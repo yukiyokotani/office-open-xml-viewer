@@ -1,7 +1,7 @@
 # Third-Party Notices
 
 `@silurus/ooxml` is MIT-licensed (see [LICENSE](./LICENSE)). It bundles the
-third-party components listed below, none of which are copyleft. This file
+third-party components listed below. This file
 is included in the npm tarball so it travels with every install.
 
 ## JavaScript / bundled asset

@@ -3,14 +3,19 @@ import { buildFont, cssFontStack, renderTextBody } from './renderer.js';
 import type { TextBody } from './types.js';
 
 describe('cssFontStack — Arabic faces keep the Arabic chain (regression)', () => {
-  it('leads with the Arabic Noto fallbacks for an Arabic-script face', () => {
-    // OFFICE_FONT_SUBSTITUTE maps Sakkal Majalla → Noto Naskh Arabic.
-    const stack = cssFontStack('Sakkal Majalla');
-    expect(stack.startsWith('"Sakkal Majalla", "Noto Naskh Arabic"')).toBe(true);
+  it('uses Arabic fallbacks only for Arabic text and keeps the default class', () => {
+    const stack = cssFontStack('Sakkal Majalla', 'Sakkal Majalla', undefined, 'العربية');
+    expect(stack.startsWith('"Sakkal Majalla", "Noto Sans Arabic"')).toBe(true);
+    expect(stack).not.toContain('"Noto Naskh Arabic"');
     expect(stack).toContain('"Noto Sans Arabic"');
     // No CJK / non-CJK script tail injected before the generic for Arabic.
     expect(stack).not.toContain('Noto Sans KR');
     expect(stack).not.toContain('Noto Sans Thai');
+    expect(cssFontStack('Sakkal Majalla')).not.toContain('Noto Naskh Arabic');
+    expect(cssFontStack('Sakkal Majalla', 'Sakkal Majalla', undefined, 'Latin', true))
+      .not.toContain('Noto Naskh Arabic');
+    expect(cssFontStack('Sakkal Majalla', 'Sakkal Majalla', undefined, 'العربية', true))
+      .toContain('"Noto Naskh Arabic"');
   });
 });
 
@@ -91,17 +96,72 @@ describe('cssFontStack — serif/sans generic classification (core classifier)',
     const stack = cssFontStack('Cambria');
     expect(stack.endsWith('serif')).toBe(true);
     expect(stack.endsWith('sans-serif')).toBe(false);
-    // Cambria's metric-compatible substitute is appended (OFFICE_FONT_SUBSTITUTE).
-    expect(stack).toContain('"Caladea"');
+    expect(stack).not.toContain('"Caladea"');
+    expect(cssFontStack('Cambria', 'Cambria', undefined, '', true)).toContain('"Caladea"');
+  });
+
+  it('does not substitute distinct light and mathematical faces', () => {
+    expect(cssFontStack('Calibri Light')).not.toContain('"Carlito"');
+    expect(cssFontStack('Cambria Math')).not.toContain('"Caladea"');
   });
 
   it('regression: Calibri stays sans, Times New Roman stays serif', () => {
     expect(cssFontStack('Calibri').endsWith('sans-serif')).toBe(true);
+    expect(cssFontStack('Calibri')).not.toContain('"Carlito"');
+    expect(cssFontStack('Calibri', 'Calibri', undefined, '', true)).toContain('"Carlito"');
     expect(cssFontStack('Times New Roman').endsWith('serif')).toBe(true);
   });
 });
 
 describe('buildFont — style encoded in a face name', () => {
+  it('keeps the existing CSS fallback for an unresolved theme-minor face', () => {
+    const route = {
+      requestedFamily: 'Calibri' as const, family: '__pinned_regular', source: 'substitute' as const,
+      resourceIdentity: 'bundled:carlito:test', weight: 400 as const, style: 'normal' as const,
+      metric: { family: '__pinned_regular' },
+    };
+    const rc = {
+      themeMajorFont: 'Calibri Light', themeMinorFont: 'Calibri', dpr: 1,
+      officeFontRoutes: { calibri: route },
+    };
+    expect(buildFont(false, false, 24, 'Calibri', rc, 'unstyled', false)).not.toContain('__pinned_regular');
+    expect(buildFont(false, false, 24, 'Calibri', rc, 'explicit', true)).toContain('__pinned_regular');
+  });
+
+  it('uses only the matching retained Calibri tuple for Canvas selection', () => {
+    const route = {
+      requestedFamily: 'Calibri' as const,
+      family: '__pinned_bold',
+      source: 'substitute' as const,
+      resourceIdentity: 'bundled:carlito:test',
+      weight: 700 as const,
+      style: 'normal' as const,
+      metric: { family: '__pinned_bold' },
+    };
+    const rc = {
+      themeMajorFont: null, themeMinorFont: 'Calibri', dpr: 1,
+      officeFontRoutes: { 'calibri:700:normal': route },
+    };
+    expect(buildFont(true, false, 24, '+mn-lt', rc)).toContain('"__pinned_bold"');
+    expect(buildFont(false, false, 24, '+mn-lt', rc)).not.toContain('"__pinned_bold"');
+    expect(buildFont(true, false, 24, 'Arial', rc)).not.toContain('"__pinned_bold"');
+  });
+  it('keeps an embedded regular Calibri face while routing its uncovered bold style', () => {
+    const route = {
+      requestedFamily: 'Calibri' as const, family: '__pinned_bold', source: 'substitute' as const,
+      resourceIdentity: 'bundled:carlito:test', weight: 700 as const, style: 'normal' as const,
+      metric: { family: '__pinned_bold' },
+    };
+    const rc = {
+      themeMajorFont: null, themeMinorFont: 'Calibri', dpr: 1,
+      embeddedFontAliases: new Map([['calibri', '__deck_calibri']]),
+      embeddedFontAuthoredFamilies: new Map([['__deck_calibri', 'calibri']]),
+      embeddedFontTuples: new Set(['calibri:400:normal']),
+      officeFontRoutes: { 'calibri:700:normal': route },
+    };
+    expect(buildFont(false, false, 24, '+mn-lt', rc)).toContain('"__deck_calibri"');
+    expect(buildFont(true, false, 24, '+mn-lt', rc)).toContain('"__pinned_bold"');
+  });
   it('builds the aliased family stack from a trimmed native name', () => {
     const font = buildFont(false, false, 24, ' Noto Sans CJK SC ', {
       themeMajorFont: null,
@@ -200,7 +260,7 @@ describe('buildFont — style encoded in a face name', () => {
     expect(font).not.toContain('"Deck Sans"');
   });
 
-  it('keeps the authored serif and substitute policy behind an embedded alias', () => {
+  it('keeps the authored serif class behind an embedded alias', () => {
     const font = buildFont(false, false, 24, 'Cambria', {
       themeMajorFont: null,
       themeMinorFont: null,
@@ -209,7 +269,7 @@ describe('buildFont — style encoded in a face name', () => {
       dpr: 1,
     });
     expect(font).toContain('"__ooxml_pptx_3_1"');
-    expect(font).toContain('"Caladea"');
+    expect(font).not.toContain('"Caladea"');
     expect(font.endsWith('serif')).toBe(true);
   });
 
@@ -220,7 +280,10 @@ describe('buildFont — style encoded in a face name', () => {
       dpr: 1,
     });
     expect(font).toMatch(/^600 48px "Franklin Gothic Medium"/);
-    expect(font).toContain('"Libre Franklin"');
+    expect(font).not.toContain('"Libre Franklin"');
+    expect(buildFont(false, false, 48, 'Franklin Gothic Medium', {
+      themeMajorFont: null, themeMinorFont: null, dpr: 1, googleSubstitutes: true,
+    })).toContain('"Libre Franklin"');
   });
 
   it('lets an explicit bold run override a named Medium face', () => {
@@ -236,7 +299,9 @@ describe('buildFont — style encoded in a face name', () => {
 
 it('uses per-presentation fallback for neutral fonts while preserving named regions', () => {
   const sc = cssFontStack('Calibri', 'Calibri', 'sc');
-  expect(sc.indexOf('"Carlito"')).toBeLessThan(sc.indexOf('"Noto Sans SC"'));
+  expect(sc).not.toContain('"Carlito"');
+  const optedIn = cssFontStack('Calibri', 'Calibri', 'sc', '', true);
+  expect(optedIn.indexOf('"Carlito"')).toBeLessThan(optedIn.indexOf('"Noto Sans SC"'));
   expect(sc.indexOf('"Noto Sans SC"')).toBeLessThan(sc.indexOf('"Noto Sans JP"'));
   const tc = cssFontStack('Calibri', 'Calibri', 'tc');
   expect(tc.indexOf('"Noto Sans TC"')).toBeLessThan(tc.indexOf('"Noto Sans SC"'));
@@ -252,7 +317,7 @@ it('uses per-presentation fallback for neutral fonts while preserving named regi
 
 
 it('keeps Arabic substitutes ahead of the configured CJK fallback', () => {
-  const stack = cssFontStack('Amiri', 'Amiri', 'sc');
+  const stack = cssFontStack('Amiri', 'Amiri', 'sc', 'العربية');
   expect(stack.indexOf('Noto Naskh Arabic')).toBeLessThan(stack.indexOf('Noto Sans SC'));
   expect(stack).toContain('"Noto Sans SC", "Noto Sans TC"');
 });

@@ -10,7 +10,7 @@ export const USE_GOOGLE_FONTS_SETTING = 'useGoogleFonts';
 export const USE_GOOGLE_FONTS_CONFIG_ID = `${CONFIG_SECTION}.${USE_GOOGLE_FONTS_SETTING}`;
 
 /**
- * Resolve whether the webview may load metric-compatible fonts from the Google
+ * Resolve whether the webview may load optional font substitutes from the Google
  * Fonts CDN.
  *
  * Two gates, both must pass:

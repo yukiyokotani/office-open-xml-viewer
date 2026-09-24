@@ -414,6 +414,29 @@ type FontMetricSnapshot = Readonly<Record<string, Readonly<ResolvedFontMetric>>>
   readonly [FONT_METRIC_SNAPSHOT]: true;
 };
 
+function snapshotUnicodeRanges(
+  ranges: readonly (readonly [number, number])[],
+): readonly (readonly [number, number])[] {
+  if (ranges.length > 32_768) throw new RangeError('Font cmap coverage has too many ranges');
+  const sorted = ranges.map(([start, end]) => {
+    if (!Number.isInteger(start) || !Number.isInteger(end)
+      || start < 0 || end > 0x10ffff || start > end) {
+      throw new RangeError('Font cmap coverage contains an invalid range');
+    }
+    return [start, end] as const;
+  }).sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const merged: Array<readonly [number, number]> = [];
+  for (const [start, end] of sorted) {
+    const last = merged[merged.length - 1];
+    if (last && start <= last[1] + 1) {
+      merged[merged.length - 1] = [last[0], Math.max(last[1], end)];
+    } else {
+      merged.push([start, end]);
+    }
+  }
+  return Object.freeze(merged.map((range) => Object.freeze(range)));
+}
+
 /** Copy successful face routes once at the document boundary. The brand lets
  * downstream services share the same deeply frozen object without retaining
  * caller-owned mutable records. */
@@ -428,6 +451,14 @@ export function snapshotFontMetrics(
         && (!Number.isFinite(metric.lineHeightRatio) || metric.lineHeightRatio < 0)) {
         throw new RangeError(`Font metric ${key} lineHeightRatio must be finite and non-negative`);
       }
+      if (metric.designAscentRatio !== undefined
+        && (!Number.isFinite(metric.designAscentRatio) || metric.designAscentRatio < 0)) {
+        throw new RangeError(`Font metric ${key} designAscentRatio must be finite and non-negative`);
+      }
+      if (metric.designDescentRatio !== undefined
+        && (!Number.isFinite(metric.designDescentRatio) || metric.designDescentRatio < 0)) {
+        throw new RangeError(`Font metric ${key} designDescentRatio must be finite and non-negative`);
+      }
       if (metric.eastAsianLineHeightRatio !== undefined
         && (!Number.isFinite(metric.eastAsianLineHeightRatio) || metric.eastAsianLineHeightRatio < 0)) {
         throw new RangeError(`Font metric ${key} eastAsianLineHeightRatio must be finite and non-negative`);
@@ -436,6 +467,10 @@ export function snapshotFontMetrics(
         && (!Number.isFinite(metric.fontBoxRatio) || metric.fontBoxRatio <= 0)) {
         throw new RangeError(`Font metric ${key} fontBoxRatio must be finite and positive`);
       }
+      if (metric.averageCharWidthRatio !== undefined
+        && (!Number.isFinite(metric.averageCharWidthRatio) || metric.averageCharWidthRatio <= 0)) {
+        throw new RangeError(`Font metric ${key} averageCharWidthRatio must be finite and positive`);
+      }
       if (metric.weight !== undefined
         && (!Number.isFinite(metric.weight) || metric.weight < 1 || metric.weight > 1000)) {
         throw new RangeError(`Font metric ${key} weight must be finite and between 1 and 1000`);
@@ -443,10 +478,18 @@ export function snapshotFontMetrics(
       const copy: ResolvedFontMetric = {
         family: metric.family,
         ...(metric.lineHeightRatio === undefined ? {} : { lineHeightRatio: metric.lineHeightRatio }),
+        ...(metric.designAscentRatio === undefined ? {} : { designAscentRatio: metric.designAscentRatio }),
+        ...(metric.designDescentRatio === undefined ? {} : { designDescentRatio: metric.designDescentRatio }),
         ...(metric.eastAsianLineHeightRatio === undefined
           ? {}
           : { eastAsianLineHeightRatio: metric.eastAsianLineHeightRatio }),
         ...(metric.fontBoxRatio === undefined ? {} : { fontBoxRatio: metric.fontBoxRatio }),
+        ...(metric.averageCharWidthRatio === undefined
+          ? {}
+          : { averageCharWidthRatio: metric.averageCharWidthRatio }),
+        ...(metric.unicodeRanges === undefined
+          ? {}
+          : { unicodeRanges: snapshotUnicodeRanges(metric.unicodeRanges) }),
         ...(metric.requestedFamily === undefined ? {} : { requestedFamily: metric.requestedFamily }),
         ...(metric.weight === undefined ? {} : { weight: metric.weight }),
         ...(metric.style === undefined ? {} : { style: metric.style }),

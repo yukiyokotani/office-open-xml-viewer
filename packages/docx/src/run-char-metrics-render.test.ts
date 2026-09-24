@@ -5,6 +5,7 @@ import type {
   DocParagraph,
   DocxTextRun,
   DocxDocumentModel,
+  DocSettings,
   SectionProps,
 } from './types';
 
@@ -101,18 +102,18 @@ function section(): SectionProps {
   } as SectionProps;
 }
 
-function doc(body: BodyElement[]): DocxDocumentModel {
+function doc(body: BodyElement[], settings?: DocSettings): DocxDocumentModel {
   return {
-    section: section(), body,
+    section: section(), body, settings,
     headers: { default: null, first: null, even: null },
     footers: { default: null, first: null, even: null },
   } as unknown as DocxDocumentModel;
 }
 
-async function render(runs: DocxTextRun[]): Promise<{ runs: DocxTextRunInfo[]; fills: FillCall[] }> {
+async function render(runs: DocxTextRun[], settings?: DocSettings): Promise<{ runs: DocxTextRunInfo[]; fills: FillCall[] }> {
   const { canvas, fills } = makeRecordingCanvas();
   const info: DocxTextRunInfo[] = [];
-  await renderDocumentToCanvas(doc([para(runs)]), canvas, 0, {
+  await renderDocumentToCanvas(doc([para(runs)], settings), canvas, 0, {
     dpr: 1, width: 600, onTextRun: (r) => info.push(r),
   });
   return { runs: info, fills };
@@ -246,8 +247,22 @@ describe('WD4 run character metrics reach the glyph draw (measure==paint)', () =
     expect(drawOf(fills, 'عنوان').fontKerning).toBe('none');
   });
 
-  it('retains Canvas auto geometry when w:kern is absent from the resolved style hierarchy', async () => {
+  it('disables kerning when w:kern is absent from the resolved style hierarchy', async () => {
     const { fills } = await render([textRun('WORD')]);
-    expect(drawOf(fills, 'WORD').fontKerning).toBe('auto');
+    expect(drawOf(fills, 'WORD').fontKerning).toBe('none');
+  });
+
+  it('enables absent-threshold kerning only under enableOpenTypeFeatures', async () => {
+    const enabled = await render([textRun('WORD')], { enableOpenTypeFeatures: true });
+    const disabled = await render([textRun('WORD')], { enableOpenTypeFeatures: false });
+    expect(drawOf(enabled.fills, 'WORD').fontKerning).toBe('normal');
+    expect(drawOf(disabled.fills, 'WORD').fontKerning).toBe('none');
+  });
+
+  it('keeps an authored w:kern threshold authoritative over enableOpenTypeFeatures', async () => {
+    const { fills } = await render([textRun('WORD', { kerning: 28 })], {
+      enableOpenTypeFeatures: true,
+    });
+    expect(drawOf(fills, 'WORD').fontKerning).toBe('none');
   });
 });

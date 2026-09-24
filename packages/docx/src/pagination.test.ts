@@ -481,7 +481,7 @@ describe('canonical layout — shared paragraph measurement geometry', () => {
     expect(pages.findIndex((page) => page.layers.body.some((el) => textOf(el) === followingText))).toBe(2);
   });
 
-  it('remeasures destination placement when the first line cannot fit beside a page float', () => {
+  it('remeasures a paragraph moved past a page float at the fresh page origin', () => {
     const targetText = 'あ'.repeat(16);
     const body = [
       paraWith([
@@ -502,7 +502,7 @@ describe('canonical layout — shared paragraph measurement geometry', () => {
     expect(geometry.pageCount).toBe(2);
     expect(target?.continuation).toMatchObject({ lineStart: 0, lineEnd: 2 });
     expect(target?.measuredWithFloats).toBe(false);
-    expect(target?.destinationLineTopsPt).toEqual([50, 70]);
+    expect(target?.destinationLineTopsPt).toEqual([20, 40]);
   });
 
   it('remeasures an unplaced paragraph at the next unequal-width column', () => {
@@ -938,6 +938,47 @@ describe('layoutPages — over-tall table row splitting (§17.4 table pagination
     expect(secondPageTable?.fragment.rows[0]?.cells[0]?.contentRanges).toEqual(
       Array.from({ length: 4 }, (_, blockIndex) => ({ kind: 'whole', blockIndex })),
     );
+  });
+
+  it.each([
+    { lines: 4, cantSplit: true, hardBreak: true, pages: 2 },
+    { lines: 8, cantSplit: true, hardBreak: true, pages: 3 },
+    { lines: 8, cantSplit: false, hardBreak: true, pages: 3 },
+    { lines: 8, cantSplit: true, hardBreak: false, pages: 2 },
+  ])('preserves the physical page occupied by an over-page cell before an authored break (%o)',
+    ({ lines, cantSplit, hardBreak, pages: expectedPages }) => {
+      // 160pt table column holds eight 20pt CJK glyphs per line. The 100pt
+      // body band contains four lines but not eight. Word's independent DOCX
+      // controls show the over-page continuation is blank when the row clips,
+      // yet a following authored page break advances beyond it.
+      const body = [
+        autoTableWithSingleWrappedParagraph(lines * 8, { cantSplit }),
+        ...(hardBreak ? [pageBreak()] : []),
+        para({ text: 'NEXT', fontSize: 20 }),
+      ];
+      const result = layoutPages(body, section(), makeCtx());
+      expect(result).toHaveLength(expectedPages);
+      const next = result.at(-1)?.layers.body.find((node) => textOf(node) === 'NEXT');
+      expect(next).toBeDefined();
+      if (cantSplit && lines === 8 && hardBreak) {
+        expect(result[1]?.layers.body).toHaveLength(0);
+      }
+      if (cantSplit && lines === 8 && !hardBreak) {
+        expect(next?.flowBounds.yPt).toBe(result[1]?.geometry.contentTopPt);
+      }
+    });
+
+  it('starts a following table at the continuation-page top without a hard break', () => {
+    const pages = layoutPages([
+      autoTableWithSingleWrappedParagraph(64, { cantSplit: true }),
+      fixedTable([20]),
+      para({ text: 'AFTER', fontSize: 20 }),
+    ], section(), makeCtx());
+    expect(pages).toHaveLength(2);
+    const secondTable = pages[1]?.layers.body.find((node) =>
+      node.kind === 'table' && node.source.path[0] === 1);
+    expect(secondTable?.flowBounds.yPt).toBe(pages[1]?.geometry.contentTopPt);
+    expect(pages[1]?.layers.body.some((node) => textOf(node) === 'AFTER')).toBe(true);
   });
 
   it('splits a single cell paragraph in a splittable row at line boundaries', () => {

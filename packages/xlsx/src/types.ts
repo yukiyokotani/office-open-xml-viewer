@@ -91,6 +91,9 @@ export interface Worksheet {
    *  `colWidths[c] === 0`. Only `true` entries. */
   colHidden?: Record<number, boolean>;
   defaultColWidth: number;
+  /** `<sheetFormatPr baseColWidth>` (§18.3.1.81), when no explicit
+   *  `defaultColWidth` is authored. */
+  baseColWidth?: number;
   defaultRowHeight: number;
   /** `<sheetFormatPr customHeight>` (ECMA-376 §18.3.1.81). When true, rows
    *  without their own `ht` use the manually authored sheet default instead of
@@ -167,6 +170,15 @@ export interface Worksheet {
   defaultFontFamily?: string;
   /** Point size of the workbook's Normal-style font (`<fonts>[N].sz.val`). */
   defaultFontSize?: number;
+  /** Bold/italic bits of the Normal-style font selected by cellStyleXfs[0].
+   * Omitted means false; MDW must use the same face tuple as Excel. */
+  defaultFontBold?: boolean;
+  defaultFontItalic?: boolean;
+  /** Workbook theme major Jpan face (`<a:majorFont><a:font script="Jpan">`).
+   *  Used only for scheme-marked cells under the Japanese Mac Excel locale. */
+  themeJapaneseMajorFont?: string;
+  /** Workbook theme minor Jpan face; see `themeJapaneseMajorFont`. */
+  themeJapaneseMinorFont?: string;
   /** Workbook date system (`<workbookPr date1904>`, ECMA-376 §18.2.28),
    *  denormalized onto every worksheet by the parser so the cell formatter can
    *  resolve serial dates (§18.17.4.1) without a workbook back-reference.
@@ -608,17 +620,13 @@ export type ShapeTextRun =
       size: number;
       color?: string;
       fontFace?: string;
-      /** East-Asian typeface (`<a:ea@typeface>`, ECMA-376 §21.1.2.3.1). The
-       *  common Japanese encoding sets Meiryo here while leaving `<a:latin>`
-       *  default; the renderer floors the line box by this face's design line
-       *  too (see `drawShapeText`). Undefined when the run declares no `<a:ea>`. */
+      /** East-Asian typeface (`<a:ea@typeface>`, ECMA-376 §21.1.2.3.1).
+       *  A distinct face is retained for future script-run routing; the
+       *  single-resource Office line projection declines mixed face slots. */
       fontFaceEa?: string;
       /** Complex-script typeface (`<a:cs@typeface>`, ECMA-376 §21.1.2.3.1).
-       *  Parsed/modeled but NOT used in the line-box floor: the cs face renders
-       *  only complex-script glyphs (Arabic/Hebrew/Thai), so flooring the whole
-       *  line box by it would over-grow Latin/CJK runs (deferred to per-glyph
-       *  handling — see `drawShapeText`). Undefined when the run declares no
-       *  `<a:cs>`. */
+       *  A distinct face is not applied to a whole-line metric until script
+       *  runs can be resolved independently. */
       fontFaceCs?: string;
     }
   | { type: 'break' }
@@ -991,6 +999,10 @@ export interface CellFont {
   size: number;
   color: string | null;
   name: string | null;
+  /** ECMA-376 §18.8.33: authored major/minor theme reference, distinct from name. */
+  scheme?: 'major' | 'minor';
+  /** Authored SpreadsheetML charset metadata; it does not select a face alone. */
+  charset?: number;
   /** ECMA-376 §18.4.13 ST_UnderlineValues — see RunFont.underlineStyle. */
   underlineStyle?: string;
   /** ECMA-376 §18.4.6 ST_VerticalAlignRun on a cell-level <font>. */
@@ -1130,6 +1142,13 @@ export interface XlsxChromeColors {
  * frame-local decoded image map, so these fields are not part of its public
  * method contract. */
 export interface RenderViewportOptions extends XlsxRenderViewportOptions {
+  /** @internal Viewer/main-realm MDW for identical hit testing and worker paint.
+   * Reapply after every font bind, including render-local row-height clones. */
+  authoritativeMdw?: number;
+  /** @internal Exact local resources retained in this canvas's FontFaceSet. */
+  officeFontRoutes?: Readonly<Record<string, import('@silurus/ooxml-core').OfficeFontFallbackRoute>>;
+  /** @internal Preserve the caller's explicit Google Fonts substitution opt-in. */
+  googleSubstitutes?: boolean;
   /** @internal Viewer chrome only; never applied to authored worksheet content. */
   chromeColors?: XlsxChromeColors;
   loadedImages?: Map<string, CanvasImageSource | null>;

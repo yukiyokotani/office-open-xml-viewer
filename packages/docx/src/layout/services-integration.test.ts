@@ -15,6 +15,7 @@ import { layoutSourceStore } from '../layout-source-model-adapter.js';
 import { privateResourceLookupOf } from './runtime-state.js';
 import { normalizeInternalDocumentModel } from '../parser-model.js';
 import { canvasFontString } from '@silurus/ooxml-core';
+import { referenceFontLineMetrics } from '../reference-font-line-metrics.js';
 
 function measureContext(): CanvasRenderingContext2D {
   return {
@@ -305,7 +306,7 @@ describe('production layout service integration', () => {
       : false)).toEqual([true, false]);
   });
 
-  it('classifies Latin runs with a resolved eastAsia axis only when useFELayout is active', () => {
+  it('classifies Latin runs with a resolved eastAsia axis only on an active useFELayout line grid', () => {
     const hinted = textRun('Hinted Latin title', {
       fontFamilyEastAsia: 'EA Face',
       fontHint: 'eastAsia',
@@ -319,7 +320,7 @@ describe('production layout service integration', () => {
     const off = buildSegments([hinted, unhinted], { pageIndex: 0, totalPages: 1 });
     const on = buildSegments(
       [hinted, unhinted],
-      { pageIndex: 0, totalPages: 1, useFeLayout: true },
+      { pageIndex: 0, totalPages: 1, useFeLayout: true, lineGridActive: true },
     );
 
     expect(off.filter((segment) => 'text' in segment)
@@ -439,6 +440,7 @@ describe('production layout service integration', () => {
 
   it('keeps embedded resource metrics separate from local-font resolution', () => {
     const family = 'Arbitrary Embedded Face';
+    const alias = '__ooxml_docx_embedded_arbitrary';
     const services = createLayoutServices(model({
       embeddedFonts: [{
         fontName: family,
@@ -448,19 +450,15 @@ describe('production layout service integration', () => {
       }],
     }), {
       measureContext: measureContext(),
-      embeddedFaces: [{
-        family,
-        weight: 'normal',
-        style: 'normal',
-        status: 'loaded',
-      } as FontFace],
+      embeddedRoutes: [{ requestedFamily: family, resolvedFamily: alias,
+        weight: 400, style: 'normal', resourceIdentity: `embedded:${alias}` }],
       fontMetrics: {
         'arbitrary embedded face': {
-          family,
+          family: alias,
           requestedFamily: family,
           weight: 400,
           style: 'normal',
-          sourceIdentity: 'embedded:word/fonts/font1.odttf',
+          sourceIdentity: `embedded:${alias}`,
           eastAsianLineHeightRatio: 1.43,
         },
       },
@@ -473,14 +471,129 @@ describe('production layout service integration', () => {
     }).spans[0]?.font).toMatchObject({
       source: 'embedded',
       requestedFamily: family,
-      resolvedFamily: family,
+      resolvedFamily: alias,
     });
     expect(services.text.fontMetrics?.['arbitrary embedded face'])
       .toMatchObject({ eastAsianLineHeightRatio: 1.43 });
   });
 
+  it('uses each document’s isolated embedded registration for measurement and paint', () => {
+    const requestedFamily = 'Shared Authored Face';
+    const document = model({ embeddedFonts: [{
+      fontName: requestedFamily, style: 'regular',
+      partPath: 'word/fonts/shared.ttf', fontKey: '',
+    }] });
+    const makeServices = (alias: string, ratio: number) => createLayoutServices(document, {
+      measureContext: measureContext(),
+      embeddedRoutes: [{
+        requestedFamily, resolvedFamily: alias, weight: 400, style: 'normal',
+        resourceIdentity: `embedded:${alias}`,
+      }],
+      fontMetrics: { 'shared authored face': {
+        family: alias, requestedFamily, weight: 400, style: 'normal',
+        sourceIdentity: `embedded:${alias}`, lineHeightRatio: ratio,
+        unicodeRanges: [[0x41, 0x5a]],
+      } },
+    });
+    const first = makeServices('__ooxml_docx_embedded_first', 1.1);
+    const second = makeServices('__ooxml_docx_embedded_second', 1.4);
+    const request = { text: 'A', fontSizePt: 10, fonts: { ascii: requestedFamily } };
+    expect(first.text.shape(request).spans[0]?.font).toMatchObject({
+      resolvedFamily: '__ooxml_docx_embedded_first',
+      resourceIdentity: 'embedded:__ooxml_docx_embedded_first',
+    });
+    expect(second.text.shape(request).spans[0]?.font).toMatchObject({
+      resolvedFamily: '__ooxml_docx_embedded_second',
+      resourceIdentity: 'embedded:__ooxml_docx_embedded_second',
+    });
+    const lineRatio = (services: typeof first) => {
+      const [segment] = buildSegments([textRun('A', { fontFamily: requestedFamily })], {
+        pageIndex: 0, totalPages: 1, layoutServices: services,
+        resolvedLocalFonts: services.text.fontMetrics,
+      });
+      return 'text' in segment ? segment.resolvedLineHeightRatio : undefined;
+    };
+    expect(lineRatio(first)).toBe(1.1);
+    expect(lineRatio(second)).toBe(1.4);
+  });
+
+  it('routes an explicitly supplied substitute through its own vertical metric', () => {
+    const alias = '__ooxml_provided_fallback_regular';
+    const identity = 'provided:test-face';
+    const services = createLayoutServices(model(), {
+      measureContext: measureContext(),
+      officeRoutes: [{ requestedFamily: 'Calibri', family: alias,
+        source: 'substitute', resourceIdentity: identity, weight: 400,
+        style: 'normal', metric: { family: alias, requestedFamily: 'Calibri',
+          sourceIdentity: identity, weight: 400, style: 'normal',
+          lineHeightRatio: 1.22, designAscentRatio: 0.98,
+          designDescentRatio: 0.24, unicodeRanges: [[0x41, 0x5a]] } }],
+    });
+    const [segment] = buildSegments([textRun('A', { fontFamily: 'Calibri' })], {
+      pageIndex: 0, totalPages: 1, layoutServices: services,
+      resolvedLocalFonts: services.text.fontMetrics,
+    });
+    expect(services.text.shape({ text: 'A', fontSizePt: 10,
+      fonts: { ascii: 'Calibri' } }).spans[0]?.font).toMatchObject({
+      source: 'substitute', resolvedFamily: alias, resourceIdentity: identity,
+    });
+    expect('text' in segment && segment.resolvedLineHeightRatio).toBe(1.22);
+  });
+
+  it('keeps a proven local Calibri face on the bounded platform reference policy', () => {
+    const alias = '__ooxml_office_local_calibri_regular';
+    const identity = 'office-local:local("Calibri")';
+    const services = createLayoutServices(model(), {
+      measureContext: measureContext(),
+      officeRoutes: [{ requestedFamily: 'Calibri', family: alias,
+        source: 'local', resourceIdentity: identity, weight: 400,
+        style: 'normal', metric: { family: alias, requestedFamily: 'Calibri',
+          sourceIdentity: identity, weight: 400, style: 'normal' } }],
+    });
+    const [segment] = buildSegments([textRun('A', { fontFamily: 'Calibri' })], {
+      pageIndex: 0, totalPages: 1, layoutServices: services,
+      resolvedLocalFonts: services.text.fontMetrics,
+    });
+    const reference = referenceFontLineMetrics('Calibri');
+    expect(reference).toBeDefined();
+    expect(services.text.shape({ text: 'A', fontSizePt: 10,
+      fonts: { ascii: 'Calibri' } }).spans[0]?.font).toMatchObject({
+      source: 'local', resolvedFamily: alias, resourceIdentity: identity,
+    });
+    expect('text' in segment && segment.resolvedLineHeightRatio)
+      .toBeCloseTo(reference?.lineHeightRatio ?? NaN, 8);
+  });
+
+  it('keeps a matching authored embedded tuple ahead of a bundled substitute', () => {
+    const embeddedAlias = '__ooxml_docx_embedded_calibri';
+    const bundledAlias = '__ooxml_office_fallback_carlito_regular';
+    const services = createLayoutServices(model(), {
+      measureContext: measureContext(),
+      embeddedRoutes: [{ requestedFamily: 'Calibri', resolvedFamily: embeddedAlias,
+        weight: 400, style: 'normal', resourceIdentity: `embedded:${embeddedAlias}` }],
+      fontMetrics: { calibri: { family: embeddedAlias,
+        requestedFamily: 'Calibri', weight: 400, style: 'normal',
+        sourceIdentity: `embedded:${embeddedAlias}`, lineHeightRatio: 1.11 } },
+      officeRoutes: [{ requestedFamily: 'Calibri', family: bundledAlias,
+        source: 'substitute', resourceIdentity: 'bundled:test-carlito-regular',
+        weight: 400, style: 'normal', metric: { family: bundledAlias,
+          requestedFamily: 'Calibri', weight: 400, style: 'normal',
+          sourceIdentity: 'bundled:test-carlito-regular', lineHeightRatio: 1.22 } }],
+    });
+    const [segment] = buildSegments([textRun('A', { fontFamily: 'Calibri' })], {
+      pageIndex: 0, totalPages: 1, layoutServices: services,
+      resolvedLocalFonts: services.text.fontMetrics,
+    });
+    expect(services.text.shape({ text: 'A', fontSizePt: 10,
+      fonts: { ascii: 'Calibri' } }).spans[0]?.font).toMatchObject({
+      source: 'embedded', resolvedFamily: embeddedAlias,
+    });
+    expect('text' in segment && segment.resolvedLineHeightRatio).toBe(1.11);
+  });
+
   it('does not apply a regular embedded metric to an unavailable bold tuple', () => {
     const family = 'Arbitrary Embedded Face';
+    const alias = '__ooxml_docx_embedded_regular';
     const document = model({
       embeddedFonts: [{
         fontName: family,
@@ -495,19 +608,15 @@ describe('production layout service integration', () => {
     });
     const services = createLayoutServices(document, {
       measureContext: measureContext(),
-      embeddedFaces: [{
-        family,
-        weight: 'normal',
-        style: 'normal',
-        status: 'loaded',
-      } as FontFace],
+      embeddedRoutes: [{ requestedFamily: family, resolvedFamily: alias,
+        weight: 400, style: 'normal', resourceIdentity: `embedded:${alias}` }],
       fontMetrics: {
         'arbitrary embedded face': {
-          family,
+          family: alias,
           requestedFamily: family,
           weight: 400,
           style: 'normal',
-          sourceIdentity: 'embedded:word/fonts/font1.odttf',
+          sourceIdentity: `embedded:${alias}`,
           eastAsianLineHeightRatio: 1.43,
         },
       },
@@ -522,7 +631,7 @@ describe('production layout service integration', () => {
     expect('text' in segment && segment.resolvedEastAsianLineHeightRatio).toBeUndefined();
   });
 
-  it('derives Word line metrics from any authored East-Asian face proven by Canvas', () => {
+  it('does not promote one Canvas glyph probe into whole-font Word line geometry', () => {
     let font = '12px serif';
     const ctx = {
       ...measureContext(),
@@ -554,18 +663,11 @@ describe('production layout service integration', () => {
     };
     const services = createLayoutServices(document, {
       measureContext: ctx,
-      measureResolvedFontMetrics: true,
     });
 
-    expect(services.text.fontMetrics?.['unlisted cjk face']).toMatchObject({
-      family: 'Unlisted CJK Face',
-      sourceIdentity: 'canvas-resolved:Unlisted CJK Face',
-      fontBoxRatio: 1.5,
-    });
-    expect(services.text.fontMetrics?.['unlisted cjk face']?.lineHeightRatio)
-      .toBeUndefined();
-    expect(services.text.fontMetrics?.['unlisted cjk face']?.eastAsianLineHeightRatio)
-      .toBeCloseTo(1.95, 12);
+    // The probe can measure one selected glyph, but cannot establish the
+    // face's code-page class or coverage of other scalars in this paragraph.
+    expect(services.text.fontMetrics?.['unlisted cjk face']).toBeUndefined();
     expect(services.text.fontMetrics?.['fallback only face']).toBeUndefined();
     expect(font).toBe('12px serif');
   });
@@ -717,7 +819,6 @@ describe('production layout service integration', () => {
     });
     const failed = createLayoutServices(doc, {
       measureContext: measureContext(),
-      embeddedFaces: [],
       googleFaces: [],
       useGoogleFonts: true,
     });
@@ -730,38 +831,12 @@ describe('production layout service integration', () => {
     const carlito = { family: 'Carlito', weight: '400', style: 'normal', status: 'loaded' } as FontFace;
     const loaded = createLayoutServices(doc, {
       measureContext: measureContext(),
-      embeddedFaces: [],
       googleFaces: [carlito],
       useGoogleFonts: true,
     });
     const substituted = loaded.text.shape({ text: 'x', fontSizePt: 10, fonts: { ascii: 'Calibri' } });
     expect(substituted.spans[0]?.font).toMatchObject({ source: 'substitute', resolvedFamily: 'Carlito' });
     expect(substituted.diagnostics[0]?.message).toMatch(/implementation-dependent/i);
-  });
-
-  it('requires loaded status and an exact family/weight/style match for every face', () => {
-    const doc = model({
-      embeddedFonts: [
-        { fontName: 'Partial Embedded', partPath: 'word/fonts/regular.odttf', fontKey: '', style: 'regular' },
-        { fontName: 'Partial Embedded', partPath: 'word/fonts/bold.odttf', fontKey: '', style: 'bold' },
-      ],
-    });
-    const services = createLayoutServices(doc, {
-      measureContext: measureContext(),
-      embeddedFaces: [
-        { family: '"Partial Embedded"', weight: '400', style: 'normal', status: 'loaded' },
-        { family: 'Partial Embedded', weight: '700', style: 'normal', status: 'error' },
-        { family: 'Timed Out', weight: '400', style: 'normal', status: 'loading' },
-      ] as FontFace[],
-    });
-    const shape = (family: string, weight: number, style: 'normal' | 'italic' = 'normal') =>
-      services.text.shape({ text: 'x', fontSizePt: 10, weight, style, fonts: { ascii: family } });
-
-    expect(shape('Partial Embedded', 400).spans[0]?.font)
-      .toMatchObject({ source: 'embedded', resolvedFamily: 'Partial Embedded' });
-    expect(shape('Partial Embedded', 700).spans[0]?.font.source).toBe('native');
-    expect(shape('Partial Embedded', 400, 'italic').spans[0]?.font.source).toBe('native');
-    expect(shape('Timed Out', 400).spans[0]?.font.source).toBe('native');
   });
 
   it('collects every currently representable math story, including rich text boxes and nested tables', () => {
@@ -867,10 +942,10 @@ describe('production layout service integration', () => {
   });
 
   it('gives main and worker factories identical fingerprints for identical successful snapshots', () => {
-    const embedded = { family: 'Embedded', weight: '700', style: 'italic', status: 'loaded' } as FontFace;
     const options = {
       measureContext: measureContext(),
-      embeddedFaces: [embedded],
+      embeddedRoutes: [{ requestedFamily: 'Embedded', resolvedFamily: '__ooxml_docx_embedded_same',
+        weight: 700, style: 'italic' as const, resourceIdentity: 'embedded:__ooxml_docx_embedded_same' }],
       googleFaces: [] as FontFace[],
       localMetrics: { authored: { family: '__local_authored', lineHeightRatio: 1.25 } },
     };

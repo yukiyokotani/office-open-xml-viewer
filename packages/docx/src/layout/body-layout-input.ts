@@ -24,6 +24,8 @@ export interface BodyParagraphSourceInput {
   readonly styleId: string | null;
   /** Source-level visibility used only for pagination look-ahead across unmeasured blocks. */
   readonly inkless?: boolean;
+  /** Parser-established ordinary text, excluding inline objects and mark-only paragraphs. */
+  readonly onlyVisibleText?: boolean;
   /** Mutually exclusive Word/LibreOffice section-mark spacing interop role. */
   readonly continuousSectionRole?:
     | 'suppress-before'
@@ -36,6 +38,8 @@ export interface BodyTableSourceInput {
   readonly kind: 'table';
   readonly source: SourceRef;
   readonly rowCount?: number;
+  /** §17.4.57 page/margin-positioned table whose exclusion can affect earlier text. */
+  readonly pageOwnedFloatingTable?: boolean;
 }
 
 export interface BodyAdjacentTableGroupInput {
@@ -73,6 +77,7 @@ export type BodyLayoutSequenceEntryFor<TSection> =
       kind: 'authored-break';
       source: SourceRef;
       break: AuthoredBreak;
+      origin?: 'authored' | 'coverPageSynthetic';
       parity?: 'odd' | 'even';
       sameSourceParagraphAsPrevious?: boolean;
     }>

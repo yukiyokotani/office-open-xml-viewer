@@ -108,6 +108,11 @@ export interface DocSettings {
   /** §17.15.1.18 `w:characterSpacingControl@w:val` — East Asian punctuation /
    *  character-spacing control. */
   characterSpacingControl?: string;
+  /** §17.15.3.31 `w:compat/w:lineWrapLikeWord6` — fit at uncompressed width
+   * even when character-level whitespace is compressed for display. */
+  lineWrapLikeWord6?: boolean;
+  /** See WORD_OPENTYPE_FEATURES_COMPAT_KERNING for this compatibility flag. */
+  enableOpenTypeFeatures?: boolean;
   /** ECMA-376 Part 4 §14.8.3.50 `w:compat/w:useFELayout` — Far East layout
    * compatibility. */
   useFeLayout?: boolean;
@@ -406,6 +411,8 @@ export type BodyElement =
   | { type: 'table' } & DocTable
   | {
       type: 'pageBreak';
+      /** Parser provenance. Missing on older wire data; absence is not authored intent. */
+      origin?: 'authored' | 'coverPageSynthetic';
       parity?: 'odd' | 'even';
       /** The hard break followed visible content in the same source paragraph. */
       sameParagraphAsPrevious?: boolean;
@@ -1660,6 +1667,9 @@ export interface DocxTextRunInfo {
   y: number;
   /** Measured text width in CSS px. */
   w: number;
+  /** Final U+0020 reduction already included in `w`; limits the transparent
+   * selection/hyperlink hit box to the retained Canvas layout width. */
+  trailingSpaceCompressionPx?: number;
   /** Line height in CSS px. */
   h: number;
   /** Exact font-box rectangle used for Word-style highlighting. Falls back to

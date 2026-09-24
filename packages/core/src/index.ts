@@ -140,6 +140,7 @@ export { readCfbStream } from './errors/cfb-read';
 export {
   preloadGoogleFonts,
   unloadGoogleFonts,
+  activeFontSet,
   type FontPreloadEntry,
 } from './fonts/preload';
 // Embedded-font registration: docx `.odttf` (§17.8.1 obfuscated) + pptx
@@ -155,7 +156,15 @@ export {
 // Cambria → Caladea, popular web fonts, Arabic Noto fallbacks). Each package
 // spreads this into its own map; script-fallback Noto faces live in
 // SCRIPT_GOOGLE_FONTS below.
-export { GOOGLE_FONT_SUBSTITUTES } from './fonts/google-fonts';
+export { GOOGLE_FONT_SUBSTITUTES, loadedGoogleRegularAliases } from './fonts/google-fonts';
+export {
+  fontFaceWeightCovers,
+  loadOfficeFontFallbacks,
+  unloadOfficeFontFallbacks,
+  type OfficeFontFallbackRequest,
+  type OfficeFontFallbackRoute,
+  type LoadedOfficeFontFallbacks,
+} from './fonts/office-fallback';
 export { canvasFontString, createCanvasFontRoute, type CanvasFontRoute } from './fonts/canvas-route';
 export {
   parseOpenTypeLineMetrics,
@@ -696,14 +705,6 @@ export {
   sanitizeHyperlinkUrl,
   openExternalHyperlink,
 } from './interaction/hyperlink';
-// Legacy family-name compatibility profiles retained for callers that cannot
-// inspect the selected font resource. New DOCX resource paths consume parsed or
-// measured metrics instead of adding more family-specific profiles here.
-export {
-  fontWinLineHeightRatio,
-  intendedSingleLinePx,
-  correctLineMetrics,
-} from './text/line-metrics';
 // Resolved font-resource metrics used when a loader owns concrete bytes or a
 // browser-selected face.
 export {
@@ -711,6 +712,13 @@ export {
   openTypeDesignLineRatios,
   type ResolvedFontMetric,
 } from './fonts/resource-metrics';
+export {
+  findReferenceFontMetrics,
+  type FindReferenceFontMetricsOptions,
+  type ReferenceFontMetricProfile,
+  type ReferenceFontSource,
+  type ReferenceFontStyle,
+} from './fonts/reference-font-metrics';
 // Backward-compatible exact-local resource loader. Format packages should not
 // add family-specific requests; DOCX now derives its metrics from resolved
 // resources and no longer uses this API for a Meiryo-only path.
@@ -722,9 +730,7 @@ export {
   type ResolvedLocalFontMetric,
   type LoadedLocalFontMetrics,
 } from './fonts/local-metrics';
-// Format-agnostic same-font Canvas-vs-Word line-fit bias. Consumers keep their
-// layout/paint wiring local, while the metric provenance and normalized family
-// matching remain shared data.
+// Deprecated compatibility export; production layout no longer calls it.
 export { fontAdvanceBiasEm } from './text/font-advance-metrics';
 // IX2 in-document text search (findText). Format-agnostic index + match →
 // run-slice resolution (buildTextIndex/findMatches), the pure highlight-extent

@@ -83,6 +83,15 @@ function syntheticSfntWithCmapFormat(
 }
 
 describe('parseOpenTypeLineMetrics', () => {
+  it('reads a positive OS/2 average character width without inferring glyph advances', () => {
+    const bytes = syntheticSfnt();
+    const os2Offset = 12 + 3 * 16 + 54 + 36;
+    new DataView(bytes.buffer).setInt16(os2Offset + 2, 602);
+    expect(parseOpenTypeResourceMetrics(bytes)?.averageCharWidthRatio).toBe(602 / 2048);
+    new DataView(bytes.buffer).setInt16(os2Offset + 2, -1);
+    expect(parseOpenTypeResourceMetrics(bytes)?.averageCharWidthRatio).toBeUndefined();
+  });
+
   it('reads line metrics from sfnt tables without consulting a family name', () => {
     expect(parseOpenTypeLineMetrics(syntheticSfnt())).toEqual({
       unitsPerEm: 2048,
@@ -95,8 +104,29 @@ describe('parseOpenTypeLineMetrics', () => {
       winAscent: 1900,
       winDescent: 736,
       useTypoMetrics: true,
+      farEastCodePage: null,
       hasEastAsianCmap: false,
     });
+  });
+
+  it('reads the Word Far East code-page class independently of cmap coverage', () => {
+    const source = syntheticSfnt();
+    const os2Offset = 12 + 3 * 16 + 54 + 36;
+    const withCodePages = new Uint8Array(source.length + 8);
+    withCodePages.set(source);
+    const view = new DataView(withCodePages.buffer);
+    view.setUint32(12 + 2 * 16 + 12, 86);
+    for (const bit of [17, 18, 19, 20]) {
+      view.setUint32(os2Offset + 78, 1 << bit);
+      expect(parseOpenTypeLineMetrics(withCodePages)?.farEastCodePage).toBe(true);
+    }
+    view.setUint32(os2Offset + 78, 1);
+    expect(parseOpenTypeLineMetrics(withCodePages)?.farEastCodePage).toBe(false);
+    view.setUint16(os2Offset, 0);
+    expect(parseOpenTypeLineMetrics(withCodePages)?.farEastCodePage).toBeNull();
+    view.setUint16(os2Offset, 1);
+    view.setUint32(12 + 2 * 16 + 12, 82);
+    expect(parseOpenTypeLineMetrics(withCodePages)?.farEastCodePage).toBeNull();
   });
 
   it('detects East Asian glyph coverage from a Unicode cmap instead of a family name', () => {

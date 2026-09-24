@@ -8,9 +8,20 @@
  * render worker.
  */
 
-/** True when `target` is a DOM canvas. Safe to call in a worker (returns false). */
+/** True when `target` is a DOM canvas, including one from a popup/iframe realm.
+ *  A cross-realm canvas fails `instanceof` against this realm's constructor;
+ *  its owning document supplies the correct constructor and FontFaceSet. */
 export function isHTMLCanvas(target: unknown): target is HTMLCanvasElement {
-  return typeof HTMLCanvasElement !== 'undefined' && target instanceof HTMLCanvasElement;
+  if (typeof HTMLCanvasElement !== 'undefined' && target instanceof HTMLCanvasElement) return true;
+  if (typeof target !== 'object' || target === null) return false;
+  const element = target as {
+    nodeType?: unknown;
+    localName?: unknown;
+    ownerDocument?: { defaultView?: { HTMLCanvasElement?: unknown } | null };
+  };
+  if (element.nodeType !== 1 || element.localName !== 'canvas') return false;
+  const ownerConstructor = element.ownerDocument?.defaultView?.HTMLCanvasElement;
+  return typeof ownerConstructor === 'function' && target instanceof ownerConstructor;
 }
 
 /** `window.devicePixelRatio` on the main thread; `fallback` in a worker. */

@@ -4,7 +4,7 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "types": ["node", "vscode"],
+    "types": ["node", "vscode", "vite/client"],
     "strict": true,
     "skipLibCheck": true,
     "outDir": "dist",

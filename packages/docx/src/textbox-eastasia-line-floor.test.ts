@@ -117,6 +117,7 @@ describe('textbox line-box floors on the eastAsia face (ECMA-376 §17.3.2.26)', 
     'arbitrary embedded cjk': {
       family: EMBEDDED_FAMILY,
       eastAsianLineHeightRatio: EMBEDDED_RATIO,
+      sourceIdentity: 'test-resource:textbox-east-asia',
     },
   };
   const NATURAL_RATIO = 1.0;        // mock substituted-font box (0.8 + 0.2)

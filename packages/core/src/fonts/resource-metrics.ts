@@ -16,6 +16,9 @@ export interface ResolvedFontMetric {
   /** Inter-line leading divided by em. Kept out of the baseline descent so
    * inline objects and paragraph marks are not shifted by line gap. */
   lineGapRatio?: number;
+  /** Positive OS/2 xAvgCharWidth / em for the selected face. DOCX may use it
+   * for Word-observed adjustable Latin spaces; it is never a glyph advance. */
+  averageCharWidthRatio?: number;
   /** Format-owned East-Asian single-line height divided by em, derived from
    * this resolved face's OpenType tables rather than its family name. */
   eastAsianLineHeightRatio?: number;

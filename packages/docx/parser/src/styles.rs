@@ -1415,11 +1415,7 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
 
     // Paragraph shading
     if let Some(shd) = child_w(ppr, "shd") {
-        if let Some(fill) = attr_w(shd, "fill") {
-            if fill != "auto" && fill.len() == 6 {
-                fmt.shading = Some(fill.to_lowercase());
-            }
-        }
+        fmt.shading = shd_fill_color(shd);
     }
 
     // Page break before paragraph
@@ -2082,16 +2078,13 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
             .or_else(|| fmt.font_family_cs_direct.clone());
     }
 
-    // Run shading (ECMA-376 §17.3.2.32 w:shd). We adopt `@w:fill` only; `@w:val`
-    // (the pattern) and `@w:color` are not modeled. `val="clear"` (inverse
-    // video) is exact since only the fill is visible, but `val="solid"` etc.
-    // drop information by ignoring the pattern foreground.
+    // ECMA-376 §17.3.2.32 / §17.18.78 names percentage shading patterns.
+    // Word for Mac PDF output paints run-level pct15/pct20/pct25 as a uniform
+    // foreground/fill blend, including explicit red and automatic-black
+    // foregrounds over white and blue fills. Keep this Office-observed rule
+    // local to runs; paragraph/cell/shape patterns have different paint paths.
     if let Some(shd) = child_w(rpr, "shd") {
-        if let Some(fill) = attr_w(shd, "fill") {
-            if fill != "auto" && fill.len() == 6 {
-                fmt.background = Some(fill.to_lowercase());
-            }
-        }
+        fmt.background = run_shd_display_color(shd);
     }
 
     // Vertical alignment (superscript / subscript)
@@ -2255,10 +2248,74 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
 // ===== Table style parsing =====
 
 fn shd_fill(node: roxmltree::Node) -> Option<String> {
-    child_w(node, "shd")
-        .and_then(|s| attr_w(s, "fill"))
-        .filter(|f| f != "auto" && f.len() == 6)
-        .map(|f| f.to_lowercase())
+    child_w(node, "shd").and_then(shd_fill_color)
+}
+
+fn shd_fill_color(shd: roxmltree::Node) -> Option<String> {
+    let fill = attr_w(shd, "fill")?;
+    if fill != "auto" && fill.len() == 6 && fill.chars().all(|c| c.is_ascii_hexdigit()) {
+        Some(fill.to_lowercase())
+    } else {
+        None
+    }
+}
+
+fn run_shd_display_color(shd: roxmltree::Node) -> Option<String> {
+    let fill = shd_fill_color(shd)?;
+    // ST_Shd's pct12/pct37/pct62/pct87 mean 12.5/37.5/62.5/87.5%,
+    // respectively (§17.18.78), not the integer encoded in their names.
+    // Represent every legal percentage shade in tenths of a percent so the
+    // Office-observed 8-bit coverage conversion below stays exact.
+    let Some(percent_tenths): Option<u16> =
+        attr_w(shd, "val").as_deref().and_then(|value| match value {
+            "pct5" => Some(50),
+            "pct10" => Some(100),
+            "pct12" => Some(125),
+            "pct15" => Some(150),
+            "pct20" => Some(200),
+            "pct25" => Some(250),
+            "pct30" => Some(300),
+            "pct35" => Some(350),
+            "pct37" => Some(375),
+            "pct40" => Some(400),
+            "pct45" => Some(450),
+            "pct50" => Some(500),
+            "pct55" => Some(550),
+            "pct60" => Some(600),
+            "pct62" => Some(625),
+            "pct65" => Some(650),
+            "pct70" => Some(700),
+            "pct75" => Some(750),
+            "pct80" => Some(800),
+            "pct85" => Some(850),
+            "pct87" => Some(875),
+            "pct90" => Some(900),
+            "pct95" => Some(950),
+            _ => None,
+        })
+    else {
+        return Some(fill);
+    };
+    let foreground = match attr_w(shd, "color") {
+        None => "000000".to_string(),
+        Some(color) if color == "auto" => "000000".to_string(),
+        Some(color) if color.len() == 6 && color.chars().all(|c| c.is_ascii_hexdigit()) => color,
+        _ => return Some(fill),
+    };
+    // PDF color operands reveal an 8-bit foreground coverage before mixing:
+    // pct50 over white is 127/255 (not the 128 from a direct 50% gray round).
+    let alpha = ((u32::from(percent_tenths) * 255 + 500) / 1000) as u16;
+    let blend = |index: usize| -> Option<u8> {
+        let bg = u8::from_str_radix(fill.get(index..index + 2)?, 16).ok()?;
+        let fg = u8::from_str_radix(foreground.get(index..index + 2)?, 16).ok()?;
+        Some(((u16::from(bg) * (255 - alpha) + u16::from(fg) * alpha + 127) / 255) as u8)
+    };
+    Some(format!(
+        "{:02x}{:02x}{:02x}",
+        blend(0)?,
+        blend(2)?,
+        blend(4)?
+    ))
 }
 
 fn parse_edge_border(node: roxmltree::Node) -> EdgeBorder {
@@ -2937,6 +2994,35 @@ mod tests {
         // Regression guard for the inverse-video case (black fill).
         let fmt = run_fmt_from(r#"<w:shd w:val="clear" w:color="auto" w:fill="000000"/>"#);
         assert_eq!(fmt.background.as_deref(), Some("000000"));
+    }
+
+    #[test]
+    fn percentage_run_shading_uses_office_pdf_blend() {
+        // Word for Mac PDF: percentage run shading is a uniform blend, not
+        // the dotted bitmap illustrated by the ST_Shd enum examples.
+        for (value, color, fill, expected) in [
+            ("pct15", "auto", "FFFFFF", "d9d9d9"),
+            ("pct20", "auto", "FFFFFF", "cccccc"),
+            ("pct25", "auto", "FFFFFF", "bfbfbf"),
+            ("pct5", "auto", "FFFFFF", "f2f2f2"),
+            ("pct12", "auto", "FFFFFF", "dfdfdf"),
+            ("pct37", "auto", "FFFFFF", "9f9f9f"),
+            ("pct50", "auto", "FFFFFF", "7f7f7f"),
+            ("pct62", "auto", "FFFFFF", "606060"),
+            ("pct87", "auto", "FFFFFF", "202020"),
+            ("pct15", "FF0000", "FFFFFF", "ffd9d9"),
+            ("pct15", "auto", "0000FF", "0000d9"),
+        ] {
+            let fmt = run_fmt_from(&format!(
+                r#"<w:shd w:val="{value}" w:color="{color}" w:fill="{fill}"/>"#
+            ));
+            assert_eq!(fmt.background.as_deref(), Some(expected));
+        }
+        let mut inherited =
+            run_fmt_from(r#"<w:shd w:val="pct15" w:color="auto" w:fill="FFFFFF"/>"#);
+        let clear = run_fmt_from(r#"<w:shd w:val="clear" w:fill="EEEEEE"/>"#);
+        apply_run(&mut inherited, &clear);
+        assert_eq!(inherited.background.as_deref(), Some("eeeeee"));
     }
 
     #[test]

@@ -5,8 +5,13 @@ import wasmAssetUrl from './wasm/xlsx_parser_bg.wasm?url';
 import {
   preloadGoogleFonts,
   unloadGoogleFonts,
+  loadOfficeFontFallbacks,
+  unloadOfficeFontFallbacks,
+  type LoadedOfficeFontFallbacks,
+  type OfficeFontFallbackRequest,
   WorkerBridge,
   defaultDpr,
+  isHTMLCanvas,
   dropDecodedBitmapCache,
   dropSvgImageCache,
   resolveOoxmlContainer,
@@ -39,7 +44,8 @@ import { BoundedRawPartCache } from '@silurus/ooxml-core/internal/bounded-raw-pa
 import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions, XlsxRenderViewportOptions, WorkerRequest, WorkerResponse, Cell, SheetVisibility, XlsxComment } from './types.js';
 import { selectSheetVisibility } from './sheet-visibility.js';
 import { renderWorksheetViewport } from './render-orchestrator.js';
-import { XLSX_GOOGLE_FONTS, xlsxFontPreloadNames } from './google-fonts.js';
+import { XLSX_GOOGLE_FONTS, xlsxFontPreloadNames, xlsxOfficeFontRequests, xlsxWorksheetOfficeFontRequests } from './google-fonts.js';
+import { officeRequestKey } from './shape-office-line.js';
 import { formatCellValue } from './number-format.js';
 import {
   addWorksheetUsage,
@@ -71,8 +77,7 @@ import {
   isXlsxWorksheetPullResponse,
   XlsxWorksheetPullClient,
 } from './worksheet-pull-client.js';
-import { GridGeometry } from './internal/grid-geometry.js';
-import { applyAutoRowHeights, inheritSheetRenderCache, getGridGeometryForWorksheet } from './renderer.js';
+import { applyAutoRowHeights, bindXlsxOfficeFontRoutes, bindXlsxWorksheetOfficeFontRoutes, inheritSheetRenderCache, getGridGeometryForWorksheet } from './renderer.js';
 import {
   assertDelimitedTextSourceBytes,
   resolveDelimitedTextOptions,
@@ -103,8 +108,8 @@ export const loadXlsxSheetSource = Symbol('load-xlsx-sheet-source');
 
 interface RetainedFontSet {
   refs: number;
-  faces: FontFace[] | null;
-  readonly loading: Promise<FontFace[]>;
+  loaded: { google: FontFace[]; office: LoadedOfficeFontFallbacks } | null;
+  readonly loading: Promise<{ google: FontFace[]; office: LoadedOfficeFontFallbacks }>;
 }
 
 /** Options for {@link XlsxWorkbook.load}. Extends the shared load-options type
@@ -173,6 +178,8 @@ export class XlsxWorkbook {
   /** Web-font registrations are per FontFaceSet. Same-origin child windows have
    * their own set even when they share this workbook instance. */
   private googleFontNames: string[] = [];
+  private googleSubstitutes = false;
+  private officeFontRequests: OfficeFontFallbackRequest[] = [];
   private readonly retainedFontSets = new Map<FontFaceSet, RetainedFontSet>();
   private fontsDestroyed = false;
   private _mode: 'main' | 'worker' = 'main';
@@ -413,6 +420,7 @@ export class XlsxWorkbook {
     this.generation = (this.generation ?? 0) + 1;
     this.resourcePolicy = resourcePolicy;
     this.workerTimeoutMs = opts.workerTimeoutMs;
+    this.googleSubstitutes = opts.useGoogleFonts === true;
     this.cjkFallback = resolveCjkFallback(opts.cjkFallback);
     this.math = this._mode === 'worker' ? undefined : opts.math;
     this.threeD = this._mode === 'worker' ? undefined : opts.threeD;
@@ -503,15 +511,16 @@ export class XlsxWorkbook {
     if (workbookError) {
       console.warn(`[ooxml] xlsx opened with a degraded part: ${workbookError}`);
     }
+    this.officeFontRequests = xlsxOfficeFontRequests(parsedWorkbook);
     if (opts.useGoogleFonts) {
       // The composite viewer computes hit/scroll/overlay geometry on the main
       // realm even when paint runs in a worker. Register the same fallback
       // faces in both realms before any worksheet geometry snapshot is made so
       // ECMA-376 MDW is identical across paint and interaction.
       this.googleFontNames = [...xlsxFontPreloadNames(parsedWorkbook, this.cjkFallback)];
-      if (typeof document !== 'undefined' && document.fonts) {
-        await this.retainFontsInSet(document.fonts);
-      }
+    }
+    if (typeof document !== 'undefined' && document.fonts) {
+      await this.retainFontsInSet(document.fonts);
     }
   }
 
@@ -525,6 +534,7 @@ export class XlsxWorkbook {
     this.delimitedTextBacked = true;
     this.resourcePolicy = resourcePolicy;
     this.workerTimeoutMs = opts.workerTimeoutMs;
+    this.googleSubstitutes = opts.useGoogleFonts === true;
     this.cjkFallback = resolveCjkFallback(opts.cjkFallback);
     this.generation++;
     this.math = this._mode === 'worker' ? undefined : opts.math;
@@ -564,26 +574,36 @@ export class XlsxWorkbook {
     this.sheetCache.set(0, worksheet);
     this.retainedSheetUsage = measured;
 
+    this.officeFontRequests = xlsxOfficeFontRequests(response.workbook);
     if (opts.useGoogleFonts) {
       this.googleFontNames = [...xlsxFontPreloadNames(response.workbook, this.cjkFallback)];
-      if (typeof document !== 'undefined' && document.fonts) {
-        await this.retainFontsInSet(document.fonts);
-      }
+    }
+    if (typeof document !== 'undefined' && document.fonts) {
+      await this.retainFontsInSet(document.fonts);
+      await this.retainWorksheetOfficeFonts(worksheet);
+      const office = this.retainedFontSets.get(document.fonts)?.loaded?.office;
+      bindXlsxWorksheetOfficeFontRoutes(worksheet, office?.routes, this.googleSubstitutes);
     }
   }
 
   private async retainFontsInSet(fontSet: FontFaceSet): Promise<() => void> {
-    if (this.googleFontNames.length === 0 || this.fontsDestroyed) return () => undefined;
+    if (this.fontsDestroyed) return () => undefined;
     let retained = this.retainedFontSets.get(fontSet);
     if (retained) {
       retained.refs++;
     } else {
-      const loading = preloadGoogleFonts(this.googleFontNames, XLSX_GOOGLE_FONTS, fontSet);
-      retained = { refs: 1, faces: null, loading };
+      const loading = Promise.all([
+        preloadGoogleFonts(this.googleFontNames, XLSX_GOOGLE_FONTS, fontSet),
+        loadOfficeFontFallbacks(this.officeFontRequests, fontSet),
+      ]).then(([google, office]) => ({ google, office }));
+      retained = { refs: 1, loaded: null, loading };
       this.retainedFontSets.set(fontSet, retained);
-      loading.then((faces) => {
-        retained!.faces = faces;
-        if (this.fontsDestroyed) unloadGoogleFonts(faces);
+      loading.then((loaded) => {
+        retained!.loaded = loaded;
+        if (this.fontsDestroyed) {
+          unloadGoogleFonts(loaded.google);
+          unloadOfficeFontFallbacks(loaded.office.faces);
+        }
       });
     }
     await retained.loading;
@@ -596,9 +616,43 @@ export class XlsxWorkbook {
       current.refs--;
       if (current.refs > 0) return;
       this.retainedFontSets.delete(fontSet);
-      if (current.faces) unloadGoogleFonts(current.faces);
-      else current.loading.then(unloadGoogleFonts);
+      if (current.loaded) {
+        unloadGoogleFonts(current.loaded.google);
+        unloadOfficeFontFallbacks(current.loaded.office.faces);
+      } else void current.loading.then((loaded) => {
+        unloadGoogleFonts(loaded.google);
+        unloadOfficeFontFallbacks(loaded.office.faces);
+      });
     };
+  }
+
+  private async retainWorksheetOfficeFonts(worksheet: Worksheet): Promise<void> {
+    const additional = xlsxWorksheetOfficeFontRequests(worksheet).filter((request) =>
+      !this.officeFontRequests.some((known) => officeRequestKey(known) === officeRequestKey(request)));
+    if (additional.length === 0) return;
+    this.officeFontRequests.push(...additional);
+    // Even an initially empty font registry is retained at bootstrap and by
+    // each viewer. Worksheet-local shape tuples can then extend every live
+    // document's registry without inventing a new lifetime or missing popups.
+    await Promise.all([...this.retainedFontSets].map(async ([set, retained]) => {
+      const current = await retained.loading;
+      const office = await loadOfficeFontFallbacks(additional, set);
+      // A popup can release its FontFaceSet while this extra sheet tuple is
+      // loading. The retained record then leaves the map; attaching the late
+      // face to that orphan would leak its registry reference forever.
+      if (this.fontsDestroyed || this.retainedFontSets.get(set) !== retained || retained.refs <= 0) {
+        unloadOfficeFontFallbacks(office.faces);
+      } else {
+        current.office.faces.push(...office.faces);
+        const completed = new Set(current.office.checked);
+        for (const key of office.checked) {
+          if (completed.has(key)) continue;
+          completed.add(key);
+          current.office.checked.push(key);
+        }
+        Object.assign(current.office.routes, office.routes);
+      }
+    }));
   }
 
   /** @internal Retain required faces in the document that owns a viewer canvas. */
@@ -610,6 +664,10 @@ export class XlsxWorkbook {
    * measurement observes the same faces that the subsequent paint uses. */
   [prepareXlsxViewerRowHeights](worksheet: Worksheet, ctx: CanvasRenderingContext2D): void {
     if (!this.parsedWorkbook) return;
+    const set = isHTMLCanvas(ctx.canvas)
+      ? ctx.canvas.ownerDocument.fonts : null;
+    const routes = set ? this.retainedFontSets.get(set)?.loaded?.office.routes : undefined;
+    bindXlsxOfficeFontRoutes(ctx, worksheet, routes, this.googleSubstitutes);
     getGridGeometryForWorksheet(worksheet);
     applyAutoRowHeights(ctx, worksheet, this.parsedWorkbook.styles, this.cjkFallback);
   }
@@ -768,7 +826,11 @@ export class XlsxWorkbook {
       // The coordinator has ACKed the accepted terminal before it completes.
       // Only now commit Browser-retained cache ownership/accounting.
       this.retainedSheetUsage = nextCacheUsage;
+      await this.retainWorksheetOfficeFonts(terminal);
       this.sheetCache.set(sheetIndex, terminal);
+      const mainOffice = typeof document !== 'undefined'
+        ? this.retainedFontSets.get(document.fonts)?.loaded?.office : undefined;
+      bindXlsxWorksheetOfficeFontRoutes(terminal, mainOffice?.routes, this.googleSubstitutes);
       return terminal;
     } catch (error) {
       if (error instanceof OoxmlResourceLimitError) this.resourceFailure ??= error;
@@ -973,12 +1035,14 @@ export class XlsxWorkbook {
     const styles = this.parsedWorkbook.styles;
     const extracted = extractViewerRenderContext(opts as WireRenderViewportOptions);
     const { sizeOverrides, ...renderOpts } = extracted.opts;
+    const targetFontSet = isHTMLCanvas(target)
+      ? target.ownerDocument.fonts
+      : (typeof document !== 'undefined' ? document.fonts : null);
     return this.withWorksheetArchiveOperation(sheetIndex, (source) => {
       const ws = extracted.worksheet ?? createSizeOverriddenWorksheet(source, sizeOverrides);
       if (ws !== source) inheritSheetRenderCache(source, ws);
-      if (extracted.layoutMetrics) {
-        GridGeometry.forWorksheet(ws, extracted.layoutMetrics.maximumDigitWidth);
-      }
+      // The render bind may invalidate a geometry snapshot made in another
+      // font realm. Pin the viewer's MDW inside the renderer after binding.
       return renderWorksheetViewport(
         {
           ws,
@@ -994,7 +1058,15 @@ export class XlsxWorkbook {
         viewport,
         // The stable closure uses the archive operation already reserved by
         // withWorksheetArchiveOperation, avoiding a nested FIFO acquisition.
-        { ...renderOpts, fetchImage: this._fetchImage },
+        {
+          ...renderOpts,
+          authoritativeMdw: extracted.layoutMetrics?.maximumDigitWidth,
+          officeFontRoutes: targetFontSet
+            ? this.retainedFontSets.get(targetFontSet)?.loaded?.office.routes
+            : undefined,
+          googleSubstitutes: this.googleSubstitutes,
+          fetchImage: this._fetchImage,
+        },
       );
     });
   }
@@ -1107,12 +1179,17 @@ export class XlsxWorkbook {
     this.sheetLoads.clear();
     this.fontsDestroyed = true;
     for (const retained of this.retainedFontSets.values()) {
-      if (retained.faces) unloadGoogleFonts(retained.faces);
+      if (retained.loaded) {
+        unloadGoogleFonts(retained.loaded.google);
+        unloadOfficeFontFallbacks(retained.loaded.office.faces);
+      }
       // An in-flight registration observes fontsDestroyed in its own completion
       // callback and releases exactly once when the faces become available.
     }
     this.retainedFontSets.clear();
     this.googleFontNames = [];
+    this.googleSubstitutes = false;
+    this.officeFontRequests = [];
     // Frame-local lookup maps never escape the renderer; drop the owning core
     // caches to release decoded surfaces and SVG references.
     dropDecodedBitmapCache(this._fetchImage);

@@ -6,7 +6,7 @@
 
 A high-fidelity viewer for `.docx`, `.xlsx`, and `.pptx` files — powered by a Rust/WASM parser and an HTML Canvas renderer.
 
-> **Private by default.** Parsing and rendering happen locally inside the VS Code Webview via WebAssembly, with no extension telemetry or outbound document requests. Two strictly opt-in features can communicate outside the extension: the [MCP server](#mcp-server-for-ai-agents) exposes requested file or active-preview context to the connected AI agent, and [Google Fonts substitution](#font-substitution-google-fonts-opt-in) loads metric-compatible fonts from a CDN. Both are off by default and subject to the connected service's privacy policy when enabled.
+> **Private by default.** Parsing and rendering happen locally inside the VS Code Webview via WebAssembly, with no extension telemetry or outbound document requests. Two strictly opt-in features can communicate outside the extension: the [MCP server](#mcp-server-for-ai-agents) exposes requested file or active-preview context to the connected AI agent, and [Google Fonts substitution](#font-substitution-google-fonts-opt-in) loads webfonts from a CDN. Both are off by default and subject to the connected service's privacy policy when enabled.
 
 ## Screenshots
 
@@ -103,16 +103,16 @@ VS Code extensions.
 
 Office files often reference fonts that aren't installed on your machine — `Calibri`, `Cambria`, and the like. By default the viewer falls back to whatever system font is closest, which can shift line breaks and column widths away from how Word / PowerPoint / Excel would lay the document out.
 
-Enabling **`ooxmlViewer.useGoogleFonts`** lets the preview load *metric-compatible* substitutes from the Google Fonts CDN so the layout matches Office:
+Enabling **`ooxmlViewer.useGoogleFonts`** lets the preview load optional substitutes from the Google Fonts CDN. These may improve text widths when an Office font is unavailable; they do not guarantee matching Office line breaks or vertical layout:
 
-- **Calibri → [Carlito](https://fonts.google.com/specimen/Carlito)**, **Cambria → [Caladea](https://fonts.google.com/specimen/Caladea)** (same metrics by design).
+- **Calibri → [Carlito](https://fonts.google.com/specimen/Carlito)**, **Cambria → [Caladea](https://fonts.google.com/specimen/Caladea)** (advance-width alternatives for the base text faces; Calibri Light and Cambria Math are distinct).
 - **Arabic / RTL** scripts → **Noto Naskh/Sans Arabic**.
 - A handful of common web fonts (Open Sans, Roboto, Lato, Montserrat, …) when a document asks for them directly.
 
 **Network disclosure:** when (and only when) this setting is enabled and the workspace is trusted, the preview requests stylesheets from `fonts.googleapis.com` and font files from `fonts.gstatic.com`. No file content is ever sent — only the standard font requests a browser makes. The webview's Content-Security-Policy is widened to exactly those two origins solely while the setting is on; with it off, the policy blocks every external origin and the extension stays fully offline.
 
 **Settings:**
-- `ooxmlViewer.useGoogleFonts`: `false` (default — fully offline) or `true` (load metric-compatible fonts from the CDN). Force-disabled in untrusted workspaces. Toggling it re-renders already-open previews immediately.
+- `ooxmlViewer.useGoogleFonts`: `false` (default — fully offline) or `true` (load optional webfont substitutes and script fallbacks from the CDN). Force-disabled in untrusted workspaces. Toggling it re-renders already-open previews immediately.
 
 ## Privacy & Security
 

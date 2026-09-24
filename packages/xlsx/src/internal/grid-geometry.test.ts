@@ -28,6 +28,24 @@ function worksheet(): Worksheet {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('GridGeometry', () => {
+  it('derives implicit base-width columns without overriding an authored default width', () => {
+    vi.stubGlobal('navigator', { platform: 'MacIntel', maxTouchPoints: 0 });
+    const ws = worksheet();
+    ws.colWidths = { 1: 12 };
+    ws.baseColWidth = 10;
+    expect(GridGeometry.forWorksheet(ws, 8).col.sizeOf(2)).toBe(87);
+
+    ws.baseColWidth = undefined;
+    GridGeometry.invalidate(ws);
+    expect(GridGeometry.forWorksheet(ws, 8).col.sizeOf(2)).toBe(colWidthToPx(8.43, 8));
+  });
+
+  it('uses the specification pixel width for implicit base columns outside Mac Excel', () => {
+    vi.stubGlobal('navigator', { platform: 'Win32', maxTouchPoints: 0 });
+    const ws = worksheet();
+    ws.baseColWidth = 10;
+    expect(GridGeometry.forWorksheet(ws, 8).col.sizeOf(3)).toBe(85);
+  });
   it('keeps offsets finite when a malformed default size reaches the geometry boundary', () => {
     const axis = new GridAxisGeometry({ 1: 10 }, Number.NaN, (value) => value, 10);
 

@@ -8,7 +8,7 @@ import type {
 import type { BodyLayoutKernel } from './body-layout-kernel.js';
 import { paginateBody } from './body-paginator.js';
 import { attachBodyLayoutKernel } from './runtime-state.js';
-import type { LayoutServices, ParagraphLayout, SourceRef, StoryLayout } from './types.js';
+import type { LayoutServices, ParagraphLayout, SourceRef, StoryLayout, TextPlacement } from './types.js';
 
 const emptyFlowRegistrySnapshot = () => ({
   floats: {
@@ -124,15 +124,55 @@ function paragraph(index: number, heightPt: number): ParagraphLayout {
   };
 }
 
-function emptyStoryLayout(source: SourceRef, heightPt: number): StoryLayout {
-  const bounds = { xPt: 0, yPt: 0, widthPt: 180, heightPt };
+function emptyStoryLayout(source: SourceRef, heightPt: number, pageIndex = 0): StoryLayout {
+  const bounds = { xPt: 10, yPt: 0, widthPt: 180, heightPt };
   return {
     story: source.story,
     flowBounds: bounds,
     inkBounds: bounds,
-    blocks: [],
+    blocks: heightPt > 0 ? [{
+      ...paragraph(0, heightPt),
+      id: `story:${source.story}:${source.storyInstance}:page:${pageIndex}:paragraph`,
+      source,
+      flowDomainId: `story:${source.story}:page:${pageIndex}`,
+      flowBounds: bounds,
+      inkBounds: bounds,
+      borders: [{
+        from: { xPt: 10, yPt: 0 }, to: { xPt: 190, yPt: 0 },
+        color: '#000000', widthPt: 0.5, authoredStyle: 'single', style: 'solid' as const,
+      }],
+    }] : [],
     advancePt: heightPt,
     diagnostics: [],
+  };
+}
+
+function plainTextStoryLayout(source: SourceRef, heightPt: number, text: string, pageIndex: number): StoryLayout {
+  const base = emptyStoryLayout(source, heightPt, pageIndex);
+  const bounds = { xPt: 10, yPt: 0, widthPt: 180, heightPt };
+  const placement = {
+    kind: 'text', text, range: { start: 0, end: text.length },
+    origin: { xPt: 10, yPt: 8 }, bounds,
+    advancePt: 5, clusters: [], decorations: [],
+    paintOps: [{ text, range: { start: 0, end: text.length },
+      offset: { xPt: 0, yPt: 0 }, letterSpacingPt: 0, scaleX: 1,
+      direction: 'ltr', kerning: 'auto', writingMode: 'horizontal-tb' }],
+    color: { kind: 'explicit', color: '#000000' },
+    fontRoute: { familyList: 'serif', scope: 'native', fingerprint: 'serif' },
+    fontSizePt: 36, fontWeight: 400, fontStyle: 'normal', direction: 'ltr',
+  } satisfies TextPlacement;
+  return {
+    ...base,
+    blocks: [{
+      ...paragraph(0, heightPt),
+      id: `story:${source.story}:${source.storyInstance}:page:${pageIndex}:paragraph`,
+      source,
+      flowDomainId: `story:${source.story}:page:${pageIndex}`,
+      flowBounds: bounds,
+      inkBounds: bounds,
+      lines: [{ range: { start: 0, end: text.length }, bounds, baselinePt: 8,
+        advancePt: heightPt, placements: [placement] }],
+    }],
   };
 }
 
@@ -141,6 +181,7 @@ function paginate(input: Readonly<{
   sequence: BodyLayoutInput['sequence'];
   heightPt?: number | ((source: SourceRef) => number);
   storyExtentPt?: (source: SourceRef, pageIndex: number) => number;
+  storyLayout?: (source: SourceRef, pageIndex: number) => StoryLayout;
   measuredStories?: Array<Readonly<{ source: SourceRef; pageIndex: number }>>;
 }>) {
   const height = input.heightPt ?? 10;
@@ -157,7 +198,8 @@ function paginate(input: Readonly<{
     measureTable: () => { throw new Error('unused'); },
     layoutStory: ({ source, pageIndex }) => {
       input.measuredStories?.push({ source, pageIndex });
-      return emptyStoryLayout(source, input.storyExtentPt?.(source, pageIndex) ?? 0);
+      return input.storyLayout?.(source, pageIndex)
+        ?? emptyStoryLayout(source, input.storyExtentPt?.(source, pageIndex) ?? 0, pageIndex);
     },
     measureFollowingBlock: ({ input: following }) => {
       const heightPt = typeof height === 'function' ? height(following.source) : height;
@@ -187,6 +229,55 @@ function paginate(input: Readonly<{
 describe('canonical header/footer reservation', () => {
   const header = storySource('header', 'default');
   const footer = storySource('footer', 'default');
+
+  it('does not reserve body space for an undecorated space-only header', () => {
+    const sectionOwner = owner('section:space-header', section(), {
+      headers: { default: header, first: null, even: null },
+    });
+    const layout = paginate({
+      initialSection: sectionOwner,
+      sequence: [bodyBlock(0)],
+      storyLayout: (source, pageIndex) => plainTextStoryLayout(source, 36, ' ', pageIndex),
+    });
+
+    expect(layout.pages[0]?.geometry.contentTopPt).toBe(10);
+  });
+
+  it('reserves body space for a visible header glyph', () => {
+    const sectionOwner = owner('section:visible-header', section(), {
+      headers: { default: header, first: null, even: null },
+    });
+    const layout = paginate({
+      initialSection: sectionOwner,
+      sequence: [bodyBlock(0)],
+      storyLayout: (source, pageIndex) => plainTextStoryLayout(source, 36, 'X', pageIndex),
+    });
+
+    expect(layout.pages[0]?.geometry.contentTopPt).toBe(41);
+  });
+
+  it('retains the established reserve for untested multiple blank header paragraphs', () => {
+    const sectionOwner = owner('section:multi-space-header', section(), {
+      headers: { default: header, first: null, even: null },
+    });
+    const layout = paginate({
+      initialSection: sectionOwner,
+      sequence: [bodyBlock(0)],
+      storyLayout: (source, pageIndex) => {
+        const single = plainTextStoryLayout(source, 36, ' ', pageIndex);
+        const secondBounds = { ...single.blocks[0].flowBounds, yPt: 36 };
+        return { ...single, advancePt: 72, blocks: [single.blocks[0], {
+          ...single.blocks[0],
+          id: `${single.blocks[0].id}:second`,
+          source: { ...source, path: [1] },
+          flowBounds: secondBounds,
+          inkBounds: secondBounds,
+        }] };
+      },
+    });
+
+    expect(layout.pages[0]?.geometry.contentTopPt).toBe(77);
+  });
 
   it('paginates and constructs pages from the same reduced body interval', () => {
     const sectionOwner = owner('section:reserved', section(), {

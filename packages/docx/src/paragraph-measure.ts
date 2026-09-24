@@ -11,6 +11,7 @@ import {
   lineBoxHeight,
   paragraphMarkBelowBaselinePt,
   paragraphMarkLineHeight,
+  paragraphMarkLineMetrics,
   type DocGridCtx,
   type LineBoundary,
   type LayoutLine,
@@ -22,6 +23,7 @@ import type { DocParagraph } from './types.js';
 import type { WrapOracle } from './layout/float-wrap-oracle.js';
 import type { NumberingMarkerShapeInput, WritingMode } from './layout/types.js';
 import { wordEmptyMarkMinimumStartWidthPx } from './layout/compatibility.js';
+import { WORD_NUMBERING_MARKER_FIRST_LINE_UNION } from './layout/line-compatibility.js';
 import type { MeasurementTextContext } from './layout/measurement-capabilities.js';
 
 export type { LineLayoutEnvironment } from './line-layout.js';
@@ -31,6 +33,8 @@ export type { WrapOracle } from './layout/float-wrap-oracle.js';
 export interface ParagraphMeasurementEnvironment extends LineLayoutEnvironment {
   readonly documentHasEastAsianText: boolean;
   readonly paragraphMarkShapeInput?: NumberingMarkerShapeInput;
+  /** Selected-face text marker box, resolved by retained numbering before line acquisition. */
+  readonly firstLineNumberingMarkerBox?: Readonly<{ ascentPt: number; descentPt: number }>;
   /** Canonical section writing mode used by retained page geometry. */
   readonly pageWritingMode: WritingMode;
   /** The paragraph is acquired in a section-logical frame that paint rotates
@@ -225,8 +229,31 @@ export function measureParagraph(
     };
   };
 
-  const segments = buildSegments(paragraph.runs, environment);
+  const segments = buildSegments(paragraph.runs, {
+    ...environment,
+    lineSpacing: context.lineSpacing,
+    lineGridActive: context.lineGrid.active,
+  });
   if (segments.length === 0) return measureMarkOnly();
+
+  if (context.lineSpacing?.rule === 'auto'
+    && context.lineSpacing.value > 1
+    && segments.some((segment) => 'imagePath' in segment && segment.inlinePicture === true)) {
+    // An image-only line has no text segment from which to obtain the authored
+    // single-line height. Measure its paragraph mark through the same selected
+    // face service as an empty paragraph, without the auto multiplier or grid.
+    // The visible text's own selected metric takes precedence on mixed lines.
+    const markSinglePx = paragraphMarkLineMetrics(
+      paragraph, 1, undefined, false, markUsesEastAsianGrid,
+      measurer.context, fontFamilyClasses, null, environment.resolvedLocalFonts,
+      environment.layoutServices?.text, environment.paragraphMarkShapeInput,
+    ).advancePx;
+    for (const segment of segments) {
+      if ('imagePath' in segment && segment.inlinePicture === true) {
+        segment.paragraphMarkSinglePx = markSinglePx;
+      }
+    }
+  }
 
   const wrapContext: WrapLayoutCtx | undefined = placement.wrap
     ? {
@@ -243,7 +270,7 @@ export function measureParagraph(
           1,
         ),
         lineWindow: (input) => placement.wrap!.lineWindow(input),
-        lineBoxH: (ascent, descent, _hasRuby, intendedSingle, eastAsian, gridCountSingle) => lineBoxHeight(
+        lineBoxH: (ascent, descent, _hasRuby, intendedSingle, eastAsian, gridCountSingle, uniformPositionAuto, inlinePictureTextSingle) => lineBoxHeight(
           context.lineSpacing,
           ascent,
           descent,
@@ -255,6 +282,9 @@ export function measureParagraph(
           // ruby paragraphs retain their established uniform paragraph resolver.
           context.hasRuby ? context.hasEastAsianText : (eastAsian ?? false),
           gridCountSingle,
+          undefined,
+          uniformPositionAuto,
+          inlinePictureTextSingle,
         ),
         pageH: placement.maximumYPt,
       }
@@ -307,11 +337,42 @@ export function measureParagraph(
     );
   }
   const measuredLines: MeasuredLine[] = [];
-  for (const line of lines) {
+  for (const [lineIndex, originalLine] of lines.entries()) {
+    const markerBox = lineIndex === 0 && !continuation && !placement.wrap
+      && !context.lineGrid.active && context.lineSpacing?.rule === 'auto'
+      && context.lineSpacing.value >= 1 && !context.hasRuby
+      && !originalLine.uniformPositionAuto && !originalLine.inlinePictureTextSingle
+      ? environment.firstLineNumberingMarkerBox : undefined;
+    const markerAscent = markerBox?.ascentPt;
+    const markerDescent = markerBox?.descentPt;
+    const line = markerAscent !== undefined && markerDescent !== undefined
+      && Number.isFinite(markerAscent) && Number.isFinite(markerDescent)
+      ? {
+          ...originalLine,
+          ascent: Math.max(originalLine.ascent, markerAscent),
+          descent: Math.max(originalLine.descent, markerDescent),
+          visibleAscent: Math.max(originalLine.visibleAscent ?? originalLine.ascent, markerAscent),
+          visibleDescent: Math.max(originalLine.visibleDescent ?? originalLine.descent, markerDescent),
+        }
+      : originalLine;
     const topYPt = line.topY !== undefined && line.topY > cursorPt
       ? line.topY
       : cursorPt;
-    const advancePt = context.hasRuby
+    const textSinglePt = Math.max(
+      originalLine.ascent + originalLine.descent,
+      originalLine.intendedSingle,
+    );
+    // ECMA-376 §17.9.6 supplies marker rPr and §17.3.1.33 the auto multiple,
+    // but neither specifies their line-box union. This selected-face projection
+    // is limited to the observed auto/non-grid text-marker class; other classes
+    // retain their established allocation.
+    void WORD_NUMBERING_MARKER_FIRST_LINE_UNION;
+    const markerNaturalPt = line.ascent + line.descent;
+    const markerRaisesBox = line !== originalLine
+      && markerNaturalPt > textSinglePt;
+    const advancePt = markerRaisesBox
+      ? markerNaturalPt + textSinglePt * ((context.lineSpacing?.value ?? 1) - 1)
+      : context.hasRuby
       ? uniformRubyAdvancePt
       : lineBoxHeight(
           context.lineSpacing,
@@ -325,6 +386,9 @@ export function measureParagraph(
           // line in a CJK paragraph keeps its natural height.
           line.eastAsian ?? false,
           line.gridCountSingle,
+          undefined,
+          line.uniformPositionAuto,
+          line.inlinePictureTextSingle,
         );
     measuredLines.push({ layout: line, topYPt, advancePt });
     cursorPt = topYPt + advancePt;

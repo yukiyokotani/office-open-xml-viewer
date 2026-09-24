@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { PT_TO_PX, intendedSingleLinePx } from '@silurus/ooxml-core';
+import { PT_TO_PX } from '@silurus/ooxml-core';
 import { drawShapeText } from './renderer.js';
 import type { ShapeParagraph, ShapeText, ShapeTextRun } from './types.js';
 
@@ -7,8 +7,7 @@ import type { ShapeParagraph, ShapeText, ShapeTextRun } from './types.js';
 // shape text bodies (drawShapeText). No real xlsx sample carries lnSpc or an
 // applied autofit, so the feature is inert on the VRT corpus; these tests drive
 // it directly with a mock CanvasRenderingContext2D, mirroring the (already
-// verified) pptx model. 20 pt Calibri is used so intendedSingleLinePx returns 0
-// (untabled face) and the natural single line is exactly the flat 1.2×em base.
+// verified) pptx model. The mock reports the same metrics for each family.
 
 interface FillTextCall {
   text: string;
@@ -46,15 +45,12 @@ function para(text: string, spaceLine?: ShapeParagraph['spaceLine'], fontFace?: 
   return { align: 'l', runs: [textRun(text, 20, fontFace)], spaceLine };
 }
 
-/** A paragraph whose single run declares only an East-Asian face (`<a:ea>`),
- *  latin left undefined — the common Japanese shape-text encoding. */
+/** A paragraph whose single run declares only an East-Asian face (`<a:ea>`). */
 function paraEa(text: string, fontFaceEa: string): ShapeParagraph {
   return { align: 'l', runs: [{ type: 'text', text, bold: false, italic: false, size: 20, fontFaceEa }] };
 }
 
-/** A paragraph whose single run declares a tabled complex-script face (`<a:cs>`)
- *  but untabled latin/ea — the cs face must NOT floor the line box (it renders
- *  only complex-script glyphs). */
+/** A paragraph whose single run declares only a complex-script face (`<a:cs>`). */
 function paraCs(text: string, fontFaceCs: string): ShapeParagraph {
   return { align: 'l', runs: [{ type: 'text', text, bold: false, italic: false, size: 20, fontFaceCs }] };
 }
@@ -85,7 +81,7 @@ function gap(paragraphs: ShapeParagraph[], overrides: Partial<ShapeText> = {}): 
 
 describe('shape-text line spacing (§21.1.2.2.5 <a:lnSpc>) + normAutofit lnSpcReduction', () => {
   const cs = 1;
-  const naturalSingle = 20 * PT_TO_PX * cs * 1.2; // 20 pt Calibri, floor is 0 → flat 1.2×em
+  const naturalSingle = 20 * PT_TO_PX * cs * 1.2;
 
   it('baseline: unspaced line height is the natural 1.2×em single line', () => {
     expect(gap([para('A'), para('B')])).toBeCloseTo(naturalSingle, 5);
@@ -99,7 +95,7 @@ describe('shape-text line spacing (§21.1.2.2.5 <a:lnSpc>) + normAutofit lnSpcRe
   });
 
   it.each(['Meiryo UI', 'Sakkal Majalla'])(
-    'does not let the %s design-height floor override an explicit spcPct',
+    'does not let the %s family change an explicit spcPct',
     (fontFace) => {
       const pct100 = { type: 'pct', val: 100000 } as const;
       const explicit = gap([
@@ -142,54 +138,15 @@ describe('shape-text line spacing (§21.1.2.2.5 <a:lnSpc>) + normAutofit lnSpcRe
   });
 });
 
-// For OMITTED line spacing, the natural single line is FLOORED by the authored
-// font's design line (intendedSingleLinePx). A tabled face (Meiryo, 1.5962×em)
-// must measure to its taller design box; an untabled face (Calibri) stays on
-// the flat 1.2×em. Explicit spcPct is covered above and deliberately bypasses
-// this implicit-spacing floor.
-describe('shape-text single-line height floor by font design metric (§21.1.2.1.1)', () => {
+// Names alone cannot establish the selected font's bytes or line geometry.
+// With identical Canvas measurements, all font slots keep the same line height.
+describe('shape-text font slot identity', () => {
   const em = 20 * PT_TO_PX;
 
-  it('a tabled face (Meiryo) floors the line to its design single line, above 1.2×em', () => {
-    const meiryoFloor = intendedSingleLinePx('Meiryo', em);
-    expect(meiryoFloor).toBeGreaterThan(em * 1.2); // sanity: the floor bites
-    const h = gap([para('A', undefined, 'Meiryo'), para('B', undefined, 'Meiryo')]);
-    expect(h).toBeCloseTo(meiryoFloor, 5);
-  });
-
-  it('an untabled face (Calibri) is left on the flat 1.2×em (floor returns 0)', () => {
-    expect(intendedSingleLinePx('Calibri', em)).toBe(0);
-    const h = gap([para('A', undefined, 'Calibri'), para('B', undefined, 'Calibri')]);
-    expect(h).toBeCloseTo(em * 1.2, 5);
-  });
-
-  // ECMA-376 §21.1.2.3.1: a tabled face declared ONLY on `<a:ea>` (latin left
-  // default) — the common Japanese shape-text encoding — must still floor the
-  // line box by that face's design line. Before parsing `<a:ea>` the run's
-  // fontFace stayed undefined and the floor never fired (PR #643 follow-up).
-  it('a tabled EA face (Meiryo on <a:ea>, latin undefined) floors the line', () => {
-    const meiryoFloor = intendedSingleLinePx('Meiryo', em);
-    expect(meiryoFloor).toBeGreaterThan(em * 1.2); // sanity: the ea floor bites
-    const h = gap([paraEa('A', 'Meiryo'), paraEa('B', 'Meiryo')]);
-    expect(h).toBeCloseTo(meiryoFloor, 5);
-  });
-
-  it('a Calibri-latin run with no <a:ea> stays on the flat 1.2×em', () => {
-    // Regression guard for the ea floor: an untabled latin face without any ea
-    // must not grow (both floors return 0).
-    const h = gap([para('A', undefined, 'Calibri'), para('B', undefined, 'Calibri')]);
-    expect(h).toBeCloseTo(em * 1.2, 5);
-  });
-
-  // §21.1.2.3.1 font slots: the complex-script (`<a:cs>`) face renders ONLY
-  // complex-script glyphs (Arabic/Hebrew/Thai). A tabled cs face on a run whose
-  // glyphs are Latin/CJK must NOT floor the line box (that would over-grow it by
-  // a face that renders none of the text — e.g. sample-25's Japanese run that
-  // also declares Meiryo UI on cs). cs is parsed/modeled but excluded from the
-  // line-box floor; correct cs handling is deferred to per-glyph layout.
-  it('a tabled CS face (Meiryo on <a:cs>) does NOT floor the line box', () => {
-    expect(intendedSingleLinePx('Meiryo', em)).toBeGreaterThan(em * 1.2); // Meiryo IS tabled
-    const h = gap([paraCs('A', 'Meiryo'), paraCs('B', 'Meiryo')]);
-    expect(h).toBeCloseTo(em * 1.2, 5); // stays flat — cs is not in the floor
+  it('does not assign numeric corrections to authored latin, East Asian, or complex-script names', () => {
+    const expected = em * 1.2;
+    expect(gap([para('A', undefined, 'Meiryo'), para('B', undefined, 'Meiryo')])).toBeCloseTo(expected, 5);
+    expect(gap([paraEa('A', 'Meiryo'), paraEa('B', 'Meiryo')])).toBeCloseTo(expected, 5);
+    expect(gap([paraCs('A', 'Meiryo'), paraCs('B', 'Meiryo')])).toBeCloseTo(expected, 5);
   });
 });

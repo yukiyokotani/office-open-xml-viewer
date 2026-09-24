@@ -68,6 +68,7 @@ interface FakeFace { family: string }
 function installFontFaceSet(): { added: FakeFace[] } {
   const added: FakeFace[] = [];
   class FakeFontFace {
+    status = 'loaded';
     constructor(public family: string, public source: string, public descriptors?: object) {}
     load(): Promise<FakeFontFace> { return Promise.resolve(this); }
   }
@@ -100,6 +101,7 @@ describe('XlsxWorkbook.destroy() — rejects in-flight worker requests', () => {
     instance.sheetLoads = new Map();
     instance.rawParts = new BoundedRawPartCache({ maxEntries: 4, maxBytes: 1024 });
     instance.googleFontNames = [];
+    instance.officeFontRequests = [];
     instance.retainedFontSets = new Map();
     instance.fontsDestroyed = false;
     instance._fetchImage = () => Promise.resolve(new Blob());
@@ -190,10 +192,11 @@ describe('XlsxWorkbook.destroy() — rejects in-flight worker requests', () => {
 
     const { wb } = makeWorkbook();
     const retainedFontSets = (wb as unknown as {
-      retainedFontSets: Map<FontFaceSet, { refs: number; faces: FontFace[]; loading: Promise<FontFace[]> }>;
+      retainedFontSets: Map<FontFaceSet, { refs: number; loaded: { google: FontFace[]; office: { faces: FontFace[]; routes: Record<string, never> } }; loading: Promise<unknown> }>;
     }).retainedFontSets;
     const fontSet = (G.document as { fonts: FontFaceSet }).fonts;
-    retainedFontSets.set(fontSet, { refs: 1, faces: held, loading: Promise.resolve(held) });
+    const loaded = { google: held, office: { faces: [], routes: {} } };
+    retainedFontSets.set(fontSet, { refs: 1, loaded, loading: Promise.resolve(loaded) });
     wb.destroy();
 
     expect(added).toHaveLength(0);
@@ -219,6 +222,66 @@ describe('XlsxWorkbook.destroy() — rejects in-flight worker requests', () => {
 
     expect(added).toHaveLength(1);
     second.destroy();
+    expect(added).toHaveLength(0);
+  });
+
+  it('retains a sheet-only shape face until its empty-bootstrap workbook closes', async () => {
+    const { added } = installFontFaceSet();
+    const { wb } = makeWorkbook();
+    const workbook = wb as unknown as XlsxWorkbook;
+    const targetDocument = G.document as Document;
+    const internals = workbook as unknown as {
+      retainedFontSets: Map<FontFaceSet, { loaded: { office: { routes: Record<string, unknown> } } }>;
+      retainFontsInSet(set: FontFaceSet): Promise<() => void>;
+      retainWorksheetOfficeFonts(worksheet: object): Promise<void>;
+    };
+    // load() owns the document registry before any worksheet has a request;
+    // the viewer holds a separate reference to that same registry.
+    await internals.retainFontsInSet(targetDocument.fonts);
+    const releaseViewer = await workbook[retainXlsxViewerFonts](targetDocument);
+    expect(added).toHaveLength(0);
+    await internals.retainWorksheetOfficeFonts({
+      rows: [],
+      shapeGroups: [{ shapes: [{ text: {
+        anchor: 't', wrap: 'square', autoFit: 'none',
+        paragraphs: [{ runs: [{ type: 'text', text: 'Heading',
+          fontFace: 'Meiryo UI', fontFaceEa: 'Meiryo UI', bold: true, size: 25 }] }],
+      } }] }],
+    });
+
+    const retained = internals.retainedFontSets.get(targetDocument.fonts);
+    expect(retained?.loaded.office.routes['meiryo ui:700:normal']).toBeDefined();
+    expect(added).toHaveLength(1);
+    releaseViewer();
+    expect(added).toHaveLength(1);
+    wb.destroy();
+    expect(added).toHaveLength(0);
+    expect(internals.retainedFontSets.size).toBe(0);
+  });
+
+  it('releases a worksheet face if its popup closes during the extra tuple load', async () => {
+    const { added } = installFontFaceSet();
+    const { wb } = makeWorkbook();
+    const set = (G.document as { fonts: FontFaceSet }).fonts;
+    const loaded = { google: [], office: { faces: [], routes: {} } };
+    let resolveInitial!: (value: typeof loaded) => void;
+    const loading = new Promise<typeof loaded>((resolve) => { resolveInitial = resolve; });
+    const retained = { refs: 1, loaded: null, loading };
+    const internals = wb as unknown as {
+      retainedFontSets: Map<FontFaceSet, typeof retained>;
+      retainWorksheetOfficeFonts(worksheet: object): Promise<void>;
+    };
+    internals.retainedFontSets.set(set, retained);
+    const load = internals.retainWorksheetOfficeFonts({
+      rows: [{ cells: [{ value: { type: 'text', runs: [
+        { text: 'x', font: { name: 'Calibri', bold: true, italic: false } },
+      ] } }] }],
+    });
+    // The popup closes while the initial font promise still holds the load.
+    retained.refs = 0;
+    internals.retainedFontSets.delete(set);
+    resolveInitial(loaded);
+    await load;
     expect(added).toHaveLength(0);
   });
 });

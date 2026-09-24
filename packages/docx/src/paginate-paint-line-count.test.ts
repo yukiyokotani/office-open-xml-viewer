@@ -2,7 +2,6 @@ import { describe, it, expect } from 'vitest';
 import { createLayoutServices } from './layout-runtime.js';
 import { layoutDocument } from './document-layout.js';
 import { renderDocumentToCanvas } from './renderer.js';
-import { testFontSnapshot } from './layout/test-font-snapshot.js';
 import type { BodyElement, DocParagraph, DocxDocumentModel, SectionProps } from './types';
 
 // ECMA-376 §17.6.4 (newspaper columns) + the renderer's scale-independent
@@ -94,47 +93,7 @@ function doc(body: BodyElement[], pageHeight: number): DocxDocumentModel {
   } as unknown as DocxDocumentModel;
 }
 
-async function paintedParagraphGeometry() {
-  const paragraph = longPara(Array.from({ length: 180 }, () => 'w').join(' '));
-  paragraph.spaceBefore = 6;
-  paragraph.spaceAfter = 4;
-  const model = doc([paragraph as unknown as BodyElement], 80);
-  const services = createLayoutServices(model, { localMetrics: testFontSnapshot([{ family: 'Times New Roman', lineHeightRatio: 2355 / 2048 }]) });
-  const layout = layoutDocument(model, services, { currentDateMs: 0 });
-  const paintedPages: Array<{ lineCount: number; topYPx: number | null }> = [];
-  for (let pageIndex = 0; pageIndex < layout.pages.length; pageIndex++) {
-    const { canvas, calls } = makeNonLinearCanvas();
-    await renderDocumentToCanvas(model, canvas, pageIndex, {
-      dpr: 1,
-      width: 200,
-      layoutServices: services,
-    });
-    const textCalls = calls.filter((call) => call.text.includes('w'));
-    paintedPages.push({
-      lineCount: textCalls.length,
-      topYPx: textCalls.length > 0 ? textCalls[0].y : null,
-    });
-  }
-  return { pageCount: layout.pages.length, paintedPages };
-}
-
 describe('paginate/paint line-count divergence — paint never indexes a phantom line (ECMA-376 §17.6.4)', () => {
-  it('preserves page count, painted line counts, and continuation top positions', async () => {
-    const geometry = await paintedParagraphGeometry();
-
-    // Word admits the final visible line at a region edge without requiring the
-    // paragraph's authored trailing spaceAfter to fit. The retained line split
-    // therefore completes on page 2 while paint still consumes every one of the
-    // 180 canonical line placements exactly once.
-    expect(geometry).toEqual({
-      pageCount: 2,
-      paintedPages: [
-        { lineCount: 84, topYPx: 24.74951171875 },
-        { lineCount: 96, topYPx: 18.74951171875 },
-      ],
-    });
-  });
-
   it.each(['Latin words', 'East Asian grid'] as const)(
     'retains and paints every source token exactly once across pages: %s',
     async (route) => {

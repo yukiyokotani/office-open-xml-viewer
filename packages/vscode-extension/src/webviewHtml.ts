@@ -35,6 +35,7 @@ export function buildContentSecurityPolicy(
 
   return [
     `default-src 'none';`,
+    `base-uri ${cspSource};`,
     `img-src ${cspSource} data: blob:;`,
     `media-src ${cspSource} blob:;`,
     fontSrc,
@@ -50,7 +51,7 @@ export function buildContentSecurityPolicy(
  * The webview script (dist/webview.js) is allowed via the content security policy,
  * and receives the file bytes via a `ooxml-init` message posted from the extension host.
  *
- * When `useGoogleFonts` is true the CSP is widened to allow the metric-compatible
+ * When `useGoogleFonts` is true the CSP is widened to allow the optional
  * font CDN (see {@link buildContentSecurityPolicy}); the flag is also forwarded to
  * the viewers via the `ooxml-init` message in the editor providers.
  */
@@ -64,6 +65,9 @@ export function getWebviewHtml(
   const scriptUri = webview.asWebviewUri(
     vscode.Uri.joinPath(extensionUri, 'dist', 'webview.js'),
   );
+  // esbuild emits parser WASM assets as relative URLs. The webview document
+  // has its own origin, so resolve those URLs beside webview.js.
+  const assetBaseUri = new URL('.', scriptUri.toString()).toString();
 
   const nonce = getNonce();
   const csp = buildContentSecurityPolicy(webview.cspSource, nonce, useGoogleFonts);
@@ -74,6 +78,7 @@ export function getWebviewHtml(
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta http-equiv="Content-Security-Policy" content="${csp}" />
+  <base href="${assetBaseUri}" />
   <title>OOXML Viewer</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }

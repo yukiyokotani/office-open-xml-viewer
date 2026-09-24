@@ -52,6 +52,7 @@ function placement(
     hyperlink?: TextPlacement['hyperlink'];
     letterSpacingPt?: number;
     tateChuYoko?: boolean;
+    trailingSpaceCompressionPt?: number;
   }> = {},
 ): TextPlacement {
   const rangeStart = options.rangeStart ?? 0;
@@ -88,6 +89,9 @@ function placement(
     decorations: Object.freeze([]),
     ...(options.hyperlink ? { hyperlink: options.hyperlink } : {}),
     ...(options.tateChuYoko ? { tateChuYoko: true } : {}),
+    ...(options.trailingSpaceCompressionPt
+      ? { trailingSpaceCompressionPt: options.trailingSpaceCompressionPt }
+      : {}),
   });
 }
 
@@ -376,6 +380,17 @@ function documentLayout(layoutPage: LayoutPage): DocumentLayout {
 }
 
 describe('textRunsForPage', () => {
+  it('projects retained terminal-space compression into CSS pixels', () => {
+    const compressed = paragraph('compressed', 'body', [
+      placement('A ', 0, 0, { trailingSpaceCompressionPt: 2 }),
+    ]);
+    const layers = buildPageLayers([
+      { layer: 'body', node: compressed, coordinateSpace: 'section-logical' },
+    ]);
+    expect(textRunsForPage(documentLayout(page(layers, [compressed.id])), 0, { scale: 2 })[0])
+      .toMatchObject({ text: 'A ', trailingSpaceCompressionPx: 4 });
+  });
+
   it('projects the source w14:paraId onto every run owned by that paragraph', () => {
     const identified = paragraph('identified', 'body', [
       placement('first', 0, 0),

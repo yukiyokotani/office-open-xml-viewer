@@ -21,6 +21,25 @@ describe('isHTMLCanvas', () => {
     expect(isHTMLCanvas(new FakeCanvas())).toBe(true);
     expect(isHTMLCanvas({})).toBe(false);
   });
+
+  it('recognizes an iframe canvas through its owning realm while excluding an OffscreenCanvas', () => {
+    class MainCanvas {}
+    class OtherCanvas {
+      readonly nodeType = 1;
+      readonly localName = 'canvas';
+      readonly ownerDocument = { defaultView: { HTMLCanvasElement: OtherCanvas } };
+    }
+    class OtherOffscreenCanvas {
+      readonly width = 100;
+      readonly height = 100;
+      getContext() { return null; }
+    }
+    G.HTMLCanvasElement = MainCanvas;
+    const popupCanvas = new OtherCanvas();
+    expect(popupCanvas instanceof MainCanvas).toBe(false);
+    expect(isHTMLCanvas(popupCanvas)).toBe(true);
+    expect(isHTMLCanvas(new OtherOffscreenCanvas())).toBe(false);
+  });
 });
 
 describe('defaultDpr', () => {

@@ -24,10 +24,8 @@ const atLeast = (value: number): LineSpacing => ({
 });
 
 // Yu Mincho design line metrics per pt of font size: 1.3 × the hhea glyph box
-// (asc 1802, |desc| 455, upm 2048) — see core line-metrics and the sample-58
-// adjudication (issue #1013). Sum = 1.43267 em. All call sites feed lineBoxHeight
-// metrics through correctLineMetrics / the intendedSingleLinePx floor, so for a
-// tabled font both ascent+descent and intendedSingle equal this design height.
+// (asc 1802, |desc| 455, upm 2048). Sum = 1.43267 em. The line-box contract
+// receives both the selected design sides and the intended single-line height.
 const YU_ASC = (1802 * 1.3) / 2048;
 const YU_DESC = (455 * 1.3) / 2048;
 const YU = YU_ASC + YU_DESC;
@@ -207,9 +205,7 @@ describe('lineBoxHeight — docGrid line-cell rounding (East Asian vs Latin)', (
   const grid20 = { type: 'lines', linePitchPt: 20 } as const;
 
   // A 12pt Yu Mincho line reaches lineBoxHeight with design-corrected metrics
-  // (asc 13.73 + desc 3.47 = 17.19px, the 1.43267em box) — correctLineMetrics
-  // shrinks the substituted ~1.602em Canvas box to it, and intendedSingleLinePx
-  // floors an under-measuring substitute up to it. 17.19 < 18 → one cell
+  // (asc 13.73 + desc 3.47 = 17.19px, the 1.43267em box). 17.19 < 18 → one cell
   // (sample-35 heading, sample-58 A2/B2).
   it('snaps a sub-pitch EA line to ONE cell of the grid pitch', () => {
     expect(lineBoxHeight(null, 12 * YU_ASC, 12 * YU_DESC, 1, grid18, false, 12 * YU, true)).toBe(18);

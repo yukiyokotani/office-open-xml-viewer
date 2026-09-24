@@ -14,6 +14,8 @@ import {
 } from './slide-nav';
 import {
   preloadGoogleFonts,
+  loadOfficeFontFallbacks,
+  unloadOfficeFontFallbacks,
   releaseOwnedBitmap,
   unloadGoogleFonts,
   unregisterEmbeddedFonts,
@@ -34,6 +36,8 @@ import {
   type TiffRenderer,
   type ImageResourceOptions,
   type OoxmlResourceMetrics,
+  type LoadedOfficeFontFallbacks,
+  type OfficeFontFallbackRoute,
   workerRendererDescriptors,
 } from '@silurus/ooxml-core';
 import {
@@ -56,7 +60,7 @@ import {
 import { BoundedRawPartCache } from '@silurus/ooxml-core/internal/bounded-raw-part-cache';
 import { ProgressiveLayoutLifecycle } from '@silurus/ooxml-core/internal/progressive-layout-lifecycle';
 import { ProgressiveLayoutObserverNotifier } from '@silurus/ooxml-core/internal/progressive-layout-observers';
-import { PPTX_GOOGLE_FONTS } from './google-fonts';
+import { PPTX_GOOGLE_FONTS, pptxSlideOfficeFontRequests } from './google-fonts';
 import {
   findPreflightMimeType,
   normalizePresentationBootstrap,
@@ -66,7 +70,7 @@ import {
   type PresentationPreflight,
 } from './presentation-preflight';
 import { PptxSlideRepository } from './slide-repository';
-import { excludeEmbeddedFontFamilies, loadEmbeddedFonts } from './embedded-fonts';
+import { excludeEmbeddedFontFamilies, loadEmbeddedFonts, uncoveredOfficeFontRequests } from './embedded-fonts';
 import {
   isPptxSlidePullResponse,
   PptxSlidePullClient,
@@ -225,6 +229,7 @@ export interface PresentSlideOptions extends Omit<RenderSlideOptions, 'skipMedia
  */
 export class PptxPresentation {
   private _cjkFallback: CjkLang = 'jp';
+  private _googleSubstitutes = false;
   private _metrics: OoxmlResourceMetricsSession | null = null;
   private readonly _worker: Worker;
   private readonly _bridge: WorkerBridge<
@@ -263,10 +268,12 @@ export class PptxPresentation {
    *  the shared FontFaceSet for the lifetime of the SPA (deduped + refcounted in
    *  core, so a web font shared with another open deck survives until both go). */
   private _googleFontFaces: FontFace[] = [];
+  private readonly _officeFontLoads = new Map<FontFaceSet, Map<string, Promise<LoadedOfficeFontFallbacks>>>();
   /** Embedded Font parts registered into the main-thread FontFaceSet. */
   private _embeddedFontFaces: FontFace[] = [];
   private _embeddedFontAliases: ReadonlyMap<string, string> = new Map();
   private _embeddedFontAuthoredFamilies: ReadonlyMap<string, string> = new Map();
+  private _embeddedFontTuples: ReadonlySet<string> = new Set();
   private _destroyed = false;
   /** One stable closure per instance: the decoded-bitmap and SVG caches key on
    *  this identity to scope decodes per deck (so two open decks never swap
@@ -417,6 +424,7 @@ export class PptxPresentation {
             settled: false,
           } satisfies ProgressiveLoad
         : undefined;
+      pres._googleSubstitutes = !!opts.useGoogleFonts;
       await pres._parse(
         buffer,
         resourceOptions.policy,
@@ -506,6 +514,7 @@ export class PptxPresentation {
         this._embeddedFontFaces = loaded.faces;
         this._embeddedFontAliases = loaded.aliases;
         this._embeddedFontAuthoredFamilies = loaded.authoredFamilies;
+        this._embeddedFontTuples = loaded.tuples;
       }
     });
     this._slidePullClient = new PptxSlidePullClient({
@@ -592,6 +601,7 @@ export class PptxPresentation {
         this._embeddedFontFaces = loaded.faces;
         this._embeddedFontAliases = loaded.aliases;
         this._embeddedFontAuthoredFamilies = loaded.authoredFamilies;
+        this._embeddedFontTuples = loaded.tuples;
       }
     });
     this._slidePullClient = this._createSlidePullClient(bootstrap.slideCount, timeoutMs, onUsage);
@@ -1024,6 +1034,31 @@ export class PptxPresentation {
     return resolveInternalSlideTarget(ref, this._partIndex(), currentIndex);
   }
 
+  private async _officeRoutesForRequests(
+    requests: readonly import('@silurus/ooxml-core').OfficeFontFallbackRequest[],
+    fontSet: FontFaceSet | null,
+  ): Promise<Record<string, OfficeFontFallbackRoute>> {
+    if (this._destroyed) throw new Error('Presentation destroyed');
+    if (!fontSet) return {};
+    const uncovered = uncoveredOfficeFontRequests(requests, this._embeddedFontTuples);
+    let loads = this._officeFontLoads.get(fontSet);
+    if (!loads) {
+      loads = new Map();
+      this._officeFontLoads.set(fontSet, loads);
+    }
+    const loaded = await Promise.all(uncovered.map((request) => {
+      const key = `calibri:${request.weight}:${request.style}`;
+      let pending = loads.get(key);
+      if (!pending) {
+        pending = loadOfficeFontFallbacks([request], fontSet);
+        loads.set(key, pending);
+      }
+      return pending;
+    }));
+    if (this._destroyed) throw new Error('Presentation destroyed');
+    return Object.assign({}, ...loaded.map((entry) => entry.routes)) as Record<string, OfficeFontFallbackRoute>;
+  }
+
   /** Render a slide onto the given canvas. */
   async renderSlide(
     canvas: HTMLCanvasElement | OffscreenCanvas,
@@ -1039,15 +1074,24 @@ export class PptxPresentation {
       }
       this._assertSlideIndex(slideIndex);
       await this._waitForSlide(slideIndex);
+      if (this._destroyed) throw new Error('Presentation destroyed');
       const compact = this._preflight;
       const repository = this._slides;
       if (!compact || !repository) throw new Error('Presentation not loaded');
       const dpr = opts.dpr ?? defaultDpr();
       const width = opts.width ?? ((isHTMLCanvas(canvas) ? canvas.offsetWidth : 0) || 960);
+      const requests = await repository.withSlide(slideIndex, (slide) =>
+        pptxSlideOfficeFontRequests(slide, compact.majorFont, compact.minorFont));
+      if (this._destroyed) throw new Error('Presentation destroyed');
+      const fontSet = isHTMLCanvas(canvas)
+        ? canvas.ownerDocument.fonts
+        : (typeof document !== 'undefined' ? document.fonts : null);
+      const officeFontRoutes = await this._officeRoutesForRequests(requests, fontSet);
       await repository.withSlide(slideIndex, (slide) => {
         // A render may have waited behind another consumer after its public
         // entrance check. Re-check the presentation poison at the ownership
         // boundary before a cached Slide becomes observable.
+        if (this._destroyed) throw new Error('Presentation destroyed');
         this._assertResourceHealthy();
         return renderSlideWithEmbeddedFonts(
           canvas,
@@ -1064,6 +1108,9 @@ export class PptxPresentation {
             hlinkColor: compact.hlinkColor,
             embeddedFontAliases: this._embeddedFontAliases,
             embeddedFontAuthoredFamilies: this._embeddedFontAuthoredFamilies,
+            embeddedFontTuples: this._embeddedFontTuples,
+            officeFontRoutes,
+            googleSubstitutes: this._googleSubstitutes,
             fetchMedia: this._fetchMedia,
             fetchImage: this._fetchImage,
             skipMediaControls: opts.skipMediaControls,
@@ -1446,12 +1493,19 @@ export class PptxPresentation {
       unloadGoogleFonts(this._googleFontFaces);
       this._googleFontFaces = [];
     }
+    for (const loads of this._officeFontLoads.values()) {
+      for (const pending of loads.values()) {
+        void pending.then((loaded) => unloadOfficeFontFallbacks(loaded.faces));
+      }
+    }
+    this._officeFontLoads.clear();
     if (this._embeddedFontFaces.length > 0) {
       unregisterEmbeddedFonts(this._embeddedFontFaces);
       this._embeddedFontFaces = [];
     }
     this._embeddedFontAliases = new Map();
     this._embeddedFontAuthoredFamilies = new Map();
+    this._embeddedFontTuples = new Set();
     // Release this deck's decoded raster bitmaps (GPU-backed), duotone-recoloured
     // rasters, and SVG object URLs promptly; all three caches are keyed by
     // `_fetchImage`.

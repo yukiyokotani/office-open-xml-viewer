@@ -67,6 +67,7 @@ function row(
     repeatedHeader?: boolean;
     verticalMerge?: 'none' | 'restart' | 'continue';
     exactHeightPt?: number;
+    atLeastHeightPt?: number;
   } = {},
 ): TableRowLayoutInput {
   const verticalMerge = options.verticalMerge ?? 'none';
@@ -75,8 +76,9 @@ function row(
     source: { story: 'body', storyInstance: 'body', path: [0, logicalRowIndex] },
     logicalRowIndex,
     cantSplit: options.cantSplit ?? false,
-    heightPt: options.exactHeightPt ?? null,
-    heightRule: options.exactHeightPt === undefined ? 'auto' : 'exact',
+    heightPt: options.exactHeightPt ?? options.atLeastHeightPt ?? null,
+    heightRule: options.exactHeightPt !== undefined ? 'exact'
+      : options.atLeastHeightPt !== undefined ? 'atLeast' : 'auto',
     cellSpacingPt: 0,
     exceptionBorders: null,
     alignment: 'left',
@@ -235,6 +237,43 @@ describe('retained table pagination across pages', () => {
     expect(pages[0]).toBeNull();
     expect(pages.slice(1).map((page) => page?.rows.length)).toEqual([3, 1]);
     expect(sourceRows(pages)).toEqual([[0, 0], [1, 0], [2, 0], [3, 0]]);
+  });
+
+  it('relocates an authored row-height floor before splitting its content in Word mode', () => {
+    const lines = [12, 12, 12, 12, 12];
+    for (const sourceRow of [
+      row(0, lines, { exactHeightPt: 90 }),
+      row(0, lines, { atLeastHeightPt: 90 }),
+    ]) {
+      const pages = paginate(acquisition([sourceRow]), 45, 120, 'word');
+      expect(pages[0]).toBeNull();
+      expect(sourceRows(pages)).toEqual([[0, 0]]);
+      expect(pages[1]?.rows[0]?.cells[0]?.contentRanges).toEqual([
+        { kind: 'whole', blockIndex: 0 },
+      ]);
+    }
+  });
+
+  it('still splits an atLeast row whose minimum fits the remaining band', () => {
+    const source = acquisition([row(0, [12, 12, 12, 12, 12], { atLeastHeightPt: 30 })]);
+    const pages = paginate(source, 45, 120, 'word');
+    expect(sourceRows(pages)).toEqual([[0, 0], [0, 1]]);
+    expect(pages[0]?.rows[0]?.cells[0]?.contentRanges).toEqual([
+      { kind: 'paragraph', blockIndex: 0, lineStart: 0, lineEnd: 3 },
+    ]);
+    expect(sourceRows(paginate(
+      acquisition([row(0, [12, 12, 12, 12, 12], { atLeastHeightPt: 90 })]),
+      45, 120, 'standard',
+    ))).toEqual([[0, 0], [0, 1]]);
+  });
+
+  it('splits an atLeast row when content grows beyond its authored minimum', () => {
+    const source = acquisition([row(0, Array(9).fill(12), { atLeastHeightPt: 90 })]);
+    const pages = paginate(source, 45, 120, 'word');
+    expect(sourceRows(pages)).toEqual([[0, 0], [0, 1]]);
+    expect(pages[0]?.rows[0]?.cells[0]?.contentRanges).toEqual([
+      { kind: 'paragraph', blockIndex: 0, lineStart: 0, lineEnd: 3 },
+    ]);
   });
 
   it('repeats only the consecutive leading tblHeader rows', () => {

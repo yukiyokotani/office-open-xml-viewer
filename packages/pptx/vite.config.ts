@@ -11,7 +11,7 @@ const dirname =
     : path.dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig({
-  plugins: [wasm()],
+  plugins: [wasmAssetUrl(), wasm()],
   resolve: {
     alias: {
       '@ooxml-test-three-d-renderer': resolve(dirname, '../../src/three-d.ts'),

@@ -53,6 +53,8 @@ export interface CellFont {
     size: number;
     color: string | null;
     name: string | null;
+    scheme?: 'major' | 'minor';
+    charset?: number;
     underlineStyle?: string;
     vertAlign?: 'superscript' | 'subscript';
 }
@@ -2061,6 +2063,7 @@ export interface Worksheet {
     colCollapsed?: Record<number, boolean>;
     colHidden?: Record<number, boolean>;
     defaultColWidth: number;
+    baseColWidth?: number;
     defaultRowHeight: number;
     defaultRowHeightCustom?: boolean;
     mergeCells: MergeCell[];
@@ -2088,6 +2091,10 @@ export interface Worksheet {
     sparklineGroups?: SparklineGroup[];
     defaultFontFamily?: string;
     defaultFontSize?: number;
+    defaultFontBold?: boolean;
+    defaultFontItalic?: boolean;
+    themeJapaneseMajorFont?: string;
+    themeJapaneseMinorFont?: string;
     date1904?: boolean;
     parseError?: string;
 }

@@ -669,4 +669,206 @@ describe('canonical producer with a real document model', () => {
     expect(floating.flowBounds).toMatchObject({ xPt: 30, yPt: 20 });
     expect(follower.flowBounds.yPt).toBe(10);
   });
+
+  it.each([
+    { name: 'default top distance with an empty paragraph', topFromText: 0, emptyParagraph: true },
+    { name: 'positive top distance without an empty paragraph', topFromText: 20, emptyParagraph: false },
+  ])('keeps preceding text lines outside a page-positioned floating table: $name', ({
+    topFromText, emptyParagraph,
+  }) => {
+    const section = {
+      pageWidth: 200, pageHeight: 120,
+      marginTop: 10, marginRight: 10, marginBottom: 10, marginLeft: 10,
+      headerDistance: 5, footerDistance: 5, titlePage: false,
+      evenAndOddHeaders: false, sectionStart: 'nextPage', columns: null,
+    } as SectionProps;
+    const table = floatingTable() as Extract<BodyElement, { type: 'table' }>;
+    table.colWidths = [180];
+    table.rows[0]!.cells[0]!.widthPt = 180;
+    table.tblpPr = {
+      ...table.tblpPr!,
+      horzAnchor: 'margin', vertAnchor: 'page', tblpX: 0, tblpY: 25,
+      topFromText,
+    };
+    const tableIndex = emptyParagraph ? 2 : 1;
+    const model = {
+      section,
+      body: [ordinaryBodyParagraph('before '.repeat(12)),
+        ...(emptyParagraph ? [ordinaryBodyParagraph('')] : []), table],
+      headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+      footnotes: [], endnotes: [], fontFamilyClasses: {},
+    } as unknown as DocxDocumentModel;
+    const layout = layoutDocument(model, createLayoutServices(model, { measureContext: measureContext() }), {
+      currentDateMs: 0,
+    });
+    const body = layout.pages[0]!.layers.body;
+    const heading = body.find((node) => node.kind === 'paragraph' && node.source.path[0] === 0);
+    const placedTable = body.find((node) => node.kind === 'table'
+      && node.source.path[0] === tableIndex);
+    expect(heading?.kind).toBe('paragraph');
+    expect(placedTable?.kind).toBe('table');
+    if (heading?.kind !== 'paragraph' || placedTable?.kind !== 'table') return;
+    expect(placedTable.flowBounds.yPt).toBe(25);
+    expect(heading.lines.length).toBeGreaterThan(1);
+    expect(heading.lines.every((line) => (
+      line.bounds.yPt + line.bounds.heightPt <= placedTable.flowBounds.yPt
+      || line.bounds.yPt >= placedTable.flowBounds.yPt + placedTable.flowBounds.heightPt
+    ))).toBe(true);
+    if (topFromText > 0) {
+      expect(heading.lines.every((line) => line.bounds.yPt >= placedTable.flowBounds.yPt
+        + placedTable.flowBounds.heightPt)).toBe(true);
+    }
+  });
+
+  it('does not apply a later section page table to the preceding section', () => {
+    const section = {
+      pageWidth: 200, pageHeight: 120,
+      marginTop: 10, marginRight: 10, marginBottom: 10, marginLeft: 10,
+      headerDistance: 5, footerDistance: 5, titlePage: false,
+      evenAndOddHeaders: false, sectionStart: 'nextPage', columns: null,
+    } as SectionProps;
+    const table = floatingTable() as Extract<BodyElement, { type: 'table' }>;
+    table.colWidths = [180];
+    table.rows[0]!.cells[0]!.widthPt = 180;
+    table.tblpPr = {
+      ...table.tblpPr!,
+      horzAnchor: 'margin', vertAnchor: 'page', tblpX: 0, tblpY: 25,
+    };
+    const breakMark = {
+      ...sectionBreak(), kind: 'nextPage',
+      geom: { ...section, sectionStart: 'nextPage' },
+    } as unknown as BodyElement;
+    const before = ordinaryBodyParagraph('before '.repeat(12));
+    const model = (body: BodyElement[]) => ({
+      section, body,
+      headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+      footnotes: [], endnotes: [], fontFamilyClasses: {},
+    }) as unknown as DocxDocumentModel;
+    const control = model([before]);
+    const withLaterTable = model([before, breakMark, table]);
+    const controlLayout = layoutDocument(control,
+      createLayoutServices(control, { measureContext: measureContext() }), { currentDateMs: 0 });
+    const candidateLayout = layoutDocument(withLaterTable,
+      createLayoutServices(withLaterTable, { measureContext: measureContext() }), { currentDateMs: 0 });
+    const firstParagraph = (layout: ReturnType<typeof layoutDocument>) => layout.pages[0]!
+      .layers.body.find((node) => node.kind === 'paragraph' && node.source.path[0] === 0);
+    const controlParagraph = firstParagraph(controlLayout);
+    const candidateParagraph = firstParagraph(candidateLayout);
+    expect(controlParagraph?.kind).toBe('paragraph');
+    expect(candidateParagraph?.kind).toBe('paragraph');
+    if (controlParagraph?.kind !== 'paragraph' || candidateParagraph?.kind !== 'paragraph') return;
+    expect(candidateParagraph.lines.map((line) => line.bounds.yPt))
+      .toEqual(controlParagraph.lines.map((line) => line.bounds.yPt));
+    expect(candidateLayout.pages[1]!.layers.body.some((node) => node.kind === 'table')).toBe(true);
+  });
+
+  it('keeps a continued floating table on its accepted page fragments', () => {
+    const section = {
+      pageWidth: 200, pageHeight: 100,
+      marginTop: 10, marginRight: 10, marginBottom: 10, marginLeft: 10,
+      headerDistance: 5, footerDistance: 5, titlePage: false,
+      evenAndOddHeaders: false, sectionStart: 'nextPage', columns: null,
+    } as SectionProps;
+    const table = floatingTable() as Extract<BodyElement, { type: 'table' }>;
+    table.colWidths = [180];
+    table.rows = Array.from({ length: 8 }, (_, index) => ({
+      ...table.rows[0]!,
+      cells: [{
+        ...table.rows[0]!.cells[0]!,
+        widthPt: 180,
+        content: [{ type: 'paragraph' as const, ...ordinaryParagraph(`row ${index} `.repeat(14)) }],
+      }],
+    }));
+    table.tblpPr = {
+      ...table.tblpPr!,
+      horzAnchor: 'margin', vertAnchor: 'page', tblpX: 0, tblpY: 25,
+    };
+    const model = {
+      section, body: [ordinaryBodyParagraph('before '.repeat(8)), table],
+      headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+      footnotes: [], endnotes: [], fontFamilyClasses: {},
+    } as unknown as DocxDocumentModel;
+    const layout = layoutDocument(model, createLayoutServices(model, { measureContext: measureContext() }), {
+      currentDateMs: 0,
+    });
+    const fragments = layout.pages.flatMap((page) => page.layers.body
+      .filter((node) => node.kind === 'table' && node.source.path[0] === 1)
+      .map((node) => ({ pageIndex: page.pageIndex, node })));
+    expect(fragments.length).toBeGreaterThan(1);
+    expect(fragments[0]!.pageIndex).toBe(1);
+    expect(fragments[0]!.node.sectionFlowOwnership).toBe('page');
+    expect(fragments.slice(1).every(({ node }) => node.sectionFlowOwnership !== 'page')).toBe(true);
+    expect(new Set(fragments.map(({ pageIndex }) => pageIndex)).size).toBe(fragments.length);
+  });
+
+  it('rechecks page-owned table placement after a visible header changes the body band', () => {
+    const section = {
+      pageWidth: 200, pageHeight: 100,
+      marginTop: 10, marginRight: 10, marginBottom: 10, marginLeft: 10,
+      headerDistance: 30, footerDistance: 5, titlePage: false,
+      evenAndOddHeaders: false, sectionStart: 'nextPage', columns: null,
+    } as SectionProps;
+    const table = floatingTable() as Extract<BodyElement, { type: 'table' }>;
+    table.colWidths = [180];
+    table.rows[0]!.cells[0]!.widthPt = 180;
+    table.tblpPr = {
+      ...table.tblpPr!,
+      horzAnchor: 'margin', vertAnchor: 'page', tblpX: 0, tblpY: 65,
+    };
+    const model = {
+      section,
+      body: [ordinaryBodyParagraph('before '.repeat(20)), table],
+      headers: { default: { body: [ordinaryParagraph('Header')] }, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+      footnotes: [], endnotes: [], fontFamilyClasses: {},
+    } as unknown as DocxDocumentModel;
+    const layout = layoutDocument(model, createLayoutServices(model, { measureContext: measureContext() }), {
+      currentDateMs: 0,
+    });
+    const headingPages = layout.pages.filter((page) => page.layers.body.some((node) =>
+      node.kind === 'paragraph' && node.source.path[0] === 0));
+    const tablePage = layout.pages.find((page) => page.layers.body.some((node) =>
+      node.kind === 'table' && node.source.path[0] === 1));
+    expect(headingPages.length).toBeGreaterThan(0);
+    expect(tablePage).toBeDefined();
+    expect(layout.pages[0]!.geometry.contentTopPt).toBeGreaterThan(section.marginTop);
+    expect(layout.pages.every((page) => page.layers.body.length > 0)).toBe(true);
+    expect(tablePage!.pageIndex).toBeGreaterThanOrEqual(headingPages.at(-1)!.pageIndex);
+  });
+
+  it('does not skip a page when the table source naturally follows multi-page text', () => {
+    const section = {
+      pageWidth: 200, pageHeight: 100,
+      marginTop: 10, marginRight: 10, marginBottom: 10, marginLeft: 10,
+      headerDistance: 5, footerDistance: 5, titlePage: false,
+      evenAndOddHeaders: false, sectionStart: 'nextPage', columns: null,
+    } as SectionProps;
+    const table = floatingTable() as Extract<BodyElement, { type: 'table' }>;
+    table.tblpPr = {
+      ...table.tblpPr!,
+      horzAnchor: 'margin', vertAnchor: 'page', tblpX: 0, tblpY: 25,
+    };
+    const model = {
+      section,
+      body: [ordinaryBodyParagraph('before '.repeat(150)), table],
+      headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+      footnotes: [], endnotes: [], fontFamilyClasses: {},
+    } as unknown as DocxDocumentModel;
+    const layout = layoutDocument(model, createLayoutServices(model, { measureContext: measureContext() }), {
+      currentDateMs: 0,
+    });
+    const tablePage = layout.pages.find((page) => page.layers.body.some((node) =>
+      node.kind === 'table' && node.source.path[0] === 1));
+    const lastTextPage = [...layout.pages].reverse().find((page) => page.layers.body.some((node) =>
+      node.kind === 'paragraph' && node.source.path[0] === 0));
+    expect(layout.pages.length).toBeGreaterThanOrEqual(3);
+    expect(layout.pages.every((page) => page.layers.body.length > 0)).toBe(true);
+    expect(tablePage).toBeDefined();
+    expect(lastTextPage).toBeDefined();
+    expect(tablePage!.pageIndex).toBeGreaterThanOrEqual(lastTextPage!.pageIndex);
+  });
 });

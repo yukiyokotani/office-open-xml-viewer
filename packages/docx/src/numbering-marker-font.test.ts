@@ -149,6 +149,43 @@ async function render(num: NumberingInfo | null) {
 const headFamily = (font: string) => /"([^"]+)"/.exec(font)?.[1] ?? font;
 
 describe('numbering marker + body eastAsia font routing (§17.3.2.26 / §17.9.6)', () => {
+  it('moves a following paragraph by the selected marker and body line-box union', async () => {
+    const renderedSuccessorTop = async (markerSizePt: number | null): Promise<number> => {
+      const { canvas } = makeRecordingCanvas();
+      const first = {
+        ...(headingDoc(null).body[0] as DocParagraph),
+        runs: [{ type: 'text' as const, ...run('Body', 'Text Face', 'Text Face'), fontSize: 10 }],
+        lineSpacing: { rule: 'auto' as const, value: 1.15, explicit: true },
+        numbering: markerSizePt === null ? null : {
+          ...numbering(),
+          fontFamily: 'Marker Face',
+          fontFacts: { fontSize: markerSizePt, fontFamily: 'Marker Face' },
+        } as unknown as NumberingInfo,
+      };
+      const successor: DocParagraph = {
+        ...first,
+        numbering: null,
+        lineSpacing: null,
+        runs: [{ type: 'text', ...run('Next', 'Text Face', 'Text Face'), fontSize: 10 }],
+      };
+      const model = { ...headingDoc(null), body: [
+        { type: 'paragraph' as const, ...first },
+        { type: 'paragraph' as const, ...successor },
+      ] } as DocxDocumentModel;
+      const runs: DocxTextRunInfo[] = [];
+      await renderDocumentToCanvas(model, canvas, 0, {
+        dpr: 1, width: 400,
+        onTextRun: (text) => runs.push(text),
+        layoutServices: createLayoutServices(model, { measureContext: canvas.getContext('2d') }),
+      });
+      return runs.find((text) => text.text === 'Next')!.y;
+    };
+    const plain = await renderedSuccessorTop(null);
+    const smallMarker = await renderedSuccessorTop(8);
+    const tallMarker = await renderedSuccessorTop(20);
+    expect(smallMarker).toBeCloseTo(plain);
+    expect(tallMarker - plain).toBeCloseTo(10);
+  });
   it('routes the CJK title to the eastAsia (MS Gothic / sans) face', async () => {
     const { runs } = await render(numbering());
     const title = runs.find((r) => r.text === '原稿の体裁');

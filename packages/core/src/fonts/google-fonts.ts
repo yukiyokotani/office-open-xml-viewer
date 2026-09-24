@@ -3,10 +3,10 @@
  * xlsx preload maps.
  *
  * These are the well-known free webfont alternatives Microsoft Office templates
- * pull from, plus the metric-compatible pairings Microsoft and Google both
- * publish (Calibri → Carlito, Cambria → Caladea: same advance widths and
- * ascender / descender). Loading the substitute on a system that lacks the
- * Office face keeps text-width measurements close to Word / PowerPoint / Excel.
+ * pull from, plus the published advance-width-compatible pairings
+ * Calibri → Carlito and Cambria → Caladea. Their vertical metrics need not
+ * match the Office faces; loading them only improves a missing face's width
+ * approximation, not exact Office layout.
  * Entries whose substitute family name differs from the requested face carry a
  * `loadFamily` so the FontFaceSet load is driven against the substitute; the
  * rest omit it because Google Fonts serves the same family name we request.
@@ -25,15 +25,14 @@
  * rendering, which is why this rarely shows in practice). Adding a name to
  * this registry therefore CHANGES how documents using that name measure: from
  * "whatever the OS falls back to" to the (better, deterministic) substitute.
- * Keep the list to faces with a published metric-compatible or well-known
- * substitute; do not add speculative names.
+ * Keep the list to published advance-width alternatives or clearly identified
+ * visual substitutes; do not add speculative names or claim exact Office layout.
  *
  * ## Why these live in ONE table (not per format)
  *
- * A DOCX template requesting Roboto, a PPTX theme requesting Calibri Light and
- * an XLSX cell styled Cambria Math all describe the SAME concept — an Office
- * face the host may not ship — and all want the SAME metric-compatible
- * substitute. None of these substitutions is specific to one file format, so
+ * A DOCX template requesting Roboto, a PPTX theme requesting Calibri and an
+ * XLSX cell styled Cambria all describe a face the host may not ship. The
+ * supported substitutions are not specific to one file format, so
  * they are consolidated here and every package spreads this registry into its
  * own map (`{ ...GOOGLE_FONT_SUBSTITUTES }`), appending only entries that are
  * genuinely format-specific (currently: none). The script-fallback Noto faces
@@ -53,13 +52,12 @@ const LIBRE_FRANKLIN_URL =
   'https://fonts.googleapis.com/css2?family=Libre+Franklin:ital,wght@0,400;0,600;0,700;1,400;1,600;1,700&display=swap';
 
 export const GOOGLE_FONT_SUBSTITUTES: Record<string, FontPreloadEntry> = {
-  // Metric-compatible Office substitutes (same advance widths / vertical
-  // metrics). "Calibri Light" (Office theme heading default) and "Cambria Math"
-  // (OMML equation font) reduce to the same substitute as their base family.
+  // Published advance-width substitutes for the base text faces. Carlito has
+  // no Calibri Light (weight 300) counterpart; Caladea has neither Cambria's
+  // vertical metrics nor Cambria Math's MATH table. Do not alias those distinct
+  // faces to the base substitutes.
   'calibri':           { url: 'https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap', loadFamily: 'Carlito' },
-  'calibri light':     { url: 'https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap', loadFamily: 'Carlito' },
   'cambria':           { url: 'https://fonts.googleapis.com/css2?family=Caladea:ital,wght@0,400;0,700;1,400;1,700&display=swap', loadFamily: 'Caladea' },
-  'cambria math':      { url: 'https://fonts.googleapis.com/css2?family=Caladea:ital,wght@0,400;0,700;1,400;1,700&display=swap', loadFamily: 'Caladea' },
   // Libre Franklin is the open Franklin-family substitute. Office templates
   // distinguish Book (regular) and Medium in the family name rather than with
   // rPr@b; exposing both keys preserves that authored face choice on hosts that
@@ -99,3 +97,28 @@ export const GOOGLE_FONT_SUBSTITUTES: Record<string, FontPreloadEntry> = {
   'noto naskh arabic':   { url: NOTO_NASKH_ARABIC_URL, loadFamily: 'Noto Naskh Arabic' },
   'noto sans arabic':    { url: NOTO_SANS_ARABIC_URL, loadFamily: 'Noto Sans Arabic' },
 };
+
+/**
+ * Some Office files record a regular face's full name (for example, "Lato
+ * Regular") while CSS registers its family as "Lato" with weight 400. Only
+ * offer that family as a fallback when its *same-name* Google entry actually
+ * loaded in this FontFaceSet. This keeps an authored/system full-name face
+ * first, and a failed or disabled webfont never changes the fallback chain.
+ * Different-family substitutes such as Calibri → Carlito are excluded.
+ */
+export function loadedGoogleRegularAliases(
+  fontSet: Pick<FontFaceSet, typeof Symbol.iterator> | null,
+  entries: Readonly<Record<string, FontPreloadEntry>> = GOOGLE_FONT_SUBSTITUTES,
+): ReadonlyMap<string, string> {
+  const aliases = new Map<string, string>();
+  if (!fontSet) return aliases;
+  for (const face of fontSet) {
+    if (face.status !== 'loaded' || face.style !== 'normal' || face.weight !== '400') continue;
+    const family = face.family.replace(/^['"]|['"]$/g, '').trim();
+    const key = family.toLocaleLowerCase('en-US');
+    const entry = entries[key];
+    if (!entry || (entry.loadFamily && entry.loadFamily.toLocaleLowerCase('en-US') !== key)) continue;
+    aliases.set(`${key} regular`, family);
+  }
+  return aliases;
+}

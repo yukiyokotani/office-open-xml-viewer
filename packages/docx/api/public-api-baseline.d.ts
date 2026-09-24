@@ -20,6 +20,7 @@ export type BodyElement = ({
     type: 'table';
 } & DocTable) | {
     type: 'pageBreak';
+    origin?: 'authored' | 'coverPageSynthetic';
     parity?: 'odd' | 'even';
     sameParagraphAsPrevious?: boolean;
 } | {
@@ -1112,6 +1113,8 @@ export interface DocSettings {
     mathDefJc?: string;
     defaultTabStop?: number;
     characterSpacingControl?: string;
+    lineWrapLikeWord6?: boolean;
+    enableOpenTypeFeatures?: boolean;
     useFeLayout?: boolean;
     balanceSingleByteDoubleByteWidth?: boolean;
     adjustLineHeightInTable?: boolean;
@@ -1417,6 +1420,7 @@ export interface DocxTextRunInfo {
     x: number;
     y: number;
     w: number;
+    trailingSpaceCompressionPx?: number;
     h: number;
     highlightBounds?: Readonly<{
         x: number;

@@ -1,6 +1,7 @@
-import { classifyCjkFont, type CjkLang } from '@silurus/ooxml-core';
-import { withVertFeatureCanvasScope } from '@silurus/ooxml-core';
+import { classifyCjkFont, type CjkLang, type OfficeFontFallbackRoute } from '@silurus/ooxml-core';
+import { activeFontSet, isHTMLCanvas, withVertFeatureCanvasScope } from '@silurus/ooxml-core';
 import type { DocxDocumentModel } from './types.js';
+import type { LoadedEmbeddedFontRoute } from './embedded-fonts.js';
 import type { ResolvedFontMetric } from './layout/text.js';
 import { snapshotFontMetrics } from './layout/text.js';
 import type { MathLayoutResource } from './layout/resources.js';
@@ -28,10 +29,6 @@ import {
   attachBodyLayoutKernel,
   attachLayoutSourceStore,
 } from './layout/runtime-state.js';
-import {
-  docxResolvedFontMetricCandidates,
-  type DocxResolvedFontMetricCandidate,
-} from './document-content.js';
 
 function createConcreteBodyLayoutKernel(
   source: LayoutSourceStore,
@@ -57,17 +54,12 @@ export function createLayoutServices(
     readonly mathResources?: readonly MathLayoutResource[];
     readonly mathDrawables?: ReadonlyMap<string, CanvasImageSource>;
     readonly measureContext?: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
-    readonly embeddedFaces?: readonly FontFace[];
+    readonly embeddedRoutes?: readonly LoadedEmbeddedFontRoute[];
+    readonly officeRoutes?: readonly OfficeFontFallbackRoute[];
     readonly googleFaces?: readonly FontFace[];
-    readonly measureResolvedFontMetrics?: boolean;
-    readonly resolvedFontMetricCandidates?: readonly DocxResolvedFontMetricCandidate[];
   } = {},
 ): LayoutServices {
   const source = isLayoutSourceStore(input) ? input : layoutSourceStore(input);
-  const resolvedFontMetricCandidates = options.resolvedFontMetricCandidates
-    ?? (isLayoutSourceStore(input)
-      ? []
-      : docxResolvedFontMetricCandidates(input, source.fontFamilyCharsets));
   // Main-thread layout must use an element-backed canvas when one is available:
   // OpenType `vert` is selected through the canvas element's CSS feature state,
   // and an OffscreenCanvas cannot prove or paint that feature route. Workers
@@ -158,16 +150,17 @@ export function createLayoutServices(
   const services = createProductionLayoutServices(source, {
     ...options,
     cjkFallback,
-    resolvedFontMetricCandidates,
     localMetrics,
     fontMetrics: inputFontMetrics,
     measureContext: context,
+    // A caller canvas may belong to a popup/iframe. CSS face admission must
+    // inspect the FontFaceSet that also shapes this context's glyphs.
+    fontSet: (isHTMLCanvas(canvasElement) ? canvasElement.ownerDocument?.fonts : undefined)
+      ?? activeFontSet(),
     verticalGlyphMeasurement,
   });
-  // The production service may add metrics proven from the concrete
-  // Canvas-selected face. The body kernel (including empty paragraph-mark
-  // measurement) must receive that same immutable snapshot rather than the
-  // pre-probe caller input.
+  // Body layout and text measurement share one immutable resource snapshot,
+  // including caller-supplied or decoded embedded font metrics.
   const fontMetrics = services.text.fontMetrics ?? inputFontMetrics;
   attachLayoutSourceStore(services, source);
   attachBodyLayoutKernel(

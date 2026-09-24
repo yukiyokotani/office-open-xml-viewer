@@ -317,6 +317,7 @@ describe('paragraph acquisition cache', () => {
       key({ environment: { ...base.environment, verticalPageFrame: true } }),
       key({ environment: { ...base.environment, documentHasEastAsianText: true } }),
       key({ environment: { ...base.environment, useFeLayout: true } }),
+      key({ environment: { ...base.environment, lineWrapLikeWord6: true } }),
       key({ environment: {
         ...base.environment,
         balanceSingleByteDoubleByteWidth: true,

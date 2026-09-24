@@ -3,7 +3,7 @@ import type { LayoutDiagnostic } from './types.js';
 import { stableFingerprint } from './fingerprint.js';
 import { createCanvasFontRoute, type CanvasFontRoute } from '@silurus/ooxml-core';
 
-export type FontResolutionSource = 'embedded' | 'local' | 'google' | 'substitute' | 'native' | 'generic';
+export type FontResolutionSource = 'embedded' | 'local' | 'css' | 'google' | 'substitute' | 'native' | 'generic';
 export type FontStyle = 'normal' | 'italic';
 
 export interface FontRequest {
@@ -20,6 +20,8 @@ export interface FontResolution {
   readonly resolvedFamily: string;
   readonly route: CanvasFontRoute;
   readonly source: FontResolutionSource;
+  /** Identity of the registered resource that supplied this face, when known. */
+  readonly resourceIdentity?: string;
   readonly weight: number;
   readonly style: FontStyle;
   readonly diagnostics: readonly LayoutDiagnostic[];
@@ -35,6 +37,7 @@ export interface FontInventoryFace {
   readonly requestedFamily: string;
   readonly resolvedFamily: string;
   readonly source: Exclude<FontResolutionSource, 'generic' | 'native'>;
+  readonly resourceIdentity?: string;
   readonly weight?: number;
   readonly style?: FontStyle;
 }
@@ -80,8 +83,9 @@ export function createFontResolver(
   const sourcePriority: Readonly<Record<FontInventoryFace['source'], number>> = {
     embedded: 0,
     local: 1,
-    google: 2,
-    substitute: 3,
+    css: 2,
+    google: 3,
+    substitute: 4,
   };
   const faces = inventory
     .filter((face) => face.requestedFamily.trim() && face.resolvedFamily.trim())
@@ -152,6 +156,7 @@ export function createFontResolver(
           resolvedFamily: face.resolvedFamily,
           route: createCanvasFontRoute(familyList, 'registered'),
           source: face.source,
+          ...(face.resourceIdentity === undefined ? {} : { resourceIdentity: face.resourceIdentity }),
           weight,
           style,
           diagnostics,

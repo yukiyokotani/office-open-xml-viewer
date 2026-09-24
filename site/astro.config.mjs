@@ -39,6 +39,9 @@ export default defineConfig({
         '@silurus/ooxml-core/internal/resource-measurement': fileURLToPath(
           new URL('../packages/core/src/internal/resource-measurement.ts', import.meta.url),
         ),
+        '@silurus/ooxml-core/internal/office-auto-line': fileURLToPath(
+          new URL('../packages/core/src/fonts/office-auto-line.ts', import.meta.url),
+        ),
         '@silurus/ooxml-core/internal/bounded-async-lru-cache': fileURLToPath(
           new URL('../packages/core/src/internal/bounded-async-lru-cache.ts', import.meta.url),
         ),

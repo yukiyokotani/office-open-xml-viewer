@@ -34,6 +34,7 @@
     "./internal/dom-geometry": "./src/internal/dom-geometry.ts",
     "./internal/in-process-pull-transport": "./src/internal/in-process-pull-transport.ts",
     "./internal/owned-session": "./src/internal/owned-session.ts",
+    "./internal/office-auto-line": "./src/fonts/office-auto-line.ts",
     "./internal/progressive-layout-lifecycle": "./src/internal/progressive-layout-lifecycle.ts",
     "./internal/progressive-layout-observers": "./src/internal/progressive-layout-observers.ts",
     "./internal/resource-measurement": "./src/internal/resource-measurement.ts",

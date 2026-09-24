@@ -22,6 +22,9 @@ use crate::chart_compatibility::apply_word_classic_chart_space_frame;
 use crate::document_projector::{DocumentBodyPlan, DocumentBodyProjector};
 use crate::drawing_compatibility::apply_word_direct_group_rect;
 use crate::numbering::{LevelDef, NumberingMap};
+use crate::ref_bookmark_flow::{
+    apply_matching_leading_break, LeadingBreakCollector, RefInstructionCollector,
+};
 use crate::styles::{
     apply_para, apply_run, merge_cond_layers, merge_tab_stops, merge_table_margin_layer,
     parse_para_fmt, parse_run_fmt, CondFmt, EdgeBorder, ParaFmt, RawTblBorders, RunFmt, StyleMap,
@@ -920,6 +923,7 @@ struct DocumentBodyPreflight {
     sections: Vec<StreamedSectionFact>,
     final_body_block_ordinal: Option<usize>,
     section: SectionProps,
+    ref_leading_breaks: HashMap<String, String>,
 }
 
 /// First pass over `word/document.xml`. Only cross-block facts survive this
@@ -936,6 +940,7 @@ fn preflight_document_body(
     let mut running_refs = SectionRefs::default();
     let mut final_candidate: Option<(usize, SectionProps, SectionPlacementWire)> = None;
     let mut emitted_section_break_candidates = 0usize;
+    let mut ref_instructions = RefInstructionCollector::default();
 
     while let Some(block) = projector.next_block()? {
         let xml = std::str::from_utf8(&block.xml)
@@ -943,6 +948,11 @@ fn preflight_document_body(
         let document = parse_guarded(xml)
             .map_err(|error| format!("{DOCUMENT_PART}: projected block: {error}"))?;
         let root = document.root_element();
+        // The local names are independent of the namespace prefix. Reuse the
+        // existing sectPr descendant walk, and skip field checks entirely for
+        // the common no-field block. A begin and its instrText may occur in
+        // different projected blocks; either token independently opts in.
+        let possible_field = xml.contains("fldChar") || xml.contains("instrText");
         if (block.local_name == "p"
             && child_w(root, "pPr")
                 .and_then(|properties| child_w(properties, "sectPr"))
@@ -971,16 +981,17 @@ fn preflight_document_body(
             _ => LogicalBodySequenceFact::Transparent,
         });
 
-        for sect_pr in root.descendants().filter(|node| {
-            node.is_element()
-                && is_w_ns(node.tag_name().namespace())
-                && node.tag_name().name() == "sectPr"
-        }) {
-            merge_section_refs(sect_pr, &environment.rel_map, &mut running_refs);
-            sections.push(StreamedSectionFact {
-                refs: running_refs.clone(),
-                title_page: child_w(sect_pr, "titlePg").is_some(),
-            });
+        for node in root.descendants().filter(roxmltree::Node::is_element) {
+            if possible_field {
+                ref_instructions.observe_node(node);
+            }
+            if is_w_ns(node.tag_name().namespace()) && node.tag_name().name() == "sectPr" {
+                merge_section_refs(node, &environment.rel_map, &mut running_refs);
+                sections.push(StreamedSectionFact {
+                    refs: running_refs.clone(),
+                    title_page: child_w(node, "titlePg").is_some(),
+                });
+            }
         }
 
         final_candidate = (block.local_name == "sectPr").then(|| {
@@ -1008,12 +1019,39 @@ fn preflight_document_body(
     placement.section_id = format!("section:{final_section_ordinal}");
     section.section_placement = Some(Box::new(placement));
 
+    // Only REF documents pay for a third bounded scan. The first pass retains
+    // requested bookmark names, not document runs or whole-block XML; this pass
+    // projects one block at a time and retains at most 1 MiB of matching text.
+    let mut ref_leading_breaks = HashMap::new();
+    if !ref_instructions.targets.is_empty() {
+        drop(projector);
+        let mut projector = open_document_body_projector(zip)?;
+        let mut collector = LeadingBreakCollector::new(&ref_instructions.targets);
+        while let Some(block) = projector.next_block()? {
+            if block.local_name != "p" {
+                collector.observe_other_block();
+                continue;
+            }
+            let xml = std::str::from_utf8(&block.xml).map_err(|error| {
+                format!("{DOCUMENT_PART}: projected block is not UTF-8: {error}")
+            })?;
+            let document = parse_guarded(xml)
+                .map_err(|error| format!("{DOCUMENT_PART}: projected block: {error}"))?;
+            collector.observe(document.root_element());
+        }
+        if projector.plan()? != plan {
+            return Err("document body changed between bounded passes".to_string());
+        }
+        ref_leading_breaks = collector.finish();
+    }
+
     Ok(DocumentBodyPreflight {
         plan,
         table_sequences,
         sections,
         final_body_block_ordinal,
         section,
+        ref_leading_breaks,
     })
 }
 
@@ -1259,7 +1297,10 @@ impl DocxBodyCursor {
             body_headers,
             body_footers,
             projector,
-            semantic: BodyParseCursor::default(),
+            semantic: BodyParseCursor {
+                ref_leading_breaks: preflight.ref_leading_breaks,
+                ..BodyParseCursor::default()
+            },
             diagnostics: Vec::new(),
             revisions: Vec::new(),
             section_cursor: 0,
@@ -1325,6 +1366,7 @@ impl DocxBodyCursor {
                     self.emitted_body_len = self.emitted_body_len.saturating_add(1);
                     return Ok(StreamedDocumentUnit::Body {
                         body: vec![BodyElement::PageBreak {
+                            origin: Some(PageBreakOrigin::CoverPageSynthetic),
                             parity: None,
                             same_paragraph_as_previous: None,
                         }],
@@ -1393,6 +1435,7 @@ impl DocxBodyCursor {
                     body.insert(
                         0,
                         BodyElement::PageBreak {
+                            origin: Some(PageBreakOrigin::CoverPageSynthetic),
                             parity: None,
                             same_paragraph_as_previous: None,
                         },
@@ -2418,6 +2461,29 @@ fn parse_document_settings(settings_xml: &str) -> Option<crate::types::DocumentS
         .children()
         .find(|n| n.is_element() && n.tag_name().name() == "compat");
     let compat_bool = |name: &str| -> Option<bool> { bool_prop(compat?, name) };
+    let line_wrap_like_word6 = compat_bool("lineWrapLikeWord6");
+    // [MS-DOCX] §2.3.3: Office stores this as a named `compatSetting`, not a
+    // direct `w:compat` boolean. The setting is off when absent.
+    let enable_open_type_features = compat
+        .filter(|node| node.tag_name().namespace() == root.tag_name().namespace())
+        .and_then(|compat| {
+            compat
+                .children()
+                .find(|node| {
+                    node.is_element()
+                        && node.tag_name().name() == "compatSetting"
+                        && node.tag_name().namespace() == root.tag_name().namespace()
+                        && attr_w(*node, "name").as_deref() == Some("enableOpenTypeFeatures")
+                        && attr_w(*node, "uri").as_deref()
+                            == Some("http://schemas.microsoft.com/office/word")
+                })
+                .and_then(|node| attr_w(node, "val"))
+                .and_then(|value| match value.as_str() {
+                    "1" | "true" | "on" => Some(true),
+                    "0" | "false" | "off" => Some(false),
+                    _ => None,
+                })
+        });
     let use_fe_layout = compat_bool("useFELayout");
     let balance_single_byte_double_byte_width = compat_bool("balanceSingleByteDoubleByteWidth");
     let adjust_line_height_in_table = compat_bool("adjustLineHeightInTable");
@@ -2441,6 +2507,8 @@ fn parse_document_settings(settings_xml: &str) -> Option<crate::types::DocumentS
         && math_def_jc.is_none()
         && default_tab_stop.is_none()
         && character_spacing_control.is_none()
+        && line_wrap_like_word6.is_none()
+        && enable_open_type_features.is_none()
         && use_fe_layout.is_none()
         && balance_single_byte_double_byte_width.is_none()
         && adjust_line_height_in_table.is_none()
@@ -2454,6 +2522,8 @@ fn parse_document_settings(settings_xml: &str) -> Option<crate::types::DocumentS
         math_def_jc,
         default_tab_stop,
         character_spacing_control,
+        line_wrap_like_word6,
+        enable_open_type_features,
         use_fe_layout,
         balance_single_byte_double_byte_width,
         adjust_line_height_in_table,
@@ -3163,6 +3233,7 @@ fn logical_table_sequence_contexts(
 struct BodyParseCursor {
     field: FieldState,
     section_ordinal: usize,
+    ref_leading_breaks: HashMap<String, String>,
 }
 
 impl BodyParseCursor {
@@ -3187,7 +3258,7 @@ impl BodyParseCursor {
         let mut child_diagnostics = Vec::new();
         match child.tag_name().name() {
             "p" => {
-                let result = parse_paragraph_with_diagnostics(
+                let mut result = parse_paragraph_with_diagnostics(
                     child,
                     style_map,
                     num_map,
@@ -3199,6 +3270,7 @@ impl BodyParseCursor {
                     &mut self.field,
                     &mut child_diagnostics,
                 );
+                apply_matching_leading_break(&mut result, &self.ref_leading_breaks);
                 let lone_break = if result.runs.len() == 1 {
                     match &result.runs[0] {
                         DocRun::Break {
@@ -3243,6 +3315,7 @@ impl BodyParseCursor {
                             });
                         if !section_subsumes_page_break {
                             output.push(BodyElement::PageBreak {
+                                origin: Some(PageBreakOrigin::Authored),
                                 parity: None,
                                 same_paragraph_as_previous: None,
                             });
@@ -3262,6 +3335,7 @@ impl BodyParseCursor {
                                 ParaPiece::PageBreak {
                                     same_paragraph_as_previous,
                                 } => output.push(BodyElement::PageBreak {
+                                    origin: Some(PageBreakOrigin::Authored),
                                     parity: None,
                                     same_paragraph_as_previous: same_paragraph_as_previous
                                         .then_some(true),
@@ -3345,6 +3419,20 @@ fn parse_body_elements_in_story(
     // below) when the cover is already followed by a page-advancing construct.
     let mut cover_break_positions: Vec<usize> = Vec::new();
 
+    // The monolithic API and pull cursor apply the same bounded REF rule.
+    // Only requested target text survives this scan, never bookmarked run trees.
+    let mut ref_instructions = RefInstructionCollector::default();
+    for (child, _) in &body_children {
+        ref_instructions.observe(*child);
+    }
+    if !ref_instructions.targets.is_empty() {
+        let mut collector = LeadingBreakCollector::new(&ref_instructions.targets);
+        for (child, _) in &body_children {
+            collector.observe(*child);
+        }
+        cursor.ref_leading_breaks = collector.finish();
+    }
+
     let logical_table_sequences =
         logical_table_sequence_contexts(&body_children, style_map, table_positioning_context);
 
@@ -3371,6 +3459,7 @@ fn parse_body_elements_in_story(
         if cover_break_after {
             cover_break_positions.push(body.len());
             body.push(BodyElement::PageBreak {
+                origin: Some(PageBreakOrigin::CoverPageSynthetic),
                 parity: None,
                 same_paragraph_as_previous: None,
             });
@@ -7268,7 +7357,12 @@ fn parse_run_inner(
                     attach_anchor_host_metrics(&mut drawing_runs);
                     runs.extend(drawing_runs);
                 } else if let Some(img) = parse_object_ole_image(child, media_map) {
-                    runs.push(DocRun::Image(Box::new(img)));
+                    let anchored = img.anchor;
+                    let mut object_runs = vec![DocRun::Image(Box::new(img))];
+                    if anchored {
+                        attach_anchor_host_metrics(&mut object_runs);
+                    }
+                    runs.extend(object_runs);
                 }
             }
             _ => {}
@@ -11465,13 +11559,19 @@ fn vml_word_z_order(style: &str) -> (bool, Option<u32>, AnchorValueStatusWire) {
         // does not. Do not invent an ordering for a value outside Word's model.
         return (false, None, AnchorValueStatusWire::Invalid);
     };
-    // ECMA-376 Part 4 §19.1.2.19 orders higher signed z-index values above
-    // lower ones. MS-OE376 §2.1.1692(cc) says Word preserves sign and relative
-    // order, not the absolute number. Biasing the signed domain into u32 is an
-    // exact order-preserving projection into the retained anchor layer key.
+    // ECMA-376 Part 4 §19.1.2.19 defines signed VML z-index ordering;
+    // DrawingML §20.4.2.3 defines unsigned relativeHeight separately. Word
+    // writes comparable positive values for shapes in the same foreground
+    // layer, so retain those values for the shared page sorter. Negative VML
+    // shapes belong to its separate behind-document layer; bias only that
+    // range into u32 to preserve order within that layer.
     (
         signed < 0,
-        Some((i64::from(signed) - i64::from(i32::MIN)) as u32),
+        Some(if signed < 0 {
+            (i64::from(signed) - i64::from(i32::MIN)) as u32
+        } else {
+            signed as u32
+        }),
         AnchorValueStatusWire::Valid,
     )
 }
@@ -11671,48 +11771,15 @@ fn resolved_vml_textpath_bool(
 ///     a separate VML-group feature; until then a grouped imagedata is skipped
 ///     rather than mis-rendered, matching the prior behaviour, or
 ///   - the rId does not resolve, or the shape has no positive pt dimensions.
-fn parse_vml_pict_image(
-    pict: roxmltree::Node,
-    media_map: &HashMap<String, String>,
-) -> Option<ImageRun> {
-    let is_shape = |n: &roxmltree::Node| {
-        n.is_element() && matches!(n.tag_name().name(), "shape" | "rect" | "roundrect" | "oval")
-    };
-    // The first shape carrying an <v:imagedata r:id>, that is NOT nested in a
-    // <v:group> (grouped geometry is in group units, handled elsewhere).
-    let shape = pict.descendants().find(|n| {
-        is_shape(n)
-            && n.children()
-                .any(|c| c.is_element() && c.tag_name().name() == "imagedata")
-            && !n
-                .ancestors()
-                .any(|a| a.is_element() && a.tag_name().name() == "group")
-    })?;
-
-    let imagedata = shape
-        .children()
-        .find(|c| c.is_element() && c.tag_name().name() == "imagedata")?;
-    let rid = attr_ns(
-        &imagedata,
-        relationships::TRANSITIONAL,
-        relationships::STRICT,
-        "id",
-    )?;
-    let image_path = media_map.get(rid)?.clone();
-    let mime_type = mime_from_ext(&image_path).to_string();
-
+fn vml_image_run(
+    shape: roxmltree::Node,
+    image_path: String,
+    width_pt: f64,
+    height_pt: f64,
+) -> ImageRun {
     let style = shape.attribute("style").unwrap_or("");
-    let width_pt = vml_css_length_pt(style, "width").unwrap_or(0.0);
-    let height_pt = vml_css_length_pt(style, "height").unwrap_or(0.0);
-    if width_pt <= 0.0 || height_pt <= 0.0 {
-        return None;
-    }
-
-    // VML §19.1.2.19 uses CSS-like positioning for both text shapes and
-    // imagedata pictures. `position:absolute` is a floating anchor; treating it
-    // as an inline glyph applies line-height/baseline positioning and clips a
-    // page-sized scan. The mso-position-*-relative values select the same page,
-    // margin, column, and paragraph frames used by DrawingML anchors.
+    // ECMA-376 Part 4 §19.1.2.19: an absolute VML image has its own
+    // positioning and z-index even when it previews an embedded OLE object.
     let anchor =
         vml_css_str(style, "position").is_some_and(|value| value.eq_ignore_ascii_case("absolute"));
     let anchor_x_pt = if anchor {
@@ -11746,9 +11813,9 @@ fn parse_vml_pict_image(
     let anchor_acquisition =
         anchor.then(|| vml_word_anchor_acquisition(shape, style, width_pt, height_pt));
 
-    Some(ImageRun {
+    ImageRun {
+        mime_type: mime_from_ext(&image_path).to_string(),
         image_path,
-        mime_type,
         svg_image_path: None,
         src_rect: None,
         width_pt,
@@ -11776,15 +11843,54 @@ fn parse_vml_pict_image(
         anchor_x_relative_from,
         anchor_y_relative_from,
         anchor_acquisition,
-    })
+    }
+}
+
+fn parse_vml_pict_image(
+    pict: roxmltree::Node,
+    media_map: &HashMap<String, String>,
+) -> Option<ImageRun> {
+    let is_shape = |n: &roxmltree::Node| {
+        n.is_element() && matches!(n.tag_name().name(), "shape" | "rect" | "roundrect" | "oval")
+    };
+    // The first shape carrying an <v:imagedata r:id>, that is NOT nested in a
+    // <v:group> (grouped geometry is in group units, handled elsewhere).
+    let shape = pict.descendants().find(|n| {
+        is_shape(n)
+            && n.children()
+                .any(|c| c.is_element() && c.tag_name().name() == "imagedata")
+            && !n
+                .ancestors()
+                .any(|a| a.is_element() && a.tag_name().name() == "group")
+    })?;
+
+    let imagedata = shape
+        .children()
+        .find(|c| c.is_element() && c.tag_name().name() == "imagedata")?;
+    let rid = attr_ns(
+        &imagedata,
+        relationships::TRANSITIONAL,
+        relationships::STRICT,
+        "id",
+    )?;
+    let image_path = media_map.get(rid)?.clone();
+
+    let style = shape.attribute("style").unwrap_or("");
+    let width_pt = vml_css_length_pt(style, "width").unwrap_or(0.0);
+    let height_pt = vml_css_length_pt(style, "height").unwrap_or(0.0);
+    if width_pt <= 0.0 || height_pt <= 0.0 {
+        return None;
+    }
+
+    Some(vml_image_run(shape, image_path, width_pt, height_pt))
 }
 
 /// Extract the preview image from an embedded OLE object (`<w:object>`,
 /// §17.3.3.19 CT_Object). Word represents the object's on-page appearance as a
 /// legacy VML `<v:shape>` (or `<v:rect>`/`<v:roundrect>`/`<v:oval>`) carrying a
 /// `<v:imagedata r:id>` — the rId of a rasterized preview part (usually
-/// EMF/WMF). Resolve that part through the media map and return it as an inline
-/// `ImageRun` sized from the VML shape's CSS `style` (pt), falling back to the
+/// EMF/WMF). Resolve that part through the media map and return an `ImageRun`
+/// with the VML shape's positioning and size, falling back to the
 /// object's `w:dxaOrig`/`w:dyaOrig` (twentieths of a point) when the shape
 /// omits explicit dimensions. Returns `None` when there is no drawable
 /// `<v:imagedata>` (an icon-only or link-only object), preserving the prior
@@ -11810,14 +11916,13 @@ fn parse_object_ole_image(
         "id",
     )?;
     let image_path = media_map.get(rid)?.clone();
-    let mime_type = mime_from_ext(&image_path).to_string();
 
     // Size: prefer the VML shape's CSS `style` width/height (pt); else the
     // object's `w:dxaOrig`/`w:dyaOrig` (1/20 pt). VML CSS lengths default to pt.
     let shape = object.descendants().find(|n| {
         n.is_element() && matches!(n.tag_name().name(), "shape" | "rect" | "roundrect" | "oval")
-    });
-    let style = shape.and_then(|s| s.attribute("style")).unwrap_or("");
+    })?;
+    let style = shape.attribute("style").unwrap_or("");
     let dxa_pt = |name: &str| -> Option<f64> {
         attr_ns(
             &object,
@@ -11838,37 +11943,7 @@ fn parse_object_ole_image(
         return None;
     }
 
-    Some(ImageRun {
-        image_path,
-        mime_type,
-        svg_image_path: None,
-        src_rect: None,
-        width_pt,
-        height_pt,
-        rotation: 0.0,
-        flip_h: false,
-        flip_v: false,
-        anchor: false,
-        anchor_x_pt: 0.0,
-        anchor_y_pt: 0.0,
-        anchor_x_from_margin: false,
-        anchor_y_from_para: false,
-        color_replace_from: None,
-        duotone: None,
-        alpha: None,
-        wrap_mode: None,
-        dist_top: 0.0,
-        dist_bottom: 0.0,
-        dist_left: 0.0,
-        dist_right: 0.0,
-        wrap_side: None,
-        allow_overlap: true,
-        anchor_x_align: None,
-        anchor_y_align: None,
-        anchor_x_relative_from: None,
-        anchor_y_relative_from: None,
-        anchor_acquisition: None,
-    })
+    Some(vml_image_run(shape, image_path, width_pt, height_pt))
 }
 
 /// Result of inspecting a shape's spPr for a direct fill.
@@ -16875,6 +16950,74 @@ mod math_jc_tests {
     }
 
     #[test]
+    fn settings_line_wrap_like_word6_preserves_explicit_on_off_and_absence() {
+        for (xml, expected) in [
+            (
+                format!(
+                    r#"<w:settings xmlns:w="{W_NS}"><w:compat><w:lineWrapLikeWord6/></w:compat></w:settings>"#
+                ),
+                Some(true),
+            ),
+            (
+                format!(
+                    r#"<w:settings xmlns:w="{W_NS}"><w:compat><w:lineWrapLikeWord6 w:val="0"/></w:compat></w:settings>"#
+                ),
+                Some(false),
+            ),
+            (
+                format!(
+                    r#"<w:settings xmlns:w="{W_NS}"><w:compat><w:useFELayout/></w:compat></w:settings>"#
+                ),
+                None,
+            ),
+        ] {
+            assert_eq!(
+                parse_document_settings(&xml)
+                    .expect("compat setting")
+                    .line_wrap_like_word6,
+                expected,
+            );
+        }
+    }
+
+    #[test]
+    fn settings_enable_open_type_features_preserves_explicit_on_off_and_absence() {
+        for (xml, expected) in [
+            (
+                format!(
+                    r#"<w:settings xmlns:w="{W_NS}"><w:compat><w:compatSetting w:name="enableOpenTypeFeatures" w:uri="http://schemas.microsoft.com/office/word" w:val="1"/></w:compat></w:settings>"#
+                ),
+                Some(true),
+            ),
+            (
+                format!(
+                    r#"<w:settings xmlns:w="{W_NS}"><w:compat><w:compatSetting w:name="enableOpenTypeFeatures" w:uri="http://schemas.microsoft.com/office/word" w:val="0"/></w:compat></w:settings>"#
+                ),
+                Some(false),
+            ),
+            (
+                format!(
+                    r#"<w:settings xmlns:w="{W_NS}"><w:compat><w:useFELayout/></w:compat></w:settings>"#
+                ),
+                None,
+            ),
+            (
+                format!(
+                    r#"<w:settings xmlns:w="{W_NS}"><w:compat><w:useFELayout/><w:compatSetting w:name="enableOpenTypeFeatures" w:uri="urn:other" w:val="1"/></w:compat></w:settings>"#
+                ),
+                None,
+            ),
+        ] {
+            assert_eq!(
+                parse_document_settings(&xml)
+                    .expect("compat setting")
+                    .enable_open_type_features,
+                expected,
+            );
+        }
+    }
+
+    #[test]
     fn settings_adjust_line_height_in_table_surfaces() {
         let xml = format!(
             r#"<w:settings xmlns:w="{w}"><w:compat><w:adjustLineHeightInTable/></w:compat></w:settings>"#,
@@ -19163,6 +19306,160 @@ mod svg_blip_tests {
             zw.finish().unwrap();
         }
         buf
+    }
+
+    /// ECMA-376 Part 1 §17.16.5.51: a REF result represents its bookmark's
+    /// content. Word controls with and without `\\h` show that an authored page
+    /// break at the start of a bookmarked range precedes the cached result,
+    /// while a text-only range does not add a break. The cached text must still
+    /// match the range; an unrelated/stale result cannot safely borrow its flow.
+    #[test]
+    fn ref_cached_result_preserves_a_matching_bookmark_leading_page_break() {
+        fn body(target: &str, cached: &str) -> String {
+            format!(
+                r#"<w:p><w:r><w:t xml:space="preserve">Before </w:t></w:r>
+  <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+  <w:r><w:instrText xml:space="preserve"> REF Anchor \h </w:instrText></w:r>
+  <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+  <w:r><w:t>{cached}</w:t></w:r>
+  <w:r><w:fldChar w:fldCharType="end"/></w:r>
+  <w:r><w:t xml:space="preserve"> after</w:t></w:r></w:p>
+<w:p><w:r><w:br w:type="page"/></w:r></w:p>
+{target}"#,
+            )
+        }
+        let text_target = r#"<w:p><w:bookmarkStart w:id="1" w:name="Anchor"/>
+  <w:r><w:t>Result</w:t></w:r><w:bookmarkEnd w:id="1"/></w:p>"#;
+        let break_target = r#"<w:p><w:bookmarkStart w:id="1" w:name="Anchor"/>
+  <w:r><w:br w:type="page"/></w:r></w:p>
+<w:p><w:bookmarkStart w:id="2" w:name="Other"/><w:r><w:lastRenderedPageBreak/><w:t>Result</w:t></w:r>
+  <w:bookmarkEnd w:id="1"/><w:bookmarkEnd w:id="2"/></w:p>"#;
+        let table_target = r#"<w:p><w:bookmarkStart w:id="1" w:name="Anchor"/>
+  <w:r><w:br w:type="page"/></w:r></w:p>
+<w:tbl><w:tr><w:tc><w:p><w:r><w:t>Intervening table</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+<w:p><w:r><w:t>Result</w:t></w:r><w:bookmarkEnd w:id="1"/></w:p>"#;
+        let kinds = |target: &str, cached: &str, streamed: bool| {
+            let data = build_docx_with_media(&body(target, cached));
+            let doc = if streamed {
+                parse_from_bytes_streamed_with_limits(&data, None, None, "ref-test")
+            } else {
+                parse_from_bytes(&data)
+            }
+            .expect("valid synthetic document");
+            doc.body
+                .iter()
+                .filter_map(|part| match part {
+                    BodyElement::PageBreak { .. } => Some("break"),
+                    BodyElement::Paragraph(p) => {
+                        let text = p
+                            .runs
+                            .iter()
+                            .filter_map(|run| match run {
+                                DocRun::Text(text) => Some(text.text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<String>();
+                        if text.contains("Before") && text.contains(cached) {
+                            Some("unsplit-ref")
+                        } else if text.contains("Before") {
+                            Some("prefix")
+                        } else if text.contains(" after") {
+                            Some("result-tail")
+                        } else if text == "Result" {
+                            Some("target")
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        for streamed in [false, true] {
+            assert_eq!(
+                kinds(text_target, "Result", streamed),
+                ["unsplit-ref", "break", "target"]
+            );
+            assert_eq!(
+                kinds(break_target, "Result", streamed),
+                ["prefix", "break", "result-tail", "break", "break", "target"]
+            );
+            assert_eq!(
+                kinds(break_target, "Stale", streamed),
+                ["unsplit-ref", "break", "break", "target"]
+            );
+            assert_eq!(
+                kinds(table_target, "Result", streamed),
+                ["unsplit-ref", "break", "break", "target"]
+            );
+
+            for (instruction, expected_breaks) in [
+                ("REF Anchor", 3),
+                ("REF Anchor \\p", 2),
+                ("REF Anchor \\n", 2),
+                ("REF Anchor \\* MERGEFORMAT", 2),
+                ("REF \"Anchor Other\" \\h", 2),
+            ] {
+                let xml = body(break_target, "Result").replace("REF Anchor \\h", instruction);
+                let data = build_docx_with_media(&xml);
+                let doc = if streamed {
+                    parse_from_bytes_streamed_with_limits(&data, None, None, "ref-switch-test")
+                } else {
+                    parse_from_bytes(&data)
+                }
+                .expect("valid synthetic document");
+                assert_eq!(
+                    doc.body
+                        .iter()
+                        .filter(|part| matches!(part, BodyElement::PageBreak { .. }))
+                        .count(),
+                    expected_breaks,
+                    "instruction {instruction}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ref_leading_break_applies_to_separate_fields_but_not_nested_results() {
+        let field = r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>
+  <w:r><w:instrText> REF Anchor </w:instrText></w:r>
+  <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+  <w:r><w:t>Result</w:t></w:r>
+  <w:r><w:fldChar w:fldCharType="end"/></w:r>"#;
+        let target = r#"<w:p><w:bookmarkStart w:id="1" w:name="Anchor"/>
+  <w:r><w:br w:type="page"/></w:r></w:p>
+<w:p><w:r><w:t>Result</w:t></w:r><w:bookmarkEnd w:id="1"/></w:p>"#;
+        let separate = format!(
+            r#"<w:p><w:r><w:t>A </w:t></w:r>{field}<w:r><w:t> B </w:t></w:r>{field}</w:p>{target}"#
+        );
+        let nested = format!(
+            r#"<w:p><w:r><w:t>A </w:t></w:r>
+  <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+  <w:r><w:instrText> REF Anchor </w:instrText></w:r>
+  <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+  <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+  <w:r><w:instrText> HYPERLINK x </w:instrText></w:r>
+  <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+  <w:r><w:t>Result</w:t></w:r>
+  <w:r><w:fldChar w:fldCharType="end"/></w:r>
+  <w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>{target}"#
+        );
+        let break_count = |body: &str| {
+            let doc = parse_from_bytes_streamed_with_limits(
+                &build_docx_with_media(body),
+                None,
+                None,
+                "ref-test",
+            )
+            .expect("valid synthetic document");
+            doc.body
+                .iter()
+                .filter(|part| matches!(part, BodyElement::PageBreak { .. }))
+                .count()
+        };
+        assert_eq!(break_count(&separate), 3);
+        assert_eq!(break_count(&nested), 1);
     }
 
     /// End-to-end through `parse()`: an inline `<w:drawing>` whose `<a:blip>`
@@ -22166,6 +22463,10 @@ mod column_tests {
         assert!(matches!(body[0], BodyElement::Paragraph(_)));
         assert!(matches!(body[1], BodyElement::Paragraph(_)));
         assert!(matches!(body[2], BodyElement::PageBreak { .. }));
+        assert_eq!(
+            serde_json::to_value(&body[2]).unwrap()["origin"],
+            "coverPageSynthetic"
+        );
         assert!(matches!(body[3], BodyElement::Paragraph(_)));
     }
 
@@ -22212,6 +22513,10 @@ mod column_tests {
         assert_eq!(body.len(), 3);
         assert!(matches!(body[0], BodyElement::Paragraph(_)));
         assert!(matches!(body[1], BodyElement::PageBreak { .. }));
+        assert_eq!(
+            serde_json::to_value(&body[1]).unwrap()["origin"],
+            "authored"
+        );
         assert!(matches!(body[2], BodyElement::Paragraph(_)));
     }
 
@@ -27239,6 +27544,33 @@ mod ole_object_tests {
             "height from style height:75pt, got {}",
             imgs[0].height_pt
         );
+    }
+
+    #[test]
+    fn absolute_ole_preview_retains_vml_position_and_stacking() {
+        // ECMA-376 Part 4 §19.1.2.19: the VML preview of an OLE object is a
+        // floating shape when position:absolute, including its z-index.
+        let body = format!(
+            r##"<w:document{ns}><w:body><w:p><w:r><w:object>
+                <v:shape id="preview" style="position:absolute;margin-left:25.25pt;margin-top:15.55pt;width:161.25pt;height:17.25pt;z-index:251670528;mso-position-horizontal-relative:text;mso-position-vertical-relative:text">
+                  <v:imagedata r:id="rIdPrev"/>
+                </v:shape>
+                <o:OLEObject Type="Embed" ProgID="Package" ShapeID="preview" r:id="rIdData"/>
+              </w:object></w:r></w:p></w:body></w:document>"##,
+            ns = OLE_NS,
+        );
+        let mut media = HashMap::new();
+        media.insert("rIdPrev".to_string(), "word/media/preview.wmf".to_string());
+        let imgs = image_runs(&body, &media);
+        assert_eq!(imgs.len(), 1);
+        assert!(imgs[0].anchor);
+        assert_eq!(imgs[0].anchor_x_pt, 25.25);
+        assert_eq!(imgs[0].anchor_y_pt, 15.55);
+        assert_eq!(imgs[0].anchor_x_relative_from.as_deref(), Some("column"));
+        assert_eq!(imgs[0].anchor_y_relative_from.as_deref(), Some("paragraph"));
+        let acquisition = imgs[0].anchor_acquisition.as_ref().expect("VML anchor");
+        assert_eq!(acquisition.behavior.relative_height, Some(251670528));
+        assert!(vml_word_z_order("z-index:251668000").1 < Some(251669000));
     }
 
     /// When the `<v:shape>` carries no CSS `style` dimensions, the size falls

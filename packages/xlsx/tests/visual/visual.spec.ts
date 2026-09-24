@@ -4,6 +4,7 @@ import { PNG } from 'pngjs';
 import pixelmatch from 'pixelmatch';
 import {
   captureOrComparePrivateItem,
+  clearPrivateCandidateItemOutput,
   preparePrivateCorpus,
   verifyPrivateItemManifest,
 } from '../../../../tests/visual/private-corpus.mjs';
@@ -250,6 +251,7 @@ test.describe('private corpus self regression', () => {
     test(file, async ({ page }) => {
       test.setTimeout(600_000);
       const stem = file.slice(0, -'.xlsx'.length);
+      if (!SNAPSHOT) clearPrivateCandidateItemOutput({ stem, itemKind: 'sheet' });
       const openSheet = async (sheetIndex: number) => {
         await page.goto(
           `/tests/visual/fixture.html?file=${encodeURIComponent(`private/${file}`)}`

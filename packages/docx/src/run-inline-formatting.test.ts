@@ -191,9 +191,9 @@ const border = (extra: Partial<DocxRunBorder> = {}): DocxRunBorder => ({
 
 describe('run box (w:bdr §17.3.2.4) + shading (w:shd §17.3.2.32) geometry', () => {
   it('insets the box outside the glyph box by w:space', async () => {
-    // One run carrying BOTH shading (fillRect at the glyph box) and a border
-    // with w:space — the four retained edges must sit `space*scale` OUTSIDE the
-    // shading rect on every side (box bounds = glyph box + space inset). Select the RUN
+    // One run carrying BOTH shading (fillRect at the selected font box) and a
+    // border with w:space. The border includes the line box, so each edge
+    // must remain at least `space*scale` outside the shading. Select the RUN
     // shading rect by its colour (the first fillRect is the page-white bg).
     const sp = 4;
     const events = await render([
@@ -205,10 +205,10 @@ describe('run box (w:bdr §17.3.2.4) + shading (w:shd §17.3.2.32) geometry', ()
     expect(stroke).toBeDefined();
     if (fill?.kind !== 'fillRect' || !stroke) throw new Error('unreachable');
     // scale = 1 ⇒ inset = sp px on each side.
-    expect(stroke.left).toBeCloseTo(fill.x - sp);
-    expect(stroke.top).toBeCloseTo(fill.y - sp);
-    expect(stroke.right - stroke.left).toBeCloseTo(fill.w + 2 * sp);
-    expect(stroke.bottom - stroke.top).toBeCloseTo(fill.h + 2 * sp);
+    expect(stroke.left).toBeLessThanOrEqual(fill.x - sp);
+    expect(stroke.top).toBeLessThanOrEqual(fill.y - sp);
+    expect(stroke.right).toBeGreaterThanOrEqual(fill.x + fill.w + sp);
+    expect(stroke.bottom).toBeGreaterThanOrEqual(fill.y + fill.h + sp);
     // The box is the run's border colour.
     expect(stroke.style.toUpperCase()).toBe('#0000FF');
   });
@@ -259,6 +259,49 @@ describe('run box (w:bdr §17.3.2.4) + shading (w:shd §17.3.2.32) geometry', ()
     expect(fill.style.toUpperCase()).toBe('#C0C0C0');
     expect(fill.w).toBeCloseTo(2 * 16); // |AB| = 2 chars × 16px
   });
+
+  it('fills the authored exact line box with run shading', async () => {
+    const events = await render(
+      [textRun('Shaded', { background: 'C0C0C0' })],
+      { lineSpacing: { value: 30, rule: 'exact', explicit: true } },
+    );
+    const fill = events.find(
+      (event): event is Extract<DrawEvent, { kind: 'fillRect' }> =>
+        event.kind === 'fillRect' && event.style.toUpperCase() === '#C0C0C0',
+    );
+
+    expect(fill).toBeDefined();
+    expect(fill?.h).toBeCloseTo(30);
+    expect(fill?.w).toBeCloseTo(6 * 16);
+  });
+
+  it('fills the centered font box instead of the multi-pitch grid advance', async () => {
+    const events = await render(
+      [textRun('あ', { background: 'C0C0C0' })],
+      {}, 400, { docGridType: 'lines', docGridLinePitch: 18 },
+    );
+    const fill = events.find(
+      (event): event is Extract<DrawEvent, { kind: 'fillRect' }> =>
+        event.kind === 'fillRect' && event.style.toUpperCase() === '#C0C0C0',
+    );
+
+    expect(fill).toBeDefined();
+    expect(fill?.h).toBeCloseTo(16);
+  });
+
+  it('excludes atLeast leading from run shading', async () => {
+    const events = await render(
+      [textRun('Shaded', { background: 'C0C0C0' })],
+      { lineSpacing: { value: 30, rule: 'atLeast', explicit: true } },
+    );
+    const fill = events.find(
+      (event): event is Extract<DrawEvent, { kind: 'fillRect' }> =>
+        event.kind === 'fillRect' && event.style.toUpperCase() === '#C0C0C0',
+    );
+
+    expect(fill?.h).toBeCloseTo(16);
+  });
+
 });
 
 describe('highlight fill spans justification slack (§17.3.2.15 highlight + §17.18.44 both)', () => {

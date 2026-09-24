@@ -44,11 +44,9 @@ import {
   parseFieldFormatSwitch,
   formatDateTimePicture,
   parseDateTimePictureSwitch,
-  fontAdvanceBiasEm,
   normalizeFontMetricFamily,
   canvasFontString,
-  intendedSingleLinePx,
-  correctLineMetrics,
+  measureResolvedCanvasFontBoxRatio,
 } from '@silurus/ooxml-core';
 import { groupFitTextRegions, type FitTextRun } from './fit-text.js';
 import {
@@ -65,6 +63,7 @@ import {
   convergeLineWrap,
 } from './layout/line-wrap-convergence.js';
 import type { LayoutServices, NumberingMarkerShapeInput } from './layout/types.js';
+import type { FontResolution } from './layout/font-service.js';
 import type {
   MeasurementTextContext,
   VerticalGlyphMeasurementService,
@@ -89,6 +88,7 @@ import {
   shapeRunToDocRun,
 } from './layout/text.js';
 import type { MathLayoutResource } from './layout/resources.js';
+import { referenceFontAverageWidthRatio, referenceFontLineMetrics } from './reference-font-line-metrics.js';
 import {
   wordDegenerateLineSpacingIsSingle,
   wordEastAsianGridLineCells,
@@ -96,12 +96,10 @@ import {
   wordGridAtLeastLineHeightPx,
   wordUseFeLayoutInheritedGridHeightPx,
   wordCandidateFitWidthPx,
-  wordJustifiedCandidateFitAllowancePx,
   wordIsOverflowPunctuation,
   wordDocumentCharacterCompressionApplies,
   RTL_PRIMARY_SUBTAGS,
   wordJapanesePunctuationRetainedExtentPt,
-  wordMsMinchoEmptyEastAsianMarkSingleLinePx,
   wordSnapToCharsEastAsianCellCount,
   wordSourceRunSpaceContinuesSequence,
   wordBalancedConsecutiveSpaceCellApplies,
@@ -111,6 +109,7 @@ import {
   wordUniformRunPositionPaintPt,
   wordUseFeLayoutParagraphMarkGridAdvancePx,
   wordExternalLinkSyntaxBreakOffsets,
+  wordInlinePictureAutoLineHeightPx,
 } from './layout/line-compatibility.js';
 import { wordNeutralAttachesToActiveScript } from './layout/script-compatibility.js';
 
@@ -178,11 +177,25 @@ export interface LayoutTextSeg extends LayoutSegSource {
   color: string | null;
   fontFamily: string | null;
   fontRoute?: CanvasFontRoute;
-  /** Exact local face selected during async document loading. The family above
-   * is its isolated alias; this measured ratio supplies the design-line floor
-   * without a version-specific font constant. */
+  /** Selected-route line ratio. It may come from parsed font bytes or a bounded
+   * Canvas measurement; the latter does not reveal OpenType table identity. */
   resolvedLineHeightRatio?: number;
+  /** A selected route supplied this ratio from measured or parsed geometry. */
+  resolvedResourceVerticalMetric?: true;
+  /** Metadata-only vertical reference for a native authored family. It grants
+   * no width, cmap, resource ownership, shaping, or paint-route authority. */
+  referenceFontVerticalMetric?: true;
+  resolvedDesignAscentRatio?: number;
+  resolvedDesignDescentRatio?: number;
   resolvedEastAsianLineHeightRatio?: number;
+  /** Selected-face OS/2 xAvgCharWidth / unitsPerEm. The bounded inter-word
+   * minimum uses half this scalar; it is never a natural advance. */
+  latinSpaceAverageWidthRatio?: number;
+  /** Set only when the document requests the registered compression mode. */
+  latinSpaceCompressionEligible?: true;
+  /** Retained paint advance is shorter than the natural space by this amount. */
+  latinSpaceCompressionPx?: number;
+  latinNaturalTrailingSpacePx?: number;
   vertAlign: 'super' | 'sub' | null;
   measuredWidth: number;  // px (set during layout)
   /** A2 text authority captured during segmentation; production text width and
@@ -224,6 +237,7 @@ export interface LayoutTextSeg extends LayoutSegSource {
    *  a solid rect behind the glyphs; also the effective background that an
    *  automatic text color resolves against. */
   background?: string | null;
+  /** ECMA-376 §17.18.78 foreground tile; background retains the fill color. */
   /** ECMA-376 §17.3.2.6 — run carries `<w:color w:val="auto"/>`. The glyph
    *  color is resolved from {@link LayoutTextSeg.background} for contrast
    *  (implementation-defined black/white pick; no normative algorithm). */
@@ -338,8 +352,9 @@ export interface LayoutTextSeg extends LayoutSegSource {
   positionExtendsLineBox?: boolean;
   /** ECMA-376 §17.3.2.19 `<w:kern>` — font-kerning threshold in POINTS (smallest
    *  kerned size). Sets `ctx.fontKerning` on measure and paint when the run's
-   *  font size ≥ the threshold. Absent leaves the inherited Canvas kerning
-   *  policy unchanged. */
+   *  font size ≥ the threshold. Absent at every style level disables kerning
+   *  unless `enableOpenTypeFeatures` explicitly enables it for the
+   *  document; Canvas `auto` is not the WordprocessingML default. */
   kerning?: number;
   /** ECMA-376 §17.3.2.10 `<w:eastAsianLayout w:vert>` — horizontal-in-vertical
    *  (縦中横). Set by {@link buildSegments} ONLY when the run declares `w:vert`
@@ -482,6 +497,10 @@ export interface LayoutImageSeg extends LayoutSegSource {
   mimeType: string;
   widthPt: number;
   heightPt: number;
+  /** The source is a literal wp:inline picture, rather than a chart/shape box. */
+  inlinePicture?: true;
+  /** Paragraph mark's selected-face natural single line, measured once per paragraph. */
+  paragraphMarkSinglePx?: number;
   rotation?: number;
   flipH?: boolean;
   flipV?: boolean;
@@ -566,9 +585,12 @@ export interface LayoutLine {
   visibleAscent?: number;
   visibleDescent?: number;
   visibleIntendedSingle?: number;
-  /** px — intended single-line height (max over segments of the selected
-   * resource ratio, with the established compatibility registry as fallback). */
+  /** px — intended single-line height from admitted font geometry, if present. */
   intendedSingle: number;
+  /** Text-face single line that supplies automatic leading to an inline picture. */
+  inlinePictureTextSingle?: number;
+  /** Registered compatibility allocation for a uniform positioned, visible run. */
+  uniformPositionAuto?: Readonly<{ normalSinglePx: number; positionPx: number; designDescentPx: number }>;
   /** px — DESIGN grid-count height: the max over segments of each run's
    *  format-policy single-line height (a resolved resource's design height,
    *  or the generic East Asian fallback). Feeds docGrid cell
@@ -646,7 +668,7 @@ export interface WrapLayoutCtx {
   /** Per-line box-height resolver (line natural ascent+descent → total px box height).
    *  `gridCountSinglePx` (the line's design grid-count height) keeps the
    *  float-wrap advance consistent with the final render's docGrid cell count. */
-  lineBoxH: (ascentPx: number, descentPx: number, hasRuby?: boolean, intendedSinglePx?: number, eastAsian?: boolean, gridCountSinglePx?: number) => number;
+  lineBoxH: (ascentPx: number, descentPx: number, hasRuby?: boolean, intendedSinglePx?: number, eastAsian?: boolean, gridCountSinglePx?: number, uniformPositionAuto?: LayoutLine['uniformPositionAuto'], inlinePictureTextSingle?: number) => number;
   /** Hard cap on Y to keep layout from running past the page. */
   pageH: number;
 }
@@ -678,6 +700,9 @@ export interface DocGridCtx {
 export interface LineLayoutEnvironment {
   readonly pageIndex: number;
   readonly totalPages: number;
+  /** Effective §17.3.1.33 paragraph spacing. The Word-for-Mac OpenType
+   * projection has been established for automatic spacing only. */
+  readonly lineSpacing?: LineSpacing | null;
   readonly displayPageNumber?: number;
   readonly pageNumberFormat?: NumberFormat;
   readonly currentDateMs?: number;
@@ -695,6 +720,9 @@ export interface LineLayoutEnvironment {
   readonly verticalCJK?: boolean;
   /** ECMA-376 Part 4 §14.8.3.50 w:useFELayout compatibility switch. */
   readonly useFeLayout?: boolean;
+  /** §17.6.5 effective line-grid gate after section type, paragraph opt-out,
+   *  and §17.15.3.1 table-cell compatibility have been resolved. */
+  readonly lineGridActive?: boolean;
   /** §17.15.3.3 w:balanceSingleByteDoubleByteWidth document compatibility switch. */
   readonly balanceSingleByteDoubleByteWidth?: boolean;
   readonly resolvedLocalFonts?: Readonly<Record<string, ResolvedFontMetric>>;
@@ -702,6 +730,10 @@ export interface LineLayoutEnvironment {
   readonly verticalGlyphMeasurement?: VerticalGlyphMeasurementService;
   /** ECMA-376 §17.15.1.18 document-wide full-width character compression. */
   readonly characterSpacingControl?: string;
+  /** §17.15.3.31: use full character width when deciding line fit. */
+  readonly lineWrapLikeWord6?: boolean;
+  /** See WORD_OPENTYPE_FEATURES_COMPAT_KERNING for absent `w:kern`. */
+  readonly enableOpenTypeFeatures?: boolean;
   /** False only when `w:framePr` specifies a drop cap with a fixed `w:lines`;
    * the authored frame height remains authoritative even when glyph paint is
    * lowered beyond it. Folded into retained text segments during acquisition. */
@@ -850,6 +882,27 @@ export const fontFamilyPitchesByClasses = new WeakMap<
   Record<string, string>
 >();
 
+// fontTable names and run names refer to the same family regardless of casing.
+// Normalize each immutable per-document facts map once rather than scanning it
+// for every glyph's fallback chain. This uses the same key as metric resolution.
+const normalizedFontTableFacts = new WeakMap<Record<string, string>, Map<string, string | null>>();
+
+function fontTableFact(facts: Record<string, string>, family: string): string | undefined {
+  let normalized = normalizedFontTableFacts.get(facts);
+  if (!normalized) {
+    normalized = new Map<string, string | null>();
+    for (const [name, value] of Object.entries(facts)) {
+      const key = normalizeFontMetricFamily(name);
+      if (!normalized.has(key)) normalized.set(key, value);
+      // Conflicting records for one case-insensitive family do not establish
+      // an authoritative classification or pitch; use the ordinary fallback.
+      else if (normalized.get(key) !== value) normalized.set(key, null);
+    }
+    normalizedFontTableFacts.set(facts, normalized);
+  }
+  return normalized.get(normalizeFontMetricFamily(family)) ?? undefined;
+}
+
 /** Bind the §17.8.3.14 pitch map to the §17.8.3.10 classes object and return the
  *  classes object (defaulting to `{}`). Call at each renderer site that
  *  materializes a document's `fontFamilyClasses` for threading, so the classifier
@@ -914,34 +967,8 @@ export function normalizeFontFamilyUncached(
   // Han glyphs render with that language's shapes; see core/fonts/scripts.ts.
   const cjk = classifyCjkFont(family);
 
-  // 0) Arabic-script faces substituted by Noto Naskh/Sans Arabic. A single
-  //    Sakkal Majalla / Traditional Arabic run carries Arabic glyphs AND
-  //    Latin letters/digits; the source run assigns both to that one face. The browser
-  //    resolves each glyph against the chain in order, so the Arabic substitute
-  //    MUST come first — otherwise the Latin/digit glyphs are grabbed by the
-  //    first chain member that has them (e.g. the CJK "Noto Sans JP"), and
-  //    Latin/digits render in a different, sans face than the Arabic. Keeping
-  //    the Arabic substitute first makes Arabic+Latin+digits resolve from one
-  //    coherent family.
-  //
-  //    Latin companion: traditional Naskh faces ship a serif Latin companion.
-  //    Noto Naskh Arabic supplies the same script combination, so placing it
-  //    first keeps Latin and digits stylistically consistent with the Arabic.
-  //    "Noto Serif" is a safety net when Noto Naskh Arabic is unavailable;
-  //    geometric Arabic faces instead pair with a sans Latin fallback.
-  if (isArabicSubstituteFont(family)) {
-    if (NASKH_SERIF_ARABIC_FONTS.has(lower)) {
-      return cjkFallback
-        ? `${head}, "Noto Naskh Arabic", "Noto Sans Arabic", "Noto Serif", ${sansTail(null, cjkFallback).replace(/sans-serif$/, 'serif')}`
-        : `${head}, "Noto Naskh Arabic", "Noto Sans Arabic", "Noto Serif", "Noto Sans JP", "Hiragino Sans", serif`;
-    }
-    return cjkFallback
-      ? `${head}, "Noto Sans Arabic", "Noto Naskh Arabic", ${sansTail(null, cjkFallback)}`
-      : `${head}, "Noto Sans Arabic", "Noto Naskh Arabic", "Noto Sans JP", "Hiragino Sans", sans-serif`;
-  }
-
   // 1) Authoritative classification from word/fontTable.xml §17.8.3.10.
-  const tableClass = fontFamilyClasses[family];
+  const tableClass = fontTableFact(fontFamilyClasses, family);
   if (tableClass && tableClass !== 'auto') {
     switch (tableClass) {
       case 'roman':
@@ -961,7 +988,7 @@ export function normalizeFontFamilyUncached(
         // a fixed-width guarantee, so they fall through to the name-pattern /
         // CJK-sans path below. Genuine monospace faces (Courier, Consolas, 等幅)
         // are still caught there by name.
-        if (fontFamilyPitches[family] === 'fixed') {
+        if (fontTableFact(fontFamilyPitches, family) === 'fixed') {
           if (cjk != null) {
             const cjkFallbacks = cjk === 'jp'
               ? ['Yu Gothic', 'YuGothic', 'Hiragino Sans', 'Meiryo', 'Noto Sans JP']
@@ -976,6 +1003,21 @@ export function normalizeFontFamilyUncached(
         // script / decorative — fall through to name-pattern matching
         break;
     }
+  }
+
+  // When fontTable has no usable class, the optional Arabic substitute route
+  // keeps Arabic and Latin/digits in one script-compatible face. This is a
+  // fallback selection policy, not evidence that Noto has the authored face's
+  // advances or Office metrics. An explicit fontTable family always wins above.
+  if (isArabicSubstituteFont(family)) {
+    if (NASKH_SERIF_ARABIC_FONTS.has(lower)) {
+      return cjkFallback
+        ? `${head}, "Noto Naskh Arabic", "Noto Sans Arabic", "Noto Serif", ${sansTail(null, cjkFallback).replace(/sans-serif$/, 'serif')}`
+        : `${head}, "Noto Naskh Arabic", "Noto Sans Arabic", "Noto Serif", "Noto Sans JP", "Hiragino Sans", serif`;
+    }
+    return cjkFallback
+      ? `${head}, "Noto Sans Arabic", "Noto Naskh Arabic", ${sansTail(null, cjkFallback)}`
+      : `${head}, "Noto Sans Arabic", "Noto Naskh Arabic", "Noto Sans JP", "Hiragino Sans", sans-serif`;
   }
 
   // 2) Name-pattern fallback for fonts absent from fontTable or classified
@@ -1034,9 +1076,7 @@ export function buildFont(
   return `${s} ${w} ${sizePx}px ${f}`;
 }
 
-/** Design single-line floor. Parsed resource geometry takes part through the
- * generic fields; the compatibility registry remains the fallback for authored
- * fonts whose bytes are unavailable to the browser. */
+/** Selected-resource or native-reference design single-line floor. */
 export function segmentIntendedSingleLinePx(
   segment: LayoutTextSeg,
   emPx: number,
@@ -1045,10 +1085,7 @@ export function segmentIntendedSingleLinePx(
   const resourceRatio = eastAsian
     ? segment.resolvedEastAsianLineHeightRatio ?? segment.resolvedLineHeightRatio ?? 0
     : segment.resolvedLineHeightRatio ?? 0;
-  return Math.max(
-    intendedSingleLinePx(segment.fontFamily, emPx, eastAsian),
-    resourceRatio * emPx,
-  );
+  return resourceRatio * emPx;
 }
 
 export function segmentEastAsiaFloorSingleLinePx(
@@ -1061,10 +1098,7 @@ export function segmentEastAsiaFloorSingleLinePx(
       ?? segment.resolvedEaFloorLineHeightRatio
       ?? 0
     : segment.resolvedEaFloorLineHeightRatio ?? 0;
-  return Math.max(
-    intendedSingleLinePx(segment.eaFloorFamily, emPx, eastAsian),
-    resourceRatio * emPx,
-  );
+  return resourceRatio * emPx;
 }
 
 export function getDefaultFontSize(para: ParagraphLayoutSource): number {
@@ -1081,8 +1115,7 @@ export function getDefaultFontSize(para: ParagraphLayoutSource): number {
 }
 
 /** First text/field run's font family. Empty paragraphs fall back to the
- * paragraph's style-resolved default family. Resource lookup consumes the name
- * first; the legacy compatibility registry may use it only when unavailable. */
+ * paragraph's style-resolved default family. */
 export function getDefaultFontFamily(
   para: ParagraphLayoutSource,
   eastAsian = false,
@@ -1093,26 +1126,6 @@ export function getDefaultFontFamily(
   }
   if (eastAsian && para.defaultFontFamilyEastAsia) return para.defaultFontFamilyEastAsia;
   return para.defaultFontFamily ?? null;
-}
-
-/** Compatibility-registry floor for an empty paragraph. */
-export function emptyIntendedSinglePx(
-  para: ParagraphLayoutSource,
-  scale: number,
-): number {
-  return intendedSingleLinePx(getDefaultFontFamily(para), getDefaultFontSize(para) * scale);
-}
-
-function emptyIntendedSingleForScriptPx(
-  para: ParagraphLayoutSource,
-  scale: number,
-  eastAsian: boolean,
-): number {
-  return intendedSingleLinePx(
-    getDefaultFontFamily(para, eastAsian),
-    getDefaultFontSize(para) * scale,
-    eastAsian,
-  );
 }
 
 /** Code points whose presence marks a line as East Asian for docGrid line-cell
@@ -1579,9 +1592,8 @@ export function isGridLineRule(ctx: DocGridCtx | undefined): boolean {
 /**
  * ECMA-376 §17.6.5 docGrid line grid — number of whole grid CELLS a
  * single-spaced East Asian line occupies on a pitch of `pitchPx`, from the
- * line's SINGLE-LINE HEIGHT `naturalPx` (the resolved font resource's design
- * line height, with the established compatibility registry used only when the
- * selected resource cannot expose metrics).
+ * line's SINGLE-LINE HEIGHT `naturalPx` (admitted design geometry, or the
+ * documented generic East Asian fallback when resource geometry is absent).
  * The count is `ceil(naturalPx / pitchPx)` — the smallest number of whole
  * cells that CONTAINS the line.
  *
@@ -1610,9 +1622,11 @@ export function docGridLineCells(naturalPx: number, pitchPx: number): number {
  * factor.
  *
  * When the font resource is unavailable, its hhea box is unknown, so the
- * compatibility fallback assumes 1.0em.
- * Whole-cell allocation bounds the error. This is an explicit fallback, not a
- * normative font-metrics claim.
+ * compatibility fallback uses 1.3em (WORD_FAR_EAST_SINGLE_LINE_FACTOR).
+ * This assumes an unknown hhea box of 1em and can choose the wrong cell near
+ * a grid boundary. It is an explicit unavailable-resource fallback, not a
+ * normative font-metrics claim or an error bound. Issue #1525 tracks its
+ * replacement when the actual face geometry or a justified substitute exists.
  *
  * Never use a substituted Canvas box here: its integer-rounded metrics are
  * font- and scale-dependent. */
@@ -1655,16 +1669,17 @@ export function lineBoxHeight(
   // px — unresolved East Asian run em used only by direct/synthetic callers that
   // cannot provide the producer-computed per-line gridCountSinglePx.
   untabledEastAsianEmPx?: number,
+  uniformPositionAuto?: LayoutLine['uniformPositionAuto'],
+  inlinePictureTextSinglePx = 0,
 ): number {
   const glyphNatural = ascentPx + descentPx;
   // For `auto`/single spacing the multiplier applies to the intended font's
   // design line height (ECMA-376 §17.3.1.33). When the document's font is
   // substituted, the Canvas glyph extent (`glyphNatural`) can understate that.
-  // A resolved-resource metric or established compatibility profile restores
-  // the intended height while
-  // never dropping below the substituted glyph extent, so glyphs are not
-  // clipped. Grid-snapped lines are governed
-  // by the grid pitch instead, so the metric correction stays out of them.
+  // An admitted resource or reference profile supplies the intended height.
+  // This takes the maximum of the geometry passed to the line allocator; it
+  // does not prove that every painted glyph fits a different Canvas face.
+  // Grid-snapped lines are governed by the grid pitch instead.
   const natural = Math.max(glyphNatural, intendedSinglePx);
   const hasGrid = isGridLineRule(grid);
   const pitchPx = hasGrid ? grid!.linePitchPt! * scale : 0;
@@ -1684,7 +1699,7 @@ export function lineBoxHeight(
   // (§17.6.5 / §17.3.1.32), so `word-east-asian-grid-line-allocation` gates
   // whole-cell allocation on the line's script.
   const gridSingleCell = (): number => {
-    if (!eastAsian) return Math.max(glyphNatural, pitchPx);
+    if (!eastAsian) return Math.max(natural, pitchPx);
     // Ruby lines reserve real furigana height (base + rt); honor the measured
     // glyph box so the annotation is not clipped. Plain EA lines snap their
     // design single-line height to whole cells.
@@ -1730,7 +1745,26 @@ export function lineBoxHeight(
           ? wordUseFeLayoutInheritedGridHeightPx(allocated, pitchPx, ls.value)
           : allocated;
       }
-      return Math.max(glyphNatural, pitchPx * ls.value);
+      return Math.max(natural, pitchPx * ls.value);
+    }
+    if (inlinePictureTextSinglePx > 0 && ls.value >= 1) {
+      // The object owns its baseline-union extent; the authored auto leading
+      // belongs to the selected text/paragraph-mark face, not to the object.
+      return wordInlinePictureAutoLineHeightPx(
+        natural, inlinePictureTextSinglePx, ls.value,
+      );
+    }
+    if (uniformPositionAuto) {
+      // ECMA-376 §17.3.2.24 defines the signed run baseline position, and
+      // §17.3.1.33 defines the auto multiplier, but neither defines their
+      // joint line allocation. Word for Mac 16.112.4 controls (Arial, Calibri,
+      // Times New Roman; 8/10/16 pt; -6..+12 pt; 1.0..2.0 auto multiples)
+      // show that a uniformly lowered visible line keeps its normal pitch,
+      // while a raise consumes hhea descent before adding to that pitch. The
+      // residual displacement is NOT multiplied. Mixed-position lines and
+      // exact/atLeast spacing are counterexamples and retain their own paths.
+      return uniformPositionAuto.normalSinglePx * ls.value
+        + Math.max(0, uniformPositionAuto.positionPx - uniformPositionAuto.designDescentPx);
     }
     return natural * ls.value;
   }
@@ -1754,18 +1788,71 @@ export function emptyLineNaturalPx(fontSizePt: number, scale: number): { asc: nu
   return { asc: fontSizePt * scale * 0.8, desc: fontSizePt * scale * 0.2 };
 }
 
-/** Single-line ascent/descent from the selected face, with the compatibility
- * registry correcting known unavailable-font substitutions. */
-export function correctedLineMetrics(
+function measuredLineMetrics(
   m: TextMetrics,
-  family: string | null | undefined,
   fallbackEmPx: number,
-  correctionEmPx: number,
-  eastAsian = false,
 ): { ascent: number; descent: number } {
-  const rawAsc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? fallbackEmPx * 0.8;
-  const rawDesc = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? fallbackEmPx * 0.2;
-  return correctLineMetrics(family, correctionEmPx, rawAsc, rawDesc, eastAsian);
+  return {
+    ascent: m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? fallbackEmPx * 0.8,
+    descent: m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? fallbackEmPx * 0.2,
+  };
+}
+
+// Canvas fontBoundingBox sides are rounded to device pixels at the run's
+// ordinary size. For an unprofiled native face this can lose a fraction of a
+// point on every §17.3.1.33 automatic line, which accumulates across table
+// rows. Probe the same browser-selected glyph at two larger sizes and use the
+// high-size ratio only when both agree within their two-side quantization
+// bounds (2/200 + 2/1000 em). This is measured Canvas geometry, not a claim
+// about the installed OpenType tables or Word's metric selection. The shared
+// core probe compares the glyph against a missing-family control and declines
+// aliases that cannot be distinguished from fallback. Parsed resources and
+// catalogued native references take precedence over this approximation.
+const NATIVE_BOX_PROBE_SMALL_EM = 200;
+const NATIVE_BOX_PROBE_LARGE_EM = 1000;
+const nativeBoxRatios = new WeakMap<MeasurementTextContext, WeakMap<object, Map<string, number | null>>>();
+
+function nativeCanvasLineRatio(
+  context: MeasurementTextContext,
+  cacheOwner: object,
+  route: CanvasFontRoute | undefined,
+  family: string | null | undefined,
+  weight: number,
+  style: 'normal' | 'italic',
+  text: string,
+): number | null {
+  if (route?.scope !== 'native' || !family) return null;
+  let probe = '';
+  for (const scalar of text) {
+    if (!/\s/u.test(scalar)) { probe = scalar; break; }
+  }
+  if (!probe) return null;
+  let ownerCaches = nativeBoxRatios.get(context);
+  if (!ownerCaches) {
+    ownerCaches = new WeakMap();
+    nativeBoxRatios.set(context, ownerCaches);
+  }
+  let cache = ownerCaches.get(cacheOwner);
+  if (!cache) {
+    cache = new Map();
+    ownerCaches.set(cacheOwner, cache);
+  }
+  const key = JSON.stringify([route.fingerprint, family, weight, style, probe]);
+  if (cache.has(key)) return cache.get(key) ?? null;
+  const small = measureResolvedCanvasFontBoxRatio(context, family, {
+    text: probe, emPx: NATIVE_BOX_PROBE_SMALL_EM, weight, style,
+  });
+  const large = small === null ? null : measureResolvedCanvasFontBoxRatio(context, family, {
+    text: probe, emPx: NATIVE_BOX_PROBE_LARGE_EM, weight, style,
+  });
+  const ratio = small !== null && large !== null
+    && Math.abs(small - large) <= 2 / NATIVE_BOX_PROBE_SMALL_EM + 2 / NATIVE_BOX_PROBE_LARGE_EM
+    ? large : null;
+  // The owner is document-scoped in production, but one document can contain
+  // arbitrary authored family names and characters. Bound retained tuples.
+  if (cache.size >= 128) cache.clear();
+  cache.set(key, ratio);
+  return ratio;
 }
 
 /**
@@ -1798,7 +1885,7 @@ export function paragraphMarkLineMetrics(
   ctx?: MeasurementTextContext,
   fontFamilyClasses: Record<string, string> = {},
   effectiveLineSpacing: LineSpacing | null = para.lineSpacing,
-  resolvedLocalFonts: Readonly<Record<string, ResolvedFontMetric>> = {},
+  _resolvedLocalFonts: Readonly<Record<string, ResolvedFontMetric>> = {},
   textLayoutService?: TextLayoutService,
   markShapeInput?: NumberingMarkerShapeInput,
   useFeLayout = false,
@@ -1815,24 +1902,27 @@ export function paragraphMarkLineMetrics(
   const authoredFamily = getDefaultFontFamily(para, markUsesEastAsianFace);
   const markWeight = effectiveMarkShapeInput?.weight ?? 400;
   const markStyle = effectiveMarkShapeInput?.style ?? 'normal';
-  const normalizedFamily = authoredFamily
-    ? normalizeFontMetricFamily(authoredFamily)
-    : null;
-  const resolvedLocalFont = normalizedFamily
-    ? resolvedLocalFonts[`${normalizedFamily}:${markWeight}:${markStyle}`]
-      ?? (markWeight === 400 && markStyle === 'normal'
-        ? resolvedLocalFonts[normalizedFamily]
-        : undefined)
-    : undefined;
-  const measuredFamily = resolvedLocalFont?.family ?? authoredFamily;
+  const markProbe = markUsesEastAsianFace ? 'あ' : 'x';
+  // A supplied metric map without the selecting text service cannot prove
+  // which face Canvas paints. The compatibility argument above is ignored;
+  // only the selected resource tuple below can lend authoritative geometry.
+  let resolvedLocalFont: ResolvedFontMetric | undefined;
+  // ECMA-376 §17.3.1.33: atLeast still reserves the normal single-line box
+  // when its authored minimum is smaller. Reusing the automatic-line
+  // OpenType projection for that natural box is a format-policy inference;
+  // exact spacing bypasses the box.
+  const naturalMetricAllowed = effectiveLineSpacing?.rule !== 'exact';
+  const measuredFamily = authoredFamily;
   let asc: number;
   let desc: number;
+  let referenceMarkMetric: ReturnType<typeof referenceFontLineMetrics> = undefined;
+  let nativeMarkRatio: number | null = null;
   if (textLayoutService) {
     const bold = markWeight >= 600;
     const italic = markStyle === 'italic';
     const ascii = effectiveMarkShapeInput?.fonts.ascii ?? para.defaultFontFamily ?? authoredFamily;
     const shaped = textLayoutService.shape({
-      text: markUsesEastAsianFace ? 'あ' : 'x',
+      text: markProbe,
       fontSizePt: fs * scale,
       fonts: effectiveMarkShapeInput?.fonts ?? {
         ascii,
@@ -1850,20 +1940,41 @@ export function paragraphMarkLineMetrics(
       kerning: effectiveMarkShapeInput?.kerning,
       measure: true,
     });
-    const face = shaped.spans[0]?.font.resolvedFamily ?? authoredFamily;
-    ({ ascent: asc, descent: desc } = correctedLineMetrics(
-      {
+    const selectedFont = shaped.spans[0]?.font;
+    // The paragraph mark has no visible run, but Canvas selects its probe
+    // through the same CSS face tuple as text. Resolve against the complete
+    // resource set: an authored alias cannot disambiguate overlapping faces.
+    resolvedLocalFont = selectedFont
+      ? selectResourceMetric(indexedFontMetrics(
+          textLayoutService.fontMetrics ?? textLayoutService.localMetrics,
+        ), selectedFont, markProbe)
+      : undefined;
+    if (!naturalMetricAllowed && resolvedLocalFont?.designAscentRatio != null) {
+      resolvedLocalFont = undefined;
+    }
+    referenceMarkMetric = naturalMetricAllowed
+      && !resolvedLocalFont && mayUseAuthoredReferenceVerticalMetric(selectedFont)
+      ? referenceFontLineMetrics(
+          selectedFont.requestedFamily,
+          selectedFont.weight,
+          selectedFont.style,
+        )
+      : undefined;
+    if (naturalMetricAllowed && !resolvedLocalFont && !referenceMarkMetric
+      && selectedFont?.source === 'native' && ctx) {
+      nativeMarkRatio = nativeCanvasLineRatio(
+        ctx, fontFamilyClasses, selectedFont.route, selectedFont.resolvedFamily,
+        selectedFont.weight, selectedFont.style, markProbe,
+      );
+    }
+    const markMeasured = {
         width: shaped.advancePt,
         actualBoundingBoxAscent: shaped.ascentPt,
         actualBoundingBoxDescent: shaped.descentPt,
         fontBoundingBoxAscent: shaped.ascentPt,
         fontBoundingBoxDescent: shaped.descentPt,
-      } as TextMetrics,
-      face,
-      fs * scale,
-      fs * scale,
-      markUsesEastAsianFace,
-    ));
+      } as TextMetrics;
+    ({ ascent: asc, descent: desc } = measuredLineMetrics(markMeasured, fs * scale));
   } else if (ctx) {
     // ECMA-376 §17.3.1.29 / §17.3.1.33: an empty paragraph's mark line reserves
     // the mark font's REAL single-line height — the SAME fontBoundingBox a text
@@ -1883,29 +1994,34 @@ export function paragraphMarkLineMetrics(
     // the same path used for visible text.
     const prevFont = ctx.font;
     ctx.font = buildFont(false, false, fs * scale, measuredFamily, fontFamilyClasses);
-    const m = ctx.measureText(markUsesEastAsianFace ? 'あ' : 'x');
+    const m = ctx.measureText(markProbe);
     ctx.font = prevFont;
     // A mark line carries no smallCaps/vertAlign, so fallback == correction size.
-    ({ ascent: asc, descent: desc } = correctedLineMetrics(
-      m, measuredFamily, fs * scale, fs * scale, markUsesEastAsianFace,
-    ));
+    ({ ascent: asc, descent: desc } = measuredLineMetrics(m, fs * scale));
   } else {
     ({ asc, desc } = emptyLineNaturalPx(fs, scale));
+  }
+  const designSides = resolvedLocalFont?.designAscentRatio != null
+    && resolvedLocalFont?.designDescentRatio != null
+    ? resolvedLocalFont : referenceMarkMetric;
+  if (designSides) {
+    asc = designSides.designAscentRatio! * fs * scale;
+    desc = designSides.designDescentRatio! * fs * scale;
   }
   const resourceRatio = markUsesEastAsianFace
     ? resolvedLocalFont?.eastAsianLineHeightRatio ?? resolvedLocalFont?.lineHeightRatio
     : resolvedLocalFont?.lineHeightRatio;
-  const intendedSingle = Math.max(
-    (resourceRatio ?? 0) * fs * scale,
-    emptyIntendedSingleForScriptPx(para, scale, markUsesEastAsianFace),
-    wordMsMinchoEmptyEastAsianMarkSingleLinePx(
-      authoredFamily,
-      fs * scale,
-      markUsesEastAsianFace,
-    ),
-  );
+  const designIntendedSingle = referenceMarkMetric
+    ? referenceMarkMetric.lineHeightRatio * fs * scale
+    : resourceRatio != null
+      ? resourceRatio * fs * scale
+      : 0;
+  // A native Canvas box may set the ordinary automatic-line floor, but it
+  // cannot establish the Word Far-East design height used to count grid cells.
+  // Keep an untabled mark on the same 1.3em grid fallback as visible text.
+  const intendedSingle = Math.max(designIntendedSingle, (nativeMarkRatio ?? 0) * fs * scale);
   const gridCountSingle = eastAsian
-    ? eastAsianGridCountSinglePx(intendedSingle, fs * scale)
+    ? eastAsianGridCountSinglePx(designIntendedSingle, fs * scale)
     : undefined;
   const ordinaryAdvancePx = lineBoxHeight(
     effectiveLineSpacing,
@@ -2494,25 +2610,6 @@ export function splitTextForLayout(text: string): string[] {
  *  numbered-list marker's retained trailing-tab advance. */
 export const DEFAULT_TAB_PT = 36;
 
-/** Knuth-Plass shrink tolerance: the fraction by which the line breaker may
- *  compress each inter-word space to keep a candidate word on the current line.
- *  ECMA-376 prescribes no line-breaking algorithm — tolerance-based fit is
- *  standard typography (TeX, InDesign, Word) and lets the layout absorb the
- *  canvas `measureText` vs Word advance-width discrepancy (~0.1–0.3 px/glyph)
- *  that would otherwise push a trailing word to the next line. Per ECMA-376
- *  §17.18.44, this tolerance is suppressed per line when the draw pass will
- *  fully justify it: non-final/non-manual-break lines of `both`/kashida, and
- *  every line of `distribute`/`thaiDistribute`. Lines the paint pass leaves
- *  non-justified keep the budget so measurement and paint agree (issue #698).
- *
- *  For eligible non-justified lines this is the ONE budget shared by both sides
- *  of the fit contract: the wrap judgment below admits a word when the line's
- *  overflow Δ ≤ SPACE_SHRINK_RATIO · Σ(trailing-space widths), and the renderer's
- *  draw pass squeezes the same spaces by the same fraction so the admitted line
- *  lands inside its box instead of overrunning the clip (see
- *  `shrinkFitCompression` in text-distribute.ts). */
-export const SPACE_SHRINK_RATIO = 0.25;
-
 /** ECMA-376 §17.15.1.25 — resolve the document's automatic tab-stop interval
  *  (pt): the explicit `<w:defaultTabStop>` value when present, else the spec
  *  absent default of 720 twips (36pt). Mirrors {@link resolveKinsokuRules}: the
@@ -2755,29 +2852,220 @@ function resolveFitTextSegments(
   }
 }
 
+/** A subset face lends design metrics only to spans whose every scalar it owns.
+ * A FontFace tuple can win CSS selection while Canvas silently paints missing
+ * glyphs from another face. Ranges are normalized once at the service boundary. */
+function metricCoversText(metric: ResolvedFontMetric, text: string): boolean {
+  const ranges = metric.unicodeRanges;
+  if (ranges === undefined || text.length === 0) return true;
+  for (const scalar of text) {
+    const codePoint = scalar.codePointAt(0)!;
+    let low = 0;
+    let high = ranges.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (ranges[middle][1] < codePoint) low = middle + 1;
+      else high = middle;
+    }
+    if (low >= ranges.length || ranges[low][0] > codePoint) return false;
+  }
+  return true;
+}
+
+/** An authored-family key alone cannot prove the selected route. Match the
+ * chosen face tuple and acquisition source before admitting its metric;
+ * a substitute may preserve the request while painting another face. */
+function metricMatchesSelectedFont(
+  metric: ResolvedFontMetric,
+  selected: FontResolution,
+  text: string,
+): boolean {
+  if (normalizeFontMetricFamily(metric.family)
+    !== normalizeFontMetricFamily(selected.resolvedFamily)
+    || (metric.weight ?? 400) !== selected.weight
+    || (metric.style ?? 'normal') !== selected.style
+    || !metricCoversText(metric, text)) return false;
+  const identity = metric.sourceIdentity;
+  if (selected.source === 'embedded') {
+    // The production loader routes Canvas to a resource-derived private family.
+    // Its metric must come from that same registration, including when another
+    // document embeds different bytes under the same authored family/style.
+    return selected.resourceIdentity === undefined
+      ? identity?.startsWith('embedded:') === true
+      : identity === selected.resourceIdentity;
+  }
+  if (selected.source === 'local' || selected.source === 'substitute') {
+    // The same CSS tuple may be supplied by an unrelated caller or another
+    // loaded face. Only the resource that created this resolver route may lend
+    // vertical geometry; a matching family name is insufficient.
+    return identity !== undefined && identity === selected.resourceIdentity;
+  }
+  return false;
+}
+
+/** Multiple resources may be registered under one CSS family/style. The
+ * authored alias does not control Canvas's choice among overlapping faces;
+ * only geometry shared by every covering resource is safe to admit. */
+function sameResourceGeometry(a: ResolvedFontMetric, b: ResolvedFontMetric): boolean {
+  return a.lineHeightRatio === b.lineHeightRatio
+    && a.designAscentRatio === b.designAscentRatio
+    && a.designDescentRatio === b.designDescentRatio
+    && a.lineGapRatio === b.lineGapRatio
+    && a.eastAsianLineHeightRatio === b.eastAsianLineHeightRatio
+    && a.fontBoxRatio === b.fontBoxRatio;
+}
+
+type MetricTupleIndex = ReadonlyMap<string, readonly ResolvedFontMetric[]>;
+const metricTupleIndexes = new WeakMap<object, MetricTupleIndex>();
+
+function selectedMetricKey(
+  family: string,
+  weight: number,
+  style: string,
+): string {
+  return `${normalizeFontMetricFamily(family)}\0${weight}\0${style}`;
+}
+
+/** A frozen service snapshot is immutable for the document lifetime, so one
+ * tuple/source index can serve every paragraph. A custom mutable service gets
+ * one temporary index per synchronous buildSegments call, then can change its
+ * entries before the next call. */
+function indexedFontMetrics(
+  metrics: Readonly<Record<string, ResolvedFontMetric>>,
+): MetricTupleIndex {
+  const frozenRoot = Object.isFrozen(metrics);
+  if (frozenRoot) {
+    const retained = metricTupleIndexes.get(metrics);
+    if (retained) return retained;
+  }
+  const values = Object.values(metrics);
+  const cacheable = frozenRoot && values.every((metric) => Object.isFrozen(metric));
+  const mutable = new Map<string, ResolvedFontMetric[]>();
+  for (const metric of values) {
+    const key = selectedMetricKey(metric.family, metric.weight ?? 400, metric.style ?? 'normal');
+    const candidates = mutable.get(key);
+    if (candidates) candidates.push(metric);
+    else mutable.set(key, [metric]);
+  }
+  for (const candidates of mutable.values()) Object.freeze(candidates);
+  if (cacheable) metricTupleIndexes.set(metrics, mutable);
+  return mutable;
+}
+
+function selectResourceMetric(
+  index: MetricTupleIndex,
+  selected: FontResolution,
+  probeText: string,
+): ResolvedFontMetric | undefined {
+  if (selected.source !== 'embedded' && selected.source !== 'local'
+    && selected.source !== 'substitute') return undefined;
+  const candidates = index.get(selectedMetricKey(
+    selected.resolvedFamily, selected.weight, selected.style,
+  )) ?? [];
+  let first: ResolvedFontMetric | undefined;
+  for (const metric of candidates) {
+    if (!metricMatchesSelectedFont(metric, selected, probeText)) continue;
+    first ??= metric;
+  }
+  if (!first) return undefined;
+  // Source identity proves which resource was requested, but not which of the
+  // overlapping CSS faces Canvas actually paints. Compare every covering
+  // resource in the tuple, including resources acquired from other sources.
+  for (const metric of candidates) {
+    if (metricCoversText(metric, probeText)
+      && !sameResourceGeometry(first, metric)) return undefined;
+  }
+  return first;
+}
+
+/** Width inference has a stricter, independent projection. Conflicting xAvg
+ * metadata cannot revoke a valid vertical metric for the same selected face. */
+function selectResourceAverageWidthRatio(
+  index: MetricTupleIndex,
+  selected: FontResolution,
+  probeText: string,
+): number | undefined {
+  if (selected.source !== 'embedded' && selected.source !== 'local'
+    && selected.source !== 'substitute') return undefined;
+  const candidates = index.get(selectedMetricKey(
+    selected.resolvedFamily, selected.weight, selected.style,
+  )) ?? [];
+  const withSpace = `${probeText} `;
+  const first = candidates.find((metric) => metricMatchesSelectedFont(metric, selected, withSpace));
+  const ratio = first?.averageCharWidthRatio;
+  if (ratio == null || ratio <= 0) return undefined;
+  return candidates.every((metric) => !metricCoversText(metric, withSpace)
+    || metric.averageCharWidthRatio === ratio) ? ratio : undefined;
+}
+
+function mayUseExactLocalReferenceWidthMetric(
+  selected: FontResolution | undefined,
+): selected is FontResolution {
+  // The width floor requires an exact selected face. A native CSS family list
+  // cannot establish which fallback Canvas painted or measured the glyph.
+  return selected?.source === 'local'
+    && selected.resourceIdentity?.startsWith('office-local:') === true;
+}
+
+function mayUseAuthoredReferenceVerticalMetric(
+  selected: FontResolution | undefined,
+): selected is FontResolution {
+  // Library pagination policy for an unavailable authored face: keep the
+  // document's known OpenType line box while Canvas paints/measures a serif or
+  // sans fallback. Word's §17.3.1.33 automatic/atLeast line advances follow
+  // the authored font; a controlled missing-Calibri case matched Word's five
+  // pages only with this vertical projection. This says nothing about glyph
+  // coverage or advances, which remain selected-resource/Canvas measurements.
+  // A loaded local() tuple may also use the pinned reference when no parsed
+  // resource metric exists. A registered substitute is a different selected
+  // face: if its resource metric is unavailable, use its Canvas line box in
+  // both axes instead of importing the authored font's vertical geometry.
+  return selected?.source === 'native'
+    || mayUseExactLocalReferenceWidthMetric(selected);
+}
+
 export function buildSegments(
   runs: readonly ParagraphLayoutRun[],
   environment: LineLayoutEnvironment,
 ): LayoutSeg[] {
   const segs: LayoutSeg[] = [];
-  const resolvedFont = (
-    family: string | null | undefined,
-    weight = 400,
-    style: 'normal' | 'italic' = 'normal',
+  const selectedFontMetrics = environment.layoutServices?.text.fontMetrics
+    ?? environment.layoutServices?.text.localMetrics
+    ?? {};
+  let selectedFontMetricIndex: MetricTupleIndex | undefined;
+  const metricIndex = (): MetricTupleIndex =>
+    selectedFontMetricIndex ??= indexedFontMetrics(selectedFontMetrics);
+  const selectedMetric = (
+    selected: FontResolution | undefined,
+    probeText: string,
   ): ResolvedFontMetric | undefined => {
-    if (!family) return undefined;
-    const normalized = normalizeFontMetricFamily(family);
-    const metrics = environment.resolvedLocalFonts;
-    if (!metrics) return undefined;
-    const tuple = metrics[`${normalized}:${weight}:${style}`];
-    if (tuple) return tuple;
-    const normal = metrics[normalized];
-    if (weight === 400 && style === 'normal' && normal) return normal;
-    return Object.values(metrics).find((metric) =>
-      normalizeFontMetricFamily(metric.requestedFamily ?? '') === normalized
-      && (metric.weight ?? 400) === weight
-      && (metric.style ?? 'normal') === style,
-    );
+    if (!selected) return undefined;
+    return selectResourceMetric(metricIndex(), selected, probeText);
+  };
+  const referenceAverageWidths = new Map<string, number | undefined>();
+  const selectedAverageWidth = (
+    selected: FontResolution | undefined,
+    probeText: string,
+  ): number | undefined => {
+    if (!selected) return undefined;
+    if (selected.source !== 'native') {
+      const selectedRatio = selectResourceAverageWidthRatio(metricIndex(), selected, probeText);
+      if (selectedRatio !== undefined) return selectedRatio;
+      if (selected.source !== 'local' || !selected.resourceIdentity?.startsWith('office-local:')) {
+        return undefined;
+      }
+    }
+    if (!mayUseExactLocalReferenceWidthMetric(selected)) return undefined;
+    const key = `${selected.requestedFamily}\0${selected.weight}\0${selected.style}`;
+    if (!referenceAverageWidths.has(key)) {
+      const admitted = referenceFontAverageWidthRatio(
+        selected.requestedFamily, selected.weight, selected.style,
+      );
+      // Only catalog-backed tuples enter this per-build cache; arbitrary
+      // authored family names cannot grow it across a long paragraph.
+      if (admitted !== undefined) referenceAverageWidths.set(key, admitted);
+    }
+    return referenceAverageWidths.get(key);
   };
   // Group §17.3.2.14 adjacency over SOURCE RUNS before script/font, word, or
   // small-caps segmentation, but model each tab-delimited fragment as its own
@@ -2855,7 +3143,11 @@ export function buildSegments(
     const documentCharacterCompressionApplies =
       wordDocumentCharacterCompressionApplies(effectiveCharacterSpacing);
     const effectiveCharacterScale = acquiredTypography?.characterScale ?? r.charScale;
-    const effectiveKerningThreshold = acquiredTypography?.kerningThresholdPt ?? r.kerning;
+    // WORD_OPENTYPE_FEATURES_COMPAT_KERNING: the exact compatSetting enables
+    // kerning for unqualified runs. Authored/style-resolved w:kern wins.
+    const effectiveKerningThreshold = acquiredTypography?.kerningThresholdPt
+      ?? r.kerning
+      ?? (environment.enableOpenTypeFeatures ? 0 : undefined);
     const effectiveSnapToGrid = acquiredTypography?.snapToGrid ?? r.snapToGrid;
     // §17.3.2.33 small caps are sized per character: lowercase LETTERS render two
     // points smaller, uppercase letters and non-alphabetic characters at the full
@@ -3011,9 +3303,8 @@ export function buildSegments(
         complexScript: cs,
         fontHint: r.fontHint,
         eastAsiaLanguage: r.langEastAsia,
-        kerning: effectiveKerningThreshold == null
-          ? undefined
-          : (cs ? csFontSize : base.fontSize) >= effectiveKerningThreshold,
+        kerning: effectiveKerningThreshold != null
+          && (cs ? csFontSize : base.fontSize) >= effectiveKerningThreshold,
         measure: false,
       });
       const shaped = authoritativeSpan
@@ -3143,24 +3434,9 @@ export function buildSegments(
         return;
       }
       const resolvedSpan = shaped?.spans[0];
-      const serviceMetric = (resolvedFamily: string | undefined, requestedFamily?: string) => {
-        if (!resolvedFamily) return undefined;
-        const candidates = Object.values(
-          environment.layoutServices?.text.fontMetrics
-          ?? environment.layoutServices?.text.localMetrics
-          ?? {},
-        ).filter((metric) =>
-            normalizeFontMetricFamily(metric.family) === normalizeFontMetricFamily(resolvedFamily)
-            && (metric.weight ?? 400) === weight
-            && (metric.style ?? 'normal') === style,
-          );
-        return candidates.find((metric) => requestedFamily
-          && normalizeFontMetricFamily(metric.requestedFamily ?? '')
-            === normalizeFontMetricFamily(requestedFamily)) ?? candidates[0];
-      };
       const localFont = resolvedSpan
-        ? serviceMetric(resolvedSpan.font.resolvedFamily, resolvedSpan.font.requestedFamily)
-        : resolvedFont(fontFamily, weight, style);
+        ? selectedMetric(resolvedSpan.font, text)
+        : undefined;
       const eaResolution = environment.layoutServices?.text.resolve({
         fonts: textShapeRequest.fonts,
         themeFonts: textShapeRequest.themeFonts,
@@ -3169,18 +3445,82 @@ export function buildSegments(
         weight,
         style,
       });
+      // A DrawingML/WPS text-body floor is reserved by its independently
+      // selected eastAsia slot, even when this run paints Latin glyphs through
+      // ascii. Empty coverage here means "no glyph is borrowed from this face";
+      // the selected resource contributes vertical geometry only. Ordinary
+      // segments still require coverage of their actual text.
+      const eaFloorProbe = (r as DocxTextRun & { textBoxLineFloor?: boolean }).textBoxLineFloor
+        ? '' : text;
       const localEaFloor = eaResolution
-        ? serviceMetric(eaResolution.resolvedFamily, eaResolution.requestedFamily)
-        : resolvedFont(eaFontFamily, weight, style);
-      const familyLineMetric = localFont ?? resolvedFont(fontFamily, weight, style);
-      const eaLineMetric = localEaFloor ?? resolvedFont(eaFontFamily, weight, style);
+        ? selectedMetric(eaResolution, eaFloorProbe)
+        : undefined;
+      // Once a service selected a face, do not re-admit metrics by the authored
+      // family name after the selected-face lookup failed (e.g. a substitute).
+      // §17.3.1.33 atLeast is max(normal single-line height, authored minimum).
+      // The Word OpenType projection supplies that normal box by inference;
+      // exact spacing instead suppresses it.
+      const naturalMetricAllowed = environment.lineSpacing?.rule !== 'exact';
+      const resourceFamilyLineMetric = (naturalMetricAllowed
+        || localFont?.designAscentRatio == null)
+        && (localFont?.lineHeightRatio != null
+          || localFont?.designAscentRatio != null
+          || localFont?.eastAsianLineHeightRatio != null)
+        ? localFont : undefined;
+      const referenceLineMetric = naturalMetricAllowed
+        && !resourceFamilyLineMetric && mayUseAuthoredReferenceVerticalMetric(resolvedSpan?.font)
+        ? referenceFontLineMetrics(
+            resolvedSpan.font.requestedFamily,
+            resolvedSpan.font.weight,
+            resolvedSpan.font.style,
+          )
+        : undefined;
+      const familyLineMetric = resourceFamilyLineMetric ?? referenceLineMetric;
+      const resourceEaLineMetric = (naturalMetricAllowed
+        || localEaFloor?.designAscentRatio == null)
+        && (localEaFloor?.lineHeightRatio != null
+          || localEaFloor?.designAscentRatio != null
+          || localEaFloor?.eastAsianLineHeightRatio != null)
+        ? localEaFloor : undefined;
+      const referenceEaLineMetric = naturalMetricAllowed
+        && !resourceEaLineMetric && mayUseAuthoredReferenceVerticalMetric(eaResolution)
+        ? referenceFontLineMetrics(
+            eaResolution.requestedFamily,
+            eaResolution.weight,
+            eaResolution.style,
+          )
+        : undefined;
+      const eaLineMetric = resourceEaLineMetric ?? referenceEaLineMetric;
       const resolvedEaFloorFamily = eaResolution?.resolvedFamily
         ?? localEaFloor?.family
         ?? eaFontFamily;
-      const useFeEastAsianMetric = environment.useFeLayout
+      // WORD_USE_FE_LAYOUT_INHERITED_GRID_MINIMUM was observed for an active
+      // document line grid. ECMA-376 §17.6.5 disables an omitted/default grid
+      // type and excludes table-cell line pitch unless §17.15.3.1
+      // adjustLineHeightInTable is enabled. An inherited eastAsia font axis
+      // alone must not raise a Latin-only non-grid line's normal-line floor.
+      const useFeEastAsianMetric = environment.useFeLayout && environment.lineGridActive
         && (r.fontHint === 'eastAsia' || Boolean(resolvedEaFloorFamily?.trim()));
       const resolvedScript = resolvedSpan?.script ?? authoritativeSpan?.script
         ?? (cs ? 'complexScript' : EAST_ASIAN_RE.test(text) ? 'eastAsia' : 'ascii');
+      const latinSpaceCompressionEligible = environment.characterSpacingControl === 'compressPunctuation'
+        // MS-OE376 §2.1.472 requires full advance for fit with this
+        // compatibility switch, even if display uses compression. This gate
+        // covers the measured Latin fit behavior; display-space placement
+        // under the switch has not yet been established.
+        && environment.lineWrapLikeWord6 !== true
+        // The xAvg floor was measured for horizontal Latin words; upright
+        // vertical runs and tate-chu-yoko use distinct advance allocation.
+        && environment.verticalCJK !== true
+        && documentCharacterCompressionApplies
+        && (resolvedScript === 'ascii' || resolvedScript === 'highAnsi')
+        && !reduced && effectiveVertAlign == null
+        && (effectiveCharacterSpacing == null || effectiveCharacterSpacing === 0)
+        && (effectiveCharacterScale == null || effectiveCharacterScale === 1)
+        && effectiveKerningThreshold == null;
+      const latinSpaceAverageWidthRatio = latinSpaceCompressionEligible
+        ? selectedAverageWidth(resolvedSpan?.font, text)
+        : undefined;
       const widthBalanceGridDeltaFactor = environment.balanceSingleByteDoubleByteWidth
         ? wordBalancedLinesAndCharsGridDeltaFactor(text, resolvedScript)
         : undefined;
@@ -3213,7 +3553,22 @@ export function buildSegments(
         fontFamily: resolvedSpan?.font.resolvedFamily ?? localFont?.family ?? fontFamily,
         fontRoute: resolvedSpan?.fontRoute,
         resolvedLineHeightRatio: familyLineMetric?.lineHeightRatio,
+        ...(resourceFamilyLineMetric?.lineHeightRatio != null
+          ? {
+              resolvedResourceVerticalMetric: true as const,
+              resolvedDesignAscentRatio: resourceFamilyLineMetric.designAscentRatio,
+              resolvedDesignDescentRatio: resourceFamilyLineMetric.designDescentRatio,
+            }
+          : {}),
+        ...(referenceLineMetric ? {
+          referenceFontVerticalMetric: true as const,
+          resolvedDesignAscentRatio: referenceLineMetric.designAscentRatio,
+          resolvedDesignDescentRatio: referenceLineMetric.designDescentRatio,
+        } : {}),
         resolvedEastAsianLineHeightRatio: familyLineMetric?.eastAsianLineHeightRatio,
+        ...(latinSpaceAverageWidthRatio != null && latinSpaceAverageWidthRatio > 0
+          ? { latinSpaceAverageWidthRatio, latinSpaceCompressionEligible: true as const }
+          : {}),
         vertAlign: effectiveVertAlign,
         measuredWidth: 0,
         textLayoutService: environment.layoutServices?.text,
@@ -3467,6 +3822,7 @@ export function buildSegments(
       segs.push({
         imagePath: img.imagePath,
         mimeType: img.mimeType,
+        ...(img.anchor ? {} : { inlinePicture: true as const }),
         widthPt: img.widthPt,
         heightPt: img.heightPt,
         rotation: img.rotation,
@@ -3606,14 +3962,33 @@ export function buildSegments(
       const authoredFamily = run.fontFamilyEastAsia ?? run.fontFamily ?? null;
       const weight = bold ? 700 : 400;
       const style = italic ? 'italic' as const : 'normal' as const;
-      const localFont = resolvedFont(authoredFamily, weight, style);
-      const localEaFloor = resolvedFont(run.fontFamilyEastAsia ?? null, weight, style);
-      const familyLineMetric = localFont ?? (authoredFamily
-        ? environment.resolvedLocalFonts?.[normalizeFontMetricFamily(authoredFamily)]
-        : undefined);
-      const eaLineMetric = localEaFloor ?? (run.fontFamilyEastAsia
-        ? environment.resolvedLocalFonts?.[normalizeFontMetricFamily(run.fontFamilyEastAsia)]
-        : undefined);
+      // An anchor host has no glyph of its own. Resolve a script-matched probe
+      // as for an empty paragraph mark, then require selected-face identity and
+      // cmap coverage. Empty text would vacuously admit any subset resource.
+      const probeText = eastAsian ? 'あ' : 'x';
+      const selected = environment.layoutServices?.text.resolve({
+        text: probeText,
+        fonts: {
+          ascii: run.fontFamily,
+          highAnsi: run.fontFamily,
+          eastAsia: run.fontFamilyEastAsia,
+          complexScript: run.fontFamily,
+        },
+        slot: eastAsian ? 'eastAsia' : 'ascii',
+        weight,
+        style,
+      });
+      const localFont = selectedMetric(selected, probeText);
+      // The mark hosting a floating anchor participates in the same natural
+      // atLeast line box as a visible text line.
+      const naturalMetricAllowed = environment.lineSpacing?.rule !== 'exact';
+      const resourceMetric = naturalMetricAllowed
+        || localFont?.designAscentRatio == null ? localFont : undefined;
+      const referenceMetric = naturalMetricAllowed && !resourceMetric
+        && mayUseAuthoredReferenceVerticalMetric(selected)
+        ? referenceFontLineMetrics(selected.requestedFamily, weight, style)
+        : undefined;
+      const familyLineMetric = resourceMetric ?? referenceMetric;
       segs.push({
         text: '',
         metricOnly: true,
@@ -3624,15 +3999,28 @@ export function buildSegments(
         strikethrough: false,
         fontSize: run.fontSize,
         color: null,
-        fontFamily: localFont?.family ?? authoredFamily,
+        fontFamily: selected?.resolvedFamily ?? authoredFamily,
+        fontRoute: selected?.route,
         resolvedLineHeightRatio: familyLineMetric?.lineHeightRatio,
+        ...(resourceMetric?.lineHeightRatio != null
+          ? {
+              resolvedResourceVerticalMetric: true as const,
+              resolvedDesignAscentRatio: resourceMetric.designAscentRatio,
+              resolvedDesignDescentRatio: resourceMetric.designDescentRatio,
+            }
+          : {}),
+        ...(referenceMetric ? {
+          referenceFontVerticalMetric: true as const,
+          resolvedDesignAscentRatio: referenceMetric.designAscentRatio,
+          resolvedDesignDescentRatio: referenceMetric.designDescentRatio,
+        } : {}),
         resolvedEastAsianLineHeightRatio: familyLineMetric?.eastAsianLineHeightRatio,
         vertAlign: null,
         measuredWidth: 0,
-        eaFloorFamily:
-          localEaFloor?.family ?? run.fontFamilyEastAsia ?? null,
-        resolvedEaFloorLineHeightRatio: eaLineMetric?.lineHeightRatio,
-        resolvedEaFloorEastAsianLineHeightRatio: eaLineMetric?.eastAsianLineHeightRatio,
+        eaFloorFamily: eastAsian ? selected?.resolvedFamily ?? authoredFamily : null,
+        resolvedEaFloorLineHeightRatio: eastAsian ? familyLineMetric?.lineHeightRatio : undefined,
+        resolvedEaFloorEastAsianLineHeightRatio: eastAsian
+          ? familyLineMetric?.eastAsianLineHeightRatio : undefined,
         snapToCharacterGrid: false,
       });
     }
@@ -3784,7 +4172,7 @@ export function buildSegments(
         effectiveFontSizePt,
         segment.bold ? 700 : 400,
         segment.italic ? 'italic' : 'normal',
-        segment.kerning ?? 'auto',
+        segment.kerning ?? 'none',
       ].join('|');
       const cached = metricCache.get(key);
       if (cached !== undefined) return cached;
@@ -4085,6 +4473,8 @@ export function layoutLines(
         line.intendedSingle,
         line.eastAsian,
         line.gridCountSingle,
+        line.uniformPositionAuto,
+        line.inlinePictureTextSingle,
       ),
     );
   }
@@ -4092,6 +4482,36 @@ export function layoutLines(
   const lines: LayoutLine[] = [];
   let currentLine: (LayoutTextSeg | LayoutImageSeg | LayoutMathSeg | LayoutTabSeg)[] = [];
   let currentWidth = 0;
+  const sameLatinSpaceFace = (candidate: LayoutTextSeg, reference: LayoutTextSeg): boolean =>
+    candidate.latinSpaceCompressionEligible === true
+    && !candidate.verticalRun && !reference.verticalRun
+    && !candidate.tateChuYoko && !reference.tateChuYoko
+    && candidate.latinSpaceAverageWidthRatio === reference.latinSpaceAverageWidthRatio
+    && candidate.fontRoute?.fingerprint === reference.fontRoute?.fingerprint
+    && candidate.fontFamily === reference.fontFamily
+    && candidate.fontSize === reference.fontSize
+    && candidate.bold === reference.bold
+    && candidate.italic === reference.italic
+    && (candidate.charScale == null || candidate.charScale === 1)
+    && (reference.charScale == null || reference.charScale === 1)
+    && candidate.kerning === reference.kerning
+    && candidate.widthBalanceGridDeltaFactor === reference.widthBalanceGridDeltaFactor
+    && !candidate.rtl && candidate.fitTextRegionIndex === undefined;
+  let latinLineFace: LayoutTextSeg | undefined;
+  let latinLineHomogeneous = true;
+  let latinLineGaps: LayoutTextSeg[] = [];
+  let latinUniformGapCapacity: number | undefined;
+  let latinAppliedGapCount = 0;
+  let latinAppliedPerGap = 0;
+  const materializeLatinSpaceCompression = (): void => {
+    for (let index = 0; index < latinAppliedGapCount; index += 1) {
+      const gap = latinLineGaps[index];
+      gap.measuredWidth -= latinAppliedPerGap;
+      gap.latinSpaceCompressionPx = latinAppliedPerGap;
+    }
+    latinAppliedGapCount = 0;
+    latinAppliedPerGap = 0;
+  };
   const snapPitchPx = characterGrid?.type === 'snapToChars'
     && characterGrid.characterPitchPt != null
     && characterGrid.characterPitchPt > 0
@@ -4105,21 +4525,12 @@ export function layoutLines(
     allocatedWidthPx: number;
   };
   let snapBlock: SnapBlockState | null = null;
-  // Sum of ordinary ONE-space inter-word separators on the current line.
-  // A consecutive authored SP sequence is preserved as explicit spacing and
-  // contributes no Knuth-Plass shrink budget. Track the pending suffix across
-  // segmentation/source-run boundaries so formatting cannot change the result.
-  let lineTotalTrailingW = 0;
-  let pendingTrailingSpaceCount = 0;
-  let pendingTrailingSpaceContribution = 0;
-  // Incremental Canvas-vs-Word bias of the text already committed to this line.
-  // Candidate checks add only the prospective text, avoiding a hot-loop rescan.
-  let lineBiasBudget = 0;
-  const lineMeasurementRoutes = new Set<string>();
   let lineHeight = 0;   // pt
   let lineAscent = 0;   // px
   let lineDescent = 0;  // px
   let lineIntendedSingle = 0; // px — max intended single-line height on the line
+  let lineHasInlinePicture = false;
+  let linePictureMarkSingle = 0;
   let lineGridCountSingle = 0; // px — max resolved design height or generic fallback
   let lineVisibleAscent = 0;
   let lineVisibleDescent = 0;
@@ -4168,8 +4579,6 @@ export function layoutLines(
   // through opening explicitly permitted by §20.4.2.18.
   const startLine = (minWidth: number = 0): void => {
     snapBlock = null;
-    lineBiasBudget = 0;
-    lineMeasurementRoutes.clear();
     lineXOffset = 0;
     lineMaxWidth = maxWidth;
     if (!wrapCtx) return;
@@ -4223,6 +4632,21 @@ export function layoutLines(
   const availW = () => widthPolicy === 'intrinsic'
     ? Number.POSITIVE_INFINITY
     : lineMaxWidth - (isFirst ? firstIndent : 0);
+
+  // AutoFit can set a table column to the measured text advance plus its
+  // first-line indent and grouped cell insets. Cell acquisition subtracts those
+  // same grouped insets. At exact equality, subtracting the indent from the
+  // line width may round down while adding it to the advance does not. Both
+  // inequalities are equivalent in real arithmetic; check both operation
+  // orders for a finite bounded line. This changes arithmetic order only;
+  // it adds no fixed overflow allowance.
+  const fitsMeasuredWidth = (used: number, available: number): boolean => {
+    if (used <= available) return true;
+    if (widthPolicy === 'intrinsic' || !Number.isFinite(used) || !Number.isFinite(lineMaxWidth)) {
+      return false;
+    }
+    return used + (isFirst ? firstIndent : 0) <= lineMaxWidth;
+  };
 
   // ECMA-376 §17.3.1.37 tab stops in leading-edge px, for the bidi post-pass.
   const bidiCustomStopsPx = baseRtl
@@ -4293,23 +4717,18 @@ export function layoutLines(
 
   let lineHasRuby = false;
   let lineEastAsian = false;
-  // Whether any committed token on the current line carries DICTIONARY-SEA
-  // (Thai/Lao/Khmer) text — `seaBreaks` marks all SEA segments; the
-  // grapheme-fill scripts (Myanmar/Tibetan, #961) are excluded because they use
-  // the per-cluster greedy path. `word-dictionary-sea-natural-fit` gates the
-  // trailing-space shrink budget for the dictionary scripts.
-  let lineHasSea = false;
   const flush = (
     forceHeight?: number,
     brTerminated = false,
     nextStart?: LineBoundary,
   ) => {
+    materializeLatinSpaceCompression();
     applyBidiTabs();
     // §17.3.2.24 defines `position` relative to surrounding non-positioned
     // text. A line whose every metric-bearing item shares the same inherited
-    // position has no differently-positioned peer to pin the resulting extra
-    // line height to one side. `word-uniform-run-position-leading` owns Word's
-    // observed placement of that surplus above and below the glyphs. Keep mixed
+    // position has no differently-positioned peer to pin the resulting line
+    // box to one side. `word-uniform-run-position-leading` owns the compatibility
+    // placement of that box around the glyphs. Keep mixed
     // lines relative to zero so their authored displacement and ink union
     // remain unchanged. Images/math
     // provide a zero-position reference; tabs do not contribute vertical
@@ -4360,6 +4779,43 @@ export function layoutLines(
       : lineIntendedSingle;
     const gridCountSingle = lineGridCountSingle
       || (lineEastAsian ? eastAsianGridCountSinglePx(lineIntendedSingle, h * scale) : asc + desc);
+    const inlinePictureTextSingle = lineHasInlinePicture
+      ? Math.max(lineIntendedSingle, linePictureMarkSingle)
+      : 0;
+    // Only project that registered rule when every metric-bearing item is
+    // visible text in one admitted face tuple. Canvas fallback geometry does
+    // not reveal hhea descent, and mixed styles cannot share one descent
+    // reserve. The rule uses face data, never a family-specific correction.
+    const positionedTexts = currentLine.filter((segment): segment is LayoutTextSeg => 'text' in segment);
+    const firstPositioned = positionedTexts[0];
+    const uniformPositionAuto = linePositionReferencePt !== 0
+      && positionedTexts.length > 0
+      && currentLine.every((segment) => 'isTab' in segment || 'text' in segment)
+      && firstPositioned?.resolvedDesignDescentRatio != null
+      && (firstPositioned.referenceFontVerticalMetric || firstPositioned.resolvedResourceVerticalMetric)
+      && positionedTexts.every((segment) =>
+        segment.text.length > 0
+        && !segment.metricOnly
+        && !segment.ruby
+        && !segment.vertAlign
+        && segment.positionExtendsLineBox !== false
+        && segment.position === linePositionReferencePt
+        && segment.fontFamily === firstPositioned.fontFamily
+        && segment.fontRoute?.fingerprint === firstPositioned.fontRoute?.fingerprint
+        && segment.bold === firstPositioned.bold
+        && segment.italic === firstPositioned.italic
+        && segment.fontSize === firstPositioned.fontSize
+        && segment.resolvedDesignDescentRatio === firstPositioned.resolvedDesignDescentRatio
+        && segment.referenceFontVerticalMetric === firstPositioned.referenceFontVerticalMetric
+        && segment.resolvedResourceVerticalMetric === firstPositioned.resolvedResourceVerticalMetric
+        && (segment.referenceFontVerticalMetric || segment.resolvedResourceVerticalMetric)
+      )
+      ? {
+          normalSinglePx: Math.max(asc + desc - Math.abs(linePositionReferencePt * scale), lineIntendedSingle),
+          positionPx: linePositionReferencePt * scale,
+          designDescentPx: firstPositioned.resolvedDesignDescentRatio * firstPositioned.fontSize * scale,
+        }
+      : undefined;
     lines.push({
       segments: currentLine,
       height: h,
@@ -4369,6 +4825,8 @@ export function layoutLines(
       visibleDescent,
       visibleIntendedSingle,
       intendedSingle: lineIntendedSingle,
+      ...(inlinePictureTextSingle > 0 ? { inlinePictureTextSingle } : {}),
+      uniformPositionAuto,
       // Empty/synthetic East Asian lines use the same design-height rule as a
       // text run; their synthesized Canvas box must not reintroduce a
       // scale-dependent cell count.
@@ -4389,19 +4847,22 @@ export function layoutLines(
         lineIntendedSingle,
         lineEastAsian,
         gridCountSingle,
+        uniformPositionAuto,
+        inlinePictureTextSingle,
       );
     }
     currentLine = [];
     currentWidth = 0;
-    lineTotalTrailingW = 0;
-    pendingTrailingSpaceCount = 0;
-    pendingTrailingSpaceContribution = 0;
-    lineBiasBudget = 0;
-    lineMeasurementRoutes.clear();
+    latinLineFace = undefined;
+    latinLineHomogeneous = true;
+    latinLineGaps = [];
+    latinUniformGapCapacity = undefined;
     lineHeight = 0;
     lineAscent = 0;
     lineDescent = 0;
     lineIntendedSingle = 0;
+    lineHasInlinePicture = false;
+    linePictureMarkSingle = 0;
     lineGridCountSingle = 0;
     lineVisibleAscent = 0;
     lineVisibleDescent = 0;
@@ -4409,43 +4870,8 @@ export function layoutLines(
     lineHasVisibleMetrics = false;
     lineHasRuby = false;
     lineEastAsian = false;
-    lineHasSea = false;
     isFirst = false;
     startLine(minLineStartWidth());
-  };
-
-  const biasBudgetContribution = (s: LayoutTextSeg, text: string = s.text): number =>
-    fontAdvanceBiasEm(s.fontFamily)
-      * calcEffectiveFontPx(s, scale)
-      * charScaleFactor(s)
-      * [...text].length;
-
-  // A face allowance is calibrated for one resolved measurement route. Keep
-  // route identity separate from whether that route currently has a non-zero
-  // profile: two differently resolved Georgia routes are still mixed and must
-  // not share one calibrated allowance. Font size is deliberately excluded;
-  // small-caps pieces use the same face route at different sizes.
-  const measurementRouteIdentity = (s: LayoutTextSeg): string => {
-    const weight = s.bold ? 700 : 400;
-    const style = s.italic ? 'italic' : 'normal';
-    if (s.fontRoute) return `${s.fontRoute.fingerprint}|${weight}|${style}`;
-    return `implicit|${buildFont(s.bold, s.italic, 1, s.fontFamily, fontFamilyClasses)}`;
-  };
-
-  const noteMeasurementRoute = (
-    routes: Set<string>,
-    s: LayoutTextSeg,
-    text: string = s.text,
-  ): void => {
-    if (/\S/.test(text)) routes.add(measurementRouteIdentity(s));
-  };
-
-  const measurementRouteCountWith = (candidateRoutes: ReadonlySet<string>): number => {
-    let count = lineMeasurementRoutes.size;
-    for (const route of candidateRoutes) {
-      if (!lineMeasurementRoutes.has(route)) count += 1;
-    }
-    return count;
   };
 
   const prospectiveSnapAdvance = (s: LayoutTextSeg, naturalWidth: number): number => {
@@ -4471,7 +4897,6 @@ export function layoutLines(
     h: number,
     asc: number,
     desc: number,
-    trailingSpaceW: number = 0,
   ) => {
     let committedWidth = w;
     if ('text' in s) {
@@ -4550,44 +4975,37 @@ export function layoutLines(
     }
     currentLine.push(s);
     currentWidth += committedWidth;
-    if ('text' in s) {
-      const trailingSpaceCount = s.text.length - s.text.replace(/ +$/, '').length;
-      const spaceOnly = trailingSpaceCount > 0 && trailingSpaceCount === s.text.length;
-      if (spaceOnly && pendingTrailingSpaceCount > 0) {
-        // UAX #14 LB7 retains the entire SP sequence with the preceding text.
-        // A source/style split must not turn an explicit two-space sequence
-        // into two separately shrinkable one-space separators.
-        lineTotalTrailingW -= pendingTrailingSpaceContribution;
-        pendingTrailingSpaceCount += trailingSpaceCount;
-        pendingTrailingSpaceContribution = 0;
-      } else {
-        pendingTrailingSpaceCount = 0;
-        pendingTrailingSpaceContribution = 0;
-        const preceding = currentLine[currentLine.length - 2];
-        const followsVisibleText = preceding !== undefined
-          && 'text' in preceding
-          && /\S$/u.test(preceding.text);
-        if (spaceOnly && followsVisibleText) {
-          // Script/font shaping can isolate a normal separator into its own
-          // segment. It remains one shrinkable inter-word space until another
-          // adjacent SP extends the sequence.
-          pendingTrailingSpaceCount = trailingSpaceCount;
-          pendingTrailingSpaceContribution = trailingSpaceCount === 1
-            ? trailingSpaceW
-            : 0;
-          lineTotalTrailingW += pendingTrailingSpaceContribution;
-        } else if (trailingSpaceCount > 0 && !spaceOnly) {
-          pendingTrailingSpaceCount = trailingSpaceCount;
-          pendingTrailingSpaceContribution = trailingSpaceCount === 1
-            ? trailingSpaceW
-            : 0;
-          lineTotalTrailingW += pendingTrailingSpaceContribution;
-        }
+    if ('text' in s && s.latinSpaceCompressionEligible === true
+      && s.latinSpaceAverageWidthRatio != null && s.fontRoute) {
+      if (latinLineFace && !sameLatinSpaceFace(s, latinLineFace)) {
+        materializeLatinSpaceCompression();
+        latinLineHomogeneous = false;
       }
-      lineBiasBudget += biasBudgetContribution(s);
-      noteMeasurementRoute(lineMeasurementRoutes, s);
+      latinLineFace ??= s;
+      if (s.latinNaturalTrailingSpacePx !== undefined) {
+        const floor = calcEffectiveFontPx(s, scale)
+          * s.latinSpaceAverageWidthRatio / 2 * charScaleFactor(s)
+          + segmentCharacterGridDeltaPx(s, characterGrid, scale);
+        const capacity = Math.max(0, s.latinNaturalTrailingSpacePx - floor);
+        if (latinUniformGapCapacity !== undefined
+          && Math.abs(capacity - latinUniformGapCapacity) > 1e-6) {
+          materializeLatinSpaceCompression();
+          latinLineHomogeneous = false;
+        }
+        latinUniformGapCapacity ??= capacity;
+        latinLineGaps.push(s);
+      }
+    } else {
+      materializeLatinSpaceCompression();
+      latinLineHomogeneous = false;
     }
     if (h > lineHeight) lineHeight = h;
+    if ('imagePath' in s && s.inlinePicture === true) {
+      lineHasInlinePicture = true;
+      linePictureMarkSingle = Math.max(
+        linePictureMarkSingle, (s.paragraphMarkSinglePx ?? 0) * scale,
+      );
+    }
     if (asc > lineAscent) lineAscent = asc;
     if (desc > lineDescent) lineDescent = desc;
     const paintsInlineInk = !('text' in s) || s.metricOnly !== true;
@@ -4607,23 +5025,24 @@ export function layoutLines(
     if (!('isTab' in s) && !('imagePath' in s) && !('math' in s)) {
       const ts = s as LayoutTextSeg;
       if (ts.ruby) lineHasRuby = true;
-      if (ts.seaBreaks !== undefined && isDictionarySeaText(ts.text)) lineHasSea = true;
       const metricEastAsian = ts.metricEastAsian === true || EAST_ASIAN_RE.test(ts.text);
       if (!lineEastAsian && metricEastAsian) lineEastAsian = true;
-      // Prefer the selected resource's single-line height. The established
-      // family compatibility registry remains a fallback when bytes or native
-      // geometry are unavailable; this path adds no new per-family estimate.
+      // Prefer the selected resource's single-line height. Without admitted
+      // geometry, the generic East Asian grid fallback remains authoritative.
       // Small caps (non-super/sub) keep the FULL run size here so the line box
       // follows the run size, not the 2pt-reduced glyphs (§17.3.2.33).
       const intendedEm = ts.smallCaps && !ts.vertAlign ? ts.fontSize * scale : effectiveFontPx(ts);
-      // Script hint: eaOnly design heights (Word FE 1.3 × hhea, e.g. Yu Mincho)
-      // apply to East Asian segments only — a Latin segment in the same font
-      // keeps its Canvas box (issue #1013 / demo sample-1 footnote). Ruby
-      // segments are excluded too: a ruby line reserves its MEASURED base +
-      // annotation box (sample-5 calibration) and Word's FE height for a
-      // ruby-bearing line is unmeasured, so the pre-#1013 metrics stand.
+      // The OpenType code-page class selects the general line ratio even for
+      // Latin text. This script hint selects an optional East-Asian-specific
+      // floor and grid-cell counting; ruby keeps its measured annotation box.
       const segScriptHint = metricEastAsian && !ts.ruby;
-      const intended = ts.textBoxLineFloor && ts.ruby
+      const nativeRatio = ts.resolvedLineHeightRatio == null
+        ? nativeCanvasLineRatio(
+            ctx, fontFamilyClasses, ts.fontRoute, ts.fontFamily,
+            ts.bold ? 700 : 400, ts.italic ? 'italic' : 'normal', ts.text,
+          )
+        : null;
+      const designIntended = ts.textBoxLineFloor && ts.ruby
         ? 0
         : Math.max(
             segmentIntendedSingleLinePx(ts, intendedEm, segScriptHint),
@@ -4631,13 +5050,17 @@ export function layoutLines(
               ? segmentEastAsiaFloorSingleLinePx(ts, intendedEm, segScriptHint)
               : 0,
           );
+      const intended = Math.max(designIntended, (nativeRatio ?? 0) * intendedEm);
       if (intended > lineIntendedSingle) lineIntendedSingle = intended;
       if (paintsInlineInk && intended > lineVisibleIntendedSingle) {
         lineVisibleIntendedSingle = intended;
       }
-      // Only East Asian text is cell-rounded. Both branches are scale-linear:
-      // resolved resources use parsed metrics; unresolved faces use 1.3em.
-      if (segScriptHint) segGridCount = eastAsianGridCountSinglePx(intended, intendedEm);
+      // Only East Asian text is cell-rounded. The native Canvas probe can
+      // establish a browser-selected font box for ordinary auto lines, but it
+      // cannot establish Word's Far-East design height or OS/2 code-page class.
+      // For an untabled tuple retain the documented 1.3em grid fallback;
+      // parsed resource/reference design metrics still take precedence.
+      if (segScriptHint) segGridCount = eastAsianGridCountSinglePx(designIntended, intendedEm);
     } else if (!('isTab' in s)) {
       // Image/math object: a tall inline object sizes the line's cells too.
       segGridCount = asc + desc;
@@ -4666,15 +5089,14 @@ export function layoutLines(
 
   // ECMA-376 §17.3.2.19 `<w:kern>` — set `ctx.fontKerning` to match how the PAINT
   // pass will draw a run, so a kerned run measures exactly as it is drawn
-  // (measure==paint). Kerning is enabled only when the run declares `w:kern` and its font
-  // size is at or above the threshold (the spec's "smallest font size which shall
-  // have its kerning automatically adjusted"). A run that does not opt in leaves
-  // `ctx.fontKerning` at its inherited value rather than forcing a document-wide
-  // default.
+  // (measure==paint). ISO/IEC 29500 §17.3.2.19: absent `w:kern` at every style
+  // level means no pair kerning. Canvas `auto` may kern even at 10pt: Office
+  // Calibri controls with absent/above-size `w:kern` wrap at a boundary where
+  // `normal` fits; an at-size threshold reverses that result. Set the state
+  // explicitly per run so a caller's Canvas default cannot change WML layout.
   const setSegKerning = (s: LayoutTextSeg): CanvasFontKerning | null => {
-    if (s.kerning == null) return null;
     const prev = ctx.fontKerning;
-    ctx.fontKerning = s.fontSize >= s.kerning ? 'normal' : 'none';
+    ctx.fontKerning = s.kerning != null && s.fontSize >= s.kerning ? 'normal' : 'none';
     return prev;
   };
   const restoreKerning = (prev: CanvasFontKerning | null): void => {
@@ -5014,6 +5436,43 @@ export function layoutLines(
     );
   };
 
+  /** Compatibility projection governed by WORD_LATIN_INTERWORD_XAVG_FLOOR.
+   * The selected face's OS/2 xAvgCharWidth / 2 is the minimum inter-word
+   * advance. Equal-face gaps share the required deficit uniformly; a natural
+   * space narrower than that minimum retains its natural advance. This is not
+   * an ECMA-376 definition or a replacement for glyph advance.
+   * Mixed faces, authored spacing, and snap-to-character cells are outside
+   * the measured scope and retain their natural widths. The §17.6.5 grid
+   * pitch is additive to the selected-face floor. The Word 6 compatibility
+   * setting excludes the fit projection at segment acquisition. */
+  const fitHomogeneousLatinSpaces = (next: LayoutTextSeg, nextFitWidth: number): boolean => {
+    if (isJustified || baseRtl || widthPolicy !== 'bounded'
+      || characterGrid?.type === 'snapToChars'
+      || (characterGrid?.type === 'linesAndChars'
+        && next.widthBalanceGridDeltaFactor !== 0.5)
+      || next.latinSpaceCompressionEligible !== true
+      || next.latinSpaceAverageWidthRatio == null
+      || !next.fontRoute || next.rtl || next.verticalRun || next.tateChuYoko
+      || next.fitTextRegionIndex !== undefined
+      || !latinLineHomogeneous || !latinLineFace
+      || !sameLatinSpaceFace(next, latinLineFace)
+      || latinLineGaps.length === 0) return false;
+    const totalCapacity = (latinUniformGapCapacity ?? 0) * latinLineGaps.length;
+    if (totalCapacity <= 0) return false;
+    const restored = latinAppliedPerGap * latinAppliedGapCount;
+    const required = Math.max(0, currentWidth + restored + nextFitWidth - availW());
+    if (required > totalCapacity
+      || !fitsMeasuredWidth(currentWidth + restored + nextFitWidth - required, availW())) {
+      return false;
+    }
+    // Keep aggregate fit width current. Write each retained gap exactly once
+    // when the line is finalized, avoiding quadratic work on long lines.
+    currentWidth += restored - required;
+    latinAppliedGapCount = latinLineGaps.length;
+    latinAppliedPerGap = required / latinAppliedGapCount;
+    return true;
+  };
+
   /** Measure one text segment's canonical advance and vertical contribution.
    * Every path that commits a complete text segment to a line must use this
    * authority so font fallback, small-caps, position, ruby and grid metrics do
@@ -5068,15 +5527,22 @@ export function layoutLines(
       metricEmPx = fullPx;
     }
 
-    const corrected = correctedLineMetrics(
-      metricMeasurement,
-      s.fontFamily,
-      fullPx,
-      metricEmPx,
-      (s.metricEastAsian === true || EAST_ASIAN_RE.test(s.text)) && !s.ruby,
-    );
-    let ascent = corrected.ascent;
-    let descent = corrected.descent;
+    const corrected = measuredLineMetrics(metricMeasurement, fullPx);
+    // Selected resource sides come from the same admitted face as the line
+    // height; native reference sides are policy geometry only. Ruby and an
+    // authored baseline position compose additional boxes outside either
+    // simple OpenType projection, so retain measured sides for those inputs.
+    const designOwnsSides = (s.resolvedResourceVerticalMetric || s.referenceFontVerticalMetric)
+      && !s.ruby
+      && (s.position ?? 0) === 0
+      && s.resolvedDesignAscentRatio != null
+      && s.resolvedDesignDescentRatio != null;
+    let ascent = designOwnsSides
+      ? s.resolvedDesignAscentRatio! * metricEmPx
+      : corrected.ascent;
+    let descent = designOwnsSides
+      ? s.resolvedDesignDescentRatio! * metricEmPx
+      : corrected.descent;
     if (s.positionExtendsLineBox !== false) {
       const positionPx = (s.position ?? 0) * scale;
       if (positionPx > 0) ascent += positionPx;
@@ -5405,6 +5871,9 @@ export function layoutLines(
     ) {
       return { kind: 'blocked' };
     }
+
+    materializeLatinSpaceCompression();
+    latinLineHomogeneous = false;
 
     const tailText = lastText.text.slice(split);
     const tail: LayoutTextSeg = {
@@ -5807,14 +6276,8 @@ export function layoutLines(
       addToLine(s, w, h, asc, desc);
       continue;
     }
-    // Wrap-fit check uses two standard typographic allowances:
-    //   1. Trailing-space collapse: if this word becomes the last on the
-    //      line, its trailing space (if any) collapses. We subtract it from
-    //      the width used to test fit.
-    //   2. Knuth-Plass shrink tolerance: lines the paint pass leaves
-    //      non-justified keep the budget. Per §17.18.44, lines the paint pass
-    //      fully justifies get no budget: non-final/non-manual-break `both`/kashida
-    //      lines, and every `distribute`/`thaiDistribute` line (issue #698).
+    // A terminal separator may collapse when this word becomes line-final;
+    // visible glyphs still need to fit at their natural measured advance.
     const trimmed = s.text.replace(/ +$/, '');
     // Subtract the full-model advance of the trimmed text (not the natural width)
     // so the grid delta, w:w scale and w:spacing pitch on the retained glyphs all
@@ -5823,6 +6286,10 @@ export function layoutLines(
     const trailingSpaceW = snapToCharsClass(s, characterGrid)
       ? 0
       : s.text.endsWith(' ') ? w - strAdvance(s, trimmed) : 0;
+    s.latinNaturalTrailingSpacePx = s.latinSpaceCompressionEligible === true
+      && /^[^ ]+ $/u.test(s.text) && trailingSpaceW > 0
+      ? trailingSpaceW : undefined;
+    s.latinSpaceCompressionPx = undefined;
     const prospectiveLineWillJustify = (next: LayoutSeg | undefined): boolean => {
       const closesLogicalLine = next === undefined || 'lineBreak' in next;
       return isJustified && (!closesLogicalLine || stretchLastLine);
@@ -5842,40 +6309,20 @@ export function layoutLines(
       trailingSpaceW,
       queue[0],
     );
-    // The two fit-tolerance roles are EXCLUSIVE per line, mirroring paint's
-    // per-line predicate `isJustified && (!endsLogicalLine || stretchLastLine)`
-    // (`next` is the first segment after the prospective closing candidate):
-    //
-    //  - A line the paint pass will justify stretches to the column edge. Admit
-    //    only the backend-specific per-font measurement bias there; suppress the
-    //    trailing-space allowance.
-    //  - A line left NON-justified keeps the classic Knuth-Plass trailing-space
-    //    shrink allowance, whose 25% promise the draw pass spends through
-    //    `shrinkFitCompression`. Adding the bias would double-count tolerance.
+    // ECMA-376 §17.3.1.33 does not prescribe a line-breaking tolerance.
+    // Word-for-Mac controls with Calibri and Arial, left/center/right aligned
+    // 10pt table cells, wrap a trailing Latin word below its natural advance
+    // boundary (including <1pt overflow). Times New Roman differs by a
+    // sub-point at that boundary, so this is a conservative library fit policy,
+    // not a claim that every Office face and script has identical break points.
+    // An earlier global 25%-of-spaces allowance pulled words up even when Word
+    // did not; it also had no proven bound matching paint compression.
     // Dictionary-SEA candidate (Thai/Lao/Khmer; grapheme-fill Myanmar/Tibetan
     // stays on its per-cluster greedy path). Per-codepoint scan: a rare segment
     // mixing both SEA families is not dictionary-SEA, so
     // it keeps the pre-#991 greedy path instead of moving a grapheme-fill span
     // inside an atomic chunk.
     const sDictSea = s.seaBreaks !== undefined && isDictionarySeaText(s.text);
-    const candidateMeasurementRoutes = new Set<string>();
-    noteMeasurementRoute(candidateMeasurementRoutes, s, trimmed);
-    const shrinkBudgetFor = (
-      next: LayoutSeg | undefined,
-      biasBudget: number,
-      measurementRoutes: ReadonlySet<string>,
-    ): number => {
-      const lineWillJustify = prospectiveLineWillJustify(next);
-      if (lineWillJustify) return wordJustifiedCandidateFitAllowancePx({
-        biasBudgetPx: biasBudget,
-        resolvedMeasurementRouteCount: measurementRouteCountWith(measurementRoutes),
-      });
-      // `word-dictionary-sea-natural-fit`: a dictionary-SEA line does not
-      // compress inter-word spaces. The candidate counts too because admitting
-      // it would make the line SEA. Other scripts retain the drawable 25%
-      // trailing-space budget.
-      return lineHasSea || sDictSea ? 0 : lineTotalTrailingW * SPACE_SHRINK_RATIO;
-    };
 
     // Atomic glued group: when THIS segment starts a glued group (its followers
     // in the queue are `joinPrev` pieces — small-caps case-pieces of the SAME
@@ -5912,18 +6359,6 @@ export function layoutLines(
       let groupW = w;
       let groupTrail = trailingSpaceW;
       let groupEnd = 0;
-      let groupBiasBudget = lineBiasBudget;
-      const groupMeasurementRoutes = new Set(candidateMeasurementRoutes);
-      // Keep one pending member so only the final member is trimmed. Committing
-      // each previous member left-to-right preserves the former prospective-array
-      // summation order exactly, without cloning or rescanning the current line.
-      let pendingGroupBiasSeg = s;
-      let pendingGroupBiasText = s.text;
-      const advanceGroupBias = (member: LayoutTextSeg, text: string = member.text): void => {
-        groupBiasBudget += biasBudgetContribution(pendingGroupBiasSeg, pendingGroupBiasText);
-        pendingGroupBiasSeg = member;
-        pendingGroupBiasText = text;
-      };
       for (; groupEnd < queue.length && (queue[groupEnd] as LayoutTextSeg).joinPrev; groupEnd++) {
         const f = queue[groupEnd] as LayoutTextSeg;
         const hardPrefixEnd = hardJoinPrefixEnd(f);
@@ -5931,8 +6366,6 @@ export function layoutLines(
           const prefix = f.text.slice(0, hardPrefixEnd);
           const prefixWidth = strAdvance(f, prefix);
           groupW += prefixWidth;
-          advanceGroupBias(f, prefix);
-          noteMeasurementRoute(groupMeasurementRoutes, f, prefix);
           groupTrail = prefix.endsWith(' ')
             ? prefixWidth - strAdvance(f, prefix.replace(/ +$/, ''))
             : 0;
@@ -5946,8 +6379,6 @@ export function layoutLines(
           const prefix = f.text.slice(0, firstExternalBreak);
           const prefixWidth = strAdvance(f, prefix);
           groupW += prefixWidth;
-          advanceGroupBias(f, prefix);
-          noteMeasurementRoute(groupMeasurementRoutes, f, prefix);
           groupTrail = 0;
           break;
         }
@@ -5972,10 +6403,6 @@ export function layoutLines(
             const prefix = chars.slice(0, p).join('');
             const prefixWidth = strAdvance(f, prefix);
             groupW += prefixWidth;
-            if (prefix.length > 0) {
-              advanceGroupBias(f, prefix);
-              noteMeasurementRoute(groupMeasurementRoutes, f, prefix);
-            }
             groupTrail = 0;
             break;
           }
@@ -5983,8 +6410,6 @@ export function layoutLines(
         }
         const fw = segAdvance(f);
         groupW += fw;
-        advanceGroupBias(f);
-        noteMeasurementRoute(groupMeasurementRoutes, f);
         const ft = f.text.replace(/ +$/, '');
         const followerTrail = f.text.endsWith(' ') ? fw - strAdvance(f, ft) : 0;
         // UAX #14 LB7 makes a consecutive SP sequence one trailing suffix even
@@ -5996,17 +6421,9 @@ export function layoutLines(
           ? groupTrail + followerTrail
           : followerTrail;
       }
-      groupBiasBudget += biasBudgetContribution(
-        pendingGroupBiasSeg,
-        pendingGroupBiasText.replace(/ +$/, ''),
-      );
       if (
         currentWidth + fitWidthFor(groupW, groupTrail, queue[groupEnd])
-        > availW() + shrinkBudgetFor(
-          queue[groupEnd],
-          groupBiasBudget,
-          groupMeasurementRoutes,
-        )
+        > availW()
       ) {
         flush(undefined, false, s.src);
       }
@@ -6036,8 +6453,6 @@ export function layoutLines(
       let chunkW = w;
       let chunkTrail = trailingSpaceW;
       let chunkEnd = 0;
-      let chunkBias = lineBiasBudget + biasBudgetContribution(s, trimmed);
-      const chunkMeasurementRoutes = new Set(candidateMeasurementRoutes);
       if (!s.text.endsWith(' ')) {
         for (; chunkEnd < queue.length; chunkEnd++) {
           const f = queue[chunkEnd];
@@ -6048,29 +6463,18 @@ export function layoutLines(
           const fTrim = ft.text.replace(/ +$/, '');
           chunkW += fw;
           chunkTrail = ft.text.endsWith(' ') ? fw - strAdvance(ft, fTrim) : 0;
-          chunkBias += biasBudgetContribution(ft, fTrim);
-          noteMeasurementRoute(chunkMeasurementRoutes, ft, fTrim);
           if (ft.text.endsWith(' ')) { chunkEnd++; break; } // a space ends the chunk
         }
       }
       const chunkWForFit = fitWidthFor(chunkW, chunkTrail, queue[chunkEnd]);
       if (
-        currentWidth + chunkWForFit > availW() + shrinkBudgetFor(
-          queue[chunkEnd],
-          chunkBias,
-          chunkMeasurementRoutes,
-        ) &&
+        currentWidth + chunkWForFit > availW() &&
         chunkWForFit <= lineMaxWidth
       ) {
         flush(undefined, false, s.src);
       }
     }
 
-    const shrinkBudget = shrinkBudgetFor(
-      queue[0],
-      lineBiasBudget + biasBudgetContribution(s, trimmed),
-      candidateMeasurementRoutes,
-    );
     // §17.3.1.21 permits one eligible punctuation character past the text
     // extent. The isolated compatibility predicate owns both the CJK-language
     // sets and the bounded parent-run extensions owned by
@@ -6093,16 +6497,29 @@ export function layoutLines(
         s.overflowPunctuationBidiLanguage,
       )
       && currentWidth + strAdvance(s, textBeforeTrailingOverflow)
-        <= availW() + shrinkBudget;
+        <= availW();
 
-    if (currentWidth + wForFit <= availW() + shrinkBudget) {
+    // A line already admitted using this homogeneous-face rule cannot lend
+    // that prior compression to a later mixed-face candidate. Its allocation
+    // is finalized here, and the new route starts a fresh line.
+    if (latinAppliedPerGap > 0
+      && (!latinLineHomogeneous || !latinLineFace
+        || !sameLatinSpaceFace(s, latinLineFace))) {
+      flush(undefined, false, s.src);
+      queue.unshift(s);
+      continue;
+    }
+
+    if ((fitsMeasuredWidth(currentWidth + wForFit, availW()) && latinAppliedPerGap === 0)
+      || fitHomogeneousLatinSpaces(s, wForFit)
+      || fitsMeasuredWidth(currentWidth + wForFit, availW())) {
       // Fits on current line as-is
       s.measuredWidth = w;
-      addToLine(s, w, h, asc, desc, trailingSpaceW);
+      addToLine(s, w, h, asc, desc);
       appendQueuedIdeographicSpaceSegment(s);
     } else if (admitsTrailingOverflowPunctuation) {
       s.measuredWidth = w;
-      addToLine(s, w, h, asc, desc, trailingSpaceW);
+      addToLine(s, w, h, asc, desc);
       appendQueuedIdeographicSpaceSegment(s);
     } else if (
       hasCJKBreakOpportunity(s.text)
@@ -6398,7 +6815,7 @@ export function layoutLines(
     } else {
       const semanticSplit = externalLinkSyntaxSplit(
         s,
-        availW() + shrinkBudget - currentWidth,
+        availW() - currentWidth,
       );
       if (semanticSplit > 0 && semanticSplit < s.text.length) {
         const prefix = s.text.slice(0, semanticSplit);
@@ -6438,7 +6855,7 @@ export function layoutLines(
         // explicitly glued piece) may overflow a pathological narrow line, but
         // it must never become a new line head and tear the cluster.
         s.measuredWidth = w;
-        addToLine(s, w, h, asc, desc, trailingSpaceW);
+        addToLine(s, w, h, asc, desc);
         continue;
       }
       // Latin token does not fit on the current (non-empty) line: move it to a fresh
