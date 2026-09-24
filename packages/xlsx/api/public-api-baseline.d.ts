@@ -2091,6 +2091,8 @@ export interface Worksheet {
     sparklineGroups?: SparklineGroup[];
     defaultFontFamily?: string;
     defaultFontSize?: number;
+    defaultFontBold?: boolean;
+    defaultFontItalic?: boolean;
     themeJapaneseMajorFont?: string;
     themeJapaneseMinorFont?: string;
     date1904?: boolean;
