@@ -983,12 +983,9 @@ export interface ChartModel {
   legendManualLayout?: LegendManualLayout | null;
   /**
    * `<c:valAx><c:numFmt@formatCode>` — format code applied to value-axis tick
-   * labels (ECMA-376 §21.2.2.121). null = plain numeric formatting.
+   * labels (ECMA-376 §21.2.2.21). null = plain numeric formatting.
    */
   valAxisFormatCode?: string | null;
-  /** `<c:valAx><c:numFmt@sourceLinked>` (§21.2.2.121). Omitted is
-   * effectively true, but null preserves that it was not authored. */
-  valAxisFormatSourceLinked?: boolean | null;
   /** `<c:valAx><c:dispUnits>` display-only divisor and optional label. Series
    * values and plot geometry stay in their authored units. */
   valAxisDisplayUnits?: ChartDisplayUnits | null;
@@ -1200,9 +1197,6 @@ export interface ChartModel {
    * the renderer formats X-axis tick labels with this code (e.g. dates).
    */
   catAxisFormatCode?: string | null;
-  /** `<c:catAx|dateAx|valAx><c:numFmt@sourceLinked>`; null means omitted
-   * (effective true under §21.2.2.121). */
-  catAxisFormatSourceLinked?: boolean | null;
   /**
    * `<c:catAx><c:scaling><c:min/max>` — explicit X-axis range. Used by
    * scatter / bubble charts whose X axis is numeric. null = derive from
@@ -1971,8 +1965,6 @@ export interface SecondaryValueAxis {
   hidden: boolean;
   /** `<c:numFmt formatCode>` for tick labels. */
   formatCode?: string | null;
-  /** `<c:numFmt@sourceLinked>`; null means omitted (effective true). */
-  formatSourceLinked?: boolean | null;
   /** `<c:dispUnits>` for this auxiliary value axis. */
   displayUnits?: ChartDisplayUnits | null;
   /** `<c:txPr>…<a:solidFill>` tick-label color (hex without '#'). */

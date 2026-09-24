@@ -650,13 +650,6 @@ pub struct ChartModel {
     pub legend_entries: Option<Vec<ChartLegendEntryOverride>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub val_axis_format_code: Option<String>,
-    /// `<c:valAx><c:numFmt@sourceLinked>` (§21.2.2.121). `None` preserves
-    /// omission; its effective value is true, as for an explicit `Some(true)`.
-    /// Office confirms that only explicit false applies the authored code over
-    /// a differently formatted source cell in a 15-point line chart; omission
-    /// was also checked in 12–60 point/date-frequency/width variants.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub val_axis_format_source_linked: Option<bool>,
     /// `<c:valAx><c:dispUnits>` (§21.2.2.45) scales displayed axis-associated
     /// values (ticks and Office-generated `showVal` data-label text); geometry
     /// and the underlying series values remain unscaled.
@@ -795,8 +788,6 @@ pub struct ChartModel {
     pub val_axis_line_paint_authored: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cat_axis_format_code: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cat_axis_format_source_linked: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cat_axis_min: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2232,9 +2223,6 @@ pub struct SecondaryValueAxis {
     pub hidden: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format_code: Option<String>,
-    /// Same `c:numFmt@sourceLinked` tri-state as the primary value axis.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub format_source_linked: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_units: Option<ChartDisplayUnits>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3686,23 +3674,13 @@ pub fn extract_data_label_format_code(root: Node) -> Option<String> {
 }
 
 /// `<c:catAx|valAx><c:numFmt formatCode>` — the value-axis tick label
-/// number format (ECMA-376 §21.2.2.121). Caller passes the already-located
+/// number format (ECMA-376 §21.2.2.21). Caller passes the already-located
 /// `<c:catAx>` / `<c:valAx>` node.
 pub fn extract_axis_format_code(axis_node: Node) -> Option<String> {
     child(axis_node, "numFmt")
         .and_then(|n| n.attribute("formatCode"))
         .map(|s| s.to_string())
         .filter(|s| !s.is_empty() && s != "General")
-}
-
-/// Preserve the authored `sourceLinked` state independently of `formatCode`.
-/// ECMA-376 §21.2.2.121 makes an omitted attribute effective `true`; Office
-/// applies the source-cell format for omitted/true and the authored code for
-/// false when the two differ. Do not infer linkage from the code string.
-fn extract_axis_format_source_linked(axis_node: Node) -> Option<bool> {
-    child(axis_node, "numFmt")
-        .and_then(|node| node.attribute("sourceLinked"))
-        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
 }
 
 /// `<c:catAx|valAx><c:scaling>` — read explicit `<c:min val>` / `<c:max val>`.
@@ -8574,7 +8552,6 @@ pub fn parse_chartex_part_with_references_style_parts_and_images(
         data_label_font_language: None,
         data_label_font_baseline: None,
         val_axis_format_code,
-        val_axis_format_source_linked: None,
         val_axis_display_units: None,
         cat_axis_display_units: None,
         plot_area_manual_layout: None,
@@ -8676,7 +8653,6 @@ pub fn parse_chartex_part_with_references_style_parts_and_images(
         val_axis_crosses: None,
         val_axis_crosses_at: None,
         cat_axis_format_code: None,
-        cat_axis_format_source_linked: None,
         cat_axis_min: None,
         cat_axis_max: None,
         radar_style: None,
@@ -13599,13 +13575,11 @@ pub fn parse_chart_part_with_references_style_parts_and_images(
 
     // `<c:valAx><c:numFmt formatCode>` — value-axis tick label number format.
     let val_axis_format_code = val_ax.and_then(extract_axis_format_code);
-    let val_axis_format_source_linked = val_ax.and_then(extract_axis_format_source_linked);
     // `<c:catAx|dateAx><c:numFmt formatCode>` — category-axis number format. For
     // a `<c:dateAx>` this is the date serial format code (e.g. "m/d/yyyy") the TS
     // side needs to format category labels. Reaches parity with the xlsx parser,
     // which already wires this field (pptx previously hardcoded it to None).
     let cat_axis_format_code = cat_ax.and_then(extract_axis_format_code);
-    let cat_axis_format_source_linked = cat_ax.and_then(extract_axis_format_source_linked);
     let val_axis_display_units =
         val_ax.and_then(|axis| parse_axis_display_units(axis, color_resolver));
     let cat_axis_display_units =
@@ -13644,7 +13618,6 @@ pub fn parse_chart_part_with_references_style_parts_and_images(
             title: t,
             hidden: axis_is_deleted(ax),
             format_code: extract_axis_format_code(ax),
-            format_source_linked: extract_axis_format_source_linked(ax),
             display_units: parse_axis_display_units(ax, color_resolver),
             font_color: extract_axis_tick_label_color(ax, color_resolver)
                 .or_else(|| chart_text_font_color.clone()),
@@ -14399,7 +14372,6 @@ pub fn parse_chart_part_with_references_style_parts_and_images(
         data_label_font_language: None,
         data_label_font_baseline: None,
         val_axis_format_code,
-        val_axis_format_source_linked,
         val_axis_display_units,
         cat_axis_display_units,
         plot_area_manual_layout,
@@ -14499,7 +14471,6 @@ pub fn parse_chart_part_with_references_style_parts_and_images(
         val_axis_crosses,
         val_axis_crosses_at,
         cat_axis_format_code,
-        cat_axis_format_source_linked,
         cat_axis_min,
         cat_axis_max,
         radar_style,
@@ -14815,7 +14786,6 @@ mod tests {
             legend_overlay: None,
             legend_entries: None,
             val_axis_format_code: None,
-            val_axis_format_source_linked: None,
             val_axis_display_units: None,
             cat_axis_display_units: None,
             bar_gap_width: None,
@@ -14878,7 +14848,6 @@ mod tests {
             val_axis_line_dash: None,
             val_axis_line_paint_authored: None,
             cat_axis_format_code: None,
-            cat_axis_format_source_linked: None,
             cat_axis_min: None,
             cat_axis_max: None,
             title_manual_layout: None,
@@ -15346,40 +15315,6 @@ mod tests {
             extract_axis_format_code(d.root_element()).as_deref(),
             Some("0.0%")
         );
-    }
-
-    #[test]
-    fn chart_model_keeps_axis_num_fmt_linkage_separate_from_code() {
-        for (attribute, expected) in [
-            ("", None),
-            ("sourceLinked=\"1\"", Some(true)),
-            ("sourceLinked=\"0\"", Some(false)),
-        ] {
-            let xml = format!(
-                r#"<c:chartSpace xmlns:c="{C_NS}" xmlns:a="{A_NS}"><c:chart><c:plotArea>
-                  <c:lineChart><c:ser><c:idx val="0"/>
-                    <c:cat><c:numLit><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:cat>
-                    <c:val><c:numLit><c:pt idx="0"><c:v>10</c:v></c:pt></c:numLit></c:val>
-                  </c:ser><c:axId val="1"/><c:axId val="2"/></c:lineChart>
-                  <c:catAx><c:axId val="1"/><c:axPos val="b"/><c:crossAx val="2"/>
-                    <c:numFmt formatCode="0.00" {attribute}/></c:catAx>
-                  <c:valAx><c:axId val="2"/><c:axPos val="l"/><c:crossAx val="1"/>
-                    <c:numFmt formatCode="0.00" {attribute}/></c:valAx>
-                </c:plotArea></c:chart></c:chartSpace>"#
-            );
-            let document = chart_space_of(&xml);
-            let model =
-                parse_chart_part(document.root_element(), &FixtureResolver).expect("line chart");
-            assert_eq!(model.val_axis_format_code.as_deref(), Some("0.00"));
-            assert_eq!(model.val_axis_format_source_linked, expected);
-            assert_eq!(model.cat_axis_format_source_linked, expected);
-            let wire = serde_json::to_value(&model).expect("serialize chart model");
-            assert_eq!(
-                wire.get("valAxisFormatSourceLinked")
-                    .and_then(|v| v.as_bool()),
-                expected
-            );
-        }
     }
 
     /// Test resolver: returns the schemeClr@val verbatim, or the srgbClr@val
@@ -18400,7 +18335,6 @@ Subtitle</a:t></a:r></a:p>
               <c:valAx><c:axId val="3"/><c:axPos val="t"/><c:crossAx val="4"/>
                 <c:dispUnits><c:custUnit val="1000"/></c:dispUnits></c:valAx>
               <c:valAx><c:axId val="4"/><c:axPos val="r"/><c:crossAx val="3"/>
-                <c:numFmt formatCode="0.00" sourceLinked="0"/>
                 <c:dispUnits><c:custUnit val="10"/></c:dispUnits></c:valAx>
             </c:plotArea></c:chart></c:chartSpace>"#,
             scatter(0, 1, 2, 1000.0, 100.0),
@@ -18427,13 +18361,6 @@ Subtitle</a:t></a:r></a:p>
                 .and_then(|axis| axis.display_units.as_ref())
                 .map(|units| units.divisor),
             Some(10.0),
-        );
-        assert_eq!(
-            model
-                .secondary_val_axis
-                .as_ref()
-                .and_then(|axis| axis.format_source_linked),
-            Some(false),
         );
     }
 

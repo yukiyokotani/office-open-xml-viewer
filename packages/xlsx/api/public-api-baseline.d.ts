@@ -564,7 +564,6 @@ export interface ChartModel {
     subtotalIndices: number[];
     legendManualLayout?: LegendManualLayout | null;
     valAxisFormatCode?: string | null;
-    valAxisFormatSourceLinked?: boolean | null;
     valAxisDisplayUnits?: ChartDisplayUnits | null;
     catAxisDisplayUnits?: ChartDisplayUnits | null;
     barGapWidth?: number | null;
@@ -653,7 +652,6 @@ export interface ChartModel {
     valAxisLineDash?: string | null;
     valAxisLinePaintAuthored?: boolean | null;
     catAxisFormatCode?: string | null;
-    catAxisFormatSourceLinked?: boolean | null;
     catAxisMin?: number | null;
     catAxisMax?: number | null;
     titleManualLayout?: ChartManualLayout | null;
@@ -1696,7 +1694,6 @@ export interface SecondaryValueAxis {
     title: string | null;
     hidden: boolean;
     formatCode?: string | null;
-    formatSourceLinked?: boolean | null;
     displayUnits?: ChartDisplayUnits | null;
     fontColor?: string | null;
     fontPaintAuthored?: boolean | null;
