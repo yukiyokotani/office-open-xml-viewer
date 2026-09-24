@@ -318,6 +318,14 @@ impl<'a> Store<'a> {
             }
         }
         let flags = flags.unwrap_or(0);
+        #[cfg(feature = "direct-doc")]
+        if mode == Mode::Direct && placement.hidden && !placement.script {
+            // MS-ODRAW 2.3.4.44 fHidden: the shape is prevented from
+            // displaying, so the direct model projects nothing for it. Word's
+            // PDF of a corpus document with hidden header lines agrees. The
+            // package writer keeps its original omission.
+            return Ok(None);
+        }
         let [left, top, right, bottom] = anchor.rect.map(i64::from);
         let extent = [(right - left) * 635, (bottom - top) * 635];
         #[cfg(feature = "direct-doc")]
@@ -1023,6 +1031,21 @@ mod tests {
         let mut truncated = Store::read(&word[..1024], &table, 20).unwrap();
         assert!(truncated.drawing(12).is_err());
     }
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn direct_model_projects_nothing_for_hidden_drawings() {
+        // fHidden (use bit 17, value bit 1) prevents display; the BLIP is
+        // never dereferenced. Script anchors remain an omission.
+        let (word, table) = drawing_input(0xa00, 0x0002_0002);
+        let mut store = Store::read(&word[..1024], &table, 20).unwrap();
+        assert!(store.direct_picture(12, &mut usize::MAX.clone()).unwrap().is_none());
+        assert!(!store.omitted && store.images.is_empty());
+        let (word, table) = drawing_input(0xa00, 0x0082_0082);
+        let mut store = Store::read(&word[..1024], &table, 20).unwrap();
+        assert!(store.direct_picture(12, &mut usize::MAX.clone()).unwrap().is_none());
+        assert!(store.omitted);
+    }
+
     #[cfg(feature = "direct-doc")]
     #[test]
     fn direct_alignment_uses_the_spa_origin_and_rejects_disagreement() {
