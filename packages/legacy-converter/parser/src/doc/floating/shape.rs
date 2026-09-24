@@ -34,6 +34,8 @@ pub(in crate::doc) struct Facts {
     /// Freeform outline normalized to the shape box (ECMA-376 20.1.9.8
     /// custGeom), one entry per OfficeArt path.
     pub subpaths: Vec<Vec<PathCmd>>,
+    /// DrawingML guide values of the preset (adj1.., 100000 = 1).
+    pub adjustments: Vec<Option<f64>>,
     /// Solid fill color, `RRGGBB` or `RRGGBBAA`.
     pub fill: Option<String>,
     pub line: Option<Line>,
@@ -78,11 +80,60 @@ pub(in crate::doc) struct Text {
 /// ECMA-376 ST_ShapeType preset. Adjusted and custom geometries are rejected
 /// before this mapping is consulted.
 fn preset(kind: u16) -> Option<&'static str> {
-    Paint::default().geometry(kind)
+    Paint::default().geometry(kind).or_else(|| {
+        // Word's own DOCX of the corpus documents writes these types as the
+        // same presets as the shared PowerPoint table (officeart::preset).
+        matches!(kind, 38 | 51)
+            .then(|| crate::officeart::preset::name(kind))
+            .flatten()
+    })
+}
+
+/// Types whose explicit OfficeArt path is their outline. Type 100 (0x64,
+/// "SHOULD NOT be used" in MS-ODRAW 2.4.24) carries explicit vertices in
+/// the corpus, and Word's DOCX writes that shape as custom geometry.
+fn is_freeform(kind: u16) -> bool {
+    matches!(kind, 0 | 100)
 }
 
 fn is_line(kind: u16) -> bool {
-    matches!(kind, 20 | 32)
+    // Straight and curved connectors are paths without a fill.
+    matches!(kind, 20 | 32 | 38)
+}
+
+/// DrawingML guide slots (adj1..) from legacy adjust values (index 0 is
+/// adjustValue, 0x147) as Word writes them in its own DOCX of the corpus
+/// documents. Coordinates in the 21600 shape space become fractions of the
+/// extent (100000 = 1), per axis, so the rule is aspect independent:
+/// - curvedConnector3: adj1 = a0 / 21600 (-470 -> -2174, 10800 -> 50%);
+/// - accentBorderCallout2: adj2..adj6 = a4..a0 / 21600 in reverse order,
+///   ten shapes of varied extents; adj1 (the sixth value) was never authored
+///   and keeps the preset default.
+/// A value outside these rules has no evidence and is rejected.
+fn adjustments(kind: u16, legacy: &[Option<i32>; 10]) -> Result<Vec<Option<f64>>, String> {
+    let sources: &[Option<usize>] = match kind {
+        38 => &[Some(0)],
+        51 => &[None, Some(4), Some(3), Some(2), Some(1), Some(0)],
+        _ => &[],
+    };
+    for (index, value) in legacy.iter().enumerate() {
+        if value.is_some() && !sources.contains(&Some(index)) {
+            return Err(unsupported(format!(
+                "Word drawing shape type {kind} adjust values have no evidenced mapping"
+            )));
+        }
+    }
+    if legacy.iter().all(Option::is_none) {
+        return Ok(Vec::new());
+    }
+    Ok(sources
+        .iter()
+        .map(|source| {
+            source
+                .and_then(|index| legacy[index])
+                .map(|value| f64::from(value) / 21_600.0 * 100_000.0)
+        })
+        .collect())
 }
 
 impl Facts {
@@ -98,7 +149,7 @@ impl Facts {
     ) -> Result<Self, String> {
         // msosptNotPrimitive (0) is a freeform: its outline is the explicit
         // OfficeArt path, decoded in `facts`.
-        let preset = if kind == 0 {
+        let preset = if is_freeform(kind) {
             None
         } else {
             Some(preset(kind).ok_or_else(|| {
@@ -228,7 +279,8 @@ impl<'a> Table<'a> {
         let mut paint = Paint::default();
         let mut geometry = Geometry::default();
         let mut rotation = 0.0;
-        let freeform = kind == 0;
+        let freeform = is_freeform(kind);
+        let mut legacy_adjust = [None; 10];
         let mut insets = [0x16530, 0xb298, 0x16530, 0xb298];
         let mut text_id = None;
         for (&id, &value) in &self.values {
@@ -275,6 +327,15 @@ impl<'a> Table<'a> {
                     None => geometry.scalar(id, value)?,
                 },
                 0x147..=0x150 | 0x151 | 0x155..=0x158 if freeform => {}
+                // Callout Boolean Properties (MS-ODRAW 2.3.3.7): only
+                // fCalloutMinusX/fCalloutMinusY are evidenced. They record
+                // the direction the authored callout points already have;
+                // Word's DOCX reproduces those callouts from the adjust values
+                // alone (0x80008 on five shapes, 0x40004 on one).
+                0x37f if kind == 51 && value & !0x000c_000c == 0 => {}
+                0x147..=0x150 if matches!(kind, 38 | 51) => {
+                    legacy_adjust[usize::from(id - 0x147)] = Some(value as i32);
+                }
                 0x152 if freeform && (client_text.is_none() || value == 0) => {}
                 0x186 => paint.property(0x4186, value)?,
                 0x17f | 0x180..=0x1bf | 0x1c0..=0x1d7 | 0x1ff => paint.property(id, value)?,
@@ -425,6 +486,7 @@ impl<'a> Table<'a> {
         Ok(Facts {
             preset,
             subpaths,
+            adjustments: adjustments(kind, &legacy_adjust)?,
             fill_picture,
             rotation,
             relative_size: relative_size(&self.values)?,
@@ -774,6 +836,62 @@ mod tests {
     }
 
     #[test]
+    fn word_callout_and_curved_connector_adjustments() {
+        // Values from one of Word's callouts and its DOCX avLst.
+        let bytes = container(
+            &[
+                (0x147, -7385i32 as u32),
+                (0x148, 25420),
+                (0x149, -2282i32 as u32),
+                (0x14a, 10330),
+                (0x14b, -460i32 as u32),
+            ],
+            &[],
+            &[],
+        );
+        let facts = read(51, 0xa00, &bytes, [9, 9]).unwrap();
+        assert_eq!(facts.preset, Some("accentBorderCallout2"));
+        let expected = [
+            None,
+            Some(-2129.6),
+            Some(47824.1),
+            Some(-10564.8),
+            Some(117685.2),
+            Some(-34189.8),
+        ];
+        for (value, expected) in facts.adjustments.iter().zip(expected) {
+            assert_eq!(value.map(|v| (v * 10.0).round() / 10.0), expected);
+        }
+        let bytes = container(&[(0x147, -470i32 as u32)], &[], &[]);
+        let facts = read(38, 0xa00, &bytes, [9, 9]).unwrap();
+        assert_eq!(facts.preset, Some("curvedConnector3"));
+        assert!(facts.fill.is_none() && facts.line.is_some());
+        assert_eq!(facts.adjustments.len(), 1);
+        assert!((facts.adjustments[0].unwrap() + 2175.9).abs() < 0.1);
+        let direction = container(&[(0x37f, 0x0008_0008)], &[], &[]);
+        assert!(read(51, 0xa00, &direction, [9, 9]).is_ok());
+        let accent = container(&[(0x37f, 0x0020_0020)], &[], &[]);
+        assert!(read(51, 0xa00, &accent, [9, 9]).is_err());
+        // Unadjusted presets keep their DrawingML defaults.
+        assert!(read(51, 0xa00, &container(&[], &[], &[]), [9, 9])
+            .unwrap()
+            .adjustments
+            .is_empty());
+        // Type 100 with no decodable path is rejected like a freeform.
+        assert!(read(100, 0xa00, &container(&[], &[], &[]), [9, 9]).is_err());
+        let points = [[0, 0], [100, 0], [100, 50]];
+        let facts = read(
+            100,
+            0xa00,
+            &freeform(&points, &[0x4000, 0x0002, 0x6001, 0x8000], &[]),
+            [9, 9],
+        )
+        .unwrap();
+        assert_eq!(facts.preset, None);
+        assert_eq!(facts.subpaths.len(), 1);
+    }
+
+    #[test]
     fn self_referencing_textbox_links_are_not_chains() {
         let fsp = record(
             0xf00a,
@@ -865,7 +983,8 @@ mod tests {
         let rejected: &[(u16, &[(u16, u32)], &[(u16, u32)])] = &[
             // Unsupported shape type, adjusted preset geometry and a freeform
             // without a decodable path.
-            (51, &[], &[]),
+            (52, &[], &[]),
+            (51, &[(0x14c, 100)], &[]),
             (0, &[], &[]),
             (0, &[(0x144, 4)], &[]),
             (1, &[(0x147, 100)], &[]),
