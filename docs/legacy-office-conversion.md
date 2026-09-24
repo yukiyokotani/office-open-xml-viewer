@@ -2268,3 +2268,28 @@ LEGACY_CORPUS=1 LEGACY_CORPUS_OUT=/tmp/legacy-survey VRT_PRIVATE_CORPUS=1 \
 
 Pixel percentages are only a triage signal. For example, a slide can score
 above 95% while a chart or autoshape is missing, so review the pairs visually.
+
+### Release gap inventory
+
+The direct-render survey was reviewed visually against the Office PDF
+exports, and the findings are grouped here. Counts are local private samples
+affected. They record open work, not supported behavior. Omission is
+acceptable only where the caller did not enable an opt-in module such as
+chartex. Every other gap below is unimplemented behavior or a bug that must
+be closed before an experimental release.
+
+| Area | Gap | Samples |
+| --- | --- | --- |
+| XLS | BIFF8 embedded charts and chart sheets are not projected into `ChartModel` | 127 of 139 |
+| XLS | Extended colors (XFExt theme/tint) fall back to palette approximations | about 6 |
+| XLS | Table (ListObject) styles, conditional-format data bars/icons and pivot styling are absent | about 5 |
+| XLS | Formula text is not decompiled from Ptg tokens, so volatile functions are not recalculated as Excel does at export | 2 |
+| XLS | Clip-art pictures, text boxes, strikethrough and one vertical merge are missing | 1 to 3 each |
+| PPT | Only seven MS-ODRAW shape types map to presets; other autoshapes render as unfilled rectangles | several |
+| PPT | Native/OLE charts are missing | 3 |
+| PPT | Rotation by multiples of 90 degrees and combined flips use the wrong bounds or order | 1 |
+| PPT | Slide gradient backgrounds, bullets, letter spacing and autofit are missing | several |
+| PPT | Implicit paragraph margin/indent and percentage spacing are rejected | 12 of 34 load failures |
+| PPT | A spurious striped artifact is drawn near a slide edge | 1 |
+| DOC | 55 of 59 samples are rejected (formatting, notes, fields, positioned tables, drawings, header pictures, non-PNG/JPEG images, list ancestry, FIB version, language ID) | 55 |
+| DOC | Picture washout/brightness and space-before after a page break differ from Word | 2 |
