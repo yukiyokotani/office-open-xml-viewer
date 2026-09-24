@@ -191,6 +191,37 @@ describe('DOCX document pull integration', () => {
     expect(archive.canceled).toBe(true);
   });
 
+  it('streams units when the package has no document cursor checkpoint', async () => {
+    // A corrupt package is streamed as a placeholder document before any
+    // cursor ledger exists. The absent checkpoint must not fail the chunk
+    // (same policy as the PPTX/XLSX cursors); real usage errors still escape.
+    class UnledgeredArchive extends FakeArchive {
+      document_cursor_resource_usage(): Uint8Array {
+        throw new Error('document cursor usage is unavailable');
+      }
+    }
+    const unledgered = new UnledgeredArchive();
+    const worker = new DocumentPullWorker(() => unledgered);
+    worker.open(identity);
+    const document = await materializeDocumentPullSession(
+      createLocalDocumentPullTransport(worker),
+      identity,
+    );
+    expect(document.body.map((element) => element.type)).toEqual(['pageBreak', 'columnBreak']);
+
+    class BrokenUsageArchive extends FakeArchive {
+      document_cursor_resource_usage(): Uint8Array {
+        throw new Error('resource ledger corrupted');
+      }
+    }
+    const brokenArchive = new BrokenUsageArchive();
+    const broken = new DocumentPullWorker(() => brokenArchive);
+    broken.open(identity);
+    await expect(
+      materializeDocumentPullSession(createLocalDocumentPullTransport(broken), identity),
+    ).rejects.toThrow('resource ledger corrupted');
+  });
+
   it('streams an already-materialized fallback model without a whole-model envelope', async () => {
     const source = {
       section: {},

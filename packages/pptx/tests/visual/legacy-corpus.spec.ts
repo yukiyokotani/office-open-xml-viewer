@@ -71,7 +71,11 @@ test.describe('legacy PPT corpus survey', () => {
         try {
           const { PptxPresentation } = await import('/src/presentation.ts');
           const { createLegacyPptSource } = await import(/* @vite-ignore */ module);
-          const bytes = await (await fetch(`/private/ppt/${encodeURIComponent(file)}`)).arrayBuffer();
+          // The dev server decodes paths with decodeURI, which keeps reserved
+          // escapes such as %2B; encodeURI leaves those characters literal.
+          const response = await fetch(`/private/ppt/${encodeURI(file)}`);
+          if (!response.ok) throw new Error(`fetch failed: ${response.status}`);
+          const bytes = await response.arrayBuffer();
           const presentation = await PptxPresentation.load(bytes, {
             legacyConversion: { ppt: { source: createLegacyPptSource() } },
           });

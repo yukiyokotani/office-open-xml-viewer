@@ -111,6 +111,13 @@ enum FontHint {
     ComplexScript,
 }
 
+#[derive(Clone, Copy)]
+enum LanguageAxis {
+    Default,
+    EastAsia,
+    ComplexScript,
+}
+
 enum LanguageResolution {
     Absent,
     Assigned(&'static str),
@@ -352,7 +359,14 @@ impl Properties {
                 if operand.len() != 2 {
                     return Err(unsupported("invalid Word complex-script language ID"));
                 }
-                self.lang_bidi_lid = Some(u16_at(operand, 0)?);
+                let lid = u16_at(operand, 0)?;
+                // Evidence: styles without a DOCX w:bidi attribute (which
+                // inherit the document default) carry LID 0x0400
+                // (LOCALE_USER_DEFAULT) in the DOC Word saved from that DOCX.
+                // It therefore sets no complex-script language of its own.
+                if lid != 0x0400 {
+                    self.lang_bidi_lid = Some(lid);
+                }
                 return Ok(true);
             }
             0x486d | 0x486e | 0x4873 | 0x4874 => {
@@ -719,11 +733,15 @@ impl Properties {
             }
         }
         let axes = [
-            ("val", "default", self.language(self.lang_default_lid)),
+            (
+                "val",
+                "default",
+                self.language(self.lang_default_lid, LanguageAxis::Default),
+            ),
             (
                 "eastAsia",
                 "East Asian",
-                self.language(self.lang_east_asia_lid),
+                self.language(self.lang_east_asia_lid, LanguageAxis::EastAsia),
             ),
             ("bidi", "complex-script", self.bidi_language()),
         ];
@@ -758,18 +776,31 @@ impl Properties {
 
     pub(super) fn resolved_languages(&self) -> Result<ResolvedLanguages, String> {
         Ok(ResolvedLanguages {
-            default: self.resolve_language_axis(self.lang_default_lid, "default")?,
-            east_asia: self.resolve_language_axis(self.lang_east_asia_lid, "East Asian")?,
-            bidi: self.resolve_language_axis(self.lang_bidi_lid, "complex-script")?,
+            default: self.resolve_language_axis(
+                self.lang_default_lid,
+                LanguageAxis::Default,
+                "default",
+            )?,
+            east_asia: self.resolve_language_axis(
+                self.lang_east_asia_lid,
+                LanguageAxis::EastAsia,
+                "East Asian",
+            )?,
+            bidi: self.resolve_language_axis(
+                self.lang_bidi_lid,
+                LanguageAxis::ComplexScript,
+                "complex-script",
+            )?,
         })
     }
 
     fn resolve_language_axis(
         &self,
         lid: Option<u16>,
+        axis: LanguageAxis,
         name: &str,
     ) -> Result<Option<&'static str>, String> {
-        match self.language(lid) {
+        match self.language(lid, axis) {
             LanguageResolution::Absent => Ok(None),
             LanguageResolution::Assigned(language) => Ok(Some(language)),
             LanguageResolution::Unsupported(lid) => Err(unsupported(format!(
@@ -779,13 +810,29 @@ impl Properties {
     }
 
     fn bidi_language(&self) -> LanguageResolution {
-        self.language(self.lang_bidi_lid)
+        self.language(self.lang_bidi_lid, LanguageAxis::ComplexScript)
     }
 
-    fn language(&self, lid: Option<u16>) -> LanguageResolution {
+    fn language(&self, lid: Option<u16>, axis: LanguageAxis) -> LanguageResolution {
         let Some(lid) = lid else {
             return LanguageResolution::Absent;
         };
+        match (lid, axis) {
+            // Evidence: private DOC files that Word saved from DOCX files. Styles
+            // whose DOCX w:lang has w:val="x-none" and w:eastAsia="x-none" carry
+            // LID 0x0000 on those axes in the DOC; project the same tag.
+            (0x0000, LanguageAxis::Default | LanguageAxis::EastAsia) => {
+                return LanguageResolution::Assigned("x-none");
+            }
+            // MS-LCID LOCALE_CUSTOM_UNSPECIFIED: a language without an LCID.
+            // Word wrote it for DOCX tags such as w:val="en-AE" and
+            // w:bidi="ae-AR"; the DOC does not retain the tag, so no language
+            // is projected (the shared layout treats an unknown tag as absent).
+            (0x1000, LanguageAxis::Default | LanguageAxis::ComplexScript) => {
+                return LanguageResolution::Absent;
+            }
+            _ => {}
+        }
         match crate::lcid::resolve(u32::from(lid)) {
             crate::lcid::Resolution::Assigned(language) => LanguageResolution::Assigned(language),
             _ => LanguageResolution::Unsupported(lid),
@@ -1002,11 +1049,24 @@ mod tests {
 
         assert!(base.clone().apply(0x485f, &[1], &base).is_err());
         assert!(base.clone().apply(0x485f, &[1, 2, 3], &base).is_err());
-        for lid in [u16::MAX, 0x1000, 0x0400, 0x007f, 0x0467, 0x040a] {
+        for lid in [u16::MAX, 0x0000, 0x007f, 0x0467, 0x040a] {
             let mut unresolved = base.clone();
             unresolved.apply(0x485f, &lid.to_le_bytes(), &base).unwrap();
             assert!(unresolved.xml(&[]).is_err(), "LID {lid:04x}");
         }
+        // Word writes 0x0400 for a style without its own complex-script
+        // language: it inherits. 0x1000 (a tag without an LCID) projects no
+        // language.
+        let mut inherited = paragraph.clone();
+        inherited
+            .apply(0x485f, &0x0400u16.to_le_bytes(), &paragraph)
+            .unwrap();
+        assert!(inherited.xml(&[]).unwrap().contains("w:bidi=\"ja-JP\""));
+        let mut custom = paragraph.clone();
+        custom
+            .apply(0x485f, &0x1000u16.to_le_bytes(), &paragraph)
+            .unwrap();
+        assert!(!custom.xml(&[]).unwrap().contains("<w:lang"));
 
         let mut truncated = Sprms::new(&[0x5f, 0x48, 0x01]);
         assert!(truncated.next(&mut Budget::default()).is_err());

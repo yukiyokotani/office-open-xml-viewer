@@ -401,6 +401,17 @@ pub(super) fn project(
                 Token::Linked(_) => {
                     return Err(unsupported("nested Word link token"));
                 }
+                Token::EvaluatedField(field) if field.ruby.is_some() => {
+                    push_ruby(
+                        &mut paragraph,
+                        story,
+                        formatting,
+                        style,
+                        table_style,
+                        field.ruby.as_deref().expect("ruby form"),
+                        budget,
+                    )?;
+                }
                 Token::EvaluatedField(field) => {
                     let run = evaluated_field_run(story, formatting, style, table_style, &field)?;
                     budget.charge(
@@ -636,6 +647,102 @@ fn push_note_mark(
         id: id.to_string(),
     });
     budget.text(&mut paragraph.runs, &mut run, id)
+}
+
+/// Project an EQ phonetic guide exactly as the DOCX parser projects the
+/// `w:ruby` Word wrote for it (ECMA-376 17.3.3.25): the base text keeps its
+/// own character properties and the first base run carries the annotation
+/// (guide text, `w:hps`, `w:hpsRaise`, `distributeSpace` alignment, the base
+/// size and the guide runs' formatting).
+fn push_ruby(
+    paragraph: &mut docx_model::DocParagraph,
+    story: &Story<'_>,
+    formatting: &mut formatting::Formatting<'_>,
+    style: usize,
+    table_style: Option<formatting::TableFormattingKey>,
+    form: &super::fields::RubyForm,
+    budget: &mut ModelBudget,
+) -> Result<(), String> {
+    use docx_model::{RubyGuideRunTypographyWire, TypographyValueStatusWire, TypographyValueWire};
+    let valid = |raw: String| TypographyValueWire {
+        status: TypographyValueStatusWire::Valid,
+        raw: Some(raw.clone()),
+        value: Some(raw),
+    };
+    let valid_pt = |value: f64| TypographyValueWire {
+        status: TypographyValueStatusWire::Valid,
+        raw: Some(value.to_string()),
+        value: Some(value),
+    };
+    let mut guide_runs = Vec::new();
+    super::super::visit_text_runs(
+        &form.guide,
+        form.guide_cp,
+        story,
+        &mut Some(&mut *formatting),
+        |formatting, fc, prm| {
+            formatting.direct_text_run(style, table_style, fc, prm, &story.prcs, String::new())
+        },
+        |part, run| {
+            let run = run
+                .flatten()
+                .ok_or_else(|| unsupported("hidden Word phonetic guide text"))?;
+            budget.charge(std::mem::size_of::<RubyGuideRunTypographyWire>() + part.len())?;
+            guide_runs.push(RubyGuideRunTypographyWire {
+                text: part.to_string(),
+                font_family: run.font_family.or(run.font_family_east_asia),
+                font_size_pt: Some(run.font_size),
+                bold: run.bold,
+                italic: run.italic,
+                color: run.color,
+                language: run.lang_default.map(|value| value.to_lowercase()),
+            });
+            Ok(())
+        },
+    )?;
+    let mut base_runs = Vec::new();
+    super::super::visit_text_runs(
+        &form.base,
+        form.base_cp,
+        story,
+        &mut Some(&mut *formatting),
+        |formatting, fc, prm| {
+            formatting.direct_text_run(style, table_style, fc, prm, &story.prcs, String::new())
+        },
+        |part, run| {
+            if let Some(run) = run.flatten() {
+                base_runs.push((part.to_string(), run));
+            }
+            Ok(())
+        },
+    )?;
+    let base_size = base_runs
+        .first()
+        .map(|(_, run)| run.font_size)
+        .ok_or_else(|| unsupported("hidden Word phonetic guide base text"))?;
+    let raise_pt = f64::from(form.raise_pt);
+    let annotation = docx_model::RubyAnnotation {
+        text: form.guide.clone(),
+        font_size_pt: f64::from(form.guide_half_points) / 2.0,
+        hps_raise_pt: Some(raise_pt),
+        typography: Some(docx_model::RubyTypographyWire {
+            align: valid("distributeSpace".to_string()),
+            base_font_size_pt: valid_pt(base_size),
+            raise_pt: valid_pt(raise_pt),
+            language: TypographyValueWire::default(),
+            guide_runs,
+        }),
+    };
+    for (index, (part, mut run)) in base_runs.into_iter().enumerate() {
+        if index == 0 {
+            if let Some(typography) = &mut run.typography_acquisition {
+                typography.ruby = annotation.typography.clone();
+            }
+            run.ruby = Some(annotation.clone());
+        }
+        budget.text(&mut paragraph.runs, &mut run, &part)?;
+    }
+    Ok(())
 }
 
 /// Project one Word-evaluated field onto the DOCX parser's `FieldRun`

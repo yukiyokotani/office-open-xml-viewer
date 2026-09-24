@@ -3547,6 +3547,8 @@ mod tests {
         let actual_object = actual.as_object_mut().unwrap();
         actual_object.remove("styleId");
         actual_object.remove("outlineLevel");
+        super::paragraph::byte_adapter_line_spacing_parity(&mut actual);
+        super::paragraph::byte_adapter_line_spacing_parity(&mut expected_paragraph);
         assert_eq!(actual, expected_paragraph);
         assert!(direct.numbering.is_none());
     }

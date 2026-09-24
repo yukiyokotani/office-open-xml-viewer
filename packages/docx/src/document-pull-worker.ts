@@ -214,8 +214,17 @@ export class DocumentPullWorker {
         cancel: () => this.executeArchive((archive) => archive.cancel_document_cursor()),
         close: () => this.executeArchive((archive) => archive.close_document_session()),
         resourceUsage: () => {
-          const bytes = this.executeArchive((archive) =>
-            archive.document_cursor_resource_usage?.());
+          let bytes: Uint8Array | undefined;
+          try {
+            bytes = this.executeArchive((archive) =>
+              archive.document_cursor_resource_usage?.());
+          } catch (error) {
+            // A package that fails before its document cursor opens has no
+            // checkpoint. Reporting that absence must not replace the real
+            // parse failure (same policy as the PPTX and XLSX cursors).
+            if (String(error).includes('document cursor usage is unavailable')) return undefined;
+            throw error;
+          }
           return bytes ? decodeOoxmlResourceUsage(bytes) : undefined;
         },
       },
