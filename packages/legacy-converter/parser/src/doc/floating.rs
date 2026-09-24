@@ -366,6 +366,13 @@ impl<'a> Store<'a> {
                 extent,
                 &mut self.budget,
             )?;
+            // No Word evidence yet shows whether a rotated top-level shape's
+            // SPA rectangle holds its rotated bounds (see `group`).
+            if facts.rotation.rem_euclid(360.0) != 0.0 {
+                return Err(unsupported(
+                    "rotated Word drawing shapes outside groups are not supported",
+                ));
+            }
             let align = direct_alignment(anchor, &placement)?;
             if matches!(anchor.wrapping, 0 | 4 | 5) {
                 return Err(unsupported(

@@ -44,6 +44,7 @@ pub(in crate::doc) enum DirectRun {
 /// drawing, or a mapped group member frame (x, y, width, height in EMUs).
 struct Placed {
     frame: [f64; 4],
+    rotation: f64,
     flip: [bool; 2],
     group: Option<(usize, usize)>,
 }
@@ -78,6 +79,7 @@ impl Store<'_> {
             .ok_or("OUTPUT_TOO_LARGE")?;
         let whole = Placed {
             frame: [0.0, 0.0, facts.extent[0] as f64, facts.extent[1] as f64],
+            rotation: 0.0,
             flip: facts.flip,
             group: None,
         };
@@ -127,6 +129,7 @@ impl Store<'_> {
                 for (index, member) in members.iter().enumerate() {
                     let placed = Placed {
                         frame: member.frame,
+                        rotation: member.rotation,
                         flip: member.flip,
                         group: Some((index, members.len())),
                     };
@@ -458,7 +461,7 @@ fn acquisition(
                 offset_y_pt: placed.frame[1] / 12_700.0,
                 width_pt: placed.frame[2] / 12_700.0,
                 height_pt: placed.frame[3] / 12_700.0,
-                rotation_deg: 0.0,
+                rotation_deg: placed.rotation,
                 flip_h: placed.flip[0],
                 flip_v: placed.flip[1],
             },
@@ -590,6 +593,7 @@ fn direct_shape(
         stroke_miter_limit: line.and_then(|line| line.miter),
         head_end: line.and_then(|line| end(line.ends[0])),
         tail_end: line.and_then(|line| end(line.ends[1])),
+        rotation: placed.rotation,
         flip_h: placed.flip[0],
         flip_v: placed.flip[1],
         text_autofit: text.filter(|text| text.fit_shape).map(|_| "sp".to_owned()),

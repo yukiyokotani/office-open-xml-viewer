@@ -1073,14 +1073,21 @@ mod tests {
     /// document. The textbox story follows the header story; its FTXBXS and
     /// Tbkd tables name the shape (MS-DOC 2.3.6-2.3.7, 2.9.106, 2.9.312).
     fn drawing_shape_source(textbox: Option<&str>, header: bool) -> Vec<u8> {
-        drawing_source(textbox, header, false)
+        drawing_source(textbox, header, false, [0, 0])
     }
 
     /// With `grouped`, the anchored shape is an OfficeArt group: FSPGR
     /// 0..1000 x 0..500 holds a filled rectangle member in its top-left
     /// quarter and a nested group (FSPGR -10..10) in the bottom-right quarter
     /// whose only member is the textbox (spid 2052).
-    fn drawing_source(textbox: Option<&str>, header: bool, grouped: bool) -> Vec<u8> {
+    /// `turns` are the FixedPoint rotations of the group and of its first
+    /// (rectangle) member.
+    fn drawing_source(
+        textbox: Option<&str>,
+        header: bool,
+        grouped: bool,
+        turns: [u32; 2],
+    ) -> Vec<u8> {
         let main = if header { "B\r" } else { "B\u{8}\r" };
         let main_units = main.encode_utf16().count();
         let textbox = textbox.unwrap_or("");
@@ -1188,6 +1195,11 @@ mod tests {
             let mut fill = Vec::new();
             fill.extend(0x181u16.to_le_bytes());
             fill.extend(0x0000_ff00u32.to_le_bytes());
+            fill.extend(0x4u16.to_le_bytes());
+            fill.extend(turns[1].to_le_bytes());
+            let mut turn = Vec::new();
+            turn.extend(0x4u16.to_le_bytes());
+            turn.extend(turns[0].to_le_bytes());
             let nested = picture_record(
                 0xf003,
                 15,
@@ -1216,11 +1228,12 @@ mod tests {
                         &[
                             picture_record(0xf009, 1, &rect([0, 0, 1000, 500])),
                             fsp(0, 2050, 0x201),
+                            picture_record(0xf00b, (1 << 4) | 3, &turn),
                             picture_record(0xf010, 0, &0u32.to_le_bytes()),
                         ]
                         .concat(),
                     ),
-                    member(1, 2051, [0, 0, 500, 250], &fill, 1),
+                    member(1, 2051, [0, 0, 500, 250], &fill, 2),
                     nested,
                 ]
                 .concat(),
@@ -1322,7 +1335,7 @@ mod tests {
 
     #[test]
     fn grouped_members_share_one_host_and_map_through_nested_groups() {
-        let bytes = drawing_source(Some("Inside\r"), false, true);
+        let bytes = drawing_source(Some("Inside\r"), false, true, [0, 0]);
         let result =
             super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024).unwrap();
         let BodyElement::Paragraph(paragraph) = &result.document.body[0] else {
@@ -1377,8 +1390,73 @@ mod tests {
     }
 
     #[test]
+    fn rotated_members_and_half_turned_groups_follow_word() {
+        let member_with = |text: Option<&str>, turns: [u32; 2]| {
+            let bytes = drawing_source(text, false, true, turns);
+            let result =
+                super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024);
+            result.map(|result| {
+                let BodyElement::Paragraph(paragraph) = &result.document.body[0] else {
+                    panic!("body paragraph")
+                };
+                let [_, _, DocRun::Shape(first), DocRun::Shape(second)] = paragraph.runs.as_slice()
+                else {
+                    panic!("two members")
+                };
+                let frame = |shape: &docx_model::ShapeRun| {
+                    let child = &shape
+                        .anchor_acquisition
+                        .as_ref()
+                        .unwrap()
+                        .group
+                        .as_ref()
+                        .unwrap()
+                        .resolved_child_frame;
+                    (
+                        child.offset_x_pt,
+                        child.offset_y_pt,
+                        child.width_pt,
+                        child.height_pt,
+                        child.rotation_deg,
+                        shape.rotation,
+                    )
+                };
+                (frame(first), frame(second))
+            })
+        };
+        let member = |turns: [u32; 2]| member_with(Some("Inside\r"), turns);
+        // The member's 50 x 25 pt stored frame is its rotated bounds at 90
+        // degrees: the unrotated box is 25 x 50 pt about the same centre.
+        assert_eq!(
+            member([0, 90 << 16]).unwrap().0,
+            (12.5, -12.5, 25.0, 50.0, 90.0, 90.0)
+        );
+        // Outside [45, 135) and [225, 315) the stored frame is unrotated.
+        let (first, _) = member([0, 0x002c_3f74]).unwrap();
+        assert_eq!((first.0, first.1, first.2, first.3), (0.0, 0.0, 50.0, 25.0));
+        assert!((first.4 - 44.248).abs() < 1e-3);
+        let (first, _) = member([0, 0xff78_6402]).unwrap();
+        assert_eq!((first.0, first.1, first.2, first.3), (0.0, 0.0, 50.0, 25.0));
+        assert!((first.4 - 224.391).abs() < 1e-3);
+        // A half-turned group mirrors member centres and adds 180 degrees; its
+        // textbox member makes this group rotate text, which stays rejected.
+        assert!(member([180 << 16, 0])
+            .unwrap_err()
+            .contains("rotated Word drawing text"));
+        let (first, second) = member_with(None, [180 << 16, 90 << 16]).unwrap();
+        // 100 x 50 pt frame: the rotated member's box mirrors through the
+        // centre (its centre 25, 12.5 becomes 75, 37.5) and turns to 270 degrees.
+        assert_eq!(first, (62.5, 12.5, 25.0, 50.0, 270.0, 270.0));
+        assert_eq!(second, (0.0, 0.0, 50.0, 25.0, 180.0, 180.0));
+        // Other group angles stay unsupported.
+        assert!(member([90 << 16, 0])
+            .unwrap_err()
+            .contains("rotated Word drawing groups"));
+    }
+
+    #[test]
     fn rotated_or_flipped_groups_fail_closed() {
-        let bytes = drawing_source(Some("Inside\r"), false, true);
+        let bytes = drawing_source(Some("Inside\r"), false, true, [0, 0]);
         let cfb = CompoundFile::open(&bytes).unwrap();
         let word = cfb.stream("WordDocument").unwrap();
         let table = cfb.stream("0Table").unwrap();

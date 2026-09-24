@@ -38,6 +38,9 @@ pub(in crate::doc) struct Facts {
     pub fill: Option<String>,
     pub line: Option<Line>,
     pub text: Option<Text>,
+    /// MS-ODRAW 2.3.18.5 rotation, clockwise about the centre, in degrees.
+    /// Only group members may carry a nonzero rotation (see `group`).
+    pub rotation: f64,
 }
 
 pub(in crate::doc) struct Line {
@@ -209,13 +212,15 @@ impl<'a> Table<'a> {
     ) -> Result<Facts, String> {
         let mut paint = Paint::default();
         let mut geometry = Geometry::default();
+        let mut rotation = 0.0;
         let freeform = kind == 0;
         let mut insets = [0x16530, 0xb298, 0x16530, 0xb298];
         let mut text_id = None;
         for (&id, &value) in &self.values {
             match id {
-                // Transform: only an unrotated shape is projected.
-                0x4 if value == 0 => {}
+                // Transform (MS-ODRAW 2.3.18.5): a FixedPoint angle. Callers
+                // decide where a rotated shape can be projected.
+                0x4 => rotation = f64::from(value as i32) / 65536.0,
                 // Protection (2.3.1-2.3.2): editing locks.
                 0x40..=0x7f => {}
                 0x80 => text_id = Some(value),
@@ -389,6 +394,7 @@ impl<'a> Table<'a> {
         Ok(Facts {
             preset,
             subpaths,
+            rotation,
             fill,
             line,
             text,
@@ -542,7 +548,12 @@ mod tests {
             &[],
         );
         let facts = read(1, 0xa00, &bytes, [9000, 3000]).unwrap();
+        assert_eq!(facts.rotation, 0.0);
         assert_eq!(facts.fill.as_deref(), Some("4F81BD80"));
+        // The FixedPoint angle is reported; callers decide where it is valid.
+        let rotated = container(&[(0x4, 0xffd6_4e6d)], &[], &[]);
+        let turned = read(1, 0xa00, &rotated, [9, 9]).unwrap();
+        assert!((turned.rotation + 41.694).abs() < 1e-3);
         let line = facts.line.unwrap();
         assert_eq!(line.color, "201000");
         assert_eq!(line.width_emu, 25_400);
@@ -691,7 +702,6 @@ mod tests {
             (0, &[], &[]),
             (0, &[(0x144, 4)], &[]),
             (1, &[(0x147, 100)], &[]),
-            (1, &[(0x4, 0x5a_0000)], &[]),
             // System/palette/scheme colors and non-solid paint.
             (1, &[(0x1c0, 0x1000_0001)], &[]),
             (1, &[(0x181, 0x0800_0001)], &[]),
