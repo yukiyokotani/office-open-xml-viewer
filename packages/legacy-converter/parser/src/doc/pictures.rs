@@ -17,6 +17,8 @@ pub(super) struct Store<'a> {
     /// PICF offsets holding the empty placeholder of a pseudo-inline shape.
     #[cfg_attr(not(feature = "direct-doc"), allow(dead_code))]
     placeholders: BTreeSet<usize>,
+    /// Whether PNG BLIPs holding TIFF data are admitted (direct model only).
+    pub raster: crate::officeart::raster::Raster,
     budget: usize,
     remaining_bytes: usize,
     occurrences: u32,
@@ -29,6 +31,7 @@ impl<'a> Store<'a> {
             cache: BTreeMap::new(),
             part_offsets: BTreeSet::new(),
             placeholders: BTreeSet::new(),
+            raster: crate::officeart::raster::Raster::Advertised,
             budget: 1_000_000,
             remaining_bytes: 128 * 1024 * 1024,
             occurrences: 0,
@@ -70,6 +73,7 @@ impl<'a> Store<'a> {
                 &mut self.budget,
                 self.remaining_bytes,
                 &mut placeholder,
+                self.raster,
             )?;
             if placeholder {
                 self.placeholders.insert(offset);
@@ -133,7 +137,14 @@ fn read<'a>(
     offset: usize,
     budget: &mut usize,
 ) -> Result<Option<Picture<'a>>, String> {
-    read_with_limit(data, offset, budget, 128 * 1024 * 1024, &mut false)
+    read_with_limit(
+        data,
+        offset,
+        budget,
+        128 * 1024 * 1024,
+        &mut false,
+        crate::officeart::raster::Raster::Advertised,
+    )
 }
 
 fn read_with_limit<'a>(
@@ -142,6 +153,7 @@ fn read_with_limit<'a>(
     budget: &mut usize,
     remaining_bytes: usize,
     placeholder: &mut bool,
+    raster: crate::officeart::raster::Raster,
 ) -> Result<Option<Picture<'a>>, String> {
     let tail = data
         .get(offset..)
@@ -204,8 +216,13 @@ fn read_with_limit<'a>(
             return Err(unsupported("invalid Word inline BLIP record"));
         }
         if props.pib == Some(index) {
-            selected =
-                crate::officeart::raster::read_store_entry(entry, None, budget, remaining_bytes)?;
+            selected = crate::officeart::raster::read_store_entry_as(
+                entry,
+                None,
+                budget,
+                remaining_bytes,
+                raster,
+            )?;
         }
     }
     let Some(image) = selected else {

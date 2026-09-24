@@ -12,8 +12,28 @@ pub(crate) fn read_store_entry<'a>(
     budget: &mut usize,
     remaining_bytes: usize,
 ) -> Result<Option<Image<'a>>, String> {
+    read_store_entry_as(entry, delayed, budget, remaining_bytes, Raster::Advertised)
+}
+
+/// Which bytes a PNG/JPEG BLIP may carry. `TiffAware` is a host decision:
+/// Word writes TIFF data inside PNG BLIPs and reads it back as TIFF (see the
+/// DOC picture store); no other host has that evidence.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Raster {
+    Advertised,
+    TiffAware,
+}
+
+pub(crate) fn read_store_entry_as<'a>(
+    entry: Record<'a>,
+    delayed: Option<&'a [u8]>,
+    budget: &mut usize,
+    remaining_bytes: usize,
+    raster: Raster,
+) -> Result<Option<Image<'a>>, String> {
+    let read = |blip, budget: &mut usize| read_as(blip, budget, remaining_bytes, raster);
     let source = match locate_store_entry(entry)? {
-        StoreLocation::Direct => return read(entry, budget, remaining_bytes),
+        StoreLocation::Direct => return read(entry, budget),
         StoreLocation::Omit => return Ok(None),
         StoreLocation::Embedded(range) => &entry.payload[range],
         StoreLocation::Delayed { offset, size } => {
@@ -30,7 +50,7 @@ pub(crate) fn read_store_entry<'a>(
     if end != source.len() {
         return Err(unsupported("OfficeArt BLIP record size mismatch"));
     }
-    read(blip, budget, remaining_bytes)
+    read(blip, budget)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -200,13 +220,24 @@ pub(crate) fn read<'a>(
     budget: &mut usize,
     remaining_bytes: usize,
 ) -> Result<Option<Image<'a>>, String> {
-    Ok(decode(blip, budget, remaining_bytes)?.map(|image| Image {
-        bytes: match image.bytes {
-            DecodedBytes::Source(range) => Cow::Borrowed(&blip.payload[range]),
-            DecodedBytes::Owned(bytes) => Cow::Owned(bytes),
-        },
-        extension: image.extension,
-    }))
+    read_as(blip, budget, remaining_bytes, Raster::Advertised)
+}
+
+fn read_as<'a>(
+    blip: Record<'a>,
+    budget: &mut usize,
+    remaining_bytes: usize,
+    raster: Raster,
+) -> Result<Option<Image<'a>>, String> {
+    Ok(
+        decode(blip, budget, remaining_bytes, raster)?.map(|image| Image {
+            bytes: match image.bytes {
+                DecodedBytes::Source(range) => Cow::Borrowed(&blip.payload[range]),
+                DecodedBytes::Owned(bytes) => Cow::Owned(bytes),
+            },
+            extension: image.extension,
+        }),
+    )
 }
 
 pub(crate) fn read_span(
@@ -216,7 +247,7 @@ pub(crate) fn read_span(
     remaining_bytes: usize,
 ) -> Result<Option<ImageSpan>, String> {
     let viewed = blip.view(backing)?;
-    decode(viewed, budget, remaining_bytes)?
+    decode(viewed, budget, remaining_bytes, Raster::Advertised)?
         .map(|image| {
             Ok(ImageSpan {
                 bytes: match image.bytes {
@@ -236,6 +267,7 @@ fn decode(
     blip: Record<'_>,
     budget: &mut usize,
     remaining_bytes: usize,
+    raster: Raster,
 ) -> Result<Option<DecodedImage>, String> {
     if matches!(blip.kind, 0xf01a | 0xf01b) {
         let extension = if blip.kind == 0xf01a { "emf" } else { "wmf" };
@@ -261,15 +293,21 @@ fn decode(
     // Admit only the advertised raster encoding. Some producer output puts a
     // different format in a PNG BLIP; omit it rather than relabel, sniff into
     // another decoder, or copy arbitrary bytes into a supported image part.
+    let mut extension = extension;
     if (extension == "png" && !bytes.starts_with(b"\x89PNG\r\n\x1a\n"))
         || (extension == "jpg" && !bytes.starts_with(&[0xff, 0xd8]))
     {
-        return Ok(None);
+        if raster != Raster::TiffAware
+            || !(bytes.starts_with(b"II*\0") || bytes.starts_with(b"MM\0*"))
+        {
+            return Ok(None);
+        }
+        extension = "tiff";
     }
-    let (width, height) = if extension == "png" {
-        png_size(bytes)?
-    } else {
-        jpeg_size(bytes, budget)?
+    let (width, height) = match extension {
+        "png" => png_size(bytes)?,
+        "jpg" => jpeg_size(bytes, budget)?,
+        _ => tiff_size(bytes, budget)?,
     };
     if width == 0
         || height == 0
@@ -289,6 +327,63 @@ fn decode(
         extension,
     }))
 }
+/// Bounded TIFF 6.0 header check: byte order, the magic number, the first
+/// IFD inside the data and its ImageWidth (256) and ImageLength (257) tags
+/// with SHORT or LONG single values. Decoding stays with the renderer.
+pub(crate) fn tiff_size(b: &[u8], budget: &mut usize) -> Result<(u32, u32), String> {
+    let invalid = || unsupported("invalid OfficeArt TIFF header");
+    let little = match b.get(..4) {
+        Some(b"II*\0") => true,
+        Some(b"MM\0*") => false,
+        _ => return Err(invalid()),
+    };
+    let u16_at = |at: usize| -> Result<u32, String> {
+        let bytes: [u8; 2] = b.get(at..at + 2).ok_or_else(invalid)?.try_into().unwrap();
+        Ok(u32::from(if little {
+            u16::from_le_bytes(bytes)
+        } else {
+            u16::from_be_bytes(bytes)
+        }))
+    };
+    let u32_at = |at: usize| -> Result<u32, String> {
+        let bytes: [u8; 4] = b.get(at..at + 4).ok_or_else(invalid)?.try_into().unwrap();
+        Ok(if little {
+            u32::from_le_bytes(bytes)
+        } else {
+            u32::from_be_bytes(bytes)
+        })
+    };
+    let ifd = u32_at(4)? as usize;
+    if ifd < 8 {
+        return Err(invalid());
+    }
+    let count = u16_at(ifd)? as usize;
+    *budget = budget
+        .checked_sub(count)
+        .ok_or_else(|| unsupported("OfficeArt TIFF work budget exceeded"))?;
+    let mut size = [None, None];
+    for index in 0..count {
+        let entry = ifd + 2 + index * 12;
+        let tag = u16_at(entry)?;
+        if !(256..=257).contains(&tag) {
+            continue;
+        }
+        if u32_at(entry + 4)? != 1 {
+            return Err(invalid());
+        }
+        let value = match u16_at(entry + 2)? {
+            3 => u16_at(entry + 8)?,
+            4 => u32_at(entry + 8)?,
+            _ => return Err(invalid()),
+        };
+        size[(tag - 256) as usize] = Some(value);
+    }
+    match size {
+        [Some(width), Some(height)] => Ok((width, height)),
+        _ => Err(invalid()),
+    }
+}
+
 pub(crate) fn png_size(b: &[u8]) -> Result<(u32, u32), String> {
     if b.len() < 33 || !b.starts_with(b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR") {
         return Err(unsupported("invalid OfficeArt PNG header"));
@@ -399,6 +494,90 @@ mod tests {
         png[24] = 8;
         png[25] = 2;
         record(0x6e00, 0xf01e, &[vec![0; 17], png].concat())
+    }
+
+    /// A PNG BLIP whose data is a little- or big-endian TIFF with the given
+    /// ImageWidth/ImageLength entries.
+    fn tiff_in_png(little: bool, entries: &[(u16, u16, u32)]) -> Vec<u8> {
+        let u16b = |v: u16| {
+            if little {
+                v.to_le_bytes()
+            } else {
+                v.to_be_bytes()
+            }
+        };
+        let u32b = |v: u32| {
+            if little {
+                v.to_le_bytes()
+            } else {
+                v.to_be_bytes()
+            }
+        };
+        let mut tiff = if little {
+            b"II*\0".to_vec()
+        } else {
+            b"MM\0*".to_vec()
+        };
+        tiff.extend(u32b(8));
+        tiff.extend(u16b(entries.len() as u16));
+        for (tag, kind, value) in entries {
+            tiff.extend(u16b(*tag));
+            tiff.extend(u16b(*kind));
+            tiff.extend(u32b(1));
+            if *kind == 3 {
+                tiff.extend(u16b(*value as u16));
+                tiff.extend([0, 0]);
+            } else {
+                tiff.extend(u32b(*value));
+            }
+        }
+        tiff.extend([0; 4]);
+        record(0x6e00, 0xf01e, &[vec![0; 17], tiff].concat())
+    }
+
+    #[test]
+    fn tiff_data_in_png_blips_is_admitted_only_when_the_host_opts_in() {
+        let blip = tiff_in_png(true, &[(256, 3, 40), (257, 4, 30)]);
+        let (blip_record, _) = crate::officeart::record_with_end(&blip, 0, &mut 10, "t").unwrap();
+        // The shared reader keeps admitting only the advertised encoding.
+        assert!(read(blip_record, &mut 100, usize::MAX).unwrap().is_none());
+        let image = read_as(blip_record, &mut 100, usize::MAX, Raster::TiffAware)
+            .unwrap()
+            .unwrap();
+        assert_eq!(image.extension, "tiff");
+        assert!(image.bytes.starts_with(b"II*\0"));
+        let big = tiff_in_png(false, &[(257, 3, 30), (256, 3, 40)]);
+        let (blip_record, _) = crate::officeart::record_with_end(&big, 0, &mut 10, "t").unwrap();
+        assert_eq!(
+            read_as(blip_record, &mut 100, usize::MAX, Raster::TiffAware)
+                .unwrap()
+                .unwrap()
+                .extension,
+            "tiff"
+        );
+        // Missing, zero, oversized or unsupported-type dimensions are rejected.
+        for entries in [
+            vec![(256u16, 3u16, 40u32)],
+            vec![(256, 3, 0), (257, 3, 30)],
+            vec![(256, 4, 40_000), (257, 4, 40_000)],
+            vec![(256, 2, 40), (257, 3, 30)],
+        ] {
+            let blip = tiff_in_png(true, &entries);
+            let (blip_record, _) =
+                crate::officeart::record_with_end(&blip, 0, &mut 10, "t").unwrap();
+            assert!(
+                read_as(blip_record, &mut 100, usize::MAX, Raster::TiffAware).is_err(),
+                "{entries:?}"
+            );
+        }
+        // Other data in a PNG BLIP is still omitted.
+        let other = record(0x6e00, 0xf01e, &[vec![0; 17], b"GIF89a".to_vec()].concat());
+        let (blip_record, _) = crate::officeart::record_with_end(&other, 0, &mut 10, "t").unwrap();
+        assert!(
+            read_as(blip_record, &mut 100, usize::MAX, Raster::TiffAware)
+                .unwrap()
+                .is_none()
+        );
     }
 
     fn jpeg_blip() -> Vec<u8> {

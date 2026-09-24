@@ -749,7 +749,7 @@ fn direct_shape(
 /// content-sniffing metafile players render them; no DOC-specific paint path.
 fn mime(extension: &str) -> Result<&'static str, String> {
     match extension {
-        "png" | "jpg" | "emf" | "wmf" => Ok(ooxml_common::blip::mime_from_ext(extension)),
+        "png" | "jpg" | "emf" | "wmf" | "tiff" => Ok(ooxml_common::blip::mime_from_ext(extension)),
         _ => Err(unsupported(
             "direct DOC model supports only PNG/JPEG/EMF/WMF floating pictures",
         )),
@@ -779,6 +779,7 @@ mod tests {
                     extension: "png",
                 }),
             )]),
+            raster: crate::officeart::raster::Raster::Advertised,
             budget: 0,
             remaining_bytes: 0,
             occurrences: 0,

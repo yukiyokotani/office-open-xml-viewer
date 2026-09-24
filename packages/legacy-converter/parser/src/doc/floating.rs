@@ -3,7 +3,7 @@
 use super::pictures::{Options as PictureOptions, Picture};
 use super::{u16_at, u32_at, unsupported};
 use crate::officeart::{
-    raster::{read_store_entry, Image},
+    raster::{read_store_entry_as, Image, Raster},
     record_with_end, Record,
 };
 use std::collections::BTreeMap;
@@ -77,6 +77,8 @@ pub(super) struct Store<'a> {
     #[cfg(feature = "direct-doc")]
     textboxes: [Option<textbox::Textboxes<'a>>; 2],
     images: BTreeMap<usize, Option<Image<'a>>>,
+    /// Whether PNG BLIPs holding TIFF data are admitted (direct model only).
+    pub raster: Raster,
     budget: usize,
     remaining_bytes: usize,
     occurrences: u32,
@@ -119,6 +121,7 @@ impl<'a> Store<'a> {
             #[cfg(feature = "direct-doc")]
             textboxes: [None, None],
             images: BTreeMap::new(),
+            raster: Raster::Advertised,
             budget: 1_000_000,
             remaining_bytes: 128 * 1024 * 1024,
             occurrences: 0,
@@ -514,11 +517,12 @@ impl<'a> Store<'a> {
                 .entries
                 .get(image_index)
                 .ok_or_else(|| unsupported("Word floating image index out of bounds"))?;
-            let image = read_store_entry(
+            let image = read_store_entry_as(
                 entry,
                 Some(self.word),
                 &mut self.budget,
                 self.remaining_bytes,
+                self.raster,
             )?;
             if let Some(image) = &image {
                 self.remaining_bytes = self
