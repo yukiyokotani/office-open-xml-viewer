@@ -68,7 +68,7 @@ export const WORD_AUTOMATIC_KEEP_NEXT_START_SPACING = defineCompatibilityRule({
   id: 'word-automatic-keep-next-start-spacing',
   evidence: {
     kind: 'regression-test',
-    reference: 'packages/docx/src/layout/body-paginator-production.test.ts#suppresses leading spacing when a keepNext unit moves to an automatic page',
+    reference: 'packages/docx/src/layout/body-paginator-production.test.ts#suppresses leading spacing when a $kind keepNext unit moves to an automatic page',
   },
   description: 'When automatic overflow relocates a keep-with-next unit to a fresh physical page, suppress the leading paragraph space-before for that grouped relocation. Standalone authored hard page breaks use a separate rule.',
 });

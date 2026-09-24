@@ -2,6 +2,15 @@ import { defineCompatibilityRule } from './compatibility.js';
 import { OFFICE_FAR_EAST_SINGLE_LINE_FACTOR, officeOpenTypeAutoLineRatios } from '@silurus/ooxml-core/internal/office-auto-line';
 import type { LineSpacing, TabStop } from '../types.js';
 
+export const WORD_OPENTYPE_FEATURES_COMPAT_KERNING = defineCompatibilityRule({
+  id: 'word-opentype-features-compat-kerning',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/run-char-metrics-render.test.ts#enables absent-threshold kerning only under enableOpenTypeFeatures',
+  },
+  description: '[MS-DOCX] §2.3.3 stores enableOpenTypeFeatures as a named compatibility setting. When enabled, an unqualified run enables OpenType kerning; an explicit or style-resolved w:kern threshold remains authoritative. Both line measurement and paint use the same resolved threshold.',
+});
+
 export const WORD_NUMBERING_MARKER_FIRST_LINE_UNION = defineCompatibilityRule({
   id: 'word-numbering-marker-first-line-union',
   evidence: {

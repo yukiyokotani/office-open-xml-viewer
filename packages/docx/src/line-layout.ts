@@ -353,7 +353,7 @@ export interface LayoutTextSeg extends LayoutSegSource {
   /** ECMA-376 §17.3.2.19 `<w:kern>` — font-kerning threshold in POINTS (smallest
    *  kerned size). Sets `ctx.fontKerning` on measure and paint when the run's
    *  font size ≥ the threshold. Absent at every style level disables kerning
-   *  unless [MS-DOCX] `enableOpenTypeFeatures` explicitly enables it for the
+   *  unless `enableOpenTypeFeatures` explicitly enables it for the
    *  document; Canvas `auto` is not the WordprocessingML default. */
   kerning?: number;
   /** ECMA-376 §17.3.2.10 `<w:eastAsianLayout w:vert>` — horizontal-in-vertical
@@ -732,7 +732,7 @@ export interface LineLayoutEnvironment {
   readonly characterSpacingControl?: string;
   /** §17.15.3.31: use full character width when deciding line fit. */
   readonly lineWrapLikeWord6?: boolean;
-  /** [MS-DOCX] §2.3.3 enables OpenType kerning without an authored `w:kern`. */
+  /** See WORD_OPENTYPE_FEATURES_COMPAT_KERNING for absent `w:kern`. */
   readonly enableOpenTypeFeatures?: boolean;
   /** False only when `w:framePr` specifies a drop cap with a fixed `w:lines`;
    * the authored frame height remains authoritative even when glyph paint is
@@ -3143,7 +3143,7 @@ export function buildSegments(
     const documentCharacterCompressionApplies =
       wordDocumentCharacterCompressionApplies(effectiveCharacterSpacing);
     const effectiveCharacterScale = acquiredTypography?.characterScale ?? r.charScale;
-    // [MS-DOCX] §2.3.3: the exact Office compatSetting enables OpenType
+    // WORD_OPENTYPE_FEATURES_COMPAT_KERNING: the exact compatSetting enables
     // kerning for unqualified runs. Authored/style-resolved w:kern wins.
     const effectiveKerningThreshold = acquiredTypography?.kerningThresholdPt
       ?? r.kerning
