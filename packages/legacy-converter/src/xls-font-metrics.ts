@@ -39,3 +39,36 @@ export function measureXlsFont(
     }).catch(reject).finally(() => signal.removeEventListener('abort', aborted));
   });
 }
+
+/**
+ * Default browser measurement for the direct XLS source. Excel column widths
+ * are expressed in the Normal font's maximum digit width in whole pixels
+ * (ECMA-376 §18.3.1.13), so this loads the named font through the document's
+ * FontFaceSet and measures digits 0–9 at 96 dpi. It honors the measurement
+ * contract: when the named font cannot be loaded it returns undefined rather
+ * than measuring a fallback face, and callers then omit geometry-dependent
+ * drawings. Once shared reference font metrics can supply Office font
+ * advances without an installed face, this default should use them instead.
+ */
+export async function measureLegacyXlsNormalFontInDocument(
+  font: Readonly<LegacyXlsNormalFont>,
+  signal: AbortSignal,
+): Promise<number | undefined> {
+  if (typeof document === 'undefined' || !document.fonts) return undefined;
+  const px = font.sizePoints * 96 / 72;
+  const family = `"${font.family.replace(/["\\]/g, '')}"`;
+  const spec = `${font.italic ? 'italic ' : ''}${font.bold ? 'bold ' : ''}${px}px ${family}`;
+  try {
+    await document.fonts.load(spec, '0123456789');
+  } catch {
+    return undefined;
+  }
+  if (signal.aborted || !document.fonts.check(spec, '0123456789')) return undefined;
+  const context = document.createElement('canvas').getContext('2d');
+  if (!context) return undefined;
+  context.font = spec;
+  let widest = 0;
+  for (const digit of '0123456789') widest = Math.max(widest, context.measureText(digit).width);
+  const width = Math.round(widest);
+  return width >= 1 && width <= 4096 ? width : undefined;
+}

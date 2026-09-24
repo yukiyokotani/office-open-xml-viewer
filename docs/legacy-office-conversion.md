@@ -2282,6 +2282,7 @@ be closed before an experimental release.
 | --- | --- | --- |
 | XLS | BIFF8 embedded charts and chart sheets are not projected into `ChartModel` | 127 of 139 |
 | XLS | EMF pictures written by GDI+ (EMF+ comment records, short EMR_EOF and a record count off by one) are rejected by the passive validator. Core rendering also treats EMF+ as out of scope, so shared EMF+ drawing is needed for all formats | 3 |
+| XLS | Chart and picture anchors need the Normal font's digit width. The browser default measures only an installed face, so they are omitted when Office fonts such as Calibri are not installed; shared reference font metrics are needed | all with drawings |
 | XLS | Extended colors (XFExt theme/tint) fall back to palette approximations | about 6 |
 | XLS | Table (ListObject) styles, conditional-format data bars/icons and pivot styling are absent | about 5 |
 | XLS | Formula text is not decompiled from Ptg tokens, so volatile functions are not recalculated as Excel does at export | 2 |

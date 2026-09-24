@@ -22,6 +22,7 @@ import { resolveXlsWorkbookInput } from '@silurus/ooxml-core/internal/legacy-off
 import type { LegacyXlsDirectSourceDescriptor } from '@silurus/ooxml-core/internal/legacy-xls-source';
 import {
   attachXlsFontMeasurement,
+  measureLegacyXlsNormalFontInDocument,
 } from '@silurus/ooxml-legacy-converter/internal/xls-font-worker';
 type LegacyXlsFontMeasurement = Parameters<typeof attachXlsFontMeasurement>[1];
 import {
@@ -114,7 +115,9 @@ interface RetainedFontSet {
  *  from `@silurus/ooxml-core` (`useGoogleFonts`, `resourceLimits`, the
  *  deprecated `maxZipEntryBytes` alias, and `math`) with worker rendering. */
 export interface LoadOptions extends CoreLoadOptions {
-  /** Measure the actual Normal-style font for direct XLS column geometry. */
+  /** Measure the actual Normal-style font for direct XLS column geometry.
+   *  Defaults to loading and measuring the named font in the current
+   *  document; pictures and charts are omitted when it cannot be measured. */
   measureLegacyXlsNormalFont?: LegacyXlsFontMeasurement;
   /**
    * 'main' (default): parse in a worker, render on the main thread (current
@@ -384,9 +387,13 @@ export class XlsxWorkbook {
     let wb: XlsxWorkbook | undefined;
     try {
       wb = new XlsxWorkbook(worker, mode, opts.wasmUrl, nativeSource === undefined);
-      if (nativeSource && opts.measureLegacyXlsNormalFont) {
+      // Direct XLS column geometry needs the Normal font's digit width; use
+      // the document's own font when the caller supplies no measurement.
+      const measureLegacyXlsNormalFont = opts.measureLegacyXlsNormalFont
+        ?? (typeof document !== 'undefined' ? measureLegacyXlsNormalFontInDocument : undefined);
+      if (nativeSource && measureLegacyXlsNormalFont) {
         wb.legacyXlsMeasurementCleanup = attachXlsFontMeasurement(
-          worker, opts.measureLegacyXlsNormalFont,
+          worker, measureLegacyXlsNormalFont,
         );
       }
       wb.metrics = metrics;
@@ -485,7 +492,7 @@ export class XlsxWorkbook {
               renderers: rendererDescriptors,
               source: nativeSource,
               measureLegacyXlsNormalFont: nativeSource !== undefined
-                && opts.measureLegacyXlsNormalFont !== undefined,
+                && (opts.measureLegacyXlsNormalFont !== undefined || typeof document !== 'undefined'),
             } satisfies RenderWorkerRequest)
           : ({
               type: 'parse',
@@ -494,7 +501,7 @@ export class XlsxWorkbook {
               resourcePolicy,
               source: nativeSource,
               measureLegacyXlsNormalFont: nativeSource !== undefined
-                && opts.measureLegacyXlsNormalFont !== undefined,
+                && (opts.measureLegacyXlsNormalFont !== undefined || typeof document !== 'undefined'),
             } satisfies WorkerRequest),
       [workerData],
       { timeoutMs: opts.workerTimeoutMs },

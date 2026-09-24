@@ -74,8 +74,9 @@ test.describe('legacy XLS corpus survey', () => {
           const { createLegacyXlsSource } = await import(/* @vite-ignore */ module);
           const bytes = await (await fetch(`/private/xls/${encodeURIComponent(file)}`)).arrayBuffer();
           // Excel column widths depend on the Normal font's maximum digit
-          // width in whole pixels (ECMA-376 §18.3.1.13); measure it with the
-          // browser's font for this survey.
+          // width in whole pixels (ECMA-376 §18.3.1.13). The library default
+          // measures only an installed face; this survey measures whatever
+          // face the browser resolves so drawings remain reviewable.
           const measure = (font: { family: string; sizePoints: number; bold: boolean; italic: boolean }) => {
             const context = document.createElement('canvas').getContext('2d')!;
             const px = font.sizePoints * 96 / 72;
