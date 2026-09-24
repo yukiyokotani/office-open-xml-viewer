@@ -255,7 +255,7 @@ fn foreground_xml_and_native_keep_quantized_stops_for_all_leaf_flips() {
 }
 
 #[test]
-fn master_gradient_inherits_but_local_scalar_zero_resets_it() {
+fn master_gradient_inherits_but_local_scalar_zero_resets_its_shade_colours() {
     for reset in [false, true] {
         let local_properties = if reset {
             gradient_properties(&[(0x301, 1)], Some(0))
@@ -328,14 +328,20 @@ fn master_gradient_inherits_but_local_scalar_zero_resets_it() {
         )
         .unwrap()
         .unwrap();
-        assert_eq!(xml.contains("<a:gradFill"), !reset);
+        assert!(xml.contains("<a:gradFill"));
         let model = native(&combined, p);
         if reset {
+            // A scalar-zero fillShadeColors removes the inherited array; the
+            // inherited shade remains, now between fillColor and fillBackColor.
             let model = model.unwrap();
             let SlideElement::Shape(shape) = &model.elements[0] else {
                 panic!("shape")
             };
-            assert!(!matches!(shape.fill, Some(Fill::Gradient { .. })));
+            let Some(Fill::Gradient { stops, .. }) = &shape.fill else {
+                panic!("expected two-colour gradient")
+            };
+            let colors: Vec<_> = stops.iter().map(|stop| stop.color.as_str()).collect();
+            assert_eq!(colors, ["FF0000", "0000FF"]);
         } else {
             let model = model.unwrap();
             let SlideElement::Shape(shape) = &model.elements[0] else {
