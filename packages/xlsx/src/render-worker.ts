@@ -40,6 +40,7 @@ import {
 } from '@silurus/ooxml-core/worker';
 import { workerRenderDeps } from './worker-render-deps.js';
 import { XLSX_GOOGLE_FONTS, xlsxFontPreloadNames, xlsxOfficeFontRequests, xlsxWorksheetOfficeFontRequests } from './google-fonts.js';
+import { officeRequestKey } from './shape-office-line.js';
 import { resolveSharedStringRows } from './shared-strings.js';
 import {
   addWorksheetCacheUsage,
@@ -304,9 +305,7 @@ self.onmessage = async (e: MessageEvent<
       if (!sheetFonts) {
         sheetFonts = (async () => {
           const extraRequests = xlsxWorksheetOfficeFontRequests(ws).filter((request) => {
-            const key = request.weight === 400 && request.style === 'normal'
-              ? 'calibri' : `calibri:${request.weight}:${request.style}`;
-            return !(key in officeFontRoutes);
+            return !(officeRequestKey(request) in officeFontRoutes);
           });
           if (extraRequests.length === 0) return;
           const extra = await loadOfficeFontFallbacks(extraRequests);

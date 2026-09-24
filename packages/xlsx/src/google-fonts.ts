@@ -4,11 +4,13 @@ import {
   scriptPreloadNamesForText,
   GOOGLE_FONT_SUBSTITUTES,
   SCRIPT_GOOGLE_FONTS,
+  findReferenceFontMetrics,
   type CjkLang,
   type FontPreloadEntry,
   type OfficeFontFallbackRequest,
 } from '@silurus/ooxml-core';
 import type { ParsedWorkbook, Worksheet } from './types.js';
+import { officeRequestKey, singleNaturalShapeRun } from './shape-office-line.js';
 
 /** Office font name → Google Fonts substitute for XLSX cells.
  *
@@ -104,9 +106,9 @@ export function xlsxOfficeFontRequests(wb: ParsedWorkbook | undefined): OfficeFo
   return [...found.values()];
 }
 
-/** Inline strings are worksheet-local and absent from the bootstrap shared
- * string table. Discover their explicitly styled runs when that sheet is
- * pulled, before its first measurement or paint. */
+/** Inline strings and DrawingML shapes are worksheet-local and absent from the
+ * bootstrap shared-string table. Shape preflight is limited to one natural
+ * text run with a catalogued exact style; cell requests remain Calibri-only. */
 export function xlsxWorksheetOfficeFontRequests(ws: Worksheet): OfficeFontFallbackRequest[] {
   const found = new Map<string, OfficeFontFallbackRequest>();
   for (const row of ws.rows) for (const cell of row.cells) {
@@ -116,17 +118,19 @@ export function xlsxWorksheetOfficeFontRequests(ws: Worksheet): OfficeFontFallba
       if (!font || (font.name?.trim().toLowerCase() || 'calibri') !== 'calibri') continue;
       const weight = font.bold ? 700 : 400;
       const style = font.italic ? 'italic' : 'normal';
-      found.set(`${weight}:${style}`, { family: 'Calibri', weight, style });
+      const request = { family: 'Calibri', weight, style } as const;
+      found.set(officeRequestKey(request), request);
     }
   }
   for (const anchor of ws.shapeGroups ?? []) for (const shape of anchor.shapes) {
-    for (const paragraph of shape.text?.paragraphs ?? []) for (const run of paragraph.runs) {
-      if (run.type !== 'text') continue;
-      if ((run.fontFace?.trim().toLowerCase() || 'calibri') !== 'calibri') continue;
-      const weight = run.bold ? 700 : 400;
-      const style = run.italic ? 'italic' : 'normal';
-      found.set(`${weight}:${style}`, { family: 'Calibri', weight, style });
-    }
+    if (!shape.text) continue;
+    const run = singleNaturalShapeRun(shape.text);
+    if (!run) continue;
+    const weight = run.bold ? 700 : 400;
+    const style = run.italic ? 'italic' : 'normal';
+    if (findReferenceFontMetrics(run.fontFace!, { weight, style }).length === 0) continue;
+    const request = { family: run.fontFace!.trim(), weight, style } as const;
+    found.set(officeRequestKey(request), request);
   }
   return [...found.values()];
 }

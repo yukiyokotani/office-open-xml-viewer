@@ -19,6 +19,7 @@ import { chartImageFillKey, paintOptionalImagePlaceholder } from '@silurus/ooxml
 import { placePhoneticRuns } from './phonetic.js';
 import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, rasterizeMathSvg, tintMathRaster, classifyCjkFont, classifyFontGeneric, googleCjkFontAlias, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, isLatinWordCodePoint, isUax14NoBreakPair, containsSeaScript, isGraphemeFillText, seaMixedBreakOffsets, fitSeaWordPrefix, graphemeClusterOffsets, xlsxBorderDashArray, drawImageCropped, hexToRgba, verticalTrLongMark, verticalVertGlyphReachable, applyStroke, resolveFill, type SparklineModel, type MathNode, type MathRenderer, type RasterizedMathSvg } from '@silurus/ooxml-core';
 import { isMacDesktop } from './internal/platform.js';
+import { shapeOfficeNaturalLineRatio, shapeOfficeRouteKey, singleNaturalShapeRun } from './shape-office-line.js';
 import { evalFormulaToBool, todaySerial, nowSerial } from './formula.js';
 import { formatCellValueWithColor } from './number-format.js';
 import { type CfContext, type CfResult, compileCf, evaluateCf } from './conditional-format.js';
@@ -4756,9 +4757,9 @@ function drawShape(
  * single column of paragraphs, per-run bold/italic/size/color/font, paragraph
  * align (`l`/`ctr`/`r`), body anchor (`t`/`ctr`/`b`). Text wrapping uses
  * canvas measurements when `bodyPr@wrap="square"` (the default), and the
- * inset is the OOXML default (`lIns=91440 EMU` ≈ 7.2 pt on each side, plus
- * `tIns=45720 EMU` ≈ 3.6 pt top/bottom). We approximate inset as a fixed
- * 7 px / 4 px since `bodyPr@*Ins` is rarely overridden in practice.
+ * inset is taken from `<a:bodyPr>` (the OOXML defaults are 91440 EMU left/right
+ * and 45720 EMU top/bottom). Only independently verified single-resource,
+ * single-line shapes receive the Office-observed natural line projection.
  */
 // ── Math (OMML) rendering in shapes ─────────────────────────────────────────
 // Equations are converted to SVG by MathJax once, cached by their MathNode[]
@@ -4872,6 +4873,29 @@ export function drawShapeText(
   const innerH = Math.max(0, sh - padTop - padBottom);
   if (innerW <= 0 || innerH <= 0) return;
 
+  // Controlled Excel PDF shapes with one run, omitted <a:lnSpc>, and 12/25pt
+  // Meiryo UI/Arial top/centre/bottom anchors use the same OS/2+hhea natural
+  // line allocation observed in Word. Admit only a loaded exact local tuple
+  // with unambiguous reference geometry; a name alone cannot identify bytes.
+  const naturalRun = singleNaturalShapeRun(txt);
+  const naturalRoute = naturalRun
+    ? officeRoutesByContext.get(ctx)?.[shapeOfficeRouteKey(naturalRun)] : undefined;
+  const naturalRatio = naturalRun
+    ? shapeOfficeNaturalLineRatio(naturalRun, naturalRoute) : undefined;
+  let useNaturalRoute = false;
+  if (naturalRun && naturalRoute && naturalRatio !== undefined) {
+    const paragraph = txt.paragraphs[0];
+    const fontPx = (naturalRun.size > 0 ? naturalRun.size : DEFAULT_FONT_SIZE) * PT_TO_PX * cs;
+    const aliasFont = `${naturalRun.italic ? 'italic ' : ''}${naturalRun.bold ? 'bold ' : ''}${fontPx}px "${naturalRoute.family}"`;
+    const available = innerW - ((paragraph.marL ?? 0) + (paragraph.marR ?? 0)
+      + Math.max(0, paragraph.indent ?? 0)) / EMU_PER_PX * cs;
+    const previousFont = ctx.font;
+    ctx.font = aliasFont;
+    const width = ctx.measureText(naturalRun.text).width;
+    ctx.font = previousFont;
+    useNaturalRoute = txt.wrap === 'none' || width <= available;
+  }
+
   // A laid-out segment: measured text or a rasterized equation. `w` is the
   // advance width (px); math also carries baseline-relative ascent/descent.
   type Seg =
@@ -4887,9 +4911,12 @@ export function drawShapeText(
   const textFont = (run: Extract<import('./types.js').ShapeTextRun, { type: 'text' }>): { font: string; px: number } => {
     const size = run.size > 0 ? run.size : DEFAULT_FONT_SIZE;
     const px = size * PT_TO_PX * cs;
-    const family = fontStackFor(run.fontFace, cjkFallback, run.text,
-      officeRoute(ctx, run.fontFace, run.bold, run.italic),
-      googleSubstitutesByContext.get(ctx) === true);
+    const family = run === naturalRun && useNaturalRoute && naturalRoute
+      ? `"${naturalRoute.family}", ${fontStackFor(run.fontFace, cjkFallback, run.text,
+          undefined, googleSubstitutesByContext.get(ctx) === true)}`
+      : fontStackFor(run.fontFace, cjkFallback, run.text,
+          officeRoute(ctx, run.fontFace, run.bold, run.italic),
+          googleSubstitutesByContext.get(ctx) === true);
     return { font: `${run.italic ? 'italic ' : ''}${run.bold ? 'bold ' : ''}${px}px ${family}`, px };
   };
 
@@ -5032,9 +5059,7 @@ export function drawShapeText(
       lastTextFace = run.fontFace;
       const { font, px: pxSize } = textFont(run);
       const color = run.color ?? '#000000';
-      // A declared face name does not establish font-table geometry. The
-      // natural fallback remains until Excel's selected-resource policy is
-      // supported with independent Office evidence.
+      // Unproved faces and multi-line cases retain the previous Canvas box.
       const naturalSingle = pxSize * 1.2;
       lineHeight = Math.max(lineHeight, naturalSingle);
       lineAscent = Math.max(lineAscent, measuredAscent(font, pxSize));
@@ -5083,6 +5108,11 @@ export function drawShapeText(
       }
     }
     flushLine();
+  }
+
+  if (useNaturalRoute && naturalRun && naturalRatio !== undefined && lines.length === 1) {
+    const px = (naturalRun.size > 0 ? naturalRun.size : DEFAULT_FONT_SIZE) * PT_TO_PX * cs;
+    lines[0].height = px * naturalRatio;
   }
 
   // Total text block height

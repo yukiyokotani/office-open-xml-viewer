@@ -45,6 +45,7 @@ import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions, X
 import { selectSheetVisibility } from './sheet-visibility.js';
 import { renderWorksheetViewport } from './render-orchestrator.js';
 import { XLSX_GOOGLE_FONTS, xlsxFontPreloadNames, xlsxOfficeFontRequests, xlsxWorksheetOfficeFontRequests } from './google-fonts.js';
+import { officeRequestKey } from './shape-office-line.js';
 import { formatCellValue } from './number-format.js';
 import {
   addWorksheetUsage,
@@ -628,7 +629,7 @@ export class XlsxWorkbook {
 
   private async retainWorksheetOfficeFonts(worksheet: Worksheet): Promise<void> {
     const additional = xlsxWorksheetOfficeFontRequests(worksheet).filter((request) =>
-      !this.officeFontRequests.some((known) => known.weight === request.weight && known.style === request.style));
+      !this.officeFontRequests.some((known) => officeRequestKey(known) === officeRequestKey(request)));
     if (additional.length === 0) return;
     this.officeFontRequests.push(...additional);
     await Promise.all([...this.retainedFontSets].map(async ([set, retained]) => {

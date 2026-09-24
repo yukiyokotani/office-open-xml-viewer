@@ -1,4 +1,5 @@
 import { defineCompatibilityRule } from './compatibility.js';
+import { OFFICE_FAR_EAST_SINGLE_LINE_FACTOR, officeOpenTypeAutoLineRatios } from '@silurus/ooxml-core/internal/office-auto-line';
 import type { LineSpacing, TabStop } from '../types.js';
 
 export const WORD_NUMBERING_MARKER_FIRST_LINE_UNION = defineCompatibilityRule({
@@ -723,7 +724,7 @@ export function wordRunVerticalAlignRaisePt(
   return 0;
 }
 
-export const WORD_FAR_EAST_SINGLE_LINE_FACTOR = 1.3;
+export const WORD_FAR_EAST_SINGLE_LINE_FACTOR = OFFICE_FAR_EAST_SINGLE_LINE_FACTOR;
 
 export const WORD_INLINE_PICTURE_AUTO_LEADING = defineCompatibilityRule({
   id: 'word-inline-picture-auto-leading',
@@ -765,26 +766,7 @@ export function wordOpenTypeAutoLineRatios(metrics: Readonly<{
   designAscentRatio: number;
   designDescentRatio: number;
 }> | null {
-  const { unitsPerEm, hheaAscent, hheaDescent, hheaLineGap, farEastCodePage } = metrics;
-  if (!(Number.isFinite(unitsPerEm) && unitsPerEm > 0
-    && Number.isFinite(hheaAscent) && hheaAscent >= 0
-    && Number.isFinite(hheaDescent) && hheaDescent <= 0
-    && Number.isFinite(hheaLineGap))) return null;
-  const glyphBox = hheaAscent - hheaDescent;
-  if (!(glyphBox > 0)) return null;
-  const farEastHalfLeading = ((WORD_FAR_EAST_SINGLE_LINE_FACTOR - 1) / 2) * glyphBox;
-  const ascent = farEastCodePage
-    ? hheaAscent + farEastHalfLeading
-    : hheaAscent + hheaLineGap;
-  const descent = farEastCodePage
-    ? -hheaDescent + farEastHalfLeading
-    : -hheaDescent;
-  if (!(ascent >= 0 && descent >= 0 && ascent + descent > 0)) return null;
-  return Object.freeze({
-    lineHeightRatio: (ascent + descent) / unitsPerEm,
-    designAscentRatio: ascent / unitsPerEm,
-    designDescentRatio: descent / unitsPerEm,
-  });
+  return officeOpenTypeAutoLineRatios(metrics);
 }
 
 export function wordEastAsianGridLineCells(
