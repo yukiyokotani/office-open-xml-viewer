@@ -44,6 +44,9 @@ pub(in crate::doc) struct Facts {
     /// zero-based drawing-store BLIP index and whether the fill rotates with
     /// the shape (fUseShapeAnchor, 2.3.7.43).
     pub fill_picture: Option<(usize, bool)>,
+    /// A linear shade (msofillShade / msofillShadeScale) projected by the
+    /// shared OfficeArt rules; see `Paint::linear_shade`.
+    pub gradient: Option<Gradient>,
     /// MS-ODRAW 2.3.18.5 rotation, clockwise about the centre, in degrees.
     /// Only group members may carry a nonzero rotation (see `group`).
     pub rotation: f64,
@@ -65,6 +68,15 @@ pub(in crate::doc) struct Line {
     pub join: &'static str,
     pub miter: Option<f64>,
     pub ends: [Option<LineEnd<'static>>; 2],
+}
+
+pub(in crate::doc) struct Gradient {
+    /// Position (0..1) and `RRGGBB` or `RRGGBBAA` colour per stop.
+    pub stops: Vec<(f64, String)>,
+    /// DrawingML `a:lin` angle in degrees.
+    pub angle: f64,
+    pub scaled: bool,
+    pub rotate_with_shape: bool,
 }
 
 pub(in crate::doc) struct Text {
@@ -221,7 +233,7 @@ impl<'a> Table<'a> {
             // Word sets fBid on these complex strings as well.
             return match id {
                 0x380 | 0x381 | 0x3a9 => Ok(()),
-                0x145 | 0x146 | 0x151 | 0x152 | 0x155..=0x157 => {
+                0x145 | 0x146 | 0x151 | 0x152 | 0x155..=0x157 | 0x197 => {
                     if self.complex.insert(id, data).is_some_and(|old| old != data) {
                         return Err(unsupported("conflicting Word drawing geometry"));
                     }
@@ -279,6 +291,7 @@ impl<'a> Table<'a> {
         let mut paint = Paint::default();
         let mut geometry = Geometry::default();
         let mut rotation = 0.0;
+        let mut shade = crate::officeart::gradient::Borrowed::default();
         let freeform = is_freeform(kind);
         let mut legacy_adjust = [None; 10];
         let mut insets = [0x16530, 0xb298, 0x16530, 0xb298];
@@ -303,7 +316,12 @@ impl<'a> Table<'a> {
                 // unused134, unused140, unused141.
                 0x86 | 0x8c | 0x8d => {}
                 // anchorText (2.3.21.8 and <52>), cdirFont (<53>) and txdir
-                // (<55>) are used by PowerPoint/Excel only; Word ignores them.
+                // (<55>) are used by PowerPoint/Excel only. Word keeps
+                // anchorText when it saves a DOCX (0/1/2 become bodyPr anchor
+                // "t"/"ctr"/"b" on 48 corpus textboxes), but its display of the
+                // DOC ignores it: Word's PDF of a DOC whose title textbox has
+                // anchorText 2 (bottom) shows the title at the top, where the
+                // PDF of its DOCX shows it at the bottom.
                 0x87 | 0x89 | 0x8b => {}
                 0x88 if value == 0 => {}
                 // hspNext naming the shape itself ends the chain at once:
@@ -336,8 +354,23 @@ impl<'a> Table<'a> {
                 0x147..=0x150 if matches!(kind, 38 | 51) => {
                     legacy_adjust[usize::from(id - 0x147)] = Some(value as i32);
                 }
-                0x152 if freeform && (client_text.is_none() || value == 0) => {}
+                // pInscribe (2.3.6.20) places a freeform's text. An array of
+                // all-zero entries leaves the text in the whole shape box:
+                // Word's own DOCX writes that freeform's text rectangle as
+                // `<a:rect l="0" t="0" r="r" b="b"/>`.
+                0x152
+                    if freeform
+                        && (client_text.is_none()
+                            || value == 0
+                            || self.complex.get(&id).is_some_and(|data| {
+                                data.len() >= 6 && data[6..].iter().all(|byte| *byte == 0)
+                            })) => {}
                 0x186 => paint.property(0x4186, value)?,
+                // fillShadeColors (MS-ODRAW 2.3.7.28): the shade's colours.
+                0x197 => match self.complex.get(&id) {
+                    Some(data) => shade.set(*data),
+                    None => shade.scalar(value),
+                },
                 0x17f | 0x180..=0x1bf | 0x1c0..=0x1d7 | 0x1ff => paint.property(id, value)?,
                 0x23f => {}
                 // Black-and-white display modes only affect B/W output.
@@ -397,7 +430,10 @@ impl<'a> Table<'a> {
                 .ok_or_else(|| unsupported("Word freeform uses guide formulas or path escapes"))?;
             // The DOCX shape model carries one fill and one line for all of
             // its paths, so per-path fill/stroke flags must agree.
-            path_paint = decoded.uniform_paint().ok_or_else(|| {
+            // Word fills open freeform paths: its own DOCX of two corpus
+            // freeforms whose paths never close writes them with a fill and
+            // no `fill="none"`, so the authored flags are used.
+            path_paint = decoded.uniform_authored_paint().ok_or_else(|| {
                 unsupported("Word freeform paths use differing fill or line flags")
             })?;
             subpaths = normalized(&decoded, budget)?;
@@ -414,7 +450,31 @@ impl<'a> Table<'a> {
         } else {
             None
         };
-        let fill = if !path_paint.0 || fill_picture.is_some() {
+        let gradient = if !line_shape && path_paint.0 {
+            paint
+                // Shade scratch and stops are bounded per shape; the
+                // retained stops are charged with the model payload.
+                .linear_shade(&shade, true, budget, &mut (1usize << 20))?
+                .map(|shade| -> Result<Gradient, String> {
+                    let stops = shade
+                        .projection
+                        .stops
+                        .iter()
+                        .zip(&shade.alphas)
+                        .map(|(stop, alpha)| Ok((stop.position(), rgb(stop.color, *alpha)?)))
+                        .collect::<Result<Vec<_>, String>>()?;
+                    Ok(Gradient {
+                        stops,
+                        angle: shade.projection.angle.degrees(),
+                        scaled: shade.scaled,
+                        rotate_with_shape: shade.rotate_with_shape,
+                    })
+                })
+                .transpose()?
+        } else {
+            None
+        };
+        let fill = if !path_paint.0 || fill_picture.is_some() || gradient.is_some() {
             None
         } else if let Some((color, alpha)) = paint.solid_fill_or_default(!line_shape) {
             Some(rgb(color, alpha)?)
@@ -427,6 +487,7 @@ impl<'a> Table<'a> {
             && path_paint.0
             && fill.is_none()
             && fill_picture.is_none()
+            && gradient.is_none()
             && paint.filled.unwrap_or(true)
             && paint.fill_ok.unwrap_or(true)
         {
@@ -488,6 +549,7 @@ impl<'a> Table<'a> {
             subpaths,
             adjustments: adjustments(kind, &legacy_adjust)?,
             fill_picture,
+            gradient,
             rotation,
             relative_size: relative_size(&self.values)?,
             pseudo_inline: self.boolean(0x53f, 0) == Some(true),
@@ -792,10 +854,10 @@ mod tests {
                 if x1 == 0.5 && y2 == 1.0 && x == 0.0 && y == 0.5
         ));
         assert!(matches!(path[4], PathCmd::Close));
-        // An open path is never filled; a uniform noFill escape removes fill.
+        // Word fills an open path; a uniform noFill escape removes fill.
         let open = [0x4000, 0x0002, 0x8000];
         let facts = read(0, 0xa00, &freeform(&points[..3], &open, &[]), [9, 9]).unwrap();
-        assert!(facts.fill.is_none() && facts.line.is_some());
+        assert!(facts.fill.is_some() && facts.line.is_some());
         let no_fill = [0x4000, 0xaa00, 0x0002, 0x8000];
         let facts = read(0, 0xa00, &freeform(&points[..3], &no_fill, &[]), [9, 9]).unwrap();
         assert!(facts.fill.is_none());
@@ -889,6 +951,43 @@ mod tests {
         .unwrap();
         assert_eq!(facts.preset, None);
         assert_eq!(facts.subpaths.len(), 1);
+    }
+
+    #[test]
+    fn freeform_shade_gradients_follow_the_shared_rules() {
+        // sample-like msofillShade with three shade colours, focus 100.
+        let colors: Vec<u8> = [
+            3u16.to_le_bytes().as_slice(),
+            &3u16.to_le_bytes(),
+            &8u16.to_le_bytes(),
+            &0x0067_5449u32.to_le_bytes(),
+            &0u32.to_le_bytes(),
+            &0x004f_3725u32.to_le_bytes(),
+            &0x8000u32.to_le_bytes(),
+            &0x0037_1f05u32.to_le_bytes(),
+            &0x10000u32.to_le_bytes(),
+        ]
+        .concat();
+        let mut body = Vec::new();
+        for (key, value) in [
+            (0x180u16, 4u32),
+            (0x18c, 100),
+            (0xc197, colors.len() as u32),
+        ] {
+            body.extend(key.to_le_bytes());
+            body.extend(value.to_le_bytes());
+        }
+        body.extend(&colors);
+        let bytes = record(0xf004, 15, &record(0xf00b, (3 << 4) | 3, &body));
+        let gradient = read(1, 0xa00, &bytes, [9, 9]).unwrap().gradient.unwrap();
+        assert_eq!(gradient.angle, 90.0);
+        assert!(!gradient.scaled);
+        let stops: Vec<_> = gradient
+            .stops
+            .iter()
+            .map(|(p, c)| (*p, c.as_str()))
+            .collect();
+        assert_eq!(stops, [(0.0, "495467"), (0.5, "25374F"), (1.0, "051F37")]);
     }
 
     #[test]
@@ -992,7 +1091,7 @@ mod tests {
             (1, &[(0x1c0, 0x1000_0002)], &[]),
             (1, &[(0x1c0, 0x1001_0011)], &[]),
             (1, &[(0x181, 0x0800_0001)], &[]),
-            (1, &[(0x180, 4)], &[]),
+            (1, &[(0x180, 5)], &[]),
             (1, &[(0x1c4, 1)], &[]),
             (1, &[(0x1cd, 1)], &[]),
             // Shadows, auto margins, no-wrap text, flow and linked chains.

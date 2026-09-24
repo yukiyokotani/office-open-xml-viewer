@@ -211,6 +211,26 @@ impl Store<'_> {
                 duotone: None,
             }));
         }
+        if let Some(gradient) = &shape.gradient {
+            return Ok(Some(ShapeFill::Gradient {
+                stops: gradient
+                    .stops
+                    .iter()
+                    .map(|(position, color)| docx_model::GradientStop {
+                        position: *position,
+                        color: color.clone(),
+                    })
+                    .collect(),
+                angle: gradient.angle,
+                grad_type: "linear".into(),
+                scaled: Some(gradient.scaled),
+                path: None,
+                fill_to_rect: None,
+                tile_rect: None,
+                flip: None,
+                rot_with_shape: Some(gradient.rotate_with_shape),
+            }));
+        }
         Ok(shape.fill.clone().map(|color| ShapeFill::Solid { color }))
     }
 
@@ -688,6 +708,12 @@ fn direct_shape(
     if let Some(ShapeFill::Image { mime_type, .. }) = &run.fill {
         total.add(mime_type.capacity())?;
     }
+    if let Some(ShapeFill::Gradient { stops, .. }) = &run.fill {
+        total.add(stops.capacity() * std::mem::size_of::<docx_model::GradientStop>())?;
+        for stop in stops {
+            total.add(stop.color.capacity())?;
+        }
+    }
     total.strings([
         run.anchor_x_align.as_ref(),
         run.anchor_y_align.as_ref(),
@@ -699,6 +725,7 @@ fn direct_shape(
         run.fill.as_ref().map(|fill| match fill {
             ShapeFill::Solid { color } => color,
             ShapeFill::Image { image_path, .. } => image_path,
+            ShapeFill::Gradient { grad_type, .. } => grad_type,
             _ => unreachable!("solid or picture DOC shape fill"),
         }),
         run.stroke.as_ref(),
