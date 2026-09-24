@@ -112,6 +112,41 @@ impl Position {
         Ok(())
     }
 
+    /// True when a cell paragraph's frame (MS-DOC 2.6.2 paragraph frame
+    /// properties, projected as ECMA-376 17.3.1.11 `framePr`) describes
+    /// exactly this table's own absolute position: the same anchors, X/Y
+    /// (special value or offset) and wrapping distances, with automatic size
+    /// and ordinary around-wrapping.
+    ///
+    /// [MS-DOC] 2.4.3 consults cell-paragraph frame properties for table
+    /// identity only when neither row specifies nondefault table position
+    /// properties, so once the table itself is positioned they carry no
+    /// separate placement. Word writes them as the pre-TAP (Word 97) form of
+    /// the same positioned table. Admitting only exact equality keeps the
+    /// result independent of whether the frame or the table positioning is
+    /// taken as the source of the placement.
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) fn matches_cell_frame(&self, frame: &docx_model::FramePr) -> bool {
+        let Some(table) = self.direct().0 else {
+            return false;
+        };
+        table.horz_anchor == frame.h_anchor
+            && table.vert_anchor == frame.v_anchor
+            && table.tblp_x_spec == frame.x_align
+            && (table.tblp_x_spec.is_some() || Some(table.tblp_x) == frame.x)
+            && table.tblp_y_spec == frame.y_align
+            && (table.tblp_y_spec.is_some() || Some(table.tblp_y) == frame.y)
+            && table.left_from_text == frame.h_space
+            && table.right_from_text == frame.h_space
+            && table.top_from_text == frame.v_space
+            && table.bottom_from_text == frame.v_space
+            && frame.w.is_none()
+            && frame.h.is_none()
+            && frame.h_rule == "auto"
+            && frame.wrap == "around"
+            && frame.drop_cap == "none"
+    }
+
     /// MS-DOC 2.7.13 Copts: nondefault position/wrapping facts create tblpPr;
     /// no-overlap alone does not. Reserved anchor values suppress placement.
     fn active_anchors(&self) -> Option<(u8, u8)> {
