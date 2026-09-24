@@ -91,6 +91,11 @@ impl Properties {
         self.frame.direct()
     }
 
+    /// Raw frame facts for comparison with an enclosing table's position.
+    pub(in crate::doc) fn table_paragraph_frame(&self) -> Option<super::TableParagraphFrame> {
+        self.frame.table_paragraph_facts()
+    }
+
     fn flag(&self, name: &str, default: bool) -> bool {
         self.flags.get(name).copied().unwrap_or(default)
     }

@@ -8,6 +8,11 @@ use docx_model::{DocParagraph, NumberingInfo, TextRun};
 pub(in crate::doc) struct DirectResolvedParagraph {
     pub(in crate::doc) paragraph: DocParagraph,
     pub(in crate::doc) numbering: Option<(numbering::Reference, Properties)>,
+    /// The paragraph carries frame properties that `frame_pr` cannot
+    /// represent. The caller decides: outside tables this is unsupported; a
+    /// table paragraph may instead repeat its table's position.
+    pub(in crate::doc) frame_gap: bool,
+    pub(in crate::doc) table_frame: Option<crate::doc::paragraph::TableParagraphFrame>,
 }
 
 pub(in crate::doc) struct DirectInlinePictureFacts {
@@ -83,10 +88,14 @@ impl Formatting<'_> {
         // ECMA-376 17.3.1.9 compares paragraph styles; the DOCX renderer does
         // so through `style_id`. The DOC paragraph istd is that identity.
         paragraph.style_id = Some(style.to_string());
-        match resolved.properties.direct_frame() {
-            Ok(frame) => paragraph.frame_pr = frame.map(Box::new),
-            Err(_) => self.unsupported_paragraph_properties = true,
-        }
+        let frame_gap = match resolved.properties.direct_frame() {
+            Ok(frame) => {
+                paragraph.frame_pr = frame.map(Box::new);
+                false
+            }
+            Err(_) => true,
+        };
+        let table_frame = resolved.properties.table_paragraph_frame();
         paragraph.mark_vanish = mark.direct_vanish();
         let mark_facts = mark.direct_font_facts(&self.fonts)?;
         paragraph.default_font_size = mark_facts.font_size;
@@ -97,6 +106,8 @@ impl Formatting<'_> {
         Ok(DirectResolvedParagraph {
             paragraph,
             numbering: resolved.numbering,
+            frame_gap,
+            table_frame,
         })
     }
 

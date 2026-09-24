@@ -3469,10 +3469,14 @@ mod tests {
         f.styles = vec![Some(style)];
         let paragraph = f.direct_paragraph(0, None, 0, 1, &[&piece]).unwrap();
         assert!(paragraph.paragraph.frame_pr.is_none());
-        assert!(f.unsupported_paragraph_properties);
+        // The gap is reported to the story, which gates it outside tables
+        // and compares it with the enclosing table's position inside them.
+        assert!(paragraph.frame_gap);
+        assert!(paragraph.table_frame.is_some());
+        assert!(!f.unsupported_paragraph_properties);
         let piece = [0x1b, 0x26, 0x60, 0x19, 0x84, 2, 0];
-        f.unsupported_paragraph_properties = false;
         let paragraph = f.direct_paragraph(0, None, 0, 1, &[&piece]).unwrap();
+        assert!(!paragraph.frame_gap);
         let frame = paragraph.paragraph.frame_pr.unwrap();
         assert_eq!((frame.v_anchor.as_str(), frame.y), ("text", Some(0.05)));
         assert!(!f.unsupported_paragraph_properties);

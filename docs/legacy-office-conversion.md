@@ -2339,10 +2339,14 @@ and their evidence are recorded next to the code in
   repeated TIstd border resets and drawn diagonals remain gated.
 - Main-story tables with nondefault position or wrapping properties
   (MS-DOC 2.6.3, 2.7.13) leave the ordinary flow as floating tables.
-- Cell paragraph frame properties that repeat the row's own table position
-  exactly are dropped: MS-DOC 2.4.3 consults them only when no row carries
-  table positioning. Framed cell paragraphs in rows without table
-  positioning remain gated (legacy framed tables have no specified layout).
+- Table paragraph frame properties that mirror the enclosing depth-1 row's
+  table position are dropped: MS-DOC 2.4.3 consults them only when no row
+  carries table positioning, and the paired OOXML documents keep only the
+  table's tblpPr (nested tables inside the positioned table repeat the same
+  frame values). A mirror has the same anchors, X/Y, no-overlap flag,
+  automatic size and around-wrapping, and frame distances equal to the
+  table's left/top distances. Framed table paragraphs whose outer row is not
+  positioned remain gated (legacy framed tables have no specified layout).
 - Dop2000 Copts.fDontAdjustLineHeightInTable (MS-DOC 2.7.13, Dop offset
   512 bit 3) is projected as the inverse `adjustLineHeightInTable`, so the
   section line grid applies inside table cells as in Word. The decoded bit
