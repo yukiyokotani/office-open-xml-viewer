@@ -370,6 +370,16 @@ impl ResolvedStyleSheet {
     }
 }
 
+/// Chart text font resolved from a BIFF Font record.
+#[derive(Debug, Clone)]
+pub(super) struct ChartFont {
+    pub name: String,
+    pub size_twips: u16,
+    pub bold: bool,
+    pub italic: bool,
+    pub color: Option<String>,
+}
+
 impl<'a> Styles<'a> {
     /// MS-XLS 2.2.6.1.2.2: Normal references XF zero, not FONT zero.
     /// Return no measurement request for font variants we cannot reproduce.
@@ -453,6 +463,30 @@ impl<'a> Styles<'a> {
             return Err(unsupported("BIFF cell XF index out of range"));
         }
         Ok(())
+    }
+
+    /// Number of Font records in the Globals Substream (FontX indexing, 2.4.123).
+    pub(super) fn font_count(&self) -> usize {
+        self.fonts.len()
+    }
+
+    /// Decode a Font record (2.4.122) for chart text: name, twip size,
+    /// weight/italic and palette color.
+    pub(super) fn chart_font(&self, data: &[u8]) -> Option<ChartFont> {
+        let font = ResolvedFont::decode(data).ok()?;
+        Some(ChartFont {
+            name: font.name,
+            size_twips: font.size_twips,
+            bold: font.weight >= 700,
+            italic: font.italic,
+            color: self.chart_color(font.color_index),
+        })
+    }
+
+    /// FontX.iFont (2.4.123) one-based index into the global Font records.
+    pub(super) fn global_font(&self, index: u16) -> Option<ChartFont> {
+        let data = *self.fonts.get(usize::from(index).checked_sub(1)?)?;
+        self.chart_font(data)
     }
 
     /// Chart element color for an Icv (MS-XLS 2.5.161): the workbook Palette

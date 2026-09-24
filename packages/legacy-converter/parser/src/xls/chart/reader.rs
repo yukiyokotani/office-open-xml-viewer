@@ -25,6 +25,9 @@ mod id {
     pub const PIE_FORMAT: u16 = 0x100b;
     pub const ATTACHED_LABEL: u16 = 0x100c;
     pub const SERIES_TEXT: u16 = 0x100d;
+    pub const FONT: u16 = 0x0031;
+    pub const FONT_X: u16 = 0x1026;
+    pub const DEFAULT_TEXT: u16 = 0x1024;
     pub const CHART_FORMAT: u16 = 0x1014;
     pub const LEGEND: u16 = 0x1015;
     pub const BAR: u16 = 0x1017;
@@ -153,6 +156,8 @@ pub(crate) struct Axis {
     pub log: bool,
     pub reversed: bool,
     pub major_gridlines: bool,
+    /// FontX.iFont of the axis labels (AXS rule).
+    pub font: Option<u16>,
 }
 
 #[derive(Debug, Clone)]
@@ -171,6 +176,12 @@ pub(crate) struct RawChart {
     pub chart_format: Option<Format>,
     pub plot_format: Option<Format>,
     pub plot_visible_only: bool,
+    /// FontX.iFont of the chart title, legend and chart-wide default text.
+    pub title_font: Option<u16>,
+    pub legend_font: Option<u16>,
+    pub default_font: Option<u16>,
+    /// Font records in this chart substream (after FrtFontList, 2.4.123).
+    pub local_fonts: Vec<Vec<u8>>,
     /// numIndex (1 values, 2 categories, 3 bubble sizes) -> (series, point).
     pub cache: BTreeMap<u16, BTreeMap<(u16, u16), Cached>>,
 }
@@ -200,6 +211,8 @@ struct Block {
     group: Option<Group>,
     axis: Option<Axis>,
     legend: Option<Legend>,
+    font: Option<u16>,
+    default_text: bool,
 }
 
 impl Block {
@@ -214,6 +227,8 @@ impl Block {
             group: None,
             axis: None,
             legend: None,
+            font: None,
+            default_text: false,
         }
     }
 }
@@ -290,6 +305,7 @@ pub(crate) fn read(records: &[Record<'_>]) -> Result<RawChart, String> {
     let mut axis_parent = 0usize;
     let mut axis_parent_seen = false;
     let mut cache_index: Option<u16> = None;
+    let mut default_text = false;
     let mut text_bytes = 0usize;
     let mut index = 1usize;
     while index < records.len() {
@@ -304,6 +320,9 @@ pub(crate) fn read(records: &[Record<'_>]) -> Result<RawChart, String> {
                 }
                 let owner = pending.take().unwrap_or(Owner::Other);
                 let mut block = Block::new(owner);
+                if owner == Owner::Text {
+                    block.default_text = std::mem::take(&mut default_text);
+                }
                 // The record that opens a block was read into its parent; move
                 // the element it describes into the new block.
                 if let Some(parent) = stack.last_mut() {
@@ -372,6 +391,21 @@ pub(crate) fn read(records: &[Record<'_>]) -> Result<RawChart, String> {
                 pending = Some(Owner::DataFormat);
             }
             id::TEXT => pending = Some(Owner::Text),
+            id::DEFAULT_TEXT => default_text = true,
+            id::FONT => {
+                if chart.local_fonts.len() < 512 {
+                    chart.local_fonts.push(record.data.to_vec());
+                }
+            }
+            id::FONT_X => {
+                let font = u16_at(record.data, 0)?;
+                if let Some(block) = stack.last_mut() {
+                    block.font = Some(font);
+                    if let Some(axis) = block.axis.as_mut() {
+                        axis.font = Some(font);
+                    }
+                }
+            }
             id::LEGEND => {
                 let position = *record.data.get(16).unwrap_or(&7);
                 if let Some(block) = stack.last_mut() {
@@ -720,6 +754,18 @@ fn finish_block(
             }
         }
         Owner::Text => {
+            if block.default_text && chart.default_font.is_none() {
+                chart.default_font = block.font;
+            }
+            if stack
+                .last()
+                .is_some_and(|parent| parent.owner == Owner::Legend)
+            {
+                chart.legend_font = block.font;
+            }
+            if block.text_link == Some(1) {
+                chart.title_font = block.font;
+            }
             if let (Some(link), Some(text)) = (block.text_link, block.text.take()) {
                 match link {
                     1 => chart.title = Some(text),

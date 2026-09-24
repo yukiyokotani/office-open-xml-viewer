@@ -9,6 +9,11 @@ use ooxml_common::chart::{ChartModel, ChartSeries};
 use ooxml_common::color::{parse_color_node, ThemeResolver, TintMode};
 
 pub(crate) struct Palette<'a> {
+    /// Global Font record by FontX one-based index (2.4.123).
+    pub global_font: &'a dyn Fn(u16) -> Option<super::super::styles::ChartFont>,
+    /// Decode a chart-local Font record.
+    pub decode_font: &'a dyn Fn(&[u8]) -> Option<super::super::styles::ChartFont>,
+    pub global_font_count: usize,
     /// Resolved palette color for an Icv (MS-XLS 2.5.161), "#RRGGBB" or "RRGGBB".
     pub icv: &'a dyn Fn(u16) -> Option<String>,
     /// Theme colors in clrScheme order: dk1, lt1, dk2, lt2, accent1-6, hlink, folHlink.
@@ -39,6 +44,24 @@ impl ThemeResolver for Palette<'_> {
 }
 
 impl Palette<'_> {
+    /// FontX.iFont (2.4.123): 0 is the chart default font, indices up to the
+    /// global count are one-based global Font records, later indices address
+    /// this chart's own Font records.
+    fn font(&self, raw: &RawChart, index: u16) -> Option<super::super::styles::ChartFont> {
+        let index = if index == 0 { raw.default_font? } else { index };
+        if index == 0 {
+            return None;
+        }
+        if usize::from(index) <= self.global_font_count {
+            (self.global_font)(index)
+        } else {
+            let local = usize::from(index) - self.global_font_count - 1;
+            raw.local_fonts
+                .get(local)
+                .and_then(|data| (self.decode_font)(data))
+        }
+    }
+
     /// Theme accentN for an automatic series or varied point (N = i mod 6 + 1).
     fn accent(&self, index: usize) -> Option<String> {
         self.theme[4 + index % 6]
@@ -427,6 +450,19 @@ pub(crate) fn project(
             model_series.series_data_labels = Some(labels);
         }
         if let Some(format) = series.series_format.as_ref() {
+            // AreaFormat.fInvertNeg (2.4.3) swaps the foreground and
+            // background colors for negative values, so a solid negative
+            // point is filled with icvBack.
+            if let Some(area) = format
+                .area
+                .filter(|area| u16::from_le_bytes([area[10], area[11]]) & 2 != 0)
+            {
+                model_series.invert_if_negative = Some(true);
+                if let Some(color) = (palette.icv)(u16::from_le_bytes([area[14], area[15]])) {
+                    model_series.inverted_fill =
+                        Some(ooxml_common::chart::ChartStyleFill::Solid { color: hex(color) });
+                }
+            }
             model_series.explosion = format.explosion.map(u32::from);
             if format.smooth {
                 model_series.smooth = Some(true);
@@ -487,6 +523,46 @@ pub(crate) fn project(
     if let Some(axis) = raw.axes.iter().find(|a| a.kind == 1 && a.axis_group == 0) {
         model.val_min = axis.min;
         model.val_max = axis.max;
+    }
+    // Font records carry twips; the shared model uses hundredths of a point.
+    let hpt = |twips: u16| i32::from(twips) * 5;
+    let color = |font: &super::super::styles::ChartFont| font.color.clone().map(hex);
+    if let Some(font) = raw.title_font.and_then(|i| palette.font(raw, i)) {
+        model.title_font_size_hpt = Some(hpt(font.size_twips));
+        model.title_font_bold = Some(font.bold);
+        model.title_font_color = color(&font);
+        model.title_font_face = Some(font.name.clone());
+    }
+    if let Some(font) = raw.legend_font.and_then(|i| palette.font(raw, i)) {
+        model.legend_font_size_hpt = Some(hpt(font.size_twips));
+        model.legend_font_bold = Some(font.bold);
+        model.legend_font_color = color(&font);
+        model.legend_font_face = Some(font.name.clone());
+    }
+    for axis in raw.axes.iter().filter(|a| a.axis_group == 0) {
+        let Some(font) = axis.font.and_then(|i| palette.font(raw, i)) else {
+            continue;
+        };
+        let (size, bold, italic, font_color, face) = (
+            Some(hpt(font.size_twips)),
+            Some(font.bold),
+            Some(font.italic),
+            color(&font),
+            Some(font.name.clone()),
+        );
+        if axis.kind == 1 {
+            model.val_axis_font_size_hpt = size;
+            model.val_axis_font_bold = bold;
+            model.val_axis_font_italic = italic;
+            model.val_axis_font_color = font_color;
+            model.val_axis_font_face = face;
+        } else if axis.kind == 0 {
+            model.cat_axis_font_size_hpt = size;
+            model.cat_axis_font_bold = bold;
+            model.cat_axis_font_italic = italic;
+            model.cat_axis_font_color = font_color;
+            model.cat_axis_font_face = face;
+        }
     }
     model.val_axis_title = raw.axis_titles.get(&2).cloned();
     model.cat_axis_title = raw.axis_titles.get(&3).cloned();

@@ -171,7 +171,12 @@ impl Charts {
         };
         let theme = theme::Colors::parse(records).unwrap_or_default();
         let color = |icv: u16| styles.chart_color(icv);
+        let global_font = |index: u16| styles.global_font(index);
+        let decode_font = |data: &[u8]| styles.chart_font(data);
         let palette = Palette {
+            global_font: &global_font,
+            decode_font: &decode_font,
+            global_font_count: styles.font_count(),
             icv: &color,
             theme: std::array::from_fn(|index| {
                 theme

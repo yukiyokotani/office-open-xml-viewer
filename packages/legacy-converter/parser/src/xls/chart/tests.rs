@@ -130,8 +130,19 @@ fn palette_color(icv: u16) -> Option<String> {
     (icv == 10).then(|| "#FF0000".into())
 }
 
+fn no_font(_: u16) -> Option<super::super::styles::ChartFont> {
+    None
+}
+
+fn no_decode(_: &[u8]) -> Option<super::super::styles::ChartFont> {
+    None
+}
+
 fn palette() -> Palette<'static> {
     Palette {
+        global_font: &no_font,
+        decode_font: &no_decode,
+        global_font_count: 0,
         icv: &palette_color,
         theme: std::array::from_fn(|index| (index == 4).then(|| "4472C4".into())),
     }
