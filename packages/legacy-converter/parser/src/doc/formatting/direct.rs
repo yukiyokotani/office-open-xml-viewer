@@ -124,3 +124,40 @@ impl Formatting<'_> {
         })
     }
 }
+
+impl<'a> Formatting<'a> {
+    /// MS-DOC 2.6.1 sprmCFSpec + sprmCFData + sprmCPicLocation and 2.9.158
+    /// NilPICFAndBinData: the binData of a binary-data character (a form
+    /// field, hyperlink or add-in field payload), bounded by its lcb.
+    pub(in crate::doc) fn direct_binary_data(
+        &mut self,
+        paragraph_style: usize,
+        table_style: Option<TableFormattingKey>,
+        fc: usize,
+        prm: u16,
+        prcs: &[&[u8]],
+    ) -> Result<&'a [u8], String> {
+        let invalid = || super::super::unsupported("invalid Word binary-data character");
+        let picture = self
+            .run_properties_with_table(paragraph_style, table_style, fc, prm, prcs)?
+            .picture;
+        if !picture.special || !picture.data || picture.ole || picture.object {
+            return Err(invalid());
+        }
+        let offset = picture
+            .location
+            .and_then(|location| usize::try_from(location).ok())
+            .ok_or_else(invalid)?;
+        let data = self.data;
+        let header = data.get(offset..offset + 6).ok_or_else(invalid)?;
+        let length = i32::from_le_bytes([header[0], header[1], header[2], header[3]]);
+        if u16::from_le_bytes([header[4], header[5]]) != 0x44 {
+            return Err(invalid());
+        }
+        usize::try_from(length)
+            .ok()
+            .filter(|length| *length >= 0x44)
+            .and_then(|length| data.get(offset + 0x44..offset + length))
+            .ok_or_else(invalid)
+    }
+}

@@ -50,6 +50,9 @@ pub(in crate::doc) struct Evaluated {
     /// First stored result character when its formatting must agree with
     /// `format_cp` (no general-formatting switch selects the source).
     pub(in crate::doc) agreeing_result_cp: Option<usize>,
+    /// FORMCHECKBOX only: the instruction's binary-data character, whose
+    /// NilPICFAndBinData holds the FFData (MS-DOC 2.9.78, 2.9.158).
+    pub(in crate::doc) form_data_cp: Option<usize>,
 }
 
 /// Validated field structure of one aggregate story (main, header, footnote
@@ -68,6 +71,7 @@ struct Open {
     instruction: String,
     instruction_overflow: bool,
     instruction_controls: bool,
+    form_data_cp: Option<usize>,
     keyword_cp: Option<usize>,
     child_in_instruction: bool,
     child_in_result: bool,
@@ -229,7 +233,11 @@ impl Open {
     fn push(&mut self, character: char, cp: usize) {
         if self.separator.is_none() {
             if character < ' ' && character != '\t' {
-                self.instruction_controls = true;
+                if character == '\u{1}' && self.form_data_cp.is_none() {
+                    self.form_data_cp = Some(cp);
+                } else {
+                    self.instruction_controls = true;
+                }
                 return;
             }
             if self.keyword_cp.is_none() && !character.is_whitespace() {
@@ -296,7 +304,8 @@ fn classify(field: &Open, flags: Option<u8>) -> Result<Option<Evaluated>, String
         "NUMPAGES" => ("numPages", 0x1a),
         "DATE" => ("date", 0x1f),
         "TIME" => ("time", 0x20),
-        "EQ" | "MACROBUTTON" | "GOTOBUTTON" | "ADVANCE" | "FORMCHECKBOX" | "FORMDROPDOWN" => {
+        "FORMCHECKBOX" => return checkbox(field, flags).map(Some),
+        "EQ" | "MACROBUTTON" | "GOTOBUTTON" | "ADVANCE" | "FORMDROPDOWN" => {
             return Err(unsupported(format!(
                 "Word {keyword} field display is not supported"
             )));
@@ -332,6 +341,7 @@ fn classify(field: &Open, flags: Option<u8>) -> Result<Option<Evaluated>, String
         || field.child_in_instruction
         || field.child_in_result
         || field.instruction_controls
+        || field.form_data_cp.is_some()
         || field.instruction_overflow
         || field.result_controls
         || field.result_overflow
@@ -363,7 +373,96 @@ fn classify(field: &Open, flags: Option<u8>) -> Result<Option<Evaluated>, String
         cached_result: field.result.clone(),
         format_cp,
         agreeing_result_cp,
+        form_data_cp: None,
     }))
+}
+
+/// ECMA-376 17.16.5.20 FORMCHECKBOX, which the DOCX parser turns into a
+/// `checkbox` FieldRun drawn as a ballot box in the begin run's formatting.
+/// MS-DOC stores the state in the FFData of the binary-data character inside
+/// the instruction; the story projector reads it. The result is empty and
+/// private (grffldEnd fPrivateResult) in Word's output.
+fn checkbox(field: &Open, flags: u8) -> Result<Evaluated, String> {
+    if field.listed_type != Some(0x47) {
+        return Err(unsupported(
+            "Word evaluated field type disagrees with its instruction",
+        ));
+    }
+    let mut words = field.instruction.split_whitespace();
+    words.next();
+    // MS-OE376 2.1.505: Word shows nothing for a nested check box, while
+    // the DOCX parser omits it; neither is established for DOC.
+    if flags & 0x1e != 0
+        || words.next().is_some()
+        || field.parent
+        || field.child_in_instruction
+        || field.child_in_result
+        || field.instruction_controls
+        || field.instruction_overflow
+        || field.has_result_content()
+    {
+        return Err(unsupported(
+            "Word FORMCHECKBOX field with unsupported state or content",
+        ));
+    }
+    let form_data_cp = field
+        .form_data_cp
+        .ok_or_else(|| unsupported("Word FORMCHECKBOX field lacks its form data"))?;
+    Ok(Evaluated {
+        field_type: "checkbox",
+        instruction: field.instruction.trim().to_string(),
+        cached_result: String::new(),
+        // The DOCX parser formats legacy check boxes like the begin run.
+        format_cp: field.begin,
+        agreeing_result_cp: None,
+        form_data_cp: Some(form_data_cp),
+    })
+}
+
+/// Check-box state from an FFData (MS-DOC 2.9.78/2.9.79): whether it is
+/// checked and its explicit size in points (`None` when sized automatically).
+pub(in crate::doc) fn checkbox_state(data: &[u8]) -> Result<(bool, Option<f64>), String> {
+    let invalid = || unsupported("invalid Word check-box form data");
+    let word = |offset: usize| -> Result<u16, String> {
+        data.get(offset..offset + 2)
+            .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+            .ok_or_else(invalid)
+    };
+    if data.get(..4) != Some(&[0xff; 4][..]) {
+        return Err(invalid());
+    }
+    let bits = word(4)?;
+    let (kind, result, automatic_size) = (bits & 3, (bits >> 2) & 0x1f, bits & 0x400 != 0);
+    if kind != 1 || word(6)? != 0 {
+        return Err(invalid());
+    }
+    let size = word(8)?;
+    // xstzName: Xst (cch, cch UTF-16 units) plus a zero terminator, then wDef.
+    let name = usize::from(word(10)?);
+    if name > 20 || word(12 + name * 2)? != 0 {
+        return Err(invalid());
+    }
+    let default = word(14 + name * 2)?;
+    let checked = match (result, default) {
+        (0, _) => false,
+        (1, _) => true,
+        // "Undefined checkboxes are treated as unchecked." Keep a checked
+        // default closed until an Office control shows which state Word draws.
+        (25, 0) => false,
+        _ => {
+            return Err(unsupported(
+                "Word check box with an undefined state and checked default",
+            ))
+        }
+    };
+    let size = if automatic_size {
+        None
+    } else if (2..=3168).contains(&size) {
+        Some(f64::from(size) / 2.0)
+    } else {
+        return Err(invalid());
+    };
+    Ok((checked, size))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -562,6 +661,7 @@ mod tests {
             cached_result: result.into(),
             format_cp: 2,
             agreeing_result_cp: None,
+            form_data_cp: None,
         }
     }
 
@@ -658,6 +758,8 @@ mod tests {
         for (text, kind, flags) in [
             ("\u{13}EQ \\o(a,b)\u{15}\r", 0x31, 0x00),
             ("\u{13} FORMCHECKBOX \u{14}\u{15}\r", 0x47, 0xa0),
+            ("\u{13} FORMCHECKBOX \u{1}\u{14}x\u{15}\r", 0x47, 0xa0),
+            ("\u{13} FORMCHECKBOX \u{1}\u{14}\u{15}\r", 0x47, 0xb0),
             ("\u{13}MACROBUTTON M Click\u{15}\r", 0x33, 0x00),
             ("\u{13}SYMBOL 183\u{15}\r", 0x39, 0x00),
             ("\u{13}REF x\u{14}secret\u{15}\r", 0x03, 0xa0),
@@ -682,6 +784,69 @@ mod tests {
         let picture = "\u{13}INCLUDEPICTURE \"x\"\u{14}\u{1}\u{15}\r";
         let table = with_types(picture, &[0x43], &[0xac]);
         assert_eq!(tokens(picture, &table).unwrap(), vec![(Token::Picture, 20)]);
+    }
+
+    #[test]
+    fn check_boxes_carry_their_form_data_character() {
+        let text = "A\u{13} FORMCHECKBOX \u{1}\u{14}\u{15}B\r";
+        let table = with_types(text, &[0x47], &[0xa0]);
+        let actual = tokens(text, &table).unwrap();
+        let expected = Evaluated {
+            field_type: "checkbox",
+            instruction: "FORMCHECKBOX".into(),
+            cached_result: String::new(),
+            format_cp: 1,
+            agreeing_result_cp: None,
+            form_data_cp: Some(16),
+        };
+        assert_eq!(
+            actual,
+            vec![
+                (Token::Text("A".into()), 0),
+                (Token::EvaluatedField(Box::new(expected)), 1),
+                (Token::Text("B".into()), 19),
+            ]
+        );
+    }
+
+    fn form_data(bits: u16, size: u16, name: &str, default: u16) -> Vec<u8> {
+        let mut data = vec![0xff; 4];
+        data.extend(bits.to_le_bytes());
+        data.extend(0u16.to_le_bytes());
+        data.extend(size.to_le_bytes());
+        data.extend((name.encode_utf16().count() as u16).to_le_bytes());
+        for unit in name.encode_utf16() {
+            data.extend(unit.to_le_bytes());
+        }
+        data.extend(0u16.to_le_bytes());
+        data.extend(default.to_le_bytes());
+        data
+    }
+
+    #[test]
+    fn check_box_state_follows_ffdata() {
+        // iType 1, iRes in bits 2-6, iSize (automatic size) in bit 10.
+        assert_eq!(
+            checkbox_state(&form_data(1 | (1 << 2), 20, "Check1", 0)).unwrap(),
+            (true, Some(10.0))
+        );
+        assert_eq!(
+            checkbox_state(&form_data(1 | (1 << 10), 0, "", 1)).unwrap(),
+            (false, None)
+        );
+        assert_eq!(
+            checkbox_state(&form_data(1 | (25 << 2) | (1 << 10), 0, "", 0)).unwrap(),
+            (false, None)
+        );
+        for data in [
+            form_data(1 | (25 << 2), 20, "", 1),
+            form_data(0, 20, "", 0),
+            form_data(1 | (2 << 2), 20, "", 0),
+            form_data(1, 1, "", 0),
+            form_data(1, 20, "", 0)[..14].to_vec(),
+        ] {
+            assert!(checkbox_state(&data).is_err());
+        }
     }
 
     #[test]

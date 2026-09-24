@@ -539,6 +539,17 @@ fn evaluated_field_run(
     table_style: Option<formatting::TableFormattingKey>,
     field: &super::fields::Evaluated,
 ) -> Result<docx_model::FieldRun, String> {
+    let checkbox = field
+        .form_data_cp
+        .map(|data_cp| {
+            let (_, fc, piece) = story
+                .position(data_cp)
+                .ok_or_else(|| unsupported("Word form data outside piece table"))?;
+            let data =
+                formatting.direct_binary_data(style, table_style, fc, piece.prm, &story.prcs)?;
+            super::fields::checkbox_state(data)
+        })
+        .transpose()?;
     let mut properties = |cp: usize| -> Result<docx_model::FieldRun, String> {
         let (_, fc, piece) = story
             .position(cp)
@@ -587,7 +598,16 @@ fn evaluated_field_run(
             typography_acquisition: run.typography_acquisition,
         })
     };
-    let run = properties(field.format_cp)?;
+    let mut run = properties(field.format_cp)?;
+    if let Some((checked, size)) = checkbox {
+        // ECMA-376 17.16.17 checkBox: the DOCX parser shows a ballot box and
+        // applies an explicit size to both font-size slots.
+        run.fallback_text = if checked { "\u{2612}" } else { "\u{2610}" }.to_string();
+        if let Some(size) = size {
+            run.font_size = size;
+            run.font_size_cs = Some(size);
+        }
+    }
     if let Some(result_cp) = field.agreeing_result_cp {
         // Without MERGEFORMAT/CHARFORMAT, ECMA-376 17.16.4.3.3 leaves the
         // formatting of a regenerated result to the application. The DOCX
