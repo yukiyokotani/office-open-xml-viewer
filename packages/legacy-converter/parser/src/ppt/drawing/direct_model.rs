@@ -12,13 +12,33 @@ const MAX_MODEL_SHAPES: usize = 100_000;
 // strings. Text and custom-path backing are charged by their own projectors.
 const MODEL_SHAPE_STRINGS_BYTES: usize = 384;
 
+/// Whether a text body takes its unspecified properties from the destination
+/// main master's `TextMasterStyleAtom` of its own `TextHeaderAtom` type.
+///
+/// MS-PPT 2.9.44 states this for placeholder shapes. It is silent for a
+/// non-placeholder shape whose text type is not `Tx_TYPE_OTHER`, although
+/// 2.13.33 names every such type as placeholder text. PowerPoint writes these
+/// bodies when a layout-only placeholder is saved to the binary format (with
+/// no PlaceholderAtom, or one whose position is -1 per 2.7.8). PowerPoint 16
+/// PDF exports of Office-saved decks show these bodies following the master
+/// style of their text type, not the document `Tx_TYPE_OTHER` defaults: a
+/// type-0 body renders at the master title size and face (44 pt Calibri Light,
+/// document default 18 pt Calibri), type-1 bodies render master body bullets
+/// absent from the document level, the master body typeface instead of the
+/// document one, and the master body's background-scheme text color. No
+/// corpus body contradicted the rule. `Tx_TYPE_OTHER` keeps the separately
+/// established document fallback below.
+fn master_typed_text(text_type: Option<u16>, placeholder: bool) -> bool {
+    placeholder || text_type.is_some_and(|kind| kind != 4)
+}
+
 fn document_text_axes(
     text_type: Option<u16>,
     placeholder: bool,
     master_linked: bool,
     outline: bool,
-    axes: Option<text_style::ParagraphAxes>,
-) -> Option<text_style::ParagraphAxes> {
+    axes: Option<text_style::DocumentAxes>,
+) -> Option<text_style::DocumentAxes> {
     (text_type == Some(4) && !placeholder && !master_linked && !outline)
         .then_some(axes)
         .flatten()
@@ -604,8 +624,7 @@ impl Context<'_> {
             .map(|id| self.presentation.shape_masters.levels(id))
             .transpose()?;
         let levels = linked.or_else(|| {
-            shape
-                .is_placeholder()
+            master_typed_text(text_type, shape.is_placeholder())
                 .then(|| {
                     self.presentation.text_masters[self.index]
                         .as_deref()
@@ -861,10 +880,12 @@ mod tests {
 
     #[test]
     fn document_type4_origins_are_limited_to_unlinked_freeform_text() {
-        let axes = Some(text_style::ParagraphAxes {
+        let mut levels = [text_style::ParagraphAxes::default(); 5];
+        levels[0] = text_style::ParagraphAxes {
             margin: Some(180),
             indent: Some(90),
-        });
+        };
+        let axes = Some(levels);
         assert_eq!(document_text_axes(Some(4), false, false, false, axes), axes);
         for excluded in [
             (Some(0), false, false, false),
@@ -877,6 +898,22 @@ mod tests {
                 None
             );
         }
+    }
+
+    #[test]
+    fn typed_master_style_follows_text_type_not_only_placeholder_status() {
+        // Placeholders of any type and non-placeholder text of every
+        // placeholder text type use the master style of that type.
+        for kind in [0, 1, 2, 5, 6, 7, 8] {
+            assert!(master_typed_text(Some(kind), false));
+            assert!(master_typed_text(Some(kind), true));
+        }
+        assert!(master_typed_text(Some(4), true));
+        assert!(master_typed_text(None, true));
+        // Tx_TYPE_OTHER freeform text keeps the document-default path, and a
+        // body without a TextHeaderAtom gains no inferred type.
+        assert!(!master_typed_text(Some(4), false));
+        assert!(!master_typed_text(None, false));
     }
 
     #[test]

@@ -4400,7 +4400,9 @@ export function renderTextBody(
     const firstLineIndentPx = firstLineIndentPxFor(hasBullet, indentPx);
     const lines = layoutParagraph(ctx, para, maxW, paraDefaultFontSizePx, paraDefaultColor, scale, marLPx, bodyDefaultBold, bodyDefaultItalic, fontScale, slideNumber, rc, firstLineIndentPx);
 
-    // spaceBefore/After are in hundredths of a point → convert to canvas px
+    // spaceBefore/After are in hundredths of a point → convert to canvas px.
+    // Percentage forms (ECMA-376 §21.1.2.3.11 spcPct) are resolved per line
+    // below, against the text size of the line the spacing is attached to.
     const spaceBeforePx = para.spaceBefore != null ? (para.spaceBefore / 100) * PT_TO_EMU * scale * fontScale : 0;
     const spaceAfterPx  = para.spaceAfter  != null ? (para.spaceAfter  / 100) * PT_TO_EMU * scale * fontScale : 0;
 
@@ -4504,14 +4506,26 @@ export function renderTextBody(
       if (body.autoFit === 'norm' && body.lnSpcReduction != null && para.spaceLine?.type !== 'pts') {
         lineHeight *= 1 - body.lnSpcReduction;
       }
-      const linePx  = lineHeight + (isLast ? spaceAfterPx : 0);
+      // ECMA-376 §21.1.2.2.9-.10 with §21.1.2.3.11: a percentage spcBef /
+      // spcAft is a fraction of the text size, measured like a percentage
+      // lnSpc (the same single-line base, before lnSpcReduction), on the first
+      // line for space before and the last line for space after. 100000 is
+      // one line.
+      const percentSpacingBase = measureOnly ? maxSizePx : naturalSingle;
+      const lineSpaceAfterPx = isLast && para.spaceAfterPct != null
+        ? percentSpacingBase * (para.spaceAfterPct / 100000)
+        : spaceAfterPx;
+      const lineSpaceBeforePx = isFirst && para.spaceBeforePct != null
+        ? percentSpacingBase * (para.spaceBeforePct / 100000)
+        : spaceBeforePx;
+      const linePx  = lineHeight + (isLast ? lineSpaceAfterPx : 0);
       // ECMA-376 §21.1.2.2.6 (a:spcBef): paragraph "space before" is the gap
       // *between* paragraphs. PowerPoint suppresses it on the first paragraph
       // of a text body — otherwise placeholders whose layout-default `spcBef`
       // is 10 pt (sample-1 slide-5 "Figure 1." caption inherits this from the
       // layout body lstStyle) get pushed ~10 px below the placeholder top and
       // collide with the chart title sitting just below in the slide.
-      const topGap  = isFirst && paraIdx > 0 ? spaceBeforePx : 0;
+      const topGap  = isFirst && paraIdx > 0 ? lineSpaceBeforePx : 0;
       // Preserve the signed non-bullet first-line indent in draw, wrapping and
       // spAutoFit measurement alike. Continuation lines remain at marL.
       const textXOffset = isFirst ? firstLineIndentPxFor(hasBullet, indentPx) : 0;

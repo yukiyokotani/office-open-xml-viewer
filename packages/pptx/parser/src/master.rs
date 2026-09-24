@@ -15,9 +15,9 @@ use crate::shape::{
 use crate::text::{
     empty_level_bullets, extract_level_bullets, extract_level_font_sizes, extract_level_indents,
     extract_lvl1_font_size, has_any_level_bullet, has_any_level_indent, has_any_level_size,
-    merge_level_bullets, merge_level_indents, merge_level_sizes, read_level_bullets,
-    read_level_font_sizes, read_level_indents, text_property_solid_fill, BuMarker, LevelBullets,
-    LevelFontSizes, LevelIndents,
+    merge_level_bullets, merge_level_indents, merge_level_sizes, paragraph_spacing,
+    read_level_bullets, read_level_font_sizes, read_level_indents, text_property_solid_fill,
+    BuMarker, LevelBullets, LevelFontSizes, LevelIndents, ParagraphSpacing,
 };
 use crate::theme::{
     bake_clr_map, parse_theme_part, resolve_theme_typeface, PptxTheme,
@@ -117,13 +117,13 @@ pub(crate) struct LayoutPlaceholders {
     /// layout lstStyle > lvl1pPr @eaLnBrk (ECMA-376 §21.1.2.2.7)
     pub(crate) by_type_ea_ln_brk: HashMap<String, bool>,
     /// Default space-before (hundredths of pt) per placeholder type, from layout lstStyle
-    pub(crate) by_type_space_before: HashMap<String, i64>,
+    pub(crate) by_type_space_before: HashMap<String, ParagraphSpacing>,
     /// Default space-after (hundredths of pt) per placeholder type, from layout lstStyle
-    pub(crate) by_type_space_after: HashMap<String, i64>,
+    pub(crate) by_type_space_after: HashMap<String, ParagraphSpacing>,
     /// Default space-before from master txStyles (fallback when layout has none)
-    pub(crate) by_type_master_space_before: HashMap<String, i64>,
+    pub(crate) by_type_master_space_before: HashMap<String, ParagraphSpacing>,
     /// Default space-after from master txStyles (fallback when layout has none)
-    pub(crate) by_type_master_space_after: HashMap<String, i64>,
+    pub(crate) by_type_master_space_after: HashMap<String, ParagraphSpacing>,
     /// Stroke per placeholder type from layout spPr > ln
     pub(crate) by_type_stroke: HashMap<String, Stroke>,
     /// Stroke per placeholder idx from layout spPr > ln
@@ -599,7 +599,7 @@ impl LayoutPlaceholders {
             })
     }
 
-    pub(crate) fn lookup_space_before(&self, ph_type: &str) -> Option<i64> {
+    pub(crate) fn lookup_space_before(&self, ph_type: &str) -> Option<ParagraphSpacing> {
         self.by_type_space_before
             .get(ph_type)
             .copied()
@@ -620,7 +620,7 @@ impl LayoutPlaceholders {
             })
     }
 
-    pub(crate) fn lookup_space_after(&self, ph_type: &str) -> Option<i64> {
+    pub(crate) fn lookup_space_after(&self, ph_type: &str) -> Option<ParagraphSpacing> {
         self.by_type_space_after
             .get(ph_type)
             .copied()
@@ -1389,12 +1389,12 @@ pub(crate) fn parse_master_txstyle_color(
 pub(crate) fn parse_master_txstyle_spacing(
     root: roxmltree::Node<'_, '_>,
 ) -> (
-    HashMap<String, i64>,
-    HashMap<String, i64>,
+    HashMap<String, ParagraphSpacing>,
+    HashMap<String, ParagraphSpacing>,
     HashMap<String, f64>,
 ) {
-    let mut before_map: HashMap<String, i64> = HashMap::new();
-    let mut after_map: HashMap<String, i64> = HashMap::new();
+    let mut before_map: HashMap<String, ParagraphSpacing> = HashMap::new();
+    let mut after_map: HashMap<String, ParagraphSpacing> = HashMap::new();
     let line_map: HashMap<String, f64> = HashMap::new(); // intentionally not populated
     let tx_styles = match child(root, "txStyles") {
         Some(n) => n,
@@ -1403,12 +1403,8 @@ pub(crate) fn parse_master_txstyle_spacing(
     let style_ph_map: &[(&str, &[&str])] = MASTER_TXSTYLE_PH_TYPES;
     for (style_name, ph_types) in style_ph_map {
         let lvl1 = child(tx_styles, style_name).and_then(|sn| child(sn, "lvl1pPr"));
-        let spc_before = lvl1
-            .and_then(|lp| child(lp, "spcBef"))
-            .and_then(|s| child(s, "spcPts").and_then(|n| attr_i64(&n, "val")));
-        let spc_after = lvl1
-            .and_then(|lp| child(lp, "spcAft"))
-            .and_then(|s| child(s, "spcPts").and_then(|n| attr_i64(&n, "val")));
+        let spc_before = lvl1.and_then(|lp| paragraph_spacing(lp, "spcBef"));
+        let spc_after = lvl1.and_then(|lp| paragraph_spacing(lp, "spcAft"));
         if let Some(v) = spc_before {
             for ph_type in *ph_types {
                 before_map.entry(ph_type.to_string()).or_insert(v);
@@ -1463,8 +1459,8 @@ pub(crate) fn parse_layout_placeholders(
     master_transforms: &HashMap<String, Transform>,
     master_alignments: &HashMap<String, String>,
     master_ea_ln_brk: &HashMap<String, bool>,
-    master_space_before: &HashMap<String, i64>,
-    master_space_after: &HashMap<String, i64>,
+    master_space_before: &HashMap<String, ParagraphSpacing>,
+    master_space_after: &HashMap<String, ParagraphSpacing>,
     master_line_spacing: &HashMap<String, f64>,
     theme_source: &(impl PptxThemeSource + ?Sized),
     layout_dir: &str,
@@ -1572,14 +1568,8 @@ pub(crate) fn parse_layout_placeholders(
         let layout_ea_ln_brk: Option<bool> = layout_lvl1_ppr
             .and_then(|lp| attr(&lp, "eaLnBrk"))
             .map(|v| v == "1" || v == "true");
-        let layout_space_before: Option<i64> = layout_lvl1_ppr
-            .and_then(|lp| child(lp, "spcBef"))
-            .and_then(|s| child(s, "spcPts"))
-            .and_then(|s| attr_i64(&s, "val"));
-        let layout_space_after: Option<i64> = layout_lvl1_ppr
-            .and_then(|lp| child(lp, "spcAft"))
-            .and_then(|s| child(s, "spcPts"))
-            .and_then(|s| attr_i64(&s, "val"));
+        let layout_space_before = layout_lvl1_ppr.and_then(|lp| paragraph_spacing(lp, "spcBef"));
+        let layout_space_after = layout_lvl1_ppr.and_then(|lp| paragraph_spacing(lp, "spcAft"));
         // lnSpc > spcPct val (e.g. 90000 = 90%)
         let layout_line_spacing: Option<f64> = layout_lvl1_ppr
             .and_then(|lp| child(lp, "lnSpc"))
@@ -1966,8 +1956,8 @@ pub(crate) fn parse_layout(
     master_transforms: &HashMap<String, Transform>,
     master_alignments: &HashMap<String, String>,
     master_ea_ln_brk: &HashMap<String, bool>,
-    master_space_before: &HashMap<String, i64>,
-    master_space_after: &HashMap<String, i64>,
+    master_space_before: &HashMap<String, ParagraphSpacing>,
+    master_space_after: &HashMap<String, ParagraphSpacing>,
     master_line_spacing: &HashMap<String, f64>,
     theme_source: &(impl PptxThemeSource + ?Sized),
     layout_dir: &str,
@@ -2060,8 +2050,8 @@ pub(crate) struct ParsedMaster {
     pub(crate) master_transforms: HashMap<String, Transform>,
     pub(crate) master_alignments: HashMap<String, String>,
     pub(crate) master_ea_ln_brk: HashMap<String, bool>,
-    pub(crate) master_space_before: HashMap<String, i64>,
-    pub(crate) master_space_after: HashMap<String, i64>,
+    pub(crate) master_space_before: HashMap<String, ParagraphSpacing>,
+    pub(crate) master_space_after: HashMap<String, ParagraphSpacing>,
     pub(crate) master_line_spacing: HashMap<String, f64>,
     pub(crate) master_bold: HashMap<String, bool>,
     pub(crate) master_italic: HashMap<String, bool>,
@@ -2280,8 +2270,8 @@ mod placeholder_geometry_tests {
             &HashMap::<String, Transform>::new(),
             &HashMap::<String, String>::new(),
             &HashMap::<String, bool>::new(),
-            &HashMap::<String, i64>::new(),
-            &HashMap::<String, i64>::new(),
+            &HashMap::<String, ParagraphSpacing>::new(),
+            &HashMap::<String, ParagraphSpacing>::new(),
             &HashMap::<String, f64>::new(),
             &HashMap::new(),
             "ppt/slideLayouts",

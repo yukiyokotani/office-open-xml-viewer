@@ -25,9 +25,13 @@ pub(super) struct ParagraphAxes {
     pub indent: Option<i16>,
 }
 
+/// Per-level origins of the document `Tx_TYPE_OTHER` master style, indexed
+/// by IndentLevel. A level absent from the record keeps both fields absent.
+pub(super) type DocumentAxes = [ParagraphAxes; 5];
+
 pub(super) struct DocumentDefaults {
     pub levels: Vec<Level>,
-    pub type4_level0_axes: Option<ParagraphAxes>,
+    pub type4_axes: Option<DocumentAxes>,
 }
 
 /// MS-PPT 2.9.47 / 2.2.30: this is a passive positional substitution, not
@@ -764,7 +768,7 @@ pub(super) fn document_defaults(
     budget: &mut usize,
 ) -> Result<DocumentDefaults, String> {
     let mut defaults = None;
-    let mut type4_level0_axes = None;
+    let mut type4_axes = None;
     for env in children
         .iter()
         .filter(|r| r.kind == 1010 && r.version == 15)
@@ -777,18 +781,23 @@ pub(super) fn document_defaults(
                 return Err(unsupported("duplicate PowerPoint document text defaults"));
             }
             let levels = read_levels(*atom, budget)?;
-            if atom.instance == 4 {
-                type4_level0_axes = levels.first().map(|level| ParagraphAxes {
-                    margin: level.paragraph.margin,
-                    indent: level.paragraph.indent,
-                });
+            if atom.instance == 4 && !levels.is_empty() {
+                type4_axes = Some(std::array::from_fn(|index| {
+                    levels
+                        .get(index)
+                        .map(|level| ParagraphAxes {
+                            margin: level.paragraph.margin,
+                            indent: level.paragraph.indent,
+                        })
+                        .unwrap_or_default()
+                }));
             }
             defaults = Some(levels);
         }
     }
     Ok(DocumentDefaults {
         levels: defaults.unwrap_or_default(),
-        type4_level0_axes,
+        type4_axes,
     })
 }
 
@@ -851,13 +860,29 @@ mod tests {
     }
 
     #[test]
-    fn document_defaults_retain_only_type4_level0_paragraph_axes() {
+    fn document_defaults_retain_type4_paragraph_axes_by_level() {
         let absent = document_defaults(&[], &mut 100).unwrap();
         assert!(absent.levels.is_empty());
-        assert_eq!(absent.type4_level0_axes, None);
+        assert_eq!(absent.type4_axes, None);
 
-        let level = [u16s(1), u32s(0x500), u16s(180), u16s(90), u32s(0)].concat();
-        let master = record_bytes(0, 4, 4003, &level);
+        let axes = |margin, indent| ParagraphAxes { margin, indent };
+        // Level 0 carries both fields, level 1 only its indent and level 2
+        // only its margin; levels 3-4 are absent from the record.
+        let levels = [
+            u16s(3),
+            u32s(0x500),
+            u16s(180),
+            u16s(90),
+            u32s(0),
+            u32s(0x400),
+            u16s(300),
+            u32s(0),
+            u32s(0x100),
+            u16s(576),
+            u32s(0),
+        ]
+        .concat();
+        let master = record_bytes(0, 4, 4003, &levels);
         let environment = Record {
             version: 15,
             instance: 0,
@@ -865,16 +890,19 @@ mod tests {
             payload: &master,
         };
         let defaults = document_defaults(&[environment], &mut 100).unwrap();
-        assert_eq!(defaults.levels.len(), 1);
+        assert_eq!(defaults.levels.len(), 3);
         assert_eq!(
-            defaults.type4_level0_axes,
-            Some(ParagraphAxes {
-                margin: Some(180),
-                indent: Some(90),
-            })
+            defaults.type4_axes,
+            Some([
+                axes(Some(180), Some(90)),
+                axes(None, Some(300)),
+                axes(Some(576), None),
+                axes(None, None),
+                axes(None, None),
+            ])
         );
 
-        let title = record_bytes(0, 0, 4003, &level);
+        let title = record_bytes(0, 0, 4003, &levels);
         let environment = Record {
             payload: &title,
             ..environment
@@ -882,7 +910,7 @@ mod tests {
         assert_eq!(
             document_defaults(&[environment], &mut 100)
                 .unwrap()
-                .type4_level0_axes,
+                .type4_axes,
             None
         );
 
@@ -895,11 +923,20 @@ mod tests {
         assert_eq!(
             document_defaults(&[zero_environment], &mut 100)
                 .unwrap()
-                .type4_level0_axes,
-            Some(ParagraphAxes {
-                margin: Some(0),
-                indent: Some(0),
-            })
+                .type4_axes
+                .map(|levels| levels[0]),
+            Some(axes(Some(0), Some(0)))
+        );
+        let empty = record_bytes(0, 4, 4003, &u16s(0));
+        let empty_environment = Record {
+            payload: &empty,
+            ..environment
+        };
+        assert_eq!(
+            document_defaults(&[empty_environment], &mut 100)
+                .unwrap()
+                .type4_axes,
+            None
         );
     }
 

@@ -11,7 +11,7 @@ pub(super) struct PresentationStorage<R, S, B> {
     pub outline_slide_numbers: Vec<Vec<Vec<u32>>>,
     pub first_slide_number: u16,
     pub text_masters: Vec<Option<std::rc::Rc<text_style::Master>>>,
-    pub document_text_axes: Option<text_style::ParagraphAxes>,
+    pub document_text_axes: Option<text_style::DocumentAxes>,
     pub fonts: Vec<String>,
     pub schemes: Vec<Option<scheme::Scheme>>,
     pub image_entries: Vec<R>,
@@ -479,20 +479,16 @@ pub(crate) mod tests {
             }
         }
         drop(borrowed);
-        owned.document_text_axes = Some(text_style::ParagraphAxes {
+        let mut axes = [text_style::ParagraphAxes::default(); 5];
+        axes[0] = text_style::ParagraphAxes {
             margin: Some(180),
             indent: Some(0),
-        });
+        };
+        owned.document_text_axes = Some(axes);
         let moved = stream.clone();
         drop(stream);
         let viewed = owned.into_borrowed(&moved).unwrap();
-        assert_eq!(
-            viewed.document_text_axes,
-            Some(text_style::ParagraphAxes {
-                margin: Some(180),
-                indent: Some(0),
-            })
-        );
+        assert_eq!(viewed.document_text_axes, Some(axes));
         assert_eq!(viewed.slides[0].1, ["second"]);
         assert_eq!(viewed.slides[1].1, ["first"]);
         assert!(viewed.outline_styles.iter().all(|styles| styles[0].is_some()));

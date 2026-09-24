@@ -1325,6 +1325,8 @@ interface Paragraph__emitterCollision1 {
     indent: number;
     spaceBefore: number | null;
     spaceAfter: number | null;
+    spaceBeforePct?: number;
+    spaceAfterPct?: number;
     spaceLine: SpaceLine | null;
     lvl: number;
     bullet: Bullet__emitterCollision1;
