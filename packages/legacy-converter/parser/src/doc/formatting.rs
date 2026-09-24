@@ -601,6 +601,8 @@ impl<'a> Formatting<'a> {
         }
         #[cfg(feature = "direct-doc")]
         let mut piece_started = false;
+        #[cfg(feature = "direct-doc")]
+        let mut native_admission = table::NativeAdmission::default();
         sprm::paragraph_properties_appended(
             direct,
             piece,
@@ -623,6 +625,7 @@ impl<'a> Formatting<'a> {
                 // keeps that cross-source case gated until it is generalized.
                 #[cfg(feature = "direct-doc")]
                 if interpret_table_styles {
+                    native_admission.observe(code);
                     properties.row.reset_row_properties_at_tistd(code);
                 }
                 #[cfg(feature = "direct-doc")]
@@ -668,6 +671,14 @@ impl<'a> Formatting<'a> {
                             return Ok(());
                         }
                         table::NativeGeometryApply::Unhandled => {}
+                    }
+                    match native_admission.apply(&mut properties.row, code, operand)? {
+                        table::NativeAdmissionApply::Handled => return Ok(()),
+                        table::NativeAdmissionApply::HandledUnsupported => {
+                            self.unsupported_table_properties = true;
+                            return Ok(());
+                        }
+                        table::NativeAdmissionApply::Unhandled => {}
                     }
                 }
                 if !properties.apply(code, operand)? && (code >> 10) & 7 == 5 {
@@ -4108,9 +4119,8 @@ mod tests {
             properties.row.resolve_style_aware_margins(defaults, cells);
             assert_eq!(properties.row.cells[0].margins[1], Some(expected));
             assert_eq!(properties.row.cells[0].width, 1000);
-            // Scalar style selection still carries the independent admission
-            // prerequisite; a correct margin projection does not remove it.
-            assert!(native.unsupported_table_properties);
+            // TInsert before the selection is established cell geometry.
+            assert!(!native.unsupported_table_properties);
         }
     }
 
@@ -4139,7 +4149,10 @@ mod tests {
             ]
             .concat(),
         );
-        assert!(unsupported, "the independent TIstd admission gate remains");
+        assert!(
+            !unsupported,
+            "established shading records around TIstd are admitted"
+        );
         assert!(matches!(
             &before_reset.row.cells[0].prepared_shading,
             Some(table::PreparedCellShading::Explicit(shading))
@@ -4155,7 +4168,10 @@ mod tests {
             ]
             .concat(),
         );
-        assert!(unsupported, "the independent TIstd admission gate remains");
+        assert!(
+            !unsupported,
+            "established shading records around TIstd are admitted"
+        );
         assert!(matches!(
             &reversed.row.cells[0].prepared_shading,
             Some(table::PreparedCellShading::Explicit(shading))
@@ -4173,7 +4189,10 @@ mod tests {
             ]
             .concat(),
         );
-        assert!(unsupported, "the independent TIstd admission gate remains");
+        assert!(
+            !unsupported,
+            "established shading records around TIstd are admitted"
+        );
         assert_eq!(after_reset.row.table_style, Some(2));
         assert!(matches!(
             after_reset.row.cells[0].prepared_shading,
@@ -4285,8 +4304,8 @@ mod tests {
                 let properties = formatting.table_properties_native(109, 0, &[]).unwrap();
                 assert_eq!(properties.row.table_style, Some(21));
                 assert!(
-                    formatting.unsupported_table_properties,
-                    "the independent TIstd admission gate remains"
+                    !formatting.unsupported_table_properties,
+                    "TIstd after the proven geometry profile is admitted"
                 );
             }
         }

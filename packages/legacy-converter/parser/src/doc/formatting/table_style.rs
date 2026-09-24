@@ -526,6 +526,15 @@ impl Formatting<'_> {
                         // The validator permits only the required zero dxa value
                         // in default style 0x000B. It introduces no leading indent.
                         0xf617 if scope == tapx::Scope::Unconditional => Ok(true),
+                        // A style's preferred indent is a preference like the
+                        // direct one: the physical row origin positions the
+                        // table (see table::PreferredIndent for the evidence and
+                        // its RTL limit, enforced at projection).
+                        #[cfg(feature = "direct-doc")]
+                        0xf661 if scope == tapx::Scope::Unconditional => {
+                            table::PreferredIndent::read(operand)?;
+                            Ok(interpret_table_styles)
+                        }
                         _ => Ok(false),
                     }
                 },

@@ -3,7 +3,7 @@
 use super::{payload, ModelBudget};
 use crate::doc::{
     table::{Color, PreferredWidth, Properties},
-    table_structure::{Assembler, Event, LogicalTable, Payload},
+    table_structure::{Assembler, Event, LogicalTable, Payload, PlannedRow},
     unsupported,
 };
 use docx_model::{
@@ -147,6 +147,7 @@ fn project_table(
                 "direct DOC model cannot retain row table-property shading",
             ));
         }
+        check_row_preferences(&planned)?;
         let mut cells = Vec::new();
         reserve(&mut cells, planned.cells.len(), &mut |n| {
             charge_cell(remaining, n)
@@ -174,6 +175,14 @@ fn project_table(
                     ));
                 }
             };
+            if source.no_wrap && !matches!(source.preferred, Some(PreferredWidth::Dxa(_))) {
+                // [MS-DOC] 2.9.28: fNoWrap is ignored only when the cell's
+                // preferred width is ftsDxa. Otherwise it changes autofit
+                // wrapping, which the shared cell model does not represent.
+                return Err(unsupported(
+                    "direct DOC model cannot retain no-wrap cells without an absolute preferred width",
+                ));
+            }
             if source.flags & ((1 << 12) | (1 << 14)) != 0
                 || source.borders[4].is_some()
                 || source.borders[5].is_some()
@@ -362,6 +371,49 @@ fn project_table(
         std::mem::size_of::<DocTable>() + payload::table(&table)?,
     )?;
     Ok(table)
+}
+
+/// Validate the row preferences that the projection represents through the
+/// physical row geometry instead of a separate model field.
+fn check_row_preferences(planned: &PlannedRow<Blocks>) -> Result<(), String> {
+    let source = &planned.source;
+    if source.bidi && (source.preferred_indent.is_some() || source.table_style.is_some()) {
+        // The preferred-indent evidence (see table::PreferredIndent) covers
+        // left-to-right tables only. Every Word table style inherits the
+        // default style's sprmTWidthIndent, so a styled RTL row is included.
+        return Err(unsupported(
+            "direct DOC model cannot place a right-to-left table with a preferred indent",
+        ));
+    }
+    // [MS-DOC] 2.6.3 sprmTWidthBefore/sprmTWidthAfter are the preferred widths
+    // of the same leading/trailing row parts whose physical widths the grid
+    // projection emits as wBefore/wAfter. Admit them only where both agree, so
+    // the projection is the same whichever one Word lays out from. ftsNil is
+    // the documented absence of a preference.
+    for (preference, grid, physical) in [
+        (
+            source.preferred_before,
+            planned.grid_before,
+            planned.width_before,
+        ),
+        (
+            source.preferred_after,
+            planned.grid_after,
+            planned.width_after,
+        ),
+    ] {
+        match preference {
+            None | Some(None) => {}
+            Some(Some(PreferredWidth::Dxa(value)))
+                if i32::from(value) == if grid == 0 { 0 } else { physical } => {}
+            Some(Some(_)) => {
+                return Err(unsupported(
+                    "direct DOC model cannot reconcile a preferred row part width with its grid",
+                ))
+            }
+        }
+    }
+    Ok(())
 }
 
 fn physical_width(value: i32) -> TableWidthAcquisitionWire {
