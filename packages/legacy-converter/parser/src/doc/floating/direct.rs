@@ -7,7 +7,7 @@ use docx_model::{
     AnchorAcquisitionWire, AnchorAxisChoiceWire, AnchorAxisWire, AnchorBehaviorWire,
     AnchorEdgesWire, AnchorExtentWire, AnchorGroupWire, AnchorResolvedChildFrameWire,
     AnchorSimplePositionWire, AnchorValueStatusWire, AnchorWrapKindWire, AnchorWrapWire, ImageRun,
-    LineEnd, ShapeFill, ShapeRun,
+    LineEnd, PathCmd, ShapeFill, ShapeRun,
 };
 
 #[cfg(test)]
@@ -579,7 +579,8 @@ fn direct_shape(
         // Members stack in source order above the group's own layer, as
         // DOCX group members do.
         z_order: facts.z_order.saturating_add(member),
-        preset_geometry: Some(shape.preset.into()),
+        preset_geometry: shape.preset.map(str::to_owned),
+        subpaths: shape.subpaths.clone(),
         fill: shape.fill.clone().map(|color| ShapeFill::Solid { color }),
         stroke: line.map(|line| line.color.clone()),
         stroke_width: line.map_or(0.0, |line| pt(line.width_emu)),
@@ -606,6 +607,11 @@ fn direct_shape(
         ..ShapeRun::default()
     };
     let mut total = Payload(std::mem::size_of::<ShapeRun>());
+    for path in &run.subpaths {
+        total.add(
+            std::mem::size_of::<Vec<PathCmd>>() + path.capacity() * std::mem::size_of::<PathCmd>(),
+        )?;
+    }
     let ends = |end: &Option<LineEnd>| {
         end.as_ref().map_or(0, |end| {
             end.r#type.capacity() + end.w.capacity() + end.len.capacity()

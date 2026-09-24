@@ -18,15 +18,22 @@
 use super::super::{u32_at, unsupported};
 use super::records;
 use crate::officeart::{
+    geometry::{Decoded, DecodedCommand, Geometry},
     paint::Paint,
     properties::{self, Property},
     stroke::LineEnd,
     Record,
 };
+use docx_model::PathCmd;
 use std::collections::BTreeMap;
 
 pub(in crate::doc) struct Facts {
-    pub preset: &'static str,
+    /// ECMA-376 preset for a preset shape type; `None` for a freeform whose
+    /// outline is `subpaths`.
+    pub preset: Option<&'static str>,
+    /// Freeform outline normalized to the shape box (ECMA-376 20.1.9.8
+    /// custGeom), one entry per OfficeArt path.
+    pub subpaths: Vec<Vec<PathCmd>>,
     /// Solid fill color, `RRGGBB` or `RRGGBBAA`.
     pub fill: Option<String>,
     pub line: Option<Line>,
@@ -76,9 +83,15 @@ impl Facts {
         extent: [i64; 2],
         budget: &mut usize,
     ) -> Result<Self, String> {
-        let preset = preset(kind).ok_or_else(|| {
-            unsupported(format!("Word drawing shape type {kind} is not supported"))
-        })?;
+        // msosptNotPrimitive (0) is a freeform: its outline is the explicit
+        // OfficeArt path, decoded in `facts`.
+        let preset = if kind == 0 {
+            None
+        } else {
+            Some(preset(kind).ok_or_else(|| {
+                unsupported(format!("Word drawing shape type {kind} is not supported"))
+            })?)
+        };
         // MS-ODRAW 2.2.40 FSP flags: group members, patriarchs, deleted,
         // OLE and master-linked shapes need facts this projection lacks.
         // fConnector is accepted only for the straight connector preset,
@@ -120,26 +133,35 @@ impl Facts {
                 }
             }
         }
-        table.facts(kind, preset, client_text)
+        table.facts(kind, preset, client_text, budget)
     }
 }
 
 /// Primary and tertiary FOPT values. Scalars must agree when repeated;
 /// Boolean property sets merge by their use bits (MS-ODRAW 2.3.1).
 #[derive(Default)]
-struct Table {
+struct Table<'a> {
     values: BTreeMap<u16, u32>,
+    /// Geometry arrays (MS-ODRAW 2.3.6.6-2.3.6.9, 2.3.6.18-2.3.6.20).
+    complex: BTreeMap<u16, &'a [u8]>,
 }
 
-impl Table {
-    fn add(&mut self, property: Property<'_>) -> Result<(), String> {
+impl<'a> Table<'a> {
+    fn add(&mut self, property: Property<'a>) -> Result<(), String> {
         let id = property.opid & 0x3fff;
-        if property.complex.is_some() {
+        if let Some(data) = property.complex {
             // Name, description and the alternate metro XML blob identify or
             // duplicate the shape; they never change its binary rendering.
             // Word sets fBid on these complex strings as well.
             return match id {
                 0x380 | 0x381 | 0x3a9 => Ok(()),
+                0x145 | 0x146 | 0x151 | 0x152 | 0x155..=0x157 => {
+                    if self.complex.insert(id, data).is_some_and(|old| old != data) {
+                        return Err(unsupported("conflicting Word drawing geometry"));
+                    }
+                    self.values.insert(id, property.value);
+                    Ok(())
+                }
                 _ => Err(unsupported(format!(
                     "Word drawing shape complex property {id:#06x} is not supported"
                 ))),
@@ -181,10 +203,13 @@ impl Table {
     fn facts(
         &self,
         kind: u16,
-        preset: &'static str,
+        preset: Option<&'static str>,
         client_text: Option<u32>,
+        budget: &mut usize,
     ) -> Result<Facts, String> {
         let mut paint = Paint::default();
+        let mut geometry = Geometry::default();
+        let freeform = kind == 0;
         let mut insets = [0x16530, 0xb298, 0x16530, 0xb298];
         let mut text_id = None;
         for (&id, &value) in &self.values {
@@ -215,6 +240,17 @@ impl Table {
                 0xbf => {}
                 // Picture-only Boolean properties have no effect on shapes.
                 0x13f => {}
+                // Freeform geometry (MS-ODRAW 2.3.6): the explicit path. Adjust
+                // values, guides, handles and connection sites only feed
+                // formulas and editing; a path that references a guide or an
+                // escape is not decoded and is rejected below.
+                0x140..=0x144 if freeform => geometry.scalar(id, value)?,
+                0x145 | 0x146 if freeform => match self.complex.get(&id) {
+                    Some(data) => geometry.complex(id, data),
+                    None => geometry.scalar(id, value)?,
+                },
+                0x147..=0x150 | 0x151 | 0x155..=0x158 if freeform => {}
+                0x152 if freeform && (client_text.is_none() || value == 0) => {}
                 0x17f | 0x180..=0x1bf | 0x1c0..=0x1d7 | 0x1ff => paint.property(id, value)?,
                 0x23f => {}
                 // Black-and-white display modes only affect B/W output.
@@ -268,8 +304,23 @@ impl Table {
             return Err(unsupported("Word compound drawing lines are not supported"));
         }
 
+        let mut subpaths = Vec::new();
+        let mut path_paint = (true, true);
+        if freeform {
+            let decoded = geometry
+                .decode(budget)?
+                .ok_or_else(|| unsupported("Word freeform uses guide formulas or path escapes"))?;
+            // The DOCX shape model carries one fill and one line for all of
+            // its paths, so per-path fill/stroke flags must agree.
+            path_paint = decoded.uniform_paint().ok_or_else(|| {
+                unsupported("Word freeform paths use differing fill or line flags")
+            })?;
+            subpaths = normalized(&decoded, budget)?;
+        }
         let line_shape = is_line(kind);
-        let fill = if let Some((color, alpha)) = paint.solid_fill_or_default(!line_shape) {
+        let fill = if !path_paint.0 {
+            None
+        } else if let Some((color, alpha)) = paint.solid_fill_or_default(!line_shape) {
             Some(rgb(color, alpha)?)
         } else {
             None
@@ -277,6 +328,7 @@ impl Table {
         // An enabled but non-solid fill (gradient, pattern, texture,
         // picture or custom fill rectangle) must not become "no fill".
         if !line_shape
+            && path_paint.0
             && fill.is_none()
             && paint.filled.unwrap_or(true)
             && paint.fill_ok.unwrap_or(true)
@@ -285,7 +337,7 @@ impl Table {
                 "Word non-solid drawing fills are not supported",
             ));
         }
-        let line = match paint.solid_line_or_default(true) {
+        let line = match paint.solid_line_or_default(path_paint.1) {
             Some((color, alpha)) => {
                 let (join, miter) = paint.details.join();
                 Some(Line {
@@ -302,7 +354,7 @@ impl Table {
                 })
             }
             None => {
-                if paint.lined.unwrap_or(true) && paint.line_ok.unwrap_or(true) {
+                if path_paint.1 && paint.lined.unwrap_or(true) && paint.line_ok.unwrap_or(true) {
                     return Err(unsupported(
                         "Word non-solid drawing lines are not supported",
                     ));
@@ -336,11 +388,49 @@ impl Table {
         };
         Ok(Facts {
             preset,
+            subpaths,
             fill,
             line,
             text,
         })
     }
+}
+
+/// Normalize decoded OfficeArt path coordinates to the unit shape box, the
+/// representation of DOCX custom-geometry subpaths.
+fn normalized(decoded: &Decoded, budget: &mut usize) -> Result<Vec<Vec<PathCmd>>, String> {
+    let width = decoded.width() as f64;
+    let height = decoded.height() as f64;
+    let mut result = Vec::with_capacity(decoded.paths().len());
+    for path in decoded.paths() {
+        *budget = budget
+            .checked_sub(path.commands().len())
+            .ok_or_else(|| unsupported("OfficeArt geometry work budget exceeded"))?;
+        result.push(
+            path.commands()
+                .map(|command| match command {
+                    DecodedCommand::Move([x, y]) => PathCmd::MoveTo {
+                        x: x as f64 / width,
+                        y: y as f64 / height,
+                    },
+                    DecodedCommand::Line([x, y]) => PathCmd::LineTo {
+                        x: x as f64 / width,
+                        y: y as f64 / height,
+                    },
+                    DecodedCommand::Cubic([[x1, y1], [x2, y2], [x, y]]) => PathCmd::CubicBezTo {
+                        x1: x1 as f64 / width,
+                        y1: y1 as f64 / height,
+                        x2: x2 as f64 / width,
+                        y2: y2 as f64 / height,
+                        x: x as f64 / width,
+                        y: y as f64 / height,
+                    },
+                    DecodedCommand::Close => PathCmd::Close,
+                })
+                .collect(),
+        );
+    }
+    Ok(result)
 }
 
 /// OfficeArtCOLORREF (MS-ODRAW 2.2.2) literal colors only. fSystemRGB is an
@@ -421,7 +511,7 @@ mod tests {
             &record(0xf00d, 0, &0x10000u32.to_le_bytes()),
         );
         let facts = read(202, 0xa00, &bytes, [9000, 3000]).unwrap();
-        assert_eq!(facts.preset, "rect");
+        assert_eq!(facts.preset, Some("rect"));
         assert_eq!(facts.fill.as_deref(), Some("FFFFFF"));
         let line = facts.line.unwrap();
         assert_eq!(line.color, "000000");
@@ -464,6 +554,116 @@ mod tests {
         assert!(text.fit_shape);
     }
 
+    /// A freeform FOPT: bounds, vertices and optional segments as complex
+    /// arrays (MS-ODRAW 2.3.6.1-2.3.6.9).
+    fn freeform(points: &[[i32; 2]], segments: &[u16], extra: &[(u16, u32)]) -> Vec<u8> {
+        let array = |count: usize, size: u16, body: Vec<u8>| {
+            [
+                (count as u16).to_le_bytes().as_slice(),
+                &(count as u16).to_le_bytes(),
+                &size.to_le_bytes(),
+                &body,
+            ]
+            .concat()
+        };
+        let vertices = array(
+            points.len(),
+            8,
+            points
+                .iter()
+                .flatten()
+                .flat_map(|v| v.to_le_bytes())
+                .collect(),
+        );
+        let segments = array(
+            segments.len(),
+            2,
+            segments.iter().flat_map(|v| v.to_le_bytes()).collect(),
+        );
+        let mut properties: Vec<(u16, u32)> = vec![(0x142, 100), (0x143, 50), (0x144, 4)];
+        properties.extend_from_slice(extra);
+        let mut body = Vec::new();
+        for (key, value) in &properties {
+            body.extend(key.to_le_bytes());
+            body.extend(value.to_le_bytes());
+        }
+        for (key, data) in [(0xc145u16, &vertices), (0xc146, &segments)] {
+            body.extend(key.to_le_bytes());
+            body.extend((data.len() as u32).to_le_bytes());
+        }
+        body.extend(&vertices);
+        body.extend(&segments);
+        let count = properties.len() + 2;
+        record(
+            0xf004,
+            15,
+            &record(0xf00b, ((count as u16) << 4) | 3, &body),
+        )
+    }
+
+    #[test]
+    fn freeform_paths_normalize_to_the_shape_box() {
+        // Move, two lines, a cubic, close, end: a filled and stroked outline.
+        let points = [[0, 0], [100, 0], [100, 50], [50, 50], [25, 50], [0, 25]];
+        let segments = [0x4000, 0x0002, 0x2001, 0x6001, 0x8000];
+        let facts = read(0, 0xa00, &freeform(&points, &segments, &[]), [9000, 3000]).unwrap();
+        assert_eq!(facts.preset, None);
+        assert_eq!(facts.fill.as_deref(), Some("FFFFFF"));
+        assert!(facts.line.is_some());
+        let [path] = facts.subpaths.as_slice() else {
+            panic!("one path")
+        };
+        assert!(matches!(path[0], PathCmd::MoveTo { x, y } if x == 0.0 && y == 0.0));
+        assert!(matches!(path[2], PathCmd::LineTo { x, y } if x == 1.0 && y == 1.0));
+        assert!(matches!(
+            path[3],
+            PathCmd::CubicBezTo { x1, y2, x, y, .. }
+                if x1 == 0.5 && y2 == 1.0 && x == 0.0 && y == 0.5
+        ));
+        assert!(matches!(path[4], PathCmd::Close));
+        // An open path is never filled; a uniform noFill escape removes fill.
+        let open = [0x4000, 0x0002, 0x8000];
+        let facts = read(0, 0xa00, &freeform(&points[..3], &open, &[]), [9, 9]).unwrap();
+        assert!(facts.fill.is_none() && facts.line.is_some());
+        let no_fill = [0x4000, 0xaa00, 0x0002, 0x8000];
+        let facts = read(0, 0xa00, &freeform(&points[..3], &no_fill, &[]), [9, 9]).unwrap();
+        assert!(facts.fill.is_none());
+        // Adjust values and guides only feed formulas that the path does not use.
+        let adjusted = freeform(&points[..3], &open, &[(0x147, 5000)]);
+        assert!(read(0, 0xa00, &adjusted, [9, 9]).is_ok());
+    }
+
+    #[test]
+    fn freeform_paint_and_formula_gaps_fail_closed() {
+        let points = [[0, 0], [100, 0], [100, 50], [0, 50]];
+        // Differing per-path fill flags cannot be expressed by one shape.
+        let mixed = [
+            0x4000, 0x0001, 0x6001, 0x8000, 0xaa00, 0x4000, 0x0001, 0x6001, 0x8000,
+        ];
+        assert!(read(0, 0xa00, &freeform(&points, &mixed, &[]), [9, 9])
+            .err()
+            .is_some_and(|error| error.contains("differing")));
+        // Guide-referencing vertices and arc escapes are not decoded.
+        let guided = [[0, 0], [i32::MIN, 0]];
+        assert!(read(
+            0,
+            0xa00,
+            &freeform(&guided, &[0x4000, 0x0001, 0x8000], &[]),
+            [9, 9]
+        )
+        .is_err());
+        let arc = [0x4000, 0xa301, 0x8000];
+        assert!(read(0, 0xa00, &freeform(&points, &arc, &[]), [9, 9]).is_err());
+        // Geometry properties stay rejected on preset shapes.
+        assert!(read(
+            1,
+            0xa00,
+            &freeform(&points, &[0x4000, 0x0003, 0x8000], &[]),
+            [9, 9]
+        )
+        .is_err());
+    }
+
     #[test]
     fn explicit_no_fill_no_line_and_line_shapes() {
         let bytes = container(&[(0x1bf, 0x100000), (0x1ff, 0x80008)], &[], &[]);
@@ -472,11 +672,11 @@ mod tests {
         // Lines keep a zero-width axis and never acquire a fill.
         let bytes = container(&[(0x1d1, 1), (0x1ff, 0x180018)], &[], &[]);
         let facts = read(20, 0xa80, &bytes, [9000, 0]).unwrap();
-        assert_eq!(facts.preset, "line");
+        assert_eq!(facts.preset, Some("line"));
         assert!(facts.fill.is_none());
         assert_eq!(facts.line.unwrap().ends[1].unwrap().kind, "triangle");
         let facts = read(32, 0xb00, &container(&[], &[], &[]), [0, 900]).unwrap();
-        assert_eq!(facts.preset, "straightConnector1");
+        assert_eq!(facts.preset, Some("straightConnector1"));
         assert!(read(20, 0xa00, &container(&[(0x1ff, 0x80000)], &[], &[]), [9, 0]).is_err());
         assert!(read(1, 0xa00, &container(&[], &[], &[]), [9000, 0]).is_err());
     }
@@ -485,8 +685,11 @@ mod tests {
     #[allow(clippy::type_complexity)]
     fn unrepresented_display_properties_fail_closed() {
         let rejected: &[(u16, &[(u16, u32)], &[(u16, u32)])] = &[
-            // Unsupported shape type and adjusted/custom geometry.
+            // Unsupported shape type, adjusted preset geometry and a freeform
+            // without a decodable path.
             (51, &[], &[]),
+            (0, &[], &[]),
+            (0, &[(0x144, 4)], &[]),
             (1, &[(0x147, 100)], &[]),
             (1, &[(0x4, 0x5a_0000)], &[]),
             // System/palette/scheme colors and non-solid paint.
