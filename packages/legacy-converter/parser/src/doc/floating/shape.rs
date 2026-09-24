@@ -66,9 +66,12 @@ fn is_line(kind: u16) -> bool {
 }
 
 impl Facts {
+    /// `child` selects a member of an OfficeArt group: it must carry fChild
+    /// and its OfficeArtChildAnchor, which the caller has already mapped.
     pub fn read(
         kind: u16,
         flags: u32,
+        child: bool,
         shape: Record<'_>,
         extent: [i64; 2],
         budget: &mut usize,
@@ -80,7 +83,8 @@ impl Facts {
         // OLE and master-linked shapes need facts this projection lacks.
         // fConnector is accepted only for the straight connector preset,
         // whose static path is kept without endpoint rerouting.
-        if flags & 0x43f != 0 || (flags & 0x100 != 0 && kind != 32) {
+        let membership = if child { 0x2 } else { 0 };
+        if flags & 0x43f != membership || (flags & 0x100 != 0 && kind != 32) {
             return Err(unsupported(
                 "Word drawing shape has unsupported shape flags",
             ));
@@ -99,6 +103,7 @@ impl Facts {
             match record.kind {
                 // FSP was decoded by the caller; anchors are the SPA's.
                 0xf00a | 0xf010 | 0xf011 => {}
+                0xf00f if child => {}
                 0xf00b => properties::visit(record, budget, |p| table.add(p))?,
                 0xf122 => properties::visit_tertiary(record, budget, |p| table.add(p))?,
                 0xf00d => {
@@ -399,7 +404,7 @@ mod tests {
 
     fn read(kind: u16, flags: u32, bytes: &[u8], extent: [i64; 2]) -> Result<Facts, String> {
         let (shape, _) = crate::officeart::record_with_end(bytes, 0, &mut 1000, "test").unwrap();
-        Facts::read(kind, flags, shape, extent, &mut 1000)
+        Facts::read(kind, flags, false, shape, extent, &mut 1000)
     }
 
     #[test]

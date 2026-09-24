@@ -11,11 +11,13 @@ use std::collections::BTreeMap;
 #[cfg(feature = "direct-doc")]
 mod direct;
 #[cfg(feature = "direct-doc")]
+mod group;
+#[cfg(feature = "direct-doc")]
 mod shape;
 #[cfg(feature = "direct-doc")]
 pub(in crate::doc) mod textbox;
 #[cfg(feature = "direct-doc")]
-pub(in crate::doc) use direct::DirectFloating;
+pub(in crate::doc) use direct::{DirectFloating, DirectRun};
 
 /// The drawing part that owns a PlcfSpa, its OfficeArtDgContainer and its
 /// textbox story (MS-DOC 2.8.27, 2.9.171; MS-ODRAW 2.2.13).
@@ -57,7 +59,8 @@ enum Mode {
 #[derive(Default)]
 struct Drawings<'a> {
     anchors: Vec<Anchor>,
-    shapes: BTreeMap<u32, (usize, u32, Record<'a>)>,
+    /// spid -> (anchor index, [package order, document order], container).
+    shapes: BTreeMap<u32, (usize, [u32; 2], Record<'a>)>,
 }
 
 pub(super) struct Store<'a> {
@@ -235,7 +238,9 @@ impl<'a> Store<'a> {
                 image_index, crop, ..
             } => (image_index, crop),
             #[cfg(feature = "direct-doc")]
-            Content::Shape(_) => unreachable!("package projection resolves pictures only"),
+            Content::Shape(_) | Content::Group(_) => {
+                unreachable!("package projection resolves pictures only")
+            }
         };
         let image = self.images[&image_index]
             .as_ref()
@@ -290,12 +295,29 @@ impl<'a> Store<'a> {
         };
         let anchor = drawings.anchors[index].clone();
         let anchor = &anchor;
-        let Some(&(anchor_index, order, shape)) = drawings.shapes.get(&anchor.shape_id) else {
+        let Some(&(anchor_index, orders, shape)) = drawings.shapes.get(&anchor.shape_id) else {
             self.omitted = true;
             return Ok(None);
         };
         if anchor_index != index {
             return Err(unsupported("Word shape/anchor index mismatch"));
+        }
+        // The package writer numbers only independent shapes, as it always
+        // has; the direct model counts groups in their document order too.
+        let order = match mode {
+            Mode::Package => orders[0],
+            #[cfg(feature = "direct-doc")]
+            Mode::Direct => orders[1],
+        };
+        if shape.kind == 0xf003 {
+            // A top-level OfficeArt group. The package writer never flattens
+            // groups; the direct model resolves them in `group`.
+            #[cfg(feature = "direct-doc")]
+            if mode == Mode::Direct {
+                return self.resolve_group(anchor, order, shape);
+            }
+            self.omitted = true;
+            return Ok(None);
         }
         let mut picture = PictureOptions::default();
         let mut placement = Placement::default();
@@ -339,6 +361,7 @@ impl<'a> Store<'a> {
             let facts = shape::Facts::read(
                 kind.ok_or_else(|| unsupported("Word drawing shape lacks its type"))?,
                 flags,
+                false,
                 shape,
                 extent,
                 &mut self.budget,
@@ -400,6 +423,38 @@ impl<'a> Store<'a> {
             self.omitted = true;
             return Ok(None);
         };
+        let Some(extension) = self.load_image(image_index)? else {
+            self.omitted = true;
+            return Ok(None);
+        };
+        if extent.iter().any(|v| *v <= 0) {
+            return Err(unsupported("invalid Word floating picture extent"));
+        }
+        if picture.crop[0] + picture.crop[1] >= 100000
+            || picture.crop[2] + picture.crop[3] >= 100000
+        {
+            return Err(unsupported("empty Word floating picture crop"));
+        }
+        let content = Content::Picture {
+            image_index,
+            extension,
+            crop: picture.crop,
+        };
+        self.finish(
+            anchor,
+            &placement,
+            order,
+            extent,
+            flags,
+            align.unwrap_or([None; 2]),
+            content,
+        )
+        .map(Some)
+    }
+
+    /// Decode an indexed delayed BLIP once (MS-DOC 2.9.171) under the store's
+    /// media budget. `None` means the entry is not a supported passive image.
+    fn load_image(&mut self, image_index: usize) -> Result<Option<&'static str>, String> {
         if !self.images.contains_key(&image_index) {
             let entry = *self
                 .entries
@@ -419,33 +474,9 @@ impl<'a> Store<'a> {
             }
             self.images.insert(image_index, image);
         }
-        let Some(image) = self.images[&image_index].as_ref() else {
-            self.omitted = true;
-            return Ok(None);
-        };
-        if extent.iter().any(|v| *v <= 0) {
-            return Err(unsupported("invalid Word floating picture extent"));
-        }
-        if picture.crop[0] + picture.crop[1] >= 100000
-            || picture.crop[2] + picture.crop[3] >= 100000
-        {
-            return Err(unsupported("empty Word floating picture crop"));
-        }
-        let content = Content::Picture {
-            image_index,
-            extension: image.extension,
-            crop: picture.crop,
-        };
-        self.finish(
-            anchor,
-            &placement,
-            order,
-            extent,
-            flags,
-            align.unwrap_or([None; 2]),
-            content,
-        )
-        .map(Some)
+        Ok(self.images[&image_index]
+            .as_ref()
+            .map(|image| image.extension))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -516,6 +547,9 @@ enum Content {
     },
     #[cfg(feature = "direct-doc")]
     Shape(Box<shape::Facts>),
+    /// Members of an OfficeArt group in source (paint) order.
+    #[cfg(feature = "direct-doc")]
+    Group(Vec<group::Member>),
 }
 
 struct ResolvedDrawing {
@@ -553,13 +587,14 @@ fn records<'a>(bytes: &'a [u8], budget: &mut usize) -> Result<Vec<Record<'a>>, S
     Ok(result)
 }
 
-/// The independent shapes of one OfficeArtDgContainer's topmost group. Nested
-/// groups need their own coordinate transform and are not flattened.
+/// The anchored shapes and groups of one OfficeArtDgContainer's patriarch.
+/// Groups are kept whole: their members use the group coordinate space.
 fn container_shapes<'a>(
     drawing: Record<'a>,
     budget: &mut usize,
-) -> Result<BTreeMap<u32, (usize, u32, Record<'a>)>, String> {
+) -> Result<BTreeMap<u32, (usize, [u32; 2], Record<'a>)>, String> {
     let mut shapes = BTreeMap::new();
+    let mut independent = 0u32;
     for child in records(drawing.payload, budget)? {
         if child.kind != 0xf003 {
             continue;
@@ -568,15 +603,29 @@ fn container_shapes<'a>(
             return Err(unsupported("invalid Word shape group"));
         }
         for shape in records(child.payload, budget)? {
-            if shape.kind != 0xf004 {
-                continue;
-            }
-            if shape.version != 15 {
+            // A nested OfficeArtSpgrContainer is an anchored group: its first
+            // OfficeArtSpContainer carries the group's FSP and client anchor
+            // (MS-ODRAW 2.2.16). It is registered as a whole and resolved
+            // only by the direct model.
+            let (entry, header) = match shape.kind {
+                0xf004 => (shape, shape),
+                0xf003 if shape.version == 15 => {
+                    // A malformed group stays unregistered: its anchor is
+                    // then reported as omitted content, as before.
+                    match records(shape.payload, budget)?.into_iter().next() {
+                        Some(first) if first.kind == 0xf004 => (shape, first),
+                        _ => continue,
+                    }
+                }
+                _ => continue,
+            };
+            if header.version != 15 {
                 return Err(unsupported("invalid Word floating shape container"));
             }
+            let shape = entry;
             let mut id = None;
             let mut anchor_index = None;
-            for property in records(shape.payload, budget)? {
+            for property in records(header.payload, budget)? {
                 match property.kind {
                     0xf00a if property.payload.len() == 8 => {
                         id = Some(u32_at(property.payload, 0)?);
@@ -591,8 +640,11 @@ fn container_shapes<'a>(
                 if shapes.len() >= 100_000 {
                     return Err(unsupported("Word floating shape budget exceeded"));
                 }
-                let order = shapes.len() as u32 + 1;
-                if shapes.insert(id, (anchor_index, order, shape)).is_some() {
+                if entry.kind == 0xf004 {
+                    independent += 1;
+                }
+                let orders = [independent, shapes.len() as u32 + 1];
+                if shapes.insert(id, (anchor_index, orders, shape)).is_some() {
                     return Err(unsupported("duplicate Word floating shape identifier"));
                 }
             }
@@ -1038,11 +1090,17 @@ mod tests {
         // never dereferenced. Script anchors remain an omission.
         let (word, table) = drawing_input(0xa00, 0x0002_0002);
         let mut store = Store::read(&word[..1024], &table, 20).unwrap();
-        assert!(store.direct_picture(12, &mut usize::MAX.clone()).unwrap().is_none());
+        assert!(store
+            .direct_picture(12, &mut usize::MAX.clone())
+            .unwrap()
+            .is_none());
         assert!(!store.omitted && store.images.is_empty());
         let (word, table) = drawing_input(0xa00, 0x0082_0082);
         let mut store = Store::read(&word[..1024], &table, 20).unwrap();
-        assert!(store.direct_picture(12, &mut usize::MAX.clone()).unwrap().is_none());
+        assert!(store
+            .direct_picture(12, &mut usize::MAX.clone())
+            .unwrap()
+            .is_none());
         assert!(store.omitted);
     }
 
@@ -1345,8 +1403,8 @@ mod tests {
         assert!(store.parts().is_empty());
 
         table[group_end] = 0;
-        // Replace the independent SpContainer tag with a nested SpgrContainer.
-        // Its children are deliberately not traversed without a group transform.
+        // Replace the independent SpContainer tag with a nested SpgrContainer
+        // lacking its group shape; it is never flattened into the story.
         let shape_start = group_end + 1 + 8 + 8;
         table[shape_start + 2..shape_start + 4].copy_from_slice(&0xf003u16.to_le_bytes());
         let mut store = Store::read(&word, &table, 20).unwrap();

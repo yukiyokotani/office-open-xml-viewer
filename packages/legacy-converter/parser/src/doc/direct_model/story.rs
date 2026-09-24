@@ -291,29 +291,30 @@ pub(super) fn project(
                     else {
                         continue;
                     };
-                    let (occurrence_id, run) = match drawing {
-                        floating::DirectFloating::Picture(picture) => (
-                            picture.occurrence_id,
-                            DocRun::Image(Box::new(picture.image)),
-                        ),
-                        floating::DirectFloating::Shape(mut shape) => {
-                            if let Some(index) = shape.text {
-                                let textboxes = store.textbox(part).ok_or_else(|| {
-                                    unsupported("Word shape text lacks its textbox story")
-                                })?;
-                                shape.shape.text_box_content = textbox_content(
-                                    textboxes,
-                                    index,
-                                    shape.spid,
-                                    formatting,
-                                    pictures,
-                                    budget,
-                                    tables.sequence(),
-                                )?;
+                    let mut runs = Vec::new();
+                    for run in drawing.runs {
+                        runs.push(match run {
+                            floating::DirectRun::Image(image) => DocRun::Image(image),
+                            floating::DirectRun::Shape(mut shape) => {
+                                if let Some(index) = shape.text {
+                                    let textboxes = store.textbox(part).ok_or_else(|| {
+                                        unsupported("Word shape text lacks its textbox story")
+                                    })?;
+                                    shape.shape.text_box_content = textbox_content(
+                                        textboxes,
+                                        index,
+                                        shape.spid,
+                                        formatting,
+                                        pictures,
+                                        budget,
+                                        tables.sequence(),
+                                    )?;
+                                }
+                                DocRun::Shape(Box::new(shape.shape))
                             }
-                            (shape.occurrence_id, DocRun::Shape(Box::new(shape.shape)))
-                        }
-                    };
+                        });
+                    }
+                    let occurrence_id = drawing.occurrence_id;
                     host.anchor_occurrence_id = Some(occurrence_id);
                     let host_payload = std::mem::size_of::<docx_model::AnchorHostMetrics>()
                         .checked_add(host.font_family.as_ref().map_or(0, String::capacity))
@@ -327,7 +328,10 @@ pub(super) fn project(
                         .ok_or("OUTPUT_TOO_LARGE")?;
                     budget.charge(host_payload)?;
                     budget.push(&mut paragraph.runs, DocRun::AnchorHost(host))?;
-                    budget.push(&mut paragraph.runs, run)?;
+                    // Group members follow one host, as DOCX wpg members do.
+                    for run in runs {
+                        budget.push(&mut paragraph.runs, run)?;
+                    }
                 }
                 Token::NoteReference(reference) => {
                     let id = reference.id().to_string();

@@ -1073,6 +1073,14 @@ mod tests {
     /// document. The textbox story follows the header story; its FTXBXS and
     /// Tbkd tables name the shape (MS-DOC 2.3.6-2.3.7, 2.9.106, 2.9.312).
     fn drawing_shape_source(textbox: Option<&str>, header: bool) -> Vec<u8> {
+        drawing_source(textbox, header, false)
+    }
+
+    /// With `grouped`, the anchored shape is an OfficeArt group: FSPGR
+    /// 0..1000 x 0..500 holds a filled rectangle member in its top-left
+    /// quarter and a nested group (FSPGR -10..10) in the bottom-right quarter
+    /// whose only member is the textbox (spid 2052).
+    fn drawing_source(textbox: Option<&str>, header: bool, grouped: bool) -> Vec<u8> {
         let main = if header { "B\r" } else { "B\u{8}\r" };
         let main_units = main.encode_utf16().count();
         let textbox = textbox.unwrap_or("");
@@ -1151,6 +1159,75 @@ mod tests {
             ]
             .concat(),
         );
+        let shape = if grouped {
+            let rect = |values: [i32; 4]| {
+                values
+                    .iter()
+                    .flat_map(|value| value.to_le_bytes())
+                    .collect::<Vec<u8>>()
+            };
+            let fsp = |kind: u16, spid: u32, flags: u32| {
+                picture_record(
+                    0xf00a,
+                    (kind << 4) | 2,
+                    &[spid.to_le_bytes(), flags.to_le_bytes()].concat(),
+                )
+            };
+            let member = |kind: u16, spid: u32, anchor: [i32; 4], options: &[u8], count: usize| {
+                picture_record(
+                    0xf004,
+                    15,
+                    &[
+                        fsp(kind, spid, 0xa02),
+                        picture_record(0xf00b, ((count as u16) << 4) | 3, options),
+                        picture_record(0xf00f, 0, &rect(anchor)),
+                    ]
+                    .concat(),
+                )
+            };
+            let mut fill = Vec::new();
+            fill.extend(0x181u16.to_le_bytes());
+            fill.extend(0x0000_ff00u32.to_le_bytes());
+            let nested = picture_record(
+                0xf003,
+                15,
+                &[
+                    picture_record(
+                        0xf004,
+                        15,
+                        &[
+                            picture_record(0xf009, 1, &rect([-10, -10, 10, 10])),
+                            fsp(0, 2053, 0x203),
+                            picture_record(0xf00f, 0, &rect([500, 250, 1000, 500])),
+                        ]
+                        .concat(),
+                    ),
+                    member(202, 2052, [-10, -10, 10, 10], &options, properties.len()),
+                ]
+                .concat(),
+            );
+            picture_record(
+                0xf003,
+                15,
+                &[
+                    picture_record(
+                        0xf004,
+                        15,
+                        &[
+                            picture_record(0xf009, 1, &rect([0, 0, 1000, 500])),
+                            fsp(0, 2050, 0x201),
+                            picture_record(0xf010, 0, &0u32.to_le_bytes()),
+                        ]
+                        .concat(),
+                    ),
+                    member(1, 2051, [0, 0, 500, 250], &fill, 1),
+                    nested,
+                ]
+                .concat(),
+            )
+        } else {
+            shape
+        };
         let art = [
             picture_record(0xf000, 15, &[]),
             vec![u8::from(header)],
@@ -1166,7 +1243,8 @@ mod tests {
                 .flat_map(|cp| cp.to_le_bytes())
                 .collect::<Vec<_>>();
             let mut actual = vec![0; 22];
-            actual[14..18].copy_from_slice(&2050u32.to_le_bytes());
+            let lid: u32 = if grouped { 2052 } else { 2050 };
+            actual[14..18].copy_from_slice(&lid.to_le_bytes());
             let mut spare = vec![0; 22];
             spare[8] = 1;
             ftxbxs.extend(actual);
@@ -1240,6 +1318,91 @@ mod tests {
             .collect();
         assert_eq!(texts, ["Inside", "box"]);
         assert!(result.resources.is_empty());
+    }
+
+    #[test]
+    fn grouped_members_share_one_host_and_map_through_nested_groups() {
+        let bytes = drawing_source(Some("Inside\r"), false, true);
+        let result =
+            super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024).unwrap();
+        let BodyElement::Paragraph(paragraph) = &result.document.body[0] else {
+            panic!("body paragraph")
+        };
+        let [DocRun::Text(_), DocRun::AnchorHost(host), DocRun::Shape(first), DocRun::Shape(second)] =
+            paragraph.runs.as_slice()
+        else {
+            panic!("text, host and two members: {:?}", paragraph.runs)
+        };
+        // The SPA frame is 100 x 50 pt at (5, 10); FSPGR is 1000 x 500.
+        for (shape, index, frame) in [
+            (first, 0, (0.0, 0.0, 50.0, 25.0)),
+            (second, 1, (50.0, 25.0, 50.0, 25.0)),
+        ] {
+            let acquisition = shape.anchor_acquisition.as_ref().unwrap();
+            assert_eq!(
+                host.anchor_occurrence_id.as_deref(),
+                Some(acquisition.occurrence_id.as_str())
+            );
+            assert_eq!(acquisition.extent.width_pt, Some(100.0));
+            assert_eq!(acquisition.extent.height_pt, Some(50.0));
+            let group = acquisition.group.as_ref().unwrap();
+            assert_eq!((group.source_index, group.source_count), (index, 2));
+            let child = &group.resolved_child_frame;
+            assert_eq!(
+                (
+                    child.offset_x_pt,
+                    child.offset_y_pt,
+                    child.width_pt,
+                    child.height_pt
+                ),
+                frame
+            );
+            assert_eq!((shape.width_pt, shape.height_pt), (frame.2, frame.3));
+            assert_eq!(
+                (shape.anchor_x_pt, shape.anchor_y_pt),
+                (5.0 + frame.0, 10.0 + frame.1)
+            );
+            assert_eq!(
+                (shape.group_width_pt, shape.group_height_pt),
+                (Some(100.0), Some(50.0))
+            );
+        }
+        assert!(matches!(
+            &first.fill,
+            Some(docx_model::ShapeFill::Solid { color }) if color == "00FF00"
+        ));
+        assert!(first.text_box_content.is_empty());
+        assert_eq!(second.text_box_content.len(), 1);
+        assert_eq!(second.z_order, first.z_order + 1);
+    }
+
+    #[test]
+    fn rotated_or_flipped_groups_fail_closed() {
+        let bytes = drawing_source(Some("Inside\r"), false, true);
+        let cfb = CompoundFile::open(&bytes).unwrap();
+        let word = cfb.stream("WordDocument").unwrap();
+        let table = cfb.stream("0Table").unwrap();
+        let fsp = [
+            0x02u8, 0x00, 0x0a, 0xf0, 8, 0, 0, 0, 0x02, 0x08, 0, 0, 0x01, 0x02, 0, 0,
+        ];
+        let at = table
+            .windows(fsp.len())
+            .position(|bytes| bytes == fsp)
+            .expect("top-level group FSP");
+        for (offset, value, reason) in [
+            (12, 0x41u8, "flipped"),
+            (13, 0x06, "unsupported shape flags"),
+        ] {
+            let mut table = table.clone();
+            table[at + offset] = value;
+            let changed = build_cfb(&[("WordDocument", word.clone()), ("0Table", table)]);
+            assert!(super::super::direct_model(
+                &CompoundFile::open(&changed).unwrap(),
+                1024 * 1024
+            )
+            .unwrap_err()
+            .contains(reason));
+        }
     }
 
     #[test]

@@ -5,10 +5,12 @@ use super::{shape, unsupported, Content, Mode, Part, ResolvedDrawing, Store};
 use crate::doc::pictures::DirectPictureResource;
 use docx_model::{
     AnchorAcquisitionWire, AnchorAxisChoiceWire, AnchorAxisWire, AnchorBehaviorWire,
-    AnchorEdgesWire, AnchorExtentWire, AnchorSimplePositionWire, AnchorValueStatusWire,
-    AnchorWrapKindWire, AnchorWrapWire, ImageRun, LineEnd, ShapeFill, ShapeRun,
+    AnchorEdgesWire, AnchorExtentWire, AnchorGroupWire, AnchorResolvedChildFrameWire,
+    AnchorSimplePositionWire, AnchorValueStatusWire, AnchorWrapKindWire, AnchorWrapWire, ImageRun,
+    LineEnd, ShapeFill, ShapeRun,
 };
 
+#[cfg(test)]
 #[derive(Debug)]
 pub(in crate::doc) struct DirectFloatingPicture {
     pub image: ImageRun,
@@ -18,17 +20,32 @@ pub(in crate::doc) struct DirectFloatingPicture {
 #[derive(Debug)]
 pub(in crate::doc) struct DirectFloatingShape {
     pub shape: ShapeRun,
-    pub occurrence_id: String,
     /// One-based FTXBXS index whose text fills `shape.text_box_content`.
     pub text: Option<usize>,
     /// The shape's spid, which the FTXBXS `lid` must name.
     pub spid: u32,
 }
 
+/// One drawing occurrence: a single picture or shape, or the members of a
+/// group, all sharing one anchor host (as DOCX `wpg:wgp` members do).
 #[derive(Debug)]
-pub(in crate::doc) enum DirectFloating {
-    Picture(Box<DirectFloatingPicture>),
+pub(in crate::doc) struct DirectFloating {
+    pub occurrence_id: String,
+    pub runs: Vec<DirectRun>,
+}
+
+#[derive(Debug)]
+pub(in crate::doc) enum DirectRun {
+    Image(Box<ImageRun>),
     Shape(Box<DirectFloatingShape>),
+}
+
+/// Where one run sits inside its drawing frame: the whole frame for a single
+/// drawing, or a mapped group member frame (x, y, width, height in EMUs).
+struct Placed {
+    frame: [f64; 4],
+    flip: [bool; 2],
+    group: Option<(usize, usize)>,
 }
 
 fn wrap_mode(wrapping: u8) -> &'static str {
@@ -55,13 +72,94 @@ impl Store<'_> {
         let Some(facts) = self.resolve(part, cp, Mode::Direct)? else {
             return Ok(None);
         };
+        let occurrence_id = format!("legacy-doc-float-{}", facts.occurrence);
+        *remaining_bytes = remaining_bytes
+            .checked_sub(occurrence_id.capacity())
+            .ok_or("OUTPUT_TOO_LARGE")?;
+        let whole = Placed {
+            frame: [0.0, 0.0, facts.extent[0] as f64, facts.extent[1] as f64],
+            flip: facts.flip,
+            group: None,
+        };
+        let mut runs = Vec::new();
+        let push = |runs: &mut Vec<DirectRun>, run: DirectRun, remaining: &mut usize| {
+            *remaining = remaining
+                .checked_sub(std::mem::size_of::<DirectRun>())
+                .ok_or("OUTPUT_TOO_LARGE")?;
+            runs.push(run);
+            Ok::<(), String>(())
+        };
         match &facts.content {
-            Content::Picture { .. } => self
-                .direct_picture_facts(&facts, remaining_bytes)
-                .map(|picture| Some(DirectFloating::Picture(Box::new(picture)))),
-            Content::Shape(shape) => direct_shape(&facts, shape, remaining_bytes)
-                .map(|shape| Some(DirectFloating::Shape(Box::new(shape)))),
+            Content::Picture {
+                image_index,
+                extension,
+                crop,
+            } => {
+                let image = self.direct_image(
+                    &facts,
+                    (*image_index, extension, *crop),
+                    &whole,
+                    &occurrence_id,
+                    remaining_bytes,
+                )?;
+                push(
+                    &mut runs,
+                    DirectRun::Image(Box::new(image)),
+                    remaining_bytes,
+                )?;
+            }
+            Content::Shape(shape) => {
+                let shape = direct_shape(
+                    &facts,
+                    shape,
+                    &whole,
+                    facts.shape_id,
+                    &occurrence_id,
+                    remaining_bytes,
+                )?;
+                push(
+                    &mut runs,
+                    DirectRun::Shape(Box::new(shape)),
+                    remaining_bytes,
+                )?;
+            }
+            Content::Group(members) => {
+                for (index, member) in members.iter().enumerate() {
+                    let placed = Placed {
+                        frame: member.frame,
+                        flip: member.flip,
+                        group: Some((index, members.len())),
+                    };
+                    let run = match &member.content {
+                        Content::Picture {
+                            image_index,
+                            extension,
+                            crop,
+                        } => DirectRun::Image(Box::new(self.direct_image(
+                            &facts,
+                            (*image_index, extension, *crop),
+                            &placed,
+                            &occurrence_id,
+                            remaining_bytes,
+                        )?)),
+                        Content::Shape(shape) => DirectRun::Shape(Box::new(direct_shape(
+                            &facts,
+                            shape,
+                            &placed,
+                            member.spid,
+                            &occurrence_id,
+                            remaining_bytes,
+                        )?)),
+                        Content::Group(_) => unreachable!("groups are flattened"),
+                    };
+                    push(&mut runs, run, remaining_bytes)?;
+                }
+            }
         }
+        Ok(Some(DirectFloating {
+            occurrence_id,
+            runs,
+        }))
     }
 
     #[cfg(test)]
@@ -70,32 +168,30 @@ impl Store<'_> {
         cp: usize,
         remaining_bytes: &mut usize,
     ) -> Result<Option<DirectFloatingPicture>, String> {
-        Ok(
-            match self.direct_drawing(Part::Main, cp, remaining_bytes)? {
-                Some(DirectFloating::Picture(picture)) => Some(*picture),
-                Some(DirectFloating::Shape(_)) => panic!("expected a picture"),
-                None => None,
-            },
-        )
+        let Some(mut drawing) = self.direct_drawing(Part::Main, cp, remaining_bytes)? else {
+            return Ok(None);
+        };
+        assert_eq!(drawing.runs.len(), 1);
+        let DirectRun::Image(image) = drawing.runs.pop().unwrap() else {
+            panic!("expected a picture");
+        };
+        Ok(Some(DirectFloatingPicture {
+            image: *image,
+            occurrence_id: drawing.occurrence_id,
+        }))
     }
 
-    fn direct_picture_facts(
+    fn direct_image(
         &mut self,
         facts: &ResolvedDrawing,
+        (image_index, extension, crop): (usize, &str, [i64; 4]),
+        placed: &Placed,
+        occurrence_id: &str,
         remaining_bytes: &mut usize,
-    ) -> Result<DirectFloatingPicture, String> {
-        let Content::Picture {
-            image_index,
-            extension,
-            crop,
-        } = facts.content
-        else {
-            unreachable!("picture content");
-        };
+    ) -> Result<ImageRun, String> {
         let mime_type = mime(extension)?.to_string();
         let image_path = format!("legacy-doc/float/{image_index}");
-        let occurrence_id = format!("legacy-doc-float-{}", facts.occurrence);
-        let acquisition = acquisition(facts, occurrence_id.clone());
+        let acquisition = acquisition(facts, occurrence_id.into(), placed);
         let [top, bottom, left, right] = crop;
         let image = ImageRun {
             image_path,
@@ -107,14 +203,14 @@ impl Store<'_> {
                 r: right as f64 / 100_000.0,
                 b: bottom as f64 / 100_000.0,
             }),
-            width_pt: facts.extent[0] as f64 / 12_700.0,
-            height_pt: facts.extent[1] as f64 / 12_700.0,
+            width_pt: placed.frame[2] / 12_700.0,
+            height_pt: placed.frame[3] / 12_700.0,
             rotation: 0.0,
-            flip_h: facts.flip[0],
-            flip_v: facts.flip[1],
+            flip_h: placed.flip[0],
+            flip_v: placed.flip[1],
             anchor: true,
-            anchor_x_pt: facts.x_emu as f64 / 12_700.0,
-            anchor_y_pt: facts.y_emu as f64 / 12_700.0,
+            anchor_x_pt: (facts.x_emu as f64 + placed.frame[0]) / 12_700.0,
+            anchor_y_pt: (facts.y_emu as f64 + placed.frame[1]) / 12_700.0,
             anchor_x_from_margin: matches!(facts.horizontal, "margin" | "column"),
             anchor_y_from_para: facts.vertical == "paragraph",
             color_replace_from: None,
@@ -133,15 +229,12 @@ impl Store<'_> {
             anchor_y_relative_from: Some(facts.vertical.into()),
             anchor_acquisition: Some(acquisition),
         };
-        let required = image_payload(&image, &occurrence_id)?;
+        let required = image_payload(&image)?;
         *remaining_bytes = remaining_bytes
             .checked_sub(required)
             .ok_or("OUTPUT_TOO_LARGE")?;
         self.selected_images.insert(image_index);
-        Ok(DirectFloatingPicture {
-            occurrence_id,
-            image,
-        })
+        Ok(image)
     }
 
     pub(in crate::doc) fn append_referenced_direct_resources(
@@ -290,7 +383,11 @@ fn valid_edges(values: [u32; 4]) -> AnchorEdgesWire {
     }
 }
 
-fn acquisition(f: &ResolvedDrawing, occurrence_id: String) -> AnchorAcquisitionWire {
+fn acquisition(
+    f: &ResolvedDrawing,
+    occurrence_id: String,
+    placed: &Placed,
+) -> AnchorAcquisitionWire {
     let axis = |relative: &'static str, value: i64, align: Option<&'static str>| AnchorAxisWire {
         relative_from: Some(relative.into()),
         relative_from_status: AnchorValueStatusWire::Valid,
@@ -304,7 +401,6 @@ fn acquisition(f: &ResolvedDrawing, occurrence_id: String) -> AnchorAcquisitionW
         },
     };
     AnchorAcquisitionWire {
-        occurrence_id,
         simple_position: AnchorSimplePositionWire {
             enabled: Some(false),
             status: AnchorValueStatusWire::Valid,
@@ -349,6 +445,25 @@ fn acquisition(f: &ResolvedDrawing, occurrence_id: String) -> AnchorAcquisitionW
             layout_in_cell: Some(f.in_cell),
             layout_in_cell_status: AnchorValueStatusWire::Valid,
         },
+        // Group members share the group's anchor frame and extent; their
+        // own frame is resolved relative to it (MS-ODRAW 2.2.38-2.2.39).
+        group: placed.group.map(|(index, count)| AnchorGroupWire {
+            child_source_id: format!("{occurrence_id}-member-{index}"),
+            source_index: index,
+            source_count: count,
+            transform_chain: Vec::new(),
+            child_transform: None,
+            resolved_child_frame: AnchorResolvedChildFrameWire {
+                offset_x_pt: placed.frame[0] / 12_700.0,
+                offset_y_pt: placed.frame[1] / 12_700.0,
+                width_pt: placed.frame[2] / 12_700.0,
+                height_pt: placed.frame[3] / 12_700.0,
+                rotation_deg: 0.0,
+                flip_h: placed.flip[0],
+                flip_v: placed.flip[1],
+            },
+        }),
+        occurrence_id,
         ..AnchorAcquisitionWire::default()
     }
 }
@@ -393,11 +508,15 @@ impl Payload {
                 .checked_mul(std::mem::size_of::<String>())
                 .ok_or("OUTPUT_TOO_LARGE")?,
         )?;
-        self.strings(facts.wrap.authored_kinds.iter().map(Some))
+        self.strings(facts.wrap.authored_kinds.iter().map(Some))?;
+        if let Some(group) = &facts.group {
+            self.add(group.child_source_id.capacity())?;
+        }
+        Ok(())
     }
 }
 
-fn image_payload(image: &ImageRun, host_occurrence_id: &String) -> Result<usize, String> {
+fn image_payload(image: &ImageRun) -> Result<usize, String> {
     let mut total = Payload(std::mem::size_of::<ImageRun>());
     total.strings([
         Some(&image.image_path),
@@ -408,7 +527,6 @@ fn image_payload(image: &ImageRun, host_occurrence_id: &String) -> Result<usize,
         image.anchor_y_align.as_ref(),
         image.anchor_x_relative_from.as_ref(),
         image.anchor_y_relative_from.as_ref(),
-        Some(host_occurrence_id),
     ])?;
     total.acquisition(
         image
@@ -426,10 +544,13 @@ fn image_payload(image: &ImageRun, host_occurrence_id: &String) -> Result<usize,
 fn direct_shape(
     facts: &ResolvedDrawing,
     shape: &shape::Facts,
+    placed: &Placed,
+    spid: u32,
+    occurrence_id: &str,
     remaining_bytes: &mut usize,
 ) -> Result<DirectFloatingShape, String> {
-    let occurrence_id = format!("legacy-doc-float-{}", facts.occurrence);
-    let acquisition = acquisition(facts, occurrence_id.clone());
+    let acquisition = acquisition(facts, occurrence_id.into(), placed);
+    let member = placed.group.map_or(0, |(index, _)| index as u32);
     let pt = |emu: u32| f64::from(emu) / 12_700.0;
     let line = shape.line.as_ref();
     let end = |end: Option<crate::officeart::stroke::LineEnd<'static>>| {
@@ -442,10 +563,12 @@ fn direct_shape(
     let text = shape.text.as_ref();
     let run = ShapeRun {
         inline: false,
-        width_pt: facts.extent[0] as f64 / 12_700.0,
-        height_pt: facts.extent[1] as f64 / 12_700.0,
-        anchor_x_pt: facts.x_emu as f64 / 12_700.0,
-        anchor_y_pt: facts.y_emu as f64 / 12_700.0,
+        width_pt: placed.frame[2] / 12_700.0,
+        height_pt: placed.frame[3] / 12_700.0,
+        anchor_x_pt: (facts.x_emu as f64 + placed.frame[0]) / 12_700.0,
+        anchor_y_pt: (facts.y_emu as f64 + placed.frame[1]) / 12_700.0,
+        group_width_pt: placed.group.map(|_| facts.extent[0] as f64 / 12_700.0),
+        group_height_pt: placed.group.map(|_| facts.extent[1] as f64 / 12_700.0),
         anchor_x_from_margin: matches!(facts.horizontal, "margin" | "column"),
         anchor_y_from_para: facts.vertical == "paragraph",
         anchor_x_align: facts.align[0].map(str::to_owned),
@@ -453,7 +576,9 @@ fn direct_shape(
         anchor_x_relative_from: Some(facts.horizontal.into()),
         anchor_y_relative_from: Some(facts.vertical.into()),
         behind_doc: facts.behind,
-        z_order: facts.z_order,
+        // Members stack in source order above the group's own layer, as
+        // DOCX group members do.
+        z_order: facts.z_order.saturating_add(member),
         preset_geometry: Some(shape.preset.into()),
         fill: shape.fill.clone().map(|color| ShapeFill::Solid { color }),
         stroke: line.map(|line| line.color.clone()),
@@ -464,8 +589,8 @@ fn direct_shape(
         stroke_miter_limit: line.and_then(|line| line.miter),
         head_end: line.and_then(|line| end(line.ends[0])),
         tail_end: line.and_then(|line| end(line.ends[1])),
-        flip_h: facts.flip[0],
-        flip_v: facts.flip[1],
+        flip_h: placed.flip[0],
+        flip_v: placed.flip[1],
         text_autofit: text.filter(|text| text.fit_shape).map(|_| "sp".to_owned()),
         text_inset_l: text.map_or(0.0, |text| pt(text.insets[0])),
         text_inset_t: text.map_or(0.0, |text| pt(text.insets[1])),
@@ -504,7 +629,6 @@ fn direct_shape(
         run.text_autofit.as_ref(),
         run.wrap_mode.as_ref(),
         run.wrap_side.as_ref(),
-        Some(&occurrence_id),
     ])?;
     total.acquisition(run.anchor_acquisition.as_ref().expect("shape acquisition"))?;
     *remaining_bytes = remaining_bytes
@@ -512,9 +636,8 @@ fn direct_shape(
         .ok_or("OUTPUT_TOO_LARGE")?;
     Ok(DirectFloatingShape {
         shape: run,
-        occurrence_id,
         text: text.map(|text| text.index),
-        spid: facts.shape_id,
+        spid,
     })
 }
 
