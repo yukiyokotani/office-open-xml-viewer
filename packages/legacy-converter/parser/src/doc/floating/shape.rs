@@ -38,6 +38,13 @@ pub(in crate::doc) struct Facts {
     pub fill: Option<String>,
     pub line: Option<Line>,
     pub text: Option<Text>,
+    /// A stretched msofillPicture fill (MS-ODRAW 2.3.7.1-2.3.7.3): the
+    /// zero-based drawing-store BLIP index and whether the fill rotates with
+    /// the shape (fUseShapeAnchor, 2.3.7.43).
+    pub fill_picture: Option<(usize, bool)>,
+    /// MS-ODRAW 2.3.18.5 rotation, clockwise about the centre, in degrees.
+    /// Only group members may carry a nonzero rotation (see `group`).
+    pub rotation: f64,
 }
 
 pub(in crate::doc) struct Line {
@@ -167,7 +174,9 @@ impl<'a> Table<'a> {
                 ))),
             };
         }
-        if property.opid & 0x4000 != 0 {
+        // fillBlip (MS-ODRAW 2.3.7.3) is the only BLIP reference a drawing
+        // shape may carry here; the caller resolves it in the drawing store.
+        if property.opid & 0x4000 != 0 && id != 0x186 {
             return Err(unsupported(format!(
                 "Word drawing shape BLIP property {id:#06x} is not supported"
             )));
@@ -209,13 +218,15 @@ impl<'a> Table<'a> {
     ) -> Result<Facts, String> {
         let mut paint = Paint::default();
         let mut geometry = Geometry::default();
+        let mut rotation = 0.0;
         let freeform = kind == 0;
         let mut insets = [0x16530, 0xb298, 0x16530, 0xb298];
         let mut text_id = None;
         for (&id, &value) in &self.values {
             match id {
-                // Transform: only an unrotated shape is projected.
-                0x4 if value == 0 => {}
+                // Transform (MS-ODRAW 2.3.18.5): a FixedPoint angle. Callers
+                // decide where a rotated shape can be projected.
+                0x4 => rotation = f64::from(value as i32) / 65536.0,
                 // Protection (2.3.1-2.3.2): editing locks.
                 0x40..=0x7f => {}
                 0x80 => text_id = Some(value),
@@ -251,6 +262,7 @@ impl<'a> Table<'a> {
                 },
                 0x147..=0x150 | 0x151 | 0x155..=0x158 if freeform => {}
                 0x152 if freeform && (client_text.is_none() || value == 0) => {}
+                0x186 => paint.property(0x4186, value)?,
                 0x17f | 0x180..=0x1bf | 0x1c0..=0x1d7 | 0x1ff => paint.property(id, value)?,
                 0x23f => {}
                 // Black-and-white display modes only affect B/W output.
@@ -318,7 +330,18 @@ impl<'a> Table<'a> {
             subpaths = normalized(&decoded, budget)?;
         }
         let line_shape = is_line(kind);
-        let fill = if !path_paint.0 {
+        // msofillPicture stretches the picture over the shape (2.3.7.1). A
+        // fill rectangle, tiling origin, view-relative sizing or opacity has
+        // no representation here and stays rejected with the non-solid fills.
+        let fill_picture = if !line_shape && path_paint.0 && paint.fill_type == Some(3) {
+            paint
+                .foreground_image()
+                .filter(|(_, alpha, _)| *alpha == 65536)
+                .map(|(blip, _, rotates)| ((blip - 1) as usize, rotates))
+        } else {
+            None
+        };
+        let fill = if !path_paint.0 || fill_picture.is_some() {
             None
         } else if let Some((color, alpha)) = paint.solid_fill_or_default(!line_shape) {
             Some(rgb(color, alpha)?)
@@ -330,6 +353,7 @@ impl<'a> Table<'a> {
         if !line_shape
             && path_paint.0
             && fill.is_none()
+            && fill_picture.is_none()
             && paint.filled.unwrap_or(true)
             && paint.fill_ok.unwrap_or(true)
         {
@@ -389,6 +413,8 @@ impl<'a> Table<'a> {
         Ok(Facts {
             preset,
             subpaths,
+            fill_picture,
+            rotation,
             fill,
             line,
             text,
@@ -433,10 +459,21 @@ fn normalized(decoded: &Decoded, budget: &mut usize) -> Result<Vec<Vec<PathCmd>>
     Ok(result)
 }
 
-/// OfficeArtCOLORREF (MS-ODRAW 2.2.2) literal colors only. fSystemRGB is an
-/// ordinary solid RGB color; palette, scheme and system color indices depend
-/// on the rendering host and are rejected.
+/// OfficeArtCOLORREF (MS-ODRAW 2.2.2). fSystemRGB is an ordinary solid RGB
+/// color. Of the fSysIndex system colors only the two with Word evidence are
+/// resolved: Word's own DOCX of the local corpus drawings (from which Word
+/// saved the DOC files) writes every index 0x0001 as `sysClr windowText`
+/// with lastClr 000000 and every index 0x0011 as `sysClr window` with
+/// lastClr FFFFFF (27 and 16 properties), and Word's PDFs draw them black
+/// and white. These indices are not GetSysColor numbers, so no other index
+/// is inferred; procedural modifiers in the blue byte, palette and scheme
+/// colors stay rejected.
 fn rgb(color: u32, alpha: u32) -> Result<String, String> {
+    let color = match color {
+        0x1000_0001 => 0x0000_0000,
+        0x1000_0011 => 0x00ff_ffff,
+        _ => color,
+    };
     if !matches!(color & 0xff00_0000, 0 | 0x0400_0000) {
         return Err(unsupported(
             "Word drawing colors other than literal RGB are not supported",
@@ -542,7 +579,12 @@ mod tests {
             &[],
         );
         let facts = read(1, 0xa00, &bytes, [9000, 3000]).unwrap();
+        assert_eq!(facts.rotation, 0.0);
         assert_eq!(facts.fill.as_deref(), Some("4F81BD80"));
+        // The FixedPoint angle is reported; callers decide where it is valid.
+        let rotated = container(&[(0x4, 0xffd6_4e6d)], &[], &[]);
+        let turned = read(1, 0xa00, &rotated, [9, 9]).unwrap();
+        assert!((turned.rotation + 41.694).abs() < 1e-3);
         let line = facts.line.unwrap();
         assert_eq!(line.color, "201000");
         assert_eq!(line.width_emu, 25_400);
@@ -665,6 +707,43 @@ mod tests {
     }
 
     #[test]
+    fn word_window_system_colors_resolve_to_their_observed_values() {
+        let bytes = container(&[(0x181, 0x1000_0011), (0x1c0, 0x1000_0001)], &[], &[]);
+        let facts = read(1, 0xa00, &bytes, [9, 9]).unwrap();
+        assert_eq!(facts.fill.as_deref(), Some("FFFFFF"));
+        assert_eq!(facts.line.unwrap().color, "000000");
+    }
+
+    #[test]
+    fn stretched_picture_fills_reference_the_drawing_store() {
+        let fill = |extra: &[(u16, u32)]| {
+            let mut properties = vec![(0x180u16, 3u32), (0x4186, 1)];
+            properties.extend_from_slice(extra);
+            read(1, 0xa00, &container(&properties, &[], &[]), [9, 9])
+        };
+        let facts = fill(&[]).unwrap();
+        assert_eq!(facts.fill_picture, Some((0, false)));
+        assert!(facts.fill.is_none());
+        // fUseShapeAnchor (use bit 21, value bit 5) rotates the fill.
+        assert_eq!(
+            fill(&[(0x1bf, 0x0060_0060)]).unwrap().fill_picture,
+            Some((0, true))
+        );
+        // Opacity, fill rectangles, tiling origins and missing BLIPs fail.
+        for extra in [
+            (0x182u16, 0x8000u32),
+            (0x1bf, 0x0002_0002),
+            (0x198, 1),
+            (0x195, 1),
+        ] {
+            assert!(fill(&[extra]).is_err(), "{extra:x?}");
+        }
+        assert!(read(1, 0xa00, &container(&[(0x180, 3)], &[], &[]), [9, 9]).is_err());
+        // Other BLIP-valued properties stay rejected.
+        assert!(read(1, 0xa00, &container(&[(0x4104, 1)], &[], &[]), [9, 9]).is_err());
+    }
+
+    #[test]
     fn explicit_no_fill_no_line_and_line_shapes() {
         let bytes = container(&[(0x1bf, 0x100000), (0x1ff, 0x80008)], &[], &[]);
         let facts = read(1, 0xa00, &bytes, [9000, 3000]).unwrap();
@@ -691,9 +770,9 @@ mod tests {
             (0, &[], &[]),
             (0, &[(0x144, 4)], &[]),
             (1, &[(0x147, 100)], &[]),
-            (1, &[(0x4, 0x5a_0000)], &[]),
             // System/palette/scheme colors and non-solid paint.
-            (1, &[(0x1c0, 0x1000_0001)], &[]),
+            (1, &[(0x1c0, 0x1000_0002)], &[]),
+            (1, &[(0x1c0, 0x1001_0011)], &[]),
             (1, &[(0x181, 0x0800_0001)], &[]),
             (1, &[(0x180, 4)], &[]),
             (1, &[(0x1c4, 1)], &[]),
