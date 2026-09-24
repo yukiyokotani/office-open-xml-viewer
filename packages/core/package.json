@@ -51,6 +51,7 @@
     "./internal/tiff-renderer": "./src/image/tiff.ts",
     "./internal/virtual-scroll": "./src/internal/virtual-scroll.ts",
     "./internal/script-preload-accumulator": "./src/internal/script-preload-accumulator.ts",
+    "./internal/spreadsheet-font-stack": "./src/internal/spreadsheet-font-stack.ts",
     "./internal/wasm-runtime-generation": "./src/internal/wasm-runtime-generation.ts",
     "./mathjax-stix2": "./assets/mathjax-stix2.js"
   },

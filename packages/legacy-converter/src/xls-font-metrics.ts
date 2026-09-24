@@ -1,3 +1,4 @@
+import { fontStackFor } from '@silurus/ooxml-core/internal/spreadsheet-font-stack';
 /** The actual BIFF Normal-style font, resolved through its style XF. */
 export interface LegacyXlsNormalFont {
   readonly family: string;
@@ -8,8 +9,9 @@ export interface LegacyXlsNormalFont {
 
 /**
  * Measure digits 0–9 in this font at 96 dpi, then return the rounded maximum
- * advance in pixels (integer 1–4096). Load the intended font before measuring;
- * return undefined if unavailable. No fallback font width is assumed.
+ * advance in pixels (integer 1–4096). Load the intended font before measuring.
+ * Returning undefined omits geometry-dependent drawings with a warning; the
+ * default measurement instead measures the face the renderer paints.
  * The signal is aborted if conversion is cancelled. Never fetch a font URL
  * supplied by the document: family is an untrusted name, not a resource URL.
  */
@@ -43,30 +45,30 @@ export function measureXlsFont(
 /**
  * Default browser measurement for the direct XLS source. Excel column widths
  * are expressed in the Normal font's maximum digit width in whole pixels
- * (ECMA-376 §18.3.1.13), so this loads the named font through the document's
- * FontFaceSet and measures digits 0–9 at 96 dpi. It honors the measurement
- * contract: when the named font cannot be loaded it returns undefined rather
- * than measuring a fallback face, and callers then omit geometry-dependent
- * drawings. Once shared reference font metrics can supply Office font
- * advances without an installed face, this default should use them instead.
+ * (ECMA-376 §18.3.1.13). This loads the named face through the document's
+ * FontFaceSet, then measures digits 0-9 at 96 dpi through the same cell font
+ * stack the spreadsheet renderer paints with. When the authored face is
+ * unavailable the painted fallback face is measured, so column geometry,
+ * drawing anchors and painted text agree, as for an XLSX workbook whose
+ * Normal font is missing. Returns undefined only without a DOM or canvas.
  */
 export async function measureLegacyXlsNormalFontInDocument(
   font: Readonly<LegacyXlsNormalFont>,
   signal: AbortSignal,
 ): Promise<number | undefined> {
-  if (typeof document === 'undefined' || !document.fonts) return undefined;
+  if (typeof document === 'undefined') return undefined;
   const px = font.sizePoints * 96 / 72;
-  const family = `"${font.family.replace(/["\\]/g, '')}"`;
-  const spec = `${font.italic ? 'italic ' : ''}${font.bold ? 'bold ' : ''}${px}px ${family}`;
+  const style = `${font.italic ? 'italic ' : ''}${font.bold ? 'bold ' : ''}${px}px`;
+  const named = `${style} "${font.family.replace(/["\\]/g, '')}"`;
   try {
-    await document.fonts.load(spec, '0123456789');
+    await document.fonts?.load(named, '0123456789');
   } catch {
-    return undefined;
+    // An unavailable authored face is measured through the painted fallback.
   }
-  if (signal.aborted || !document.fonts.check(spec, '0123456789')) return undefined;
+  if (signal.aborted) return undefined;
   const context = document.createElement('canvas').getContext('2d');
   if (!context) return undefined;
-  context.font = spec;
+  context.font = `${style} ${fontStackFor(font.family)}`;
   let widest = 0;
   for (const digit of '0123456789') widest = Math.max(widest, context.measureText(digit).width);
   const width = Math.round(widest);
