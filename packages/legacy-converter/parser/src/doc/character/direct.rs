@@ -1242,18 +1242,20 @@ mod tests {
     }
 
     #[test]
-    fn patterned_or_automatic_solid_character_shading_stays_unsupported() {
+    fn percentage_character_shading_blends_and_other_patterns_stay_unsupported() {
         let base = Properties::default();
         for operand in [
-            cshd([0, 0, 0, 0xff], [0xff, 0xff, 0xff, 0], 0x26),
+            cshd([0, 0, 0, 0xff], [0xff, 0xff, 0xff, 0], 14),
+            cshd([0, 0, 0, 0xff], [0, 0, 0, 0xff], 0x26),
             cshd([0, 0, 0, 0xff], [0xff, 0xff, 0xff, 0], 1),
         ] {
             assert!(!base.clone().apply(0xca71, &operand, &base).unwrap());
         }
-        assert!(!base
-            .clone()
-            .apply(0x4866, &0x9900u16.to_le_bytes(), &base)
-            .unwrap());
+        // Word paints pct15 with an automatic foreground over white as #D9D9D9.
+        let pct = applied(&[(0x4866, 0x9900u16.to_le_bytes().to_vec())]);
+        assert_eq!(public_run(&pct)["background"], "d9d9d9");
+        let pct = applied(&[(0xca71, cshd([0, 0, 0, 0xff], [0xff, 0xff, 0xff, 0], 0x26))]);
+        assert_eq!(public_run(&pct)["background"], "d9d9d9");
         let cleared = applied(&[(0xca71, cshd([0, 0, 0, 0xff], [0xff; 4], 0))]);
         assert!(public_run(&cleared)["background"].is_null());
     }

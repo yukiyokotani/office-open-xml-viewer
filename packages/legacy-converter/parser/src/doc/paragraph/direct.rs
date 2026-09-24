@@ -413,8 +413,13 @@ mod tests {
         );
         assert!(properties.apply(0x442d, &[0xff, 0xff]).unwrap());
         assert_eq!(properties.direct_paragraph().shading, None);
-        // A two-color pattern is valid but not representable.
-        assert!(!properties.apply(0x442d, &0x9900u16.to_le_bytes()).unwrap());
+        // pct15 over white blends to one fill; a stripe pattern does not.
+        assert!(properties.apply(0x442d, &0x9900u16.to_le_bytes()).unwrap());
+        assert_eq!(
+            properties.direct_paragraph().shading.as_deref(),
+            Some("d9d9d9")
+        );
+        assert!(!properties.apply(0x442d, &0x3900u16.to_le_bytes()).unwrap());
         assert!(!Properties::default().has_direct_only_properties());
     }
 

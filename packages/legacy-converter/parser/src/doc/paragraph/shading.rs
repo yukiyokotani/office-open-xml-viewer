@@ -49,10 +49,40 @@ pub(in crate::doc) fn fill(operand: &[u8], modern: bool) -> Result<Option<Shadin
             }
             super::super::table::Color::Auto => None,
         },
-        // Percentage and hatch patterns mix two colors; the fill-only model
-        // cannot represent them without inventing a blend.
-        _ => None,
+        // ST_Shd pctN is an N% foreground pattern over the background. Word
+        // renders it as one solid color: a Word-exported PDF of a pct15 run
+        // over white with an automatic (black) foreground paints exactly
+        // #D9D9D9 = 15% black over white. An automatic background has no
+        // such evidence and stays unrepresentable; hatch patterns cannot be a
+        // single fill.
+        pattern => percentage(pattern).and_then(|percent| {
+            let super::super::table::Color::Rgb(back) = facts.background else {
+                return None;
+            };
+            let fore = match facts.foreground {
+                super::super::table::Color::Rgb(value) => value,
+                super::super::table::Color::Auto => [0, 0, 0],
+            };
+            let mix = |index: usize| {
+                let value = f64::from(fore[index]) * percent / 100.0
+                    + f64::from(back[index]) * (100.0 - percent) / 100.0;
+                value.round() as u8
+            };
+            Some(ShadingFill::Rgb(format!(
+                "{:02x}{:02x}{:02x}",
+                mix(0),
+                mix(1),
+                mix(2)
+            )))
+        }),
     })
+}
+
+fn percentage(pattern: &str) -> Option<f64> {
+    pattern
+        .strip_prefix("pct")
+        .and_then(|value| value.parse::<u8>().ok())
+        .map(f64::from)
 }
 
 #[cfg(test)]
@@ -101,7 +131,21 @@ mod tests {
             Some(ShadingFill::Rgb("123456".into()))
         );
         assert_eq!(fill(&modern(auto, [1, 2, 3, 0], 1), true).unwrap(), None);
-        for ipat in [2u16, 0x26, 0x3d] {
+        // pct5 (2), pct15 (0x26) and pct95 (0x3c) blend over the background;
+        // an automatic foreground is black.
+        for (ipat, expected) in [(2u16, "f2f2f2"), (0x26, "d9d9d9"), (0x3c, "0d0d0d")] {
+            assert_eq!(
+                fill(&modern(auto, [0xff, 0xff, 0xff, 0], ipat), true).unwrap(),
+                Some(ShadingFill::Rgb(expected.into()))
+            );
+        }
+        assert_eq!(
+            fill(&modern([0xff, 0, 0, 0], [0, 0, 0xff, 0], 7), true).unwrap(),
+            Some(ShadingFill::Rgb("660099".into()))
+        );
+        // Automatic background and hatch patterns stay unrepresentable.
+        assert_eq!(fill(&modern(auto, auto, 0x26), true).unwrap(), None);
+        for ipat in [14u16, 25, 0x3d] {
             assert_eq!(
                 fill(&modern(auto, [0xff, 0xff, 0xff, 0], ipat), true).unwrap(),
                 None
@@ -134,8 +178,11 @@ mod tests {
         );
         assert_eq!(fill(&[0, 0], false).unwrap(), Some(ShadingFill::None));
         assert_eq!(fill(&[0xff, 0xff], false).unwrap(), Some(ShadingFill::None));
-        // pct15 over white: two-color mix.
-        assert_eq!(fill(&0x9900u16.to_le_bytes(), false).unwrap(), None);
+        // pct15, automatic foreground over white.
+        assert_eq!(
+            fill(&0x9900u16.to_le_bytes(), false).unwrap(),
+            Some(ShadingFill::Rgb("d9d9d9".into()))
+        );
         // solid, icoFore = 6 (red).
         assert_eq!(
             fill(&(0x0400u16 | 6).to_le_bytes(), false).unwrap(),
