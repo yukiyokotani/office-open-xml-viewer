@@ -81,7 +81,7 @@ pub(in crate::doc) struct Linked {
 
 /// Validated field structure of one aggregate story (main, header, footnote
 /// or endnote document), with CPs relative to that document.
-pub(super) struct StoryFields {
+pub(in crate::doc) struct StoryFields {
     evaluated: Vec<(usize, usize, Evaluated)>,
     /// Piecewise-constant link context: each entry applies from its CP up to
     /// the next entry.
@@ -126,7 +126,7 @@ impl StoryFields {
     /// fields Word evaluates. `partitions` are sorted CPs that separate
     /// independently projected stories inside the aggregate document; no
     /// field may span one of them.
-    pub(super) fn analyze(
+    pub(in crate::doc) fn analyze(
         text: &str,
         table: &header_fields::Table,
         partitions: &[usize],
@@ -243,7 +243,11 @@ impl StoryFields {
     /// Replace each evaluated field's stored-result tokens in one already
     /// tokenized slice (`base_cp` is the slice's first CP) with one
     /// `Token::EvaluatedField`, placed at the field's begin character.
-    pub(super) fn apply(&self, base_cp: usize, paragraphs: &mut [Paragraph]) -> Result<(), String> {
+    pub(in crate::doc) fn apply(
+        &self,
+        base_cp: usize,
+        paragraphs: &mut [Paragraph],
+    ) -> Result<(), String> {
         let Some(limit) = paragraphs.last().map(|paragraph| paragraph.end_cp) else {
             return Ok(());
         };

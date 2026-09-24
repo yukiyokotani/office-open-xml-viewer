@@ -11,7 +11,8 @@
 //! is not reconstructed here.
 
 use super::Part;
-use crate::doc::{read_story_range, u16_at, u32_at, unsupported, Story};
+use crate::doc::direct_model::fields::StoryFields;
+use crate::doc::{header_fields, read_story_range, u16_at, u32_at, unsupported, Story};
 use std::ops::Range;
 
 const MAX_TEXTBOXES: usize = 100_000;
@@ -20,6 +21,9 @@ pub(in crate::doc) struct Textboxes<'a> {
     pub story: Story<'a>,
     /// One entry per FTXBXS; `None` for reusable spare structures.
     boxes: Vec<Option<Textbox>>,
+    /// MS-DOC 2.8.25 Plcfld of this textbox document (PlcfFldTxbx at FIB
+    /// 0x262, PlcffldHdrTxbx at 0x272), validated like any other story.
+    pub fields: StoryFields,
 }
 
 #[derive(Debug)]
@@ -55,13 +59,13 @@ impl<'a> Textboxes<'a> {
                 .ok_or_else(|| unsupported("Word textbox story range overflow"))?;
         }
         let main_length = ccp(0x64)?;
-        let (length, plc, breaks) = match part {
-            Part::Main => (main_length, 0x25a, 0x2f2),
+        let (length, plc, breaks, field_table) = match part {
+            Part::Main => (main_length, 0x25a, 0x2f2, 0x262),
             Part::Header => {
                 start = start
                     .checked_add(main_length)
                     .ok_or_else(|| unsupported("Word textbox story range overflow"))?;
-                (ccp(0x68)?, 0x26a, 0x2fa)
+                (ccp(0x68)?, 0x26a, 0x2fa, 0x272)
             }
         };
         let plc = plc_bytes(word, table, plc)?;
@@ -72,7 +76,23 @@ impl<'a> Textboxes<'a> {
             (1.., Some(plc), Some(breaks)) => {
                 let story = read_story_range(word, clx, start, length)?;
                 let boxes = boxes(&story.text, length, plc, breaks)?;
-                Ok(Some(Self { story, boxes }))
+                // Every textbox is projected independently: no field may
+                // cross a textbox boundary.
+                let mut partitions = Vec::new();
+                for textbox in boxes.iter().flatten() {
+                    partitions.push(textbox.cp);
+                    partitions.push(
+                        textbox.cp + story.text[textbox.bytes.clone()].encode_utf16().count(),
+                    );
+                }
+                partitions.sort_unstable();
+                let table = header_fields::Table::read_at(word, table, field_table, length)?;
+                let fields = StoryFields::analyze(&story.text, &table, &partitions)?;
+                Ok(Some(Self {
+                    story,
+                    boxes,
+                    fields,
+                }))
             }
             _ => Err(unsupported("inconsistent Word textbox story tables")),
         }
@@ -267,6 +287,8 @@ mod tests {
                 prcs: Vec::new(),
             },
             boxes,
+            fields: StoryFields::analyze(text, &header_fields::Table::for_test(&[], 0), &[])
+                .unwrap(),
         };
         assert_eq!(story.text(1, 7).unwrap(), ("ab\r", 0));
         assert_eq!(story.text(2, 8).unwrap(), ("cé\r", 3));

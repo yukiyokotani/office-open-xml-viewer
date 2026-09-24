@@ -727,22 +727,16 @@ fn textbox_content(
     table_sequence: &mut usize,
 ) -> Result<Vec<docx_model::TextBoxBlockWire>, String> {
     let (text, base_cp) = textboxes.text(index, spid)?;
-    // MS-DOC 2.8.25: textbox documents have their own Plcfld (PlcfFldTxbx,
-    // PlcffldHdrTxbx) that is not validated here yet. Keep fields closed
-    // rather than show stale results of fields Word evaluates.
-    if text.contains(['\u{13}', '\u{14}', '\u{15}']) {
-        return Err(unsupported(
-            "direct DOC model does not yet project fields inside textboxes",
-        ));
-    }
     // Each occurrence re-tokenizes its range: charge that scratch work.
     budget.charge(text.len())?;
-    let paragraphs = super::super::tokenize_with_fields(
+    let mut paragraphs = super::super::tokenize_with_fields(
         text,
         &mut super::super::Fields::default(),
         base_cp,
         true,
     );
+    // Fields follow the textbox document's own Plcfld (MS-DOC 2.8.25).
+    textboxes.fields.apply(base_cp, &mut paragraphs)?;
     let mut body = Vec::new();
     let mut numbering = numbering::direct::Store::default();
     numbering.begin_story()?;
