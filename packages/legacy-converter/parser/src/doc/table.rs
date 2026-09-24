@@ -37,7 +37,7 @@ pub(in crate::doc) struct TableShadingPolicy {
 }
 
 impl TableShadingPolicy {
-    fn enabled(self) -> bool {
+    pub(in crate::doc) fn enabled(self) -> bool {
         self.effective_nfib > 0x00d9 && self.interpret_table_styles
     }
 }

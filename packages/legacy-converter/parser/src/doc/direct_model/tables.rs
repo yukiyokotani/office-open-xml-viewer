@@ -49,6 +49,7 @@ pub(super) struct Writer<'a> {
 
 impl<'a> Writer<'a> {
     /// A writer that rejects absolutely positioned tables.
+    #[cfg(test)]
     pub(super) fn new(sequence: &'a mut usize) -> Self {
         Self::with_positioned_tables(sequence, false)
     }

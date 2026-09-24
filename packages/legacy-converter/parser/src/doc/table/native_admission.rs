@@ -81,23 +81,40 @@ const ESTABLISHED_BEFORE_TISTD: [u16; 38] = [
     T_ISTD,
 ];
 
+/// Shading records whose TIstd reset is implemented only by the style-aware
+/// shading applier (nFib > 0x00D9 readers, [MS-DOC] 2.6.3). For older files
+/// the compatibility arrays remain live cell shading that TIstd does not reset.
+const STYLE_AWARE_SHADING: [u16; 8] = [
+    0xd609, 0xd612, 0xd616, 0xd60c, 0xd660, 0xd670, 0xd671, 0xd672,
+];
+
 /// Per-row-chain state for the native admission decisions. The caller creates
 /// one value per `table_properties_native` acquisition and presents every Prl
 /// to [`Self::observe`] in application order, before any applier consumes it.
 #[derive(Default)]
 pub(in crate::doc) struct NativeAdmission {
+    style_aware_shading: bool,
     unestablished_before_tistd: bool,
     last_tistd_blocked: bool,
 }
 
 impl NativeAdmission {
+    pub(in crate::doc) fn new(style_aware_shading: bool) -> Self {
+        Self {
+            style_aware_shading,
+            ..Self::default()
+        }
+    }
+
     pub(in crate::doc) fn observe(&mut self, code: u16) {
         if (code >> 10) & 7 != 5 {
             return;
         }
         if code == T_ISTD {
             self.last_tistd_blocked = self.unestablished_before_tistd;
-        } else if !ESTABLISHED_BEFORE_TISTD.contains(&code) {
+        } else if !ESTABLISHED_BEFORE_TISTD.contains(&code)
+            || (!self.style_aware_shading && STYLE_AWARE_SHADING.contains(&code))
+        {
             self.unestablished_before_tistd = true;
         }
     }
@@ -220,7 +237,7 @@ mod tests {
     #[test]
     fn tistd_is_admitted_after_preserved_reset_and_geometry_properties_only() {
         for before in ESTABLISHED_BEFORE_TISTD {
-            let mut admission = NativeAdmission::default();
+            let mut admission = NativeAdmission::new(true);
             let mut target = row(1);
             admission.observe(before);
             admission.observe(T_ISTD);
@@ -236,7 +253,7 @@ mod tests {
         // Vertical alignment is replaced by TIstd, but that replacement is not
         // implemented; a preceding hide-mark has no projection at all.
         for before in [0xd62c, 0xd642, 0xf661, 0xd639, 0x5622, 0xd605] {
-            let mut admission = NativeAdmission::default();
+            let mut admission = NativeAdmission::new(true);
             let mut target = row(1);
             admission.observe(before);
             admission.observe(T_ISTD);
@@ -249,7 +266,7 @@ mod tests {
             );
         }
         // The same properties after the selection are not replaced by it.
-        let mut admission = NativeAdmission::default();
+        let mut admission = NativeAdmission::new(true);
         let mut target = row(1);
         admission.observe(T_ISTD);
         assert_eq!(
@@ -259,8 +276,14 @@ mod tests {
             NativeAdmissionApply::Handled
         );
         admission.observe(0xd62c);
+        // Before Word 2000 the compatibility shading arrays are live cell
+        // shading, whose replacement by TIstd is not implemented.
+        let mut admission = NativeAdmission::new(false);
+        admission.observe(0xd612);
+        admission.observe(T_ISTD);
+        assert!(admission.last_tistd_blocked);
         // Paragraph SPRMs in the same chain never influence the decision.
-        let mut admission = NativeAdmission::default();
+        let mut admission = NativeAdmission::new(true);
         admission.observe(0x2416);
         admission.observe(T_ISTD);
         assert!(!admission.last_tistd_blocked);
@@ -268,7 +291,7 @@ mod tests {
 
     #[test]
     fn each_selection_is_decided_by_the_properties_preceding_it() {
-        let mut admission = NativeAdmission::default();
+        let mut admission = NativeAdmission::new(true);
         let mut target = row(1);
         admission.observe(T_ISTD);
         admission.observe(0xd62c);
@@ -283,7 +306,7 @@ mod tests {
 
     #[test]
     fn style_options_and_revision_ids_are_admitted_without_projection() {
-        let mut admission = NativeAdmission::default();
+        let mut admission = NativeAdmission::new(true);
         let mut target = row(1);
         assert_eq!(
             admission
@@ -334,7 +357,7 @@ mod tests {
         }
         assert!(PreferredIndent::read(&[3, 0x47, 0x84]).is_err());
 
-        let mut admission = NativeAdmission::default();
+        let mut admission = NativeAdmission::new(true);
         let mut target = row(1);
         admission.apply(&mut target, 0xf661, &[3, 0x6d, 0]).unwrap();
         assert_eq!(target.preferred_indent, Some(PreferredIndent::Dxa(109)));
@@ -342,7 +365,7 @@ mod tests {
 
     #[test]
     fn preferred_before_and_after_retain_table_part_widths() {
-        let mut admission = NativeAdmission::default();
+        let mut admission = NativeAdmission::new(true);
         let mut target = row(2);
         admission.apply(&mut target, 0xf617, &[0, 0, 0]).unwrap();
         admission
@@ -360,7 +383,7 @@ mod tests {
 
     #[test]
     fn no_wrap_applies_to_its_cell_range_and_validates_the_operand() {
-        let mut admission = NativeAdmission::default();
+        let mut admission = NativeAdmission::new(true);
         let mut target = row(3);
         admission.apply(&mut target, 0xd639, &[3, 1, 3, 1]).unwrap();
         assert_eq!(

@@ -602,7 +602,7 @@ impl<'a> Formatting<'a> {
         #[cfg(feature = "direct-doc")]
         let mut piece_started = false;
         #[cfg(feature = "direct-doc")]
-        let mut native_admission = table::NativeAdmission::default();
+        let mut native_admission = table::NativeAdmission::new(shading_policy.enabled());
         sprm::paragraph_properties_appended(
             direct,
             piece,
