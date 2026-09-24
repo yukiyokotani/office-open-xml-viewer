@@ -4518,14 +4518,17 @@ export function renderTextBody(
       const lineSpaceBeforePx = isFirst && para.spaceBeforePct != null
         ? percentSpacingBase * (para.spaceBeforePct / 100000)
         : spaceBeforePx;
-      const linePx  = lineHeight + (isLast ? lineSpaceAfterPx : 0);
-      // ECMA-376 §21.1.2.2.6 (a:spcBef): paragraph "space before" is the gap
-      // *between* paragraphs. PowerPoint suppresses it on the first paragraph
-      // of a text body — otherwise placeholders whose layout-default `spcBef`
-      // is 10 pt (sample-1 slide-5 "Figure 1." caption inherits this from the
-      // layout body lstStyle) get pushed ~10 px below the placeholder top and
-      // collide with the chart title sitting just below in the slide.
-      const topGap  = isFirst && paraIdx > 0 ? lineSpaceBeforePx : 0;
+      // ECMA-376 §21.1.2.1.1 bodyPr@spcFirstLastPara (default false): the
+      // first paragraph's space before and the last paragraph's space after
+      // are not respected at the edges of the text body. Otherwise
+      // placeholders whose layout-default `spcBef` is 10 pt (sample-1 slide-5
+      // "Figure 1." caption) get pushed below the placeholder top, and a
+      // bottom- or centre-anchored body is lifted by its trailing spcAft.
+      const respectEdges = body.spcFirstLastPara === true;
+      const lastParagraph = paraIdx === body.paragraphs.length - 1;
+      const linePx  = lineHeight
+        + (isLast && (respectEdges || !lastParagraph) ? lineSpaceAfterPx : 0);
+      const topGap  = isFirst && (respectEdges || paraIdx > 0) ? lineSpaceBeforePx : 0;
       // Preserve the signed non-bullet first-line indent in draw, wrapping and
       // spAutoFit measurement alike. Continuation lines remain at marL.
       const textXOffset = isFirst ? firstLineIndentPxFor(hasBullet, indentPx) : 0;

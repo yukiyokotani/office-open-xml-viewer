@@ -274,6 +274,7 @@ pub(crate) fn emit_smartart_fallback(
             num_col: 1,
             spc_col: 0,
             rtl_col: false,
+            spc_first_last_para: false,
             text_warp: None,
         },
     )));
@@ -374,6 +375,7 @@ fn emit_placeholder(gf_xfrm: &Transform, out: &mut Vec<SlideElement>) -> bool {
         num_col: 1,
         spc_col: 0,
         rtl_col: false,
+        spc_first_last_para: false,
         text_warp: None,
     };
     let mut shape = text_list_shape(gf_xfrm, body);

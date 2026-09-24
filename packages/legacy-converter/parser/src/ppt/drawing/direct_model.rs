@@ -726,6 +726,9 @@ impl Context<'_> {
             num_col: 1,
             spc_col: 0,
             rtl_col: false,
+            // MS-PPT carries no edge-spacing flag; DrawingML's default
+            // (edges suppressed) is the renderer's existing behavior.
+            spc_first_last_para: false,
             text_warp: None,
         }))
     }

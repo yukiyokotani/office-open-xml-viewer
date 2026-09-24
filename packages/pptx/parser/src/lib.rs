@@ -7073,6 +7073,18 @@ mod tests {
             "rtl_col=false must be omitted from JSON; got {json}"
         );
 
+        // ECMA-376 §21.1.2.1.1 spcFirstLastPara: xsd:boolean, default false,
+        // serialized only when set.
+        assert!(!tb_absent.spc_first_last_para);
+        assert!(!json.contains("spcFirstLastPara"), "{json}");
+        for value in ["1", "true"] {
+            let tb = parse(&format!(r#"<bodyPr spcFirstLastPara="{value}"/>"#));
+            assert!(tb.spc_first_last_para, "{value}");
+            let json = serde_json::to_string(&tb).unwrap();
+            assert!(json.contains("\"spcFirstLastPara\":true"), "{json}");
+        }
+        assert!(!parse(r#"<bodyPr spcFirstLastPara="0"/>"#).spc_first_last_para);
+
         // rtlCol="1" appears under the camelCase key "rtlCol".
         let json_true = serde_json::to_string(&tb).unwrap();
         assert!(

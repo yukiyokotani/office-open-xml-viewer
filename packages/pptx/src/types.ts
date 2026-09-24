@@ -115,6 +115,12 @@ export interface TextBody extends CoreTextBody {
    */
   rtlCol?: boolean;
   /**
+   * `<a:bodyPr spcFirstLastPara>` (ECMA-376 §21.1.2.1.1) — when true the first
+   * paragraph's space before and the last paragraph's space after are applied.
+   * Defaults to false (both suppressed); omitted from JSON when false.
+   */
+  spcFirstLastPara?: boolean;
+  /**
    * `<a:bodyPr><a:prstTxWarp>` (ECMA-376 §20.1.9.19) — WordArt text warp. When
    * present the renderer maps each glyph through the named envelope
    * (presetTextWarpDefinitions) instead of laying text out flat. Omitted from
