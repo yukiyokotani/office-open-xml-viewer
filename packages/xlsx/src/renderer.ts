@@ -1218,6 +1218,15 @@ export function layoutRichTextLines(
   return lines;
 }
 
+/** ECMA-376 §18.18.40 `general` horizontal alignment: text is left-aligned,
+ *  numbers (including dates and times) right-aligned, and booleans centered.
+ *  Parsers represent `general` as an absent `alignH`. */
+export function generalHorizontalAlignment(type: CellValue['type']): 'left' | 'right' | 'center' {
+  if (type === 'number') return 'right';
+  if (type === 'bool') return 'center';
+  return 'left';
+}
+
 /** Cell geometry + alignment shared by the rich-text draw helpers (wrap and
  *  non-wrap). `alignH`/`alignV` accept the raw `xf` strings; any value other
  *  than `right`/`center` anchors left, and other than `top`/`center` anchors
@@ -2089,7 +2098,7 @@ function renderQuadrant(
 
     const paddingX = 3, paddingY = 2;
     const isNumeric = cell.value.type === 'number';
-    const alignH = xf.alignH ?? (isNumeric ? 'right' : 'left');
+    const alignH = xf.alignH ?? generalHorizontalAlignment(cell.value.type);
     const alignV = xf.alignV ?? 'bottom';
     // Indent: ECMA-376 §18.8.1 alignment@indent — one level indents by 3
     // character widths (MDW) of the workbook's normal-style font.
@@ -2523,7 +2532,7 @@ function renderQuadrant(
       const paddingX = 3;
       const paddingY = 2;
       const isNumeric = cell.value.type === 'number';
-      const alignH = xf.alignH ?? (isNumeric ? 'right' : 'left');
+      const alignH = xf.alignH ?? generalHorizontalAlignment(cell.value.type);
       const alignV = xf.alignV ?? 'bottom';
       // Indent: ECMA-376 §18.8.1 alignment@indent — one level indents by 3
       // character widths (MDW) of the workbook's normal-style font.

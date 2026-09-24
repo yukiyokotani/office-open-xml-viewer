@@ -859,7 +859,10 @@ fn xf_model(value: ResolvedXf) -> xlsx_model::CellXf {
         fill_id: value.fill_id as u32,
         border_id: value.border_id as u32,
         num_fmt_id: value.num_fmt_id.into(),
-        align_h: (!value.horizontal.is_empty()).then(|| value.horizontal.into()),
+        // BIFF8 XF alc 0 is General, the SpreadsheetML default (ECMA-376
+        // §18.8.1); the shared model represents it as omission so the renderer
+        // applies the value-type rule of §18.18.40.
+        align_h: (!matches!(value.horizontal, "" | "general")).then(|| value.horizontal.into()),
         align_v: (!value.vertical.is_empty()).then(|| value.vertical.into()),
         wrap_text: value.wrap_text,
         indent: (value.indent != 0).then_some(value.indent.into()),
@@ -1273,7 +1276,8 @@ mod tests {
         assert_eq!(model.cell_xfs[0].font_id, 4);
         assert_eq!(model.cell_xfs[0].fill_id, 0);
         assert_eq!(model.cell_xfs[0].border_id, 1);
-        assert_eq!(model.cell_xfs[0].align_h.as_deref(), Some("general"));
+        // alc 0 (General) is the SpreadsheetML default and is omitted.
+        assert_eq!(model.cell_xfs[0].align_h, None);
         assert_eq!(model.cell_xfs[0].align_v.as_deref(), Some("top"));
         assert_eq!(model.cell_xfs[0].indent, None);
         assert_eq!(model.cell_xfs[0].text_rotation, None);

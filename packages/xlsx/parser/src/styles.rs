@@ -502,7 +502,13 @@ pub(crate) fn parse_cell_xfs(doc: &roxmltree::Document) -> Vec<CellXf> {
                 let mut reading_order: Option<u32> = None;
                 for child in xf_node.children() {
                     if child.tag_name().name() == "alignment" {
-                        align_h = child.attribute("horizontal").map(|s| s.to_string());
+                        // ECMA-376 §18.8.1: horizontal defaults to `general`,
+                        // so an explicit `general` is the same as omission and
+                        // leaves the value-type rule (§18.18.40) to the renderer.
+                        align_h = child
+                            .attribute("horizontal")
+                            .filter(|value| *value != "general")
+                            .map(|s| s.to_string());
                         align_v = child.attribute("vertical").map(|s| s.to_string());
                         wrap_text = child
                             .attribute("wrapText")
@@ -614,5 +620,19 @@ mod strict_namespace_tests {
         assert_eq!(styled.fill_id, 1);
         assert_eq!(styled.align_h.as_deref(), Some("center"));
         assert!(styled.wrap_text);
+    }
+
+    #[test]
+    fn explicit_general_horizontal_alignment_is_the_default() {
+        let xml = r#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <cellXfs count="2">
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0"><alignment horizontal="general"/></xf>
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0"><alignment horizontal="left"/></xf>
+  </cellXfs>
+</styleSheet>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let cell_xfs = parse_cell_xfs(&doc);
+        assert_eq!(cell_xfs[0].align_h, None);
+        assert_eq!(cell_xfs[1].align_h.as_deref(), Some("left"));
     }
 }
