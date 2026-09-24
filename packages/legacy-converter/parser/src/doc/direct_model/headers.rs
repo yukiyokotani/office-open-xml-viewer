@@ -130,9 +130,12 @@ impl<'a, 'h> Resolver<'a, 'h> {
             table_sequence,
         )?;
         if body.iter().any(|element| {
-            matches!(element, BodyElement::Paragraph(paragraph) if paragraph.frame_pr.is_some())
+            matches!(element, BodyElement::Paragraph(paragraph)
+                if paragraph.frame_pr.as_deref().is_some_and(|frame| !story_positions_frame(frame)))
         }) {
-            // The DOCX renderer positions frames only in the main body flow.
+            // Page stories are translated into their band after layout, so the
+            // DOCX renderer positions only text-anchored, non-drop-cap frames
+            // there; others would silently fall back to ordinary flow.
             formatting.unsupported_paragraph_properties = true;
         }
         // Header and footer stories are laid out horizontally.
@@ -140,5 +143,29 @@ impl<'a, 'h> Resolver<'a, 'h> {
             formatting.unsupported_character_properties = true;
         }
         Ok(HeaderFooter { body })
+    }
+}
+
+/// Header/footer frames the DOCX renderer positions (ECMA-376 17.3.1.11 with
+/// vAnchor="text"; drop caps and page/margin anchors stay in flow there).
+fn story_positions_frame(frame: &docx_model::FramePr) -> bool {
+    frame.v_anchor == "text" && frame.drop_cap == "none"
+}
+
+#[cfg(test)]
+mod frame_tests {
+    use super::story_positions_frame;
+
+    #[test]
+    fn only_text_anchored_non_drop_cap_story_frames_are_admitted() {
+        let frame = |v_anchor: &str, drop_cap: &str| docx_model::FramePr {
+            v_anchor: v_anchor.into(),
+            drop_cap: drop_cap.into(),
+            ..Default::default()
+        };
+        assert!(story_positions_frame(&frame("text", "none")));
+        assert!(!story_positions_frame(&frame("page", "none")));
+        assert!(!story_positions_frame(&frame("margin", "none")));
+        assert!(!story_positions_frame(&frame("text", "drop")));
     }
 }
