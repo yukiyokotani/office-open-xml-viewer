@@ -45,6 +45,9 @@ pub(in crate::doc) struct Facts {
     /// MS-ODRAW 2.3.18.5 rotation, clockwise about the centre, in degrees.
     /// Only group members may carry a nonzero rotation (see `group`).
     pub rotation: f64,
+    /// Relative width and height (MS-ODRAW 2.3.5.1-2.3.5.2, 2.3.5.5-2.3.5.6):
+    /// fraction of the named page element; see `relative_size`.
+    pub relative_size: [Option<(f64, &'static str)>; 2],
 }
 
 pub(in crate::doc) struct Line {
@@ -271,16 +274,15 @@ impl<'a> Table<'a> {
                 0x33f => {}
                 0x384..=0x387 | 0x388 | 0x38f..=0x392 | 0x3aa | 0x3bf => {}
                 0x53f => {}
-                0x7c0..=0x7c3 if value == 0 => {}
-                // MS-ODRAW 2.3.5 <34>-<37>: Word 2007+ honors relative size
-                // and position; their interaction with SPA/fFitShapeToText
-                // needs an Office control.
-                0x7c0..=0x7c3 => {
+                0x7c2 | 0x7c3 if value == 0 => {}
+                // pctHorizPos/pctVertPos (2.3.5.3-2.3.5.4) have no Word
+                // evidence in the corpus yet.
+                0x7c2 | 0x7c3 => {
                     return Err(unsupported(
-                        "Word relative drawing size or position is not supported",
+                        "Word relative drawing positions are not supported",
                     ))
                 }
-                0x7c4 | 0x7c5 => {}
+                0x7c0 | 0x7c1 | 0x7c4 | 0x7c5 => {}
                 _ => {
                     return Err(unsupported(format!(
                         "Word drawing shape property {id:#06x}={value:#x} is not supported"
@@ -415,11 +417,65 @@ impl<'a> Table<'a> {
             subpaths,
             fill_picture,
             rotation,
+            relative_size: relative_size(&self.values)?,
             fill,
             line,
             text,
         })
     }
+}
+
+/// pctHoriz/pctVert with sizerelh/sizerelv (MS-ODRAW 2.3.5; Word 2007 and
+/// later honour them, <34>-<39>). They are the DrawingML `wp14:sizeRelH/V`
+/// relative sizes: Word's own DOCX of the local corpus writes pctVert 200
+/// (0.1% units) with sizerelv 0 as `sizeRelV relativeFrom="margin"` with
+/// `pctHeight 20000` (1/1000 %). The enumeration names match ST_SizeRelFromH
+/// and ST_SizeRelFromV; absent sizerelh/sizerelv default to msosrhPage and
+/// msosrvPage. A zero percentage leaves the size to the anchor extent.
+fn relative_size(values: &BTreeMap<u16, u32>) -> Result<[Option<(f64, &'static str)>; 2], String> {
+    let mut result = [None; 2];
+    for (axis, (pct, relative, names)) in [
+        (
+            0x7c0u16,
+            0x7c4u16,
+            [
+                "margin",
+                "page",
+                "leftMargin",
+                "rightMargin",
+                "insideMargin",
+                "outsideMargin",
+            ],
+        ),
+        (
+            0x7c1,
+            0x7c5,
+            [
+                "margin",
+                "page",
+                "topMargin",
+                "bottomMargin",
+                "insideMargin",
+                "outsideMargin",
+            ],
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let value = values.get(&pct).copied().unwrap_or(0);
+        if value == 0 {
+            continue;
+        }
+        if value > 10_000 {
+            return Err(unsupported("invalid Word relative drawing size"));
+        }
+        let from = *names
+            .get(values.get(&relative).copied().unwrap_or(1) as usize)
+            .ok_or_else(|| unsupported("invalid Word relative drawing size origin"))?;
+        result[axis] = Some((f64::from(value) / 1000.0, from));
+    }
+    Ok(result)
 }
 
 /// Normalize decoded OfficeArt path coordinates to the unit shape box, the
@@ -707,6 +763,17 @@ mod tests {
     }
 
     #[test]
+    fn relative_sizes_follow_word_drawingml_relative_size() {
+        let bytes = container(&[], &[(0x7c1, 200), (0x7c5, 0), (0x7c4, 0)], &[]);
+        let facts = read(202, 0xa00, &bytes, [9, 9]).unwrap();
+        assert_eq!(facts.relative_size, [None, Some((0.2, "margin"))]);
+        // Absent origins default to the page; zero percentages use the extent.
+        let bytes = container(&[], &[(0x7c0, 1000), (0x7c1, 0)], &[]);
+        let facts = read(202, 0xa00, &bytes, [9, 9]).unwrap();
+        assert_eq!(facts.relative_size, [Some((1.0, "page")), None]);
+    }
+
+    #[test]
     fn word_window_system_colors_resolve_to_their_observed_values() {
         let bytes = container(&[(0x181, 0x1000_0011), (0x1c0, 0x1000_0001)], &[], &[]);
         let facts = read(1, 0xa00, &bytes, [9, 9]).unwrap();
@@ -785,7 +852,9 @@ mod tests {
             (1, &[(0x80, 0x10001)], &[]),
             (1, &[(0x80, 0x10000), (0x8a, 0x806)], &[]),
             // Relative sizing, pseudo-inline, horizontal rule, unknown ids.
-            (1, &[], &[(0x7c1, 0xc8)]),
+            (1, &[], &[(0x7c3, 0xc8)]),
+            (1, &[], &[(0x7c1, 10_001)]),
+            (1, &[], &[(0x7c1, 5), (0x7c5, 6)]),
             (1, &[], &[(0x53f, 0x10001)]),
             (1, &[(0x3bf, 0x0800_0800)], &[]),
             (1, &[(0x2ff, 0)], &[]),

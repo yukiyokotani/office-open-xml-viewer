@@ -398,6 +398,11 @@ impl Store<'_> {
             }
             Content::Shape(Box::new(facts))
         };
+        if matches!(&content, Content::Shape(shape) if shape.relative_size != [None; 2]) {
+            return Err(unsupported(
+                "relative sizes of Word drawing group members are not supported",
+            ));
+        }
         let rotation = match &content {
             Content::Shape(shape) => shape.rotation.rem_euclid(360.0),
             _ => 0.0,

@@ -542,6 +542,15 @@ impl Payload {
         if let Some(group) = &facts.group {
             self.add(group.child_source_id.capacity())?;
         }
+        for axis in [
+            &facts.relative_size.horizontal,
+            &facts.relative_size.vertical,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            self.strings([axis.relative_from.as_ref()])?;
+        }
         Ok(())
     }
 }
@@ -580,8 +589,21 @@ fn direct_shape(
     occurrence_id: &str,
     remaining_bytes: &mut usize,
 ) -> Result<DirectFloatingShape, String> {
-    let acquisition = acquisition(facts, occurrence_id.into(), placed);
+    let mut acquisition = acquisition(facts, occurrence_id.into(), placed);
     let member = placed.group.map_or(0, |(index, _)| index as u32);
+    let [relative_width, relative_height] = shape.relative_size;
+    let axis = |size: Option<(f64, &'static str)>| {
+        size.map(|(fraction, from)| docx_model::AnchorRelativeSizeAxisWire {
+            relative_from: Some(from.into()),
+            relative_from_status: AnchorValueStatusWire::Valid,
+            fraction: Some(fraction),
+            fraction_status: AnchorValueStatusWire::Valid,
+        })
+    };
+    acquisition.relative_size = docx_model::AnchorRelativeSizeWire {
+        horizontal: axis(relative_width),
+        vertical: axis(relative_height),
+    };
     let pt = |emu: u32| f64::from(emu) / 12_700.0;
     let line = shape.line.as_ref();
     let end = |end: Option<crate::officeart::stroke::LineEnd<'static>>| {
@@ -606,6 +628,10 @@ fn direct_shape(
         anchor_y_align: facts.align[1].map(str::to_owned),
         anchor_x_relative_from: Some(facts.horizontal.into()),
         anchor_y_relative_from: Some(facts.vertical.into()),
+        width_pct: relative_width.map(|(fraction, _)| fraction),
+        height_pct: relative_height.map(|(fraction, _)| fraction),
+        width_relative_from: relative_width.map(|(_, from)| from.to_owned()),
+        height_relative_from: relative_height.map(|(_, from)| from.to_owned()),
         behind_doc: facts.behind,
         // Members stack in source order above the group's own layer, as
         // DOCX group members do.
@@ -662,6 +688,8 @@ fn direct_shape(
         run.anchor_y_align.as_ref(),
         run.anchor_x_relative_from.as_ref(),
         run.anchor_y_relative_from.as_ref(),
+        run.width_relative_from.as_ref(),
+        run.height_relative_from.as_ref(),
         run.preset_geometry.as_ref(),
         run.fill.as_ref().map(|fill| match fill {
             ShapeFill::Solid { color } => color,
