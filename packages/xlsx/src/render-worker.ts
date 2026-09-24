@@ -50,7 +50,6 @@ import {
 } from './worksheet-resource-limits.js';
 import type { ParsedWorkbook, Worksheet } from './types.js';
 import { WorksheetViewProjectionCache } from './worker-protocol.js';
-import { GridGeometry } from './internal/grid-geometry.js';
 import { readXlsxArchiveBootstrap } from './internal/archive-bootstrap.js';
 import type { RenderWorkerRequest, RenderWorkerResponse } from './worker-protocol.js';
 import { isWorksheetPullCommand, WorksheetPullWorker } from './worksheet-pull-worker.js';
@@ -349,21 +348,18 @@ self.onmessage = async (e: MessageEvent<
       if (req.viewProjection?.autoRowHeightsPrepared) {
         markAutoRowHeightsPrepared(renderWorksheet);
       }
-      const maximumDigitWidth = req.layoutMetrics?.maximumDigitWidth;
-      if (maximumDigitWidth !== undefined) {
-        if (!Number.isFinite(maximumDigitWidth) || maximumDigitWidth <= 0) {
-          throw new Error('XLSX maximum digit width must be a finite positive number');
-        }
-        GridGeometry.forWorksheet(renderWorksheet, maximumDigitWidth);
-      }
       const canvas = new OffscreenCanvas(1, 1); // orchestrator resizes it
       await renderWorksheetViewport(
         { ...workerRenderDeps(renderWorksheet, workbook.styles, renderers), cjkFallback },
         canvas,
         req.viewport,
         // Supply the in-worker byte loader so embedded images decode straight
-        // from the retained archive (no main-thread round-trip).
-        { ...renderOpts, officeFontRoutes, checkedOfficeTuples, googleSubstitutes, fetchImage: getImage },
+        // from the retained archive (no main-thread round-trip). Pass the
+        // viewer's MDW through the render bind: seeding GridGeometry before
+        // that bind is ineffective because the worker's FontFaceSet can
+        // invalidate it on first use.
+        { ...renderOpts, authoritativeMdw: req.layoutMetrics?.maximumDigitWidth,
+          officeFontRoutes, checkedOfficeTuples, googleSubstitutes, fetchImage: getImage },
         svgDecodeClient.decode,
       );
       const bitmap = canvas.transferToImageBitmap();

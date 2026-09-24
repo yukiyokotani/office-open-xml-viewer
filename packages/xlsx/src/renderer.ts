@@ -194,10 +194,24 @@ function officeRoute(
   bold = false,
   italic = false,
 ): import('@silurus/ooxml-core').OfficeFontFallbackRoute | undefined {
-  if ((name?.trim().toLowerCase() || 'calibri') !== 'calibri') return undefined;
-  const key = bold ? `calibri:700:${italic ? 'italic' : 'normal'}`
-    : italic ? 'calibri:400:italic' : 'calibri';
+  // A positively loaded exact local route must serve both the Normal-font
+  // digit measurement and matching cell paint. Restricting this lookup to
+  // Calibri let a non-Calibri Normal route narrow columns while its cells
+  // still painted with a wider CSS fallback.
+  const key = officeRequestKey({ family: name?.trim() || 'Calibri',
+    weight: bold ? 700 : 400, style: italic ? 'italic' : 'normal' });
   return officeRoutesByContext.get(ctx)?.[key];
+}
+
+/** Keep a viewer-owned column metric after local font binding. The main realm
+ * owns hit testing; a worker may have a different FontFaceSet and must not
+ * silently replace the scalar while rendering the same worksheet. */
+export function pinXlsxGridGeometry(worksheet: Worksheet, mdw?: number): void {
+  if (mdw === undefined) return;
+  if (!Number.isFinite(mdw) || mdw <= 0) {
+    throw new Error('XLSX maximum digit width must be a finite positive number');
+  }
+  GridGeometry.forWorksheet(worksheet, mdw);
 }
 // Monospace counterpart: a monospaced cell font the host lacks degrades to a
 // monospace generic rather than the proportional sans default.
@@ -3985,6 +3999,7 @@ export function renderViewport(
   cjkFallback?: CjkLang,
 ): void {
   bindXlsxOfficeFontRoutes(ctx, worksheet, opts.officeFontRoutes, opts.googleSubstitutes === true, opts.checkedOfficeTuples);
+  pinXlsxGridGeometry(worksheet, opts.authoritativeMdw);
   const dpr = opts.dpr ?? 1;
   const cs = opts.cellScale ?? 1;
   const chartSheet = worksheet.isChartSheet === true;

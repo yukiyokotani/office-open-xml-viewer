@@ -77,7 +77,9 @@ describe('XLSX single-run DrawingML natural line', () => {
     bindXlsxOfficeFontRoutes(explicit.ctx, {} as Worksheet, { 'meiryo ui:700:normal': localRoute });
     drawShapeText(explicit.ctx, shape('t', { type: 'pct', val: 100000 }), 230, 98, 1);
     expect(explicit.draws[0].y).toBeCloseTo(absent.draws[0].y, 5);
-    expect(explicit.draws[0].font).not.toContain('__exact_meiryo_ui_bold');
+    // Explicit spacing overrides the Office line-box projection, but the
+    // positively loaded exact resource still paints the authored face.
+    expect(explicit.draws[0].font).toContain('__exact_meiryo_ui_bold');
   });
 
   it('discovers catalogued shape tuples separately from cell fonts', () => {

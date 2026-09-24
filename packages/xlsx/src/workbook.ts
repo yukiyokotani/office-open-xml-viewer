@@ -77,7 +77,6 @@ import {
   isXlsxWorksheetPullResponse,
   XlsxWorksheetPullClient,
 } from './worksheet-pull-client.js';
-import { GridGeometry } from './internal/grid-geometry.js';
 import { applyAutoRowHeights, bindXlsxOfficeFontRoutes, bindXlsxWorksheetOfficeFontRoutes, inheritSheetRenderCache, getGridGeometryForWorksheet } from './renderer.js';
 import {
   assertDelimitedTextSourceBytes,
@@ -1043,9 +1042,8 @@ export class XlsxWorkbook {
     return this.withWorksheetArchiveOperation(sheetIndex, (source) => {
       const ws = extracted.worksheet ?? createSizeOverriddenWorksheet(source, sizeOverrides);
       if (ws !== source) inheritSheetRenderCache(source, ws);
-      if (extracted.layoutMetrics) {
-        GridGeometry.forWorksheet(ws, extracted.layoutMetrics.maximumDigitWidth);
-      }
+      // The render bind may invalidate a geometry snapshot made in another
+      // font realm. Pin the viewer's MDW inside the renderer after binding.
       return renderWorksheetViewport(
         {
           ws,
@@ -1063,6 +1061,7 @@ export class XlsxWorkbook {
         // withWorksheetArchiveOperation, avoiding a nested FIFO acquisition.
         {
           ...renderOpts,
+          authoritativeMdw: extracted.layoutMetrics?.maximumDigitWidth,
           officeFontRoutes: targetFontSet
             ? this.retainedFontSets.get(targetFontSet)?.loaded?.office.routes
             : undefined,

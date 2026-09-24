@@ -1142,7 +1142,10 @@ export interface XlsxChromeColors {
  * frame-local decoded image map, so these fields are not part of its public
  * method contract. */
 export interface RenderViewportOptions extends XlsxRenderViewportOptions {
-  /** @internal Exact Calibri resources retained in this canvas's FontFaceSet. */
+  /** @internal Viewer/main-realm MDW for identical hit testing and worker paint.
+   * Reapply after every font bind, including render-local row-height clones. */
+  authoritativeMdw?: number;
+  /** @internal Exact local resources retained in this canvas's FontFaceSet. */
   officeFontRoutes?: Readonly<Record<string, import('@silurus/ooxml-core').OfficeFontFallbackRoute>>;
   /** Internal completed local-font preflight tuples. */
   checkedOfficeTuples?: readonly string[];
