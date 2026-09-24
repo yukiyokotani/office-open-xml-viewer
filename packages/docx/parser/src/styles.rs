@@ -1415,10 +1415,8 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
 
     // Paragraph shading
     if let Some(shd) = child_w(ppr, "shd") {
-        if let Some(fill) = attr_w(shd, "fill") {
-            if fill != "auto" && fill.len() == 6 {
-                fmt.shading = Some(fill.to_lowercase());
-            }
+        if let Some(fill) = paragraph_run_shading_fill(shd) {
+            fmt.shading = Some(fill);
         }
     }
 
@@ -2088,10 +2086,8 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
     // video) is exact since only the fill is visible, but `val="solid"` etc.
     // drop information by ignoring the pattern foreground.
     if let Some(shd) = child_w(rpr, "shd") {
-        if let Some(fill) = attr_w(shd, "fill") {
-            if fill != "auto" && fill.len() == 6 {
-                fmt.background = Some(fill.to_lowercase());
-            }
+        if let Some(fill) = paragraph_run_shading_fill(shd) {
+            fmt.background = Some(fill);
         }
     }
 
@@ -2254,6 +2250,42 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
 }
 
 // ===== Table style parsing =====
+
+/// ECMA-376 17.3.1.31 / 17.3.2.32 paragraph and run `w:shd` as one fill.
+///
+/// ST_Shd `pctN` (17.18.78) is an N% `w:color` pattern over `w:fill`. Word
+/// paints it as a single solid color: its PDF of a `pct15` run with
+/// `w:color="auto"` over `w:fill="FFFFFF"` is exactly #D9D9D9 (15% black
+/// over white). Blend percentage patterns with an automatic pattern color as
+/// black; every other pattern keeps the historical fill-only projection.
+pub(crate) fn paragraph_run_shading_fill(shd: roxmltree::Node) -> Option<String> {
+    let hex = |value: &str| {
+        (value.len() == 6)
+            .then(|| u32::from_str_radix(value, 16).ok())
+            .flatten()
+    };
+    let fill = attr_w(shd, "fill").filter(|fill| fill != "auto" && fill.len() == 6)?;
+    let percent = attr_w(shd, "val")
+        .and_then(|value| value.strip_prefix("pct").and_then(|n| n.parse::<u8>().ok()))
+        .filter(|percent| *percent <= 100);
+    let (Some(percent), Some(back)) = (percent, hex(&fill)) else {
+        return Some(fill.to_lowercase());
+    };
+    let fore = match attr_w(shd, "color").as_deref() {
+        None | Some("auto") => 0,
+        Some(color) => match hex(color) {
+            Some(value) => value,
+            None => return Some(fill.to_lowercase()),
+        },
+    };
+    let mix = |shift: u32| {
+        let fore = f64::from((fore >> shift) & 0xff);
+        let back = f64::from((back >> shift) & 0xff);
+        let percent = f64::from(percent);
+        (fore * percent / 100.0 + back * (100.0 - percent) / 100.0).round() as u32
+    };
+    Some(format!("{:02x}{:02x}{:02x}", mix(16), mix(8), mix(0)))
+}
 
 fn shd_fill(node: roxmltree::Node) -> Option<String> {
     child_w(node, "shd")
@@ -3435,6 +3467,36 @@ mod tests {
             base.fit_text.and_then(|fit_text| fit_text.id).is_none(),
             "a direct fitText WITHOUT w:id must clear the inherited id"
         );
+    }
+
+    #[test]
+    fn percentage_run_shading_is_one_blended_fill() {
+        // Word PDF evidence: pct15, automatic pattern color over white = D9D9D9.
+        for (shd, expected) in [
+            (
+                r#"<w:shd w:val="pct15" w:color="auto" w:fill="FFFFFF"/>"#,
+                Some("d9d9d9"),
+            ),
+            (r#"<w:shd w:val="pct15" w:fill="FFFFFF"/>"#, Some("d9d9d9")),
+            (
+                r#"<w:shd w:val="pct25" w:color="00FF00" w:fill="FFFFFF"/>"#,
+                Some("bfffbf"),
+            ),
+            (
+                r#"<w:shd w:val="clear" w:color="auto" w:fill="DDDDDD"/>"#,
+                Some("dddddd"),
+            ),
+            (
+                r#"<w:shd w:val="horzStripe" w:color="FF0000" w:fill="00FF00"/>"#,
+                Some("00ff00"),
+            ),
+            (
+                r#"<w:shd w:val="pct15" w:color="auto" w:fill="auto"/>"#,
+                None,
+            ),
+        ] {
+            assert_eq!(run_fmt_from(shd).background.as_deref(), expected, "{shd}");
+        }
     }
 
     #[test]
