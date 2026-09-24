@@ -8,6 +8,9 @@ use super::unsupported;
 pub(crate) struct Paint {
     pub(crate) details: crate::officeart::stroke::Details,
     pub(crate) custom_geometry: bool,
+    /// adjustValue..adjust10Value (MS-ODRAW 2.3.6.10-19), for preset
+    /// conversion by hosts that implement it (`officeart::preset`).
+    pub(crate) adjust: [Option<i32>; 10],
     pub(crate) fill_ok: Option<bool>,
     pub(crate) line_ok: Option<bool>,
     pub(crate) fill_rect: Option<bool>,
@@ -114,6 +117,7 @@ impl Paint {
             // Unsupported inherited adjustments/paths must not turn into an
             // invented unadjusted preset. Explicit paths are decoded separately.
             custom_geometry: self.custom_geometry || parent.custom_geometry,
+            adjust: std::array::from_fn(|i| self.adjust[i].or(parent.adjust[i])),
             fill_ok: self.fill_ok.or(parent.fill_ok),
             line_ok: self.line_ok.or(parent.line_ok),
             fill_rect: self.fill_rect.or(parent.fill_rect),
@@ -145,7 +149,12 @@ impl Paint {
         // MS-ODRAW 2.3.6: customized vertices/segments/adjustments require their
         // own geometry conversion; never apply a preset over these overrides.
         match id {
-            0x145..=0x150 => self.custom_geometry = true,
+            0x145..=0x150 => {
+                if (0x147..=0x150).contains(&id) {
+                    self.adjust[usize::from(id - 0x147)] = Some(value as i32);
+                }
+                self.custom_geometry = true;
+            }
             // MS-ODRAW 2.3.6.31: geometry can veto paint independently of
             // fill/line style. Its use bits must not override those style bits.
             0x17f => {

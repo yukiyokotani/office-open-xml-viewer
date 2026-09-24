@@ -255,7 +255,9 @@ impl Context<'_> {
         if self.elements.len() >= MAX_MODEL_SHAPES {
             return Err(unsupported("too many PowerPoint drawing shapes"));
         }
-        let transform = direct_transform::flatten(direct_transform::leaf(&shape)?, ancestors);
+        let local = direct_transform::leaf(&shape)?;
+        let local_extent = (local.cx, local.cy);
+        let transform = direct_transform::flatten(local, ancestors);
         let master = shape
             .master()
             .map(|id| self.presentation.shape_masters.paint(id))
@@ -366,20 +368,44 @@ impl Context<'_> {
             }
         }
         let text = self.text_body(&shape, inherited)?;
-        let preset = paint.geometry(shape.kind);
-        if text.is_none() && preset.is_none() && custom.is_none() {
+        // Shape types map to presets as PowerPoint converts them; an unmapped
+        // type is rejected rather than dropped or drawn as an unfilled box.
+        // Adjust values convert on the shape's own (pre-group) extent, where
+        // PowerPoint writes its avLst.
+        // A picture frame that displayed its picture keeps only its text on
+        // an unfilled box, as before.
+        let pictured = shape.kind == 75 && shape.props.picture != 0;
+        if pictured && text.is_none() {
             return Ok(());
         }
+        let (preset, adjust) = if custom.is_some() || pictured {
+            (None, None)
+        } else {
+            let name = crate::officeart::preset::name(shape.kind).ok_or_else(|| {
+                unsupported(&format!(
+                    "PowerPoint shape type {} has no evidenced preset geometry",
+                    shape.kind
+                ))
+            })?;
+            let adjust = crate::officeart::preset::adjustments(
+                shape.kind,
+                &paint.adjust,
+                local_extent.0,
+                local_extent.1,
+            )?;
+            (Some(name), adjust)
+        };
         self.charge_shape_strings()?;
         let (geometry_name, paths, allow_fill, allow_line) = match custom {
             Some(g) => ("custGeom".to_owned(), Some(g.paths), g.fill, g.stroke),
             None => (
                 preset.unwrap_or("rect").to_owned(),
                 None,
-                preset.is_some() && !matches!(shape.kind, 20 | 32),
+                preset.is_some() && !matches!(shape.kind, 20 | 32 | 34 | 38),
                 true,
             ),
         };
+        let [adj, adj2, adj3, adj4, adj5, adj6, adj7, adj8] = adjust.unwrap_or_default();
         let image = if allow_fill {
             match paint.foreground_image() {
                 Some((id, alpha, rotate)) => {
@@ -433,14 +459,14 @@ impl Context<'_> {
                 text_body: text,
                 default_text_color: None,
                 cust_geom: paths,
-                adj: None,
-                adj2: None,
-                adj3: None,
-                adj4: None,
-                adj5: None,
-                adj6: None,
-                adj7: None,
-                adj8: None,
+                adj,
+                adj2,
+                adj3,
+                adj4,
+                adj5,
+                adj6,
+                adj7,
+                adj8,
                 shadow: None,
                 inner_shadow: None,
                 glow: None,
