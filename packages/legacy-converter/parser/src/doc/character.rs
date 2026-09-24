@@ -74,6 +74,8 @@ struct DirectOnly {
     border: Option<(bool, [u8; 8])>,
     /// sprmCFitText (dxaFitText twips, FitTextID).
     fit_text: Option<(i32, i32)>,
+    /// sprmCFELayout UFEL fTNY / fTNYCompress (horizontal in vertical).
+    east_asian: Option<(bool, bool)>,
 }
 
 impl DirectOnly {
@@ -82,7 +84,7 @@ impl DirectOnly {
         if self.shading.is_some() {
             return true;
         }
-        self.border.is_some() || self.fit_text.is_some()
+        self.border.is_some() || self.fit_text.is_some() || self.east_asian.is_some()
     }
 
     fn overlay(&mut self, patch: &Self) {
@@ -95,6 +97,9 @@ impl DirectOnly {
         }
         if patch.fit_text.is_some() {
             self.fit_text = patch.fit_text;
+        }
+        if patch.east_asian.is_some() {
+            self.east_asian = patch.east_asian;
         }
     }
 }
@@ -467,6 +472,24 @@ impl Properties {
                 let mut raw = [0; 8];
                 raw[..bytes.len()].copy_from_slice(bytes);
                 self.direct_only.border = Some((old, raw));
+                return Ok(true);
+            }
+            0xca78 => {
+                // MS-DOC 2.9.68 FarEastLayoutOperand: cb = 6, UFEL, ID.
+                if operand.len() != 7 || operand[0] != 6 {
+                    return Err(unsupported("invalid Word East Asian layout operand"));
+                }
+                let ufel = u16_at(operand, 1)?;
+                let _layout_id = u32_at(operand, 3)?;
+                // MS-DOC 2.9.332 UFEL: fTNY (bit 0) is ECMA-376 17.3.2.10
+                // eastAsianLayout@vert and fTNYCompress (bit 12) is
+                // @vertCompress. Bits that MUST be 0 are ignored as required.
+                // fWarichu (two lines in one) has no renderer projection.
+                if ufel & 2 != 0 {
+                    return Ok(false);
+                }
+                let vertical = ufel & 1 != 0;
+                self.direct_only.east_asian = Some((vertical, vertical && ufel & 0x1000 != 0));
                 return Ok(true);
             }
             0xca76 => {

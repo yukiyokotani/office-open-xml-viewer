@@ -9,9 +9,10 @@ use crate::doc::border::Border;
 use crate::doc::paragraph::ShadingFill;
 use crate::doc::unsupported;
 use docx_model::{
-    CtBorderTypographyWire, FitTextSpecWire, RunBorder, RunFontAxisPresence, RunFontAxisValues,
-    RunFontFacts, RunFontSlots, RunTypographyWire, TextRun, TypographyLanguagesWire,
-    TypographyValueStatusWire, TypographyValueWire, UnderlineTypographyWire,
+    BodyElement, CellElement, CtBorderTypographyWire, DocRun, EastAsianLayoutTypographyWire,
+    FitTextSpecWire, RunBorder, RunFontAxisPresence, RunFontAxisValues, RunFontFacts, RunFontSlots,
+    RunTypographyWire, TextRun, TypographyLanguagesWire, TypographyValueStatusWire,
+    TypographyValueWire, UnderlineTypographyWire,
 };
 
 type FontAxes = [Option<String>; 4];
@@ -124,6 +125,10 @@ impl Properties {
             fit_text_id: fit_text.map(|(_, id)| id.to_string()),
             ..TextRun::default()
         };
+        if let Some((vertical, compress)) = self.direct_only.east_asian {
+            run.east_asian_vert = Some(vertical);
+            run.east_asian_vert_compress = Some(compress);
+        }
         if let Some((glyph, font)) = symbol {
             // ECMA-376 17.3.3.30 sym: a one-glyph run in the symbol's font,
             // exactly as the DOCX parser projects `w:sym` (font on the
@@ -166,6 +171,11 @@ impl Properties {
                 id: Some(id.to_string()),
             }),
             border: border_wire,
+            east_asian_layout: EastAsianLayoutTypographyWire {
+                vert: run.east_asian_vert,
+                vert_compress: run.east_asian_vert_compress,
+                ..EastAsianLayoutTypographyWire::default()
+            },
             kerning_threshold_pt: run.kerning,
             languages: TypographyLanguagesWire {
                 bidi: lang_bidi,
@@ -228,6 +238,35 @@ impl Properties {
         self.values
             .get("color")
             .is_some_and(|value| value == "auto")
+    }
+
+    /// ECMA-376 17.3.2.10 horizontal-in-vertical text is rendered only in
+    /// vertical (tbRl) body flow; horizontal flow and table cells would drop
+    /// the MS-DOC 2.9.332 fTNY rotation. Returns true when such a run occurs
+    /// where the renderer cannot honor it.
+    pub(in crate::doc) fn unrenderable_east_asian_vertical(
+        elements: &[BodyElement],
+        vertical_flow: bool,
+    ) -> bool {
+        fn paragraph(value: &docx_model::DocParagraph) -> bool {
+            value
+                .runs
+                .iter()
+                .any(|run| matches!(run, DocRun::Text(text) if text.east_asian_vert == Some(true)))
+        }
+        fn table(value: &docx_model::DocTable) -> bool {
+            value.rows.iter().flat_map(|row| &row.cells).any(|cell| {
+                cell.content.iter().any(|block| match block {
+                    CellElement::Paragraph(value) => paragraph(value),
+                    CellElement::Table(value) => table(value),
+                })
+            })
+        }
+        elements.iter().any(|element| match element {
+            BodyElement::Paragraph(value) => !vertical_flow && paragraph(value),
+            BodyElement::Table(value) => table(value),
+            _ => false,
+        })
     }
 
     /// MS-DOC 2.6.1 sprmCSymbol "designates the character as a symbol", and
@@ -1243,5 +1282,78 @@ mod tests {
             Properties::direct_run_text(&mut ordinary, "(a").unwrap(),
             "(a"
         );
+    }
+
+    #[test]
+    fn horizontal_in_vertical_layout_matches_the_docx_projection_and_is_gated_by_flow() {
+        // UFEL 0x1001: fTNY + fTNYCompress, plus an ignored must-be-zero bit.
+        let properties = applied(&[(0xca78, vec![6, 0x05, 0x10, 0, 0xc4, 0x3c, 7])]);
+        assert!(properties.has_direct_only_properties());
+        assert_eq!(
+            public_run(&properties),
+            parsed_rpr(
+                r#"<w:sz w:val="20"/><w:eastAsianLayout w:id="1" w:vert="1" w:vertCompress="1"/>"#
+            )
+        );
+        let run = properties
+            .direct_text_run("x".into(), &[])
+            .unwrap()
+            .unwrap();
+        let wire = run.typography_acquisition.as_ref().unwrap();
+        assert_eq!(
+            (
+                wire.east_asian_layout.vert,
+                wire.east_asian_layout.vert_compress
+            ),
+            (Some(true), Some(true))
+        );
+        // Compression alone is meaningless without fTNY.
+        let plain = applied(&[(0xca78, vec![6, 0x00, 0x10, 0, 0, 0, 0])]);
+        let plain_run = plain.direct_text_run("x".into(), &[]).unwrap().unwrap();
+        assert_eq!(
+            (
+                plain_run.east_asian_vert,
+                plain_run.east_asian_vert_compress
+            ),
+            (Some(false), Some(false))
+        );
+        // Two lines in one has no renderer projection.
+        let base = Properties::default();
+        assert!(!base
+            .clone()
+            .apply(0xca78, &[6, 2, 0, 0, 0, 0, 0], &base)
+            .unwrap());
+        assert!(base
+            .clone()
+            .apply(0xca78, &[5, 1, 0, 0, 0, 0, 0], &base)
+            .is_err());
+
+        let paragraph = docx_model::DocParagraph {
+            runs: vec![DocRun::Text(Box::new(run))],
+            ..Default::default()
+        };
+        let body = vec![BodyElement::Paragraph(Box::new(paragraph.clone()))];
+        assert!(!Properties::unrenderable_east_asian_vertical(&body, true));
+        assert!(Properties::unrenderable_east_asian_vertical(&body, false));
+        let table = docx_model::DocTable {
+            rows: vec![docx_model::DocTableRow {
+                cells: vec![docx_model::DocTableCell {
+                    content: vec![CellElement::Paragraph(Box::new(paragraph))],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let body = vec![BodyElement::Table(Box::new(table))];
+        assert!(Properties::unrenderable_east_asian_vertical(&body, true));
+        let plain_body = vec![BodyElement::Paragraph(Box::new(docx_model::DocParagraph {
+            runs: vec![DocRun::Text(Box::new(plain_run))],
+            ..Default::default()
+        }))];
+        assert!(!Properties::unrenderable_east_asian_vertical(
+            &plain_body,
+            false
+        ));
     }
 }
