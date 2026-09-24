@@ -1601,6 +1601,18 @@ function drawCfIcon(ctx: CanvasRenderingContext2D, name: string, index: number, 
     }
     ctx.closePath();
     ctx.fill();
+  } else if (safeName === '3Signs' && index < 2) {
+    // ECMA-376 §18.18.42 3Signs: Excel draws a red diamond, a yellow
+    // triangle and a green circle (observed in Excel's PDF output).
+    ctx.beginPath();
+    if (index === 0) {
+      ctx.moveTo(x + sz / 2, y); ctx.lineTo(x + sz, y + sz / 2);
+      ctx.lineTo(x + sz / 2, y + sz); ctx.lineTo(x, y + sz / 2);
+    } else {
+      ctx.moveTo(x + sz / 2, y); ctx.lineTo(x + sz, y + sz); ctx.lineTo(x, y + sz);
+    }
+    ctx.closePath();
+    ctx.fill();
   } else if (safeName.includes('Flag')) {
     ctx.beginPath();
     ctx.moveTo(x, y); ctx.lineTo(x + sz, y); ctx.lineTo(x, y + sz);

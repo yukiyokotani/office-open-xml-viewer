@@ -410,9 +410,59 @@ fn project_sheet(
             right: u32::from(last_column) + 1,
         });
     }
+    charge(budget, conditional_bytes(&sheet.conditional_formats))?;
+    worksheet.conditional_formats = sheet.conditional_formats;
     sheet.geometry.project(&mut worksheet, mdw, budget)?;
     sheet.views.project(&mut worksheet);
     Ok(worksheet)
+}
+
+/// Retained model bytes of projected conditional formats (resource accounting).
+fn conditional_bytes(formats: &[xlsx_model::ConditionalFormat]) -> usize {
+    let value = |value: &xlsx_model::CfValue| {
+        value.kind.len() + value.value.as_ref().map_or(0, String::len)
+    };
+    formats
+        .iter()
+        .map(|format| {
+            std::mem::size_of::<xlsx_model::ConditionalFormat>()
+                + format.sqref.len() * std::mem::size_of::<xlsx_model::CellRange>()
+                + format
+                    .rules
+                    .iter()
+                    .map(|rule| {
+                        std::mem::size_of::<xlsx_model::CfRule>()
+                            + match rule {
+                                xlsx_model::CfRule::ColorScale { stops, .. } => stops
+                                    .iter()
+                                    .map(|stop| {
+                                        std::mem::size_of::<xlsx_model::CfStop>()
+                                            + stop.kind.len()
+                                            + stop.value.as_ref().map_or(0, String::len)
+                                            + stop.color.len()
+                                    })
+                                    .sum(),
+                                xlsx_model::CfRule::DataBar {
+                                    color, min, max, ..
+                                } => color.len() + value(min) + value(max),
+                                xlsx_model::CfRule::IconSet {
+                                    icon_set, cfvos, ..
+                                } => {
+                                    icon_set.len()
+                                        + cfvos
+                                            .iter()
+                                            .map(|cfvo| {
+                                                std::mem::size_of::<xlsx_model::CfValue>()
+                                                    + value(cfvo)
+                                            })
+                                            .sum::<usize>()
+                                }
+                                _ => 0,
+                            }
+                    })
+                    .sum::<usize>()
+        })
+        .sum()
 }
 
 fn cell_value(value: CellValue, budget: &mut usize) -> Result<xlsx_model::CellValue, String> {
