@@ -172,7 +172,7 @@ fn with_acquired_doc<T>(
     formatting.configure_table_styles(effective_nfib, interpret_table_styles);
     let note_references = notes::References::read(&note_stories, &story, &mut formatting)?;
     let pictures = pictures::Store::new(&data);
-    let floating = floating::Store::read(&word, &table, ccp_text)?;
+    let floating = floating::Store::read_stories(&word, &table, clx, ccp_text)?;
     visit(AcquiredDoc {
         document_settings,
         story,

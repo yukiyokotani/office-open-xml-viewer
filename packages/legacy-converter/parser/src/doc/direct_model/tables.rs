@@ -54,6 +54,12 @@ impl<'a> Writer<'a> {
         }
     }
 
+    /// The document-wide table identity counter, for a nested story (such as
+    /// a textbox) projected while this story's tables are still open.
+    pub(super) fn sequence(&mut self) -> &mut usize {
+        self.sequence
+    }
+
     pub(super) fn push(
         &mut self,
         props: Properties,

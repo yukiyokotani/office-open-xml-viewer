@@ -23,7 +23,7 @@ pub(super) fn project(
     formatting: &mut formatting::Formatting<'_>,
     numbering: &mut numbering::direct::Store,
     pictures: &mut pictures::Store<'_>,
-    mut floating: Option<&mut floating::Store<'_>>,
+    mut floating: Option<(&mut floating::Store<'_>, floating::Part)>,
     budget: &mut ModelBudget,
     body: &mut Vec<BodyElement>,
     ending_kind: Option<&str>,
@@ -244,9 +244,14 @@ pub(super) fn project(
                     }
                 }
                 Token::FloatingPicture => {
-                    let store = floating.as_deref_mut().ok_or_else(|| {
-                        unsupported("direct DOC model does not support header floating pictures")
-                    })?;
+                    // Textbox stories cannot host floating drawings; Word
+                    // anchors them only in the main and header documents.
+                    let Some((store, part)) = floating.as_mut() else {
+                        return Err(unsupported(
+                            "direct DOC model found a floating drawing in a textbox story",
+                        ));
+                    };
+                    let part = *part;
                     let (_, fc, piece) = story
                         .position(cp)
                         .ok_or_else(|| unsupported("Word floating picture outside piece table"))?;
@@ -260,24 +265,48 @@ pub(super) fn project(
                     else {
                         continue;
                     };
-                    let image: Option<floating::DirectFloatingPicture> =
-                        store.direct_picture(cp, &mut budget.remaining_bytes)?;
-                    if let Some(image) = image {
-                        host.anchor_occurrence_id = Some(image.occurrence_id);
-                        let host_payload = std::mem::size_of::<docx_model::AnchorHostMetrics>()
-                            .checked_add(host.font_family.as_ref().map_or(0, String::capacity))
-                            .and_then(|bytes| {
-                                bytes.checked_add(
-                                    host.font_family_east_asia
-                                        .as_ref()
-                                        .map_or(0, String::capacity),
-                                )
-                            })
-                            .ok_or("OUTPUT_TOO_LARGE")?;
-                        budget.charge(host_payload)?;
-                        budget.push(&mut paragraph.runs, DocRun::AnchorHost(host))?;
-                        budget.push(&mut paragraph.runs, DocRun::Image(Box::new(image.image)))?;
-                    }
+                    let Some(drawing) =
+                        store.direct_drawing(part, cp, &mut budget.remaining_bytes)?
+                    else {
+                        continue;
+                    };
+                    let (occurrence_id, run) = match drawing {
+                        floating::DirectFloating::Picture(picture) => (
+                            picture.occurrence_id,
+                            DocRun::Image(Box::new(picture.image)),
+                        ),
+                        floating::DirectFloating::Shape(mut shape) => {
+                            if let Some(index) = shape.text {
+                                let textboxes = store.textbox(part).ok_or_else(|| {
+                                    unsupported("Word shape text lacks its textbox story")
+                                })?;
+                                shape.shape.text_box_content = textbox_content(
+                                    textboxes,
+                                    index,
+                                    shape.spid,
+                                    formatting,
+                                    pictures,
+                                    budget,
+                                    tables.sequence(),
+                                )?;
+                            }
+                            (shape.occurrence_id, DocRun::Shape(Box::new(shape.shape)))
+                        }
+                    };
+                    host.anchor_occurrence_id = Some(occurrence_id);
+                    let host_payload = std::mem::size_of::<docx_model::AnchorHostMetrics>()
+                        .checked_add(host.font_family.as_ref().map_or(0, String::capacity))
+                        .and_then(|bytes| {
+                            bytes.checked_add(
+                                host.font_family_east_asia
+                                    .as_ref()
+                                    .map_or(0, String::capacity),
+                            )
+                        })
+                        .ok_or("OUTPUT_TOO_LARGE")?;
+                    budget.charge(host_payload)?;
+                    budget.push(&mut paragraph.runs, DocRun::AnchorHost(host))?;
+                    budget.push(&mut paragraph.runs, run)?;
                 }
                 Token::NoteMarker | Token::NoteReference(_) => {
                     return Err(unsupported(
@@ -443,6 +472,88 @@ fn push_control_text(
         budget.text(&mut paragraph.runs, &mut run, text)?;
     }
     Ok(())
+}
+
+/// Project one textbox's text (MS-DOC 2.3.6, 2.9.106) through the ordinary
+/// story projection into the DOCX text box block stream (ECMA-376 17.3.4.7
+/// `w:txbxContent`). The textbox range ends with its final paragraph mark.
+#[allow(clippy::too_many_arguments)]
+fn textbox_content(
+    textboxes: &floating::textbox::Textboxes<'_>,
+    index: usize,
+    spid: u32,
+    formatting: &mut formatting::Formatting<'_>,
+    pictures: &mut pictures::Store<'_>,
+    budget: &mut ModelBudget,
+    table_sequence: &mut usize,
+) -> Result<Vec<docx_model::TextBoxBlockWire>, String> {
+    let (text, base_cp) = textboxes.text(index, spid)?;
+    // Each occurrence re-tokenizes its range: charge that scratch work.
+    budget.charge(text.len())?;
+    let paragraphs = super::super::tokenize_with_fields(
+        text,
+        &mut super::super::Fields::default(),
+        base_cp,
+        true,
+    );
+    let mut body = Vec::new();
+    let mut numbering = numbering::direct::Store::default();
+    numbering.begin_story()?;
+    project(
+        &textboxes.story,
+        paragraphs,
+        formatting,
+        &mut numbering,
+        pictures,
+        None,
+        budget,
+        &mut body,
+        None,
+        table_sequence,
+    )?;
+    // List counters shared between textboxes and the main story, and breaks
+    // inside a textbox, have no Office control yet: keep them fail-closed.
+    let numbered = || unsupported("direct DOC model does not yet number textbox paragraphs");
+    let mut tables = Vec::new();
+    for block in &body {
+        match block {
+            BodyElement::Paragraph(paragraph) if paragraph.numbering.is_some() => {
+                return Err(numbered())
+            }
+            BodyElement::Paragraph(_) => {}
+            BodyElement::Table(table) => tables.push(table.as_ref()),
+            _ => {
+                return Err(unsupported(
+                    "direct DOC model does not support breaks inside textboxes",
+                ))
+            }
+        }
+    }
+    while let Some(table) = tables.pop() {
+        for element in table
+            .rows
+            .iter()
+            .flat_map(|row| &row.cells)
+            .flat_map(|cell| &cell.content)
+        {
+            match element {
+                docx_model::CellElement::Paragraph(paragraph) if paragraph.numbering.is_some() => {
+                    return Err(numbered())
+                }
+                docx_model::CellElement::Paragraph(_) => {}
+                docx_model::CellElement::Table(table) => tables.push(table.as_ref()),
+            }
+        }
+    }
+    budget.charge(
+        body.len()
+            .checked_mul(std::mem::size_of::<docx_model::TextBoxBlockWire>())
+            .ok_or("OUTPUT_TOO_LARGE")?,
+    )?;
+    Ok(body
+        .into_iter()
+        .map(docx_model::TextBoxBlockWire::Body)
+        .collect())
 }
 
 #[cfg(test)]
@@ -1134,7 +1245,7 @@ mod tests {
                 &mut facts.formatting,
                 &mut numbering,
                 &mut facts.pictures,
-                Some(&mut facts.floating),
+                Some((&mut facts.floating, floating::Part::Main)),
                 &mut budget,
                 &mut body,
                 None,
