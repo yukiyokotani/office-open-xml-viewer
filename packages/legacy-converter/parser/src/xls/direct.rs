@@ -49,6 +49,17 @@ impl DirectSession {
     }
 
     fn from_prepared(mut prepared: PreparedXls) -> Result<Self, String> {
+        // Conditional formatting changes what Excel displays. The direct
+        // projection does not produce it yet, so never omit it silently.
+        if prepared
+            .sheets
+            .iter()
+            .any(|(_, sheet)| sheet.conditional_formatting)
+        {
+            return Err(unsupported(
+                "XLS conditional formatting is not projected yet",
+            ));
+        }
         let mut meta_bytes = prepared
             .sheets
             .iter()

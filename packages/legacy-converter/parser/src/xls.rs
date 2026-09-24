@@ -153,6 +153,9 @@ struct SheetData {
     merged: Vec<(u16, u16, u16, u16)>,
     formula_results: bool,
     custom_views_omitted: bool,
+    /// MS-XLS 2.4.56 CondFmt, 2.4.42 CF, 2.4.57 CondFmt12, 2.4.43 CF12 or
+    /// 2.4.44 CFEx occurred in the worksheet substream.
+    conditional_formatting: bool,
 }
 
 pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<XlsConversion, String> {
@@ -974,6 +977,7 @@ fn parse_sheet(
                 }
             }
             MERGEDCELLS => parse_merged_cells(record.data, &mut output.merged)?,
+            0x01b0 | 0x01b1 | 0x0879 | 0x087a | 0x087b => output.conditional_formatting = true,
             FILEPASS => return Err(unsupported("encrypted BIFF worksheet")),
             _ => {}
         }
