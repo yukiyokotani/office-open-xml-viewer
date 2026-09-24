@@ -4,6 +4,7 @@ use std::ops::Range;
 pub(crate) mod geometry;
 pub(crate) mod gradient;
 mod metafile;
+pub(crate) mod paint;
 pub(crate) mod properties;
 #[cfg(test)]
 pub(crate) use metafile::tests::{emf_test_blip, wmf_test_blip};

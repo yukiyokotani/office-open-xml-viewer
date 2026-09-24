@@ -1,11 +1,12 @@
-//! Direct-model projection of already validated main-story floating pictures.
+//! Direct-model projection of already validated floating pictures and
+//! drawing shapes of the main and header documents.
 
-use super::{unsupported, ResolvedDrawing, Store};
+use super::{shape, unsupported, Content, Mode, Part, ResolvedDrawing, Store};
 use crate::doc::pictures::DirectPictureResource;
 use docx_model::{
     AnchorAcquisitionWire, AnchorAxisChoiceWire, AnchorAxisWire, AnchorBehaviorWire,
     AnchorEdgesWire, AnchorExtentWire, AnchorSimplePositionWire, AnchorValueStatusWire,
-    AnchorWrapKindWire, AnchorWrapWire, ImageRun,
+    AnchorWrapKindWire, AnchorWrapWire, ImageRun, LineEnd, ShapeFill, ShapeRun,
 };
 
 #[derive(Debug)]
@@ -14,29 +15,93 @@ pub(in crate::doc) struct DirectFloatingPicture {
     pub occurrence_id: String,
 }
 
+#[derive(Debug)]
+pub(in crate::doc) struct DirectFloatingShape {
+    pub shape: ShapeRun,
+    pub occurrence_id: String,
+    /// One-based FTXBXS index whose text fills `shape.text_box_content`.
+    pub text: Option<usize>,
+    /// The shape's spid, which the FTXBXS `lid` must name.
+    pub spid: u32,
+}
+
+#[derive(Debug)]
+pub(in crate::doc) enum DirectFloating {
+    Picture(Box<DirectFloatingPicture>),
+    Shape(Box<DirectFloatingShape>),
+}
+
+fn wrap_mode(wrapping: u8) -> &'static str {
+    match wrapping {
+        1 => "topAndBottom",
+        2 => "square",
+        3 => "none",
+        _ => unreachable!("unsupported wrap modes are rejected during resolution"),
+    }
+}
+
 impl Store<'_> {
     pub(in crate::doc) fn has_selected_direct_resources(&self) -> bool {
         !self.selected_images.is_empty()
     }
 
+    /// Project the drawing anchored at `cp` of `part`'s story.
+    pub(in crate::doc) fn direct_drawing(
+        &mut self,
+        part: Part,
+        cp: usize,
+        remaining_bytes: &mut usize,
+    ) -> Result<Option<DirectFloating>, String> {
+        let Some(facts) = self.resolve(part, cp, Mode::Direct)? else {
+            return Ok(None);
+        };
+        match &facts.content {
+            Content::Picture { .. } => self
+                .direct_picture_facts(&facts, remaining_bytes)
+                .map(|picture| Some(DirectFloating::Picture(Box::new(picture)))),
+            Content::Shape(shape) => direct_shape(&facts, shape, remaining_bytes)
+                .map(|shape| Some(DirectFloating::Shape(Box::new(shape)))),
+        }
+    }
+
+    #[cfg(test)]
     pub(in crate::doc) fn direct_picture(
         &mut self,
         cp: usize,
         remaining_bytes: &mut usize,
     ) -> Result<Option<DirectFloatingPicture>, String> {
-        let Some(facts) = self.resolve(cp)? else {
-            return Ok(None);
+        Ok(
+            match self.direct_drawing(Part::Main, cp, remaining_bytes)? {
+                Some(DirectFloating::Picture(picture)) => Some(*picture),
+                Some(DirectFloating::Shape(_)) => panic!("expected a picture"),
+                None => None,
+            },
+        )
+    }
+
+    fn direct_picture_facts(
+        &mut self,
+        facts: &ResolvedDrawing,
+        remaining_bytes: &mut usize,
+    ) -> Result<DirectFloatingPicture, String> {
+        let Content::Picture {
+            image_index,
+            extension,
+            crop,
+        } = facts.content
+        else {
+            unreachable!("picture content");
         };
-        let mime_type = mime(facts.extension)?.to_string();
-        let image_path = format!("legacy-doc/float/{}", facts.image_index);
+        let mime_type = mime(extension)?.to_string();
+        let image_path = format!("legacy-doc/float/{image_index}");
         let occurrence_id = format!("legacy-doc-float-{}", facts.occurrence);
-        let acquisition = acquisition(&facts, occurrence_id.clone());
-        let [top, bottom, left, right] = facts.crop;
+        let acquisition = acquisition(facts, occurrence_id.clone());
+        let [top, bottom, left, right] = crop;
         let image = ImageRun {
             image_path,
             mime_type,
             svg_image_path: None,
-            src_rect: (facts.crop != [0; 4]).then_some(ooxml_common::blip::SrcRect {
+            src_rect: (crop != [0; 4]).then_some(ooxml_common::blip::SrcRect {
                 l: left as f64 / 100_000.0,
                 t: top as f64 / 100_000.0,
                 r: right as f64 / 100_000.0,
@@ -55,23 +120,15 @@ impl Store<'_> {
             color_replace_from: None,
             duotone: None,
             alpha: None,
-            wrap_mode: Some(
-                match facts.wrapping {
-                    1 => "topAndBottom",
-                    2 => "square",
-                    3 => "none",
-                    _ => unreachable!(),
-                }
-                .into(),
-            ),
+            wrap_mode: Some(wrap_mode(facts.wrapping).into()),
             dist_top: facts.distances[1] as f64 / 12_700.0,
             dist_bottom: facts.distances[3] as f64 / 12_700.0,
             dist_left: facts.distances[0] as f64 / 12_700.0,
             dist_right: facts.distances[2] as f64 / 12_700.0,
             wrap_side: (facts.wrapping == 2).then(|| facts.side.into()),
             allow_overlap: facts.overlap,
-            anchor_x_align: None,
-            anchor_y_align: None,
+            anchor_x_align: facts.align[0].map(str::to_owned),
+            anchor_y_align: facts.align[1].map(str::to_owned),
             anchor_x_relative_from: Some(facts.horizontal.into()),
             anchor_y_relative_from: Some(facts.vertical.into()),
             anchor_acquisition: Some(acquisition),
@@ -80,11 +137,11 @@ impl Store<'_> {
         *remaining_bytes = remaining_bytes
             .checked_sub(required)
             .ok_or("OUTPUT_TOO_LARGE")?;
-        self.selected_images.insert(facts.image_index);
-        Ok(Some(DirectFloatingPicture {
+        self.selected_images.insert(image_index);
+        Ok(DirectFloatingPicture {
             occurrence_id,
             image,
-        }))
+        })
     }
 
     pub(in crate::doc) fn append_referenced_direct_resources(
@@ -234,11 +291,16 @@ fn valid_edges(values: [u32; 4]) -> AnchorEdgesWire {
 }
 
 fn acquisition(f: &ResolvedDrawing, occurrence_id: String) -> AnchorAcquisitionWire {
-    let axis = |relative: &'static str, value: i64| AnchorAxisWire {
+    let axis = |relative: &'static str, value: i64, align: Option<&'static str>| AnchorAxisWire {
         relative_from: Some(relative.into()),
         relative_from_status: AnchorValueStatusWire::Valid,
-        choice: AnchorAxisChoiceWire::Offset {
-            value_pt: value as f64 / 12_700.0,
+        choice: match align {
+            Some(value) => AnchorAxisChoiceWire::Align {
+                value: value.into(),
+            },
+            None => AnchorAxisChoiceWire::Offset {
+                value_pt: value as f64 / 12_700.0,
+            },
         },
     };
     AnchorAcquisitionWire {
@@ -251,8 +313,8 @@ fn acquisition(f: &ResolvedDrawing, occurrence_id: String) -> AnchorAcquisitionW
             y_pt: Some(0.0),
             y_status: AnchorValueStatusWire::Valid,
         },
-        horizontal: axis(f.horizontal, f.x_emu),
-        vertical: axis(f.vertical, f.y_emu),
+        horizontal: axis(f.horizontal, f.x_emu, f.align[0]),
+        vertical: axis(f.vertical, f.y_emu, f.align[1]),
         extent: AnchorExtentWire {
             width_pt: Some(f.extent[0] as f64 / 12_700.0),
             height_pt: Some(f.extent[1] as f64 / 12_700.0),
@@ -264,14 +326,12 @@ fn acquisition(f: &ResolvedDrawing, occurrence_id: String) -> AnchorAcquisitionW
             kind: match f.wrapping {
                 1 => AnchorWrapKindWire::TopAndBottom,
                 2 => AnchorWrapKindWire::Square,
-                3 => AnchorWrapKindWire::None,
-                _ => unreachable!(),
+                _ => AnchorWrapKindWire::None,
             },
             authored_kinds: vec![match f.wrapping {
                 1 => "wrapTopAndBottom",
                 2 => "wrapSquare",
-                3 => "wrapNone",
-                _ => unreachable!(),
+                _ => "wrapNone",
             }
             .into()],
             side: (f.wrapping == 2).then(|| f.side.into()),
@@ -293,58 +353,180 @@ fn acquisition(f: &ResolvedDrawing, occurrence_id: String) -> AnchorAcquisitionW
     }
 }
 
-fn image_payload(image: &ImageRun, host_occurrence_id: &String) -> Result<usize, String> {
-    let mut total = std::mem::size_of::<ImageRun>();
-    let mut add = |bytes: usize| -> Result<(), String> {
-        total = total.checked_add(bytes).ok_or("OUTPUT_TOO_LARGE")?;
+/// Checked sum of retained heap payload plus a fixed struct size.
+struct Payload(usize);
+
+impl Payload {
+    fn add(&mut self, bytes: usize) -> Result<(), String> {
+        self.0 = self.0.checked_add(bytes).ok_or("OUTPUT_TOO_LARGE")?;
         Ok(())
-    };
-    for value in [
+    }
+    fn strings<'s>(
+        &mut self,
+        values: impl IntoIterator<Item = Option<&'s String>>,
+    ) -> Result<(), String> {
+        for value in values.into_iter().flatten() {
+            self.add(value.capacity())?;
+        }
+        Ok(())
+    }
+    fn acquisition(&mut self, facts: &AnchorAcquisitionWire) -> Result<(), String> {
+        self.add(facts.occurrence_id.capacity())?;
+        fn align(axis: &AnchorAxisWire) -> Option<&String> {
+            match &axis.choice {
+                AnchorAxisChoiceWire::Align { value } => Some(value),
+                _ => None,
+            }
+        }
+        self.strings([
+            facts.horizontal.relative_from.as_ref(),
+            facts.vertical.relative_from.as_ref(),
+            align(&facts.horizontal),
+            align(&facts.vertical),
+            facts.wrap.side.as_ref(),
+        ])?;
+        self.add(
+            facts
+                .wrap
+                .authored_kinds
+                .capacity()
+                .checked_mul(std::mem::size_of::<String>())
+                .ok_or("OUTPUT_TOO_LARGE")?,
+        )?;
+        self.strings(facts.wrap.authored_kinds.iter().map(Some))
+    }
+}
+
+fn image_payload(image: &ImageRun, host_occurrence_id: &String) -> Result<usize, String> {
+    let mut total = Payload(std::mem::size_of::<ImageRun>());
+    total.strings([
         Some(&image.image_path),
         Some(&image.mime_type),
         image.wrap_mode.as_ref(),
         image.wrap_side.as_ref(),
+        image.anchor_x_align.as_ref(),
+        image.anchor_y_align.as_ref(),
         image.anchor_x_relative_from.as_ref(),
         image.anchor_y_relative_from.as_ref(),
         Some(host_occurrence_id),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        add(value.capacity())?;
-    }
-    let facts = image
-        .anchor_acquisition
-        .as_ref()
-        .expect("floating acquisition");
-    add(facts.occurrence_id.capacity())?;
-    for value in [
-        facts.horizontal.relative_from.as_ref(),
-        facts.vertical.relative_from.as_ref(),
-        facts.wrap.side.as_ref(),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        add(value.capacity())?;
-    }
-    add(facts
-        .wrap
-        .authored_kinds
-        .capacity()
-        .checked_mul(std::mem::size_of::<String>())
-        .ok_or("OUTPUT_TOO_LARGE")?)?;
-    for value in &facts.wrap.authored_kinds {
-        add(value.capacity())?;
-    }
-    Ok(total)
+    ])?;
+    total.acquisition(
+        image
+            .anchor_acquisition
+            .as_ref()
+            .expect("floating acquisition"),
+    )?;
+    Ok(total.0)
 }
 
+/// Project resolved drawing-shape facts onto the DOCX shape model: the same
+/// anchor/wrap facts as pictures, an ECMA-376 preset outline, solid paint and
+/// text box margins (ECMA-376 20.1.9.18, 20.1.8.54, 20.1.2.2.24 and
+/// 20.4.2.3; bodyPr lIns/tIns/rIns/bIns and spAutoFit, 21.1.2.1.1-2).
+fn direct_shape(
+    facts: &ResolvedDrawing,
+    shape: &shape::Facts,
+    remaining_bytes: &mut usize,
+) -> Result<DirectFloatingShape, String> {
+    let occurrence_id = format!("legacy-doc-float-{}", facts.occurrence);
+    let acquisition = acquisition(facts, occurrence_id.clone());
+    let pt = |emu: u32| f64::from(emu) / 12_700.0;
+    let line = shape.line.as_ref();
+    let end = |end: Option<crate::officeart::stroke::LineEnd<'static>>| {
+        end.map(|end| LineEnd {
+            r#type: end.kind.into(),
+            w: end.width.into(),
+            len: end.length.into(),
+        })
+    };
+    let text = shape.text.as_ref();
+    let run = ShapeRun {
+        inline: false,
+        width_pt: facts.extent[0] as f64 / 12_700.0,
+        height_pt: facts.extent[1] as f64 / 12_700.0,
+        anchor_x_pt: facts.x_emu as f64 / 12_700.0,
+        anchor_y_pt: facts.y_emu as f64 / 12_700.0,
+        anchor_x_from_margin: matches!(facts.horizontal, "margin" | "column"),
+        anchor_y_from_para: facts.vertical == "paragraph",
+        anchor_x_align: facts.align[0].map(str::to_owned),
+        anchor_y_align: facts.align[1].map(str::to_owned),
+        anchor_x_relative_from: Some(facts.horizontal.into()),
+        anchor_y_relative_from: Some(facts.vertical.into()),
+        behind_doc: facts.behind,
+        z_order: facts.z_order,
+        preset_geometry: Some(shape.preset.into()),
+        fill: shape.fill.clone().map(|color| ShapeFill::Solid { color }),
+        stroke: line.map(|line| line.color.clone()),
+        stroke_width: line.map_or(0.0, |line| pt(line.width_emu)),
+        stroke_dash: line.and_then(|line| line.dash).map(str::to_owned),
+        stroke_cap: line.map(|line| line.cap.to_owned()),
+        stroke_join: line.map(|line| line.join.to_owned()),
+        stroke_miter_limit: line.and_then(|line| line.miter),
+        head_end: line.and_then(|line| end(line.ends[0])),
+        tail_end: line.and_then(|line| end(line.ends[1])),
+        flip_h: facts.flip[0],
+        flip_v: facts.flip[1],
+        text_autofit: text.filter(|text| text.fit_shape).map(|_| "sp".to_owned()),
+        text_inset_l: text.map_or(0.0, |text| pt(text.insets[0])),
+        text_inset_t: text.map_or(0.0, |text| pt(text.insets[1])),
+        text_inset_r: text.map_or(0.0, |text| pt(text.insets[2])),
+        text_inset_b: text.map_or(0.0, |text| pt(text.insets[3])),
+        wrap_mode: Some(wrap_mode(facts.wrapping).into()),
+        dist_top: pt(facts.distances[1]),
+        dist_bottom: pt(facts.distances[3]),
+        dist_left: pt(facts.distances[0]),
+        dist_right: pt(facts.distances[2]),
+        wrap_side: (facts.wrapping == 2).then(|| facts.side.into()),
+        anchor_acquisition: Some(acquisition),
+        ..ShapeRun::default()
+    };
+    let mut total = Payload(std::mem::size_of::<ShapeRun>());
+    let ends = |end: &Option<LineEnd>| {
+        end.as_ref().map_or(0, |end| {
+            end.r#type.capacity() + end.w.capacity() + end.len.capacity()
+        })
+    };
+    total.add(ends(&run.head_end) + ends(&run.tail_end))?;
+    total.strings([
+        run.anchor_x_align.as_ref(),
+        run.anchor_y_align.as_ref(),
+        run.anchor_x_relative_from.as_ref(),
+        run.anchor_y_relative_from.as_ref(),
+        run.preset_geometry.as_ref(),
+        run.fill.as_ref().map(|fill| match fill {
+            ShapeFill::Solid { color } => color,
+            _ => unreachable!("solid DOC shape fill"),
+        }),
+        run.stroke.as_ref(),
+        run.stroke_dash.as_ref(),
+        run.stroke_cap.as_ref(),
+        run.stroke_join.as_ref(),
+        run.text_autofit.as_ref(),
+        run.wrap_mode.as_ref(),
+        run.wrap_side.as_ref(),
+        Some(&occurrence_id),
+    ])?;
+    total.acquisition(run.anchor_acquisition.as_ref().expect("shape acquisition"))?;
+    *remaining_bytes = remaining_bytes
+        .checked_sub(total.0)
+        .ok_or("OUTPUT_TOO_LARGE")?;
+    Ok(DirectFloatingShape {
+        shape: run,
+        occurrence_id,
+        text: text.map(|text| text.index),
+        spid: facts.shape_id,
+    })
+}
+
+/// The passive BLIP reader admits PNG/JPEG rasters and validated EMF/WMF
+/// metafiles (MS-ODRAW 2.2.24-25/31). They use the same extension-to-MIME
+/// mapping as DOCX media parts (`image/emf`, `image/wmf`), so the shared
+/// content-sniffing metafile players render them; no DOC-specific paint path.
 fn mime(extension: &str) -> Result<&'static str, String> {
     match extension {
-        "png" | "jpg" => Ok(ooxml_common::blip::mime_from_ext(extension)),
+        "png" | "jpg" | "emf" | "wmf" => Ok(ooxml_common::blip::mime_from_ext(extension)),
         _ => Err(unsupported(
-            "direct DOC model supports only PNG/JPEG floating pictures",
+            "direct DOC model supports only PNG/JPEG/EMF/WMF floating pictures",
         )),
     }
 }
@@ -357,10 +539,14 @@ mod tests {
 
     fn selected_store() -> Store<'static> {
         Store {
-            anchors: Vec::new(),
-            shapes: BTreeMap::new(),
+            parts: Default::default(),
             entries: Vec::new(),
             word: &[],
+            table: &[],
+            clx: &[],
+            group_read: false,
+            header_container: None,
+            textboxes: [None, None],
             images: BTreeMap::from([(
                 7,
                 Some(Image {

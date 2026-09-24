@@ -74,6 +74,9 @@ pub(super) fn build(
     {
         return Err(unsupported("Word story structure budget exceeded"));
     }
+    // Header drawings and textbox stories are resolved only by this model;
+    // malformed tables fail closed before any output is retained.
+    facts.floating.load_direct_parts()?;
     let mut body = Vec::new();
     let mut header_resolver = headers::Resolver::new(facts.headers.as_ref());
     let mut final_headers = None;
@@ -116,7 +119,7 @@ pub(super) fn build(
             &mut facts.formatting,
             &mut numbering,
             &mut facts.pictures,
-            Some(&mut facts.floating),
+            Some((&mut facts.floating, super::floating::Part::Main)),
             &mut budget,
             &mut body,
             ending.as_ref().map(|ending| ending.kind.as_str()),
@@ -133,6 +136,7 @@ pub(super) fn build(
             section_index,
             &mut facts.formatting,
             &mut facts.pictures,
+            &mut facts.floating,
             &mut budget,
             &mut table_sequence,
         )?;
@@ -265,6 +269,7 @@ fn direct_picture_references<'a>(
 
     fn paragraph<'a>(
         paragraph: &'a docx_model::DocParagraph,
+        pending: &mut Vec<RetainedBlock<'a>>,
         references: &mut Vec<&'a str>,
         budget: &mut ModelBudget,
     ) -> Result<(), String> {
@@ -274,11 +279,29 @@ fn direct_picture_references<'a>(
             }
         }
         for run in &paragraph.runs {
-            if let DocRun::Image(image) = run {
-                push_key(&image.image_path, references, budget)?;
-                if let Some(key) = &image.svg_image_path {
-                    push_key(key, references, budget)?;
+            match run {
+                DocRun::Image(image) => {
+                    push_key(&image.image_path, references, budget)?;
+                    if let Some(key) = &image.svg_image_path {
+                        push_key(key, references, budget)?;
+                    }
                 }
+                // Textbox stories can hold inline pictures.
+                DocRun::Shape(shape) => {
+                    for block in &shape.text_box_content {
+                        match block {
+                            docx_model::TextBoxBlockWire::Body(block) => {
+                                budget.push(pending, RetainedBlock::Body(block))?
+                            }
+                            docx_model::TextBoxBlockWire::Unsupported { .. } => {
+                                return Err(unsupported(
+                                    "unexpected unsupported direct DOC textbox block",
+                                ))
+                            }
+                        }
+                    }
+                }
+                _ => {}
             }
         }
         Ok(())
@@ -311,7 +334,7 @@ fn direct_picture_references<'a>(
         match block {
             RetainedBlock::Body(BodyElement::Paragraph(value))
             | RetainedBlock::Cell(CellElement::Paragraph(value)) => {
-                paragraph(value, &mut references, budget)?
+                paragraph(value, &mut pending, &mut references, budget)?
             }
             RetainedBlock::Body(BodyElement::Table(value))
             | RetainedBlock::Cell(CellElement::Table(value)) => table(value, &mut pending, budget)?,
@@ -874,6 +897,226 @@ mod tests {
         word[0x22e..0x232].copy_from_slice(&(art.len() as u32).to_le_bytes());
         table.extend(art);
         build_cfb(&[("WordDocument", word), ("0Table", table)])
+    }
+
+    /// A textbox (msosptTextBox) or rectangle anchored in the main or header
+    /// document. The textbox story follows the header story; its FTXBXS and
+    /// Tbkd tables name the shape (MS-DOC 2.3.6-2.3.7, 2.9.106, 2.9.312).
+    fn drawing_shape_source(textbox: Option<&str>, header: bool) -> Vec<u8> {
+        let main = if header { "B\r" } else { "B\u{8}\r" };
+        let main_units = main.encode_utf16().count();
+        let textbox = textbox.unwrap_or("");
+        let slots = [None, Some("\u{8}\r"), None, None, None, None];
+        let bytes = source_with_typography(
+            &format!("{main}{textbox}"),
+            &[(main_units, 2, 12_240, 15_840, 1, 720)],
+            None,
+            None,
+            None,
+            header.then_some(&slots[..]),
+        );
+        let bytes = passive_special_source(&bytes);
+        let cfb = CompoundFile::open(&bytes).unwrap();
+        let mut word = cfb.stream("WordDocument").unwrap();
+        let mut table = cfb.stream("0Table").unwrap();
+        // The builder placed the textbox text after the main story; move it
+        // behind the (optional) header story by swapping the story lengths.
+        let textbox_units = textbox.encode_utf16().count() as u32;
+        if header {
+            assert_eq!(textbox_units, 0);
+        }
+        word[0x4c..0x50].copy_from_slice(&(main_units as u32).to_le_bytes());
+        word[0x64..0x68].copy_from_slice(&textbox_units.to_le_bytes());
+
+        // SPA at the anchor character: page/paragraph origin, no wrapping.
+        // Both stories place the anchor character at CP 1 of their own
+        // document; the PLC's final CP is its story length.
+        let anchor_cp = 1u32;
+        let anchor_units = if header { 5 } else { main_units as u32 };
+        let flags = (1u16 << 1) | (2 << 3) | (3 << 5);
+        let anchors = [
+            anchor_cp.to_le_bytes().as_slice(),
+            &anchor_units.to_le_bytes(),
+            &2050u32.to_le_bytes(),
+            &100i32.to_le_bytes(),
+            &200i32.to_le_bytes(),
+            &2100i32.to_le_bytes(),
+            &1200i32.to_le_bytes(),
+            &flags.to_le_bytes(),
+            &[0; 4],
+        ]
+        .concat();
+        append_table_part(
+            &mut word,
+            &mut table,
+            if header { 0x1e2 } else { 0x1da },
+            &anchors,
+        );
+
+        let mut properties = vec![
+            (0x181u16, 0x00ff_0000u32),
+            (0x1c0, 0x0000_00ff),
+            (0x1cb, 12_700),
+        ];
+        if !textbox.is_empty() {
+            properties.extend([(0x80, 0x10000), (0x81, 0), (0xbf, 0x20002)]);
+        }
+        let mut options = Vec::new();
+        for (key, value) in &properties {
+            options.extend(key.to_le_bytes());
+            options.extend(value.to_le_bytes());
+        }
+        let kind: u16 = if textbox.is_empty() { 1 } else { 202 };
+        let shape = picture_record(
+            0xf004,
+            15,
+            &[
+                picture_record(
+                    0xf00a,
+                    (kind << 4) | 2,
+                    &[2050u32.to_le_bytes(), 0xa00u32.to_le_bytes()].concat(),
+                ),
+                picture_record(0xf00b, ((properties.len() as u16) << 4) | 3, &options),
+                picture_record(0xf010, 0, &0u32.to_le_bytes()),
+            ]
+            .concat(),
+        );
+        let art = [
+            picture_record(0xf000, 15, &[]),
+            vec![u8::from(header)],
+            picture_record(0xf002, 15, &picture_record(0xf003, 15, &shape)),
+        ]
+        .concat();
+        append_table_part(&mut word, &mut table, 0x22a, &art);
+
+        if !textbox.is_empty() {
+            // FTXBXS: the textbox and the trailing reusable spare structure.
+            let mut ftxbxs = [0u32, textbox_units, textbox_units + 1]
+                .iter()
+                .flat_map(|cp| cp.to_le_bytes())
+                .collect::<Vec<_>>();
+            let mut actual = vec![0; 22];
+            actual[14..18].copy_from_slice(&2050u32.to_le_bytes());
+            let mut spare = vec![0; 22];
+            spare[8] = 1;
+            ftxbxs.extend(actual);
+            ftxbxs.extend(spare);
+            append_table_part(&mut word, &mut table, 0x25a, &ftxbxs);
+            let mut tbkd = [0u32, textbox_units, textbox_units + 2]
+                .iter()
+                .flat_map(|cp| cp.to_le_bytes())
+                .collect::<Vec<_>>();
+            tbkd.extend([0, 0, 0, 0, 0, 0, 0xff, 0xff, 0, 0, 0, 0]);
+            append_table_part(&mut word, &mut table, 0x2f2, &tbkd);
+        }
+        build_cfb(&[("WordDocument", word), ("0Table", table)])
+    }
+
+    #[test]
+    fn textbox_shape_projects_paint_margins_and_its_story() {
+        let bytes = drawing_shape_source(Some("Inside\rbox\r"), false);
+        let result =
+            super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024).unwrap();
+        let BodyElement::Paragraph(paragraph) = &result.document.body[0] else {
+            panic!("body paragraph")
+        };
+        let [DocRun::Text(_), DocRun::AnchorHost(host), DocRun::Shape(shape)] =
+            paragraph.runs.as_slice()
+        else {
+            panic!("text, anchor host, shape: {:?}", paragraph.runs)
+        };
+        let acquisition = shape.anchor_acquisition.as_ref().unwrap();
+        assert_eq!(
+            host.anchor_occurrence_id.as_deref(),
+            Some(acquisition.occurrence_id.as_str())
+        );
+        assert_eq!(shape.preset_geometry.as_deref(), Some("rect"));
+        assert_eq!((shape.width_pt, shape.height_pt), (100.0, 50.0));
+        assert_eq!((shape.anchor_x_pt, shape.anchor_y_pt), (5.0, 10.0));
+        assert_eq!(shape.anchor_x_relative_from.as_deref(), Some("page"));
+        assert_eq!(shape.anchor_y_relative_from.as_deref(), Some("paragraph"));
+        assert!(shape.anchor_y_from_para && !shape.anchor_x_from_margin);
+        assert_eq!(shape.wrap_mode.as_deref(), Some("none"));
+        assert!(matches!(
+            &shape.fill,
+            Some(docx_model::ShapeFill::Solid { color }) if color == "0000FF"
+        ));
+        assert_eq!(shape.stroke.as_deref(), Some("FF0000"));
+        assert_eq!(shape.stroke_width, 1.0);
+        assert_eq!(
+            (
+                shape.text_inset_l,
+                shape.text_inset_t,
+                shape.text_inset_r,
+                shape.text_inset_b
+            ),
+            (0.0, 3.6, 7.2, 3.6)
+        );
+        assert_eq!(shape.text_autofit.as_deref(), Some("sp"));
+        let texts: Vec<String> = shape
+            .text_box_content
+            .iter()
+            .map(|block| match block {
+                docx_model::TextBoxBlockWire::Body(BodyElement::Paragraph(paragraph)) => paragraph
+                    .runs
+                    .iter()
+                    .filter_map(|run| match run {
+                        DocRun::Text(text) => Some(text.text.as_str()),
+                        _ => None,
+                    })
+                    .collect(),
+                other => panic!("unexpected textbox block {other:?}"),
+            })
+            .collect();
+        assert_eq!(texts, ["Inside", "box"]);
+        assert!(result.resources.is_empty());
+    }
+
+    #[test]
+    fn header_shapes_resolve_only_against_header_anchors() {
+        let bytes = drawing_shape_source(None, true);
+        let result =
+            super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024).unwrap();
+        let header = result.document.headers.default.as_ref().unwrap();
+        let BodyElement::Paragraph(paragraph) = &header.body[0] else {
+            panic!("header paragraph")
+        };
+        assert!(matches!(
+            paragraph.runs.as_slice(),
+            [DocRun::AnchorHost(_), DocRun::Shape(shape)]
+                if shape.preset_geometry.as_deref() == Some("rect") && shape.text_box_content.is_empty()
+        ));
+        // The same drawing is not reachable from the main story.
+        let body = drawing_shape_source(None, false);
+        let cfb = CompoundFile::open(&body).unwrap();
+        let word = cfb.stream("WordDocument").unwrap();
+        let table = cfb.stream("0Table").unwrap();
+        let art = u32::from_le_bytes(word[0x22a..0x22e].try_into().unwrap()) as usize;
+        let mut table = table;
+        table[art + 8] = 1; // Relabel the drawing container as the header's.
+        let relabeled = build_cfb(&[("WordDocument", word), ("0Table", table)]);
+        assert!(
+            super::super::direct_model(&CompoundFile::open(&relabeled).unwrap(), 1024 * 1024)
+                .unwrap_err()
+                .contains("omitted drawing content")
+        );
+    }
+
+    #[test]
+    fn foreign_textbox_owner_fails_closed() {
+        let bytes = drawing_shape_source(Some("Inside\r"), false);
+        let cfb = CompoundFile::open(&bytes).unwrap();
+        let word = cfb.stream("WordDocument").unwrap();
+        let mut table = cfb.stream("0Table").unwrap();
+        // Point the FTXBXS at another shape identifier.
+        let ftxbxs = u32::from_le_bytes(word[0x25a..0x25e].try_into().unwrap()) as usize;
+        table[ftxbxs + 12 + 14] = 3;
+        let foreign = build_cfb(&[("WordDocument", word), ("0Table", table)]);
+        assert!(
+            super::super::direct_model(&CompoundFile::open(&foreign).unwrap(), 1024 * 1024)
+                .unwrap_err()
+                .contains("another shape")
+        );
     }
 
     fn passive_special_source(source: &[u8]) -> Vec<u8> {
@@ -1606,7 +1849,7 @@ mod tests {
             1024 * 1024,
         )
         .unwrap_err()
-        .contains("header floating pictures"));
+        .contains("omitted drawing content"));
         let bytes = source(&format!("{}\r", "x".repeat(100)));
         let cfb = CompoundFile::open(&bytes).unwrap();
         assert!(super::super::direct_model(&cfb, 64 * 1024).is_ok());

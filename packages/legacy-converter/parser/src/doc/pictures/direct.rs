@@ -187,11 +187,15 @@ fn key(offset: usize) -> String {
     format!("legacy-doc/image/{offset}")
 }
 
+/// The passive BLIP reader admits PNG/JPEG rasters and validated EMF/WMF
+/// metafiles (MS-ODRAW 2.2.24-25/31). They use the same extension-to-MIME
+/// mapping as DOCX media parts (`image/emf`, `image/wmf`), so the shared
+/// content-sniffing metafile players render them; no DOC-specific paint path.
 fn mime(extension: &str) -> Result<&'static str, String> {
     match extension {
-        "png" | "jpg" => Ok(ooxml_common::blip::mime_from_ext(extension)),
+        "png" | "jpg" | "emf" | "wmf" => Ok(ooxml_common::blip::mime_from_ext(extension)),
         _ => Err(unsupported(
-            "direct DOC model supports only PNG/JPEG inline pictures",
+            "direct DOC model supports only PNG/JPEG/EMF/WMF inline pictures",
         )),
     }
 }

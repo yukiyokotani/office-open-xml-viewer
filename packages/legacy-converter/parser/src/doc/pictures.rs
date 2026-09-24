@@ -502,6 +502,26 @@ mod tests {
         assert_eq!(resources[0].bytes.capacity(), 128);
         assert!(sufficient < 4096);
     }
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn direct_inline_passes_validated_metafiles_with_docx_media_types() {
+        for ((source, blip), mime) in [
+            (crate::officeart::emf_test_blip(), "image/emf"),
+            (crate::officeart::wmf_test_blip(), "image/wmf"),
+        ] {
+            let data = fixture(&[(0x0104, 1)], &[blip]);
+            let mut store = Store::new(&data);
+            let mut budget = usize::MAX;
+            let picture = store.direct_inline(0, &mut budget).unwrap().unwrap();
+            assert_eq!(picture.mime_type, mime);
+            let resources = store
+                .finish_referenced_direct_resources(&[picture.resource_key.as_str()], &mut budget)
+                .unwrap();
+            assert_eq!(resources.len(), 1);
+            assert_eq!(resources[0].mime_type, mime);
+            assert_eq!(resources[0].bytes, source);
+        }
+    }
     #[test]
     fn retains_owned_emf_once_for_repeated_inline_pictures() {
         let (source, blip) = crate::officeart::emf_test_blip();
