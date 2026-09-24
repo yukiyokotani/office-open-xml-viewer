@@ -727,7 +727,10 @@ impl Context<'_> {
                 "horz"
             }
             .to_owned(),
-            auto_fit: "none".to_owned(),
+            // MS-ODRAW fFitShapeToText is DrawingML spAutoFit (ECMA-376
+            // 21.1.2.1.4): the stored anchor is already the fitted size. The
+            // classic binary has no shrink-on-overflow (normAutofit) flag.
+            auto_fit: if p.fit_shape_to_text { "sp" } else { "none" }.to_owned(),
             font_scale: None,
             ln_spc_reduction: None,
             num_col: 1,

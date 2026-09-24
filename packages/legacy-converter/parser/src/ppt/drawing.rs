@@ -543,6 +543,8 @@ struct PropertiesStorage<T> {
     center: bool,
     text_flow: Option<u32>,
     font_direction: Option<u32>,
+    /// MS-ODRAW 2.3.21.15 fFitShapeToText (honored only with its use bit).
+    fit_shape_to_text: bool,
 }
 type Properties<'a> = PropertiesStorage<&'a [u8]>;
 type SpannedProperties = PropertiesStorage<ByteSpan>;
@@ -569,6 +571,7 @@ impl<T> Default for PropertiesStorage<T> {
             center: false,
             text_flow: None,
             font_direction: None,
+            fit_shape_to_text: false,
         }
     }
 }
@@ -702,6 +705,13 @@ impl<T: Default + Clone> PropertiesStorage<T> {
                 self.margins[usize::from(opid - 0x81)] = value;
             }
             0x85 => self.wrap = if value == 2 { "none" } else { "square" },
+            // MS-ODRAW 2.3.21.15 Text Boolean Properties: fFitShapeToText is
+            // bit 1 and fUsefFitShapeToText bit 17; the default is false.
+            0xbf => {
+                if value & (1 << 17) != 0 {
+                    self.fit_shape_to_text = value & (1 << 1) != 0;
+                }
+            }
             0x87 if value <= 5 => {
                 self.anchor = ["t", "ctr", "b"][(value % 3) as usize];
                 self.center = value >= 3;
@@ -2318,6 +2328,24 @@ mod tests {
         assert!(props
             .read(parse_record_at(&bytes, 0, &mut 100).unwrap(), &mut 100)
             .is_err());
+    }
+
+    #[test]
+    fn fit_shape_to_text_requires_its_use_bit() {
+        let fit = |values: &[(u16, u32)]| {
+            let bytes = properties(values);
+            let mut props = Properties::default();
+            props
+                .read(parse_record_at(&bytes, 0, &mut 100).unwrap(), &mut 100)
+                .unwrap();
+            props.fit_shape_to_text
+        };
+        assert!(!fit(&[]));
+        // Office-saved values: use bits 17-18 with and without the fit bit.
+        assert!(fit(&[(0xbf, 0x60002)]));
+        assert!(!fit(&[(0xbf, 0x60000)]));
+        // Without fUsefFitShapeToText the fit bit is ignored.
+        assert!(!fit(&[(0xbf, 0x2)]));
     }
 
     #[test]
