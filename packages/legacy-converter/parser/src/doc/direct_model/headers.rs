@@ -5,8 +5,10 @@
 //! is a real replacement and therefore projects to an empty paragraph.
 
 use super::{fields::StoryFields, story, ModelBudget};
-use crate::doc::{formatting, headers, numbering, pictures, tokenize_with_fields, Fields};
-use docx_model::{HeaderFooter, HeadersFooters};
+use crate::doc::{
+    floating, formatting, headers, numbering, pictures, tokenize_with_fields, Fields,
+};
+use docx_model::{BodyElement, HeaderFooter, HeadersFooters};
 
 pub(super) struct Resolver<'a, 'h> {
     source: Option<&'h headers::Headers<'a>>,
@@ -46,6 +48,7 @@ impl<'a, 'h> Resolver<'a, 'h> {
         section: usize,
         formatting: &mut formatting::Formatting<'a>,
         pictures: &mut pictures::Store<'a>,
+        drawings: &mut floating::Store<'a>,
         budget: &mut ModelBudget,
         table_sequence: &mut usize,
     ) -> Result<(HeadersFooters, HeadersFooters), String> {
@@ -62,7 +65,14 @@ impl<'a, 'h> Resolver<'a, 'h> {
             projected.push(
                 entry
                     .map(|entry| {
-                        self.project_entry(entry, formatting, pictures, budget, table_sequence)
+                        self.project_entry(
+                            entry,
+                            formatting,
+                            pictures,
+                            drawings,
+                            budget,
+                            table_sequence,
+                        )
                     })
                     .transpose()?,
             );
@@ -86,6 +96,7 @@ impl<'a, 'h> Resolver<'a, 'h> {
         entry: &headers::Entry,
         formatting: &mut formatting::Formatting<'a>,
         pictures: &mut pictures::Store<'a>,
+        drawings: &mut floating::Store<'a>,
         budget: &mut ModelBudget,
         table_sequence: &mut usize,
     ) -> Result<HeaderFooter, String> {
@@ -111,12 +122,23 @@ impl<'a, 'h> Resolver<'a, 'h> {
             formatting,
             &mut numbering,
             pictures,
-            None,
+            // Header anchors address the header document (PlcSpaHdr).
+            Some((drawings, floating::Part::Header)),
             budget,
             &mut body,
             None,
             table_sequence,
         )?;
+        if body.iter().any(|element| {
+            matches!(element, BodyElement::Paragraph(paragraph) if paragraph.frame_pr.is_some())
+        }) {
+            // The DOCX renderer positions frames only in the main body flow.
+            formatting.unsupported_paragraph_properties = true;
+        }
+        // Header and footer stories are laid out horizontally.
+        if crate::doc::character::Properties::unrenderable_east_asian_vertical(&body, false) {
+            formatting.unsupported_character_properties = true;
+        }
         Ok(HeaderFooter { body })
     }
 }

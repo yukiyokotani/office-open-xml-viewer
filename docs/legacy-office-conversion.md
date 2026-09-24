@@ -127,6 +127,18 @@ margin or indentation and positive paragraph before/after percentages. Its
 explicit unsupported diagnostics are authoritative; conversion support does
 not imply direct-reader support.
 
+The direct reader shows an embedded OLE object, such as an Excel or Graph
+chart, as the presentation picture the file stores for it: an OLE shape is a
+picture frame whose `pib` names the BLIP to display (MS-ODRAW 2.2.40 and
+2.3.23.5), resolved through the shape's `ExObjRefAtom` to the document's
+external object list (MS-PPT 2.7.7 and 2.10.1). The object storage is never
+read or activated. PowerPoint's own PDF exports show that stored picture
+unchanged for embedded objects drawn as content. Icon or thumbnail aspects,
+linked objects and ActiveX controls, pictures without a supported BLIP,
+picture brightness/contrast/transparent-color/recolor/grayscale/black-and-white
+adjustments, and pattern, texture or non-stretched picture fills are rejected
+instead of being drawn without them.
+
 ## Experimental direct XLS source
 
 Like DOC and PPT, XLS is a per-format opt-in. XLS applications can import
@@ -2252,6 +2264,56 @@ admission gates.
 | TOOL-1 | Office export restoration | Open: `scripts/legacy-office-export.applescript` cannot restore Word/Excel settings when `open` returns no value; it also adopts an unrestored ForceDisable baseline |
 | LEGACY-OOXML | Remove the OOXML-generation path | Open: legacy support is unreleased, so delete the byte converter, its WASM/TS entry points and XML writers instead of deprecating them; direct paths must not depend on them |
 
+### Direct-model table-style admission checkpoint
+
+The direct DOC model now admits table-style selection instead of rejecting
+every table that carries sprmTIstd or sprmTTlp. The table-style profile
+(TAPX/PAPX/CHPX, conditional selection, borders, margins, shading) keeps its
+own per-property gates; the XML conversion path is unchanged. The decisions
+and their evidence are recorded next to the code in
+`doc/table/native_admission.rs`, `doc/table/position.rs`,
+`doc/direct_model/tables.rs` and `doc/direct_model/story/borders.rs` and
+`preferences.rs`.
+
+- sprmTIstd is admitted when every table property authored before it in the
+  row chain is on the MS-DOC 2.6.3 preserved list, is reset by an implemented
+  applier, or is cell geometry that the earlier Word controls (DOC-44,
+  DOC-129, DOC-184, DOC-193) show surviving the selection. Any other earlier
+  table property keeps the row gated.
+- sprmTTlp feeds conditional selection; its itl is historical metadata.
+  sprmTRsid has no presentation semantics.
+- sprmTWidthIndent (direct or inherited from the style) is validated but not
+  projected: TDxaLeft/TDxaGapHalf/TDefTable define the physical origin. In
+  two Word PDF exports of left-to-right documents whose preference differs
+  from that origin, the borders sit at the physical origin; the paired OOXML
+  documents carry the preference as `w:tblInd`. RTL rows are admitted only
+  when the effective preference equals the origin.
+- sprmTWidthBefore/sprmTWidthAfter (direct, or the default style's required
+  zero width-before) are admitted only when ftsNil or equal to the physical
+  leading/trailing grid width that the projection emits.
+- sprmTFCellNoWrap is admitted only for cells with an ftsDxa preferred
+  width, where MS-DOC 2.9.28 says it is ignored.
+- Direct NilBrc borders are projected as explicit no-border edges under a
+  table style, and Nil diagonals as absent diagonals (MS-DOC 2.9.20,
+  2.9.157). Style borders on RTL rows, TC80/Brc80 borders with styles,
+  repeated TIstd border resets and drawn diagonals remain gated.
+- Main-story tables with nondefault position or wrapping properties
+  (MS-DOC 2.6.3, 2.7.13) leave the ordinary flow as floating tables.
+
+Separate release-candidate builds were not compared for this checkpoint.
+The local private census admits ten of 59 DOC inputs (previously four); the
+positioned-table and border-interaction gates no longer fire for any input.
+Admission is not visual fidelity.
+
+| Additional item | Scope | Status |
+| --- | --- | --- |
+| DOC-TBL-1 | Replacement of other pre-TIstd table properties | Open: needs Word controls that author e.g. TVertAlign, TSetBrc80, TMerge or TCellFHideMark before TIstd and compare with the same record after it |
+| DOC-TBL-2 | RTL preferred indent | Open: vary sprmTWidthIndent against TDxaLeft/TDxaGapHalf in right-to-left tables (styled and unstyled) and measure the border position in Word's PDF |
+| DOC-TBL-3 | Width-before/after disagreement | Open: vary sprmTWidthBefore/After against the physical leading/trailing grid slot (fixed and AutoFit) and measure the row edges |
+| DOC-TBL-4 | Positioned-table exceptions | Open: controls for sprmTDyaAbs 0 (inline) and for left/zero X with zero Y and column/margin anchors (the MS-OI29500 2.1.162 counterpart), plus positioned tables in headers, footers and notes |
+| DOC-TBL-5 | Hide-mark, cell text flow, no-wrap | Open: the shared cell model has no hideMark, cell text direction or no-wrap facts; MS-DOC 2.6.3 (all cells empty) and ECMA-376 17.4.21 (per-cell end mark) describe hideMark differently, so Word controls are needed before a model capability is designed |
+| DOC-TBL-6 | Compatibility shading without a table style | Open: current Word's use of sprmTDefTableShd in rows without sprmTIstd, which the specification says style-capable readers ignore |
+
 ### Local direct-render survey
 
 `packages/{docx,pptx,xlsx}/tests/visual/legacy-corpus.spec.ts` render each
@@ -2280,19 +2342,31 @@ be closed before an experimental release.
 
 | Area | Gap | Samples |
 | --- | --- | --- |
-| XLS | BIFF8 embedded charts and chart sheets are not projected into `ChartModel` | 127 of 139 |
+| XLS | ~~BIFF8 embedded charts are not projected into `ChartModel`~~ Projected (89f3db02, f7dcb0fa, 06da6a7a); chart sheets and the items below remain | 127 of 139 |
 | XLS | EMF pictures written by GDI+ (EMF+ comment records, short EMR_EOF and a record count off by one) are rejected by the passive validator. Core rendering also treats EMF+ as out of scope, so shared EMF+ drawing is needed for all formats | 3 |
 | XLS | Chart and picture anchors need the Normal font's digit width. The browser default measures only an installed face, so they are omitted when Office fonts such as Calibri are not installed; shared reference font metrics are needed | all with drawings |
 | XLS | Chart text omits TextPropsStream (its checksum is not implemented), Fbi font autoscaling, the outline Excel draws around inverted negative points, plot-area layout, drop/high-low lines and 3-D walls | most chart samples |
-| XLS | Extended colors (XFExt theme/tint) fall back to palette approximations | about 6 |
+| XLS | ~~Extended colors (XFExt theme/tint) fall back to palette approximations~~ Resolved: tints (b09eae6a) and theme 0-3 in Excel's lt1/dk1/lt2/dk2 order (0adbc794) | about 6 |
 | XLS | Table (ListObject) styles, conditional-format data bars/icons and pivot styling are absent | about 5 |
 | XLS | Formula text is not decompiled from Ptg tokens, so volatile functions are not recalculated as Excel does at export | 2 |
 | XLS | Clip-art pictures, text boxes, strikethrough and one vertical merge are missing | 1 to 3 each |
 | PPT | Only seven MS-ODRAW shape types map to presets; other autoshapes render as unfilled rectangles | several |
-| PPT | Native/OLE charts are missing | 3 |
-| PPT | Rotation by multiples of 90 degrees and combined flips use the wrong bounds or order | 1 |
-| PPT | Slide gradient backgrounds, bullets, letter spacing and autofit are missing | several |
+| PPT | ~~Native/OLE charts are missing~~ Resolved: embedded OLE objects show their stored presentation picture (bfc835d3) | 3 |
+| PPT | ~~Rotation by multiples of 90 degrees and combined flips use the wrong bounds or order~~ Resolved from the 120-case PowerPoint control (aa9dc5c1) | 1 |
+| PPT | ~~Slide gradient backgrounds~~ linear/scaled/two-colour/translucent shades resolved (95b74d19); path (5, 6) and title (8) shades now fail closed. Bullets, letter spacing and autofit are missing | several |
+| PPT | ~~Gradients on rotated shapes (or inside rotated/flipped groups) are replaced by the solid fill colour~~ Resolved (ef41f03a) | several |
+| PPT | Custom geometry with per-path fill/stroke flags is rejected; the PPTX model has no per-path `fill`/`stroke` (ECMA-376 §20.1.9.15), a generic PPTX gap | 1 |
+| PPT | Unmapped shape types without text are dropped silently and with text lose their fill; must fail closed once the preset mapping lands | several |
+| PPT | Picture adjustments (washout, grayscale, black-and-white, transparent color), pattern/texture fills, and OLE icons, links and controls are rejected | several |
 | PPT | Implicit paragraph margin/indent and percentage spacing are rejected | 12 of 34 load failures |
-| PPT | A spurious striped artifact is drawn near a slide edge | 1 |
 | DOC | 55 of 59 samples are rejected (formatting, notes, fields, positioned tables, drawings, header pictures, non-PNG/JPEG images, list ancestry, FIB version, language ID) | 55 |
 | DOC | Picture washout/brightness and space-before after a page break differ from Word | 2 |
+
+PowerPoint 2007+ also stores a `metroBlob` (MS-ODRAW 2.3.4.41, an OPC
+package with the shape's DrawingML) on most shapes. The specification says it
+SHOULD be ignored, and a PowerPoint 16 control agrees for the case that
+matters: with a shape's binary adjust and fill edited but its metroBlob kept,
+PowerPoint's PDF follows the binary, identically to a copy whose metroBlob was
+removed. The direct PPT path therefore renders the binary properties only.
+metroBlob contents are used solely as analysis evidence (binary-to-DrawingML
+pairs), never for rendering.

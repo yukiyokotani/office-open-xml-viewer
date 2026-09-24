@@ -53,6 +53,55 @@ pub struct Properties {
     lang_default_lid: Option<u16>,
     lang_east_asia_lid: Option<u16>,
     pub picture: Picture,
+    /// Properties projected only by the direct model (see `DirectOnly`).
+    direct_only: DirectOnly,
+    /// MS-DOC 2.6.1 sprmCSymbol / 2.9.47 CSymbolOperand (ftc, xchar).
+    /// Both sprmCPlain and sprmCIstd preserve it.
+    symbol: Option<(u16, u16)>,
+}
+
+/// Character properties whose MS-DOC semantics map onto the direct DOCX
+/// model but which the legacy WordprocessingML adapter never serializes.
+/// `None` is "not applied", so sparse style patches overlay only what they
+/// set, and CPlain/CIstd reset them (neither preserved-property list in
+/// MS-DOC 2.6.1 names them).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct DirectOnly {
+    /// sprmCShd/sprmCShd80 projected fill.
+    #[cfg(feature = "direct-doc")]
+    shading: Option<super::paragraph::ShadingFill>,
+    /// sprmCBrc (modern, 8 bytes) / sprmCBrc80 (4 bytes), validated raw.
+    border: Option<(bool, [u8; 8])>,
+    /// sprmCFitText (dxaFitText twips, FitTextID).
+    fit_text: Option<(i32, i32)>,
+    /// sprmCFELayout UFEL fTNY / fTNYCompress (horizontal in vertical).
+    east_asian: Option<(bool, bool)>,
+}
+
+impl DirectOnly {
+    fn any(&self) -> bool {
+        #[cfg(feature = "direct-doc")]
+        if self.shading.is_some() {
+            return true;
+        }
+        self.border.is_some() || self.fit_text.is_some() || self.east_asian.is_some()
+    }
+
+    fn overlay(&mut self, patch: &Self) {
+        #[cfg(feature = "direct-doc")]
+        if patch.shading.is_some() {
+            self.shading = patch.shading.clone();
+        }
+        if patch.border.is_some() {
+            self.border = patch.border;
+        }
+        if patch.fit_text.is_some() {
+            self.fit_text = patch.fit_text;
+        }
+        if patch.east_asian.is_some() {
+            self.east_asian = patch.east_asian;
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -126,6 +175,8 @@ impl Default for Properties {
             lang_default_lid: None,
             lang_east_asia_lid: None,
             picture: Picture::default(),
+            direct_only: DirectOnly::default(),
+            symbol: None,
         }
     }
 }
@@ -145,6 +196,8 @@ impl Properties {
             lang_default_lid: None,
             lang_east_asia_lid: None,
             picture: Picture::default(),
+            direct_only: DirectOnly::default(),
+            symbol: None,
         }
     }
 
@@ -180,8 +233,18 @@ impl Properties {
                 *current = added;
             }
         }
+        self.direct_only.overlay(&patch.direct_only);
+        if patch.symbol.is_some() {
+            self.symbol = patch.symbol;
+        }
         // Object/special flags are not visual run formatting and must not
         // turn numbering text into a picture or an executable object.
+    }
+
+    /// True when an accepted property is projected only by the direct model;
+    /// the WordprocessingML adapter keeps reporting it as omitted.
+    pub(super) fn has_direct_only_properties(&self) -> bool {
+        self.direct_only.any() || self.symbol.is_some()
     }
 
     pub fn reset_to(&mut self, paragraph: &Self, preserve_object: bool) {
@@ -191,6 +254,7 @@ impl Properties {
         let mut picture = self.picture;
         let font_hint = self.font_hint;
         let font_hint_present = self.font_hint_present;
+        let symbol = self.symbol;
         if !preserve_object {
             picture.object = paragraph.picture.object;
         }
@@ -204,6 +268,7 @@ impl Properties {
         // sprmCIdctHint operand unaffected, including 0xFF (no guidance).
         self.font_hint = font_hint;
         self.font_hint_present = font_hint_present;
+        self.symbol = symbol;
         for (key, value) in preserved {
             if let Some(value) = value {
                 self.values.insert(key, value);
@@ -320,6 +385,147 @@ impl Properties {
                     return Err(unsupported("invalid Word character revision session ID"));
                 }
                 let _ = u32_at(operand, 0)?;
+                return Ok(true);
+            }
+            0x6a09 => {
+                // MS-DOC 2.6.1 sprmCSymbol / 2.9.47: font index and the
+                // Unicode code of the symbol in that font. The font index is
+                // validated against the font table at projection.
+                if operand.len() != 4 {
+                    return Err(unsupported("invalid Word symbol operand"));
+                }
+                self.symbol = Some((u16_at(operand, 0)?, u16_at(operand, 2)?));
+                return Ok(true);
+            }
+            0x6887 => {
+                // MS-DOC 2.6.1 sprmCPbiIBullet: a non-negative CP in the Bullet
+                // Pictures document. It only locates the picture used when
+                // sprmCPbiGrf enables a picture bullet (handled below).
+                if operand.len() != 4 || (u32_at(operand, 0)? as i32) < 0 {
+                    return Err(unsupported("invalid Word picture bullet position"));
+                }
+                return Ok(true);
+            }
+            0x4888 => {
+                // MS-DOC 2.9.176 PbiGrfOperand: fPicBullet (bit 0) states
+                // whether the bullet is a picture. A clear bit leaves the text
+                // bullet in place, so only an enabled picture bullet, whose
+                // image acquisition is not implemented, stays unsupported.
+                if operand.len() != 2 {
+                    return Err(unsupported("invalid Word picture bullet flags"));
+                }
+                return Ok(operand[0] & 1 == 0);
+            }
+            0x0811 => {
+                // MS-DOC 2.6.1 sprmCFWebHidden (ToggleOperand): text hidden
+                // only in Web Layout view. The direct model is the print/page
+                // layout, where the text stays visible, so the validated
+                // toggle has no effect. (CPlain/CIstd preserve it, which is
+                // moot for a property that is not retained.)
+                if operand.len() != 1 || !matches!(operand[0], 0 | 1 | 0x80 | 0x81) {
+                    return Err(unsupported("invalid Word web-hidden toggle"));
+                }
+                return Ok(true);
+            }
+            0xc81a => {
+                // MS-DOC 2.6.1 sprmCFMathPr / 2.9.153 MathPrOperand: cb = 2,
+                // jcMath is a DOPMTH mthbpjc value (1..=4). It justifies Office
+                // Math equations only; MS-DOC stores no Office Math zones in
+                // the text stream (equations are ordinary embedded objects),
+                // and note <145> states Word 2007 and later ignore it in
+                // compatibility mode while Word 97-2003 never process it.
+                if operand.len() != 3 || operand[0] != 2 || !(1..=4).contains(&(operand[1] & 7)) {
+                    return Err(unsupported("invalid Word math justification"));
+                }
+                return Ok(true);
+            }
+            0xca71 | 0x4866 => {
+                // MS-DOC 2.6.1 sprmCShd (SHDOperand) / sprmCShd80 (Shd80).
+                #[cfg(feature = "direct-doc")]
+                {
+                    return Ok(
+                        match super::paragraph::shading_fill(operand, code == 0xca71)? {
+                            Some(fill) => {
+                                self.direct_only.shading = Some(fill);
+                                true
+                            }
+                            // Valid but a two-color pattern: keep it unsupported.
+                            None => false,
+                        },
+                    );
+                }
+                #[cfg(not(feature = "direct-doc"))]
+                return Ok(false);
+            }
+            0xca72 | 0x6865 => {
+                // MS-DOC 2.6.1 sprmCBrc (BrcOperand, cb = 8) and sprmCBrc80
+                // (Brc80): one border on all four sides of the text.
+                let (old, bytes) = if code == 0xca72 {
+                    if operand.len() != 9 || operand[0] != 8 {
+                        return Err(unsupported("invalid Word character border operand"));
+                    }
+                    (false, &operand[1..])
+                } else {
+                    (true, operand)
+                };
+                if old && operand.len() == 4 && matches!(bytes[1], 0x1a | 0x1b) {
+                    return Err(unsupported("invalid Word character Brc80 type"));
+                }
+                super::border::Border::read(bytes, old)?;
+                let size = bytes.len();
+                if u32_at(bytes, size - 4)? != u32::MAX {
+                    // Brc80/Brc: brcType is byte 1 / 5; byte 3 / 6 holds
+                    // dptSpace (5 bits), fShadow (0x20) and fFrame (0x40).
+                    let kind = bytes[if old { 1 } else { 5 }];
+                    let flags = bytes[if old { 3 } else { 6 }];
+                    // The DOCX run-border model has no shadow. fFrame only
+                    // reverses a border's appearance across its width
+                    // (MS-DOC 2.9.16/17), which is invisible for symmetric
+                    // single, double, triple and dash/dot strokes.
+                    if flags & 0x20 != 0
+                        || (flags & 0x40 != 0 && !matches!(kind, 0 | 1 | 3 | 5..=10 | 22))
+                    {
+                        return Ok(false);
+                    }
+                }
+                let mut raw = [0; 8];
+                raw[..bytes.len()].copy_from_slice(bytes);
+                self.direct_only.border = Some((old, raw));
+                return Ok(true);
+            }
+            0xca78 => {
+                // MS-DOC 2.9.68 FarEastLayoutOperand: cb = 6, UFEL, ID.
+                if operand.len() != 7 || operand[0] != 6 {
+                    return Err(unsupported("invalid Word East Asian layout operand"));
+                }
+                let ufel = u16_at(operand, 1)?;
+                let _layout_id = u32_at(operand, 3)?;
+                // MS-DOC 2.9.332 UFEL: fTNY (bit 0) is ECMA-376 17.3.2.10
+                // eastAsianLayout@vert and fTNYCompress (bit 12) is
+                // @vertCompress. Bits that MUST be 0 are ignored as required.
+                // fWarichu (two lines in one) has no renderer projection.
+                if ufel & 2 != 0 {
+                    return Ok(false);
+                }
+                let vertical = ufel & 1 != 0;
+                self.direct_only.east_asian = Some((vertical, vertical && ufel & 0x1000 != 0));
+                return Ok(true);
+            }
+            0xca76 => {
+                // MS-DOC 2.9.31 CFitTextOperand: cb = 8, dxaFitText, FitTextID.
+                if operand.len() != 9 || operand[0] != 8 {
+                    return Err(unsupported("invalid Word fit-text operand"));
+                }
+                let width = u32_at(operand, 1)? as i32;
+                let id = u32_at(operand, 5)? as i32;
+                match width {
+                    // "A value of zero specifies that the Sprm is ignored."
+                    0 => {}
+                    // A negative width requests Word's minimum-width fit,
+                    // which ECMA-376 17.3.2.14 fitText cannot express.
+                    ..=-1 => return Ok(false),
+                    _ => self.direct_only.fit_text = Some((width, id)),
+                }
                 return Ok(true);
             }
             0x2a0c => {
@@ -684,6 +890,42 @@ mod tests {
         value.apply(0x2a0c, &[12], &base).unwrap();
         value.reset_to(&base, true);
         assert!(value.xml(&[]).unwrap().contains("w:val=\"darkMagenta\""));
+    }
+
+    #[test]
+    fn disabled_picture_bullets_have_no_effect_and_enabled_ones_stay_unsupported() {
+        let base = Properties::default();
+        let mut value = base.clone();
+        assert!(value.apply(0x6887, &[0, 0, 0, 0], &base).unwrap());
+        assert!(value.apply(0x4888, &[0, 0], &base).unwrap());
+        assert!(value.apply(0x4888, &[0xfe, 0xff], &base).unwrap());
+        assert_eq!(value, base);
+        assert!(!value.apply(0x4888, &[1, 0], &base).unwrap());
+        assert!(base.clone().apply(0x6887, &[0, 0, 0, 0x80], &base).is_err());
+        assert!(base.clone().apply(0x6887, &[0, 0, 0], &base).is_err());
+        assert!(base.clone().apply(0x4888, &[0], &base).is_err());
+    }
+
+    #[test]
+    fn web_hidden_and_math_justification_are_validated_without_print_effect() {
+        let base = Properties::default();
+        for operand in [0u8, 1, 0x80, 0x81] {
+            let mut value = base.clone();
+            assert!(value.apply(0x0811, &[operand], &base).unwrap());
+            assert_eq!(value, base);
+        }
+        for operand in [vec![2], vec![0x82], vec![], vec![1, 0]] {
+            assert!(base.clone().apply(0x0811, &operand, &base).is_err());
+        }
+        for jc in 1u8..=4 {
+            let mut value = base.clone();
+            assert!(value.apply(0xc81a, &[2, jc | 0xf8, 0xff], &base).unwrap());
+            assert_eq!(value, base);
+            assert!(!value.has_direct_only_properties());
+        }
+        for operand in [vec![2, 0, 0], vec![2, 5, 0], vec![1, 2, 0], vec![2, 2]] {
+            assert!(base.clone().apply(0xc81a, &operand, &base).is_err());
+        }
     }
 
     #[test]

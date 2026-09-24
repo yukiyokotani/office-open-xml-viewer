@@ -70,13 +70,17 @@ impl Extensions {
                     if color_type > 4 {
                         return Err(unsupported("invalid BIFF extended color type"));
                     }
-                    // Resolve owned, untinted theme colors to SML ARGB. Leave
-                    // tint normalization separate; never scale RGB channels.
-                    // Interop limitation: the light/dark order in MS-XLS
-                    // 2.5.49 conflicts with Office-produced XFExt/palette/PDF
-                    // evidence. Keep those four colors' original BIFF fallback
-                    // until varied Office probes establish an approved mapping.
-                    // Do not guess a swap or let unresolved indices inflate ZIPs.
+                    // Resolve owned theme colors to SML ARGB.
+                    // MS-XLS 2.5.49 lists 0..3 as Dark 1, Light 1, Dark 2,
+                    // Light 2, but Excel uses the SpreadsheetML order: 0 = lt1,
+                    // 1 = dk1, 2 = lt2, 3 = dk2. Evidence: Excel writes a
+                    // palette fallback (icvFore) next to every XFExt fill; in
+                    // the local corpus theme 0 always pairs with white/silver
+                    // (icv 9, 22, 55 as tint darkens), 1 with black (icv 8) or
+                    // dark grey (63) under positive tints, 2 with white/silver
+                    // and 3 with dark blue (62) -- 211 fills, no exception.
+                    // Font colours agree: theme 1 (dark text) dominates, as
+                    // theme="1" does in the paired Excel-saved XLSX files.
                     // nTintShade has no stated scale in 2.5.155. Excel writes
                     // its standard tints as n/32767 (26213, 13106, 19660, -8191
                     // and 16383 are 0.8, 0.4, 0.6, -0.25 and 0.5, the dominant
@@ -84,11 +88,15 @@ impl Extensions {
                     // the SpreadsheetML tint algorithm (ECMA-376 §18.8.19)
                     // then applies to the base color.
                     let tint = f64::from(u16_at(value, 2)? as i16) / 32767.0;
-                    if owned && color_type == 3 && (4..=11).contains(&u32_at(value, 4)?) {
+                    if owned && color_type == 3 && u32_at(value, 4)? <= 11 {
                         if theme.is_none() {
                             theme = Some(super::super::theme::Colors::parse(records)?);
                         }
-                        if let Some(argb) = theme.as_ref().unwrap().argb(u32_at(value, 4)?) {
+                        // Theme slots are stored in clrScheme order (dk1, lt1,
+                        // dk2, lt2, accent1..); swap each light/dark pair.
+                        let index = u32_at(value, 4)?;
+                        let slot = if index < 4 { index ^ 1 } else { index };
+                        if let Some(argb) = theme.as_ref().unwrap().argb(slot) {
                             colors.insert(kind, ColorIdentity::Argb(tinted(argb, tint)));
                         }
                     }

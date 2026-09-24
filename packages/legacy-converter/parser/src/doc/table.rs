@@ -12,7 +12,11 @@ pub(in crate::doc) use position::Position;
 #[cfg(feature = "direct-doc")]
 mod geometry;
 #[cfg(feature = "direct-doc")]
+mod native_admission;
+#[cfg(feature = "direct-doc")]
 pub(in crate::doc) use geometry::{NativeGeometry, NativeGeometryApply};
+#[cfg(feature = "direct-doc")]
+pub(in crate::doc) use native_admission::{NativeAdmission, NativeAdmissionApply, PreferredIndent};
 mod width;
 pub(crate) use width::PreferredWidth;
 
@@ -33,7 +37,7 @@ pub(in crate::doc) struct TableShadingPolicy {
 }
 
 impl TableShadingPolicy {
-    fn enabled(self) -> bool {
+    pub(in crate::doc) fn enabled(self) -> bool {
         self.effective_nfib > 0x00d9 && self.interpret_table_styles
     }
 }
@@ -114,6 +118,9 @@ pub struct Cell {
     pub borders: [Option<Border>; 6],
     #[cfg(feature = "direct-doc")]
     pub(in crate::doc) prepared_borders: [Option<PreparedBorder>; 6],
+    /// [MS-DOC] 2.9.28 fNoWrap from sprmTFCellNoWrap (native acquisition).
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) no_wrap: bool,
 }
 
 pub struct Properties<R = Row> {
@@ -172,6 +179,15 @@ pub struct Row {
     #[cfg(feature = "direct-doc")]
     pub(in crate::doc) border_tistd_count: u8,
     pub preferred_width: Option<PreferredWidth>,
+    /// Last sprmTWidthIndent, sprmTWidthBefore and sprmTWidthAfter preference
+    /// (native acquisition only). The outer `None` means not authored; the
+    /// inner `None` of a table-part width is MS-DOC ftsNil.
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) preferred_indent: Option<PreferredIndent>,
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) preferred_before: Option<Option<PreferredWidth>>,
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) preferred_after: Option<Option<PreferredWidth>>,
 }
 
 impl Default for Row {
@@ -205,6 +221,12 @@ impl Default for Row {
             #[cfg(feature = "direct-doc")]
             border_tistd_count: 0,
             preferred_width: None,
+            #[cfg(feature = "direct-doc")]
+            preferred_indent: None,
+            #[cfg(feature = "direct-doc")]
+            preferred_before: None,
+            #[cfg(feature = "direct-doc")]
+            preferred_after: None,
         }
     }
 }
@@ -731,8 +753,9 @@ impl Row {
             0x563a => {
                 // [MS-DOC] 2.6.3 sprmTIstd: each application selects a table
                 // style and resets the previous selection. Retain last-wins
-                // state here. Returning false keeps the existing unsupported
-                // output gate until table TAPX/PAPX/CHPX are projected.
+                // state here. Returning false keeps the XML conversion, which
+                // does not interpret table styles, gated; the direct model
+                // admits the selection through table::NativeAdmission.
                 let table_style = usize::from(u16_at(b, 0)?);
                 // sprmTIstd replaces table properties except for the explicit
                 // preserved list in [MS-DOC] 2.6.3. Prepared direct cell
@@ -753,7 +776,7 @@ impl Row {
             0x740a => {
                 // MS-DOC 2.9.326 TLP: ignore the historical itl and retain
                 // only the live grfatl options. Returning false keeps TTlp
-                // itself behind the existing table-format admission gate.
+                // gated in the XML conversion; see table::NativeAdmission.
                 if b.len() != 4 {
                     return Err(unsupported("invalid Word table style options"));
                 }

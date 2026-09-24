@@ -11,10 +11,11 @@ pub(super) struct PresentationStorage<R, S, B> {
     pub outline_slide_numbers: Vec<Vec<Vec<u32>>>,
     pub first_slide_number: u16,
     pub text_masters: Vec<Option<std::rc::Rc<text_style::Master>>>,
-    pub document_text_axes: Option<text_style::ParagraphAxes>,
+    pub document_text_axes: Option<text_style::DocumentAxes>,
     pub fonts: Vec<String>,
     pub schemes: Vec<Option<scheme::Scheme>>,
     pub image_entries: Vec<R>,
+    pub ole_objects: media::OleCatalog,
     pub backgrounds: Vec<Option<B>>,
     pub object_masters: Vec<std::rc::Rc<[RecordSpan]>>,
     pub size: (u32, u32),
@@ -36,6 +37,7 @@ impl OwnedPresentation {
                     .map(|style| style.map(|span| span.view(document)).transpose())
                     .collect::<Result<_, _>>())
                 .collect::<Result<_, _>>()?,
+            ole_objects: self.ole_objects,
             image_entries: self.image_entries.into_iter()
                 .map(|record| record.view(document)).collect::<Result<_, _>>()?,
             shape_masters: self.shape_masters,
@@ -322,6 +324,7 @@ pub(super) fn resolve_owned(
             .map(|(slide, _)| schemes.background(document, slide, budget))
             .collect::<Result<_, _>>()?,
         image_entries: media::catalog_spans(document, &child_spans, budget)?,
+        ole_objects: media::ole_catalog(document, &child_spans, budget),
         text_masters: slides
             .iter()
             .map(|(slide, _)| schemes.text_master(slide.view(document)?, budget))
@@ -476,20 +479,16 @@ pub(crate) mod tests {
             }
         }
         drop(borrowed);
-        owned.document_text_axes = Some(text_style::ParagraphAxes {
+        let mut axes = [text_style::ParagraphAxes::default(); 5];
+        axes[0] = text_style::ParagraphAxes {
             margin: Some(180),
             indent: Some(0),
-        });
+        };
+        owned.document_text_axes = Some(axes);
         let moved = stream.clone();
         drop(stream);
         let viewed = owned.into_borrowed(&moved).unwrap();
-        assert_eq!(
-            viewed.document_text_axes,
-            Some(text_style::ParagraphAxes {
-                margin: Some(180),
-                indent: Some(0),
-            })
-        );
+        assert_eq!(viewed.document_text_axes, Some(axes));
         assert_eq!(viewed.slides[0].1, ["second"]);
         assert_eq!(viewed.slides[1].1, ["first"]);
         assert!(viewed.outline_styles.iter().all(|styles| styles[0].is_some()));

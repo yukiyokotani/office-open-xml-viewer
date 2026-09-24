@@ -12,16 +12,49 @@ const MAX_MODEL_SHAPES: usize = 100_000;
 // strings. Text and custom-path backing are charged by their own projectors.
 const MODEL_SHAPE_STRINGS_BYTES: usize = 384;
 
+/// Whether a text body takes its unspecified properties from the destination
+/// main master's `TextMasterStyleAtom` of its own `TextHeaderAtom` type.
+///
+/// MS-PPT 2.9.44 states this for placeholder shapes. It is silent for a
+/// non-placeholder shape whose text type is not `Tx_TYPE_OTHER`, although
+/// 2.13.33 names every such type as placeholder text. PowerPoint writes these
+/// bodies when a layout-only placeholder is saved to the binary format (with
+/// no PlaceholderAtom, or one whose position is -1 per 2.7.8). PowerPoint 16
+/// PDF exports of Office-saved decks show these bodies following the master
+/// style of their text type, not the document `Tx_TYPE_OTHER` defaults: a
+/// type-0 body renders at the master title size and face (44 pt Calibri Light,
+/// document default 18 pt Calibri), type-1 bodies render master body bullets
+/// absent from the document level, the master body typeface instead of the
+/// document one, and the master body's background-scheme text color. No
+/// corpus body contradicted the rule. `Tx_TYPE_OTHER` keeps the separately
+/// established document fallback below.
+fn master_typed_text(text_type: Option<u16>, placeholder: bool) -> bool {
+    placeholder || text_type.is_some_and(|kind| kind != 4)
+}
+
 fn document_text_axes(
     text_type: Option<u16>,
     placeholder: bool,
     master_linked: bool,
     outline: bool,
-    axes: Option<text_style::ParagraphAxes>,
-) -> Option<text_style::ParagraphAxes> {
+    axes: Option<text_style::DocumentAxes>,
+) -> Option<text_style::DocumentAxes> {
     (text_type == Some(4) && !placeholder && !master_linked && !outline)
         .then_some(axes)
         .flatten()
+}
+
+/// Pattern and texture fills need tile semantics (the pattern bitmap's
+/// foreground/background colors, the texture's intrinsic tile size) that the
+/// direct model does not derive, and a picture fill with a separate fill
+/// rectangle or view-relative placement has no shape-local stretch. Reject
+/// them rather than leaving the shape or slide unfilled.
+fn unprojected_blip_fill(kind: u32) -> String {
+    unsupported(match kind {
+        1 => "PowerPoint pattern fill is not projected",
+        2 => "PowerPoint texture fill is not projected",
+        _ => "PowerPoint picture fill placement is not projected",
+    })
 }
 
 pub(in crate::ppt) fn slide(
@@ -96,6 +129,11 @@ impl Context<'_> {
                     )?
                     .map(|value| value.to_model(self.model_budget))
                     .transpose()?;
+                if gradient.is_none() && image.is_none() {
+                    if let Some(kind) = background.paint.blip_fill_type() {
+                        return Err(unprojected_blip_fill(kind));
+                    }
+                }
                 gradient.or_else(|| background.paint.background_model(scheme, image))
             }
             None => None,
@@ -174,8 +212,12 @@ impl Context<'_> {
                 nested,
                 self.work_budget,
             )?;
-            if group.omitted() || group.props.hidden || (inherited && group.is_placeholder()) {
+            if group.direct_omitted() || group.props.hidden || (inherited && group.is_placeholder())
+            {
                 return Ok(());
+            }
+            if group.is_ole() {
+                return Err(unsupported("PowerPoint OLE group shape"));
             }
             let transform = direct_transform::group(&group, nested)?;
             let mut next = ancestors.to_vec();
@@ -195,7 +237,8 @@ impl Context<'_> {
                 nested,
                 self.work_budget,
             )?;
-            if shape.omitted() || shape.props.hidden || (inherited && shape.is_placeholder()) {
+            if shape.direct_omitted() || shape.props.hidden || (inherited && shape.is_placeholder())
+            {
                 return Ok(());
             }
             self.shape(shape, inherited, ancestors)?;
@@ -246,7 +289,18 @@ impl Context<'_> {
                 .map(|g| direct_geometry::project(g, self.model_budget))
                 .transpose()?
         };
+        if shape.is_ole() {
+            self.admit_ole_picture(&shape)?;
+        }
+        if shape.kind == 75 && shape.props.picture_linked {
+            return Err(unsupported("linked PowerPoint picture file"));
+        }
         if shape.kind == 75 && shape.props.picture != 0 {
+            self.admit_picture_display(&shape)?;
+            // MS-ODRAW 2.3.23.5: pib names the BLIP displayed by the picture
+            // shape. A BLIP this projector cannot carry (PICT, DIB, TIFF, an
+            // unused store slot or a mislabeled payload) is rejected rather
+            // than leaving an empty frame.
             if self.media.reference(
                 shape.props.picture,
                 self.backing,
@@ -305,6 +359,10 @@ impl Context<'_> {
                     }),
                     inherited,
                 )?;
+            } else {
+                return Err(unsupported(
+                    "PowerPoint picture BLIP is not a supported image",
+                ));
             }
         }
         let text = self.text_body(&shape, inherited)?;
@@ -323,38 +381,42 @@ impl Context<'_> {
             ),
         };
         let image = if allow_fill {
-            paint
-                .foreground_image()
-                .map(|(id, alpha, rotate)| self.image_fill(id, alpha, rotate))
-                .transpose()?
-                .flatten()
+            match paint.foreground_image() {
+                Some((id, alpha, rotate)) => {
+                    self.admit_picture_display(&shape)?;
+                    self.image_fill(id, alpha, rotate)?
+                }
+                None => None,
+            }
         } else {
             None
         };
+        if allow_fill && image.is_none() {
+            if let Some(kind) = paint.blip_fill_type() {
+                return Err(unprojected_blip_fill(kind));
+            }
+        }
         let (fill, stroke) = paint.model_with_custom_geometry(
             self.presentation.schemes[self.index].as_ref(),
             allow_fill,
             allow_line,
             image,
         );
-        let gradient_fill = if shape.props.rotation == 0
-            && ancestors
-                .iter()
-                .all(|group| group.rot == 0.0 && !group.flip_h && !group.flip_v)
-        {
-            paint
-                .project_gradient(
-                    &gradient,
-                    allow_fill,
-                    self.presentation.schemes[self.index].as_ref(),
-                    self.work_budget,
-                    self.model_budget,
-                )?
-                .map(|value| value.to_model(self.model_budget))
-                .transpose()?
-        } else {
-            None
-        };
+        // Rotation and flips (own or inherited from groups) do not change the
+        // projected shade: in every rotated or flipped corpus shape whose
+        // metroBlob shows PowerPoint's own DrawingML (90/180/270 degrees, with
+        // and without flips), `ang` stays 90 - fillAngle and only
+        // fRotateFillWithShape selects rotWithShape.
+        let gradient_fill = paint
+            .project_gradient(
+                &gradient,
+                allow_fill,
+                self.presentation.schemes[self.index].as_ref(),
+                self.work_budget,
+                self.model_budget,
+            )?
+            .map(|value| value.to_model(self.model_budget))
+            .transpose()?;
         let fill = gradient_fill.or(fill);
         self.push(
             SlideElement::Shape(ShapeElement {
@@ -398,12 +460,64 @@ impl Context<'_> {
         )
     }
 
+    /// OLE shapes (fOleShape, MS-ODRAW 2.2.40) show the presentation picture
+    /// the file stores for them: a msosptPictureFrame whose pib names the BLIP
+    /// to display (MS-ODRAW 2.3.23.5), resolved through the shape's
+    /// ExObjRefAtom (MS-PPT 2.7.7) to the document's ExObjListContainer
+    /// (2.10.1). The OLE object itself is never read or activated.
+    ///
+    /// Evidence and limits: PowerPoint's PDF exports of the local corpus show
+    /// the stored picture unchanged for embedded objects with drawAspect
+    /// DVASPECT_CONTENT and exColorFollow ExColor_FollowScheme (Excel.Chart
+    /// PNG pictures). Icon/thumbnail aspects, linked objects (whose picture may
+    /// be refreshed from the link source) and ActiveX controls (drawn live by
+    /// the control) are not covered by that evidence and stay rejected.
+    fn admit_ole_picture(&self, shape: &SpannedShape) -> Result<(), String> {
+        if shape.kind != 75 || shape.props.picture == 0 {
+            return Err(unsupported(
+                "PowerPoint OLE object has no presentation picture",
+            ));
+        }
+        let id = shape
+            .props
+            .ole_ref
+            .ok_or_else(|| unsupported("PowerPoint OLE shape lacks ExObjRefAtom"))?;
+        match self.presentation.ole_objects.get(id)? {
+            // [MS-OSHARED] 2.2.1.2 DVASPECT_CONTENT.
+            media::OleObject::Embedded { draw_aspect: 1 } => Ok(()),
+            media::OleObject::Embedded { .. } => Err(unsupported(
+                "PowerPoint OLE object drawn as icon or thumbnail",
+            )),
+            media::OleObject::Linked => Err(unsupported("linked PowerPoint OLE object")),
+            media::OleObject::Control => Err(unsupported("PowerPoint ActiveX control")),
+        }
+    }
+
+    /// The presentation model has no MS-ODRAW 2.3.23 picture adjustments or
+    /// MS-PPT 2.7.9 metafile recoloring, so a displayed picture that carries
+    /// them is rejected instead of being drawn unadjusted.
+    fn admit_picture_display(&self, shape: &SpannedShape) -> Result<(), String> {
+        if let Some(adjustment) = shape.props.picture_adjustment {
+            return Err(unsupported(format!(
+                "PowerPoint picture {adjustment} adjustment is not projected"
+            )));
+        }
+        if shape.props.recolor {
+            return Err(unsupported(
+                "PowerPoint picture recoloring is not projected",
+            ));
+        }
+        Ok(())
+    }
+
     fn image_fill(&mut self, id: u32, opacity: u32, rotate: bool) -> Result<Option<Fill>, String> {
         if !self
             .media
             .reference(id, self.backing, self.pictures, self.work_budget)?
         {
-            return Ok(None);
+            // MS-ODRAW 2.3.7.6 fillBlip: an unsupported BLIP must not turn a
+            // picture fill into an unfilled shape or missing background.
+            return Err(unsupported("PowerPoint fill BLIP is not a supported image"));
         }
         let (extension, _) = self
             .media
@@ -510,8 +624,7 @@ impl Context<'_> {
             .map(|id| self.presentation.shape_masters.levels(id))
             .transpose()?;
         let levels = linked.or_else(|| {
-            shape
-                .is_placeholder()
+            master_typed_text(text_type, shape.is_placeholder())
                 .then(|| {
                     self.presentation.text_masters[self.index]
                         .as_deref()
@@ -758,6 +871,7 @@ mod tests {
             fonts: Vec::new(),
             schemes: vec![None],
             image_entries: Vec::new(),
+            ole_objects: media::OleCatalog::default(),
             backgrounds: vec![None],
             object_masters: vec![std::rc::Rc::from([])],
             size: (720, 540),
@@ -766,10 +880,12 @@ mod tests {
 
     #[test]
     fn document_type4_origins_are_limited_to_unlinked_freeform_text() {
-        let axes = Some(text_style::ParagraphAxes {
+        let mut levels = [text_style::ParagraphAxes::default(); 5];
+        levels[0] = text_style::ParagraphAxes {
             margin: Some(180),
             indent: Some(90),
-        });
+        };
+        let axes = Some(levels);
         assert_eq!(document_text_axes(Some(4), false, false, false, axes), axes);
         for excluded in [
             (Some(0), false, false, false),
@@ -782,6 +898,22 @@ mod tests {
                 None
             );
         }
+    }
+
+    #[test]
+    fn typed_master_style_follows_text_type_not_only_placeholder_status() {
+        // Placeholders of any type and non-placeholder text of every
+        // placeholder text type use the master style of that type.
+        for kind in [0, 1, 2, 5, 6, 7, 8] {
+            assert!(master_typed_text(Some(kind), false));
+            assert!(master_typed_text(Some(kind), true));
+        }
+        assert!(master_typed_text(Some(4), true));
+        assert!(master_typed_text(None, true));
+        // Tx_TYPE_OTHER freeform text keeps the document-default path, and a
+        // body without a TextHeaderAtom gains no inferred type.
+        assert!(!master_typed_text(Some(4), false));
+        assert!(!master_typed_text(None, false));
     }
 
     #[test]
@@ -1070,5 +1202,298 @@ mod tests {
             vec![1]
         );
         assert_eq!(media.image(1, &document, None).unwrap().unwrap().0, "png");
+    }
+
+    /// ExObjListContainer with one OLE container per (container kind,
+    /// drawAspect, type, exObjId) tuple (MS-PPT 2.10.1/2.10.12).
+    fn ex_obj_list(objects: &[(u16, u32, u32, u32)]) -> Vec<u8> {
+        let containers: Vec<u8> = objects
+            .iter()
+            .flat_map(|&(kind, aspect, object_type, id)| {
+                let atom = [aspect, object_type, id, 14, 2, 0]
+                    .into_iter()
+                    .flat_map(u32::to_le_bytes)
+                    .collect::<Vec<_>>();
+                record(
+                    15,
+                    kind,
+                    &[
+                        record(0, 0x0fcd, &[1, 0, 0, 0, 0, 0, 0, 0]),
+                        record(1, 0x0fc3, &atom),
+                    ]
+                    .concat(),
+                )
+            })
+            .collect();
+        record(
+            15,
+            0x0409,
+            &[record(0, 0x040a, &[9, 0, 0, 0]), containers].concat(),
+        )
+    }
+
+    fn client_data(atoms: &[Vec<u8>]) -> Vec<u8> {
+        record(15, 0xf011, &atoms.concat())
+    }
+
+    /// One local picture-frame shape on a slide, a one-entry image store and
+    /// an optional external object list; returns the projected slide.
+    fn project(
+        kind: u16,
+        flags: u32,
+        children: Vec<Vec<u8>>,
+        blip: Vec<u8>,
+        objects: Option<Vec<u8>>,
+    ) -> Result<Slide, String> {
+        let picture = shape(kind, flags, 0xf010, [0, 0, 100, 100], children);
+        let local = record(
+            15,
+            SLIDE_CONTAINER,
+            &record(15, 1036, &record(15, 0xf002, &picture)),
+        );
+        let blip_offset = local.len();
+        let list_offset = blip_offset + blip.len();
+        let document = [local, blip, objects.clone().unwrap_or_default()].concat();
+        let local_span = record_span_with_end(&document, 0, &mut 20, "slide")
+            .unwrap()
+            .0;
+        let blip_span = record_span_with_end(&document, blip_offset, &mut 20, "blip")
+            .unwrap()
+            .0;
+        let mut p = presentation(local_span);
+        p.image_entries = vec![blip_span];
+        if objects.is_some() {
+            let list = record_span_with_end(&document, list_offset, &mut 20, "list")
+                .unwrap()
+                .0;
+            p.ole_objects = media::ole_catalog(&document, &[list], &mut 1000);
+        }
+        let mut media = media::SpanStore::new(p.image_entries.clone());
+        slide(
+            0,
+            &p,
+            &document,
+            None,
+            &mut media,
+            &mut 1000,
+            &mut 1000,
+            &mut 1_000_000,
+        )
+    }
+
+    const OLE: u32 = 0x200 | 0x10;
+
+    fn ole_ref(id: u32) -> Vec<u8> {
+        client_data(&[record(0, 0x0bc1, &id.to_le_bytes())])
+    }
+
+    #[test]
+    fn embedded_ole_objects_show_their_stored_presentation_picture() {
+        let model = project(
+            75,
+            OLE,
+            vec![properties(&[(0x4104, 1), (0x10b, 1)]), ole_ref(7)],
+            png_blip(),
+            Some(ex_obj_list(&[(0x0fcc, 1, 0, 7)])),
+        )
+        .unwrap();
+        assert_eq!(model.elements.len(), 1);
+        let SlideElement::Picture(picture) = &model.elements[0] else {
+            panic!("OLE presentation picture")
+        };
+        assert_eq!(picture.image_path, "legacy-ppt/image/1");
+        assert_eq!(picture.mime_type, "image/png");
+        assert_eq!((picture.width, picture.height), (158750, 158750));
+    }
+
+    #[test]
+    fn ole_objects_outside_the_evidenced_display_case_are_rejected() {
+        let list = |objects: &[(u16, u32, u32, u32)]| Some(ex_obj_list(objects));
+        for (kind, children, objects, expected) in [
+            // No picture frame BLIP to show.
+            (
+                75,
+                vec![ole_ref(7)],
+                list(&[(0x0fcc, 1, 0, 7)]),
+                "no presentation picture",
+            ),
+            (
+                1,
+                vec![properties(&[(0x4104, 1)]), ole_ref(7)],
+                list(&[(0x0fcc, 1, 0, 7)]),
+                "no presentation picture",
+            ),
+            // Reference resolution (MS-PPT 2.7.7, 2.10.1).
+            (
+                75,
+                vec![properties(&[(0x4104, 1)])],
+                list(&[(0x0fcc, 1, 0, 7)]),
+                "lacks ExObjRefAtom",
+            ),
+            (
+                75,
+                vec![properties(&[(0x4104, 1)]), ole_ref(8)],
+                list(&[(0x0fcc, 1, 0, 7)]),
+                "unresolved",
+            ),
+            (
+                75,
+                vec![properties(&[(0x4104, 1)]), ole_ref(7)],
+                None,
+                "unresolved",
+            ),
+            (
+                75,
+                vec![properties(&[(0x4104, 1)]), ole_ref(7)],
+                list(&[(0x0fcc, 1, 0, 7), (0x0fcc, 1, 0, 7)]),
+                "ambiguous",
+            ),
+            (
+                75,
+                vec![properties(&[(0x4104, 1)]), ole_ref(7)],
+                list(&[(0x0fcc, 1, 1, 7)]),
+                "inconsistent",
+            ),
+            // Display cases without Office evidence.
+            (
+                75,
+                vec![properties(&[(0x4104, 1)]), ole_ref(7)],
+                list(&[(0x0fcc, 4, 0, 7)]),
+                "icon or thumbnail",
+            ),
+            (
+                75,
+                vec![properties(&[(0x4104, 1)]), ole_ref(7)],
+                list(&[(0x0fce, 1, 1, 7)]),
+                "linked",
+            ),
+            (
+                75,
+                vec![properties(&[(0x4104, 1)]), ole_ref(7)],
+                list(&[(0x0fee, 1, 2, 7)]),
+                "ActiveX",
+            ),
+        ] {
+            let error = project(kind, OLE, children, png_blip(), objects).unwrap_err();
+            assert!(error.contains(expected), "{expected}: {error}");
+        }
+        // A malformed list only rejects presentations whose OLE shapes need it.
+        let malformed = record(15, 0x0409, &record(15, 0x0fcc, &record(1, 0x0fc3, &[0; 8])));
+        assert!(project(
+            75,
+            0x200,
+            vec![properties(&[(0x4104, 1)])],
+            png_blip(),
+            Some(malformed.clone())
+        )
+        .is_ok());
+        assert!(project(
+            75,
+            OLE,
+            vec![properties(&[(0x4104, 1)]), ole_ref(7)],
+            png_blip(),
+            Some(malformed)
+        )
+        .unwrap_err()
+        .contains("ExOleObjAtom"));
+        // Hidden OLE shapes stay omitted like every other hidden shape.
+        let hidden = properties(&[(0x3bf, 0x0002_0002)]);
+        assert!(project(75, OLE, vec![hidden], png_blip(), None)
+            .unwrap()
+            .elements
+            .is_empty());
+    }
+
+    #[test]
+    fn unsupported_or_adjusted_picture_blips_are_rejected_instead_of_dropped() {
+        // MS-ODRAW 2.2.23: a DIB BLIP is not carried by the presentation model.
+        let dib = record(0x7a80, 0xf01f, &[0; 40]);
+        assert!(project(
+            75,
+            0x200,
+            vec![properties(&[(0x4104, 1)])],
+            dib.clone(),
+            None
+        )
+        .unwrap_err()
+        .contains("picture BLIP"));
+        let fill = properties(&[(0x180, 3), (0x4186, 1), (0x1bf, 0x0010_0010)]);
+        assert!(project(1, 0x200, vec![fill], dib, None)
+            .unwrap_err()
+            .contains("fill BLIP"));
+        for (values, expected) in [
+            (vec![(0x109, 0x599a)], "brightness"),
+            (vec![(0x108, 0x4ccd)], "contrast"),
+            (vec![(0x107, 0xffffff)], "transparent color"),
+            (vec![(0x11a, 0x0000ff)], "recolor"),
+            (vec![(0x13f, 0x0004_0004)], "grayscale"),
+            (vec![(0x13f, 0x0006_0006)], "grayscale"),
+            (vec![(0x13f, 0x0002_0002)], "black-and-white"),
+        ] {
+            let values = [vec![(0x4104, 1)], values].concat();
+            let error =
+                project(75, 0x200, vec![properties(&values)], png_blip(), None).unwrap_err();
+            assert!(error.contains(expected), "{expected}: {error}");
+        }
+        // Default values and unset use bits leave the picture unadjusted.
+        for values in [
+            vec![
+                (0x107, 0xffff_ffff),
+                (0x108, 0x10000),
+                (0x109, 0),
+                (0x117, 0x2000_0000),
+            ],
+            vec![(0x13f, 0x0006_0000)],
+            vec![(0x13f, 0x0000_0006)],
+        ] {
+            let values = [vec![(0x4104, 1)], values].concat();
+            assert_eq!(
+                project(75, 0x200, vec![properties(&values)], png_blip(), None)
+                    .unwrap()
+                    .elements
+                    .len(),
+                1
+            );
+        }
+        // MS-PPT 2.7.9 RecolorInfoAtom with fShouldRecolor set.
+        for (flags, rejected) in [(1u8, true), (0, false)] {
+            let atom = record(0, 0x0fe7, &[vec![flags], vec![0; 11]].concat());
+            let result = project(
+                75,
+                0x200,
+                vec![properties(&[(0x4104, 1)]), client_data(&[atom])],
+                png_blip(),
+                None,
+            );
+            assert_eq!(result.is_err(), rejected);
+        }
+        // Pattern, texture and non-plain picture fills are not left unfilled.
+        for (values, expected) in [
+            (vec![(0x180, 1), (0x4186, 1)], Some("pattern fill")),
+            (vec![(0x180, 2), (0x4186, 1)], Some("texture fill")),
+            (
+                vec![(0x180, 3), (0x4186, 1), (0x1bf, 0x0002_0002)],
+                Some("picture fill placement"),
+            ),
+            (vec![(0x180, 3)], Some("picture fill placement")),
+            (vec![(0x180, 1), (0x4186, 1), (0x1bf, 0x0010_0000)], None),
+        ] {
+            let result = project(1, 0x200, vec![properties(&values)], png_blip(), None);
+            match expected {
+                Some(expected) => assert!(result.unwrap_err().contains(expected), "{expected}"),
+                None => assert!(matches!(
+                    &result.unwrap().elements[0],
+                    SlideElement::Shape(shape) if matches!(shape.fill, Some(Fill::None))
+                )),
+            }
+        }
+        // pib_complex names a linked file rather than a BLIP.
+        let mut linked = properties(&[(0xc104, 4)]);
+        linked.extend_from_slice(&[b'a', 0, b'b', 0]);
+        let len = (linked.len() - 8) as u32;
+        linked[4..8].copy_from_slice(&len.to_le_bytes());
+        assert!(project(75, 0x200, vec![linked], png_blip(), None)
+            .unwrap_err()
+            .contains("linked PowerPoint picture"));
     }
 }

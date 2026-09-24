@@ -171,6 +171,7 @@ fn presentation(span: RecordSpan) -> persist::OwnedPresentation {
         fonts: Vec::new(),
         schemes: vec![None],
         image_entries: Vec::new(),
+        ole_objects: media::OleCatalog::default(),
         backgrounds: vec![None],
         object_masters: vec![Rc::from([])],
         size: (720, 540),
@@ -255,7 +256,7 @@ fn foreground_xml_and_native_keep_quantized_stops_for_all_leaf_flips() {
 }
 
 #[test]
-fn master_gradient_inherits_but_local_scalar_zero_resets_it() {
+fn master_gradient_inherits_but_local_scalar_zero_resets_its_shade_colours() {
     for reset in [false, true] {
         let local_properties = if reset {
             gradient_properties(&[(0x301, 1)], Some(0))
@@ -328,14 +329,20 @@ fn master_gradient_inherits_but_local_scalar_zero_resets_it() {
         )
         .unwrap()
         .unwrap();
-        assert_eq!(xml.contains("<a:gradFill"), !reset);
+        assert!(xml.contains("<a:gradFill"));
         let model = native(&combined, p);
         if reset {
+            // A scalar-zero fillShadeColors removes the inherited array; the
+            // inherited shade remains, now between fillColor and fillBackColor.
             let model = model.unwrap();
             let SlideElement::Shape(shape) = &model.elements[0] else {
                 panic!("shape")
             };
-            assert!(!matches!(shape.fill, Some(Fill::Gradient { .. })));
+            let Some(Fill::Gradient { stops, .. }) = &shape.fill else {
+                panic!("expected two-colour gradient")
+            };
+            let colors: Vec<_> = stops.iter().map(|stop| stop.color.as_str()).collect();
+            assert_eq!(colors, ["FF0000", "0000FF"]);
         } else {
             let model = model.unwrap();
             let SlideElement::Shape(shape) = &model.elements[0] else {
@@ -384,7 +391,7 @@ fn native_background_uses_the_retained_gradient_span() {
 }
 
 #[test]
-fn nonzero_leaf_rotation_vetoes_gradient_projection() {
+fn leaf_rotation_keeps_the_direct_gradient_but_not_the_withdrawn_xml_route() {
     let tree = drawing(&[shape(0xa00, gradient_properties(&[(4, 45 << 16)], None))]);
     let xml = render(
         &tree,
@@ -406,11 +413,11 @@ fn nonzero_leaf_rotation_vetoes_gradient_projection() {
     let SlideElement::Shape(shape) = &model.elements[0] else {
         panic!("shape")
     };
-    assert!(!matches!(shape.fill, Some(Fill::Gradient { .. })));
+    assert!(matches!(shape.fill, Some(Fill::Gradient { .. })));
 }
 
 #[test]
-fn scaled_groups_admit_but_rotated_or_reflected_ancestors_veto_gradients() {
+fn rotated_or_reflected_ancestors_keep_direct_gradients() {
     for (group_flags, rotation, admitted) in [
         (0, None, true),
         (0, Some(45 << 16), false),
@@ -444,7 +451,9 @@ fn scaled_groups_admit_but_rotated_or_reflected_ancestors_veto_gradients() {
         let SlideElement::Shape(shape) = &model.elements[0] else {
             panic!("shape")
         };
-        assert_eq!(matches!(shape.fill, Some(Fill::Gradient { .. })), admitted);
+        // Only the withdrawn XML route vetoes; the direct model keeps the
+        // shade, as PowerPoint's own DrawingML for such shapes does.
+        assert!(matches!(shape.fill, Some(Fill::Gradient { .. })));
     }
 }
 

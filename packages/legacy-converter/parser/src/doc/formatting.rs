@@ -217,7 +217,15 @@ impl<'a> Formatting<'a> {
         prcs: &[&[u8]],
     ) -> Result<String, String> {
         let mut resolved = self.resolve_paragraph(style, fc, prm, prcs)?;
+        if resolved.properties.has_direct_only_properties() {
+            // The WordprocessingML adapter does not serialize these; keep its
+            // established omission warning.
+            self.unsupported_paragraph_properties = true;
+        }
         if let Some((reference, marker)) = resolved.numbering {
+            if marker.has_direct_only_properties() {
+                self.unsupported_character_properties = true;
+            }
             let ppr = resolved.properties.xml();
             let rpr = self.byte_run_xml(&marker)?;
             let id = self.numbering_output.activate(
@@ -601,6 +609,8 @@ impl<'a> Formatting<'a> {
         }
         #[cfg(feature = "direct-doc")]
         let mut piece_started = false;
+        #[cfg(feature = "direct-doc")]
+        let mut native_admission = table::NativeAdmission::new(shading_policy.enabled());
         sprm::paragraph_properties_appended(
             direct,
             piece,
@@ -623,6 +633,7 @@ impl<'a> Formatting<'a> {
                 // keeps that cross-source case gated until it is generalized.
                 #[cfg(feature = "direct-doc")]
                 if interpret_table_styles {
+                    native_admission.observe(code);
                     properties.row.reset_row_properties_at_tistd(code);
                 }
                 #[cfg(feature = "direct-doc")]
@@ -668,6 +679,14 @@ impl<'a> Formatting<'a> {
                             return Ok(());
                         }
                         table::NativeGeometryApply::Unhandled => {}
+                    }
+                    match native_admission.apply(&mut properties.row, code, operand)? {
+                        table::NativeAdmissionApply::Handled => return Ok(()),
+                        table::NativeAdmissionApply::HandledUnsupported => {
+                            self.unsupported_table_properties = true;
+                            return Ok(());
+                        }
+                        table::NativeAdmissionApply::Unhandled => {}
                     }
                 }
                 if !properties.apply(code, operand)? && (code >> 10) & 7 == 5 {
@@ -752,6 +771,10 @@ impl<'a> Formatting<'a> {
         prcs: &[&[u8]],
     ) -> Result<String, String> {
         let props = self.run_properties(paragraph_style, fc, prm, prcs)?;
+        if props.has_direct_only_properties() {
+            // Not serialized by the WordprocessingML adapter; keep warning.
+            self.unsupported_character_properties = true;
+        }
         self.byte_run_xml(&props)
     }
 
@@ -3389,6 +3412,74 @@ mod tests {
 
     #[cfg(feature = "direct-doc")]
     #[test]
+    fn direct_only_properties_keep_the_byte_adapter_omission_warning() {
+        let style = || Style {
+            kind: 1,
+            base: 0xfff,
+            chpx: &[],
+            papx: &[],
+            table: None,
+            language_compatibility: StyleLanguageCompatibility::default(),
+        };
+        // Contextual spacing and fit text are projected by the direct model
+        // only; the WordprocessingML adapter keeps reporting them omitted.
+        let piece = [0x6d, 0x24, 1, 0x76, 0xca, 8, 0x60, 9, 0, 0, 1, 0, 0, 0];
+        let mut f = empty();
+        f.styles = vec![Some(style())];
+        f.paragraph_xml(0, 0, 1, &[&piece]).unwrap();
+        assert!(f.unsupported_paragraph_properties);
+        assert!(!f.unsupported_character_properties);
+        f.run_xml(0, 0, 1, &[&piece]).unwrap();
+        assert!(f.unsupported_character_properties);
+
+        let mut direct = empty();
+        direct.styles = vec![Some(style())];
+        let paragraph = direct.direct_paragraph(0, None, 0, 1, &[&piece]).unwrap();
+        assert!(paragraph.paragraph.contextual_spacing);
+        let run = direct
+            .direct_text_run(0, None, 0, 1, &[&piece], "x".into())
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.fit_text_val, Some(2400.0));
+        assert!(!direct.unsupported_paragraph_properties);
+        assert!(!direct.unsupported_character_properties);
+
+        // No-effect properties stay silent on both routes.
+        let bar = [0x29, 0x66, 0xff, 0xff, 0xff, 0xff];
+        let mut f = empty();
+        f.styles = vec![Some(style())];
+        f.paragraph_xml(0, 0, 1, &[&bar]).unwrap();
+        assert!(!f.unsupported_paragraph_properties);
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn direct_paragraph_frames_fail_closed_through_the_formatting_flag() {
+        let style = Style {
+            kind: 1,
+            base: 0xfff,
+            chpx: &[],
+            papx: &[],
+            table: None,
+            language_compatibility: StyleLanguageCompatibility::default(),
+        };
+        // sprmPDyaAbs without sprmPPc: MS-DOC gives no default anchor.
+        let piece = [0x19, 0x84, 2, 0];
+        let mut f = empty();
+        f.styles = vec![Some(style)];
+        let paragraph = f.direct_paragraph(0, None, 0, 1, &[&piece]).unwrap();
+        assert!(paragraph.paragraph.frame_pr.is_none());
+        assert!(f.unsupported_paragraph_properties);
+        let piece = [0x1b, 0x26, 0x60, 0x19, 0x84, 2, 0];
+        f.unsupported_paragraph_properties = false;
+        let paragraph = f.direct_paragraph(0, None, 0, 1, &[&piece]).unwrap();
+        let frame = paragraph.paragraph.frame_pr.unwrap();
+        assert_eq!((frame.v_anchor.as_str(), frame.y), ("text", Some(0.05)));
+        assert!(!f.unsupported_paragraph_properties);
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
     fn direct_run_and_mark_use_the_existing_style_and_piece_cascade() {
         let mut f = empty();
         f.fonts = ["ASCII", "East Asia", "High ANSI", "Complex Script"]
@@ -3447,10 +3538,16 @@ mod tests {
         object.remove("type");
         object.remove("styleId");
         object.insert("runs".into(), serde_json::json!([]));
-        assert_eq!(
-            serde_json::to_value(&direct.paragraph).unwrap(),
-            expected_paragraph
-        );
+        // The byte adapter emits neither pStyle nor outlineLvl. The direct
+        // model carries the istd identity (for contextual spacing) and the
+        // MS-DOC 2.6.2 sprmPIstd outline level of fixed-index style 1.
+        assert_eq!(direct.paragraph.style_id.as_deref(), Some("1"));
+        assert_eq!(direct.paragraph.outline_level, Some(0));
+        let mut actual = serde_json::to_value(&direct.paragraph).unwrap();
+        let actual_object = actual.as_object_mut().unwrap();
+        actual_object.remove("styleId");
+        actual_object.remove("outlineLevel");
+        assert_eq!(actual, expected_paragraph);
         assert!(direct.numbering.is_none());
     }
 
@@ -4108,9 +4205,8 @@ mod tests {
             properties.row.resolve_style_aware_margins(defaults, cells);
             assert_eq!(properties.row.cells[0].margins[1], Some(expected));
             assert_eq!(properties.row.cells[0].width, 1000);
-            // Scalar style selection still carries the independent admission
-            // prerequisite; a correct margin projection does not remove it.
-            assert!(native.unsupported_table_properties);
+            // TInsert before the selection is established cell geometry.
+            assert!(!native.unsupported_table_properties);
         }
     }
 
@@ -4139,7 +4235,10 @@ mod tests {
             ]
             .concat(),
         );
-        assert!(unsupported, "the independent TIstd admission gate remains");
+        assert!(
+            !unsupported,
+            "established shading records around TIstd are admitted"
+        );
         assert!(matches!(
             &before_reset.row.cells[0].prepared_shading,
             Some(table::PreparedCellShading::Explicit(shading))
@@ -4155,7 +4254,10 @@ mod tests {
             ]
             .concat(),
         );
-        assert!(unsupported, "the independent TIstd admission gate remains");
+        assert!(
+            !unsupported,
+            "established shading records around TIstd are admitted"
+        );
         assert!(matches!(
             &reversed.row.cells[0].prepared_shading,
             Some(table::PreparedCellShading::Explicit(shading))
@@ -4173,7 +4275,10 @@ mod tests {
             ]
             .concat(),
         );
-        assert!(unsupported, "the independent TIstd admission gate remains");
+        assert!(
+            !unsupported,
+            "established shading records around TIstd are admitted"
+        );
         assert_eq!(after_reset.row.table_style, Some(2));
         assert!(matches!(
             after_reset.row.cells[0].prepared_shading,
@@ -4285,8 +4390,8 @@ mod tests {
                 let properties = formatting.table_properties_native(109, 0, &[]).unwrap();
                 assert_eq!(properties.row.table_style, Some(21));
                 assert!(
-                    formatting.unsupported_table_properties,
-                    "the independent TIstd admission gate remains"
+                    !formatting.unsupported_table_properties,
+                    "TIstd after the proven geometry profile is admitted"
                 );
             }
         }

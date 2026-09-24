@@ -192,7 +192,7 @@ fn with_acquired_doc<T>(
     formatting.configure_table_styles(effective_nfib, interpret_table_styles);
     let note_references = notes::References::read(&note_stories, &story, &mut formatting)?;
     let pictures = pictures::Store::new(&data);
-    let floating = floating::Store::read(&word, &table, ccp_text)?;
+    let floating = floating::Store::read_stories(&word, &table, clx, ccp_text)?;
     let main_fields = header_fields::Table::read_at(&word, &table, 0x11a, ccp_text);
     let note_fields = [(0x12a, 0x50), (0x21a, 0x60)].map(|(fib_offset, length_offset)| {
         let length = u32_at(&word, length_offset)? as usize;

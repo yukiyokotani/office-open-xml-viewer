@@ -78,6 +78,12 @@ pub(super) struct Profile {
     conditional_table_borders: ConditionalTableBorders,
     conditional_table_shading: BTreeMap<u16, table::Shading>,
     conditional_table_shading_nil: BTreeSet<u16>,
+    /// Last unconditional sprmTWidthIndent and sprmTWidthBefore in
+    /// base-to-child order.
+    #[cfg(feature = "direct-doc")]
+    preferred_indent: Option<table::PreferredIndent>,
+    #[cfg(feature = "direct-doc")]
+    preferred_before: Option<Option<table::PreferredWidth>>,
     unsupported_character: bool,
     unsupported_paragraph: bool,
     unsupported_table: bool,
@@ -102,6 +108,10 @@ impl Default for Profile {
             conditional_table_borders: ConditionalTableBorders::default(),
             conditional_table_shading: BTreeMap::new(),
             conditional_table_shading_nil: BTreeSet::new(),
+            #[cfg(feature = "direct-doc")]
+            preferred_indent: None,
+            #[cfg(feature = "direct-doc")]
+            preferred_before: None,
             unsupported_character: false,
             unsupported_paragraph: false,
             unsupported_table: false,
@@ -265,6 +275,25 @@ impl Formatting<'_> {
             profile.conditional_table_borders,
             profile.condition_presence,
         )))
+    }
+
+    /// The selected style's inherited sprmTWidthIndent and sprmTWidthBefore.
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) fn table_row_preferences(
+        &mut self,
+        selected_style: Option<usize>,
+    ) -> Result<
+        (
+            Option<table::PreferredIndent>,
+            Option<Option<table::PreferredWidth>>,
+        ),
+        String,
+    > {
+        let Some(selected_style) = selected_style else {
+            return Ok((None, None));
+        };
+        let profile = self.table_style_profile(selected_style)?;
+        Ok((profile.preferred_indent, profile.preferred_before))
     }
 
     pub(super) fn table_style_profile(&mut self, id: usize) -> Result<Rc<Profile>, String> {
@@ -524,8 +553,26 @@ impl Formatting<'_> {
                             Ok(true)
                         }
                         // The validator permits only the required zero dxa value
-                        // in default style 0x000B. It introduces no leading indent.
-                        0xf617 if scope == tapx::Scope::Unconditional => Ok(true),
+                        // in default style 0x000B. The direct model retains it as
+                        // the row's inherited preference, checked against the
+                        // physical leading grid at projection.
+                        0xf617 if scope == tapx::Scope::Unconditional => {
+                            #[cfg(feature = "direct-doc")]
+                            {
+                                profile.preferred_before =
+                                    Some(table::PreferredWidth::part(operand)?);
+                            }
+                            Ok(true)
+                        }
+                        // A style's preferred indent is a preference like the
+                        // direct one: the physical row origin positions the
+                        // table (see table::PreferredIndent for the evidence and
+                        // its RTL limit, enforced at projection).
+                        #[cfg(feature = "direct-doc")]
+                        0xf661 if scope == tapx::Scope::Unconditional => {
+                            profile.preferred_indent = Some(table::PreferredIndent::read(operand)?);
+                            Ok(interpret_table_styles)
+                        }
                         _ => Ok(false),
                     }
                 },

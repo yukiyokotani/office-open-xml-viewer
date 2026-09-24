@@ -1144,8 +1144,24 @@ pub struct Paragraph {
     pub mar_r: i64,
     /// First-line indent in EMU (negative = hanging indent for bullets)
     pub indent: i64,
+    /// `<a:spcBef><a:spcPts val>` (ECMA-376 §21.1.2.2.10, §21.1.2.3.12) in
+    /// hundredths of a point. Mutually exclusive with `space_before_pct`.
     pub space_before: Option<i64>,
+    /// `<a:spcAft><a:spcPts val>` (ECMA-376 §21.1.2.2.9) in hundredths of a
+    /// point. Mutually exclusive with `space_after_pct`.
     pub space_after: Option<i64>,
+    /// `<a:spcBef><a:spcPct val>` (ECMA-376 §21.1.2.2.10, §21.1.2.3.11) in
+    /// thousandths of a percent (100000 = one line) of the text size of the
+    /// line it precedes. The spacing choice is exclusive: at most one of
+    /// `space_before` / `space_before_pct` is set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub space_before_pct: Option<f64>,
+    /// `<a:spcAft><a:spcPct val>` (ECMA-376 §21.1.2.2.9, §21.1.2.3.11), in
+    /// the same unit, of the text size of the paragraph's last line.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub space_after_pct: Option<f64>,
     pub space_line: Option<SpaceLine>,
     /// List nesting level (0–8)
     pub lvl: u32,

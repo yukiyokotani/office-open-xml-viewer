@@ -1,4 +1,5 @@
-//! Main-story floating drawing anchors, MS-DOC 2.8.27 and 2.9.253.
+//! Floating drawing anchors of the main and header documents, MS-DOC 2.8.27
+//! and 2.9.253.
 use super::pictures::{Options as PictureOptions, Picture};
 use super::{u16_at, u32_at, unsupported};
 use crate::officeart::{
@@ -10,13 +11,68 @@ use std::collections::BTreeMap;
 #[cfg(feature = "direct-doc")]
 mod direct;
 #[cfg(feature = "direct-doc")]
-pub(in crate::doc) use direct::DirectFloatingPicture;
+mod shape;
+#[cfg(feature = "direct-doc")]
+pub(in crate::doc) mod textbox;
+#[cfg(feature = "direct-doc")]
+pub(in crate::doc) use direct::DirectFloating;
 
-pub(super) struct Store<'a> {
+/// The drawing part that owns a PlcfSpa, its OfficeArtDgContainer and its
+/// textbox story (MS-DOC 2.8.27, 2.9.171; MS-ODRAW 2.2.13).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(feature = "direct-doc"), allow(dead_code))]
+pub(in crate::doc) enum Part {
+    Main,
+    Header,
+}
+
+impl Part {
+    /// FibRgFcLcb97 fcPlcSpaMom / fcPlcSpaHdr.
+    fn anchor_table(self) -> usize {
+        match self {
+            Self::Main => 0x1da,
+            Self::Header => 0x1e2,
+        }
+    }
+    /// OfficeArtWordDrawing.dgglbl: 0 main document, 1 header document.
+    fn label(self) -> u8 {
+        match self {
+            Self::Main => 0,
+            Self::Header => 1,
+        }
+    }
+}
+
+/// Which projection consumes the resolved facts. The package writer keeps
+/// its original picture-only subset; the direct model admits the drawing
+/// shapes and aligned positions implemented in `shape` and `direct`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Package,
+    #[cfg(feature = "direct-doc")]
+    Direct,
+}
+
+/// The anchors and top-level shape containers of one drawing part.
+#[derive(Default)]
+struct Drawings<'a> {
     anchors: Vec<Anchor>,
     shapes: BTreeMap<u32, (usize, u32, Record<'a>)>,
+}
+
+pub(super) struct Store<'a> {
+    /// Indexed by `Part as usize`: main document, header document.
+    parts: [Drawings<'a>; 2],
     entries: Vec<Record<'a>>,
     word: &'a [u8],
+    table: &'a [u8],
+    /// The CLX that maps textbox stories; empty when none was supplied.
+    #[cfg_attr(not(feature = "direct-doc"), allow(dead_code))]
+    clx: &'a [u8],
+    group_read: bool,
+    header_container: Option<Record<'a>>,
+    #[cfg(feature = "direct-doc")]
+    textboxes: [Option<textbox::Textboxes<'a>>; 2],
     images: BTreeMap<usize, Option<Image<'a>>>,
     budget: usize,
     remaining_bytes: usize,
@@ -27,13 +83,38 @@ pub(super) struct Store<'a> {
 }
 
 impl<'a> Store<'a> {
+    /// Read the main document's drawing part. Header drawings are loaded only
+    /// on request, so this subset never assigns them to the main story.
+    #[cfg(test)]
     pub fn read(word: &'a [u8], table: &'a [u8], main_units: usize) -> Result<Self, String> {
-        let anchors = anchors(word, table, main_units)?;
+        Self::read_stories(word, table, &[], main_units)
+    }
+
+    /// Like `read`, retaining the CLX from which the direct model can later
+    /// decode textbox stories on request.
+    pub fn read_stories(
+        word: &'a [u8],
+        table: &'a [u8],
+        clx: &'a [u8],
+        main_units: usize,
+    ) -> Result<Self, String> {
+        let anchors = anchors_in(word, table, Part::Main, main_units)?;
         let mut result = Self {
-            anchors,
-            shapes: BTreeMap::new(),
+            parts: [
+                Drawings {
+                    anchors,
+                    shapes: BTreeMap::new(),
+                },
+                Drawings::default(),
+            ],
             entries: Vec::new(),
             word,
+            table,
+            clx,
+            group_read: false,
+            header_container: None,
+            #[cfg(feature = "direct-doc")]
+            textboxes: [None, None],
             images: BTreeMap::new(),
             budget: 1_000_000,
             remaining_bytes: 128 * 1024 * 1024,
@@ -42,27 +123,73 @@ impl<'a> Store<'a> {
             selected_images: std::collections::BTreeSet::new(),
             omitted: false,
         };
-        if result.anchors.is_empty() {
+        if result.parts[0].anchors.is_empty() {
             return Ok(result);
         }
+        result.read_group()?;
+        Ok(result)
+    }
+
+    /// Load the header document's anchors (PlcSpaHdr, CPs relative to the
+    /// header document) and its own drawing container (dgglbl 1).
+    #[cfg(feature = "direct-doc")]
+    fn load_header(&mut self, header_units: usize) -> Result<(), String> {
+        let anchors = anchors_in(self.word, self.table, Part::Header, header_units)?;
+        if anchors.is_empty() {
+            return Ok(());
+        }
+        self.parts[1].anchors = anchors;
+        self.read_group()?;
+        if let Some(container) = self.header_container {
+            self.parts[1].shapes = container_shapes(container, &mut self.budget)?;
+        } else if !self.omitted {
+            return Err(unsupported("Word header anchors lack their drawing"));
+        }
+        Ok(())
+    }
+
+    /// Load everything the direct model resolves beyond main-story anchors:
+    /// header drawings and both textbox stories (MS-DOC 2.3.6-2.3.7).
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) fn load_direct_parts(&mut self) -> Result<(), String> {
+        let header_units = u32_at(self.word, 0x54)? as usize; // FibRgLw97.ccpHdd
+        self.load_header(header_units)?;
+        for part in [Part::Main, Part::Header] {
+            self.textboxes[part as usize] =
+                textbox::Textboxes::read(self.word, self.table, self.clx, part)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) fn textbox(&self, part: Part) -> Option<&textbox::Textboxes<'a>> {
+        self.textboxes[part as usize].as_ref()
+    }
+
+    fn read_group(&mut self) -> Result<(), String> {
+        if self.group_read {
+            return Ok(());
+        }
+        self.group_read = true;
         // MS-DOC 2.9.171: the OfficeArt delay stream is WordDocument, NOT Data.
-        let offset = u32_at(word, 0x22a)? as usize;
-        let length = u32_at(word, 0x22e)? as usize;
+        let offset = u32_at(self.word, 0x22a)? as usize;
+        let length = u32_at(self.word, 0x22e)? as usize;
         if length == 0 {
-            result.omitted = true;
-            return Ok(result);
+            self.omitted = true;
+            return Ok(());
         }
-        let bytes = table
+        let bytes = self
+            .table
             .get(offset..)
             .and_then(|b| b.get(..length))
             .ok_or_else(|| unsupported("Word drawing group out of bounds"))?;
         let (group, mut position) =
-            record_with_end(bytes, 0, &mut result.budget, "Word drawing group")?;
+            record_with_end(bytes, 0, &mut self.budget, "Word drawing group")?;
         if group.kind != 0xf000 || group.version != 15 {
             return Err(unsupported("invalid Word drawing group"));
         }
         let mut store_seen = false;
-        for child in records(group.payload, &mut result.budget)? {
+        for child in records(group.payload, &mut self.budget)? {
             if child.kind != 0xf001 {
                 continue;
             }
@@ -70,81 +197,47 @@ impl<'a> Store<'a> {
                 return Err(unsupported("invalid Word floating image store"));
             }
             store_seen = true;
-            result.entries = records(child.payload, &mut result.budget)?;
-            if result.entries.len() != usize::from(child.instance) {
+            self.entries = records(child.payload, &mut self.budget)?;
+            if self.entries.len() != usize::from(child.instance) {
                 return Err(unsupported("Word floating image store count mismatch"));
             }
         }
-        let mut main_seen = false;
+        let mut seen = [false; 2];
         while position < bytes.len() {
             let label = bytes[position];
             let (drawing, end) =
-                record_with_end(bytes, position + 1, &mut result.budget, "Word drawing")?;
+                record_with_end(bytes, position + 1, &mut self.budget, "Word drawing")?;
             position = end;
             if label > 1 || drawing.kind != 0xf002 || drawing.version != 15 {
                 return Err(unsupported("invalid Word drawing container"));
             }
-            if label != 0 {
-                continue;
-            } // Do not leak header drawings into the body.
-            if main_seen {
-                return Err(unsupported("duplicate Word main drawing container"));
+            if seen[usize::from(label)] {
+                return Err(unsupported("duplicate Word drawing container"));
             }
-            main_seen = true;
-            for child in records(drawing.payload, &mut result.budget)? {
-                if child.kind != 0xf003 {
-                    continue;
-                }
-                if child.version != 15 {
-                    return Err(unsupported("invalid Word shape group"));
-                }
-                for shape in records(child.payload, &mut result.budget)? {
-                    // The topmost spgr contains independent shapes. Nested
-                    // groups need their own coordinate transform and are not flattened.
-                    if shape.kind != 0xf004 {
-                        continue;
-                    }
-                    if shape.version != 15 {
-                        return Err(unsupported("invalid Word floating shape container"));
-                    }
-                    let mut id = None;
-                    let mut anchor_index = None;
-                    for property in records(shape.payload, &mut result.budget)? {
-                        match property.kind {
-                            0xf00a if property.payload.len() == 8 => {
-                                id = Some(u32_at(property.payload, 0)?);
-                            }
-                            0xf010 if property.payload.len() == 4 => {
-                                anchor_index =
-                                    usize::try_from(u32_at(property.payload, 0)? as i32).ok();
-                            }
-                            _ => {}
-                        }
-                    }
-                    if let (Some(id), Some(anchor_index)) = (id, anchor_index) {
-                        if result.shapes.len() >= 100_000 {
-                            return Err(unsupported("Word floating shape budget exceeded"));
-                        }
-                        let order = result.shapes.len() as u32 + 1;
-                        if result
-                            .shapes
-                            .insert(id, (anchor_index, order, shape))
-                            .is_some()
-                        {
-                            return Err(unsupported("duplicate Word floating shape identifier"));
-                        }
-                    }
-                }
+            seen[usize::from(label)] = true;
+            if label == Part::Main.label() {
+                self.parts[0].shapes = container_shapes(drawing, &mut self.budget)?;
+            } else {
+                // Never leak header drawings into the body; they are
+                // resolved only against header anchors.
+                self.header_container = Some(drawing);
             }
         }
-        Ok(result)
+        Ok(())
     }
 
     pub fn drawing(&mut self, cp: usize) -> Result<String, String> {
-        let Some(resolved) = self.resolve(cp)? else {
+        let Some(resolved) = self.resolve(Part::Main, cp, Mode::Package)? else {
             return Ok(String::new());
         };
-        let image = self.images[&resolved.image_index]
+        let (image_index, crop) = match resolved.content {
+            Content::Picture {
+                image_index, crop, ..
+            } => (image_index, crop),
+            #[cfg(feature = "direct-doc")]
+            Content::Shape(_) => unreachable!("package projection resolves pictures only"),
+        };
+        let image = self.images[&image_index]
             .as_ref()
             .expect("resolved floating image");
         let [dist_l, dist_t, dist_r, dist_b] = resolved.distances;
@@ -172,25 +265,32 @@ impl<'a> Store<'a> {
                 extension: image.extension,
             },
             extent: resolved.extent,
-            crop: resolved.crop,
+            crop,
             flip: resolved.flip,
             rotation: 0,
         };
         Ok(image.xml(
             1_000_000 + resolved.occurrence,
-            &format!("rFloatImg{}", resolved.image_index),
+            &format!("rFloatImg{image_index}"),
             &opening,
             "</wp:anchor>",
         ))
     }
 
-    fn resolve(&mut self, cp: usize) -> Result<Option<ResolvedDrawing>, String> {
-        let Ok(index) = self.anchors.binary_search_by_key(&cp, |a| a.cp) else {
+    fn resolve(
+        &mut self,
+        part: Part,
+        cp: usize,
+        mode: Mode,
+    ) -> Result<Option<ResolvedDrawing>, String> {
+        let drawings = &self.parts[part as usize];
+        let Ok(index) = drawings.anchors.binary_search_by_key(&cp, |a| a.cp) else {
             self.omitted = true;
             return Ok(None);
         };
-        let anchor = &self.anchors[index];
-        let Some(&(anchor_index, order, shape)) = self.shapes.get(&anchor.shape_id) else {
+        let anchor = drawings.anchors[index].clone();
+        let anchor = &anchor;
+        let Some(&(anchor_index, order, shape)) = drawings.shapes.get(&anchor.shape_id) else {
             self.omitted = true;
             return Ok(None);
         };
@@ -218,6 +318,66 @@ impl<'a> Store<'a> {
             }
         }
         let flags = flags.unwrap_or(0);
+        #[cfg(feature = "direct-doc")]
+        if mode == Mode::Direct && placement.hidden && !placement.script {
+            // MS-ODRAW 2.3.4.44 fHidden: the shape is prevented from
+            // displaying, so the direct model projects nothing for it. Word's
+            // PDF of a corpus document with hidden header lines agrees. The
+            // package writer keeps its original omission.
+            return Ok(None);
+        }
+        let [left, top, right, bottom] = anchor.rect.map(i64::from);
+        let extent = [(right - left) * 635, (bottom - top) * 635];
+        #[cfg(feature = "direct-doc")]
+        if mode == Mode::Direct && kind != Some(75) {
+            // Non-picture drawing shapes: every property is classified by
+            // `shape`; unsupported sub-cases are rejected with their reason.
+            if placement.hidden || placement.script {
+                self.omitted = true;
+                return Ok(None);
+            }
+            let facts = shape::Facts::read(
+                kind.ok_or_else(|| unsupported("Word drawing shape lacks its type"))?,
+                flags,
+                shape,
+                extent,
+                &mut self.budget,
+            )?;
+            let align = direct_alignment(anchor, &placement)?;
+            if matches!(anchor.wrapping, 0 | 4 | 5) {
+                return Err(unsupported(
+                    "Word drawing shape uses an unsupported wrap contour",
+                ));
+            }
+            return self
+                .finish(
+                    anchor,
+                    &placement,
+                    order,
+                    extent,
+                    flags,
+                    align,
+                    Content::Shape(Box::new(facts)),
+                )
+                .map(Some);
+        }
+        let align = match mode {
+            Mode::Package => None,
+            #[cfg(feature = "direct-doc")]
+            Mode::Direct => {
+                if placement.horizontal == 0 && placement.vertical == 0 {
+                    None
+                } else {
+                    match direct_alignment(anchor, &placement) {
+                        Ok(align) => Some(align),
+                        Err(_) => {
+                            self.omitted = true;
+                            return Ok(None);
+                        }
+                    }
+                }
+            }
+        };
         if kind != Some(75)
             // MS-ODRAW 2.2.40 identifies fOleShape (0x10) as shape
             // metadata, not permission to execute or inspect an OLE payload.
@@ -227,12 +387,10 @@ impl<'a> Store<'a> {
             || placement.hidden
             || placement.script
             || picture.rotation != 0
-            // SPA provides an explicit, host-defined coordinate origin.
-            // Aligned positions require resolving OfficeArt posrelh/posrelv;
-            // producer values differ from the published enumeration. Do not
-            // guess a remapping or combine conflicting origins here.
-            || placement.horizontal != 0
-            || placement.vertical != 0
+            // SPA provides an explicit, host-defined coordinate origin. The
+            // package writer does not resolve aligned positions; the direct
+            // model accepts them only through `direct_alignment`.
+            || (align.is_none() && (placement.horizontal != 0 || placement.vertical != 0))
             || matches!(anchor.wrapping, 0 | 4 | 5)
         {
             self.omitted = true;
@@ -265,8 +423,6 @@ impl<'a> Store<'a> {
             self.omitted = true;
             return Ok(None);
         };
-        let [left, top, right, bottom] = anchor.rect.map(i64::from);
-        let extent = [(right - left) * 635, (bottom - top) * 635];
         if extent.iter().any(|v| *v <= 0) {
             return Err(unsupported("invalid Word floating picture extent"));
         }
@@ -275,34 +431,63 @@ impl<'a> Store<'a> {
         {
             return Err(unsupported("empty Word floating picture crop"));
         }
+        let content = Content::Picture {
+            image_index,
+            extension: image.extension,
+            crop: picture.crop,
+        };
+        self.finish(
+            anchor,
+            &placement,
+            order,
+            extent,
+            flags,
+            align.unwrap_or([None; 2]),
+            content,
+        )
+        .map(Some)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish(
+        &mut self,
+        anchor: &Anchor,
+        placement: &Placement,
+        order: u32,
+        extent: [i64; 2],
+        flags: u32,
+        align: [Option<&'static str>; 2],
+        content: Content,
+    ) -> Result<ResolvedDrawing, String> {
+        let [left, top, _, _] = anchor.rect.map(i64::from);
         i32::try_from(left * 635)
             .and_then(|_| i32::try_from(top * 635))
             .map_err(|_| unsupported("Word floating position exceeds DrawingML range"))?;
-        let [dist_l, dist_t, dist_r, dist_b] = placement.distances;
         if self.occurrences >= 100_000 {
             return Err(unsupported("Word floating occurrence budget exceeded"));
         }
         self.occurrences += 1;
-        Ok(Some(ResolvedDrawing {
-            image_index,
-            extension: image.extension,
+        Ok(ResolvedDrawing {
+            content,
+            #[cfg(feature = "direct-doc")]
+            shape_id: anchor.shape_id,
             extent,
-            crop: picture.crop,
             flip: [flags & 0x40 != 0, flags & 0x80 != 0],
             x_emu: left * 635,
             y_emu: top * 635,
             horizontal: anchor.horizontal,
             vertical: anchor.vertical,
+            align,
             wrapping: anchor.wrapping,
             side: anchor.side,
             behind: anchor.behind,
             locked: anchor.locked,
-            distances: [dist_l, dist_t, dist_r, dist_b],
+            distances: placement.distances,
             in_cell: placement.in_cell,
             overlap: placement.overlap,
             z_order: placement.z_order.unwrap_or(order),
             occurrence: self.occurrences,
-        }))
+        })
     }
     pub fn relationships(&self) -> String {
         self.images.iter().filter_map(|(id,image)|image.as_ref().map(|p|format!(r#"<Relationship Id="rFloatImg{id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/float{id}.{}"/>"#,p.extension))).collect()
@@ -322,16 +507,30 @@ impl<'a> Store<'a> {
     }
 }
 
+enum Content {
+    Picture {
+        image_index: usize,
+        #[cfg_attr(not(feature = "direct-doc"), allow(dead_code))]
+        extension: &'static str,
+        crop: [i64; 4],
+    },
+    #[cfg(feature = "direct-doc")]
+    Shape(Box<shape::Facts>),
+}
+
 struct ResolvedDrawing {
-    image_index: usize,
-    extension: &'static str,
+    content: Content,
+    #[cfg(feature = "direct-doc")]
+    shape_id: u32,
     extent: [i64; 2],
-    crop: [i64; 4],
     flip: [bool; 2],
     x_emu: i64,
     y_emu: i64,
     horizontal: &'static str,
     vertical: &'static str,
+    /// Horizontal/vertical `wp:align` values replacing the offsets when set.
+    #[cfg_attr(not(feature = "direct-doc"), allow(dead_code))]
+    align: [Option<&'static str>; 2],
     wrapping: u8,
     side: &'static str,
     behind: bool,
@@ -354,9 +553,59 @@ fn records<'a>(bytes: &'a [u8], budget: &mut usize) -> Result<Vec<Record<'a>>, S
     Ok(result)
 }
 
+/// The independent shapes of one OfficeArtDgContainer's topmost group. Nested
+/// groups need their own coordinate transform and are not flattened.
+fn container_shapes<'a>(
+    drawing: Record<'a>,
+    budget: &mut usize,
+) -> Result<BTreeMap<u32, (usize, u32, Record<'a>)>, String> {
+    let mut shapes = BTreeMap::new();
+    for child in records(drawing.payload, budget)? {
+        if child.kind != 0xf003 {
+            continue;
+        }
+        if child.version != 15 {
+            return Err(unsupported("invalid Word shape group"));
+        }
+        for shape in records(child.payload, budget)? {
+            if shape.kind != 0xf004 {
+                continue;
+            }
+            if shape.version != 15 {
+                return Err(unsupported("invalid Word floating shape container"));
+            }
+            let mut id = None;
+            let mut anchor_index = None;
+            for property in records(shape.payload, budget)? {
+                match property.kind {
+                    0xf00a if property.payload.len() == 8 => {
+                        id = Some(u32_at(property.payload, 0)?);
+                    }
+                    0xf010 if property.payload.len() == 4 => {
+                        anchor_index = usize::try_from(u32_at(property.payload, 0)? as i32).ok();
+                    }
+                    _ => {}
+                }
+            }
+            if let (Some(id), Some(anchor_index)) = (id, anchor_index) {
+                if shapes.len() >= 100_000 {
+                    return Err(unsupported("Word floating shape budget exceeded"));
+                }
+                let order = shapes.len() as u32 + 1;
+                if shapes.insert(id, (anchor_index, order, shape)).is_some() {
+                    return Err(unsupported("duplicate Word floating shape identifier"));
+                }
+            }
+        }
+    }
+    Ok(shapes)
+}
+
 struct Placement {
     horizontal: u32,
     vertical: u32,
+    relative_horizontal: Option<u32>,
+    relative_vertical: Option<u32>,
     distances: [u32; 4],
     in_cell: bool,
     overlap: bool,
@@ -369,6 +618,8 @@ impl Default for Placement {
         Self {
             horizontal: 0,
             vertical: 0,
+            relative_horizontal: None,
+            relative_vertical: None,
             distances: [114300, 0, 114300, 0],
             in_cell: true,
             overlap: true,
@@ -399,7 +650,9 @@ impl Placement {
                     self.distances[usize::from(key - 0x384)] = value;
                 }
                 0x38f => self.horizontal = value,
+                0x390 => self.relative_horizontal = Some(value),
                 0x391 => self.vertical = value,
+                0x392 => self.relative_vertical = Some(value),
                 0x3aa if value != 0 => self.z_order = Some(value),
                 0x3bf => {
                     for (bit, target) in [
@@ -418,6 +671,77 @@ impl Placement {
         }
         Ok(())
     }
+}
+
+/// Resolve MS-ODRAW posh/posv alignment (2.3.4.19/21) for the direct model.
+///
+/// The MS-DOC SPA origin (2.9.253 bx/by: margin, page, column/paragraph) is
+/// the normative container of the rca rectangle, so an aligned position is
+/// placed within that container. posrelh/posrelv only corroborate it: Word
+/// writes them as 0 margin, 1 page, 2 text, 3 character/line, one less than
+/// the enumeration published in MS-ODRAW 2.3.4.20/22 (1-4); every aligned and
+/// absolute shape in the local private corpus satisfies bx = posrelh and
+/// by = posrelv under that numbering, and an absent value is the documented
+/// msoprhText/msoprvText default (column/paragraph). Any disagreement,
+/// character/line-relative alignment, inside/outside page-parity alignment
+/// and vertical alignment within a paragraph stay unsupported: each needs an
+/// Office control before its container can be asserted.
+#[cfg(feature = "direct-doc")]
+fn direct_alignment(
+    anchor: &Anchor,
+    placement: &Placement,
+) -> Result<[Option<&'static str>; 2], String> {
+    let horizontal = match placement.horizontal {
+        0 => None,
+        1 => Some("left"),
+        2 => Some("center"),
+        3 => Some("right"),
+        _ => {
+            return Err(unsupported(
+                "Word drawing uses page-parity or invalid horizontal alignment",
+            ))
+        }
+    };
+    if horizontal.is_some() {
+        let origin = match anchor.horizontal {
+            "margin" => 0,
+            "page" => 1,
+            _ => 2,
+        };
+        if placement.relative_horizontal.unwrap_or(2) != origin {
+            return Err(unsupported(
+                "Word aligned drawing disagrees with its horizontal SPA origin",
+            ));
+        }
+    }
+    let vertical = match placement.vertical {
+        0 => None,
+        1 => Some("top"),
+        2 => Some("center"),
+        3 => Some("bottom"),
+        _ => {
+            return Err(unsupported(
+                "Word drawing uses page-parity or invalid vertical alignment",
+            ))
+        }
+    };
+    if vertical.is_some() {
+        let origin = match anchor.vertical {
+            "margin" => 0,
+            "page" => 1,
+            _ => {
+                return Err(unsupported(
+                    "Word drawing aligned within its paragraph is not supported",
+                ))
+            }
+        };
+        if placement.relative_vertical.unwrap_or(2) != origin {
+            return Err(unsupported(
+                "Word aligned drawing disagrees with its vertical SPA origin",
+            ));
+        }
+    }
+    Ok([horizontal, vertical])
 }
 
 fn position(origin: &str, offset: i64, vertical: bool) -> Result<String, String> {
@@ -443,13 +767,24 @@ pub(super) struct Anchor {
     pub locked: bool,
 }
 
+#[cfg(test)]
 pub(super) fn anchors(word: &[u8], table: &[u8], main_units: usize) -> Result<Vec<Anchor>, String> {
-    // FibRgFcLcb97 fields 40/41: main and header shape PLCs. This reader
-    // intentionally does not assign header-document anchors to the main story.
-    if word.len() < 0x1e2 {
+    anchors_in(word, table, Part::Main, main_units)
+}
+
+fn anchors_in(
+    word: &[u8],
+    table: &[u8],
+    part: Part,
+    main_units: usize,
+) -> Result<Vec<Anchor>, String> {
+    // FibRgFcLcb97 fields 40/41: main and header shape PLCs. Each part's
+    // anchors address only its own story; they are never reassigned.
+    let fib = part.anchor_table();
+    if word.len() < fib + 8 {
         return Ok(Vec::new());
     }
-    let size = u32_at(word, 0x1de)? as usize;
+    let size = u32_at(word, fib + 4)? as usize;
     if size == 0 {
         return Ok(Vec::new());
     }
@@ -460,7 +795,7 @@ pub(super) fn anchors(word: &[u8], table: &[u8], main_units: usize) -> Result<Ve
     if count > 100_000 {
         return Err(unsupported("Word floating-anchor budget exceeded"));
     }
-    let offset = u32_at(word, 0x1da)? as usize;
+    let offset = u32_at(word, fib)? as usize;
     let bytes = table
         .get(offset..)
         .and_then(|b| b.get(..size))
@@ -698,11 +1033,103 @@ mod tests {
     }
     #[cfg(feature = "direct-doc")]
     #[test]
+    fn direct_model_projects_nothing_for_hidden_drawings() {
+        // fHidden (use bit 17, value bit 1) prevents display; the BLIP is
+        // never dereferenced. Script anchors remain an omission.
+        let (word, table) = drawing_input(0xa00, 0x0002_0002);
+        let mut store = Store::read(&word[..1024], &table, 20).unwrap();
+        assert!(store.direct_picture(12, &mut usize::MAX.clone()).unwrap().is_none());
+        assert!(!store.omitted && store.images.is_empty());
+        let (word, table) = drawing_input(0xa00, 0x0082_0082);
+        let mut store = Store::read(&word[..1024], &table, 20).unwrap();
+        assert!(store.direct_picture(12, &mut usize::MAX.clone()).unwrap().is_none());
+        assert!(store.omitted);
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn direct_alignment_uses_the_spa_origin_and_rejects_disagreement() {
+        // The fixture's SPA origin is page/page.
+        let aligned = |options: &[(u16, u32)]| {
+            let (word, table) = drawing_with_options(0xa00, 0, options);
+            let mut store = Store::read(&word, &table, 20).unwrap();
+            let picture = store.direct_picture(12, &mut usize::MAX.clone());
+            (picture, store.omitted)
+        };
+        for (posh, align) in [(1, "left"), (2, "center"), (3, "right")] {
+            let (picture, omitted) = aligned(&[(0x38f, posh), (0x390, 1)]);
+            let image = picture.unwrap().unwrap().image;
+            assert!(!omitted);
+            assert_eq!(image.anchor_x_align.as_deref(), Some(align));
+            assert_eq!(image.anchor_x_relative_from.as_deref(), Some("page"));
+            let facts = image.anchor_acquisition.unwrap();
+            assert!(matches!(
+                facts.horizontal.choice,
+                docx_model::AnchorAxisChoiceWire::Align { ref value } if value == align
+            ));
+        }
+        for (posv, align) in [(1, "top"), (2, "center"), (3, "bottom")] {
+            let (picture, _) = aligned(&[(0x391, posv), (0x392, 1)]);
+            let image = picture.unwrap().unwrap().image;
+            assert_eq!(image.anchor_y_align.as_deref(), Some(align));
+            assert_eq!(image.anchor_x_align, None);
+        }
+        // Disagreeing, defaulted (text) or character-relative containers and
+        // page-parity alignment keep the drawing out of the document.
+        for options in [
+            &[(0x38f, 2), (0x390, 0)][..],
+            &[(0x38f, 2)][..],
+            &[(0x38f, 2), (0x390, 3)][..],
+            &[(0x38f, 4), (0x390, 1)][..],
+            &[(0x391, 1), (0x392, 0)][..],
+            &[(0x391, 5), (0x392, 1)][..],
+        ] {
+            let (picture, omitted) = aligned(options);
+            assert!(picture.unwrap().is_none() && omitted, "{options:x?}");
+        }
+        // Package conversion still omits every aligned position.
+        let (word, table) = drawing_with_options(0xa00, 0, &[(0x38f, 2), (0x390, 1)]);
+        let mut store = Store::read(&word, &table, 20).unwrap();
+        assert!(store.drawing(12).unwrap().is_empty() && store.omitted);
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn direct_floating_passes_validated_metafiles_with_docx_media_types() {
+        for ((source, blip), mime) in [
+            (crate::officeart::emf_test_blip(), "image/emf"),
+            (crate::officeart::wmf_test_blip(), "image/wmf"),
+        ] {
+            let (word, table) = drawing_with_blip(0xa00, 0, &[], blip, 2);
+            let mut store = Store::read(&word, &table, 20).unwrap();
+            let mut budget = usize::MAX;
+            let picture = store.direct_picture(12, &mut budget).unwrap().unwrap();
+            assert_eq!(picture.image.mime_type, mime);
+            let mut resources = Vec::new();
+            store
+                .append_referenced_direct_resources(
+                    &mut resources,
+                    &[picture.image.image_path.as_str()],
+                    &mut budget,
+                )
+                .unwrap();
+            assert_eq!(resources[0].mime_type, mime);
+            assert_eq!(resources[0].bytes, source);
+        }
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
     fn direct_floating_deduplicates_resources_and_admits_before_reserving() {
         let (word, table) = drawing_with_options(
             0xac0,
             0x8200_0000,
-            &[(0x384, 12_700), (0x385, 25_400), (0x386, 38_100), (0x387, 50_800)],
+            &[
+                (0x384, 12_700),
+                (0x385, 25_400),
+                (0x386, 38_100),
+                (0x387, 50_800),
+            ],
         );
         let mut store = Store::read(&word, &table, 20).unwrap();
         let mut budget = usize::MAX;
@@ -711,19 +1138,48 @@ mod tests {
         assert_eq!(first.image.image_path, second.image.image_path);
         assert_ne!(first.occurrence_id, second.occurrence_id);
         assert_eq!(first.image.wrap_mode.as_deref(), Some("square"));
-        assert_eq!(first.image.anchor_acquisition.as_ref().unwrap().wrap.authored_kinds, ["wrapSquare"]);
+        assert_eq!(
+            first
+                .image
+                .anchor_acquisition
+                .as_ref()
+                .unwrap()
+                .wrap
+                .authored_kinds,
+            ["wrapSquare"]
+        );
         let acquisition = first.image.anchor_acquisition.as_ref().unwrap();
         let expected_payload = std::mem::size_of::<docx_model::ImageRun>()
             + first.image.image_path.capacity()
             + first.image.mime_type.capacity()
             + first.image.wrap_mode.as_ref().unwrap().capacity()
             + first.image.wrap_side.as_ref().unwrap().capacity()
-            + first.image.anchor_x_relative_from.as_ref().unwrap().capacity()
-            + first.image.anchor_y_relative_from.as_ref().unwrap().capacity()
+            + first
+                .image
+                .anchor_x_relative_from
+                .as_ref()
+                .unwrap()
+                .capacity()
+            + first
+                .image
+                .anchor_y_relative_from
+                .as_ref()
+                .unwrap()
+                .capacity()
             + first.occurrence_id.capacity()
             + acquisition.occurrence_id.capacity()
-            + acquisition.horizontal.relative_from.as_ref().unwrap().capacity()
-            + acquisition.vertical.relative_from.as_ref().unwrap().capacity()
+            + acquisition
+                .horizontal
+                .relative_from
+                .as_ref()
+                .unwrap()
+                .capacity()
+            + acquisition
+                .vertical
+                .relative_from
+                .as_ref()
+                .unwrap()
+                .capacity()
             + acquisition.wrap.side.as_ref().unwrap().capacity()
             + acquisition.wrap.authored_kinds.capacity() * std::mem::size_of::<String>()
             + acquisition.wrap.authored_kinds[0].capacity();
@@ -737,7 +1193,9 @@ mod tests {
         let mut resources = Vec::new();
         let mut none = 0;
         assert_eq!(
-            store.append_direct_resources(&mut resources, &mut none).unwrap_err(),
+            store
+                .append_direct_resources(&mut resources, &mut none)
+                .unwrap_err(),
             "OUTPUT_TOO_LARGE"
         );
         assert_eq!(resources.capacity(), 0);
@@ -747,7 +1205,9 @@ mod tests {
         store.direct_picture(12, &mut budget).unwrap().unwrap();
         store.direct_picture(12, &mut budget).unwrap().unwrap();
         let mut resources = Vec::new();
-        store.append_direct_resources(&mut resources, &mut budget).unwrap();
+        store
+            .append_direct_resources(&mut resources, &mut budget)
+            .unwrap();
         assert_eq!(resources.len(), 1);
         assert!(resources[0].bytes.starts_with(b"\x89PNG"));
 
@@ -759,7 +1219,11 @@ mod tests {
                     table[28..30].copy_from_slice(&flags.to_le_bytes());
                     let mut store = Store::read(&word, &table, 20).unwrap();
                     let mut budget = usize::MAX;
-                    let image = store.direct_picture(12, &mut budget).unwrap().unwrap().image;
+                    let image = store
+                        .direct_picture(12, &mut budget)
+                        .unwrap()
+                        .unwrap()
+                        .image;
                     assert_eq!(
                         image.anchor_x_relative_from.as_deref(),
                         Some(["margin", "page", "column"][horizontal as usize])
@@ -790,7 +1254,10 @@ mod tests {
         table[record + 12..record + 16].copy_from_slice(&4_000_400i32.to_le_bytes());
         let mut store = Store::read(&word, &table, 20).unwrap();
         let mut budget = usize::MAX;
-        assert!(store.direct_picture(12, &mut budget).unwrap_err().contains("position"));
+        assert!(store
+            .direct_picture(12, &mut budget)
+            .unwrap_err()
+            .contains("position"));
         assert_eq!(store.occurrences, 0);
     }
     #[test]

@@ -330,8 +330,8 @@ impl<R: Clone, C: Default + Clone, S> ShapeStorage<R, C, S> {
             if view.kind == 0xf004 && view.version == 15 {
                 Ok(())
             } else {
-            return Err(unsupported("invalid PowerPoint shape container"));
-        }
+                return Err(unsupported("invalid PowerPoint shape container"));
+            }
         })?;
         let mut flags = None;
         let mut id = 0;
@@ -342,6 +342,8 @@ impl<R: Clone, C: Default + Clone, S> ShapeStorage<R, C, S> {
         let mut style9 = None;
         let mut tags_seen = false;
         let mut placeholder = None;
+        let mut ole_ref = None;
+        let mut recolor = None;
         let mut tertiary_seen = false;
         let mut props = PropertiesStorage::<C>::default();
         for child in source.children(&record, budget)? {
@@ -403,6 +405,28 @@ impl<R: Clone, C: Default + Clone, S> ShapeStorage<R, C, S> {
                             tags_seen = true;
                             style9 = source.style(&atom, budget)?;
                         }
+                        if atom_kind == 0x0bc1 {
+                            // MS-PPT 2.7.7: recVer 0, recLen 4. The reference is
+                            // only an identifier; it is resolved, never followed
+                            // into object storage.
+                            if ole_ref.is_some() || atom_version != 0 || atom_len != 4 {
+                                return Err(unsupported("invalid PowerPoint ExObjRefAtom"));
+                            }
+                            ole_ref =
+                                Some(source.with_record(&atom, |view| u32_at(view.payload, 0))?);
+                            continue;
+                        }
+                        if atom_kind == 0x0fe7 {
+                            // MS-PPT 2.7.9: a 12-byte fixed part precedes the
+                            // entries; bit 0 of the first field is fShouldRecolor.
+                            if recolor.is_some() || atom_version != 0 || atom_len < 12 {
+                                return Err(unsupported("invalid PowerPoint RecolorInfoAtom"));
+                            }
+                            recolor = Some(
+                                source.with_record(&atom, |view| Ok(view.payload[0] & 1 != 0))?,
+                            );
+                            continue;
+                        }
                         if atom_kind != 3011 {
                             continue;
                         }
@@ -432,7 +456,11 @@ impl<R: Clone, C: Default + Clone, S> ShapeStorage<R, C, S> {
             textbox,
             style9,
             placeholder,
-            props,
+            props: PropertiesStorage {
+                ole_ref,
+                recolor: recolor.unwrap_or(false),
+                ..props
+            },
         })
     }
 }
@@ -451,6 +479,16 @@ impl<'a> Shape<'a> {
 impl<R, C, S> ShapeStorage<R, C, S> {
     fn omitted(&self) -> bool {
         self.flags & (8 | 16 | 1024) != 0 || self.props.script
+    }
+    /// Direct-model omission. Unlike the byte converter, an OLE shape
+    /// (fOleShape, MS-ODRAW 2.2.40) is not omitted: it is a picture frame whose
+    /// pib names the BLIP to display (MS-ODRAW 2.3.23.5), and the direct model
+    /// either shows that stored presentation picture or rejects the shape.
+    fn direct_omitted(&self) -> bool {
+        self.flags & (8 | 1024) != 0 || self.props.script
+    }
+    fn is_ole(&self) -> bool {
+        self.flags & 16 != 0
     }
     fn master(&self) -> Option<u32> {
         (self.flags & 0x20 != 0).then_some(self.props.master.unwrap_or(0))
@@ -484,6 +522,18 @@ struct PropertiesStorage<T> {
     script: bool,
     master: Option<u32>,
     picture: u32,
+    /// pib_complex (MS-ODRAW 2.3.23.6): a picture named by file, not a BLIP.
+    picture_linked: bool,
+    /// First non-default MS-ODRAW 2.3.23 display adjustment, if any. The
+    /// presentation model has no brightness, contrast, transparent-color,
+    /// recolor or gray/bilevel picture effects, so the direct model rejects it.
+    picture_adjustment: Option<&'static str>,
+    /// MS-PPT 2.7.7 ExObjRefAtom from the shape's client data: the external
+    /// object behind an OLE shape.
+    ole_ref: Option<u32>,
+    /// MS-PPT 2.7.9 RecolorInfoAtom.fShouldRecolor from the shape's client
+    /// data: metafile color remapping of the displayed picture.
+    recolor: bool,
     crop: [i64; 4],
     paint: paint::Paint,
     rotation: i64,
@@ -506,6 +556,10 @@ impl<T> Default for PropertiesStorage<T> {
             script: false,
             master: None,
             picture: 0,
+            picture_linked: false,
+            picture_adjustment: None,
+            ole_ref: None,
+            recolor: false,
             crop: [0; 4],
             paint: paint::Paint::default(),
             rotation: 0,
@@ -523,7 +577,22 @@ impl<T: Default + Clone> PropertiesStorage<T> {
         if opid == 0x01bf && complex.is_none() {
             self.paint.tertiary_fill_boolean_property(value)?;
         }
+        if opid == 0x013f && complex.is_none() {
+            self.blip_booleans(value);
+        }
         Ok(())
+    }
+
+    /// MS-ODRAW 2.3.23.35: fPictureGray is bit 2 and fPictureBiLevel bit 1,
+    /// each honored only with its use bit (18 and 17). Other Blip Booleans
+    /// (hit testing, looping, active OLE server) do not change the display.
+    fn blip_booleans(&mut self, value: u32) {
+        if value & (1 << 18) != 0 && value & (1 << 2) != 0 {
+            self.picture_adjustment.get_or_insert("grayscale");
+        }
+        if value & (1 << 17) != 0 && value & (1 << 1) != 0 {
+            self.picture_adjustment.get_or_insert("black-and-white");
+        }
     }
 
     fn apply_primary(&mut self, opid: u16, value: u32, complex: Option<T>) -> Result<(), String> {
@@ -550,6 +619,10 @@ impl<T: Default + Clone> PropertiesStorage<T> {
         if let Some(complex) = complex {
             if opid & 0x3fff == 0x197 {
                 self.gradient.set(complex);
+                return Ok(());
+            }
+            if opid & 0x3fff == 0x104 {
+                self.picture_linked = true;
                 return Ok(());
             }
             if matches!(opid & 0x3fff, 0x145..=0x150) {
@@ -585,6 +658,27 @@ impl<T: Default + Clone> PropertiesStorage<T> {
             }
             // MS-ODRAW hspMaster is a scalar MSOSPID, not a BLIP index.
             0x301 => self.master = Some(value),
+            // MS-ODRAW 2.3.23.10-12 and 24-32: defaults are no transparent
+            // color, contrast 0x10000, brightness 0, no recolor color and an
+            // MSOTINTSHADE of 0x20000000 for the Ext modifiers.
+            0x107 | 0x115 | 0x11a | 0x11b if value != 0xffff_ffff => {
+                self.picture_adjustment
+                    .get_or_insert(if opid == 0x107 || opid == 0x115 {
+                        "transparent color"
+                    } else {
+                        "recolor"
+                    });
+            }
+            0x117 | 0x11d if value != 0x2000_0000 => {
+                self.picture_adjustment.get_or_insert("color modification");
+            }
+            0x108 if value != 0x10000 => {
+                self.picture_adjustment.get_or_insert("contrast");
+            }
+            0x109 if value != 0 => {
+                self.picture_adjustment.get_or_insert("brightness");
+            }
+            0x13f => self.blip_booleans(value),
             // MS-ODRAW crop order: top, bottom, left, right. Signed 16.16
             // fractions become DrawingML 1/1000 percentages without clamping.
             0x100..=0x103 => {
@@ -595,8 +689,12 @@ impl<T: Default + Clone> PropertiesStorage<T> {
                 })?;
                 self.crop[usize::from(opid - 0x100)] = value;
             }
-            // [MS-ODRAW] 2.3.18.5: signed 16.16 degrees -> 1/60000 degree.
-            4 => self.rotation = i64::from(value as i32) * 60000 / 65536,
+            // [MS-ODRAW] 2.3.18.5: signed 16.16 degrees -> nearest 1/60000
+            // degree (45.01 is stored as 2949775/65536 and reads as 2700600).
+            4 => {
+                let value = i64::from(value as i32) * 60000;
+                self.rotation = (value + value.signum() * 32768) / 65536;
+            }
             0x81..=0x84 => {
                 if value > 0x132f540 {
                     return Err(unsupported("invalid PowerPoint text margin"));
@@ -716,19 +814,21 @@ fn background_from<S: ShapeSource>(
     let Some(drawing) = drawings.next() else {
         return Ok(None);
     };
-    if drawings.next().is_some()
-        || source.with_record(&drawing, |view| Ok(view.version != 15))?
-    {
+    if drawings.next().is_some() || source.with_record(&drawing, |view| Ok(view.version != 15))? {
         return Err(unsupported("invalid PowerPoint background drawing"));
     }
     let groups = source.children(&drawing, budget)?;
     if groups.len() != 1 {
-        return Err(unsupported("invalid PowerPoint background OfficeArt drawing"));
+        return Err(unsupported(
+            "invalid PowerPoint background OfficeArt drawing",
+        ));
     }
     if source.with_record(&groups[0], |view| {
         Ok(view.kind != 0xf002 || view.version != 15)
     })? {
-        return Err(unsupported("invalid PowerPoint background OfficeArt drawing"));
+        return Err(unsupported(
+            "invalid PowerPoint background OfficeArt drawing",
+        ));
     }
     let mut result = None;
     for record in source.children(&groups[0], budget)? {
@@ -1812,9 +1912,9 @@ mod tests {
             [
                 0x4000u16, 1, 0x6001, 0xaa00, 0x8000, 0x4000, 1, 0x6001, 0xab00, 0x8000,
             ]
-                .iter()
-                .flat_map(|value| value.to_le_bytes())
-                .collect(),
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect(),
         );
         let complex = record(
             (4 << 4) | 3,
@@ -1902,8 +2002,7 @@ mod tests {
         let entry = parse_record_at(&image, 0, &mut 100).unwrap();
         let entries = [entry];
         let mut media = media::Store::new(&entries, &[]);
-        assert!(
-            render(
+        assert!(render(
             &shape(2),
             &[],
             &mut MAX_RECORDS.clone(),
@@ -1913,8 +2012,7 @@ mod tests {
             Some(&mut media),
         )
         .unwrap_err()
-            .contains("index out of range")
-        );
+        .contains("index out of range"));
 
         let unsupported = record(0, 0xf01c, &[]); // PICT remains outside Store's allowlist.
         let entry = parse_record_at(&unsupported, 0, &mut 100).unwrap();
@@ -1956,7 +2054,7 @@ mod tests {
             15,
             0xf00d,
             &[
-            record(0, 3999, &4u32.to_le_bytes()),
+                record(0, 3999, &4u32.to_le_bytes()),
                 record(0, 4008, b"A\tB\rC\tD"),
                 ruler,
             ]
@@ -2030,17 +2128,14 @@ mod tests {
         .unwrap();
         assert!(rendered.fallback);
         assert!(rendered.tree.contains("id=\"2\" name=\"Legacy shape 2\""));
-        assert!(
-            rendered
+        assert!(rendered
             .tree
-                .contains("id=\"3\" name=\"Legacy slide text\"")
-        );
+            .contains("id=\"3\" name=\"Legacy slide text\""));
         assert!(
             rendered.tree.find(">Master<").unwrap()
                 < rendered.tree.find(">Local fallback<").unwrap()
         );
-        assert!(
-            render_with_masters(
+        assert!(render_with_masters(
             &local,
             [Ok(layer)],
             &[],
@@ -2050,8 +2145,7 @@ mod tests {
             None,
             None
         )
-            .is_err()
-        );
+        .is_err());
     }
 
     #[test]
@@ -2090,34 +2184,28 @@ mod tests {
     fn backgrounds_are_explicit_ungrouped_live_shapes_without_anchor_requirements() {
         let bg = sp(0xc00, vec![properties(&[(0x181, 0x123456)])]);
         let input = drawing(vec![bg.clone()]);
-        assert!(
-            background(&input, &mut 100)
+        assert!(background(&input, &mut 100)
             .unwrap()
             .unwrap()
             .paint
             .background_fill(None)
             .unwrap()
-                .contains("563412")
-        );
+            .contains("563412"));
         assert!(xml(&input).unwrap().is_empty()); // Never emit a foreground rectangle.
         for flag in [0x800, 0xc08, 0xc10] {
-            assert!(
-                background(&drawing(vec![sp(flag, vec![])]), &mut 100)
+            assert!(background(&drawing(vec![sp(flag, vec![])]), &mut 100)
                 .unwrap()
-                    .is_none()
-            );
+                .is_none());
         }
         assert!(
             background(&drawing(vec![record(15, 0xf003, &bg)]), &mut 100)
                 .unwrap()
                 .is_none()
         );
-        assert!(
-            background(&drawing(vec![bg.clone(), bg]), &mut 100)
+        assert!(background(&drawing(vec![bg.clone(), bg]), &mut 100)
             .err()
             .unwrap()
-                .contains("duplicate")
-        );
+            .contains("duplicate"));
         assert!(background(&input, &mut 1).is_err());
     }
 
@@ -2161,14 +2249,11 @@ mod tests {
         let shade = [1, 0, 1, 0, 8, 0, 7, 0, 0, 0, 0, 0, 0, 0];
         for opid in [0x197, 0x4197] {
             let mut props = Properties::default();
-            props.apply_primary(0x8197, shade.len() as u32, Some(&shade))
+            props
+                .apply_primary(0x8197, shade.len() as u32, Some(&shade))
                 .unwrap();
             props.apply_primary(opid, 0, None).unwrap();
-            assert!(props
-                .gradient
-                .decode(&mut 1, &mut 8)
-                .unwrap()
-                .is_none());
+            assert!(props.gradient.decode(&mut 1, &mut 8).unwrap().is_none());
         }
         let mut invalid = Properties::default();
         invalid.apply_primary(0x197, 1, None).unwrap();
@@ -2193,7 +2278,11 @@ mod tests {
         let shape = |extra| {
             drawing(vec![sp(
                 0x200,
-                vec![record(0, 0xf010, &ints(&[0, 0, 576, 288])), extra, text("x")],
+                vec![
+                    record(0, 0xf010, &ints(&[0, 0, 576, 288])),
+                    extra,
+                    text("x"),
+                ],
             )])
         };
         let output = xml(&shape(gradient)).unwrap();
@@ -2226,11 +2315,9 @@ mod tests {
             .unwrap();
         assert_eq!(props.picture, 0);
         let bytes = properties(&[(0x100, i32::MAX as u32)]);
-        assert!(
-            props
+        assert!(props
             .read(parse_record_at(&bytes, 0, &mut 100).unwrap(), &mut 100)
-                .is_err()
-        );
+            .is_err());
     }
 
     #[test]
@@ -2363,7 +2450,10 @@ mod tests {
                 media: None,
             };
             let record = parse_records(&bytes, &mut MAX_RECORDS.clone()).unwrap()[0];
-            assert!(writer.node(record, false, 0, true).unwrap_err().contains(message));
+            assert!(writer
+                .node(record, false, 0, true)
+                .unwrap_err()
+                .contains(message));
         }
     }
 
@@ -2427,11 +2517,9 @@ mod tests {
             &[(0x88, 4)],
             &[(0x88, 5)],
         ] {
-            assert!(
-                !xml(&drawing(vec![shape(values)]))
+            assert!(!xml(&drawing(vec![shape(values)]))
                 .unwrap()
-                    .contains(" vert=")
-            );
+                .contains(" vert="));
         }
         for flags in [0xa00, 0xa40, 0xa80, 0xac0] {
             let out = xml(&drawing(vec![sp(
@@ -2445,17 +2533,13 @@ mod tests {
             .unwrap();
             assert!(out.contains("<a:bodyPr") && out.contains(" vert=\"eaVert\""));
         }
-        assert!(
-            xml(&drawing(vec![shape(&[(0x88, 1), (0x89, 0)])]))
+        assert!(xml(&drawing(vec![shape(&[(0x88, 1), (0x89, 0)])]))
             .unwrap()
-                .contains(" vert=\"eaVert\"")
-        );
+            .contains(" vert=\"eaVert\""));
         for direction in 1..=3 {
-            assert!(
-                !xml(&drawing(vec![shape(&[(0x88, 1), (0x89, direction)])]))
+            assert!(!xml(&drawing(vec![shape(&[(0x88, 1), (0x89, direction)])]))
                 .unwrap()
-                    .contains(" vert=")
-            );
+                .contains(" vert="));
         }
     }
 
@@ -2501,19 +2585,15 @@ mod tests {
     #[test]
     fn validates_complex_property_tails_and_charges_property_work() {
         let malformed = drawing(vec![sp(0x200, vec![properties(&[(0x8380, 100)])])]);
-        assert!(
-            xml(&malformed)
+        assert!(xml(&malformed)
             .unwrap_err()
-                .contains("complex shape property")
-        );
+            .contains("complex shape property"));
         let opts = properties(&[(4, 0), (0x85, 0)]);
         let entry = parse_records(&opts, &mut 1).unwrap()[0];
-        assert!(
-            Properties::default()
+        assert!(Properties::default()
             .read(entry, &mut 1)
             .unwrap_err()
-                .contains("work budget")
-        );
+            .contains("work budget"));
     }
 
     #[test]
@@ -2568,12 +2648,10 @@ mod tests {
             media: None,
         };
         let record = parse_records(&group, &mut MAX_RECORDS.clone()).unwrap()[0];
-        assert!(
-            writer
+        assert!(writer
             .node(record, true, 0, true)
             .unwrap_err()
-                .contains("nesting")
-        );
+            .contains("nesting"));
     }
 
     #[test]
@@ -2657,13 +2735,11 @@ mod tests {
 
     #[test]
     fn rejects_truncated_anchors_and_unbounded_xml() {
-        assert!(
-            xml(&drawing(vec![sp(
+        assert!(xml(&drawing(vec![sp(
             0x200,
             vec![record(0, 0xf010, &[0; 7]), text("x")]
         )]))
-            .is_err()
-        );
+        .is_err());
         let bytes = drawing(vec![sp(
             0x200,
             vec![
@@ -2671,8 +2747,7 @@ mod tests {
                 text("\r".repeat(100).as_str()),
             ],
         )]);
-        assert!(
-            render(
+        assert!(render(
             &bytes,
             &[],
             &mut MAX_RECORDS.clone(),
@@ -2681,7 +2756,6 @@ mod tests {
             None,
             None,
         )
-            .is_err()
-        );
+        .is_err());
     }
 }

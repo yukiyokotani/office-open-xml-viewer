@@ -16,6 +16,7 @@ use docx_model::{BodyElement, BreakType, DocRun, ImageRun};
 
 mod borders;
 mod margins;
+mod preferences;
 
 pub(super) fn project(
     story: &Story<'_>,
@@ -23,7 +24,7 @@ pub(super) fn project(
     formatting: &mut formatting::Formatting<'_>,
     numbering: &mut numbering::direct::Store,
     pictures: &mut pictures::Store<'_>,
-    mut floating: Option<&mut floating::Store<'_>>,
+    mut floating: Option<(&mut floating::Store<'_>, floating::Part)>,
     budget: &mut ModelBudget,
     body: &mut Vec<BodyElement>,
     ending_kind: Option<&str>,
@@ -70,10 +71,12 @@ pub(super) fn project(
     )?;
     margins::resolve(&mut prepared, &table_context, formatting)?;
     borders::resolve(&mut prepared, &table_context, formatting, budget)?;
+    preferences::resolve(&mut prepared, &table_context, formatting)?;
     if formatting.use_raw_table_shading() {
         resolve_table_cell_shading(&mut prepared, &table_context, formatting)?;
     }
-    let mut tables = Writer::new(table_sequence);
+    // Only the main story passes a floating-drawing store.
+    let mut tables = Writer::with_positioned_tables(table_sequence, floating.is_some());
     for (paragraph_index, prepared) in prepared.into_iter().enumerate() {
         let PreparedParagraph {
             source,
@@ -124,6 +127,11 @@ pub(super) fn project(
         let direct =
             formatting.direct_paragraph(style, table_style, mark_fc, mark_prm, &story.prcs)?;
         let mut paragraph = direct.paragraph;
+        if table_depth != 0 && paragraph.frame_pr.is_some() {
+            // The DOCX renderer positions frames only in the body flow; a
+            // framed cell paragraph would silently lay out in flow.
+            formatting.unsupported_paragraph_properties = true;
+        }
         if let Some((reference, marker)) = direct.numbering {
             paragraph.numbering = Some(Box::new(
                 formatting.direct_numbering(numbering, reference, &marker, &paragraph)?,
@@ -160,7 +168,10 @@ pub(super) fn project(
                         },
                         |part, run| {
                             if let Some(mut run) = run.flatten() {
-                                budget.text(&mut paragraph.runs, &mut run, part)?;
+                                let part = crate::doc::character::Properties::direct_run_text(
+                                    &mut run, part,
+                                )?;
+                                budget.text(&mut paragraph.runs, &mut run, &part)?;
                             }
                             Ok(())
                         },
@@ -254,9 +265,14 @@ pub(super) fn project(
                     }
                 }
                 Token::FloatingPicture => {
-                    let store = floating.as_deref_mut().ok_or_else(|| {
-                        unsupported("direct DOC model does not support header floating pictures")
-                    })?;
+                    // Textbox stories cannot host floating drawings; Word
+                    // anchors them only in the main and header documents.
+                    let Some((store, part)) = floating.as_mut() else {
+                        return Err(unsupported(
+                            "direct DOC model found a floating drawing in a textbox story",
+                        ));
+                    };
+                    let part = *part;
                     let (_, fc, piece) = story
                         .position(cp)
                         .ok_or_else(|| unsupported("Word floating picture outside piece table"))?;
@@ -270,24 +286,48 @@ pub(super) fn project(
                     else {
                         continue;
                     };
-                    let image: Option<floating::DirectFloatingPicture> =
-                        store.direct_picture(cp, &mut budget.remaining_bytes)?;
-                    if let Some(image) = image {
-                        host.anchor_occurrence_id = Some(image.occurrence_id);
-                        let host_payload = std::mem::size_of::<docx_model::AnchorHostMetrics>()
-                            .checked_add(host.font_family.as_ref().map_or(0, String::capacity))
-                            .and_then(|bytes| {
-                                bytes.checked_add(
-                                    host.font_family_east_asia
-                                        .as_ref()
-                                        .map_or(0, String::capacity),
-                                )
-                            })
-                            .ok_or("OUTPUT_TOO_LARGE")?;
-                        budget.charge(host_payload)?;
-                        budget.push(&mut paragraph.runs, DocRun::AnchorHost(host))?;
-                        budget.push(&mut paragraph.runs, DocRun::Image(Box::new(image.image)))?;
-                    }
+                    let Some(drawing) =
+                        store.direct_drawing(part, cp, &mut budget.remaining_bytes)?
+                    else {
+                        continue;
+                    };
+                    let (occurrence_id, run) = match drawing {
+                        floating::DirectFloating::Picture(picture) => (
+                            picture.occurrence_id,
+                            DocRun::Image(Box::new(picture.image)),
+                        ),
+                        floating::DirectFloating::Shape(mut shape) => {
+                            if let Some(index) = shape.text {
+                                let textboxes = store.textbox(part).ok_or_else(|| {
+                                    unsupported("Word shape text lacks its textbox story")
+                                })?;
+                                shape.shape.text_box_content = textbox_content(
+                                    textboxes,
+                                    index,
+                                    shape.spid,
+                                    formatting,
+                                    pictures,
+                                    budget,
+                                    tables.sequence(),
+                                )?;
+                            }
+                            (shape.occurrence_id, DocRun::Shape(Box::new(shape.shape)))
+                        }
+                    };
+                    host.anchor_occurrence_id = Some(occurrence_id);
+                    let host_payload = std::mem::size_of::<docx_model::AnchorHostMetrics>()
+                        .checked_add(host.font_family.as_ref().map_or(0, String::capacity))
+                        .and_then(|bytes| {
+                            bytes.checked_add(
+                                host.font_family_east_asia
+                                    .as_ref()
+                                    .map_or(0, String::capacity),
+                            )
+                        })
+                        .ok_or("OUTPUT_TOO_LARGE")?;
+                    budget.charge(host_payload)?;
+                    budget.push(&mut paragraph.runs, DocRun::AnchorHost(host))?;
+                    budget.push(&mut paragraph.runs, run)?;
                 }
                 Token::NoteReference(reference) => {
                     let id = reference.id().to_string();
@@ -504,7 +544,8 @@ fn push_control_text(
         &story.prcs,
         link,
     )? {
-        budget.text(&mut paragraph.runs, &mut run, text)?;
+        let text = crate::doc::character::Properties::direct_run_text(&mut run, text)?;
+        budget.text(&mut paragraph.runs, &mut run, &text)?;
     }
     Ok(())
 }
@@ -668,6 +709,96 @@ fn evaluated_field_run(
     Ok(run)
 }
 
+/// Project one textbox's text (MS-DOC 2.3.6, 2.9.106) through the ordinary
+/// story projection into the DOCX text box block stream (ECMA-376 17.3.4.7
+/// `w:txbxContent`). The textbox range ends with its final paragraph mark.
+#[allow(clippy::too_many_arguments)]
+fn textbox_content(
+    textboxes: &floating::textbox::Textboxes<'_>,
+    index: usize,
+    spid: u32,
+    formatting: &mut formatting::Formatting<'_>,
+    pictures: &mut pictures::Store<'_>,
+    budget: &mut ModelBudget,
+    table_sequence: &mut usize,
+) -> Result<Vec<docx_model::TextBoxBlockWire>, String> {
+    let (text, base_cp) = textboxes.text(index, spid)?;
+    // MS-DOC 2.8.25: textbox documents have their own Plcfld (PlcfFldTxbx,
+    // PlcffldHdrTxbx) that is not validated here yet. Keep fields closed
+    // rather than show stale results of fields Word evaluates.
+    if text.contains(['\u{13}', '\u{14}', '\u{15}']) {
+        return Err(unsupported(
+            "direct DOC model does not yet project fields inside textboxes",
+        ));
+    }
+    // Each occurrence re-tokenizes its range: charge that scratch work.
+    budget.charge(text.len())?;
+    let paragraphs = super::super::tokenize_with_fields(
+        text,
+        &mut super::super::Fields::default(),
+        base_cp,
+        true,
+    );
+    let mut body = Vec::new();
+    let mut numbering = numbering::direct::Store::default();
+    numbering.begin_story()?;
+    project(
+        &textboxes.story,
+        paragraphs,
+        formatting,
+        &mut numbering,
+        pictures,
+        None,
+        budget,
+        &mut body,
+        None,
+        table_sequence,
+    )?;
+    // List counters shared between textboxes and the main story, and breaks
+    // inside a textbox, have no Office control yet: keep them fail-closed.
+    let numbered = || unsupported("direct DOC model does not yet number textbox paragraphs");
+    let mut tables = Vec::new();
+    for block in &body {
+        match block {
+            BodyElement::Paragraph(paragraph) if paragraph.numbering.is_some() => {
+                return Err(numbered())
+            }
+            BodyElement::Paragraph(_) => {}
+            BodyElement::Table(table) => tables.push(table.as_ref()),
+            _ => {
+                return Err(unsupported(
+                    "direct DOC model does not support breaks inside textboxes",
+                ))
+            }
+        }
+    }
+    while let Some(table) = tables.pop() {
+        for element in table
+            .rows
+            .iter()
+            .flat_map(|row| &row.cells)
+            .flat_map(|cell| &cell.content)
+        {
+            match element {
+                docx_model::CellElement::Paragraph(paragraph) if paragraph.numbering.is_some() => {
+                    return Err(numbered())
+                }
+                docx_model::CellElement::Paragraph(_) => {}
+                docx_model::CellElement::Table(table) => tables.push(table.as_ref()),
+            }
+        }
+    }
+    budget.charge(
+        body.len()
+            .checked_mul(std::mem::size_of::<docx_model::TextBoxBlockWire>())
+            .ok_or("OUTPUT_TOO_LARGE")?,
+    )?;
+    Ok(body
+        .into_iter()
+        .map(docx_model::TextBoxBlockWire::Body)
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::table_tests::with_papx;
@@ -693,6 +824,7 @@ mod tests {
         inherited_margins: bool,
         table_borders: bool,
         default_table_style: bool,
+        default_table_style_indent: bool,
         conditional_borders: u16,
         conditional_borders_second: u16,
         conditional_border_nil: bool,
@@ -855,7 +987,12 @@ mod tests {
             for _ in 1..11 {
                 bytes.extend(0u16.to_le_bytes());
             }
-            let width_before = sprm(0xf617, &[3, 0, 0]);
+            let mut width_before = sprm(0xf617, &[3, 0, 0]);
+            if fixture.default_table_style_indent {
+                // Word's default table style also carries a zero dxa
+                // sprmTWidthIndent.
+                width_before.extend(sprm(0xf661, &[3, 0, 0]));
+            }
             append_table_style(&mut bytes, 0xfff, [&width_before, &[], &[]]);
             for _ in 12..15 {
                 bytes.extend(0u16.to_le_bytes());
@@ -1357,7 +1494,7 @@ mod tests {
                 &mut facts.formatting,
                 &mut numbering,
                 &mut facts.pictures,
-                Some(&mut facts.floating),
+                Some((&mut facts.floating, floating::Part::Main)),
                 &mut budget,
                 &mut body,
                 None,
@@ -1514,16 +1651,21 @@ mod tests {
                 std::array::from_fn(|_| Some(("0000ff".into(), 2.0))),
             ]
         );
-        // The retained whole-table TIstd admission gate is independent of the
-        // now-resolved border facts.
-        assert!(projected.unsupported_table);
+        assert!(!projected.unsupported_table);
     }
 
     fn conditional_border_grid_with_rows(
         fixture: StyleFixture,
         rows: [Vec<u8>; 3],
     ) -> ProjectedTable {
-        project_table(
+        try_conditional_border_grid_with_rows(fixture, rows).unwrap()
+    }
+
+    fn try_conditional_border_grid_with_rows(
+        fixture: StyleFixture,
+        rows: [Vec<u8>; 3],
+    ) -> Result<ProjectedTable, String> {
+        try_project_table(
             "a\u{7}b\u{7}c\u{7}\u{7}d\u{7}e\u{7}f\u{7}\u{7}g\u{7}h\u{7}i\u{7}\u{7}\r",
             &[
                 (0, 2, cell()),
@@ -1558,8 +1700,8 @@ mod tests {
     fn native_story_maps_first_row_conditional_borders_to_region_edges() {
         let projected = conditional_border_grid(table_style_condition::FIRST_ROW, 1 << 5);
         assert!(
-            projected.unsupported_table,
-            "the global TIstd gate remains active"
+            !projected.unsupported_table,
+            "supported TIstd/TTlp selection is admitted"
         );
         let none = [None, None, None, None];
         assert_eq!(
@@ -1716,8 +1858,8 @@ mod tests {
     fn native_story_maps_first_column_conditional_borders_to_region_edges() {
         let projected = conditional_border_grid(table_style_condition::FIRST_COLUMN, 1 << 7);
         assert!(
-            projected.unsupported_table,
-            "the global TIstd gate remains active"
+            !projected.unsupported_table,
+            "supported TIstd/TTlp selection is admitted"
         );
         let none = [None, None, None, None];
         assert_eq!(
@@ -1755,8 +1897,8 @@ mod tests {
     fn native_story_maps_last_row_conditional_borders_to_region_edges() {
         let projected = conditional_border_grid(table_style_condition::LAST_ROW, 1 << 6);
         assert!(
-            projected.unsupported_table,
-            "the global TIstd gate remains active"
+            !projected.unsupported_table,
+            "supported TIstd/TTlp selection is admitted"
         );
         let none = [None, None, None, None];
         assert_eq!(
@@ -1794,8 +1936,8 @@ mod tests {
     fn native_story_maps_last_column_conditional_borders_to_region_edges() {
         let projected = conditional_border_grid(table_style_condition::LAST_COLUMN, 1 << 8);
         assert!(
-            projected.unsupported_table,
-            "the global TIstd gate remains active"
+            !projected.unsupported_table,
+            "supported TIstd/TTlp selection is admitted"
         );
         let none = [None, None, None, None];
         assert_eq!(
@@ -2022,13 +2164,21 @@ mod tests {
                 row_cells(options, 3),
             ],
         ] {
-            let projected = conditional_border_grid_with_rows(
+            let projected = match try_conditional_border_grid_with_rows(
                 StyleFixture {
                     conditional_borders: condition,
                     ..StyleFixture::default()
                 },
                 rows,
-            );
+            ) {
+                Ok(projected) => projected,
+                // A styled right-to-left row is rejected outright by the
+                // preferred-indent projection gate.
+                Err(error) => {
+                    assert!(error.contains("right-to-left"), "{error}");
+                    continue;
+                }
+            };
             assert!(projected.unsupported_table);
             assert_ne!(
                 projected.borders[0][0],
@@ -2078,8 +2228,8 @@ mod tests {
         );
         assert_eq!(row_then_column.borders, column_then_row.borders);
         assert!(
-            row_then_column.unsupported_table,
-            "global TIstd gate remains"
+            !row_then_column.unsupported_table,
+            "supported TIstd/TTlp selection is admitted"
         );
         let none = [None, None, None, None];
         assert_eq!(
@@ -2271,7 +2421,10 @@ mod tests {
             },
             std::array::from_fn(|_| row_cells(1 << 5, 3)),
         );
-        assert!(projected.unsupported_table, "global TIstd gate remains");
+        assert!(
+            !projected.unsupported_table,
+            "supported TIstd/TTlp selection is admitted"
+        );
         assert_eq!(
             projected.borders[..3],
             [
@@ -2518,7 +2671,7 @@ mod tests {
                 ["0", "720", "0", "108"],
             ]
         );
-        assert!(projected.unsupported_table);
+        assert!(!projected.unsupported_table);
     }
 
     #[test]
@@ -2539,8 +2692,8 @@ mod tests {
                 assert_eq!(*margin, [3.6, 3.6, 3.6, 3.6]);
             }
             assert!(
-                projected.unsupported_table,
-                "the global TIstd gate remains active"
+                !projected.unsupported_table,
+                "supported TIstd/TTlp selection is admitted"
             );
         }
     }
@@ -2629,7 +2782,7 @@ mod tests {
         );
         assert_eq!(projected.margins[0][1], 0.0);
         assert_eq!(projected.margins[1][1], 36.0);
-        assert!(projected.unsupported_table);
+        assert!(!projected.unsupported_table);
     }
 
     #[test]
@@ -2662,7 +2815,7 @@ mod tests {
             projected.margins.iter().map(|m| m[1]).collect::<Vec<_>>(),
             [18.0, 0.0, 0.0]
         );
-        assert!(projected.unsupported_table);
+        assert!(!projected.unsupported_table);
     }
 
     #[test]
@@ -2695,7 +2848,7 @@ mod tests {
                 Some("008000".into()),
             ]
         );
-        assert!(projected.unsupported_table);
+        assert!(!projected.unsupported_table);
     }
 
     #[test]
@@ -2720,9 +2873,7 @@ mod tests {
         );
 
         assert_eq!(projected.backgrounds, [Some("0000ff".into())]);
-        // TIstd and TTlp remain independently gated; this assertion verifies
-        // the actual CFB-to-story shading path without claiming admission.
-        assert!(projected.unsupported_table);
+        assert!(!projected.unsupported_table);
     }
 
     #[test]
@@ -2798,7 +2949,7 @@ mod tests {
                 Some("000000".into()),
             ]
         );
-        assert!(projected.unsupported_table);
+        assert!(!projected.unsupported_table);
     }
 
     #[test]
@@ -2811,9 +2962,7 @@ mod tests {
         // control (green, red, blue); the fourth keeps the disabled-band
         // row-local TTlp regression in the same acquisition path.
         assert_eq!(projected.colors, ["008000", "ff0000", "0000ff", "000000"]);
-        // TIstd and TTlp remain deliberately admission-gated even though
-        // this internal projection verifies their acquired context.
-        assert!(projected.unsupported_table);
+        assert!(!projected.unsupported_table);
     }
 
     #[test]
@@ -2822,7 +2971,7 @@ mod tests {
         // Office keeps the ordinary row bands unshifted when the enabled
         // first-row CCnf is empty: red, blue, red.
         assert_eq!(projected.colors, ["ff0000", "0000ff", "ff0000", "000000"]);
-        assert!(projected.unsupported_table);
+        assert!(!projected.unsupported_table);
     }
 
     #[test]
@@ -2835,7 +2984,7 @@ mod tests {
         // the CHPX horizontal bands. The final row disables bands via TTlp.
         assert_eq!(projected.colors, ["000000", "ff0000", "0000ff", "000000"]);
         assert_eq!(projected.alignments, ["center", "left", "left", "left"]);
-        assert!(projected.unsupported_table);
+        assert!(!projected.unsupported_table);
         assert!(!projected.unsupported_paragraph);
     }
 
@@ -2849,7 +2998,7 @@ mod tests {
         // presence, excluding that row from the horizontal color bands.
         assert_eq!(projected.colors, ["000000", "ff0000", "0000ff", "000000"]);
         assert_eq!(projected.sizes, [14.0, 10.0, 10.0, 10.0]);
-        assert!(projected.unsupported_table);
+        assert!(!projected.unsupported_table);
         assert!(!projected.unsupported_character);
         assert!(!projected.unsupported_paragraph);
     }
@@ -2874,7 +3023,7 @@ mod tests {
         assert_eq!(projected.colors, ["0000ff", "000000"]);
         assert_eq!(projected.sizes, [14.0, 10.0]);
         assert_eq!(projected.alignments, ["center", "left"]);
-        assert!(projected.unsupported_table);
+        assert!(!projected.unsupported_table);
         assert!(!projected.unsupported_character);
         assert!(!projected.unsupported_paragraph);
     }
@@ -2929,9 +3078,7 @@ mod tests {
             .high_ansi_fonts
             .iter()
             .all(|font| font.as_deref() == Some("Courier New")));
-        // TIstd and TTlp remain admission-gated independently of the verified
-        // internal formatting projection.
-        assert!(projected.unsupported_table);
+        assert!(!projected.unsupported_table);
         assert!(!projected.unsupported_character);
         assert!(!projected.unsupported_paragraph);
     }
@@ -3018,8 +3165,205 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["360", "360", "360", "360", "720"]
         );
-        assert!(projected.unsupported_table);
+        assert!(!projected.unsupported_table);
         assert!(!projected.unsupported_character);
         assert!(!projected.unsupported_paragraph);
+    }
+
+    /// A one-cell row selecting table style `style`, with `before` authored
+    /// before sprmTIstd and `after` after sprmTTlp.
+    fn styled_row(style: u16, before: &[u8], after: &[u8]) -> Vec<u8> {
+        let mut row = [
+            sprm(0x2416, &[1]),
+            sprm(0x2417, &[1]),
+            sprm(0x7621, &[0, 1, 0xe8, 3]),
+        ]
+        .concat();
+        row.extend(before);
+        row.extend(sprm(0x563a, &style.to_le_bytes()));
+        row.extend(sprm(0x740a, &[0xff, 0xff, 0xa0, 0x04]));
+        row.extend(after);
+        row.extend(sprm(0x2416, &[1]));
+        if row.len() % 2 == 0 {
+            row.extend(sprm(0x2416, &[1]));
+        }
+        row
+    }
+
+    fn try_default_styled_table(before: &[u8], after: &[u8]) -> Result<ProjectedTable, String> {
+        try_project_table(
+            "a\u{7}\u{7}\r",
+            &[
+                (0, 2, cell()),
+                (2, 3, styled_row(11, before, after)),
+                (3, 4, Vec::new()),
+            ],
+            StyleFixture {
+                default_table_style: true,
+                default_table_style_indent: true,
+                ..StyleFixture::default()
+            },
+        )
+    }
+
+    #[test]
+    fn native_story_admits_default_style_selection_with_rsid_and_row_preferences() {
+        let after = [
+            sprm(0xd635, &[5, 0, 1, 3, 0xe8, 3]),
+            // [MS-DOC] 2.9.28: ignored because the cell width is ftsDxa.
+            sprm(0xd639, &[3, 0, 1, 1]),
+            // Preferred indent differs from the physical origin; see
+            // table::PreferredIndent.
+            sprm(0xf661, &[3, 0x6d, 0]),
+            // ftsNil before and a zero dxa after both match the grid.
+            sprm(0xf617, &[0, 0, 0]),
+            sprm(0xf618, &[3, 0, 0]),
+            sprm(0x7479, &[1, 2, 3, 4]),
+        ]
+        .concat();
+        let projected = try_default_styled_table(&sprm(0x7479, &[5, 6, 7, 8]), &after).unwrap();
+        assert_eq!(projected.markers, ["a"]);
+        assert!(!projected.unsupported_table);
+        assert!(!projected.unsupported_character);
+        assert!(!projected.unsupported_paragraph);
+    }
+
+    #[test]
+    fn native_story_gates_tistd_after_an_unimplemented_replacement() {
+        // TVertAlign is replaced by TIstd ([MS-DOC] 2.6.3), but that
+        // replacement is not implemented. The same record after TIstd is an
+        // ordinary direct override.
+        let alignment = sprm(0xd62c, &[3, 0, 1, 1]);
+        assert!(
+            try_default_styled_table(&alignment, &[])
+                .unwrap()
+                .unsupported_table
+        );
+        assert!(
+            !try_default_styled_table(&[], &alignment)
+                .unwrap()
+                .unsupported_table
+        );
+    }
+
+    #[test]
+    fn native_story_rejects_row_preferences_it_cannot_represent() {
+        // fNoWrap without an ftsDxa preferred cell width changes wrapping.
+        let error = try_default_styled_table(&[], &sprm(0xd639, &[3, 0, 1, 1]))
+            .err()
+            .unwrap();
+        assert!(error.contains("no-wrap"), "{error}");
+        // A leading preferred width without a matching physical grid slot.
+        let error = try_default_styled_table(&[], &sprm(0xf617, &[3, 0x7c, 0]))
+            .err()
+            .unwrap();
+        assert!(error.contains("preferred row part"), "{error}");
+        let error = try_default_styled_table(&[], &sprm(0xf618, &[1, 0, 0]))
+            .err()
+            .unwrap();
+        assert!(error.contains("preferred row part"), "{error}");
+        // hideMark and cell text flow have no model representation.
+        for unmodeled in [sprm(0xd642, &[3, 0, 1, 1]), sprm(0x7629, &[0, 1, 5, 0])] {
+            assert!(
+                try_default_styled_table(&[], &unmodeled)
+                    .unwrap()
+                    .unsupported_table
+            );
+        }
+    }
+
+    fn cell_border_sides(sides: u8, border: [u8; 8]) -> Vec<u8> {
+        let mut operand = vec![11, 0, 1, sides];
+        operand.extend(border);
+        sprm(0xd62f, &operand)
+    }
+
+    #[test]
+    fn native_story_projects_post_tistd_nil_cell_borders_as_explicit_absence() {
+        // All six sides, including both diagonals, carry NilBrc.
+        let nil = cell_border_sides(0x3f, [0xff; 8]);
+        let projected = try_default_styled_table(&[], &nil).unwrap();
+        assert!(!projected.unsupported_table);
+        assert_eq!(
+            projected.border_styles,
+            [std::array::from_fn(|_| Some("nil".to_string()))]
+        );
+
+        // A drawn diagonal has no cell-model representation.
+        let diagonal = cell_border_sides(0x10, border_bytes([0, 0, 0], 8));
+        let projected = try_default_styled_table(&[], &diagonal);
+        assert!(projected.map_or(true, |table| table.unsupported_table));
+    }
+
+    #[test]
+    fn native_story_admits_rtl_direct_borders_when_the_style_has_none() {
+        let rtl = [
+            sprm(0x560b, &1u16.to_le_bytes()),
+            // Equal to the projected origin, so both indent readings agree.
+            sprm(0xf661, &[3, 0, 0]),
+            cell_borders(0, 1, [0, 0, 0xff], 16),
+        ]
+        .concat();
+        let projected = try_default_styled_table(&[], &rtl).unwrap();
+        assert!(!projected.unsupported_table);
+        assert_eq!(
+            projected.borders,
+            [std::array::from_fn(|_| Some(("0000ff".into(), 2.0)))]
+        );
+
+        // The default style's inherited zero indent equals the origin too.
+        let rtl_inherited = sprm(0x560b, &1u16.to_le_bytes());
+        assert!(
+            !try_default_styled_table(&[], &rtl_inherited)
+                .unwrap()
+                .unsupported_table
+        );
+        let moved = sprm(0x9601, &200i16.to_le_bytes());
+        let error = try_default_styled_table(&moved, &rtl_inherited)
+            .err()
+            .unwrap();
+        assert!(error.contains("right-to-left"), "{error}");
+
+        // A differing preferred indent is not covered by the LTR evidence.
+        let rtl_indented = [
+            sprm(0x560b, &1u16.to_le_bytes()),
+            sprm(0xf661, &[3, 0x6d, 0]),
+        ]
+        .concat();
+        let error = try_default_styled_table(&[], &rtl_indented).err().unwrap();
+        assert!(error.contains("right-to-left"), "{error}");
+    }
+
+    #[test]
+    fn native_story_checks_inherited_width_before_against_the_leading_grid() {
+        let project = |second_after: &[u8]| {
+            try_project_table(
+                "a\u{7}\u{7}b\u{7}\u{7}\r",
+                &[
+                    (0, 2, cell()),
+                    (2, 3, styled_row(11, &[], &[])),
+                    (3, 5, cell()),
+                    (
+                        5,
+                        6,
+                        styled_row(11, &sprm(0x9601, &360i16.to_le_bytes()), second_after),
+                    ),
+                    (6, 7, Vec::new()),
+                ],
+                StyleFixture {
+                    default_table_style: true,
+                    default_table_style_indent: true,
+                    ..StyleFixture::default()
+                },
+            )
+        };
+        // The default style's zero preferred leading width disagrees with the
+        // second row's 360-twip physical leading grid slot.
+        let error = project(&[]).err().unwrap();
+        assert!(error.contains("preferred row part"), "{error}");
+        // A direct preference equal to that slot overrides the style value.
+        let projected = project(&sprm(0xf617, &[3, 0x68, 0x01])).unwrap();
+        assert_eq!(projected.markers, ["a", "b"]);
+        assert!(!projected.unsupported_table);
     }
 }

@@ -1,5 +1,10 @@
-import { measureXlsFont, type LegacyXlsFontMeasurement, type LegacyXlsNormalFont } from './xls-font-metrics.js';
-export { measureLegacyXlsNormalFontInDocument } from './xls-font-metrics.js';
+import {
+  measureLegacyXlsNormalFontInDocument,
+  measureXlsFont,
+  type LegacyXlsFontMeasurement,
+  type LegacyXlsNormalFont,
+} from './xls-font-metrics.js';
+export { measureLegacyXlsNormalFontInDocument };
 export type { LegacyXlsFontMeasurement, LegacyXlsNormalFont } from './xls-font-metrics.js';
 
 export const XLS_FONT_REQUEST = 'legacy-xls-font-request';
@@ -18,6 +23,15 @@ function isFont(value: unknown): value is LegacyXlsNormalFont {
     && typeof font.sizePoints === 'number' && Number.isFinite(font.sizePoints)
     && font.sizePoints > 0 && font.sizePoints <= 65535 / 20
     && typeof font.bold === 'boolean' && typeof font.italic === 'boolean';
+}
+
+/** The Normal-font measurement a direct XLS load uses: the caller's, else the
+ * named font loaded in the current document (main thread with a DOM). Kept in
+ * this opt-in module so host packages carry no legacy measurement policy. */
+export function resolveXlsFontMeasurement(
+  measure: LegacyXlsFontMeasurement | undefined,
+): LegacyXlsFontMeasurement | undefined {
+  return measure ?? (typeof document !== 'undefined' ? measureLegacyXlsNormalFontInDocument : undefined);
 }
 
 /** One metric exchange for one disposable worker; functions never cross realms. */

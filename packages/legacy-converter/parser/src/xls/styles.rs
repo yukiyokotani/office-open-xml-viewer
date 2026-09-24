@@ -1164,6 +1164,78 @@ mod tests {
         assert_eq!(xml.matches("fontId=\"1\"").count(), 1);
     }
     #[test]
+    fn extended_theme_colors_zero_to_three_follow_excels_light_dark_order() {
+        const A: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
+        const R: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
+        const REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+        let theme = format!("<a:theme xmlns:a=\"{A}\"><a:themeElements><a:clrScheme name=\"T\"><a:dk1><a:srgbClr val=\"111111\"/></a:dk1><a:lt1><a:srgbClr val=\"EEEEEE\"/></a:lt1><a:dk2><a:srgbClr val=\"222222\"/></a:dk2><a:lt2><a:srgbClr val=\"DDDDDD\"/></a:lt2></a:clrScheme></a:themeElements></a:theme>");
+        let package = crate::ooxml::write_package(&[
+            ("_rels/.rels".into(), format!("<Relationships xmlns=\"{R}\"><Relationship Id=\"main\" Type=\"{REL}/officeDocument\" Target=\"theme/manager.xml\"/></Relationships>")),
+            ("theme/manager.xml".into(), format!("<a:themeManager xmlns:a=\"{A}\"/>")),
+            ("theme/_rels/manager.xml.rels".into(), format!("<Relationships xmlns=\"{R}\"><Relationship Id=\"t\" Type=\"{REL}/theme\" Target=\"theme1.xml\"/></Relationships>")),
+            ("theme/theme1.xml".into(), theme),
+        ], 1024 * 1024).unwrap();
+        let mut theme_record = vec![0; 16];
+        theme_record[..2].copy_from_slice(&0x0896u16.to_le_bytes());
+        theme_record.extend_from_slice(&package);
+        let font = font();
+        let mut xf = [0; 20];
+        xf[17] = 6; // Solid fill and CellXF.fHasXFExt.
+        let mut crc = [0; 20];
+        crc[..2].copy_from_slice(&0x087cu16.to_le_bytes());
+        crc[14..16].copy_from_slice(&16u16.to_le_bytes());
+        crc[16..].copy_from_slice(&0x344d21a3u32.to_le_bytes());
+        for (index, expected) in [
+            (0u32, "EEEEEE"),
+            (1, "111111"),
+            (2, "DDDDDD"),
+            (3, "222222"),
+        ] {
+            let mut ext = vec![0; 20];
+            ext[..2].copy_from_slice(&0x087du16.to_le_bytes());
+            ext[14] = 1;
+            ext[18] = 1;
+            ext.extend_from_slice(&4u16.to_le_bytes());
+            ext.extend_from_slice(&20u16.to_le_bytes());
+            ext.extend_from_slice(&[3, 0, 0, 0]);
+            ext.extend_from_slice(&index.to_le_bytes());
+            ext.extend_from_slice(&[0; 8]);
+            let mut records = vec![
+                Record {
+                    kind: 0x0896,
+                    offset: 0,
+                    data: &theme_record,
+                },
+                Record {
+                    kind: 0x31,
+                    offset: 0,
+                    data: &font,
+                },
+            ];
+            records.extend((0..16).map(|_| Record {
+                kind: 0xe0,
+                offset: 0,
+                data: &xf,
+            }));
+            records.push(Record {
+                kind: 0x87c,
+                offset: 0,
+                data: &crc,
+            });
+            records.push(Record {
+                kind: 0x87d,
+                offset: 0,
+                data: &ext,
+            });
+            let xml = Styles::parse(&records).unwrap().xml().unwrap();
+            assert!(
+                xml.contains(&format!("<fgColor rgb=\"FF{expected}\"/>")),
+                "theme {index}: {xml}"
+            );
+        }
+    }
+
+    #[test]
     fn extended_color_tint_uses_the_spreadsheetml_tint_algorithm() {
         let font = font();
         let mut xf = [0; 20];

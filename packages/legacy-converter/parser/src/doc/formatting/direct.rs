@@ -79,6 +79,14 @@ impl Formatting<'_> {
             None => self.run_properties_with_table(style, table_style, fc, prm, prcs)?,
         };
         let mut paragraph = resolved.properties.direct_paragraph();
+        paragraph.outline_level = resolved.properties.direct_outline_level(style);
+        // ECMA-376 17.3.1.9 compares paragraph styles; the DOCX renderer does
+        // so through `style_id`. The DOC paragraph istd is that identity.
+        paragraph.style_id = Some(style.to_string());
+        match resolved.properties.direct_frame() {
+            Ok(frame) => paragraph.frame_pr = frame.map(Box::new),
+            Err(_) => self.unsupported_paragraph_properties = true,
+        }
         paragraph.mark_vanish = mark.direct_vanish();
         let mark_facts = mark.direct_font_facts(&self.fonts)?;
         paragraph.default_font_size = mark_facts.font_size;

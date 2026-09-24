@@ -5,9 +5,9 @@
 //! inheritance; it does not serialize or parse DrawingML as an intermediate.
 //!
 //! Internal producer groundwork, not a complete or publicly routed converter.
-//! Unresolved paragraph origins and percentage before/after spacing need further
-//! model admission support. Baseline information discarded by the native decoder
-//! cannot be recovered here. Keep these limits explicit before wiring a producer.
+//! Unresolved paragraph origins need further model admission support.
+//! Baseline information discarded by the native decoder cannot be recovered
+//! here. Keep these limits explicit before wiring a producer.
 
 use super::*;
 use ooxml_common::text::SpaceLine;
@@ -39,7 +39,7 @@ pub(in crate::ppt) fn paragraphs(
 #[derive(Clone, Copy, Default)]
 pub(in crate::ppt) struct DirectAxes<'a> {
     pub ruler: Option<ruler::Ruler<'a>>,
-    pub document: Option<ParagraphAxes>,
+    pub document: Option<DocumentAxes>,
 }
 
 pub(in crate::ppt) fn paragraphs_with_axes(
@@ -97,7 +97,13 @@ pub(in crate::ppt) fn paragraphs_with_axes(
         // paragraph's active level. Office-rendered binary counterfactuals
         // establish the document type-4 origin for ordinary level-0 freeform
         // text, including independent fallback beneath partial local axes.
-        // Callers gate that narrower fallback context.
+        // The same record's own level entries (2.9.35 lstLvl2-5) supply the
+        // higher levels: Office-saved decks whose level-1 local rulers omit
+        // the indent render the first line at the document level-1 indent,
+        // matching their authored OOXML, and not at the main master's
+        // Tx_TYPE_OTHER value, which differs from it by one master unit.
+        // A level missing from the document record stays unresolved; no
+        // other level is substituted. Callers gate the freeform context.
         if let Some(ruler) = axes.ruler {
             let level = usize::from(properties.level);
             if let Some(margin) = ruler.margins[level] {
@@ -110,11 +116,10 @@ pub(in crate::ppt) fn paragraphs_with_axes(
             // default tab size independently of the per-level origin arrays.
             properties.default_tab = ruler.default_tab_size.or(properties.default_tab);
         }
-        if properties.level == 0 {
-            if let Some(document) = axes.document {
-                properties.margin = properties.margin.or(document.margin);
-                properties.indent = properties.indent.or(document.indent);
-            }
+        if let Some(document) = axes.document {
+            let document = document[usize::from(properties.level)];
+            properties.margin = properties.margin.or(document.margin);
+            properties.indent = properties.indent.or(document.indent);
         }
         let number = auto_number::paragraph(&groups, &mut number_group, cp, para_end);
         let mut runs = Vec::new();
@@ -351,19 +356,27 @@ fn model_paragraph(
                 "implicit binary PowerPoint paragraph indent requires model admission context",
             )
         })?;
-    let spacing = |value: Option<i16>| -> Result<Option<i64>, String> {
+    // MS-PPT 2.2.20 ParaSpacing: 0..=13200 is a percentage of the text line
+    // height; a negative value is an absolute size in master units (1/8
+    // point). The percentage keeps its own model field: DrawingML
+    // spcBef/spcAft spcPct (ECMA-376 §21.1.2.2.9-.10, §21.1.2.3.11) uses the
+    // same line-relative unit, thousandths of a percent.
+    let spacing = |value: Option<i16>| -> Result<(Option<i64>, Option<f64>), String> {
         match value {
-            None => Ok(None),
-            Some(0) => Ok(Some(0)),
-            Some(1..) => Err(unsupported(
-                "percentage PowerPoint before/after spacing requires presentation model support",
+            None => Ok((None, None)),
+            Some(0) => Ok((Some(0), None)),
+            Some(v @ 1..=13200) => Ok((None, Some(f64::from(v) * 1000.0))),
+            Some(13201..) => Err(unsupported(
+                "invalid PowerPoint percentage before/after spacing",
             )),
             Some(v) => {
                 let raw = (-i32::from(v) * 100 + 4) / 8;
-                Ok(Some(i64::from(raw)))
+                Ok((Some(i64::from(raw)), None))
             }
         }
     };
+    let (space_before, space_before_pct) = spacing(paragraph.spacing[1])?;
+    let (space_after, space_after_pct) = spacing(paragraph.spacing[2])?;
     let space_line = match paragraph.spacing[0] {
         None => None,
         Some(v @ 0..=13200) => Some(SpaceLine::Pct {
@@ -409,8 +422,10 @@ fn model_paragraph(
         mar_l,
         mar_r: 0,
         indent,
-        space_before: spacing(paragraph.spacing[1])?,
-        space_after: spacing(paragraph.spacing[2])?,
+        space_before,
+        space_after,
+        space_before_pct,
+        space_after_pct,
         space_line,
         lvl: u32::from(paragraph.level),
         bullet,
@@ -549,12 +564,15 @@ mod tests {
         }
     }
 
+    fn document_level0(margin: Option<i16>, indent: Option<i16>) -> DocumentAxes {
+        let mut axes = [ParagraphAxes::default(); 5];
+        axes[0] = ParagraphAxes { margin, indent };
+        axes
+    }
+
     #[test]
     fn direct_origins_resolve_local_level_then_document_type4_level0_by_field() {
-        let document = ParagraphAxes {
-            margin: Some(180),
-            indent: Some(90),
-        };
+        let document = document_level0(Some(180), Some(90));
         let project = |level, ruler, levels: Option<&[Level]>| {
             paragraphs_with_axes(
                 "X",
@@ -629,39 +647,64 @@ mod tests {
     }
 
     #[test]
-    fn document_origin_does_not_fill_higher_levels_but_local_ruler_does() {
+    fn document_origin_fills_each_level_from_its_own_entry_only() {
+        let mut document = document_level0(Some(180), Some(90));
+        document[1] = ParagraphAxes {
+            margin: Some(288),
+            indent: Some(288),
+        };
+        document[2] = ParagraphAxes {
+            margin: Some(576),
+            indent: None,
+        };
         let axes = DirectAxes {
             ruler: None,
-            document: Some(ParagraphAxes {
-                margin: Some(180),
-                indent: Some(90),
-            }),
+            document: Some(document),
         };
-        let error = paragraphs_with_axes(
-            "X",
-            &plain_style(1),
-            Context::default(),
-            axes,
-            &mut 100,
-            &mut 100_000,
-        )
-        .unwrap_err();
-        assert!(error.contains("margin requires model admission context"));
+        let project = |level, axes| {
+            paragraphs_with_axes(
+                "X",
+                &plain_style(level),
+                Context::default(),
+                axes,
+                &mut 100,
+                &mut 100_000,
+            )
+        };
+        let model = project(1, axes).unwrap();
+        assert_eq!((model[0].mar_l, model[0].indent), (master_to_emu(288), 0));
 
-        let ruler = ruler_with_axes(
-            [None, Some(0), None, None, None],
-            [None, Some(0), None, None, None],
-        );
-        let model = paragraphs_with_axes(
-            "X",
-            &plain_style(1),
-            Context::default(),
+        // A level-1 local margin keeps the document level-1 first-line origin.
+        let ruler = ruler_with_axes([None, Some(612), None, None, None], [None; 5]);
+        let model = project(
+            1,
             DirectAxes {
                 ruler: Some(ruler),
-                document: axes.document,
+                document: Some(document),
             },
-            &mut 100,
-            &mut 100_000,
+        )
+        .unwrap();
+        assert_eq!(model[0].mar_l, master_to_emu(612));
+        assert_eq!(model[0].indent, master_to_emu(288 - 612));
+
+        // Neither level 0 nor another level stands in for an absent field.
+        assert!(project(2, axes)
+            .unwrap_err()
+            .contains("indent requires model admission context"));
+        assert!(project(3, axes)
+            .unwrap_err()
+            .contains("margin requires model admission context"));
+
+        let ruler = ruler_with_axes(
+            [None, None, Some(0), None, None],
+            [None, None, Some(0), None, None],
+        );
+        let model = project(
+            2,
+            DirectAxes {
+                ruler: Some(ruler),
+                document: Some(document),
+            },
         )
         .unwrap();
         assert_eq!((model[0].mar_l, model[0].indent), (0, 0));
@@ -1142,12 +1185,62 @@ mod tests {
     }
 
     #[test]
+    fn before_after_spacing_keeps_percentages_and_points_distinct() {
+        let character = Level::empty(0).character;
+        let project = |before, after| {
+            let paragraph = Paragraph {
+                spacing: [None, before, after],
+                margin: Some(0),
+                indent: Some(0),
+                ..Level::empty(0).paragraph
+            };
+            model_paragraph(
+                &paragraph,
+                None,
+                Context::default(),
+                vec![],
+                &character,
+                &mut 10,
+                &mut 10_000,
+            )
+            .unwrap()
+        };
+        // MS-PPT 2.2.20: 1..=13200 is a percentage of the line height.
+        for value in [1, 20, 100, 13_200] {
+            let model = project(Some(value), Some(value));
+            let expected = Some(f64::from(value) * 1000.0);
+            assert_eq!(
+                (model.space_before, model.space_before_pct),
+                (None, expected)
+            );
+            assert_eq!((model.space_after, model.space_after_pct), (None, expected));
+        }
+        // Zero and negative master units stay absolute points.
+        let model = project(Some(0), Some(-80));
+        assert_eq!(
+            (model.space_before, model.space_before_pct),
+            (Some(0), None)
+        );
+        assert_eq!(
+            (model.space_after, model.space_after_pct),
+            (Some(1000), None)
+        );
+        let model = project(None, None);
+        assert_eq!((model.space_before, model.space_before_pct), (None, None));
+        assert_eq!((model.space_after, model.space_after_pct), (None, None));
+    }
+
+    #[test]
     fn spacing_boundaries_and_unresolved_geometry_fail_closed() {
         let character = Level::empty(0).character;
         for (spacing, expected) in [
             (
-                [Some(13_200), Some(1), None],
-                "percentage PowerPoint before/after",
+                [Some(13_200), Some(13_201), None],
+                "invalid PowerPoint percentage before/after",
+            ),
+            (
+                [None, None, Some(i16::MAX)],
+                "invalid PowerPoint percentage before/after",
             ),
             (
                 [Some(13_201), None, None],
