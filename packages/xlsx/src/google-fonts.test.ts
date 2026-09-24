@@ -1,5 +1,12 @@
-import { xlsxFontPreloadNames, xlsxCjkFallback } from './google-fonts.js';
-import type { ParsedWorkbook } from './types.js';
+import { xlsxFontPreloadNames, xlsxCjkFallback, xlsxWorksheetOfficeFontRequests } from './google-fonts.js';
+import type { ParsedWorkbook, Worksheet } from './types.js';
+
+it('preflights the Normal font even when no text cell uses it', () => {
+  const worksheet = { defaultFontFamily: 'Arial', rows: [], shapeGroups: [] } as unknown as Worksheet;
+  expect(xlsxWorksheetOfficeFontRequests(worksheet)).toEqual([
+    { family: 'Arial', weight: 400, style: 'normal' },
+  ]);
+});
 import { describe, expect, it } from 'vitest';
 import type { FontPreloadEntry } from '@silurus/ooxml-core';
 import { XLSX_GOOGLE_FONTS } from './google-fonts.js';

@@ -111,6 +111,14 @@ export function xlsxOfficeFontRequests(wb: ParsedWorkbook | undefined): OfficeFo
  * text run with a catalogued exact style; cell requests remain Calibri-only. */
 export function xlsxWorksheetOfficeFontRequests(ws: Worksheet): OfficeFontFallbackRequest[] {
   const found = new Map<string, OfficeFontFallbackRequest>();
+  // The parser resolves Normal through cellStyleXfs[0].fontId. Preflight that
+  // authored face before measuring column MDW, including families that occur
+  // nowhere in a cell's text. Exact local bytes win over catalog references.
+  const normalFamily = ws.defaultFontFamily?.trim();
+  if (normalFamily && findReferenceFontMetrics(normalFamily, { weight: 400, style: 'normal' }).length) {
+    const request = { family: normalFamily, weight: 400, style: 'normal' } as const;
+    found.set(officeRequestKey(request), request);
+  }
   for (const row of ws.rows) for (const cell of row.cells) {
     if (cell.value.type !== 'text') continue;
     for (const run of cell.value.runs ?? []) {

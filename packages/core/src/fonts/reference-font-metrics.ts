@@ -12,6 +12,9 @@ export interface ReferenceFontMetricProfile {
   readonly unitsPerEm: number;
   /** Signed OS/2 xAvgCharWidth design units, when declared. */
   readonly xAvgCharWidth?: number | null;
+  /** Largest hmtx advance among Unicode digits 0–9, in design units. This is
+   * only an Excel Normal-font column metric, never a shaped text advance. */
+  readonly maxDigitAdvance?: number | null;
   readonly hhea: readonly [ascender: number, descender: number, lineGap: number];
   /** Derived OS/2 code-page class. Null means this source did not provide the
    * code-page field needed to classify Word's auto-line allocation. */
@@ -103,4 +106,31 @@ export function findReferenceFontMetrics(
   const query = normalizeFamilyName(familyOrAlias);
   if (!query) return EMPTY_RESULTS;
   return getAliasIndex().get(query)?.get(optionKey(options)) ?? EMPTY_RESULTS;
+}
+
+/** Metadata-only Excel MDW ratio for an unavailable authored Normal face.
+ * macOS prefers the system catalog and other hosts prefer the Office catalog.
+ * A populated preferred source with missing or conflicting digit widths does
+ * not fall through to another font version. Catalog metadata cannot establish
+ * which face Canvas painted; callers must first check their actual font route. */
+export function referenceFontMaxDigitAdvanceRatio(
+  family: string,
+  weight: number,
+  style: ReferenceFontStyle,
+  macOS: boolean,
+): number | undefined {
+  const groups: readonly (readonly ReferenceFontSource[])[] = macOS
+    ? [['macos-system', 'macos-supplemental'], ['office-mac'], ['published-open-font']]
+    : [['office-mac'], ['macos-system', 'macos-supplemental'], ['published-open-font']];
+  for (const sources of groups) {
+    const matches = sources.flatMap((source) =>
+      findReferenceFontMetrics(family, { source, weight, style }));
+    if (matches.length === 0) continue;
+    const ratios = matches.map(({ maxDigitAdvance, unitsPerEm }) =>
+      maxDigitAdvance != null && maxDigitAdvance > 0 && unitsPerEm > 0
+        ? maxDigitAdvance / unitsPerEm : undefined);
+    const first = ratios[0];
+    return first != null && ratios.every((ratio) => ratio === first) ? first : undefined;
+  }
+  return undefined;
 }

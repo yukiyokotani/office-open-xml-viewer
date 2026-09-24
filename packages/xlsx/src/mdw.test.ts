@@ -1,10 +1,43 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { computeMdw } from './renderer.js';
+import { bindXlsxWorksheetOfficeFontRoutes, computeMdw, getMdwForWorksheet } from './renderer.js';
 
 beforeEach(() => vi.stubGlobal('navigator', { platform: 'Win32', userAgent: 'Windows' }));
 afterEach(() => vi.unstubAllGlobals());
 
 describe('ECMA-376 maximum digit width authority', () => {
+  it('uses the authored Normal face digit scalar when Calibri is unavailable', () => {
+    vi.stubGlobal('OffscreenCanvas', undefined);
+    vi.stubGlobal('navigator', { platform: 'MacIntel', userAgent: 'Macintosh' });
+    vi.stubGlobal('document', { createElement: () => ({ getContext: () => ({
+      font: '', measureText: () => ({ width: 9 }),
+    }) }) });
+    const worksheet = { defaultFontFamily: 'Calibri', defaultFontSize: 12 };
+    // Canvas would measure the substituted 9px face; the Office Calibri hmtx
+    // maximum is 1038/2048 em, i.e. 8.109375 CSS px before Mac quantization.
+    expect(getMdwForWorksheet(worksheet)).toBe(8);
+  });
+
+  it('keeps actual font measurements authoritative for exact and app faces', () => {
+    vi.stubGlobal('OffscreenCanvas', undefined);
+    vi.stubGlobal('document', { createElement: () => ({ getContext: () => ({
+      font: '', measureText: () => ({ width: 9 }),
+    }) }) });
+    const worksheet = { defaultFontFamily: 'Calibri', defaultFontSize: 12 };
+    const route = {
+      requestedFamily: 'Calibri', family: '__local_calibri', source: 'local',
+      resourceIdentity: 'office-local:test', weight: 400, style: 'normal',
+      metric: { family: '__local_calibri' },
+    } as const;
+    bindXlsxWorksheetOfficeFontRoutes(worksheet as Parameters<typeof bindXlsxWorksheetOfficeFontRoutes>[0], { calibri: route });
+    expect(getMdwForWorksheet(worksheet)).toBe(9);
+    bindXlsxWorksheetOfficeFontRoutes(worksheet as Parameters<typeof bindXlsxWorksheetOfficeFontRoutes>[0]);
+    vi.stubGlobal('document', {
+      fonts: [{ family: 'Calibri' }],
+      createElement: () => ({ getContext: () => ({ font: '', measureText: () => ({ width: 9 }) }) }),
+    });
+    expect(getMdwForWorksheet(worksheet)).toBe(9);
+  });
+
   it('uses Mac Excel point-quantized widths across a font-size boundary', () => {
     vi.stubGlobal('OffscreenCanvas', undefined);
     vi.stubGlobal('navigator', { platform: 'MacIntel', userAgent: 'Macintosh' });

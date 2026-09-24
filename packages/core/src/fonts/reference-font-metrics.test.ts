@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { findReferenceFontMetrics } from './reference-font-metrics.js';
+import { findReferenceFontMetrics, referenceFontMaxDigitAdvanceRatio } from './reference-font-metrics.js';
 
 describe('findReferenceFontMetrics', () => {
+  it('projects the pinned widest digit for the authored Normal face', () => {
+    expect(referenceFontMaxDigitAdvanceRatio('Calibri', 400, 'normal', true)).toBe(1038 / 2048);
+    expect(referenceFontMaxDigitAdvanceRatio('Arial', 400, 'normal', false)).toBe(1139 / 2048);
+    expect(referenceFontMaxDigitAdvanceRatio('Uncatalogued', 400, 'normal', true)).toBeUndefined();
+  });
   it('preserves conflicting source profiles instead of choosing a same-name winner', () => {
     const matches = findReferenceFontMetrics('Times New Roman', {
       weight: 400,

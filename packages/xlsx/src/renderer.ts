@@ -1,6 +1,6 @@
 import type { CjkLang } from '@silurus/ooxml-core';
 import { containsHanScript } from '@silurus/ooxml-core/internal/script-preload-accumulator';
-import { findReferenceFontMetrics } from '@silurus/ooxml-core';
+import { findReferenceFontMetrics, referenceFontMaxDigitAdvanceRatio } from '@silurus/ooxml-core';
 import type {
   Worksheet, Styles, Cell, CellValue, CellFont, CellFill, Border, BorderEdge, CellXf,
   ViewportRange, RenderViewportOptions, XlsxTextRunInfo,
@@ -211,7 +211,8 @@ export function fontStackFor(
 ): string {
   const normalized = name?.trim();
   const fallback = containsHanScript(text) ? cjkFallback : undefined;
-  const selected = (normalized?.toLowerCase() || 'calibri') === 'calibri' ? route : undefined;
+  const selected = route && (normalized?.toLocaleLowerCase('en-US') || 'calibri')
+    === route.requestedFamily.trim().toLocaleLowerCase('en-US') ? route : undefined;
   const aliasPart = fallbackAlias && fallbackAlias.toLocaleLowerCase('en-US') !== normalized?.toLocaleLowerCase('en-US')
     ? `"${fallbackAlias}", ` : '';
   return selected
@@ -299,10 +300,23 @@ export function computeMdw(family: string, sizePt: number, route?: import('@silu
     const w = ctx.measureText(d).width;
     if (w > mdw) mdw = w;
   }
-  const out = (isMacDesktop()
-    ? Math.round(Math.round(mdw / PT_TO_PX) * PT_TO_PX)
-    : Math.round(mdw)) || MDW_FALLBACK;
-  return out;
+  return quantizeMdw(mdw);
+}
+
+function quantizeMdw(widthPx: number): number {
+  return (isMacDesktop()
+    ? Math.round(Math.round(widthPx / PT_TO_PX) * PT_TO_PX)
+    : Math.round(widthPx)) || MDW_FALLBACK;
+}
+
+function hasDeclaredNormalFace(family: string): boolean {
+  const fontSet = typeof document !== 'undefined' ? document.fonts : undefined;
+  if (!fontSet || typeof fontSet[Symbol.iterator] !== 'function') return false;
+  const requested = family.trim().toLocaleLowerCase('en-US');
+  for (const face of fontSet) {
+    if (face.family.trim().replace(/^(['"])(.*)\1$/u, '$2').toLocaleLowerCase('en-US') === requested) return true;
+  }
+  return false;
 }
 
 /** Resolve the Max Digit Width for a worksheet's Normal-style font. Falls
@@ -310,9 +324,23 @@ export function computeMdw(family: string, sizePt: number, route?: import('@silu
  *  determine the workbook's default font. */
 export function getMdwForWorksheet(ws: { defaultFontFamily?: string; defaultFontSize?: number }): number {
   if (!ws.defaultFontFamily || !ws.defaultFontSize) return MDW_FALLBACK;
+  const route = officeRoutesByWorksheet.get(ws as Worksheet)?.[ws.defaultFontFamily.trim().toLocaleLowerCase('en-US')];
+  // ECMA-376 §18.3.1.13 bases every stored column width on the Normal face's
+  // widest digit. Canvas silently substitutes another face when the authored
+  // one is missing. After exact-local preflight, use the pinned OpenType hmtx
+  // scalar for that missing face so column geometry follows the document's
+  // authored Normal style. A positively loaded local face or application
+  // @font-face retains Canvas measurement authority. The checked-in scalar
+  // covers every static catalog face with a complete Unicode digit cmap;
+  // ambiguous/missing catalog data falls back to ordinary Canvas measurement.
+  if (!route && !hasDeclaredNormalFace(ws.defaultFontFamily)) {
+    const ratio = referenceFontMaxDigitAdvanceRatio(
+      ws.defaultFontFamily, 400, 'normal', isMacDesktop());
+    if (ratio !== undefined) return quantizeMdw(ratio * ws.defaultFontSize * PT_TO_PX);
+  }
   return computeMdw(
     ws.defaultFontFamily, ws.defaultFontSize,
-    officeRoutesByWorksheet.get(ws as Worksheet)?.calibri,
+    route,
     googleSubstitutesByWorksheet.get(ws as Worksheet) === true,
   );
 }
