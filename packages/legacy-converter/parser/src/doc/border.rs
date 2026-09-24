@@ -134,7 +134,20 @@ impl Border {
             25 => "threeDEngrave",
             26 => "outset",
             27 => "inset",
-            _ => return Err(unsupported("invalid Word cell border type")),
+            // MS-DOC 2.9.22: image (art) borders 0x40..=0xE3 are valid only
+            // for page borders; 0x02, 0x04 and every other value is undefined.
+            // A Brc is a NilBrc only when its last four bytes are 0xFFFFFFFF
+            // (2.9.20), so an all-0xFF type with other flag bytes stays here.
+            0x40..=0xe3 => {
+                return Err(unsupported(format!(
+                    "Word image border type 0x{kind:02X} outside a page border"
+                )))
+            }
+            _ => {
+                return Err(unsupported(format!(
+                    "undefined Word border type 0x{kind:02X}"
+                )))
+            }
         };
         // Brc widths below 2 are normatively treated as 2 eighth-points.
         let width = width.max(2);
@@ -358,6 +371,30 @@ mod tests {
                 assert!(xml.contains("w:space=\"31\""));
             }
         }
+    }
+
+    #[test]
+    fn undefined_and_page_only_border_types_are_rejected_precisely() {
+        // A near-Nil Brc: cv and type 0xFF but flag bytes that are not the
+        // NilBrc sentinel. brcType 0xFF is not a BrcType.
+        let error = Border::read(&[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xe0, 0xff], false)
+            .err()
+            .unwrap();
+        assert!(error.contains("undefined Word border type 0xFF"), "{error}");
+        for (kind, expected) in [
+            (0x02, "undefined Word border type 0x02"),
+            (0x04, "undefined Word border type 0x04"),
+            (0x1c, "undefined Word border type 0x1C"),
+            (0x40, "image border type 0x40"),
+            (0xe3, "image border type 0xE3"),
+            (0xe4, "undefined Word border type 0xE4"),
+        ] {
+            let error = Border::read(&[0, 0, 0, 0, 4, kind, 0, 0], false)
+                .err()
+                .unwrap();
+            assert!(error.contains(expected), "{error}");
+        }
+        assert!(Border::read(&[0, 0, 0, 0, 4, 0x1b, 0, 0], false).is_ok());
     }
 
     #[test]
