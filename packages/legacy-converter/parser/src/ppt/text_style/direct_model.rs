@@ -307,6 +307,18 @@ fn model_run(
         text.len(),
         "PowerPoint direct text model budget exceeded",
     )?;
+    // MS-PPT 2.9.16 CFStyle shadow and emboss are visible glyph effects whose
+    // appearance the format does not define (no offset, blur or color), and
+    // DrawingML has no equivalent flag. Office-saved decks keep the authored
+    // effect parameters only in the alternative shape XML, which the direct
+    // model does not read. Reject rather than drop the effect.
+    for (bit, name) in [(0x10u16, "shadow"), (0x200, "emboss")] {
+        if character.mask & u32::from(bit) != 0 && character.style & bit != 0 {
+            return Err(unsupported(format!(
+                "PowerPoint text {name} effect is not projected"
+            )));
+        }
+    }
     let color = model_color(character.color, context.scheme, model_budget)?;
     let mut font = |id: Option<u16>| -> Result<Option<String>, String> {
         let value = id.and_then(|n| context.fonts.get(usize::from(n)));
@@ -600,6 +612,44 @@ mod tests {
         let mut axes = [ParagraphAxes::default(); 5];
         axes[0] = ParagraphAxes { margin, indent };
         axes
+    }
+
+    #[test]
+    fn text_shadow_and_emboss_reject_visible_runs_only() {
+        let mut base = Level::empty(0);
+        base.paragraph.margin = Some(0);
+        base.paragraph.indent = Some(0);
+        let levels = [base];
+        let context = Context {
+            levels: Some(&levels),
+            ..Context::default()
+        };
+        for (bit, name) in [(0x10u32, "shadow"), (0x200, "emboss")] {
+            let effect = [
+                u32s(2),
+                u16s(0),
+                u32s(0),
+                u32s(2),
+                u32s(bit),
+                u16s(bit as u16),
+            ]
+            .concat();
+            let error = paragraphs("X", &effect, context, &mut 100, &mut 100_000).unwrap_err();
+            assert!(error.contains(name), "{error}");
+            // A cleared effect bit and effect-only empty text stay admitted.
+            let cleared = [u32s(2), u16s(0), u32s(0), u32s(2), u32s(bit), u16s(0)].concat();
+            assert!(paragraphs("X", &cleared, context, &mut 100, &mut 100_000).is_ok());
+            let empty = [
+                u32s(1),
+                u16s(0),
+                u32s(0),
+                u32s(1),
+                u32s(bit),
+                u16s(bit as u16),
+            ]
+            .concat();
+            assert!(paragraphs("", &empty, context, &mut 100, &mut 100_000).is_ok());
+        }
     }
 
     #[test]
