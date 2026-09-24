@@ -4385,6 +4385,9 @@ export interface RetainedFrameGroupOptions {
    * leak across the session whose resource/font facts produced their geometry. */
   readonly acquisitionSession: object;
   readonly placementSignature: string;
+  /** Owning story of the grouped paragraphs; `sourceIndices` are paths in its
+   * root block list. Defaults to the main body. */
+  readonly story?: Readonly<{ story: SourceRef['story']; storyInstance: string }>;
   readonly place: (
     contentWidthPt: number,
     contentHeightPt: number,
@@ -4435,7 +4438,13 @@ export function acquireRetainedFrameGroup(
     cache = new Map();
     retainedFrameGroupCache.set(options.acquisitionSession, cache);
   }
+  const owner = options.story ?? { story: 'body' as const, storyInstance: 'body' };
+  const framePrefix = owner.story === 'body'
+    ? 'body-frame'
+    : `${owner.story}:${owner.storyInstance}:frame`;
   const cacheKey = stableFingerprint('w:frame-acquisition', [
+    owner.story,
+    owner.storyInstance,
     group.id,
     options.placementSignature,
     options.maximumWidthPt,
@@ -4480,7 +4489,7 @@ export function acquireRetainedFrameGroup(
     heightPt: number;
     members: RetainedFrameGroupAcquisition['members'];
   }> => {
-    let wrapRegistry = createParagraphWrapRegistry(`body-frame:${group.id}`);
+    let wrapRegistry = createParagraphWrapRegistry(`${framePrefix}:${group.id}`);
     let cursorPt = 0;
     let previous: ParagraphLayoutSource | null = null;
     let previousAfterPt = 0;
@@ -4501,14 +4510,16 @@ export function acquireRetainedFrameGroup(
       };
       const borderExtentPt = options.borderExtentsPt[memberIndex] ?? 0;
       const source: SourceRef = {
-        story: 'body', storyInstance: 'body', path: [group.sourceIndices[memberIndex]!],
+        story: owner.story,
+        storyInstance: owner.storyInstance,
+        path: [group.sourceIndices[memberIndex]!],
       };
       const acquired = acquireParagraphResult(
         options.inputs[memberIndex]!,
         {
-          id: `body-frame:${group.id}:${memberIndex}`,
+          id: `${framePrefix}:${group.id}:${memberIndex}`,
           source,
-          flowDomainId: `body-frame:${group.id}`,
+          flowDomainId: `${framePrefix}:${group.id}`,
           ordinaryFlow: false,
           context,
           placement,
