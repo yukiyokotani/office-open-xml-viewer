@@ -698,11 +698,41 @@ mod tests {
     }
     #[cfg(feature = "direct-doc")]
     #[test]
+    fn direct_floating_passes_validated_metafiles_with_docx_media_types() {
+        for ((source, blip), mime) in [
+            (crate::officeart::emf_test_blip(), "image/emf"),
+            (crate::officeart::wmf_test_blip(), "image/wmf"),
+        ] {
+            let (word, table) = drawing_with_blip(0xa00, 0, &[], blip, 2);
+            let mut store = Store::read(&word, &table, 20).unwrap();
+            let mut budget = usize::MAX;
+            let picture = store.direct_picture(12, &mut budget).unwrap().unwrap();
+            assert_eq!(picture.image.mime_type, mime);
+            let mut resources = Vec::new();
+            store
+                .append_referenced_direct_resources(
+                    &mut resources,
+                    &[picture.image.image_path.as_str()],
+                    &mut budget,
+                )
+                .unwrap();
+            assert_eq!(resources[0].mime_type, mime);
+            assert_eq!(resources[0].bytes, source);
+        }
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
     fn direct_floating_deduplicates_resources_and_admits_before_reserving() {
         let (word, table) = drawing_with_options(
             0xac0,
             0x8200_0000,
-            &[(0x384, 12_700), (0x385, 25_400), (0x386, 38_100), (0x387, 50_800)],
+            &[
+                (0x384, 12_700),
+                (0x385, 25_400),
+                (0x386, 38_100),
+                (0x387, 50_800),
+            ],
         );
         let mut store = Store::read(&word, &table, 20).unwrap();
         let mut budget = usize::MAX;
@@ -711,19 +741,48 @@ mod tests {
         assert_eq!(first.image.image_path, second.image.image_path);
         assert_ne!(first.occurrence_id, second.occurrence_id);
         assert_eq!(first.image.wrap_mode.as_deref(), Some("square"));
-        assert_eq!(first.image.anchor_acquisition.as_ref().unwrap().wrap.authored_kinds, ["wrapSquare"]);
+        assert_eq!(
+            first
+                .image
+                .anchor_acquisition
+                .as_ref()
+                .unwrap()
+                .wrap
+                .authored_kinds,
+            ["wrapSquare"]
+        );
         let acquisition = first.image.anchor_acquisition.as_ref().unwrap();
         let expected_payload = std::mem::size_of::<docx_model::ImageRun>()
             + first.image.image_path.capacity()
             + first.image.mime_type.capacity()
             + first.image.wrap_mode.as_ref().unwrap().capacity()
             + first.image.wrap_side.as_ref().unwrap().capacity()
-            + first.image.anchor_x_relative_from.as_ref().unwrap().capacity()
-            + first.image.anchor_y_relative_from.as_ref().unwrap().capacity()
+            + first
+                .image
+                .anchor_x_relative_from
+                .as_ref()
+                .unwrap()
+                .capacity()
+            + first
+                .image
+                .anchor_y_relative_from
+                .as_ref()
+                .unwrap()
+                .capacity()
             + first.occurrence_id.capacity()
             + acquisition.occurrence_id.capacity()
-            + acquisition.horizontal.relative_from.as_ref().unwrap().capacity()
-            + acquisition.vertical.relative_from.as_ref().unwrap().capacity()
+            + acquisition
+                .horizontal
+                .relative_from
+                .as_ref()
+                .unwrap()
+                .capacity()
+            + acquisition
+                .vertical
+                .relative_from
+                .as_ref()
+                .unwrap()
+                .capacity()
             + acquisition.wrap.side.as_ref().unwrap().capacity()
             + acquisition.wrap.authored_kinds.capacity() * std::mem::size_of::<String>()
             + acquisition.wrap.authored_kinds[0].capacity();
@@ -737,7 +796,9 @@ mod tests {
         let mut resources = Vec::new();
         let mut none = 0;
         assert_eq!(
-            store.append_direct_resources(&mut resources, &mut none).unwrap_err(),
+            store
+                .append_direct_resources(&mut resources, &mut none)
+                .unwrap_err(),
             "OUTPUT_TOO_LARGE"
         );
         assert_eq!(resources.capacity(), 0);
@@ -747,7 +808,9 @@ mod tests {
         store.direct_picture(12, &mut budget).unwrap().unwrap();
         store.direct_picture(12, &mut budget).unwrap().unwrap();
         let mut resources = Vec::new();
-        store.append_direct_resources(&mut resources, &mut budget).unwrap();
+        store
+            .append_direct_resources(&mut resources, &mut budget)
+            .unwrap();
         assert_eq!(resources.len(), 1);
         assert!(resources[0].bytes.starts_with(b"\x89PNG"));
 
@@ -759,7 +822,11 @@ mod tests {
                     table[28..30].copy_from_slice(&flags.to_le_bytes());
                     let mut store = Store::read(&word, &table, 20).unwrap();
                     let mut budget = usize::MAX;
-                    let image = store.direct_picture(12, &mut budget).unwrap().unwrap().image;
+                    let image = store
+                        .direct_picture(12, &mut budget)
+                        .unwrap()
+                        .unwrap()
+                        .image;
                     assert_eq!(
                         image.anchor_x_relative_from.as_deref(),
                         Some(["margin", "page", "column"][horizontal as usize])
@@ -790,7 +857,10 @@ mod tests {
         table[record + 12..record + 16].copy_from_slice(&4_000_400i32.to_le_bytes());
         let mut store = Store::read(&word, &table, 20).unwrap();
         let mut budget = usize::MAX;
-        assert!(store.direct_picture(12, &mut budget).unwrap_err().contains("position"));
+        assert!(store
+            .direct_picture(12, &mut budget)
+            .unwrap_err()
+            .contains("position"));
         assert_eq!(store.occurrences, 0);
     }
     #[test]
