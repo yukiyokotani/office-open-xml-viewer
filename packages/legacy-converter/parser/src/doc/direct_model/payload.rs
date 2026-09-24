@@ -98,10 +98,7 @@ pub(super) fn table(value: &docx_model::DocTable) -> Result<usize, String> {
 }
 
 pub(super) fn text_run(run: &TextRun) -> Result<usize, String> {
-    if run.no_break_hyphen_offsets.capacity() != 0
-        || run.ruby.is_some()
-        || run.revision.is_some()
-    {
+    if run.no_break_hyphen_offsets.capacity() != 0 || run.revision.is_some() {
         return Err(unsupported("unaccounted direct DOC text-run payload"));
     }
     let mut total = Total::default();
@@ -132,6 +129,13 @@ pub(super) fn text_run(run: &TextRun) -> Result<usize, String> {
         &run.east_asian_combine_brackets,
     ] {
         total.option_string(value)?;
+    }
+    if let Some(ruby) = &run.ruby {
+        total.add(std::mem::size_of::<docx_model::RubyAnnotation>())?;
+        total.string(&ruby.text)?;
+        if let Some(typography) = &ruby.typography {
+            total.ruby_typography(typography)?;
+        }
     }
     if let Some(note) = &run.note_ref {
         total.string(&note.kind)?;
@@ -460,8 +464,11 @@ impl Total {
     }
 
     fn run_typography(&mut self, value: &RunTypographyWire) -> Result<(), String> {
-        if value.ruby.is_some() || value.revision.is_some() {
+        if value.revision.is_some() {
             return Err(unsupported("unaccounted direct DOC run typography payload"));
+        }
+        if let Some(ruby) = &value.ruby {
+            self.ruby_typography(ruby)?;
         }
         if let Some(fit_text) = &value.fit_text {
             self.option_string(&fit_text.id)?;
@@ -487,6 +494,21 @@ impl Total {
         self.option_string(&value.languages.bidi)?;
         self.option_string(&value.languages.default)?;
         self.typography_string(&value.east_asian_layout.combine_brackets)
+    }
+
+    fn ruby_typography(&mut self, value: &docx_model::RubyTypographyWire) -> Result<(), String> {
+        self.typography_string(&value.align)?;
+        self.typography_raw(&value.base_font_size_pt)?;
+        self.typography_raw(&value.raise_pt)?;
+        self.typography_string(&value.language)?;
+        self.vec::<docx_model::RubyGuideRunTypographyWire>(value.guide_runs.capacity())?;
+        for run in &value.guide_runs {
+            self.string(&run.text)?;
+            self.option_string(&run.font_family)?;
+            self.option_string(&run.color)?;
+            self.option_string(&run.language)?;
+        }
+        Ok(())
     }
 
     fn paragraph_borders(&mut self, value: &ParagraphBorders) -> Result<(), String> {
