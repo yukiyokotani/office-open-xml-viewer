@@ -75,7 +75,8 @@ pub(super) fn project(
     if formatting.use_raw_table_shading() {
         resolve_table_cell_shading(&mut prepared, &table_context, formatting)?;
     }
-    let mut tables = Writer::new(table_sequence);
+    // Only the main story passes a floating-drawing store.
+    let mut tables = Writer::with_positioned_tables(table_sequence, floating.is_some());
     for (paragraph_index, prepared) in prepared.into_iter().enumerate() {
         let PreparedParagraph {
             source,
