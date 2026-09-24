@@ -641,6 +641,7 @@ fn direct_shape(
         z_order: facts.z_order.saturating_add(member),
         preset_geometry: shape.preset.map(str::to_owned),
         subpaths: shape.subpaths.clone(),
+        adj_values: shape.adjustments.clone(),
         fill,
         stroke: line.map(|line| line.color.clone()),
         stroke_width: line.map_or(0.0, |line| pt(line.width_emu)),
@@ -672,6 +673,7 @@ fn direct_shape(
         ..ShapeRun::default()
     };
     let mut total = Payload(std::mem::size_of::<ShapeRun>());
+    total.add(run.adj_values.capacity() * std::mem::size_of::<Option<f64>>())?;
     for path in &run.subpaths {
         total.add(
             std::mem::size_of::<Vec<PathCmd>>() + path.capacity() * std::mem::size_of::<PathCmd>(),
