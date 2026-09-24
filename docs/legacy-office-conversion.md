@@ -2251,3 +2251,20 @@ admission gates.
 | DOC-273 | Cross-source row definition after explicit widths | Open: one control showed a piece TDefTable replacing earlier direct-chain TDxaCol widths; the geometry source boundary stays gated |
 | TOOL-1 | Office export restoration | Open: `scripts/legacy-office-export.applescript` cannot restore Word/Excel settings when `open` returns no value; it also adopts an unrestored ForceDisable baseline |
 | LEGACY-OOXML | Remove the OOXML-generation path | Open: legacy support is unreleased, so delete the byte converter, its WASM/TS entry points and XML writers instead of deprecating them; direct paths must not depend on them |
+
+### Local direct-render survey
+
+`packages/{docx,pptx,xlsx}/tests/visual/legacy-corpus.spec.ts` render each
+local private legacy sample through its direct source. Each sample is written
+beside its same-named Office PDF export as paired PNGs and a summary. The
+survey reports only: it never gates, updates references, or generates OOXML.
+Run it with an output directory outside the checkout:
+
+```bash
+LEGACY_CORPUS=1 LEGACY_CORPUS_OUT=/tmp/legacy-survey VRT_PRIVATE_CORPUS=1 \
+  pnpm --filter @silurus/ooxml-pptx exec playwright test \
+  --config playwright.config.ts --project=chrome legacy-corpus.spec.ts
+```
+
+Pixel percentages are only a triage signal. For example, a slide can score
+above 95% while a chart or autoshape is missing, so review the pairs visually.
