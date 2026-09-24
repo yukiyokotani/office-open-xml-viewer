@@ -104,9 +104,9 @@ function substitutedMeiryoService(metric: ResolvedFontMetric, resolvedFamily: st
 }
 
 describe('native reference font vertical layout', () => {
-  it('does not use authored reference geometry when only a native CSS fallback is known', () => {
-    // The resolver can only create an authored CSS stack here. It has not
-    // established that Calibri is installed or paints either glyph.
+  it('uses authored Calibri vertical geometry with a native CSS fallback, without borrowing widths', () => {
+    // A CSS fallback does not prove that Calibri paints the glyph. Its catalog
+    // sides still define Word pagination; glyph advances remain measured.
     const layoutServices = services();
     const segment = buildSegments([{
       type: 'text', text: 'A B', fontFamily: 'Calibri', fontFamilyEastAsia: 'Calibri',
@@ -116,10 +116,12 @@ describe('native reference font vertical layout', () => {
       pageIndex: 0, totalPages: 1, layoutServices,
       characterSpacingControl: 'compressPunctuation',
     })[0] as LayoutTextSeg;
-    expect(segment.referenceFontVerticalMetric).toBeUndefined();
-    expect(segment.resolvedLineHeightRatio).toBeUndefined();
+    expect(segment.referenceFontVerticalMetric).toBe(true);
+    expect(segment.resolvedLineHeightRatio).toBe(2500 / 2048);
     expect(segment.latinSpaceAverageWidthRatio).toBeUndefined();
-    expect(layoutLines(context, [segment], 100, 0, 1)[0]?.intendedSingle).toBe(0);
+    const line = layoutLines(context, [segment], 100, 0, 1)[0]!;
+    expect(line.intendedSingle).toBeCloseTo(10 * 2500 / 2048, 8);
+    expect(line.segments[0]?.measuredWidth).toBe(10);
   });
 
   it('admits Latin xAvg only from the selected covering resource without changing vertical selection', () => {
@@ -764,7 +766,7 @@ describe('native reference font vertical layout', () => {
   });
 
   it.each(['Fallback Face', 'Meiryo'])(
-    'does not lend authored-family resource geometry to a shaped substitute called %s',
+    'keeps authored vertical geometry while refusing an unrelated resource metric for substitute %s',
     (resolvedFamily) => {
       const metric = { family: 'Meiryo', lineHeightRatio: 1.2 };
       const text = substitutedMeiryoService(metric, resolvedFamily);
@@ -779,8 +781,10 @@ describe('native reference font vertical layout', () => {
       });
       const segment = segments[0] as LayoutTextSeg;
       expect(segment.fontFamily).toBe(resolvedFamily);
-      expect(segment.resolvedLineHeightRatio).toBeUndefined();
-      expect(segment.resolvedEaFloorLineHeightRatio).toBeUndefined();
+      const authoredRatio = referenceFontLineMetrics('Meiryo')!.lineHeightRatio;
+      expect(segment.resolvedLineHeightRatio).toBe(authoredRatio);
+      expect(segment.resolvedEaFloorLineHeightRatio).toBe(authoredRatio);
+      expect(segment.resolvedLineHeightRatio).not.toBe(metric.lineHeightRatio);
 
       const paragraph = {
         runs: [], defaultFontFamily: 'Meiryo', defaultFontSize: 10,
@@ -790,7 +794,7 @@ describe('native reference font vertical layout', () => {
         paragraph, 1, undefined, false, false, context, {}, null,
         { meiryo: metric }, text,
       );
-      expect(mark.advancePx).toBe(10);
+      expect(mark.advancePx).toBeCloseTo(10 * authoredRatio, 8);
     },
   );
 });

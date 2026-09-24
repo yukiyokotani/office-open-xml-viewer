@@ -83,7 +83,7 @@ function identicalProjection(
 }
 
 /**
- * Resolve metadata-only reference vertical geometry for a native authored face.
+ * Resolve metadata-only reference vertical geometry for an authored face.
  * ECMA-376 Part 1 §17.3.1.33 defines automatic spacing as a multiple of the
  * normal single line but does not select an OpenType metric table. DOCX applies
  * a bounded Word-for-Mac hhea projection: ordinary faces use signed hhea

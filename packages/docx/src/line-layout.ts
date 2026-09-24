@@ -1949,7 +1949,7 @@ export function paragraphMarkLineMetrics(
       resolvedLocalFont = undefined;
     }
     referenceMarkMetric = naturalMetricAllowed
-      && !resolvedLocalFont && mayUseNativeReferenceMetric(selectedFont)
+      && !resolvedLocalFont && mayUseAuthoredReferenceVerticalMetric(selectedFont)
       ? referenceFontLineMetrics(
           selectedFont.requestedFamily,
           selectedFont.weight,
@@ -2994,18 +2994,29 @@ function selectResourceAverageWidthRatio(
     || metric.averageCharWidthRatio === ratio) ? ratio : undefined;
 }
 
-function mayUseNativeReferenceMetric(
+function mayUseExactLocalReferenceWidthMetric(
   selected: FontResolution | undefined,
 ): selected is FontResolution {
-  // A native CSS family list retains the authored name even when that face is
-  // absent. It cannot establish which fallback Canvas actually selected, so
-  // the authored family's reference tables must not govern its layout.
-  // Exact local() loading does establish this tuple's face, though the pinned
-  // reference tables may still describe a different installed version. CSS
-  // does not expose this face's cmap: this admits a normal line-box policy for
-  // the selected tuple, never a claim that every glyph paints from that face.
+  // The width floor requires an exact selected face. A native CSS family list
+  // cannot establish which fallback Canvas painted or measured the glyph.
   return selected?.source === 'local'
     && selected.resourceIdentity?.startsWith('office-local:') === true;
+}
+
+function mayUseAuthoredReferenceVerticalMetric(
+  selected: FontResolution | undefined,
+): selected is FontResolution {
+  // Library pagination policy for an unavailable authored face: keep the
+  // document's known OpenType line box while Canvas paints/measures a serif or
+  // sans fallback. Word's §17.3.1.33 automatic/atLeast line advances follow
+  // the authored font; a controlled missing-Calibri case matched Word's five
+  // pages only with this vertical projection. This says nothing about glyph
+  // coverage or advances, which remain selected-resource/Canvas measurements.
+  // A loaded local() tuple may also use the pinned reference when no parsed
+  // resource metric exists. Other loaded sources must use their own geometry.
+  return selected?.source === 'native'
+    || selected?.source === 'substitute'
+    || mayUseExactLocalReferenceWidthMetric(selected);
 }
 
 export function buildSegments(
@@ -3039,7 +3050,7 @@ export function buildSegments(
         return undefined;
       }
     }
-    if (!mayUseNativeReferenceMetric(selected)) return undefined;
+    if (!mayUseExactLocalReferenceWidthMetric(selected)) return undefined;
     const key = `${selected.requestedFamily}\0${selected.weight}\0${selected.style}`;
     if (!referenceAverageWidths.has(key)) {
       const admitted = referenceFontAverageWidthRatio(
@@ -3449,7 +3460,7 @@ export function buildSegments(
           || localFont?.eastAsianLineHeightRatio != null)
         ? localFont : undefined;
       const referenceLineMetric = naturalMetricAllowed
-        && !resourceFamilyLineMetric && mayUseNativeReferenceMetric(resolvedSpan?.font)
+        && !resourceFamilyLineMetric && mayUseAuthoredReferenceVerticalMetric(resolvedSpan?.font)
         ? referenceFontLineMetrics(
             resolvedSpan.font.requestedFamily,
             resolvedSpan.font.weight,
@@ -3464,7 +3475,7 @@ export function buildSegments(
           || localEaFloor?.eastAsianLineHeightRatio != null)
         ? localEaFloor : undefined;
       const referenceEaLineMetric = naturalMetricAllowed
-        && !resourceEaLineMetric && mayUseNativeReferenceMetric(eaResolution)
+        && !resourceEaLineMetric && mayUseAuthoredReferenceVerticalMetric(eaResolution)
         ? referenceFontLineMetrics(
             eaResolution.requestedFamily,
             eaResolution.weight,
@@ -3966,7 +3977,7 @@ export function buildSegments(
       const resourceMetric = naturalMetricAllowed
         || localFont?.designAscentRatio == null ? localFont : undefined;
       const referenceMetric = naturalMetricAllowed && !resourceMetric
-        && mayUseNativeReferenceMetric(selected)
+        && mayUseAuthoredReferenceVerticalMetric(selected)
         ? referenceFontLineMetrics(selected.requestedFamily, weight, style)
         : undefined;
       const familyLineMetric = resourceMetric ?? referenceMetric;
