@@ -232,6 +232,14 @@ impl Paint {
             scheme,
         )
     }
+    /// MS-ODRAW 2.3.7.1: msofillPattern (1), msofillTexture (2) and
+    /// msofillPicture (3) paint with the fillBlip BLIP. Returns the active one
+    /// so a caller that cannot project it can reject instead of drawing none.
+    pub fn blip_fill_type(&self) -> Option<u32> {
+        let kind = self.fill_type.unwrap_or(0);
+        (matches!(kind, 1..=3) && self.filled.unwrap_or(true) && self.fill_ok.unwrap_or(true))
+            .then_some(kind)
+    }
     pub fn background_image(&self) -> Option<(u32, u32)> {
         (self.fill_type == Some(3)
             && self.fill_blip.unwrap_or(0) != 0

@@ -90,6 +90,130 @@ fn catalog_core<'a, T: CatalogEntry<'a>>(
     Ok(result.unwrap_or_default())
 }
 
+/// Kind of external OLE object an OLE shape refers to (MS-PPT 2.10.1
+/// ExObjListContainer and its ExOleEmbedContainer 2.10.27, ExOleLinkContainer
+/// 2.10.29 and ExControlContainer 2.10.10 children). Only the facts that decide
+/// whether the shape's stored presentation picture may be shown are kept: the
+/// object storage (ExOleObjStg 2.10.34) is never read, inflated or activated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum OleObject {
+    /// ExOleObjAtom.drawAspect is a DataViewAspectEnum ([MS-OSHARED] 2.2.1.2).
+    Embedded {
+        draw_aspect: u32,
+    },
+    Linked,
+    Control,
+}
+
+// RT_ExternalObjectList, RT_ExternalOleEmbed, RT_ExternalOleLink,
+// RT_ExternalOleControl and RT_ExternalOleObjectAtom (MS-PPT 2.13.24).
+const EX_OBJ_LIST: u16 = 0x0409;
+const EX_OLE_EMBED: u16 = 0x0fcc;
+const EX_OLE_LINK: u16 = 0x0fce;
+const EX_OLE_CONTROL: u16 = 0x0fee;
+const EX_OLE_OBJ_ATOM: u16 = 0x0fc3;
+
+/// exObjId -> OLE object. A malformed list does not reject presentations that
+/// never refer to it; the recorded error is returned to the first OLE shape
+/// that needs the list. Duplicate identifiers are ambiguous (MS-PPT 2.10.12:
+/// each ExOleObjAtom is referred to by exactly one ExObjRefAtom).
+#[derive(Clone, Debug, Default)]
+pub(super) struct OleCatalog {
+    objects: BTreeMap<u32, Option<OleObject>>,
+    error: Option<String>,
+}
+
+impl OleCatalog {
+    pub fn get(&self, id: u32) -> Result<OleObject, String> {
+        if let Some(error) = &self.error {
+            return Err(error.clone());
+        }
+        match self.objects.get(&id) {
+            Some(Some(object)) => Ok(*object),
+            Some(None) => Err(unsupported(
+                "ambiguous or inconsistent PowerPoint OLE object reference",
+            )),
+            None => Err(unsupported("unresolved PowerPoint OLE object reference")),
+        }
+    }
+}
+
+pub(super) fn ole_catalog(
+    document: &[u8],
+    children: &[RecordSpan],
+    budget: &mut usize,
+) -> OleCatalog {
+    let mut catalog = OleCatalog::default();
+    if let Err(error) = read_ole_catalog(document, children, budget, &mut catalog.objects) {
+        catalog.objects.clear();
+        catalog.error = Some(error);
+    }
+    catalog
+}
+
+fn read_ole_catalog(
+    document: &[u8],
+    children: &[RecordSpan],
+    budget: &mut usize,
+    objects: &mut BTreeMap<u32, Option<OleObject>>,
+) -> Result<(), String> {
+    let mut seen = false;
+    for list in children {
+        let view = list.view(document)?;
+        if view.kind != EX_OBJ_LIST {
+            continue;
+        }
+        if seen || view.version != 15 {
+            return Err(unsupported("invalid PowerPoint external object list"));
+        }
+        seen = true;
+        for container in parse_record_spans(document, list.payload_span(), budget)? {
+            let view = container.view(document)?;
+            let expected_type = match view.kind {
+                EX_OLE_EMBED => 0,
+                EX_OLE_LINK => 1,
+                EX_OLE_CONTROL => 2,
+                _ => continue, // Hyperlinks and media are not OLE objects.
+            };
+            if view.version != 15 {
+                return Err(unsupported("invalid PowerPoint OLE object container"));
+            }
+            let mut atom = None;
+            for child in parse_record_spans(document, container.payload_span(), budget)? {
+                let child = child.view(document)?;
+                if child.kind != EX_OLE_OBJ_ATOM {
+                    continue;
+                }
+                // MS-PPT 2.10.12: recVer 1, recInstance 0, recLen 0x18.
+                if atom.is_some()
+                    || child.version != 1
+                    || child.instance != 0
+                    || child.payload.len() != 24
+                {
+                    return Err(unsupported("invalid PowerPoint ExOleObjAtom"));
+                }
+                atom = Some((
+                    u32_at(child.payload, 0)?,
+                    u32_at(child.payload, 4)?,
+                    u32_at(child.payload, 8)?,
+                ));
+            }
+            let (draw_aspect, kind, id) =
+                atom.ok_or_else(|| unsupported("PowerPoint OLE object lacks ExOleObjAtom"))?;
+            let object = (kind == expected_type).then_some(match expected_type {
+                0 => OleObject::Embedded { draw_aspect },
+                1 => OleObject::Linked,
+                _ => OleObject::Control,
+            });
+            objects
+                .entry(id)
+                .and_modify(|entry| *entry = None)
+                .or_insert(object);
+        }
+    }
+    Ok(())
+}
+
 pub(super) struct Store<'a> {
     entries: &'a [Record<'a>],
     delayed: &'a [u8],
