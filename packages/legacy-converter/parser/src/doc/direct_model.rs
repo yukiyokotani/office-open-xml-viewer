@@ -93,6 +93,12 @@ pub(super) fn build(
     // Header drawings and textbox stories are resolved only by this model;
     // malformed tables fail closed before any output is retained.
     facts.floating.load_direct_parts()?;
+    // Word stores TIFF data in PNG BLIPs and reads it back as TIFF: its own
+    // DOCX of a corpus document writes that BLIP as media/*.tiff. The
+    // package writer keeps rejecting such BLIPs; no other format has this
+    // evidence. Painting TIFF needs the caller's optional TIFF decoder.
+    facts.pictures.raster = crate::officeart::raster::Raster::TiffAware;
+    facts.floating.raster = crate::officeart::raster::Raster::TiffAware;
     let mut body = Vec::new();
     let mut header_resolver = headers::Resolver::new(facts.headers.as_ref())?;
     let mut final_headers = None;
