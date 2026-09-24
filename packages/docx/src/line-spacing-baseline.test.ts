@@ -79,7 +79,7 @@ function makeRecordingCanvas(metricRatios?: readonly [number, number]): {
 
 // A SYNTHETIC, untabled font: the mock canvas reports a clean 1.0 em box
 // (ascent 0.8 / descent 0.2) for it, so these tests isolate the line-spacing
-// MULTIPLIER from the substituted-font single-line FLOOR (intendedSingleLinePx).
+// MULTIPLIER from any selected-resource or reference single-line floor.
 const TEST_FONT = 'Synthetic Untabled Serif';
 
 function textRun(text: string): DocxTextRun {

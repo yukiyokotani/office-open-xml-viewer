@@ -80,6 +80,21 @@ function routeKey(tuple: Tuple): string {
     ? family : `${family}:${tuple.weight}:${tuple.style}`;
 }
 
+function loadedFaceCoversTuple(face: FontFace, tuple: Tuple): boolean {
+  if (face.status !== 'loaded'
+    || normalizeLocalFontMetricFamily(face.family.replace(/^(['"])(.*)\1$/u, '$2'))
+      !== normalizeLocalFontMetricFamily(tuple.family)
+    || face.style.trim().toLowerCase() !== tuple.style) return false;
+  const descriptor = face.weight.trim().toLowerCase();
+  if (descriptor === 'normal') return tuple.weight === 400;
+  if (descriptor === 'bold') return tuple.weight === 700;
+  const range = /^(\d+)(?:\s+(\d+))?$/u.exec(descriptor);
+  if (!range) return false;
+  const lower = Number(range[1]);
+  const upper = Number(range[2] ?? range[1]);
+  return lower <= tuple.weight && tuple.weight <= upper;
+}
+
 /** ECMA-376 font names identify requested families, not transferable font
  * resources. Probe only catalogued exact local() names for document-used
  * tuples. A regular face does not establish bold or italic. CSS local() exposes
@@ -91,18 +106,13 @@ export async function loadOfficeFontFallbacks(
   targetFontSet: FontFaceSet | null = activeFontSet(),
 ): Promise<LoadedOfficeFontFallbacks> {
   if (!targetFontSet || typeof FontFace === 'undefined') return { faces: [], routes: {}, checked: [] };
-  // An application-declared @font-face for the authored family belongs to the
-  // browser's normal CSS resolution. Do not replace it with an isolated system
-  // local() alias merely because a catalog entry shares its family name.
-  const declared = new Set<string>();
-  if (typeof targetFontSet[Symbol.iterator] === 'function') {
-    for (const face of targetFontSet) {
-      const family = face.family.trim().replace(/^(['"])(.*)\1$/u, '$2');
-      declared.add(normalizeLocalFontMetricFamily(family));
-    }
-  }
+  // A loaded application face wins only its declared style/weight tuple. A
+  // regular face must not suppress exact-local Bold or Italic, and a face still
+  // loading cannot supply stable geometry to this document's layout snapshot.
+  const declared = typeof targetFontSet[Symbol.iterator] === 'function'
+    ? [...targetFontSet] : [];
   const tuples = [...new Map(requests.map(tupleFor).filter((tuple): tuple is Tuple => !!tuple)
-    .filter((tuple) => !declared.has(normalizeLocalFontMetricFamily(tuple.family)))
+    .filter((tuple) => !declared.some((face) => loadedFaceCoversTuple(face, tuple)))
     .map((tuple) => [routeKey(tuple), tuple])).values()];
   if (tuples.length === 0) return { faces: [], routes: {}, checked: [] };
   // A document can name many catalogued faces. Keep failed local() loads from

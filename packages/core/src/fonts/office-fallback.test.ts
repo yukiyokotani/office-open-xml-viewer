@@ -19,7 +19,9 @@ function fontSet(installed: readonly string[], delayMs = 0, declared: readonly s
     add(face: Face) { added.push(face); },
     delete(face: Face) { deleted.push(face); return true; },
     *[Symbol.iterator]() {
-      for (const family of declared) yield { family, source: '', status: 'loaded' };
+      for (const family of declared) yield {
+        family, source: '', status: 'loaded', weight: '400', style: 'normal',
+      };
       for (const face of added) if (!deleted.includes(face)) yield face;
     },
   } as unknown as FontFaceSet;
@@ -173,6 +175,49 @@ describe('loadOfficeFontFallbacks', () => {
     const result = await loadOfficeFontFallbacks([{ family: 'Times New Roman' }], set);
     expect(result).toEqual({ faces: [], routes: {}, checked: [] });
     expect(added).toEqual([]);
+  });
+
+  it('preflights a bold local face when the application declares only regular', async () => {
+    const { set } = fontSet(['Calibri-Bold'], 0, ['Calibri']);
+    const result = await loadOfficeFontFallbacks([{ family: 'Calibri', weight: 700 }], set);
+    expect(result.routes['calibri:700:normal']).toMatchObject({ source: 'local', weight: 700 });
+    unloadOfficeFontFallbacks(result.faces);
+  });
+
+  it('keeps italic and weight-range declarations confined to their own tuples', async () => {
+    const { set, added } = fontSet(['Calibri']);
+    const declaredSet = {
+      ...set,
+      *[Symbol.iterator]() {
+        yield { family: 'Calibri', weight: '400', style: 'italic', status: 'loaded' };
+        yield { family: 'Calibri', weight: '600 800', style: 'normal', status: 'loaded' };
+        for (const face of set) yield face;
+      },
+    } as FontFaceSet;
+    const result = await loadOfficeFontFallbacks([
+      { family: 'Calibri' },
+      { family: 'Calibri', weight: 700 },
+      { family: 'Calibri', style: 'italic' },
+    ], declaredSet);
+    expect(result.checked).toEqual(['calibri']);
+    expect(Object.keys(result.routes)).toEqual(['calibri']);
+    expect(added).toHaveLength(1);
+    unloadOfficeFontFallbacks(result.faces);
+  });
+
+  it('does not let an application face still loading suppress exact local preflight', async () => {
+    const { set, added } = fontSet(['Calibri']);
+    const loadingSet = {
+      ...set,
+      *[Symbol.iterator]() {
+        yield { family: 'Calibri', weight: '400', style: 'normal', status: 'loading' };
+        for (const face of set) yield face;
+      },
+    } as FontFaceSet;
+    const result = await loadOfficeFontFallbacks([{ family: 'Calibri' }], loadingSet);
+    expect(added).toHaveLength(1);
+    expect(result.routes.calibri).toMatchObject({ source: 'local' });
+    unloadOfficeFontFallbacks(result.faces);
   });
 
   it('caps the number of local source probes for a font-heavy document', async () => {

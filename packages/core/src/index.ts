@@ -704,13 +704,6 @@ export {
   sanitizeHyperlinkUrl,
   openExternalHyperlink,
 } from './interaction/hyperlink';
-// Deprecated public signatures are retained for source compatibility. They
-// no longer grant numerical metric authority to a family name.
-export {
-  fontWinLineHeightRatio,
-  intendedSingleLinePx,
-  correctLineMetrics,
-} from './text/line-metrics';
 // Resolved font-resource metrics used when a loader owns concrete bytes or a
 // browser-selected face.
 export {
