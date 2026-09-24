@@ -193,6 +193,23 @@ fn rules(kind: u16) -> Option<&'static [Option<Rule>]> {
             Some(Scale(1)),
             Some(Scale(0)),
         ],
+        // Callout3 family: points in reverse order as for callout1. Only the
+        // x coordinates are evidenced (PowerPoint's defaults round trip);
+        // an authored y coordinate has no rule and is rejected.
+        43 | 46 | 49 | 52 => &[
+            None,
+            Some(Scale(6)),
+            None,
+            Some(Scale(4)),
+            None,
+            Some(Scale(2)),
+            None,
+            Some(Scale(0)),
+        ],
+        53 => &[Some(Scale(1))],
+        54 => &[Some(Complement(1))],
+        // Evidenced only for tall shapes (short side = width).
+        22 => &[Some(Height(0))],
         _ => return None,
     })
 }
@@ -241,7 +258,7 @@ pub(crate) fn adjustments(
     }
     // Parallelogram, hexagon and cube conversions were observed only with
     // the height as the short side.
-    if matches!(kind, 7 | 9 | 16) && w < h {
+    if matches!(kind, 7 | 9 | 16) && w < h || kind == 22 && h < w {
         return Err(unsupported());
     }
     let mut output = [None; 8];
@@ -298,6 +315,21 @@ mod tests {
         close(adj(58, &[(0, 2700)], 534, 476)[0], 37500.0);
         close(adj(16, &[(0, 5333)], 1276, 1221)[0], 24690.0);
         close(adj(38, &[(0, 10800)], 427, 242)[0], 50000.0);
+        // PowerPoint's defaults round trip (bisect2/defaults-all).
+        let callout3 = adj(
+            43,
+            &[(0, -1800), (2, -3600), (4, -3600), (6, -1800)],
+            691,
+            692,
+        );
+        assert_eq!(callout3[0], None);
+        close(callout3[1], -8333.0);
+        close(callout3[3], -16667.0);
+        close(callout3[5], -16667.0);
+        close(callout3[7], -8333.0);
+        close(adj(53, &[(1, 3600)], 691, 346)[0], 16667.0);
+        close(adj(54, &[(1, 18000)], 345, 691)[0], 16667.0);
+        close(adj(22, &[(0, 2700)], 547688, 1096963)[0], 25036.0);
         let wedge = adj(62, &[(0, -8503), (1, 13709)], 1440, 672);
         close(wedge[0], -89366.0);
         close(wedge[1], 13468.0);
@@ -331,7 +363,7 @@ mod tests {
         assert!(adjustments(43, &[None; 10], 10, 10).unwrap().is_none());
         let mut legacy = [None; 10];
         legacy[0] = Some(-1800);
-        assert!(adjustments(43, &legacy, 10, 10).is_err());
+        assert!(adjustments(42, &legacy, 10, 10).is_err());
         // rightArrow's shaft (adjust2Value) has no evidenced conversion.
         legacy[1] = Some(5400);
         assert!(adjustments(13, &legacy, 10, 10).is_err());
@@ -340,6 +372,10 @@ mod tests {
         assert!(adjustments(9, &tall, 100, 200).is_err());
         assert!(adjustments(999, &tall, 100, 100).is_err());
         assert!(adjustments(16, &tall, 100, 200).is_err());
+        assert!(adjustments(22, &tall, 200, 100).is_err());
+        let mut y = [None; 10];
+        y[1] = Some(20000);
+        assert!(adjustments(43, &y, 100, 100).is_err());
         let mut curve = [None; 10];
         curve[0] = Some(5400);
         assert!(adjustments(38, &curve, 100, 100).is_err());
