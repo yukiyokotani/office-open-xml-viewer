@@ -14,6 +14,9 @@ pub(super) struct Store<'a> {
     data: &'a [u8],
     cache: BTreeMap<usize, Option<Picture<'a>>>,
     part_offsets: BTreeSet<usize>,
+    /// PICF offsets holding the empty placeholder of a pseudo-inline shape.
+    #[cfg_attr(not(feature = "direct-doc"), allow(dead_code))]
+    placeholders: BTreeSet<usize>,
     budget: usize,
     remaining_bytes: usize,
     occurrences: u32,
@@ -25,6 +28,7 @@ impl<'a> Store<'a> {
             data,
             cache: BTreeMap::new(),
             part_offsets: BTreeSet::new(),
+            placeholders: BTreeSet::new(),
             budget: 1_000_000,
             remaining_bytes: 128 * 1024 * 1024,
             occurrences: 0,
@@ -59,8 +63,17 @@ impl<'a> Store<'a> {
             if self.cache.len() >= 100_000 {
                 return Err(unsupported("Word picture cache budget exceeded"));
             }
-            let picture =
-                read_with_limit(self.data, offset, &mut self.budget, self.remaining_bytes)?;
+            let mut placeholder = false;
+            let picture = read_with_limit(
+                self.data,
+                offset,
+                &mut self.budget,
+                self.remaining_bytes,
+                &mut placeholder,
+            )?;
+            if placeholder {
+                self.placeholders.insert(offset);
+            }
             if let Some(picture) = &picture {
                 self.remaining_bytes = self
                     .remaining_bytes
@@ -120,7 +133,7 @@ fn read<'a>(
     offset: usize,
     budget: &mut usize,
 ) -> Result<Option<Picture<'a>>, String> {
-    read_with_limit(data, offset, budget, 128 * 1024 * 1024)
+    read_with_limit(data, offset, budget, 128 * 1024 * 1024, &mut false)
 }
 
 fn read_with_limit<'a>(
@@ -128,6 +141,7 @@ fn read_with_limit<'a>(
     offset: usize,
     budget: &mut usize,
     remaining_bytes: usize,
+    placeholder: &mut bool,
 ) -> Result<Option<Picture<'a>>, String> {
     let tail = data
         .get(offset..)
@@ -195,6 +209,10 @@ fn read_with_limit<'a>(
         }
     }
     let Some(image) = selected else {
+        // A picture frame without any BLIP whose shape is marked
+        // fPseudoInline (MS-ODRAW 2.3.17.11) is the result placeholder that
+        // follows a pseudo-inline shape's anchor inside its SHAPE field.
+        *placeholder = props.blips == 0 && props.pib.is_none() && props.pseudo_inline;
         return Ok(None);
     };
     if props.crop[0] + props.crop[1] >= 100000 || props.crop[2] + props.crop[3] >= 100000 {
@@ -228,6 +246,7 @@ pub(super) struct Options {
     pub crop: [i64; 4],
     flip: [bool; 2],
     pub rotation: i64,
+    pseudo_inline: bool,
 }
 impl Options {
     fn apply(&mut self, record: Record<'_>, budget: &mut usize) -> Result<(), String> {
@@ -293,6 +312,7 @@ impl Options {
                     self.crop[usize::from(id - 0x100)] = percent;
                 }
                 4 => self.rotation = i64::from(value as i32) * 60000 / 65536,
+                0x53f if value & 0x0001_0001 == 0x0001_0001 => self.pseudo_inline = true,
                 _ => {}
             }
         }
@@ -502,6 +522,29 @@ mod tests {
         assert_eq!(resources[0].bytes.capacity(), 128);
         assert!(sufficient < 4096);
     }
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn pseudo_inline_placeholders_project_nothing_but_other_empty_frames_are_omitted() {
+        let placeholder = fixture(&[(0x53f, 0x0001_0001)], &[]);
+        let mut store = Store::new(&placeholder);
+        assert!(store
+            .direct_inline(0, &mut usize::MAX.clone())
+            .unwrap()
+            .is_none());
+        assert!(!store.omitted);
+        // An explicit false, or a BLIP-referencing frame, is not a placeholder.
+        for properties in [
+            &[(0x53fu16, 0x0001_0000u32)][..],
+            &[(0x53f, 0x0001_0001), (0x0104, 1)],
+        ] {
+            let data = fixture(properties, &[]);
+            let mut store = Store::new(&data);
+            let result = store.direct_inline(0, &mut usize::MAX.clone());
+            assert!(result.is_err() || store.omitted, "{properties:x?}");
+            assert!(store.placeholders.is_empty());
+        }
+    }
+
     #[cfg(feature = "direct-doc")]
     #[test]
     fn direct_inline_passes_validated_metafiles_with_docx_media_types() {

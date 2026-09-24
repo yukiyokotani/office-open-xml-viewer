@@ -48,6 +48,9 @@ pub(in crate::doc) struct Facts {
     /// Relative width and height (MS-ODRAW 2.3.5.1-2.3.5.2, 2.3.5.5-2.3.5.6):
     /// fraction of the named page element; see `relative_size`.
     pub relative_size: [Option<(f64, &'static str)>; 2],
+    /// fPseudoInline (MS-ODRAW 2.3.17.11): the shape stands in for an inline
+    /// object; see `Store::resolve`.
+    pub pseudo_inline: bool,
 }
 
 pub(in crate::doc) struct Line {
@@ -305,7 +308,6 @@ impl<'a> Table<'a> {
                 8,
                 "Word really-hidden drawing shapes are not supported",
             ),
-            (0x53f, 0, "Word pseudo-inline drawings are not supported"),
         ] {
             if self.boolean(id, bit) == Some(true) {
                 return Err(unsupported(reason));
@@ -418,6 +420,7 @@ impl<'a> Table<'a> {
             fill_picture,
             rotation,
             relative_size: relative_size(&self.values)?,
+            pseudo_inline: self.boolean(0x53f, 0) == Some(true),
             fill,
             line,
             text,
@@ -763,6 +766,14 @@ mod tests {
     }
 
     #[test]
+    fn pseudo_inline_shapes_are_reported_to_the_caller() {
+        let bytes = container(&[], &[(0x53f, 0x0001_0001), (0x390, 3), (0x392, 3)], &[]);
+        assert!(read(1, 0xa00, &bytes, [9, 9]).unwrap().pseudo_inline);
+        let bytes = container(&[], &[(0x53f, 0x0001_0000)], &[]);
+        assert!(!read(1, 0xa00, &bytes, [9, 9]).unwrap().pseudo_inline);
+    }
+
+    #[test]
     fn relative_sizes_follow_word_drawingml_relative_size() {
         let bytes = container(&[], &[(0x7c1, 200), (0x7c5, 0), (0x7c4, 0)], &[]);
         let facts = read(202, 0xa00, &bytes, [9, 9]).unwrap();
@@ -855,7 +866,6 @@ mod tests {
             (1, &[], &[(0x7c3, 0xc8)]),
             (1, &[], &[(0x7c1, 10_001)]),
             (1, &[], &[(0x7c1, 5), (0x7c5, 6)]),
-            (1, &[], &[(0x53f, 0x10001)]),
             (1, &[(0x3bf, 0x0800_0800)], &[]),
             (1, &[(0x2ff, 0)], &[]),
             // Conflicting scalars and Boolean members between tables.

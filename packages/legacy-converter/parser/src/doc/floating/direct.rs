@@ -30,6 +30,8 @@ pub(in crate::doc) struct DirectFloatingShape {
 /// group, all sharing one anchor host (as DOCX `wpg:wgp` members do).
 #[derive(Debug)]
 pub(in crate::doc) struct DirectFloating {
+    /// An inline drawing has no anchor host.
+    pub inline: bool,
     pub occurrence_id: String,
     pub runs: Vec<DirectRun>,
 }
@@ -163,6 +165,7 @@ impl Store<'_> {
             }
         }
         Ok(Some(DirectFloating {
+            inline: facts.inline,
             occurrence_id,
             runs,
         }))
@@ -708,6 +711,31 @@ fn direct_shape(
     *remaining_bytes = remaining_bytes
         .checked_sub(total.0)
         .ok_or("OUTPUT_TOO_LARGE")?;
+    let run = if facts.inline {
+        // ECMA-376 20.4.2.8 wp:inline: the shape takes part in line flow at
+        // its extent, with no anchor, wrap or stacking facts.
+        ShapeRun {
+            inline: true,
+            anchor_x_pt: 0.0,
+            anchor_y_pt: 0.0,
+            anchor_x_from_margin: false,
+            anchor_y_from_para: false,
+            anchor_x_relative_from: None,
+            anchor_y_relative_from: None,
+            behind_doc: false,
+            z_order: 0,
+            wrap_mode: None,
+            wrap_side: None,
+            dist_top: 0.0,
+            dist_bottom: 0.0,
+            dist_left: 0.0,
+            dist_right: 0.0,
+            anchor_acquisition: None,
+            ..run
+        }
+    } else {
+        run
+    };
     Ok(DirectFloatingShape {
         shape: run,
         text: text.map(|text| text.index),

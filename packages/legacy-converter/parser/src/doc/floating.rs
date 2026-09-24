@@ -17,7 +17,7 @@ mod shape;
 #[cfg(feature = "direct-doc")]
 pub(in crate::doc) mod textbox;
 #[cfg(feature = "direct-doc")]
-pub(in crate::doc) use direct::{DirectFloating, DirectRun};
+pub(in crate::doc) use direct::DirectRun;
 
 /// The drawing part that owns a PlcfSpa, its OfficeArtDgContainer and its
 /// textbox story (MS-DOC 2.8.27, 2.9.171; MS-ODRAW 2.2.13).
@@ -377,6 +377,39 @@ impl<'a> Store<'a> {
                 self.omitted = true;
                 return Ok(None);
             }
+            if facts.pseudo_inline {
+                // A pseudo-inline shape is the drawing of a SHAPE field: an
+                // absolutely positioned shape at the anchor character's
+                // origin (posrelh/posrelv 3, character and line, with a zero
+                // SPA offset). Word's own DOCX of the corpus documents writes
+                // each as an ordinary `wp:inline` WPS shape of the SPA size
+                // in the field's place. Any offset, alignment or wrapping
+                // other than none has no such evidence.
+                let [left, top, _, _] = anchor.rect;
+                if placement.relative_horizontal != Some(3)
+                    || placement.relative_vertical != Some(3)
+                    || placement.horizontal != 0
+                    || placement.vertical != 0
+                    || left != 0
+                    || top != 0
+                    || anchor.wrapping != 3
+                {
+                    return Err(unsupported(
+                        "Word pseudo-inline drawing is not at its character origin",
+                    ));
+                }
+                let mut drawing = self.finish(
+                    anchor,
+                    &placement,
+                    order,
+                    extent,
+                    flags,
+                    [None; 2],
+                    Content::Shape(Box::new(facts)),
+                )?;
+                drawing.inline = true;
+                return Ok(Some(drawing));
+            }
             let align = direct_alignment(anchor, &placement)?;
             if matches!(anchor.wrapping, 0 | 4 | 5) {
                 return Err(unsupported(
@@ -521,6 +554,7 @@ impl<'a> Store<'a> {
         self.occurrences += 1;
         Ok(ResolvedDrawing {
             content,
+            inline: false,
             #[cfg(feature = "direct-doc")]
             shape_id: anchor.shape_id,
             extent,
@@ -575,6 +609,9 @@ enum Content {
 
 struct ResolvedDrawing {
     content: Content,
+    /// Projected in paragraph flow instead of anchored (pseudo-inline).
+    #[cfg_attr(not(feature = "direct-doc"), allow(dead_code))]
+    inline: bool,
     #[cfg(feature = "direct-doc")]
     shape_id: u32,
     extent: [i64; 2],

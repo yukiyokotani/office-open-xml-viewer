@@ -37,7 +37,12 @@ impl Store<'_> {
     ) -> Result<Option<DirectInlinePicture>, String> {
         self.load(offset)?;
         let Some(picture) = self.cache[&offset].as_ref() else {
-            self.omitted = true;
+            // Word's own DOCX of the corpus documents writes nothing for the
+            // placeholder of a pseudo-inline shape; the shape itself is
+            // projected at its anchor character.
+            if !self.placeholders.contains(&offset) {
+                self.omitted = true;
+            }
             return Ok(None);
         };
         let mime_type = mime(picture.image.extension)?;

@@ -333,6 +333,7 @@ pub(super) fn project(
                         });
                     }
                     let occurrence_id = drawing.occurrence_id;
+                    let drawing_inline = drawing.inline;
                     host.anchor_occurrence_id = Some(occurrence_id);
                     let host_payload = std::mem::size_of::<docx_model::AnchorHostMetrics>()
                         .checked_add(host.font_family.as_ref().map_or(0, String::capacity))
@@ -345,7 +346,9 @@ pub(super) fn project(
                         })
                         .ok_or("OUTPUT_TOO_LARGE")?;
                     budget.charge(host_payload)?;
-                    budget.push(&mut paragraph.runs, DocRun::AnchorHost(host))?;
+                    if !drawing_inline {
+                        budget.push(&mut paragraph.runs, DocRun::AnchorHost(host))?;
+                    }
                     // Group members follow one host, as DOCX wpg members do.
                     for run in runs {
                         budget.push(&mut paragraph.runs, run)?;
