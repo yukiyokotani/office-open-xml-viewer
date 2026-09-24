@@ -13,6 +13,8 @@ use std::collections::{BTreeMap, HashSet};
 use crate::cfb::CompoundFile;
 use crate::ooxml::{write_package, xml_attr, xml_text, ROOT_RELS_XLSX};
 
+mod chart;
+mod conditional;
 pub(crate) mod direct;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod direct_corpus_tests;
@@ -30,8 +32,6 @@ mod print;
 mod rich;
 mod styles;
 mod theme;
-mod chart;
-mod conditional;
 mod views;
 
 const BOF: u16 = 0x0809;
@@ -299,7 +299,7 @@ fn prepare_workbook(
     // Validate global rich-text references before allocating worksheet cells.
     // This replaces the old SST encoder's eager FontIndex validation without
     // making XML generation part of source admission.
-    let resolved_styles = styles.resolve()?;
+    let mut resolved_styles = styles.resolve()?;
     for text in &shared_strings {
         text.validate_fonts(&resolved_styles)?;
     }
@@ -311,6 +311,7 @@ fn prepare_workbook(
     let mut custom_views_omitted = false;
     let mut tabs = Vec::new();
     let mut conditional_theme = None;
+    let mut dxfs = Vec::new();
     for (tab, sheet) in sheets.into_iter().enumerate() {
         if sheet.sheet_type != 0 {
             skipped_non_worksheets = true;
@@ -321,13 +322,19 @@ fn prepare_workbook(
         // converter keeps its documented omission warning.
         if direct && !data.conditional_records.is_empty() {
             if conditional_theme.is_none() {
-                conditional_theme = Some(theme::Colors::parse(&records)?);
+                conditional_theme = Some((
+                    theme::Colors::parse(&records)?,
+                    conditional::Externs::parse(&records)?,
+                ));
             }
+            let (theme, externs) = conditional_theme.as_ref().expect("parsed theme");
             let context = conditional::Context {
                 styles: &styles,
-                theme: conditional_theme.as_ref().expect("parsed theme"),
+                theme,
+                externs,
             };
-            data.conditional_formats = conditional::project(&data.conditional_records, &context)?;
+            data.conditional_formats =
+                conditional::project(&data.conditional_records, &context, &mut dxfs)?;
         }
         data.views.validate_count(window_count)?;
         for index in data.cell_styles.values() {
@@ -345,6 +352,7 @@ fn prepare_workbook(
             "BIFF workbook contains no supported worksheets",
         ));
     }
+    resolved_styles.set_dxfs(dxfs);
     let mut warnings = vec![
         "legacy-xls:drawings-conditional-formatting-and-external-links-omitted".into(),
         "legacy-xls:phonetic-data-print-areas-titles-and-extended-headers-omitted".into(),

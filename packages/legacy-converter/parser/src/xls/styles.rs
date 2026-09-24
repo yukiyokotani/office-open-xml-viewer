@@ -15,7 +15,7 @@ mod font;
 use color::ColorIdentity;
 use font::{ResolvedFont, Script, Underline};
 
-const PATTERNS: [&str; 19] = [
+pub(super) const PATTERNS: [&str; 19] = [
     "none",
     "solid",
     "mediumGray",
@@ -36,7 +36,7 @@ const PATTERNS: [&str; 19] = [
     "gray125",
     "gray0625",
 ];
-const BORDERS: [&str; 14] = [
+pub(super) const BORDERS: [&str; 14] = [
     "none",
     "thin",
     "medium",
@@ -80,6 +80,8 @@ pub(super) struct ResolvedStyleSheet {
     borders: Vec<ResolvedBorder>,
     xfs: Vec<ResolvedXf>,
     formats: BTreeMap<u16, String>,
+    /// Conditional-formatting differential formats (direct model only).
+    dxfs: Vec<xlsx_model::Dxf>,
 }
 
 #[derive(Clone)]
@@ -221,8 +223,12 @@ impl ResolvedStyleSheet {
                     format_code,
                 })
                 .collect(),
-            dxfs: Vec::new(),
+            dxfs: self.dxfs,
         }
+    }
+
+    pub(super) fn set_dxfs(&mut self, dxfs: Vec<xlsx_model::Dxf>) {
+        self.dxfs = dxfs;
     }
 
     pub(super) fn into_model_bounded(
@@ -301,6 +307,11 @@ impl ResolvedStyleSheet {
         for format in self.formats.values() {
             bytes = bytes
                 .checked_add(format.capacity())
+                .ok_or_else(|| unsupported("XLS style model byte budget exceeded"))?;
+        }
+        for dxf in &self.dxfs {
+            bytes = bytes
+                .checked_add(dxf_bytes(dxf))
                 .ok_or_else(|| unsupported("XLS style model byte budget exceeded"))?;
         }
         *budget = budget
@@ -502,6 +513,23 @@ impl<'a> Styles<'a> {
         }
     }
 
+    /// An IcvXF/IcvFont color as the XLSX model resolves cell-style colors.
+    pub(super) fn icv_model(&self, index: u16) -> Option<String> {
+        self.color(index).model()
+    }
+
+    /// The FORMAT record (2.4.126) id whose string equals `code`.
+    pub(super) fn format_id(&self, code: &str) -> Option<u16> {
+        self.formats
+            .iter()
+            .find_map(|(id, value)| (value == code).then_some(*id))
+    }
+
+    /// The FORMAT record string for `id`, if the workbook defines one.
+    pub(super) fn format_code(&self, id: u16) -> Option<String> {
+        self.formats.get(&id).cloned()
+    }
+
     fn color(&self, index: u16) -> ColorIdentity {
         if let Some(palette) = self.palette {
             if (8..64).contains(&index) {
@@ -692,6 +720,7 @@ impl<'a> Styles<'a> {
             borders,
             xfs,
             formats: self.formats.clone(),
+            dxfs: Vec::new(),
         })
     }
 
@@ -756,6 +785,7 @@ pub(super) fn minimal_resolved() -> ResolvedStyleSheet {
         borders: vec![ResolvedBorder::seed()],
         xfs: vec![ResolvedXf::default_xf()],
         formats: BTreeMap::new(),
+        dxfs: Vec::new(),
     }
 }
 
@@ -819,6 +849,42 @@ fn fill_xml(value: &ResolvedFill) -> String {
         ResolvedFill::Gray125 => "<fill><patternFill patternType=\"gray125\"/></fill>".into(),
         ResolvedFill::Pattern { pattern, foreground, background } => format!("<fill><patternFill patternType=\"{pattern}\"><fgColor {}/><bgColor {}/></patternFill></fill>", foreground.xml(), background.xml()),
     }
+}
+
+/// Retained model bytes of one conditional-formatting dxf.
+fn dxf_bytes(dxf: &xlsx_model::Dxf) -> usize {
+    let color = |value: &Option<String>| value.as_ref().map_or(0, String::len);
+    let edge = |value: &Option<xlsx_model::BorderEdge>| {
+        value
+            .as_ref()
+            .map_or(0, |e| e.style.len() + color(&e.color))
+    };
+    std::mem::size_of::<xlsx_model::Dxf>()
+        + dxf.font.as_ref().map_or(0, |f| {
+            std::mem::size_of::<xlsx_model::Font>()
+                + color(&f.color)
+                + color(&f.name)
+                + color(&f.underline_style)
+                + color(&f.vert_align)
+        })
+        + dxf.fill.as_ref().map_or(0, |f| {
+            std::mem::size_of::<xlsx_model::Fill>()
+                + f.pattern_type.len()
+                + color(&f.fg_color)
+                + color(&f.bg_color)
+        })
+        + dxf.border.as_ref().map_or(0, |b| {
+            std::mem::size_of::<xlsx_model::Border>()
+                + edge(&b.left)
+                + edge(&b.right)
+                + edge(&b.top)
+                + edge(&b.bottom)
+                + edge(&b.diagonal_up)
+                + edge(&b.diagonal_down)
+        })
+        + dxf.num_fmt.as_ref().map_or(0, |n| {
+            std::mem::size_of::<xlsx_model::NumFmt>() + n.format_code.len()
+        })
 }
 
 fn fill_model(value: ResolvedFill) -> xlsx_model::Fill {

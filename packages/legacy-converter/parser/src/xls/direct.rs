@@ -442,6 +442,12 @@ fn conditional_bytes(formats: &[xlsx_model::ConditionalFormat]) -> usize {
                                             + stop.color.len()
                                     })
                                     .sum(),
+                                xlsx_model::CfRule::CellIs {
+                                    operator, formulas, ..
+                                } => {
+                                    operator.len() + formulas.iter().map(String::len).sum::<usize>()
+                                }
+                                xlsx_model::CfRule::Expression { formula, .. } => formula.len(),
                                 xlsx_model::CfRule::DataBar {
                                     color, min, max, ..
                                 } => color.len() + value(min) + value(max),
