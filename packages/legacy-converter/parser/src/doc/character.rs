@@ -55,6 +55,9 @@ pub struct Properties {
     pub picture: Picture,
     /// Properties projected only by the direct model (see `DirectOnly`).
     direct_only: DirectOnly,
+    /// MS-DOC 2.6.1 sprmCSymbol / 2.9.47 CSymbolOperand (ftc, xchar).
+    /// Both sprmCPlain and sprmCIstd preserve it.
+    symbol: Option<(u16, u16)>,
 }
 
 /// Character properties whose MS-DOC semantics map onto the direct DOCX
@@ -168,6 +171,7 @@ impl Default for Properties {
             lang_east_asia_lid: None,
             picture: Picture::default(),
             direct_only: DirectOnly::default(),
+            symbol: None,
         }
     }
 }
@@ -188,6 +192,7 @@ impl Properties {
             lang_east_asia_lid: None,
             picture: Picture::default(),
             direct_only: DirectOnly::default(),
+            symbol: None,
         }
     }
 
@@ -224,6 +229,9 @@ impl Properties {
             }
         }
         self.direct_only.overlay(&patch.direct_only);
+        if patch.symbol.is_some() {
+            self.symbol = patch.symbol;
+        }
         // Object/special flags are not visual run formatting and must not
         // turn numbering text into a picture or an executable object.
     }
@@ -231,7 +239,7 @@ impl Properties {
     /// True when an accepted property is projected only by the direct model;
     /// the WordprocessingML adapter keeps reporting it as omitted.
     pub(super) fn has_direct_only_properties(&self) -> bool {
-        self.direct_only.any()
+        self.direct_only.any() || self.symbol.is_some()
     }
 
     pub fn reset_to(&mut self, paragraph: &Self, preserve_object: bool) {
@@ -241,6 +249,7 @@ impl Properties {
         let mut picture = self.picture;
         let font_hint = self.font_hint;
         let font_hint_present = self.font_hint_present;
+        let symbol = self.symbol;
         if !preserve_object {
             picture.object = paragraph.picture.object;
         }
@@ -254,6 +263,7 @@ impl Properties {
         // sprmCIdctHint operand unaffected, including 0xFF (no guidance).
         self.font_hint = font_hint;
         self.font_hint_present = font_hint_present;
+        self.symbol = symbol;
         for (key, value) in preserved {
             if let Some(value) = value {
                 self.values.insert(key, value);
@@ -370,6 +380,39 @@ impl Properties {
                     return Err(unsupported("invalid Word character revision session ID"));
                 }
                 let _ = u32_at(operand, 0)?;
+                return Ok(true);
+            }
+            0x6a09 => {
+                // MS-DOC 2.6.1 sprmCSymbol / 2.9.47: font index and the
+                // Unicode code of the symbol in that font. The font index is
+                // validated against the font table at projection.
+                if operand.len() != 4 {
+                    return Err(unsupported("invalid Word symbol operand"));
+                }
+                self.symbol = Some((u16_at(operand, 0)?, u16_at(operand, 2)?));
+                return Ok(true);
+            }
+            0x0811 => {
+                // MS-DOC 2.6.1 sprmCFWebHidden (ToggleOperand): text hidden
+                // only in Web Layout view. The direct model is the print/page
+                // layout, where the text stays visible, so the validated
+                // toggle has no effect. (CPlain/CIstd preserve it, which is
+                // moot for a property that is not retained.)
+                if operand.len() != 1 || !matches!(operand[0], 0 | 1 | 0x80 | 0x81) {
+                    return Err(unsupported("invalid Word web-hidden toggle"));
+                }
+                return Ok(true);
+            }
+            0xc81a => {
+                // MS-DOC 2.6.1 sprmCFMathPr / 2.9.153 MathPrOperand: cb = 2,
+                // jcMath is a DOPMTH mthbpjc value (1..=4). It justifies Office
+                // Math equations only; MS-DOC stores no Office Math zones in
+                // the text stream (equations are ordinary embedded objects),
+                // and note <145> states Word 2007 and later ignore it in
+                // compatibility mode while Word 97-2003 never process it.
+                if operand.len() != 3 || operand[0] != 2 || !(1..=4).contains(&(operand[1] & 7)) {
+                    return Err(unsupported("invalid Word math justification"));
+                }
                 return Ok(true);
             }
             0xca71 | 0x4866 => {
@@ -805,6 +848,28 @@ mod tests {
         value.apply(0x2a0c, &[12], &base).unwrap();
         value.reset_to(&base, true);
         assert!(value.xml(&[]).unwrap().contains("w:val=\"darkMagenta\""));
+    }
+
+    #[test]
+    fn web_hidden_and_math_justification_are_validated_without_print_effect() {
+        let base = Properties::default();
+        for operand in [0u8, 1, 0x80, 0x81] {
+            let mut value = base.clone();
+            assert!(value.apply(0x0811, &[operand], &base).unwrap());
+            assert_eq!(value, base);
+        }
+        for operand in [vec![2], vec![0x82], vec![], vec![1, 0]] {
+            assert!(base.clone().apply(0x0811, &operand, &base).is_err());
+        }
+        for jc in 1u8..=4 {
+            let mut value = base.clone();
+            assert!(value.apply(0xc81a, &[2, jc | 0xf8, 0xff], &base).unwrap());
+            assert_eq!(value, base);
+            assert!(!value.has_direct_only_properties());
+        }
+        for operand in [vec![2, 0, 0], vec![2, 5, 0], vec![1, 2, 0], vec![2, 2]] {
+            assert!(base.clone().apply(0xc81a, &operand, &base).is_err());
+        }
     }
 
     #[test]

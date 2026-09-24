@@ -156,7 +156,10 @@ pub(super) fn project(
                         },
                         |part, run| {
                             if let Some(mut run) = run.flatten() {
-                                budget.text(&mut paragraph.runs, &mut run, part)?;
+                                let part = crate::doc::character::Properties::direct_run_text(
+                                    &mut run, part,
+                                )?;
+                                budget.text(&mut paragraph.runs, &mut run, &part)?;
                             }
                             Ok(())
                         },
@@ -445,7 +448,8 @@ fn push_control_text(
         &story.prcs,
         String::new(),
     )? {
-        budget.text(&mut paragraph.runs, &mut run, text)?;
+        let text = crate::doc::character::Properties::direct_run_text(&mut run, text)?;
+        budget.text(&mut paragraph.runs, &mut run, &text)?;
     }
     Ok(())
 }

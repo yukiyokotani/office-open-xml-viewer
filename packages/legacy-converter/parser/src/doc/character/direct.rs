@@ -66,6 +66,7 @@ impl Properties {
             .filter(|value| value.as_str() != "none")
             .cloned();
         let (border, border_wire) = self.direct_border()?;
+        let symbol = self.direct_symbol(fonts)?;
         let fit_text = self.direct_only.fit_text;
 
         let mut run = TextRun {
@@ -123,6 +124,16 @@ impl Properties {
             fit_text_id: fit_text.map(|(_, id)| id.to_string()),
             ..TextRun::default()
         };
+        if let Some((glyph, font)) = symbol {
+            // ECMA-376 17.3.3.30 sym: a one-glyph run in the symbol's font,
+            // exactly as the DOCX parser projects `w:sym` (font on the
+            // ascii, high-ANSI and East Asian axes, no slot provenance).
+            run.text = glyph;
+            run.font_family = Some(font.clone());
+            run.font_family_high_ansi = Some(font.clone());
+            run.font_family_east_asia = Some(font);
+            run.font_slots = None;
+        }
         run.typography_acquisition = Some(RunTypographyWire {
             underline: match (
                 underline_token,
@@ -217,6 +228,44 @@ impl Properties {
         self.values
             .get("color")
             .is_some_and(|value| value == "auto")
+    }
+
+    /// MS-DOC 2.6.1 sprmCSymbol "designates the character as a symbol", and
+    /// sprmCFSpec lists U+0028 as "a symbol, see sprmCSymbol". The symbol
+    /// placeholder is therefore U+0028 (checked in `direct_run_text`).
+    /// sprmCSymbol does not require sprmCFSpec: a Word-produced corpus
+    /// document applies it to non-fSpec U+0028 characters and Word's own PDF
+    /// shows the symbol glyph there. Picture/OLE/object characters are never
+    /// symbols.
+    fn direct_symbol(&self, fonts: &[String]) -> Result<Option<(String, String)>, String> {
+        let Some((font, code)) = self.symbol else {
+            return Ok(None);
+        };
+        if self.picture.data || self.picture.ole || self.picture.object {
+            return Err(unsupported("Word symbol on a picture or object character"));
+        }
+        let glyph = char::from_u32(u32::from(code))
+            .ok_or_else(|| unsupported("invalid Word symbol character code"))?;
+        let font = fonts
+            .get(usize::from(font))
+            .ok_or_else(|| unsupported("Word symbol font outside font table"))?;
+        Ok(Some((glyph.to_string(), font.clone())))
+    }
+
+    /// Text for one visible span resolved by [`Self::direct_text_run`]. A
+    /// symbol run carries its glyph; every source character of the span MUST
+    /// then be the U+0028 symbol placeholder, one glyph each.
+    pub(in crate::doc) fn direct_run_text(run: &mut TextRun, part: &str) -> Result<String, String> {
+        if run.text.is_empty() {
+            return Ok(part.to_string());
+        }
+        if part.is_empty() || part.chars().any(|character| character != '(') {
+            return Err(unsupported(
+                "Word symbol property on a non-symbol character",
+            ));
+        }
+        let glyph = std::mem::take(&mut run.text);
+        Ok(glyph.repeat(part.chars().count()))
     }
 
     /// MS-DOC 2.6.1 sprmCBrc/sprmCBrc80 as an ECMA-376 17.3.2.4 run border.
@@ -1130,5 +1179,69 @@ mod tests {
             .unwrap());
         let cleared = applied(&[(0xca71, cshd([0, 0, 0, 0xff], [0xff; 4], 0))]);
         assert!(public_run(&cleared)["background"].is_null());
+    }
+
+    #[test]
+    fn symbol_characters_match_the_docx_sym_projection() {
+        let fonts = ["Times New Roman", "Symbol"].map(String::from);
+        let properties = applied(&[(0x0855, vec![1]), (0x6a09, vec![1, 0, 0xb0, 0xf0])]);
+        assert!(properties.has_direct_only_properties());
+        let mut run = properties
+            .direct_text_run(String::new(), &fonts)
+            .unwrap()
+            .unwrap();
+        let text = Properties::direct_run_text(&mut run, "((").unwrap();
+        assert_eq!(text, "\u{f0b0}\u{f0b0}");
+        run.text = "\u{f0b0}".into();
+        let mut direct = serde_json::to_value(&run).unwrap();
+        direct
+            .as_object_mut()
+            .unwrap()
+            .remove("__typographyAcquisition");
+        assert_eq!(
+            direct,
+            parsed_rpr(
+                r#"<w:sz w:val="20"/></w:rPr><w:sym w:font="Symbol" w:char="F0B0"/><w:rPr>"#
+            )
+        );
+
+        // CPlain/CIstd preserve the symbol designation.
+        let mut reset = properties.clone();
+        reset.reset_to(&Properties::default(), false);
+        assert_eq!(reset.symbol, Some((1, 0xf0b0)));
+
+        // Only the special U+0028 placeholder is a symbol.
+        let mut run = properties
+            .direct_text_run(String::new(), &fonts)
+            .unwrap()
+            .unwrap();
+        assert!(Properties::direct_run_text(&mut run, "(x").is_err());
+        // Word renders the symbol without sprmCFSpec as well.
+        let plain = applied(&[(0x6a09, vec![1, 0, 0xb0, 0xf0])]);
+        let mut run = plain
+            .direct_text_run(String::new(), &fonts)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            Properties::direct_run_text(&mut run, "(").unwrap(),
+            "\u{f0b0}"
+        );
+        let object = applied(&[(0x0856, vec![1]), (0x6a09, vec![1, 0, 0xb0, 0xf0])]);
+        assert!(object.direct_text_run(String::new(), &fonts).is_err());
+        let outside = applied(&[(0x0855, vec![1]), (0x6a09, vec![2, 0, 0xb0, 0xf0])]);
+        assert!(outside.direct_text_run(String::new(), &fonts).is_err());
+        let surrogate = applied(&[(0x0855, vec![1]), (0x6a09, vec![1, 0, 0x00, 0xd8])]);
+        assert!(surrogate.direct_text_run(String::new(), &fonts).is_err());
+        let base = Properties::default();
+        assert!(base.clone().apply(0x6a09, &[1, 0, 0], &base).is_err());
+        // Ordinary runs keep their text.
+        let mut ordinary = base
+            .direct_text_run(String::new(), &fonts)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            Properties::direct_run_text(&mut ordinary, "(a").unwrap(),
+            "(a"
+        );
     }
 }
