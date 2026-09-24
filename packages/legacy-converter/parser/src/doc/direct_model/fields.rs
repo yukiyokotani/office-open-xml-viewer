@@ -53,6 +53,27 @@ pub(in crate::doc) struct Evaluated {
     /// FORMCHECKBOX only: the instruction's binary-data character, whose
     /// NilPICFAndBinData holds the FFData (MS-DOC 2.9.78, 2.9.158).
     pub(in crate::doc) form_data_cp: Option<usize>,
+    /// EQ phonetic guide only (see `eq_ruby`).
+    pub(in crate::doc) ruby: Option<Box<RubyForm>>,
+}
+
+/// A Word phonetic guide stored as an EQ field (ECMA-376 Part 4 14.10.4.6
+/// \o overstrike with \ad alignment of a \s\up raised guide over its base).
+/// Evidence: the local DOC files Word saved from DOCX files store every DOCX
+/// `w:ruby` as `EQ \* jc2 \* "Font:..." \* hpsN \o\ad(\s\up K(guide),base)`
+/// with `w:rubyAlign="distributeSpace"`, `w:hps` = N and `w:hpsRaise` = 2K.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::doc) struct RubyForm {
+    /// Guide text and its CPs inside the (hidden) instruction.
+    pub(in crate::doc) guide: String,
+    pub(in crate::doc) guide_cp: usize,
+    /// Base text and its CPs inside the instruction.
+    pub(in crate::doc) base: String,
+    pub(in crate::doc) base_cp: usize,
+    /// `w:hps`: guide text size in half-points.
+    pub(in crate::doc) guide_half_points: u16,
+    /// `w:hpsRaise` / 2: raise of the guide in points.
+    pub(in crate::doc) raise_pt: u16,
 }
 
 /// Link semantics of stored-result content, as the DOCX parser derives them
@@ -112,6 +133,8 @@ struct Open {
     instruction_overflow: bool,
     instruction_controls: bool,
     form_data_cp: Option<usize>,
+    /// Instruction characters with their CPs (bounded like `instruction`).
+    instruction_chars: Vec<(char, usize)>,
     keyword_cp: Option<usize>,
     child_in_instruction: bool,
     child_in_result: bool,
@@ -317,6 +340,9 @@ impl Open {
                 }
                 return;
             }
+            if self.instruction_chars.len() < MAX_FIELD_TEXT {
+                self.instruction_chars.push((character, cp));
+            }
             if self.keyword_cp.is_none() && !character.is_whitespace() {
                 self.keyword_cp = Some(cp);
             }
@@ -517,7 +543,8 @@ fn classify(field: &Open, flags: Option<u8>) -> Result<Option<Evaluated>, String
         "DATE" => ("date", 0x1f),
         "TIME" => ("time", 0x20),
         "FORMCHECKBOX" => return checkbox(field, flags).map(Some),
-        "EQ" | "MACROBUTTON" | "GOTOBUTTON" | "ADVANCE" | "FORMDROPDOWN" => {
+        "EQ" => return eq_ruby(field, flags).map(Some),
+        "MACROBUTTON" | "GOTOBUTTON" | "ADVANCE" | "FORMDROPDOWN" => {
             return Err(unsupported(format!(
                 "Word {keyword} field display is not supported"
             )));
@@ -586,6 +613,7 @@ fn classify(field: &Open, flags: Option<u8>) -> Result<Option<Evaluated>, String
         format_cp,
         agreeing_result_cp,
         form_data_cp: None,
+        ruby: None,
     }))
 }
 
@@ -628,6 +656,163 @@ fn checkbox(field: &Open, flags: u8) -> Result<Evaluated, String> {
         format_cp: field.begin,
         agreeing_result_cp: None,
         form_data_cp: Some(form_data_cp),
+        ruby: None,
+    })
+}
+
+/// Project only the EQ phonetic-guide form the DOC/DOCX pairs settle; every
+/// other EQ switch or shape stays rejected (Word draws those itself).
+fn eq_ruby(field: &Open, flags: u8) -> Result<Evaluated, String> {
+    let reject = || {
+        unsupported(format!(
+            "Word EQ field display is not supported: {}",
+            field.instruction.trim()
+        ))
+    };
+    // An EQ field stores no result; a nested, locked or otherwise flagged
+    // field is outside the evidence.
+    if field.listed_type != Some(0x31)
+        || flags != 0
+        || field.parent
+        || field.child_in_instruction
+        || field.child_in_result
+        || field.instruction_controls
+        || field.instruction_overflow
+        || field.form_data_cp.is_some()
+    {
+        return Err(reject());
+    }
+    let chars = &field.instruction_chars;
+    let mut at = 0usize;
+    let skip_space = |at: &mut usize| {
+        while chars.get(*at).is_some_and(|(c, _)| c.is_whitespace()) {
+            *at += 1;
+        }
+    };
+    let literal = |at: &mut usize, text: &str| -> bool {
+        let matched = text
+            .chars()
+            .enumerate()
+            .all(|(offset, expected)| chars.get(*at + offset).map(|(c, _)| *c) == Some(expected));
+        if matched {
+            *at += text.chars().count();
+        }
+        matched
+    };
+    let number = |at: &mut usize| -> Option<u16> {
+        let start = *at;
+        while chars.get(*at).is_some_and(|(c, _)| c.is_ascii_digit()) {
+            *at += 1;
+        }
+        chars[start..*at]
+            .iter()
+            .map(|(c, _)| *c)
+            .collect::<String>()
+            .parse()
+            .ok()
+    };
+    skip_space(&mut at);
+    if !(literal(&mut at, "EQ") || literal(&mut at, "eq")) {
+        return Err(reject());
+    }
+    // \* jc2
+    skip_space(&mut at);
+    if !literal(&mut at, "\\*") {
+        return Err(reject());
+    }
+    skip_space(&mut at);
+    if !literal(&mut at, "jc2") {
+        return Err(reject());
+    }
+    // \* "Font:name" (Word also writes typographic quotes here). The guide's
+    // own character properties carry its font, as in the DOCX w:rt run.
+    skip_space(&mut at);
+    if !literal(&mut at, "\\*") {
+        return Err(reject());
+    }
+    skip_space(&mut at);
+    let close = match chars.get(at).map(|(c, _)| *c) {
+        Some('"') => '"',
+        Some('\u{201c}') => '\u{201d}',
+        _ => return Err(reject()),
+    };
+    at += 1;
+    if !literal(&mut at, "Font:") {
+        return Err(reject());
+    }
+    while chars.get(at).is_some_and(|(c, _)| *c != close) {
+        at += 1;
+    }
+    if chars.get(at).is_none() {
+        return Err(reject());
+    }
+    at += 1;
+    // \* hpsN
+    skip_space(&mut at);
+    if !literal(&mut at, "\\*") {
+        return Err(reject());
+    }
+    skip_space(&mut at);
+    if !literal(&mut at, "hps") {
+        return Err(reject());
+    }
+    let guide_half_points = number(&mut at)
+        .filter(|value| *value > 0)
+        .ok_or_else(reject)?;
+    // \o\ad(\s\up K(guide),base)
+    skip_space(&mut at);
+    if !literal(&mut at, "\\o\\ad(\\s\\up") {
+        return Err(reject());
+    }
+    skip_space(&mut at);
+    let raise_pt = number(&mut at).ok_or_else(reject)?;
+    if !literal(&mut at, "(") {
+        return Err(reject());
+    }
+    let text = |at: &mut usize, end: char| -> Option<(String, usize)> {
+        let start = *at;
+        while let Some((c, _)) = chars.get(*at) {
+            if *c == end {
+                break;
+            }
+            if matches!(c, '(' | ')' | ',' | '\\') {
+                return None;
+            }
+            *at += 1;
+        }
+        chars.get(*at)?;
+        (*at > start).then(|| {
+            (
+                chars[start..*at].iter().map(|(c, _)| *c).collect(),
+                chars[start].1,
+            )
+        })
+    };
+    let (guide, guide_cp) = text(&mut at, ')').ok_or_else(reject)?;
+    if !literal(&mut at, "),") {
+        return Err(reject());
+    }
+    let (base, base_cp) = text(&mut at, ')').ok_or_else(reject)?;
+    at += 1;
+    skip_space(&mut at);
+    if at != chars.len() {
+        return Err(reject());
+    }
+    Ok(Evaluated {
+        field_type: "ruby",
+        instruction: field.instruction.trim().to_string(),
+        cached_result: String::new(),
+        format_cp: base_cp,
+        agreeing_result_cp: None,
+        form_data_cp: None,
+        ruby: Some(Box::new(RubyForm {
+            guide,
+            guide_cp,
+            base,
+            base_cp,
+            guide_half_points,
+            raise_pt,
+        })),
     })
 }
 
@@ -874,6 +1059,7 @@ mod tests {
             format_cp: 2,
             agreeing_result_cp: None,
             form_data_cp: None,
+            ruby: None,
         }
     }
 
@@ -1005,6 +1191,11 @@ mod tests {
     fn fields_word_draws_itself_or_with_unverified_state_are_rejected() {
         for (text, kind, flags) in [
             ("\u{13}EQ \\o(a,b)\u{15}\r", 0x31, 0x00),
+            (
+                "\u{13}EQ \\* jc2 \\* \"Font:X\" \\* hps16 \\o\\ad(\\s\\up 14(a),b)\u{15}\r",
+                0x31,
+                0x40,
+            ),
             ("\u{13} FORMCHECKBOX \u{14}\u{15}\r", 0x47, 0xa0),
             ("\u{13} FORMCHECKBOX \u{1}\u{14}x\u{15}\r", 0x47, 0xa0),
             ("\u{13} FORMCHECKBOX \u{1}\u{14}\u{15}\r", 0x47, 0xb0),
@@ -1046,6 +1237,7 @@ mod tests {
             format_cp: 1,
             agreeing_result_cp: None,
             form_data_cp: Some(16),
+            ruby: None,
         };
         assert_eq!(
             actual,
@@ -1094,6 +1286,38 @@ mod tests {
             form_data(1, 20, "", 0)[..14].to_vec(),
         ] {
             assert!(checkbox_state(&data).is_err());
+        }
+    }
+
+    #[test]
+    fn eq_phonetic_guides_become_ruby_forms() {
+        let text = "A\u{13}EQ \\* jc2 \\* \u{201c}Font:X\u{201d}  \\* hps16 \\o\\ad(\\s\\up 14(\u{3042}),\u{4e0a})\u{15}B\r";
+        let table = with_types(text, &[0x31], &[0x00]);
+        let actual = tokens(text, &table).unwrap();
+        let Token::EvaluatedField(field) = &actual[1].0 else {
+            panic!("ruby token: {actual:?}");
+        };
+        let ruby = field.ruby.as_deref().unwrap();
+        assert_eq!(field.field_type, "ruby");
+        assert_eq!(
+            (ruby.guide.as_str(), ruby.base.as_str()),
+            ("\u{3042}", "\u{4e0a}")
+        );
+        assert_eq!((ruby.guide_half_points, ruby.raise_pt), (16, 14));
+        let units: Vec<u16> = text.encode_utf16().collect();
+        assert_eq!(units[ruby.guide_cp], 0x3042);
+        assert_eq!(units[ruby.base_cp], 0x4e0a);
+        assert_eq!(actual[2].0, Token::Text("B".into()));
+        // Other EQ forms and alignments are not settled by the pairs.
+        for instruction in [
+            "EQ \\* jc0 \\* \"Font:X\" \\* hps16 \\o\\ad(\\s\\up 14(a),b)",
+            "EQ \\* jc2 \\* \"Font:X\" \\* hps16 \\o\\ac(\\s\\up 14(a),b)",
+            "EQ \\* jc2 \\* \"Font:X\" \\* hps16 \\o\\ad(\\s\\up 14(a),b,c)",
+            "EQ \\f(1,2)",
+        ] {
+            let text = format!("\u{13}{instruction}\u{15}\r");
+            let table = with_types(&text, &[0x31], &[0x00]);
+            assert!(tokens(&text, &table).is_err(), "{instruction}");
         }
     }
 
