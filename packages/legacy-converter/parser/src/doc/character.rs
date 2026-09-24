@@ -58,6 +58,9 @@ pub struct Properties {
     /// MS-DOC 2.6.1 sprmCSymbol / 2.9.47 CSymbolOperand (ftc, xchar).
     /// Both sprmCPlain and sprmCIstd preserve it.
     symbol: Option<(u16, u16)>,
+    /// MS-DOC 2.6.1 sprmCFFldVanish (field text hidden). Both sprmCPlain and
+    /// sprmCIstd preserve it.
+    field_vanish: Option<bool>,
 }
 
 /// Character properties whose MS-DOC semantics map onto the direct DOCX
@@ -76,6 +79,8 @@ struct DirectOnly {
     fit_text: Option<(i32, i32)>,
     /// sprmCFELayout UFEL fTNY / fTNYCompress (horizontal in vertical).
     east_asian: Option<(bool, bool)>,
+    /// sprmCFUsePgsuSettings: ECMA-376 17.3.2.34 run snapToGrid.
+    snap_to_grid: Option<bool>,
 }
 
 impl DirectOnly {
@@ -84,7 +89,10 @@ impl DirectOnly {
         if self.shading.is_some() {
             return true;
         }
-        self.border.is_some() || self.fit_text.is_some() || self.east_asian.is_some()
+        self.border.is_some()
+            || self.fit_text.is_some()
+            || self.east_asian.is_some()
+            || self.snap_to_grid.is_some()
     }
 
     fn overlay(&mut self, patch: &Self) {
@@ -100,6 +108,9 @@ impl DirectOnly {
         }
         if patch.east_asian.is_some() {
             self.east_asian = patch.east_asian;
+        }
+        if patch.snap_to_grid.is_some() {
+            self.snap_to_grid = patch.snap_to_grid;
         }
     }
 }
@@ -177,6 +188,7 @@ impl Default for Properties {
             picture: Picture::default(),
             direct_only: DirectOnly::default(),
             symbol: None,
+            field_vanish: None,
         }
     }
 }
@@ -198,6 +210,7 @@ impl Properties {
             picture: Picture::default(),
             direct_only: DirectOnly::default(),
             symbol: None,
+            field_vanish: None,
         }
     }
 
@@ -234,6 +247,9 @@ impl Properties {
             }
         }
         self.direct_only.overlay(&patch.direct_only);
+        if patch.field_vanish.is_some() {
+            self.field_vanish = patch.field_vanish;
+        }
         if patch.symbol.is_some() {
             self.symbol = patch.symbol;
         }
@@ -244,7 +260,7 @@ impl Properties {
     /// True when an accepted property is projected only by the direct model;
     /// the WordprocessingML adapter keeps reporting it as omitted.
     pub(super) fn has_direct_only_properties(&self) -> bool {
-        self.direct_only.any() || self.symbol.is_some()
+        self.direct_only.any() || self.symbol.is_some() || self.field_vanish == Some(true)
     }
 
     pub fn reset_to(&mut self, paragraph: &Self, preserve_object: bool) {
@@ -255,6 +271,7 @@ impl Properties {
         let font_hint = self.font_hint;
         let font_hint_present = self.font_hint_present;
         let symbol = self.symbol;
+        let field_vanish = self.field_vanish;
         if !preserve_object {
             picture.object = paragraph.picture.object;
         }
@@ -269,6 +286,7 @@ impl Properties {
         self.font_hint = font_hint;
         self.font_hint_present = font_hint_present;
         self.symbol = symbol;
+        self.field_vanish = field_vanish;
         for (key, value) in preserved {
             if let Some(value) = value {
                 self.values.insert(key, value);
@@ -385,6 +403,32 @@ impl Properties {
                     return Err(unsupported("invalid Word character revision session ID"));
                 }
                 let _ = u32_at(operand, 0)?;
+                return Ok(true);
+            }
+            0x0868 | 0x0802 => {
+                // ToggleOperand (MS-DOC 2.9.327), relative to the style value.
+                if operand.len() != 1 {
+                    return Err(unsupported("invalid Word character toggle"));
+                }
+                let (current, base) = if code == 0x0868 {
+                    // sprmCFUsePgsuSettings: "by default, text uses the
+                    // document grid"; a corpus DOC/DOCX pair maps it to
+                    // ECMA-376 17.3.2.34 w:snapToGrid.
+                    (
+                        &mut self.direct_only.snap_to_grid,
+                        style.direct_only.snap_to_grid.unwrap_or(true),
+                    )
+                } else {
+                    // sprmCFFldVanish: "field text is hidden"; default false.
+                    (&mut self.field_vanish, style.field_vanish.unwrap_or(false))
+                };
+                *current = Some(match operand[0] {
+                    0 => false,
+                    1 => true,
+                    0x80 => base,
+                    0x81 => !base,
+                    _ => return Err(unsupported("invalid Word character toggle")),
+                });
                 return Ok(true);
             }
             0x6a09 => {
