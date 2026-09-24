@@ -31,6 +31,7 @@ mod rich;
 mod styles;
 mod theme;
 mod chart;
+mod conditional;
 mod views;
 
 const BOF: u16 = 0x0809;
@@ -153,9 +154,11 @@ struct SheetData {
     merged: Vec<(u16, u16, u16, u16)>,
     formula_results: bool,
     custom_views_omitted: bool,
-    /// MS-XLS 2.4.56 CondFmt, 2.4.42 CF, 2.4.57 CondFmt12, 2.4.43 CF12 or
-    /// 2.4.44 CFEx occurred in the worksheet substream.
-    conditional_formatting: bool,
+    /// MS-XLS 2.4.56 CondFmt, 2.4.42 CF, 2.4.57 CondFmt12, 2.4.43 CF12 and
+    /// 2.4.44 CFEx records of the worksheet substream, in stream order.
+    conditional_records: conditional::Records,
+    /// Their XLSX-model projection (direct path only).
+    conditional_formats: Vec<xlsx_model::ConditionalFormat>,
 }
 
 pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<XlsConversion, String> {
@@ -307,12 +310,25 @@ fn prepare_workbook(
     let mut incomplete_print_margins = false;
     let mut custom_views_omitted = false;
     let mut tabs = Vec::new();
+    let mut conditional_theme = None;
     for (tab, sheet) in sheets.into_iter().enumerate() {
         if sheet.sheet_type != 0 {
             skipped_non_worksheets = true;
             continue;
         }
-        let data = parse_sheet(&records, &sheet, &shared_strings)?;
+        let mut data = parse_sheet(&records, &sheet, &shared_strings)?;
+        // Only the direct model projects conditional formatting; the byte
+        // converter keeps its documented omission warning.
+        if direct && !data.conditional_records.is_empty() {
+            if conditional_theme.is_none() {
+                conditional_theme = Some(theme::Colors::parse(&records)?);
+            }
+            let context = conditional::Context {
+                styles: &styles,
+                theme: conditional_theme.as_ref().expect("parsed theme"),
+            };
+            data.conditional_formats = conditional::project(&data.conditional_records, &context)?;
+        }
         data.views.validate_count(window_count)?;
         for index in data.cell_styles.values() {
             styles.validate_xf(*index)?;
@@ -820,7 +836,9 @@ fn parse_sheet(
     let mut nested_substreams = 0usize;
     let mut found_eof = false;
     let mut custom_view = false;
+    let mut previous_kind = 0u16;
     for record in &all_records[start_index + 1..] {
+        let prior_kind = std::mem::replace(&mut previous_kind, record.kind);
         // [MS-XLS] 2.1.7: an embedded chart has its own BOF/EOF
         // substream. Its records are not worksheet cells or geometry.
         if record.kind == BOF {
@@ -977,7 +995,16 @@ fn parse_sheet(
                 }
             }
             MERGEDCELLS => parse_merged_cells(record.data, &mut output.merged)?,
-            0x01b0 | 0x01b1 | 0x0879 | 0x087a | 0x087b => output.conditional_formatting = true,
+            0x01b0 | 0x01b1 | 0x0879 | 0x087a | 0x087b => {
+                output.conditional_records.push(record.kind, record.data)?
+            }
+            // A continued conditional formatting record is not reassembled.
+            CONTINUE
+                if !output.conditional_records.is_empty()
+                    && matches!(prior_kind, 0x01b0 | 0x01b1 | 0x0879 | 0x087a | 0x087b) =>
+            {
+                return Err(unsupported("continued XLS conditional formatting record"));
+            }
             FILEPASS => return Err(unsupported("encrypted BIFF worksheet")),
             _ => {}
         }
