@@ -42,6 +42,17 @@ describe('ECMA-376 maximum digit width authority', () => {
     expect(getMdwForWorksheet(worksheet)).toBe(9);
   });
 
+  it('uses the authored bold Normal tuple rather than regular digit widths', () => {
+    vi.stubGlobal('navigator', { platform: 'MacIntel', userAgent: 'Macintosh' });
+    const worksheet = {
+      defaultFontFamily: 'Meiryo UI', defaultFontSize: 12,
+      defaultFontBold: true,
+    };
+    bindXlsxWorksheetOfficeFontRoutes(worksheet as Parameters<typeof bindXlsxWorksheetOfficeFontRoutes>[0], {});
+    // Office hmtx: 1386/2048 for bold vs 1272/2048 for regular.
+    expect(getMdwForWorksheet(worksheet)).toBe(11);
+  });
+
   it('uses Mac Excel point-quantized widths across a font-size boundary', () => {
     vi.stubGlobal('OffscreenCanvas', undefined);
     vi.stubGlobal('navigator', { platform: 'MacIntel', userAgent: 'Macintosh' });

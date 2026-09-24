@@ -232,6 +232,13 @@ pub struct Worksheet {
     /// Used together with `default_font_family` to compute Max Digit Width.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_font_size: Option<f64>,
+    /// `<fonts>[Normal.fontId]` style bits. Omitted when false so an ordinary
+    /// workbook keeps the compact worksheet model. MDW must use this exact
+    /// tuple rather than assuming the regular face.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_font_bold: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_font_italic: Option<bool>,
     /// Workbook DrawingML theme's Jpan faces for scheme-marked cell fonts.
     /// Excel for Mac with a Japanese UI locale selects this script face even
     /// for Latin cells; retain the authored scheme separately on each font.
@@ -298,6 +305,8 @@ impl Worksheet {
             sparkline_groups: Vec::new(),
             default_font_family: None,
             default_font_size: None,
+            default_font_bold: None,
+            default_font_italic: None,
             theme_japanese_major_font: None,
             theme_japanese_minor_font: None,
             date1904: false,

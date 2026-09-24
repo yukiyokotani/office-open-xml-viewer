@@ -2,9 +2,12 @@ import { xlsxFontPreloadNames, xlsxCjkFallback, xlsxWorksheetOfficeFontRequests 
 import type { ParsedWorkbook, Worksheet } from './types.js';
 
 it('preflights the Normal font even when no text cell uses it', () => {
-  const worksheet = { defaultFontFamily: 'Arial', rows: [], shapeGroups: [] } as unknown as Worksheet;
+  const worksheet = {
+    defaultFontFamily: 'Arial', defaultFontBold: true,
+    defaultFontItalic: true, rows: [], shapeGroups: [],
+  } as unknown as Worksheet;
   expect(xlsxWorksheetOfficeFontRequests(worksheet)).toEqual([
-    { family: 'Arial', weight: 400, style: 'normal' },
+    { family: 'Arial', weight: 700, style: 'italic' },
   ]);
 });
 import { describe, expect, it } from 'vitest';

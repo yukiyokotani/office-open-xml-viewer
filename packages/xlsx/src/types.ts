@@ -170,6 +170,10 @@ export interface Worksheet {
   defaultFontFamily?: string;
   /** Point size of the workbook's Normal-style font (`<fonts>[N].sz.val`). */
   defaultFontSize?: number;
+  /** Bold/italic bits of the Normal-style font selected by cellStyleXfs[0].
+   * Omitted means false; MDW must use the same face tuple as Excel. */
+  defaultFontBold?: boolean;
+  defaultFontItalic?: boolean;
   /** Workbook theme major Jpan face (`<a:majorFont><a:font script="Jpan">`).
    *  Used only for scheme-marked cells under the Japanese Mac Excel locale. */
   themeJapaneseMajorFont?: string;

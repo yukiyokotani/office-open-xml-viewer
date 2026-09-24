@@ -19,7 +19,7 @@ import { chartImageFillKey, paintOptionalImagePlaceholder } from '@silurus/ooxml
 import { placePhoneticRuns } from './phonetic.js';
 import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, rasterizeMathSvg, tintMathRaster, classifyCjkFont, classifyFontGeneric, googleCjkFontAlias, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, isLatinWordCodePoint, isUax14NoBreakPair, containsSeaScript, isGraphemeFillText, seaMixedBreakOffsets, fitSeaWordPrefix, graphemeClusterOffsets, xlsxBorderDashArray, drawImageCropped, hexToRgba, verticalTrLongMark, verticalVertGlyphReachable, applyStroke, resolveFill, type SparklineModel, type MathNode, type MathRenderer, type RasterizedMathSvg } from '@silurus/ooxml-core';
 import { isMacDesktop } from './internal/platform.js';
-import { shapeOfficeNaturalLineRatio, shapeOfficeRouteKey, singleNaturalShapeRun } from './shape-office-line.js';
+import { officeRequestKey, shapeOfficeNaturalLineRatio, shapeOfficeRouteKey, singleNaturalShapeRun } from './shape-office-line.js';
 import { evalFormulaToBool, todaySerial, nowSerial } from './formula.js';
 import { formatCellValueWithColor } from './number-format.js';
 import { type CfContext, type CfResult, compileCf, evaluateCf } from './conditional-format.js';
@@ -284,7 +284,13 @@ const FREEZE_LINE_COLOR = '#7a7a7a';
  *  Font registration is lifecycle-managed and may change between workbooks;
  *  caching by family/size alone would retain fallback metrics after the real
  *  face loads or is released. */
-export function computeMdw(family: string, sizePt: number, route?: import('@silurus/ooxml-core').OfficeFontFallbackRoute, googleSubstitutes = false): number {
+export function computeMdw(
+  family: string, sizePt: number,
+  route?: import('@silurus/ooxml-core').OfficeFontFallbackRoute,
+  googleSubstitutes = false,
+  weight: 400 | 700 = 400,
+  style: 'normal' | 'italic' = 'normal',
+): number {
   const sizePx = sizePt * PT_TO_PX;
   // Off-DOM canvas: avoids touching the document tree from background calls.
   const canvas = (typeof OffscreenCanvas !== 'undefined')
@@ -294,7 +300,8 @@ export function computeMdw(family: string, sizePt: number, route?: import('@silu
   const ctx = canvas.getContext('2d');
   if (!ctx) return MDW_FALLBACK;
   // Quote the family so multi-word names like "Meiryo UI" parse as one face.
-  ctx.font = `${sizePx}px ${fontStackFor(family, undefined, '', route, googleSubstitutes)}`;
+  const stylePrefix = weight !== 400 || style !== 'normal' ? `${style} ${weight} ` : '';
+  ctx.font = `${stylePrefix}${sizePx}px ${fontStackFor(family, undefined, '', route, googleSubstitutes)}`;
   let mdw = 0;
   for (const d of '0123456789') {
     const w = ctx.measureText(d).width;
@@ -322,9 +329,12 @@ function hasDeclaredNormalFace(family: string): boolean {
 /** Resolve the Max Digit Width for a worksheet's Normal-style font. Falls
  *  back to the Calibri 11 pt baseline (~8 px) when the parser couldn't
  *  determine the workbook's default font. */
-export function getMdwForWorksheet(ws: { defaultFontFamily?: string; defaultFontSize?: number }): number {
+export function getMdwForWorksheet(ws: Pick<Worksheet,
+  'defaultFontFamily' | 'defaultFontSize' | 'defaultFontBold' | 'defaultFontItalic'>): number {
   if (!ws.defaultFontFamily || !ws.defaultFontSize) return MDW_FALLBACK;
-  const route = officeRoutesByWorksheet.get(ws as Worksheet)?.[ws.defaultFontFamily.trim().toLocaleLowerCase('en-US')];
+  const weight = ws.defaultFontBold ? 700 : 400;
+  const style = ws.defaultFontItalic ? 'italic' : 'normal';
+  const route = officeRoutesByWorksheet.get(ws as Worksheet)?.[officeRequestKey({ family: ws.defaultFontFamily, weight, style })];
   // ECMA-376 §18.3.1.13 bases every stored column width on the Normal face's
   // widest digit. Canvas silently substitutes another face when the authored
   // one is missing. After exact-local preflight, use the pinned OpenType hmtx
@@ -338,13 +348,15 @@ export function getMdwForWorksheet(ws: { defaultFontFamily?: string; defaultFont
   if (officeRoutesByWorksheet.has(ws as Worksheet)
       && !route && !hasDeclaredNormalFace(ws.defaultFontFamily)) {
     const ratio = referenceFontMaxDigitAdvanceRatio(
-      ws.defaultFontFamily, 400, 'normal', isMacDesktop());
+      ws.defaultFontFamily, weight, style, isMacDesktop());
     if (ratio !== undefined) return quantizeMdw(ratio * ws.defaultFontSize * PT_TO_PX);
   }
   return computeMdw(
     ws.defaultFontFamily, ws.defaultFontSize,
     route,
     googleSubstitutesByWorksheet.get(ws as Worksheet) === true,
+    weight,
+    style,
   );
 }
 

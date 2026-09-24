@@ -4,12 +4,14 @@ use crate::types::*;
 use ooxml_common::depth::parse_guarded;
 use ooxml_common::ns::is_x_ns;
 
-/// Resolve the workbook's Normal-style font (family name + point size) by
+/// Resolve the workbook's Normal-style font (family, point size, and style) by
 /// following `<cellStyleXfs>[0].fontId` → `<fonts>[fontId]`. Returns `(None,
 /// None)` if `xl/styles.xml` is missing or malformed. The renderer uses this
 /// to compute the Max Digit Width for column-width pixel conversion
 /// (ECMA-376 §18.3.1.13).
-fn parse_default_font(doc: &roxmltree::Document) -> (Option<String>, Option<f64>) {
+pub(crate) type DefaultFont = (Option<String>, Option<f64>, bool, bool);
+
+fn parse_default_font(doc: &roxmltree::Document) -> DefaultFont {
     let mut font_id: usize = 0;
     for n in doc.descendants() {
         if n.tag_name().name() == "cellStyleXfs" && is_x_ns(n.tag_name().namespace()) {
@@ -36,28 +38,32 @@ fn parse_default_font(doc: &roxmltree::Document) -> (Option<String>, Option<f64>
         {
             let mut name = None;
             let mut sz = None;
+            let mut bold = false;
+            let mut italic = false;
             for child in font_node.children() {
                 match child.tag_name().name() {
                     "name" => name = child.attribute("val").map(|s| s.to_string()),
                     "sz" => sz = child.attribute("val").and_then(|s| s.parse().ok()),
+                    "b" => bold = parse_st_on_off(&child),
+                    "i" => italic = parse_st_on_off(&child),
                     _ => {}
                 }
             }
-            return (name, sz);
+            return (name, sz, bold, italic);
         }
         break;
     }
-    (None, None)
+    (None, None, false, false)
 }
 
 pub(crate) struct ParsedStylesPart {
     pub(crate) styles: Styles,
-    pub(crate) default_font: (Option<String>, Option<f64>),
+    pub(crate) default_font: DefaultFont,
     pub(crate) chart_number_formats: crate::chart::ChartNumberFormatCache,
 }
 
 pub(crate) struct ParsedStyleProjection {
-    pub(crate) default_font: (Option<String>, Option<f64>),
+    pub(crate) default_font: DefaultFont,
     pub(crate) chart_number_formats: crate::chart::ChartNumberFormatCache,
 }
 
@@ -654,5 +660,21 @@ mod strict_namespace_tests {
         assert_eq!(styled.fill_id, 1);
         assert_eq!(styled.align_h.as_deref(), Some("center"));
         assert!(styled.wrap_text);
+    }
+
+    #[test]
+    fn normal_font_style_follows_cell_style_font_id() {
+        let xml = r#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+          <fonts count="2">
+            <font><sz val="11"/><name val="Calibri"/></font>
+            <font><b/><i/><sz val="12"/><name val="Arial"/></font>
+          </fonts>
+          <cellStyleXfs count="1"><xf fontId="1"/></cellStyleXfs>
+        </styleSheet>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        assert_eq!(
+            parse_default_font(&doc),
+            (Some("Arial".into()), Some(12.0), true, true)
+        );
     }
 }

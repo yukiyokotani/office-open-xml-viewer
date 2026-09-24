@@ -115,8 +115,10 @@ export function xlsxWorksheetOfficeFontRequests(ws: Worksheet): OfficeFontFallba
   // authored face before measuring column MDW, including families that occur
   // nowhere in a cell's text. Exact local bytes win over catalog references.
   const normalFamily = ws.defaultFontFamily?.trim();
-  if (normalFamily && findReferenceFontMetrics(normalFamily, { weight: 400, style: 'normal' }).length) {
-    const request = { family: normalFamily, weight: 400, style: 'normal' } as const;
+  const normalWeight = ws.defaultFontBold ? 700 : 400;
+  const normalStyle = ws.defaultFontItalic ? 'italic' : 'normal';
+  if (normalFamily && findReferenceFontMetrics(normalFamily, { weight: normalWeight, style: normalStyle }).length) {
+    const request = { family: normalFamily, weight: normalWeight, style: normalStyle } as const;
     found.set(officeRequestKey(request), request);
   }
   for (const row of ws.rows) for (const cell of row.cells) {

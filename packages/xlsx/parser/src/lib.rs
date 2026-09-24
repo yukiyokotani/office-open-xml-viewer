@@ -386,7 +386,7 @@ struct WorkbookShared {
     /// Lightweight style projections used while materializing sheets. Full
     /// workbook styles stay owned by the full-parse path instead of being
     /// retained and deeply cloned here.
-    default_font: (Option<String>, Option<f64>),
+    default_font: DefaultFont,
     chart_number_formats: ChartNumberFormatCache,
     shared_strings: Rc<[SharedString]>,
     /// #773: a part-tagged degradation error set when `xl/sharedStrings.xml` was
@@ -514,7 +514,7 @@ impl WorkbookShared {
                     Some(Ok(parsed.styles)),
                 ),
                 Err(error) => (
-                    (None, None),
+                    (None, None, false, false),
                     ChartNumberFormatCache::default(),
                     Some(Err(error)),
                 ),
@@ -522,7 +522,11 @@ impl WorkbookShared {
         } else {
             match styles::parse_style_projection(archive) {
                 Ok(parsed) => (parsed.default_font, parsed.chart_number_formats, None),
-                Err(_) => ((None, None), ChartNumberFormatCache::default(), None),
+                Err(_) => (
+                    (None, None, false, false),
+                    ChartNumberFormatCache::default(),
+                    None,
+                ),
             }
         };
         let (shared_strings, shared_strings_error) =
@@ -781,6 +785,8 @@ fn finalize_projected_sheet(
     ws.sparkline_groups = sparkline_groups;
     ws.default_font_family = shared.default_font.0.clone();
     ws.default_font_size = shared.default_font.1;
+    ws.default_font_bold = shared.default_font.2.then_some(true);
+    ws.default_font_italic = shared.default_font.3.then_some(true);
     ws.theme_japanese_major_font = shared.theme_japanese_fonts.0.clone();
     ws.theme_japanese_minor_font = shared.theme_japanese_fonts.1.clone();
     // Denormalize the workbook-wide date system onto this sheet so the cell
@@ -2396,6 +2402,8 @@ fn parse_projected_worksheet(
         sparkline_groups: Vec::new(),
         default_font_family: None,
         default_font_size: None,
+        default_font_bold: None,
+        default_font_italic: None,
         theme_japanese_major_font: None,
         theme_japanese_minor_font: None,
         // Set by `parse_sheet_with` from the workbook-level `<workbookPr
@@ -6885,7 +6893,7 @@ mod rb7_partial_degradation_tests {
         let sheet_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rDrawing" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>"#;
         let drawing = r#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><xdr:twoCellAnchor><xdr:from><xdr:col>3</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>0</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>8</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>10</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:graphicFrame><xdr:nvGraphicFramePr><xdr:cNvPr id="1" name="Chart"/></xdr:nvGraphicFramePr><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart r:id="rChart"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>"#;
         let drawing_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rChart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/></Relationships>"#;
-        let styles = r#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><numFmts count="1"><numFmt numFmtId="165" formatCode="0.0000"/></numFmts><fonts count="1"><font><sz val="13"/><name val="Cursor Test Font"/></font></fonts><fills count="0"/><borders count="0"/><cellStyleXfs count="1"><xf fontId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0"/><xf numFmtId="165" fontId="0"/></cellXfs></styleSheet>"#;
+        let styles = r#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><numFmts count="1"><numFmt numFmtId="165" formatCode="0.0000"/></numFmts><fonts count="1"><font><b/><i/><sz val="13"/><name val="Cursor Test Font"/></font></fonts><fills count="0"/><borders count="0"/><cellStyleXfs count="1"><xf fontId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0"/><xf numFmtId="165" fontId="0"/></cellXfs></styleSheet>"#;
         let mut entries = vec![
             ("xl/workbook.xml", workbook.as_str()),
             ("xl/_rels/workbook.xml.rels", workbook_rels.as_str()),
@@ -6969,6 +6977,8 @@ mod rb7_partial_degradation_tests {
             terminal["worksheet"]["defaultFontFamily"],
             "Cursor Test Font"
         );
+        assert_eq!(terminal["worksheet"]["defaultFontBold"], true);
+        assert_eq!(terminal["worksheet"]["defaultFontItalic"], true);
         assert_eq!(
             terminal["worksheet"]["charts"][0]["chart"]["series"][0]["catFormatBuiltinId"],
             165
