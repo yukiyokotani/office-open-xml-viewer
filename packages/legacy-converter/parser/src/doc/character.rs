@@ -437,6 +437,18 @@ impl Properties {
                 });
                 return Ok(true);
             }
+            0x486b => {
+                // Not listed in MS-DOC 2.6.1. Its two-byte operand is a
+                // Windows code page (the corpus value is 1252). MS-DOC 2.4.1
+                // already fixes compressed text to code page 1252 and stores
+                // other text as UTF-16, and a Word-saved DOC/DOCX corpus pair
+                // has no counterpart for it in the DOCX style. Only that
+                // value is accepted as having no display effect.
+                if operand.len() != 2 {
+                    return Err(unsupported("invalid Word character code page"));
+                }
+                return Ok(u16_at(operand, 0)? == 1252);
+            }
             0x2879 => {
                 // MS-DOC 2.6.1 sprmCLbcCRJ / 2.9.129 LBCOperand: where text
                 // resumes after a U+000B line break (lbrNone/Left/Right/Both).
@@ -978,6 +990,16 @@ mod tests {
         assert!(base.clone().apply(0x6887, &[0, 0, 0, 0x80], &base).is_err());
         assert!(base.clone().apply(0x6887, &[0, 0, 0], &base).is_err());
         assert!(base.clone().apply(0x4888, &[0], &base).is_err());
+    }
+
+    #[test]
+    fn windows_1252_character_code_page_has_no_effect() {
+        let base = Properties::default();
+        let mut value = base.clone();
+        assert!(value.apply(0x486b, &1252u16.to_le_bytes(), &base).unwrap());
+        assert_eq!(value, base);
+        assert!(!value.apply(0x486b, &932u16.to_le_bytes(), &base).unwrap());
+        assert!(base.clone().apply(0x486b, &[0xe4], &base).is_err());
     }
 
     #[test]
