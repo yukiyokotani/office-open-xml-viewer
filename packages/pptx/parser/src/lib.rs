@@ -6234,7 +6234,7 @@ mod tests {
         let m_str: HashMap<String, String> = HashMap::new();
         let m_tf: HashMap<String, Transform> = HashMap::new();
         let m_bool: HashMap<String, bool> = HashMap::new();
-        let m_i64: HashMap<String, i64> = HashMap::new();
+        let m_i64: HashMap<String, crate::text::ParagraphSpacing> = HashMap::new();
         let empty_rels: HashMap<String, String> = HashMap::new();
         let build = |accent1_hex: &str| -> ParsedLayout {
             let mut theme: HashMap<String, String> = HashMap::new();
@@ -7328,6 +7328,90 @@ mod tests {
             !json_absent.contains("defTabSz"),
             "absent defTabSz must be omitted from JSON; got {json_absent}"
         );
+    }
+
+    /// ECMA-376 §21.1.2.2.9-.10: `a:spcBef`/`a:spcAft` hold one CT_TextSpacing
+    /// choice. A percentage is retained separately from points, and the
+    /// nearest level's choice replaces an inherited value of the other kind.
+    #[test]
+    fn test_parse_paragraph_percentage_before_after_spacing() {
+        use crate::text::ParagraphSpacing;
+        let theme = HashMap::new();
+        let rels = HashMap::new();
+        let bytes = empty_zip_bytes();
+        let cursor = Cursor::new(bytes.clone());
+        let mut zip = PptxZip::new(cursor).unwrap();
+        let mut parse_para = |lst_style: &str,
+                              p_pr: &str,
+                              inherited: Option<ParagraphSpacing>|
+         -> Paragraph {
+            let xml = format!(
+                r#"<txBody xmlns="http://schemas.openxmlformats.org/drawingml/2006/main"><lstStyle>{lst_style}</lstStyle><p>{p_pr}<r><t>a</t></r></p></txBody>"#
+            );
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            let mut tb = parse_text_body(
+                doc.root_element(),
+                &theme,
+                &rels,
+                "ppt/slides",
+                None,
+                None,
+                [None; 9],
+                Default::default(),
+                &empty_level_bullets(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                inherited,
+                inherited,
+                None,
+                ShapeKind::Sp,
+                &mut zip,
+            );
+            tb.paragraphs.remove(0)
+        };
+
+        let p = parse_para(
+            "",
+            r#"<pPr><spcBef><spcPct val="20000"/></spcBef><spcAft><spcPct val="50000"/></spcAft></pPr>"#,
+            None,
+        );
+        assert_eq!((p.space_before, p.space_before_pct), (None, Some(20000.0)));
+        assert_eq!((p.space_after, p.space_after_pct), (None, Some(50000.0)));
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(json.contains("\"spaceBeforePct\":20000.0"), "{json}");
+        assert!(json.contains("\"spaceAfterPct\":50000.0"), "{json}");
+
+        // Points stay in the existing field and the percentage keys are omitted.
+        let p = parse_para(
+            "",
+            r#"<pPr><spcBef><spcPts val="600"/></spcBef></pPr>"#,
+            None,
+        );
+        assert_eq!((p.space_before, p.space_before_pct), (Some(600), None));
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(!json.contains("spaceBeforePct"), "{json}");
+
+        // An own lstStyle percentage overrides inherited points, and a direct
+        // point value overrides an inherited percentage.
+        let p = parse_para(
+            r#"<lvl1pPr><spcBef><spcPct val="30000"/></spcBef></lvl1pPr>"#,
+            "",
+            Some(ParagraphSpacing::Points(1200)),
+        );
+        assert_eq!((p.space_before, p.space_before_pct), (None, Some(30000.0)));
+        let p = parse_para(
+            "",
+            r#"<pPr><spcAft><spcPts val="0"/></spcAft></pPr>"#,
+            Some(ParagraphSpacing::Percent(40000.0)),
+        );
+        assert_eq!((p.space_after, p.space_after_pct), (Some(0), None));
+        assert_eq!((p.space_before, p.space_before_pct), (None, Some(40000.0)));
     }
 
     /// ECMA-376 §21.1.3.13 (`a:tblPr@rtl`): a right-to-left table sets `rtl=true`

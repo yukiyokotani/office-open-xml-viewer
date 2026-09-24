@@ -447,6 +447,8 @@ fn default_paragraph() -> Paragraph {
         indent: 0,
         space_before: None,
         space_after: None,
+        space_before_pct: None,
+        space_after_pct: None,
         space_line: None,
         lvl: 0,
         bullet: Bullet::None,

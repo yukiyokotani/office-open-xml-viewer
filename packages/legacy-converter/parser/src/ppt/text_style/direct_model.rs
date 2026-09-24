@@ -5,9 +5,9 @@
 //! inheritance; it does not serialize or parse DrawingML as an intermediate.
 //!
 //! Internal producer groundwork, not a complete or publicly routed converter.
-//! Unresolved paragraph origins and percentage before/after spacing need further
-//! model admission support. Baseline information discarded by the native decoder
-//! cannot be recovered here. Keep these limits explicit before wiring a producer.
+//! Unresolved paragraph origins need further model admission support.
+//! Baseline information discarded by the native decoder cannot be recovered
+//! here. Keep these limits explicit before wiring a producer.
 
 use super::*;
 use ooxml_common::text::SpaceLine;
@@ -356,19 +356,27 @@ fn model_paragraph(
                 "implicit binary PowerPoint paragraph indent requires model admission context",
             )
         })?;
-    let spacing = |value: Option<i16>| -> Result<Option<i64>, String> {
+    // MS-PPT 2.2.20 ParaSpacing: 0..=13200 is a percentage of the text line
+    // height; a negative value is an absolute size in master units (1/8
+    // point). The percentage keeps its own model field: DrawingML
+    // spcBef/spcAft spcPct (ECMA-376 §21.1.2.2.9-.10, §21.1.2.3.11) uses the
+    // same line-relative unit, thousandths of a percent.
+    let spacing = |value: Option<i16>| -> Result<(Option<i64>, Option<f64>), String> {
         match value {
-            None => Ok(None),
-            Some(0) => Ok(Some(0)),
-            Some(1..) => Err(unsupported(
-                "percentage PowerPoint before/after spacing requires presentation model support",
+            None => Ok((None, None)),
+            Some(0) => Ok((Some(0), None)),
+            Some(v @ 1..=13200) => Ok((None, Some(f64::from(v) * 1000.0))),
+            Some(13201..) => Err(unsupported(
+                "invalid PowerPoint percentage before/after spacing",
             )),
             Some(v) => {
                 let raw = (-i32::from(v) * 100 + 4) / 8;
-                Ok(Some(i64::from(raw)))
+                Ok((Some(i64::from(raw)), None))
             }
         }
     };
+    let (space_before, space_before_pct) = spacing(paragraph.spacing[1])?;
+    let (space_after, space_after_pct) = spacing(paragraph.spacing[2])?;
     let space_line = match paragraph.spacing[0] {
         None => None,
         Some(v @ 0..=13200) => Some(SpaceLine::Pct {
@@ -414,8 +422,10 @@ fn model_paragraph(
         mar_l,
         mar_r: 0,
         indent,
-        space_before: spacing(paragraph.spacing[1])?,
-        space_after: spacing(paragraph.spacing[2])?,
+        space_before,
+        space_after,
+        space_before_pct,
+        space_after_pct,
         space_line,
         lvl: u32::from(paragraph.level),
         bullet,
@@ -1175,12 +1185,62 @@ mod tests {
     }
 
     #[test]
+    fn before_after_spacing_keeps_percentages_and_points_distinct() {
+        let character = Level::empty(0).character;
+        let project = |before, after| {
+            let paragraph = Paragraph {
+                spacing: [None, before, after],
+                margin: Some(0),
+                indent: Some(0),
+                ..Level::empty(0).paragraph
+            };
+            model_paragraph(
+                &paragraph,
+                None,
+                Context::default(),
+                vec![],
+                &character,
+                &mut 10,
+                &mut 10_000,
+            )
+            .unwrap()
+        };
+        // MS-PPT 2.2.20: 1..=13200 is a percentage of the line height.
+        for value in [1, 20, 100, 13_200] {
+            let model = project(Some(value), Some(value));
+            let expected = Some(f64::from(value) * 1000.0);
+            assert_eq!(
+                (model.space_before, model.space_before_pct),
+                (None, expected)
+            );
+            assert_eq!((model.space_after, model.space_after_pct), (None, expected));
+        }
+        // Zero and negative master units stay absolute points.
+        let model = project(Some(0), Some(-80));
+        assert_eq!(
+            (model.space_before, model.space_before_pct),
+            (Some(0), None)
+        );
+        assert_eq!(
+            (model.space_after, model.space_after_pct),
+            (Some(1000), None)
+        );
+        let model = project(None, None);
+        assert_eq!((model.space_before, model.space_before_pct), (None, None));
+        assert_eq!((model.space_after, model.space_after_pct), (None, None));
+    }
+
+    #[test]
     fn spacing_boundaries_and_unresolved_geometry_fail_closed() {
         let character = Level::empty(0).character;
         for (spacing, expected) in [
             (
-                [Some(13_200), Some(1), None],
-                "percentage PowerPoint before/after",
+                [Some(13_200), Some(13_201), None],
+                "invalid PowerPoint percentage before/after",
+            ),
+            (
+                [None, None, Some(i16::MAX)],
+                "invalid PowerPoint percentage before/after",
             ),
             (
                 [Some(13_201), None, None],

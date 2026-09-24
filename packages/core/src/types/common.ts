@@ -331,8 +331,19 @@ export interface Paragraph {
   marR: number;
   /** First-line indent in EMU (negative = hanging indent) */
   indent: number;
+  /** `<a:spcBef><a:spcPts>` in hundredths of a point. */
   spaceBefore: number | null;
+  /** `<a:spcAft><a:spcPts>` in hundredths of a point. */
   spaceAfter: number | null;
+  /**
+   * `<a:spcBef><a:spcPct>` (ECMA-376 §21.1.2.2.10, §21.1.2.3.11) in
+   * thousandths of a percent of the text size of the paragraph's first line
+   * (100000 = one line). Absent unless the effective choice is a percentage;
+   * never set together with `spaceBefore`.
+   */
+  spaceBeforePct?: number;
+  /** `<a:spcAft><a:spcPct>` (ECMA-376 §21.1.2.2.9), same unit, of the last line. */
+  spaceAfterPct?: number;
   spaceLine: SpaceLine | null;
   /** List nesting level (0–8) */
   lvl: number;
