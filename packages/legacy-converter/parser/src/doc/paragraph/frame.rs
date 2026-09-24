@@ -126,6 +126,39 @@ impl Frame {
     }
 }
 
+/// Raw frame facts of a table paragraph, compared against the table's own
+/// position by `table::Position::matches_cell_frame`.
+#[cfg(feature = "direct-doc")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::doc) struct TableParagraphFrame {
+    pub(in crate::doc) position_code: Option<u8>,
+    pub(in crate::doc) dxa_abs: i16,
+    pub(in crate::doc) dya_abs: i16,
+    pub(in crate::doc) auto_size: bool,
+    pub(in crate::doc) wrap: u8,
+    pub(in crate::doc) dxa_from_text: u16,
+    pub(in crate::doc) dya_from_text: u16,
+    pub(in crate::doc) no_allow_overlap: bool,
+    pub(in crate::doc) drop_cap_or_text_flow: bool,
+}
+
+#[cfg(feature = "direct-doc")]
+impl Frame {
+    pub(in crate::doc) fn table_paragraph_facts(&self) -> Option<TableParagraphFrame> {
+        self.applied.then_some(TableParagraphFrame {
+            position_code: self.position_code,
+            dxa_abs: self.dxa_abs,
+            dya_abs: self.dya_abs,
+            auto_size: self.width == 0 && self.height == 0,
+            wrap: self.wrap,
+            dxa_from_text: self.dxa_from_text,
+            dya_from_text: self.dya_from_text,
+            no_allow_overlap: self.no_allow_overlap,
+            drop_cap_or_text_flow: self.drop_cap & 7 != 0 || self.text_flow,
+        })
+    }
+}
+
 /// Why a frame cannot be projected. Every variant keeps the file fail-closed.
 #[cfg(feature = "direct-doc")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

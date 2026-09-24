@@ -75,14 +75,21 @@ pub(super) fn project(
     if formatting.use_raw_table_shading() {
         resolve_table_cell_shading(&mut prepared, &table_context, formatting)?;
     }
-    // Row positions, keyed by TTP, for cell paragraphs that repeat them as
-    // paragraph frames (see table::Position::matches_cell_frame).
-    let mut row_positions = std::collections::BTreeMap::new();
-    for table in table_context.tables() {
-        for row in &table.rows {
-            if let Some(ttp) = prepared.get(row.ttp_id) {
-                row_positions.insert(row.ttp_id, ttp.table_properties.row.position.clone());
-            }
+    // Position of the depth-1 row that encloses each table paragraph (its own
+    // row, or the outer row of a nested table): its TTP is the next depth-1
+    // row mark ([MS-DOC] 2.4.3). Cell paragraphs may repeat that position as
+    // paragraph frame properties (see table::Position::matches_cell_frame).
+    let mut outer_row_positions = vec![None; prepared.len()];
+    let mut next_outer: Option<&table::Position> = None;
+    for (index, value) in prepared.iter().enumerate().rev() {
+        let depth = value.table_properties.depth()?;
+        if depth == 1 && value.table_properties.row_end {
+            next_outer = Some(&value.table_properties.row.position);
+        } else if depth == 0 {
+            next_outer = None;
+        }
+        if depth != 0 {
+            outer_row_positions[index] = next_outer.cloned();
         }
     }
     // Only the main story passes a floating-drawing store.
@@ -137,18 +144,23 @@ pub(super) fn project(
         let direct =
             formatting.direct_paragraph(style, table_style, mark_fc, mark_prm, &story.prcs)?;
         let mut paragraph = direct.paragraph;
-        if let (Some(context), Some(frame)) = (context, paragraph.frame_pr.as_deref()) {
-            if row_positions
-                .get(&context.ttp_id)
-                .is_some_and(|position| position.matches_cell_frame(frame))
-            {
-                // The positioned table itself carries this placement.
-                paragraph.frame_pr = None;
-            } else {
-                // The DOCX renderer positions frames only in the body flow; a
-                // framed cell paragraph would silently lay out in flow.
-                formatting.unsupported_paragraph_properties = true;
+        match (context, direct.table_frame) {
+            (Some(_), Some(frame)) => {
+                if outer_row_positions[paragraph_index]
+                    .as_ref()
+                    .is_some_and(|position| position.matches_cell_frame(frame))
+                {
+                    // The positioned table itself carries this placement.
+                    paragraph.frame_pr = None;
+                } else {
+                    // The DOCX renderer positions frames only in the body
+                    // flow; a framed cell paragraph would silently lay out in
+                    // flow.
+                    formatting.unsupported_paragraph_properties = true;
+                }
             }
+            _ if direct.frame_gap => formatting.unsupported_paragraph_properties = true,
+            _ => {}
         }
         if let Some((reference, marker)) = direct.numbering {
             paragraph.numbering = Some(Box::new(
@@ -3557,5 +3569,53 @@ mod tests {
         // A frame that disagrees with the table position stays gated.
         assert!(project(framed_cell(0x60, 200)).unsupported_paragraph);
         assert!(project(framed_cell(0x50, 159)).unsupported_paragraph);
+    }
+
+    #[test]
+    fn native_story_drops_no_overlap_cell_frames_mirroring_asymmetric_positions() {
+        // Paragraph-relative anchors at a zero offset, right/bottom-only
+        // wrapping distances and no-overlap, as Word writes a floating table
+        // whose OOXML form carries only tblpPr.
+        let position = [
+            sprm(0x360d, &[0x20]),
+            sprm(0x940f, &1i16.to_le_bytes()),
+            sprm(0x941e, &187u16.to_le_bytes()),
+            sprm(0x941f, &72u16.to_le_bytes()),
+            sprm(0x3465, &[1]),
+        ]
+        .concat();
+        let framed_cell = |no_overlap: u8| {
+            [
+                cell(),
+                sprm(0x261b, &[0x20]),
+                sprm(0x8419, &1i16.to_le_bytes()),
+                sprm(0x2423, &[2]),
+                sprm(0x2462, &[no_overlap]),
+                // Keeps the fixture PAPX at the odd length the FKP builder needs.
+                cell(),
+            ]
+            .concat()
+        };
+        let project = |cell_papx: Vec<u8>| {
+            try_project_table(
+                "a\u{7}\u{7}\r",
+                &[
+                    (0, 2, cell_papx),
+                    (2, 3, styled_row(11, &[], &position)),
+                    (3, 4, Vec::new()),
+                ],
+                StyleFixture {
+                    default_table_style: true,
+                    default_table_style_indent: true,
+                    ..StyleFixture::default()
+                },
+            )
+            .unwrap()
+        };
+        let mirrored = project(framed_cell(1));
+        assert!(!mirrored.unsupported_paragraph);
+        assert!(!mirrored.unsupported_table);
+        // A no-overlap flag that differs from the table's is not a mirror.
+        assert!(project(framed_cell(0)).unsupported_paragraph);
     }
 }

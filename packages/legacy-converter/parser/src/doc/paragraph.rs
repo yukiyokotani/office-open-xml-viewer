@@ -14,6 +14,8 @@ pub(in crate::doc) use direct::byte_adapter_line_spacing_parity;
 #[cfg(feature = "direct-doc")]
 pub(super) use frame::FrameGap;
 #[cfg(feature = "direct-doc")]
+pub(in crate::doc) use frame::TableParagraphFrame;
+#[cfg(feature = "direct-doc")]
 pub(super) use shading::{fill as shading_fill, ShadingFill};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
