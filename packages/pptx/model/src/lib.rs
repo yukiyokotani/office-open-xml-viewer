@@ -1030,6 +1030,12 @@ pub struct TextBody {
     #[serde(skip_serializing_if = "is_false")]
     #[serde(default)]
     pub rtl_col: bool,
+    /// `<a:bodyPr spcFirstLastPara>` (ECMA-376 §21.1.2.1.1) — whether the
+    /// space before of the first paragraph and the space after of the last
+    /// paragraph are respected. Default false: both edges are suppressed.
+    #[serde(skip_serializing_if = "is_false")]
+    #[serde(default)]
+    pub spc_first_last_para: bool,
     /// `<a:bodyPr><a:prstTxWarp>` — WordArt text warp (ECMA-376 §20.1.9.19).
     /// None when the body has no warp (the common case), so existing text bodies
     /// serialize byte-identically. When present the renderer maps each glyph

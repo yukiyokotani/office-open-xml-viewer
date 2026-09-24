@@ -576,6 +576,12 @@ pub(crate) fn parse_text_body(
         .or_else(|| theme_default_str("rtlCol"))
         .map(|v| v == "1" || v == "true")
         .unwrap_or(false);
+    // ECMA-376 §21.1.2.1.1 spcFirstLastPara: shape attribute → theme
+    // objectDefaults → spec default (false, edge spacing suppressed).
+    let spc_first_last_para = body_pr
+        .and_then(|n| attr(&n, "spcFirstLastPara"))
+        .or_else(|| theme_default_str("spcFirstLastPara"))
+        .is_some_and(|v| v == "1" || v == "true");
 
     // ECMA-376 §20.1.9.19 — `<a:bodyPr><a:prstTxWarp prst="…">` selects a WordArt
     // text-warp envelope (ST_TextShapeType). Its `<a:avLst>` carries `<a:gd>`
@@ -758,6 +764,7 @@ pub(crate) fn parse_text_body(
         num_col,
         spc_col,
         rtl_col,
+        spc_first_last_para,
         text_warp,
     }
 }

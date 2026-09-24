@@ -89,10 +89,15 @@ function paragraph(text: string, fontSize: number, spacing: Partial<Paragraph>):
   } as Paragraph;
 }
 
-function baselines(paragraphs: Paragraph[]): number[] {
+function baselines(
+  paragraphs: Paragraph[],
+  anchor = 't',
+  spcFirstLastPara?: boolean,
+): number[] {
   const { ctx, texts } = recordingCtx();
   const body = {
-    verticalAnchor: 't',
+    verticalAnchor: anchor,
+    spcFirstLastPara,
     paragraphs,
     defaultFontSize: 20,
     defaultBold: null,
@@ -149,5 +154,21 @@ describe('pptx DrawingML percentage paragraph spacing', () => {
       paragraph('B', 20, { spaceBefore: 1200 }),
     ]);
     expect(ys[1] - ys[0]).toBeCloseTo(pitch + 12, 5);
+  });
+
+  // ECMA-376 §21.1.2.1.1 bodyPr@spcFirstLastPara (default false).
+  it('suppresses the last paragraph space after unless spcFirstLastPara is set', () => {
+    const bottom = baselines([paragraph('A', 20, {})], 'b');
+    const suppressed = baselines([paragraph('A', 20, { spaceAfterPct: 50000 })], 'b');
+    expect(suppressed[0]).toBeCloseTo(bottom[0], 5);
+    const points = baselines([paragraph('A', 20, { spaceAfter: 1200 })], 'b');
+    expect(points[0]).toBeCloseTo(bottom[0], 5);
+    const respected = baselines([paragraph('A', 20, { spaceAfter: 1200 })], 'b', true);
+    expect(bottom[0] - respected[0]).toBeCloseTo(12, 5);
+  });
+
+  it('applies the first paragraph space before when spcFirstLastPara is set', () => {
+    const ys = baselines([paragraph('A', 20, { spaceBefore: 1200 })], 't', true);
+    expect(ys[0] - plain[0]).toBeCloseTo(12, 5);
   });
 });

@@ -649,15 +649,27 @@ impl Context<'_> {
         let linked = master_link
             .map(|id| self.presentation.shape_masters.levels(id))
             .transpose()?;
-        let levels = linked.or_else(|| {
-            master_typed_text(text_type, shape.is_placeholder())
-                .then(|| {
-                    self.presentation.text_masters[self.index]
-                        .as_deref()
-                        .and_then(|m| text_type.and_then(|t| m.levels(t)))
-                })
-                .flatten()
-        });
+        let document_axes = document_text_axes(
+            text_type,
+            shape.is_placeholder(),
+            master_link.is_some(),
+            outline_body,
+            self.presentation.document_text_axes,
+        );
+        // Master levels resolve through `text_style::master_chain`: typed
+        // text through its own, base and document atoms, freeform
+        // Tx_TYPE_OTHER text through the document atom alone.
+        let master = self.presentation.text_masters[self.index].as_deref();
+        let direct = if linked.is_some() {
+            None
+        } else if master_typed_text(text_type, shape.is_placeholder()) {
+            master.and_then(|m| text_type.and_then(|t| m.direct_levels(t)))
+        } else if text_type == Some(4) && !shape.is_placeholder() && !outline_body {
+            master.and_then(text_style::Master::document_levels)
+        } else {
+            None
+        };
+        let levels = linked.or(direct.as_ref().map(|d| d.levels.as_slice()));
         slide_numbers.sort_unstable();
         let default_style = style
             .is_none()
@@ -691,13 +703,8 @@ impl Context<'_> {
             },
             text_style::direct_model::DirectAxes {
                 ruler: local_ruler,
-                document: document_text_axes(
-                    text_type,
-                    shape.is_placeholder(),
-                    master_link.is_some(),
-                    outline_body,
-                    self.presentation.document_text_axes,
-                ),
+                document: document_axes,
+                ambiguous: direct.as_ref().map(|d| &d.ambiguous),
             },
             self.work_budget,
             self.model_budget,
@@ -720,12 +727,18 @@ impl Context<'_> {
                 "horz"
             }
             .to_owned(),
-            auto_fit: "none".to_owned(),
+            // MS-ODRAW fFitShapeToText is DrawingML spAutoFit (ECMA-376
+            // 21.1.2.1.4): the stored anchor is already the fitted size. The
+            // classic binary has no shrink-on-overflow (normAutofit) flag.
+            auto_fit: if p.fit_shape_to_text { "sp" } else { "none" }.to_owned(),
             font_scale: None,
             ln_spc_reduction: None,
             num_col: 1,
             spc_col: 0,
             rtl_col: false,
+            // MS-PPT carries no edge-spacing flag; DrawingML's default
+            // (edges suppressed) is the renderer's existing behavior.
+            spc_first_last_para: false,
             text_warp: None,
         }))
     }
