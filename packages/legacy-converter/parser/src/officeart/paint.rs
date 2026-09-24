@@ -335,3 +335,137 @@ impl Paint {
             .then_some((self.line.unwrap_or(0), self.line_alpha.unwrap_or(65536)))
     }
 }
+
+/// A linear OfficeArt shade projected to DrawingML stop order. Stop colours
+/// stay OfficeArtCOLORREF values for the host to resolve.
+pub(crate) struct LinearShade {
+    pub projection: super::gradient::projection::Projection,
+    /// Per-stop 16.16 opacity, parallel to `projection.stops`.
+    pub alphas: Vec<u32>,
+    pub scaled: bool,
+    pub rotate_with_shape: bool,
+}
+
+// Two-colour shades are projected with these marker colours so each output
+// stop keeps its origin (fill or back colour) even when both colours match.
+const FRONT_MARKER: u32 = 0;
+const BACK_MARKER: u32 = 1;
+
+impl Paint {
+    /// Linear OfficeArt shades -> DrawingML `a:lin` gradients.
+    ///
+    /// Evidence for the mapping beyond MS-ODRAW 2.4.13 (whose shade
+    /// illustrations do not state DrawingML equivalents): every shape-level
+    /// gradient in the local PowerPoint corpus that also carries a metroBlob
+    /// (MS-ODRAW 2.3.4.41, PowerPoint's own DrawingML for the same shape) was
+    /// paired with its binary fill properties, and Word's own DOCX of a DOC
+    /// shade agrees (msofillShade, fillAngle 0 -> `a:lin ang="5400000"
+    /// scaled="0"` with the same three stops):
+    /// - msofillShade (4) is `a:lin scaled="0"` and msofillShadeScale (7) is
+    ///   `a:lin scaled="1"`; both use `ang` = 90 degrees - fillAngle.
+    /// - fillShadeType 0 and the default 0x40000003 (gamma + sigma) produce the
+    ///   same DrawingML stops; other shade types stay unsupported.
+    /// - Without fillShadeColors, fillOpacity applies to every stop taken from
+    ///   the fill colour and fillBackOpacity to every stop taken from the back
+    ///   colour (e.g. 27525/65536 -> alpha 42000, back 0 -> alpha 0).
+    /// Opacity combined with an authored shade-colour array has no evidence
+    /// and is rejected, as are the path shades (5, 6) and the host-defined
+    /// title shade (8).
+    pub(crate) fn linear_shade(
+        &self,
+        source: &super::gradient::Borrowed<'_>,
+        allow_fill: bool,
+        work_budget: &mut usize,
+        byte_budget: &mut usize,
+    ) -> Result<Option<LinearShade>, String> {
+        use super::gradient::projection;
+        let scaled = match self.fill_type {
+            Some(4) => false,
+            Some(7) => true,
+            Some(5 | 6 | 8) => {
+                return Err(unsupported(
+                    "OfficeArt path or title gradient fills are not supported yet",
+                ))
+            }
+            _ => return Ok(None),
+        };
+        if !allow_fill || !self.filled.unwrap_or(true) || !self.fill_ok.unwrap_or(true) {
+            return Ok(None);
+        }
+        if !self.fill_shape.unwrap_or(true)
+            || self.fill_rect.unwrap_or(false)
+            || !matches!(self.fill_shade_type.unwrap_or(0x4000_0003) & 0x1f, 0 | 3)
+        {
+            return Err(unsupported(
+                "OfficeArt gradient shade options are not supported yet",
+            ));
+        }
+        let front_alpha = self.fill_alpha.unwrap_or(65_536);
+        let back_alpha = self.fill_back_alpha.unwrap_or(65_536);
+
+        // The decoded vector and projection scratch coexist. Reserve the exact
+        // normalized and projected vector payloads before either allocation.
+        let authored = source.decode(work_budget, byte_budget)?.unwrap_or_default();
+        if !authored.is_empty() && (front_alpha != 65_536 || back_alpha != 65_536) {
+            return Err(unsupported(
+                "OfficeArt gradient opacity with shade colours is not supported yet",
+            ));
+        }
+        if authored.first().is_some_and(|stop| stop.position != 0) {
+            return Err(unsupported(
+                "OfficeArt gradient shade colours must start at position 0",
+            ));
+        }
+        let two_colour = authored.is_empty();
+        let focus = self.fill_focus.unwrap_or(0) as i32;
+        let requirements = projection::requirements(&authored, focus)?;
+        let mut projection_scratch = requirements.scratch_bytes;
+        let mut projection_output = requirements.output_bytes;
+        let projection_bytes = projection_scratch
+            .checked_add(projection_output)
+            .and_then(|bytes| bytes.checked_add(requirements.output_bytes))
+            .ok_or_else(|| unsupported("OfficeArt gradient byte budget overflow"))?;
+        *byte_budget = byte_budget
+            .checked_sub(projection_bytes)
+            .ok_or_else(|| unsupported("OfficeArt gradient byte budget exceeded"))?;
+        let (front, back) = if two_colour {
+            (FRONT_MARKER, BACK_MARKER)
+        } else {
+            (
+                self.fill.unwrap_or(0x00ff_ffff),
+                self.fill_back.unwrap_or(0x00ff_ffff),
+            )
+        };
+        let mut projection = projection::project(
+            &authored,
+            front,
+            back,
+            focus,
+            self.fill_angle.unwrap_or(0) as i32,
+            work_budget,
+            &mut projection_scratch,
+            &mut projection_output,
+        )?;
+        debug_assert_eq!((projection_scratch, projection_output), (0, 0));
+
+        let mut alphas = Vec::new();
+        alphas
+            .try_reserve_exact(projection.stops.len())
+            .map_err(|_| unsupported("OfficeArt gradient allocation failed"))?;
+        for stop in &mut projection.stops {
+            let (color, alpha) = match (two_colour, stop.color) {
+                (true, FRONT_MARKER) => (self.fill.unwrap_or(0x00ff_ffff), front_alpha),
+                (true, _) => (self.fill_back.unwrap_or(0x00ff_ffff), back_alpha),
+                (false, color) => (color, 65_536),
+            };
+            stop.color = color;
+            alphas.push(alpha);
+        }
+        Ok(Some(LinearShade {
+            projection,
+            alphas,
+            scaled,
+            rotate_with_shape: self.rotate_fill_with_shape.unwrap_or(false),
+        }))
+    }
+}
