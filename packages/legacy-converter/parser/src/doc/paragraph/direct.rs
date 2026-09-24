@@ -3,7 +3,7 @@
 //! Runs, paragraph-mark formatting, numbering activation and source identity
 //! remain owned by their acquisition layers; this module projects layout facts.
 
-use super::Properties;
+use super::{FrameGap, Properties, ShadingFill};
 use docx_model::{
     DocParagraph, LineSpacing, ParagraphBorders, ParagraphTypographyBordersWire,
     ParagraphTypographyWire,
@@ -43,9 +43,12 @@ impl Properties {
             complex_field_boundaries: Vec::new(),
             bookmarks: Vec::new(),
             comment_marks: Vec::new(),
-            shading: None,
+            shading: match &self.shading {
+                Some(ShadingFill::Rgb(fill)) => Some(fill.clone()),
+                Some(ShadingFill::None) | None => None,
+            },
             page_break_before: self.flag("pageBreakBefore", false),
-            contextual_spacing: false,
+            contextual_spacing: self.contextual_spacing,
             keep_next: self.flag("keepNext", false),
             keep_lines: self.flag("keepLines", false),
             mark_vanish: false,
@@ -65,6 +68,22 @@ impl Properties {
             frame_pr: None,
             paragraph_typography_acquisition,
         }
+    }
+
+    /// MS-DOC 2.6.2 sprmPIstd: an istd of 1..=9 also specifies outline level
+    /// istd - 1, and sprmPOutLvl MUST then be ignored. Otherwise sprmPOutLvl
+    /// 0..=8 is the outline level and 9 (the default) is body text. This is
+    /// ECMA-376 17.3.1.20 outlineLvl, where 9 likewise means body text.
+    pub(in crate::doc) fn direct_outline_level(&self, istd: usize) -> Option<u32> {
+        if (1..=9).contains(&istd) {
+            return Some(istd as u32 - 1);
+        }
+        self.outline_level.filter(|level| *level < 9).map(u32::from)
+    }
+
+    /// Resolved paragraph frame, or the reason it stays fail-closed.
+    pub(in crate::doc) fn direct_frame(&self) -> Result<Option<docx_model::FramePr>, FrameGap> {
+        self.frame.direct()
     }
 
     fn flag(&self, name: &str, default: bool) -> bool {
@@ -359,5 +378,93 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn contextual_spacing_outline_level_and_shading_project_documented_semantics() {
+        let mut properties = Properties::default();
+        assert!(properties.apply(0x246d, &[1]).unwrap());
+        assert!(properties.apply(0x2640, &[3]).unwrap());
+        let mut shd = vec![10, 0, 0, 0, 0xff, 0xdd, 0xdd, 0xdd, 0];
+        shd.extend(0u16.to_le_bytes());
+        assert!(properties.apply(0xc64d, &shd).unwrap());
+        assert!(properties.has_direct_only_properties());
+        let paragraph = properties.direct_paragraph();
+        assert!(paragraph.contextual_spacing);
+        assert_eq!(paragraph.shading.as_deref(), Some("dddddd"));
+        // sprmPOutLvl applies to non-heading istds; 9 is body text.
+        assert_eq!(properties.direct_outline_level(0), Some(3));
+        assert_eq!(properties.direct_outline_level(15), Some(3));
+        // An istd of 1..=9 specifies the level and sprmPOutLvl is ignored.
+        assert_eq!(properties.direct_outline_level(1), Some(0));
+        assert_eq!(properties.direct_outline_level(9), Some(8));
+        assert!(properties.apply(0x2640, &[9]).unwrap());
+        assert_eq!(properties.direct_outline_level(0), None);
+        assert_eq!(Properties::default().direct_outline_level(20), None);
+        assert!(Properties::default().apply(0x2640, &[10]).is_err());
+        assert!(Properties::default().apply(0x246d, &[2]).is_err());
+
+        // A later Shd80 replaces the modern value; automatic background and
+        // ShdNil both mean no shading.
+        assert!(properties.apply(0x442d, &0x0200u16.to_le_bytes()).unwrap());
+        assert_eq!(
+            properties.direct_paragraph().shading.as_deref(),
+            Some("c0c0c0")
+        );
+        assert!(properties.apply(0x442d, &[0xff, 0xff]).unwrap());
+        assert_eq!(properties.direct_paragraph().shading, None);
+        // A two-color pattern is valid but not representable.
+        assert!(!properties.apply(0x442d, &0x9900u16.to_le_bytes()).unwrap());
+        assert!(!Properties::default().has_direct_only_properties());
+    }
+
+    #[test]
+    fn bar_borders_have_no_effect_but_are_validated() {
+        let baseline = serde_json::to_value(Properties::default().direct_paragraph()).unwrap();
+        let mut properties = Properties::default();
+        assert!(properties.apply(0x6629, &[0xff; 4]).unwrap());
+        assert!(properties.apply(0x6629, &[8, 1, 2, 0]).unwrap());
+        assert!(properties
+            .apply(0xc653, &[8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff])
+            .unwrap());
+        assert!(properties
+            .apply(0xc653, &[8, 0, 0, 0, 0, 8, 1, 0, 0])
+            .unwrap());
+        assert_eq!(
+            serde_json::to_value(properties.direct_paragraph()).unwrap(),
+            baseline
+        );
+        assert!(!properties.has_direct_only_properties());
+        assert_eq!(properties.xml(), Properties::default().xml());
+        assert!(Properties::default()
+            .apply(0xc653, &[7, 0, 0, 0, 0, 8, 1, 0, 0])
+            .is_err());
+        assert!(Properties::default().apply(0x6629, &[8, 1, 17, 0]).is_err());
+    }
+
+    #[test]
+    fn resolved_frame_properties_reach_the_paragraph_frame() {
+        let mut properties = Properties::default();
+        for (code, operand) in [
+            (0x261b, vec![0x60]),
+            (0x2423, vec![2]),
+            (0x8418, (-8i16).to_le_bytes().to_vec()),
+            (0x8419, 223i16.to_le_bytes().to_vec()),
+            (0x842f, 180u16.to_le_bytes().to_vec()),
+        ] {
+            assert!(properties.apply(code, &operand).unwrap());
+        }
+        assert!(properties.has_direct_only_properties());
+        let frame = properties.direct_frame().unwrap().unwrap();
+        assert_eq!(
+            (frame.h_anchor.as_str(), frame.v_anchor.as_str()),
+            ("margin", "text")
+        );
+        assert_eq!(
+            (frame.x_align.as_deref(), frame.y),
+            (Some("right"), Some(11.1))
+        );
+        assert_eq!((frame.wrap.as_str(), frame.h_space), ("around", 9.0));
+        assert!(Properties::default().direct_frame().unwrap().is_none());
     }
 }

@@ -6,6 +6,13 @@ use std::collections::BTreeMap;
 
 #[cfg(feature = "direct-doc")]
 mod direct;
+mod frame;
+#[cfg(feature = "direct-doc")]
+mod shading;
+#[cfg(feature = "direct-doc")]
+pub(super) use frame::FrameGap;
+#[cfg(feature = "direct-doc")]
+pub(super) use shading::{fill as shading_fill, ShadingFill};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct AlignmentPatch {
@@ -56,6 +63,18 @@ pub struct Properties {
     alignment: (u8, bool),
     text_alignment: Option<&'static str>,
     borders: [Option<Border>; 5],
+    /// MS-DOC 2.6.2 sprmPFContextualSpacing.
+    contextual_spacing: bool,
+    /// MS-DOC 2.6.2 sprmPOutLvl raw value (0..=9); see `outline_level`.
+    outline_level: Option<u8>,
+    /// MS-DOC 2.6.2 sprmPShd/sprmPShd80 projected to a fill.
+    #[cfg(feature = "direct-doc")]
+    shading: Option<ShadingFill>,
+    frame: frame::Frame,
+    /// A property was accepted that only the direct model projects. The
+    /// legacy WordprocessingML adapter does not serialize it and must keep
+    /// reporting it as omitted (see `Formatting::paragraph_xml`).
+    direct_only: bool,
 }
 
 impl Default for Properties {
@@ -91,6 +110,12 @@ impl Default for Properties {
             alignment: (0, false),
             text_alignment: None,
             borders: std::array::from_fn(|_| None),
+            contextual_spacing: false,
+            outline_level: None,
+            #[cfg(feature = "direct-doc")]
+            shading: None,
+            frame: frame::Frame::default(),
+            direct_only: false,
         }
     }
 }
@@ -114,6 +139,11 @@ impl Properties {
 
     pub(super) fn clear_alignment(&mut self) {
         self.alignment = (0, false);
+    }
+
+    /// True when an accepted property is projected only by the direct model.
+    pub(super) fn has_direct_only_properties(&self) -> bool {
+        self.direct_only
     }
 
     pub fn apply(&mut self, code: u16, operand: &[u8]) -> Result<bool, String> {
@@ -238,6 +268,53 @@ impl Properties {
                 AlignmentPatch::from_sprm(code, operand)?
                     .expect("alignment code")
                     .apply(self);
+            }
+            0x246d => {
+                // MS-DOC 2.6.2 sprmPFContextualSpacing (Bool8): suppress
+                // before/after spacing next to a paragraph of the same style,
+                // exactly ECMA-376 17.3.1.9 contextualSpacing.
+                self.contextual_spacing = bool8(operand[0])?;
+                self.direct_only = true;
+            }
+            0x2640 => {
+                // MS-DOC 2.6.2 sprmPOutLvl: 0..=8 outline level, 9 body text.
+                let level = operand[0];
+                if level > 9 {
+                    return Err(unsupported("invalid Word outline level"));
+                }
+                self.outline_level = Some(level);
+                self.direct_only = true;
+            }
+            0x6629 | 0xc653 => {
+                // MS-DOC 2.6.2: sprmPBrcBar80 (Brc80) and sprmPBrcBar
+                // (BrcOperand) are specified as "a value that has no effect".
+                // Validate the framing and decode the border so malformed
+                // input still fails, then apply nothing.
+                if code == 0xc653 {
+                    if operand.len() != 9 || operand[0] != 8 {
+                        return Err(unsupported("invalid Word paragraph bar border"));
+                    }
+                    Border::read(&operand[1..], false)?;
+                } else {
+                    Border::read(operand, true)?;
+                }
+            }
+            0xc64d | 0x442d => {
+                #[cfg(feature = "direct-doc")]
+                {
+                    match shading::fill(operand, code == 0xc64d)? {
+                        Some(fill) => self.shading = Some(fill),
+                        None => return Ok(false),
+                    }
+                    self.direct_only = true;
+                }
+                #[cfg(not(feature = "direct-doc"))]
+                return Ok(false);
+            }
+            0x8418 | 0x8419 | 0x841a | 0x442b | 0x261b | 0x2423 | 0x842f | 0x842e | 0x2430
+            | 0x2462 | 0x442c | 0x443a => {
+                self.frame.apply(code, operand)?;
+                self.direct_only = true;
             }
             0x4439 => {
                 self.text_alignment = Some(match u16_at(operand, 0)? {

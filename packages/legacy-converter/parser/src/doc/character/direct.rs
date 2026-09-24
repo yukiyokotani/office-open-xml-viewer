@@ -5,11 +5,13 @@
 //! manufacturing WordprocessingML and parsing it back through the DOCX parser.
 
 use super::Properties;
+use crate::doc::border::Border;
+use crate::doc::paragraph::ShadingFill;
 use crate::doc::unsupported;
 use docx_model::{
-    RunFontAxisPresence, RunFontAxisValues, RunFontFacts, RunFontSlots, RunTypographyWire, TextRun,
-    TypographyLanguagesWire, TypographyValueStatusWire, TypographyValueWire,
-    UnderlineTypographyWire,
+    CtBorderTypographyWire, FitTextSpecWire, RunBorder, RunFontAxisPresence, RunFontAxisValues,
+    RunFontFacts, RunFontSlots, RunTypographyWire, TextRun, TypographyLanguagesWire,
+    TypographyValueStatusWire, TypographyValueWire, UnderlineTypographyWire,
 };
 
 type FontAxes = [Option<String>; 4];
@@ -63,6 +65,8 @@ impl Properties {
             .get("highlight")
             .filter(|value| value.as_str() != "none")
             .cloned();
+        let (border, border_wire) = self.direct_border()?;
+        let fit_text = self.direct_only.fit_text;
 
         let mut run = TextRun {
             text,
@@ -106,6 +110,17 @@ impl Properties {
             position,
             kerning,
             highlight,
+            // MS-DOC 2.6.1 sprmCShd/sprmCShd80: a single-color fill only.
+            background: match &self.direct_only.shading {
+                Some(ShadingFill::Rgb(fill)) => Some(fill.clone()),
+                Some(ShadingFill::None) | None => None,
+            },
+            border,
+            // MS-DOC 2.9.31: dxaFitText twips and FitTextID. Contiguous runs
+            // sharing an ID form one region, exactly as ECMA-376 17.3.2.14
+            // fitText@w:id links consecutive runs.
+            fit_text_val: fit_text.map(|(width, _)| f64::from(width)),
+            fit_text_id: fit_text.map(|(_, id)| id.to_string()),
             ..TextRun::default()
         };
         run.typography_acquisition = Some(RunTypographyWire {
@@ -135,6 +150,11 @@ impl Properties {
             position_pt: number_wire(position_raw, run.position),
             character_spacing_pt: run.char_spacing,
             character_scale: run.char_scale,
+            fit_text: fit_text.map(|(width, id)| FitTextSpecWire {
+                val_twips: f64::from(width),
+                id: Some(id.to_string()),
+            }),
+            border: border_wire,
             kerning_threshold_pt: run.kerning,
             languages: TypographyLanguagesWire {
                 bidi: lang_bidi,
@@ -197,6 +217,27 @@ impl Properties {
         self.values
             .get("color")
             .is_some_and(|value| value == "auto")
+    }
+
+    /// MS-DOC 2.6.1 sprmCBrc/sprmCBrc80 as an ECMA-376 17.3.2.4 run border.
+    /// "Brc.dptSpace MUST be ignored when applied to character borders", so
+    /// the projected spacing is zero and the raw spacing is not acquired.
+    /// Shadowed borders and asymmetric frame effects were rejected at apply.
+    fn direct_border(&self) -> Result<(Option<RunBorder>, Option<CtBorderTypographyWire>), String> {
+        let Some((old, raw)) = self.direct_only.border else {
+            return Ok((None, None));
+        };
+        let border = Border::read(&raw[..if old { 4 } else { 8 }], old)?;
+        let mut wire = border.direct_typography();
+        wire.space_pt = TypographyValueWire::default();
+        let edge = border.direct_edge();
+        let run = (edge.style != "none").then_some(RunBorder {
+            style: edge.style,
+            color: edge.color,
+            width: edge.width,
+            space: 0.0,
+        });
+        Ok((run, Some(wire)))
     }
 
     fn direct_font_axes(&self, fonts: &[String]) -> Result<FontAxes, String> {
@@ -909,5 +950,185 @@ mod tests {
         ]);
         let fonts = ["ASCII", "East Asia", "High ANSI", "Complex Script"].map(String::from);
         assert_parser_parity(&properties, &fonts);
+    }
+
+    fn parsed_rpr(rpr: &str) -> serde_json::Value {
+        let document_xml = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:rPr>{rpr}</w:rPr><w:t>x</w:t></w:r></w:p></w:body></w:document>"#,
+        );
+        let mut bytes = Vec::new();
+        {
+            let mut archive = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            archive
+                .start_file("word/document.xml", SimpleFileOptions::default())
+                .unwrap();
+            archive.write_all(document_xml.as_bytes()).unwrap();
+            archive.finish().unwrap();
+        }
+        let parsed: serde_json::Value =
+            serde_json::from_str(&docx_parser::parse_docx_native(&bytes).unwrap()).unwrap();
+        let mut run = parsed["body"][0]["runs"][0].clone();
+        let object = run.as_object_mut().unwrap();
+        object.remove("type");
+        object.remove("__typographyAcquisition");
+        run
+    }
+
+    fn public_run(properties: &Properties) -> serde_json::Value {
+        let mut run = serde_json::to_value(
+            properties
+                .direct_text_run("x".into(), &[])
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        run.as_object_mut()
+            .unwrap()
+            .remove("__typographyAcquisition");
+        run
+    }
+
+    fn cshd(fore: [u8; 4], back: [u8; 4], ipat: u16) -> Vec<u8> {
+        let mut operand = vec![10];
+        operand.extend(fore);
+        operand.extend(back);
+        operand.extend(ipat.to_le_bytes());
+        operand
+    }
+
+    #[test]
+    fn character_shading_border_and_fit_text_match_the_docx_model_semantics() {
+        let properties = applied(&[
+            (0xca71, cshd([0, 0, 0, 0xff], [0xdd, 0xdd, 0xdd, 0], 0)),
+            (0xca72, vec![8, 0x12, 0x34, 0x56, 0, 6, 1, 0x05, 0]),
+            (0xca76, vec![8, 0x60, 0x09, 0, 0, 0, 0xb5, 0xad, 0xaa]),
+        ]);
+        assert!(properties.has_direct_only_properties());
+        // MS-DOC 2.6.1: Brc.dptSpace MUST be ignored for character borders.
+        assert_eq!(
+            public_run(&properties),
+            parsed_rpr(
+                r#"<w:sz w:val="20"/><w:bdr w:val="single" w:sz="6" w:space="0" w:color="123456"/><w:shd w:val="clear" w:color="auto" w:fill="DDDDDD"/><w:fitText w:val="2400" w:id="-1431456512"/>"#
+            )
+        );
+        let run = properties
+            .direct_text_run("x".into(), &[])
+            .unwrap()
+            .unwrap();
+        let wire = run.typography_acquisition.unwrap();
+        let fit = wire.fit_text.unwrap();
+        assert_eq!(
+            (fit.val_twips, fit.id.as_deref()),
+            (2400.0, Some("-1431456512"))
+        );
+        let border = wire.border.unwrap();
+        assert_eq!(border.val.value.as_deref(), Some("single"));
+        assert_eq!(border.space_pt, TypographyValueWire::default());
+
+        // Brc80 with an automatic color, then a black Shd80 background.
+        let properties = applied(&[
+            (0x6865, vec![4, 1, 0, 0]),
+            (0x4866, 0x0020u16.to_le_bytes().to_vec()),
+        ]);
+        assert_eq!(
+            public_run(&properties),
+            parsed_rpr(
+                r#"<w:sz w:val="20"/><w:bdr w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:shd w:val="clear" w:color="auto" w:fill="000000"/>"#
+            )
+        );
+    }
+
+    #[test]
+    fn character_border_none_nil_and_resets_remove_the_border() {
+        for operand in [vec![0, 0, 0, 0x40], vec![0xff; 4]] {
+            let run = public_run(&applied(&[(0x6865, operand)]));
+            assert!(run.get("border").is_none());
+        }
+        let nil = applied(&[(
+            0xca72,
+            vec![8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+        )]);
+        assert!(public_run(&nil).get("border").is_none());
+        // The frame effect is invisible on a single stroke; shadows and
+        // asymmetric frame effects cannot be represented.
+        let framed = applied(&[(0x6865, vec![4, 1, 0, 0x40])]);
+        assert!(public_run(&framed).get("border").is_some());
+        let base = Properties::default();
+        for (code, operand) in [
+            (0x6865, vec![4, 1, 0, 0x20]),
+            (0x6865, vec![4, 12, 0, 0x40]),
+            (0xca72, vec![8, 0, 0, 0, 0, 4, 1, 0x20, 0]),
+        ] {
+            assert!(!base.clone().apply(code, &operand, &base).unwrap());
+        }
+        for (code, operand) in [
+            (0xca72, vec![7, 0, 0, 0, 0, 4, 1, 0, 0]),
+            (0xca72, vec![8, 0, 0, 0, 0, 4, 1, 0]),
+            (0x6865, vec![4, 1, 17, 0]),
+            (0x6865, vec![4, 0x1a, 0, 0]),
+        ] {
+            assert!(base.clone().apply(code, &operand, &base).is_err());
+        }
+        // Neither CPlain nor CIstd preserves border, shading or fit text.
+        let mut reset = applied(&[
+            (0x6865, vec![4, 1, 0, 0]),
+            (0x4866, 0x0100u16.to_le_bytes().to_vec()),
+            (0xca76, vec![8, 0x60, 0x09, 0, 0, 1, 0, 0, 0]),
+        ]);
+        reset.reset_to(&base, false);
+        assert!(!reset.has_direct_only_properties());
+        assert_eq!(public_run(&reset), public_run(&base));
+    }
+
+    #[test]
+    fn fit_text_zero_is_ignored_and_negative_widths_stay_unsupported() {
+        let base = Properties::default();
+        let mut value = applied(&[(0xca76, vec![8, 0xb5, 0x04, 0, 0, 1, 0, 0, 0])]);
+        assert!(value
+            .apply(0xca76, &[8, 0, 0, 0, 0, 2, 0, 0, 0], &base)
+            .unwrap());
+        let run = value.direct_text_run("x".into(), &[]).unwrap().unwrap();
+        assert_eq!(
+            (run.fit_text_val, run.fit_text_id.as_deref()),
+            (Some(1205.0), Some("1"))
+        );
+        assert!(!base
+            .clone()
+            .apply(0xca76, &[8, 0xff, 0xff, 0xff, 0xff, 1, 0, 0, 0], &base)
+            .unwrap());
+        assert!(base
+            .clone()
+            .apply(0xca76, &[7, 0, 0, 0, 0, 1, 0, 0, 0], &base)
+            .is_err());
+
+        // A sparse style patch overlays fit text and shading only when set.
+        let mut inherited = applied(&[(0xca76, vec![8, 0xb5, 0x04, 0, 0, 1, 0, 0, 0])]);
+        inherited.overlay_visible(&Properties::sparse());
+        assert!(inherited.has_direct_only_properties());
+        let mut patch = Properties::sparse();
+        patch
+            .apply(0x4866, &0x0100u16.to_le_bytes(), &base)
+            .unwrap();
+        inherited.overlay_visible(&patch);
+        let run = inherited.direct_text_run("x".into(), &[]).unwrap().unwrap();
+        assert_eq!(run.background.as_deref(), Some("ffffff"));
+        assert_eq!(run.fit_text_val, Some(1205.0));
+    }
+
+    #[test]
+    fn patterned_or_automatic_solid_character_shading_stays_unsupported() {
+        let base = Properties::default();
+        for operand in [
+            cshd([0, 0, 0, 0xff], [0xff, 0xff, 0xff, 0], 0x26),
+            cshd([0, 0, 0, 0xff], [0xff, 0xff, 0xff, 0], 1),
+        ] {
+            assert!(!base.clone().apply(0xca71, &operand, &base).unwrap());
+        }
+        assert!(!base
+            .clone()
+            .apply(0x4866, &0x9900u16.to_le_bytes(), &base)
+            .unwrap());
+        let cleared = applied(&[(0xca71, cshd([0, 0, 0, 0xff], [0xff; 4], 0))]);
+        assert!(public_run(&cleared)["background"].is_null());
     }
 }

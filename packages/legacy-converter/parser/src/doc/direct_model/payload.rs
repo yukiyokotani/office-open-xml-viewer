@@ -99,7 +99,6 @@ pub(super) fn table(value: &docx_model::DocTable) -> Result<usize, String> {
 
 pub(super) fn text_run(run: &TextRun) -> Result<usize, String> {
     if run.no_break_hyphen_offsets.capacity() != 0
-        || run.border.is_some()
         || run.ruby.is_some()
         || run.revision.is_some()
         || run.note_ref.is_some()
@@ -108,6 +107,10 @@ pub(super) fn text_run(run: &TextRun) -> Result<usize, String> {
     }
     let mut total = Total::default();
     total.string(&run.text)?;
+    if let Some(border) = &run.border {
+        total.string(&border.style)?;
+        total.option_string(&border.color)?;
+    }
     for value in [
         &run.underline_style,
         &run.underline_color,
@@ -153,7 +156,6 @@ pub(super) fn paragraph_metadata(value: &DocParagraph) -> Result<usize, String> 
         || value.complex_field_boundaries.capacity() != 0
         || value.bookmarks.capacity() != 0
         || value.comment_marks.capacity() != 0
-        || value.frame_pr.is_some()
     {
         return Err(unsupported("unaccounted direct DOC paragraph payload"));
     }
@@ -208,6 +210,20 @@ pub(super) fn paragraph_metadata(value: &DocParagraph) -> Result<usize, String> 
     }
     if let Some(wire) = &value.paragraph_typography_acquisition {
         total.paragraph_typography(wire)?;
+    }
+    if let Some(frame) = &value.frame_pr {
+        total.add(std::mem::size_of::<docx_model::FramePr>())?;
+        for string in [
+            &frame.drop_cap,
+            &frame.wrap,
+            &frame.h_anchor,
+            &frame.v_anchor,
+            &frame.h_rule,
+        ] {
+            total.string(string)?;
+        }
+        total.option_string(&frame.x_align)?;
+        total.option_string(&frame.y_align)?;
     }
     Ok(total.0)
 }
@@ -410,12 +426,14 @@ impl Total {
     }
 
     fn run_typography(&mut self, value: &RunTypographyWire) -> Result<(), String> {
-        if value.fit_text.is_some()
-            || value.border.is_some()
-            || value.ruby.is_some()
-            || value.revision.is_some()
-        {
+        if value.ruby.is_some() || value.revision.is_some() {
             return Err(unsupported("unaccounted direct DOC run typography payload"));
+        }
+        if let Some(fit_text) = &value.fit_text {
+            self.option_string(&fit_text.id)?;
+        }
+        if let Some(border) = &value.border {
+            self.border_typography(border)?;
         }
         if let Some(underline) = &value.underline {
             for item in [

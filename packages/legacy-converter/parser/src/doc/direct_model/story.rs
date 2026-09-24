@@ -124,6 +124,11 @@ pub(super) fn project(
         let direct =
             formatting.direct_paragraph(style, table_style, mark_fc, mark_prm, &story.prcs)?;
         let mut paragraph = direct.paragraph;
+        if table_depth != 0 && paragraph.frame_pr.is_some() {
+            // The DOCX renderer positions frames only in the body flow; a
+            // framed cell paragraph would silently lay out in flow.
+            formatting.unsupported_paragraph_properties = true;
+        }
         if let Some((reference, marker)) = direct.numbering {
             paragraph.numbering = Some(Box::new(
                 formatting.direct_numbering(numbering, reference, &marker, &paragraph)?,

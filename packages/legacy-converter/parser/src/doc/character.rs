@@ -53,6 +53,47 @@ pub struct Properties {
     lang_default_lid: Option<u16>,
     lang_east_asia_lid: Option<u16>,
     pub picture: Picture,
+    /// Properties projected only by the direct model (see `DirectOnly`).
+    direct_only: DirectOnly,
+}
+
+/// Character properties whose MS-DOC semantics map onto the direct DOCX
+/// model but which the legacy WordprocessingML adapter never serializes.
+/// `None` is "not applied", so sparse style patches overlay only what they
+/// set, and CPlain/CIstd reset them (neither preserved-property list in
+/// MS-DOC 2.6.1 names them).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct DirectOnly {
+    /// sprmCShd/sprmCShd80 projected fill.
+    #[cfg(feature = "direct-doc")]
+    shading: Option<super::paragraph::ShadingFill>,
+    /// sprmCBrc (modern, 8 bytes) / sprmCBrc80 (4 bytes), validated raw.
+    border: Option<(bool, [u8; 8])>,
+    /// sprmCFitText (dxaFitText twips, FitTextID).
+    fit_text: Option<(i32, i32)>,
+}
+
+impl DirectOnly {
+    fn any(&self) -> bool {
+        #[cfg(feature = "direct-doc")]
+        if self.shading.is_some() {
+            return true;
+        }
+        self.border.is_some() || self.fit_text.is_some()
+    }
+
+    fn overlay(&mut self, patch: &Self) {
+        #[cfg(feature = "direct-doc")]
+        if patch.shading.is_some() {
+            self.shading = patch.shading.clone();
+        }
+        if patch.border.is_some() {
+            self.border = patch.border;
+        }
+        if patch.fit_text.is_some() {
+            self.fit_text = patch.fit_text;
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -126,6 +167,7 @@ impl Default for Properties {
             lang_default_lid: None,
             lang_east_asia_lid: None,
             picture: Picture::default(),
+            direct_only: DirectOnly::default(),
         }
     }
 }
@@ -145,6 +187,7 @@ impl Properties {
             lang_default_lid: None,
             lang_east_asia_lid: None,
             picture: Picture::default(),
+            direct_only: DirectOnly::default(),
         }
     }
 
@@ -180,8 +223,15 @@ impl Properties {
                 *current = added;
             }
         }
+        self.direct_only.overlay(&patch.direct_only);
         // Object/special flags are not visual run formatting and must not
         // turn numbering text into a picture or an executable object.
+    }
+
+    /// True when an accepted property is projected only by the direct model;
+    /// the WordprocessingML adapter keeps reporting it as omitted.
+    pub(super) fn has_direct_only_properties(&self) -> bool {
+        self.direct_only.any()
     }
 
     pub fn reset_to(&mut self, paragraph: &Self, preserve_object: bool) {
@@ -320,6 +370,77 @@ impl Properties {
                     return Err(unsupported("invalid Word character revision session ID"));
                 }
                 let _ = u32_at(operand, 0)?;
+                return Ok(true);
+            }
+            0xca71 | 0x4866 => {
+                // MS-DOC 2.6.1 sprmCShd (SHDOperand) / sprmCShd80 (Shd80).
+                #[cfg(feature = "direct-doc")]
+                {
+                    return Ok(
+                        match super::paragraph::shading_fill(operand, code == 0xca71)? {
+                            Some(fill) => {
+                                self.direct_only.shading = Some(fill);
+                                true
+                            }
+                            // Valid but a two-color pattern: keep it unsupported.
+                            None => false,
+                        },
+                    );
+                }
+                #[cfg(not(feature = "direct-doc"))]
+                return Ok(false);
+            }
+            0xca72 | 0x6865 => {
+                // MS-DOC 2.6.1 sprmCBrc (BrcOperand, cb = 8) and sprmCBrc80
+                // (Brc80): one border on all four sides of the text.
+                let (old, bytes) = if code == 0xca72 {
+                    if operand.len() != 9 || operand[0] != 8 {
+                        return Err(unsupported("invalid Word character border operand"));
+                    }
+                    (false, &operand[1..])
+                } else {
+                    (true, operand)
+                };
+                if old && operand.len() == 4 && matches!(bytes[1], 0x1a | 0x1b) {
+                    return Err(unsupported("invalid Word character Brc80 type"));
+                }
+                super::border::Border::read(bytes, old)?;
+                let size = bytes.len();
+                if u32_at(bytes, size - 4)? != u32::MAX {
+                    // Brc80/Brc: brcType is byte 1 / 5; byte 3 / 6 holds
+                    // dptSpace (5 bits), fShadow (0x20) and fFrame (0x40).
+                    let kind = bytes[if old { 1 } else { 5 }];
+                    let flags = bytes[if old { 3 } else { 6 }];
+                    // The DOCX run-border model has no shadow. fFrame only
+                    // reverses a border's appearance across its width
+                    // (MS-DOC 2.9.16/17), which is invisible for symmetric
+                    // single, double, triple and dash/dot strokes.
+                    if flags & 0x20 != 0
+                        || (flags & 0x40 != 0 && !matches!(kind, 0 | 1 | 3 | 5..=10 | 22))
+                    {
+                        return Ok(false);
+                    }
+                }
+                let mut raw = [0; 8];
+                raw[..bytes.len()].copy_from_slice(bytes);
+                self.direct_only.border = Some((old, raw));
+                return Ok(true);
+            }
+            0xca76 => {
+                // MS-DOC 2.9.31 CFitTextOperand: cb = 8, dxaFitText, FitTextID.
+                if operand.len() != 9 || operand[0] != 8 {
+                    return Err(unsupported("invalid Word fit-text operand"));
+                }
+                let width = u32_at(operand, 1)? as i32;
+                let id = u32_at(operand, 5)? as i32;
+                match width {
+                    // "A value of zero specifies that the Sprm is ignored."
+                    0 => {}
+                    // A negative width requests Word's minimum-width fit,
+                    // which ECMA-376 17.3.2.14 fitText cannot express.
+                    ..=-1 => return Ok(false),
+                    _ => self.direct_only.fit_text = Some((width, id)),
+                }
                 return Ok(true);
             }
             0x2a0c => {
