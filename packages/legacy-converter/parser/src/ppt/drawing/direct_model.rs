@@ -1,7 +1,7 @@
 //! Direct, bounded projection of the validated binary slide tree into the
 //! presentation renderer model. No package or XML intermediary is involved.
 use super::*;
-use ooxml_common::blip::SrcRect;
+use ooxml_common::blip::{BlipEffect, SrcRect};
 use pptx_model::{
     Fill, PictureElement, ShapeElement, Slide, SlideElement, SlideElementOrigin,
     SlideElementSource, TextBody,
@@ -298,7 +298,7 @@ impl Context<'_> {
             return Err(unsupported("linked PowerPoint picture file"));
         }
         if shape.kind == 75 && shape.props.picture != 0 {
-            self.admit_picture_display(&shape)?;
+            let blip_effects = self.picture_display_effects(&shape, true)?;
             // MS-ODRAW 2.3.23.5: pib names the BLIP displayed by the picture
             // shape. A BLIP this projector cannot carry (PICT, DIB, TIFF, an
             // unused store slot or a mislabeled payload) is rejected rather
@@ -318,12 +318,16 @@ impl Context<'_> {
                     .media
                     .image(shape.props.picture, self.backing, self.pictures)?
                     .ok_or_else(|| unsupported("PowerPoint picture was not retained"))?;
-                let (_, stroke) = paint.model_with_custom_geometry(
-                    self.presentation.schemes[self.index].as_ref(),
-                    false,
-                    true,
-                    None,
-                );
+                let scheme = self.presentation.schemes[self.index].as_ref();
+                let (_, stroke) = paint.model_with_custom_geometry(scheme, false, true, None);
+                let fill = match paint.picture_backing()? {
+                    Some((color, alpha)) => {
+                        Some(paint::model_solid(color, alpha, scheme).ok_or_else(|| {
+                            unsupported("unresolved PowerPoint picture frame fill color")
+                        })?)
+                    }
+                    None => None,
+                };
                 self.push(
                     SlideElement::Picture(PictureElement {
                         id: Some(shape.id.to_string()),
@@ -340,6 +344,7 @@ impl Context<'_> {
                         intrinsic_width_px: None,
                         intrinsic_height_px: None,
                         stroke,
+                        fill,
                         prst_geom: None,
                         prst_adjust: None,
                         src_rect: (shape.props.crop != [0; 4]).then_some(SrcRect {
@@ -350,6 +355,7 @@ impl Context<'_> {
                         }),
                         alpha: None,
                         duotone: None,
+                        blip_effects,
                         cust_geom: None,
                         shadow: None,
                         inner_shadow: None,
@@ -409,7 +415,7 @@ impl Context<'_> {
         let image = if allow_fill {
             match paint.foreground_image() {
                 Some((id, alpha, rotate)) => {
-                    self.admit_picture_display(&shape)?;
+                    self.picture_display_effects(&shape, false)?;
                     self.image_fill(id, alpha, rotate)?
                 }
                 None => None,
@@ -519,21 +525,95 @@ impl Context<'_> {
         }
     }
 
-    /// The presentation model has no MS-ODRAW 2.3.23 picture adjustments or
-    /// MS-PPT 2.7.9 metafile recoloring, so a displayed picture that carries
-    /// them is rejected instead of being drawn unadjusted.
-    fn admit_picture_display(&self, shape: &SpannedShape) -> Result<(), String> {
-        if let Some(adjustment) = shape.props.picture_adjustment {
+    /// MS-ODRAW 2.3.23 picture display adjustments and MS-PPT 2.7.9 metafile
+    /// recoloring, projected onto DrawingML blip effects where PowerPoint's
+    /// own reading of the binary is known, otherwise rejected.
+    ///
+    /// Evidence: PowerPoint 16 opening binary decks (with metroBlobs removed,
+    /// so only the binary properties speak) and saving them as PPTX writes
+    /// - fPictureGray + fPictureBiLevel as `<a:grayscl/><a:biLevel
+    ///   thresh="50000"/>` (PowerPoint's "Black and White");
+    /// - pictureTransparent RGB as `<a:clrChange>` from that colour to the
+    ///   same colour with alpha 0 (written before the gray/bilevel pair);
+    /// - pictureBrightness/pictureContrast as `<a:lum>` (0x8000 -> bright
+    ///   100000; 0x599a/0x4ccd -> bright 70000, contrast -70000).
+    /// PowerPoint's PDF exports agree with the first two (black/white by a
+    /// luminance threshold, white made transparent). The presentation renderer
+    /// has no `<a:lum>` rendering whose formula is confirmed by Office output,
+    /// and gray alone, bi-level alone, recolor and colour modifiers have no
+    /// evidence, so they stay rejected. Picture fills reject every adjustment.
+    fn picture_display_effects(
+        &self,
+        shape: &SpannedShape,
+        picture_frame: bool,
+    ) -> Result<Vec<BlipEffect>, String> {
+        let p = &shape.props;
+        if let Some(adjustment) = p.picture_adjustment {
             return Err(unsupported(format!(
                 "PowerPoint picture {adjustment} adjustment is not projected"
             )));
         }
-        if shape.props.recolor {
+        if p.recolor {
             return Err(unsupported(
                 "PowerPoint picture recoloring is not projected",
             ));
         }
-        Ok(())
+        if p.picture_contrast.is_some_and(|value| value != 0x10000)
+            || p.picture_brightness.is_some_and(|value| value != 0)
+        {
+            return Err(unsupported(
+                "PowerPoint picture brightness/contrast adjustment is not projected",
+            ));
+        }
+        let gray = p.picture_gray.unwrap_or(false);
+        let bilevel = p.picture_bilevel.unwrap_or(false);
+        let transparent = p.picture_transparent;
+        if !picture_frame && (gray || bilevel || transparent.is_some()) {
+            return Err(unsupported(
+                "PowerPoint picture fill color adjustment is not projected",
+            ));
+        }
+        let mut effects = Vec::new();
+        if let Some(color) = transparent {
+            // OfficeArtCOLORREF (MS-ODRAW 2.2.2): red, green, blue bytes and a
+            // flag byte; only a literal RGB colour is a pixel colour to match.
+            if color >> 24 != 0 {
+                return Err(unsupported(
+                    "PowerPoint indexed picture transparent color is not projected",
+                ));
+            }
+            let hex = format!(
+                "{:02X}{:02X}{:02X}",
+                color & 0xff,
+                (color >> 8) & 0xff,
+                (color >> 16) & 0xff
+            );
+            effects.push(BlipEffect::ColorChange {
+                from: hex.clone(),
+                from_alpha: 1.0,
+                to: hex,
+                to_alpha: 0.0,
+                use_alpha: false,
+            });
+        }
+        match (gray, bilevel) {
+            (false, false) => {}
+            (true, true) => {
+                effects.push(BlipEffect::Grayscale);
+                effects.push(BlipEffect::BiLevel { thresh: 0.5 });
+            }
+            (true, false) => {
+                return Err(unsupported(
+                    "PowerPoint picture grayscale adjustment is not projected",
+                ))
+            }
+            (false, true) => {
+                return Err(unsupported(
+                    "PowerPoint picture black-and-white adjustment is not projected",
+                ))
+            }
+        }
+        Ok(effects)
     }
 
     fn image_fill(&mut self, id: u32, opacity: u32, rotate: bool) -> Result<Option<Fill>, String> {
@@ -561,6 +641,7 @@ impl Context<'_> {
             tile: None,
             alpha: (opacity != 65536).then_some(opacity as f64 / 65536.0),
             duotone: None,
+            blip_effects: Vec::new(),
         }))
     }
 
@@ -1463,10 +1544,13 @@ mod tests {
         for (values, expected) in [
             (vec![(0x109, 0x599a)], "brightness"),
             (vec![(0x108, 0x4ccd)], "contrast"),
-            (vec![(0x107, 0xffffff)], "transparent color"),
+            (vec![(0x109, 0x8000), (0x13f, 0x0006_0006)], "brightness"),
+            (
+                vec![(0x107, 0x0800_0001)],
+                "indexed picture transparent color",
+            ),
             (vec![(0x11a, 0x0000ff)], "recolor"),
             (vec![(0x13f, 0x0004_0004)], "grayscale"),
-            (vec![(0x13f, 0x0006_0006)], "grayscale"),
             (vec![(0x13f, 0x0002_0002)], "black-and-white"),
         ] {
             let values = [vec![(0x4104, 1)], values].concat();
@@ -1474,6 +1558,52 @@ mod tests {
                 project(75, 0x200, vec![properties(&values)], png_blip(), None).unwrap_err();
             assert!(error.contains(expected), "{expected}: {error}");
         }
+        // PowerPoint's reading of the binary: transparent colour, then its
+        // "Black and White" pair.
+        let values = [(0x4104, 1), (0x107, 0x00c0_8040), (0x13f, 0x0006_0006)];
+        let model = project(75, 0x200, vec![properties(&values)], png_blip(), None).unwrap();
+        let SlideElement::Picture(picture) = &model.elements[0] else {
+            panic!("picture")
+        };
+        assert_eq!(
+            picture.blip_effects,
+            vec![
+                BlipEffect::ColorChange {
+                    from: "4080C0".into(),
+                    from_alpha: 1.0,
+                    to: "4080C0".into(),
+                    to_alpha: 0.0,
+                    use_alpha: false,
+                },
+                BlipEffect::Grayscale,
+                BlipEffect::BiLevel { thresh: 0.5 },
+            ]
+        );
+        // Colour adjustments on a picture fill stay rejected.
+        let fill = properties(&[
+            (0x180, 3),
+            (0x4186, 1),
+            (0x1bf, 0x0010_0010),
+            (0x13f, 0x0006_0006),
+        ]);
+        assert!(project(1, 0x200, vec![fill], png_blip(), None)
+            .unwrap_err()
+            .contains("picture fill color"));
+        // Contradictory primary/tertiary colour-mode bits are ambiguous.
+        let tertiary = {
+            let mut bytes = properties(&[(0x13f, 0x0004_0000)]);
+            bytes[2..4].copy_from_slice(&0xf122u16.to_le_bytes());
+            bytes
+        };
+        assert!(project(
+            75,
+            0x200,
+            vec![properties(&[(0x4104, 1), (0x13f, 0x0004_0004)]), tertiary],
+            png_blip(),
+            None
+        )
+        .unwrap_err()
+        .contains("ambiguous"));
         // Default values and unset use bits leave the picture unadjusted.
         for values in [
             vec![
@@ -1526,6 +1656,38 @@ mod tests {
                 )),
             }
         }
+        // Picture-frame backing fill: only an explicit fFilled with a solid
+        // fillColor is painted; frames that leave fFilled alone stay unfilled.
+        let backing = |values: &[(u16, u32)]| {
+            project(
+                75,
+                0x200,
+                vec![properties(&[vec![(0x4104, 1)], values.to_vec()].concat())],
+                png_blip(),
+                None,
+            )
+        };
+        let picture_fill = |model: Slide| match &model.elements[0] {
+            SlideElement::Picture(picture) => picture.fill.clone(),
+            _ => panic!("picture"),
+        };
+        assert!(matches!(
+            picture_fill(backing(&[(0x181, 0x4d4d4d), (0x1bf, 0x0010_0010)]).unwrap()),
+            Some(Fill::Solid { ref color }) if color == "4D4D4D"
+        ));
+        for values in [
+            vec![(0x181, 0x4d4d4d)],
+            vec![(0x181, 0x4d4d4d), (0x1bf, 0x0010_0000)],
+            vec![],
+        ] {
+            assert!(picture_fill(backing(&values).unwrap()).is_none());
+        }
+        assert!(backing(&[(0x1bf, 0x0010_0010)])
+            .unwrap_err()
+            .contains("without a color"));
+        assert!(backing(&[(0x180, 4), (0x181, 0xff), (0x1bf, 0x0010_0010)])
+            .unwrap_err()
+            .contains("non-solid"));
         // pib_complex names a linked file rather than a BLIP.
         let mut linked = properties(&[(0xc104, 4)]);
         linked.extend_from_slice(&[b'a', 0, b'b', 0]);

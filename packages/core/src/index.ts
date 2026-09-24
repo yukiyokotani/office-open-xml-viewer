@@ -387,6 +387,14 @@ export {
 // applies its `<a:duotone>` recolour once per (path + colours). Shared by the
 // docx and pptx renderers so a duotone picture decodes + recolours once and is
 // reused across page/slide revisits. xlsx keeps its own worksheet-scoped map.
+// CT_Blip pixel effects (grayscl, biLevel, clrChange) applied in document
+// order with the duotone, through the same decode cache.
+export {
+  applyBlipPixelEffects,
+  blipLuminance,
+  type BlipEffect,
+  type BlipPixelEffects,
+} from './image/blip-effects';
 export {
   getCachedDuotoneBitmapByPath,
   duotoneCacheKey,

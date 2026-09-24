@@ -6,6 +6,28 @@ mod gradient;
 pub(super) use crate::officeart::paint::Paint;
 
 impl Paint {
+    /// Picture-frame backing fill. PowerPoint 16 writes the ~2,000 corpus
+    /// picture frames that do not set fFilled themselves as `noFill` (even
+    /// though the drawing-group defaults set fFilled), and the frames with an
+    /// explicit fFilled = 1 and fillColor as a solid spPr fill, which its PDF
+    /// export paints behind transparent pixels. Only that evidenced case is
+    /// projected: `Ok(None)` for an unfilled frame, `Err` for a filled frame
+    /// whose fill type or colour source has no evidence.
+    pub(super) fn picture_backing(&self) -> Result<Option<(u32, u32)>, String> {
+        if self.filled != Some(true) || !self.fill_ok.unwrap_or(true) {
+            return Ok(None);
+        }
+        match (self.fill_type.unwrap_or(0), self.fill) {
+            (0, Some(color)) => Ok(Some((color, self.fill_alpha.unwrap_or(65536)))),
+            (0, None) => Err(super::unsupported(
+                "PowerPoint picture frame fill without a color",
+            )),
+            _ => Err(super::unsupported(
+                "PowerPoint picture frame non-solid fill",
+            )),
+        }
+    }
+
     /// Background paint has no geometry or line, and must not acquire a fake
     /// preset merely to extract its fill (PresentationML CT_BackgroundProperties).
     pub fn background_fill(&self, scheme: Option<&scheme::Scheme>) -> Option<String> {
@@ -192,7 +214,11 @@ fn solid(color: u32, opacity: u32, scheme: Option<&scheme::Scheme>) -> Option<St
     Some(xml)
 }
 
-fn model_solid(color: u32, opacity: u32, scheme: Option<&scheme::Scheme>) -> Option<Fill> {
+pub(super) fn model_solid(
+    color: u32,
+    opacity: u32,
+    scheme: Option<&scheme::Scheme>,
+) -> Option<Fill> {
     model_color(color, opacity, scheme).map(|color| Fill::Solid { color })
 }
 

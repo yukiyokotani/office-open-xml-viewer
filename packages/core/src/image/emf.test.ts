@@ -395,9 +395,14 @@ describe('playEmf — retained path painting', () => {
     ]);
   });
 
-  it.each([42, 65, 66, 84, 108])('does not paint fragments of unsupported path operation %i', type => {
+  it.each([42, 66, 84, 108])('does not paint fragments of unsupported path operation %i', type => {
     const m = run(stock(4), empty(59), ...triangle, empty(type), empty(60), paint(62));
     expect(m.styles.fill).toEqual([]);
+  });
+
+  it('FLATTENPATH keeps the path: replacing curves by lines does not change the painted area', () => {
+    const m = run(stock(4), empty(59), ...triangle, empty(60), empty(65), paint(62));
+    expect(m.styles.fill).toEqual(['#000000']);
   });
 });
 
@@ -1233,5 +1238,258 @@ describe('renderEmfToBitmap', () => {
     const file = concat(emfHeader(0, 0, 10, 10), record(EMR.EOF, () => {}));
     expect(await renderEmfToBitmap(file, 0, 10)).toBeNull();
     expect(await renderEmfToBitmap(file, 10, 0)).toBeNull();
+  });
+});
+
+// ── arcs, pies, chords, rounded rectangles and clip records ────────────────
+
+describe('playEmf — elliptical arc records ([MS-EMF] ARC/ARCTO/CHORD/PIE/ANGLEARC/ROUNDRECT)', () => {
+  const ARC = 45;
+  const CHORD = 46;
+  const PIE = 47;
+  const ARCTO = 55;
+  const ANGLEARC = 41;
+  const ROUNDRECT = 44;
+  const SETARCDIRECTION = 57;
+  const MOVETOEX = 27;
+  const LINETO = 54;
+  const stock = (id: number) => record(EMR.SELECTOBJECT, (w) => w.u32(0x80000000 + id));
+  const radial = (type: number, box: number[], start: number[], end: number[]) =>
+    record(type, (w) => {
+      for (const v of [...box, ...start, ...end]) w.i32(v);
+    });
+  function run(records: Uint8Array[], onUnsupported?: (r: readonly string[]) => void) {
+    const m = makeRecordingCtx();
+    const drew = playEmf(concat(emfHeader(), ...records, record(EMR.EOF, () => {})), m.ctx, 100, 100, {
+      onUnsupported: onUnsupported ?? (() => {}),
+    });
+    return { ...m, drew };
+  }
+  const ops = (m: MockCtx) => m.calls.map((c) => c.op);
+  const last = (m: MockCtx, op: string) => m.calls.filter((c) => c.op === op).at(-1)?.args;
+  const close = (actual: (number | string)[] | undefined, expected: number[]) => {
+    expect(actual).toHaveLength(expected.length);
+    expected.forEach((v, i) => expect(actual?.[i] as number).toBeCloseTo(v, 6));
+  };
+
+  it('PIE draws centre → start radial → counterclockwise arc → closed, filled and stroked', () => {
+    // Start radial points right, end radial up: counterclockwise (the default)
+    // is the short quarter from (100,50) up to (50,0) on a y-down surface.
+    const m = run([stock(4), stock(7), radial(PIE, [0, 0, 100, 100], [100, 50], [50, 0])]);
+    expect(ops(m)).toEqual(['save', 'beginPath', 'moveTo', 'lineTo', 'bezierCurveTo', 'closePath', 'fill', 'stroke', 'restore']);
+    close(last(m, 'moveTo'), [50, 50]);
+    close(last(m, 'lineTo'), [100, 50]);
+    const k = (4 / 3) * Math.tan(Math.PI / 8) * 50;
+    close(last(m, 'bezierCurveTo'), [100, 50 - k, 50 + k, 0, 50, 0]);
+    expect(m.styles.fill).toEqual(['#000000']);
+    expect(m.drew).toBe(true);
+  });
+
+  it('SETARCDIRECTION AD_CLOCKWISE takes the long way round, and SAVEDC scopes it', () => {
+    const m = run([
+      stock(4),
+      record(EMR.SAVEDC, () => {}),
+      record(SETARCDIRECTION, (w) => w.u32(2)),
+      radial(PIE, [0, 0, 100, 100], [100, 50], [50, 0]),
+      record(EMR.RESTOREDC, (w) => w.i32(-1)),
+      radial(PIE, [0, 0, 100, 100], [100, 50], [50, 0]),
+    ]);
+    const curves = m.calls.filter((c) => c.op === 'bezierCurveTo');
+    expect(curves).toHaveLength(4); // three quarters clockwise, then one counterclockwise
+    close(curves[2].args.slice(4), [50, 0]);
+    close(curves[3].args.slice(4), [50, 0]);
+  });
+
+  it('ARC strokes only and leaves the current position; ARCTO lines from it and moves it', () => {
+    const m = run([
+      stock(7),
+      record(MOVETOEX, (w) => w.i32(10).i32(90)),
+      radial(ARC, [0, 0, 100, 100], [100, 50], [50, 0]),
+      record(LINETO, (w) => w.i32(20).i32(90)),
+      radial(ARCTO, [0, 0, 100, 100], [100, 50], [50, 0]),
+      record(LINETO, (w) => w.i32(0).i32(0)),
+    ]);
+    expect(m.styles.fill).toEqual([]);
+    const moves = m.calls.filter((c) => c.op === 'moveTo').map((c) => c.args);
+    // ARC starts its own figure; LINETO still starts at (10,90); ARCTO starts at
+    // the current position (20,90) and the final LINETO at the arc end (50,0).
+    expect(moves).toEqual([[100, 50], [10, 90], [20, 90], [50, 0]]);
+  });
+
+  it('CHORD closes the arc with a straight chord and fills it', () => {
+    const m = run([stock(4), radial(CHORD, [0, 0, 100, 100], [100, 50], [50, 0])]);
+    expect(ops(m)).toEqual(['save', 'beginPath', 'moveTo', 'bezierCurveTo', 'closePath', 'fill', 'restore']);
+  });
+
+  it('equal radials draw the complete ellipse', () => {
+    const m = run([stock(7), radial(ARC, [0, 0, 100, 50], [100, 25], [100, 25])]);
+    const curves = m.calls.filter((c) => c.op === 'bezierCurveTo');
+    expect(curves).toHaveLength(4);
+    close(curves[3].args.slice(4), [100, 25]);
+  });
+
+  it('maps arc control points through the world transform (rotated, not axis-aligned)', () => {
+    // 90° rotation about the origin, then translate back on-canvas.
+    const m = run([
+      stock(4),
+      record(EMR.SETWORLDTRANSFORM, (w) => w.f32(0).f32(1).f32(-1).f32(0).f32(100).f32(0)),
+      radial(PIE, [0, 0, 100, 100], [100, 50], [50, 0]),
+    ]);
+    // Logical (100,50) → page (50,100); logical (50,0) → page (100,50).
+    close(last(m, 'lineTo'), [50, 100]);
+    close(last(m, 'bezierCurveTo')?.slice(4), [100, 50]);
+  });
+
+  it('ANGLEARC lines from the current position and sweeps counterclockwise from the x-axis', () => {
+    const m = run([
+      stock(7),
+      record(MOVETOEX, (w) => w.i32(0).i32(50)),
+      record(ANGLEARC, (w) => w.i32(50).i32(50).u32(50).f32(0).f32(90)),
+      record(LINETO, (w) => w.i32(0).i32(0)),
+    ]);
+    close(m.calls.find((c) => c.op === 'lineTo')?.args, [100, 50]);
+    close(m.calls.find((c) => c.op === 'bezierCurveTo')?.args.slice(4), [50, 0]);
+    // The current position moved to the arc end.
+    close(m.calls.filter((c) => c.op === 'moveTo')[1].args, [50, 0]);
+  });
+
+  it('ROUNDRECT fills a closed outline with four elliptical corners', () => {
+    const m = run([stock(4), record(ROUNDRECT, (w) => w.i32(0).i32(0).i32(100).i32(60).i32(20).i32(10))]);
+    expect(m.calls.filter((c) => c.op === 'bezierCurveTo')).toHaveLength(4);
+    expect(m.calls.filter((c) => c.op === 'lineTo')).toHaveLength(3);
+    expect(m.styles.fill).toEqual(['#000000']);
+  });
+
+  it('builds pies and ellipses inside path brackets for a later FILLPATH', () => {
+    const m = run([
+      stock(4),
+      record(59, () => {}),
+      radial(PIE, [0, 0, 100, 100], [100, 50], [50, 0]),
+      record(42, (w) => w.i32(0).i32(0).i32(20).i32(20)),
+      record(60, () => {}),
+      record(62, (w) => w.i32(0).i32(0).i32(100).i32(100)),
+    ]);
+    expect(m.calls.filter((c) => c.op === 'bezierCurveTo')).toHaveLength(5);
+    expect(m.styles.fill).toEqual(['#000000']);
+  });
+
+  it('reports instead of guessing the direction when the mapping reflects an axis', () => {
+    const reported: string[] = [];
+    const m = run(
+      [
+        stock(4),
+        record(EMR.SETWORLDTRANSFORM, (w) => w.f32(1).f32(0).f32(0).f32(-1).f32(0).f32(100)),
+        radial(PIE, [0, 0, 100, 100], [100, 50], [50, 0]),
+      ],
+      (records) => reported.push(...records),
+    );
+    expect(m.calls.filter((c) => c.op === 'fill')).toHaveLength(0);
+    expect(reported).toEqual(['EMR_PIE (reflected mapping)']);
+  });
+});
+
+describe('playEmf — clip rectangles and regions', () => {
+  const INTERSECTCLIPRECT = 30;
+  const EXCLUDECLIPRECT = 29;
+  const EXTSELECTCLIPRGN = 75;
+  const rect = (type: number, l: number, t: number, r: number, b: number) =>
+    record(type, (w) => w.i32(l).i32(t).i32(r).i32(b));
+  function run(records: Uint8Array[], onUnsupported: (r: readonly string[]) => void = () => {}) {
+    const m = makeRecordingCtx();
+    playEmf(concat(emfHeader(), ...records, record(EMR.EOF, () => {})), m.ctx, 100, 100, { onUnsupported });
+    return m;
+  }
+
+  it('INTERSECTCLIPRECT clips to the rectangle; EXCLUDECLIPRECT clips to its complement', () => {
+    const m = run([rect(INTERSECTCLIPRECT, 10, 10, 50, 50), rect(EXCLUDECLIPRECT, 20, 20, 30, 30)]);
+    expect(m.calls.filter((c) => c.op === 'clip').map((c) => c.args)).toEqual([['nonzero'], ['evenodd']]);
+  });
+
+  it('scopes clips to SAVEDC/RESTOREDC and balances every canvas save', () => {
+    const m = run([record(EMR.SAVEDC, () => {}), rect(INTERSECTCLIPRECT, 10, 10, 50, 50), record(EMR.RESTOREDC, (w) => w.i32(-1))]);
+    const saves = m.calls.filter((c) => c.op === 'save').length;
+    expect(saves).toBe(2);
+    expect(m.calls.filter((c) => c.op === 'restore').length).toBe(saves);
+    // An unmatched SAVEDC is also unwound at the end of playback.
+    const open = run([record(EMR.SAVEDC, () => {}), rect(INTERSECTCLIPRECT, 10, 10, 50, 50)]);
+    expect(open.calls.filter((c) => c.op === 'restore').length).toBe(2);
+  });
+
+  it('EXTSELECTCLIPRGN RGN_COPY with no region resets a clip set at the same level', () => {
+    const m = run([rect(INTERSECTCLIPRECT, 10, 10, 50, 50), record(EXTSELECTCLIPRGN, (w) => w.u32(0).u32(5))]);
+    expect(m.calls.map((c) => c.op).slice(-4)).toEqual(['clip', 'restore', 'save', 'restore']);
+  });
+
+  it('reports a reset that would have to drop a clip inherited from an outer level', () => {
+    const reported: string[] = [];
+    run(
+      [rect(INTERSECTCLIPRECT, 10, 10, 50, 50), record(EMR.SAVEDC, () => {}), record(EXTSELECTCLIPRGN, (w) => w.u32(0).u32(5))],
+      (r) => reported.push(...r),
+    );
+    expect(reported).toEqual(['EMR_EXTSELECTCLIPRGN (reset of an inherited clip)']);
+  });
+
+  it('EXTSELECTCLIPRGN intersects device-unit region rectangles, and subtracts them for RGN_DIFF', () => {
+    const region = (mode: number, rects: number[][]) =>
+      record(EXTSELECTCLIPRGN, (w) => {
+        w.u32(32 + rects.length * 16).u32(mode);
+        w.u32(32).u32(1).u32(rects.length).u32(rects.length * 16).i32(0).i32(0).i32(100).i32(100);
+        for (const r of rects) for (const v of r) w.i32(v);
+      });
+    const m = run([region(1, [[0, 0, 10, 10], [20, 0, 30, 10]]), region(4, [[0, 0, 5, 5], [2, 2, 8, 8]])]);
+    expect(m.calls.filter((c) => c.op === 'clip').map((c) => c.args)).toEqual([['nonzero'], ['evenodd'], ['evenodd']]);
+    const reported: string[] = [];
+    run([region(2, [[0, 0, 10, 10]])], (r) => reported.push(...r));
+    expect(reported).toEqual(['EMR_EXTSELECTCLIPRGN (mode 2)']);
+  });
+});
+
+describe('playEmf — explicit report of records it cannot draw', () => {
+  function run(records: Uint8Array[]) {
+    const m = makeRecordingCtx();
+    const reported: string[] = [];
+    playEmf(concat(emfHeader(), ...records, record(EMR.EOF, () => {})), m.ctx, 100, 100, {
+      onUnsupported: (r) => reported.push(...r),
+    });
+    return { ...m, reported };
+  }
+
+  it('reports each unsupported drawing record once per playback, and nothing for state records', () => {
+    const polyText = record(97, (w) => w.u32(0));
+    const m = run([polyText, polyText, record(21 /* SETROP2-class state */, (w) => w.u32(13))]);
+    expect(m.reported).toEqual(['EMR_POLYTEXTOUTW']);
+  });
+
+  it('warns through the console by default, once per record name per process', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const file = concat(emfHeader(), record(118, (w) => w.u32(0)), record(EMR.EOF, () => {}));
+      playEmf(file, makeRecordingCtx().ctx, 10, 10);
+      playEmf(file, makeRecordingCtx().ctx, 10, 10);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0][0])).toContain('EMR_GRADIENTFILL');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('paints PATCOPY/BLACKNESS pattern blits and reports other brush-only raster operations', () => {
+    const bitblt = (rop: number) =>
+      record(76, (w) => {
+        w.i32(0).i32(0).i32(10).i32(10); // rclBounds
+        w.i32(10).i32(20).i32(30).i32(40).u32(rop).i32(0).i32(0);
+        for (let i = 0; i < 6; i++) w.f32(i === 0 || i === 3 ? 1 : 0);
+        w.u32(0).u32(0).u32(0).u32(0).u32(0).u32(0);
+      });
+    const m = run([record(EMR.SELECTOBJECT, (w) => w.u32(0x80000000 + 2)), bitblt(0x00f00021), bitblt(0x00000042), bitblt(0x005a0049)]);
+    expect(m.styles.fill).toEqual(['#808080', '#000000']);
+    expect(m.reported).toEqual(['EMR_BITBLT (raster operation 0x5a0049)']);
+  });
+
+  it('reports an EMF+ header without the dual-mode flag; dual files play their GDI records', () => {
+    const plus = (flags: number) =>
+      record(70, (w) => w.u32(16).u32(0x2b464d45).u16(0x4001).u16(flags).u32(28).u32(16).u32(0).u32(0));
+    expect(run([plus(0)]).reported).toEqual(['EMF+ records (no GDI fallback)']);
+    expect(run([plus(1)]).reported).toEqual([]);
   });
 });

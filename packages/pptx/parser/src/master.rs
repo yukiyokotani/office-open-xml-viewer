@@ -254,6 +254,8 @@ pub(crate) struct InheritedBlipFill {
     /// blipFill, resolved through the theme. Inherited onto the slide picture
     /// placeholder that omits its own blipFill (see `shape.rs`).
     pub(crate) duotone: Option<Duotone>,
+    /// CT_Blip pixel effects on the same blipFill, inherited with it.
+    pub(crate) blip_effects: Vec<ooxml_common::blip::BlipEffect>,
 }
 
 impl LayoutPlaceholders {
@@ -1626,12 +1628,13 @@ pub(crate) fn parse_layout_placeholders(
             };
             let Fill::Image {
                 svg_image_path, dpi, rot_with_shape, src_rect, fill_rect,
-                stretch, tile, alpha, duotone, ..
+                stretch, tile, alpha, duotone, blip_effects, ..
             } = parse_blip_fill(bf, theme, &mut resolve)? else {
                 return None;
             };
             Some(InheritedBlipFill { image_path, mime_type, svg_image_path, dpi,
-                rot_with_shape, src_rect, fill_rect, tile, stretch, alpha, duotone })
+                rot_with_shape, src_rect, fill_rect, tile, stretch, alpha, duotone,
+                blip_effects })
         });
 
         if let Some(ph) = ph_node {

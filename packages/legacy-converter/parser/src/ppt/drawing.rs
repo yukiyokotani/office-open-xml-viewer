@@ -524,10 +524,18 @@ struct PropertiesStorage<T> {
     picture: u32,
     /// pib_complex (MS-ODRAW 2.3.23.6): a picture named by file, not a BLIP.
     picture_linked: bool,
-    /// First non-default MS-ODRAW 2.3.23 display adjustment, if any. The
-    /// presentation model has no brightness, contrast, transparent-color,
-    /// recolor or gray/bilevel picture effects, so the direct model rejects it.
+    /// First non-default MS-ODRAW 2.3.23 display adjustment without a
+    /// projection (recolor and color modifiers), if any; rejected.
     picture_adjustment: Option<&'static str>,
+    /// MS-ODRAW 2.3.23.10 pictureTransparent (OfficeArtCOLORREF), when set.
+    picture_transparent: Option<u32>,
+    /// MS-ODRAW 2.3.23.11-12 pictureContrast / pictureBrightness, when set.
+    picture_contrast: Option<u32>,
+    picture_brightness: Option<u32>,
+    /// MS-ODRAW 2.3.23.35 fPictureGray / fPictureBiLevel, when their use bits
+    /// are set.
+    picture_gray: Option<bool>,
+    picture_bilevel: Option<bool>,
     /// MS-PPT 2.7.7 ExObjRefAtom from the shape's client data: the external
     /// object behind an OLE shape.
     ole_ref: Option<u32>,
@@ -560,6 +568,11 @@ impl<T> Default for PropertiesStorage<T> {
             picture: 0,
             picture_linked: false,
             picture_adjustment: None,
+            picture_transparent: None,
+            picture_contrast: None,
+            picture_brightness: None,
+            picture_gray: None,
+            picture_bilevel: None,
             ole_ref: None,
             recolor: false,
             crop: [0; 4],
@@ -581,7 +594,7 @@ impl<T: Default + Clone> PropertiesStorage<T> {
             self.paint.tertiary_fill_boolean_property(value)?;
         }
         if opid == 0x013f && complex.is_none() {
-            self.blip_booleans(value);
+            self.blip_booleans(value)?;
         }
         Ok(())
     }
@@ -589,13 +602,23 @@ impl<T: Default + Clone> PropertiesStorage<T> {
     /// MS-ODRAW 2.3.23.35: fPictureGray is bit 2 and fPictureBiLevel bit 1,
     /// each honored only with its use bit (18 and 17). Other Blip Booleans
     /// (hit testing, looping, active OLE server) do not change the display.
-    fn blip_booleans(&mut self, value: u32) {
-        if value & (1 << 18) != 0 && value & (1 << 2) != 0 {
-            self.picture_adjustment.get_or_insert("grayscale");
+    /// Primary and tertiary tables have no documented precedence, so
+    /// contradictory active bits are rejected.
+    fn blip_booleans(&mut self, value: u32) -> Result<(), String> {
+        for (use_bit, bit, target) in [
+            (18, 2, &mut self.picture_gray),
+            (17, 1, &mut self.picture_bilevel),
+        ] {
+            if value & (1 << use_bit) == 0 {
+                continue;
+            }
+            let active = value & (1 << bit) != 0;
+            if target.is_some_and(|current| current != active) {
+                return Err(unsupported("ambiguous PowerPoint picture color mode"));
+            }
+            *target = Some(active);
         }
-        if value & (1 << 17) != 0 && value & (1 << 1) != 0 {
-            self.picture_adjustment.get_or_insert("black-and-white");
-        }
+        Ok(())
     }
 
     fn apply_primary(&mut self, opid: u16, value: u32, complex: Option<T>) -> Result<(), String> {
@@ -664,24 +687,20 @@ impl<T: Default + Clone> PropertiesStorage<T> {
             // MS-ODRAW 2.3.23.10-12 and 24-32: defaults are no transparent
             // color, contrast 0x10000, brightness 0, no recolor color and an
             // MSOTINTSHADE of 0x20000000 for the Ext modifiers.
-            0x107 | 0x115 | 0x11a | 0x11b if value != 0xffff_ffff => {
-                self.picture_adjustment
-                    .get_or_insert(if opid == 0x107 || opid == 0x115 {
-                        "transparent color"
-                    } else {
-                        "recolor"
-                    });
+            0x107 => self.picture_transparent = (value != 0xffff_ffff).then_some(value),
+            0x115 | 0x11a | 0x11b if value != 0xffff_ffff => {
+                self.picture_adjustment.get_or_insert(if opid == 0x115 {
+                    "extended transparent color"
+                } else {
+                    "recolor"
+                });
             }
             0x117 | 0x11d if value != 0x2000_0000 => {
                 self.picture_adjustment.get_or_insert("color modification");
             }
-            0x108 if value != 0x10000 => {
-                self.picture_adjustment.get_or_insert("contrast");
-            }
-            0x109 if value != 0 => {
-                self.picture_adjustment.get_or_insert("brightness");
-            }
-            0x13f => self.blip_booleans(value),
+            0x108 => self.picture_contrast = Some(value),
+            0x109 => self.picture_brightness = Some(value),
+            0x13f => self.blip_booleans(value)?,
             // MS-ODRAW crop order: top, bottom, left, right. Signed 16.16
             // fractions become DrawingML 1/1000 percentages without clamping.
             0x100..=0x103 => {

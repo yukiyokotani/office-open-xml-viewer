@@ -3,7 +3,7 @@
 //! Shared by presentation input producers without depending on the OOXML
 //! parser, archive construction, or a WASM runtime.
 
-use ooxml_common::blip::{Duotone, SrcRect};
+use ooxml_common::blip::{BlipEffect, Duotone, SrcRect};
 use ooxml_common::drawing::{DrawingGroupSpec, DrawingGroupTransform, DrawingRect};
 use ooxml_common::math::MathNode;
 use ooxml_common::text::SpaceLine;
@@ -590,6 +590,12 @@ pub struct PictureElement {
     /// resolves to `<a:noFill/>` (border explicitly suppressed).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stroke: Option<Stroke>,
+    /// `<p:spPr>` fill (ECMA-376 §19.3.1.37 routes a `p:pic`'s spPr through
+    /// CT_ShapeProperties): painted inside the picture silhouette BEHIND the
+    /// blip, so it shows through transparent pixels. `None` when the spPr has
+    /// no fill element.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fill: Option<Fill>,
     /// `<p:spPr><a:prstGeom prst="…">` preset name (e.g. "roundRect",
     /// "ellipse"). ECMA-376 §20.1.9.18: a picture's preset geometry is its clip
     /// silhouette and the path its border / contour hug. None = plain rectangle
@@ -616,6 +622,12 @@ pub struct PictureElement {
     /// `applyDuotone`), matching PowerPoint's recolour.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duotone: Option<Duotone>,
+    /// CT_Blip pixel effects (ECMA-376 §20.1.8.13: grayscl, biLevel,
+    /// clrChange) in document order, with a `Duotone` entry marking where the
+    /// `duotone` above applies. Empty (the common case, and any picture with at
+    /// most a duotone) keeps the duotone-only decode path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blip_effects: Vec<BlipEffect>,
     /// `<p:spPr><a:custGeom>` — custom geometry path used as a clip on the
     /// blitted image. Same shape model as `ShapeElement.cust_geom` (one or more
     /// `<a:path>` whose coordinates are normalized into [0,1] of the bbox).
@@ -852,6 +864,10 @@ pub enum Fill {
         /// picture FILL (§20.1.8.14) may carry just as a picture element can.
         #[serde(skip_serializing_if = "Option::is_none")]
         duotone: Option<Duotone>,
+        /// CT_Blip pixel effects in document order (see
+        /// `PictureElement::blip_effects`).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        blip_effects: Vec<BlipEffect>,
     },
 }
 

@@ -22,7 +22,9 @@ use crate::{
     table_style_presets, PptxZip, ResolvedTableCellStyle, TableCellBorderStyle, TableLineStyle,
     TablePartStyle, TableStyleDef, TableStyleFlags, TableTextStyle,
 };
-use ooxml_common::blip::{mime_from_ext, parse_blip_duotone, parse_src_rect, svg_blip_rid};
+use ooxml_common::blip::{
+    mime_from_ext, parse_blip_duotone, parse_blip_effects, parse_src_rect, svg_blip_rid,
+};
 use ooxml_common::depth::DepthGuard;
 use ooxml_common::line::{
     parse_line_properties, LineDash, LineEnd, LineJoin, LinePaint, LineProperties,
@@ -1077,6 +1079,7 @@ pub(crate) fn parse_shape(
                     tile: bf.tile,
                     alpha: bf.alpha,
                     duotone: bf.duotone,
+                    blip_effects: bf.blip_effects,
                 }).or_else(|| lph.lookup_fill(&ph_type, ph_idx))
             } else {
                 None
@@ -1496,6 +1499,7 @@ pub(crate) fn parse_picture(
         intrinsic_width_px,
         intrinsic_height_px,
         stroke,
+        fill: parse_fill(sp_pr, theme),
         prst_geom,
         prst_adjust,
         src_rect: parse_src_rect(blip_fill),
@@ -1503,6 +1507,11 @@ pub(crate) fn parse_picture(
         // §20.1.8.23 `<a:duotone>` recolour, resolved through the slide's theme
         // palette with PowerPoint's linear tint. `None` ⇒ no effect.
         duotone: parse_blip_duotone(
+            blip_fill,
+            &PptxSchemeResolver { theme },
+            ooxml_common::color::TintMode::PowerPointLinear,
+        ),
+        blip_effects: parse_blip_effects(
             blip_fill,
             &PptxSchemeResolver { theme },
             ooxml_common::color::TintMode::PowerPointLinear,
@@ -1561,11 +1570,17 @@ pub(crate) fn parse_ole_preview_picture(
         intrinsic_width_px,
         intrinsic_height_px,
         stroke: None,
+        fill: None,
         prst_geom: None,
         prst_adjust: None,
         src_rect: parse_src_rect(blip_fill),
         alpha: parse_blip_alpha(blip_fill),
         duotone: parse_blip_duotone(
+            blip_fill,
+            &PptxSchemeResolver { theme },
+            ooxml_common::color::TintMode::PowerPointLinear,
+        ),
+        blip_effects: parse_blip_effects(
             blip_fill,
             &PptxSchemeResolver { theme },
             ooxml_common::color::TintMode::PowerPointLinear,
@@ -2516,6 +2531,7 @@ pub(crate) fn parse_sp_tree_node(
                                         intrinsic_width_px,
                                         intrinsic_height_px,
                                         stroke,
+                                        fill: child(node, "spPr").and_then(|sp| parse_fill(sp, theme)),
                                         prst_geom: None,
                                         prst_adjust: None,
                                         src_rect: blip_fill.and_then(parse_src_rect),
@@ -2527,6 +2543,15 @@ pub(crate) fn parse_sp_tree_node(
                                                 ooxml_common::color::TintMode::PowerPointLinear,
                                             )
                                         }),
+                                        blip_effects: blip_fill
+                                            .map(|bf| {
+                                                parse_blip_effects(
+                                                    bf,
+                                                    &PptxSchemeResolver { theme },
+                                                    ooxml_common::color::TintMode::PowerPointLinear,
+                                                )
+                                            })
+                                            .unwrap_or_default(),
                                         cust_geom: None,
                                         shadow,
                                         inner_shadow,
@@ -3663,6 +3688,7 @@ mod picture_property_resolution_tests {
             stretch: true,
             alpha: None,
             duotone: None,
+            blip_effects: Vec::new(),
         };
         let mut placeholders = LayoutPlaceholders::default();
         placeholders.by_idx.insert(9, transform);

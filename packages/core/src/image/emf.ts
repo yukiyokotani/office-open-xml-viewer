@@ -41,16 +41,23 @@
 // CREATEDIBPATTERNBRUSHPT (→ average solid color), EXTCREATEFONTINDIRECTW,
 // POLYLINE16/POLYGON16/POLYBEZIER16/POLYLINETO16/POLYBEZIERTO16 (+ their 32-bit
 // twins), POLYPOLYGON16/POLYPOLYLINE16 (+ 32-bit twins), MOVETOEX, LINETO,
-// RECTANGLE, ELLIPSE, SETPOLYFILLMODE, EXTTEXTOUTW, SETTEXTCOLOR, SETTEXTALIGN,
-// SETBKMODE, BITBLT, STRETCHDIBITS (minimal DIB decoder), EOF.
-// BEGINPATH/ENDPATH/CLOSEFIGURE retain line/polygon/cubic/rectangle geometry;
-// FILLPATH/STROKEPATH/STROKEANDFILLPATH paint it, ABORTPATH discards it, and
-// SELECTCLIPPATH applies the existing intersection clip implementation.
-// Glyph/ellipse/arc path construction and flatten/widen remain unsupported;
-// such paths are discarded rather than painting an incomplete outline.
-// Ignored (no-op, skipped by nSize): GDICOMMENT (may hold EMF+, out of scope),
-// SETICMMODE, SETMITERLIMIT, SETROP2, SETSTRETCHBLTMODE, INTERSECTCLIPRECT,
-// and any unrecognized iType.
+// RECTANGLE, ROUNDRECT, ELLIPSE, ARC, ARCTO, ANGLEARC, CHORD, PIE,
+// SETARCDIRECTION, SETPOLYFILLMODE, EXTTEXTOUTW, SETTEXTCOLOR, SETTEXTALIGN,
+// SETBKMODE, BITBLT (DIB source, or PATCOPY/BLACKNESS/WHITENESS/D without
+// one), STRETCHDIBITS (minimal DIB decoder), EOF.
+// BEGINPATH/ENDPATH/CLOSEFIGURE retain line/polygon/cubic/rectangle/arc/ellipse
+// geometry; FILLPATH/STROKEPATH/STROKEANDFILLPATH paint it, FLATTENPATH keeps
+// it, ABORTPATH discards it. Clipping: SELECTCLIPPATH (AND/COPY),
+// INTERSECTCLIPRECT, EXCLUDECLIPRECT and EXTSELECTCLIPRGN (AND/COPY/DIFF and
+// the default-clip reset), scoped by SAVEDC/RESTOREDC.
+// Drawing records that are not implemented (text variants other than
+// EXTTEXTOUTW, POLYDRAW, region painting, flood fill, other blits, gradient
+// fill, glyph paths, WIDENPATH, EMF+-only content, arcs under a reflected
+// mapping) are reported through `EmfPlaybackOptions.onUnsupported` (default: a
+// once-per-record console warning) instead of being dropped silently. State
+// records without a visible effect (SETICMMODE, SETMITERLIMIT, SETROP2,
+// SETSTRETCHBLTMODE, SETMETARGN, palettes, dual-mode EMF+ comments) and
+// unrecognized iTypes are skipped by nSize.
 //
 // Shared across the docx, pptx and xlsx renderers via
 // {@link ./raster-or-metafile.ts}#decodeRasterOrMetafile, which sniffs the bytes and routes
@@ -132,7 +139,60 @@ const EMR = {
   SMALLTEXTOUT: 108,
   BITBLT: 76,
   STRETCHDIBITS: 81,
+  SETPIXELV: 15,
+  OFFSETCLIPRGN: 26,
+  SETMETARGN: 28,
+  EXCLUDECLIPRECT: 29,
+  INTERSECTCLIPRECT: 30,
+  EXTFLOODFILL: 53,
+  SETARCDIRECTION: 57,
+  GDICOMMENT: 70,
+  FILLRGN: 71,
+  FRAMERGN: 72,
+  INVERTRGN: 73,
+  PAINTRGN: 74,
+  EXTSELECTCLIPRGN: 75,
+  STRETCHBLT: 77,
+  MASKBLT: 78,
+  PLGBLT: 79,
+  SETDIBITSTODEVICE: 80,
+  ALPHABLEND: 114,
+  TRANSPARENTBLT: 116,
+  GRADIENTFILL: 118,
 } as const;
+
+/** Names of drawing records this player cannot draw ([MS-EMF] 2.1.1), used to
+ *  report — never silently drop — content that a playback leaves out. */
+const UNSUPPORTED_DRAWING: Readonly<Record<number, string>> = {
+  [EMR.POLYDRAW]: 'EMR_POLYDRAW',
+  [EMR.POLYDRAW16]: 'EMR_POLYDRAW16',
+  [EMR.EXTTEXTOUTA]: 'EMR_EXTTEXTOUTA',
+  [EMR.POLYTEXTOUTA]: 'EMR_POLYTEXTOUTA',
+  [EMR.POLYTEXTOUTW]: 'EMR_POLYTEXTOUTW',
+  [EMR.SMALLTEXTOUT]: 'EMR_SMALLTEXTOUT',
+  [EMR.SETPIXELV]: 'EMR_SETPIXELV',
+  [EMR.EXTFLOODFILL]: 'EMR_EXTFLOODFILL',
+  [EMR.FILLRGN]: 'EMR_FILLRGN',
+  [EMR.FRAMERGN]: 'EMR_FRAMERGN',
+  [EMR.INVERTRGN]: 'EMR_INVERTRGN',
+  [EMR.PAINTRGN]: 'EMR_PAINTRGN',
+  [EMR.STRETCHBLT]: 'EMR_STRETCHBLT',
+  [EMR.MASKBLT]: 'EMR_MASKBLT',
+  [EMR.PLGBLT]: 'EMR_PLGBLT',
+  [EMR.SETDIBITSTODEVICE]: 'EMR_SETDIBITSTODEVICE',
+  [EMR.ALPHABLEND]: 'EMR_ALPHABLEND',
+  [EMR.TRANSPARENTBLT]: 'EMR_TRANSPARENTBLT',
+  [EMR.GRADIENTFILL]: 'EMR_GRADIENTFILL',
+};
+
+// ArcDirection enumeration ([MS-EMF] 2.1.2).
+const AD_COUNTERCLOCKWISE = 1;
+const AD_CLOCKWISE = 2;
+
+// RegionMode enumeration ([MS-EMF] 2.1.29).
+const RGN_AND = 1;
+const RGN_DIFF = 4;
+const RGN_COPY = 5;
 
 // Stock object handle ids ([MS-EMF] 2.1.31 StockObject) — high bit 0x80000000
 // set in a SELECTOBJECT handle.
@@ -244,6 +304,12 @@ class EmfCursor {
   private require(size: number): void {
     if (this.p < 0 || this.remaining < size) throw new RangeError('Truncated EMF record');
   }
+  u16(): number {
+    this.require(2);
+    const v = this.dv.getUint16(this.p, true);
+    this.p += 2;
+    return v;
+  }
   i16(): number {
     this.require(2);
     const v = this.dv.getInt16(this.p, true);
@@ -330,6 +396,13 @@ interface PlayState {
   inPath: boolean; // between BEGINPATH and ENDPATH — geometry builds a path, no draw
   path: EmfPath | null;
   pathBudget: EmfPathBudget;
+  arcDirection: number; // EMR_SETARCDIRECTION ArcDirection; default AD_COUNTERCLOCKWISE
+  // Clipping state. Each DC level owns exactly one outstanding canvas save
+  // (the playback base or the SAVEDC save), so a clip reset at the current
+  // level is a restore+save — exact only when no outer level is clipped.
+  clipped: boolean; // any clip active at the current level (incl. inherited)
+  outerClipped: boolean; // a clip inherited from an enclosing level
+  unsupported: Set<string>; // records that drew nothing although they draw content
 }
 
 /** Snapshot of the graphics state pushed by EMR_SAVEDC. */
@@ -355,6 +428,9 @@ interface SavedDc {
   fillRule: CanvasFillRule;
   curX: number;
   curY: number;
+  arcDirection: number;
+  clipped: boolean;
+  outerClipped: boolean;
 }
 
 // ── coordinate pipeline ─────────────────────────────────────────────────────
@@ -852,6 +928,372 @@ function fillStrokeRect(s: PlayState, l: number, t: number, r: number, b: number
   }
 }
 
+// ── elliptical arcs, pies, chords and rounded rectangles ([MS-EMF] 2.3.5) ─────
+//
+// Geometry is built as cubic Bézier segments in LOGICAL space and mapped point
+// by point through `toPx`. Every stage of that mapping is affine, so the curves
+// stay exact under world transforms, anisotropic window/viewport scaling and
+// rotation (a Canvas `ellipse` call would stay axis-aligned).
+//
+// Drawing direction (Win32 GDI `SetArcDirection` / `SetGraphicsMode`): the
+// default direction is counterclockwise. In GM_COMPATIBLE it applies in device
+// space, in GM_ADVANCED in logical space; the two agree unless the logical →
+// device mapping reflects an axis. The EMF records do not say which mode the
+// recording DC used, so a reflected mapping is reported unsupported rather than
+// guessed. "Counterclockwise" is visual on a y-down surface, i.e. a DECREASING
+// parametric angle measured with y pointing down.
+
+type LPoint = readonly [number, number];
+interface ArcGeometry {
+  start: LPoint;
+  curves: Array<readonly [LPoint, LPoint, LPoint]>;
+  end: LPoint;
+}
+
+/** Elliptical arc from parametric angle `theta0` over `sweep` radians, as at
+ *  most-90° cubic segments (the standard 4/3·tan(Δ/4) handle length). */
+function ellipseArc(
+  cx: number,
+  cy: number,
+  rx: number,
+  ry: number,
+  theta0: number,
+  sweep: number,
+): ArcGeometry {
+  const n = Math.max(1, Math.ceil(Math.abs(sweep) / (Math.PI / 2) - 1e-9));
+  const d = sweep / n;
+  const k = (4 / 3) * Math.tan(d / 4);
+  const at = (a: number): LPoint => [cx + rx * Math.cos(a), cy + ry * Math.sin(a)];
+  const curves: Array<readonly [LPoint, LPoint, LPoint]> = [];
+  for (let i = 0; i < n; i++) {
+    const a0 = theta0 + i * d;
+    const a1 = a0 + d;
+    const [x0, y0] = at(a0);
+    const [x1, y1] = at(a1);
+    curves.push([
+      [x0 - k * rx * Math.sin(a0), y0 + k * ry * Math.cos(a0)],
+      [x1 + k * rx * Math.sin(a1), y1 - k * ry * Math.cos(a1)],
+      [x1, y1],
+    ]);
+  }
+  return { start: at(theta0), curves, end: at(theta0 + sweep) };
+}
+
+/** Signed sweep from `a0` to `a1` in the current drawing direction; equal
+ *  radials give a complete ellipse (Win32 `Arc` remarks). */
+function directedSweep(a0: number, a1: number, direction: number): number {
+  let sweep = a1 - a0;
+  if (direction === AD_CLOCKWISE) {
+    while (sweep <= 0) sweep += 2 * Math.PI;
+    while (sweep > 2 * Math.PI) sweep -= 2 * Math.PI;
+  } else {
+    while (sweep >= 0) sweep -= 2 * Math.PI;
+    while (sweep < -2 * Math.PI) sweep += 2 * Math.PI;
+  }
+  return sweep;
+}
+
+/** The arc of the ellipse inscribed in `box` between the radials from its
+ *  centre to `p0` and `p1` (Win32 `Arc`/`Chord`/`Pie`). Null for an empty box. */
+function radialArc(
+  box: readonly [number, number, number, number],
+  p0: LPoint,
+  p1: LPoint,
+  direction: number,
+): (ArcGeometry & { center: LPoint }) | null {
+  const [l, t, r, b] = box;
+  const rx = Math.abs(r - l) / 2;
+  const ry = Math.abs(b - t) / 2;
+  if (rx === 0 || ry === 0) return null;
+  const cx = (l + r) / 2;
+  const cy = (t + b) / 2;
+  // The radial through p meets the ellipse at parametric angle
+  // atan2((py−cy)/ry, (px−cx)/rx).
+  const a0 = Math.atan2((p0[1] - cy) / ry, (p0[0] - cx) / rx);
+  const a1 = Math.atan2((p1[1] - cy) / ry, (p1[0] - cx) / rx);
+  return { ...ellipseArc(cx, cy, rx, ry, a0, directedSweep(a0, a1, direction)), center: [cx, cy] };
+}
+
+/** True when the logical → target mapping reflects an axis (negative
+ *  determinant), where the arc drawing direction depends on the recording
+ *  graphics mode. */
+function mappingReflects(s: PlayState): boolean {
+  const [ox, oy] = toPx(s, 0, 0);
+  const [xx, xy] = toPx(s, 1, 0);
+  const [yx, yy] = toPx(s, 0, 1);
+  return (xx - ox) * (yy - oy) - (xy - oy) * (yx - ox) < 0;
+}
+
+type Sink = Pick<CanvasRenderingContext2D, 'moveTo' | 'lineTo' | 'bezierCurveTo' | 'closePath'>;
+
+function emitCurves(s: PlayState, sink: Sink, geometry: ArcGeometry): void {
+  for (const [c1, c2, end] of geometry.curves) {
+    const p1 = toPx(s, c1[0], c1[1]);
+    const p2 = toPx(s, c2[0], c2[1]);
+    const pe = toPx(s, end[0], end[1]);
+    sink.bezierCurveTo(p1[0], p1[1], p2[0], p2[1], pe[0], pe[1]);
+  }
+}
+
+/** Paint the figure just built on the context: fill with the brush when
+ *  `filled`, then stroke with the pen. */
+function paintFigure(s: PlayState, filled: boolean): void {
+  const { ctx } = s;
+  if (filled && s.curBrush && s.curBrush.fill != null) {
+    ctx.fillStyle = s.curBrush.fill;
+    ctx.fill(s.fillRule);
+    s.drew = true;
+  }
+  if (s.curPen && s.curPen.stroke != null) {
+    ctx.strokeStyle = s.curPen.stroke;
+    ctx.lineWidth = deviceLineWidth(s, s.curPen.width);
+    ctx.stroke();
+    s.drew = true;
+  }
+}
+
+/** Report a drawing record this playback leaves out. Inside a path bracket
+ *  the incomplete path is also discarded, never painted partially. */
+function unsupportedDrawing(s: PlayState, name: string): void {
+  s.unsupported.add(name);
+  if (s.inPath) s.path?.invalidate();
+}
+
+type ArcKind = 'arc' | 'arcTo' | 'chord' | 'pie';
+
+/** EMR_ARC(45) / EMR_ARCTO(55) / EMR_CHORD(46) / EMR_PIE(47): RECTL rclBox,
+ *  POINTL ptlStart, POINTL ptlEnd ([MS-EMF] drawing records; Win32 `Arc`,
+ *  `ArcTo`, `Chord`, `Pie`).
+ *  Arc is stroked and leaves the current position alone; ArcTo first draws a
+ *  line from the current position and moves it to the arc end; Chord closes
+ *  the arc with a chord and Pie with two radials, both filled and stroked. */
+function drawRadialArc(s: PlayState, c: EmfCursor, kind: ArcKind, name: string): void {
+  const box = [c.i32(), c.i32(), c.i32(), c.i32()] as const;
+  const p0: LPoint = [c.i32(), c.i32()];
+  const p1: LPoint = [c.i32(), c.i32()];
+  if (mappingReflects(s)) {
+    unsupportedDrawing(s, `${name} (reflected mapping)`);
+    return;
+  }
+  const geometry = radialArc(box, p0, p1, s.arcDirection);
+  if (!geometry) return; // an empty bounding box has no curve
+  const { ctx } = s;
+  const sink: Sink = s.inPath && s.path ? s.path : ctx;
+  const start = toPx(s, geometry.start[0], geometry.start[1]);
+  if (!s.inPath) ctx.beginPath();
+  if (kind === 'arcTo') {
+    if (s.inPath && s.path) s.path.continueFrom(...toPx(s, s.curX, s.curY));
+    else ctx.moveTo(...toPx(s, s.curX, s.curY));
+    sink.lineTo(start[0], start[1]);
+  } else if (kind === 'pie') {
+    sink.moveTo(...toPx(s, geometry.center[0], geometry.center[1]));
+    sink.lineTo(start[0], start[1]);
+  } else {
+    sink.moveTo(start[0], start[1]);
+  }
+  emitCurves(s, sink, geometry);
+  if (kind === 'chord' || kind === 'pie') sink.closePath();
+  if (kind === 'arcTo') {
+    s.curX = geometry.end[0];
+    s.curY = geometry.end[1];
+  }
+  if (!s.inPath) paintFigure(s, kind === 'chord' || kind === 'pie');
+}
+
+/** EMR_ANGLEARC(41): POINTL ptlCenter, u32 nRadius, f32 eStartAngle,
+ *  f32 eSweepAngle ([MS-EMF] drawing record). Win32 `AngleArc`: a line from the
+ *  current position to the arc start, then a circular arc measured
+ *  counterclockwise from the x-axis (independent of the arc direction); the
+ *  current position moves to the arc end. A sweep beyond 360° retraces the
+ *  circle, which adds no stroked pixels, so it is bounded to one turn. */
+function drawAngleArc(s: PlayState, c: EmfCursor): void {
+  const cx = c.i32();
+  const cy = c.i32();
+  const radius = c.u32();
+  const startDeg = c.f32();
+  const sweepDeg = c.f32();
+  if (!Number.isFinite(startDeg) || !Number.isFinite(sweepDeg)) return;
+  if (mappingReflects(s)) {
+    unsupportedDrawing(s, 'EMR_ANGLEARC (reflected mapping)');
+    return;
+  }
+  if (s.inPath && Math.abs(sweepDeg) > 360) {
+    // A retraced circle changes even-odd path fills; not modelled.
+    unsupportedDrawing(s, 'EMR_ANGLEARC (multiple sweeps in a path)');
+    return;
+  }
+  const sweep = Math.max(-360, Math.min(360, sweepDeg));
+  // Counterclockwise on a y-down surface = decreasing parametric angle.
+  const theta0 = (-startDeg * Math.PI) / 180;
+  const geometry = ellipseArc(cx, cy, radius, radius, theta0, (-sweep * Math.PI) / 180);
+  const { ctx } = s;
+  const sink: Sink = s.inPath && s.path ? s.path : ctx;
+  const start = toPx(s, geometry.start[0], geometry.start[1]);
+  if (s.inPath && s.path) {
+    s.path.continueFrom(...toPx(s, s.curX, s.curY));
+  } else {
+    ctx.beginPath();
+    ctx.moveTo(...toPx(s, s.curX, s.curY));
+  }
+  sink.lineTo(start[0], start[1]);
+  if (sweep !== 0) emitCurves(s, sink, geometry);
+  s.curX = geometry.end[0];
+  s.curY = geometry.end[1];
+  if (!s.inPath) paintFigure(s, false);
+}
+
+/** EMR_ROUNDRECT(44): RECTL rclBox, SIZEL szlCorner ([MS-EMF] drawing record) — the
+ *  corner ellipse's width and height, clamped to the box (Win32 `RoundRect`).
+ *  The outline follows the arc direction like `Rectangle`. */
+function drawRoundRect(s: PlayState, c: EmfCursor): void {
+  const l0 = c.i32();
+  const t0 = c.i32();
+  const r0 = c.i32();
+  const b0 = c.i32();
+  const cw = c.i32();
+  const ch = c.i32();
+  if (mappingReflects(s)) {
+    unsupportedDrawing(s, 'EMR_ROUNDRECT (reflected mapping)');
+    return;
+  }
+  const [l, r] = l0 <= r0 ? [l0, r0] : [r0, l0];
+  const [t, b] = t0 <= b0 ? [t0, b0] : [b0, t0];
+  const rx = Math.min(Math.abs(cw) / 2, (r - l) / 2);
+  const ry = Math.min(Math.abs(ch) / 2, (b - t) / 2);
+  const { ctx } = s;
+  const sink: Sink = s.inPath && s.path ? s.path : ctx;
+  if (!s.inPath) ctx.beginPath();
+  // Clockwise (increasing angle, y-down) corner order: top-right, bottom-right,
+  // bottom-left, top-left; counterclockwise walks the same corners backwards.
+  const clockwise = s.arcDirection === AD_CLOCKWISE;
+  const corners: Array<[number, number, number]> = [
+    [r - rx, t + ry, -Math.PI / 2],
+    [r - rx, b - ry, 0],
+    [l + rx, b - ry, Math.PI / 2],
+    [l + rx, t + ry, Math.PI],
+  ];
+  const order = clockwise ? corners : [...corners].reverse();
+  order.forEach(([cx, cy, a], i) => {
+    const arc = clockwise
+      ? ellipseArc(cx, cy, rx, ry, a, Math.PI / 2)
+      : ellipseArc(cx, cy, rx, ry, a + Math.PI / 2, -Math.PI / 2);
+    const start = toPx(s, arc.start[0], arc.start[1]);
+    if (i === 0) sink.moveTo(start[0], start[1]);
+    else sink.lineTo(start[0], start[1]);
+    if (rx > 0 && ry > 0) emitCurves(s, sink, arc);
+  });
+  sink.closePath();
+  if (!s.inPath) paintFigure(s, true);
+}
+
+/** Intersect (or, with `exclude`, subtract) a logical rectangle from the clip
+ *  region: EMR_INTERSECTCLIPRECT(30) / EMR_EXCLUDECLIPRECT(29), RECTL rclClip
+ *  ([MS-EMF] clipping records). Scoped by the enclosing SAVEDC/RESTOREDC. */
+function clipRect(s: PlayState, c: EmfCursor, exclude: boolean): void {
+  const l = c.i32();
+  const t = c.i32();
+  const r = c.i32();
+  const b = c.i32();
+  const { ctx } = s;
+  ctx.beginPath();
+  if (exclude) outerFrame(ctx);
+  const corners = [toPx(s, l, t), toPx(s, r, t), toPx(s, r, b), toPx(s, l, b)];
+  ctx.moveTo(...corners[0]);
+  for (const corner of corners.slice(1)) ctx.lineTo(...corner);
+  ctx.closePath();
+  applyClip(s, exclude ? 'evenodd' : 'nonzero');
+}
+
+function applyClip(s: PlayState, rule: CanvasFillRule): void {
+  try {
+    s.ctx.clip(rule);
+    s.clipped = true;
+  } catch {
+    /* a ctx without clip() (some mocks): leave unclipped */
+  }
+}
+
+/** Reset the clip region to the default ([MS-EMF] RGN_COPY with no region).
+ *  Canvas can only drop a clip by restoring a save, which is exact at this DC
+ *  level only when no enclosing level is clipped. */
+function resetClip(s: PlayState, name: string): boolean {
+  if (!s.clipped) return true;
+  if (s.outerClipped) {
+    s.unsupported.add(`${name} (reset of an inherited clip)`);
+    return false;
+  }
+  s.ctx.restore();
+  s.ctx.save();
+  s.clipped = false;
+  return true;
+}
+
+/** EMR_EXTSELECTCLIPRGN(75): u32 RgnDataSize, u32 RegionMode, RegionData
+ *  ([MS-EMF] clipping record); region rectangles are in device units. RGN_COPY with no
+ *  data restores the default clip; AND, COPY and DIFF with rectangle data are
+ *  applied; OR and XOR are reported unsupported. */
+function extSelectClipRgn(s: PlayState, c: EmfCursor): void {
+  const size = c.u32();
+  const mode = c.u32();
+  const name = 'EMR_EXTSELECTCLIPRGN';
+  if (mode === RGN_COPY && size === 0) {
+    resetClip(s, name);
+    return;
+  }
+  if (mode !== RGN_AND && mode !== RGN_COPY && mode !== RGN_DIFF) {
+    s.unsupported.add(`${name} (mode ${mode})`);
+    return;
+  }
+  // RegionDataHeader: dwSize (32), iType (1), nCount,
+  // nRgnSize, rclBounds; then nCount RECTL.
+  if (size < 32 || c.remaining < size) throw new RangeError('Truncated EMF region');
+  c.u32();
+  c.u32();
+  const count = c.u32();
+  c.u32();
+  c.skip(16);
+  if (count > Math.floor((size - 32) / 16) || count > 0x10000) throw new RangeError('Invalid EMF region');
+  if (mode === RGN_COPY && !resetClip(s, name)) return;
+  const dev = (x: number, y: number): [number, number] => [
+    ((x - s.left) * s.W) / s.boundsW,
+    ((y - s.top) * s.H) / s.boundsH,
+  ];
+  const { ctx } = s;
+  const rects: Array<[number, number, number, number]> = [];
+  for (let i = 0; i < count; i++) rects.push([c.i32(), c.i32(), c.i32(), c.i32()]);
+  const rect = ([l, t, r, b]: [number, number, number, number]) => {
+    ctx.moveTo(...dev(l, t));
+    ctx.lineTo(...dev(r, t));
+    ctx.lineTo(...dev(r, b));
+    ctx.lineTo(...dev(l, b));
+    ctx.closePath();
+  };
+  if (mode === RGN_DIFF) {
+    // Subtract each rectangle on its own, so overlapping rectangles stay exact.
+    for (const r of rects) {
+      ctx.beginPath();
+      outerFrame(ctx);
+      rect(r);
+      applyClip(s, 'evenodd');
+    }
+    return;
+  }
+  // Same-orientation rectangles under non-zero winding form their union.
+  ctx.beginPath();
+  for (const r of rects) rect(r);
+  applyClip(s, 'nonzero');
+}
+
+/** A frame far outside any target raster; with a rectangle under even-odd
+ *  winding it leaves everything except that rectangle. */
+function outerFrame(ctx: Sink): void {
+  ctx.moveTo(-1e7, -1e7);
+  ctx.lineTo(1e7, -1e7);
+  ctx.lineTo(1e7, 1e7);
+  ctx.lineTo(-1e7, 1e7);
+  ctx.closePath();
+}
+
 // ── object creators ──────────────────────────────────────────────────────────
 
 /** EMR_CREATEPEN(38): u32 ihObject + LOGPEN{u32 style, POINTL width, COLORREF}. */
@@ -1033,9 +1475,12 @@ function blitDib(
   destR: number,
   destB: number,
 ): void {
-  if (cbBmi === 0 || cbBits === 0) return; // pattern-only blt → skip
+  if (cbBmi === 0 || cbBits === 0) return; // no source bitmap (see doBitBlt)
   const dib = decodeDib(dv, recStart + offBmi, cbBmi, recStart + offBits, cbBits);
-  if (!dib) return;
+  if (!dib) {
+    s.unsupported.add('EMF bitmap (DIB encoding)');
+    return;
+  }
   const [x0, y0] = toPx(s, destL, destT);
   const [x1, y1] = toPx(s, destR, destB);
   if (blitDibToCtx(s.ctx, dib, x0, y0, x1, y1)) s.drew = true;
@@ -1048,7 +1493,7 @@ function doBitBlt(s: PlayState, c: EmfCursor, dv: DataView, recStart: number): v
   const yDest = c.i32();
   const cxDest = c.i32();
   const cyDest = c.i32();
-  c.u32(); // bitBltRasterOp
+  const rop = c.u32(); // bitBltRasterOp
   c.i32(); // xSrc
   c.i32(); // ySrc
   c.skip(24); // XFORM xformSrc (6×f32)
@@ -1058,6 +1503,37 @@ function doBitBlt(s: PlayState, c: EmfCursor, dv: DataView, recStart: number): v
   const cbBmi = c.u32();
   const offBits = c.u32();
   const cbBits = c.u32();
+  if (cbBmi === 0 || cbBits === 0) {
+    // No source bitmap: the ternary raster operation paints the destination
+    // from the brush alone. PATCOPY copies the brush; BLACKNESS/WHITENESS fill
+    // with physical-palette black/white (Win32 BitBlt / PatBlt); the D
+    // operation (0x00AA0029) leaves the destination unchanged.
+    if (rop === 0x00aa0029) return;
+    const fill =
+      rop === 0x00f00021 ? s.curBrush?.fill ?? null
+        : rop === 0x00000042 ? '#000000'
+          : rop === 0x00ff0062 ? '#ffffff'
+            : undefined;
+    if (fill === undefined) {
+      s.unsupported.add(`EMR_BITBLT (raster operation 0x${rop.toString(16)})`);
+      return;
+    }
+    if (fill === null) return; // a hollow brush paints nothing
+    const corners = [
+      toPx(s, xDest, yDest),
+      toPx(s, xDest + cxDest, yDest),
+      toPx(s, xDest + cxDest, yDest + cyDest),
+      toPx(s, xDest, yDest + cyDest),
+    ];
+    s.ctx.beginPath();
+    s.ctx.moveTo(...corners[0]);
+    for (const corner of corners.slice(1)) s.ctx.lineTo(...corner);
+    s.ctx.closePath();
+    s.ctx.fillStyle = fill;
+    s.ctx.fill('nonzero');
+    s.drew = true;
+    return;
+  }
   blitDib(
     s, dv, recStart, offBmi, cbBmi, offBits, cbBits,
     xDest, yDest, xDest + cxDest, yDest + cyDest,
@@ -1100,7 +1576,32 @@ function doStretchDibits(s: PlayState, c: EmfCursor, dv: DataView, recStart: num
  * optional BITBLT/STRETCHDIBITS path, which needs a temp OffscreenCanvas and is
  * skipped gracefully when absent).
  */
-export function playEmf(bytes: Uint8Array, ctx: AnyCtx, W: number, H: number): boolean {
+export interface EmfPlaybackOptions {
+  /** Receives the names of drawing records the playback could not draw (each
+   *  once per playback). Defaults to a once-per-record `console.warn`. */
+  readonly onUnsupported?: (records: readonly string[]) => void;
+}
+
+const warnedUnsupported = new Set<string>();
+
+/** Default report: warn once per record name per process, so a deck with many
+ *  similar pictures does not flood the console, but a gap is never silent. */
+function warnUnsupported(records: readonly string[]): void {
+  const fresh = records.filter((name) => !warnedUnsupported.has(name));
+  if (fresh.length === 0) return;
+  for (const name of fresh) warnedUnsupported.add(name);
+  if (typeof console !== 'undefined' && typeof console.warn === 'function') {
+    console.warn(`[ooxml] EMF picture drawn without unsupported records: ${fresh.join(', ')}`);
+  }
+}
+
+export function playEmf(
+  bytes: Uint8Array,
+  ctx: AnyCtx,
+  W: number,
+  H: number,
+  options: EmfPlaybackOptions = {},
+): boolean {
   if (!isEmf(bytes)) return false;
   if (W <= 0 || H <= 0) return false;
 
@@ -1144,7 +1645,15 @@ export function playEmf(bytes: Uint8Array, ctx: AnyCtx, W: number, H: number): b
     inPath: false,
     path: null,
     pathBudget: createEmfPathBudget(),
+    arcDirection: AD_COUNTERCLOCKWISE,
+    clipped: false,
+    outerClipped: false,
+    unsupported: new Set(),
   };
+  // The playback's own base save: every DC level owns one outstanding canvas
+  // save, so a clip reset can restore to it, and playback leaves the caller's
+  // context state (including clips) as it found it.
+  ctx.save();
 
   let pos = 0;
   while (pos + 8 <= bytes.length) {
@@ -1307,7 +1816,11 @@ export function playEmf(bytes: Uint8Array, ctx: AnyCtx, W: number, H: number): b
             fillRule: s.fillRule,
             curX: s.curX,
             curY: s.curY,
+            arcDirection: s.arcDirection,
+            clipped: s.clipped,
+            outerClipped: s.outerClipped,
           });
+          s.outerClipped = s.clipped;
           break;
         }
         case EMR.RESTOREDC: {
@@ -1342,6 +1855,9 @@ export function playEmf(bytes: Uint8Array, ctx: AnyCtx, W: number, H: number): b
             s.fillRule = saved.fillRule;
             s.curX = saved.curX;
             s.curY = saved.curY;
+            s.arcDirection = saved.arcDirection;
+            s.clipped = saved.clipped;
+            s.outerClipped = saved.outerClipped;
           }
           break;
         }
@@ -1365,9 +1881,15 @@ export function playEmf(bytes: Uint8Array, ctx: AnyCtx, W: number, H: number): b
           s.inPath = false;
           break;
         case EMR.FLATTENPATH:
+          // Flattening only replaces curves by lines; it does not change the
+          // painted area beyond curve-approximation tolerance.
+          break;
         case EMR.WIDENPATH:
-          // Unsupported path transformations: do not paint the untransformed path.
-          s.path?.invalidate();
+          // Unsupported path transformation: do not paint the untransformed path.
+          if (s.path) {
+            s.path.invalidate();
+            s.unsupported.add('EMR_WIDENPATH');
+          }
           break;
         case EMR.FILLPATH:
         case EMR.STROKEPATH:
@@ -1392,18 +1914,55 @@ export function playEmf(bytes: Uint8Array, ctx: AnyCtx, W: number, H: number): b
         }
         case EMR.SELECTCLIPPATH: {
           if (s.inPath) break;
+          // data: u32 RegionMode. AND intersects; COPY replaces the clip.
+          const mode = c.remaining >= 4 ? c.u32() : RGN_AND;
           const path = s.path;
           s.path = null;
+          if (mode !== RGN_AND && mode !== RGN_COPY) {
+            s.unsupported.add(`EMR_SELECTCLIPPATH (mode ${mode})`);
+            break;
+          }
+          if (mode === RGN_COPY && !resetClip(s, 'EMR_SELECTCLIPPATH')) break;
           if (!path?.replay(ctx)) break;
           // Use the path just defined as the clip region (intersecting the
           // current clip — the common RGN_AND case, and what a following blit
           // relies on, e.g. sample-13 Fig.3 clips a bar-chart DIB to the bar
           // shapes so its background is masked out). Scoped by the enclosing
           // SAVEDC/RESTOREDC.
-          try {
-            s.ctx.clip(s.fillRule);
-          } catch {
-            /* a ctx without clip() (some mocks): leave unclipped */
+          applyClip(s, s.fillRule);
+          break;
+        }
+        case EMR.INTERSECTCLIPRECT:
+          clipRect(s, c, false);
+          break;
+        case EMR.EXCLUDECLIPRECT:
+          clipRect(s, c, true);
+          break;
+        case EMR.EXTSELECTCLIPRGN:
+          extSelectClipRgn(s, c);
+          break;
+        case EMR.OFFSETCLIPRGN:
+          // Moving a default (unclipped) region changes nothing.
+          if (s.clipped) s.unsupported.add('EMR_OFFSETCLIPRGN');
+          break;
+        case EMR.SETARCDIRECTION: {
+          const direction = c.u32();
+          if (direction === AD_COUNTERCLOCKWISE || direction === AD_CLOCKWISE) {
+            s.arcDirection = direction;
+          }
+          break;
+        }
+        case EMR.GDICOMMENT: {
+          // An EMF+ header without the dual-mode flag (EMF+ record Flags bit
+          // 0x0001) means the GDI records are not a complete rendering.
+          if (c.remaining >= 12) {
+            c.u32(); // DataSize
+            const identifier = c.u32();
+            if (identifier === 0x2b464d45 /* 'EMF+' */) {
+              const type = c.u16();
+              const flags = c.u16();
+              if (type === 0x4001 && (flags & 1) === 0) s.unsupported.add('EMF+ records (no GDI fallback)');
+            }
           }
           break;
         }
@@ -1536,15 +2095,27 @@ export function playEmf(bytes: Uint8Array, ctx: AnyCtx, W: number, H: number): b
           break;
         }
         case EMR.ELLIPSE: {
-          if (s.inPath) {
-            // Affine ellipse-to-path construction is not implemented yet.
-            s.path?.invalidate();
-            break;
-          }
           const left = c.i32();
           const top = c.i32();
           const right = c.i32();
           const bottom = c.i32();
+          if (s.inPath && s.path) {
+            // A closed figure starting at the rightmost point, in the current
+            // arc direction (Win32 SetArcDirection covers Ellipse).
+            if (mappingReflects(s)) {
+              unsupportedDrawing(s, 'EMR_ELLIPSE (reflected mapping)');
+              break;
+            }
+            const rx = Math.abs(right - left) / 2;
+            const ry = Math.abs(bottom - top) / 2;
+            if (rx === 0 || ry === 0) break;
+            const sweep = s.arcDirection === AD_CLOCKWISE ? 2 * Math.PI : -2 * Math.PI;
+            const arc = ellipseArc((left + right) / 2, (top + bottom) / 2, rx, ry, 0, sweep);
+            s.path.moveTo(...toPx(s, arc.start[0], arc.start[1]));
+            emitCurves(s, s.path, arc);
+            s.path.closePath();
+            break;
+          }
           const [cxl, cyl] = [(left + right) / 2, (top + bottom) / 2];
           const [cx, cy] = toPx(s, cxl, cyl);
           const [ex] = toPx(s, right, cyl);
@@ -1585,7 +2156,7 @@ export function playEmf(bytes: Uint8Array, ctx: AnyCtx, W: number, H: number): b
         }
         case EMR.EXTTEXTOUTW:
           // Canvas text cannot supply GDI glyph outlines to a retained path.
-          if (s.inPath) s.path?.invalidate();
+          if (s.inPath) unsupportedDrawing(s, 'EMR_EXTTEXTOUTW (glyph path)');
           else drawText(s, c, dv, pos);
           break;
         case EMR.BITBLT:
@@ -1594,28 +2165,34 @@ export function playEmf(bytes: Uint8Array, ctx: AnyCtx, W: number, H: number): b
         case EMR.STRETCHDIBITS:
           doStretchDibits(s, c, dv, pos);
           break;
-        case EMR.ANGLEARC:
-        case EMR.ROUNDRECT:
         case EMR.ARC:
-        case EMR.CHORD:
-        case EMR.PIE:
+          drawRadialArc(s, c, 'arc', 'EMR_ARC');
+          break;
         case EMR.ARCTO:
-        case EMR.POLYDRAW:
-        case EMR.POLYDRAW16:
-        case EMR.EXTTEXTOUTA:
-        case EMR.POLYTEXTOUTA:
-        case EMR.POLYTEXTOUTW:
-        case EMR.SMALLTEXTOUT:
-          // Unsupported path-producing records: never silently fill only the
-          // supported fragments. [MS-EMF] 2.3.5 drawing record enumeration.
-          if (s.inPath) s.path?.invalidate();
+          drawRadialArc(s, c, 'arcTo', 'EMR_ARCTO');
           break;
-        default:
-          // GDICOMMENT (may hold EMF+, out of scope), SETICMMODE,
-          // SETMITERLIMIT, SETROP2, SETSTRETCHBLTMODE, INTERSECTCLIPRECT, and any
-          // unrecognized iType: skip by nSize. (Path/clip records ARE handled
-          // above.)
+        case EMR.CHORD:
+          drawRadialArc(s, c, 'chord', 'EMR_CHORD');
           break;
+        case EMR.PIE:
+          drawRadialArc(s, c, 'pie', 'EMR_PIE');
+          break;
+        case EMR.ANGLEARC:
+          drawAngleArc(s, c);
+          break;
+        case EMR.ROUNDRECT:
+          drawRoundRect(s, c);
+          break;
+        default: {
+          // Drawing records this player cannot draw are reported (and discard
+          // an open path bracket rather than painting a fragment). Every other
+          // record — state such as SETICMMODE, SETMITERLIMIT, SETROP2,
+          // SETSTRETCHBLTMODE, palettes, SETMETARGN (which keeps the visible
+          // clip) — is skipped by nSize.
+          const name = UNSUPPORTED_DRAWING[iType];
+          if (name) unsupportedDrawing(s, name);
+          break;
+        }
       }
     } catch {
       // A malformed record must never abort the whole render — just advance.
@@ -1625,6 +2202,11 @@ export function playEmf(bytes: Uint8Array, ctx: AnyCtx, W: number, H: number): b
     pos = recEnd;
   }
 
+  // Unwind the SAVEDC levels left open by the metafile and the base save.
+  for (let i = 0; i <= s.stack.length; i++) ctx.restore();
+  if (s.unsupported.size > 0) {
+    (options.onUnsupported ?? warnUnsupported)([...s.unsupported]);
+  }
   return s.drew;
 }
 

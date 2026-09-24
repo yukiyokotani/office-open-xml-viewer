@@ -10,7 +10,7 @@ use crate::theme::{
 };
 use crate::types::*;
 use crate::{attr, attr_f64, attr_i64, attr_r, child, parse_preflighted_pptx_xml};
-use ooxml_common::blip::{mime_from_ext, parse_blip_duotone, parse_src_rect};
+use ooxml_common::blip::{mime_from_ext, parse_blip_duotone, parse_blip_effects, parse_src_rect};
 use ooxml_common::color::ThemeResolver;
 use std::collections::HashMap;
 
@@ -277,6 +277,12 @@ fn parse_blip_fill_with_color_resolver<
         color_resolver,
         ooxml_common::color::TintMode::PowerPointLinear,
     );
+    // CT_Blip grayscl/biLevel/clrChange pixel effects in document order.
+    let blip_effects = parse_blip_effects(
+        blip_fill,
+        color_resolver,
+        ooxml_common::color::TintMode::PowerPointLinear,
+    );
     // §20.1.8.58 tile takes precedence when present (stretch/tile are an
     // either-or choice in CT_BlipFillProperties).
     if let Some(tile_node) = child(blip_fill, "tile") {
@@ -292,6 +298,7 @@ fn parse_blip_fill_with_color_resolver<
             tile: Some(parse_tile(tile_node)),
             alpha,
             duotone,
+            blip_effects,
         });
     }
     let fill_rect = child(blip_fill, "stretch").and_then(parse_fill_rect);
@@ -308,6 +315,7 @@ fn parse_blip_fill_with_color_resolver<
         tile: None,
         alpha,
         duotone,
+        blip_effects,
     })
 }
 
