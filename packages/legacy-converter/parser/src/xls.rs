@@ -30,6 +30,7 @@ mod print;
 mod rich;
 mod styles;
 mod theme;
+mod chart;
 mod views;
 
 const BOF: u16 = 0x0809;
@@ -169,6 +170,7 @@ pub(crate) struct PreparedXls {
     warnings: Vec<String>,
     pub(crate) font: Option<styles::NormalFont>,
     pictures: pictures::Pictures,
+    charts: chart::Charts,
 }
 
 impl PreparedXls {
@@ -361,7 +363,17 @@ fn prepare_workbook(
     } else {
         pictures::Pictures::default()
     };
-    let font = if with_pictures && !pictures.is_empty() {
+    // Only the direct model projects charts; the byte converter keeps its
+    // documented drawing omission.
+    let charts = if with_pictures && direct {
+        chart::Charts::prepare(&records, &tabs, &styles, &converted, &shared_strings)
+    } else {
+        chart::Charts::default()
+    };
+    if charts.has_unsupported() {
+        warnings.push("legacy-xls:unsupported-charts-omitted".into());
+    }
+    let font = if with_pictures && (!pictures.is_empty() || !charts.is_empty()) {
         styles.normal_font()
     } else {
         None
@@ -375,6 +387,7 @@ fn prepare_workbook(
         warnings,
         font,
         pictures,
+        charts,
     })
 }
 

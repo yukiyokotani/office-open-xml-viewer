@@ -73,8 +73,20 @@ test.describe('legacy XLS corpus survey', () => {
           const { XlsxWorkbook } = await import('/src/workbook.ts');
           const { createLegacyXlsSource } = await import(/* @vite-ignore */ module);
           const bytes = await (await fetch(`/private/xls/${encodeURIComponent(file)}`)).arrayBuffer();
+          // Excel column widths depend on the Normal font's maximum digit
+          // width in whole pixels (ECMA-376 §18.3.1.13); measure it with the
+          // browser's font for this survey.
+          const measure = (font: { family: string; sizePoints: number; bold: boolean; italic: boolean }) => {
+            const context = document.createElement('canvas').getContext('2d')!;
+            const px = font.sizePoints * 96 / 72;
+            context.font = `${font.italic ? 'italic ' : ''}${font.bold ? 'bold ' : ''}${px}px "${font.family}"`;
+            let widest = 0;
+            for (const digit of '0123456789') widest = Math.max(widest, context.measureText(digit).width);
+            return Math.max(1, Math.round(widest));
+          };
           const workbook = await XlsxWorkbook.load(bytes, {
             legacyConversion: { xls: { source: createLegacyXlsSource() } },
+            measureLegacyXlsNormalFont: measure,
           });
           try {
             for (let index = 0; index < workbook.sheetCount; index += 1) {

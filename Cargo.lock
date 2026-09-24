@@ -429,6 +429,7 @@ dependencies = [
  "ooxml-common",
  "pptx-model",
  "quick-xml",
+ "roxmltree",
  "serde",
  "serde_json",
  "wasm-bindgen",

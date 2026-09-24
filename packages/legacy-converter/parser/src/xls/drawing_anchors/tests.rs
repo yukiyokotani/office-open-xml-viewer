@@ -69,7 +69,7 @@ fn fixture() -> Vec<(u16, Vec<u8>)> {
 fn run(data: &[(u16, Vec<u8>)]) -> Result<Vec<DrawingAnchor>, String> {
     let mut work = 1000;
     let mut remaining = MAX_BYTES;
-    let mut drawing = assemble(&records(data), &mut work, &mut remaining)?.unwrap();
+    let mut drawing = assemble(&records(data), 0, &mut work, &mut remaining)?.unwrap();
     let mut result = Vec::new();
     walk(&mut drawing, 4, &mut work, &mut result)?;
     Ok(result)
@@ -90,6 +90,7 @@ fn preserves_signed_fractional_endpoints_and_exact_object_ownership() {
             group_depth: 0,
             behavior: 3,
             picture: None,
+            chart: None,
             from: CellCorner {
                 column: 2,
                 row: 3,
@@ -164,16 +165,16 @@ fn bounds_fragments_substreams_and_retained_work() {
     let data = fixture();
     let records = records(&data);
     let mut remaining = MAX_BYTES;
-    assert!(assemble(&records, &mut 0, &mut remaining).is_err());
-    assert!(assemble(&records, &mut 100, &mut 0).is_err());
-    assert!(assemble(&records[..records.len() - 1], &mut 100, &mut remaining).is_err());
+    assert!(assemble(&records, 0, &mut 0, &mut remaining).is_err());
+    assert!(assemble(&records, 0, &mut 100, &mut 0).is_err());
+    assert!(assemble(&records[..records.len() - 1], 0, &mut 100, &mut remaining).is_err());
     let mut overlong = data.clone();
     overlong[1].1.resize(8225, 0);
     assert!(run(&overlong).is_err());
     let mut nested = data.clone();
     nested.splice(1..1, (0..=MAX_DEPTH).map(|_| (BOF, vec![0, 6, 0x20, 0])));
     assert!(run(&nested).is_err());
-    let mut drawing = assemble(&records, &mut 100, &mut remaining)
+    let mut drawing = assemble(&records, 0, &mut 100, &mut remaining)
         .unwrap()
         .unwrap();
     assert!(walk(&mut drawing, 0, &mut 1, &mut Vec::new()).is_err());
@@ -289,6 +290,7 @@ fn enforces_shape_identity_and_global_retained_anchor_limits() {
     let mut drawing = Drawing {
         bytes: art(0xf002, 15, &body),
         clients: BTreeMap::new(),
+        charts: BTreeMap::new(),
     };
     assert!(walk(&mut drawing, 0, &mut 2_000_000, &mut Vec::new())
         .unwrap_err()
@@ -296,7 +298,7 @@ fn enforces_shape_identity_and_global_retained_anchor_limits() {
 
     let source = fixture();
     let mut remaining = MAX_BYTES;
-    let mut drawing = assemble(&records(&source), &mut 1000, &mut remaining)
+    let mut drawing = assemble(&records(&source), 0, &mut 1000, &mut remaining)
         .unwrap()
         .unwrap();
     let mut retained = vec![run(&source).unwrap()[0]; MAX_OBJECTS];

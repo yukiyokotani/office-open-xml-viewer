@@ -416,8 +416,10 @@ pub struct ChartPlotGroup {
 }
 
 /// Mirror of TS `ChartModel`. Built by each parser and emitted as the single
-/// `chart` object consumed by the core chart renderer.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+/// `chart` object consumed by the core chart renderer. `Default` is an empty
+/// starting point for binary-source projections; the XML parser still fills
+/// every field explicitly.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ChartModel {
     // ── Required (always serialized) ────────────────────────────────────────
@@ -1401,7 +1403,7 @@ pub struct ChartPatternFill {
 }
 
 /// Mirror of TS `ChartSeries`.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ChartSeries {
     pub name: String,

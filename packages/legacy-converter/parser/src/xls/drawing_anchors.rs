@@ -40,6 +40,9 @@ pub struct DrawingAnchor {
     pub from: CellCorner,
     pub to: CellCorner,
     pub picture: Option<PictureReference>,
+    /// Absolute record range (BOF..=EOF) of the chart substream that follows
+    /// this anchor's Obj record (MS-XLS 2.1.7.20.6 `OBJ = Obj *Continue *CHART`).
+    pub chart: Option<(usize, usize)>,
 }
 
 #[cfg(any(test, all(feature = "inspection", not(target_arch = "wasm32"))))]
@@ -98,7 +101,7 @@ fn workbook_with_policy(
             continue;
         }
         let end = starts.get(ordinal + 1).map_or(records.len(), |s| s.0);
-        let data = assemble(&records[start..end], &mut work, &mut remaining)?;
+        let data = assemble(&records[start..end], start, &mut work, &mut remaining)?;
         if let Some(mut drawing) = data {
             walk_with_policy(&mut drawing, tab, &mut work, &mut output, projectable_only)?;
         }
@@ -110,6 +113,8 @@ struct Drawing<'a> {
     bytes: Vec<u8>,
     /// Assembled byte boundary -> the immediately following native client.
     clients: BTreeMap<usize, Record<'a>>,
+    /// Client boundary -> absolute chart substream record range.
+    charts: BTreeMap<usize, (usize, usize)>,
 }
 
 fn spend(work: &mut usize) -> Result<(), String> {
@@ -121,6 +126,7 @@ fn spend(work: &mut usize) -> Result<(), String> {
 
 fn assemble<'a>(
     records: &[Record<'a>],
+    base: usize,
     work: &mut usize,
     remaining: &mut usize,
 ) -> Result<Option<Drawing<'a>>, String> {
@@ -133,12 +139,19 @@ fn assemble<'a>(
     let (mut depth, mut active, mut length, mut complete) = (0usize, false, 0usize, false);
     let mut fragments = Vec::new();
     let mut clients = BTreeMap::new();
-    for &record in &records[1..] {
+    let mut charts = BTreeMap::new();
+    // The Obj client that may own an immediately following chart substream.
+    let mut last_object: Option<usize> = None;
+    let mut chart_start: Option<(usize, usize)> = None;
+    for (offset, &record) in records.iter().enumerate().skip(1) {
         spend(work)?;
         if record.kind == BOF {
             depth += 1;
             if depth > MAX_DEPTH {
                 return Err(unsupported("BIFF substream depth exceeded"));
+            }
+            if depth == 1 && u16_at(record.data, 2)? == 0x0020 {
+                chart_start = last_object.map(|client| (client, base + offset));
             }
             active = false;
             continue;
@@ -149,6 +162,12 @@ fn assemble<'a>(
                 break;
             }
             depth -= 1;
+            if depth == 0 {
+                if let Some((client, start)) = chart_start.take() {
+                    charts.insert(client, (start, base + offset));
+                }
+                last_object = None;
+            }
             active = false;
             continue;
         }
@@ -171,6 +190,11 @@ fn assemble<'a>(
                     return Err(unsupported("ambiguous or excessive BIFF drawing clients"));
                 }
             }
+            if record.kind == 0x005d {
+                last_object = Some(length);
+            } else if record.kind != 0x003c {
+                last_object = None;
+            }
             // This subset assigns post-Obj/TxO continuations to their native
             // client. Reclassifying interleaved producer continuations needs
             // complete client-length ownership, not an OfficeArt header sniff.
@@ -188,7 +212,11 @@ fn assemble<'a>(
     for fragment in fragments {
         bytes.extend_from_slice(fragment);
     }
-    Ok(Some(Drawing { bytes, clients }))
+    Ok(Some(Drawing {
+        bytes,
+        clients,
+        charts,
+    }))
 }
 
 fn corner(bytes: &[u8], offset: usize) -> Result<CellCorner, String> {
@@ -257,6 +285,7 @@ fn walk_with_policy(
             if record.kind == 0xf004 {
                 let (mut position, mut shape, mut anchor, mut object, mut textbox) =
                     (at + 8, None, None, None, false);
+                let mut chart = None;
                 let mut object_data = None;
                 let mut picture = picture::Properties::default();
                 let mut child_anchor = false;
@@ -304,6 +333,9 @@ fn walk_with_policy(
                             let client = drawing.clients.remove(&child_end).ok_or_else(|| {
                                 unsupported("BIFF drawing client is not at its fragment boundary")
                             })?;
+                            if child.kind == 0xf011 {
+                                chart = drawing.charts.remove(&child_end);
+                            }
                             if child.kind == 0xf011 {
                                 if object.is_some()
                                     || client.kind != 0x005d
@@ -366,6 +398,7 @@ fn walk_with_policy(
                         from,
                         to,
                         picture: picture.reference(shape_flags, object_data)?,
+                        chart: chart.filter(|_| object_type == 5),
                     });
                 }
             }

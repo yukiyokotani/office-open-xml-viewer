@@ -15,6 +15,8 @@ pub(crate) struct DirectSession {
     date1904: bool,
     pictures: pictures::Pictures,
     native_pictures: pictures::NativePictures,
+    charts: chart::Charts,
+    native_charts: BTreeMap<usize, Vec<xlsx_model::ChartAnchor>>,
     sheet_index: usize,
     measurement_font: Option<styles::NormalFont>,
     default_font: Option<(String, f64)>,
@@ -90,6 +92,8 @@ impl DirectSession {
                 sheets: BTreeMap::new(),
                 resources: BTreeMap::new(),
             },
+            charts: std::mem::take(&mut prepared.charts),
+            native_charts: BTreeMap::new(),
             sheet_index: 0,
             measurement_font: prepared.font,
             default_font,
@@ -99,7 +103,7 @@ impl DirectSession {
             bootstrapped: false,
             poisoned: false,
         };
-        if session.pictures.is_empty() {
+        if session.pictures.is_empty() && session.charts.is_empty() {
             session.initialize_sheet_slots()?;
         }
         Ok(session)
@@ -129,10 +133,13 @@ impl DirectSession {
                     self.poisoned = true;
                     error
                 })?;
+            self.native_charts =
+                std::mem::take(&mut self.charts).resolve(pending, mdw, &mut self.warnings);
         } else {
             self.warnings
                 .push("legacy-xls:unmeasured-pictures-omitted".into());
             self.pictures = pictures::Pictures::default();
+            self.charts = chart::Charts::default();
         }
         self.mdw = mdw;
         self.initialize_sheet_slots()
@@ -278,6 +285,7 @@ impl DirectSession {
                 .sheets
                 .remove(&index)
                 .unwrap_or_default();
+            worksheet.charts = self.native_charts.remove(&index).unwrap_or_default();
             let rows = std::mem::take(&mut worksheet.rows);
             self.sheets[index] = SheetSlot::Projected(ProjectedSheet { worksheet, rows });
         }

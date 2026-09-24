@@ -35,6 +35,7 @@ js-sys = { version = "0.3", optional = true }
 wasm-bindgen = { workspace = true }
 zip = { workspace = true }
 quick-xml = { workspace = true }
+roxmltree = { workspace = true }
 serde = { workspace = true, optional = true }
 pptx-model = { workspace = true }
 ooxml-common = { workspace = true }

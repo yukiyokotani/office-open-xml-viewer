@@ -455,6 +455,19 @@ impl<'a> Styles<'a> {
         Ok(())
     }
 
+    /// Chart element color for an Icv (MS-XLS 2.5.161): the workbook Palette
+    /// record when it overrides the index, else the built-in indexed palette.
+    pub(super) fn chart_color(&self, index: u16) -> Option<String> {
+        use ooxml_common::spreadsheet_color::{resolve_color, SpreadsheetColor};
+        match self.color(index) {
+            ColorIdentity::Argb(argb) => resolve_color(SpreadsheetColor::Argb(argb), None, &[]),
+            ColorIdentity::Indexed(index) if index < 64 => {
+                resolve_color(SpreadsheetColor::Indexed(u32::from(index)), None, &[])
+            }
+            _ => None,
+        }
+    }
+
     fn color(&self, index: u16) -> ColorIdentity {
         if let Some(palette) = self.palette {
             if (8..64).contains(&index) {

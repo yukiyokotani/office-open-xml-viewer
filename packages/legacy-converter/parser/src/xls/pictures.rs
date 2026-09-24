@@ -365,7 +365,7 @@ impl ResolvedPictures {
     }
 }
 
-fn prefix(last: u16, mut dimension: impl FnMut(u16) -> Option<f64>) -> Vec<Option<f64>> {
+pub(super) fn prefix(last: u16, mut dimension: impl FnMut(u16) -> Option<f64>) -> Vec<Option<f64>> {
     let mut result = Vec::with_capacity(usize::from(last) + 2);
     result.push(Some(0.0));
     for i in 0..=last {
@@ -403,6 +403,7 @@ pub(super) fn session_fixture() -> (Pictures, SheetData, &'static str, Vec<u8>) 
         object_flags: 0,
         group_depth: 1,
         behavior: 2,
+        chart: None,
         from: CellCorner {
             column: 0,
             row: 0,
@@ -491,6 +492,7 @@ mod tests {
             object_flags: 0,
             group_depth: 1,
             behavior: 2,
+            chart: None,
             from: CellCorner {
                 column: 0,
                 row: 0,
@@ -676,6 +678,7 @@ mod tests {
         use super::super::{styles, styles::NormalFont, PreparedXls};
         use std::io::{Cursor, Read};
         let prepared = PreparedXls {
+            charts: Default::default(),
             sheets: vec![("Picture".into(), sheet()), ("Cells".into(), sheet())],
             styles: styles::minimal_resolved(),
             shared_strings: vec![],
@@ -710,6 +713,7 @@ mod tests {
         use super::super::{styles, styles::NormalFont, PreparedXls};
         use std::io::{Cursor, Read};
         let prepared = PreparedXls {
+            charts: Default::default(),
             sheets: vec![
                 ("Picture".into(), base_width_sheet()),
                 ("Cells".into(), base_width_sheet()),
