@@ -31,7 +31,12 @@ impl Properties {
             indent_first: f64::from(first) / 20.0,
             space_before: f64::from(self.before) / 20.0,
             space_after: f64::from(self.after) / 20.0,
-            line_spacing: Some(LineSpacing {
+            // docx_model LineSpacing.explicit marks spacing authored on the
+            // paragraph or a named style; DOC has no docDefaults layer, so an
+            // unauthored MS-DOC default (single) is the model's absent value,
+            // exactly as the DOCX parser represents a paragraph with no
+            // w:spacing/@w:line anywhere in its cascade.
+            line_spacing: self.line_authored.then(|| LineSpacing {
                 value: line_value,
                 rule: self.line.1.to_string(),
                 explicit: true,
@@ -136,6 +141,32 @@ impl Properties {
     }
 }
 
+/// The legacy byte adapter always serializes `w:spacing/@w:line`, even for
+/// the unauthored MS-DOC default, so its parsed model reports authored single
+/// spacing where the direct model reports none. Parity tests map that one
+/// default value to absence on both sides before comparing.
+#[cfg(test)]
+pub(in crate::doc) fn byte_adapter_line_spacing_parity(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(object) => {
+            if object.get("lineSpacing")
+                == Some(&serde_json::json!({"value": 1.0, "rule": "auto", "explicit": true}))
+            {
+                object.insert("lineSpacing".into(), serde_json::Value::Null);
+            }
+            for child in object.values_mut() {
+                byte_adapter_line_spacing_parity(child);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for child in items {
+                byte_adapter_line_spacing_parity(child);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,10 +207,39 @@ mod tests {
         ] {
             object.remove(key);
         }
+        let mut actual = serde_json::to_value(properties.direct_paragraph()).unwrap();
+        super::byte_adapter_line_spacing_parity(&mut actual);
+        super::byte_adapter_line_spacing_parity(&mut expected);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn line_spacing_is_absent_until_a_style_or_direct_prl_authors_it() {
+        let unauthored = Properties::default().direct_paragraph();
+        assert!(unauthored.line_spacing.is_none());
+        // An explicitly authored single spacing stays distinct from the
+        // default: the docx_model marks it explicit.
+        let mut single = Properties::default();
+        assert!(single.apply(0x6412, &[240, 0, 1, 0]).unwrap());
+        let spacing = single.direct_paragraph().line_spacing.unwrap();
         assert_eq!(
-            serde_json::to_value(properties.direct_paragraph()).unwrap(),
-            expected
+            (spacing.value, spacing.rule.as_str(), spacing.explicit),
+            (1.0, "auto", true)
         );
+        let mut exact = Properties::default();
+        assert!(exact
+            .apply(
+                0x6412,
+                &(-300i16)
+                    .to_le_bytes()
+                    .iter()
+                    .chain(&[0, 0])
+                    .copied()
+                    .collect::<Vec<_>>()
+            )
+            .unwrap());
+        let spacing = exact.direct_paragraph().line_spacing.unwrap();
+        assert_eq!((spacing.value, spacing.rule.as_str()), (15.0, "exact"));
     }
 
     #[test]
