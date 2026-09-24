@@ -225,6 +225,40 @@ describe('XlsxWorkbook.destroy() — rejects in-flight worker requests', () => {
     expect(added).toHaveLength(0);
   });
 
+  it('retains a sheet-only shape face until its empty-bootstrap workbook closes', async () => {
+    const { added } = installFontFaceSet();
+    const { wb } = makeWorkbook();
+    const workbook = wb as unknown as XlsxWorkbook;
+    const targetDocument = G.document as Document;
+    const internals = workbook as unknown as {
+      retainedFontSets: Map<FontFaceSet, { loaded: { office: { routes: Record<string, unknown> } } }>;
+      retainFontsInSet(set: FontFaceSet): Promise<() => void>;
+      retainWorksheetOfficeFonts(worksheet: object): Promise<void>;
+    };
+    // load() owns the document registry before any worksheet has a request;
+    // the viewer holds a separate reference to that same registry.
+    await internals.retainFontsInSet(targetDocument.fonts);
+    const releaseViewer = await workbook[retainXlsxViewerFonts](targetDocument);
+    expect(added).toHaveLength(0);
+    await internals.retainWorksheetOfficeFonts({
+      rows: [],
+      shapeGroups: [{ shapes: [{ text: {
+        anchor: 't', wrap: 'square', autoFit: 'none',
+        paragraphs: [{ runs: [{ type: 'text', text: 'Heading',
+          fontFace: 'Meiryo UI', fontFaceEa: 'Meiryo UI', bold: true, size: 25 }] }],
+      } }] }],
+    });
+
+    const retained = internals.retainedFontSets.get(targetDocument.fonts);
+    expect(retained?.loaded.office.routes['meiryo ui:700:normal']).toBeDefined();
+    expect(added).toHaveLength(1);
+    releaseViewer();
+    expect(added).toHaveLength(1);
+    wb.destroy();
+    expect(added).toHaveLength(0);
+    expect(internals.retainedFontSets.size).toBe(0);
+  });
+
   it('releases a worksheet face if its popup closes during the extra tuple load', async () => {
     const { added } = installFontFaceSet();
     const { wb } = makeWorkbook();

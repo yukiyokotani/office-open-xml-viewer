@@ -588,7 +588,7 @@ export class XlsxWorkbook {
   }
 
   private async retainFontsInSet(fontSet: FontFaceSet): Promise<() => void> {
-    if ((this.googleFontNames.length === 0 && this.officeFontRequests.length === 0) || this.fontsDestroyed) return () => undefined;
+    if (this.fontsDestroyed) return () => undefined;
     let retained = this.retainedFontSets.get(fontSet);
     if (retained) {
       retained.refs++;
@@ -632,6 +632,9 @@ export class XlsxWorkbook {
       !this.officeFontRequests.some((known) => officeRequestKey(known) === officeRequestKey(request)));
     if (additional.length === 0) return;
     this.officeFontRequests.push(...additional);
+    // Even an initially empty font registry is retained at bootstrap and by
+    // each viewer. Worksheet-local shape tuples can then extend every live
+    // document's registry without inventing a new lifetime or missing popups.
     await Promise.all([...this.retainedFontSets].map(async ([set, retained]) => {
       const current = await retained.loading;
       const office = await loadOfficeFontFallbacks(additional, set);
