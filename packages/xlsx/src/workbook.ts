@@ -582,8 +582,8 @@ export class XlsxWorkbook {
     if (typeof document !== 'undefined' && document.fonts) {
       await this.retainFontsInSet(document.fonts);
       await this.retainWorksheetOfficeFonts(worksheet);
-      const routes = this.retainedFontSets.get(document.fonts)?.loaded?.office.routes;
-      bindXlsxWorksheetOfficeFontRoutes(worksheet, routes, this.googleSubstitutes);
+      const office = this.retainedFontSets.get(document.fonts)?.loaded?.office;
+      bindXlsxWorksheetOfficeFontRoutes(worksheet, office?.routes, this.googleSubstitutes, office?.checked);
     }
   }
 
@@ -645,6 +645,12 @@ export class XlsxWorkbook {
         unloadOfficeFontFallbacks(office.faces);
       } else {
         current.office.faces.push(...office.faces);
+        const completed = new Set(current.office.checked);
+        for (const key of office.checked) {
+          if (completed.has(key)) continue;
+          completed.add(key);
+          current.office.checked.push(key);
+        }
         Object.assign(current.office.routes, office.routes);
       }
     }));
@@ -662,7 +668,8 @@ export class XlsxWorkbook {
     const set = isHTMLCanvas(ctx.canvas)
       ? ctx.canvas.ownerDocument.fonts : null;
     const routes = set ? this.retainedFontSets.get(set)?.loaded?.office.routes : undefined;
-    bindXlsxOfficeFontRoutes(ctx, worksheet, routes, this.googleSubstitutes);
+    bindXlsxOfficeFontRoutes(ctx, worksheet, routes, this.googleSubstitutes,
+      set ? this.retainedFontSets.get(set)?.loaded?.office.checked : undefined);
     getGridGeometryForWorksheet(worksheet);
     applyAutoRowHeights(ctx, worksheet, this.parsedWorkbook.styles, this.cjkFallback);
   }
@@ -823,9 +830,9 @@ export class XlsxWorkbook {
       this.retainedSheetUsage = nextCacheUsage;
       await this.retainWorksheetOfficeFonts(terminal);
       this.sheetCache.set(sheetIndex, terminal);
-      const mainRoutes = typeof document !== 'undefined'
-        ? this.retainedFontSets.get(document.fonts)?.loaded?.office.routes : undefined;
-      bindXlsxWorksheetOfficeFontRoutes(terminal, mainRoutes, this.googleSubstitutes);
+      const mainOffice = typeof document !== 'undefined'
+        ? this.retainedFontSets.get(document.fonts)?.loaded?.office : undefined;
+      bindXlsxWorksheetOfficeFontRoutes(terminal, mainOffice?.routes, this.googleSubstitutes, mainOffice?.checked);
       return terminal;
     } catch (error) {
       if (error instanceof OoxmlResourceLimitError) this.resourceFailure ??= error;
@@ -1058,6 +1065,9 @@ export class XlsxWorkbook {
           ...renderOpts,
           officeFontRoutes: targetFontSet
             ? this.retainedFontSets.get(targetFontSet)?.loaded?.office.routes
+            : undefined,
+          checkedOfficeTuples: targetFontSet
+            ? this.retainedFontSets.get(targetFontSet)?.loaded?.office.checked
             : undefined,
           googleSubstitutes: this.googleSubstitutes,
           fetchImage: this._fetchImage,

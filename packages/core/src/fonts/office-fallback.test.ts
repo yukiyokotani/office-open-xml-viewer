@@ -66,7 +66,7 @@ describe('loadOfficeFontFallbacks', () => {
 
     const loaded = await loadOfficeFontFallbacks([{ family: 'Calibri', weight: 700 }], set);
 
-    expect(loaded).toEqual({ faces: [], routes: {} });
+    expect(loaded).toEqual({ faces: [], routes: {}, checked: ['calibri:700:normal'] });
     expect(fetchCount).toBe(0);
     expect(added).toHaveLength(1);
     expect(deleted).toEqual(added);
@@ -171,7 +171,7 @@ describe('loadOfficeFontFallbacks', () => {
   it('leaves an application-declared authored family to normal CSS resolution', async () => {
     const { set, added } = fontSet(['TimesNewRomanPSMT'], 0, ['"Times New Roman"']);
     const result = await loadOfficeFontFallbacks([{ family: 'Times New Roman' }], set);
-    expect(result).toEqual({ faces: [], routes: {} });
+    expect(result).toEqual({ faces: [], routes: {}, checked: [] });
     expect(added).toEqual([]);
   });
 
@@ -208,7 +208,7 @@ describe('loadOfficeFontFallbacks', () => {
     } as unknown as FontFaceSet;
     const pending = loadOfficeFontFallbacks([{ family: 'Calibri' }], set);
     await vi.advanceTimersByTimeAsync(8_000);
-    expect(await pending).toEqual({ faces: [], routes: {} });
+    expect(await pending).toEqual({ faces: [], routes: {}, checked: [] });
     expect(added).toHaveLength(1);
     finish();
     await vi.advanceTimersByTimeAsync(0);

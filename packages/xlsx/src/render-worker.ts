@@ -78,8 +78,11 @@ let renderers: LoadedWorkerRenderers = {};
 let fontsLoaded: Promise<unknown> = Promise.resolve();
 let officeFontFaces: FontFace[] = [];
 let officeFontRoutes: Record<string, OfficeFontFallbackRoute> = {};
+let checkedOfficeTuples: string[] = [];
+let checkedOfficeTupleSet = new Set<string>();
 let googleSubstitutes = false;
 let officeSheetLoads = new WeakMap<Worksheet, Promise<void>>();
+let officeSheetLoadQueue: Promise<void> = Promise.resolve();
 
 function startFontLoad(parsed: ParsedWorkbook, useGoogleFonts: boolean): void {
   googleSubstitutes = useGoogleFonts;
@@ -91,6 +94,8 @@ function startFontLoad(parsed: ParsedWorkbook, useGoogleFonts: boolean): void {
   ]).then(([, office]) => {
     officeFontFaces = office.faces;
     officeFontRoutes = office.routes;
+    checkedOfficeTupleSet = new Set(office.checked);
+    checkedOfficeTuples = [...checkedOfficeTupleSet];
   });
 }
 const sheetCache = new Map<number, Worksheet>();
@@ -234,10 +239,14 @@ self.onmessage = async (e: MessageEvent<
       // workers (issue #781).
       cjkFallback = req.cjkFallback ?? 'jp';
       await fontsLoaded;
+      await officeSheetLoadQueue;
       unloadOfficeFontFallbacks(officeFontFaces);
       officeFontFaces = [];
       officeFontRoutes = {};
+      checkedOfficeTuples = [];
+      checkedOfficeTupleSet = new Set();
       officeSheetLoads = new WeakMap();
+      officeSheetLoadQueue = Promise.resolve();
       sheetCache.clear();
       viewProjectionCache.clear();
       sheetCacheUsage.clear();
@@ -303,15 +312,25 @@ self.onmessage = async (e: MessageEvent<
       if (!ws) throw new Error('Worksheet is not loaded through its pull session');
       let sheetFonts = officeSheetLoads.get(ws);
       if (!sheetFonts) {
-        sheetFonts = (async () => {
+        // Different sheets may be rendered concurrently. Serialize their
+        // worksheet-only probes so a completed missing tuple is tried once,
+        // while a tuple omitted by a preflight budget can be retried later.
+        sheetFonts = officeSheetLoadQueue.then(async () => {
           const extraRequests = xlsxWorksheetOfficeFontRequests(ws).filter((request) => {
-            return !(officeRequestKey(request) in officeFontRoutes);
+            const key = officeRequestKey(request);
+            return !checkedOfficeTupleSet.has(key) && !(key in officeFontRoutes);
           });
           if (extraRequests.length === 0) return;
           const extra = await loadOfficeFontFallbacks(extraRequests);
           officeFontFaces.push(...extra.faces);
+          for (const key of extra.checked) {
+            if (checkedOfficeTupleSet.has(key)) continue;
+            checkedOfficeTupleSet.add(key);
+            checkedOfficeTuples.push(key);
+          }
           Object.assign(officeFontRoutes, extra.routes);
-        })();
+        });
+        officeSheetLoadQueue = sheetFonts.catch(() => {});
         officeSheetLoads.set(ws, sheetFonts);
       }
       await sheetFonts;
@@ -344,7 +363,7 @@ self.onmessage = async (e: MessageEvent<
         req.viewport,
         // Supply the in-worker byte loader so embedded images decode straight
         // from the retained archive (no main-thread round-trip).
-        { ...renderOpts, officeFontRoutes, googleSubstitutes, fetchImage: getImage },
+        { ...renderOpts, officeFontRoutes, checkedOfficeTuples, googleSubstitutes, fetchImage: getImage },
         svgDecodeClient.decode,
       );
       const bitmap = canvas.transferToImageBitmap();

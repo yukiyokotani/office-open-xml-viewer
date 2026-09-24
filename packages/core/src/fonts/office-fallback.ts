@@ -1,4 +1,4 @@
-import { loadLocalFontMetrics, normalizeLocalFontMetricFamily, unloadLocalFontMetrics } from './local-metrics.js';
+import { hadLocalFontProbeTimeout, loadLocalFontMetrics, normalizeLocalFontMetricFamily, unloadLocalFontMetrics } from './local-metrics.js';
 import { activeFontSet } from './preload.js';
 import { findReferenceFontMetrics } from './reference-font-metrics.js';
 import type { ResolvedFontMetric } from './resource-metrics.js';
@@ -29,6 +29,10 @@ export interface LoadedOfficeFontFallbacks {
   faces: FontFace[];
   /** Normalized family key, with :weight:style for non-regular tuples. */
   routes: Record<string, OfficeFontFallbackRoute>;
+  /** Tuples whose local() preflight completed without hitting a timeout. A
+   * missing route means the attempted sources did not load, not proof that no
+   * system installation exists. Budget/deadline omissions are absent. */
+  checked: string[];
 }
 
 type Tuple = Readonly<{
@@ -86,7 +90,7 @@ export async function loadOfficeFontFallbacks(
   requests: readonly OfficeFontFallbackRequest[],
   targetFontSet: FontFaceSet | null = activeFontSet(),
 ): Promise<LoadedOfficeFontFallbacks> {
-  if (!targetFontSet) return { faces: [], routes: {} };
+  if (!targetFontSet || typeof FontFace === 'undefined') return { faces: [], routes: {}, checked: [] };
   // An application-declared @font-face for the authored family belongs to the
   // browser's normal CSS resolution. Do not replace it with an isolated system
   // local() alias merely because a catalog entry shares its family name.
@@ -100,7 +104,7 @@ export async function loadOfficeFontFallbacks(
   const tuples = [...new Map(requests.map(tupleFor).filter((tuple): tuple is Tuple => !!tuple)
     .filter((tuple) => !declared.has(normalizeLocalFontMetricFamily(tuple.family)))
     .map((tuple) => [routeKey(tuple), tuple])).values()];
-  if (tuples.length === 0) return { faces: [], routes: {} };
+  if (tuples.length === 0) return { faces: [], routes: {}, checked: [] };
   // A document can name many catalogued faces. Keep failed local() loads from
   // serializing startup by probing at most four independent source tuples at a
   // time. Aliases of one source share one registration/refcount and one load.
@@ -153,7 +157,11 @@ export async function loadOfficeFontFallbacks(
       metric: { ...metric, sourceIdentity: resourceIdentity },
     };
   }
-  return { faces: loaded.flatMap((result) => result?.faces ?? []), routes };
+  return {
+    faces: loaded.flatMap((result) => result?.faces ?? []), routes,
+    checked: loaded.flatMap((result, index) => result && !hadLocalFontProbeTimeout(result)
+      ? jobs[index].map(routeKey) : []),
+  };
 }
 
 export function unloadOfficeFontFallbacks(faces: Iterable<FontFace>): void {

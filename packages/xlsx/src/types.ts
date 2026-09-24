@@ -1144,6 +1144,8 @@ export interface XlsxChromeColors {
 export interface RenderViewportOptions extends XlsxRenderViewportOptions {
   /** @internal Exact Calibri resources retained in this canvas's FontFaceSet. */
   officeFontRoutes?: Readonly<Record<string, import('@silurus/ooxml-core').OfficeFontFallbackRoute>>;
+  /** Internal completed local-font preflight tuples. */
+  checkedOfficeTuples?: readonly string[];
   /** @internal Preserve the caller's explicit Google Fonts substitution opt-in. */
   googleSubstitutes?: boolean;
   /** @internal Viewer chrome only; never applied to authored worksheet content. */

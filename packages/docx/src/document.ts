@@ -584,7 +584,7 @@ export class DocxDocument {
         // A proven local Calibri face already resolves this authored family;
         // avoid the optional Google Fonts substitution for the same request.
         const names = docxFontPreloadNames(doc._document, cjkFallback).filter((name) =>
-          name?.toLowerCase() !== 'calibri' || !officeFonts.routes.calibri);
+          name?.toLowerCase() !== 'calibri' || !('calibri' in officeFonts.routes));
         doc._googleFontFaces = await preloadGoogleFonts(names, DOCX_GOOGLE_FONTS);
       }
       // Equations are converted + rasterized before pagination (which reads their

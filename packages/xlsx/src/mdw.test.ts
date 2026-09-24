@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { bindXlsxWorksheetOfficeFontRoutes, computeMdw, getMdwForWorksheet } from './renderer.js';
+import { bindXlsxOfficeFontRoutes, bindXlsxWorksheetOfficeFontRoutes, computeMdw, getGridGeometryForWorksheet, getMdwForWorksheet } from './renderer.js';
+import { createSheetViewModel } from './internal/sheet-viewer-runtime.js';
 
 beforeEach(() => vi.stubGlobal('navigator', { platform: 'Win32', userAgent: 'Windows' }));
 afterEach(() => vi.unstubAllGlobals());
@@ -15,10 +16,75 @@ describe('ECMA-376 maximum digit width authority', () => {
     // Canvas would measure the substituted 9px face; the Office Calibri hmtx
     // maximum is 1038/2048 em, i.e. 8.109375 CSS px before Mac quantization.
     expect(getMdwForWorksheet(worksheet)).toBe(9);
-    // Empty retained routes mean exact local preflight completed and found no
-    // authored face; an unbound direct renderer must not make that inference.
+    // A bound route map does not prove this tuple was attempted: bounded
+    // preflight may omit it. Canvas remains authoritative until it completes.
     bindXlsxWorksheetOfficeFontRoutes(worksheet as Parameters<typeof bindXlsxWorksheetOfficeFontRoutes>[0], {});
+    expect(getMdwForWorksheet(worksheet)).toBe(9);
+    // Once the exact tuple was attempted without a retained route, use the
+    // authored face's digit scalar rather than substituted Canvas digits.
+    bindXlsxWorksheetOfficeFontRoutes(worksheet as Parameters<typeof bindXlsxWorksheetOfficeFontRoutes>[0], {}, false, ['calibri']);
     expect(getMdwForWorksheet(worksheet)).toBe(8);
+  });
+
+  it('rebuilds cached column geometry when the Normal tuple completes preflight', () => {
+    vi.stubGlobal('OffscreenCanvas', undefined);
+    vi.stubGlobal('navigator', { platform: 'MacIntel', userAgent: 'Macintosh' });
+    vi.stubGlobal('document', { createElement: () => ({ getContext: () => ({
+      font: '', measureText: () => ({ width: 9 }),
+    }) }) });
+    const worksheet = {
+      defaultFontFamily: 'Calibri', defaultFontSize: 12,
+      defaultColWidth: 10, defaultRowHeight: 15, colWidths: {}, rowHeights: {},
+    } as Parameters<typeof getGridGeometryForWorksheet>[0];
+    const routes = {};
+    bindXlsxWorksheetOfficeFontRoutes(worksheet, routes, false, []);
+    const before = getGridGeometryForWorksheet(worksheet);
+    bindXlsxWorksheetOfficeFontRoutes(worksheet, routes, false, ['calibri']);
+    const after = getGridGeometryForWorksheet(worksheet);
+    expect(before.maximumDigitWidth).toBe(9);
+    expect(after.maximumDigitWidth).toBe(8);
+    expect(after).not.toBe(before);
+  });
+
+  it('keeps two viewer-owned worksheet projections independent', () => {
+    vi.stubGlobal('OffscreenCanvas', undefined);
+    vi.stubGlobal('navigator', { platform: 'MacIntel', userAgent: 'Macintosh' });
+    vi.stubGlobal('document', { createElement: () => ({ getContext: () => ({
+      font: '', measureText: () => ({ width: 9 }),
+    }) }) });
+    const source = {
+      defaultFontFamily: 'Calibri', defaultFontSize: 12,
+      defaultColWidth: 10, defaultRowHeight: 15,
+      colWidths: {}, rowHeights: {}, rows: [],
+    } as unknown as Parameters<typeof createSheetViewModel>[0];
+    const first = createSheetViewModel(source);
+    const second = createSheetViewModel(source);
+    bindXlsxWorksheetOfficeFontRoutes(first, {}, false, ['calibri']);
+    bindXlsxWorksheetOfficeFontRoutes(second, {}, false, []);
+    expect(getGridGeometryForWorksheet(first).maximumDigitWidth).toBe(8);
+    expect(getGridGeometryForWorksheet(second).maximumDigitWidth).toBe(9);
+    expect(getGridGeometryForWorksheet(first).maximumDigitWidth).toBe(8);
+  });
+
+  it('measures a popup-owned application face on its own Canvas context', () => {
+    vi.stubGlobal('navigator', { platform: 'MacIntel', userAgent: 'Macintosh' });
+    class MainOffscreenCanvas {
+      getContext() { return { font: '', measureText: () => ({ width: 9 }) }; }
+    }
+    vi.stubGlobal('OffscreenCanvas', MainOffscreenCanvas);
+    class PopupCanvas { constructor(readonly ownerDocument: { fonts: FontFaceSet }) {} }
+    vi.stubGlobal('HTMLCanvasElement', PopupCanvas);
+    const popupFonts = { *[Symbol.iterator]() { yield { family: 'Calibri' }; } } as unknown as FontFaceSet;
+    const initialFont = 'italic 13px serif';
+    let savedFont = '';
+    const ctx = { canvas: new PopupCanvas({ fonts: popupFonts }), font: initialFont,
+      save(this: { font: string }) { savedFont = this.font; },
+      restore(this: { font: string }) { this.font = savedFont; },
+      measureText: () => ({ width: 12 }) } as unknown as CanvasRenderingContext2D;
+    const worksheet = { defaultFontFamily: 'Calibri', defaultFontSize: 12 } as Parameters<typeof bindXlsxOfficeFontRoutes>[1];
+    bindXlsxOfficeFontRoutes(ctx, worksheet, {}, false, []);
+    expect(getMdwForWorksheet(worksheet)).toBe(12);
+    expect(ctx.font).toBe(initialFont);
   });
 
   it('keeps actual font measurements authoritative for exact and app faces', () => {
@@ -48,7 +114,7 @@ describe('ECMA-376 maximum digit width authority', () => {
       defaultFontFamily: 'Meiryo UI', defaultFontSize: 12,
       defaultFontBold: true,
     };
-    bindXlsxWorksheetOfficeFontRoutes(worksheet as Parameters<typeof bindXlsxWorksheetOfficeFontRoutes>[0], {});
+    bindXlsxWorksheetOfficeFontRoutes(worksheet as Parameters<typeof bindXlsxWorksheetOfficeFontRoutes>[0], {}, false, ['meiryo ui:700:normal']);
     // Office hmtx: 1386/2048 for bold vs 1272/2048 for regular.
     expect(getMdwForWorksheet(worksheet)).toBe(11);
   });
