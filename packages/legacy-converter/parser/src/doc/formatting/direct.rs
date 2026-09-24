@@ -126,6 +126,27 @@ impl Formatting<'_> {
 }
 
 impl<'a> Formatting<'a> {
+    /// A link run (see `direct_model::fields::Link`). Inside a TOC result the
+    /// DOCX parser replaces the run's color and underline state with the
+    /// paragraph-level (style and table style) character properties.
+    pub(in crate::doc) fn direct_link_text_run(
+        &mut self,
+        paragraph_style: usize,
+        table_style: Option<TableFormattingKey>,
+        fc: usize,
+        prm: u16,
+        prcs: &[&[u8]],
+        in_toc: bool,
+    ) -> Result<Option<TextRun>, String> {
+        let mut properties =
+            self.run_properties_with_table(paragraph_style, table_style, fc, prm, prcs)?;
+        if in_toc {
+            let base = self.paragraph_base_with_table(paragraph_style, table_style)?;
+            properties.take_link_display_from(&base);
+        }
+        properties.direct_text_run(String::new(), &self.fonts)
+    }
+
     /// MS-DOC 2.6.1 sprmCFSpec + sprmCFData + sprmCPicLocation and 2.9.158
     /// NilPICFAndBinData: the binData of a binary-data character (a form
     /// field, hyperlink or add-in field payload), bounded by its lcb.

@@ -220,6 +220,36 @@ impl Properties {
         Ok(axes)
     }
 
+    /// The DOCX parser's in-TOC link display: take the paragraph-level color
+    /// and underline state, keeping this run's underline style when both are
+    /// underlined.
+    pub(in crate::doc) fn take_link_display_from(&mut self, base: &Properties) {
+        match base.values.get("color") {
+            Some(color) => {
+                self.values.insert("color", color.clone());
+            }
+            None => {
+                self.values.remove("color");
+            }
+        }
+        let underlined = |properties: &Properties| {
+            properties
+                .values
+                .get("u")
+                .filter(|value| value.as_str() != "none")
+                .cloned()
+        };
+        match (underlined(base), underlined(self)) {
+            (None, _) => {
+                self.values.remove("u");
+            }
+            (Some(token), None) => {
+                self.values.insert("u", token);
+            }
+            (Some(_), Some(_)) => {}
+        }
+    }
+
     fn bool_value(&self, key: &str) -> Option<bool> {
         self.values.get(key).map(|value| value == "1")
     }

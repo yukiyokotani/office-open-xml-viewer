@@ -55,10 +55,49 @@ pub(in crate::doc) struct Evaluated {
     pub(in crate::doc) form_data_cp: Option<usize>,
 }
 
+/// Link semantics of stored-result content, as the DOCX parser derives them
+/// for runs inside `<w:hyperlink>` (ECMA-376 17.16.22) and inside REF/PAGEREF
+/// results with the `\h` switch (17.16.5.45/51). A DOC HYPERLINK field
+/// (17.16.5.25) is the field form of `<w:hyperlink>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::doc) struct Link {
+    /// External target (`TextRun.hyperlink`).
+    pub(in crate::doc) href: Option<String>,
+    /// Bookmark target (`TextRun.hyperlink_anchor`).
+    pub(in crate::doc) anchor: Option<String>,
+    /// Inside a TOC field result: the DOCX parser keeps the paragraph-level
+    /// color and underline for link runs there, as Word displays TOC entries
+    /// (observed: a DOC TOC whose HYPERLINK results carry the blue underlined
+    /// Hyperlink character style prints in the TOC paragraph style).
+    pub(in crate::doc) in_toc: bool,
+}
+
+/// A displayed token together with its link semantics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::doc) struct Linked {
+    pub(in crate::doc) token: Token,
+    pub(in crate::doc) link: Link,
+}
+
 /// Validated field structure of one aggregate story (main, header, footnote
 /// or endnote document), with CPs relative to that document.
 pub(super) struct StoryFields {
     evaluated: Vec<(usize, usize, Evaluated)>,
+    /// Piecewise-constant link context: each entry applies from its CP up to
+    /// the next entry.
+    links: Vec<(usize, Option<Link>)>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+enum Role {
+    #[default]
+    None,
+    Toc,
+    Hyperlink {
+        href: Option<String>,
+        anchor: Option<String>,
+    },
+    Anchor(String),
 }
 
 #[derive(Default)]
@@ -67,6 +106,7 @@ struct Open {
     parent: bool,
     listed_type: Option<u8>,
     hidden: bool,
+    role: Role,
     separator: Option<usize>,
     instruction: String,
     instruction_overflow: bool,
@@ -93,6 +133,7 @@ impl StoryFields {
     ) -> Result<Self, String> {
         let mut stack: Vec<Open> = Vec::new();
         let mut evaluated = Vec::new();
+        let mut links = Vec::new();
         let mut listed = 0usize;
         let mut cp = 0usize;
         for character in text.chars() {
@@ -140,6 +181,12 @@ impl StoryFields {
                     if field.separator.replace(cp).is_some() {
                         return Err(unsupported("Word field has two separators"));
                     }
+                    if !field.hidden && field.listed_type.is_some() {
+                        field.role = role(&field.instruction)?;
+                        if field.role != Role::None {
+                            links.push((cp + 1, effective_link(&stack)?));
+                        }
+                    }
                 }
                 '\u{15}' => {
                     let field = stack
@@ -161,6 +208,9 @@ impl StoryFields {
                     if let Some(entry) = classify(&field, flags)? {
                         evaluated.push((field.begin, cp, entry));
                     }
+                    if field.role != Role::None {
+                        links.push((cp, effective_link(&stack)?));
+                    }
                 }
                 _ => {
                     if let Some(field) = stack.last_mut() {
@@ -180,7 +230,14 @@ impl StoryFields {
         }
         // Evaluated fields have no nested fields, so closing order is begin order.
         evaluated.sort_unstable_by_key(|(begin, ..)| *begin);
-        Ok(Self { evaluated })
+        Ok(Self { evaluated, links })
+    }
+
+    fn link_at(&self, cp: usize) -> Option<&Link> {
+        let index = self.links.partition_point(|(start, _)| *start <= cp);
+        index
+            .checked_sub(1)
+            .and_then(|index| self.links[index].1.as_ref())
     }
 
     /// Replace each evaluated field's stored-result tokens in one already
@@ -224,6 +281,22 @@ impl StoryFields {
                     .push((Token::EvaluatedField(Box::new(field.clone())), *begin));
                 covered_until = Some(*end);
             }
+            if self.links.is_empty() {
+                continue;
+            }
+            for (token, cp) in &mut paragraph.tokens {
+                // A FieldRun carries no link in the DOCX model.
+                if matches!(token, Token::EvaluatedField(_)) {
+                    continue;
+                }
+                if let Some(link) = self.link_at(*cp) {
+                    let inner = std::mem::replace(token, Token::Tab);
+                    *token = Token::Linked(Box::new(Linked {
+                        token: inner,
+                        link: link.clone(),
+                    }));
+                }
+            }
         }
         Ok(())
     }
@@ -263,6 +336,141 @@ impl Open {
     fn has_result_content(&self) -> bool {
         self.result_cp.is_some() || self.child_in_result
     }
+}
+
+/// DOCX precedence: a hyperlink's own target and anchor, else the innermost
+/// `\h` field anchor; any enclosing TOC result marks the run as a TOC link.
+fn effective_link(stack: &[Open]) -> Result<Option<Link>, String> {
+    let mut in_toc = false;
+    let mut hyperlink = None;
+    let mut field_anchor = None;
+    for field in stack {
+        match &field.role {
+            Role::None => {}
+            Role::Toc => in_toc = true,
+            Role::Hyperlink { href, anchor } => {
+                if hyperlink.replace((href, anchor)).is_some() {
+                    return Err(unsupported(
+                        "nested Word hyperlink fields are not supported",
+                    ));
+                }
+            }
+            Role::Anchor(anchor) => field_anchor = Some(anchor),
+        }
+    }
+    Ok(match hyperlink {
+        Some((href, anchor)) => Some(Link {
+            href: href.clone(),
+            anchor: anchor.clone().or_else(|| field_anchor.cloned()),
+            in_toc,
+        }),
+        None => field_anchor.map(|anchor| Link {
+            href: None,
+            anchor: Some(anchor.clone()),
+            in_toc,
+        }),
+    })
+}
+
+/// Result-display role of a visible cached field, from its instruction.
+fn role(instruction: &str) -> Result<Role, String> {
+    let words: Vec<&str> = instruction.split_whitespace().collect();
+    let keyword = words.first().copied().unwrap_or_default();
+    if keyword.eq_ignore_ascii_case("TOC") {
+        return Ok(Role::Toc);
+    }
+    if keyword.eq_ignore_ascii_case("HYPERLINK") {
+        return hyperlink(instruction);
+    }
+    // The DOCX parser's classify_complex_field: REF/PAGEREF with a `\h`
+    // switch after the bookmark argument link to that bookmark.
+    if (keyword.eq_ignore_ascii_case("REF") || keyword.eq_ignore_ascii_case("PAGEREF"))
+        && words
+            .iter()
+            .skip(2)
+            .any(|word| word.eq_ignore_ascii_case("\\h"))
+    {
+        if let Some(anchor) = words
+            .get(1)
+            .map(|target| target.trim_matches(['\'', '"']))
+            .filter(|target| !target.is_empty())
+        {
+            return Ok(Role::Anchor(anchor.to_string()));
+        }
+    }
+    Ok(Role::None)
+}
+
+/// ECMA-376 17.16.5.25 HYPERLINK with 17.16.1 argument quoting: an optional
+/// target argument, `\l` location, and the display-neutral `\m`, `\n`,
+/// `\o` and `\t` switches.
+fn hyperlink(instruction: &str) -> Result<Role, String> {
+    let reject = || {
+        unsupported(format!(
+            "unsupported Word hyperlink instruction: {instruction}"
+        ))
+    };
+    let items = arguments(instruction).ok_or_else(reject)?;
+    let mut items = items.into_iter().skip(1).peekable();
+    let href = items.next_if(|(switch, _)| !switch).map(|(_, value)| value);
+    let mut anchor = None;
+    while let Some((switch, name)) = items.next() {
+        if !switch {
+            return Err(reject());
+        }
+        match name.as_str() {
+            "\\l" | "\\o" | "\\t" => {
+                let (_, value) = items.next_if(|(switch, _)| !switch).ok_or_else(reject)?;
+                if name == "\\l" && anchor.replace(value).is_some() {
+                    return Err(reject());
+                }
+            }
+            // Word also writes `\h` on HYPERLINK fields; like `\m` and `\n` it
+            // takes no argument and does not change the stored result.
+            "\\m" | "\\n" | "\\h" => {}
+            _ => return Err(reject()),
+        }
+    }
+    Ok(Role::Hyperlink { href, anchor })
+}
+
+/// Split an instruction into (is_switch, text) items. Quoted arguments may
+/// contain white space; `\"` and `\\` escape a quote and a backslash
+/// (ECMA-376 17.16.1). `None` for an unterminated quote.
+fn arguments(instruction: &str) -> Option<Vec<(bool, String)>> {
+    let mut items = Vec::new();
+    let mut characters = instruction.chars().peekable();
+    while let Some(&character) = characters.peek() {
+        if character.is_whitespace() {
+            characters.next();
+            continue;
+        }
+        if character == '"' {
+            characters.next();
+            let mut value = String::new();
+            loop {
+                match characters.next()? {
+                    '"' => break,
+                    '\\' if matches!(characters.peek(), Some('"' | '\\')) => {
+                        value.push(characters.next()?)
+                    }
+                    other => value.push(other),
+                }
+            }
+            items.push((false, value));
+            continue;
+        }
+        let mut value = String::new();
+        while let Some(&next) = characters.peek() {
+            if next.is_whitespace() {
+                break;
+            }
+            value.push(next);
+            characters.next();
+        }
+        items.push((value.starts_with('\\'), value));
+    }
+    Some(items)
 }
 
 fn mismatch() -> String {
@@ -716,8 +924,44 @@ mod tests {
         let text = "\u{13}HYPERLINK \\l \"x\"\u{14}\u{13}PAGEREF x \\h\u{14}3\u{15}\u{15}\r";
         let table = with_types(text, &[0x58, 0x25], &[0xc0, 0x80]);
         let actual = tokens(text, &table).unwrap();
-        assert_eq!(actual.len(), 1);
-        assert_eq!(actual[0].0, Token::Text("3".into()));
+        // The HYPERLINK field is the field form of <w:hyperlink>; its \l
+        // location wins over the nested PAGEREF \h bookmark.
+        let link = Link {
+            href: None,
+            anchor: Some("x".into()),
+            in_toc: false,
+        };
+        assert_eq!(
+            actual,
+            vec![(
+                Token::Linked(Box::new(Linked {
+                    token: Token::Text("3".into()),
+                    link: link.clone(),
+                })),
+                32
+            )]
+        );
+        let toc = "\u{13}TOC \\h\u{14}\u{13}HYPERLINK \"http://a\" \\l \"y\"\u{14}T\u{15}U\u{15}\r";
+        let table = with_types(toc, &[0x0d, 0x58], &[0xc0, 0x80]);
+        let actual = tokens(toc, &table).unwrap();
+        let link = Link {
+            href: Some("http://a".into()),
+            anchor: Some("y".into()),
+            in_toc: true,
+        };
+        assert_eq!(
+            actual
+                .iter()
+                .map(|(token, _)| token.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                Token::Linked(Box::new(Linked {
+                    token: Token::Text("T".into()),
+                    link,
+                })),
+                Token::Text("U".into()),
+            ]
+        );
         let hidden = "\u{13}IF \u{13}PAGE\u{14}1\u{15} = 1 \"a\"\u{14}a\u{15}\r";
         let table = with_types(hidden, &[0x07, 0x21], &[0xc0, 0x80]);
         let actual = tokens(hidden, &table).unwrap();

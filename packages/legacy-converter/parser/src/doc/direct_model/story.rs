@@ -132,6 +132,14 @@ pub(super) fn project(
         budget.paragraph(&paragraph)?;
 
         for (token, cp) in source.tokens {
+            let (token, link) = match token {
+                Token::Linked(linked) => {
+                    let linked = *linked;
+                    (linked.token, Some(linked.link))
+                }
+                token => (token, None),
+            };
+            let link = link.as_ref();
             match token {
                 Token::Text(text) => {
                     super::super::visit_text_runs(
@@ -140,13 +148,14 @@ pub(super) fn project(
                         story,
                         &mut Some(&mut *formatting),
                         |formatting, fc, prm| {
-                            formatting.direct_text_run(
+                            linked_text_run(
+                                formatting,
                                 style,
                                 table_style,
                                 fc,
                                 prm,
                                 &story.prcs,
-                                String::new(),
+                                link,
                             )
                         },
                         |part, run| {
@@ -166,6 +175,7 @@ pub(super) fn project(
                         table_style,
                         cp,
                         "\t",
+                        link,
                         budget,
                     )?;
                 }
@@ -290,6 +300,7 @@ pub(super) fn project(
                         cp,
                         reference.kind(),
                         &id,
+                        link,
                         budget,
                     )?;
                 }
@@ -313,6 +324,7 @@ pub(super) fn project(
                         cp,
                         kind,
                         "",
+                        link,
                         budget,
                     )?;
                 }
@@ -320,6 +332,9 @@ pub(super) fn project(
                     return Err(unsupported(
                         "Word note character outside a note reference or note",
                     ));
+                }
+                Token::Linked(_) => {
+                    return Err(unsupported("nested Word link token"));
                 }
                 Token::EvaluatedField(field) => {
                     let run = evaluated_field_run(story, formatting, style, table_style, &field)?;
@@ -474,22 +489,49 @@ fn push_control_text(
     table_style: Option<formatting::TableFormattingKey>,
     cp: usize,
     text: &str,
+    link: Option<&super::fields::Link>,
     budget: &mut ModelBudget,
 ) -> Result<(), String> {
     let (_, fc, piece) = story
         .position(cp)
         .ok_or_else(|| unsupported("Word control outside piece table"))?;
-    if let Some(mut run) = formatting.direct_text_run(
+    if let Some(mut run) = linked_text_run(
+        formatting,
         style,
         table_style,
         fc,
         piece.prm,
         &story.prcs,
-        String::new(),
+        link,
     )? {
         budget.text(&mut paragraph.runs, &mut run, text)?;
     }
     Ok(())
+}
+
+/// A text run with the DOCX parser's link facts: `is_link`, the external
+/// target and bookmark anchor, and inside a TOC result the paragraph-level
+/// color and underline (see `fields::Link`).
+fn linked_text_run(
+    formatting: &mut formatting::Formatting<'_>,
+    style: usize,
+    table_style: Option<formatting::TableFormattingKey>,
+    fc: usize,
+    prm: u16,
+    prcs: &[&[u8]],
+    link: Option<&super::fields::Link>,
+) -> Result<Option<docx_model::TextRun>, String> {
+    let Some(link) = link else {
+        return formatting.direct_text_run(style, table_style, fc, prm, prcs, String::new());
+    };
+    Ok(formatting
+        .direct_link_text_run(style, table_style, fc, prm, prcs, link.in_toc)?
+        .map(|mut run| {
+            run.is_link = true;
+            run.hyperlink = link.href.clone();
+            run.hyperlink_anchor = link.anchor.clone();
+            run
+        }))
 }
 
 /// ECMA-376 17.11.6/7/16/17 as parsed by the DOCX parser: a note mark is a
@@ -506,21 +548,22 @@ fn push_note_mark(
     cp: usize,
     kind: crate::doc::notes::Kind,
     id: &str,
+    link: Option<&super::fields::Link>,
     budget: &mut ModelBudget,
 ) -> Result<(), String> {
     let (_, fc, piece) = story
         .position(cp)
         .ok_or_else(|| unsupported("Word note mark outside piece table"))?;
-    let mut run = formatting
-        .direct_text_run(
-            style,
-            table_style,
-            fc,
-            piece.prm,
-            &story.prcs,
-            String::new(),
-        )?
-        .ok_or_else(|| unsupported("hidden Word note mark is not supported"))?;
+    let mut run = linked_text_run(
+        formatting,
+        style,
+        table_style,
+        fc,
+        piece.prm,
+        &story.prcs,
+        link,
+    )?
+    .ok_or_else(|| unsupported("hidden Word note mark is not supported"))?;
     run.vert_align = Some("super".to_string());
     run.note_ref = Some(docx_model::NoteRef {
         kind: kind.tag().to_string(),

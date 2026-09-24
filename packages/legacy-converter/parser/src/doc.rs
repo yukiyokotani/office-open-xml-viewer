@@ -100,6 +100,10 @@ enum Token {
     /// `footnoteRef`/`endnoteRef`), projected by the direct model only.
     #[cfg(feature = "direct-doc")]
     NoteNumber(notes::Kind),
+    /// A displayed token inside a hyperlink or `\h` field result, projected
+    /// by the direct model only.
+    #[cfg(feature = "direct-doc")]
+    Linked(Box<direct_model::fields::Linked>),
 }
 
 #[derive(Default)]
@@ -968,6 +972,8 @@ fn build_formatted_story(
                             Token::EvaluatedField(_) => unreachable!(),
                             #[cfg(feature = "direct-doc")]
                             Token::NoteNumber(_) => unreachable!(),
+                            #[cfg(feature = "direct-doc")]
+                            Token::Linked(_) => unreachable!(),
                         });
                         xml.push_str("</w:r>");
                     }

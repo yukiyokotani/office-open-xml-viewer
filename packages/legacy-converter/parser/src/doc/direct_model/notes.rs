@@ -151,6 +151,10 @@ pub(super) fn restore_references(
 ) -> Result<(), String> {
     for paragraph in paragraphs {
         for (token, cp) in &mut paragraph.tokens {
+            let token = match token {
+                Token::Linked(linked) => &mut linked.token,
+                token => token,
+            };
             if matches!(token, Token::NoteMarker) {
                 let reference = references.get(*cp).ok_or_else(|| {
                     unsupported("Word automatic note character without a note reference")
@@ -199,6 +203,10 @@ pub(super) fn project(
         fields.apply(entry.cp, &mut paragraphs)?;
         for paragraph in &mut paragraphs {
             for (token, _) in &mut paragraph.tokens {
+                let token = match token {
+                    Token::Linked(linked) => &mut linked.token,
+                    token => token,
+                };
                 if matches!(token, Token::NoteMarker) {
                     // `validate` rejected custom marks, so every note is
                     // automatic; each U+0002 shows the enclosing note number.
