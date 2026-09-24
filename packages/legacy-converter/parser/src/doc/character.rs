@@ -397,6 +397,25 @@ impl Properties {
                 self.symbol = Some((u16_at(operand, 0)?, u16_at(operand, 2)?));
                 return Ok(true);
             }
+            0x6887 => {
+                // MS-DOC 2.6.1 sprmCPbiIBullet: a non-negative CP in the Bullet
+                // Pictures document. It only locates the picture used when
+                // sprmCPbiGrf enables a picture bullet (handled below).
+                if operand.len() != 4 || (u32_at(operand, 0)? as i32) < 0 {
+                    return Err(unsupported("invalid Word picture bullet position"));
+                }
+                return Ok(true);
+            }
+            0x4888 => {
+                // MS-DOC 2.9.176 PbiGrfOperand: fPicBullet (bit 0) states
+                // whether the bullet is a picture. A clear bit leaves the text
+                // bullet in place, so only an enabled picture bullet, whose
+                // image acquisition is not implemented, stays unsupported.
+                if operand.len() != 2 {
+                    return Err(unsupported("invalid Word picture bullet flags"));
+                }
+                return Ok(operand[0] & 1 == 0);
+            }
             0x0811 => {
                 // MS-DOC 2.6.1 sprmCFWebHidden (ToggleOperand): text hidden
                 // only in Web Layout view. The direct model is the print/page
@@ -871,6 +890,20 @@ mod tests {
         value.apply(0x2a0c, &[12], &base).unwrap();
         value.reset_to(&base, true);
         assert!(value.xml(&[]).unwrap().contains("w:val=\"darkMagenta\""));
+    }
+
+    #[test]
+    fn disabled_picture_bullets_have_no_effect_and_enabled_ones_stay_unsupported() {
+        let base = Properties::default();
+        let mut value = base.clone();
+        assert!(value.apply(0x6887, &[0, 0, 0, 0], &base).unwrap());
+        assert!(value.apply(0x4888, &[0, 0], &base).unwrap());
+        assert!(value.apply(0x4888, &[0xfe, 0xff], &base).unwrap());
+        assert_eq!(value, base);
+        assert!(!value.apply(0x4888, &[1, 0], &base).unwrap());
+        assert!(base.clone().apply(0x6887, &[0, 0, 0, 0x80], &base).is_err());
+        assert!(base.clone().apply(0x6887, &[0, 0, 0], &base).is_err());
+        assert!(base.clone().apply(0x4888, &[0], &base).is_err());
     }
 
     #[test]
