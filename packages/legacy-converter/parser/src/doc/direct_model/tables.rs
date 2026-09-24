@@ -2,7 +2,7 @@
 
 use super::{payload, ModelBudget};
 use crate::doc::{
-    table::{Color, PreferredWidth, Properties},
+    table::{Color, PreferredIndent, PreferredWidth, Properties},
     table_structure::{Assembler, Event, LogicalTable, Payload, PlannedRow},
     unsupported,
 };
@@ -184,8 +184,10 @@ fn project_table(
                 ));
             }
             if source.flags & ((1 << 12) | (1 << 14)) != 0
-                || source.borders[4].is_some()
-                || source.borders[5].is_some()
+                || source.borders[4..]
+                    .iter()
+                    .flatten()
+                    .any(|border| !border.is_cleared())
             {
                 return Err(unsupported(
                     "direct DOC model cannot retain cell fit/hide/diagonal facts",
@@ -377,10 +379,18 @@ fn project_table(
 /// physical row geometry instead of a separate model field.
 fn check_row_preferences(planned: &PlannedRow<Blocks>) -> Result<(), String> {
     let source = &planned.source;
-    if source.bidi && (source.preferred_indent.is_some() || source.table_style.is_some()) {
+    if source.bidi
+        && source.preferred_indent.is_some()
+        && !matches!(
+            source.preferred_indent,
+            Some(PreferredIndent::Dxa(value)) if i32::from(value) == source.origin()
+        )
+    {
         // The preferred-indent evidence (see table::PreferredIndent) covers
-        // left-to-right tables only. Every Word table style inherits the
-        // default style's sprmTWidthIndent, so a styled RTL row is included.
+        // left-to-right tables only. The effective value includes the one
+        // inherited from the selected table style (story::preferences). A
+        // preference equal to the projected origin gives the same placement
+        // under either reading.
         return Err(unsupported(
             "direct DOC model cannot place a right-to-left table with a preferred indent",
         ));

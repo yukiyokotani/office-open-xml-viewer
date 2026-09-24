@@ -16,6 +16,7 @@ use docx_model::{BodyElement, BreakType, DocRun, ImageRun};
 
 mod borders;
 mod margins;
+mod preferences;
 
 pub(super) fn project(
     story: &Story<'_>,
@@ -70,6 +71,7 @@ pub(super) fn project(
     )?;
     margins::resolve(&mut prepared, &table_context, formatting)?;
     borders::resolve(&mut prepared, &table_context, formatting, budget)?;
+    preferences::resolve(&mut prepared, &table_context, formatting)?;
     if formatting.use_raw_table_shading() {
         resolve_table_cell_shading(&mut prepared, &table_context, formatting)?;
     }
@@ -2916,5 +2918,67 @@ mod tests {
                     .unsupported_table
             );
         }
+    }
+
+    fn cell_border_sides(sides: u8, border: [u8; 8]) -> Vec<u8> {
+        let mut operand = vec![11, 0, 1, sides];
+        operand.extend(border);
+        sprm(0xd62f, &operand)
+    }
+
+    #[test]
+    fn native_story_projects_post_tistd_nil_cell_borders_as_explicit_absence() {
+        // All six sides, including both diagonals, carry NilBrc.
+        let nil = cell_border_sides(0x3f, [0xff; 8]);
+        let projected = try_default_styled_table(&[], &nil).unwrap();
+        assert!(!projected.unsupported_table);
+        assert_eq!(
+            projected.border_styles,
+            [std::array::from_fn(|_| Some("nil".to_string()))]
+        );
+
+        // A drawn diagonal has no cell-model representation.
+        let diagonal = cell_border_sides(0x10, border_bytes([0, 0, 0], 8));
+        let projected = try_default_styled_table(&[], &diagonal);
+        assert!(projected.map_or(true, |table| table.unsupported_table));
+    }
+
+    #[test]
+    fn native_story_admits_rtl_direct_borders_when_the_style_has_none() {
+        let rtl = [
+            sprm(0x560b, &1u16.to_le_bytes()),
+            // Equal to the projected origin, so both indent readings agree.
+            sprm(0xf661, &[3, 0, 0]),
+            cell_borders(0, 1, [0, 0, 0xff], 16),
+        ]
+        .concat();
+        let projected = try_default_styled_table(&[], &rtl).unwrap();
+        assert!(!projected.unsupported_table);
+        assert_eq!(
+            projected.borders,
+            [std::array::from_fn(|_| Some(("0000ff".into(), 2.0)))]
+        );
+
+        // The default style's inherited zero indent equals the origin too.
+        let rtl_inherited = sprm(0x560b, &1u16.to_le_bytes());
+        assert!(
+            !try_default_styled_table(&[], &rtl_inherited)
+                .unwrap()
+                .unsupported_table
+        );
+        let moved = sprm(0x9601, &200i16.to_le_bytes());
+        let error = try_default_styled_table(&moved, &rtl_inherited)
+            .err()
+            .unwrap();
+        assert!(error.contains("right-to-left"), "{error}");
+
+        // A differing preferred indent is not covered by the LTR evidence.
+        let rtl_indented = [
+            sprm(0x560b, &1u16.to_le_bytes()),
+            sprm(0xf661, &[3, 0x6d, 0]),
+        ]
+        .concat();
+        let error = try_default_styled_table(&[], &rtl_indented).err().unwrap();
+        assert!(error.contains("right-to-left"), "{error}");
     }
 }

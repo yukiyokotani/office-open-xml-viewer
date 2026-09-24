@@ -78,6 +78,9 @@ pub(super) struct Profile {
     conditional_table_borders: ConditionalTableBorders,
     conditional_table_shading: BTreeMap<u16, table::Shading>,
     conditional_table_shading_nil: BTreeSet<u16>,
+    /// Last unconditional sprmTWidthIndent in base-to-child order.
+    #[cfg(feature = "direct-doc")]
+    preferred_indent: Option<table::PreferredIndent>,
     unsupported_character: bool,
     unsupported_paragraph: bool,
     unsupported_table: bool,
@@ -102,6 +105,8 @@ impl Default for Profile {
             conditional_table_borders: ConditionalTableBorders::default(),
             conditional_table_shading: BTreeMap::new(),
             conditional_table_shading_nil: BTreeSet::new(),
+            #[cfg(feature = "direct-doc")]
+            preferred_indent: None,
             unsupported_character: false,
             unsupported_paragraph: false,
             unsupported_table: false,
@@ -265,6 +270,18 @@ impl Formatting<'_> {
             profile.conditional_table_borders,
             profile.condition_presence,
         )))
+    }
+
+    /// The selected style's inherited sprmTWidthIndent, if any.
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) fn table_preferred_indent(
+        &mut self,
+        selected_style: Option<usize>,
+    ) -> Result<Option<table::PreferredIndent>, String> {
+        let Some(selected_style) = selected_style else {
+            return Ok(None);
+        };
+        Ok(self.table_style_profile(selected_style)?.preferred_indent)
     }
 
     pub(super) fn table_style_profile(&mut self, id: usize) -> Result<Rc<Profile>, String> {
@@ -532,7 +549,7 @@ impl Formatting<'_> {
                         // its RTL limit, enforced at projection).
                         #[cfg(feature = "direct-doc")]
                         0xf661 if scope == tapx::Scope::Unconditional => {
-                            table::PreferredIndent::read(operand)?;
+                            profile.preferred_indent = Some(table::PreferredIndent::read(operand)?);
                             Ok(interpret_table_styles)
                         }
                         _ => Ok(false),
