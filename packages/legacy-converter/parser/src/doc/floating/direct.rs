@@ -592,7 +592,11 @@ fn direct_shape(
         tail_end: line.and_then(|line| end(line.ends[1])),
         flip_h: placed.flip[0],
         flip_v: placed.flip[1],
-        text_autofit: text.filter(|text| text.fit_shape).map(|_| "sp".to_owned()),
+        // MS-ODRAW 2.3.21.15 fFitShapeToText grows the shape to its text
+        // (DrawingML spAutoFit). Otherwise the box is fixed and Word clips
+        // overflowing text, as DrawingML noAutofit does: the Word PDF of a DOC
+        // banner textbox omits the paragraph that overflows the shape.
+        text_autofit: text.map(|text| if text.fit_shape { "sp" } else { "none" }.to_owned()),
         text_inset_l: text.map_or(0.0, |text| pt(text.insets[0])),
         text_inset_t: text.map_or(0.0, |text| pt(text.insets[1])),
         text_inset_r: text.map_or(0.0, |text| pt(text.insets[2])),
