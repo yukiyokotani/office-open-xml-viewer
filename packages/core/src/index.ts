@@ -140,6 +140,7 @@ export { readCfbStream } from './errors/cfb-read';
 export {
   preloadGoogleFonts,
   unloadGoogleFonts,
+  activeFontSet,
   type FontPreloadEntry,
 } from './fonts/preload';
 // Embedded-font registration: docx `.odttf` (§17.8.1 obfuscated) + pptx

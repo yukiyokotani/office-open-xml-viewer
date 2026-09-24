@@ -1,5 +1,6 @@
 import { type CjkLang } from '@silurus/ooxml-core';
 import {
+  activeFontSet,
   canvasFontString,
 } from '@silurus/ooxml-core';
 import type { ResolvedFontMetric } from '@silurus/ooxml-core';
@@ -182,6 +183,27 @@ export function createProductionLayoutServices(
     ...(source.fonts.majorFamily ? [source.fonts.majorFamily] : []),
     ...(source.fonts.minorFamily ? [source.fonts.minorFamily] : []),
   ])];
+  // An application-owned @font-face with the authored family is a real Canvas
+  // route, even though the library cannot read its font bytes. Snapshot loaded
+  // tuples at service creation so line layout uses Canvas's own line box rather
+  // than the pinned reference for a different version of the same family.
+  // A face loaded after this snapshot needs a new layout service/pagination.
+  const requestedNames = new Set(routedFontFamilies.map(normalizedFaceFamily));
+  const fontSet = activeFontSet();
+  if (fontSet && typeof fontSet[Symbol.iterator] === 'function') {
+    for (const face of fontSet) {
+      if (!requestedNames.has(normalizedFaceFamily(face.family))) continue;
+      for (const loaded of loadedFaces([face])) {
+        inventory.push({
+          requestedFamily: loaded.displayFamily,
+          resolvedFamily: loaded.displayFamily,
+          source: 'css',
+          weight: loaded.weight,
+          style: loaded.style,
+        });
+      }
+    }
+  }
   const text = createTextLayoutService({
     fonts: createFontResolver(inventory, {
       regionalFamilyLists: Object.fromEntries((['sc', 'tc', 'hk', 'jp', 'kr'] as const).map(region => [

@@ -3,7 +3,7 @@ import type { LayoutDiagnostic } from './types.js';
 import { stableFingerprint } from './fingerprint.js';
 import { createCanvasFontRoute, type CanvasFontRoute } from '@silurus/ooxml-core';
 
-export type FontResolutionSource = 'embedded' | 'local' | 'google' | 'substitute' | 'native' | 'generic';
+export type FontResolutionSource = 'embedded' | 'local' | 'css' | 'google' | 'substitute' | 'native' | 'generic';
 export type FontStyle = 'normal' | 'italic';
 
 export interface FontRequest {
@@ -83,8 +83,9 @@ export function createFontResolver(
   const sourcePriority: Readonly<Record<FontInventoryFace['source'], number>> = {
     embedded: 0,
     local: 1,
-    google: 2,
-    substitute: 3,
+    css: 2,
+    google: 3,
+    substitute: 4,
   };
   const faces = inventory
     .filter((face) => face.requestedFamily.trim() && face.resolvedFamily.trim())

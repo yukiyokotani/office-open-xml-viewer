@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createLayoutServices } from './layout-runtime.js';
 import { createFontResolver } from './layout/font-service.js';
 import { createTextLayoutService } from './layout/text.js';
@@ -29,6 +29,7 @@ const context = {
 function services(
   localMetrics?: Readonly<Record<string, ResolvedFontMetric>>,
   measureContext: CanvasRenderingContext2D = context,
+  majorFont?: string,
 ) {
   const empty = { default: null, first: null, even: null };
   // The fake Canvas face inventory must carry the same explicit resource
@@ -45,7 +46,7 @@ function services(
       marginBottom: 72, marginLeft: 72, headerDistance: 36, footerDistance: 36,
       titlePage: false, evenAndOddHeaders: false,
     },
-    body: [], headers: empty, footers: empty,
+    body: [], headers: empty, footers: empty, majorFont,
   } as DocxDocumentModel, { measureContext, localMetrics: identified });
 }
 
@@ -104,6 +105,50 @@ function substitutedMeiryoService(metric: ResolvedFontMetric, resolvedFamily: st
 }
 
 describe('native reference font vertical layout', () => {
+  it('keeps a loaded application CSS face on its measured line box', () => {
+    const loadedFace = {
+      family: 'Calibri', weight: '400', style: 'normal', status: 'loaded',
+    } as FontFace;
+    vi.stubGlobal('document', {
+      fonts: { [Symbol.iterator]: function* () { yield loadedFace; } },
+    });
+    try {
+      const layoutServices = services(undefined, context, 'Calibri');
+      const selected = layoutServices.text.resolve({
+        fonts: { ascii: 'Calibri' }, slot: 'ascii', weight: 400, style: 'normal',
+      });
+      expect(selected.source).toBe('css');
+      const segment = buildSegments([{
+        type: 'text', text: 'A', fontFamily: 'Calibri', fontSize: 10,
+        bold: false, italic: false, underline: false, strikethrough: false,
+      }] as DocRun[], { pageIndex: 0, totalPages: 1, layoutServices })[0] as LayoutTextSeg;
+      expect(segment.referenceFontVerticalMetric).toBeUndefined();
+      expect(segment.latinSpaceAverageWidthRatio).toBeUndefined();
+      const line = layoutLines(context, [segment], 100, 0, 1)[0]!;
+      expect(line.ascent).toBe(8);
+      expect(line.descent).toBe(2);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('does not treat an unloaded CSS declaration as a selected face', () => {
+    const unloadedFace = {
+      family: 'Calibri', weight: '400', style: 'normal', status: 'unloaded',
+    } as FontFace;
+    vi.stubGlobal('document', {
+      fonts: { [Symbol.iterator]: function* () { yield unloadedFace; } },
+    });
+    try {
+      const layoutServices = services(undefined, context, 'Calibri');
+      expect(layoutServices.text.resolve({
+        fonts: { ascii: 'Calibri' }, slot: 'ascii', weight: 400, style: 'normal',
+      }).source).toBe('native');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('uses authored Calibri vertical geometry with a native CSS fallback, without borrowing widths', () => {
     // A CSS fallback does not prove that Calibri paints the glyph. Its catalog
     // sides still define Word pagination; glyph advances remain measured.
