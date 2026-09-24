@@ -6,7 +6,7 @@
 
 use super::{story, ModelBudget};
 use crate::doc::{formatting, headers, numbering, pictures, tokenize_with_fields, Fields};
-use docx_model::{HeaderFooter, HeadersFooters};
+use docx_model::{BodyElement, HeaderFooter, HeadersFooters};
 
 pub(super) struct Resolver<'a, 'h> {
     source: Option<&'h headers::Headers<'a>>,
@@ -97,6 +97,16 @@ impl<'a, 'h> Resolver<'a, 'h> {
             None,
             table_sequence,
         )?;
+        if body.iter().any(|element| {
+            matches!(element, BodyElement::Paragraph(paragraph) if paragraph.frame_pr.is_some())
+        }) {
+            // The DOCX renderer positions frames only in the main body flow.
+            formatting.unsupported_paragraph_properties = true;
+        }
+        // Header and footer stories are laid out horizontally.
+        if crate::doc::character::Properties::unrenderable_east_asian_vertical(&body, false) {
+            formatting.unsupported_character_properties = true;
+        }
         Ok(HeaderFooter { body })
     }
 }

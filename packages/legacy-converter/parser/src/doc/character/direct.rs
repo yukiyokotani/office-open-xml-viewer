@@ -5,11 +5,14 @@
 //! manufacturing WordprocessingML and parsing it back through the DOCX parser.
 
 use super::Properties;
+use crate::doc::border::Border;
+use crate::doc::paragraph::ShadingFill;
 use crate::doc::unsupported;
 use docx_model::{
-    RunFontAxisPresence, RunFontAxisValues, RunFontFacts, RunFontSlots, RunTypographyWire, TextRun,
-    TypographyLanguagesWire, TypographyValueStatusWire, TypographyValueWire,
-    UnderlineTypographyWire,
+    BodyElement, CellElement, CtBorderTypographyWire, DocRun, EastAsianLayoutTypographyWire,
+    FitTextSpecWire, RunBorder, RunFontAxisPresence, RunFontAxisValues, RunFontFacts, RunFontSlots,
+    RunTypographyWire, TextRun, TypographyLanguagesWire, TypographyValueStatusWire,
+    TypographyValueWire, UnderlineTypographyWire,
 };
 
 type FontAxes = [Option<String>; 4];
@@ -63,6 +66,9 @@ impl Properties {
             .get("highlight")
             .filter(|value| value.as_str() != "none")
             .cloned();
+        let (border, border_wire) = self.direct_border()?;
+        let symbol = self.direct_symbol(fonts)?;
+        let fit_text = self.direct_only.fit_text;
 
         let mut run = TextRun {
             text,
@@ -106,8 +112,33 @@ impl Properties {
             position,
             kerning,
             highlight,
+            // MS-DOC 2.6.1 sprmCShd/sprmCShd80: a single-color fill only.
+            background: match &self.direct_only.shading {
+                Some(ShadingFill::Rgb(fill)) => Some(fill.clone()),
+                Some(ShadingFill::None) | None => None,
+            },
+            border,
+            // MS-DOC 2.9.31: dxaFitText twips and FitTextID. Contiguous runs
+            // sharing an ID form one region, exactly as ECMA-376 17.3.2.14
+            // fitText@w:id links consecutive runs.
+            fit_text_val: fit_text.map(|(width, _)| f64::from(width)),
+            fit_text_id: fit_text.map(|(_, id)| id.to_string()),
             ..TextRun::default()
         };
+        if let Some((vertical, compress)) = self.direct_only.east_asian {
+            run.east_asian_vert = Some(vertical);
+            run.east_asian_vert_compress = Some(compress);
+        }
+        if let Some((glyph, font)) = symbol {
+            // ECMA-376 17.3.3.30 sym: a one-glyph run in the symbol's font,
+            // exactly as the DOCX parser projects `w:sym` (font on the
+            // ascii, high-ANSI and East Asian axes, no slot provenance).
+            run.text = glyph;
+            run.font_family = Some(font.clone());
+            run.font_family_high_ansi = Some(font.clone());
+            run.font_family_east_asia = Some(font);
+            run.font_slots = None;
+        }
         run.typography_acquisition = Some(RunTypographyWire {
             underline: match (
                 underline_token,
@@ -135,6 +166,16 @@ impl Properties {
             position_pt: number_wire(position_raw, run.position),
             character_spacing_pt: run.char_spacing,
             character_scale: run.char_scale,
+            fit_text: fit_text.map(|(width, id)| FitTextSpecWire {
+                val_twips: f64::from(width),
+                id: Some(id.to_string()),
+            }),
+            border: border_wire,
+            east_asian_layout: EastAsianLayoutTypographyWire {
+                vert: run.east_asian_vert,
+                vert_compress: run.east_asian_vert_compress,
+                ..EastAsianLayoutTypographyWire::default()
+            },
             kerning_threshold_pt: run.kerning,
             languages: TypographyLanguagesWire {
                 bidi: lang_bidi,
@@ -197,6 +238,94 @@ impl Properties {
         self.values
             .get("color")
             .is_some_and(|value| value == "auto")
+    }
+
+    /// ECMA-376 17.3.2.10 horizontal-in-vertical text is rendered only in
+    /// vertical (tbRl) body flow; horizontal flow and table cells would drop
+    /// the MS-DOC 2.9.332 fTNY rotation. Returns true when such a run occurs
+    /// where the renderer cannot honor it.
+    pub(in crate::doc) fn unrenderable_east_asian_vertical(
+        elements: &[BodyElement],
+        vertical_flow: bool,
+    ) -> bool {
+        fn paragraph(value: &docx_model::DocParagraph) -> bool {
+            value
+                .runs
+                .iter()
+                .any(|run| matches!(run, DocRun::Text(text) if text.east_asian_vert == Some(true)))
+        }
+        fn table(value: &docx_model::DocTable) -> bool {
+            value.rows.iter().flat_map(|row| &row.cells).any(|cell| {
+                cell.content.iter().any(|block| match block {
+                    CellElement::Paragraph(value) => paragraph(value),
+                    CellElement::Table(value) => table(value),
+                })
+            })
+        }
+        elements.iter().any(|element| match element {
+            BodyElement::Paragraph(value) => !vertical_flow && paragraph(value),
+            BodyElement::Table(value) => table(value),
+            _ => false,
+        })
+    }
+
+    /// MS-DOC 2.6.1 sprmCSymbol "designates the character as a symbol", and
+    /// sprmCFSpec lists U+0028 as "a symbol, see sprmCSymbol". The symbol
+    /// placeholder is therefore U+0028 (checked in `direct_run_text`).
+    /// sprmCSymbol does not require sprmCFSpec: a Word-produced corpus
+    /// document applies it to non-fSpec U+0028 characters and Word's own PDF
+    /// shows the symbol glyph there. Picture/OLE/object characters are never
+    /// symbols.
+    fn direct_symbol(&self, fonts: &[String]) -> Result<Option<(String, String)>, String> {
+        let Some((font, code)) = self.symbol else {
+            return Ok(None);
+        };
+        if self.picture.data || self.picture.ole || self.picture.object {
+            return Err(unsupported("Word symbol on a picture or object character"));
+        }
+        let glyph = char::from_u32(u32::from(code))
+            .ok_or_else(|| unsupported("invalid Word symbol character code"))?;
+        let font = fonts
+            .get(usize::from(font))
+            .ok_or_else(|| unsupported("Word symbol font outside font table"))?;
+        Ok(Some((glyph.to_string(), font.clone())))
+    }
+
+    /// Text for one visible span resolved by [`Self::direct_text_run`]. A
+    /// symbol run carries its glyph; every source character of the span MUST
+    /// then be the U+0028 symbol placeholder, one glyph each.
+    pub(in crate::doc) fn direct_run_text(run: &mut TextRun, part: &str) -> Result<String, String> {
+        if run.text.is_empty() {
+            return Ok(part.to_string());
+        }
+        if part.is_empty() || part.chars().any(|character| character != '(') {
+            return Err(unsupported(
+                "Word symbol property on a non-symbol character",
+            ));
+        }
+        let glyph = std::mem::take(&mut run.text);
+        Ok(glyph.repeat(part.chars().count()))
+    }
+
+    /// MS-DOC 2.6.1 sprmCBrc/sprmCBrc80 as an ECMA-376 17.3.2.4 run border.
+    /// "Brc.dptSpace MUST be ignored when applied to character borders", so
+    /// the projected spacing is zero and the raw spacing is not acquired.
+    /// Shadowed borders and asymmetric frame effects were rejected at apply.
+    fn direct_border(&self) -> Result<(Option<RunBorder>, Option<CtBorderTypographyWire>), String> {
+        let Some((old, raw)) = self.direct_only.border else {
+            return Ok((None, None));
+        };
+        let border = Border::read(&raw[..if old { 4 } else { 8 }], old)?;
+        let mut wire = border.direct_typography();
+        wire.space_pt = TypographyValueWire::default();
+        let edge = border.direct_edge();
+        let run = (edge.style != "none").then_some(RunBorder {
+            style: edge.style,
+            color: edge.color,
+            width: edge.width,
+            space: 0.0,
+        });
+        Ok((run, Some(wire)))
     }
 
     fn direct_font_axes(&self, fonts: &[String]) -> Result<FontAxes, String> {
@@ -909,5 +1038,322 @@ mod tests {
         ]);
         let fonts = ["ASCII", "East Asia", "High ANSI", "Complex Script"].map(String::from);
         assert_parser_parity(&properties, &fonts);
+    }
+
+    fn parsed_rpr(rpr: &str) -> serde_json::Value {
+        let document_xml = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:rPr>{rpr}</w:rPr><w:t>x</w:t></w:r></w:p></w:body></w:document>"#,
+        );
+        let mut bytes = Vec::new();
+        {
+            let mut archive = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            archive
+                .start_file("word/document.xml", SimpleFileOptions::default())
+                .unwrap();
+            archive.write_all(document_xml.as_bytes()).unwrap();
+            archive.finish().unwrap();
+        }
+        let parsed: serde_json::Value =
+            serde_json::from_str(&docx_parser::parse_docx_native(&bytes).unwrap()).unwrap();
+        let mut run = parsed["body"][0]["runs"][0].clone();
+        let object = run.as_object_mut().unwrap();
+        object.remove("type");
+        object.remove("__typographyAcquisition");
+        run
+    }
+
+    fn public_run(properties: &Properties) -> serde_json::Value {
+        let mut run = serde_json::to_value(
+            properties
+                .direct_text_run("x".into(), &[])
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        run.as_object_mut()
+            .unwrap()
+            .remove("__typographyAcquisition");
+        run
+    }
+
+    fn cshd(fore: [u8; 4], back: [u8; 4], ipat: u16) -> Vec<u8> {
+        let mut operand = vec![10];
+        operand.extend(fore);
+        operand.extend(back);
+        operand.extend(ipat.to_le_bytes());
+        operand
+    }
+
+    #[test]
+    fn character_shading_border_and_fit_text_match_the_docx_model_semantics() {
+        let properties = applied(&[
+            (0xca71, cshd([0, 0, 0, 0xff], [0xdd, 0xdd, 0xdd, 0], 0)),
+            (0xca72, vec![8, 0x12, 0x34, 0x56, 0, 6, 1, 0x05, 0]),
+            (0xca76, vec![8, 0x60, 0x09, 0, 0, 0, 0xb5, 0xad, 0xaa]),
+        ]);
+        assert!(properties.has_direct_only_properties());
+        // MS-DOC 2.6.1: Brc.dptSpace MUST be ignored for character borders.
+        assert_eq!(
+            public_run(&properties),
+            parsed_rpr(
+                r#"<w:sz w:val="20"/><w:bdr w:val="single" w:sz="6" w:space="0" w:color="123456"/><w:shd w:val="clear" w:color="auto" w:fill="DDDDDD"/><w:fitText w:val="2400" w:id="-1431456512"/>"#
+            )
+        );
+        let run = properties
+            .direct_text_run("x".into(), &[])
+            .unwrap()
+            .unwrap();
+        let wire = run.typography_acquisition.unwrap();
+        let fit = wire.fit_text.unwrap();
+        assert_eq!(
+            (fit.val_twips, fit.id.as_deref()),
+            (2400.0, Some("-1431456512"))
+        );
+        let border = wire.border.unwrap();
+        assert_eq!(border.val.value.as_deref(), Some("single"));
+        assert_eq!(border.space_pt, TypographyValueWire::default());
+
+        // Brc80 with an automatic color, then a black Shd80 background.
+        let properties = applied(&[
+            (0x6865, vec![4, 1, 0, 0]),
+            (0x4866, 0x0020u16.to_le_bytes().to_vec()),
+        ]);
+        assert_eq!(
+            public_run(&properties),
+            parsed_rpr(
+                r#"<w:sz w:val="20"/><w:bdr w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:shd w:val="clear" w:color="auto" w:fill="000000"/>"#
+            )
+        );
+    }
+
+    #[test]
+    fn character_border_none_nil_and_resets_remove_the_border() {
+        for operand in [vec![0, 0, 0, 0x40], vec![0xff; 4]] {
+            let run = public_run(&applied(&[(0x6865, operand)]));
+            assert!(run.get("border").is_none());
+        }
+        let nil = applied(&[(
+            0xca72,
+            vec![8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+        )]);
+        assert!(public_run(&nil).get("border").is_none());
+        // The frame effect is invisible on a single stroke; shadows and
+        // asymmetric frame effects cannot be represented.
+        let framed = applied(&[(0x6865, vec![4, 1, 0, 0x40])]);
+        assert!(public_run(&framed).get("border").is_some());
+        let base = Properties::default();
+        for (code, operand) in [
+            (0x6865, vec![4, 1, 0, 0x20]),
+            (0x6865, vec![4, 12, 0, 0x40]),
+            (0xca72, vec![8, 0, 0, 0, 0, 4, 1, 0x20, 0]),
+        ] {
+            assert!(!base.clone().apply(code, &operand, &base).unwrap());
+        }
+        for (code, operand) in [
+            (0xca72, vec![7, 0, 0, 0, 0, 4, 1, 0, 0]),
+            (0xca72, vec![8, 0, 0, 0, 0, 4, 1, 0]),
+            (0x6865, vec![4, 1, 17, 0]),
+            (0x6865, vec![4, 0x1a, 0, 0]),
+        ] {
+            assert!(base.clone().apply(code, &operand, &base).is_err());
+        }
+        // Neither CPlain nor CIstd preserves border, shading or fit text.
+        let mut reset = applied(&[
+            (0x6865, vec![4, 1, 0, 0]),
+            (0x4866, 0x0100u16.to_le_bytes().to_vec()),
+            (0xca76, vec![8, 0x60, 0x09, 0, 0, 1, 0, 0, 0]),
+        ]);
+        reset.reset_to(&base, false);
+        assert!(!reset.has_direct_only_properties());
+        assert_eq!(public_run(&reset), public_run(&base));
+    }
+
+    #[test]
+    fn fit_text_zero_is_ignored_and_negative_widths_stay_unsupported() {
+        let base = Properties::default();
+        let mut value = applied(&[(0xca76, vec![8, 0xb5, 0x04, 0, 0, 1, 0, 0, 0])]);
+        assert!(value
+            .apply(0xca76, &[8, 0, 0, 0, 0, 2, 0, 0, 0], &base)
+            .unwrap());
+        let run = value.direct_text_run("x".into(), &[]).unwrap().unwrap();
+        assert_eq!(
+            (run.fit_text_val, run.fit_text_id.as_deref()),
+            (Some(1205.0), Some("1"))
+        );
+        assert!(!base
+            .clone()
+            .apply(0xca76, &[8, 0xff, 0xff, 0xff, 0xff, 1, 0, 0, 0], &base)
+            .unwrap());
+        assert!(base
+            .clone()
+            .apply(0xca76, &[7, 0, 0, 0, 0, 1, 0, 0, 0], &base)
+            .is_err());
+
+        // A sparse style patch overlays fit text and shading only when set.
+        let mut inherited = applied(&[(0xca76, vec![8, 0xb5, 0x04, 0, 0, 1, 0, 0, 0])]);
+        inherited.overlay_visible(&Properties::sparse());
+        assert!(inherited.has_direct_only_properties());
+        let mut patch = Properties::sparse();
+        patch
+            .apply(0x4866, &0x0100u16.to_le_bytes(), &base)
+            .unwrap();
+        inherited.overlay_visible(&patch);
+        let run = inherited.direct_text_run("x".into(), &[]).unwrap().unwrap();
+        assert_eq!(run.background.as_deref(), Some("ffffff"));
+        assert_eq!(run.fit_text_val, Some(1205.0));
+    }
+
+    #[test]
+    fn patterned_or_automatic_solid_character_shading_stays_unsupported() {
+        let base = Properties::default();
+        for operand in [
+            cshd([0, 0, 0, 0xff], [0xff, 0xff, 0xff, 0], 0x26),
+            cshd([0, 0, 0, 0xff], [0xff, 0xff, 0xff, 0], 1),
+        ] {
+            assert!(!base.clone().apply(0xca71, &operand, &base).unwrap());
+        }
+        assert!(!base
+            .clone()
+            .apply(0x4866, &0x9900u16.to_le_bytes(), &base)
+            .unwrap());
+        let cleared = applied(&[(0xca71, cshd([0, 0, 0, 0xff], [0xff; 4], 0))]);
+        assert!(public_run(&cleared)["background"].is_null());
+    }
+
+    #[test]
+    fn symbol_characters_match_the_docx_sym_projection() {
+        let fonts = ["Times New Roman", "Symbol"].map(String::from);
+        let properties = applied(&[(0x0855, vec![1]), (0x6a09, vec![1, 0, 0xb0, 0xf0])]);
+        assert!(properties.has_direct_only_properties());
+        let mut run = properties
+            .direct_text_run(String::new(), &fonts)
+            .unwrap()
+            .unwrap();
+        let text = Properties::direct_run_text(&mut run, "((").unwrap();
+        assert_eq!(text, "\u{f0b0}\u{f0b0}");
+        run.text = "\u{f0b0}".into();
+        let mut direct = serde_json::to_value(&run).unwrap();
+        direct
+            .as_object_mut()
+            .unwrap()
+            .remove("__typographyAcquisition");
+        assert_eq!(
+            direct,
+            parsed_rpr(
+                r#"<w:sz w:val="20"/></w:rPr><w:sym w:font="Symbol" w:char="F0B0"/><w:rPr>"#
+            )
+        );
+
+        // CPlain/CIstd preserve the symbol designation.
+        let mut reset = properties.clone();
+        reset.reset_to(&Properties::default(), false);
+        assert_eq!(reset.symbol, Some((1, 0xf0b0)));
+
+        // Only the special U+0028 placeholder is a symbol.
+        let mut run = properties
+            .direct_text_run(String::new(), &fonts)
+            .unwrap()
+            .unwrap();
+        assert!(Properties::direct_run_text(&mut run, "(x").is_err());
+        // Word renders the symbol without sprmCFSpec as well.
+        let plain = applied(&[(0x6a09, vec![1, 0, 0xb0, 0xf0])]);
+        let mut run = plain
+            .direct_text_run(String::new(), &fonts)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            Properties::direct_run_text(&mut run, "(").unwrap(),
+            "\u{f0b0}"
+        );
+        let object = applied(&[(0x0856, vec![1]), (0x6a09, vec![1, 0, 0xb0, 0xf0])]);
+        assert!(object.direct_text_run(String::new(), &fonts).is_err());
+        let outside = applied(&[(0x0855, vec![1]), (0x6a09, vec![2, 0, 0xb0, 0xf0])]);
+        assert!(outside.direct_text_run(String::new(), &fonts).is_err());
+        let surrogate = applied(&[(0x0855, vec![1]), (0x6a09, vec![1, 0, 0x00, 0xd8])]);
+        assert!(surrogate.direct_text_run(String::new(), &fonts).is_err());
+        let base = Properties::default();
+        assert!(base.clone().apply(0x6a09, &[1, 0, 0], &base).is_err());
+        // Ordinary runs keep their text.
+        let mut ordinary = base
+            .direct_text_run(String::new(), &fonts)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            Properties::direct_run_text(&mut ordinary, "(a").unwrap(),
+            "(a"
+        );
+    }
+
+    #[test]
+    fn horizontal_in_vertical_layout_matches_the_docx_projection_and_is_gated_by_flow() {
+        // UFEL 0x1001: fTNY + fTNYCompress, plus an ignored must-be-zero bit.
+        let properties = applied(&[(0xca78, vec![6, 0x05, 0x10, 0, 0xc4, 0x3c, 7])]);
+        assert!(properties.has_direct_only_properties());
+        assert_eq!(
+            public_run(&properties),
+            parsed_rpr(
+                r#"<w:sz w:val="20"/><w:eastAsianLayout w:id="1" w:vert="1" w:vertCompress="1"/>"#
+            )
+        );
+        let run = properties
+            .direct_text_run("x".into(), &[])
+            .unwrap()
+            .unwrap();
+        let wire = run.typography_acquisition.as_ref().unwrap();
+        assert_eq!(
+            (
+                wire.east_asian_layout.vert,
+                wire.east_asian_layout.vert_compress
+            ),
+            (Some(true), Some(true))
+        );
+        // Compression alone is meaningless without fTNY.
+        let plain = applied(&[(0xca78, vec![6, 0x00, 0x10, 0, 0, 0, 0])]);
+        let plain_run = plain.direct_text_run("x".into(), &[]).unwrap().unwrap();
+        assert_eq!(
+            (
+                plain_run.east_asian_vert,
+                plain_run.east_asian_vert_compress
+            ),
+            (Some(false), Some(false))
+        );
+        // Two lines in one has no renderer projection.
+        let base = Properties::default();
+        assert!(!base
+            .clone()
+            .apply(0xca78, &[6, 2, 0, 0, 0, 0, 0], &base)
+            .unwrap());
+        assert!(base
+            .clone()
+            .apply(0xca78, &[5, 1, 0, 0, 0, 0, 0], &base)
+            .is_err());
+
+        let paragraph = docx_model::DocParagraph {
+            runs: vec![DocRun::Text(Box::new(run))],
+            ..Default::default()
+        };
+        let body = vec![BodyElement::Paragraph(Box::new(paragraph.clone()))];
+        assert!(!Properties::unrenderable_east_asian_vertical(&body, true));
+        assert!(Properties::unrenderable_east_asian_vertical(&body, false));
+        let table = docx_model::DocTable {
+            rows: vec![docx_model::DocTableRow {
+                cells: vec![docx_model::DocTableCell {
+                    content: vec![CellElement::Paragraph(Box::new(paragraph))],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let body = vec![BodyElement::Table(Box::new(table))];
+        assert!(Properties::unrenderable_east_asian_vertical(&body, true));
+        let plain_body = vec![BodyElement::Paragraph(Box::new(docx_model::DocParagraph {
+            runs: vec![DocRun::Text(Box::new(plain_run))],
+            ..Default::default()
+        }))];
+        assert!(!Properties::unrenderable_east_asian_vertical(
+            &plain_body,
+            false
+        ));
     }
 }

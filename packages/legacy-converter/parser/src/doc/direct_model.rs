@@ -105,6 +105,11 @@ pub(super) fn build(
                 facts.sections[section_index].end - 1;
         }
 
+        let vertical_flow = match &ending {
+            Some(ending) => ending.text_direction.as_deref(),
+            None => section.text_direction.as_deref(),
+        } == Some("tbRl");
+        let section_start = body.len();
         story::project(
             &facts.story,
             paragraphs,
@@ -117,6 +122,12 @@ pub(super) fn build(
             ending.as_ref().map(|ending| ending.kind.as_str()),
             &mut table_sequence,
         )?;
+        if super::character::Properties::unrenderable_east_asian_vertical(
+            &body[section_start..],
+            vertical_flow,
+        ) {
+            facts.formatting.unsupported_character_properties = true;
+        }
 
         let (section_headers, section_footers) = header_resolver.project_section(
             section_index,
@@ -1326,12 +1337,10 @@ mod tests {
         assert!(run.bold);
 
         let baseline_bytes = source_with_proofing("Proof\r", false);
-        let baseline = super::super::direct_model(
-            &CompoundFile::open(&baseline_bytes).unwrap(),
-            1024 * 1024,
-        )
-        .unwrap()
-        .document;
+        let baseline =
+            super::super::direct_model(&CompoundFile::open(&baseline_bytes).unwrap(), 1024 * 1024)
+                .unwrap()
+                .document;
         let BodyElement::Paragraph(baseline_paragraph) = &baseline.body[0] else {
             panic!("expected baseline paragraph");
         };
