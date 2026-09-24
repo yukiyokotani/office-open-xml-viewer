@@ -318,12 +318,16 @@ impl Context<'_> {
                     .media
                     .image(shape.props.picture, self.backing, self.pictures)?
                     .ok_or_else(|| unsupported("PowerPoint picture was not retained"))?;
-                let (_, stroke) = paint.model_with_custom_geometry(
-                    self.presentation.schemes[self.index].as_ref(),
-                    false,
-                    true,
-                    None,
-                );
+                let scheme = self.presentation.schemes[self.index].as_ref();
+                let (_, stroke) = paint.model_with_custom_geometry(scheme, false, true, None);
+                let fill = match paint.picture_backing()? {
+                    Some((color, alpha)) => {
+                        Some(paint::model_solid(color, alpha, scheme).ok_or_else(|| {
+                            unsupported("unresolved PowerPoint picture frame fill color")
+                        })?)
+                    }
+                    None => None,
+                };
                 self.push(
                     SlideElement::Picture(PictureElement {
                         id: Some(shape.id.to_string()),
@@ -340,6 +344,7 @@ impl Context<'_> {
                         intrinsic_width_px: None,
                         intrinsic_height_px: None,
                         stroke,
+                        fill,
                         prst_geom: None,
                         prst_adjust: None,
                         src_rect: (shape.props.crop != [0; 4]).then_some(SrcRect {
@@ -1638,6 +1643,38 @@ mod tests {
                 )),
             }
         }
+        // Picture-frame backing fill: only an explicit fFilled with a solid
+        // fillColor is painted; frames that leave fFilled alone stay unfilled.
+        let backing = |values: &[(u16, u32)]| {
+            project(
+                75,
+                0x200,
+                vec![properties(&[vec![(0x4104, 1)], values.to_vec()].concat())],
+                png_blip(),
+                None,
+            )
+        };
+        let picture_fill = |model: Slide| match &model.elements[0] {
+            SlideElement::Picture(picture) => picture.fill.clone(),
+            _ => panic!("picture"),
+        };
+        assert!(matches!(
+            picture_fill(backing(&[(0x181, 0x4d4d4d), (0x1bf, 0x0010_0010)]).unwrap()),
+            Some(Fill::Solid { ref color }) if color == "4D4D4D"
+        ));
+        for values in [
+            vec![(0x181, 0x4d4d4d)],
+            vec![(0x181, 0x4d4d4d), (0x1bf, 0x0010_0000)],
+            vec![],
+        ] {
+            assert!(picture_fill(backing(&values).unwrap()).is_none());
+        }
+        assert!(backing(&[(0x1bf, 0x0010_0010)])
+            .unwrap_err()
+            .contains("without a color"));
+        assert!(backing(&[(0x180, 4), (0x181, 0xff), (0x1bf, 0x0010_0010)])
+            .unwrap_err()
+            .contains("non-solid"));
         // pib_complex names a linked file rather than a BLIP.
         let mut linked = properties(&[(0xc104, 4)]);
         linked.extend_from_slice(&[b'a', 0, b'b', 0]);

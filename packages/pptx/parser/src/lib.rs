@@ -3818,6 +3818,7 @@ mod tests {
             intrinsic_width_px: Some(64),
             intrinsic_height_px: Some(48),
             stroke: None,
+            fill: None,
             prst_geom: None,
             prst_adjust: None,
             src_rect: None,
@@ -8738,6 +8739,47 @@ mod tests {
         );
         let json = serde_json::to_value(&pic).unwrap();
         assert_eq!(json["blipEffects"][1]["type"], "grayscale");
+    }
+
+    #[test]
+    fn picture_sp_pr_fill_surfaces_as_backing_fill() {
+        const PNG_1X1: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x62, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
+            0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+        // A p:pic spPr fill (§19.3.1.37) is carried as the picture's backing fill.
+        let pic_xml = r#"<p:pic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+  xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:nvPicPr><p:cNvPr id="5" name="DuoPic"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>
+  <p:blipFill>
+    <a:blip r:embed="rIdPng">
+
+    </a:blip>
+    <a:stretch><a:fillRect/></a:stretch>
+  </p:blipFill>
+  <p:spPr><a:xfrm><a:off x="100" y="200"/><a:ext cx="300000" cy="300000"/></a:xfrm>
+    <a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="4D4D4D"/></a:solidFill></p:spPr>
+</p:pic>"#;
+        let doc = roxmltree::Document::parse(pic_xml).unwrap();
+        let pic_node = doc.root_element();
+        let mut rels = HashMap::new();
+        rels.insert("rIdPng".to_string(), "../media/image1.png".to_string());
+        let mut theme = HashMap::new();
+        theme.insert("accent1".to_string(), "4472C4".to_string());
+        let data = build_blip_media_zip(PNG_1X1, b"<svg/>");
+        let cursor = Cursor::new(data.clone());
+        let mut zip = PptxZip::new(cursor).unwrap();
+        let pic = parse_picture(pic_node, "ppt/slides", &rels, &theme, &mut zip)
+            .expect("parse_picture should succeed for a duotone picture");
+        assert!(matches!(
+            pic.fill,
+            Some(Fill::Solid { ref color }) if color == "4D4D4D"
+        ));
+        assert!(pic.blip_effects.is_empty());
     }
 
     /// A `<p:pic>` without a `<a:duotone>` leaves `duotone` None — guards the new

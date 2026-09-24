@@ -590,6 +590,12 @@ pub struct PictureElement {
     /// resolves to `<a:noFill/>` (border explicitly suppressed).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stroke: Option<Stroke>,
+    /// `<p:spPr>` fill (ECMA-376 §19.3.1.37 routes a `p:pic`'s spPr through
+    /// CT_ShapeProperties): painted inside the picture silhouette BEHIND the
+    /// blip, so it shows through transparent pixels. `None` when the spPr has
+    /// no fill element.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fill: Option<Fill>,
     /// `<p:spPr><a:prstGeom prst="…">` preset name (e.g. "roundRect",
     /// "ellipse"). ECMA-376 §20.1.9.18: a picture's preset geometry is its clip
     /// silhouette and the path its border / contour hug. None = plain rectangle

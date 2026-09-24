@@ -6003,6 +6003,19 @@ async function renderPicture(
       ow: number,
       oh: number,
     ): void => {
+      // spPr fill (§19.3.1.37): painted inside the silhouette BEHIND the blip,
+      // visible through transparent pixels. Image fills need their own decode
+      // and are not painted here.
+      const backing = el.fill && el.fill.fillType !== 'none' && el.fill.fillType !== 'image'
+        ? resolveShapeFill(el.fill, target, ox, oy, ow, oh, el.rotation)
+        : null;
+      if (backing) {
+        target.save();
+        tracePictureSilhouette(target, ox, oy, ow, oh);
+        target.fillStyle = backing;
+        target.fill();
+        target.restore();
+      }
       target.save();
       applyClipAt(target, ox, oy, ow, oh);
       drawImageCropped(target, bitmap, el.srcRect, ox, oy, ow, oh);

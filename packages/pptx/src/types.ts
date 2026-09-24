@@ -605,6 +605,12 @@ export interface PictureElement {
    */
   stroke: Stroke | null;
   /**
+   * `<p:spPr>` fill (a `p:pic`'s spPr is CT_ShapeProperties, §19.3.1.37),
+   * painted inside the picture silhouette BEHIND the blip so it shows through
+   * transparent pixels. Omitted when the spPr has no fill element.
+   */
+  fill?: Fill;
+  /**
    * `<p:spPr><a:prstGeom prst="…">` preset name (e.g. `"roundRect"`,
    * `"ellipse"`). ECMA-376 §20.1.9.18: a picture's preset geometry is its clip
    * silhouette and the path its border / contour hug. Undefined / omitted = a
