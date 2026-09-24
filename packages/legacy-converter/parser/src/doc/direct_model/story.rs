@@ -279,9 +279,46 @@ pub(super) fn project(
                         budget.push(&mut paragraph.runs, DocRun::Image(Box::new(image.image)))?;
                     }
                 }
-                Token::NoteMarker | Token::NoteReference(_) => {
+                Token::NoteReference(reference) => {
+                    let id = reference.id().to_string();
+                    push_note_mark(
+                        &mut paragraph,
+                        story,
+                        formatting,
+                        style,
+                        table_style,
+                        cp,
+                        reference.kind(),
+                        &id,
+                        budget,
+                    )?;
+                }
+                Token::NoteNumber(kind) => {
+                    let (_, fc, piece) = story
+                        .position(cp)
+                        .ok_or_else(|| unsupported("Word note number outside piece table"))?;
+                    // MS-DOC 2.3.2/2.3.5: the automatic number is a special
+                    // character (sprmCFSpec), as its reference is.
+                    if !formatting.passive_special_character(style, fc, piece.prm, &story.prcs)? {
+                        return Err(unsupported(
+                            "Word note number lacks special-character property",
+                        ));
+                    }
+                    push_note_mark(
+                        &mut paragraph,
+                        story,
+                        formatting,
+                        style,
+                        table_style,
+                        cp,
+                        kind,
+                        "",
+                        budget,
+                    )?;
+                }
+                Token::NoteMarker => {
                     return Err(unsupported(
-                        "direct DOC model does not yet support note content",
+                        "Word note character outside a note reference or note",
                     ));
                 }
                 Token::EvaluatedField(field) => {
@@ -453,6 +490,43 @@ fn push_control_text(
         budget.text(&mut paragraph.runs, &mut run, text)?;
     }
     Ok(())
+}
+
+/// ECMA-376 17.11.6/7/16/17 as parsed by the DOCX parser: a note mark is a
+/// `TextRun` with the run's properties, forced superscript, its id as
+/// fallback text and `NoteRef { kind, id }`. An empty id is the in-note
+/// number, which the renderer resolves to the enclosing note's number.
+#[allow(clippy::too_many_arguments)]
+fn push_note_mark(
+    paragraph: &mut docx_model::DocParagraph,
+    story: &Story<'_>,
+    formatting: &mut formatting::Formatting<'_>,
+    style: usize,
+    table_style: Option<formatting::TableFormattingKey>,
+    cp: usize,
+    kind: crate::doc::notes::Kind,
+    id: &str,
+    budget: &mut ModelBudget,
+) -> Result<(), String> {
+    let (_, fc, piece) = story
+        .position(cp)
+        .ok_or_else(|| unsupported("Word note mark outside piece table"))?;
+    let mut run = formatting
+        .direct_text_run(
+            style,
+            table_style,
+            fc,
+            piece.prm,
+            &story.prcs,
+            String::new(),
+        )?
+        .ok_or_else(|| unsupported("hidden Word note mark is not supported"))?;
+    run.vert_align = Some("super".to_string());
+    run.note_ref = Some(docx_model::NoteRef {
+        kind: kind.tag().to_string(),
+        id: id.to_string(),
+    });
+    budget.text(&mut paragraph.runs, &mut run, id)
 }
 
 /// Project one Word-evaluated field onto the DOCX parser's `FieldRun`

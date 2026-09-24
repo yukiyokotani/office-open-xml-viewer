@@ -102,7 +102,6 @@ pub(super) fn text_run(run: &TextRun) -> Result<usize, String> {
         || run.border.is_some()
         || run.ruby.is_some()
         || run.revision.is_some()
-        || run.note_ref.is_some()
     {
         return Err(unsupported("unaccounted direct DOC text-run payload"));
     }
@@ -130,6 +129,10 @@ pub(super) fn text_run(run: &TextRun) -> Result<usize, String> {
         &run.east_asian_combine_brackets,
     ] {
         total.option_string(value)?;
+    }
+    if let Some(note) = &run.note_ref {
+        total.string(&note.kind)?;
+        total.string(&note.id)?;
     }
     if let Some(slots) = &run.font_slots {
         total.font_slots(slots)?;

@@ -47,6 +47,23 @@ pub(super) struct Reference {
     custom: bool,
 }
 impl Reference {
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) fn kind(&self) -> Kind {
+        self.kind
+    }
+
+    /// One-based position in its note document, used as the note id.
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) fn id(&self) -> usize {
+        self.id
+    }
+
+    /// True for a literal custom mark (FRD.nAuto == 0).
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) fn custom(&self) -> bool {
+        self.custom
+    }
+
     pub fn xml(&self) -> String {
         format!(
             "<w:{}Reference w:id=\"{}\"{}/>",
@@ -65,6 +82,16 @@ pub(super) struct References {
     by_cp: BTreeMap<usize, Reference>,
 }
 impl References {
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) fn get(&self, cp: usize) -> Option<&Reference> {
+        self.by_cp.get(&cp)
+    }
+
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) fn iter(&self) -> impl Iterator<Item = &Reference> {
+        self.by_cp.values()
+    }
+
     pub fn read(
         notes: &[Option<Notes<'_>>],
         main: &Story<'_>,

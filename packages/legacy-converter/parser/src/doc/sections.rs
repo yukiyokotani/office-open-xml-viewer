@@ -69,6 +69,11 @@ impl Section {
         Ok(())
     }
 
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) fn note_properties(&self) -> NoteProperties {
+        self.properties.notes
+    }
+
     pub fn xml(&self) -> Result<String, String> {
         let mut xml = self.properties.xml()?;
         let mut references = String::new();
@@ -271,6 +276,25 @@ struct Properties {
     page_format: &'static str,
     page_restart: bool,
     page_start: u32,
+    /// MS-DOC 2.6.4 footnote/endnote SPRMs, retained raw (last modifier
+    /// wins). Only the direct model interprets them.
+    notes: NoteProperties,
+}
+
+/// Raw section note properties (MS-DOC 2.6.4 sprmSFpc, sprmSRncFtn,
+/// sprmSNFtn, sprmSNfcFtnRef, sprmSRncEdn, sprmSNEdn, sprmSNfcEdnRef,
+/// sprmSFEndnote). `None` means the SPRM is absent and its default applies.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(not(feature = "direct-doc"), allow(dead_code))]
+pub(super) struct NoteProperties {
+    pub footnote_position: Option<u8>,
+    pub footnote_restart: Option<u8>,
+    pub footnote_offset: Option<u16>,
+    pub footnote_format: Option<u16>,
+    pub endnote_restart: Option<u8>,
+    pub endnote_offset: Option<u16>,
+    pub endnote_format: Option<u16>,
+    pub endnote_at_section_end: Option<u8>,
 }
 
 impl Properties {
@@ -315,6 +339,7 @@ impl Properties {
             page_format: "decimal",
             page_restart: false,
             page_start: 0,
+            notes: NoteProperties::default(),
         };
         while !bytes.is_empty() {
             *budget = budget
@@ -345,6 +370,14 @@ impl Properties {
             bytes = &bytes[size..];
             match sprm {
                 0x300e => p.page_format = page_number_format(value[0])?,
+                0x303b => p.notes.footnote_position = Some(value[0]),
+                0x303c => p.notes.footnote_restart = Some(value[0]),
+                0x303e => p.notes.endnote_restart = Some(value[0]),
+                0x503f => p.notes.footnote_offset = Some(u16_at(value, 0)?),
+                0x5040 => p.notes.footnote_format = Some(u16_at(value, 0)?),
+                0x5041 => p.notes.endnote_offset = Some(u16_at(value, 0)?),
+                0x5042 => p.notes.endnote_format = Some(u16_at(value, 0)?),
+                0x3012 => p.notes.endnote_at_section_end = Some(value[0]),
                 // MS-DOC 2.2.5: later modifiers of the same property win.
                 // The older 16-bit operand has a SHOULD, not MUST, maximum
                 // of 32766. Do not reinterpret it as signed or clamp it.

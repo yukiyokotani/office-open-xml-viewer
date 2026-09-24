@@ -69,6 +69,12 @@ struct AcquiredDoc<'a> {
     /// MS-DOC 2.8.25 PlcfFldMom. Only the direct model consumes it, so a
     /// malformed table does not change the byte converter's behavior.
     main_fields: Result<header_fields::Table, String>,
+    /// PlcfFldFtn (0x12A) and PlcfFldEdn (0x21A), consumed only by the direct
+    /// model; CPs are relative to each note document.
+    note_fields: [Result<header_fields::Table, String>; 2],
+    /// MS-DOC 2.5.15 effective nFib, which scopes DOP versus section note
+    /// properties (MS-DOC 2.7.2).
+    effective_nfib: u16,
     note_references: notes::References,
     pictures: pictures::Store<'a>,
     floating: floating::Store<'a>,
@@ -90,6 +96,10 @@ enum Token {
     /// A field Word evaluates for display, projected by the direct model only.
     #[cfg(feature = "direct-doc")]
     EvaluatedField(Box<direct_model::fields::Evaluated>),
+    /// An automatic note-number character inside note text (the DOCX
+    /// `footnoteRef`/`endnoteRef`), projected by the direct model only.
+    #[cfg(feature = "direct-doc")]
+    NoteNumber(notes::Kind),
 }
 
 #[derive(Default)]
@@ -180,6 +190,10 @@ fn with_acquired_doc<T>(
     let pictures = pictures::Store::new(&data);
     let floating = floating::Store::read(&word, &table, ccp_text)?;
     let main_fields = header_fields::Table::read_at(&word, &table, 0x11a, ccp_text);
+    let note_fields = [(0x12a, 0x50), (0x21a, 0x60)].map(|(fib_offset, length_offset)| {
+        let length = u32_at(&word, length_offset)? as usize;
+        header_fields::Table::read_at(&word, &table, fib_offset, length)
+    });
     visit(AcquiredDoc {
         document_settings,
         story,
@@ -188,6 +202,8 @@ fn with_acquired_doc<T>(
         headers,
         formatting,
         main_fields,
+        note_fields,
+        effective_nfib,
         note_references,
         pictures,
         floating,
@@ -209,6 +225,8 @@ fn build_conversion(
         mut pictures,
         mut floating,
         main_fields: _,
+        note_fields: _,
+        effective_nfib: _,
     } = facts;
     let document_xml = build_formatted_story(
         &story,
@@ -948,6 +966,8 @@ fn build_formatted_story(
                             Token::NoteMarker | Token::NoteReference(_) => unreachable!(),
                             #[cfg(feature = "direct-doc")]
                             Token::EvaluatedField(_) => unreachable!(),
+                            #[cfg(feature = "direct-doc")]
+                            Token::NoteNumber(_) => unreachable!(),
                         });
                         xml.push_str("</w:r>");
                     }

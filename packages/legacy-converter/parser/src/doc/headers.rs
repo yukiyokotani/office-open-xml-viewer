@@ -10,6 +10,10 @@ pub(super) struct Headers<'a> {
     pub story: Story<'a>,
     pub entries: Vec<Entry>,
     fields: header_fields::Table,
+    /// Byte ranges of the six separator stories (MS-DOC 2.3.3), each
+    /// including its guard paragraph mark; empty when the story is absent.
+    #[cfg_attr(not(feature = "direct-doc"), allow(dead_code))]
+    separators: [Range<usize>; 6],
 }
 
 pub(super) struct Entry {
@@ -34,6 +38,13 @@ impl Headers<'_> {
     #[cfg(feature = "direct-doc")]
     pub(in crate::doc) fn entry_text<'a>(&'a self, entry: &Entry) -> &'a str {
         &self.story.text[entry.text.clone()]
+    }
+
+    /// The raw text of separator story `index` (0-2 footnote separator,
+    /// continuation separator and continuation notice; 3-5 the endnote ones).
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) fn separator_text(&self, index: usize) -> &str {
+        &self.story.text[self.separators[index].clone()]
     }
 
     /// MS-DOC 2.8.25 PlcfFldHdr, with CPs relative to the header document.
@@ -201,16 +212,17 @@ pub(super) fn read<'a>(
     {
         return Err(unsupported("Word header structure budget exceeded"));
     }
-    let entries = split(&story.text, &cps)?;
+    let (entries, separators) = split(&story.text, &cps)?;
     let fields = header_fields::Table::read(word, table, length)?;
     Ok(Some(Headers {
         story,
         entries,
         fields,
+        separators,
     }))
 }
 
-fn split(text: &str, cps: &[usize]) -> Result<Vec<Entry>, String> {
+fn split(text: &str, cps: &[usize]) -> Result<(Vec<Entry>, [Range<usize>; 6]), String> {
     // One forward UTF-16/UTF-8 translation for the aggregate header document:
     // no per-header scanning/cloning of the whole piece/property table.
     let mut chars = text.char_indices();
@@ -231,6 +243,7 @@ fn split(text: &str, cps: &[usize]) -> Result<Vec<Entry>, String> {
         }
         offsets.push(byte);
     }
+    let separators = std::array::from_fn(|i| offsets[i]..offsets[i + 1]);
     let mut entries = Vec::new();
     for i in 0..cps.len() - 1 {
         if cps[i] == cps[i + 1] {
@@ -257,7 +270,7 @@ fn split(text: &str, cps: &[usize]) -> Result<Vec<Entry>, String> {
             });
         }
     }
-    Ok(entries)
+    Ok((entries, separators))
 }
 
 #[cfg(test)]
@@ -335,7 +348,7 @@ mod tests {
         cps.extend([0, 5, 5, 5, 5, 5]);
         cps.extend([5; 6]);
         cps.extend([5, 7, 7, 7, 7, 7]);
-        let entries = split(text, &cps).unwrap();
+        let entries = split(text, &cps).unwrap().0;
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].section(), 0);
         assert_eq!(&text[entries[0].text.clone()], "A😀\r");

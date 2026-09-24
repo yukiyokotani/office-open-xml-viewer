@@ -10,6 +10,7 @@ use docx_model::{
 
 pub(in crate::doc) mod fields;
 mod headers;
+mod notes;
 mod payload;
 mod story;
 #[cfg(test)]
@@ -28,9 +29,6 @@ pub(super) fn build(
 ) -> Result<DirectDocResult, String> {
     if max_bytes == 0 {
         return Err("OUTPUT_TOO_LARGE".into());
-    }
-    if facts.note_stories.iter().any(Option::is_some) {
-        return Err(unsupported("direct DOC model does not yet support notes"));
     }
     if facts.formatting.missing_tables {
         return Err(unsupported(
@@ -75,6 +73,14 @@ pub(super) fn build(
     {
         return Err(unsupported("Word story structure budget exceeded"));
     }
+    notes::validate(
+        &facts.note_stories,
+        &facts.note_references,
+        facts.effective_nfib,
+        facts.document_settings.as_ref(),
+        &facts.sections,
+        facts.headers.as_ref(),
+    )?;
     let main_fields = match &facts.main_fields {
         Ok(table) => fields::StoryFields::analyze(&facts.story.text, table, &[])?,
         Err(error) => return Err(error.clone()),
@@ -88,6 +94,7 @@ pub(super) fn build(
     let mut table_sequence = 0;
     let mut numbering = super::numbering::direct::Store::default();
     numbering.begin_story()?;
+    let mut placed_note_references = 0;
     for (section_index, chunk) in chunks.iter().enumerate() {
         let ending = (section_index + 1 < chunks.len())
             .then(|| facts.sections[section_index].project_ending(section_index))
@@ -104,6 +111,11 @@ pub(super) fn build(
             section_index + 1 == chunks.len(),
         );
         main_fields.apply(base_cp, &mut paragraphs)?;
+        notes::restore_references(
+            &facts.note_references,
+            &mut paragraphs,
+            &mut placed_note_references,
+        )?;
         if section_index + 1 < chunks.len() {
             // split_story consumed the section-break form feed. The paragraph
             // mark formatting remains owned by the preceding physical CP.
@@ -161,6 +173,25 @@ pub(super) fn build(
         }
     }
 
+    notes::check_all_references_placed(&facts.note_references, placed_note_references)?;
+    let (mut footnotes, mut endnotes) = (Vec::new(), Vec::new());
+    for story in facts.note_stories.iter().flatten() {
+        let (fields, output) = match story.kind {
+            super::notes::Kind::Footnote => (&facts.note_fields[0], &mut footnotes),
+            super::notes::Kind::Endnote => (&facts.note_fields[1], &mut endnotes),
+        };
+        let fields = fields.as_ref().map_err(Clone::clone)?;
+        notes::project(
+            story,
+            fields,
+            &mut facts.formatting,
+            &mut facts.pictures,
+            &mut budget,
+            &mut table_sequence,
+            output,
+        )?;
+    }
+
     if facts.formatting.unsupported_character_properties
         || facts.formatting.unsupported_paragraph_properties
         || facts.formatting.unsupported_piece_properties
@@ -183,6 +214,8 @@ pub(super) fn build(
         footers: final_footers.unwrap_or_default(),
         settings,
         document_typography_settings,
+        footnotes,
+        endnotes,
         ..Document::default()
     };
     if !facts.pictures.has_selected_direct_resources()
@@ -300,6 +333,11 @@ fn direct_picture_references<'a>(
     }
     push_headers(&document.headers, &mut pending, budget)?;
     push_headers(&document.footers, &mut pending, budget)?;
+    for note in document.footnotes.iter().chain(&document.endnotes) {
+        for block in &note.content {
+            budget.push(&mut pending, RetainedBlock::Body(block))?;
+        }
+    }
 
     let mut references = Vec::new();
     while let Some(block) = pending.pop() {
@@ -439,12 +477,66 @@ mod tests {
         body_hps: Option<u16>,
         header_slots: Option<&[Option<&str>]>,
     ) -> Vec<u8> {
+        source_with_stories(
+            text,
+            sections,
+            authored_blank_header,
+            normal_hps,
+            body_hps,
+            header_slots,
+            None,
+        )
+    }
+
+    /// Footnote document for `source_with_stories`: note texts (each ending
+    /// with its paragraph mark), their main-story reference CPs and FRD
+    /// automatic flags, the six separator stories (each including its guard)
+    /// and an optional raw DOP.
+    pub(super) struct NotesFixture<'a> {
+        pub(super) notes: &'a [&'a str],
+        pub(super) references: &'a [(u32, bool)],
+        pub(super) separators: [&'a str; 6],
+        pub(super) dop: Option<Vec<u8>>,
+    }
+
+    /// Dop97-sized DOP with Word's default note properties: bottom-of-page
+    /// footnotes, continuous numbering from 1, end-of-document endnotes and
+    /// Arabic footnote/endnote formats.
+    pub(super) fn default_note_dop() -> Vec<u8> {
+        let mut dop = vec![0u8; 500];
+        dop[0] = 1 << 5;
+        dop[2..4].copy_from_slice(&(1u16 << 2).to_le_bytes());
+        dop[10..12].copy_from_slice(&720u16.to_le_bytes());
+        dop[52..54].copy_from_slice(&(1u16 << 2).to_le_bytes());
+        dop[54] = 3;
+        dop
+    }
+
+    pub(super) fn source_with_stories(
+        text: &str,
+        sections: &[(usize, u8, u16, u16, u16, u16)],
+        authored_blank_header: Option<bool>,
+        normal_hps: Option<u16>,
+        body_hps: Option<u16>,
+        header_slots: Option<&[Option<&str>]>,
+        notes: Option<&NotesFixture<'_>>,
+    ) -> Vec<u8> {
         let main_units = text.encode_utf16().count();
+        let footnote_text = notes
+            .map(|fixture| format!("{}\r", fixture.notes.concat()))
+            .unwrap_or_default();
         let (header, header_cps) = if let Some(slots) = header_slots {
             assert_eq!(slots.len(), sections.len() * 6);
-            let mut header = String::from("\r");
-            let mut cps = vec![0u32, 1, 1, 1, 1, 1, 1];
-            let mut cp = 1u32;
+            let (mut header, mut cps) = if let Some(fixture) = notes {
+                let mut cps = vec![0u32];
+                for separator in fixture.separators {
+                    cps.push(cps.last().unwrap() + separator.encode_utf16().count() as u32);
+                }
+                (fixture.separators.concat(), cps)
+            } else {
+                (String::from("\r"), vec![0u32, 1, 1, 1, 1, 1, 1])
+            };
+            let mut cp = *cps.last().unwrap();
             for slot in slots {
                 if let Some(content) = slot {
                     assert!(content.ends_with('\r'));
@@ -466,12 +558,18 @@ mod tests {
                 None,
             )
         };
-        let units: Vec<u16> = text.encode_utf16().chain(header.encode_utf16()).collect();
+        let units: Vec<u16> = text
+            .encode_utf16()
+            .chain(footnote_text.encode_utf16())
+            .chain(header.encode_utf16())
+            .collect();
         let text_offset = 0x400usize;
         let mut word = vec![0u8; text_offset + units.len() * 2];
         super::super::write_minimal_word97_test_header(&mut word);
         word[6..8].copy_from_slice(&1033u16.to_le_bytes());
         word[0x4c..0x50].copy_from_slice(&(main_units as u32).to_le_bytes());
+        word[0x50..0x54]
+            .copy_from_slice(&(footnote_text.encode_utf16().count() as u32).to_le_bytes());
         word[0x54..0x58].copy_from_slice(&(header.encode_utf16().count() as u32).to_le_bytes());
         word[0x1a2..0x1a6].copy_from_slice(&0u32.to_le_bytes());
         word[0x1a6..0x1aa].copy_from_slice(&21u32.to_le_bytes());
@@ -541,7 +639,34 @@ mod tests {
             }
             append_table_part(&mut word, &mut table, 0xf2, &hdd);
         }
-        for (story, fib_offset) in [(text, 0x11a), (header.as_str(), 0x122)] {
+        if let Some(fixture) = notes {
+            let mut references = Vec::new();
+            for (cp, _) in fixture.references {
+                references.extend(cp.to_le_bytes());
+            }
+            references.extend((main_units as u32).to_le_bytes());
+            for (_, automatic) in fixture.references {
+                references.extend(u16::from(*automatic).to_le_bytes());
+            }
+            append_table_part(&mut word, &mut table, 0xaa, &references);
+            let mut boundaries = Vec::new();
+            let mut cp = 0u32;
+            for note in fixture.notes {
+                boundaries.extend(cp.to_le_bytes());
+                cp += note.encode_utf16().count() as u32;
+            }
+            boundaries.extend(cp.to_le_bytes());
+            boundaries.extend((cp + 1).to_le_bytes());
+            append_table_part(&mut word, &mut table, 0xb2, &boundaries);
+            if let Some(dop) = &fixture.dop {
+                append_table_part(&mut word, &mut table, 0x192, dop);
+            }
+        }
+        for (story, fib_offset) in [
+            (text, 0x11a),
+            (header.as_str(), 0x122),
+            (footnote_text.as_str(), 0x12a),
+        ] {
             if let Some(field_table) = field_plc(story) {
                 append_table_part(&mut word, &mut table, fib_offset, &field_table);
             }
@@ -910,7 +1035,7 @@ mod tests {
         build_cfb(&[("WordDocument", word), ("0Table", table)])
     }
 
-    fn passive_special_source(source: &[u8]) -> Vec<u8> {
+    pub(super) fn passive_special_source(source: &[u8]) -> Vec<u8> {
         let cfb = CompoundFile::open(source).unwrap();
         let mut word = cfb.stream("WordDocument").unwrap();
         let table = cfb.stream("0Table").unwrap();

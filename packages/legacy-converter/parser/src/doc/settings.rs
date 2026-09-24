@@ -6,6 +6,24 @@ use super::{u16_at, u32_at, unsupported};
 pub(super) struct Properties {
     pub default_tab_twips: u16,
     pub even_and_odd_headers: bool,
+    #[cfg_attr(not(feature = "direct-doc"), allow(dead_code))]
+    pub notes: NoteProperties,
+}
+
+/// MS-DOC 2.7.2 DopBase fpc/rncFtn/nFtn/rncEdn/nEdn/epc and 2.7.4 Dop97
+/// nfcFtnRef/nfcEdnRef, retained raw. Except epc, MS-DOC scopes them to
+/// documents whose nFib is at most 0x00D9; later documents use section
+/// properties. `formats` is `None` when the DOP predates Dop97.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(feature = "direct-doc"), allow(dead_code))]
+pub(super) struct NoteProperties {
+    pub footnote_position: u8,
+    pub footnote_restart: u8,
+    pub footnote_start: u16,
+    pub endnote_restart: u8,
+    pub endnote_start: u16,
+    pub endnote_position: u8,
+    pub formats: Option<(u16, u16)>,
 }
 
 pub(super) fn read(word: &[u8], table: &[u8]) -> Result<Option<Properties>, String> {
@@ -29,10 +47,28 @@ pub(super) fn read(word: &[u8], table: &[u8]) -> Result<Option<Properties>, Stri
     if interval == 0 {
         return Err(unsupported("zero Word default tab interval"));
     }
+    let footnotes = u16_at(dop, 2)?;
+    let endnotes = u16_at(dop, 52)?;
+    let notes = NoteProperties {
+        footnote_position: (dop[0] >> 5) & 3,
+        footnote_restart: (footnotes & 3) as u8,
+        footnote_start: footnotes >> 2,
+        endnote_restart: (endnotes & 3) as u8,
+        endnote_start: endnotes >> 2,
+        endnote_position: (u16_at(dop, 54)? & 3) as u8,
+        // Dop97 (500 bytes) ends with nfcFtnRef, nfcEdnRef and two ignored
+        // display values; every later Dop embeds Dop97 at its start.
+        formats: if dop.len() >= 500 {
+            Some((u16_at(dop, 492)?, u16_at(dop, 494)?))
+        } else {
+            None
+        },
+    };
     // MS-DOC 2.7.3 DopBase.fFacingPages explicitly maps to evenAndOddHeaders.
     Ok(Some(Properties {
         default_tab_twips: interval,
         even_and_odd_headers: dop[0] & 1 != 0,
+        notes,
     }))
 }
 
