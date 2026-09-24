@@ -53,6 +53,7 @@ pub(super) fn build(
         .as_ref()
         .map(|settings| DocumentSettings {
             default_tab_stop: Some(f64::from(settings.default_tab_twips) / 20.0),
+            adjust_line_height_in_table: Some(settings.adjust_line_height_in_table),
             ..DocumentSettings::default()
         });
     let document_typography_settings = Some(DocumentTypographySettingsWire {

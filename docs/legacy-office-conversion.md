@@ -2331,6 +2331,15 @@ and their evidence are recorded next to the code in
   repeated TIstd border resets and drawn diagonals remain gated.
 - Main-story tables with nondefault position or wrapping properties
   (MS-DOC 2.6.3, 2.7.13) leave the ordinary flow as floating tables.
+- Cell paragraph frame properties that repeat the row's own table position
+  exactly are dropped: MS-DOC 2.4.3 consults them only when no row carries
+  table positioning. Framed cell paragraphs in rows without table
+  positioning remain gated (legacy framed tables have no specified layout).
+- Dop2000 Copts.fDontAdjustLineHeightInTable (MS-DOC 2.7.13, Dop offset
+  512 bit 3) is projected as the inverse `adjustLineHeightInTable`, so the
+  section line grid applies inside table cells as in Word. The decoded bit
+  is the inverse of the paired OOXML element in all 57 comparable private
+  inputs.
 
 Separate release-candidate builds were not compared for this checkpoint.
 The local private census admits ten of 59 DOC inputs (previously four); the
@@ -2344,6 +2353,7 @@ Admission is not visual fidelity.
 | DOC-TBL-3 | Width-before/after disagreement | Open: vary sprmTWidthBefore/After against the physical leading/trailing grid slot (fixed and AutoFit) and measure the row edges |
 | DOC-TBL-4 | Positioned-table exceptions | Open: controls for sprmTDyaAbs 0 (inline) and for left/zero X with zero Y and column/margin anchors (the MS-OI29500 2.1.162 counterpart), plus positioned tables in headers, footers and notes |
 | DOC-TBL-5 | Hide-mark, cell text flow, no-wrap | Open: the shared cell model has no hideMark, cell text direction or no-wrap facts; MS-DOC 2.6.3 (all cells empty) and ECMA-376 17.4.21 (per-cell end mark) describe hideMark differently, so Word controls are needed before a model capability is designed |
+| DOC-TBL-7 | Legacy framed tables | Open: a table whose cell paragraphs carry frame properties but whose rows carry no table positioning; build Word controls varying the frame anchors/offsets on the first-cell paragraph only versus every cell paragraph, and compare the table placement |
 | DOC-TBL-6 | Compatibility shading without a table style | Open: current Word's use of sprmTDefTableShd in rows without sprmTIstd, which the specification says style-capable readers ignore |
 
 ### Local direct-render survey

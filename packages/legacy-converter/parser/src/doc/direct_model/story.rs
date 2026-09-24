@@ -75,6 +75,16 @@ pub(super) fn project(
     if formatting.use_raw_table_shading() {
         resolve_table_cell_shading(&mut prepared, &table_context, formatting)?;
     }
+    // Row positions, keyed by TTP, for cell paragraphs that repeat them as
+    // paragraph frames (see table::Position::matches_cell_frame).
+    let mut row_positions = std::collections::BTreeMap::new();
+    for table in table_context.tables() {
+        for row in &table.rows {
+            if let Some(ttp) = prepared.get(row.ttp_id) {
+                row_positions.insert(row.ttp_id, ttp.table_properties.row.position.clone());
+            }
+        }
+    }
     // Only the main story passes a floating-drawing store.
     let mut tables = Writer::with_positioned_tables(table_sequence, floating.is_some());
     for (paragraph_index, prepared) in prepared.into_iter().enumerate() {
@@ -127,10 +137,18 @@ pub(super) fn project(
         let direct =
             formatting.direct_paragraph(style, table_style, mark_fc, mark_prm, &story.prcs)?;
         let mut paragraph = direct.paragraph;
-        if table_depth != 0 && paragraph.frame_pr.is_some() {
-            // The DOCX renderer positions frames only in the body flow; a
-            // framed cell paragraph would silently lay out in flow.
-            formatting.unsupported_paragraph_properties = true;
+        if let (Some(context), Some(frame)) = (context, paragraph.frame_pr.as_deref()) {
+            if row_positions
+                .get(&context.ttp_id)
+                .is_some_and(|position| position.matches_cell_frame(frame))
+            {
+                // The positioned table itself carries this placement.
+                paragraph.frame_pr = None;
+            } else {
+                // The DOCX renderer positions frames only in the body flow; a
+                // framed cell paragraph would silently lay out in flow.
+                formatting.unsupported_paragraph_properties = true;
+            }
         }
         if let Some((reference, marker)) = direct.numbering {
             paragraph.numbering = Some(Box::new(
@@ -3363,5 +3381,50 @@ mod tests {
         let projected = project(&sprm(0xf617, &[3, 0x68, 0x01])).unwrap();
         assert_eq!(projected.markers, ["a", "b"]);
         assert!(!projected.unsupported_table);
+    }
+
+    #[test]
+    fn native_story_drops_cell_frames_that_repeat_the_table_position() {
+        // Paragraph-relative vertical and margin-relative horizontal anchors,
+        // Y offset 158 twips (YAS_plusOne 159) and 187-twip side distances.
+        let position = [
+            sprm(0x360d, &[0x60]),
+            sprm(0x940f, &159i16.to_le_bytes()),
+            sprm(0x9410, &187u16.to_le_bytes()),
+            sprm(0x941e, &187u16.to_le_bytes()),
+        ]
+        .concat();
+        let framed_cell = |pc: u8, y: i16| {
+            [
+                cell(),
+                sprm(0x261b, &[pc]),
+                sprm(0x8419, &y.to_le_bytes()),
+                sprm(0x842f, &187u16.to_le_bytes()),
+                sprm(0x2423, &[2]),
+            ]
+            .concat()
+        };
+        let project = |cell_papx: Vec<u8>| {
+            try_project_table(
+                "a\u{7}\u{7}\r",
+                &[
+                    (0, 2, cell_papx),
+                    (2, 3, styled_row(11, &[], &position)),
+                    (3, 4, Vec::new()),
+                ],
+                StyleFixture {
+                    default_table_style: true,
+                    default_table_style_indent: true,
+                    ..StyleFixture::default()
+                },
+            )
+            .unwrap()
+        };
+        let same = project(framed_cell(0x60, 159));
+        assert!(!same.unsupported_paragraph);
+        assert!(!same.unsupported_table);
+        // A frame that disagrees with the table position stays gated.
+        assert!(project(framed_cell(0x60, 200)).unsupported_paragraph);
+        assert!(project(framed_cell(0x50, 159)).unsupported_paragraph);
     }
 }

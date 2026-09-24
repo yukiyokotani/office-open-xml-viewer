@@ -8,6 +8,10 @@ pub(super) struct Properties {
     pub even_and_odd_headers: bool,
     #[cfg_attr(not(feature = "direct-doc"), allow(dead_code))]
     pub notes: NoteProperties,
+    /// ECMA-376 Part 1 17.15.3.1 adjustLineHeightInTable, the inverse of
+    /// MS-DOC 2.7.13 Copts.fDontAdjustLineHeightInTable.
+    #[cfg_attr(not(feature = "direct-doc"), allow(dead_code))]
+    pub adjust_line_height_in_table: bool,
 }
 
 /// MS-DOC 2.7.2 DopBase fpc/rncFtn/nFtn/rncEdn/nEdn/epc and 2.7.4 Dop97
@@ -64,11 +68,23 @@ pub(super) fn read(word: &[u8], table: &[u8]) -> Result<Option<Properties>, Stri
             None
         },
     };
+    // MS-DOC 2.7.5 Dop2000 (544 bytes) places its 32-byte Copts after the
+    // 500-byte Dop97 and eight bytes of Dop2000 fields; 2.7.13 Copts begins
+    // with a four-byte Copts80, followed by the flag word whose fourth bit is
+    // fDontAdjustLineHeightInTable. 2.6.4 sprmSDyaLinePitch excludes table
+    // lines only "in case the fDontAdjustLineHeightInTable flag is set in the
+    // document Dop2000"; an older DOP has no such flag, so it is not set.
+    let adjust_line_height_in_table = if dop.len() >= 544 {
+        u32_at(dop, 512)? & (1 << 3) == 0
+    } else {
+        true
+    };
     // MS-DOC 2.7.3 DopBase.fFacingPages explicitly maps to evenAndOddHeaders.
     Ok(Some(Properties {
         default_tab_twips: interval,
         even_and_odd_headers: dop[0] & 1 != 0,
         notes,
+        adjust_line_height_in_table,
     }))
 }
 
@@ -117,6 +133,30 @@ mod tests {
                     .contains(&format!("w:val=\"{interval}\"")));
             }
         }
+    }
+
+    #[test]
+    fn dop2000_copts_controls_table_line_grid_adjustment() {
+        let adjust = |size: u32, flags: u32| {
+            let (word, mut table) = fixture(size, 720);
+            if size >= 544 {
+                // Dop at table offset 7; Copts flag word at Dop offset 512.
+                table[7 + 512..7 + 516].copy_from_slice(&flags.to_le_bytes());
+            }
+            read(&word, &table)
+                .unwrap()
+                .unwrap()
+                .adjust_line_height_in_table
+        };
+        for size in [544, 616, 694] {
+            assert!(adjust(size, 0));
+            assert!(!adjust(size, 1 << 3));
+            // Neighboring Copts bits are independent.
+            assert!(adjust(size, !(1 << 3)));
+        }
+        // Dop97 and older carry no fDontAdjustLineHeightInTable flag.
+        assert!(adjust(500, 0));
+        assert!(adjust(84, 0));
     }
 
     #[test]
