@@ -390,7 +390,7 @@ fn native_background_uses_the_retained_gradient_span() {
 }
 
 #[test]
-fn nonzero_leaf_rotation_vetoes_gradient_projection() {
+fn leaf_rotation_keeps_the_direct_gradient_but_not_the_withdrawn_xml_route() {
     let tree = drawing(&[shape(0xa00, gradient_properties(&[(4, 45 << 16)], None))]);
     let xml = render(
         &tree,
@@ -412,11 +412,11 @@ fn nonzero_leaf_rotation_vetoes_gradient_projection() {
     let SlideElement::Shape(shape) = &model.elements[0] else {
         panic!("shape")
     };
-    assert!(!matches!(shape.fill, Some(Fill::Gradient { .. })));
+    assert!(matches!(shape.fill, Some(Fill::Gradient { .. })));
 }
 
 #[test]
-fn scaled_groups_admit_but_rotated_or_reflected_ancestors_veto_gradients() {
+fn rotated_or_reflected_ancestors_keep_direct_gradients() {
     for (group_flags, rotation, admitted) in [
         (0, None, true),
         (0, Some(45 << 16), false),
@@ -450,7 +450,9 @@ fn scaled_groups_admit_but_rotated_or_reflected_ancestors_veto_gradients() {
         let SlideElement::Shape(shape) = &model.elements[0] else {
             panic!("shape")
         };
-        assert_eq!(matches!(shape.fill, Some(Fill::Gradient { .. })), admitted);
+        // Only the withdrawn XML route vetoes; the direct model keeps the
+        // shade, as PowerPoint's own DrawingML for such shapes does.
+        assert!(matches!(shape.fill, Some(Fill::Gradient { .. })));
     }
 }
 

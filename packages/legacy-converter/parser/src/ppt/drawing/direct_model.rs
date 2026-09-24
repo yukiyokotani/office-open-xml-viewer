@@ -337,24 +337,21 @@ impl Context<'_> {
             allow_line,
             image,
         );
-        let gradient_fill = if shape.props.rotation == 0
-            && ancestors
-                .iter()
-                .all(|group| group.rot == 0.0 && !group.flip_h && !group.flip_v)
-        {
-            paint
-                .project_gradient(
-                    &gradient,
-                    allow_fill,
-                    self.presentation.schemes[self.index].as_ref(),
-                    self.work_budget,
-                    self.model_budget,
-                )?
-                .map(|value| value.to_model(self.model_budget))
-                .transpose()?
-        } else {
-            None
-        };
+        // Rotation and flips (own or inherited from groups) do not change the
+        // projected shade: in every rotated or flipped corpus shape whose
+        // metroBlob shows PowerPoint's own DrawingML (90/180/270 degrees, with
+        // and without flips), `ang` stays 90 - fillAngle and only
+        // fRotateFillWithShape selects rotWithShape.
+        let gradient_fill = paint
+            .project_gradient(
+                &gradient,
+                allow_fill,
+                self.presentation.schemes[self.index].as_ref(),
+                self.work_budget,
+                self.model_budget,
+            )?
+            .map(|value| value.to_model(self.model_budget))
+            .transpose()?;
         let fill = gradient_fill.or(fill);
         self.push(
             SlideElement::Shape(ShapeElement {
