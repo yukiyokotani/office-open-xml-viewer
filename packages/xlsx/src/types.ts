@@ -91,6 +91,9 @@ export interface Worksheet {
    *  `colWidths[c] === 0`. Only `true` entries. */
   colHidden?: Record<number, boolean>;
   defaultColWidth: number;
+  /** `<sheetFormatPr baseColWidth>` (§18.3.1.81), when no explicit
+   *  `defaultColWidth` is authored. */
+  baseColWidth?: number;
   defaultRowHeight: number;
   /** `<sheetFormatPr customHeight>` (ECMA-376 §18.3.1.81). When true, rows
    *  without their own `ht` use the manually authored sheet default instead of
@@ -167,6 +170,11 @@ export interface Worksheet {
   defaultFontFamily?: string;
   /** Point size of the workbook's Normal-style font (`<fonts>[N].sz.val`). */
   defaultFontSize?: number;
+  /** Workbook theme major Jpan face (`<a:majorFont><a:font script="Jpan">`).
+   *  Used only for scheme-marked cells under the Japanese Mac Excel locale. */
+  themeJapaneseMajorFont?: string;
+  /** Workbook theme minor Jpan face; see `themeJapaneseMajorFont`. */
+  themeJapaneseMinorFont?: string;
   /** Workbook date system (`<workbookPr date1904>`, ECMA-376 §18.2.28),
    *  denormalized onto every worksheet by the parser so the cell formatter can
    *  resolve serial dates (§18.17.4.1) without a workbook back-reference.
@@ -991,6 +999,10 @@ export interface CellFont {
   size: number;
   color: string | null;
   name: string | null;
+  /** ECMA-376 §18.8.33: authored major/minor theme reference, distinct from name. */
+  scheme?: 'major' | 'minor';
+  /** Authored SpreadsheetML charset metadata; it does not select a face alone. */
+  charset?: number;
   /** ECMA-376 §18.4.13 ST_UnderlineValues — see RunFont.underlineStyle. */
   underlineStyle?: string;
   /** ECMA-376 §18.4.6 ST_VerticalAlignRun on a cell-level <font>. */
@@ -1130,6 +1142,10 @@ export interface XlsxChromeColors {
  * frame-local decoded image map, so these fields are not part of its public
  * method contract. */
 export interface RenderViewportOptions extends XlsxRenderViewportOptions {
+  /** @internal Exact Calibri resources retained in this canvas's FontFaceSet. */
+  officeFontRoutes?: Readonly<Record<string, import('@silurus/ooxml-core').OfficeFontFallbackRoute>>;
+  /** @internal Preserve the caller's explicit Google Fonts substitution opt-in. */
+  googleSubstitutes?: boolean;
   /** @internal Viewer chrome only; never applied to authored worksheet content. */
   chromeColors?: XlsxChromeColors;
   loadedImages?: Map<string, CanvasImageSource | null>;

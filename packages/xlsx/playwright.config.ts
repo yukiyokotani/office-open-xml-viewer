@@ -28,6 +28,10 @@ export default defineConfig({
       name: 'chrome',
       use: {
         channel: 'chrome',
+        // Built-in Excel date formats follow navigator.language. Pin the
+        // previous-renderer and candidate contexts to the same locale so a
+        // host-language change cannot masquerade as a sheet regression.
+        locale: process.env.VRT_LOCALE || 'en-US',
         // Keep exact-pixel VRT independent of GPU driver scheduling and
         // antialiasing differences between otherwise identical Chrome runs.
         launchOptions: {

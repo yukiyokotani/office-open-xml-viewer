@@ -1194,6 +1194,9 @@ function buildConcreteBodyLayoutKernel(
             return Object.freeze({
               layout: result.fragment,
               blockExtentPt: result.fragment.advancePt,
+              ...(result.fragment.unpaintedOverflowPt !== undefined
+                ? { unpaintedOverflowPt: result.fragment.unpaintedOverflowPt }
+                : {}),
               nextCursor: nextGroupCursor
                 ? Object.freeze({ kind: 'adjacent-table-group' as const, cursor: nextGroupCursor })
                 : null,
@@ -1660,6 +1663,9 @@ function buildConcreteBodyLayoutKernel(
           return Object.freeze({
             layout: result.fragment,
             blockExtentPt: result.fragment.advancePt,
+            ...(result.fragment.unpaintedOverflowPt !== undefined
+              ? { unpaintedOverflowPt: result.fragment.unpaintedOverflowPt }
+              : {}),
             nextCursor: result.nextCursor
               ? Object.freeze({ kind: 'table' as const, cursor: result.nextCursor })
               : null,

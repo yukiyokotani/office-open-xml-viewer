@@ -20,6 +20,8 @@ export interface FontResolution {
   readonly resolvedFamily: string;
   readonly route: CanvasFontRoute;
   readonly source: FontResolutionSource;
+  /** Identity of the registered resource that supplied this face, when known. */
+  readonly resourceIdentity?: string;
   readonly weight: number;
   readonly style: FontStyle;
   readonly diagnostics: readonly LayoutDiagnostic[];
@@ -35,6 +37,7 @@ export interface FontInventoryFace {
   readonly requestedFamily: string;
   readonly resolvedFamily: string;
   readonly source: Exclude<FontResolutionSource, 'generic' | 'native'>;
+  readonly resourceIdentity?: string;
   readonly weight?: number;
   readonly style?: FontStyle;
 }
@@ -152,6 +155,7 @@ export function createFontResolver(
           resolvedFamily: face.resolvedFamily,
           route: createCanvasFontRoute(familyList, 'registered'),
           source: face.source,
+          ...(face.resourceIdentity === undefined ? {} : { resourceIdentity: face.resourceIdentity }),
           weight,
           style,
           diagnostics,

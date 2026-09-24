@@ -154,6 +154,17 @@ pub(crate) fn parse_dxfs(doc: &roxmltree::Document, theme_colors: &[String]) -> 
                                 "name" => {
                                     f.name = fc.attribute("val").map(|s| s.to_string());
                                 }
+                                "scheme" => {
+                                    f.scheme = fc
+                                        .attribute("val")
+                                        .filter(|value| matches!(*value, "major" | "minor"))
+                                        .map(str::to_owned);
+                                }
+                                "charset" => {
+                                    f.charset = fc
+                                        .attribute("val")
+                                        .and_then(|value| value.parse::<u8>().ok());
+                                }
                                 "color" => {
                                     f.color = parse_color(&fc, theme_colors);
                                 }
@@ -308,6 +319,17 @@ pub(crate) fn parse_fonts(doc: &roxmltree::Document, theme_colors: &[String]) ->
                         }
                         "name" => {
                             f.name = child.attribute("val").map(|s| s.to_string());
+                        }
+                        "scheme" => {
+                            f.scheme = child
+                                .attribute("val")
+                                .filter(|value| matches!(*value, "major" | "minor"))
+                                .map(str::to_owned);
+                        }
+                        "charset" => {
+                            f.charset = child
+                                .attribute("val")
+                                .and_then(|value| value.parse::<u8>().ok());
                         }
                         "color" => {
                             f.color = parse_color(&child, theme_colors);
@@ -562,6 +584,24 @@ mod strict_namespace_tests {
 
     fn theme() -> Vec<String> {
         vec!["#111111".into(); 12]
+    }
+
+    #[test]
+    fn cell_font_retains_theme_scheme_and_charset_without_overriding_name() {
+        let xml = format!(
+            r#"<styleSheet xmlns="{X_NS_STRICT}"><fonts count="2">
+          <font><name val="Calibri"/><scheme val="minor"/><charset val="128"/></font>
+          <font><name val="Arial"/></font>
+        </fonts></styleSheet>"#
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let fonts = parse_fonts(&doc, &theme());
+        assert_eq!(fonts[0].name.as_deref(), Some("Calibri"));
+        assert_eq!(fonts[0].scheme.as_deref(), Some("minor"));
+        assert_eq!(fonts[0].charset, Some(128));
+        assert_eq!(fonts[1].name.as_deref(), Some("Arial"));
+        assert_eq!(fonts[1].scheme, None);
+        assert_eq!(fonts[1].charset, None);
     }
 
     #[test]

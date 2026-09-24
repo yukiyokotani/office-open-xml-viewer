@@ -73,6 +73,7 @@ export type BodyLayoutSequenceEntryFor<TSection> =
       kind: 'authored-break';
       source: SourceRef;
       break: AuthoredBreak;
+      origin?: 'authored' | 'coverPageSynthetic';
       parity?: 'odd' | 'even';
       sameSourceParagraphAsPrevious?: boolean;
     }>

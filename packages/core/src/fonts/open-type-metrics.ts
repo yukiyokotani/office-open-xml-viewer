@@ -2,6 +2,9 @@
  * format consumers decide which table and compatibility rule governs layout. */
 export interface OpenTypeLineMetrics {
   readonly unitsPerEm: number;
+  /** Positive OS/2 xAvgCharWidth / head.unitsPerEm, from this selected face.
+   * This is a font-wide scalar, never a substitute for shaped text advances. */
+  readonly averageCharWidthRatio?: number;
   readonly hheaAscent: number;
   readonly hheaDescent: number;
   readonly hheaLineGap: number;
@@ -11,6 +14,11 @@ export interface OpenTypeLineMetrics {
   readonly winAscent?: number;
   readonly winDescent?: number;
   readonly useTypoMetrics?: boolean;
+  /** OS/2 ulCodePageRange1 bits 17–20 identify the Far East code-page class
+   * observed by Word for Mac's automatic line allocation. `null` means the
+   * OS/2 version/table does not declare code-page ranges; cmap coverage is
+   * deliberately independent of this classification. */
+  readonly farEastCodePage?: boolean | null;
   /** True only when a Unicode cmap maps at least one East Asian code point to
    * a non-zero glyph in this face. */
   readonly hasEastAsianCmap: boolean;
@@ -380,9 +388,9 @@ export function parseOpenTypeLineMetrics(
   return readOpenTypeLineMetrics(bytes, faceIndex, false);
 }
 
-/** Strict coverage is a caller-resource opt-in. Keep the existing embedded
- * loader's cmap/line-metric policy unchanged until that default can be migrated
- * independently with visual regression evidence. */
+/** Strict coverage for any concrete resource whose design metrics may own
+ * layout. The caller and embedded loaders must both check the returned cmap
+ * ranges before attributing a shaped segment to this face. */
 export function parseOpenTypeResourceMetrics(
   bytes: Uint8Array,
   faceIndex?: number,
@@ -443,14 +451,27 @@ function readOpenTypeLineMetrics(
   if (unitsPerEm < 16 || unitsPerEm > 16384) return null;
 
   const os2 = tables.get(OS_2);
+  // OpenType OS/2 xAvgCharWidth is a signed FWORD at +2. A non-positive or
+  // unavailable value cannot define Word's observed inter-word-space floor.
+  const averageCharWidth = os2 !== undefined && os2.length >= 4
+    ? view.getInt16(os2.offset + 2)
+    : 0;
   const hasWindowsMetrics = os2 !== undefined && os2.length >= 78;
+  const hasCodePageRanges = os2 !== undefined && os2.length >= 86
+    && view.getUint16(os2.offset) >= 1;
   const unicodeRanges = resourceCoverage
     ? cmapUnicodeCoverage(view, tables.get(CMAP)) : undefined;
   return Object.freeze({
     unitsPerEm,
+    ...(averageCharWidth > 0
+      ? { averageCharWidthRatio: averageCharWidth / unitsPerEm }
+      : {}),
     hheaAscent: view.getInt16(hhea.offset + 4),
     hheaDescent: view.getInt16(hhea.offset + 6),
     hheaLineGap: view.getInt16(hhea.offset + 8),
+    farEastCodePage: hasCodePageRanges
+      ? (view.getUint32(os2.offset + 78) & 0x001e0000) !== 0
+      : null,
     hasEastAsianCmap: unicodeRanges
       ? rangesContainEastAsianGlyph(unicodeRanges)
       : cmapHasEastAsianGlyph(view, tables.get(CMAP)),

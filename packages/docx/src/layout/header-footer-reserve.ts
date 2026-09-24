@@ -1,5 +1,6 @@
 import { convergeLayoutSteps, type LayoutIteration } from './convergence.js';
 import { stableFingerprint } from './fingerprint.js';
+import type { StoryLayout } from './types.js';
 
 export interface HeaderFooterReserve {
   readonly top: number;
@@ -76,6 +77,53 @@ export function headerFooterOverflowReservePt(
   // alone cannot overlap the body or reduce the canonical body-flow domain.
   if (storyExtentPt === 0) return 0;
   return marginPt < 0 ? 0 : Math.max(0, storyExtentPt - (marginPt - distancePt));
+}
+
+/**
+ * ECMA-376 §17.6.11 bases a non-negative top margin on the extent of header
+ * text. Controlled Word output showed that an undecorated paragraph containing
+ * only U+0020 contributes no body overflow even at 36 pt, while a visible glyph
+ * at that size does. A paragraph border also contributes. This intentionally
+ * recognizes only that measured non-painting class; tabs, other whitespace,
+ * fields, objects, and decorations keep their acquired extent.
+ */
+export function headerStoryBodyReserveExtentPt(story: StoryLayout): number {
+  // The Office controls covered one paragraph. A longer blank header can
+  // carry its own vertical extent, so do not infer the same suppression there.
+  const onlyUndecoratedSpaces = story.blocks.length <= 1 && story.blocks.every((block) =>
+    block.kind === 'paragraph'
+    && block.borders.length === 0
+    && block.shading === undefined
+    && block.resources.length === 0
+    && block.drawings.length === 0
+    && block.textBoxes.length === 0
+    && block.events.length === 0
+    && block.exclusions.length === 0
+    && (block.lineNumbers?.length ?? 0) === 0
+    && (block.anchorFrames?.length ?? 0) === 0
+    && block.lines.every((line) =>
+      (line.barTabRules?.length ?? 0) === 0
+      && line.placements.every((placement) =>
+        placement.kind === 'text'
+        && /^ *$/.test(placement.text)
+        && placement.role !== 'field-result'
+        && placement.dependency === undefined
+        && placement.hyperlink === undefined
+        && placement.paintOps.every((op) => /^ *$/.test(op.text))
+        && placement.decorations.length === 0
+        && placement.highlight === undefined
+        && (placement.highlightFragments?.length ?? 0) === 0
+        && placement.background === undefined
+        && placement.runBorder === undefined
+        && (placement.runBorderFragments?.length ?? 0) === 0
+        && placement.ruby === undefined
+        && placement.emphasis === undefined
+        && placement.emphasisMark === undefined
+        && placement.noteReference === undefined,
+      ),
+    ),
+  );
+  return onlyUndecoratedSpaces ? 0 : story.advancePt;
 }
 
 export interface HeaderFooterReserveIteration<T> extends LayoutIteration {

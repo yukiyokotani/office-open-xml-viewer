@@ -292,15 +292,17 @@ describe('textbox rich text — per-run formatting', () => {
     acquireShapeTextBoxForTest(
       shape, 0, 0, 200, 100, ctx, 1, doc.fontFamilyClasses, state,
     );
-    expect(fontCalls.filter((font) => font.includes('Roman Face')))
-      .toEqual(expect.arrayContaining([expected]));
-    expect(fontCalls.filter((font) => font.includes('Roman Face')).every((font) => font === expected)).toBe(true);
+    // Native line-metric probes use larger sizes; the authored 10px route must
+    // still be identical for text acquisition and paint.
+    const authoredCalls = fontCalls.filter((font) => font.includes('Roman Face') && font.includes(' 10px '));
+    expect(authoredCalls).toContain(expected);
+    expect(authoredCalls.every((font) => font === expected)).toBe(true);
 
     fontCalls.length = 0;
     acquireAndPaintShapeTextBox(shape, 0, 0, 200, 100, ctx, 1, doc.fontFamilyClasses, new Map(), state);
-    expect(fontCalls.filter((font) => font.includes('Roman Face')))
-      .toEqual(expect.arrayContaining([expected]));
-    expect(fontCalls.filter((font) => font.includes('Roman Face')).every((font) => font === expected)).toBe(true);
+    const paintedCalls = fontCalls.filter((font) => font.includes('Roman Face') && font.includes(' 10px '));
+    expect(paintedCalls).toContain(expected);
+    expect(paintedCalls.every((font) => font === expected)).toBe(true);
   });
 
   /** Tokens belonging to a substring, with the font each was drawn with. */

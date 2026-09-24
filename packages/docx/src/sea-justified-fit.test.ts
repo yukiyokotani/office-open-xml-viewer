@@ -12,14 +12,10 @@ import type {
 // against the Word PDF of the purpose-built calibration fixture (21-paragraph
 // overflow sweep + 8 no-space-run placements; record on the issue):
 //
-// 1. ZERO trailing-space shrink on SEA lines. Word admits a paragraph-final
-//    word past the column edge on a non-justified-painted line only for Latin
-//    (the SPACE_SHRINK_RATIO budget, demo-verified); on lines carrying SEA
-//    script Word wraps at natural fit for EVERY overflow ≥ +1pt across 5/9/13
-//    inter-phrase spaces (admits only the negative-overflow controls). The
-//    allowance is therefore suppressed per line when the line contains SEA
-//    text. Latin/CJK lines keep the 25% drawable budget (sample-1 p3/p6,
-//    sample-10 title).
+// 1. SEA lines wrap at natural fit for every tested overflow ≥ +1pt across
+//    5/9/13 inter-phrase spaces (negative-overflow controls fit). Independent
+//    Latin Word controls also wrap at natural width; the former global 25%
+//    trailing-space allowance was not a sound cross-script policy.
 //
 // 2. Dictionary boundaries are SECONDARY break opportunities. A no-space SEA
 //    chunk that does not fit the remaining width of a non-empty line moves to
@@ -206,12 +202,10 @@ describe('issue #991 — SEA justified fit (Word calibration-fixture rules)', ()
     expect(norm(lines.join(''))).toBe('มากน้อยน้อยစုစုစုစု');
   });
 
-  it('Rule 1 guard: a Latin line keeps the 25% drawable trailing-space budget', async () => {
-    // 'AAAA ' ×3 = 180, final 'AAAA' = 48 ⇒ natural end 228, column 225 ⇒
-    // overflow 3 ≤ 0.25×36 — the Latin closing line still admits (issue #698
-    // behavior; full matrix in justify-shrink-overshoot.test.ts).
+  it('Rule 1 guard: a Latin line also wraps at natural width', async () => {
+    // 'AAAA ' ×3 = 180, final 'AAAA' = 48 ⇒ natural end 228, column 225.
     const lines = await renderLines(textPara('AAAA AAAA AAAA AAAA', 'left'), 225);
-    expect(lines.length).toBe(1);
+    expect(lines.length).toBe(2);
   });
 
   it('Rule 2: a no-space chunk that fits a full line moves whole instead of splitting', async () => {

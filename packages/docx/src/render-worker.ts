@@ -11,6 +11,8 @@ import init, { DocxArchive, reinit } from './wasm/docx_parser.js';
 import {
   decodeDataUrl,
   preloadGoogleFonts,
+  loadOfficeFontFallbacks,
+  unloadOfficeFontFallbacks,
   unloadGoogleFonts,
   unregisterEmbeddedFonts,
   WasmParserHost,
@@ -36,9 +38,8 @@ import {
 } from '@silurus/ooxml-core/worker';
 import { prepareMathRuns, renderLayoutSourceToCanvas } from './renderer';
 import { createLayoutServices } from './layout-runtime.js';
-import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts';
+import { DOCX_GOOGLE_FONTS, docxFontPreloadNames, docxOfficeFontFallbackRequests } from './google-fonts';
 import { loadEmbeddedFonts } from './embedded-fonts';
-import { docxResolvedFontMetricCandidates } from './document-content.js';
 import type {
   RenderWorkerResponse,
   RenderWorkerWireRequest,
@@ -105,6 +106,7 @@ const LAYOUT_PROGRESS_POST_INTERVAL_MS = 100;
 let renderers: LoadedWorkerRenderers = {};
 let googleFontFaces: FontFace[] = [];
 let embeddedFontFaces: FontFace[] = [];
+let officeFontFaces: FontFace[] = [];
 const rawParts = new BoundedRawPartCache({
   maxEntries: HARD_MAX_RAW_PART_CACHE_ENTRIES,
   maxBytes: HARD_MAX_RAW_PART_CACHE_BYTES,
@@ -183,6 +185,10 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
         unregisterEmbeddedFonts(embeddedFontFaces);
         embeddedFontFaces = [];
       }
+      if (officeFontFaces.length > 0) {
+        unloadOfficeFontFallbacks(officeFontFaces);
+        officeFontFaces = [];
+      }
       // Cached blobs belong to the previous document; serving them after a
       // re-parse would silently return the wrong file's image.
       rawParts.clear();
@@ -250,20 +256,10 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
         comments: model.comments ?? [],
         revisions: model.revisions ?? [],
       };
-      let googleFaces: FontFace[] = [];
-      if (req.useGoogleFonts) {
-        // Pagination measures text, so fonts must land before canonical layout —
-        // same ordering the main-mode load() guarantees.
-        googleFaces = await preloadGoogleFonts(
-          docxFontPreloadNames(model, req.cjkFallback),
-          DOCX_GOOGLE_FONTS,
-        );
-      }
-      googleFontFaces = googleFaces;
       // ECMA-376 §17.8.1 / §17.8.3 — register embedded fonts into the worker's
       // FontFaceSet (self.fonts) before pagination measures text. Bytes are read
       // straight from the retained archive (extract_image reads any zip entry).
-      let embeddedFonts: Awaited<ReturnType<typeof loadEmbeddedFonts>> = { faces: [], metrics: {} };
+      let embeddedFonts: Awaited<ReturnType<typeof loadEmbeddedFonts>> = { faces: [], metrics: {}, routes: [] };
       if (model.embeddedFonts?.length) {
         embeddedFonts = await loadEmbeddedFonts(model, async (p) => {
           const loaded = host.archive;
@@ -272,19 +268,28 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
         });
       }
       embeddedFontFaces = embeddedFonts.faces;
+      const officeFonts = await loadOfficeFontFallbacks(docxOfficeFontFallbackRequests(model).filter((request) =>
+        !embeddedFonts.routes.some((route) => route.requestedFamily.toLowerCase() === request.family.toLowerCase()
+          && route.weight === (request.weight ?? 400) && route.style === (request.style ?? 'normal'))));
+      officeFontFaces = officeFonts.faces;
+      let googleFaces: FontFace[] = [];
+      if (req.useGoogleFonts) {
+        // Pagination measures text, so each admitted face must be available
+        // before canonical layout in both worker and main mode.
+        const names = docxFontPreloadNames(model, req.cjkFallback).filter((name) =>
+          name?.toLowerCase() !== 'calibri' || !officeFonts.routes.calibri);
+        googleFaces = await preloadGoogleFonts(names, DOCX_GOOGLE_FONTS);
+      }
+      googleFontFaces = googleFaces;
       const preparedMath = renderers.math && source.mathOccurrences.length > 0
         ? await prepareMathRuns(model, renderers.math)
         : undefined;
       const layoutServices = createLayoutServices(source, {
         fontMetrics: embeddedFonts.metrics,
-        measureResolvedFontMetrics: true,
-        resolvedFontMetricCandidates: docxResolvedFontMetricCandidates(
-          model,
-          source.fontFamilyCharsets,
-        ),
         useGoogleFonts: !!req.useGoogleFonts,
         cjkFallback: req.cjkFallback,
-        embeddedFaces: embeddedFonts.faces,
+        embeddedRoutes: embeddedFonts.routes,
+        officeRoutes: Object.values(officeFonts.routes),
         googleFaces,
         mathResources: preparedMath?.records,
         mathDrawables: preparedMath?.drawables,

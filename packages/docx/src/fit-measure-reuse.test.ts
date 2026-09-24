@@ -140,7 +140,8 @@ describe('M-1 fit-check measurement reuse for non-split body fragments', () => {
     // origin rather than keeping the rejected cursor geometry.
     const filler = para('filler');
     const keep = para(Array.from({ length: 20 }, () => 'w').join(' '), { keepLines: true });
-    const model = doc([filler as unknown as BodyElement, keep as unknown as BodyElement], 40);
+    // The keep paragraph fits by itself on a fresh page, but not after filler.
+    const model = doc([filler as unknown as BodyElement, keep as unknown as BodyElement], 50);
 
     const retained = projection(model);
     expect(retained).toHaveLength(2);

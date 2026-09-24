@@ -23,6 +23,15 @@ describe('normalizeFontFamily — modern family respects w:pitch (§17.8.3.14)',
     expect(chain).toContain('"Courier New", monospace');
   });
 
+  it('uses fixed pitch when its fontTable spelling differs from the run and class', () => {
+    const chain = normalizeFontFamilyUncached(
+      'fixedface',
+      { FixedFace: 'modern' },
+      { FIXEDFACE: 'fixed' },
+    );
+    expect(chain).toContain('"Courier New", monospace');
+  });
+
   it('keeps a CJK fallback ahead of Latin monospace for fixed East Asian faces', () => {
     const chain = normalizeFontFamilyUncached(
       'ＭＳ ゴシック',
@@ -47,6 +56,44 @@ describe('normalizeFontFamily — modern family respects w:pitch (§17.8.3.14)',
 });
 
 describe('normalizeFontFamily — Arabic substitute fonts', () => {
+  it('respects an explicit fontTable family before an optional name-based substitute', () => {
+    const swiss = normalizeFontFamilyUncached('Sakkal Majalla', {
+      'Sakkal Majalla': 'swiss',
+    });
+    const roman = normalizeFontFamilyUncached('Univers Next Arabic', {
+      'Univers Next Arabic': 'roman',
+    });
+    expect(swiss.indexOf('"Noto Naskh Arabic"'))
+      .toBeGreaterThan(swiss.indexOf('"Arial"'));
+    expect(swiss.endsWith('sans-serif')).toBe(true);
+    expect(roman.indexOf('"Noto Sans Arabic"'))
+      .toBeGreaterThan(roman.indexOf('"Times New Roman"'));
+    expect(roman.endsWith('serif')).toBe(true);
+  });
+
+  it('uses the explicit fontTable class when its family casing differs from the run', () => {
+    const swiss = normalizeFontFamilyUncached('sakkal majalla', {
+      'Sakkal Majalla': 'swiss',
+    });
+    const roman = normalizeFontFamilyUncached('univers next arabic', {
+      'Univers Next Arabic': 'roman',
+    });
+    expect(swiss).toBe(normalizeFontFamilyUncached('sakkal majalla', {
+      'sakkal majalla': 'swiss',
+    }));
+    expect(roman).toBe(normalizeFontFamilyUncached('univers next arabic', {
+      'univers next arabic': 'roman',
+    }));
+  });
+
+  it('declines conflicting case variants instead of choosing a document-order class', () => {
+    const ambiguous = normalizeFontFamilyUncached('sakkal majalla', {
+      'Sakkal Majalla': 'roman',
+      'SAKKAL MAJALLA': 'swiss',
+    });
+    expect(ambiguous).toBe(normalizeFontFamilyUncached('sakkal majalla', {}));
+  });
+
   it('puts the Arabic substitute first so Latin/digits resolve from the same family as Arabic', () => {
     // Sakkal Majalla is family="auto" in fontTable; the run carries both
     // Arabic glyphs and Latin/digits. The Arabic substitute must lead the chain
@@ -61,8 +108,8 @@ describe('normalizeFontFamily — Arabic substitute fonts', () => {
   });
 
   it('routes traditional Naskh faces to a serif Latin companion', () => {
-    // Word's PDF export of sample-7 renders Sakkal Majalla's Latin with serifs,
-    // so a serif Latin generic precedes the sans generics.
+    // A traditional Naskh substitute keeps a serif Latin companion before
+    // generic sans faces when fontTable offers no explicit family class.
     const chain = normalizeFontFamily('Traditional Arabic');
     expect(chain).toContain('"Noto Serif"');
     expect(chain.endsWith('serif')).toBe(true);

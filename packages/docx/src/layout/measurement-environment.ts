@@ -88,6 +88,7 @@ export function paragraphMeasurementEnvironment(
     balanceSingleByteDoubleByteWidth:
       state.layoutSettings.compat.balanceSingleByteDoubleByteWidth,
     characterSpacingControl: state.layoutSettings.characterSpacingControl,
+    lineWrapLikeWord6: state.layoutSettings.compat.lineWrapLikeWord6,
     resolvedLocalFonts: state.resolvedLocalFonts,
     layoutServices: state.layoutServices,
     verticalGlyphMeasurement: state.verticalGlyphMeasurement,
@@ -101,11 +102,13 @@ export function segmentEnvironmentOf(
 ): LineLayoutEnvironment {
   if (!state.verticalAllRotated
     && state.layoutSettings.characterSpacingControl === undefined
+    && !state.layoutSettings.compat.lineWrapLikeWord6
     && !state.layoutSettings.compat.balanceSingleByteDoubleByteWidth) return state;
   return {
     ...state,
     ...(state.verticalAllRotated ? { verticalCJK: false } : {}),
     characterSpacingControl: state.layoutSettings.characterSpacingControl,
+    lineWrapLikeWord6: state.layoutSettings.compat.lineWrapLikeWord6,
     balanceSingleByteDoubleByteWidth:
       state.layoutSettings.compat.balanceSingleByteDoubleByteWidth,
   };

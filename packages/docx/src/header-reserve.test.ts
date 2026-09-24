@@ -77,6 +77,12 @@ function makeRecordingCanvas(): { canvas: HTMLCanvasElement; calls: Call[] } {
   return { canvas: canvas as unknown as HTMLCanvasElement, calls };
 }
 
+// Keep this geometry-only fixture outside the reference-font catalog. These
+// tests exercise header reservation and vertical alignment; binding them to a
+// real catalogued face would make their fixed synthetic Canvas metrics compete
+// with that face's real design metrics.
+const TEST_FONT_FAMILY = 'Header Reserve Test Serif';
+
 function para(text: string): DocParagraph {
   return {
     type: 'paragraph', alignment: 'left',
@@ -86,11 +92,11 @@ function para(text: string): DocParagraph {
     runs: text
       ? [{
           type: 'text', text, bold: false, italic: false, underline: false,
-          strikethrough: false, fontSize: 10, color: null, fontFamily: 'Times New Roman',
+          strikethrough: false, fontSize: 10, color: null, fontFamily: TEST_FONT_FAMILY,
           fontFamilyEastAsia: '', isLink: false, background: null, vertAlign: null, hyperlink: null,
         } as DocParagraph['runs'][number]]
       : [],
-    defaultFontSize: 10, defaultFontFamily: 'Times New Roman', widowControl: false,
+    defaultFontSize: 10, defaultFontFamily: TEST_FONT_FAMILY, widowControl: false,
   } as unknown as DocParagraph;
 }
 
@@ -118,7 +124,7 @@ function docWithHeader(
     body,
     headers: { default: header, first: null, even: null },
     footers: { default: null, first: null, even: null },
-    fontFamilyClasses: { 'Times New Roman': 'roman' },
+    fontFamilyClasses: { [TEST_FONT_FAMILY]: 'roman' },
     footnotes: [],
   } as unknown as DocxDocumentModel;
 }

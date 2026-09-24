@@ -17,6 +17,7 @@ const RESOLVED_EA_METRICS = {
   'arbitrary resolved ea': {
     family: RESOLVED_EA_FAMILY,
     eastAsianLineHeightRatio: RESOLVED_EA_RATIO,
+    sourceIdentity: 'test-resource:arbitrary-ea',
   },
 };
 

@@ -81,8 +81,9 @@ function measureContext():
  */
 export async function loadLocalFontMetrics(
   requests: readonly LocalFontMetricRequest[],
+  targetFontSet: FontFaceSet | null = activeFontSet(),
 ): Promise<LoadedLocalFontMetrics> {
-  const set = activeFontSet();
+  const set = targetFontSet;
   if (!set || typeof FontFace === 'undefined') return { faces: [], metrics: {} };
 
   const faces: FontFace[] = [];

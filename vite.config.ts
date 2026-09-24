@@ -14,18 +14,17 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  * Vite **library mode** force-inlines every `?url` asset as a
  * `data:<mime>;base64,…` string regardless of `assetsInlineLimit` (a number or a
  * `() => false` function does NOT override it — `build.lib` unconditionally
- * returns `true` from Vite's internal `shouldInline`). Two heavy asset kinds ride
- * on this path:
+ * returns `true` from Vite's internal `shouldInline`). Heavy asset kinds on
+ * this path include:
  *   - the three parser WASM modules (`*_parser_bg.wasm?url`, ~0.6–0.7 MB each) —
  *     base64 inflates them +33 % and blocks `WebAssembly.compileStreaming`
  *     (a data URL cannot be fetch-streamed; the worker must `atob` by hand);
  *   - the MathJax + STIX Two Math engine (`assets/mathjax-stix2.js?url`, ~3 MB) —
  *     inlined it turned the opt-in `math.mjs` chunk into a 4.1 MB base64 blob,
  *     even though consumers only import it when a document actually has equations.
- *
- * All of these are `?url` imports in a single owner module each (the format
- * main-thread handles — `document.ts` / `presentation.ts` / `workbook.ts` — and
- * `math/engine.ts`). We intercept the `?url` variant here, `emitFile` the bytes
+ * The parser and math assets use plain `?url` imports in their owner modules
+ * (the format main-thread handles and `math/engine.ts`). We intercept those
+ * imports here, `emitFile` the bytes
  * as an asset next to the chunk, and hand back the standard ESM asset reference
  * `new URL('<name>', import.meta.url)` — the form Vite / webpack 5 / Rollup /
  * Turbopack rewrite when they re-bundle our `.mjs`, and which resolves
@@ -70,6 +69,18 @@ export function wasmAssetUrl(): Plugin {
       // webpack consumer. The single-level form is the exact shape webpack 5 /
       // Turbopack / Vite statically rewrite when re-bundling our `.mjs`.
       return `export default import.meta.ROLLUP_FILE_URL_${referenceId};`;
+    },
+    renderChunk(code, _chunk, output) {
+      if (output.format !== 'cjs') return null;
+      // Oxc lowers `import.meta` to `{}` before Rolldown resolves emitted
+      // asset URLs for CJS. Restore the Node entry's own file URL for static
+      // sidecars; otherwise importing the CJS package throws immediately.
+      const restored = code.replace(
+        /new URL\((["'`])([^"'`]+\.(?:wasm|ttf))\1,\s*\{\}\.url\)\.href/g,
+        (_match, _quote, file) =>
+          `new URL(${JSON.stringify(file)}, require('node:url').pathToFileURL(__filename)).href`,
+      );
+      return restored === code ? null : { code: restored, map: null };
     },
   };
 }

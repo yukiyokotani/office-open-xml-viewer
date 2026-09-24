@@ -9,6 +9,7 @@ import {
   convergeExactState,
 } from './convergence.js';
 import { LayoutInvariantError } from './diagnostics.js';
+import { adjustForWidowOrphan } from '../line-fit-policy.js';
 import { sliceParagraphLayout } from './paragraph.js';
 import {
   layoutTable,
@@ -18,6 +19,7 @@ import {
 } from './table.js';
 import {
   wordClipsOverPageCantSplitRow,
+  wordRelocatesAuthoredHeightRowAtPageBoundary,
   wordRelocatesParallelParagraphRowCut,
 } from './table-compatibility.js';
 import type {
@@ -75,6 +77,10 @@ export interface TableRowFragmentLayout extends TableRowLayout {
 }
 
 export interface TableFragmentLayout extends TableLayout {
+  /** Height beyond the fresh page band retained by an over-page row but
+   * clipped from paint. It still occupies physical pages before a following
+   * authored page break; see WORD_OVER_PAGE_CELL_BREAK_OCCUPANCY. */
+  readonly unpaintedOverflowPt?: number;
   readonly rows: readonly TableRowFragmentLayout[];
   readonly floatingTables: readonly FloatingTablePlacementLayout[];
   readonly resolvedFloatingTables: readonly ResolvedFloatingTablePlacementLayout[];
@@ -709,10 +715,12 @@ function paragraphSlice(
 
 function selectParagraph(
   paragraph: ParagraphLayout,
-  sourceBlockIndex: number,
+  sourceBlock: TableCellBlockInput,
   start: number,
   selectedBlocks: readonly TableCellBlockInput[],
   availableHeightPt: number,
+  freshAvailableHeightPt: number,
+  canGainPageSpace: boolean,
 ): Readonly<{
   block: TableCellBlockInput | null;
   range: BlockContinuationRange | null;
@@ -723,16 +731,41 @@ function selectParagraph(
   let lineEnd = start;
   for (let candidateEnd = start + 1; candidateEnd <= paragraph.lines.length; candidateEnd += 1) {
     const candidate = paragraphSlice(paragraph, start, candidateEnd);
-    const candidateBlock = { layout: candidate, sourceBlockIndex } as const;
+    const candidateBlock = { ...sourceBlock, layout: candidate };
     if (measureTableCellBlockFlowHeightPt([...selectedBlocks, candidateBlock])
       > availableHeightPt + EPSILON_PT) break;
-    selected = candidate;
     lineEnd = candidateEnd;
   }
-  if (!selected) return { block: null, range: null, lineEnd: start, advancePt: 0 };
+  if (lineEnd === start) return { block: null, range: null, lineEnd: start, advancePt: 0 };
+  const canRelocate = start === 0 && (selectedBlocks.length > 0 || canGainPageSpace);
+  // §17.3.1.14 / §17.3.1.44 apply to cell paragraphs too. The selected
+  // line count is the retained paragraph's count; no substitute-font or
+  // manual-break-specific compatibility rule changes it here.
+  if (sourceBlock.keepLines === true
+    && lineEnd < paragraph.lines.length
+    && canRelocate
+    && measureTableCellBlockFlowHeightPt([{ ...sourceBlock, layout: paragraph }])
+      <= freshAvailableHeightPt + EPSILON_PT) {
+    return { block: null, range: null, lineEnd: start, advancePt: 0 };
+  }
+  for (;;) {
+    const widow = adjustForWidowOrphan({
+      widowControl: sourceBlock.widowControl === true,
+      start,
+      end: lineEnd,
+      totalLines: paragraph.lines.length,
+      canRelocate,
+    });
+    if (widow.kind === 'relocate') {
+      return { block: null, range: null, lineEnd: start, advancePt: 0 };
+    }
+    if (widow.kind !== 'dropLastLine') break;
+    lineEnd -= 1;
+  }
+  selected = paragraphSlice(paragraph, start, lineEnd);
   return {
-    block: { layout: selected, sourceBlockIndex },
-    range: { kind: 'paragraph', blockIndex: sourceBlockIndex, lineStart: start, lineEnd },
+    block: { ...sourceBlock, layout: selected },
+    range: { kind: 'paragraph', blockIndex: sourceBlock.sourceBlockIndex, lineStart: start, lineEnd },
     lineEnd,
     advancePt: selected.advancePt,
   };
@@ -743,6 +776,8 @@ function selectCell(
   cell: TableCellLayoutInput,
   cursor: TableCellFragmentCursor,
   availableContentHeightPt: number,
+  freshAvailableContentHeightPt: number,
+  canGainPageSpace: boolean,
   context: TableFragmentContext,
 ): SelectedCell {
   if (cell.verticalMerge === 'continue') {
@@ -780,10 +815,12 @@ function selectCell(
       }
       const selected = selectParagraph(
         child,
-        sourceBlock.sourceBlockIndex,
+        sourceBlock,
         paragraphLineStart,
         blocks,
         availableContentHeightPt,
+        freshAvailableContentHeightPt,
+        canGainPageSpace,
       );
       if (!selected.block || !selected.range) break;
       blocks.push({ ...selected.block, ...(sourceBlock.structuralTrailing
@@ -849,6 +886,8 @@ function partialRow(
   row: TableRowLayoutInput,
   cursor: TableFragmentCursor,
   availableHeightPt: number,
+  freshAvailableHeightPt: number,
+  canGainPageSpace: boolean,
   context: TableFragmentContext,
 ): Readonly<{
   selected: SelectedRow | null;
@@ -878,11 +917,17 @@ function partialRow(
     0,
     availableHeightPt - verticalInsetsPt - spacingInsetsPt - boundaryInsetsPt,
   );
+  const freshAvailableContentHeightPt = Math.max(
+    0,
+    freshAvailableHeightPt - verticalInsetsPt - spacingInsetsPt - boundaryInsetsPt,
+  );
   const selectedCells = row.cells.map((cell, index) => selectCell(
     source,
     cell,
     cellCursors[index]!,
     availableContentHeightPt,
+    freshAvailableContentHeightPt,
+    canGainPageSpace,
     context,
   ));
   const cellMadeProgress = (cell: SelectedCell, index: number) => (
@@ -1057,6 +1102,7 @@ function materializeFragment(
     ...laidOut,
     flowBounds,
     ...(clipAtPageEnd ? {
+      unpaintedOverflowPt: Math.max(0, laidOut.advancePt - clippedHeightPt),
       inkBounds: flowBounds,
       clipBounds: flowBounds,
       advancePt: clippedHeightPt,
@@ -1131,6 +1177,11 @@ export function takeTableFragment(
     }
   }
 
+  const repeatedHeaderHeightPt = context.availableHeightPt - availablePt;
+  const freshSourceHeightPt = Math.max(
+    0,
+    context.freshPageHeightPt - repeatedHeaderHeightPt,
+  );
   let nextCursor: TableFragmentCursor | null = cursor;
   let rowIndex = cursor.rowIndex;
   const retainedRemainderFits = cursor.rowFragmentIndex === 0
@@ -1234,6 +1285,20 @@ export function takeTableFragment(
       // only the explicit compatibility mode clips it.
     }
 
+    if (canTakeWhole && wordRelocatesAuthoredHeightRowAtPageBoundary({
+      compatibility: context.compatibility,
+      heightRule: row.heightRule,
+      repeatedHeader: row.repeatedHeader,
+      authoredHeightPt: row.heightPt,
+      availableHeightPt: availablePt,
+      wholeHeightPt,
+      freshAvailableHeightPt: freshSourceHeightPt,
+      epsilonPt: EPSILON_PT,
+    })) {
+      if (selected.some((item) => item.ownership === 'source')) break;
+      return { fragment: null, nextCursor: cursor, requiresFreshPage: true };
+    }
+
     // Floating overflow is not defined by §17.4.57. The retained floating
     // adapter preserves the established row-boundary policy: after relocation
     // to a fresh band, one over-band row is emitted once instead of being
@@ -1252,8 +1317,11 @@ export function takeTableFragment(
       break;
     }
 
+    const canGainPageSpace = context.availableHeightPt + EPSILON_PT < context.freshPageHeightPt
+      || selected.some((item) => item.ownership === 'source');
     let partial = partialRow(
-      source, acquiredRow, rowCursor, availablePt, context,
+      source, acquiredRow, rowCursor, availablePt,
+      freshSourceHeightPt, canGainPageSpace, context,
     );
     let selectedPrepared: ReturnType<typeof finalFrameRow> | null = null;
     const visitedOwnershipStates = new Set<string>();
@@ -1276,7 +1344,8 @@ export function takeTableFragment(
         (occurrence) => transactionInputs.has(occurrenceSelectionKey(occurrence)),
       );
       const reselection = partialRow(
-        source, selectedPrepared.row, rowCursor, availablePt, context,
+        source, selectedPrepared.row, rowCursor, availablePt,
+        freshSourceHeightPt, canGainPageSpace, context,
       );
       if (!reselection.selected) {
         partial = reselection;

@@ -178,11 +178,12 @@ describe('canonical body layout input', () => {
     expect(JSON.stringify(input)).not.toContain('__sectionPlacement');
   });
 
-  it('retains parity only on authored page breaks during acquisition', () => {
+  it('retains page-break parity and authored versus synthetic provenance during acquisition', () => {
     const document = {
       body: [
-        { type: 'pageBreak', parity: 'odd' },
-        { type: 'pageBreak' },
+        { type: 'pageBreak', parity: 'odd', origin: 'authored' },
+        { type: 'pageBreak', origin: 'coverPageSynthetic' },
+        { type: 'pageBreak', origin: 'authored' },
         { type: 'columnBreak', parity: 'even' },
       ] as unknown as BodyElement[],
       section: finalSection(),
@@ -192,12 +193,13 @@ describe('canonical body layout input', () => {
     } as DocxDocumentModel;
 
     expect(bodyLayoutAcquisitionInput(document).sequence).toMatchObject([
-      { kind: 'authored-break', break: 'page', parity: 'odd' },
-      { kind: 'authored-break', break: 'page' },
+      { kind: 'authored-break', break: 'page', parity: 'odd', origin: 'authored' },
+      { kind: 'authored-break', break: 'page', origin: 'coverPageSynthetic' },
+      { kind: 'authored-break', break: 'page', origin: 'authored' },
       { kind: 'authored-break', break: 'column' },
     ]);
     expect(bodyLayoutAcquisitionInput(document).sequence[1]).not.toHaveProperty('parity');
-    expect(bodyLayoutAcquisitionInput(document).sequence[2]).not.toHaveProperty('parity');
+    expect(bodyLayoutAcquisitionInput(document).sequence[3]).not.toHaveProperty('parity');
   });
 
   it('consumes a vanished empty paragraph without admitting a body block', () => {

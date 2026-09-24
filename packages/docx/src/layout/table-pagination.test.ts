@@ -1026,6 +1026,57 @@ describe('retained table pagination', () => {
     expect(result.nextCursor).toEqual(cursor);
   });
 
+  it('keeps a table-cell paragraph widow off the next page', () => {
+    const original = row(0, 30, { paragraph: paragraph('cell-widow', [10, 10, 10]) });
+    const source = acquisition([{
+      ...original,
+      cells: [{
+        ...original.cells[0]!,
+        blocks: [{
+          layout: original.cells[0]!.blocks[0]!.layout,
+          sourceBlockIndex: 0,
+          widowControl: true,
+        }],
+      }],
+    }]);
+
+    const result = take(source, 20, startTableFragmentCursor(), {
+      freshPageHeightPt: 30,
+    });
+
+    expect(result.fragment).toBeNull();
+    expect(result.requiresFreshPage).toBe(true);
+  });
+
+  it('moves a keepLines cell paragraph while allowing an ordinary row to split', () => {
+    const original = row(0, 30, { paragraph: paragraph('cell-lines', [10, 10, 10]) });
+    const withPolicy = (keepLines: boolean) => acquisition([{
+      ...original,
+      cells: [{
+        ...original.cells[0]!,
+        blocks: [{
+          layout: original.cells[0]!.blocks[0]!.layout,
+          sourceBlockIndex: 0,
+          keepLines,
+          widowControl: false,
+        }],
+      }],
+    }]);
+
+    const kept = take(withPolicy(true), 20, startTableFragmentCursor(), {
+      freshPageHeightPt: 30,
+    });
+    const ordinary = take(withPolicy(false), 20, startTableFragmentCursor(), {
+      freshPageHeightPt: 30,
+    });
+
+    expect(kept.requiresFreshPage).toBe(true);
+    expect(kept.fragment).toBeNull();
+    expect(ordinary.fragment?.rows[0]?.cells[0]?.contentRanges).toEqual([
+      { kind: 'paragraph', blockIndex: 0, lineStart: 0, lineEnd: 2 },
+    ]);
+  });
+
   it('moves a fully retained exact-height row instead of discarding its authored box', () => {
     const source = acquisition([row(0, 90, {
       heightRule: 'exact',
@@ -1172,6 +1223,7 @@ describe('retained table pagination', () => {
     expect(result.fragment?.advancePt).toBe(100);
     expect(result.fragment?.flowBounds.heightPt).toBe(100);
     expect(result.fragment?.clipBounds?.heightPt).toBe(100);
+    expect(result.fragment?.unpaintedOverflowPt).toBe(20);
     expect(result.nextCursor).toBeNull();
   });
 

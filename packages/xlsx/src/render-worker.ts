@@ -15,6 +15,9 @@ import init, { XlsxArchive, reinit } from './wasm/xlsx_parser.js';
 import {
   decodeDataUrl,
   preloadGoogleFonts,
+  loadOfficeFontFallbacks,
+  unloadOfficeFontFallbacks,
+  type OfficeFontFallbackRoute,
   WasmParserHost,
   dropDecodedBitmapCache,
   dropSvgImageCache,
@@ -36,7 +39,7 @@ import {
   type WorkerSvgDecodeResponse,
 } from '@silurus/ooxml-core/worker';
 import { workerRenderDeps } from './worker-render-deps.js';
-import { XLSX_GOOGLE_FONTS, xlsxFontPreloadNames } from './google-fonts.js';
+import { XLSX_GOOGLE_FONTS, xlsxFontPreloadNames, xlsxOfficeFontRequests, xlsxWorksheetOfficeFontRequests } from './google-fonts.js';
 import { resolveSharedStringRows } from './shared-strings.js';
 import {
   addWorksheetCacheUsage,
@@ -72,6 +75,23 @@ let renderers: LoadedWorkerRenderers = {};
  *  FontFaceSet (`self.fonts`) and terminates with it, so there is nothing to
  *  release — only the sequencing (fonts landed before first paint) matters. */
 let fontsLoaded: Promise<unknown> = Promise.resolve();
+let officeFontFaces: FontFace[] = [];
+let officeFontRoutes: Record<string, OfficeFontFallbackRoute> = {};
+let googleSubstitutes = false;
+let officeSheetLoads = new WeakMap<Worksheet, Promise<void>>();
+
+function startFontLoad(parsed: ParsedWorkbook, useGoogleFonts: boolean): void {
+  googleSubstitutes = useGoogleFonts;
+  fontsLoaded = Promise.all([
+    useGoogleFonts
+      ? preloadGoogleFonts(xlsxFontPreloadNames(parsed, cjkFallback), XLSX_GOOGLE_FONTS)
+      : Promise.resolve([]),
+    loadOfficeFontFallbacks(xlsxOfficeFontRequests(parsed)),
+  ]).then(([, office]) => {
+    officeFontFaces = office.faces;
+    officeFontRoutes = office.routes;
+  });
+}
 const sheetCache = new Map<number, Worksheet>();
 const viewProjectionCache = new WorksheetViewProjectionCache();
 const sheetCacheUsage = new Map<number, WorksheetCacheUsage>();
@@ -212,6 +232,11 @@ self.onmessage = async (e: MessageEvent<
       // zip path. Symmetric with XlsxWorkbook.destroy() and the docx/pptx render
       // workers (issue #781).
       cjkFallback = req.cjkFallback ?? 'jp';
+      await fontsLoaded;
+      unloadOfficeFontFallbacks(officeFontFaces);
+      officeFontFaces = [];
+      officeFontRoutes = {};
+      officeSheetLoads = new WeakMap();
       sheetCache.clear();
       viewProjectionCache.clear();
       sheetCacheUsage.clear();
@@ -231,12 +256,7 @@ self.onmessage = async (e: MessageEvent<
         retainedSheetUsage = measured;
         sheetCache.set(0, parsed.worksheet);
         sheetCacheUsage.set(0, measured);
-        fontsLoaded = req.useGoogleFonts
-          ? preloadGoogleFonts(
-              xlsxFontPreloadNames(parsed.workbook, cjkFallback),
-              XLSX_GOOGLE_FONTS,
-            )
-          : Promise.resolve();
+        startFontLoad(parsed.workbook, !!req.useGoogleFonts);
         const worksheetJson = new TextEncoder()
           .encode(JSON.stringify(parsed.worksheet)).buffer as ArrayBuffer;
         post({
@@ -269,16 +289,7 @@ self.onmessage = async (e: MessageEvent<
       );
       workbook = bootstrap.workbook;
       cjkFallback = xlsxCjkFallback(workbook, cjkFallback);
-      if (req.useGoogleFonts) {
-        // Mirror XlsxWorkbook._load exactly: queue Google Fonts substitutes for
-        // every styled font name, plus the generic Arabic fallbacks. Fonts must
-        // land before rendering (which measures text), so we keep the promise
-        // and await it in the renderViewport handler.
-        fontsLoaded = preloadGoogleFonts(
-          xlsxFontPreloadNames(workbook, cjkFallback),
-          XLSX_GOOGLE_FONTS,
-        );
-      }
+      startFontLoad(workbook, !!req.useGoogleFonts);
       post({ type: 'parsed', id, workbook, usage: bootstrap.usage });
       return;
     }
@@ -289,6 +300,22 @@ self.onmessage = async (e: MessageEvent<
       const { renderWorksheetViewport } = await orchestratorModule;
       const ws = sheetCache.get(req.sheetIndex);
       if (!ws) throw new Error('Worksheet is not loaded through its pull session');
+      let sheetFonts = officeSheetLoads.get(ws);
+      if (!sheetFonts) {
+        sheetFonts = (async () => {
+          const extraRequests = xlsxWorksheetOfficeFontRequests(ws).filter((request) => {
+            const key = request.weight === 400 && request.style === 'normal'
+              ? 'calibri' : `calibri:${request.weight}:${request.style}`;
+            return !(key in officeFontRoutes);
+          });
+          if (extraRequests.length === 0) return;
+          const extra = await loadOfficeFontFallbacks(extraRequests);
+          officeFontFaces.push(...extra.faces);
+          Object.assign(officeFontRoutes, extra.routes);
+        })();
+        officeSheetLoads.set(ws, sheetFonts);
+      }
+      await sheetFonts;
       // Apply view-only size mutations to a render-local projection. Multiple
       // viewers may share this worker cache while retaining different outline
       // and resize state, so the cached worksheet itself must stay unchanged.
@@ -318,7 +345,7 @@ self.onmessage = async (e: MessageEvent<
         req.viewport,
         // Supply the in-worker byte loader so embedded images decode straight
         // from the retained archive (no main-thread round-trip).
-        { ...renderOpts, fetchImage: getImage },
+        { ...renderOpts, officeFontRoutes, googleSubstitutes, fetchImage: getImage },
         svgDecodeClient.decode,
       );
       const bitmap = canvas.transferToImageBitmap();

@@ -138,7 +138,7 @@
           "type": "boolean",
           "default": false,
           "scope": "machine-overridable",
-          "markdownDescription": "Load metric-compatible substitute fonts (Carlito for Calibri, Caladea for Cambria, Noto for Arabic, etc.) from `fonts.googleapis.com` / `fonts.gstatic.com` so text layout matches Word / PowerPoint / Excel on machines without those fonts installed.\n\n**The extension makes no network requests when this is disabled (the default).** Enabling it is the only thing that lets the preview reach the font CDN. The setting is also ignored in untrusted workspaces. Changes apply to already-open previews immediately."
+          "markdownDescription": "Load optional webfont substitutes (Carlito for Calibri, Caladea for Cambria) and script fallbacks (such as Noto Arabic) from `fonts.googleapis.com` / `fonts.gstatic.com`. These can improve text widths when the authored font is unavailable but do not guarantee matching Office layout.\n\n**The extension makes no network requests when this is disabled (the default).** Enabling it is the only thing that lets the preview reach the font CDN. The setting is also ignored in untrusted workspaces. Changes apply to already-open previews immediately."
         },
         "ooxmlViewer.mcpServer.enabled": {
           "type": "string",

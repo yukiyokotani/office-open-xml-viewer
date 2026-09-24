@@ -103,6 +103,8 @@ export interface AcquiredParagraphBlock {
 export interface AcquiredTableBlock {
   readonly layout: TableLayout;
   readonly blockExtentPt: number;
+  /** Retained table height beyond an Office-clipped page band. */
+  readonly unpaintedOverflowPt?: number;
   readonly nextCursor?: BodyTableContinuationCursor | null;
   readonly flowRegistryDelta?: BodyFlowRegistryDeltaPt;
   readonly requiresFreshFlowRegion?: boolean;

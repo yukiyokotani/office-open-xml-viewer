@@ -477,7 +477,11 @@ export function measureParagraphIntrinsicWidths(
   }
   if (maximumWidthPt === 0) return { minWidthPt: 0, maxWidthPt: 0 };
 
-  const segments = mergeCompatibleTextSegments(buildSegments(paragraph.runs, environment));
+  const segments = mergeCompatibleTextSegments(buildSegments(paragraph.runs, {
+    ...environment,
+    lineSpacing: context.lineSpacing,
+    lineGridActive: context.lineGrid.active,
+  }));
   const paragraphWidthPt = Math.max(
     1,
     maximumWidthPt - context.physicalIndentLeftPt - context.physicalIndentRightPt,

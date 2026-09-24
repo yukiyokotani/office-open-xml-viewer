@@ -2,6 +2,7 @@ import {
   registerEmbeddedFonts,
   unregisterEmbeddedFonts,
   type EmbeddedFontFace,
+  type OfficeFontFallbackRequest,
 } from '@silurus/ooxml-core';
 import type { PptxEmbeddedFontRef } from './worker-protocol';
 
@@ -11,6 +12,17 @@ export interface LoadedPptxEmbeddedFonts {
   readonly aliases: ReadonlyMap<string, string>;
   /** Presentation-scoped FontFace family → lower-cased authored family. */
   readonly authoredFamilies: ReadonlyMap<string, string>;
+  /** Successfully registered authored family/style slots (§19.2.1.9). */
+  readonly tuples: ReadonlySet<string>;
+}
+
+/** Only an actually registered PresentationML face occupies its style slot. */
+export function uncoveredOfficeFontRequests(
+  requests: readonly OfficeFontFallbackRequest[],
+  embeddedTuples: ReadonlySet<string>,
+): OfficeFontFallbackRequest[] {
+  return requests.filter((request) =>
+    !embeddedTuples.has(`${request.family.toLowerCase()}:${request.weight}:${request.style}`));
 }
 
 let nextFontScope = 1;
@@ -32,6 +44,7 @@ export async function loadEmbeddedFonts(
     faces: [],
     aliases: new Map(),
     authoredFamilies: new Map(),
+    tuples: new Set(),
   };
   const scope = nextFontScope++;
   const candidateAliases = new Map<string, string>();
@@ -82,7 +95,14 @@ export async function loadEmbeddedFonts(
   const authoredFamilies = new Map(
     [...aliases].map(([authored, alias]) => [alias, authored]),
   );
-  return { faces: loaded, aliases, authoredFamilies };
+  // An embedded regular face does not satisfy the bold or italic slots. Keep
+  // this distinct from the family alias so a missing Calibri slot may use its
+  // measured Office fallback without replacing the successful embedded face.
+  const tuples = new Set(loaded.map((face) => {
+    const authored = authoredFamilies.get(face.family) as string;
+    return `${authored}:${face.weight === 'bold' || face.weight === '700' ? 700 : 400}:${face.style === 'italic' ? 'italic' : 'normal'}`;
+  }));
+  return { faces: loaded, aliases, authoredFamilies, tuples };
 }
 
 /** Do not register a web substitute for a family successfully loaded from the deck. */

@@ -3,6 +3,8 @@ import InlineWorker from './worker.ts?worker&inline';
 import wasmAssetUrl from './wasm/docx_parser_bg.wasm?url';
 import {
   preloadGoogleFonts,
+  loadOfficeFontFallbacks,
+  unloadOfficeFontFallbacks,
   releaseOwnedBitmap,
   unloadGoogleFonts,
   unregisterEmbeddedFonts,
@@ -43,9 +45,8 @@ import type { DocxDocumentModel, RenderPageOptions, WorkerRequest, WorkerRespons
 import { renderLayoutSourceToCanvas, documentHasMath, prepareMathRuns, type DocxTextRunInfo } from './renderer';
 import { createLayoutServices } from './layout-runtime.js';
 import { buildBookmarkPageMap } from './bookmark-nav';
-import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts';
+import { DOCX_GOOGLE_FONTS, docxFontPreloadNames, docxOfficeFontFallbackRequests } from './google-fonts';
 import { loadEmbeddedFonts } from './embedded-fonts';
-import { docxResolvedFontMetricCandidates } from './document-content.js';
 import {
   attachDocumentLayoutRuntime,
   documentLayoutRuntimeOf,
@@ -380,6 +381,8 @@ export class DocxDocument {
    *  the shared FontFaceSet for the lifetime of the SPA (deduped + refcounted in
    *  core, so a font shared with another open document survives until both go). */
   private _embeddedFontFaces: FontFace[] = [];
+  /** Library-owned exact-local or pinned substitute faces in main mode. */
+  private _officeFontFaces: FontFace[] = [];
   /** Google-Fonts `FontFace` objects this document preloaded into `document.fonts`
    *  (main mode only — in worker mode the worker owns them and terminates with its
    *  own FontFaceSet). Released in {@link destroy} so they do not leak into the
@@ -555,17 +558,12 @@ export class DocxDocument {
         );
       }
       doc._tiff = doc._mode === 'worker' ? undefined : opts.tiff;
-      if (doc._mode === 'main' && opts.useGoogleFonts && doc._document) {
-        doc._googleFontFaces = await preloadGoogleFonts(
-          docxFontPreloadNames(doc._document, cjkFallback),
-          DOCX_GOOGLE_FONTS,
-        );
-      }
       // ECMA-376 §17.8.1 / §17.8.3 — register the document's embedded fonts (via
       // the worker's zip-entry extraction) before the lazy first pagination, so
       // text measures/draws with the authored typeface. Worker mode does this
       // inside the worker (before it paginates); here it runs on the main thread.
       let embeddedMetrics: Awaited<ReturnType<typeof loadEmbeddedFonts>>['metrics'] | undefined;
+      let embeddedRoutes: Awaited<ReturnType<typeof loadEmbeddedFonts>>['routes'] | undefined;
       if (doc._mode === 'main' && doc._document?.embeddedFonts?.length) {
         const loadingDocument = doc;
         const loadedEmbedded = await loadEmbeddedFonts(
@@ -574,6 +572,20 @@ export class DocxDocument {
         );
         doc._embeddedFontFaces = loadedEmbedded.faces;
         embeddedMetrics = loadedEmbedded.metrics;
+        embeddedRoutes = loadedEmbedded.routes;
+      }
+      const officeFonts = doc._mode === 'main' && doc._document
+        ? await loadOfficeFontFallbacks(docxOfficeFontFallbackRequests(doc._document).filter((request) =>
+            !embeddedRoutes?.some((route) => route.requestedFamily.toLowerCase() === request.family.toLowerCase()
+              && route.weight === (request.weight ?? 400) && route.style === (request.style ?? 'normal'))))
+        : { faces: [], routes: {} };
+      doc._officeFontFaces = officeFonts.faces;
+      if (doc._mode === 'main' && opts.useGoogleFonts && doc._document) {
+        // A proven local Calibri face already resolves this authored family;
+        // avoid the optional Google Fonts substitution for the same request.
+        const names = docxFontPreloadNames(doc._document, cjkFallback).filter((name) =>
+          name?.toLowerCase() !== 'calibri' || !officeFonts.routes.calibri);
+        doc._googleFontFaces = await preloadGoogleFonts(names, DOCX_GOOGLE_FONTS);
       }
       // Equations are converted + rasterized before pagination (which reads their
       // extents synchronously). Requires the opt-in `math` engine; without it,
@@ -588,14 +600,10 @@ export class DocxDocument {
         const runtime = documentLayoutRuntimeOf(doc);
         runtime.services = createLayoutServices(doc._source, {
           fontMetrics: embeddedMetrics,
-          measureResolvedFontMetrics: true,
-          resolvedFontMetricCandidates: docxResolvedFontMetricCandidates(
-            doc._document,
-            doc._source.fontFamilyCharsets,
-          ),
           useGoogleFonts: !!opts.useGoogleFonts,
           cjkFallback,
-          embeddedFaces: doc._embeddedFontFaces,
+          embeddedRoutes,
+          officeRoutes: Object.values(officeFonts.routes),
           googleFaces: doc._googleFontFaces,
           mathResources: preparedMath?.records,
           mathDrawables: preparedMath?.drawables,
@@ -1218,6 +1226,10 @@ export class DocxDocument {
     if (this._embeddedFontFaces.length > 0) {
       unregisterEmbeddedFonts(this._embeddedFontFaces);
       this._embeddedFontFaces = [];
+    }
+    if (this._officeFontFaces.length > 0) {
+      unloadOfficeFontFallbacks(this._officeFontFaces);
+      this._officeFontFaces = [];
     }
     // Release the Google-Fonts substitutes this document preloaded into the
     // shared FontFaceSet (main mode). Same refcount contract as the embedded

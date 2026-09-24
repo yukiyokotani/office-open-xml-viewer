@@ -286,13 +286,17 @@ export function acquireRetainedTable<State>(
             outerState,
             sourcePath: cellPath,
           }, {
+            // Match the grouped insets added to the intrinsic AutoFit minimum
+            // (intrinsic-width.ts and table-source-acquisition.ts). Reversing
+            // those groups avoids rounding an exact measured-width boundary
+            // below its own minimum. This preserves the measured boundary
+            // without adding a width allowance. Margin ownership is
+            // ECMA-376 §17.4.41/.42.
             resolveContentWidthPt: (_cell, _table, totalWidthPt) => Math.max(
               0,
               totalWidthPt
-                - spacingInsets.startPt
-                - spacingInsets.endPt
-                - formatMargins.left
-                - formatMargins.right,
+                - (spacingInsets.startPt + spacingInsets.endPt)
+                - (formatMargins.left + formatMargins.right),
             ),
             createCellState: dependencies.createCellState,
             acquireParagraph: (
@@ -386,6 +390,11 @@ export function acquireRetainedTable<State>(
           return [{
             layout,
             sourceBlockIndex,
+            ...(sourceElement?.type === 'paragraph' ? {
+              keepLines: sourceElement.keepLines === true,
+              // §17.3.1.44: omission enables widow/orphan control.
+              widowControl: sourceElement.widowControl !== false,
+            } : {}),
             ...((layout.kind === 'paragraph' && paragraphHasPageDependency(layout))
               ? { pageDependent: true }
               : {}),

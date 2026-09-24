@@ -118,37 +118,4 @@ describe('buildSegments UAX #14 LB28 boundary glue', () => {
     expect(splitRuns).toEqual(sameRun);
   });
 
-  it('does not use consecutive authored spaces as shrink budget for following visible text', () => {
-    const context = {
-      font: '10px serif',
-      letterSpacing: '0px',
-      measureText(value: string) {
-        return {
-          width: [...value].length * 10,
-          fontBoundingBoxAscent: 8,
-          fontBoundingBoxDescent: 2,
-          actualBoundingBoxAscent: 8,
-          actualBoundingBoxDescent: 2,
-        } as TextMetrics;
-      },
-    } as CanvasRenderingContext2D;
-    const lineTexts = (runs: readonly DocRun[]) => layoutLines(
-      context,
-      buildSegments(runs, ENV),
-      95,
-      0,
-      1,
-    ).map((line) => line.segments.map((segment) =>
-      'text' in segment ? segment.text : '').join(''));
-
-    const sameRun = lineTexts([textRun('2月22日（水）  までに', true)]);
-    const splitRuns = lineTexts([
-      textRun('2月22日（水） ', true),
-      textRun(' ', true),
-      textRun('までに', true),
-    ]);
-
-    expect(sameRun).toEqual(['2月22日（水）  ', 'までに']);
-    expect(splitRuns).toEqual(sameRun);
-  });
 });

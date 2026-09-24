@@ -362,6 +362,9 @@ export interface TextPlacement {
   readonly advancePt: number;
   /** Shaped cluster geometry for selection/hit testing. Always covers `range`. */
   readonly clusters: readonly TextClusterLayout[];
+  /** Final U+0020 advance removed by the registered Latin line-fit rule. The
+   * transparent browser overlay must not hit-test beyond this retained box. */
+  readonly trailingSpaceCompressionPt?: number;
   /** Immutable contextual paint operations. Normally one whole-run operation. */
   readonly paintOps: readonly TextPaintOp[];
   readonly color: TextColorPolicy;
@@ -1177,6 +1180,10 @@ export interface TableCellBlockInput {
   readonly layout: ParagraphLayout | TableLayout;
   /** Stable source index; continuation slices must not renumber field ownership. */
   readonly sourceBlockIndex: number;
+  /** Effective ECMA-376 §17.3.1.14 paragraph policy; absent for tables. */
+  readonly keepLines?: boolean;
+  /** Effective ECMA-376 §17.3.1.44 paragraph policy; absent for tables. */
+  readonly widowControl?: boolean;
   /** True when destination-page context can change the acquired child geometry. */
   readonly pageDependent?: boolean;
   /** The required empty paragraph after a nested table owns no row-height ink. */

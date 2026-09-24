@@ -50,6 +50,7 @@ import {
   UnsupportedPageFlowTransitionError,
   type PageFlowState,
 } from './paginator.js';
+
 import {
   createPageFlowSectionContext,
   physicalSectionGeometry,
@@ -88,6 +89,7 @@ import {
 import { bodyOccurrenceKey } from './source-key.js';
 import {
   convergeHeaderFooterReserveSteps,
+  headerStoryBodyReserveExtentPt,
   headerFooterOverflowReservePt,
   reservedBodyInterval,
   selectedHeaderFooterStory,
@@ -118,6 +120,10 @@ import {
   convergeExactStateSteps,
 } from './convergence.js';
 import { paginationFieldPageContexts } from './pagination-fields.js';
+
+// Resource governance independent of compatibility thresholds: each physical
+// page retains flow/paint state. Bound adversarial page generation globally.
+const MAX_BODY_LAYOUT_PAGES = 10_000;
 
 class FootnoteAdmissionOverflowError extends Error {
   readonly code = 'FOOTNOTE_RESERVE_EXCEEDS_FRESH_PAGE' as const;
@@ -849,11 +855,12 @@ function* paginateBodyPassSteps(
   };
   state = setBodyBalanceTarget(state, balanceTargetFor(state));
   const factory = transitionFactory(owners, reserves);
-  // Source entry whose keep-with-next set was relocated to a new physical page
-  // by automatic overflow. The compatibility projection suppresses that
-  // leading paragraph's space-before only for this grouped relocation;
-  // ordinary overflow and authored page/section breaks retain their own rules.
+  // Source entry whose paragraph or keep-with-next set was relocated to a new
+  // physical page by automatic overflow. Compatibility rules:
+  // word-automatic-paragraph-top-spacing and word-automatic-keep-next-start-spacing.
   let automaticPageStartEntryIndex: number | null = null;
+  // Compatibility rule: word-standalone-hard-page-break-top-spacing.
+  let standaloneHardPageStartEntryIndex: number | null = null;
   const session = kernel.openBodyLayoutSession({
     source: input.source,
     section: input.initialSection.context,
@@ -920,7 +927,11 @@ function* paginateBodyPassSteps(
     transition: ReturnType<typeof applyAuthoredBreak>,
     nextEntryIndex: number,
     suppressFirstParagraphSpaceBefore = false,
+    skipPageAnchorPrescan = false,
   ) => {
+    if (transition.state.pageIndex >= MAX_BODY_LAYOUT_PAGES) {
+      throw new Error(`Document page budget exceeded (${MAX_BODY_LAYOUT_PAGES} pages)`);
+    }
     const previousPageIndex = state.flow.pageIndex;
     const opensAutomaticPage = transition.events.some((event) => (
       event.type === 'next-page' && event.reason === 'overflow'
@@ -932,14 +943,15 @@ function* paginateBodyPassSteps(
     ));
     state = commitPageFlowTransition(state, transition, factory);
     state = setBodyBalanceTarget(state, balanceTargetFor(state));
-    const nextLocation = acquisitionLocation(state);
     if (state.flow.pageIndex !== previousPageIndex) {
       automaticPageStartEntryIndex = opensAutomaticPage && suppressFirstParagraphSpaceBefore
         ? nextEntryIndex
         : null;
+      const nextLocation = acquisitionLocation(state);
       session.resetPageAcquisition(nextLocation);
-      prescanPageAnchors(state, nextEntryIndex);
+      if (!skipPageAnchorPrescan) prescanPageAnchors(state, nextEntryIndex);
     } else {
+      const nextLocation = acquisitionLocation(state);
       session.moveAcquisitionCursor(nextLocation);
       // §17.18.77 keeps the physical page but opens a distinct flow domain.
       // The outgoing source scan intentionally stopped at the section mark, so
@@ -1070,10 +1082,18 @@ function* paginateBodyPassSteps(
       if (entry.break === 'column' && !activeColumnBreakIndexes.has(entryIndex)) {
         continue;
       }
+      const pageIndexBeforeBreak = state.flow.pageIndex;
       commitTransition(
         applyAuthoredBreak(state.flow, entry.break, entry.parity),
         entryIndex + 1,
       );
+      standaloneHardPageStartEntryIndex = entry.break === 'page'
+        && entry.origin === 'authored'
+        && entry.parity === undefined
+        && entry.sameSourceParagraphAsPrevious !== true
+        && state.flow.pageIndex !== pageIndexBeforeBreak
+        ? entryIndex + 1
+        : null;
       continue;
     }
     if (entry.kind === 'begin-section') {
@@ -1192,8 +1212,20 @@ function* paginateBodyPassSteps(
             || spacing.suppressBefore
             || (
               cursor.boundary === null
+              // The controlled Office top-spacing rule covers an ink-bearing
+              // paragraph relocated by overflow. Empty paragraph marks still
+              // retain their authored before spacing: the mark-only cases in
+              // two independent multi-page documents move subsequent content
+              // by exactly that spacing when it is incorrectly suppressed.
+              && block.inkless !== true
               && !state.flow.pageHasContent
               && automaticPageStartEntryIndex === entryIndex
+            )
+            || (
+              cursor.boundary === null
+              && !block.pageBreakBefore
+              && !state.flow.pageHasContent
+              && standaloneHardPageStartEntryIndex === entryIndex
             ),
           continuation: cursor,
         });
@@ -1434,6 +1466,7 @@ function* paginateBodyPassSteps(
           commitTransition(
             advanceColumnOrPage(state.flow, 'overflow'),
             entryIndex,
+            true,
           );
           continue;
         }
@@ -1636,7 +1669,46 @@ function* paginateBodyPassSteps(
         }
         cursor = acquired.nextCursor ?? undefined;
         complete = cursor === undefined;
-        if (cursor) {
+        // WORD_OVER_PAGE_CELL_BREAK_OCCUPANCY:
+        // clipped cell content counts a physical continuation page before a
+        // following authored page break. The continuation page's normal-flow
+        // cursor stays at its top: without a break, the next paragraph starts
+        // there, not after the invisible remainder. The 500pt/800pt controls
+        // bracketed a 648pt body band; use retained overflow height rather
+        // than a fixed extra-page allowance.
+        let hiddenOverflowPt = acquired.unpaintedOverflowPt ?? 0;
+        if (hiddenOverflowPt > 0) {
+          if (!Number.isFinite(hiddenOverflowPt)) throw new Error('Table overflow extent must be finite');
+          // A body's usable extent may differ on first/even/odd pages because
+          // header/footer reserves vary. For budget preflight, the full page
+          // dimension is only an upper bound; actual charging below uses each
+          // destination page's reserved body interval.
+          const maxPageExtentPt = Math.max(
+            state.flow.section.geometry.pageWidth,
+            state.flow.section.geometry.pageHeight,
+          );
+          if (!Number.isFinite(maxPageExtentPt) || maxPageExtentPt <= 0) {
+            throw new Error('Table overflow requires a finite positive page extent');
+          }
+          const minimumContinuationPages = Math.ceil(hiddenOverflowPt / maxPageExtentPt);
+          if (state.flow.pageIndex + minimumContinuationPages >= MAX_BODY_LAYOUT_PAGES) {
+            throw new Error(`Document page budget exceeded (${MAX_BODY_LAYOUT_PAGES} pages)`);
+          }
+          while (hiddenOverflowPt > 0) {
+            const pageExtentPt = freshPageExtent(state);
+            if (!Number.isFinite(pageExtentPt) || pageExtentPt <= 0) {
+              throw new Error('Table overflow requires a finite positive page extent');
+            }
+            const hasMoreHiddenPages = hiddenOverflowPt > pageExtentPt;
+            commitTransition(
+              advanceToPage(state.flow, state.flow.section, 'overflow'),
+              entryIndex,
+              false,
+              hasMoreHiddenPages,
+            );
+            hiddenOverflowPt -= pageExtentPt;
+          }
+        } else if (cursor) {
           commitTransition(
             advanceColumnOrPage(state.flow, 'overflow'),
             entryIndex,
@@ -1705,7 +1777,7 @@ function headerFooterReserves(
       if (!pass.session.layoutStory) {
         throw new Error('Header/footer story layout requires a story-capable layout session');
       }
-      return pass.session.layoutStory({
+      const story = pass.session.layoutStory({
         source,
         pageIndex: page.pageIndex,
         section: page.section,
@@ -1719,7 +1791,8 @@ function headerFooterReserves(
             heightPt: page.section.geometry.pageHeight,
           },
         },
-      }).advancePt;
+      });
+      return kind === 'header' ? headerStoryBodyReserveExtentPt(story) : story.advancePt;
     };
     return Object.freeze({
       top: headerFooterOverflowReservePt(

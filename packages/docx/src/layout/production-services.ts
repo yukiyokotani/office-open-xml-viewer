@@ -1,11 +1,11 @@
 import { type CjkLang } from '@silurus/ooxml-core';
 import {
   canvasFontString,
-  measureResolvedCanvasFontBoxRatio,
-  normalizeFontMetricFamily,
 } from '@silurus/ooxml-core';
 import type { ResolvedFontMetric } from '@silurus/ooxml-core';
+import type { OfficeFontFallbackRoute } from '@silurus/ooxml-core';
 import { DOCX_GOOGLE_FONTS } from '../google-fonts.js';
+import type { LoadedEmbeddedFontRoute } from '../embedded-fonts.js';
 import { normalizeFontFamilyUncached } from '../line-layout.js';
 import type { LayoutSourceStore } from './layout-source-store.js';
 import { createFontResolver, type FontInventoryFace } from './font-service.js';
@@ -31,8 +31,6 @@ import {
   type GlyphMeasureRequest,
 } from './text.js';
 import type { LayoutServices } from './types.js';
-import { wordResolvedEastAsianSingleLineRatio } from './line-compatibility.js';
-import type { DocxResolvedFontMetricCandidate } from '../document-content.js';
 
 export interface LoadedFontFaceRecord {
   readonly family: string;
@@ -50,61 +48,17 @@ export interface ProductionLayoutServiceOptions {
   readonly mathDrawables?: ReadonlyMap<string, CanvasImageSource>;
   readonly measureContext: MeasurementTextContext | null;
   readonly verticalGlyphMeasurement: VerticalGlyphMeasurementService;
-  readonly embeddedFaces?: readonly LoadedFontFaceRecord[];
+  /** Exact registrations returned by the DOCX loader. */
+  readonly embeddedRoutes?: readonly LoadedEmbeddedFontRoute[];
+  /** Exact local registrations, scoped to this FontFaceSet. */
+  readonly officeRoutes?: readonly OfficeFontFallbackRoute[];
   readonly googleFaces?: readonly LoadedFontFaceRecord[];
-  /** Derive Word line allocation only from the concrete authored Canvas face
-   * that proves coverage of its fontTable East-Asian charset. */
-  readonly measureResolvedFontMetrics?: boolean;
-  readonly resolvedFontMetricCandidates?: readonly DocxResolvedFontMetricCandidate[];
-}
-
-function canvasResolvedFontMetrics(
-  candidates: readonly DocxResolvedFontMetricCandidate[],
-  context: MeasurementTextContext | null,
-): Readonly<Record<string, ResolvedFontMetric>> {
-  if (!context) return {};
-  const metrics: Record<string, ResolvedFontMetric> = {};
-  for (const candidate of candidates) {
-    const family = candidate.family.trim();
-    if (!family) continue;
-    const key = normalizeFontMetricFamily(family);
-    if (metrics[key]) continue;
-    // The document-content projection proves this family actually wins a
-    // rendered script slot. Equal selected/control glyph ink means Canvas
-    // silently substituted a fallback, so no resource metric is claimed.
-    const fontBoxRatio = measureResolvedCanvasFontBoxRatio(
-      context,
-      family,
-      { text: candidate.probeText, emPx: 100 },
-    );
-    if (!(fontBoxRatio != null && fontBoxRatio > 0)) continue;
-    const eastAsianLineHeightRatio = wordResolvedEastAsianSingleLineRatio(fontBoxRatio);
-    if (!(eastAsianLineHeightRatio > 0)) continue;
-    metrics[key] = Object.freeze({
-      family,
-      requestedFamily: family,
-      weight: 400,
-      style: 'normal',
-      sourceIdentity: `canvas-resolved:${family}`,
-      synthesized: false,
-      fontBoxRatio,
-      ...(candidate.appliesToLatin ? { lineHeightRatio: eastAsianLineHeightRatio } : {}),
-      eastAsianLineHeightRatio,
-    });
-  }
-  return Object.freeze(metrics);
 }
 
 export function createProductionLayoutServices(
   source: LayoutSourceStore,
   options: ProductionLayoutServiceOptions,
 ): LayoutServices {
-  const measuredFontMetrics = options.measureResolvedFontMetrics
-    ? canvasResolvedFontMetrics(
-        options.resolvedFontMetricCandidates ?? [],
-        options.measureContext,
-      )
-    : {};
   const fontFamilyCharsets = Object.freeze(Object.fromEntries(
     Object.entries(source.fontFamilyCharsets)
       .map(([family, charset]) => [family.trim().toLowerCase(), charset]),
@@ -137,25 +91,17 @@ export function createProductionLayoutServices(
       style,
     }];
   });
-  const successfulEmbedded = new Map(loadedFaces(options.embeddedFaces ?? []).map((loaded) => [
-    `${loaded.family}:${loaded.weight}:${loaded.style}`, loaded,
-  ]));
-  const inventory: FontInventoryFace[] = source.fonts.embeddedFonts.flatMap((font) => {
-    const weight = font.style === 'bold' || font.style === 'boldItalic' ? 700 : 400;
-    const style = font.style === 'italic' || font.style === 'boldItalic' ? 'italic' as const : 'normal' as const;
-    const loaded = successfulEmbedded.get(`${normalizedFaceFamily(font.fontName)}:${weight}:${style}`);
-    return loaded ? [{
-      requestedFamily: font.fontName,
-      resolvedFamily: loaded.displayFamily,
+  const inventory: FontInventoryFace[] = (options.embeddedRoutes ?? []).map((route) => ({
+      requestedFamily: route.requestedFamily,
+      resolvedFamily: route.resolvedFamily,
+      resourceIdentity: route.resourceIdentity,
       source: 'embedded' as const,
-      weight,
-      style,
-    }] : [];
-  });
+      weight: route.weight,
+      style: route.style,
+    }));
   // Caller resources are optional substitutes. An authored embedded face wins
-  // the same tuple even when its legacy loader supplies no numeric metric; do
-  // not overwrite that face's existing measured/default metrics with the
-  // caller alias's geometry. With no caller resource this is the old merge.
+  // the same tuple even when its loader supplies no numeric metric; do not
+  // overwrite that face's measured/default metrics with caller alias geometry.
   const embeddedTuples = new Set(inventory.map((face) =>
     `${normalizedFaceFamily(face.requestedFamily)}:${face.weight}:${face.style}`));
   const unshadowed = (metrics: Readonly<Record<string, ResolvedFontMetric>> = {}) =>
@@ -163,16 +109,42 @@ export function createProductionLayoutServices(
       !metric.sourceIdentity?.startsWith('provided-sfnt:')
       || !embeddedTuples.has(`${normalizedFaceFamily(metric.requestedFamily ?? key)}:${metric.weight ?? 400}:${metric.style ?? 'normal'}`)));
   const localMetrics = snapshotFontMetrics(unshadowed(options.localMetrics));
+  const localTuples = new Set(Object.entries(localMetrics).map(([key, metric]) =>
+    `${normalizedFaceFamily(metric.requestedFamily ?? key)}:${metric.weight ?? 400}:${metric.style ?? 'normal'}`));
+  // A document-embedded face and an application-provided exact resource outrank
+  // the library's offline fallback for the same authored tuple.
+  const officeRoutes = (options.officeRoutes ?? []).filter((route) => {
+    const tuple = `${normalizedFaceFamily(route.requestedFamily)}:${route.weight}:${route.style}`;
+    return !embeddedTuples.has(tuple) && !localTuples.has(tuple);
+  });
+  const officeMetrics = Object.fromEntries(officeRoutes.flatMap((route) => {
+    if (route.metric.lineHeightRatio == null) return [];
+    const requested = normalizedFaceFamily(route.requestedFamily);
+    const key = route.weight === 400 && route.style === 'normal'
+      ? requested : `${requested}:${route.weight}:${route.style}`;
+    return [[key, route.metric]];
+  }));
   const fontMetrics = snapshotFontMetrics({
-    ...measuredFontMetrics,
     ...localMetrics,
+    ...officeMetrics,
     ...unshadowed(options.fontMetrics),
   });
+  for (const route of officeRoutes) {
+    inventory.push({
+      requestedFamily: route.requestedFamily,
+      resolvedFamily: route.family,
+      source: route.source,
+      resourceIdentity: route.resourceIdentity,
+      weight: route.weight,
+      style: route.style,
+    });
+  }
   for (const [requestedFamily, metric] of Object.entries(localMetrics)) {
     inventory.push({
       requestedFamily: metric.requestedFamily ?? requestedFamily,
       resolvedFamily: metric.family,
       source: 'local',
+      ...(metric.sourceIdentity === undefined ? {} : { resourceIdentity: metric.sourceIdentity }),
       weight: metric.weight ?? 400,
       style: metric.style ?? 'normal',
     });

@@ -97,6 +97,7 @@ function progressiveDocument(opts: {
     // Field initializers the real constructor runs; destroy() reads them.
     _rawParts: new BoundedRawPartCache({ maxEntries: 4, maxBytes: 1024 }),
     _embeddedFontFaces: [],
+    _officeFontFaces: [],
     _googleFontFaces: [],
     _bridge: {
       request: (factory: (id: number) => RenderWorkerRequest) => {

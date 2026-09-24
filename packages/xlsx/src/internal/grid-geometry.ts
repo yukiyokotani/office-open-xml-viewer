@@ -1,5 +1,6 @@
 import type { ViewportRange, Worksheet } from '../types.js';
-import { colWidthToPx, rowHeightToPx } from './grid-metrics.js';
+import { baseColWidthToPx, colWidthToPx, rowHeightToPx } from './grid-metrics.js';
+import { isMacDesktop } from './platform.js';
 import { GridAxisGeometry } from './grid-axis-geometry.js';
 
 export { GridAxisGeometry } from './grid-axis-geometry.js';
@@ -84,7 +85,9 @@ export class GridGeometry {
     this.maximumDigitWidth = mdw;
     this.freezeRows = Math.min(MAX_WORKSHEET_ROW, Math.max(0, worksheet.freezeRows ?? 0));
     this.freezeCols = Math.min(MAX_WORKSHEET_COL, Math.max(0, worksheet.freezeCols ?? 0));
-    const defaultColPx = colWidthToPx(worksheet.defaultColWidth, mdw);
+    const defaultColPx = worksheet.baseColWidth === undefined
+      ? colWidthToPx(worksheet.defaultColWidth, mdw)
+      : baseColWidthToPx(worksheet.baseColWidth, mdw, isMacDesktop());
     const resolvedColWidths = new Float64Array(MAX_WORKSHEET_COL + 1);
     resolvedColWidths.fill(Number.NaN);
     // Resolve declarations from last to first. The disjoint-set successor

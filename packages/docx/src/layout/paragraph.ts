@@ -39,7 +39,6 @@ import {
 import {
   distributeLineSlack,
   distributedDelta,
-  shrinkFitCompression,
   type DistributeResult,
   type SegStretch,
 } from '../text-distribute.js';
@@ -792,17 +791,6 @@ export function planLine(input: PlanLineInput): LineLayout {
     stretchByIndex = distribution?.perSeg ?? null;
     perGapPt = distribution?.perGap ?? 0;
     distributedWidthPt = distributedDelta(distribution);
-  } else if (lineSlackPt < 0) {
-    const compression = keepGraphemeSafeCuts(shrinkFitCompression(
-      distSegments,
-      lineSlackPt,
-      firstContentIndex,
-      bidi ? lastDrawnIndex : segments.length,
-      line.baselinePt - line.topPt,
-    ), segments);
-    stretchByIndex = compression?.perSeg ?? null;
-    perGapPt = compression?.perGap ?? 0;
-    distributedWidthPt = distributedDelta(compression);
   }
 
   const drawnWidthPt = naturalWidthPt + distributedWidthPt;
@@ -1876,6 +1864,16 @@ function textPlanSegment(
         + clusterPunctuationCompression,
     };
   });
+  if (segment.latinSpaceCompressionPx && segment.text.endsWith(' ') && clusters.length > 0) {
+    // The fit projection removes only the final invisible U+0020 advance.
+    // Keep retained cluster geometry inside the same shortened segment box;
+    // Canvas paint operations still draw the preceding visible glyph naturally.
+    const last = clusters.length - 1;
+    clusters[last] = {
+      ...clusters[last],
+      advancePt: Math.max(0, clusters[last].advancePt - segment.latinSpaceCompressionPx),
+    };
+  }
   const snapLeadingPadPt = segment.snapGridLeadingPadPx ?? 0;
   let decorationTerminalAdvancePt = segment.measuredWidth
     - (segment.snapGridTrailingPadPx ?? 0);
@@ -2089,6 +2087,9 @@ function textPlanSegment(
   return {
     ...style,
     kind: 'text', measuredWidthPt: segment.measuredWidth,
+    ...(segment.latinSpaceCompressionPx ? {
+      trailingSpaceCompressionPt: segment.latinSpaceCompressionPx,
+    } : {}),
     clusters,
     basePaintOps: basePaintOps.map((operation) => ({
       ...operation,
@@ -4117,6 +4118,7 @@ export function paragraphAcquisitionCacheKey(
       environment.useFeLayout ?? null,
       environment.balanceSingleByteDoubleByteWidth ?? null,
       environment.characterSpacingControl ?? null,
+      environment.lineWrapLikeWord6 ?? null,
       environment.resolvedLocalFonts
         ? cache.objectIdentity(environment.resolvedLocalFonts)
         : null,
@@ -4268,6 +4270,11 @@ export function acquireParagraphResult(
     options.exclusions,
     initialOwnedExclusions,
   );
+  const numberingPlan = continuation || options.continuesFromPrevious
+    ? undefined : retainedNumberingPlan(paragraph, options.context, options);
+  const acquisitionOptions = numberingPlan && !options.context.numberingMarkerGeometry
+    ? { ...options, context: { ...options.context, numberingMarkerGeometry: numberingPlan } }
+    : options;
   type Pass = Readonly<{
     measured: MeasuredParagraph;
     layout: ParagraphLayout;
@@ -4284,13 +4291,22 @@ export function acquireParagraphResult(
         );
         const measured = measureParagraph(
           paragraph,
-          options.context,
+          acquisitionOptions.context,
           measurementPlacement(options, effectiveExclusions),
           options.measurer,
-          { ...options.environment, paragraphMarkShapeInput: paragraph.paragraphMarkShapeInput },
+          {
+            ...options.environment,
+            paragraphMarkShapeInput: paragraph.paragraphMarkShapeInput,
+            ...(numberingPlan?.shape && numberingPlan.markerText ? {
+              firstLineNumberingMarkerBox: {
+                ascentPt: numberingPlan.shape.ascentPt,
+                descentPt: numberingPlan.shape.descentPt,
+              },
+            } : {}),
+          },
           continuation,
         );
-        const layout = paragraphLayoutFromMeasurement(paragraph, options, measured);
+        const layout = paragraphLayoutFromMeasurement(paragraph, acquisitionOptions, measured);
         const ownedExclusions = canonicalOwnedExclusions(layout, occurrenceIds);
         const nextEffectiveExclusions = mergeParagraphExclusions(
           options.exclusions,

@@ -1325,6 +1325,7 @@ impl DocxBodyCursor {
                     self.emitted_body_len = self.emitted_body_len.saturating_add(1);
                     return Ok(StreamedDocumentUnit::Body {
                         body: vec![BodyElement::PageBreak {
+                            origin: Some(PageBreakOrigin::CoverPageSynthetic),
                             parity: None,
                             same_paragraph_as_previous: None,
                         }],
@@ -1393,6 +1394,7 @@ impl DocxBodyCursor {
                     body.insert(
                         0,
                         BodyElement::PageBreak {
+                            origin: Some(PageBreakOrigin::CoverPageSynthetic),
                             parity: None,
                             same_paragraph_as_previous: None,
                         },
@@ -2418,6 +2420,7 @@ fn parse_document_settings(settings_xml: &str) -> Option<crate::types::DocumentS
         .children()
         .find(|n| n.is_element() && n.tag_name().name() == "compat");
     let compat_bool = |name: &str| -> Option<bool> { bool_prop(compat?, name) };
+    let line_wrap_like_word6 = compat_bool("lineWrapLikeWord6");
     let use_fe_layout = compat_bool("useFELayout");
     let balance_single_byte_double_byte_width = compat_bool("balanceSingleByteDoubleByteWidth");
     let adjust_line_height_in_table = compat_bool("adjustLineHeightInTable");
@@ -2441,6 +2444,7 @@ fn parse_document_settings(settings_xml: &str) -> Option<crate::types::DocumentS
         && math_def_jc.is_none()
         && default_tab_stop.is_none()
         && character_spacing_control.is_none()
+        && line_wrap_like_word6.is_none()
         && use_fe_layout.is_none()
         && balance_single_byte_double_byte_width.is_none()
         && adjust_line_height_in_table.is_none()
@@ -2454,6 +2458,7 @@ fn parse_document_settings(settings_xml: &str) -> Option<crate::types::DocumentS
         math_def_jc,
         default_tab_stop,
         character_spacing_control,
+        line_wrap_like_word6,
         use_fe_layout,
         balance_single_byte_double_byte_width,
         adjust_line_height_in_table,
@@ -3243,6 +3248,7 @@ impl BodyParseCursor {
                             });
                         if !section_subsumes_page_break {
                             output.push(BodyElement::PageBreak {
+                                origin: Some(PageBreakOrigin::Authored),
                                 parity: None,
                                 same_paragraph_as_previous: None,
                             });
@@ -3262,6 +3268,7 @@ impl BodyParseCursor {
                                 ParaPiece::PageBreak {
                                     same_paragraph_as_previous,
                                 } => output.push(BodyElement::PageBreak {
+                                    origin: Some(PageBreakOrigin::Authored),
                                     parity: None,
                                     same_paragraph_as_previous: same_paragraph_as_previous
                                         .then_some(true),
@@ -3371,6 +3378,7 @@ fn parse_body_elements_in_story(
         if cover_break_after {
             cover_break_positions.push(body.len());
             body.push(BodyElement::PageBreak {
+                origin: Some(PageBreakOrigin::CoverPageSynthetic),
                 parity: None,
                 same_paragraph_as_previous: None,
             });
@@ -16875,6 +16883,37 @@ mod math_jc_tests {
     }
 
     #[test]
+    fn settings_line_wrap_like_word6_preserves_explicit_on_off_and_absence() {
+        for (xml, expected) in [
+            (
+                format!(
+                    r#"<w:settings xmlns:w="{W_NS}"><w:compat><w:lineWrapLikeWord6/></w:compat></w:settings>"#
+                ),
+                Some(true),
+            ),
+            (
+                format!(
+                    r#"<w:settings xmlns:w="{W_NS}"><w:compat><w:lineWrapLikeWord6 w:val="0"/></w:compat></w:settings>"#
+                ),
+                Some(false),
+            ),
+            (
+                format!(
+                    r#"<w:settings xmlns:w="{W_NS}"><w:compat><w:useFELayout/></w:compat></w:settings>"#
+                ),
+                None,
+            ),
+        ] {
+            assert_eq!(
+                parse_document_settings(&xml)
+                    .expect("compat setting")
+                    .line_wrap_like_word6,
+                expected,
+            );
+        }
+    }
+
+    #[test]
     fn settings_adjust_line_height_in_table_surfaces() {
         let xml = format!(
             r#"<w:settings xmlns:w="{w}"><w:compat><w:adjustLineHeightInTable/></w:compat></w:settings>"#,
@@ -22166,6 +22205,10 @@ mod column_tests {
         assert!(matches!(body[0], BodyElement::Paragraph(_)));
         assert!(matches!(body[1], BodyElement::Paragraph(_)));
         assert!(matches!(body[2], BodyElement::PageBreak { .. }));
+        assert_eq!(
+            serde_json::to_value(&body[2]).unwrap()["origin"],
+            "coverPageSynthetic"
+        );
         assert!(matches!(body[3], BodyElement::Paragraph(_)));
     }
 
@@ -22212,6 +22255,10 @@ mod column_tests {
         assert_eq!(body.len(), 3);
         assert!(matches!(body[0], BodyElement::Paragraph(_)));
         assert!(matches!(body[1], BodyElement::PageBreak { .. }));
+        assert_eq!(
+            serde_json::to_value(&body[1]).unwrap()["origin"],
+            "authored"
+        );
         assert!(matches!(body[2], BodyElement::Paragraph(_)));
     }
 

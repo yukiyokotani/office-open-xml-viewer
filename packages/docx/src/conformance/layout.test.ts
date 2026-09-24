@@ -365,6 +365,26 @@ describe('synthetic DOCX conformance matrix', () => {
   });
 });
 
+it('inherits automatic line spacing from a boolean-default paragraph style through WASM', () => {
+  const model = parse(fontSizeMeasureDocx(
+    '<w:p><w:r><w:t>INHERITED_SPACING</w:t></w:r></w:p>',
+    `<w:style w:type="paragraph" w:default="true" w:styleId="Normal">
+      <w:pPr><w:spacing w:line="259" w:lineRule="auto"/></w:pPr>
+    </w:style>`,
+  ));
+  const paragraph = targetParagraph(model, 'body', 'INHERITED_SPACING');
+
+  // ECMA-376 §17.3.1.33: auto line spacing is measured in 240ths of a line.
+  // The paragraph omits both pStyle and direct spacing, so the default style
+  // must survive the Rust parser, WASM wire, and TS normalization unchanged.
+  expect(paragraph.styleId).toBe('Normal');
+  expect(paragraph.lineSpacing).toEqual({
+    rule: 'auto',
+    value: 259 / 240,
+    explicit: true,
+  });
+});
+
 describe('ST_HpsMeasure font sizes through the WASM parser', () => {
   const expectedMmSizePt = 72 * 3.6 / 25.4;
 

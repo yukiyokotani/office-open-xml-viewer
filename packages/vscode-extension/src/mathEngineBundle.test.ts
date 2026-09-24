@@ -43,7 +43,8 @@ describe('VS Code webview math engine bundle', () => {
         '@silurus/ooxml-pptx': resolve(EXTENSION_ROOT, '../pptx/src/index.ts'),
       },
       external: ['*.wasm'],
-      loader: { '.wasm': 'file' },
+      loader: { '.wasm': 'file', '.ttf': 'file' },
+      assetNames: 'assets/[name]-[hash]',
       plugins: [mainThreadOnlyWorkerStubs],
     });
 
@@ -57,5 +58,6 @@ describe('VS Code webview math engine bundle', () => {
     expect(bundle).toContain('renderSimpleThreeDChart');
     expect(bundle).not.toContain('Failed to load math engine from');
     expect(bundle).not.toContain('ooxml-worker-renderer-module');
+    expect(result.outputFiles.filter((file) => /\.(?:ttf|otf|woff2?)$/.test(file.path))).toEqual([]);
   });
 });

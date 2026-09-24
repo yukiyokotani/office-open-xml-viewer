@@ -382,6 +382,7 @@ struct WorkbookShared {
     /// Workbook theme `(majorFont.latin, minorFont.latin)` Latin faces
     /// (§20.1.4.2). Chart-text fallback font (CH10).
     theme_fonts: (Option<String>, Option<String>),
+    theme_japanese_fonts: (Option<String>, Option<String>),
     /// Lightweight style projections used while materializing sheets. Full
     /// workbook styles stay owned by the full-parse path instead of being
     /// retained and deeply cloned here.
@@ -407,6 +408,7 @@ struct XlsxThemeData {
     format_scheme: ooxml_common::theme::ThemeFormatScheme,
     format_scheme_present: bool,
     fonts: (Option<String>, Option<String>),
+    japanese_fonts: (Option<String>, Option<String>),
     chart_images: ooxml_common::chart::ChartImageRelationships,
 }
 
@@ -442,11 +444,22 @@ impl XlsxThemeData {
             .map(|hex| format!("#{}", hex.to_uppercase()))
             .collect();
         let theme_fonts = ooxml_common::theme::ThemeFonts::parse(xml);
+        let japanese_fonts = (
+            theme_fonts
+                .major
+                .typeface_for_script("Jpan")
+                .map(str::to_owned),
+            theme_fonts
+                .minor
+                .typeface_for_script("Jpan")
+                .map(str::to_owned),
+        );
         Self {
             colors,
             format_scheme: ooxml_common::theme::ThemeFormatScheme::parse(xml),
             format_scheme_present: true,
             fonts: (theme_fonts.major.latin, theme_fonts.minor.latin),
+            japanese_fonts,
             chart_images: ooxml_common::chart::ChartImageRelationships::default(),
         }
     }
@@ -491,6 +504,7 @@ impl WorkbookShared {
         let theme_format_scheme = Rc::new(theme.format_scheme);
         let theme_format_scheme_present = theme.format_scheme_present;
         let theme_fonts = theme.fonts;
+        let theme_japanese_fonts = theme.japanese_fonts;
         let theme_chart_images = Rc::new(theme.chart_images);
         let (default_font, chart_number_formats, styles) = if include_full_styles {
             match parse_styles(archive, theme_colors.as_ref()) {
@@ -523,6 +537,7 @@ impl WorkbookShared {
                 theme_format_scheme_present,
                 theme_chart_images,
                 theme_fonts,
+                theme_japanese_fonts,
                 default_font,
                 chart_number_formats,
                 shared_strings: shared_strings.into(),
@@ -766,6 +781,8 @@ fn finalize_projected_sheet(
     ws.sparkline_groups = sparkline_groups;
     ws.default_font_family = shared.default_font.0.clone();
     ws.default_font_size = shared.default_font.1;
+    ws.theme_japanese_major_font = shared.theme_japanese_fonts.0.clone();
+    ws.theme_japanese_minor_font = shared.theme_japanese_fonts.1.clone();
     // Denormalize the workbook-wide date system onto this sheet so the cell
     // formatter can resolve serial dates without a workbook back-reference
     // (ECMA-376 §18.2.28 / §18.17.4.1).
@@ -1626,6 +1643,7 @@ fn parse_projected_worksheet(
     let mut freeze_rows: u32 = 0;
     let mut freeze_cols: u32 = 0;
     let mut default_col_width = 8.43;
+    let mut base_col_width: Option<u32> = None;
     // Intrinsic default row height in *points* — ECMA-376 §18.3.1.81.
     // 15 pt = 20 CSS px at 96 DPI, Excel's baseline for the Calibri 11
     // Normal style. The renderer multiplies by 4/3 at display time, so
@@ -1767,6 +1785,11 @@ fn parse_projected_worksheet(
     for node in doc.descendants() {
         match node.tag_name().name() {
             "sheetFormatPr" if is_x_ns(node.tag_name().namespace()) => {
+                // ECMA-376 §18.3.1.81: baseColWidth describes implicit columns
+                // only when the sheet does not supply defaultColWidth.
+                if node.attribute("defaultColWidth").is_none() {
+                    base_col_width = node.attribute("baseColWidth").and_then(|s| s.parse().ok());
+                }
                 if let Some(v) = node
                     .attribute("defaultColWidth")
                     .and_then(|s| s.parse::<f64>().ok())
@@ -2345,6 +2368,7 @@ fn parse_projected_worksheet(
         col_collapsed,
         col_hidden,
         default_col_width,
+        base_col_width,
         default_row_height,
         default_row_height_custom,
         merge_cells,
@@ -2372,6 +2396,8 @@ fn parse_projected_worksheet(
         sparkline_groups: Vec::new(),
         default_font_family: None,
         default_font_size: None,
+        theme_japanese_major_font: None,
+        theme_japanese_minor_font: None,
         // Set by `parse_sheet_with` from the workbook-level `<workbookPr
         // date1904>` (ECMA-376 §18.2.28); a bare `parse_worksheet` (tests)
         // defaults to the 1900 date system.
@@ -4589,6 +4615,22 @@ mod sheet_view_tests {
         assert!(ws.row_heights.is_empty());
     }
 
+    #[test]
+    fn sheet_base_width_is_retained_only_without_authored_default_width() {
+        let base = format!(
+            r#"<worksheet xmlns="{NS}"><sheetFormatPr baseColWidth="10" defaultRowHeight="16"/><sheetData/></worksheet>"#
+        );
+        let (ws, _) = parse_worksheet(&base, &[], &[], "Sheet1").expect("worksheet parses");
+        assert_eq!(ws.base_col_width, Some(10));
+
+        let explicit = format!(
+            r#"<worksheet xmlns="{NS}"><sheetFormatPr baseColWidth="10" defaultColWidth="12.5" defaultRowHeight="16"/><sheetData/></worksheet>"#
+        );
+        let (ws, _) = parse_worksheet(&explicit, &[], &[], "Sheet1").expect("worksheet parses");
+        assert_eq!(ws.base_col_width, None);
+        assert_eq!(ws.default_col_width, 12.5);
+    }
+
     /// The serialized worksheet JSON is deterministic: `colWidths` keys come out
     /// in ascending column order regardless of `<col>` declaration order, and
     /// two serializations of the same parse are byte-identical. This is the
@@ -5393,7 +5435,7 @@ mod workbook_theme_tests {
     #[test]
     fn loads_the_theme_target_declared_by_workbook_relationships_once() {
         let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rTheme" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="themes/custom.xml"/></Relationships>"#;
-        let custom = r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:clrScheme name="custom"><a:dk1><a:srgbClr val="010203"/></a:dk1></a:clrScheme><a:fontScheme name="custom"><a:majorFont><a:latin typeface="Major Custom"/></a:majorFont><a:minorFont><a:latin typeface="Minor Custom"/></a:minorFont></a:fontScheme><a:fmtScheme name="custom"><a:fillStyleLst><a:solidFill><a:srgbClr val="ABCDEF"/></a:solidFill></a:fillStyleLst></a:fmtScheme></a:themeElements></a:theme>"#;
+        let custom = r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:clrScheme name="custom"><a:dk1><a:srgbClr val="010203"/></a:dk1></a:clrScheme><a:fontScheme name="custom"><a:majorFont><a:latin typeface="Major Custom"/><a:font script="Jpan" typeface="Major Japanese"/></a:majorFont><a:minorFont><a:latin typeface="Minor Custom"/><a:font script="Jpan" typeface="Minor Japanese"/></a:minorFont></a:fontScheme><a:fmtScheme name="custom"><a:fillStyleLst><a:solidFill><a:srgbClr val="ABCDEF"/></a:solidFill></a:fillStyleLst></a:fmtScheme></a:themeElements></a:theme>"#;
         let decoy = r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:clrScheme name="decoy"><a:dk1><a:srgbClr val="FFFFFF"/></a:dk1></a:clrScheme></a:themeElements></a:theme>"#;
         let mut bytes = Vec::new();
         {
@@ -5415,6 +5457,8 @@ mod workbook_theme_tests {
         assert_eq!(theme.colors.first().map(String::as_str), Some("#010203"));
         assert_eq!(theme.fonts.0.as_deref(), Some("Major Custom"));
         assert_eq!(theme.fonts.1.as_deref(), Some("Minor Custom"));
+        assert_eq!(theme.japanese_fonts.0.as_deref(), Some("Major Japanese"));
+        assert_eq!(theme.japanese_fonts.1.as_deref(), Some("Minor Japanese"));
         assert!(matches!(
             theme.format_scheme.lookup_fill_ref(1),
             ooxml_common::theme::StyleMatrixLookup::Entry(_)

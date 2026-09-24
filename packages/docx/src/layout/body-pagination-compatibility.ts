@@ -70,7 +70,31 @@ export const WORD_AUTOMATIC_KEEP_NEXT_START_SPACING = defineCompatibilityRule({
     kind: 'regression-test',
     reference: 'packages/docx/src/layout/body-paginator-production.test.ts#suppresses leading spacing when a keepNext unit moves to an automatic page',
   },
-  description: 'When automatic overflow relocates a keep-with-next unit to a fresh physical page, suppress the leading paragraph space-before for that grouped relocation without changing ordinary overflow or authored-break spacing.',
+  description: 'When automatic overflow relocates a keep-with-next unit to a fresh physical page, suppress the leading paragraph space-before for that grouped relocation. Standalone authored hard page breaks use a separate rule.',
+});
+
+export const WORD_AUTOMATIC_PARAGRAPH_TOP_SPACING = defineCompatibilityRule({
+  id: 'word-automatic-paragraph-top-spacing',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'automatic-paragraph-top-spacing',
+    application: 'Microsoft Word',
+    version: '16.111.1',
+    platform: 'macOS 26.5.2',
+  },
+  description: 'A controlled ink-bearing exact-line paragraph with before=6pt does not retain that before spacing when ordinary overflow moves the complete paragraph to a fresh physical page. A before=0pt paragraph defines the page-top control. Empty mark-only paragraphs retain authored before spacing in observed Word output; table and float overflow, same-page columns, and paragraph continuations have separate ownership.',
+});
+
+export const WORD_STANDALONE_HARD_PAGE_BREAK_TOP_SPACING = defineCompatibilityRule({
+  id: 'word-standalone-hard-page-break-top-spacing',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'standalone-hard-page-break-top-spacing',
+    application: 'Microsoft Word',
+    version: '16.111.1',
+    platform: 'macOS 26.5.2',
+  },
+  description: 'Controlled before=0/6pt documents in compatibility modes 14 and 15 place the first paragraph after a standalone hard page break at the same page-top origin: its before spacing is suppressed. The first paragraph of a document or a new section retains before spacing. A pageBreakBefore paragraph differs by mode (retained in 14, suppressed in 15); compatibilityMode is not yet represented in the parser model. This rule applies only to parser-proven authored breaks, excluding synthetic Cover Pages breaks, parity section breaks, and inline breaks after visible content.',
 });
 
 export const WORD_TRAILING_SPACE_AFTER_FIT_ADMISSION = defineCompatibilityRule({

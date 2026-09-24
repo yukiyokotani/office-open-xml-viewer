@@ -42,7 +42,6 @@ import {
   WORD_CJK_BOTH_INTER_CHARACTER_EXPANSION,
   WORD_DEGENERATE_LINE_SPACING_SINGLE,
   WORD_DICTIONARY_SEA_ATOMIC_CHUNK,
-  WORD_DICTIONARY_SEA_NATURAL_FIT,
   WORD_EAST_ASIAN_GRID_LINE_ALLOCATION,
   WORD_FAR_EAST_SINGLE_LINE_FACTOR,
   WORD_FIT_TEXT_INTER_CHARACTER_EXPANSION,
@@ -54,7 +53,6 @@ import {
   WORD_JUSTIFICATION_LEADING_INDENT_EXCLUSION,
   WORD_JUSTIFIED_CANDIDATE_SEPARATOR_FIT,
   WORD_MIXED_ANCHOR_VISIBLE_LINE_METRICS,
-  WORD_MS_MINCHO_EMPTY_EAST_ASIAN_MARK_HEIGHT,
   WORD_NUMBERING_MARKER_OVERFLOW_TAB_ADVANCE,
   WORD_NUMBERING_MARKER_PARAGRAPH_MARK_FALLBACK,
   WORD_NUMBERING_SUFFIX_COINCIDENT_LIST_TAB,
@@ -76,8 +74,7 @@ import {
   wordDegenerateLineSpacingIsSingle,
   wordEastAsianGridLineCells,
   wordFarEastSingleLinePx,
-  wordOpenTypeEastAsianSingleLineRatio,
-  wordResolvedEastAsianSingleLineRatio,
+  wordOpenTypeAutoLineRatios,
   wordFirstJustifiedContentSegment,
   wordGridAtLeastLineHeightPx,
   wordGridRightIndentAdjustmentPt,
@@ -85,9 +82,7 @@ import {
   wordUseFeLayoutInheritedGridHeightPx,
   wordCandidateFitWidthPx,
   wordDocumentCharacterCompressionApplies,
-  wordJustifiedCandidateFitAllowancePx,
   wordJapanesePunctuationRetainedExtentPt,
-  wordMsMinchoEmptyEastAsianMarkSingleLinePx,
   wordNumberingSuffixAcceptsCoincidentListTab,
   wordRubyUniformLineHeightPx,
   wordSnapToCharsEastAsianCellCount,
@@ -392,7 +387,6 @@ describe('layout compatibility inventory', () => {
       WORD_NUMBERING_MARKER_PARAGRAPH_MARK_FALLBACK,
       WORD_NUMBERING_SUFFIX_COINCIDENT_LIST_TAB,
       WORD_TAB_STOP_PAGE_EDGE_CLAMP,
-      WORD_DICTIONARY_SEA_NATURAL_FIT,
       WORD_DICTIONARY_SEA_ATOMIC_CHUNK,
       WORD_OVERLONG_TOKEN_EMERGENCY_BREAK,
       WORD_UNIFORM_RUN_POSITION_LEADING,
@@ -585,22 +579,6 @@ describe('layout compatibility inventory', () => {
       .not.toMatch(/sample|private|\.docx|\.pdf/i);
   });
 
-  it('scopes the observed MS Mincho height to empty East-Asian marks', () => {
-    expect(WORD_MS_MINCHO_EMPTY_EAST_ASIAN_MARK_HEIGHT.evidence).toEqual({
-      kind: 'office-observation',
-      syntheticFixtureId: 'ms-mincho-empty-east-asian-paragraph-mark',
-      application: 'Microsoft Word',
-      version: '16.111.1',
-      platform: 'macOS 26.5.2',
-    });
-    expect(WORD_MS_MINCHO_EMPTY_EAST_ASIAN_MARK_HEIGHT.description)
-      .not.toMatch(/sample|private|\.docx|\.pdf/i);
-    expect(wordMsMinchoEmptyEastAsianMarkSingleLinePx('MS Mincho', 12, true)).toBeCloseTo(15.6, 5);
-    expect(wordMsMinchoEmptyEastAsianMarkSingleLinePx('ＭＳ 明朝', 12, true)).toBeCloseTo(15.6, 5);
-    expect(wordMsMinchoEmptyEastAsianMarkSingleLinePx('MS Mincho', 12, false)).toBe(0);
-    expect(wordMsMinchoEmptyEastAsianMarkSingleLinePx('MS PMincho', 12, true)).toBe(0);
-  });
-
   it('records the anonymized Word observation for vertical final-line admission', () => {
     expect(WORD_VERTICAL_RL_FINAL_LINE_BASELINE_ADMISSION.evidence).toEqual({
       kind: 'office-observation',
@@ -716,14 +694,6 @@ describe('layout compatibility inventory', () => {
       lineWillJustify: true,
       wrapNarrowed: true,
     })).toBe(48);
-    expect(wordJustifiedCandidateFitAllowancePx({
-      biasBudgetPx: 5.25,
-      resolvedMeasurementRouteCount: 1,
-    })).toBe(5.25);
-    expect(wordJustifiedCandidateFitAllowancePx({
-      biasBudgetPx: 5.25,
-      resolvedMeasurementRouteCount: 2,
-    })).toBe(0);
     expect(wordCandidateFitWidthPx({
       widthPx: 60,
       trailingSpacePx: 12,
@@ -738,30 +708,23 @@ describe('layout compatibility inventory', () => {
     expect(wordEastAsianGridLineCells(0, 18)).toBe(1);
     expect(wordFarEastSingleLinePx(22, 10)).toBe(22);
     expect(wordFarEastSingleLinePx(0, 10)).toBe(13);
-    expect(wordOpenTypeEastAsianSingleLineRatio({
-      unitsPerEm: 2048,
-      hheaAscent: 1802,
-      hheaDescent: -455,
-      hheaLineGap: 1024,
-      typoAscent: 1600,
-      typoDescent: -400,
-      typoLineGap: 200,
-      winAscent: 1900,
-      winDescent: 736,
-      useTypoMetrics: true,
-      hasEastAsianCmap: true,
-    })).toBeCloseTo(((1802 + 455) * 1.3) / 2048, 12);
-    expect(wordOpenTypeEastAsianSingleLineRatio({
-      unitsPerEm: 2048,
-      hheaAscent: -1,
-      hheaDescent: 1,
-      hheaLineGap: 0,
-      hasEastAsianCmap: true,
-    })).toBe(0);
-    expect(wordResolvedEastAsianSingleLineRatio(1.25)).toBeCloseTo(1.625, 12);
-    expect(wordResolvedEastAsianSingleLineRatio(Number.POSITIVE_INFINITY)).toBe(0);
     expect(wordUseFeLayoutInheritedGridHeightPx(36, 18, 1.15)).toBe(36);
     expect(wordUseFeLayoutInheritedGridHeightPx(18, 18, 1.15)).toBeCloseTo(20.7, 12);
+  });
+
+  it('projects Word auto spacing from code-page class, even for the same cmap', () => {
+    const hhea = {
+      unitsPerEm: 1000,
+      hheaAscent: 800,
+      hheaDescent: -200,
+      hheaLineGap: 100,
+    };
+    expect(wordOpenTypeAutoLineRatios({ ...hhea, farEastCodePage: false }))
+      .toEqual({ lineHeightRatio: 1.1, designAscentRatio: 0.9, designDescentRatio: 0.2 });
+    expect(wordOpenTypeAutoLineRatios({ ...hhea, farEastCodePage: true }))
+      .toEqual({ lineHeightRatio: 1.3, designAscentRatio: 0.95, designDescentRatio: 0.35 });
+    expect(wordOpenTypeAutoLineRatios({ ...hhea, hheaLineGap: -100, farEastCodePage: false }))
+      .toEqual({ lineHeightRatio: 0.9, designAscentRatio: 0.7, designDescentRatio: 0.2 });
   });
 
   it('pins the eight track-change author colors independently of author indexing', () => {

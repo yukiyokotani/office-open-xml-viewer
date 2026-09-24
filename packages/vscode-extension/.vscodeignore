@@ -7,4 +7,5 @@ node_modules/**
 tsconfig.json
 esbuild.config.mjs
 esbuild-worker-stub.*
+esbuild-asset-sidecars.*
 *.vsix

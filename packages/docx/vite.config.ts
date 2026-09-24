@@ -9,7 +9,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig({
   root: __dirname,
-  plugins: [wasm(), topLevelAwait()],
+  plugins: [wasmAssetUrl(), wasm(), topLevelAwait()],
   resolve: {
     alias: {
       '@ooxml-test-three-d-renderer': resolve(__dirname, '../../src/three-d.ts'),

@@ -6,14 +6,15 @@ import {
   SCRIPT_GOOGLE_FONTS,
   type CjkLang,
   type FontPreloadEntry,
+  type OfficeFontFallbackRequest,
 } from '@silurus/ooxml-core';
-import type { ParsedWorkbook } from './types.js';
+import type { ParsedWorkbook, Worksheet } from './types.js';
 
-/** Office font name → metric-compatible Google Fonts substitute for XLSX cells.
+/** Office font name → Google Fonts substitute for XLSX cells.
  *
  *  {@link GOOGLE_FONT_SUBSTITUTES} supplies the Office substitutes (Calibri →
- *  Carlito, Cambria → Caladea — same advance widths / vertical metrics, so
- *  text-width measurements stay close to Excel's), the popular free web fonts
+ *  Carlito, Cambria → Caladea — advance-width alternatives for base text faces,
+ *  without an exact Excel layout guarantee), the popular free web fonts
  *  and the Arabic Noto fallbacks — shared with docx/pptx. {@link
  *  SCRIPT_GOOGLE_FONTS} adds the CJK / Cyrillic / Thai / Devanagari / Hebrew
  *  Noto faces (the renderer chooses the CJK Noto per cell from the cell's font
@@ -44,7 +45,7 @@ function* xlsxTextRuns(wb: ParsedWorkbook | undefined): Generator<string> {
  * The font-family names to preload for a workbook: every styled cell font, plus
  * only the script-fallback Noto faces whose script the workbook's TEXT actually
  * contains ({@link scriptPreloadNamesForText}). Office faces map to
- * metric-compatible substitutes (Calibri → Carlito, Cambria → Caladea); the
+ * advance-width substitutes (Calibri → Carlito, Cambria → Caladea); the
  * renderer's default chain still ends with the full Noto set, but eagerly
  * fetching the multi-MB CJK families for a workbook that has no CJK glyphs would
  * block first paint for nothing; an un-preloaded face loads lazily if it ever
@@ -78,4 +79,54 @@ export function xlsxCjkFallback(wb: ParsedWorkbook | undefined, fallback: CjkLan
     if (region) return cjkFallbackForText(xlsxTextRuns(wb), region);
   }
   return cjkFallbackForText(xlsxTextRuns(wb), fallback);
+}
+
+/** Exact Calibri style slots in the workbook style and shared-string tables.
+ * An omitted font name uses the workbook default Calibri chain; unrelated
+ * authored families never borrow Carlito merely through a CSS fallback tail.
+ * Styles are prepared before a sheet is pulled so Normal-font MDW and viewer
+ * geometry cannot be captured against a different fallback resource. This can
+ * prepare an unused style slot, bounded by the four supported tuples. */
+export function xlsxOfficeFontRequests(wb: ParsedWorkbook | undefined): OfficeFontFallbackRequest[] {
+  const found = new Map<string, OfficeFontFallbackRequest>();
+  const add = (name: string | null | undefined, bold: boolean, italic: boolean) => {
+    if ((name?.trim().toLowerCase() || 'calibri') !== 'calibri') return;
+    const weight = bold ? 700 : 400;
+    const style = italic ? 'italic' : 'normal';
+    found.set(`${weight}:${style}`, { family: 'Calibri', weight, style });
+  };
+  for (const font of wb?.styles?.fonts ?? []) add(font.name, font.bold, font.italic);
+  for (const shared of wb?.sharedStrings ?? []) {
+    for (const run of shared.runs ?? []) {
+      if (run.font) add(run.font.name, run.font.bold, run.font.italic);
+    }
+  }
+  return [...found.values()];
+}
+
+/** Inline strings are worksheet-local and absent from the bootstrap shared
+ * string table. Discover their explicitly styled runs when that sheet is
+ * pulled, before its first measurement or paint. */
+export function xlsxWorksheetOfficeFontRequests(ws: Worksheet): OfficeFontFallbackRequest[] {
+  const found = new Map<string, OfficeFontFallbackRequest>();
+  for (const row of ws.rows) for (const cell of row.cells) {
+    if (cell.value.type !== 'text') continue;
+    for (const run of cell.value.runs ?? []) {
+      const font = run.font;
+      if (!font || (font.name?.trim().toLowerCase() || 'calibri') !== 'calibri') continue;
+      const weight = font.bold ? 700 : 400;
+      const style = font.italic ? 'italic' : 'normal';
+      found.set(`${weight}:${style}`, { family: 'Calibri', weight, style });
+    }
+  }
+  for (const anchor of ws.shapeGroups ?? []) for (const shape of anchor.shapes) {
+    for (const paragraph of shape.text?.paragraphs ?? []) for (const run of paragraph.runs) {
+      if (run.type !== 'text') continue;
+      if ((run.fontFace?.trim().toLowerCase() || 'calibri') !== 'calibri') continue;
+      const weight = run.bold ? 700 : 400;
+      const style = run.italic ? 'italic' : 'normal';
+      found.set(`${weight}:${style}`, { family: 'Calibri', weight, style });
+    }
+  }
+  return [...found.values()];
 }

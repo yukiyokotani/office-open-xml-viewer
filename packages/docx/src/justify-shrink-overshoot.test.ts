@@ -10,31 +10,10 @@ import type {
   SectionProps,
 } from './types';
 
-// Word-observed `both`/`distribute` line-fit behavior (issue #698 PDF) — the
-// Knuth-Plass space-shrink drawable-space tolerance (`SPACE_SHRINK_RATIO`) must
-// NOT admit an extra word onto a line that the draw pass will justify, and must
-// remain available on a line the draw pass treats as non-justified. §17.18.44
-// classifies ST_Jc values but does not mandate this fit gate. A separate per-font
-// bias applies exclusively on justified lines; this synthetic `serif` face has
-// zero bias:
-//
-// - A line that WILL justify (a non-final, non-manual-break line of a
-//   `both`/kashida paragraph, or ANY line of `distribute`/`thaiDistribute`)
-//   redistributes its slack by EXPANDING inter-word spaces — it is never drawn
-//   compressed below natural width, so a candidate word whose natural advance
-//   overflows the column must wrap. Observed Word behaviour (issue #698, PDF
-//   ground truth) still stands: in a narrow justified column Word breaks at
-//   natural fit rather than pulling up one more word.
-// - A line the draw pass does NOT justify — the paragraph's true last line and a
-//   line ending at a manual `<w:br/>` (§17.3.3.1) under `both`/kashida, and every
-//   line of a non-justified paragraph — is drawn with the shrink-fit compression
-//   the budget promises (`shrinkFitCompression`).
-// - The allowances are exclusive per line: justified lines receive only the
-//   Canvas-vs-Word face bias; non-justified lines receive only drawable trailing-
-//   space shrink. Demo p3/p6 space-collapse evidence shows that adding both
-//   double-counts tolerance and admits words the paint pass cannot fit. Georgia
-//   retains its calibrated bias on justified demo lines; generic `serif` and
-//   Times remain at zero for the #698 natural-fit gate.
+// ECMA-376 §17.18.44 defines justification, not a general word-fit tolerance.
+// Word-produced Calibri and Arial controls at their natural-width boundary
+// wrap for left, center, and right alignment. Earlier justified controls also
+// require natural fit. Keep the same fit decision across these paragraph paths.
 
 const FONT_PX = 12; // linear stub: each code point advances FONT_PX at scale 1
 
@@ -208,13 +187,12 @@ function gluedFitLines(
 // Fit arithmetic (linear stub): each "AAAA " token advances 5·12 = 60px, the
 // bare word 48px, its trailing space 12px. Testing the 4th word on a line
 // already holding three tokens: currentWidth = 180, wForFit = 48 ⇒ natural end
-// 228. Column = 225 ⇒ overflow 3px. The line carries Σ trailing-space = 36px, so
-// the shrink budget (0.25·36 = 9px) admits the word WHEN the tolerance applies.
+// 228. Column = 225 ⇒ overflow 3px, so the fourth word wraps.
 const TEXT4 = 'AAAA AAAA AAAA AAAA';      // marginal word is the paragraph-FINAL word
 const TEXT5 = 'AAAA AAAA AAAA AAAA AAAA'; // marginal word is followed by more content
 const COLUMN = 225;
 
-describe('§17.18.44 — per-font advance bias and drawable space shrink', () => {
+describe('§17.18.44 — natural word fit across alignment modes', () => {
   it('counts a candidate trailing space when the prospective line will justify', async () => {
     const lines = await renderLines(textPara('AAAA AAAA BBBB', 'both'), 108);
 
@@ -227,38 +205,30 @@ describe('§17.18.44 — per-font advance bias and drawable space shrink', () =>
 
   it('wraps the marginal word on a line that will justify', async () => {
     // Word PDF ground truth for #698's narrow justified column still shows a
-    // natural-fit break (3 tokens). Generic `serif` has no per-font bias, and
-    // this line will justify, so it gets no drawable-space budget either.
+    // natural-fit break (3 tokens). This line will justify, so it gets no
+    // drawable-space budget.
     const lines = await renderLines(textPara(TEXT5, 'both'), COLUMN);
     expect(lines.length).toBe(2);
     expect(tokens(lines[0])).toBe(3);
   });
 
-  it('keeps the SAME marginal word on a non-justified line (drawable shrink retained)', async () => {
-    // left/center lines are drawn at (or compressed toward) natural spacing, so
-    // the 3px overflow is absorbed by drawable trailing-space compression. The
-    // same path guards centred single-line titles such as sample-10 p1.
-    for (const alignment of ['left', 'center'] as const) {
+  it('wraps a marginal Latin word at natural width for ordinary alignments', async () => {
+    // Word-controlled Calibri and Arial tables, each with left/center/right
+    // alignment, wrap even when the natural line is under 1pt too wide.
+    for (const alignment of ['left', 'center', 'right'] as const) {
       const lines = await renderLines(textPara(TEXT5, alignment), COLUMN);
       expect(lines.length, alignment).toBe(2);
-      expect(tokens(lines[0]), alignment).toBe(4); // budget admits the 4th; 5th wraps
+      expect(tokens(lines[0]), alignment).toBe(3);
     }
   });
 
-  it("keeps the budget on a `both` paragraph's TRUE LAST line (paint draws it non-justified)", async () => {
-    // The marginal word is the paragraph's final word: admitting it makes this
-    // the paragraph's last line, which the draw pass does NOT justify
-    // (applyJustify excludes endsLogicalLine for `both`) — it is drawn with the
-    // shrink-fit compression the budget promises. Measure must therefore admit
-    // within the same budget (measure==paint), keeping the old behaviour.
+  it("wraps a `both` paragraph's marginal final word at natural width", async () => {
     const lines = await renderLines(textPara(TEXT4, 'both'), COLUMN);
-    expect(lines.length).toBe(1);
-    expect(tokens(lines[0])).toBe(4);
+    expect(lines.length).toBe(2);
+    expect(tokens(lines[0])).toBe(3);
   });
 
-  it('keeps the budget on a `both` line ending at a manual <w:br/> (§17.3.3.1)', async () => {
-    // A manual break terminates the logical line, which `both` leaves
-    // non-justified exactly like the paragraph's last line — same budget rule.
+  it('wraps a marginal word before a manual <w:br/> (§17.3.3.1)', async () => {
     const el = para(
       [
         { type: 'text', ...textRun(TEXT4) } as DocRun,
@@ -268,16 +238,16 @@ describe('§17.18.44 — per-font advance bias and drawable space shrink', () =>
       'both',
     );
     const lines = await renderLines(el, COLUMN);
-    expect(lines.length).toBe(2); // "AAAA ×4" ‖ "BBBB" — the break-line keeps its 4th token
-    expect(tokens(lines[0])).toBe(4);
-    expect(lines[1]).toContain('BBBB');
+    expect(lines.length).toBe(3);
+    expect(tokens(lines[0])).toBe(3);
+    expect(lines[2]).toContain('BBBB');
   });
 
   it('wraps the marginal word on a `distribute` last line', async () => {
     // Word PDF ground truth for #698 still requires the natural-fit break here:
     // §17.18.44 `distribute` stretches the final line, yielding 3 tokens across
     // 2 lines. `distribute` stretches even the logical last line, so the
-    // drawable-space budget is suppressed; generic `serif` contributes no bias.
+    // drawable-space budget is suppressed.
     const lines = await renderLines(textPara(TEXT4, 'distribute'), COLUMN);
     expect(lines.length).toBe(2);
     expect(tokens(lines[0])).toBe(3);
@@ -288,7 +258,7 @@ describe('§17.18.44 — per-font advance bias and drawable space shrink', () =>
     expect(lines.length).toBe(1);
   });
 
-  it('applies the Georgia bias budget after scaling it by authored w:w', async () => {
+  it('uses the same measured width for Georgia and a generic face after authored w:w', async () => {
     const el = para(
       [{
         type: 'text',
@@ -297,8 +267,8 @@ describe('§17.18.44 — per-font advance bias and drawable space shrink', () =>
       'both',
     );
 
-    // At this threshold the scaled Georgia allowance admits the third token;
-    // the otherwise-identical zero-profile generic route still wraps it.
+    // The synthetic Canvas measures both names identically. Authored w:w may
+    // scale the advances, but the family name alone cannot add fit tolerance.
     const generic = para(
       [{
         type: 'text',
@@ -306,25 +276,16 @@ describe('§17.18.44 — per-font advance bias and drawable space shrink', () =>
       } as DocRun],
       'both',
     );
-    expect(tokens((await renderLines(el, 89.2))[0])).toBe(3);
+    expect(tokens((await renderLines(el, 89.2))[0])).toBe(2);
     expect(tokens((await renderLines(generic, 89.2))[0])).toBe(2);
   });
 
-  it('keeps a marginal glued group on one justified line for one Georgia route', () => {
-    const georgiaRoute = route('Georgia');
-
-    // Natural end = 60px against 59.9px. The one-route Georgia allowance is
-    // intentionally enough to retain the atomic group before TAIL wraps.
-    expect(gluedFitLines(georgiaRoute, georgiaRoute)[0]).toBe('X AAB');
-  });
-
-  it('suppresses the Georgia allowance for mixed-route glued groups in either order', () => {
+  it('wraps a marginal glued group at natural width for one or mixed routes', () => {
     const georgiaRoute = route('Georgia');
     const otherResolvedRoute = route('Registered Georgia Alias', 'registered');
-
-    // Both segments retain the same resolved-family profile to prove that face
-    // profile booleans are insufficient. Route identity makes the judgment
-    // order-independent and moves the whole atomic group after the first line.
+    // Natural end = 60px against 59.9px. The group is atomic and starts on the
+    // next line, independent of name and route splitting.
+    expect(gluedFitLines(georgiaRoute, georgiaRoute)[0]).toBe('X ');
     expect(gluedFitLines(georgiaRoute, otherResolvedRoute)[0]).toBe('X ');
     expect(gluedFitLines(otherResolvedRoute, georgiaRoute)[0]).toBe('X ');
   });

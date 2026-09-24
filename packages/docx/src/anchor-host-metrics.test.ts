@@ -1,5 +1,6 @@
 import { DEFAULT_KINSOKU_RULES } from '@silurus/ooxml-core';
 import { describe, expect, it } from 'vitest';
+import { createLayoutServices } from './layout-runtime.js';
 import {
   buildSegments,
   layoutLines,
@@ -7,7 +8,29 @@ import {
   type LayoutSeg,
   type LayoutTextSeg,
 } from './line-layout.js';
-import type { DocRun } from './types.js';
+import type { DocRun, DocxDocumentModel } from './types.js';
+
+function metricServices(unicodeRanges: readonly (readonly [number, number])[]) {
+  const empty = { default: null, first: null, even: null };
+  return createLayoutServices({
+    section: {
+      pageWidth: 612, pageHeight: 792, marginTop: 72, marginRight: 72,
+      marginBottom: 72, marginLeft: 72, headerDistance: 36, footerDistance: 36,
+      titlePage: false, evenAndOddHeaders: false,
+    },
+    body: [], headers: empty, footers: empty,
+  } as DocxDocumentModel, {
+    measureContext: linearCtx(),
+    localMetrics: {
+      'yu mincho': {
+        family: 'Yu Mincho', requestedFamily: 'Yu Mincho',
+        lineHeightRatio: 1.5, designAscentRatio: 1.1,
+        designDescentRatio: 0.4, unicodeRanges,
+        sourceIdentity: 'test-resource:yu-mincho',
+      },
+    },
+  });
+}
 
 function linearCtx(): CanvasRenderingContext2D {
   let font = '10px serif';
@@ -78,6 +101,20 @@ function layOut(runs: DocRun[]) {
 }
 
 describe('floating drawing anchor-host metrics', () => {
+  it('admits selected host geometry for auto and atLeast, but not exact spacing', () => {
+    const covered = metricServices([[0x3042, 0x3042]]);
+    const partial = metricServices([[0x41, 0x5a]]);
+    const segment = (layoutServices: ReturnType<typeof metricServices>, rule?: 'exact' | 'atLeast') =>
+      buildSegments([anchorHost()], {
+        pageIndex: 0, totalPages: 1, layoutServices,
+        ...(rule ? { lineSpacing: { rule, value: 18, explicit: true } } : {}),
+      })[0] as LayoutTextSeg;
+    expect(segment(covered).resolvedLineHeightRatio).toBe(1.5);
+    expect(segment(partial).resolvedLineHeightRatio).toBeUndefined();
+    expect(segment(covered, 'exact').resolvedLineHeightRatio).toBeUndefined();
+    expect(segment(covered, 'atLeast').resolvedLineHeightRatio).toBe(1.5);
+  });
+
   it('emits a zero-width metric segment using the anchor character formatting', () => {
     const segments = buildSegments([anchorHost()], { pageIndex: 0, totalPages: 1 });
 

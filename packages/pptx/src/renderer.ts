@@ -155,12 +155,16 @@ import { drawEaVertRun } from './vertical-text.js';
 /** Theme font context threaded through the render call chain. */
 export interface RenderContext {
   cjkFallback?: CjkLang;
+  officeFontRoutes?: Readonly<Record<string, import('@silurus/ooxml-core').OfficeFontFallbackRoute>>;
+  /** Presentation load explicitly enabled Google Fonts substitutions. */
+  googleSubstitutes?: boolean;
   themeMajorFont: string | null;
   themeMinorFont: string | null;
   /** Lower-cased authored family → this presentation's isolated FontFace alias. */
   embeddedFontAliases?: ReadonlyMap<string, string>;
   /** Isolated FontFace alias → lower-cased authored family for fallback policy. */
   embeddedFontAuthoredFamilies?: ReadonlyMap<string, string>;
+  embeddedFontTuples?: ReadonlySet<string>;
   /** Theme hyperlink colour as a 6-char hex (no leading #), or null. */
   themeHlinkColor?: string | null;
   /**
@@ -739,6 +743,10 @@ function normalizeFontFamily(family: string | null, rc: RenderContext): string {
   return isolated(primary);
 }
 
+function hasNamedFontFamily(family: string | null | undefined): boolean {
+  return !!family?.trim();
+}
+
 /** CSS generic font families — must NOT be quoted in a canvas font string. */
 const CSS_GENERIC_FAMILIES = new Set([
   'serif', 'sans-serif', 'monospace', 'cursive', 'fantasy', 'system-ui',
@@ -753,25 +761,18 @@ function genericFallback(family: string): string {
 }
 
 /**
- * Office fonts → metric-compatible, freely-distributable substitutes
- * (`presentation.ts` preloads these webfonts). Putting the substitute in the
- * canvas font stack means a viewer that lacks Calibri/Cambria (macOS, Linux)
- * renders at the SAME advance widths as PowerPoint instead of a wider system
- * serif/sans — without which `wrap="none"` lines overflow the slide. Keys are
- * lower-cased; both the Office face and its substitute share glyph metrics.
+ * Optional published web aliases for authored Office faces. These enter the
+ * canvas stack only when `useGoogleFonts` is enabled. The authored family
+ * remains first, followed by a fallback of the same generic class. Keys are
+ * lower-cased; this map is not a metric correction or a line-break rule.
  */
 const OFFICE_FONT_SUBSTITUTE: Record<string, string> = {
   'calibri': 'Carlito',
-  'calibri light': 'Carlito',
   'cambria': 'Caladea',
-  'cambria math': 'Caladea',
   'franklin gothic book': 'Libre Franklin',
   'franklin gothic medium': 'Libre Franklin',
-  // Common Arabic-script faces that hosts rarely ship. Map them to Noto
-  // substitutes so RTL slides (e.g. sample-10, which requests Sakkal Majalla /
-  // Univers Next Arabic) render with a real web font instead of an oversized
-  // OS fallback. "Naskh" covers traditional serif-like Arabic faces; "Sans"
-  // covers the modern geometric ones.
+  // Optional aliases for common Arabic-script faces. "Naskh" covers
+  // traditional serif-like faces; "Sans" covers geometric ones.
   'sakkal majalla': 'Noto Naskh Arabic',
   'traditional arabic': 'Noto Naskh Arabic',
   'simplified arabic': 'Noto Naskh Arabic',
@@ -779,22 +780,19 @@ const OFFICE_FONT_SUBSTITUTE: Record<string, string> = {
   'univers next arabic': 'Noto Sans Arabic',
 };
 
-/** Generic Arabic fallbacks appended to an Arabic-script font's canvas stack
- *  (before the CSS generic) so Arabic glyphs in an Arabic-targeted family that
- *  the host lacks still resolve to a real Arabic web font when `useGoogleFonts`
- *  is on. */
-const ARABIC_FALLBACKS = '"Noto Naskh Arabic", "Noto Sans Arabic"';
+/** Arabic fallbacks apply only to runs containing Arabic codepoints, before
+ * the CSS generic so a missing authored face can retain the script. */
+const ARABIC_TEXT_RE = /[\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff]/u;
 
 /**
- * True when `family` names an Arabic-script face. Only such faces get the Noto
- * Arabic web fonts appended to their canvas stack.
+ * True when `family` names an Arabic-script face. Its Arabic runs place the
+ * script fallbacks before CJK and other script tails.
  *
  * These fallback faces (esp. Noto Naskh Arabic) also carry serif-style *Latin*
  * glyphs, so appending them to every font stack made Latin text in an
- * uninstalled Latin/CJK face (e.g. a Japanese gothic carrying "About us") fall
+ * uninstalled Latin/CJK face fall
  * into the serif Naskh face instead of degrading to the sans-serif generic.
- * Gating on Arabic-script faces keeps RTL decks (Amiri, Sakkal Majalla, …)
- * correct while letting Latin/CJK text degrade to the right generic.
+ * Gating on actual Arabic text lets Latin/CJK runs degrade to their generic.
  */
 function isArabicScriptFace(family: string): boolean {
   // Faces we explicitly substitute to a Noto Arabic web font are Arabic-script.
@@ -811,10 +809,10 @@ function quoteAll(names: readonly string[]): string {
 
 /**
  * Build the CSS font-family LIST for a (already-normalized, non-generic) face:
- * named face + metric-compatible Office substitute + script Noto fallbacks +
+ * named face + optional web alias + script Noto fallbacks +
  * inferred generic. The script fallbacks are:
  *
- * - Arabic-script faces: the Arabic Notos lead (Latin/digits share that face).
+ * - Arabic runs: matching-class Arabic Notos enter only that run's stack.
  * - CJK faces (Noto KR/SC/TC/JP, ordered by the document's CJK language so
  *   shared Han glyphs take the right shapes — see core/fonts/scripts.ts).
  * - Non-CJK scripts (Cyrillic via Noto Sans/Serif, Thai, Devanagari, Hebrew)
@@ -822,17 +820,28 @@ function quoteAll(names: readonly string[]): string {
  *
  * Exported for unit testing the fallback ordering.
  */
-export function cssFontStack(normalized: string, authoredFamily = normalized, fallback?: CjkLang): string {
+export function cssFontStack(
+  normalized: string,
+  authoredFamily = normalized,
+  fallback?: CjkLang,
+  text = '',
+  googleSubstitutes = false,
+): string {
   const generic = genericFallback(authoredFamily);
-  const sub = OFFICE_FONT_SUBSTITUTE[authoredFamily.toLowerCase()];
+  const arabicText = ARABIC_TEXT_RE.test(text);
+  const alias = googleSubstitutes ? OFFICE_FONT_SUBSTITUTE[authoredFamily.toLowerCase()] : undefined;
+  const sub = alias?.includes('Arabic') && !arabicText ? undefined : alias;
   const subPart = sub ? `"${sub}", ` : '';
   const googleAlias = googleCjkFontAlias(authoredFamily);
   const aliasPart = googleAlias ? `"${googleAlias}", ` : '';
-  // Arabic faces keep the historical chain unchanged (Arabic leads; appending a
-  // CJK or non-CJK tail would let Latin/digits leak away from the Arabic face).
-  if (isArabicScriptFace(authoredFamily)) {
+  // Arabic faces lead with script fallbacks only for Arabic runs.
+  const arabicFamilies = generic === 'serif'
+    ? ['Noto Naskh Arabic', 'Noto Sans Arabic']
+    : ['Noto Sans Arabic'];
+  const arabicPart = arabicText ? `${quoteAll(arabicFamilies)}, ` : '';
+  if (isArabicScriptFace(authoredFamily) && arabicText) {
     const cjk = fallback ? cjkFallbackChain(fallback, 'sans') : [];
-    return `"${normalized}", ${subPart}${ARABIC_FALLBACKS}, ${cjk.length ? `${quoteAll(cjk)}, ` : ''}${generic}`;
+    return `"${normalized}", ${subPart}${arabicPart}${cjk.length ? `${quoteAll(cjk)}, ` : ''}${generic}`;
   }
   const variant: 'sans' | 'serif' = generic === 'serif' ? 'serif' : 'sans';
   const authoredCjk = classifyCjkFont(authoredFamily);
@@ -844,8 +853,8 @@ export function cssFontStack(normalized: string, authoredFamily = normalized, fa
   const nonCjk = variant === 'serif' ? NON_CJK_SERIF_FALLBACKS : NON_CJK_SANS_FALLBACKS;
   const nonCjkPart = `${quoteAll(nonCjk)}, `;
   return authoredCjk
-    ? `"${normalized}", ${subPart}${aliasPart}${cjkPart}${nonCjkPart}${generic}`
-    : `"${normalized}", ${subPart}${aliasPart}${nonCjkPart}${cjkPart}${generic}`;
+    ? `"${normalized}", ${subPart}${aliasPart}${cjkPart}${nonCjkPart}${arabicPart}${generic}`
+    : `"${normalized}", ${subPart}${aliasPart}${nonCjkPart}${cjkPart}${arabicPart}${generic}`;
 }
 
 /**
@@ -1007,12 +1016,25 @@ export function buildFont(
   family: string,
   rc: RenderContext,
   text = '',
+  hasNamedFamily = true,
 ): string {
   const style  = italic ? 'italic ' : '';
   const normalized = normalizeFontFamily(family, rc);
   const authoredFamily = rc.embeddedFontAuthoredFamilies?.get(normalized) ?? normalized;
   const inferredWeight = namedFaceWeight(authoredFamily);
   const weight = bold ? 'bold ' : inferredWeight ? `${inferredWeight} ` : '';
+  const routeKey = bold || inferredWeight === 700
+    ? `calibri:700:${italic ? 'italic' : 'normal'}`
+    : italic ? 'calibri:400:italic' : 'calibri';
+  const embeddedTuple = `calibri:${bold || inferredWeight === 700 ? 700 : 400}:${italic ? 'italic' : 'normal'}`;
+  // ECMA-376 §19.3.1.52: master txStyles is an optional source of text style.
+  // The theme-minor CSS fallback when every font slot is absent is renderer
+  // policy, not evidence that an exact Calibri resource was selected. Preserve
+  // that established fallback until a run or inherited style names a face.
+  const officeRoute = hasNamedFamily && authoredFamily.toLowerCase() === 'calibri'
+    && !rc.embeddedFontTuples?.has(embeddedTuple)
+    ? rc.officeFontRoutes?.[routeKey]
+    : undefined;
   const fallback = containsHanScript(text)
     ? rc.cjkFallback ?? classifyCjkFont(rc.themeMajorFont) ?? classifyCjkFont(rc.themeMinorFont) ?? undefined
     : undefined;
@@ -1023,7 +1045,10 @@ export function buildFont(
       : [...NON_CJK_SANS_FALLBACKS, 'Arial', 'Helvetica', 'Liberation Sans'];
     return `${style}${weight}${sizePx}px ${families.length ? `${quoteAll([...latin, ...families])}, ` : ''}${normalized}`;
   }
-  return `${style}${weight}${sizePx}px ${cssFontStack(normalized, authoredFamily, fallback)}`;
+  return `${style}${weight}${sizePx}px ${cssFontStack(
+    officeRoute?.family ?? normalized, authoredFamily, fallback, text,
+    rc.googleSubstitutes === true,
+  )}`;
 }
 
 /**
@@ -1212,6 +1237,7 @@ export function naturalWidthExceedsBbox(
         family,
         rc,
         run.text,
+        hasNamedFontFamily(run.fontFamily ?? para.defFontFamily),
       );
       const letterSpacingPx = (run.letterSpacing ?? 0) * PT_TO_EMU * scale;
       lineW += measureTextAdvance(ctx, run.text, letterSpacingPx);
@@ -1666,7 +1692,8 @@ export function layoutParagraph(
     // Cascade: run → paragraph defRPr → body/layout default → false
     const isBold   = run.bold   ?? para.defBold   ?? defaultBold;
     const isItalic = run.italic ?? para.defItalic ?? defaultItalic;
-    const font   = buildFont(isBold, isItalic, drawSizePx, family, rc, run.text);
+    const font   = buildFont(isBold, isItalic, drawSizePx, family, rc, run.text,
+      hasNamedFontFamily(run.fontFamily ?? para.defFontFamily));
     const fontEa = familyEa
       ? buildFont(isBold, isItalic, drawSizePx, familyEa, rc, run.text)
       : font;
@@ -4457,7 +4484,8 @@ export function renderTextBody(
       // If the char was mapped to a Unicode symbol, use sans-serif for reliable rendering.
       // Otherwise use the specified font (e.g. Wingdings on systems that have it).
       const convertedFamily = bulletLabel !== b.char ? 'sans-serif' : normalizeFontFamily(b.fontFamily ?? null, rc);
-      bulletFont  = buildFont(false, false, bSizePx, convertedFamily, rc, bulletLabel);
+      bulletFont  = buildFont(false, false, bSizePx, convertedFamily, rc, bulletLabel,
+        hasNamedFontFamily(b.fontFamily));
       bulletColor = b.color ? hexToRgba(b.color) : bulletInheritedColor;
     } else if (bullet.type === 'autoNum') {
       const b = bullet;
@@ -4473,6 +4501,7 @@ export function renderTextBody(
         normalizeFontFamily(b.fontFamily ?? firstRunFontFamily, rc),
         rc,
         bulletLabel,
+        hasNamedFontFamily(b.fontFamily ?? firstRunFontFamily),
       );
       // ECMA-376 §21.1.2.4.4 (buClr): an explicit `<a:buClr>` colours the
       // auto-number marker, mirroring the char-bullet branch above. Only when it
@@ -7051,8 +7080,11 @@ export type SlideRenderOptions = RenderOptions & {
  * isolation, not a caller-configurable rendering policy. */
 type InternalSlideRenderOptions = SlideRenderOptions & {
   cjkFallback?: CjkLang;
+  officeFontRoutes?: Readonly<Record<string, import('@silurus/ooxml-core').OfficeFontFallbackRoute>>;
+  googleSubstitutes?: boolean;
   embeddedFontAliases?: ReadonlyMap<string, string>;
   embeddedFontAuthoredFamilies?: ReadonlyMap<string, string>;
+  embeddedFontTuples?: ReadonlySet<string>;
   svgDecoder?: SvgBlobDecoder;
 };
 
@@ -7289,6 +7321,9 @@ async function renderSlideLeased(
     themeHlinkColor: opts.hlinkColor ?? null,
     embeddedFontAliases: opts.embeddedFontAliases,
     embeddedFontAuthoredFamilies: opts.embeddedFontAuthoredFamilies,
+    embeddedFontTuples: opts.embeddedFontTuples,
+    officeFontRoutes: opts.officeFontRoutes,
+    googleSubstitutes: opts.googleSubstitutes,
     // The backing store may have been clamped below `canvasSize × dpr`; downstream
     // crisp-offset math must use the SAME effective dpr the ctx was scaled by.
     dpr: effectiveDpr,

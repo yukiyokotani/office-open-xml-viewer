@@ -161,6 +161,51 @@ describe('retained table acquisition reuse across pages', () => {
   });
 });
 
+describe('table-cell paragraph page policy', () => {
+  // The parser already resolves direct/style paragraph properties onto the
+  // model. These cases exercise the remaining model → retained cell → page
+  // fragment path, which direct table-pagination tests cannot cover.
+  function tableWithParagraph(text: string, policy: Partial<DocParagraph> = {}): BodyElement {
+    const table = wrappingTable(1) as Extract<BodyElement, { type: 'table' }>;
+    const paragraph = { ...para(text), ...policy } as CellElement;
+    return {
+      ...table,
+      rows: table.rows.map((row) => ({
+        ...row,
+        cells: row.cells.map((cell) => ({ ...cell, content: [paragraph] })),
+      })),
+    };
+  }
+
+  function cellRanges(body: readonly BodyElement[]) {
+    return layoutBodyModel(body, section(), makeCtx()).pages.map((page) => page.layers.body
+      .filter((node): node is TableFragmentLayout => node.kind === 'table')
+      .flatMap((node) => node.rows.flatMap((row) => row.cells.flatMap((cell) =>
+        cell.contentRanges))));
+  }
+
+  it('applies effective default widow control from the source cell paragraph', () => {
+    const text = 'あ'.repeat(48);
+    const withDefault = cellRanges([tableWithParagraph(text, { widowControl: undefined })]);
+    const withDisabled = cellRanges([tableWithParagraph(text, { widowControl: false })]);
+    expect(withDefault[0]?.[0]).toMatchObject({ kind: 'paragraph', lineStart: 0 });
+    expect(withDisabled[0]?.[0]).toMatchObject({ kind: 'paragraph', lineStart: 0 });
+    if (withDefault[0]?.[0]?.kind !== 'paragraph'
+      || withDisabled[0]?.[0]?.kind !== 'paragraph') throw new Error('expected line slices');
+    expect(withDefault[0][0].lineEnd).toBeLessThan(withDisabled[0][0].lineEnd);
+  });
+
+  it('keeps a source cell paragraph together when it fits a fresh page', () => {
+    const lead = para('あ'.repeat(24));
+    const text = 'あ'.repeat(24);
+    const ordinary = cellRanges([lead, tableWithParagraph(text, { keepLines: false })]);
+    const kept = cellRanges([lead, tableWithParagraph(text, { keepLines: true })]);
+    expect(ordinary[0]).not.toHaveLength(0);
+    expect(kept[0]).toHaveLength(0);
+    expect(kept[1]?.[0]).toEqual({ kind: 'whole', blockIndex: 0 });
+  });
+});
+
 describe('retainedTableAcquisitionIsReusableAcrossPages', () => {
   const fakeAcquisition = (
     block: object,
