@@ -22,7 +22,7 @@ impl PreferredWidth {
         read(bytes, Scope::Table)
     }
 
-    pub(super) fn part(bytes: &[u8]) -> Result<Option<Self>, String> {
+    pub(in crate::doc) fn part(bytes: &[u8]) -> Result<Option<Self>, String> {
         read(bytes, Scope::Part)
     }
 

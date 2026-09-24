@@ -2982,4 +2982,37 @@ mod tests {
         let error = try_default_styled_table(&[], &rtl_indented).err().unwrap();
         assert!(error.contains("right-to-left"), "{error}");
     }
+
+    #[test]
+    fn native_story_checks_inherited_width_before_against_the_leading_grid() {
+        let project = |second_after: &[u8]| {
+            try_project_table(
+                "a\u{7}\u{7}b\u{7}\u{7}\r",
+                &[
+                    (0, 2, cell()),
+                    (2, 3, styled_row(11, &[], &[])),
+                    (3, 5, cell()),
+                    (
+                        5,
+                        6,
+                        styled_row(11, &sprm(0x9601, &360i16.to_le_bytes()), second_after),
+                    ),
+                    (6, 7, Vec::new()),
+                ],
+                StyleFixture {
+                    default_table_style: true,
+                    default_table_style_indent: true,
+                    ..StyleFixture::default()
+                },
+            )
+        };
+        // The default style's zero preferred leading width disagrees with the
+        // second row's 360-twip physical leading grid slot.
+        let error = project(&[]).err().unwrap();
+        assert!(error.contains("preferred row part"), "{error}");
+        // A direct preference equal to that slot overrides the style value.
+        let projected = project(&sprm(0xf617, &[3, 0x68, 0x01])).unwrap();
+        assert_eq!(projected.markers, ["a", "b"]);
+        assert!(!projected.unsupported_table);
+    }
 }

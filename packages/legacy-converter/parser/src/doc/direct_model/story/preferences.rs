@@ -4,10 +4,10 @@
 use super::*;
 
 /// [MS-DOC] 2.6.3 sprmTIstd applies the selected style's table properties
-/// before later direct Prls. A direct sprmTWidthIndent is admitted only after
-/// the selection (see table::NativeAdmission), so it overrides the style's
-/// inherited value; otherwise the style value is the row's effective
-/// preference.
+/// before later direct Prls. Direct sprmTWidthIndent/sprmTWidthBefore are
+/// admitted only after the selection (see table::NativeAdmission), so they
+/// override the style's inherited values; otherwise the style values are the
+/// row's effective preferences.
 pub(super) fn resolve(
     prepared: &mut [PreparedParagraph],
     index: &table_context::Index,
@@ -15,14 +15,17 @@ pub(super) fn resolve(
 ) -> Result<(), String> {
     for table_context in index.tables() {
         for row_context in &table_context.rows {
-            let inherited = formatting.table_preferred_indent(row_context.table_style)?;
+            let (indent, before) = formatting.table_row_preferences(row_context.table_style)?;
             let row = &mut prepared
                 .get_mut(row_context.ttp_id)
                 .ok_or_else(|| unsupported("Word table preference TTP outside story"))?
                 .table_properties
                 .row;
             if row.preferred_indent.is_none() {
-                row.preferred_indent = inherited;
+                row.preferred_indent = indent;
+            }
+            if row.preferred_before.is_none() {
+                row.preferred_before = before;
             }
         }
     }
