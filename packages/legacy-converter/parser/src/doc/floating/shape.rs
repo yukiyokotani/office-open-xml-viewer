@@ -459,10 +459,21 @@ fn normalized(decoded: &Decoded, budget: &mut usize) -> Result<Vec<Vec<PathCmd>>
     Ok(result)
 }
 
-/// OfficeArtCOLORREF (MS-ODRAW 2.2.2) literal colors only. fSystemRGB is an
-/// ordinary solid RGB color; palette, scheme and system color indices depend
-/// on the rendering host and are rejected.
+/// OfficeArtCOLORREF (MS-ODRAW 2.2.2). fSystemRGB is an ordinary solid RGB
+/// color. Of the fSysIndex system colors only the two with Word evidence are
+/// resolved: Word's own DOCX of the local corpus drawings (from which Word
+/// saved the DOC files) writes every index 0x0001 as `sysClr windowText`
+/// with lastClr 000000 and every index 0x0011 as `sysClr window` with
+/// lastClr FFFFFF (27 and 16 properties), and Word's PDFs draw them black
+/// and white. These indices are not GetSysColor numbers, so no other index
+/// is inferred; procedural modifiers in the blue byte, palette and scheme
+/// colors stay rejected.
 fn rgb(color: u32, alpha: u32) -> Result<String, String> {
+    let color = match color {
+        0x1000_0001 => 0x0000_0000,
+        0x1000_0011 => 0x00ff_ffff,
+        _ => color,
+    };
     if !matches!(color & 0xff00_0000, 0 | 0x0400_0000) {
         return Err(unsupported(
             "Word drawing colors other than literal RGB are not supported",
@@ -696,6 +707,14 @@ mod tests {
     }
 
     #[test]
+    fn word_window_system_colors_resolve_to_their_observed_values() {
+        let bytes = container(&[(0x181, 0x1000_0011), (0x1c0, 0x1000_0001)], &[], &[]);
+        let facts = read(1, 0xa00, &bytes, [9, 9]).unwrap();
+        assert_eq!(facts.fill.as_deref(), Some("FFFFFF"));
+        assert_eq!(facts.line.unwrap().color, "000000");
+    }
+
+    #[test]
     fn stretched_picture_fills_reference_the_drawing_store() {
         let fill = |extra: &[(u16, u32)]| {
             let mut properties = vec![(0x180u16, 3u32), (0x4186, 1)];
@@ -752,7 +771,8 @@ mod tests {
             (0, &[(0x144, 4)], &[]),
             (1, &[(0x147, 100)], &[]),
             // System/palette/scheme colors and non-solid paint.
-            (1, &[(0x1c0, 0x1000_0001)], &[]),
+            (1, &[(0x1c0, 0x1000_0002)], &[]),
+            (1, &[(0x1c0, 0x1001_0011)], &[]),
             (1, &[(0x181, 0x0800_0001)], &[]),
             (1, &[(0x180, 4)], &[]),
             (1, &[(0x1c4, 1)], &[]),
