@@ -73,7 +73,7 @@ pub(super) fn build(
     {
         return Err(unsupported("Word story structure budget exceeded"));
     }
-    notes::validate(
+    let note_layout_settings = notes::validate(
         &facts.note_stories,
         &facts.note_references,
         facts.effective_nfib,
@@ -231,6 +231,7 @@ pub(super) fn build(
         document_typography_settings,
         footnotes,
         endnotes,
+        note_layout_settings,
         ..Document::default()
     };
     if !facts.pictures.has_selected_direct_resources()

@@ -10,12 +10,14 @@
 //! tagged `NoteRef { kind, id }`, and the in-note `footnoteRef` as the same run
 //! with an empty id. The direct model produces exactly that shape.
 //!
-//! The shared renderer numbers notes 1, 2, 3, ... in first-reference order
-//! with Arabic digits, lays footnotes out at the page bottom and endnotes at
+//! The shared renderer numbers notes in first-reference order with the
+//! document-wide numbering format and start (ECMA-376 17.11.17/.18/.20), lays
+//! footnotes out at the page bottom and endnotes at
 //! the end of the document, and draws its fixed default separator (the DOCX
 //! parser likewise ignores separator notes). A document is accepted only when
 //! Word's effective note properties produce that display: automatic marks,
-//! continuous Arabic numbering from 1, bottom-of-page footnotes,
+//! continuous numbering with one format and start per note kind (Arabic,
+//! Roman or letters), bottom-of-page footnotes,
 //! end-of-document endnotes and the standard separator stories. Everything
 //! else stays rejected; custom marks additionally need renderer support for
 //! literal marks that do not consume a number.
@@ -25,12 +27,14 @@ use crate::doc::{
     formatting, header_fields, headers, notes, numbering, pictures, sections, settings,
     tokenize_with_fields, unsupported, Fields, Paragraph, Token,
 };
-use docx_model::DocxNote;
+use docx_model::{DocxNote, NoteLayoutSettingsWire};
 
 /// Last effective nFib whose note properties live in the DOP (MS-DOC 2.7.2).
 const DOP_NOTE_PROPERTIES_MAX_NFIB: u16 = 0x00d9;
 
-/// Reject note properties the shared renderer cannot display as Word does.
+/// Reject note properties the shared renderer cannot display as Word does and
+/// return the document-wide note numbering (ECMA-376 17.11.17/.18/.20) the
+/// renderer applies to automatic reference marks.
 pub(super) fn validate(
     stories: &[Option<notes::Notes<'_>>],
     references: &notes::References,
@@ -38,7 +42,7 @@ pub(super) fn validate(
     dop: Option<&settings::Properties>,
     sections: &[sections::Section],
     headers: Option<&headers::Headers<'_>>,
-) -> Result<(), String> {
+) -> Result<Option<NoteLayoutSettingsWire>, String> {
     let present = |kind| {
         stories
             .iter()
@@ -50,7 +54,7 @@ pub(super) fn validate(
         present(notes::Kind::Endnote),
     );
     if !footnotes && !endnotes {
-        return Ok(());
+        return Ok(None);
     }
     if references.iter().any(notes::Reference::custom) {
         return Err(unsupported(
@@ -60,6 +64,8 @@ pub(super) fn validate(
     let dop = dop
         .map(|dop| dop.notes)
         .ok_or_else(|| unsupported("Word notes require document note properties"))?;
+    // (format, start) for each kind: MSONFC and the first automatic number.
+    let (footnote_numbering, endnote_numbering);
     if effective_nfib <= DOP_NOTE_PROPERTIES_MAX_NFIB {
         // MS-DOC 2.7.2/2.7.4: these documents keep note numbering and footnote
         // placement in the DOP. Section note SPRMs would be ambiguous.
@@ -74,39 +80,65 @@ pub(super) fn validate(
                 "Word section note properties in a DOP-scoped document",
             ));
         }
-        if footnotes
-            && (dop.footnote_position != 1
-                || dop.footnote_restart != 0
-                || dop.footnote_start != 1
-                || formats.0 != 0)
-        {
+        if footnotes && (dop.footnote_position != 1 || dop.footnote_restart != 0) {
             return Err(unsupported(footnote_message()));
         }
-        if endnotes && (dop.endnote_restart != 0 || dop.endnote_start != 1 || formats.1 != 0) {
+        if endnotes && dop.endnote_restart != 0 {
             return Err(unsupported(endnote_message()));
         }
+        footnote_numbering = (formats.0, dop.footnote_start);
+        endnote_numbering = (formats.1, dop.endnote_start);
     } else {
         // MS-DOC 2.6.4 defaults: fpcBottomPage, rncCont, no offset, Arabic
-        // footnotes and lowercase-Roman endnotes.
+        // footnotes and lowercase-Roman endnotes. With continuous numbering
+        // sprmSNFtn/sprmSNEdn add (value - 1) to every number of the section;
+        // equal values in every section are a document-wide start value.
+        let mut footnote_values = None;
+        let mut endnote_values = None;
         for section in sections {
             let properties = section.note_properties();
             if footnotes
                 && (!matches!(properties.footnote_position, None | Some(1))
-                    || !matches!(properties.footnote_restart, None | Some(0))
-                    || !matches!(properties.footnote_offset, None | Some(1))
-                    || !matches!(properties.footnote_format, None | Some(0)))
+                    || !matches!(properties.footnote_restart, None | Some(0)))
             {
                 return Err(unsupported(footnote_message()));
             }
-            if endnotes
-                && (!matches!(properties.endnote_restart, None | Some(0))
-                    || !matches!(properties.endnote_offset, None | Some(1))
-                    || properties.endnote_format != Some(0))
-            {
+            if endnotes && !matches!(properties.endnote_restart, None | Some(0)) {
+                return Err(unsupported(endnote_message()));
+            }
+            let footnote = (
+                properties.footnote_format.unwrap_or(0),
+                properties.footnote_offset.unwrap_or(1),
+            );
+            let endnote = (
+                properties.endnote_format.unwrap_or(2),
+                properties.endnote_offset.unwrap_or(1),
+            );
+            if *footnote_values.get_or_insert(footnote) != footnote && footnotes {
+                return Err(unsupported(footnote_message()));
+            }
+            if *endnote_values.get_or_insert(endnote) != endnote && endnotes {
                 return Err(unsupported(endnote_message()));
             }
         }
+        footnote_numbering = footnote_values.unwrap_or((0, 1));
+        endnote_numbering = endnote_values.unwrap_or((2, 1));
     }
+    let settings = NoteLayoutSettingsWire {
+        footnote_number_format: footnotes
+            .then(|| number_format(footnote_numbering.0, footnote_message()))
+            .transpose()?,
+        footnote_number_start: footnotes
+            .then(|| number_start(footnote_numbering.1, footnote_message()))
+            .transpose()?,
+        endnote_number_format: endnotes
+            .then(|| number_format(endnote_numbering.0, endnote_message()))
+            .transpose()?,
+        endnote_number_start: endnotes
+            .then(|| number_start(endnote_numbering.1, endnote_message()))
+            .transpose()?,
+        ..NoteLayoutSettingsWire::default()
+    };
     // DopBase.epc is not scoped by nFib. Only end-of-document placement (3)
     // matches the shared layout; sprmSFEndnote is then irrelevant.
     if endnotes && dop.endnote_position != 3 {
@@ -131,15 +163,38 @@ pub(super) fn validate(
             return Err(unsupported("custom Word note separators are not supported"));
         }
     }
-    Ok(())
+    Ok(Some(settings))
+}
+
+/// MS-OSHARED 2.2.1.3 MSONFC values whose ECMA-376 17.18.59 format the shared
+/// note renderer formats natively: Arabic, upper/lower Roman and letters.
+fn number_format(value: u16, message: &'static str) -> Result<String, String> {
+    match value {
+        0 => Ok("decimal"),
+        1 => Ok("upperRoman"),
+        2 => Ok("lowerRoman"),
+        3 => Ok("upperLetter"),
+        4 => Ok("lowerLetter"),
+        _ => Err(unsupported(message)),
+    }
+    .map(str::to_string)
+}
+
+/// A first automatic number of at least 1 (the 14-bit DOP value or the
+/// section SPRM value, at most 16383).
+fn number_start(value: u16, message: &'static str) -> Result<i64, String> {
+    if value == 0 {
+        return Err(unsupported(message));
+    }
+    Ok(i64::from(value))
 }
 
 fn footnote_message() -> &'static str {
-    "Word footnote numbering or placement other than continuous Arabic numbering at the page bottom is not supported"
+    "Word footnote numbering or placement other than continuous Roman, letter or Arabic numbering at the page bottom is not supported"
 }
 
 fn endnote_message() -> &'static str {
-    "Word endnote numbering other than continuous Arabic numbering is not supported"
+    "Word endnote numbering other than continuous Roman, letter or Arabic numbering is not supported"
 }
 
 /// Turn main-story automatic note characters into references. Every
@@ -342,9 +397,12 @@ mod tests {
         let custom = [(1, false)];
         assert!(reject(fixture(&notes, &custom), "A*\r").contains("custom note reference"));
         for (offset, value, message) in [
-            (492usize, 2u8, "footnote numbering"),
-            (2, 1, "footnote numbering"),
-            (2, 2 << 2, "footnote numbering"),
+            // Chicago numbering, per-section and per-page restarts, a zero
+            // start and beneath-text placement have no shared rendering.
+            (492usize, 9u8, "footnote numbering"),
+            (2, 1 | (1 << 2), "footnote numbering"),
+            (2, 2 | (1 << 2), "footnote numbering"),
+            (2, 0, "footnote numbering"),
             (0, 2 << 5, "footnote numbering"),
         ] {
             let mut properties = fixture(&notes, &references);
@@ -369,6 +427,26 @@ mod tests {
             properties.separators = separators;
             assert!(reject(properties, "A\u{2}\r").contains("separators"));
         }
+    }
+
+    #[test]
+    fn dop_note_format_and_start_become_document_note_numbering() {
+        let notes = ["\u{2} one\r"];
+        let references = [(1, true)];
+        let mut properties = fixture(&notes, &references);
+        let dop = properties.dop.as_mut().unwrap();
+        dop[492] = 2; // nfcFtnRef msonfcLCRoman
+        dop[2..4].copy_from_slice(&(3u16 << 2).to_le_bytes()); // nFtn 3
+        let settings = document("A\u{2}\r", &properties)
+            .unwrap()
+            .note_layout_settings
+            .unwrap();
+        assert_eq!(
+            settings.footnote_number_format.as_deref(),
+            Some("lowerRoman")
+        );
+        assert_eq!(settings.footnote_number_start, Some(3));
+        assert_eq!(settings.endnote_number_format, None);
     }
 
     #[test]

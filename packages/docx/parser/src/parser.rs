@@ -2272,16 +2272,31 @@ fn parse_page_layout_settings(settings_xml: &str) -> Option<crate::types::PageLa
 fn parse_note_layout_settings(settings_xml: &str) -> Option<crate::types::NoteLayoutSettingsWire> {
     let doc = parse_guarded(settings_xml).ok()?;
     let root = doc.root_element();
-    let position = |properties: &str| {
+    let value = |properties: &str, name: &str| {
         child_w(root, properties)
-            .and_then(|node| child_w(node, "pos"))
+            .and_then(|node| child_w(node, name))
             .and_then(|node| attr_w(node, "val"))
     };
-    let result = crate::types::NoteLayoutSettingsWire {
-        footnote_position: position("footnotePr"),
-        endnote_position: position("endnotePr"),
+    // §17.11.20 numStart is an ST_DecimalNumber; an unparsable value is
+    // treated as absent (the default start of 1).
+    let start = |properties: &str| {
+        value(properties, "numStart").and_then(|value| value.trim().parse::<i64>().ok())
     };
-    if result.footnote_position.is_none() && result.endnote_position.is_none() {
+    let result = crate::types::NoteLayoutSettingsWire {
+        footnote_position: value("footnotePr", "pos"),
+        endnote_position: value("endnotePr", "pos"),
+        footnote_number_format: value("footnotePr", "numFmt"),
+        footnote_number_start: start("footnotePr"),
+        endnote_number_format: value("endnotePr", "numFmt"),
+        endnote_number_start: start("endnotePr"),
+    };
+    if result.footnote_position.is_none()
+        && result.endnote_position.is_none()
+        && result.footnote_number_format.is_none()
+        && result.footnote_number_start.is_none()
+        && result.endnote_number_format.is_none()
+        && result.endnote_number_start.is_none()
+    {
         None
     } else {
         Some(result)
@@ -2346,6 +2361,28 @@ mod note_layout_settings_tests {
             assert_eq!(settings.footnote_position.as_deref(), Some("beneathText"));
             assert_eq!(settings.endnote_position.as_deref(), Some("sectEnd"));
         }
+    }
+
+    #[test]
+    fn preserves_document_wide_note_number_formats_and_starts() {
+        let xml = r#"<w:settings
+                       xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                     <w:footnotePr><w:numFmt w:val="upperLetter"/><w:numStart w:val="4"/></w:footnotePr>
+                     <w:endnotePr><w:numFmt w:val="lowerRoman"/><w:numStart w:val="x"/></w:endnotePr>
+                   </w:settings>"#;
+        let settings = parse_note_layout_settings(xml).expect("authored note numbering");
+        assert_eq!(
+            settings.footnote_number_format.as_deref(),
+            Some("upperLetter")
+        );
+        assert_eq!(settings.footnote_number_start, Some(4));
+        assert_eq!(
+            settings.endnote_number_format.as_deref(),
+            Some("lowerRoman")
+        );
+        // An invalid ST_DecimalNumber keeps the default start.
+        assert_eq!(settings.endnote_number_start, None);
+        assert_eq!(settings.footnote_position, None);
     }
 
     #[test]

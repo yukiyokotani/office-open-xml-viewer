@@ -92,7 +92,17 @@ export interface BodyLayoutInput {
   readonly noteLayoutSettings?: Readonly<{
     footnotePosition: string;
     endnotePosition: string;
+    footnoteNumbering?: NoteNumberingInput;
+    endnoteNumbering?: NoteNumberingInput;
   }>;
+}
+
+/** ECMA-376 §17.11.17/.18 numFmt and §17.11.20 numStart for one note kind. */
+export interface NoteNumberingInput {
+  /** ST_NumberFormat (§17.18.59); `decimal` when not authored. */
+  readonly format: string;
+  /** First automatic note number; 1 when not authored. */
+  readonly start: number;
 }
 
 export interface BodyLayoutAcquisitionInput {
@@ -103,6 +113,8 @@ export interface BodyLayoutAcquisitionInput {
   readonly noteLayoutSettings: Readonly<{
     footnotePosition: string;
     endnotePosition: string;
+    footnoteNumbering?: NoteNumberingInput;
+    endnoteNumbering?: NoteNumberingInput;
   }>;
   readonly pageLayoutSettings: Readonly<{
     mirrorMargins: boolean;

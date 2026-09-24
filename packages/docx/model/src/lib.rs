@@ -249,6 +249,20 @@ pub struct NoteLayoutSettingsWire {
     /// §17.11.22 / §17.18.22 `w:endnotePr/w:pos`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endnote_position: Option<String>,
+    /// §17.11.18 / §17.18.59 document-wide `w:footnotePr/w:numFmt/@w:val`.
+    /// Absent means decimal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub footnote_number_format: Option<String>,
+    /// §17.11.20 document-wide `w:footnotePr/w:numStart/@w:val`. Absent means 1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub footnote_number_start: Option<i64>,
+    /// §17.11.17 / §17.18.59 document-wide `w:endnotePr/w:numFmt/@w:val`.
+    /// Absent means decimal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endnote_number_format: Option<String>,
+    /// §17.11.20 document-wide `w:endnotePr/w:numStart/@w:val`. Absent means 1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endnote_number_start: Option<i64>,
 }
 
 /// One embedded font-style slot from `word/fontTable.xml`. `style` is one of

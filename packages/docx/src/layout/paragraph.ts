@@ -4110,6 +4110,14 @@ export function paragraphAcquisitionCacheKey(
           .sort(([left], [right]) => left.localeCompare(right))
         : null,
       environment.noteReferenceNumber ?? null,
+      environment.noteNumbering
+        ? [
+          environment.noteNumbering.footnote.format,
+          environment.noteNumbering.footnote.start,
+          environment.noteNumbering.endnote.format,
+          environment.noteNumbering.endnote.start,
+        ]
+        : null,
       environment.pageWritingMode,
       environment.verticalCJK ?? null,
       environment.verticalPageFrame ?? null,

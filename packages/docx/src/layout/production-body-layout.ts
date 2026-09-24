@@ -488,6 +488,11 @@ function buildConcreteBodyLayoutKernel(
       }
       const sourceFootnotes = source.blocks.footnotes;
       const sourceEndnotes = source.blocks.endnotes;
+      const noteSettings = source.bodyLayoutInput.noteLayoutSettings;
+      state.noteNumbering = {
+        footnote: noteSettings?.footnoteNumbering ?? { format: 'decimal', start: 1 },
+        endnote: noteSettings?.endnoteNumbering ?? { format: 'decimal', start: 1 },
+      };
       const footnotesById = indexNotes(sourceFootnotes);
       state.noteNumbers = new Map([
         ...[...buildNoteNumberMap(
