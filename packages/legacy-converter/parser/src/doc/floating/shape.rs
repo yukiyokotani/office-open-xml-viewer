@@ -205,6 +205,8 @@ impl Table {
                 0x87 | 0x89 | 0x8b => {}
                 0x88 if value == 0 => {}
                 0x8a if value == 0 => {}
+                // hspNext names the next shape of a linked textbox chain.
+                0x8a => return Err(unsupported("linked Word textbox chains are not supported")),
                 0xbf => {}
                 // Picture-only Boolean properties have no effect on shapes.
                 0x13f => {}
@@ -217,6 +219,14 @@ impl Table {
                 0x384..=0x387 | 0x388 | 0x38f..=0x392 | 0x3aa | 0x3bf => {}
                 0x53f => {}
                 0x7c0..=0x7c3 if value == 0 => {}
+                // MS-ODRAW 2.3.5 <34>-<37>: Word 2007+ honors relative size
+                // and position; their interaction with SPA/fFitShapeToText
+                // needs an Office control.
+                0x7c0..=0x7c3 => {
+                    return Err(unsupported(
+                        "Word relative drawing size or position is not supported",
+                    ))
+                }
                 0x7c4 | 0x7c5 => {}
                 _ => {
                     return Err(unsupported(format!(
