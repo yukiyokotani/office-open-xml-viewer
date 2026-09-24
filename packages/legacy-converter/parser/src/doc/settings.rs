@@ -12,6 +12,14 @@ pub(super) struct Properties {
     /// MS-DOC 2.7.13 Copts.fDontAdjustLineHeightInTable.
     #[cfg_attr(not(feature = "direct-doc"), allow(dead_code))]
     pub adjust_line_height_in_table: bool,
+    /// ECMA-376 Part 1 17.15.3.3 balanceSingleByteDoubleByteWidth, the
+    /// inverse of MS-DOC 2.7.11 Copts60.fDntBlnSbDbWid.
+    #[cfg_attr(not(feature = "direct-doc"), allow(dead_code))]
+    pub balance_single_byte_double_byte_width: bool,
+    /// ECMA-376 Part 1 17.15.1.18 characterSpacingControl from MS-DOC 2.7.16
+    /// DopTypography.iJustification; `None` when the DOP predates Dop97.
+    #[cfg_attr(not(feature = "direct-doc"), allow(dead_code))]
+    pub character_spacing_control: Option<&'static str>,
 }
 
 /// MS-DOC 2.7.2 DopBase fpc/rncFtn/nFtn/rncEdn/nEdn/epc and 2.7.4 Dop97
@@ -79,12 +87,28 @@ pub(super) fn read(word: &[u8], table: &[u8]) -> Result<Option<Properties>, Stri
     } else {
         true
     };
+    // MS-DOC 2.7.2 DopBase.copts60 (offset 8), 2.7.11 bit P.
+    let balance_single_byte_double_byte_width = u16_at(dop, 8)? & (1 << 15) == 0;
+    // MS-DOC 2.7.4 Dop97: dop95 (88 bytes) and adt (2 bytes) precede the
+    // DopTypography, whose bits 1-2 are iJustification.
+    let character_spacing_control = if dop.len() >= 500 {
+        Some(match (u16_at(dop, 90)? >> 1) & 3 {
+            0 => "doNotCompress",
+            1 => "compressPunctuation",
+            2 => "compressPunctuationAndJapaneseKana",
+            _ => return Err(unsupported("invalid Word character spacing control")),
+        })
+    } else {
+        None
+    };
     // MS-DOC 2.7.3 DopBase.fFacingPages explicitly maps to evenAndOddHeaders.
     Ok(Some(Properties {
         default_tab_twips: interval,
         even_and_odd_headers: dop[0] & 1 != 0,
         notes,
         adjust_line_height_in_table,
+        balance_single_byte_double_byte_width,
+        character_spacing_control,
     }))
 }
 
@@ -157,6 +181,35 @@ mod tests {
         // Dop97 and older carry no fDontAdjustLineHeightInTable flag.
         assert!(adjust(500, 0));
         assert!(adjust(84, 0));
+    }
+
+    #[test]
+    fn dop_typography_and_copts60_project_east_asian_spacing() {
+        let facts = |size: u32, copts60: u16, typography: u16| {
+            let (word, mut table) = fixture(size, 720);
+            table[7 + 8..7 + 10].copy_from_slice(&copts60.to_le_bytes());
+            if size >= 500 {
+                table[7 + 90..7 + 92].copy_from_slice(&typography.to_le_bytes());
+            }
+            read(&word, &table).map(|value| {
+                let value = value.unwrap();
+                (
+                    value.balance_single_byte_double_byte_width,
+                    value.character_spacing_control,
+                )
+            })
+        };
+        assert_eq!(facts(694, 0, 0).unwrap(), (true, Some("doNotCompress")));
+        assert_eq!(
+            facts(694, 1 << 15, 1 << 1).unwrap(),
+            (false, Some("compressPunctuation"))
+        );
+        assert_eq!(
+            facts(694, 0x7fff, (2 << 1) | 1 | (3 << 3)).unwrap(),
+            (true, Some("compressPunctuationAndJapaneseKana"))
+        );
+        assert!(facts(694, 0, 3 << 1).is_err());
+        assert_eq!(facts(88, 1 << 15, 0).unwrap(), (false, None));
     }
 
     #[test]
