@@ -46,6 +46,9 @@ describe('XLSX single-run DrawingML natural line', () => {
     };
     // Excel PDF controls measured 1.157em at 25pt and 1.149em at 12pt.
     expect(shapeOfficeNaturalLineRatio(latin, arialRoute)).toBeCloseTo(1.15, 2);
+    expect(shapeOfficeNaturalLineRatio(eastAsian, {
+      ...localRoute, resourceIdentity: 'injected:unverified',
+    })).toBeUndefined();
   });
 
   it('uses the Excel-measured line box only for a positively loaded exact tuple', () => {

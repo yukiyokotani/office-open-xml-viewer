@@ -44,7 +44,8 @@ export function shapeOfficeNaturalLineRatio(
   run: TextRun,
   route: OfficeFontFallbackRoute | undefined,
 ): number | undefined {
-  if (!route || route.source !== 'local' || route.metric.synthesized) return undefined;
+  if (!route || route.source !== 'local' || route.metric.synthesized
+    || !route.resourceIdentity.startsWith('office-local:')) return undefined;
   const family = run.fontFace!.trim();
   if (route.requestedFamily.toLocaleLowerCase('en-US') !== family.toLocaleLowerCase('en-US')
     || route.weight !== (run.bold ? 700 : 400)
