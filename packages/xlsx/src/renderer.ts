@@ -1,6 +1,6 @@
 import type { CjkLang } from '@silurus/ooxml-core';
 import { containsHanScript } from '@silurus/ooxml-core/internal/script-preload-accumulator';
-import { activeFontSet, findReferenceFontMetrics } from '@silurus/ooxml-core';
+import { activeFontSet, findReferenceFontMetrics, isHTMLCanvas, loadedGoogleRegularAliases } from '@silurus/ooxml-core';
 import type {
   Worksheet, Styles, Cell, CellValue, CellFont, CellFill, Border, BorderEdge, CellXf,
   ViewportRange, RenderViewportOptions, XlsxTextRunInfo,
@@ -19,8 +19,8 @@ import { chartImageFillKey, paintOptionalImagePlaceholder } from '@silurus/ooxml
 import { placePhoneticRuns } from './phonetic.js';
 import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, rasterizeMathSvg, tintMathRaster, classifyCjkFont, classifyFontGeneric, googleCjkFontAlias, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, isLatinWordCodePoint, isUax14NoBreakPair, containsSeaScript, isGraphemeFillText, seaMixedBreakOffsets, fitSeaWordPrefix, graphemeClusterOffsets, xlsxBorderDashArray, drawImageCropped, hexToRgba, verticalTrLongMark, verticalVertGlyphReachable, applyStroke, resolveFill, type SparklineModel, type MathNode, type MathRenderer, type RasterizedMathSvg } from '@silurus/ooxml-core';
 import { isMacDesktop } from './internal/platform.js';
-import { calibriCompatibleBasicLatinWidth, shouldUseCalibriCompatibleWrap } from './fonts/carlito-basic-latin.js';
 import { officeRequestKey, shapeOfficeNaturalLineRatio, shapeOfficeRouteKey, singleNaturalShapeRun } from './shape-office-line.js';
+import { XLSX_GOOGLE_FONTS } from './google-fonts.js';
 import { evalFormulaToBool, todaySerial, nowSerial } from './formula.js';
 import { formatCellValueWithColor } from './number-format.js';
 import { type CfContext, type CfResult, compileCf, evaluateCf } from './conditional-format.js';
@@ -97,10 +97,6 @@ const ARABIC_TEXT_RE = /[\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff]/u;
 type OfficeRoutes = Readonly<Record<string, import('@silurus/ooxml-core').OfficeFontFallbackRoute>>;
 const officeRoutesByContext = new WeakMap<object, OfficeRoutes>();
 const officeRoutesByWorksheet = new WeakMap<Worksheet, OfficeRoutes>();
-const EMPTY_CHECKED_FONT_TUPLES: ReadonlySet<string> = new Set();
-const checkedOfficeTuplesByContext = new WeakMap<object, ReadonlySet<string>>();
-const declaredCalibriByContext = new WeakMap<object, boolean>();
-const calibriWrapWidthsByContext = new WeakMap<object, Map<number, (value: string) => number>>();
 type NormalFontBinding = {
   tupleKey: string | null;
   route: import('@silurus/ooxml-core').OfficeFontFallbackRoute | undefined;
@@ -110,6 +106,8 @@ type NormalFontBinding = {
 const normalFontBindingByWorksheet = new WeakMap<Worksheet, NormalFontBinding>();
 const googleSubstitutesByContext = new WeakMap<object, boolean>();
 const googleSubstitutesByWorksheet = new WeakMap<Worksheet, boolean>();
+const regularAliasesByContext = new WeakMap<object, ReadonlyMap<string, string>>();
+const regularAliasesByWorksheet = new WeakMap<Worksheet, ReadonlyMap<string, string>>();
 const worksheetByContext = new WeakMap<object, Worksheet>();
 type ResolvedThemeCellFont = { family: string | null; weight: number; fallbackAlias?: string };
 const themeCellFontByWorksheet = new WeakMap<Worksheet, Map<string, ResolvedThemeCellFont>>();
@@ -118,6 +116,7 @@ function bindNormalFontState(
   worksheet: Worksheet, routes: OfficeRoutes | undefined,
   fontSet: FontFaceSet | null, googleSubstitutes: boolean,
   measureCtx?: CanvasRenderingContext2D,
+  regularAliases: ReadonlyMap<string, string> = new Map(),
 ): void {
   const tupleKey = worksheet.defaultFontFamily
     ? officeRequestKey({ family: worksheet.defaultFontFamily,
@@ -130,7 +129,8 @@ function bindNormalFontState(
   const canvasMdw = measureCtx && worksheet.defaultFontFamily && worksheet.defaultFontSize
     ? computeMdw(worksheet.defaultFontFamily, worksheet.defaultFontSize, route,
       googleSubstitutes, worksheet.defaultFontBold ? 700 : 400,
-      worksheet.defaultFontItalic ? 'italic' : 'normal', measureCtx)
+      worksheet.defaultFontItalic ? 'italic' : 'normal', measureCtx,
+      regularAliases.get(worksheet.defaultFontFamily.trim().toLocaleLowerCase('en-US')))
     : undefined;
   const next = { tupleKey, route, hasDeclaredFace, canvasMdw };
   const old = normalFontBindingByWorksheet.get(worksheet);
@@ -150,23 +150,18 @@ export function bindXlsxOfficeFontRoutes(
   worksheet: Worksheet,
   routes?: OfficeRoutes,
   googleSubstitutes = false,
-  checkedOfficeTuples?: readonly string[],
 ): void {
   worksheetByContext.set(ctx, worksheet);
   if (officeRoutesByWorksheet.get(worksheet) !== routes ||
       googleSubstitutesByWorksheet.get(worksheet) !== googleSubstitutes) GridGeometry.invalidate(worksheet);
   googleSubstitutesByContext.set(ctx, googleSubstitutes);
-  const fontSet = typeof HTMLCanvasElement !== 'undefined' && ctx.canvas instanceof HTMLCanvasElement
-    ? ctx.canvas.ownerDocument.fonts : activeFontSet();
-  if (checkedOfficeTuples) {
-    const checked = new Set(checkedOfficeTuples);
-    checkedOfficeTuplesByContext.set(ctx, checked);
-  } else {
-    checkedOfficeTuplesByContext.delete(ctx);
-  }
-  bindNormalFontState(worksheet, routes, fontSet, googleSubstitutes, ctx);
-  calibriWrapWidthsByContext.delete(ctx);
-  declaredCalibriByContext.set(ctx, hasDeclaredFamilyFace('Calibri', fontSet));
+  const fontSet = (isHTMLCanvas(ctx.canvas) ? ctx.canvas.ownerDocument?.fonts : undefined)
+    ?? activeFontSet();
+  const regularAliases = googleSubstitutes
+    ? loadedGoogleRegularAliases(fontSet, XLSX_GOOGLE_FONTS) : new Map<string, string>();
+  regularAliasesByContext.set(ctx, regularAliases);
+  regularAliasesByWorksheet.set(worksheet, regularAliases);
+  bindNormalFontState(worksheet, routes, fontSet, googleSubstitutes, ctx, regularAliases);
   googleSubstitutesByWorksheet.set(worksheet, googleSubstitutes);
   if (routes) {
     officeRoutesByContext.set(ctx, routes);
@@ -177,6 +172,10 @@ export function bindXlsxOfficeFontRoutes(
   }
 }
 
+function contextRegularAlias(ctx: CanvasRenderingContext2D, name: string | null | undefined): string | undefined {
+  return name ? regularAliasesByContext.get(ctx)?.get(name.trim().toLocaleLowerCase('en-US')) : undefined;
+}
+
 export function bindXlsxWorksheetOfficeFontRoutes(
   worksheet: Worksheet, routes?: OfficeRoutes, googleSubstitutes = false,
 ): void {
@@ -185,7 +184,11 @@ export function bindXlsxWorksheetOfficeFontRoutes(
   if (routes) officeRoutesByWorksheet.set(worksheet, routes);
   else officeRoutesByWorksheet.delete(worksheet);
   googleSubstitutesByWorksheet.set(worksheet, googleSubstitutes);
-  bindNormalFontState(worksheet, routes, activeFontSet(), googleSubstitutes);
+  const fontSet = activeFontSet();
+  const regularAliases = googleSubstitutes
+    ? loadedGoogleRegularAliases(fontSet, XLSX_GOOGLE_FONTS) : new Map<string, string>();
+  regularAliasesByWorksheet.set(worksheet, regularAliases);
+  bindNormalFontState(worksheet, routes, fontSet, googleSubstitutes, undefined, regularAliases);
 }
 
 function officeRoute(
@@ -278,6 +281,7 @@ export function fontStackFor(
   route?: import('@silurus/ooxml-core').OfficeFontFallbackRoute,
   googleSubstitutes = false,
   fallbackAlias?: string,
+  regularAlias?: string,
 ): string {
   const normalized = name?.trim();
   const fallback = containsHanScript(text) ? cjkFallback : undefined;
@@ -285,9 +289,11 @@ export function fontStackFor(
     === route.requestedFamily.trim().toLocaleLowerCase('en-US') ? route : undefined;
   const aliasPart = fallbackAlias && fallbackAlias.toLocaleLowerCase('en-US') !== normalized?.toLocaleLowerCase('en-US')
     ? `"${fallbackAlias}", ` : '';
+  const regularPart = regularAlias && regularAlias.toLocaleLowerCase('en-US') !== normalized?.toLocaleLowerCase('en-US')
+    ? `"${regularAlias}", ` : '';
   return selected
-    ? `"${selected.family}", ${aliasPart}${cssTailFor(normalized, fallback, googleSubstitutes, text)}`
-    : normalized ? `"${normalized}", ${aliasPart}${cssTailFor(normalized, fallback, googleSubstitutes, text)}` : cssTailFor(null, fallback, googleSubstitutes, text);
+    ? `"${selected.family}", ${aliasPart}${regularPart}${cssTailFor(normalized, fallback, googleSubstitutes, text)}`
+    : normalized ? `"${normalized}", ${aliasPart}${regularPart}${cssTailFor(normalized, fallback, googleSubstitutes, text)}` : cssTailFor(null, fallback, googleSubstitutes, text);
 }
 
 const DEFAULT_FONT_SIZE = 11;
@@ -360,6 +366,7 @@ export function computeMdw(
   weight: 400 | 700 = 400,
   style: 'normal' | 'italic' = 'normal',
   ownerCtx?: CanvasRenderingContext2D,
+  regularAlias?: string,
 ): number {
   const sizePx = sizePt * PT_TO_PX;
   // A viewer-owned context resolves CSS faces in its own Document (which may
@@ -373,7 +380,7 @@ export function computeMdw(
   const stylePrefix = weight !== 400 || style !== 'normal' ? `${style} ${weight} ` : '';
   if (ownerCtx) ctx.save();
   try {
-    ctx.font = `${stylePrefix}${sizePx}px ${fontStackFor(family, undefined, '', route, googleSubstitutes)}`;
+    ctx.font = `${stylePrefix}${sizePx}px ${fontStackFor(family, undefined, '', route, googleSubstitutes, undefined, regularAlias)}`;
     let mdw = 0;
     for (const d of '0123456789') {
       const w = ctx.measureText(d).width;
@@ -401,40 +408,6 @@ function hasDeclaredFamilyFace(family: string, fontSet: FontFaceSet | null): boo
   return false;
 }
 
-function calibriWrapReferenceWidth(
-  ctx: CanvasRenderingContext2D, font: CellFont, text: string, cs: number,
-): ((value: string) => number) | undefined {
-  // Ordinary cells avoid theme lookup, route checks, and width-function
-  // allocation. Only a completed probe of the exact Bold tuple can opt in.
-  const checked = checkedOfficeTuplesByContext.get(ctx);
-  if (!font.bold || font.italic || !checked?.has('calibri:700:normal')) return undefined;
-  const worksheet = worksheetByContext.get(ctx);
-  const selected = cachedThemeCellFont(font, worksheet);
-  if (!shouldUseCalibriCompatibleWrap({
-    family: selected.family,
-    bold: font.bold,
-    italic: font.italic,
-    checkedOfficeTuples: checked ?? EMPTY_CHECKED_FONT_TUPLES,
-    hasExactRoute: officeRoute(ctx, selected.family, font.bold, font.italic) !== undefined,
-    hasDeclaredFace: declaredCalibriByContext.get(ctx) === true,
-    googleSubstitutes: googleSubstitutesByContext.get(ctx) === true,
-  }, text)) return undefined;
-  // buildFont() rounds the CSS pixel size before Canvas measures or paints.
-  const sizePx = Math.max(1, Math.round(font.size * PT_TO_PX * cs));
-  let widths = calibriWrapWidthsByContext.get(ctx);
-  if (!widths) {
-    widths = new Map();
-    calibriWrapWidthsByContext.set(ctx, widths);
-  }
-  let width = widths.get(sizePx);
-  if (!width) {
-    width = (value) => calibriCompatibleBasicLatinWidth(value, sizePx)
-      ?? ctx.measureText(value).width;
-    widths.set(sizePx, width);
-  }
-  return width;
-}
-
 /** Resolve the Max Digit Width from the face that paints this worksheet's
  *  Normal-style text. ECMA-376 §18.3.1.13 defines the source digit metric;
  *  when that face is unavailable, its catalog hmtx digit width cannot be used
@@ -455,6 +428,8 @@ export function getMdwForWorksheet(ws: Pick<Worksheet,
     googleSubstitutesByWorksheet.get(ws as Worksheet) === true,
     weight,
     style,
+    undefined,
+    regularAliasesByWorksheet.get(ws as Worksheet)?.get(ws.defaultFontFamily.trim().toLocaleLowerCase('en-US')),
   );
 }
 
@@ -938,6 +913,7 @@ function buildFont(ctx: CanvasRenderingContext2D, font: CellFont, cs = 1, cjkFal
     officeRoute(ctx, selected.family, font.bold, font.italic),
     googleSubstitutesByContext.get(ctx) === true,
     selected.fallbackAlias,
+    contextRegularAlias(ctx, selected.family),
   )}`;
 }
 
@@ -1811,34 +1787,18 @@ export function drawWrappedPlainText(
   font: CellFont,
   geom: RichCellGeom,
   cs: number,
-  referenceWidth?: (value: string) => number,
 ): void {
   const { alignV, cy, cellH, leftPad, paddingX, paddingY } = geom;
   const available = geom.cellW - leftPad - paddingX;
-  const fallbackLines = wrapTextLines(ctx, text, available);
-  // Limit the reference intervention to the observed visibility failure: a
-  // bottom-aligned fixed-height value whose fallback adds a line above the
-  // cell, while the reference width reduces its line count. If fallback text
-  // already fits, its Canvas geometry and paint remain authoritative.
-  const fallbackOverflows = referenceWidth !== undefined && alignV === 'bottom'
-    && fallbackLines.length > 1
-    && fallbackLines.length * vMetricPx(font.size, cs, 1.2) + 2 * paddingY > cellH;
-  const referenceLines = fallbackOverflows
-    ? wrapTextLines(ctx, text, available, referenceWidth) : undefined;
-  const useReference = referenceLines !== undefined
-    && referenceLines.length < fallbackLines.length;
-  const lines = useReference ? referenceLines : fallbackLines;
-  if (!useReference) referenceWidth = undefined;
+  // Wrap and paint with the same resolved Canvas face. A fixed-height cell
+  // may clip lines when a substitute is wider, as it would with any wider
+  // installed face; narrowing glyphs to an unrelated font's advances makes
+  // the substitute itself look distorted and can conceal overflow.
+  const lines = wrapTextLines(ctx, text, available);
   if (lines.length === 1) {
     const { baseline, textY } = singleLineVerticalAnchor(geom);
     ctx.textBaseline = baseline;
-    const width = referenceWidth?.(lines[0]);
-    // An unresolved authored face can wrap at its reference advances while
-    // Canvas paints a wider fallback. maxWidth visually compresses that
-    // fallback; apply it only to a rescued clipped value so a right-aligned
-    // line stays in its reference cell interval, including the one-line case.
-    if (width !== undefined && ctx.measureText(lines[0]).width > width) ctx.fillText(lines[0], textX, textY, width);
-    else ctx.fillText(lines[0], textX, textY);
+    ctx.fillText(lines[0], textX, textY);
     return;
   }
 
@@ -1850,12 +1810,7 @@ export function drawWrappedPlainText(
   else startY = cy + cellH - totalTextH - paddingY;
   ctx.textBaseline = 'top';
   for (let li = 0; li < lines.length; li++) {
-    const width = referenceWidth?.(lines[li]);
-    if (width !== undefined && ctx.measureText(lines[li]).width > width) {
-      ctx.fillText(lines[li], textX, startY + li * lineH, width);
-    } else {
-      ctx.fillText(lines[li], textX, startY + li * lineH);
-    }
+    ctx.fillText(lines[li], textX, startY + li * lineH);
   }
 }
 
@@ -2489,7 +2444,6 @@ function renderQuadrant(
         fontForDraw,
         { alignH, alignV, cx: aCx, cy: aCy, cellW: cW, cellH: cH, leftPad, paddingX, paddingY },
         cs,
-        calibriWrapReferenceWidth(ctx, fontForDraw, text, cs),
       );
     } else if (hasRichText) {
       // Non-wrap rich text — same helper as the in-viewport path so an
@@ -3156,7 +3110,6 @@ function renderQuadrant(
           fontForDraw,
           { alignH, alignV, cx, cy, cellW, cellH, leftPad, paddingX, paddingY },
           cs,
-          calibriWrapReferenceWidth(ctx, fontForDraw, text, cs),
         );
       } else if (hasRichText) {
         // Non-wrap rich text: per-run fonts, honoring hard breaks (Alt+Enter LF;
@@ -3998,7 +3951,7 @@ export function renderViewport(
   opts: RenderViewportOptions = {},
   cjkFallback?: CjkLang,
 ): void {
-  bindXlsxOfficeFontRoutes(ctx, worksheet, opts.officeFontRoutes, opts.googleSubstitutes === true, opts.checkedOfficeTuples);
+  bindXlsxOfficeFontRoutes(ctx, worksheet, opts.officeFontRoutes, opts.googleSubstitutes === true);
   pinXlsxGridGeometry(worksheet, opts.authoritativeMdw);
   const dpr = opts.dpr ?? 1;
   const cs = opts.cellScale ?? 1;
@@ -5089,10 +5042,12 @@ export function drawShapeText(
     const px = size * PT_TO_PX * cs;
     const family = run === naturalRun && useNaturalRoute && naturalRoute
       ? `"${naturalRoute.family}", ${fontStackFor(run.fontFace, cjkFallback, run.text,
-          undefined, googleSubstitutesByContext.get(ctx) === true)}`
+          undefined, googleSubstitutesByContext.get(ctx) === true,
+          undefined, contextRegularAlias(ctx, run.fontFace))}`
       : fontStackFor(run.fontFace, cjkFallback, run.text,
           officeRoute(ctx, run.fontFace, run.bold, run.italic),
-          googleSubstitutesByContext.get(ctx) === true);
+          googleSubstitutesByContext.get(ctx) === true,
+          undefined, contextRegularAlias(ctx, run.fontFace));
     return { font: `${run.italic ? 'italic ' : ''}${run.bold ? 'bold ' : ''}${px}px ${family}`, px };
   };
 
@@ -5181,7 +5136,8 @@ export function drawShapeText(
         // No glyph is painted for an empty line, so a regional Han fallback
         // must not perturb its generic line metric.
         lineAscent = measuredAscent(`${fallbackPx}px ${fontStackFor(lastTextFace, undefined, '',
-          officeRoute(ctx, lastTextFace), googleSubstitutesByContext.get(ctx) === true)}`, fallbackPx);
+          officeRoute(ctx, lastTextFace), googleSubstitutesByContext.get(ctx) === true,
+          undefined, contextRegularAlias(ctx, lastTextFace))}`, fallbackPx);
       }
       lineHeight = applyLineSpacing(lineHeight);
       lines.push({ segs, align, height: lineHeight, ascent: lineAscent, hasMath, leftInset: lineLeftInset(), availW: lineAvailW() });

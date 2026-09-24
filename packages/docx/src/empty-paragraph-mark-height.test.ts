@@ -594,16 +594,18 @@ describe('empty paragraph mark line height (§17.3.1.29 / §17.3.1.33)', () => {
     );
 
     expect(main.text.fingerprint).toBe(worker.text.fingerprint);
-    // The authored theme face supplies only the mark's Word line advance;
-    // both services still paint and measure through the substitute route.
-    expect(measureMark(mainContext.ctx, main.text)).toBeCloseTo(10 * 2500 / 2048, 8);
-    expect(measureMark(workerContext.ctx, worker.text)).toBeCloseTo(10 * 2500 / 2048, 8);
-    const expectedRoute = main.text.shape({
+    // The registered substitute determines both the mark's measured line box
+    // and its paint route. Main and worker services must agree on that box.
+    expect(measureMark(mainContext.ctx, main.text)).toBe(15);
+    expect(measureMark(workerContext.ctx, worker.text)).toBe(15);
+    const selected = main.text.shape({
       text: 'x', fontSizePt: 10,
       fonts: { ascii: 'Legacy Direct' },
       themeFonts: { ascii: 'Calibri' },
       themeFontPresence: { ascii: true },
-    }).spans[0]!.fontRoute;
+    }).spans[0]!;
+    expect(selected.font.source).toBe('substitute');
+    const expectedRoute = selected.fontRoute;
     const expectedFont = canvasFontString(expectedRoute, 10, 400, 'normal');
     expect(mainContext.measured.filter(({ text }) => text === 'x').map(({ font }) => font))
       .toContain(expectedFont);

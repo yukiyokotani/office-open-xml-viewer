@@ -667,8 +667,7 @@ export class XlsxWorkbook {
     const set = isHTMLCanvas(ctx.canvas)
       ? ctx.canvas.ownerDocument.fonts : null;
     const routes = set ? this.retainedFontSets.get(set)?.loaded?.office.routes : undefined;
-    bindXlsxOfficeFontRoutes(ctx, worksheet, routes, this.googleSubstitutes,
-      set ? this.retainedFontSets.get(set)?.loaded?.office.checked : undefined);
+    bindXlsxOfficeFontRoutes(ctx, worksheet, routes, this.googleSubstitutes);
     getGridGeometryForWorksheet(worksheet);
     applyAutoRowHeights(ctx, worksheet, this.parsedWorkbook.styles, this.cjkFallback);
   }
@@ -1064,9 +1063,6 @@ export class XlsxWorkbook {
           authoritativeMdw: extracted.layoutMetrics?.maximumDigitWidth,
           officeFontRoutes: targetFontSet
             ? this.retainedFontSets.get(targetFontSet)?.loaded?.office.routes
-            : undefined,
-          checkedOfficeTuples: targetFontSet
-            ? this.retainedFontSets.get(targetFontSet)?.loaded?.office.checked
             : undefined,
           googleSubstitutes: this.googleSubstitutes,
           fetchImage: this._fetchImage,

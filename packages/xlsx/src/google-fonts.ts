@@ -65,6 +65,16 @@ export function xlsxFontPreloadNames(wb: ParsedWorkbook | undefined, fallback?: 
   for (const f of wb?.styles?.fonts ?? []) {
     if (f.name) {
       names.add(f.name);
+      // OOXML may store a full regular face name while Google Fonts registers
+      // the same face under its base CSS family. Queue only a known same-name
+      // family: an unrelated substitute is not an alias for the authored face.
+      const regular = /^(.*?)\s+Regular$/i.exec(f.name.trim());
+      if (regular) {
+        const base = regular[1]!.trim();
+        const entry = XLSX_GOOGLE_FONTS[base.toLocaleLowerCase('en-US')];
+        if (entry && (!entry.loadFamily || entry.loadFamily.toLocaleLowerCase('en-US') === base.toLocaleLowerCase('en-US')))
+          names.add(base);
+      }
       cjkLang ??= classifyCjkFont(f.name);
     }
   }

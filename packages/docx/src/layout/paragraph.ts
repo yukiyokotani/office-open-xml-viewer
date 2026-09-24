@@ -323,6 +323,8 @@ export interface PlanLineInput {
   readonly isFirstLine: boolean;
   readonly isLastLine: boolean;
   readonly stretchLastLine: boolean;
+  /** Exact lines paint run shading through the authored line box. */
+  readonly exactLineSpacing?: boolean;
   readonly firstLineIndentPt?: number;
   readonly numbering?: Readonly<{
     /** Resolved logical-start offset of the first-line body after the marker. */
@@ -959,9 +961,12 @@ export function planLine(input: PlanLineInput): LineLayout {
         ...(ownedTrailingSlackPt !== 0 ? { ownedTrailingSlackPt } : {}),
         ...((style.highlight || style.background) ? {
           highlightFragments: [{
-            // ECMA-376 §17.3.2.15 applies highlighting behind the run
-            // contents, not across the paragraph's authored line advance.
-            rect: style.highlight ? highlightBounds : {
+            // Word for Mac PDF run shading (§17.3.2.32) follows the selected
+            // font box for auto and atLeast spacing, centered inside any
+            // larger line-grid allocation. With exact spacing it fills the
+            // fixed line box. Highlighting
+            // (§17.3.2.15) always hugs the selected font box.
+            rect: style.highlight || !input.exactLineSpacing ? highlightBounds : {
               xPt,
               yPt: line.topPt,
               widthPt: widthPt + ownedTrailingSlackPt,
@@ -2393,6 +2398,7 @@ function planMeasuredLines(
       isFirstLine: lineIndex === 0,
       isLastLine: lineIndex === measured.lines.length - 1,
       stretchLastLine: context.stretchLastLine,
+      exactLineSpacing: context.lineSpacing?.rule === 'exact',
       firstLineIndentPt: context.firstIndentPt,
       ...(lineIndex === 0 && numberingPlan
         ? { numbering: { bodyOffsetPt: numberingPlan.bodyOffsetPt } }

@@ -237,6 +237,7 @@ export interface LayoutTextSeg extends LayoutSegSource {
    *  a solid rect behind the glyphs; also the effective background that an
    *  automatic text color resolves against. */
   background?: string | null;
+  /** ECMA-376 §17.18.78 foreground tile; background retains the fill color. */
   /** ECMA-376 §17.3.2.6 — run carries `<w:color w:val="auto"/>`. The glyph
    *  color is resolved from {@link LayoutTextSeg.background} for contrast
    *  (implementation-defined black/white pick; no normative algorithm). */
@@ -351,8 +352,9 @@ export interface LayoutTextSeg extends LayoutSegSource {
   positionExtendsLineBox?: boolean;
   /** ECMA-376 §17.3.2.19 `<w:kern>` — font-kerning threshold in POINTS (smallest
    *  kerned size). Sets `ctx.fontKerning` on measure and paint when the run's
-   *  font size ≥ the threshold. Absent at every style level disables kerning;
-   *  Canvas `auto` is not the WordprocessingML default. */
+   *  font size ≥ the threshold. Absent at every style level disables kerning
+   *  unless [MS-DOCX] `enableOpenTypeFeatures` explicitly enables it for the
+   *  document; Canvas `auto` is not the WordprocessingML default. */
   kerning?: number;
   /** ECMA-376 §17.3.2.10 `<w:eastAsianLayout w:vert>` — horizontal-in-vertical
    *  (縦中横). Set by {@link buildSegments} ONLY when the run declares `w:vert`
@@ -730,6 +732,8 @@ export interface LineLayoutEnvironment {
   readonly characterSpacingControl?: string;
   /** §17.15.3.31: use full character width when deciding line fit. */
   readonly lineWrapLikeWord6?: boolean;
+  /** [MS-DOCX] §2.3.3 enables OpenType kerning without an authored `w:kern`. */
+  readonly enableOpenTypeFeatures?: boolean;
   /** False only when `w:framePr` specifies a drop cap with a fixed `w:lines`;
    * the authored frame height remains authoritative even when glyph paint is
    * lowered beyond it. Folded into retained text segments during acquisition. */
@@ -3013,9 +3017,10 @@ function mayUseAuthoredReferenceVerticalMetric(
   // pages only with this vertical projection. This says nothing about glyph
   // coverage or advances, which remain selected-resource/Canvas measurements.
   // A loaded local() tuple may also use the pinned reference when no parsed
-  // resource metric exists. Other loaded sources must use their own geometry.
+  // resource metric exists. A registered substitute is a different selected
+  // face: if its resource metric is unavailable, use its Canvas line box in
+  // both axes instead of importing the authored font's vertical geometry.
   return selected?.source === 'native'
-    || selected?.source === 'substitute'
     || mayUseExactLocalReferenceWidthMetric(selected);
 }
 
@@ -3138,7 +3143,11 @@ export function buildSegments(
     const documentCharacterCompressionApplies =
       wordDocumentCharacterCompressionApplies(effectiveCharacterSpacing);
     const effectiveCharacterScale = acquiredTypography?.characterScale ?? r.charScale;
-    const effectiveKerningThreshold = acquiredTypography?.kerningThresholdPt ?? r.kerning;
+    // [MS-DOCX] §2.3.3: the exact Office compatSetting enables OpenType
+    // kerning for unqualified runs. Authored/style-resolved w:kern wins.
+    const effectiveKerningThreshold = acquiredTypography?.kerningThresholdPt
+      ?? r.kerning
+      ?? (environment.enableOpenTypeFeatures ? 0 : undefined);
     const effectiveSnapToGrid = acquiredTypography?.snapToGrid ?? r.snapToGrid;
     // §17.3.2.33 small caps are sized per character: lowercase LETTERS render two
     // points smaller, uppercase letters and non-alphabetic characters at the full

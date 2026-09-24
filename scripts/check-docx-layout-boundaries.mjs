@@ -99,6 +99,9 @@ const SHARED_PAINT_IMPORTS = new Map([
     ['acquireBitmapCacheLease', 'value'],
     ['applyDuotone', 'value'],
     ['autoContrastColor', 'value'],
+    // A retained run-shading preset is rasterized as an 8x8 paint tile;
+    // this helper cannot measure text or change the layout result.
+    ['buildPatternBitmap', 'value'],
     ['captureDecodedBitmapCacheEpoch', 'value'],
     ['canvasFontString', 'value'],
     ['clampCanvasSize', 'value'],

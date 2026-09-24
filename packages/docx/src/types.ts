@@ -111,6 +111,8 @@ export interface DocSettings {
   /** §17.15.3.31 `w:compat/w:lineWrapLikeWord6` — fit at uncompressed width
    * even when character-level whitespace is compressed for display. */
   lineWrapLikeWord6?: boolean;
+  /** [MS-DOCX] §2.3.3 `enableOpenTypeFeatures` compatibility setting. */
+  enableOpenTypeFeatures?: boolean;
   /** ECMA-376 Part 4 §14.8.3.50 `w:compat/w:useFELayout` — Far East layout
    * compatibility. */
   useFeLayout?: boolean;

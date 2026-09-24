@@ -97,3 +97,28 @@ export const GOOGLE_FONT_SUBSTITUTES: Record<string, FontPreloadEntry> = {
   'noto naskh arabic':   { url: NOTO_NASKH_ARABIC_URL, loadFamily: 'Noto Naskh Arabic' },
   'noto sans arabic':    { url: NOTO_SANS_ARABIC_URL, loadFamily: 'Noto Sans Arabic' },
 };
+
+/**
+ * Some Office files record a regular face's full name (for example, "Lato
+ * Regular") while CSS registers its family as "Lato" with weight 400. Only
+ * offer that family as a fallback when its *same-name* Google entry actually
+ * loaded in this FontFaceSet. This keeps an authored/system full-name face
+ * first, and a failed or disabled webfont never changes the fallback chain.
+ * Different-family substitutes such as Calibri → Carlito are excluded.
+ */
+export function loadedGoogleRegularAliases(
+  fontSet: Pick<FontFaceSet, typeof Symbol.iterator> | null,
+  entries: Readonly<Record<string, FontPreloadEntry>> = GOOGLE_FONT_SUBSTITUTES,
+): ReadonlyMap<string, string> {
+  const aliases = new Map<string, string>();
+  if (!fontSet) return aliases;
+  for (const face of fontSet) {
+    if (face.status !== 'loaded' || face.style !== 'normal' || face.weight !== '400') continue;
+    const family = face.family.replace(/^['"]|['"]$/g, '').trim();
+    const key = family.toLocaleLowerCase('en-US');
+    const entry = entries[key];
+    if (!entry || (entry.loadFamily && entry.loadFamily.toLocaleLowerCase('en-US') !== key)) continue;
+    aliases.set(`${key} regular`, family);
+  }
+  return aliases;
+}

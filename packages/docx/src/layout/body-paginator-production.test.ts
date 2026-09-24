@@ -150,9 +150,12 @@ const bodyOwner = () => ({
 
 describe('canonical body producer', () => {
   it.each([
-    { inkless: false, expectedTopPt: 10 },
-    { inkless: true, expectedTopPt: 16 },
-  ])('keeps the authored top spacing only for an inkless overflow paragraph ($inkless)', ({ inkless, expectedTopPt }) => {
+    { kind: 'visible text', inkless: false, onlyVisibleText: true, expectedTopPt: 10 },
+    { kind: 'image only', inkless: false, onlyVisibleText: false, expectedTopPt: 16 },
+    { kind: 'mixed text and object', inkless: false, onlyVisibleText: false, expectedTopPt: 16 },
+    { kind: 'empty mark', inkless: true, onlyVisibleText: false, expectedTopPt: 16 },
+    { kind: 'unknown source', inkless: false, onlyVisibleText: undefined, expectedTopPt: 16 },
+  ])('suppresses automatic page-top spacing only for established $kind', ({ inkless, onlyVisibleText, expectedTopPt }) => {
     const services = Object.freeze({
       text: { fingerprint: 'text' }, images: { fingerprint: 'images' }, math: { fingerprint: 'math' },
     }) as LayoutServices;
@@ -196,6 +199,7 @@ describe('canonical body producer', () => {
           spaceBeforePt: index === 4 ? 6 : 0, spaceAfterPt: 0,
           contextualSpacing: false, styleId: null,
           inkless: index === 4 && inkless,
+          ...(index === 4 && onlyVisibleText !== undefined ? { onlyVisibleText } : {}),
         },
       })),
     }, services, { currentDateMs: 0 });
@@ -2412,7 +2416,10 @@ describe('canonical body producer', () => {
       .toEqual([[0], [1, 2]]);
   });
 
-  it('suppresses leading spacing when a keepNext unit moves to an automatic page', () => {
+  it.each([
+    { kind: 'unknown-content', onlyVisibleText: undefined },
+    { kind: 'image-only', onlyVisibleText: false },
+  ])('suppresses leading spacing when a $kind keepNext unit moves to an automatic page', ({ onlyVisibleText }) => {
     const services = Object.freeze({
       text: { fingerprint: 'text' }, images: { fingerprint: 'images' }, math: { fingerprint: 'math' },
     }) as LayoutServices;
@@ -2458,6 +2465,7 @@ describe('canonical body producer', () => {
           keepLines: false, keepNext: index === 1, widowControl: true,
           spaceBeforePt: index === 1 ? 15 : 0,
           spaceAfterPt: 0, contextualSpacing: false, styleId: null,
+          ...(index === 1 && onlyVisibleText !== undefined ? { onlyVisibleText } : {}),
         },
       })),
     };

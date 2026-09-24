@@ -23,6 +23,8 @@ export interface PaintCanvas2D {
   letterSpacing: string;
   fontKerning: CanvasFontKerning;
   fillRect(x: number, y: number, width: number, height: number): void;
+  /** Native Canvas pattern source; optional on test recording contexts. */
+  createPattern?(image: CanvasImageSource, repetition: string | null): CanvasPattern | null;
   strokeRect(x: number, y: number, width: number, height: number): void;
   setLineDash(segments: number[]): void;
   fillText(text: string, x: number, y: number): void;

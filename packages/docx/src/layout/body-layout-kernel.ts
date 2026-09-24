@@ -88,6 +88,8 @@ export interface AcquiredParagraphBlock {
   readonly fragmentation: ParagraphFragmentation;
   readonly uniformRubyAdvancePt?: number;
   readonly markBelowBaselinePt?: number;
+  /** True when this mark's line box occupies a §17.6.5 document-grid cell. */
+  readonly markOnLineGrid?: boolean;
   readonly flowRegistryDelta?: BodyFlowRegistryDeltaPt;
   readonly placement?: Readonly<{
     coordinateSpace: 'logical-body';

@@ -131,6 +131,7 @@ describe('layout context resolvers', () => {
       useFeLayout: true,
       balanceSingleByteDoubleByteWidth: true,
       lineWrapLikeWord6: true,
+      enableOpenTypeFeatures: false,
     });
   });
 
@@ -147,6 +148,7 @@ describe('layout context resolvers', () => {
       useFeLayout: false,
       balanceSingleByteDoubleByteWidth: false,
       lineWrapLikeWord6: false,
+      enableOpenTypeFeatures: false,
     });
     expect(context.grid).toEqual({
       kind: 'none',

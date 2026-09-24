@@ -41,7 +41,7 @@ import { combineAdjacentTableLayoutInputs } from './adjacent-table-layout-input.
 import { layoutTable as layoutRetainedTableInput } from './table.js';
 import { startTableFragmentCursor, takeTableFragment, type PageDependentTableBlockRequest } from './table-pagination.js';
 import { paragraphGapAdjustment } from './paragraph-spacing.js';
-import { bottomBorderExtentPt, resolveParagraphBorderEdges } from './paragraph-border-adjacency.js';
+import { bottomBorderExtentPt, resolveParagraphBorderEdges, topBorderExtentPt, type ParagraphBorderEdges } from './paragraph-border-adjacency.js';
 import { acquireParagraphResult, acquireRetainedFrameGroup, bodyFrameGroupFor, bodyParagraphBorderEdgesFor, projectPhysicalAnchorResult, retainedFrameMaximumBaselineLoweringPt, type BodyFrameGroup } from './paragraph.js';
 import { wordLoweredDropCapAnchorLeadingPt } from './body-pagination-compatibility.js';
 import type { CompleteTextBoxStoryAcquirer } from './paragraph.js';
@@ -94,6 +94,27 @@ export function createProductionBodyLayoutRuntime(
     + `${duotone ? `|duo:${duotone.clr1}:${duotone.clr2}` : ''}`;
 /** Retained default separator leading used by the shared note story layout. */
 const FOOTNOTE_SEPARATOR_GAP_PT = 6;
+
+/** A visible §17.3.1.42 top border owns space above the first line in every
+ * paragraph container. Page/cell-start suppression removes authored w:before,
+ * never the border's own spacing or outer half-stroke. */
+function paragraphContextWithTopBorder<T extends { readonly spaceBeforePt: number }>(
+  context: T,
+  paragraph: { readonly borders?: DocParagraph['borders'] },
+  topEdge: ParagraphBorderEdges['top'],
+  suppressSpaceBefore: boolean,
+  continuing = false,
+): { context: T; suppressSpaceBefore: boolean } {
+  const reservePt = continuing ? 0 : topBorderExtentPt(paragraph.borders, topEdge);
+  if (reservePt === 0) return { context, suppressSpaceBefore };
+  return {
+    context: {
+      ...context,
+      spaceBeforePt: (suppressSpaceBefore ? 0 : context.spaceBeforePt) + reservePt,
+    },
+    suppressSpaceBefore: false,
+  };
+}
 
 function buildMeasureState(
   ctx: MeasurementTextContext,
@@ -188,6 +209,9 @@ function buildMeasureState(
           );
         }
         const context = resolveStateParagraphLayoutContext(cellState, paragraph);
+        const topBorder = paragraphContextWithTopBorder(
+          context, paragraph, paragraphBorderEdges?.top ?? 'top', true,
+        );
         const layout = acquireRegisteredParagraph(
           cellState,
           cellState.acquisitionInputs.paragraphAcquisitionInput(paragraph, source),
@@ -196,13 +220,13 @@ function buildMeasureState(
             source,
             flowDomainId,
             ordinaryFlow: true,
-            context,
+            context: topBorder.context,
             placement: {
               startYPt: cellState.y,
               paragraphXPt: 0,
               availableWidthPt: paragraphWidthPt,
               maximumYPt: cellState.pageH,
-              suppressSpaceBefore: true,
+              suppressSpaceBefore: topBorder.suppressSpaceBefore,
             },
             measurer: {
               context: cellState.ctx,
@@ -241,7 +265,7 @@ function buildMeasureState(
           advancePt: layout.advancePt + paragraph.spaceBefore,
           spacing: Object.freeze({
             ...layout.spacing,
-            beforePt: paragraph.spaceBefore,
+            beforePt: (layout.spacing?.beforePt ?? 0) + paragraph.spaceBefore,
           }),
         });
       },
@@ -416,6 +440,10 @@ function buildConcreteBodyLayoutKernel(
       bottom: 'bottom' as const,
     };
     const context = resolveBodyParagraphLayoutContext(state, paragraph);
+    const topBorder = paragraphContextWithTopBorder(
+      context, paragraph, edges.top, suppressSpaceBefore,
+      continuation.boundary !== null,
+    );
     return acquireParagraphResult(
       paragraph,
       {
@@ -423,13 +451,13 @@ function buildConcreteBodyLayoutKernel(
         source,
         flowDomainId: location.flowDomainId,
         ordinaryFlow: true,
-        context,
+        context: topBorder.context,
         placement: {
           startYPt: state.y,
           paragraphXPt: location.availableBounds.xPt,
           availableWidthPt: availableInlineExtentPt,
           maximumYPt: state.pageH,
-          suppressSpaceBefore,
+          suppressSpaceBefore: topBorder.suppressSpaceBefore,
         },
         measurer: { context: state.ctx, fontFamilyClasses: state.fontFamilyClasses },
         environment: paragraphMeasurementEnvironment(state),
@@ -830,6 +858,9 @@ function buildConcreteBodyLayoutKernel(
             }
             const context = resolveStateParagraphLayoutContext(candidate, paragraph);
             const borderEdges = resolveParagraphBorderEdges(previous, paragraph, next);
+            const topBorder = paragraphContextWithTopBorder(
+              context, paragraph, borderEdges.top, spacing.suppressBefore,
+            );
             const result = acquireRegisteredParagraph(
               candidate,
               paragraph,
@@ -838,13 +869,13 @@ function buildConcreteBodyLayoutKernel(
                 source: block.source,
                 flowDomainId: placement.container.id,
                 ordinaryFlow: true,
-                context,
+                context: topBorder.context,
                 placement: {
                   startYPt,
                   paragraphXPt: placement.container.bounds.xPt,
                   availableWidthPt: placement.container.bounds.widthPt,
                   maximumYPt: placement.availableBounds.yPt + placement.availableBounds.heightPt,
-                  suppressSpaceBefore: spacing.suppressBefore,
+                  suppressSpaceBefore: topBorder.suppressSpaceBefore,
                 },
                 measurer: {
                   context: candidate.ctx,
@@ -1034,6 +1065,8 @@ function buildConcreteBodyLayoutKernel(
             drawingCollisionRegistry.entries,
           );
           const { measured, layout } = acquired;
+          const markOnLineGrid = measured.markOnly
+            && resolveBodyParagraphLayoutContext(candidate, paragraph).lineGrid.active;
           const allBoundaries = measured.lines.map((line) => {
             const boundary = line.layout.consumedEnd;
             if (!boundary) throw new Error('Measured line omitted its source boundary');
@@ -1056,7 +1089,10 @@ function buildConcreteBodyLayoutKernel(
                   lineEndBoundaries: Object.freeze(allBoundaries),
                 }),
             ...(measured.markOnly
-              ? { markBelowBaselinePt: measured.lastLineBelowBaselinePt }
+              ? {
+                  markBelowBaselinePt: measured.lastLineBelowBaselinePt,
+                  markOnLineGrid,
+                }
               : {}),
             ...(measured.uniformRubyAdvancePt == null
               ? {}

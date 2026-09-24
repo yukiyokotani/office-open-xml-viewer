@@ -830,6 +830,8 @@ function acquiredBodyParagraph(paragraph: DocParagraph, source: SourceRef) {
     contextualSpacing: paragraph.contextualSpacing === true,
     styleId: paragraph.styleId ?? null,
     inkless: !paragraphHasUnavailableDrawing(paragraph) && isInklessParagraph(paragraph),
+    onlyVisibleText: paragraph.runs.every((run) => run.type === 'text')
+      && paragraph.runs.some((run) => run.type === 'text' && /\S/u.test(run.text)),
     ...(pageOwnedAnchorOccurrenceIds.length === 0 ? {} : { pageOwnedAnchorOccurrenceIds }),
   });
 }

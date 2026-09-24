@@ -15,8 +15,30 @@ import type { ReferenceFontMetricProfile } from './reference-font-metrics.js';
  * Both have OS/2 ulCodePageRange1=0x20020009 (Far East bit 17 set),
  * unitsPerEm=2048, and hhea=(1802, -246, 0). The checked data covers only
  * regular and bold normal styles; italic tuples deliberately remain absent.
+ *
+ * BIZ UDGothic: googlefonts/morisawa-biz-ud-gothic at
+ * 18934af56b9c003ca58c54bffbf226848cb11032, fonts/ttf/.
+ * Regular SHA-256: 7d2b48d84ef4e65c9f85bcf65fb1fb41c92b134be641fab6a7141d597c9a92b0
+ * Bold SHA-256: c686d1b05b36d98473d98f67e74e96048a5ad6695de143111b8328b78900006e
+ * Both have OS/2 ulCodePageRange1=0x20020009 (Far East bit 17 set),
+ * unitsPerEm=2048, hhea=(1802, -246, 0), and xAvgCharWidth=1718.
+ * The same vertical and code-page metrics were confirmed in the installed
+ * macOS BIZ_UDGothic.ttc regular/bold faces. These static metadata references
+ * do not bundle font bytes or establish which face Canvas selected.
  */
 export const OPEN_FONT_REFERENCE_PROFILES: readonly ReferenceFontMetricProfile[] = [
+  {
+    source: 'published-open-font', family: 'BIZ UDGothic',
+    aliases: ['BIZ UDGothic', 'BIZUDGothic-Regular'],
+    weight: 400, style: 'normal', unitsPerEm: 2048,
+    hhea: [1802, -246, 0], farEastCodePage: true, xAvgCharWidth: 1718,
+  },
+  {
+    source: 'published-open-font', family: 'BIZ UDGothic',
+    aliases: ['BIZ UDGothic', 'BIZUDGothic-Bold'],
+    weight: 700, style: 'normal', unitsPerEm: 2048,
+    hhea: [1802, -246, 0], farEastCodePage: true, xAvgCharWidth: 1718,
+  },
   {
     source: 'published-open-font', family: 'BIZ UDMincho',
     aliases: ['BIZ UDMincho', 'BIZUDMincho-Regular'],

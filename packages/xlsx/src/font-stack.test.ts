@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
+import { loadedGoogleRegularAliases } from '@silurus/ooxml-core';
 import { cssTailFor, fontStackFor } from './renderer.js';
-import { xlsxOfficeFontRequests, xlsxWorksheetOfficeFontRequests } from './google-fonts.js';
+import { xlsxFontPreloadNames, xlsxOfficeFontRequests, xlsxWorksheetOfficeFontRequests } from './google-fonts.js';
 import type { ParsedWorkbook, Worksheet } from './types.js';
 
 describe('XLSX exact Office face requests', () => {
@@ -36,6 +37,30 @@ describe('XLSX exact Office face requests', () => {
 });
 
 describe('fontStackFor — default Latin chain (regression)', () => {
+  it('uses a loaded same-family regular webfont after its authored full name', () => {
+    const faces = [
+      { family: 'Lato', weight: '400', style: 'normal', status: 'loaded' },
+      { family: 'Carlito', weight: '400', style: 'normal', status: 'loaded' },
+      { family: 'Roboto', weight: '400', style: 'normal', status: 'error' },
+    ] as unknown as FontFaceSet;
+    const aliases = loadedGoogleRegularAliases(faces);
+    expect(aliases.get('lato regular')).toBe('Lato');
+    expect(aliases.has('carlito regular')).toBe(false);
+    expect(aliases.has('roboto regular')).toBe(false);
+    expect(fontStackFor('Lato Regular', undefined, '', undefined, true, undefined,
+      aliases.get('lato regular')).startsWith('"Lato Regular", "Lato", Arial')).toBe(true);
+    expect(fontStackFor('Lato Regular').startsWith('"Lato Regular", Arial')).toBe(true);
+  });
+
+  it('preloads the base only for a known same-family regular face', () => {
+    const wb = { styles: { fonts: [
+      { name: 'Lato Regular' }, { name: 'Calibri Regular' }, { name: 'Unknown Regular' },
+    ] } } as unknown as ParsedWorkbook;
+    const names = xlsxFontPreloadNames(wb);
+    expect(names.has('Lato')).toBe(true);
+    expect(names.has('Calibri')).toBe(false);
+    expect(names.has('Unknown')).toBe(false);
+  });
   it('uses a retained tuple alias only for the requested Calibri face', () => {
     const route = {
       requestedFamily: 'Calibri' as const, family: '__pinned_regular',

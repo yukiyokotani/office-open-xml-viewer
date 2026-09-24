@@ -77,7 +77,6 @@ let renderers: LoadedWorkerRenderers = {};
 let fontsLoaded: Promise<unknown> = Promise.resolve();
 let officeFontFaces: FontFace[] = [];
 let officeFontRoutes: Record<string, OfficeFontFallbackRoute> = {};
-let checkedOfficeTuples: string[] = [];
 let checkedOfficeTupleSet = new Set<string>();
 let googleSubstitutes = false;
 let officeSheetLoads = new WeakMap<Worksheet, Promise<void>>();
@@ -94,7 +93,6 @@ function startFontLoad(parsed: ParsedWorkbook, useGoogleFonts: boolean): void {
     officeFontFaces = office.faces;
     officeFontRoutes = office.routes;
     checkedOfficeTupleSet = new Set(office.checked);
-    checkedOfficeTuples = [...checkedOfficeTupleSet];
   });
 }
 const sheetCache = new Map<number, Worksheet>();
@@ -242,7 +240,6 @@ self.onmessage = async (e: MessageEvent<
       unloadOfficeFontFallbacks(officeFontFaces);
       officeFontFaces = [];
       officeFontRoutes = {};
-      checkedOfficeTuples = [];
       checkedOfficeTupleSet = new Set();
       officeSheetLoads = new WeakMap();
       officeSheetLoadQueue = Promise.resolve();
@@ -325,7 +322,6 @@ self.onmessage = async (e: MessageEvent<
           for (const key of extra.checked) {
             if (checkedOfficeTupleSet.has(key)) continue;
             checkedOfficeTupleSet.add(key);
-            checkedOfficeTuples.push(key);
           }
           Object.assign(officeFontRoutes, extra.routes);
         });
@@ -359,7 +355,7 @@ self.onmessage = async (e: MessageEvent<
         // that bind is ineffective because the worker's FontFaceSet can
         // invalidate it on first use.
         { ...renderOpts, authoritativeMdw: req.layoutMetrics?.maximumDigitWidth,
-          officeFontRoutes, checkedOfficeTuples, googleSubstitutes, fetchImage: getImage },
+          officeFontRoutes, googleSubstitutes, fetchImage: getImage },
         svgDecodeClient.decode,
       );
       const bitmap = canvas.transferToImageBitmap();

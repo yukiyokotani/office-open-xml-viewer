@@ -236,6 +236,10 @@ pub struct DocumentSettings {
     /// character-level whitespace compression, even when paint is compressed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub line_wrap_like_word6: Option<bool>,
+    /// [MS-DOCX] §2.3.3 `enableOpenTypeFeatures` compatibility setting.
+    /// Absent defaults to disabled; explicit `w:kern` remains authoritative.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enable_open_type_features: Option<bool>,
     /// ECMA-376 Part 4 §14.8.3.50 `w:compat` / `w:useFELayout` — enable Far
     /// East layout compatibility behavior.
     #[serde(skip_serializing_if = "Option::is_none")]

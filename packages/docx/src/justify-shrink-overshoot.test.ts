@@ -196,10 +196,10 @@ describe('§17.18.44 — natural word fit across alignment modes', () => {
   it('counts a candidate trailing space when the prospective line will justify', async () => {
     const lines = await renderLines(textPara('AAAA AAAA BBBB', 'both'), 108);
 
-    // Public Word/PDF evidence: a separator following the last admitted word
-    // still participates in the wrap decision for a line that will justify.
-    // The first word plus the second visible word is exactly 108px; counting
-    // the second token's 12px separator therefore moves it to the next line.
+    // A separator following the last admitted word still participates in the
+    // wrap decision for a line that will justify. The first word plus the
+    // second visible word is exactly 108px; counting the second token's 12px
+    // separator therefore moves it to the next line.
     expect(tokens(lines[0])).toBe(1);
   });
 

@@ -4,7 +4,7 @@ import {
   withVertFeature,
 } from '@silurus/ooxml-core';
 import type { ParagraphLayout, TextBoxLayout } from '../layout/types.js';
-import type { CanvasPaintContext } from './types.js';
+import type { CanvasPaintContext, PaintCanvas2D } from './types.js';
 import { paintDrawingLayout } from './canvas-drawing.js';
 import { paintRetainedResource } from './canvas-resource.js';
 import { paintTableLayout } from './canvas-table.js';
@@ -286,6 +286,7 @@ function paintParagraphContents(node: ParagraphLayout, context: CanvasPaintConte
           `Unsupported retained typography geometry: ${placement.unsupportedGeometry.join(', ')}`,
         );
       }
+      // ECMA-376 Part 1 §17.3.2.15: run highlighting supersedes shading.
       if (placement.highlightFragments) {
         for (const fragment of placement.highlightFragments) {
           ctx.fillStyle = fragment.color;

@@ -1,5 +1,5 @@
 import { classifyCjkFont, type CjkLang, type OfficeFontFallbackRoute } from '@silurus/ooxml-core';
-import { withVertFeatureCanvasScope } from '@silurus/ooxml-core';
+import { activeFontSet, isHTMLCanvas, withVertFeatureCanvasScope } from '@silurus/ooxml-core';
 import type { DocxDocumentModel } from './types.js';
 import type { LoadedEmbeddedFontRoute } from './embedded-fonts.js';
 import type { ResolvedFontMetric } from './layout/text.js';
@@ -153,6 +153,10 @@ export function createLayoutServices(
     localMetrics,
     fontMetrics: inputFontMetrics,
     measureContext: context,
+    // A caller canvas may belong to a popup/iframe. CSS face admission must
+    // inspect the FontFaceSet that also shapes this context's glyphs.
+    fontSet: (isHTMLCanvas(canvasElement) ? canvasElement.ownerDocument?.fonts : undefined)
+      ?? activeFontSet(),
     verticalGlyphMeasurement,
   });
   // Body layout and text measurement share one immutable resource snapshot,

@@ -156,7 +156,7 @@ export {
 // Cambria → Caladea, popular web fonts, Arabic Noto fallbacks). Each package
 // spreads this into its own map; script-fallback Noto faces live in
 // SCRIPT_GOOGLE_FONTS below.
-export { GOOGLE_FONT_SUBSTITUTES } from './fonts/google-fonts';
+export { GOOGLE_FONT_SUBSTITUTES, loadedGoogleRegularAliases } from './fonts/google-fonts';
 export {
   fontFaceWeightCovers,
   loadOfficeFontFallbacks,

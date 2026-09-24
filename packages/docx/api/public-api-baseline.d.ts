@@ -1114,6 +1114,7 @@ export interface DocSettings {
     defaultTabStop?: number;
     characterSpacingControl?: string;
     lineWrapLikeWord6?: boolean;
+    enableOpenTypeFeatures?: boolean;
     useFeLayout?: boolean;
     balanceSingleByteDoubleByteWidth?: boolean;
     adjustLineHeightInTable?: boolean;

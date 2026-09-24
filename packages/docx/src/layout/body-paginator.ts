@@ -1233,11 +1233,19 @@ function* paginateBodyPassSteps(
             || spacing.suppressBefore
             || (
               cursor.boundary === null
-              // The controlled Office top-spacing rule covers an ink-bearing
-              // paragraph relocated by overflow. Empty paragraph marks still
-              // retain their authored before spacing: the mark-only cases in
-              // two independent multi-page documents move subsequent content
-              // by exactly that spacing when it is incorrectly suppressed.
+              // Ordinary overflow suppresses top spacing only for ordinary
+              // text. Image-only and mixed-object paragraphs retain their
+              // authored spacing; `inkless` cannot distinguish these cases.
+              && block.inkless !== true
+              && block.onlyVisibleText === true
+              && !state.flow.pageHasContent
+              && automaticPageStartEntryIndex === entryIndex
+            )
+            || (
+              // Keep-with-next relocation owns a separate, content-independent
+              // leading-spacing rule for the complete group.
+              cursor.boundary === null
+              && block.keepNext
               && block.inkless !== true
               && !state.flow.pageHasContent
               && automaticPageStartEntryIndex === entryIndex
@@ -1462,6 +1470,7 @@ function* paginateBodyPassSteps(
             followsNextPageSectionBoundary,
             markExtentPt: acquired.blockExtentPt,
             markBelowBaselinePt: acquired.markBelowBaselinePt ?? 0,
+            markOnLineGrid: acquired.markOnLineGrid === true,
           });
         const selected = selectParagraphFragment(
           acquired.layout,

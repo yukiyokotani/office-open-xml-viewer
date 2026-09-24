@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { createLayoutServices } from './layout-runtime.js';
 import { createFontResolver } from './layout/font-service.js';
 import { createTextLayoutService } from './layout/text.js';
+import { layoutBodyTableRowAdvances } from './test-support/document-layout.test-support.js';
 import { referenceFontLineMetrics } from './reference-font-line-metrics.js';
 import {
   buildSegments,
@@ -13,7 +14,7 @@ import {
   type LayoutTextSeg,
 } from './line-layout.js';
 import type { ResolvedFontMetric } from './layout/text.js';
-import type { DocParagraph, DocRun, DocxDocumentModel } from './types.js';
+import type { DocParagraph, DocRun, DocTable, DocxDocumentModel } from './types.js';
 
 const context = {
   font: '10px serif', letterSpacing: '0px', fontKerning: 'auto',
@@ -127,6 +128,31 @@ describe('native reference font vertical layout', () => {
       const line = layoutLines(context, [segment], 100, 0, 1)[0]!;
       expect(line.ascent).toBe(8);
       expect(line.descent).toBe(2);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('selects CSS faces from the measuring canvas owner document', () => {
+    class PopupCanvas {
+      readonly nodeType = 1;
+      readonly localName = 'canvas';
+      readonly ownerDocument: { fonts: FontFaceSet; defaultView: { HTMLCanvasElement: typeof PopupCanvas } };
+      constructor(fonts: FontFaceSet) {
+        this.ownerDocument = { fonts, defaultView: { HTMLCanvasElement: PopupCanvas } };
+      }
+    }
+    const loadedFace = {
+      family: 'Calibri', weight: '400', style: 'normal', status: 'loaded',
+    } as FontFace;
+    const popupFonts = [loadedFace] as unknown as FontFaceSet;
+    const popupContext = { ...context, canvas: new PopupCanvas(popupFonts) } as unknown as CanvasRenderingContext2D;
+    vi.stubGlobal('document', { fonts: [] });
+    try {
+      const selected = services(undefined, popupContext, 'Calibri').text.resolve({
+        fonts: { ascii: 'Calibri' }, slot: 'ascii', weight: 400, style: 'normal',
+      });
+      expect(selected.source).toBe('css');
     } finally {
       vi.unstubAllGlobals();
     }
@@ -376,6 +402,47 @@ describe('native reference font vertical layout', () => {
       expect(line.segments[0]?.measuredWidth).toBe(45);
     }
     expect(referenceFontLineMetrics('BIZ UDMincho', 400, 'italic')).toBeUndefined();
+  });
+
+  it('allocates an auto table row from BIZ UDGothic normal spacing and cell margins', () => {
+    const section = {
+      pageWidth: 612, pageHeight: 792, marginTop: 72, marginRight: 72,
+      marginBottom: 72, marginLeft: 72, headerDistance: 36,
+      footerDistance: 36, titlePage: false, evenAndOddHeaders: false,
+    };
+    for (const bold of [false, true]) {
+      const paragraph = {
+        type: 'paragraph',
+        alignment: 'left', indentLeft: 0, indentRight: 0, indentFirst: 0,
+        spaceBefore: 0, spaceAfter: 0,
+        lineSpacing: { rule: 'auto', value: 1, explicit: true },
+        numbering: null, tabStops: [],
+        runs: [{
+          type: 'text', text: '確認します。',
+          fontFamily: 'BIZ UDGothic', fontFamilyEastAsia: 'BIZ UDGothic',
+          fontSize: 10.5, bold, italic: false, underline: false,
+          strikethrough: false,
+        }],
+        defaultFontSize: 10.5, defaultFontFamily: 'BIZ UDGothic',
+        widowControl: false,
+      } as unknown as DocParagraph;
+      const table = {
+        colWidths: [300], rows: [{
+          cells: [{
+            content: [paragraph], colSpan: 1, vMerge: null,
+            borders: { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null },
+            background: null, vAlign: 'center', widthPt: 300,
+            marginTop: 3.5, marginBottom: 3.5,
+          }],
+          rowHeight: null, rowHeightRule: 'auto', isHeader: false,
+        }],
+        borders: { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null },
+        cellMarginTop: 0, cellMarginBottom: 0, cellMarginLeft: 0, cellMarginRight: 0,
+        jc: 'left',
+      } as unknown as DocTable;
+      expect(layoutBodyTableRowAdvances(table, section, context)).toEqual([20.65]);
+    }
+    expect(referenceFontLineMetrics('BIZ UDGothic', 400, 'italic')).toBeUndefined();
   });
 
   it('uses positively loaded Calibri reference sides without changing its measured width route', () => {
@@ -841,7 +908,7 @@ describe('native reference font vertical layout', () => {
   });
 
   it.each(['Fallback Face', 'Meiryo'])(
-    'keeps authored vertical geometry while refusing an unrelated resource metric for substitute %s',
+    'uses the selected substitute Canvas box while refusing an unrelated resource metric for %s',
     (resolvedFamily) => {
       const metric = { family: 'Meiryo', lineHeightRatio: 1.2 };
       const text = substitutedMeiryoService(metric, resolvedFamily);
@@ -857,9 +924,13 @@ describe('native reference font vertical layout', () => {
       const segment = segments[0] as LayoutTextSeg;
       expect(segment.fontFamily).toBe(resolvedFamily);
       const authoredRatio = referenceFontLineMetrics('Meiryo')!.lineHeightRatio;
-      expect(segment.resolvedLineHeightRatio).toBe(authoredRatio);
-      expect(segment.resolvedEaFloorLineHeightRatio).toBe(authoredRatio);
+      expect(segment.referenceFontVerticalMetric).toBeUndefined();
+      expect(segment.resolvedLineHeightRatio).toBeUndefined();
+      expect(segment.resolvedEaFloorLineHeightRatio).toBeUndefined();
       expect(segment.resolvedLineHeightRatio).not.toBe(metric.lineHeightRatio);
+      const line = layoutLines(context, segments, 100, 0, 1)[0]!;
+      expect(line.height).toBe(10);
+      expect(line.height).not.toBeCloseTo(10 * authoredRatio, 8);
 
       const paragraph = {
         runs: [], defaultFontFamily: 'Meiryo', defaultFontSize: 10,
@@ -869,7 +940,7 @@ describe('native reference font vertical layout', () => {
         paragraph, 1, undefined, false, false, context, {}, null,
         { meiryo: metric }, text,
       );
-      expect(mark.advancePx).toBeCloseTo(10 * authoredRatio, 8);
+      expect(mark.advancePx).toBe(10);
     },
   );
 });

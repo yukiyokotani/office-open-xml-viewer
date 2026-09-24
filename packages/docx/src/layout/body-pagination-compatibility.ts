@@ -82,7 +82,7 @@ export const WORD_AUTOMATIC_PARAGRAPH_TOP_SPACING = defineCompatibilityRule({
     version: '16.111.1',
     platform: 'macOS 26.5.2',
   },
-  description: 'A controlled ink-bearing exact-line paragraph with before=6pt does not retain that before spacing when ordinary overflow moves the complete paragraph to a fresh physical page. A before=0pt paragraph defines the page-top control. Empty mark-only paragraphs retain authored before spacing in observed Word output; table and float overflow, same-page columns, and paragraph continuations have separate ownership.',
+  description: 'A controlled ordinary-text exact-line paragraph with before=6pt does not retain that before spacing when ordinary overflow moves the complete paragraph to a fresh physical page. A before=0pt paragraph defines the page-top control. Empty mark-only paragraphs retain authored before spacing in observed Word output. Image-only and mixed-object paragraphs are outside these controls, so the library conservatively retains their authored spacing. Table and float overflow, same-page columns, and paragraph continuations have separate ownership.',
 });
 
 export const WORD_STANDALONE_HARD_PAGE_BREAK_TOP_SPACING = defineCompatibilityRule({

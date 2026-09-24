@@ -40,6 +40,7 @@ function makeRecordingCanvas(): {
   canvas: HTMLCanvasElement;
   hStrokes: HStroke[];
   textBaselines: number[];
+  textCalls: { text: string; y: number }[];
   fillRects: FillRectCall[];
 } {
   let font = '10px serif';
@@ -47,6 +48,7 @@ function makeRecordingCanvas(): {
   let fillStyle = '#000';
   const hStrokes: HStroke[] = [];
   const textBaselines: number[] = [];
+  const textCalls: { text: string; y: number }[] = [];
   const fillRects: FillRectCall[] = [];
   let path: { x: number; y: number }[] = [];
   const ctx = {
@@ -83,7 +85,10 @@ function makeRecordingCanvas(): {
     setLineDash() {}, clearRect() {}, arc() {}, quadraticCurveTo() {},
     bezierCurveTo() {}, createLinearGradient() { return { addColorStop() {} }; },
     drawImage() {},
-    fillText(_t: string, _x: number, y: number) { textBaselines.push(y); },
+    fillText(t: string, _x: number, y: number) {
+      textBaselines.push(y);
+      textCalls.push({ text: t, y });
+    },
     strokeText() {},
     lineWidth: 1,
     textAlign: 'left' as CanvasTextAlign, direction: 'ltr' as CanvasDirection,
@@ -93,13 +98,21 @@ function makeRecordingCanvas(): {
   // Real CanvasRenderingContext2D has a `.canvas` back-reference; the renderer
   // reads it on some table paths (e.g. the §17.4.80 Y-axis clip).
   (ctx as unknown as { canvas: unknown }).canvas = canvas;
-  return { canvas: canvas as unknown as HTMLCanvasElement, hStrokes, textBaselines, fillRects };
+  return { canvas: canvas as unknown as HTMLCanvasElement, hStrokes, textBaselines, textCalls, fillRects };
 }
 
 function bottomBorderOnly(): ParagraphBorders {
   return {
     top: null,
     bottom: { style: 'single', color: BORDER_COLOR, width: WIDTH_PT, space: SPACE_PT } as NonNullable<ParagraphBorders['bottom']>,
+    left: null, right: null, between: null,
+  };
+}
+
+function topBorderOnly(): ParagraphBorders {
+  return {
+    top: { style: 'single', color: BORDER_COLOR, width: WIDTH_PT, space: SPACE_PT } as NonNullable<ParagraphBorders['top']>,
+    bottom: null,
     left: null, right: null, between: null,
   };
 }
@@ -154,6 +167,71 @@ async function followerBaseline(leadHasBorder: boolean): Promise<{ baseline: num
 }
 
 describe('a bottom paragraph border reserves flow so following content clears it (§17.3.1.7)', () => {
+  it('reserves top border space and the outer half-stroke before its text (§17.3.1.42)', async () => {
+    const topWithBorder = makeRecordingCanvas();
+    await renderDocumentToCanvas(
+      docOf(para('Leader', null), para('', topBorderOnly()), para('Follower', null)),
+      topWithBorder.canvas, 0, { dpr: 1, width: PAGE_WIDTH },
+    );
+    const topWithoutBorder = makeRecordingCanvas();
+    await renderDocumentToCanvas(
+      docOf(para('Leader', null), para('', null), para('Follower', null)),
+      topWithoutBorder.canvas, 0, { dpr: 1, width: PAGE_WIDTH },
+    );
+    const followerDelta = topWithBorder.textBaselines[1]! - topWithoutBorder.textBaselines[1]!;
+    expect(followerDelta).toBeCloseTo(SPACE_PT + WIDTH_PT / 2, 3);
+    const borderY = Math.min(...topWithBorder.hStrokes
+      .filter((stroke) => stroke.strokeStyle === `#${BORDER_COLOR}`)
+      .map((stroke) => stroke.y));
+    expect(Number.isFinite(borderY)).toBe(true);
+  });
+
+  it('keeps the same top-border reservation in table-cell paragraphs', async () => {
+    const renderFollower = async (bordered: boolean): Promise<number> => {
+      const cell: DocTableCell = {
+        content: [para('Leader', null), para('', bordered ? topBorderOnly() : null), para('Follower', null)],
+        colSpan: 1, vMerge: null,
+        borders: { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null },
+        vAlign: 'top', widthPt: 300,
+      } as unknown as DocTableCell;
+      const table: DocTable = {
+        colWidths: [300],
+        rows: [{ cells: [cell], rowHeight: null, rowHeightRule: 'auto', isHeader: false } as DocTableRow],
+        borders: { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null },
+        cellMarginTop: 0, cellMarginBottom: 0, cellMarginLeft: 0, cellMarginRight: 0,
+        jc: 'left',
+      } as unknown as DocTable;
+      const { canvas, textCalls } = makeRecordingCanvas();
+      await renderDocumentToCanvas({
+        ...docOf(), body: [{ type: 'table', ...table } as BodyElement],
+      }, canvas, 0, { dpr: 1, width: PAGE_WIDTH });
+      return textCalls.find((call) => call.text === 'Follower')!.y;
+    };
+    expect(await renderFollower(true) - await renderFollower(false))
+      .toBeCloseTo(SPACE_PT + WIDTH_PT / 2, 3);
+  });
+
+  it('keeps the same top-border reservation in header paragraphs', async () => {
+    const renderFollower = async (bordered: boolean): Promise<number> => {
+      const model: DocxDocumentModel = {
+        ...docOf(para('Body', null)),
+        headers: {
+          default: { body: [
+            para('Leader', null) as BodyElement,
+            para('', bordered ? topBorderOnly() : null) as BodyElement,
+            para('Follower', null) as BodyElement,
+          ] },
+          first: null, even: null,
+        },
+      };
+      const { canvas, textCalls } = makeRecordingCanvas();
+      await renderDocumentToCanvas(model, canvas, 0, { dpr: 1, width: PAGE_WIDTH });
+      return textCalls.find((call) => call.text === 'Follower')!.y;
+    };
+    expect(await renderFollower(true) - await renderFollower(false))
+      .toBeCloseTo(SPACE_PT + WIDTH_PT / 2, 3);
+  });
+
   it('a bottom border drops the following paragraph by exactly space + width/2', async () => {
     // Baseline layouts differ ONLY in whether the leading empty paragraph carries a
     // bottom border. The border must push the follower down by its outer extent

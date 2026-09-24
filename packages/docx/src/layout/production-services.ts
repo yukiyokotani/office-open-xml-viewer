@@ -49,6 +49,8 @@ export interface ProductionLayoutServiceOptions {
   readonly mathResources?: readonly MathLayoutResource[];
   readonly mathDrawables?: ReadonlyMap<string, CanvasImageSource>;
   readonly measureContext: MeasurementTextContext | null;
+  /** FontFaceSet of the measuring canvas, including foreign DOM realms. */
+  readonly fontSet?: FontFaceSet | null;
   readonly verticalGlyphMeasurement: VerticalGlyphMeasurementService;
   /** Exact registrations returned by the DOCX loader. */
   readonly embeddedRoutes?: readonly LoadedEmbeddedFontRoute[];
@@ -193,7 +195,7 @@ export function createProductionLayoutServices(
   // than the pinned reference for a different version of the same family.
   // A face loaded after this snapshot needs a new layout service/pagination.
   const requestedNames = new Set(routedFontFamilies.map(normalizedFaceFamily));
-  const fontSet = activeFontSet();
+  const fontSet = options.fontSet === undefined ? activeFontSet() : options.fontSet;
   if (fontSet && typeof fontSet[Symbol.iterator] === 'function') {
     for (const face of fontSet) {
       if (!requestedNames.has(normalizedFaceFamily(face.family))) continue;

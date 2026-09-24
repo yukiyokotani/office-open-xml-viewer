@@ -42,6 +42,7 @@ export interface DocumentLayoutSettings {
     readonly useFeLayout: boolean;
     readonly balanceSingleByteDoubleByteWidth: boolean;
     readonly lineWrapLikeWord6: boolean;
+    readonly enableOpenTypeFeatures: boolean;
   };
 }
 
@@ -195,6 +196,7 @@ export function resolveDocumentLayoutSettings(
       balanceSingleByteDoubleByteWidth:
         document.settings?.balanceSingleByteDoubleByteWidth ?? false,
       lineWrapLikeWord6: document.settings?.lineWrapLikeWord6 ?? false,
+      enableOpenTypeFeatures: document.settings?.enableOpenTypeFeatures ?? false,
     },
   };
 }

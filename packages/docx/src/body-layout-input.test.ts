@@ -38,6 +38,31 @@ const finalSection = (overrides: Partial<SectionProps> = {}): SectionProps => ({
 });
 
 describe('canonical body layout input', () => {
+  it('distinguishes ordinary visible text from inline-object and mark-only paragraphs', () => {
+    const image = { type: 'image', src: 'word/media/picture.png' };
+    const withRuns = (runs: readonly unknown[]): BodyElement => ({
+      ...paragraph(''), runs,
+    }) as unknown as BodyElement;
+    const document = {
+      body: [
+        paragraph('body text'),
+        withRuns([image]),
+        withRuns([{ type: 'text', text: 'caption' }, image]),
+        paragraph(''),
+      ],
+      section: finalSection(),
+      headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+      fontFamilyClasses: {},
+    } as DocxDocumentModel;
+
+    expect(bodyLayoutAcquisitionInput(document).sequence.map((entry) =>
+      entry.kind === 'body-block' && entry.block.kind === 'paragraph'
+        ? entry.block.onlyVisibleText
+        : undefined,
+    )).toEqual([true, false, false, false]);
+  });
+
   it('acquires clone-safe parser facts before resolving layout section owners', () => {
     const document = {
       body: [

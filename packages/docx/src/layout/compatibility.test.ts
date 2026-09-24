@@ -652,6 +652,7 @@ describe('layout compatibility inventory', () => {
       followsNextPageSectionBoundary: false,
       markExtentPt: 12,
       markBelowBaselinePt: 3,
+      markOnLineGrid: false,
     };
     expect(wordTrailingEmptyMarkAdmissionAllowancePt(trailingMark)).toBe(3);
     expect(wordTrailingEmptyMarkAdmissionAllowancePt({
