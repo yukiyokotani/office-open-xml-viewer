@@ -134,15 +134,34 @@ export const defaultOffscreenFactory: OffscreenFactory = (w, h) => {
 export async function applyDuotone(
   img: CanvasImageSource,
   duotone: Duotone,
-  opts: {
-    width: number;
-    height: number;
-    offscreenFactory?: OffscreenFactory;
-    /** Optional final display target. The source is always recoloured at the
-     * authored pixel grid; resizing occurs only while baking the result. */
-    targetWidthPx?: number;
-    targetHeightPx?: number;
-  },
+  opts: ImageTransformOptions,
+): Promise<CanvasImageSource> {
+  return applyImageDataTransform(
+    img,
+    (data) => {
+      duotoneImageData(data, duotone.clr1, duotone.clr2);
+    },
+    opts,
+  );
+}
+
+export interface ImageTransformOptions {
+  width: number;
+  height: number;
+  offscreenFactory?: OffscreenFactory;
+  /** Optional final display target. The source is always transformed at the
+   * authored pixel grid; resizing occurs only while baking the result. */
+  targetWidthPx?: number;
+  targetHeightPx?: number;
+}
+
+/** Run an in-place ImageData transform over a decoded image at its native
+ *  pixel grid and bake the result into a new `ImageBitmap`. Returns the
+ *  ORIGINAL source when the surface/readback pipeline is unavailable. */
+export async function applyImageDataTransform(
+  img: CanvasImageSource,
+  transform: (data: ImageData) => void,
+  opts: ImageTransformOptions,
 ): Promise<CanvasImageSource> {
   const { width, height } = opts;
   if (width <= 0 || height <= 0) return img;
@@ -160,7 +179,7 @@ export async function applyDuotone(
     // Tainted canvas / unsupported readback — leave the picture unrecoloured.
     return img;
   }
-  duotoneImageData(data, duotone.clr1, duotone.clr2);
+  transform(data);
   ctx.putImageData(data, 0, 0);
   const resizeOptions = decodedBitmapTargetResizeOptions(
     width,

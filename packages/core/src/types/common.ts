@@ -3,6 +3,7 @@
 
 import type { MathNode } from './math';
 import type { Duotone } from '../image/duotone';
+import type { BlipEffect } from '../image/blip-effects';
 import type { SrcRect } from '../image/crop';
 
 export type PathCmd =
@@ -147,6 +148,12 @@ export interface ImageFill {
    * the picture-FILL path (§20.1.8.14) by issue #889.
    */
   duotone?: Duotone;
+  /**
+   * CT_Blip pixel effects (§20.1.8.13: grayscl, biLevel, clrChange) in
+   * document order, with a `duotone` entry marking where {@link duotone}
+   * applies. Absent when the blip carries none of them.
+   */
+  blipEffects?: BlipEffect[];
 }
 
 export interface Shadow {

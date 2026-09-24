@@ -240,6 +240,7 @@ export type {
   // Drawings / shapes (reachable via Worksheet drawings).
   ImageAnchor,
   Duotone,
+  BlipEffect,
   ChartAnchor,
   ShapeAnchor,
   ShapeInfo,

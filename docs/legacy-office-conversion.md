@@ -134,10 +134,18 @@ picture frame whose `pib` names the BLIP to display (MS-ODRAW 2.2.40 and
 external object list (MS-PPT 2.7.7 and 2.10.1). The object storage is never
 read or activated. PowerPoint's own PDF exports show that stored picture
 unchanged for embedded objects drawn as content. Icon or thumbnail aspects,
-linked objects and ActiveX controls, pictures without a supported BLIP,
-picture brightness/contrast/transparent-color/recolor/grayscale/black-and-white
-adjustments, and pattern, texture or non-stretched picture fills are rejected
-instead of being drawn without them.
+linked objects and ActiveX controls, pictures without a supported BLIP, and
+pattern, texture or non-stretched picture fills are rejected instead of being
+drawn without them.
+
+Picture colour settings follow how PowerPoint itself reads the binary
+properties when it saves a binary deck as PPTX: "Black and White" becomes
+DrawingML `grayscl` plus `biLevel` at 50%, and a transparent colour becomes a
+`clrChange` to the same colour with zero alpha. The presentation renderer
+applies these blip effects in document order for PPTX files as well.
+Brightness/contrast (washout), grayscale or black-and-white alone, recolouring
+and adjustments on picture fills stay rejected until Office output confirms
+their rendering.
 
 ## Experimental direct XLS source
 
@@ -2357,7 +2365,7 @@ be closed before an experimental release.
 | PPT | ~~Gradients on rotated shapes (or inside rotated/flipped groups) are replaced by the solid fill colour~~ Resolved (ef41f03a) | several |
 | PPT | Custom geometry with per-path fill/stroke flags is rejected; the PPTX model has no per-path `fill`/`stroke` (ECMA-376 §20.1.9.15), a generic PPTX gap | 1 |
 | PPT | ~~Unmapped shape types are dropped silently~~ Now rejected | several |
-| PPT | Picture adjustments (washout, grayscale, black-and-white, transparent color), pattern/texture fills, and OLE icons, links and controls are rejected | several |
+| PPT | Picture brightness/contrast (washout), pattern/texture fills, and OLE icons, links and controls are rejected | several |
 | PPT | Implicit paragraph margin/indent and percentage spacing are rejected | 12 of 34 load failures |
 | DOC | 55 of 59 samples are rejected (formatting, notes, fields, positioned tables, drawings, header pictures, non-PNG/JPEG images, list ancestry, FIB version, language ID) | 55 |
 | DOC | Picture washout/brightness and space-before after a page break differ from Word | 2 |

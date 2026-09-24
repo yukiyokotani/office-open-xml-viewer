@@ -90,6 +90,7 @@ import {
   normalizeImageResourceOptions,
   planDecodedImageTargets,
   duotoneCacheKey,
+  type BlipPixelEffects,
   inspectCachedRasterSource,
   isBrowserResizableRasterMimeType,
   isDecodeTargetResizableRasterFormat,
@@ -283,9 +284,21 @@ type PlannedRasterOptions = {
   maxRetainedPixels: number;
 };
 
+/** The decode-time pixel transform of a blip: its ordered CT_Blip effects
+ *  (with the duotone at its position) when it carries any, otherwise just the
+ *  duotone, so a duotone-only or plain picture keeps its existing cache key. */
+function pixelTransform(blip: {
+  readonly duotone?: import('@silurus/ooxml-core').Duotone | null;
+  readonly blipEffects?: readonly import('@silurus/ooxml-core').BlipEffect[] | null;
+}): import('@silurus/ooxml-core').Duotone | BlipPixelEffects | undefined {
+  return blip.blipEffects?.length
+    ? { effects: blip.blipEffects, duotone: blip.duotone ?? null }
+    : blip.duotone ?? undefined;
+}
+
 function imagePlanKey(
   path: string,
-  duotone?: import('@silurus/ooxml-core').Duotone | null,
+  duotone?: import('@silurus/ooxml-core').Duotone | BlipPixelEffects | null,
 ): string {
   return duotoneCacheKey(path, duotone);
 }
@@ -390,12 +403,12 @@ async function planSlideImages(
 
   const background = slide.background;
   if (background?.fillType === 'image' && background.imagePath
-    && !background.tile && !background.duotone) {
+    && !background.tile && !pixelTransform(background)) {
     const fr = background.fillRect ?? {};
     const width = canvasW * (1 - (fr.l ?? 0) - (fr.r ?? 0));
     const height = canvasH * (1 - (fr.t ?? 0) - (fr.b ?? 0));
     push(
-      imagePlanKey(background.imagePath, background.duotone),
+      imagePlanKey(background.imagePath, pixelTransform(background)),
       rasterTargetOptions(width, height, dpr, background.srcRect),
       background.imagePath,
       background.mimeType,
@@ -407,9 +420,9 @@ async function planSlideImages(
   for (const element of slide.elements) {
     if (element.type === 'picture') {
       const vector = preferVectorBlip(element) || element.mimeType === 'image/svg+xml';
-      if (!vector && !element.duotone) {
+      if (!vector && !pixelTransform(element)) {
         push(
-          imagePlanKey(element.imagePath, element.duotone),
+          imagePlanKey(element.imagePath, pixelTransform(element)),
           rasterTargetOptions(
             emuToPx(element.width, scale),
             emuToPx(element.height, scale),
@@ -451,10 +464,10 @@ async function planSlideImages(
           svgImagePath: fill.svgImagePath,
           srcRect: usage.hasSourceCrop ? true : null,
         });
-        if (!vector && !fill.duotone && !usage.preserveNaturalSize
+        if (!vector && !pixelTransform(fill) && !usage.preserveNaturalSize
           && size?.targetWidthPx && size.targetHeightPx) {
           push(
-            imagePlanKey(fill.imagePath, fill.duotone),
+            imagePlanKey(fill.imagePath, pixelTransform(fill)),
             {
               targetWidthPx: size.targetWidthPx,
               targetHeightPx: size.targetHeightPx,
@@ -468,13 +481,13 @@ async function planSlideImages(
       }
     } else if (element.type === 'shape') {
       const fill = element.fill?.fillType === 'image' ? element.fill : null;
-      if (fill && !fill.tile && !fill.duotone) {
+      if (fill && !fill.tile && !pixelTransform(fill)) {
         const fr = fill.fillRect ?? {};
         const width = emuToPx(element.width, scale) * (1 - (fr.l ?? 0) - (fr.r ?? 0));
         const height = emuToPx(element.height, scale) * (1 - (fr.t ?? 0) - (fr.b ?? 0));
         const vector = fill.mimeType === 'image/svg+xml' || preferVectorBlip(fill);
         if (!vector) push(
-          imagePlanKey(fill.imagePath, fill.duotone),
+          imagePlanKey(fill.imagePath, pixelTransform(fill)),
           rasterTargetOptions(width, height, dpr, fill.srcRect),
           fill.imagePath,
           fill.mimeType,
@@ -2015,8 +2028,8 @@ async function renderBackground(
       // §20.1.8.23 duotone recolour on the raster blip (issue #889): route
       // through the shared duotone cache (keyed by path + colours). No duotone ⇒
       // this is exactly the former `getCachedBitmapByPath` decode, byte-identical.
-      const planned = imagePlan && !fill.duotone
-        ? plannedRasterOptions(imagePlan, imagePlanKey(fill.imagePath, fill.duotone))
+      const planned = imagePlan && !pixelTransform(fill)
+        ? plannedRasterOptions(imagePlan, imagePlanKey(fill.imagePath, pixelTransform(fill)))
         : undefined;
       const sourceInspection = fill.tile
         ? await inspectCachedRasterSource(fill.imagePath, fill.mimeType, fetchImage)
@@ -2024,7 +2037,7 @@ async function renderBackground(
       const bitmap = await getCachedDuotoneBitmapByPath(
         fill.imagePath,
         fill.mimeType,
-        fill.duotone,
+        pixelTransform(fill),
         fetchImage,
         {
           widthPt: canvasW / scale / PT_TO_EMU,
@@ -5744,10 +5757,10 @@ async function renderPicture(
     const vector = preferVectorBlip(el) || dataIsSvg;
     const target = vector
       ? rawTarget
-      : imagePlan && !el.duotone
+      : imagePlan && !pixelTransform(el)
         ? plannedRasterOptions(
           imagePlan,
-          imagePlanKey(pictureResourcePath(el), vector ? undefined : el.duotone),
+          imagePlanKey(pictureResourcePath(el), vector ? undefined : pixelTransform(el)),
         )
         : undefined;
     const svgPixelLimit = target && 'maxRetainedPixels' in target
@@ -5782,7 +5795,7 @@ async function renderPicture(
         // SVG vector original has no readable pixel grid (matches xlsx).
         bitmap = dataIsSvg
           ? await getCachedSvgImageByPath(el.imagePath, fetchImage, svgOptions)
-          : await getCachedDuotoneBitmapByPath(el.imagePath, el.mimeType, el.duotone, fetchImage, {
+          : await getCachedDuotoneBitmapByPath(el.imagePath, el.mimeType, pixelTransform(el), fetchImage, {
               widthPt,
               heightPt,
               ...(target ?? {}),
@@ -5802,7 +5815,7 @@ async function renderPicture(
       bitmap = await getCachedDuotoneBitmapByPath(
         el.imagePath,
         el.mimeType,
-        el.duotone,
+        pixelTransform(el),
         fetchImage,
         { widthPt, heightPt, ...(target ?? {}), tiff },
       );
@@ -7192,10 +7205,10 @@ async function renderSlideLeased(
       const p = el as PictureElement;
       const pDataIsSvg = p.mimeType === 'image/svg+xml';
       const pVector = preferVectorBlip(p) || pDataIsSvg;
-      const planned = !pVector && !p.duotone
+      const planned = !pVector && !pixelTransform(p)
         ? plannedRasterOptions(
             imagePlan,
-            imagePlanKey(pictureResourcePath(p), p.duotone),
+            imagePlanKey(pictureResourcePath(p), pixelTransform(p)),
           )
         : undefined;
       const rawTarget = rasterTargetOptions(
@@ -7234,7 +7247,7 @@ async function renderSlideLeased(
         // Warm through the duotone cache so a §20.1.8.23 recolour picture warms
         // its recoloured variant (keyed by path + colours); no duotone ⇒ this is
         // the plain base-bitmap warm, byte-identical to before.
-        void getCachedDuotoneBitmapByPath(p.imagePath, p.mimeType, p.duotone, opts.fetchImage, {
+        void getCachedDuotoneBitmapByPath(p.imagePath, p.mimeType, pixelTransform(p), opts.fetchImage, {
           widthPt: warm.widthPt,
           heightPt: warm.heightPt,
           ...(target ?? {}),
@@ -7389,10 +7402,10 @@ async function renderSlideLeased(
         // native-sized, even when another chart stretches the same blip.
         const preserveNaturalSize = prior.preserveNaturalSize || usage.preserveNaturalSize;
         const hasSourceCrop = prior.hasSourceCrop || usage.hasSourceCrop;
-        const planned = preserveNaturalSize || fill.duotone
+        const planned = preserveNaturalSize || pixelTransform(fill)
           ? undefined
-          : plannedRasterOptions(imagePlan, imagePlanKey(fill.imagePath, fill.duotone));
-        const vector = !fill.duotone
+          : plannedRasterOptions(imagePlan, imagePlanKey(fill.imagePath, pixelTransform(fill)));
+        const vector = !pixelTransform(fill)
           && (fill.mimeType === 'image/svg+xml' || preferVectorBlip({
             svgImagePath: fill.svgImagePath,
             srcRect: hasSourceCrop ? true : null,
@@ -7490,12 +7503,12 @@ async function renderSlideLeased(
           : undefined;
         try {
           const decodeFallback = () => fill.mimeType === 'image/svg+xml'
-            ? fill.duotone ? Promise.resolve(null) : getCachedSvgImageByPath(fill.imagePath, fetchImage, {
+            ? pixelTransform(fill) ? Promise.resolve(null) : getCachedSvgImageByPath(fill.imagePath, fetchImage, {
                 ...(target ?? {}),
                 workerDecoder: opts.svgDecoder,
               })
             : getCachedDuotoneBitmapByPath(
-                fill.imagePath, fill.mimeType, fill.duotone, fetchImage,
+                fill.imagePath, fill.mimeType, pixelTransform(fill), fetchImage,
                 {
                   widthPt,
                   heightPt,
@@ -7509,7 +7522,7 @@ async function renderSlideLeased(
             svgImagePath: fill.svgImagePath,
             srcRect: hasSourceCrop ? true : null,
           };
-          if (!fill.duotone && preferVectorBlip(blip)) {
+          if (!pixelTransform(fill) && preferVectorBlip(blip)) {
             try {
               bitmap = await getCachedSvgImageByPath(blip.svgImagePath, fetchImage, {
                 ...(target ?? {}),
@@ -7537,13 +7550,13 @@ async function renderSlideLeased(
           preserveNaturalSize, hasSourceCrop,
         }],
       ) => {
-        const vector = !fill.duotone
+        const vector = !pixelTransform(fill)
           && (fill.mimeType === 'image/svg+xml' || preferVectorBlip({
             svgImagePath: fill.svgImagePath,
             srcRect: hasSourceCrop ? true : null,
           }));
-        const planned = !preserveNaturalSize && !fill.duotone
-          ? plannedRasterOptions(imagePlan, imagePlanKey(fill.imagePath, fill.duotone))
+        const planned = !preserveNaturalSize && !pixelTransform(fill)
+          ? plannedRasterOptions(imagePlan, imagePlanKey(fill.imagePath, pixelTransform(fill)))
           : undefined;
         const rawTarget = !preserveNaturalSize && targetWidthPx && targetHeightPx
           ? { targetWidthPx, targetHeightPx }
@@ -7555,13 +7568,13 @@ async function renderSlideLeased(
                 .dimensions ?? undefined
             : undefined;
           const fallback = () => fill.mimeType === 'image/svg+xml'
-            ? fill.duotone
+            ? pixelTransform(fill)
               ? Promise.resolve(null)
               : getCachedSvgImageByPath(fill.imagePath, fetchImage, {
                   ...(target ?? {}), workerDecoder: opts.svgDecoder,
                 })
             : getCachedDuotoneBitmapByPath(
-                fill.imagePath, fill.mimeType, fill.duotone, fetchImage,
+                fill.imagePath, fill.mimeType, pixelTransform(fill), fetchImage,
                 {
                   widthPt,
                   heightPt,
@@ -7572,7 +7585,7 @@ async function renderSlideLeased(
                 },
               );
           let image: SvgImageSource | null;
-          if (!fill.duotone && preferVectorBlip({
+          if (!pixelTransform(fill) && preferVectorBlip({
             svgImagePath: fill.svgImagePath,
             srcRect: hasSourceCrop ? true : null,
           })) {

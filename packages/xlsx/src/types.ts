@@ -473,6 +473,7 @@ export type {
   ChartErrBars,
   ChartManualLayout,
   LegendManualLayout,
+  BlipEffect,
 } from '@silurus/ooxml-core';
 export interface ChartAnchor {
   /** DrawingML document order; higher values paint above lower values. */

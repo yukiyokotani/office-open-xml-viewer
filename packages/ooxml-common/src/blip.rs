@@ -250,6 +250,110 @@ pub fn parse_blip_duotone<R: crate::color::ThemeResolver + ?Sized>(
     })
 }
 
+/// A CT_Blip pixel effect (ECMA-376 §20.1.8.13) that the renderers apply to
+/// the decoded raster, in document order. Only the effects with an
+/// established rendering are carried; `Duotone` marks where the blip's
+/// `<a:duotone>` (resolved separately as [`Duotone`]) sits in that order.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum BlipEffect {
+    /// §20.1.8.34 `<a:grayscl>`.
+    Grayscale,
+    /// §20.1.8.11 `<a:biLevel thresh>`, threshold as a 0–1 fraction.
+    #[serde(rename_all = "camelCase")]
+    BiLevel { thresh: f64 },
+    /// §20.1.8.16 `<a:clrChange>`: colours as 6-char uppercase hex (no `#`)
+    /// with their `<a:alpha>` as 0–1 fractions; `use_alpha` is `@useA`.
+    #[serde(rename_all = "camelCase")]
+    ColorChange {
+        from: String,
+        from_alpha: f64,
+        to: String,
+        to_alpha: f64,
+        use_alpha: bool,
+    },
+    /// Position of the blip's `<a:duotone>` among the effects.
+    Duotone,
+}
+
+/// Parse the ordered CT_Blip pixel effects of a `<a:blipFill>`'s `<a:blip>`.
+/// Returns an empty list unless the blip carries grayscl, biLevel or
+/// clrChange, so a picture with at most a duotone keeps its existing
+/// duotone-only rendering path. A malformed effect (missing threshold or an
+/// unresolvable colour) is kept out of the list rather than half-applied.
+pub fn parse_blip_effects<R: crate::color::ThemeResolver + ?Sized>(
+    blip_fill: Node<'_, '_>,
+    resolver: &R,
+    tint_mode: crate::color::TintMode,
+) -> Vec<BlipEffect> {
+    let Some(blip) = blip_fill
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "blip")
+    else {
+        return Vec::new();
+    };
+    let color = |container: Option<Node<'_, '_>>| -> Option<(String, f64)> {
+        let element = container?.children().find(|n| n.is_element())?;
+        let source = crate::color::color_source_from_element(element)?;
+        // The shared resolver appends the resolved alpha transforms as a
+        // trailing byte (RRGGBBAA) when the colour is not opaque.
+        let hex = crate::color::resolve_color_source(source, resolver, tint_mode)?.to_uppercase();
+        let alpha = match hex.len() {
+            6 => 1.0,
+            8 => f64::from(u8::from_str_radix(&hex[6..8], 16).ok()?) / 255.0,
+            _ => return None,
+        };
+        Some((hex[..6].to_owned(), alpha))
+    };
+    let mut effects = Vec::new();
+    let mut pixel = false;
+    for node in blip.children().filter(|n| n.is_element()) {
+        let effect = match node.tag_name().name() {
+            "grayscl" => Some(BlipEffect::Grayscale),
+            "biLevel" => node
+                .attribute("thresh")
+                .and_then(crate::units::drawingml_percentage_to_fraction)
+                .map(|thresh| BlipEffect::BiLevel {
+                    thresh: thresh.clamp(0.0, 1.0),
+                }),
+            "clrChange" => {
+                let child = |name: &str| {
+                    node.children()
+                        .find(|n| n.is_element() && n.tag_name().name() == name)
+                };
+                match (color(child("clrFrom")), color(child("clrTo"))) {
+                    (Some((from, from_alpha)), Some((to, to_alpha))) => {
+                        Some(BlipEffect::ColorChange {
+                            from,
+                            from_alpha,
+                            to,
+                            to_alpha,
+                            use_alpha: node
+                                .attribute("useA")
+                                .is_some_and(|v| v == "1" || v == "true"),
+                        })
+                    }
+                    _ => None,
+                }
+            }
+            "duotone" => {
+                effects.push(BlipEffect::Duotone);
+                continue;
+            }
+            _ => continue,
+        };
+        if let Some(effect) = effect {
+            pixel = true;
+            effects.push(effect);
+        }
+    }
+    if pixel {
+        effects
+    } else {
+        Vec::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -478,6 +582,55 @@ mod tests {
             "clr2 should be pink (R largest): {}",
             duo.clr2
         );
+    }
+
+    #[test]
+    fn parse_blip_effects_keeps_document_order_and_duotone_position() {
+        let xml = format!(
+            r#"<a:blipFill xmlns:a="{A_NS}">
+                 <a:blip r:embed="rId1" xmlns:r="{R_NS}">
+                   <a:clrChange><a:clrFrom><a:srgbClr val="ffffff"/></a:clrFrom>
+                     <a:clrTo><a:srgbClr val="FFFFFF"><a:alpha val="0"/></a:srgbClr></a:clrTo></a:clrChange>
+                   <a:duotone><a:prstClr val="black"/><a:srgbClr val="FF0000"/></a:duotone>
+                   <a:grayscl/><a:biLevel thresh="50000"/><a:alphaModFix amt="50000"/>
+                 </a:blip>
+               </a:blipFill>"#
+        );
+        let doc = Document::parse(&xml).unwrap();
+        let effects = parse_blip_effects(
+            doc.root_element(),
+            &DuoResolver,
+            crate::color::TintMode::PowerPointLinear,
+        );
+        assert_eq!(
+            effects,
+            vec![
+                BlipEffect::ColorChange {
+                    from: "FFFFFF".into(),
+                    from_alpha: 1.0,
+                    to: "FFFFFF".into(),
+                    to_alpha: 0.0,
+                    use_alpha: false,
+                },
+                BlipEffect::Duotone,
+                BlipEffect::Grayscale,
+                BlipEffect::BiLevel { thresh: 0.5 },
+            ]
+        );
+        assert_eq!(
+            serde_json::to_value(&effects[3]).unwrap(),
+            serde_json::json!({"type": "biLevel", "thresh": 0.5})
+        );
+        // A duotone alone keeps the duotone-only path (no effect list).
+        let duotone_only = format!(
+            r#"<a:blipFill xmlns:a="{A_NS}"><a:blip xmlns:r="{R_NS}" r:embed="rId1"><a:duotone><a:prstClr val="black"/><a:srgbClr val="FF0000"/></a:duotone></a:blip></a:blipFill>"#
+        );
+        assert!(parse_blip_effects(
+            Document::parse(&duotone_only).unwrap().root_element(),
+            &DuoResolver,
+            crate::color::TintMode::PowerPointLinear
+        )
+        .is_empty());
     }
 
     #[test]

@@ -105,6 +105,7 @@ mod tests {
             tile: None,
             alpha: None,
             duotone: None,
+            blip_effects: Vec::new(),
         }
     }
 

@@ -19,7 +19,7 @@ export type {
 // All positions and sizes are in EMUs (English Metric Units).
 // 914400 EMU = 1 inch, 12700 EMU = 1 pt
 
-import type { Bullet as CoreBullet, Fill, Stroke, TextBody as CoreTextBody, Paragraph as CoreParagraph, Shadow, Glow, SoftEdge, Reflection, PathCmd, ChartModel, Duotone } from '@silurus/ooxml-core';
+import type { Bullet as CoreBullet, Fill, Stroke, TextBody as CoreTextBody, Paragraph as CoreParagraph, Shadow, Glow, SoftEdge, Reflection, PathCmd, ChartModel, Duotone, BlipEffect } from '@silurus/ooxml-core';
 
 /**
  * Picture bullet — ECMA-376 §21.1.2.4.2 `<a:buBlip><a:blip r:embed>`. The
@@ -635,6 +635,12 @@ export interface PictureElement {
    * luminance ramp, and caches the recoloured bitmap under a colour-suffixed key.
    */
   duotone?: Duotone;
+  /**
+   * CT_Blip pixel effects (§20.1.8.13: grayscl, biLevel, clrChange) in
+   * document order, with a `duotone` entry marking where {@link duotone}
+   * applies. Absent when the blip carries none of them.
+   */
+  blipEffects?: BlipEffect[];
   /**
    * `<p:spPr><a:custGeom>` clipping path. Same `PathCmd` model as
    * `ShapeElement.custGeom` (one entry per `<a:path>`; coords normalized
