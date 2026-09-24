@@ -2280,19 +2280,31 @@ be closed before an experimental release.
 
 | Area | Gap | Samples |
 | --- | --- | --- |
-| XLS | BIFF8 embedded charts and chart sheets are not projected into `ChartModel` | 127 of 139 |
+| XLS | ~~BIFF8 embedded charts are not projected into `ChartModel`~~ Projected (89f3db02, f7dcb0fa, 06da6a7a); chart sheets and the items below remain | 127 of 139 |
 | XLS | EMF pictures written by GDI+ (EMF+ comment records, short EMR_EOF and a record count off by one) are rejected by the passive validator. Core rendering also treats EMF+ as out of scope, so shared EMF+ drawing is needed for all formats | 3 |
 | XLS | Chart and picture anchors need the Normal font's digit width. The browser default measures only an installed face, so they are omitted when Office fonts such as Calibri are not installed; shared reference font metrics are needed | all with drawings |
 | XLS | Chart text omits TextPropsStream (its checksum is not implemented), Fbi font autoscaling, the outline Excel draws around inverted negative points, plot-area layout, drop/high-low lines and 3-D walls | most chart samples |
-| XLS | Extended colors (XFExt theme/tint) fall back to palette approximations | about 6 |
+| XLS | ~~Extended colors (XFExt theme/tint) fall back to palette approximations~~ Resolved: tints (b09eae6a) and theme 0-3 in Excel's lt1/dk1/lt2/dk2 order (0adbc794) | about 6 |
 | XLS | Table (ListObject) styles, conditional-format data bars/icons and pivot styling are absent | about 5 |
 | XLS | Formula text is not decompiled from Ptg tokens, so volatile functions are not recalculated as Excel does at export | 2 |
 | XLS | Clip-art pictures, text boxes, strikethrough and one vertical merge are missing | 1 to 3 each |
 | PPT | Only seven MS-ODRAW shape types map to presets; other autoshapes render as unfilled rectangles | several |
 | PPT | Native/OLE charts are missing | 3 |
-| PPT | Rotation by multiples of 90 degrees and combined flips use the wrong bounds or order | 1 |
-| PPT | Slide gradient backgrounds, bullets, letter spacing and autofit are missing | several |
+| PPT | ~~Rotation by multiples of 90 degrees and combined flips use the wrong bounds or order~~ Resolved from the 120-case PowerPoint control (aa9dc5c1) | 1 |
+| PPT | ~~Slide gradient backgrounds~~ linear/scaled/two-colour/translucent shades resolved (95b74d19); path (5, 6) and title (8) shades now fail closed. Bullets, letter spacing and autofit are missing | several |
+| PPT | Custom geometry with per-path fill/stroke flags is rejected; the PPTX model has no per-path `fill`/`stroke` (ECMA-376 §20.1.9.15), a generic PPTX gap | 1 |
+| PPT | Unmapped shape types without text are dropped silently and with text lose their fill; must fail closed once the preset mapping lands | several |
+| PPT | Gradients on rotated shapes (or inside rotated/flipped groups) are replaced by the solid fill colour | several |
 | PPT | Implicit paragraph margin/indent and percentage spacing are rejected | 12 of 34 load failures |
 | PPT | A spurious striped artifact is drawn near a slide edge | 1 |
 | DOC | 55 of 59 samples are rejected (formatting, notes, fields, positioned tables, drawings, header pictures, non-PNG/JPEG images, list ancestry, FIB version, language ID) | 55 |
 | DOC | Picture washout/brightness and space-before after a page break differ from Word | 2 |
+
+PowerPoint 2007+ also stores a `metroBlob` (MS-ODRAW 2.3.4.41, an OPC
+package with the shape's DrawingML) on most shapes. The specification says it
+SHOULD be ignored, and a PowerPoint 16 control agrees for the case that
+matters: with a shape's binary adjust and fill edited but its metroBlob kept,
+PowerPoint's PDF follows the binary, identically to a copy whose metroBlob was
+removed. The direct PPT path therefore renders the binary properties only.
+metroBlob contents are used solely as analysis evidence (binary-to-DrawingML
+pairs), never for rendering.
