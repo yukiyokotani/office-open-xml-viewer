@@ -24,7 +24,8 @@ export interface OfficeFontFallbackRoute {
 }
 
 export interface LoadedOfficeFontFallbacks {
-  /** One retention per loaded tuple. Release when the owning document closes. */
+  /** One retention per loaded local source (aliases may share it). Release when
+   * the owning document closes. */
   faces: FontFace[];
   /** Normalized family key, with :weight:style for non-regular tuples. */
   routes: Record<string, OfficeFontFallbackRoute>;
@@ -36,6 +37,12 @@ type Tuple = Readonly<{
   style: 'normal' | 'italic';
   localNames: readonly string[];
 }>;
+
+// Resource-governance limits for optional local() preflight, not Office layout
+// coefficients. A document with hundreds of authored faces must not block its
+// first paint on one 15-second FontFace.load() ceiling per four-face batch.
+const MAX_PREFLIGHT_SOURCES = 32;
+const PREFLIGHT_DEADLINE_MS = 8_000;
 
 function tupleFor(request: OfficeFontFallbackRequest): Tuple | undefined {
   const family = request.family.trim();
@@ -79,7 +86,19 @@ export async function loadOfficeFontFallbacks(
   requests: readonly OfficeFontFallbackRequest[],
   targetFontSet: FontFaceSet | null = activeFontSet(),
 ): Promise<LoadedOfficeFontFallbacks> {
+  if (!targetFontSet) return { faces: [], routes: {} };
+  // An application-declared @font-face for the authored family belongs to the
+  // browser's normal CSS resolution. Do not replace it with an isolated system
+  // local() alias merely because a catalog entry shares its family name.
+  const declared = new Set<string>();
+  if (typeof targetFontSet[Symbol.iterator] === 'function') {
+    for (const face of targetFontSet) {
+      const family = face.family.trim().replace(/^(['"])(.*)\1$/u, '$2');
+      declared.add(normalizeLocalFontMetricFamily(family));
+    }
+  }
   const tuples = [...new Map(requests.map(tupleFor).filter((tuple): tuple is Tuple => !!tuple)
+    .filter((tuple) => !declared.has(normalizeLocalFontMetricFamily(tuple.family)))
     .map((tuple) => [routeKey(tuple), tuple])).values()];
   if (tuples.length === 0) return { faces: [], routes: {} };
   // A document can name many catalogued faces. Keep failed local() loads from
@@ -92,25 +111,36 @@ export async function loadOfficeFontFallbacks(
     group.push(tuple);
     groups.set(signature, group);
   }
-  const jobs = [...groups.values()];
+  const jobs = [...groups.values()].slice(0, MAX_PREFLIGHT_SOURCES);
   const loaded = new Array<Awaited<ReturnType<typeof loadLocalFontMetrics>>>(jobs.length);
   let nextJob = 0;
+  let accepting = true;
   const workers = Array.from({ length: Math.min(4, jobs.length) }, async () => {
-    while (nextJob < jobs.length) {
+    while (accepting && nextJob < jobs.length) {
       const index = nextJob++;
-      loaded[index] = await loadLocalFontMetrics(jobs[index].map((tuple) => ({
+      const result = await loadLocalFontMetrics(jobs[index].map((tuple) => ({
         family: tuple.family, localNames: tuple.localNames,
         weight: tuple.weight, style: tuple.style,
       })), targetFontSet);
+      if (accepting) loaded[index] = result;
+      else unloadLocalFontMetrics(result.faces);
     }
   });
-  const settled = await Promise.allSettled(workers);
-  const failure = settled.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+  let deadline: ReturnType<typeof setTimeout> | undefined;
+  const settled = await Promise.race([
+    Promise.allSettled(workers),
+    new Promise<null>((resolve) => {
+      deadline = setTimeout(() => resolve(null), PREFLIGHT_DEADLINE_MS);
+    }),
+  ]);
+  if (deadline !== undefined) clearTimeout(deadline);
+  accepting = false;
+  const failure = settled?.find((result): result is PromiseRejectedResult => result.status === 'rejected');
   if (failure) {
     unloadLocalFontMetrics(loaded.flatMap((result) => result?.faces ?? []));
     throw failure.reason;
   }
-  const metrics = Object.assign({}, ...loaded.map((result) => result.metrics)) as Record<string, ResolvedFontMetric>;
+  const metrics = Object.assign({}, ...loaded.flatMap((result) => result ? [result.metrics] : [])) as Record<string, ResolvedFontMetric>;
   const routes: Record<string, OfficeFontFallbackRoute> = {};
   for (const tuple of tuples) {
     const key = routeKey(tuple);
@@ -123,7 +153,7 @@ export async function loadOfficeFontFallbacks(
       metric: { ...metric, sourceIdentity: resourceIdentity },
     };
   }
-  return { faces: loaded.flatMap((result) => result.faces), routes };
+  return { faces: loaded.flatMap((result) => result?.faces ?? []), routes };
 }
 
 export function unloadOfficeFontFallbacks(faces: Iterable<FontFace>): void {

@@ -1,6 +1,7 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { _resetFontRegistryForTests } from './font-registry.js';
 import { loadOfficeFontFallbacks, unloadOfficeFontFallbacks } from './office-fallback.js';
+import referenceData from './reference-font-metrics-data.json';
 
 const globals = globalThis as unknown as Record<string, unknown>;
 const originals = Object.fromEntries(
@@ -9,7 +10,7 @@ const originals = Object.fromEntries(
 
 type Face = { family: string; source: string | ArrayBuffer; status: FontFaceLoadStatus };
 
-function fontSet(installed: readonly string[], delayMs = 0) {
+function fontSet(installed: readonly string[], delayMs = 0, declared: readonly string[] = []) {
   const added: Face[] = [];
   const deleted: Face[] = [];
   let active = 0;
@@ -17,6 +18,10 @@ function fontSet(installed: readonly string[], delayMs = 0) {
   const set = {
     add(face: Face) { added.push(face); },
     delete(face: Face) { deleted.push(face); return true; },
+    *[Symbol.iterator]() {
+      for (const family of declared) yield { family, source: '', status: 'loaded' };
+      for (const face of added) if (!deleted.includes(face)) yield face;
+    },
   } as unknown as FontFaceSet;
   class FakeFace implements Face {
     status: FontFaceLoadStatus = 'unloaded';
@@ -45,6 +50,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   for (const [name, value] of Object.entries(originals)) {
     if (value === undefined) delete globals[name];
     else globals[name] = value;
@@ -159,6 +165,53 @@ describe('loadOfficeFontFallbacks', () => {
     expect(added.length).toBeGreaterThan(4);
     expect(peak()).toBeGreaterThan(1);
     expect(peak()).toBeLessThanOrEqual(4);
+    expect(deleted).toEqual(added);
+  });
+
+  it('leaves an application-declared authored family to normal CSS resolution', async () => {
+    const { set, added } = fontSet(['TimesNewRomanPSMT'], 0, ['"Times New Roman"']);
+    const result = await loadOfficeFontFallbacks([{ family: 'Times New Roman' }], set);
+    expect(result).toEqual({ faces: [], routes: {} });
+    expect(added).toEqual([]);
+  });
+
+  it('caps the number of local source probes for a font-heavy document', async () => {
+    const { set, added, deleted } = fontSet([]);
+    const families = [...new Set(referenceData.profiles
+      .filter((profile) => profile.weight === 400 && profile.style === 'normal')
+      .map((profile) => profile.family))].slice(0, 80);
+    await loadOfficeFontFallbacks(families.map((family) => ({ family })), set);
+    expect(families.length).toBe(80);
+    expect(added.length).toBeGreaterThan(0);
+    expect(added.length).toBeLessThanOrEqual(32);
+    expect(deleted).toEqual(added);
+  });
+
+  it('returns at the document deadline and releases a face that finishes later', async () => {
+    vi.useFakeTimers();
+    const added: Face[] = [];
+    const deleted: Face[] = [];
+    let finish!: () => void;
+    class DeferredFace implements Face {
+      status: FontFaceLoadStatus = 'unloaded';
+      constructor(readonly family: string, readonly source: string | ArrayBuffer) {}
+      load(): Promise<this> {
+        return new Promise((resolve) => {
+          finish = () => { this.status = 'loaded'; resolve(this); };
+        });
+      }
+    }
+    globals.FontFace = DeferredFace;
+    const set = {
+      add(face: Face) { added.push(face); },
+      delete(face: Face) { deleted.push(face); return true; },
+    } as unknown as FontFaceSet;
+    const pending = loadOfficeFontFallbacks([{ family: 'Calibri' }], set);
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(await pending).toEqual({ faces: [], routes: {} });
+    expect(added).toHaveLength(1);
+    finish();
+    await vi.advanceTimersByTimeAsync(0);
     expect(deleted).toEqual(added);
   });
 });
