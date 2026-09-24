@@ -599,6 +599,7 @@ impl<'a> Formatting<'a> {
         if interpret_table_styles {
             native_geometry.begin_source();
         }
+        #[cfg(feature = "direct-doc")]
         let mut piece_started = false;
         sprm::paragraph_properties_appended(
             direct,
@@ -606,22 +607,20 @@ impl<'a> Formatting<'a> {
             self.data,
             &mut self.budget,
             piece_filter,
-            |code, operand, _, from_piece| {
+            |code, operand, _, _from_piece| {
                 #[cfg(feature = "direct-doc")]
-                if interpret_table_styles && from_piece && !piece_started {
+                if interpret_table_styles && _from_piece && !piece_started {
                     native_geometry.begin_source();
                     piece_started = true;
                 }
-                // MS-DOC 2.4.6.1 step 5 filters the top-level complex PCD
-                // before first-position indirection is evaluated. Nested
-                // PTableProps/PHugePapx data remains unfiltered.
-                if interpret_table_styles && from_piece && (code >> 10) & 7 == 5 {
-                    // Retain table facts reached through paragraph data,
-                    // but fail native admission for this still-unverified case:
-                    // a reachable wrapped table property from a complex PCD
-                    // with no earlier direct replacement.
-                    self.unsupported_table_properties = true;
-                }
+                // Piece table SPRMs arrive here only as top-level piece Prls:
+                // piece PTableProps/PHugePapx are never followed (see
+                // `sprm::paragraph_properties_appended`). Word applies them to
+                // the row mark like direct Prls, so the same per-code appliers
+                // and admission gates below decide support. A piece TDefTable
+                // after a direct chain that set TDxaCol overrides replaced
+                // those widths in the one native control observed; geometry
+                // keeps that cross-source case gated until it is generalized.
                 #[cfg(feature = "direct-doc")]
                 if interpret_table_styles {
                     properties.row.reset_row_properties_at_tistd(code);
@@ -3932,56 +3931,8 @@ mod tests {
             .contains("cyclic"));
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
-    fn native_complex_paragraph_filter_controls_huge_papx_first_position() {
-        let data = test_prc_data(
-            [
-                test_prl(0x2403, &[2]),
-                test_prl(0x2407, &[0]),
-                test_prl(0x2407, &[0]),
-                test_prl(0x2407, &[0]),
-            ]
-            .concat(),
-        );
-        let mut formatting = empty();
-        formatting.data = Box::leak(data.into_boxed_slice());
-
-        let filtered_then_huge = [
-            test_prl(0xd608, &[1, 0]),
-            test_prl(0x6646, &0u32.to_le_bytes()),
-            test_prl(0x2403, &[1]),
-        ]
-        .concat();
-        let mut props = paragraph::Properties::default();
-        formatting
-            .apply_paragraph_with_filter(
-                &mut props,
-                &filtered_then_huge,
-                sprm::TopLevelFilter::Paragraph,
-            )
-            .unwrap();
-        assert!(props.xml().contains("w:val=\"right\""));
-
-        let paragraph_then_huge = [
-            test_prl(0x2407, &[0]),
-            test_prl(0x6646, &u32::MAX.to_le_bytes()),
-            test_prl(0x2403, &[1]),
-        ]
-        .concat();
-        let mut props = paragraph::Properties::default();
-        formatting
-            .apply_paragraph_with_filter(
-                &mut props,
-                &paragraph_then_huge,
-                sprm::TopLevelFilter::Paragraph,
-            )
-            .unwrap();
-        assert!(props.xml().contains("w:val=\"center\""));
-    }
-
-    #[test]
-    fn direct_ptableprops_suppresses_appended_complex_piece_properties() {
+    fn piece_table_properties_apply_after_direct_ptableprops_data() {
         let data = test_prc_data(
             [
                 test_prl(0x2416, &[1]),
@@ -3997,7 +3948,7 @@ mod tests {
             vec![0, 0],
             test_prl(0x646b, &0u32.to_le_bytes()),
             // Compatibility TDefTable for readers that ignore PTableProps.
-            // Processing PTableProps replaces this tail per MS-DOC 2.6.2.
+            // Processing PTableProps replaces this direct tail (MS-DOC 2.6.2).
             test_prl(0xd608, &[6, 0, 1, 0, 0, 0xd0, 7]),
         ]
         .concat();
@@ -4030,11 +3981,13 @@ mod tests {
             test_prl(0x3404, &[0]),
         ]
         .concat();
+        // The piece is not part of the replaced direct array: Word applies it
+        // after the PrcData (see `sprm::paragraph_properties_appended`).
         let overridden = formatting.table_properties(109, 1, &[&piece]).unwrap();
-        assert_eq!(overridden.row.cells[0].width, 1000);
-        assert_eq!(overridden.row.table_style, Some(4));
-        assert_eq!(overridden.row.table_style_options, Some(0x20));
-        assert!(overridden.row.header);
+        assert_eq!(overridden.row.cells[0].width, 1500);
+        assert_eq!(overridden.row.table_style, Some(9));
+        assert_eq!(overridden.row.table_style_options, Some(0x0340));
+        assert!(!overridden.row.header);
 
         let neighbor = formatting.table_properties(110, 0, &[]).unwrap();
         assert_eq!(neighbor.row.cells[0].width, 400);
@@ -4071,50 +4024,6 @@ mod tests {
         let properties = xml.table_properties(109, 0, &[]).unwrap();
         assert!(properties.row.cells[0].prepared_shading.is_none());
         assert!(xml.unsupported_table_properties);
-    }
-
-    #[cfg(feature = "direct-doc")]
-    #[test]
-    fn native_complex_piece_applies_only_paragraph_sprms_until_table_props_data() {
-        let papx = [vec![0, 0], test_prl(0x2416, &[1]), test_prl(0x2417, &[1])].concat();
-        let definition = test_prl(0xd608, &[6, 0, 1, 0, 0, 0xd0, 7]);
-        let width = test_prl(0x7623, &[0, 1, 0xdc, 5]);
-
-        let raw_piece = [definition.clone(), width.clone()].concat();
-        let mut raw = with_direct_paragraph(&papx);
-        raw.configure_table_styles(0x0112, true);
-        let properties = raw.table_properties_native(109, 1, &[&raw_piece]).unwrap();
-        assert!(properties.row.cells.is_empty());
-        assert!(!raw.unsupported_table_properties);
-
-        let data = test_prc_data(
-            [
-                definition.clone(),
-                width,
-                test_prl(0x2407, &[0]),
-                test_prl(0x2407, &[0]),
-            ]
-            .concat(),
-        );
-        let wrapped_piece = test_prl(0x646b, &0u32.to_le_bytes());
-        let mut wrapped = with_direct_paragraph(&papx);
-        wrapped.data = Box::leak(data.clone().into_boxed_slice());
-        wrapped.configure_table_styles(0x0112, true);
-        let properties = wrapped
-            .table_properties_native(109, 1, &[&wrapped_piece])
-            .unwrap();
-        assert_eq!(properties.row.cells[0].width, 1500);
-        assert!(wrapped.unsupported_table_properties);
-
-        let nonfirst_huge = [definition, test_prl(0x6646, &0u32.to_le_bytes())].concat();
-        let mut first_huge = with_direct_paragraph(&papx);
-        first_huge.data = Box::leak(data.into_boxed_slice());
-        first_huge.configure_table_styles(0x0112, true);
-        let properties = first_huge
-            .table_properties_native(109, 1, &[&nonfirst_huge])
-            .unwrap();
-        assert!(properties.row.cells.is_empty());
-        assert!(!first_huge.unsupported_table_properties);
     }
 
     #[cfg(feature = "direct-doc")]
@@ -4640,16 +4549,17 @@ mod tests {
 
     #[test]
     fn table_properties_follow_mixed_data_indirection_and_reject_bad_records() {
-        // A: apply in-table, ignore the non-first PHugePapx, then follow
-        // PTableProps to B. B: follow its first PHugePapx to C and ignore its
-        // tail. Every complete PrcData has cbGrpprl >= 10.
+        // Direct PTableProps -> A. A: follow its first PTableProps to B and
+        // ignore its tail. B: follow its first PHugePapx to C and ignore its
+        // tail. C: apply, ignoring non-first redirects. Every complete PrcData
+        // has cbGrpprl >= 10.
         let offset_b = 17u32;
         let offset_c = 29u32;
         let record_a = test_prc_data(
             [
-                test_prl(0x2416, &[1]),
-                test_prl(0x6646, &u32::MAX.to_le_bytes()),
                 test_prl(0x646b, &offset_b.to_le_bytes()),
+                test_prl(0x2416, &[0]),
+                test_prl(0x6646, &u32::MAX.to_le_bytes()),
             ]
             .concat(),
         );
@@ -4662,7 +4572,10 @@ mod tests {
         );
         let record_c = test_prc_data(
             [
+                test_prl(0x2416, &[1]),
                 test_prl(0x2417, &[1]),
+                test_prl(0x6646, &u32::MAX.to_le_bytes()),
+                test_prl(0x646b, &u32::MAX.to_le_bytes()),
                 test_prl(0x7621, &[0, 1, 0xe8, 3]),
                 test_prl(0x3404, &[1]),
             ]

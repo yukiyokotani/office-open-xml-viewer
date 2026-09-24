@@ -285,34 +285,52 @@ def _read_prl(data, position, end, stream, budget):
 
 def _trace_properties(streams, stream, start, end, budget,
                       filter_initial_paragraph=False, appended=None):
+    """Trace a direct array (and its PrcData chain), then the piece array.
+
+    Mirrors `sprm::paragraph_properties_appended`: direct PHugePapx and
+    PTableProps are followed only as the first Prl of their array; piece
+    properties follow the whole direct chain and never follow either redirect;
+    piece Prls outside paragraph/table SPRM groups are not applied.
+    """
     if stream not in streams:
         raise ProbeError(f"missing stream {stream}")
     _range(streams[stream], start, end - start, "property range outside stream")
     trace = []
-    current_stream, current_start, current_end = stream, start, end
+    if filter_initial_paragraph:
+        current, piece_pending, in_piece = None, (stream, start, end), False
+    else:
+        current, piece_pending, in_piece = (stream, start, end), appended, False
     visited = set()
-    filter_paragraph = filter_initial_paragraph
-    appended_pending = appended
-    first = True
     while True:
+        if current is None:
+            if piece_pending is None:
+                return trace
+            current, piece_pending, in_piece = piece_pending[:3], None, True
+        current_stream, current_start, current_end = current
         data = streams[current_stream]
         budget.array(current_end - current_start)
         position = current_start
         reference = None
+        first = True
         while position < current_end:
             item, next_position, code, operand = _read_prl(
                 data, position, current_end, current_stream, budget
             )
-            is_paragraph = ((code >> 10) & 7) == 1
-            if filter_paragraph and not is_paragraph:
+            trace.append(item)
+            redirect = code in (P_TABLE_PROPS, PHUGE_PAPX)
+            if in_piece and redirect:
+                item["applied"] = False
+                item["reason"] = "complex-PCD-redirect"
+            elif in_piece and ((code >> 10) & 7) not in (1, 5):
                 item["applied"] = False
                 item["reason"] = "non-paragraph-complex-PCD"
-            if code == PHUGE_PAPX and not first:
+            elif redirect and not first:
                 item["applied"] = False
-                item["reason"] = "non-first-PHugePapx"
-            trace.append(item)
-            if (not filter_paragraph or is_paragraph) and (
-                    code == P_TABLE_PROPS or (code == PHUGE_PAPX and first)):
+                item["reason"] = (
+                    "non-first-PTableProps" if code == P_TABLE_PROPS
+                    else "non-first-PHugePapx"
+                )
+            elif redirect:
                 reference = _u32(operand, 0, "short paragraph data reference")
                 item["followed"] = True
                 if next_position < current_end:
@@ -332,16 +350,12 @@ def _trace_properties(streams, stream, start, end, budget,
                         ),
                     })
                 break
-            position = next_position
-            if not filter_paragraph or is_paragraph:
+            else:
                 first = False
+            position = next_position
         if reference is None:
-            if appended_pending is None:
-                return trace
-            current_stream, current_start, current_end, filter_paragraph = appended_pending
-            appended_pending = None
+            current = None
             continue
-        appended_pending = None
         if reference in visited:
             raise ProbeError("cyclic paragraph data chain")
         if len(visited) >= MAX_TRACE_DEPTH:
@@ -368,13 +382,11 @@ def _trace_properties(streams, stream, start, end, budget,
             "grpprl_offset": group_start,
             "grpprl_end": group_end,
         })
-        current_stream, current_start, current_end = "Data", group_start, group_end
-        filter_paragraph = False
-        first = True
+        current = ("Data", group_start, group_end)
 
 
 def _trace_direct_and_piece_properties(streams, direct, piece, budget):
-    """Trace direct PAPX plus eligible Pcd.Prm1 as one MS-DOC 2.4.6.1 array."""
+    """Trace direct PAPX, then eligible Pcd.Prm1 properties (MS-DOC 2.4.6.1)."""
     if direct is None:
         stream, start, end = piece
         return _trace_properties(
@@ -382,7 +394,7 @@ def _trace_direct_and_piece_properties(streams, direct, piece, budget):
         )
     return _trace_properties(
         streams, *direct, budget,
-        appended=(*piece, True) if piece is not None else None,
+        appended=piece,
     )
 
 
@@ -853,10 +865,10 @@ class AcquiredPropertyTraceSession:
             trace = list(self._acquired_trace(direct_key, piece_key))
         else:
             trace = [] if direct_key is None else list(self._trace(direct_key))
-            if not any(item.get("followed") for item in trace):
-                prm0_entry = _paragraph_prm0_entry(piece, self.trace_budget)
-                if prm0_entry is not None:
-                    trace.append(prm0_entry)
+            # Prm0 follows the whole direct chain, like Prm1 properties.
+            prm0_entry = _paragraph_prm0_entry(piece, self.trace_budget)
+            if prm0_entry is not None:
+                trace.append(prm0_entry)
         self.acquire_budget.charge(len(trace))
 
         depth, _ = _active_operand(trace, 0x6649)

@@ -13,7 +13,8 @@ pub enum TopLevelFilter {
     Paragraph,
 }
 
-/// PHugePapx/PTableProps replace the remaining property array with PrcData.
+/// Traverse one property array. `Paragraph` treats `bytes` as piece properties
+/// (see `paragraph_properties_appended`); `All` treats them as a direct array.
 /// Share the traversal so paragraph layout and table structure see the same data.
 pub fn paragraph_properties<'a>(
     bytes: &'a [u8],
@@ -36,13 +37,35 @@ pub fn paragraph_properties<'a>(
     )
 }
 
-/// Traverse direct PAPX and appended Pcd.Prm properties as one logical array.
+/// Traverse direct PAPX properties, then the paragraph's Pcd.Prm properties.
 ///
-/// [MS-DOC] 2.4.6.1 steps 4-5 append eligible piece properties to the direct
-/// grpprl before it is applied. Consequently an earlier PTableProps or eligible
-/// PHugePapx replacement also discards the appended tail under section 2.6.2.
+/// Normative basis: [MS-DOC] 2.4.6.1 steps 4-5 place the piece properties after
+/// the direct grpprl, and 2.6.2 lets sprmPHugePapx/sprmPTableProps replace the
+/// rest of "the array that contained" them with a Data-stream PrcData
+/// (2.9.210); sprmPHugePapx is only honored as the first Prl.
+///
+/// Observed Word 16.113 (macOS) behavior, from native controls that each
+/// changed one Word-saved DOC row mark or table-cell paragraph and compared
+/// Word's PDF plus its saved DOCX (cell widths, table style, alignment), with
+/// a sprmPJc complex-piece witness proving the split pieces were active:
+/// - A direct sprmPTableProps is followed only as the first Prl of the direct
+///   grpprl. A later one is ignored and the following Prls still apply, the
+///   same rule 2.6.2 states for sprmPHugePapx. PrcData chains restart the
+///   first-position rule.
+/// - Piece properties (Prm1 and Prm0) are not part of the replaced array:
+///   they still apply after a direct first-position sprmPTableProps and its
+///   PrcData (a paragraph jc from either PRM form and a row TDefTable/TIstd
+///   survived).
+/// - Piece sprmPTableProps/sprmPHugePapx are never followed, even when they
+///   are the first Prl of the paragraph (empty direct PAPX, BxPap.bOffset 0).
+///   Word ignores them and still applies the following piece Prls.
+/// - With `TopLevelFilter::Paragraph`, piece table SPRMs (sgc 5) are kept with
+///   paragraph SPRMs (sgc 1): Word applied a piece TDefTable and TIstd to the
+///   row mark. Other groups (character, picture, section) stay excluded, as in
+///   2.4.6.1 step 5. Simple Prm0 values only encode paragraph/character SPRMs.
+/// The last callback argument reports whether the Prl came from the piece.
 pub fn paragraph_properties_appended<'a>(
-    mut bytes: &'a [u8],
+    direct: &'a [u8],
     appended: Option<&'a [u8]>,
     data: &'a [u8],
     budget: &mut Budget,
@@ -50,63 +73,66 @@ pub fn paragraph_properties_appended<'a>(
     mut apply: impl FnMut(u16, &[u8], &mut Budget, bool) -> Result<(), String>,
 ) -> Result<(), String> {
     let mut visited = BTreeSet::new();
-    let mut appended_pending = appended;
-    let mut appended_origin = false;
-    let mut filter_top_level = false;
-    let mut first = true;
+    let mut bytes = direct;
     loop {
         let mut sprms = Sprms::new(bytes);
         let mut next = None;
+        let mut first = true;
         while let Some((code, operand)) = sprms.next(budget)? {
-            if matches!(appended_filter, TopLevelFilter::Paragraph)
-                && filter_top_level
-                && (code >> 10) & 7 != 1
-            {
+            if matches!(code, 0x646b | 0x6646) {
+                if first {
+                    next = Some(prc_data(operand, data, &mut visited)?);
+                    break;
+                }
                 continue;
             }
-            if code == 0x646b || (code == 0x6646 && first) {
-                let offset = u32_at(operand, 0)? as usize;
-                if visited.len() >= 64 || !visited.insert(offset) {
-                    return Err(unsupported("cyclic or excessive Word paragraph data chain"));
-                }
-                let record = data
-                    .get(offset..)
-                    .ok_or_else(|| unsupported("Word paragraph data offset outside Data stream"))?;
-                let size = u16_at(record, 0)? as usize;
-                if size < 10 {
-                    return Err(unsupported("short Word paragraph data record"));
-                }
-                if size > MAX_PRC_DATA_GRPPRL_BYTES {
-                    return Err(unsupported("oversized Word paragraph data record"));
-                }
-                next =
-                    Some(record.get(2..2 + size).ok_or_else(|| {
-                        unsupported("Word paragraph properties outside Data stream")
-                    })?);
-                break;
-            }
-            if code != 0x6646 {
-                apply(code, operand, budget, appended_origin)?;
-            }
+            apply(code, operand, budget, false)?;
             first = false;
         }
         match next {
-            Some(value) => {
-                bytes = value;
-                appended_pending = None;
-                filter_top_level = false;
-                first = true;
-            }
-            None => match appended_pending.take() {
-                Some(value) => {
-                    bytes = value;
-                    appended_origin = true;
-                    filter_top_level = true;
-                }
-                None => return Ok(()),
-            },
+            Some(value) => bytes = value,
+            None => break,
         }
     }
+    let Some(piece) = appended else {
+        return Ok(());
+    };
+    let mut sprms = Sprms::new(piece);
+    while let Some((code, operand)) = sprms.next(budget)? {
+        if matches!(code, 0x646b | 0x6646)
+            || (matches!(appended_filter, TopLevelFilter::Paragraph)
+                && !matches!((code >> 10) & 7, 1 | 5))
+        {
+            continue;
+        }
+        apply(code, operand, budget, true)?;
+    }
+    Ok(())
+}
+
+/// Resolve one sprmPHugePapx/sprmPTableProps operand to its PrcData grpprl.
+fn prc_data<'a>(
+    operand: &[u8],
+    data: &'a [u8],
+    visited: &mut BTreeSet<usize>,
+) -> Result<&'a [u8], String> {
+    let offset = u32_at(operand, 0)? as usize;
+    if visited.len() >= 64 || !visited.insert(offset) {
+        return Err(unsupported("cyclic or excessive Word paragraph data chain"));
+    }
+    let record = data
+        .get(offset..)
+        .ok_or_else(|| unsupported("Word paragraph data offset outside Data stream"))?;
+    let size = u16_at(record, 0)? as usize;
+    if size < 10 {
+        return Err(unsupported("short Word paragraph data record"));
+    }
+    if size > MAX_PRC_DATA_GRPPRL_BYTES {
+        return Err(unsupported("oversized Word paragraph data record"));
+    }
+    record
+        .get(2..2 + size)
+        .ok_or_else(|| unsupported("Word paragraph properties outside Data stream"))
 }
 
 pub struct Budget(usize);
@@ -279,113 +305,109 @@ mod tests {
         assert_eq!(budget.0, 0);
     }
 
+    fn traced(
+        direct: &[u8],
+        piece: Option<&[u8]>,
+        data: &[u8],
+        budget: &mut Budget,
+    ) -> Result<Vec<(u16, u8, bool)>, String> {
+        let mut applied = Vec::new();
+        paragraph_properties_appended(
+            direct,
+            piece,
+            data,
+            budget,
+            TopLevelFilter::Paragraph,
+            |code, operand, _, from_piece| {
+                applied.push((code, operand[0], from_piece));
+                Ok(())
+            },
+        )?;
+        Ok(applied)
+    }
+
     #[test]
-    fn paragraph_filter_preserves_first_indirection_and_data_guards() {
+    fn direct_redirects_are_followed_only_from_the_first_prl() {
         let data = [
             12, 0, 0x03, 0x24, 2, 0x07, 0x24, 0, 0x07, 0x24, 0, 0x07, 0x24, 0,
         ];
-        let source = [
-            0x08, 0xd6, 1, 0, // filtered table SPRM
-            0x46, 0x66, 0, 0, 0, 0, // PHugePapx remains first
-            0x03, 0x24, 1, // ignored tail
+        let first = [0x6b, 0x64, 0, 0, 0, 0, 0x03, 0x24, 1];
+        let expected = [
+            (0x2403, 2, false),
+            (0x2407, 0, false),
+            (0x2407, 0, false),
+            (0x2407, 0, false),
         ];
-        let mut applied = Vec::new();
-        paragraph_properties(
-            &source,
-            &data,
-            &mut Budget(6),
-            TopLevelFilter::Paragraph,
-            |code, _, _| {
-                applied.push(code);
-                Ok(())
-            },
-        )
-        .unwrap();
-        assert_eq!(applied, [0x2403, 0x2407, 0x2407, 0x2407]);
+        assert_eq!(
+            traced(&first, None, &data, &mut Budget(5)).unwrap(),
+            expected
+        );
+        assert!(traced(&first, None, &data, &mut Budget(4))
+            .unwrap_err()
+            .contains("budget"));
 
-        assert!(paragraph_properties(
-            &source,
-            &data,
-            &mut Budget(5),
-            TopLevelFilter::Paragraph,
-            |_, _, _| Ok(())
-        )
-        .unwrap_err()
-        .contains("budget"));
+        // A later PTableProps/PHugePapx is ignored without reading Data.
+        for redirect in [0x646b_u16, 0x6646] {
+            let [low, high] = redirect.to_le_bytes();
+            let later = [
+                0x07, 0x24, 1, low, high, 0xff, 0xff, 0xff, 0xff, 0x03, 0x24, 1,
+            ];
+            assert_eq!(
+                traced(&later, None, &[], &mut Budget::default()).unwrap(),
+                [(0x2407, 1, false), (0x2403, 1, false)]
+            );
+        }
 
+        // Each PrcData restarts the first-position rule, so chains are bounded.
         let cycle = [12, 0, 0x6b, 0x64, 0, 0, 0, 0, 0x07, 0x24, 0, 0x07, 0x24, 0];
-        assert!(paragraph_properties(
+        assert!(traced(
             &[0x46, 0x66, 0, 0, 0, 0],
+            None,
             &cycle,
-            &mut Budget::default(),
-            TopLevelFilter::Paragraph,
-            |_, _, _| Ok(())
+            &mut Budget::default()
         )
         .unwrap_err()
         .contains("cyclic"));
     }
 
     #[test]
-    fn direct_and_piece_properties_share_one_replacement_array() {
+    fn piece_properties_follow_the_direct_chain_without_redirects() {
         let data = [
             12, 0, 0x03, 0x24, 1, 0x07, 0x24, 0, 0x07, 0x24, 0, 0x07, 0x24, 0,
         ];
-        let direct_redirect = [0x6b, 0x64, 0, 0, 0, 0];
         let piece_alignment = [0x61, 0x24, 2];
-        let mut applied = Vec::new();
-        paragraph_properties_appended(
-            &direct_redirect,
-            Some(&piece_alignment),
-            &data,
-            &mut Budget::default(),
-            TopLevelFilter::Paragraph,
-            |code, operand, _, from_piece| {
-                applied.push((code, operand[0], from_piece));
-                Ok(())
-            },
-        )
-        .unwrap();
         assert_eq!(
-            applied,
+            traced(
+                &[0x6b, 0x64, 0, 0, 0, 0],
+                Some(&piece_alignment),
+                &data,
+                &mut Budget::default()
+            )
+            .unwrap(),
             [
                 (0x2403, 1, false),
                 (0x2407, 0, false),
                 (0x2407, 0, false),
-                (0x2407, 0, false)
+                (0x2407, 0, false),
+                (0x2461, 2, true)
             ]
         );
 
-        applied.clear();
-        paragraph_properties_appended(
-            &[0x61, 0x24, 0],
-            Some(&piece_alignment),
-            &[],
-            &mut Budget::default(),
-            TopLevelFilter::Paragraph,
-            |code, operand, _, from_piece| {
-                applied.push((code, operand[0], from_piece));
-                Ok(())
-            },
-        )
-        .unwrap();
-        assert_eq!(applied, [(0x2461, 0, false), (0x2461, 2, true)]);
-
-        applied.clear();
-        let appended_huge = [0x46, 0x66, 0, 0, 0, 0];
-        paragraph_properties_appended(
-            &[0x61, 0x24, 0],
-            Some(&appended_huge),
-            &data,
-            &mut Budget::default(),
-            TopLevelFilter::Paragraph,
-            |code, operand, _, from_piece| {
-                applied.push((code, operand[0], from_piece));
-                Ok(())
-            },
-        )
-        .unwrap();
-        assert_eq!(applied, [(0x2461, 0, false)]);
+        // Piece redirects are ignored even as the paragraph's first Prl; table
+        // SPRMs are kept and character SPRMs are excluded.
+        let piece = [
+            0x46, 0x66, 0xff, 0xff, 0xff, 0xff, // PHugePapx
+            0x6b, 0x64, 0xff, 0xff, 0xff, 0xff, // PTableProps
+            0x08, 0xd6, 1, 0, // TDefTable
+            0x35, 0x08, 1, // CFBold
+            0x03, 0x24, 1,
+        ];
+        assert_eq!(
+            traced(&[], Some(&piece), &[], &mut Budget::default()).unwrap(),
+            [(0xd608, 1, true), (0x2403, 1, true)]
+        );
     }
+
     #[test]
     fn extended_tabs_are_framed_without_consuming_the_following_sprm() {
         let mut b = vec![0x15, 0xc6, 255, 64];

@@ -133,7 +133,7 @@ fn with_piece_prc_and_prm(source: &[u8], prc: &[u8], data: &[u8], prm: u16) -> V
 }
 
 #[test]
-fn full_cfb_direct_table_props_replace_appended_piece_alignment_tail() {
+fn full_cfb_piece_alignment_applies_after_direct_table_props_data() {
     let text = "a\u{7}\u{7}\r";
     let units = text.encode_utf16().count();
     let base = source_with_typography(
@@ -188,7 +188,7 @@ fn full_cfb_direct_table_props_replace_appended_piece_alignment_tail() {
         let CellElement::Paragraph(paragraph) = &table.rows[0].cells[0].content[0] else {
             panic!("cell paragraph")
         };
-        assert_eq!(paragraph.alignment, "right");
+        assert_eq!(paragraph.alignment, "center");
     }
 
     let inline = with_papx(
@@ -226,28 +226,33 @@ fn full_cfb_direct_table_props_replace_appended_piece_alignment_tail() {
 }
 
 #[test]
-fn full_cfb_complex_piece_filters_raw_table_sprms_and_gates_redirected_table_data() {
+fn full_cfb_complex_piece_applies_table_sprms_but_not_its_redirects() {
     let source = body_table_source("a\u{7}\u{7}\r");
     let definition = sprm(0xd608, &[6, 0, 1, 0, 0, 0xe8, 3], false);
     let width = sprm(0x7623, &[0, 1, 0xdc, 5], false);
+    let column_widths = |bytes: &[u8]| {
+        let document = super::super::direct_model(&CompoundFile::open(bytes).unwrap(), 1_000_000)
+            .unwrap()
+            .document;
+        let Some(BodyElement::Table(table)) = document.body.first() else {
+            panic!("table")
+        };
+        let CellElement::Paragraph(cell) = &table.rows[0].cells[0].content[0] else {
+            panic!("cell paragraph")
+        };
+        assert!(matches!(&cell.runs[0], DocRun::Text(text) if text.text == "a"));
+        assert!(matches!(
+            document.body.get(1),
+            Some(BodyElement::Paragraph(_))
+        ));
+        table.col_widths.clone()
+    };
 
+    // Top-level piece table SPRMs apply to the row mark after its direct PAPX.
     let raw = with_piece_prc(&source, &[definition.clone(), width.clone()].concat(), &[]);
-    let document = super::super::direct_model(&CompoundFile::open(&raw).unwrap(), 1_000_000)
-        .unwrap()
-        .document;
-    let Some(BodyElement::Table(table)) = document.body.first() else {
-        panic!("table")
-    };
-    assert_eq!(table.col_widths, [50.0]);
-    let CellElement::Paragraph(cell) = &table.rows[0].cells[0].content[0] else {
-        panic!("cell paragraph")
-    };
-    assert!(matches!(&cell.runs[0], DocRun::Text(text) if text.text == "a"));
-    assert!(matches!(
-        document.body.get(1),
-        Some(BodyElement::Paragraph(_))
-    ));
+    assert_eq!(column_widths(&raw), [75.0]);
 
+    // Piece PTableProps/PHugePapx are ignored without reading their Data.
     let mut data = Vec::new();
     let redirected = [definition, width].concat();
     data.extend(u16::try_from(redirected.len()).unwrap().to_le_bytes());
@@ -255,9 +260,7 @@ fn full_cfb_complex_piece_filters_raw_table_sprms_and_gates_redirected_table_dat
     for redirect in [0x646b, 0x6646] {
         let prc = sprm(redirect, &0u32.to_le_bytes(), false);
         let wrapped = with_piece_prc(&source, &prc, &data);
-        let error = super::super::direct_model(&CompoundFile::open(&wrapped).unwrap(), 1_000_000)
-            .unwrap_err();
-        assert!(error.contains("unsupported formatting"), "{error}");
+        assert_eq!(column_widths(&wrapped), [50.0]);
     }
 }
 

@@ -147,7 +147,7 @@ class PapxProbeTests(unittest.TestCase):
                 ]}])
             )
 
-    def test_direct_ptableprops_suppresses_appended_complex_pcd(self):
+    def test_direct_ptableprops_ignores_its_tail_and_the_piece_redirect(self):
         ignored = prl(0x7623, b"\x03\0\0\0")
         indirect = prl(probes.P_TABLE_PROPS, b"\0\0\0\0") + ignored
         data = prc_data(owned_top_level_row(prl(0x7621, b"\x01\0\0\0")))
@@ -170,33 +170,21 @@ class PapxProbeTests(unittest.TestCase):
         self.assertEqual(len(ignored_items), 1)
         self.assertIn(ignored.hex(), ignored_items[0]["bytes"])
 
-    def test_direct_redirect_suppresses_simple_prm0_and_inline_piece_applies(self):
+    def test_simple_prm0_and_inline_piece_follow_the_direct_redirect_chain(self):
         data = prc_data(owned_top_level_row(prl(0x7621, b"\x01\0\0\0")))
         direct = b"\0\0" + prl(probes.P_TABLE_PROPS, b"\0\0\0\0")
-        simple = loaded(fixture(direct, data, prm=prm0(0x05, 2)))
-        acquired = probes.acquire_property_trace(simple, 105, "ttp")["entries"]
-        self.assertFalse(any(entry.get("code") == "2461" for entry in acquired))
+        for streams in (
+            fixture(direct, data, prm=prm0(0x05, 2)),
+            fixture(direct, data, [prl(0x2461, b"\x02")], prm=1),
+        ):
+            acquired = probes.acquire_property_trace(loaded(streams), 105, "ttp")["entries"]
+            self.assertEqual(
+                [entry["operand"] for entry in acquired
+                 if entry.get("code") == "2461" and entry.get("applied")],
+                ["02"],
+            )
 
-        # The replacement makes even a reserved simple PRM unreachable, so it
-        # is neither decoded nor rejected as part of acquisition.
-        reserved = loaded(fixture(direct, data, prm=prm0(0x01, 1)))
-        acquired = probes.acquire_property_trace(reserved, 105, "ttp")["entries"]
-        self.assertFalse(any(entry.get("source") == "simplePCD" for entry in acquired))
-
-        inline = loaded(fixture(
-            b"\0\0" + owned_top_level_row(b""),
-            data,
-            [prl(0x2461, b"\x02")],
-            prm=1,
-        ))
-        acquired = probes.acquire_property_trace(inline, 105, "ttp")["entries"]
-        self.assertEqual(
-            [entry["operand"] for entry in acquired
-             if entry.get("code") == "2461" and entry.get("applied")],
-            ["02"],
-        )
-
-    def test_first_phuge_in_appended_piece_is_not_first_after_direct_paragraph(self):
+    def test_phuge_in_appended_piece_is_never_followed(self):
         data = prc_data(owned_top_level_row(prl(0x2461, b"\x02")))
         direct = b"\0\0" + owned_top_level_row(prl(0x2461, b"\x00"))
         piece = prl(probes.PHUGE_PAPX, b"\0\0\0\0")
@@ -209,62 +197,32 @@ class PapxProbeTests(unittest.TestCase):
         )
         huge = next(entry for entry in acquired if entry.get("code") == "6646")
         self.assertEqual((huge["applied"], huge["reason"]),
-                         (False, "non-first-PHugePapx"))
+                         (False, "complex-PCD-redirect"))
 
-    def test_complex_pcd_filter_preserves_indirection_first_element_rules(self):
-        table = prl(0x7623, b"\0\x01\xe8\x03")
-        huge = prl(probes.PHUGE_PAPX, b"\0\0\0\0")
+    def test_complex_pcd_keeps_table_sprms_and_never_follows_redirects(self):
         data = prc_data(owned_top_level_row(prl(0x7621, b"\0\x01\xe8\x03")))
-        streams = fixture(b"\0\0", data, [table + huge], prm=1)
-        record = probes.inspect_document(streams)["prcs"][0]
-        trace = probes._trace_properties(
-            streams, record["stream"], record["offset"], record["end"],
-            probes._TraceBudget(), filter_initial_paragraph=True,
-        )
-        self.assertEqual(
-            [(entry.get("code"), entry.get("applied"), entry.get("followed"))
-             for entry in trace if entry["kind"] == "prl"][:2],
-            [("7623", False, None), ("6646", True, True)],
-        )
-        self.assertTrue(any(entry["kind"] == "prc_data" for entry in trace))
-
-        paragraph = prl(0x2461, b"\x01")
-        streams = fixture(b"\0\0", data, [paragraph + huge], prm=1)
-        record = probes.inspect_document(streams)["prcs"][0]
-        trace = probes._trace_properties(
-            streams, record["stream"], record["offset"], record["end"],
-            probes._TraceBudget(), filter_initial_paragraph=True,
-        )
-        self.assertFalse(any(entry["kind"] == "prc_data" for entry in trace))
-        huge_entry = next(entry for entry in trace if entry.get("code") == "6646")
-        self.assertEqual(
-            (huge_entry["applied"], huge_entry["reason"]),
-            (False, "non-first-PHugePapx"),
-        )
-
-    def test_complex_pcd_ptableprops_expands_data_and_ignores_its_tail(self):
-        widths = prl(0x7623, b"\0\x01\xe8\x03") + prl(0x7623, b"\x02\x03\xd0\x07")
-        data = prc_data(widths)
+        table = prl(0x7623, b"\0\x01\xe8\x03")
+        bold = prl(0x0835, b"\x01")
         tail = prl(0x2461, b"\x02")
-        pcd = prl(probes.P_TABLE_PROPS, b"\0\0\0\0") + tail
-        streams = fixture(b"\0\0", data, [pcd], prm=1)
-        record = probes.inspect_document(streams)["prcs"][0]
-        trace = probes._trace_properties(
-            streams, record["stream"], record["offset"], record["end"],
-            probes._TraceBudget(), filter_initial_paragraph=True,
-        )
-        self.assertEqual(
-            [entry["operand"] for entry in trace
-             if entry.get("code") == "7623" and entry.get("applied")],
-            ["0001e803", "0203d007"],
-        )
-        ignored = [entry for entry in trace if entry["kind"] == "ignored_tail"]
-        self.assertEqual([(entry["bytes"], entry["reason"]) for entry in ignored], [
-            (tail.hex(), "after-PTableProps"),
-        ])
+        for redirect in (probes.PHUGE_PAPX, probes.P_TABLE_PROPS):
+            piece = prl(redirect, b"\0\0\0\0") + table + bold + tail
+            streams = fixture(b"\0\0", data, [piece], prm=1)
+            record = probes.inspect_document(streams)["prcs"][0]
+            trace = probes._trace_properties(
+                streams, record["stream"], record["offset"], record["end"],
+                probes._TraceBudget(), filter_initial_paragraph=True,
+            )
+            self.assertEqual(
+                [(entry["code"], entry["applied"], entry.get("reason"))
+                 for entry in trace],
+                [(f"{redirect:04x}", False, "complex-PCD-redirect"),
+                 ("7623", True, None),
+                 ("0835", False, "non-paragraph-complex-PCD"),
+                 ("2461", True, None)],
+            )
 
     def test_raw_and_complex_piece_trace_cache_entries_do_not_alias(self):
-        streams = fixture(b"\0\0", prcs=[prl(0x7623, b"\0\x01\xe8\x03")], prm=1)
+        streams = fixture(b"\0\0", prcs=[prl(0x0835, b"\x01")], prm=1)
         session = probes.AcquiredPropertyTraceSession(loaded(streams))
         record = session.prcs[0]
         key = (record["stream"], record["offset"], record["end"])
@@ -553,7 +511,7 @@ class PapxProbeTests(unittest.TestCase):
         with self.assertRaisesRegex(probes.ProbeError, "effective target"):
             probes.validate_plan(source, after, plan)
 
-    def test_raw_table_sprm_in_complex_pcd_does_not_shadow_paragraph_data(self):
+    def test_complex_pcd_table_sprm_shadows_direct_data_target(self):
         before_value = b"\0\0 \0"
         after_value = b"\0\0@\0"
         pcd_value = b"\0\0\x80\0"
@@ -573,8 +531,10 @@ class PapxProbeTests(unittest.TestCase):
             "targets": [{"fc": 105, "code": 0x740A,
                          "before": before_value.hex(), "after": after_value.hex()}],
         }
-        result = probes.validate_plan(source, after, plan)
-        self.assertTrue(result["valid"])
+        # The piece TTlp applies after the direct PrcData, so the Data edit is
+        # not the effective value and the plan must be rejected.
+        with self.assertRaisesRegex(probes.ProbeError, "does not match"):
+            probes.validate_plan(source, after, plan)
         inspected = probes.inspect_document(before)
         record = inspected["prcs"][0]
         raw = probes._trace_properties(
@@ -582,11 +542,11 @@ class PapxProbeTests(unittest.TestCase):
             probes._TraceBudget(), filter_initial_paragraph=True,
         )[-1]
         self.assertEqual(
-            (raw["code"], raw["applied"], raw["reason"]),
-            ("740a", False, "non-paragraph-complex-PCD"),
+            (raw["code"], raw["applied"], raw.get("reason")),
+            ("740a", True, None),
         )
 
-    def test_direct_ptableprops_suppresses_wrapped_complex_pcd_shadow(self):
+    def test_wrapped_complex_pcd_redirect_does_not_shadow_direct_data(self):
         before_value = b"\0\0 \0"
         after_value = b"\0\0@\0"
         pcd_value = b"\0\0\x80\0"

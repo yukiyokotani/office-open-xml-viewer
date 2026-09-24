@@ -2223,3 +2223,31 @@ including all 59 private inputs; private admission remains four of 59. Rejected
 inputs do not establish rendering fidelity. Final adversarial review accepted
 this bounded change; whole-branch semantic, browser and visual acceptance remain
 open.
+
+### Complex-PCD property acquisition checkpoint
+
+Nineteen native Word exports (Word 16.113, macOS; one unmodified baseline) replaced the earlier
+single-array reading of direct PAPX plus Pcd.Prm. Each control changed one
+Word-saved row mark or table-cell paragraph. It was compared through Word's
+PDF and saved DOCX, and carried a piece alignment witness proving the split
+pieces were active. `doc/sprm.rs` now records and implements the observed
+rules:
+
+- a direct sprmPTableProps is followed only as the first Prl of its array;
+- piece properties, both Prm0 and Prm1, apply after the whole direct chain,
+  including PrcData reached through a direct first-position redirect;
+- piece sprmPTableProps and sprmPHugePapx are ignored rather than followed,
+  even as the paragraph's first Prl, and later piece Prls still apply;
+- top-level piece table SPRMs apply to the row mark together with paragraph
+  SPRMs.
+
+DOC-269's suppression rule is therefore withdrawn, and DOC-272 is resolved:
+reachable complex-PCD table indirection does not occur. The diagnostic PAPX
+probe follows the same rules. Piece table SPRMs use the existing per-code
+admission gates.
+
+| Additional item | Scope | Status |
+| --- | --- | --- |
+| DOC-273 | Cross-source row definition after explicit widths | Open: one control showed a piece TDefTable replacing earlier direct-chain TDxaCol widths; the geometry source boundary stays gated |
+| TOOL-1 | Office export restoration | Open: `scripts/legacy-office-export.applescript` cannot restore Word/Excel settings when `open` returns no value; it also adopts an unrestored ForceDisable baseline |
+| LEGACY-OOXML | Remove the OOXML-generation path | Open: legacy support is unreleased, so delete the byte converter, its WASM/TS entry points and XML writers instead of deprecating them; direct paths must not depend on them |
