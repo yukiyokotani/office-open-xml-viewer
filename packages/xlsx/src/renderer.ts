@@ -333,7 +333,10 @@ export function getMdwForWorksheet(ws: { defaultFontFamily?: string; defaultFont
   // @font-face retains Canvas measurement authority. The checked-in scalar
   // covers every static catalog face with a complete Unicode digit cmap;
   // ambiguous/missing catalog data falls back to ordinary Canvas measurement.
-  if (!route && !hasDeclaredNormalFace(ws.defaultFontFamily)) {
+  // An unbound worksheet has not completed local-font preflight. In that
+  // direct rendering path, a missing route does not prove a missing face.
+  if (officeRoutesByWorksheet.has(ws as Worksheet)
+      && !route && !hasDeclaredNormalFace(ws.defaultFontFamily)) {
     const ratio = referenceFontMaxDigitAdvanceRatio(
       ws.defaultFontFamily, 400, 'normal', isMacDesktop());
     if (ratio !== undefined) return quantizeMdw(ratio * ws.defaultFontSize * PT_TO_PX);

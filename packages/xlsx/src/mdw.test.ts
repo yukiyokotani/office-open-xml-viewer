@@ -14,6 +14,10 @@ describe('ECMA-376 maximum digit width authority', () => {
     const worksheet = { defaultFontFamily: 'Calibri', defaultFontSize: 12 };
     // Canvas would measure the substituted 9px face; the Office Calibri hmtx
     // maximum is 1038/2048 em, i.e. 8.109375 CSS px before Mac quantization.
+    expect(getMdwForWorksheet(worksheet)).toBe(9);
+    // Empty retained routes mean exact local preflight completed and found no
+    // authored face; an unbound direct renderer must not make that inference.
+    bindXlsxWorksheetOfficeFontRoutes(worksheet as Parameters<typeof bindXlsxWorksheetOfficeFontRoutes>[0], {});
     expect(getMdwForWorksheet(worksheet)).toBe(8);
   });
 
