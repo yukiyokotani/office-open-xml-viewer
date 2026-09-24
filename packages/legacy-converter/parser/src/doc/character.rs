@@ -786,6 +786,14 @@ impl Properties {
         let Some(lid) = lid else {
             return LanguageResolution::Absent;
         };
+        if lid == 0 {
+            // LID 0x0000 names no language (MS-LCID LANG_NEUTRAL). Word writes
+            // it to WordprocessingML as the private-use tag `x-none`: a
+            // Word-saved DOC/DOCX corpus pair carries 0x0000 on the default and
+            // East Asian axes exactly where the DOCX styles have
+            // w:lang@val/@eastAsia="x-none".
+            return LanguageResolution::Assigned("x-none");
+        }
         match crate::lcid::resolve(u32::from(lid)) {
             crate::lcid::Resolution::Assigned(language) => LanguageResolution::Assigned(language),
             _ => LanguageResolution::Unsupported(lid),
@@ -1104,6 +1112,30 @@ mod tests {
             assert_eq!(reset.lang_bidi_lid, paragraph.lang_bidi_lid);
             assert!(!reset.xml(&[]).unwrap().contains("<w:noProof"));
         }
+    }
+
+    #[test]
+    fn language_id_zero_is_the_word_no_language_tag_on_every_axis() {
+        let base = Properties::default();
+        let mut value = Properties::sparse();
+        for code in [0x4873, 0x4874, 0x485f] {
+            assert!(value.apply(code, &[0, 0], &base).unwrap());
+        }
+        assert_eq!(
+            value.xml(&[]).unwrap(),
+            "<w:rPr><w:lang w:val=\"x-none\" w:eastAsia=\"x-none\" w:bidi=\"x-none\"/></w:rPr>"
+        );
+        let languages = value.resolved_languages().unwrap();
+        assert_eq!(
+            (languages.default, languages.east_asia, languages.bidi),
+            (Some("x-none"), Some("x-none"), Some("x-none"))
+        );
+        // Custom/unspecified locales stay unresolved.
+        let mut custom = Properties::sparse();
+        custom
+            .apply(0x4873, &0x1000u16.to_le_bytes(), &base)
+            .unwrap();
+        assert!(custom.resolved_languages().is_err());
     }
 
     #[test]
