@@ -649,15 +649,27 @@ impl Context<'_> {
         let linked = master_link
             .map(|id| self.presentation.shape_masters.levels(id))
             .transpose()?;
-        let levels = linked.or_else(|| {
-            master_typed_text(text_type, shape.is_placeholder())
-                .then(|| {
-                    self.presentation.text_masters[self.index]
-                        .as_deref()
-                        .and_then(|m| text_type.and_then(|t| m.levels(t)))
-                })
-                .flatten()
-        });
+        let document_axes = document_text_axes(
+            text_type,
+            shape.is_placeholder(),
+            master_link.is_some(),
+            outline_body,
+            self.presentation.document_text_axes,
+        );
+        // Master levels resolve through `text_style::master_chain`: typed
+        // text through its own, base and document atoms, freeform
+        // Tx_TYPE_OTHER text through the document atom alone.
+        let master = self.presentation.text_masters[self.index].as_deref();
+        let direct = if linked.is_some() {
+            None
+        } else if master_typed_text(text_type, shape.is_placeholder()) {
+            master.and_then(|m| text_type.and_then(|t| m.direct_levels(t)))
+        } else if text_type == Some(4) && !shape.is_placeholder() && !outline_body {
+            master.and_then(text_style::Master::document_levels)
+        } else {
+            None
+        };
+        let levels = linked.or(direct.as_ref().map(|d| d.levels.as_slice()));
         slide_numbers.sort_unstable();
         let default_style = style
             .is_none()
@@ -691,13 +703,8 @@ impl Context<'_> {
             },
             text_style::direct_model::DirectAxes {
                 ruler: local_ruler,
-                document: document_text_axes(
-                    text_type,
-                    shape.is_placeholder(),
-                    master_link.is_some(),
-                    outline_body,
-                    self.presentation.document_text_axes,
-                ),
+                document: document_axes,
+                ambiguous: direct.as_ref().map(|d| &d.ambiguous),
             },
             self.work_budget,
             self.model_budget,

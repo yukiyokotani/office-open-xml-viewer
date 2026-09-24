@@ -6,6 +6,7 @@ mod bullet;
 // owns a bounded session; keep its focused tests live during that integration.
 #[allow(dead_code)]
 pub(super) mod direct_model;
+pub(super) mod master_chain;
 
 #[derive(Default, Clone, Copy)]
 pub(super) struct Context<'a> {
@@ -666,6 +667,8 @@ pub(super) struct Master {
     types: std::collections::BTreeMap<u16, Vec<Level>>,
     authored_font_sizes: std::rc::Rc<AuthoredFontSizeTable>,
     defaults: Vec<Level>,
+    /// Unmerged atom levels for the direct model's level-chain resolution.
+    raw: std::collections::BTreeMap<u16, Vec<Level>>,
 }
 impl Master {
     pub fn parse(
@@ -674,6 +677,7 @@ impl Master {
         budget: &mut usize,
     ) -> Result<Self, String> {
         let mut types = std::collections::BTreeMap::new();
+        let mut raw = std::collections::BTreeMap::new();
         let mut authored_types: AuthoredFontSizeTable = [None; 9];
         for atom in records.iter().filter(|r| r.kind == 4003) {
             if types.contains_key(&atom.instance) {
@@ -689,6 +693,7 @@ impl Master {
                 }),
             };
             authored_types[usize::from(atom.instance)] = Some(authored_font_sizes);
+            raw.insert(atom.instance, levels.clone());
             for (i, level) in levels.iter_mut().enumerate() {
                 level.paragraph = level
                     .paragraph
@@ -704,7 +709,25 @@ impl Master {
             types,
             authored_font_sizes: std::rc::Rc::new(authored_types),
             defaults: defaults.to_vec(),
+            raw,
         })
+    }
+    /// Direct-model levels for text of `kind` (see [`master_chain`]).
+    pub fn direct_levels(&self, kind: u16) -> Option<master_chain::DirectLevels> {
+        let own = self.raw.get(&kind);
+        let base = master_chain::base_type(kind).and_then(|b| self.raw.get(&b));
+        if own.is_none() && base.is_none() && self.defaults.is_empty() {
+            return None;
+        }
+        Some(master_chain::resolve(
+            own.map_or(&[], Vec::as_slice),
+            base.map_or(&[], Vec::as_slice),
+            &self.defaults,
+        ))
+    }
+    /// Direct-model levels of the document Tx_TYPE_OTHER atom alone.
+    pub fn document_levels(&self) -> Option<master_chain::DirectLevels> {
+        (!self.defaults.is_empty()).then(|| master_chain::resolve(&[], &[], &self.defaults))
     }
     pub fn levels(&self, kind: u16) -> Option<&[Level]> {
         self.types

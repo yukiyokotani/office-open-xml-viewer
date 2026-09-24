@@ -40,6 +40,9 @@ pub(in crate::ppt) fn paragraphs(
 pub(in crate::ppt) struct DirectAxes<'a> {
     pub ruler: Option<ruler::Ruler<'a>>,
     pub document: Option<DocumentAxes>,
+    /// Per-level fields whose master inheritance order is ambiguous
+    /// (see `master_chain`); inheriting one of them is rejected.
+    pub ambiguous: Option<&'a [u32; 5]>,
 }
 
 pub(in crate::ppt) fn paragraphs_with_axes(
@@ -121,6 +124,35 @@ pub(in crate::ppt) fn paragraphs_with_axes(
             properties.margin = properties.margin.or(document.margin);
             properties.indent = properties.indent.or(document.indent);
         }
+        let ambiguous = axes
+            .ambiguous
+            .map_or(0, |fields| fields[usize::from(properties.level)]);
+        let mut supplied = pf[pi].1.present();
+        if let Some(ruler) = axes.ruler {
+            let level = usize::from(properties.level);
+            if ruler.margins[level].is_some() {
+                supplied |= master_chain::MARGIN;
+            }
+            if ruler.indents[level].is_some() {
+                supplied |= master_chain::INDENT;
+            }
+            if ruler.default_tab_size.is_some() {
+                supplied |= master_chain::DEFAULT_TAB;
+            }
+        }
+        if ambiguous & master_chain::PARAGRAPH & !supplied != 0 {
+            return Err(unsupported(
+                "ambiguous PowerPoint master paragraph style inheritance order",
+            ));
+        }
+        let inherit_character = |character: &Character| -> Result<Character, String> {
+            if ambiguous & master_chain::CHARACTER & !character.present() != 0 {
+                return Err(unsupported(
+                    "ambiguous PowerPoint master character style inheritance order",
+                ));
+            }
+            Ok(character.inherit(base.map(|v| &v.character)))
+        };
         let number = auto_number::paragraph(&groups, &mut number_group, cp, para_end);
         let mut runs = Vec::new();
         let mut start = 0;
@@ -138,7 +170,7 @@ pub(in crate::ppt) fn paragraphs_with_axes(
             if numbers.peek().is_some_and(|&&p| p as usize == cp) {
                 push_text_runs(
                     &paragraph[start..offset],
-                    &cf[run].1.inherit(base.map(|v| &v.character)),
+                    &inherit_character(&cf[run].1)?,
                     context,
                     &mut runs,
                     work_budget,
@@ -146,7 +178,7 @@ pub(in crate::ppt) fn paragraphs_with_axes(
                 )?;
                 push_text_runs(
                     &slide_number,
-                    &cf[run].1.inherit(base.map(|v| &v.character)),
+                    &inherit_character(&cf[run].1)?,
                     context,
                     &mut runs,
                     work_budget,
@@ -165,7 +197,7 @@ pub(in crate::ppt) fn paragraphs_with_axes(
                 let end = offset + c.len_utf8();
                 push_text_runs(
                     &paragraph[start..end],
-                    &cf[run].1.inherit(base.map(|v| &v.character)),
+                    &inherit_character(&cf[run].1)?,
                     context,
                     &mut runs,
                     work_budget,
@@ -177,7 +209,7 @@ pub(in crate::ppt) fn paragraphs_with_axes(
         while cf[ci].0 <= cp {
             ci += 1;
         }
-        let end_character = cf[ci].1.inherit(base.map(|v| &v.character));
+        let end_character = inherit_character(&cf[ci].1)?;
         result.push(model_paragraph(
             &properties,
             number,
@@ -571,6 +603,46 @@ mod tests {
     }
 
     #[test]
+    fn ambiguous_master_fields_reject_only_when_inherited() {
+        let mut base = Level::empty(0);
+        base.paragraph.margin = Some(0);
+        base.paragraph.indent = Some(0);
+        let levels = [base];
+        let project = |style: &[u8], ambiguous: [u32; 5]| {
+            paragraphs_with_axes(
+                "X",
+                style,
+                Context {
+                    levels: Some(&levels),
+                    ..Context::default()
+                },
+                DirectAxes {
+                    ruler: None,
+                    document: None,
+                    ambiguous: Some(&ambiguous),
+                },
+                &mut 100,
+                &mut 100_000,
+            )
+        };
+        let mut ambiguous = [0; 5];
+        ambiguous[0] = master_chain::ALIGN;
+        let error = project(&plain_style(0), ambiguous).unwrap_err();
+        assert!(error.contains("ambiguous PowerPoint master paragraph"));
+        // A direct alignment supplies the field itself.
+        let aligned = [u32s(2), u16s(0), u32s(0x800), u16s(1), u32s(2), u32s(0)].concat();
+        assert_eq!(project(&aligned, ambiguous).unwrap()[0].alignment, "ctr");
+        // Other levels' ambiguity does not affect this paragraph.
+        let mut elsewhere = [0; 5];
+        elsewhere[1] = master_chain::ALIGN | master_chain::CHARACTER;
+        assert!(project(&plain_style(0), elsewhere).is_ok());
+        let mut character = [0; 5];
+        character[0] = master_chain::CHARACTER;
+        let error = project(&plain_style(0), character).unwrap_err();
+        assert!(error.contains("ambiguous PowerPoint master character"));
+    }
+
+    #[test]
     fn direct_origins_resolve_local_level_then_document_type4_level0_by_field() {
         let document = document_level0(Some(180), Some(90));
         let project = |level, ruler, levels: Option<&[Level]>| {
@@ -584,6 +656,7 @@ mod tests {
                 DirectAxes {
                     ruler,
                     document: Some(document),
+                    ambiguous: None,
                 },
                 &mut 100,
                 &mut 100_000,
@@ -636,6 +709,7 @@ mod tests {
             DirectAxes {
                 ruler: None,
                 document: Some(document),
+                ambiguous: None,
             },
             &mut 100,
             &mut 100_000,
@@ -660,6 +734,7 @@ mod tests {
         let axes = DirectAxes {
             ruler: None,
             document: Some(document),
+            ambiguous: None,
         };
         let project = |level, axes| {
             paragraphs_with_axes(
@@ -681,6 +756,7 @@ mod tests {
             DirectAxes {
                 ruler: Some(ruler),
                 document: Some(document),
+                ambiguous: None,
             },
         )
         .unwrap();
@@ -704,6 +780,7 @@ mod tests {
             DirectAxes {
                 ruler: Some(ruler),
                 document: Some(document),
+                ambiguous: None,
             },
         )
         .unwrap();
@@ -1009,6 +1086,7 @@ mod tests {
                 DirectAxes {
                     ruler: Some(ruler),
                     document: None,
+                    ambiguous: None,
                 },
                 &mut 100,
                 &mut 100_000,
@@ -1044,6 +1122,7 @@ mod tests {
             DirectAxes {
                 ruler: Some(ruler),
                 document: None,
+                ambiguous: None,
             },
             &mut 100,
             &mut 100_000,
