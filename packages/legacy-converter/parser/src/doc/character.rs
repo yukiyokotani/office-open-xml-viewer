@@ -81,6 +81,8 @@ struct DirectOnly {
     east_asian: Option<(bool, bool)>,
     /// sprmCFUsePgsuSettings: ECMA-376 17.3.2.34 run snapToGrid.
     snap_to_grid: Option<bool>,
+    /// sprmCLbcCRJ raw LBCOperand; only meaningful on U+000B line breaks.
+    line_break: Option<u8>,
 }
 
 impl DirectOnly {
@@ -93,6 +95,7 @@ impl DirectOnly {
             || self.fit_text.is_some()
             || self.east_asian.is_some()
             || self.snap_to_grid.is_some()
+            || self.line_break.is_some_and(|value| value & 3 != 0)
     }
 
     fn overlay(&mut self, patch: &Self) {
@@ -111,6 +114,9 @@ impl DirectOnly {
         }
         if patch.snap_to_grid.is_some() {
             self.snap_to_grid = patch.snap_to_grid;
+        }
+        if patch.line_break.is_some() {
+            self.line_break = patch.line_break;
         }
     }
 }
@@ -429,6 +435,22 @@ impl Properties {
                     0x81 => !base,
                     _ => return Err(unsupported("invalid Word character toggle")),
                 });
+                return Ok(true);
+            }
+            0x2879 => {
+                // MS-DOC 2.6.1 sprmCLbcCRJ / 2.9.129 LBCOperand: where text
+                // resumes after a U+000B line break (lbrNone/Left/Right/Both).
+                // It MUST NOT be applied to other characters, which ignore it.
+                // A Word-saved DOC/DOCX corpus pair carries the undocumented
+                // value 0x7C on exactly the four line breaks Word writes as
+                // `w:br w:type="textWrapping" w:clear="none"`, and on ordinary
+                // text that its DOCX leaves unformatted: only the two low bits
+                // select the break type. The value is checked at line breaks.
+                self.direct_only.line_break = Some(
+                    *operand
+                        .first()
+                        .ok_or_else(|| unsupported("truncated Word line break type"))?,
+                );
                 return Ok(true);
             }
             0x6a09 => {

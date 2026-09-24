@@ -231,6 +231,15 @@ impl Properties {
         })
     }
 
+    /// True when a U+000B line break with these properties must clear floating
+    /// objects (LBCOperand lbrLeft/Right/Both). The DOCX model's line break
+    /// carries no `w:clear`, so such breaks stay unsupported.
+    pub(in crate::doc) fn direct_line_break_clears(&self) -> bool {
+        self.direct_only
+            .line_break
+            .is_some_and(|value| value & 3 != 0)
+    }
+
     pub(in crate::doc) fn direct_vanish(&self) -> bool {
         self.bool_value("vanish").unwrap_or(false)
     }
@@ -1436,5 +1445,23 @@ mod tests {
         let shown = applied(&[(0x0802, vec![0])]);
         assert!(shown.direct_text_run("x".into(), &[]).unwrap().is_some());
         assert!(!shown.has_direct_only_properties());
+    }
+
+    #[test]
+    fn line_break_type_uses_its_two_documented_bits_and_clearing_stays_unsupported() {
+        let base = Properties::default();
+        // Word writes 0x7C as w:clear="none"; text characters ignore it.
+        let none = applied(&[(0x2879, vec![0x7c])]);
+        assert!(!none.direct_line_break_clears());
+        assert!(!none.has_direct_only_properties());
+        assert_eq!(public_run(&none), public_run(&base));
+        for value in [1u8, 2, 3, 0x7f] {
+            let clears = applied(&[(0x2879, vec![value])]);
+            assert!(clears.direct_line_break_clears(), "{value:#x}");
+            assert!(clears.has_direct_only_properties());
+        }
+        let mut reset = applied(&[(0x2879, vec![3])]);
+        reset.reset_to(&base, false);
+        assert!(!reset.direct_line_break_clears());
     }
 }
