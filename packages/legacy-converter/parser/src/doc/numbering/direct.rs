@@ -54,6 +54,8 @@ pub struct Store {
     // Ancestor placeholders belong to a DOC "list" (same iLfo), unlike the
     // numeric sequences above, which MS-DOC 2.4.6.4 shares by LSID.
     ancestors: HashMap<(usize, u8), AncestorValue>,
+    // (LSID, level) pairs with at least one real paragraph in this story.
+    encountered: HashSet<(i32, u8)>,
 }
 
 impl Store {
@@ -68,6 +70,7 @@ impl Store {
         self.lists.clear();
         self.started.clear();
         self.ancestors.clear();
+        self.encountered.clear();
         Ok(())
     }
 
@@ -197,10 +200,33 @@ impl Store {
             if target >= reference.level {
                 continue;
             }
-            let ancestor = self
-                .ancestors
-                .get(&(reference.index, target))
-                .ok_or_else(|| unsupported("missing prior Word list ancestor level"))?;
+            let Some(ancestor) = self.ancestors.get(&(reference.index, target)) else {
+                // MS-DOC 2.4.6.3 Part 2 step 4 takes the closest previous
+                // paragraph of that level in the list, and is silent when none
+                // exists. MS-DOC 2.4.6.4: a level's number sequence "begins at
+                // a specified value" (numCur = iStartAt with nothing counted).
+                // Word-exported PDFs of two corpus documents whose LSID has
+                // never used the ancestor level show exactly that iStartAt
+                // (3 and 1). Only that case is admitted: a same-LSID paragraph
+                // from another LFO, a start override on the ancestor level or
+                // a numberless ancestor keep the rejection.
+                let level = effective(target)
+                    .ok_or_else(|| unsupported("missing prior Word list ancestor level"))?;
+                let overridden = selection
+                    .instance
+                    .levels
+                    .iter()
+                    .any(|value| value.index == target && value.start.is_some());
+                if self.encountered.contains(&(selection.list.id, target)) || overridden {
+                    return Err(unsupported("missing prior Word list ancestor level"));
+                }
+                let start = level
+                    .start
+                    .filter(|_| !matches!(level.format, 0x17 | 0xff))
+                    .ok_or_else(|| unsupported("missing prior Word list ancestor level"))?;
+                ancestor_values[usize::from(target)] = Some(u32::from(start));
+                continue;
+            };
             if matches!(
                 effective(target).map(|level| level.format),
                 Some(0x17 | 0xff)
@@ -235,6 +261,8 @@ impl Store {
             )
             .map_err(counter_error)?;
         self.started.insert((reference.index, reference.level));
+        self.encountered
+            .insert((selection.list.id, reference.level));
         if numberless {
             self.ancestors.insert(
                 (reference.index, reference.level),
@@ -749,27 +777,92 @@ mod tests {
         assert_eq!(activate_at(&mut store, &tables, 0, 1), "I.1.");
     }
 
-    #[test]
-    fn absent_ancestor_is_not_fabricated_as_one() {
-        let tables = tables(vec![
-            level(0, 0, Some(1), DECIMAL),
-            level(1, 0, Some(1), CHILD),
-        ]);
-        let mut store = Store::default();
-        store.begin_story().unwrap();
-        let error = store
+    fn try_activate_at(
+        store: &mut Store,
+        tables: &Tables<'_>,
+        index: usize,
+        level: u8,
+    ) -> Result<String, String> {
+        store
             .activate(
-                &tables,
+                tables,
                 Reference {
-                    index: 0,
-                    level: 1,
+                    index,
+                    level,
                     preserve_indent: false,
                 },
                 &character::Properties::default(),
                 &DocParagraph::default(),
                 &[],
             )
-            .unwrap_err();
+            .map(|info| info.text)
+    }
+
+    #[test]
+    fn ancestor_level_never_used_by_its_lsid_shows_its_start_value() {
+        // Word PDFs: a first level-1 paragraph whose list never used level 0
+        // shows the level-0 iStartAt (observed with 3 and with 1).
+        for start in [1u16, 3] {
+            let tables = tables(vec![
+                level(0, 0, Some(start), DECIMAL),
+                level(1, 0, Some(1), CHILD),
+            ]);
+            let mut store = Store::default();
+            store.begin_story().unwrap();
+            assert_eq!(activate(&mut store, &tables, 1), format!("{start}.1."));
+            assert_eq!(activate(&mut store, &tables, 1), format!("{start}.2."));
+            // A real level-0 paragraph then counts from iStartAt as usual.
+            assert_eq!(activate(&mut store, &tables, 0), format!("{start}."));
+            assert_eq!(activate(&mut store, &tables, 1), format!("{start}.1."));
+        }
+        // The ancestor level's own format is used.
+        let tables = tables(vec![
+            level(0, 1, Some(4), DECIMAL),
+            level(1, 0, Some(1), CHILD),
+        ]);
+        let mut store = Store::default();
+        store.begin_story().unwrap();
+        assert_eq!(activate(&mut store, &tables, 1), "IV.1.");
+    }
+
+    #[test]
+    fn unmeasured_absent_ancestor_cases_stay_rejected() {
+        // A same-LSID paragraph from another LFO used the ancestor level.
+        let shared = {
+            let mut tables = tables(vec![
+                level(0, 0, Some(1), DECIMAL),
+                level(1, 0, Some(1), CHILD),
+            ]);
+            tables.overrides.push(Override {
+                list_index: 0,
+                first_cp: None,
+                auto_number_field: None,
+                levels: Vec::new(),
+            });
+            tables
+        };
+        let mut store = Store::default();
+        store.begin_story().unwrap();
+        assert_eq!(activate_at(&mut store, &shared, 1, 0), "1.");
+        let error = try_activate_at(&mut store, &shared, 0, 1).unwrap_err();
+        assert!(error.contains("missing prior Word list ancestor level"));
+
+        // A start override on the ancestor level.
+        let overridden = {
+            let mut tables = tables(vec![
+                level(0, 0, Some(1), DECIMAL),
+                level(1, 0, Some(1), CHILD),
+            ]);
+            tables.overrides[0].levels.push(LevelOverride {
+                index: 0,
+                start: Some(5),
+                formatting: None,
+            });
+            tables
+        };
+        let mut store = Store::default();
+        store.begin_story().unwrap();
+        let error = try_activate_at(&mut store, &overridden, 0, 1).unwrap_err();
         assert!(error.contains("missing prior Word list ancestor level"));
     }
 
