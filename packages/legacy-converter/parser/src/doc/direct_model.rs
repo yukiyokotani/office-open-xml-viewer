@@ -325,8 +325,12 @@ fn direct_picture_references<'a>(
                         push_key(key, references, budget)?;
                     }
                 }
-                // Textbox stories can hold inline pictures.
+                // Textbox stories can hold inline pictures; picture fills
+                // share the floating picture resources.
                 DocRun::Shape(shape) => {
+                    if let Some(docx_model::ShapeFill::Image { image_path, .. }) = &shape.fill {
+                        push_key(image_path, references, budget)?;
+                    }
                     for block in &shape.text_box_content {
                         match block {
                             docx_model::TextBoxBlockWire::Body(block) => {

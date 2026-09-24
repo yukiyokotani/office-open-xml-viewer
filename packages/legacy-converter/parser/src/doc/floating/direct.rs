@@ -111,7 +111,9 @@ impl Store<'_> {
                 )?;
             }
             Content::Shape(shape) => {
+                let fill = self.direct_fill(shape)?;
                 let shape = direct_shape(
+                    fill,
                     &facts,
                     shape,
                     &whole,
@@ -146,6 +148,7 @@ impl Store<'_> {
                             remaining_bytes,
                         )?)),
                         Content::Shape(shape) => DirectRun::Shape(Box::new(direct_shape(
+                            self.direct_fill(shape)?,
                             &facts,
                             shape,
                             &placed,
@@ -182,6 +185,30 @@ impl Store<'_> {
             image: *image,
             occurrence_id: drawing.occurrence_id,
         }))
+    }
+
+    /// The shape's paint as a DOCX fill: solid, or the stretched picture of an
+    /// msofillPicture fill, sharing the floating picture resources (ECMA-376
+    /// 20.1.8.14 blipFill with a:stretch/a:fillRect).
+    fn direct_fill(&mut self, shape: &shape::Facts) -> Result<Option<ShapeFill>, String> {
+        if let Some((index, _)) = shape.fill_picture {
+            let extension = self.images[&index]
+                .as_ref()
+                .expect("loaded picture fill")
+                .extension;
+            self.selected_images.insert(index);
+            return Ok(Some(ShapeFill::Image {
+                image_path: format!("legacy-doc/float/{index}"),
+                mime_type: mime(extension)?.to_string(),
+                svg_image_path: None,
+                src_rect: None,
+                fill_rect: None,
+                tile: None,
+                alpha: None,
+                duotone: None,
+            }));
+        }
+        Ok(shape.fill.clone().map(|color| ShapeFill::Solid { color }))
     }
 
     fn direct_image(
@@ -545,6 +572,7 @@ fn image_payload(image: &ImageRun) -> Result<usize, String> {
 /// text box margins (ECMA-376 20.1.9.18, 20.1.8.54, 20.1.2.2.24 and
 /// 20.4.2.3; bodyPr lIns/tIns/rIns/bIns and spAutoFit, 21.1.2.1.1-2).
 fn direct_shape(
+    fill: Option<ShapeFill>,
     facts: &ResolvedDrawing,
     shape: &shape::Facts,
     placed: &Placed,
@@ -584,7 +612,7 @@ fn direct_shape(
         z_order: facts.z_order.saturating_add(member),
         preset_geometry: shape.preset.map(str::to_owned),
         subpaths: shape.subpaths.clone(),
-        fill: shape.fill.clone().map(|color| ShapeFill::Solid { color }),
+        fill,
         stroke: line.map(|line| line.color.clone()),
         stroke_width: line.map_or(0.0, |line| pt(line.width_emu)),
         stroke_dash: line.and_then(|line| line.dash).map(str::to_owned),
@@ -622,6 +650,9 @@ fn direct_shape(
         })
     };
     total.add(ends(&run.head_end) + ends(&run.tail_end))?;
+    if let Some(ShapeFill::Image { mime_type, .. }) = &run.fill {
+        total.add(mime_type.capacity())?;
+    }
     total.strings([
         run.anchor_x_align.as_ref(),
         run.anchor_y_align.as_ref(),
@@ -630,7 +661,8 @@ fn direct_shape(
         run.preset_geometry.as_ref(),
         run.fill.as_ref().map(|fill| match fill {
             ShapeFill::Solid { color } => color,
-            _ => unreachable!("solid DOC shape fill"),
+            ShapeFill::Image { image_path, .. } => image_path,
+            _ => unreachable!("solid or picture DOC shape fill"),
         }),
         run.stroke.as_ref(),
         run.stroke_dash.as_ref(),

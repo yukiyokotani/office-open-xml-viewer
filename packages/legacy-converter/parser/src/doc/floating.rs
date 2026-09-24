@@ -373,6 +373,10 @@ impl<'a> Store<'a> {
                     "rotated Word drawing shapes outside groups are not supported",
                 ));
             }
+            if !self.load_fill_picture(&facts)? {
+                self.omitted = true;
+                return Ok(None);
+            }
             let align = direct_alignment(anchor, &placement)?;
             if matches!(anchor.wrapping, 0 | 4 | 5) {
                 return Err(unsupported(
@@ -457,6 +461,16 @@ impl<'a> Store<'a> {
             content,
         )
         .map(Some)
+    }
+
+    /// Load a shape's picture fill BLIP; `false` when it is not a supported
+    /// passive image, which the caller reports as omitted content.
+    #[cfg(feature = "direct-doc")]
+    fn load_fill_picture(&mut self, facts: &shape::Facts) -> Result<bool, String> {
+        match facts.fill_picture {
+            Some((index, _)) => Ok(self.load_image(index)?.is_some()),
+            None => Ok(true),
+        }
     }
 
     /// Decode an indexed delayed BLIP once (MS-DOC 2.9.171) under the store's

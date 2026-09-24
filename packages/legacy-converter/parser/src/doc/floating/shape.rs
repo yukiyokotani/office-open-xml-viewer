@@ -38,6 +38,10 @@ pub(in crate::doc) struct Facts {
     pub fill: Option<String>,
     pub line: Option<Line>,
     pub text: Option<Text>,
+    /// A stretched msofillPicture fill (MS-ODRAW 2.3.7.1-2.3.7.3): the
+    /// zero-based drawing-store BLIP index and whether the fill rotates with
+    /// the shape (fUseShapeAnchor, 2.3.7.43).
+    pub fill_picture: Option<(usize, bool)>,
     /// MS-ODRAW 2.3.18.5 rotation, clockwise about the centre, in degrees.
     /// Only group members may carry a nonzero rotation (see `group`).
     pub rotation: f64,
@@ -170,7 +174,9 @@ impl<'a> Table<'a> {
                 ))),
             };
         }
-        if property.opid & 0x4000 != 0 {
+        // fillBlip (MS-ODRAW 2.3.7.3) is the only BLIP reference a drawing
+        // shape may carry here; the caller resolves it in the drawing store.
+        if property.opid & 0x4000 != 0 && id != 0x186 {
             return Err(unsupported(format!(
                 "Word drawing shape BLIP property {id:#06x} is not supported"
             )));
@@ -256,6 +262,7 @@ impl<'a> Table<'a> {
                 },
                 0x147..=0x150 | 0x151 | 0x155..=0x158 if freeform => {}
                 0x152 if freeform && (client_text.is_none() || value == 0) => {}
+                0x186 => paint.property(0x4186, value)?,
                 0x17f | 0x180..=0x1bf | 0x1c0..=0x1d7 | 0x1ff => paint.property(id, value)?,
                 0x23f => {}
                 // Black-and-white display modes only affect B/W output.
@@ -323,7 +330,18 @@ impl<'a> Table<'a> {
             subpaths = normalized(&decoded, budget)?;
         }
         let line_shape = is_line(kind);
-        let fill = if !path_paint.0 {
+        // msofillPicture stretches the picture over the shape (2.3.7.1). A
+        // fill rectangle, tiling origin, view-relative sizing or opacity has
+        // no representation here and stays rejected with the non-solid fills.
+        let fill_picture = if !line_shape && path_paint.0 && paint.fill_type == Some(3) {
+            paint
+                .foreground_image()
+                .filter(|(_, alpha, _)| *alpha == 65536)
+                .map(|(blip, _, rotates)| ((blip - 1) as usize, rotates))
+        } else {
+            None
+        };
+        let fill = if !path_paint.0 || fill_picture.is_some() {
             None
         } else if let Some((color, alpha)) = paint.solid_fill_or_default(!line_shape) {
             Some(rgb(color, alpha)?)
@@ -335,6 +353,7 @@ impl<'a> Table<'a> {
         if !line_shape
             && path_paint.0
             && fill.is_none()
+            && fill_picture.is_none()
             && paint.filled.unwrap_or(true)
             && paint.fill_ok.unwrap_or(true)
         {
@@ -394,6 +413,7 @@ impl<'a> Table<'a> {
         Ok(Facts {
             preset,
             subpaths,
+            fill_picture,
             rotation,
             fill,
             line,
@@ -673,6 +693,35 @@ mod tests {
             [9, 9]
         )
         .is_err());
+    }
+
+    #[test]
+    fn stretched_picture_fills_reference_the_drawing_store() {
+        let fill = |extra: &[(u16, u32)]| {
+            let mut properties = vec![(0x180u16, 3u32), (0x4186, 1)];
+            properties.extend_from_slice(extra);
+            read(1, 0xa00, &container(&properties, &[], &[]), [9, 9])
+        };
+        let facts = fill(&[]).unwrap();
+        assert_eq!(facts.fill_picture, Some((0, false)));
+        assert!(facts.fill.is_none());
+        // fUseShapeAnchor (use bit 21, value bit 5) rotates the fill.
+        assert_eq!(
+            fill(&[(0x1bf, 0x0060_0060)]).unwrap().fill_picture,
+            Some((0, true))
+        );
+        // Opacity, fill rectangles, tiling origins and missing BLIPs fail.
+        for extra in [
+            (0x182u16, 0x8000u32),
+            (0x1bf, 0x0002_0002),
+            (0x198, 1),
+            (0x195, 1),
+        ] {
+            assert!(fill(&[extra]).is_err(), "{extra:x?}");
+        }
+        assert!(read(1, 0xa00, &container(&[(0x180, 3)], &[], &[]), [9, 9]).is_err());
+        // Other BLIP-valued properties stay rejected.
+        assert!(read(1, 0xa00, &container(&[(0x4104, 1)], &[], &[]), [9, 9]).is_err());
     }
 
     #[test]

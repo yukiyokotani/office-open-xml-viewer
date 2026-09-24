@@ -253,6 +253,14 @@ impl Store<'_> {
                 if matches!(&member.content, Content::Shape(shape) if shape.text.is_some()) {
                     return Err(unsupported("rotated Word drawing text is not supported"));
                 }
+                // fUseShapeAnchor 0 keeps a picture fill upright while the
+                // shape turns; the DOCX shape model has no such fill.
+                if matches!(&member.content, Content::Shape(shape) if shape.fill_picture.is_some_and(|(_, rotates)| !rotates))
+                {
+                    return Err(unsupported(
+                        "upright picture fills in rotated Word shapes are not supported",
+                    ));
+                }
                 let [x, y, width, height] = member.frame;
                 member.frame = [
                     extent[0] as f64 - x - width,
@@ -376,14 +384,19 @@ impl Store<'_> {
                 crop,
             }
         } else {
-            Content::Shape(Box::new(shape::Facts::read(
+            let facts = shape::Facts::read(
                 head.kind,
                 head.flags,
                 true,
                 head.record,
                 extent,
                 &mut self.budget,
-            )?))
+            )?;
+            if !self.load_fill_picture(&facts)? {
+                self.omitted = true;
+                return Ok(None);
+            }
+            Content::Shape(Box::new(facts))
         };
         let rotation = match &content {
             Content::Shape(shape) => shape.rotation.rem_euclid(360.0),
@@ -397,6 +410,14 @@ impl Store<'_> {
             }
             if matches!(&content, Content::Shape(shape) if shape.text.is_some()) {
                 return Err(unsupported("rotated Word drawing text is not supported"));
+            }
+            // fUseShapeAnchor 0 keeps a picture fill upright while the
+            // shape turns; the DOCX shape model has no such fill.
+            if matches!(&content, Content::Shape(shape) if shape.fill_picture.is_some_and(|(_, rotates)| !rotates))
+            {
+                return Err(unsupported(
+                    "upright picture fills in rotated Word shapes are not supported",
+                ));
             }
             if (45.0..135.0).contains(&rotation) || (225.0..315.0).contains(&rotation) {
                 // The child anchor holds the rotated bounds (see above).
