@@ -15,6 +15,7 @@ mod markdown;
 mod math;
 mod numbering;
 mod parser;
+mod ref_bookmark_flow;
 mod styles;
 mod types;
 mod xml_util;

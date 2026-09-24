@@ -22,6 +22,9 @@ use crate::chart_compatibility::apply_word_classic_chart_space_frame;
 use crate::document_projector::{DocumentBodyPlan, DocumentBodyProjector};
 use crate::drawing_compatibility::apply_word_direct_group_rect;
 use crate::numbering::{LevelDef, NumberingMap};
+use crate::ref_bookmark_flow::{
+    apply_matching_leading_break, LeadingBreakCollector, RefInstructionCollector,
+};
 use crate::styles::{
     apply_para, apply_run, merge_cond_layers, merge_tab_stops, merge_table_margin_layer,
     parse_para_fmt, parse_run_fmt, CondFmt, EdgeBorder, ParaFmt, RawTblBorders, RunFmt, StyleMap,
@@ -920,6 +923,7 @@ struct DocumentBodyPreflight {
     sections: Vec<StreamedSectionFact>,
     final_body_block_ordinal: Option<usize>,
     section: SectionProps,
+    ref_leading_breaks: HashMap<String, String>,
 }
 
 /// First pass over `word/document.xml`. Only cross-block facts survive this
@@ -936,6 +940,7 @@ fn preflight_document_body(
     let mut running_refs = SectionRefs::default();
     let mut final_candidate: Option<(usize, SectionProps, SectionPlacementWire)> = None;
     let mut emitted_section_break_candidates = 0usize;
+    let mut ref_instructions = RefInstructionCollector::default();
 
     while let Some(block) = projector.next_block()? {
         let xml = std::str::from_utf8(&block.xml)
@@ -943,6 +948,11 @@ fn preflight_document_body(
         let document = parse_guarded(xml)
             .map_err(|error| format!("{DOCUMENT_PART}: projected block: {error}"))?;
         let root = document.root_element();
+        // The local names are independent of the namespace prefix. Reuse the
+        // existing sectPr descendant walk, and skip field checks entirely for
+        // the common no-field block. A begin and its instrText may occur in
+        // different projected blocks; either token independently opts in.
+        let possible_field = xml.contains("fldChar") || xml.contains("instrText");
         if (block.local_name == "p"
             && child_w(root, "pPr")
                 .and_then(|properties| child_w(properties, "sectPr"))
@@ -971,16 +981,17 @@ fn preflight_document_body(
             _ => LogicalBodySequenceFact::Transparent,
         });
 
-        for sect_pr in root.descendants().filter(|node| {
-            node.is_element()
-                && is_w_ns(node.tag_name().namespace())
-                && node.tag_name().name() == "sectPr"
-        }) {
-            merge_section_refs(sect_pr, &environment.rel_map, &mut running_refs);
-            sections.push(StreamedSectionFact {
-                refs: running_refs.clone(),
-                title_page: child_w(sect_pr, "titlePg").is_some(),
-            });
+        for node in root.descendants().filter(roxmltree::Node::is_element) {
+            if possible_field {
+                ref_instructions.observe_node(node);
+            }
+            if is_w_ns(node.tag_name().namespace()) && node.tag_name().name() == "sectPr" {
+                merge_section_refs(node, &environment.rel_map, &mut running_refs);
+                sections.push(StreamedSectionFact {
+                    refs: running_refs.clone(),
+                    title_page: child_w(node, "titlePg").is_some(),
+                });
+            }
         }
 
         final_candidate = (block.local_name == "sectPr").then(|| {
@@ -1008,12 +1019,39 @@ fn preflight_document_body(
     placement.section_id = format!("section:{final_section_ordinal}");
     section.section_placement = Some(Box::new(placement));
 
+    // Only REF documents pay for a third bounded scan. The first pass retains
+    // requested bookmark names, not document runs or whole-block XML; this pass
+    // projects one block at a time and retains at most 1 MiB of matching text.
+    let mut ref_leading_breaks = HashMap::new();
+    if !ref_instructions.targets.is_empty() {
+        drop(projector);
+        let mut projector = open_document_body_projector(zip)?;
+        let mut collector = LeadingBreakCollector::new(&ref_instructions.targets);
+        while let Some(block) = projector.next_block()? {
+            if block.local_name != "p" {
+                collector.observe_other_block();
+                continue;
+            }
+            let xml = std::str::from_utf8(&block.xml).map_err(|error| {
+                format!("{DOCUMENT_PART}: projected block is not UTF-8: {error}")
+            })?;
+            let document = parse_guarded(xml)
+                .map_err(|error| format!("{DOCUMENT_PART}: projected block: {error}"))?;
+            collector.observe(document.root_element());
+        }
+        if projector.plan()? != plan {
+            return Err("document body changed between bounded passes".to_string());
+        }
+        ref_leading_breaks = collector.finish();
+    }
+
     Ok(DocumentBodyPreflight {
         plan,
         table_sequences,
         sections,
         final_body_block_ordinal,
         section,
+        ref_leading_breaks,
     })
 }
 
@@ -1259,7 +1297,10 @@ impl DocxBodyCursor {
             body_headers,
             body_footers,
             projector,
-            semantic: BodyParseCursor::default(),
+            semantic: BodyParseCursor {
+                ref_leading_breaks: preflight.ref_leading_breaks,
+                ..BodyParseCursor::default()
+            },
             diagnostics: Vec::new(),
             revisions: Vec::new(),
             section_cursor: 0,
@@ -3168,6 +3209,7 @@ fn logical_table_sequence_contexts(
 struct BodyParseCursor {
     field: FieldState,
     section_ordinal: usize,
+    ref_leading_breaks: HashMap<String, String>,
 }
 
 impl BodyParseCursor {
@@ -3192,7 +3234,7 @@ impl BodyParseCursor {
         let mut child_diagnostics = Vec::new();
         match child.tag_name().name() {
             "p" => {
-                let result = parse_paragraph_with_diagnostics(
+                let mut result = parse_paragraph_with_diagnostics(
                     child,
                     style_map,
                     num_map,
@@ -3204,6 +3246,7 @@ impl BodyParseCursor {
                     &mut self.field,
                     &mut child_diagnostics,
                 );
+                apply_matching_leading_break(&mut result, &self.ref_leading_breaks);
                 let lone_break = if result.runs.len() == 1 {
                     match &result.runs[0] {
                         DocRun::Break {
@@ -3351,6 +3394,20 @@ fn parse_body_elements_in_story(
     // building blocks (§17.5.2), so a redundant one can be dropped post-pass (see
     // below) when the cover is already followed by a page-advancing construct.
     let mut cover_break_positions: Vec<usize> = Vec::new();
+
+    // The monolithic API and pull cursor apply the same bounded REF rule.
+    // Only requested target text survives this scan, never bookmarked run trees.
+    let mut ref_instructions = RefInstructionCollector::default();
+    for (child, _) in &body_children {
+        ref_instructions.observe(*child);
+    }
+    if !ref_instructions.targets.is_empty() {
+        let mut collector = LeadingBreakCollector::new(&ref_instructions.targets);
+        for (child, _) in &body_children {
+            collector.observe(*child);
+        }
+        cursor.ref_leading_breaks = collector.finish();
+    }
 
     let logical_table_sequences =
         logical_table_sequence_contexts(&body_children, style_map, table_positioning_context);
@@ -19202,6 +19259,160 @@ mod svg_blip_tests {
             zw.finish().unwrap();
         }
         buf
+    }
+
+    /// ECMA-376 Part 1 §17.16.5.51: a REF result represents its bookmark's
+    /// content. Word controls with and without `\\h` show that an authored page
+    /// break at the start of a bookmarked range precedes the cached result,
+    /// while a text-only range does not add a break. The cached text must still
+    /// match the range; an unrelated/stale result cannot safely borrow its flow.
+    #[test]
+    fn ref_cached_result_preserves_a_matching_bookmark_leading_page_break() {
+        fn body(target: &str, cached: &str) -> String {
+            format!(
+                r#"<w:p><w:r><w:t xml:space="preserve">Before </w:t></w:r>
+  <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+  <w:r><w:instrText xml:space="preserve"> REF Anchor \h </w:instrText></w:r>
+  <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+  <w:r><w:t>{cached}</w:t></w:r>
+  <w:r><w:fldChar w:fldCharType="end"/></w:r>
+  <w:r><w:t xml:space="preserve"> after</w:t></w:r></w:p>
+<w:p><w:r><w:br w:type="page"/></w:r></w:p>
+{target}"#,
+            )
+        }
+        let text_target = r#"<w:p><w:bookmarkStart w:id="1" w:name="Anchor"/>
+  <w:r><w:t>Result</w:t></w:r><w:bookmarkEnd w:id="1"/></w:p>"#;
+        let break_target = r#"<w:p><w:bookmarkStart w:id="1" w:name="Anchor"/>
+  <w:r><w:br w:type="page"/></w:r></w:p>
+<w:p><w:bookmarkStart w:id="2" w:name="Other"/><w:r><w:lastRenderedPageBreak/><w:t>Result</w:t></w:r>
+  <w:bookmarkEnd w:id="1"/><w:bookmarkEnd w:id="2"/></w:p>"#;
+        let table_target = r#"<w:p><w:bookmarkStart w:id="1" w:name="Anchor"/>
+  <w:r><w:br w:type="page"/></w:r></w:p>
+<w:tbl><w:tr><w:tc><w:p><w:r><w:t>Intervening table</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+<w:p><w:r><w:t>Result</w:t></w:r><w:bookmarkEnd w:id="1"/></w:p>"#;
+        let kinds = |target: &str, cached: &str, streamed: bool| {
+            let data = build_docx_with_media(&body(target, cached));
+            let doc = if streamed {
+                parse_from_bytes_streamed_with_limits(&data, None, None, "ref-test")
+            } else {
+                parse_from_bytes(&data)
+            }
+            .expect("valid synthetic document");
+            doc.body
+                .iter()
+                .filter_map(|part| match part {
+                    BodyElement::PageBreak { .. } => Some("break"),
+                    BodyElement::Paragraph(p) => {
+                        let text = p
+                            .runs
+                            .iter()
+                            .filter_map(|run| match run {
+                                DocRun::Text(text) => Some(text.text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<String>();
+                        if text.contains("Before") && text.contains(cached) {
+                            Some("unsplit-ref")
+                        } else if text.contains("Before") {
+                            Some("prefix")
+                        } else if text.contains(" after") {
+                            Some("result-tail")
+                        } else if text == "Result" {
+                            Some("target")
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        for streamed in [false, true] {
+            assert_eq!(
+                kinds(text_target, "Result", streamed),
+                ["unsplit-ref", "break", "target"]
+            );
+            assert_eq!(
+                kinds(break_target, "Result", streamed),
+                ["prefix", "break", "result-tail", "break", "break", "target"]
+            );
+            assert_eq!(
+                kinds(break_target, "Stale", streamed),
+                ["unsplit-ref", "break", "break", "target"]
+            );
+            assert_eq!(
+                kinds(table_target, "Result", streamed),
+                ["unsplit-ref", "break", "break", "target"]
+            );
+
+            for (instruction, expected_breaks) in [
+                ("REF Anchor", 3),
+                ("REF Anchor \\p", 2),
+                ("REF Anchor \\n", 2),
+                ("REF Anchor \\* MERGEFORMAT", 2),
+                ("REF \"Anchor Other\" \\h", 2),
+            ] {
+                let xml = body(break_target, "Result").replace("REF Anchor \\h", instruction);
+                let data = build_docx_with_media(&xml);
+                let doc = if streamed {
+                    parse_from_bytes_streamed_with_limits(&data, None, None, "ref-switch-test")
+                } else {
+                    parse_from_bytes(&data)
+                }
+                .expect("valid synthetic document");
+                assert_eq!(
+                    doc.body
+                        .iter()
+                        .filter(|part| matches!(part, BodyElement::PageBreak { .. }))
+                        .count(),
+                    expected_breaks,
+                    "instruction {instruction}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ref_leading_break_applies_to_separate_fields_but_not_nested_results() {
+        let field = r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>
+  <w:r><w:instrText> REF Anchor </w:instrText></w:r>
+  <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+  <w:r><w:t>Result</w:t></w:r>
+  <w:r><w:fldChar w:fldCharType="end"/></w:r>"#;
+        let target = r#"<w:p><w:bookmarkStart w:id="1" w:name="Anchor"/>
+  <w:r><w:br w:type="page"/></w:r></w:p>
+<w:p><w:r><w:t>Result</w:t></w:r><w:bookmarkEnd w:id="1"/></w:p>"#;
+        let separate = format!(
+            r#"<w:p><w:r><w:t>A </w:t></w:r>{field}<w:r><w:t> B </w:t></w:r>{field}</w:p>{target}"#
+        );
+        let nested = format!(
+            r#"<w:p><w:r><w:t>A </w:t></w:r>
+  <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+  <w:r><w:instrText> REF Anchor </w:instrText></w:r>
+  <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+  <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+  <w:r><w:instrText> HYPERLINK x </w:instrText></w:r>
+  <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+  <w:r><w:t>Result</w:t></w:r>
+  <w:r><w:fldChar w:fldCharType="end"/></w:r>
+  <w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>{target}"#
+        );
+        let break_count = |body: &str| {
+            let doc = parse_from_bytes_streamed_with_limits(
+                &build_docx_with_media(body),
+                None,
+                None,
+                "ref-test",
+            )
+            .expect("valid synthetic document");
+            doc.body
+                .iter()
+                .filter(|part| matches!(part, BodyElement::PageBreak { .. }))
+                .count()
+        };
+        assert_eq!(break_count(&separate), 3);
+        assert_eq!(break_count(&nested), 1);
     }
 
     /// End-to-end through `parse()`: an inline `<w:drawing>` whose `<a:blip>`
