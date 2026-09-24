@@ -216,6 +216,8 @@ struct Path {
     fill: bool,
     stroke: bool,
     has_open_subpath: bool,
+    /// The fill flag as authored, before the open-path veto in `end`.
+    authored_fill: bool,
 }
 impl Default for Path {
     fn default() -> Self {
@@ -224,6 +226,7 @@ impl Default for Path {
             fill: true,
             stroke: true,
             has_open_subpath: false,
+            authored_fill: true,
         }
     }
 }
@@ -317,6 +320,7 @@ impl PathReader<'_, '_> {
     }
     fn end(&mut self) {
         if !self.current.commands.is_empty() {
+            self.current.authored_fill = self.current.fill;
             self.current.fill &= !self.open && !self.current.has_open_subpath;
             self.result.paths.push(std::mem::take(&mut self.current));
         }
@@ -344,6 +348,16 @@ fn array(bytes: &[u8]) -> Result<(usize, usize, &[u8]), String> {
     Ok((n, size, &bytes[6..]))
 }
 impl Decoded {
+    /// Like `uniform_paint`, but with each path's authored fill flag: a host
+    /// whose application fills open paths (DrawingML closes them implicitly
+    /// for fill) uses this instead of the open-path veto.
+    pub fn uniform_authored_paint(&self) -> Option<(bool, bool)> {
+        let first = self.paths.first()?;
+        self.paths
+            .iter()
+            .all(|p| p.authored_fill == first.authored_fill && p.stroke == first.stroke)
+            .then_some((first.authored_fill, first.stroke))
+    }
     pub fn uniform_paint(&self) -> Option<(bool, bool)> {
         let first = self.paths.first()?;
         self.paths
