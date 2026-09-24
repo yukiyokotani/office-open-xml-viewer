@@ -882,13 +882,20 @@ fn textbox_content(
     )?;
     // List counters shared between textboxes and the main story, and breaks
     // inside a textbox, have no Office control yet: keep them fail-closed.
+    // A bullet level has no counter, so its marker does not depend on that
+    // sharing; bullets are projected (each textbox uses its own numbering
+    // store, which only matters for counted levels).
     let numbered = || unsupported("direct DOC model does not yet number textbox paragraphs");
+    let counted = |paragraph: &docx_model::DocParagraph| {
+        paragraph
+            .numbering
+            .as_ref()
+            .is_some_and(|numbering| numbering.format != "bullet")
+    };
     let mut tables = Vec::new();
     for block in &body {
         match block {
-            BodyElement::Paragraph(paragraph) if paragraph.numbering.is_some() => {
-                return Err(numbered())
-            }
+            BodyElement::Paragraph(paragraph) if counted(paragraph) => return Err(numbered()),
             BodyElement::Paragraph(_) => {}
             BodyElement::Table(table) => tables.push(table.as_ref()),
             _ => {
@@ -906,7 +913,7 @@ fn textbox_content(
             .flat_map(|cell| &cell.content)
         {
             match element {
-                docx_model::CellElement::Paragraph(paragraph) if paragraph.numbering.is_some() => {
+                docx_model::CellElement::Paragraph(paragraph) if counted(paragraph) => {
                     return Err(numbered())
                 }
                 docx_model::CellElement::Paragraph(_) => {}
