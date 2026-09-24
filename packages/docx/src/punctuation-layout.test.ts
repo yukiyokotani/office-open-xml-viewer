@@ -584,7 +584,21 @@ describe('ECMA-376 East-Asian punctuation fit', () => {
       totalPages: 1,
     });
 
+    // Office boundary controls in Latin Calibri/Arial keep . and , but wrap
+    // the complete word ending in ) or } once its advance exceeds the line.
     expect(lines(latin, 30, true).map(textOf)).toEqual(['A B.']);
+    expect(lines(buildSegments([textRun('A B,', 'en-us')], {
+      pageIndex: 0,
+      totalPages: 1,
+    }), 30, true).map(textOf)).toEqual(['A B,']);
+    expect(lines(buildSegments([textRun('A B)', 'en-us')], {
+      pageIndex: 0,
+      totalPages: 1,
+    }), 30, true).map(textOf)).toEqual(['A ', 'B)']);
+    expect(lines(buildSegments([textRun('A B}', 'en-us')], {
+      pageIndex: 0,
+      totalPages: 1,
+    }), 30, true).map(textOf)).toEqual(['A ', 'B}']);
     expect(lines(buildSegments([textRun('A B.', null)], {
       pageIndex: 0,
       totalPages: 1,
@@ -602,7 +616,13 @@ describe('ECMA-376 East-Asian punctuation fit', () => {
       totalPages: 1,
     }), 30, true).map(textOf)).toEqual(['甲 A)']);
     expect(wordIsOverflowPunctuation('.', 'en-us', false, true)).toBe(true);
-    expect(wordIsOverflowPunctuation('}', undefined, false, true)).toBe(true);
+    expect(wordIsOverflowPunctuation(',', 'en-us', false, true)).toBe(true);
+    // Office-produced Calibri/Arial boundary controls wrap these Latin words
+    // at their normal advance; the older ASCII-union projection overhung them.
+    expect(wordIsOverflowPunctuation('}', undefined, false, true)).toBe(false);
+    expect(wordIsOverflowPunctuation(')', 'en-us', false, true)).toBe(false);
+    expect(wordIsOverflowPunctuation(':', 'en-us', false, true)).toBe(false);
+    expect(wordIsOverflowPunctuation('>', 'en-us', false, true)).toBe(false);
     expect(wordIsOverflowPunctuation('.', 'ar-sa', false, false)).toBe(false);
     expect(wordIsOverflowPunctuation('.', 'en-us', false, false, true, undefined)).toBe(true);
     expect(wordIsOverflowPunctuation(':', 'en-us', false, false, true, 'en-us')).toBe(true);

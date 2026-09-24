@@ -1363,7 +1363,7 @@ function textPlacement(
       perGapPt: segment.fitTextPerGapPx ?? 0,
       trailingPadPt: segment.fitTextTrailingPadPx ?? 0,
     } } : {}),
-    ...(segment.kerning !== undefined ? { kerning: segment.fontSize >= segment.kerning } : {}),
+    kerning: segment.kerning !== undefined && segment.fontSize >= segment.kerning,
     ...(segment.position !== undefined ? { positionPt: segment.position } : {}),
     ...(segment.vertAlign ? { verticalAlign: segment.vertAlign } : {}),
     ...(segment.tateChuYoko ? { tateChuYoko: true } : {}),
@@ -1438,7 +1438,7 @@ function textPlacement(
       scaleX: segment.charScale ?? 1,
       direction: segment.rtl ? 'rtl' : 'ltr',
       kerning: segment.kerning === undefined
-        ? 'auto'
+        ? 'none'
         : segment.fontSize >= segment.kerning ? 'normal' : 'none',
       writingMode: segment.verticalRun ? 'vertical-rl' : 'horizontal-tb',
     }],
@@ -1573,7 +1573,8 @@ function numberingMarkerPlacements(
         range: { start: rangeBase + span.start, end: rangeBase + span.end },
         offset: { xPt: 0, yPt: 0 }, letterSpacingPt: 0, scaleX: 1,
         direction: context.baseRtl ? 'rtl' : 'ltr',
-        kerning: 'auto', writingMode: 'horizontal-tb',
+        kerning: paragraph.numberingMarkerShapeInput?.kerning ? 'normal' : 'none',
+        writingMode: 'horizontal-tb',
       }],
       color, fontRoute: span.fontRoute,
       fontSizePt: paragraph.numberingMarkerShapeInput?.fontSizePt ?? span.ascentPt + span.descentPt,

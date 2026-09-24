@@ -246,8 +246,8 @@ describe('WD4 run character metrics reach the glyph draw (measure==paint)', () =
     expect(drawOf(fills, 'عنوان').fontKerning).toBe('none');
   });
 
-  it('retains Canvas auto geometry when w:kern is absent from the resolved style hierarchy', async () => {
+  it('disables kerning when w:kern is absent from the resolved style hierarchy', async () => {
     const { fills } = await render([textRun('WORD')]);
-    expect(drawOf(fills, 'WORD').fontKerning).toBe('auto');
+    expect(drawOf(fills, 'WORD').fontKerning).toBe('none');
   });
 });

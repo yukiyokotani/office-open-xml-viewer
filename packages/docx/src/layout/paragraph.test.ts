@@ -1591,13 +1591,13 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
     }, markerServices);
 
     expect(markerShapeRequests).toEqual([
-      expect.objectContaining({ text: '1.', kerning: undefined }),
+      expect.objectContaining({ text: '1.', kerning: false }),
     ]);
     expect(node.lines[0]?.placements).toEqual([
       expect.objectContaining({
         kind: 'text', role: 'numbering-marker', text: '1.',
         range: { start: -2, end: 0 }, origin: { xPt: 10, yPt: expect.any(Number) },
-        paintOps: [expect.objectContaining({ kerning: 'auto' })],
+        paintOps: [expect.objectContaining({ kerning: 'none' })],
       }),
       expect.objectContaining({
         kind: 'text', text: 'AB', range: { start: 0, end: 2 },

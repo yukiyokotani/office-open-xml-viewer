@@ -49,7 +49,7 @@ function anchorFacts(occurrenceId: string) {
 }
 
 describe('RTL header anchor kerning projection', () => {
-  it('retains the anchored image while an absent w:kern keeps required complex-script shaping', () => {
+  it('retains the anchored image while an absent w:kern disables optional pair kerning', () => {
     const occurrenceId = 'wp-anchor-rtl-header';
     const facts = anchorFacts(occurrenceId);
     const header = paragraph([
@@ -122,6 +122,8 @@ describe('RTL header anchor kerning projection', () => {
       }),
     ]);
     expect(rtlMeasurementStates.length).toBeGreaterThan(0);
-    expect(new Set(rtlMeasurementStates)).toEqual(new Set<CanvasFontKerning>(['auto']));
+    // Font discovery may probe under Canvas `auto`; retained WML text must be
+    // measured under the spec's absent-kerning default.
+    expect(rtlMeasurementStates).toContain('none');
   });
 });

@@ -282,12 +282,12 @@ export const WORD_OVERFLOW_PUNCTUATION_LATIN_PARENT_RUN = defineCompatibilityRul
   id: 'word-overflow-punctuation-latin-parent-run',
   evidence: {
     kind: 'office-observation',
-    syntheticFixtureId: 'overflow-punctuation-latin-parent-run-boundary-matrix',
+    syntheticFixtureId: 'latin-ascii-punctuation-advance-boundary-matrix',
     application: 'Microsoft Word',
     version: '16.111.1',
     platform: 'macOS 26.5.2',
   },
-  description: 'Although [MS-OE376] §2.1.56 presents concrete punctuation sets by CJK language, Word also applies the union\'s ASCII closing punctuation to Latin parent runs and to complex-script segments whose parent run has no explicit RTL-primary bidi language. The observed Latin matrix covers `.`, `,`, and `}` at 9, 10, 11, and 14 points; production controls cover `.`, `:`, `)`, and `>` with absent bidi language. An explicit `ar-SA` bidi language is the counterexample.',
+  description: 'Although [MS-OE376] §2.1.56 presents concrete punctuation sets by CJK language, Office-produced Latin boundary controls admit `.` and `,` beyond the ordinary word-fit extent. Controls at 9 and 14 points in Calibri and Arial instead wrap `)` and `}` with the word at the measured advance boundary; 10-point controls also wrap `!`, `%`, `:`, `;`, `>`, `?`, and `]`. Complex-script segments with no explicit RTL-primary bidi language retain their separate observed fallback; an explicit `ar-SA` bidi language is its counterexample.',
 });
 
 export const WORD_FULL_WIDTH_CHARACTER_SPACING_SCOPE = defineCompatibilityRule({
@@ -476,6 +476,7 @@ const ALL_WORD_OVERFLOW_PUNCTUATION = new Set([
   ...WORD_OVERFLOW_PUNCTUATION.zhHant,
   ...WORD_OVERFLOW_PUNCTUATION.ko,
 ]);
+const LATIN_WORD_OVERFLOW_PUNCTUATION = new Set(['.', ',']);
 
 export const RTL_PRIMARY_SUBTAGS = new Set([
   'ar', 'fa', 'ur', 'he', 'iw', 'yi', 'ji', 'ps', 'sd', 'ug', 'dv', 'syr', 'ckb',
@@ -501,17 +502,20 @@ export function wordIsOverflowPunctuation(
   }
   // ECMA-376 §17.3.1.21 is script-neutral. Although [MS-OE376] §2.1.56
   // describes Word's concrete sets as CJK-language behavior, Office-produced
-  // boundary controls also hang the set's ASCII closing punctuation in Latin
-  // parent runs. Complex-script production controls with an absent bidi tag
-  // likewise hang `.`, `:`, `)` and `>`; an explicit RTL-primary tag such as
+  // boundary controls hang `.` and `,` in Latin parent runs; 9/14pt Calibri
+  // and Arial counterexamples wrap `)` and `}` at the normal measured advance
+  // boundary. Complex-script production controls with an absent bidi tag
+  // hang `.`, `:`, `)` and `>`; an explicit RTL-primary tag such as
   // `ar-SA` is the counterexample. A CJK run carrying an inherited
   // non-CJK language also uses the union, because its actual script route is
   // more authoritative than that inherited language.
   const bidiPrimary = bidiLanguage?.split('-')[0].toLowerCase();
   const explicitRtlBidi = bidiPrimary != null && RTL_PRIMARY_SUBTAGS.has(bidiPrimary);
   const observedComplexFallback = parentRunHasComplexScriptText && !explicitRtlBidi;
-  return (parentRunHasEastAsianText || parentRunHasLatinText || observedComplexFallback)
-    && ALL_WORD_OVERFLOW_PUNCTUATION.has(character);
+  if (parentRunHasEastAsianText || observedComplexFallback) {
+    return ALL_WORD_OVERFLOW_PUNCTUATION.has(character);
+  }
+  return parentRunHasLatinText && LATIN_WORD_OVERFLOW_PUNCTUATION.has(character);
 }
 
 /** Compatibility projection governed by {@link WORD_JUSTIFIED_CANDIDATE_SEPARATOR_FIT}. */

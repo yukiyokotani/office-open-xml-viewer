@@ -351,8 +351,8 @@ export interface LayoutTextSeg extends LayoutSegSource {
   positionExtendsLineBox?: boolean;
   /** ECMA-376 §17.3.2.19 `<w:kern>` — font-kerning threshold in POINTS (smallest
    *  kerned size). Sets `ctx.fontKerning` on measure and paint when the run's
-   *  font size ≥ the threshold. Absent leaves the inherited Canvas kerning
-   *  policy unchanged. */
+   *  font size ≥ the threshold. Absent at every style level disables kerning;
+   *  Canvas `auto` is not the WordprocessingML default. */
   kerning?: number;
   /** ECMA-376 §17.3.2.10 `<w:eastAsianLayout w:vert>` — horizontal-in-vertical
    *  (縦中横). Set by {@link buildSegments} ONLY when the run declares `w:vert`
@@ -3294,9 +3294,8 @@ export function buildSegments(
         complexScript: cs,
         fontHint: r.fontHint,
         eastAsiaLanguage: r.langEastAsia,
-        kerning: effectiveKerningThreshold == null
-          ? undefined
-          : (cs ? csFontSize : base.fontSize) >= effectiveKerningThreshold,
+        kerning: effectiveKerningThreshold != null
+          && (cs ? csFontSize : base.fontSize) >= effectiveKerningThreshold,
         measure: false,
       });
       const shaped = authoritativeSpan
@@ -4164,7 +4163,7 @@ export function buildSegments(
         effectiveFontSizePt,
         segment.bold ? 700 : 400,
         segment.italic ? 'italic' : 'normal',
-        segment.kerning ?? 'auto',
+        segment.kerning ?? 'none',
       ].join('|');
       const cached = metricCache.get(key);
       if (cached !== undefined) return cached;
@@ -5081,15 +5080,14 @@ export function layoutLines(
 
   // ECMA-376 §17.3.2.19 `<w:kern>` — set `ctx.fontKerning` to match how the PAINT
   // pass will draw a run, so a kerned run measures exactly as it is drawn
-  // (measure==paint). Kerning is enabled only when the run declares `w:kern` and its font
-  // size is at or above the threshold (the spec's "smallest font size which shall
-  // have its kerning automatically adjusted"). A run that does not opt in leaves
-  // `ctx.fontKerning` at its inherited value rather than forcing a document-wide
-  // default.
+  // (measure==paint). ISO/IEC 29500 §17.3.2.19: absent `w:kern` at every style
+  // level means no pair kerning. Canvas `auto` may kern even at 10pt: Office
+  // Calibri controls with absent/above-size `w:kern` wrap at a boundary where
+  // `normal` fits; an at-size threshold reverses that result. Set the state
+  // explicitly per run so a caller's Canvas default cannot change WML layout.
   const setSegKerning = (s: LayoutTextSeg): CanvasFontKerning | null => {
-    if (s.kerning == null) return null;
     const prev = ctx.fontKerning;
-    ctx.fontKerning = s.fontSize >= s.kerning ? 'normal' : 'none';
+    ctx.fontKerning = s.kerning != null && s.fontSize >= s.kerning ? 'normal' : 'none';
     return prev;
   };
   const restoreKerning = (prev: CanvasFontKerning | null): void => {
