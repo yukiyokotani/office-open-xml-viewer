@@ -42,6 +42,12 @@ impl Properties {
         if self.bool_value("vanish").unwrap_or(false) {
             return Ok(None);
         }
+        if self.field_vanish == Some(true) {
+            // Word sets fFldVanish on field instruction characters, which the
+            // direct field projection never emits as text. Its effect on
+            // ordinary visible text is not specified beyond "hidden".
+            return Err(unsupported("Word field-hidden property on visible text"));
+        }
         let underline_token = self.values.get("u").map(String::as_str);
         let underline = underline_token.is_some_and(|value| value != "none");
         let underline_color = underline
@@ -112,6 +118,7 @@ impl Properties {
             position,
             kerning,
             highlight,
+            snap_to_grid: self.direct_only.snap_to_grid,
             // MS-DOC 2.6.1 sprmCShd/sprmCShd80: a single-color fill only.
             background: match &self.direct_only.shading {
                 Some(ShadingFill::Rgb(fill)) => Some(fill.clone()),
@@ -166,6 +173,7 @@ impl Properties {
             position_pt: number_wire(position_raw, run.position),
             character_spacing_pt: run.char_spacing,
             character_scale: run.char_scale,
+            snap_to_grid: run.snap_to_grid,
             fit_text: fit_text.map(|(width, id)| FitTextSpecWire {
                 val_twips: f64::from(width),
                 id: Some(id.to_string()),
@@ -221,6 +229,15 @@ impl Properties {
             kerning: self.half_points("kern")?,
             ..RunFontFacts::default()
         })
+    }
+
+    /// True when a U+000B line break with these properties must clear floating
+    /// objects (LBCOperand lbrLeft/Right/Both). The DOCX model's line break
+    /// carries no `w:clear`, so such breaks stay unsupported.
+    pub(in crate::doc) fn direct_line_break_clears(&self) -> bool {
+        self.direct_only
+            .line_break
+            .is_some_and(|value| value & 3 != 0)
     }
 
     pub(in crate::doc) fn direct_vanish(&self) -> bool {
@@ -1262,18 +1279,20 @@ mod tests {
     }
 
     #[test]
-    fn patterned_or_automatic_solid_character_shading_stays_unsupported() {
+    fn percentage_character_shading_blends_and_other_patterns_stay_unsupported() {
         let base = Properties::default();
         for operand in [
-            cshd([0, 0, 0, 0xff], [0xff, 0xff, 0xff, 0], 0x26),
+            cshd([0, 0, 0, 0xff], [0xff, 0xff, 0xff, 0], 14),
+            cshd([0, 0, 0, 0xff], [0, 0, 0, 0xff], 0x26),
             cshd([0, 0, 0, 0xff], [0xff, 0xff, 0xff, 0], 1),
         ] {
             assert!(!base.clone().apply(0xca71, &operand, &base).unwrap());
         }
-        assert!(!base
-            .clone()
-            .apply(0x4866, &0x9900u16.to_le_bytes(), &base)
-            .unwrap());
+        // Word paints pct15 with an automatic foreground over white as #D9D9D9.
+        let pct = applied(&[(0x4866, 0x9900u16.to_le_bytes().to_vec())]);
+        assert_eq!(public_run(&pct)["background"], "d9d9d9");
+        let pct = applied(&[(0xca71, cshd([0, 0, 0, 0xff], [0xff, 0xff, 0xff, 0], 0x26))]);
+        assert_eq!(public_run(&pct)["background"], "d9d9d9");
         let cleared = applied(&[(0xca71, cshd([0, 0, 0, 0xff], [0xff; 4], 0))]);
         assert!(public_run(&cleared)["background"].is_null());
     }
@@ -1413,5 +1432,64 @@ mod tests {
             &plain_body,
             false
         ));
+    }
+
+    #[test]
+    fn document_grid_participation_and_field_hiding_are_style_relative_toggles() {
+        let base = Properties::default();
+        let properties = applied(&[(0x0868, vec![0])]);
+        assert!(properties.has_direct_only_properties());
+        assert_eq!(
+            public_run(&properties),
+            parsed_rpr(r#"<w:snapToGrid w:val="0"/><w:sz w:val="20"/>"#)
+        );
+        let run = properties
+            .direct_text_run("x".into(), &[])
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            run.typography_acquisition.unwrap().snap_to_grid,
+            Some(false)
+        );
+        // Toggles are relative to the style; the default is "uses the grid".
+        let mut style = Properties::sparse();
+        style.apply(0x0868, &[0], &base).unwrap();
+        let mut value = style.clone();
+        value.apply(0x0868, &[0x81], &style).unwrap();
+        assert_eq!(value.direct_only.snap_to_grid, Some(true));
+        let mut inherited = base.clone();
+        inherited.apply(0x0868, &[0x81], &base).unwrap();
+        assert_eq!(inherited.direct_only.snap_to_grid, Some(false));
+        assert!(base.clone().apply(0x0868, &[2], &base).is_err());
+
+        // Field hiding survives CPlain/CIstd and only fails for visible text.
+        let mut hidden = applied(&[(0x0802, vec![1])]);
+        hidden.reset_to(&base, false);
+        assert_eq!(hidden.field_vanish, Some(true));
+        assert!(hidden.direct_text_run("x".into(), &[]).is_err());
+        let mut vanished = hidden.clone();
+        vanished.apply(0x083c, &[1], &base).unwrap();
+        assert!(vanished.direct_text_run("x".into(), &[]).unwrap().is_none());
+        let shown = applied(&[(0x0802, vec![0])]);
+        assert!(shown.direct_text_run("x".into(), &[]).unwrap().is_some());
+        assert!(!shown.has_direct_only_properties());
+    }
+
+    #[test]
+    fn line_break_type_uses_its_two_documented_bits_and_clearing_stays_unsupported() {
+        let base = Properties::default();
+        // Word writes 0x7C as w:clear="none"; text characters ignore it.
+        let none = applied(&[(0x2879, vec![0x7c])]);
+        assert!(!none.direct_line_break_clears());
+        assert!(!none.has_direct_only_properties());
+        assert_eq!(public_run(&none), public_run(&base));
+        for value in [1u8, 2, 3, 0x7f] {
+            let clears = applied(&[(0x2879, vec![value])]);
+            assert!(clears.direct_line_break_clears(), "{value:#x}");
+            assert!(clears.has_direct_only_properties());
+        }
+        let mut reset = applied(&[(0x2879, vec![3])]);
+        reset.reset_to(&base, false);
+        assert!(!reset.direct_line_break_clears());
     }
 }

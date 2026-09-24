@@ -58,6 +58,9 @@ pub struct Properties {
     /// MS-DOC 2.6.1 sprmCSymbol / 2.9.47 CSymbolOperand (ftc, xchar).
     /// Both sprmCPlain and sprmCIstd preserve it.
     symbol: Option<(u16, u16)>,
+    /// MS-DOC 2.6.1 sprmCFFldVanish (field text hidden). Both sprmCPlain and
+    /// sprmCIstd preserve it.
+    field_vanish: Option<bool>,
 }
 
 /// Character properties whose MS-DOC semantics map onto the direct DOCX
@@ -76,6 +79,10 @@ struct DirectOnly {
     fit_text: Option<(i32, i32)>,
     /// sprmCFELayout UFEL fTNY / fTNYCompress (horizontal in vertical).
     east_asian: Option<(bool, bool)>,
+    /// sprmCFUsePgsuSettings: ECMA-376 17.3.2.34 run snapToGrid.
+    snap_to_grid: Option<bool>,
+    /// sprmCLbcCRJ raw LBCOperand; only meaningful on U+000B line breaks.
+    line_break: Option<u8>,
 }
 
 impl DirectOnly {
@@ -84,7 +91,11 @@ impl DirectOnly {
         if self.shading.is_some() {
             return true;
         }
-        self.border.is_some() || self.fit_text.is_some() || self.east_asian.is_some()
+        self.border.is_some()
+            || self.fit_text.is_some()
+            || self.east_asian.is_some()
+            || self.snap_to_grid.is_some()
+            || self.line_break.is_some_and(|value| value & 3 != 0)
     }
 
     fn overlay(&mut self, patch: &Self) {
@@ -100,6 +111,12 @@ impl DirectOnly {
         }
         if patch.east_asian.is_some() {
             self.east_asian = patch.east_asian;
+        }
+        if patch.snap_to_grid.is_some() {
+            self.snap_to_grid = patch.snap_to_grid;
+        }
+        if patch.line_break.is_some() {
+            self.line_break = patch.line_break;
         }
     }
 }
@@ -184,6 +201,7 @@ impl Default for Properties {
             picture: Picture::default(),
             direct_only: DirectOnly::default(),
             symbol: None,
+            field_vanish: None,
         }
     }
 }
@@ -205,6 +223,7 @@ impl Properties {
             picture: Picture::default(),
             direct_only: DirectOnly::default(),
             symbol: None,
+            field_vanish: None,
         }
     }
 
@@ -241,6 +260,9 @@ impl Properties {
             }
         }
         self.direct_only.overlay(&patch.direct_only);
+        if patch.field_vanish.is_some() {
+            self.field_vanish = patch.field_vanish;
+        }
         if patch.symbol.is_some() {
             self.symbol = patch.symbol;
         }
@@ -251,7 +273,7 @@ impl Properties {
     /// True when an accepted property is projected only by the direct model;
     /// the WordprocessingML adapter keeps reporting it as omitted.
     pub(super) fn has_direct_only_properties(&self) -> bool {
-        self.direct_only.any() || self.symbol.is_some()
+        self.direct_only.any() || self.symbol.is_some() || self.field_vanish == Some(true)
     }
 
     pub fn reset_to(&mut self, paragraph: &Self, preserve_object: bool) {
@@ -262,6 +284,7 @@ impl Properties {
         let font_hint = self.font_hint;
         let font_hint_present = self.font_hint_present;
         let symbol = self.symbol;
+        let field_vanish = self.field_vanish;
         if !preserve_object {
             picture.object = paragraph.picture.object;
         }
@@ -276,6 +299,7 @@ impl Properties {
         self.font_hint = font_hint;
         self.font_hint_present = font_hint_present;
         self.symbol = symbol;
+        self.field_vanish = field_vanish;
         for (key, value) in preserved {
             if let Some(value) = value {
                 self.values.insert(key, value);
@@ -399,6 +423,60 @@ impl Properties {
                     return Err(unsupported("invalid Word character revision session ID"));
                 }
                 let _ = u32_at(operand, 0)?;
+                return Ok(true);
+            }
+            0x0868 | 0x0802 => {
+                // ToggleOperand (MS-DOC 2.9.327), relative to the style value.
+                if operand.len() != 1 {
+                    return Err(unsupported("invalid Word character toggle"));
+                }
+                let (current, base) = if code == 0x0868 {
+                    // sprmCFUsePgsuSettings: "by default, text uses the
+                    // document grid"; a corpus DOC/DOCX pair maps it to
+                    // ECMA-376 17.3.2.34 w:snapToGrid.
+                    (
+                        &mut self.direct_only.snap_to_grid,
+                        style.direct_only.snap_to_grid.unwrap_or(true),
+                    )
+                } else {
+                    // sprmCFFldVanish: "field text is hidden"; default false.
+                    (&mut self.field_vanish, style.field_vanish.unwrap_or(false))
+                };
+                *current = Some(match operand[0] {
+                    0 => false,
+                    1 => true,
+                    0x80 => base,
+                    0x81 => !base,
+                    _ => return Err(unsupported("invalid Word character toggle")),
+                });
+                return Ok(true);
+            }
+            0x486b => {
+                // Not listed in MS-DOC 2.6.1. Its two-byte operand is a
+                // Windows code page (the corpus value is 1252). MS-DOC 2.4.1
+                // already fixes compressed text to code page 1252 and stores
+                // other text as UTF-16, and a Word-saved DOC/DOCX corpus pair
+                // has no counterpart for it in the DOCX style. Only that
+                // value is accepted as having no display effect.
+                if operand.len() != 2 {
+                    return Err(unsupported("invalid Word character code page"));
+                }
+                return Ok(u16_at(operand, 0)? == 1252);
+            }
+            0x2879 => {
+                // MS-DOC 2.6.1 sprmCLbcCRJ / 2.9.129 LBCOperand: where text
+                // resumes after a U+000B line break (lbrNone/Left/Right/Both).
+                // It MUST NOT be applied to other characters, which ignore it.
+                // A Word-saved DOC/DOCX corpus pair carries the undocumented
+                // value 0x7C on exactly the four line breaks Word writes as
+                // `w:br w:type="textWrapping" w:clear="none"`, and on ordinary
+                // text that its DOCX leaves unformatted: only the two low bits
+                // select the break type. The value is checked at line breaks.
+                self.direct_only.line_break = Some(
+                    *operand
+                        .first()
+                        .ok_or_else(|| unsupported("truncated Word line break type"))?,
+                );
                 return Ok(true);
             }
             0x6a09 => {
@@ -951,6 +1029,16 @@ mod tests {
         assert!(base.clone().apply(0x6887, &[0, 0, 0, 0x80], &base).is_err());
         assert!(base.clone().apply(0x6887, &[0, 0, 0], &base).is_err());
         assert!(base.clone().apply(0x4888, &[0], &base).is_err());
+    }
+
+    #[test]
+    fn windows_1252_character_code_page_has_no_effect() {
+        let base = Properties::default();
+        let mut value = base.clone();
+        assert!(value.apply(0x486b, &1252u16.to_le_bytes(), &base).unwrap());
+        assert_eq!(value, base);
+        assert!(!value.apply(0x486b, &932u16.to_le_bytes(), &base).unwrap());
+        assert!(base.clone().apply(0x486b, &[0xe4], &base).is_err());
     }
 
     #[test]

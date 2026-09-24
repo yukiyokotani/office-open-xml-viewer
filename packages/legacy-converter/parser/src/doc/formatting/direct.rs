@@ -113,6 +113,21 @@ impl Formatting<'_> {
             .direct_text_run(text, &self.fonts)
     }
 
+    /// MS-DOC 2.6.1 sprmCLbcCRJ on a U+000B line break (see
+    /// `Properties::direct_line_break_clears`).
+    pub(in crate::doc) fn direct_line_break_clears(
+        &mut self,
+        paragraph_style: usize,
+        table_style: Option<TableFormattingKey>,
+        fc: usize,
+        prm: u16,
+        prcs: &[&[u8]],
+    ) -> Result<bool, String> {
+        Ok(self
+            .run_properties_with_table(paragraph_style, table_style, fc, prm, prcs)?
+            .direct_line_break_clears())
+    }
+
     /// Resolve the CHPX cascade once for an inline-picture character. Visibility
     /// is a run property just as it is for text; picture acquisition must not
     /// create a resource for a vanished run.

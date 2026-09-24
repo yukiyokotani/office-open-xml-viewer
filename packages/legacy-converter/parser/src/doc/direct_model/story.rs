@@ -208,12 +208,26 @@ pub(super) fn project(
                         budget,
                     )?;
                 }
-                Token::LineBreak => budget.push(
-                    &mut paragraph.runs,
-                    DocRun::Break {
-                        break_type: BreakType::Line,
-                    },
-                )?,
+                Token::LineBreak => {
+                    let (_, fc, piece) = story
+                        .position(cp)
+                        .ok_or_else(|| unsupported("Word line break outside piece table"))?;
+                    if formatting.direct_line_break_clears(
+                        style,
+                        table_style,
+                        fc,
+                        piece.prm,
+                        &story.prcs,
+                    )? {
+                        formatting.unsupported_character_properties = true;
+                    }
+                    budget.push(
+                        &mut paragraph.runs,
+                        DocRun::Break {
+                            break_type: BreakType::Line,
+                        },
+                    )?
+                }
                 Token::PageBreak | Token::ColumnBreak => budget.push(
                     &mut paragraph.runs,
                     DocRun::Break {
