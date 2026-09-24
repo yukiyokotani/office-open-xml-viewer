@@ -125,10 +125,12 @@ impl Facts {
 
         let mut table = Table::default();
         let mut client_text = None;
+        let mut spid = None;
         for record in records(shape.payload, budget)? {
             match record.kind {
                 // FSP was decoded by the caller; anchors are the SPA's.
-                0xf00a | 0xf010 | 0xf011 => {}
+                0xf00a if record.payload.len() == 8 => spid = Some(u32_at(record.payload, 0)?),
+                0xf010 | 0xf011 => {}
                 0xf00f if child => {}
                 0xf00b => properties::visit(record, budget, |p| table.add(p))?,
                 0xf122 => properties::visit_tertiary(record, budget, |p| table.add(p))?,
@@ -146,7 +148,7 @@ impl Facts {
                 }
             }
         }
-        table.facts(kind, preset, client_text, budget)
+        table.facts(kind, preset, client_text, spid, budget)
     }
 }
 
@@ -220,6 +222,7 @@ impl<'a> Table<'a> {
         kind: u16,
         preset: Option<&'static str>,
         client_text: Option<u32>,
+        spid: Option<u32>,
         budget: &mut usize,
     ) -> Result<Facts, String> {
         let mut paint = Paint::default();
@@ -251,7 +254,12 @@ impl<'a> Table<'a> {
                 // (<55>) are used by PowerPoint/Excel only; Word ignores them.
                 0x87 | 0x89 | 0x8b => {}
                 0x88 if value == 0 => {}
-                0x8a if value == 0 => {}
+                // hspNext naming the shape itself ends the chain at once:
+                // Word's own DOCX of a corpus document writes both such
+                // boxes as `mso-next-textbox` referencing itself, with their
+                // own text; a second document has four more self-references.
+                // A real chain (another shape) stays unsupported.
+                0x8a if value == 0 || Some(value) == spid => {}
                 // hspNext names the next shape of a linked textbox chain.
                 0x8a => return Err(unsupported("linked Word textbox chains are not supported")),
                 0xbf => {}
@@ -763,6 +771,19 @@ mod tests {
             [9, 9]
         )
         .is_err());
+    }
+
+    #[test]
+    fn self_referencing_textbox_links_are_not_chains() {
+        let fsp = record(
+            0xf00a,
+            (202 << 4) | 2,
+            &[0x806u32.to_le_bytes(), 0xa00u32.to_le_bytes()].concat(),
+        );
+        let own = container(&[(0x80, 0x10000), (0x8a, 0x806)], &[], &fsp);
+        assert!(read(202, 0xa00, &own, [9, 9]).unwrap().text.is_some());
+        let other = container(&[(0x80, 0x10000), (0x8a, 0x807)], &[], &fsp);
+        assert!(read(202, 0xa00, &other, [9, 9]).is_err());
     }
 
     #[test]
