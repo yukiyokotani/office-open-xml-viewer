@@ -38,6 +38,15 @@ impl ThemeResolver for Palette<'_> {
     }
 }
 
+impl Palette<'_> {
+    /// Theme accentN for an automatic series or varied point (N = i mod 6 + 1).
+    fn accent(&self, index: usize) -> Option<String> {
+        self.theme[4 + index % 6]
+            .as_deref()
+            .map(|hex| hex.trim_start_matches('#').to_uppercase())
+    }
+}
+
 struct Paint {
     fill: Option<String>,
     fill_hidden: bool,
@@ -61,7 +70,19 @@ fn child<'a, 'input>(
 }
 
 /// Shape XML (DrawingML spPr) fill/line, resolved with the workbook theme.
+/// A verified but empty stream is an empty spPr: automatic formatting, which
+/// supersedes the BIFF records (ShapePropsStream is their superset, 2.4.258).
+/// Excel then draws the chart-style automatic colors, as for XLSX.
 fn xml_paint(xml: &str, palette: &Palette<'_>) -> Option<Paint> {
+    if xml.trim().is_empty() {
+        return Some(Paint {
+            fill: None,
+            fill_hidden: false,
+            line: None,
+            line_hidden: false,
+            line_width_emu: None,
+        });
+    }
     let document = roxmltree::Document::parse(xml).ok()?;
     let root = document.root_element();
     if root.tag_name().name() != "spPr" {
@@ -196,6 +217,82 @@ fn grouping(stacked: bool, percent: bool) -> &'static str {
     }
 }
 
+/// MarkerFormat.imk (MS-XLS 2.4.160) -> ST_MarkerStyle. The short and long
+/// bar markers are the "dot" and "dash" styles of the same Office marker set.
+fn marker_symbol(imk: u16) -> Option<&'static str> {
+    Some(match imk {
+        0 => "none",
+        1 => "square",
+        2 => "diamond",
+        3 => "triangle",
+        4 => "x",
+        5 => "star",
+        6 => "dot",
+        7 => "dash",
+        8 => "circle",
+        9 => "plus",
+        _ => return None,
+    })
+}
+
+struct Marker {
+    symbol: Option<&'static str>,
+    size_pt: Option<f64>,
+    fill: Option<String>,
+    line: Option<String>,
+}
+
+fn marker(format: &Format, palette: &Palette<'_>) -> Option<Marker> {
+    let data = format.marker?;
+    let u16_at = |at: usize| u16::from_le_bytes([data[at], data[at + 1]]);
+    let flags = u16_at(10);
+    if flags & 1 != 0 {
+        // fAuto: automatic marker formatting.
+        return None;
+    }
+    let xml = format
+        .shape_xml
+        .get(&1)
+        .and_then(|xml| xml_paint(xml, palette));
+    let (fill, line) = match xml {
+        Some(paint) => (paint.fill, paint.line),
+        None => (
+            (flags & 0x10 == 0)
+                .then(|| (palette.icv)(u16_at(14)).map(hex))
+                .flatten(),
+            (flags & 0x20 == 0)
+                .then(|| (palette.icv)(u16_at(12)).map(hex))
+                .flatten(),
+        ),
+    };
+    let size = u32::from_le_bytes([data[16], data[17], data[18], data[19]]);
+    Some(Marker {
+        symbol: marker_symbol(u16_at(8)),
+        // miSize is in twips (1/20 point).
+        size_pt: (size > 0).then(|| f64::from(size) / 20.0),
+        fill,
+        line,
+    })
+}
+
+/// AttachedLabel (MS-XLS 2.4.5) flags -> series data labels.
+fn data_labels(flags: u16) -> Option<ooxml_common::chart::ChartSeriesDataLabels> {
+    let labels = ooxml_common::chart::ChartSeriesDataLabels {
+        show_val: flags & 0x01 != 0,
+        show_percent: flags & 0x02 != 0 || flags & 0x04 != 0,
+        show_cat_name: flags & 0x10 != 0 || flags & 0x04 != 0,
+        show_bubble_size: flags & 0x20 != 0,
+        show_ser_name: flags & 0x40 != 0,
+        ..Default::default()
+    };
+    (labels.show_val
+        || labels.show_percent
+        || labels.show_cat_name
+        || labels.show_bubble_size
+        || labels.show_ser_name)
+        .then_some(labels)
+}
+
 /// Resolves a BRAI worksheet reference (rgce) to its cells in order.
 pub(crate) type References<'a> = dyn Fn(&[u8]) -> Option<Vec<Option<Cached>>> + 'a;
 
@@ -285,13 +382,49 @@ pub(crate) fn project(
             categories: Some(series_categories),
             ..ChartSeries::default()
         };
+        // Line-drawn groups take the series color from its line (the fill
+        // only paints markers or areas); filled groups use the fill.
+        let line_drawn = matches!(
+            group.kind,
+            GroupKind::Line { .. }
+                | GroupKind::Scatter { bubbles: false }
+                | GroupKind::Radar { filled: false }
+        );
         if let Some(paint) = series_paint {
-            model_series.color = paint.fill;
+            model_series.color = if line_drawn {
+                paint.line.clone().or(paint.fill)
+            } else {
+                paint.fill
+            };
             model_series.line_color = paint.line;
             model_series.line_width_emu = paint.line_width_emu;
             if paint.line_hidden {
                 model_series.line_hidden = Some(true);
             }
+        }
+        // Automatic series formatting uses the theme accents in series order,
+        // matching the XLSX parser's automatic series color.
+        if model_series.color.is_none() && !group.varied_colors {
+            model_series.color = palette.accent(index);
+        }
+        if let Some(marker) = series
+            .series_format
+            .as_ref()
+            .and_then(|f| marker(f, palette))
+        {
+            model_series.show_marker = Some(marker.symbol != Some("none"));
+            model_series.marker_symbol = marker.symbol.map(str::to_owned);
+            model_series.marker_size = marker.size_pt;
+            model_series.marker_fill = marker.fill;
+            model_series.marker_line = marker.line;
+        }
+        if let Some(labels) = series
+            .series_format
+            .as_ref()
+            .and_then(|f| f.data_labels)
+            .and_then(data_labels)
+        {
+            model_series.series_data_labels = Some(labels);
         }
         if let Some(format) = series.series_format.as_ref() {
             model_series.explosion = format.explosion.map(u32::from);
@@ -299,7 +432,7 @@ pub(crate) fn project(
                 model_series.smooth = Some(true);
             }
         }
-        if !series.point_formats.is_empty() {
+        if !series.point_formats.is_empty() || group.varied_colors {
             let points = count.max(
                 series
                     .point_formats
@@ -314,6 +447,7 @@ pub(crate) fn project(
                         .point_formats
                         .get(&(point as u16))
                         .and_then(|format| paint(format, palette).fill)
+                        .or_else(|| group.varied_colors.then(|| palette.accent(point)).flatten())
                 })
                 .collect::<Vec<_>>();
             if colors.iter().any(Option::is_some) {
@@ -362,12 +496,22 @@ pub(crate) fn project(
         if area.fill_hidden {
             model.chart_fill_hidden = Some(true);
         }
+        model.chart_border_color = area.line;
+        model.chart_border_width_emu = area.line_width_emu;
+        if area.line_hidden {
+            model.chart_border_hidden = Some(true);
+        }
     }
     if let Some(format) = raw.plot_format.as_ref() {
         let area = paint(format, palette);
         model.plot_area_bg = area.fill;
         if area.fill_hidden {
             model.plot_area_fill_hidden = Some(true);
+        }
+        model.plot_area_line_color = area.line;
+        model.plot_area_line_width_emu = area.line_width_emu.and_then(|w| u32::try_from(w).ok());
+        if area.line_hidden {
+            model.plot_area_line_hidden = Some(true);
         }
     }
     Some(model)

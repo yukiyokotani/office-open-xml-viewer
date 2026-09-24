@@ -176,7 +176,13 @@ fn shape_xml_is_used_only_when_its_checksum_matches_the_biff_formats() {
     let area = area_format(0, 10);
     data.extend(checksum::interior_properties(&area, &area).unwrap());
     let valid = checksum::crc(&data);
-    for (stored, expected) in [(valid, "4472C4"), (valid ^ 1, "FF0000")] {
+    // A verified empty stream is an empty spPr: automatic formatting, which
+    // takes the theme accent instead of the explicit BIFF palette color.
+    for (stored, xml, expected) in [
+        (valid, xml, "4472C4"),
+        (valid ^ 1, xml, "FF0000"),
+        (valid, "", "4472C4"),
+    ] {
         let owned = bar_chart(true, Some((stored, xml)));
         let raw = read(&as_records(&owned)).unwrap();
         let model = project(&raw, &palette(), &|_| None).unwrap();

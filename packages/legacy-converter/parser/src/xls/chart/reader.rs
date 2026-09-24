@@ -23,6 +23,7 @@ mod id {
     pub const MARKER_FORMAT: u16 = 0x1009;
     pub const AREA_FORMAT: u16 = 0x100a;
     pub const PIE_FORMAT: u16 = 0x100b;
+    pub const ATTACHED_LABEL: u16 = 0x100c;
     pub const SERIES_TEXT: u16 = 0x100d;
     pub const CHART_FORMAT: u16 = 0x1014;
     pub const LEGEND: u16 = 0x1015;
@@ -123,6 +124,8 @@ pub(crate) struct Format {
     pub shape_xml: BTreeMap<u16, String>,
     pub explosion: Option<u16>,
     pub smooth: bool,
+    /// AttachedLabel (2.4.5) flags of a series or point data label.
+    pub data_labels: Option<u16>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -486,6 +489,12 @@ pub(crate) fn read(records: &[Record<'_>]) -> Result<RawChart, String> {
             id::LINE_FORMAT => set_fixed(&mut stack, record, |f, v| f.line = Some(v))?,
             id::AREA_FORMAT => set_fixed(&mut stack, record, |f, v| f.area = Some(v))?,
             id::MARKER_FORMAT => set_fixed(&mut stack, record, |f, v| f.marker = Some(v))?,
+            id::ATTACHED_LABEL => {
+                let flags = u16_at(record.data, 0)?;
+                if let Some(block) = stack.last_mut() {
+                    block.format.data_labels = Some(flags);
+                }
+            }
             id::PIE_FORMAT => {
                 let value = u16_at(record.data, 0)?;
                 if let Some(block) = stack.last_mut() {
