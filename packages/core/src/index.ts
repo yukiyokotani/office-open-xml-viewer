@@ -713,7 +713,6 @@ export {
 } from './fonts/resource-metrics';
 export {
   findReferenceFontMetrics,
-  referenceFontMaxDigitAdvanceRatio,
   type FindReferenceFontMetricsOptions,
   type ReferenceFontMetricProfile,
   type ReferenceFontSource,

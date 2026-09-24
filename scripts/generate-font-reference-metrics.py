@@ -3,8 +3,8 @@
 
 The generated profiles are reference facts, not proof of the font face selected by
 Canvas, the operating system, or Office. No outlines, glyph maps, or per-glyph
-advances are written to the output. OS/2 xAvgCharWidth and the maximum digit
-advance are scalar font metrics, not shaped text advances.
+advances are written to the output. OS/2 xAvgCharWidth is a scalar font
+metric, not a shaped text advance.
 """
 
 from __future__ import annotations
@@ -122,13 +122,6 @@ def face_profile(font: TTFont, source_id: str) -> dict[str, Any] | None:
     fs_selection = integer(os2, "fsSelection") if os2 else 0
     os2_version = integer(os2, "version") if os2 else None
     italic = bool((fs_selection or 0) & 0x01 or integer(head, "macStyle") & 0x02)
-    # ECMA-376 §18.3.1.13 defines column width against the Normal font's
-    # widest digit. If even one digit is absent, the scalar is unknown.
-    cmap = font.getBestCmap() or {}
-    hmtx = font["hmtx"].metrics if "hmtx" in font else {}
-    advances = [hmtx[cmap[ord(d)]][0] for d in "0123456789"] if all(
-        ord(d) in cmap and cmap[ord(d)] in hmtx for d in "0123456789"
-    ) else []
     profile = {
         "source": source_id,
         "family": family,
@@ -137,7 +130,6 @@ def face_profile(font: TTFont, source_id: str) -> dict[str, Any] | None:
         "style": "italic" if italic else "normal",
         "unitsPerEm": integer(head, "unitsPerEm"),
         "xAvgCharWidth": integer(os2, "xAvgCharWidth") if os2 else None,
-        "maxDigitAdvance": max(advances) if advances else None,
         "hhea": [integer(hhea, "ascent"), integer(hhea, "descent"), integer(hhea, "lineGap")],
     }
     provenance_code_page_range1 = (
