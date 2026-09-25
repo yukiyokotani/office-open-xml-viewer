@@ -7,12 +7,17 @@
 //
 // EMF+ records live in EMR_COMMENT records ("EMF+" identifier). A dual-mode
 // metafile also carries a complete GDI rendering, and EMF+-aware players play
-// one of the two. `scanEmfPlus` therefore decides up front:
-//   - the EMF+ stream is played only when it contains drawing records and
-//     every record and object it uses is implemented here;
-//   - otherwise a dual-mode file keeps its GDI rendering (the player's
-//     established behaviour), and an EMF+-only file is played as far as it is
-//     implemented with the gaps reported, never dropped silently.
+// one of the two. `scanEmfPlus` therefore decides up front, semantically: it
+// plays the whole EMF+ stream through this same player in a dry run (every
+// record, object, unit, transform, rectangle and image-attribute check, no
+// drawing) and
+//   - plays the EMF+ stream only when it contains drawing records and the dry
+//     run reports nothing unsupported or malformed;
+//   - otherwise a dual-mode file keeps its complete GDI rendering, and an
+//     EMF+-only file is played as far as it is implemented with the gaps
+//     reported, never dropped silently.
+// So a GDI alternative is never discarded for EMF+ content that playback
+// would later reject.
 // Evidence for choosing the EMF+ rendering: Excel's PDF exports of GDI+
 // metafiles whose GDI part has no drawing records (a bitmap drawn by
 // EmfPlusDrawImage) show that bitmap; PowerPoint's PDF export of dual files
@@ -46,10 +51,6 @@ const PLUS = {
   SET_PAGE_TRANSFORM: 0x4030,
 } as const;
 
-/** Records this player implements (state records with no visible effect on
- *  the implemented drawing are accepted as no-ops). */
-const IMPLEMENTED = new Set<number>(Object.values(PLUS));
-
 /** [MS-EMFPLUS] 2.1.1.1 RecordType drawing records. */
 const DRAWING = new Set<number>([
   0x400a, 0x400b, 0x400c, 0x400d, 0x400e, 0x400f, 0x4010, 0x4011, 0x4012, 0x4013,
@@ -64,6 +65,8 @@ const PIXEL_32BPP_ARGB = 0x0026200a;
 const PIXEL_32BPP_PARGB = 0x000e200b;
 /** [MS-EMFPLUS] 2.1.1.33 UnitType. */
 const UNIT_PIXEL = 2;
+/** [MS-EMFPLUS] 2.1.1.34 WrapMode: Tile .. Clamp. */
+const WRAP_MODE_MAX = 4;
 // Resource policy, not a format limit.
 const MAX_BITMAP_PIXELS = 40_000_000;
 const MAX_OBJECT_BYTES = 256 * 1024 * 1024;
@@ -109,7 +112,18 @@ export function scanEmfPlus(bytes: Uint8Array): EmfPlusScan {
   let present = false;
   let dual = false;
   let drawing = false;
-  let implemented = true;
+  const dry: EmfPlusTarget = {
+    ctx: null,
+    W: 1,
+    H: 1,
+    left: 0,
+    top: 0,
+    boundsW: 1,
+    boundsH: 1,
+    drew: false,
+    unsupported: new Set(),
+  };
+  const player = new EmfPlusPlayer(dry, true);
   let pos = 0;
   while (pos + 8 <= bytes.length) {
     const type = dv.getUint32(pos, true);
@@ -122,36 +136,20 @@ export function scanEmfPlus(bytes: Uint8Array): EmfPlusScan {
           dual = (record.flags & 1) !== 0;
         }
         if (DRAWING.has(record.type)) drawing = true;
-        if (!IMPLEMENTED.has(record.type)) implemented = false;
-        if (record.type === PLUS.OBJECT && !objectImplemented(dv, record)) implemented = false;
       }
+      player.playComment(dv, pos, pos + size);
     }
     if (type === 14) break;
     pos += size;
   }
-  return { present, dual, play: present && drawing && (implemented || !dual) };
-}
-
-function objectImplemented(dv: DataView, record: PlusRecord): boolean {
-  const kind = (record.flags >> 8) & 0x7f;
-  if (kind === OBJECT_IMAGE_ATTRIBUTES) return true;
-  if (kind !== OBJECT_IMAGE) return false;
-  // A continued object's first record carries TotalObjectSize first; later
-  // fragments carry no header, so only the first fragment is inspected.
-  const continued = (record.flags & 0x8000) !== 0;
-  const at = record.start + (continued ? 4 : 0);
-  if (record.end - at < 28) return continued; // a later fragment
-  const imageType = dv.getUint32(at + 4, true);
-  const pixelFormat = dv.getUint32(at + 20, true);
-  const bitmapType = dv.getUint32(at + 24, true);
-  return imageType === 1
-    && bitmapType === 0
-    && (pixelFormat === PIXEL_32BPP_ARGB || pixelFormat === PIXEL_32BPP_PARGB);
+  const playable = dry.unsupported.size === 0;
+  return { present, dual, play: present && drawing && (playable || !dual) };
 }
 
 /** The subset of the GDI player state the EMF+ player draws through. */
 export interface EmfPlusTarget {
-  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
+  /** `null` only for the dry run of `scanEmfPlus`. */
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
   W: number;
   H: number;
   /** Device-unit rectangle of the picture frame mapped onto W×H. */
@@ -187,18 +185,33 @@ function multiply(m1: Matrix, m2: Matrix): Matrix {
 
 interface Bitmap extends DecodedDib {}
 
+/** The EMF+ Object Table entry kinds this player keeps ([MS-EMFPLUS] 2.3.5.1:
+ *  a later object with the same index replaces the entry). */
+type TableObject =
+  | { kind: 'image'; bitmap: Bitmap }
+  | { kind: 'attributes'; wrapMode: number };
+
+/** The implemented graphics state saved by EmfPlusSave ([MS-EMFPLUS] 2.3.11.3). */
+interface GraphicsState {
+  world: Matrix;
+  unit: number;
+  scale: number;
+  sourceCopy: boolean;
+}
+
 export class EmfPlusPlayer {
   private world: Matrix = IDENTITY;
   private pageUnit = UNIT_PIXEL;
   private pageScale = 1;
   private sourceCopy = false;
-  private readonly images = new Map<number, Bitmap>();
-  private readonly saved = new Map<number, { world: Matrix; unit: number; scale: number }>();
+  private readonly objects = new Map<number, TableObject>();
+  private readonly saved = new Map<number, GraphicsState>();
   private pending: { id: number; total: number; parts: Uint8Array[]; length: number } | null = null;
   /** Inside EmfPlusGetDC until the next EMF+ record: GDI records draw. */
   gdiAllowed = false;
 
-  constructor(private readonly target: EmfPlusTarget) {}
+  /** `dry`: validate everything playback checks, decode and draw nothing. */
+  constructor(private readonly target: EmfPlusTarget, private readonly dry = false) {}
 
   /** Play the EMF+ records of one EMR_COMMENT record. */
   playComment(dv: DataView, pos: number, recEnd: number): void {
@@ -278,16 +291,20 @@ export class EmfPlusPlayer {
           world: this.world,
           unit: this.pageUnit,
           scale: this.pageScale,
+          sourceCopy: this.sourceCopy,
         });
         return;
       case PLUS.RESTORE: {
         need(4);
         const state = this.saved.get(dv.getUint32(r.start, true));
-        if (state) {
-          this.world = state.world;
-          this.pageUnit = state.unit;
-          this.pageScale = state.scale;
+        if (!state) {
+          this.target.unsupported.add('EMF+ Restore of an unsaved graphics state');
+          return;
         }
+        this.world = state.world;
+        this.pageUnit = state.unit;
+        this.pageScale = state.scale;
+        this.sourceCopy = state.sourceCopy;
         return;
       }
       case PLUS.CLEAR:
@@ -308,6 +325,7 @@ export class EmfPlusPlayer {
   /** [MS-EMFPLUS] 2.3.4.1 EmfPlusClear: the output area becomes the ARGB colour. */
   private clear(argb: number): void {
     const { ctx, W, H } = this.target;
+    if (this.dry || !ctx) return;
     const alpha = (argb >>> 24) / 255;
     try {
       ctx.clearRect(0, 0, W, H);
@@ -347,12 +365,26 @@ export class EmfPlusPlayer {
       this.pending = null;
       data = whole;
     }
-    if (kind === OBJECT_IMAGE_ATTRIBUTES) return; // defaults suit in-bounds sources
+    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+    this.objects.delete(id);
+    if (kind === OBJECT_IMAGE_ATTRIBUTES) {
+      // EmfPlusImageAttributes (2.2.1.5): Version, Reserved1, WrapMode,
+      // ClampColor, ObjectClamp, Reserved2. It serializes no colour
+      // adjustment; WrapMode, ClampColor and ObjectClamp only govern samples
+      // outside the image, which DrawImage below never admits.
+      if (data.length < 24) throw new RangeError('Truncated EMF+ image attributes');
+      const wrapMode = view.getUint32(8, true);
+      if (wrapMode > WRAP_MODE_MAX || view.getUint32(16, true) > 1) {
+        this.target.unsupported.add('EMF+ image attributes (invalid wrap or clamp)');
+        return;
+      }
+      this.objects.set(id, { kind: 'attributes', wrapMode });
+      return;
+    }
     if (kind !== OBJECT_IMAGE) {
       this.target.unsupported.add(`EMF+ object type ${kind}`);
       return;
     }
-    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
     if (data.length < 28) throw new RangeError('Truncated EMF+ image');
     // EmfPlusImage (2.2.1.4): Version, Type; EmfPlusBitmap (2.2.2.2): Width,
     // Height, Stride, PixelFormat, Type, BitmapData.
@@ -371,6 +403,10 @@ export class EmfPlusPlayer {
       || stride < width * 4 || 28 + stride * height > data.length) {
       throw new RangeError('Invalid EMF+ bitmap');
     }
+    if (this.dry) {
+      this.objects.set(id, { kind: 'image', bitmap: { width, height, data: new Uint8ClampedArray(0) } });
+      return;
+    }
     // BitmapData is top-down B,G,R,A per pixel (little-endian ARGB).
     const rgba = new Uint8ClampedArray(width * height * 4);
     const premultiplied = pixelFormat === PIXEL_32BPP_PARGB;
@@ -386,7 +422,7 @@ export class EmfPlusPlayer {
         rgba[dst + 3] = alpha;
       }
     }
-    this.images.set(id, { width, height, data: rgba });
+    this.objects.set(id, { kind: 'image', bitmap: { width, height, data: rgba } });
   }
 
   /** World → page → device pixels → target. Only UnitPixel pages are
@@ -404,9 +440,15 @@ export class EmfPlusPlayer {
   private drawImage(dv: DataView, r: PlusRecord): void {
     const compressed = (r.flags & 0x4000) !== 0;
     if (r.end - r.start < 24 + (compressed ? 8 : 16)) throw new RangeError('Truncated EMF+ DrawImage');
-    const image = this.images.get(r.flags & 0xff);
-    if (!image) {
+    const entry = this.objects.get(r.flags & 0xff);
+    if (entry?.kind !== 'image') {
       this.target.unsupported.add('EMF+ DrawImage of an unavailable image');
+      return;
+    }
+    const image = entry.bitmap;
+    // ImageAttributesID names the EmfPlusImageAttributes object of the draw.
+    if (this.objects.get(dv.getUint32(r.start, true))?.kind !== 'attributes') {
+      this.target.unsupported.add('EMF+ DrawImage without its image attributes');
       return;
     }
     const srcUnit = dv.getInt32(r.start + 4, true);
@@ -423,12 +465,17 @@ export class EmfPlusPlayer {
       this.target.unsupported.add('EMF+ DrawImage placement (units, rotation or mirroring)');
       return;
     }
-    // Crop the source rectangle (pixel units) out of the decoded bitmap.
-    const x0 = Math.max(0, Math.round(sx));
-    const y0 = Math.max(0, Math.round(sy));
-    const x1 = Math.min(image.width, Math.round(sx + sw));
-    const y1 = Math.min(image.height, Math.round(sy + sh));
-    if (x1 <= x0 || y1 <= y0) return;
+    // A source rectangle reaching outside the image samples the wrap mode
+    // and clamp colour (2.1.1.34), which are not drawn here.
+    const x0 = Math.round(sx);
+    const y0 = Math.round(sy);
+    const x1 = Math.round(sx + sw);
+    const y1 = Math.round(sy + sh);
+    if (x0 < 0 || y0 < 0 || x1 > image.width || y1 > image.height || x1 <= x0 || y1 <= y0) {
+      this.target.unsupported.add('EMF+ DrawImage source outside the image');
+      return;
+    }
+    if (this.dry) return;
     let source: Bitmap = image;
     if (x0 !== 0 || y0 !== 0 || x1 !== image.width || y1 !== image.height) {
       const width = x1 - x0;
@@ -441,6 +488,7 @@ export class EmfPlusPlayer {
     const [tx0, ty0] = this.toTarget(dx, dy);
     const [tx1, ty1] = this.toTarget(dx + dw, dy + dh);
     const { ctx } = this.target;
+    if (!ctx) return;
     if (this.sourceCopy) {
       try {
         ctx.clearRect(Math.min(tx0, tx1), Math.min(ty0, ty1), Math.abs(tx1 - tx0), Math.abs(ty1 - ty0));

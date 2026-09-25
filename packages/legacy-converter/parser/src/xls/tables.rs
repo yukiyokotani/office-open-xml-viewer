@@ -367,7 +367,7 @@ impl Styles {
             .dxf_records
             .get(index as usize)
             .ok_or_else(|| unsupported("XLS table style names no DXF record"))?;
-        let dxf = xfprops(data, 14, context)?;
+        let dxf = xfprops(data, 14, context, false)?;
         if dxfs.len() >= super::conditional::MAX_DXFS {
             return Err(unsupported("too many XLS differential formats"));
         }
@@ -375,6 +375,34 @@ impl Styles {
         let id = u32::try_from(dxfs.len() - 1).map_err(|_| truncated())?;
         self.projected.insert(index, id);
         Ok(id)
+    }
+}
+
+impl Styles {
+    /// The elements of the workbook table style `name` (tseType, band size,
+    /// format), with explicitly cleared border edges kept as `none` edges
+    /// for PivotTable style layering; `None` when the workbook defines no
+    /// such style.
+    pub(super) fn pivot_elements(
+        &self,
+        name: &str,
+        context: &Context<'_>,
+    ) -> Result<Option<Vec<(u32, u32, xlsx_model::Dxf)>>, String> {
+        let Some(elements) = self.styles.get(name) else {
+            return Ok(None);
+        };
+        elements
+            .by_type
+            .iter()
+            .map(|(&kind, &(size, index))| {
+                let data = self
+                    .dxf_records
+                    .get(index as usize)
+                    .ok_or_else(|| unsupported("XLS table style names no DXF record"))?;
+                Ok((kind, size, xfprops(data, 14, context, true)?))
+            })
+            .collect::<Result<Vec<_>, String>>()
+            .map(Some)
     }
 }
 
@@ -407,8 +435,16 @@ fn font_entry(font: &mut Option<xlsx_model::Font>) -> &mut xlsx_model::Font {
 
 /// XFProps (2.5.288) of a DXF record as the XLSX model `Dxf`, with the
 /// XLSX parser's defaults for omitted children (font size 11, solid fill,
-/// a lone background mirrored into the foreground).
-fn xfprops(data: &[u8], offset: usize, context: &Context<'_>) -> Result<xlsx_model::Dxf, String> {
+/// a lone background mirrored into the foreground). With `explicit_none`,
+/// a border edge property whose style is 0 (none) becomes a `none` edge
+/// rather than no edge: a PivotTable style element's cleared edge
+/// overrides an earlier element's edge (ECMA-376 18.8.41 layering).
+fn xfprops(
+    data: &[u8],
+    offset: usize,
+    context: &Context<'_>,
+    explicit_none: bool,
+) -> Result<xlsx_model::Dxf, String> {
     let count = usize::from(u16_at(data, offset + 2)?);
     let mut at = offset + 4;
     let mut dxf = xlsx_model::Dxf::default();
@@ -458,7 +494,10 @@ fn xfprops(data: &[u8], offset: usize, context: &Context<'_>) -> Result<xlsx_mod
             6..=12 => {
                 let style = u16_at(value, 8)?;
                 let edge = if style == 0 {
-                    None
+                    (explicit_none && kind != 10).then(|| xlsx_model::BorderEdge {
+                        style: "none".into(),
+                        color: None,
+                    })
                 } else {
                     Some(xlsx_model::BorderEdge {
                         style: styles::BORDERS

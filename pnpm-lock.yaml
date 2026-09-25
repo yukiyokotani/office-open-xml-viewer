@@ -130,9 +130,24 @@ importers:
         specifier: workspace:*
         version: link:../core
     devDependencies:
+      '@playwright/test':
+        specifier: ^1.59.1
+        version: 1.59.1
       '@types/node':
         specifier: ^25.6.0
         version: 25.6.0
+      '@types/pngjs':
+        specifier: ^6.0.5
+        version: 6.0.5
+      pixelmatch:
+        specifier: ^7.1.0
+        version: 7.1.0
+      playwright:
+        specifier: ^1.59.1
+        version: 1.59.1
+      pngjs:
+        specifier: ^7.0.0
+        version: 7.0.0
       typescript:
         specifier: ^7.0.2
         version: 7.0.2
@@ -164,15 +179,15 @@ importers:
 
   packages/node:
     dependencies:
-      '@silurus/ooxml-legacy-converter':
-        specifier: workspace:*
-        version: link:../legacy-converter
       '@silurus/ooxml-core':
         specifier: workspace:*
         version: link:../core
       '@silurus/ooxml-docx':
         specifier: workspace:*
         version: link:../docx
+      '@silurus/ooxml-legacy-converter':
+        specifier: workspace:*
+        version: link:../legacy-converter
       '@silurus/ooxml-pptx':
         specifier: workspace:*
         version: link:../pptx
@@ -2000,6 +2015,7 @@ packages:
   '@xmldom/xmldom@0.9.10':
     resolution: {integrity: sha512-A9gOqLdi6cV4ibazAjcQufGj0B1y/vDqYrcuP6d/6x8P27gRS8643Dj9o1dEKtB6O7fwxb2FgBmJS2mX7gpvdw==}
     engines: {node: '>=14.6'}
+    deprecated: this version has critical issues, please update to the latest version
 
   '@yuku-codegen/binding-android-arm64@0.8.3':
     resolution: {integrity: sha512-/EKnnqwvN7xYoVDhQEIEJTdPDwGW1wkFz/2Eku3ES/IJd4lcQh/OaIDFBmoJKvpe12enrb1TIoYh1fxasGXolA==}

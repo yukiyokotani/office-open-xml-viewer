@@ -1460,14 +1460,12 @@ describe('playEmf — explicit report of records it cannot draw', () => {
     expect(m.reported).toEqual(['EMR_POLYTEXTOUTW']);
   });
 
-  it('warns through the console by default, once per record name per process', () => {
+  it('has no default report: without a callback nothing reaches the console', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       const file = concat(emfHeader(), record(118, (w) => w.u32(0)), record(EMR.EOF, () => {}));
       playEmf(file, makeRecordingCtx().ctx, 10, 10);
-      playEmf(file, makeRecordingCtx().ctx, 10, 10);
-      expect(warn).toHaveBeenCalledTimes(1);
-      expect(String(warn.mock.calls[0][0])).toContain('EMR_GRADIENTFILL');
+      expect(warn).not.toHaveBeenCalled();
     } finally {
       warn.mockRestore();
     }
@@ -1516,6 +1514,10 @@ describe('playEmf — EMF+ bitmap records', () => {
       ...u32(0xdbc01002), ...u32(1), ...u32(2), ...u32(1), ...u32(8), ...u32(pixelFormat), ...u32(bitmapType),
       0, 0, 255, 255, 128, 128, 128, 128,
     ]);
+  /** EmfPlusImageAttributes object 0: Version, Reserved1, WrapMode (Tile, as
+   *  Excel writes), ClampColor, ObjectClamp, Reserved2. */
+  const attributes = (wrapMode = 0, objectClamp = 0) =>
+    plusRecord(0x4008, 0x0800, [...u32(0xdbc01002), ...u32(0), ...u32(wrapMode), ...u32(0xffffffff), ...u32(objectClamp), ...u32(0)]);
   const drawImage = (dest: number[], src = [0, 0, 2, 1]) =>
     plusRecord(0x401a, 0x0001, [...u32(0), ...u32(2), ...src.flatMap(f32), ...dest.flatMap(f32)]);
 
@@ -1559,7 +1561,7 @@ describe('playEmf — EMF+ bitmap records', () => {
         plusRecord(0x4030, 0x0002, f32(1)), // SetPageTransform: UnitPixel, scale 1
         plusRecord(0x4009, 0, u32(0x00ffffff)), // Clear to transparent white
         plusRecord(0x4023, 0), // SourceOver
-        plusRecord(0x4008, 0x0800, [...u32(0xdbc01002), ...new Array(20).fill(0)]), // ImageAttributes
+        attributes(),
         bitmap(),
         drawImage([10, 20, 50, 40]),
       ),
@@ -1582,6 +1584,7 @@ describe('playEmf — EMF+ bitmap records', () => {
     const result = run([
       comment(
         header(true),
+        attributes(),
         first,
         second,
         plusRecord(0x402d, 0, [...f32(5), ...f32(5)]), // translate
@@ -1606,9 +1609,57 @@ describe('playEmf — EMF+ bitmap records', () => {
     // A dual file whose EMF+ part has no drawing also keeps its GDI drawing.
     expect(run([comment(header(true), plusRecord(0x401e, 0))], gdiPolygon).styles.fill).toEqual(['#000000']);
     // Played EMF+ skips GDI records outside an EmfPlusGetDC scope.
-    const plus = run([comment(header(true), bitmap(), drawImage([0, 0, 2, 1]))], gdiPolygon);
+    const plus = run([comment(header(true), attributes(), bitmap(), drawImage([0, 0, 2, 1]))], gdiPolygon);
     expect(plus.styles.fill).toEqual([]);
     expect(plus.draws).toHaveLength(1);
+  });
+
+  it('keeps the GDI rendering when implemented EMF+ records would be rejected in playback', () => {
+    const gdiPolygon = [
+      record(EMR.SELECTOBJECT, (w) => w.u32(0x80000004)),
+      record(EMR.POLYGON16, (w) => w.i32(0).i32(0).i32(10).i32(10).u32(3).i16(0).i16(0).i16(10).i16(0).i16(0).i16(10)),
+    ];
+    const dual = (...records: Uint8Array[]) => run([comment(header(true), ...records)], gdiPolygon);
+    const expectGdi = (result: ReturnType<typeof run>) => {
+      expect(result.styles.fill).toEqual(['#000000']);
+      expect(result.draws).toHaveLength(0);
+    };
+    // Unsupported page unit (UnitInch).
+    expectGdi(dual(plusRecord(0x4030, 0x0004, f32(1)), attributes(), bitmap(), drawImage([0, 0, 2, 1])));
+    // Rotating and mirroring world transforms.
+    expectGdi(dual(attributes(), bitmap(), plusRecord(0x402f, 0, f32(30)), drawImage([0, 0, 2, 1])));
+    expectGdi(dual(attributes(), bitmap(), plusRecord(0x402e, 0, [...f32(-1), ...f32(1)]), drawImage([0, 0, 2, 1])));
+    // An empty destination and a source reaching outside the image.
+    expectGdi(dual(attributes(), bitmap(), drawImage([0, 0, 0, 1])));
+    expectGdi(dual(attributes(), bitmap(), drawImage([0, 0, 2, 1], [0, 0, 3, 1])));
+    // Missing or invalid image attributes.
+    expectGdi(dual(bitmap(), drawImage([0, 0, 2, 1])));
+    expectGdi(dual(attributes(9), bitmap(), drawImage([0, 0, 2, 1])));
+    expectGdi(dual(attributes(0, 2), bitmap(), drawImage([0, 0, 2, 1])));
+    // An object table entry replaced by another kind is no longer usable.
+    expectGdi(dual(attributes(), plusRecord(0x4008, 0x0400, u32(0)), bitmap(), drawImage([0, 0, 2, 1])));
+    // Restoring a state that was never saved.
+    expectGdi(dual(attributes(), bitmap(), plusRecord(0x4026, 0, u32(7)), drawImage([0, 0, 2, 1])));
+  });
+
+  it('saves and restores the compositing mode with the graphics state', () => {
+    const played = (...records: Uint8Array[]) => run([comment(header(false), attributes(), bitmap(), ...records)]);
+    const clears = (result: ReturnType<typeof run>) => result.calls.filter((c) => c.op === 'clearRect').length;
+    // SourceCopy set after Save is undone by Restore: no clearing blit.
+    expect(clears(played(
+      plusRecord(0x4025, 0, u32(1)),
+      plusRecord(0x4023, 1),
+      plusRecord(0x4026, 0, u32(1)),
+      drawImage([0, 0, 2, 1]),
+    ))).toBe(0);
+    // SourceCopy saved with the state survives a later SourceOver.
+    expect(clears(played(
+      plusRecord(0x4023, 1),
+      plusRecord(0x4025, 0, u32(2)),
+      plusRecord(0x4023, 0),
+      plusRecord(0x4026, 0, u32(2)),
+      drawImage([0, 0, 2, 1]),
+    ))).toBe(1);
   });
 
   it('plays an EMF+-only file as far as implemented and reports the rest', () => {

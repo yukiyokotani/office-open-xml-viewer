@@ -17,6 +17,7 @@ import type {
   FlowBlockPlacement,
   LayoutRect,
   LayoutServices,
+  Matrix2DData,
   ParagraphLayout,
   ResolvedBorderSegment,
   TableBorderInput,
@@ -196,11 +197,31 @@ function cellRequiredHeight(
   flow: CellFlowGeometry,
   spacing: RowSpacingInsets,
 ): number {
+  // ECMA-376 §17.4.72: rotated text runs along the cell's height, so the
+  // physical height requirement is the acquired line length, not the stacked
+  // block extent (which spans the cell width instead).
+  const contentPt = input.verticalText
+    ? input.verticalText.requiredLineLengthPt
+    : cellContentRequiredHeightPt(flow);
   return spacing.topPt
     + input.margins.topPt
-    + cellContentRequiredHeightPt(flow)
+    + contentPt
     + input.margins.bottomPt
     + spacing.bottomPt;
+}
+
+/** Local-to-table matrix for a rotated cell's content rectangle. The local
+ * frame is the horizontal layout frame: x runs along each line, y across
+ * lines. `vert`/`eaVert` turn it a quarter clockwise (first line at the right
+ * edge, text top to bottom, §17.18.93 tbRl/tbRlV); `vert270` a quarter
+ * counter-clockwise (first line at the left edge, text bottom to top, btLr). */
+function verticalCellTransform(
+  mode: NonNullable<TableCellLayoutInput['verticalText']>['mode'],
+  content: LayoutRect,
+): Matrix2DData {
+  return mode === 'vert270'
+    ? { a: 0, b: -1, c: 1, d: 0, e: content.xPt, f: content.yPt + content.heightPt }
+    : { a: 0, b: 1, c: -1, d: 0, e: content.xPt + content.widthPt, f: content.yPt };
 }
 
 export function mergeEndRow(
@@ -584,7 +605,7 @@ function borderSegment(
   to: Readonly<{ xPt: number; yPt: number }>,
 ): ResolvedBorderSegment {
   return {
-    edge: resolved.edge,
+    ...(resolved.edge ? { edge: resolved.edge } : {}),
     from,
     to,
     color: resolved.border.color,
@@ -948,6 +969,41 @@ function materializeBorders(
       push(visibleBorder(edges.left), 'left', { xPt: leftPt, yPt: topPt }, { xPt: leftPt, yPt: bottomPt });
     }
   });
+
+  // ECMA-376 §17.4.73 tl2br / §17.4.79 tr2bl: a cell diagonal runs between
+  // the physical corners of the cell box (the merged box for a vertical or
+  // horizontal merge). Diagonals take no part in the §17.4.66 edge conflict
+  // resolution, so they are materialized from the owning cell alone.
+  input.rows.forEach((row, rowIndex) => {
+    for (const cell of row.cells) {
+      if (!cell.diagonalBorders || cell.verticalMerge === 'continue') continue;
+      const lastRowIndex = cell.verticalMerge === 'restart'
+        ? mergeEndRow(input.rows, rowIndex, cell.columnStart, cell.columnSpan)
+        : rowIndex;
+      const startXPt = columnX(rowIndex, cell.columnStart);
+      const endXPt = columnX(rowIndex, Math.min(
+        input.columnWidthsPt.length,
+        cell.columnStart + cell.columnSpan,
+      ));
+      const { startPt: logicalStartInsetPt, endPt: logicalEndInsetPt } =
+        tableCellHorizontalSpacingInsets(
+          effectiveCellSpacingPt(row),
+          cell.columnStart,
+          cell.columnSpan,
+          input.columnWidthsPt.length,
+        );
+      const leftPt = Math.min(startXPt, endXPt)
+        + (input.bidiVisual ? logicalEndInsetPt : logicalStartInsetPt);
+      const rightPt = Math.max(startXPt, endXPt)
+        - (input.bidiVisual ? logicalStartInsetPt : logicalEndInsetPt);
+      const topPt = rowY(rowIndex) + rowSpacingInsets(input.rows, rowIndex).topPt;
+      const bottomPt = rowY(lastRowIndex + 1)
+        - rowSpacingInsets(input.rows, lastRowIndex).bottomPt;
+      const { tl2br, tr2bl } = cell.diagonalBorders;
+      push(tl2br, undefined, { xPt: leftPt, yPt: topPt }, { xPt: rightPt, yPt: bottomPt });
+      push(tr2bl, undefined, { xPt: rightPt, yPt: topPt }, { xPt: leftPt, yPt: bottomPt });
+    }
+  });
   return segments;
 }
 
@@ -1091,6 +1147,71 @@ function placedChildInkBounds(
   };
 }
 
+/**
+ * Place a rotated cell (ECMA-376 §17.4.72). The blocks keep the horizontal
+ * geometry they were acquired with in a local frame whose width is the
+ * physical content height and whose block axis is the physical content width;
+ * §17.4.83 vAlign therefore positions the stacked lines across the cell, as
+ * the rotated text flow requires. Paint and hit testing apply `transform`.
+ */
+function rotatedCellLayout(
+  cell: TableCellLayoutInput,
+  flow: CellFlowGeometry,
+  cellFlowBounds: LayoutRect,
+  physicalContentHeightPt: number,
+  input: TableLayoutInput,
+  rowIndex: number,
+  lastRowIndex: number,
+  placement: FlowBlockPlacement,
+): TableCellLayout {
+  const verticalText = cell.verticalText!;
+  const physicalContent = {
+    xPt: cellFlowBounds.xPt + cell.margins.leftPt,
+    yPt: cellFlowBounds.yPt + cell.margins.topPt,
+    widthPt: Math.max(0, cellFlowBounds.widthPt - cell.margins.leftPt - cell.margins.rightPt),
+    heightPt: physicalContentHeightPt,
+  };
+  const localBlockExtentPt = physicalContent.widthPt;
+  const localOffsetPt = flow.inkHeightPt >= localBlockExtentPt
+    ? -Math.min(0, flow.inkTopPt)
+    : cell.vAlign === 'center'
+      ? (localBlockExtentPt - flow.inkHeightPt) / 2 - flow.inkTopPt
+      : cell.vAlign === 'bottom'
+        ? localBlockExtentPt - flow.inkHeightPt - flow.inkTopPt
+        : -Math.min(0, flow.inkTopPt);
+  const transform = verticalCellTransform(verticalText.mode, physicalContent);
+  const exactOwnedSpan = input.rows
+    .slice(rowIndex, lastRowIndex + 1)
+    .every((ownedRow) => ownedRow.heightRule === 'exact');
+  // Rotated lines can exceed the physical cell on either axis; clip them to
+  // the cell like an exact row so they never paint over neighbours.
+  const clipBounds = exactOwnedSpan
+    ? wordExactRowVerticalClipBounds(cellFlowBounds, placement.availableBounds)
+    : cellFlowBounds;
+  return {
+    kind: 'table-cell',
+    id: cell.id,
+    source: cell.source,
+    flowDomainId: input.flowDomainId,
+    ordinaryFlow: input.ordinaryFlow,
+    flowBounds: cellFlowBounds,
+    inkBounds: cellFlowBounds,
+    clipBounds,
+    contentBounds: {
+      xPt: 0,
+      yPt: localOffsetPt,
+      widthPt: verticalText.lineLengthPt,
+      heightPt: localBlockExtentPt,
+    },
+    advancePt: cellFlowBounds.heightPt,
+    verticalMerge: cell.verticalMerge,
+    vAlign: cell.vAlign,
+    ...(cell.background ? { background: cell.background } : {}),
+    blocks: flow.blocks.map((block) => ({ ...block, offsetPt: localOffsetPt + block.offsetPt })),
+    verticalText: { mode: verticalText.mode, transform },
+  };
+}
+
 export function layoutTable(
   rawInput: TableLayoutInput,
   placement: FlowBlockPlacement,
@@ -1177,10 +1298,23 @@ export function layoutTable(
         ? Math.max(0, cellBottomPt - cellTopPt)
         : Math.max(0, rowHeightPt - rowSpacing.topPt - rowSpacing.bottomPt);
       const flow = flows.get(cell.id) ?? resolveCellFlow([]);
-      const availableContentHeightPt = Math.max(
+      const physicalContentHeightPt = Math.max(
         0,
         cellHeightPt - cell.margins.topPt - cell.margins.bottomPt,
       );
+      if (cell.verticalText && cell.verticalMerge !== 'continue') {
+        return rotatedCellLayout(
+          cell,
+          flow,
+          { xPt: cellXPt, yPt: cellTopPt, widthPt: cellWidthPt, heightPt: cellHeightPt },
+          physicalContentHeightPt,
+          input,
+          rowIndex,
+          lastRowIndex,
+          placement,
+        );
+      }
+      const availableContentHeightPt = physicalContentHeightPt;
       const topInkOffsetPt = cell.margins.topPt - Math.min(0, flow.inkTopPt);
       const inkOffsetPt = flow.inkHeightPt >= availableContentHeightPt
         ? topInkOffsetPt

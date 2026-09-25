@@ -10,9 +10,10 @@
 //! color, TxO alignment is the paragraph `algn` and body `anchor`, and a group
 //! keeps its members' child-anchor placement. Every other drawn fact is
 //! rejected, never approximated.
-use super::drawing_anchors::{self, CellCorner, ShapeSource};
+use super::drawing_anchors::{self, CellCorner, GroupFrame, ShapeSource};
 use super::{styles, u16_at, unsupported, Record, SheetData};
 use crate::officeart::{paint::Paint, record_with_end};
+use ooxml_common::drawing::{DrawingGroupSpec, DrawingGroupTransform, DrawingRect};
 use std::collections::BTreeMap;
 
 /// MS-ODRAW 2.3.21.2-5 default text margins (0.1 in, 0.05 in). Excel writes
@@ -24,13 +25,110 @@ const DEFAULT_MARGINS: [u32; 4] = [91_440, 45_720, 91_440, 45_720];
 #[derive(Default)]
 pub(super) struct Shapes {
     sheets: BTreeMap<usize, Vec<Prepared>>,
+    /// Store entries of grouped pictures (their media is loaded with the
+    /// sheet pictures', see `attach_images`).
+    images: std::collections::BTreeSet<u32>,
 }
 
 struct Prepared {
     from: CellCorner,
     to: CellCorner,
     behavior: u16,
-    shapes: Vec<xlsx_model::ShapeInfo>,
+    leaves: Vec<(xlsx_model::ShapeInfo, Placement)>,
+}
+
+/// Where a leaf sits: the enclosing groups (outermost first, the first one
+/// placed by the cell anchor) and its own child anchor, rotation and flips,
+/// all as stored. Placement is resolved in EMU once the anchor size is known,
+/// so rotation composes in true proportions.
+struct Placement {
+    groups: Vec<GroupFrame>,
+    /// Child anchor in the innermost group; `None` for a shape that fills
+    /// the cell anchor itself.
+    anchor: Option<[i32; 4]>,
+    rotation: i32,
+    flip_h: bool,
+    flip_v: bool,
+}
+
+/// OfficeArt placement -> DrawingML (MS-ODRAW 2.3.18.5 defines only a
+/// clockwise angle about the centre). Two Office rules, established by
+/// PowerPoint's 120-case rotation control for the PPT reader
+/// (`ppt::drawing::direct_transform`) and matched by Excel's own XLSX of
+/// sample workbooks (a -45 degree freeform keeps its unswapped child anchor
+/// and a 15.76 degree group keeps its frame): the angle is negated when
+/// exactly one flip is set, and an angle normalised into [45, 135) or
+/// [225, 315) means the stored rectangle holds the rotated bounds, so width
+/// and height swap about the same centre. A group's child coordinate space
+/// is never swapped.
+fn drawing_rect(rect: [f64; 4], rotation: i32, flip_h: bool, flip_v: bool) -> DrawingRect {
+    let [x, y, w, h] = rect;
+    let normalized = i64::from(rotation).rem_euclid(360 * 65_536);
+    let swapped = (45 * 65_536..135 * 65_536).contains(&normalized)
+        || (225 * 65_536..315 * 65_536).contains(&normalized);
+    let (x, y, w, h) = if swapped {
+        (x + (w - h) / 2.0, y + (h - w) / 2.0, h, w)
+    } else {
+        (x, y, w, h)
+    };
+    let degrees = f64::from(rotation) / 65_536.0;
+    DrawingRect {
+        x,
+        y,
+        width: w,
+        height: h,
+        rotation_degrees: if flip_h != flip_v { -degrees } else { degrees },
+        flip_h,
+        flip_v,
+    }
+}
+
+fn corners(rect: [i32; 4]) -> [f64; 4] {
+    let [left, top, right, bottom] = rect.map(f64::from);
+    [left, top, right - left, bottom - top]
+}
+
+impl Placement {
+    /// The leaf rectangle in anchor EMU (anchor at the origin, `cx`×`cy`).
+    fn resolve(&self, cx: f64, cy: f64) -> DrawingRect {
+        let mut transform = DrawingGroupTransform::IDENTITY;
+        let mut parent = [0.0, 0.0, cx, cy];
+        for group in &self.groups {
+            let placed = drawing_rect(
+                group.anchor.map_or(parent, corners),
+                group.rotation,
+                group.flip_h,
+                group.flip_v,
+            );
+            let child = corners(group.rect);
+            let spec = DrawingGroupSpec {
+                off_x: placed.x,
+                off_y: placed.y,
+                ext_x: placed.width,
+                ext_y: placed.height,
+                child_off_x: child[0],
+                child_off_y: child[1],
+                child_ext_x: child[2],
+                child_ext_y: child[3],
+                rotation_degrees: placed.rotation_degrees,
+                flip_h: placed.flip_h,
+                flip_v: placed.flip_v,
+            };
+            transform = if transform == DrawingGroupTransform::IDENTITY {
+                DrawingGroupTransform::from_group(spec)
+            } else {
+                transform.compose_group(spec)
+            };
+            parent = child;
+        }
+        let leaf = drawing_rect(
+            self.anchor.map_or(parent, corners),
+            self.rotation,
+            self.flip_h,
+            self.flip_v,
+        );
+        transform.apply_rect(leaf)
+    }
 }
 
 impl Shapes {
@@ -46,7 +144,7 @@ impl Shapes {
             let Some(&sheet) = sheet_ids.get(&anchor.sheet) else {
                 continue;
             };
-            if !matches!(anchor.object_type, 0 | 2 | 6) {
+            if !matches!(anchor.object_type, 0 | 2 | 6 | 9) {
                 continue;
             }
             let defaults = match &defaults {
@@ -57,13 +155,27 @@ impl Shapes {
                 .shape
                 .as_ref()
                 .ok_or_else(|| unsupported("BIFF drawing shape without its properties"))?;
-            let mut shapes = Vec::new();
+            let mut leaves = Vec::new();
             if anchor.object_type == 0 {
                 if group_hidden(defaults, source)? {
                     continue;
                 }
                 for member in &anchor.members {
-                    if !matches!(member.object_type, 2 | 6) {
+                    if let (8, Some(picture)) = (member.object_type, member.picture) {
+                        prepared.images.insert(picture.store_index);
+                        leaves.push((
+                            picture_leaf(member.order, &picture),
+                            Placement {
+                                groups: member.groups.clone(),
+                                anchor: Some(member.anchor),
+                                rotation: picture.rotation,
+                                flip_h: member.shape_flags & 0x40 != 0,
+                                flip_v: member.shape_flags & 0x80 != 0,
+                            },
+                        ));
+                        continue;
+                    }
+                    if !matches!(member.object_type, 2 | 6 | 9) {
                         return Err(unsupported(format!(
                             "grouped BIFF drawing object type {} is not projected",
                             member.object_type
@@ -77,25 +189,47 @@ impl Shapes {
                         flags: member.shape_flags,
                         child: true,
                         order: member.order,
-                        bounds: member.bounds,
                     };
-                    shapes.extend(leaf.project(records, styles, defaults, source)?);
+                    if let Some((info, rotation)) =
+                        leaf.project(records, styles, defaults, source)?
+                    {
+                        leaves.push((
+                            info,
+                            Placement {
+                                groups: member.groups.clone(),
+                                anchor: Some(member.anchor),
+                                rotation,
+                                flip_h: member.shape_flags & 0x40 != 0,
+                                flip_v: member.shape_flags & 0x80 != 0,
+                            },
+                        ));
+                    }
                 }
             } else {
                 let leaf = Leaf {
                     flags: anchor.shape_flags,
                     child: false,
                     order: anchor.order,
-                    bounds: [0.0, 0.0, 1.0, 1.0],
                 };
-                shapes.extend(leaf.project(records, styles, defaults, source)?);
+                if let Some((info, rotation)) = leaf.project(records, styles, defaults, source)? {
+                    leaves.push((
+                        info,
+                        Placement {
+                            groups: Vec::new(),
+                            anchor: None,
+                            rotation,
+                            flip_h: anchor.shape_flags & 0x40 != 0,
+                            flip_v: anchor.shape_flags & 0x80 != 0,
+                        },
+                    ));
+                }
             }
-            if !shapes.is_empty() {
+            if !leaves.is_empty() {
                 prepared.sheets.entry(sheet).or_default().push(Prepared {
                     from: anchor.from,
                     to: anchor.to,
                     behavior: anchor.behavior,
-                    shapes,
+                    leaves,
                 });
             }
         }
@@ -104,6 +238,38 @@ impl Shapes {
 
     pub(super) fn is_empty(&self) -> bool {
         self.sheets.is_empty()
+    }
+
+    pub(super) fn picture_indices(&self) -> std::collections::BTreeSet<u32> {
+        self.images.clone()
+    }
+
+    /// Give each grouped picture the MIME type of its decoded media.
+    pub(super) fn attach_images(
+        &mut self,
+        pictures: &super::pictures::Pictures,
+    ) -> Result<(), String> {
+        for prepared in self.sheets.values_mut().flatten() {
+            for (info, _) in &mut prepared.leaves {
+                if let xlsx_model::ShapeGeom::Image {
+                    image_path,
+                    mime_type,
+                    ..
+                } = &mut info.geom
+                {
+                    let id = image_path
+                        .rsplit('/')
+                        .next()
+                        .and_then(|id| id.parse().ok())
+                        .ok_or_else(|| unsupported("invalid grouped XLS picture"))?;
+                    let extension = pictures.extension(id).ok_or_else(|| {
+                        unsupported("grouped BIFF picture BLIP is not a supported image")
+                    })?;
+                    *mime_type = ooxml_common::blip::mime_from_ext(extension).into();
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Resolve MS-XLS 2.5.193 cell fractions to DrawingML cell offsets, as
@@ -160,10 +326,26 @@ impl Shapes {
                 };
                 let cx = (to.0.round() as i64 + to.2) - (from.0.round() as i64 + from.2);
                 let cy = (to.1.round() as i64 + to.3) - (from.1.round() as i64 + from.3);
-                if cx < 0 || cy < 0 {
+                if cx <= 0 || cy <= 0 {
                     omitted = true;
                     continue;
                 }
+                let (width, height) = (cx as f64, cy as f64);
+                let shapes = shape
+                    .leaves
+                    .into_iter()
+                    .map(|(mut info, placement)| {
+                        let rect = placement.resolve(width, height);
+                        info.x = rect.x / width;
+                        info.y = rect.y / height;
+                        info.w = rect.width / width;
+                        info.h = rect.height / height;
+                        info.rot = rect.rotation_degrees;
+                        info.flip_h = rect.flip_h;
+                        info.flip_v = rect.flip_v;
+                        info
+                    })
+                    .collect();
                 anchors.push(xlsx_model::ShapeAnchor {
                     from_col: u32::from(shape.from.column),
                     from_col_off: from.2,
@@ -176,7 +358,7 @@ impl Shapes {
                     edit_as: Some(edit_as.into()),
                     native_ext_cx: cx,
                     native_ext_cy: cy,
-                    shapes: shape.shapes,
+                    shapes,
                 });
             }
             if !anchors.is_empty() {
@@ -207,6 +389,12 @@ impl Table {
             // never change its binary rendering.
             return match id {
                 0x380 | 0x381 | 0x382 | 0x38d | 0x3a9 => Ok(()),
+                // Geometry arrays: the value is the array size and the data
+                // travels in `ShapeSource::complex`.
+                0x145 | 0x146 | 0x151 | 0x152 | 0x155..=0x157 => {
+                    self.values.insert(id, value);
+                    Ok(())
+                }
                 _ => Err(unsupported(format!(
                     "XLS drawing shape complex property {id:#06x} is not projected"
                 ))),
@@ -304,8 +492,8 @@ fn group_hidden(defaults: &Table, source: &ShapeSource) -> Result<bool, String> 
     let table = table.with_defaults(defaults);
     for (&id, &value) in &table.values {
         match id {
-            0x0004 if value == 0 => {}
-            0x0040..=0x007f | 0x03bf => {}
+            // Rotation belongs to the group frame (see `Placement`).
+            0x0004 | 0x0040..=0x007f | 0x03bf => {}
             // Shape defaults that only matter to the group's members.
             0x0080..=0x00bf | 0x0180..=0x01ff => {}
             _ => {
@@ -322,7 +510,6 @@ struct Leaf {
     flags: u32,
     child: bool,
     order: u64,
-    bounds: [f64; 4],
 }
 
 impl Leaf {
@@ -332,19 +519,22 @@ impl Leaf {
         styles: &styles::Styles<'_>,
         defaults: &Table,
         source: &ShapeSource,
-    ) -> Result<Option<xlsx_model::ShapeInfo>, String> {
+    ) -> Result<Option<(xlsx_model::ShapeInfo, i32)>, String> {
         // MS-ODRAW 2.2.40: groups, patriarchs, deleted, OLE, master-linked,
         // connector and background shapes need facts this projection lacks.
         let membership = if self.child { 0x2 } else { 0 };
         if self.flags & 0x53f != membership || self.flags & 0xa00 != 0xa00 {
             return Err(unsupported("XLS drawing shape has unsupported shape flags"));
         }
-        if !matches!(source.kind, 1 | 202) {
+        // msosptNotPrimitive (0) is a freeform drawn from its own path.
+        if !matches!(source.kind, 0 | 1 | 202) {
             return Err(unsupported(format!(
                 "XLS drawing shape type {} is not projected",
                 source.kind
             )));
         }
+        let freeform = source.kind == 0;
+        let mut geometry = crate::officeart::geometry::Geometry::default();
         let mut table = Table::default();
         for &(opid, value) in &source.properties {
             table.add(opid, value)?;
@@ -355,10 +545,12 @@ impl Leaf {
         let mut wrap = "square";
         let mut anchor_text = None;
         let mut context_direction = false;
+        let mut rotation = 0i32;
+        let mut inscribed = false;
         for (&id, &value) in &table.values {
             match id {
-                0x0004 if value == 0 => {}
-                0x0004 => return Err(unsupported("rotated XLS drawing shapes are not projected")),
+                // Transform (2.3.18.5): resolved with the placement.
+                0x0004 => rotation = value as i32,
                 // Protection (2.3.1-2.3.2) and the text identifier, whose
                 // text Excel stores in the TxO record.
                 0x0040..=0x007f | 0x0080 => {}
@@ -379,6 +571,31 @@ impl Leaf {
                 // anchorText (2.3.21.8, used by Excel <52>): top, middle or
                 // bottom; it must agree with the TxO alignment below.
                 0x0087 if value <= 2 => anchor_text = Some(value),
+                // hspNext (2.3.21.11) names a linked text box; zero is none.
+                0x008a if value == 0 => {}
+                // unused134, unused140 and unused141 (2.3.21.7/13/14) MUST
+                // be ignored; 0x008E is not an MS-ODRAW property, which a
+                // reader can ignore (MS-ODRAW 2.2: "If a property has an
+                // unrecognized opid.opid field, a vendor can ignore the
+                // property").
+                0x0086 | 0x008c | 0x008d | 0x008e => {}
+                // Freeform geometry (2.3.6): the explicit path. A path that
+                // references a guide or an escape is rejected below.
+                0x0140..=0x0146 if freeform => {
+                    match source.complex.iter().find(|(c, _)| *c == id) {
+                        Some((_, data)) => geometry.complex(id, data.as_slice()),
+                        None => geometry.scalar(id, value)?,
+                    }
+                }
+                // Connection sites, their directions, adjust handles and the
+                // connection-site type (2.3.6.18-30) only serve editing.
+                0x0151 | 0x0152 | 0x0155 | 0x0158 if freeform => {}
+                // Guides feed formulas; a path using them is not decoded.
+                0x0156 if freeform => {}
+                // pInscribe (2.3.6.28): the text rectangle of the path.
+                0x0157 if freeform => inscribed = value != 0,
+                // Geometry Boolean Properties (2.3.6.31): fill/line vetoes.
+                0x017f => paint.property(id, value)?,
                 0x0088 | 0x0089 if value == 0 => {}
                 // txdir (2.3.21.13): left-to-right or from the context.
                 0x008b if value == 0 => {}
@@ -458,6 +675,41 @@ impl Leaf {
             Some(offset) => text(records, styles, offset, anchor_text, margins, wrap, &table)?,
             None => None,
         };
+        if freeform && inscribed && text.is_some() {
+            return Err(unsupported(
+                "XLS freeform text rectangles are not projected",
+            ));
+        }
+        let geom = if freeform {
+            let decoded = geometry
+                .decode(&mut 1_000_000usize)?
+                .ok_or_else(|| unsupported("XLS freeform uses guide formulas or path escapes"))?;
+            // The shape model carries one fill and one line for all paths.
+            // Paths flagged without fill or line are representable only
+            // when the shape itself has none, and whether Excel fills an
+            // open path is not established, so a filled shape needs every
+            // path closed and filled.
+            let (path_fill, path_stroke) = decoded
+                .uniform_paint()
+                .ok_or_else(|| unsupported("XLS freeform paths with differing paint"))?;
+            let authored_fill = decoded.uniform_authored_paint().map(|paint| paint.0);
+            if fill.is_some() && !(path_fill && authored_fill == Some(true)) {
+                return Err(unsupported(
+                    "XLS filled freeforms with open or unfilled paths are not projected",
+                ));
+            }
+            if line.is_some() && !path_stroke {
+                return Err(unsupported(
+                    "XLS freeform paths without their line are not projected",
+                ));
+            }
+            custom_geometry(&decoded)
+        } else {
+            xlsx_model::ShapeGeom::Preset {
+                name: "rect".into(),
+                adj: Vec::new(),
+            }
+        };
         if context_direction
             && text.as_ref().is_some_and(|text| {
                 text.paragraphs.iter().flat_map(|p| &p.runs).any(|run| {
@@ -469,44 +721,129 @@ impl Leaf {
             return Err(unsupported("right-to-left XLS shape text is not projected"));
         }
         let (join, miter) = paint.details.join();
-        let [x, y, w, h] = self.bounds;
-        Ok(Some(xlsx_model::ShapeInfo {
-            z_order: self.order,
-            x,
-            y,
+        Ok(Some((
+            xlsx_model::ShapeInfo {
+                z_order: self.order,
+                // Placement is resolved with the anchor size.
+                x: 0.0,
+                y: 0.0,
+                w: 1.0,
+                h: 1.0,
+                rot: 0.0,
+                flip_h: false,
+                flip_v: false,
+                fill_color: fill.clone(),
+                fill: fill.map(|color| xlsx_model::ShapeFill::Solid { color }),
+                stroke_width: line
+                    .as_ref()
+                    .map_or(0, |_| i64::from(paint.width.unwrap_or(9525))),
+                stroke_dash_style: line.as_ref().and_then(|_| {
+                    paint
+                        .dash
+                        .and_then(crate::officeart::stroke::preset_dash)
+                        .filter(|dash| *dash != "solid")
+                        .map(str::to_owned)
+                }),
+                stroke_line_cap: line.as_ref().map(|_| paint.details.canvas_cap().to_owned()),
+                stroke_line_join: line.as_ref().map(|_| join.to_owned()),
+                stroke_miter_limit: line.as_ref().and(miter),
+                stroke_color: line,
+                stroke_fill: None,
+                stroke_custom_dash: Vec::new(),
+                stroke_alignment: None,
+                stroke_cmpd: None,
+                stroke_head_end: None,
+                stroke_tail_end: None,
+                geom,
+                text,
+            },
+            rotation,
+        )))
+    }
+}
+
+/// Decoded OfficeArt paths as the shape model's custom geometry, in the
+/// path's own coordinate space (MS-ODRAW 2.3.6.1-4 geoLeft..geoBottom).
+fn custom_geometry(decoded: &crate::officeart::geometry::Decoded) -> xlsx_model::ShapeGeom {
+    use crate::officeart::geometry::DecodedCommand;
+    let (w, h) = (decoded.width() as f64, decoded.height() as f64);
+    let paths = decoded
+        .paths()
+        .map(|path| xlsx_model::PathInfo {
             w,
             h,
-            rot: 0.0,
-            flip_h: self.flags & 0x40 != 0,
-            flip_v: self.flags & 0x80 != 0,
-            fill_color: fill.clone(),
-            fill: fill.map(|color| xlsx_model::ShapeFill::Solid { color }),
-            stroke_width: line
-                .as_ref()
-                .map_or(0, |_| i64::from(paint.width.unwrap_or(9525))),
-            stroke_dash_style: line.as_ref().and_then(|_| {
-                paint
-                    .dash
-                    .and_then(crate::officeart::stroke::preset_dash)
-                    .filter(|dash| *dash != "solid")
-                    .map(str::to_owned)
-            }),
-            stroke_line_cap: line.as_ref().map(|_| paint.details.canvas_cap().to_owned()),
-            stroke_line_join: line.as_ref().map(|_| join.to_owned()),
-            stroke_miter_limit: line.as_ref().and(miter),
-            stroke_color: line,
-            stroke_fill: None,
-            stroke_custom_dash: Vec::new(),
-            stroke_alignment: None,
-            stroke_cmpd: None,
-            stroke_head_end: None,
-            stroke_tail_end: None,
-            geom: xlsx_model::ShapeGeom::Preset {
-                name: "rect".into(),
-                adj: Vec::new(),
-            },
-            text,
-        }))
+            commands: path
+                .commands()
+                .map(|command| match command {
+                    DecodedCommand::Move([x, y]) => xlsx_model::PathCmd::MoveTo {
+                        x: x as f64,
+                        y: y as f64,
+                    },
+                    DecodedCommand::Line([x, y]) => xlsx_model::PathCmd::LineTo {
+                        x: x as f64,
+                        y: y as f64,
+                    },
+                    DecodedCommand::Cubic([[x1, y1], [x2, y2], [x3, y3]]) => {
+                        xlsx_model::PathCmd::CubicBezTo {
+                            x1: x1 as f64,
+                            y1: y1 as f64,
+                            x2: x2 as f64,
+                            y2: y2 as f64,
+                            x3: x3 as f64,
+                            y3: y3 as f64,
+                        }
+                    }
+                    DecodedCommand::Close => xlsx_model::PathCmd::Close,
+                })
+                .collect(),
+        })
+        .collect();
+    xlsx_model::ShapeGeom::Custom { paths }
+}
+
+/// A grouped picture: the store entry's media, cropped as the sheet pictures
+/// are (MS-ODRAW 2.3.23.1-4 cropFrom*, 16.16 fractions of the picture).
+fn picture_leaf(order: u64, picture: &drawing_anchors::PictureReference) -> xlsx_model::ShapeInfo {
+    let [top, bottom, left, right] = picture.crop.map(|value| f64::from(value) / 65_536.0);
+    xlsx_model::ShapeInfo {
+        z_order: order,
+        x: 0.0,
+        y: 0.0,
+        w: 1.0,
+        h: 1.0,
+        rot: 0.0,
+        flip_h: false,
+        flip_v: false,
+        fill_color: None,
+        fill: None,
+        stroke_color: None,
+        stroke_width: 0,
+        stroke_fill: None,
+        stroke_dash_style: None,
+        stroke_custom_dash: Vec::new(),
+        stroke_line_cap: None,
+        stroke_line_join: None,
+        stroke_miter_limit: None,
+        stroke_alignment: None,
+        stroke_cmpd: None,
+        stroke_head_end: None,
+        stroke_tail_end: None,
+        geom: xlsx_model::ShapeGeom::Image {
+            image_path: format!("legacy-xls/image/{}", picture.store_index),
+            mime_type: String::new(),
+            svg_image_path: None,
+            src_rect: picture.crop.iter().any(|value| *value != 0).then_some(
+                ooxml_common::blip::SrcRect {
+                    t: top,
+                    b: bottom,
+                    l: left,
+                    r: right,
+                },
+            ),
+            alpha: None,
+            duotone: None,
+        },
+        text: None,
     }
 }
 

@@ -73,6 +73,25 @@ function baselineRevision(snapshot = false) {
   return resolved;
 }
 
+/** List a package's private corpus inputs of one extension, relative to
+ * `public/private`. The local corpus convention keeps each format's inputs in
+ * a folder named after the format (`public/private/docx/NAME.docx`), while
+ * older checkouts keep them at the top level; both layouts are enumerated.
+ * Office lock files (`~$...`) are skipped. The relative path (including its
+ * folder) is the item identity, so identical basenames cannot collide. */
+export function listPrivateCorpus(extension, root = 'public/private') {
+  if (!existsSync(root)) return [];
+  const accepted = (file) => file.endsWith(`.${extension}`) && !file.startsWith('~$');
+  const nested = `${root}/${extension}`;
+  const files = [
+    ...readdirSync(root).filter(accepted),
+    ...(existsSync(nested)
+      ? readdirSync(nested).filter(accepted).map((file) => `${extension}/${file}`)
+      : []),
+  ];
+  return files.sort((left, right) => left.localeCompare(right, undefined, { numeric: true }));
+}
+
 function corpusFiles(files) {
   return files.map((name) => ({
     name,

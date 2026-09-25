@@ -121,6 +121,7 @@ export type RenderWorkerRequest =
     }
   | { type: 'extractImage'; id: number; path: string }
   | { type: 'resourceUsage'; id: number }
+  | { type: 'sourceRevisionView'; id: number }
   | { type: 'toMarkdown'; id: number };
 
 export type RenderWorkerWireRequest =

@@ -12,6 +12,9 @@ pub(super) struct Pictures {
     anchors: BTreeMap<usize, Vec<DrawingAnchor>>,
     images: Vec<(u32, &'static str, Vec<u8>)>,
     unsupported_images: bool,
+    /// Store entries drawn by grouped pictures, which the shape projection
+    /// places; their media is retained with the sheet pictures'.
+    grouped: BTreeSet<u32>,
 }
 
 pub(super) struct Parts {
@@ -58,14 +61,16 @@ impl Pictures {
         records: &[Record<'_>],
         tabs: &[usize],
         raster: crate::officeart::raster::Raster,
+        grouped: &BTreeSet<u32>,
     ) -> Result<Self, String> {
         let sheet_ids: BTreeMap<_, _> = tabs.iter().enumerate().map(|(i, &tab)| (tab, i)).collect();
         let mut anchors = drawing_anchors::projectable(records)?;
         anchors.retain(|a| a.picture.is_some() && sheet_ids.contains_key(&a.sheet));
-        let indices = anchors
+        let mut indices: BTreeSet<u32> = anchors
             .iter()
             .filter_map(|a| a.picture.map(|p| p.store_index))
             .collect();
+        indices.extend(grouped);
         let images = drawing_media::selected(records, &indices, raster)?;
         let supported: BTreeSet<_> = images.iter().map(|i| i.0).collect();
         let mut by_sheet = BTreeMap::<_, Vec<_>>::new();
@@ -80,11 +85,20 @@ impl Pictures {
             anchors: by_sheet,
             images,
             unsupported_images: supported.len() != indices.len(),
+            grouped: grouped.clone(),
         })
     }
 
     pub fn is_empty(&self) -> bool {
         self.anchors.is_empty()
+    }
+
+    /// The file extension of a store entry's decoded media.
+    pub fn extension(&self, id: u32) -> Option<&'static str> {
+        self.images
+            .iter()
+            .find(|image| image.0 == id)
+            .map(|image| image.1)
     }
 
     pub fn has_unsupported_images(&self) -> bool {
@@ -108,7 +122,7 @@ impl Pictures {
         warnings: &mut Vec<String>,
     ) -> ResolvedPictures {
         let mut resolved_sheets = BTreeMap::new();
-        let mut used = BTreeSet::new();
+        let mut used = self.grouped.clone();
         let mut omitted = false;
         // Resource governance, not a layout threshold. Prefixes are built once
         // per drawing sheet, never once per picture, and dropped after that sheet.
@@ -441,6 +455,7 @@ pub(super) fn session_fixture() -> (Pictures, SheetData, &'static str, Vec<u8>) 
             anchors: BTreeMap::from([(0, vec![anchor])]),
             images: vec![(7, "png", bytes.clone())],
             unsupported_images: false,
+            grouped: BTreeSet::new(),
         },
         sheet,
         "legacy-xls/image/7",
@@ -539,6 +554,7 @@ mod tests {
             anchors: BTreeMap::from([(0, anchors)]),
             images: vec![(1, "png", vec![1, 2, 3])],
             unsupported_images: false,
+            grouped: BTreeSet::new(),
         }
     }
 
@@ -640,6 +656,7 @@ mod tests {
             anchors: BTreeMap::from([(0, vec![anchor()])]),
             images: vec![(1, "png", vec![1, 2, 3])],
             unsupported_images: true,
+            grouped: BTreeSet::new(),
         };
         assert!(pictures.has_unsupported_images());
         let mut warnings = vec!["legacy-xls:invalid-or-unsupported-pictures-omitted".into()];
@@ -680,6 +697,7 @@ mod tests {
             anchors: (0..32).map(|i| (i, vec![picture.clone()])).collect(),
             images: vec![(1, "png", vec![1])],
             unsupported_images: false,
+            grouped: BTreeSet::new(),
         };
         let mut warnings = vec![];
         let parts = pictures.emit(&sheets, 7.0, &mut warnings);

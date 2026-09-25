@@ -3376,6 +3376,15 @@ pub struct DocTableCell {
     pub margin_right: Option<f64>,
     #[serde(rename = "__tableCellLayout")]
     pub table_cell_layout: TableCellLayoutAcquisitionWire,
+    /// ECMA-376 §17.4.72 `<w:tcPr><w:textDirection w:val>` as a transitional
+    /// §17.18.93 ST_TextDirection value (`tbRl`, `btLr`, `lrTbV`, `tbRlV`,
+    /// `tbLrV`). The default `lrTb` is `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_direction: Option<String>,
+    /// ECMA-376 §17.4.21 `<w:tcPr><w:hideMark>`: the cell's end-of-cell mark
+    /// does not count toward the row height. Omitted when false.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub hide_mark: bool,
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
@@ -3402,4 +3411,12 @@ pub struct CellBorders {
     /// spec); a `Some` with style "nil"/"none" = an explicit "no interior border".
     pub inside_h: Option<BorderSpec>,
     pub inside_v: Option<BorderSpec>,
+    /// ECMA-376 §17.4.73 tl2br / §17.4.79 tr2bl: the diagonal borders drawn
+    /// inside the cell from its physical top-left to bottom-right corner and
+    /// from its top-right to bottom-left corner. They take no part in the
+    /// §17.4.66 edge conflict resolution. Absent = no diagonal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tl2br: Option<BorderSpec>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tr2bl: Option<BorderSpec>,
 }

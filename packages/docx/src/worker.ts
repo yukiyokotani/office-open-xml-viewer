@@ -132,6 +132,10 @@ self.onmessage = async (e: MessageEvent<WorkerRequest | PullSessionCommand<numbe
       (self.postMessage as (message: unknown, transfer: Transferable[]) => void)(res, [out]);
       return;
     }
+    if (req.type === 'sourceRevisionView') {
+      post({ type: 'sourceRevisionView', id, markup: source.sourceRevisionMarkup() });
+      return;
+    }
     if (req.type === 'resourceUsage') {
       const archive = source.ooxml('resource usage');
       const usage = decodeOoxmlResourceUsage(host.run(() => archive.resource_usage()));

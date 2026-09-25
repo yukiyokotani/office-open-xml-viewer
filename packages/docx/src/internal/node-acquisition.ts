@@ -30,7 +30,8 @@ export interface DocxNodeAcquisitionOptions {
 export interface DocxNodeArchive extends DocxDocumentCursorArchive {
   free(): void;
   extract_image(path: string): Uint8Array;
-  document_cursor_resource_usage(): Uint8Array;
+  /** `undefined` when the package has no document-cursor checkpoint. */
+  document_cursor_resource_usage(): Uint8Array | undefined;
   resource_usage(): Uint8Array;
 }
 
@@ -157,7 +158,8 @@ export async function acquireDocxNodeDocument<TResult>(
   }
 }
 
-function decodeUsage(bytes: Uint8Array): OoxmlResourceUsageSnapshot | undefined {
+function decodeUsage(bytes: Uint8Array | undefined): OoxmlResourceUsageSnapshot | undefined {
+  if (!bytes) return undefined;
   try {
     return decodeOoxmlResourceUsage(bytes);
   } catch {

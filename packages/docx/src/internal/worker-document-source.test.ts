@@ -36,6 +36,26 @@ describe('WorkerDocumentSourceOwner', () => {
     expect(closeArchive).toHaveBeenCalledTimes(1);
   });
 
+  it('reports source revision markup only for a native DOC with print markup and marks', async () => {
+    const ooxml = archive() as OoxmlWorkerDocumentArchive;
+    expect(new WorkerDocumentSourceOwner(hostFor(ooxml).value).sourceRevisionMarkup()).toBe(false);
+    for (const [print, marks, expected] of [
+      [true, true, true], [true, false, false], [false, true, false],
+      [undefined, undefined, false],
+    ] as const) {
+      const native = {
+        ...archive(),
+        ...(print === undefined ? {} : { revision_markup_in_print: () => print }),
+        ...(marks === undefined ? {} : { has_revision_marks: () => marks }),
+      };
+      const owner = new WorkerDocumentSourceOwner(hostFor(null).value, async () => ({
+        archive: native as never, sourceByteLength: 3, closeArchive: vi.fn(),
+      }));
+      await owner.openNative(new Uint8Array([1]), descriptor);
+      expect(owner.sourceRevisionMarkup()).toBe(expected);
+    }
+  });
+
   it('uses an existing OOXML archive without loading legacy glue', () => {
     const ooxml = archive() as OoxmlWorkerDocumentArchive;
     ooxml.resource_usage = vi.fn(() => new Uint8Array([4]));

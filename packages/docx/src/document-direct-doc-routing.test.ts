@@ -39,7 +39,21 @@ function install() {
     DocxDocument.prototype as unknown as { _parse(...args: unknown[]): Promise<void> },
     '_parse',
   ).mockResolvedValue(undefined);
+  sourceRevisionMarkup(false);
   return parse;
+}
+
+function sourceRevisionMarkup(markup: boolean) {
+  return vi.spyOn(
+    DocxDocument.prototype as unknown as {
+      _sourceRevisionMarkup(timeoutMs?: number): Promise<boolean>;
+    },
+    '_sourceRevisionMarkup',
+  ).mockResolvedValue(markup);
+}
+
+function setLayoutView() {
+  return vi.spyOn(DocxDocument.prototype, 'setLayoutView').mockResolvedValue(undefined);
 }
 
 describe('DocxDocument direct DOC routing', () => {
@@ -63,6 +77,48 @@ describe('DocxDocument direct DOC routing', () => {
       'resource usage is unsupported for direct legacy DOC sources',
     );
     document.destroy();
+  });
+
+  it('follows the DOC print-markup setting only when the caller omits the view', async () => {
+    install();
+    const query = sourceRevisionMarkup(true);
+    const select = setLayoutView();
+    const followed = await DocxDocument.load(docBuffer(), { legacyConversion: { doc: { source } } });
+    expect(query).toHaveBeenCalledOnce();
+    expect(select).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ showTrackedChanges: true }),
+    );
+    followed.destroy();
+
+    // An explicit choice always wins and never asks the source.
+    for (const showTrackedChanges of [false, true]) {
+      query.mockClear();
+      select.mockClear();
+      const explicit = await DocxDocument.load(docBuffer(), {
+        showTrackedChanges, legacyConversion: { doc: { source } },
+      });
+      expect(query).not.toHaveBeenCalled();
+      expect(select).not.toHaveBeenCalled();
+      explicit.destroy();
+    }
+
+    // A source without markup keeps the default view.
+    query.mockResolvedValue(false);
+    query.mockClear();
+    const plain = await DocxDocument.load(docBuffer(), { legacyConversion: { doc: { source } } });
+    expect(query).toHaveBeenCalledOnce();
+    expect(select).not.toHaveBeenCalled();
+    plain.destroy();
+  });
+
+  it('never consults a source revision view for OOXML input', async () => {
+    install();
+    const query = sourceRevisionMarkup(true);
+    const select = setLayoutView();
+    const ordinary = await DocxDocument.load(new ArrayBuffer(0));
+    expect(query).not.toHaveBeenCalled();
+    expect(select).not.toHaveBeenCalled();
+    ordinary.destroy();
   });
 
   it('keeps ordinary input and unrelated format opt-ins off the native DOC route', async () => {

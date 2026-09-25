@@ -328,6 +328,53 @@ pub struct PivotTableMetadata {
     pub status: PivotMetadataStatus,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub extension_uris: Vec<String>,
+    /// ECMA-376 §18.10.1.97 `pivotTableStyleInfo`, with the applied style's
+    /// elements resolved to differential formats (a workbook `tableStyle` or
+    /// a built-in Annex G PivotTable style). `None` without a style.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub style: Option<PivotTableStyle>,
+    /// ECMA-376 §18.10.1.84 `rowItems`: one entry per body row, in order.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub row_items: Vec<PivotAxisItem>,
+    /// ECMA-376 §18.10.1.19 `colItems`: one entry per data column, in order.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub column_items: Vec<PivotAxisItem>,
+}
+
+/// A PivotTable style as applied to one PivotTable (§18.10.1.97, §18.8.40).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PivotTableStyle {
+    pub name: String,
+    pub show_row_headers: bool,
+    pub show_column_headers: bool,
+    pub show_row_stripes: bool,
+    pub show_column_stripes: bool,
+    pub show_last_column: bool,
+    /// The style's elements (§18.8.41), each with its format inline.
+    pub elements: Vec<PivotTableStyleElement>,
+}
+
+/// One `tableStyleElement` of a PivotTable style.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PivotTableStyleElement {
+    /// ECMA-376 §18.18.77 ST_TableStyleType, e.g. `firstRowSubheading`.
+    pub kind: String,
+    /// Band size for stripe elements (§18.8.41 `size`, default 1).
+    pub size: u32,
+    pub dxf: Dxf,
+}
+
+/// One `i` of `rowItems`/`colItems` (§18.10.1.44).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PivotAxisItem {
+    /// ECMA-376 §18.18.43 ST_ItemType (`data`, `default`, `sum`, …, `grand`,
+    /// `blank`).
+    pub kind: String,
+    /// Zero-based field level of the item: `r` plus its `x` count less one.
+    pub depth: u32,
 }
 
 #[derive(Debug, Serialize)]

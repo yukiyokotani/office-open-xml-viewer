@@ -1599,6 +1599,12 @@ export interface DocTableCell {
   marginBottom?: number | null;
   marginLeft?: number | null;
   marginRight?: number | null;
+  /** ECMA-376 §17.4.72 `<w:textDirection>` as a transitional §17.18.93 value
+   *  (`tbRl`, `btLr`, `lrTbV`, `tbRlV`, `tbLrV`); absent for the default `lrTb`. */
+  textDirection?: string;
+  /** ECMA-376 §17.4.21 `<w:hideMark>`: the end-of-cell mark does not count
+   *  toward the row height. Absent when false. */
+  hideMark?: boolean;
 }
 
 export interface CellBorders {
@@ -1614,6 +1620,11 @@ export interface CellBorders {
    *  border" (e.g. banded data rows in Medium List 2 / Medium Shading 2). */
   insideH: BorderSpec | null;
   insideV: BorderSpec | null;
+  /** ECMA-376 §17.4.73 tl2br / §17.4.79 tr2bl: diagonal borders drawn from
+   *  the cell's physical top-left to bottom-right corner and from its
+   *  top-right to bottom-left corner. Absent = no diagonal. */
+  tl2br?: BorderSpec;
+  tr2bl?: BorderSpec;
 }
 
 // ===== Worker message protocol =====
@@ -1623,6 +1634,8 @@ export type WorkerRequest =
   | { type: 'parse'; id: number; data: ArrayBuffer; resourcePolicy: NormalizedOoxmlResourcePolicy; source?: import('@silurus/ooxml-core/internal/legacy-doc-source').LegacyDocDirectSourceDescriptor }
   | { type: 'extractImage'; id: number; path: string }
   | { type: 'resourceUsage'; id: number }
+  // Legacy DOC only: the source's own revision-markup view (false for OOXML).
+  | { type: 'sourceRevisionView'; id: number }
   // Project the retained archive to GitHub-flavoured markdown (`DocxArchive.to_markdown`,
   // the handle already opened at `parse` — no re-copy of the file). Twin of
   // `extractImage`: the archive stays in the worker, only the string crosses back.
@@ -1633,6 +1646,7 @@ export type WorkerResponse =
   | { type: 'imageExtracted'; id: number; bytes: ArrayBuffer }
   | { type: 'resourceUsage'; id: number; usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot }
   | { type: 'markdownRendered'; id: number; markdown: string }
+  | { type: 'sourceRevisionView'; id: number; markup: boolean }
   | ({
       type: 'error';
       id: number;

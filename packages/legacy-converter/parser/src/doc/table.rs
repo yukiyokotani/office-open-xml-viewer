@@ -16,7 +16,9 @@ mod native_admission;
 #[cfg(feature = "direct-doc")]
 pub(in crate::doc) use geometry::{NativeGeometry, NativeGeometryApply};
 #[cfg(feature = "direct-doc")]
-pub(in crate::doc) use native_admission::{NativeAdmission, NativeAdmissionApply, PreferredIndent};
+pub(in crate::doc) use native_admission::{
+    cell_text_flow, NativeAdmission, NativeAdmissionApply, PreferredIndent,
+};
 mod width;
 pub(crate) use width::PreferredWidth;
 
@@ -121,6 +123,9 @@ pub struct Cell {
     /// [MS-DOC] 2.9.28 fNoWrap from sprmTFCellNoWrap (native acquisition).
     #[cfg(feature = "direct-doc")]
     pub(in crate::doc) no_wrap: bool,
+    /// [MS-DOC] 2.9.26 bArg from sprmTCellFHideMark (native acquisition).
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) hide_mark: bool,
 }
 
 pub struct Properties<R = Row> {
@@ -568,13 +573,22 @@ impl Row {
                 return Err(unsupported("invalid Word cell border operand length"));
             }
             let sides = bytes[3];
-            if sides & !if old { 0x0f } else { 0x3f } != 0 {
+            // [MS-DOC] 2.9.305 TableBrcOperand allows 0x01-0x20 (edges plus
+            // the tl-br 0x10 and tr-bl 0x20 diagonals); 2.9.304
+            // TableBrc80Operand allows only the four edges. Word nevertheless
+            // writes the tl-br bit 0x10 in sprmTSetBrc80: sample-19.doc row 35
+            // carries sprmTSetBrc80 sides 0x10 (single, 4/8 pt, auto) for the
+            // cell that its DOCX pair gives `w:tl2br w:val="single" w:sz="4"
+            // w:color="auto"`, followed by an equal sprmTSetBrc 0x10. Bit 0x10
+            // of the 80 operand is therefore read with the same diagonal
+            // meaning; 0x20 and higher bits have no evidence and stay gated.
+            if sides & !if old { 0x1f } else { 0x3f } != 0 {
                 return Ok(StyleAwareBorderApply::HandledUnsupported);
             }
             let cells = range(&bytes[1..], self.cells.len())?;
             let value = PreparedBorder::read(&bytes[4..], old)?;
             for cell in &mut self.cells[cells] {
-                for side in 0..if old { 4 } else { 6 } {
+                for side in 0..6 {
                     if sides & (1 << side) != 0 {
                         cell.prepared_borders[side] = Some(value);
                     }

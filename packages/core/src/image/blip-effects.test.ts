@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { applyBlipPixelEffects, blipLuminance, type BlipPixelEffects } from './blip-effects';
+import { applyBlipPixelEffects, blipGrayLevel, blipLuminance, type BlipPixelEffects } from './blip-effects';
 import {
   getCachedDuotoneBitmapByPath,
   duotoneCacheKey,
@@ -26,8 +26,18 @@ describe('applyBlipPixelEffects (ECMA-376 §20.1.8.11/16/34)', () => {
   it('grayscl keeps alpha and writes the luma to every channel', () => {
     const buf = buffer([255, 0, 0, 7]);
     applyBlipPixelEffects(buf, { effects: [{ type: 'grayscale' }] });
-    const gray = Math.round(blipLuminance(255, 0, 0) * 255);
+    const gray = Math.floor(blipLuminance(255, 0, 0) * 255);
     expect([...buf.data]).toEqual([gray, gray, gray, 7]);
+  });
+
+  it('grayscl truncates the luma to a whole level, as the PowerPoint boundary evidence shows', () => {
+    // Luma 127.59 must become 127 (black under biLevel 50%), 128.02 stays 128.
+    expect(blipGrayLevel(99, 131, 178)).toBe(127);
+    expect(blipGrayLevel(98, 132, 177)).toBe(128);
+    expect(blipGrayLevel(255, 255, 255)).toBe(255);
+    const buf = buffer([99, 131, 178, 255], [98, 132, 177, 255]);
+    applyBlipPixelEffects(buf, { effects: [{ type: 'grayscale' }, { type: 'biLevel', thresh: 0.5 }] });
+    expect([...buf.data]).toEqual([0, 0, 0, 255, 255, 255, 255, 255]);
   });
 
   it('clrChange replaces exact RGB matches with the target colour and alpha', () => {

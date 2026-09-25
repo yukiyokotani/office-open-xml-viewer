@@ -32,6 +32,7 @@ mod geometry;
 mod hyperlinks;
 mod names;
 mod pictures;
+mod pivots;
 mod print;
 mod rich;
 mod shapes;
@@ -99,8 +100,11 @@ pub(crate) fn inspect_pictures(
         .iter()
         .filter_map(|a| a.picture.map(|p| p.store_index))
         .collect();
-    let images =
-        drawing_media::selected(&records, &indices, crate::officeart::raster::Raster::Advertised)?;
+    let images = drawing_media::selected(
+        &records,
+        &indices,
+        crate::officeart::raster::Raster::Advertised,
+    )?;
     let supported: HashSet<u32> = images.iter().map(|i| i.0).collect();
     anchors.retain(|a| {
         a.picture
@@ -203,6 +207,11 @@ struct SheetData {
     formula_records: tables::Records,
     /// Formula text by cell (direct path only).
     formulas: BTreeMap<(u16, u16), String>,
+    /// PivotTable view records (see `pivots::RECORDS`) with their Continue
+    /// records, in order.
+    pivot_records: tables::Records,
+    /// Their XLSX-model projection (direct path only).
+    pivot_tables: Vec<xlsx_model::PivotTableMetadata>,
 }
 
 pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<XlsConversion, String> {
@@ -489,6 +498,27 @@ fn prepare_workbook(
                 &mut dxfs,
             )?;
         }
+        if direct && !data.pivot_records.is_empty() {
+            if conditional_theme.is_none() {
+                conditional_theme = Some((
+                    theme::Colors::parse(&records)?,
+                    conditional::Externs::parse(&records)?,
+                ));
+            }
+            if table_styles.is_none() {
+                table_styles = Some(tables::Styles::parse(&records)?);
+            }
+            let (theme, _) = conditional_theme.as_ref().expect("parsed theme");
+            let context = tables::Context {
+                styles: &styles,
+                theme,
+            };
+            data.pivot_tables = pivots::project(
+                &data.pivot_records,
+                table_styles.as_ref().expect("parsed table styles"),
+                &context,
+            )?;
+        }
         if direct && !data.conditional_records.is_empty() {
             if conditional_theme.is_none() {
                 conditional_theme = Some((
@@ -574,6 +604,12 @@ fn prepare_workbook(
             .collect();
         validate_direct_drawings(&records, &tabs, &filters)?;
     }
+    // Rectangles, text boxes, freeforms and their groups: direct model only.
+    let mut shapes = if with_pictures && direct {
+        shapes::Shapes::prepare(&records, &tabs, &styles)?
+    } else {
+        shapes::Shapes::default()
+    };
     let pictures = if with_pictures {
         // The direct reader follows Excel, which displays GDI+ metafiles with
         // their short end-of-file record; the byte converter keeps its
@@ -583,7 +619,7 @@ fn prepare_workbook(
         } else {
             crate::officeart::raster::Raster::Advertised
         };
-        match pictures::Pictures::prepare(&records, &tabs, raster) {
+        match pictures::Pictures::prepare(&records, &tabs, raster, &shapes.picture_indices()) {
             Ok(value) => {
                 if value.has_unsupported_images() {
                     if direct {
@@ -611,12 +647,7 @@ fn prepare_workbook(
     } else {
         chart::Charts::default()
     };
-    // Rectangles, text boxes and their groups: direct model only.
-    let shapes = if with_pictures && direct {
-        shapes::Shapes::prepare(&records, &tabs, &styles)?
-    } else {
-        shapes::Shapes::default()
-    };
+    shapes.attach_images(&pictures)?;
     let mut chart_sheets = Vec::with_capacity(pending_chart_sheets.len());
     for &(index, offset) in &pending_chart_sheets {
         let start = records
@@ -630,13 +661,12 @@ fn prepare_workbook(
     for (index, chart_sheet) in chart_sheets {
         converted[index].1.chart_sheet = Some(chart_sheet);
     }
-    let font = if with_pictures
-        && (!pictures.is_empty() || !charts.is_empty() || !shapes.is_empty())
-    {
-        styles.normal_font()
-    } else {
-        None
-    };
+    let font =
+        if with_pictures && (!pictures.is_empty() || !charts.is_empty() || !shapes.is_empty()) {
+            styles.normal_font()
+        } else {
+            None
+        };
     Ok(PreparedXls {
         sheets: converted,
         styles: resolved_styles,
@@ -654,9 +684,9 @@ fn prepare_workbook(
 /// The direct reader must not drop drawn content: every sheet-anchored
 /// drawing object on a projected worksheet is an embedded chart (MS-XLS
 /// 2.4.181 ot 5 with its chart substream), a picture (ot 8 with a BLIP
-/// reference), a rectangle or text box (ot 2 or 6) or a group (ot 0) of
-/// rectangles and text boxes; any other object (lines, ovals, controls, cell
-/// comments), grouped pictures or charts, or a chart/picture without its data
+/// reference), a rectangle, text box or freeform polygon (ot 2, 6 or 9) or a
+/// group (ot 0) of those and pictures; any other object (lines, ovals,
+/// controls, cell comments), grouped charts, or a chart/picture without its data
 /// is rejected with the reason. `shapes` validates each shape's properties.
 fn validate_direct_drawings(
     records: &[Record<'_>],
@@ -672,9 +702,9 @@ fn validate_direct_drawings(
         // worksheet renderer from the projected range.
         if anchor.object_type == 20
             && anchor.object_flags & 0x100 != 0
-            && filters
-                .get(&anchor.sheet)
-                .is_some_and(|range| filters::owns_button(range, anchor.from.column, anchor.from.row))
+            && filters.get(&anchor.sheet).is_some_and(|range| {
+                filters::owns_button(range, anchor.from.column, anchor.from.row)
+            })
         {
             continue;
         }
@@ -690,12 +720,12 @@ fn admit_direct_object(anchor: &drawing_anchors::DrawingAnchor) -> Result<(), St
             5 => return Err(unsupported("BIFF chart object without its chart substream")),
             8 if anchor.picture.is_some() => {}
             8 => return Err(unsupported("BIFF picture object without a BLIP reference")),
-            2 | 6 => {}
+            2 | 6 | 9 => {}
             0 => {
-                if let Some(member) = anchor
-                    .members
-                    .iter()
-                    .find(|member| !matches!(member.object_type, 2 | 6))
+                if let Some(member) = anchor.members.iter().find(|member| {
+                    !matches!(member.object_type, 2 | 6 | 9)
+                        && !(member.object_type == 8 && member.picture.is_some())
+                })
                 {
                     return Err(unsupported(format!(
                         "grouped BIFF drawing object type {} is not projected",
@@ -760,6 +790,7 @@ mod direct_drawing_tests {
             (25, None, "cell comments"),
             (1, None, "type 1 is not projected"),
             (3, None, "type 3 is not projected"),
+            (4, None, "type 4 is not projected"),
         ] {
             let error = super::admit_direct_object(&anchor(kind, chart, None)).unwrap_err();
             assert!(error.contains(expected), "{expected}: {error}");
@@ -1217,8 +1248,12 @@ fn parse_sheet(
     let mut found_eof = false;
     let mut custom_view = false;
     let mut previous_kind = 0u16;
+    let mut pivot_continues = false;
     for record in &all_records[start_index + 1..] {
         let prior_kind = std::mem::replace(&mut previous_kind, record.kind);
+        // PIVOTIVD, PIVOTPI and PIVOTLI (2.1.7.20.5) continue their record.
+        let pivot_continue = record.kind == CONTINUE && pivot_continues;
+        pivot_continues = pivots::continued(record.kind) || pivot_continue;
         // [MS-XLS] 2.1.7: an embedded chart has its own BOF/EOF
         // substream. Its records are not worksheet cells or geometry.
         if matches!(record.kind, BOF | EOF) && pending_formula_string.is_some() {
@@ -1407,6 +1442,9 @@ fn parse_sheet(
             }
             // ContinueFrt11 (2.4.60) of a table record is not reassembled.
             0x0875 => return Err(unsupported("continued XLS table record")),
+            kind if pivots::RECORDS.contains(&kind) || pivot_continue => {
+                output.pivot_records.push(kind, record.data)?
+            }
             // A continued conditional formatting record is not reassembled.
             CONTINUE
                 if !output.conditional_records.is_empty()

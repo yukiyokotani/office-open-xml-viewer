@@ -127,11 +127,17 @@ impl NativeAdmission {
     ) -> Result<NativeAdmissionApply, String> {
         match code {
             T_ISTD => {
+                // TC80 cell geometry survives TIstd in current Word (module
+                // documentation), but no control shows whether a TC80 textFlow
+                // (2.9.317 TCGRF) authored before the selection survives or is
+                // replaced: a style cannot carry text flow (2.9.340 excludes
+                // sprmTTextFlow from UpxTapx). Keep that order gated.
+                let text_flow_before = row.cells.iter().any(|cell| cell_text_flow(cell.flags) != 0);
                 // Row::apply records the last selection and discards the
                 // prepared shading layers; it keeps returning false for the
                 // XML conversion, which does not interpret table styles.
                 row.apply(code, operand)?;
-                Ok(if self.last_tistd_blocked {
+                Ok(if self.last_tistd_blocked || text_flow_before {
                     NativeAdmissionApply::HandledUnsupported
                 } else {
                     NativeAdmissionApply::Handled
@@ -178,9 +184,55 @@ impl NativeAdmission {
                 }
                 Ok(NativeAdmissionApply::Handled)
             }
+            0xd642 => {
+                // [MS-DOC] 2.9.26 CellHideMarkOperand: cb MUST be 3, then an
+                // ItcFirstLim and a Bool8. The projection is ECMA-376
+                // §17.4.21 hideMark, which Word applies per cell (see the
+                // DOCX table layout): its PDFs of sample-26 drop a hideMark
+                // cell's final empty paragraph although the row has content.
+                if operand.len() != 4 || operand[0] != 3 {
+                    return Err(unsupported("invalid Word cell hide-mark operand"));
+                }
+                let value = match operand[3] {
+                    0 => false,
+                    1 => true,
+                    _ => return Err(unsupported("invalid Word cell hide-mark boolean")),
+                };
+                let cells = range(&operand[1..], row.cells.len())?;
+                for cell in &mut row.cells[cells] {
+                    cell.hide_mark = value;
+                }
+                Ok(NativeAdmissionApply::Handled)
+            }
+            0x7629 => {
+                // [MS-DOC] 2.6.3 sprmTTextFlow: a CellRangeTextFlow (2.9.29),
+                // an ItcFirstLim (2.9.123) followed by a 2-byte TextFlow
+                // (2.9.323), with no cb prefix. The value lives in the same
+                // TCGRF textFlow field (2.9.317) that a TC80 authors, so a
+                // later TDefTable replaces it and projection reads one place.
+                let [first, lim, low, high] = operand else {
+                    return Err(unsupported("invalid Word cell text flow operand"));
+                };
+                let text_flow = u16::from_le_bytes([*low, *high]);
+                if !matches!(text_flow, 0 | 1 | 3 | 4 | 5) {
+                    return Err(unsupported("invalid Word cell text flow value"));
+                }
+                let cells = range(&[*first, *lim], row.cells.len())?;
+                for cell in &mut row.cells[cells] {
+                    cell.flags = (cell.flags & !TCGRF_TEXT_FLOW) | (text_flow << 2);
+                }
+                Ok(NativeAdmissionApply::Handled)
+            }
             _ => Ok(NativeAdmissionApply::Unhandled),
         }
     }
+}
+
+/// [MS-DOC] 2.9.317 TCGRF bits 2..=4: the cell's TextFlow (2.9.323).
+const TCGRF_TEXT_FLOW: u16 = 7 << 2;
+
+pub(in crate::doc) fn cell_text_flow(flags: u16) -> u16 {
+    (flags & TCGRF_TEXT_FLOW) >> 2
 }
 
 /// [MS-DOC] 2.9.102 FtsWWidth_Indent, the preferred leading indent written by
@@ -251,7 +303,8 @@ mod tests {
             assert_eq!(target.table_style, Some(3));
         }
         // Vertical alignment is replaced by TIstd, but that replacement is not
-        // implemented; a preceding hide-mark has no projection at all.
+        // implemented; no control shows whether TIstd resets a preceding
+        // hide-mark, which a style cannot carry (2.9.340).
         for before in [0xd62c, 0xd642, 0xf661, 0xd639, 0x5622, 0xd605] {
             let mut admission = NativeAdmission::new(true);
             let mut target = row(1);
@@ -320,10 +373,38 @@ mod tests {
             admission.apply(&mut target, 0x7479, &[1, 2, 3, 4]).unwrap(),
             NativeAdmissionApply::Handled
         );
+    }
+
+    #[test]
+    fn hide_mark_applies_to_its_cell_range_and_validates_the_operand() {
+        let mut admission = NativeAdmission::new(true);
+        let mut target = row(3);
         assert_eq!(
-            admission.apply(&mut target, 0xd642, &[3, 0, 1, 1]).unwrap(),
-            NativeAdmissionApply::Unhandled
+            admission.apply(&mut target, 0xd642, &[3, 0, 2, 1]).unwrap(),
+            NativeAdmissionApply::Handled
         );
+        assert_eq!(
+            target
+                .cells
+                .iter()
+                .map(|cell| cell.hide_mark)
+                .collect::<Vec<_>>(),
+            [true, true, false]
+        );
+        admission.apply(&mut target, 0xd642, &[3, 1, 2, 0]).unwrap();
+        assert!(!target.cells[1].hide_mark);
+        for invalid in [
+            vec![3, 0, 1],
+            vec![2, 0, 1, 1],
+            vec![3, 0, 1, 2],
+            vec![3, 2, 1, 1],
+            vec![3, 0, 4, 1],
+        ] {
+            assert!(
+                admission.apply(&mut target, 0xd642, &invalid).is_err(),
+                "{invalid:?}"
+            );
+        }
     }
 
     #[test]
@@ -379,6 +460,68 @@ mod tests {
         assert!(admission
             .apply(&mut target, 0xf617, &[3, 0xc1, 0x7b])
             .is_err());
+    }
+
+    #[test]
+    fn text_flow_sets_the_tcgrf_field_of_its_cell_range_and_validates_the_operand() {
+        let mut admission = NativeAdmission::new(true);
+        let mut target = row(3);
+        target.cells[1].flags = 0x0183; // horzMerge 3, vertAlign 3: preserved
+        admission.apply(&mut target, 0x7629, &[1, 3, 5, 0]).unwrap();
+        assert_eq!(
+            target
+                .cells
+                .iter()
+                .map(|cell| cell_text_flow(cell.flags))
+                .collect::<Vec<_>>(),
+            [0, 5, 5]
+        );
+        assert_eq!(target.cells[1].flags & !TCGRF_TEXT_FLOW, 0x0183);
+        admission.apply(&mut target, 0x7629, &[2, 3, 0, 0]).unwrap();
+        assert_eq!(cell_text_flow(target.cells[2].flags), 0);
+        for invalid in [
+            vec![0, 1, 2, 0],
+            vec![0, 1, 6, 0],
+            vec![0, 1, 7, 0],
+            vec![0, 1, 1, 1],
+            vec![0, 4, 1, 0],
+            vec![2, 1, 1, 0],
+            vec![0, 1, 1],
+            vec![4, 0, 1, 1, 0],
+        ] {
+            assert!(
+                admission.apply(&mut target, 0x7629, &invalid).is_err(),
+                "{invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tistd_after_authored_text_flow_stays_gated() {
+        // sprmTTextFlow before TIstd is not an established property.
+        let mut admission = NativeAdmission::new(true);
+        admission.observe(0x7629);
+        admission.observe(T_ISTD);
+        let mut target = row(1);
+        admission.apply(&mut target, 0x7629, &[0, 1, 1, 0]).unwrap();
+        assert_eq!(
+            admission
+                .apply(&mut target, T_ISTD, &11u16.to_le_bytes())
+                .unwrap(),
+            NativeAdmissionApply::HandledUnsupported
+        );
+        // A TC80 textFlow (via TDefTable) before TIstd has no survival control.
+        let mut admission = NativeAdmission::new(true);
+        admission.observe(0xd608);
+        admission.observe(T_ISTD);
+        let mut target = row(1);
+        target.cells[0].flags = 3 << 2;
+        assert_eq!(
+            admission
+                .apply(&mut target, T_ISTD, &11u16.to_le_bytes())
+                .unwrap(),
+            NativeAdmissionApply::HandledUnsupported
+        );
     }
 
     #[test]

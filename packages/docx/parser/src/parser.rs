@@ -13435,9 +13435,21 @@ fn parse_table_cell(
 
     let background = tc_pr
         .and_then(|p| child_w(p, "shd"))
-        .and_then(|s| attr_w(s, "fill"))
-        .filter(|f| f != "auto" && f.len() == 6)
-        .map(|f| f.to_lowercase());
+        .and_then(crate::styles::shading_fill);
+
+    // ECMA-376 §17.4.72 cell text direction. Strict §17.18.93 names are
+    // normalized to their transitional equivalents; the default lrTb and
+    // unknown values are None (horizontal).
+    let text_direction = tc_pr
+        .and_then(|p| child_w(p, "textDirection"))
+        .and_then(|v| attr_w(v, "val"))
+        .and_then(|value| cell_text_direction(&value));
+
+    // ECMA-376 §17.4.21 hideMark (CT_OnOff): ignore the end-of-cell mark when
+    // calculating the row height.
+    let hide_mark = tc_pr
+        .and_then(|p| bool_prop(p, "hideMark"))
+        .unwrap_or(false);
 
     // Empty = not set inline; parse_table fills it from the table style (else "top").
     let v_align = tc_pr
@@ -13565,7 +13577,24 @@ fn parse_table_cell(
         margin_left,
         margin_right,
         table_cell_layout,
+        text_direction,
+        hide_mark,
     }
+}
+
+/// ECMA-376 §17.18.93 ST_TextDirection for a table cell: transitional values
+/// are kept, strict values map to their transitional equivalents, and the
+/// default (`lrTb`/`tb`) or an unknown token is `None`.
+fn cell_text_direction(value: &str) -> Option<String> {
+    let transitional = match value {
+        "tbRl" | "rl" => "tbRl",
+        "btLr" | "lr" => "btLr",
+        "lrTbV" | "tbV" => "lrTbV",
+        "tbRlV" | "rlV" => "tbRlV",
+        "tbLrV" | "lrV" => "tbLrV",
+        _ => return None,
+    };
+    Some(transitional.to_string())
 }
 
 fn parse_table_borders(node: roxmltree::Node) -> TableBorders {
@@ -13606,6 +13635,9 @@ fn parse_cell_borders(node: roxmltree::Node) -> CellBorders {
             .map(parse_border_spec),
         inside_h: child_w(node, "insideH").map(parse_border_spec),
         inside_v: child_w(node, "insideV").map(parse_border_spec),
+        // §17.4.73 / §17.4.79: the cell diagonals (CT_TcBorders only).
+        tl2br: child_w(node, "tl2br").map(parse_border_spec),
+        tr2bl: child_w(node, "tr2bl").map(parse_border_spec),
     }
 }
 
@@ -13647,6 +13679,12 @@ fn apply_cond_cell_borders(dst: &mut CellBorders, src: &RawTblBorders) {
     }
     if dst.inside_v.is_none() {
         dst.inside_v = src.inside_v.as_ref().map(edge_to_border_spec);
+    }
+    if dst.tl2br.is_none() {
+        dst.tl2br = src.tl2br.as_ref().map(edge_to_border_spec);
+    }
+    if dst.tr2bl.is_none() {
+        dst.tr2bl = src.tr2bl.as_ref().map(edge_to_border_spec);
     }
 }
 
@@ -14460,6 +14498,56 @@ mod tests {
                <w:tr><w:tc><w:p/></w:tc></w:tr>"#,
         );
         assert_eq!(t.tbl_ind, None);
+    }
+
+    // ECMA-376 §17.4.72 cell text direction: transitional values are kept,
+    // strict values normalize, and the default/unknown values stay unset.
+    #[test]
+    fn cell_text_direction_surfaces_transitional_values() {
+        for (authored, expected) in [
+            ("tbRl", Some("tbRl")),
+            ("btLr", Some("btLr")),
+            ("tbRlV", Some("tbRlV")),
+            ("lrTbV", Some("lrTbV")),
+            ("tbLrV", Some("tbLrV")),
+            ("rl", Some("tbRl")),
+            ("lr", Some("btLr")),
+            ("rlV", Some("tbRlV")),
+            ("lrTb", None),
+            ("tb", None),
+            ("sideways", None),
+        ] {
+            let t = parse_tbl(&format!(
+                r#"<w:tblPr/>
+                   <w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid>
+                   <w:tr><w:tc><w:tcPr><w:textDirection w:val="{authored}"/></w:tcPr><w:p/></w:tc></w:tr>"#
+            ));
+            assert_eq!(
+                t.rows[0].cells[0].text_direction.as_deref(),
+                expected,
+                "{authored}"
+            );
+        }
+    }
+
+    // ECMA-376 §17.4.21 hideMark is CT_OnOff: present means on unless its
+    // w:val turns it off.
+    #[test]
+    fn cell_hide_mark_reads_on_off() {
+        for (tc_pr, expected) in [
+            ("", false),
+            ("<w:hideMark/>", true),
+            (r#"<w:hideMark w:val="true"/>"#, true),
+            (r#"<w:hideMark w:val="0"/>"#, false),
+            (r#"<w:hideMark w:val="false"/>"#, false),
+        ] {
+            let t = parse_tbl(&format!(
+                r#"<w:tblPr/>
+                   <w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid>
+                   <w:tr><w:tc><w:tcPr>{tc_pr}</w:tcPr><w:p/></w:tc></w:tr>"#
+            ));
+            assert_eq!(t.rows[0].cells[0].hide_mark, expected, "{tc_pr}");
+        }
     }
 
     // Regression guard for the direct-rPr merge path. `apply_direct_run` now
@@ -25930,6 +26018,23 @@ mod numbering_marker_font_tests {
         );
     }
 
+    #[test]
+    fn direct_cell_percentage_shading_blends_like_run_shading() {
+        let tables = parse_body_tables(
+            r#"<w:tbl><w:tblPr/><w:tr>
+                <w:tc><w:tcPr><w:shd w:val="pct15" w:color="auto" w:fill="FFFFFF"/></w:tcPr><w:p/></w:tc>
+                <w:tc><w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="DDDDDD"/></w:tcPr><w:p/></w:tc>
+                <w:tc><w:tcPr><w:shd w:val="horzStripe" w:color="FF0000" w:fill="00FF00"/></w:tcPr><w:p/></w:tc>
+            </w:tr></w:tbl>"#,
+            &phase_styles(),
+        );
+        let cells = &tables[0].rows[0].cells;
+        assert_eq!(cells[0].background.as_deref(), Some("d9d9d9"));
+        assert_eq!(cells[1].background.as_deref(), Some("dddddd"));
+        // Non-percentage patterns keep the fill-only projection.
+        assert_eq!(cells[2].background.as_deref(), Some("00ff00"));
+    }
+
     fn phase_styles() -> StyleMap {
         StyleMap::parse(&format!(
             r#"<w:styles xmlns:w="{ns}">
@@ -26568,6 +26673,57 @@ mod numbering_marker_font_tests {
             </w:styles>"#,
             ns = W_NS
         ))
+    }
+
+    // ECMA-376 §17.4.73 / §17.4.79: cell diagonals are read from direct
+    // tcBorders and from a conditional table style's tcBorders; a direct value
+    // wins per diagonal, exactly like the four edges.
+    #[test]
+    fn cell_diagonal_borders_fold_direct_over_conditional_style() {
+        let t = parse_tbl_styled(
+            r#"<w:tblPr/>
+               <w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid>
+               <w:tr><w:tc><w:tcPr><w:tcBorders>
+                 <w:tl2br w:val="single" w:sz="4" w:space="0" w:color="auto"/>
+               </w:tcBorders></w:tcPr><w:p/></w:tc></w:tr>"#,
+            &StyleMap::default(),
+        );
+        let borders = &t.rows[0].cells[0].borders;
+        let tl2br = borders.tl2br.as_ref().expect("tl2br");
+        assert_eq!(tl2br.style, "single");
+        assert!((tl2br.width - 0.5).abs() < 1e-9);
+        assert!(borders.tr2bl.is_none());
+
+        let styles = StyleMap::parse(&format!(
+            r#"<w:styles xmlns:w="{ns}">
+                <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:rPr/></w:style>
+                <w:style w:type="table" w:styleId="Diag">
+                    <w:tblStylePr w:type="firstRow">
+                        <w:tcPr><w:tcBorders>
+                            <w:tl2br w:val="double" w:sz="8" w:color="FF0000"/>
+                            <w:tr2bl w:val="dotted" w:sz="4" w:color="00FF00"/>
+                        </w:tcBorders></w:tcPr>
+                    </w:tblStylePr>
+                </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        ));
+        let t = parse_tbl_styled(
+            r#"<w:tblPr><w:tblStyle w:val="Diag"/><w:tblLook w:val="0020"/></w:tblPr>
+               <w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>
+               <w:tr><w:tc><w:tcPr><w:tcBorders>
+                 <w:tr2bl w:val="nil"/>
+               </w:tcBorders></w:tcPr><w:p/></w:tc></w:tr>"#,
+            &styles,
+        );
+        let borders = &t.rows[0].cells[0].borders;
+        let tl2br = borders.tl2br.as_ref().expect("conditional tl2br");
+        assert_eq!(tl2br.style, "double");
+        assert_eq!(tl2br.color.as_deref(), Some("ff0000"));
+        assert_eq!(
+            borders.tr2bl.as_ref().map(|b| b.style.as_str()),
+            Some("nil")
+        );
     }
 
     #[test]

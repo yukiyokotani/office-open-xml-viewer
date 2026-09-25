@@ -2,7 +2,7 @@
 
 use super::{payload, ModelBudget};
 use crate::doc::{
-    table::{Color, PreferredIndent, PreferredWidth, Properties},
+    table::{cell_text_flow, Color, PreferredIndent, PreferredWidth, Properties},
     table_structure::{Assembler, Event, LogicalTable, Payload, PlannedRow},
     unsupported,
 };
@@ -213,20 +213,50 @@ fn project_table(
                     "direct DOC model cannot retain no-wrap cells without an absolute preferred width",
                 ));
             }
-            if source.flags & ((1 << 12) | (1 << 14)) != 0
-                || source.borders[4..]
-                    .iter()
-                    .flatten()
-                    .any(|border| !border.is_cleared())
-            {
+            if source.flags & ((1 << 12) | (1 << 14)) != 0 {
                 return Err(unsupported(
-                    "direct DOC model cannot retain cell fit/hide/diagonal facts",
+                    "direct DOC model cannot retain cell fit/hide facts",
+                ));
+            }
+            // [MS-DOC] 2.9.305 diagonal sides 0x10 (top left to bottom right)
+            // and 0x20 (top right to bottom left) are ECMA-376 §17.4.73 tl2br
+            // and §17.4.79 tr2bl. A cleared (none/Nil) diagonal is absence.
+            let diagonal = |side: usize| {
+                source.borders[side]
+                    .as_ref()
+                    .filter(|border| !border.is_cleared())
+                    .map(|border| border.direct_spec())
+            };
+            let (tl2br, tr2bl) = (diagonal(4), diagonal(5));
+            if (tl2br.is_some() || tr2bl.is_some()) && (cell.vertical != 0 || source.flags & 3 != 0)
+            {
+                // Each merged DOC cell carries its own TC; no control shows
+                // which member's diagonal Word draws across a merged box.
+                return Err(unsupported(
+                    "direct DOC model cannot place diagonals on merged cells",
                 ));
             }
             let align = (source.flags >> 7) & 3;
             if align > 2 {
                 return Err(unsupported("invalid Word vertical cell alignment"));
             }
+            // [MS-DOC] 2.9.317 TCGRF textFlow (from TC80 or sprmTTextFlow)
+            // is a 2.9.323 TextFlow; ECMA-376 Part 1 §17.18.93 names the same
+            // arrangements (sample-19's DOC/DOCX pair: 5 = tbRlV).
+            let text_direction = match cell_text_flow(source.flags) {
+                0 => None,
+                1 => Some("tbRl"),
+                3 => Some("btLr"),
+                5 => Some("tbRlV"),
+                // The shared renderer lays lrTbV cells out without rotating
+                // their East Asian glyphs, so projecting it would misdisplay.
+                4 => {
+                    return Err(unsupported(
+                        "direct DOC model cannot display grpfTFlrtbv cell text flow",
+                    ));
+                }
+                _ => return Err(unsupported("invalid Word cell text flow")),
+            };
             let mut content = Vec::new();
             reserve(&mut content, cell.content.0.len().max(1), &mut |n| {
                 charge_cell(remaining, n)
@@ -244,6 +274,17 @@ fn project_table(
                         }
                     });
                 }
+            }
+            if text_direction.is_some()
+                && content
+                    .iter()
+                    .any(|element| matches!(element, CellElement::Table(_)))
+            {
+                // The shared renderer keeps a rotated cell holding a nested
+                // table horizontal; projecting it would misdisplay.
+                return Err(unsupported(
+                    "direct DOC model cannot display rotated cells containing tables",
+                ));
             }
             let fallback = |side: usize| match side {
                 0 => Some(if row_index == 0 { 0 } else { 4 }),
@@ -280,6 +321,8 @@ fn project_table(
                     right: border(3),
                     inside_h: None,
                     inside_v: None,
+                    tl2br,
+                    tr2bl,
                 },
                 background,
                 v_align: ["top", "center", "bottom"][align as usize].into(),
@@ -299,6 +342,8 @@ fn project_table(
                     preferred_width: source.preferred.map(width),
                     margins: Some(margin_wire(margins)),
                 },
+                text_direction: text_direction.map(str::to_owned),
+                hide_mark: source.hide_mark,
             });
         }
         let height = planned.source.height;
@@ -560,6 +605,99 @@ mod tests {
         assert_eq!(table.table_layout.logical_row_offset, 0);
         assert_eq!(table.table_layout.logical_total_rows, 1);
         assert!(table.table_layout.ordinary_flow);
+    }
+    #[test]
+    fn tcgrf_text_flow_projects_and_rotated_cells_with_nested_tables_fail_closed() {
+        // [MS-DOC] 2.9.317 TCGRF textFlow authored by a TC80 (grpfTFbtlr).
+        let mut end = row(1, &[1000]);
+        end.row.cells[0].flags |= 3 << 2;
+        let mut sequence = 0;
+        let mut writer = Writer::new(&mut sequence);
+        let mut budget = ModelBudget::new(1_000_000);
+        writer
+            .push(cell(1), '\u{7}', paragraph("a"), &mut budget)
+            .unwrap();
+        writer
+            .push(end, '\u{7}', Blocks::default(), &mut budget)
+            .unwrap();
+        let body = writer.finish(&mut budget).unwrap();
+        let Block::Table(table) = &body.0[0] else {
+            panic!()
+        };
+        assert_eq!(
+            table.rows[0].cells[0].text_direction.as_deref(),
+            Some("btLr")
+        );
+
+        // The same flow on a cell holding a nested table is rejected.
+        let mut end = row(1, &[1000]);
+        end.row.cells[0].flags |= 1 << 2;
+        let mut sequence = 0;
+        let mut writer = Writer::new(&mut sequence);
+        let mut budget = ModelBudget::new(1_000_000);
+        // Nested cells and rows end at paragraph marks carrying
+        // fInnerTableCell / fInnerTtp ([MS-DOC] 2.4.3).
+        let mut inner_cell = cell(2);
+        inner_cell.inner_cell = true;
+        writer
+            .push(inner_cell, '\r', paragraph("inner"), &mut budget)
+            .unwrap();
+        writer
+            .push(row(2, &[500]), '\r', Blocks::default(), &mut budget)
+            .unwrap();
+        writer
+            .push(cell(1), '\u{7}', paragraph("a"), &mut budget)
+            .unwrap();
+        let error = writer
+            .push(end, '\u{7}', Blocks::default(), &mut budget)
+            .and_then(|_| writer.finish(&mut budget).map(|_| ()))
+            .err()
+            .unwrap();
+        assert!(error.contains("rotated cells containing tables"), "{error}");
+    }
+    #[test]
+    fn cell_diagonals_project_and_merged_cell_diagonals_fail_closed() {
+        let diagonal =
+            || Some(crate::doc::border::Border::read(&[0, 0, 0, 0xff, 4, 1, 0, 0], false).unwrap());
+        let mut end = row(1, &[1000]);
+        end.row.cells[0].borders[5] = diagonal();
+        let mut sequence = 0;
+        let mut writer = Writer::new(&mut sequence);
+        let mut budget = ModelBudget::new(1_000_000);
+        writer
+            .push(cell(1), '\u{7}', paragraph("a"), &mut budget)
+            .unwrap();
+        writer
+            .push(end, '\u{7}', Blocks::default(), &mut budget)
+            .unwrap();
+        let body = writer.finish(&mut budget).unwrap();
+        let Block::Table(table) = &body.0[0] else {
+            panic!()
+        };
+        let borders = &table.rows[0].cells[0].borders;
+        assert!(borders.tl2br.is_none());
+        assert_eq!(borders.tr2bl.as_ref().unwrap().style, "single");
+
+        // The primary of a horizontal merge (TCGRF horzMerge 2) is rejected.
+        let mut end = row(1, &[500, 500]);
+        end.row.cells[0].flags |= 2;
+        end.row.cells[1].flags |= 1;
+        end.row.cells[0].borders[4] = diagonal();
+        let mut sequence = 0;
+        let mut writer = Writer::new(&mut sequence);
+        let mut budget = ModelBudget::new(1_000_000);
+        writer
+            .push(cell(1), '\u{7}', paragraph("a"), &mut budget)
+            .unwrap();
+        writer
+            .push(cell(1), '\u{7}', paragraph("b"), &mut budget)
+            .unwrap();
+        let error = writer
+            .push(end, '\u{7}', Blocks::default(), &mut budget)
+            .and_then(|_| writer.finish(&mut budget).map(|_| ()))
+            .err()
+            .unwrap();
+        assert!(error.contains("diagonals on merged cells"), "{error}");
     }
     #[test]
     fn no_overlap_alone_remains_ordinary_but_positioned_table_fails_closed() {

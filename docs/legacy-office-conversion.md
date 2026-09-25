@@ -2403,16 +2403,17 @@ Admission is not visual fidelity.
 
 ### Local direct-render survey
 
-`packages/{docx,pptx,xlsx}/tests/visual/legacy-corpus.spec.ts` render each
-local private legacy sample through its direct source. Each sample is written
-beside its same-named Office PDF export as paired PNGs and a summary. The
-survey reports only: it never gates, updates references, or generates OOXML.
-Run it with an output directory outside the checkout:
+`packages/legacy-converter/tests/survey/{doc,ppt,xls}.spec.ts` render each
+local private legacy sample through its direct source, on the matching viewer
+package's own VRT fixture and dev server. Each sample is written beside its
+same-named Office PDF export as paired PNGs and a summary. The survey reports
+only: it never gates, updates references, or generates OOXML. Run it with an
+output directory outside the checkout (`VRT_PORT` serves DOC, `+1` PPT and
+`+2` XLS; `LEGACY_CORPUS_FORMATS` and `LEGACY_CORPUS_FILTER` narrow the run):
 
 ```bash
-LEGACY_CORPUS=1 LEGACY_CORPUS_OUT=/tmp/legacy-survey VRT_PRIVATE_CORPUS=1 \
-  pnpm --filter @silurus/ooxml-pptx exec playwright test \
-  --config playwright.config.ts --project=chrome legacy-corpus.spec.ts
+LEGACY_CORPUS=1 LEGACY_CORPUS_OUT=/tmp/legacy-survey LEGACY_CORPUS_FORMATS=ppt \
+  pnpm --filter @silurus/ooxml-legacy-converter survey
 ```
 
 Pixel percentages are only a triage signal. For example, a slide can score
@@ -2436,8 +2437,8 @@ be closed before an experimental release.
 | XLS | Table (ListObject) styles, conditional-format data bars/icons and pivot styling are absent | about 5 |
 | XLS | Formula text is not decompiled from Ptg tokens, so volatile functions are not recalculated as Excel does at export | 2 |
 | XLS | Clip-art pictures, strikethrough and one vertical merge are missing | 1 to 3 each |
-| XLS | The direct reader rejects, instead of omitting, drawn objects it does not project: lines, ovals and other shape types, grouped pictures or charts, rotated shapes or groups, macro sheets and AutoFilter criteria. OfficeArt data that Excel continues in Continue records after a complete Obj, chart substream or TxO is assembled by native record length. AutoFilter drop-down objects (application-inserted, anchored move-without-size) project as the sheet's AutoFilter range. Chart sheets are projected as chart-sheet worksheets with the chart at its Chart record rectangle; rectangles, text boxes and their sheet groups are projected as XLSX-model shape anchors with solid paint and TxO text, following Excel's own XLSX of the same workbooks | 1 of 139 (rotated/flipped groups and polygons) |
-| XLS | The chart area's automatic border (Excel draws it on a chart sheet) is not projected, so an authored series-less chart renders blank | 1 |
+| XLS | The direct reader rejects, instead of omitting, drawn objects it does not project: lines, ovals and other shape types, grouped charts, macro sheets and AutoFilter criteria. Chart sheets are projected as chart-sheet worksheets with the chart at its Chart record rectangle; rectangles, text boxes, freeform polygons, pictures and their (rotated, flipped or nested) sheet groups are projected as XLSX-model shape anchors with solid paint and TxO text, following Excel's own XLSX of the same workbooks; OfficeArt data that Excel continues in Continue records after a complete Obj, chart substream or TxO is assembled by native record length | 0 of 139 |
+| XLS | ~~The chart area's automatic border is not projected~~ Resolved: an automatic chart area takes the BIFF outline Excel writes for it | ~~1~~ |
 | PPT | ~~Only seven MS-ODRAW shape types map to presets~~ 100+ shape types map as PowerPoint converts them, with evidenced adjust formulas (officeart::preset); adjusted callout2/3 families, arrow callouts, curved arrows, ribbons and tall cubes/hexagons/parallelograms still fail closed | several |
 | PPT | ~~Native/OLE charts are missing~~ Resolved: embedded OLE objects show their stored presentation picture (bfc835d3) | 3 |
 | PPT | ~~Rotation by multiples of 90 degrees and combined flips use the wrong bounds or order~~ Resolved from the 120-case PowerPoint control (aa9dc5c1) | 1 |
@@ -2445,7 +2446,7 @@ be closed before an experimental release.
 | PPT | ~~Gradients on rotated shapes (or inside rotated/flipped groups) are replaced by the solid fill colour~~ Resolved (ef41f03a) | several |
 | PPT | Custom geometry with per-path fill/stroke flags is rejected; the PPTX model has no per-path `fill`/`stroke` (ECMA-376 §20.1.9.15), a generic PPTX gap | 1 |
 | PPT | ~~Unmapped shape types are dropped silently~~ Now rejected | several |
-| PPT | ~~Picture brightness/contrast (washout)~~ projected as `lum` from the gray-ramp control; pattern fills on rotated shapes, texture fills, and OLE icons, links and controls are rejected | several |
+| PPT | ~~Picture brightness/contrast (washout)~~ projected as `lum` from the gray-ramp control; pattern fills (including on rotated shapes) are projected; pattern fills on flipped shapes, texture fills, and OLE icons, links and controls are rejected | several |
 | PPT | Implicit paragraph margin/indent and percentage spacing are rejected | 12 of 34 load failures |
 | DOC | 55 of 59 samples are rejected (formatting, notes, fields, positioned tables, drawings, header pictures, non-PNG/JPEG images, list ancestry, FIB version, language ID) | 55 |
 | DOC | Picture washout/brightness and space-before after a page break differ from Word | 2 |
