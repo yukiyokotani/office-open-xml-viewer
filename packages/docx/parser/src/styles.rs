@@ -1415,7 +1415,7 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
 
     // Paragraph shading
     if let Some(shd) = child_w(ppr, "shd") {
-        if let Some(fill) = paragraph_run_shading_fill(shd) {
+        if let Some(fill) = shading_fill(shd) {
             fmt.shading = Some(fill);
         }
     }
@@ -2086,7 +2086,7 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
     // video) is exact since only the fill is visible, but `val="solid"` etc.
     // drop information by ignoring the pattern foreground.
     if let Some(shd) = child_w(rpr, "shd") {
-        if let Some(fill) = paragraph_run_shading_fill(shd) {
+        if let Some(fill) = shading_fill(shd) {
             fmt.background = Some(fill);
         }
     }
@@ -2251,14 +2251,15 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
 
 // ===== Table style parsing =====
 
-/// ECMA-376 17.3.1.31 / 17.3.2.32 paragraph and run `w:shd` as one fill.
+/// ECMA-376 `w:shd` (paragraph 17.3.1.31, run 17.3.2.32, table cell and
+/// table-style cell 17.4.32/17.4.33) as one fill.
 ///
 /// ST_Shd `pctN` (17.18.78) is an N% `w:color` pattern over `w:fill`. Word
 /// paints it as a single solid color: its PDF of a `pct15` run with
 /// `w:color="auto"` over `w:fill="FFFFFF"` is exactly #D9D9D9 (15% black
 /// over white). Blend percentage patterns with an automatic pattern color as
 /// black; every other pattern keeps the historical fill-only projection.
-pub(crate) fn paragraph_run_shading_fill(shd: roxmltree::Node) -> Option<String> {
+pub(crate) fn shading_fill(shd: roxmltree::Node) -> Option<String> {
     let hex = |value: &str| {
         (value.len() == 6)
             .then(|| u32::from_str_radix(value, 16).ok())
@@ -2287,11 +2288,10 @@ pub(crate) fn paragraph_run_shading_fill(shd: roxmltree::Node) -> Option<String>
     Some(format!("{:02x}{:02x}{:02x}", mix(16), mix(8), mix(0)))
 }
 
+/// Table-style cell shading: the same ECMA-376 `w:shd` semantics as
+/// paragraph/run shading, so percentage patterns blend identically.
 fn shd_fill(node: roxmltree::Node) -> Option<String> {
-    child_w(node, "shd")
-        .and_then(|s| attr_w(s, "fill"))
-        .filter(|f| f != "auto" && f.len() == 6)
-        .map(|f| f.to_lowercase())
+    child_w(node, "shd").and_then(shading_fill)
 }
 
 fn parse_edge_border(node: roxmltree::Node) -> EdgeBorder {
@@ -3418,6 +3418,28 @@ mod tests {
         assert!(fr.para.is_none());
         // shd still parses (existing behavior unchanged).
         assert_eq!(fr.shd.as_deref(), Some("cccccc"));
+    }
+
+    #[test]
+    fn table_style_cell_percentage_shading_blends_like_run_shading() {
+        let xml = format!(
+            r#"<w:styles xmlns:w="{ns}">
+              <w:style w:type="table" w:styleId="Pct">
+                <w:name w:val="Pct"/>
+                <w:tcPr><w:shd w:val="pct15" w:color="auto" w:fill="FFFFFF"/></w:tcPr>
+                <w:tblStylePr w:type="firstRow">
+                  <w:tcPr><w:shd w:val="pct25" w:color="00FF00" w:fill="FFFFFF"/></w:tcPr>
+                </w:tblStylePr>
+              </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        );
+        let def = StyleMap::parse(&xml).resolve_table_style("Pct");
+        assert_eq!(def.cell_shd.as_deref(), Some("d9d9d9"));
+        assert_eq!(
+            def.cond.get("firstRow").unwrap().shd.as_deref(),
+            Some("bfffbf")
+        );
     }
 
     // ── WD4: run-level character metrics (§17.3.2.35 / .43 / .24 / .19) ──────
