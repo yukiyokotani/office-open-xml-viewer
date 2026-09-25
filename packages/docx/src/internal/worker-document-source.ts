@@ -85,6 +85,18 @@ export class WorkerDocumentSourceOwner<TArchive extends OoxmlWorkerDocumentArchi
     return archive;
   }
 
+  /**
+   * Legacy DOC only: whether the source document asks for its revision
+   * markup in print/PDF output (MS-DOC DopBase fRMPrint; Word's PDF is the
+   * display target for legacy DOC) and actually carries revision marks.
+   * Always false for OOXML packages, whose view follows the caller alone.
+   */
+  sourceRevisionMarkup(): boolean {
+    const archive = this.nativeSource?.archive;
+    if (!archive) return false;
+    return archive.revision_markup_in_print?.() === true && archive.has_revision_marks?.() === true;
+  }
+
   closeNative(): void {
     this.pending = undefined;
     const owned = this.nativeSource;

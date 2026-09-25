@@ -479,6 +479,10 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
       post({ type: 'imageExtracted', id, bytes }, [bytes]);
       return;
     }
+    if (req.type === 'sourceRevisionView') {
+      post({ type: 'sourceRevisionView', id, markup: sourceOwner.sourceRevisionMarkup() });
+      return;
+    }
     if (req.type === 'resourceUsage') {
       const archive = sourceOwner.ooxml('resource usage');
       const usage = decodeOoxmlResourceUsage(host.run(() => archive.resource_usage()));

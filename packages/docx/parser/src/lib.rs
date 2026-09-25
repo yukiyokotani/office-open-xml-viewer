@@ -501,15 +501,20 @@ impl DocxArchive {
     }
 
     /// Current or most recently completed document-cursor resource checkpoint.
-    pub fn document_cursor_resource_usage(&self) -> Result<Vec<u8>, JsValue> {
-        let usage = self
+    /// `None` when no checkpoint exists: a package that fails before its
+    /// document cursor opens streams a placeholder document without one.
+    pub fn document_cursor_resource_usage(&self) -> Result<Option<Vec<u8>>, JsValue> {
+        let Some(usage) = self
             .archive
             .as_ref()
             .ok()
             .and_then(parser::Zip::operation_usage)
             .or(self.last_document_usage)
-            .ok_or_else(|| JsValue::from_str("document cursor usage is unavailable"))?;
+        else {
+            return Ok(None);
+        };
         serde_json::to_vec(&usage)
+            .map(Some)
             .map_err(|error| JsValue::from_str(&format!("serialize error: {error}")))
     }
 
@@ -801,8 +806,19 @@ mod tests {
         assert!(archive.document_cursor.is_none());
         assert!(archive.prepared_document_chunk.is_none());
         let usage: serde_json::Value =
-            serde_json::from_slice(&archive.document_cursor_resource_usage().unwrap()).unwrap();
+            serde_json::from_slice(&archive.document_cursor_resource_usage().unwrap().unwrap())
+                .unwrap();
         assert!(usage["operationInflatedBytes"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn missing_document_cursor_checkpoint_is_a_typed_absence() {
+        // A package that fails before its document cursor opens has no
+        // checkpoint; the archive reports that as `None`, not as an error.
+        let archive = DocxArchive::new(vec![0, 1, 2, 3], None, None, None).unwrap_or_else(|_| {
+            panic!("an unreadable package still constructs a placeholder session")
+        });
+        assert!(archive.document_cursor_resource_usage().unwrap().is_none());
     }
 
     #[test]

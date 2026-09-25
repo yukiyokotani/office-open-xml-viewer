@@ -80,6 +80,11 @@ impl DirectCursor {
         self.revision_markup.in_print
     }
 
+    /// Whether the projected model carries any revision mark.
+    pub(crate) fn has_revision_marks(&self) -> bool {
+        self.revision_markup.has_marks
+    }
+
     /// MS-DOC 2.7.2 DopBase fRMView of the source document.
     pub(crate) fn revision_markup_on_screen(&self) -> bool {
         self.revision_markup.on_screen
@@ -345,10 +350,12 @@ mod tests {
         value.revision_markup = crate::doc::settings::RevisionMarkup {
             on_screen: true,
             in_print: false,
+            has_marks: true,
         };
         let cursor = DirectCursor::new(value).unwrap();
         assert!(cursor.revision_markup_on_screen());
         assert!(!cursor.revision_markup_in_print());
+        assert!(cursor.has_revision_marks());
     }
 
     fn pull(cursor: &mut DirectCursor, sequence: u32, credit: usize) -> Vec<u8> {

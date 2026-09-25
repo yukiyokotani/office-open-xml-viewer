@@ -34,6 +34,9 @@ pub(super) struct Properties {
 pub(crate) struct RevisionMarkup {
     pub(crate) on_screen: bool,
     pub(crate) in_print: bool,
+    /// Whether the projected model carries any revision mark at all; set by
+    /// the direct model, never read from the DOP.
+    pub(crate) has_marks: bool,
 }
 
 /// MS-DOC 2.7.2 DopBase fpc/rncFtn/nFtn/rncEdn/nEdn/epc and 2.7.4 Dop97
@@ -121,6 +124,7 @@ pub(super) fn read(word: &[u8], table: &[u8]) -> Result<Option<Properties>, Stri
     let revision_markup = RevisionMarkup {
         on_screen: flags & (1 << 27) != 0,
         in_print: flags & (1 << 28) != 0,
+        has_marks: false,
     };
     // MS-DOC 2.7.3 DopBase.fFacingPages explicitly maps to evenAndOddHeaders.
     Ok(Some(Properties {

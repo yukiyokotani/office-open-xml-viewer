@@ -250,11 +250,12 @@ pub(super) fn build(
         note_layout_settings,
         ..Document::default()
     };
-    let revision_markup = facts
+    let mut revision_markup = facts
         .document_settings
         .as_ref()
         .map(|settings| settings.revision_markup)
         .unwrap_or_default();
+    revision_markup.has_marks = document_has_revision_marks(&document);
     if !facts.pictures.has_selected_direct_resources()
         && !facts.floating.has_selected_direct_resources()
     {
@@ -278,6 +279,42 @@ pub(super) fn build(
         resources,
         revision_markup,
     })
+}
+
+/// True when any projected text run carries a revision mark, in the body or
+/// in any header/footer story.
+fn document_has_revision_marks(document: &Document) -> bool {
+    fn blocks<'a>(elements: impl IntoIterator<Item = &'a BodyElement>) -> bool {
+        elements.into_iter().any(|element| match element {
+            BodyElement::Paragraph(paragraph) => paragraph_marked(paragraph),
+            BodyElement::Table(table) => table_marked(table),
+            BodyElement::SectionBreak {
+                headers, footers, ..
+            } => stories(headers) || stories(footers),
+            _ => false,
+        })
+    }
+    fn paragraph_marked(paragraph: &docx_model::DocParagraph) -> bool {
+        paragraph
+            .runs
+            .iter()
+            .any(|run| matches!(run, docx_model::DocRun::Text(text) if text.revision.is_some()))
+    }
+    fn table_marked(table: &docx_model::DocTable) -> bool {
+        table.rows.iter().flat_map(|row| &row.cells).any(|cell| {
+            cell.content.iter().any(|block| match block {
+                CellElement::Paragraph(paragraph) => paragraph_marked(paragraph),
+                CellElement::Table(table) => table_marked(table),
+            })
+        })
+    }
+    fn stories(value: &docx_model::HeadersFooters) -> bool {
+        [&value.default, &value.first, &value.even]
+            .into_iter()
+            .flatten()
+            .any(|story| blocks(&story.body))
+    }
+    blocks(&document.body) || stories(&document.headers) || stories(&document.footers)
 }
 
 #[derive(Clone, Copy)]
@@ -2652,5 +2689,51 @@ mod tests {
                 "source {text:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod revision_mark_tests {
+    use super::*;
+    use docx_model::{DocParagraph, DocTable, DocTableCell, DocTableRow, HeaderFooter, TextRun};
+
+    fn marked_paragraph(marked: bool) -> DocParagraph {
+        DocParagraph {
+            runs: vec![DocRun::Text(Box::new(TextRun {
+                revision: marked.then(|| docx_model::RunRevision {
+                    kind: "insertion".into(),
+                    id: None,
+                    author: None,
+                    date: None,
+                    typography_id: Default::default(),
+                }),
+                ..TextRun::default()
+            }))],
+            ..DocParagraph::default()
+        }
+    }
+
+    #[test]
+    fn revision_marks_are_found_in_body_tables_and_page_stories() {
+        let mut document = Document::default();
+        document.body = vec![BodyElement::Paragraph(Box::new(marked_paragraph(false)))];
+        assert!(!document_has_revision_marks(&document));
+        let table = DocTable {
+            rows: vec![DocTableRow {
+                cells: vec![DocTableCell {
+                    content: vec![CellElement::Paragraph(Box::new(marked_paragraph(true)))],
+                    ..DocTableCell::default()
+                }],
+                ..DocTableRow::default()
+            }],
+            ..DocTable::default()
+        };
+        document.body.push(BodyElement::Table(Box::new(table)));
+        assert!(document_has_revision_marks(&document));
+        let mut header_only = Document::default();
+        header_only.footers.default = Some(HeaderFooter {
+            body: vec![BodyElement::Paragraph(Box::new(marked_paragraph(true)))],
+        });
+        assert!(document_has_revision_marks(&header_only));
     }
 }

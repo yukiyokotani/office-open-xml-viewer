@@ -533,6 +533,23 @@ export class DocxDocument {
         nativeSource,
       ), nativeSignal);
       doc._throwIfNativeDocAborted(nativeSignal);
+      // Legacy DOC only: when the caller did not choose a tracked-change view,
+      // follow the DOC's own print-markup setting (Word's PDF of the .doc is
+      // the display target). OOXML inputs never take this branch, and an
+      // explicit `showTrackedChanges` always wins.
+      if (resolvedInput.kind === 'legacy-doc' && opts.showTrackedChanges === undefined) {
+        const markup = await doc._bindNativeDocSignal(
+          () => doc!._sourceRevisionMarkup(opts.workerTimeoutMs),
+          nativeSignal,
+        );
+        doc._throwIfNativeDocAborted(nativeSignal);
+        if (markup) {
+          await doc.setLayoutView({
+            showTrackedChanges: true,
+            currentDate: loadRuntime.activeLayoutOptions?.currentDateMs ?? loadRuntime.defaultCurrentDateMs,
+          });
+        }
+      }
       if (mode === 'worker' && doc._mode === 'main') {
         metrics.setMode('main');
         console.warn(
@@ -1399,6 +1416,17 @@ export class DocxDocument {
    * const doc = await DocxDocument.load(buffer);
    * const md = await doc.toMarkdown();
    */
+  /** Legacy DOC only: the source's own revision-markup view (see
+   * `WorkerDocumentSourceOwner.sourceRevisionMarkup`). */
+  private async _sourceRevisionMarkup(timeoutMs: number | undefined): Promise<boolean> {
+    const res = await this._bridge.request(
+      (id) => ({ type: 'sourceRevisionView', id }) satisfies WorkerRequest,
+      [],
+      { timeoutMs },
+    );
+    return (res as Extract<WorkerResponse, { type: 'sourceRevisionView' }>).markup === true;
+  }
+
   async toMarkdown(): Promise<string> {
     const res = await this._bridge.request(
       (id) => ({ type: 'toMarkdown', id }) satisfies WorkerRequest,

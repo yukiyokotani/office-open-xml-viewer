@@ -30,6 +30,8 @@ export interface LegacyDocNativeDocument {
   revision_markup_in_print?(): boolean;
   /** MS-DOC 2.7.2 DopBase fRMView: the DOC shows its revision markup on screen. */
   revision_markup_on_screen?(): boolean;
+  /** Whether the projected model carries any revision mark. */
+  has_revision_marks?(): boolean;
 }
 
 export type OwnedLegacyDocSource = OwnedDirectSource<LegacyDocNativeDocument>;

@@ -13410,9 +13410,7 @@ fn parse_table_cell(
 
     let background = tc_pr
         .and_then(|p| child_w(p, "shd"))
-        .and_then(|s| attr_w(s, "fill"))
-        .filter(|f| f != "auto" && f.len() == 6)
-        .map(|f| f.to_lowercase());
+        .and_then(crate::styles::shading_fill);
 
     // ECMA-376 §17.4.72 cell text direction. Strict §17.18.93 names are
     // normalized to their transitional equivalents; the default lrTb and
@@ -25924,6 +25922,23 @@ mod numbering_marker_font_tests {
             tables[0].table_layout.logical_sequence_id,
             tables[1].table_layout.logical_sequence_id,
         );
+    }
+
+    #[test]
+    fn direct_cell_percentage_shading_blends_like_run_shading() {
+        let tables = parse_body_tables(
+            r#"<w:tbl><w:tblPr/><w:tr>
+                <w:tc><w:tcPr><w:shd w:val="pct15" w:color="auto" w:fill="FFFFFF"/></w:tcPr><w:p/></w:tc>
+                <w:tc><w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="DDDDDD"/></w:tcPr><w:p/></w:tc>
+                <w:tc><w:tcPr><w:shd w:val="horzStripe" w:color="FF0000" w:fill="00FF00"/></w:tcPr><w:p/></w:tc>
+            </w:tr></w:tbl>"#,
+            &phase_styles(),
+        );
+        let cells = &tables[0].rows[0].cells;
+        assert_eq!(cells[0].background.as_deref(), Some("d9d9d9"));
+        assert_eq!(cells[1].background.as_deref(), Some("dddddd"));
+        // Non-percentage patterns keep the fill-only projection.
+        assert_eq!(cells[2].background.as_deref(), Some("00ff00"));
     }
 
     fn phase_styles() -> StyleMap {

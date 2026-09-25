@@ -133,6 +133,33 @@ describe('header/footer text frames (§17.3.1.11)', () => {
     expect(text.bounds.xPt).toBeGreaterThanOrEqual(40 - 1e-6);
   });
 
+  it('lays out every member of a multi-paragraph header frame group as one frame', () => {
+    const shared = frame({ xAlign: 'right' });
+    const layers = layout([], [
+      paragraph('11', { ...shared }),
+      paragraph('22', { ...shared }),
+      paragraph('33', { ...shared }),
+      paragraph('abc'),
+    ]);
+    const nodes = paragraphs(layers.header);
+    const members = ['11', '22', '33'].map((text) => nodes.find((node) => textOf(node) === text)!);
+    for (const member of members) {
+      expect(member.ordinaryFlow).toBe(false);
+      // xAlign="right" in the margin band [20, 180]: a 20pt-wide frame.
+      expect(member.flowBounds.xPt).toBeCloseTo(160);
+    }
+    // Members stack inside the frame, one 10pt line each.
+    expect(members[1]!.flowBounds.yPt).toBeCloseTo(members[0]!.flowBounds.yPt + 10);
+    expect(members[2]!.flowBounds.yPt).toBeCloseTo(members[1]!.flowBounds.yPt + 10);
+    // The anchor starts at the frame's cursor and wraps beside the frame.
+    const anchor = nodes.find((node) => textOf(node) === 'abc')!;
+    expect(anchor.ordinaryFlow).toBe(true);
+    expect(anchor.flowBounds.yPt).toBeCloseTo(members[0]!.flowBounds.yPt - 0.05);
+    // Only the owner registers the group's single wrap exclusion.
+    const exclusions = anchor.exclusions.filter((item) => item.id.includes('frame'));
+    expect(exclusions.length).toBeLessThanOrEqual(1);
+  });
+
   it('keeps page-anchored story frames in ordinary flow', () => {
     const footer = paragraphs(layout([paragraph('12', frame({ vAnchor: 'page', y: 5 })), paragraph('')]).footer);
     expect(footer.find((node) => textOf(node) === '12')!.ordinaryFlow).toBe(true);
