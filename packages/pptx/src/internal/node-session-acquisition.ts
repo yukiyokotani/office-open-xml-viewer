@@ -19,21 +19,25 @@ export interface PptxNodeArchive extends PptxSlideCursorArchive {
   free(): void;
   assert_healthy(): void;
   presentation_bootstrap(): Uint8Array;
-  /** ZIP accounting is absent for native sources; absence is not zero usage. */
+  /** Absent when a model source has no ZIP accounting; absence is not zero usage. */
   resource_usage?(): Uint8Array;
   extract_image(path: string): Uint8Array;
-  extract_media(path: string): Uint8Array;
+  /** Absent for a model source without media reads. */
+  extract_media?(path: string): Uint8Array;
 }
 
+/** The archive a Node PPTX session reads; a model source closes its own. */
+export type PptxNodeSessionArchive = Omit<PptxNodeArchive, 'free'>;
+
 export interface PptxNodeAcquisition {
-  readonly archive: PptxNodeArchive;
+  readonly archive: PptxNodeSessionArchive;
   readonly bootstrap: PresentationBootstrap;
   readonly metrics: OoxmlResourceMetricsSession;
   closeArchive(): void;
 }
 
 export interface PptxOwnedArchiveSource {
-  readonly archive: PptxNodeArchive;
+  readonly archive: PptxNodeSessionArchive;
   readonly sourceByteLength: number;
   closeArchive(): void;
 }

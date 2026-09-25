@@ -23,6 +23,8 @@ export {
   type PptxNodeAcquisition,
   type PptxNodeAcquisitionOptions,
   type PptxNodeArchive,
+  type PptxNodeSessionArchive,
+  type PptxOwnedArchiveSource,
 } from './node-session-acquisition.js';
 
 interface PptxArchiveConstructor {

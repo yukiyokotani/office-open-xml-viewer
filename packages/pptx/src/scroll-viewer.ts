@@ -12,8 +12,6 @@ import {
   StaticCanvasRenderDispatcher,
   TerminalResourceOwner,
 } from '@silurus/ooxml-core/internal/canvas-viewer-mechanics';
-import { bindLegacyOfficeConversionSignal } from '@silurus/ooxml-core/internal/legacy-office-conversion';
-import { settleLegacyPptLoad } from './legacy-ppt-load.js';
 import { eventTargetsDataAttributeWithin } from '@silurus/ooxml-core/internal/dom-interaction-boundary';
 import type { ReadOnlyCommentMarginGeometry } from '@silurus/ooxml-core/internal/read-only-comment-decoration';
 import { PptxPresentation, type LoadOptions, type RenderSlideOptions } from './presentation';
@@ -601,32 +599,28 @@ export class PptxScrollViewer implements ZoomableViewer {
     // an engine we created.)
     let selectionInvalidated = false;
     try {
-      const pres = await this._presentationOwner.replace((signal) => {
-        const conversion = bindLegacyOfficeConversionSignal(this._opts.legacyConversion, 'pptx', signal);
-        const pending = PptxPresentation.load(source, {
-          password: this._opts.password,
-          legacyConversion: conversion.options,
-          useGoogleFonts: this._opts.useGoogleFonts,
-          cjkFallback: this._opts.cjkFallback,
-          maxZipEntryBytes: this._opts.maxZipEntryBytes,
-          resourceLimits: this._opts.resourceLimits,
-          debug: this._opts.debug,
-          onResourceMetrics: this._opts.onResourceMetrics,
-          workerTimeoutMs: this._opts.workerTimeoutMs,
-          wasmUrl: this._opts.wasmUrl,
-          math: this._opts.math,
-          threeD: this._opts.threeD,
-          regionMap: this._opts.regionMap,
-          chartEx: this._opts.chartEx,
-          tiff: this._opts.tiff,
-          mode: this._mode,
-          progressiveLayout: this._opts.progressiveLayout,
-          onLayoutProgress: this._opts.onLayoutProgress,
-          onLayoutPartial: this._opts.onLayoutPartial,
-          onLayoutComplete: this._opts.onLayoutComplete,
-        });
-        return settleLegacyPptLoad(pending, conversion);
-      }, (ownedPresentation) => {
+      const pres = await this._presentationOwner.replace(() => PptxPresentation.load(source, {
+        password: this._opts.password,
+        useGoogleFonts: this._opts.useGoogleFonts,
+        cjkFallback: this._opts.cjkFallback,
+        maxZipEntryBytes: this._opts.maxZipEntryBytes,
+        resourceLimits: this._opts.resourceLimits,
+        debug: this._opts.debug,
+        onResourceMetrics: this._opts.onResourceMetrics,
+        workerTimeoutMs: this._opts.workerTimeoutMs,
+        wasmUrl: this._opts.wasmUrl,
+        math: this._opts.math,
+        threeD: this._opts.threeD,
+        regionMap: this._opts.regionMap,
+        chartEx: this._opts.chartEx,
+        tiff: this._opts.tiff,
+        mode: this._mode,
+        ...(this._opts.modelSources === undefined ? {} : { modelSources: this._opts.modelSources }),
+        progressiveLayout: this._opts.progressiveLayout,
+        onLayoutProgress: this._opts.onLayoutProgress,
+        onLayoutPartial: this._opts.onLayoutPartial,
+        onLayoutComplete: this._opts.onLayoutComplete,
+      }), (ownedPresentation) => {
         // Invalidate before TerminalResourceOwner installs the candidate and
         // destroys the prior worker, whose pending hit requests reject on close.
         this._invalidateElementSelection(false);

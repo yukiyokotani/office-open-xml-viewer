@@ -158,8 +158,7 @@ function loadSlide(slideIndex: number) {
 function getMedia(path: string): Promise<Blob> {
   const mimeType = findPreflightMimeType(requirePreflight(), path);
   return rawParts.get(path, mimeType, () => slidePull.run(() => {
-    const archive = source.ooxml('media extraction');
-    const bytes = host.run(() => archive.extract_media(path));
+    const bytes = source.extractMedia(path);
     return new Blob([bytes as BlobPart], { type: mimeType });
   }));
 }
@@ -173,8 +172,7 @@ function getImage(path: string, mimeType: string): Promise<Blob> {
 
 function getFontBytes(path: string): Promise<Uint8Array> {
   return slidePull.run(() => {
-    const archive = source.ooxml('font extraction');
-    const bytes = host.run(() => archive.extract_font(path));
+    const bytes = source.extractFont(path);
     return new Uint8Array(bytes as Uint8Array);
   });
 }
@@ -300,7 +298,7 @@ async function executeArchiveFromNew(
   request: Extract<RenderWorkerRequest, { kind: 'parse' }>,
 ): Promise<PresentationBootstrap> {
   if (request.source) {
-    await source.openLegacy(new Uint8Array(request.buffer), request.source);
+    await source.openModelSource(new Uint8Array(request.buffer), request.source, request.sourceTransfer);
     return JSON.parse(new TextDecoder().decode(
       source.execute((archive) => archive.presentation_bootstrap()),
     )) as PresentationBootstrap;
@@ -466,24 +464,21 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest | WorkerSvgDecod
       return;
     }
     if (request.kind === 'resourceUsage') {
-      const archive = source.ooxml('resource usage');
-      const usage = decodeOoxmlResourceUsage(host.run(() => archive.resource_usage()));
+      const bytes = source.resourceUsage();
+      const usage = bytes === undefined ? undefined : decodeOoxmlResourceUsage(bytes);
       post({ kind: 'resourceUsage', id: request.id, usage });
       return;
     }
 
     if (request.kind === 'toMarkdown') {
-      const markdown = await slidePull.run(() => {
-        const archive = source.ooxml('markdown conversion');
-        return host.run(() => archive.to_markdown());
-      });
+      const markdown = await slidePull.run(() => source.toMarkdown());
       post({ kind: 'markdownRendered', id: request.id, markdown });
     }
   } catch (error) {
     if (ownsParseReservation) {
       presentationState = 'failed';
       wakeSlideAvailabilityWaiters();
-      try { source.closeLegacy(); } catch {}
+      try { source.closeModelSource(); } catch {}
     }
     if (ownsParseReservation) {
       progressivePreflightGate.reset();

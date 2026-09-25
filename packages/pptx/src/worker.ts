@@ -107,20 +107,22 @@ self.onmessage = async (
 
       if (request.kind === 'parse') {
         preflightBuilder = null;
-        let archive: PptxArchive | import('@silurus/ooxml-legacy-converter/internal/direct-ppt-engine').LegacyPptNativeArchive;
         if (request.source) {
-          archive = await source.openLegacy(new Uint8Array(request.buffer), request.source);
+          await source.openModelSource(
+            new Uint8Array(request.buffer),
+            request.source,
+            request.sourceTransfer,
+          );
         } else {
           if (ooxmlWasmInput === undefined) throw new Error('PPTX WASM input was not configured');
           host.setWasmInput(ooxmlWasmInput);
           await host.ensureReady();
           const [maxEntry, maxTotal, maxEntries] = resourcePolicyForWasm(request.resourcePolicy);
-          archive = host.run(() => {
+          host.run(() => {
             const opened = new PptxArchive(
               new Uint8Array(request.buffer), maxEntry, maxTotal, maxEntries,
             );
             host.setArchive(opened);
-            return opened;
           });
         }
         const bootstrap = JSON.parse(new TextDecoder().decode(
@@ -150,8 +152,7 @@ self.onmessage = async (
       }
 
       if (request.kind === 'extractMedia') {
-        const ooxml = source.ooxml('media extraction');
-        const bytes = host.run(() => ooxml.extract_media(request.path).buffer as ArrayBuffer);
+        const bytes = source.extractMedia(request.path).buffer as ArrayBuffer;
         post({ kind: 'mediaExtracted', id, bytes }, [bytes]);
         return;
       }
@@ -165,28 +166,26 @@ self.onmessage = async (
       }
 
       if (request.kind === 'extractFont') {
-        const ooxml = source.ooxml('font extraction');
-        const bytes = host.run(() => ooxml.extract_font(request.path).buffer as ArrayBuffer);
+        const bytes = source.extractFont(request.path).buffer as ArrayBuffer;
         post({ kind: 'fontExtracted', id, bytes }, [bytes]);
         return;
       }
 
       if (request.kind === 'resourceUsage') {
-        const ooxml = source.ooxml('resource usage');
-        const usage = decodeOoxmlResourceUsage(host.run(() => ooxml.resource_usage()));
+        const bytes = source.resourceUsage();
+        const usage = bytes === undefined ? undefined : decodeOoxmlResourceUsage(bytes);
         post({ kind: 'resourceUsage', id, usage });
         return;
       }
 
       if (request.kind === 'toMarkdown') {
-        const ooxml = source.ooxml('markdown conversion');
-        post({ kind: 'markdownRendered', id, markdown: host.run(() => ooxml.to_markdown()) });
+        post({ kind: 'markdownRendered', id, markdown: source.toMarkdown() });
       }
     });
   } catch (error) {
     if (ownsParseReservation) {
       presentationState = 'failed';
-      try { source.closeLegacy(); } catch {}
+      try { source.closeModelSource(); } catch {}
     }
     if (request.kind === 'openSlideSession') slidePull.abandonOpen(request.sessionId);
     try {
