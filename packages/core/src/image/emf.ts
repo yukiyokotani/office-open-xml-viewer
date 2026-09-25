@@ -67,6 +67,7 @@ import { decodeDib, blitDibToCtx, type DecodedDib } from './dib.js';
 import { colorRefToCss, isEmf } from './wmf.js';
 import { createAuxCanvas } from '../canvas/aux-canvas.js';
 import { EmfPath, createEmfPathBudget, type EmfPathBudget } from './emf-path.js';
+import { EmfPlusPlayer, scanEmfPlus } from './emf-plus.js';
 
 // EMF record type codes ([MS-EMF] 2.1.1 EMR enumeration; the subset we act on,
 // others are skipped by nSize).
@@ -1650,6 +1651,9 @@ export function playEmf(
     outerClipped: false,
     unsupported: new Set(),
   };
+  // EMF+ ([MS-EMFPLUS]): play the EMF+ rendering instead of the GDI records
+  // when the metafile has one this player implements (see emf-plus.ts).
+  const plus = scanEmfPlus(bytes).play ? new EmfPlusPlayer(s) : null;
   // The playback's own base save: every DC level owns one outstanding canvas
   // save, so a clip reset can restore to it, and playback leaves the caller's
   // context state (including clips) as it found it.
@@ -1667,6 +1671,20 @@ export function playEmf(
 
     // A cursor over the data region (starts at record offset 8).
     const c = new EmfCursor(dv, pos + 8, recEnd);
+
+    if (plus && iType !== EMR.HEADER) {
+      if (iType === EMR.GDICOMMENT) {
+        plus.playComment(dv, pos, recEnd);
+        pos = recEnd;
+        continue;
+      }
+      // In EMF+ playback the GDI records are the alternative rendering; only
+      // records inside an EmfPlusGetDC scope draw ([MS-EMFPLUS] 2.3.3.1).
+      if (!plus.gdiAllowed) {
+        pos = recEnd;
+        continue;
+      }
+    }
 
     // Never throw on a malformed record — just advance by nSize.
     try {
@@ -1952,20 +1970,10 @@ export function playEmf(
           }
           break;
         }
-        case EMR.GDICOMMENT: {
-          // An EMF+ header without the dual-mode flag (EMF+ record Flags bit
-          // 0x0001) means the GDI records are not a complete rendering.
-          if (c.remaining >= 12) {
-            c.u32(); // DataSize
-            const identifier = c.u32();
-            if (identifier === 0x2b464d45 /* 'EMF+' */) {
-              const type = c.u16();
-              const flags = c.u16();
-              if (type === 0x4001 && (flags & 1) === 0) s.unsupported.add('EMF+ records (no GDI fallback)');
-            }
-          }
+        case EMR.GDICOMMENT:
+          // Reached only when the GDI rendering is played: a dual-mode EMF+
+          // file whose EMF+ part is not implemented here, or no EMF+ at all.
           break;
-        }
         case EMR.SELECTOBJECT: {
           const ih = c.u32();
           if ((ih & 0x80000000) !== 0) {

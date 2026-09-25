@@ -1486,10 +1486,140 @@ describe('playEmf — explicit report of records it cannot draw', () => {
     expect(m.reported).toEqual(['EMR_BITBLT (raster operation 0x5a0049)']);
   });
 
-  it('reports an EMF+ header without the dual-mode flag; dual files play their GDI records', () => {
-    const plus = (flags: number) =>
-      record(70, (w) => w.u32(16).u32(0x2b464d45).u16(0x4001).u16(flags).u32(28).u32(16).u32(0).u32(0));
-    expect(run([plus(0)]).reported).toEqual(['EMF+ records (no GDI fallback)']);
-    expect(run([plus(1)]).reported).toEqual([]);
+});
+
+// ── EMF+ ([MS-EMFPLUS]) bitmap playback ─────────────────────────────────────
+
+describe('playEmf — EMF+ bitmap records', () => {
+  /** One EMF+ record: Type, Flags, Size, DataSize, data (4-byte aligned). */
+  const plusRecord = (type: number, flags: number, data: number[] = []) => {
+    const body = [...data];
+    while (body.length % 4) body.push(0);
+    const w = new Writer().u16(type).u16(flags).u32(12 + body.length).u32(data.length);
+    for (const byte of body) w.raw(byte);
+    return w.build();
+  };
+  const f32 = (v: number) => [...new Uint8Array(new Float32Array([v]).buffer)];
+  const u32 = (v: number) => [v & 255, (v >>> 8) & 255, (v >>> 16) & 255, (v >>> 24) & 255];
+  /** EMR_COMMENT carrying EMF+ records. */
+  const comment = (...records: Uint8Array[]) => {
+    const payload = concat(...records);
+    return record(70, (w) => {
+      w.u32(4 + payload.length).u32(0x2b464d45);
+      for (const byte of payload) w.raw(byte);
+    });
+  };
+  const header = (dual: boolean) => plusRecord(0x4001, dual ? 1 : 0, [...u32(0xdbc01002), ...u32(1), ...u32(96), ...u32(96)]);
+  // A 2×1 premultiplied-ARGB bitmap: opaque red, half-transparent white.
+  const bitmap = (flags = 0x0501, pixelFormat = 0x000e200b, bitmapType = 0) =>
+    plusRecord(0x4008, flags, [
+      ...u32(0xdbc01002), ...u32(1), ...u32(2), ...u32(1), ...u32(8), ...u32(pixelFormat), ...u32(bitmapType),
+      0, 0, 255, 255, 128, 128, 128, 128,
+    ]);
+  const drawImage = (dest: number[], src = [0, 0, 2, 1]) =>
+    plusRecord(0x401a, 0x0001, [...u32(0), ...u32(2), ...src.flatMap(f32), ...dest.flatMap(f32)]);
+
+  function run(records: Uint8Array[], gdi: Uint8Array[] = []) {
+    const draws: { data: number[]; rect: number[] }[] = [];
+    vi.stubGlobal('OffscreenCanvas', class {
+      width: number;
+      height: number;
+      constructor(w: number, h: number) {
+        this.width = w;
+        this.height = h;
+      }
+      getContext() {
+        const owner = this;
+        return {
+          createImageData: (w: number, h: number) => ({ data: new Uint8ClampedArray(w * h * 4), width: w, height: h }),
+          putImageData(img: { data: Uint8ClampedArray }) {
+            (owner as unknown as { pixels: number[] }).pixels = [...img.data];
+          },
+        };
+      }
+    });
+    const m = makeRecordingCtx();
+    (m.ctx as unknown as { drawImage: unknown }).drawImage = (img: { pixels: number[] }, ...rect: number[]) => {
+      draws.push({ data: img.pixels, rect });
+    };
+    (m.ctx as unknown as { clearRect: unknown }).clearRect = (...a: number[]) => m.calls.push({ op: 'clearRect', args: a });
+    (m.ctx as unknown as { fillRect: unknown }).fillRect = (...a: number[]) => m.calls.push({ op: 'fillRect', args: a });
+    const reported: string[] = [];
+    const drew = playEmf(concat(emfHeader(0, 0, 100, 100), ...gdi, ...records, record(EMR.EOF, () => {})), m.ctx, 100, 100, {
+      onUnsupported: (r) => reported.push(...r),
+    });
+    vi.unstubAllGlobals();
+    return { ...m, draws, reported, drew };
+  }
+
+  it('draws an uncompressed 32bpp bitmap object through EmfPlusDrawImage', () => {
+    const result = run([
+      comment(
+        header(true),
+        plusRecord(0x4030, 0x0002, f32(1)), // SetPageTransform: UnitPixel, scale 1
+        plusRecord(0x4009, 0, u32(0x00ffffff)), // Clear to transparent white
+        plusRecord(0x4023, 0), // SourceOver
+        plusRecord(0x4008, 0x0800, [...u32(0xdbc01002), ...new Array(20).fill(0)]), // ImageAttributes
+        bitmap(),
+        drawImage([10, 20, 50, 40]),
+      ),
+      comment(plusRecord(0x4002, 0)),
+    ]);
+    expect(result.drew).toBe(true);
+    expect(result.reported).toEqual([]);
+    expect(result.draws).toHaveLength(1);
+    expect(result.draws[0].rect).toEqual([10, 20, 50, 40]);
+    // BGRA → RGBA, and premultiplied 128/128 un-premultiplied to white.
+    expect(result.draws[0].data).toEqual([255, 0, 0, 255, 255, 255, 255, 128]);
+    expect(result.calls.some((c) => c.op === 'clearRect')).toBe(true);
+  });
+
+  it('assembles continued objects, applies world transforms and crops the source', () => {
+    const whole = bitmap();
+    const data = whole.slice(12); // object data after the record header
+    const first = plusRecord(0x4008, 0x8501, [...u32(data.length), ...data.slice(0, 10)]);
+    const second = plusRecord(0x4008, 0x8501, [...u32(data.length), ...data.slice(10)]);
+    const result = run([
+      comment(
+        header(true),
+        first,
+        second,
+        plusRecord(0x402d, 0, [...f32(5), ...f32(5)]), // translate
+        plusRecord(0x402e, 0x2000, [...f32(2), ...f32(2)]), // then scale (append)
+        drawImage([0, 0, 10, 10], [1, 0, 1, 1]),
+      ),
+    ]);
+    expect(result.reported).toEqual([]);
+    expect(result.draws[0].rect).toEqual([10, 10, 20, 20]);
+    expect(result.draws[0].data).toEqual([255, 255, 255, 128]);
+  });
+
+  it('keeps the GDI rendering of a dual file whose EMF+ part is not implemented', () => {
+    const gdiPolygon = [
+      record(EMR.SELECTOBJECT, (w) => w.u32(0x80000004)),
+      record(EMR.POLYGON16, (w) => w.i32(0).i32(0).i32(10).i32(10).u32(3).i16(0).i16(0).i16(10).i16(0).i16(0).i16(10)),
+    ];
+    // FillRects (0x400A) is not implemented: the GDI alternative is played.
+    const dual = run([comment(header(true), plusRecord(0x400a, 0, u32(0)))], gdiPolygon);
+    expect(dual.styles.fill).toEqual(['#000000']);
+    expect(dual.draws).toHaveLength(0);
+    // A dual file whose EMF+ part has no drawing also keeps its GDI drawing.
+    expect(run([comment(header(true), plusRecord(0x401e, 0))], gdiPolygon).styles.fill).toEqual(['#000000']);
+    // Played EMF+ skips GDI records outside an EmfPlusGetDC scope.
+    const plus = run([comment(header(true), bitmap(), drawImage([0, 0, 2, 1]))], gdiPolygon);
+    expect(plus.styles.fill).toEqual([]);
+    expect(plus.draws).toHaveLength(1);
+  });
+
+  it('plays an EMF+-only file as far as implemented and reports the rest', () => {
+    const result = run([
+      comment(header(false), plusRecord(0x400a, 0, u32(0)), bitmap(0x0501, 0x00022009), drawImage([0, 0, 2, 1])),
+    ]);
+    expect(result.draws).toHaveLength(0);
+    expect(result.reported).toEqual(expect.arrayContaining([
+      'EMF+ record 0x400a',
+      'EMF+ image other than an uncompressed 32-bit bitmap',
+      'EMF+ DrawImage of an unavailable image',
+    ]));
   });
 });

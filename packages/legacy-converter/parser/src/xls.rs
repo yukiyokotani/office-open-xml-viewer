@@ -92,7 +92,8 @@ pub(crate) fn inspect_pictures(
         .iter()
         .filter_map(|a| a.picture.map(|p| p.store_index))
         .collect();
-    let images = drawing_media::selected(&records, &indices)?;
+    let images =
+        drawing_media::selected(&records, &indices, crate::officeart::raster::Raster::Advertised)?;
     let supported: HashSet<u32> = images.iter().map(|i| i.0).collect();
     anchors.retain(|a| {
         a.picture
@@ -393,7 +394,15 @@ fn prepare_workbook(
         validate_direct_drawings(&records, &tabs)?;
     }
     let pictures = if with_pictures {
-        match pictures::Pictures::prepare(&records, &tabs) {
+        // The direct reader follows Excel, which displays GDI+ metafiles with
+        // their short end-of-file record; the byte converter keeps its
+        // documented validation.
+        let raster = if direct {
+            crate::officeart::raster::Raster::ExcelMetafiles
+        } else {
+            crate::officeart::raster::Raster::Advertised
+        };
+        match pictures::Pictures::prepare(&records, &tabs, raster) {
             Ok(value) => {
                 if value.has_unsupported_images() {
                     if direct {

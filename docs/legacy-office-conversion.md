@@ -2409,14 +2409,13 @@ be closed before an experimental release.
 | Area | Gap | Samples |
 | --- | --- | --- |
 | XLS | ~~BIFF8 embedded charts are not projected into `ChartModel`~~ Projected (89f3db02, f7dcb0fa, 06da6a7a); chart sheets and the items below remain | 127 of 139 |
-| XLS | EMF pictures written by GDI+ (EMF+ comment records, short EMR_EOF and a record count off by one) are rejected by the passive validator. Core rendering also treats EMF+ as out of scope, so shared EMF+ drawing is needed for all formats | 3 |
 | XLS | Chart and picture anchors need the Normal font's digit width. The browser default measures only an installed face, so they are omitted when Office fonts such as Calibri are not installed; shared reference font metrics are needed | all with drawings |
 | XLS | Chart text omits TextPropsStream (its checksum is not implemented), Fbi font autoscaling, the outline Excel draws around inverted negative points, plot-area layout, drop/high-low lines and 3-D walls | most chart samples |
 | XLS | ~~Extended colors (XFExt theme/tint) fall back to palette approximations~~ Resolved: tints (b09eae6a) and theme 0-3 in Excel's lt1/dk1/lt2/dk2 order (0adbc794) | about 6 |
 | XLS | Table (ListObject) styles, conditional-format data bars/icons and pivot styling are absent | about 5 |
 | XLS | Formula text is not decompiled from Ptg tokens, so volatile functions are not recalculated as Excel does at export | 2 |
 | XLS | Clip-art pictures, text boxes, strikethrough and one vertical merge are missing | 1 to 3 each |
-| XLS | The direct reader rejects, instead of omitting, drawn objects it does not project: EMF+-only pictures, shapes and text boxes, grouped shapes, chart and macro sheets, and drawings whose OfficeArt data continues after an Obj record | 19 of 139 |
+| XLS | The direct reader rejects, instead of omitting, drawn objects it does not project: shapes and text boxes, grouped shapes, chart and macro sheets, and drawings whose OfficeArt data continues after an Obj record | 8 of 139 |
 | PPT | ~~Only seven MS-ODRAW shape types map to presets~~ 100+ shape types map as PowerPoint converts them, with evidenced adjust formulas (officeart::preset); adjusted callout2/3 families, arrow callouts, curved arrows, ribbons and tall cubes/hexagons/parallelograms still fail closed | several |
 | PPT | ~~Native/OLE charts are missing~~ Resolved: embedded OLE objects show their stored presentation picture (bfc835d3) | 3 |
 | PPT | ~~Rotation by multiples of 90 degrees and combined flips use the wrong bounds or order~~ Resolved from the 120-case PowerPoint control (aa9dc5c1) | 1 |

@@ -25,6 +25,9 @@ pub(crate) enum Raster {
     Advertised,
     TiffAware,
     GifAware,
+    /// Advertised raster encodings, plus EMF files with the end-of-file
+    /// layout GDI+ writes, which Excel displays (see the metafile validator).
+    ExcelMetafiles,
 }
 
 pub(crate) fn read_store_entry_as<'a>(
@@ -304,8 +307,11 @@ fn decode(
 ) -> Result<Option<DecodedImage>, String> {
     if matches!(blip.kind, 0xf01a | 0xf01b) {
         let extension = if blip.kind == 0xf01a { "emf" } else { "wmf" };
-        return Ok(super::metafile::decode(blip, budget, remaining_bytes)?
-            .map(|bytes| DecodedImage { bytes, extension }));
+        let gdiplus_end = raster == Raster::ExcelMetafiles;
+        return Ok(
+            super::metafile::decode_with(blip, budget, remaining_bytes, gdiplus_end)?
+                .map(|bytes| DecodedImage { bytes, extension }),
+        );
     }
     let (extension, prefix) = match (blip.kind, blip.instance) {
         (0xf01e, 0x6e0) => ("png", 17),

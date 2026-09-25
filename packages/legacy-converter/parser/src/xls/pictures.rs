@@ -52,7 +52,11 @@ pub(super) struct NativePictures {
 }
 
 impl Pictures {
-    pub fn prepare(records: &[Record<'_>], tabs: &[usize]) -> Result<Self, String> {
+    pub fn prepare(
+        records: &[Record<'_>],
+        tabs: &[usize],
+        raster: crate::officeart::raster::Raster,
+    ) -> Result<Self, String> {
         let sheet_ids: BTreeMap<_, _> = tabs.iter().enumerate().map(|(i, &tab)| (tab, i)).collect();
         let mut anchors = drawing_anchors::projectable(records)?;
         anchors.retain(|a| a.picture.is_some() && sheet_ids.contains_key(&a.sheet));
@@ -60,7 +64,7 @@ impl Pictures {
             .iter()
             .filter_map(|a| a.picture.map(|p| p.store_index))
             .collect();
-        let images = drawing_media::selected(records, &indices)?;
+        let images = drawing_media::selected(records, &indices, raster)?;
         let supported: BTreeSet<_> = images.iter().map(|i| i.0).collect();
         let mut by_sheet = BTreeMap::<_, Vec<_>>::new();
         for a in anchors {

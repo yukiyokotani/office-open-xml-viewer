@@ -24,6 +24,17 @@ pub(super) fn decode(
     budget: &mut usize,
     remaining: usize,
 ) -> Result<Option<DecodedBytes>, String> {
+    decode_with(record, budget, remaining, false)
+}
+
+/// `gdiplus_end` admits the end-of-file layout GDI+ writes (see
+/// `validate_emf`); only hosts with Office evidence opt in.
+pub(super) fn decode_with(
+    record: Record<'_>,
+    budget: &mut usize,
+    remaining: usize,
+    gdiplus_end: bool,
+) -> Result<Option<DecodedBytes>, String> {
     let (start, format) = match (record.kind, record.version, record.instance) {
         (0xf01a, 0, 0x3d4) => (16, Format::Emf),
         (0xf01a, 0, 0x3d5) => (32, Format::Emf),
@@ -75,7 +86,7 @@ pub(super) fn decode(
             if viewed.len() < 44 || number(viewed, 0) != 1 || number(viewed, 40) != 0x464d4520 {
                 return Ok(None);
             }
-            validate_emf(viewed, budget)?;
+            validate_emf(viewed, budget, gdiplus_end)?;
         }
         Format::Wmf => {
             if !validate_wmf(viewed, budget)? {
@@ -96,13 +107,21 @@ fn number(bytes: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
 }
 
-fn validate_emf(bytes: &[u8], budget: &mut usize) -> Result<(), String> {
+/// With `gdiplus_end`, the layout GDI+ writes when it records EMF+ content is
+/// also admitted: a 16-byte EMR_EOF (Type, Size, nPalEntries = 0,
+/// offPalEntries; MS-EMF 2.3.4.1 requires SizeLast too, i.e. 20 bytes) whose
+/// header nRecords does not count that EOF. Evidence: Excel's PDF exports of
+/// workbooks whose pictures are such GDI+ metafiles show the pictures. Both
+/// deviations must appear together, and only in a metafile that starts with an
+/// EMF+ header comment, so other malformed files stay rejected.
+fn validate_emf(bytes: &[u8], budget: &mut usize, gdiplus_end: bool) -> Result<(), String> {
     // MS-EMF 2.2.9/2.3: validate the envelope and bounded record walk only.
     // Ordinary OOXML image handling remains responsible for drawing support.
     if bytes.len() < 88 || number(bytes, 48) as usize != bytes.len() {
         return Err(unsupported("invalid EMF header size"));
     }
     let (mut position, mut count, mut eof) = (0, 0, false);
+    let mut short_end = false;
     while position < bytes.len() {
         *budget = budget
             .checked_sub(1)
@@ -123,15 +142,35 @@ fn validate_emf(bytes: &[u8], budget: &mut usize) -> Result<(), String> {
         }
         eof = kind == 14;
         if eof && size < 20 {
-            return Err(unsupported("truncated EMF end record"));
+            let gdiplus = gdiplus_end
+                && size == 16
+                && number(tail, 8) == 0
+                && starts_with_emf_plus_header(bytes);
+            if !gdiplus {
+                return Err(unsupported("truncated EMF end record"));
+            }
+            short_end = true;
         }
         position += size;
         count += 1;
     }
-    if !eof || count != number(bytes, 52) {
+    let declared = number(bytes, 52);
+    if !eof || (count != declared && !(short_end && count == declared + 1)) {
         return Err(unsupported("EMF record count or end mismatch"));
     }
     Ok(())
+}
+
+/// The record after EMR_HEADER is an EMR_COMMENT whose first EMF+ record is
+/// an EmfPlusHeader (MS-EMFPLUS 2.3.3.3): the signature of a GDI+ recording.
+fn starts_with_emf_plus_header(bytes: &[u8]) -> bool {
+    let header = number(bytes, 4) as usize;
+    let Some(comment) = bytes.get(header..header.saturating_add(20)) else {
+        return false;
+    };
+    number(comment, 0) == 70
+        && number(comment, 12) == 0x2b46_4d45
+        && u16::from_le_bytes([comment[16], comment[17]]) == 0x4001
 }
 
 fn validate_wmf(bytes: &[u8], budget: &mut usize) -> Result<bool, String> {
@@ -208,6 +247,48 @@ fn validate_wmf(bytes: &[u8], budget: &mut usize) -> Result<bool, String> {
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
+
+    #[test]
+    fn gdiplus_short_end_record_is_admitted_only_for_opted_in_emf_plus_files() {
+        let u32b = |v: u32| v.to_le_bytes();
+        let build = |plus: bool, end_size: u32, declared: u32| {
+            let mut header = vec![0u8; 88];
+            header[0..4].copy_from_slice(&u32b(1));
+            header[4..8].copy_from_slice(&u32b(88));
+            header[40..44].copy_from_slice(&u32b(0x464d4520));
+            let mut comment = Vec::new();
+            comment.extend(u32b(70));
+            comment.extend(u32b(32));
+            comment.extend(u32b(20));
+            comment.extend(u32b(if plus { 0x2b46_4d45 } else { 0 }));
+            comment.extend(0x4001u16.to_le_bytes());
+            comment.extend(1u16.to_le_bytes());
+            comment.extend(u32b(12));
+            comment.extend(u32b(0));
+            comment.extend(u32b(0)); // pad to the declared record size
+            let mut end = Vec::new();
+            end.extend(u32b(14));
+            end.extend(u32b(end_size));
+            end.extend(vec![0u8; end_size as usize - 8]);
+            let mut bytes = [header, comment, end].concat();
+            let len = bytes.len() as u32;
+            bytes[48..52].copy_from_slice(&u32b(len));
+            bytes[52..56].copy_from_slice(&u32b(declared));
+            bytes
+        };
+        // GDI+ layout: 16-byte EMR_EOF, nRecords not counting it.
+        let gdiplus = build(true, 16, 2);
+        assert!(validate_emf(&gdiplus, &mut 100, true).is_ok());
+        assert!(validate_emf(&gdiplus, &mut 100, false)
+            .unwrap_err()
+            .contains("truncated EMF end record"));
+        // Without the EMF+ header signature, or with a wrong count, it stays
+        // malformed; an ordinary 20-byte end record still needs an exact count.
+        assert!(validate_emf(&build(false, 16, 2), &mut 100, true).is_err());
+        assert!(validate_emf(&build(true, 16, 1), &mut 100, true).is_err());
+        assert!(validate_emf(&build(true, 20, 3), &mut 100, true).is_ok());
+        assert!(validate_emf(&build(true, 20, 2), &mut 100, true).is_err());
+    }
 
     fn emf() -> Vec<u8> {
         let mut data = vec![0; 108];
@@ -413,9 +494,11 @@ pub(super) mod tests {
         let mut after_eof = wmf();
         after_eof.extend_from_slice(&[3, 0, 0, 0, 1, 0]);
         after_eof[6..10].copy_from_slice(&15u32.to_le_bytes());
-        assert!(parse_wmf(&payload(&after_eof, false), false, &mut 10, usize::MAX)
-            .unwrap()
-            .is_none());
+        assert!(
+            parse_wmf(&payload(&after_eof, false), false, &mut 10, usize::MAX)
+                .unwrap()
+                .is_none()
+        );
         let mut overflow = wmf();
         overflow[18..22].copy_from_slice(&u32::MAX.to_le_bytes());
         assert!(parse_wmf(&payload(&overflow, false), false, &mut 10, usize::MAX).is_err());
@@ -439,8 +522,7 @@ pub(super) mod tests {
                     source.truncate(original_length);
                     source.resize(original_length + length, value);
                     let words = ((source.len() - start) / 2) as u32;
-                    source[start + 6..start + 10]
-                        .copy_from_slice(&words.to_le_bytes());
+                    source[start + 6..start + 10].copy_from_slice(&words.to_le_bytes());
                     for two in [false, true] {
                         for bytes in [payload(&source, two), compressed(&source, two)] {
                             assert!(parse_wmf(&bytes, two, &mut 1, source.len())
