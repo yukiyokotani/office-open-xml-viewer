@@ -27,6 +27,7 @@ pub(crate) mod direct_wire;
 pub(crate) mod drawing_anchors;
 mod drawing_media;
 mod geometry;
+mod hyperlinks;
 mod pictures;
 mod print;
 mod rich;
@@ -169,6 +170,10 @@ struct SheetData {
     sheet_ext: Option<Vec<u8>>,
     /// Its resolved tab color (direct path only).
     tab_color: Option<String>,
+    /// MS-XLS 2.4.140 HLink and 2.4.141 HLinkTooltip records, in order.
+    hyperlink_records: tables::Records,
+    /// Their XLSX-model projection (direct path only).
+    hyperlinks: Vec<xlsx_model::Hyperlink>,
 }
 
 pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<XlsConversion, String> {
@@ -341,6 +346,15 @@ fn prepare_workbook(
                 }
                 let (theme, _) = conditional_theme.as_ref().expect("parsed theme");
                 data.tab_color = tab_color(ext, &styles, theme)?;
+            }
+        }
+        if direct {
+            for (kind, record) in data.hyperlink_records.iter() {
+                if kind == 0x01b8 {
+                    data.hyperlinks.push(hyperlinks::hlink(record)?);
+                } else {
+                    hyperlinks::tooltip(record)?;
+                }
             }
         }
         if direct && !data.table_records.is_empty() {
@@ -1092,6 +1106,7 @@ fn parse_sheet(
             0x01b0 | 0x01b1 | 0x0879 | 0x087a | 0x087b => {
                 output.conditional_records.push(record.kind, record.data)?
             }
+            0x01b8 | 0x0800 => output.hyperlink_records.push(record.kind, record.data)?,
             0x0862 => {
                 if output.sheet_ext.replace(record.data.to_vec()).is_some() {
                     return Err(unsupported("duplicate BIFF sheet extension"));

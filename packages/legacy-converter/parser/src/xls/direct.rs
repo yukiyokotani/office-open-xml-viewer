@@ -438,6 +438,21 @@ fn project_sheet(
             .sum(),
     )?;
     worksheet.tables = sheet.tables;
+    charge(
+        budget,
+        sheet
+            .hyperlinks
+            .iter()
+            .map(|link| {
+                std::mem::size_of::<xlsx_model::Hyperlink>()
+                    + [&link.url, &link.location, &link.display]
+                        .iter()
+                        .map(|text| text.as_ref().map_or(0, String::len))
+                        .sum::<usize>()
+            })
+            .sum(),
+    )?;
+    worksheet.hyperlinks = sheet.hyperlinks;
     if let Some(color) = sheet.tab_color {
         charge(budget, color.len())?;
         worksheet.tab_color = Some(color);

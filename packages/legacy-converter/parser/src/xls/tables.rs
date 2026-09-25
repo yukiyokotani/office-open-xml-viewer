@@ -20,7 +20,7 @@
 use super::{f64_at, styles, theme, u16_at, u32_at, unsupported, Record, EOF};
 use std::collections::BTreeMap;
 
-/// Retained Feature11/Feature12/List12 records of one worksheet, in order.
+/// Retained records of one worksheet (tables, hyperlinks), in order.
 #[derive(Default)]
 pub(super) struct Records {
     records: Vec<(u16, Vec<u8>)>,
@@ -42,6 +42,12 @@ impl Records {
 
     pub(super) fn is_empty(&self) -> bool {
         self.records.is_empty()
+    }
+
+    pub(super) fn iter(&self) -> impl Iterator<Item = (u16, &[u8])> {
+        self.records
+            .iter()
+            .map(|(kind, data)| (*kind, data.as_slice()))
     }
 }
 
