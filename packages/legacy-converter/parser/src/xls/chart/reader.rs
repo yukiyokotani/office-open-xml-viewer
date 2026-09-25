@@ -843,7 +843,11 @@ fn verify_shape_xml(block: &mut Block) -> Result<(), String> {
         let context = u16_at(data, 12)?;
         let stored = u32_at(data, 16)?;
         let length = u32_at(data, 20)? as usize;
-        let Some(xml) = data.get(24..24 + length) else {
+        // An input u32: unchecked, it can wrap a 32-bit `usize` (wasm32).
+        let Some(xml) = 24usize
+            .checked_add(length)
+            .and_then(|end| data.get(24..end))
+        else {
             continue;
         };
         let area_auto = area.map(|a| a.get(10).is_some_and(|flags| flags & 1 != 0));

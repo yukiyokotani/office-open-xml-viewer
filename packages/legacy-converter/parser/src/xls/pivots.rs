@@ -191,7 +191,8 @@ fn lines(
     entries: usize,
 ) -> Result<Vec<xlsx_model::PivotAxisItem>, String> {
     let size = 8 + entries * 2;
-    if data.len() != count * size {
+    // Two u16 counts: the product can exceed a 32-bit `usize` (wasm32).
+    if count.checked_mul(size) != Some(data.len()) {
         return Err(unsupported("invalid XLS PivotTable lines"));
     }
     data.chunks_exact(size)
@@ -791,5 +792,12 @@ mod tests {
                 .unwrap_err()
                 .contains("theme")
         );
+    }
+
+    #[test]
+    fn maximal_line_counts_reject_instead_of_wrapping() {
+        let error = unsupported("invalid XLS PivotTable lines");
+        assert_eq!(lines(&[], 0xffff, 0xffff).unwrap_err(), error);
+        assert_eq!(lines(&[0; 8], 0xffff, 0xffff).unwrap_err(), error);
     }
 }

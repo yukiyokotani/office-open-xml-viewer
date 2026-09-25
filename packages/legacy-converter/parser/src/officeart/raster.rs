@@ -416,8 +416,11 @@ pub(crate) fn tiff_size(b: &[u8], budget: &mut usize) -> Result<(u32, u32), Stri
         Some(b"MM\0*") => false,
         _ => return Err(invalid()),
     };
+    // The IFD offset is an input u32: offsets derived from it are checked,
+    // since `usize` is 32 bits on wasm32.
+    let field = |at: usize, len: usize| at.checked_add(len).and_then(|end| b.get(at..end));
     let u16_at = |at: usize| -> Result<u32, String> {
-        let bytes: [u8; 2] = b.get(at..at + 2).ok_or_else(invalid)?.try_into().unwrap();
+        let bytes: [u8; 2] = field(at, 2).ok_or_else(invalid)?.try_into().unwrap();
         Ok(u32::from(if little {
             u16::from_le_bytes(bytes)
         } else {
@@ -425,7 +428,7 @@ pub(crate) fn tiff_size(b: &[u8], budget: &mut usize) -> Result<(u32, u32), Stri
         }))
     };
     let u32_at = |at: usize| -> Result<u32, String> {
-        let bytes: [u8; 4] = b.get(at..at + 4).ok_or_else(invalid)?.try_into().unwrap();
+        let bytes: [u8; 4] = field(at, 4).ok_or_else(invalid)?.try_into().unwrap();
         Ok(if little {
             u32::from_le_bytes(bytes)
         } else {
@@ -442,17 +445,19 @@ pub(crate) fn tiff_size(b: &[u8], budget: &mut usize) -> Result<(u32, u32), Stri
         .ok_or_else(|| unsupported("OfficeArt TIFF work budget exceeded"))?;
     let mut size = [None, None];
     for index in 0..count {
-        let entry = ifd + 2 + index * 12;
+        // `index * 12` is at most 0xffff * 12; only the input offset can overflow.
+        let entry = ifd.checked_add(2 + index * 12).ok_or_else(invalid)?;
+        let at = |delta: usize| entry.checked_add(delta).ok_or_else(invalid);
         let tag = u16_at(entry)?;
         if !(256..=257).contains(&tag) {
             continue;
         }
-        if u32_at(entry + 4)? != 1 {
+        if u32_at(at(4)?)? != 1 {
             return Err(invalid());
         }
-        let value = match u16_at(entry + 2)? {
-            3 => u16_at(entry + 8)?,
-            4 => u32_at(entry + 8)?,
+        let value = match u16_at(at(2)?)? {
+            3 => u16_at(at(8)?)?,
+            4 => u32_at(at(8)?)?,
             _ => return Err(invalid()),
         };
         size[(tag - 256) as usize] = Some(value);
@@ -710,6 +715,20 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn tiff_ifd_offsets_at_the_integer_limit_are_rejected() {
+        // The IFD offset is an input u32; entry offsets derived from it must
+        // not wrap where `usize` is 32 bits.
+        for ifd in [u32::MAX, u32::MAX - 1, u32::MAX - 13] {
+            let tiff = [b"II*\0".as_slice(), &ifd.to_le_bytes(), &[1, 0, 0, 1, 3, 0]].concat();
+            assert_eq!(
+                tiff_size(&tiff, &mut 100),
+                Err(unsupported("invalid OfficeArt TIFF header")),
+                "{ifd:#x}"
+            );
+        }
     }
 
     fn jpeg_blip() -> Vec<u8> {

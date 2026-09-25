@@ -202,6 +202,25 @@ fn shape_xml_is_used_only_when_its_checksum_matches_the_biff_formats() {
 }
 
 #[test]
+fn a_maximal_shape_xml_length_leaves_the_biff_formats() {
+    let mut data = checksum::line_properties(&line_format(0, 0, 8))
+        .unwrap()
+        .to_vec();
+    let area = area_format(0, 10);
+    data.extend(checksum::interior_properties(&area, &area).unwrap());
+    // With its stated length the verified empty stream would win (4472C4).
+    let mut owned = bar_chart(true, Some((checksum::crc(&data), "")));
+    let shape = owned
+        .iter_mut()
+        .find(|(kind, _)| *kind == 0x08a4)
+        .expect("ShapePropsStream");
+    shape.1[20..24].copy_from_slice(&u32::MAX.to_le_bytes());
+    let raw = read(&as_records(&owned)).unwrap();
+    let model = project(&raw, &palette(), &|_| None).unwrap();
+    assert_eq!(model.series[0].color.as_deref(), Some("FF0000"));
+}
+
+#[test]
 fn a_chart_without_series_records_is_an_authored_empty_chart() {
     let owned = vec![
         record(0x0809, u16s(&[0x0600, 0x0020, 0, 0])),

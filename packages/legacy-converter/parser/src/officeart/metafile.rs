@@ -155,8 +155,10 @@ fn validate_emf(bytes: &[u8], budget: &mut usize, gdiplus_end: bool) -> Result<(
         position += size;
         count += 1;
     }
+    // nRecords is input; a GDI+ short end adds one record to it, which a
+    // maximal count cannot hold.
     let declared = number(bytes, 52);
-    if !eof || (count != declared && !(short_end && count == declared + 1)) {
+    if !eof || (count != declared && !(short_end && declared.checked_add(1) == Some(count))) {
         return Err(unsupported("EMF record count or end mismatch"));
     }
     Ok(())
@@ -289,6 +291,10 @@ pub(super) mod tests {
         assert!(validate_emf(&build(true, 16, 1), &mut 100, true).is_err());
         assert!(validate_emf(&build(true, 20, 3), &mut 100, true).is_ok());
         assert!(validate_emf(&build(true, 20, 2), &mut 100, true).is_err());
+        // A maximal record count is a mismatch, not an arithmetic overflow.
+        assert!(validate_emf(&build(true, 16, u32::MAX), &mut 100, true)
+            .unwrap_err()
+            .contains("record count"));
     }
 
     fn emf() -> Vec<u8> {

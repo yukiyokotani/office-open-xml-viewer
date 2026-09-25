@@ -1877,24 +1877,24 @@ fn unsupported(message: impl Into<String>) -> String {
     format!("UNSUPPORTED:{}", message.into())
 }
 
+/// `offset..offset + N` of an input-derived offset, which may lie near
+/// `usize::MAX` (a 32-bit `u32` offset on wasm32, or a caller's sum).
+fn field(bytes: &[u8], offset: usize, size: usize) -> Option<&[u8]> {
+    bytes.get(offset..offset.checked_add(size)?)
+}
+
 fn u16_at(bytes: &[u8], offset: usize) -> Result<u16, String> {
-    let raw = bytes
-        .get(offset..offset + 2)
-        .ok_or_else(|| unsupported("truncated BIFF integer"))?;
+    let raw = field(bytes, offset, 2).ok_or_else(|| unsupported("truncated BIFF integer"))?;
     Ok(u16::from_le_bytes([raw[0], raw[1]]))
 }
 
 fn u32_at(bytes: &[u8], offset: usize) -> Result<u32, String> {
-    let raw = bytes
-        .get(offset..offset + 4)
-        .ok_or_else(|| unsupported("truncated BIFF integer"))?;
+    let raw = field(bytes, offset, 4).ok_or_else(|| unsupported("truncated BIFF integer"))?;
     Ok(u32::from_le_bytes(raw.try_into().expect("four-byte slice")))
 }
 
 fn f64_at(bytes: &[u8], offset: usize) -> Result<f64, String> {
-    let raw = bytes
-        .get(offset..offset + 8)
-        .ok_or_else(|| unsupported("truncated BIFF number"))?;
+    let raw = field(bytes, offset, 8).ok_or_else(|| unsupported("truncated BIFF number"))?;
     Ok(f64::from_le_bytes(
         raw.try_into().expect("eight-byte slice"),
     ))
@@ -1903,6 +1903,29 @@ fn f64_at(bytes: &[u8], offset: usize) -> Result<f64, String> {
 #[cfg(test)]
 mod tests {
     use super::{cell_reference, decode_rk, parse_biff_string, parse_sst, records};
+
+    #[test]
+    fn integer_readers_reject_offsets_at_the_usize_limit() {
+        use super::{f64_at, u16_at, u32_at};
+        let bytes = [0u8; 8];
+        for offset in [usize::MAX, usize::MAX - 1, usize::MAX - 7] {
+            assert_eq!(
+                u16_at(&bytes, offset).unwrap_err(),
+                "UNSUPPORTED:truncated BIFF integer"
+            );
+            assert_eq!(
+                u32_at(&bytes, offset).unwrap_err(),
+                "UNSUPPORTED:truncated BIFF integer"
+            );
+            assert_eq!(
+                f64_at(&bytes, offset).unwrap_err(),
+                "UNSUPPORTED:truncated BIFF number"
+            );
+        }
+        assert_eq!(u16_at(&bytes, 6), Ok(0));
+        assert_eq!(u32_at(&bytes, 4), Ok(0));
+        assert_eq!(f64_at(&bytes, 0), Ok(0.0));
+    }
 
     #[test]
     fn worksheet_window_flags_survive_without_modifying_cells() {

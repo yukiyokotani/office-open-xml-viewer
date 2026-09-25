@@ -63,7 +63,12 @@ fn moniker(data: &[u8], offset: usize) -> Result<(String, usize), String> {
         // URLMoniker (2.3.7.6): length, NULL-terminated url, optional
         // 24-byte serialization tail.
         let length = usize::try_from(u32_at(data, at)?).map_err(|_| truncated())?;
-        let body = data.get(at + 4..at + 4 + length).ok_or_else(truncated)?;
+        // `length` is an input u32: 32-bit `usize` (wasm32) cannot add it
+        // unchecked.
+        let body = (at + 4)
+            .checked_add(length)
+            .and_then(|end| data.get(at + 4..end))
+            .ok_or_else(truncated)?;
         let end = body
             .chunks_exact(2)
             .position(|pair| pair == [0, 0])
@@ -97,7 +102,10 @@ fn moniker(data: &[u8], offset: usize) -> Result<(String, usize), String> {
         next += 4;
         let path = if unicode_size > 0 {
             let bytes = usize::try_from(u32_at(data, next)?).map_err(|_| truncated())?;
-            if u16_at(data, next + 4)? != 3 || unicode_size != bytes + 6 || bytes % 2 != 0 {
+            if u16_at(data, next + 4)? != 3
+                || bytes.checked_add(6) != Some(unicode_size)
+                || bytes % 2 != 0
+            {
                 return Err(unsupported("invalid XLS hyperlink file moniker"));
             }
             let path = utf16(data, next + 6, bytes / 2)?;
@@ -236,6 +244,13 @@ mod tests {
         let link = hlink(&data).unwrap();
         assert_eq!(link.url.as_deref(), Some("https://e.x/"));
 
+        // A maximal URL moniker length is truncated input, not an overflow.
+        let mut huge = header(0x03);
+        huge.extend(URL_MONIKER);
+        huge.extend(u32::MAX.to_le_bytes());
+        huge.extend([0; 8]);
+        assert_eq!(hlink(&huge).unwrap_err(), truncated());
+
         // Item monikers are not projected; trailing bytes reject.
         let mut item = header(0x01);
         item.extend([0x04, 0x03, 0, 0, 0, 0, 0, 0, 0xc0, 0, 0, 0, 0, 0, 0, 0x46]);
@@ -244,5 +259,25 @@ mod tests {
         tail.extend(string("A1"));
         tail.push(0);
         assert!(hlink(&tail).is_err());
+    }
+
+    #[test]
+    fn file_moniker_unicode_length_rejects_maximal_sizes() {
+        let mut data = header(0x01);
+        data.extend(FILE_MONIKER);
+        data.extend(0u16.to_le_bytes());
+        data.extend(2u32.to_le_bytes());
+        data.extend(*b"a\0");
+        data.extend([0xff, 0xff, 0xad, 0xde]);
+        data.extend([0; 20]);
+        // cbUnicodePathSize = 5, cbUnicodePathBytes = u32::MAX: the
+        // declared sizes must not wrap into agreement.
+        data.extend(5u32.to_le_bytes());
+        data.extend(u32::MAX.to_le_bytes());
+        data.extend(3u16.to_le_bytes());
+        assert_eq!(
+            moniker(&data, 32).unwrap_err(),
+            unsupported("invalid XLS hyperlink file moniker")
+        );
     }
 }
