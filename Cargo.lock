@@ -428,6 +428,7 @@ dependencies = [
  "js-sys",
  "ooxml-common",
  "pptx-model",
+ "pptx-parser",
  "quick-xml",
  "roxmltree",
  "serde",

@@ -8,6 +8,33 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(super) struct Extensions {
     colors: BTreeMap<usize, BTreeMap<u16, ColorIdentity>>,
     indents: BTreeMap<usize, u16>,
+    gradients: BTreeMap<usize, Gradient>,
+    /// An owned extension carries formatting the model does not resolve: an
+    /// indexed color with a tint (the palette fallback lacks the tint) or
+    /// an undefined property. Font schemes (0x000E) are not counted: the
+    /// XF's Font record already names the resolved face.
+    pub(super) unrepresented: bool,
+}
+
+/// ExtProp 0x0006 XFExtGradient (2.5.280): an XFPropGradient (2.5.286)
+/// and its GradStop (2.5.156) list.
+#[derive(Clone, Debug)]
+pub(super) struct Gradient {
+    pub(super) path: bool,
+    pub(super) degree: f64,
+    pub(super) left: f64,
+    pub(super) right: f64,
+    pub(super) top: f64,
+    pub(super) bottom: f64,
+    pub(super) stops: Vec<(f64, StopColor)>,
+}
+
+/// A gradient stop color before palette resolution.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum StopColor {
+    Argb([u8; 4]),
+    /// IcvXF with a tint, resolved against the workbook palette.
+    Indexed(u16, f64),
 }
 
 impl Extensions {
@@ -52,6 +79,7 @@ impl Extensions {
             let mut offset = 20usize;
             let mut colors = BTreeMap::new();
             let mut indent = None;
+            let mut gradients_found = None;
             let mut properties = BTreeSet::new();
             for _ in 0..count {
                 let kind = u16_at(data, offset)?;
@@ -69,6 +97,9 @@ impl Extensions {
                     let color_type = u16_at(value, 0)?;
                     if color_type > 4 {
                         return Err(unsupported("invalid BIFF extended color type"));
+                    }
+                    if owned && color_type == 1 && u16_at(value, 2)? != 0 {
+                        result.unrepresented = true;
                     }
                     // Resolve owned theme colors to SML ARGB.
                     // MS-XLS 2.5.49 lists 0..3 as Dark 1, Light 1, Dark 2,
@@ -109,6 +140,13 @@ impl Extensions {
                             )),
                         );
                     }
+                } else if !matches!(kind, 0x0006 | 0x000e | 0x000f) {
+                    result.unrepresented |= owned;
+                } else if kind == 0x0006 {
+                    let gradient = gradient(value, owned, &mut theme, records)?;
+                    if let Some(gradient) = gradient {
+                        gradients_found = Some(gradient);
+                    }
                 } else if kind == 0x000f {
                     if value.len() != 2 {
                         return Err(unsupported("invalid BIFF extended indentation size"));
@@ -130,6 +168,9 @@ impl Extensions {
                 if let Some(indent) = indent {
                     result.indents.insert(index, indent);
                 }
+                if let Some(gradient) = gradients_found {
+                    result.gradients.insert(index, gradient);
+                }
             }
         }
         Ok(result)
@@ -139,9 +180,90 @@ impl Extensions {
         self.colors.get(&index)?.get(&property).copied()
     }
 
+    pub(super) fn gradient(&self, index: usize) -> Option<&Gradient> {
+        self.gradients.get(&index)
+    }
+
     pub(super) fn indent(&self, index: usize) -> Option<u16> {
         self.indents.get(&index).copied()
     }
+}
+
+/// XFExtGradient of an XF; `None` for an XF that does not own its
+/// extension (its gradient is validated but not applied).
+fn gradient(
+    value: &[u8],
+    owned: bool,
+    theme: &mut Option<super::super::theme::Colors>,
+    records: &[Record<'_>],
+) -> Result<Option<Gradient>, String> {
+    use super::super::f64_at;
+    let number = |at: usize| -> Result<f64, String> {
+        let number = f64_at(value, at)?;
+        number
+            .is_finite()
+            .then_some(number)
+            .ok_or_else(|| unsupported("invalid BIFF gradient fill"))
+    };
+    let kind = u32_at(value, 0)?;
+    let count = usize::try_from(u32_at(value, 44)?)
+        .map_err(|_| unsupported("invalid BIFF gradient fill"))?;
+    if kind > 1 || count > 256 || value.len() != 48 + count * 22 {
+        return Err(unsupported("invalid BIFF gradient fill"));
+    }
+    let mut stops = Vec::with_capacity(count);
+    for stop in 0..count {
+        let at = 48 + stop * 22;
+        let color_type = u16_at(value, at)?;
+        let color = u32_at(value, at + 2)?;
+        let position = number(at + 6)?;
+        let tint = number(at + 14)?;
+        if !(0.0..=1.0).contains(&position) || !(-1.0..=1.0).contains(&tint) {
+            return Err(unsupported("invalid BIFF gradient stop"));
+        }
+        let color = match color_type {
+            1 => StopColor::Indexed(
+                u16::try_from(color).map_err(|_| unsupported("invalid BIFF gradient stop"))?,
+                tint,
+            ),
+            2 => {
+                let [r, g, b, a] = color.to_le_bytes();
+                StopColor::Argb(tinted([a, r, g, b], tint))
+            }
+            // ColorTheme in SpreadsheetML order over the clrScheme-ordered
+            // theme, as for the XFExt colors above.
+            3 if color <= 11 => {
+                if !owned {
+                    return Ok(None);
+                }
+                if theme.is_none() {
+                    *theme = Some(super::super::theme::Colors::parse(records)?);
+                }
+                let slot = if color < 4 { color ^ 1 } else { color };
+                let argb = theme
+                    .as_ref()
+                    .unwrap()
+                    .argb(slot)
+                    .ok_or_else(|| unsupported("BIFF themed gradient stop lacks a theme"))?;
+                StopColor::Argb(tinted(argb, tint))
+            }
+            _ => return Err(unsupported("unsupported BIFF gradient stop color")),
+        };
+        stops.push((position, color));
+    }
+    if stops.is_empty() {
+        return Err(unsupported("BIFF gradient fill without stops"));
+    }
+    stops.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    Ok(owned.then_some(Gradient {
+        path: kind == 1,
+        degree: number(4)?,
+        left: number(12)?,
+        right: number(20)?,
+        top: number(28)?,
+        bottom: number(36)?,
+        stops,
+    }))
 }
 
 /// Apply a SpreadsheetML tint (ECMA-376 §18.8.19) through the shared resolver.
@@ -173,4 +295,47 @@ fn checksum(bytes: impl Iterator<Item = u8>) -> u32 {
         }
     }
     crc
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stop(kind: u16, value: u32, position: f64, tint: f64) -> Vec<u8> {
+        let mut data = kind.to_le_bytes().to_vec();
+        data.extend(value.to_le_bytes());
+        data.extend(position.to_le_bytes());
+        data.extend(tint.to_le_bytes());
+        data
+    }
+
+    #[test]
+    fn gradient_fills_read_their_geometry_and_stops() {
+        let mut value = 0u32.to_le_bytes().to_vec();
+        for number in [90.0f64, 0.0, 0.0, 0.0, 0.0] {
+            value.extend(number.to_le_bytes());
+        }
+        value.extend(2u32.to_le_bytes());
+        value.extend(stop(2, 0xff00_00ff, 1.0, 0.0));
+        value.extend(stop(2, 0xff00_ff00, 0.0, 0.0));
+        let parsed = gradient(&value, true, &mut None, &[]).unwrap().unwrap();
+        assert!(!parsed.path);
+        assert_eq!(parsed.degree, 90.0);
+        // Stops sort by position; LongRGBA is red, green, blue, alpha.
+        assert!(matches!(
+            parsed.stops[0],
+            (0.0, StopColor::Argb([0xff, 0, 0xff, 0]))
+        ));
+        assert!(matches!(
+            parsed.stops[1],
+            (1.0, StopColor::Argb([0xff, 0xff, 0, 0]))
+        ));
+        // An XF that does not own the extension keeps its pattern fill.
+        assert!(gradient(&value, false, &mut None, &[]).unwrap().is_none());
+        // Truncated stop lists and unknown color types reject.
+        assert!(gradient(&value[..value.len() - 1], true, &mut None, &[]).is_err());
+        let mut bad = value.clone();
+        bad[48] = 9;
+        assert!(gradient(&bad, true, &mut None, &[]).is_err());
+    }
 }

@@ -969,10 +969,12 @@ pub(crate) fn parse_shape(
         .unwrap_or_else(|| InheritedShapeGeometry {
             geometry: "rect".to_owned(),
             cust_geom: None,
+            cust_geom_paint: None,
             adjustments: [None; 8],
         });
     let geometry = shape_geometry.geometry;
     let cust_geom = shape_geometry.cust_geom;
+    let cust_geom_paint = shape_geometry.cust_geom_paint;
     let [adj, adj2, adj3, adj4, adj5, adj6, adj7, adj8] = shape_geometry.adjustments;
 
     // cy=0 means "auto-height" for body-text shapes, but connector-type
@@ -1258,6 +1260,7 @@ pub(crate) fn parse_shape(
         text_body,
         default_text_color,
         cust_geom,
+        cust_geom_paint,
         adj,
         adj2,
         adj3,
@@ -3060,7 +3063,7 @@ fn offset_slide_element(el: &mut SlideElement, dx: i64, dy: i64) {
 }
 
 /// Parse a connector shape (p:cxnSp) as a ShapeElement with line geometry.
-fn parse_connector(
+pub(crate) fn parse_connector(
     node: roxmltree::Node<'_, '_>,
     theme_source: &(impl PptxThemeSource + ?Sized),
     rels: &HashMap<String, String>,
@@ -3159,6 +3162,7 @@ fn parse_connector(
         text_body: None,
         default_text_color: None,
         cust_geom: None,
+        cust_geom_paint: None,
         adj,
         adj2,
         adj3,

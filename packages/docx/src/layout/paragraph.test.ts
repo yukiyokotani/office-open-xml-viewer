@@ -1402,6 +1402,127 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
     }).yPt).toBe(13);
   });
 
+  it('keeps a bottom/centre aligned spAutoFit box aligned at its fitted height', () => {
+    // ECMA-376 §20.4.3.1 wp:align + §21.1.2.1.3 spAutoFit: the aligned edge
+    // belongs to the drawn (fitted) extent, not to the authored extent.
+    const services = createLayoutServices({
+      section: {
+        pageWidth: 200, pageHeight: 300,
+        marginTop: 30, marginRight: 20, marginBottom: 30, marginLeft: 20,
+        headerDistance: 15, footerDistance: 15,
+        titlePage: false, evenAndOddHeaders: false,
+      },
+      body: [],
+      headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+    }, { measureContext });
+    const host = {
+      text: '', metricOnly: true, sourceRunIndex: 0, measuredWidth: 0,
+      fontSize: 10, fontFamily: 'Test Sans', fontRoute,
+    } as unknown as LayoutTextSeg;
+    const measured = {
+      lines: [{
+        layout: {
+          segments: [host], height: 10, ascent: 8, descent: 2,
+          visibleAscent: 8, visibleDescent: 2, intendedSingle: 10,
+          visibleIntendedSingle: 10, xOffset: 0, availWidth: 100,
+        },
+        topYPt: 40, advancePt: 12,
+      }],
+      markOnly: false, requestedSpaceBeforePt: 0, requestedSpaceAfterPt: 0,
+      uniformRubyAdvancePt: 0, contentStartYPt: 40, contentEndYPt: 52,
+      lastLineBelowBaselinePt: 2,
+      placement: {
+        startYPt: 40, paragraphXPt: 20, availableWidthPt: 160,
+        maximumYPt: 270, suppressSpaceBefore: false,
+      },
+    } as unknown as MeasuredParagraph;
+    const occurrenceId = 'aligned-autofit-anchor';
+    const acquire = (
+      choice: AnchorAcquisitionInput['vertical']['choice'],
+      textAutofit = 'sp',
+    ) => {
+      const input = retainedAnchor(occurrenceId, {
+        horizontal: {
+          relativeFrom: 'margin', relativeFromStatus: 'valid',
+          choice: { kind: 'align', value: 'left' },
+        },
+        vertical: { relativeFrom: 'margin', relativeFromStatus: 'valid', choice },
+        extent: { widthPt: 40, widthStatus: 'valid', heightPt: 100, heightStatus: 'valid' },
+        wrap: {
+          kind: 'none', authoredKinds: [], side: null,
+          distances: retainedAnchor(occurrenceId).wrap.distances,
+          effectExtent: null, polygon: null,
+        },
+      });
+      const anchored = {
+        ...paragraph,
+        runs: [
+          { type: 'anchorHost', fontSize: 10, anchorOccurrenceId: occurrenceId },
+          {
+            type: 'shape',
+            widthPt: 40,
+            heightPt: 100,
+            anchorXPt: 0,
+            anchorYPt: 0,
+            anchorXFromMargin: true,
+            anchorYFromPara: false,
+            anchorAcquisitionInput: input,
+            zOrder: 0,
+            subpaths: [],
+            presetGeometry: 'rect',
+            fill: null,
+            stroke: null,
+            textAutofit,
+            textInsetL: 0, textInsetT: 0, textInsetR: 0, textInsetB: 0,
+            textAnchor: 't',
+            textBlocks: [{
+              text: 'abcdefghij', fontSizePt: 10, color: '112233', alignment: 'left',
+              runs: [{ text: 'abcdefghij', fontSizePt: 10, color: '112233' }],
+            }],
+          },
+        ],
+      } as unknown as DocParagraph;
+      return paragraphLayoutFromMeasurement(anchored as never, {
+        id: 'aligned-autofit', source, flowDomainId: 'body', ordinaryFlow: true,
+        context: acquisitionContext,
+        placement: measured.placement,
+        measurer: { context: measureContext, fontFamilyClasses: {} } as never,
+        environment: {
+          pageIndex: 0, totalPages: 1, documentHasEastAsianText: false,
+          layoutServices: services, pageWritingMode: 'horizontal-tb',
+          verticalPageFrame: false,
+        } as never,
+        exclusions: [],
+        anchorFrames: {
+          page: { xPt: 0, yPt: 0, widthPt: 200, heightPt: 300 },
+          margin: { xPt: 20, yPt: 30, widthPt: 160, heightPt: 240 },
+          column: { xPt: 20, yPt: 30, widthPt: 160, heightPt: 240 },
+          pageParity: 'odd',
+        },
+      }, measured).drawings[0]!.flowBounds;
+    };
+
+    const top = acquire({ kind: 'align', value: 'top' });
+    expect(top.yPt).toBe(30);
+    expect(top.heightPt).toBeLessThan(100);
+    const bottom = acquire({ kind: 'align', value: 'bottom' });
+    expect(bottom.heightPt).toBe(top.heightPt);
+    expect(bottom.yPt + bottom.heightPt).toBeCloseTo(270, 9);
+    const center = acquire({ kind: 'align', value: 'center' });
+    expect(center.heightPt).toBe(top.heightPt);
+    expect(center.yPt + center.heightPt / 2).toBeCloseTo(150, 9);
+    // inside/outside follow page parity: outside on an odd page is trailing.
+    const outside = acquire({ kind: 'align', value: 'outside' });
+    expect(outside.yPt + outside.heightPt).toBeCloseTo(270, 9);
+    // Offsets and percentages keep the authored top edge.
+    expect(acquire({ kind: 'offset', valuePt: 12 }).yPt).toBe(42);
+    expect(acquire({ kind: 'percent', fraction: 0.5 }).yPt).toBe(150);
+    // Without spAutoFit the authored extent is the drawn extent.
+    expect(acquire({ kind: 'align', value: 'bottom' }, 'none'))
+      .toMatchObject({ yPt: 170, heightPt: 100 });
+  });
+
   it('acquires ordinary CJK as complete service-shaped grapheme clusters', () => {
     const cjkParagraph = {
       ...paragraph,

@@ -39,6 +39,7 @@ import {
   applySoftEdge,
   applyReflection,
   renderPresetShape,
+  pathFillModeOverlay,
   hasPreset,
   buildPresetGeometryPath,
   buildPresetGeometryFillPath,
@@ -3645,6 +3646,47 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
       return;
     }
 
+    // ECMA-376 §20.1.9.15: custom geometry paths carry their own fill mode and
+    // stroke flag. Paint each path on its own, like the preset engine does, so
+    // an unfilled or unstroked path stays unfilled / unstroked. A silhouette
+    // uses the fill-bearing paths only.
+    const pathPaint = el.custGeom && el.custGeomPaint?.length === el.custGeom.length
+      ? el.custGeomPaint
+      : null;
+    if (el.custGeom && pathPaint) {
+      let shadowCleared = false;
+      el.custGeom.forEach((cmds, index) => {
+        const paint = pathPaint[index];
+        const filled = paint.fill !== 'none';
+        if (silhouette && !filled) return;
+        target.beginPath();
+        buildCustomPath(target, [cmds], bx, by, bw, bh);
+        if (filled) {
+          let painted = false;
+          if (paintImageFill) {
+            target.save();
+            try { painted = paintImageFill(target); } finally { target.restore(); }
+          } else if (tFill) {
+            target.fillStyle = tFill;
+            target.fill();
+            painted = true;
+          }
+          const overlay = painted && !silhouette ? pathFillModeOverlay(paint.fill) : null;
+          if (overlay) {
+            target.save();
+            target.fillStyle = overlay;
+            target.fill();
+            target.restore();
+          }
+          if (painted && !silhouette && !shadowCleared) {
+            tClearShadow();
+            shadowCleared = true;
+          }
+        }
+        if (paint.stroke && tStroke) tStroke();
+      });
+      return;
+    }
     target.beginPath();
     if (el.custGeom && el.custGeom.length > 0) {
       buildCustomPath(target, el.custGeom, bx, by, bw, bh);

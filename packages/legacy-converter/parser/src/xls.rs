@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, HashSet};
 use crate::cfb::CompoundFile;
 use crate::ooxml::{write_package, xml_attr, xml_text, ROOT_RELS_XLSX};
 
-mod autofilter;
+mod cell_formulas;
 mod chart;
 mod conditional;
 pub(crate) mod direct;
@@ -27,13 +27,18 @@ mod direct_styles_tests;
 pub(crate) mod direct_wire;
 pub(crate) mod drawing_anchors;
 mod drawing_media;
+mod filters;
 mod geometry;
+mod hyperlinks;
+mod names;
 mod pictures;
 mod print;
 mod rich;
 mod shapes;
 mod styles;
+mod tables;
 mod theme;
+mod validation;
 mod views;
 
 const BOF: u16 = 0x0809;
@@ -164,8 +169,40 @@ struct SheetData {
     conditional_formats: Vec<xlsx_model::ConditionalFormat>,
     /// A chart sheet's chart (direct path only); such a sheet has no cells.
     chart_sheet: Option<chart::ChartSheet>,
-    /// The worksheet's AutoFilter range (direct path only).
-    auto_filter: Option<autofilter::AutoFilter>,
+    /// MS-XLS 2.4.113 FeatHdr11, 2.4.114 Feature11, 2.4.115 Feature12 and
+    /// 2.4.157 List12 records (tables), in stream order.
+    table_records: tables::Records,
+    /// Their XLSX-model projection (direct path only).
+    tables: Vec<xlsx_model::TableInfo>,
+    /// MS-XLS 2.4.259 SheetExt (tab color), if present.
+    sheet_ext: Option<Vec<u8>>,
+    /// Its resolved tab color (direct path only).
+    tab_color: Option<String>,
+    /// MS-XLS 2.4.140 HLink and 2.4.141 HLinkTooltip records, in order.
+    hyperlink_records: tables::Records,
+    /// Their XLSX-model projection (direct path only).
+    hyperlinks: Vec<xlsx_model::Hyperlink>,
+    /// MS-XLS 2.4.8 AutoFilterInfo: the sheet has an AutoFilter over this
+    /// many columns.
+    autofilter_info: Option<u16>,
+    /// AutoFilter criteria (2.4.6 AutoFilter, 2.4.7 AutoFilter12, 2.4.117
+    /// FilterMode) are present.
+    autofilter_criteria: bool,
+    /// Its `_FilterDatabase` range (direct path only).
+    auto_filter: Option<xlsx_model::CellRange>,
+    /// MS-XLS 2.4.96 DVal and 2.4.95 Dv records, in order.
+    validation_records: tables::Records,
+    /// Their XLSX-model projection (direct path only).
+    data_validations: Vec<xlsx_model::DataValidation>,
+    /// Defined names visible on this sheet (direct path only).
+    defined_names: Vec<xlsx_model::DefinedName>,
+    /// A cell, row or column shows phonetic guides (MS-XLS 2.4.192
+    /// PhoneticInfo sqref, ROW/COLINFO fPhonetic).
+    shows_phonetic: bool,
+    /// FORMULA, SHRFMLA, ARRAY and TABLE records, in order.
+    formula_records: tables::Records,
+    /// Formula text by cell (direct path only).
+    formulas: BTreeMap<(u16, u16), String>,
 }
 
 pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<XlsConversion, String> {
@@ -321,6 +358,13 @@ fn prepare_workbook(
     let mut tabs = Vec::new();
     let mut conditional_theme = None;
     let mut dxfs = Vec::new();
+    let mut table_styles = None;
+    let mut filter_databases = None;
+    let mut defined_names = None;
+    let has_names = records
+        .iter()
+        .take_while(|record| record.kind != EOF)
+        .any(|record| record.kind == 0x0018);
     for (tab, sheet) in sheets.into_iter().enumerate() {
         if sheet.sheet_type != 0 {
             // MS-XLS 2.4.28 BoundSheet8.dt: 1 macro sheet, 2 chart sheet, 6 VB
@@ -352,6 +396,99 @@ fn prepare_workbook(
         let mut data = parse_sheet(&records, &sheet, &shared_strings)?;
         // Only the direct model projects conditional formatting; the byte
         // converter keeps its documented omission warning.
+        if direct {
+            if let Some(ext) = data.sheet_ext.as_deref() {
+                if conditional_theme.is_none() {
+                    conditional_theme = Some((
+                        theme::Colors::parse(&records)?,
+                        conditional::Externs::parse(&records)?,
+                    ));
+                }
+                let (theme, _) = conditional_theme.as_ref().expect("parsed theme");
+                data.tab_color = tab_color(ext, &styles, theme)?;
+            }
+        }
+        if direct {
+            for (kind, record) in data.hyperlink_records.iter() {
+                if kind == 0x01b8 {
+                    data.hyperlinks.push(hyperlinks::hlink(record)?);
+                } else {
+                    hyperlinks::tooltip(record)?;
+                }
+            }
+        }
+        // Phonetic guides (ExtRst runs in the shared strings) are not
+        // projected; a sheet that displays them fails closed.
+        if direct && data.shows_phonetic {
+            return Err(unsupported("XLS phonetic guides are not projected"));
+        }
+        if direct && !data.formula_records.is_empty() {
+            if conditional_theme.is_none() {
+                conditional_theme = Some((
+                    theme::Colors::parse(&records)?,
+                    conditional::Externs::parse(&records)?,
+                ));
+            }
+            let (_, externs) = conditional_theme.as_ref().expect("parsed theme");
+            data.formulas = cell_formulas::project(data.formula_records.iter(), externs)?;
+        }
+        if direct && has_names {
+            if conditional_theme.is_none() {
+                conditional_theme = Some((
+                    theme::Colors::parse(&records)?,
+                    conditional::Externs::parse(&records)?,
+                ));
+            }
+            if defined_names.is_none() {
+                let (_, externs) = conditional_theme.as_ref().expect("parsed theme");
+                defined_names = Some(names::Names::parse(&records, externs)?);
+            }
+            data.defined_names = defined_names.as_ref().expect("parsed names").for_sheet(tab);
+        }
+        if direct && !data.validation_records.is_empty() {
+            if conditional_theme.is_none() {
+                conditional_theme = Some((
+                    theme::Colors::parse(&records)?,
+                    conditional::Externs::parse(&records)?,
+                ));
+            }
+            let (_, externs) = conditional_theme.as_ref().expect("parsed theme");
+            data.data_validations = validation::project(data.validation_records.iter(), externs)?;
+        }
+        if let (true, Some(columns)) = (direct, data.autofilter_info) {
+            if filter_databases.is_none() {
+                filter_databases = Some(filters::Databases::parse(&records)?);
+            }
+            let range = filter_databases
+                .as_ref()
+                .expect("parsed filter databases")
+                .range(tab)
+                .ok_or_else(|| unsupported("BIFF AutoFilter lacks its filter database"))?;
+            filters::check(range, columns, data.autofilter_criteria)?;
+            data.auto_filter = Some(xlsx_model::CellRange { ..*range });
+        }
+        if direct && !data.table_records.is_empty() {
+            if conditional_theme.is_none() {
+                conditional_theme = Some((
+                    theme::Colors::parse(&records)?,
+                    conditional::Externs::parse(&records)?,
+                ));
+            }
+            if table_styles.is_none() {
+                table_styles = Some(tables::Styles::parse(&records)?);
+            }
+            let (theme, _) = conditional_theme.as_ref().expect("parsed theme");
+            let context = tables::Context {
+                styles: &styles,
+                theme,
+            };
+            data.tables = tables::project(
+                &data.table_records,
+                table_styles.as_mut().expect("parsed table styles"),
+                &context,
+                &mut dxfs,
+            )?;
+        }
         if direct && !data.conditional_records.is_empty() {
             if conditional_theme.is_none() {
                 conditional_theme = Some((
@@ -394,8 +531,25 @@ fn prepare_workbook(
     } else {
         vec!["legacy-xls:drawings-conditional-formatting-and-external-links-omitted".into()]
     };
-    warnings.push("legacy-xls:phonetic-data-print-areas-titles-and-extended-headers-omitted".into());
-    if styles.extensions_omitted {
+    // The direct model carries print areas and titles as defined names;
+    // page setup, headers and footers (including 2.4.136 HeaderFooter) only
+    // affect printing, which neither the XLSX model nor its viewer has.
+    // Phonetic strings (ExtRst) display only in cells marked by
+    // PhoneticInfo, ROW or COLINFO, which the direct path rejects instead.
+    if !direct {
+        warnings.push(
+            "legacy-xls:phonetic-data-print-areas-titles-and-extended-headers-omitted".into(),
+        );
+    }
+    // The direct model projects XFExt colors, indentation and gradient
+    // fills; StyleExt (2.4.270) only extends the cell-style gallery entries,
+    // which cells reach through their XFs. Anything else fails closed.
+    if direct && styles.extensions_unrepresented() {
+        return Err(unsupported(
+            "XLS extended cell formatting is not representable",
+        ));
+    }
+    if styles.extensions_omitted && !direct {
         warnings.push("legacy-xls:extended-styles-omitted".into());
     }
     if incomplete_print_margins {
@@ -404,18 +558,21 @@ fn prepare_workbook(
     if custom_views_omitted {
         warnings.push("legacy-xls:saved-custom-views-omitted".into());
     }
-    if formula_results {
+    // The direct model carries formula text with the cached results, as the
+    // XLSX model does, so only the byte converter replaces formulas.
+    if formula_results && !direct {
         warnings.push("legacy-xls:formulas-replaced-with-cached-results".into());
     }
     if skipped_non_worksheets {
         warnings.push("legacy-xls:non-worksheet-tabs-omitted".into());
     }
     if with_pictures && direct {
-        let filters = autofilter::workbook(&records)?;
+        let filters: BTreeMap<usize, &xlsx_model::CellRange> = tabs
+            .iter()
+            .zip(&converted)
+            .filter_map(|(&tab, (_, sheet))| sheet.auto_filter.as_ref().map(|range| (tab, range)))
+            .collect();
         validate_direct_drawings(&records, &tabs, &filters)?;
-        for (index, tab) in tabs.iter().enumerate() {
-            converted[index].1.auto_filter = filters.get(tab).copied();
-        }
     }
     let pictures = if with_pictures {
         // The direct reader follows Excel, which displays GDI+ metafiles with
@@ -430,9 +587,7 @@ fn prepare_workbook(
             Ok(value) => {
                 if value.has_unsupported_images() {
                     if direct {
-                        return Err(unsupported(
-                            "BIFF picture BLIP is not a supported image",
-                        ));
+                        return Err(unsupported("BIFF picture BLIP is not a supported image"));
                     }
                     warnings.push("legacy-xls:invalid-or-unsupported-pictures-omitted".into());
                 }
@@ -506,20 +661,20 @@ fn prepare_workbook(
 fn validate_direct_drawings(
     records: &[Record<'_>],
     tabs: &[usize],
-    filters: &BTreeMap<usize, autofilter::AutoFilter>,
+    filters: &BTreeMap<usize, &xlsx_model::CellRange>,
 ) -> Result<(), String> {
     let projected: std::collections::BTreeSet<_> = tabs.iter().copied().collect();
     for anchor in drawing_anchors::strict(records)? {
         if !projected.contains(&anchor.sheet) {
             continue;
         }
-        // An AutoFilter's own column buttons (see `autofilter`): drawn by
-        // the worksheet renderer from the projected range.
+        // An AutoFilter's own column buttons (see `filters`): drawn by the
+        // worksheet renderer from the projected range.
         if anchor.object_type == 20
             && anchor.object_flags & 0x100 != 0
             && filters
                 .get(&anchor.sheet)
-                .is_some_and(|filter| filter.owns_button(anchor.from.column, anchor.from.row))
+                .is_some_and(|range| filters::owns_button(range, anchor.from.column, anchor.from.row))
         {
             continue;
         }
@@ -565,7 +720,12 @@ mod direct_drawing_tests {
 
     #[test]
     fn direct_objects_are_charts_with_data_or_referenced_pictures() {
-        let corner = CellCorner { column: 0, row: 0, dx: 0, dy: 0 };
+        let corner = CellCorner {
+            column: 0,
+            row: 0,
+            dx: 0,
+            dy: 0,
+        };
         let anchor = |object_type, chart, picture| DrawingAnchor {
             sheet: 0,
             shape_id: 1,
@@ -605,6 +765,29 @@ mod direct_drawing_tests {
             assert!(error.contains(expected), "{expected}: {error}");
         }
     }
+}
+
+/// MS-XLS 2.4.259 SheetExt: icvPlain (0x7F = no color), refined by the
+/// SheetExtOptional CFColor when its icvPlain12 agrees with icvPlain.
+fn tab_color(
+    data: &[u8],
+    styles: &styles::Styles<'_>,
+    theme: &theme::Colors,
+) -> Result<Option<String>, String> {
+    let size = u32_at(data, 12)?;
+    if u16_at(data, 0)? != 0x0862 || !matches!((size, data.len()), (20, 20) | (40, 40)) {
+        return Err(unsupported("invalid BIFF sheet extension"));
+    }
+    let icv = (u32_at(data, 16)? & 0x7f) as u16;
+    if icv == 0x7f {
+        return Ok(None);
+    }
+    if size == 40 && (u32_at(data, 20)? & 0x7f) as u16 == icv {
+        return conditional::cf_color(data, 24, styles, theme).map(Some);
+    }
+    Ok(Some(styles.chart_color(icv).ok_or_else(|| {
+        unsupported("invalid BIFF sheet tab color")
+    })?))
 }
 
 fn prepare_direct(cfb: &CompoundFile<'_>) -> Result<PreparedXls, String> {
@@ -1177,6 +1360,7 @@ fn parse_sheet(
                 insert_cell(&mut output, row, column, value, &mut cell_count)?;
             }
             FORMULA => {
+                output.formula_records.push(record.kind, record.data)?;
                 let (row, column) = cell_position(record.data)?;
                 match formula_cached_value(record.data)? {
                     FormulaResult::Value(value) => {
@@ -1205,6 +1389,24 @@ fn parse_sheet(
             0x01b0 | 0x01b1 | 0x0879 | 0x087a | 0x087b => {
                 output.conditional_records.push(record.kind, record.data)?
             }
+            0x01b8 | 0x0800 => output.hyperlink_records.push(record.kind, record.data)?,
+            0x009d => output.autofilter_info = Some(u16_at(record.data, 0)?),
+            0x009b | 0x009e | 0x087e => output.autofilter_criteria = true,
+            0x04bc | 0x0221 | 0x0236 => output.formula_records.push(record.kind, record.data)?,
+            0x00ef => output.shows_phonetic |= u16_at(record.data, 4)? != 0,
+            0x0208 => output.shows_phonetic |= u16_at(record.data, 14)? & 0x4000 != 0,
+            0x007d => output.shows_phonetic |= u16_at(record.data, 8)? & 0x0008 != 0,
+            0x01b2 | 0x01be => output.validation_records.push(record.kind, record.data)?,
+            0x0862 => {
+                if output.sheet_ext.replace(record.data.to_vec()).is_some() {
+                    return Err(unsupported("duplicate BIFF sheet extension"));
+                }
+            }
+            0x0871 | 0x0872 | 0x0877 | 0x0878 => {
+                output.table_records.push(record.kind, record.data)?
+            }
+            // ContinueFrt11 (2.4.60) of a table record is not reassembled.
+            0x0875 => return Err(unsupported("continued XLS table record")),
             // A continued conditional formatting record is not reassembled.
             CONTINUE
                 if !output.conditional_records.is_empty()

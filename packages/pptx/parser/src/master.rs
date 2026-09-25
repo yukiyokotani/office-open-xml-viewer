@@ -6,7 +6,7 @@
 //! `MasterBundle` → `ParsedMaster` type rename (fields unchanged).
 
 use crate::fill::{
-    parse_background, parse_blip_fill, parse_color_node, parse_cust_geom, parse_fill,
+    parse_background, parse_blip_fill, parse_color_node, parse_cust_geom_with_paint, parse_fill,
     parse_reflection, parse_xfrm,
 };
 use crate::shape::{
@@ -175,6 +175,7 @@ pub(crate) struct LayoutPlaceholders {
 pub(crate) struct InheritedShapeGeometry {
     pub(crate) geometry: String,
     pub(crate) cust_geom: Option<Vec<Vec<PathCmd>>>,
+    pub(crate) cust_geom_paint: Option<Vec<PathPaint>>,
     pub(crate) adjustments: [Option<f64>; 8],
 }
 
@@ -190,9 +191,11 @@ impl InheritedShapeGeometry {
         let cust_geom_node = child(sp_pr, "custGeom");
         let prst_geom_node = child(sp_pr, "prstGeom");
         if let Some(cust_geom_node) = cust_geom_node {
+            let (paths, paint) = parse_cust_geom_with_paint(cust_geom_node, shape_w, shape_h);
             return Some(Self {
                 geometry: "custGeom".to_owned(),
-                cust_geom: Some(parse_cust_geom(cust_geom_node, shape_w, shape_h)),
+                cust_geom: Some(paths),
+                cust_geom_paint: paint,
                 adjustments: [None; 8],
             });
         }
@@ -231,6 +234,7 @@ impl InheritedShapeGeometry {
         Some(Self {
             geometry,
             cust_geom: None,
+            cust_geom_paint: None,
             adjustments: std::array::from_fn(adjustment),
         })
     }

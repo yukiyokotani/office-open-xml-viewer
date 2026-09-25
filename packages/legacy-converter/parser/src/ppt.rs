@@ -14,6 +14,7 @@ pub(crate) mod direct_cursor;
 pub(crate) mod direct_session;
 mod drawing;
 mod media;
+mod metro;
 mod paint;
 mod persist;
 mod ruler;
