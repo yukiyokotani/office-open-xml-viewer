@@ -10338,6 +10338,16 @@ mod tests {
         let xml = date_axis_chart_xml(r#"<c:numFmt formatCode="m/d/yyyy" sourceLinked="0"/>"#);
         let c = parse_legacy_chart(&xml, &theme).expect("dateAx chart should parse");
         assert_eq!(c.chart.cat_axis_format_code.as_deref(), Some("m/d/yyyy"));
+        // A presentation has no worksheet to resolve. Linked and omitted
+        // forms retain the authored code instead of losing the axis format.
+        for num_fmt in [
+            r#"<c:numFmt formatCode="m/d/yyyy" sourceLinked="1"/>"#,
+            r#"<c:numFmt formatCode="m/d/yyyy"/>"#,
+        ] {
+            let xml = date_axis_chart_xml(num_fmt);
+            let c = parse_legacy_chart(&xml, &theme).expect("dateAx chart should parse");
+            assert_eq!(c.chart.cat_axis_format_code.as_deref(), Some("m/d/yyyy"));
+        }
     }
 
     /// A dateAx title maps to the cat-axis title (same wiring as catAx).

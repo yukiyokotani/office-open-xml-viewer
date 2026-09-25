@@ -112,6 +112,7 @@ export type {
   MathSvg,
   ChartDisplayUnits,
   ChartDisplayUnitsLabel,
+  ChartAxisNumberFormat,
   SecondaryValueAxis,
   SrcRect,
   NoFill,

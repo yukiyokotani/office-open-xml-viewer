@@ -116,6 +116,7 @@ export type {
   PatternFill,
   ChartDisplayUnits,
   ChartDisplayUnitsLabel,
+  ChartAxisNumberFormat,
   SecondaryValueAxis,
   TextOutline,
   TextSelectionContextOptions,

@@ -650,6 +650,8 @@ pub struct ChartModel {
     pub legend_entries: Option<Vec<ChartLegendEntryOverride>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub val_axis_format_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub val_axis_number_format: Option<ChartAxisNumberFormat>,
     /// `<c:valAx><c:dispUnits>` (§21.2.2.45) scales displayed axis-associated
     /// values (ticks and Office-generated `showVal` data-label text); geometry
     /// and the underlying series values remain unscaled.
@@ -788,6 +790,8 @@ pub struct ChartModel {
     pub val_axis_line_paint_authored: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cat_axis_format_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cat_axis_number_format: Option<ChartAxisNumberFormat>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cat_axis_min: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2223,6 +2227,8 @@ pub struct SecondaryValueAxis {
     pub hidden: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub number_format: Option<ChartAxisNumberFormat>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_units: Option<ChartDisplayUnits>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3681,6 +3687,58 @@ pub fn extract_axis_format_code(axis_node: Node) -> Option<String> {
         .and_then(|n| n.attribute("formatCode"))
         .map(|s| s.to_string())
         .filter(|s| !s.is_empty() && s != "General")
+}
+
+/// Authored `<c:numFmt>` (§21.2.2.121), kept apart from the effective tick
+/// format projected into the renderer's `*formatCode` fields. `None` for
+/// `sourceLinked` preserves omission, whose effective meaning is true.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartAxisNumberFormat {
+    pub authored_code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_linked: Option<bool>,
+}
+
+fn axis_number_format(axis: Node) -> Option<ChartAxisNumberFormat> {
+    let number_format = child(axis, "numFmt")?;
+    let authored_code = number_format.attribute("formatCode")?.to_string();
+    let source_linked = number_format
+        .attribute("sourceLinked")
+        .and_then(|value| match value {
+            "1" | "true" => Some(true),
+            "0" | "false" => Some(false),
+            _ => None,
+        });
+    Some(ChartAxisNumberFormat {
+        authored_code,
+        source_linked,
+    })
+}
+
+enum AxisNumberFormatSource {
+    Formula(String),
+    Literal(String),
+    Unavailable,
+}
+
+fn effective_axis_format_code(
+    format: &ChartAxisNumberFormat,
+    source: Option<&AxisNumberFormatSource>,
+    references: &mut dyn ChartReferenceResolver,
+) -> Option<String> {
+    let code = if format.source_linked.unwrap_or(true) {
+        match source {
+            Some(AxisNumberFormatSource::Formula(formula)) => references
+                .resolve_number_format(formula)
+                .unwrap_or_else(|| format.authored_code.clone()),
+            Some(AxisNumberFormatSource::Literal(code)) => code.clone(),
+            _ => format.authored_code.clone(),
+        }
+    } else {
+        format.authored_code.clone()
+    };
+    (!code.is_empty() && code != "General").then_some(code)
 }
 
 /// `<c:catAx|valAx><c:scaling>` — read explicit `<c:min val>` / `<c:max val>`.
@@ -8552,6 +8610,7 @@ pub fn parse_chartex_part_with_references_style_parts_and_images(
         data_label_font_language: None,
         data_label_font_baseline: None,
         val_axis_format_code,
+        val_axis_number_format: None,
         val_axis_display_units: None,
         cat_axis_display_units: None,
         plot_area_manual_layout: None,
@@ -8653,6 +8712,7 @@ pub fn parse_chartex_part_with_references_style_parts_and_images(
         val_axis_crosses: None,
         val_axis_crosses_at: None,
         cat_axis_format_code: None,
+        cat_axis_number_format: None,
         cat_axis_min: None,
         cat_axis_max: None,
         radar_style: None,
@@ -13573,13 +13633,71 @@ pub fn parse_chart_part_with_references_style_parts_and_images(
         }
     }
 
-    // `<c:valAx><c:numFmt formatCode>` — value-axis tick label number format.
-    let val_axis_format_code = val_ax.and_then(extract_axis_format_code);
-    // `<c:catAx|dateAx><c:numFmt formatCode>` — category-axis number format. For
-    // a `<c:dateAx>` this is the date serial format code (e.g. "m/d/yyyy") the TS
-    // side needs to format category labels. Reaches parity with the xlsx parser,
-    // which already wires this field (pptx previously hardcoded it to None).
-    let cat_axis_format_code = cat_ax.and_then(extract_axis_format_code);
+    // Plot groups carry the axis IDs and series ranges. A linked axis reads
+    // its source format from the first series bound to that axis, in XML
+    // order. A numRef's chart cache must not substitute for worksheet style;
+    // an actual numLit formatCode is the source format for literal data.
+    // Excel uses General when the first numLit omits formatCode; it does not
+    // advance to a later source-backed series or use the authored axis code.
+    // Observed in controlled workbooks rendered by Excel: one/two-series line
+    // charts, line/bar mixes (including reversed c:order with unchanged ser
+    // order), a literal-first series followed by a worksheet reference,
+    // primary/secondary value axes, numeric category/date axes, and scatter/
+    // bubble horizontal/vertical axes, with differing source styles and
+    // explicit/omitted sourceLinked. A scatter series without xVal/yVal source
+    // nodes retains the authored code. DOCX/PPTX have no worksheet
+    // resolver, so only literal source formats can replace authored codes.
+    let axis_source = |axis_role: &str, category: bool| {
+        plot_groups
+            .iter()
+            .filter(|group| {
+                (if category {
+                    &group.category_axis
+                } else {
+                    &group.value_axis
+                }) == axis_role
+            })
+            .find_map(|group| {
+                let series = (group.series_count > 0)
+                    .then(|| ser_nodes.get(group.series_start))
+                    .flatten()?;
+                let source_tag = if matches!(group.kind.as_str(), "scatter" | "bubble") {
+                    if category {
+                        "xVal"
+                    } else {
+                        "yVal"
+                    }
+                } else if category {
+                    "cat"
+                } else {
+                    "val"
+                };
+                let source = child(*series, source_tag);
+                Some(match source {
+                    Some(source) if child(source, "numLit").is_some() => child(source, "numLit")
+                        .and_then(|literal| child(literal, "formatCode"))
+                        .and_then(|code| code.text())
+                        .map(|code| AxisNumberFormatSource::Literal(code.to_string()))
+                        .unwrap_or_else(|| AxisNumberFormatSource::Literal("General".to_string())),
+                    Some(source) => reference_formula(source)
+                        .map(AxisNumberFormatSource::Formula)
+                        .unwrap_or(AxisNumberFormatSource::Unavailable),
+                    None => AxisNumberFormatSource::Unavailable,
+                })
+            })
+    };
+    let primary_value_source = axis_source("primary", false);
+    let primary_category_source = axis_source("primary", true);
+    let secondary_value_source = axis_source("secondary", false);
+    let secondary_category_source = axis_source("secondary", true);
+    let val_axis_number_format = val_ax.and_then(axis_number_format);
+    let cat_axis_number_format = cat_ax.and_then(axis_number_format);
+    let val_axis_format_code = val_axis_number_format.as_ref().and_then(|format| {
+        effective_axis_format_code(format, primary_value_source.as_ref(), references)
+    });
+    let cat_axis_format_code = cat_axis_number_format.as_ref().and_then(|format| {
+        effective_axis_format_code(format, primary_category_source.as_ref(), references)
+    });
     let val_axis_display_units =
         val_ax.and_then(|axis| parse_axis_display_units(axis, color_resolver));
     let cat_axis_display_units =
@@ -13588,7 +13706,11 @@ pub fn parse_chart_part_with_references_style_parts_and_images(
     // Secondary value axis (combo charts) — parse the right-hand `<c:valAx>`
     // into a self-contained spec using the same shared helpers as the primary
     // axis. None for the common single value-axis case.
-    let parse_auxiliary_value_axis = |ax| {
+    let mut parse_auxiliary_value_axis = |ax, source: Option<&AxisNumberFormatSource>| {
+        let number_format = axis_number_format(ax);
+        let format_code = number_format
+            .as_ref()
+            .and_then(|format| effective_axis_format_code(format, source, references));
         let (min, max) = extract_axis_min_max(ax);
         let (t, title_size, title_bold, title_color) =
             extract_axis_title_with_props_resolved(ax, color_resolver);
@@ -13617,7 +13739,8 @@ pub fn parse_chart_part_with_references_style_parts_and_images(
             max,
             title: t,
             hidden: axis_is_deleted(ax),
-            format_code: extract_axis_format_code(ax),
+            format_code,
+            number_format,
             display_units: parse_axis_display_units(ax, color_resolver),
             font_color: extract_axis_tick_label_color(ax, color_resolver)
                 .or_else(|| chart_text_font_color.clone()),
@@ -13690,8 +13813,10 @@ pub fn parse_chart_part_with_references_style_parts_and_images(
             title_manual_layout: extract_axis_title_manual_layout(ax),
         }
     };
-    let secondary_val_axis = secondary_val_ax.map(&parse_auxiliary_value_axis);
-    let secondary_cat_axis = secondary_cat_ax.map(parse_auxiliary_value_axis);
+    let secondary_val_axis = secondary_val_ax
+        .map(|axis| parse_auxiliary_value_axis(axis, secondary_value_source.as_ref()));
+    let secondary_cat_axis = secondary_cat_ax
+        .map(|axis| parse_auxiliary_value_axis(axis, secondary_category_source.as_ref()));
 
     // `<c:plotArea><c:layout><c:manualLayout>` — use the shared parser so
     // schema defaults and all four layout modes cannot diverge by host format.
@@ -14372,6 +14497,7 @@ pub fn parse_chart_part_with_references_style_parts_and_images(
         data_label_font_language: None,
         data_label_font_baseline: None,
         val_axis_format_code,
+        val_axis_number_format,
         val_axis_display_units,
         cat_axis_display_units,
         plot_area_manual_layout,
@@ -14471,6 +14597,7 @@ pub fn parse_chart_part_with_references_style_parts_and_images(
         val_axis_crosses,
         val_axis_crosses_at,
         cat_axis_format_code,
+        cat_axis_number_format,
         cat_axis_min,
         cat_axis_max,
         radar_style,
@@ -14786,6 +14913,7 @@ mod tests {
             legend_overlay: None,
             legend_entries: None,
             val_axis_format_code: None,
+            val_axis_number_format: None,
             val_axis_display_units: None,
             cat_axis_display_units: None,
             bar_gap_width: None,
@@ -14848,6 +14976,7 @@ mod tests {
             val_axis_line_dash: None,
             val_axis_line_paint_authored: None,
             cat_axis_format_code: None,
+            cat_axis_number_format: None,
             cat_axis_min: None,
             cat_axis_max: None,
             title_manual_layout: None,
