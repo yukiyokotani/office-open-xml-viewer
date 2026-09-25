@@ -11,13 +11,10 @@
  * Scope: only enough of [MS-CFB] to enumerate the directory-entry names —
  *
  *   - §2.2 header: signature, sector shift (2^SectorShift @ 0x1E), first
- *     directory sector location (@ 0x30), and the in-header DIFAT (109 FAT
- *     sector locations @ 0x4C).
- *   - §2.3 FAT: walk the directory-stream sector chain via the FAT. The FAT
- *     sectors themselves are located through the in-header DIFAT only —
- *     DIFAT-sector extension (§2.5.1) is intentionally not followed, since a
- *     directory chain never needs more than 109 FAT sectors in practice and the
- *     sniffer only needs the directory. The mini FAT is likewise irrelevant.
+ *     directory sector location (@ 0x30), and DIFAT locations.
+ *   - §2.3 FAT / §2.5.1 DIFAT: walk the directory-stream sector chain via the
+ *     FAT, including DIFAT-sector extensions used by larger compound files. The
+ *     mini FAT is irrelevant because the directory is a regular FAT stream.
  *   - §2.6 directory entries: 128 bytes each, name is UTF-16LE @ 0x00..0x40
  *     with the byte length @ 0x40.
  *
@@ -25,6 +22,12 @@
  * arbitrary / hostile bytes can only make it return early — never throw, hang,
  * or read out of range.
  */
+
+import {
+  collectCfbFatSectors,
+  nextCfbFatSector,
+  type CfbFatIndexHeader,
+} from './cfb-read';
 
 /** CFB header signature (§2.2). */
 const CFB_SIGNATURE = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
@@ -101,8 +104,22 @@ export function sniffCfb(bytes: Uint8Array): CfbKind | null {
   const sectorSize = 1 << sectorShift;
 
   const firstDirSector = view.getUint32(0x30, true);
+  const fatHeader: CfbFatIndexHeader = {
+    sectorSize,
+    numFatSectors: view.getUint32(0x2c, true),
+    firstDifatSector: view.getUint32(0x44, true),
+    numDifatSectors: view.getUint32(0x48, true),
+  };
+  const fatSectors = collectCfbFatSectors(view, bytes.length, fatHeader);
+  if (fatSectors === null) return 'cfb-unknown';
 
-  const names = enumerateDirectoryNames(view, bytes.length, sectorSize, firstDirSector);
+  const names = enumerateDirectoryNames(
+    view,
+    bytes.length,
+    sectorSize,
+    firstDirSector,
+    fatSectors,
+  );
   if (names === null) return 'cfb-unknown';
 
   // Encryption wins over a legacy marker: an encrypted .doc is still routed to
@@ -123,6 +140,7 @@ function enumerateDirectoryNames(
   totalLen: number,
   sectorSize: number,
   firstDirSector: number,
+  fatSectors: number[],
 ): Set<string> | null {
   if (!isRegularSector(firstDirSector)) return null;
 
@@ -151,7 +169,7 @@ function enumerateDirectoryNames(
       if (name) names.add(name);
     }
 
-    const next = readFatEntry(view, totalLen, sectorSize, sector);
+    const next = nextCfbFatSector(view, totalLen, sectorSize, fatSectors, sector);
     if (next === null) break; // FAT entry unreadable -> stop with what we have
     sector = next;
   }
@@ -176,39 +194,6 @@ function readEntryName(view: DataView, entryOff: number): string {
     s += String.fromCharCode(code);
   }
   return s;
-}
-
-/**
- * Resolve the next sector in a FAT chain. The FAT sector that holds the entry
- * for `sector` is located through the in-header DIFAT (109 entries @ 0x4C).
- * Returns `null` if the FAT sector or entry cannot be read.
- */
-function readFatEntry(
-  view: DataView,
-  totalLen: number,
-  sectorSize: number,
-  sector: number,
-): number | null {
-  const fatEntriesPerSector = Math.floor(sectorSize / 4);
-  if (fatEntriesPerSector < 1) return null;
-
-  const fatSectorIndex = Math.floor(sector / fatEntriesPerSector);
-  const withinFat = sector % fatEntriesPerSector;
-
-  // In-header DIFAT covers the first 109 FAT sectors — enough for any directory
-  // chain we care about. Beyond that we deliberately give up (see module doc).
-  if (fatSectorIndex >= 109) return null;
-
-  const difatOff = 0x4c + fatSectorIndex * 4;
-  if (difatOff + 4 > totalLen) return null;
-  const fatSector = view.getUint32(difatOff, true);
-  if (!isRegularSector(fatSector)) return null;
-
-  const fatSectorOffset = fileOffsetOfSector(fatSector, sectorSize);
-  const entryOff = fatSectorOffset + withinFat * 4;
-  if (fatSectorOffset < 0 || entryOff + 4 > totalLen) return null;
-
-  return view.getUint32(entryOff, true);
 }
 
 /** File byte offset of logical sector N: the 512-byte header occupies "sector
