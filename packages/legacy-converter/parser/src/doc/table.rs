@@ -4,9 +4,9 @@ use super::{border::Border, u16_at, u32_at, unsupported};
 mod margin;
 pub(in crate::doc) use margin::Patch as MarginPatch;
 mod shading;
-pub(in crate::doc) use shading::Shading;
 #[cfg(feature = "direct-doc")]
-pub(in crate::doc) use shading::{Color, DirectShadingFacts};
+pub(in crate::doc) use shading::Color;
+pub(in crate::doc) use shading::Shading;
 mod position;
 pub(in crate::doc) use position::Position;
 #[cfg(feature = "direct-doc")]
@@ -288,6 +288,7 @@ impl<R> Properties<R> {
 }
 
 impl Properties {
+    #[cfg(feature = "direct-doc")]
     pub(super) fn borrowed(&self) -> Properties<&Row> {
         Properties {
             in_table: self.in_table,
@@ -480,7 +481,9 @@ impl Row {
         Ok(true)
     }
 
-    #[cfg(feature = "direct-doc")]
+    // The direct model resolves margins per cell through
+    // `resolve_style_aware_margins_by_cell`; this row-wide form serves tests.
+    #[cfg(all(test, feature = "direct-doc"))]
     pub(in crate::doc) fn resolve_style_aware_margins(
         &mut self,
         style_defaults: MarginPatch,
@@ -686,7 +689,7 @@ impl Row {
             // produced no verified fill oracle, so do not project a guessed
             // result for any D660 pattern or table-style state.
             0xd660 if self.table_style.is_some() => Ok(StyleAwareShadingApply::HandledUnsupported),
-            0xd670 | 0xd671 | 0xd672 => {
+            0xd670..=0xd672 => {
                 let start = match code {
                     0xd671 => 22,
                     0xd672 => 44,
@@ -900,7 +903,7 @@ impl Row {
                 // [MS-DOC] 2.9.321 defines rgTc80 as an array of complete
                 // 20-byte TC80 structures. Whole entries may be omitted or
                 // exceed NumberOfColumns, but a partial entry is malformed.
-                if b[end..].len() % 20 != 0 {
+                if !b[end..].len().is_multiple_of(20) {
                     return Err(unsupported("partial Word TC80 table definition"));
                 }
                 self.left = signed(boundaries)?;

@@ -3,22 +3,36 @@
 //! differs from the OOXML conditional-style order. It neither resolves complete
 //! styles nor replays historical table auto-formatting.
 
+#[cfg(feature = "direct-doc")]
 pub(super) use super::table_context::LogicalColumn;
+#[cfg(feature = "direct-doc")]
 use super::{table_context::Index, unsupported};
 
+#[cfg(any(test, feature = "direct-doc"))]
 pub(super) const HORIZONTAL_ODD: u16 = 0x0040;
+#[cfg(feature = "direct-doc")]
 pub(super) const HORIZONTAL_EVEN: u16 = 0x0080;
+#[cfg(any(test, feature = "direct-doc"))]
 pub(super) const VERTICAL_ODD: u16 = 0x0010;
+#[cfg(feature = "direct-doc")]
 pub(super) const VERTICAL_EVEN: u16 = 0x0020;
+#[cfg(any(test, feature = "direct-doc"))]
 pub(super) const FIRST_COLUMN: u16 = 0x0004;
+#[cfg(feature = "direct-doc")]
 pub(super) const LAST_COLUMN: u16 = 0x0008;
 pub(super) const FIRST_ROW: u16 = 0x0001;
+#[cfg(feature = "direct-doc")]
 pub(super) const LAST_ROW: u16 = 0x0002;
+#[cfg(feature = "direct-doc")]
 pub(super) const TOP_RIGHT: u16 = 0x0100;
+#[cfg(any(test, feature = "direct-doc"))]
 pub(super) const TOP_LEFT: u16 = 0x0200;
+#[cfg(feature = "direct-doc")]
 pub(super) const BOTTOM_RIGHT: u16 = 0x0400;
+#[cfg(feature = "direct-doc")]
 pub(super) const BOTTOM_LEFT: u16 = 0x0800;
 
+#[cfg(feature = "direct-doc")]
 #[derive(Clone, Copy)]
 pub(super) struct Options {
     first_row: bool,
@@ -30,6 +44,7 @@ pub(super) struct Options {
     corners: u16,
 }
 
+#[cfg(feature = "direct-doc")]
 impl Options {
     /// Band operands follow [MS-DOC] 2.6.3 (0x3488/0x3489): 1..=3,
     /// with no banding when absent. Historical auto-format bits and Fatl
@@ -85,6 +100,7 @@ impl Options {
     }
 }
 
+#[cfg(feature = "direct-doc")]
 fn validate_band(value: Option<u8>) -> Result<(), String> {
     if value.is_some_and(|size| !(1..=3).contains(&size)) {
         return Err(unsupported("invalid Word table style band size"));
@@ -96,6 +112,7 @@ fn validate_band(value: Option<u8>) -> Result<(), String> {
 /// band, vertical band, column, row, then corner. The checked table-context
 /// lookup supplies row-local source-cell ordinals, including merge slots and
 /// RTL rows. Selection allocates nothing.
+#[cfg(feature = "direct-doc")]
 pub(super) fn select(
     index: &Index,
     table_id: usize,
@@ -166,12 +183,13 @@ pub(super) fn select(
     Ok([horizontal, vertical, column_match, row_match, corner])
 }
 
+#[cfg(feature = "direct-doc")]
 fn band(ordinal: usize, size: Option<u8>, odd: u16, even: u16) -> Option<u16> {
     let band = ordinal / usize::from(size?);
-    Some(if band % 2 == 0 { odd } else { even })
+    Some(if band.is_multiple_of(2) { odd } else { even })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "direct-doc"))]
 mod tests {
     use super::*;
     use crate::doc::table::{Cell, Properties};

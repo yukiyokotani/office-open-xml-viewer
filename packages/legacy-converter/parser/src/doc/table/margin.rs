@@ -16,6 +16,7 @@ pub(in crate::doc) enum Value {
 }
 
 impl Value {
+    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) fn resolved(self) -> u16 {
         match self {
             Self::Nil => 0,
@@ -38,10 +39,12 @@ impl Patch {
         }
     }
 
+    #[cfg(any(test, feature = "direct-doc"))]
     pub(in crate::doc) fn get(self, side: usize) -> Option<Value> {
         self.sides[side]
     }
 
+    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) fn overlay(&mut self, patch: Self) {
         for side in 0..4 {
             if patch.sides[side].is_some() {

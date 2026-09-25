@@ -33,6 +33,8 @@ mod sections;
 mod settings;
 mod sprm;
 mod table;
+// Logical table/row/cell indexing for the direct model's style resolution.
+#[cfg(feature = "direct-doc")]
 mod table_context;
 mod table_output;
 mod table_structure;

@@ -52,6 +52,7 @@ fn conditional_border_index(condition: u16) -> Option<usize> {
     }
 }
 
+#[cfg(feature = "direct-doc")]
 #[derive(Clone)]
 enum TableStyleShading {
     /// Authored ShdNil is retained as property presence even though its value
@@ -68,6 +69,7 @@ pub(super) struct Profile {
     condition_presence: u16,
     bands: Bands,
     pub(super) paragraph_alignment: Option<paragraph::AlignmentPatch>,
+    #[cfg(feature = "direct-doc")]
     table_shading: Option<TableStyleShading>,
     table_default_margins: table::MarginPatch,
     table_style_margins: table::MarginPatch,
@@ -98,6 +100,7 @@ impl Default for Profile {
             condition_presence: 0,
             bands: Bands::default(),
             paragraph_alignment: None,
+            #[cfg(feature = "direct-doc")]
             table_shading: None,
             table_default_margins: table::MarginPatch::default(),
             table_style_margins: table::MarginPatch::default(),
@@ -120,6 +123,7 @@ impl Default for Profile {
 }
 
 impl Formatting<'_> {
+    #[cfg(any(test, feature = "direct-doc"))]
     pub(in crate::doc) fn table_style_selector_profile(
         &mut self,
         selected_style: Option<usize>,
@@ -135,6 +139,7 @@ impl Formatting<'_> {
         ))
     }
 
+    #[cfg(any(test, feature = "direct-doc"))]
     pub(in crate::doc) fn table_formatting_key(
         &mut self,
         selected_style: Option<usize>,
@@ -205,7 +210,9 @@ impl Formatting<'_> {
         Ok(shading)
     }
 
-    #[cfg(feature = "direct-doc")]
+    // The direct model uses `table_cell_margins_for_key`; this
+    // unconditional form serves tests.
+    #[cfg(all(test, feature = "direct-doc"))]
     pub(in crate::doc) fn table_cell_margins(
         &mut self,
         selected_style: Option<usize>,
@@ -489,7 +496,10 @@ impl Formatting<'_> {
                                         // an omitted property: Word controls
                                         // show that an inherited child Nil does
                                         // not behave like an empty child.
-                                        profile.table_shading = Some(TableStyleShading::Nil);
+                                        #[cfg(feature = "direct-doc")]
+                                        {
+                                            profile.table_shading = Some(TableStyleShading::Nil);
+                                        }
                                         return Ok(interpret_table_styles);
                                     }
                                     tapx::Scope::Conditional(condition) => {
@@ -511,7 +521,13 @@ impl Formatting<'_> {
                             };
                             match scope {
                                 tapx::Scope::Unconditional => {
-                                    profile.table_shading = Some(TableStyleShading::Value(shading));
+                                    // Read only by the direct model's cell
+                                    // shading resolution.
+                                    #[cfg(feature = "direct-doc")]
+                                    {
+                                        profile.table_shading =
+                                            Some(TableStyleShading::Value(shading));
+                                    }
                                 }
                                 tapx::Scope::Conditional(condition) => {
                                     has_inherited_conditional_shading = true;

@@ -52,6 +52,7 @@ pub(super) struct Index {
 }
 
 impl Index {
+    #[cfg(test)]
     pub(super) fn build<I, A, R>(
         paragraph_count: usize,
         paragraphs: I,
@@ -327,7 +328,7 @@ fn reserve_additional<T, A: FnMut(usize) -> Result<(), String>>(
     if required <= old {
         return Ok(());
     }
-    let doubled = old.checked_mul(2).unwrap_or(usize::MAX);
+    let doubled = old.saturating_mul(2);
     let target = required.max(doubled).max(1);
     admit(
         target
@@ -525,7 +526,7 @@ mod tests {
         cell_properties.row.table_style = Some(99);
         let mut row_properties = properties(1, true, vec![cell(10, 0)]);
         row_properties.row.table_style = Some(7);
-        let source = vec![(cell_properties, '\u{7}'), (row_properties, '\u{7}')];
+        let source = [(cell_properties, '\u{7}'), (row_properties, '\u{7}')];
 
         let index = Index::build_with_styles(
             source.len(),

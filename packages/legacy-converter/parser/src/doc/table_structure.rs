@@ -63,7 +63,6 @@ pub(super) struct RawRow<P, R = Row> {
 pub(super) struct LogicalTable<P> {
     pub(super) grid: Vec<i32>,
     pub(super) origin: i32,
-    pub(super) total: i32,
     pub(super) rows: Vec<PlannedRow<P>>,
 }
 
@@ -82,6 +81,8 @@ pub(super) struct PlannedCell<P> {
     pub(super) source: Cell,
     pub(super) source_index: usize,
     pub(super) source_end: usize,
+    /// Merged physical width, asserted by the grid-planning tests.
+    #[cfg(test)]
     pub(super) width: i32,
     pub(super) grid_span: usize,
     pub(super) vertical: u16,
@@ -281,7 +282,9 @@ fn plan<P: Default, A: FnMut(usize) -> Result<(), String>>(
         return Err(unsupported("Word table has no cell boundaries"));
     }
     let origin = grid[0];
-    let total = grid[grid.len() - 1]
+    // The table extent is validated for overflow even though no consumer
+    // reads it.
+    grid[grid.len() - 1]
         .checked_sub(origin)
         .ok_or("OUTPUT_TOO_LARGE")?;
     let mut header_prefix = true;
@@ -343,11 +346,15 @@ fn plan<P: Default, A: FnMut(usize) -> Result<(), String>>(
                     end += 1;
                 }
             }
+            // The merged width is always validated for overflow.
+            #[cfg(not(test))]
+            let _ = width;
             let vertical = (source.flags >> 5) & 3;
             cells.push(PlannedCell {
                 source,
                 source_index: i,
                 source_end: end,
+                #[cfg(test)]
                 width,
                 grid_span: cell_grid[end] - cell_grid[i],
                 vertical,
@@ -370,7 +377,6 @@ fn plan<P: Default, A: FnMut(usize) -> Result<(), String>>(
     Ok(LogicalTable {
         grid,
         origin,
-        total,
         rows: planned_rows,
     })
 }
