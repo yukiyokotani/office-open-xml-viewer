@@ -3167,6 +3167,10 @@ function acquireAnchorOccurrence(
         behavior.relativeHeight,
         entry.relativeHeight,
       ));
+    const paragraphOccurrenceIds = new Set(paragraph.runs.flatMap((run) =>
+      anchoredPayloadRun(run) && run.anchorAcquisitionInput
+        ? [run.anchorAcquisitionInput.occurrenceId]
+        : []));
     const blockerBounds = normativeCollision
       ? [...externalCollisions, ...sameParagraphBlockers]
           .filter((entry) => entry.occurrenceId !== occurrenceId)
@@ -3175,7 +3179,12 @@ function acquireAnchorOccurrence(
             bounds: entry.bounds,
           }))
       : externalExclusions
-          .filter((exclusion) => exclusion.anchorOccurrenceId !== occurrenceId)
+          // Page-owned prescan registers this paragraph's own anchors on the
+          // page before the paragraph lays out. They are same-paragraph
+          // siblings, not different-paragraph blockers, so the compatibility
+          // policy leaves them to overlap as allowOverlap=true permits.
+          .filter((exclusion) => exclusion.anchorOccurrenceId === undefined
+            || !paragraphOccurrenceIds.has(exclusion.anchorOccurrenceId))
           .map((exclusion) => ({
             occurrenceId: exclusion.anchorOccurrenceId ?? exclusion.id,
             bounds: exclusion.bounds,
