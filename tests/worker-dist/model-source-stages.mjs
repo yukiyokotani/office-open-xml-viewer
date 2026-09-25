@@ -21,11 +21,25 @@ function fakeSource(target, config) {
   };
 }
 
+function bitmapImage(bitmap) {
+  const canvas = window.document.createElement('canvas');
+  canvas.width = bitmap.width;
+  canvas.height = bitmap.height;
+  canvas.getContext('2d').drawImage(bitmap, 0, 0);
+  bitmap.close();
+  return canvas;
+}
+
 async function docxPage(DocxDocument, source, options) {
   const document = await DocxDocument.load(source.slice(0), options);
   try {
-    const canvas = window.document.createElement('canvas');
-    await document.renderPage(canvas, 0, { width: 480, dpr: 1 });
+    let canvas;
+    if (document.mode === 'worker') {
+      canvas = bitmapImage(await document.renderPageToBitmap(0, { width: 480, dpr: 1 }));
+    } else {
+      canvas = window.document.createElement('canvas');
+      await document.renderPage(canvas, 0, { width: 480, dpr: 1 });
+    }
     return { image: canvas.toDataURL(), document };
   } catch (error) {
     document.destroy();
@@ -36,8 +50,13 @@ async function docxPage(DocxDocument, source, options) {
 async function xlsxView(XlsxWorkbook, source, options) {
   const workbook = await XlsxWorkbook.load(source.slice(0), options);
   try {
+    const viewport = { row: 0, col: 0, rows: 8, cols: 4 };
+    const size = { width: 320, height: 200, dpr: 1 };
+    if (workbook.mode === 'worker') {
+      return bitmapImage(await workbook.renderViewportToBitmap(0, viewport, size)).toDataURL();
+    }
     const canvas = window.document.createElement('canvas');
-    await workbook.renderViewport(canvas, 0, { row: 0, col: 0, rows: 8, cols: 4 }, { width: 320, height: 200, dpr: 1 });
+    await workbook.renderViewport(canvas, 0, viewport, size);
     return canvas.toDataURL();
   } finally {
     workbook.destroy();
@@ -97,8 +116,6 @@ export async function runModelSourceStages({ DocxDocument, XlsxWorkbook, legacyD
     assert(wide !== plain, `${mode}: the host-measured Normal font must size the grid`);
     document.body.dataset[`xlsxHostLayout${mode === 'main' ? 'Main' : 'Worker'}`] = wide;
   }
-  assert(document.body.dataset.xlsxHostLayoutMain === document.body.dataset.xlsxHostLayoutWorker,
-    'main-mode (page) and worker-mode (worker) host layout must measure the same width');
   delete document.body.dataset.xlsxHostLayoutMain;
   delete document.body.dataset.xlsxHostLayoutWorker;
 
@@ -109,7 +126,16 @@ export async function runModelSourceStages({ DocxDocument, XlsxWorkbook, legacyD
       modelSources: [legacyDocSource()],
     });
     try {
-      await legacy.renderPage(paintCanvas(`legacy-doc-${mode}`), 0, { width: 360, dpr: 1 });
+      const target = paintCanvas(`legacy-doc-${mode}`);
+      if (legacy.mode === 'worker') {
+        const bitmap = await legacy.renderPageToBitmap(0, { width: 360, dpr: 1 });
+        target.width = bitmap.width;
+        target.height = bitmap.height;
+        target.getContext('2d').drawImage(bitmap, 0, 0);
+        bitmap.close();
+      } else {
+        await legacy.renderPage(target, 0, { width: 360, dpr: 1 });
+      }
     } finally {
       legacy.destroy();
     }

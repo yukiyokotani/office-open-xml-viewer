@@ -356,11 +356,14 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
       // tracked-changes or explicit-date load no longer reports a page count
       // belonging to a pagination nobody is going to paint.
       // One precedence for every source: the caller's explicit choice, else the
-      // model source's own view default, else the renderer default (final view).
+      // model source's own view default, else the renderer default (final
+      // view). The parse request is this worker's own structured clone, so the
+      // resolved view is recorded on it for every later use in this load.
+      req.showTrackedChanges ??= viewDefaults.showTrackedChanges;
       const layoutOptions = normalizeLayoutOptions(
         req.currentDateMs,
         req.defaultCurrentDateMs,
-        req.showTrackedChanges ?? viewDefaults.showTrackedChanges,
+        req.showTrackedChanges,
       );
       const showTrackedChanges = layoutOptions.showTrackedChanges === true;
       // Progressive layout: publish the opening pages long before the whole

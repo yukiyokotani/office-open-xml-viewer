@@ -2,6 +2,8 @@ import { readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { build } from 'vite';
+// Node strips the fixture module's type annotations; it has no imports.
+import { buildDocFixture } from '../packages/legacy-converter/src/test-fixtures.ts';
 
 const root = resolve(new URL('..', import.meta.url).pathname);
 const outDir = join(tmpdir(), 'ooxml-worker-consumer-dist');
@@ -63,99 +65,6 @@ function storedZip(entries) {
   return Buffer.concat([...locals, ...central, end]);
 }
 
-/**
- * A minimal self-authored Word 97 document: one Unicode piece in the main
- * story ([MS-DOC] 2.5.1 FIB with the canonical csw/cslw/cbRgFcLcb counts,
- * 2.9.38 Clx with one Pcd) in an [MS-CFB] container whose streams are root
- * children. It proves that a consumer bundle keeps the legacy DOC source
- * module and its WASM loadable by URL.
- */
-function legacyDocFixture(text) {
-  const units = [...text].map((character) => character.charCodeAt(0));
-  const textOffset = 0x400;
-  const word = Buffer.alloc(Math.max(4096, textOffset + units.length * 2));
-  word.writeUInt16LE(0xa5ec, 0);
-  word.writeUInt16LE(0x00c1, 2);
-  word.writeUInt16LE(0x000e, 32);
-  word.writeUInt16LE(0x0016, 62);
-  word.writeUInt16LE(0x005d, 152);
-  word.writeUInt32LE(units.length, 0x4c);
-  units.forEach((unit, index) => word.writeUInt16LE(unit, textOffset + index * 2));
-  const clx = Buffer.alloc(1 + 4 + 8 + 8);
-  clx[0] = 0x02;
-  clx.writeUInt32LE(16, 1);
-  clx.writeUInt32LE(0, 5);
-  clx.writeUInt32LE(units.length, 9);
-  clx.writeUInt16LE(0, 13);
-  clx.writeUInt32LE(textOffset, 15);
-  clx.writeUInt16LE(0, 19);
-  word.writeUInt32LE(0, 0x1a2);
-  word.writeUInt32LE(clx.length, 0x1a6);
-  const table = Buffer.alloc(4096);
-  clx.copy(table);
-  const streams = [['WordDocument', word], ['0Table', table]];
-  const sector = 512;
-  const sectors = streams.map(([, bytes]) => Math.ceil(bytes.length / sector));
-  const dataSectors = sectors.reduce((sum, count) => sum + count, 0);
-  const directory = dataSectors;
-  const fatSector = dataSectors + 1;
-  const output = Buffer.alloc(512 + (dataSectors + 2) * sector);
-  Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]).copy(output);
-  output.writeUInt16LE(0x003e, 24);
-  output.writeUInt16LE(3, 26);
-  output.writeUInt16LE(0xfffe, 28);
-  output.writeUInt16LE(9, 30);
-  output.writeUInt16LE(6, 32);
-  output.writeUInt32LE(1, 44);
-  output.writeUInt32LE(directory, 48);
-  output.writeUInt32LE(4096, 56);
-  output.writeUInt32LE(0xfffffffe, 60);
-  output.writeUInt32LE(0xfffffffe, 68);
-  for (let index = 0; index < 109; index++) {
-    output.writeUInt32LE(index === 0 ? fatSector : 0xffffffff, 76 + index * 4);
-  }
-  const fat = new Array(128).fill(0xffffffff);
-  let start = 0;
-  const entries = [];
-  streams.forEach(([name, bytes], index) => {
-    bytes.copy(output, 512 + start * sector);
-    for (let offset = 0; offset < sectors[index]; offset++) {
-      fat[start + offset] = offset + 1 === sectors[index] ? 0xfffffffe : start + offset + 1;
-    }
-    entries.push({ name, start, size: bytes.length });
-    start += sectors[index];
-  });
-  fat[directory] = 0xfffffffe;
-  fat[fatSector] = 0xfffffffd;
-  fat.forEach((value, index) => output.writeUInt32LE(value, 512 + fatSector * sector + index * 4));
-  const entry = (index, name, type, first, size) => {
-    const offset = 512 + directory * sector + index * 128;
-    [...name].forEach((character, position) => output.writeUInt16LE(character.charCodeAt(0), offset + position * 2));
-    output.writeUInt16LE((name.length + 1) * 2, offset + 64);
-    output[offset + 66] = type;
-    output[offset + 67] = 1;
-    output.writeUInt32LE(0xffffffff, offset + 68);
-    output.writeUInt32LE(0xffffffff, offset + 72);
-    output.writeUInt32LE(0xffffffff, offset + 76);
-    output.writeUInt32LE(first, offset + 116);
-    output.writeUInt32LE(size, offset + 120);
-    return offset;
-  };
-  const root = entry(0, 'Root Entry', 5, 0xfffffffe, 0);
-  output.writeUInt32LE(1, root + 76);
-  entries.forEach(({ name, start: first, size }, index) => {
-    const offset = entry(index + 1, name, 2, first, size);
-    if (index + 1 < entries.length) output.writeUInt32LE(index + 2, offset + 72);
-  });
-  for (let index = entries.length + 1; index < 4; index++) {
-    const offset = 512 + directory * sector + index * 128;
-    output.writeUInt32LE(0xffffffff, offset + 68);
-    output.writeUInt32LE(0xffffffff, offset + 72);
-    output.writeUInt32LE(0xffffffff, offset + 76);
-  }
-  return output;
-}
-
 await build({
   configFile: false,
   root: resolve(root, 'tests/worker-dist/consumer'),
@@ -209,7 +118,10 @@ writeFileSync(join(outDir, 'equation.docx'), storedZip([
     </w:document>`],
 ]));
 
-writeFileSync(join(outDir, 'legacy.doc'), legacyDocFixture('Legacy worker source\rSecond paragraph\r'));
+// The legacy readers' own synthetic Word 97 fixture (canonical FIB, one
+// Unicode piece, root-linked CFB streams): it proves that a consumer bundle
+// keeps the legacy DOC source module and its WASM loadable by URL.
+writeFileSync(join(outDir, 'legacy.doc'), buildDocFixture({ text: 'Legacy worker source\rSecond paragraph\r' }));
 
 // A tracked insertion and deletion make the final and markup views differ, so a
 // model source's view default is observable in the rendered page.
