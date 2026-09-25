@@ -982,10 +982,12 @@ export interface ChartModel {
    *  gets the reserved band. null = use default layout. */
   legendManualLayout?: LegendManualLayout | null;
   /**
-   * `<c:valAx><c:numFmt@formatCode>` — format code applied to value-axis tick
-   * labels (ECMA-376 §21.2.2.21). null = plain numeric formatting.
+   * Effective value-axis tick format after source linking is resolved.
+   * null = plain numeric formatting.
    */
   valAxisFormatCode?: string | null;
+  /** Authored axis code/linkage, retained apart from the effective tick code. */
+  valAxisNumberFormat?: ChartAxisNumberFormat | null;
   /** `<c:valAx><c:dispUnits>` display-only divisor and optional label. Series
    * values and plot geometry stay in their authored units. */
   valAxisDisplayUnits?: ChartDisplayUnits | null;
@@ -1193,10 +1195,11 @@ export interface ChartModel {
   /** A direct `<c:valAx><c:spPr><a:ln>` paint was authored. */
   valAxisLinePaintAuthored?: boolean | null;
   /**
-   * `<c:catAx><c:numFmt@formatCode>` (or scatter X-axis valAx). When set,
-   * the renderer formats X-axis tick labels with this code (e.g. dates).
+   * Effective category-axis tick format (or scatter X-axis valAx).
    */
   catAxisFormatCode?: string | null;
+  /** Authored axis code/linkage, retained apart from the effective tick code. */
+  catAxisNumberFormat?: ChartAxisNumberFormat | null;
   /**
    * `<c:catAx><c:scaling><c:min/max>` — explicit X-axis range. Used by
    * scatter / bubble charts whose X axis is numeric. null = derive from
@@ -1943,6 +1946,13 @@ export interface ChartexHistogramBinning {
   overflow?: number | null;
 }
 
+/** Authored axis format, separate from the effective tick format. */
+export interface ChartAxisNumberFormat {
+  authoredCode: string;
+  /** Omission means true per ECMA-376 §21.2.2.121. */
+  sourceLinked?: boolean | null;
+}
+
 /**
  * A secondary value axis (combo charts). Mirrors the primary value-axis
  * properties but lives in its own object so the flat primary-axis fields stay
@@ -1963,8 +1973,10 @@ export interface SecondaryValueAxis {
   title: string | null;
   /** `<c:delete val="1"/>` — hide labels/ticks entirely. */
   hidden: boolean;
-  /** `<c:numFmt formatCode>` for tick labels. */
+  /** Effective tick format after source linking is resolved. */
   formatCode?: string | null;
+  /** Authored axis code/linkage, retained apart from the effective tick code. */
+  numberFormat?: ChartAxisNumberFormat | null;
   /** `<c:dispUnits>` for this auxiliary value axis. */
   displayUnits?: ChartDisplayUnits | null;
   /** `<c:txPr>…<a:solidFill>` tick-label color (hex without '#'). */

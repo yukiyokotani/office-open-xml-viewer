@@ -63,6 +63,7 @@ export type {
   ChartThreeDSeriesAxis,
   ChartDisplayUnits,
   ChartDisplayUnitsLabel,
+  ChartAxisNumberFormat,
   ChartExElementStyle,
   ChartLineDashSegment,
   ChartexHistogramBinning,

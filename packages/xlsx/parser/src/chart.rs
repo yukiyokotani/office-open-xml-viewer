@@ -1757,6 +1757,188 @@ mod worksheet_reference_tests {
     }
 
     #[test]
+    fn linked_value_axis_uses_worksheet_format_instead_of_chart_cache() {
+        let base = chart_xml(true)
+            .replace("<c:numCache>", "<c:numCache><c:formatCode>0.00</c:formatCode>")
+            .replace(
+            "<c:valAx><c:axId val=\"100\"/><c:axPos val=\"l\"/></c:valAx>",
+            "<c:valAx><c:axId val=\"100\"/><c:axPos val=\"l\"/><c:numFmt formatCode=\"0.00\" sourceLinked=\"1\"/></c:valAx>",
+            );
+        let linked = load_model(&base);
+        assert_eq!(linked.val_axis_format_code.as_deref(), Some("#,##0"));
+        assert_eq!(
+            linked
+                .val_axis_number_format
+                .as_ref()
+                .map(|format| (format.authored_code.as_str(), format.source_linked,)),
+            Some(("0.00", Some(true))),
+        );
+        let unlinked = base.replace("sourceLinked=\"1\"", "sourceLinked=\"0\"");
+        let unlinked = load_model(&unlinked);
+        assert_eq!(unlinked.val_axis_format_code.as_deref(), Some("0.00"));
+        assert_eq!(
+            unlinked.val_axis_number_format.unwrap().source_linked,
+            Some(false),
+        );
+        let default_linked = base.replace(" sourceLinked=\"1\"", "");
+        let default_linked = load_model(&default_linked);
+        assert_eq!(
+            default_linked.val_axis_format_code.as_deref(),
+            Some("#,##0")
+        );
+        assert_eq!(
+            default_linked.val_axis_number_format.unwrap().source_linked,
+            None,
+        );
+    }
+
+    #[test]
+    fn linked_secondary_axis_uses_its_own_series_source() {
+        let secondary_group = r#"<c:lineChart><c:ser><c:idx val="1"/><c:order val="1"/><c:cat><c:numRef><c:f>'التقرير'!$C$2:$C$4</c:f></c:numRef></c:cat><c:val><c:numRef><c:f>'التقرير'!$D$2:$D$4</c:f></c:numRef></c:val></c:ser><c:axId val="11"/><c:axId val="101"/></c:lineChart>"#;
+        let xml = chart_xml(false)
+            .replace("</c:barChart>", &format!("</c:barChart>{secondary_group}"))
+            .replace(
+                "<c:valAx><c:axId val=\"100\"/><c:axPos val=\"l\"/></c:valAx>",
+                "<c:valAx><c:axId val=\"100\"/><c:axPos val=\"l\"/><c:numFmt formatCode=\"0.00\" sourceLinked=\"1\"/></c:valAx><c:catAx><c:axId val=\"11\"/><c:axPos val=\"t\"/><c:numFmt formatCode=\"0.00\" sourceLinked=\"1\"/></c:catAx><c:valAx><c:axId val=\"101\"/><c:axPos val=\"r\"/><c:numFmt formatCode=\"0.00\" sourceLinked=\"1\"/></c:valAx>",
+            );
+        let chart = load_model(&xml);
+        assert_eq!(chart.val_axis_format_code.as_deref(), Some("#,##0"));
+        let secondary = chart.secondary_val_axis.expect("secondary value axis");
+        assert_eq!(secondary.format_code, None);
+        assert_eq!(
+            secondary
+                .number_format
+                .map(|format| (format.authored_code, format.source_linked,)),
+            Some(("0.00".to_string(), Some(true))),
+        );
+        assert_eq!(
+            chart
+                .secondary_cat_axis
+                .and_then(|axis| axis.format_code)
+                .as_deref(),
+            Some("#,##0"),
+        );
+    }
+
+    #[test]
+    fn linked_axis_uses_first_series_when_source_formats_differ() {
+        let second = r#"<c:ser><c:idx val="1"/><c:order val="1"/><c:cat><c:strRef><c:f>'التقرير'!$A$2:$A$4</c:f></c:strRef></c:cat><c:val><c:numRef><c:f>'التقرير'!$D$2:$D$4</c:f></c:numRef></c:val></c:ser>"#;
+        let with_second = |first_formula: &str, second_series: &str| {
+            chart_xml(false)
+                .replace("$C$2:$C$4", first_formula)
+                .replace(
+                    "<c:axId val=\"10\"/><c:axId val=\"100\"/>",
+                    &format!("{second_series}<c:axId val=\"10\"/><c:axId val=\"100\"/>"),
+                )
+                .replace(
+                    "<c:valAx><c:axId val=\"100\"/><c:axPos val=\"l\"/></c:valAx>",
+                    "<c:valAx><c:axId val=\"100\"/><c:axPos val=\"l\"/><c:numFmt formatCode=\"0.00\" sourceLinked=\"1\"/></c:valAx>",
+                )
+        };
+        assert_eq!(
+            load_model(&with_second("$C$2:$C$4", second))
+                .val_axis_format_code
+                .as_deref(),
+            Some("#,##0"),
+        );
+        let reversed_order_second = second.replace(
+            "<c:idx val=\"1\"/><c:order val=\"1\"/>",
+            "<c:idx val=\"1\"/><c:order val=\"0\"/>",
+        );
+        let reversed_order = with_second("$C$2:$C$4", &reversed_order_second).replace(
+            "<c:idx val=\"0\"/><c:order val=\"0\"/>",
+            "<c:idx val=\"0\"/><c:order val=\"1\"/>",
+        );
+        assert_eq!(
+            load_model(&reversed_order).val_axis_format_code.as_deref(),
+            Some("#,##0"),
+        );
+        let second_formatted = second.replace("$D$2:$D$4", "$C$2:$C$4");
+        assert_eq!(
+            load_model(&with_second("$D$2:$D$4", &second_formatted)).val_axis_format_code,
+            None,
+        );
+    }
+
+    #[test]
+    fn linked_category_and_date_axes_resolve_numeric_source_style() {
+        for axis_tag in ["catAx", "dateAx"] {
+            let xml = format!(
+                r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:lineChart><c:ser><c:idx val="0"/><c:order val="0"/><c:cat><c:numRef><c:f>'التقرير'!$C$2:$C$4</c:f></c:numRef></c:cat><c:val><c:numRef><c:f>'التقرير'!$D$2:$D$4</c:f></c:numRef></c:val></c:ser><c:axId val="10"/><c:axId val="100"/></c:lineChart><c:{axis_tag}><c:axId val="10"/><c:axPos val="b"/><c:numFmt formatCode="0.00" sourceLinked="1"/></c:{axis_tag}><c:valAx><c:axId val="100"/><c:axPos val="l"/></c:valAx></c:plotArea></c:chart></c:chartSpace>"#,
+            );
+            assert_eq!(
+                load_model(&xml).cat_axis_format_code.as_deref(),
+                Some("#,##0"),
+                "{axis_tag}",
+            );
+        }
+    }
+
+    #[test]
+    fn linked_scatter_and_bubble_axes_follow_x_and_y_sources() {
+        for kind in ["scatterChart", "bubbleChart"] {
+            let bubble_size = if kind == "bubbleChart" {
+                r#"<c:bubbleSize><c:numRef><c:f>'التقرير'!$E$2:$E$4</c:f></c:numRef></c:bubbleSize>"#
+            } else {
+                ""
+            };
+            let xml = format!(
+                r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:{kind}><c:ser><c:idx val="0"/><c:order val="0"/><c:xVal><c:numRef><c:f>'التقرير'!$C$2:$C$4</c:f></c:numRef></c:xVal><c:yVal><c:numRef><c:f>'التقرير'!$D$2:$D$4</c:f></c:numRef></c:yVal>{bubble_size}</c:ser><c:axId val="10"/><c:axId val="100"/></c:{kind}><c:valAx><c:axId val="10"/><c:axPos val="b"/><c:numFmt formatCode="0.00" sourceLinked="1"/></c:valAx><c:valAx><c:axId val="100"/><c:axPos val="l"/><c:numFmt formatCode="0.00" sourceLinked="1"/></c:valAx></c:plotArea></c:chart></c:chartSpace>"#,
+            );
+            let chart = load_model(&xml);
+            assert_eq!(
+                chart.cat_axis_format_code.as_deref(),
+                Some("#,##0"),
+                "{kind}"
+            );
+            assert_eq!(chart.val_axis_format_code, None, "{kind}");
+        }
+    }
+
+    #[test]
+    fn linked_axis_uses_first_plot_group_when_chart_kinds_share_it() {
+        let group = |kind: &str, formula: &str, index: usize| {
+            format!(
+                r#"<c:{kind}><c:ser><c:idx val="{index}"/><c:order val="{index}"/><c:val><c:numRef><c:f>'التقرير'!${formula}$2:${formula}$4</c:f></c:numRef></c:val></c:ser><c:axId val="10"/><c:axId val="100"/></c:{kind}>"#,
+            )
+        };
+        let chart = |first: &str, second: &str| {
+            format!(
+                r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea>{first}{second}<c:catAx><c:axId val="10"/><c:axPos val="b"/></c:catAx><c:valAx><c:axId val="100"/><c:axPos val="l"/><c:numFmt formatCode="0.00" sourceLinked="1"/></c:valAx></c:plotArea></c:chart></c:chartSpace>"#,
+            )
+        };
+        let general_first = chart(&group("lineChart", "D", 0), &group("barChart", "C", 1));
+        assert_eq!(load_model(&general_first).val_axis_format_code, None);
+        let formatted_first = chart(&group("barChart", "C", 0), &group("lineChart", "D", 1));
+        assert_eq!(
+            load_model(&formatted_first).val_axis_format_code.as_deref(),
+            Some("#,##0"),
+        );
+    }
+
+    #[test]
+    fn linked_axis_uses_first_literal_series_instead_of_later_worksheet_source() {
+        let chart = |literal_code: &str, linked: bool| {
+            let linkage = if linked { "1" } else { "0" };
+            format!(
+                r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:lineChart><c:ser><c:idx val="0"/><c:order val="0"/><c:val><c:numLit>{literal_code}<c:ptCount val="2"/><c:pt idx="0"><c:v>1</c:v></c:pt><c:pt idx="1"><c:v>2</c:v></c:pt></c:numLit></c:val></c:ser><c:ser><c:idx val="1"/><c:order val="1"/><c:val><c:numRef><c:f>'التقرير'!$C$2:$C$4</c:f></c:numRef></c:val></c:ser><c:axId val="10"/><c:axId val="100"/></c:lineChart><c:catAx><c:axId val="10"/><c:axPos val="b"/></c:catAx><c:valAx><c:axId val="100"/><c:axPos val="l"/><c:numFmt formatCode="0.00" sourceLinked="{linkage}"/></c:valAx></c:plotArea></c:chart></c:chartSpace>"#,
+            )
+        };
+        let one_decimal = chart("<c:formatCode>0.0</c:formatCode>", true);
+        assert_eq!(
+            load_model(&one_decimal).val_axis_format_code.as_deref(),
+            Some("0.0"),
+        );
+        let no_literal_format = chart("", true);
+        assert_eq!(load_model(&no_literal_format).val_axis_format_code, None);
+        let unlinked = chart("<c:formatCode>0.0</c:formatCode>", false);
+        assert_eq!(
+            load_model(&unlinked).val_axis_format_code.as_deref(),
+            Some("0.00")
+        );
+    }
+
+    #[test]
     fn authored_chart_caches_take_precedence_over_live_cells() {
         let xml = chart_xml(true);
         let chart = load_model(&xml);

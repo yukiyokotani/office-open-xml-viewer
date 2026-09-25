@@ -90,6 +90,18 @@ mod tests {
     }
 
     #[test]
+    fn word_chart_keeps_authored_axis_code_without_worksheet_resolver() {
+        let chart = word_chart(
+            "",
+            &format!(
+                r#"{}<c:valAx><c:axId val="100"/><c:axPos val="l"/><c:numFmt formatCode="0.00" sourceLinked="1"/></c:valAx>"#,
+                bar_group("col"),
+            ),
+        );
+        assert_eq!(chart.val_axis_format_code.as_deref(), Some("0.00"));
+    }
+
+    #[test]
     fn theme_less_package_keeps_default_numeric_role_paint() {
         let xml = r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:style val="2"/><c:chart><c:plotArea><c:barChart><c:barDir val="col"/><c:ser><c:idx val="0"/><c:order val="0"/><c:val><c:numLit><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#;
         let document = roxmltree::Document::parse(xml).unwrap();

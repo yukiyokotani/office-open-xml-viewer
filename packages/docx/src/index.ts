@@ -116,6 +116,7 @@ export type {
   SolidFill,
   ChartDisplayUnits,
   ChartDisplayUnitsLabel,
+  ChartAxisNumberFormat,
   SecondaryValueAxis,
   SrcRect,
   TextSelectionContextOptions,
