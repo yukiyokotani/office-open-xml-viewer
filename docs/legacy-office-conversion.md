@@ -170,6 +170,11 @@ linked objects and ActiveX controls, pictures without a supported BLIP, and
 pattern, texture or non-stretched picture fills are rejected instead of being
 drawn without them.
 
+PowerPoint displays GIF data that a producer stored in a PNG picture slot,
+so the direct PPT reader identifies such a slot by its GIF87a/GIF89a
+signature and emits it as `image/gif`; other mismatched content stays
+rejected.
+
 Picture colour settings follow how PowerPoint itself reads the binary
 properties when it saves a binary deck as PPTX: "Black and White" becomes
 DrawingML `grayscl` plus `biLevel` at 50%, and a transparent colour becomes a
