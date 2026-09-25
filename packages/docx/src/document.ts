@@ -12,7 +12,11 @@ import {
   defaultDpr,
   dropSvgImageCache,
   dropDecodedBitmapCache,
+  resolveOoxmlContainer,
   toArrayBuffer,
+  beginModelSourceLoad,
+  selectModelSource,
+  type AdmittedModelSourceLoad,
   type LoadOptions as CoreLoadOptions,
   type ProgressiveLayoutPartial,
   type ProgressiveLayoutProgress,
@@ -23,8 +27,6 @@ import {
   type OoxmlResourceMetrics,
   workerRendererDescriptors,
 } from '@silurus/ooxml-core';
-import { resolveDocDocumentInput } from '@silurus/ooxml-core/internal/legacy-office-conversion';
-import type { LegacyDocDirectSourceDescriptor } from '@silurus/ooxml-core/internal/legacy-doc-source';
 import {
   deserializeWorkerError,
   disposeRejectedLoad,
@@ -260,9 +262,10 @@ interface WorkerProgressiveLoad {
   readonly onPartial?: LoadOptions['onLayoutPartial'];
   readonly onComplete?: LoadOptions['onLayoutComplete'];
   readonly onProgress?: LoadOptions['onLayoutProgress'];
-  /** The immutable view selected by the parse request. Later publications from
-   *  this load may update host geometry only while this view remains active. */
-  readonly layoutOptions: LayoutOptions;
+  /** The view this load paginates: the parse request's view, replaced once by
+   *  the worker's effective view before the first publication. Later
+   *  publications may update host geometry only while this view is active. */
+  layoutOptions: LayoutOptions;
   readonly abort: AbortController;
   /** Settles when the worker publishes its first prefix, or — when it publishes
    *  none — when the authoritative `parsedMeta` lands. Either way it is what
@@ -291,17 +294,21 @@ function sameLayoutView(
     && (left.showTrackedChanges === true) === (right.showTrackedChanges === true);
 }
 
+/** Parse-request fields for an application-selected model source. */
+function modelSourceFields(
+  load: AdmittedModelSourceLoad | undefined,
+): { source?: AdmittedModelSourceLoad['module']; sourceTransfer?: readonly Transferable[] } {
+  if (!load) return {};
+  return load.transfer.length > 0
+    ? { source: load.module, sourceTransfer: load.transfer }
+    : { source: load.module };
+}
+
 function deferred<T>(): Deferred<T> {
   let resolve!: (value: T) => void;
   let reject!: (error: unknown) => void;
   const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
   return { promise, resolve, reject };
-}
-
-function nativeDocAbortError(): Error {
-  const error = new Error('legacy DOC source was aborted');
-  error.name = 'AbortError';
-  return error;
 }
 
 /** Identity-stable empties for the two anchor projections.
@@ -372,8 +379,9 @@ export class DocxDocument {
    * order; only this generation may atomically install its variant + metadata. */
   private _layoutViewGeneration = 0;
   private _mode: 'main' | 'worker' = 'main';
-  private _sourceKind: 'ooxml' | 'legacy-doc' = 'ooxml';
-  private _nativeDocSignalCleanup: () => void = () => undefined;
+  /** The caller's own tracked-change choice (tri-state). A model source's view
+   * default applies only while this is undefined. */
+  private _callerShowTrackedChanges: boolean | undefined;
   private _threeD: ChartThreeDRenderer | undefined;
   private _regionMap: ChartRegionMapRenderer | undefined;
   private _chartEx: ChartExRenderer | undefined;
@@ -476,17 +484,19 @@ export class DocxDocument {
     } else {
       buffer = source;
     }
+    // An application-supplied model source claims its input from the raw bytes
+    // before OOXML container resolution; without `modelSources` nothing here
+    // runs and the OOXML path below is unchanged.
+    let sourceLoad: AdmittedModelSourceLoad | undefined;
+    if (opts.modelSources !== undefined) {
+      const selected = selectModelSource(opts.modelSources, 'docx', new Uint8Array(buffer));
+      if (selected) sourceLoad = beginModelSourceLoad(selected, 'docx');
+    }
+    try {
     // Resolve the container on the main thread before spinning up the worker.
     // Container errors remain typed OoxmlError instances here; `instanceof`
     // would not survive the worker boundary.
-    const resolvedInput = await resolveDocDocumentInput(
-      buffer,
-      opts.legacyConversion,
-      opts.password,
-    );
-    buffer = toArrayBuffer(resolvedInput.bytes);
-    const nativeSource = resolvedInput.kind === 'legacy-doc' ? resolvedInput.source : undefined;
-    const nativeSignal = resolvedInput.kind === 'legacy-doc' ? resolvedInput.signal : undefined;
+    if (!sourceLoad) buffer = toArrayBuffer(await resolveOoxmlContainer(buffer, opts.password));
     metrics.setSourceBytes(buffer.byteLength);
     metrics.checkpoint('container ready');
     // The render worker is reachable only through this dynamic import, so
@@ -500,9 +510,9 @@ export class DocxDocument {
     let doc: DocxDocument | undefined;
     try {
       doc = new DocxDocument(worker, mode, defaultCurrentDateMs, opts.wasmUrl);
-      doc._sourceKind = resolvedInput.kind;
       doc._metrics = metrics;
       doc._cjkFallback = cjkFallback;
+      doc._callerShowTrackedChanges = opts.showTrackedChanges;
       // The variant the caller will actually render, recorded for BOTH render
       // modes and recorded BEFORE the parse: geometry accessors and the
       // per-call option fill-in (`_withActiveView`) read it, the wire options
@@ -520,7 +530,7 @@ export class DocxDocument {
       // In worker mode the worker preloads fonts before paginating (pagination
       // measures text), so the flag is forwarded; in main mode fonts are loaded
       // here after parse, before the lazy first pagination.
-      await doc._bindNativeDocSignal(() => doc!._parse(
+      await doc._parse(
         buffer,
         resourceOptions.policy,
         mode === 'worker' ? !!opts.useGoogleFonts : false,
@@ -539,26 +549,8 @@ export class DocxDocument {
               settled: false,
             }
           : undefined,
-        nativeSource,
-      ), nativeSignal);
-      doc._throwIfNativeDocAborted(nativeSignal);
-      // Legacy DOC only: when the caller did not choose a tracked-change view,
-      // follow the source's own print-markup setting as reported by the
-      // legacy source. OOXML inputs never take this branch, and an
-      // explicit `showTrackedChanges` always wins.
-      if (resolvedInput.kind === 'legacy-doc' && opts.showTrackedChanges === undefined) {
-        const markup = await doc._bindNativeDocSignal(
-          () => doc!._sourceRevisionMarkup(opts.workerTimeoutMs),
-          nativeSignal,
-        );
-        doc._throwIfNativeDocAborted(nativeSignal);
-        if (markup) {
-          await doc.setLayoutView({
-            showTrackedChanges: true,
-            currentDate: loadRuntime.activeLayoutOptions?.currentDateMs ?? loadRuntime.defaultCurrentDateMs,
-          });
-        }
-      }
+        sourceLoad,
+      );
       if (mode === 'worker' && doc._mode === 'main') {
         metrics.setMode('main');
         console.warn(
@@ -602,22 +594,18 @@ export class DocxDocument {
       let embeddedRoutes: Awaited<ReturnType<typeof loadEmbeddedFonts>>['routes'] | undefined;
       if (doc._mode === 'main' && doc._document?.embeddedFonts?.length) {
         const loadingDocument = doc;
-        const loadedEmbedded = await doc._awaitNativeDoc(loadEmbeddedFonts(
+        const loadedEmbedded = await loadEmbeddedFonts(
           doc._document,
           (p) => loadingDocument.getFontBytes(p),
-        ), nativeSignal, (late) => unregisterEmbeddedFonts(late.faces));
+        );
         doc._embeddedFontFaces = loadedEmbedded.faces;
         embeddedMetrics = loadedEmbedded.metrics;
         embeddedRoutes = loadedEmbedded.routes;
       }
       const officeFonts = doc._mode === 'main' && doc._document
-        ? await doc._awaitNativeDoc(
-            loadOfficeFontFallbacks(docxOfficeFontFallbackRequests(doc._document).filter((request) =>
-              !embeddedRoutes?.some((route) => route.requestedFamily.toLowerCase() === request.family.toLowerCase()
-                && route.weight === (request.weight ?? 400) && route.style === (request.style ?? 'normal')))),
-            nativeSignal,
-            (late) => unloadOfficeFontFallbacks(late.faces),
-          )
+        ? await loadOfficeFontFallbacks(docxOfficeFontFallbackRequests(doc._document).filter((request) =>
+            !embeddedRoutes?.some((route) => route.requestedFamily.toLowerCase() === request.family.toLowerCase()
+              && route.weight === (request.weight ?? 400) && route.style === (request.style ?? 'normal'))))
         : { faces: [], routes: {} };
       doc._officeFontFaces = officeFonts.faces;
       if (doc._mode === 'main' && opts.useGoogleFonts && doc._document) {
@@ -625,11 +613,7 @@ export class DocxDocument {
         // avoid the optional Google Fonts substitution for the same request.
         const names = docxFontPreloadNames(doc._document, cjkFallback).filter((name) =>
           name?.toLowerCase() !== 'calibri' || !('calibri' in officeFonts.routes));
-        doc._googleFontFaces = await doc._awaitNativeDoc(
-          preloadGoogleFonts(names, DOCX_GOOGLE_FONTS),
-          nativeSignal,
-          unloadGoogleFonts,
-        );
+        doc._googleFontFaces = await preloadGoogleFonts(names, DOCX_GOOGLE_FONTS);
       }
       // Equations are converted + rasterized before pagination (which reads their
       // extents synchronously). Requires the opt-in `math` engine; without it,
@@ -637,10 +621,7 @@ export class DocxDocument {
       // mode performs the same preparation with the renderer's imported engine.
       let preparedMath;
       if (doc._mode === 'main' && opts.math && doc._document && documentHasMath(doc._document)) {
-        preparedMath = await doc._awaitNativeDoc(
-          prepareMathRuns(doc._document, opts.math),
-          nativeSignal,
-        );
+        preparedMath = await prepareMathRuns(doc._document, opts.math);
       }
       if (doc._mode === 'main' && doc._document && doc._source) {
         const layoutDocument = doc;
@@ -808,14 +789,14 @@ export class DocxDocument {
               'onLayoutComplete', opts.onLayoutComplete, layoutError,
             );
           });
-          await doc._awaitNativeDoc(firstPublication.promise, nativeSignal);
+          await firstPublication.promise;
         } else if (deferrable && (opts.sliceLayout || opts.onLayoutProgress)) {
-          const layout = await doc._awaitNativeDoc(layoutDocumentInputAsync(
+          const layout = await layoutDocumentInputAsync(
             doc._source.bodyLayoutInput,
             services,
             layoutOptions,
             scheduler,
-          ), nativeSignal);
+          );
           retained.layoutVariants.prime(layoutOptions, layout);
         } else {
           // Build the variant that will be rendered, not the default one.
@@ -826,16 +807,12 @@ export class DocxDocument {
       // after the parse response. Telemetry is strictly best-effort: a worker
       // failure or a silent worker may omit the newest counters, but must not
       // turn an otherwise successful load into a rejection or an endless wait.
-      if (doc._sourceKind === 'ooxml') {
-        await doc._resourceUsage(
-          opts.workerTimeoutMs ?? OOXML_RESOURCE_METRICS_PROBE_TIMEOUT_MS,
-        ).then(
-          (usage) => metrics.observeUsage(usage),
-          () => undefined,
-        );
-        doc._throwIfNativeDocAborted(nativeSignal);
-      }
-      doc._throwIfNativeDocAborted(nativeSignal);
+      await doc._resourceUsage(
+        opts.workerTimeoutMs ?? OOXML_RESOURCE_METRICS_PROBE_TIMEOUT_MS,
+      ).then(
+        (usage) => metrics.observeUsage(usage),
+        () => undefined,
+      );
       metrics.checkpoint('model and layout ready');
       metrics.succeed({ pages: doc.pageCount });
       return doc;
@@ -843,6 +820,9 @@ export class DocxDocument {
       const rejectedDocument = doc;
       disposeRejectedLoad(worker, rejectedDocument ? () => rejectedDocument.destroy() : undefined);
       throw error;
+    }
+    } finally {
+      sourceLoad?.release();
     }
     } catch (error) {
       metrics.fail(error);
@@ -858,7 +838,7 @@ export class DocxDocument {
     onUsage?: (usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => void,
     renderers?: WorkerRendererDescriptors,
     progressive?: WorkerProgressiveLoad,
-    nativeSource?: LegacyDocDirectSourceDescriptor,
+    sourceLoad?: AdmittedModelSourceLoad,
   ): Promise<void> {
     if (progressive) {
       await this._parseProgressively(
@@ -869,16 +849,16 @@ export class DocxDocument {
         onUsage,
         renderers,
         progressive,
-        nativeSource,
+        sourceLoad,
       );
       return;
     }
     const res = await this._bridge.request(
       (id) =>
         this._mode === 'worker'
-          ? ({ type: 'parse', id, data: buffer, resourcePolicy, ...(nativeSource ? { source: nativeSource } : {}), useGoogleFonts, cjkFallback: this._cjkFallback, defaultCurrentDateMs: documentLayoutRuntimeOf(this).defaultCurrentDateMs, ...this._parseViewFields(), renderers } satisfies RenderWorkerRequest)
-          : ({ type: 'parse', id, data: buffer, resourcePolicy, ...(nativeSource ? { source: nativeSource } : {}) } satisfies WorkerRequest),
-      [buffer],
+          ? ({ type: 'parse', id, data: buffer, resourcePolicy, ...modelSourceFields(sourceLoad), useGoogleFonts, cjkFallback: this._cjkFallback, defaultCurrentDateMs: documentLayoutRuntimeOf(this).defaultCurrentDateMs, ...this._parseViewFields(), renderers } satisfies RenderWorkerRequest)
+          : ({ type: 'parse', id, data: buffer, resourcePolicy, ...modelSourceFields(sourceLoad) } satisfies WorkerRequest),
+      [buffer, ...(sourceLoad?.transfer ?? [])],
       { timeoutMs },
     );
     if ('protocol' in res) {
@@ -887,6 +867,7 @@ export class DocxDocument {
     if (this._mode === 'worker') {
       if ('usage' in res && res.usage) onUsage?.(res.usage);
       if (res.type === 'mainThreadVerticalFallback') {
+        this._adoptSourceViewDefaults(res.viewDefaults);
         const adapted = await materializeDocumentPullAdapterSession(
           this._bridge.transport(isDocumentPullResponse),
           res,
@@ -897,10 +878,13 @@ export class DocxDocument {
         this._meta = null;
         this._mode = 'main';
       } else {
-        this._meta = (res as Extract<RenderWorkerResponse, { type: 'parsedMeta' }>).meta;
+        const parsed = res as Extract<RenderWorkerResponse, { type: 'parsedMeta' }>;
+        this._adoptWorkerView(parsed.showTrackedChanges);
+        this._meta = parsed.meta;
       }
     } else {
       const identity = res as Extract<WorkerResponse, { type: 'documentSessionOpened' }>;
+      this._adoptSourceViewDefaults(identity.viewDefaults);
       const adapted = await materializeDocumentPullAdapterSession(
         this._bridge.transport(isDocumentPullResponse),
         identity,
@@ -913,71 +897,6 @@ export class DocxDocument {
       this._meta?.comments ?? this._document?.comments ?? [],
       this._meta?.revisions ?? this._document?.revisions ?? [],
     );
-  }
-
-  private _bindNativeDocSignal<T>(start: () => Promise<T>, signal: AbortSignal | undefined): Promise<T> {
-    if (!signal) return start();
-    if (signal.aborted) return Promise.reject(nativeDocAbortError());
-    this._nativeDocSignalCleanup();
-    return new Promise<T>((resolve, reject) => {
-      let settled = false;
-      const cleanup = (): void => signal.removeEventListener('abort', onAbort);
-      const onAbort = (): void => {
-        this._nativeDocSignalCleanup();
-        try { this.destroy(); } catch { try { this._worker.terminate(); } catch {} }
-        if (!settled) reject(nativeDocAbortError());
-      };
-      this._nativeDocSignalCleanup = () => {
-        cleanup();
-        this._nativeDocSignalCleanup = () => undefined;
-      };
-      signal.addEventListener('abort', onAbort, { once: true });
-      const pending = start();
-      pending.then(
-        (value) => { settled = true; resolve(value); },
-        (error: unknown) => {
-          settled = true;
-          this._nativeDocSignalCleanup();
-          reject(error);
-        },
-      );
-      if (signal.aborted) onAbort();
-    });
-  }
-
-  private _throwIfNativeDocAborted(signal: AbortSignal | undefined): void {
-    if (signal?.aborted) throw nativeDocAbortError();
-  }
-
-  private _awaitNativeDoc<T>(
-    pending: Promise<T>,
-    signal: AbortSignal | undefined,
-    disposeLate?: (value: T) => void,
-  ): Promise<T> {
-    if (!signal) return pending;
-    return new Promise<T>((resolve, reject) => {
-      let aborted = signal.aborted;
-      const onAbort = (): void => {
-        aborted = true;
-        reject(nativeDocAbortError());
-      };
-      if (!aborted) signal.addEventListener('abort', onAbort, { once: true });
-      else reject(nativeDocAbortError());
-      pending.then(
-        (value) => {
-          signal.removeEventListener('abort', onAbort);
-          if (aborted) {
-            try { disposeLate?.(value); } catch {}
-            return;
-          }
-          resolve(value);
-        },
-        (error: unknown) => {
-          signal.removeEventListener('abort', onAbort);
-          if (!aborted) reject(error);
-        },
-      );
-    });
   }
 
   /**
@@ -1007,6 +926,10 @@ export class DocxDocument {
       return;
     }
     if (res.type !== 'layoutPartial' || !progressive) return;
+    // The worker chose the load's view before its first pagination (caller
+    // choice, else the model source's view default); adopt it before the first
+    // publication installs any geometry.
+    if (!progressive.published) this._adoptWorkerView(res.showTrackedChanges);
     // The worker continues its load-time variant after setLayoutView() builds a
     // different one. The original session may keep priming its own store entry,
     // but its pushes no longer own the host's synchronous geometry.
@@ -1207,8 +1130,37 @@ export class DocxDocument {
       ...(active.currentDateMs === runtime.defaultCurrentDateMs
         ? {}
         : { currentDateMs: active.currentDateMs }),
-      ...(active.showTrackedChanges === true ? { showTrackedChanges: true } : {}),
+      // Tri-state: an explicit caller choice (including `false`) is sent; an
+      // unchosen view is omitted so the worker can apply a model source's view
+      // default before its first pagination.
+      ...(this._callerShowTrackedChanges !== undefined || active.showTrackedChanges === true
+        ? { showTrackedChanges: active.showTrackedChanges === true }
+        : {}),
     };
+  }
+
+  /** Main-mode half of the view precedence: explicit caller option > model
+   *  source view default > renderer default. Runs before the first layout. */
+  private _adoptSourceViewDefaults(viewDefaults: { showTrackedChanges?: boolean } | undefined): void {
+    if (this._callerShowTrackedChanges !== undefined) return;
+    const preferred = viewDefaults?.showTrackedChanges;
+    if (preferred === undefined) return;
+    this._adoptWorkerView(preferred);
+  }
+
+  /** Record the effective tracked-change view before any geometry exists. */
+  private _adoptWorkerView(showTrackedChanges: boolean | undefined): void {
+    if (showTrackedChanges === undefined) return;
+    const runtime = documentLayoutRuntimeOf(this);
+    const active = runtime.activeLayoutOptions;
+    if (!active || (active.showTrackedChanges === true) === showTrackedChanges) return;
+    const next = normalizeLayoutOptions(
+      active.currentDateMs,
+      runtime.defaultCurrentDateMs,
+      showTrackedChanges,
+    );
+    runtime.activeLayoutOptions = next;
+    if (this._progressive) this._progressive.layoutOptions = next;
   }
 
   /**
@@ -1230,7 +1182,7 @@ export class DocxDocument {
     onUsage: ((usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => void) | undefined,
     renderers: WorkerRendererDescriptors | undefined,
     progressive: WorkerProgressiveLoad,
-    nativeSource: LegacyDocDirectSourceDescriptor | undefined,
+    sourceLoad: AdmittedModelSourceLoad | undefined,
   ): Promise<void> {
     this._progressive = progressive;
     this._layoutAbort = progressive.abort;
@@ -1243,7 +1195,7 @@ export class DocxDocument {
           id,
           data: buffer,
           resourcePolicy,
-          ...(nativeSource ? { source: nativeSource } : {}),
+          ...modelSourceFields(sourceLoad),
           useGoogleFonts,
           cjkFallback: this._cjkFallback,
           defaultCurrentDateMs: documentLayoutRuntimeOf(this).defaultCurrentDateMs,
@@ -1252,7 +1204,7 @@ export class DocxDocument {
           progressiveLayout: true,
         } satisfies RenderWorkerRequest;
       },
-      [buffer],
+      [buffer, ...(sourceLoad?.transfer ?? [])],
       { timeoutMs: false },
     );
     // Retained rather than awaited: once a publication resolves load(), a later
@@ -1274,6 +1226,7 @@ export class DocxDocument {
           progressive.settled = true;
           this._progressive = null;
           this._layoutAbort = null;
+          this._adoptSourceViewDefaults(res.viewDefaults);
           const adapted = await materializeDocumentPullAdapterSession(
             this._bridge.transport(isDocumentPullResponse),
             res,
@@ -1290,9 +1243,9 @@ export class DocxDocument {
           progressive.firstPublication.resolve();
           return;
         }
-        this._onAuthoritativeMeta(
-          (res as Extract<RenderWorkerResponse, { type: 'parsedMeta' }>).meta,
-        );
+        const parsedMeta = res as Extract<RenderWorkerResponse, { type: 'parsedMeta' }>;
+        if (!progressive.published) this._adoptWorkerView(parsedMeta.showTrackedChanges);
+        this._onAuthoritativeMeta(parsedMeta.meta);
       },
       (error: unknown) => {
         this._parseRequestId = null;
@@ -1315,7 +1268,6 @@ export class DocxDocument {
   }
 
   destroy(): void {
-    this._nativeDocSignalCleanup();
     // Stop background layout first: without this, a destroyed document's
     // remaining pagination kept consuming main-thread slices to completion for
     // a viewer that no longer exists.
@@ -1404,7 +1356,7 @@ export class DocxDocument {
 
   private async _resourceUsage(
     timeoutMs: number,
-  ): Promise<import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot> {
+  ): Promise<import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot | undefined> {
     const res = await this._bridge.request(
       (id) => ({ type: 'resourceUsage', id }) satisfies WorkerRequest,
       undefined,
@@ -1419,9 +1371,6 @@ export class DocxDocument {
   async getResourceMetrics(): Promise<OoxmlResourceMetrics> {
     const metrics = this._metrics;
     if (!metrics) throw new Error('Document not loaded');
-    if (this._sourceKind === 'legacy-doc') {
-      throw new Error('resource usage is unsupported for direct legacy DOC sources');
-    }
     return readLatestOoxmlResourceMetrics(metrics, (timeoutMs) => this._resourceUsage(timeoutMs));
   }
 
@@ -1444,17 +1393,6 @@ export class DocxDocument {
    * const doc = await DocxDocument.load(buffer);
    * const md = await doc.toMarkdown();
    */
-  /** Legacy DOC only: the source's own revision-markup view (see
-   * `WorkerDocumentSourceOwner.sourceRevisionMarkup`). */
-  private async _sourceRevisionMarkup(timeoutMs: number | undefined): Promise<boolean> {
-    const res = await this._bridge.request(
-      (id) => ({ type: 'sourceRevisionView', id }) satisfies WorkerRequest,
-      [],
-      { timeoutMs },
-    );
-    return (res as Extract<WorkerResponse, { type: 'sourceRevisionView' }>).markup === true;
-  }
-
   async toMarkdown(): Promise<string> {
     const res = await this._bridge.request(
       (id) => ({ type: 'toMarkdown', id }) satisfies WorkerRequest,

@@ -124,7 +124,6 @@ export interface InternalRunSlotMetadata {
   fontSizeCs?: number;
   boldCs?: boolean;
   italicCs?: boolean;
-  langDefault?: string;
   langBidi?: string;
   langEastAsia?: string;
 }
@@ -1337,7 +1336,6 @@ export function numberingMarkerShapeInput(
       : 'normal',
     complexScript,
     fontHint: facts?.fontHint,
-    langDefault: facts?.langDefault,
     eastAsiaLanguage: facts?.langEastAsia,
     kerning: facts?.kerning == null ? undefined : fontSizePt >= facts.kerning,
   });
@@ -1396,7 +1394,6 @@ export function paragraphMarkShapeInput(
     style: (complexScript ? (facts.italicCs ?? false) : (facts.italic ?? false)) ? 'italic' : 'normal',
     complexScript,
     fontHint: facts.fontHint,
-    langDefault: facts.langDefault,
     eastAsiaLanguage: facts.langEastAsia,
     kerning: facts.kerning == null ? undefined : fontSizePt >= facts.kerning,
   });

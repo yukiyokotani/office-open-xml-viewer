@@ -15,7 +15,6 @@ import {
   StaticCanvasRenderDispatcher,
   TerminalResourceOwner,
 } from '@silurus/ooxml-core/internal/canvas-viewer-mechanics';
-import { bindLegacyOfficeConversionSignal } from '@silurus/ooxml-core/internal/legacy-office-conversion';
 import { READ_ONLY_COMMENT_MARGIN_WIDTH_PX } from '@silurus/ooxml-core/internal/read-only-comment-contract';
 import { eventTargetsDataAttributeWithin } from '@silurus/ooxml-core/internal/dom-interaction-boundary';
 import type { ReadOnlyCommentMarginGeometry } from '@silurus/ooxml-core/internal/read-only-comment-decoration';
@@ -460,6 +459,10 @@ export class DocxScrollViewer implements ZoomableViewer {
    *  variant the viewer reads geometry from; toggle it with
    *  {@link setShowTrackedChanges}. */
   private _showTrackedChanges: boolean;
+  /** The tracked-change view requested by the caller or by
+   *  {@link setShowTrackedChanges}; `undefined` lets each loaded document's
+   *  own view default apply. Sent tri-state on every load. */
+  private _requestedShowTrackedChanges: boolean | undefined;
   /** Canonical epoch milliseconds for the document-global field-date layout
    * axis. Kept beside `_showTrackedChanges` because borrowed documents can
    * change either axis after construction. */
@@ -508,6 +511,7 @@ export class DocxScrollViewer implements ZoomableViewer {
     this._opts = opts;
     this._errorRouter = new CanvasViewerErrorRouter('DocxScrollViewer', opts.onError);
     this._showTrackedChanges = opts.showTrackedChanges === true;
+    this._requestedShowTrackedChanges = opts.showTrackedChanges;
     this._currentDate = opts.currentDate;
     // `??` (not `||`): a caller's explicit `false` must disable the shadow, not
     // fall through to the default.
@@ -644,42 +648,40 @@ export class DocxScrollViewer implements ZoomableViewer {
     // frees an engine we created.)
     let elementInvalidated = false;
     try {
-      const doc = await this._documentOwner.replace((signal) => {
-        const conversion = bindLegacyOfficeConversionSignal(this._opts.legacyConversion, 'docx', signal);
-        const pending = DocxDocument.load(source, {
-          password: this._opts.password,
-          legacyConversion: conversion.options,
-          useGoogleFonts: this._opts.useGoogleFonts,
-          cjkFallback: this._opts.cjkFallback,
-          maxZipEntryBytes: this._opts.maxZipEntryBytes,
-          resourceLimits: this._opts.resourceLimits,
-          debug: this._opts.debug,
-          onResourceMetrics: this._opts.onResourceMetrics,
-          workerTimeoutMs: this._opts.workerTimeoutMs,
-          wasmUrl: this._opts.wasmUrl,
-          math: this._opts.math,
-          threeD: this._opts.threeD,
-          regionMap: this._opts.regionMap,
-          chartEx: this._opts.chartEx,
-          tiff: this._opts.tiff,
-          mode: this._mode,
-          // The variant the viewer will render. Without these, load builds the
-          // final view while every render asks for the markup view, and the first
-          // paint pays a full synchronous repagination.
-          ...(this._showTrackedChanges ? { showTrackedChanges: true } : {}),
-          ...(this._currentDate === undefined
-            ? {}
-            : { currentDate: this._currentDate }),
-          ...(this._opts.progressiveLayout ? { progressiveLayout: true } : {}),
-          ...(this._opts.sliceLayout ? { sliceLayout: true } : {}),
-          onLayoutProgress: this._opts.onLayoutProgress,
-          onLayoutPartial: this._opts.onLayoutPartial,
-          onLayoutComplete: this._opts.onLayoutComplete,
-        });
-        return conversion.options === undefined
-          ? pending
-          : pending.finally(conversion.cleanup);
-      }, (ownedDocument) => {
+      const doc = await this._documentOwner.replace(() => DocxDocument.load(source, {
+        password: this._opts.password,
+        useGoogleFonts: this._opts.useGoogleFonts,
+        cjkFallback: this._opts.cjkFallback,
+        maxZipEntryBytes: this._opts.maxZipEntryBytes,
+        resourceLimits: this._opts.resourceLimits,
+        debug: this._opts.debug,
+        onResourceMetrics: this._opts.onResourceMetrics,
+        workerTimeoutMs: this._opts.workerTimeoutMs,
+        wasmUrl: this._opts.wasmUrl,
+        math: this._opts.math,
+        threeD: this._opts.threeD,
+        regionMap: this._opts.regionMap,
+        chartEx: this._opts.chartEx,
+        tiff: this._opts.tiff,
+        mode: this._mode,
+        // The variant the viewer will render. Without these, load builds the
+        // final view while every render asks for the markup view, and the first
+        // paint pays a full synchronous repagination.
+        // An explicit choice (including `false`) is forwarded; otherwise the
+        // document's own view default applies.
+        ...(this._requestedShowTrackedChanges === undefined
+          ? {}
+          : { showTrackedChanges: this._requestedShowTrackedChanges }),
+        ...(this._currentDate === undefined
+          ? {}
+          : { currentDate: this._currentDate }),
+        ...(this._opts.modelSources === undefined ? {} : { modelSources: this._opts.modelSources }),
+        ...(this._opts.progressiveLayout ? { progressiveLayout: true } : {}),
+        ...(this._opts.sliceLayout ? { sliceLayout: true } : {}),
+        onLayoutProgress: this._opts.onLayoutProgress,
+        onLayoutPartial: this._opts.onLayoutPartial,
+        onLayoutComplete: this._opts.onLayoutComplete,
+      }), (ownedDocument) => {
         this._invalidateElementContext(false);
         elementInvalidated = true;
         this._findRequestGeneration++;
@@ -700,6 +702,9 @@ export class DocxScrollViewer implements ZoomableViewer {
       });
       if (!doc) return;
       if (this._destroyed) throw new Error('DocxScrollViewer is destroyed');
+      // The loaded document's active view is authoritative (it may come from
+      // the document's own view default).
+      this._showTrackedChanges = activeDocxLayoutViewOf(doc).showTrackedChanges;
       this._bindLayoutDocument(doc);
       this._find.invalidate();
       this._findActive = false;
@@ -2239,6 +2244,7 @@ export class DocxScrollViewer implements ZoomableViewer {
     if (!selected) return;
     if (this._destroyed || generation !== this._layoutViewGeneration || doc !== this._doc) return;
     this._showTrackedChanges = value;
+    this._requestedShowTrackedChanges = value;
     this._find.invalidate();
     // Re-render every mounted slot at the new variant, and relayout: heights,
     // spacer and mount window all follow the new page count, and a shrinking

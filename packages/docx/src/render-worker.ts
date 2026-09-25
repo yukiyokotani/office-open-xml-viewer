@@ -71,7 +71,10 @@ import {
   isDocumentPullCommand,
   MaterializedDocumentCursorArchive,
 } from './document-pull-worker.js';
-import { WorkerDocumentSourceOwner } from './internal/worker-document-source.js';
+import {
+  WorkerDocumentSourceOwner,
+  type DocxModelSourceViewDefaults,
+} from './internal/worker-document-source.js';
 
 // RB6: self-poison + auto-respawn. A trap during parse (or an in-worker image /
 // embedded-font read) recycles the instance so the next document renders on
@@ -188,7 +191,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
       await previousFallback?.reset();
       if (requestedGeneration !== parseGeneration) throw new Error('render-worker parse was superseded');
       if (fallbackPull === previousFallback) fallbackPull = null;
-      sourceOwner.closeNative();
+      sourceOwner.closeModelSource();
       host.run(() => host.disposeArchive());
       doc = null;
       reviewIndexInput = null;
@@ -210,10 +213,11 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
       dropSvgImageCache(getImage);
       const bytes = new Uint8Array(req.data);
       // Both sources drain the same pull/ACK state machine locally. OOXML
-      // construction/calls use host.run; the direct owner applies its own WASM
-      // trap boundary. Neither route creates a monolithic model JSON value.
+      // construction/calls use host.run; a model source applies its own trap
+      // boundary. Neither route creates a monolithic model JSON value.
+      let viewDefaults: DocxModelSourceViewDefaults = {};
       if (req.source) {
-        await sourceOwner.openNative(bytes, req.source);
+        viewDefaults = await sourceOwner.openModelSource(bytes, req.source, req.sourceTransfer);
         if (requestedGeneration !== parseGeneration) {
           throw new Error('render-worker parse was superseded');
         }
@@ -263,7 +267,13 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
           generation: documentGeneration,
         };
         fallbackPull.open(fallbackIdentity);
-        post({ type: 'mainThreadVerticalFallback', id, ...fallbackIdentity, usage: resourceUsage });
+        post({
+          type: 'mainThreadVerticalFallback',
+          id,
+          ...fallbackIdentity,
+          usage: resourceUsage,
+          ...(req.source ? { viewDefaults } : {}),
+        });
         return;
       }
       const adapted = layoutSourceModelAdapterFromOwnedModel(
@@ -345,11 +355,14 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
       // host's geometry accessors read — is built for THIS view, so a
       // tracked-changes or explicit-date load no longer reports a page count
       // belonging to a pagination nobody is going to paint.
+      // One precedence for every source: the caller's explicit choice, else the
+      // model source's own view default, else the renderer default (final view).
       const layoutOptions = normalizeLayoutOptions(
         req.currentDateMs,
         req.defaultCurrentDateMs,
-        req.showTrackedChanges,
+        req.showTrackedChanges ?? viewDefaults.showTrackedChanges,
       );
+      const showTrackedChanges = layoutOptions.showTrackedChanges === true;
       // Progressive layout: publish the opening pages long before the whole
       // document is paginated, so the host can resolve load() and paint while
       // the rest is still being laid out. Every publication primes the variant
@@ -379,6 +392,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
             post({
               type: 'layoutPartial',
               forId: id,
+              showTrackedChanges,
               partial: review ? { ...publication, review } : publication,
             });
             review = undefined;
@@ -406,11 +420,9 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
         endnotes: model.endnotes ?? [],
         ...projectRenderWorkerLayoutMeta(layout, source, reviewIndexInput),
       };
-      if (sourceOwner.kind === 'ooxml') {
-        const loadedArchive = sourceOwner.ooxml('resource usage');
-        resourceUsage = decodeOoxmlResourceUsage(host.run(() => loadedArchive.resource_usage()));
-      }
-      post({ type: 'parsedMeta', id, meta, usage: resourceUsage });
+      const usageBytes = sourceOwner.resourceUsage();
+      if (usageBytes) resourceUsage = decodeOoxmlResourceUsage(usageBytes);
+      post({ type: 'parsedMeta', id, meta, usage: resourceUsage, showTrackedChanges });
       return;
     }
     if (req.type === 'selectLayoutView') {
@@ -482,21 +494,15 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
       post({ type: 'imageExtracted', id, bytes }, [bytes]);
       return;
     }
-    if (req.type === 'sourceRevisionView') {
-      post({ type: 'sourceRevisionView', id, markup: sourceOwner.sourceRevisionMarkup() });
-      return;
-    }
     if (req.type === 'resourceUsage') {
-      const archive = sourceOwner.ooxml('resource usage');
-      const usage = decodeOoxmlResourceUsage(host.run(() => archive.resource_usage()));
-      post({ type: 'resourceUsage', id, usage });
+      const bytes = sourceOwner.resourceUsage();
+      post({ type: 'resourceUsage', id, usage: bytes ? decodeOoxmlResourceUsage(bytes) : undefined });
       return;
     }
     if (req.type === 'toMarkdown') {
       // Project the retained archive to markdown, straight from the handle the
       // worker already holds (same source as worker.ts's parse-mode arm).
-      const archive = sourceOwner.ooxml('markdown conversion');
-      const markdown = host.run(() => archive.to_markdown());
+      const markdown = sourceOwner.toMarkdown();
       post({ type: 'markdownRendered', id, markdown });
       return;
     }
@@ -508,7 +514,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
     if (requestedGeneration !== undefined && requestedGeneration === parseGeneration) {
       // Cleanup must not replace the parse failure or suppress its terminal
       // response. A stale parse never touches the newer generation's owner.
-      try { sourceOwner.closeNative(); } catch {}
+      try { sourceOwner.closeModelSource(); } catch {}
       releaseRetainedFonts();
       doc = null;
       reviewIndexInput = null;

@@ -87,15 +87,16 @@ self.onmessage = async (e: MessageEvent<WorkerRequest | PullSessionCommand<numbe
       requestedParseGeneration = requestedGeneration;
       await documentPull.reset();
       if (requestedGeneration !== parseGeneration) throw supersededParseError();
-      source.closeNative();
+      source.closeModelSource();
       host.run(() => host.disposeArchive());
       const bytes = new Uint8Array(req.data);
-      // OOXML construction/cursor calls run under `host.run`; native calls use
-      // the direct runtime's guarded archive proxy. The parse response opens a
-      // correlated pull session; complete body units, never a monolithic model
-      // JSON value, cross to Window and require consumer ACK.
+      // OOXML construction/cursor calls run under `host.run`; a model source
+      // applies its own trap boundary. The parse response opens a correlated
+      // pull session; complete body units, never a monolithic model JSON
+      // value, cross to Window and require consumer ACK.
+      let viewDefaults: { showTrackedChanges?: boolean } | undefined;
       if (req.source) {
-        await source.openNative(bytes, req.source);
+        viewDefaults = await source.openModelSource(bytes, req.source, req.sourceTransfer);
         if (requestedGeneration !== parseGeneration) {
           throw supersededParseError();
         }
@@ -117,7 +118,12 @@ self.onmessage = async (e: MessageEvent<WorkerRequest | PullSessionCommand<numbe
         generation: documentGeneration,
       };
       documentPull.open(identity);
-      post({ type: 'documentSessionOpened', id, ...identity });
+      post({
+        type: 'documentSessionOpened',
+        id,
+        ...identity,
+        ...(viewDefaults ? { viewDefaults } : {}),
+      });
       return;
     }
 
@@ -132,22 +138,16 @@ self.onmessage = async (e: MessageEvent<WorkerRequest | PullSessionCommand<numbe
       (self.postMessage as (message: unknown, transfer: Transferable[]) => void)(res, [out]);
       return;
     }
-    if (req.type === 'sourceRevisionView') {
-      post({ type: 'sourceRevisionView', id, markup: source.sourceRevisionMarkup() });
-      return;
-    }
     if (req.type === 'resourceUsage') {
-      const archive = source.ooxml('resource usage');
-      const usage = decodeOoxmlResourceUsage(host.run(() => archive.resource_usage()));
-      post({ type: 'resourceUsage', id, usage });
+      const bytes = source.resourceUsage();
+      post({ type: 'resourceUsage', id, usage: bytes ? decodeOoxmlResourceUsage(bytes) : undefined });
       return;
     }
     if (req.type === 'toMarkdown') {
-      const archive = source.ooxml('markdown conversion');
       // Project the already-opened handle to markdown (no re-copy of the file,
       // no re-scan of the central directory). A plain string has no transferable
       // backing, so it is posted by structured clone like any other value.
-      const markdown = host.run(() => archive.to_markdown());
+      const markdown = source.toMarkdown();
       const res: WorkerResponse = { type: 'markdownRendered', id, markdown };
       post(res);
       return;
@@ -156,7 +156,7 @@ self.onmessage = async (e: MessageEvent<WorkerRequest | PullSessionCommand<numbe
     if (requestedParseGeneration !== undefined && requestedParseGeneration === parseGeneration) {
       await documentPull.reset().catch(() => undefined);
       if (requestedParseGeneration === parseGeneration) {
-        try { source.closeNative(); } catch {}
+        try { source.closeModelSource(); } catch {}
       }
     }
     const res: WorkerResponse = { type: 'error', id, ...serializeWorkerError(err) };

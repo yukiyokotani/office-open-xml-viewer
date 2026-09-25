@@ -1161,9 +1161,6 @@ export interface FieldRun {
   smallCaps?: boolean;
   doubleStrikethrough?: boolean;
   highlight?: string | null;
-  /** ECMA-376 §17.3.2.20 `<w:lang w:val>` — default language for the field's
-   * displayed run content; retained without assigning renderer policy. */
-  langDefault?: string;
   /** ECMA-376 §17.3.2.12 `<w:em w:val>` — emphasis (boten / 圏点) mark, mirrors
    *  {@link DocxTextRun.emphasisMark} (§17.18.24 ST_Em). Absent (or the
    *  authored `val="none"`) ⇒ no mark. */
@@ -1255,9 +1252,6 @@ export interface DocxTextRun {
   boldCs?: boolean;
   /** ECMA-376 §17.3.2.17 `<w:iCs>` — complex-script italic toggle. */
   italicCs?: boolean;
-  /** ECMA-376 §17.3.2.20 `<w:lang w:val>` — default language for run content,
-   * retained as an authored/inherited fact without assigning renderer policy. */
-  langDefault?: string;
   /** ECMA-376 §17.3.2.20 `<w:lang w:bidi>` — complex-script (RTL) language tag,
    *  lower-cased (e.g. "ar-sa", "ae-ar"). Drives Word's AN digit ordering. */
   langBidi?: string;
@@ -1638,22 +1632,33 @@ export interface CellBorders {
 
 export type WorkerRequest =
   | { type: 'init'; wasmUrl: string }
-  | { type: 'parse'; id: number; data: ArrayBuffer; resourcePolicy: NormalizedOoxmlResourcePolicy; source?: import('@silurus/ooxml-core/internal/legacy-doc-source').LegacyDocDirectSourceDescriptor }
+  | {
+      type: 'parse';
+      id: number;
+      data: ArrayBuffer;
+      resourcePolicy: NormalizedOoxmlResourcePolicy;
+      /** Application-selected model source (LoadOptions.modelSources). */
+      source?: import('@silurus/ooxml-core').ModelSourceModuleDescriptor;
+      sourceTransfer?: readonly Transferable[];
+    }
   | { type: 'extractImage'; id: number; path: string }
   | { type: 'resourceUsage'; id: number }
-  // Legacy DOC only: the source's own revision-markup view (false for OOXML).
-  | { type: 'sourceRevisionView'; id: number }
   // Project the retained archive to GitHub-flavoured markdown (`DocxArchive.to_markdown`,
   // the handle already opened at `parse` — no re-copy of the file). Twin of
   // `extractImage`: the archive stays in the worker, only the string crosses back.
   | { type: 'toMarkdown'; id: number };
 
 export type WorkerResponse =
-  | ({ type: 'documentSessionOpened'; id: number } & PullSessionIdentity<number>)
+  | ({
+      type: 'documentSessionOpened';
+      id: number;
+      /** The model source's own view preferences, validated in the worker. */
+      viewDefaults?: { showTrackedChanges?: boolean };
+    } & PullSessionIdentity<number>)
   | { type: 'imageExtracted'; id: number; bytes: ArrayBuffer }
-  | { type: 'resourceUsage'; id: number; usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot }
+  // `usage` is absent when the loaded model source has no ZIP accounting.
+  | { type: 'resourceUsage'; id: number; usage?: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot }
   | { type: 'markdownRendered'; id: number; markdown: string }
-  | { type: 'sourceRevisionView'; id: number; markup: boolean }
   | ({
       type: 'error';
       id: number;
