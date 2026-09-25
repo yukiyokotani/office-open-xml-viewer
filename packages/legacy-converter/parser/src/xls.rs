@@ -31,6 +31,7 @@ mod pictures;
 mod print;
 mod rich;
 mod styles;
+mod tables;
 mod theme;
 mod views;
 
@@ -159,6 +160,11 @@ struct SheetData {
     conditional_records: conditional::Records,
     /// Their XLSX-model projection (direct path only).
     conditional_formats: Vec<xlsx_model::ConditionalFormat>,
+    /// MS-XLS 2.4.113 FeatHdr11, 2.4.114 Feature11, 2.4.115 Feature12 and
+    /// 2.4.157 List12 records (tables), in stream order.
+    table_records: tables::Records,
+    /// Their XLSX-model projection (direct path only).
+    tables: Vec<xlsx_model::TableInfo>,
 }
 
 pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<XlsConversion, String> {
@@ -312,6 +318,7 @@ fn prepare_workbook(
     let mut tabs = Vec::new();
     let mut conditional_theme = None;
     let mut dxfs = Vec::new();
+    let mut table_styles = None;
     for (tab, sheet) in sheets.into_iter().enumerate() {
         if sheet.sheet_type != 0 {
             skipped_non_worksheets = true;
@@ -320,6 +327,28 @@ fn prepare_workbook(
         let mut data = parse_sheet(&records, &sheet, &shared_strings)?;
         // Only the direct model projects conditional formatting; the byte
         // converter keeps its documented omission warning.
+        if direct && !data.table_records.is_empty() {
+            if conditional_theme.is_none() {
+                conditional_theme = Some((
+                    theme::Colors::parse(&records)?,
+                    conditional::Externs::parse(&records)?,
+                ));
+            }
+            if table_styles.is_none() {
+                table_styles = Some(tables::Styles::parse(&records)?);
+            }
+            let (theme, _) = conditional_theme.as_ref().expect("parsed theme");
+            let context = tables::Context {
+                styles: &styles,
+                theme,
+            };
+            data.tables = tables::project(
+                &data.table_records,
+                table_styles.as_mut().expect("parsed table styles"),
+                &context,
+                &mut dxfs,
+            )?;
+        }
         if direct && !data.conditional_records.is_empty() {
             if conditional_theme.is_none() {
                 conditional_theme = Some((
@@ -1016,6 +1045,11 @@ fn parse_sheet(
             0x01b0 | 0x01b1 | 0x0879 | 0x087a | 0x087b => {
                 output.conditional_records.push(record.kind, record.data)?
             }
+            0x0871 | 0x0872 | 0x0877 | 0x0878 => {
+                output.table_records.push(record.kind, record.data)?
+            }
+            // ContinueFrt11 (2.4.60) of a table record is not reassembled.
+            0x0875 => return Err(unsupported("continued XLS table record")),
             // A continued conditional formatting record is not reassembled.
             CONTINUE
                 if !output.conditional_records.is_empty()

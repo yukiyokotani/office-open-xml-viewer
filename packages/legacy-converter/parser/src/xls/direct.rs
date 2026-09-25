@@ -412,6 +412,19 @@ fn project_sheet(
     }
     charge(budget, conditional_bytes(&sheet.conditional_formats))?;
     worksheet.conditional_formats = sheet.conditional_formats;
+    charge(
+        budget,
+        sheet
+            .tables
+            .iter()
+            .map(|table| {
+                std::mem::size_of::<xlsx_model::TableInfo>()
+                    + table.style_name.len()
+                    + table.accent_color.len()
+            })
+            .sum(),
+    )?;
+    worksheet.tables = sheet.tables;
     sheet.geometry.project(&mut worksheet, mdw, budget)?;
     sheet.views.project(&mut worksheet);
     Ok(worksheet)
