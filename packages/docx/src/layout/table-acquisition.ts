@@ -257,14 +257,12 @@ function verticalCellMode(
  * line: each line's placement span (independent of its alignment on that
  * line) plus the paragraph's side indents and, on the first line, a positive
  * first-line indent. For automatic rows this is the length the rotated
- * lines require; ECMA-376
- * §17.4.80/§17.4.81 size a row to its content, and the rotated content's
- * extent along the row axis is its line length. This is the natural
- * reading of ECMA row sizing, not an observed Word rule: the exact Word
- * behaviour for rotated cells in automatic rows (MS-DOC sprmTTextFlow /
- * `w:textDirection` with `w:trHeight` auto or atLeast) awaits Word control
- * c03 (legacy-doc tables controls, DOC-TBL-3). sample-19's auto rows match
- * Word only because a taller neighbour row governs there.
+ * lines require: ECMA-376 §17.4.80/§17.4.81 size a row to its content, and
+ * the rotated content's extent along the row axis is its line length. This
+ * rule is derived from the specification alone. Rotated cells in automatic
+ * or atLeast rows have no compatibility evidence yet; the pending control
+ * is c03 (legacy-doc tables controls, DOC-TBL-3). In sample-19 a taller
+ * neighbour row governs the height, so that pair does not exercise it.
  */
 function naturalLineExtentPt(
   layouts: readonly (ParagraphLayout | TableLayout)[],
