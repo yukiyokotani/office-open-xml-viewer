@@ -16,6 +16,7 @@ import { measureParagraph } from '../paragraph-measure.js';
 import { createLayoutServices } from '../layout-runtime.js';
 import type { DocParagraph } from '../types.js';
 import type { AnchorAcquisitionInput } from './anchor-input.js';
+import type { LayoutRect } from './types.js';
 import type { VerticalGlyphMeasurementService } from './measurement-capabilities.js';
 
 const fontRoute = {
@@ -1438,17 +1439,26 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
       },
     } as unknown as MeasuredParagraph;
     const occurrenceId = 'aligned-autofit-anchor';
-    const acquire = (
-      choice: AnchorAcquisitionInput['vertical']['choice'],
-      textAutofit = 'sp',
-    ) => {
+    const layoutFor = (options: Readonly<{
+      vertical: AnchorAcquisitionInput['vertical']['choice'];
+      horizontal?: AnchorAcquisitionInput['horizontal']['choice'];
+      textAutofit?: string;
+      widthPt?: number;
+      heightPt?: number;
+      textVert?: string;
+      verticalSection?: boolean;
+    }>) => {
+      const widthPt = options.widthPt ?? 40;
+      const heightPt = options.heightPt ?? 100;
       const input = retainedAnchor(occurrenceId, {
         horizontal: {
           relativeFrom: 'margin', relativeFromStatus: 'valid',
-          choice: { kind: 'align', value: 'left' },
+          choice: options.horizontal ?? { kind: 'align', value: 'left' },
         },
-        vertical: { relativeFrom: 'margin', relativeFromStatus: 'valid', choice },
-        extent: { widthPt: 40, widthStatus: 'valid', heightPt: 100, heightStatus: 'valid' },
+        vertical: {
+          relativeFrom: 'margin', relativeFromStatus: 'valid', choice: options.vertical,
+        },
+        extent: { widthPt, widthStatus: 'valid', heightPt, heightStatus: 'valid' },
         wrap: {
           kind: 'none', authoredKinds: [], side: null,
           distances: retainedAnchor(occurrenceId).wrap.distances,
@@ -1461,8 +1471,8 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
           { type: 'anchorHost', fontSize: 10, anchorOccurrenceId: occurrenceId },
           {
             type: 'shape',
-            widthPt: 40,
-            heightPt: 100,
+            widthPt,
+            heightPt,
             anchorXPt: 0,
             anchorYPt: 0,
             anchorXFromMargin: true,
@@ -1473,9 +1483,10 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
             presetGeometry: 'rect',
             fill: null,
             stroke: null,
-            textAutofit,
+            textAutofit: options.textAutofit ?? 'sp',
             textInsetL: 0, textInsetT: 0, textInsetR: 0, textInsetB: 0,
             textAnchor: 't',
+            ...(options.textVert ? { textVert: options.textVert } : {}),
             textBlocks: [{
               text: 'abcdefghij', fontSizePt: 10, color: '112233', alignment: 'left',
               runs: [{ text: 'abcdefghij', fontSizePt: 10, color: '112233' }],
@@ -1483,6 +1494,7 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
           },
         ],
       } as unknown as DocParagraph;
+      const verticalSection = options.verticalSection ?? false;
       return paragraphLayoutFromMeasurement(anchored as never, {
         id: 'aligned-autofit', source, flowDomainId: 'body', ordinaryFlow: true,
         context: acquisitionContext,
@@ -1490,8 +1502,9 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
         measurer: { context: measureContext, fontFamilyClasses: {} } as never,
         environment: {
           pageIndex: 0, totalPages: 1, documentHasEastAsianText: false,
-          layoutServices: services, pageWritingMode: 'horizontal-tb',
-          verticalPageFrame: false,
+          layoutServices: services,
+          pageWritingMode: verticalSection ? 'vertical-rl' : 'horizontal-tb',
+          verticalPageFrame: verticalSection,
         } as never,
         exclusions: [],
         anchorFrames: {
@@ -1500,8 +1513,12 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
           column: { xPt: 20, yPt: 30, widthPt: 160, heightPt: 240 },
           pageParity: 'odd',
         },
-      }, measured).drawings[0]!.flowBounds;
+      }, measured);
     };
+    const acquire = (
+      choice: AnchorAcquisitionInput['vertical']['choice'],
+      textAutofit = 'sp',
+    ) => layoutFor({ vertical: choice, textAutofit }).drawings[0]!.flowBounds;
 
     const top = acquire({ kind: 'align', value: 'top' });
     expect(top.yPt).toBe(30);
@@ -1521,6 +1538,73 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
     // Without spAutoFit the authored extent is the drawn extent.
     expect(acquire({ kind: 'align', value: 'bottom' }, 'none'))
       .toMatchObject({ yPt: 170, heightPt: 100 });
+
+    // Invariance: an aligned spAutoFit box draws exactly like a fixed box
+    // authored at its fitted extent — drawing frame, text-box frame and text
+    // lines, all compared in section-logical points (a vertical section may
+    // choose a different upright-local origin for the same geometry). This
+    // also covers vertical text (the fitted axis is the width, so positionH
+    // carries the alignment) and vertical sections (alignment in the upright
+    // physical drawing frame).
+    type Affine = Readonly<{ a: number; b: number; c: number; d: number; e: number; f: number }>;
+    const logicalRect = (rect: LayoutRect, transforms: readonly (Affine | undefined)[]) => {
+      const corners = [
+        [rect.xPt, rect.yPt], [rect.xPt + rect.widthPt, rect.yPt],
+        [rect.xPt, rect.yPt + rect.heightPt], [rect.xPt + rect.widthPt, rect.yPt + rect.heightPt],
+      ].map(([x, y]) => transforms.reduce(([px, py], m) => m
+        ? [m.a * px! + m.c * py! + m.e, m.b * px! + m.d * py! + m.f]
+        : [px!, py!], [x!, y!]));
+      const xs = corners.map(([x]) => x!);
+      const ys = corners.map(([, y]) => y!);
+      const round = (value: number) => Math.round(value * 1e6) / 1e6;
+      return {
+        xPt: round(Math.min(...xs)), yPt: round(Math.min(...ys)),
+        widthPt: round(Math.max(...xs) - Math.min(...xs)),
+        heightPt: round(Math.max(...ys) - Math.min(...ys)),
+      };
+    };
+    const geometry = (layout: ReturnType<typeof layoutFor>) => {
+      const drawing = layout.drawings[0]!;
+      const textBox = layout.textBoxes[0]!;
+      const block = textBox.story.blocks[0]!;
+      const toLogical = [textBox.transform, drawing.transform];
+      return {
+        drawing: drawing.flowBounds,
+        textBox: logicalRect(textBox.flowBounds, [drawing.transform]),
+        line: block.kind === 'paragraph' ? logicalRect(block.lines[0]!.bounds, toLogical) : null,
+      };
+    };
+    for (const verticalSection of [false, true]) {
+      for (const choice of [
+        { kind: 'align', value: 'bottom' },
+        { kind: 'align', value: 'center' },
+      ] as const) {
+        const fitted = layoutFor({ vertical: choice, verticalSection });
+        const fittedHeightPt = fitted.textBoxes[0]!.flowBounds.heightPt;
+        expect(fittedHeightPt).toBeLessThan(100);
+        const fixed = layoutFor({
+          vertical: choice, verticalSection, textAutofit: 'none', heightPt: fittedHeightPt,
+        });
+        expect(geometry(fitted)).toEqual(geometry(fixed));
+      }
+      for (const choice of [
+        { kind: 'align', value: 'right' },
+        { kind: 'align', value: 'center' },
+      ] as const) {
+        const fitted = layoutFor({
+          vertical: { kind: 'align', value: 'top' }, horizontal: choice,
+          textVert: 'eaVert', widthPt: 100, heightPt: 40, verticalSection,
+        });
+        const fittedWidthPt = fitted.textBoxes[0]!.flowBounds.widthPt;
+        expect(fittedWidthPt).not.toBe(100);
+        const fixed = layoutFor({
+          vertical: { kind: 'align', value: 'top' }, horizontal: choice,
+          textVert: 'eaVert', widthPt: fittedWidthPt, heightPt: 40, verticalSection,
+          textAutofit: 'none',
+        });
+        expect(geometry(fitted)).toEqual(geometry(fixed));
+      }
+    }
   });
 
   it('acquires ordinary CJK as complete service-shaped grapheme clusters', () => {

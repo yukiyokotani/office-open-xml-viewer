@@ -117,6 +117,7 @@ import {
   type FloatPlacementParticipant,
 } from './floats.js';
 import { unionLayoutRects } from './rect-union.js';
+import type { LayoutTranslation } from './retained-geometry-translation.js';
 import {
   measureParagraphIntrinsicWidth,
   type BodyFrameGroup,
@@ -2990,6 +2991,8 @@ function acquireAnchorOccurrence(
   sameParagraphExclusions: readonly WrapExclusion[],
   externalCollisions: readonly DrawingMLCollisionEntryPt[],
   sameParagraphCollisions: readonly DrawingMLCollisionEntryPt[],
+  /** Every anchor occurrence of this paragraph, computed once per paragraph. */
+  paragraphOccurrenceIds: ReadonlySet<string>,
 ): AcquiredAnchorOccurrence | null {
   let hostLineIndex = -1;
   let host: Extract<ParagraphPlacement, { kind: 'anchor-host' }> | undefined;
@@ -3097,35 +3100,32 @@ function acquireAnchorOccurrence(
     const textBoxRect = uprightTransform
       ? logicalRectToUprightDrawingLocal(authoredRect, uprightTransform)
       : authoredRect;
-    const shapeRun = outer.run;
-    const acquireTextBox = (frame: LayoutRect) => acquireShapeTextBoxLayout(shapeRun, frame, {
+    const acquired = acquireShapeTextBoxLayout(outer.run, textBoxRect, {
       id: `${options.id}:anchor-textbox:${occurrenceId}:${outer.runIndex}`,
       source,
       flowDomainId: options.flowDomainId,
       context: options.context,
       measurer: options.measurer,
       environment: uprightEnvironment,
-      input: shapeRun.textBoxInput,
+      input: outer.run.textBoxInput,
       acquireCompleteStory: options.acquireCompleteStory,
       ...(uprightTransform ? { coordinateSpace: 'upright-physical' as const } : {}),
     });
-    let textBox = acquireTextBox(textBoxRect);
-    // A spAutoFit box aligned to the bottom or centre of its container keeps
-    // that alignment at its fitted height: Word draws a bottom-aligned
-    // fit-to-text box with its fitted bottom on the margin edge, not with its
-    // authored extent's bottom there (ECMA-376 §20.4.3.1 wp:align,
-    // §21.1.2.1.3 spAutoFit).
-    const fitShiftPt = textBox && !uprightTransform
-      ? alignedAutofitShiftPt(
-          outer.run.anchorAcquisitionInput.vertical.choice,
+    // The fitted text box keeps its anchor alignment. The acquired layout is
+    // immutable retained geometry in textBoxRect's space (logical page, or the
+    // upright drawing frame whose axes are the physical anchor axes), so the
+    // alignment is a translation of that layout, not a second acquisition.
+    const fitShift = acquired
+      ? alignedAutofitTranslation(
+          outer.run.anchorAcquisitionInput,
           baseFrames?.pageParity ?? null,
-          textBoxRect.heightPt,
-          textBox.flowBounds.heightPt,
+          textBoxRect,
+          acquired.flowBounds,
         )
-      : 0;
-    if (fitShiftPt !== 0) {
-      textBox = acquireTextBox({ ...textBoxRect, yPt: textBoxRect.yPt + fitShiftPt });
-    }
+      : { xPt: 0, yPt: 0 };
+    const textBox = acquired && (fitShift.xPt !== 0 || fitShift.yPt !== 0)
+      ? translateTextBox(acquired, fitShift)
+      : acquired;
     if (textBox) {
       acquiredShapeTextBoxes.set(outer.runIndex, textBox);
       rect = uprightTransform
@@ -3167,10 +3167,6 @@ function acquireAnchorOccurrence(
         behavior.relativeHeight,
         entry.relativeHeight,
       ));
-    const paragraphOccurrenceIds = new Set(paragraph.runs.flatMap((run) =>
-      anchoredPayloadRun(run) && run.anchorAcquisitionInput
-        ? [run.anchorAcquisitionInput.occurrenceId]
-        : []));
     const blockerBounds = normativeCollision
       ? [...externalCollisions, ...sameParagraphBlockers]
           .filter((entry) => entry.occurrenceId !== occurrenceId)
@@ -3674,31 +3670,49 @@ function translateVerticalTextBoxTable(
   };
 }
 
-/** Acquires a DrawingML/WPS text body through the same paragraph measurement
- * and retained layout seam used by ordinary WordprocessingML paragraphs. */
 /**
- * Vertical displacement that keeps an aligned anchor's `wp:align` value when a
- * spAutoFit text box changes its height from the authored extent: `bottom`
- * (or a trailing `inside`/`outside`) keeps the bottom edge and `center` the
- * centre. Offsets, percentages and leading alignments keep the top edge.
+ * Translation that keeps an aligned anchor's `wp:align` values when spAutoFit
+ * gives a text box a fitted extent different from its authored one
+ * (ECMA-376 §20.4.3.1 wp:align, §21.1.2.1.3 spAutoFit): the aligned edge
+ * belongs to the drawn extent. A trailing value (`right`/`bottom`, or
+ * `inside`/`outside` by page parity) keeps the fitted box's trailing edge on
+ * the authored one and `center` keeps the centre. Offsets, percentages and
+ * leading values keep the fitted box where acquisition placed it. Both frames
+ * are in the same coordinate space, whose axes are the anchor's physical
+ * positionH/positionV axes (the logical page, or the upright drawing frame of
+ * a vertical section).
  */
-export function alignedAutofitShiftPt(
-  choice: Readonly<import('./anchor-input.js').AnchorAcquisitionInput['vertical']['choice']>,
+export function alignedAutofitTranslation(
+  input: Readonly<Pick<import('./anchor-input.js').AnchorAcquisitionInput, 'horizontal' | 'vertical'>>,
   pageParity: 'odd' | 'even' | null,
-  authoredHeightPt: number,
-  fittedHeightPt: number,
-): number {
-  if (choice.kind !== 'align' || !Number.isFinite(authoredHeightPt)
-    || !Number.isFinite(fittedHeightPt)) {
-    return 0;
-  }
-  const delta = authoredHeightPt - fittedHeightPt;
-  const placement = alignedAnchorPlacement('vertical', choice.value, pageParity);
-  if (placement === 'trailing') return delta;
-  if (placement === 'center') return delta / 2;
-  return 0;
+  authored: LayoutRect,
+  fitted: LayoutRect,
+): LayoutTranslation {
+  const axisShift = (
+    axis: 'horizontal' | 'vertical',
+    authoredStart: number,
+    authoredSize: number,
+    fittedStart: number,
+    fittedSize: number,
+  ): number => {
+    const choice = input[axis].choice;
+    if (choice.kind !== 'align' || authoredSize === fittedSize) return 0;
+    const placement = alignedAnchorPlacement(axis, choice.value, pageParity);
+    const shift = placement === 'trailing'
+      ? authoredStart + authoredSize - fittedStart - fittedSize
+      : placement === 'center'
+        ? authoredStart + authoredSize / 2 - fittedStart - fittedSize / 2
+        : 0;
+    return Number.isFinite(shift) ? shift : 0;
+  };
+  return {
+    xPt: axisShift('horizontal', authored.xPt, authored.widthPt, fitted.xPt, fitted.widthPt),
+    yPt: axisShift('vertical', authored.yPt, authored.heightPt, fitted.yPt, fitted.heightPt),
+  };
 }
 
+/** Acquires a DrawingML/WPS text body through the same paragraph measurement
+ * and retained layout seam used by ordinary WordprocessingML paragraphs. */
 export function acquireShapeTextBoxLayout(
   shape: import('./types.js').DeepReadonly<ShapeRun>,
   rect: LayoutRect,
@@ -4716,6 +4730,7 @@ export function paragraphLayoutFromMeasurement(
     payloads.push({ run, runIndex });
     payloadsByOccurrence.set(run.anchorAcquisitionInput!.occurrenceId, payloads);
   });
+  const paragraphOccurrenceIds: ReadonlySet<string> = new Set(payloadsByOccurrence.keys());
   for (const [occurrenceId, payloads] of payloadsByOccurrence) {
     const acquired = acquireAnchorOccurrence(
       occurrenceId,
@@ -4728,6 +4743,7 @@ export function paragraphLayoutFromMeasurement(
       anchorExclusions,
       options.anchorCollisions ?? [],
       anchorCollisions,
+      paragraphOccurrenceIds,
     );
     if (!acquired) continue;
     anchorResults.push(acquired.result);
