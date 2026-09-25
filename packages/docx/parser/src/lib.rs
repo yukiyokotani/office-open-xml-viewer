@@ -501,15 +501,20 @@ impl DocxArchive {
     }
 
     /// Current or most recently completed document-cursor resource checkpoint.
-    pub fn document_cursor_resource_usage(&self) -> Result<Vec<u8>, JsValue> {
-        let usage = self
+    /// `None` when no checkpoint exists: a package that fails before its
+    /// document cursor opens streams a placeholder document without one.
+    pub fn document_cursor_resource_usage(&self) -> Result<Option<Vec<u8>>, JsValue> {
+        let Some(usage) = self
             .archive
             .as_ref()
             .ok()
             .and_then(parser::Zip::operation_usage)
             .or(self.last_document_usage)
-            .ok_or_else(|| JsValue::from_str("document cursor usage is unavailable"))?;
+        else {
+            return Ok(None);
+        };
         serde_json::to_vec(&usage)
+            .map(Some)
             .map_err(|error| JsValue::from_str(&format!("serialize error: {error}")))
     }
 
