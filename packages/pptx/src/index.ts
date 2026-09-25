@@ -89,6 +89,7 @@ export type {
   ChartexValueColorStop,
   DrawingMLCustomDashSegment,
   Duotone,
+  BlipEffect,
   EquationRun,
   LegendManualLayout,
   MathAccent,

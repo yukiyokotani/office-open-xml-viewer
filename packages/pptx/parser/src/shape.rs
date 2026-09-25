@@ -22,7 +22,9 @@ use crate::{
     table_style_presets, PptxZip, ResolvedTableCellStyle, TableCellBorderStyle, TableLineStyle,
     TablePartStyle, TableStyleDef, TableStyleFlags, TableTextStyle,
 };
-use ooxml_common::blip::{mime_from_ext, parse_blip_duotone, parse_src_rect, svg_blip_rid};
+use ooxml_common::blip::{
+    mime_from_ext, parse_blip_duotone, parse_blip_effects, parse_src_rect, svg_blip_rid,
+};
 use ooxml_common::depth::DepthGuard;
 use ooxml_common::line::{
     parse_line_properties, LineDash, LineEnd, LineJoin, LinePaint, LineProperties,
@@ -994,10 +996,12 @@ pub(crate) fn parse_shape(
         .unwrap_or_else(|| InheritedShapeGeometry {
             geometry: "rect".to_owned(),
             cust_geom: None,
+            cust_geom_paint: None,
             adjustments: [None; 8],
         });
     let geometry = shape_geometry.geometry;
     let cust_geom = shape_geometry.cust_geom;
+    let cust_geom_paint = shape_geometry.cust_geom_paint;
     let [adj, adj2, adj3, adj4, adj5, adj6, adj7, adj8] = shape_geometry.adjustments;
 
     // cy=0 means "auto-height" for body-text shapes, but connector-type
@@ -1252,6 +1256,7 @@ pub(crate) fn parse_shape(
         text_body,
         default_text_color,
         cust_geom,
+        cust_geom_paint,
         adj,
         adj2,
         adj3,
@@ -1487,6 +1492,7 @@ pub(crate) fn parse_picture(
         intrinsic_width_px,
         intrinsic_height_px,
         stroke,
+        fill: parse_fill(sp_pr, theme),
         prst_geom,
         prst_adjust,
         src_rect: parse_src_rect(blip_fill),
@@ -1494,6 +1500,11 @@ pub(crate) fn parse_picture(
         // §20.1.8.23 `<a:duotone>` recolour, resolved through the slide's theme
         // palette with PowerPoint's linear tint. `None` ⇒ no effect.
         duotone: parse_blip_duotone(
+            blip_fill,
+            &PptxSchemeResolver { theme },
+            ooxml_common::color::TintMode::PowerPointLinear,
+        ),
+        blip_effects: parse_blip_effects(
             blip_fill,
             &PptxSchemeResolver { theme },
             ooxml_common::color::TintMode::PowerPointLinear,
@@ -1552,11 +1563,17 @@ pub(crate) fn parse_ole_preview_picture(
         intrinsic_width_px,
         intrinsic_height_px,
         stroke: None,
+        fill: None,
         prst_geom: None,
         prst_adjust: None,
         src_rect: parse_src_rect(blip_fill),
         alpha: parse_blip_alpha(blip_fill),
         duotone: parse_blip_duotone(
+            blip_fill,
+            &PptxSchemeResolver { theme },
+            ooxml_common::color::TintMode::PowerPointLinear,
+        ),
+        blip_effects: parse_blip_effects(
             blip_fill,
             &PptxSchemeResolver { theme },
             ooxml_common::color::TintMode::PowerPointLinear,
@@ -2496,6 +2513,9 @@ pub(crate) fn parse_sp_tree_node(
                             intrinsic_width_px,
                             intrinsic_height_px,
                             stroke,
+                            // The sp's spPr fill is this blipFill itself; there
+                            // is no separate backing fill.
+                            fill: None,
                             prst_geom,
                             prst_adjust,
                             src_rect: blip_fill_node.and_then(parse_src_rect),
@@ -2507,6 +2527,15 @@ pub(crate) fn parse_sp_tree_node(
                                     ooxml_common::color::TintMode::PowerPointLinear,
                                 )
                             }),
+                            blip_effects: blip_fill_node
+                                .map(|bf| {
+                                    parse_blip_effects(
+                                        bf,
+                                        &PptxSchemeResolver { theme },
+                                        ooxml_common::color::TintMode::PowerPointLinear,
+                                    )
+                                })
+                                .unwrap_or_default(),
                             cust_geom,
                             shadow,
                             inner_shadow,
@@ -2576,6 +2605,7 @@ pub(crate) fn parse_sp_tree_node(
                                     intrinsic_width_px: None,
                                     intrinsic_height_px: None,
                                     stroke,
+                                    fill: None,
                                     prst_geom: None,
                                     prst_adjust: None,
                                     src_rect: bf.src_rect,
@@ -2585,6 +2615,7 @@ pub(crate) fn parse_sp_tree_node(
                                     // theme in InheritedBlipFill); the PictureElement
                                     // render applies it via the shared core cache.
                                     duotone: bf.duotone,
+                                    blip_effects: bf.blip_effects,
                                     cust_geom: None,
                                     shadow,
                                     inner_shadow,
@@ -2672,6 +2703,8 @@ pub(crate) fn parse_sp_tree_node(
                                         intrinsic_width_px,
                                         intrinsic_height_px,
                                         stroke,
+                                        fill: child(node, "spPr")
+                                            .and_then(|sp| parse_fill(sp, theme)),
                                         prst_geom: None,
                                         prst_adjust: None,
                                         src_rect: blip_fill.and_then(parse_src_rect),
@@ -2683,6 +2716,15 @@ pub(crate) fn parse_sp_tree_node(
                                                 ooxml_common::color::TintMode::PowerPointLinear,
                                             )
                                         }),
+                                        blip_effects: blip_fill
+                                            .map(|bf| {
+                                                parse_blip_effects(
+                                                    bf,
+                                                    &PptxSchemeResolver { theme },
+                                                    ooxml_common::color::TintMode::PowerPointLinear,
+                                                )
+                                            })
+                                            .unwrap_or_default(),
                                         cust_geom: None,
                                         shadow,
                                         inner_shadow,
@@ -3291,6 +3333,7 @@ fn parse_connector(
         text_body: None,
         default_text_color: None,
         cust_geom: None,
+        cust_geom_paint: None,
         adj,
         adj2,
         adj3,
@@ -3937,6 +3980,7 @@ mod picture_property_resolution_tests {
             src_rect: None,
             alpha: None,
             duotone: None,
+            blip_effects: Vec::new(),
         };
         let mut placeholders = LayoutPlaceholders::default();
         placeholders.by_idx.insert(9, transform);

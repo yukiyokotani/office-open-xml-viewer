@@ -19,7 +19,7 @@ export type {
 // All positions and sizes are in EMUs (English Metric Units).
 // 914400 EMU = 1 inch, 12700 EMU = 1 pt
 
-import type { Bullet as CoreBullet, Fill, Stroke, TextBody as CoreTextBody, Paragraph as CoreParagraph, Shadow, Glow, SoftEdge, Reflection, PathCmd, ChartModel, Duotone } from '@silurus/ooxml-core';
+import type { Bullet as CoreBullet, Fill, Stroke, TextBody as CoreTextBody, Paragraph as CoreParagraph, Shadow, Glow, SoftEdge, Reflection, PathCmd, ChartModel, Duotone, BlipEffect } from '@silurus/ooxml-core';
 
 /**
  * Picture bullet — ECMA-376 §21.1.2.4.2 `<a:buBlip><a:blip r:embed>`. The
@@ -114,6 +114,12 @@ export interface TextBody extends CoreTextBody {
    * omitted from JSON when false. Only meaningful when `numCol > 1`.
    */
   rtlCol?: boolean;
+  /**
+   * `<a:bodyPr spcFirstLastPara>` (ECMA-376 §21.1.2.1.1) — when true the first
+   * paragraph's space before and the last paragraph's space after are applied.
+   * Defaults to false (both suppressed); omitted from JSON when false.
+   */
+  spcFirstLastPara?: boolean;
   /**
    * `<a:bodyPr><a:prstTxWarp>` (ECMA-376 §20.1.9.19) — WordArt text warp. When
    * present the renderer maps each glyph through the named envelope
@@ -323,6 +329,13 @@ export interface ShapeElement {
   /** Custom geometry sub-paths (set only when geometry === "custGeom").
    *  Outer array: one entry per <a:path>; inner: path commands with coords in [0,1]. */
   custGeom: PathCmd[][] | null;
+  /**
+   * Per-path paint of `custGeom` (ECMA-376 §20.1.9.15 `a:path@fill` /
+   * `@stroke`), one entry per path. Absent when every path is filled
+   * normally and stroked. `fill` is `none`, `lighten`, `lightenLess`,
+   * `darken` or `darkenLess`; `null` means `norm`.
+   */
+  custGeomPaint?: { fill: string | null; stroke: boolean }[];
   /** First adjustment value from prstGeom avLst (e.g. trapezoid inset). Range 0–100000. */
   adj: number | null;
   /** Second adjustment value from prstGeom avLst (e.g. arrow head width). Range 0–100000. */
@@ -605,6 +618,12 @@ export interface PictureElement {
    */
   stroke: Stroke | null;
   /**
+   * `<p:spPr>` fill (a `p:pic`'s spPr is CT_ShapeProperties, §19.3.1.37),
+   * painted inside the picture silhouette BEHIND the blip so it shows through
+   * transparent pixels. Omitted when the spPr has no fill element.
+   */
+  fill?: Fill;
+  /**
    * `<p:spPr><a:prstGeom prst="…">` preset name (e.g. `"roundRect"`,
    * `"ellipse"`). ECMA-376 §20.1.9.18: a picture's preset geometry is its clip
    * silhouette and the path its border / contour hug. Undefined / omitted = a
@@ -635,6 +654,12 @@ export interface PictureElement {
    * luminance ramp, and caches the recoloured bitmap under a colour-suffixed key.
    */
   duotone?: Duotone;
+  /**
+   * CT_Blip pixel effects (§20.1.8.13: grayscl, biLevel, clrChange) in
+   * document order, with a `duotone` entry marking where {@link duotone}
+   * applies. Absent when the blip carries none of them.
+   */
+  blipEffects?: BlipEffect[];
   /**
    * `<p:spPr><a:custGeom>` clipping path. Same `PathCmd` model as
    * `ShapeElement.custGeom` (one entry per `<a:path>`; coords normalized

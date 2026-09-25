@@ -41,6 +41,7 @@ import {
   applySoftEdge,
   applyReflection,
   renderPresetShape,
+  pathFillModeOverlay,
   hasPreset,
   buildPresetGeometryPath,
   buildPresetGeometryFillPath,
@@ -92,6 +93,7 @@ import {
   normalizeImageResourceOptions,
   planDecodedImageTargets,
   duotoneCacheKey,
+  type BlipPixelEffects,
   inspectCachedRasterSource,
   isBrowserResizableRasterMimeType,
   isDecodeTargetResizableRasterFormat,
@@ -287,9 +289,21 @@ type PlannedRasterOptions = {
   maxRetainedPixels: number;
 };
 
+/** The decode-time pixel transform of a blip: its ordered CT_Blip effects
+ *  (with the duotone at its position) when it carries any, otherwise just the
+ *  duotone, so a duotone-only or plain picture keeps its existing cache key. */
+function pixelTransform(blip: {
+  readonly duotone?: import('@silurus/ooxml-core').Duotone | null;
+  readonly blipEffects?: readonly import('@silurus/ooxml-core').BlipEffect[] | null;
+}): import('@silurus/ooxml-core').Duotone | BlipPixelEffects | undefined {
+  return blip.blipEffects?.length
+    ? { effects: blip.blipEffects, duotone: blip.duotone ?? null }
+    : blip.duotone ?? undefined;
+}
+
 function imagePlanKey(
   path: string,
-  duotone?: import('@silurus/ooxml-core').Duotone | null,
+  duotone?: import('@silurus/ooxml-core').Duotone | BlipPixelEffects | null,
 ): string {
   return duotoneCacheKey(path, duotone);
 }
@@ -394,12 +408,12 @@ async function planSlideImages(
 
   const background = slide.background;
   if (background?.fillType === 'image' && background.imagePath
-    && !background.tile && !background.duotone) {
+    && !background.tile && !pixelTransform(background)) {
     const fr = background.fillRect ?? {};
     const width = canvasW * (1 - (fr.l ?? 0) - (fr.r ?? 0));
     const height = canvasH * (1 - (fr.t ?? 0) - (fr.b ?? 0));
     push(
-      imagePlanKey(background.imagePath, background.duotone),
+      imagePlanKey(background.imagePath, pixelTransform(background)),
       rasterTargetOptions(width, height, dpr, background.srcRect),
       background.imagePath,
       background.mimeType,
@@ -411,9 +425,9 @@ async function planSlideImages(
   for (const element of slide.elements) {
     if (element.type === 'picture') {
       const vector = preferVectorBlip(element) || element.mimeType === 'image/svg+xml';
-      if (!vector && !element.duotone) {
+      if (!vector && !pixelTransform(element)) {
         push(
-          imagePlanKey(element.imagePath, element.duotone),
+          imagePlanKey(element.imagePath, pixelTransform(element)),
           rasterTargetOptions(
             emuToPx(element.width, scale),
             emuToPx(element.height, scale),
@@ -455,10 +469,10 @@ async function planSlideImages(
           svgImagePath: fill.svgImagePath,
           srcRect: usage.hasSourceCrop ? true : null,
         });
-        if (!vector && !fill.duotone && !usage.preserveNaturalSize
+        if (!vector && !pixelTransform(fill) && !usage.preserveNaturalSize
           && size?.targetWidthPx && size.targetHeightPx) {
           push(
-            imagePlanKey(fill.imagePath, fill.duotone),
+            imagePlanKey(fill.imagePath, pixelTransform(fill)),
             {
               targetWidthPx: size.targetWidthPx,
               targetHeightPx: size.targetHeightPx,
@@ -2160,8 +2174,8 @@ async function renderBackground(
       // §20.1.8.23 duotone recolour on the raster blip (issue #889): route
       // through the shared duotone cache (keyed by path + colours). No duotone ⇒
       // this is exactly the former `getCachedBitmapByPath` decode, byte-identical.
-      const planned = imagePlan && !fill.duotone
-        ? plannedRasterOptions(imagePlan, imagePlanKey(fill.imagePath, fill.duotone))
+      const planned = imagePlan && !pixelTransform(fill)
+        ? plannedRasterOptions(imagePlan, imagePlanKey(fill.imagePath, pixelTransform(fill)))
         : undefined;
       const sourceInspection = fill.tile
         ? await inspectCachedRasterSource(fill.imagePath, fill.mimeType, fetchImage)
@@ -2169,7 +2183,7 @@ async function renderBackground(
       const bitmap = await getCachedDuotoneBitmapByPath(
         fill.imagePath,
         fill.mimeType,
-        fill.duotone,
+        pixelTransform(fill),
         fetchImage,
         {
           widthPt: canvasW / scale / PT_TO_EMU,
@@ -3758,6 +3772,44 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
       return;
     }
 
+    // ECMA-376 §20.1.9.15: custom geometry paths carry their own fill mode and
+    // stroke flag. Paint each path on its own, like the preset engine does, so
+    // an unfilled or unstroked path stays unfilled / unstroked. A silhouette
+    // uses the fill-bearing paths only.
+    const pathPaint = el.custGeom && el.custGeomPaint?.length === el.custGeom.length
+      ? el.custGeomPaint
+      : null;
+    if (el.custGeom && pathPaint) {
+      let shadowCleared = false;
+      el.custGeom.forEach((cmds, index) => {
+        const paint = pathPaint[index];
+        const filled = paint.fill !== 'none';
+        if (silhouette && !filled) return;
+        target.beginPath();
+        buildCustomPath(target, [cmds], bx, by, bw, bh);
+        if (filled) {
+          let painted = false;
+          if (tFill) {
+            target.fillStyle = tFill;
+            target.fill();
+            painted = true;
+          }
+          const overlay = painted && !silhouette ? pathFillModeOverlay(paint.fill) : null;
+          if (overlay) {
+            target.save();
+            target.fillStyle = overlay;
+            target.fill();
+            target.restore();
+          }
+          if (painted && !silhouette && !shadowCleared) {
+            tClearShadow();
+            shadowCleared = true;
+          }
+        }
+        if (paint.stroke && tStroke) tStroke();
+      });
+      return;
+    }
     target.beginPath();
     if (el.custGeom && el.custGeom.length > 0) {
       buildCustomPath(target, el.custGeom, bx, by, bw, bh);
@@ -4548,7 +4600,9 @@ export function renderTextBody(
     const firstLineIndentPx = firstLineIndentPxFor(hasBullet, indentPx);
     const lines = layoutParagraph(ctx, para, maxW, paraDefaultFontSizePx, paraDefaultColor, scale, marLPx, bodyDefaultBold, bodyDefaultItalic, fontScale, slideNumber, rc, firstLineIndentPx);
 
-    // spaceBefore/After are in hundredths of a point → convert to canvas px
+    // spaceBefore/After are in hundredths of a point → convert to canvas px.
+    // Percentage forms (ECMA-376 §21.1.2.3.11 spcPct) are resolved per line
+    // below, against the text size of the line the spacing is attached to.
     const spaceBeforePx = para.spaceBefore != null ? (para.spaceBefore / 100) * PT_TO_EMU * scale * fontScale : 0;
     const spaceAfterPx  = para.spaceAfter  != null ? (para.spaceAfter  / 100) * PT_TO_EMU * scale * fontScale : 0;
 
@@ -4662,14 +4716,34 @@ export function renderTextBody(
       if (body.autoFit === 'norm' && body.lnSpcReduction != null && para.spaceLine?.type !== 'pts') {
         lineHeight *= 1 - body.lnSpcReduction;
       }
-      const linePx  = lineHeight + (isLast ? spaceAfterPx : 0);
-      // ECMA-376 §21.1.2.2.6 (a:spcBef): paragraph "space before" is the gap
-      // *between* paragraphs. PowerPoint suppresses it on the first paragraph
-      // of a text body — otherwise placeholders whose layout-default `spcBef`
-      // is 10 pt (sample-1 slide-5 "Figure 1." caption inherits this from the
-      // layout body lstStyle) get pushed ~10 px below the placeholder top and
-      // collide with the chart title sitting just below in the slide.
-      const topGap  = isFirst && paraIdx > 0 ? spaceBeforePx : 0;
+      // ECMA-376 §21.1.2.2.9-.10 with §21.1.2.3.11: a percentage spcBef /
+      // spcAft is a fraction of the text size, 100000 being one line. It is
+      // taken from the first line for space before and from the last line for
+      // space after. PowerPoint's unit is one single line of that text: its
+      // largest size × 1.2. It does not depend on the paragraph's lnSpc,
+      // lnSpcReduction, or a substituted font's design line. This comes from
+      // PowerPoint's PDF of a spacing control deck: 100% before and after
+      // 40 pt Arial or Meiryo adds 48 pt with lnSpc 100% and with lnSpc 80%.
+      // A 20 pt line adds 24 pt, a 20 + 40 pt line adds 48 pt, and a two-line
+      // paragraph uses its first line for before and its last line for after.
+      // Paint and table measurement use the same base.
+      const lineSpaceAfterPx = isLast && para.spaceAfterPct != null
+        ? naturalSingle * (para.spaceAfterPct / 100000)
+        : spaceAfterPx;
+      const lineSpaceBeforePx = isFirst && para.spaceBeforePct != null
+        ? naturalSingle * (para.spaceBeforePct / 100000)
+        : spaceBeforePx;
+      // ECMA-376 §21.1.2.1.1 bodyPr@spcFirstLastPara (default false): the
+      // first paragraph's space before and the last paragraph's space after
+      // are not respected at the edges of the text body. Otherwise
+      // placeholders whose layout-default `spcBef` is 10 pt (sample-1 slide-5
+      // "Figure 1." caption) get pushed below the placeholder top, and a
+      // bottom- or centre-anchored body is lifted by its trailing spcAft.
+      const respectEdges = body.spcFirstLastPara === true;
+      const lastParagraph = paraIdx === body.paragraphs.length - 1;
+      const linePx  = lineHeight
+        + (isLast && (respectEdges || !lastParagraph) ? lineSpaceAfterPx : 0);
+      const topGap  = isFirst && (respectEdges || paraIdx > 0) ? lineSpaceBeforePx : 0;
       // Non-bullet first-line indent, clamped ≥ 0 via firstLineIndentPxFor so the
       // draw offset matches the wrap budget and the spAutoFit measurement. A
       // negative ("hanging") indent is NOT honored at draw time — it would shift
@@ -4706,7 +4780,9 @@ export function renderTextBody(
       requiredHeight = Math.max(
         requiredHeight,
         totalHeight,
-        lineTop + requiredLineHeight + (isLast ? spaceAfterPx : 0),
+        // The space after actually applied to this line: percentage and
+        // spcFirstLastPara edge rules included (linePx above).
+        lineTop + requiredLineHeight + (linePx - lineHeight),
       );
     }
   }
@@ -5907,10 +5983,10 @@ async function renderPicture(
     const vector = preferVectorBlip(el) || dataIsSvg;
     const target = vector
       ? rawTarget
-      : imagePlan && !el.duotone
+      : imagePlan && !pixelTransform(el)
         ? plannedRasterOptions(
           imagePlan,
-          imagePlanKey(pictureResourcePath(el), vector ? undefined : el.duotone),
+          imagePlanKey(pictureResourcePath(el), vector ? undefined : pixelTransform(el)),
         )
         : undefined;
     const svgPixelLimit = target && 'maxRetainedPixels' in target
@@ -5945,7 +6021,7 @@ async function renderPicture(
         // SVG vector original has no readable pixel grid (matches xlsx).
         bitmap = dataIsSvg
           ? await getCachedSvgImageByPath(el.imagePath, fetchImage, svgOptions)
-          : await getCachedDuotoneBitmapByPath(el.imagePath, el.mimeType, el.duotone, fetchImage, {
+          : await getCachedDuotoneBitmapByPath(el.imagePath, el.mimeType, pixelTransform(el), fetchImage, {
               widthPt,
               heightPt,
               ...(target ?? {}),
@@ -5965,7 +6041,7 @@ async function renderPicture(
       bitmap = await getCachedDuotoneBitmapByPath(
         el.imagePath,
         el.mimeType,
-        el.duotone,
+        pixelTransform(el),
         fetchImage,
         { widthPt, heightPt, ...(target ?? {}), tiff },
       );
@@ -6153,6 +6229,19 @@ async function renderPicture(
       ow: number,
       oh: number,
     ): void => {
+      // spPr fill (§19.3.1.37): painted inside the silhouette BEHIND the blip,
+      // visible through transparent pixels. Image fills need their own decode
+      // and are not painted here.
+      const backing = el.fill && el.fill.fillType !== 'none' && el.fill.fillType !== 'image'
+        ? resolveShapeFill(el.fill, target, ox, oy, ow, oh, el.rotation)
+        : null;
+      if (backing) {
+        target.save();
+        tracePictureSilhouette(target, ox, oy, ow, oh);
+        target.fillStyle = backing;
+        target.fill();
+        target.restore();
+      }
       target.save();
       applyClipAt(target, ox, oy, ow, oh);
       drawImageCropped(target, bitmap, el.srcRect, ox, oy, ow, oh);
@@ -7373,10 +7462,10 @@ async function renderSlideLeased(
       const p = el as PictureElement;
       const pDataIsSvg = p.mimeType === 'image/svg+xml';
       const pVector = preferVectorBlip(p) || pDataIsSvg;
-      const planned = !pVector && !p.duotone
+      const planned = !pVector && !pixelTransform(p)
         ? plannedRasterOptions(
             imagePlan,
-            imagePlanKey(pictureResourcePath(p), p.duotone),
+            imagePlanKey(pictureResourcePath(p), pixelTransform(p)),
           )
         : undefined;
       const rawTarget = rasterTargetOptions(
@@ -7415,7 +7504,7 @@ async function renderSlideLeased(
         // Warm through the duotone cache so a §20.1.8.23 recolour picture warms
         // its recoloured variant (keyed by path + colours); no duotone ⇒ this is
         // the plain base-bitmap warm, byte-identical to before.
-        void getCachedDuotoneBitmapByPath(p.imagePath, p.mimeType, p.duotone, opts.fetchImage, {
+        void getCachedDuotoneBitmapByPath(p.imagePath, p.mimeType, pixelTransform(p), opts.fetchImage, {
           widthPt: warm.widthPt,
           heightPt: warm.heightPt,
           ...(target ?? {}),
@@ -7527,10 +7616,10 @@ async function renderSlideLeased(
         // native-sized, even when another chart stretches the same blip.
         const preserveNaturalSize = prior.preserveNaturalSize || usage.preserveNaturalSize;
         const hasSourceCrop = prior.hasSourceCrop || usage.hasSourceCrop;
-        const planned = preserveNaturalSize || fill.duotone
+        const planned = preserveNaturalSize || pixelTransform(fill)
           ? undefined
-          : plannedRasterOptions(imagePlan, imagePlanKey(fill.imagePath, fill.duotone));
-        const vector = !fill.duotone
+          : plannedRasterOptions(imagePlan, imagePlanKey(fill.imagePath, pixelTransform(fill)));
+        const vector = !pixelTransform(fill)
           && (fill.mimeType === 'image/svg+xml' || preferVectorBlip({
             svgImagePath: fill.svgImagePath,
             srcRect: hasSourceCrop ? true : null,
@@ -7628,12 +7717,12 @@ async function renderSlideLeased(
           : undefined;
         try {
           const decodeFallback = () => fill.mimeType === 'image/svg+xml'
-            ? fill.duotone ? Promise.resolve(null) : getCachedSvgImageByPath(fill.imagePath, fetchImage, {
+            ? pixelTransform(fill) ? Promise.resolve(null) : getCachedSvgImageByPath(fill.imagePath, fetchImage, {
                 ...(target ?? {}),
                 workerDecoder: opts.svgDecoder,
               })
             : getCachedDuotoneBitmapByPath(
-                fill.imagePath, fill.mimeType, fill.duotone, fetchImage,
+                fill.imagePath, fill.mimeType, pixelTransform(fill), fetchImage,
                 {
                   widthPt,
                   heightPt,
@@ -7647,7 +7736,7 @@ async function renderSlideLeased(
             svgImagePath: fill.svgImagePath,
             srcRect: hasSourceCrop ? true : null,
           };
-          if (!fill.duotone && preferVectorBlip(blip)) {
+          if (!pixelTransform(fill) && preferVectorBlip(blip)) {
             try {
               bitmap = await getCachedSvgImageByPath(blip.svgImagePath, fetchImage, {
                 ...(target ?? {}),
