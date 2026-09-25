@@ -2448,8 +2448,9 @@ specification says it SHOULD be ignored; implementation note 32 says Office
 
 The direct PPT source therefore adopts the alternative XML for a shape only
 when it agrees with the binary shape on what both record and the direct model
-can compare: the same preset (and adjust values within master-unit rounding)
-or custom geometry on both sides, the same untransformed position, size,
+can compare: the same preset (and adjust values within master-unit rounding,
+an omitted value standing for the preset default of ECMA-376
+`presetShapeDefinitions.xml`) or custom geometry on both sides, the same untransformed position, size,
 rotation and flips (group children in their unscaled child space), the same
 solid fill color when both have one, the same run font size, bold and italic
 where both state them, and the same paragraph, run and line-break structure
