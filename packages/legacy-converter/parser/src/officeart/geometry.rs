@@ -1,6 +1,6 @@
 //! Explicit OfficeArt paths, independent of the source Office application.
-//! MS-ODRAW 2.2.51/53-55, 2.3.6.1-9, 2.4.9/30-31. Output is ECMA-376
-//! 20.1.9.6-8/13-16 custom geometry, with no binary-aware renderer commands.
+//! MS-ODRAW 2.2.51/53-55, 2.3.6.1-9, 2.4.9/30-31, decoded into the path
+//! commands of ECMA-376 20.1.9.6-8/13-16 custom geometry.
 use super::unsupported;
 
 #[derive(Clone, Copy)]
@@ -11,6 +11,7 @@ pub(crate) struct GeometryStorage<T> {
     segments: Option<T>,
 }
 pub(crate) type Geometry<'a> = GeometryStorage<&'a [u8]>;
+#[cfg(any(test, feature = "direct-ppt"))]
 pub(crate) type SpannedGeometry = GeometryStorage<super::ByteSpan>;
 
 impl<T> Default for GeometryStorage<T> {
@@ -52,6 +53,7 @@ impl<T: Default + Clone> GeometryStorage<T> {
     }
     /// OfficeArt property inheritance preserves explicit empty arrays as resets.
     /// Borrowed arrays never expand until a visible destination needs the path.
+    #[cfg(any(test, feature = "direct-ppt"))]
     pub fn inherit(&self, parent: &Self) -> Self {
         Self {
             bounds: std::array::from_fn(|i| self.bounds[i].or(parent.bounds[i])),
@@ -62,6 +64,7 @@ impl<T: Default + Clone> GeometryStorage<T> {
     }
 }
 
+#[cfg(any(test, feature = "direct-ppt"))]
 impl SpannedGeometry {
     /// Materialize only borrowed views over the owning session's immutable
     /// backing. Bounds/inheritance/path decoding are shared with borrowed users;
@@ -274,19 +277,19 @@ impl Decoded {
     feature = "direct-xls"
 ))]
 impl DecodedPath<'_> {
-    #[cfg(any(test, feature = "direct-ppt", feature = "direct-xls"))]
+    #[cfg(any(feature = "direct-ppt", feature = "direct-xls"))]
     pub(crate) fn fill(&self) -> bool {
         self.path.fill
     }
 
-    #[cfg(any(test, feature = "direct-ppt", feature = "direct-xls"))]
+    #[cfg(any(feature = "direct-ppt", feature = "direct-xls"))]
     pub(crate) fn stroke(&self) -> bool {
         self.path.stroke
     }
 
     /// The fill flag as authored (segment escapes only), before the
     /// PowerPoint open-path veto applied by `fill`.
-    #[cfg(any(test, feature = "direct-ppt", feature = "direct-xls"))]
+    #[cfg(any(feature = "direct-ppt", feature = "direct-xls"))]
     pub(crate) fn authored_fill(&self) -> bool {
         self.path.authored_fill
     }
@@ -376,9 +379,9 @@ fn array(bytes: &[u8]) -> Result<(usize, usize, &[u8]), String> {
     Ok((n, size, &bytes[6..]))
 }
 impl Decoded {
-    /// Like `uniform_paint`, but with each path's authored fill flag: a host
-    /// whose application fills open paths (DrawingML closes them implicitly
-    /// for fill) uses this instead of the open-path veto.
+    /// The (authored fill, stroke) flags shared by every path, if they agree.
+    /// A host whose application fills open paths (DrawingML closes them
+    /// implicitly for fill) uses the authored fill, not the open-path veto.
     #[cfg(feature = "direct-doc")]
     pub fn uniform_authored_paint(&self) -> Option<(bool, bool)> {
         let first = self.paths.first()?;
@@ -386,54 +389,6 @@ impl Decoded {
             .iter()
             .all(|p| p.authored_fill == first.authored_fill && p.stroke == first.stroke)
             .then_some((first.authored_fill, first.stroke))
-    }
-    pub fn uniform_paint(&self) -> Option<(bool, bool)> {
-        let first = self.paths.first()?;
-        self.paths
-            .iter()
-            .all(|p| p.fill == first.fill && p.stroke == first.stroke)
-            .then_some((first.fill, first.stroke))
-    }
-    pub fn write_xml(&self, output: &mut String, budget: &mut usize) -> Result<(), String> {
-        fn push(output: &mut String, budget: &mut usize, s: &str) -> Result<(), String> {
-            *budget = budget
-                .checked_sub(s.len())
-                .ok_or_else(|| "OUTPUT_TOO_LARGE".to_string())?;
-            output.push_str(s);
-            Ok(())
-        }
-        push(output,budget,"<a:custGeom><a:avLst/><a:gdLst/><a:ahLst/><a:cxnLst/><a:rect l=\"0\" t=\"0\" r=\"r\" b=\"b\"/><a:pathLst>")?;
-        for path in &self.paths {
-            push(
-                output,
-                budget,
-                &format!(
-                    "<a:path w=\"{}\" h=\"{}\" fill=\"{}\" stroke=\"{}\">",
-                    self.width,
-                    self.height,
-                    if path.fill { "norm" } else { "none" },
-                    u8::from(path.stroke)
-                ),
-            )?;
-            for command in &path.commands {
-                let (tag, points): (&str, &[Point]) = match command {
-                    DecodedCommand::Move(p) => ("moveTo", std::slice::from_ref(p)),
-                    DecodedCommand::Line(p) => ("lnTo", std::slice::from_ref(p)),
-                    DecodedCommand::Cubic(p) => ("cubicBezTo", p),
-                    DecodedCommand::Close => {
-                        push(output, budget, "<a:close/>")?;
-                        continue;
-                    }
-                };
-                push(output, budget, &format!("<a:{tag}>"))?;
-                for [x, y] in points {
-                    push(output, budget, &format!("<a:pt x=\"{x}\" y=\"{y}\"/>"))?;
-                }
-                push(output, budget, &format!("</a:{tag}>"))?;
-            }
-            push(output, budget, "</a:path>")?;
-        }
-        push(output, budget, "</a:pathLst></a:custGeom>")
     }
 }
 
@@ -460,7 +415,7 @@ mod tests {
         assert_eq!(work, 98);
         // The original decoder remains the sole geometry interpretation.
         let expected = geometry(&moved, None).decode(&mut 100).unwrap().unwrap();
-        assert_eq!(xml(&decoded), xml(&expected));
+        assert_eq!(describe(&decoded), describe(&expected));
         inherited.scalar(0x145, 0).unwrap();
         assert!(inherited
             .inherit(&parent)
@@ -501,10 +456,35 @@ mod tests {
             ..Geometry::default()
         }
     }
-    fn xml(d: &Decoded) -> String {
-        let mut out = String::new();
-        d.write_xml(&mut out, &mut 100000).unwrap();
+    /// The decoded path: `w=W h=H`, then per path its fill/stroke flags and
+    /// commands (M/L move and line, C cubic, Z close) with their points.
+    fn describe(d: &Decoded) -> String {
+        let mut out = format!("w={} h={}", d.width, d.height);
+        for path in &d.paths {
+            out.push_str(&format!(" | fill={} stroke={}:", path.fill, path.stroke));
+            for command in &path.commands {
+                match command {
+                    DecodedCommand::Move([x, y]) => out.push_str(&format!(" M({x},{y})")),
+                    DecodedCommand::Line([x, y]) => out.push_str(&format!(" L({x},{y})")),
+                    DecodedCommand::Cubic(points) => {
+                        out.push_str(" C");
+                        for [x, y] in points {
+                            out.push_str(&format!("({x},{y})"));
+                        }
+                    }
+                    DecodedCommand::Close => out.push_str(" Z"),
+                }
+            }
+        }
         out
+    }
+
+    /// (fill, stroke) of each decoded path.
+    fn flags(d: &Decoded) -> Vec<(bool, bool)> {
+        d.paths
+            .iter()
+            .map(|path| (path.fill, path.stroke))
+            .collect()
     }
     #[test]
     fn explicit_cubic_geometry_translates_its_signed_coordinate_space() {
@@ -517,12 +497,11 @@ mod tests {
         // A nonempty segment list overrides shapePath, including an unused value.
         g.scalar(0x144, 99).unwrap();
         let d = g.decode(&mut 100).unwrap().unwrap();
-        let out = xml(&d);
-        assert!(out.contains("w=\"100\" h=\"100\""));
-        assert!(out.contains("<a:moveTo><a:pt x=\"0\" y=\"0\"/></a:moveTo>"));
-        assert!(out.contains("<a:cubicBezTo><a:pt x=\"10\" y=\"10\"/><a:pt x=\"50\" y=\"30\"/><a:pt x=\"80\" y=\"60\"/></a:cubicBezTo>"));
-        assert_eq!(d.uniform_paint(), Some((true, true)));
-        assert!(out.contains("<a:close/>"));
+        assert_eq!(
+            describe(&d),
+            "w=100 h=100 | fill=true stroke=true: M(0,0) C(10,10)(50,30)(80,60) L(0,0) Z"
+        );
+        assert_eq!(flags(&d), [(true, true)]);
     }
     #[test]
     fn absent_or_empty_segments_use_the_declared_polygon_or_curve_path() {
@@ -533,10 +512,10 @@ mod tests {
                 let mut g = geometry(&v, s);
                 g.scalar(0x144, path).unwrap();
                 let d = g.decode(&mut 100).unwrap().unwrap();
-                let out = xml(&d);
-                assert_eq!(out.contains("<a:cubicBezTo>"), path >= 2);
-                assert_eq!(out.contains("<a:close/>"), path & 1 != 0);
-                assert_eq!(d.uniform_paint(), Some((path & 1 != 0, true)));
+                let out = describe(&d);
+                assert_eq!(out.contains(" C("), path >= 2);
+                assert_eq!(out.ends_with(" Z"), path & 1 != 0);
+                assert_eq!(flags(&d), [(path & 1 != 0, true)]);
             }
         }
         let mut g = geometry(&v, None);
@@ -550,11 +529,7 @@ mod tests {
             0x4000, 1, 0x6001, 0xaa00, 0x8000, 0x4000, 1, 0x6001, 0xab00, 0x8000,
         ]);
         let d = geometry(&v, Some(&s)).decode(&mut 100).unwrap().unwrap();
-        assert_eq!(d.paths.len(), 2);
-        assert_eq!(d.uniform_paint(), None);
-        let out = xml(&d);
-        assert!(out.contains("fill=\"none\" stroke=\"1\""));
-        assert!(out.contains("fill=\"norm\" stroke=\"0\""));
+        assert_eq!(flags(&d), [(false, true), (true, false)]);
     }
     #[test]
     fn rejects_truncated_arrays_and_inconsistent_allocation_headers() {
@@ -614,10 +589,10 @@ mod tests {
         let mut g = geometry(&v, None);
         g.bounds = [Some(10), Some(40), Some(10), Some(20)];
         g.path = Some(0);
-        let out = xml(&g.decode(&mut 100).unwrap().unwrap());
-        assert!(out.contains("w=\"1\" h=\"20\""));
-        assert!(out.contains("x=\"0\" y=\"20\""));
-        assert!(out.contains("x=\"0\" y=\"0\""));
+        let out = describe(&g.decode(&mut 100).unwrap().unwrap());
+        assert!(out.starts_with("w=1 h=20"), "{out}");
+        assert!(out.contains("(0,20)"), "{out}");
+        assert!(out.contains("(0,0)"), "{out}");
         g.bounds[0] = Some(0);
         g.bounds[2] = Some(0);
         assert!(g.decode(&mut 100).unwrap().is_none());
@@ -629,11 +604,7 @@ mod tests {
         let mut g = geometry(&v, Some(&s));
         let mut budget = 4;
         assert!(g.decode(&mut budget).is_err());
-        let d = g.decode(&mut 5).unwrap().unwrap();
-        assert!(d
-            .write_xml(&mut String::new(), &mut 20)
-            .unwrap_err()
-            .contains("OUTPUT_TOO_LARGE"));
+        assert!(g.decode(&mut 5).unwrap().is_some());
         assert!(g.scalar(0x145, 4).is_err());
         g.scalar(0x145, 0).unwrap();
         assert!(g.decode(&mut 0).unwrap().is_none());
@@ -647,7 +618,7 @@ mod tests {
         child.scalar(0x142, 50).unwrap();
         let inherited = child.inherit(&parent);
         assert_eq!(inherited.vertices.unwrap().as_ptr(), v.as_ptr());
-        assert!(xml(&inherited.decode(&mut 100).unwrap().unwrap()).contains("w=\"40\" h=\"20\""));
+        assert!(describe(&inherited.decode(&mut 100).unwrap().unwrap()).starts_with("w=40 h=20"));
         child.scalar(0x145, 0).unwrap();
         assert!(child.inherit(&parent).decode(&mut 0).unwrap().is_none());
     }

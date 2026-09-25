@@ -49,9 +49,9 @@ impl Details {
     pub fn property(&mut self, id: u16, value: u32) -> Result<(), String> {
         match id {
             0x1cc => {
-                // This writer uses Transitional integer percentages, whose
-                // ST_PercentageDecimal base is xsd:int. Reject unrepresentable
-                // values rather than clamp them or emit invalid DrawingML.
+                // A DrawingML miter limit is an integer percentage (ECMA-376
+                // 20.1.8.43, ST_PositivePercentage over xsd:int). Reject a
+                // limit it cannot state rather than clamp it.
                 if value > i32::MAX as u32 || miter_percentage(value) > i32::MAX as u64 {
                     return Err(unsupported(
                         "OfficeArt line miter limit outside output range",
@@ -73,12 +73,14 @@ impl Details {
         }
         Ok(())
     }
+    #[cfg(any(test, feature = "direct-ppt"))]
     pub fn inherit(&self, parent: &Self) -> Self {
         Self {
             values: std::array::from_fn(|i| self.values[i].or(parent.values[i])),
             miter: self.miter.or(parent.miter),
         }
     }
+    #[cfg(any(test, feature = "direct-ppt"))]
     pub fn specified(&self) -> bool {
         self.miter.is_some() || self.values.iter().any(Option::is_some)
     }
@@ -136,28 +138,6 @@ impl Details {
             }
         })
     }
-    pub fn children_xml(&self) -> String {
-        let mut xml = match self.values[6].unwrap_or(2) {
-            0 => "<a:bevel/>".to_string(),
-            1 => {
-                // Signed 16.16 ratio -> DrawingML thousandths of a percent.
-                let limit = miter_percentage(self.miter.unwrap_or(0x80000));
-                format!("<a:miter lim=\"{limit}\"/>")
-            }
-            _ => "<a:round/>".to_string(),
-        };
-        for (index, tag) in [(0, "headEnd"), (1, "tailEnd")] {
-            let kind = ["none", "triangle", "stealth", "diamond", "oval", "arrow"]
-                [usize::from(self.values[index].unwrap_or(0))];
-            let sizes = ["sm", "med", "lg"];
-            let width = sizes[usize::from(self.values[2 + index * 2].unwrap_or(1))];
-            let length = sizes[usize::from(self.values[3 + index * 2].unwrap_or(1))];
-            xml.push_str(&format!(
-                "<a:{tag} type=\"{kind}\" w=\"{width}\" len=\"{length}\"/>"
-            ));
-        }
-        xml
-    }
 }
 
 fn miter_percentage(value: u32) -> u64 {
@@ -193,11 +173,13 @@ mod tests {
                     ] {
                         d.property(id, value as u32).unwrap();
                     }
-                    let xml = d.children_xml();
-                    for tag in ["headEnd", "tailEnd"] {
-                        assert!(xml.contains(&format!(
-                            "<a:{tag} type=\"{name}\" w=\"{w}\" len=\"{len}\"/>"
-                        )));
+                    for index in 0..2 {
+                        let expected = (*name != "none").then_some(LineEnd {
+                            kind: name,
+                            width: w,
+                            length: len,
+                        });
+                        assert_eq!(d.line_end(index), expected);
                     }
                 }
             }
@@ -211,10 +193,7 @@ mod tests {
             let mut child = Details::default();
             child.property(0x1d0, ignored).unwrap();
             assert!(!child.specified());
-            assert!(child
-                .inherit(&parent)
-                .children_xml()
-                .contains("type=\"triangle\""));
+            assert_eq!(child.inherit(&parent).line_end(0).unwrap().kind, "triangle");
         }
         for id in 0x1d0..=0x1d7 {
             let invalid = if id <= 0x1d1 { 8 } else { 3 };
@@ -223,16 +202,13 @@ mod tests {
         assert!(Details::default().property(0x1cc, u32::MAX).is_err());
         let mut child = Details::default();
         child.property(0x1d0, 0).unwrap();
-        assert!(!child
-            .inherit(&parent)
-            .children_xml()
-            .contains("type=\"triangle\""));
+        assert_eq!(child.inherit(&parent).line_end(0), None);
     }
     #[test]
     fn retains_cap_join_and_fixed_point_miter_values_independently() {
         for (cap, name) in ["rnd", "sq", "flat"].iter().enumerate() {
-            for (join, tag) in ["<a:bevel/>", "<a:miter lim=\"150000\"/>", "<a:round/>"]
-                .iter()
+            for (join, expected) in [("bevel", None), ("miter", Some(1.5)), ("round", None)]
+                .into_iter()
                 .enumerate()
             {
                 let mut d = Details::default();
@@ -240,26 +216,24 @@ mod tests {
                 d.property(0x1d6, join as u32).unwrap();
                 d.property(0x1cc, 0x18000).unwrap();
                 assert_eq!(d.cap(), *name);
-                assert!(d.children_xml().starts_with(tag));
+                assert_eq!(d.join(), expected);
             }
         }
         let d = Details::default();
         assert_eq!(d.cap(), "flat");
-        assert!(d.children_xml().starts_with("<a:round/>"));
+        assert_eq!(d.join(), ("round", None));
     }
 
     #[test]
-    fn miter_conversion_stays_in_the_transitional_integer_percentage_range() {
+    fn miter_limit_stays_within_the_integer_percentage_range() {
         // Include values that round to, rather than exceed, xsd:int::MAX.
         let maximum = ((i32::MAX as u64 * 65536 + 32767) / 100000) as u32;
         let mut d = Details::default();
         d.property(0x1d6, 1).unwrap();
         d.property(0x1cc, maximum).unwrap();
-        assert!(d
-            .children_xml()
-            .starts_with("<a:miter lim=\"2147483647\"/>"));
+        assert_eq!(d.join(), ("miter", Some(f64::from(maximum) / 65536.0)));
         assert!(d.property(0x1cc, maximum + 1).is_err());
         d.property(0x1cc, 0).unwrap();
-        assert!(d.children_xml().starts_with("<a:miter lim=\"0\"/>"));
+        assert_eq!(d.join(), ("miter", Some(0.0)));
     }
 }

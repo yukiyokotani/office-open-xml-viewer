@@ -1,8 +1,6 @@
 //! BIFF8 rich shared strings (MS-XLS 2.5.132 and 2.5.293).
 
 use super::{styles::ResolvedStyleSheet, unsupported};
-use crate::ooxml::xml_text;
-use std::collections::BTreeMap;
 
 pub(super) const MAX_MODEL_BYTES: usize = 256 * 1024 * 1024;
 
@@ -71,31 +69,9 @@ impl Text {
         Ok(())
     }
 
-    /// Materialize one SpreadsheetML string item for the byte-conversion route.
-    /// The caller owns the route-wide output budget so repeated cell expansion
-    /// remains bounded without retaining generated XML in the neutral SST.
-    #[cfg(test)]
-    pub(super) fn xml(
-        &self,
-        styles: &ResolvedStyleSheet,
-        budget: &mut usize,
-    ) -> Result<String, String> {
-        XmlEncoder::new(styles, budget).encode(self)
-    }
-
     /// Project one neutral BIFF SST entry directly to the renderer model.
-    /// Every owned allocation is charged before reservation or cloning.
-    #[allow(dead_code)] // Consumed by the direct XLS session in the next unit.
-    pub(super) fn model(
-        &self,
-        styles: &ResolvedStyleSheet,
-        budget: &mut usize,
-    ) -> Result<xlsx_model::SharedString, String> {
-        charge_model(budget, std::mem::size_of::<xlsx_model::SharedString>())?;
-        self.model_into_reserved_slot(styles, budget)
-    }
-
-    /// The owning vector has already charged and reserved this SharedString slot.
+    /// Every owned allocation is charged before reservation or cloning; the
+    /// owning vector has already charged and reserved this SharedString slot.
     pub(super) fn model_into_reserved_slot(
         &self,
         styles: &ResolvedStyleSheet,
@@ -144,73 +120,19 @@ impl Text {
     }
 }
 
-/// Byte-route-only adapter. Its font cache exists only while `finish` creates
-/// the unique SST XML fragments; neutral preparation and direct projection do
-/// not retain OOXML strings.
-pub(super) struct XmlEncoder<'a, 'b> {
-    styles: &'a ResolvedStyleSheet,
-    fonts: BTreeMap<u16, String>,
-    budget: &'b mut usize,
-}
-
-impl<'a, 'b> XmlEncoder<'a, 'b> {
-    pub(super) fn new(styles: &'a ResolvedStyleSheet, budget: &'b mut usize) -> Self {
-        Self {
-            styles,
-            fonts: BTreeMap::new(),
-            budget,
-        }
-    }
-
-    pub(super) fn encode(&mut self, value: &Text) -> Result<String, String> {
-        let mut xml = String::new();
-        if value.runs.is_empty() {
-            append(
-                &mut xml,
-                &format!("<t xml:space=\"preserve\">{}</t>", xml_text(&value.text)),
-                self.budget,
-            )?;
-        } else {
-            let first = value.runs[0].0;
-            if first != 0 {
-                append_run(&mut xml, "", &value.text[..first], self.budget)?;
-            }
-            for (index, &(start, font)) in value.runs.iter().enumerate() {
-                if !self.fonts.contains_key(&font) {
-                    self.fonts.insert(font, self.styles.run_font_xml(font)?);
-                }
-                let end = value
-                    .runs
-                    .get(index + 1)
-                    .map_or(value.text.len(), |run| run.0);
-                append_run(
-                    &mut xml,
-                    &self.fonts[&font],
-                    &value.text[start..end],
-                    self.budget,
-                )?;
-            }
-        }
-        Ok(xml)
-    }
-}
-
 fn retained_budget_error() -> String {
     unsupported("BIFF retained shared string byte budget exceeded")
 }
 
-#[allow(dead_code)] // Used by the direct-model adapter above.
 fn model_budget_error() -> String {
     unsupported("BIFF shared string model byte budget exceeded")
 }
 
-#[allow(dead_code)] // Used by the direct-model adapter above.
 fn charge_model(budget: &mut usize, bytes: usize) -> Result<(), String> {
     *budget = budget.checked_sub(bytes).ok_or_else(model_budget_error)?;
     Ok(())
 }
 
-#[allow(dead_code)] // Used by the direct-model adapter above.
 fn clone_bounded(value: &str, budget: &mut usize) -> Result<String, String> {
     charge_model(budget, value.len())?;
     let mut output = String::new();
@@ -221,36 +143,10 @@ fn clone_bounded(value: &str, budget: &mut usize) -> Result<String, String> {
     Ok(output)
 }
 
-fn append_run(
-    xml: &mut String,
-    properties: &str,
-    text: &str,
-    budget: &mut usize,
-) -> Result<(), String> {
-    append(
-        xml,
-        &format!(
-            "<r>{properties}<t xml:space=\"preserve\">{}</t></r>",
-            xml_text(text)
-        ),
-        budget,
-    )
-}
-fn append(xml: &mut String, part: &str, budget: &mut usize) -> Result<(), String> {
-    *budget = budget
-        .checked_sub(part.len())
-        .ok_or_else(|| "OUTPUT_TOO_LARGE".to_string())?;
-    xml.push_str(part);
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
-    use crate::{
-        cfb::{test_support::build_cfb, CompoundFile},
-        convert_native, LegacyFormat,
-    };
-    use std::io::{Cursor, Read};
+    use crate::cfb::{test_support::build_scoped_cfb, CompoundFile};
+    use crate::xls::direct::DirectSession;
 
     fn record(kind: u16, data: &[u8]) -> Vec<u8> {
         [
@@ -296,35 +192,26 @@ mod tests {
         stream.extend(record(0x0809, &[0, 6, 0x10, 0]));
         stream.extend(record(0xfd, &[0; 10]));
         stream.extend(record(0x0a, &[]));
-        build_cfb(&[("Workbook", stream)])
+        build_scoped_cfb(&[("Workbook", stream)])
+    }
+
+    /// Standalone projection charge: the owning vector's slot plus payload.
+    fn model(
+        text: &super::Text,
+        styles: &super::ResolvedStyleSheet,
+        budget: &mut usize,
+    ) -> Result<xlsx_model::SharedString, String> {
+        super::charge_model(budget, std::mem::size_of::<xlsx_model::SharedString>())?;
+        text.model_into_reserved_slot(styles, budget)
     }
 
     #[test]
-    fn emits_run_fonts_and_normal_reset_without_validating_the_end_sentinel_font() {
-        let input = workbook("base RED normal", &[(5, 5), (9, 0), (15, u16::MAX)]);
-        let output = convert_native(&input, LegacyFormat::Xls, 1_000_000).unwrap();
-        let mut archive = zip::ZipArchive::new(Cursor::new(output.bytes)).unwrap();
-        let mut xml = String::new();
-        archive
-            .by_name("xl/worksheets/sheet1.xml")
-            .unwrap()
-            .read_to_string(&mut xml)
-            .unwrap();
-        assert!(xml.contains("<r><t xml:space=\"preserve\">base </t></r>"));
-        assert!(xml.contains("<rFont val=\"Arial\"/>") && xml.contains("<sz val=\"24\"/>"));
-        assert!(xml.contains("<color indexed=\"10\"/>") && xml.contains("<b val=\"0\"/>"));
-        assert!(xml.contains(">RED </t></r>") && xml.contains(">normal</t></r>"));
-    }
-
-    #[test]
-    fn direct_model_matches_the_parser_visible_rich_run_semantics() {
+    fn direct_model_projects_run_fonts_and_resets_without_the_end_sentinel_font() {
         let input = workbook("base RED normal", &[(5, 5), (9, 0), (15, u16::MAX)]);
         let cfb = CompoundFile::open(&input).unwrap();
-        let prepared = super::super::prepare(&cfb, false).unwrap();
+        let prepared = super::super::prepare(&cfb).unwrap();
         let mut budget = super::MAX_MODEL_BYTES;
-        let value = prepared.shared_strings[0]
-            .model(&prepared.styles, &mut budget)
-            .unwrap();
+        let value = model(&prepared.shared_strings[0], &prepared.styles, &mut budget).unwrap();
         let required = super::MAX_MODEL_BYTES - budget;
         assert_eq!(
             required,
@@ -335,7 +222,7 @@ mod tests {
                 + "#FF0000".len()
         );
         assert_eq!(value.text, "base RED normal");
-        let runs = value.runs.unwrap();
+        let runs = value.runs.clone().unwrap();
         assert_eq!(runs.len(), 3);
         assert_eq!(runs[0].text, "base ");
         assert!(runs[0].font.is_none());
@@ -351,6 +238,7 @@ mod tests {
             (red.underline_style.as_deref(), red.vert_align.as_deref()),
             (None, None)
         );
+        // The normal run explicitly resets the cell's bold XF font.
         let normal = runs[2].font.as_ref().unwrap();
         assert_eq!(runs[2].text, "normal");
         assert_eq!(
@@ -359,95 +247,65 @@ mod tests {
         );
         assert_eq!(normal.vert_align, None);
         let mut exact = required;
-        prepared.shared_strings[0]
-            .model(&prepared.styles, &mut exact)
-            .unwrap();
+        model(&prepared.shared_strings[0], &prepared.styles, &mut exact).unwrap();
         assert_eq!(exact, 0);
-        assert!(prepared.shared_strings[0]
-            .model(&prepared.styles, &mut (required - 1))
-            .is_err());
-
-        let converted = convert_native(&input, LegacyFormat::Xls, 1_000_000).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(
-            &xlsx_parser::parse_sheet_native(&converted.bytes, 0, "S").unwrap(),
+        assert!(model(
+            &prepared.shared_strings[0],
+            &prepared.styles,
+            &mut (required - 1)
         )
-        .unwrap();
-        let mut parsed_value = parsed["rows"][0]["cells"][0]["value"].clone();
+        .is_err());
+
+        // The session bootstrap carries the same projection.
+        let mut session = DirectSession::new(&cfb).unwrap();
+        let bootstrap = session.bootstrap().unwrap();
         assert_eq!(
-            parsed_value
-                .as_object_mut()
-                .unwrap()
-                .remove("type")
-                .unwrap(),
-            "text"
-        );
-        let mut comparison_budget = super::MAX_MODEL_BYTES;
-        assert_eq!(
-            serde_json::to_value(
-                prepared.shared_strings[0]
-                    .model(&prepared.styles, &mut comparison_budget)
-                    .unwrap()
-            )
-            .unwrap(),
-            parsed_value
+            serde_json::to_value(&bootstrap.shared_strings[0]).unwrap(),
+            serde_json::to_value(value).unwrap()
         );
     }
 
     #[test]
-    fn native_model_preserves_biff_controls_and_line_endings_without_xml_normalization() {
+    fn native_model_preserves_biff_controls_and_line_endings() {
         let source = "a\rb\r\nc\u{1}d";
         let text = super::Text::new(&source.encode_utf16().collect::<Vec<_>>(), &[]).unwrap();
         let styles = super::super::styles::minimal_resolved();
         let mut budget = super::MAX_MODEL_BYTES;
-        assert_eq!(text.model(&styles, &mut budget).unwrap().text, source);
-
-        let mut xml_budget = usize::MAX;
-        let xml = text.xml(&styles, &mut xml_budget).unwrap();
-        assert!(xml.contains("a\rb\r\nc�d"));
-    }
-
-    #[test]
-    fn reserved_slot_projection_charges_only_owned_payload() {
-        let styles = super::super::styles::minimal_resolved();
-        let text = super::Text::new(&"sample".encode_utf16().collect::<Vec<_>>(), &[]).unwrap();
-        let mut standalone = usize::MAX;
-        let expected = text.model(&styles, &mut standalone).unwrap();
-        let mut reserved = usize::MAX;
-        let actual = text
-            .model_into_reserved_slot(&styles, &mut reserved)
-            .unwrap();
-        assert_eq!(
-            reserved - standalone,
-            std::mem::size_of::<xlsx_model::SharedString>()
-        );
-        assert_eq!(
-            serde_json::to_value(actual).unwrap(),
-            serde_json::to_value(expected).unwrap()
-        );
-        let mut exact = usize::MAX - reserved;
-        text.model_into_reserved_slot(&styles, &mut exact).unwrap();
-        assert_eq!(exact, 0);
+        assert_eq!(model(&text, &styles, &mut budget).unwrap().text, source);
     }
 
     #[test]
     fn plain_model_charges_before_allocating_at_the_exact_boundary() {
         let text = super::Text::new(&"abc".encode_utf16().collect::<Vec<_>>(), &[]).unwrap();
         let styles = super::super::styles::minimal_resolved();
-        let required = std::mem::size_of::<xlsx_model::SharedString>() + 3;
+        let required = 3;
         let mut exact = required;
-        assert_eq!(text.model(&styles, &mut exact).unwrap().text, "abc");
+        assert_eq!(
+            text.model_into_reserved_slot(&styles, &mut exact)
+                .unwrap()
+                .text,
+            "abc"
+        );
         assert_eq!(exact, 0);
-        assert!(text.model(&styles, &mut (required - 1)).is_err());
+        assert!(text
+            .model_into_reserved_slot(&styles, &mut (required - 1))
+            .is_err());
     }
 
     #[test]
     fn rejects_live_invalid_fonts_unsorted_runs_and_surrogate_splits() {
-        for runs in [&[(0, 4)][..], &[(0, 1023)], &[(2, 0), (1, 0)], &[(4, 0)]] {
-            assert!(convert_native(&workbook("abc", runs), LegacyFormat::Xls, 1_000_000).is_err());
+        for (text, runs, expected) in [
+            ("abc", &[(0, 4)][..], "font index out of range"),
+            ("abc", &[(0, 1023)], "font index out of range"),
+            ("abc", &[(2, 0), (1, 0)], "not strictly ordered"),
+            ("abc", &[(4, 0)], "splits or exceeds string"),
+            ("A😀B", &[(2, 0)], "splits or exceeds string"),
+        ] {
+            let input = workbook(text, runs);
+            let cfb = CompoundFile::open(&input).unwrap();
+            let error = DirectSession::new(&cfb).err().expect("rejected run");
+            assert!(error.contains(expected), "{expected}: {error}");
         }
-        assert!(
-            convert_native(&workbook("A😀B", &[(2, 0)]), LegacyFormat::Xls, 1_000_000).is_err()
-        );
     }
 
     #[test]
@@ -479,34 +337,5 @@ mod tests {
         first.truncate(8);
         first.extend([1, 0, 4, 255, 255, 255, 255, b'A']);
         assert!(super::super::parse_sst_elements(&[&first]).is_err());
-    }
-
-    #[test]
-    fn markup_budget_counts_escaping_and_repeated_cell_expansion() {
-        let mut xml = String::new();
-        assert!(super::append_run(&mut xml, "", "<&", &mut 10).is_err());
-        assert!(xml.is_empty());
-        let mut sheet = super::super::SheetData::default();
-        let value = super::Text::new(&"shared".encode_utf16().collect::<Vec<_>>(), &[]).unwrap();
-        for row in 0..100 {
-            sheet
-                .rows
-                .entry(row)
-                .or_default()
-                .insert(0, super::super::CellValue::SharedString(0));
-        }
-        let styles = super::super::styles::minimal_resolved();
-        let mut budget = 256 * 1024 * 1024;
-        let strings = [value.xml(&styles, &mut budget).unwrap()];
-        assert_eq!(
-            super::super::build_sheet_xml_with_drawings(&sheet, &strings, 512, None, false)
-                .unwrap_err(),
-            "OUTPUT_TOO_LARGE"
-        );
-        assert!(
-            super::super::build_sheet_xml_with_drawings(&sheet, &strings, 20_000, None, false)
-                .unwrap()
-                .contains("<t xml:space=\"preserve\">shared</t>")
-        );
     }
 }

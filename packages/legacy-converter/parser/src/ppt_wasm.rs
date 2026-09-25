@@ -1,7 +1,6 @@
 //! Experimental direct `.ppt` presentation-source boundary.
 //!
-//! Unlike `convert_legacy_office`, this API does not create an OOXML package.
-//! It owns a bounded native cursor that projects the supported passive PPT
+//! This API does not create an OOXML package. It owns a bounded native cursor that projects the supported passive PPT
 //! subset directly into the existing PPTX renderer models. The caller retains
 //! ownership of the original JavaScript bytes; the bounded constructor copy is
 //! released after construction once the session owns its admitted streams.
@@ -86,20 +85,6 @@ impl LegacyPptPresentation {
 
     pub fn extract_image(&self, path: &str) -> Result<Vec<u8>, JsValue> {
         self.cursor.extract_image(path).map_err(string_error)
-    }
-
-    pub fn extract_media(&self, _path: &str) -> Result<Vec<u8>, JsValue> {
-        self.cursor.assert_healthy().map_err(string_error)?;
-        Err(js_error(
-            "UNSUPPORTED:legacy PPT direct media extraction is not supported",
-        ))
-    }
-
-    pub fn extract_font(&self, _path: &str) -> Result<Vec<u8>, JsValue> {
-        self.cursor.assert_healthy().map_err(string_error)?;
-        Err(js_error(
-            "UNSUPPORTED:legacy PPT direct font extraction is not supported",
-        ))
     }
 
     pub fn slide_cursor_resource_usage(&self) -> Result<Vec<u8>, JsValue> {

@@ -2,8 +2,11 @@
 //! Interpretation, duplicate policy and inheritance belong to the host format.
 use std::ops::Range;
 
-use super::{unsupported, ByteSpan, Record, RecordSpan};
+use super::{unsupported, Record};
+#[cfg(any(test, feature = "direct-ppt"))]
+use super::{ByteSpan, RecordSpan};
 
+#[cfg(any(test, feature = "direct-doc", feature = "direct-xls"))]
 pub(crate) struct Property<'a> {
     /// Full encoded property ID, including fBid and fComplex.
     pub opid: u16,
@@ -12,6 +15,7 @@ pub(crate) struct Property<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(any(test, feature = "direct-ppt"))]
 pub(crate) struct PropertySpan {
     /// Full encoded property ID, including fBid and fComplex.
     pub opid: u16,
@@ -22,6 +26,7 @@ pub(crate) struct PropertySpan {
 /// Walk every entry and validate the complete complex-data tail without
 /// allocating or decoding strings/actions. Callers must discard partial state
 /// on error, including an error discovered after the final callback.
+#[cfg(any(test, feature = "direct-doc", feature = "direct-xls"))]
 pub(crate) fn visit<'a>(
     record: Record<'a>,
     budget: &mut usize,
@@ -33,6 +38,7 @@ pub(crate) fn visit<'a>(
 /// Walk a shape-owned OfficeArtTertiaryFOPT table (MS-ODRAW 2.2.11).
 /// Interpretation remains host-scoped; callers must explicitly select the
 /// small property subset they support from tertiary options.
+#[cfg(any(test, feature = "direct-doc", feature = "direct-xls"))]
 pub(crate) fn visit_tertiary<'a>(
     record: Record<'a>,
     budget: &mut usize,
@@ -41,6 +47,7 @@ pub(crate) fn visit_tertiary<'a>(
     visit_kind(record, 0xf122, budget, visitor)
 }
 
+#[cfg(any(test, feature = "direct-ppt"))]
 pub(crate) fn visit_span(
     record: &RecordSpan,
     backing: &[u8],
@@ -50,6 +57,7 @@ pub(crate) fn visit_span(
     visit_span_kind(record, backing, 0xf00b, budget, visitor)
 }
 
+#[cfg(any(test, feature = "direct-ppt"))]
 pub(crate) fn visit_tertiary_span(
     record: &RecordSpan,
     backing: &[u8],
@@ -59,6 +67,7 @@ pub(crate) fn visit_tertiary_span(
     visit_span_kind(record, backing, 0xf122, budget, visitor)
 }
 
+#[cfg(any(test, feature = "direct-doc", feature = "direct-xls"))]
 fn visit_kind<'a>(
     record: Record<'a>,
     expected_kind: u16,
@@ -74,6 +83,7 @@ fn visit_kind<'a>(
     })
 }
 
+#[cfg(any(test, feature = "direct-ppt"))]
 fn visit_span_kind(
     record: &RecordSpan,
     backing: &[u8],

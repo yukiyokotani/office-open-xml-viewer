@@ -2,18 +2,15 @@
 //! 2.2.5.1 Sprm, 2.6.4 section properties. ECMA-376 17.6.
 use super::{u16_at, u32_at, unsupported};
 
-#[cfg(feature = "direct-doc")]
 mod direct;
 
 pub(super) struct Section {
     pub end: usize,
-    pub incomplete_margins: bool,
     properties: Properties,
     header_footer_references: [Option<HeaderFooterReference>; 6],
     /// MS-DOC 2.6.4 `sprmSDxaColumns` installation-language default.
     /// Retained separately so direct model production never substitutes the
     /// unrelated fixed OOXML `w:cols/@space` default.
-    #[cfg(feature = "direct-doc")]
     default_column_spacing: Option<u16>,
 }
 
@@ -44,10 +41,8 @@ impl Section {
         properties.kind = kind;
         Self {
             end,
-            incomplete_margins: true,
             properties,
             header_footer_references: [None; 6],
-            #[cfg(feature = "direct-doc")]
             default_column_spacing: None,
         }
     }
@@ -69,54 +64,8 @@ impl Section {
         Ok(())
     }
 
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) fn note_properties(&self) -> NoteProperties {
         self.properties.notes
-    }
-
-    pub fn xml(&self) -> Result<String, String> {
-        let mut xml = self.properties.xml()?;
-        let mut references = String::new();
-        for reference in self.header_footer_references.iter().flatten() {
-            references.push_str(&reference.xml());
-        }
-        // CT_SectPr: header/footer references precede the page geometry.
-        xml.insert_str("<w:sectPr>".len(), &references);
-        Ok(xml)
-    }
-}
-
-impl HeaderFooterReference {
-    pub(super) fn id(self) -> String {
-        format!("rIdHf{}", self.index + 1)
-    }
-
-    pub(super) fn xml(self) -> String {
-        let kind = self.kind.as_str();
-        let variant = self.variant.as_str();
-        format!(
-            r#"<w:{kind}Reference xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" w:type="{variant}" r:id="{}"/>"#,
-            self.id()
-        )
-    }
-}
-
-impl HeaderFooterKind {
-    pub(super) fn as_str(self) -> &'static str {
-        match self {
-            HeaderFooterKind::Header => "header",
-            HeaderFooterKind::Footer => "footer",
-        }
-    }
-}
-
-impl HeaderFooterVariant {
-    pub(super) fn as_str(self) -> &'static str {
-        match self {
-            HeaderFooterVariant::Even => "even",
-            HeaderFooterVariant::Default => "default",
-            HeaderFooterVariant::First => "first",
-        }
     }
 }
 
@@ -167,10 +116,9 @@ pub(super) fn read(word: &[u8], table: &[u8], ccp_text: usize) -> Result<Vec<Sec
         let mut properties = Properties::parse(data, &mut budget)?;
         // FibBase.lid records the producer's installation language (MS-DOC
         // 2.5.2). Apply only the LCIDs explicitly listed in 2.6.4, not the
-        // document text's language, the converter host locale or a guessed
+        // document text's language, the host locale or a guessed
         // base language. Explicit distances, including zero, take priority.
         let default = header_distance_for_install_lid(u16_at(word, 6)?);
-        #[cfg(feature = "direct-doc")]
         let default_column_spacing = column_spacing_for_install_lid(u16_at(word, 6)?);
         for distance in &mut properties.margins[4..] {
             *distance = distance.or(default);
@@ -178,10 +126,8 @@ pub(super) fn read(word: &[u8], table: &[u8], ccp_text: usize) -> Result<Vec<Sec
         properties.validate()?;
         sections.push(Section {
             end,
-            incomplete_margins: properties.margins.iter().any(Option::is_none),
             properties,
             header_footer_references: [None; 6],
-            #[cfg(feature = "direct-doc")]
             default_column_spacing,
         });
         previous = end;
@@ -192,7 +138,6 @@ pub(super) fn read(word: &[u8], table: &[u8], ccp_text: usize) -> Result<Vec<Sec
 // MS-DOC 2.6.4 sprmSDxaColumns. This table is deliberately independent from
 // the header-distance table: several LCIDs differ, and Lithuanian (1063) uses
 // 1296 twips for column spacing but 567 twips for header/footer distance.
-#[cfg(feature = "direct-doc")]
 fn column_spacing_for_install_lid(lid: u16) -> Option<u16> {
     match lid {
         1025 | 1028 | 1031 | 1032 | 1033 | 1034 | 1036 | 1037 | 1040 | 1041 | 1042 | 1046
@@ -285,7 +230,6 @@ struct Properties {
 /// sprmSNFtn, sprmSNfcFtnRef, sprmSRncEdn, sprmSNEdn, sprmSNfcEdnRef,
 /// sprmSFEndnote). `None` means the SPRM is absent and its default applies.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[cfg_attr(not(feature = "direct-doc"), allow(dead_code))]
 pub(super) struct NoteProperties {
     pub footnote_position: Option<u8>,
     pub footnote_restart: Option<u8>,
@@ -517,88 +461,6 @@ impl Properties {
         }
         Ok(p)
     }
-
-    fn xml(&self) -> Result<String, String> {
-        self.validate()?;
-        let kind = [
-            "continuous",
-            "nextColumn",
-            "nextPage",
-            "evenPage",
-            "oddPage",
-        ][usize::from(self.kind)];
-        let mut xml = format!(
-            "<w:sectPr><w:type w:val=\"{kind}\"/><w:pgSz w:w=\"{}\" w:h=\"{}\" w:orient=\"{}\"/>",
-            self.size.0,
-            self.size.1,
-            if self.orientation == 2 {
-                "landscape"
-            } else {
-                "portrait"
-            }
-        );
-        if let [Some(top), Some(right), Some(bottom), Some(left), header, footer] = self.margins {
-            // Recovery policy: retain known body margins when the stored
-            // installation language cannot resolve a missing header/footer
-            // distance. Zero satisfies CT_PageMar's required attributes;
-            // incomplete_margins keeps this unresolved recovery diagnostic.
-            let header = header.unwrap_or(0);
-            let footer = footer.unwrap_or(0);
-            xml.push_str(&format!("<w:pgMar w:top=\"{top}\" w:right=\"{right}\" w:bottom=\"{bottom}\" w:left=\"{left}\" w:header=\"{header}\" w:footer=\"{footer}\" w:gutter=\"{}\"/>",self.gutter));
-        }
-        // MS-DOC 2.6.4 SNfcPgn/SFPgnRestart/SPgnStart97/SPgnStart ->
-        // ECMA-376 17.6.12 pgNumType. A dormant start MUST be ignored.
-        // Validate only the effective restart, after all modifiers are applied.
-        // Omission preserves decimal continuation, independently per section.
-        if self.page_restart || self.page_format != "decimal" {
-            xml.push_str(&format!("<w:pgNumType w:fmt=\"{}\"", self.page_format));
-            if self.page_restart {
-                xml.push_str(&format!(" w:start=\"{}\"", self.page_start));
-            }
-            xml.push_str("/>");
-        }
-        xml.push_str(&format!(
-            "<w:cols w:num=\"{}\" w:equalWidth=\"{}\" w:sep=\"{}\"",
-            self.columns,
-            u8::from(self.equal),
-            u8::from(self.separator)
-        ));
-        if let Some(space) = self.spacing {
-            xml.push_str(&format!(" w:space=\"{space}\""));
-        }
-        xml.push('>');
-        if !self.equal {
-            for index in 0..usize::from(self.columns) {
-                let width = self.widths[index].expect("validated unequal column width");
-                xml.push_str(&format!(
-                    "<w:col w:w=\"{width}\" w:space=\"{}\"/>",
-                    self.spaces[index]
-                ));
-            }
-        }
-        xml.push_str("</w:cols>");
-        xml.push_str(&format!(
-            "<w:vAlign w:val=\"{}\"/>",
-            ["top", "center", "both", "bottom"][usize::from(self.vertical)]
-        ));
-        xml.push_str(&format!("<w:titlePg w:val=\"{}\"/>", u8::from(self.title)));
-        if let Some(flow) = self.text_flow {
-            xml.push_str(&format!("<w:textDirection w:val=\"{flow}\"/>"));
-        }
-        for (name, value) in [("bidi", self.bidi), ("rtlGutter", self.rtl_gutter)] {
-            xml.push_str(&format!("<w:{name} w:val=\"{}\"/>", u8::from(value)));
-        }
-        if self.grid != 0 {
-            let pitch = self.line_pitch.expect("validated document grid pitch");
-            xml.push_str(&format!(
-                "<w:docGrid w:type=\"{}\" w:linePitch=\"{pitch}\" w:charSpace=\"{}\"/>",
-                ["default", "linesAndChars", "lines", "snapToChars"][usize::from(self.grid)],
-                self.char_space
-            ));
-        }
-        xml.push_str("</w:sectPr>");
-        Ok(xml)
-    }
 }
 
 // MS-OSHARED 2.2.1.3 MSONFC -> ECMA-376 17.18.59 ST_NumberFormat.
@@ -613,8 +475,23 @@ fn page_number_format(value: u8) -> Result<&'static str, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn section_xml(bytes: &[u8]) -> String {
-        Properties::parse(bytes, &mut 100).unwrap().xml().unwrap()
+
+    /// (format, start) of the section's page numbering, if it is not plain
+    /// decimal continuation.
+    fn page_numbering(bytes: &[u8]) -> Option<(String, Option<i64>)> {
+        Properties::parse(bytes, &mut 100)
+            .unwrap()
+            .page_num_type()
+            .map(|value| (value.fmt.unwrap(), value.start))
+    }
+
+    fn section(properties: Properties) -> Section {
+        Section {
+            end: 1,
+            properties,
+            header_footer_references: [None; 6],
+            default_column_spacing: None,
+        }
     }
 
     #[test]
@@ -624,10 +501,12 @@ mod tests {
             prl(0x501c, 25),
             [vec![0x11, 0x30, 1], prl(0x501c, 25), vec![0x11, 0x30, 0]].concat(),
         ] {
-            assert!(!section_xml(&bytes).contains("pgNumType"));
+            assert_eq!(page_numbering(&bytes), None);
         }
-        assert!(section_xml(&[0x11, 0x30, 1])
-            .contains("<w:pgNumType w:fmt=\"decimal\" w:start=\"0\"/>"));
+        assert_eq!(
+            page_numbering(&[0x11, 0x30, 1]),
+            Some(("decimal".into(), Some(0)))
+        );
         assert!(Properties::parse(&[0x11, 0x30, 2], &mut 100).is_err());
     }
 
@@ -637,13 +516,17 @@ mod tests {
             let mut bytes = vec![0x11, 0x30, 1];
             if start <= u16::MAX as u32 {
                 bytes.extend(prl(0x501c, start as u16 as i16));
-                assert!(section_xml(&bytes).contains(&format!("w:start=\"{start}\"")));
+                assert_eq!(
+                    page_numbering(&bytes),
+                    Some(("decimal".into(), Some(i64::from(start))))
+                );
             }
             bytes.extend(0x7044u16.to_le_bytes());
             bytes.extend(start.to_le_bytes());
-            let xml = section_xml(&bytes);
-            assert!(xml.contains(&format!("w:start=\"{start}\"")));
-            assert!(xml.find("<w:pgNumType").unwrap() < xml.find("<w:cols").unwrap());
+            assert_eq!(
+                page_numbering(&bytes),
+                Some(("decimal".into(), Some(i64::from(start))))
+            );
         }
         let bytes = [
             vec![0x11, 0x30, 1],
@@ -652,15 +535,18 @@ mod tests {
             123456u32.to_le_bytes().to_vec(),
         ]
         .concat();
-        assert!(section_xml(&bytes).contains("w:start=\"123456\""));
+        assert_eq!(
+            page_numbering(&bytes),
+            Some(("decimal".into(), Some(123456)))
+        );
         for start in [2147483647u32, u32::MAX] {
             let bytes = [vec![0x44, 0x70], start.to_le_bytes().to_vec()].concat();
             // MUST ignore a dormant start, including an out-of-range value.
-            assert!(!section_xml(&bytes).contains("pgNumType"));
+            assert_eq!(page_numbering(&bytes), None);
             assert!(
                 Properties::parse(&[bytes, vec![0x11, 0x30, 1]].concat(), &mut 100)
                     .unwrap()
-                    .xml()
+                    .validate()
                     .is_err()
             );
         }
@@ -680,15 +566,14 @@ mod tests {
             (0x3b, "russianUpper"),
             (0xff, "none"),
         ] {
-            let xml = section_xml(&[0x0e, 0x30, value]);
+            let numbering = page_numbering(&[0x0e, 0x30, value]);
             if name == "decimal" {
-                assert!(!xml.contains("pgNumType"));
+                assert_eq!(numbering, None);
             } else {
-                assert!(xml.contains(&format!("<w:pgNumType w:fmt=\"{name}\"/>")));
+                assert_eq!(numbering, Some((name.into(), None)));
             }
-            assert!(!xml.contains("w:start="));
         }
-        assert!(!section_xml(&[0x0e, 0x30, 2, 0x0e, 0x30, 0]).contains("pgNumType"));
+        assert_eq!(page_numbering(&[0x0e, 0x30, 2, 0x0e, 0x30, 0]), None);
         assert!(Properties::parse(&[0x0e, 0x30, 0x60], &mut 100).is_err());
     }
 
@@ -728,21 +613,12 @@ mod tests {
                     sections[0].properties.margins[4],
                     explicit
                         .map(i32::from)
-                        .or((default != 0).then_some(i32::from(default)))
+                        .or((default != 0).then_some(default))
                 );
                 assert_eq!(
                     sections[0].properties.margins[5],
-                    (default != 0).then_some(i32::from(default))
+                    (default != 0).then_some(default)
                 );
-                assert!(
-                    sections[0].xml().unwrap().contains(&format!(
-                        "w:header=\"{}\" w:footer=\"{default}\"",
-                        explicit.unwrap_or(default)
-                    )),
-                    "lid={lid}, explicit={explicit:?}: {}",
-                    sections[0].xml().unwrap()
-                );
-                assert_eq!(sections[0].incomplete_margins, default == 0);
             }
         }
     }
@@ -750,19 +626,11 @@ mod tests {
     #[test]
     fn preserves_section_vertical_flow_and_explicit_horizontal_reset() {
         let vertical = prl(0x5033, 1);
-        let xml = Properties::parse(&vertical, &mut 100)
-            .unwrap()
-            .xml()
-            .unwrap();
-        assert!(xml.contains("<w:textDirection w:val=\"tbRl\"/>"));
-        assert!(xml.find("<w:titlePg").unwrap() < xml.find("<w:textDirection").unwrap());
-        assert!(xml.find("<w:textDirection").unwrap() < xml.find("<w:bidi").unwrap());
+        let flow = Properties::parse(&vertical, &mut 100).unwrap().text_flow;
+        assert_eq!(flow, Some("tbRl"));
         let horizontal = [vertical, prl(0x5033, 0)].concat();
-        let xml = Properties::parse(&horizontal, &mut 100)
-            .unwrap()
-            .xml()
-            .unwrap();
-        assert!(!xml.contains("tbRl"));
+        let flow = Properties::parse(&horizontal, &mut 100).unwrap().text_flow;
+        assert_eq!(flow, None);
         assert!(Properties::parse(&prl(0x5033, 6), &mut 100).is_err());
         assert!(Properties::parse(&prl(0x5033, -1), &mut 100).is_err());
     }
@@ -771,8 +639,8 @@ mod tests {
     fn unsupported_rotation_variants_do_not_retain_a_previous_flow() {
         for flow in 2..=5 {
             let bytes = [prl(0x5033, 1), prl(0x5033, flow)].concat();
-            let xml = Properties::parse(&bytes, &mut 100).unwrap().xml().unwrap();
-            assert!(!xml.contains("textDirection"));
+            let flow = Properties::parse(&bytes, &mut 100).unwrap().text_flow;
+            assert_eq!(flow, None);
         }
     }
 
@@ -793,7 +661,7 @@ mod tests {
             }
             let sections = read(&word, &table, 4).unwrap();
             for (section, flow) in sections.iter().zip(flows) {
-                assert_eq!(section.xml().unwrap().contains("tbRl"), flow == 1);
+                assert_eq!(section.properties.text_flow == Some("tbRl"), flow == 1);
             }
         }
     }
@@ -816,7 +684,10 @@ mod tests {
     fn preserves_unequal_columns_and_requires_each_width() {
         let mut bytes = vec![0x05, 0x30, 0];
         bytes.extend(prl(0x500b, 1));
-        assert!(Properties::parse(&bytes, &mut 100).unwrap().xml().is_err());
+        assert!(Properties::parse(&bytes, &mut 100)
+            .unwrap()
+            .validate()
+            .is_err());
         for (sprm, index, value) in [
             (0xf203u16, 0u8, 2000u16),
             (0xf203, 1, 4000),
@@ -826,9 +697,16 @@ mod tests {
             bytes.push(index);
             bytes.extend(value.to_le_bytes());
         }
-        let xml = Properties::parse(&bytes, &mut 100).unwrap().xml().unwrap();
-        assert!(xml
-            .contains("<w:col w:w=\"2000\" w:space=\"300\"/><w:col w:w=\"4000\" w:space=\"0\"/>"));
+        let properties = Properties::parse(&bytes, &mut 100).unwrap();
+        properties.validate().unwrap();
+        let columns = section(properties).direct_columns().unwrap().unwrap();
+        assert!(!columns.equal_width);
+        let cols: Vec<_> = columns
+            .cols
+            .iter()
+            .map(|col| (col.width_pt, col.space_pt))
+            .collect();
+        assert_eq!(cols, [(100.0, 15.0), (200.0, 0.0)]);
     }
 
     #[test]
@@ -846,7 +724,7 @@ mod tests {
         assert!(Properties::parse(&operand(0xf204, 0), &mut 100).is_ok());
     }
     #[test]
-    fn missing_header_distance_does_not_discard_known_body_margins() {
+    fn missing_header_distance_keeps_known_body_margins_and_fails_direct_geometry() {
         let mut bytes = Vec::new();
         for (sprm, value) in [
             (0x9023, 1800),
@@ -857,10 +735,17 @@ mod tests {
         ] {
             bytes.extend(prl(sprm, value));
         }
-        let xml = Properties::parse(&bytes, &mut 100).unwrap().xml().unwrap();
-        assert!(xml.contains("w:top=\"1800\""));
-        assert!(xml.contains("w:left=\"2160\""));
-        assert!(xml.contains("w:header=\"0\" w:footer=\"0\" w:gutter=\"720\""));
+        let properties = Properties::parse(&bytes, &mut 100).unwrap();
+        assert_eq!(
+            properties.margins,
+            [Some(1800), Some(1440), Some(1440), Some(2160), None, None]
+        );
+        assert_eq!(properties.gutter, 720);
+        // The direct model never substitutes a header/footer distance.
+        assert!(section(properties)
+            .project_final(0, false)
+            .unwrap_err()
+            .contains("unresolved Word section margin"));
     }
     fn prl(sprm: u16, value: i16) -> Vec<u8> {
         [sprm.to_le_bytes(), value.to_le_bytes()].concat()
@@ -885,10 +770,9 @@ mod tests {
         bytes.extend(0x7030u16.to_le_bytes());
         bytes.extend(6144i32.to_le_bytes());
         let p = Properties::parse(&bytes, &mut 100).unwrap();
-        let xml = p.xml().unwrap();
-        assert!(xml.contains("w:w=\"11906\" w:h=\"16838\""));
-        assert!(xml.contains("w:top=\"-500\"") && xml.contains("w:bottom=\"-300\""));
-        assert!(xml.contains("w:linePitch=\"330\" w:charSpace=\"6144\""));
+        assert_eq!(p.size, (11906, 16838));
+        assert_eq!((p.margins[0], p.margins[2]), (Some(-500), Some(-300)));
+        assert_eq!((p.grid_line_pitch(), p.char_space), (Some(16.5), 6144));
     }
     #[test]
     fn section_boundaries_count_surrogate_pairs_and_do_not_double_page_breaks() {
@@ -965,6 +849,5 @@ mod tests {
         assert_eq!(facts.grid, 2);
         assert_eq!(facts.line_pitch, Some(360));
         assert_eq!(facts.page_format, "lowerRoman");
-        assert!(sections[0].incomplete_margins);
     }
 }

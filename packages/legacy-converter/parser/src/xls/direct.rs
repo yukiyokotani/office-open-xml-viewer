@@ -51,7 +51,7 @@ pub(crate) struct ProjectedSheetRef<'a> {
 
 impl DirectSession {
     pub(crate) fn new(cfb: &CompoundFile<'_>) -> Result<Self, String> {
-        Self::from_prepared(prepare_direct(cfb)?)
+        Self::from_prepared(prepare(cfb)?)
     }
 
     fn from_prepared(mut prepared: PreparedXls) -> Result<Self, String> {
@@ -132,10 +132,17 @@ impl DirectSession {
         self.pending_sheets.is_some()
     }
 
-    pub(crate) fn configure_mdw(&mut self, mdw: Option<f64>) -> Result<(), String> {
+    /// The host's single layout decision before bootstrap. While drawings
+    /// await the Normal font's maximum digit width, `Some` resolves their
+    /// anchors and `None` omits them with a warning. With no decision pending
+    /// `None` changes nothing and a measured width fails closed.
+    pub(crate) fn configure_host_layout(&mut self, mdw: Option<f64>) -> Result<(), String> {
         self.healthy()?;
         let Some(pending) = self.pending_sheets.as_ref() else {
-            return self.fail("XLS direct measurement already configured");
+            if mdw.is_none() {
+                return Ok(());
+            }
+            return self.fail("XLS direct host layout decision is not pending");
         };
         if mdw.is_some_and(|v| !v.is_finite() || v.fract() != 0.0 || !(1.0..=4096.0).contains(&v)) {
             return self.fail("invalid measured XLS maximum digit width");
@@ -149,9 +156,10 @@ impl DirectSession {
                 std::mem::take(&mut self.charts).resolve(pending, mdw, &mut self.warnings);
             self.native_shapes =
                 std::mem::take(&mut self.shapes).resolve(pending, mdw, &mut self.warnings);
-            // Geometry the byte converter omits with a warning (a sheet
-            // without stored defaults, a formula-display window or an anchor
-            // past the resolved grid) rejects the direct session instead.
+            // The resolvers report geometry they cannot place (a sheet without
+            // stored defaults, a formula-display window or an anchor past the
+            // resolved grid) as an omission; drawn content is never dropped,
+            // so such a workbook rejects the session instead.
             if let Some(omitted) = self.warnings.iter().find(|warning| {
                 matches!(
                     warning.as_str(),
@@ -778,7 +786,7 @@ fn model_error() -> String {
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
-    use crate::cfb::test_support::build_cfb;
+    use crate::cfb::test_support::{build_cfb, build_scoped_cfb};
 
     fn record(kind: u16, data: &[u8]) -> Vec<u8> {
         [
@@ -822,7 +830,7 @@ pub(super) mod tests {
     fn picture_session() -> (DirectSession, &'static str, Vec<u8>) {
         let bytes = workbook();
         let cfb = CompoundFile::open(&bytes).unwrap();
-        let mut prepared = prepare(&cfb, false).unwrap();
+        let mut prepared = prepare(&cfb).unwrap();
         let (pictures, sheet, key, resource) = pictures::session_fixture();
         prepared.sheets = vec![("S".into(), sheet)];
         prepared.pictures = pictures;
@@ -852,7 +860,7 @@ pub(super) mod tests {
     fn indexed_session() -> DirectSession {
         let bytes = workbook();
         let cfb = CompoundFile::open(&bytes).unwrap();
-        let mut prepared = prepare(&cfb, false).unwrap();
+        let mut prepared = prepare(&cfb).unwrap();
         prepared.sheets = ["First", "Second", "Third"]
             .into_iter()
             .map(|name| (name.into(), SheetData::default()))
@@ -862,9 +870,8 @@ pub(super) mod tests {
 
     #[test]
     fn rejects_macro_and_malformed_chart_sheets_and_makes_no_blanket_omission_claim() {
-        // The direct reader projects drawings and conditional formatting or
-        // rejects the workbook, so it never reports the byte converter's
-        // blanket omission.
+        // Drawings and conditional formatting are projected or the workbook
+        // is rejected, so no blanket omission is ever reported.
         assert!(!wire_fixture()
             .warnings()
             .iter()
@@ -889,12 +896,6 @@ pub(super) mod tests {
             let cfb = CompoundFile::open(&bytes).unwrap();
             let error = DirectSession::new(&cfb).err().expect("rejected");
             assert!(error.contains(expected), "{expected}: {error}");
-            // The byte converter keeps its documented tab omission.
-            assert!(prepare(&cfb, false)
-                .unwrap()
-                .warnings
-                .iter()
-                .any(|warning| warning == "legacy-xls:non-worksheet-tabs-omitted"));
         }
     }
 
@@ -1029,7 +1030,7 @@ pub(super) mod tests {
         let (mut session, key, expected) = picture_session();
         assert!(session.requires_measurement_decision());
         assert_eq!(session.measurement_font().unwrap().name, "Calibri");
-        session.configure_mdw(Some(7.0)).unwrap();
+        session.configure_host_layout(Some(7.0)).unwrap();
         assert!(!session.requires_measurement_decision());
         session.bootstrap().unwrap();
         let sheet = session.next_sheet().unwrap().unwrap();
@@ -1039,7 +1040,7 @@ pub(super) mod tests {
         assert!(session.resource("legacy-xls/image/07").is_err());
 
         let (mut wider, _, _) = picture_session();
-        wider.configure_mdw(Some(9.0)).unwrap();
+        wider.configure_host_layout(Some(9.0)).unwrap();
         wider.bootstrap().unwrap();
         let wider = wider.next_sheet().unwrap().unwrap();
         assert_ne!(sheet.default_col_width, wider.default_col_width);
@@ -1050,18 +1051,197 @@ pub(super) mod tests {
     fn picture_measurement_errors_are_terminal_and_decisions_are_once_only() {
         let (mut session, _, _) = picture_session();
         assert!(session.bootstrap().is_err());
-        assert!(session.configure_mdw(Some(7.0)).is_err());
+        assert!(session.configure_host_layout(Some(7.0)).is_err());
 
         let (mut session, _, _) = picture_session();
-        assert!(session.configure_mdw(Some(f64::NAN)).is_err());
+        assert!(session.configure_host_layout(Some(f64::NAN)).is_err());
         assert!(session.bootstrap().is_err());
 
         let (mut session, _, _) = picture_session();
-        session.configure_mdw(None).unwrap();
+        session.configure_host_layout(None).unwrap();
         assert!(session
             .warnings()
             .iter()
             .any(|warning| warning == "legacy-xls:unmeasured-drawings-omitted"));
-        assert!(session.configure_mdw(Some(7.0)).is_err());
+        assert!(session.configure_host_layout(Some(7.0)).is_err());
+    }
+
+    #[test]
+    fn projects_biff8_scalar_and_unicode_cells() {
+        fn bof(kind: u16) -> Vec<u8> {
+            record(BOF, &[0, 6, kind as u8, (kind >> 8) as u8, 0, 0, 0, 0])
+        }
+        let mut stream = bof(WORKBOOK_GLOBALS);
+        let bound = stream.len() + 4;
+        let mut sheet = vec![0; 6];
+        sheet.extend([3, 1]);
+        sheet.extend("表計算".encode_utf16().flat_map(u16::to_le_bytes));
+        stream.extend(record(BOUNDSHEET8, &sheet));
+        let mut sst = [1u32.to_le_bytes(), 1u32.to_le_bytes()].concat();
+        sst.extend(3u16.to_le_bytes());
+        sst.push(1);
+        sst.extend("日本語".encode_utf16().flat_map(u16::to_le_bytes));
+        stream.extend(record(SST, &sst));
+        stream.extend(record(EOF, &[]));
+        let offset = stream.len() as u32;
+        stream[bound..bound + 4].copy_from_slice(&offset.to_le_bytes());
+        stream.extend(bof(WORKSHEET));
+        let mut number = vec![0; 6];
+        number.extend(42.5f64.to_le_bytes());
+        stream.extend(record(NUMBER, &number));
+        stream.extend(record(LABELSST, &[1, 0, 1, 0, 0, 0, 0, 0, 0, 0]));
+        stream.extend(record(EOF, &[]));
+        let bytes = build_scoped_cfb(&[("Workbook", stream)]);
+        let cfb = CompoundFile::open(&bytes).unwrap();
+        let mut session = DirectSession::new(&cfb).unwrap();
+        let bootstrap = session.bootstrap().unwrap();
+        assert_eq!(bootstrap.workbook.sheets.len(), 1);
+        assert_eq!(bootstrap.workbook.sheets[0].name, "表計算");
+        assert_eq!(bootstrap.shared_strings.len(), 1);
+        assert_eq!(bootstrap.shared_strings[0].text, "日本語");
+        let sheet = session.next_sheet().unwrap().unwrap();
+        assert_eq!(sheet.name, "表計算");
+        let a1 = &sheet.rows[0].cells[0];
+        assert_eq!((a1.row, a1.col), (1, 1));
+        assert!(matches!(
+            a1.value,
+            xlsx_model::CellValue::Number { number: 42.5 }
+        ));
+        let b2 = &sheet.rows[1].cells[0];
+        assert_eq!((b2.row, b2.col), (2, 2));
+        assert!(matches!(b2.value, xlsx_model::CellValue::Shared { si: 0 }));
+    }
+
+    #[test]
+    fn rejects_encrypted_workbooks() {
+        let mut stream = record(BOF, &[0, 6, 5, 0, 0, 0, 0, 0]);
+        stream.extend(record(FILEPASS, &[]));
+        let bytes = build_scoped_cfb(&[("Workbook", stream)]);
+        let cfb = CompoundFile::open(&bytes).unwrap();
+        let error = DirectSession::new(&cfb).err().expect("encrypted workbook");
+        assert!(error.contains("encrypted"), "{error}");
+    }
+
+    #[test]
+    fn projects_cell_xf_blank_cells_and_sheet_geometry_and_admits_print_records() {
+        let mut stream = record(BOF, &[0, 6, 5, 0]);
+        let bound = stream.len() + 4;
+        stream.extend(record(BOUNDSHEET8, &[0, 0, 0, 0, 0, 0, 1, 0, b'S']));
+        stream.extend(record(0x0022, &[1, 0])); // Date1904
+        let mut font = vec![0; 16];
+        font[0..2].copy_from_slice(&360u16.to_le_bytes());
+        font[2] = 2; // italic
+        font[4..6].copy_from_slice(&10u16.to_le_bytes());
+        font[6..8].copy_from_slice(&700u16.to_le_bytes());
+        font[14..16].copy_from_slice(&[5, 0]);
+        font.extend(b"Arial");
+        stream.extend(record(0x0031, &font));
+        let mut xf = [0u8; 20];
+        xf[6] = 0x2a; // center, wrap, bottom
+        xf[10..14].copy_from_slice(&(1u32 | (10 << 16)).to_le_bytes()); // thin red left
+        xf[14..18].copy_from_slice(&(1u32 << 26).to_le_bytes()); // solid fill
+        xf[18..20].copy_from_slice(&(13u16 | (65 << 7)).to_le_bytes());
+        stream.extend(record(0x00e0, &xf));
+        xf[2..4].copy_from_slice(&14u16.to_le_bytes()); // date format
+        stream.extend(record(0x00e0, &xf));
+        stream.extend(record(EOF, &[]));
+        let offset = stream.len() as u32;
+        stream[bound..bound + 4].copy_from_slice(&offset.to_le_bytes());
+        stream.extend(record(BOF, &[0, 6, 0x10, 0]));
+        // Print records carry no model data but are validated for admission;
+        // with all four margins present no incomplete-margin warning arises.
+        stream.extend(record(0x0081, &[0, 1])); // fit to pages
+        for kind in 0x0026..=0x0029 {
+            stream.extend(record(kind, &0.5f64.to_le_bytes()));
+        }
+        let mut setup = vec![0u8; 34];
+        setup[..16].copy_from_slice(&[9, 0, 75, 0, 3, 0, 2, 0, 0, 0, 0x89, 0, 88, 2, 88, 2]);
+        setup[16..24].copy_from_slice(&0.25f64.to_le_bytes());
+        setup[24..32].copy_from_slice(&0.3f64.to_le_bytes());
+        setup[32] = 1;
+        stream.extend(record(0x00a1, &setup));
+        stream.extend(record(0x0014, &[4, 0, 0, b'&', b'L', b'&', b'P']));
+        stream.extend(record(0x001b, &[1, 0, 4, 0, 0, 0, 255, 63]));
+        stream.extend(record(0x0225, &[0, 0, 0x2c, 1])); // default 15 pt
+                                                         // Columns A:C, width 20, XF 1, hidden and custom width.
+        stream.extend(record(0x007d, &[0, 0, 2, 0, 0, 20, 1, 0, 3, 0, 0, 0]));
+        let mut row = [0u8; 16];
+        row[0] = 2; // empty third row, 30 pt, hidden with a custom height
+        row[6..8].copy_from_slice(&600u16.to_le_bytes());
+        row[12] = 0x60;
+        stream.extend(record(0x0208, &row));
+        let mut number = vec![0, 0, 0, 0, 1, 0];
+        number.extend(1f64.to_le_bytes());
+        stream.extend(record(NUMBER, &number));
+        stream.extend(record(0x0201, &[0, 0, 1, 0, 1, 0])); // styled empty cell
+        stream.extend(record(0x00be, &[1, 0, 0, 0, 1, 0, 1, 0, 1, 0])); // two blanks
+        stream.extend(record(EOF, &[]));
+        let bytes = build_scoped_cfb(&[("Workbook", stream)]);
+        let cfb = CompoundFile::open(&bytes).unwrap();
+        let mut session = DirectSession::new(&cfb).unwrap();
+        assert!(session.warnings().is_empty(), "{:?}", session.warnings());
+        let bootstrap = session.bootstrap().unwrap();
+        assert!(bootstrap.workbook.date1904);
+        let styles = bootstrap.styles;
+        assert_eq!(styles.fonts.len(), 1);
+        let font = &styles.fonts[0];
+        assert_eq!((font.name.as_deref(), font.size), (Some("Arial"), 18.0));
+        assert!(font.bold && font.italic);
+        assert_eq!(font.color.as_deref(), Some("#FF0000"));
+        assert_eq!(styles.cell_xfs.len(), 2);
+        let (normal, date) = (&styles.cell_xfs[0], &styles.cell_xfs[1]);
+        assert_eq!((normal.num_fmt_id, date.num_fmt_id), (0, 14));
+        assert_eq!(date.align_h.as_deref(), Some("center"));
+        assert_eq!(date.align_v.as_deref(), Some("bottom"));
+        assert!(date.wrap_text);
+        let fill = &styles.fills[date.fill_id as usize];
+        assert_eq!(fill.pattern_type, "solid");
+        assert_eq!(fill.fg_color.as_deref(), Some("#FFFF00"));
+        let border = &styles.borders[date.border_id as usize];
+        let left = border.left.as_ref().unwrap();
+        assert_eq!(
+            (left.style.as_str(), left.color.as_deref()),
+            ("thin", Some("#FF0000"))
+        );
+        assert!(border.right.is_none() && border.top.is_none() && border.bottom.is_none());
+
+        let sheet = session.next_sheet().unwrap().unwrap();
+        assert!(sheet.date1904);
+        assert_eq!(sheet.default_row_height, 15.0);
+        let cells: Vec<_> = sheet
+            .rows
+            .iter()
+            .flat_map(|row| &row.cells)
+            .map(|cell| (cell.row, cell.col, cell.style_index))
+            .collect();
+        assert_eq!(
+            cells,
+            [
+                (1, 1, Some(1)),
+                (1, 2, Some(1)),
+                (2, 1, Some(1)),
+                (2, 2, Some(1))
+            ]
+        );
+        assert!(matches!(
+            sheet.rows[0].cells[0].value,
+            xlsx_model::CellValue::Number { number } if number == 1.0
+        ));
+        assert!(matches!(
+            sheet.rows[0].cells[1].value,
+            xlsx_model::CellValue::Empty
+        ));
+        let third = sheet.rows.iter().find(|row| row.index == 3).unwrap();
+        assert!(third.cells.is_empty() && third.hidden && third.custom_height);
+        assert_eq!(third.height, Some(0.0));
+        for column in 1..=3 {
+            assert_eq!(sheet.col_widths.get(&column), Some(&0.0));
+            assert_eq!(sheet.col_hidden.get(&column), Some(&true));
+        }
+        assert!(sheet
+            .col_style_ranges
+            .iter()
+            .all(|range| range.style_index == 1));
+        assert_eq!(sheet.col_style_ranges.len(), 3);
     }
 }

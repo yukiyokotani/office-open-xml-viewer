@@ -183,6 +183,15 @@ fn native(
     backing: &[u8],
     presentation: persist::OwnedPresentation,
 ) -> Result<pptx_model::Slide, String> {
+    native_with_budgets(backing, presentation, 10_000, 1_000_000)
+}
+
+fn native_with_budgets(
+    backing: &[u8],
+    presentation: persist::OwnedPresentation,
+    mut work: usize,
+    mut model: usize,
+) -> Result<pptx_model::Slide, String> {
     let mut media = media::SpanStore::new(Vec::new());
     direct_model::slide(
         0,
@@ -190,10 +199,19 @@ fn native(
         backing,
         None,
         &mut media,
+        &mut work,
         &mut 10_000,
-        &mut 10_000,
-        &mut 1_000_000,
+        &mut model,
     )
+}
+
+/// The single-slide presentation of one slide drawing.
+fn single_slide(tree: &[u8]) -> (Vec<u8>, persist::OwnedPresentation) {
+    let document = slide_container(tree);
+    let span = record_span_with_end(&document, 0, &mut 100, "gradient slide")
+        .unwrap()
+        .0;
+    (document, presentation(span))
 }
 
 fn assert_gradient(fill: &Option<Fill>) {
@@ -222,24 +240,9 @@ fn assert_gradient(fill: &Option<Fill>) {
 }
 
 #[test]
-fn foreground_xml_and_native_keep_quantized_stops_for_all_leaf_flips() {
+fn foreground_native_keeps_quantized_stops_for_all_leaf_flips() {
     for flip in [0, 0x40, 0x80, 0xc0] {
         let tree = drawing(&[shape(0xa00 | flip, gradient_properties(&[], None))]);
-        let xml = render(
-            &tree,
-            &[],
-            &mut 10_000,
-            &mut 10_000,
-            &mut 1_000_000,
-            None,
-            None,
-        )
-        .unwrap()
-        .unwrap();
-        assert!(xml.contains("<a:gs pos=\"0\"><a:srgbClr val=\"FF0000\"/>"));
-        assert!(xml.contains("<a:gs pos=\"100000\"><a:srgbClr val=\"0000FF\"/>"));
-        assert!(xml.contains("<a:lin ang=\"5400000\"/>"));
-
         let document = slide_container(&tree);
         let span = record_span_with_end(&document, 0, &mut 100, "gradient slide")
             .unwrap()
@@ -306,31 +309,6 @@ fn master_gradient_inherits_but_local_scalar_zero_resets_its_shade_colours() {
                 .unwrap()
                 .0;
         p.slides[0].0 = slide_span;
-        let empty_styles = Vec::new();
-        let empty_types = Vec::new();
-        let empty_numbers = Vec::new();
-        let xml = render(
-            &local,
-            &[],
-            &mut 10_000,
-            &mut 10_000,
-            &mut 1_000_000,
-            Some(TextContext {
-                fonts: &[],
-                styles: &empty_styles,
-                scheme: None,
-                types: &empty_types,
-                master: None,
-                shapes: Some(&p.shape_masters),
-                backing: &combined,
-                outline_slide_numbers: &empty_numbers,
-                slide_number: 1,
-            }),
-            None,
-        )
-        .unwrap()
-        .unwrap();
-        assert!(xml.contains("<a:gradFill"));
         let model = native(&combined, p);
         if reset {
             // A scalar-zero fillShadeColors removes the inherited array; the
@@ -379,38 +357,13 @@ fn native_background_uses_the_retained_gradient_span() {
     p.backgrounds[0] = Some(SpannedBackground { paint, gradient });
     let model = native(&combined, p).unwrap();
     assert_gradient(&model.background);
-
-    let mut borrowed = crate::officeart::gradient::Borrowed::default();
-    borrowed.set(&shade);
-    let mut media = media::Store::new(&[], &[]);
-    let xml =
-        super::super::background_xml(&paint, &borrowed, None, &mut media, &mut 10_000, 1_000_000)
-            .unwrap();
-    assert!(xml.contains("<p:bg><p:bgPr><a:gradFill"));
-    assert!(xml.contains("<a:gs pos=\"0\"><a:srgbClr val=\"FF0000\"/>"));
-    assert!(xml.contains("<a:lin ang=\"5400000\"/>"));
 }
 
 #[test]
-fn leaf_rotation_keeps_the_direct_gradient_but_not_the_withdrawn_xml_route() {
+fn leaf_rotation_keeps_the_direct_gradient() {
     let tree = drawing(&[shape(0xa00, gradient_properties(&[(4, 45 << 16)], None))]);
-    let xml = render(
-        &tree,
-        &[],
-        &mut 10_000,
-        &mut 10_000,
-        &mut 1_000_000,
-        None,
-        None,
-    )
-    .unwrap()
-    .unwrap();
-    assert!(!xml.contains("<a:gradFill"));
-    let document = slide_container(&tree);
-    let span = record_span_with_end(&document, 0, &mut 100, "gradient slide")
-        .unwrap()
-        .0;
-    let model = native(&document, presentation(span)).unwrap();
+    let (document, presentation) = single_slide(&tree);
+    let model = native(&document, presentation).unwrap();
     let SlideElement::Shape(shape) = &model.elements[0] else {
         panic!("shape")
     };
@@ -419,41 +372,19 @@ fn leaf_rotation_keeps_the_direct_gradient_but_not_the_withdrawn_xml_route() {
 
 #[test]
 fn rotated_or_reflected_ancestors_keep_direct_gradients() {
-    for (group_flags, rotation, admitted) in [
-        (0, None, true),
-        (0, Some(45 << 16), false),
-        (0x40, None, false),
-        (0x80, None, false),
-    ] {
+    for (group_flags, rotation) in [(0, None), (0, Some(45 << 16)), (0x40, None), (0x80, None)] {
         let grouped = group(
             group_flags,
             rotation,
             nested_shape(gradient_properties(&[], None)),
         );
-        let tree = drawing(&[grouped]);
-        let xml = render(
-            &tree,
-            &[],
-            &mut 10_000,
-            &mut 10_000,
-            &mut 1_000_000,
-            None,
-            None,
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(xml.contains("<a:gradFill"), admitted);
-
-        let document = slide_container(&tree);
-        let span = record_span_with_end(&document, 0, &mut 100, "gradient slide")
-            .unwrap()
-            .0;
-        let model = native(&document, presentation(span)).unwrap();
+        let (document, presentation) = single_slide(&drawing(&[grouped]));
+        let model = native(&document, presentation).unwrap();
         let SlideElement::Shape(shape) = &model.elements[0] else {
             panic!("shape")
         };
-        // Only the withdrawn XML route vetoes; the direct model keeps the
-        // shade, as PowerPoint's own DrawingML for such shapes does.
+        // The direct model keeps the shade under rotated or reflected groups,
+        // as PowerPoint's own DrawingML for such shapes does.
         assert!(matches!(shape.fill, Some(Fill::Gradient { .. })));
     }
 }
@@ -463,19 +394,14 @@ fn malformed_gradient_and_outer_short_budgets_fail_without_partial_admission() {
     let malformed = gradient_properties(&[], None);
     let mut truncated = malformed.clone();
     truncated.pop();
-    let tree = drawing(&[shape(0xa00, truncated)]);
-    assert!(render(
-        &tree,
-        &[],
-        &mut 10_000,
-        &mut 10_000,
-        &mut 1_000_000,
-        None,
-        None
-    )
-    .is_err());
+    let (document, presentation) = single_slide(&drawing(&[shape(0xa00, truncated)]));
+    assert!(native(&document, presentation).is_err());
 
     let tree = drawing(&[shape(0xa00, gradient_properties(&[], None))]);
-    assert!(render(&tree, &[], &mut 1, &mut 10_000, &mut 1_000_000, None, None).is_err());
-    assert!(render(&tree, &[], &mut 10_000, &mut 10_000, &mut 1, None, None).is_err());
+    let (document, presentation) = single_slide(&tree);
+    assert!(native_with_budgets(&document, presentation, 1, 1_000_000).is_err());
+    let (document, presentation) = single_slide(&tree);
+    assert!(native_with_budgets(&document, presentation, 10_000, 1).is_err());
+    let (document, presentation) = single_slide(&tree);
+    assert!(native_with_budgets(&document, presentation, 10_000, 1_000_000).is_ok());
 }

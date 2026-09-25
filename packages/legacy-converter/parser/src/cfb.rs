@@ -1,6 +1,6 @@
 //! Bounded reader for the Compound File Binary container used by Office 97-2003.
 //!
-//! This intentionally implements only the read path needed by the converter.
+//! This intentionally implements only the read path the passive readers need.
 //! Sector chains, DIFAT/FAT tables, MiniFAT streams, and directory entries are
 //! validated before a legacy-format parser sees any bytes. The bounds follow
 //! [MS-CFB] sections 2.2 through 2.6. Format classification and the byte
@@ -324,13 +324,7 @@ impl<'a> CompoundFile<'a> {
         })
     }
 
-    pub fn has_entry(&self, expected: &str) -> bool {
-        self.directory
-            .iter()
-            .filter_map(Option::as_ref)
-            .any(|(name, _)| name.eq_ignore_ascii_case(expected))
-    }
-
+    #[cfg(any(test, feature = "inspection"))]
     pub fn stream(&self, expected: &str) -> Result<Vec<u8>, String> {
         let mut matches = self
             .directory
@@ -1012,7 +1006,6 @@ mod tests {
         let source = b"hello compound file".to_vec();
         let bytes = build_cfb(&[("Workbook", source.clone())]);
         let cfb = CompoundFile::open(&bytes).unwrap();
-        assert!(cfb.has_entry("workbook"));
         let stream = cfb.stream("Workbook").unwrap();
         assert_eq!(&stream[..source.len()], source);
     }
@@ -1200,7 +1193,6 @@ mod tests {
     fn legacy_flat_lookup_still_accepts_unlinked_synthetic_directories() {
         let bytes = build_cfb(&[("Workbook", b"legacy flat lookup".to_vec())]);
         let cfb = CompoundFile::open(&bytes).unwrap();
-        assert!(cfb.has_entry("Workbook"));
         assert_eq!(
             &cfb.stream("Workbook").unwrap()[..18],
             b"legacy flat lookup"

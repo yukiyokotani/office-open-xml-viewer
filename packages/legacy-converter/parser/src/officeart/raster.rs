@@ -1,13 +1,15 @@
-//! Passive image BLIP validation shared by binary Office converters.
+//! Passive image BLIP validation shared by the binary Office readers.
 //! MS-ODRAW 2.2.24-32; W3C PNG IHDR; ITU-T T.81 JPEG frame headers.
 use super::Record;
 #[cfg(any(test, feature = "direct-ppt"))]
 use super::{ByteSpan, RecordSpan};
+#[cfg(any(test, feature = "direct-doc", feature = "direct-xls"))]
 use std::borrow::Cow;
 use std::ops::Range;
 
 /// Resolve only in-stream BLIPs. `delayed` is the format-defined binary stream,
 /// never a file path; DOC inline shapes do not supply a delayed store.
+#[cfg(any(test, all(feature = "inspection", not(target_arch = "wasm32"))))]
 pub(crate) fn read_store_entry<'a>(
     entry: Record<'a>,
     delayed: Option<&'a [u8]>,
@@ -25,6 +27,7 @@ pub(crate) fn read_store_entry<'a>(
 /// evidence for TIFF in PowerPoint.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Raster {
+    #[cfg(any(test, feature = "direct-doc", feature = "inspection"))]
     Advertised,
     // Chosen only by the direct DOC reader.
     #[cfg_attr(not(any(test, feature = "direct-doc")), allow(dead_code))]
@@ -37,6 +40,7 @@ pub(crate) enum Raster {
     ExcelMetafiles,
 }
 
+#[cfg(any(test, feature = "direct-doc", feature = "direct-xls"))]
 pub(crate) fn read_store_entry_as<'a>(
     entry: Record<'a>,
     delayed: Option<&'a [u8]>,
@@ -214,6 +218,7 @@ fn locate_store_entry(entry: Record<'_>) -> Result<StoreLocation, String> {
 
 const MAX_PIXELS: u64 = 40_000_000;
 
+#[cfg(any(test, feature = "direct-doc", feature = "direct-xls"))]
 pub(crate) struct Image<'a> {
     pub bytes: Cow<'a, [u8]>,
     pub extension: &'static str,
@@ -264,6 +269,7 @@ pub(crate) fn read<'a>(
     read_as(blip, budget, remaining_bytes, Raster::Advertised)
 }
 
+#[cfg(any(test, feature = "direct-doc", feature = "direct-xls"))]
 fn read_as<'a>(
     blip: Record<'a>,
     budget: &mut usize,

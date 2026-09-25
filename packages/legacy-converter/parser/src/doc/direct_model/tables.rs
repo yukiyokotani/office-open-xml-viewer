@@ -263,7 +263,7 @@ fn project_table(
             })?;
             if cell.vertical == 1 {
                 charge_cell(remaining, std::mem::size_of::<DocParagraph>())?;
-                content.push(CellElement::Paragraph(Box::new(DocParagraph::default())));
+                content.push(CellElement::Paragraph(Box::default()));
             } else {
                 for block in cell.content.0 {
                     content.push(match block {
@@ -556,8 +556,6 @@ fn reserve<T, A: FnMut(usize) -> Result<(), String>>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Cursor, Write};
-    use zip::write::SimpleFileOptions;
     fn cell(depth: u32) -> Properties {
         let mut p = Properties::default();
         p.apply(0x6649, &depth.to_le_bytes()).unwrap();
@@ -1078,7 +1076,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_preferred_width_fields_match_the_byte_route_docx_parser() {
+    fn preferred_widths_follow_the_merged_leader_cell() {
         fn configured_row() -> Properties {
             let mut end = row(1, &[1000, 2000]);
             end.row.preferred_width = Some(PreferredWidth::Percent(2500));
@@ -1088,34 +1086,6 @@ mod tests {
             end.row.cells[1].flags = (end.row.cells[1].flags & !3) | 1;
             end
         }
-
-        let mut xml_writer = crate::doc::table_output::Writer::new(100_000);
-        xml_writer.push(cell(1), '\u{7}', "<w:p/>".into()).unwrap();
-        xml_writer.push(cell(1), '\u{7}', "<w:p/>".into()).unwrap();
-        xml_writer
-            .push(configured_row(), '\u{7}', String::new())
-            .unwrap();
-        let document_xml = format!(
-            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{}</w:body></w:document>"#,
-            xml_writer.finish().unwrap()
-        );
-        // MS-DOC 2.9.317: the leader's formatting extends across the merged
-        // set. The continuation's conflicting preference is not serialized.
-        assert_eq!(document_xml.matches("<w:tcW ").count(), 1);
-        assert!(document_xml.contains("<w:tcW w:w=\"720\" w:type=\"dxa\"/>"));
-        assert!(document_xml.contains("<w:gridCol w:w=\"1000\"/><w:gridCol w:w=\"2000\"/>"));
-        let mut package = Vec::new();
-        {
-            let mut archive = zip::ZipWriter::new(Cursor::new(&mut package));
-            archive
-                .start_file("word/document.xml", SimpleFileOptions::default())
-                .unwrap();
-            archive.write_all(document_xml.as_bytes()).unwrap();
-            archive.finish().unwrap();
-        }
-        let parsed: serde_json::Value =
-            serde_json::from_str(&docx_parser::parse_docx_native(&package).unwrap()).unwrap();
-        let byte_table = &parsed["body"][0];
 
         let mut sequence = 0;
         let mut direct_writer = Writer::new(&mut sequence);
@@ -1134,18 +1104,26 @@ mod tests {
             panic!()
         };
         let direct_table = serde_json::to_value(direct_table).unwrap();
-        for pointer in [
-            "/widthPt",
-            "/widthPct",
-            "/__tableLayout/preferredWidth",
-            "/rows/0/cells/0/widthPt",
-            "/rows/0/cells/0/widthPct",
-            "/rows/0/cells/0/__tableCellLayout/preferredWidth",
-            "/rows/0/cells/0/colSpan",
+        // MS-DOC 2.9.317: the leader's formatting extends across the merged
+        // set; the continuation's conflicting preference is not projected.
+        for (pointer, expected) in [
+            ("/widthPt", None),
+            ("/widthPct", Some(serde_json::json!(2500.0))),
+            (
+                "/__tableLayout/preferredWidth",
+                Some(serde_json::json!({"kind": "pct", "value": "2500"})),
+            ),
+            ("/rows/0/cells/0/widthPt", Some(serde_json::json!(36.0))),
+            ("/rows/0/cells/0/widthPct", None),
+            (
+                "/rows/0/cells/0/__tableCellLayout/preferredWidth",
+                Some(serde_json::json!({"kind": "dxa", "value": "720"})),
+            ),
+            ("/rows/0/cells/0/colSpan", Some(serde_json::json!(2))),
         ] {
             assert_eq!(
                 direct_table.pointer(pointer),
-                byte_table.pointer(pointer),
+                expected.as_ref(),
                 "{pointer}"
             );
         }

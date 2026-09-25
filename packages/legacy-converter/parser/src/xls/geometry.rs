@@ -1,5 +1,6 @@
 //! [MS-XLS] Row (2.4.221), ColInfo (2.4.53), DefaultRowHeight
-//! (2.4.87), DefColWidth (2.4.89) -> ECMA-376 18.3.1 row/col/sheetFormatPr.
+//! (2.4.87), DefColWidth (2.4.89) -> the XLSX model's row, column and sheet
+//! format geometry (ECMA-376 18.3.1 row/col/sheetFormatPr semantics).
 use super::{styles::Styles, u16_at, u32_at, unsupported, Record};
 use std::collections::BTreeMap;
 
@@ -9,9 +10,6 @@ struct RowFacts {
     custom: bool,
     outline: u8,
     collapsed: bool,
-    thick_top: bool,
-    thick_bottom: bool,
-    style: Option<u16>,
 }
 
 struct ColumnFacts {
@@ -19,7 +17,6 @@ struct ColumnFacts {
     style: u16,
     hidden: bool,
     custom: bool,
-    best_fit: bool,
     outline: u8,
     collapsed: bool,
 }
@@ -31,9 +28,6 @@ fn row_facts(height: u16, flags: u32) -> RowFacts {
         custom: flags & (1 << 6) != 0,
         outline: (flags & 7) as u8,
         collapsed: flags & (1 << 4) != 0,
-        thick_top: flags & (1 << 28) != 0,
-        thick_bottom: flags & (1 << 29) != 0,
-        style: (flags & 0x80 != 0).then_some(((flags >> 16) & 0xfff) as u16),
     }
 }
 
@@ -43,7 +37,6 @@ fn column_facts(width: u16, style: u16, flags: u16) -> ColumnFacts {
         style,
         hidden: flags & 1 != 0,
         custom: flags & 2 != 0,
-        best_fit: flags & 4 != 0,
         outline: ((flags >> 8) & 7) as u8,
         collapsed: flags & (1 << 12) != 0,
     }
@@ -61,7 +54,6 @@ pub(super) struct Geometry {
 }
 
 impl Geometry {
-    #[cfg(any(test, feature = "direct-xls"))]
     /// Apply already-validated BIFF geometry to the renderer worksheet model.
     /// The 8.43/15.0 values are the existing XLSX parser's model defaults when
     /// SpreadsheetML omits sheetFormatPr; they are not additional BIFF facts.
@@ -275,49 +267,6 @@ impl Geometry {
         Ok(())
     }
 
-    pub fn row_attributes(&self, row: u16) -> String {
-        let Some((height, flags)) = self.rows.get(&row) else {
-            return String::new();
-        };
-        let facts = row_facts(*height, *flags);
-        let mut xml = format!(" ht=\"{}\" hidden=\"{}\" customHeight=\"{}\" outlineLevel=\"{}\" collapsed=\"{}\" thickTop=\"{}\" thickBot=\"{}\"", facts.height, u8::from(facts.hidden), u8::from(facts.custom), facts.outline, u8::from(facts.collapsed), u8::from(facts.thick_top), u8::from(facts.thick_bottom));
-        if let Some(style) = facts.style {
-            xml.push_str(&format!(" s=\"{style}\" customFormat=\"1\""));
-        }
-        xml
-    }
-
-    #[cfg(test)]
-    pub fn xml(&self) -> String {
-        self.xml_with_metrics(None)
-    }
-
-    pub(super) fn xml_with_metrics(&self, mdw: Option<f64>) -> String {
-        let mut xml = String::new();
-        if let Some((height, flags)) = self.default_row {
-            xml.push_str(&format!("<sheetFormatPr defaultRowHeight=\"{}\" customHeight=\"{}\" zeroHeight=\"{}\" thickTop=\"{}\" thickBottom=\"{}\"", f64::from(height) / 20.0, flags & 1, (flags >> 1) & 1, (flags >> 2) & 1, (flags >> 3) & 1));
-            // DefColWidth excludes margin padding, unlike CT_Col.width. Keep
-            // it as baseColWidth; inventing a font-dependent padding loses fidelity.
-            if let Some(width) = self.base_width {
-                xml.push_str(&format!(" baseColWidth=\"{width}\""));
-            }
-            if let Some(width) = self.sheet_default_width(mdw) {
-                xml.push_str(&format!(" defaultColWidth=\"{}\"", width / 256.0));
-            }
-            xml.push_str("/>");
-        }
-        if !self.columns.is_empty() {
-            xml.push_str("<cols>");
-            for (column, (width, style, flags)) in &self.columns {
-                let column = u32::from(*column) + 1;
-                let facts = column_facts(*width, *style, *flags);
-                xml.push_str(&format!("<col min=\"{column}\" max=\"{column}\" width=\"{}\" style=\"{}\" hidden=\"{}\" customWidth=\"{}\" bestFit=\"{}\" outlineLevel=\"{}\" collapsed=\"{}\"/>", facts.width, facts.style, u8::from(facts.hidden), u8::from(facts.custom), u8::from(facts.best_fit), facts.outline, u8::from(facts.collapsed)));
-            }
-            xml.push_str("</cols>");
-        }
-        xml
-    }
-
     fn default_width(&self, mdw: f64) -> Option<f64> {
         if self.unknown_digit_width {
             return None;
@@ -384,12 +333,10 @@ impl Geometry {
     }
 }
 
-#[cfg(any(test, feature = "direct-xls"))]
 fn checked_product(count: usize, size: usize) -> Result<usize, String> {
     count.checked_mul(size).ok_or_else(model_budget_error)
 }
 
-#[cfg(any(test, feature = "direct-xls"))]
 fn model_budget_error() -> String {
     unsupported("XLS direct geometry model byte budget exceeded")
 }
@@ -397,6 +344,11 @@ fn model_budget_error() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A model budget that never binds.
+    fn unbounded() -> usize {
+        usize::MAX
+    }
 
     fn worksheet() -> xlsx_model::Worksheet {
         xlsx_model::Worksheet::placeholder("S", "test".into())
@@ -435,9 +387,6 @@ mod tests {
                 let mut budget = usize::MAX;
                 geometry.project(&mut model, mdw, &mut budget).unwrap();
                 assert_eq!(model.default_col_width, f64::from(width) / 256.0);
-                assert!(geometry
-                    .xml_with_metrics(mdw)
-                    .contains(&format!("defaultColWidth=\"{}\"", f64::from(width) / 256.0)));
             }
         }
     }
@@ -469,9 +418,6 @@ mod tests {
             geometry.project(&mut model, mdw, &mut budget).unwrap();
             assert_eq!(model.default_col_width, 12.0);
             assert_eq!(model.col_widths.get(&1), Some(&16.0));
-            assert!(geometry
-                .xml_with_metrics(mdw)
-                .contains("defaultColWidth=\"12\""));
         }
     }
 
@@ -488,7 +434,6 @@ mod tests {
         geometry.project(&mut model, None, &mut budget).unwrap();
         assert_eq!(model.default_col_width, 10.0);
         assert_eq!(model.col_widths.get(&1), Some(&16.0));
-        assert!(geometry.xml().contains("defaultColWidth=\"10\""));
     }
 
     #[test]
@@ -511,9 +456,6 @@ mod tests {
             .project(&mut model, Some(7.0), &mut budget)
             .unwrap();
         assert_eq!(model.default_col_width, 8.43);
-        assert!(!geometry
-            .xml_with_metrics(Some(7.0))
-            .contains("defaultColWidth"));
     }
 
     #[test]
@@ -535,10 +477,15 @@ mod tests {
             })
             .unwrap();
         assert_eq!(geometry.column_emu(0, 7.0), Some(61.0 * 9525.0));
-        assert!(geometry
-            .xml_with_metrics(Some(7.0))
-            .contains("defaultColWidth=\"8.7109375\""));
-        assert!(!geometry.xml().contains("defaultColWidth"));
+        // DefColWidth 8 at mdw 7: trunc((8 + 5 / 7) * 256) / 256 characters.
+        let default_width = |mdw| {
+            let mut model = worksheet();
+            geometry.project(&mut model, mdw, &mut unbounded()).unwrap();
+            model.default_col_width
+        };
+        assert_eq!(default_width(Some(7.0)), 8.7109375);
+        // Without a measurement the model keeps its own default.
+        assert_eq!(default_width(None), 8.43);
         geometry
             .read(&Record {
                 kind: 0x99,
@@ -576,10 +523,17 @@ mod tests {
                 data: &[255, 0, 0, 1, 0, 12, 0, 0, 0, 0, 0, 0],
             })
             .unwrap();
-        let xml = geometry.xml();
-        assert!(xml.contains("defaultColWidth=\"12\""));
-        assert!(xml.contains("min=\"256\" max=\"256\""));
-        assert!(!xml.contains("min=\"257\""));
+        let mut model = worksheet();
+        geometry
+            .project(&mut model, None, &mut unbounded())
+            .unwrap();
+        assert_eq!(model.default_col_width, 12.0);
+        let columns: Vec<_> = model
+            .col_style_ranges
+            .iter()
+            .map(|range| (range.min, range.max))
+            .collect();
+        assert_eq!(columns, [(256, 256)]);
     }
     #[test]
     fn preserves_default_hidden_rows_and_rejects_out_of_range_geometry() {
@@ -591,7 +545,11 @@ mod tests {
                 data: &[2, 0, 44, 1],
             })
             .unwrap();
-        assert!(geometry.xml().contains("zeroHeight=\"1\""));
+        let mut model = worksheet();
+        geometry
+            .project(&mut model, None, &mut unbounded())
+            .unwrap();
+        assert_eq!(model.default_row_height, 0.0);
         assert!(geometry
             .read(&Record {
                 kind: 0x007d,
@@ -673,81 +631,37 @@ mod tests {
     }
 
     #[test]
-    fn native_geometry_matches_parser_across_flag_combinations() {
-        use super::super::{build_xlsx_with_drawings, styles, CellValue, Emission, SheetData};
-        for default_flags in 0..4 {
-            for flags in 0..128_u32 {
-                let mut source = SheetData::default();
-                source.geometry.default_row = Some((420, default_flags));
-                source.geometry.default_column = Some((2560, 0, 0));
-                source.geometry.rows.insert(1, (360, flags));
-                let col_flags = (flags as u16 & 7)
-                    | (((flags as u16 >> 3) & 7) << 8)
-                    | (((flags as u16 >> 6) & 1) << 12);
-                source.geometry.columns.insert(0, (3072, 0, col_flags));
-                source
-                    .rows
-                    .insert(0, BTreeMap::from([(0, CellValue::Number(1.0))]));
-                source
-                    .rows
-                    .insert(1, BTreeMap::from([(0, CellValue::Number(2.0))]));
-                let mut actual = worksheet();
-                actual.rows = vec![row(1), row(2)];
-                let mut budget = usize::MAX;
-                source
-                    .geometry
-                    .project(&mut actual, None, &mut budget)
-                    .unwrap();
-                let bytes = build_xlsx_with_drawings(
-                    &[("S".into(), source)],
-                    &styles::minimal_resolved(),
-                    Vec::new(),
-                    false,
-                    1,
-                    Emission {
-                        max_output_bytes: 1024 * 1024,
-                        mdw: None,
-                        drawings: None,
-                    },
-                )
-                .unwrap();
-                let expected: serde_json::Value =
-                    serde_json::from_str(&xlsx_parser::parse_sheet_native(&bytes, 0, "S").unwrap())
-                        .unwrap();
-                let actual = serde_json::to_value(actual).unwrap();
-                for field in [
-                    "defaultColWidth",
-                    "defaultRowHeight",
-                    "defaultRowHeightCustom",
-                    "colWidths",
-                    "colWidthRanges",
-                    "colStyleRanges",
-                    "colOutlineLevels",
-                    "colCollapsed",
-                    "colHidden",
-                    "rowHeights",
-                ] {
-                    assert_eq!(
-                        actual[field], expected[field],
-                        "{field}: default={default_flags}, flags={flags}"
-                    );
-                }
-                for i in 0..2 {
-                    for field in [
-                        "height",
-                        "customHeight",
-                        "outlineLevel",
-                        "collapsed",
-                        "hidden",
-                    ] {
-                        assert_eq!(
-                            actual["rows"][i][field], expected["rows"][i][field],
-                            "row {i} {field}: default={default_flags}, flags={flags}"
-                        );
-                    }
-                }
-            }
-        }
+    fn hidden_rows_and_default_width_columns_project_by_their_flags() {
+        let mut geometry = Geometry {
+            default_row: Some((420, 0)),
+            ..Geometry::default()
+        };
+        // Row 1 hidden (fDyZero) with a custom height; row 2 plain.
+        geometry.rows.insert(0, (360, (1 << 5) | (1 << 6)));
+        geometry.rows.insert(1, (360, 0));
+        // Column A neither hidden nor custom: an ordinary width range.
+        geometry.columns.insert(0, (3072, 0, 0));
+        // Column B hidden without a custom width: zero width, still hidden.
+        geometry.columns.insert(1, (3072, 0, 1));
+        let mut model = worksheet();
+        model.rows = vec![row(1), row(2), row(3)];
+        geometry
+            .project(&mut model, None, &mut unbounded())
+            .unwrap();
+        assert!(model.rows[0].hidden && model.rows[0].custom_height);
+        assert_eq!(model.rows[0].height, Some(0.0));
+        assert!(!model.rows[1].hidden && !model.rows[1].custom_height);
+        assert_eq!(model.rows[1].height, Some(18.0));
+        // A row without a ROW record keeps the sheet default.
+        assert_eq!(model.rows[2].height, None);
+        assert_eq!(model.row_heights.get(&3), None);
+        assert_eq!(model.default_row_height, 21.0);
+        assert_eq!(model.col_width_ranges.len(), 1);
+        let range = &model.col_width_ranges[0];
+        assert_eq!((range.min, range.max, range.width), (1, 1, 12.0));
+        assert_eq!(model.col_widths.get(&2), Some(&0.0));
+        assert_eq!(model.col_hidden.get(&2), Some(&true));
+        assert_eq!(model.col_hidden.get(&1), None);
     }
 
     #[test]

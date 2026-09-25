@@ -3,8 +3,9 @@ name: Fuzz
 # Long-running libFuzzer campaigns for the parser workspace, moved off local
 # machines onto Actions runners (QA6). Each target
 # (fuzz_docx_parse / fuzz_pptx_parse / fuzz_xlsx_parse / fuzz_zip_handle /
-# fuzz_rels / fuzz_legacy_office_converter — see fuzz/fuzz_targets/) gets its
-# own matrix job so a hang or
+# fuzz_rels / fuzz_legacy_direct_doc / fuzz_legacy_direct_xls /
+# fuzz_legacy_direct_ppt / fuzz_legacy_ppt_alternative — see
+# fuzz/fuzz_targets/) gets its own matrix job so a hang or
 # crash in one target never blocks the others.
 #
 # Seed corpus lives only in fuzz/corpus/ (copied from the committable
@@ -28,7 +29,10 @@ on:
           - fuzz_xlsx_parse
           - fuzz_zip_handle
           - fuzz_rels
-          - fuzz_legacy_office_converter
+          - fuzz_legacy_direct_doc
+          - fuzz_legacy_direct_xls
+          - fuzz_legacy_direct_ppt
+          - fuzz_legacy_ppt_alternative
       duration_minutes:
         description: 'Fuzz duration per target, in minutes'
         required: true
@@ -60,7 +64,10 @@ jobs:
           - fuzz_xlsx_parse
           - fuzz_zip_handle
           - fuzz_rels
-          - fuzz_legacy_office_converter
+          - fuzz_legacy_direct_doc
+          - fuzz_legacy_direct_xls
+          - fuzz_legacy_direct_ppt
+          - fuzz_legacy_ppt_alternative
     steps:
       - uses: actions/checkout@v5
 

@@ -16,7 +16,6 @@ fn typed_level(text: &[u8]) -> Level<'_> {
         legal: false,
         restart: Some(0),
         follow: 0,
-        tentative: false,
         papx: &[],
         chpx: &[],
         text,
@@ -86,8 +85,6 @@ fn reads_appended_levels_outside_lcb_plflst_and_keeps_override_identity() {
     let result = Tables::read(&word, &table).unwrap();
     assert_eq!(result.lists.len(), 2);
     assert_eq!(result.lists[0].levels.len(), 1);
-    assert!(result.lists[0].simple);
-    assert!(!result.lists[1].simple);
     assert_eq!(result.lists[0].styles, [0xfff; 9]);
     assert_eq!(result.lists[1].levels.len(), 9);
     let a = result
@@ -181,7 +178,7 @@ fn preserves_reference_removal_skip_and_negative_indent_semantics() {
 #[test]
 fn reads_papx_before_chpx_and_honors_dormant_fields() {
     let mut lvl = level(0);
-    lvl[5] = 0x84; // legal, tentative; restart limit is dormant.
+    lvl[5] = 0x84; // legal and (unused) tentative; restart limit is dormant.
     lvl[26] = 255;
     lvl[24] = 3;
     lvl[25] = 4;
@@ -192,7 +189,6 @@ fn reads_papx_before_chpx_and_honors_dormant_fields() {
     assert_eq!(lvl.papx, &[0x0f, 0x84, 0xd0, 0x02]);
     assert_eq!(lvl.chpx, &[0x35, 0x08, 1]);
     assert!(lvl.legal);
-    assert!(!lvl.tentative); // fTentative is ignored outside hybrid lists.
     assert_eq!(lvl.restart, Some(0));
     assert_eq!(parsed.overrides[0].first_cp, Some(0));
 }
@@ -328,16 +324,16 @@ fn empty_ranges_ignore_offsets_and_counts_cannot_drive_unbounded_allocation() {
         levels: 0,
         bytes: usize::MAX,
     };
-    assert!(read_level(&mut Reader::new(&level(0)), 0, false, &mut budget).is_err());
+    assert!(read_level(&mut Reader::new(&level(0)), 0, &mut budget).is_err());
     let mut budget = Budget {
         levels: 1,
         bytes: 29,
     };
-    assert!(read_level(&mut Reader::new(&level(0)), 0, false, &mut budget).is_err());
+    assert!(read_level(&mut Reader::new(&level(0)), 0, &mut budget).is_err());
 }
 
 #[test]
-fn handles_all_nine_placeholders_restart_boundaries_and_hybrid_metadata() {
+fn handles_all_nine_placeholders_and_restart_boundaries() {
     for restart in 0..=8 {
         let mut levels: Vec<_> = (0..9).map(level).collect();
         let last = &mut levels[8];
@@ -356,7 +352,7 @@ fn handles_all_nine_placeholders_restart_boundaries_and_hybrid_metadata() {
         let (word, table) = tables(&[lst], &levels, &[lfo(42, 0)], &[vec![0; 4]]);
         let parsed = Tables::read(&word, &table).unwrap();
         let lvl = &parsed.lists[0].levels[8];
-        assert!(lvl.tentative && lvl.legal);
+        assert!(lvl.legal);
         assert_eq!(lvl.justification, 2);
         assert_eq!(lvl.follow, 2);
         assert_eq!(lvl.restart, Some(restart));
@@ -447,14 +443,14 @@ fn checks_each_level_prefix_and_charges_the_exact_borrowed_payload() {
             levels: 1,
             bytes: bytes.len(),
         };
-        assert!(read_level(&mut Reader::new(&bytes[..end]), 0, false, &mut budget).is_err());
+        assert!(read_level(&mut Reader::new(&bytes[..end]), 0, &mut budget).is_err());
     }
     let mut budget = Budget {
         levels: 1,
         bytes: bytes.len(),
     };
     let mut reader = Reader::new(&bytes);
-    let parsed = read_level(&mut reader, 0, false, &mut budget).unwrap();
+    let parsed = read_level(&mut reader, 0, &mut budget).unwrap();
     assert!(reader.bytes.is_empty());
     assert_eq!(budget.levels, 0);
     assert_eq!(budget.bytes, 0);

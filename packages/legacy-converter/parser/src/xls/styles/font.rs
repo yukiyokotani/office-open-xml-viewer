@@ -1,4 +1,4 @@
-//! Owned BIFF8 font semantics shared by legacy XML and future native projection.
+//! Owned BIFF8 font semantics projected into the XLSX renderer model.
 //! [MS-XLS] 2.4.122 (Font, including family/charset) and 2.5.129 (FontIndex).
 
 use super::super::{decode_biff_chars, u16_at, unsupported};
@@ -13,7 +13,7 @@ pub(super) enum Underline {
 }
 
 impl Underline {
-    pub(super) fn xml_value(self) -> &'static str {
+    pub(super) fn model_value(self) -> &'static str {
         match self {
             Self::None => "none",
             Self::Single => "single",
@@ -32,7 +32,7 @@ pub(super) enum Script {
 }
 
 impl Script {
-    pub(super) fn xml_value(self) -> &'static str {
+    pub(super) fn model_value(self) -> &'static str {
         match self {
             Self::Baseline => "baseline",
             Self::Superscript => "superscript",
@@ -136,11 +136,11 @@ impl ResolvedFont {
             charset: Some(self.charset),
             underline_style: match self.underline {
                 Underline::None | Underline::Single => None,
-                value => Some(value.xml_value().to_string()),
+                value => Some(value.model_value().to_string()),
             },
             vert_align: match self.script {
                 Script::Baseline => None,
-                value => Some(value.xml_value().to_string()),
+                value => Some(value.model_value().to_string()),
             },
         }
     }

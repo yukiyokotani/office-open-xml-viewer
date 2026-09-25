@@ -141,7 +141,6 @@ impl DirectSession {
         self.presentation.slides.len()
     }
 
-    #[cfg(feature = "direct-ppt")]
     pub fn size(&self) -> (u32, u32) {
         self.presentation.size
     }
@@ -182,7 +181,7 @@ fn resource_index(key: &str) -> Result<u32, String> {
 }
 
 /// The direct cursor's tests use this session fixture.
-#[cfg(all(test, feature = "direct-ppt"))]
+#[cfg(test)]
 pub(super) fn cursor_fixture() -> (DirectSession, Vec<u8>) {
     tests::cursor_fixture()
 }
@@ -190,7 +189,7 @@ pub(super) fn cursor_fixture() -> (DirectSession, Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cfb::test_support::build_cfb;
+    use crate::cfb::test_support::{build_cfb, build_scoped_cfb};
 
     fn record(options: u16, kind: u16, payload: &[u8]) -> Vec<u8> {
         [
@@ -293,6 +292,150 @@ mod tests {
             .reference(1, &session.document, None, &mut session.work_budget)
             .unwrap());
         (session, png)
+    }
+
+    /// A root-scoped CFB holding a minimal edit chain: DocumentContainer
+    /// (DocumentAtom 5760 x 4320 master units, SlideListWithText with one
+    /// SlidePersistAtom), one SlideContainer with `slide_children`, a
+    /// PersistDirectoryAtom, a UserEditAtom and the Current User stream.
+    fn minimal_ppt(slide_children: &[u8]) -> Vec<u8> {
+        let mut document_atom = vec![0u8; 40];
+        document_atom[..4].copy_from_slice(&5760u32.to_le_bytes());
+        document_atom[4..8].copy_from_slice(&4320u32.to_le_bytes());
+        let mut slide_ref = [0u8; 20];
+        slide_ref[..4].copy_from_slice(&2u32.to_le_bytes());
+        let document = record(
+            15,
+            1000,
+            &[
+                record(1, 1001, &document_atom),
+                record(15, 4080, &record(0, 1011, &slide_ref)),
+            ]
+            .concat(),
+        );
+        let slide = record(15, SLIDE_CONTAINER, slide_children);
+        let directory_offset = document.len() + slide.len();
+        let directory = record(
+            0,
+            0x1772,
+            &[
+                0x00200001u32.to_le_bytes(),
+                0u32.to_le_bytes(),
+                (document.len() as u32).to_le_bytes(),
+            ]
+            .concat(),
+        );
+        let current_edit = directory_offset + directory.len();
+        let mut user_payload = [0u8; 28];
+        user_payload[12..16].copy_from_slice(&(directory_offset as u32).to_le_bytes());
+        user_payload[16..20].copy_from_slice(&1u32.to_le_bytes());
+        let user_edit = record(0, USER_EDIT_ATOM, &user_payload);
+        build_scoped_cfb(&[
+            (
+                "PowerPoint Document",
+                [document, slide, directory, user_edit].concat(),
+            ),
+            ("Current User", valid_current_user(current_edit)),
+        ])
+    }
+
+    /// One text box whose ClientTextbox holds `text` as a TextCharsAtom and a
+    /// TextRulerAtom giving level 0 explicit zero origins.
+    fn text_drawing(text: &str) -> Vec<u8> {
+        let units: Vec<u8> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let ruler = record(0, 4006, &[(8u32 | 256).to_le_bytes(), [0; 4]].concat());
+        let textbox = record(
+            15,
+            0xf00d,
+            &[record(0, TEXT_CHARS_ATOM, &units), ruler].concat(),
+        );
+        let flags = record(
+            (202 << 4) | 2,
+            0xf00a,
+            &[42u32.to_le_bytes(), 0xa00u32.to_le_bytes()].concat(),
+        );
+        let anchor = record(
+            0,
+            0xf010,
+            &[0i16, 0, 576, 576]
+                .into_iter()
+                .flat_map(i16::to_le_bytes)
+                .collect::<Vec<_>>(),
+        );
+        let shape = record(15, 0xf004, &[flags, anchor, textbox].concat());
+        record(15, 1036, &record(15, 0xf002, &shape))
+    }
+
+    fn session(bytes: &[u8]) -> Result<DirectSession, String> {
+        DirectSession::new(&CompoundFile::open(bytes).unwrap())
+    }
+
+    #[test]
+    fn projects_unicode_text_of_a_minimal_edit_chain() {
+        let mut session = session(&minimal_ppt(&text_drawing("Legacy 日本語 slide"))).unwrap();
+        assert_eq!(session.slide_count(), 1);
+        assert_eq!(session.size(), (9_144_000, 6_858_000));
+        let slide = session.slide(0).unwrap();
+        assert!(!slide.hidden);
+        let pptx_model::SlideElement::Shape(shape) = &slide.elements[0] else {
+            panic!("expected the text box")
+        };
+        let text: String = shape.text_body.as_ref().unwrap().paragraphs[0]
+            .runs
+            .iter()
+            .filter_map(|run| match run {
+                pptx_model::TextRun::Text(run) => Some(run.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "Legacy 日本語 slide");
+    }
+
+    #[test]
+    fn projects_the_live_slide_hidden_flag() {
+        // MS-PPT 2.5.1 / 2.6.6: SlideShowSlideInfoAtom.fHidden is bit 2 of
+        // the flags word following the two effect bytes.
+        let mut info = [0u8; 16];
+        info[10] = 4;
+        let children = [record(0, 0x03f9, &info), text_drawing("Hidden")].concat();
+        let mut session = session(&minimal_ppt(&children)).unwrap();
+        assert!(session.slide(0).unwrap().hidden);
+    }
+
+    #[test]
+    fn rejects_an_invalid_user_edit_chain() {
+        let mut user_edit_payload = vec![0; 24];
+        user_edit_payload[8..12].copy_from_slice(&1u32.to_le_bytes());
+        let ppt = build_scoped_cfb(&[
+            (
+                "PowerPoint Document",
+                record(0, USER_EDIT_ATOM, &user_edit_payload),
+            ),
+            ("Current User", valid_current_user(0)),
+        ]);
+        assert!(session(&ppt)
+            .err()
+            .expect("malformed UserEditAtom must fail")
+            .contains("invalid PowerPoint UserEditAtom"));
+    }
+
+    #[test]
+    fn cfb_constructor_rejects_encrypted_current_user_and_encrypted_summary() {
+        let encrypted_user = build_scoped_cfb(&[
+            ("PowerPoint Document", vec![0; 16]),
+            ("Current User", current_user(CURRENT_USER_ENCRYPTED)),
+        ]);
+        let summary = build_scoped_cfb(&[
+            ("EncryptedSummary", vec![0; 16]),
+            ("PowerPoint Document", vec![0; 16]),
+            ("Current User", valid_current_user(0)),
+        ]);
+        for bytes in [encrypted_user, summary] {
+            assert!(session(&bytes)
+                .err()
+                .expect("encrypted input must fail")
+                .contains("encrypted"));
+        }
     }
 
     #[test]

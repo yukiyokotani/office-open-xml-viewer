@@ -11,7 +11,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 mod cnf;
-#[cfg(feature = "direct-doc")]
 mod direct;
 mod table_style;
 mod tapx;
@@ -113,7 +112,6 @@ pub struct Formatting<'a> {
     data: &'a [u8],
     budget: Budget,
     numbering: numbering::Tables<'a>,
-    pub numbering_output: numbering::output::Store,
     pub unsupported_character_properties: bool,
     pub unsupported_paragraph_properties: bool,
     pub unsupported_piece_properties: bool,
@@ -123,14 +121,12 @@ pub struct Formatting<'a> {
     /// author names), decoded only when a revision mark is projected. `None`
     /// records an out-of-range table so documents without revision marks are
     /// unaffected, while a revision mark that needs it still fails.
-    #[cfg(feature = "direct-doc")]
     revision_authors: Option<&'a [u8]>,
 }
 
 pub(in crate::doc) struct ResolvedParagraph {
     pub(in crate::doc) properties: paragraph::Properties,
     pub(in crate::doc) numbering: Option<(numbering::Reference, Properties)>,
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) paragraph_mark: Option<Properties>,
 }
 
@@ -168,14 +164,12 @@ impl<'a> Formatting<'a> {
             data,
             budget: Budget::default(),
             numbering: numbering::Tables::read(word, table)?,
-            numbering_output: numbering::output::Store::default(),
             unsupported_character_properties: false,
             unsupported_paragraph_properties: false,
             unsupported_piece_properties: false,
             missing_tables,
             unsupported_table_properties: false,
             // FibRgFcLcb97 entry 51 (0x9A + 51 * 8).
-            #[cfg(feature = "direct-doc")]
             revision_authors: fkp::table_part(word, table, 0x232).ok(),
         })
     }
@@ -197,12 +191,10 @@ impl<'a> Formatting<'a> {
         self.interpret_table_styles = interpret_table_styles;
     }
 
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) fn use_raw_table_shading(&self) -> bool {
         self.effective_nfib > 0x00d9 && self.interpret_table_styles
     }
 
-    #[cfg(any(test, feature = "direct-doc"))]
     pub(in crate::doc) fn resolve_table_style_id(&self, selected: Option<usize>) -> Option<usize> {
         let selected = selected?;
         // [MS-DOC] 2.6.3 sprmTIstd: an empty, missing, or wrong-kind style is
@@ -217,47 +209,6 @@ impl<'a> Formatting<'a> {
                 .filter(|style| style.kind == 3)
                 .map_or(0x000b, |_| selected),
         )
-    }
-
-    pub fn paragraph_xml(
-        &mut self,
-        style: usize,
-        fc: usize,
-        prm: u16,
-        prcs: &[&[u8]],
-    ) -> Result<String, String> {
-        let mut resolved = self.resolve_paragraph(style, fc, prm, prcs)?;
-        if resolved.properties.has_direct_only_properties() {
-            // The WordprocessingML adapter does not serialize these; keep its
-            // established omission warning.
-            self.unsupported_paragraph_properties = true;
-        }
-        if let Some((reference, marker)) = resolved.numbering {
-            if marker.has_direct_only_properties() {
-                self.unsupported_character_properties = true;
-            }
-            let ppr = resolved.properties.xml();
-            let rpr = self.byte_run_xml(&marker)?;
-            let id = self.numbering_output.activate(
-                &self.numbering,
-                reference,
-                ppr,
-                rpr,
-                super::MAX_DOCUMENT_XML_BYTES,
-            )?;
-            resolved.properties.numbering = id.map(|id| (id, reference.level));
-        }
-        Ok(resolved.properties.xml())
-    }
-
-    pub(in crate::doc) fn resolve_paragraph(
-        &mut self,
-        style: usize,
-        fc: usize,
-        prm: u16,
-        prcs: &[&[u8]],
-    ) -> Result<ResolvedParagraph, String> {
-        self.resolve_paragraph_with_table(style, None, fc, prm, prcs)
     }
 
     fn resolve_paragraph_with_table(
@@ -387,13 +338,9 @@ impl<'a> Formatting<'a> {
                 props.clear_alignment();
             }
 
-            #[cfg(feature = "direct-doc")]
             let paragraph_mark =
                 self.run_properties_with_table(style, table_style, fc, prm, prcs)?;
-            #[cfg(feature = "direct-doc")]
             let mut marker = paragraph_mark.clone();
-            #[cfg(not(feature = "direct-doc"))]
-            let mut marker = self.run_properties(style, fc, prm, prcs)?;
             let mut baseline = self.paragraph_base_with_table(style, table_style)?;
             if linked != 0xfff {
                 // Resolve the linked style's toggles against its own base
@@ -417,7 +364,6 @@ impl<'a> Formatting<'a> {
             return Ok(ResolvedParagraph {
                 properties: props,
                 numbering: Some((reference, marker)),
-                #[cfg(feature = "direct-doc")]
                 paragraph_mark: Some(paragraph_mark),
             });
         }
@@ -429,7 +375,6 @@ impl<'a> Formatting<'a> {
         Ok(ResolvedParagraph {
             properties: props,
             numbering: None,
-            #[cfg(feature = "direct-doc")]
             paragraph_mark: None,
         })
     }
@@ -546,16 +491,6 @@ impl<'a> Formatting<'a> {
         Ok(direct_properties)
     }
 
-    pub fn table_properties(
-        &mut self,
-        fc: usize,
-        prm: u16,
-        prcs: &[&[u8]],
-    ) -> Result<table::Properties, String> {
-        self.table_properties_with_policy(fc, prm, prcs, false)
-    }
-
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) fn table_properties_native(
         &mut self,
         fc: usize,
@@ -611,15 +546,11 @@ impl<'a> Formatting<'a> {
             effective_nfib: self.effective_nfib,
             interpret_table_styles,
         };
-        #[cfg(feature = "direct-doc")]
         let mut native_geometry = table::NativeGeometry::default();
-        #[cfg(feature = "direct-doc")]
         if interpret_table_styles {
             native_geometry.begin_source();
         }
-        #[cfg(feature = "direct-doc")]
         let mut piece_started = false;
-        #[cfg(feature = "direct-doc")]
         let mut native_admission = table::NativeAdmission::new(shading_policy.enabled());
         sprm::paragraph_properties_appended(
             direct,
@@ -628,7 +559,6 @@ impl<'a> Formatting<'a> {
             &mut self.budget,
             piece_filter,
             |code, operand, _, _from_piece| {
-                #[cfg(feature = "direct-doc")]
                 if interpret_table_styles && _from_piece && !piece_started {
                     native_geometry.begin_source();
                     piece_started = true;
@@ -641,24 +571,20 @@ impl<'a> Formatting<'a> {
                 // after a direct chain that set TDxaCol overrides replaced
                 // those widths in the one native control observed; geometry
                 // keeps that cross-source case gated until it is generalized.
-                #[cfg(feature = "direct-doc")]
                 if interpret_table_styles {
                     native_admission.observe(code);
                     properties.row.reset_row_properties_at_tistd(code);
                 }
-                #[cfg(feature = "direct-doc")]
                 if interpret_table_styles
                     && properties.row.apply_native_cant_split(code, operand)?
                 {
                     return Ok(());
                 }
-                #[cfg(feature = "direct-doc")]
                 if interpret_table_styles
                     && properties.row.apply_style_aware_margins(code, operand)?
                 {
                     return Ok(());
                 }
-                #[cfg(feature = "direct-doc")]
                 if interpret_table_styles {
                     match properties.row.apply_style_aware_borders(code, operand)? {
                         table::StyleAwareBorderApply::Handled => return Ok(()),
@@ -680,7 +606,6 @@ impl<'a> Formatting<'a> {
                     }
                     table::StyleAwareShadingApply::Unhandled => {}
                 }
-                #[cfg(feature = "direct-doc")]
                 if interpret_table_styles {
                     match native_geometry.apply(&mut properties.row, code, operand)? {
                         table::NativeGeometryApply::Handled => return Ok(()),
@@ -748,7 +673,6 @@ impl<'a> Formatting<'a> {
         Ok(())
     }
 
-    #[cfg(feature = "direct-doc")]
     fn paragraph_base(&mut self, id: usize) -> Result<Properties, String> {
         self.paragraph_base_with_table(id, None)
     }
@@ -770,43 +694,6 @@ impl<'a> Formatting<'a> {
         }
         self.paragraph_cache.insert(key, props.clone());
         Ok(props)
-    }
-
-    /// A caller caches this result for a consecutive (paragraph style, CHPX,
-    /// PCD) range. Properties are not decoded or allocated once per character.
-    pub fn run_xml(
-        &mut self,
-        paragraph_style: usize,
-        fc: usize,
-        prm: u16,
-        prcs: &[&[u8]],
-    ) -> Result<String, String> {
-        let props = self.run_properties(paragraph_style, fc, prm, prcs)?;
-        if props.has_direct_only_properties() {
-            // Not serialized by the WordprocessingML adapter; keep warning.
-            self.unsupported_character_properties = true;
-        }
-        self.byte_run_xml(&props)
-    }
-
-    fn byte_run_xml(&mut self, properties: &Properties) -> Result<String, String> {
-        let (xml, omitted_language) = properties.byte_xml(&self.fonts)?;
-        if omitted_language {
-            self.unsupported_character_properties = true;
-        }
-        Ok(xml)
-    }
-
-    pub fn inline_picture_location(
-        &mut self,
-        style: usize,
-        fc: usize,
-        prm: u16,
-        prcs: &[&[u8]],
-    ) -> Result<Option<usize>, String> {
-        self.run_properties(style, fc, prm, prcs)?
-            .picture
-            .inline_location()
     }
 
     pub fn passive_special_character(
@@ -1043,31 +930,7 @@ fn read_styles(bytes: &[u8]) -> Result<(Properties, Vec<Option<Style<'_>>>), Str
 mod tests {
     use super::*;
     use crate::doc::table_style_condition;
-
-    #[cfg(feature = "direct-doc")]
-    fn parse_direct_fixture(ppr: &str, rpr: &str, mark_rpr: &str) -> serde_json::Value {
-        use std::io::{Cursor, Write};
-        use zip::write::SimpleFileOptions;
-
-        let mark_inner = mark_rpr
-            .strip_prefix("<w:rPr>")
-            .and_then(|value| value.strip_suffix("</w:rPr>"))
-            .expect("resolved run properties");
-        let xml = format!(
-            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr>{ppr}<w:rPr>{mark_inner}</w:rPr></w:pPr><w:r>{rpr}<w:t>x</w:t></w:r></w:p></w:body></w:document>"#
-        );
-        let mut bytes = Vec::new();
-        {
-            let mut zip = zip::ZipWriter::new(Cursor::new(&mut bytes));
-            zip.start_file("word/document.xml", SimpleFileOptions::default())
-                .unwrap();
-            zip.write_all(xml.as_bytes()).unwrap();
-            zip.finish().unwrap();
-        }
-        let parsed: serde_json::Value =
-            serde_json::from_str(&docx_parser::parse_docx_native(&bytes).unwrap()).unwrap();
-        parsed["body"][0].clone()
-    }
+    use docx_model::DocParagraph;
 
     #[test]
     fn reads_font_names_after_ffn_metadata_not_as_latin1() {
@@ -1099,13 +962,11 @@ mod tests {
             data: &[],
             budget: Budget::default(),
             numbering: numbering::Tables::default(),
-            numbering_output: numbering::output::Store::default(),
             unsupported_character_properties: false,
             unsupported_paragraph_properties: false,
             unsupported_piece_properties: false,
             missing_tables: true,
             unsupported_table_properties: false,
-            #[cfg(feature = "direct-doc")]
             revision_authors: Some(&[]),
         }
     }
@@ -1286,11 +1147,11 @@ mod tests {
         assert_eq!(formatting.chain(5, 3).unwrap(), [4, 5]);
 
         for (id, expected) in [
-            (0, "FF0000"),
-            (1, "0000FF"),
-            (2, "FF0000"),
+            (0, "ff0000"),
+            (1, "0000ff"),
+            (2, "ff0000"),
             (3, "008000"),
-            (5, "FF0000"),
+            (5, "ff0000"),
         ] {
             let mut properties = Properties::default();
             for style_id in formatting.chain(id, 3).unwrap() {
@@ -1307,17 +1168,14 @@ mod tests {
                     assert!(properties.apply(code, operand, &baseline).unwrap());
                 }
             }
-            assert!(
-                properties
-                    .xml(&[])
-                    .unwrap()
-                    .contains(&format!("<w:color w:val=\"{expected}\"/>")),
-                "style {id} did not resolve to {expected}"
+            assert_eq!(
+                properties.direct_color().as_deref(),
+                Some(expected),
+                "style {id}"
             );
         }
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn table_chpx_absolute_size_inherits_and_direct_size_wins_for_run_and_mark() {
         let mut formatting = observed_table_style_formatting();
@@ -1393,7 +1251,6 @@ mod tests {
         assert!(complex_script.unsupported_character_properties);
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn inherited_conditional_character_fields_compose_by_property() {
         let mut formatting = observed_table_style_formatting();
@@ -1454,7 +1311,6 @@ mod tests {
         assert!(!formatting.unsupported_character_properties);
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn table_chpx_ascii_and_high_ansi_fonts_inherit_and_direct_fonts_win() {
         fn font_axes(index: u16) -> Vec<u8> {
@@ -1530,7 +1386,6 @@ mod tests {
         assert!(!formatting.unsupported_character_properties);
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn table_chpx_fonts_validate_indices_and_keep_other_axes_and_conditions_gated() {
         let mut negative = observed_table_style_formatting();
@@ -1667,7 +1522,6 @@ mod tests {
         cnf(0xca85, condition, properties)
     }
 
-    #[cfg(feature = "direct-doc")]
     fn table_style_shading(background: [u8; 3], pattern: u16) -> Vec<u8> {
         let mut bytes = vec![0x87, 0xd6, 10, 0, 0, 0, 255];
         bytes.extend(background);
@@ -1676,23 +1530,19 @@ mod tests {
         bytes
     }
 
-    #[cfg(feature = "direct-doc")]
     fn table_style_shading_auto() -> Vec<u8> {
         vec![0x87, 0xd6, 10, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0]
     }
 
-    #[cfg(feature = "direct-doc")]
     fn table_style_shading_nil() -> Vec<u8> {
         [vec![0x87, 0xd6, 10], vec![255; 8], vec![0, 0]].concat()
     }
 
-    #[cfg(feature = "direct-doc")]
     fn table_style_margin(code: u16, sides: u8, unit: u8, width: u16) -> Vec<u8> {
         let [lo, hi] = width.to_le_bytes();
         test_prl(code, &[6, 0, 1, sides, unit, lo, hi])
     }
 
-    #[cfg(feature = "direct-doc")]
     fn table_style_borders(color: [u8; 3], width: u8) -> Vec<u8> {
         let mut operand = vec![48];
         for _ in 0..6 {
@@ -1701,7 +1551,6 @@ mod tests {
         test_prl(0xd613, &operand)
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn unconditional_table_borders_compose_base_to_child_and_empty_inherits() {
         let mut formatting = observed_table_style_formatting();
@@ -1733,7 +1582,6 @@ mod tests {
         assert!(!formatting.unsupported_table_properties);
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn conditional_and_nil_table_style_borders_stay_behind_admission_gate() {
         let mut conditional = observed_table_style_formatting();
@@ -1772,7 +1620,6 @@ mod tests {
         assert!(nil.unsupported_table_properties);
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn table_style_margin_overlap_is_gated_but_disjoint_sides_resolve() {
         for (style_side, expected_gate) in [(0x02, true), (0x08, false)] {
@@ -1808,7 +1655,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn conditional_table_style_margin_remains_gated_and_does_not_project() {
         let mut formatting = observed_table_style_formatting();
@@ -1833,7 +1679,6 @@ mod tests {
         assert!(formatting.unsupported_table_properties);
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn table_style_margin_profile_checks_range_unit_and_width_boundary() {
         for (code, operand) in [
@@ -1896,7 +1741,6 @@ mod tests {
         formatting
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn table_style_shading_layers_unconditional_and_ordered_conditions() {
         let red = table_style_shading([255, 0, 0], 0);
@@ -1929,26 +1773,28 @@ mod tests {
                 None,
             ],
         };
-        assert!(formatting
-            .table_cell_shading(Some(key))
-            .unwrap()
-            .unwrap()
-            .xml()
-            .contains("w:fill=\"008000\""));
+        assert_eq!(
+            formatting
+                .table_cell_shading(Some(key))
+                .unwrap()
+                .unwrap()
+                .direct_background()
+                .as_deref(),
+            Some("008000")
+        );
         assert!(!formatting.unsupported_table_properties);
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn table_style_shading_distinguishes_empty_nil_and_auto_descendants() {
         let cases = [
             (
                 Some(table_style_shading([0, 0, 255], 0)),
-                Some("0000FF"),
+                Some("0000ff"),
                 true,
                 false,
             ),
-            (None, Some("FF0000"), true, false),
+            (None, Some("ff0000"), true, false),
             (Some(table_style_shading_nil()), None, false, false),
             (Some(table_style_shading_auto()), None, true, false),
         ];
@@ -1971,31 +1817,17 @@ mod tests {
                 .tapx = child.map_or(&[], leaked);
 
             let shading = formatting.table_cell_shading(table_key(1)).unwrap();
-            match expected_fill {
-                Some(fill) => assert!(shading
-                    .unwrap()
-                    .xml()
-                    .contains(&format!("w:fill=\"{fill}\""))),
-                None => {
-                    assert_eq!(shading.is_some(), expected_value);
-                    if let Some(shading) = shading {
-                        assert_eq!(shading.direct_background(), None);
-                    }
-                }
-            }
+            assert_eq!(shading.is_some(), expected_value);
+            assert_eq!(
+                shading.and_then(|shading| shading.direct_background()),
+                expected_fill.map(String::from)
+            );
             assert_eq!(formatting.unsupported_table_properties, expected_gate);
         }
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
-    fn table_style_shading_keeps_xml_gated_and_applies_conditional_nil_as_noop() {
-        let mut xml = observed_table_style_formatting();
-        xml.styles[0].as_mut().unwrap().table.as_mut().unwrap().tapx =
-            leaked(table_style_shading([255, 0, 0], 0));
-        xml.table_style_selector_profile(Some(0)).unwrap();
-        assert!(xml.unsupported_table_properties);
-
+    fn conditional_table_style_nil_shading_is_noop_and_unmapped_pattern_is_gated() {
         let mut conditional_nil = observed_table_style_formatting();
         conditional_nil.configure_table_styles(0x0112, true);
         let mut tapx = table_style_shading([255, 0, 0], 0);
@@ -2028,12 +1860,15 @@ mod tests {
                 None,
             ],
         };
-        assert!(conditional_nil
-            .table_cell_shading(Some(key))
-            .unwrap()
-            .unwrap()
-            .xml()
-            .contains("w:fill=\"FF0000\""));
+        assert_eq!(
+            conditional_nil
+                .table_cell_shading(Some(key))
+                .unwrap()
+                .unwrap()
+                .direct_background()
+                .as_deref(),
+            Some("ff0000")
+        );
         assert!(!conditional_nil.unsupported_table_properties);
 
         let mut unmapped = observed_table_style_formatting();
@@ -2049,7 +1884,6 @@ mod tests {
         assert!(unmapped.unsupported_table_properties);
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn empty_table_condition_does_not_compete_with_present_nil_across_property_families() {
         const BLACK: &[u8] = &[0x70, 0x68, 0, 0, 0, 0];
@@ -2058,13 +1892,13 @@ mod tests {
         let last_row = table_style_condition::LAST_ROW;
 
         for (first_row_tapx, expected_presence, expected_row, expected_fill, expected_text) in [
-            (None, last_row, last_row, "0000FF", "008000"),
-            (Some(Vec::new()), last_row, last_row, "0000FF", "008000"),
+            (None, last_row, last_row, "0000ff", "008000"),
+            (Some(Vec::new()), last_row, last_row, "0000ff", "008000"),
             (
                 Some(table_style_shading_nil()),
                 first_row | last_row,
                 first_row,
-                "FF0000",
+                "ff0000",
                 "000000",
             ),
         ] {
@@ -2101,12 +1935,15 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(key.matches, matches);
-            assert!(formatting
-                .table_cell_shading(Some(key))
-                .unwrap()
-                .unwrap()
-                .xml()
-                .contains(&format!("w:fill=\"{expected_fill}\"")));
+            assert_eq!(
+                formatting
+                    .table_cell_shading(Some(key))
+                    .unwrap()
+                    .unwrap()
+                    .direct_background()
+                    .as_deref(),
+                Some(expected_fill)
+            );
             let run = formatting
                 .direct_text_run(7, Some(key), 0, 0, &[], "x".into())
                 .unwrap()
@@ -2117,7 +1954,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn conditional_color_keys_layer_in_doc_order_before_direct_formatting_and_resets() {
         let mut formatting = conditional_color_formatting();
@@ -2217,7 +2053,7 @@ mod tests {
         formatting
             .apply_table_character_style(&mut properties, Some(absent))
             .unwrap();
-        assert!(properties.xml(&[]).unwrap().contains("w:val=\"FF0000\""));
+        assert_eq!(properties.direct_color().as_deref(), Some("ff0000"));
     }
 
     #[test]
@@ -2386,7 +2222,7 @@ mod tests {
                 }),
             )
             .unwrap();
-        assert!(properties.xml(&[]).unwrap().contains("w:val=\"00FFFF\""));
+        assert_eq!(properties.direct_color().as_deref(), Some("00ffff"));
         assert!(!conditional.unsupported_character_properties);
 
         for (child_width, unsupported) in [(1, false), (2, true)] {
@@ -2410,6 +2246,10 @@ mod tests {
         }
     }
 
+    fn resolved_alignment(resolved: &ResolvedParagraph) -> String {
+        resolved.properties.direct_paragraph().alignment
+    }
+
     #[test]
     fn table_papx_alignment_uses_embedded_style_index_and_observed_descendant_priority() {
         // Word-produced LTR controls establish these base/child/grandchild and
@@ -2428,12 +2268,10 @@ mod tests {
             let resolved = formatting
                 .resolve_paragraph_with_table(7, table_key(table_style), 0, 0, &[])
                 .unwrap();
-            assert!(
-                resolved
-                    .properties
-                    .xml()
-                    .contains(&format!("<w:jc w:val=\"{expected}\"/>")),
-                "table style {table_style} did not resolve to {expected}"
+            assert_eq!(
+                resolved_alignment(&resolved),
+                expected,
+                "table style {table_style}"
             );
         }
 
@@ -2495,26 +2333,20 @@ mod tests {
         let resolved = formatting
             .resolve_paragraph_with_table(7, key, 0, 0, &[])
             .unwrap();
-        assert!(resolved
-            .properties
-            .xml()
-            .contains("<w:jc w:val=\"center\"/>"));
+        assert_eq!(resolved_alignment(&resolved), "center");
 
         let direct_right = &[0x61, 0x24, 2][..];
         let resolved = formatting
             .resolve_paragraph_with_table(7, key, 0, 1, &[direct_right])
             .unwrap();
-        assert!(resolved
-            .properties
-            .xml()
-            .contains("<w:jc w:val=\"right\"/>"));
+        assert_eq!(resolved_alignment(&resolved), "right");
         assert!(!formatting.unsupported_paragraph_properties);
 
         let direct_bidi = &[0x41, 0x24, 1][..];
         let resolved = formatting
             .resolve_paragraph_with_table(7, key, 0, 1, &[direct_bidi])
             .unwrap();
-        assert!(resolved.properties.xml().contains("<w:jc w:val=\"left\"/>"));
+        assert_eq!(resolved_alignment(&resolved), "left");
         assert!(formatting.unsupported_paragraph_properties);
     }
 
@@ -2531,7 +2363,7 @@ mod tests {
         let resolved = unconditional
             .resolve_paragraph_with_table(7, table_key(0), 0, 0, &[])
             .unwrap();
-        assert!(resolved.properties.xml().contains("<w:jc w:val=\"left\"/>"));
+        assert_eq!(resolved_alignment(&resolved), "left");
         assert!(unconditional.unsupported_paragraph_properties);
 
         let mut conditional = observed_table_style_formatting();
@@ -2584,10 +2416,7 @@ mod tests {
         let resolved = formatting
             .resolve_paragraph_with_table(7, Some(key), 0, 0, &[])
             .unwrap();
-        assert!(resolved
-            .properties
-            .xml()
-            .contains("<w:jc w:val=\"right\"/>"));
+        assert_eq!(resolved_alignment(&resolved), "right");
         assert!(!formatting.unsupported_paragraph_properties);
     }
 
@@ -2615,13 +2444,9 @@ mod tests {
         // Only the new ordinary paragraph-style chain consumes one operation;
         // the cached table chain and its PAPX/UPX are not scanned again.
         assert_eq!(before - after, 1);
-        assert!(resolved
-            .properties
-            .xml()
-            .contains("<w:jc w:val=\"center\"/>"));
+        assert_eq!(resolved_alignment(&resolved), "center");
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn direct_projection_layers_observed_table_color_and_ltr_alignment_before_higher_sources() {
         let mut formatting = observed_table_style_formatting();
@@ -2711,7 +2536,6 @@ mod tests {
         assert_eq!(direct.alignment, "left");
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn unsupported_table_style_properties_keep_the_admission_gates_closed() {
         let mut formatting = observed_table_style_formatting();
@@ -2733,7 +2557,6 @@ mod tests {
         assert!(formatting.unsupported_character_properties);
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn table_aware_formatting_caches_have_a_fixed_entry_bound() {
         let mut formatting = empty();
@@ -2967,8 +2790,6 @@ mod tests {
             lists: vec![numbering::List {
                 id: 42,
                 styles: [0xfff; 9],
-                simple: true,
-                hybrid: false,
                 auto_number: false,
                 levels: vec![numbering::Level {
                     start: Some(1),
@@ -2977,7 +2798,6 @@ mod tests {
                     legal: false,
                     restart: Some(0),
                     follow: 0,
-                    tentative: false,
                     papx: Box::leak(vec![0x41, 0x24, value, 0x03, 0x24, 2].into_boxed_slice()),
                     chpx: &[],
                     text: &[0, 0, b'.', 0],
@@ -3004,212 +2824,53 @@ mod tests {
     }
 
     #[test]
-    fn typed_paragraph_resolution_does_not_activate_numbering() {
-        let piece = list_piece(1);
-        let mut resolved_formatting = empty();
-        resolved_formatting.numbering = level_bidi_formatting(1);
-        let resolved = resolved_formatting
-            .resolve_paragraph(0, 0, 1, &[&piece])
-            .unwrap();
-        assert_eq!(resolved.properties.numbering, None);
-        let (reference, marker) = resolved.numbering.unwrap();
-        assert_eq!((reference.index, reference.level), (0, 0));
-        assert!(marker.xml(&[]).unwrap().starts_with("<w:rPr>"));
-        assert_eq!(
-            resolved_formatting.numbering_output.xml(10_000).unwrap(),
-            None
-        );
-
-        let after_resolution = resolved_formatting
-            .paragraph_xml(0, 0, 1, &[&piece])
-            .unwrap();
-        let after_numbering = resolved_formatting.numbering_output.xml(10_000).unwrap();
-        let mut adapter_only = empty();
-        adapter_only.numbering = level_bidi_formatting(1);
-        let expected = adapter_only.paragraph_xml(0, 0, 1, &[&piece]).unwrap();
-        assert_eq!(after_resolution, expected);
-        assert_eq!(
-            after_numbering,
-            adapter_only.numbering_output.xml(10_000).unwrap()
-        );
-    }
-
-    #[test]
-    fn typed_resolver_and_xml_adapter_preserve_piece_reference_errors() {
-        let mut typed = empty();
-        let typed_error = match typed.resolve_paragraph(0, 0, 1, &[]) {
+    fn direct_paragraph_preserves_piece_reference_errors_and_unsupported_flags() {
+        let mut formatting = empty();
+        let error = match formatting.direct_paragraph(0, None, 0, 1, &[]) {
             Ok(_) => panic!("invalid piece reference unexpectedly resolved"),
             Err(error) => error,
         };
-        assert!(typed_error.contains("outside CLX"), "{typed_error}");
-        assert_eq!(typed.numbering_output.xml(10_000).unwrap(), None);
-
-        let mut adapter = empty();
-        let adapter_error = adapter.paragraph_xml(0, 0, 1, &[]).unwrap_err();
-        assert_eq!(adapter_error, typed_error);
-        assert_eq!(adapter.numbering_output.xml(10_000).unwrap(), None);
-        assert_eq!(
-            adapter.unsupported_paragraph_properties,
-            typed.unsupported_paragraph_properties
-        );
-        assert_eq!(
-            adapter.unsupported_piece_properties,
-            typed.unsupported_piece_properties
-        );
+        assert!(error.contains("outside CLX"), "{error}");
+        assert!(!formatting.unsupported_paragraph_properties);
+        assert!(!formatting.unsupported_piece_properties);
 
         let unsupported = [0x00, 0x24, 0];
-        let mut typed = empty();
-        let resolved = typed.resolve_paragraph(0, 0, 1, &[&unsupported]).unwrap();
-        assert!(typed.unsupported_paragraph_properties);
-        assert_eq!(typed.numbering_output.xml(10_000).unwrap(), None);
-
-        let mut adapter = empty();
-        let xml = adapter.paragraph_xml(0, 0, 1, &[&unsupported]).unwrap();
-        assert!(adapter.unsupported_paragraph_properties);
-        assert_eq!(xml, resolved.properties.xml());
-        assert_eq!(adapter.numbering_output.xml(10_000).unwrap(), None);
+        let mut formatting = empty();
+        formatting
+            .direct_paragraph(0, None, 0, 1, &[&unsupported])
+            .unwrap();
+        assert!(formatting.unsupported_paragraph_properties);
     }
 
     #[test]
-    fn typed_plain_and_suppressed_numbering_leave_output_inactive() {
-        let mut typed = empty();
-        let resolved = typed.resolve_paragraph(0, 0, 0, &[]).unwrap();
-        assert!(resolved.numbering.is_none());
-        let typed_xml = resolved.properties.xml();
-        let mut adapter = empty();
-        assert_eq!(adapter.paragraph_xml(0, 0, 0, &[]).unwrap(), typed_xml);
-
-        for piece in [
-            list_piece(-2047),
-            [list_piece(1), vec![0x0a, 0x26, 12]].concat(),
-        ] {
-            let mut formatting = empty();
-            let resolved = formatting.resolve_paragraph(0, 0, 1, &[&piece]).unwrap();
-            assert!(resolved.numbering.is_none());
-            assert_eq!(formatting.numbering_output.xml(10_000).unwrap(), None);
-            let expected = resolved.properties.xml();
-            assert_eq!(
-                formatting.paragraph_xml(0, 0, 1, &[&piece]).unwrap(),
-                expected
-            );
-            assert_eq!(formatting.numbering_output.xml(10_000).unwrap(), None);
-        }
-    }
-
-    #[test]
-    fn marker_font_validation_remains_in_xml_adapter_before_activation() {
+    fn marker_font_validation_happens_at_direct_numbering_activation() {
         let piece = list_piece(1);
         let mut formatting = empty();
         formatting.numbering = level_bidi_formatting(1);
         formatting.numbering.lists[0].levels[0].chpx =
             Box::leak(vec![0x4f, 0x4a, 1, 0].into_boxed_slice());
-        let resolved = formatting.resolve_paragraph(0, 0, 1, &[&piece]).unwrap();
-        assert!(resolved.numbering.is_some());
-        assert_eq!(formatting.numbering_output.xml(10_000).unwrap(), None);
-        let error = formatting.paragraph_xml(0, 0, 1, &[&piece]).unwrap_err();
+        // Paragraph resolution retains the marker; its font reference is
+        // validated only when the list marker is projected.
+        let direct = formatting
+            .direct_paragraph(0, None, 0, 1, &[&piece])
+            .unwrap();
+        let (reference, marker) = direct.numbering.expect("resolved numbering");
+        let mut store = numbering::direct::Store::default();
+        let error = formatting
+            .direct_numbering(&mut store, reference, &marker, &direct.paragraph)
+            .unwrap_err();
         assert!(
             error.contains("font index outside empty font table"),
             "{error}"
         );
-        assert_eq!(formatting.numbering_output.xml(10_000).unwrap(), None);
     }
 
-    #[test]
-    fn byte_adapter_omits_only_unresolved_complex_script_language_and_warns() {
-        let base = Properties::default();
-        let mut unresolved = base.clone();
-        unresolved
-            .apply(0x485f, &u16::MAX.to_le_bytes(), &base)
-            .unwrap();
-        assert!(unresolved.xml(&[]).is_err());
-
-        let mut formatting = empty();
-        let xml = formatting.byte_run_xml(&unresolved).unwrap();
-        assert!(!xml.contains("<w:lang"));
-        assert!(formatting.unsupported_character_properties);
-
-        let mut invalid_font = unresolved.clone();
-        invalid_font.fonts[0] = Some(1);
-        assert!(formatting
-            .byte_run_xml(&invalid_font)
-            .unwrap_err()
-            .contains("font index outside empty font table"));
-
-        let mut overridden = unresolved;
-        overridden
-            .apply(0x485f, &0x0401u16.to_le_bytes(), &base)
-            .unwrap();
-        let mut formatting = empty();
-        let xml = formatting.byte_run_xml(&overridden).unwrap();
-        assert!(xml.contains("<w:lang w:bidi=\"ar-SA\"/>"));
-        assert!(!formatting.unsupported_character_properties);
-    }
-
-    #[test]
-    fn compatibility_languages_are_metadata_and_modern_languages_project() {
-        const COMPATIBILITY: [[u8; 4]; 2] = [[0x6d, 0x48, 0x34, 0x12], [0x6e, 0x48, 0x34, 0x12]];
-        for direct in &COMPATIBILITY {
-            let mut formatting = empty();
-            let xml = formatting.run_xml(0, 0, 1, &[direct]).unwrap();
-            assert_eq!(xml, "<w:rPr><w:sz w:val=\"20\"/></w:rPr>");
-            assert!(!formatting.unsupported_character_properties);
-
-            let mut formatting = empty();
-            formatting.styles = vec![Some(Style {
-                kind: 1,
-                base: 0xfff,
-                chpx: direct,
-                papx: &[],
-                table: None,
-                language_compatibility: StyleLanguageCompatibility::default(),
-            })];
-            let xml = formatting.run_xml(0, 0, 0, &[]).unwrap();
-            assert_eq!(xml, "<w:rPr><w:sz w:val=\"20\"/></w:rPr>");
-            assert!(!formatting.unsupported_character_properties);
-        }
-
-        for direct in [[0x73, 0x48, 0x0c, 0x04], [0x74, 0x48, 0x11, 0x04]] {
-            let mut formatting = empty();
-            let xml = formatting.run_xml(0, 0, 1, &[&direct]).unwrap();
-            assert!(xml.contains(if direct[0] == 0x73 {
-                "w:val=\"fr-FR\""
-            } else {
-                "w:eastAsia=\"ja-JP\""
-            }));
-            assert!(!formatting.unsupported_character_properties);
-        }
-
-        for direct in [[0x73, 0x48, 0x00, 0x04], [0x74, 0x48, 0xff, 0xff]] {
-            let mut formatting = empty();
-            let xml = formatting.run_xml(0, 0, 1, &[&direct]).unwrap();
-            assert!(!xml.contains("<w:lang"));
-            assert!(formatting.unsupported_character_properties);
-        }
-    }
-
-    #[test]
-    fn byte_language_policy_preserves_resolved_axes_when_one_axis_is_unresolved() {
-        let base = Properties::default();
-        let mut properties = base.clone();
-        properties
-            .apply(0x4873, &0x040cu16.to_le_bytes(), &base)
-            .unwrap();
-        properties
-            .apply(0x4874, &u16::MAX.to_le_bytes(), &base)
-            .unwrap();
-        properties
-            .apply(0x485f, &0x0401u16.to_le_bytes(), &base)
-            .unwrap();
-        properties.apply(0x0875, &[1], &base).unwrap();
-
-        assert!(properties.xml(&[]).is_err());
-        let mut formatting = empty();
-        let xml = formatting.byte_run_xml(&properties).unwrap();
-        assert!(xml.contains("w:val=\"fr-FR\""), "{xml}");
-        assert!(!xml.contains("w:eastAsia="), "{xml}");
-        assert!(xml.contains("w:bidi=\"ar-SA\""), "{xml}");
-        assert!(xml.contains("<w:noProof w:val=\"1\"/>"), "{xml}");
-        assert!(formatting.unsupported_character_properties);
+    /// The direct paragraph at FC 100 with a list-selecting piece.
+    fn listed_paragraph(formatting: &mut Formatting<'static>, piece: &[u8]) -> DocParagraph {
+        formatting
+            .direct_paragraph(0, None, 100, 1, &[piece])
+            .unwrap()
+            .paragraph
     }
 
     #[test]
@@ -3223,11 +2884,11 @@ mod tests {
         ]);
         f.numbering =
             level_paragraph_formatting(vec![0x5e, 0x84, 0xd0, 0x02, 0x5d, 0x84, 0xd0, 0x02]);
-        let piece = list_piece(1);
-        let xml = f.paragraph_xml(0, 100, 1, &[&piece]).unwrap();
-        assert!(
-            xml.contains("<w:ind w:left=\"360\" w:right=\"480\""),
-            "{xml}"
+        let paragraph = listed_paragraph(&mut f, &list_piece(1));
+        assert_eq!(paragraph.bidi, Some(true));
+        assert_eq!(
+            (paragraph.indent_left, paragraph.indent_right),
+            (18.0, 24.0)
         );
     }
 
@@ -3242,11 +2903,14 @@ mod tests {
             0x5d, 0x84, 0x68, 0x01, // list right 360 (must remain: absent direct)
             0x60, 0x84, 0x98, 0xfe, // list hanging 360
         ]);
-        let piece = list_piece(1);
-        let xml = f.paragraph_xml(0, 100, 1, &[&piece]).unwrap();
-        assert!(
-            xml.contains("<w:ind w:left=\"0\" w:right=\"360\" w:firstLine=\"360\""),
-            "{xml}"
+        let paragraph = listed_paragraph(&mut f, &list_piece(1));
+        assert_eq!(
+            (
+                paragraph.indent_left,
+                paragraph.indent_right,
+                paragraph.indent_first
+            ),
+            (0.0, 18.0, 18.0)
         );
     }
 
@@ -3259,10 +2923,11 @@ mod tests {
             0x60, 0x84, 0x98, 0xfe, // later first -360
         ]);
         f.numbering = level_paragraph_formatting(vec![0x5e, 0x84, 0x68, 0x01, 0x60, 0x84, 0, 0]);
-        let piece = list_piece(1);
-        let xml = f.paragraph_xml(0, 100, 1, &[&piece]).unwrap();
-        assert!(xml.contains("<w:ind w:left=\"1440\""), "{xml}");
-        assert!(xml.contains("w:hanging=\"360\""), "{xml}");
+        let paragraph = listed_paragraph(&mut f, &list_piece(1));
+        assert_eq!(
+            (paragraph.indent_left, paragraph.indent_first),
+            (72.0, -18.0)
+        );
     }
 
     #[test]
@@ -3270,8 +2935,7 @@ mod tests {
         let mut f = with_direct_paragraph(&[0, 0, 0x5e, 0x84, 0xd0, 0x02]);
         f.numbering = level_paragraph_formatting(vec![0x5e, 0x84, 0x68, 0x01]);
         let piece = [list_piece(1), vec![0x5e, 0x84, 0xa0, 0x05]].concat();
-        let xml = f.paragraph_xml(0, 100, 1, &[&piece]).unwrap();
-        assert!(xml.contains("<w:ind w:left=\"1440\""), "{xml}");
+        assert_eq!(listed_paragraph(&mut f, &piece).indent_left, 72.0);
     }
 
     #[test]
@@ -3287,9 +2951,8 @@ mod tests {
         let mut f = with_direct_paragraph(&bytes);
         f.numbering =
             level_paragraph_formatting(vec![0x5e, 0x84, 0xd0, 0x02, 0x5d, 0x84, 0xd0, 0x02]);
-        let piece = list_piece(1);
-        let xml = f.paragraph_xml(0, 100, 1, &[&piece]).unwrap();
-        assert!(xml.contains("<w:ind w:left=\"0\" w:right=\"7\""), "{xml}");
+        let paragraph = listed_paragraph(&mut f, &list_piece(1));
+        assert_eq!((paragraph.indent_left, paragraph.indent_right), (0.0, 0.35));
     }
 
     #[test]
@@ -3300,11 +2963,17 @@ mod tests {
         ]);
         f.numbering = level_paragraph_formatting(vec![0x5e, 0x84, 0xd0, 0x02]);
         let piece = [list_piece(1), vec![0x0e, 0x84, 70, 0]].concat();
-        let xml = f.paragraph_xml(0, 100, 1, &[&piece]).unwrap();
+        let paragraph = listed_paragraph(&mut f, &piece);
         // PCD's repeated physical-right code moves last without dropping the
         // other five distinct codes; logical-left remains later for LTR left.
-        assert!(xml.contains("<w:ind w:left=\"40\" w:right=\"70\""), "{xml}");
-        assert!(xml.contains("w:firstLine=\"60\""), "{xml}");
+        assert_eq!(
+            (
+                paragraph.indent_left,
+                paragraph.indent_right,
+                paragraph.indent_first
+            ),
+            (2.0, 3.5, 3.0)
+        );
     }
 
     #[test]
@@ -3312,77 +2981,61 @@ mod tests {
         let mut f = with_direct_paragraph(&[0, 0, 0x5e, 0x84, 0xd0, 0x02, 0x60, 0x84, 0x98, 0xfe]);
         f.numbering =
             level_paragraph_formatting(vec![0x5e, 0x84, 0xa0, 0x05, 0x60, 0x84, 0x68, 0x01]);
-        let piece = list_piece(-1);
-        let xml = f.paragraph_xml(0, 100, 1, &[&piece]).unwrap();
-        assert!(xml.contains("<w:ind w:left=\"720\""), "{xml}");
-        assert!(xml.contains("w:hanging=\"360\""), "{xml}");
-    }
-
-    #[test]
-    fn explicit_direct_bidi_survives_list_level_formatting() {
-        let mut f = with_direct_paragraph(&[0, 0, 0x41, 0x24, 0]);
-        f.numbering = level_bidi_formatting(1);
-        let xml = f.paragraph_xml(0, 100, 1, &[&[0x0b, 0x46, 1, 0]]).unwrap();
-        assert!(xml.contains("<w:bidi w:val=\"0\"/>"));
+        let paragraph = listed_paragraph(&mut f, &list_piece(-1));
+        assert_eq!(
+            (paragraph.indent_left, paragraph.indent_first),
+            (36.0, -18.0)
+        );
     }
 
     #[test]
     fn explicit_direct_bidi_and_physical_alignment_survive_list_level_formatting() {
-        let mut f = with_direct_paragraph(&[0, 0, 0x41, 0x24, 0, 0x03, 0x24, 0]);
-        f.numbering = level_bidi_formatting(1);
-        let xml = f.paragraph_xml(0, 100, 1, &[&[0x0b, 0x46, 1, 0]]).unwrap();
-        assert!(xml.contains("<w:bidi w:val=\"0\"/>"));
-        assert!(xml.contains("<w:jc w:val=\"left\"/>"));
-    }
-
-    #[test]
-    fn direct_bidi_does_not_protect_absent_alignment_from_the_list_level() {
         let mut f = with_direct_paragraph(&[0, 0, 0x41, 0x24, 0]);
         f.numbering = level_bidi_formatting(1);
-        let xml = f.paragraph_xml(0, 100, 1, &[&[0x0b, 0x46, 1, 0]]).unwrap();
-        assert!(xml.contains("<w:bidi w:val=\"0\"/>"));
-        assert!(xml.contains("<w:jc w:val=\"right\"/>"));
+        let paragraph = listed_paragraph(&mut f, &list_piece(1));
+        assert_eq!(paragraph.bidi, Some(false));
+        // Direct bidi does not protect an absent alignment from the level.
+        assert_eq!(paragraph.alignment, "right");
+
+        let mut f = with_direct_paragraph(&[0, 0, 0x41, 0x24, 0, 0x03, 0x24, 0]);
+        f.numbering = level_bidi_formatting(1);
+        let paragraph = listed_paragraph(&mut f, &list_piece(1));
+        assert_eq!(paragraph.bidi, Some(false));
+        assert_eq!(paragraph.alignment, "left");
     }
 
     #[test]
     fn direct_alignment_is_independent_and_uses_its_last_explicit_write() {
         let mut f = with_direct_paragraph(&[0, 0, 0x03, 0x24, 2, 0x61, 0x24, 0]);
         f.numbering = level_bidi_formatting(1);
-        let xml = f.paragraph_xml(0, 100, 1, &[&[0x0b, 0x46, 1, 0]]).unwrap();
-        assert!(xml.contains("<w:bidi w:val=\"1\"/>"));
+        let paragraph = listed_paragraph(&mut f, &list_piece(1));
+        assert_eq!(paragraph.bidi, Some(true));
         // The later logical PJc left replaces the earlier physical PJc80 right.
-        assert!(xml.contains("<w:jc w:val=\"left\"/>"));
+        assert_eq!(paragraph.alignment, "left");
     }
 
     #[test]
     fn direct_bidi_controls_are_explicit_last_write_and_piece_override() {
-        let mut explicit_true = with_direct_paragraph(&[0, 0, 0x41, 0x24, 1]);
-        explicit_true.numbering = level_bidi_formatting(0);
-        assert!(explicit_true
-            .paragraph_xml(0, 100, 1, &[&[0x0b, 0x46, 1, 0]])
-            .unwrap()
-            .contains("<w:bidi w:val=\"1\"/>"));
-
-        let mut absent = with_direct_paragraph(&[]);
-        absent.numbering = level_bidi_formatting(1);
-        assert!(absent
-            .paragraph_xml(0, 100, 1, &[&[0x0b, 0x46, 1, 0]])
-            .unwrap()
-            .contains("<w:bidi w:val=\"1\"/>"));
-
-        let mut sequential = with_direct_paragraph(&[0, 0, 0x41, 0x24, 1, 0x41, 0x24, 0]);
-        sequential.numbering = level_bidi_formatting(1);
-        assert!(sequential
-            .paragraph_xml(0, 100, 1, &[&[0x0b, 0x46, 1, 0]])
-            .unwrap()
-            .contains("<w:bidi w:val=\"0\"/>"));
-
-        let mut piece_override = with_direct_paragraph(&[0, 0, 0x41, 0x24, 0]);
-        piece_override.numbering = level_bidi_formatting(0);
-        assert!(piece_override
-            .paragraph_xml(0, 100, 1, &[&[0x0b, 0x46, 1, 0, 0x41, 0x24, 1]])
-            .unwrap()
-            .contains("<w:bidi w:val=\"1\"/>"));
+        for (papx, level_bidi, piece, expected) in [
+            (vec![0, 0, 0x41, 0x24, 1], 0, list_piece(1), true),
+            (vec![], 1, list_piece(1), true),
+            (
+                vec![0, 0, 0x41, 0x24, 1, 0x41, 0x24, 0],
+                1,
+                list_piece(1),
+                false,
+            ),
+            (
+                vec![0, 0, 0x41, 0x24, 0],
+                0,
+                [list_piece(1), vec![0x41, 0x24, 1]].concat(),
+                true,
+            ),
+        ] {
+            let mut f = with_direct_paragraph(&papx);
+            f.numbering = level_bidi_formatting(level_bidi);
+            assert_eq!(listed_paragraph(&mut f, &piece).bidi, Some(expected));
+        }
     }
 
     #[test]
@@ -3414,19 +3067,29 @@ mod tests {
                 language_compatibility: StyleLanguageCompatibility::default(),
             }),
         ];
-        let xml = f
-            .run_xml(1, 0, 1, &[&[0x30, 0x4a, 2, 0, 0x35, 8, 0x81]])
+        let run = f
+            .direct_text_run(
+                1,
+                None,
+                0,
+                1,
+                &[&[0x30, 0x4a, 2, 0, 0x35, 8, 0x81]],
+                "x".into(),
+            )
+            .unwrap()
             .unwrap();
-        assert!(xml.contains("w:sz w:val=\"32\""));
-        assert!(xml.contains("w:i w:val=\"1\""));
-        assert!(xml.contains("w:b w:val=\"0\""));
-        let xml = f.run_xml(1, 0, 0x0100 | (0x55 << 1), &[]).unwrap();
-        assert!(xml.contains("w:sz w:val=\"32\""));
+        assert_eq!(run.font_size, 16.0);
+        assert!(run.italic);
+        assert!(!run.bold);
+        let run = f
+            .direct_text_run(1, None, 0, 0x0100 | (0x55 << 1), &[], "x".into())
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.font_size, 16.0);
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
-    fn direct_only_properties_keep_the_byte_adapter_omission_warning() {
+    fn contextual_spacing_and_fit_text_project_without_admission_gates() {
         let style = || Style {
             kind: 1,
             base: 0xfff,
@@ -3435,17 +3098,7 @@ mod tests {
             table: None,
             language_compatibility: StyleLanguageCompatibility::default(),
         };
-        // Contextual spacing and fit text are projected by the direct model
-        // only; the WordprocessingML adapter keeps reporting them omitted.
         let piece = [0x6d, 0x24, 1, 0x76, 0xca, 8, 0x60, 9, 0, 0, 1, 0, 0, 0];
-        let mut f = empty();
-        f.styles = vec![Some(style())];
-        f.paragraph_xml(0, 0, 1, &[&piece]).unwrap();
-        assert!(f.unsupported_paragraph_properties);
-        assert!(!f.unsupported_character_properties);
-        f.run_xml(0, 0, 1, &[&piece]).unwrap();
-        assert!(f.unsupported_character_properties);
-
         let mut direct = empty();
         direct.styles = vec![Some(style())];
         let paragraph = direct.direct_paragraph(0, None, 0, 1, &[&piece]).unwrap();
@@ -3458,15 +3111,14 @@ mod tests {
         assert!(!direct.unsupported_paragraph_properties);
         assert!(!direct.unsupported_character_properties);
 
-        // No-effect properties stay silent on both routes.
+        // A no-effect property stays silent.
         let bar = [0x29, 0x66, 0xff, 0xff, 0xff, 0xff];
         let mut f = empty();
         f.styles = vec![Some(style())];
-        f.paragraph_xml(0, 0, 1, &[&bar]).unwrap();
+        f.direct_paragraph(0, None, 0, 1, &[&bar]).unwrap();
         assert!(!f.unsupported_paragraph_properties);
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn direct_insertion_revisions_carry_the_sttbfrmark_author_and_dttm() {
         let mut table = vec![0xff, 0xff, 2, 0, 0, 0];
@@ -3516,7 +3168,6 @@ mod tests {
         assert!(f.unsupported_character_properties);
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn direct_paragraph_frames_fail_closed_through_the_formatting_flag() {
         let style = Style {
@@ -3546,7 +3197,6 @@ mod tests {
         assert!(!f.unsupported_paragraph_properties);
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn direct_run_and_mark_use_the_existing_style_and_piece_cascade() {
         let mut f = empty();
@@ -3584,44 +3234,62 @@ mod tests {
             0x35, 8, 0x81, // toggle inherited bold off
             0x70, 0x68, 0, 0, 0, 0xff, // auto color
         ];
-        let ppr = f
-            .resolve_paragraph(1, 0, 1, &[&piece])
-            .unwrap()
-            .properties
-            .xml();
-        let rpr = f.run_xml(1, 0, 1, &[&piece]).unwrap();
-        let expected = parse_direct_fixture(&ppr, &rpr, &rpr);
-
-        let direct_run = f
+        let run = f
             .direct_text_run(1, None, 0, 1, &[&piece], "x".into())
             .unwrap()
             .unwrap();
-        let mut expected_run = expected["runs"][0].clone();
-        expected_run.as_object_mut().unwrap().remove("type");
-        assert_eq!(serde_json::to_value(direct_run).unwrap(), expected_run);
+        // Style 0 supplies 12pt, bold and the ASCII font; style 1 adds the
+        // other three font axes; the piece selects the italic character
+        // style, toggles the inherited bold off and sets automatic color.
+        assert_eq!(run.font_size, 12.0);
+        assert!(!run.bold);
+        assert!(run.italic);
+        assert_eq!(run.color, None);
+        assert!(run.color_auto);
+        let expected_fonts = [
+            Some("ASCII"),
+            Some("East Asia"),
+            Some("High ANSI"),
+            Some("Complex Script"),
+        ];
+        assert_eq!(
+            [
+                run.font_family.as_deref(),
+                run.font_family_east_asia.as_deref(),
+                run.font_family_high_ansi.as_deref(),
+                run.font_family_cs.as_deref(),
+            ],
+            expected_fonts
+        );
 
         let direct = f.direct_paragraph(1, None, 0, 1, &[&piece]).unwrap();
-        let mut expected_paragraph = expected;
-        let object = expected_paragraph.as_object_mut().unwrap();
-        object.remove("type");
-        object.remove("styleId");
-        object.insert("runs".into(), serde_json::json!([]));
-        // The byte adapter emits neither pStyle nor outlineLvl. The direct
-        // model carries the istd identity (for contextual spacing) and the
-        // MS-DOC 2.6.2 sprmPIstd outline level of fixed-index style 1.
-        assert_eq!(direct.paragraph.style_id.as_deref(), Some("1"));
-        assert_eq!(direct.paragraph.outline_level, Some(0));
-        let mut actual = serde_json::to_value(&direct.paragraph).unwrap();
-        let actual_object = actual.as_object_mut().unwrap();
-        actual_object.remove("styleId");
-        actual_object.remove("outlineLevel");
-        super::paragraph::byte_adapter_line_spacing_parity(&mut actual);
-        super::paragraph::byte_adapter_line_spacing_parity(&mut expected_paragraph);
-        assert_eq!(actual, expected_paragraph);
+        let paragraph = &direct.paragraph;
+        // The direct model carries the istd identity (for contextual spacing)
+        // and the MS-DOC 2.6.2 sprmPIstd outline level of fixed-index style 1.
+        assert_eq!(paragraph.style_id.as_deref(), Some("1"));
+        assert_eq!(paragraph.outline_level, Some(0));
+        assert_eq!(paragraph.default_font_size, Some(12.0));
+        assert_eq!(paragraph.default_font_family.as_deref(), Some("ASCII"));
+        assert_eq!(
+            paragraph.default_font_family_east_asia.as_deref(),
+            Some("East Asia")
+        );
+        assert_eq!(paragraph.paragraph_mark_color, None);
+        let mark = paragraph.paragraph_mark_font_facts.as_ref().unwrap();
+        assert!(!mark.bold);
+        assert!(mark.italic);
+        assert_eq!(
+            [
+                mark.font_family.as_deref(),
+                mark.font_family_east_asia.as_deref(),
+                mark.font_family_high_ansi.as_deref(),
+                mark.font_family_cs.as_deref(),
+            ],
+            expected_fonts
+        );
         assert!(direct.numbering.is_none());
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn direct_font_validation_precedes_hidden_mark_and_run_filtering() {
         let mut f = empty();
@@ -3637,7 +3305,6 @@ mod tests {
             .is_err());
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn direct_projection_uses_physical_chpx_before_piece_overrides() {
         let mut word = vec![0u8; 1024];
@@ -3707,7 +3374,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn direct_paragraph_retains_numbering_reference_and_marker_without_activation() {
         let mut f = empty();
@@ -3716,7 +3382,7 @@ mod tests {
         let piece = [0x0b, 0x46, 1, 0];
         let direct = f.direct_paragraph(0, None, 0, 1, &[&piece]).unwrap();
         let (reference, marker) = direct.numbering.expect("resolved numbering");
-        assert_eq!(reference.level, 0);
+        assert_eq!((reference.index, reference.level), (0, 0));
         assert!(
             !direct
                 .paragraph
@@ -3727,7 +3393,19 @@ mod tests {
         );
         assert!(marker.direct_font_facts(&[]).unwrap().bold);
         assert!(direct.paragraph.numbering.is_none());
-        assert_eq!(f.numbering_output.xml(10_000).unwrap(), None);
+    }
+
+    fn font_hint(
+        formatting: &mut Formatting<'static>,
+        style: usize,
+        piece: &[u8],
+    ) -> Option<String> {
+        let prm = u16::from(!piece.is_empty());
+        formatting
+            .direct_text_run(style, None, 0, prm, &[piece], "x".into())
+            .unwrap()
+            .unwrap()
+            .font_hint
     }
 
     #[test]
@@ -3760,58 +3438,37 @@ mod tests {
             }),
         ];
 
-        assert!(f
-            .run_xml(0, 0, 0, &[])
-            .unwrap()
-            .contains("<w:rFonts w:hint=\"eastAsia\"/>"));
-        assert!(f
-            .run_xml(1, 0, 0, &[])
-            .unwrap()
-            .contains("<w:rFonts w:hint=\"default\"/>"));
-
+        assert_eq!(font_hint(&mut f, 0, &[]).as_deref(), Some("eastAsia"));
+        assert_eq!(font_hint(&mut f, 1, &[]).as_deref(), Some("default"));
         // PCD/direct formatting is later than paragraph-style inheritance.
-        let cs = f.run_xml(1, 0, 1, &[&[0x6f, 0x28, 2]]).unwrap();
-        assert!(cs.contains("<w:rFonts w:hint=\"cs\"/>"), "{cs}");
-
+        assert_eq!(
+            font_hint(&mut f, 1, &[0x6f, 0x28, 2]).as_deref(),
+            Some("cs")
+        );
         // Both CIstd and CPlain preserve the previous sprmCIdctHint operand.
-        let reset = f
-            .run_xml(
-                0,
-                0,
-                1,
-                &[&[
-                    0x6f, 0x28, 2, // cs
-                    0x30, 0x4a, 2, 0, // CIstd 2
-                    0x33, 0x2a, 0, // CPlain
-                ]],
-            )
-            .unwrap();
-        assert!(reset.contains("<w:rFonts w:hint=\"cs\"/>"), "{reset}");
-
+        let reset = [
+            0x6f, 0x28, 2, // cs
+            0x30, 0x4a, 2, 0, // CIstd 2
+            0x33, 0x2a, 0, // CPlain
+        ];
+        assert_eq!(font_hint(&mut f, 0, &reset).as_deref(), Some("cs"));
         // 0xFF is a valid explicit cancellation with no ST_Hint equivalent.
-        let cancelled = f
-            .run_xml(0, 0, 1, &[&[0x6f, 0x28, 0xff, 0x33, 0x2a, 0]])
-            .unwrap();
-        assert!(!cancelled.contains("w:hint="), "{cancelled}");
+        assert_eq!(
+            font_hint(&mut f, 0, &[0x6f, 0x28, 0xff, 0x33, 0x2a, 0]),
+            None
+        );
     }
 
-    #[test]
-    fn font_hint_rejects_invalid_values_and_truncated_operands() {
-        let mut f = empty();
-        assert!(f
-            .run_xml(0, 0, 1, &[&[0x6f, 0x28, 3]])
-            .unwrap_err()
-            .contains("invalid Word character font hint"));
-        assert!(f
-            .run_xml(0, 0, 1, &[&[0x6f, 0x28]])
-            .unwrap_err()
-            .contains("truncated Word formatting operand"));
-        assert!(!f.run_xml(0, 0, 0, &[]).unwrap().contains("w:hint="));
+    fn one_level_list(linked_style: u16, chpx: &'static [u8]) -> numbering::Tables<'static> {
+        let mut tables = level_paragraph_formatting(Vec::new());
+        tables.lists[0].styles = [linked_style; 9];
+        tables.lists[0].levels[0].chpx = chpx;
+        tables
     }
 
     #[test]
     fn list_marker_style_patches_do_not_toggle_twice_or_inject_default_sizes() {
-        for (chpx, bold) in [(&[][..], "1"), (&[0x35, 0x08, 0x81][..], "0")] {
+        for (chpx, bold) in [(&[][..], true), (&[0x35, 0x08, 0x81][..], false)] {
             let mut f = empty();
             f.styles = vec![Some(Style {
                 kind: 1,
@@ -3821,63 +3478,31 @@ mod tests {
                 table: None,
                 language_compatibility: StyleLanguageCompatibility::default(),
             })];
-            f.numbering = numbering::Tables {
-                lists: vec![numbering::List {
-                    id: 42,
-                    styles: [0; 9],
-                    simple: true,
-                    hybrid: false,
-                    auto_number: false,
-                    levels: vec![numbering::Level {
-                        start: Some(1),
-                        format: 0,
-                        justification: 0,
-                        legal: false,
-                        restart: Some(0),
-                        follow: 0,
-                        tentative: false,
-                        papx: &[],
-                        chpx,
-                        text: &[0, 0, b'.', 0],
-                        placeholders: [
-                            Some((1, 0)),
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                        ],
-                    }],
-                }],
-                overrides: vec![numbering::Override {
-                    list_index: 0,
-                    first_cp: None,
-                    auto_number_field: None,
-                    levels: vec![],
-                }],
-            };
+            f.numbering = one_level_list(0, chpx);
             let piece: &[u8] = &[0x0b, 0x46, 1, 0, 0x43, 0x4a, 40, 0];
+            // The second resolution reuses the cached linked-style patch.
             for _ in 0..2 {
-                f.paragraph_xml(0, 0, 1, &[piece]).unwrap();
+                let (_, marker) = f
+                    .direct_paragraph(0, None, 0, 1, &[piece])
+                    .unwrap()
+                    .numbering
+                    .expect("resolved numbering");
+                let facts = marker.direct_font_facts(&[]).unwrap();
+                assert_eq!(facts.bold, bold);
+                assert_eq!(facts.font_size, Some(20.0));
             }
-            let xml = f.numbering_output.xml(10000).unwrap().unwrap();
-            assert!(xml.contains(&format!("<w:b w:val=\"{bold}\"/>")));
-            assert!(xml.contains("<w:sz w:val=\"40\"/>"));
-            assert!(!xml.contains("<w:sz w:val=\"20\"/>"));
-            assert_eq!(xml.matches("<w:num w:numId=").count(), 1);
-            assert!(f
-                .run_xml(0, 0, 1, &[piece])
-                .unwrap()
-                .contains("<w:b w:val=\"1\"/>"));
+            assert!(
+                f.direct_text_run(0, None, 0, 1, &[piece], "x".into())
+                    .unwrap()
+                    .unwrap()
+                    .bold
+            );
         }
     }
 
     #[test]
     fn list_marker_hint_patch_can_cancel_and_level_chpx_can_override_it() {
-        let build = |level_chpx: &'static [u8]| {
+        let marker_hint = |level_chpx: &'static [u8]| {
             let mut f = empty();
             f.styles = vec![
                 Some(Style {
@@ -3897,55 +3522,17 @@ mod tests {
                     language_compatibility: StyleLanguageCompatibility::default(),
                 }),
             ];
-            f.numbering = numbering::Tables {
-                lists: vec![numbering::List {
-                    id: 42,
-                    styles: [1; 9],
-                    simple: true,
-                    hybrid: false,
-                    auto_number: false,
-                    levels: vec![numbering::Level {
-                        start: Some(1),
-                        format: 0,
-                        justification: 0,
-                        legal: false,
-                        restart: Some(0),
-                        follow: 0,
-                        tentative: false,
-                        papx: &[],
-                        chpx: level_chpx,
-                        text: &[0, 0, b'.', 0],
-                        placeholders: [
-                            Some((1, 0)),
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                        ],
-                    }],
-                }],
-                overrides: vec![numbering::Override {
-                    list_index: 0,
-                    first_cp: None,
-                    auto_number_field: None,
-                    levels: vec![],
-                }],
-            };
-            f.paragraph_xml(0, 0, 1, &[&[0x0b, 0x46, 1, 0]]).unwrap();
-            f.numbering_output.xml(10000).unwrap().unwrap()
+            f.numbering = one_level_list(1, level_chpx);
+            let (_, marker) = f
+                .direct_paragraph(0, None, 0, 1, &[&list_piece(1)])
+                .unwrap()
+                .numbering
+                .expect("resolved numbering");
+            marker.direct_font_facts(&[]).unwrap().font_hint
         };
 
-        let cancelled = build(&[]);
-        assert!(!cancelled.contains("w:hint="), "{cancelled}");
-        let overridden = build(&[0x6f, 0x28, 2]);
-        assert!(
-            overridden.contains("<w:rFonts w:hint=\"cs\"/>"),
-            "{overridden}"
-        );
+        assert_eq!(marker_hint(&[]), None);
+        assert_eq!(marker_hint(&[0x6f, 0x28, 2]).as_deref(), Some("cs"));
     }
 
     #[test]
@@ -3969,15 +3556,29 @@ mod tests {
                 language_compatibility: StyleLanguageCompatibility::default(),
             }),
         ];
-        let before = f.paragraph_xml(1, 0, 0, &[]).unwrap();
-        assert!(before.contains("<w:top w:val=\"single\""));
-        assert!(before.contains("<w:bottom w:val=\"double\""));
-        let cleared = f
-            .paragraph_xml(1, 0, 1, &[&[0x50, 0xc6, 8, 0, 0, 0, 0xff, 0, 0, 0, 0]])
-            .unwrap();
-        assert!(cleared.contains("<w:top w:val=\"single\""));
-        assert!(cleared.contains("<w:bottom w:val=\"none\""));
-        assert_eq!(before, f.paragraph_xml(1, 0, 0, &[]).unwrap());
+        let styles = |f: &mut Formatting<'static>, prm: u16, prcs: &[&[u8]]| {
+            let borders = f
+                .direct_paragraph(1, None, 0, prm, prcs)
+                .unwrap()
+                .paragraph
+                .borders
+                .unwrap();
+            (
+                borders.top.map(|edge| edge.style),
+                borders.bottom.map(|edge| edge.style),
+            )
+        };
+        let before = styles(&mut f, 0, &[]);
+        assert_eq!(
+            before,
+            (Some("single".to_string()), Some("double".to_string()))
+        );
+        let cleared = styles(&mut f, 1, &[&[0x50, 0xc6, 8, 0, 0, 0, 0xff, 0, 0, 0, 0]]);
+        assert_eq!(
+            cleared,
+            (Some("single".to_string()), Some("none".to_string()))
+        );
+        assert_eq!(styles(&mut f, 0, &[]), before);
         assert!(!f.unsupported_paragraph_properties);
     }
 
@@ -3992,9 +3593,15 @@ mod tests {
             table: None,
             language_compatibility: StyleLanguageCompatibility::default(),
         })];
-        assert!(f.run_xml(0, 0, 0, &[]).unwrap_err().contains("cyclic"));
+        assert!(f
+            .direct_text_run(0, None, 0, 0, &[], "x".into())
+            .unwrap_err()
+            .contains("cyclic"));
         f.styles.clear();
-        assert!(f.run_xml(0, 0, 1, &[]).unwrap_err().contains("outside CLX"));
+        assert!(f
+            .direct_text_run(0, None, 0, 1, &[], "x".into())
+            .unwrap_err()
+            .contains("outside CLX"));
     }
 
     #[test]
@@ -4009,17 +3616,30 @@ mod tests {
             table: None,
             language_compatibility: StyleLanguageCompatibility::default(),
         })];
-        let original = f.paragraph_xml(0, 0, 0, &[]).unwrap();
-        assert!(original.contains("<w:tab w:val=\"left\" w:pos=\"720\" w:leader=\"dot\"/>"));
+        let tabs = |f: &mut Formatting<'static>, prm: u16, prcs: &[&[u8]]| {
+            f.direct_paragraph(0, None, 0, prm, prcs)
+                .unwrap()
+                .paragraph
+                .tab_stops
+                .into_iter()
+                .map(|tab| (tab.pos, tab.alignment, tab.leader))
+                .collect::<Vec<_>>()
+        };
+        let original = tabs(&mut f, 0, &[]);
+        assert_eq!(
+            original,
+            [
+                (36.0, "left".to_string(), "dot".to_string()),
+                (72.0, "right".to_string(), "none".to_string()),
+            ]
+        );
         // Delete at 740 (+20 twips from inherited 720), replace 1440 with center.
-        let modified = f
-            .paragraph_xml(0, 0, 1, &[&[0x0d, 0xc6, 7, 1, 0xe4, 2, 1, 0xa0, 5, 1]])
-            .unwrap();
-        assert!(!modified.contains("w:pos=\"720\""));
-        assert!(modified.contains("<w:tab w:val=\"center\" w:pos=\"1440\" w:leader=\"none\"/>"));
-        assert_eq!(f.paragraph_xml(0, 0, 0, &[]).unwrap(), original);
+        let modified = tabs(&mut f, 1, &[&[0x0d, 0xc6, 7, 1, 0xe4, 2, 1, 0xa0, 5, 1]]);
+        assert_eq!(modified, [(72.0, "center".to_string(), "none".to_string())]);
+        assert_eq!(tabs(&mut f, 0, &[]), original);
         assert!(!f.unsupported_paragraph_properties);
     }
+
     #[test]
     fn inherited_paragraph_layout_is_overridden_by_piece_properties() {
         let mut f = empty();
@@ -4031,16 +3651,17 @@ mod tests {
             table: None,
             language_compatibility: StyleLanguageCompatibility::default(),
         })];
-        let xml = f
-            .paragraph_xml(0, 0, 1, &[&[0x13, 0xa4, 0, 0, 0x07, 0x24, 1]])
-            .unwrap();
-        assert!(xml.contains("w:line=\"300\" w:lineRule=\"exact\""));
-        assert!(xml.contains("w:before=\"0\""));
-        assert!(xml.contains("<w:pageBreakBefore w:val=\"1\"/>"));
-        assert!(f
-            .paragraph_xml(0, 0, 0, &[])
+        let paragraph = f
+            .direct_paragraph(0, None, 0, 1, &[&[0x13, 0xa4, 0, 0, 0x07, 0x24, 1]])
             .unwrap()
-            .contains("w:before=\"240\""));
+            .paragraph;
+        let line = paragraph.line_spacing.unwrap();
+        assert_eq!((line.value, line.rule.as_str()), (15.0, "exact"));
+        assert_eq!(paragraph.space_before, 0.0);
+        assert!(paragraph.page_break_before);
+        let inherited = f.direct_paragraph(0, None, 0, 0, &[]).unwrap().paragraph;
+        assert_eq!(inherited.space_before, 12.0);
+        assert!(!inherited.page_break_before);
     }
 
     #[test]
@@ -4062,16 +3683,21 @@ mod tests {
         page[96..106].copy_from_slice(&[5, 0, 0, 0x13, 0xa4, 240, 0, 0x61, 0x24, 2]);
         page[511] = 2;
         let mut f = Formatting::read(&word, &table, &[]).unwrap();
-        let first = f.paragraph_xml(0, 109, 0, &[]).unwrap();
-        assert!(first.contains("w:before=\"120\""));
-        assert!(first.contains("<w:jc w:val=\"center\"/>"));
-        let second = f.paragraph_xml(0, 110, 1, &[&[0x13, 0xa4, 0, 0]]).unwrap();
-        assert!(second.contains("w:before=\"0\""));
-        assert!(second.contains("<w:jc w:val=\"right\"/>"));
-        assert!(f
-            .paragraph_xml(0, 120, 0, &[])
+        let first = f.direct_paragraph(0, None, 109, 0, &[]).unwrap().paragraph;
+        assert_eq!(
+            (first.space_before, first.alignment.as_str()),
+            (6.0, "center")
+        );
+        let second = f
+            .direct_paragraph(0, None, 110, 1, &[&[0x13, 0xa4, 0, 0]])
             .unwrap()
-            .contains("w:before=\"0\""));
+            .paragraph;
+        assert_eq!(
+            (second.space_before, second.alignment.as_str()),
+            (0.0, "right")
+        );
+        let outside = f.direct_paragraph(0, None, 120, 0, &[]).unwrap().paragraph;
+        assert_eq!(outside.space_before, 0.0);
     }
 
     #[test]
@@ -4082,8 +3708,9 @@ mod tests {
         let mut props = paragraph::Properties::default();
         f.apply_paragraph(&mut props, &[0x46, 0x66, 0, 0, 0, 0, 0x13, 0xa4, 240, 0])
             .unwrap();
-        assert!(props.xml().contains("w:before=\"120\""));
-        assert!(props.xml().contains("w:line=\"300\""));
+        let paragraph = props.direct_paragraph();
+        assert_eq!(paragraph.space_before, 6.0);
+        assert_eq!(paragraph.line_spacing.unwrap().value, 15.0);
         // A non-first PHugePapx must be ignored, including an invalid pointer.
         f.apply_paragraph(&mut props, &[0x07, 0x24, 1, 0x46, 0x66, 255, 255, 255, 255])
             .unwrap();
@@ -4133,8 +3760,9 @@ mod tests {
             &[(100, 110, first_papx), (110, 120, neighboring_papx)],
             data,
         );
+        formatting.configure_table_styles(0x0112, true);
 
-        let base = formatting.table_properties(109, 0, &[]).unwrap();
+        let base = formatting.table_properties_native(109, 0, &[]).unwrap();
         assert!(base.in_table && base.row_end && base.row.header);
         assert_eq!(base.row.cells.len(), 1);
         assert_eq!(base.row.cells[0].width, 1000);
@@ -4150,21 +3778,27 @@ mod tests {
         .concat();
         // The piece is not part of the replaced direct array: Word applies it
         // after the PrcData (see `sprm::paragraph_properties_appended`).
-        let overridden = formatting.table_properties(109, 1, &[&piece]).unwrap();
+        let overridden = formatting
+            .table_properties_native(109, 1, &[&piece])
+            .unwrap();
         assert_eq!(overridden.row.cells[0].width, 1500);
         assert_eq!(overridden.row.table_style, Some(9));
         assert_eq!(overridden.row.table_style_options, Some(0x0340));
         assert!(!overridden.row.header);
 
-        let neighbor = formatting.table_properties(110, 0, &[]).unwrap();
+        let neighbor = formatting.table_properties_native(110, 0, &[]).unwrap();
         assert_eq!(neighbor.row.cells[0].width, 400);
         assert_eq!(neighbor.row.table_style, Some(7));
         assert_eq!(neighbor.row.table_style_options, Some(0x40));
         assert!(neighbor.row.header);
-        assert!(!formatting.table_properties(120, 0, &[]).unwrap().in_table);
+        assert!(
+            !formatting
+                .table_properties_native(120, 0, &[])
+                .unwrap()
+                .in_table
+        );
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn native_table_acquisition_enables_raw_shading_only_after_word_2000() {
         let definition = test_prl(0xd608, &[6, 0, 1, 0, 0, 0xd0, 7]);
@@ -4185,17 +3819,10 @@ mod tests {
         let properties = old_native.table_properties_native(109, 0, &[]).unwrap();
         assert!(properties.row.cells[0].prepared_shading.is_none());
         assert!(old_native.unsupported_table_properties);
-
-        let mut xml = with_direct_paragraph(&papx);
-        xml.configure_table_styles(0x00da, false);
-        let properties = xml.table_properties(109, 0, &[]).unwrap();
-        assert!(properties.row.cells[0].prepared_shading.is_none());
-        assert!(xml.unsupported_table_properties);
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
-    fn native_tistd_resets_preceding_cell_margins_without_changing_xml_mode() {
+    fn native_tistd_resets_preceding_cell_margins() {
         let papx = [
             vec![0, 0],
             test_prl(0x7621, &[0, 1, 0xe8, 3]),
@@ -4213,15 +3840,8 @@ mod tests {
         );
         assert_eq!(properties.row.cells[0].margins[1], Some(108));
         assert_eq!(properties.row.cells[0].width, 1000);
-
-        let mut xml = with_direct_paragraph(&papx);
-        xml.configure_table_styles(0x00da, false);
-        let properties = xml.table_properties(109, 0, &[]).unwrap();
-        assert_eq!(properties.row.cells[0].margins[1], Some(720));
-        assert_eq!(properties.row.cells[0].width, 1000);
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn native_margin_acquisition_distinguishes_style_defaults_and_later_row_overrides() {
         // Native bordered controls isolate D634 by removing the later direct
@@ -4280,7 +3900,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn native_table_acquisition_resets_authored_shading_at_each_tistd() {
         let definition = test_prl(0xd608, &[6, 0, 1, 0, 0, 0xd0, 7]);
@@ -4312,7 +3931,7 @@ mod tests {
         assert!(matches!(
             &before_reset.row.cells[0].prepared_shading,
             Some(table::PreparedCellShading::Explicit(shading))
-                if shading.xml().contains("w:fill=\"123456\"")
+                if shading.direct_background().as_deref() == Some("123456")
         ));
 
         let (reversed, unsupported) = acquire(
@@ -4331,7 +3950,7 @@ mod tests {
         assert!(matches!(
             &reversed.row.cells[0].prepared_shading,
             Some(table::PreparedCellShading::Explicit(shading))
-                if shading.xml().contains("w:fill=\"123456\"")
+                if shading.direct_background().as_deref() == Some("123456")
         ));
 
         let (after_reset, unsupported) = acquire(
@@ -4358,7 +3977,6 @@ mod tests {
         assert!(after_reset.row.cells[0].raw_nil_authored);
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn native_table_acquisition_retains_d635_authored_state_across_tistd() {
         let definition = test_prl(0xd608, &[6, 0, 1, 0, 0, 0xe8, 3]);
@@ -4391,7 +4009,6 @@ mod tests {
         assert_eq!(row.cells[0].preferred, None);
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn native_table_acquisition_preserves_tdxacol_across_same_count_tdef() {
         fn definition(boundaries: &[i16]) -> Vec<u8> {
@@ -4465,32 +4082,8 @@ mod tests {
                 );
             }
         }
-
-        let papx = [
-            vec![0, 0],
-            [
-                first,
-                test_prl(0x7623, &[1, 2, 0xb8, 0xb]),
-                definition(&[0, 2500, 4000, 9000]),
-            ]
-            .concat(),
-        ]
-        .concat();
-        let mut xml = with_direct_paragraph(&papx);
-        let properties = xml.table_properties(109, 0, &[]).unwrap();
-        assert_eq!(
-            properties
-                .row
-                .cells
-                .iter()
-                .map(|cell| cell.width)
-                .collect::<Vec<_>>(),
-            [2500, 1500, 5000],
-            "legacy XML acquisition retains raw Prl ordering"
-        );
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn native_table_acquisition_preserves_varied_tdxacol_ranges_and_order() {
         fn definition(boundaries: &[i16]) -> Vec<u8> {
@@ -4555,7 +4148,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn native_tistd_resets_only_independently_authored_row_properties_in_data_order() {
         let before_tistd = [
@@ -4608,15 +4200,6 @@ mod tests {
         assert!(!properties.row.identity.contains_key(&0x3465));
         assert!(native.unsupported_table_properties);
 
-        let mut xml = with_direct_paragraph_runs(&[(100, 110, papx.clone())], data);
-        xml.configure_table_styles(0x0112, false);
-        let properties = xml.table_properties(109, 0, &[]).unwrap();
-        assert_eq!(properties.row.alignment, (2, false));
-        assert!(properties.row.header);
-        assert!(properties.row.cant_split);
-        assert!(properties.row.position.xml().contains("tblOverlap"));
-        assert!(properties.row.identity.contains_key(&0x3465));
-
         let after_tistd = [
             reset.clone(),
             test_prl(0x548a, &1u16.to_le_bytes()),
@@ -4632,7 +4215,7 @@ mod tests {
         assert_eq!(properties.row.alignment, (1, false));
         assert!(properties.row.header);
         assert!(properties.row.cant_split);
-        assert!(properties.row.position.xml().contains("tblOverlap"));
+        assert_eq!(properties.row.position.direct().1.as_deref(), Some("never"));
 
         let repeated = test_prc_data(
             [
@@ -4652,10 +4235,9 @@ mod tests {
         assert_eq!(properties.row.alignment, (0, false));
         assert!(!properties.row.header);
         assert!(!properties.row.cant_split);
-        assert!(!properties.row.position.xml().contains("tblOverlap"));
+        assert_eq!(properties.row.position.direct().1, None);
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn native_current_word_cant_split_policy_is_ordered_and_not_selected_by_nfib() {
         fn native_value(papx: &[u8], effective_nfib: u16) -> bool {
@@ -4673,10 +4255,6 @@ mod tests {
         assert!(native_value(&modern_then_legacy, 0x00d9));
         assert!(native_value(&modern_then_legacy, 0x0112));
 
-        let mut xml = with_direct_paragraph(&modern_then_legacy);
-        xml.configure_table_styles(0x0112, false);
-        assert!(!xml.table_properties(109, 0, &[]).unwrap().row.cant_split);
-
         let repeated_reset = [
             vec![0, 0],
             test_prl(0x3466, &[1]),
@@ -4693,33 +4271,25 @@ mod tests {
         assert!(native_value(&modern_after_reset, 0x0112));
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn table_acquisition_normalizes_explicit_overlap_false_to_omission() {
-        fn acquired(overlap: Option<u8>, native: bool) -> (bool, bool) {
+        fn acquired(overlap: Option<u8>) -> (bool, Option<String>) {
             let mut papx = vec![0, 0];
             if let Some(value) = overlap {
                 papx.extend(test_prl(0x3465, &[value]));
             }
             let mut formatting = with_direct_paragraph(&papx);
-            formatting.configure_table_styles(0x0112, native);
-            let properties = if native {
-                formatting.table_properties_native(109, 0, &[])
-            } else {
-                formatting.table_properties(109, 0, &[])
-            }
-            .unwrap();
+            formatting.configure_table_styles(0x0112, true);
+            let properties = formatting.table_properties_native(109, 0, &[]).unwrap();
             (
                 properties.row.identity.contains_key(&0x3465),
-                properties.row.position.xml().contains("tblOverlap"),
+                properties.row.position.direct().1,
             )
         }
 
-        for native in [false, true] {
-            assert_eq!(acquired(None, native), (false, false));
-            assert_eq!(acquired(Some(0), native), (false, false));
-            assert_eq!(acquired(Some(1), native), (true, true));
-        }
+        assert_eq!(acquired(None), (false, None));
+        assert_eq!(acquired(Some(0)), (false, None));
+        assert_eq!(acquired(Some(1)), (true, Some("never".into())));
     }
 
     #[test]
@@ -4761,7 +4331,8 @@ mod tests {
         let data = [record_a, record_b, record_c].concat();
         let papx = [vec![0, 0], test_prl(0x646b, &0u32.to_le_bytes())].concat();
         let mut formatting = with_direct_paragraph_runs(&[(100, 110, papx.clone())], data);
-        let properties = formatting.table_properties(109, 0, &[]).unwrap();
+        formatting.configure_table_styles(0x0112, true);
+        let properties = formatting.table_properties_native(109, 0, &[]).unwrap();
         assert!(properties.in_table && properties.row_end && properties.row.header);
         assert_eq!(properties.row.cells[0].width, 1000);
         assert_eq!(properties.row.table_style, None);
@@ -4774,8 +4345,9 @@ mod tests {
             .concat(),
         );
         let mut formatting = with_direct_paragraph_runs(&[(100, 110, papx.clone())], cycle);
+        formatting.configure_table_styles(0x0112, true);
         assert!(formatting
-            .table_properties(109, 0, &[])
+            .table_properties_native(109, 0, &[])
             .err()
             .unwrap()
             .contains("cyclic"));
@@ -4783,8 +4355,9 @@ mod tests {
         let mut truncated = 10u16.to_le_bytes().to_vec();
         truncated.extend([0u8; 9]);
         let mut formatting = with_direct_paragraph_runs(&[(100, 110, papx)], truncated);
+        formatting.configure_table_styles(0x0112, true);
         assert!(formatting
-            .table_properties(109, 0, &[])
+            .table_properties_native(109, 0, &[])
             .err()
             .unwrap()
             .contains("outside Data stream"));
@@ -4794,7 +4367,8 @@ mod tests {
     fn supported_paragraph_prm_does_not_report_character_loss() {
         let mut f = empty();
         for code in [0x09, 0x18, 0x19] {
-            f.run_xml(0, 0, 0x0100 | (code << 1), &[]).unwrap();
+            f.direct_text_run(0, None, 0, 0x0100 | (code << 1), &[], "x".into())
+                .unwrap();
         }
         assert!(!f.unsupported_piece_properties && !f.unsupported_character_properties);
     }

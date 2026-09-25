@@ -1,6 +1,6 @@
 //! Floating drawing anchors of the main and header documents, MS-DOC 2.8.27
 //! and 2.9.253.
-use super::pictures::{Options as PictureOptions, Picture};
+use super::pictures::Options as PictureOptions;
 use super::{u16_at, u32_at, unsupported};
 use crate::officeart::{
     raster::{read_store_entry_as, Image, Raster},
@@ -8,21 +8,15 @@ use crate::officeart::{
 };
 use std::collections::BTreeMap;
 
-#[cfg(feature = "direct-doc")]
 mod direct;
-#[cfg(feature = "direct-doc")]
 mod group;
-#[cfg(feature = "direct-doc")]
 mod shape;
-#[cfg(feature = "direct-doc")]
 pub(in crate::doc) mod textbox;
-#[cfg(feature = "direct-doc")]
 pub(in crate::doc) use direct::DirectRun;
 
 /// The drawing part that owns a PlcfSpa, its OfficeArtDgContainer and its
 /// textbox story (MS-DOC 2.8.27, 2.9.171; MS-ODRAW 2.2.13).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(not(feature = "direct-doc"), allow(dead_code))]
 pub(in crate::doc) enum Part {
     Main,
     Header,
@@ -45,16 +39,6 @@ impl Part {
     }
 }
 
-/// Which projection consumes the resolved facts. The package writer keeps
-/// its original picture-only subset; the direct model admits the drawing
-/// shapes and aligned positions implemented in `shape` and `direct`.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Mode {
-    Package,
-    #[cfg(feature = "direct-doc")]
-    Direct,
-}
-
 /// The anchors and top-level shape containers of one drawing part.
 #[derive(Default)]
 struct Drawings<'a> {
@@ -70,11 +54,9 @@ pub(super) struct Store<'a> {
     word: &'a [u8],
     table: &'a [u8],
     /// The CLX that maps textbox stories; empty when none was supplied.
-    #[cfg_attr(not(feature = "direct-doc"), allow(dead_code))]
     clx: &'a [u8],
     group_read: bool,
     header_container: Option<Record<'a>>,
-    #[cfg(feature = "direct-doc")]
     textboxes: [Option<textbox::Textboxes<'a>>; 2],
     images: BTreeMap<usize, Option<Image<'a>>>,
     /// Whether PNG BLIPs holding TIFF data are admitted (direct model only).
@@ -82,7 +64,6 @@ pub(super) struct Store<'a> {
     budget: usize,
     remaining_bytes: usize,
     occurrences: u32,
-    #[cfg(feature = "direct-doc")]
     selected_images: std::collections::BTreeSet<usize>,
     pub omitted: bool,
 }
@@ -118,14 +99,12 @@ impl<'a> Store<'a> {
             clx,
             group_read: false,
             header_container: None,
-            #[cfg(feature = "direct-doc")]
             textboxes: [None, None],
             images: BTreeMap::new(),
             raster: Raster::Advertised,
             budget: 1_000_000,
             remaining_bytes: 128 * 1024 * 1024,
             occurrences: 0,
-            #[cfg(feature = "direct-doc")]
             selected_images: std::collections::BTreeSet::new(),
             omitted: false,
         };
@@ -138,7 +117,6 @@ impl<'a> Store<'a> {
 
     /// Load the header document's anchors (PlcSpaHdr, CPs relative to the
     /// header document) and its own drawing container (dgglbl 1).
-    #[cfg(feature = "direct-doc")]
     fn load_header(&mut self, header_units: usize) -> Result<(), String> {
         let anchors = anchors_in(self.word, self.table, Part::Header, header_units)?;
         if anchors.is_empty() {
@@ -156,7 +134,6 @@ impl<'a> Store<'a> {
 
     /// Load everything the direct model resolves beyond main-story anchors:
     /// header drawings and both textbox stories (MS-DOC 2.3.6-2.3.7).
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) fn load_direct_parts(&mut self) -> Result<(), String> {
         let header_units = u32_at(self.word, 0x54)? as usize; // FibRgLw97.ccpHdd
         self.load_header(header_units)?;
@@ -167,7 +144,6 @@ impl<'a> Store<'a> {
         Ok(())
     }
 
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) fn textbox(&self, part: Part) -> Option<&textbox::Textboxes<'a>> {
         self.textboxes[part as usize].as_ref()
     }
@@ -232,65 +208,7 @@ impl<'a> Store<'a> {
         Ok(())
     }
 
-    pub fn drawing(&mut self, cp: usize) -> Result<String, String> {
-        let Some(resolved) = self.resolve(Part::Main, cp, Mode::Package)? else {
-            return Ok(String::new());
-        };
-        let (image_index, crop) = match resolved.content {
-            Content::Picture {
-                image_index, crop, ..
-            } => (image_index, crop),
-            #[cfg(feature = "direct-doc")]
-            Content::Shape(_) | Content::Group(_) => {
-                unreachable!("package projection resolves pictures only")
-            }
-        };
-        let image = self.images[&image_index]
-            .as_ref()
-            .expect("resolved floating image");
-        let [dist_l, dist_t, dist_r, dist_b] = resolved.distances;
-        let x = position(resolved.horizontal, resolved.x_emu, false)?;
-        let y = position(resolved.vertical, resolved.y_emu, true)?;
-        let wrap = match resolved.wrapping {
-            1 => "<wp:wrapTopAndBottom/>".to_string(),
-            2 => format!("<wp:wrapSquare wrapText=\"{}\"/>", resolved.side),
-            3 => "<wp:wrapNone/>".into(),
-            _ => unreachable!(),
-        };
-        let opening = format!(
-            r#"<wp:anchor distL="{dist_l}" distT="{dist_t}" distR="{dist_r}" distB="{dist_b}" simplePos="0" relativeHeight="{}" behindDoc="{}" locked="{}" layoutInCell="{}" allowOverlap="{}"><wp:simplePos x="0" y="0"/>{x}{y}<wp:extent cx="{}" cy="{}"/>{wrap}"#,
-            resolved.z_order,
-            u8::from(resolved.behind),
-            u8::from(resolved.locked),
-            u8::from(resolved.in_cell),
-            u8::from(resolved.overlap),
-            resolved.extent[0],
-            resolved.extent[1]
-        );
-        let image = Picture {
-            image: Image {
-                bytes: std::borrow::Cow::Borrowed(image.bytes.as_ref()),
-                extension: image.extension,
-            },
-            extent: resolved.extent,
-            crop,
-            flip: resolved.flip,
-            rotation: 0,
-        };
-        Ok(image.xml(
-            1_000_000 + resolved.occurrence,
-            &format!("rFloatImg{image_index}"),
-            &opening,
-            "</wp:anchor>",
-        ))
-    }
-
-    fn resolve(
-        &mut self,
-        part: Part,
-        cp: usize,
-        mode: Mode,
-    ) -> Result<Option<ResolvedDrawing>, String> {
+    fn resolve(&mut self, part: Part, cp: usize) -> Result<Option<ResolvedDrawing>, String> {
         let drawings = &self.parts[part as usize];
         let Ok(index) = drawings.anchors.binary_search_by_key(&cp, |a| a.cp) else {
             self.omitted = true;
@@ -298,29 +216,16 @@ impl<'a> Store<'a> {
         };
         let anchor = drawings.anchors[index].clone();
         let anchor = &anchor;
-        let Some(&(anchor_index, orders, shape)) = drawings.shapes.get(&anchor.shape_id) else {
+        let Some(&(anchor_index, order, shape)) = drawings.shapes.get(&anchor.shape_id) else {
             self.omitted = true;
             return Ok(None);
         };
         if anchor_index != index {
             return Err(unsupported("Word shape/anchor index mismatch"));
         }
-        // The package writer numbers only independent shapes, as it always
-        // has; the direct model counts groups in their document order too.
-        let order = match mode {
-            Mode::Package => orders[0],
-            #[cfg(feature = "direct-doc")]
-            Mode::Direct => orders[1],
-        };
         if shape.kind == 0xf003 {
-            // A top-level OfficeArt group. The package writer never flattens
-            // groups; the direct model resolves them in `group`.
-            #[cfg(feature = "direct-doc")]
-            if mode == Mode::Direct {
-                return self.resolve_group(anchor, order, shape);
-            }
-            self.omitted = true;
-            return Ok(None);
+            // A top-level OfficeArt group, resolved in `group`.
+            return self.resolve_group(anchor, order, shape);
         }
         let mut picture = PictureOptions::default();
         let mut placement = Placement::default();
@@ -343,18 +248,15 @@ impl<'a> Store<'a> {
             }
         }
         let flags = flags.unwrap_or(0);
-        #[cfg(feature = "direct-doc")]
-        if mode == Mode::Direct && placement.hidden && !placement.script {
+        if placement.hidden && !placement.script {
             // MS-ODRAW 2.3.4.44 fHidden: the shape is prevented from
             // displaying, so the direct model projects nothing for it. Word's
-            // PDF of a corpus document with hidden header lines agrees. The
-            // package writer keeps its original omission.
+            // PDF of a corpus document with hidden header lines agrees.
             return Ok(None);
         }
         let [left, top, right, bottom] = anchor.rect.map(i64::from);
         let extent = [(right - left) * 635, (bottom - top) * 635];
-        #[cfg(feature = "direct-doc")]
-        if mode == Mode::Direct && kind != Some(75) {
+        if kind != Some(75) {
             // Non-picture drawing shapes: every property is classified by
             // `shape`; unsupported sub-cases are rejected with their reason.
             if placement.hidden || placement.script {
@@ -431,20 +333,14 @@ impl<'a> Store<'a> {
                 )
                 .map(Some);
         }
-        let align = match mode {
-            Mode::Package => None,
-            #[cfg(feature = "direct-doc")]
-            Mode::Direct => {
-                if placement.horizontal == 0 && placement.vertical == 0 {
-                    None
-                } else {
-                    match direct_alignment(anchor, &placement) {
-                        Ok(align) => Some(align),
-                        Err(_) => {
-                            self.omitted = true;
-                            return Ok(None);
-                        }
-                    }
+        let align = if placement.horizontal == 0 && placement.vertical == 0 {
+            None
+        } else {
+            match direct_alignment(anchor, &placement) {
+                Ok(align) => Some(align),
+                Err(_) => {
+                    self.omitted = true;
+                    return Ok(None);
                 }
             }
         };
@@ -457,9 +353,8 @@ impl<'a> Store<'a> {
             || placement.hidden
             || placement.script
             || picture.rotation != 0
-            // SPA provides an explicit, host-defined coordinate origin. The
-            // package writer does not resolve aligned positions; the direct
-            // model accepts them only through `direct_alignment`.
+            // SPA provides an explicit, host-defined coordinate origin; aligned
+            // positions are accepted only through `direct_alignment`.
             || (align.is_none() && (placement.horizontal != 0 || placement.vertical != 0))
             || matches!(anchor.wrapping, 0 | 4 | 5)
         {
@@ -501,7 +396,6 @@ impl<'a> Store<'a> {
 
     /// Load a shape's picture fill BLIP; `false` when it is not a supported
     /// passive image, which the caller reports as omitted content.
-    #[cfg(feature = "direct-doc")]
     fn load_fill_picture(&mut self, facts: &shape::Facts) -> Result<bool, String> {
         match facts.fill_picture {
             Some((index, _)) => Ok(self.load_image(index)?.is_some()),
@@ -559,7 +453,6 @@ impl<'a> Store<'a> {
         Ok(ResolvedDrawing {
             content,
             inline: false,
-            #[cfg(feature = "direct-doc")]
             shape_id: anchor.shape_id,
             extent,
             flip: [flags & 0x40 != 0, flags & 0x80 != 0],
@@ -579,44 +472,23 @@ impl<'a> Store<'a> {
             occurrence: self.occurrences,
         })
     }
-    pub fn relationships(&self) -> String {
-        self.images.iter().filter_map(|(id,image)|image.as_ref().map(|p|format!(r#"<Relationship Id="rFloatImg{id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/float{id}.{}"/>"#,p.extension))).collect()
-    }
-    pub fn parts(&self) -> Vec<(String, &[u8])> {
-        self.images
-            .iter()
-            .filter_map(|(id, image)| {
-                image.as_ref().map(|p| {
-                    (
-                        format!("word/media/float{id}.{}", p.extension),
-                        p.bytes.as_ref(),
-                    )
-                })
-            })
-            .collect()
-    }
 }
 
 enum Content {
     Picture {
         image_index: usize,
-        #[cfg_attr(not(feature = "direct-doc"), allow(dead_code))]
         extension: &'static str,
         crop: [i64; 4],
     },
-    #[cfg(feature = "direct-doc")]
     Shape(Box<shape::Facts>),
     /// Members of an OfficeArt group in source (paint) order.
-    #[cfg(feature = "direct-doc")]
     Group(Vec<group::Member>),
 }
 
 struct ResolvedDrawing {
     content: Content,
     /// Projected in paragraph flow instead of anchored (pseudo-inline).
-    #[cfg_attr(not(feature = "direct-doc"), allow(dead_code))]
     inline: bool,
-    #[cfg(feature = "direct-doc")]
     shape_id: u32,
     extent: [i64; 2],
     flip: [bool; 2],
@@ -625,7 +497,6 @@ struct ResolvedDrawing {
     horizontal: &'static str,
     vertical: &'static str,
     /// Horizontal/vertical `wp:align` values replacing the offsets when set.
-    #[cfg_attr(not(feature = "direct-doc"), allow(dead_code))]
     align: [Option<&'static str>; 2],
     wrapping: u8,
     side: &'static str,
@@ -651,7 +522,9 @@ fn records<'a>(bytes: &'a [u8], budget: &mut usize) -> Result<Vec<Record<'a>>, S
 
 /// A registered shape: (anchor index, [package order, document order],
 /// shape or group container).
-type ContainerShape<'a> = (usize, [u32; 2], Record<'a>);
+/// Anchor index, document order among top-level shapes and groups, and the
+/// shape container.
+type ContainerShape<'a> = (usize, u32, Record<'a>);
 
 /// The anchored shapes and groups of one OfficeArtDgContainer's patriarch.
 /// Groups are kept whole: their members use the group coordinate space.
@@ -660,7 +533,6 @@ fn container_shapes<'a>(
     budget: &mut usize,
 ) -> Result<BTreeMap<u32, ContainerShape<'a>>, String> {
     let mut shapes = BTreeMap::new();
-    let mut independent = 0u32;
     for child in records(drawing.payload, budget)? {
         if child.kind != 0xf003 {
             continue;
@@ -706,11 +578,8 @@ fn container_shapes<'a>(
                 if shapes.len() >= 100_000 {
                     return Err(unsupported("Word floating shape budget exceeded"));
                 }
-                if entry.kind == 0xf004 {
-                    independent += 1;
-                }
-                let orders = [independent, shapes.len() as u32 + 1];
-                if shapes.insert(id, (anchor_index, orders, shape)).is_some() {
+                let order = shapes.len() as u32 + 1;
+                if shapes.insert(id, (anchor_index, order, shape)).is_some() {
                     return Err(unsupported("duplicate Word floating shape identifier"));
                 }
             }
@@ -804,7 +673,6 @@ impl Placement {
 /// character/line-relative alignment, inside/outside page-parity alignment
 /// and vertical alignment within a paragraph stay unsupported: each needs an
 /// Office control before its container can be asserted.
-#[cfg(feature = "direct-doc")]
 fn direct_alignment(
     anchor: &Anchor,
     placement: &Placement,
@@ -860,16 +728,6 @@ fn direct_alignment(
         }
     }
     Ok([horizontal, vertical])
-}
-
-fn position(origin: &str, offset: i64, vertical: bool) -> Result<String, String> {
-    let axis = if vertical { "V" } else { "H" };
-    i32::try_from(offset)
-        .map_err(|_| unsupported("Word floating position exceeds DrawingML range"))?;
-    let value = format!("<wp:posOffset>{offset}</wp:posOffset>");
-    Ok(format!(
-        "<wp:position{axis} relativeFrom=\"{origin}\">{value}</wp:position{axis}>"
-    ))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1070,33 +928,48 @@ mod tests {
         table.extend(art);
         (word, table)
     }
+
+    /// The direct picture at CP 12, or None when nothing is projected.
+    fn picture(store: &mut Store<'_>) -> Result<Option<direct::DirectFloatingPicture>, String> {
+        store.direct_picture(12, &mut usize::MAX.clone())
+    }
+
+    fn resources(store: Store<'_>) -> Vec<super::super::pictures::DirectPictureResource> {
+        let mut resources = Vec::new();
+        store
+            .append_direct_resources(&mut resources, &mut usize::MAX.clone())
+            .unwrap();
+        resources
+    }
+
     #[test]
     fn delayed_metafiles_keep_owned_bytes_cached_across_floating_occurrences() {
-        for (source, blip, extension) in [
+        for (source, blip, mime) in [
             {
                 let (s, b) = crate::officeart::emf_test_blip();
-                (s, b, ".emf")
+                (s, b, "image/emf")
             },
             {
                 let (s, b) = crate::officeart::wmf_test_blip();
-                (s, b, ".wmf")
+                (s, b, "image/wmf")
             },
         ] {
             let (word, table) = drawing_with_blip(0xa00, 0, &[], blip, 2);
             let mut store = Store::read(&word, &table, 20).unwrap();
             store.remaining_bytes = source.len();
-            assert!(store.drawing(12).unwrap().contains("<wp:anchor"));
-            let pointer = store.parts()[0].1.as_ptr();
-            assert_eq!(store.parts()[0].1, source);
+            let first = picture(&mut store).unwrap().unwrap();
             assert_eq!(store.remaining_bytes, 0);
             // Shape records are still parsed per occurrence; image bytes are not.
-            assert!(store.drawing(12).unwrap().contains("<wp:anchor"));
-            assert_eq!(store.parts()[0].1.as_ptr(), pointer);
-            assert!(store.relationships().contains(extension));
+            let second = picture(&mut store).unwrap().unwrap();
+            assert_eq!(first.image.image_path, second.image.image_path);
+            assert_eq!(first.image.mime_type, mime);
+            let resources = resources(store);
+            assert_eq!(resources.len(), 1);
+            assert_eq!(resources[0].bytes, source);
         }
     }
     #[test]
-    fn post_eof_wmf_omits_floating_xml_relationship_and_media() {
+    fn post_eof_wmf_omits_the_floating_picture_and_its_media() {
         let (mut source, _) = crate::officeart::wmf_test_blip();
         source.extend_from_slice(&[0, 0]);
         let words = (source.len() / 2) as u32;
@@ -1111,14 +984,13 @@ mod tests {
         for flags in [0xa00, 0xa10] {
             let (word, table) = drawing_with_blip(flags, 0, &[], blip.clone(), 2);
             let mut store = Store::read(&word, &table, 20).unwrap();
-            assert!(store.drawing(12).unwrap().is_empty());
+            assert!(picture(&mut store).unwrap().is_none());
             assert!(store.omitted);
-            assert!(store.relationships().is_empty());
-            assert!(store.parts().is_empty());
+            assert!(resources(store).is_empty());
         }
     }
     #[test]
-    fn ole_shape_without_pib_is_omitted_without_package_residue() {
+    fn ole_shape_without_pib_is_omitted_without_residue() {
         let (word, mut table) = drawing_input(0xa10, 0);
         let key = 0x4104u16.to_le_bytes();
         let offset = table
@@ -1127,29 +999,27 @@ mod tests {
             .expect("fixture contains pib property");
         table[offset..offset + 2].copy_from_slice(&0x4105u16.to_le_bytes());
         let mut store = Store::read(&word, &table, 20).unwrap();
-        assert!(store.drawing(12).unwrap().is_empty());
-        assert!(store.relationships().is_empty());
-        assert!(store.parts().is_empty());
+        assert!(picture(&mut store).unwrap().is_none());
         assert!(store.omitted);
+        assert!(resources(store).is_empty());
     }
     #[test]
-    fn delayed_pictures_use_word_stream_and_share_parts_without_sharing_drawing_ids() {
+    fn delayed_pictures_use_word_stream_and_share_resources_across_occurrences() {
         let (word, table) = drawing_input(0xa00, 0);
         let mut store = Store::read(&word, &table, 20).unwrap();
-        let first = store.drawing(12).unwrap();
-        let second = store.drawing(12).unwrap();
-        assert!(first.contains("<wp:anchor"));
-        assert!(first.contains("<wp:posOffset>-63500</wp:posOffset>"));
-        assert!(first.contains("cx=\"254000\" cy=\"190500\""));
-        assert!(first.contains("id=\"1000001\""));
-        assert!(second.contains("id=\"1000002\""));
-        assert_eq!(store.parts().len(), 1);
-        assert_eq!(store.relationships().matches("<Relationship ").count(), 1);
-        assert!(store.parts()[0].1.starts_with(b"\x89PNG"));
+        let first = picture(&mut store).unwrap().unwrap();
+        let second = picture(&mut store).unwrap().unwrap();
+        assert!(first.image.anchor);
+        assert_eq!(first.image.anchor_x_pt, -5.0);
+        assert_eq!((first.image.width_pt, first.image.height_pt), (20.0, 15.0));
+        assert_ne!(first.occurrence_id, second.occurrence_id);
+        assert_eq!(first.image.image_path, second.image.image_path);
+        let resources = resources(store);
+        assert_eq!(resources.len(), 1);
+        assert!(resources[0].bytes.starts_with(b"\x89PNG"));
         let mut truncated = Store::read(&word[..1024], &table, 20).unwrap();
-        assert!(truncated.drawing(12).is_err());
+        assert!(picture(&mut truncated).is_err());
     }
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn direct_model_projects_nothing_for_hidden_drawings() {
         // fHidden (use bit 17, value bit 1) prevents display; the BLIP is
@@ -1170,7 +1040,6 @@ mod tests {
         assert!(store.omitted);
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn direct_alignment_uses_the_spa_origin_and_rejects_disagreement() {
         // The fixture's SPA origin is page/page.
@@ -1211,13 +1080,8 @@ mod tests {
             let (picture, omitted) = aligned(options);
             assert!(picture.unwrap().is_none() && omitted, "{options:x?}");
         }
-        // Package conversion still omits every aligned position.
-        let (word, table) = drawing_with_options(0xa00, 0, &[(0x38f, 2), (0x390, 1)]);
-        let mut store = Store::read(&word, &table, 20).unwrap();
-        assert!(store.drawing(12).unwrap().is_empty() && store.omitted);
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn direct_floating_passes_validated_metafiles_with_docx_media_types() {
         for ((source, blip), mime) in [
@@ -1242,7 +1106,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn direct_floating_deduplicates_resources_and_admits_before_reserving() {
         let (word, table) = drawing_with_options(
@@ -1367,7 +1230,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn shared_resolution_rejects_position_overflow_before_occurrence() {
         let (word, table) = drawing_input(0xa00, 0);
@@ -1394,20 +1256,21 @@ mod tests {
             (wmf_word, wmf_table, Some(wmf_source)),
         ] {
             let mut store = Store::read(&word, &table, 20).unwrap();
-            let xml = store.drawing(12).unwrap();
-            assert!(xml.contains("<wp:anchor"));
-            assert!(xml.contains("<wp:positionH relativeFrom=\"page\">"));
-            assert!(xml.contains("<wp:positionV relativeFrom=\"page\">"));
-            assert!(xml.contains("cx=\"254000\" cy=\"190500\""));
-            assert!(xml.contains("<wp:wrapSquare wrapText=\"bothSides\"/>"));
-            assert_eq!(store.parts().len(), 1);
-            if let Some(expected) = expected {
-                assert_eq!(store.parts()[0].1, expected);
-            } else {
-                assert!(store.parts()[0].1.starts_with(b"\x89PNG"));
-            }
-            assert_eq!(store.relationships().matches("<Relationship ").count(), 1);
+            let image = picture(&mut store).unwrap().unwrap().image;
+            assert!(image.anchor);
+            assert_eq!(image.anchor_x_relative_from.as_deref(), Some("page"));
+            assert_eq!(image.anchor_y_relative_from.as_deref(), Some("page"));
+            assert_eq!((image.width_pt, image.height_pt), (20.0, 15.0));
+            assert_eq!(image.wrap_mode.as_deref(), Some("square"));
+            assert_eq!(image.wrap_side.as_deref(), Some("bothSides"));
             assert!(!store.omitted);
+            let resources = resources(store);
+            assert_eq!(resources.len(), 1);
+            if let Some(expected) = expected {
+                assert_eq!(resources[0].bytes, expected);
+            } else {
+                assert!(resources[0].bytes.starts_with(b"\x89PNG"));
+            }
         }
     }
     #[test]
@@ -1416,17 +1279,19 @@ mod tests {
             for ole in [0, 0x10] {
                 let (word, table) = drawing_input(0xa00 | flag | ole, 0);
                 let mut store = Store::read(&word[..1024], &table, 20).unwrap();
-                assert!(store.drawing(12).unwrap().is_empty());
-                assert!(store.parts().is_empty());
+                assert!(picture(&mut store).unwrap().is_none());
+                assert!(store.images.is_empty());
                 assert!(store.omitted);
             }
         }
-        for group in [0x00020002, 0x00800080] {
+        // A hidden drawing projects nothing without an omission; a script
+        // anchor stays an omission. Neither dereferences its BLIP.
+        for (group, omitted) in [(0x00020002, false), (0x00800080, true)] {
             let (word, table) = drawing_input(0xa10, group);
             let mut store = Store::read(&word[..1024], &table, 20).unwrap();
-            assert!(store.drawing(12).unwrap().is_empty());
-            assert!(store.parts().is_empty());
-            assert!(store.omitted);
+            assert!(picture(&mut store).unwrap().is_none());
+            assert!(store.images.is_empty());
+            assert_eq!(store.omitted, omitted);
         }
     }
     #[test]
@@ -1436,8 +1301,8 @@ mod tests {
                 let operand = if key == 4 { value << 16 } else { value };
                 let (word, table) = drawing_with_options(0xa00, 0, &[(key, operand)]);
                 let mut store = Store::read(&word[..1024], &table, 20).unwrap();
-                assert!(store.drawing(12).unwrap().is_empty());
-                assert!(store.parts().is_empty());
+                assert!(picture(&mut store).unwrap().is_none());
+                assert!(store.images.is_empty());
                 assert!(store.omitted);
             }
         }
@@ -1447,16 +1312,18 @@ mod tests {
         let (word, table) = drawing_input(0xa00, 0);
         let mut store = Store::read(&word, &table, 20).unwrap();
         store.remaining_bytes = 0;
-        assert!(store.drawing(12).unwrap_err().contains("media budget"));
-        assert!(store.parts().is_empty());
+        assert!(picture(&mut store).unwrap_err().contains("media budget"));
+        assert!(resources(store).is_empty());
 
         let mut store = Store::read(&word, &table, 20).unwrap();
         store.occurrences = 100_000;
-        assert!(store.drawing(12).unwrap_err().contains("occurrence budget"));
+        assert!(picture(&mut store)
+            .unwrap_err()
+            .contains("occurrence budget"));
 
         let mut store = Store::read(&word, &table, 20).unwrap();
         store.budget = 0;
-        assert!(store.drawing(12).is_err());
+        assert!(picture(&mut store).is_err());
     }
     #[test]
     fn does_not_reassign_header_or_nested_group_drawings_to_main_story() {
@@ -1465,8 +1332,8 @@ mod tests {
         let (_, group_end) = record_with_end(&table, start, &mut 100, "test").unwrap();
         table[group_end] = 1;
         let mut store = Store::read(&word, &table, 20).unwrap();
-        assert!(store.drawing(12).unwrap().is_empty());
-        assert!(store.parts().is_empty());
+        assert!(picture(&mut store).unwrap().is_none());
+        assert!(store.images.is_empty());
 
         table[group_end] = 0;
         // Replace the independent SpContainer tag with a nested SpgrContainer
@@ -1474,8 +1341,8 @@ mod tests {
         let shape_start = group_end + 1 + 8 + 8;
         table[shape_start + 2..shape_start + 4].copy_from_slice(&0xf003u16.to_le_bytes());
         let mut store = Store::read(&word, &table, 20).unwrap();
-        assert!(store.drawing(12).unwrap().is_empty());
-        assert!(store.parts().is_empty());
+        assert!(picture(&mut store).unwrap().is_none());
+        assert!(store.images.is_empty());
     }
     #[test]
     fn placement_masks_honor_explicit_false_and_ignore_unused_bits() {
@@ -1502,11 +1369,6 @@ mod tests {
         apply(&mut placement, 0x82008000);
         assert!(placement.in_cell);
         assert!(!placement.overlap);
-        assert_eq!(
-            position("margin", 999, false).unwrap(),
-            "<wp:positionH relativeFrom=\"margin\"><wp:posOffset>999</wp:posOffset></wp:positionH>"
-        );
-        assert!(position("page", i64::MAX, false).is_err());
     }
     fn input(flags: u16) -> (Vec<u8>, Vec<u8>) {
         let mut word = vec![0u8; 0x232];

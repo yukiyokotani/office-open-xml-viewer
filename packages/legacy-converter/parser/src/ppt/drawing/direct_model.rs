@@ -995,7 +995,6 @@ impl Context<'_> {
                 } else {
                     None
                 },
-                auto_number: None,
                 deferred_effect,
             },
             text_style::direct_model::DirectAxes {
@@ -1018,6 +1017,13 @@ impl Context<'_> {
             t_ins: i64::from(p.margins[1]),
             b_ins: i64::from(p.margins[3]),
             wrap: p.wrap.to_owned(),
+            // PowerPoint's owned scalar txflTextFlow=1 down-saves both its
+            // `vert` and `eaVert` inputs as the same OfficeArt value and
+            // round-trips that value as DrawingML eaVert. This compatibility
+            // mapping is deliberately independent of text, fonts and outer
+            // transforms (MS-ODRAW 2.4.5 uses text-container coordinates).
+            // Other flows and nonzero cdirFont were not established by these
+            // controls and stay horizontal.
             vert: if p.text_flow == Some(1) && p.font_direction.unwrap_or(0) == 0 {
                 "eaVert"
             } else {
@@ -2015,14 +2021,4 @@ mod tests {
             .unwrap_err()
             .contains("linked PowerPoint picture"));
     }
-}
-#[cfg(test)]
-#[test]
-fn tmp_print_sizes() {
-    eprintln!(
-        "SIZE SlideElement={} Source={} ShapeElement={}",
-        std::mem::size_of::<SlideElement>(),
-        std::mem::size_of::<SlideElementSource>(),
-        std::mem::size_of::<pptx_model::ShapeElement>()
-    );
 }

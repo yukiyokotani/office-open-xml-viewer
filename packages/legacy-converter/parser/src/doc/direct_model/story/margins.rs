@@ -2,6 +2,7 @@
 
 use super::*;
 
+#[allow(clippy::needless_range_loop)] // The ordinal is also the logical column.
 pub(super) fn resolve(
     prepared: &mut [PreparedParagraph],
     index: &table_context::Index,

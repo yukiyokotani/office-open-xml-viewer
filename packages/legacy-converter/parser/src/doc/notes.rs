@@ -1,8 +1,5 @@
 //! MS-DOC 2.3.2/5, 2.8.16/17/19/20: note reference and text PLCs.
-use super::{
-    build_formatted_story, formatting, pictures, read_story_range, u16_at, u32_at, unsupported,
-    Content, Paragraph, Story, StoryParts, Token,
-};
+use super::{formatting, read_story_range, u16_at, u32_at, unsupported, Story};
 use std::collections::BTreeMap;
 use std::ops::Range;
 
@@ -47,34 +44,18 @@ pub(super) struct Reference {
     custom: bool,
 }
 impl Reference {
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) fn kind(&self) -> Kind {
         self.kind
     }
 
     /// One-based position in its note document, used as the note id.
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) fn id(&self) -> usize {
         self.id
     }
 
     /// True for a literal custom mark (FRD.nAuto == 0).
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) fn custom(&self) -> bool {
         self.custom
-    }
-
-    pub fn xml(&self) -> String {
-        format!(
-            "<w:{}Reference w:id=\"{}\"{}/>",
-            self.kind.tag(),
-            self.id,
-            if self.custom {
-                " w:customMarkFollows=\"1\""
-            } else {
-                ""
-            }
-        )
     }
 }
 
@@ -82,12 +63,10 @@ pub(super) struct References {
     by_cp: BTreeMap<usize, Reference>,
 }
 impl References {
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) fn get(&self, cp: usize) -> Option<&Reference> {
         self.by_cp.get(&cp)
     }
 
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) fn iter(&self) -> impl Iterator<Item = &Reference> {
         self.by_cp.values()
     }
@@ -156,56 +135,6 @@ impl References {
         }
         Ok(Self { by_cp })
     }
-
-    pub fn restore(&self, paragraphs: &mut [Paragraph]) {
-        if self.by_cp.is_empty() {
-            return;
-        }
-        for paragraph in paragraphs {
-            let mut output = Vec::new();
-            for (token, cp) in std::mem::take(&mut paragraph.tokens) {
-                match token {
-                    Token::NoteMarker => {
-                        if let Some(reference) = self.by_cp.get(&cp) {
-                            output.push((Token::NoteReference(reference.clone()), cp));
-                        }
-                    }
-                    Token::Text(text) => {
-                        let end = cp + text.encode_utf16().count();
-                        let mut refs = self.by_cp.range(cp..end).peekable();
-                        if refs.peek().is_none() {
-                            output.push((Token::Text(text), cp));
-                            continue;
-                        }
-                        let (mut position, mut start_cp, mut start_byte) = (cp, cp, 0);
-                        for (byte, ch) in text.char_indices() {
-                            if let Some((&at, reference)) = refs.peek().copied() {
-                                if at == position {
-                                    if byte > start_byte {
-                                        output.push((
-                                            Token::Text(text[start_byte..byte].into()),
-                                            start_cp,
-                                        ));
-                                    }
-                                    output
-                                        .push((Token::NoteReference(reference.clone()), position));
-                                    start_cp = position;
-                                    start_byte = byte;
-                                    refs.next();
-                                }
-                            }
-                            position += ch.len_utf16();
-                        }
-                        if start_byte < text.len() {
-                            output.push((Token::Text(text[start_byte..].into()), start_cp));
-                        }
-                    }
-                    _ => output.push((token, cp)),
-                }
-            }
-            paragraph.tokens = output;
-        }
-    }
 }
 
 pub(super) fn read_all<'a>(
@@ -214,7 +143,7 @@ pub(super) fn read_all<'a>(
     clx: &'a [u8],
 ) -> Result<Vec<Option<Notes<'a>>>, String> {
     // A shared decoded-character budget prevents two independent note stories
-    // from each reserving the maximum before either starts generating XML.
+    // from each reserving the maximum before either is projected.
     (u32_at(word, 0x50)? as usize)
         .checked_add(u32_at(word, 0x60)? as usize)
         .filter(|n| *n <= super::MAX_MAIN_STORY_UNITS)
@@ -223,71 +152,6 @@ pub(super) fn read_all<'a>(
         .into_iter()
         .map(|kind| read(word, table, clx, kind))
         .collect()
-}
-
-impl Notes<'_> {
-    pub fn build_parts(
-        &self,
-        formatting: &mut formatting::Formatting<'_>,
-        pictures: &mut pictures::Store<'_>,
-        mut remaining: usize,
-    ) -> Result<StoryParts, String> {
-        let mut output = StoryParts::default();
-        if self.entries.is_empty() {
-            return Ok(output);
-        }
-        let kind = self.kind.tag();
-        let mut xml = format!(
-            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:{kind}s xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">"#
-        );
-        remaining = remaining.checked_sub(xml.len()).ok_or("OUTPUT_TOO_LARGE")?;
-        pictures.begin_part();
-        for (i, entry) in self.entries.iter().enumerate() {
-            let text = &self.story.text[entry.text.clone()];
-            output.omitted_floating |= text.contains('\u{8}');
-            let note = build_formatted_story(
-                &self.story,
-                Content::Note {
-                    kind: self.kind,
-                    id: i + 1,
-                    text,
-                    cp: entry.cp,
-                    automatic: entry.automatic,
-                },
-                Some(formatting),
-                Some(pictures),
-                None,
-                remaining,
-            )?;
-            remaining = remaining
-                .checked_sub(note.len())
-                .ok_or("OUTPUT_TOO_LARGE")?;
-            xml.push_str(&note);
-        }
-        let end = format!("</w:{kind}s>");
-        remaining = remaining.checked_sub(end.len()).ok_or("OUTPUT_TOO_LARGE")?;
-        xml.push_str(&end);
-        output.parts.push((format!("word/{kind}s.xml"), xml));
-        let relationships = pictures.relationships();
-        if !relationships.is_empty() {
-            let xml = format!(
-                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{relationships}</Relationships>"#
-            );
-            if xml.len() > remaining {
-                return Err("OUTPUT_TOO_LARGE".into());
-            }
-            output
-                .parts
-                .push((format!("word/_rels/{kind}s.xml.rels"), xml));
-        }
-        output.content_types = format!(
-            r#"<Override PartName="/word/{kind}s.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.{kind}s+xml"/>"#
-        );
-        output.relationships = format!(
-            r#"<Relationship Id="rId{kind}s" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/{kind}s" Target="{kind}s.xml"/>"#
-        );
-        Ok(output)
-    }
 }
 
 pub(super) fn read<'a>(
@@ -505,35 +369,6 @@ mod tests {
         let (mut word, table, clx) = fixture(Kind::Footnote);
         word[1050..1052].copy_from_slice(&u16::from(b'x').to_le_bytes());
         assert!(read(&word, &table, &clx, Kind::Footnote).is_err());
-    }
-    #[test]
-    fn note_parts_share_the_remaining_xml_budget_and_cleanup_is_reusable() {
-        let (word, table, clx) = fixture(Kind::Footnote);
-        let mut notes = read(&word, &table, &clx, Kind::Footnote).unwrap().unwrap();
-        for entry in &mut notes.entries {
-            entry.automatic = false;
-        }
-        let mut formatting = formatting::Formatting::read(&word, &[], &[]).unwrap();
-        let mut pictures = pictures::Store::new(&[]);
-        let expected = notes
-            .build_parts(&mut formatting, &mut pictures, 16_384)
-            .unwrap();
-        let required: usize = expected.parts.iter().map(|(_, xml)| xml.len()).sum();
-        assert!(required > 1);
-        for budget in [0, 1, required - 1] {
-            assert_eq!(
-                notes
-                    .build_parts(&mut formatting, &mut pictures, budget)
-                    .err()
-                    .as_deref(),
-                Some("OUTPUT_TOO_LARGE"),
-            );
-        }
-        let retry = notes
-            .build_parts(&mut formatting, &mut pictures, required)
-            .unwrap();
-        assert_eq!(retry.parts, expected.parts);
-        assert_eq!(retry.relationships, expected.relationships);
     }
 
     #[test]

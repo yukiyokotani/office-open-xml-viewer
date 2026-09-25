@@ -2,9 +2,6 @@
 use super::*;
 pub(super) mod auto_number;
 mod bullet;
-// This projection is intentionally not wired until the direct slide producer
-// owns a bounded session; keep its focused tests live during that integration.
-#[allow(dead_code)]
 pub(super) mod direct_model;
 pub(super) mod master_chain;
 
@@ -17,7 +14,6 @@ pub(super) struct Context<'a> {
     pub slide_number: u32,
     pub ruler_tabs: Option<ruler::Tabs<'a>>,
     pub style9: Option<&'a [u8]>,
-    pub auto_number: Option<auto_number::Number>,
     /// Direct model only: record a glyph effect the model cannot express
     /// here instead of rejecting, for a caller with an alternative source.
     pub deferred_effect: Option<&'a std::cell::Cell<Option<&'static str>>>,
@@ -111,162 +107,6 @@ fn read_runs(text: &str, style: &[u8], work_budget: &mut usize) -> Result<Runs, 
         paragraphs: pf,
         characters: cf,
     })
-}
-
-pub(super) fn write(
-    text: &str,
-    style: &[u8],
-    context: Context<'_>,
-    output: &mut String,
-    xml_budget: &mut usize,
-    work_budget: &mut usize,
-) -> Result<(), String> {
-    if context.slide_numbers.windows(2).any(|v| v[0] >= v[1]) {
-        return Err(unsupported(
-            "duplicate or unordered PowerPoint slide-number positions",
-        ));
-    }
-    let mut numbers = context.slide_numbers.iter().peekable();
-    let number = context.slide_number.to_string();
-    let Runs {
-        paragraphs: pf,
-        characters: cf,
-    } = read_runs(text, style, work_budget)?;
-    let groups = context
-        .style9
-        .map(|bytes| auto_number::bind(bytes, &cf, work_budget))
-        .transpose()?
-        .unwrap_or_default();
-    let mut number_group = 0;
-    let (mut pi, mut ci, mut cp) = (0, 0, 0);
-    for paragraph in text.split('\r') {
-        while pf[pi].0 <= cp {
-            pi += 1;
-        }
-        let para_end = cp + paragraph.encode_utf16().count() + 1;
-        if pf[pi].0 < para_end {
-            return Err(unsupported("PowerPoint paragraph style splits a paragraph"));
-        }
-        drawing::append(output, xml_budget, "<a:p>")?;
-        let base = context
-            .levels
-            .and_then(|levels| levels.get(usize::from(pf[pi].1.level)));
-        let properties = pf[pi].1.inherit(base.map(|v| &v.paragraph)).xml(Context {
-            auto_number: auto_number::paragraph(&groups, &mut number_group, cp, para_end),
-            ..context
-        })?;
-        if let Some(tabs) = context.ruler_tabs {
-            let prefix = properties
-                .strip_suffix("</a:pPr>")
-                .expect("paragraph XML owns closing tag");
-            drawing::append(output, xml_budget, prefix)?;
-            tabs.write(output, xml_budget, work_budget)?;
-            drawing::append(output, xml_budget, "</a:pPr>")?;
-        } else {
-            drawing::append(output, xml_budget, &properties)?;
-        }
-        let mut start = 0;
-        let mut iter = paragraph.char_indices().peekable();
-        while let Some((offset, c)) = iter.next() {
-            while cf[ci].0 <= cp {
-                ci += 1;
-            }
-            let run = ci;
-            if numbers.peek().is_some_and(|&&p| (p as usize) < cp) {
-                return Err(unsupported(
-                    "invalid PowerPoint slide-number character boundary",
-                ));
-            }
-            if numbers.peek().is_some_and(|&&p| p as usize == cp) {
-                let properties = cf[run].1.inherit(base.map(|v| &v.character)).xml(
-                    "rPr",
-                    context.fonts,
-                    context.scheme,
-                )?;
-                write_run(&paragraph[start..offset], &properties, output, xml_budget)?;
-                write_run(&number, &properties, output, xml_budget)?;
-                start = offset + c.len_utf8();
-                numbers.next();
-            }
-            cp += c.len_utf16();
-            if cp > cf[run].0 {
-                return Err(unsupported(
-                    "PowerPoint character style splits a surrogate pair",
-                ));
-            }
-            if cp == cf[run].0 || iter.peek().is_none() {
-                let end = offset + c.len_utf8();
-                write_run(
-                    &paragraph[start..end],
-                    &cf[run].1.inherit(base.map(|v| &v.character)).xml(
-                        "rPr",
-                        context.fonts,
-                        context.scheme,
-                    )?,
-                    output,
-                    xml_budget,
-                )?;
-                start = end;
-            }
-        }
-        while cf[ci].0 <= cp {
-            ci += 1;
-        }
-        drawing::append(
-            output,
-            xml_budget,
-            &cf[ci].1.inherit(base.map(|v| &v.character)).xml(
-                "endParaRPr",
-                context.fonts,
-                context.scheme,
-            )?,
-        )?;
-        drawing::append(output, xml_budget, "</a:p>")?;
-        cp += 1;
-    }
-    if numbers.next().is_some() {
-        return Err(unsupported("PowerPoint slide-number position outside text"));
-    }
-    Ok(())
-}
-
-pub(super) fn write_run(
-    text: &str,
-    properties: &str,
-    output: &mut String,
-    budget: &mut usize,
-) -> Result<(), String> {
-    // Unicode UAX #14 BK/LF: VT, LF and LINE SEPARATOR force line breaks,
-    // not new paragraphs. DrawingML CT_TextLineBreak preserves that distinction.
-    // MS-PPT TextHeaderAtom assigns CR the separate paragraph-mark role.
-    for (index, part) in text.split(['\u{b}', '\n', '\u{2028}']).enumerate() {
-        if index != 0 {
-            drawing::append(output, budget, "<a:br>")?;
-            drawing::append(output, budget, properties)?;
-            drawing::append(output, budget, "</a:br>")?;
-        }
-        if !part.is_empty() {
-            drawing::append(output, budget, "<a:r>")?;
-            drawing::append(output, budget, properties)?;
-            drawing::append(output, budget, "<a:t>")?;
-            escaped(part, output, budget)?;
-            drawing::append(output, budget, "</a:t></a:r>")?;
-        }
-    }
-    Ok(())
-}
-
-pub(super) fn escaped(text: &str, output: &mut String, budget: &mut usize) -> Result<(), String> {
-    let mut remaining = text;
-    while !remaining.is_empty() {
-        let mut end = remaining.len().min(1024);
-        while !remaining.is_char_boundary(end) {
-            end -= 1;
-        }
-        drawing::append(output, budget, &xml_text(&remaining[..end]))?;
-        remaining = &remaining[end..];
-    }
-    Ok(())
 }
 
 struct Reader<'a, 'b> {
@@ -376,59 +216,6 @@ impl Character {
             color,
         })
     }
-    fn xml(
-        &self,
-        tag: &str,
-        fonts: &[String],
-        scheme: Option<&scheme::Scheme>,
-    ) -> Result<String, String> {
-        let mut xml = format!("<a:{tag} sz=\"{}\"", u32::from(self.size) * 100);
-        for (bit, name) in [(1, "b"), (2, "i")] {
-            if self.mask & bit != 0 {
-                xml.push_str(&format!(
-                    " {name}=\"{}\"",
-                    u8::from(self.style & bit as u16 != 0)
-                ));
-            }
-        }
-        if self.mask & 4 != 0 {
-            xml.push_str(if self.style & 4 != 0 {
-                " u=\"sng\""
-            } else {
-                " u=\"none\""
-            });
-        }
-        let mut children = String::new();
-        if let Some(color) = self.color.and_then(|c| scheme::text(c, scheme)) {
-            children.push_str(&format!(
-                "<a:solidFill><a:srgbClr val=\"{:02X}{:02X}{:02X}\"/></a:solidFill>",
-                color & 255,
-                (color >> 8) & 255,
-                (color >> 16) & 255
-            ));
-        }
-        for (id, name) in [(self.font, "latin"), (self.ea, "ea"), (self.symbol, "sym")] {
-            if let Some(id) = id {
-                // An unsupported font reference must not invent a font or
-                // discard otherwise usable inherited text properties.
-                let Some(font) = fonts.get(usize::from(id)) else {
-                    continue;
-                };
-                children.push_str(&format!(
-                    "<a:{name} typeface=\"{}\"/>",
-                    crate::ooxml::xml_attr(font)
-                ));
-            }
-        }
-        if children.is_empty() {
-            xml.push_str("/>");
-        } else {
-            xml.push('>');
-            xml.push_str(&children);
-            xml.push_str(&format!("</a:{tag}>"));
-        }
-        Ok(xml)
-    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -504,63 +291,6 @@ impl Paragraph {
             indent,
             default_tab,
         })
-    }
-    fn xml(&self, context: Context<'_>) -> Result<String, String> {
-        let mut xml = format!("<a:pPr lvl=\"{}\"", self.level);
-        if let Some(rtl) = self.rtl {
-            // ECMA-376 21.1.2.2.7: direction is independent of alignment.
-            xml.push_str(&format!(" rtl=\"{}\"", u8::from(rtl)));
-        }
-        // MS-PPT 2.9.20 / 2.2.29: signed master units, not points or a
-        // percentage. ECMA-376 21.1.2.2.7 defTabSz uses ST_Coordinate32.
-        // Preserve explicit zero/negative values; absence alone inherits.
-        if let Some(value) = self.default_tab {
-            xml.push_str(&format!(
-                " defTabSz=\"{}\"",
-                master_to_emu(i64::from(value))
-            ));
-        }
-        // Binary text/bullet offsets share a text-body origin. DrawingML indent
-        // is relative to marL, so retain their difference (including hanging).
-        // A negative binary margin cannot be expressed by ST_TextMargin; omit
-        // it and its dependent first-line offset rather than clamp the layout.
-        if let Some(margin) = self
-            .margin
-            .map(|m| master_to_emu(i64::from(m)))
-            .filter(|m| (0..=51_206_400).contains(m))
-        {
-            xml.push_str(&format!(" marL=\"{margin}\""));
-            if let Some(indent) = self.indent {
-                let indent = master_to_emu(i64::from(indent)) - margin;
-                if (-51_206_400..=51_206_400).contains(&indent) {
-                    xml.push_str(&format!(" indent=\"{indent}\""));
-                }
-            }
-        }
-        if let Some(align) = self.align {
-            let value = ["l", "ctr", "r", "just", "dist", "thaiDist", "justLow"]
-                .get(usize::from(align))
-                .ok_or_else(|| unsupported("invalid PowerPoint text alignment"))?;
-            xml.push_str(&format!(" algn=\"{value}\""));
-        }
-        xml.push('>');
-        for (value, tag) in self.spacing.iter().zip(["lnSpc", "spcBef", "spcAft"]) {
-            if let Some(n) = value {
-                // MS-PPT ParaSpacing: >=0 percent; <0 master units (1/8 pt).
-                let (kind, value) = if *n >= 0 {
-                    ("spcPct", i32::from(*n) * 1000)
-                } else {
-                    ("spcPts", (-i32::from(*n) * 100 + 4) / 8)
-                };
-                if (kind == "spcPct" && value > 13200000) || (kind == "spcPts" && value > 158400) {
-                    return Err(unsupported("PowerPoint spacing exceeds DrawingML range"));
-                }
-                xml.push_str(&format!("<a:{tag}><a:{kind} val=\"{value}\"/></a:{tag}>"));
-            }
-        }
-        xml.push_str(&self.bullet.xml(context));
-        xml.push_str("</a:pPr>");
-        Ok(xml)
     }
 }
 
@@ -672,8 +402,6 @@ pub(super) struct Master {
     authored_font_sizes: std::rc::Rc<AuthoredFontSizeTable>,
     defaults: Vec<Level>,
     /// Unmerged atom levels for the direct model's level-chain resolution.
-    // Read only by the direct model.
-    #[cfg_attr(not(any(test, feature = "direct-ppt")), allow(dead_code))]
     raw: std::collections::BTreeMap<u16, Vec<Level>>,
 }
 impl Master {
@@ -719,7 +447,6 @@ impl Master {
         })
     }
     /// Direct-model levels for text of `kind` (see [`master_chain`]).
-    #[cfg(any(test, feature = "direct-ppt"))]
     pub fn direct_levels(&self, kind: u16) -> Option<master_chain::DirectLevels> {
         let own = self.raw.get(&kind);
         let base = master_chain::base_type(kind).and_then(|b| self.raw.get(&b));
@@ -733,7 +460,6 @@ impl Master {
         ))
     }
     /// Direct-model levels of the document Tx_TYPE_OTHER atom alone.
-    #[cfg(any(test, feature = "direct-ppt"))]
     pub fn document_levels(&self) -> Option<master_chain::DirectLevels> {
         (!self.defaults.is_empty()).then(|| master_chain::resolve(&[], &[], &self.defaults))
     }
@@ -879,6 +605,44 @@ pub(super) fn fonts(children: &[Record<'_>], budget: &mut usize) -> Result<Vec<S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pptx_model::{Bullet as ModelBullet, Paragraph as ModelParagraph, TextRun};
+
+    /// Project through the direct text model. Paragraph origins the tested
+    /// level does not supply come from zero document axes, which only fill
+    /// absent fields.
+    fn project(
+        text: &str,
+        style: &[u8],
+        context: Context<'_>,
+    ) -> Result<Vec<ModelParagraph>, String> {
+        let zero = ParagraphAxes {
+            margin: Some(0),
+            indent: Some(0),
+        };
+        direct_model::paragraphs_with_axes(
+            text,
+            style,
+            context,
+            direct_model::DirectAxes {
+                document: Some([zero; 5]),
+                ..Default::default()
+            },
+            &mut MAX_RECORDS.clone(),
+            &mut (1024 * 1024),
+        )
+    }
+
+    /// The text runs of one paragraph as (text, font size).
+    fn runs(paragraph: &ModelParagraph) -> Vec<(&str, Option<f64>)> {
+        paragraph
+            .runs
+            .iter()
+            .filter_map(|run| match run {
+                TextRun::Text(run) => Some((run.text.as_str(), run.font_size)),
+                _ => None,
+            })
+            .collect()
+    }
 
     fn record_bytes(version: u16, instance: u16, kind: u16, payload: &[u8]) -> Vec<u8> {
         let options = (instance << 4) | version;
@@ -988,21 +752,17 @@ mod tests {
         .unwrap()
     }
 
-    fn inherited_paragraph_xml(master: &Master) -> String {
-        let mut output = String::new();
-        write(
+    fn inherited_paragraph(master: &Master) -> ModelParagraph {
+        project(
             "X",
             &default_style("X"),
             Context {
                 levels: master.levels(0),
                 ..Context::default()
             },
-            &mut output,
-            &mut 4096,
-            &mut 100,
         )
-        .unwrap();
-        output
+        .unwrap()
+        .remove(0)
     }
 
     #[test]
@@ -1018,21 +778,35 @@ mod tests {
                 0,
             )
         };
-        let rtl = read(1).unwrap();
-        let ltr = read(0).unwrap();
-        let empty = Level::empty(0).paragraph;
-        assert!(rtl.xml(Context::default()).unwrap().contains(" rtl=\"1\""));
-        assert!(empty
-            .inherit(Some(&rtl))
-            .xml(Context::default())
+        let rtl = Level {
+            paragraph: read(1).unwrap(),
+            ..Level::empty(0)
+        };
+        let direction = |value: Option<u16>, levels: Option<&[Level]>| {
+            let pf = value.map_or_else(
+                || [u32s(0)].concat(),
+                |v| [u32s(0x200000), u16s(v)].concat(),
+            );
+            let style = [u32s(2), u16s(0), pf, u32s(2), u32s(0)].concat();
+            let paragraph = project(
+                "X",
+                &style,
+                Context {
+                    levels,
+                    ..Context::default()
+                },
+            )
             .unwrap()
-            .contains(" rtl=\"1\""));
-        assert!(ltr
-            .inherit(Some(&rtl))
-            .xml(Context::default())
-            .unwrap()
-            .contains(" rtl=\"0\""));
-        assert!(!empty.xml(Context::default()).unwrap().contains(" rtl="));
+            .remove(0);
+            (paragraph.rtl, paragraph.alignment)
+        };
+        let master = Some(std::slice::from_ref(&rtl));
+        // Right-to-left text without an alignment aligns right (ECMA-376
+        // 21.1.2.2.7 keeps direction independent of an explicit alignment).
+        assert_eq!(direction(Some(1), None), (true, "r".to_owned()));
+        assert_eq!(direction(None, master), (true, "r".to_owned()));
+        assert_eq!(direction(Some(0), master), (false, "l".to_owned()));
+        assert_eq!(direction(None, None), (false, "l".to_owned()));
         for value in [2, 255, 32767, 65535] {
             assert!(read(value).is_err());
         }
@@ -1044,17 +818,22 @@ mod tests {
         for value in [i16::MIN, -1, 0, 1, 288, 575, 576, i16::MAX] {
             let bytes = [u32s(0x8000), value.to_le_bytes().to_vec()].concat();
             let master = paragraph_master(&bytes, &[]);
-            let expected = format!("defTabSz=\"{}\"", master_to_emu(i64::from(value)));
-            assert!(inherited_paragraph_xml(&master).contains(&expected));
+            assert_eq!(
+                inherited_paragraph(&master).def_tab_sz,
+                Some(master_to_emu(i64::from(value)))
+            );
         }
         let base_bytes = [u32s(0x8000), u16s(288)].concat();
         let base = paragraph_master(&base_bytes, &[]);
         let zero_bytes = [u32s(0x8000), u16s(0)].concat();
         let zero = paragraph_master(&zero_bytes, base.levels(0).unwrap());
         let absent = paragraph_master(&u32s(0), base.levels(0).unwrap());
-        assert!(inherited_paragraph_xml(&zero).contains("defTabSz=\"0\""));
-        assert!(inherited_paragraph_xml(&absent).contains("defTabSz=\"457200\""));
-        assert!(!inherited_paragraph_xml(&paragraph_master(&u32s(0), &[])).contains("defTabSz"));
+        assert_eq!(inherited_paragraph(&zero).def_tab_sz, Some(0));
+        assert_eq!(inherited_paragraph(&absent).def_tab_sz, Some(457200));
+        assert_eq!(
+            inherited_paragraph(&paragraph_master(&u32s(0), &[])).def_tab_sz,
+            None
+        );
     }
 
     #[test]
@@ -1077,8 +856,7 @@ mod tests {
         .concat();
         // MS-PPT 2.9.45 forbids ruler fields inside a TextPFRun.
         assert_eq!(u32_at(&data, 6).unwrap() & 0x108500, 0);
-        let mut output = String::new();
-        write(
+        let paragraph = project(
             "X",
             &data,
             Context {
@@ -1086,45 +864,18 @@ mod tests {
                 levels: master.levels(0),
                 ..Context::default()
             },
-            &mut output,
-            &mut 4096,
-            &mut 100,
         )
-        .unwrap();
-        assert!(output.contains("marL=\"228600\" indent=\"-228600\""));
-        assert!(output.contains("<a:buClr><a:srgbClr val=\"112233\"/></a:buClr>"));
-        assert!(output.contains("<a:buSzPts val=\"1200\"/>"));
-        assert!(output.contains("<a:buFont typeface=\"Bullet &amp; Font\"/>"));
-        assert!(output.contains("<a:buChar char=\"&amp;\"/>"));
+        .unwrap()
+        .remove(0);
+        assert_eq!((paragraph.mar_l, paragraph.indent), (228600, -228600));
+        assert!(matches!(
+            paragraph.bullet,
+            ModelBullet::Char { ref ch, ref color, size_pct: None, size_pts: Some(12.0), ref font_family }
+                if ch == "&" && color.as_deref() == Some("112233")
+                    && font_family.as_deref() == Some("Bullet & Font")
+        ));
     }
-    #[test]
-    fn paragraph_offsets_merge_independently_and_obey_ooxml_ranges() {
-        let mut base = Level::empty(0).paragraph;
-        base.margin = Some(144);
-        base.indent = Some(0);
-        let mut direct = Level::empty(0).paragraph;
-        direct.margin = Some(288);
-        let output = direct.inherit(Some(&base)).xml(Context::default()).unwrap();
-        assert!(output.contains("marL=\"457200\" indent=\"-457200\""));
-        direct.indent = Some(432);
-        assert!(direct
-            .xml(Context::default())
-            .unwrap()
-            .contains("indent=\"228600\""));
-        for invalid in [-1, 32767] {
-            direct.margin = Some(invalid);
-            let output = direct.xml(Context::default()).unwrap();
-            assert!(!output.contains("marL="));
-            assert!(!output.contains("indent="));
-        }
-        direct.margin = Some(30000);
-        direct.indent = Some(-32768);
-        let output = direct.xml(Context::default()).unwrap();
-        assert!(output.contains("marL="));
-        assert!(!output.contains("indent="));
-        direct.margin = None;
-        assert!(!direct.xml(Context::default()).unwrap().contains("indent="));
-    }
+
     #[test]
     fn master_shape_levels_keep_uniform_styles_without_selecting_arbitrary_runs() {
         let style = [
@@ -1212,22 +963,21 @@ mod tests {
             u16s(0),
         ]
         .concat();
-        let mut output = String::new();
-        write(
+        let paragraph = project(
             "X",
             &direct,
             Context {
                 levels: master.levels(0),
                 ..Context::default()
             },
-            &mut output,
-            &mut 4096,
-            &mut 100,
         )
-        .unwrap();
-        assert!(output.contains("sz=\"4800\" b=\"0\""));
-        assert!(output.contains("algn=\"r\""));
-        assert!(!output.contains("1800"));
+        .unwrap()
+        .remove(0);
+        assert_eq!(paragraph.alignment, "r");
+        let TextRun::Text(run) = &paragraph.runs[0] else {
+            panic!("text run")
+        };
+        assert_eq!((run.font_size, run.bold), (Some(48.0), Some(false)));
         let local = [u16s(1), u32s(0), u32s(0x20000), u16s(32)].concat();
         let merged = Master::parse(
             &[Record {
@@ -1362,56 +1112,21 @@ mod tests {
             u16s(20),
         ]
         .concat();
-        let mut output = String::new();
-        write(
-            text,
-            &data,
-            Context {
-                slide_numbers: &[2, 4],
-                slide_number: 42,
-                ..Context::default()
-            },
-            &mut output,
-            &mut 4096,
-            &mut 100,
-        )
-        .unwrap();
-        assert!(output.contains("sz=\"4000\"/><a:t>😀</a:t>"));
-        assert!(output.contains("sz=\"4000\"/><a:t>42</a:t>"));
-        assert!(output.contains("sz=\"2000\"/><a:t>42</a:t>"));
-        assert!(output.contains("sz=\"2000\"/><a:t>Z</a:t>"));
-        assert_eq!(output.matches("<a:p>").count(), 2);
+        let context = |slide_numbers| Context {
+            slide_numbers,
+            slide_number: 42,
+            ..Context::default()
+        };
+        let model = project(text, &data, context(&[2, 4])).unwrap();
+        assert_eq!(model.len(), 2);
+        assert_eq!(runs(&model[0]), [("😀", Some(40.0)), ("42", Some(40.0))]);
+        assert_eq!(runs(&model[1]), [("42", Some(20.0)), ("Z", Some(20.0))]);
         for positions in [&[1][..], &[3], &[6], &[7], &[2, 2], &[4, 2]] {
             assert!(
-                write(
-                    text,
-                    &data,
-                    Context {
-                        slide_numbers: positions,
-                        slide_number: 42,
-                        ..Context::default()
-                    },
-                    &mut String::new(),
-                    &mut 4096,
-                    &mut 100
-                )
-                .is_err(),
+                project(text, &data, context(positions)).is_err(),
                 "{positions:?}"
             );
         }
-        assert!(write(
-            text,
-            &data,
-            Context {
-                slide_numbers: &[2],
-                slide_number: 42,
-                ..Context::default()
-            },
-            &mut String::new(),
-            &mut 20,
-            &mut 100
-        )
-        .is_err());
     }
 
     #[test]
@@ -1448,20 +1163,21 @@ mod tests {
     fn style(count: u32, cf: Vec<u8>) -> Vec<u8> {
         [u32s(count), u16s(0), u32s(0), u32s(count), cf].concat()
     }
-    fn xml(text: &str, data: &[u8], fonts: &[String]) -> Result<String, String> {
-        let mut output = String::new();
-        write(
+    fn model(text: &str, data: &[u8], fonts: &[String]) -> Result<Vec<ModelParagraph>, String> {
+        project(
             text,
             data,
             Context {
                 fonts,
                 ..Context::default()
             },
-            &mut output,
-            &mut (1024 * 1024),
-            &mut MAX_RECORDS.clone(),
-        )?;
-        Ok(output)
+        )
+    }
+    fn first_run(paragraphs: &[ModelParagraph]) -> &pptx_model::TextRunData {
+        match &paragraphs[0].runs[0] {
+            TextRun::Text(run) => run,
+            _ => panic!("text run"),
+        }
     }
     #[test]
     fn direct_font_size_styles_color_and_name_are_not_replaced_with_defaults() {
@@ -1469,11 +1185,17 @@ mod tests {
             3,
             [u32s(0x70007), u16s(3), u16s(0), u16s(36), u32s(0xfe563412)].concat(),
         );
-        let out = xml("ab", &data, &["A & B\"".into()]).unwrap();
-        assert!(out.contains("sz=\"3600\" b=\"1\" i=\"1\" u=\"none\""));
-        assert!(out.contains("val=\"123456\""));
-        assert!(out.contains("typeface=\"A &amp; B&quot;\""));
+        let paragraphs = model("ab", &data, &["A & B\"".into()]).unwrap();
+        let run = first_run(&paragraphs);
+        assert_eq!(run.font_size, Some(36.0));
+        assert_eq!(
+            (run.bold, run.italic, run.underline),
+            (Some(true), Some(true), false)
+        );
+        assert_eq!(run.color.as_deref(), Some("123456"));
+        assert_eq!(run.font_family.as_deref(), Some("A & B\""));
     }
+
     #[test]
     fn counts_utf16_and_retains_implicit_paragraph_mark_style() {
         let data = [
@@ -1488,11 +1210,29 @@ mod tests {
             u16s(20),
         ]
         .concat();
-        let out = xml("😀x", &data, &[]).unwrap();
-        assert!(out.contains("sz=\"4000\"/><a:t>😀</a:t>"));
-        assert!(out.contains("sz=\"2000\"/><a:t>x</a:t>"));
-        assert!(out.contains("<a:endParaRPr sz=\"2000\"/>"));
+        let paragraphs = model("😀x", &data, &[]).unwrap();
+        assert_eq!(
+            runs(&paragraphs[0]),
+            [("😀", Some(40.0)), ("x", Some(20.0))]
+        );
+        // The implicit terminal CR's style sizes an empty final paragraph.
+        let data = [
+            u32s(3),
+            u16s(0),
+            u32s(0),
+            u32s(2),
+            u32s(0x20000),
+            u16s(40),
+            u32s(1),
+            u32s(0x20000),
+            u16s(20),
+        ]
+        .concat();
+        let paragraphs = model("a\r", &data, &[]).unwrap();
+        assert_eq!(paragraphs[0].def_font_size, None);
+        assert_eq!(paragraphs[1].def_font_size, Some(20.0));
     }
+
     #[test]
     fn character_position_accepts_only_the_signed_percentage_domain() {
         // MS-PPT 2.9.14: position is signed and MUST be within [-100, 100].
@@ -1500,18 +1240,18 @@ mod tests {
         // percentage mapping. This test validates input, not superscript paint.
         for position in i16::MIN..=i16::MAX {
             let data = style(2, [u32s(0x80000), u16s(position as u16)].concat());
-            let result = xml("x", &data, &[]);
+            let result = model("x", &data, &[]);
             assert_eq!(
                 result.is_ok(),
                 (-100..=100).contains(&position),
                 "{position}"
             );
-            if let Ok(output) = result {
-                assert!(!output.contains("baseline="));
+            if let Ok(paragraphs) = result {
+                assert_eq!(first_run(&paragraphs).baseline, None);
             }
         }
-        assert!(xml("x", &style(2, u32s(0x80000)), &[]).is_err());
-        assert!(xml("x", &style(2, [u32s(0x80000), vec![0]].concat()), &[]).is_err());
+        assert!(model("x", &style(2, u32s(0x80000)), &[]).is_err());
+        assert!(model("x", &style(2, [u32s(0x80000), vec![0]].concat()), &[]).is_err());
     }
 
     #[test]
@@ -1551,17 +1291,26 @@ mod tests {
             u32s(0),
         ]
         .concat();
-        let out = xml("x", &data, &[]).unwrap();
-        assert!(out.contains("lvl=\"1\" algn=\"ctr\""));
-        assert!(out.contains("<a:lnSpc><a:spcPct val=\"120000\"/></a:lnSpc>"));
-        assert!(out.contains("<a:spcBef><a:spcPts val=\"1200\"/></a:spcBef>"));
-        assert!(out.contains("<a:spcAft><a:spcPct val=\"50000\"/></a:spcAft>"));
+        let paragraph = model("x", &data, &[]).unwrap().remove(0);
+        assert_eq!((paragraph.lvl, paragraph.alignment.as_str()), (1, "ctr"));
+        assert!(matches!(
+            paragraph.space_line,
+            Some(ooxml_common::text::SpaceLine::Pct { val }) if val == 120_000.0
+        ));
+        assert_eq!(
+            (paragraph.space_before, paragraph.space_before_pct),
+            (Some(1200), None)
+        );
+        assert_eq!(
+            (paragraph.space_after, paragraph.space_after_pct),
+            (None, Some(50_000.0))
+        );
     }
     #[test]
     fn rejects_zero_overrun_truncated_and_surrogate_splitting_runs() {
-        assert!(xml("a", &style(0, u32s(0)), &[]).is_err());
-        assert!(xml("a", &style(3, u32s(0)), &[]).is_err());
-        assert!(xml("a", &style(2, u32s(0x20000)), &[]).is_err());
+        assert!(model("a", &style(0, u32s(0)), &[]).is_err());
+        assert!(model("a", &style(3, u32s(0)), &[]).is_err());
+        assert!(model("a", &style(2, u32s(0x20000)), &[]).is_err());
         let split = [
             u32s(3),
             u16s(0),
@@ -1572,48 +1321,60 @@ mod tests {
             u32s(0),
         ]
         .concat();
-        assert!(xml("😀", &split, &[]).is_err());
+        assert!(model("😀", &split, &[]).is_err());
     }
 
     #[test]
     fn line_breaks_remain_inside_the_paragraph_and_keep_character_style() {
+        let breaks = |paragraph: &ModelParagraph| {
+            paragraph
+                .runs
+                .iter()
+                .filter(|run| matches!(run, TextRun::Break))
+                .count()
+        };
         for text in ["a\u{b}b", "\u{b}ab", "ab\u{b}", "a\nb", "a\u{2028}b"] {
             let data = style(4, [u32s(0x20000), u16s(36)].concat());
-            let out = xml(text, &data, &[]).unwrap();
-            assert_eq!(out.matches("<a:p>").count(), 1);
-            assert_eq!(out.matches("<a:br><a:rPr sz=\"3600\"/></a:br>").count(), 1);
-            assert!(!out.contains('\u{fffd}'));
+            let paragraphs = model(text, &data, &[]).unwrap();
+            assert_eq!(paragraphs.len(), 1);
+            assert_eq!(breaks(&paragraphs[0]), 1);
+            let runs = runs(&paragraphs[0]);
+            assert!(runs
+                .iter()
+                .all(|(text, size)| !text.contains('\u{fffd}') && *size == Some(36.0)));
+            assert_eq!(runs.iter().map(|(text, _)| *text).collect::<String>(), "ab");
         }
         let data = style(5, u32s(0));
-        let out = xml("a\r\u{b}b", &data, &[]).unwrap();
-        assert_eq!(out.matches("<a:p>").count(), 2);
-        assert_eq!(out.matches("<a:br>").count(), 1);
+        let paragraphs = model("a\r\u{b}b", &data, &[]).unwrap();
+        assert_eq!(paragraphs.len(), 2);
+        assert_eq!(breaks(&paragraphs[0]) + breaks(&paragraphs[1]), 1);
     }
 
     #[test]
-    fn style_work_and_expanded_xml_have_independent_budgets() {
+    fn style_work_and_model_output_have_independent_budgets() {
         let data = style(3, u32s(0));
-        let mut output = String::new();
-        assert!(write(
-            "ab",
-            &data,
-            Context::default(),
-            &mut output,
-            &mut 1024,
-            &mut 1
-        )
-        .unwrap_err()
-        .contains("work budget"));
-        assert!(write(
-            "ab",
-            &data,
-            Context::default(),
-            &mut output,
-            &mut 8,
-            &mut 10
-        )
-        .unwrap_err()
-        .contains("OUTPUT_TOO_LARGE"));
+        let origin = [Level {
+            paragraph: Paragraph {
+                margin: Some(0),
+                indent: Some(0),
+                ..Level::empty(0).paragraph
+            },
+            ..Level::empty(0)
+        }];
+        let context = Context {
+            levels: Some(&origin),
+            ..Context::default()
+        };
+        assert!(
+            direct_model::paragraphs("ab", &data, context, &mut 1, &mut 1024)
+                .unwrap_err()
+                .contains("work budget")
+        );
+        assert!(
+            direct_model::paragraphs("ab", &data, context, &mut 10, &mut 8)
+                .unwrap_err()
+                .contains("model budget")
+        );
     }
 
     #[test]
@@ -1637,8 +1398,9 @@ mod tests {
         let children = parse_records(&env, &mut 100).unwrap();
         assert_eq!(fonts(&children, &mut 100).unwrap(), ["Name"]);
         let data = style(2, [u32s(0x10000), u16s(1)].concat());
-        let output = xml("x", &data, &["Name".into()]).unwrap();
-        assert!(output.contains("<a:t>x</a:t>"));
-        assert!(!output.contains("typeface=")); // Omit invalid references; never guess an index.
+        let paragraphs = model("x", &data, &["Name".into()]).unwrap();
+        let run = first_run(&paragraphs);
+        assert_eq!(run.text, "x");
+        assert_eq!(run.font_family, None); // Omit invalid references; never guess an index.
     }
 }

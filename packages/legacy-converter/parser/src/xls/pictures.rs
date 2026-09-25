@@ -1,6 +1,6 @@
-//! Passive XLS pictures -> ordinary SpreadsheetDrawing parts. Coordinates use
-//! MS-XLS 2.5.193 cell fractions and ECMA-376 18.3.1.13 measured digit widths.
-//! No legacy layout policy is delegated to the OOXML renderer.
+//! Passive XLS pictures -> XLSX-model image anchors and image resources.
+//! Coordinates use MS-XLS 2.5.193 cell fractions and ECMA-376 18.3.1.13
+//! measured digit widths. No legacy layout policy is delegated to the renderer.
 use super::{
     drawing_anchors::{self, CellCorner, DrawingAnchor},
     drawing_media, Record, SheetData,
@@ -17,13 +17,6 @@ pub(super) struct Pictures {
     grouped: BTreeSet<u32>,
 }
 
-pub(super) struct Parts {
-    pub xml: Vec<(String, String)>,
-    pub media: Vec<(String, Vec<u8>)>,
-    pub types: String,
-    pub sheets: BTreeSet<usize>,
-}
-
 pub(super) struct ResolvedPictures {
     sheets: BTreeMap<usize, Vec<ResolvedPicture>>,
     images: Vec<(u32, &'static str, Vec<u8>)>,
@@ -32,8 +25,6 @@ pub(super) struct ResolvedPictures {
 struct ResolvedPicture {
     from: CellCorner,
     to: CellCorner,
-    x: i64,
-    y: i64,
     dx: i64,
     dy: i64,
     tdx: i64,
@@ -47,12 +38,10 @@ struct ResolvedPicture {
     store_index: u32,
     extension: &'static str,
     edit_as: &'static str,
-    #[cfg(any(test, feature = "direct-xls"))]
     /// Document (paint) order among all of the sheet's drawing objects.
     order: u64,
 }
 
-#[cfg(any(test, feature = "direct-xls"))]
 pub(super) struct NativePictures {
     pub sheets: BTreeMap<usize, Vec<xlsx_model::ImageAnchor>>,
     pub resources: BTreeMap<String, Vec<u8>>,
@@ -95,7 +84,6 @@ impl Pictures {
         self.anchors.is_empty()
     }
 
-    #[cfg(any(test, feature = "direct-xls"))]
     /// The file extension of a store entry's decoded media.
     pub fn extension(&self, id: u32) -> Option<&'static str> {
         self.images
@@ -108,16 +96,7 @@ impl Pictures {
         self.unsupported_images
     }
 
-    pub fn emit(
-        self,
-        sheets: &[(String, SheetData)],
-        mdw: f64,
-        warnings: &mut Vec<String>,
-    ) -> Parts {
-        self.resolve(sheets, mdw, warnings).into_parts()
-    }
-
-    /// Resolve source geometry once. Neither XML nor renderer DTOs are retained here.
+    /// Resolve source geometry once; model DTOs are built by `into_models`.
     pub(super) fn resolve(
         self,
         sheets: &[(String, SheetData)],
@@ -215,8 +194,6 @@ impl Pictures {
                 resolved.push(ResolvedPicture {
                     from: anchor.from,
                     to: anchor.to,
-                    x,
-                    y,
                     dx,
                     dy,
                     tdx,
@@ -230,7 +207,6 @@ impl Pictures {
                     store_index: id,
                     extension: ext,
                     edit_as,
-                    #[cfg(any(test, feature = "direct-xls"))]
                     order: anchor.order,
                 });
             }
@@ -254,7 +230,6 @@ impl Pictures {
 }
 
 impl ResolvedPictures {
-    #[cfg(any(test, feature = "direct-xls"))]
     /// Charge retained payload and model slots, excluding allocator bookkeeping.
     /// Source anchor/media limits bound map entry counts separately.
     pub(super) fn into_models(self, budget: &mut usize) -> Result<NativePictures, String> {
@@ -332,63 +307,6 @@ impl ResolvedPictures {
             resources.insert(key(id, budget)?, bytes);
         }
         Ok(NativePictures { sheets, resources })
-    }
-
-    fn into_parts(self) -> Parts {
-        let mut parts = Parts {
-            xml: vec![],
-            media: vec![],
-            types: String::new(),
-            sheets: BTreeSet::new(),
-        };
-        for (sheet_index, values) in self.sheets {
-            let mut xml = String::from("<xdr:wsDr xmlns:xdr=\"http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">");
-            let mut rels = String::from("<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">");
-            for (ordinal, value) in values.into_iter().enumerate() {
-                let count = ordinal + 1;
-                let (x, y, dx, dy, tdx, tdy, cx, cy) = (
-                    value.x, value.y, value.dx, value.dy, value.tdx, value.tdy, value.cx, value.cy,
-                );
-                let (crop, rotation) = (value.crop, value.rotation);
-                let (flip_h, flip_v) = (u8::from(value.flip_h), u8::from(value.flip_v));
-                let (id, ext, edit_as) = (value.store_index, value.extension, value.edit_as);
-                xml.push_str(&format!("<xdr:twoCellAnchor editAs=\"{edit_as}\">"));
-                for (tag, corner, ox, oy) in
-                    [("from", value.from, dx, dy), ("to", value.to, tdx, tdy)]
-                {
-                    xml.push_str(&format!("<xdr:{tag}><xdr:col>{}</xdr:col><xdr:colOff>{ox}</xdr:colOff><xdr:row>{}</xdr:row><xdr:rowOff>{oy}</xdr:rowOff></xdr:{tag}>", corner.column, corner.row));
-                }
-                xml.push_str(&format!("<xdr:pic><xdr:nvPicPr><xdr:cNvPr id=\"{count}\" name=\"Picture {count}\"/><xdr:cNvPicPr/></xdr:nvPicPr><xdr:blipFill><a:blip r:embed=\"rId{count}\"/><a:srcRect t=\"{}\" b=\"{}\" l=\"{}\" r=\"{}\"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill><xdr:spPr><a:xfrm rot=\"{rotation}\" flipH=\"{flip_h}\" flipV=\"{flip_v}\"><a:off x=\"{}\" y=\"{}\"/><a:ext cx=\"{cx}\" cy=\"{cy}\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></xdr:spPr></xdr:pic><xdr:clientData/></xdr:twoCellAnchor>", crop[0], crop[1], crop[2], crop[3], x + dx, y + dy));
-                rels.push_str(&format!("<Relationship Id=\"rId{count}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image\" Target=\"../media/image{id}.{ext}\"/>"));
-            }
-            let id = sheet_index + 1;
-            xml.push_str("</xdr:wsDr>");
-            rels.push_str("</Relationships>");
-            parts.types.push_str(&format!("<Override PartName=\"/xl/drawings/drawing{id}.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.drawing+xml\"/>"));
-            parts
-                .xml
-                .push((format!("xl/drawings/drawing{id}.xml"), xml));
-            parts
-                .xml
-                .push((format!("xl/drawings/_rels/drawing{id}.xml.rels"), rels));
-            parts.xml.push((format!("xl/worksheets/_rels/sheet{id}.xml.rels"), format!("<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"legacyDrawing\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing\" Target=\"../drawings/drawing{id}.xml\"/></Relationships>")));
-            parts.sheets.insert(sheet_index);
-        }
-        for (id, ext, bytes) in self.images {
-            let mime = match ext {
-                "png" => "image/png",
-                "jpg" | "jpeg" => "image/jpeg",
-                "emf" => "image/x-emf",
-                "wmf" => "image/wmf",
-                _ => continue,
-            };
-            let name = format!("xl/media/image{id}.{ext}");
-            parts.types.push_str(&format!(
-                "<Override PartName=\"/{name}\" ContentType=\"{mime}\"/>"
-            ));
-            parts.media.push((name, bytes));
-        }
-        parts
     }
 }
 
@@ -473,6 +391,11 @@ mod tests {
     use super::super::drawing_anchors::PictureReference;
     use super::*;
 
+    /// A model budget that never binds.
+    fn unbounded() -> usize {
+        usize::MAX
+    }
+
     fn sheet() -> SheetData {
         let mut sheet = SheetData::default();
         sheet
@@ -489,26 +412,6 @@ mod tests {
                 kind: 0x99,
                 offset: 0,
                 data: &[0, 10],
-            })
-            .unwrap();
-        sheet
-    }
-    fn base_width_sheet() -> SheetData {
-        let mut sheet = SheetData::default();
-        sheet
-            .geometry
-            .read(&Record {
-                kind: 0x225,
-                offset: 0,
-                data: &[0, 0, 44, 1],
-            })
-            .unwrap();
-        sheet
-            .geometry
-            .read(&Record {
-                kind: 0x55,
-                offset: 0,
-                data: &[8, 0],
             })
             .unwrap();
         sheet
@@ -564,40 +467,41 @@ mod tests {
     }
 
     #[test]
-    fn native_picture_projection_matches_existing_xlsx_parser() {
-        let sheets = [("S".into(), sheet())];
-        let parts = pictures(two()).emit(&sheets, 7.0, &mut Vec::new());
-        let bytes = super::super::build_xlsx_with_drawings(
-            &sheets,
-            &super::super::styles::minimal_resolved(),
-            Vec::new(),
-            false,
-            1,
-            super::super::Emission {
-                max_output_bytes: 16 * 1024 * 1024,
-                mdw: Some(7.0),
-                drawings: Some(&parts),
-            },
-        )
-        .unwrap();
-        let parsed: serde_json::Value =
-            serde_json::from_str(&xlsx_parser::parse_sheet_native(&bytes, 0, "S").unwrap())
-                .unwrap();
+    fn native_picture_anchors_resolve_measured_cell_geometry() {
+        // DxGCol 10 digits at mdw 7: trunc((2560 + trunc(128 / 7)) / 256 * 7)
+        // = 70 px per column (ECMA-376 18.3.1.13); 300-twip rows.
+        let (column, row) = (70 * 9525, 300 * 635);
         let mut budget = usize::MAX;
         let native = pictures(two())
-            .resolve(&sheets, 7.0, &mut Vec::new())
+            .resolve(&[("S".into(), sheet())], 7.0, &mut Vec::new())
             .into_models(&mut budget)
             .unwrap();
-        let expected = parsed["images"].as_array().unwrap();
-        assert_eq!(expected.len(), native.sheets[&0].len());
-        for (ordinal, (expected, actual)) in expected.iter().zip(&native.sheets[&0]).enumerate() {
-            let mut expected = expected.clone();
-            // Resource identity and OfficeArt document order replace ZIP
-            // paths/XML offsets.
-            expected["imagePath"] = serde_json::json!("legacy-xls/image/1");
-            expected["zOrder"] = serde_json::json!(ordinal + 1);
-            assert_eq!(expected, serde_json::to_value(actual).unwrap());
-        }
+        let anchors = &native.sheets[&0];
+        assert_eq!(anchors.len(), 2);
+        let first = &anchors[0];
+        assert_eq!((first.from_col, first.from_row), (0, 0));
+        assert_eq!((first.to_col, first.to_row), (2, 3));
+        // MS-XLS 2.5.193: dx in 1/1024 of the cell width, dy in 1/256 of
+        // its height, rounded to whole EMUs.
+        assert_eq!(
+            (first.from_col_off, first.from_row_off),
+            (-column / 2, -row / 2)
+        );
+        assert_eq!(
+            (first.to_col_off, first.to_row_off),
+            (((column as f64) / 4.0).round() as i64, row / 4)
+        );
+        assert_eq!(
+            (first.native_ext_cx, first.native_ext_cy),
+            (
+                2 * column + first.to_col_off - first.from_col_off,
+                3 * row + first.to_row_off - first.from_row_off
+            )
+        );
+        assert_eq!(first.edit_as.as_deref(), Some("oneCell"));
+        assert_eq!(first.image_path, "legacy-xls/image/1");
+        // OfficeArt document order is the paint order.
+        assert_eq!((first.z_order, anchors[1].z_order), (1, 2));
     }
 
     #[test]
@@ -632,63 +536,40 @@ mod tests {
     }
 
     #[test]
-    fn deduplicates_media_and_emits_signed_crops_rotation_flips_and_relationships() {
+    fn pictures_sharing_a_store_entry_share_one_resource() {
         let mut second = anchor();
         second.shape_id = 2;
         second.object_id = 2;
         let mut warnings = Vec::new();
-        let parts =
-            pictures(vec![anchor(), second]).emit(&[("S".into(), sheet())], 7.0, &mut warnings);
+        let native = pictures(vec![anchor(), second])
+            .resolve(&[("S".into(), sheet())], 7.0, &mut warnings)
+            .into_models(&mut unbounded())
+            .unwrap();
         assert!(warnings.is_empty());
-        assert_eq!(parts.media.len(), 1);
-        assert_eq!(parts.media[0].0, "xl/media/image1.png");
-        let xml = &parts.xml[0].1;
-        assert_eq!(xml.matches("<xdr:pic>").count(), 2);
-        assert!(xml.contains("rot=\"-5400000\" flipH=\"1\" flipV=\"1\""));
-        assert!(xml.contains("<a:srcRect t=\"50000\" b=\"-25000\" l=\"25000\" r=\"0\"/>"));
-        assert!(xml.contains("<xdr:colOff>-333375</xdr:colOff>"));
-        assert!(xml.contains("r:embed=\"rId1\"") && xml.contains("r:embed=\"rId2\""));
-        assert_eq!(
-            parts.xml[1]
-                .1
-                .matches("Target=\"../media/image1.png\"")
-                .count(),
-            2
-        );
+        assert_eq!(native.resources.len(), 1);
+        let anchors = &native.sheets[&0];
+        assert_eq!(anchors.len(), 2);
+        assert!(anchors
+            .iter()
+            .all(|anchor| anchor.image_path == "legacy-xls/image/1"));
     }
 
     #[test]
-    fn mixed_supported_and_unsupported_catalog_entries_keep_supported_output() {
-        let pictures = Pictures {
-            anchors: BTreeMap::from([(0, vec![anchor()])]),
-            images: vec![(1, "png", vec![1, 2, 3])],
-            unsupported_images: true,
-            grouped: BTreeSet::new(),
-        };
-        assert!(pictures.has_unsupported_images());
-        let mut warnings = vec!["legacy-xls:invalid-or-unsupported-pictures-omitted".into()];
-        let parts = pictures.emit(&[("S".into(), sheet())], 7.0, &mut warnings);
-        assert_eq!(parts.media, [("xl/media/image1.png".into(), vec![1, 2, 3])]);
-        assert_eq!(
-            warnings,
-            ["legacy-xls:invalid-or-unsupported-pictures-omitted"]
-        );
-    }
-
-    #[test]
-    fn refuses_missing_dimensions_and_never_emits_unreferenced_media() {
+    fn refuses_missing_dimensions_and_never_retains_unreferenced_media() {
         let mut warnings = Vec::new();
-        let parts = pictures(vec![anchor()]).emit(
-            &[("S".into(), SheetData::default())],
-            7.0,
-            &mut warnings,
-        );
-        assert!(parts.xml.is_empty() && parts.media.is_empty());
+        let native = pictures(vec![anchor()])
+            .resolve(&[("S".into(), SheetData::default())], 7.0, &mut warnings)
+            .into_models(&mut unbounded())
+            .unwrap();
+        assert!(native.sheets.is_empty() && native.resources.is_empty());
         assert_eq!(warnings, ["legacy-xls:unresolved-picture-geometry-omitted"]);
         let mut bad = anchor();
         bad.to = bad.from;
-        let parts = pictures(vec![bad]).emit(&[("S".into(), sheet())], 7.0, &mut vec![]);
-        assert!(parts.media.is_empty());
+        let native = pictures(vec![bad])
+            .resolve(&[("S".into(), sheet())], 7.0, &mut vec![])
+            .into_models(&mut unbounded())
+            .unwrap();
+        assert!(native.resources.is_empty());
         assert_eq!(
             prefix(2, |i| (i != 1).then_some(10.0)),
             [Some(0.0), Some(10.0), None, None]
@@ -707,84 +588,12 @@ mod tests {
             grouped: BTreeSet::new(),
         };
         let mut warnings = vec![];
-        let parts = pictures.emit(&sheets, 7.0, &mut warnings);
-        assert_eq!(parts.sheets.len(), 30);
-        assert_eq!(parts.media.len(), 1);
+        let native = pictures
+            .resolve(&sheets, 7.0, &mut warnings)
+            .into_models(&mut unbounded())
+            .unwrap();
+        assert_eq!(native.sheets.len(), 30);
+        assert_eq!(native.resources.len(), 1);
         assert_eq!(warnings, ["legacy-xls:unresolved-picture-geometry-omitted"]);
-    }
-
-    #[test]
-    fn stored_default_width_is_preserved_with_and_without_drawings() {
-        use super::super::{styles, styles::NormalFont, PreparedXls};
-        use std::io::{Cursor, Read};
-        let prepared = PreparedXls {
-            charts: Default::default(),
-            shapes: Default::default(),
-            sheets: vec![("Picture".into(), sheet()), ("Cells".into(), sheet())],
-            styles: styles::minimal_resolved(),
-            shared_strings: vec![],
-            date1904: false,
-            window_count: 0,
-            warnings: vec![
-                "legacy-xls:drawings-conditional-formatting-and-external-links-omitted".into(),
-            ],
-            font: Some(NormalFont {
-                name: "F".into(),
-                size_points: 11.0,
-                bold: false,
-                italic: false,
-            }),
-            pictures: pictures(vec![anchor()]),
-        };
-        let result = prepared.finish(10000, Some(7.0)).unwrap();
-        let mut zip = zip::ZipArchive::new(Cursor::new(result.bytes)).unwrap();
-        for (id, drawing) in [(1, true), (2, false)] {
-            let mut xml = String::new();
-            zip.by_name(&format!("xl/worksheets/sheet{id}.xml"))
-                .unwrap()
-                .read_to_string(&mut xml)
-                .unwrap();
-            assert!(xml.contains("defaultColWidth=\"10\""));
-            assert_eq!(xml.contains("r:id=\"legacyDrawing\""), drawing);
-        }
-    }
-
-    #[test]
-    fn font_dependent_base_width_only_changes_sheets_that_receive_drawings() {
-        use super::super::{styles, styles::NormalFont, PreparedXls};
-        use std::io::{Cursor, Read};
-        let prepared = PreparedXls {
-            charts: Default::default(),
-            shapes: Default::default(),
-            sheets: vec![
-                ("Picture".into(), base_width_sheet()),
-                ("Cells".into(), base_width_sheet()),
-            ],
-            styles: styles::minimal_resolved(),
-            shared_strings: vec![],
-            date1904: false,
-            window_count: 0,
-            warnings: vec![
-                "legacy-xls:drawings-conditional-formatting-and-external-links-omitted".into(),
-            ],
-            font: Some(NormalFont {
-                name: "F".into(),
-                size_points: 11.0,
-                bold: false,
-                italic: false,
-            }),
-            pictures: pictures(vec![anchor()]),
-        };
-        let result = prepared.finish(10000, Some(7.0)).unwrap();
-        let mut zip = zip::ZipArchive::new(Cursor::new(result.bytes)).unwrap();
-        for (id, measured) in [(1, true), (2, false)] {
-            let mut xml = String::new();
-            zip.by_name(&format!("xl/worksheets/sheet{id}.xml"))
-                .unwrap()
-                .read_to_string(&mut xml)
-                .unwrap();
-            assert_eq!(xml.contains("defaultColWidth=\"8.7109375\""), measured);
-            assert_eq!(xml.contains("r:id=\"legacyDrawing\""), measured);
-        }
     }
 }

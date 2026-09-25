@@ -37,7 +37,6 @@ fn positions(b: &[u8], p: usize, n: usize, close: bool) -> Result<Vec<i16>, Stri
     Ok(result)
 }
 impl Stops {
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) fn direct(&self) -> Vec<docx_model::TabStop> {
         self.0
             .iter()
@@ -121,19 +120,6 @@ impl Stops {
         }
         Ok(())
     }
-    pub fn xml(&self) -> String {
-        if self.0.is_empty() {
-            return String::new();
-        }
-        let mut xml = String::from("<w:tabs>");
-        for (position, (alignment, leader)) in &self.0 {
-            xml.push_str(&format!(
-                "<w:tab w:val=\"{alignment}\" w:pos=\"{position}\" w:leader=\"{leader}\"/>"
-            ));
-        }
-        xml.push_str("</w:tabs>");
-        xml
-    }
 }
 
 #[cfg(test)]
@@ -200,23 +186,22 @@ mod tests {
             false,
         )
         .unwrap();
-        let xml = t.xml();
-        for value in [
-            "left",
-            "center",
-            "right",
-            "decimal",
-            "bar",
-            "num",
-            "dot",
-            "hyphen",
-            "underscore",
-            "middleDot",
-        ] {
-            assert!(xml.contains(value));
-        }
-        assert_eq!(t.0[&400], ("bar", "none"));
-        assert_eq!(t.0[&600], ("left", "none"));
+        let projected: Vec<_> = t
+            .direct()
+            .into_iter()
+            .map(|stop| (stop.pos, stop.alignment, stop.leader))
+            .collect();
+        let expected = [
+            (-5.0, "left", "dot"),
+            (5.0, "center", "hyphen"),
+            (10.0, "right", "underscore"),
+            (15.0, "decimal", "underscore"),
+            (20.0, "bar", "none"),
+            (25.0, "num", "middleDot"),
+            (30.0, "left", "none"),
+        ]
+        .map(|(pos, alignment, leader)| (pos, alignment.to_string(), leader.to_string()));
+        assert_eq!(projected, expected);
         for d in [5, 7, 48] {
             assert!(t.apply(&operand(&[], &[(0, d)], false), false).is_err());
         }

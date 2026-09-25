@@ -269,7 +269,7 @@ pub(super) fn project(
                 }
             }
         }
-        // Lists restart in every note, as in the byte converter.
+        // Lists restart in every note.
         let mut numbering = numbering::direct::Store::default();
         numbering.begin_story()?;
         let mut content = Vec::new();

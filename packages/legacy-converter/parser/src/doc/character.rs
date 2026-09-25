@@ -3,7 +3,6 @@
 //! [MS-DOC] 2.2.5, 2.6.1, 2.9.327; ECMA-376 17.3.2 (run properties).
 
 use super::{border::ICO_COLORS, u16_at, u32_at, unsupported};
-use crate::ooxml::xml_attr;
 use std::collections::BTreeMap;
 
 // MS-DOC 2.6.1 sprmCHighlight / 2.9.119 Ico. This is deliberately separate
@@ -31,7 +30,6 @@ const HIGHLIGHT_COLORS: [&str; 17] = [
     "lightGray",
 ];
 
-#[cfg(feature = "direct-doc")]
 mod direct;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -73,15 +71,14 @@ struct InsertionMark {
     date: Option<u32>,
 }
 
-/// Character properties whose MS-DOC semantics map onto the direct DOCX
-/// model but which the legacy WordprocessingML adapter never serializes.
-/// `None` is "not applied", so sparse style patches overlay only what they
+/// Character properties projected only through dedicated direct DOCX model
+/// fields (shading, border, fit text, East Asian layout, grid snapping and
+/// line-break clearing). `None` is "not applied", so sparse style patches overlay only what they
 /// set, and CPlain/CIstd reset them (neither preserved-property list in
 /// MS-DOC 2.6.1 names them).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct DirectOnly {
     /// sprmCShd/sprmCShd80 projected fill.
-    #[cfg(feature = "direct-doc")]
     shading: Option<super::paragraph::ShadingFill>,
     /// sprmCBrc (modern, 8 bytes) / sprmCBrc80 (4 bytes), validated raw.
     border: Option<(bool, [u8; 8])>,
@@ -96,20 +93,7 @@ struct DirectOnly {
 }
 
 impl DirectOnly {
-    fn any(&self) -> bool {
-        #[cfg(feature = "direct-doc")]
-        if self.shading.is_some() {
-            return true;
-        }
-        self.border.is_some()
-            || self.fit_text.is_some()
-            || self.east_asian.is_some()
-            || self.snap_to_grid.is_some()
-            || self.line_break.is_some_and(|value| value & 3 != 0)
-    }
-
     fn overlay(&mut self, patch: &Self) {
-        #[cfg(feature = "direct-doc")]
         if patch.shading.is_some() {
             self.shading = patch.shading.clone();
         }
@@ -151,7 +135,6 @@ enum LanguageResolution {
     Unsupported(u16),
 }
 
-#[cfg(feature = "direct-doc")]
 #[derive(Clone, Copy)]
 pub(super) struct ResolvedLanguages {
     pub(super) default: Option<&'static str>,
@@ -292,15 +275,6 @@ impl Properties {
         // turn numbering text into a picture or an executable object.
     }
 
-    /// True when an accepted property is projected only by the direct model;
-    /// the WordprocessingML adapter keeps reporting it as omitted.
-    pub(super) fn has_direct_only_properties(&self) -> bool {
-        self.direct_only.any()
-            || self.symbol.is_some()
-            || self.field_vanish == Some(true)
-            || self.insertion.inserted == Some(true)
-    }
-
     pub fn reset_to(&mut self, paragraph: &Self, preserve_object: bool) {
         // Of the reset exceptions in sprmCPlain/CIstd, these are the supported
         // properties. Revision metadata remains omitted. CIstd preserves
@@ -380,8 +354,8 @@ impl Properties {
             0x085c => Some("bCs"),
             0x085d => Some("iCs"),
             // MS-DOC 2.6.1 sprmCFNoProof / 2.9.327 ToggleOperand maps to
-            // ECMA-376 17.3.2.21. The byte route retains it; the display-only
-            // direct viewer validates it without introducing proofing UI state.
+            // ECMA-376 17.3.2.21. The display-only direct model validates it
+            // without introducing proofing UI state.
             0x0875 => Some("noProof"),
             0x0882 => Some("cs"),
             _ => None,
@@ -593,21 +567,16 @@ impl Properties {
             }
             0xca71 | 0x4866 => {
                 // MS-DOC 2.6.1 sprmCShd (SHDOperand) / sprmCShd80 (Shd80).
-                #[cfg(feature = "direct-doc")]
-                {
-                    return Ok(
-                        match super::paragraph::shading_fill(operand, code == 0xca71)? {
-                            Some(fill) => {
-                                self.direct_only.shading = Some(fill);
-                                true
-                            }
-                            // Valid but a two-color pattern: keep it unsupported.
-                            None => false,
-                        },
-                    );
-                }
-                #[cfg(not(feature = "direct-doc"))]
-                return Ok(false);
+                return Ok(
+                    match super::paragraph::shading_fill(operand, code == 0xca71)? {
+                        Some(fill) => {
+                            self.direct_only.shading = Some(fill);
+                            true
+                        }
+                        // Valid but a two-color pattern: keep it unsupported.
+                        None => false,
+                    },
+                );
             }
             0xca72 | 0x6865 => {
                 // MS-DOC 2.6.1 sprmCBrc (BrcOperand, cb = 8) and sprmCBrc80
@@ -809,111 +778,6 @@ impl Properties {
         Ok(true)
     }
 
-    #[cfg(test)]
-    pub fn xml(&self, fonts: &[String]) -> Result<String, String> {
-        self.xml_with_language_policy(fonts, false)
-            .map(|(xml, _)| xml)
-    }
-
-    /// Preserve the byte adapter's warning-based omission policy for unresolved
-    /// languages only. The caller must surface the returned omission flag;
-    /// direct model projection remains strict and never guesses a locale.
-    pub(in crate::doc) fn byte_xml(&self, fonts: &[String]) -> Result<(String, bool), String> {
-        self.xml_with_language_policy(fonts, true)
-    }
-
-    fn xml_with_language_policy(
-        &self,
-        fonts: &[String],
-        omit_unsupported_language: bool,
-    ) -> Result<(String, bool), String> {
-        let mut xml = String::from("<w:rPr>");
-        let has_font_index = self.fonts.iter().any(Option::is_some);
-        if self.font_hint.is_some() || (has_font_index && !fonts.is_empty()) {
-            xml.push_str("<w:rFonts");
-            if let Some(hint) = self.font_hint {
-                xml.push_str(&format!(" w:hint=\"{}\"", hint.xml_value()));
-            }
-            if !fonts.is_empty() {
-                for (key, index) in ["ascii", "eastAsia", "hAnsi", "cs"].iter().zip(self.fonts) {
-                    if let Some(index) = index {
-                        let name = fonts
-                            .get(index)
-                            .ok_or_else(|| unsupported("Word font index outside font table"))?;
-                        xml.push_str(&format!(" w:{key}=\"{}\"", xml_attr(name)));
-                    }
-                }
-            }
-            xml.push_str("/>");
-        } else if self.fonts.iter().flatten().any(|index| *index != 0) {
-            return Err(unsupported("Word font index outside empty font table"));
-        }
-        for (key, value) in &self.values {
-            if *key == "uColor" {
-                continue;
-            }
-            if *key == "u" {
-                xml.push_str(&format!("<w:u w:val=\"{value}\""));
-                if let Some(color) = self.values.get("uColor") {
-                    xml.push_str(&format!(" w:color=\"{color}\""));
-                }
-                xml.push_str("/>");
-            } else {
-                xml.push_str(&format!("<w:{key} w:val=\"{value}\"/>"));
-            }
-        }
-        if !self.values.contains_key("u") {
-            if let Some(color) = self.values.get("uColor") {
-                // MS-DOC 2.6.1 sprmCCvUl retains underline color independently.
-                // MS-OI29500 2.1.100(c), refining ECMA-376 17.3.2.40: absent
-                // w:u@val inherits and ultimately means no underline; color
-                // alone therefore preserves authorship without activating it.
-                xml.push_str(&format!("<w:u w:color=\"{color}\"/>"));
-            }
-        }
-        let axes = [
-            (
-                "val",
-                "default",
-                self.language(self.lang_default_lid, LanguageAxis::Default),
-            ),
-            (
-                "eastAsia",
-                "East Asian",
-                self.language(self.lang_east_asia_lid, LanguageAxis::EastAsia),
-            ),
-            ("bidi", "complex-script", self.bidi_language()),
-        ];
-        let mut omitted_language = false;
-        let mut language_started = false;
-        for (attribute, name, value) in axes {
-            match value {
-                LanguageResolution::Absent => {}
-                LanguageResolution::Assigned(language) => {
-                    if !language_started {
-                        xml.push_str("<w:lang");
-                        language_started = true;
-                    }
-                    xml.push_str(&format!(" w:{attribute}=\"{language}\""));
-                }
-                LanguageResolution::Unsupported(_) if omit_unsupported_language => {
-                    omitted_language = true;
-                }
-                LanguageResolution::Unsupported(lid) => {
-                    return Err(unsupported(format!(
-                        "unsupported Word {name} language ID 0x{lid:04X}"
-                    )));
-                }
-            }
-        }
-        if language_started {
-            xml.push_str("/>");
-        }
-        xml.push_str("</w:rPr>");
-        Ok((xml, omitted_language))
-    }
-
-    #[cfg(feature = "direct-doc")]
     pub(super) fn resolved_languages(&self) -> Result<ResolvedLanguages, String> {
         Ok(ResolvedLanguages {
             default: self.resolve_language_axis(
@@ -934,7 +798,6 @@ impl Properties {
         })
     }
 
-    #[cfg(feature = "direct-doc")]
     fn resolve_language_axis(
         &self,
         lid: Option<u16>,
@@ -948,10 +811,6 @@ impl Properties {
                 "unsupported Word {name} language ID 0x{lid:04X}"
             ))),
         }
-    }
-
-    fn bidi_language(&self) -> LanguageResolution {
-        self.language(self.lang_bidi_lid, LanguageAxis::ComplexScript)
     }
 
     fn language(&self, lid: Option<u16>, axis: LanguageAxis) -> LanguageResolution {
@@ -1020,16 +879,34 @@ mod tests {
     use super::*;
     use crate::doc::sprm::{Budget, Sprms};
 
+    /// The visible direct text run these properties project.
+    fn run(properties: &Properties, fonts: &[String]) -> docx_model::TextRun {
+        properties
+            .direct_text_run("x".into(), fonts)
+            .unwrap()
+            .expect("visible run")
+    }
+
+    fn run_json(properties: &Properties) -> serde_json::Value {
+        serde_json::to_value(run(properties, &[])).unwrap()
+    }
+
+    fn bidi(properties: &Properties) -> Option<&'static str> {
+        properties.resolved_languages().unwrap().bidi
+    }
+
     #[test]
     fn indexed_text_color_uses_shared_palette_and_normal_cascade_order() {
         let base = Properties::default();
         for (index, expected) in ICO_COLORS.iter().enumerate() {
             let mut value = base.clone();
             assert!(value.apply(0x2a42, &[index as u8], &base).unwrap());
-            assert!(value
-                .xml(&[])
-                .unwrap()
-                .contains(&format!("<w:color w:val=\"{expected}\"/>")));
+            let projected = run(&value, &[]);
+            if *expected == "auto" {
+                assert!(projected.color_auto && projected.color.is_none());
+            } else {
+                assert_eq!(projected.color, Some(expected.to_ascii_lowercase()));
+            }
         }
         for index in 17..=255u8 {
             assert!(base.clone().apply(0x2a42, &[index], &base).is_err());
@@ -1040,11 +917,11 @@ mod tests {
         style.apply(0x2a42, &[2], &base).unwrap();
         let mut value = style.clone();
         value.apply(0x6870, &[0x12, 0x34, 0x56, 0], &style).unwrap();
-        assert!(value.xml(&[]).unwrap().contains("w:val=\"123456\""));
+        assert_eq!(run(&value, &[]).color.as_deref(), Some("123456"));
         value.apply(0x2a42, &[6], &style).unwrap();
-        assert!(value.xml(&[]).unwrap().contains("w:val=\"FF0000\""));
+        assert_eq!(run(&value, &[]).color.as_deref(), Some("ff0000"));
         value.reset_to(&style, false);
-        assert!(value.xml(&[]).unwrap().contains("w:val=\"0000FF\""));
+        assert_eq!(run(&value, &[]).color.as_deref(), Some("0000ff"));
     }
 
     #[test]
@@ -1053,10 +930,15 @@ mod tests {
         for (index, expected) in HIGHLIGHT_COLORS.iter().enumerate() {
             let mut value = base.clone();
             assert!(value.apply(0x2a0c, &[index as u8], &base).unwrap());
-            assert!(value
-                .xml(&[])
-                .unwrap()
-                .contains(&format!("<w:highlight w:val=\"{expected}\"/>")));
+            assert_eq!(
+                value.values.get("highlight").map(String::as_str),
+                Some(*expected)
+            );
+            let highlight = run(&value, &[]).highlight;
+            assert_eq!(
+                highlight.as_deref(),
+                (*expected != "none").then_some(*expected)
+            );
         }
         for index in 17..=255u8 {
             assert!(base.clone().apply(0x2a0c, &[index], &base).is_err());
@@ -1067,17 +949,18 @@ mod tests {
         style.apply(0x2a0c, &[12], &base).unwrap();
         let mut value = style.clone();
         value.apply(0x2a0c, &[13], &style).unwrap();
-        assert!(value.xml(&[]).unwrap().contains("w:val=\"darkRed\""));
+        assert_eq!(run(&value, &[]).highlight.as_deref(), Some("darkRed"));
+        // An explicit none overrides the style's highlight.
         value.apply(0x2a0c, &[0], &style).unwrap();
-        assert!(value.xml(&[]).unwrap().contains("w:val=\"none\""));
+        assert_eq!(run(&value, &[]).highlight, None);
 
         // MS-DOC 2.6.1 explicitly excludes highlight from both CPlain and
         // CIstd resets. This tests the shared reset primitive used by both.
         value.reset_to(&base, false);
-        assert!(value.xml(&[]).unwrap().contains("w:val=\"none\""));
+        assert_eq!(run(&value, &[]).highlight, None);
         value.apply(0x2a0c, &[12], &base).unwrap();
         value.reset_to(&base, true);
-        assert!(value.xml(&[]).unwrap().contains("w:val=\"darkMagenta\""));
+        assert_eq!(run(&value, &[]).highlight.as_deref(), Some("darkMagenta"));
     }
 
     #[test]
@@ -1095,7 +978,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "direct-doc")]
     fn insertion_marks_are_style_relative_and_survive_resets() {
         let base = Properties::default();
         let mut value = base.clone();
@@ -1105,7 +987,6 @@ mod tests {
             .apply(0x6805, &0x86a1_2d2eu32.to_le_bytes(), &base)
             .unwrap());
         assert_eq!(value.direct_insertion(), Some((Some(1), Some(0x86a1_2d2e))));
-        assert!(value.has_direct_only_properties());
         // Both CPlain and CIstd preserve the revision-mark properties.
         for preserve_object in [false, true] {
             let mut reset = value.clone();
@@ -1149,7 +1030,6 @@ mod tests {
             let mut value = base.clone();
             assert!(value.apply(0xc81a, &[2, jc | 0xf8, 0xff], &base).unwrap());
             assert_eq!(value, base);
-            assert!(!value.has_direct_only_properties());
         }
         for operand in [vec![2, 0, 0], vec![2, 5, 0], vec![1, 2, 0], vec![2, 2]] {
             assert!(base.clone().apply(0xc81a, &operand, &base).is_err());
@@ -1163,7 +1043,7 @@ mod tests {
             for value in [0, 0x7856_3412, u32::MAX] {
                 let mut properties = base.clone();
                 assert!(properties.apply(code, &value.to_le_bytes(), &base).unwrap());
-                assert_eq!(properties.xml(&[]).unwrap(), base.xml(&[]).unwrap());
+                assert_eq!(run_json(&properties), run_json(&base));
             }
             assert!(base.clone().apply(code, &[0; 3], &base).is_err());
             assert!(base.clone().apply(code, &[0; 5], &base).is_err());
@@ -1174,9 +1054,9 @@ mod tests {
             .apply(0x6816, &0x7856_3412u32.to_le_bytes(), &base)
             .unwrap();
         adjacent.apply(0x0835, &[1], &base).unwrap();
-        assert!(adjacent.xml(&[]).unwrap().contains("<w:b w:val=\"1\"/>"));
+        assert!(run(&adjacent, &[]).bold);
         adjacent.reset_to(&base, false);
-        assert_eq!(adjacent.xml(&[]).unwrap(), base.xml(&[]).unwrap());
+        assert_eq!(run_json(&adjacent), run_json(&base));
         // A session ID associated with deletion cannot manufacture a deletion.
         assert!(!adjacent.apply(0x0800, &[1], &base).unwrap());
 
@@ -1191,23 +1071,20 @@ mod tests {
         assert!(style
             .apply(0x485f, &0x0401u16.to_le_bytes(), &base)
             .unwrap());
-        assert!(style
-            .xml(&[])
-            .unwrap()
-            .contains("<w:lang w:bidi=\"ar-SA\"/>"));
+        assert_eq!(bidi(&style), Some("ar-SA"));
 
         let mut patch = Properties::sparse();
         patch
             .apply(0x485f, &0x0411u16.to_le_bytes(), &base)
             .unwrap();
         style.overlay_visible(&patch);
-        assert!(style.xml(&[]).unwrap().contains("w:bidi=\"ja-JP\""));
+        assert_eq!(bidi(&style), Some("ja-JP"));
         style.overlay_visible(&Properties::sparse());
-        assert!(style.xml(&[]).unwrap().contains("w:bidi=\"ja-JP\""));
+        assert_eq!(bidi(&style), Some("ja-JP"));
         style
             .apply(0x485f, &0x0409u16.to_le_bytes(), &base)
             .unwrap();
-        assert!(style.xml(&[]).unwrap().contains("w:bidi=\"en-US\""));
+        assert_eq!(bidi(&style), Some("en-US"));
 
         // Both CPlain and CIstd reset language: neither preserved-property
         // list in MS-DOC 2.6.1 includes language.
@@ -1216,16 +1093,16 @@ mod tests {
             .apply(0x485f, &0x0411u16.to_le_bytes(), &base)
             .unwrap();
         style.reset_to(&paragraph, false);
-        assert!(style.xml(&[]).unwrap().contains("w:bidi=\"ja-JP\""));
+        assert_eq!(bidi(&style), Some("ja-JP"));
         style
             .apply(0x485f, &0x0401u16.to_le_bytes(), &paragraph)
             .unwrap();
         style.reset_to(&paragraph, true);
-        assert!(style.xml(&[]).unwrap().contains("w:bidi=\"ja-JP\""));
+        assert_eq!(bidi(&style), Some("ja-JP"));
         for preserve_object in [false, true] {
             let mut reset = style.clone();
             reset.reset_to(&base, preserve_object);
-            assert!(!reset.xml(&[]).unwrap().contains("<w:lang"));
+            assert_eq!(bidi(&reset), None);
         }
 
         assert!(base.clone().apply(0x485f, &[1], &base).is_err());
@@ -1233,7 +1110,7 @@ mod tests {
         for lid in [u16::MAX, 0x0000, 0x007f, 0x0467, 0x040a] {
             let mut unresolved = base.clone();
             unresolved.apply(0x485f, &lid.to_le_bytes(), &base).unwrap();
-            assert!(unresolved.xml(&[]).is_err(), "LID {lid:04x}");
+            assert!(unresolved.resolved_languages().is_err(), "LID {lid:04x}");
         }
         // Word writes 0x0400 for a style without its own complex-script
         // language: it inherits. 0x1000 (a tag without an LCID) projects no
@@ -1242,12 +1119,12 @@ mod tests {
         inherited
             .apply(0x485f, &0x0400u16.to_le_bytes(), &paragraph)
             .unwrap();
-        assert!(inherited.xml(&[]).unwrap().contains("w:bidi=\"ja-JP\""));
+        assert_eq!(bidi(&inherited), Some("ja-JP"));
         let mut custom = paragraph.clone();
         custom
             .apply(0x485f, &0x1000u16.to_le_bytes(), &paragraph)
             .unwrap();
-        assert!(!custom.xml(&[]).unwrap().contains("<w:lang"));
+        assert_eq!(bidi(&custom), None);
 
         let mut truncated = Sprms::new(&[0x5f, 0x48, 0x01]);
         assert!(truncated.next(&mut Budget::default()).is_err());
@@ -1288,9 +1165,11 @@ mod tests {
             slots(&properties),
             [Some(0x0400), Some(0x007f), Some(0x040c), Some(0x0411)]
         );
+        // Only the modern axes resolve; the Word 97 axes remain metadata.
+        let languages = properties.resolved_languages().unwrap();
         assert_eq!(
-            properties.xml(&[]).unwrap(),
-            "<w:rPr><w:lang w:val=\"fr-FR\" w:eastAsia=\"ja-JP\"/></w:rPr>"
+            (languages.default, languages.east_asia, languages.bidi),
+            (Some("fr-FR"), Some("ja-JP"), None)
         );
 
         // Repeated properties retain their ordered last value without merging
@@ -1334,16 +1213,21 @@ mod tests {
             .apply(0x485f, &0x0401u16.to_le_bytes(), &base)
             .unwrap();
         inherited.apply(0x0875, &[1], &base).unwrap();
-        let independent_xml = inherited.xml(&[]).unwrap();
-        assert!(independent_xml.contains("w:eastAsia=\"zh-TW\""));
-        assert!(independent_xml.contains("w:bidi=\"ar-SA\""));
-        assert!(independent_xml.contains("<w:noProof w:val=\"1\"/>"));
+        let languages = inherited.resolved_languages().unwrap();
+        assert_eq!(
+            (languages.east_asia, languages.bidi),
+            (Some("zh-TW"), Some("ar-SA"))
+        );
+        assert_eq!(
+            inherited.values.get("noProof").map(String::as_str),
+            Some("1")
+        );
         for preserve_object in [false, true] {
             let mut reset = inherited.clone();
             reset.reset_to(&paragraph, preserve_object);
             assert_eq!(slots(&reset), [None, None, Some(0x0409), None]);
             assert_eq!(reset.lang_bidi_lid, paragraph.lang_bidi_lid);
-            assert!(!reset.xml(&[]).unwrap().contains("<w:noProof"));
+            assert!(!reset.values.contains_key("noProof"));
         }
     }
 
@@ -1374,15 +1258,19 @@ mod tests {
         let mut style = base.clone();
         style.apply(0x2a3e, &[11], &base).unwrap();
         style.apply(0x6877, &[0x12, 0x34, 0x56, 0], &base).unwrap();
-        assert!(style
-            .xml(&[])
-            .unwrap()
-            .contains("<w:u w:val=\"wave\" w:color=\"123456\"/>"));
+        let underline = |p: &Properties| {
+            let run = run(p, &[]);
+            (run.underline, run.underline_style, run.underline_color)
+        };
+        assert_eq!(
+            underline(&style),
+            (true, Some("wave".into()), Some("123456".into()))
+        );
         let mut direct = style.clone();
         direct.apply(0x6877, &[0, 0, 0, 0xff], &style).unwrap();
-        assert!(direct.xml(&[]).unwrap().contains("w:color=\"auto\""));
+        assert_eq!(underline(&direct).2.as_deref(), Some("auto"));
         direct.reset_to(&base, false);
-        assert!(!direct.xml(&[]).unwrap().contains("w:color="));
+        assert_eq!(underline(&direct), (false, None, None));
         assert!(base.clone().apply(0x6877, &[], &base).is_err());
         assert!(base.clone().apply(0x6877, &[1, 2, 3, 1], &base).is_err());
 
@@ -1390,19 +1278,24 @@ mod tests {
         color_only
             .apply(0x6877, &[0x12, 0x34, 0x56, 0], &base)
             .unwrap();
-        assert!(color_only
-            .xml(&[])
-            .unwrap()
-            .contains("<w:u w:color=\"123456\"/>"));
+        // MS-OI29500 2.1.100(c): color alone keeps its authorship without
+        // activating an underline.
+        assert_eq!(underline(&color_only), (false, None, None));
+        let wire = run(&color_only, &[]).typography_acquisition.unwrap();
+        let wire = wire.underline.unwrap();
+        assert_eq!(
+            (wire.val.raw, wire.color.raw.as_deref()),
+            (None, Some("123456"))
+        );
         color_only.apply(0x2a3e, &[4], &base).unwrap();
-        assert!(color_only
-            .xml(&[])
-            .unwrap()
-            .contains("<w:u w:val=\"dotted\" w:color=\"123456\"/>"));
+        assert_eq!(
+            underline(&color_only),
+            (true, Some("dotted".into()), Some("123456".into()))
+        );
     }
 
     #[test]
-    fn picture_metadata_survives_style_reset_without_becoming_run_xml() {
+    fn picture_metadata_survives_style_reset_without_becoming_run_formatting() {
         let base = Properties::default();
         let mut props = base.clone();
         for (code, bytes) in [
@@ -1417,7 +1310,7 @@ mod tests {
         assert_eq!(props.picture.inline_location().unwrap(), None);
         props.reset_to(&base, false);
         assert_eq!(props.picture.inline_location().unwrap(), Some(123));
-        assert!(!props.xml(&[]).unwrap().contains("123"));
+        assert_eq!(run_json(&props), run_json(&base));
         for code in [0x0806, 0x080a, 0x0856] {
             let mut active = props.clone();
             active.apply(code, &[1], &base).unwrap();
@@ -1441,7 +1334,7 @@ mod tests {
         let mut direct = style.clone();
         direct.apply(0x0835, &[0x81], &style).unwrap();
         direct.apply(0x0835, &[0x81], &style).unwrap();
-        assert!(direct.xml(&[]).unwrap().contains("<w:b w:val=\"0\"/>"));
+        assert!(!run(&direct, &[]).bold);
         direct.apply(0x0835, &[0x80], &style).unwrap();
         assert_eq!(direct, style);
         assert!(direct.apply(0x0835, &[2], &style).is_err());
@@ -1454,41 +1347,30 @@ mod tests {
         let base = Properties::default();
         let mut style = base.clone();
         assert!(style.apply(0x0875, &[1], &base).unwrap());
-        assert!(style.xml(&[]).unwrap().contains("<w:noProof w:val=\"1\"/>"));
+        let no_proof = |p: &Properties| p.values.get("noProof").cloned();
+        assert_eq!(no_proof(&style).as_deref(), Some("1"));
 
         for (operand, expected) in [(0, "0"), (1, "1"), (0x80, "1"), (0x81, "0")] {
             let mut direct = style.clone();
             assert!(direct.apply(0x0875, &[operand], &style).unwrap());
-            assert!(direct
-                .xml(&[])
-                .unwrap()
-                .contains(&format!("<w:noProof w:val=\"{expected}\"/>")));
+            assert_eq!(no_proof(&direct).as_deref(), Some(expected));
         }
 
         let mut false_style = base.clone();
         false_style.apply(0x0875, &[0], &base).unwrap();
         let mut opposite = false_style.clone();
         opposite.apply(0x0875, &[0x81], &false_style).unwrap();
-        assert!(opposite
-            .xml(&[])
-            .unwrap()
-            .contains("<w:noProof w:val=\"1\"/>"));
+        assert_eq!(no_proof(&opposite).as_deref(), Some("1"));
         opposite.apply(0x0875, &[0], &false_style).unwrap();
-        assert!(opposite
-            .xml(&[])
-            .unwrap()
-            .contains("<w:noProof w:val=\"0\"/>"));
+        assert_eq!(no_proof(&opposite).as_deref(), Some("0"));
 
         let mut inherited = style.clone();
         inherited.overlay_visible(&Properties::sparse());
-        assert!(inherited
-            .xml(&[])
-            .unwrap()
-            .contains("<w:noProof w:val=\"1\"/>"));
+        assert_eq!(no_proof(&inherited).as_deref(), Some("1"));
         for preserve_object in [false, true] {
             let mut reset = inherited.clone();
             reset.reset_to(&false_style, preserve_object);
-            assert!(reset.xml(&[]).unwrap().contains("<w:noProof w:val=\"0\"/>"));
+            assert_eq!(no_proof(&reset).as_deref(), Some("0"));
         }
 
         for operand in [vec![], vec![2], vec![0x82], vec![1, 0]] {
@@ -1511,16 +1393,17 @@ mod tests {
     }
 
     #[test]
-    fn preserves_font_slots_and_escapes_names_without_embedding_fonts() {
+    fn preserves_font_slots_without_embedding_fonts() {
         let mut p = Properties::default();
         let base = p.clone();
         p.apply(0x4a4f, &[0, 0], &base).unwrap();
         p.apply(0x4a50, &[1, 0], &base).unwrap();
         p.apply(0x4a43, &[24, 0], &base).unwrap();
-        let xml = p.xml(&["A & \"B\"".into(), "CJK".into()]).unwrap();
-        assert!(xml.contains("w:ascii=\"A &amp; &quot;B&quot;\" w:eastAsia=\"CJK\""));
-        assert!(xml.contains("w:sz w:val=\"24\""));
-        assert!(p.xml(&[]).is_err());
+        let projected = run(&p, &["A & \"B\"".into(), "CJK".into()]);
+        assert_eq!(projected.font_family.as_deref(), Some("A & \"B\""));
+        assert_eq!(projected.font_family_east_asia.as_deref(), Some("CJK"));
+        assert_eq!(projected.font_size, 12.0);
+        assert!(p.direct_text_run("x".into(), &[]).is_err());
     }
 
     #[test]
@@ -1538,29 +1421,35 @@ mod tests {
         let fonts = ["ASCII", "East Asia", "High ANSI", "Complex Script"].map(String::from);
         for (value, expected) in [(0, "default"), (1, "eastAsia"), (2, "cs")] {
             assert!(p.apply(0x286f, &[value], &base).unwrap());
-            let xml = p.xml(&fonts).unwrap();
-            assert!(xml.contains(&format!("w:hint=\"{expected}\"")), "{xml}");
-            for (slot, name) in [
-                ("ascii", "ASCII"),
-                ("eastAsia", "East Asia"),
-                ("hAnsi", "High ANSI"),
-                ("cs", "Complex Script"),
-            ] {
-                assert!(xml.contains(&format!("w:{slot}=\"{name}\"")), "{xml}");
-            }
+            let projected = run(&p, &fonts);
+            assert_eq!(projected.font_hint.as_deref(), Some(expected));
+            assert_eq!(
+                [
+                    projected.font_family.as_deref(),
+                    projected.font_family_east_asia.as_deref(),
+                    projected.font_family_high_ansi.as_deref(),
+                    projected.font_family_cs.as_deref(),
+                ],
+                [
+                    Some("ASCII"),
+                    Some("East Asia"),
+                    Some("High ANSI"),
+                    Some("Complex Script")
+                ]
+            );
         }
     }
 
     #[test]
-    fn no_guidance_cancels_inherited_hint_and_absence_emits_no_font_element() {
+    fn no_guidance_cancels_inherited_hint() {
         let base = Properties::default();
-        assert!(!base.xml(&[]).unwrap().contains("<w:rFonts"));
+        assert_eq!(run(&base, &[]).font_hint, None);
 
         let mut inherited = base.clone();
         inherited.apply(0x286f, &[1], &base).unwrap();
-        assert!(inherited.xml(&[]).unwrap().contains("w:hint=\"eastAsia\""));
+        assert_eq!(run(&inherited, &[]).font_hint.as_deref(), Some("eastAsia"));
         inherited.apply(0x286f, &[0xff], &base).unwrap();
-        assert!(!inherited.xml(&[]).unwrap().contains("<w:rFonts"));
+        assert_eq!(run(&inherited, &[]).font_hint, None);
         assert!(inherited.apply(0x286f, &[3], &base).is_err());
     }
 
@@ -1571,8 +1460,8 @@ mod tests {
         p.apply(0x085a, &[1], &base).unwrap();
         p.apply(0x4a43, &[40, 0], &base).unwrap();
         p.reset_to(&base, false);
-        let xml = p.xml(&[]).unwrap();
-        assert!(xml.contains("w:sz w:val=\"20\""));
-        assert!(xml.contains("w:rtl w:val=\"1\""));
+        let projected = run(&p, &[]);
+        assert_eq!(projected.font_size, 10.0);
+        assert_eq!(projected.rtl, Some(true));
     }
 }

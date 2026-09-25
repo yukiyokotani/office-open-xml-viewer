@@ -18,6 +18,7 @@ mod borders;
 mod margins;
 mod preferences;
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn project(
     story: &Story<'_>,
     paragraphs: Vec<Paragraph>,
@@ -447,12 +448,6 @@ pub(super) fn project(
                     )?;
                     budget.push(&mut paragraph.runs, DocRun::Field(Box::new(run)))?;
                 }
-                Token::FieldBegin(_) | Token::FieldEnd => {
-                    // Only the byte converter's header restoration emits these.
-                    return Err(unsupported(
-                        "direct DOC model does not retain field structures yet",
-                    ));
-                }
             }
         }
 
@@ -586,6 +581,7 @@ struct PreparedParagraph {
     table_properties: table::Properties,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_control_text(
     paragraph: &mut docx_model::DocParagraph,
     story: &Story<'_>,
@@ -710,10 +706,10 @@ fn push_ruby(
         story,
         &mut Some(&mut *formatting),
         |formatting, fc, prm| {
-            formatting.direct_text_run(style, table_style, fc, prm, &story.prcs, String::new())
+            formatting.direct_ruby_guide_run(style, table_style, fc, prm, &story.prcs)
         },
         |part, run| {
-            let run = run
+            let (run, language) = run
                 .flatten()
                 .ok_or_else(|| unsupported("hidden Word phonetic guide text"))?;
             budget.charge(std::mem::size_of::<RubyGuideRunTypographyWire>() + part.len())?;
@@ -724,7 +720,7 @@ fn push_ruby(
                 bold: run.bold,
                 italic: run.italic,
                 color: run.color,
-                language: run.lang_default.map(|value| value.to_lowercase()),
+                language: language.map(str::to_ascii_lowercase),
             });
             Ok(())
         },
@@ -830,7 +826,6 @@ fn evaluated_field_run(
             font_size_cs: run.font_size_cs,
             bold_cs: run.bold_cs,
             italic_cs: run.italic_cs,
-            lang_default: run.lang_default,
             lang_bidi: run.lang_bidi,
             lang_east_asia: run.lang_east_asia,
             background: run.background,
@@ -1017,6 +1012,7 @@ mod tests {
         D634,
     }
 
+    #[allow(clippy::type_complexity)]
     struct ProjectedTable {
         markers: Vec<String>,
         row_cell_counts: Vec<usize>,
@@ -1442,7 +1438,7 @@ mod tests {
     fn row_cells_with_horizontal_merge(options: u16, first: u8, limit: u8) -> Vec<u8> {
         let mut row = row_cells(options, 3);
         row.extend(sprm(0x5624, &[first, limit]));
-        if row.len() % 2 == 0 {
+        if row.len().is_multiple_of(2) {
             row.extend(cell());
         }
         row
@@ -1451,7 +1447,7 @@ mod tests {
     fn row_cells_with_extra(options: u16, count: u8, extra: &[u8]) -> Vec<u8> {
         let mut row = row_cells(options, count);
         row.extend(extra);
-        if row.len() % 2 == 0 {
+        if row.len().is_multiple_of(2) {
             row.extend(cell());
         }
         row
@@ -1475,7 +1471,7 @@ mod tests {
         let mut row = row_cells(options, count);
         row.extend(sprm(0xd612, compatibility));
         row.extend(sprm(0xd670, raw));
-        if row.len() % 2 == 0 {
+        if row.len().is_multiple_of(2) {
             row.extend(cell());
         }
         row
@@ -1493,7 +1489,7 @@ mod tests {
         row.extend(sprm(0x5624, &merge));
         row.extend(margin);
         row.extend(sprm(0xd670, raw));
-        if row.len() % 2 == 0 {
+        if row.len().is_multiple_of(2) {
             row.extend(sprm(0x2416, &[1]));
         }
         row
@@ -1516,7 +1512,7 @@ mod tests {
         for margin in margins {
             row.extend(margin);
         }
-        if row.len() % 2 == 0 {
+        if row.len().is_multiple_of(2) {
             row.extend(sprm(0x2416, &[1]));
         }
         row
@@ -1538,7 +1534,7 @@ mod tests {
             row.extend(border);
         }
         row.extend(sprm(0x2416, &[1]));
-        if row.len() % 2 == 0 {
+        if row.len().is_multiple_of(2) {
             row.extend(sprm(0x2416, &[1]));
         }
         row
@@ -1558,7 +1554,7 @@ mod tests {
             sprm(0x2416, &[1]),
         ]
         .concat();
-        if row.len() % 2 == 0 {
+        if row.len().is_multiple_of(2) {
             row.extend(sprm(0x2416, &[1]));
         }
         row
@@ -1583,7 +1579,7 @@ mod tests {
             sprm(0x2416, &[1]),
         ]
         .concat();
-        if row.len() % 2 == 0 {
+        if row.len().is_multiple_of(2) {
             row.extend(sprm(0x2416, &[1]));
         }
         row
@@ -1601,7 +1597,7 @@ mod tests {
             sprm(0x2416, &[1]),
         ]
         .concat();
-        if row.len() % 2 == 0 {
+        if row.len().is_multiple_of(2) {
             row.extend(sprm(0x2416, &[1]));
         }
         row
@@ -1641,7 +1637,7 @@ mod tests {
         let source = with_table_style(&source, fixture);
         let source = with_papx(&source, runs);
         let cfb = CompoundFile::open(&source).unwrap();
-        with_acquired_doc(&cfb, true, |mut facts| {
+        with_acquired_doc(&cfb, |mut facts| {
             let paragraphs = crate::doc::tokenize_with_fields(
                 &facts.story.text,
                 &mut Fields::default(),
@@ -2016,7 +2012,7 @@ mod tests {
         for (first, limit) in [(0, 1), (1, 2)] {
             let mut row = row_cells_with_horizontal_merge(1 << 5, 0, 2);
             row.extend(cell_borders(first, limit, [0, 0, 0xff], 16));
-            if row.len() % 2 == 0 {
+            if row.len().is_multiple_of(2) {
                 row.extend(cell());
             }
             let projected = conditional_border_grid_with_rows(
@@ -2366,6 +2362,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::single_element_loop)]
     fn unsupported_conditional_border_nil_does_not_project_partial_patches() {
         for fixture in [StyleFixture {
             conditional_borders: table_style_condition::FIRST_ROW,
@@ -3361,7 +3358,7 @@ mod tests {
         row.extend(sprm(0x740a, &[0xff, 0xff, 0xa0, 0x04]));
         row.extend(after);
         row.extend(sprm(0x2416, &[1]));
-        if row.len() % 2 == 0 {
+        if row.len().is_multiple_of(2) {
             row.extend(sprm(0x2416, &[1]));
         }
         row

@@ -7,6 +7,7 @@
 //! `wrapped_*` place arbitrary bytes into the streams of a root-linked
 //! compound file so the format readers are reached behind the container.
 
+#[cfg(any(feature = "direct-doc", feature = "direct-xls", feature = "direct-ppt"))]
 use crate::cfb::{test_support::build_scoped_cfb, CompoundFile};
 
 /// A per-unit credit large enough for any unit the budgets admit.
@@ -14,16 +15,19 @@ use crate::cfb::{test_support::build_scoped_cfb, CompoundFile};
 const BYTE_CREDIT: usize = 256 * 1024 * 1024;
 
 /// `data` as the WordDocument and table streams of a root-linked DOC.
+#[cfg(feature = "direct-doc")]
 pub fn wrapped_doc(data: &[u8]) -> Vec<u8> {
     build_scoped_cfb(&[("WordDocument", data.to_vec()), ("0Table", data.to_vec())])
 }
 
 /// `data` as the Workbook stream of a root-linked XLS.
+#[cfg(feature = "direct-xls")]
 pub fn wrapped_xls(data: &[u8]) -> Vec<u8> {
     build_scoped_cfb(&[("Workbook", data.to_vec())])
 }
 
 /// `data` as the document and current-user streams of a root-linked PPT.
+#[cfg(feature = "direct-ppt")]
 pub fn wrapped_ppt(data: &[u8]) -> Vec<u8> {
     build_scoped_cfb(&[
         ("PowerPoint Document", data.to_vec()),
@@ -72,7 +76,7 @@ pub fn direct_doc(data: &[u8]) {
     cursor.close_document_session();
 }
 
-/// Direct XLS session: measurement decision, bootstrap and every worksheet.
+/// Direct XLS session: host layout decision, bootstrap and every worksheet.
 #[cfg(feature = "direct-xls")]
 pub fn direct_xls(data: &[u8]) {
     use crate::xls::direct::DirectSession;
@@ -83,7 +87,8 @@ pub fn direct_xls(data: &[u8]) {
         return;
     };
     let _ = session.measurement_font();
-    if session.configure_mdw(Some(7.0)).is_err() {
+    let mdw = session.requires_measurement_decision().then_some(7.0);
+    if session.configure_host_layout(mdw).is_err() {
         return;
     }
     let Ok(workbook) = session.bootstrap() else {

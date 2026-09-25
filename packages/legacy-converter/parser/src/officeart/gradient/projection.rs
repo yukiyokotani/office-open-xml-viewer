@@ -23,12 +23,6 @@ impl ProjectedShadeStop {
     pub(crate) fn position(self) -> f64 {
         self.position_numerator as f64 / POSITION_DENOMINATOR as f64
     }
-
-    /// Quantize to DrawingML's 100,000 position units. Round-half-up is an
-    /// explicit compatibility output policy, not an Office-derived rule.
-    pub(crate) fn position_units(self) -> u32 {
-        round_half_up(self.position_numerator, POSITION_DENOMINATOR, 100_000) as u32
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -41,13 +35,6 @@ impl RationalAngle {
     #[cfg(any(test, feature = "direct-ppt", feature = "direct-doc"))]
     pub(crate) fn degrees(self) -> f64 {
         self.numerator as f64 / f64::from(self.denominator)
-    }
-
-    /// Quantize to DrawingML's 60,000 angle units per degree. Round-half-up is
-    /// an explicit compatibility output policy, not an Office-derived rule.
-    pub(crate) fn angle_units(self) -> i32 {
-        let units = round_half_up(self.numerator as u64, u64::from(self.denominator), 60_000);
-        (units % (360 * 60_000)) as i32
     }
 }
 
@@ -62,11 +49,6 @@ pub(crate) struct Requirements {
     pub work_iterations: usize,
     pub scratch_bytes: usize,
     pub output_bytes: usize,
-}
-
-fn round_half_up(numerator: u64, denominator: u64, units: u64) -> u64 {
-    let scaled = u128::from(numerator) * u128::from(units);
-    ((scaled + u128::from(denominator) / 2) / u128::from(denominator)) as u64
 }
 
 fn charge(budget: &mut usize, amount: usize, message: &str) -> Result<(), String> {
@@ -621,7 +603,7 @@ mod tests {
     }
 
     #[test]
-    fn rational_native_values_and_compatibility_quantization_are_bounded() {
+    fn rational_native_values_are_exact_and_angles_wrap_to_a_full_turn() {
         for numerator in [0, 1, 32_768, POSITION_DENOMINATOR - 1, POSITION_DENOMINATOR] {
             let stop = ProjectedShadeStop {
                 color: 0,
@@ -631,8 +613,6 @@ mod tests {
                 stop.position(),
                 numerator as f64 / POSITION_DENOMINATOR as f64
             );
-            let exact = numerator as f64 * 100_000.0 / POSITION_DENOMINATOR as f64;
-            assert!((f64::from(stop.position_units()) - exact).abs() <= 0.5);
         }
         for numerator in [
             0,
@@ -646,27 +626,9 @@ mod tests {
                 denominator: SOURCE_ONE,
             };
             assert_eq!(angle.degrees(), numerator as f64 / f64::from(SOURCE_ONE));
-            let exact = numerator as f64 * 60_000.0 / f64::from(SOURCE_ONE);
-            assert!((f64::from(angle.angle_units()) - exact).abs() <= 0.5);
         }
-        assert_eq!(
-            ProjectedShadeStop {
-                color: 0,
-                position_numerator: POSITION_DENOMINATOR
-            }
-            .position_units(),
-            100_000
-        );
-        assert_eq!(run(100, 90 << 16).angle.angle_units(), 0);
-        assert_eq!(run(100, -(270 << 16)).angle.angle_units(), 0);
-        let almost_full_turn = RationalAngle {
-            numerator: 360_i64 * 131_072 - 1,
-            denominator: 131_072,
-        };
-        assert_eq!(almost_full_turn.angle_units(), 0);
-        let linear_error = (almost_full_turn.degrees() * 60_000.0
-            - f64::from(almost_full_turn.angle_units()))
-        .abs();
-        assert!((21_600_000.0 - linear_error).abs() <= 0.5);
+        for angle in [run(100, 90 << 16).angle, run(100, -(270 << 16)).angle] {
+            assert_eq!(angle.degrees().rem_euclid(360.0), 0.0, "{angle:?}");
+        }
     }
 }

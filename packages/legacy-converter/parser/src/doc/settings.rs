@@ -6,22 +6,17 @@ use super::{u16_at, u32_at, unsupported};
 pub(super) struct Properties {
     pub default_tab_twips: u16,
     pub even_and_odd_headers: bool,
-    #[cfg_attr(not(feature = "direct-doc"), allow(dead_code))]
     pub notes: NoteProperties,
     /// ECMA-376 Part 1 17.15.3.1 adjustLineHeightInTable, the inverse of
     /// MS-DOC 2.7.13 Copts.fDontAdjustLineHeightInTable.
-    #[cfg_attr(not(feature = "direct-doc"), allow(dead_code))]
     pub adjust_line_height_in_table: bool,
     /// ECMA-376 Part 1 17.15.3.3 balanceSingleByteDoubleByteWidth, the
     /// inverse of MS-DOC 2.7.11 Copts60.fDntBlnSbDbWid.
-    #[cfg_attr(not(feature = "direct-doc"), allow(dead_code))]
     pub balance_single_byte_double_byte_width: bool,
     /// ECMA-376 Part 1 17.15.1.18 characterSpacingControl from MS-DOC 2.7.16
     /// DopTypography.iJustification; `None` when the DOP predates Dop97.
-    #[cfg_attr(not(feature = "direct-doc"), allow(dead_code))]
     pub character_spacing_control: Option<&'static str>,
     /// MS-DOC 2.7.2 DopBase fRMView / fRMPrint.
-    #[cfg_attr(not(feature = "direct-doc"), allow(dead_code))]
     pub revision_markup: RevisionMarkup,
 }
 
@@ -30,7 +25,6 @@ pub(super) struct Properties {
 /// they can differ). A Word-exported PDF of a document with both set shows
 /// insertions underlined with margin change bars.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[cfg_attr(not(feature = "direct-doc"), allow(dead_code))]
 pub(crate) struct RevisionMarkup {
     pub(crate) on_screen: bool,
     pub(crate) in_print: bool,
@@ -44,7 +38,6 @@ pub(crate) struct RevisionMarkup {
 /// documents whose nFib is at most 0x00D9; later documents use section
 /// properties. `formats` is `None` when the DOP predates Dop97.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(not(feature = "direct-doc"), allow(dead_code))]
 pub(super) struct NoteProperties {
     pub footnote_position: u8,
     pub footnote_restart: u8,
@@ -138,19 +131,7 @@ pub(super) fn read(word: &[u8], table: &[u8]) -> Result<Option<Properties>, Stri
     }))
 }
 
-impl Properties {
-    pub(super) fn xml(&self) -> String {
-        let interval = self.default_tab_twips;
-        let facing = if self.even_and_odd_headers {
-            "<w:evenAndOddHeaders/>"
-        } else {
-            ""
-        };
-        format!(
-            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:defaultTabStop w:val="{interval}"/>{facing}</w:settings>"#
-        )
-    }
-}
+impl Properties {}
 
 #[cfg(test)]
 mod tests {
@@ -176,11 +157,6 @@ mod tests {
             for interval in [1, 360, 720, 2160, u16::MAX] {
                 let (word, table) = fixture(size, interval);
                 assert_eq!(default_tab_twips(&word, &table).unwrap(), Some(interval));
-                assert!(read(&word, &table)
-                    .unwrap()
-                    .unwrap()
-                    .xml()
-                    .contains(&format!("w:val=\"{interval}\"")));
             }
         }
     }

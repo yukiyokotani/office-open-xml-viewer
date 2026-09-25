@@ -43,13 +43,23 @@ impl LegacyXlsWorkbook {
         })
     }
 
-    pub fn measurement_request(&mut self) -> Result<Vec<u8>, JsValue> {
-        self.wire.measurement_request().map_err(string_error)
+    /// UTF-8 JSON: `null` when the host has no layout decision to make (or
+    /// the Normal font is unknown), otherwise the Normal-style font
+    /// `{"family", "sizePt", "bold", "italic"}` whose maximum digit width the
+    /// drawing anchors need.
+    pub fn host_layout_request(&mut self) -> Result<Vec<u8>, JsValue> {
+        self.wire.host_layout_request().map_err(string_error)
     }
 
-    pub fn configure_mdw(&mut self, maximum_digit_width: Option<f64>) -> Result<(), JsValue> {
+    /// Called once before `parse`. `None` declines (pending drawings are
+    /// omitted with a warning); a measured width without a pending decision
+    /// fails closed.
+    pub fn configure_host_layout(
+        &mut self,
+        maximum_digit_width: Option<f64>,
+    ) -> Result<(), JsValue> {
         self.wire
-            .configure_mdw(maximum_digit_width)
+            .configure_host_layout(maximum_digit_width)
             .map_err(string_error)
     }
 
@@ -99,21 +109,9 @@ impl LegacyXlsWorkbook {
         self.wire.assert_healthy().map_err(string_error)
     }
 
-    pub fn resource_usage(&self) -> Result<Vec<u8>, JsValue> {
-        self.wire.assert_healthy().map_err(string_error)?;
-        Err(js_error("xlsx resource usage is unavailable"))
-    }
-
     pub fn sheet_cursor_resource_usage(&self) -> Result<Vec<u8>, JsValue> {
         self.wire.assert_healthy().map_err(string_error)?;
         Err(js_error("worksheet cursor usage is unavailable"))
-    }
-
-    pub fn to_markdown(&self) -> Result<String, JsValue> {
-        self.wire.assert_healthy().map_err(string_error)?;
-        Err(js_error(
-            "UNSUPPORTED:legacy XLS direct markdown projection is not supported",
-        ))
     }
 }
 

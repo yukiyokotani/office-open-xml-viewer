@@ -319,14 +319,15 @@ impl DirectCursor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use docx_model::{DocParagraph, DocTable, HeaderFooter, HeadersFooters};
+    use docx_model::{HeaderFooter, HeadersFooters};
 
+    #[allow(clippy::field_reassign_with_default)]
     fn result(body: Vec<BodyElement>) -> DirectDocResult {
         let mut document = Document::default();
         document.body = body;
         document.headers = HeadersFooters {
             default: Some(HeaderFooter {
-                body: vec![BodyElement::Paragraph(Box::new(DocParagraph::default()))],
+                body: vec![BodyElement::Paragraph(Box::default())],
             }),
             ..HeadersFooters::default()
         };
@@ -365,8 +366,8 @@ mod tests {
     #[test]
     fn streams_one_owned_body_element_then_bodyless_metadata() {
         let mut cursor = DirectCursor::new(result(vec![
-            BodyElement::Table(Box::new(DocTable::default())),
-            BodyElement::Paragraph(Box::new(DocParagraph::default())),
+            BodyElement::Table(Box::default()),
+            BodyElement::Paragraph(Box::default()),
         ]))
         .unwrap();
         cursor.open_document_cursor(7, 9).unwrap();
@@ -388,10 +389,8 @@ mod tests {
 
     #[test]
     fn validates_identity_credit_delivery_and_destructive_lifecycle() {
-        let mut cursor = DirectCursor::new(result(vec![BodyElement::Paragraph(Box::new(
-            DocParagraph::default(),
-        ))]))
-        .unwrap();
+        let mut cursor =
+            DirectCursor::new(result(vec![BodyElement::Paragraph(Box::default())])).unwrap();
         assert!(cursor.open_document_cursor(0, 1).is_err());
         cursor.open_document_cursor(7, 9).unwrap();
         assert!(cursor.pull_document_chunk(1, 7, 9, 1).is_err());
@@ -418,10 +417,8 @@ mod tests {
             serde_json::from_slice(&pull(&mut empty, 0, usize::MAX)).unwrap();
         assert_eq!(value["kind"], "complete");
 
-        let mut limited = DirectCursor::new(result(vec![BodyElement::Paragraph(Box::new(
-            DocParagraph::default(),
-        ))]))
-        .unwrap();
+        let mut limited =
+            DirectCursor::new(result(vec![BodyElement::Paragraph(Box::default())])).unwrap();
         limited.limits.retained = 1;
         limited.open_document_cursor(7, 9).unwrap();
         assert!(limited
@@ -440,8 +437,8 @@ mod tests {
     #[test]
     fn body_and_terminal_ceiling_failures_are_fatal_without_skipping() {
         let mut body = DirectCursor::new(result(vec![
-            BodyElement::Paragraph(Box::new(DocParagraph::default())),
-            BodyElement::Table(Box::new(DocTable::default())),
+            BodyElement::Paragraph(Box::default()),
+            BodyElement::Table(Box::default()),
         ]))
         .unwrap();
         body.limits.body = 1;

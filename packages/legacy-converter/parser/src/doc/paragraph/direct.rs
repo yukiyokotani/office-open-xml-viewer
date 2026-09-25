@@ -146,76 +146,12 @@ impl Properties {
     }
 }
 
-/// The legacy byte adapter always serializes `w:spacing/@w:line`, even for
-/// the unauthored MS-DOC default, so its parsed model reports authored single
-/// spacing where the direct model reports none. Parity tests map that one
-/// default value to absence on both sides before comparing.
-#[cfg(test)]
-pub(in crate::doc) fn byte_adapter_line_spacing_parity(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::Object(object) => {
-            if object.get("lineSpacing")
-                == Some(&serde_json::json!({"value": 1.0, "rule": "auto", "explicit": true}))
-            {
-                object.insert("lineSpacing".into(), serde_json::Value::Null);
-            }
-            for child in object.values_mut() {
-                byte_adapter_line_spacing_parity(child);
-            }
-        }
-        serde_json::Value::Array(items) => {
-            for child in items {
-                byte_adapter_line_spacing_parity(child);
-            }
-        }
-        _ => {}
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Cursor, Write};
-    use zip::write::SimpleFileOptions;
 
-    fn parsed(properties: &Properties) -> serde_json::Value {
-        let document = format!(
-            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr>{}</w:pPr></w:p></w:body></w:document>"#,
-            properties.xml()
-        );
-        let mut bytes = Vec::new();
-        {
-            let mut archive = zip::ZipWriter::new(Cursor::new(&mut bytes));
-            archive
-                .start_file("word/document.xml", SimpleFileOptions::default())
-                .unwrap();
-            archive.write_all(document.as_bytes()).unwrap();
-            archive.finish().unwrap();
-        }
-        let json: serde_json::Value =
-            serde_json::from_str(&docx_parser::parse_docx_native(&bytes).unwrap()).unwrap();
-        json["body"][0].clone()
-    }
-
-    fn assert_property_parity(properties: &Properties) {
-        let mut expected = parsed(properties);
-        // Owned by later direct acquisition seams, not paragraph properties.
-        let object = expected.as_object_mut().unwrap();
-        for key in [
-            "type",
-            "styleId",
-            "defaultFontSize",
-            "defaultFontFamily",
-            "defaultFontFamilyEastAsia",
-            "paragraphMarkFontFacts",
-            "paragraphMarkColor",
-        ] {
-            object.remove(key);
-        }
-        let mut actual = serde_json::to_value(properties.direct_paragraph()).unwrap();
-        super::byte_adapter_line_spacing_parity(&mut actual);
-        super::byte_adapter_line_spacing_parity(&mut expected);
-        assert_eq!(actual, expected);
+    fn projected(properties: &Properties) -> serde_json::Value {
+        serde_json::to_value(properties.direct_paragraph()).unwrap()
     }
 
     #[test]
@@ -248,43 +184,37 @@ mod tests {
     }
 
     #[test]
-    fn ignored_ptistdinfo_has_no_direct_or_xml_model_effect() {
+    fn ignored_ptistdinfo_has_no_direct_model_effect() {
         let baseline = Properties::default();
         let baseline_direct = serde_json::to_value(baseline.direct_paragraph()).unwrap();
-        let baseline_xml = baseline.xml();
         for fill in [0x00, 0x55, 0xff] {
             let mut properties = baseline.clone();
             let mut operand = vec![16];
             operand.extend([fill; 16]);
             assert!(properties.apply(0xc66c, &operand).unwrap());
-            assert_eq!(properties.xml(), baseline_xml);
             assert_eq!(
                 serde_json::to_value(properties.direct_paragraph()).unwrap(),
                 baseline_direct
             );
-            assert_property_parity(&properties);
         }
     }
 
     #[test]
-    fn paragraph_revision_session_id_has_no_direct_or_xml_model_effect() {
+    fn paragraph_revision_session_id_has_no_direct_model_effect() {
         let baseline = Properties::default();
         let baseline_direct = serde_json::to_value(baseline.direct_paragraph()).unwrap();
-        let baseline_xml = baseline.xml();
         for value in [0, 0x7856_3412, u32::MAX] {
             let mut properties = baseline.clone();
             assert!(properties.apply(0x6467, &value.to_le_bytes()).unwrap());
-            assert_eq!(properties.xml(), baseline_xml);
             assert_eq!(
                 serde_json::to_value(properties.direct_paragraph()).unwrap(),
                 baseline_direct
             );
-            assert_property_parity(&properties);
         }
     }
 
     #[test]
-    fn full_resolved_property_projection_matches_docx_parser_semantics() {
+    fn full_resolved_property_projection() {
         let mut properties = Properties::default();
         for (code, operand) in [
             (0x2405, vec![1]),
@@ -313,13 +243,72 @@ mod tests {
         ] {
             assert!(properties.apply(code, &operand).unwrap());
         }
-        assert_property_parity(&properties);
+        let value = projected(&properties);
+        // sprmPJc80 0 (left) is the logical start: right in a bidi paragraph.
+        assert_eq!(value["alignment"], "right");
+        assert_eq!(value["bidi"], true);
+        // Physical indents: sprmPDxaLeft80 is the right side under bidi.
+        assert_eq!(value["indentLeft"], 18.0);
+        assert_eq!(value["indentRight"], 36.0);
+        assert_eq!(value["indentFirst"], -12.0);
+        assert_eq!(value["spaceBefore"], 12.0);
+        assert_eq!(value["spaceAfter"], 24.0);
+        assert_eq!(
+            value["lineSpacing"],
+            serde_json::json!({"value": 18.0, "rule": "exact", "explicit": true})
+        );
+        assert_eq!(
+            value["tabStops"],
+            serde_json::json!([{"pos": 36.0, "alignment": "center", "leader": "dot"}])
+        );
+        for (key, expected) in [
+            ("pageBreakBefore", true),
+            ("keepNext", true),
+            ("keepLines", true),
+            ("widowControl", false),
+            ("overflowPunct", false),
+            ("adjustRightInd", false),
+            ("snapToGrid", false),
+        ] {
+            assert_eq!(value[key], expected, "{key}");
+        }
+        assert_eq!(
+            value["borders"],
+            serde_json::json!({
+                "top": {"style": "double", "color": "0000ff", "width": 1.0, "space": 0.0},
+                "left": {"style": "dashed", "color": "000000", "width": 3.0, "space": 0.0},
+                "right": {"style": "single", "color": "ff0000", "width": 2.0, "space": 0.0},
+                "between": {"style": "dotted", "color": null, "width": 1.0, "space": 0.0}
+            })
+        );
     }
 
     #[test]
-    fn defaults_and_line_rule_units_match_docx_parser_semantics() {
-        assert_property_parity(&Properties::default());
-        for (line, multiple) in [(360i16, 1u16), (360, 0), (-360, 0)] {
+    fn defaults_and_line_rule_units() {
+        let default = projected(&Properties::default());
+        assert_eq!(
+            default,
+            serde_json::json!({
+                "alignment": "left", "indentLeft": 0.0, "indentRight": 0.0, "indentFirst": 0.0,
+                "spaceBefore": 0.0, "spaceAfter": 0.0, "lineSpacing": null, "numbering": null,
+                "tabStops": [], "runs": [], "widowControl": true, "overflowPunct": true,
+                "snapToGrid": true
+            })
+        );
+        for ((line, multiple), expected) in [
+            (
+                (360i16, 1u16),
+                serde_json::json!({"value": 1.5, "rule": "auto", "explicit": true}),
+            ),
+            (
+                (360, 0),
+                serde_json::json!({"value": 18.0, "rule": "atLeast", "explicit": true}),
+            ),
+            (
+                (-360, 0),
+                serde_json::json!({"value": 18.0, "rule": "exact", "explicit": true}),
+            ),
+        ] {
             let mut properties = Properties::default();
             properties
                 .apply(
@@ -327,12 +316,12 @@ mod tests {
                     &[line.to_le_bytes(), multiple.to_le_bytes()].concat(),
                 )
                 .unwrap();
-            assert_property_parity(&properties);
+            assert_eq!(projected(&properties)["lineSpacing"], expected);
         }
     }
 
     #[test]
-    fn parser_model_limits_for_extended_spacing_indent_and_alignment_are_explicit() {
+    fn model_limits_for_extended_spacing_indent_and_alignment_are_explicit() {
         let mut properties = Properties::default();
         for (code, operand) in [
             (0x4458, 120i16.to_le_bytes().to_vec()),
@@ -347,26 +336,50 @@ mod tests {
             assert!(properties.apply(code, &operand).unwrap());
         }
         // The current DOCX model has no fields for line-unit/automatic spacing,
-        // character-unit indents, or textAlignment. The existing DOCX parser
-        // also omits them, so this projection preserves model parity rather
-        // than inventing renderer-facing equivalents.
-        assert_property_parity(&properties);
+        // character-unit indents, or textAlignment. The DOCX parser also
+        // omits them, so this projection does not invent renderer-facing
+        // equivalents.
+        assert_eq!(projected(&properties), projected(&Properties::default()));
 
-        for alignment in 0..=9 {
+        // sprmPJc (logical): 6 is reserved and keeps the default.
+        for (alignment, expected) in [
+            "left",
+            "center",
+            "right",
+            "justify",
+            "distribute",
+            "mediumKashida",
+            "left",
+            "highKashida",
+            "lowKashida",
+            "thaiDistribute",
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let mut properties = Properties::default();
-            assert!(properties.apply(0x2461, &[alignment]).unwrap());
-            assert_property_parity(&properties);
+            assert!(properties.apply(0x2461, &[alignment as u8]).unwrap());
+            assert_eq!(projected(&properties)["alignment"], expected, "{alignment}");
         }
-        for alignment in 0..=5 {
+        // sprmPJc80 (physical): left and right swap in a bidi paragraph.
+        for (alignment, ltr, rtl) in [
+            (0, "left", "right"),
+            (1, "center", "center"),
+            (2, "right", "left"),
+            (3, "justify", "justify"),
+            (4, "mediumKashida", "mediumKashida"),
+            (5, "highKashida", "highKashida"),
+        ] {
             let mut properties = Properties::default();
             assert!(properties.apply(0x2403, &[alignment]).unwrap());
-            assert_property_parity(&properties);
+            assert_eq!(projected(&properties)["alignment"], ltr, "{alignment}");
             assert!(properties.apply(0x2441, &[1]).unwrap());
-            assert_property_parity(&properties);
+            assert_eq!(projected(&properties)["alignment"], rtl, "{alignment}");
         }
     }
 
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn protected_negative_list_indent_has_existing_adapter_precedence() {
         let mut properties = Properties::default();
         properties.ilfo = -1;
@@ -375,25 +388,45 @@ mod tests {
         let direct = properties.direct_paragraph();
         assert_eq!(direct.indent_left, 36.0);
         assert_eq!(direct.indent_first, -18.0);
-        assert_property_parity(&properties);
     }
 
     #[test]
-    fn border_binary_boundaries_match_docx_parser_semantics() {
-        for operand in [
-            vec![8, 0xAB, 0xCD, 0xEF, 0, 255, 1, 31, 0],
-            vec![8, 0, 0, 0, 0xff, 255, 1, 31, 0],
-            vec![8, 0, 0, 0, 0, 8, 0, 0, 0],
-            vec![8, 255, 255, 255, 255, 255, 255, 255, 255],
+    fn border_binary_boundaries() {
+        for (operand, edge, raw) in [
+            (
+                vec![8, 0xAB, 0xCD, 0xEF, 0, 255, 1, 31, 0],
+                serde_json::json!({"style": "single", "color": "abcdef", "width": 31.875, "space": 31.0}),
+                "single",
+            ),
+            (
+                vec![8, 0, 0, 0, 0xff, 255, 1, 31, 0],
+                serde_json::json!({"style": "single", "color": null, "width": 31.875, "space": 31.0}),
+                "single",
+            ),
+            (
+                vec![8, 0, 0, 0, 0, 8, 0, 0, 0],
+                serde_json::json!({"style": "none", "color": null, "width": 0.0, "space": 0.0}),
+                "none",
+            ),
+            (
+                vec![8, 255, 255, 255, 255, 255, 255, 255, 255],
+                serde_json::json!({"style": "none", "color": null, "width": 0.0, "space": 0.0}),
+                "nil",
+            ),
         ] {
             let mut properties = Properties::default();
             assert!(properties.apply(0xc64e, &operand).unwrap());
-            assert_property_parity(&properties);
+            let value = projected(&properties);
+            assert_eq!(value["borders"], serde_json::json!({ "top": edge }));
+            assert_eq!(
+                value["__paragraphTypographyAcquisition"]["borders"]["top"]["val"]["raw"],
+                raw
+            );
         }
     }
 
     #[test]
-    fn every_valid_tab_alignment_and_leader_matches_docx_parser() {
+    fn every_valid_tab_alignment_and_leader() {
         let alignments = [0u8, 1, 2, 3, 4, 6];
         let leaders = [0u8, 1, 2, 3, 4, 5, 7];
         let descriptors: Vec<_> = alignments
@@ -416,16 +449,44 @@ mod tests {
 
         let mut properties = Properties::default();
         assert!(properties.apply(0xc60d, &operand).unwrap());
-        assert_property_parity(&properties);
-        assert!(properties
+        let expected: Vec<_> = descriptors
+            .iter()
+            .zip(&positions)
+            .map(|(descriptor, position)| {
+                let alignment = ["left", "center", "right", "decimal", "bar", "", "num"]
+                    [usize::from(descriptor & 7)];
+                let leader = if alignment == "bar" {
+                    "none"
+                } else {
+                    [
+                        "none",
+                        "dot",
+                        "hyphen",
+                        "underscore",
+                        "underscore",
+                        "middleDot",
+                        "",
+                        "none",
+                    ][usize::from(descriptor >> 3)]
+                };
+                (
+                    f64::from(*position) / 20.0,
+                    alignment.to_owned(),
+                    leader.to_owned(),
+                )
+            })
+            .collect();
+        let actual: Vec<_> = properties
             .direct_paragraph()
             .tab_stops
-            .first()
-            .is_some_and(|tab| tab.pos < 0.0));
+            .into_iter()
+            .map(|tab| (tab.pos, tab.alignment, tab.leader))
+            .collect();
+        assert_eq!(actual, expected);
     }
 
     #[test]
-    fn old_and_modern_border_sides_and_bidi_swaps_match_docx_parser() {
+    fn old_and_modern_border_sides_and_bidi_swaps() {
         for bidi in [false, true] {
             for side in 0u16..5 {
                 for modern in [false, true] {
@@ -439,7 +500,20 @@ mod tests {
                         (0x6424 + side, vec![255, 1, 6, 0x7f])
                     };
                     assert!(properties.apply(code, &operand).unwrap());
-                    assert_property_parity(&properties);
+                    let physical = if bidi {
+                        ["top", "right", "bottom", "left", "between"]
+                    } else {
+                        ["top", "left", "bottom", "right", "between"]
+                    }[usize::from(side)];
+                    let color = if modern { "123456" } else { "ff0000" };
+                    let value = projected(&properties);
+                    assert_eq!(
+                        value["borders"],
+                        serde_json::json!({
+                            physical: {"style": "single", "color": color, "width": 31.875, "space": 31.0}
+                        }),
+                        "bidi {bidi}, side {side}, modern {modern}"
+                    );
                 }
             }
         }
@@ -453,7 +527,6 @@ mod tests {
         let mut shd = vec![10, 0, 0, 0, 0xff, 0xdd, 0xdd, 0xdd, 0];
         shd.extend(0u16.to_le_bytes());
         assert!(properties.apply(0xc64d, &shd).unwrap());
-        assert!(properties.has_direct_only_properties());
         let paragraph = properties.direct_paragraph();
         assert!(paragraph.contextual_spacing);
         assert_eq!(paragraph.shading.as_deref(), Some("dddddd"));
@@ -485,7 +558,6 @@ mod tests {
             Some("d9d9d9")
         );
         assert!(!properties.apply(0x442d, &0x3900u16.to_le_bytes()).unwrap());
-        assert!(!Properties::default().has_direct_only_properties());
     }
 
     #[test]
@@ -504,8 +576,6 @@ mod tests {
             serde_json::to_value(properties.direct_paragraph()).unwrap(),
             baseline
         );
-        assert!(!properties.has_direct_only_properties());
-        assert_eq!(properties.xml(), Properties::default().xml());
         assert!(Properties::default()
             .apply(0xc653, &[7, 0, 0, 0, 0, 8, 1, 0, 0])
             .is_err());
@@ -524,7 +594,6 @@ mod tests {
         ] {
             assert!(properties.apply(code, &operand).unwrap());
         }
-        assert!(properties.has_direct_only_properties());
         let frame = properties.direct_frame().unwrap().unwrap();
         assert_eq!(
             (frame.h_anchor.as_str(), frame.v_anchor.as_str()),

@@ -1,8 +1,7 @@
 //! MS-DOC 2.3.3 / 2.8.22: six separators then six stories per section.
 //! Empty CP ranges inherit; nonempty blank paragraphs explicitly clear a header.
 use super::{
-    build_formatted_story, formatting, header_fields, pictures, read_story_range, sections, u32_at,
-    unsupported, Content, Story, StoryParts, MAX_STORY_CONTROLS,
+    header_fields, read_story_range, sections, u32_at, unsupported, Story, MAX_STORY_CONTROLS,
 };
 use std::ops::Range;
 
@@ -12,7 +11,6 @@ pub(super) struct Headers<'a> {
     fields: header_fields::Table,
     /// Byte ranges of the six separator stories (MS-DOC 2.3.3), each
     /// including its guard paragraph mark; empty when the story is absent.
-    #[cfg_attr(not(feature = "direct-doc"), allow(dead_code))]
     separators: [Range<usize>; 6],
 }
 
@@ -27,7 +25,6 @@ impl Headers<'_> {
         attach_entries(&self.entries, sections)
     }
 
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) fn entry(&self, index: usize) -> Option<&Entry> {
         self.entries
             .binary_search_by_key(&index, |entry| entry.index)
@@ -35,20 +32,17 @@ impl Headers<'_> {
             .map(|position| &self.entries[position])
     }
 
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) fn entry_text<'a>(&'a self, entry: &Entry) -> &'a str {
         &self.story.text[entry.text.clone()]
     }
 
     /// The raw text of separator story `index` (0-2 footnote separator,
     /// continuation separator and continuation notice; 3-5 the endnote ones).
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) fn separator_text(&self, index: usize) -> &str {
         &self.story.text[self.separators[index].clone()]
     }
 
     /// MS-DOC 2.8.25 PlcfFldHdr, with CPs relative to the header document.
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) fn fields(&self) -> &header_fields::Table {
         &self.fields
     }
@@ -62,66 +56,6 @@ fn attach_entries(entries: &[Entry], sections: &mut [sections::Section]) -> Resu
             .attach_header_footer_reference(entry.section_reference())?;
     }
     Ok(())
-}
-
-impl Headers<'_> {
-    pub fn build_parts(
-        &self,
-        formatting: &mut formatting::Formatting<'_>,
-        pictures: &mut pictures::Store<'_>,
-        mut remaining: usize,
-    ) -> Result<StoryParts, String> {
-        let mut output = StoryParts::default();
-        for entry in &self.entries {
-            let text = &self.story.text[entry.text.clone()];
-            if text.ends_with('\u{7}') {
-                // MS-DOC 2.4.3: a depth-one table's terminating paragraph
-                // is U+0007, not U+000D. Require its actual row properties.
-                let cp = entry.cp + text.encode_utf16().count() - 1;
-                let (_, fc, piece) = self
-                    .story
-                    .position(cp)
-                    .ok_or_else(|| unsupported("Word header table mark outside story"))?;
-                let properties = formatting.table_properties(fc, piece.prm, &self.story.prcs)?;
-                if properties.depth()? != 1 || !properties.row_end {
-                    return Err(unsupported(
-                        "Word header lacks a final paragraph or table row",
-                    ));
-                }
-            }
-            output.omitted_floating |= text.contains('\u{8}');
-            pictures.begin_part();
-            let xml = build_formatted_story(
-                &self.story,
-                Content::HeaderFooter {
-                    kind: entry.kind(),
-                    text,
-                    cp: entry.cp,
-                    fields: &self.fields,
-                },
-                Some(formatting),
-                Some(pictures),
-                None,
-                remaining,
-            )?;
-            remaining = remaining.checked_sub(xml.len()).ok_or("OUTPUT_TOO_LARGE")?;
-            let filename = entry.filename();
-            output.parts.push((format!("word/{filename}"), xml));
-            let relationships = pictures.relationships();
-            if !relationships.is_empty() {
-                let xml = format!(
-                    r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{relationships}</Relationships>"#
-                );
-                remaining = remaining.checked_sub(xml.len()).ok_or("OUTPUT_TOO_LARGE")?;
-                output
-                    .parts
-                    .push((format!("word/_rels/{filename}.rels"), xml));
-            }
-            output.content_types.push_str(&format!(r#"<Override PartName="/word/{filename}" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.{}+xml"/>"#, entry.kind()));
-            output.relationships.push_str(&format!(r#"<Relationship Id="{}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/{}" Target="{filename}"/>"#, entry.id(), entry.kind()));
-        }
-        Ok(output)
-    }
 }
 
 impl Entry {
@@ -143,18 +77,9 @@ impl Entry {
     pub fn section(&self) -> usize {
         self.index / 6
     }
-    pub fn kind(&self) -> &'static str {
-        self.section_reference().kind.as_str()
-    }
     #[cfg(test)]
-    pub fn variant(&self) -> &'static str {
-        self.section_reference().variant.as_str()
-    }
-    pub fn id(&self) -> String {
-        self.section_reference().id()
-    }
-    pub fn filename(&self) -> String {
-        format!("{}{}.xml", self.kind(), self.index + 1)
+    pub fn variant(&self) -> sections::HeaderFooterVariant {
+        self.section_reference().variant
     }
 }
 
@@ -354,7 +279,7 @@ mod tests {
         assert_eq!(&text[entries[0].text.clone()], "A😀\r");
         assert_eq!(entries[1].section(), 2);
         assert_eq!(&text[entries[1].text.clone()], "\r");
-        assert_eq!(entries[1].variant(), "default");
+        assert_eq!(entries[1].variant(), sections::HeaderFooterVariant::Default);
         let mut sections = [
             sections::Section::for_test(1, 2),
             sections::Section::for_test(2, 2),
@@ -403,20 +328,10 @@ mod tests {
                     expected[slot]
                 );
             }
-            let xml = section.xml().unwrap();
-            let mut previous = 0;
-            for slot in 0..6 {
-                let index = section_index * 6 + slot;
-                let marker = format!("r:id=\"rIdHf{}\"", index + 1);
-                let position = xml.find(&marker).unwrap();
-                assert!(position >= previous);
-                previous = position;
-                assert!(position < xml.find("<w:type").unwrap());
-            }
         }
-        let before = sections[0].xml().unwrap();
+        let before = *sections[0].header_footer_references();
         assert!(attach_entries(&entries[..1], &mut sections).is_err());
-        assert_eq!(sections[0].xml().unwrap(), before);
+        assert_eq!(*sections[0].header_footer_references(), before);
         assert!(attach_entries(&entries[6..7], &mut sections[..1]).is_err());
     }
     #[test]

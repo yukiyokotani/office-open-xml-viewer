@@ -1,32 +1,28 @@
-//! BIFF8 (`.xls`) compatibility subset.
+//! BIFF8 (`.xls`) direct renderer-model reader.
 //!
-//! The converter preserves worksheet names, scalar/string/boolean/error values,
-//! cached formula results, merged-cell ranges, BIFF8 cell styles, shared-string
-//! character formatting and geometry.
-//! Formula token programs, charts, external links, and macros are never evaluated
-//! or copied. Passive picture projection requires host-measured Normal-font metrics.
+//! The owned parse projects worksheet names and visibility, scalar/string/
+//! boolean/error values with their formula text, merged-cell ranges, BIFF8
+//! cell styles, shared-string character formatting, geometry, views,
+//! conditional formatting, tables, hyperlinks, filters, validation, defined
+//! names, PivotTable layout, charts, pictures and shapes into the XLSX
+//! renderer model (see `direct`). Formula token programs, external links and
+//! macros are never evaluated or copied; drawn content the model cannot carry
+//! fails closed. Anchored drawings require host-measured Normal-font metrics.
 //! See [MS-XLS] 2.4 for record structures and 2.5.293 for BIFF8
 //! Unicode strings. FILEPASS and pre-BIFF8 workbooks fail closed.
 
 use std::collections::{BTreeMap, HashSet};
 
 use crate::cfb::CompoundFile;
-use crate::ooxml::{write_package, xml_attr, xml_text, ROOT_RELS_XLSX};
 
 mod cell_formulas;
-// Charts and shapes are projected by the direct model only.
-#[cfg(any(test, feature = "direct-xls"))]
 mod chart;
 mod conditional;
-#[cfg(any(test, feature = "direct-xls"))]
 pub(crate) mod direct;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod direct_corpus_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))]
-mod direct_strings_tests;
-#[cfg(all(test, not(target_arch = "wasm32")))]
 mod direct_styles_tests;
-#[cfg(any(test, feature = "direct-xls"))]
 pub(crate) mod direct_wire;
 pub(crate) mod drawing_anchors;
 mod drawing_media;
@@ -38,7 +34,6 @@ mod pictures;
 mod pivots;
 mod print;
 mod rich;
-#[cfg(any(test, feature = "direct-xls"))]
 mod shapes;
 mod styles;
 mod tables;
@@ -115,11 +110,6 @@ pub(crate) fn inspect_pictures(
     Ok(crate::XlsPictureInspection { anchors, images })
 }
 
-pub struct XlsConversion {
-    pub bytes: Vec<u8>,
-    pub warnings: Vec<String>,
-}
-
 #[derive(Debug, Clone)]
 struct BoundSheet {
     offset: usize,
@@ -134,17 +124,6 @@ enum SheetVisibility {
     Visible,
     Hidden,
     VeryHidden,
-}
-
-impl SheetVisibility {
-    fn attribute(self) -> &'static str {
-        // ECMA-376 18.2.19: omitted sheet/@state means visible.
-        match self {
-            Self::Visible => "",
-            Self::Hidden => " state=\"hidden\"",
-            Self::VeryHidden => " state=\"veryHidden\"",
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -166,28 +145,26 @@ struct SheetData {
     print: print::PrintSettings,
     views: views::SheetViews,
     merged: Vec<(u16, u16, u16, u16)>,
-    formula_results: bool,
     custom_views_omitted: bool,
     /// MS-XLS 2.4.56 CondFmt, 2.4.42 CF, 2.4.57 CondFmt12, 2.4.43 CF12 and
     /// 2.4.44 CFEx records of the worksheet substream, in stream order.
     conditional_records: conditional::Records,
-    /// Their XLSX-model projection (direct path only).
+    /// Their XLSX-model projection.
     conditional_formats: Vec<xlsx_model::ConditionalFormat>,
-    /// A chart sheet's chart (direct path only); such a sheet has no cells.
-    #[cfg(any(test, feature = "direct-xls"))]
+    /// A chart sheet's chart; such a sheet has no cells.
     chart_sheet: Option<chart::ChartSheet>,
     /// MS-XLS 2.4.113 FeatHdr11, 2.4.114 Feature11, 2.4.115 Feature12 and
     /// 2.4.157 List12 records (tables), in stream order.
     table_records: tables::Records,
-    /// Their XLSX-model projection (direct path only).
+    /// Their XLSX-model projection.
     tables: Vec<xlsx_model::TableInfo>,
     /// MS-XLS 2.4.259 SheetExt (tab color), if present.
     sheet_ext: Option<Vec<u8>>,
-    /// Its resolved tab color (direct path only).
+    /// Its resolved tab color.
     tab_color: Option<String>,
     /// MS-XLS 2.4.140 HLink and 2.4.141 HLinkTooltip records, in order.
     hyperlink_records: tables::Records,
-    /// Their XLSX-model projection (direct path only).
+    /// Their XLSX-model projection.
     hyperlinks: Vec<xlsx_model::Hyperlink>,
     /// MS-XLS 2.4.8 AutoFilterInfo: the sheet has an AutoFilter over this
     /// many columns.
@@ -195,30 +172,26 @@ struct SheetData {
     /// AutoFilter criteria (2.4.6 AutoFilter, 2.4.7 AutoFilter12, 2.4.117
     /// FilterMode) are present.
     autofilter_criteria: bool,
-    /// Its `_FilterDatabase` range (direct path only).
+    /// Its `_FilterDatabase` range.
     auto_filter: Option<xlsx_model::CellRange>,
     /// MS-XLS 2.4.96 DVal and 2.4.95 Dv records, in order.
     validation_records: tables::Records,
-    /// Their XLSX-model projection (direct path only).
+    /// Their XLSX-model projection.
     data_validations: Vec<xlsx_model::DataValidation>,
-    /// Defined names visible on this sheet (direct path only).
+    /// Defined names visible on this sheet.
     defined_names: Vec<xlsx_model::DefinedName>,
     /// A cell, row or column shows phonetic guides (MS-XLS 2.4.192
     /// PhoneticInfo sqref, ROW/COLINFO fPhonetic).
     shows_phonetic: bool,
     /// FORMULA, SHRFMLA, ARRAY and TABLE records, in order.
     formula_records: tables::Records,
-    /// Formula text by cell (direct path only).
+    /// Formula text by cell.
     formulas: BTreeMap<(u16, u16), String>,
     /// PivotTable view records (see `pivots::RECORDS`) with their Continue
     /// records, in order.
     pivot_records: tables::Records,
-    /// Their XLSX-model projection (direct path only).
+    /// Their XLSX-model projection.
     pivot_tables: Vec<xlsx_model::PivotTableMetadata>,
-}
-
-pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<XlsConversion, String> {
-    prepare(cfb, false)?.finish(max_output_bytes, None)
 }
 
 /// Owned parse result: no CFB/BIFF slices survive preparation. This boundary
@@ -228,72 +201,31 @@ pub(crate) struct PreparedXls {
     styles: styles::ResolvedStyleSheet,
     shared_strings: Vec<rich::Text>,
     date1904: bool,
-    window_count: usize,
     warnings: Vec<String>,
     pub(crate) font: Option<styles::NormalFont>,
     pictures: pictures::Pictures,
-    #[cfg(any(test, feature = "direct-xls"))]
     charts: chart::Charts,
-    #[cfg(any(test, feature = "direct-xls"))]
     shapes: shapes::Shapes,
 }
 
-impl PreparedXls {
-    pub(crate) fn finish(
-        mut self,
-        max_output_bytes: usize,
-        mdw: Option<f64>,
-    ) -> Result<XlsConversion, String> {
-        if mdw.is_some_and(|v| !v.is_finite() || v.fract() != 0.0 || !(1.0..=4096.0).contains(&v)) {
-            return Err(unsupported("invalid measured XLS maximum digit width"));
-        }
-        let mdw = mdw.filter(|_| self.font.is_some());
-        if mdw.is_none() && !self.pictures.is_empty() {
-            self.warnings
-                .push("legacy-xls:unmeasured-pictures-omitted".into());
-        }
-        let drawings = mdw.map(|m| self.pictures.emit(&self.sheets, m, &mut self.warnings));
-        if drawings.as_ref().is_some_and(|d| !d.sheets.is_empty()) {
-            self.warnings[0] =
-                "legacy-xls:unsupported-drawings-conditional-formatting-and-external-links-omitted"
-                    .into();
-        }
-        let bytes = build_xlsx_with_drawings(
-            &self.sheets,
-            &self.styles,
-            self.shared_strings,
-            self.date1904,
-            self.window_count,
-            Emission {
-                max_output_bytes,
-                mdw,
-                drawings: drawings.as_ref(),
-            },
-        )?;
-        Ok(XlsConversion {
-            bytes,
-            warnings: self.warnings,
-        })
-    }
+/// Read the root `Workbook` (or BIFF5-era `Book`) stream through the scoped
+/// CFB directory and prepare its owned renderer-model inputs.
+fn prepare(cfb: &CompoundFile<'_>) -> Result<PreparedXls, String> {
+    const MAX_DIRECT_WORKBOOK_BYTES: usize = 256 * 1024 * 1024;
+    let streams = cfb.scoped_streams().map_err(unsupported)?;
+    let workbook = match streams.optional_stream(&["Workbook"], MAX_DIRECT_WORKBOOK_BYTES) {
+        Ok(Some(value)) => value,
+        Ok(None) => streams
+            .stream(&["Book"], MAX_DIRECT_WORKBOOK_BYTES)
+            .map_err(unsupported)?,
+        Err(error) => return Err(unsupported(error)),
+    };
+    prepare_workbook(&workbook)
 }
 
-pub(crate) fn prepare(cfb: &CompoundFile<'_>, with_pictures: bool) -> Result<PreparedXls, String> {
-    let workbook = cfb
-        .stream("Workbook")
-        .or_else(|_| cfb.stream("Book"))
-        .map_err(unsupported)?;
-    prepare_workbook(&workbook, with_pictures, false)
-}
-
-fn prepare_workbook(
-    workbook: &[u8],
-    with_pictures: bool,
-    direct: bool,
-) -> Result<PreparedXls, String> {
+fn prepare_workbook(workbook: &[u8]) -> Result<PreparedXls, String> {
     let records = records(workbook)?;
-    if direct {
-        validate_direct_retention(&records)?;
-    }
+    validate_direct_retention(&records)?;
     let first = records
         .first()
         .ok_or_else(|| unsupported("empty BIFF workbook"))?;
@@ -357,9 +289,8 @@ fn prepare_workbook(
         return Err(unsupported("duplicate BIFF worksheet offsets"));
     }
 
-    // Validate global rich-text references before allocating worksheet cells.
-    // This replaces the old SST encoder's eager FontIndex validation without
-    // making XML generation part of source admission.
+    // Validate global rich-text references before allocating worksheet cells,
+    // so model projection never meets an unresolvable run font.
     let mut resolved_styles = styles.resolve()?;
     for text in &shared_strings {
         text.validate_fonts(&resolved_styles)?;
@@ -368,7 +299,6 @@ fn prepare_workbook(
     let mut converted = Vec::new();
     let mut pending_chart_sheets = Vec::new();
     let mut skipped_non_worksheets = false;
-    let mut formula_results = false;
     let mut incomplete_print_margins = false;
     let mut custom_views_omitted = false;
     let mut tabs = Vec::new();
@@ -384,11 +314,11 @@ fn prepare_workbook(
     for (tab, sheet) in sheets.into_iter().enumerate() {
         if sheet.sheet_type != 0 {
             // MS-XLS 2.4.28 BoundSheet8.dt: 1 macro sheet, 2 chart sheet, 6 VB
-            // module. A VB module has no sheet content to display. The direct
-            // reader projects chart sheets (their charts are parsed once all
-            // worksheets they reference are read) and rejects macro sheets
+            // module. A VB module has no sheet content to display. Chart
+            // sheets are projected (their charts are parsed once all
+            // worksheets they reference are read); macro sheets are rejected
             // rather than dropping tabs whose cells Excel shows.
-            if direct && sheet.sheet_type == 2 {
+            if sheet.sheet_type == 2 {
                 pending_chart_sheets.push((converted.len(), sheet.offset));
                 converted.push((
                     sheet.name,
@@ -400,7 +330,7 @@ fn prepare_workbook(
                 tabs.push(tab);
                 continue;
             }
-            if direct && sheet.sheet_type != 6 {
+            if sheet.sheet_type != 6 {
                 return Err(unsupported(match sheet.sheet_type {
                     1 => "XLS macro sheets are not projected",
                     _ => "unknown XLS sheet type",
@@ -410,35 +340,29 @@ fn prepare_workbook(
             continue;
         }
         let mut data = parse_sheet(&records, &sheet, &shared_strings)?;
-        // Only the direct model projects conditional formatting; the byte
-        // converter keeps its documented omission warning.
-        if direct {
-            if let Some(ext) = data.sheet_ext.as_deref() {
-                if conditional_theme.is_none() {
-                    conditional_theme = Some((
-                        theme::Colors::parse(&records)?,
-                        conditional::Externs::parse(&records)?,
-                    ));
-                }
-                let (theme, _) = conditional_theme.as_ref().expect("parsed theme");
-                data.tab_color = tab_color(ext, &styles, theme)?;
+        if let Some(ext) = data.sheet_ext.as_deref() {
+            if conditional_theme.is_none() {
+                conditional_theme = Some((
+                    theme::Colors::parse(&records)?,
+                    conditional::Externs::parse(&records)?,
+                ));
             }
+            let (theme, _) = conditional_theme.as_ref().expect("parsed theme");
+            data.tab_color = tab_color(ext, &styles, theme)?;
         }
-        if direct {
-            for (kind, record) in data.hyperlink_records.iter() {
-                if kind == 0x01b8 {
-                    data.hyperlinks.push(hyperlinks::hlink(record)?);
-                } else {
-                    hyperlinks::tooltip(record)?;
-                }
+        for (kind, record) in data.hyperlink_records.iter() {
+            if kind == 0x01b8 {
+                data.hyperlinks.push(hyperlinks::hlink(record)?);
+            } else {
+                hyperlinks::tooltip(record)?;
             }
         }
         // Phonetic guides (ExtRst runs in the shared strings) are not
         // projected; a sheet that displays them fails closed.
-        if direct && data.shows_phonetic {
+        if data.shows_phonetic {
             return Err(unsupported("XLS phonetic guides are not projected"));
         }
-        if direct && !data.formula_records.is_empty() {
+        if !data.formula_records.is_empty() {
             if conditional_theme.is_none() {
                 conditional_theme = Some((
                     theme::Colors::parse(&records)?,
@@ -448,7 +372,7 @@ fn prepare_workbook(
             let (_, externs) = conditional_theme.as_ref().expect("parsed theme");
             data.formulas = cell_formulas::project(data.formula_records.iter(), externs)?;
         }
-        if direct && has_names {
+        if has_names {
             if conditional_theme.is_none() {
                 conditional_theme = Some((
                     theme::Colors::parse(&records)?,
@@ -461,7 +385,7 @@ fn prepare_workbook(
             }
             data.defined_names = defined_names.as_ref().expect("parsed names").for_sheet(tab);
         }
-        if direct && !data.validation_records.is_empty() {
+        if !data.validation_records.is_empty() {
             if conditional_theme.is_none() {
                 conditional_theme = Some((
                     theme::Colors::parse(&records)?,
@@ -471,7 +395,7 @@ fn prepare_workbook(
             let (_, externs) = conditional_theme.as_ref().expect("parsed theme");
             data.data_validations = validation::project(data.validation_records.iter(), externs)?;
         }
-        if let (true, Some(columns)) = (direct, data.autofilter_info) {
+        if let Some(columns) = data.autofilter_info {
             if filter_databases.is_none() {
                 filter_databases = Some(filters::Databases::parse(&records)?);
             }
@@ -483,7 +407,7 @@ fn prepare_workbook(
             filters::check(range, columns, data.autofilter_criteria)?;
             data.auto_filter = Some(xlsx_model::CellRange { ..*range });
         }
-        if direct && !data.table_records.is_empty() {
+        if !data.table_records.is_empty() {
             if conditional_theme.is_none() {
                 conditional_theme = Some((
                     theme::Colors::parse(&records)?,
@@ -505,7 +429,7 @@ fn prepare_workbook(
                 &mut dxfs,
             )?;
         }
-        if direct && !data.pivot_records.is_empty() {
+        if !data.pivot_records.is_empty() {
             if conditional_theme.is_none() {
                 conditional_theme = Some((
                     theme::Colors::parse(&records)?,
@@ -526,7 +450,7 @@ fn prepare_workbook(
                 &context,
             )?;
         }
-        if direct && !data.conditional_records.is_empty() {
+        if !data.conditional_records.is_empty() {
             if conditional_theme.is_none() {
                 conditional_theme = Some((
                     theme::Colors::parse(&records)?,
@@ -549,7 +473,6 @@ fn prepare_workbook(
         data.geometry.validate_styles(&styles)?;
         incomplete_print_margins |= data.print.incomplete_margins();
         custom_views_omitted |= data.custom_views_omitted;
-        formula_results |= data.formula_results;
         converted.push((sheet.name, data));
         tabs.push(tab);
     }
@@ -559,35 +482,22 @@ fn prepare_workbook(
         ));
     }
     resolved_styles.set_dxfs(dxfs);
-    // The byte converter omits drawings and conditional formatting and says
-    // so. The direct reader projects pictures, charts and conditional
-    // formatting or rejects the workbook (below), and never evaluates external
-    // links, whose cached cell values it shows, so it makes no such claim.
-    let mut warnings: Vec<String> = if direct {
-        Vec::new()
-    } else {
-        vec!["legacy-xls:drawings-conditional-formatting-and-external-links-omitted".into()]
-    };
-    // The direct model carries print areas and titles as defined names;
-    // page setup, headers and footers (including 2.4.136 HeaderFooter) only
-    // affect printing, which neither the XLSX model nor its viewer has.
-    // Phonetic strings (ExtRst) display only in cells marked by
-    // PhoneticInfo, ROW or COLINFO, which the direct path rejects instead.
-    if !direct {
-        warnings.push(
-            "legacy-xls:phonetic-data-print-areas-titles-and-extended-headers-omitted".into(),
-        );
-    }
-    // The direct model projects XFExt colors, indentation and gradient
-    // fills; StyleExt (2.4.270) only extends the cell-style gallery entries,
-    // which cells reach through their XFs. Anything else fails closed.
-    if direct && styles.extensions_unrepresented() {
+    // Pictures, charts, shapes and conditional formatting are projected or
+    // the workbook is rejected (below). External links are never evaluated;
+    // their cached cell values are shown. Formula text is carried with the
+    // cached results, as the XLSX model does. Print areas and titles are
+    // defined names; page setup, headers and footers (including 2.4.136
+    // HeaderFooter) only affect printing, which neither the XLSX model nor
+    // its viewer has. Phonetic strings (ExtRst) display only in cells marked
+    // by PhoneticInfo, ROW or COLINFO, which are rejected above.
+    let mut warnings: Vec<String> = Vec::new();
+    // XFExt colors, indentation and gradient fills are projected; StyleExt
+    // (2.4.270) only extends the cell-style gallery entries, which cells
+    // reach through their XFs. Anything else fails closed.
+    if styles.extensions_unrepresented() {
         return Err(unsupported(
             "XLS extended cell formatting is not representable",
         ));
-    }
-    if styles.extensions_omitted && !direct {
-        warnings.push("legacy-xls:extended-styles-omitted".into());
     }
     if incomplete_print_margins {
         warnings.push("legacy-xls:incomplete-print-margins-omitted".into());
@@ -595,97 +505,46 @@ fn prepare_workbook(
     if custom_views_omitted {
         warnings.push("legacy-xls:saved-custom-views-omitted".into());
     }
-    // The direct model carries formula text with the cached results, as the
-    // XLSX model does, so only the byte converter replaces formulas.
-    if formula_results && !direct {
-        warnings.push("legacy-xls:formulas-replaced-with-cached-results".into());
-    }
     if skipped_non_worksheets {
         warnings.push("legacy-xls:non-worksheet-tabs-omitted".into());
     }
-    if with_pictures && direct {
-        let filters: BTreeMap<usize, &xlsx_model::CellRange> = tabs
-            .iter()
-            .zip(&converted)
-            .filter_map(|(&tab, (_, sheet))| sheet.auto_filter.as_ref().map(|range| (tab, range)))
-            .collect();
-        validate_direct_drawings(&records, &tabs, &filters)?;
-    }
-    // Rectangles, text boxes, freeforms and their groups: direct model only.
-    #[cfg(any(test, feature = "direct-xls"))]
-    let mut shapes = if with_pictures && direct {
-        shapes::Shapes::prepare(&records, &tabs, &styles)?
-    } else {
-        shapes::Shapes::default()
-    };
-    #[cfg(any(test, feature = "direct-xls"))]
+    let filters: BTreeMap<usize, &xlsx_model::CellRange> = tabs
+        .iter()
+        .zip(&converted)
+        .filter_map(|(&tab, (_, sheet))| sheet.auto_filter.as_ref().map(|range| (tab, range)))
+        .collect();
+    validate_direct_drawings(&records, &tabs, &filters)?;
+    // Rectangles, text boxes, freeforms and their groups.
+    let mut shapes = shapes::Shapes::prepare(&records, &tabs, &styles)?;
     let grouped_pictures = shapes.picture_indices();
-    #[cfg(not(any(test, feature = "direct-xls")))]
-    let grouped_pictures = std::collections::BTreeSet::new();
-    let pictures = if with_pictures {
-        // The direct reader follows Excel, which displays GDI+ metafiles with
-        // their short end-of-file record; the byte converter keeps its
-        // documented validation.
-        let raster = if direct {
-            crate::officeart::raster::Raster::ExcelMetafiles
-        } else {
-            crate::officeart::raster::Raster::Advertised
-        };
-        match pictures::Pictures::prepare(&records, &tabs, raster, &grouped_pictures) {
-            Ok(value) => {
-                if value.has_unsupported_images() {
-                    if direct {
-                        return Err(unsupported("BIFF picture BLIP is not a supported image"));
-                    }
-                    warnings.push("legacy-xls:invalid-or-unsupported-pictures-omitted".into());
-                }
-                value
-            }
-            Err(error) if direct => return Err(format!("{error} (XLS picture)")),
-            Err(_) => {
-                // Optional passive content fails closed without discarding
-                // otherwise valid cells. Never copy the rejected image bytes.
-                warnings.push("legacy-xls:invalid-or-unsupported-pictures-omitted".into());
-                pictures::Pictures::default()
-            }
-        }
-    } else {
-        pictures::Pictures::default()
-    };
-    // Only the direct model projects charts; the byte converter keeps its
-    // documented drawing omission.
-    #[cfg(any(test, feature = "direct-xls"))]
-    let charts = if with_pictures && direct {
-        chart::Charts::prepare(&records, &tabs, &styles, &converted, &shared_strings)?
-    } else {
-        chart::Charts::default()
-    };
-    #[cfg(any(test, feature = "direct-xls"))]
-    let direct_drawings = {
-        shapes.attach_images(&pictures)?;
-        let mut chart_sheets = Vec::with_capacity(pending_chart_sheets.len());
-        for &(index, offset) in &pending_chart_sheets {
-            let start = records
-                .binary_search_by_key(&offset, |record| record.offset)
-                .map_err(|_| unsupported("BOUNDSHEET8 points outside the BIFF record stream"))?;
-            chart_sheets.push((
-                index,
-                chart::chart_sheet(&records, start, &tabs, &styles, &converted, &shared_strings)?,
-            ));
-        }
-        for (index, chart_sheet) in chart_sheets {
-            converted[index].1.chart_sheet = Some(chart_sheet);
-        }
-        !charts.is_empty() || !shapes.is_empty()
-    };
-    // Only the direct model queues chart sheets, and it is not built here.
-    #[cfg(not(any(test, feature = "direct-xls")))]
-    let direct_drawings = if pending_chart_sheets.is_empty() {
-        false
-    } else {
-        return Err(unsupported("XLS chart sheets need the direct model"));
-    };
-    let font = if with_pictures && (!pictures.is_empty() || direct_drawings) {
+    // Excel displays GDI+ metafiles with their short end-of-file record, so
+    // their rasters are admitted as Excel draws them.
+    let pictures = pictures::Pictures::prepare(
+        &records,
+        &tabs,
+        crate::officeart::raster::Raster::ExcelMetafiles,
+        &grouped_pictures,
+    )
+    .map_err(|error| format!("{error} (XLS picture)"))?;
+    if pictures.has_unsupported_images() {
+        return Err(unsupported("BIFF picture BLIP is not a supported image"));
+    }
+    let charts = chart::Charts::prepare(&records, &tabs, &styles, &converted, &shared_strings)?;
+    shapes.attach_images(&pictures)?;
+    let mut chart_sheets = Vec::with_capacity(pending_chart_sheets.len());
+    for &(index, offset) in &pending_chart_sheets {
+        let start = records
+            .binary_search_by_key(&offset, |record| record.offset)
+            .map_err(|_| unsupported("BOUNDSHEET8 points outside the BIFF record stream"))?;
+        chart_sheets.push((
+            index,
+            chart::chart_sheet(&records, start, &tabs, &styles, &converted, &shared_strings)?,
+        ));
+    }
+    for (index, chart_sheet) in chart_sheets {
+        converted[index].1.chart_sheet = Some(chart_sheet);
+    }
+    let font = if !pictures.is_empty() || !charts.is_empty() || !shapes.is_empty() {
         styles.normal_font()
     } else {
         None
@@ -695,13 +554,10 @@ fn prepare_workbook(
         styles: resolved_styles,
         shared_strings,
         date1904,
-        window_count,
         warnings,
         font,
         pictures,
-        #[cfg(any(test, feature = "direct-xls"))]
         charts,
-        #[cfg(any(test, feature = "direct-xls"))]
         shapes,
     })
 }
@@ -845,20 +701,6 @@ fn tab_color(
     })?))
 }
 
-#[cfg(any(test, feature = "direct-xls"))]
-fn prepare_direct(cfb: &CompoundFile<'_>) -> Result<PreparedXls, String> {
-    const MAX_DIRECT_WORKBOOK_BYTES: usize = 256 * 1024 * 1024;
-    let streams = cfb.scoped_streams().map_err(unsupported)?;
-    let workbook = match streams.optional_stream(&["Workbook"], MAX_DIRECT_WORKBOOK_BYTES) {
-        Ok(Some(value)) => value,
-        Ok(None) => streams
-            .stream(&["Book"], MAX_DIRECT_WORKBOOK_BYTES)
-            .map_err(unsupported)?,
-        Err(error) => return Err(unsupported(error)),
-    };
-    prepare_workbook(&workbook, true, true)
-}
-
 fn validate_direct_retention(records: &[Record<'_>]) -> Result<(), String> {
     const MAX_DIRECT_NEUTRAL_BYTES: usize = 256 * 1024 * 1024;
     const MAX_DIRECT_CELLS: usize = 1_000_000;
@@ -998,7 +840,7 @@ fn parse_sst_elements(fragments: &[&[u8]]) -> Result<Vec<rich::Text>, String> {
     let unique = usize::try_from(u32_at(counts, 4)?)
         .map_err(|_| unsupported("BIFF shared string count is too large"))?;
     // Resource policy, separate from BIFF's cell/record limits. Retain only the
-    // neutral text/run table here; XML or model expansion is route-local later.
+    // neutral text/run table here; model expansion is charged at projection.
     if unique > 1_000_000 || unique > total_bytes.saturating_sub(8) / 3 {
         return Err(unsupported("too many BIFF shared strings"));
     }
@@ -1431,7 +1273,6 @@ fn parse_sheet(
                         insert_cell(&mut output, row, column, CellValue::Blank, &mut cell_count)?;
                     }
                 }
-                output.formula_results = true;
             }
             STRING => {
                 if let Some((row, column)) = pending_formula_string.take() {
@@ -1618,248 +1459,6 @@ fn decode_rk(raw: u32) -> f64 {
     value
 }
 
-/// Output limits and measured drawings of one XLSX package emission.
-struct Emission<'a> {
-    max_output_bytes: usize,
-    mdw: Option<f64>,
-    drawings: Option<&'a pictures::Parts>,
-}
-
-fn build_xlsx_with_drawings(
-    sheets: &[(String, SheetData)],
-    styles: &styles::ResolvedStyleSheet,
-    shared_strings: Vec<rich::Text>,
-    date1904: bool,
-    window_count: usize,
-    emission: Emission<'_>,
-) -> Result<Vec<u8>, String> {
-    let Emission {
-        max_output_bytes,
-        mdw,
-        drawings,
-    } = emission;
-    let mut shared_xml_budget = 256 * 1024 * 1024usize;
-    let mut shared_xml = Vec::new();
-    shared_xml
-        .try_reserve_exact(shared_strings.len())
-        .map_err(|_| unsupported("BIFF shared string XML cache allocation failed"))?;
-    let mut shared_encoder = rich::XmlEncoder::new(styles, &mut shared_xml_budget);
-    for value in shared_strings {
-        // Drop each neutral entry after encoding it so the byte route does not
-        // retain both complete text tables until package serialization ends.
-        shared_xml.push(shared_encoder.encode(&value)?);
-    }
-    let mut workbook = String::from(
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">"#,
-    );
-    workbook.push_str(&format!(
-        "<workbookPr date1904=\"{}\"/>",
-        u8::from(date1904)
-    ));
-    // Window1/Window2 associate by ordinal position, not by sheet selection.
-    // Preserve that identity without guessing window geometry or an active tab
-    // after unsupported chart/macro tabs have been omitted.
-    if window_count != 0 {
-        workbook.push_str("<bookViews>");
-        for _ in 0..window_count {
-            workbook.push_str("<workbookView/>");
-        }
-        workbook.push_str("</bookViews>");
-    }
-    workbook.push_str("<sheets>");
-    let mut workbook_rels = String::from(
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
-    );
-    let mut content_types = String::from(
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>"#,
-    );
-    let mut parts = vec![
-        ("_rels/.rels".into(), ROOT_RELS_XLSX.to_string()),
-        ("xl/styles.xml".into(), styles.xml()),
-    ];
-    // Resource policy: rich run markup must not multiply without a bound when
-    // the same SST entry is referenced by many cells or sheets.
-    let mut remaining_sheet_xml = 256 * 1024 * 1024usize;
-    for (index, (name, sheet)) in sheets.iter().enumerate() {
-        let id = index + 1;
-        workbook.push_str(&format!(
-            "<sheet name=\"{}\" sheetId=\"{}\" r:id=\"rId{}\"{}/>",
-            xml_attr(name),
-            id,
-            id,
-            sheet.visibility.attribute()
-        ));
-        workbook_rels.push_str(&format!(
-            "<Relationship Id=\"rId{}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet{}.xml\"/>",
-            id, id
-        ));
-        content_types.push_str(&format!(
-            "<Override PartName=\"/xl/worksheets/sheet{}.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>",
-            id
-        ));
-        let has_drawing = drawings.is_some_and(|d| d.sheets.contains(&index));
-        let sheet_xml = build_sheet_xml_with_drawings(
-            sheet,
-            &shared_xml,
-            remaining_sheet_xml,
-            if has_drawing { mdw } else { None },
-            has_drawing,
-        )?;
-        remaining_sheet_xml = remaining_sheet_xml
-            .checked_sub(sheet_xml.len())
-            .ok_or_else(|| "OUTPUT_TOO_LARGE".to_string())?;
-        parts.push((format!("xl/worksheets/sheet{id}.xml"), sheet_xml));
-    }
-    workbook.push_str("</sheets></workbook>");
-    workbook_rels.push_str(&format!(
-        "<Relationship Id=\"rId{}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" Target=\"styles.xml\"/></Relationships>",
-        sheets.len() + 1
-    ));
-    if let Some(drawings) = drawings {
-        content_types.push_str(&drawings.types);
-    }
-    content_types.push_str("</Types>");
-    parts.push(("xl/workbook.xml".into(), workbook));
-    parts.push(("xl/_rels/workbook.xml.rels".into(), workbook_rels));
-    parts.push(("[Content_Types].xml".into(), content_types));
-    if let Some(drawings) = drawings {
-        crate::ooxml::write_package_bytes(
-            parts
-                .iter()
-                .chain(drawings.xml.iter())
-                .map(|(n, b)| (n.as_str(), b.as_bytes()))
-                .chain(
-                    drawings
-                        .media
-                        .iter()
-                        .map(|(n, b)| (n.as_str(), b.as_slice())),
-                ),
-            max_output_bytes,
-        )
-    } else {
-        write_package(&parts, max_output_bytes)
-    }
-}
-
-#[cfg(test)]
-fn build_sheet_xml(sheet: &SheetData, max_bytes: usize) -> Result<String, String> {
-    build_sheet_xml_with_drawings(sheet, &[], max_bytes, None, false)
-}
-
-fn build_sheet_xml_with_drawings(
-    sheet: &SheetData,
-    shared_strings: &[String],
-    max_bytes: usize,
-    mdw: Option<f64>,
-    drawing: bool,
-) -> Result<String, String> {
-    let mut xml = String::from(
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">"#,
-    );
-    xml.push_str(&sheet.print.sheet_properties());
-    xml.push_str(&sheet.views.xml());
-    xml.push_str(&sheet.geometry.xml_with_metrics(mdw));
-    xml.push_str("<sheetData>");
-    for (row, cells) in &sheet.rows {
-        xml.push_str(&format!(
-            "<row r=\"{}\"{}>",
-            u32::from(*row) + 1,
-            sheet.geometry.row_attributes(*row)
-        ));
-        for (column, value) in cells {
-            let reference = cell_reference(*row, *column);
-            let style = sheet
-                .cell_styles
-                .get(&(*row, *column))
-                .copied()
-                .unwrap_or(0);
-            let cell = format!("<c r=\"{reference}\" s=\"{style}\"");
-            match value {
-                CellValue::Blank => xml.push_str(&format!("{cell}/>")),
-                CellValue::Number(value) if value.is_finite() => {
-                    xml.push_str(&format!("{cell}><v>{value}</v></c>"));
-                }
-                CellValue::Number(_) => {
-                    xml.push_str(&format!("{cell} t=\"e\"><v>#NUM!</v></c>"));
-                }
-                CellValue::Text(value) => {
-                    xml.push_str(&format!(
-                        "{cell} t=\"inlineStr\"><is><t xml:space=\"preserve\">{}</t></is></c>",
-                        xml_text(value)
-                    ));
-                }
-                CellValue::SharedString(index) => {
-                    let value = shared_strings
-                        .get(*index)
-                        .ok_or_else(|| unsupported("BIFF shared string index is out of range"))?;
-                    if value.len() > max_bytes.saturating_sub(xml.len()) {
-                        return Err("OUTPUT_TOO_LARGE".into());
-                    }
-                    xml.push_str(&format!("{cell} t=\"inlineStr\"><is>"));
-                    xml.push_str(value);
-                    xml.push_str("</is></c>");
-                }
-                CellValue::Bool(value) => {
-                    xml.push_str(&format!("{cell} t=\"b\"><v>{}</v></c>", u8::from(*value)));
-                }
-                CellValue::Error(value) => {
-                    xml.push_str(&format!("{cell} t=\"e\"><v>{}</v></c>", xml_text(value)));
-                }
-            }
-            if xml.len() > max_bytes {
-                return Err("OUTPUT_TOO_LARGE".into());
-            }
-        }
-        xml.push_str("</row>");
-    }
-    xml.push_str("</sheetData>");
-    if !sheet.merged.is_empty() {
-        xml.push_str(&format!("<mergeCells count=\"{}\">", sheet.merged.len()));
-        for (first_row, last_row, first_column, last_column) in &sheet.merged {
-            xml.push_str(&format!(
-                "<mergeCell ref=\"{}:{}\"/>",
-                cell_reference(*first_row, *first_column),
-                cell_reference(*last_row, *last_column)
-            ));
-        }
-        xml.push_str("</mergeCells>");
-    }
-    xml.push_str(&sheet.print.xml());
-    if drawing {
-        xml.push_str("<drawing xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" r:id=\"legacyDrawing\"/>");
-    }
-    xml.push_str("</worksheet>");
-    if xml.len() > max_bytes {
-        return Err("OUTPUT_TOO_LARGE".into());
-    }
-    Ok(xml)
-}
-
-fn minimal_styles() -> String {
-    r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><name val="Calibri"/><family val="2"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>"#.into()
-}
-
-fn cell_reference(row: u16, column: u16) -> String {
-    let mut value = u32::from(column) + 1;
-    let mut letters = Vec::new();
-    while value > 0 {
-        let remainder = ((value - 1) % 26) as u8;
-        letters.push(char::from(b'A' + remainder));
-        value = (value - 1) / 26;
-    }
-    letters.reverse();
-    format!(
-        "{}{}",
-        letters.into_iter().collect::<String>(),
-        u32::from(row) + 1
-    )
-}
-
 fn error_text(code: u8) -> &'static str {
     match code {
         0x00 => "#NULL!",
@@ -1902,7 +1501,7 @@ fn f64_at(bytes: &[u8], offset: usize) -> Result<f64, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{cell_reference, decode_rk, parse_biff_string, parse_sst, records};
+    use super::{decode_rk, parse_biff_string, parse_sst, records};
 
     #[test]
     fn integer_readers_reject_offsets_at_the_usize_limit() {
@@ -1957,15 +1556,12 @@ mod tests {
             visibility: SheetVisibility::Visible,
         };
         let sheet = parse_sheet(&records, &bound, &[]).unwrap();
-        let xml = build_sheet_xml(&sheet, 10000).unwrap();
-        assert!(xml.contains("showGridLines=\"0\""));
-        assert!(xml.contains("showZeros=\"0\""));
-        assert!(xml.contains("rightToLeft=\"1\""));
-        assert!(xml.contains("<sheetData></sheetData>"));
-        assert_eq!(
-            build_sheet_xml(&sheet, xml.len() - 1).unwrap_err(),
-            "OUTPUT_TOO_LARGE"
-        );
+        assert!(sheet.rows.is_empty() && sheet.cell_styles.is_empty());
+        let mut model = xlsx_model::Worksheet::placeholder("A", "test".into());
+        sheet.views.project(&mut model);
+        assert!(!model.show_gridlines);
+        assert!(!model.show_zeros);
+        assert!(model.right_to_left);
     }
 
     #[test]
@@ -2015,11 +1611,12 @@ mod tests {
                     .unwrap_err()
                     .contains("invalid BIFF sheet visibility"));
             } else {
-                let expected = ["", " state=\"hidden\"", " state=\"veryHidden\""];
-                assert_eq!(
-                    parsed.unwrap().visibility.attribute(),
-                    expected[usize::from(flags & 3)]
-                );
+                let visibility = parsed.unwrap().visibility;
+                assert!(match flags & 3 {
+                    0 => matches!(visibility, super::SheetVisibility::Visible),
+                    1 => matches!(visibility, super::SheetVisibility::Hidden),
+                    _ => matches!(visibility, super::SheetVisibility::VeryHidden),
+                });
             }
         }
     }
@@ -2044,10 +1641,12 @@ mod tests {
                 offset: 12,
                 data: &[0; 64],
             },
+            // A Header whose text exceeds 255 characters is invalid for the
+            // current settings; inside the saved view it is never read.
             Record {
                 kind: 0x14,
                 offset: 80,
-                data: &[1, 0, 0, b'X'],
+                data: &[0, 1, 0],
             },
             Record {
                 kind: 0x1ab,
@@ -2067,8 +1666,12 @@ mod tests {
             visibility: SheetVisibility::Visible,
         };
         let output = parse_sheet(&records, &sheet, &[]).unwrap();
-        assert!(output.print.xml().contains("<oddHeader></oddHeader>"));
+        assert!(output.custom_views_omitted);
         assert!(parse_sheet(&records[..4], &sheet, &[]).is_err());
+        let mut current = records.to_vec();
+        current.remove(2);
+        current.remove(3);
+        assert!(parse_sheet(&current, &sheet, &[]).is_err());
     }
 
     #[test]
@@ -2115,104 +1718,6 @@ mod tests {
     }
 
     #[test]
-    fn preserves_cell_xf_blank_borders_and_sheet_geometry() {
-        use crate::{cfb::test_support::build_cfb, convert_native, LegacyFormat};
-        use std::io::{Cursor, Read};
-        fn rec(kind: u16, data: &[u8]) -> Vec<u8> {
-            [
-                kind.to_le_bytes().as_slice(),
-                &(data.len() as u16).to_le_bytes(),
-                data,
-            ]
-            .concat()
-        }
-        let mut stream = rec(0x0809, &[0, 6, 5, 0]);
-        let bound = stream.len() + 4;
-        stream.extend(rec(0x0085, &[0, 0, 0, 0, 0, 0, 1, 0, b'S']));
-        stream.extend(rec(0x0022, &[1, 0])); // Date1904
-        let mut font = vec![0; 16];
-        font[0..2].copy_from_slice(&360u16.to_le_bytes());
-        font[2] = 2; // italic
-        font[4..6].copy_from_slice(&10u16.to_le_bytes());
-        font[6..8].copy_from_slice(&700u16.to_le_bytes());
-        font[14..16].copy_from_slice(&[5, 0]);
-        font.extend(b"Arial");
-        stream.extend(rec(0x0031, &font));
-        let mut xf = [0u8; 20];
-        xf[6] = 0x2a; // center, wrap, bottom
-        xf[10..14].copy_from_slice(&(1u32 | (10 << 16)).to_le_bytes()); // thin red left
-        xf[14..18].copy_from_slice(&(1u32 << 26).to_le_bytes()); // solid fill
-        xf[18..20].copy_from_slice(&(13u16 | (65 << 7)).to_le_bytes());
-        stream.extend(rec(0x00e0, &xf));
-        xf[2..4].copy_from_slice(&14u16.to_le_bytes()); // date format
-        stream.extend(rec(0x00e0, &xf));
-        stream.extend(rec(0x000a, &[]));
-        let offset = stream.len() as u32;
-        stream[bound..bound + 4].copy_from_slice(&offset.to_le_bytes());
-        stream.extend(rec(0x0809, &[0, 6, 0x10, 0]));
-        // Print layout must survive independently of cell styles.
-        stream.extend(rec(0x0081, &[0, 1])); // fit to pages
-        for kind in 0x0026..=0x0029 {
-            stream.extend(rec(kind, &0.5f64.to_le_bytes()));
-        }
-        let mut setup = vec![0u8; 34];
-        setup[..16].copy_from_slice(&[9, 0, 75, 0, 3, 0, 2, 0, 0, 0, 0x89, 0, 88, 2, 88, 2]);
-        setup[16..24].copy_from_slice(&0.25f64.to_le_bytes());
-        setup[24..32].copy_from_slice(&0.3f64.to_le_bytes());
-        setup[32] = 1;
-        stream.extend(rec(0x00a1, &setup));
-        stream.extend(rec(0x0014, &[4, 0, 0, b'&', b'L', b'&', b'P']));
-        stream.extend(rec(0x001b, &[1, 0, 4, 0, 0, 0, 255, 63]));
-        stream.extend(rec(0x0225, &[0, 0, 0x2c, 1])); // default 15 pt
-        stream.extend(rec(0x007d, &[0, 0, 2, 0, 0, 20, 1, 0, 3, 0, 0, 0]));
-        let mut row = [0u8; 16];
-        row[0] = 2; // empty third row, preserve height/hidden state
-        row[6..8].copy_from_slice(&600u16.to_le_bytes());
-        row[12] = 0x60;
-        stream.extend(rec(0x0208, &row));
-        let mut number = vec![0, 0, 0, 0, 1, 0];
-        number.extend(1f64.to_le_bytes());
-        stream.extend(rec(0x0203, &number));
-        stream.extend(rec(0x0201, &[0, 0, 1, 0, 1, 0])); // styled empty cell
-        stream.extend(rec(0x00be, &[1, 0, 0, 0, 1, 0, 1, 0, 1, 0])); // two blanks
-        stream.extend(rec(0x000a, &[]));
-        let data = build_cfb(&[("Workbook", stream)]);
-        let output = convert_native(&data, LegacyFormat::Xls, 1024 * 1024).unwrap();
-        let mut archive = zip::ZipArchive::new(Cursor::new(output.bytes)).unwrap();
-        let mut part = |name| {
-            let mut xml = String::new();
-            archive
-                .by_name(name)
-                .unwrap()
-                .read_to_string(&mut xml)
-                .unwrap();
-            xml
-        };
-        let styles = part("xl/styles.xml");
-        assert!(styles.contains("<sz val=\"18\"/>"));
-        assert!(styles.contains("<b/>") && styles.contains("<i/>"));
-        assert!(styles.contains("numFmtId=\"14\""));
-        assert!(styles.contains("patternType=\"solid\""));
-        assert!(styles.contains("<left style=\"thin\">"));
-        assert!(styles.contains("horizontal=\"center\"") && styles.contains("wrapText=\"1\""));
-        let sheet = part("xl/worksheets/sheet1.xml");
-        assert!(sheet.contains("fitToPage=\"1\""));
-        assert!(sheet.contains("<pageMargins left=\"0.5\" right=\"0.5\" top=\"0.5\" bottom=\"0.5\" header=\"0.25\" footer=\"0.3\"/>"));
-        assert!(sheet.contains("orientation=\"landscape\"") && sheet.contains("scale=\"75\""));
-        assert!(
-            sheet.contains("firstPageNumber=\"3\"") && sheet.contains("pageOrder=\"overThenDown\"")
-        );
-        assert!(sheet.contains("<oddHeader>&amp;L&amp;P</oddHeader>"));
-        assert!(sheet.contains("<brk id=\"4\" min=\"0\" max=\"16383\" man=\"1\"/>"));
-        assert!(sheet.contains("<c r=\"A1\" s=\"1\"><v>1</v></c>"));
-        assert!(sheet.contains("<c r=\"B1\" s=\"1\"/>"));
-        assert!(sheet.contains("<c r=\"A2\" s=\"1\"/>") && sheet.contains("<c r=\"B2\" s=\"1\"/>"));
-        assert!(sheet.contains("width=\"20\""));
-        assert!(sheet.contains("<row r=\"3\" ht=\"30\" hidden=\"1\""));
-        assert!(part("xl/workbook.xml").contains("date1904=\"1\""));
-    }
-
-    #[test]
     fn decodes_biff8_unicode_strings() {
         let mut raw = vec![3, 0, 1];
         for unit in "日本語".encode_utf16() {
@@ -2225,12 +1730,6 @@ mod tests {
     fn decodes_integer_and_scaled_rk_values() {
         assert_eq!(decode_rk((42u32 << 2) | 2), 42.0);
         assert_eq!(decode_rk((1234u32 << 2) | 3), 12.34);
-    }
-
-    #[test]
-    fn formats_biff8_cell_references() {
-        assert_eq!(cell_reference(0, 0), "A1");
-        assert_eq!(cell_reference(65535, 255), "IV65536");
     }
 
     #[test]

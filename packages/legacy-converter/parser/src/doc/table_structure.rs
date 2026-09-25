@@ -2,7 +2,7 @@
 //!
 //! [MS-DOC] 2.4.3 encodes cells and rows with paragraph marks. This module is
 //! the single owner of that nesting grammar and of the union-grid construction
-//! used by both the legacy DOCX serializer and the direct model producer.
+//! used by the direct model producer.
 
 use std::borrow::Borrow;
 
@@ -209,11 +209,6 @@ impl<P: Payload, R: Borrow<Row>> Assembler<P, R> {
             self.close(&mut emit, admit)?;
         }
         Ok(self.body)
-    }
-
-    #[cfg(test)]
-    pub(super) fn set_row_count(&mut self, rows: usize) {
-        self.rows = rows;
     }
 }
 

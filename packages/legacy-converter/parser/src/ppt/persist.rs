@@ -22,54 +22,8 @@ pub(super) struct PresentationStorage<R, S, B> {
     pub size: (u32, u32),
 }
 
-pub(super) type Presentation<'a> =
-    PresentationStorage<Record<'a>, &'a [u8], drawing::Background<'a>>;
 pub(super) type OwnedPresentation =
     PresentationStorage<RecordSpan, ByteSpan, drawing::SpannedBackground>;
-
-impl OwnedPresentation {
-    fn into_borrowed(self, document: &[u8]) -> Result<Presentation<'_>, String> {
-        Ok(PresentationStorage {
-            slides: self
-                .slides
-                .into_iter()
-                .map(|(record, text)| Ok((record.view(document)?, text)))
-                .collect::<Result<_, String>>()?,
-            outline_styles: self
-                .outline_styles
-                .into_iter()
-                .map(|styles| {
-                    styles
-                        .into_iter()
-                        .map(|style| style.map(|span| span.view(document)).transpose())
-                        .collect::<Result<_, _>>()
-                })
-                .collect::<Result<_, _>>()?,
-            ole_objects: self.ole_objects,
-            image_entries: self
-                .image_entries
-                .into_iter()
-                .map(|record| record.view(document))
-                .collect::<Result<_, _>>()?,
-            shape_masters: self.shape_masters,
-            outline_types: self.outline_types,
-            outline_slide_numbers: self.outline_slide_numbers,
-            first_slide_number: self.first_slide_number,
-            text_masters: self.text_masters,
-            metro_themes: self.metro_themes,
-            document_text_axes: self.document_text_axes,
-            fonts: self.fonts,
-            schemes: self.schemes,
-            backgrounds: self
-                .backgrounds
-                .into_iter()
-                .map(|background| background.map(|value| value.view(document)).transpose())
-                .collect::<Result<_, _>>()?,
-            object_masters: self.object_masters,
-            size: self.size,
-        })
-    }
-}
 
 /// Owned edit-chain index, independent of borrowed slide/master views. Direct
 /// sessions can retain this once and resolve individual records on demand.
@@ -259,14 +213,6 @@ pub(super) fn resolve_directory(
         offsets,
         document_offset,
     })
-}
-
-pub(super) fn resolve<'a>(
-    document: &'a [u8],
-    current_edit: usize,
-    budget: &mut usize,
-) -> Result<Presentation<'a>, String> {
-    resolve_owned(document, current_edit, budget)?.into_borrowed(document)
 }
 
 /// Resolve live metadata once; retained references are source-relative ranges.
@@ -475,51 +421,19 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn owned_presentation_preserves_styles_order_and_admission_work_after_move() {
+    fn owned_presentation_keeps_order_styles_and_slides_after_the_source_moves() {
         let (stream, edit) = fixture_with_styles(true);
-        let mut owned_budget = MAX_RECORDS;
-        let mut owned = resolve_owned(&stream, edit, &mut owned_budget).unwrap();
-        let mut borrowed_budget = MAX_RECORDS;
-        let borrowed = resolve(&stream, edit, &mut borrowed_budget).unwrap();
-        assert_eq!(owned_budget, borrowed_budget);
-        assert_eq!(owned.size, borrowed.size);
-        assert_eq!(owned.first_slide_number, borrowed.first_slide_number);
-        assert_eq!(owned.outline_types, borrowed.outline_types);
-        assert_eq!(owned.outline_slide_numbers, borrowed.outline_slide_numbers);
-        for (index, (span, text)) in owned.slides.iter().enumerate() {
-            assert_eq!(text, &borrowed.slides[index].1);
-            assert_eq!(
-                span.view(&stream).unwrap().payload,
-                borrowed.slides[index].0.payload
-            );
-            for (span, bytes) in owned.outline_styles[index]
-                .iter()
-                .zip(&borrowed.outline_styles[index])
-            {
-                assert_eq!(
-                    span.as_ref().map(|span| span.view(&stream).unwrap()),
-                    *bytes
-                );
-            }
-        }
-        drop(borrowed);
-        let mut axes = [text_style::ParagraphAxes::default(); 5];
-        axes[0] = text_style::ParagraphAxes {
-            margin: Some(180),
-            indent: Some(0),
-        };
-        owned.document_text_axes = Some(axes);
+        let owned = resolve_owned(&stream, edit, &mut MAX_RECORDS.clone()).unwrap();
         let moved = stream.clone();
         drop(stream);
-        let viewed = owned.into_borrowed(&moved).unwrap();
-        assert_eq!(viewed.document_text_axes, Some(axes));
-        assert_eq!(viewed.slides[0].1, ["second"]);
-        assert_eq!(viewed.slides[1].1, ["first"]);
-        assert!(viewed
-            .outline_styles
-            .iter()
-            .all(|styles| styles[0].is_some()));
-        assert_eq!(viewed.slides.len(), 2); // Dead physical slide remains excluded.
+        assert_eq!(owned.slides.len(), 2); // Dead physical slide remains excluded.
+        assert_eq!(owned.slides[0].1, ["second"]);
+        assert_eq!(owned.slides[1].1, ["first"]);
+        assert_eq!(owned.outline_types, vec![vec![0u16], vec![0]]);
+        for (slide, styles) in owned.slides.iter().zip(&owned.outline_styles) {
+            assert_eq!(slide.0.view(&moved).unwrap().kind, SLIDE_CONTAINER);
+            assert!(styles[0].as_ref().unwrap().view(&moved).is_ok());
+        }
     }
 
     #[test]
@@ -532,14 +446,18 @@ pub(crate) mod tests {
             .map(|(record, _)| record.payload_span().range().end)
             .max()
             .unwrap();
-        assert!(owned.into_borrowed(&stream[..last_slide_end - 1]).is_err());
+        let short = &stream[..last_slide_end - 1];
+        assert!(owned
+            .slides
+            .iter()
+            .any(|(record, _)| record.view(short).is_err()));
     }
 
     #[test]
     fn resolves_order_outline_text_and_size_without_deleted_slides() {
         let (stream, edit) = fixture();
         let mut budget = MAX_RECORDS;
-        let result = resolve(&stream, edit, &mut budget).unwrap();
+        let result = resolve_owned(&stream, edit, &mut budget).unwrap();
         assert_eq!(result.size, (12192000, 6858000));
         assert_eq!(result.slides.len(), 2);
         assert_eq!(result.slides[0].1, ["second"]);
@@ -602,7 +520,7 @@ pub(crate) mod tests {
             let (mut stream, edit) = fixture();
             // Fixture starts with DocumentContainer, then DocumentAtom.
             stream[48..50].copy_from_slice(&first.to_le_bytes());
-            let result = resolve(&stream, edit, &mut MAX_RECORDS.clone());
+            let result = resolve_owned(&stream, edit, &mut MAX_RECORDS.clone());
             if first < 10000 {
                 assert_eq!(result.unwrap().first_slide_number, first);
             } else {
@@ -637,38 +555,24 @@ pub(crate) mod tests {
         assert_eq!(latest.document_offset, original.document_offset);
         assert_eq!(latest.offsets[&2], original.offsets[&2]);
         assert_eq!(latest.offsets[&3], replacement as usize);
+        let slide_text = |span: &RecordSpan| {
+            let payload = span.view(&stream).unwrap().payload;
+            let atoms = parse_records(payload, &mut MAX_RECORDS.clone()).unwrap();
+            atoms
+                .into_iter()
+                .map(|atom| decode_text(atom).unwrap())
+                .collect::<Vec<_>>()
+        };
         let index = owned_slide_index(&stream, current, &mut MAX_RECORDS.clone());
-        let replacement = index.slides[0].record.view(&stream).unwrap();
-        let mut indexed_text = Vec::new();
-        collect_text(
-            replacement.payload,
-            0,
-            &mut MAX_RECORDS.clone(),
-            &mut indexed_text,
-            &index.slides[0].outline,
-            &mut MAX_TEXT_BYTES.clone(),
-        )
-        .unwrap();
-        assert_eq!(indexed_text, ["updated"]);
-        let mut budget = MAX_RECORDS;
-        let result = resolve(&stream, current, &mut budget).unwrap();
+        assert_eq!(slide_text(&index.slides[0].record), ["updated"]);
+        let result = resolve_owned(&stream, current, &mut MAX_RECORDS.clone()).unwrap();
         assert_eq!(result.slides.len(), 2);
-        let mut texts = Vec::new();
-        collect_text(
-            result.slides[0].0.payload,
-            0,
-            &mut budget,
-            &mut texts,
-            &result.slides[0].1,
-            &mut MAX_TEXT_BYTES.clone(),
-        )
-        .unwrap();
-        assert_eq!(texts, ["updated"]);
+        assert_eq!(slide_text(&result.slides[0].0), ["updated"]);
     }
     #[test]
     fn rejects_self_referential_edit_chain() {
         let (mut stream, edit) = fixture();
         stream[edit + 16..edit + 20].copy_from_slice(&(edit as u32).to_le_bytes());
-        assert!(resolve(&stream, edit, &mut MAX_RECORDS.clone()).is_err());
+        assert!(resolve_owned(&stream, edit, &mut MAX_RECORDS.clone()).is_err());
     }
 }

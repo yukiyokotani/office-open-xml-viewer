@@ -1,7 +1,8 @@
-//! Passive PAGE/NUMPAGES projection only. MS-DOC 2.8.25, 2.9.88/89/110;
-//! ECMA-376 17.16.5.42/44 and 17.16.18. No external/calculating fields execute.
-use super::{u32_at, unsupported, Paragraph, Token, MAX_STORY_CONTROLS};
-use std::collections::{BTreeMap, VecDeque};
+//! MS-DOC 2.8.25 Plcfld field-marker tables (2.9.88 Fld, 2.9.89 FldCh,
+//! 2.9.110 grffldEnd), with CPs relative to their document part. The direct
+//! model evaluates the passive fields it supports; nothing executes.
+use super::{u32_at, unsupported, MAX_STORY_CONTROLS};
+use std::collections::BTreeMap;
 
 pub(super) struct Table(BTreeMap<usize, (u8, u8)>);
 impl Table {
@@ -55,17 +56,15 @@ impl Table {
     }
 
     /// The field character and its Fld.grffld byte at `cp`, if listed.
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) fn get(&self, cp: usize) -> Option<(u8, u8)> {
         self.0.get(&cp).copied()
     }
 
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) fn len(&self) -> usize {
         self.0.len()
     }
 
-    #[cfg(all(test, feature = "direct-doc"))]
+    #[cfg(test)]
     pub(in crate::doc) fn for_test(entries: &[(u32, u8, u8)], _final_cp: u32) -> Self {
         Self(
             entries
@@ -74,215 +73,11 @@ impl Table {
                 .collect(),
         )
     }
-
-    pub fn restore(&self, text: &str, base_cp: usize, paragraphs: &mut [Paragraph]) {
-        let mut depth = 0usize;
-        let mut start = 0;
-        let mut instruction = String::new();
-        let mut separator = None;
-        let mut eligible = false;
-        let mut events = VecDeque::new();
-        let mut private_ranges = Vec::new();
-        let mut starts = Vec::new();
-        let mut cp = base_cp;
-        for ch in text.chars() {
-            match ch {
-                '\u{13}' => {
-                    starts.push(cp);
-                    if depth == 0 {
-                        start = cp;
-                        instruction.clear();
-                        separator = None;
-                        eligible = self.0.get(&cp).is_some_and(|(c, _)| *c == 0x13);
-                    } else {
-                        eligible = false;
-                    }
-                    depth += 1;
-                }
-                '\u{14}' if depth == 1 => {
-                    if separator.is_some() {
-                        eligible = false;
-                    }
-                    separator = Some(cp);
-                    eligible &= self.0.get(&cp).is_some_and(|(c, _)| *c == 0x14);
-                }
-                '\u{15}' if depth > 0 => {
-                    depth -= 1;
-                    let private_start = starts.pop().expect("matched field begin");
-                    if self
-                        .0
-                        .get(&cp)
-                        .is_some_and(|(c, flags)| *c == 0x15 && flags & 0x20 != 0)
-                    {
-                        private_ranges.push(private_start..=cp);
-                    }
-                    if depth == 0 && eligible && separator.is_some()
-                        // fLocked keeps its cached display; fPrivateResult is
-                        // not turned into a newly visible, recomputed value.
-                        && self.0.get(&cp).is_some_and(|(c, flags)| *c == 0x15 && flags & 0x30 == 0)
-                        && supported(&instruction)
-                    {
-                        events.push_back((Token::FieldBegin(instruction.clone()), start + 1));
-                        events.push_back((Token::FieldEnd, cp));
-                    }
-                }
-                '\r' | '\u{7}' | '\u{b}' | '\u{c}' if depth > 0 => eligible = false,
-                _ if depth == 1 && separator.is_none() && eligible => {
-                    if instruction.len() + ch.len_utf8() <= 512 && (ch >= ' ' || ch == '\t') {
-                        instruction.push(ch);
-                    } else {
-                        eligible = false;
-                    }
-                }
-                _ => {}
-            }
-            cp += ch.len_utf16();
-        }
-        // The tokenizer flushes at field controls, so no cached text token can
-        // straddle an event. Merge once in CP order without rescanning paragraphs.
-        private_ranges.sort_unstable_by_key(|range| *range.start());
-        let mut private_ranges: VecDeque<_> = private_ranges.into();
-        for paragraph in paragraphs {
-            let original = std::mem::take(&mut paragraph.tokens);
-            for token in original {
-                while private_ranges
-                    .front()
-                    .is_some_and(|range| *range.end() < token.1)
-                {
-                    private_ranges.pop_front();
-                }
-                if private_ranges
-                    .front()
-                    .is_some_and(|range| range.contains(&token.1))
-                {
-                    continue;
-                }
-                while events.front().is_some_and(|(_, cp)| *cp <= token.1) {
-                    paragraph.tokens.push(events.pop_front().unwrap());
-                }
-                paragraph.tokens.push(token);
-            }
-            while events
-                .front()
-                .is_some_and(|(_, cp)| *cp <= paragraph.end_cp)
-            {
-                paragraph.tokens.push(events.pop_front().unwrap());
-            }
-        }
-    }
-}
-
-fn supported(instruction: &str) -> bool {
-    let mut words = instruction.split_ascii_whitespace();
-    if !words
-        .next()
-        .is_some_and(|w| w.eq_ignore_ascii_case("PAGE") || w.eq_ignore_ascii_case("NUMPAGES"))
-    {
-        return false;
-    }
-    while let Some(switch) = words.next() {
-        if switch != "\\*" {
-            return false;
-        }
-        let Some(format) = words.next() else {
-            return false;
-        };
-        if !matches!(
-            format.to_ascii_lowercase().as_str(),
-            "mergeformat" | "charformat" | "arabic" | "roman" | "alphabetic"
-        ) {
-            return false;
-        }
-    }
-    true
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn allows_only_passive_page_field_instructions() {
-        for value in ["PAGE", " numpages ", "PAGE \\* roman \\* MERGEFORMAT"] {
-            assert!(supported(value));
-        }
-        for value in [
-            "PAGEREF X",
-            "INCLUDETEXT file",
-            "DATE",
-            "PAGE \\*",
-            "PAGE \\h",
-            "PAGE \\* Unknown",
-            "NUMPAGES \\# 0",
-        ] {
-            assert!(!supported(value));
-        }
-    }
-
-    fn tokens(text: &str, flags: u8) -> Vec<Token> {
-        let mut cp = 7;
-        let mut entries = BTreeMap::new();
-        for ch in text.chars() {
-            if matches!(ch, '\u{13}'..='\u{15}') {
-                entries.insert(cp, (ch as u8, if ch == '\u{15}' { flags } else { 0 }));
-            }
-            cp += ch.len_utf16();
-        }
-        let mut paragraphs =
-            super::super::tokenize_with_fields(text, &mut super::super::Fields::default(), 7, true);
-        Table(entries).restore(text, 7, &mut paragraphs);
-        paragraphs
-            .into_iter()
-            .flat_map(|p| p.tokens.into_iter().map(|(t, _)| t))
-            .collect()
-    }
-
-    #[test]
-    fn keeps_field_events_ordered_with_astral_prefix_and_adjacent_fields() {
-        let actual = tokens(
-            "😀\u{13}PAGE\u{14}99\u{15}\u{13}NUMPAGES\u{14}99\u{15}Z\r",
-            0x80,
-        );
-        assert_eq!(
-            actual,
-            vec![
-                Token::Text("😀".into()),
-                Token::FieldBegin("PAGE".into()),
-                Token::Text("99".into()),
-                Token::FieldEnd,
-                Token::FieldBegin("NUMPAGES".into()),
-                Token::Text("99".into()),
-                Token::FieldEnd,
-                Token::Text("Z".into())
-            ]
-        );
-    }
-    #[test]
-    fn locks_nested_multiline_incomplete_and_oversized_fields_do_not_recompute() {
-        for text in [
-            "\u{13}PAGE\u{14}99\u{15}".into(),
-            "\u{13}PAGE\u{14}\u{13}PAGE\u{14}99\u{15}\u{15}".into(),
-            "\u{13}PAGE\r\u{14}99\u{15}".into(),
-            "\u{13}PAGE\u{14}99".into(),
-            format!("\u{13}PAGE{}\u{14}99\u{15}", " ".repeat(513)),
-        ] {
-            let flags = if text == "\u{13}PAGE\u{14}99\u{15}" {
-                0x90
-            } else {
-                0x80
-            };
-            assert!(!tokens(&text, flags)
-                .iter()
-                .any(|t| matches!(t, Token::FieldBegin(_))));
-        }
-        assert_eq!(
-            tokens("A\u{13}PAGE\u{14}secret\u{15}B", 0xa0),
-            vec![Token::Text("A".into()), Token::Text("B".into())]
-        );
-        assert_eq!(
-            tokens("A\u{13}IF\u{14}x\u{13}PAGE\u{14}secret\u{15}y\u{15}B", 0xa0),
-            vec![Token::Text("A".into()), Token::Text("B".into())]
-        );
-    }
 
     #[test]
     fn validates_field_table_boundaries_and_ignores_reserved_marker_bits() {

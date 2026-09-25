@@ -77,7 +77,7 @@ pub(super) fn with_papx(source: &[u8], runs: &[(usize, usize, Vec<u8>)]) -> Vec<
         let mut papx = vec![0, 0];
         papx.extend_from_slice(sprms);
         assert_eq!(papx.len() % 2, 1);
-        let cb = (papx.len() + 1) / 2;
+        let cb = papx.len().div_ceil(2);
         payload -= 1 + papx.len();
         payload &= !1;
         page[payload] = cb as u8;
@@ -1068,11 +1068,7 @@ fn table_budget_fails_at_row_retention_and_finish_grid_projection() {
 fn clear_and_solid_cell_backgrounds_use_their_exact_colors() {
     use super::tables::{Block, Blocks, Writer};
     use crate::doc::table::Properties;
-    let paragraph = || {
-        Blocks(vec![Block::Paragraph(Box::new(
-            docx_model::DocParagraph::default(),
-        ))])
-    };
+    let paragraph = || Blocks(vec![Block::Paragraph(Box::default())]);
     let build = |pattern: u16, foreground_auto: bool| {
         let mut cell = Properties::default();
         cell.apply(0x6649, &1u32.to_le_bytes()).unwrap();
@@ -1135,7 +1131,7 @@ fn clear_and_solid_cell_backgrounds_use_their_exact_colors() {
 #[test]
 fn multiappend_reserves_for_len_plus_add_before_mutating() {
     use super::tables::{Block, Blocks};
-    let paragraph = || Block::Paragraph(Box::new(docx_model::DocParagraph::default()));
+    let paragraph = || Block::Paragraph(Box::default());
     let mut target = Blocks(Vec::with_capacity(4));
     target.0.push(paragraph());
     target.0.push(paragraph());

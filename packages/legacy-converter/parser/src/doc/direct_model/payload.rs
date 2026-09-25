@@ -130,7 +130,6 @@ pub(super) fn text_run(run: &TextRun) -> Result<usize, String> {
         &run.font_family_cs,
         &run.lang_bidi,
         &run.lang_east_asia,
-        &run.lang_default,
         &run.fit_text_id,
         &run.east_asian_combine_brackets,
     ] {
@@ -168,7 +167,6 @@ pub(super) fn field_run(run: &docx_model::FieldRun) -> Result<usize, String> {
         &run.font_family_east_asia,
         &run.font_hint,
         &run.font_family_cs,
-        &run.lang_default,
         &run.lang_bidi,
         &run.lang_east_asia,
         &run.background,
@@ -408,7 +406,6 @@ impl Total {
             &facts.font_family_cs,
             &facts.lang_bidi,
             &facts.lang_east_asia,
-            &facts.lang_default,
         ] {
             self.option_string(value)?;
         }
@@ -501,7 +498,6 @@ impl Total {
         self.typography_string(&value.emphasis)?;
         self.option_string(&value.languages.east_asia)?;
         self.option_string(&value.languages.bidi)?;
-        self.option_string(&value.languages.default)?;
         self.typography_string(&value.east_asian_layout.combine_brackets)
     }
 
@@ -570,6 +566,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn counts_string_capacities_and_vector_backing_not_lengths() {
         let mut run = TextRun::default();
         run.text = allocated("x", 32);
@@ -593,28 +590,6 @@ mod tests {
             paragraph(&paragraph_value).unwrap(),
             16 + 10 + 3 * std::mem::size_of::<docx_model::TabStop>() + 8 + 12
         );
-    }
-
-    #[test]
-    fn counts_western_language_capacities_at_each_reachable_run_seam() {
-        let mut run = TextRun::default();
-        run.lang_default = Some(allocated("en-US", 31));
-        run.typography_acquisition = Some(RunTypographyWire {
-            languages: docx_model::TypographyLanguagesWire {
-                default: Some(allocated("en-US", 47)),
-                ..docx_model::TypographyLanguagesWire::default()
-            },
-            ..RunTypographyWire::default()
-        });
-        assert_eq!(text_run(&run).unwrap(), 31 + 47);
-
-        let facts = RunFontFacts {
-            lang_default: Some(allocated("fr-FR", 53)),
-            ..RunFontFacts::default()
-        };
-        let mut total = Total::default();
-        total.font_facts(&facts).unwrap();
-        assert_eq!(total.0, 53);
     }
 
     #[test]
@@ -645,35 +620,7 @@ mod tests {
     }
 
     #[test]
-    fn western_language_payload_is_rejected_one_byte_over_budget_before_retention() {
-        let mut run = TextRun {
-            lang_default: Some(allocated("en-US", 31)),
-            typography_acquisition: Some(RunTypographyWire {
-                languages: docx_model::TypographyLanguagesWire {
-                    default: Some(allocated("en-US", 47)),
-                    ..docx_model::TypographyLanguagesWire::default()
-                },
-                ..RunTypographyWire::default()
-            }),
-            ..TextRun::default()
-        };
-        let required = std::mem::size_of::<TextRun>() + 31 + 47;
-        let mut runs = Vec::with_capacity(1);
-        let mut budget = super::super::ModelBudget::new(required - 1);
-        assert_eq!(
-            budget.text(&mut runs, &mut run, "").unwrap_err(),
-            "OUTPUT_TOO_LARGE"
-        );
-        assert!(runs.is_empty());
-        assert_eq!(run.lang_default.as_deref(), Some("en-US"));
-
-        let mut budget = super::super::ModelBudget::new(required);
-        budget.text(&mut runs, &mut run, "").unwrap();
-        assert_eq!(runs.len(), 1);
-        assert_eq!(budget.remaining_bytes, 0);
-    }
-
-    #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn counts_boxed_section_payload_and_rejects_unowned_fields() {
         let mut section_value = SectionProps::default();
         section_value.section_start = Some(allocated("nextPage", 24));

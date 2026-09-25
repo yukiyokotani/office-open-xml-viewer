@@ -1,17 +1,15 @@
 //! PowerPoint Binary File (`.ppt`) compatibility subset.
 //!
-//! The converter resolves live slides and outline text through the edit-chain
-//! persist directory. It emits one macro-free PresentationML
-//! slide per live slide reference and never executes actions, macros, hyperlinks,
-//! animations, or external-resource updates. See [MS-PPT] 2.3.3, 2.4.3, and
-//! 2.9.40 through 2.9.42. Unsupported/encrypted containers fail closed.
+//! The direct session resolves live slides and outline text through the
+//! edit-chain persist directory and projects each live slide reference
+//! straight into the presentation renderer model. It never executes actions,
+//! macros, hyperlinks, animations, or external-resource updates. See [MS-PPT]
+//! 2.3.3, 2.4.3, and 2.9.40 through 2.9.42. Unsupported/encrypted containers
+//! fail closed.
 
 use crate::cfb::CompoundFile;
-use crate::ooxml::{write_package_bytes, xml_text, ROOT_RELS_PPTX};
 
-#[cfg(any(feature = "direct-ppt", feature = "inspection"))]
 pub(crate) mod direct_cursor;
-#[cfg(any(test, feature = "direct-ppt"))]
 pub(crate) mod direct_session;
 mod drawing;
 mod media;
@@ -44,106 +42,9 @@ const MAX_TEXT_BLOCKS_PER_SLIDE: usize = 100_000;
 // Implementation resource policy, independent of the compressed ZIP ceiling.
 const MAX_TEXT_BYTES: usize = 128 * 1024 * 1024;
 
-pub struct PptConversion {
-    pub bytes: Vec<u8>,
-    pub warnings: Vec<String>,
-}
-
 use crate::officeart::{
     record_span_with_end, record_span_with_end_in, ByteSpan, Record, RecordSpan,
 };
-
-pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<PptConversion, String> {
-    if cfb.has_entry("EncryptedSummary") {
-        return Err(unsupported(
-            "encrypted PowerPoint binary documents are not supported",
-        ));
-    }
-    let document = cfb.stream("PowerPoint Document").map_err(unsupported)?;
-    let mut record_budget = MAX_RECORDS;
-    let current_user = cfb.stream("Current User").map_err(unsupported)?;
-    let current_edit = parse_current_user_atom(&current_user, &mut record_budget)?;
-    let presentation = persist::resolve(&document, current_edit, &mut record_budget)?;
-    let pictures = if cfb.has_entry("Pictures") && !presentation.image_entries.is_empty() {
-        cfb.stream("Pictures").map_err(unsupported)?
-    } else {
-        Vec::new()
-    };
-    let mut media = media::Store::new(&presentation.image_entries, &pictures);
-    let mut slides = Vec::new();
-    let mut text_budget = MAX_TEXT_BYTES;
-    // Limit retained expanded XML independently of ZIP compression. Paragraph
-    // markup and escaping must not amplify repeated short text beyond this cap.
-    let mut xml_budget = 256 * 1024 * 1024;
-    let mut fallback = false;
-    for (index, (record, outline)) in presentation.slides.iter().enumerate() {
-        media.begin_slide();
-        let hidden = slide_is_hidden(record.payload, &mut record_budget)?;
-        if contains_record(
-            record.payload,
-            DOCUMENT_ENCRYPTION_ATOM,
-            0,
-            &mut record_budget,
-        )? {
-            return Err(unsupported("encrypted PowerPoint slide"));
-        }
-        let drawing = drawing::render_with_masters(
-            record.payload,
-            presentation.object_masters[index]
-                .iter()
-                .map(|span| span.view(&document)),
-            outline,
-            &mut record_budget,
-            &mut text_budget,
-            &mut xml_budget,
-            Some(drawing::TextContext {
-                fonts: &presentation.fonts,
-                styles: &presentation.outline_styles[index],
-                scheme: presentation.schemes[index].as_ref(),
-                types: &presentation.outline_types[index],
-                master: presentation.text_masters[index].as_deref(),
-                shapes: Some(&presentation.shape_masters),
-                backing: &document,
-                outline_slide_numbers: &presentation.outline_slide_numbers[index],
-                slide_number: u32::from(presentation.first_slide_number) + index as u32,
-            }),
-            Some(&mut media),
-        )?;
-        fallback |= drawing.fallback;
-        let background = match &presentation.backgrounds[index] {
-            Some(background) => background_xml(
-                &background.paint,
-                &background.gradient,
-                presentation.schemes[index].as_ref(),
-                &mut media,
-                &mut record_budget,
-                xml_budget,
-            )?,
-            None => String::new(),
-        };
-        let relationships = media.relationships();
-        xml_budget = xml_budget
-            .checked_sub(relationships.len())
-            .ok_or_else(|| "OUTPUT_TOO_LARGE".to_string())?;
-        slides.push((
-            slide_xml(&drawing.tree, &background, hidden, &mut xml_budget)?,
-            relationships,
-        ));
-    }
-    let bytes = build_pptx(slides, presentation.size, &media.parts(), max_output_bytes)?;
-    let mut warnings = vec![
-        "legacy-ppt:positioned-text-and-basic-presets".into(),
-        "legacy-ppt:unlinked-placeholder-styles-inherited-and-outline-numbering-picture-bullets-inherited-rulers-and-advanced-text-omitted".into(),
-        "legacy-ppt:unsupported-bullet-properties-and-paragraph-offsets-omitted".into(),
-        "legacy-ppt:nonuniform-master-text-and-invalid-font-references-omitted".into(),
-        "legacy-ppt:custom-geometry-unlinked-and-advanced-paint-unsupported-media-and-actions-omitted".into(),
-        "legacy-ppt:master-placeholder-content-omitted".into(),
-    ];
-    if fallback {
-        warnings.push("legacy-ppt:missing-drawing-unpositioned-text-fallback".into());
-    }
-    Ok(PptConversion { bytes, warnings })
-}
 
 /// Parse the sole CurrentUserAtom from the Current User stream.
 ///
@@ -321,52 +222,6 @@ fn contains_record(
     Ok(false)
 }
 
-fn collect_text(
-    bytes: &[u8],
-    depth: usize,
-    budget: &mut usize,
-    output: &mut Vec<String>,
-    outline: &[String],
-    text_budget: &mut usize,
-) -> Result<(), String> {
-    if depth > MAX_DEPTH {
-        return Err(unsupported("PowerPoint record nesting is too deep"));
-    }
-    for record in parse_records(bytes, budget)? {
-        match record.kind {
-            TEXT_CHARS_ATOM | TEXT_BYTES_ATOM => {
-                let text = decode_text(record)?;
-                charge_text(text_budget, text.len())?;
-                push_text(output, text)?;
-            }
-            3998 => {
-                // [MS-PPT] 2.9.78: index is relative to this slide's sequence
-                // of TextHeaderAtoms, not a global or byte-stream index.
-                let index = u32_at(record.payload, 0)? as usize;
-                let text = outline
-                    .get(index)
-                    .ok_or_else(|| unsupported("PowerPoint outline text index out of range"))?;
-                // Charge before cloning: repeated references must not amplify
-                // retained text beyond the global document budget.
-                charge_text(text_budget, text.len())?;
-                push_text(output, text.clone())?;
-            }
-            _ if record.version == 0x0f => {
-                collect_text(
-                    record.payload,
-                    depth + 1,
-                    budget,
-                    output,
-                    outline,
-                    text_budget,
-                )?;
-            }
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
 fn decode_text(record: Record<'_>) -> Result<String, String> {
     if record.kind == TEXT_CHARS_ATOM {
         if !record.payload.len().is_multiple_of(2) {
@@ -396,137 +251,6 @@ fn charge_text(budget: &mut usize, bytes: usize) -> Result<(), String> {
     Ok(())
 }
 
-fn push_text(output: &mut Vec<String>, text: String) -> Result<(), String> {
-    if output.len() >= MAX_TEXT_BLOCKS_PER_SLIDE {
-        return Err(unsupported("too many PowerPoint text atoms on one slide"));
-    }
-    if !text.is_empty() {
-        output.push(text);
-    }
-    Ok(())
-}
-
-fn build_pptx(
-    slides: Vec<(String, String)>,
-    size: (u32, u32),
-    media: &[(String, &[u8])],
-    max_output_bytes: usize,
-) -> Result<Vec<u8>, String> {
-    let mut content_types = String::from(
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slideMasters/slideMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"/><Override PartName="/ppt/slideLayouts/slideLayout1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/><Override PartName="/ppt/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>"#,
-    );
-    let mut presentation = String::from(
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<p:presentation xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rId1"/></p:sldMasterIdLst><p:sldIdLst>"#,
-    );
-    let mut presentation_rels = String::from(
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="slideMasters/slideMaster1.xml"/>"#,
-    );
-    let mut parts = vec![
-        ("_rels/.rels".into(), ROOT_RELS_PPTX.to_string()),
-        ("ppt/slideMasters/slideMaster1.xml".into(), slide_master()),
-        (
-            "ppt/slideMasters/_rels/slideMaster1.xml.rels".into(),
-            slide_master_rels(),
-        ),
-        ("ppt/slideLayouts/slideLayout1.xml".into(), slide_layout()),
-        (
-            "ppt/slideLayouts/_rels/slideLayout1.xml.rels".into(),
-            slide_layout_rels(),
-        ),
-        ("ppt/theme/theme1.xml".into(), theme()),
-    ];
-    if !media.is_empty() {
-        content_types.push_str("<Default Extension=\"png\" ContentType=\"image/png\"/><Default Extension=\"jpg\" ContentType=\"image/jpeg\"/>");
-    }
-    if media.iter().any(|(name, _)| name.ends_with(".emf")) {
-        content_types.push_str("<Default Extension=\"emf\" ContentType=\"image/x-emf\"/>");
-    }
-    if media.iter().any(|(name, _)| name.ends_with(".wmf")) {
-        content_types.push_str("<Default Extension=\"wmf\" ContentType=\"image/wmf\"/>");
-    }
-    for (index, (slide, image_rels)) in slides.into_iter().enumerate() {
-        let id = index + 1;
-        content_types.push_str(&format!(
-            "<Override PartName=\"/ppt/slides/slide{id}.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slide+xml\"/>"
-        ));
-        presentation.push_str(&format!(
-            "<p:sldId id=\"{}\" r:id=\"rId{}\"/>",
-            256 + index,
-            id + 1
-        ));
-        presentation_rels.push_str(&format!(
-            "<Relationship Id=\"rId{}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide\" Target=\"slides/slide{id}.xml\"/>",
-            id + 1
-        ));
-        parts.push((format!("ppt/slides/slide{id}.xml"), slide));
-        parts.push((
-            format!("ppt/slides/_rels/slide{id}.xml.rels"),
-            slide_rels(&image_rels),
-        ));
-    }
-    content_types.push_str("</Types>");
-    presentation.push_str(&format!("</p:sldIdLst><p:sldSz cx=\"{}\" cy=\"{}\" type=\"custom\"/><p:notesSz cx=\"6858000\" cy=\"9144000\"/></p:presentation>", size.0, size.1));
-    presentation_rels.push_str("</Relationships>");
-    parts.push(("[Content_Types].xml".into(), content_types));
-    parts.push(("ppt/presentation.xml".into(), presentation));
-    parts.push(("ppt/_rels/presentation.xml.rels".into(), presentation_rels));
-    write_package_bytes(
-        parts
-            .iter()
-            .map(|(name, body)| (name.as_str(), body.as_bytes()))
-            .chain(media.iter().map(|(name, body)| (name.as_str(), *body))),
-        max_output_bytes,
-    )
-}
-
-fn background_xml(
-    paint: &paint::Paint,
-    gradient: &crate::officeart::gradient::Borrowed<'_>,
-    scheme: Option<&scheme::Scheme>,
-    media: &mut media::Store<'_>,
-    budget: &mut usize,
-    output_bytes: usize,
-) -> Result<String, String> {
-    let mut gradient_bytes = output_bytes;
-    let gradient = paint.project_gradient(gradient, true, scheme, budget, &mut gradient_bytes)?;
-    let fill = if let Some(gradient) = gradient {
-        gradient.to_xml(&mut gradient_bytes)?
-    } else if let Some((index, opacity)) = paint.background_image() {
-        if !media.reference(index, budget)? {
-            return Ok(String::new());
-        }
-        let alpha = if opacity == 65536 {
-            String::new()
-        } else {
-            format!(
-                "<a:alphaModFix amt=\"{}\"/>",
-                (u64::from(opacity) * 100000 + 32768) / 65536
-            )
-        };
-        format!("<a:blipFill><a:blip r:embed=\"rImg{index}\">{alpha}</a:blip><a:stretch><a:fillRect/></a:stretch></a:blipFill>")
-    } else {
-        let Some(fill) = paint.background_fill(scheme) else {
-            return Ok(String::new());
-        };
-        fill
-    };
-    let size = fill
-        .len()
-        .checked_add("<p:bg><p:bgPr></p:bgPr></p:bg>".len())
-        .filter(|size| *size <= output_bytes)
-        .ok_or_else(|| "OUTPUT_TOO_LARGE".to_owned())?;
-    let mut xml = String::new();
-    xml.try_reserve_exact(size)
-        .map_err(|_| "OUTPUT_TOO_LARGE".to_owned())?;
-    use std::fmt::Write as _;
-    write!(&mut xml, "<p:bg><p:bgPr>{fill}</p:bgPr></p:bg>")
-        .map_err(|_| "OUTPUT_TOO_LARGE".to_owned())?;
-    Ok(xml)
-}
-
 /// MS-PPT 2.5.1 / 2.6.6: only the live slide's own optional
 /// SlideShowSlideInfoAtom controls visibility. Master and nested records do not.
 fn slide_is_hidden(payload: &[u8], budget: &mut usize) -> Result<bool, String> {
@@ -546,77 +270,18 @@ fn slide_is_hidden(payload: &[u8], budget: &mut usize) -> Result<bool, String> {
         }
         // fHidden is bit 2 of the flags word following the two effect bytes.
         // Reserved bits are explicitly ignored; transitions/sounds/actions
-        // remain outside this converter subset and are never executed.
+        // remain outside this reader's subset and are never executed.
         hidden = Some(u16_at(record.payload, 10)? & 0x0004 != 0);
     }
     Ok(hidden.unwrap_or(false))
 }
 
-fn slide_xml(
-    tree: &str,
-    background: &str,
-    hidden: bool,
-    budget: &mut usize,
-) -> Result<String, String> {
-    let mut xml = String::from(
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main""#,
-    );
-    // ECMA-376 CT_Slide/@show defaults to true. Retain the slide and its
-    // content; ordinary PPTX viewer visibility policy decides whether to show it.
-    if hidden {
-        xml.push_str(r#" show="0""#);
-    }
-    xml.push_str("><p:cSld>");
-    xml.push_str(background);
-    xml.push_str(r#"<p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>"#);
-    let end = "</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>";
-    // The tree has already been charged. Only charge the slide wrapper here.
-    *budget = budget
-        .checked_sub(xml.len() + end.len())
-        .ok_or_else(|| "OUTPUT_TOO_LARGE".to_string())?;
-    xml.push_str(tree);
-    xml.push_str(end);
-    Ok(xml)
-}
-
-fn fallback_text(blocks: &[String], id: u32, budget: &mut usize) -> Result<String, String> {
-    let mut xml = String::new();
-    if !blocks.is_empty() {
-        drawing::append(&mut xml, budget, &format!("<p:sp><p:nvSpPr><p:cNvPr id=\"{id}\" name=\"Legacy slide text\"/><p:cNvSpPr txBox=\"1\"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"457200\" y=\"457200\"/><a:ext cx=\"8229600\" cy=\"5943600\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></p:spPr><p:txBody><a:bodyPr wrap=\"square\"/><a:lstStyle/>"))?;
-        drawing::paragraphs(blocks, &mut xml, budget)?;
-        drawing::append(&mut xml, budget, "</p:txBody></p:sp>")?;
-    }
-    Ok(xml)
-}
-
-fn slide_rels(images: &str) -> String {
-    format!(
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>{images}</Relationships>"#
-    )
-}
-
-fn slide_master() -> String {
-    r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<p:sldMaster xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr></p:spTree></p:cSld><p:clrMap accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" bg1="lt1" bg2="lt2" folHlink="folHlink" hlink="hlink" tx1="dk1" tx2="dk2"/><p:sldLayoutIdLst><p:sldLayoutId id="1" r:id="rId1"/></p:sldLayoutIdLst><p:txStyles><p:titleStyle/><p:bodyStyle/><p:otherStyle/></p:txStyles></p:sldMaster>"#.into()
-}
-
-fn slide_master_rels() -> String {
-    r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="../theme/theme1.xml"/></Relationships>"#.into()
-}
-
-fn slide_layout() -> String {
-    r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<p:sldLayout xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" type="blank" preserve="1"><p:cSld name="Blank"><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr></p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sldLayout>"#.into()
-}
-
-fn slide_layout_rels() -> String {
-    r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="../slideMasters/slideMaster1.xml"/></Relationships>"#.into()
-}
-
+/// Fixed DrawingML theme part (Office 2007 default colours, Arial fonts), used
+/// only by tests and the alternative-shape fuzz driver as a readable master
+/// round-trip theme against which alternative shape XML resolves. Production
+/// themes come from each main master's RoundTripTheme12Atom
+/// (`metro::master_theme`).
+#[cfg(any(test, feature = "fuzzing"))]
 fn theme() -> String {
     r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="Legacy conversion"><a:themeElements><a:clrScheme name="Legacy"><a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1><a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1><a:dk2><a:srgbClr val="1F497D"/></a:dk2><a:lt2><a:srgbClr val="EEECE1"/></a:lt2><a:accent1><a:srgbClr val="4F81BD"/></a:accent1><a:accent2><a:srgbClr val="C0504D"/></a:accent2><a:accent3><a:srgbClr val="9BBB59"/></a:accent3><a:accent4><a:srgbClr val="8064A2"/></a:accent4><a:accent5><a:srgbClr val="4BACC6"/></a:accent5><a:accent6><a:srgbClr val="F79646"/></a:accent6><a:hlink><a:srgbClr val="0000FF"/></a:hlink><a:folHlink><a:srgbClr val="800080"/></a:folHlink></a:clrScheme><a:fontScheme name="Legacy"><a:majorFont><a:latin typeface="Arial"/><a:ea typeface=""/><a:cs typeface=""/></a:majorFont><a:minorFont><a:latin typeface="Arial"/><a:ea typeface=""/><a:cs typeface=""/></a:minorFont></a:fontScheme><a:fmtScheme name="Legacy"><a:fillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:fillStyleLst><a:lnStyleLst><a:ln w="9525"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:prstDash val="solid"/></a:ln><a:ln w="25400"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:prstDash val="solid"/></a:ln><a:ln w="38100"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:prstDash val="solid"/></a:ln></a:lnStyleLst><a:effectStyleLst><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle></a:effectStyleLst><a:bgFillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:bgFillStyleLst></a:fmtScheme></a:themeElements></a:theme>"#.into()
@@ -629,7 +294,7 @@ fn unsupported(message: impl Into<String>) -> String {
 /// Fuzz driver for alternative shape XML resolution (`crate::fuzzing`):
 /// `data` as a whole metroBlob package, and as the shape part of a package
 /// whose relationships are well formed, against a fixed binary text shape.
-#[cfg(all(feature = "fuzzing", feature = "direct-ppt"))]
+#[cfg(feature = "fuzzing")]
 pub(crate) fn fuzz_alternative(data: &[u8]) {
     use std::io::Write;
     let Ok(mut element) = serde_json::from_value::<pptx_model::ShapeElement>(serde_json::json!({
@@ -705,7 +370,7 @@ fn u32_at(bytes: &[u8], offset: usize) -> Result<u32, String> {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(all(feature = "fuzzing", feature = "direct-ppt"))]
+    #[cfg(feature = "fuzzing")]
     #[test]
     fn alternative_fuzz_driver_builds_its_fixed_shape() {
         super::fuzz_alternative(b"");
@@ -752,7 +417,7 @@ mod tests {
             .is_empty());
     }
 
-    use super::{collect_text, parse_current_user_atom, parse_records, MAX_RECORDS};
+    use super::{parse_current_user_atom, parse_records, MAX_RECORDS};
 
     #[test]
     fn slide_visibility_uses_only_the_hidden_flag_in_all_flag_words() {
@@ -778,18 +443,6 @@ mod tests {
     }
 
     #[test]
-    fn hidden_slide_wrapper_charges_the_attribute_to_the_xml_budget() {
-        let visible = super::slide_xml("", "", false, &mut usize::MAX.clone()).unwrap();
-        let hidden = super::slide_xml("", "", true, &mut usize::MAX.clone()).unwrap();
-        assert_eq!(hidden.replace(" show=\"0\"", ""), visible);
-        assert_eq!(hidden.len() - visible.len(), " show=\"0\"".len());
-        assert!(super::slide_xml("", "", true, &mut (hidden.len() - 1)).is_err());
-        let mut budget = hidden.len();
-        assert_eq!(super::slide_xml("", "", true, &mut budget).unwrap(), hidden);
-        assert_eq!(budget, 0);
-    }
-
-    #[test]
     fn text_bytes_are_zero_high_byte_unicode_not_ansi() {
         let text = super::decode_text(super::Record {
             version: 0,
@@ -804,24 +457,6 @@ mod tests {
     #[test]
     fn rejects_record_offsets_before_doing_pointer_arithmetic() {
         assert!(super::parse_record_at(&[], usize::MAX, &mut MAX_RECORDS.clone()).is_err());
-    }
-
-    #[test]
-    fn repeated_outline_references_are_charged_before_copying() {
-        let reference = super::persist::tests::record(0, 3998, &[0; 4]);
-        let mut output = Vec::new();
-        let mut bytes = 5;
-        assert!(collect_text(
-            &[reference.clone(), reference].concat(),
-            0,
-            &mut MAX_RECORDS.clone(),
-            &mut output,
-            &["abc".into()],
-            &mut bytes,
-        )
-        .is_err());
-        assert_eq!(output, ["abc"]);
-        assert_eq!(bytes, 2);
     }
 
     fn current_user_atom(declared_len: u32, payload: &[u8]) -> Vec<u8> {
@@ -856,34 +491,6 @@ mod tests {
         let bytes = current_user_atom(29, &empty_user_payload(1234));
         let mut budget = MAX_RECORDS;
         assert!(parse_current_user_atom(&bytes, &mut budget).is_err());
-    }
-
-    #[test]
-    fn extracts_unicode_text_from_nested_records() {
-        let mut atom = Vec::new();
-        atom.extend_from_slice(&0u16.to_le_bytes());
-        atom.extend_from_slice(&4000u16.to_le_bytes());
-        atom.extend_from_slice(&6u32.to_le_bytes());
-        for unit in "日本語".encode_utf16() {
-            atom.extend_from_slice(&unit.to_le_bytes());
-        }
-        let mut container = Vec::new();
-        container.extend_from_slice(&0x000fu16.to_le_bytes());
-        container.extend_from_slice(&1036u16.to_le_bytes());
-        container.extend_from_slice(&(atom.len() as u32).to_le_bytes());
-        container.extend_from_slice(&atom);
-        let mut output = Vec::new();
-        let mut budget = MAX_RECORDS;
-        collect_text(
-            &container,
-            0,
-            &mut budget,
-            &mut output,
-            &[],
-            &mut super::MAX_TEXT_BYTES.clone(),
-        )
-        .unwrap();
-        assert_eq!(output, vec!["日本語"]);
     }
 
     #[test]

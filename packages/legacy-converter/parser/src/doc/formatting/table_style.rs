@@ -30,7 +30,6 @@ pub(super) struct Bands {
     pub(super) vertical: Option<u8>,
 }
 
-#[cfg(feature = "direct-doc")]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(in crate::doc) struct ConditionalTableBorders {
     /// Fixed slots in [MS-DOC] 2.4.6.6 application order: first column,
@@ -41,7 +40,6 @@ pub(in crate::doc) struct ConditionalTableBorders {
     pub(in crate::doc) present: u8,
 }
 
-#[cfg(feature = "direct-doc")]
 fn conditional_border_index(condition: u16) -> Option<usize> {
     match condition {
         crate::doc::table_style_condition::FIRST_COLUMN => Some(0),
@@ -52,7 +50,6 @@ fn conditional_border_index(condition: u16) -> Option<usize> {
     }
 }
 
-#[cfg(feature = "direct-doc")]
 #[derive(Clone)]
 enum TableStyleShading {
     /// Authored ShdNil is retained as property presence even though its value
@@ -69,22 +66,17 @@ pub(super) struct Profile {
     condition_presence: u16,
     bands: Bands,
     pub(super) paragraph_alignment: Option<paragraph::AlignmentPatch>,
-    #[cfg(feature = "direct-doc")]
     table_shading: Option<TableStyleShading>,
     table_default_margins: table::MarginPatch,
     table_style_margins: table::MarginPatch,
     conditional_first_row_margins: Option<table::MarginPatch>,
-    #[cfg(feature = "direct-doc")]
     table_borders: [Option<table::PreparedBorder>; 6],
-    #[cfg(feature = "direct-doc")]
     conditional_table_borders: ConditionalTableBorders,
     conditional_table_shading: BTreeMap<u16, table::Shading>,
     conditional_table_shading_nil: BTreeSet<u16>,
     /// Last unconditional sprmTWidthIndent and sprmTWidthBefore in
     /// base-to-child order.
-    #[cfg(feature = "direct-doc")]
     preferred_indent: Option<table::PreferredIndent>,
-    #[cfg(feature = "direct-doc")]
     preferred_before: Option<Option<table::PreferredWidth>>,
     unsupported_character: bool,
     unsupported_paragraph: bool,
@@ -100,20 +92,15 @@ impl Default for Profile {
             condition_presence: 0,
             bands: Bands::default(),
             paragraph_alignment: None,
-            #[cfg(feature = "direct-doc")]
             table_shading: None,
             table_default_margins: table::MarginPatch::default(),
             table_style_margins: table::MarginPatch::default(),
             conditional_first_row_margins: None,
-            #[cfg(feature = "direct-doc")]
             table_borders: [None; 6],
-            #[cfg(feature = "direct-doc")]
             conditional_table_borders: ConditionalTableBorders::default(),
             conditional_table_shading: BTreeMap::new(),
             conditional_table_shading_nil: BTreeSet::new(),
-            #[cfg(feature = "direct-doc")]
             preferred_indent: None,
-            #[cfg(feature = "direct-doc")]
             preferred_before: None,
             unsupported_character: false,
             unsupported_paragraph: false,
@@ -123,7 +110,6 @@ impl Default for Profile {
 }
 
 impl Formatting<'_> {
-    #[cfg(any(test, feature = "direct-doc"))]
     pub(in crate::doc) fn table_style_selector_profile(
         &mut self,
         selected_style: Option<usize>,
@@ -139,7 +125,6 @@ impl Formatting<'_> {
         ))
     }
 
-    #[cfg(any(test, feature = "direct-doc"))]
     pub(in crate::doc) fn table_formatting_key(
         &mut self,
         selected_style: Option<usize>,
@@ -184,7 +169,6 @@ impl Formatting<'_> {
         Ok(())
     }
 
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) fn table_cell_shading(
         &mut self,
         key: Option<TableFormattingKey>,
@@ -212,7 +196,7 @@ impl Formatting<'_> {
 
     // The direct model uses `table_cell_margins_for_key`; this
     // unconditional form serves tests.
-    #[cfg(all(test, feature = "direct-doc"))]
+    #[cfg(test)]
     pub(in crate::doc) fn table_cell_margins(
         &mut self,
         selected_style: Option<usize>,
@@ -224,7 +208,6 @@ impl Formatting<'_> {
         Ok((profile.table_default_margins, profile.table_style_margins))
     }
 
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) fn table_cell_margins_for_key(
         &mut self,
         key: Option<TableFormattingKey>,
@@ -244,7 +227,6 @@ impl Formatting<'_> {
         Ok((profile.table_default_margins, cells))
     }
 
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) fn has_conditional_first_row_margins(
         &mut self,
         selected_style: Option<usize>,
@@ -258,7 +240,6 @@ impl Formatting<'_> {
             .is_some())
     }
 
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) fn table_borders(
         &mut self,
         selected_style: Option<usize>,
@@ -269,7 +250,6 @@ impl Formatting<'_> {
         Ok(self.table_style_profile(selected_style)?.table_borders)
     }
 
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) fn conditional_table_borders(
         &mut self,
         selected_style: Option<usize>,
@@ -285,7 +265,6 @@ impl Formatting<'_> {
     }
 
     /// The selected style's inherited sprmTWidthIndent and sprmTWidthBefore.
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) fn table_row_preferences(
         &mut self,
         selected_style: Option<usize>,
@@ -340,7 +319,6 @@ impl Formatting<'_> {
         let mut horizontal_source = None;
         let mut vertical_source = None;
         let mut has_inherited_conditional_shading = false;
-        #[cfg(feature = "direct-doc")]
         let mut conditional_border_rejected = false;
         let mut default_margin_sides = 0u8;
         let mut style_margin_sides = 0u8;
@@ -360,7 +338,6 @@ impl Formatting<'_> {
                 &mut self.budget,
                 |scope, code, operand, _| {
                     match code {
-                        #[cfg(feature = "direct-doc")]
                         0xd47f | 0xd680 | 0xd681 | 0xd682 | 0xd683 | 0xd684 => {
                             let tapx::Scope::Conditional(condition) = scope else {
                                 return Ok(false);
@@ -404,7 +381,6 @@ impl Formatting<'_> {
                             profile.condition_presence |= condition;
                             Ok(interpret_table_styles)
                         }
-                        #[cfg(feature = "direct-doc")]
                         0xd613 => {
                             if scope != tapx::Scope::Unconditional {
                                 return Ok(false);
@@ -496,10 +472,8 @@ impl Formatting<'_> {
                                         // an omitted property: Word controls
                                         // show that an inherited child Nil does
                                         // not behave like an empty child.
-                                        #[cfg(feature = "direct-doc")]
-                                        {
-                                            profile.table_shading = Some(TableStyleShading::Nil);
-                                        }
+                                        profile.table_shading = Some(TableStyleShading::Nil);
+
                                         return Ok(interpret_table_styles);
                                     }
                                     tapx::Scope::Conditional(condition) => {
@@ -523,11 +497,7 @@ impl Formatting<'_> {
                                 tapx::Scope::Unconditional => {
                                     // Read only by the direct model's cell
                                     // shading resolution.
-                                    #[cfg(feature = "direct-doc")]
-                                    {
-                                        profile.table_shading =
-                                            Some(TableStyleShading::Value(shading));
-                                    }
+                                    profile.table_shading = Some(TableStyleShading::Value(shading));
                                 }
                                 tapx::Scope::Conditional(condition) => {
                                     has_inherited_conditional_shading = true;
@@ -536,10 +506,9 @@ impl Formatting<'_> {
                                     profile.conditional_table_shading.insert(condition, shading);
                                 }
                             }
-                            // Retain exact facts for both paths, but only the
-                            // direct model currently projects table-style cell
-                            // shading. The XML conversion keeps its admission
-                            // gate rather than silently omitting this property.
+                            // Retain the exact facts; the property is admitted
+                            // only when table styles are interpreted, which the
+                            // direct model's cell shading resolution requires.
                             Ok(interpret_table_styles)
                         }
                         0x3488 | 0x3489 => {
@@ -573,18 +542,14 @@ impl Formatting<'_> {
                         // the row's inherited preference, checked against the
                         // physical leading grid at projection.
                         0xf617 if scope == tapx::Scope::Unconditional => {
-                            #[cfg(feature = "direct-doc")]
-                            {
-                                profile.preferred_before =
-                                    Some(table::PreferredWidth::part(operand)?);
-                            }
+                            profile.preferred_before = Some(table::PreferredWidth::part(operand)?);
+
                             Ok(true)
                         }
                         // A style's preferred indent is a preference like the
                         // direct one: the physical row origin positions the
                         // table (see table::PreferredIndent for the evidence and
                         // its RTL limit, enforced at projection).
-                        #[cfg(feature = "direct-doc")]
                         0xf661 if scope == tapx::Scope::Unconditional => {
                             profile.preferred_indent = Some(table::PreferredIndent::read(operand)?);
                             Ok(interpret_table_styles)
@@ -663,12 +628,8 @@ impl Formatting<'_> {
             // shading composition. Conditional borders are composed per side
             // by the fixed slots above and have separate Word controls.
             profile.unsupported_table = true;
-            #[cfg(feature = "direct-doc")]
-            {
-                profile.conditional_table_borders = ConditionalTableBorders::default();
-            }
+            profile.conditional_table_borders = ConditionalTableBorders::default();
         }
-        #[cfg(feature = "direct-doc")]
         if inherited {
             let borders = profile.conditional_table_borders;
             let unsupported_inherited_border = borders.present & !0b0101 != 0;
@@ -761,6 +722,6 @@ fn parse_conditional(
     Ok(())
 }
 
-#[cfg(all(test, feature = "direct-doc"))]
+#[cfg(test)]
 #[path = "table_style_margin_tests.rs"]
 mod margin_tests;

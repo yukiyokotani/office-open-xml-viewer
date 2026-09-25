@@ -103,6 +103,7 @@ impl Paint {
         Ok(())
     }
 
+    #[cfg(feature = "direct-ppt")]
     pub fn tertiary_fill_boolean_property(&mut self, value: u32) -> Result<(), String> {
         self.fill_boolean_property(value, true)
     }
@@ -111,6 +112,7 @@ impl Paint {
     /// Preserve absence until the full chain is resolved, especially Boolean
     /// use bits: explicit false must win over inherited true. Colors stay in
     /// their source representation until the destination slide resolves them.
+    #[cfg(feature = "direct-ppt")]
     pub fn inherit(&self, parent: &Self) -> Self {
         Self {
             details: self.details.inherit(&parent.details),
@@ -208,6 +210,7 @@ impl Paint {
         }
         Ok(())
     }
+    #[cfg(feature = "direct-doc")]
     pub fn geometry(&self, kind: u16) -> Option<&'static str> {
         if self.custom_geometry {
             return None;
@@ -230,12 +233,13 @@ impl Paint {
     /// MS-ODRAW 2.3.7.1: msofillPattern (1), msofillTexture (2) and
     /// msofillPicture (3) paint with the fillBlip BLIP. Returns the active one
     /// so a caller that cannot project it can reject instead of drawing none.
-    #[cfg(any(test, feature = "direct-ppt"))]
+    #[cfg(feature = "direct-ppt")]
     pub fn blip_fill_type(&self) -> Option<u32> {
         let kind = self.fill_type.unwrap_or(0);
         (matches!(kind, 1..=3) && self.filled.unwrap_or(true) && self.fill_ok.unwrap_or(true))
             .then_some(kind)
     }
+    #[cfg(feature = "direct-ppt")]
     pub fn background_image(&self) -> Option<(u32, u32)> {
         (self.fill_type == Some(3)
             && self.fill_blip.unwrap_or(0) != 0
@@ -251,6 +255,7 @@ impl Paint {
     /// fillShape to 1, fillUseRect to 0, and fUseShapeAnchor to 0. A distinct
     /// fill rectangle or view-relative fill cannot be represented by this
     /// shape-local DrawingML stretch without inventing placement semantics.
+    #[cfg(any(feature = "direct-doc", feature = "direct-ppt"))]
     pub fn foreground_image(&self) -> Option<(u32, u32, bool)> {
         (self.fill_type == Some(3)
             && self.fill_blip.unwrap_or(0) != 0
@@ -276,6 +281,7 @@ impl Paint {
     /// required before the MS-ODRAW defaults are used.
     /// Whether the shape states any fill property. Without one the
     /// projection draws no fill.
+    #[cfg(feature = "direct-ppt")]
     pub(crate) fn fill_stated(&self) -> bool {
         self.fill.is_some()
             || self.filled.is_some()
@@ -283,6 +289,7 @@ impl Paint {
             || self.fill_alpha.is_some()
     }
 
+    #[cfg(feature = "direct-ppt")]
     pub(crate) fn solid_fill_values(&self, allow_fill: bool) -> Option<(u32, u32)> {
         (allow_fill
             && self.fill_stated()
@@ -297,6 +304,7 @@ impl Paint {
     }
 
     /// Solid line counterpart of [`Self::solid_fill_values`].
+    #[cfg(feature = "direct-ppt")]
     pub(crate) fn solid_line_values(&self, allow_line: bool) -> Option<(u32, u32)> {
         let line_set = self.line.is_some()
             || self.lined.is_some()
@@ -344,6 +352,7 @@ impl Paint {
 
 /// A linear OfficeArt shade projected to DrawingML stop order. Stop colours
 /// stay OfficeArtCOLORREF values for the host to resolve.
+#[cfg(any(feature = "direct-doc", feature = "direct-ppt"))]
 pub(crate) struct LinearShade {
     pub projection: super::gradient::projection::Projection,
     /// Per-stop 16.16 opacity, parallel to `projection.stops`.
@@ -354,7 +363,9 @@ pub(crate) struct LinearShade {
 
 // Two-colour shades are projected with these marker colours so each output
 // stop keeps its origin (fill or back colour) even when both colours match.
+#[cfg(any(feature = "direct-doc", feature = "direct-ppt"))]
 const FRONT_MARKER: u32 = 0;
+#[cfg(any(feature = "direct-doc", feature = "direct-ppt"))]
 const BACK_MARKER: u32 = 1;
 
 impl Paint {
@@ -378,6 +389,7 @@ impl Paint {
     /// Opacity combined with an authored shade-colour array has no evidence
     /// and is rejected, as are the path shades (5, 6) and the host-defined
     /// title shade (8).
+    #[cfg(any(feature = "direct-doc", feature = "direct-ppt"))]
     pub(crate) fn linear_shade(
         &self,
         source: &super::gradient::Borrowed<'_>,

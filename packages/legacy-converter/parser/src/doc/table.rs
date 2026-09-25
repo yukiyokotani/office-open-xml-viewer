@@ -4,18 +4,13 @@ use super::{border::Border, u16_at, u32_at, unsupported};
 mod margin;
 pub(in crate::doc) use margin::Patch as MarginPatch;
 mod shading;
-#[cfg(feature = "direct-doc")]
 pub(in crate::doc) use shading::Color;
 pub(in crate::doc) use shading::Shading;
 mod position;
 pub(in crate::doc) use position::Position;
-#[cfg(feature = "direct-doc")]
 mod geometry;
-#[cfg(feature = "direct-doc")]
 mod native_admission;
-#[cfg(feature = "direct-doc")]
 pub(in crate::doc) use geometry::{NativeGeometry, NativeGeometryApply};
-#[cfg(feature = "direct-doc")]
 pub(in crate::doc) use native_admission::{
     cell_text_flow, NativeAdmission, NativeAdmissionApply, PreferredIndent,
 };
@@ -54,14 +49,12 @@ pub(in crate::doc) enum StyleAwareShadingApply {
 /// A validated border operand retained without decoded `String` payload until
 /// the native table-style cascade is known. Keeping this separate from
 /// `Cell::borders` preserves the TC80 definition layer across sprmTIstd.
-#[cfg(feature = "direct-doc")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::doc) enum PreparedBorder {
     Old([u8; 4]),
     Modern([u8; 8]),
 }
 
-#[cfg(feature = "direct-doc")]
 impl PreparedBorder {
     pub(in crate::doc) fn read(bytes: &[u8], old: bool) -> Result<Self, String> {
         let size = if old { 4 } else { 8 };
@@ -97,7 +90,6 @@ impl PreparedBorder {
     }
 }
 
-#[cfg(feature = "direct-doc")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::doc) enum StyleAwareBorderApply {
     Unhandled,
@@ -115,16 +107,12 @@ pub struct Cell {
     pub flags: u16,
     pub preferred: Option<PreferredWidth>,
     pub margins: [Option<u16>; 4],
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) margin_nil: u8,
     pub borders: [Option<Border>; 6],
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) prepared_borders: [Option<PreparedBorder>; 6],
     /// [MS-DOC] 2.9.28 fNoWrap from sprmTFCellNoWrap (native acquisition).
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) no_wrap: bool,
     /// [MS-DOC] 2.9.26 bArg from sprmTCellFHideMark (native acquisition).
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) hide_mark: bool,
 }
 
@@ -167,9 +155,7 @@ pub struct Row {
     left_is_edge: bool,
     pub height: i32,
     pub margins: [u16; 4],
-    #[cfg(feature = "direct-doc")]
     margin_authored: u8,
-    #[cfg(feature = "direct-doc")]
     margin_nil: u8,
     pub autofit: bool,
     pub header: bool,
@@ -179,19 +165,14 @@ pub struct Row {
     bidi_5664: bool,
     pub alignment: (u16, bool),
     pub borders: [Option<Border>; 6],
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) prepared_borders: [Option<PreparedBorder>; 6],
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) border_tistd_count: u8,
     pub preferred_width: Option<PreferredWidth>,
     /// Last sprmTWidthIndent, sprmTWidthBefore and sprmTWidthAfter preference
     /// (native acquisition only). The outer `None` means not authored; the
     /// inner `None` of a table-part width is MS-DOC ftsNil.
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) preferred_indent: Option<PreferredIndent>,
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) preferred_before: Option<Option<PreferredWidth>>,
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) preferred_after: Option<Option<PreferredWidth>>,
 }
 
@@ -209,9 +190,7 @@ impl Default for Row {
             left_is_edge: false,
             height: 0,
             margins: margin::DEFAULTS,
-            #[cfg(feature = "direct-doc")]
             margin_authored: 0,
-            #[cfg(feature = "direct-doc")]
             margin_nil: 0,
             autofit: false,
             header: false,
@@ -221,16 +200,11 @@ impl Default for Row {
             bidi_5664: false,
             alignment: (0, false),
             borders: Default::default(),
-            #[cfg(feature = "direct-doc")]
             prepared_borders: [None; 6],
-            #[cfg(feature = "direct-doc")]
             border_tistd_count: 0,
             preferred_width: None,
-            #[cfg(feature = "direct-doc")]
             preferred_indent: None,
-            #[cfg(feature = "direct-doc")]
             preferred_before: None,
-            #[cfg(feature = "direct-doc")]
             preferred_after: None,
         }
     }
@@ -288,7 +262,6 @@ impl<R> Properties<R> {
 }
 
 impl Properties {
-    #[cfg(feature = "direct-doc")]
     pub(super) fn borrowed(&self) -> Properties<&Row> {
         Properties {
             in_table: self.in_table,
@@ -300,7 +273,6 @@ impl Properties {
         }
     }
 
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) fn retained_heap_bytes(&self) -> Result<usize, String> {
         let mut bytes = self
             .row
@@ -366,7 +338,6 @@ impl Row {
     /// Resets the independently authored row properties for which native Word
     /// controls establish sprmTIstd replacement. Positioning and table/cell
     /// geometry remain separate preserved semantic properties ([MS-DOC] 2.6.3).
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) fn reset_row_properties_at_tistd(&mut self, code: u16) {
         if code == 0x563a {
             self.alignment = (0, false);
@@ -383,7 +354,6 @@ impl Row {
     /// current Word ignores the legacy sprmTFCantSplit90 and evaluates the
     /// modern sprmTFCantSplit. This policy is selected by the native reader;
     /// it is not inferred from the document's FIB version.
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) fn apply_native_cant_split(
         &mut self,
         code: u16,
@@ -416,7 +386,6 @@ impl Row {
     /// is known. Nil is distinct from omission and resolves to zero in the
     /// bounded Office controls. A later TIstd discards these non-preserved
     /// table properties without disturbing cell geometry ([MS-DOC] 2.6.3).
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) fn apply_style_aware_margins(
         &mut self,
         code: u16,
@@ -483,7 +452,7 @@ impl Row {
 
     // The direct model resolves margins per cell through
     // `resolve_style_aware_margins_by_cell`; this row-wide form serves tests.
-    #[cfg(all(test, feature = "direct-doc"))]
+    #[cfg(test)]
     pub(in crate::doc) fn resolve_style_aware_margins(
         &mut self,
         style_defaults: MarginPatch,
@@ -492,7 +461,6 @@ impl Row {
         self.resolve_style_aware_margins_with(style_defaults, |_| style_cells);
     }
 
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) fn resolve_style_aware_margins_by_cell(
         &mut self,
         style_defaults: MarginPatch,
@@ -505,7 +473,6 @@ impl Row {
         Ok(())
     }
 
-    #[cfg(feature = "direct-doc")]
     fn resolve_style_aware_margins_with(
         &mut self,
         style_defaults: MarginPatch,
@@ -542,7 +509,6 @@ impl Row {
     /// Retains resettable direct table/cell border operands separately from
     /// TC80 cell-definition borders. [MS-DOC] 2.6.3 does not list borders
     /// among the properties preserved when sprmTIstd applies.
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) fn apply_style_aware_borders(
         &mut self,
         code: u16,
@@ -770,9 +736,8 @@ impl Row {
             0x563a => {
                 // [MS-DOC] 2.6.3 sprmTIstd: each application selects a table
                 // style and resets the previous selection. Retain last-wins
-                // state here. Returning false keeps the XML conversion, which
-                // does not interpret table styles, gated; the direct model
-                // admits the selection through table::NativeAdmission.
+                // state here. Returning false leaves the selection to
+                // table::NativeAdmission, which admits it.
                 let table_style = usize::from(u16_at(b, 0)?);
                 // sprmTIstd replaces table properties except for the explicit
                 // preserved list in [MS-DOC] 2.6.3. Prepared direct cell
@@ -792,8 +757,8 @@ impl Row {
             }
             0x740a => {
                 // MS-DOC 2.9.326 TLP: ignore the historical itl and retain
-                // only the live grfatl options. Returning false keeps TTlp
-                // gated in the XML conversion; see table::NativeAdmission.
+                // only the live grfatl options. Returning false leaves TTlp to
+                // table::NativeAdmission.
                 if b.len() != 4 {
                     return Err(unsupported("invalid Word table style options"));
                 }
@@ -1106,6 +1071,13 @@ impl Row {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The projected table position and overlap of a row.
+    fn position(row: &Row) -> serde_json::Value {
+        let (position, overlap) = row.position.direct();
+        serde_json::json!([position, overlap])
+    }
+
     #[test]
     fn table_identity_ignores_position_padding_but_retains_anchor_changes() {
         let mut a = Row::default();
@@ -1113,7 +1085,7 @@ mod tests {
         a.apply(0x360d, &[0x20]).unwrap();
         b.apply(0x360d, &[0x2f]).unwrap();
         assert_eq!(a.identity, b.identity);
-        assert_eq!(a.position.xml(), b.position.xml());
+        assert_eq!(position(&a), position(&b));
         b.apply(0x360d, &[0x60]).unwrap();
         assert_ne!(a.identity, b.identity);
     }
@@ -1124,25 +1096,24 @@ mod tests {
         let mut explicit_false = Row::default();
         explicit_false.apply(0x3465, &[0]).unwrap();
         assert_eq!(explicit_false.identity, omitted.identity);
-        assert_eq!(explicit_false.position.xml(), omitted.position.xml());
+        assert_eq!(position(&explicit_false), position(&omitted));
 
         let mut row = Row::default();
         row.apply(0x3465, &[1]).unwrap();
         assert_eq!(row.identity[&0x3465], vec![1]);
-        assert!(row.position.xml().contains("tblOverlap"));
+        assert_eq!(position(&row)[1], "never");
         let before = row.identity.clone();
-        let before_xml = row.position.xml();
+        let before_position = position(&row);
         assert!(row.apply(0x3465, &[2]).is_err());
         assert!(row.apply(0x3465, &[]).is_err());
         assert_eq!(row.identity, before);
-        assert_eq!(row.position.xml(), before_xml);
+        assert_eq!(position(&row), before_position);
 
         row.apply(0x3465, &[0]).unwrap();
         assert_eq!(row.identity, omitted.identity);
-        assert_eq!(row.position.xml(), omitted.position.xml());
+        assert_eq!(position(&row), position(&omitted));
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn native_current_word_ignores_legacy_cant_split_and_orders_modern_records() {
         let mut row = Row::default();
@@ -1186,18 +1157,15 @@ mod tests {
         assert_eq!(row.identity[&0x563a], 8u16.to_le_bytes());
     }
 
-    #[cfg(feature = "direct-doc")]
     fn margin_cssa(first: u8, limit: u8, sides: u8, unit: u8, width: u16) -> [u8; 7] {
         let [lo, hi] = width.to_le_bytes();
         [6, first, limit, sides, unit, lo, hi]
     }
 
-    #[cfg(feature = "direct-doc")]
     fn modern_border(color: [u8; 3], width: u8) -> [u8; 8] {
         [color[0], color[1], color[2], 0, width, 1, 0, 0]
     }
 
-    #[cfg(feature = "direct-doc")]
     fn modern_table_borders(color: [u8; 3], width: u8) -> Vec<u8> {
         let mut operand = vec![48];
         for _ in 0..6 {
@@ -1206,14 +1174,12 @@ mod tests {
         operand
     }
 
-    #[cfg(feature = "direct-doc")]
     fn modern_cell_border(first: u8, limit: u8, sides: u8, color: [u8; 3], width: u8) -> Vec<u8> {
         let mut operand = vec![11, first, limit, sides];
         operand.extend(modern_border(color, width));
         operand
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn native_tistd_resets_preceding_direct_borders_but_keeps_tc80_layer() {
         let mut definition = vec![26, 0, 1, 0, 0, 0xe8, 3, 0, 0, 0, 0];
@@ -1266,7 +1232,6 @@ mod tests {
             .all(Option::is_some));
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn prepared_cell_borders_follow_source_cell_edits_and_redefinition() {
         let mut row = Row::default();
@@ -1287,7 +1252,6 @@ mod tests {
         assert!(row.cells[0].prepared_borders.iter().all(Option::is_none));
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn native_nil_diagonal_and_malformed_borders_retain_prior_unstyled_semantics() {
         let mut row = Row::default();
@@ -1318,7 +1282,6 @@ mod tests {
             .is_err());
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn native_margins_keep_nil_dxa_and_omission_distinct_until_resolution() {
         let mut row = Row::default();
@@ -1356,7 +1319,6 @@ mod tests {
         assert_eq!(row.cells[2].margins[1], Some(180));
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn native_style_d634_nil_masks_inherited_dxa_and_resolves_zero() {
         let mut defaults = MarginPatch::default();
@@ -1373,7 +1335,6 @@ mod tests {
         assert_eq!(row.cells[0].margins[1], Some(0));
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn native_tistd_resets_only_prepared_margins_and_preserves_geometry() {
         let mut row = Row::default();
@@ -1395,7 +1356,6 @@ mod tests {
         assert_eq!(row.cells[0].margin_nil, 0);
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn prepared_cell_margins_follow_insert_delete_and_definition_ownership() {
         let mut row = Row::default();
@@ -1426,7 +1386,6 @@ mod tests {
         assert_eq!(row.cells[0].margin_nil, 0);
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn native_margin_ranges_and_last_authored_state_are_checked() {
         let mut row = Row::default();
@@ -1627,7 +1586,7 @@ mod tests {
                 matches!(
                     &cell.prepared_shading,
                     Some(PreparedCellShading::Explicit(shading))
-                        if shading.xml().contains("w:fill=\"123456\"")
+                        if shading.direct_background().as_deref() == Some("123456")
                 )
             }));
         }
@@ -1664,8 +1623,12 @@ mod tests {
             panic!("ShdAuto must remain an explicit cell value");
         };
         assert_eq!(
-            auto.xml(),
-            "<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"auto\"/>"
+            auto.direct_facts(),
+            shading::DirectShadingFacts {
+                pattern: "clear",
+                foreground: shading::Color::Auto,
+                background: shading::Color::Auto,
+            }
         );
         assert!(matches!(
             row.cells[23].prepared_shading,
@@ -1690,7 +1653,7 @@ mod tests {
         assert!(matches!(
             &row.cells[0].prepared_shading,
             Some(PreparedCellShading::Explicit(shading))
-                if shading.xml().contains("w:fill=\"123456\"")
+                if shading.direct_background().as_deref() == Some("123456")
         ));
 
         row.apply_style_aware_shading(
@@ -1771,7 +1734,7 @@ mod tests {
         assert!(matches!(
             raw_nil.cells[0].prepared_shading,
             Some(PreparedCellShading::Explicit(ref shading))
-                if shading.xml().contains("w:fill=\"123456\"")
+                if shading.direct_background().as_deref() == Some("123456")
         ));
     }
 
@@ -1802,7 +1765,7 @@ mod tests {
                 .unwrap();
             assert!(row.cells[start..start + 2].iter().all(|cell| matches!(
                 &cell.prepared_shading,
-                Some(PreparedCellShading::Explicit(shading)) if shading.xml().contains("w:fill=\"123456\"")
+                Some(PreparedCellShading::Explicit(shading)) if shading.direct_background().as_deref() == Some("123456")
             )));
             let mut empty = new_row();
             empty
@@ -1873,7 +1836,7 @@ mod tests {
         assert!(matches!(
             &reverse.cells[0].prepared_shading,
             Some(PreparedCellShading::Explicit(shading))
-                if shading.xml().contains("w:fill=\"123456\"")
+                if shading.direct_background().as_deref() == Some("123456")
         ));
 
         let mut reverse_tail = Row::default();
@@ -2044,8 +2007,8 @@ mod tests {
                 .shading
                 .as_ref()
                 .unwrap()
-                .xml()
-                .contains("123456"));
+                .direct_background()
+                .is_some_and(|fill| fill == "123456"));
             assert!(row.cells[index + 1].shading.is_none());
         }
         assert!(row.apply(0xd609, &[2, 0xe0, 0]).unwrap()); // Ico yellow background.
@@ -2053,8 +2016,8 @@ mod tests {
             .shading
             .as_ref()
             .unwrap()
-            .xml()
-            .contains("FFFF00"));
+            .direct_background()
+            .is_some_and(|fill| fill == "ffff00"));
         assert!(row.cells[22].shading.is_some());
         assert!(row.cells[44].shading.is_some());
         assert!(row.apply(0xd612, &[0]).unwrap());

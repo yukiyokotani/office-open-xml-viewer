@@ -22,7 +22,6 @@ struct BorderFacts {
     frame: Option<bool>,
 }
 impl Border {
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) fn retained_bytes(&self) -> Result<usize, String> {
         let Some(facts) = &self.facts else {
             return Ok(0);
@@ -165,27 +164,9 @@ impl Border {
             }),
         })
     }
-    pub fn xml(&self, side: &str) -> String {
-        let Some(value) = &self.facts else {
-            return format!("<w:{side} />");
-        };
-        if value.style == "nil" {
-            return format!("<w:{side} w:val=\"nil\"/>");
-        }
-        format!(
-            "<w:{side} w:val=\"{}\" w:sz=\"{}\" w:color=\"{}\" w:space=\"{}\" w:shadow=\"{}\" w:frame=\"{}\"/>",
-            value.style,
-            value.width_eighth_points.expect("decoded border width"),
-            value.color.as_deref().expect("decoded border color"),
-            value.space_points.expect("decoded border space"),
-            u8::from(value.shadow.expect("decoded border shadow")),
-            u8::from(value.frame.expect("decoded border frame")),
-        )
-    }
 
     /// True for the documented no-border values: NilBrc/Brc80MayBeNil and a
     /// border type of zero (none). A cleared diagonal equals its absence.
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) fn is_cleared(&self) -> bool {
         self.facts
             .as_ref()
@@ -195,7 +176,6 @@ impl Border {
     /// Table/cell border projection matching the current DOCX parser's
     /// `BorderSpec` contract. Spacing, shadow and frame remain available to
     /// paragraph typography, but `BorderSpec` has no fields for them.
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) fn direct_spec(&self) -> docx_model::BorderSpec {
         let Some(value) = &self.facts else {
             return docx_model::BorderSpec {
@@ -217,7 +197,6 @@ impl Border {
         }
     }
 
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) fn direct_edge(&self) -> docx_model::ParaBorderEdge {
         let Some(value) = &self.facts else {
             return docx_model::ParaBorderEdge {
@@ -235,7 +214,7 @@ impl Border {
                 value.style.clone()
             },
             color: (!cleared)
-                .then(|| value.color.as_deref())
+                .then_some(value.color.as_deref())
                 .flatten()
                 .filter(|color| *color != "auto")
                 .map(str::to_ascii_lowercase),
@@ -254,7 +233,6 @@ impl Border {
         }
     }
 
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) fn direct_typography(&self) -> docx_model::CtBorderTypographyWire {
         use docx_model::{TypographyValueStatusWire::Valid, TypographyValueWire};
         let Some(value) = &self.facts else {
@@ -300,32 +278,31 @@ impl Border {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(feature = "direct-doc")]
-    use std::io::{Cursor, Write};
-    #[cfg(feature = "direct-doc")]
-    use zip::write::SimpleFileOptions;
 
-    #[cfg(feature = "direct-doc")]
-    fn parsed_table(xml: &str) -> serde_json::Value {
-        let document = format!(
-            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl><w:tblPr>{xml}</w:tblPr><w:tblGrid/><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl></w:body></w:document>"#
-        );
-        let mut bytes = Vec::new();
-        {
-            let mut archive = zip::ZipWriter::new(Cursor::new(&mut bytes));
-            archive
-                .start_file("word/document.xml", SimpleFileOptions::default())
-                .unwrap();
-            archive.write_all(document.as_bytes()).unwrap();
-            archive.finish().unwrap();
-        }
-        let json: serde_json::Value =
-            serde_json::from_str(&docx_parser::parse_docx_native(&bytes).unwrap()).unwrap();
-        json["body"][0].clone()
+    /// The raw authored attributes the typed storage keeps: val, color, sz,
+    /// space, shadow and frame, as the paragraph typography wire carries them.
+    fn raw(border: &Border) -> [Option<String>; 6] {
+        let t = border.direct_typography();
+        [
+            t.val.raw,
+            t.color.raw,
+            t.size_pt.raw,
+            t.space_pt.raw,
+            t.shadow.raw,
+            t.frame.raw,
+        ]
     }
-    #[cfg(feature = "direct-doc")]
+
+    fn some(values: [&str; 6]) -> [Option<String>; 6] {
+        values.map(|value| Some(value.to_owned()))
+    }
+
+    fn nil() -> [Option<String>; 6] {
+        [Some("nil".to_owned()), None, None, None, None, None]
+    }
+
     #[test]
-    fn direct_table_border_matches_docx_parser_contract_at_boundaries() {
+    fn direct_table_border_maps_width_color_and_style_at_boundaries() {
         let default = Border::default().direct_spec();
         assert_eq!(
             (default.style.as_str(), default.width, default.color),
@@ -343,16 +320,6 @@ mod tests {
             (value.style.as_str(), value.width, value.color.as_deref()),
             ("inset", 31.875, Some("abcdef"))
         );
-        let parsed = parsed_table(&format!(
-            "<w:tblBorders>{}</w:tblBorders>",
-            Border::read(&[0xAB, 0xCD, 0xEF, 0, 255, 27, 31, 0], false)
-                .unwrap()
-                .xml("top")
-        ));
-        assert_eq!(
-            serde_json::to_value(value).unwrap(),
-            parsed["borders"]["top"]
-        );
     }
     #[test]
     fn paragraph_border_effects_follow_logical_side_and_record_version() {
@@ -363,16 +330,16 @@ mod tests {
                 vec![0, 0, 255, 0, 8, 1, 0xff, 0xff]
             };
             for side in 0..5 {
-                let xml = Border::paragraph(&bytes, old, side).unwrap().xml("test");
+                let [_, _, _, space, shadow_raw, frame_raw] =
+                    raw(&Border::paragraph(&bytes, old, side).unwrap());
                 let shadow = side == 2 || side == 3 || (old && side == 4);
                 let frame = side == 2 || side == 3;
-                assert!(xml.contains(&format!("w:shadow=\"{}\"", u8::from(shadow))));
-                assert!(xml.contains(&format!("w:frame=\"{}\"", u8::from(frame))));
-                assert!(xml.contains("w:space=\"31\""));
+                assert_eq!(shadow_raw, Some(u8::from(shadow).to_string()));
+                assert_eq!(frame_raw, Some(u8::from(frame).to_string()));
+                assert_eq!(space.as_deref(), Some("31"));
             }
         }
     }
-
     #[test]
     fn undefined_and_page_only_border_types_are_rejected_precisely() {
         // A near-Nil Brc: cv and type 0xFF but flag bytes that are not the
@@ -402,10 +369,8 @@ mod tests {
         for old in [false, true] {
             let size = if old { 4 } else { 8 };
             assert_eq!(
-                Border::paragraph(&vec![255; size], old, 0)
-                    .unwrap()
-                    .xml("top"),
-                "<w:top w:val=\"nil\"/>"
+                raw(&Border::paragraph(&vec![255; size], old, 0).unwrap()),
+                nil()
             );
             assert!(Border::read(&vec![255; size], old).is_ok());
             for length in 0..size {
@@ -414,10 +379,8 @@ mod tests {
         }
         // NilBrc.colorref is unused, irrespective of the bytes preceding it.
         assert_eq!(
-            Border::paragraph(&[0, 1, 2, 3, 255, 255, 255, 255], false, 3)
-                .unwrap()
-                .xml("right"),
-            "<w:right w:val=\"nil\"/>"
+            raw(&Border::paragraph(&[0, 1, 2, 3, 255, 255, 255, 255], false, 3).unwrap()),
+            nil()
         );
         for kind in [0x1a, 0x1b] {
             assert!(Border::paragraph(&[8, kind, 0, 0], true, 0).is_err());
@@ -427,43 +390,34 @@ mod tests {
 
     #[test]
     fn preserves_nil_palette_and_colorref_instead_of_byte_order_swapping() {
-        assert!(Border::read(&[255; 4], true)
-            .unwrap()
-            .xml("top")
-            .contains("w:val=\"nil\""));
-        let b = Border::read(&[0, 6, 2, 0], true).unwrap().xml("top");
-        assert!(b.contains("w:color=\"0000FF\""));
-        assert!(b.contains("w:sz=\"2\""));
-        assert!(Border::read(&[0x12, 0x34, 0x56, 0, 8, 3, 0, 0], false)
-            .unwrap()
-            .xml("left")
-            .contains("w:color=\"123456\""));
+        assert_eq!(raw(&Border::read(&[255; 4], true).unwrap()), nil());
+        let [_, color, size, ..] = raw(&Border::read(&[0, 6, 2, 0], true).unwrap());
+        assert_eq!(
+            (color.as_deref(), size.as_deref()),
+            (Some("0000FF"), Some("2"))
+        );
+        let [_, color, ..] = raw(&Border::read(&[0x12, 0x34, 0x56, 0, 8, 3, 0, 0], false).unwrap());
+        assert_eq!(color.as_deref(), Some("123456"));
     }
 
     #[test]
-    fn typed_storage_preserves_exact_xml_at_binary_boundaries() {
-        assert_eq!(Border::default().xml("top"), "<w:top />");
+    fn typed_storage_preserves_exact_attributes_at_binary_boundaries() {
         assert_eq!(
-            Border::read(&[0xAB, 0xCD, 0xEF, 0, 255, 1, 31, 0], false)
-                .unwrap()
-                .xml("bottom"),
-            "<w:bottom w:val=\"single\" w:sz=\"255\" w:color=\"ABCDEF\" w:space=\"31\" w:shadow=\"0\" w:frame=\"0\"/>"
+            raw(&Border::default()),
+            [None, None, None, None, None, None]
         );
         assert_eq!(
-            Border::read(&[0, 0, 0, 255, 255, 1, 31, 0], false)
-                .unwrap()
-                .xml("bottom"),
-            "<w:bottom w:val=\"single\" w:sz=\"255\" w:color=\"auto\" w:space=\"31\" w:shadow=\"0\" w:frame=\"0\"/>"
+            raw(&Border::read(&[0xAB, 0xCD, 0xEF, 0, 255, 1, 31, 0], false).unwrap()),
+            some(["single", "ABCDEF", "255", "31", "0", "0"])
         );
         assert_eq!(
-            Border::read(&[0, 0, 0, 0, 8, 0, 0, 0], false)
-                .unwrap()
-                .xml("bottom"),
-            "<w:bottom w:val=\"none\" w:sz=\"8\" w:color=\"000000\" w:space=\"0\" w:shadow=\"0\" w:frame=\"0\"/>"
+            raw(&Border::read(&[0, 0, 0, 255, 255, 1, 31, 0], false).unwrap()),
+            some(["single", "auto", "255", "31", "0", "0"])
         );
         assert_eq!(
-            Border::read(&[255; 8], false).unwrap().xml("bottom"),
-            "<w:bottom w:val=\"nil\"/>"
+            raw(&Border::read(&[0, 0, 0, 0, 8, 0, 0, 0], false).unwrap()),
+            some(["none", "000000", "8", "0", "0", "0"])
         );
+        assert_eq!(raw(&Border::read(&[255; 8], false).unwrap()), nil());
     }
 }

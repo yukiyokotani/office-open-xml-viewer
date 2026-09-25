@@ -128,7 +128,6 @@ impl Frame {
 
 /// Raw frame facts of a table paragraph, compared against the table's own
 /// position by `table::Position::matches_cell_frame`.
-#[cfg(feature = "direct-doc")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::doc) struct TableParagraphFrame {
     pub(in crate::doc) position_code: Option<u8>,
@@ -142,7 +141,6 @@ pub(in crate::doc) struct TableParagraphFrame {
     pub(in crate::doc) drop_cap_or_text_flow: bool,
 }
 
-#[cfg(feature = "direct-doc")]
 impl Frame {
     pub(in crate::doc) fn table_paragraph_facts(&self) -> Option<TableParagraphFrame> {
         self.applied.then_some(TableParagraphFrame {
@@ -160,7 +158,6 @@ impl Frame {
 }
 
 /// Why a frame cannot be projected. Every variant keeps the file fail-closed.
-#[cfg(feature = "direct-doc")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::doc) enum FrameGap {
     /// MS-DOC 2.6.2 gives sprmPPc no default anchor.
@@ -174,7 +171,6 @@ pub(in crate::doc) enum FrameGap {
     UnrepresentableProperty,
 }
 
-#[cfg(feature = "direct-doc")]
 impl Frame {
     /// Project the resolved frame facts onto ECMA-376 17.3.1.11 `framePr`
     /// semantics carried by `docx_model::FramePr`.
@@ -280,7 +276,6 @@ impl Frame {
 mod tests {
     use super::*;
 
-    #[cfg(feature = "direct-doc")]
     fn frame(entries: &[(u16, &[u8])]) -> Frame {
         let mut frame = Frame::default();
         for (code, operand) in entries {
@@ -321,7 +316,6 @@ mod tests {
         assert!(Frame::default().apply(0x442c, &[0, 0xff]).unwrap());
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn positioned_frame_projects_documented_anchor_position_and_size_facts() {
         // pcVert=2 (paragraph -> text), pcHorz=1 (margin).
@@ -410,7 +404,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn drop_cap_ignores_vertical_position_and_records_lines() {
         let value = frame(&[(0x261b, &[0x20]), (0x2423, &[2]), (0x442c, &[0x19, 0])])
@@ -426,7 +419,6 @@ mod tests {
         assert_eq!((value.drop_cap.as_str(), value.lines), ("margin", 10));
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn implicit_or_unrepresentable_frames_stay_fail_closed() {
         assert!(Frame::default().direct().unwrap().is_none());

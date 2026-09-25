@@ -5,9 +5,7 @@
 use super::{fkp, u16_at, u32_at, unsupported};
 use std::collections::BTreeMap;
 
-#[cfg(feature = "direct-doc")]
 pub(super) mod direct;
-pub(super) mod output;
 
 const FC_PLF_LST: usize = 0x2e2;
 const FC_PLF_LFO: usize = 0x2ea;
@@ -59,7 +57,6 @@ pub struct Level<'a> {
     /// last level that DOES trigger a restart; zero means never restart.
     pub restart: Option<u8>,
     pub follow: u8,
-    pub tentative: bool,
     pub papx: &'a [u8],
     pub chpx: &'a [u8],
     /// Raw UTF-16LE, excluding Xst.cch. Symbol-font code points and literal
@@ -146,8 +143,6 @@ impl Level<'_> {
 pub struct List<'a> {
     pub id: i32,
     pub styles: [u16; 9],
-    pub simple: bool,
-    pub hybrid: bool,
     pub auto_number: bool,
     pub levels: Vec<Level<'a>>,
 }
@@ -218,19 +213,16 @@ impl<'a> Tables<'a> {
                     }
                 }
                 let simple = header[26] & 1 != 0;
-                let hybrid = header[26] & 0x10 != 0;
                 let mut definition = List {
                     id,
                     styles,
-                    simple,
-                    hybrid,
                     auto_number: header[26] & 4 != 0,
                     levels: Vec::new(),
                 };
                 for index in 0..if simple { 1 } else { 9 } {
                     definition
                         .levels
-                        .push(read_level(&mut levels, index, hybrid, &mut budget)?);
+                        .push(read_level(&mut levels, index, &mut budget)?);
                 }
                 lists.push(definition);
             }
@@ -282,12 +274,7 @@ impl<'a> Tables<'a> {
                     }
                     seen |= 1 << index;
                     let formatting = if header[4] & 0x20 != 0 {
-                        Some(read_level(
-                            &mut data,
-                            index,
-                            lists[list_index].hybrid,
-                            &mut budget,
-                        )?)
+                        Some(read_level(&mut data, index, &mut budget)?)
                     } else {
                         None
                     };
@@ -379,7 +366,6 @@ fn start_value(value: i32) -> Result<u16, String> {
 fn read_level<'a>(
     data: &mut Reader<'a>,
     index: u8,
-    hybrid: bool,
     budget: &mut Budget,
 ) -> Result<Level<'a>, String> {
     budget.levels = budget
@@ -449,7 +435,6 @@ fn read_level<'a>(
         legal: header[5] & 4 != 0,
         restart,
         follow,
-        tentative: hybrid && header[5] & 0x80 != 0,
         papx,
         chpx,
         text,

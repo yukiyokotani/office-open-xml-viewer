@@ -1,92 +1,10 @@
-//! Positioned text and basic preset reconstruction of the live slide's OfficeArt tree.
+//! Validated reading of the live slide's and masters' OfficeArt shape trees:
+//! shape records, properties, placeholders, backgrounds and master shapes.
 //! [MS-PPT] 2.5.13, 2.7.1, 2.9.76 and [MS-ODRAW] 2.2.14/16/38/39/40.
-//! Output uses ECMA-376 DrawingML CT_(Group)Transform2D, never binary-aware paint.
+//! `direct_model` projects them into the presentation model, with placement in
+//! ECMA-376 DrawingML CT_(Group)Transform2D terms (`direct_transform`).
 use super::*;
 use crate::officeart::geometry;
-
-#[derive(Clone, Copy)]
-pub(super) struct TextContext<'a> {
-    pub fonts: &'a [String],
-    pub styles: &'a [Option<&'a [u8]>],
-    pub scheme: Option<&'a scheme::Scheme>,
-    pub types: &'a [u16],
-    pub master: Option<&'a text_style::Master>,
-    pub shapes: Option<&'a shape_master::Resolver>,
-    pub backing: &'a [u8],
-    pub outline_slide_numbers: &'a [Vec<u32>],
-    pub slide_number: u32,
-}
-
-#[cfg(test)]
-pub(super) fn render<'a>(
-    slide: &[u8],
-    outline: &'a [String],
-    records: &mut usize,
-    text: &mut usize,
-    xml: &mut usize,
-    context: Option<TextContext<'a>>,
-    media: Option<&mut media::Store<'a>>,
-) -> Result<Option<String>, String> {
-    let result = render_with_masters(
-        slide,
-        std::iter::empty(),
-        outline,
-        records,
-        text,
-        xml,
-        context,
-        media,
-    )?;
-    Ok((!result.fallback).then_some(result.tree))
-}
-
-pub(super) struct Rendered {
-    pub tree: String,
-    pub fallback: bool,
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) fn render_with_masters<'a>(
-    slide: &[u8],
-    masters: impl IntoIterator<Item = Result<Record<'a>, String>>,
-    outline: &'a [String],
-    records: &mut usize,
-    text: &mut usize,
-    xml: &mut usize,
-    context: Option<TextContext<'a>>,
-    media: Option<&mut media::Store<'a>>,
-) -> Result<Rendered, String> {
-    let mut writer = Writer {
-        outline,
-        records,
-        text,
-        remaining: xml,
-        output: String::new(),
-        id: 1,
-        context,
-        media,
-        inherited: true,
-    };
-    // Flatten passive master objects below slide-local objects. One writer owns
-    // the IDs and budgets across all layers (ECMA-376 19.3.1.45 lexical z-order).
-    for master in masters {
-        writer.drawing(master?.payload)?;
-    }
-    writer.inherited = false;
-    let local = writer.drawing(slide)?;
-    if !local {
-        // Preserve the prior missing-drawing fallback even if a master exists.
-        let mut blocks = Vec::new();
-        collect_text(slide, 0, writer.records, &mut blocks, outline, writer.text)?;
-        let id = writer.next_id()?;
-        let fallback = fallback_text(&blocks, id, writer.remaining)?;
-        writer.output.push_str(&fallback);
-    }
-    Ok(Rendered {
-        tree: writer.output,
-        fallback: !local,
-    })
-}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Rect {
@@ -132,11 +50,8 @@ impl Rect {
     }
 }
 
-#[cfg(any(test, feature = "direct-ppt"))]
 mod direct_geometry;
-#[cfg(any(test, feature = "direct-ppt"))]
 pub(super) mod direct_model;
-#[cfg(any(test, feature = "direct-ppt"))]
 mod direct_transform;
 #[cfg(test)]
 mod gradient_integration_tests;
@@ -174,56 +89,11 @@ trait ShapeSource {
     ) -> Result<Option<Self::Style>, String>;
 }
 
-struct BorrowedSource<'a>(std::marker::PhantomData<&'a [u8]>);
-impl<'a> ShapeSource for BorrowedSource<'a> {
-    type Record = Record<'a>;
-    type Complex = &'a [u8];
-    type Style = &'a [u8];
-    fn with_record<T>(
-        &self,
-        record: &Self::Record,
-        f: impl FnOnce(Record<'_>) -> Result<T, String>,
-    ) -> Result<T, String> {
-        f(*record)
-    }
-    fn children(
-        &self,
-        record: &Self::Record,
-        budget: &mut usize,
-    ) -> Result<Vec<Self::Record>, String> {
-        parse_records(record.payload, budget)
-    }
-    fn primary(
-        &self,
-        record: &Self::Record,
-        props: &mut PropertiesStorage<Self::Complex>,
-        budget: &mut usize,
-    ) -> Result<(), String> {
-        props.read(*record, budget)
-    }
-    fn tertiary(
-        &self,
-        record: &Self::Record,
-        props: &mut PropertiesStorage<Self::Complex>,
-        budget: &mut usize,
-    ) -> Result<(), String> {
-        props.read_tertiary(*record, budget)
-    }
-    fn style(
-        &self,
-        record: &Self::Record,
-        budget: &mut usize,
-    ) -> Result<Option<Self::Style>, String> {
-        text_style::auto_number::local_atom(*record, budget)
-    }
-}
-
 struct SpannedSlideSource<'a> {
     backing: &'a [u8],
 }
-// Master-metadata adapter only: the previous master path validated PP9 tags
-// without consuming their local styles. A direct slide producer must retain
-// those styles rather than reuse this adapter's unit-valued Style.
+/// Shape records as validated ranges of the retained document stream; the
+/// local PP9 text style is retained as a range too.
 impl ShapeSource for SpannedSlideSource<'_> {
     type Record = RecordSpan;
     type Complex = ByteSpan;
@@ -314,7 +184,6 @@ struct ShapeStorage<R, C, S> {
     placeholder: Option<PlaceholderMetadata>,
     props: PropertiesStorage<C>,
 }
-type Shape<'a> = ShapeStorage<Record<'a>, &'a [u8], &'a [u8]>;
 type SpannedShape = ShapeStorage<RecordSpan, ByteSpan, ByteSpan>;
 
 impl<R: Clone, C: Default + Clone, S> ShapeStorage<R, C, S> {
@@ -468,55 +337,25 @@ impl<R: Clone, C: Default + Clone, S> ShapeStorage<R, C, S> {
     }
 }
 
-impl<'a> Shape<'a> {
-    fn read(record: Record<'a>, nested: bool, budget: &mut usize) -> Result<Self, String> {
-        Self::read_from(
-            &BorrowedSource(std::marker::PhantomData),
-            record,
-            nested,
-            budget,
-        )
-    }
-}
-
 impl<R, C, S> ShapeStorage<R, C, S> {
+    /// Master-shape metadata omission: deleted (fDeleted), OLE (fOleShape) and
+    /// background (fBackground) shapes and active script anchors contribute no
+    /// inherited master-shape properties (MS-ODRAW 2.2.40, 2.3.4.44).
     fn omitted(&self) -> bool {
         self.flags & (8 | 16 | 1024) != 0 || self.props.script
     }
-    /// Direct-model omission. Unlike the byte converter, an OLE shape
+    /// Direct-model omission. Unlike master-shape metadata, an OLE shape
     /// (fOleShape, MS-ODRAW 2.2.40) is not omitted: it is a picture frame whose
     /// pib names the BLIP to display (MS-ODRAW 2.3.23.5), and the direct model
     /// either shows that stored presentation picture or rejects the shape.
-    #[cfg(any(test, feature = "direct-ppt"))]
     fn direct_omitted(&self) -> bool {
         self.flags & (8 | 1024) != 0 || self.props.script
     }
-    #[cfg(any(test, feature = "direct-ppt"))]
     fn is_ole(&self) -> bool {
         self.flags & 16 != 0
     }
     fn master(&self) -> Option<u32> {
         (self.flags & 0x20 != 0).then_some(self.props.master.unwrap_or(0))
-    }
-    fn transform(&self, anchor: Rect, group: Option<Rect>) -> String {
-        let mut xml = format!(
-            "<a:xfrm rot=\"{}\" flipH=\"{}\" flipV=\"{}\"><a:off x=\"{}\" y=\"{}\"/><a:ext cx=\"{}\" cy=\"{}\"/>",
-            self.props.rotation,
-            (self.flags >> 6) & 1,
-            (self.flags >> 7) & 1,
-            anchor.x,
-            anchor.y,
-            anchor.w,
-            anchor.h
-        );
-        if let Some(ch) = group {
-            xml.push_str(&format!(
-                "<a:chOff x=\"{}\" y=\"{}\"/><a:chExt cx=\"{}\" cy=\"{}\"/>",
-                ch.x, ch.y, ch.w, ch.h
-            ));
-        }
-        xml.push_str("</a:xfrm>");
-        xml
     }
 }
 
@@ -543,13 +382,9 @@ struct PropertiesStorage<T> {
     picture_bilevel: Option<bool>,
     /// MS-PPT 2.7.7 ExObjRefAtom from the shape's client data: the external
     /// object behind an OLE shape.
-    // Read only by the direct model.
-    #[cfg_attr(not(any(test, feature = "direct-ppt")), allow(dead_code))]
     ole_ref: Option<u32>,
     /// MS-PPT 2.7.9 RecolorInfoAtom.fShouldRecolor from the shape's client
     /// data: metafile color remapping of the displayed picture.
-    // Read only by the direct model.
-    #[cfg_attr(not(any(test, feature = "direct-ppt")), allow(dead_code))]
     recolor: bool,
     crop: [i64; 4],
     paint: paint::Paint,
@@ -568,7 +403,6 @@ struct PropertiesStorage<T> {
     metro: Option<T>,
     metro_ambiguous: bool,
 }
-type Properties<'a> = PropertiesStorage<&'a [u8]>;
 type SpannedProperties = PropertiesStorage<ByteSpan>;
 
 impl<T> Default for PropertiesStorage<T> {
@@ -767,23 +601,6 @@ impl<T: Default + Clone> PropertiesStorage<T> {
     }
 }
 
-impl<'a> Properties<'a> {
-    fn read_tertiary(&mut self, record: Record<'a>, budget: &mut usize) -> Result<(), String> {
-        crate::officeart::properties::visit_tertiary(record, budget, |property| {
-            // Only supported fill Boolean fields are interpreted here; other
-            // tertiary properties need their own typed mappings and must not be
-            // routed through the broader primary-property parser.
-            self.apply_tertiary(property.opid, property.value, property.complex)
-        })
-    }
-
-    fn read(&mut self, record: Record<'a>, budget: &mut usize) -> Result<(), String> {
-        crate::officeart::properties::visit(record, budget, |property| {
-            self.apply_primary(property.opid, property.value, property.complex)
-        })
-    }
-}
-
 impl SpannedProperties {
     fn read_span(
         &mut self,
@@ -815,34 +632,7 @@ pub(super) struct BackgroundStorage<T> {
     pub paint: paint::Paint,
     pub gradient: crate::officeart::gradient::Storage<T>,
 }
-pub(super) type Background<'a> = BackgroundStorage<&'a [u8]>;
 pub(super) type SpannedBackground = BackgroundStorage<ByteSpan>;
-
-impl SpannedBackground {
-    pub fn view<'a>(&self, backing: &'a [u8]) -> Result<Background<'a>, String> {
-        Ok(BackgroundStorage {
-            paint: self.paint,
-            gradient: self.gradient.view(backing)?,
-        })
-    }
-}
-
-#[cfg(test)]
-pub(super) fn background<'a>(
-    slide: &'a [u8],
-    budget: &mut usize,
-) -> Result<Option<Background<'a>>, String> {
-    background_from(
-        &BorrowedSource(std::marker::PhantomData),
-        &Record {
-            version: 0,
-            instance: 0,
-            kind: 0,
-            payload: slide,
-        },
-        budget,
-    )
-}
 
 pub(super) fn spanned_background(
     backing: &[u8],
@@ -1059,475 +849,11 @@ pub(super) fn master_shapes(
     Ok(())
 }
 
-struct Writer<'a, 'b> {
-    inherited: bool,
-    media: Option<&'b mut media::Store<'a>>,
-    outline: &'a [String],
-    records: &'b mut usize,
-    text: &'b mut usize,
-    remaining: &'b mut usize,
-    output: String,
-    id: u32,
-    context: Option<TextContext<'a>>,
-}
-impl Writer<'_, '_> {
-    fn drawing(&mut self, slide: &[u8]) -> Result<bool, String> {
-        let children = parse_records(slide, self.records)?;
-        let mut drawings = children.iter().filter(|r| r.kind == 1036);
-        let Some(drawing) = drawings.next() else {
-            return Ok(false);
-        };
-        if drawings.next().is_some() || drawing.version != 15 {
-            return Err(unsupported("invalid PowerPoint drawing container"));
-        }
-        for dg in parse_records(drawing.payload, self.records)? {
-            if dg.kind != 0xf002 || dg.version != 15 {
-                return Err(unsupported("invalid PowerPoint OfficeArt drawing"));
-            }
-            for child in parse_records(dg.payload, self.records)? {
-                self.node(child, false, 0, true)?;
-            }
-        }
-        Ok(true)
-    }
-    fn push(&mut self, value: &str) -> Result<(), String> {
-        append(&mut self.output, self.remaining, value)
-    }
-    fn next_id(&mut self) -> Result<u32, String> {
-        // Independent resource policy; IDs are output-local, never source actions.
-        if self.id >= 100_001 {
-            return Err(unsupported("too many PowerPoint drawing shapes"));
-        }
-        self.id += 1;
-        Ok(self.id)
-    }
-    fn node(
-        &mut self,
-        record: Record<'_>,
-        nested: bool,
-        depth: usize,
-        gradient_transform_supported: bool,
-    ) -> Result<(), String> {
-        if depth > MAX_DEPTH {
-            return Err(unsupported("PowerPoint drawing nesting is too deep"));
-        }
-        match record.kind {
-            0xf003 => {
-                if record.version != 15 {
-                    return Err(unsupported("invalid PowerPoint group container"));
-                }
-                let children = parse_records(record.payload, self.records)?;
-                let first = children
-                    .first()
-                    .ok_or_else(|| unsupported("empty PowerPoint group"))?;
-                let group = Shape::read(*first, nested, self.records)?;
-                if group.omitted()
-                    || group.props.hidden
-                    || (self.inherited && group.is_placeholder())
-                {
-                    return Ok(());
-                }
-                if group.flags & 1 == 0 {
-                    return Err(unsupported("missing PowerPoint group flag"));
-                }
-                let patriarch = group.flags & 4 != 0;
-                if patriarch && nested {
-                    return Err(unsupported("nested PowerPoint patriarch group"));
-                }
-                if !patriarch {
-                    let anchor = group
-                        .anchor
-                        .ok_or_else(|| unsupported("missing PowerPoint group anchor"))?;
-                    let child_space = group
-                        .child_space
-                        .filter(|r| r.w > 0 && r.h > 0)
-                        .ok_or_else(|| unsupported("invalid PowerPoint group coordinate space"))?;
-                    let id = self.next_id()?;
-                    self.push(&format!("<p:grpSp><p:nvGrpSpPr><p:cNvPr id=\"{id}\" name=\"Legacy group {id}\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr>{}</p:grpSpPr>", group.transform(anchor, Some(child_space))))?;
-                }
-                for child in &children[1..] {
-                    self.node(
-                        *child,
-                        !patriarch,
-                        depth + 1,
-                        gradient_transform_supported
-                            && (patriarch
-                                || (group.props.rotation == 0 && group.flags & 0xc0 == 0)),
-                    )?;
-                }
-                if !patriarch {
-                    self.push("</p:grpSp>")?;
-                }
-            }
-            0xf004 => {
-                let shape = Shape::read(record, nested, self.records)?;
-                if shape.omitted()
-                    || shape.props.hidden
-                    || (self.inherited && shape.is_placeholder())
-                {
-                    return Ok(());
-                }
-                let paint = match (shape.master(), self.context.and_then(|c| c.shapes)) {
-                    (Some(id), Some(shapes)) => shape.props.paint.inherit(shapes.paint(id)?),
-                    _ => shape.props.paint,
-                };
-                let gradient = match (shape.master(), self.context.and_then(|c| c.shapes)) {
-                    (Some(id), Some(shapes)) => shape.props.gradient.inherit(
-                        &shapes
-                            .gradient(id)?
-                            .view(self.context.expect("context").backing)?,
-                    ),
-                    _ => shape.props.gradient.clone(),
-                };
-                if shape.kind == 75 && shape.props.picture != 0 {
-                    let index = shape.props.picture;
-                    if self
-                        .media
-                        .as_deref_mut()
-                        .map(|m| m.reference(index, self.records))
-                        .transpose()?
-                        .unwrap_or(false)
-                    {
-                        let anchor = shape
-                            .anchor
-                            .ok_or_else(|| unsupported("missing PowerPoint picture anchor"))?;
-                        let id = self.next_id()?;
-                        let [top, bottom, left, right] = shape.props.crop;
-                        if left + right >= 100000 || top + bottom >= 100000 {
-                            return Err(unsupported("empty PowerPoint picture crop"));
-                        }
-                        self.push(&format!("<p:pic><p:nvPicPr><p:cNvPr id=\"{id}\" name=\"Legacy picture {id}\"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed=\"rImg{index}\"/><a:srcRect l=\"{left}\" t=\"{top}\" r=\"{right}\" b=\"{bottom}\"/><a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr>{}<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom>{}</p:spPr></p:pic>", shape.transform(anchor, None), paint.xml_with_scheme(1, self.context.and_then(|c| c.scheme))))?;
-                    }
-                }
-                let mut text = Vec::new();
-                let mut style = None;
-                let mut body_seen = false;
-                let mut outline_body = false;
-                let mut text_type = None;
-                let mut slide_numbers = Vec::new();
-                let mut ruler_seen = false;
-                let mut ruler_tabs = None;
-                // The only source of visible text is this shape's ClientTextbox.
-                let atoms = shape
-                    .textbox
-                    .map(|t| parse_records(t.payload, self.records))
-                    .transpose()?
-                    .unwrap_or_default();
-                for atom in atoms {
-                    match atom.kind {
-                        3999 => {
-                            if text_type.is_some() || body_seen {
-                                return Err(unsupported("ambiguous PowerPoint text header"));
-                            }
-                            text_type = Some(text_style::text_type(atom)?);
-                        }
-                        TEXT_CHARS_ATOM | TEXT_BYTES_ATOM => {
-                            if body_seen {
-                                return Err(unsupported("duplicate PowerPoint text body"));
-                            }
-                            body_seen = true;
-                            let value = decode_text(atom)?;
-                            charge_text(self.text, value.len())?;
-                            push_text(&mut text, value)?;
-                        }
-                        3998 => {
-                            // Master placeholder exemplars must never acquire
-                            // slide-local outline text. Master non-placeholder
-                            // text should be stored directly in ClientTextbox.
-                            if self.inherited {
-                                return Err(unsupported(
-                                    "outline reference in inherited master object",
-                                ));
-                            }
-                            if body_seen || style.is_some() {
-                                return Err(unsupported("ambiguous PowerPoint outline text body"));
-                            }
-                            body_seen = true;
-                            outline_body = true;
-                            let index = u32_at(atom.payload, 0)? as usize;
-                            if text_type.is_some() {
-                                return Err(unsupported(
-                                    "inline header on PowerPoint outline reference",
-                                ));
-                            }
-                            text_type = self.context.and_then(|c| c.types.get(index).copied());
-                            style = self
-                                .context
-                                .and_then(|context| context.styles.get(index).copied().flatten());
-                            if let Some(positions) = self
-                                .context
-                                .and_then(|c| c.outline_slide_numbers.get(index))
-                            {
-                                *self.records =
-                                    self.records.checked_sub(positions.len()).ok_or_else(|| {
-                                        unsupported("PowerPoint slide-number work budget exceeded")
-                                    })?;
-                                slide_numbers.extend_from_slice(positions);
-                            }
-                            let value = self.outline.get(index).ok_or_else(|| {
-                                unsupported("PowerPoint outline text index out of range")
-                            })?;
-                            charge_text(self.text, value.len())?;
-                            push_text(&mut text, value.clone())?;
-                        }
-                        4001 => {
-                            if atom.version != 0 || style.is_some() || outline_body {
-                                return Err(unsupported("invalid PowerPoint text style record"));
-                            }
-                            style = Some(atom.payload);
-                        }
-                        4056 => {
-                            if !body_seen || outline_body {
-                                return Err(unsupported("orphan PowerPoint slide-number atom"));
-                            }
-                            slide_numbers.push(text_style::slide_number_position(atom)?);
-                        }
-                        4006 => {
-                            // Inline TextOrMaster permits multiple ruler records
-                            // (MS-PPT 2.9.76). Choosing precedence is unsupported
-                            // policy here, not a claim that duplicates are invalid.
-                            if ruler_seen {
-                                return Err(unsupported("duplicate PowerPoint local text ruler"));
-                            }
-                            ruler_seen = true;
-                            ruler_tabs = ruler::read(atom, self.records)?;
-                        }
-                        // Do not descend into interactive/action containers.
-                        _ => {}
-                    }
-                }
-                if !slide_numbers.is_empty() && text.len() != 1 {
-                    return Err(unsupported("ambiguous PowerPoint slide-number text body"));
-                }
-                let preset = paint.geometry(shape.kind);
-                // Picture clipping is a distinct path; this restores foreground
-                // vector shapes, including master objects, without painting an
-                // extra vector shape over a picture frame.
-                let geometry = match (shape.master(), self.context.and_then(|c| c.shapes)) {
-                    (Some(id), Some(shapes)) => shape.props.geometry.inherit(
-                        &shapes
-                            .geometry(id)?
-                            .view(self.context.expect("context").backing)?,
-                    ),
-                    _ => shape.props.geometry,
-                };
-                let custom = if shape.kind == 75 {
-                    None
-                } else {
-                    // The existing PPTX model has one paint per shape. Keep
-                    // mixed per-path paint unsupported rather than discard its
-                    // flags or introduce legacy-specific rendering behavior.
-                    geometry
-                        .decode(self.records)?
-                        .filter(|g| g.uniform_paint().is_some())
-                };
-                if text.is_empty() && preset.is_none() && custom.is_none() {
-                    return Ok(());
-                }
-                let allow_fill = custom
-                    .as_ref()
-                    .and_then(|geometry| geometry.uniform_paint())
-                    .map_or(
-                        preset.is_some() && !matches!(shape.kind, 20 | 32),
-                        |(fill, _)| fill,
-                    );
-                let image_fill = if allow_fill {
-                    paint
-                        .foreground_image()
-                        .map(|(index, opacity, rotate)| {
-                            let referenced = self
-                                .media
-                                .as_deref_mut()
-                                .map(|media| media.reference(index, self.records))
-                                .transpose()?
-                                .unwrap_or(false);
-                            Ok::<_, String>(referenced.then(|| {
-                                let alpha = if opacity != 65536 {
-                                    format!(
-                                        "<a:alphaModFix amt=\"{}\"/>",
-                                        (u64::from(opacity) * 100000 + 32768) / 65536
-                                    )
-                                } else {
-                                    String::new()
-                                };
-                                format!("<a:blipFill rotWithShape=\"{}\"><a:blip r:embed=\"rImg{index}\">{alpha}</a:blip><a:stretch><a:fillRect/></a:stretch></a:blipFill>", u8::from(rotate))
-                            }))
-                        })
-                        .transpose()?
-                        .flatten()
-                } else {
-                    None
-                };
-                // Controlled Office cases cover leaf reflections and scaled
-                // groups, but not rotated leaves or rotated/reflected groups.
-                let mut gradient_bytes = *self.remaining;
-                let gradient_fill = if gradient_transform_supported && shape.props.rotation == 0 {
-                    paint
-                        .project_gradient(
-                            &gradient,
-                            allow_fill,
-                            self.context.and_then(|c| c.scheme),
-                            self.records,
-                            &mut gradient_bytes,
-                        )?
-                        .map(|value| value.to_xml(&mut gradient_bytes))
-                        .transpose()?
-                } else {
-                    None
-                };
-                let extra_fill = gradient_fill.or(image_fill);
-                let anchor = shape
-                    .anchor
-                    .ok_or_else(|| unsupported("missing PowerPoint shape anchor"))?;
-                let id = self.next_id()?;
-                // Unsupported geometry may still carry text. Preserve its text
-                // frame, but never paint an invented rectangle in its place.
-                let text_box =
-                    u8::from(shape.kind == 202 || (preset.is_none() && custom.is_none()));
-                self.push(&format!("<p:sp><p:nvSpPr><p:cNvPr id=\"{id}\" name=\"Legacy shape {id}\"/><p:cNvSpPr txBox=\"{text_box}\"/><p:nvPr/></p:nvSpPr><p:spPr>{}", shape.transform(anchor, None)))?;
-                let scheme = self.context.and_then(|c| c.scheme);
-                if let Some(custom) = custom {
-                    let (fill, stroke) = custom
-                        .uniform_paint()
-                        .expect("uniform paths filtered above");
-                    custom.write_xml(&mut self.output, self.remaining)?;
-                    self.push(&paint.xml_with_custom_geometry_and_fill(
-                        scheme,
-                        fill,
-                        stroke,
-                        extra_fill.as_deref(),
-                    ))?;
-                } else {
-                    let paint_xml = if extra_fill.is_some() {
-                        paint.xml_with_custom_geometry_and_fill(
-                            scheme,
-                            !matches!(shape.kind, 20 | 32),
-                            true,
-                            extra_fill.as_deref(),
-                        )
-                    } else {
-                        paint.xml_with_scheme(shape.kind, scheme)
-                    };
-                    self.push(&format!(
-                        "<a:prstGeom prst=\"{}\"><a:avLst/></a:prstGeom>{paint_xml}",
-                        preset.unwrap_or("rect"),
-                    ))?;
-                }
-                self.push("</p:spPr>")?;
-                if text.is_empty() {
-                    self.push("</p:sp>")?;
-                    return Ok(());
-                }
-                self.push("<p:txBody>")?;
-                let p = &shape.props;
-                // PowerPoint's owned scalar txflTextFlow=1 down-saves both its
-                // `vert` and `eaVert` inputs as the same OfficeArt value and
-                // round-trips that value as DrawingML eaVert. This compatibility
-                // mapping is deliberately independent of text, fonts and outer
-                // transforms (MS-ODRAW 2.4.5 uses text-container coordinates).
-                // Other flows and nonzero cdirFont were not established by
-                // these controls and remain omitted. See the controlled-test
-                // scope in docs/legacy-office-conversion.md.
-                let vert = if p.text_flow == Some(1) && p.font_direction.unwrap_or(0) == 0 {
-                    " vert=\"eaVert\""
-                } else {
-                    ""
-                };
-                self.push(&format!("<a:bodyPr wrap=\"{}\" anchor=\"{}\" anchorCtr=\"{}\" lIns=\"{}\" tIns=\"{}\" rIns=\"{}\" bIns=\"{}\"{vert}/><a:lstStyle/>", p.wrap, p.anchor, u8::from(p.center), p.margins[0], p.margins[1], p.margins[2], p.margins[3]))?;
-                let linked = match (shape.master(), self.context.and_then(|c| c.shapes)) {
-                    (Some(id), Some(shapes)) => Some(shapes.levels(id)?),
-                    _ => None,
-                };
-                let levels = if linked.is_some() {
-                    linked
-                } else if shape.is_placeholder() {
-                    self.context
-                        .and_then(|c| c.master)
-                        .and_then(|m| text_type.and_then(|t| m.levels(t)))
-                } else {
-                    None
-                };
-                slide_numbers.sort_unstable();
-                if ruler_tabs.is_some() && text.len() != 1 {
-                    return Err(unsupported("ambiguous PowerPoint ruled text body"));
-                }
-                let default_style = if style.is_none()
-                    && (levels.is_some() || !slide_numbers.is_empty() || ruler_tabs.is_some())
-                    && text.len() == 1
-                {
-                    Some(text_style::default_style(&text[0]))
-                } else {
-                    None
-                };
-                if let Some(style) = style.or(default_style.as_deref()) {
-                    if text.len() != 1 {
-                        return Err(unsupported("ambiguous PowerPoint styled text body"));
-                    }
-                    text_style::write(
-                        &text[0],
-                        style,
-                        text_style::Context {
-                            fonts: self.context.map_or(&[], |c| c.fonts),
-                            scheme: self.context.and_then(|c| c.scheme),
-                            levels,
-                            slide_numbers: &slide_numbers,
-                            slide_number: self.context.map_or(0, |c| c.slide_number),
-                            ruler_tabs,
-                            // PP9ShapeBinaryTagExtension owns an inline TextHeaderAtom.
-                            // Outline PP9 uses document-level slide/text IDs instead;
-                            // do not attach local metadata to an outline by proximity.
-                            style9: if !outline_body && text_type.is_some() {
-                                shape.style9
-                            } else {
-                                None
-                            },
-                            auto_number: None,
-                            deferred_effect: None,
-                        },
-                        &mut self.output,
-                        self.remaining,
-                        self.records,
-                    )?;
-                } else {
-                    paragraphs(&text, &mut self.output, self.remaining)?;
-                }
-                self.push("</p:txBody></p:sp>")?;
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-}
-
-pub(super) fn append(output: &mut String, budget: &mut usize, value: &str) -> Result<(), String> {
-    *budget = budget
-        .checked_sub(value.len())
-        .ok_or_else(|| "OUTPUT_TOO_LARGE".to_string())?;
-    output.push_str(value);
-    Ok(())
-}
-
-pub(super) fn paragraphs(
-    blocks: &[String],
-    output: &mut String,
-    budget: &mut usize,
-) -> Result<(), String> {
-    for block in blocks {
-        for line in block.split('\r') {
-            append(output, budget, "<a:p>")?;
-            // Bounded chunks prevent XML escaping of one large atom from allocating
-            // a multiple of the entire input before the XML budget is checked.
-            text_style::write_run(line, "<a:rPr sz=\"1800\"/>", output, budget)?;
-            append(output, budget, "<a:endParaRPr sz=\"1800\"/></a:p>")?;
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::persist::tests::record;
     use super::*;
+    use pptx_model::{Fill, ShapeElement, Slide, SlideElement, TextRun};
 
     fn ints(values: &[i32]) -> Vec<u8> {
         values.iter().flat_map(|n| n.to_le_bytes()).collect()
@@ -1550,22 +876,30 @@ mod tests {
     fn text(value: &str) -> Vec<u8> {
         record(15, 0xf00d, &record(0, 4008, value.as_bytes()))
     }
+    /// A TextRulerAtom giving level 0 explicit zero origins (MS-PPT 2.9.30),
+    /// so plain text boxes project without a text master.
+    fn origin_ruler() -> Vec<u8> {
+        record(
+            0,
+            4006,
+            &[
+                (8u32 | 256).to_le_bytes().as_slice(),
+                &0i16.to_le_bytes(),
+                &0i16.to_le_bytes(),
+            ]
+            .concat(),
+        )
+    }
+    fn ruled_text(value: &str) -> Vec<u8> {
+        record(
+            15,
+            0xf00d,
+            &[record(0, 4008, value.as_bytes()), origin_ruler()].concat(),
+        )
+    }
     fn drawing(shapes: Vec<Vec<u8>>) -> Vec<u8> {
         record(15, 1036, &record(15, 0xf002, &shapes.concat()))
     }
-    fn xml(bytes: &[u8]) -> Result<String, String> {
-        render(
-            bytes,
-            &["Outline".into()],
-            &mut MAX_RECORDS.clone(),
-            &mut MAX_TEXT_BYTES.clone(),
-            &mut (256 * 1024 * 1024),
-            None,
-            None,
-        )
-        .map(|x| x.unwrap_or_default())
-    }
-
     fn properties(values: &[(u16, u32)]) -> Vec<u8> {
         let payload: Vec<u8> = values
             .iter()
@@ -1574,6 +908,124 @@ mod tests {
             })
             .collect();
         record(((values.len() as u16) << 4) | 3, 0xf00b, &payload)
+    }
+    fn tertiary_properties(values: &[(u16, u32)]) -> Vec<u8> {
+        let mut bytes = properties(values);
+        bytes[2..4].copy_from_slice(&0xf122u16.to_le_bytes());
+        bytes
+    }
+    fn png_blip() -> Vec<u8> {
+        // Complete 2x1 RGBA PNG, including valid zlib data and CRCs.
+        let png = vec![
+            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2, 0, 0, 0, 1,
+            8, 6, 0, 0, 0, 244, 34, 127, 138, 0, 0, 0, 14, 73, 68, 65, 84, 120, 156, 99, 248, 207,
+            192, 0, 66, 13, 0, 15, 122, 3, 126, 119, 233, 127, 151, 0, 0, 0, 0, 73, 69, 78, 68,
+            174, 66, 96, 130,
+        ];
+        record(0x6e00, 0xf01e, &[vec![0; 17], png].concat())
+    }
+
+    fn read_shape(bytes: &[u8], budget: &mut usize) -> Result<SpannedShape, String> {
+        let (span, _) = record_span_with_end(bytes, 0, &mut 1, "shape")?;
+        SpannedShape::read_from(&SpannedSlideSource { backing: bytes }, span, false, budget)
+    }
+
+    fn read_properties(bytes: &[u8], budget: &mut usize) -> Result<SpannedProperties, String> {
+        let (span, _) = record_span_with_end(bytes, 0, &mut 1, "properties")?;
+        let mut props = SpannedProperties::default();
+        props.read_span(&span, bytes, budget)?;
+        Ok(props)
+    }
+
+    fn slide_span(tree: &[u8]) -> (Vec<u8>, RecordSpan) {
+        let slide = record(15, SLIDE_CONTAINER, tree);
+        let span = record_span_with_end(&slide, 0, &mut 1, "slide").unwrap().0;
+        (slide, span)
+    }
+
+    fn background_of(tree: &[u8], budget: &mut usize) -> Result<Option<SpannedBackground>, String> {
+        let (slide, span) = slide_span(tree);
+        spanned_background(&slide, &span, budget)
+    }
+
+    /// Project the slide whose drawing is `tree` through the direct model, with
+    /// one outline block and `blips` as the image store. Returns the slide and
+    /// the image store indexes it admitted.
+    fn project_slide(
+        tree: &[u8],
+        blips: &[Vec<u8>],
+        mut text_budget: usize,
+    ) -> Result<(Slide, Vec<u32>), String> {
+        let mut document = record(15, SLIDE_CONTAINER, tree);
+        let mut offsets = Vec::new();
+        for blip in blips {
+            offsets.push(document.len());
+            document.extend_from_slice(blip);
+        }
+        let slide = record_span_with_end(&document, 0, &mut 1, "slide")?.0;
+        let entries = offsets
+            .into_iter()
+            .map(|offset| record_span_with_end(&document, offset, &mut 1, "blip").map(|r| r.0))
+            .collect::<Result<Vec<_>, _>>()?;
+        let presentation = persist::PresentationStorage {
+            shape_masters: shape_master::Resolver::default(),
+            slides: vec![(slide, vec!["Outline".to_owned()])],
+            outline_styles: vec![Vec::new()],
+            outline_types: vec![Vec::new()],
+            outline_slide_numbers: vec![Vec::new()],
+            first_slide_number: 1,
+            text_masters: vec![None],
+            metro_themes: vec![None],
+            document_text_axes: None,
+            fonts: Vec::new(),
+            schemes: vec![None],
+            image_entries: entries.clone(),
+            ole_objects: media::OleCatalog::default(),
+            backgrounds: vec![None],
+            object_masters: vec![std::rc::Rc::from([])],
+            size: (720, 540),
+        };
+        let mut media = media::SpanStore::new(entries);
+        let slide = direct_model::slide(
+            0,
+            &presentation,
+            &document,
+            None,
+            &mut media,
+            &mut MAX_RECORDS.clone(),
+            &mut text_budget,
+            &mut (256 * 1024 * 1024),
+        )?;
+        let used = media.used_images().map(|(id, _)| id).collect();
+        Ok((slide, used))
+    }
+
+    fn project(tree: &[u8]) -> Result<Slide, String> {
+        project_slide(tree, &[], MAX_TEXT_BYTES).map(|(slide, _)| slide)
+    }
+
+    fn shapes(slide: &Slide) -> Vec<&ShapeElement> {
+        slide
+            .elements
+            .iter()
+            .map(|element| match element {
+                SlideElement::Shape(shape) => shape,
+                _ => panic!("expected only shapes"),
+            })
+            .collect()
+    }
+
+    fn shape_text(shape: &ShapeElement) -> String {
+        shape
+            .text_body
+            .iter()
+            .flat_map(|body| &body.paragraphs)
+            .flat_map(|paragraph| &paragraph.runs)
+            .filter_map(|run| match run {
+                TextRun::Text(run) => Some(run.text.as_str()),
+                _ => None,
+            })
+            .collect()
     }
 
     fn shape_with_placeholder(
@@ -1603,9 +1055,7 @@ mod tests {
 
     #[test]
     fn retains_placeholder_presence_identity_position_and_preferred_size() {
-        let absent = sp(0, vec![]);
-        let absent =
-            Shape::read(parse_record_at(&absent, 0, &mut 1).unwrap(), false, &mut 10).unwrap();
+        let absent = read_shape(&sp(0, vec![]), &mut 10).unwrap();
         assert_eq!(absent.placeholder, None);
         assert!(!absent.is_placeholder());
 
@@ -1617,8 +1067,7 @@ mod tests {
             (u8::MAX, PlaceholderSize::Unknown(u8::MAX)),
         ] {
             let bytes = shape_with_placeholder(-17, 0x1a, raw, [0x55, 0xaa]);
-            let shape =
-                Shape::read(parse_record_at(&bytes, 0, &mut 1).unwrap(), false, &mut 20).unwrap();
+            let shape = read_shape(&bytes, &mut 20).unwrap();
             assert_eq!(
                 shape.placeholder,
                 Some(PlaceholderMetadata {
@@ -1631,39 +1080,16 @@ mod tests {
             assert!(shape.textbox.is_none());
         }
 
-        let bytes = shape_with_placeholder(-1, 7, 0, [1, 2]);
-        let shape =
-            Shape::read(parse_record_at(&bytes, 0, &mut 1).unwrap(), false, &mut 20).unwrap();
+        let shape = read_shape(&shape_with_placeholder(-1, 7, 0, [1, 2]), &mut 20).unwrap();
         assert!(shape.placeholder.is_some());
         assert!(!shape.is_placeholder());
-    }
 
-    #[test]
-    fn borrowed_and_spanned_placeholder_metadata_match_without_backing_borrows() {
+        // Retained metadata keeps every position once the source is gone.
         for position in [i32::MIN, -1, 0, i32::MAX] {
             let bytes = shape_with_placeholder(position, u8::MAX, 2, [0xde, 0xad]);
-            let borrowed_record = parse_record_at(&bytes, 0, &mut 1).unwrap();
-            let (span, end) = record_span_with_end(&bytes, 0, &mut 1, "shape").unwrap();
-            assert_eq!(end, bytes.len());
-            let mut borrowed_work = 20;
-            let borrowed = Shape::read(borrowed_record, false, &mut borrowed_work).unwrap();
-            let mut spanned_work = 20;
-            let spanned = SpannedShape::read_from(
-                &SpannedSlideSource { backing: &bytes },
-                span,
-                false,
-                &mut spanned_work,
-            )
-            .unwrap();
-            assert_eq!(borrowed_work, spanned_work);
-            assert_eq!(borrowed.placeholder, spanned.placeholder);
-            let moved = bytes;
-            assert_eq!(
-                spanned.placeholder.unwrap().position,
-                position,
-                "metadata must not borrow the source bytes"
-            );
-            assert!(!moved.is_empty());
+            let shape = read_shape(&bytes, &mut 20).unwrap();
+            drop(bytes);
+            assert_eq!(shape.placeholder.unwrap().position, position);
         }
     }
 
@@ -1676,7 +1102,7 @@ mod tests {
             client(vec![record(0, 3011, &[0; 7])]),
             client(vec![record(0, 3011, &payload), record(0, 3011, &payload)]),
         ] {
-            let error = Shape::read(parse_record_at(&bytes, 0, &mut 1).unwrap(), false, &mut 20)
+            let error = read_shape(&bytes, &mut 20)
                 .err()
                 .expect("invalid placeholder metadata must fail");
             assert!(error.contains("invalid PowerPoint placeholder metadata"));
@@ -1684,7 +1110,7 @@ mod tests {
     }
 
     #[test]
-    fn borrowed_and_spanned_shape_sources_share_structure_properties_and_work() {
+    fn shape_source_reads_structure_and_rejects_truncation_and_exhausted_work() {
         let bytes = sp(
             0x20,
             vec![
@@ -1692,28 +1118,21 @@ mod tests {
                 properties(&[(0x301, 77), (0x145, 0), (0x146, 0)]),
             ],
         );
-        let borrowed_record = parse_record_at(&bytes, 0, &mut 1).unwrap();
-        let (span, end) = record_span_with_end(&bytes, 0, &mut 1, "shape").unwrap();
-        assert_eq!(end, bytes.len());
-        let mut borrowed_work = 20;
-        let borrowed = Shape::read(borrowed_record, false, &mut borrowed_work).unwrap();
-        let mut spanned_work = 20;
-        let spanned = SpannedShape::read_from(
-            &SpannedSlideSource { backing: &bytes },
-            span,
-            false,
-            &mut spanned_work,
-        )
-        .unwrap();
-        assert_eq!(borrowed_work, spanned_work);
+        let shape = read_shape(&bytes, &mut 20).unwrap();
+        assert_eq!((shape.id, shape.flags), (42, 0x20));
+        // PPT RectStruct order is top/left/right/bottom.
         assert_eq!(
-            (borrowed.id, borrowed.flags, borrowed.anchor),
-            (spanned.id, spanned.flags, spanned.anchor)
+            shape.anchor,
+            Some(Rect {
+                x: master_to_emu(3),
+                y: master_to_emu(-2),
+                w: master_to_emu(574) - master_to_emu(3),
+                h: master_to_emu(291) - master_to_emu(-2),
+            })
         );
-        assert_eq!(borrowed.master(), spanned.master());
-        assert!(borrowed.props.geometry.decode(&mut 10).unwrap().is_none());
+        assert_eq!(shape.master(), Some(77));
         let moved = bytes.clone();
-        assert!(spanned
+        assert!(shape
             .props
             .geometry
             .view(&moved)
@@ -1722,7 +1141,7 @@ mod tests {
             .unwrap()
             .is_none());
         for length in 0..bytes.len() {
-            assert!(span_for_shape_prefix(&bytes[..length]).is_err());
+            assert!(read_shape(&bytes[..length], &mut 100).is_err());
         }
         let duplicate_flags = sp(0, vec![record(2, 0xf00a, &[0; 8])]);
         let malformed_child = record(
@@ -1731,161 +1150,59 @@ mod tests {
             &[record(2, 0xf00a, &[0; 8]), vec![1, 2, 3]].concat(),
         );
         for (invalid, work) in [(&duplicate_flags, 20), (&malformed_child, 20), (&bytes, 0)] {
-            let (borrowed, borrowed_left, spanned, spanned_left) = parse_shape_both(invalid, work);
-            assert_eq!(borrowed, spanned);
-            assert_eq!(borrowed_left, spanned_left);
-            assert!(borrowed.is_err());
+            assert!(read_shape(invalid, &mut work.clone()).is_err());
         }
     }
 
-    fn parse_shape_both(
-        bytes: &[u8],
-        work: usize,
-    ) -> (Result<(), String>, usize, Result<(), String>, usize) {
-        let borrowed_record = parse_record_at(bytes, 0, &mut 1).unwrap();
-        let (span, _) = record_span_with_end(bytes, 0, &mut 1, "shape").unwrap();
-        let mut borrowed_work = work;
-        let borrowed = Shape::read(borrowed_record, false, &mut borrowed_work).map(|_| ());
-        let mut spanned_work = work;
-        let spanned = SpannedShape::read_from(
-            &SpannedSlideSource { backing: bytes },
-            span,
-            false,
-            &mut spanned_work,
-        )
-        .map(|_| ());
-        (borrowed, borrowed_work, spanned, spanned_work)
-    }
-
-    fn span_for_shape_prefix(bytes: &[u8]) -> Result<(), String> {
-        let (span, _) = record_span_with_end(bytes, 0, &mut 100, "shape")?;
-        SpannedShape::read_from(
-            &SpannedSlideSource { backing: bytes },
-            span,
-            false,
-            &mut 100,
-        )
-        .map(|_| ())
-    }
-
-    fn tertiary_properties(values: &[(u16, u32)]) -> Vec<u8> {
-        let payload: Vec<u8> = values
-            .iter()
-            .flat_map(|(id, value)| {
-                [id.to_le_bytes().to_vec(), value.to_le_bytes().to_vec()].concat()
-            })
-            .collect();
-        record(((values.len() as u16) << 4) | 3, 0xf122, &payload)
-    }
-
-    fn authored_png() -> Vec<u8> {
-        // Complete authored asymmetric 2x1 RGBA PNG, including valid zlib data and CRCs.
-        vec![
-            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2, 0, 0, 0, 1,
-            8, 6, 0, 0, 0, 244, 34, 127, 138, 0, 0, 0, 14, 73, 68, 65, 84, 120, 156, 99, 248, 207,
-            192, 0, 66, 13, 0, 15, 122, 3, 126, 119, 233, 127, 151, 0, 0, 0, 0, 73, 69, 78, 68,
-            174, 66, 96, 130,
-        ]
-    }
-    fn png_blip() -> Vec<u8> {
-        record(0x6e00, 0xf01e, &[vec![0; 17], authored_png()].concat())
-    }
-
     #[test]
-    fn authored_shape_fill_png_has_valid_chunks_and_decodes_asymmetric_pixels() {
-        use std::io::Read;
-        let png = authored_png();
-        let crc = |bytes: &[u8]| {
-            !bytes.iter().fold(u32::MAX, |mut crc, byte| {
-                crc ^= u32::from(*byte);
-                for _ in 0..8 {
-                    crc = (crc >> 1) ^ (0xedb88320 & 0u32.wrapping_sub(crc & 1));
-                }
-                crc
-            })
+    fn stretched_shape_picture_fill_references_its_blip_and_keeps_the_line() {
+        let tree = |booleans| {
+            drawing(vec![sp(
+                0x200,
+                vec![
+                    record(0, 0xf010, &ints(&[0, 0, 576, 288])),
+                    properties(&[
+                        (0x180, 3),
+                        (0x182, 32768),
+                        (0x4186, 1),
+                        (0x1bf, booleans),
+                        (0x1c0, 0xff),
+                    ]),
+                ],
+            )])
         };
-        assert_eq!(
-            crc(&png[12..29]),
-            u32::from_be_bytes(png[29..33].try_into().unwrap())
-        );
-        assert_eq!(
-            crc(&png[37..55]),
-            u32::from_be_bytes(png[55..59].try_into().unwrap())
-        );
-        let mut pixels = Vec::new();
-        flate2::read::ZlibDecoder::new(&png[41..55])
-            .read_to_end(&mut pixels)
-            .unwrap();
-        assert_eq!(pixels, [0, 255, 0, 0, 255, 0, 0, 255, 128]);
-    }
-
-    #[test]
-    fn stretched_shape_picture_fill_uses_media_relationship_and_keeps_line() {
-        let image = png_blip();
-        let entry = parse_record_at(&image, 0, &mut 100).unwrap();
-        let entries = [entry];
-        let mut media = media::Store::new(&entries, &[]);
-        let shape = sp(
-            0x200,
-            vec![
-                record(0, 0xf010, &ints(&[0, 0, 576, 288])),
-                properties(&[
-                    (0x180, 3),
-                    (0x182, 32768),
-                    (0x4186, 1),
-                    (0x1bf, 0x00200020),
-                    (0x1c0, 0xff),
-                ]),
-            ],
-        );
-        let xml = render(
-            &drawing(vec![shape]),
-            &[],
-            &mut MAX_RECORDS.clone(),
-            &mut MAX_TEXT_BYTES.clone(),
-            &mut (256 * 1024 * 1024),
-            None,
-            Some(&mut media),
-        )
-        .unwrap()
-        .unwrap();
-        assert!(xml.contains("<a:prstGeom prst=\"rect\""));
-        assert!(xml.contains("<a:blipFill rotWithShape=\"1\"><a:blip r:embed=\"rImg1\"><a:alphaModFix amt=\"50000\"/></a:blip><a:stretch><a:fillRect/></a:stretch></a:blipFill>"));
-        assert!(xml.contains("<a:ln"));
-        assert!(media.relationships().contains("Id=\"rImg1\""));
-        assert_eq!(media.parts().len(), 1);
+        let (slide, used) = project_slide(&tree(0x00200020), &[png_blip()], 100).unwrap();
+        let shape = shapes(&slide)[0];
+        assert_eq!(shape.geometry, "rect");
+        assert!(matches!(
+            &shape.fill,
+            Some(Fill::Image { image_path, stretch: true, rot_with_shape: Some(true), alpha: Some(alpha), .. })
+                if image_path == "legacy-ppt/image/1" && *alpha == 0.5
+        ));
+        assert_eq!(shape.stroke.as_ref().unwrap().color, "FF0000");
+        assert_eq!(used, [1]);
+        // A vetoed fill neither paints nor admits its BLIP.
+        let (slide, used) = project_slide(&tree(0x00100000), &[png_blip()], 100).unwrap();
+        assert!(matches!(shapes(&slide)[0].fill, Some(Fill::None)));
+        assert!(used.is_empty());
     }
 
     #[test]
     fn tertiary_fill_rotation_is_scoped_and_supports_explicit_true_and_false() {
-        let image = png_blip();
-        let entry = parse_record_at(&image, 0, &mut 100).unwrap();
-        let entries = [entry];
-        for (tertiary, expected) in [
-            (0x00600060, "rotWithShape=\"1\""),
-            (0x00600040, "rotWithShape=\"0\""),
-        ] {
-            let mut media = media::Store::new(&entries, &[]);
-            let shape = sp(
+        for (tertiary, expected) in [(0x00600060, true), (0x00600040, false)] {
+            let tree = drawing(vec![sp(
                 0x200,
                 vec![
                     record(0, 0xf010, &ints(&[0, 0, 576, 288])),
                     properties(&[(0x180, 3), (0x4186, 1), (0x1bf, 0x00100010)]),
                     tertiary_properties(&[(0x1bf, tertiary), (0x180, 99)]),
                 ],
-            );
-            let output = render(
-                &drawing(vec![shape]),
-                &[],
-                &mut MAX_RECORDS.clone(),
-                &mut MAX_TEXT_BYTES.clone(),
-                &mut (256 * 1024 * 1024),
-                None,
-                Some(&mut media),
-            )
-            .unwrap()
-            .unwrap();
-            assert!(output.contains(expected));
+            )]);
+            let (slide, _) = project_slide(&tree, &[png_blip()], 100).unwrap();
+            assert!(matches!(
+                shapes(&slide)[0].fill,
+                Some(Fill::Image { rot_with_shape: Some(rotate), .. }) if rotate == expected
+            ));
         }
     }
 
@@ -1897,213 +1214,63 @@ mod tests {
         ];
         let mut conflicting = base.clone();
         conflicting.push(tertiary_properties(&[(0x1bf, 0x00200000)]));
-        assert!(xml(&drawing(vec![sp(0x200, conflicting)])).is_err());
+        assert!(project(&drawing(vec![sp(0x200, conflicting)])).is_err());
 
         let mut duplicate = base;
         duplicate.push(tertiary_properties(&[(0x1bf, 0x00200020)]));
         duplicate.push(tertiary_properties(&[(0x1bf, 0x00200020)]));
-        assert!(xml(&drawing(vec![sp(0x200, duplicate)])).is_err());
+        assert!(project(&drawing(vec![sp(0x200, duplicate)])).is_err());
     }
 
     #[test]
-    fn shape_picture_fill_does_not_reference_ineligible_or_unknown_geometry() {
-        let image = png_blip();
-        let entry = parse_record_at(&image, 0, &mut 100).unwrap();
-        let entries = [entry];
-        for (kind, boolean, adjusted) in [
-            (202, 0x00100000, false),
-            (202, 0x00020002, false),
-            (0, 0, false),
-            (202, 0, true),
-        ] {
-            let mut media = media::Store::new(&entries, &[]);
-            let mut values = vec![(0x180, 3), (0x4186, 1), (0x1bf, boolean)];
-            if adjusted {
-                values.push((0x147, 100));
-            }
-            let shape = sp_kind(
-                kind,
-                0x200,
-                vec![
-                    record(0, 0xf010, &ints(&[0, 0, 576, 288])),
-                    properties(&values),
-                    text("kept"),
-                ],
-            );
-            let output = render(
-                &drawing(vec![shape]),
-                &[],
-                &mut MAX_RECORDS.clone(),
-                &mut MAX_TEXT_BYTES.clone(),
-                &mut (256 * 1024 * 1024),
-                None,
-                Some(&mut media),
-            )
-            .unwrap()
-            .unwrap();
-            assert!(!output.contains("a:blipFill"));
-            assert!(media.relationships().is_empty());
-            assert!(media.parts().is_empty());
-        }
-
-        let array = |size: u16, data: Vec<u8>| {
-            let count = u16::try_from(data.len() / usize::from(size)).unwrap();
-            [
-                count.to_le_bytes().as_slice(),
-                count.to_le_bytes().as_slice(),
-                size.to_le_bytes().as_slice(),
-                data.as_slice(),
-            ]
-            .concat()
-        };
-        let vertices = array(
-            8,
-            [[0i32, 0], [10, 0], [0, 0], [0, 10]]
-                .iter()
-                .flatten()
-                .flat_map(|value| value.to_le_bytes())
-                .collect(),
-        );
-        let segments = array(
-            2,
-            [
-                0x4000u16, 1, 0x6001, 0xaa00, 0x8000, 0x4000, 1, 0x6001, 0xab00, 0x8000,
-            ]
-            .iter()
-            .flat_map(|value| value.to_le_bytes())
-            .collect(),
-        );
-        let complex = record(
-            (4 << 4) | 3,
-            0xf00b,
-            &[
-                0x8145u16.to_le_bytes().as_slice(),
-                (vertices.len() as u32).to_le_bytes().as_slice(),
-                0x8146u16.to_le_bytes().as_slice(),
-                (segments.len() as u32).to_le_bytes().as_slice(),
-                0x180u16.to_le_bytes().as_slice(),
-                3u32.to_le_bytes().as_slice(),
-                0x4186u16.to_le_bytes().as_slice(),
-                1u32.to_le_bytes().as_slice(),
-                vertices.as_slice(),
-                segments.as_slice(),
-            ]
-            .concat(),
-        );
-        let mut media = media::Store::new(&entries, &[]);
-        let shape = sp(
+    fn shape_picture_fill_validates_its_store_index() {
+        let tree = drawing(vec![sp(
             0x200,
             vec![
                 record(0, 0xf010, &ints(&[0, 0, 576, 288])),
-                complex,
-                text("mixed paint kept"),
+                properties(&[(0x180, 3), (0x4186, 2)]),
             ],
-        );
-        let output = render(
-            &drawing(vec![shape]),
-            &[],
-            &mut MAX_RECORDS.clone(),
-            &mut MAX_TEXT_BYTES.clone(),
-            &mut (256 * 1024 * 1024),
-            None,
-            Some(&mut media),
-        )
-        .unwrap()
-        .unwrap();
-        assert!(output.contains("mixed paint kept"));
-        assert!(!output.contains("a:blipFill"));
-        assert!(media.relationships().is_empty());
-        assert!(media.parts().is_empty());
-
-        // Eligibility is decided before Store parsing: an adjusted text shape
-        // must not dereference even a malformed BLIP that would fail if used.
-        let malformed = record(0x6e00, 0xf01e, &[vec![0; 17], vec![1, 2, 3]].concat());
-        let entry = parse_record_at(&malformed, 0, &mut 100).unwrap();
-        let entries = [entry];
-        let mut media = media::Store::new(&entries, &[]);
-        let shape = sp(
-            0x200,
-            vec![
-                record(0, 0xf010, &ints(&[0, 0, 576, 288])),
-                properties(&[(0x147, 100), (0x180, 3), (0x4186, 1)]),
-                text("malformed media untouched"),
-            ],
-        );
-        let output = render(
-            &drawing(vec![shape]),
-            &[],
-            &mut MAX_RECORDS.clone(),
-            &mut MAX_TEXT_BYTES.clone(),
-            &mut (256 * 1024 * 1024),
-            None,
-            Some(&mut media),
-        )
-        .unwrap()
-        .unwrap();
-        assert!(output.contains("malformed media untouched"));
-        assert!(media.parts().is_empty());
+        )]);
+        assert!(project_slide(&tree, &[png_blip()], 100)
+            .unwrap_err()
+            .contains("index out of range"));
     }
 
     #[test]
-    fn eligible_shape_picture_fill_validates_index_and_supported_media() {
-        let shape = |index| {
-            drawing(vec![sp(
-                0x200,
-                vec![
-                    record(0, 0xf010, &ints(&[0, 0, 576, 288])),
-                    properties(&[(0x180, 3), (0x4186, index)]),
-                ],
-            )])
-        };
-        let image = png_blip();
-        let entry = parse_record_at(&image, 0, &mut 100).unwrap();
-        let entries = [entry];
-        let mut media = media::Store::new(&entries, &[]);
-        assert!(render(
-            &shape(2),
-            &[],
-            &mut MAX_RECORDS.clone(),
-            &mut MAX_TEXT_BYTES.clone(),
-            &mut (256 * 1024 * 1024),
-            None,
-            Some(&mut media),
-        )
-        .unwrap_err()
-        .contains("index out of range"));
-
-        let unsupported = record(0, 0xf01c, &[]); // PICT remains outside Store's allowlist.
-        let entry = parse_record_at(&unsupported, 0, &mut 100).unwrap();
-        let entries = [entry];
-        let mut media = media::Store::new(&entries, &[]);
-        let output = render(
-            &shape(1),
-            &[],
-            &mut MAX_RECORDS.clone(),
-            &mut MAX_TEXT_BYTES.clone(),
-            &mut (256 * 1024 * 1024),
-            None,
-            Some(&mut media),
-        )
-        .unwrap()
-        .unwrap();
-        assert!(!output.contains("a:blipFill"));
-        assert!(media.relationships().is_empty());
-        assert!(media.parts().is_empty());
+    fn straight_connector_keeps_its_preset_line_and_arrow_without_a_fill() {
+        let tree = drawing(vec![sp_kind(
+            32,
+            0xa00,
+            vec![
+                record(0, 0xf010, &ints(&[0, 0, 576, 576])),
+                properties(&[(0x181, 255), (0x1c0, 0xff0000), (0x1d1, 5)]),
+            ],
+        )]);
+        let slide = project(&tree).unwrap();
+        let shape = shapes(&slide)[0];
+        assert_eq!(shape.geometry, "straightConnector1");
+        assert!(matches!(shape.fill, Some(Fill::None)));
+        let stroke = shape.stroke.as_ref().unwrap();
+        assert_eq!(stroke.color, "0000FF");
+        assert_eq!(stroke.tail_end.as_ref().unwrap().kind, "arrow");
     }
 
     #[test]
     fn local_ruler_tabs_reach_each_paragraph_without_a_style_atom() {
-        // MS-PPT 2.9.29-30: explicit ruler tabs, signed positions and enum types.
+        // MS-PPT 2.9.29-30: explicit ruler tabs, signed positions and enum
+        // types, with level 0 origins.
         let ruler = record(
             0,
             4006,
             &[
-                4u32.to_le_bytes().as_slice(),
+                (4u32 | 8 | 256).to_le_bytes().as_slice(),
                 &2u16.to_le_bytes(),
                 &576i16.to_le_bytes(),
                 &0u16.to_le_bytes(),
                 &1152i16.to_le_bytes(),
                 &2u16.to_le_bytes(),
+                &0i16.to_le_bytes(),
+                &0i16.to_le_bytes(),
             ]
             .concat(),
         );
@@ -2121,18 +1288,17 @@ mod tests {
             0xa00,
             vec![record(0, 0xf010, &ints(&[0, 0, 5760, 4320])), textbox],
         );
-        let result = xml(&drawing(vec![shape])).unwrap();
-        assert_eq!(result.matches("<a:tabLst>").count(), 2);
-        assert_eq!(
-            result.matches("<a:tab pos=\"914400\" algn=\"l\"/>").count(),
-            2
-        );
-        assert_eq!(
-            result
-                .matches("<a:tab pos=\"1828800\" algn=\"r\"/>")
-                .count(),
-            2
-        );
+        let slide = project(&drawing(vec![shape])).unwrap();
+        let paragraphs = &shapes(&slide)[0].text_body.as_ref().unwrap().paragraphs;
+        assert_eq!(paragraphs.len(), 2);
+        for paragraph in paragraphs {
+            let tabs: Vec<_> = paragraph
+                .tab_stops
+                .iter()
+                .map(|tab| (tab.pos, tab.algn.as_str()))
+                .collect();
+            assert_eq!(tabs, [(914400, "l"), (1828800, "r")]);
+        }
     }
 
     #[test]
@@ -2155,54 +1321,8 @@ mod tests {
                 0xa00,
                 vec![record(0, 0xf010, &ints(&[0, 0, 5760, 4320])), textbox],
             );
-            assert!(xml(&drawing(vec![shape])).is_err());
+            assert!(project(&drawing(vec![shape])).is_err());
         }
-    }
-
-    #[test]
-    fn master_layers_and_missing_local_drawing_share_ids_and_xml_budget() {
-        let master = drawing(vec![sp(
-            0xa00,
-            vec![record(0, 0xf010, &ints(&[0, 0, 576, 576])), text("Master")],
-        )]);
-        let layer = Record {
-            version: 15,
-            instance: 0,
-            kind: 1016,
-            payload: &master,
-        };
-        let local = record(0, 4008, b"Local fallback");
-        let rendered = render_with_masters(
-            &local,
-            [Ok(layer)],
-            &[],
-            &mut 1000,
-            &mut 1000,
-            &mut 10000,
-            None,
-            None,
-        )
-        .unwrap();
-        assert!(rendered.fallback);
-        assert!(rendered.tree.contains("id=\"2\" name=\"Legacy shape 2\""));
-        assert!(rendered
-            .tree
-            .contains("id=\"3\" name=\"Legacy slide text\""));
-        assert!(
-            rendered.tree.find(">Master<").unwrap()
-                < rendered.tree.find(">Local fallback<").unwrap()
-        );
-        assert!(render_with_masters(
-            &local,
-            [Ok(layer)],
-            &[],
-            &mut 1000,
-            &mut 1000,
-            &mut 100,
-            None,
-            None
-        )
-        .is_err());
     }
 
     #[test]
@@ -2218,9 +1338,9 @@ mod tests {
                 0xa00,
                 vec![properties(&[(0x3bf, value)]), bad_outline.clone()],
             );
-            let result = xml(&drawing(vec![shape]));
+            let result = project(&drawing(vec![shape]));
             if omitted {
-                assert_eq!(result.unwrap(), "");
+                assert!(result.unwrap().elements.is_empty());
             } else {
                 assert!(result.is_err());
             }
@@ -2234,36 +1354,37 @@ mod tests {
             ]
             .concat(),
         );
-        assert_eq!(xml(&drawing(vec![hidden_group])).unwrap(), "");
+        assert!(project(&drawing(vec![hidden_group]))
+            .unwrap()
+            .elements
+            .is_empty());
     }
 
     #[test]
     fn backgrounds_are_explicit_ungrouped_live_shapes_without_anchor_requirements() {
         let bg = sp(0xc00, vec![properties(&[(0x181, 0x123456)])]);
         let input = drawing(vec![bg.clone()]);
-        assert!(background(&input, &mut 100)
-            .unwrap()
-            .unwrap()
-            .paint
-            .background_fill(None)
-            .unwrap()
-            .contains("563412"));
-        assert!(xml(&input).unwrap().is_empty()); // Never emit a foreground rectangle.
+        assert!(matches!(
+            background_of(&input, &mut 100).unwrap().unwrap().paint.background_model(None, None),
+            Some(Fill::Solid { ref color }) if color == "563412"
+        ));
+        // Never project the background shape as a foreground rectangle.
+        assert!(project(&input).unwrap().elements.is_empty());
         for flag in [0x800, 0xc08, 0xc10] {
-            assert!(background(&drawing(vec![sp(flag, vec![])]), &mut 100)
+            assert!(background_of(&drawing(vec![sp(flag, vec![])]), &mut 100)
                 .unwrap()
                 .is_none());
         }
         assert!(
-            background(&drawing(vec![record(15, 0xf003, &bg)]), &mut 100)
+            background_of(&drawing(vec![record(15, 0xf003, &bg)]), &mut 100)
                 .unwrap()
                 .is_none()
         );
-        assert!(background(&drawing(vec![bg.clone(), bg]), &mut 100)
+        assert!(background_of(&drawing(vec![bg.clone(), bg]), &mut 100)
             .err()
             .unwrap()
             .contains("duplicate"));
-        assert!(background(&input, &mut 1).is_err());
+        assert!(background_of(&input, &mut 1).is_err());
     }
 
     #[test]
@@ -2287,16 +1408,16 @@ mod tests {
         let moved = slide;
         assert_eq!(
             retained
+                .gradient
                 .view(&moved)
                 .unwrap()
-                .gradient
                 .decode(&mut 1, &mut 8)
                 .unwrap()
                 .unwrap()[0]
                 .color,
             7
         );
-        assert!(retained.view(&moved[..moved.len() - 1]).is_err());
+        assert!(retained.gradient.view(&moved[..moved.len() - 1]).is_err());
     }
 
     #[test]
@@ -2305,48 +1426,16 @@ mod tests {
     fn scalar_shade_reset_ignores_fbid_and_defers_invalid_value_rejection() {
         let shade = [1, 0, 1, 0, 8, 0, 7, 0, 0, 0, 0, 0, 0, 0];
         for opid in [0x197, 0x4197] {
-            let mut props = Properties::default();
+            let mut props = PropertiesStorage::<&[u8]>::default();
             props
                 .apply_primary(0x8197, shade.len() as u32, Some(&shade))
                 .unwrap();
             props.apply_primary(opid, 0, None).unwrap();
             assert!(props.gradient.decode(&mut 1, &mut 8).unwrap().is_none());
         }
-        let mut invalid = Properties::default();
+        let mut invalid = PropertiesStorage::<&[u8]>::default();
         invalid.apply_primary(0x197, 1, None).unwrap();
         assert!(invalid.gradient.decode(&mut 1, &mut 8).is_err());
-    }
-
-    #[test]
-    fn retained_gradient_is_projected_to_xml_without_a_solid_fill_guess() {
-        let shade = [1, 0, 1, 0, 8, 0, 7, 0, 0, 0, 0, 0, 0, 0];
-        let gradient = record(
-            (2 << 4) | 3,
-            0xf00b,
-            &[
-                0x180u16.to_le_bytes().as_slice(),
-                4u32.to_le_bytes().as_slice(),
-                0x8197u16.to_le_bytes().as_slice(),
-                (shade.len() as u32).to_le_bytes().as_slice(),
-                shade.as_slice(),
-            ]
-            .concat(),
-        );
-        let shape = |extra| {
-            drawing(vec![sp(
-                0x200,
-                vec![
-                    record(0, 0xf010, &ints(&[0, 0, 576, 288])),
-                    extra,
-                    text("x"),
-                ],
-            )])
-        };
-        let output = xml(&shape(gradient)).unwrap();
-        assert!(output.contains("<a:gradFill rotWithShape=\"0\">"));
-        assert!(output.contains("<a:gs pos=\"0\"><a:srgbClr val=\"FFFFFF\"/>"));
-        assert!(output.contains("<a:gs pos=\"100000\"><a:srgbClr val=\"070000\"/>"));
-        assert!(output.contains("<a:lin ang=\"5400000\"/>"));
     }
 
     #[test]
@@ -2359,33 +1448,20 @@ mod tests {
             (0x102, 32768),
             (0x103, 0),
         ]);
-        let mut props = Properties::default();
-        props
-            .read(parse_record_at(&bytes, 0, &mut 100).unwrap(), &mut 100)
-            .unwrap();
+        let props = read_properties(&bytes, &mut 100).unwrap();
         assert_eq!(props.picture, 2);
         assert_eq!(props.crop, [25000, -12500, 50000, 0]);
-        let bytes = properties(&[(0x104, 7)]);
-        let mut props = Properties::default();
-        props
-            .read(parse_record_at(&bytes, 0, &mut 100).unwrap(), &mut 100)
-            .unwrap();
+        let props = read_properties(&properties(&[(0x104, 7)]), &mut 100).unwrap();
         assert_eq!(props.picture, 0);
-        let bytes = properties(&[(0x100, i32::MAX as u32)]);
-        assert!(props
-            .read(parse_record_at(&bytes, 0, &mut 100).unwrap(), &mut 100)
-            .is_err());
+        assert!(read_properties(&properties(&[(0x100, i32::MAX as u32)]), &mut 100).is_err());
     }
 
     #[test]
     fn fit_shape_to_text_requires_its_use_bit() {
         let fit = |values: &[(u16, u32)]| {
-            let bytes = properties(values);
-            let mut props = Properties::default();
-            props
-                .read(parse_record_at(&bytes, 0, &mut 100).unwrap(), &mut 100)
-                .unwrap();
-            props.fit_shape_to_text
+            read_properties(&properties(values), &mut 100)
+                .unwrap()
+                .fit_shape_to_text
         };
         assert!(!fit(&[]));
         // Office-saved values: use bits 17-18 with and without the fit bit.
@@ -2396,140 +1472,60 @@ mod tests {
     }
 
     #[test]
-    fn master_text_only_applies_to_verified_placeholders_not_ordinary_text_boxes() {
-        let master_bytes = [
-            1u16.to_le_bytes().to_vec(),
-            0x800u32.to_le_bytes().to_vec(),
-            1u16.to_le_bytes().to_vec(),
-            0x20000u32.to_le_bytes().to_vec(),
-            48u16.to_le_bytes().to_vec(),
-        ]
-        .concat();
-        let master = text_style::Master::parse(
-            &[Record {
-                version: 0,
-                instance: 0,
-                kind: 4003,
-                payload: &master_bytes,
-            }],
-            &[],
-            &mut 100,
-        )
-        .unwrap();
-        let shape = |position: u32, label: &str| {
+    fn preserves_nontext_geometry_paint_and_stacking_order() {
+        let shape = |kind: u16| {
+            record(
+                15,
+                0xf004,
+                &[
+                    record((kind << 4) | 2, 0xf00a, &ints(&[42, 0xa00])),
+                    record(0, 0xf010, &ints(&[144, 288, 864, 720])),
+                    properties(&[(0x181, 0x00563412), (0x1c0, 255), (0x1cb, 25400)]),
+                ]
+                .concat(),
+            )
+        };
+        let slide = project(&drawing(vec![shape(3), shape(1)])).unwrap();
+        let shapes = shapes(&slide);
+        assert_eq!(
+            shapes
+                .iter()
+                .map(|shape| shape.geometry.as_str())
+                .collect::<Vec<_>>(),
+            ["ellipse", "rect"]
+        );
+        for shape in shapes {
+            assert!(matches!(shape.fill, Some(Fill::Solid { ref color }) if color == "123456"));
+            let stroke = shape.stroke.as_ref().unwrap();
+            assert_eq!((stroke.color.as_str(), stroke.width), ("FF0000", 25400));
+            assert!(shape.text_body.is_none());
+        }
+    }
+
+    #[test]
+    fn repeated_outline_references_share_the_decoded_text_budget() {
+        let referencing = || {
             sp(
                 0xa00,
                 vec![
-                    record(0, 0xf010, &ints(&[0, 0, 1152, 576])),
+                    record(0, 0xf010, &ints(&[0, 0, 576, 576])),
                     record(
                         15,
                         0xf00d,
-                        &[record(0, 3999, &[0; 4]), record(0, 4008, label.as_bytes())].concat(),
-                    ),
-                    record(
-                        15,
-                        0xf011,
-                        &record(0, 3011, &[position.to_le_bytes(), [1, 0, 0, 0]].concat()),
+                        &[record(0, 3998, &ints(&[0])), origin_ruler()].concat(),
                     ),
                 ],
             )
         };
-        let input = drawing(vec![shape(0, "Title"), shape(u32::MAX, "Ordinary")]);
-        let out = render(
-            &input,
-            &[],
-            &mut MAX_RECORDS.clone(),
-            &mut MAX_TEXT_BYTES.clone(),
-            &mut 8192,
-            Some(TextContext {
-                backing: &[],
-                fonts: &[],
-                styles: &[],
-                types: &[],
-                scheme: None,
-                master: Some(&master),
-                shapes: None,
-                outline_slide_numbers: &[],
-                slide_number: 0,
-            }),
-            None,
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(out.matches("algn=\"ctr\"").count(), 1);
-        assert_eq!(out.matches("sz=\"4800\"").count(), 2);
-        assert_eq!(out.matches("sz=\"1800\"").count(), 2);
-        assert!(out.contains("Title") && out.contains("Ordinary"));
-    }
-
-    #[test]
-    fn preserves_nontext_geometry_paint_and_stacking_order() {
-        let shape = |kind: u16, label: Option<&str>| {
-            let mut atoms = vec![
-                record((kind << 4) | 2, 0xf00a, &ints(&[42, 0xa00])),
-                record(0, 0xf010, &ints(&[144, 288, 864, 720])),
-                properties(&[(0x181, 0x00563412), (0x1c0, 255), (0x1cb, 25400)]),
-            ];
-            if let Some(label) = label {
-                atoms.push(text(label));
-            }
-            record(15, 0xf004, &atoms.concat())
-        };
-        let out = xml(&drawing(vec![shape(3, None), shape(1, Some("Label"))])).unwrap();
-        assert_eq!(out.matches("<p:sp>").count(), 2);
-        assert_eq!(out.matches("<p:txBody>").count(), 1);
-        assert!(out.contains("prst=\"ellipse\""));
-        assert!(out.contains("<a:ln w=\"25400\" cap=\"flat\">"));
-        assert!(out.contains("val=\"123456\""));
-        assert!(out.find("ellipse").unwrap() < out.find("Label").unwrap());
-        assert!(!out.contains("txBox=\"1\""));
-    }
-
-    #[test]
-    fn adjusted_shapes_keep_text_without_painting_a_fake_preset() {
-        let anchor = record(0, 0xf010, &ints(&[0, 0, 576, 576]));
-        let options = properties(&[(0x147, 100), (0x181, 255)]);
-        let bytes = drawing(vec![
-            sp(0xa00, vec![anchor.clone(), options.clone()]),
-            sp(0xa00, vec![anchor, options, text("Custom outline")]),
-        ]);
-        let out = xml(&bytes).unwrap();
-        assert_eq!(out.matches("<p:sp>").count(), 1);
-        assert!(out.contains("Custom outline"));
-        assert!(!out.contains("solidFill"));
-        let complex = record(0x13, 0xf00b, &[0x45, 0x81, 0, 0, 0, 0]);
-        let out = xml(&drawing(vec![sp(0xa00, vec![complex])])).unwrap();
-        assert!(out.is_empty());
-    }
-
-    #[test]
-    fn nontext_shapes_share_shape_count_and_xml_budgets() {
-        let bytes = sp(
-            0xa00,
-            vec![
-                record(0, 0xf010, &ints(&[0, 0, 576, 576])),
-                properties(&[(0x181, 255)]),
-            ],
-        );
-        for (id, budget, message) in [(100_001, 4096, "too many"), (1, 1, "OUTPUT_TOO_LARGE")] {
-            let mut xml_budget = budget;
-            let mut writer = Writer {
-                inherited: false,
-                outline: &[],
-                records: &mut MAX_RECORDS.clone(),
-                text: &mut MAX_TEXT_BYTES.clone(),
-                remaining: &mut xml_budget,
-                output: String::new(),
-                id,
-                context: None,
-                media: None,
-            };
-            let record = parse_records(&bytes, &mut MAX_RECORDS.clone()).unwrap()[0];
-            assert!(writer
-                .node(record, false, 0, true)
-                .unwrap_err()
-                .contains(message));
-        }
+        let tree = drawing(vec![referencing(), referencing()]);
+        // "Outline" is seven bytes; each reference is charged before copying.
+        let (slide, _) = project_slide(&tree, &[], 14).unwrap();
+        assert!(shapes(&slide)
+            .iter()
+            .all(|shape| shape_text(shape) == "Outline"));
+        assert!(project_slide(&tree, &[], 13)
+            .unwrap_err()
+            .contains("decoded text budget"));
     }
 
     #[test]
@@ -2538,24 +1534,24 @@ mod tests {
             [record(0, 4001, &[]), record(0, 3998, &[0; 4])].concat(),
             [record(0, 3998, &[0; 4]), record(0, 4001, &[])].concat(),
         ] {
-            let bytes = drawing(vec![sp(
+            let tree = drawing(vec![sp(
                 0x200,
                 vec![
                     record(0, 0xf010, &ints(&[0, 0, 576, 576])),
                     record(15, 0xf00d, &atoms),
                 ],
             )]);
-            assert!(xml(&bytes).is_err());
+            assert!(project(&tree).is_err());
         }
     }
 
     #[test]
     fn preserves_signed_rotation_flips_and_emu_text_margins() {
-        let bytes = drawing(vec![sp(
+        let tree = drawing(vec![sp(
             0x2c0,
             vec![
                 record(0, 0xf010, &ints(&[0, 0, 576, 576])),
-                text("Rotated"),
+                ruled_text("Rotated"),
                 properties(&[
                     (4, (-45i32 * 65536) as u32),
                     (0x81, 12700),
@@ -2567,22 +1563,37 @@ mod tests {
                 ]),
             ],
         )]);
-        let out = xml(&bytes).unwrap();
-        assert!(out.contains("rot=\"-2700000\" flipH=\"1\" flipV=\"1\""));
-        assert!(out.contains("wrap=\"none\" anchor=\"ctr\" anchorCtr=\"1\" lIns=\"12700\" tIns=\"25400\" rIns=\"38100\" bIns=\"50800\""));
+        let slide = project(&tree).unwrap();
+        let shape = shapes(&slide)[0];
+        assert_eq!(
+            (shape.rotation, shape.flip_h, shape.flip_v),
+            (-45.0, true, true)
+        );
+        let body = shape.text_body.as_ref().unwrap();
+        assert_eq!(
+            (body.l_ins, body.t_ins, body.r_ins, body.b_ins),
+            (12700, 25400, 38100, 50800)
+        );
+        assert_eq!(
+            (body.wrap.as_str(), body.vertical_anchor.as_str()),
+            ("none", "ctr")
+        );
     }
 
     #[test]
     fn maps_only_owned_text_flow_one_with_default_font_direction_to_ea_vert() {
-        let shape = |values: &[(u16, u32)]| {
-            sp(
-                0xa00,
+        let vert = |flags: i32, values: &[(u16, u32)]| {
+            let tree = drawing(vec![sp(
+                flags,
                 vec![
                     record(0, 0xf010, &ints(&[0, 0, 576, 576])),
-                    text("Same text 日本語 123"),
+                    ruled_text("Same text 123"),
                     properties(values),
                 ],
-            )
+            )]);
+            let slide = project(&tree).unwrap();
+            let vert = shapes(&slide)[0].text_body.as_ref().unwrap().vert.clone();
+            vert
         };
         for values in [
             &[][..],
@@ -2592,40 +1603,28 @@ mod tests {
             &[(0x88, 4)],
             &[(0x88, 5)],
         ] {
-            assert!(!xml(&drawing(vec![shape(values)]))
-                .unwrap()
-                .contains(" vert="));
+            assert_eq!(vert(0xa00, values), "horz");
         }
         for flags in [0xa00, 0xa40, 0xa80, 0xac0] {
-            let out = xml(&drawing(vec![sp(
-                flags,
-                vec![
-                    record(0, 0xf010, &ints(&[0, 0, 576, 576])),
-                    text("Same text 日本語 123"),
-                    properties(&[(4, (-45i32 * 65536) as u32), (0x88, 1)]),
-                ],
-            )]))
-            .unwrap();
-            assert!(out.contains("<a:bodyPr") && out.contains(" vert=\"eaVert\""));
+            assert_eq!(
+                vert(flags, &[(4, (-45i32 * 65536) as u32), (0x88, 1)]),
+                "eaVert"
+            );
         }
-        assert!(xml(&drawing(vec![shape(&[(0x88, 1), (0x89, 0)])]))
-            .unwrap()
-            .contains(" vert=\"eaVert\""));
+        assert_eq!(vert(0xa00, &[(0x88, 1), (0x89, 0)]), "eaVert");
         for direction in 1..=3 {
-            assert!(!xml(&drawing(vec![shape(&[(0x88, 1), (0x89, direction)])]))
-                .unwrap()
-                .contains(" vert="));
+            assert_eq!(vert(0xa00, &[(0x88, 1), (0x89, direction)]), "horz");
         }
     }
 
     #[test]
     fn validates_text_direction_scalars_without_guessing_other_values() {
-        let shape = |options: Vec<u8>| {
+        let tree = |options: Vec<u8>| {
             drawing(vec![sp(
                 0xa00,
                 vec![
                     record(0, 0xf010, &ints(&[0, 0, 576, 576])),
-                    text("Direction"),
+                    ruled_text("Direction"),
                     options,
                 ],
             )])
@@ -2636,47 +1635,30 @@ mod tests {
             vec![(0x88, 6)],
             vec![(0x89, 4)],
         ] {
-            assert!(xml(&shape(properties(&values))).is_err());
+            assert!(project(&tree(properties(&values))).is_err());
         }
         let complex = record((1 << 4) | 3, 0xf00b, &[0x88, 0x80, 0, 0, 0, 0]);
         let blip = properties(&[(0x4088, 1)]);
-        assert!(xml(&shape(complex)).is_err());
-        assert!(xml(&shape(blip)).is_err());
+        assert!(project(&tree(complex)).is_err());
+        assert!(project(&tree(blip)).is_err());
 
         // Direction fields in a tertiary table are outside this measured,
-        // primary-owned mapping and remain omitted rather than reinterpreted.
-        let out = xml(&drawing(vec![sp(
-            0xa00,
-            vec![
-                record(0, 0xf010, &ints(&[0, 0, 576, 576])),
-                text("Direction"),
-                tertiary_properties(&[(0x88, 1)]),
-            ],
-        )]))
-        .unwrap();
-        assert!(!out.contains(" vert="));
+        // primary-owned mapping and remain horizontal rather than reinterpreted.
+        let slide = project(&tree(tertiary_properties(&[(0x88, 1)]))).unwrap();
+        assert_eq!(shapes(&slide)[0].text_body.as_ref().unwrap().vert, "horz");
     }
 
     #[test]
     fn validates_complex_property_tails_and_charges_property_work() {
         let malformed = drawing(vec![sp(0x200, vec![properties(&[(0x8380, 100)])])]);
-        assert!(xml(&malformed)
+        assert!(project(&malformed)
             .unwrap_err()
             .contains("complex shape property"));
         let opts = properties(&[(4, 0), (0x85, 0)]);
-        let entry = parse_records(&opts, &mut 1).unwrap()[0];
-        assert!(Properties::default()
-            .read(entry, &mut 1)
-            .unwrap_err()
+        assert!(read_properties(&opts, &mut 1)
+            .err()
+            .expect("property work must be charged")
             .contains("work budget"));
-    }
-
-    #[test]
-    fn escapes_multibyte_text_across_chunks_without_losing_unicode() {
-        let text = format!("{}日本語<&", "x".repeat(1023));
-        let mut output = String::new();
-        paragraphs(&[text], &mut output, &mut 4096).unwrap();
-        assert!(output.contains("日本語&lt;&amp;"));
     }
 
     #[test]
@@ -2688,43 +1670,30 @@ mod tests {
                 record(1, 0xf009, &ints(&[0, 0, 0, 576])),
             ],
         );
-        assert!(xml(&drawing(vec![record(15, 0xf003, &group_header)])).is_err());
-        assert!(xml(&drawing(vec![sp(0, vec![text("missing")])])).is_err());
-        let mut group = sp(
-            0x202,
-            vec![record(0, 0xf00f, &ints(&[0, 0, 576, 576])), text("deep")],
-        );
+        assert!(project(&drawing(vec![record(15, 0xf003, &group_header)]))
+            .unwrap_err()
+            .contains("group coordinate space"));
+        assert!(project(&drawing(vec![sp(0, vec![text("missing")])]))
+            .unwrap_err()
+            .contains("missing PowerPoint shape anchor"));
+        let child_space = record(1, 0xf009, &ints(&[0, 0, 576, 576]));
+        let mut group = sp(0x202, vec![record(0, 0xf00f, &ints(&[0, 0, 576, 576]))]);
         for _ in 0..=MAX_DEPTH {
-            group = record(
-                15,
-                0xf003,
-                &[
-                    sp(
-                        0x203,
-                        vec![
-                            record(0, 0xf00f, &ints(&[0, 0, 576, 576])),
-                            record(1, 0xf009, &ints(&[0, 0, 576, 576])),
-                        ],
-                    ),
-                    group,
-                ]
-                .concat(),
+            let head = sp(
+                0x203,
+                vec![
+                    record(0, 0xf00f, &ints(&[0, 0, 576, 576])),
+                    child_space.clone(),
+                ],
             );
+            group = record(15, 0xf003, &[head, group].concat());
         }
-        let mut writer = Writer {
-            inherited: false,
-            outline: &[],
-            records: &mut MAX_RECORDS.clone(),
-            text: &mut MAX_TEXT_BYTES.clone(),
-            remaining: &mut (1024 * 1024),
-            output: String::new(),
-            id: 1,
-            context: None,
-            media: None,
-        };
-        let record = parse_records(&group, &mut MAX_RECORDS.clone()).unwrap()[0];
-        assert!(writer
-            .node(record, true, 0, true)
+        let head = sp(
+            0x201,
+            vec![record(0, 0xf010, &ints(&[0, 0, 576, 576])), child_space],
+        );
+        let outer = record(15, 0xf003, &[head, group].concat());
+        assert!(project(&drawing(vec![outer]))
             .unwrap_err()
             .contains("nesting"));
     }
@@ -2735,26 +1704,29 @@ mod tests {
             .iter()
             .flat_map(|x| x.to_le_bytes())
             .collect();
-        let bytes = drawing(vec![
-            sp(0x200, vec![record(0, 0xf010, &small), text("First")]),
+        let tree = drawing(vec![
+            sp(0x200, vec![record(0, 0xf010, &small)]),
             sp(
                 0x200,
-                vec![
-                    record(0, 0xf010, &ints(&[576, 1152, 1728, 864])),
-                    text("Second"),
-                ],
+                vec![record(0, 0xf010, &ints(&[576, 1152, 1728, 864]))],
             ),
         ]);
-        let out = xml(&bytes).unwrap();
-        assert_eq!(out.matches("<p:sp>").count(), 2);
-        assert!(out.contains("<a:off x=\"-457200\" y=\"228600\"/>"));
-        assert!(out.contains("<a:ext cx=\"1371600\" cy=\"457200\"/>"));
-        assert!(out.contains("<a:off x=\"1828800\" y=\"914400\"/>"));
-        assert!(out.find("First").unwrap() < out.find("Second").unwrap());
+        let slide = project(&tree).unwrap();
+        let frames: Vec<_> = shapes(&slide)
+            .iter()
+            .map(|shape| (shape.x, shape.y, shape.width, shape.height))
+            .collect();
+        assert_eq!(
+            frames,
+            [
+                (-457200, 228600, 1371600, 457200),
+                (1828800, 914400, 914400, 457200)
+            ]
+        );
     }
 
     #[test]
-    fn preserves_group_coordinates_and_resolves_only_owned_outline_text() {
+    fn flattens_group_coordinates_onto_the_slide() {
         let group = record(
             15,
             0xf003,
@@ -2766,71 +1738,47 @@ mod tests {
                         record(1, 0xf009, &ints(&[100, 200, 500, 600])),
                     ],
                 ),
-                sp(
-                    0x202,
-                    vec![
-                        record(0, 0xf00f, &ints(&[100, 300, 300, 400])),
-                        record(15, 0xf00d, &record(0, 3998, &ints(&[0]))),
-                    ],
-                ),
+                sp(0x202, vec![record(0, 0xf00f, &ints(&[100, 300, 300, 400]))]),
             ]
             .concat(),
         );
-        let out = xml(&drawing(vec![group])).unwrap();
-        assert!(out.contains("<p:grpSp>"));
-        assert!(out.contains("<a:chOff x=\"158750\" y=\"317500\"/>"));
-        assert!(out.contains("<a:chExt cx=\"635000\" cy=\"635000\"/>"));
-        assert!(out.contains("<a:off x=\"158750\" y=\"476250\"/>"));
-        assert_eq!(out.matches("Outline").count(), 1);
-        assert!(out.contains("id=\"2\""));
-        assert!(out.contains("id=\"3\""));
+        let slide = project(&drawing(vec![group])).unwrap();
+        let shape = shapes(&slide)[0];
+        // Group anchor (914400, 457200, 1828800 x 914400) over child space
+        // (158750, 317500, 635000 x 635000).
+        assert_eq!(
+            (shape.x, shape.y, shape.width, shape.height),
+            (914400, 685800, 914400, 228600)
+        );
     }
 
     #[test]
     fn skips_deleted_shapes_and_does_not_collect_client_data_text() {
         let anchor = record(0, 0xf010, &ints(&[0, 0, 576, 576]));
-        let out = xml(&drawing(vec![
+        let slide = project(&drawing(vec![
             sp(0x208, vec![anchor.clone(), text("Deleted")]),
-            sp(0x210, vec![anchor.clone(), text("OLE")]),
             sp(
                 0x200,
                 vec![
                     anchor,
-                    text("Visible"),
+                    ruled_text("Visible"),
                     record(15, 0xf011, &record(0, 4008, b"Action")),
                 ],
             ),
         ]))
         .unwrap();
-        assert!(out.contains("Visible"));
-        for omitted in ["Deleted", "OLE", "Action"] {
-            assert!(!out.contains(omitted));
-        }
+        let shapes = shapes(&slide);
+        assert_eq!(shapes.len(), 1);
+        assert_eq!(shape_text(shapes[0]), "Visible");
     }
 
     #[test]
-    fn rejects_truncated_anchors_and_unbounded_xml() {
-        assert!(xml(&drawing(vec![sp(
+    fn rejects_truncated_anchors() {
+        assert!(project(&drawing(vec![sp(
             0x200,
             vec![record(0, 0xf010, &[0; 7]), text("x")]
         )]))
-        .is_err());
-        let bytes = drawing(vec![sp(
-            0x200,
-            vec![
-                record(0, 0xf010, &ints(&[0, 0, 576, 576])),
-                text("\r".repeat(100).as_str()),
-            ],
-        )]);
-        assert!(render(
-            &bytes,
-            &[],
-            &mut MAX_RECORDS.clone(),
-            &mut MAX_TEXT_BYTES.clone(),
-            &mut 1024,
-            None,
-            None,
-        )
-        .is_err());
+        .unwrap_err()
+        .contains("invalid PowerPoint shape anchor"));
     }
 }

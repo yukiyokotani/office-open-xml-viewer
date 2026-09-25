@@ -335,6 +335,22 @@ fn preflight(bytes: &[u8]) -> Result<usize, String> {
     Ok(count)
 }
 
+/// Test fixture: a deflated ZIP of the given parts, as Office stores a
+/// theme package in the Theme record.
+#[cfg(test)]
+pub(super) fn test_zip(parts: &[(&str, String)]) -> Vec<u8> {
+    use std::io::Write;
+    let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .unix_permissions(0o644);
+    for (name, body) in parts {
+        writer.start_file(*name, options).unwrap();
+        writer.write_all(body.as_bytes()).unwrap();
+    }
+    writer.finish().unwrap().into_inner()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,12 +359,12 @@ mod tests {
     const REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 
     fn package(theme: &str) -> Vec<u8> {
-        crate::ooxml::write_package(&[
-            ("_rels/.rels".into(), format!("<Relationships xmlns=\"{R}\"><Relationship Id=\"main\" Type=\"{REL}/officeDocument\" Target=\"styles/manager.xml\"/></Relationships>")),
-            ("styles/manager.xml".into(), format!("<a:themeManager xmlns:a=\"{A}\"/>")),
-            ("styles/_rels/manager.xml.rels".into(), format!("<Relationships xmlns=\"{R}\"><Relationship Id=\"theme\" Type=\"{REL}/theme\" Target=\"../colors/custom.xml\"/></Relationships>")),
-            ("colors/custom.xml".into(), theme.into()),
-        ], 1024 * 1024).unwrap()
+        test_zip(&[
+            ("_rels/.rels", format!("<Relationships xmlns=\"{R}\"><Relationship Id=\"main\" Type=\"{REL}/officeDocument\" Target=\"styles/manager.xml\"/></Relationships>")),
+            ("styles/manager.xml", format!("<a:themeManager xmlns:a=\"{A}\"/>")),
+            ("styles/_rels/manager.xml.rels", format!("<Relationships xmlns=\"{R}\"><Relationship Id=\"theme\" Type=\"{REL}/theme\" Target=\"../colors/custom.xml\"/></Relationships>")),
+            ("colors/custom.xml", theme.into()),
+        ])
     }
 
     fn record_data(package: &[u8]) -> Vec<u8> {
@@ -555,11 +571,7 @@ mod tests {
 
     #[test]
     fn rejects_duplicate_zip_names_and_mismatched_directory_counts() {
-        let zip = crate::ooxml::write_package(
-            &[("a.xml".into(), "a".into()), ("b.xml".into(), "b".into())],
-            4096,
-        )
-        .unwrap();
+        let zip = test_zip(&[("a.xml", "a".into()), ("b.xml", "b".into())]);
         let mut duplicate = zip.clone();
         // Change both local and central names to create a true duplicate, not
         // merely a discrepancy between the two directory representations.

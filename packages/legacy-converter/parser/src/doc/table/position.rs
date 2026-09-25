@@ -13,7 +13,6 @@ pub struct Position {
 }
 
 impl Position {
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) fn reset_no_overlap_at_tistd(&mut self) {
         self.no_overlap = false;
     }
@@ -43,22 +42,6 @@ impl Position {
         Ok(true)
     }
 
-    pub fn xml(&self) -> String {
-        let mut xml = String::new();
-        if let Some((horizontal, vertical)) = self.active_anchors() {
-            let (horizontal_anchor, vertical_anchor) = anchors(horizontal, vertical);
-            xml.push_str(&format!("<w:tblpPr w:horzAnchor=\"{}\" w:vertAnchor=\"{}\" {} {} w:leftFromText=\"{}\" w:topFromText=\"{}\" w:rightFromText=\"{}\" w:bottomFromText=\"{}\"/>",
-                horizontal_anchor, vertical_anchor,
-                coordinate("X", self.x), coordinate("Y", self.y),
-                self.distances[0], self.distances[1], self.distances[2], self.distances[3]));
-        }
-        if self.no_overlap {
-            xml.push_str("<w:tblOverlap w:val=\"never\"/>");
-        }
-        xml
-    }
-
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) fn direct(&self) -> (Option<docx_model::TblpPr>, Option<String>) {
         let position = self.active_anchors().map(|(horizontal, vertical)| {
             let (tblp_x, tblp_x_spec) = direct_coordinate("X", self.x);
@@ -70,9 +53,9 @@ impl Position {
                 right_from_text: f64::from(self.distances[2]) / 20.0,
                 bottom_from_text: f64::from(self.distances[3]) / 20.0,
                 horz_anchor: horizontal_anchor.into(),
-                // The canonical XML adapter always emits horzAnchor and an X
-                // coordinate for every retained tblpPr, including Y-only and
-                // wrap-distance-only DOC inputs. Match that authored wire.
+                // Every retained position states its horizontal anchor and X
+                // coordinate, including Y-only and wrap-distance-only DOC
+                // inputs, where both take their MS-DOC defaults.
                 horz_specified: true,
                 vert_anchor: vertical_anchor.into(),
                 tblp_x,
@@ -94,7 +77,6 @@ impl Position {
     ///   2.1.162). Whether Word's DOC reader applies the same exception to the
     ///   equivalent DOC values (left or zero X, zero Y, column and margin/page
     ///   anchors) has not been observed.
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) fn check_direct_floating(&self) -> Result<(), String> {
         let Some((horizontal, vertical)) = self.active_anchors() else {
             return Ok(());
@@ -128,7 +110,6 @@ impl Position {
     /// one horizontal and one vertical distance; the mirrors observed carry
     /// the table's left and top distances (equal to the right and bottom in
     /// the symmetric cases, 0 against a right-only/bottom-only table).
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) fn matches_cell_frame(
         &self,
         frame: crate::doc::paragraph::TableParagraphFrame,
@@ -170,18 +151,10 @@ fn anchors(horizontal: u8, vertical: u8) -> (&'static str, &'static str) {
     )
 }
 
-#[cfg(feature = "direct-doc")]
 fn direct_coordinate(axis: &str, value: i32) -> (f64, Option<String>) {
     match resolved_coordinate(axis, value) {
         Coordinate::Spec(value) => (0.0, Some(value.into())),
         Coordinate::Offset(value) => (f64::from(value) / 20.0, None),
-    }
-}
-
-fn coordinate(axis: &str, value: i32) -> String {
-    match resolved_coordinate(axis, value) {
-        Coordinate::Spec(value) => format!("w:tblp{axis}Spec=\"{value}\""),
-        Coordinate::Offset(value) => format!("w:tblp{axis}=\"{value}\""),
     }
 }
 
@@ -215,32 +188,8 @@ fn resolved_coordinate(axis: &str, value: i32) -> Coordinate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(feature = "direct-doc")]
-    use std::io::{Cursor, Write};
-    #[cfg(feature = "direct-doc")]
-    use zip::write::SimpleFileOptions;
-
-    #[cfg(feature = "direct-doc")]
-    fn parsed_table(xml: &str) -> serde_json::Value {
-        let document = format!(
-            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl><w:tblPr>{xml}</w:tblPr><w:tblGrid/><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl></w:body></w:document>"#
-        );
-        let mut bytes = Vec::new();
-        {
-            let mut archive = zip::ZipWriter::new(Cursor::new(&mut bytes));
-            archive
-                .start_file("word/document.xml", SimpleFileOptions::default())
-                .unwrap();
-            archive.write_all(document.as_bytes()).unwrap();
-            archive.finish().unwrap();
-        }
-        let json: serde_json::Value =
-            serde_json::from_str(&docx_parser::parse_docx_native(&bytes).unwrap()).unwrap();
-        json["body"][0].clone()
-    }
-    #[cfg(feature = "direct-doc")]
     #[test]
-    fn direct_position_uses_the_serializer_mapping_and_preserves_disabled_authorship() {
+    fn direct_position_maps_anchors_coordinates_and_preserves_disabled_authorship() {
         let mut p = Position::default();
         p.apply(0x360d, &[0x21]).unwrap();
         p.apply(0x940e, &721i16.to_le_bytes()).unwrap();
@@ -256,18 +205,43 @@ mod tests {
         assert_eq!(position.left_from_text, 1.0);
         assert!(position.horz_specified);
         assert_eq!(overlap.as_deref(), Some("never"));
-        let parsed = parsed_table(&p.xml());
-        assert_eq!(serde_json::to_value(position).unwrap(), parsed["tblpPr"]);
-        assert_eq!(parsed["overlap"], "never");
+        assert_eq!(
+            serde_json::to_value(position).unwrap(),
+            serde_json::json!({
+                "bottomFromText": 0.0, "horzAnchor": "text", "horzSpecified": true,
+                "leftFromText": 1.0, "rightFromText": 0.0, "tblpX": 36.0, "tblpY": 0.0,
+                "tblpYSpec": "center", "topFromText": 0.0, "vertAnchor": "text"
+            })
+        );
 
-        for code in [0x940f, 0x9410] {
+        // A Y-only or distance-only position still retains the horizontal
+        // anchor and an X coordinate (the default margin/left placement).
+        for (code, expected) in [
+            (
+                0x940f,
+                serde_json::json!({
+                    "bottomFromText": 0.0, "horzAnchor": "text", "horzSpecified": true,
+                    "leftFromText": 0.0, "rightFromText": 0.0, "tblpX": 0.0,
+                    "tblpXSpec": "left", "tblpY": 0.95, "topFromText": 0.0,
+                    "vertAnchor": "margin"
+                }),
+            ),
+            (
+                0x9410,
+                serde_json::json!({
+                    "bottomFromText": 0.0, "horzAnchor": "text", "horzSpecified": true,
+                    "leftFromText": 1.0, "rightFromText": 0.0, "tblpX": 0.0,
+                    "tblpXSpec": "left", "tblpY": 0.0, "tblpYSpec": "inline",
+                    "topFromText": 0.0, "vertAnchor": "margin"
+                }),
+            ),
+        ] {
             let mut canonical = Position::default();
             canonical.apply(code, &20i16.to_le_bytes()).unwrap();
             let position = canonical.direct().0.unwrap();
-            assert!(position.horz_specified, "code {code:#x}");
             assert_eq!(
                 serde_json::to_value(position).unwrap(),
-                parsed_table(&canonical.xml())["tblpPr"],
+                expected,
                 "code {code:#x}"
             );
         }
@@ -285,20 +259,16 @@ mod tests {
             p.apply(0x360d, &[bits]).unwrap();
             let x = bits >> 6;
             let y = (bits >> 4) & 3;
+            let position = p.direct().0;
             if x == 3 || y == 3 {
-                assert!(p.xml().is_empty());
+                assert!(position.is_none());
             } else {
-                assert!(p.xml().contains(&format!(
-                    "w:horzAnchor=\"{}\"",
-                    ["text", "margin", "page"][x as usize]
-                )));
-                assert!(p.xml().contains(&format!(
-                    "w:vertAnchor=\"{}\"",
-                    ["margin", "page", "text"][y as usize]
-                )));
+                let position = position.unwrap();
+                assert_eq!(position.horz_anchor, ["text", "margin", "page"][x as usize]);
+                assert_eq!(position.vert_anchor, ["margin", "page", "text"][y as usize]);
             }
         }
-        assert!(Position::default().xml().is_empty());
+        assert!(Position::default().direct().0.is_none());
     }
     #[test]
     fn symbolic_positions_and_signed_twips_do_not_share_the_minus_one_path() {
@@ -311,12 +281,12 @@ mod tests {
         ] {
             for (i, label) in labels.iter().enumerate() {
                 assert_eq!(
-                    coordinate(axis, -(i as i32) * 4),
-                    format!("w:tblp{axis}Spec=\"{label}\"")
+                    direct_coordinate(axis, -(i as i32) * 4),
+                    (0.0, Some(label.to_string()))
                 );
             }
             for n in [-31679, -21, -3, -1, 1, 2, 721, 31681] {
-                assert_eq!(coordinate(axis, n), format!("w:tblp{axis}=\"{}\"", n - 1));
+                assert_eq!(direct_coordinate(axis, n), (f64::from(n - 1) / 20.0, None));
             }
         }
     }
@@ -327,7 +297,16 @@ mod tests {
             p.apply(code, &n.to_le_bytes()).unwrap();
             assert!(p.apply(code, &31681u16.to_le_bytes()).is_err());
         }
-        assert!(p.xml().contains("w:leftFromText=\"12\" w:topFromText=\"34\" w:rightFromText=\"56\" w:bottomFromText=\"78\""));
+        let position = p.direct().0.unwrap();
+        assert_eq!(
+            (
+                position.left_from_text,
+                position.top_from_text,
+                position.right_from_text,
+                position.bottom_from_text
+            ),
+            (0.6, 1.7, 2.8, 3.9)
+        );
         for code in [0x940e, 0x940f] {
             for n in [-32768i16, -31680, 31682, 32767] {
                 assert!(p.apply(code, &n.to_le_bytes()).is_err());
@@ -335,9 +314,11 @@ mod tests {
         }
         let mut p = Position::default();
         p.apply(0x3465, &[1]).unwrap();
-        assert_eq!(p.xml(), "<w:tblOverlap w:val=\"never\"/>");
+        // No-overlap alone does not create a positioned table.
+        assert!(p.direct().0.is_none());
+        assert_eq!(p.direct().1.as_deref(), Some("never"));
         p.apply(0x3465, &[0]).unwrap();
-        assert!(p.xml().is_empty());
+        assert!(p.direct().0.is_none() && p.direct().1.is_none());
         assert!(p.apply(0x3465, &[2]).is_err());
     }
 }

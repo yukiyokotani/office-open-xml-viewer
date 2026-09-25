@@ -3,11 +3,8 @@ use super::{u16_at, u32_at, unsupported};
 use crate::officeart::{raster::Image, record_with_end, Record};
 use std::collections::{BTreeMap, BTreeSet};
 
-#[cfg(feature = "direct-doc")]
 mod direct;
-#[cfg(feature = "direct-doc")]
 pub(in crate::doc) use direct::DirectInlinePicture;
-#[cfg(feature = "direct-doc")]
 pub(crate) use direct::DirectPictureResource;
 
 pub(super) struct Store<'a> {
@@ -15,7 +12,6 @@ pub(super) struct Store<'a> {
     cache: BTreeMap<usize, Option<Picture<'a>>>,
     part_offsets: BTreeSet<usize>,
     /// PICF offsets holding the empty placeholder of a pseudo-inline shape.
-    #[cfg_attr(not(feature = "direct-doc"), allow(dead_code))]
     placeholders: BTreeSet<usize>,
     /// Whether PNG BLIPs holding TIFF data are admitted (direct model only).
     pub raster: crate::officeart::raster::Raster,
@@ -37,28 +33,6 @@ impl<'a> Store<'a> {
             occurrences: 0,
             omitted: false,
         }
-    }
-    pub fn drawing(&mut self, offset: usize) -> Result<String, String> {
-        self.load(offset)?;
-        let Some(picture) = self.cache[&offset].as_ref() else {
-            self.omitted = true;
-            return Ok(String::new());
-        };
-        if self.occurrences >= 1_000_000 {
-            return Err(unsupported("Word picture occurrence budget exceeded"));
-        }
-        self.occurrences += 1;
-        self.part_offsets.insert(offset);
-        let id = self.occurrences;
-        Ok(picture.xml(
-            id,
-            &format!("rImg{offset}"),
-            &format!(
-                r#"<wp:inline><wp:extent cx="{}" cy="{}"/>"#,
-                picture.extent[0], picture.extent[1]
-            ),
-            "</wp:inline>",
-        ))
     }
 
     fn load(&mut self, offset: usize) -> Result<(), String> {
@@ -88,25 +62,6 @@ impl<'a> Store<'a> {
         }
         Ok(())
     }
-    pub fn relationships(&self) -> String {
-        self.part_offsets.iter().filter_map(|offset| self.cache[offset].as_ref().map(|p| format!(r#"<Relationship Id="rImg{offset}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image{offset}.{}"/>"#, p.image.extension))).collect()
-    }
-    pub fn begin_part(&mut self) {
-        self.part_offsets.clear();
-    }
-    pub fn parts(&self) -> Vec<(String, &[u8])> {
-        self.cache
-            .iter()
-            .filter_map(|(offset, picture)| {
-                picture.as_ref().map(|p| {
-                    (
-                        format!("word/media/image{offset}.{}", p.image.extension),
-                        p.image.bytes.as_ref(),
-                    )
-                })
-            })
-            .collect()
-    }
 }
 
 pub(super) struct Picture<'a> {
@@ -115,20 +70,6 @@ pub(super) struct Picture<'a> {
     pub crop: [i64; 4],
     pub flip: [bool; 2],
     pub rotation: i64,
-}
-
-impl Picture<'_> {
-    /// Ordinary DrawingML content, shared by inline and floating DOC pictures.
-    /// All caller-supplied fragments are generated from validated numeric/enumerated values.
-    pub fn xml(&self, id: u32, relationship: &str, opening: &str, closing: &str) -> String {
-        let [cx, cy] = self.extent;
-        let [top, bottom, left, right] = self.crop;
-        let [flip_h, flip_v] = self.flip.map(u8::from);
-        let rotation = self.rotation;
-        format!(
-            r#"<w:drawing xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">{opening}<wp:docPr id="{id}" name="Legacy picture {id}"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="{id}" name="Legacy picture {id}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="{relationship}"/><a:srcRect l="{left}" t="{top}" r="{right}" b="{bottom}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm rot="{rotation}" flipH="{flip_h}" flipV="{flip_v}"><a:off x="0" y="0"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic>{closing}</w:drawing>"#
-        )
-    }
 }
 
 #[cfg(test)]
@@ -386,13 +327,11 @@ mod tests {
     fn raster() -> Vec<u8> {
         record(0xf01e, 0x6e0 << 4, &[vec![0; 17], png()].concat())
     }
-    #[cfg(feature = "direct-doc")]
     fn jpeg_raster() -> Vec<u8> {
         let jpeg = [0xff, 0xd8, 0xff, 0xc0, 0, 11, 8, 0, 3, 0, 2, 1, 1, 0x11, 0];
         record(0xf01d, 0x46a << 4, &[vec![0; 17], jpeg.to_vec()].concat())
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn direct_inline_png_jpeg_metadata_resources_dedup_and_budget() {
         for (image, mime) in [(raster(), "image/png"), (jpeg_raster(), "image/jpeg")] {
@@ -438,7 +377,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn direct_inline_finalization_keeps_only_live_keys_and_rejects_dangling_keys() {
         let mut data = fixture(&[(0x0104, 1)], &[raster()]);
@@ -475,7 +413,6 @@ mod tests {
         assert_eq!(resources[0].key, "legacy-doc/image/0");
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn direct_inline_rejects_unavailable_types_and_admits_before_metadata() {
         let unsupported_image = record(0xf01a, 0, &[]);
@@ -500,7 +437,6 @@ mod tests {
         assert!(store.direct_inline(0, &mut budget).is_err());
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn direct_owned_resource_budget_uses_retained_vector_capacity() {
         let owned_store = || {
@@ -539,7 +475,6 @@ mod tests {
         assert_eq!(resources[0].bytes.capacity(), 128);
         assert!(sufficient < 4096);
     }
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn pseudo_inline_placeholders_project_nothing_but_other_empty_frames_are_omitted() {
         let placeholder = fixture(&[(0x53f, 0x0001_0001)], &[]);
@@ -562,7 +497,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn direct_inline_passes_validated_metafiles_with_docx_media_types() {
         for ((source, blip), mime) in [
@@ -588,13 +522,19 @@ mod tests {
         let data = fixture(&[(0x0104, 1)], &[blip]);
         let mut store = Store::new(&data);
         store.remaining_bytes = source.len();
-        assert!(store.drawing(0).unwrap().contains("<wp:inline>"));
-        let pointer = store.parts()[0].1.as_ptr();
-        assert_eq!(store.parts()[0].1, source);
+        let first = store.direct_inline(0, &mut usize::MAX.clone()).unwrap();
+        // A repeated occurrence reuses the cached picture: no record work and
+        // no second retention of the decoded metafile.
         store.budget = 0;
-        assert!(!store.drawing(0).unwrap().is_empty());
-        assert_eq!(store.parts()[0].1.as_ptr(), pointer);
-        assert!(store.relationships().contains("image0.emf"));
+        let second = store.direct_inline(0, &mut usize::MAX.clone()).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(store.remaining_bytes, 0);
+        let resources = store
+            .finish_direct_resources(&mut usize::MAX.clone())
+            .unwrap();
+        assert_eq!(resources.len(), 1);
+        assert_eq!(resources[0].key, first.unwrap().resource_key);
+        assert_eq!(resources[0].bytes, source);
     }
     #[test]
     fn inline_blips_follow_property_order_not_the_ignored_index_or_flags() {
@@ -647,25 +587,25 @@ mod tests {
     }
 
     #[test]
-    fn cached_images_share_a_part_but_each_occurrence_has_unique_drawing_ids() {
+    fn cached_images_share_one_resource_across_occurrences() {
         let data = fixture(&[(0x0104, 1)], &[raster()]);
         let mut store = Store::new(&data);
-        assert!(store.drawing(0).unwrap().contains("docPr id=\"1\""));
+        let first = store.direct_inline(0, &mut usize::MAX.clone()).unwrap();
         let budget = store.budget;
-        assert!(store.drawing(0).unwrap().contains("docPr id=\"2\""));
-        assert_eq!(store.budget, budget);
-        assert_eq!(store.parts().len(), 1);
-        assert_eq!(store.relationships().matches("<Relationship ").count(), 1);
-        store.begin_part();
-        assert!(store.relationships().is_empty());
-        assert_eq!(store.parts().len(), 1); // The media remains shared.
-        assert!(store.drawing(0).unwrap().contains("docPr id=\"3\""));
-        assert_eq!(store.budget, budget);
-        assert_eq!(store.relationships().matches("<Relationship ").count(), 1);
+        for _ in 0..2 {
+            let again = store.direct_inline(0, &mut usize::MAX.clone()).unwrap();
+            assert_eq!(again, first);
+            assert_eq!(store.budget, budget);
+        }
+        assert_eq!(store.occurrences, 3);
         assert_eq!(store.remaining_bytes, 128 * 1024 * 1024 - png().len());
+        let resources = store
+            .finish_direct_resources(&mut usize::MAX.clone())
+            .unwrap();
+        assert_eq!(resources.len(), 1);
         let mut store = Store::new(&data);
         store.remaining_bytes = 0;
-        assert!(store.drawing(0).is_err());
+        assert!(store.direct_inline(0, &mut usize::MAX.clone()).is_err());
     }
 
     #[test]
@@ -687,8 +627,14 @@ mod tests {
         bse[28..32].copy_from_slice(&u32::MAX.to_le_bytes());
         let data = fixture(&[(0x104, 1)], &[record(0xf007, 0x62, &bse)]);
         let mut store = Store::new(&data);
-        assert!(store.drawing(0).unwrap().is_empty());
+        assert!(store
+            .direct_inline(0, &mut usize::MAX.clone())
+            .unwrap()
+            .is_none());
         assert!(store.omitted);
-        assert!(store.parts().is_empty());
+        assert!(store
+            .finish_direct_resources(&mut usize::MAX.clone())
+            .unwrap()
+            .is_empty());
     }
 }

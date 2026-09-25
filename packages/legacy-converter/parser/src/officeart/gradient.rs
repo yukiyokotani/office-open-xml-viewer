@@ -1,6 +1,8 @@
 //! Neutral OfficeArt gradient facts (MS-ODRAW 2.2.51 and 2.2.61).
 
-use super::{unsupported, ByteSpan};
+use super::unsupported;
+#[cfg(any(test, feature = "direct-ppt"))]
+use super::ByteSpan;
 pub(crate) mod projection;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,6 +28,7 @@ impl<T> Default for Storage<T> {
     }
 }
 pub(crate) type Borrowed<'a> = Storage<&'a [u8]>;
+#[cfg(any(test, feature = "direct-ppt"))]
 pub(crate) type Spanned = Storage<ByteSpan>;
 
 impl<T: Clone> Storage<T> {
@@ -39,6 +42,7 @@ impl<T: Clone> Storage<T> {
         self.specified = true;
         self.invalid_scalar = value != 0;
     }
+    #[cfg(any(test, feature = "direct-ppt"))]
     pub(crate) fn inherit(&self, parent: &Self) -> Self {
         if self.specified {
             self.clone()
@@ -61,6 +65,7 @@ impl<'a> Borrowed<'a> {
             .transpose()
     }
 }
+#[cfg(any(test, feature = "direct-ppt"))]
 impl Spanned {
     pub(crate) fn view<'a>(&self, backing: &'a [u8]) -> Result<Borrowed<'a>, String> {
         Ok(Storage {

@@ -17,10 +17,6 @@ pub(super) struct Ruler<'a> {
     pub indents: [Option<i16>; 5],
 }
 
-pub(super) fn read<'a>(atom: Record<'a>, budget: &mut usize) -> Result<Option<Tabs<'a>>, String> {
-    Ok(read_full(atom, budget)?.tabs)
-}
-
 pub(super) fn read_full<'a>(atom: Record<'a>, budget: &mut usize) -> Result<Ruler<'a>, String> {
     if atom.kind != 4006 || atom.version != 0 || atom.instance != 0 {
         return Err(unsupported("invalid PowerPoint text ruler header"));
@@ -108,8 +104,13 @@ fn read_optional_i16(
 }
 
 impl<'a> Tabs<'a> {
-    /// Semantic tab positions shared by direct-model and XML output. The
-    /// validated record owns order, duplicates and the signed ruler origin.
+    /// Semantic tab positions for the direct model. The validated record owns
+    /// order, duplicates and the signed ruler origin.
+    ///
+    /// ECMA-376 21.1.2.2.13-14. Office roundtrip of the controlled baseline
+    /// maps a local ruler's 1152 units to pos=1828800, and keeps that stop
+    /// fixed when paragraph marL changes. No offset correction, sorting or
+    /// duplicate-position policy is invented.
     pub(super) fn positions(self) -> impl ExactSizeIterator<Item = (i64, &'static str)> + 'a {
         self.entries.chunks_exact(4).map(|entry| {
             let position = master_to_emu(i64::from(i16::from_le_bytes([entry[0], entry[1]])));
@@ -117,37 +118,17 @@ impl<'a> Tabs<'a> {
             (position, alignment)
         })
     }
-
-    pub(super) fn write(
-        self,
-        output: &mut String,
-        xml: &mut usize,
-        work: &mut usize,
-    ) -> Result<(), String> {
-        *work = work
-            .checked_sub(self.entries.len() / 4)
-            .ok_or_else(|| unsupported("PowerPoint ruler tab work budget exceeded"))?;
-        drawing::append(output, xml, "<a:tabLst>")?;
-        for (pos, alignment) in self.positions() {
-            // ECMA-376 21.1.2.2.13-14. Office roundtrip of the controlled
-            // baseline maps a local ruler's 1152 units to pos=1828800, and
-            // keeps that stop fixed when paragraph marL changes. No offset
-            // correction, sorting or duplicate-position policy is invented.
-            drawing::append(
-                output,
-                xml,
-                &format!("<a:tab pos=\"{pos}\" algn=\"{alignment}\"/>"),
-            )?;
-        }
-        drawing::append(output, xml, "</a:tabLst>")
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn read<'a>(atom: Record<'a>, budget: &mut usize) -> Result<Option<Tabs<'a>>, String> {
+        Ok(read_full(atom, budget)?.tabs)
+    }
     #[test]
-    fn positions_expose_binary_tabs_without_xml_or_reordering() {
+    fn absent_empty_signed_and_all_alignment_tabs_keep_binary_order() {
+        assert!(read(atom(&0u32.to_le_bytes()), &mut 100).unwrap().is_none());
         let mut data = [4u32.to_le_bytes().as_slice(), &4u16.to_le_bytes()].concat();
         for (position, alignment) in [(1152i16, 3u16), (-576, 0), (0, 1), (0, 2)] {
             data.extend(position.to_le_bytes());
@@ -159,7 +140,7 @@ mod tests {
             tabs.positions().collect::<Vec<_>>(),
             vec![(1828800, "dec"), (-914400, "l"), (0, "ctr"), (0, "r"),]
         );
-        let empty = read(atom(&[4, 0, 0, 0, 0, 0]), &mut 100).unwrap().unwrap();
+        let empty = read(atom(&[4, 0, 0, 0, 0, 0]), &mut 0).unwrap().unwrap();
         assert_eq!(empty.positions().len(), 0);
     }
 
@@ -178,27 +159,6 @@ mod tests {
             instance: 0,
             payload,
         }
-    }
-    #[test]
-    fn absent_empty_signed_and_all_alignment_values_are_distinct() {
-        assert!(read(atom(&0u32.to_le_bytes()), &mut 100).unwrap().is_none());
-        let mut data = [4u32.to_le_bytes().as_slice(), &4u16.to_le_bytes()].concat();
-        for (position, alignment) in [(-576i16, 0u16), (0, 1), (576, 2), (1152, 3)] {
-            data.extend(position.to_le_bytes());
-            data.extend(alignment.to_le_bytes());
-        }
-        let tabs = read(atom(&data), &mut 100).unwrap().unwrap();
-        let mut result = String::new();
-        tabs.write(&mut result, &mut 1000, &mut 100).unwrap();
-        assert_eq!(result, "<a:tabLst><a:tab pos=\"-914400\" algn=\"l\"/><a:tab pos=\"0\" algn=\"ctr\"/><a:tab pos=\"914400\" algn=\"r\"/><a:tab pos=\"1828800\" algn=\"dec\"/></a:tabLst>");
-        let empty = [4u32.to_le_bytes().as_slice(), &0u16.to_le_bytes()].concat();
-        let mut result = String::new();
-        read(atom(&empty), &mut 0)
-            .unwrap()
-            .unwrap()
-            .write(&mut result, &mut 100, &mut 0)
-            .unwrap();
-        assert_eq!(result, "<a:tabLst></a:tabLst>");
     }
     #[test]
     fn every_presence_mask_consumes_fields_in_order_and_ignores_reserved_bits() {
@@ -304,7 +264,7 @@ mod tests {
         assert!(read_full(default_atom(&complete), &mut 0).is_err());
     }
     #[test]
-    fn maximum_count_and_repeated_emission_are_budgeted() {
+    fn maximum_tab_count_is_budgeted() {
         let count = usize::from(u16::MAX);
         let mut data = [4u32.to_le_bytes().as_slice(), &u16::MAX.to_le_bytes()].concat();
         data.resize(6 + count * 4, 0);
@@ -312,15 +272,7 @@ mod tests {
         let mut read_work = count;
         let tabs = read(atom(&data), &mut read_work).unwrap().unwrap();
         assert_eq!(read_work, 0);
-        let mut work = count;
-        let mut xml = count * 40;
-        let mut output = String::new();
-        tabs.write(&mut output, &mut xml, &mut work).unwrap();
-        assert_eq!(work, 0);
-        assert_eq!(output.matches("<a:tab pos=").count(), count);
-        let length = output.len();
-        assert!(tabs.write(&mut output, &mut xml, &mut work).is_err());
-        assert_eq!(output.len(), length);
+        assert_eq!(tabs.positions().len(), count);
     }
     #[test]
     fn malformed_headers_alignment_and_budgets_fail_closed() {
@@ -348,9 +300,7 @@ mod tests {
             assert!(read(bad, &mut 100).is_err());
         }
         assert!(read(atom(&data), &mut 0).is_err());
-        let tabs = read(atom(&data), &mut 1).unwrap().unwrap();
-        assert!(tabs.write(&mut String::new(), &mut 1000, &mut 0).is_err());
-        assert!(tabs.write(&mut String::new(), &mut 10, &mut 1).is_err());
+        assert!(read(atom(&data), &mut 1).unwrap().is_some());
         for value in [4u16, 255, 256, 65535] {
             let mut invalid = data.clone();
             invalid[8..10].copy_from_slice(&value.to_le_bytes());

@@ -548,29 +548,24 @@ mod tests {
             .background(&input, &input_span, &mut 100)
             .unwrap()
             .unwrap();
-        assert!(paint
-            .paint
-            .background_fill(Some(&[0xabcdef; 8]))
-            .unwrap()
-            .contains("EFCDAB"));
-        assert!(paint
-            .paint
-            .background_fill(Some(&[0x123456; 8]))
-            .unwrap()
-            .contains("563412"));
+        let color = |paint: &paint::Paint, scheme: Option<&Scheme>| match paint
+            .background_model(scheme, None)
+        {
+            Some(pptx_model::Fill::Solid { color }) => color,
+            other => panic!("expected a solid background: {other:?}"),
+        };
+        assert_eq!(color(&paint.paint, Some(&[0xabcdef; 8])), "EFCDAB");
+        assert_eq!(color(&paint.paint, Some(&[0x123456; 8])), "563412");
         assert_eq!(r.background_cache.len(), 2);
         assert!(r.master_background(200, &mut Vec::new(), &mut 0).is_err());
         // Scheme/objects bits do not inherit the background.
         let local = background_slide(1006, 200, 3, 0x123456);
         let local_span = record_span_with_end(&local, 0, &mut 100, "test").unwrap().0;
-        assert!(r
+        let local = r
             .background(&local, &local_span, &mut 100)
             .unwrap()
-            .unwrap()
-            .paint
-            .background_fill(None)
-            .unwrap()
-            .contains("563412"));
+            .unwrap();
+        assert_eq!(color(&local.paint, None), "563412");
     }
 
     #[test]

@@ -241,12 +241,22 @@ mod tests {
         r.insert(middle).unwrap();
         r.insert(leaf).unwrap();
         r.finish(&mut 100).unwrap();
-        let middle = r.paint(2).unwrap().xml_with_scheme(1, None);
-        assert!(!middle.contains("FF0000"));
-        assert!(middle.contains("0000FF"));
-        let leaf = r.paint(3).unwrap().xml_with_scheme(1, None);
-        assert!(leaf.contains("FF0000"));
-        assert!(leaf.contains("0000FF"));
+        let model = |id| {
+            let (fill, stroke) = r
+                .paint(id)
+                .unwrap()
+                .model_with_custom_geometry(None, true, true, None);
+            let fill = match fill {
+                Some(pptx_model::Fill::Solid { color }) => Some(color),
+                _ => None,
+            };
+            (fill, stroke.map(|stroke| stroke.color))
+        };
+        assert_eq!(model(2), (None, Some("0000FF".to_owned())));
+        assert_eq!(
+            model(3),
+            (Some("FF0000".to_owned()), Some("0000FF".to_owned()))
+        );
         assert!(r.paint(4).is_err());
     }
     #[test]

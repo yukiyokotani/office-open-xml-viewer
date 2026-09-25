@@ -1,5 +1,5 @@
-//! Direct model assembly from the same resolved DOC formatting cascade used by
-//! the legacy WordprocessingML adapter. Numbering remains deferred to its owner.
+//! Direct model assembly from the resolved DOC formatting cascade. Numbering
+//! remains deferred to its owner.
 
 use super::{numbering, Formatting, Properties, TableFormattingKey};
 use docx_model::AnchorHostMetrics;
@@ -143,6 +143,28 @@ impl Formatting<'_> {
             run.revision = Some(revision);
         }
         Ok(Some(run))
+    }
+
+    /// A visible phonetic-guide run and its resolved default language, the
+    /// language a DOCX `w:rt` run states in `w:lang/@w:val` (ECMA-376
+    /// 17.3.2.20) and the only place the DOCX model carries that axis.
+    pub(in crate::doc) fn direct_ruby_guide_run(
+        &mut self,
+        paragraph_style: usize,
+        table_style: Option<TableFormattingKey>,
+        fc: usize,
+        prm: u16,
+        prcs: &[&[u8]],
+    ) -> Result<Option<(TextRun, Option<&'static str>)>, String> {
+        let Some(run) =
+            self.direct_text_run(paragraph_style, table_style, fc, prm, prcs, String::new())?
+        else {
+            return Ok(None);
+        };
+        let languages = self
+            .run_properties_with_table(paragraph_style, table_style, fc, prm, prcs)?
+            .resolved_languages()?;
+        Ok(Some((run, languages.default)))
     }
 
     /// MS-DOC 2.6.1 sprmCFRMarkIns with sprmCIbstRMark (index into

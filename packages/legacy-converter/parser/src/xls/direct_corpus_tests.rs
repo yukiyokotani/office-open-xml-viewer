@@ -142,7 +142,7 @@ fn native_session_matches_immutable_archive_models() {
             panic!("corpus index {document} direct admission error: {error}")
         });
         if direct.requires_measurement_decision() {
-            direct.configure_mdw(None).unwrap_or_else(|error| {
+            direct.configure_host_layout(None).unwrap_or_else(|error| {
                 panic!("corpus index {document} measurement decision error: {error}")
             });
         }

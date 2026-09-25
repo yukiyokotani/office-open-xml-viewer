@@ -2,6 +2,7 @@
 use std::ops::Range;
 
 pub(crate) mod geometry;
+#[cfg(any(feature = "direct-doc", feature = "direct-ppt"))]
 pub(crate) mod gradient;
 mod metafile;
 pub(crate) mod paint;
@@ -57,6 +58,7 @@ impl ByteSpan {
 
     /// Return a span addressed relative to this span, without permitting the
     /// requested range to escape its parent.
+    #[cfg(any(test, feature = "direct-ppt"))]
     pub(crate) fn checked_subrange(
         &self,
         relative: Range<usize>,

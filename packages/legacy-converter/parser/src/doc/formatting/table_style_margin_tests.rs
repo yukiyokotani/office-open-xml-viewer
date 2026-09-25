@@ -22,13 +22,11 @@ fn empty<'a>() -> Formatting<'a> {
         data: &[],
         budget: Default::default(),
         numbering: Default::default(),
-        numbering_output: Default::default(),
         unsupported_character_properties: false,
         unsupported_paragraph_properties: false,
         unsupported_piece_properties: false,
         missing_tables: true,
         unsupported_table_properties: false,
-        #[cfg(feature = "direct-doc")]
         revision_authors: Some(&[]),
     }
 }

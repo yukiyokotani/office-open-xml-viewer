@@ -1,6 +1,6 @@
-//! OfficeArt preset geometry and solid paint, without renderer extensions.
+//! OfficeArt paint projected into presentation-model fills and strokes,
+//! without renderer extensions.
 use super::scheme;
-#[cfg(any(test, feature = "direct-ppt"))]
 use pptx_model::{ArrowEnd, Fill, Stroke};
 mod gradient;
 
@@ -11,7 +11,6 @@ impl Paint {
     /// is the pattern, fillColor its foreground and fillBackColor its
     /// background (2.3.7.2 table). Returns the BLIP, both colours and their
     /// opacities, under the same placement vetoes as a picture fill.
-    #[cfg(any(test, feature = "direct-ppt"))]
     pub(super) fn pattern_image(&self) -> Option<(u32, u32, u32, u32, u32)> {
         (self.fill_type == Some(1)
             && self.fill_blip.unwrap_or(0) != 0
@@ -41,7 +40,6 @@ impl Paint {
     /// export paints behind transparent pixels. Only that evidenced case is
     /// projected: `Ok(None)` for an unfilled frame, `Err` for a filled frame
     /// whose fill type or colour source has no evidence.
-    #[cfg(any(test, feature = "direct-ppt"))]
     pub(super) fn picture_backing(&self) -> Result<Option<(u32, u32)>, String> {
         if self.filled != Some(true) || !self.fill_ok.unwrap_or(true) {
             return Ok(None);
@@ -57,35 +55,6 @@ impl Paint {
         }
     }
 
-    /// Background paint has no geometry or line, and must not acquire a fake
-    /// preset merely to extract its fill (PresentationML CT_BackgroundProperties).
-    pub fn background_fill(&self, scheme: Option<&scheme::Scheme>) -> Option<String> {
-        if !self.filled.unwrap_or(true) || !self.fill_ok.unwrap_or(true) {
-            return Some("<a:noFill/>".into());
-        }
-        if self.fill_rect.unwrap_or(false) || self.fill_type.unwrap_or(0) != 0 {
-            return None;
-        }
-        solid(
-            self.fill.unwrap_or(0xffffff),
-            self.fill_alpha.unwrap_or(65536),
-            scheme,
-        )
-    }
-    #[cfg(test)]
-    pub(super) fn model(
-        &self,
-        kind: u16,
-        scheme: Option<&scheme::Scheme>,
-        image_fill: Option<Fill>,
-    ) -> (Option<Fill>, Option<Stroke>) {
-        if self.geometry(kind).is_none() {
-            return (Some(Fill::None), None);
-        }
-        self.model_with_custom_geometry(scheme, !matches!(kind, 20 | 32), true, image_fill)
-    }
-
-    #[cfg(any(test, feature = "direct-ppt"))]
     pub(super) fn model_with_custom_geometry(
         &self,
         scheme: Option<&scheme::Scheme>,
@@ -108,7 +77,6 @@ impl Paint {
         (Some(fill.unwrap_or(Fill::None)), stroke)
     }
 
-    #[cfg(any(test, feature = "direct-ppt"))]
     pub(super) fn background_model(
         &self,
         scheme: Option<&scheme::Scheme>,
@@ -134,7 +102,6 @@ impl Paint {
             .flatten()
     }
 
-    #[cfg(any(test, feature = "direct-ppt"))]
     fn model_stroke(&self, scheme: Option<&scheme::Scheme>) -> Option<Stroke> {
         let color = model_color(
             self.line.unwrap_or(0),
@@ -166,88 +133,8 @@ impl Paint {
             cmpd: None,
         })
     }
-    #[cfg(test)]
-    fn xml(&self, kind: u16) -> String {
-        self.xml_with_scheme(kind, None)
-    }
-    pub fn xml_with_scheme(&self, kind: u16, scheme: Option<&scheme::Scheme>) -> String {
-        let no_paint = "<a:noFill/><a:ln><a:noFill/></a:ln>";
-        if self.geometry(kind).is_none() {
-            return no_paint.into();
-        }
-        self.xml_with_custom_geometry(scheme, !matches!(kind, 20 | 32), true)
-    }
-    /// The caller has reconstructed explicit custom paths. Geometry and path
-    /// paint vetoes stay separate from style inheritance and property defaults.
-    pub fn xml_with_custom_geometry(
-        &self,
-        scheme: Option<&scheme::Scheme>,
-        allow_fill: bool,
-        allow_line: bool,
-    ) -> String {
-        self.xml_with_custom_geometry_and_fill(scheme, allow_fill, allow_line, None)
-    }
-
-    pub fn xml_with_custom_geometry_and_fill(
-        &self,
-        scheme: Option<&scheme::Scheme>,
-        allow_fill: bool,
-        allow_line: bool,
-        image_fill: Option<&str>,
-    ) -> String {
-        // Direct and explicitly linked master paint are reconstructed. Drawing
-        // defaults and unlinked masters remain absent, with a conversion warning.
-        // Within an explicit layer, use the normative MS-ODRAW property defaults.
-        let fill = self
-            .solid_fill_values(allow_fill)
-            .and_then(|(color, alpha)| solid(color, alpha, scheme));
-        let line = self
-            .solid_line_values(allow_line)
-            .and_then(|(color, alpha)| solid(color, alpha, scheme));
-        let mut xml = if allow_fill {
-            image_fill.map(str::to_owned).or(fill)
-        } else {
-            fill
-        }
-        .unwrap_or_else(|| "<a:noFill/>".into());
-        if let Some(line) = line {
-            let dash = self
-                .dash
-                .and_then(crate::officeart::stroke::preset_dash)
-                .map(|name| format!("<a:prstDash val=\"{name}\"/>"))
-                .unwrap_or_default();
-            xml.push_str(&format!(
-                "<a:ln w=\"{}\" cap=\"{}\">{line}{dash}{}</a:ln>",
-                self.width.unwrap_or(9525),
-                self.details.cap(),
-                self.details.children_xml()
-            ));
-        } else {
-            xml.push_str("<a:ln><a:noFill/></a:ln>");
-        }
-        xml
-    }
 }
 
-fn solid(color: u32, opacity: u32, scheme: Option<&scheme::Scheme>) -> Option<String> {
-    let color = scheme::drawing(color, scheme)?;
-    let mut xml = format!(
-        "<a:solidFill><a:srgbClr val=\"{:02X}{:02X}{:02X}\">",
-        color & 255,
-        (color >> 8) & 255,
-        (color >> 16) & 255
-    );
-    if opacity != 65536 {
-        xml.push_str(&format!(
-            "<a:alpha val=\"{}\"/>",
-            (u64::from(opacity) * 100000 + 32768) / 65536
-        ));
-    }
-    xml.push_str("</a:srgbClr></a:solidFill>");
-    Some(xml)
-}
-
-#[cfg(any(test, feature = "direct-ppt"))]
 pub(super) fn model_solid(
     color: u32,
     opacity: u32,
@@ -256,7 +143,6 @@ pub(super) fn model_solid(
     model_color(color, opacity, scheme).map(|color| Fill::Solid { color })
 }
 
-#[cfg(any(test, feature = "direct-ppt"))]
 pub(super) fn model_color(
     color: u32,
     opacity: u32,
@@ -279,8 +165,22 @@ pub(super) fn model_color(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The direct model's paint for a filled preset (allow_fill) or a line
+    /// preset (no fill area); lines are always allowed.
+    fn model(p: &Paint, allow_fill: bool) -> (Option<Fill>, Option<Stroke>) {
+        p.model_with_custom_geometry(None, allow_fill, true, None)
+    }
+
+    fn solid(fill: &Option<Fill>) -> Option<&str> {
+        match fill {
+            Some(Fill::Solid { color }) => Some(color),
+            _ => None,
+        }
+    }
+
     #[test]
-    fn direct_and_xml_outputs_share_explicit_paint_vetoes() {
+    fn explicit_paint_vetoes_suppress_solid_fill_and_line() {
         for allow in [false, true] {
             for enabled in [None, Some(false), Some(true)] {
                 for ok in [None, Some(false), Some(true)] {
@@ -296,13 +196,16 @@ mod tests {
                             line_type: kind,
                             ..Paint::default()
                         };
+                        let painted = allow
+                            && enabled != Some(false)
+                            && ok != Some(false)
+                            && kind.unwrap_or(0) == 0;
                         let (fill, line) = p.model_with_custom_geometry(None, allow, allow, None);
-                        let xml = p.xml_with_custom_geometry(None, allow, allow);
+                        assert_eq!(solid(&fill), painted.then_some("112233"));
                         assert_eq!(
-                            matches!(fill, Some(Fill::Solid { .. })),
-                            xml.contains("112233")
+                            line.map(|line| line.color),
+                            painted.then(|| "445566".into())
                         );
-                        assert_eq!(line.is_some(), xml.contains("445566"));
                     }
                 }
             }
@@ -327,8 +230,8 @@ mod tests {
         ] {
             p.property(id, value).unwrap();
         }
-        let (fill, stroke) = p.model(1, None, None);
-        assert!(matches!(fill, Some(Fill::Solid { ref color }) if color == "11223380"));
+        let (fill, stroke) = model(&p, true);
+        assert_eq!(solid(&fill), Some("11223380"));
         let stroke = stroke.unwrap();
         assert_eq!(stroke.color, "44556640");
         assert_eq!(stroke.width, 25400);
@@ -347,13 +250,13 @@ mod tests {
         p.property(0x1c0, 0x665544).unwrap();
         p.property(0x1bf, 0x00100000).unwrap();
         p.property(0x1c4, 1).unwrap();
-        let (fill, stroke) = p.model(1, None, None);
+        let (fill, stroke) = model(&p, true);
         assert!(matches!(fill, Some(Fill::None)));
         assert!(stroke.is_none());
 
         let mut unresolved = Paint::default();
         unresolved.property(0x181, 0x08000001).unwrap();
-        let (fill, _) = unresolved.model(1, None, None);
+        let (fill, _) = model(&unresolved, true);
         assert!(matches!(fill, Some(Fill::None)));
         assert!(unresolved.background_model(None, None).is_none());
     }
@@ -385,6 +288,7 @@ mod tests {
         );
         assert!(matches!(fill, Some(Fill::None)));
     }
+
     #[test]
     fn all_dash_presets_retain_the_line_and_inherit_explicit_solid() {
         for (value, name) in [
@@ -406,40 +310,26 @@ mod tests {
             let mut parent = Paint::default();
             parent.property(0x1c0, 0xff0000).unwrap();
             parent.property(0x1ce, value as u32).unwrap();
-            let inherited = Paint::default().inherit(&parent).xml(20);
-            assert!(inherited.contains("<a:solidFill><a:srgbClr val=\"0000FF\""));
-            assert!(inherited.contains(&format!("<a:prstDash val=\"{name}\"/>")));
-            assert!(inherited.find("a:prstDash").unwrap() < inherited.find("a:round").unwrap());
+            let inherited = model(&Paint::default().inherit(&parent), false).1.unwrap();
+            assert_eq!(inherited.color, "0000FF");
+            // A solid dash is the model's default line, not a named dash.
+            assert_eq!(
+                inherited.dash_style.as_deref(),
+                (value != 0).then_some(*name)
+            );
+            assert_eq!(inherited.line_join.as_deref(), Some("round"));
             let mut child = Paint::default();
             child.property(0x1ce, 0).unwrap();
-            assert!(child
-                .inherit(&parent)
-                .xml(20)
-                .contains("<a:prstDash val=\"solid\"/>"));
+            let explicit = model(&child.inherit(&parent), false).1.unwrap();
+            assert_eq!(explicit.dash_style, None);
             child.property(0x1ff, 0x00080000).unwrap();
-            assert!(!child.inherit(&parent).xml(1).contains("a:prstDash"));
+            assert!(model(&child.inherit(&parent), true).1.is_none());
         }
         assert!(Paint::default().property(0x1ce, 11).is_err());
     }
 
     #[test]
-    fn straight_connector_preserves_its_preset_without_inventing_a_fill() {
-        let mut p = Paint::default();
-        p.property(0x181, 255).unwrap();
-        p.property(0x1c0, 0xff0000).unwrap();
-        p.property(0x1d1, 5).unwrap();
-        assert_eq!(p.geometry(32), Some("straightConnector1"));
-        let xml = p.xml(32);
-        assert!(xml.starts_with("<a:noFill/><a:ln"));
-        assert!(xml.contains("val=\"0000FF\""));
-        assert!(xml.contains("type=\"arrow\""));
-        p.property(0x147, 10800).unwrap();
-        assert_eq!(p.geometry(32), None);
-        assert_eq!(p.xml(32), "<a:noFill/><a:ln><a:noFill/></a:ln>");
-    }
-
-    #[test]
-    fn line_decorations_caps_and_joins_reach_drawingml() {
+    fn line_decorations_caps_and_joins_reach_the_model() {
         let mut p = Paint::default();
         for (id, value) in [
             (0x1c0, 0),
@@ -454,13 +344,21 @@ mod tests {
         ] {
             p.property(id, value).unwrap();
         }
-        let xml = p.xml(20);
-        assert!(xml.contains("cap=\"rnd\""));
-        assert!(xml.contains("<a:bevel/>"));
-        assert!(xml.contains("<a:headEnd type=\"triangle\" w=\"sm\" len=\"lg\"/>"));
-        assert!(xml.contains("<a:tailEnd type=\"arrow\" w=\"lg\" len=\"sm\"/>"));
+        let stroke = model(&p, false).1.unwrap();
+        assert_eq!(stroke.line_cap.as_deref(), Some("round"));
+        assert_eq!(stroke.line_join.as_deref(), Some("bevel"));
+        let head = stroke.head_end.unwrap();
+        assert_eq!(
+            (head.kind.as_str(), head.w.as_str(), head.len.as_str()),
+            ("triangle", "sm", "lg")
+        );
+        let tail = stroke.tail_end.unwrap();
+        assert_eq!(
+            (tail.kind.as_str(), tail.w.as_str(), tail.len.as_str()),
+            ("arrow", "lg", "sm")
+        );
         p.property(0x1ff, 0x00080000).unwrap();
-        assert_eq!(p.xml(1), "<a:noFill/><a:ln><a:noFill/></a:ln>");
+        assert!(model(&p, true).1.is_none());
     }
 
     #[test]
@@ -472,16 +370,21 @@ mod tests {
         let mut child = Paint::default();
         child.property(0x1d0, 0).unwrap();
         child.property(0x1d4, 0).unwrap();
-        let xml = child.inherit(&parent).xml(20);
-        assert!(!xml.contains("type=\"diamond\""));
-        assert!(xml.contains("<a:tailEnd type=\"oval\" w=\"sm\" len=\"med\"/>"));
-        assert!(xml.contains("cap=\"sq\""));
-        assert!(xml.contains("<a:miter lim=\"800000\"/>"));
+        let stroke = model(&child.inherit(&parent), false).1.unwrap();
+        assert!(stroke.head_end.is_none());
+        let tail = stroke.tail_end.unwrap();
+        assert_eq!(
+            (tail.kind.as_str(), tail.w.as_str(), tail.len.as_str()),
+            ("oval", "sm", "med")
+        );
+        assert_eq!(stroke.line_cap.as_deref(), Some("square"));
+        assert_eq!(stroke.line_join.as_deref(), Some("miter"));
+        assert_eq!(stroke.miter_limit, Some(8.0));
         child.property(0x1cc, 0x00018000).unwrap();
-        assert!(child
-            .inherit(&parent)
-            .xml(20)
-            .contains("<a:miter lim=\"150000\"/>"));
+        assert_eq!(
+            model(&child.inherit(&parent), false).1.unwrap().miter_limit,
+            Some(1.5)
+        );
     }
 
     #[test]
@@ -490,8 +393,9 @@ mod tests {
         p.property(0x1d1, 1).unwrap();
         // MS-ODRAW 2.3.8.38: fArrowheadsOK controls editing, not rendering.
         p.property(0x1ff, 0x00100000).unwrap();
-        assert!(p.xml(20).contains("<a:tailEnd type=\"triangle\""));
-        assert!(p.xml(20).contains("<a:round/>"));
+        let stroke = model(&p, false).1.unwrap();
+        assert_eq!(stroke.tail_end.unwrap().kind, "triangle");
+        assert_eq!(stroke.line_join.as_deref(), Some("round"));
     }
 
     #[test]
@@ -507,24 +411,20 @@ mod tests {
         }
         let mut local = Paint::default();
         local.property(0x1bf, 0).unwrap(); // Unused false is not an override.
-        let inherited = local.inherit(&master);
-        let xml = inherited.xml(1);
-        assert!(xml.contains("FF0000"));
-        assert!(xml.contains("0000FF"));
-        assert!(xml.contains("50000"));
-        assert!(xml.contains("w=\"25400\""));
+        let (fill, stroke) = model(&local.inherit(&master), true);
+        assert_eq!(solid(&fill), Some("FF000080"));
+        let stroke = stroke.unwrap();
+        assert_eq!((stroke.color.as_str(), stroke.width), ("0000FF", 25400));
         local.property(0x1bf, 0x00100000).unwrap();
         local.property(0x1ff, 0x00080000).unwrap();
-        assert_eq!(
-            local.inherit(&master).xml(1),
-            "<a:noFill/><a:ln><a:noFill/></a:ln>"
-        );
+        let (fill, stroke) = model(&local.inherit(&master), true);
+        assert!(matches!(fill, Some(Fill::None)));
+        assert!(stroke.is_none());
         local.property(0x1bf, 0x00100010).unwrap();
         local.property(0x181, 0xff00).unwrap();
-        let xml = local.inherit(&master).xml(1);
-        assert!(xml.contains("00FF00"));
-        assert!(xml.contains("50000"));
-        assert!(!xml.contains("0000FF"));
+        let (fill, stroke) = model(&local.inherit(&master), true);
+        assert_eq!(solid(&fill), Some("00FF0080"));
+        assert!(stroke.is_none());
     }
 
     #[test]
@@ -535,18 +435,21 @@ mod tests {
         master.property(0x1ce, 1).unwrap(); // Supported dashed outline, independent of fill.
         let mut local = Paint::default();
         local.property(0x181, 0xff00).unwrap();
-        let xml = local.inherit(&master).xml(1);
-        assert!(xml.starts_with("<a:noFill/><a:ln"));
-        assert!(xml.contains("<a:prstDash val=\"sysDash\"/>"));
-        assert!(!xml.contains("00FF00"));
+        let (fill, stroke) = model(&local.inherit(&master), true);
+        assert!(matches!(fill, Some(Fill::None)));
+        assert_eq!(stroke.unwrap().dash_style.as_deref(), Some("sysDash"));
         local.property(0x180, 0).unwrap();
-        assert!(local.inherit(&master).xml(1).contains("00FF00"));
+        assert_eq!(
+            solid(&model(&local.inherit(&master), true).0),
+            Some("00FF00")
+        );
         master.property(0x1bf, 0x00020002).unwrap();
-        assert!(!local.inherit(&master).xml(1).contains("00FF00"));
+        assert_eq!(solid(&model(&local.inherit(&master), true).0), None);
         local.property(0x1bf, 0x00020000).unwrap(); // Explicitly clear inherited fill rectangle.
-        assert!(local.inherit(&master).xml(1).contains("00FF00"));
-        master.custom_geometry = true;
-        assert!(local.inherit(&master).geometry(1).is_none());
+        assert_eq!(
+            solid(&model(&local.inherit(&master), true).0),
+            Some("00FF00")
+        );
     }
 
     #[test]
@@ -588,32 +491,34 @@ mod tests {
         let inherited = Paint::default().inherit(&master);
         let mut scheme = [0; 8];
         scheme[4] = 0x563412;
-        assert!(inherited
-            .xml_with_scheme(1, Some(&scheme))
-            .contains("123456"));
+        let fill = |scheme: &scheme::Scheme| {
+            inherited
+                .model_with_custom_geometry(Some(scheme), true, true, None)
+                .0
+        };
+        assert_eq!(solid(&fill(&scheme)), Some("123456"));
         scheme[4] = 0xabcdef;
-        assert!(inherited
-            .xml_with_scheme(1, Some(&scheme))
-            .contains("EFCDAB"));
+        assert_eq!(solid(&fill(&scheme)), Some("EFCDAB"));
     }
+
     #[test]
-    fn background_fill_has_no_geometry_or_line_and_respects_use_bits() {
+    fn background_fill_ignores_line_and_geometry_and_respects_use_bits() {
         let mut p = Paint::default();
         p.property(0x181, 0x112233).unwrap();
         p.property(0x182, 32768).unwrap();
         p.property(0x1c0, 0xff).unwrap();
         p.custom_geometry = true;
-        let xml = p.background_fill(None).unwrap();
-        assert!(xml.contains("332211"));
-        assert!(xml.contains("50000"));
-        assert!(!xml.contains("a:ln"));
+        assert!(matches!(
+            p.background_model(None, None),
+            Some(Fill::Solid { ref color }) if color == "33221180"
+        ));
         p.property(0x180, 3).unwrap();
         p.property(0x4186, 9).unwrap();
         assert_eq!(p.background_image(), Some((9, 32768)));
-        assert!(p.background_fill(None).is_none());
+        assert!(p.background_model(None, None).is_none());
         p.property(0x1bf, 0x00100000).unwrap();
         assert!(p.background_image().is_none());
-        assert_eq!(p.background_fill(None).unwrap(), "<a:noFill/>");
+        assert!(matches!(p.background_model(None, None), Some(Fill::None)));
     }
     #[test]
     fn foreground_picture_fill_preserves_use_bits_opacity_and_master_values() {
@@ -726,24 +631,7 @@ mod tests {
             );
         }
     }
-    #[test]
-    fn maps_only_supported_unmodified_presets() {
-        let mut p = Paint::default();
-        for (kind, name) in [
-            (1, "rect"),
-            (3, "ellipse"),
-            (4, "diamond"),
-            (5, "triangle"),
-            (6, "rtTriangle"),
-            (20, "line"),
-            (202, "rect"),
-        ] {
-            assert_eq!(p.geometry(kind), Some(name));
-        }
-        assert_eq!(p.geometry(0), None);
-        p.property(0x147, 100).unwrap();
-        assert_eq!(p.geometry(5), None);
-    }
+
     #[test]
     fn literal_colors_width_and_fixed_point_opacity_survive() {
         let mut p = Paint::default();
@@ -755,11 +643,13 @@ mod tests {
         ] {
             p.property(id, value).unwrap();
         }
-        let xml = p.xml(3);
-        assert!(xml.contains("val=\"123456\"><a:alpha val=\"50000\"/>"));
-        assert!(xml.contains("<a:ln w=\"25400\" cap=\"flat\">"));
-        assert!(xml.contains("val=\"ABCDEF\""));
+        let (fill, stroke) = model(&p, true);
+        assert_eq!(solid(&fill), Some("12345680"));
+        let stroke = stroke.unwrap();
+        assert_eq!((stroke.color.as_str(), stroke.width), ("ABCDEF", 25400));
+        assert_eq!(stroke.line_cap.as_deref(), Some("butt"));
     }
+
     #[test]
     fn boolean_use_bits_control_suppression_not_the_unused_values() {
         let mut p = Paint::default();
@@ -767,22 +657,26 @@ mod tests {
         p.property(0x1c0, 0).unwrap();
         p.property(0x1bf, 0).unwrap();
         p.property(0x1ff, 0).unwrap();
-        assert!(p.xml(1).contains("FF0000"));
+        assert_eq!(solid(&model(&p, true).0), Some("FF0000"));
         p.property(0x1bf, 0x00100000).unwrap();
         p.property(0x1ff, 0x00080000).unwrap();
-        assert_eq!(p.xml(1), "<a:noFill/><a:ln><a:noFill/></a:ln>");
+        let (fill, stroke) = model(&p, true);
+        assert!(matches!(fill, Some(Fill::None)));
+        assert!(stroke.is_none());
     }
+
     #[test]
-    fn does_not_invent_scheme_colors_gradient_fills_or_unknown_geometry() {
+    fn does_not_invent_scheme_colors_gradient_fills_or_line_fills() {
         let mut p = Paint::default();
         p.property(0x181, 0x08000005).unwrap();
-        assert!(!p.xml(1).contains("srgbClr"));
+        assert_eq!(solid(&model(&p, true).0), None);
         p.property(0x181, 255).unwrap();
         p.property(0x180, 4).unwrap();
-        assert!(!p.xml(1).contains("FF0000"));
+        assert_eq!(solid(&model(&p, true).0), None);
         p.property(0x180, 0).unwrap();
-        assert!(!p.xml(0).contains("FF0000"));
-        assert!(!p.xml(20).contains("FF0000"));
+        assert_eq!(solid(&model(&p, true).0), Some("FF0000"));
+        // A shape without a fill area (lines, connectors) gets no fill.
+        assert!(matches!(model(&p, false).0, Some(Fill::None)));
     }
     #[test]
     fn validates_opacity_and_line_width_without_clamping() {
@@ -800,10 +694,12 @@ mod tests {
         p.property(0x17f, 0x00090000).unwrap();
         p.property(0x1bf, 0x00100010).unwrap();
         p.property(0x1ff, 0x00080008).unwrap();
-        assert_eq!(p.xml(1), "<a:noFill/><a:ln><a:noFill/></a:ln>");
+        let (fill, stroke) = model(&p, true);
+        assert!(matches!(fill, Some(Fill::None)));
+        assert!(stroke.is_none());
         p.property(0x17f, 0x00090009).unwrap();
-        assert!(p.xml(1).contains("FF0000"));
+        assert_eq!(solid(&model(&p, true).0), Some("FF0000"));
         p.property(0x1bf, 0x00020002).unwrap();
-        assert!(!p.xml(1).contains("FF0000"));
+        assert_eq!(solid(&model(&p, true).0), None);
     }
 }

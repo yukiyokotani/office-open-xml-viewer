@@ -121,6 +121,7 @@ fn is_line(kind: u16) -> bool {
 /// - accentBorderCallout2: adj2..adj6 = a4..a0 / 21600 in reverse order,
 ///   ten shapes of varied extents; adj1 (the sixth value) was never authored
 ///   and keeps the preset default.
+///
 /// A value outside these rules has no evidence and is rejected.
 fn adjustments(kind: u16, legacy: &[Option<i32>; 10]) -> Result<Vec<Option<f64>>, String> {
     let sources: &[Option<usize>] = match kind {

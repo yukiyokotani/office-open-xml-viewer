@@ -90,7 +90,7 @@ impl Section {
         })
     }
 
-    fn direct_columns(&self) -> Result<Option<ColumnsSpec>, String> {
+    pub(super) fn direct_columns(&self) -> Result<Option<ColumnsSpec>, String> {
         let count = usize::from(self.properties.columns);
         if count < 2 {
             return Ok(None);
@@ -190,13 +190,13 @@ impl Properties {
         }
     }
 
-    fn grid_line_pitch(&self) -> Option<f64> {
+    pub(super) fn grid_line_pitch(&self) -> Option<f64> {
         (self.grid != 0)
             .then(|| self.line_pitch.map(twips_to_pt))
             .flatten()
     }
 
-    fn page_num_type(&self) -> Option<PageNumType> {
+    pub(super) fn page_num_type(&self) -> Option<PageNumType> {
         (self.page_restart || self.page_format != "decimal").then(|| PageNumType {
             start: self.page_restart.then_some(i64::from(self.page_start)),
             fmt: Some(self.page_format.to_string()),
@@ -211,12 +211,10 @@ fn twips_to_pt(value: impl Into<f64>) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::Value;
 
     fn section(properties: Properties, default_column_spacing: Option<u16>) -> Section {
         Section {
             end: 1,
-            incomplete_margins: false,
             properties,
             header_footer_references: [None; 6],
             default_column_spacing,
@@ -454,19 +452,8 @@ mod tests {
         assert_eq!(placement.doc_grid_char_space, None);
     }
 
-    fn xml_projection(properties: &Properties) -> Value {
-        let section = properties.xml().unwrap();
-        let document = format!(
-            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p/>{section}</w:body></w:document>"#
-        );
-        let parts = vec![("word/document.xml".to_string(), document)];
-        let package = crate::ooxml::write_package(&parts, 1_000_000).unwrap();
-        let json = docx_parser::parse_docx_native(&package).unwrap();
-        serde_json::from_str::<Value>(&json).unwrap()["section"].clone()
-    }
-
     #[test]
-    fn direct_final_matches_existing_xml_projection_for_representable_facts() {
+    fn final_section_projects_every_representable_fact() {
         let mut properties = complete_properties();
         properties.kind = 4;
         properties.gutter = 240;
@@ -484,29 +471,33 @@ mod tests {
         properties.page_start = 7;
         properties.page_format = "lowerRoman";
 
-        let xml = xml_projection(&properties);
         let direct = serde_json::to_value(
             section(properties, Some(720))
                 .project_final(0, false)
                 .unwrap(),
         )
         .unwrap();
-        assert_eq!(direct, xml);
-    }
-
-    #[test]
-    fn direct_grid_off_with_dormant_pitch_matches_existing_xml_projection() {
-        let mut properties = complete_properties();
-        properties.line_pitch = Some(360);
-        properties.char_space = 4096;
-        let xml = xml_projection(&properties);
-        let direct = serde_json::to_value(
-            section(properties, Some(720))
-                .project_final(0, false)
-                .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(direct, xml);
+        let geometry = serde_json::json!({
+            "footerDistance": 35.4, "headerDistance": 36.0, "marginBottom": 108.0,
+            "marginLeft": 144.0, "marginRight": 72.0, "marginTop": -72.0,
+            "pageHeight": 792.0, "pageWidth": 612.0
+        });
+        let mut expected = serde_json::json!({
+            "__sectionPlacement": {
+                "docGridCharSpace": -4096.0, "docGridLinePitch": 18.0, "docGridType": "lines",
+                "gutterPt": 12.0, "pageGeometry": geometry, "rtlGutter": false,
+                "sectionBidi": true, "sectionId": "section:0", "vAlign": "both"
+            },
+            "columns": {"cols": [], "count": 2, "equalWidth": true, "sep": true, "spacePt": 0.0},
+            "docGridCharSpace": -4096.0, "docGridLinePitch": 18.0, "docGridType": "lines",
+            "evenAndOddHeaders": false,
+            "pageNumType": {"fmt": "lowerRoman", "start": 7},
+            "sectionStart": "oddPage", "textDirection": "tbRl", "titlePage": true, "vAlign": "both"
+        });
+        for (key, value) in geometry.as_object().unwrap() {
+            expected[key] = value.clone();
+        }
+        assert_eq!(direct, expected);
     }
 
     fn read_fixture(lid: u16, properties: &[u8]) -> (Vec<u8>, Vec<u8>) {

@@ -99,9 +99,8 @@ pub(super) fn build(
     // Word stores TIFF data in PNG BLIPs and reads it back as TIFF: its own
     // DOCX of a corpus document writes that BLIP as media/*.tiff. It also
     // displays GIF data stored in a PNG BLIP: Word's PDF of such a DOC shows
-    // the GIF and Word's DOCX of it writes the BLIP as a .gif part. The package
-    // writer keeps rejecting such BLIPs. Painting TIFF needs the caller's
-    // optional TIFF decoder.
+    // the GIF and Word's DOCX of it writes the BLIP as a .gif part. Painting
+    // TIFF needs the caller's optional TIFF decoder.
     facts.pictures.raster = crate::officeart::raster::Raster::TiffAndGifAware;
     facts.floating.raster = crate::officeart::raster::Raster::TiffAndGifAware;
     let mut body = Vec::new();
@@ -545,11 +544,40 @@ impl ModelBudget {
     }
 }
 
+/// Project one story without fields, notes or drawings exactly as the main
+/// document projects a single-section body, for unit tests of the shared
+/// piece-table and formatting machinery.
+#[cfg(test)]
+pub(in crate::doc) fn project_story_for_test(
+    story: &super::Story<'_>,
+    formatting: &mut super::formatting::Formatting<'_>,
+) -> Result<Vec<BodyElement>, String> {
+    formatting.configure_table_styles(0x00c1, true);
+    let paragraphs = super::tokenize_with_fields(&story.text, &mut Fields::default(), 0, true);
+    let mut numbering = super::numbering::direct::Store::default();
+    numbering.begin_story()?;
+    let mut pictures = super::pictures::Store::new(&[]);
+    let mut budget = ModelBudget::new(64 * 1024 * 1024);
+    let mut body = Vec::new();
+    story::project(
+        story,
+        paragraphs,
+        formatting,
+        &mut numbering,
+        &mut pictures,
+        None,
+        &mut budget,
+        &mut body,
+        None,
+        &mut 0,
+    )?;
+    Ok(body)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::cfb::{test_support::build_scoped_cfb, CompoundFile};
-    use std::io::{Cursor, Read};
 
     fn source(text: &str) -> Vec<u8> {
         let units: Vec<u16> = text.encode_utf16().collect();
@@ -893,7 +921,7 @@ mod tests {
     }
 
     pub(super) fn with_numbering(source: &[u8]) -> Vec<u8> {
-        let cfb = CompoundFile::open(&source).unwrap();
+        let cfb = CompoundFile::open(source).unwrap();
         let mut word = cfb.stream("WordDocument").unwrap();
         let mut table = cfb.stream("0Table").unwrap();
 
@@ -1634,6 +1662,33 @@ mod tests {
         build_scoped_cfb(&[("WordDocument", word), ("0Table", table)])
     }
 
+    /// A compact structural outline of a projected body: element kinds,
+    /// section and break kinds, and each paragraph's run texts and controls.
+    pub(super) fn body_outline(body: &serde_json::Value) -> Vec<String> {
+        body.as_array()
+            .unwrap()
+            .iter()
+            .map(|element| match element["type"].as_str().unwrap() {
+                "paragraph" => {
+                    let runs: Vec<String> = element["runs"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|run| match run["type"].as_str().unwrap() {
+                            "text" => format!("t:{}", run["text"].as_str().unwrap()),
+                            "break" => format!("break:{}", run["breakType"].as_str().unwrap()),
+                            other => other.to_string(),
+                        })
+                        .collect();
+                    format!("p[{}]", runs.join(","))
+                }
+                "sectionBreak" => format!("section:{}", element["kind"].as_str().unwrap()),
+                "pageBreak" => format!("pageBreak:{}", element["origin"].as_str().unwrap()),
+                other => other.to_string(),
+            })
+            .collect()
+    }
+
     #[test]
     fn source_story_projects_directly_with_controls_and_cached_field_result() {
         let bytes = source("A\tB\u{b}C\r\u{13}REF x\u{14}42\u{15}\r\u{c}\r\u{e}\rA\u{c}B\u{e}C\r");
@@ -1641,23 +1696,24 @@ mod tests {
         let direct = super::super::direct_model(&cfb, 1024 * 1024)
             .unwrap()
             .document;
-        let converted = super::super::convert(&cfb, 1024 * 1024).unwrap();
-        let expected: serde_json::Value =
-            serde_json::from_str(&docx_parser::parse_docx_native(&converted.bytes).unwrap())
-                .unwrap();
         let actual = serde_json::to_value(&direct).unwrap();
-        let mut actual_body = actual["body"].clone();
-        let mut expected_body = expected["body"].clone();
-        for body in [&mut actual_body, &mut expected_body] {
-            for value in body.as_array_mut().unwrap() {
-                if value["type"] == "paragraph" {
-                    value.as_object_mut().unwrap().remove("styleId");
-                }
-            }
-            crate::doc::paragraph::byte_adapter_line_spacing_parity(body);
-        }
-        assert_eq!(actual_body, expected_body);
-        assert_eq!(actual["section"], expected["section"]);
+        // A lone page or column break paragraph is a body-level break; an
+        // inline one splits its paragraph. The REF field keeps its cached
+        // result text.
+        assert_eq!(
+            body_outline(&actual["body"]),
+            [
+                "p[t:A,t:\t,t:B,break:line,t:C]",
+                "p[t:42]",
+                "pageBreak:authored",
+                "columnBreak",
+                "p[t:A]",
+                "pageBreak:authored",
+                "p[t:B]",
+                "columnBreak",
+                "p[t:C]",
+            ]
+        );
     }
 
     #[test]
@@ -1678,18 +1734,17 @@ mod tests {
             .collect();
         assert_eq!(markers, ["1.", "2."]);
 
-        let converted = super::super::convert(&cfb, 1024 * 1024).unwrap();
-        let expected: serde_json::Value =
-            serde_json::from_str(&docx_parser::parse_docx_native(&converted.bytes).unwrap())
-                .unwrap();
         let actual = serde_json::to_value(&direct).unwrap();
-        for index in 0..2 {
-            assert_eq!(
-                actual["body"][index]["numbering"],
-                expected["body"][index]["numbering"]
-            );
+        for (index, text) in ["1.", "2."].into_iter().enumerate() {
+            let mut expected: serde_json::Value = serde_json::from_str(NUMBERED_MARKER).unwrap();
+            expected["text"] = text.into();
+            assert_eq!(actual["body"][index]["numbering"], expected);
         }
     }
+
+    /// The first numbered paragraph's marker, as the byte route's DOCX parser
+    /// projected it before that route was removed.
+    const NUMBERED_MARKER: &str = r#"{"fontFacts":{"fontFamily":"Test Font","fontFamilyEastAsia":"Test Font","fontFamilyHighAnsi":"Test Font","fontSize":10.0,"fontSizeCs":10.0,"fontSlots":{"direct":{"ascii":"Test Font","eastAsia":"Test Font","highAnsi":"Test Font"},"theme":{},"themePresent":{"ascii":false,"complexScript":false,"eastAsia":false,"highAnsi":false}}},"fontFamily":"Test Font","fontFamilyEastAsia":"Test Font","format":"decimal","indentLeft":0.0,"jc":"left","level":0,"numId":1,"suff":"tab","tab":0.0,"text":"1."}"#;
 
     #[test]
     fn body_numbering_survives_section_headers_while_each_header_story_restarts() {
@@ -1738,6 +1793,8 @@ mod tests {
         assert_eq!(header_markers, ["1.", "1."]);
     }
 
+    const INLINE_PICTURE_RUN: &str = r#"{"allowOverlap":true,"anchor":false,"anchorXFromMargin":false,"anchorXPt":0.0,"anchorYFromPara":false,"anchorYPt":0.0,"colorReplaceFrom":null,"flipH":true,"flipV":true,"heightPt":72.0,"imagePath":"legacy-doc/image/0","mimeType":"image/png","rotation":90.0,"srcRect":{"b":0.25,"l":0.375,"r":0.5,"t":0.125},"type":"image","widthPt":36.0}"#;
+
     fn image_runs(document: &Document) -> Vec<&docx_model::ImageRun> {
         document
             .body
@@ -1773,34 +1830,14 @@ mod tests {
         assert_eq!(images[0].src_rect.as_ref().unwrap().l, 0.375);
         assert!(result.resources[0].bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
 
-        let converted = super::super::convert(
-            &CompoundFile::open(&picture_source("\u{1}\r", false)).unwrap(),
-            1024 * 1024,
-        )
-        .unwrap();
-        let mut archive = zip::ZipArchive::new(Cursor::new(&converted.bytes)).unwrap();
-        let mut document_xml = String::new();
-        archive
-            .by_name("word/document.xml")
-            .unwrap()
-            .read_to_string(&mut document_xml)
-            .unwrap();
-        assert!(document_xml.contains("rot=\"5400000\" flipH=\"1\" flipV=\"1\""));
-        let expected: serde_json::Value =
-            serde_json::from_str(&docx_parser::parse_docx_native(&converted.bytes).unwrap())
-                .unwrap();
-        let actual = serde_json::to_value(&result.document).unwrap();
-        let mut normalized = actual["body"][0]["runs"][0].clone();
-        normalized["imagePath"] = expected["body"][0]["runs"][0]["imagePath"].clone();
-        normalized.as_object_mut().unwrap().remove("rotation");
-        normalized.as_object_mut().unwrap().remove("flipH");
-        normalized.as_object_mut().unwrap().remove("flipV");
-        assert_eq!(normalized, expected["body"][0]["runs"][0]);
-        // The byte adapter emits these acquired facts on pic:spPr/a:xfrm, but
-        // the current DOCX inline parser does not yet project that transform.
-        assert!(expected["body"][0]["runs"][0].get("rotation").is_none());
-        assert!(expected["body"][0]["runs"][0].get("flipH").is_none());
-        assert!(expected["body"][0]["runs"][0].get("flipV").is_none());
+        // The complete run contract, including the authored rotation and
+        // flips on the picture's own transform.
+        let mut expected: serde_json::Value = serde_json::from_str(INLINE_PICTURE_RUN).unwrap();
+        expected["imagePath"] = result.resources[0].key.clone().into();
+        assert_eq!(
+            serde_json::to_value(&result.document).unwrap()["body"][0]["runs"][0],
+            expected
+        );
 
         let sections = [
             (2, 0, 12_240, 15_840, 1, 720),
@@ -1905,6 +1942,9 @@ mod tests {
         );
     }
 
+    const FLOATING_HOST_RUN: &str = r#"{"__anchorOccurrenceId":"legacy-doc-float-1","fontFamily":"Test Font","fontFamilyEastAsia":"Test Font","fontSize":10.0,"type":"anchorHost"}"#;
+    const FLOATING_IMAGE_RUN: &str = r#"{"__anchorAcquisition":{"anchorDistances":{"bottomPt":4.0,"bottomStatus":"valid","leftPt":1.0,"leftStatus":"valid","rightPt":3.0,"rightStatus":"valid","topPt":2.0,"topStatus":"valid"},"behavior":{"allowOverlap":false,"allowOverlapStatus":"valid","behindDoc":false,"behindDocStatus":"valid","layoutInCell":false,"layoutInCellStatus":"valid","locked":true,"lockedStatus":"valid","relativeHeight":77,"relativeHeightStatus":"valid"},"extent":{"heightPt":15.0,"heightStatus":"valid","widthPt":20.0,"widthStatus":"valid"},"group":null,"horizontal":{"choice":{"kind":"offset","valuePt":-5.0},"relativeFrom":"page","relativeFromStatus":"valid"},"occurrenceId":"legacy-doc-float-1","parentEffectExtent":{"bottomPt":null,"bottomStatus":"missing","leftPt":null,"leftStatus":"missing","rightPt":null,"rightStatus":"missing","topPt":null,"topStatus":"missing"},"relativeSize":{"horizontal":null,"vertical":null},"simplePosition":{"enabled":false,"status":"valid","xPt":0.0,"xStatus":"valid","yPt":0.0,"yStatus":"valid"},"vertical":{"choice":{"kind":"offset","valuePt":10.0},"relativeFrom":"paragraph","relativeFromStatus":"valid"},"wrap":{"authoredKinds":["wrapSquare"],"distances":{"bottomPt":null,"bottomStatus":"missing","leftPt":null,"leftStatus":"missing","rightPt":null,"rightStatus":"missing","topPt":null,"topStatus":"missing"},"effectExtent":null,"kind":"square","polygon":null,"side":"right"}},"allowOverlap":false,"anchor":true,"anchorXFromMargin":false,"anchorXPt":-5.0,"anchorXRelativeFrom":"page","anchorYFromPara":true,"anchorYPt":10.0,"anchorYRelativeFrom":"paragraph","colorReplaceFrom":null,"distBottom":4.0,"distLeft":1.0,"distRight":3.0,"distTop":2.0,"flipH":true,"flipV":true,"heightPt":15.0,"imagePath":"legacy-doc/float/0","mimeType":"image/png","srcRect":{"b":0.25,"l":0.375,"r":0.5,"t":0.125},"type":"image","widthPt":20.0,"wrapMode":"square","wrapSide":"right"}"#;
+
     #[test]
     fn floating_picture_projects_anchor_host_sidecar_and_owned_resource() {
         let bytes = floating_picture_source("B\u{8}\r", false);
@@ -1954,29 +1994,14 @@ mod tests {
         assert_eq!(acquisition.anchor_distances.left_pt, Some(1.0));
 
         // Cross-check the complete host and acquisition contract, not only
-        // selected display fields. The byte parser's known picture-flip loss
-        // remains explicit; direct projection preserves the authored flips.
-        let reference_source = floating_picture_source("B\u{8}\r", false);
-        let converted =
-            super::super::convert(&CompoundFile::open(&reference_source).unwrap(), 1024 * 1024)
-                .unwrap();
-        let expected: serde_json::Value =
-            serde_json::from_str(&docx_parser::parse_docx_native(&converted.bytes).unwrap())
-                .unwrap();
+        // selected display fields.
         let actual = serde_json::to_value(&result.document).unwrap();
-        let expected_runs = &expected["body"][0]["runs"];
-        let mut actual_host = actual["body"][0]["runs"][1].clone();
-        actual_host["__anchorOccurrenceId"] = expected_runs[1]["__anchorOccurrenceId"].clone();
-        assert_eq!(actual_host, expected_runs[1]);
-        let mut actual_image = actual["body"][0]["runs"][2].clone();
-        actual_image["imagePath"] = expected_runs[2]["imagePath"].clone();
-        actual_image["__anchorAcquisition"]["occurrenceId"] =
-            expected_runs[2]["__anchorAcquisition"]["occurrenceId"].clone();
-        assert!(expected_runs[2].get("flipH").is_none());
-        assert!(expected_runs[2].get("flipV").is_none());
-        actual_image.as_object_mut().unwrap().remove("flipH");
-        actual_image.as_object_mut().unwrap().remove("flipV");
-        assert_eq!(actual_image, expected_runs[2]);
+        let expected_host: serde_json::Value = serde_json::from_str(FLOATING_HOST_RUN).unwrap();
+        assert_eq!(actual["body"][0]["runs"][1], expected_host);
+        let mut expected_image: serde_json::Value =
+            serde_json::from_str(FLOATING_IMAGE_RUN).unwrap();
+        expected_image["imagePath"] = result.resources[0].key.clone().into();
+        assert_eq!(actual["body"][0]["runs"][2], expected_image);
 
         let hidden_bytes = floating_picture_source("B\u{8}\r", true);
         let hidden =
@@ -2101,22 +2126,6 @@ mod tests {
             panic!("authored blank header remains an empty paragraph")
         };
         assert!(paragraph.runs.is_empty());
-
-        let converted =
-            super::super::convert(&CompoundFile::open(&blank_header).unwrap(), 1024 * 1024)
-                .unwrap();
-        let expected: serde_json::Value =
-            serde_json::from_str(&docx_parser::parse_docx_native(&converted.bytes).unwrap())
-                .unwrap();
-        let actual = serde_json::to_value(blank).unwrap();
-        assert_eq!(
-            actual["headers"]["even"]["body"].as_array().unwrap().len(),
-            1
-        );
-        assert_eq!(
-            actual["headers"]["even"]["body"][0]["runs"],
-            expected["headers"]["even"]["body"][0]["runs"]
-        );
     }
 
     fn header_text(value: &docx_model::HeaderFooter) -> String {
@@ -2137,22 +2146,6 @@ mod tests {
                 _ => None,
             })
             .collect()
-    }
-
-    fn normalized_header_json(value: &serde_json::Value) -> serde_json::Value {
-        let mut value = value.clone();
-        for slot in ["even", "default", "first"] {
-            let Some(body) = value[slot]["body"].as_array_mut() else {
-                continue;
-            };
-            for element in body {
-                if element["type"] == "paragraph" {
-                    element.as_object_mut().unwrap().remove("styleId");
-                }
-            }
-        }
-        crate::doc::paragraph::byte_adapter_line_spacing_parity(&mut value);
-        value
     }
 
     #[test]
@@ -2188,20 +2181,6 @@ mod tests {
             super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024)
                 .unwrap()
                 .document;
-        let converted =
-            super::super::convert(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024).unwrap();
-        let expected: serde_json::Value =
-            serde_json::from_str(&docx_parser::parse_docx_native(&converted.bytes).unwrap())
-                .unwrap();
-        let actual = serde_json::to_value(&document).unwrap();
-        assert_eq!(
-            normalized_header_json(&actual["headers"]),
-            normalized_header_json(&expected["headers"])
-        );
-        assert_eq!(
-            normalized_header_json(&actual["footers"]),
-            normalized_header_json(&expected["footers"])
-        );
         let breaks: Vec<_> = document
             .body
             .iter()
@@ -2336,6 +2315,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::single_element_loop)]
     fn output_budget_and_unimplemented_body_owners_fail_without_a_document() {
         let bytes = source("visible\r");
         let cfb = CompoundFile::open(&bytes).unwrap();
@@ -2449,7 +2429,7 @@ mod tests {
         let bytes = source("Visible\r");
         let cfb = CompoundFile::open(&bytes).unwrap();
         for case in 0..8 {
-            let result = super::super::with_acquired_doc(&cfb, true, |mut facts| {
+            let result = super::super::with_acquired_doc(&cfb, |mut facts| {
                 match case {
                     0 => facts.sections.clear(),
                     1 => facts
@@ -2472,6 +2452,22 @@ mod tests {
         }
     }
 
+    fn projected_body(bytes: &[u8]) -> serde_json::Value {
+        let cfb = CompoundFile::open(bytes).unwrap();
+        let direct = super::super::direct_model(&cfb, 1024 * 1024)
+            .unwrap()
+            .document;
+        serde_json::to_value(&direct).unwrap()
+    }
+
+    const SECTION_KINDS: [&str; 5] = [
+        "continuous",
+        "nextColumn",
+        "nextPage",
+        "evenPage",
+        "oddPage",
+    ];
+
     #[test]
     fn multiple_sections_preserve_utf16_boundaries_geometry_columns_and_break_kinds() {
         // First section ends after A (1 CP), supplementary 😀 (2 CP), and the
@@ -2483,76 +2479,41 @@ mod tests {
                 (6, 4, 15_840, 12_240, 1, 720),
             ],
         );
-        let cfb = CompoundFile::open(&bytes).unwrap();
-        let direct = super::super::direct_model(&cfb, 1024 * 1024)
-            .unwrap()
-            .document;
-        let converted = super::super::convert(&cfb, 1024 * 1024).unwrap();
-        let expected: serde_json::Value =
-            serde_json::from_str(&docx_parser::parse_docx_native(&converted.bytes).unwrap())
-                .unwrap();
-        let actual = serde_json::to_value(&direct).unwrap();
-        let normalize = |body: &serde_json::Value| {
-            let mut body = body.clone();
-            for value in body.as_array_mut().unwrap() {
-                if value["type"] == "paragraph" {
-                    value.as_object_mut().unwrap().remove("styleId");
-                }
-            }
-            crate::doc::paragraph::byte_adapter_line_spacing_parity(&mut body);
-            body
-        };
-        assert_eq!(normalize(&actual["body"]), normalize(&expected["body"]));
-        assert_eq!(actual["section"], expected["section"]);
-        assert_eq!(actual["body"][1]["kind"], "continuous");
+        let actual = projected_body(&bytes);
+        assert_eq!(
+            body_outline(&actual["body"]),
+            ["p[t:A😀]", "section:continuous", "p[t:B]"]
+        );
         assert_eq!(actual["body"][1]["columns"]["count"], 2);
+        assert_eq!(actual["body"][1]["geom"]["pageWidth"], 595.3);
+        assert_eq!(actual["body"][1]["geom"]["pageHeight"], 841.9);
         assert_eq!(actual["section"]["sectionStart"], "oddPage");
+        assert_eq!(actual["section"]["pageWidth"], 792.0);
+        assert_eq!(actual["section"]["pageHeight"], 612.0);
     }
 
     #[test]
     fn lone_page_break_at_section_boundary_matches_section_kind_normalization() {
-        for (kind, expected_page_breaks) in [(0, 1), (1, 1), (2, 0), (3, 0), (4, 0)] {
+        for (kind, name) in SECTION_KINDS.into_iter().enumerate() {
             // The first form feed is an authored page break. The second is the
-            // section mark consumed by split_story.
+            // section mark consumed by split_story. A page-starting section
+            // subsumes the lone break; continuous and column sections keep it.
             let bytes = source_with_sections(
                 "\u{c}\u{c}B\r",
                 &[
-                    (2, kind, 12_240, 15_840, 1, 720),
+                    (2, kind as u8, 12_240, 15_840, 1, 720),
                     (4, 2, 12_240, 15_840, 1, 720),
                 ],
             );
-            let cfb = CompoundFile::open(&bytes).unwrap();
-            let direct = super::super::direct_model(&cfb, 1024 * 1024)
-                .unwrap()
-                .document;
-            let converted = super::super::convert(&cfb, 1024 * 1024).unwrap();
-            let expected: serde_json::Value =
-                serde_json::from_str(&docx_parser::parse_docx_native(&converted.bytes).unwrap())
-                    .unwrap();
-            let actual = serde_json::to_value(&direct).unwrap();
-            let normalize = |body: &serde_json::Value| {
-                let mut body = body.clone();
-                for value in body.as_array_mut().unwrap() {
-                    if value["type"] == "paragraph" {
-                        value.as_object_mut().unwrap().remove("styleId");
-                    }
-                }
-                crate::doc::paragraph::byte_adapter_line_spacing_parity(&mut body);
-                body
+            let section = format!("section:{name}");
+            let expected: Vec<&str> = if kind < 2 {
+                vec!["pageBreak:authored", &section, "p[t:B]"]
+            } else {
+                vec![&section, "p[t:B]"]
             };
             assert_eq!(
-                normalize(&actual["body"]),
-                normalize(&expected["body"]),
-                "section kind {kind}"
-            );
-            assert_eq!(
-                actual["body"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .filter(|element| element["type"] == "pageBreak")
-                    .count(),
-                expected_page_breaks,
+                body_outline(&projected_body(&bytes)["body"]),
+                expected,
                 "section kind {kind}"
             );
         }
@@ -2560,101 +2521,159 @@ mod tests {
 
     #[test]
     fn standalone_page_break_before_section_ending_paragraph_is_never_suppressed() {
-        for kind in 0..=4 {
+        for (kind, name) in SECTION_KINDS.into_iter().enumerate() {
             // The first form feed belongs to its own paragraph. Only the later
             // form feed terminates the section containing paragraph "A".
             let bytes = source_with_sections(
                 "\u{c}\rA\u{c}B\r",
                 &[
-                    (4, kind, 12_240, 15_840, 1, 720),
+                    (4, kind as u8, 12_240, 15_840, 1, 720),
                     (6, 2, 12_240, 15_840, 1, 720),
                 ],
             );
-            let cfb = CompoundFile::open(&bytes).unwrap();
-            let direct = super::super::direct_model(&cfb, 1024 * 1024)
-                .unwrap()
-                .document;
-            let converted = super::super::convert(&cfb, 1024 * 1024).unwrap();
-            let expected: serde_json::Value =
-                serde_json::from_str(&docx_parser::parse_docx_native(&converted.bytes).unwrap())
-                    .unwrap();
-            let actual = serde_json::to_value(&direct).unwrap();
-            let normalize = |body: &serde_json::Value| {
-                let mut body = body.clone();
-                for value in body.as_array_mut().unwrap() {
-                    if value["type"] == "paragraph" {
-                        value.as_object_mut().unwrap().remove("styleId");
-                    }
-                }
-                crate::doc::paragraph::byte_adapter_line_spacing_parity(&mut body);
-                body
-            };
+            let section = format!("section:{name}");
             assert_eq!(
-                normalize(&actual["body"]),
-                normalize(&expected["body"]),
-                "section kind {kind}"
-            );
-            assert_eq!(
-                actual["body"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .filter(|element| element["type"] == "pageBreak")
-                    .count(),
-                1,
+                body_outline(&projected_body(&bytes)["body"]),
+                ["pageBreak:authored", "p[t:A]", &section, "p[t:B]"],
                 "section kind {kind}"
             );
         }
     }
 
     #[test]
+    fn empty_paragraph_before_a_section_mark_owns_the_section_break() {
+        let bytes = source_with_sections(
+            "A\r\u{c}B\r",
+            &[
+                (3, 2, 12_240, 15_840, 1, 720),
+                (5, 2, 12_240, 15_840, 1, 720),
+            ],
+        );
+        assert_eq!(
+            body_outline(&projected_body(&bytes)["body"]),
+            ["p[t:A]", "p[]", "section:nextPage", "p[t:B]"]
+        );
+    }
+
+    #[test]
+    fn section_marks_add_no_page_breaks_beside_authored_breaks() {
+        let bytes = source_with_sections(
+            "A\u{c}B\u{c}\u{e}C\r",
+            &[
+                (2, 2, 12_240, 15_840, 1, 720),
+                (7, 2, 12_240, 15_840, 1, 720),
+            ],
+        );
+        assert_eq!(
+            body_outline(&projected_body(&bytes)["body"]),
+            [
+                "p[t:A]",
+                "section:nextPage",
+                "p[t:B]",
+                "pageBreak:authored",
+                "p[]",
+                "columnBreak",
+                "p[t:C]"
+            ]
+        );
+    }
+
+    #[test]
+    fn field_instructions_remain_hidden_across_section_boundaries() {
+        let bytes = source_with_sections(
+            "\u{13}X\u{c}Y\u{14}OK\u{15}\r",
+            &[
+                (3, 2, 12_240, 15_840, 1, 720),
+                (9, 2, 12_240, 15_840, 1, 720),
+            ],
+        );
+        assert_eq!(
+            body_outline(&projected_body(&bytes)["body"]),
+            ["p[]", "section:nextPage", "p[t:OK]"]
+        );
+    }
+
+    #[test]
+    fn word_97_unicode_main_story_projects_its_paragraphs() {
+        let bytes = source("Hello 日本語\rSecond paragraph\r");
+        assert_eq!(
+            body_outline(&projected_body(&bytes)["body"]),
+            ["p[t:Hello 日本語]", "p[t:Second paragraph]"]
+        );
+    }
+
+    #[test]
+    fn other_cfb_families_and_encrypted_documents_are_rejected() {
+        let workbook = build_scoped_cfb(&[("Workbook", vec![0; 16])]);
+        let error = super::super::direct_model(&CompoundFile::open(&workbook).unwrap(), 1024)
+            .err()
+            .unwrap();
+        assert!(error.starts_with("UNSUPPORTED:"), "{error}");
+
+        let mut word = vec![0u8; 900];
+        crate::doc::write_minimal_word97_test_header(&mut word);
+        word[0x0a..0x0c].copy_from_slice(&0x0100u16.to_le_bytes());
+        let encrypted = build_scoped_cfb(&[("WordDocument", word)]);
+        let error = super::super::direct_model(&CompoundFile::open(&encrypted).unwrap(), 1024)
+            .err()
+            .unwrap();
+        assert!(error.contains("encrypted"), "{error}");
+    }
+
+    #[test]
+    fn story_control_count_is_bounded_before_tokenization() {
+        let text = format!("{}\r", "\t".repeat(crate::doc::MAX_STORY_CONTROLS));
+        let bytes = source(&text);
+        let error = super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), usize::MAX)
+            .err()
+            .unwrap();
+        assert!(error.contains("structure budget"), "{error}");
+    }
+
+    #[test]
     fn section_break_subsumes_only_the_sole_projected_page_break() {
-        for (kind, expected_page_breaks) in [(0, 1), (1, 1), (2, 0), (3, 0), (4, 0)] {
+        for (kind, name) in SECTION_KINDS.into_iter().enumerate() {
             let source = source_with_sections(
                 "X\u{c}\u{c}B\r",
                 &[
-                    (3, kind, 12_240, 15_840, 1, 720),
+                    (3, kind as u8, 12_240, 15_840, 1, 720),
                     (5, 2, 12_240, 15_840, 1, 720),
                 ],
             );
+            // The hidden "X" leaves the page break as the only projected content.
             let bytes = hide_first_utf16_unit(&source);
-            let cfb = CompoundFile::open(&bytes).unwrap();
-            let direct = super::super::direct_model(&cfb, 1024 * 1024)
-                .unwrap()
-                .document;
-            let converted = super::super::convert(&cfb, 1024 * 1024).unwrap();
-            let expected: serde_json::Value =
-                serde_json::from_str(&docx_parser::parse_docx_native(&converted.bytes).unwrap())
-                    .unwrap();
-            let actual = serde_json::to_value(&direct).unwrap();
-            let normalize = |body: &serde_json::Value| {
-                let mut body = body.clone();
-                for value in body.as_array_mut().unwrap() {
-                    if value["type"] == "paragraph" {
-                        value.as_object_mut().unwrap().remove("styleId");
-                    }
-                }
-                crate::doc::paragraph::byte_adapter_line_spacing_parity(&mut body);
-                body
+            let section = format!("section:{name}");
+            let expected: Vec<&str> = if kind < 2 {
+                vec!["pageBreak:authored", &section, "p[t:B]"]
+            } else {
+                vec![&section, "p[t:B]"]
             };
             assert_eq!(
-                normalize(&actual["body"]),
-                normalize(&expected["body"]),
-                "section kind {kind}"
-            );
-            assert_eq!(
-                actual["body"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .filter(|element| element["type"] == "pageBreak")
-                    .count(),
-                expected_page_breaks,
+                body_outline(&projected_body(&bytes)["body"]),
+                expected,
                 "section kind {kind}"
             );
         }
 
-        for text in ["X\u{c}\u{c}B\r", "\u{c}\u{c}\u{c}B\r", "\u{b}\u{c}\u{c}B\r"] {
+        for (text, expected) in [
+            (
+                "X\u{c}\u{c}B\r",
+                &["p[t:X]", "pageBreak:authored", "section:nextPage", "p[t:B]"][..],
+            ),
+            (
+                "\u{c}\u{c}\u{c}B\r",
+                &[
+                    "pageBreak:authored",
+                    "pageBreak:authored",
+                    "section:nextPage",
+                    "p[t:B]",
+                ][..],
+            ),
+            (
+                "\u{b}\u{c}\u{c}B\r",
+                &["pageBreak:authored", "section:nextPage", "p[t:B]"][..],
+            ),
+        ] {
             let first_end = text[..text.len() - "B\r".len()].encode_utf16().count();
             let total = text.encode_utf16().count();
             let bytes = source_with_sections(
@@ -2664,28 +2683,9 @@ mod tests {
                     (total, 2, 12_240, 15_840, 1, 720),
                 ],
             );
-            let cfb = CompoundFile::open(&bytes).unwrap();
-            let direct = super::super::direct_model(&cfb, 1024 * 1024)
-                .unwrap()
-                .document;
-            let converted = super::super::convert(&cfb, 1024 * 1024).unwrap();
-            let expected: serde_json::Value =
-                serde_json::from_str(&docx_parser::parse_docx_native(&converted.bytes).unwrap())
-                    .unwrap();
-            let actual = serde_json::to_value(&direct).unwrap();
-            let normalize = |body: &serde_json::Value| {
-                let mut body = body.clone();
-                for value in body.as_array_mut().unwrap() {
-                    if value["type"] == "paragraph" {
-                        value.as_object_mut().unwrap().remove("styleId");
-                    }
-                }
-                crate::doc::paragraph::byte_adapter_line_spacing_parity(&mut body);
-                body
-            };
             assert_eq!(
-                normalize(&actual["body"]),
-                normalize(&expected["body"]),
+                body_outline(&projected_body(&bytes)["body"]),
+                expected,
                 "source {text:?}"
             );
         }
@@ -2714,6 +2714,7 @@ mod revision_mark_tests {
     }
 
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn revision_marks_are_found_in_body_tables_and_page_stories() {
         let mut document = Document::default();
         document.body = vec![BodyElement::Paragraph(Box::new(marked_paragraph(false)))];

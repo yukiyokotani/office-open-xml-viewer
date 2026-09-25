@@ -287,6 +287,7 @@ fn supported_conditional_shape(
     Ok(true)
 }
 
+#[allow(clippy::needless_range_loop)] // One side index selects three parallel arrays.
 fn resolve_row(
     prepared: &mut [PreparedParagraph],
     context: &table_context::RowContext,

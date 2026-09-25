@@ -22,6 +22,7 @@
 //! - A top-level group rotated by 180 degrees keeps its unrotated SPA frame
 //!   and member coordinates (Word's DOCX: `rot="10800000"` on the group
 //!   transform with the same extent); members turn about the group centre.
+//!
 //! Other group angles, nested rotated groups, rotated flipped members,
 //! rotated pictures and rotated text shapes have no Word evidence yet and
 //! stay unsupported. Members that are straight connectors keep their static

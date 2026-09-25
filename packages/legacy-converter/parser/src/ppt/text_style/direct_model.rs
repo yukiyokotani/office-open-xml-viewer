@@ -4,10 +4,9 @@
 //! 2.9.44-46. This deliberately shares the existing binary run decoding and
 //! inheritance; it does not serialize or parse DrawingML as an intermediate.
 //!
-//! Internal producer groundwork, not a complete or publicly routed converter.
-//! Unresolved paragraph origins need further model admission support.
-//! Baseline information discarded by the native decoder cannot be recovered
-//! here. Keep these limits explicit before wiring a producer.
+//! Limits: unresolved paragraph origins need further model admission support,
+//! and baseline information discarded by the native decoder cannot be
+//! recovered here.
 
 use super::*;
 use ooxml_common::text::SpaceLine;
@@ -15,10 +14,8 @@ use pptx_model::{
     Bullet as ModelBullet, Paragraph as ModelParagraph, TabStop, TextRun, TextRunData,
 };
 
-/// Build the receiving presentation model directly from a TextCharsAtom (or
-/// decoded TextBytesAtom), StyleTextPropAtom and its resolved master context.
-/// `model_budget` bounds requested output backing storage and owned string bytes;
-/// allocator bookkeeping, input bytes and decoder temporaries are not included.
+/// `paragraphs_with_axes` without ruler, document or ambiguity axes.
+#[cfg(test)]
 pub(in crate::ppt) fn paragraphs(
     text: &str,
     style: &[u8],
@@ -45,6 +42,10 @@ pub(in crate::ppt) struct DirectAxes<'a> {
     pub ambiguous: Option<&'a [u32; 5]>,
 }
 
+/// Build the receiving presentation model directly from a TextCharsAtom (or
+/// decoded TextBytesAtom), StyleTextPropAtom and its resolved master context.
+/// `model_budget` bounds requested output backing storage and owned string bytes;
+/// allocator bookkeeping, input bytes and decoder temporaries are not included.
 pub(in crate::ppt) fn paragraphs_with_axes(
     text: &str,
     style: &[u8],
@@ -930,7 +931,7 @@ mod tests {
             &3u16.to_le_bytes(),
         ]
         .concat();
-        let tabs = ruler::read(
+        let tabs = ruler::read_full(
             Record {
                 kind: 4006,
                 version: 0,
@@ -940,6 +941,7 @@ mod tests {
             &mut 100,
         )
         .unwrap()
+        .tabs
         .unwrap();
         let mut base = Level::empty(0);
         base.paragraph.margin = Some(0);
@@ -1086,7 +1088,7 @@ mod tests {
             &0u16.to_le_bytes(),
         ]
         .concat();
-        let tabs = ruler::read(
+        let tabs = ruler::read_full(
             Record {
                 kind: 4006,
                 version: 0,
@@ -1096,6 +1098,7 @@ mod tests {
             &mut 100,
         )
         .unwrap()
+        .tabs
         .unwrap();
         let base = explicit_origin();
         let model = paragraphs(
@@ -1432,5 +1435,132 @@ mod tests {
                 .unwrap_err()
                 .contains("surrogate pair")
         );
+    }
+
+    fn read_bullet(mask: u32, bytes: &[u8]) -> bullet::Bullet {
+        bullet::Bullet::read(
+            &mut Reader {
+                bytes,
+                pos: 0,
+                budget: &mut 100,
+            },
+            mask,
+        )
+        .unwrap()
+    }
+
+    fn full_bullet() -> bullet::Bullet {
+        bullet::Bullet {
+            enabled: Some(true),
+            has_color: Some(true),
+            has_font: Some(true),
+            has_size: Some(true),
+            character: Some(0x2022),
+            font: Some(0),
+            size: Some(75),
+            color: Some(0x01000000),
+        }
+    }
+
+    #[test]
+    fn bullet_flags_and_values_inherit_independently() {
+        // Only the enabled bit is valid; zero bits for the other flags in this
+        // same word must not override inherited font/color/size flags.
+        let direct = read_bullet(1, &[1, 0]);
+        let fonts = ["Arial".to_string()];
+        let scheme = [0x123456; 8];
+        let context = Context {
+            fonts: &fonts,
+            scheme: Some(&scheme),
+            ..Context::default()
+        };
+        let project =
+            |bullet: &bullet::Bullet| model_bullet(bullet, None, context, &mut 1000).unwrap();
+        let inherited = direct.inherit(&full_bullet());
+        assert!(matches!(
+            project(&inherited),
+            ModelBullet::Char { ref ch, ref color, size_pct: Some(75.0), size_pts: None, ref font_family }
+                if ch == "\u{2022}" && color.as_deref() == Some("563412")
+                    && font_family.as_deref() == Some("Arial")
+        ));
+        let disabled = read_bullet(1, &[0, 0]).inherit(&inherited);
+        assert!(matches!(project(&disabled), ModelBullet::None));
+        // Explicit false flags follow the text instead of the inherited values.
+        let follow = read_bullet(14, &[0, 0]).inherit(&inherited);
+        assert!(matches!(
+            project(&follow),
+            ModelBullet::Char { ref ch, color: None, size_pct: None, size_pts: None, font_family: None }
+                if ch == "\u{2022}"
+        ));
+        let changed = read_bullet(0x40, &50u16.to_le_bytes()).inherit(&inherited);
+        assert!(matches!(
+            project(&changed),
+            ModelBullet::Char {
+                size_pct: Some(50.0),
+                ..
+            }
+        ));
+        // A glyph without a valid enabled flag must not invent a list.
+        assert!(matches!(
+            project(&read_bullet(0x80, &0x2022u16.to_le_bytes())),
+            ModelBullet::Inherit
+        ));
+    }
+
+    #[test]
+    fn bullet_size_boundaries_and_unsupported_glyphs_never_get_clamped() {
+        let project = |bullet: &bullet::Bullet| {
+            model_bullet(bullet, None, Context::default(), &mut 1000).unwrap()
+        };
+        for (size, pct, pts) in [
+            (25, Some(25.0), None),
+            (400, Some(400.0), None),
+            (-1, None, Some(1.0)),
+            (-4000, None, Some(4000.0)),
+            (i16::MIN, None, None),
+            (-4001, None, None),
+            (0, None, None),
+            (24, None, None),
+            (401, None, None),
+            (i16::MAX, None, None),
+        ] {
+            let bullet = bullet::Bullet {
+                size: Some(size),
+                ..full_bullet()
+            };
+            assert!(
+                matches!(project(&bullet), ModelBullet::Char { size_pct, size_pts, .. }
+                    if size_pct == pct && size_pts == pts),
+                "{size}"
+            );
+        }
+        for character in [0, 9, 10, 13, 0xd800, 0xdfff, 0xfffe, 0xffff] {
+            let bullet = bullet::Bullet {
+                character: Some(character),
+                ..full_bullet()
+            };
+            assert!(matches!(project(&bullet), ModelBullet::None));
+        }
+        let bullet = bullet::Bullet {
+            character: Some('"' as u16),
+            font: Some(u16::MAX),
+            ..full_bullet()
+        };
+        // No font index or scheme colour is guessed.
+        assert!(matches!(
+            project(&bullet),
+            ModelBullet::Char { ref ch, color: None, font_family: None, .. } if ch == "\""
+        ));
+        for bytes in [vec![], vec![0], vec![1, 0, 0]] {
+            assert!(bullet::Bullet::read(
+                &mut Reader {
+                    bytes: &bytes,
+                    pos: 0,
+                    budget: &mut 100
+                },
+                0xff
+            )
+            .is_err());
+        }
     }
 }

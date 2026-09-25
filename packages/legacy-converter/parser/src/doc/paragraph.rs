@@ -4,18 +4,11 @@
 use super::{border::Border, u16_at, unsupported};
 use std::collections::BTreeMap;
 
-#[cfg(feature = "direct-doc")]
 mod direct;
 mod frame;
-#[cfg(feature = "direct-doc")]
 mod shading;
-#[cfg(all(test, feature = "direct-doc"))]
-pub(in crate::doc) use direct::byte_adapter_line_spacing_parity;
-#[cfg(feature = "direct-doc")]
 pub(super) use frame::FrameGap;
-#[cfg(feature = "direct-doc")]
 pub(in crate::doc) use frame::TableParagraphFrame;
-#[cfg(feature = "direct-doc")]
 pub(super) use shading::{fill as shading_fill, ShadingFill};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,7 +41,6 @@ impl AlignmentPatch {
 pub struct Properties {
     pub ilfo: i16,
     pub ilvl: u8,
-    pub numbering: Option<(usize, u8)>,
     protected_list_indent: Option<(i32, i32)>,
     tabs: super::tabs::Stops,
     flags: BTreeMap<&'static str, bool>,
@@ -75,13 +67,8 @@ pub struct Properties {
     /// MS-DOC 2.6.2 sprmPOutLvl raw value (0..=9); see `outline_level`.
     outline_level: Option<u8>,
     /// MS-DOC 2.6.2 sprmPShd/sprmPShd80 projected to a fill.
-    #[cfg(feature = "direct-doc")]
     shading: Option<ShadingFill>,
     frame: frame::Frame,
-    /// A property was accepted that only the direct model projects. The
-    /// legacy WordprocessingML adapter does not serialize it and must keep
-    /// reporting it as omitted (see `Formatting::paragraph_xml`).
-    direct_only: bool,
 }
 
 impl Default for Properties {
@@ -89,7 +76,6 @@ impl Default for Properties {
         Self {
             ilfo: 0,
             ilvl: 0,
-            numbering: None,
             protected_list_indent: None,
             tabs: super::tabs::Stops::default(),
             flags: BTreeMap::from([
@@ -120,10 +106,8 @@ impl Default for Properties {
             borders: std::array::from_fn(|_| None),
             contextual_spacing: false,
             outline_level: None,
-            #[cfg(feature = "direct-doc")]
             shading: None,
             frame: frame::Frame::default(),
-            direct_only: false,
         }
     }
 }
@@ -147,11 +131,6 @@ impl Properties {
 
     pub(super) fn clear_alignment(&mut self) {
         self.alignment = (0, false);
-    }
-
-    /// True when an accepted property is projected only by the direct model.
-    pub(super) fn has_direct_only_properties(&self) -> bool {
-        self.direct_only
     }
 
     pub fn apply(&mut self, code: u16, operand: &[u8]) -> Result<bool, String> {
@@ -283,7 +262,6 @@ impl Properties {
                 // before/after spacing next to a paragraph of the same style,
                 // exactly ECMA-376 17.3.1.9 contextualSpacing.
                 self.contextual_spacing = bool8(operand[0])?;
-                self.direct_only = true;
             }
             0x2640 => {
                 // MS-DOC 2.6.2 sprmPOutLvl: 0..=8 outline level, 9 body text.
@@ -292,7 +270,6 @@ impl Properties {
                     return Err(unsupported("invalid Word outline level"));
                 }
                 self.outline_level = Some(level);
-                self.direct_only = true;
             }
             0x6629 | 0xc653 => {
                 // MS-DOC 2.6.2: sprmPBrcBar80 (Brc80) and sprmPBrcBar
@@ -308,22 +285,13 @@ impl Properties {
                     Border::read(operand, true)?;
                 }
             }
-            0xc64d | 0x442d => {
-                #[cfg(feature = "direct-doc")]
-                {
-                    match shading::fill(operand, code == 0xc64d)? {
-                        Some(fill) => self.shading = Some(fill),
-                        None => return Ok(false),
-                    }
-                    self.direct_only = true;
-                }
-                #[cfg(not(feature = "direct-doc"))]
-                return Ok(false);
-            }
+            0xc64d | 0x442d => match shading::fill(operand, code == 0xc64d)? {
+                Some(fill) => self.shading = Some(fill),
+                None => return Ok(false),
+            },
             0x8418 | 0x8419 | 0x841a | 0x442b | 0x261b | 0x2423 | 0x842f | 0x842e | 0x2430
             | 0x2462 | 0x442c | 0x443a => {
                 self.frame.apply(code, operand)?;
-                self.direct_only = true;
             }
             0x4439 => {
                 self.text_alignment = Some(match u16_at(operand, 0)? {
@@ -338,106 +306,6 @@ impl Properties {
             _ => return Ok(false),
         }
         Ok(true)
-    }
-
-    pub fn xml(&self) -> String {
-        let mut xml = String::new();
-        // CT_PPrBase has a sequence, not an arbitrary element map.
-        for key in [
-            "keepNext",
-            "keepLines",
-            "pageBreakBefore",
-            "widowControl",
-            "suppressLineNumbers",
-            "suppressAutoHyphens",
-            "kinsoku",
-            "wordWrap",
-            "overflowPunct",
-            "topLinePunct",
-            "autoSpaceDE",
-            "autoSpaceDN",
-            "bidi",
-            "adjustRightInd",
-            "snapToGrid",
-        ] {
-            if key == "suppressLineNumbers" {
-                if let Some((id, level)) = self.numbering {
-                    xml.push_str(&format!(
-                        "<w:numPr><w:ilvl w:val=\"{level}\"/><w:numId w:val=\"{id}\"/></w:numPr>"
-                    ));
-                }
-            }
-            if key == "suppressAutoHyphens" {
-                // MS-DOC 2.6.2 PBrcLeft/Right are logical. ECMA-376
-                // 17.3.1.17/28 left/right are physical, so resolve after bidi.
-                // Keep grouping as ordinary pBdr; the existing OOXML layout
-                // owns adjacency, spacing and between-border decisions.
-                if self.borders.iter().any(Option::is_some) {
-                    xml.push_str("<w:pBdr>");
-                    let rtl = self.flags.get("bidi") == Some(&true);
-                    for (side, index) in [
-                        ("top", 0),
-                        ("left", if rtl { 3 } else { 1 }),
-                        ("bottom", 2),
-                        ("right", if rtl { 1 } else { 3 }),
-                        ("between", 4),
-                    ] {
-                        if let Some(border) = &self.borders[index] {
-                            xml.push_str(&border.xml(side));
-                        }
-                    }
-                    xml.push_str("</w:pBdr>");
-                }
-                // CT_PPrBase places tabs after shading/borders and before this flag.
-                xml.push_str(&self.tabs.xml());
-            }
-            if let Some(value) = self.flags.get(key) {
-                xml.push_str(&format!("<w:{key} w:val=\"{}\"/>", u8::from(*value)));
-            }
-        }
-        xml.push_str(&format!("<w:spacing w:before=\"{}\" w:after=\"{}\" w:line=\"{}\" w:lineRule=\"{}\" w:beforeAutospacing=\"{}\" w:afterAutospacing=\"{}\"",
-            self.before, self.after, self.line.0, self.line.1, u8::from(self.before_auto), u8::from(self.after_auto)));
-        for (name, value) in [
-            ("beforeLines", self.before_lines),
-            ("afterLines", self.after_lines),
-        ] {
-            if let Some(value) = value {
-                xml.push_str(&format!(" w:{name}=\"{value}\""));
-            }
-        }
-        xml.push_str("/>");
-        let [left, right] = self.logical_indents();
-        let first = self
-            .protected_list_indent
-            .map_or(self.first, |(_, first)| first);
-        xml.push_str(&format!(
-            "<w:ind w:left=\"{left}\" w:right=\"{right}\" w:{}=\"{}\"",
-            if first < 0 { "hanging" } else { "firstLine" },
-            first.abs()
-        ));
-        for (name, value) in [("leftChars", self.chars[0]), ("rightChars", self.chars[1])] {
-            if let Some(value) = value {
-                xml.push_str(&format!(" w:{name}=\"{value}\""));
-            }
-        }
-        if let Some(value) = self.chars[2] {
-            xml.push_str(&format!(
-                " w:{}=\"{}\"",
-                if value < 0 {
-                    "hangingChars"
-                } else {
-                    "firstLineChars"
-                },
-                i32::from(value).abs()
-            ));
-        }
-        xml.push_str("/>");
-        let alignment = self.normalized_alignment();
-        xml.push_str(&format!("<w:jc w:val=\"{alignment}\"/>"));
-        if let Some(value) = self.text_alignment {
-            xml.push_str(&format!("<w:textAlignment w:val=\"{value}\"/>"));
-        }
-        xml
     }
 
     fn normalized_alignment(&self) -> &'static str {
@@ -470,7 +338,6 @@ impl Properties {
         }
     }
 
-    #[cfg(feature = "direct-doc")]
     fn normalized_model_alignment(&self) -> &'static str {
         match self.normalized_alignment() {
             // Match the DOCX parser's stable renderer-facing normalization.
@@ -545,10 +412,23 @@ mod tests {
     use super::*;
     use crate::doc::sprm::{Budget, Sprms};
 
+    fn projected(properties: &Properties) -> serde_json::Value {
+        serde_json::to_value(properties.direct_paragraph()).unwrap()
+    }
+
+    /// (style, color, width, space) of each physical side's border edge.
+    fn border(value: &serde_json::Value, side: &str) -> serde_json::Value {
+        value["borders"][side].clone()
+    }
+
+    fn raw_border(value: &serde_json::Value, side: &str) -> serde_json::Value {
+        value["__paragraphTypographyAcquisition"]["borders"][side]["val"]["raw"].clone()
+    }
+
     #[test]
     fn ptistdinfo_validates_and_ignores_exact_operand_without_consuming_neighbors() {
         for fill in [0x00, 0x55, 0xff] {
-            let baseline = Properties::default().xml();
+            let baseline = projected(&Properties::default());
             let mut bytes = vec![0x6c, 0xc6, 16];
             bytes.extend([fill; 16]);
             bytes.extend([0x07, 0x24, 1]);
@@ -558,13 +438,11 @@ mod tests {
             let (code, operand) = sprms.next(&mut budget).unwrap().unwrap();
             assert_eq!((code, operand.len()), (0xc66c, 17));
             assert!(properties.apply(code, operand).unwrap());
-            assert_eq!(properties.xml(), baseline);
+            assert_eq!(projected(&properties), baseline);
             let (code, operand) = sprms.next(&mut budget).unwrap().unwrap();
             assert_eq!(code, 0x2407);
             assert!(properties.apply(code, operand).unwrap());
-            assert!(properties
-                .xml()
-                .contains("<w:pageBreakBefore w:val=\"1\"/>"));
+            assert!(properties.direct_paragraph().page_break_before);
             assert!(sprms.next(&mut budget).unwrap().is_none());
         }
 
@@ -583,11 +461,11 @@ mod tests {
 
     #[test]
     fn paragraph_revision_session_id_is_validated_and_nonvisual() {
-        let baseline = Properties::default().xml();
+        let baseline = projected(&Properties::default());
         for value in [0, 0x7856_3412, u32::MAX] {
             let mut properties = Properties::default();
             assert!(properties.apply(0x6467, &value.to_le_bytes()).unwrap());
-            assert_eq!(properties.xml(), baseline);
+            assert_eq!(projected(&properties), baseline);
         }
         assert!(Properties::default().apply(0x6467, &[0; 3]).is_err());
         assert!(Properties::default().apply(0x6467, &[0; 5]).is_err());
@@ -601,9 +479,7 @@ mod tests {
         while let Some((code, operand)) = sprms.next(&mut budget).unwrap() {
             assert!(properties.apply(code, operand).unwrap());
         }
-        assert!(properties
-            .xml()
-            .contains("<w:pageBreakBefore w:val=\"1\"/>"));
+        assert!(properties.direct_paragraph().page_break_before);
 
         assert!(Sprms::new(&[0x67, 0x64, 1, 2, 3])
             .next(&mut Budget::default())
@@ -621,38 +497,32 @@ mod tests {
         list.apply(0x845d, &600_i16.to_le_bytes()).unwrap();
         list.apply(0x8460, &(-360_i16).to_le_bytes()).unwrap();
         list.preserve_list_indent(&original);
-        assert!(list
-            .xml()
-            .contains("<w:ind w:left=\"1000\" w:right=\"600\" w:hanging=\"200\"/>"));
-        assert!(original
-            .xml()
-            .contains("<w:ind w:left=\"1000\" w:right=\"0\" w:hanging=\"200\"/>"));
+        let indents = |properties: &Properties| {
+            let paragraph = properties.direct_paragraph();
+            (
+                paragraph.indent_left,
+                paragraph.indent_right,
+                paragraph.indent_first,
+            )
+        };
+        assert_eq!(indents(&list), (50.0, 30.0, -10.0));
+        assert_eq!(indents(&original), (50.0, 0.0, -10.0));
     }
     #[test]
-    fn paragraph_borders_preserve_each_side_and_schema_order() {
+    fn paragraph_borders_preserve_each_side() {
         let mut p = Properties::default();
-        assert!(!p.xml().contains("pBdr"));
+        assert!(p.direct_paragraph().borders.is_none());
         for code in 0x6424..=0x6428 {
             assert!(p.apply(code, &[8, 1, 2, 3]).unwrap());
         }
-        let xml = p.xml();
-        let border = xml
-            .split("<w:pBdr>")
-            .nth(1)
-            .unwrap()
-            .split("</w:pBdr>")
-            .next()
-            .unwrap();
-        let mut offset = 0;
+        let value = projected(&p);
         for side in ["top", "left", "bottom", "right", "between"] {
-            let at = border.find(&format!("<w:{side} ")).unwrap();
-            assert!(at >= offset);
-            offset = at;
-            assert!(border[at..].starts_with(&format!(
-                "<w:{side} w:val=\"single\" w:sz=\"8\" w:color=\"0000FF\" w:space=\"3\""
-            )));
+            assert_eq!(
+                border(&value, side),
+                serde_json::json!({"style": "single", "color": "0000ff", "width": 1.0, "space": 3.0}),
+                "{side}"
+            );
         }
-        assert!(xml.find("</w:pBdr>").unwrap() < xml.find("<w:kinsoku").unwrap());
     }
 
     #[test]
@@ -663,18 +533,22 @@ mod tests {
         assert!(p
             .apply(0xc650, &[8, 0x12, 0x34, 0x56, 0, 16, 3, 7, 0])
             .unwrap());
-        let xml = p.xml();
-        assert!(xml.contains("<w:top w:val=\"single\""));
-        assert!(
-            xml.contains("<w:bottom w:val=\"double\" w:sz=\"16\" w:color=\"123456\" w:space=\"7\"")
+        let value = projected(&p);
+        assert_eq!(border(&value, "top")["style"], "single");
+        assert_eq!(
+            border(&value, "bottom"),
+            serde_json::json!({"style": "double", "color": "123456", "width": 2.0, "space": 7.0})
         );
         p.apply(0xc650, &[8, 0, 0, 0, 0xff, 0, 0, 0, 0]).unwrap();
-        assert!(p.xml().contains("<w:bottom w:val=\"none\""));
-        assert!(p.xml().contains("<w:top w:val=\"single\""));
+        let value = projected(&p);
+        assert_eq!(raw_border(&value, "bottom"), "none");
+        assert_eq!(border(&value, "bottom")["style"], "none");
+        assert_eq!(border(&value, "top")["style"], "single");
         p.apply(0xc650, &[8, 0, 1, 2, 3, 255, 255, 255, 255])
             .unwrap();
-        assert!(p.xml().contains("<w:bottom w:val=\"nil\"/>"));
-        assert!(p.xml().contains("<w:top w:val=\"single\""));
+        let value = projected(&p);
+        assert_eq!(raw_border(&value, "bottom"), "nil");
+        assert_eq!(border(&value, "top")["style"], "single");
         for bad in [&[0][..], &[7, 0, 0, 0, 0, 0, 0, 0], &[8, 0, 0]] {
             assert!(p.apply(0xc650, bad).is_err());
         }
@@ -686,23 +560,28 @@ mod tests {
         p.apply(0x6425, &[8, 1, 2, 0]).unwrap();
         p.apply(0xc651, &[8, 255, 0, 0, 0, 8, 3, 0, 0]).unwrap();
         p.apply(0x2441, &[1]).unwrap();
-        let xml = p.xml();
-        assert!(xml.contains("<w:left w:val=\"double\""));
-        assert!(xml.contains("<w:right w:val=\"single\""));
+        let value = projected(&p);
+        assert_eq!(border(&value, "left")["style"], "double");
+        assert_eq!(border(&value, "right")["style"], "single");
         p.apply(0x2441, &[0]).unwrap();
-        assert!(p.xml().contains("<w:left w:val=\"single\""));
-        assert!(p.xml().contains("<w:right w:val=\"double\""));
+        let value = projected(&p);
+        assert_eq!(border(&value, "left")["style"], "single");
+        assert_eq!(border(&value, "right")["style"], "double");
     }
 
     #[test]
     fn negative_line_spacing_is_exact_even_when_multiplier_flag_is_set() {
         let mut p = Properties::default();
+        let spacing = |p: &Properties| {
+            let spacing = p.direct_paragraph().line_spacing.unwrap();
+            (spacing.value, spacing.rule)
+        };
         p.apply(0x6412, &[0xd4, 0xfe, 1, 0]).unwrap(); // -300 twips
-        assert!(p.xml().contains("w:line=\"300\" w:lineRule=\"exact\""));
+        assert_eq!(spacing(&p), (15.0, "exact".to_owned()));
         p.apply(0x6412, &[0x68, 1, 1, 0]).unwrap();
-        assert!(p.xml().contains("w:line=\"360\" w:lineRule=\"auto\""));
+        assert_eq!(spacing(&p), (1.5, "auto".to_owned()));
         p.apply(0x6412, &[0x68, 1, 0, 0]).unwrap();
-        assert!(p.xml().contains("w:line=\"360\" w:lineRule=\"atLeast\""));
+        assert_eq!(spacing(&p), (18.0, "atLeast".to_owned()));
         assert!(p.apply(0x6412, &[0, 0, 2, 0]).is_err());
     }
 
@@ -713,10 +592,16 @@ mod tests {
         p.apply(0x8460, &(-360i16).to_le_bytes()).unwrap();
         p.apply(0xa413, &240u16.to_le_bytes()).unwrap();
         p.apply(0xa413, &[0, 0]).unwrap();
-        assert!(p
-            .xml()
-            .contains("w:left=\"720\" w:right=\"0\" w:hanging=\"360\""));
-        assert!(p.xml().contains("w:before=\"0\""));
+        let paragraph = p.direct_paragraph();
+        assert_eq!(
+            (
+                paragraph.indent_left,
+                paragraph.indent_right,
+                paragraph.indent_first
+            ),
+            (36.0, 0.0, -18.0)
+        );
+        assert_eq!(paragraph.space_before, 0.0);
     }
 
     #[test]
@@ -725,12 +610,16 @@ mod tests {
         p.apply(0x840f, &720u16.to_le_bytes()).unwrap();
         p.apply(0x840e, &360u16.to_le_bytes()).unwrap();
         p.apply(0x2441, &[1]).unwrap();
-        assert!(p.xml().contains("w:left=\"360\" w:right=\"720\""));
+        let sides = |p: &Properties| {
+            let paragraph = p.direct_paragraph();
+            (paragraph.indent_left, paragraph.indent_right)
+        };
+        assert_eq!(sides(&p), (18.0, 36.0));
         p.apply(0x845d, &240u16.to_le_bytes()).unwrap();
-        assert!(p.xml().contains("w:left=\"360\" w:right=\"240\""));
+        assert_eq!(sides(&p), (18.0, 12.0));
         let mut single = Properties::default();
         single.apply(0x840f, &720u16.to_le_bytes()).unwrap();
         single.apply(0x2441, &[1]).unwrap();
-        assert!(single.xml().contains("w:left=\"0\" w:right=\"720\""));
+        assert_eq!(sides(&single), (0.0, 36.0));
     }
 }

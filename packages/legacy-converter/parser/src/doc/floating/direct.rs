@@ -1,7 +1,7 @@
 //! Direct-model projection of already validated floating pictures and
 //! drawing shapes of the main and header documents.
 
-use super::{shape, unsupported, Content, Mode, Part, ResolvedDrawing, Store};
+use super::{shape, unsupported, Content, Part, ResolvedDrawing, Store};
 use crate::doc::pictures::DirectPictureResource;
 use docx_model::{
     AnchorAcquisitionWire, AnchorAxisChoiceWire, AnchorAxisWire, AnchorBehaviorWire,
@@ -72,7 +72,7 @@ impl Store<'_> {
         cp: usize,
         remaining_bytes: &mut usize,
     ) -> Result<Option<DirectFloating>, String> {
-        let Some(facts) = self.resolve(part, cp, Mode::Direct)? else {
+        let Some(facts) = self.resolve(part, cp)? else {
             return Ok(None);
         };
         let occurrence_id = format!("legacy-doc-float-{}", facts.occurrence);

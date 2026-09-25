@@ -134,8 +134,8 @@ impl NativeAdmission {
                 // sprmTTextFlow from UpxTapx). Keep that order gated.
                 let text_flow_before = row.cells.iter().any(|cell| cell_text_flow(cell.flags) != 0);
                 // Row::apply records the last selection and discards the
-                // prepared shading layers; it keeps returning false for the
-                // XML conversion, which does not interpret table styles.
+                // prepared shading layers; it returns false because TIstd is
+                // admitted here, not by the ordinary row property path.
                 row.apply(code, operand)?;
                 Ok(if self.last_tistd_blocked || text_flow_before {
                     NativeAdmissionApply::HandledUnsupported

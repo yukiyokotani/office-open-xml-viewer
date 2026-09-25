@@ -180,8 +180,7 @@ impl Store {
         let counter = if numberless {
             0
         } else {
-            let value = selected.ok_or_else(|| unsupported("invalid Word list restart limit"))?;
-            value
+            selected.ok_or_else(|| unsupported("invalid Word list restart limit"))?
         };
         // This real paragraph restarts every deeper virtual sequence whose
         // candidate threshold is greater than the encountered level.
@@ -361,7 +360,6 @@ mod tests {
             legal: false,
             restart: (!matches!(format, 0x17 | 0xff)).then_some(index),
             follow: 0,
-            tentative: false,
             papx: &[],
             chpx: &[],
             text,
@@ -386,8 +384,6 @@ mod tests {
             lists: vec![List {
                 id: 42,
                 styles: [0xfff; 9],
-                simple: levels.len() == 1,
-                hybrid: levels.len() > 1,
                 auto_number: false,
                 levels,
             }],

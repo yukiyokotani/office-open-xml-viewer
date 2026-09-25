@@ -1,22 +1,18 @@
-//! Word Binary File (`.doc`) compatibility subset.
+//! Word Binary File (`.doc`) compatibility subset, projected directly into the
+//! DOCX renderer model (`direct_model`).
 //!
-//! The reader accepts Word 97-2003 FIB/CLX piece tables and preserves main-story
-//! text, paragraphs, tabs, line breaks, page breaks, and displayed field results.
-//! Section geometry, character formatting and passive JPEG/PNG pictures
-//! (inline and explicitly positioned main-story floats) are preserved.
-//! Formatted header/footer stories use ordinary OOXML parts; passive page fields
-//! retain their dynamic meaning. Note content uses ordinary OOXML parts.
-//! Advanced floating drawings, revisions, and OLE are
-//! deliberately not inferred. See [MS-DOC] 2.5.1 (FIB), 2.8.35 (Clx), and
-//! 2.9.177 (PlcPcd). Unsupported/encrypted inputs fail closed.
+//! The reader accepts Word 97-2003 FIB/CLX piece tables and projects main-story
+//! text, paragraphs, tabs, line breaks, page breaks and displayed field
+//! results, section geometry, character and paragraph formatting, tables,
+//! numbering, header/footer and note stories, and passive pictures and drawing
+//! shapes. Anything outside the supported subset fails closed rather than
+//! being inferred. See [MS-DOC] 2.5.1 (FIB), 2.8.35 (Clx), and 2.9.177
+//! (PlcPcd). Unsupported/encrypted inputs fail closed.
 
 use crate::cfb::CompoundFile;
-use crate::ooxml::{write_package_bytes, xml_text, ROOT_RELS_DOCX};
 mod border;
 mod character;
-#[cfg(feature = "direct-doc")]
 pub(crate) mod direct_cursor;
-#[cfg(feature = "direct-doc")]
 mod direct_model;
 mod fib;
 mod fkp;
@@ -34,9 +30,7 @@ mod settings;
 mod sprm;
 mod table;
 // Logical table/row/cell indexing for the direct model's style resolution.
-#[cfg(feature = "direct-doc")]
 mod table_context;
-mod table_output;
 mod table_structure;
 mod table_style_condition;
 mod tabs;
@@ -48,18 +42,11 @@ const CCP_TEXT_OFFSET: usize = 0x4c;
 const FC_CLX_OFFSET: usize = 0x01a2;
 const LCB_CLX_OFFSET: usize = 0x01a6;
 const MAX_PIECES: usize = 1_000_000;
-// Resource policy independent of the caller's compressed output ZIP ceiling.
-const MAX_DOCUMENT_XML_BYTES: usize = 256 * 1024 * 1024;
 /// Implementation resource policy for each retained source stream, not an
 /// MS-DOC format limit.
 const MAX_DOC_STREAM_BYTES: usize = 256 * 1024 * 1024;
 const MAX_MAIN_STORY_UNITS: usize = 64 * 1024 * 1024;
 const MAX_STORY_CONTROLS: usize = 1_000_000;
-
-pub struct DocConversion {
-    pub bytes: Vec<u8>,
-    pub warnings: Vec<String>,
-}
 
 /// Borrowed, typed facts acquired from the DOC streams before any output
 /// representation is chosen. The callback scope keeps the backing stream
@@ -71,17 +58,14 @@ struct AcquiredDoc<'a> {
     sections: Vec<sections::Section>,
     headers: Option<headers::Headers<'a>>,
     formatting: formatting::Formatting<'a>,
-    /// MS-DOC 2.8.25 PlcfFldMom. Only the direct model consumes it, so a
-    /// malformed table does not change the byte converter's behavior.
-    #[cfg(feature = "direct-doc")]
+    /// MS-DOC 2.8.25 PlcfFldMom, consumed by the direct model's field
+    /// evaluation.
     main_fields: Result<header_fields::Table, String>,
     /// PlcfFldFtn (0x12A) and PlcfFldEdn (0x21A), consumed only by the direct
     /// model; CPs are relative to each note document.
-    #[cfg(feature = "direct-doc")]
     note_fields: [Result<header_fields::Table, String>; 2],
     /// MS-DOC 2.5.15 effective nFib, which scopes DOP versus section note
     /// properties (MS-DOC 2.7.2).
-    #[cfg(feature = "direct-doc")]
     effective_nfib: u16,
     note_references: notes::References,
     pictures: pictures::Store<'a>,
@@ -97,50 +81,27 @@ enum Token {
     ColumnBreak,
     Picture,
     FloatingPicture,
-    FieldBegin(String),
-    FieldEnd,
     NoteMarker,
     NoteReference(notes::Reference),
     /// A field Word evaluates for display, projected by the direct model only.
-    #[cfg(feature = "direct-doc")]
     EvaluatedField(Box<direct_model::fields::Evaluated>),
     /// An automatic note-number character inside note text (the DOCX
     /// `footnoteRef`/`endnoteRef`), projected by the direct model only.
-    #[cfg(feature = "direct-doc")]
     NoteNumber(notes::Kind),
     /// A displayed token inside a hyperlink or `\h` field result, projected
     /// by the direct model only.
-    #[cfg(feature = "direct-doc")]
     Linked(Box<direct_model::fields::Linked>),
 }
 
-#[derive(Default)]
-struct StoryParts {
-    parts: Vec<(String, String)>,
-    relationships: String,
-    content_types: String,
-    omitted_floating: bool,
-}
-
-pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<DocConversion, String> {
-    with_acquired_doc(cfb, false, |facts| {
-        build_conversion(max_output_bytes, facts)
-    })
-}
-
-#[cfg(feature = "direct-doc")]
 pub(crate) fn direct_model(
     cfb: &CompoundFile<'_>,
     max_model_bytes: usize,
 ) -> Result<direct_model::DirectDocResult, String> {
-    with_acquired_doc(cfb, true, |facts| {
-        direct_model::build(facts, max_model_bytes)
-    })
+    with_acquired_doc(cfb, |facts| direct_model::build(facts, max_model_bytes))
 }
 
 fn with_acquired_doc<T>(
     cfb: &CompoundFile<'_>,
-    interpret_table_styles: bool,
     visit: impl FnOnce(AcquiredDoc<'_>) -> Result<T, String>,
 ) -> Result<T, String> {
     // MS-DOC 2.1: the WordDocument, table and Data streams are children of
@@ -205,13 +166,11 @@ fn with_acquired_doc<T>(
         .map_err(unsupported)?
         .unwrap_or_default();
     let mut formatting = formatting::Formatting::read(&word, &table, &data)?;
-    formatting.configure_table_styles(effective_nfib, interpret_table_styles);
+    formatting.configure_table_styles(effective_nfib, true);
     let note_references = notes::References::read(&note_stories, &story, &mut formatting)?;
     let pictures = pictures::Store::new(&data);
     let floating = floating::Store::read_stories(&word, &table, clx, ccp_text)?;
-    #[cfg(feature = "direct-doc")]
     let main_fields = header_fields::Table::read_at(&word, &table, 0x11a, ccp_text);
-    #[cfg(feature = "direct-doc")]
     let note_fields = [(0x12a, 0x50), (0x21a, 0x60)].map(|(fib_offset, length_offset)| {
         let length = u32_at(&word, length_offset)? as usize;
         header_fields::Table::read_at(&word, &table, fib_offset, length)
@@ -223,198 +182,12 @@ fn with_acquired_doc<T>(
         sections,
         headers,
         formatting,
-        #[cfg(feature = "direct-doc")]
         main_fields,
-        #[cfg(feature = "direct-doc")]
         note_fields,
-        #[cfg(feature = "direct-doc")]
         effective_nfib,
         note_references,
         pictures,
         floating,
-    })
-}
-
-fn build_conversion(
-    max_output_bytes: usize,
-    facts: AcquiredDoc<'_>,
-) -> Result<DocConversion, String> {
-    let AcquiredDoc {
-        document_settings,
-        story,
-        note_stories,
-        sections,
-        headers,
-        mut formatting,
-        note_references,
-        mut pictures,
-        mut floating,
-        #[cfg(feature = "direct-doc")]
-            main_fields: _,
-        #[cfg(feature = "direct-doc")]
-            note_fields: _,
-        #[cfg(feature = "direct-doc")]
-            effective_nfib: _,
-    } = facts;
-    let document_xml = build_formatted_story(
-        &story,
-        Content::Document(&sections, Some(&note_references)),
-        Some(&mut formatting),
-        Some(&mut pictures),
-        Some(&mut floating),
-        MAX_DOCUMENT_XML_BYTES,
-    )?;
-    let document_picture_relationships = pictures.relationships();
-    let header_parts = headers
-        .as_ref()
-        .map(|h| {
-            h.build_parts(
-                &mut formatting,
-                &mut pictures,
-                MAX_DOCUMENT_XML_BYTES.saturating_sub(document_xml.len()),
-            )
-        })
-        .transpose()?
-        .unwrap_or_default();
-    let mut note_parts = StoryParts::default();
-    let mut remaining = MAX_DOCUMENT_XML_BYTES.saturating_sub(document_xml.len());
-    for (_, xml) in &header_parts.parts {
-        remaining = remaining.checked_sub(xml.len()).ok_or("OUTPUT_TOO_LARGE")?;
-    }
-    for notes in note_stories.iter().flatten() {
-        let output = notes.build_parts(&mut formatting, &mut pictures, remaining)?;
-        for (_, xml) in &output.parts {
-            remaining = remaining.checked_sub(xml.len()).ok_or("OUTPUT_TOO_LARGE")?;
-        }
-        note_parts.parts.extend(output.parts);
-        note_parts.content_types.push_str(&output.content_types);
-        note_parts.relationships.push_str(&output.relationships);
-        note_parts.omitted_floating |= output.omitted_floating;
-    }
-    let numbering_xml = formatting.numbering_output.xml(remaining)?;
-    let mut content_types = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>"#.to_string();
-    if document_settings.is_some() {
-        content_types.push_str(r#"<Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>"#);
-    }
-    content_types.push_str(&header_parts.content_types);
-    content_types.push_str(&note_parts.content_types);
-    if numbering_xml.is_some() {
-        content_types.push_str(r#"<Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>"#);
-    }
-    let mut media = pictures.parts();
-    media.extend(floating.parts());
-    if !media.is_empty() {
-        content_types.push_str(r#"<Default Extension="png" ContentType="image/png"/><Default Extension="jpg" ContentType="image/jpeg"/>"#);
-    }
-    if media.iter().any(|(name, _)| name.ends_with(".emf")) {
-        content_types.push_str(r#"<Default Extension="emf" ContentType="image/x-emf"/>"#);
-    }
-    if media.iter().any(|(name, _)| name.ends_with(".wmf")) {
-        content_types.push_str(r#"<Default Extension="wmf" ContentType="image/wmf"/>"#);
-    }
-    content_types.push_str("</Types>");
-    let mut parts: Vec<(String, String)> = vec![
-        ("[Content_Types].xml".into(), content_types),
-        ("_rels/.rels".into(), ROOT_RELS_DOCX.to_string()),
-        ("word/document.xml".into(), document_xml),
-    ];
-    let mut relationships = String::new();
-    if let Some(xml) = numbering_xml {
-        parts.push(("word/numbering.xml".into(), xml));
-        relationships.push_str(r#"<Relationship Id="rIdNumbering" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/>"#);
-    }
-    if let Some(properties) = &document_settings {
-        parts.push(("word/settings.xml".into(), properties.xml()));
-        relationships.push_str(r#"<Relationship Id="rIdSettings" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/>"#);
-    }
-    relationships.push_str(&document_picture_relationships);
-    relationships.push_str(&floating.relationships());
-    relationships.push_str(&header_parts.relationships);
-    relationships.push_str(&note_parts.relationships);
-    parts.extend(header_parts.parts);
-    parts.extend(note_parts.parts);
-    if !relationships.is_empty() {
-        parts.push(("word/_rels/document.xml.rels".into(), format!(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{relationships}</Relationships>"#)));
-    }
-    let mut warnings = vec![
-        "legacy-doc:advanced-table-formatting-and-embedded-objects-omitted".into(),
-        "legacy-doc:advanced-section-properties-omitted".into(),
-    ];
-    if header_parts.omitted_floating {
-        warnings.push("legacy-doc:header-footer-floating-drawings-omitted".into());
-    }
-    if note_stories.iter().flatten().any(|n| !n.entries.is_empty()) {
-        warnings.push("legacy-doc:note-numbering-and-custom-separators-incomplete".into());
-    }
-    if note_parts.omitted_floating {
-        warnings.push("legacy-doc:note-floating-drawings-omitted".into());
-    }
-    if note_stories
-        .iter()
-        .flatten()
-        .any(|n| n.story.text.contains('\u{13}'))
-    {
-        warnings.push("legacy-doc:note-fields-use-cached-results".into());
-    }
-    if headers
-        .as_ref()
-        .is_some_and(|h| h.story.text.contains('\u{13}'))
-    {
-        warnings.push(
-            "legacy-doc:header-footer-fields-use-cached-results-except-supported-page-fields"
-                .into(),
-        );
-    }
-    if pictures.omitted {
-        warnings.push("legacy-doc:unsupported-inline-pictures-omitted".into());
-    }
-    if floating.omitted {
-        warnings.push("legacy-doc:unsupported-floating-drawings-omitted".into());
-    }
-    if document_settings.is_none() {
-        warnings.push("legacy-doc:missing-document-properties-default-tab-interval".into());
-    }
-    if formatting.unsupported_character_properties {
-        warnings.push("legacy-doc:unsupported-character-properties-omitted".into());
-    }
-    if formatting.numbering_output.omitted {
-        warnings.push("legacy-doc:unsupported-numbering-text-or-autonum-omitted".into());
-    }
-    if formatting.unsupported_paragraph_properties {
-        warnings.push("legacy-doc:unsupported-paragraph-properties-omitted".into());
-    }
-    if formatting.unsupported_piece_properties {
-        warnings.push("legacy-doc:unsupported-piece-properties-omitted".into());
-    }
-    if formatting.unsupported_table_properties {
-        warnings.push("legacy-doc:unsupported-table-properties-omitted".into());
-    }
-    if formatting.missing_tables {
-        warnings.push("legacy-doc:missing-formatting-tables-default-character-properties".into());
-    }
-    if sections.is_empty() {
-        warnings.push("legacy-doc:missing-section-table-default-page-geometry".into());
-    }
-    if sections.iter().any(|s| s.incomplete_margins) {
-        warnings.push("legacy-doc:incomplete-section-margin-defaults".into());
-    }
-    if parts
-        .iter()
-        .try_fold(0usize, |sum, (_, body)| sum.checked_add(body.len()))
-        .is_none_or(|size| size > MAX_DOCUMENT_XML_BYTES)
-    {
-        return Err("OUTPUT_TOO_LARGE".into());
-    }
-    Ok(DocConversion {
-        bytes: write_package_bytes(
-            parts
-                .iter()
-                .map(|(name, body)| (name.as_str(), body.as_bytes()))
-                .chain(media.iter().map(|(name, bytes)| (name.as_str(), *bytes))),
-            max_output_bytes,
-        )?,
-        warnings,
     })
 }
 
@@ -704,404 +477,11 @@ fn tokenize_with_fields(
     paragraphs
 }
 
-#[cfg(test)]
-fn build_document_xml(text: &str, sections: &[sections::Section]) -> Result<String, String> {
-    build_formatted_document(
-        &Story {
-            text: text.into(),
-            pieces: Vec::new(),
-            prcs: Vec::new(),
-        },
-        sections,
-        None,
-        None,
-        None,
-        usize::MAX,
-    )
-}
-
-#[cfg(test)]
-fn build_formatted_document(
-    story: &Story<'_>,
-    sections: &[sections::Section],
-    formatting: Option<&mut formatting::Formatting<'_>>,
-    pictures: Option<&mut pictures::Store<'_>>,
-    floating: Option<&mut floating::Store<'_>>,
-    max_bytes: usize,
-) -> Result<String, String> {
-    build_formatted_story(
-        story,
-        Content::Document(sections, None),
-        formatting,
-        pictures,
-        floating,
-        max_bytes,
-    )
-}
-
-enum Content<'a> {
-    Document(&'a [sections::Section], Option<&'a notes::References>),
-    Note {
-        kind: notes::Kind,
-        id: usize,
-        text: &'a str,
-        cp: usize,
-        automatic: bool,
-    },
-    HeaderFooter {
-        kind: &'static str,
-        text: &'a str,
-        cp: usize,
-        fields: &'a header_fields::Table,
-    },
-}
-
-fn build_formatted_story(
-    story: &Story<'_>,
-    content: Content<'_>,
-    mut formatting: Option<&mut formatting::Formatting<'_>>,
-    mut pictures: Option<&mut pictures::Store<'_>>,
-    mut floating: Option<&mut floating::Store<'_>>,
-    max_bytes: usize,
-) -> Result<String, String> {
-    if let Some(formatting) = formatting.as_deref_mut() {
-        formatting.numbering_output.begin_story();
-    }
-    let (text, sections, story_cp) = match content {
-        Content::Document(sections, _) => (story.text.as_str(), sections, 0),
-        Content::HeaderFooter { text, cp, .. } => (text, &[][..], cp),
-        Content::Note { text, cp, .. } => (text, &[][..], cp),
-    };
-    // Every control can introduce a paragraph, token or field-stack entry.
-    // Charge before constructing these arrays, not only after XML expansion.
-    if text
-        .bytes()
-        .filter(|b| *b < 32)
-        .take(MAX_STORY_CONTROLS + 1)
-        .count()
-        > MAX_STORY_CONTROLS
-    {
-        return Err(unsupported("Word story structure budget exceeded"));
-    }
-    let mut xml = match content {
-        Content::Document(..) => String::from(
-            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>"#,
-        ),
-        Content::Note { kind, id, .. } => format!("<w:{} w:id=\"{id}\">", kind.tag()),
-        Content::HeaderFooter { kind, .. } => {
-            let tag = if kind == "header" { "hdr" } else { "ftr" };
-            format!(
-                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:{tag} xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">"#
-            )
-        }
-    };
-    let chunks = sections::split_story(text, sections)?;
-    let mut fields = Fields::default();
-    for (section_index, chunk) in chunks.iter().enumerate() {
-        let mut table_writer = table_output::Writer::new(max_bytes.saturating_sub(xml.len()));
-        let base_cp = if section_index == 0 {
-            story_cp
-        } else {
-            sections[section_index - 1].end
-        };
-        let mut paragraphs = tokenize_with_fields(
-            chunk,
-            &mut fields,
-            base_cp,
-            section_index + 1 == chunks.len(),
-        );
-        if let Content::HeaderFooter { fields, .. } = content {
-            fields.restore(chunk, base_cp, &mut paragraphs);
-        }
-        if let Content::Document(_, Some(references)) = content {
-            references.restore(&mut paragraphs);
-        }
-        if section_index + 1 < chunks.len() {
-            // split_story removed this paragraph's section-break character.
-            paragraphs.last_mut().expect("opening paragraph").end_cp =
-                sections[section_index].end - 1;
-        }
-        for (paragraph_index, paragraph) in paragraphs.iter().enumerate() {
-            let mut paragraph_xml = String::new();
-            let xml = &mut paragraph_xml;
-            let style = if let Some(f) = formatting.as_deref() {
-                story
-                    .position(paragraph.end_cp)
-                    .map(|(_, fc, _)| f.paragraph_style(fc))
-                    .transpose()?
-                    .unwrap_or(0)
-            } else {
-                0
-            };
-            xml.push_str("<w:p>");
-            // ECMA-376 17.6.17/18: intermediate sectPr is in the final
-            // paragraph's pPr; only the last section is a direct body child.
-            let section_end =
-                section_index + 1 < chunks.len() && paragraph_index + 1 == paragraphs.len();
-            if formatting.is_some() || section_end {
-                xml.push_str("<w:pPr>");
-                // CT_PPr orders paragraph-mark rPr before sectPr. The mark's
-                // own character properties determine empty-paragraph metrics.
-                if let Some(f) = formatting.as_deref_mut() {
-                    if let Some((_, fc, piece)) = story.position(paragraph.end_cp) {
-                        xml.push_str(&f.paragraph_xml(style, fc, piece.prm, &story.prcs)?);
-                        xml.push_str(&f.run_xml(style, fc, piece.prm, &story.prcs)?);
-                    }
-                }
-                if section_end {
-                    xml.push_str(&sections[section_index].xml()?);
-                }
-                xml.push_str("</w:pPr>");
-            }
-            for (token, cp) in &paragraph.tokens {
-                match token {
-                    Token::NoteReference(reference) => {
-                        xml.push_str("<w:r>");
-                        if let Some(f) = formatting.as_deref_mut() {
-                            if let Some((_, fc, piece)) = story.position(*cp) {
-                                xml.push_str(&f.run_xml(style, fc, piece.prm, &story.prcs)?);
-                            }
-                        }
-                        xml.push_str(&reference.xml());
-                        xml.push_str("</w:r>");
-                    }
-                    Token::NoteMarker => {
-                        if let Content::Note {
-                            kind,
-                            automatic: true,
-                            ..
-                        } = content
-                        {
-                            if let Some(f) = formatting.as_deref_mut() {
-                                let (_, fc, piece) = story
-                                    .position(*cp)
-                                    .ok_or_else(|| unsupported("Word note marker outside story"))?;
-                                if !f.passive_special_character(
-                                    style,
-                                    fc,
-                                    piece.prm,
-                                    &story.prcs,
-                                )? {
-                                    return Err(unsupported(
-                                        "Word note marker lacks special-character property",
-                                    ));
-                                }
-                                xml.push_str("<w:r>");
-                                xml.push_str(&f.run_xml(style, fc, piece.prm, &story.prcs)?);
-                                xml.push_str(&format!("<w:{}Ref/></w:r>", kind.tag()));
-                            }
-                        }
-                    }
-                    Token::FieldBegin(instruction) => {
-                        xml.push_str("<w:r>");
-                        if let Some(f) = formatting.as_deref_mut() {
-                            if let Some((_, fc, piece)) = story.position(*cp) {
-                                xml.push_str(&f.run_xml(style, fc, piece.prm, &story.prcs)?);
-                            }
-                        }
-                        xml.push_str("<w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText xml:space=\"preserve\">");
-                        xml.push_str(&xml_text(instruction));
-                        xml.push_str("</w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r>");
-                    }
-                    Token::FieldEnd => {
-                        xml.push_str("<w:r><w:fldChar w:fldCharType=\"end\"/></w:r>")
-                    }
-                    Token::Text(text) => {
-                        write_text_runs(xml, text, *cp, story, style, &mut formatting, max_bytes)?;
-                    }
-                    Token::FloatingPicture => {
-                        if let Some(store) = floating.as_deref_mut() {
-                            let mut drawing = None;
-                            if let Some(f) = formatting.as_deref_mut() {
-                                if let Some((_, fc, piece)) = story.position(*cp) {
-                                    if f.passive_special_character(
-                                        style,
-                                        fc,
-                                        piece.prm,
-                                        &story.prcs,
-                                    )? {
-                                        let content = store.drawing(*cp)?;
-                                        if !content.is_empty() {
-                                            drawing = Some((
-                                                f.run_xml(style, fc, piece.prm, &story.prcs)?,
-                                                content,
-                                            ));
-                                        }
-                                    }
-                                }
-                            }
-                            if let Some((properties, content)) = drawing {
-                                xml.push_str("<w:r>");
-                                xml.push_str(&properties);
-                                xml.push_str(&content);
-                                xml.push_str("</w:r>");
-                            } else {
-                                store.omitted = true;
-                            }
-                        }
-                    }
-                    Token::Picture => {
-                        if let Some(store) = pictures.as_deref_mut() {
-                            let mut drawing = None;
-                            if let Some(f) = formatting.as_deref_mut() {
-                                if let Some((_, fc, piece)) = story.position(*cp) {
-                                    if let Some(offset) = f.inline_picture_location(
-                                        style,
-                                        fc,
-                                        piece.prm,
-                                        &story.prcs,
-                                    )? {
-                                        let content = store.drawing(offset)?;
-                                        if !content.is_empty() {
-                                            drawing = Some((
-                                                f.run_xml(style, fc, piece.prm, &story.prcs)?,
-                                                content,
-                                            ));
-                                        }
-                                    }
-                                }
-                            }
-                            if let Some((properties, content)) = drawing {
-                                xml.push_str("<w:r>");
-                                xml.push_str(&properties);
-                                xml.push_str(&content);
-                                xml.push_str("</w:r>");
-                            } else {
-                                store.omitted = true;
-                            }
-                        }
-                    }
-                    _ => {
-                        xml.push_str("<w:r>");
-                        if let Some(f) = formatting.as_deref_mut() {
-                            if let Some((_, fc, piece)) = story.position(*cp) {
-                                xml.push_str(&f.run_xml(style, fc, piece.prm, &story.prcs)?);
-                            }
-                        }
-                        xml.push_str(match token {
-                            Token::Tab => "<w:tab/>",
-                            Token::LineBreak => "<w:br/>",
-                            Token::PageBreak => "<w:br w:type=\"page\"/>",
-                            Token::ColumnBreak => "<w:br w:type=\"column\"/>",
-                            Token::Text(_)
-                            | Token::Picture
-                            | Token::FloatingPicture
-                            | Token::FieldBegin(_)
-                            | Token::FieldEnd => {
-                                unreachable!()
-                            }
-                            Token::NoteMarker | Token::NoteReference(_) => unreachable!(),
-                            #[cfg(feature = "direct-doc")]
-                            Token::EvaluatedField(_) => unreachable!(),
-                            #[cfg(feature = "direct-doc")]
-                            Token::NoteNumber(_) => unreachable!(),
-                            #[cfg(feature = "direct-doc")]
-                            Token::Linked(_) => unreachable!(),
-                        });
-                        xml.push_str("</w:r>");
-                    }
-                }
-                if xml.len() > max_bytes {
-                    return Err("OUTPUT_TOO_LARGE".into());
-                }
-            }
-            xml.push_str("</w:p>");
-            if xml.len() > max_bytes {
-                return Err("OUTPUT_TOO_LARGE".into());
-            }
-            let mut table_properties = table::Properties::default();
-            if let Some(f) = formatting.as_deref_mut() {
-                if let Some((_, fc, piece)) = story.position(paragraph.end_cp) {
-                    table_properties = f.table_properties(fc, piece.prm, &story.prcs)?;
-                }
-            }
-            if section_end && table_properties.depth()? != 0 {
-                return Err(unsupported("Word section break inside table"));
-            }
-            table_writer.push(table_properties, paragraph.mark, paragraph_xml)?;
-        }
-        xml.push_str(&table_writer.finish()?);
-    }
-    if let Content::Document(..) = content {
-        if let Some(last) = sections.last() {
-            xml.push_str(&last.xml()?);
-        } else {
-            // Existing compatibility policy when no section table is available;
-            // explicitly warned, not inferred from the file's name or content.
-            xml.push_str("<w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/><w:pgMar w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\" w:header=\"720\" w:footer=\"720\" w:gutter=\"0\"/></w:sectPr>");
-        }
-        xml.push_str("</w:body></w:document>");
-    } else if let Content::Note { kind, .. } = content {
-        xml.push_str(&format!("</w:{}>", kind.tag()));
-    } else if let Content::HeaderFooter { kind, .. } = content {
-        xml.push_str(if kind == "header" {
-            "</w:hdr>"
-        } else {
-            "</w:ftr>"
-        });
-    }
-    if xml.len() > max_bytes {
-        return Err("OUTPUT_TOO_LARGE".into());
-    }
-    Ok(xml)
-}
-
-fn write_text_runs(
-    xml: &mut String,
-    text: &str,
-    cp: usize,
-    story: &Story<'_>,
-    style: usize,
-    formatting: &mut Option<&mut formatting::Formatting<'_>>,
-    max_bytes: usize,
-) -> Result<(), String> {
-    if !text.is_empty() && xml.len() > max_bytes {
-        return Err("OUTPUT_TOO_LARGE".into());
-    }
-    let write = |xml: &mut String, text: &str, properties: &str| -> Result<(), String> {
-        // Check expansion before allocating an escaped copy of a potentially
-        // document-sized run. Also bound the raw part before ZIP construction.
-        let escaped_len = text
-            .chars()
-            .try_fold(0usize, |length, c| {
-                length.checked_add(match c {
-                    '&' => 5,
-                    '<' | '>' => 4,
-                    _ => c.len_utf8(),
-                })
-            })
-            .ok_or("OUTPUT_TOO_LARGE")?;
-        let tags_len = "<w:r><w:t xml:space=\"preserve\"></w:t></w:r>".len();
-        let extra = escaped_len
-            .checked_add(properties.len())
-            .and_then(|n| n.checked_add(tags_len))
-            .ok_or("OUTPUT_TOO_LARGE")?;
-        if extra > max_bytes.saturating_sub(xml.len()) {
-            return Err("OUTPUT_TOO_LARGE".into());
-        }
-        xml.push_str("<w:r>");
-        xml.push_str(properties);
-        xml.push_str("<w:t xml:space=\"preserve\">");
-        xml.push_str(&xml_text(text));
-        xml.push_str("</w:t></w:r>");
-        Ok(())
-    };
-    visit_text_runs(
-        text,
-        cp,
-        story,
-        formatting,
-        |f, fc, prm| f.run_xml(style, fc, prm, &story.prcs),
-        |text, properties| write(xml, text, properties.as_deref().unwrap_or("")),
-    )
-}
-
-/// Visit consecutive physical character-format ranges without choosing an
-/// output representation. MS-DOC CLX/PCD and CHPX ownership, including UTF-16
-/// positions, remains shared by the XML and direct-model producers. Resolve
-/// once per range, retain one result, and move it to the sink without cloning
-/// model fields. Stop immediately on a sink error.
+/// Visit consecutive physical character-format ranges. MS-DOC CLX/PCD and
+/// CHPX ownership, including UTF-16 positions, is resolved here once for
+/// every direct-model run producer. Resolve once per range, retain one
+/// result, and move it to the sink without cloning model fields. Stop
+/// immediately on a sink error.
 fn visit_text_runs<T>(
     text: &str,
     mut cp: usize,
@@ -1182,7 +562,7 @@ mod tests {
     fn acquisition_error(word: Vec<u8>) -> String {
         let bytes = build_scoped_cfb(&[("WordDocument", word)]);
         let cfb = CompoundFile::open(&bytes).unwrap();
-        super::with_acquired_doc(&cfb, false, |_| Ok(())).unwrap_err()
+        super::with_acquired_doc(&cfb, |_| Ok(())).unwrap_err()
     }
 
     /// A Word 97 document with one Unicode piece, as root streams.
@@ -1225,7 +605,7 @@ mod tests {
 
     fn acquire(bytes: &[u8]) -> Result<usize, String> {
         let cfb = CompoundFile::open(bytes).unwrap();
-        super::with_acquired_doc(&cfb, false, |facts| Ok(facts.story.text.len()))
+        super::with_acquired_doc(&cfb, |facts| Ok(facts.story.text.len()))
     }
 
     #[test]
@@ -1303,19 +683,44 @@ mod tests {
         pieces: &[(&str, usize, bool)],
         ranges: &[u32],
         properties: &[&[u8]],
-    ) -> String {
+    ) -> serde_json::Value {
         formatted_fixture_kind(pieces, ranges, properties, false)
     }
 
+    /// The fixture story projected by the direct model, as body JSON.
     fn formatted_fixture_kind(
         pieces: &[(&str, usize, bool)],
         ranges: &[u32],
         properties: &[&[u8]],
         paragraph: bool,
-    ) -> String {
+    ) -> serde_json::Value {
         with_formatted_fixture(pieces, ranges, properties, paragraph, |story, f| {
-            super::build_formatted_document(story, &[], Some(f), None, None, usize::MAX).unwrap()
+            serde_json::to_value(super::direct_model::project_story_for_test(story, f).unwrap())
+                .unwrap()
         })
+    }
+
+    /// (text, bold, font size in points) of each paragraph's text runs.
+    fn text_runs(body: &serde_json::Value) -> Vec<Vec<(String, bool, f64)>> {
+        body.as_array()
+            .unwrap()
+            .iter()
+            .filter(|element| element["type"] == "paragraph")
+            .map(|paragraph| {
+                paragraph["runs"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|run| {
+                        (
+                            run["text"].as_str().unwrap().to_owned(),
+                            run["bold"].as_bool().unwrap(),
+                            run["fontSize"].as_f64().unwrap(),
+                        )
+                    })
+                    .collect()
+            })
+            .collect()
     }
 
     fn with_formatted_fixture<T>(
@@ -1478,7 +883,7 @@ mod tests {
 
     #[test]
     fn restores_table_using_the_row_marks_physical_papx() {
-        let xml = formatted_fixture_kind(
+        let body = formatted_fixture_kind(
             &[("A\u{7}B\u{7}\u{7}\r", 1500, true)],
             &[1500, 1502, 1504, 1505, 1506],
             &[
@@ -1491,85 +896,83 @@ mod tests {
             ],
             true,
         );
-        assert_eq!(xml.matches("<w:tbl>").count(), 1);
-        assert_eq!(xml.matches("<w:tc>").count(), 2);
-        assert_eq!(xml.matches("<w:p>").count(), 3);
-        assert_eq!(xml.matches("<w:gridCol w:w=\"1000\"/>").count(), 2);
-        assert!(xml.contains(">A</w:t>"));
-        assert!(xml.contains(">B</w:t>"));
+        let body = body.as_array().unwrap();
+        assert_eq!(body.len(), 2);
+        let table = &body[0];
+        assert_eq!(table["type"], "table");
+        assert_eq!(table["colWidths"], serde_json::json!([50.0, 50.0]));
+        let rows = table["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        let cells = rows[0]["cells"].as_array().unwrap();
+        let texts: Vec<_> = cells
+            .iter()
+            .map(|cell| text_runs(&cell["content"]))
+            .collect();
+        assert_eq!(
+            texts,
+            [
+                vec![vec![("A".to_owned(), false, 10.0)]],
+                vec![vec![("B".to_owned(), false, 10.0)]]
+            ]
+        );
+        assert_eq!(body[1]["type"], "paragraph");
+        assert_eq!(body[1]["runs"], serde_json::json!([]));
     }
 
     #[test]
     fn formats_reordered_unicode_and_compressed_pieces_by_physical_offsets() {
-        let xml = formatted_fixture(
+        let body = formatted_fixture(
             &[("A\r", 1600, false), ("B\r", 1500, true)],
             &[1500, 1502, 1600, 1604],
             &[&[0x35, 8, 1], &[], &[0x43, 0x4a, 40, 0]],
         );
-        assert!(xml.contains("<w:sz w:val=\"40\"/></w:rPr><w:t xml:space=\"preserve\">A</w:t>"));
-        assert!(xml.contains(
-            "<w:b w:val=\"1\"/><w:sz w:val=\"20\"/></w:rPr><w:t xml:space=\"preserve\">B</w:t>"
-        ));
-        assert!(xml.find(">A</w:t>").unwrap() < xml.find(">B</w:t>").unwrap());
+        assert_eq!(
+            text_runs(&body),
+            [
+                vec![("A".to_owned(), false, 20.0)],
+                vec![("B".to_owned(), true, 10.0)]
+            ]
+        );
     }
 
     #[test]
     fn field_gaps_and_surrogate_pairs_do_not_shift_character_properties() {
         let text = "😀\u{13}HIDDEN\u{14}B\u{15}C\r";
         let end = 1500 + text.encode_utf16().count() as u32 * 2;
-        let xml = formatted_fixture(
+        let body = formatted_fixture(
             &[(text, 1500, false)],
             &[1500, 1520, 1522, end],
             &[&[], &[0x35, 8, 1], &[]],
         );
-        assert!(!xml.contains("HIDDEN"));
-        assert!(xml.contains(
-            "<w:b w:val=\"1\"/><w:sz w:val=\"20\"/></w:rPr><w:t xml:space=\"preserve\">B</w:t>"
-        ));
-        assert!(
-            xml.contains("<w:rPr><w:sz w:val=\"20\"/></w:rPr><w:t xml:space=\"preserve\">C</w:t>")
+        assert_eq!(
+            text_runs(&body),
+            [vec![
+                ("😀".to_owned(), false, 10.0),
+                ("B".to_owned(), true, 10.0),
+                ("C".to_owned(), false, 10.0)
+            ]]
         );
-        assert!(xml.contains('😀'));
     }
 
     #[test]
     fn empty_paragraphs_keep_the_marks_font_size_without_inventing_text() {
-        let xml = formatted_fixture(
+        let body = formatted_fixture(
             &[("\r", 1500, false)],
             &[1500, 1502],
             &[&[0x43, 0x4a, 36, 0]],
         );
-        assert!(xml.contains("<w:rPr><w:sz w:val=\"36\"/></w:rPr></w:pPr></w:p>"));
-        assert!(!xml.contains("<w:t"));
+        assert_eq!(body.as_array().unwrap().len(), 1);
+        assert_eq!(body[0]["runs"], serde_json::json!([]));
+        assert_eq!(body[0]["paragraphMarkFontFacts"]["fontSize"], 18.0);
+        assert_eq!(body[0]["defaultFontSize"], 18.0);
     }
 
     #[test]
-    fn limits_escaped_runs_and_empty_paragraph_expansion_before_packaging() {
+    fn limits_the_main_story_character_count_before_decoding() {
         assert!(super::read_story(&[], &[], super::MAX_MAIN_STORY_UNITS + 1)
             .err()
             .unwrap()
             .contains("character budget"));
-        for text in ["&".repeat(1000), "\r".repeat(1000)] {
-            let story = super::Story {
-                text,
-                pieces: vec![],
-                prcs: vec![],
-            };
-            assert_eq!(
-                super::build_formatted_document(&story, &[], None, None, None, 1024).unwrap_err(),
-                "OUTPUT_TOO_LARGE"
-            );
-        }
-        let story = super::Story {
-            text: "\t".repeat(super::MAX_STORY_CONTROLS + 1),
-            pieces: vec![],
-            prcs: vec![],
-        };
-        assert!(
-            super::build_formatted_document(&story, &[], None, None, None, usize::MAX)
-                .unwrap_err()
-                .contains("structure budget")
-        );
     }
 
     #[test]
@@ -1583,46 +986,6 @@ mod tests {
             tokenize_story(&text),
             vec![vec![Token::Text("shown".into())]]
         );
-    }
-
-    #[test]
-    fn keeps_the_empty_paragraph_that_owns_a_section_break() {
-        let sections = [
-            super::sections::Section::for_test(3, 2),
-            super::sections::Section::for_test(5, 2),
-        ];
-        let xml = super::build_document_xml("A\r\u{c}B\r", &sections).unwrap();
-        assert!(xml.contains(&format!(
-            "</w:r></w:p><w:p><w:pPr>{}</w:pPr></w:p>",
-            sections[0].xml().unwrap()
-        )));
-    }
-
-    #[test]
-    fn writes_section_properties_at_their_ooxml_positions_without_extra_page_breaks() {
-        let sections = [
-            super::sections::Section::for_test(2, 0),
-            super::sections::Section::for_test(6, 2),
-        ];
-        let xml = super::build_document_xml("A\u{c}B\u{c}\u{e}C", &sections).unwrap();
-        assert!(xml.contains("<w:p><w:pPr><w:sectPr>"));
-        assert!(xml.ends_with(&format!(
-            "</w:p>{}</w:body></w:document>",
-            sections[1].xml().unwrap()
-        )));
-        assert_eq!(xml.matches("w:type=\"page\"").count(), 1);
-        assert_eq!(xml.matches("w:type=\"column\"").count(), 1);
-    }
-
-    #[test]
-    fn field_instructions_remain_hidden_across_section_boundaries() {
-        let sections = [
-            super::sections::Section::for_test(3, 2),
-            super::sections::Section::for_test(8, 2),
-        ];
-        let xml = super::build_document_xml("\u{13}X\u{c}Y\u{14}OK\u{15}", &sections).unwrap();
-        assert!(!xml.contains('X') && !xml.contains('Y'));
-        assert!(xml.contains("OK"));
     }
 
     #[test]

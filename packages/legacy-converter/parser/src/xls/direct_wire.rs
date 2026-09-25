@@ -10,18 +10,13 @@ use ooxml_common::resource::{
 use serde::Serialize;
 use std::io::{self, Write};
 
+/// The Normal-style font whose maximum digit width the host measures for the
+/// session's pending drawing anchors.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct MeasurementRequest<'a> {
-    required: bool,
-    font: Option<MeasurementFont<'a>>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct MeasurementFont<'a> {
-    name: &'a str,
-    size_points: f64,
+struct HostLayoutRequest<'a> {
+    family: &'a str,
+    size_pt: f64,
     bold: bool,
     italic: bool,
 }
@@ -55,29 +50,32 @@ impl DirectWire {
         }
     }
 
-    pub(crate) fn measurement_request(&mut self) -> Result<Vec<u8>, String> {
+    /// `null` unless the session awaits a host layout decision for a known
+    /// Normal font; otherwise that font.
+    pub(crate) fn host_layout_request(&mut self) -> Result<Vec<u8>, String> {
         let result = {
             let session = self.session()?;
-            let request = MeasurementRequest {
-                required: session.requires_measurement_decision(),
-                font: session.measurement_font().map(|font| MeasurementFont {
-                    name: &font.name,
-                    size_points: font.size_points,
+            let request = session
+                .requires_measurement_decision()
+                .then(|| session.measurement_font())
+                .flatten()
+                .map(|font| HostLayoutRequest {
+                    family: &font.name,
+                    size_pt: font.size_points,
                     bold: font.bold,
                     italic: font.italic,
-                }),
-            };
+                });
             serialize_bounded(
                 &request,
                 HARD_MAX_XLSX_WORKBOOK_CACHED_JSON_BYTES,
-                "measurement request",
+                "host layout request",
             )
         };
         self.terminal(result)
     }
 
-    pub(crate) fn configure_mdw(&mut self, mdw: Option<f64>) -> Result<(), String> {
-        self.with_session(|session| session.configure_mdw(mdw))
+    pub(crate) fn configure_host_layout(&mut self, mdw: Option<f64>) -> Result<(), String> {
+        self.with_session(|session| session.configure_host_layout(mdw))
     }
 
     pub(crate) fn workbook_bootstrap(&mut self) -> Result<Vec<u8>, String> {
@@ -458,10 +456,8 @@ mod tests {
     #[test]
     fn native_wire_cursor_chunks_rows_and_acknowledges_terminal() {
         let mut wire = DirectWire::new(super::super::direct::tests::wire_fixture());
-        let request: serde_json::Value =
-            serde_json::from_slice(&wire.measurement_request().unwrap()).unwrap();
-        assert_eq!(request["required"], false);
-        assert!(request["font"].is_null());
+        assert_eq!(wire.host_layout_request().unwrap(), b"null");
+        wire.configure_host_layout(None).unwrap();
         let bootstrap: serde_json::Value =
             serde_json::from_slice(&wire.workbook_bootstrap().unwrap()).unwrap();
         assert_eq!(bootstrap["workbook"]["sheets"][0]["name"], "S");
@@ -501,16 +497,27 @@ mod tests {
     }
 
     #[test]
-    fn measurement_request_and_decision_use_the_inherited_session_state() {
+    fn host_layout_request_and_decision_use_the_inherited_session_state() {
         let mut wire = DirectWire::new(super::super::direct::tests::wire_picture_fixture());
         let request: serde_json::Value =
-            serde_json::from_slice(&wire.measurement_request().unwrap()).unwrap();
-        assert_eq!(request["required"], true);
-        assert_eq!(request["font"]["name"], "Calibri");
-        assert_eq!(request["font"]["sizePoints"], 11.0);
-        wire.configure_mdw(Some(7.0)).unwrap();
+            serde_json::from_slice(&wire.host_layout_request().unwrap()).unwrap();
+        assert_eq!(
+            request,
+            serde_json::json!({"family": "Calibri", "sizePt": 11.0, "bold": false, "italic": false})
+        );
+        wire.configure_host_layout(Some(7.0)).unwrap();
+        assert_eq!(wire.host_layout_request().unwrap(), b"null");
         assert!(wire.workbook_bootstrap().is_ok());
-        assert!(wire.configure_mdw(Some(8.0)).is_err());
+        assert!(wire.configure_host_layout(Some(8.0)).is_err());
+        assert!(wire.assert_healthy().is_err());
+    }
+
+    #[test]
+    fn a_measured_width_without_a_pending_decision_fails_closed() {
+        let mut wire = DirectWire::new(super::super::direct::tests::wire_fixture());
+        wire.configure_host_layout(None).unwrap();
+        wire.configure_host_layout(None).unwrap();
+        assert!(wire.configure_host_layout(Some(7.0)).is_err());
         assert!(wire.assert_healthy().is_err());
     }
 

@@ -25,18 +25,17 @@ impl Properties {
             .ok_or_else(|| unsupported("Word resolved font size is absent"))
     }
 
-    /// Project one visible text span. Hidden text is absent from the normal/print
-    /// DOC model, matching the existing DOC-to-OOXML-to-DOCX-parser route.
+    /// Project one visible text span. Hidden text is absent from the
+    /// normal/print DOC model.
     pub(in crate::doc) fn direct_text_run(
         &self,
         text: String,
         fonts: &[String],
     ) -> Result<Option<TextRun>, String> {
-        // Validate referenced fonts before applying visibility, matching the
-        // legacy XML construction step that precedes DOCX run filtering.
+        // Validate referenced fonts before applying visibility: a hidden run
+        // with an invalid font reference still fails closed.
         let axes = self.direct_font_axes(fonts)?;
         let languages = self.resolved_languages()?;
-        let lang_default = languages.default.map(str::to_ascii_lowercase);
         let lang_east_asia = languages.east_asia.map(str::to_ascii_lowercase);
         let lang_bidi = languages.bidi.map(str::to_ascii_lowercase);
         if self.bool_value("vanish").unwrap_or(false) {
@@ -111,7 +110,6 @@ impl Properties {
             bold_cs: self.bool_value("bCs"),
             italic_cs: self.bool_value("iCs"),
             lang_bidi: lang_bidi.clone(),
-            lang_default: lang_default.clone(),
             lang_east_asia: lang_east_asia.clone(),
             char_spacing,
             char_scale,
@@ -187,7 +185,6 @@ impl Properties {
             kerning_threshold_pt: run.kerning,
             languages: TypographyLanguagesWire {
                 bidi: lang_bidi,
-                default: lang_default,
                 east_asia: lang_east_asia,
             },
             ..RunTypographyWire::default()
@@ -205,7 +202,6 @@ impl Properties {
         let axes = self.direct_font_axes(fonts)?;
         let font_size = self.half_points("sz")?;
         let languages = self.resolved_languages()?;
-        let lang_default = languages.default.map(str::to_ascii_lowercase);
         let lang_east_asia = languages.east_asia.map(str::to_ascii_lowercase);
         let lang_bidi = languages.bidi.map(str::to_ascii_lowercase);
         Ok(RunFontFacts {
@@ -224,10 +220,8 @@ impl Properties {
             bold_cs: self.bool_value("bCs"),
             italic_cs: self.bool_value("iCs"),
             lang_bidi,
-            lang_default,
             lang_east_asia,
             kerning: self.half_points("kern")?,
-            ..RunFontFacts::default()
         })
     }
 
@@ -504,38 +498,6 @@ mod tests {
         properties
     }
 
-    fn parsed_run(properties: &Properties, fonts: &[String]) -> serde_json::Value {
-        let document_xml = format!(
-            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r>{}<w:t>x</w:t></w:r></w:p></w:body></w:document>"#,
-            properties.xml(fonts).unwrap(),
-        );
-        let mut bytes = Vec::new();
-        {
-            let mut archive = zip::ZipWriter::new(Cursor::new(&mut bytes));
-            archive
-                .start_file("word/document.xml", SimpleFileOptions::default())
-                .unwrap();
-            archive.write_all(document_xml.as_bytes()).unwrap();
-            archive.finish().unwrap();
-        }
-        let parsed: serde_json::Value =
-            serde_json::from_str(&docx_parser::parse_docx_native(&bytes).unwrap()).unwrap();
-        let mut run = parsed["body"][0]["runs"][0].clone();
-        run.as_object_mut().unwrap().remove("type");
-        run
-    }
-
-    fn assert_parser_parity(properties: &Properties, fonts: &[String]) {
-        let direct = serde_json::to_value(
-            properties
-                .direct_text_run("x".into(), fonts)
-                .unwrap()
-                .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(direct, parsed_run(properties, fonts));
-    }
-
     #[test]
     fn projects_units_flags_color_and_private_typography_without_ids() {
         let properties = applied(&[
@@ -584,10 +546,9 @@ mod tests {
     }
 
     #[test]
-    fn indexed_text_colors_match_the_existing_docx_parser_projection() {
+    fn indexed_text_colors_use_the_ico_palette() {
         for index in 0..17u8 {
             let properties = applied(&[(0x2a42, vec![index])]);
-            assert_parser_parity(&properties, &[]);
             let run = properties
                 .direct_text_run("x".into(), &[])
                 .unwrap()
@@ -598,7 +559,7 @@ mod tests {
     }
 
     #[test]
-    fn highlights_match_the_existing_docx_parser_projection() {
+    fn highlights_use_the_symbolic_palette() {
         let expected = [
             None,
             Some("black"),
@@ -620,7 +581,6 @@ mod tests {
         ];
         for (index, expected) in expected.into_iter().enumerate() {
             let properties = applied(&[(0x2a0c, vec![index as u8])]);
-            assert_parser_parity(&properties, &[]);
             let run = properties
                 .direct_text_run("x".into(), &[])
                 .unwrap()
@@ -646,7 +606,6 @@ mod tests {
                 .unwrap();
             assert!(run.revision.is_none());
             assert_eq!(serde_json::to_value(run).unwrap(), baseline);
-            assert_parser_parity(&properties, &[]);
         }
     }
 
@@ -661,7 +620,6 @@ mod tests {
         .unwrap();
         for operand in [0, 1, 0x80, 0x81] {
             let properties = applied(&[(0x0875, vec![operand])]);
-            assert_parser_parity(&properties, &[]);
             let run = properties
                 .direct_text_run("x".into(), &[])
                 .unwrap()
@@ -671,10 +629,9 @@ mod tests {
     }
 
     #[test]
-    fn complex_script_language_matches_xml_parser_without_family_inference() {
+    fn complex_script_language_resolves_without_family_inference() {
         for (lid, expected) in [(0x0401u16, "ar-sa"), (0x0411, "ja-jp"), (0x0409, "en-us")] {
             let properties = applied(&[(0x485f, lid.to_le_bytes().to_vec())]);
-            assert_parser_parity(&properties, &[]);
             let run = properties
                 .direct_text_run("x".into(), &[])
                 .unwrap()
@@ -698,7 +655,6 @@ mod tests {
 
         for lid in [u16::MAX, 0x0000, 0x007f, 0x0467, 0x040a] {
             let unresolved = applied(&[(0x485f, lid.to_le_bytes().to_vec())]);
-            assert!(unresolved.xml(&[]).is_err(), "LID {lid:04x}");
             assert!(unresolved.direct_text_run("x".into(), &[]).is_err());
             assert!(unresolved.direct_font_facts(&[]).is_err());
         }
@@ -706,22 +662,24 @@ mod tests {
         // Word's DOCX-to-DOC evidence: 0x0000 is "x-none" on the default and
         // East Asian axes, 0x1000 (no LCID) is no language, and a complex-script
         // 0x0400 sets nothing.
-        let none = applied(&[
+        let none_properties = applied(&[
             (0x4873, 0x0000u16.to_le_bytes().to_vec()),
             (0x4874, 0x0000u16.to_le_bytes().to_vec()),
             (0x485f, 0x1000u16.to_le_bytes().to_vec()),
-        ])
-        .direct_text_run("x".into(), &[])
-        .unwrap()
-        .unwrap();
-        assert_eq!(none.lang_default.as_deref(), Some("x-none"));
-        assert_eq!(none.lang_east_asia.as_deref(), Some("x-none"));
-        assert_eq!(none.lang_bidi, None);
-        let custom = applied(&[(0x4873, 0x1000u16.to_le_bytes().to_vec())])
+        ]);
+        assert_eq!(
+            none_properties.resolved_languages().unwrap().default,
+            Some("x-none")
+        );
+        let none = none_properties
             .direct_text_run("x".into(), &[])
             .unwrap()
             .unwrap();
-        assert_eq!(custom.lang_default, None);
+        assert_eq!(none.lang_east_asia.as_deref(), Some("x-none"));
+        assert_eq!(none.lang_bidi, None);
+        let custom = applied(&[(0x4873, 0x1000u16.to_le_bytes().to_vec())]);
+        assert_eq!(custom.resolved_languages().unwrap().default, None);
+        assert!(custom.direct_text_run("x".into(), &[]).unwrap().is_some());
         assert!(applied(&[(0x4874, 0x1000u16.to_le_bytes().to_vec())])
             .direct_text_run("x".into(), &[])
             .is_err());
@@ -731,17 +689,14 @@ mod tests {
             .unwrap();
         assert_eq!(inherited.lang_bidi, None);
 
-        // Projection validates the retained language before visibility, just as
-        // the XML writer validates run properties before the DOCX parser drops
-        // a vanished run.
+        // Projection validates the retained language before visibility.
         let hidden_unknown =
             applied(&[(0x485f, u16::MAX.to_le_bytes().to_vec()), (0x083c, vec![1])]);
-        assert!(hidden_unknown.xml(&[]).is_err());
         assert!(hidden_unknown.direct_text_run("x".into(), &[]).is_err());
     }
 
     #[test]
-    fn modern_default_and_east_asian_languages_match_xml_parser() {
+    fn modern_default_and_east_asian_languages_resolve() {
         let properties = applied(&[
             (0x486d, 0x0411u16.to_le_bytes().to_vec()),
             (0x486e, 0x0412u16.to_le_bytes().to_vec()),
@@ -749,27 +704,27 @@ mod tests {
             (0x4874, 0x0404u16.to_le_bytes().to_vec()),
             (0x485f, 0x0401u16.to_le_bytes().to_vec()),
         ]);
-        assert_parser_parity(&properties, &[]);
         let run = properties
             .direct_text_run("x".into(), &[])
             .unwrap()
             .unwrap();
-        assert_eq!(run.lang_default.as_deref(), Some("fr-fr"));
+        // The default axis reaches the model only as a ruby guide language.
+        assert_eq!(
+            properties.resolved_languages().unwrap().default,
+            Some("fr-FR")
+        );
         assert_eq!(run.lang_east_asia.as_deref(), Some("zh-tw"));
         assert_eq!(run.lang_bidi.as_deref(), Some("ar-sa"));
         let languages = &run.typography_acquisition.as_ref().unwrap().languages;
-        assert_eq!(languages.default.as_deref(), Some("fr-fr"));
         assert_eq!(languages.east_asia.as_deref(), Some("zh-tw"));
         assert_eq!(languages.bidi.as_deref(), Some("ar-sa"));
 
         let facts = properties.direct_font_facts(&[]).unwrap();
-        assert_eq!(facts.lang_default.as_deref(), Some("fr-fr"));
         assert_eq!(facts.lang_east_asia.as_deref(), Some("zh-tw"));
         assert_eq!(facts.lang_bidi.as_deref(), Some("ar-sa"));
 
         for (code, lid) in [(0x4873, 0x0400u16), (0x4874, 0xffff)] {
             let unresolved = applied(&[(code, lid.to_le_bytes().to_vec())]);
-            assert!(unresolved.xml(&[]).is_err());
             assert!(unresolved.direct_text_run("x".into(), &[]).is_err());
             assert!(unresolved.direct_font_facts(&[]).is_err());
         }
@@ -786,41 +741,30 @@ mod tests {
                 .map(|(code, lid)| (code, lid.to_le_bytes().to_vec()))
                 .collect::<Vec<_>>();
             let properties = applied(&entries);
-            assert_parser_parity(&properties, &[]);
-            let run = properties
-                .direct_text_run("x".into(), &[])
-                .unwrap()
-                .unwrap();
-            assert_eq!(run.lang_default.as_deref(), Some("fr-fr"));
             assert_eq!(
-                properties
-                    .direct_font_facts(&[])
-                    .unwrap()
-                    .lang_default
-                    .as_deref(),
-                Some("fr-fr")
+                properties.resolved_languages().unwrap().default,
+                Some("fr-FR")
             );
+            assert!(properties.direct_text_run("x".into(), &[]).is_ok());
         }
 
         let compatibility_only = applied(&[
             (0x486d, 0x0411u16.to_le_bytes().to_vec()),
             (0x486e, 0x0412u16.to_le_bytes().to_vec()),
         ]);
-        assert_parser_parity(&compatibility_only, &[]);
+        let languages = compatibility_only.resolved_languages().unwrap();
+        assert_eq!((languages.default, languages.east_asia), (None, None));
         let run = compatibility_only
             .direct_text_run("x".into(), &[])
             .unwrap()
             .unwrap();
-        assert_eq!(run.lang_default, None);
         assert_eq!(run.lang_east_asia, None);
-        assert_eq!(run.typography_acquisition.unwrap().languages.default, None);
         let facts = compatibility_only.direct_font_facts(&[]).unwrap();
-        assert_eq!(facts.lang_default, None);
         assert_eq!(facts.lang_east_asia, None);
     }
 
     #[test]
-    fn adjacent_highlights_remain_distinct_across_xml_and_direct_projection() {
+    fn adjacent_highlights_remain_distinct_in_direct_projection() {
         let magenta = applied(&[(0x2a0c, vec![12])]);
         let cleared = applied(&[(0x2a0c, vec![0])]);
         let red = applied(&[(0x2a0c, vec![13])]);
@@ -838,27 +782,6 @@ mod tests {
             runs,
             vec![Some("darkMagenta".into()), None, Some("darkRed".into())]
         );
-
-        let document_xml = format!(
-            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r>{}<w:t>a</w:t></w:r><w:r>{}<w:t>b</w:t></w:r><w:r>{}<w:t>c</w:t></w:r></w:p></w:body></w:document>"#,
-            magenta.xml(&[]).unwrap(),
-            cleared.xml(&[]).unwrap(),
-            red.xml(&[]).unwrap(),
-        );
-        let mut bytes = Vec::new();
-        {
-            let mut archive = zip::ZipWriter::new(Cursor::new(&mut bytes));
-            archive
-                .start_file("word/document.xml", SimpleFileOptions::default())
-                .unwrap();
-            archive.write_all(document_xml.as_bytes()).unwrap();
-            archive.finish().unwrap();
-        }
-        let parsed: serde_json::Value =
-            serde_json::from_str(&docx_parser::parse_docx_native(&bytes).unwrap()).unwrap();
-        assert_eq!(parsed["body"][0]["runs"][0]["highlight"], "darkMagenta");
-        assert!(parsed["body"][0]["runs"][1].get("highlight").is_none());
-        assert_eq!(parsed["body"][0]["runs"][2]["highlight"], "darkRed");
     }
 
     #[test]
@@ -947,12 +870,11 @@ mod tests {
                     .as_deref(),
                 Some(token)
             );
-            assert_parser_parity(&applied(&[(0x2a3e, vec![operand])]), &[]);
         }
     }
 
     #[test]
-    fn underline_color_matches_the_xml_parser_route() {
+    fn underline_color_follows_the_effective_underline() {
         for (underline, color, expected) in [
             (0, vec![0x12, 0x34, 0x56, 0], None),
             (1, vec![0x12, 0x34, 0x56, 0], Some("123456")),
@@ -964,7 +886,6 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(run.underline_color.as_deref(), expected);
-            assert_parser_parity(&properties, &[]);
         }
         let color_only = applied(&[(0x6877, vec![0x12, 0x34, 0x56, 0])]);
         let run = color_only
@@ -980,7 +901,6 @@ mod tests {
                 .and_then(|wire| wire.color.value.as_deref()),
             Some("123456"),
         );
-        assert_parser_parity(&color_only, &[]);
     }
 
     #[test]
@@ -998,26 +918,36 @@ mod tests {
         let run = cleared.direct_text_run("x".into(), &[]).unwrap().unwrap();
         assert!(!run.underline);
         assert_eq!(run.underline_color, None);
-        assert_parser_parity(&cleared, &[]);
     }
 
     #[test]
-    fn numeric_and_color_boundaries_match_the_xml_parser_route() {
-        for (code, operands) in [
-            (0x4a43, vec![2u16, 3276]),
-            (0x4a61, vec![0u16, 3276]),
-            (0x8840, vec![i16::MIN as u16, 0, i16::MAX as u16]),
-            (0x4845, vec![(-3168i16) as u16, 0, 3168]),
-            (0x484b, vec![0u16, 3276]),
-            (0x4852, vec![1u16, 600]),
+    fn numeric_and_color_boundaries() {
+        for (code, operand, key, expected) in [
+            (0x4a43, 2u16, "fontSize", 1.0),
+            (0x4a43, 3276, "fontSize", 1638.0),
+            (0x4a61, 0, "fontSizeCs", 0.0),
+            (0x4a61, 3276, "fontSizeCs", 1638.0),
+            (0x8840, i16::MIN as u16, "charSpacing", -1638.4),
+            (0x8840, 0, "charSpacing", 0.0),
+            (0x8840, i16::MAX as u16, "charSpacing", 1638.35),
+            (0x4845, (-3168i16) as u16, "position", -1584.0),
+            (0x4845, 0, "position", 0.0),
+            (0x4845, 3168, "position", 1584.0),
+            (0x484b, 0, "kerning", 0.0),
+            (0x484b, 3276, "kerning", 1638.0),
+            (0x4852, 1, "charScale", 0.01),
+            (0x4852, 600, "charScale", 6.0),
         ] {
-            for operand in operands {
-                assert_parser_parity(&applied(&[(code, operand.to_le_bytes().to_vec())]), &[]);
-            }
+            let run = public_run(&applied(&[(code, operand.to_le_bytes().to_vec())]));
+            assert_eq!(run[key], expected, "{code:#x} {operand}");
         }
-        for operand in [vec![0xab, 0xcd, 0xef, 0], vec![0, 0, 0, 0xff]] {
-            assert_parser_parity(&applied(&[(0x6870, operand)]), &[]);
-        }
+        let run = public_run(&applied(&[(0x6870, vec![0xab, 0xcd, 0xef, 0])]));
+        assert_eq!(run["color"], "abcdef");
+        let run = public_run(&applied(&[(0x6870, vec![0, 0, 0, 0xff])]));
+        assert_eq!(
+            (&run["color"], &run["colorAuto"]),
+            (&serde_json::Value::Null, &true.into())
+        );
         assert!(Properties::default()
             .apply(0x4a43, &0u16.to_le_bytes(), &Properties::default())
             .is_err());
@@ -1049,20 +979,52 @@ mod tests {
             let wire = run.typography_acquisition.unwrap().vertical_align;
             assert_eq!(wire.status, status);
             assert_eq!(wire.raw.as_deref(), Some(raw));
-            assert_parser_parity(&properties, &[]);
         }
     }
 
     #[test]
-    fn font_hints_cancellation_and_partial_axes_match_the_xml_parser_route() {
-        for hint in [0, 1, 2, 0xff] {
-            assert_parser_parity(&applied(&[(0x286f, vec![hint])]), &[]);
+    fn font_hints_cancellation_and_partial_axes() {
+        for (hint, expected) in [
+            (0, Some("default")),
+            (1, Some("eastAsia")),
+            (2, Some("cs")),
+            (0xff, None),
+        ] {
+            let run = applied(&[(0x286f, vec![hint])])
+                .direct_text_run("x".into(), &[])
+                .unwrap()
+                .unwrap();
+            assert_eq!(run.font_hint.as_deref(), expected, "{hint}");
         }
-        assert_parser_parity(&Properties::default(), &[]);
+        assert!(public_run(&Properties::default()).get("fontHint").is_none());
 
+        // One authored axis at a time: the East Asian font is also the
+        // fallback family; high-ANSI and complex-script fonts are not.
         let fonts = ["ASCII", "East Asia", "High ANSI", "Complex Script"].map(String::from);
-        for (code, index) in [(0x4a4f, 0u16), (0x4a50, 1), (0x4a51, 2), (0x4a5e, 3)] {
-            assert_parser_parity(&applied(&[(code, index.to_le_bytes().to_vec())]), &fonts);
+        for ((code, index), expected) in [
+            ((0x4a4f, 0u16), [Some("ASCII"), None, None, None]),
+            (
+                (0x4a50, 1),
+                [Some("East Asia"), Some("East Asia"), None, None],
+            ),
+            ((0x4a51, 2), [None, None, Some("High ANSI"), None]),
+            ((0x4a5e, 3), [None, None, None, Some("Complex Script")]),
+        ] {
+            let run = applied(&[(code, index.to_le_bytes().to_vec())])
+                .direct_text_run("x".into(), &fonts)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                [
+                    run.font_family.as_deref(),
+                    run.font_family_east_asia.as_deref(),
+                    run.font_family_high_ansi.as_deref(),
+                    run.font_family_cs.as_deref(),
+                ],
+                expected,
+                "{code:#x}"
+            );
+            assert!(run.font_slots.is_some());
         }
     }
 
@@ -1072,10 +1034,8 @@ mod tests {
         assert!(invalid.direct_text_run("x".into(), &[]).is_err());
         let vanished = applied(&[(0x083c, vec![1]), (0x4a4f, 1u16.to_le_bytes().to_vec())]);
         assert!(vanished.direct_text_run("x".into(), &[]).is_err());
-        assert!(vanished.xml(&[]).is_err());
 
         let hinted = applied(&[(0x286f, vec![1]), (0x4a4f, 1u16.to_le_bytes().to_vec())]);
-        assert!(hinted.xml(&[]).is_ok());
         assert!(hinted.direct_text_run("x".into(), &[]).is_err());
     }
 
@@ -1090,7 +1050,7 @@ mod tests {
     }
 
     #[test]
-    fn typed_projection_matches_the_existing_xml_parser_route() {
+    fn typed_projection_of_every_supported_run_property() {
         let properties = applied(&[
             (0x0835, vec![1]),
             (0x0836, vec![1]),
@@ -1119,8 +1079,22 @@ mod tests {
             (0x6870, vec![0x12, 0x34, 0x56, 0]),
         ]);
         let fonts = ["ASCII", "East Asia", "High ANSI", "Complex Script"].map(String::from);
-        assert_parser_parity(&properties, &fonts);
+        let mut run = serde_json::to_value(
+            properties
+                .direct_text_run("x".into(), &fonts)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        run.as_object_mut()
+            .unwrap()
+            .remove("__typographyAcquisition");
+        let expected: serde_json::Value = serde_json::from_str(TYPED_RUN).unwrap();
+        assert_eq!(run, expected);
     }
+
+    /// Captured from the byte route's DOCX parser before that route was removed.
+    const TYPED_RUN: &str = r#"{"allCaps":true,"background":null,"bold":true,"boldCs":true,"charScale":0.67,"charSpacing":-1.5,"color":"123456","cs":true,"doubleStrikethrough":true,"fontFamily":"ASCII","fontFamilyCs":"Complex Script","fontFamilyEastAsia":"East Asia","fontFamilyHighAnsi":"High ANSI","fontHint":"eastAsia","fontSize":12.0,"fontSizeCs":15.0,"fontSlots":{"direct":{"ascii":"ASCII","complexScript":"Complex Script","eastAsia":"East Asia","highAnsi":"High ANSI"},"theme":{},"themePresent":{"ascii":false,"complexScript":false,"eastAsia":false,"highAnsi":false}},"hyperlink":null,"isLink":false,"italic":true,"italicCs":false,"kerning":10.0,"position":-1.5,"rtl":true,"smallCaps":true,"strikethrough":true,"text":"x","underline":true,"underlineColor":"654321","underlineStyle":"wave","vertAlign":"sub"}"#;
 
     fn parsed_rpr(rpr: &str) -> serde_json::Value {
         let document_xml = format!(
@@ -1173,7 +1147,6 @@ mod tests {
             (0xca72, vec![8, 0x12, 0x34, 0x56, 0, 6, 1, 0x05, 0]),
             (0xca76, vec![8, 0x60, 0x09, 0, 0, 0, 0xb5, 0xad, 0xaa]),
         ]);
-        assert!(properties.has_direct_only_properties());
         // MS-DOC 2.6.1: Brc.dptSpace MUST be ignored for character borders.
         assert_eq!(
             public_run(&properties),
@@ -1246,7 +1219,6 @@ mod tests {
             (0xca76, vec![8, 0x60, 0x09, 0, 0, 1, 0, 0, 0]),
         ]);
         reset.reset_to(&base, false);
-        assert!(!reset.has_direct_only_properties());
         assert_eq!(public_run(&reset), public_run(&base));
     }
 
@@ -1274,7 +1246,6 @@ mod tests {
         // A sparse style patch overlays fit text and shading only when set.
         let mut inherited = applied(&[(0xca76, vec![8, 0xb5, 0x04, 0, 0, 1, 0, 0, 0])]);
         inherited.overlay_visible(&Properties::sparse());
-        assert!(inherited.has_direct_only_properties());
         let mut patch = Properties::sparse();
         patch
             .apply(0x4866, &0x0100u16.to_le_bytes(), &base)
@@ -1308,7 +1279,6 @@ mod tests {
     fn symbol_characters_match_the_docx_sym_projection() {
         let fonts = ["Times New Roman", "Symbol"].map(String::from);
         let properties = applied(&[(0x0855, vec![1]), (0x6a09, vec![1, 0, 0xb0, 0xf0])]);
-        assert!(properties.has_direct_only_properties());
         let mut run = properties
             .direct_text_run(String::new(), &fonts)
             .unwrap()
@@ -1372,7 +1342,6 @@ mod tests {
     fn horizontal_in_vertical_layout_matches_the_docx_projection_and_is_gated_by_flow() {
         // UFEL 0x1001: fTNY + fTNYCompress, plus an ignored must-be-zero bit.
         let properties = applied(&[(0xca78, vec![6, 0x05, 0x10, 0, 0xc4, 0x3c, 7])]);
-        assert!(properties.has_direct_only_properties());
         assert_eq!(
             public_run(&properties),
             parsed_rpr(
@@ -1445,7 +1414,6 @@ mod tests {
     fn document_grid_participation_and_field_hiding_are_style_relative_toggles() {
         let base = Properties::default();
         let properties = applied(&[(0x0868, vec![0])]);
-        assert!(properties.has_direct_only_properties());
         assert_eq!(
             public_run(&properties),
             parsed_rpr(r#"<w:snapToGrid w:val="0"/><w:sz w:val="20"/>"#)
@@ -1479,7 +1447,6 @@ mod tests {
         assert!(vanished.direct_text_run("x".into(), &[]).unwrap().is_none());
         let shown = applied(&[(0x0802, vec![0])]);
         assert!(shown.direct_text_run("x".into(), &[]).unwrap().is_some());
-        assert!(!shown.has_direct_only_properties());
     }
 
     #[test]
@@ -1488,12 +1455,10 @@ mod tests {
         // Word writes 0x7C as w:clear="none"; text characters ignore it.
         let none = applied(&[(0x2879, vec![0x7c])]);
         assert!(!none.direct_line_break_clears());
-        assert!(!none.has_direct_only_properties());
         assert_eq!(public_run(&none), public_run(&base));
         for value in [1u8, 2, 3, 0x7f] {
             let clears = applied(&[(0x2879, vec![value])]);
             assert!(clears.direct_line_break_clears(), "{value:#x}");
-            assert!(clears.has_direct_only_properties());
         }
         let mut reset = applied(&[(0x2879, vec![3])]);
         reset.reset_to(&base, false);

@@ -4,13 +4,6 @@ use super::*;
 
 /// Follow only the exact ClientData -> ProgTags -> ProgBinaryTag -> ___PPT9
 /// ownership chain. Other tags, actions, links and nested decoys are opaque.
-pub(in crate::ppt) fn local_atom<'a>(
-    tags: Record<'a>,
-    budget: &mut usize,
-) -> Result<Option<&'a [u8]>, String> {
-    Ok(local_atom_record(&tags, &[], budget)?.map(|atom| atom.payload))
-}
-
 pub(in crate::ppt) fn local_atom_span(
     tags: &RecordSpan,
     backing: &[u8],
@@ -22,15 +15,6 @@ pub(in crate::ppt) fn local_atom_span(
 trait TagRecord<'a>: Clone {
     fn view(&self, backing: &'a [u8]) -> Result<Record<'a>, String>;
     fn children(&self, backing: &'a [u8], budget: &mut usize) -> Result<Vec<Self>, String>;
-}
-
-impl<'a> TagRecord<'a> for Record<'a> {
-    fn view(&self, _: &'a [u8]) -> Result<Record<'a>, String> {
-        Ok(*self)
-    }
-    fn children(&self, _: &'a [u8], budget: &mut usize) -> Result<Vec<Self>, String> {
-        parse_records(self.payload, budget)
-    }
 }
 
 impl<'a> TagRecord<'a> for RecordSpan {
@@ -295,29 +279,16 @@ mod tests {
         let data = record(5003, 0, &record(4012, 0, &entry(3, 1)));
         let tag = record(5002, 15, &[name.clone(), data.clone()].concat());
         let parse = |bytes: &[u8], budget: &mut usize| {
-            let mut span_budget = *budget;
-            let borrowed = local_atom(
-                Record {
-                    kind: 5000,
-                    version: 15,
-                    instance: 0,
-                    payload: bytes,
-                },
-                budget,
-            )
-            .map(|v| v.map(<[u8]>::to_vec));
             let mut backing = vec![0xaa; 3];
             backing.extend(record(5000, 15, bytes));
             let (tags, _) = record_span_with_end(&backing, 3, &mut 1, "PP9").unwrap();
-            let retained = local_atom_span(&tags, &backing, &mut span_budget);
+            let retained = local_atom_span(&tags, &backing, budget);
+            // The retained style is a range, read from the moved backing.
             let moved = backing;
-            let spanned = retained.and_then(|span| {
+            retained.and_then(|span| {
                 span.map(|span| span.view(&moved).map(<[u8]>::to_vec))
                     .transpose()
-            });
-            assert_eq!(borrowed, spanned);
-            assert_eq!(*budget, span_budget);
-            borrowed
+            })
         };
         assert_eq!(parse(&tag, &mut 100).unwrap(), Some(entry(3, 1)));
         assert!(parse(&tag, &mut 1).is_err());

@@ -15,7 +15,6 @@ pub(in crate::doc) enum Color {
     Rgb([u8; 3]),
 }
 
-#[cfg(feature = "direct-doc")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::doc) struct DirectShadingFacts {
     pub pattern: &'static str,
@@ -138,13 +137,6 @@ impl Shading {
         }))
     }
 
-    pub fn xml(&self) -> String {
-        format!(
-            "<w:shd w:val=\"{}\" w:color=\"{}\" w:fill=\"{}\"/>",
-            self.pattern, self.foreground, self.background
-        )
-    }
-
     /// The ShdNil sentinel is narrower than an ordinary Shd whose pattern is
     /// ipatNil. Its containing property determines the sentinel's effect.
     pub(in crate::doc) fn is_shd_nil(bytes: &[u8]) -> bool {
@@ -154,7 +146,6 @@ impl Shading {
     /// Exact decoded DOC shading facts. The current table-cell renderer model
     /// retains only an RGB background fill; callers must handle non-clear
     /// patterns as an explicit known loss rather than approximate their tint.
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) fn direct_facts(&self) -> DirectShadingFacts {
         DirectShadingFacts {
             pattern: self.pattern,
@@ -165,7 +156,6 @@ impl Shading {
 
     /// Background representable by `DocTableCell.background`, matching the
     /// existing DOCX parser's fill-only projection without pattern fitting.
-    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) fn direct_background(&self) -> Option<String> {
         match self.background {
             Color::Auto => None,
@@ -177,7 +167,6 @@ impl Shading {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(feature = "direct-doc")]
     #[test]
     fn direct_shading_exposes_exact_pattern_colors_and_only_literal_rgb_fill() {
         let patterned = Shading::read(&modern(18), false).unwrap().unwrap();
@@ -208,7 +197,9 @@ mod tests {
             match Shading::read(&modern(ipat), false) {
                 Ok(Some(value)) => {
                     mapped += 1;
-                    assert!(value.xml().contains("w:color=\"123456\" w:fill=\"987654\""));
+                    let facts = value.direct_facts();
+                    assert_eq!(facts.foreground, Color::Rgb([0x12, 0x34, 0x56]));
+                    assert_eq!(facts.background, Color::Rgb([0x98, 0x76, 0x54]));
                 }
                 Ok(None) => {
                     unmapped += 1;
@@ -238,8 +229,12 @@ mod tests {
         let auto = [0, 0, 0, 255, 0, 0, 0, 255, 0, 0];
         let nil = [255, 255, 255, 255, 255, 255, 255, 255, 0, 0];
         assert_eq!(
-            Shading::read(&auto, false).unwrap().unwrap().xml(),
-            "<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"auto\"/>"
+            Shading::read(&auto, false).unwrap().unwrap().direct_facts(),
+            DirectShadingFacts {
+                pattern: "clear",
+                foreground: Color::Auto,
+                background: Color::Auto,
+            }
         );
         assert_eq!(Shading::read(&nil, false).unwrap().unwrap().pattern, "nil");
         assert_eq!(

@@ -108,7 +108,7 @@ pub(super) fn flatten(mut leaf: Transform, ancestors: &[GroupTransform]) -> Tran
 mod tests {
     use super::*;
 
-    fn shape(flags: u32) -> Shape<'static> {
+    fn shape(flags: u32) -> SpannedShape {
         ShapeStorage {
             id: 1,
             kind: 1,
@@ -128,7 +128,7 @@ mod tests {
             textbox: None,
             style9: None,
             placeholder: None,
-            props: Properties::default(),
+            props: SpannedProperties::default(),
         }
     }
 

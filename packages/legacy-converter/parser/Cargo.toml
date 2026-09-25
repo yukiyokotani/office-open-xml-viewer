@@ -3,7 +3,7 @@ name = "legacy-office-converter"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "Minimum-sufficient, macro-free legacy Office to OOXML converter"
+description = "Passive Office 97-2003 readers projecting into the OOXML renderer models"
 repository = "https://github.com/yukiyokotani/office-open-xml-viewer"
 
 [lib]
@@ -14,7 +14,7 @@ fuzzing = []
 direct-ppt = ["dep:js-sys", "dep:serde_json", "dep:pptx-parser"]
 direct-xls = ["dep:js-sys", "dep:serde", "dep:serde_json"]
 direct-doc = ["dep:docx-model", "dep:serde", "dep:serde_json"]
-inspection = ["direct-ppt"]
+inspection = ["direct-ppt", "direct-xls"]
 
 [[example]]
 name = "inspect_xls_images"

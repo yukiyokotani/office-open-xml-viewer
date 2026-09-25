@@ -1,12 +1,10 @@
-//! Adapter from retained OfficeArt shade facts to DrawingML/native gradients.
+//! Adapter from retained OfficeArt shade facts to presentation-model gradients.
 
 use super::Paint;
 use crate::officeart::gradient as office_gradient;
 use crate::ppt::{scheme, unsupported};
-#[cfg(any(test, feature = "direct-ppt"))]
 use pptx_model::{Fill, GradStop};
 use std::fmt::Write;
-#[cfg(any(test, feature = "direct-ppt"))]
 use std::mem::size_of;
 
 pub(in crate::ppt) struct ResolvedGradient {
@@ -49,7 +47,6 @@ impl Paint {
 }
 
 impl ResolvedGradient {
-    #[cfg(any(test, feature = "direct-ppt"))]
     pub(in crate::ppt) fn into_model(self, byte_budget: &mut usize) -> Result<Fill, String> {
         let count = self.projection.stops.len();
         let bytes = count
@@ -92,61 +89,6 @@ impl ResolvedGradient {
             rot_with_shape: Some(self.rotate_with_shape),
         })
     }
-
-    pub(in crate::ppt) fn to_xml(&self, byte_budget: &mut usize) -> Result<String, String> {
-        // The withdrawn OOXML route only ever emitted opaque, unscaled shades.
-        if self.scaled || self.alphas.iter().any(|alpha| *alpha != 65_536) {
-            return Err(unsupported(
-                "PowerPoint scaled or translucent gradient has no OOXML route",
-            ));
-        }
-        const OPEN: &str = "<a:gradFill rotWithShape=\"";
-        const LIST: &str = "\"><a:gsLst>";
-        const STOP_OPEN: &str = "<a:gs pos=\"";
-        const STOP_COLOR: &str = "\"><a:srgbClr val=\"";
-        const STOP_CLOSE: &str = "\"/></a:gs>";
-        const CLOSE: &str = "</a:gsLst><a:lin ang=\"";
-        const END: &str = "\"/></a:gradFill>";
-        let mut length = OPEN.len() + 1 + LIST.len() + CLOSE.len() + END.len();
-        length = length
-            .checked_add(decimal_len(self.projection.angle.angle_units() as u32))
-            .ok_or_else(|| unsupported("PowerPoint gradient XML budget overflow"))?;
-        for stop in &self.projection.stops {
-            length = length
-                .checked_add(
-                    STOP_OPEN.len()
-                        + decimal_len(stop.position_units())
-                        + STOP_COLOR.len()
-                        + 6
-                        + STOP_CLOSE.len(),
-                )
-                .ok_or_else(|| unsupported("PowerPoint gradient XML budget overflow"))?;
-        }
-        *byte_budget = byte_budget
-            .checked_sub(length)
-            .ok_or_else(|| unsupported("PowerPoint gradient XML budget exceeded"))?;
-        let mut output = String::new();
-        output
-            .try_reserve_exact(length)
-            .map_err(|_| unsupported("PowerPoint gradient XML allocation failed"))?;
-        output.push_str(OPEN);
-        output.push(if self.rotate_with_shape { '1' } else { '0' });
-        output.push_str(LIST);
-        for stop in &self.projection.stops {
-            output.push_str(STOP_OPEN);
-            write!(&mut output, "{}", stop.position_units())
-                .map_err(|_| unsupported("PowerPoint gradient XML formatting failed"))?;
-            output.push_str(STOP_COLOR);
-            write_color(&mut output, stop.color)?;
-            output.push_str(STOP_CLOSE);
-        }
-        output.push_str(CLOSE);
-        write!(&mut output, "{}", self.projection.angle.angle_units())
-            .map_err(|_| unsupported("PowerPoint gradient XML formatting failed"))?;
-        output.push_str(END);
-        debug_assert_eq!(output.len(), length);
-        Ok(output)
-    }
 }
 
 fn write_color(output: &mut String, color: u32) -> Result<(), String> {
@@ -158,15 +100,6 @@ fn write_color(output: &mut String, color: u32) -> Result<(), String> {
         (color >> 16) & 255
     )
     .map_err(|_| unsupported("PowerPoint gradient color formatting failed"))
-}
-
-fn decimal_len(mut value: u32) -> usize {
-    let mut result = 1;
-    while value >= 10 {
-        result += 1;
-        value /= 10;
-    }
-    result
 }
 
 #[cfg(test)]
@@ -334,18 +267,12 @@ mod tests {
     }
 
     #[test]
-    fn model_and_xml_share_exact_projection_and_rounding_boundaries() {
+    fn model_keeps_exact_projection_and_rounding_boundaries() {
         let source = source(&[
             (0x0033_2211, 0),
             (0x0066_5544, 32_768),
             (0x0001_0203, 65_536),
         ]);
-        let descriptor = resolved(&paint(), &source).unwrap();
-        let mut xml_bytes = usize::MAX;
-        let xml = descriptor.to_xml(&mut xml_bytes).unwrap();
-        assert!(xml.contains("pos=\"50000\""));
-        assert!(xml.contains("ang=\"10800000\""));
-        assert!(xml.contains("val=\"112233\""));
         let mut model_bytes = usize::MAX;
         let model = resolved(&paint(), &source)
             .unwrap()
@@ -363,6 +290,7 @@ mod tests {
                 flip,
                 rot_with_shape,
             } => {
+                assert_eq!(stops[0].color, "112233");
                 assert_eq!(stops[1].position, 0.5);
                 assert_eq!(stops.last().unwrap().color, "030201");
                 assert_eq!(angle, 180.0);
@@ -414,14 +342,6 @@ mod tests {
         assert!(paint()
             .project_gradient(&source, true, None, &mut work, &mut (projection_bytes - 1))
             .is_err());
-        let descriptor = resolved(&paint(), &source).unwrap();
-        let mut unlimited = usize::MAX;
-        let xml_len = descriptor.to_xml(&mut unlimited).unwrap().len();
-        assert!(descriptor.to_xml(&mut (xml_len - 1)).is_err());
-        assert_eq!(
-            descriptor.to_xml(&mut xml_len.clone()).unwrap().len(),
-            xml_len
-        );
         let descriptor = resolved(&paint(), &source).unwrap();
         let mut unlimited = usize::MAX;
         descriptor.into_model(&mut unlimited).unwrap();

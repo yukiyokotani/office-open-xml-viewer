@@ -1,12 +1,9 @@
-//! BIFF8 Font/Format/Palette/XF -> SpreadsheetML styles.
+//! BIFF8 Font/Format/Palette/XF -> the XLSX renderer style model.
 //! [MS-XLS] 2.4.122, 2.4.126, 2.4.188, 2.4.353, 2.5.20,
 //! 2.5.129; ECMA-376 Part 1 18.8. Cell XFs contain complete properties;
 //! fAtr* controls later style updates, not inheritance during display.
 
-use super::{
-    decode_biff_chars, minimal_styles, parse_biff_string, u16_at, u32_at, unsupported, Record,
-};
-use crate::ooxml::xml_attr;
+use super::{decode_biff_chars, parse_biff_string, u16_at, u32_at, unsupported, Record};
 use std::collections::BTreeMap;
 mod color;
 mod extensions;
@@ -59,7 +56,6 @@ pub(super) struct Styles<'a> {
     formats: BTreeMap<u16, String>,
     palette: Option<&'a [u8]>,
     extensions: extensions::Extensions,
-    pub extensions_omitted: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -80,10 +76,10 @@ pub(super) struct ResolvedStyleSheet {
     borders: Vec<ResolvedBorder>,
     xfs: Vec<ResolvedXf>,
     formats: BTreeMap<u16, String>,
-    /// Conditional-formatting differential formats (direct model only).
+    /// Conditional-formatting and table differential formats.
     dxfs: Vec<xlsx_model::Dxf>,
-    /// XFExt gradient fills by XF index (direct model only): the XML path
-    /// keeps the XF's palette pattern fill.
+    /// XFExt gradient fills by XF index; each replaces its XF's palette
+    /// pattern fill in the model.
     gradients: Vec<(usize, ResolvedGradient)>,
 }
 
@@ -138,7 +134,6 @@ struct ResolvedXf {
     font_id: usize,
     fill_id: usize,
     border_id: usize,
-    quote_prefix: bool,
     horizontal: &'static str,
     vertical: &'static str,
     wrap_text: bool,
@@ -146,9 +141,6 @@ struct ResolvedXf {
     indent: u16,
     shrink_to_fit: bool,
     reading_order: u8,
-    justify_last_line: bool,
-    locked: bool,
-    hidden: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -191,34 +183,10 @@ impl ResolvedStyleFont {
 }
 
 impl ResolvedStyleSheet {
-    #[cfg(any(test, feature = "direct-xls"))]
     pub(super) fn default_font(&self) -> Option<(&str, f64)> {
         let font = self.fonts.get(self.xfs.first()?.font_id)?;
         Some((&font.font.name, f64::from(font.font.size_twips) / 20.0))
     }
-    pub(super) fn xml(&self) -> String {
-        if self.minimal {
-            return minimal_styles();
-        }
-        let fonts: Vec<_> = self.fonts.iter().map(font_style_xml).collect();
-        let fills: Vec<_> = self.fills.iter().map(fill_xml).collect();
-        let borders: Vec<_> = self.borders.iter().map(border_xml).collect();
-        let xfs: Vec<_> = self.xfs.iter().map(xf_xml).collect();
-        let normal = xfs[0].replace(" xfId=\"0\"", "");
-        let formats: String = self
-            .formats
-            .iter()
-            .map(|(id, code)| {
-                format!(
-                    "<numFmt numFmtId=\"{id}\" formatCode=\"{}\"/>",
-                    xml_attr(code)
-                )
-            })
-            .collect();
-        format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?><styleSheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><numFmts count=\"{}\">{formats}</numFmts><fonts count=\"{}\">{}</fonts><fills count=\"{}\">{}</fills><borders count=\"{}\">{}</borders><cellStyleXfs count=\"1\">{normal}</cellStyleXfs><cellXfs count=\"{}\">{}</cellXfs><cellStyles count=\"1\"><cellStyle name=\"Normal\" xfId=\"0\" builtinId=\"0\"/></cellStyles></styleSheet>", self.formats.len(), fonts.len(), fonts.join(""), fills.len(), fills.join(""), borders.len(), borders.join(""), xfs.len(), xfs.join(""))
-    }
-
-    #[allow(dead_code)] // Consumed by the direct XLS session in the next unit.
     pub(super) fn into_model(self) -> xlsx_model::Styles {
         let gradients = self.gradients;
         // The synthesized minimal stylesheet has no BIFF FONT record, so its
@@ -280,7 +248,6 @@ impl ResolvedStyleSheet {
         self.dxfs = dxfs;
     }
 
-    #[cfg(any(test, feature = "direct-xls"))]
     pub(super) fn into_model_bounded(
         self,
         budget: &mut usize,
@@ -301,11 +268,11 @@ impl ResolvedStyleSheet {
         for font in &self.fonts {
             let underline = match font.font.underline {
                 Underline::None | Underline::Single => 0,
-                value => value.xml_value().len(),
+                value => value.model_value().len(),
             };
             let script = match font.font.script {
                 Script::Baseline => 0,
-                value => value.xml_value().len(),
+                value => value.model_value().len(),
             };
             bytes = bytes
                 .checked_add(font.font.name.len())
@@ -392,12 +359,6 @@ impl ResolvedStyleSheet {
         self.run_font(index).map(|_| ())
     }
 
-    pub(super) fn run_font_xml(&self, index: u16) -> Result<String, String> {
-        let value = self.run_font(index)?;
-        Ok(font_xml_value(&value.font, true, value.color))
-    }
-
-    #[allow(dead_code)] // Consumed by the direct XLS session in the next unit.
     pub(super) fn run_font_model(
         &self,
         index: u16,
@@ -406,11 +367,11 @@ impl ResolvedStyleSheet {
         let value = self.run_font(index)?;
         let underline_style = match value.font.underline {
             Underline::None | Underline::Single => None,
-            underline => Some(underline.xml_value()),
+            underline => Some(underline.model_value()),
         };
         let vert_align = match value.font.script {
             Script::Baseline => None,
-            script => Some(script.xml_value()),
+            script => Some(script.model_value()),
         };
         // The owning Run Vec slot already includes its inline RunFont. Charge
         // only allocations owned behind that value, before materializing them.
@@ -441,7 +402,6 @@ impl ResolvedStyleSheet {
     }
 }
 
-#[cfg(any(test, feature = "direct-xls"))]
 /// Drawing-shape text font resolved from a BIFF Font record (MS-XLS 2.4.122)
 /// selected by a TxO formatting run's FontIndex (2.5.129).
 #[derive(Debug, Clone)]
@@ -459,7 +419,6 @@ pub(super) struct ShapeFont {
     pub automatic_color: bool,
 }
 
-#[cfg(any(test, feature = "direct-xls"))]
 /// Chart text font resolved from a BIFF Font record.
 #[derive(Debug, Clone)]
 pub(super) struct ChartFont {
@@ -510,7 +469,6 @@ impl<'a> Styles<'a> {
             formats: BTreeMap::new(),
             palette: None,
             extensions: extensions::Extensions::default(),
-            extensions_omitted: false,
         };
         for record in records.iter().take_while(|r| r.kind != super::EOF) {
             match record.kind {
@@ -539,8 +497,6 @@ impl<'a> Styles<'a> {
                     }
                     styles.palette = Some(&record.data[2..]);
                 }
-                // XFExt/StyleExt may contain true colors/gradients beyond BIFF8 XF.
-                0x087d | 0x0892 => styles.extensions_omitted = true,
                 _ => {}
             }
         }
@@ -560,13 +516,11 @@ impl<'a> Styles<'a> {
         Ok(())
     }
 
-    #[cfg(any(test, feature = "direct-xls"))]
     /// Number of Font records in the Globals Substream (FontX indexing, 2.4.123).
     pub(super) fn font_count(&self) -> usize {
         self.fonts.len()
     }
 
-    #[cfg(any(test, feature = "direct-xls"))]
     /// Decode a Font record (2.4.122) for chart text: name, twip size,
     /// weight/italic and palette color.
     pub(super) fn chart_font(&self, data: &[u8]) -> Option<ChartFont> {
@@ -580,7 +534,6 @@ impl<'a> Styles<'a> {
         })
     }
 
-    #[cfg(any(test, feature = "direct-xls"))]
     /// A shape text run's font by FontIndex: 4 is reserved and indices above
     /// it are one-based (MS-XLS 2.5.129).
     pub(super) fn shape_font(&self, index: u16) -> Result<ShapeFont, String> {
@@ -608,7 +561,6 @@ impl<'a> Styles<'a> {
         })
     }
 
-    #[cfg(any(test, feature = "direct-xls"))]
     /// FontX.iFont (2.4.123) one-based index into the global Font records.
     pub(super) fn global_font(&self, index: u16) -> Option<ChartFont> {
         let data = *self.fonts.get(usize::from(index).checked_sub(1)?)?;
@@ -662,25 +614,6 @@ impl<'a> Styles<'a> {
         } else {
             ColorIdentity::Indexed(index)
         }
-    }
-
-    #[cfg(test)]
-    fn font(&self, data: &[u8]) -> Result<String, String> {
-        let font = ResolvedFont::decode(data)?;
-        Ok(font_xml_value(&font, false, self.color(font.color_index)))
-    }
-
-    #[cfg(test)]
-    pub(super) fn run_font(&self, index: u16) -> Result<String, String> {
-        // MS-XLS 2.5.129: FontIndex 4 is reserved, indices above it are one-based.
-        let offset = usize::from(index - u16::from(index > 4));
-        let data = self
-            .fonts
-            .get(offset)
-            .filter(|_| index != 4)
-            .ok_or_else(|| unsupported("BIFF rich-text font index out of range"))?;
-        let font = ResolvedFont::decode(data)?;
-        Ok(font_xml_value(&font, true, self.color(font.color_index)))
     }
 
     pub(super) fn resolve(&self) -> Result<ResolvedStyleSheet, String> {
@@ -738,7 +671,6 @@ impl<'a> Styles<'a> {
                     .color(index, property)
                     .unwrap_or_else(|| self.color(fallback))
             };
-            let flags = u16_at(data, 4)?;
             let b1 = u32_at(data, 10)?;
             let b2 = u32_at(data, 14)?;
             let colors = u16_at(data, 18)?;
@@ -811,7 +743,6 @@ impl<'a> Styles<'a> {
                 font_id: font,
                 fill_id,
                 border_id,
-                quote_prefix: flags >> 3 & 1 != 0,
                 horizontal,
                 vertical,
                 wrap_text: data[6] >> 3 & 1 != 0,
@@ -819,9 +750,6 @@ impl<'a> Styles<'a> {
                 indent,
                 shrink_to_fit: data[8] >> 4 & 1 != 0,
                 reading_order: reading,
-                justify_last_line: data[6] >> 7 != 0,
-                locked: flags & 1 != 0,
-                hidden: flags >> 1 & 1 != 0,
             });
         }
         if xfs.is_empty() {
@@ -883,11 +811,6 @@ impl<'a> Styles<'a> {
     }
 
     #[cfg(test)]
-    pub fn xml(&self) -> Result<String, String> {
-        Ok(self.resolve()?.xml())
-    }
-
-    #[cfg(test)]
     fn model(&self) -> Result<xlsx_model::Styles, String> {
         Ok(self.resolve()?.into_model())
     }
@@ -915,7 +838,6 @@ impl ResolvedXf {
             font_id: 0,
             fill_id: 0,
             border_id: 0,
-            quote_prefix: false,
             horizontal: "",
             vertical: "",
             wrap_text: false,
@@ -923,9 +845,6 @@ impl ResolvedXf {
             indent: 0,
             shrink_to_fit: false,
             reading_order: 0,
-            justify_last_line: false,
-            locked: false,
-            hidden: false,
         }
     }
 }
@@ -962,55 +881,6 @@ fn intern_typed<T: Clone + Ord>(
     id
 }
 
-fn font_style_xml(value: &ResolvedStyleFont) -> String {
-    font_xml_value(&value.font, false, value.color)
-}
-
-fn font_xml_value(font: &ResolvedFont, run: bool, color: ColorIdentity) -> String {
-    let (tag, name_tag) = if run {
-        ("rPr", "rFont")
-    } else {
-        ("font", "name")
-    };
-    let mut xml = format!("<{tag}><{name_tag} val=\"{}\"/><sz val=\"{}\"/><color {}/><family val=\"{}\"/><charset val=\"{}\"/>", xml_attr(&font.name), f64::from(font.size_twips) / 20.0, color.xml(), font.family, font.charset);
-    if font.weight == 700 {
-        xml.push_str("<b/>");
-    } else if run {
-        xml.push_str("<b val=\"0\"/>");
-    }
-    for (enabled, tag) in [
-        (font.italic, "i"),
-        (font.strike, "strike"),
-        (font.outline, "outline"),
-        (font.shadow, "shadow"),
-        (font.condense, "condense"),
-        (font.extend, "extend"),
-    ] {
-        if enabled {
-            xml.push_str(&format!("<{tag}/>"));
-        } else if run {
-            xml.push_str(&format!("<{tag} val=\"0\"/>"));
-        }
-    }
-    if font.underline != Underline::None || run {
-        xml.push_str(&format!("<u val=\"{}\"/>", font.underline.xml_value()));
-    }
-    if font.script != Script::Baseline || run {
-        xml.push_str(&format!("<vertAlign val=\"{}\"/>", font.script.xml_value()));
-    }
-    xml.push_str(&format!("</{tag}>"));
-    xml
-}
-
-fn fill_xml(value: &ResolvedFill) -> String {
-    match value {
-        ResolvedFill::None => "<fill><patternFill patternType=\"none\"/></fill>".into(),
-        ResolvedFill::Gray125 => "<fill><patternFill patternType=\"gray125\"/></fill>".into(),
-        ResolvedFill::Pattern { pattern, foreground, background } => format!("<fill><patternFill patternType=\"{pattern}\"><fgColor {}/><bgColor {}/></patternFill></fill>", foreground.xml(), background.xml()),
-    }
-}
-
-#[cfg(any(test, feature = "direct-xls"))]
 /// Retained model bytes of one conditional-formatting dxf.
 fn dxf_bytes(dxf: &xlsx_model::Dxf) -> usize {
     let color = |value: &Option<String>| value.as_ref().map_or(0, String::len);
@@ -1070,34 +940,6 @@ fn fill_model(value: ResolvedFill) -> xlsx_model::Fill {
     }
 }
 
-fn edge_xml(tag: &str, edge: &Option<ResolvedEdge>) -> String {
-    edge.as_ref()
-        .map(|e| {
-            format!(
-                "<{tag} style=\"{}\"><color {}/></{tag}>",
-                e.style,
-                e.color.xml()
-            )
-        })
-        .unwrap_or_else(|| format!("<{tag}/>"))
-}
-
-fn border_xml(value: &ResolvedBorder) -> String {
-    if value.seed {
-        return "<border><left/><right/><top/><bottom/><diagonal/></border>".into();
-    }
-    format!(
-        "<border diagonalDown=\"{}\" diagonalUp=\"{}\">{}{}{}{}{}</border>",
-        value.diagonal_down as u8,
-        value.diagonal_up as u8,
-        edge_xml("left", &value.left),
-        edge_xml("right", &value.right),
-        edge_xml("top", &value.top),
-        edge_xml("bottom", &value.bottom),
-        edge_xml("diagonal", &value.diagonal)
-    )
-}
-
 fn edge_model(value: Option<ResolvedEdge>) -> Option<xlsx_model::BorderEdge> {
     value.map(|e| xlsx_model::BorderEdge {
         style: e.style.into(),
@@ -1117,13 +959,6 @@ fn border_model(value: ResolvedBorder) -> xlsx_model::Border {
         horizontal: None,
         vertical: None,
     }
-}
-
-fn xf_xml(value: &ResolvedXf) -> String {
-    if value.horizontal.is_empty() {
-        return "<xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/>".into();
-    }
-    format!("<xf numFmtId=\"{}\" fontId=\"{}\" fillId=\"{}\" borderId=\"{}\" xfId=\"0\" applyNumberFormat=\"1\" applyFont=\"1\" applyFill=\"1\" applyBorder=\"1\" applyAlignment=\"1\" applyProtection=\"1\" quotePrefix=\"{}\"><alignment horizontal=\"{}\" vertical=\"{}\" wrapText=\"{}\" textRotation=\"{}\" indent=\"{}\" shrinkToFit=\"{}\" readingOrder=\"{}\" justifyLastLine=\"{}\"/><protection locked=\"{}\" hidden=\"{}\"/></xf>", value.num_fmt_id, value.font_id, value.fill_id, value.border_id, value.quote_prefix as u8, value.horizontal, value.vertical, value.wrap_text as u8, value.text_rotation, value.indent, value.shrink_to_fit as u8, value.reading_order, value.justify_last_line as u8, value.locked as u8, value.hidden as u8)
 }
 
 fn xf_model(value: ResolvedXf) -> xlsx_model::CellXf {
@@ -1148,6 +983,11 @@ fn xf_model(value: ResolvedXf) -> xlsx_model::CellXf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A model budget that never binds.
+    fn unbounded() -> usize {
+        usize::MAX
+    }
     fn crc(bytes: impl Iterator<Item = u8>) -> u32 {
         let mut value = 0u32;
         for byte in bytes {
@@ -1236,13 +1076,12 @@ mod tests {
     }
 
     #[test]
-    fn minimal_native_model_matches_minimal_styles_xml_defaults() {
+    fn minimal_native_model_has_the_synthesized_defaults() {
         let s = Styles {
             fonts: vec![],
             xfs: vec![],
             formats: BTreeMap::new(),
             palette: None,
-            extensions_omitted: false,
             extensions: extensions::Extensions::default(),
         };
         let model = s.model().unwrap();
@@ -1258,8 +1097,11 @@ mod tests {
         assert_eq!(model.fonts[0].name.as_deref(), Some("Calibri"));
         assert_eq!(model.fonts[0].size, 11.0);
         assert_eq!(model.fonts[0].color, None);
+        // The synthesized font has no authored FONT bCharSet.
+        assert_eq!(model.fonts[0].charset, None);
         assert_eq!(model.fills[0].pattern_type, "none");
         assert_eq!(model.fills[1].pattern_type, "gray125");
+        assert_eq!(model.cell_xfs[0].align_v, None);
     }
     #[test]
     fn normal_measurement_resolves_style_xf_and_reserved_font_gap() {
@@ -1383,11 +1225,25 @@ mod tests {
             offset: 0,
             data: &ext,
         });
-        let xml = Styles::parse(&records).unwrap().xml().unwrap();
-        assert!(xml.contains("<fgColor rgb=\"FF123456\"/>"));
-        assert!(xml.contains("<color rgb=\"FF123456\"/>"));
-        assert!(xml.contains("<fonts count=\"2\">"));
-        assert_eq!(xml.matches("fontId=\"1\"").count(), 1);
+        let model = Styles::parse(&records).unwrap().model().unwrap();
+        let owned = &model.cell_xfs[1];
+        assert_eq!(
+            model.fills[owned.fill_id as usize].fg_color.as_deref(),
+            Some("#123456")
+        );
+        assert_eq!(
+            model.fills[model.cell_xfs[2].fill_id as usize]
+                .fg_color
+                .as_deref(),
+            Some("#000000")
+        );
+        assert_eq!(model.fonts.len(), 2);
+        assert_eq!(model.fonts[1].color.as_deref(), Some("#123456"));
+        assert_eq!(owned.font_id, 1);
+        assert_eq!(
+            model.cell_xfs.iter().filter(|xf| xf.font_id == 1).count(),
+            1
+        );
     }
     #[test]
     fn extended_theme_colors_zero_to_three_follow_excels_light_dark_order() {
@@ -1395,12 +1251,12 @@ mod tests {
         const R: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
         const REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
         let theme = format!("<a:theme xmlns:a=\"{A}\"><a:themeElements><a:clrScheme name=\"T\"><a:dk1><a:srgbClr val=\"111111\"/></a:dk1><a:lt1><a:srgbClr val=\"EEEEEE\"/></a:lt1><a:dk2><a:srgbClr val=\"222222\"/></a:dk2><a:lt2><a:srgbClr val=\"DDDDDD\"/></a:lt2></a:clrScheme></a:themeElements></a:theme>");
-        let package = crate::ooxml::write_package(&[
-            ("_rels/.rels".into(), format!("<Relationships xmlns=\"{R}\"><Relationship Id=\"main\" Type=\"{REL}/officeDocument\" Target=\"theme/manager.xml\"/></Relationships>")),
-            ("theme/manager.xml".into(), format!("<a:themeManager xmlns:a=\"{A}\"/>")),
-            ("theme/_rels/manager.xml.rels".into(), format!("<Relationships xmlns=\"{R}\"><Relationship Id=\"t\" Type=\"{REL}/theme\" Target=\"theme1.xml\"/></Relationships>")),
-            ("theme/theme1.xml".into(), theme),
-        ], 1024 * 1024).unwrap();
+        let package = super::super::theme::test_zip(&[
+            ("_rels/.rels", format!("<Relationships xmlns=\"{R}\"><Relationship Id=\"main\" Type=\"{REL}/officeDocument\" Target=\"theme/manager.xml\"/></Relationships>")),
+            ("theme/manager.xml", format!("<a:themeManager xmlns:a=\"{A}\"/>")),
+            ("theme/_rels/manager.xml.rels", format!("<Relationships xmlns=\"{R}\"><Relationship Id=\"t\" Type=\"{REL}/theme\" Target=\"theme1.xml\"/></Relationships>")),
+            ("theme/theme1.xml", theme),
+        ]);
         let mut theme_record = vec![0; 16];
         theme_record[..2].copy_from_slice(&0x0896u16.to_le_bytes());
         theme_record.extend_from_slice(&package);
@@ -1453,10 +1309,11 @@ mod tests {
                 offset: 0,
                 data: &ext,
             });
-            let xml = Styles::parse(&records).unwrap().xml().unwrap();
-            assert!(
-                xml.contains(&format!("<fgColor rgb=\"FF{expected}\"/>")),
-                "theme {index}: {xml}"
+            let model = Styles::parse(&records).unwrap().model().unwrap();
+            assert_eq!(
+                model.fills[model.cell_xfs[1].fill_id as usize].fg_color,
+                Some(format!("#{expected}")),
+                "theme {index}"
             );
         }
     }
@@ -1501,9 +1358,14 @@ mod tests {
             offset: 0,
             data: &ext,
         });
-        let xml = Styles::parse(&records).unwrap().xml().unwrap();
+        let model = Styles::parse(&records).unwrap().model().unwrap();
         // HLS luminance 0.502 -> 0.502 * 0.5 + 0.5 = 0.751 (ECMA-376 §18.8.19).
-        assert!(xml.contains("<fgColor rgb=\"FFBFBFBF\"/>"), "{xml}");
+        assert_eq!(
+            model.fills[model.cell_xfs[1].fill_id as usize]
+                .fg_color
+                .as_deref(),
+            Some("#BFBFBF")
+        );
     }
     #[test]
     fn checksum_bound_extended_indent_overrides_only_the_owned_cell_xf() {
@@ -1537,12 +1399,11 @@ mod tests {
                 offset: 0,
                 data: &ext,
             });
-            let xml = Styles::parse(&records).unwrap().xml().unwrap();
-            assert_eq!(xml.matches("indent=\"7\"").count(), 16); // style XF plus 15 unextended cell XFs
-            assert_eq!(
-                xml.matches(&format!("indent=\"{value}\"")).count(),
-                usize::from(value != 7)
-            );
+            let model = Styles::parse(&records).unwrap().model().unwrap();
+            let indents: Vec<_> = model.cell_xfs.iter().map(|xf| xf.indent).collect();
+            // The style XF plus 15 unextended cell XFs keep the base cIndent.
+            assert_eq!(indents.iter().filter(|v| **v == Some(7)).count(), 15);
+            assert_eq!(indents[1], (value != 0).then_some(u32::from(value)));
         }
     }
     #[test]
@@ -1583,14 +1444,29 @@ mod tests {
                 offset: 0,
                 data: &ext,
             });
-            let xml = Styles::parse(&records).unwrap().xml().unwrap();
+            let model = Styles::parse(&records).unwrap().model().unwrap();
             let expected = match case {
                 "cell" => 1,
-                "style" => 2,
+                "style" => 1,
                 _ => 0,
             };
-            assert_eq!(xml.matches("indent=\"250\"").count(), expected, "{case}");
-            assert_eq!(xml.matches("readingOrder=\"2\"").count(), 2, "{case}");
+            let count = |value| {
+                model
+                    .cell_xfs
+                    .iter()
+                    .filter(|xf| xf.indent == value)
+                    .count()
+            };
+            assert_eq!(count(Some(250)), expected, "{case}");
+            assert_eq!(
+                model
+                    .cell_xfs
+                    .iter()
+                    .filter(|xf| xf.reading_order == Some(2))
+                    .count(),
+                1,
+                "{case}"
+            );
         }
     }
     #[test]
@@ -1649,13 +1525,8 @@ mod tests {
             xfs: vec![&xf; 100],
             formats: BTreeMap::new(),
             palette: None,
-            extensions_omitted: false,
             extensions: extensions::Extensions::default(),
         };
-        let xml = s.xml().unwrap();
-        assert!(xml.contains("fontId=\"4\""));
-        assert!(xml.contains("<fills count=\"2\">"));
-        assert!(xml.contains("<cellXfs count=\"100\">"));
         let model = s.model().unwrap();
         assert_eq!(
             (model.fonts.len(), model.fills.len(), model.borders.len()),
@@ -1673,7 +1544,7 @@ mod tests {
         assert_eq!(model.cell_xfs[0].reading_order, None);
     }
     #[test]
-    fn typed_font_keeps_legacy_cell_and_run_xml_byte_exact() {
+    fn typed_font_projects_cell_and_run_font_properties() {
         let mut font = vec![0; 16];
         font[..2].copy_from_slice(&240u16.to_le_bytes());
         font[2] = 2 | 8 | 16 | 32 | 64 | 128;
@@ -1690,12 +1561,8 @@ mod tests {
             xfs: vec![],
             formats: BTreeMap::new(),
             palette: None,
-            extensions_omitted: false,
             extensions: extensions::Extensions::default(),
         };
-        assert_eq!(s.font(&font).unwrap(), "<font><name val=\"A&amp;B\"/><sz val=\"12\"/><color indexed=\"10\"/><family val=\"3\"/><charset val=\"128\"/><b/><i/><strike/><outline/><shadow/><condense/><extend/><u val=\"singleAccounting\"/><vertAlign val=\"superscript\"/></font>");
-        assert_eq!(s.run_font(0).unwrap(), "<rPr><rFont val=\"A&amp;B\"/><sz val=\"12\"/><color indexed=\"10\"/><family val=\"3\"/><charset val=\"128\"/><b/><i/><strike/><outline/><shadow/><condense/><extend/><u val=\"singleAccounting\"/><vertAlign val=\"superscript\"/></rPr>");
-        assert!(s.run_font(4).is_err());
         let model = s.model().unwrap();
         assert_eq!(model.fonts.len(), 1);
         assert_eq!(model.fonts[0].name.as_deref(), Some("A&B"));
@@ -1706,6 +1573,16 @@ mod tests {
             Some("singleAccounting")
         );
         assert_eq!(model.fonts[0].vert_align.as_deref(), Some("superscript"));
+        assert_eq!(model.fonts[0].charset, Some(0x80));
+        let resolved = s.resolve().unwrap();
+        // MS-XLS 2.5.129: FontIndex 4 is reserved.
+        assert!(resolved.validate_run_font(4).is_err());
+        let run = resolved.run_font_model(0, &mut unbounded()).unwrap();
+        assert!(run.bold && run.italic && run.underline && run.strike);
+        assert_eq!((run.size, run.name.as_deref()), (Some(12.0), Some("A&B")));
+        assert_eq!(run.color.as_deref(), Some("#FF0000"));
+        assert_eq!(run.underline_style.as_deref(), Some("singleAccounting"));
+        assert_eq!(run.vert_align.as_deref(), Some("superscript"));
 
         let mut plain = font.clone();
         plain[2] = 0;
@@ -1717,10 +1594,17 @@ mod tests {
             xfs: vec![],
             formats: BTreeMap::new(),
             palette: None,
-            extensions_omitted: false,
             extensions: extensions::Extensions::default(),
         };
-        assert_eq!(plain_styles.run_font(0).unwrap(), "<rPr><rFont val=\"A&amp;B\"/><sz val=\"12\"/><color indexed=\"10\"/><family val=\"3\"/><charset val=\"128\"/><b val=\"0\"/><i val=\"0\"/><strike val=\"0\"/><outline val=\"0\"/><shadow val=\"0\"/><condense val=\"0\"/><extend val=\"0\"/><u val=\"none\"/><vertAlign val=\"baseline\"/></rPr>");
+        // A plain run font states every property explicitly off, so it
+        // resets the cell's font rather than inheriting from it.
+        let run = plain_styles
+            .resolve()
+            .unwrap()
+            .run_font_model(0, &mut unbounded())
+            .unwrap();
+        assert!(!run.bold && !run.italic && !run.underline && !run.strike);
+        assert_eq!((run.underline_style, run.vert_align), (None, None));
     }
     #[test]
     fn resolves_custom_palette_and_preserves_automatic_font_color() {
@@ -1731,12 +1615,13 @@ mod tests {
             xfs: vec![],
             formats: BTreeMap::new(),
             palette: Some(&palette),
-            extensions_omitted: false,
             extensions: extensions::Extensions::default(),
         };
-        assert_eq!(s.color(10).xml(), "rgb=\"FF123456\"");
-        assert_eq!(s.color(0x7fff).xml(), "auto=\"1\"");
-        assert_eq!(s.color(65).xml(), "indexed=\"65\"");
+        assert_eq!(s.color(10), ColorIdentity::Argb([0xff, 0x12, 0x34, 0x56]));
+        assert_eq!(s.color(0x7fff), ColorIdentity::Auto);
+        assert_eq!(s.color(65), ColorIdentity::Indexed(65));
+        assert_eq!(s.color(10).model().as_deref(), Some("#123456"));
+        assert_eq!(s.color(0x7fff).model(), None);
     }
     #[test]
     fn palette_and_parsed_extended_argb_share_typed_identity() {
@@ -1778,14 +1663,15 @@ mod tests {
         ]);
         let styles = Styles::parse(&records).unwrap();
         assert_eq!(styles.color(10), styles.extensions.color(1, 13).unwrap());
-        let xml = styles.xml().unwrap();
+        let model = styles.model().unwrap();
         // The extension resolves to the same typed ARGB identity as the
-        // palette-backed base font, so exact XML interning keeps one font.
-        assert!(xml.contains("<fonts count=\"1\">"));
-        assert_eq!(xml.matches("rgb=\"FF123456\"").count(), 1);
+        // palette-backed base font, so interning keeps one font.
+        assert_eq!(model.fonts.len(), 1);
+        assert_eq!(model.fonts[0].color.as_deref(), Some("#123456"));
+        assert!(model.cell_xfs.iter().all(|xf| xf.font_id == 0));
     }
     #[test]
-    fn font_override_interns_emission_equivalent_weights_without_removing_source_slots() {
+    fn font_override_interns_equivalent_weights_without_removing_source_slots() {
         let mut normal = font();
         normal[4..6].copy_from_slice(&10u16.to_le_bytes());
         let mut other = normal.clone();
@@ -1836,7 +1722,6 @@ mod tests {
         let resolved = Styles::parse(&records).unwrap().resolve().unwrap();
         assert_eq!(resolved.fonts.len(), 2);
         assert_eq!(resolved.fonts[1].font.weight, 650);
-        assert!(resolved.xml().contains("<fonts count=\"2\">"));
         let model = resolved.into_model();
         assert_eq!(model.cell_xfs[1].font_id, 0);
         assert_eq!(model.cell_xfs[2].font_id, 1);
@@ -1877,12 +1762,15 @@ mod tests {
                 data: &second,
             },
         ]);
-        let xml = Styles::parse(&records).unwrap().xml().unwrap();
-        assert!(xml.contains("<fonts count=\"3\">"));
-        assert!(xml.contains("<color rgb=\"80123456\"/>"));
-        assert!(xml.contains("<color rgb=\"FF123456\"/>"));
-        assert_eq!(xml.matches("fontId=\"1\"").count(), 1);
-        assert_eq!(xml.matches("fontId=\"2\"").count(), 1);
+        let model = Styles::parse(&records).unwrap().model().unwrap();
+        // Alpha is dropped by color resolution but still distinguishes the
+        // interned source fonts.
+        assert_eq!(model.fonts.len(), 3);
+        assert_eq!(model.fonts[1].color, model.fonts[2].color);
+        assert_eq!(
+            (model.cell_xfs[1].font_id, model.cell_xfs[2].font_id),
+            (1, 2)
+        );
     }
     #[test]
     fn rejects_invalid_font_references_and_truncated_records() {
@@ -1895,10 +1783,9 @@ mod tests {
                 xfs: vec![&xf],
                 formats: BTreeMap::new(),
                 palette: None,
-                extensions_omitted: false,
                 extensions: extensions::Extensions::default(),
             };
-            assert!(s.xml().is_err());
+            assert!(s.resolve().is_err());
         }
         for kind in [0x00e0, 0x041e, 0x0092] {
             assert!(Styles::parse(&[Record {
@@ -1919,7 +1806,6 @@ mod tests {
             xfs: vec![&xf],
             formats: BTreeMap::new(),
             palette: None,
-            extensions_omitted: false,
             extensions: extensions::Extensions::default(),
         }
         .resolve()
@@ -1929,7 +1815,7 @@ mod tests {
         assert!(resolved.validate_run_font(1).is_err());
     }
     #[test]
-    fn escapes_custom_formats_without_evaluating_them() {
+    fn keeps_custom_formats_verbatim_without_evaluating_them() {
         let font = font();
         let xf = [0u8; 20];
         let s = Styles {
@@ -1937,12 +1823,11 @@ mod tests {
             xfs: vec![&xf],
             formats: BTreeMap::from([(164, "[Red][<0]0.0\"&\"".into())]),
             palette: None,
-            extensions_omitted: false,
             extensions: extensions::Extensions::default(),
         };
-        assert!(s
-            .xml()
-            .unwrap()
-            .contains("[Red][&lt;0]0.0&quot;&amp;&quot;"));
+        let model = s.model().unwrap();
+        assert_eq!(model.num_fmts.len(), 1);
+        assert_eq!(model.num_fmts[0].num_fmt_id, 164);
+        assert_eq!(model.num_fmts[0].format_code, "[Red][<0]0.0\"&\"");
     }
 }

@@ -19,7 +19,7 @@
 //! Any adjusted shape type without such evidence is rejected, never guessed.
 
 /// DrawingML preset for a legacy shape type, as PowerPoint converts it.
-#[cfg(any(test, feature = "direct-ppt", feature = "direct-doc"))]
+#[cfg(any(feature = "direct-ppt", feature = "direct-doc"))]
 pub(crate) fn name(kind: u16) -> Option<&'static str> {
     Some(match kind {
         // Not-primitive without vertices, picture frames and text boxes are

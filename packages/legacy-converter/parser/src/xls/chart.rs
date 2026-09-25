@@ -32,7 +32,7 @@ const MAX_REFERENCED_CELLS: usize = 32_000;
 /// XTI entries (MS-XLS 2.4.105/2.5.172) that point at the workbook's own
 /// SupBook (2.4.271, cch 0x0401) and single-sheet tab ranges.
 struct Cells<'a> {
-    /// XTI index -> converted worksheet index.
+    /// XTI index -> projected worksheet index.
     sheets_by_xti: Vec<Option<usize>>,
     sheets: &'a [(String, SheetData)],
     shared: &'a [rich::Text],
