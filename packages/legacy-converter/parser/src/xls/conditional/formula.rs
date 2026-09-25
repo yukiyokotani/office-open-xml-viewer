@@ -119,6 +119,9 @@ pub(in super::super) struct Externs {
     xti_names: Vec<Option<Vec<String>>>,
     /// Lbl (2.4.150) names in record order; built-in names are `None`.
     names: Vec<Option<String>>,
+    /// Formula sheet prefix (quoted when needed) per XTI of this workbook's
+    /// own SupBook that names exactly one sheet.
+    xti_sheets: Vec<Option<String>>,
 }
 
 impl Externs {
@@ -126,11 +129,37 @@ impl Externs {
         let mut books: Vec<Option<Vec<String>>> = Vec::new();
         let mut xtis = Vec::new();
         let mut defined = Vec::new();
+        let mut own = Vec::new();
+        let mut sheet_names = Vec::new();
+        let mut xti_tabs = Vec::new();
         for record in records.iter().take_while(|r| r.kind != super::super::EOF) {
             match record.kind {
                 0x01ae => {
                     let addin = u16_at(record.data, 2).is_ok_and(|cch| cch == 0x3a01);
                     books.push(addin.then(Vec::new));
+                    own.push(u16_at(record.data, 2).is_ok_and(|cch| cch == 0x0401));
+                }
+                0x0085 => {
+                    // BoundSheet8: lbPlyPos, flags, stName (ShortXLUnicodeString).
+                    let data = record.data;
+                    let count = usize::from(*data.get(6).ok_or_else(truncated)?);
+                    let name = match *data.get(7).ok_or_else(truncated)? {
+                        0 => data
+                            .get(8..8 + count)
+                            .ok_or_else(truncated)?
+                            .iter()
+                            .map(|&byte| char::from(byte))
+                            .collect::<String>(),
+                        _ => {
+                            let bytes = data.get(8..8 + count * 2).ok_or_else(truncated)?;
+                            let units: Vec<u16> = bytes
+                                .chunks_exact(2)
+                                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                                .collect();
+                            String::from_utf16(&units).map_err(|_| truncated())?
+                        }
+                    };
+                    sheet_names.push(name);
                 }
                 0x0023 => {
                     // ExternName 2.4.105 of an add-in SupBook: flags (all
@@ -167,6 +196,10 @@ impl Externs {
                     let count = usize::from(u16_at(record.data, 0)?);
                     for index in 0..count {
                         xtis.push(u16_at(record.data, 2 + index * 6)?);
+                        xti_tabs.push((
+                            u16_at(record.data, 4 + index * 6)?,
+                            u16_at(record.data, 6 + index * 6)?,
+                        ));
                     }
                 }
                 0x0018 => {
@@ -199,11 +232,26 @@ impl Externs {
         }
         Ok(Self {
             xti_names: xtis
-                .into_iter()
-                .map(|book| books.get(usize::from(book)).cloned().flatten())
+                .iter()
+                .map(|book| books.get(usize::from(*book)).cloned().flatten())
                 .collect(),
             names: defined,
+            xti_sheets: xtis
+                .iter()
+                .zip(&xti_tabs)
+                .map(|(book, (first, last))| {
+                    let own = own.get(usize::from(*book)).copied().unwrap_or(false);
+                    (own && first == last)
+                        .then(|| sheet_names.get(usize::from(*first)))
+                        .flatten()
+                        .map(|name| sheet_prefix(name))
+                })
+                .collect(),
         })
+    }
+
+    fn sheet(&self, xti: u16) -> Option<&str> {
+        self.xti_sheets.get(usize::from(xti))?.as_deref()
     }
 
     /// A one-based Lbl index as the user-defined name it names.
@@ -221,6 +269,30 @@ impl Externs {
 
 fn truncated() -> String {
     unsupported("truncated XLS conditional formatting formula")
+}
+
+/// A sheet name as a formula prefix: quoted (with doubled apostrophes)
+/// unless it is a plain identifier. Excel's own .xlsx files leave names of
+/// letters (including CJK), digits, `_` and `.` unquoted (sample-3:
+/// `夏休み!$C$4`) and quote names with spaces (`'WATERFALL CHART'!…`); a
+/// name that begins with a digit or reads as an A1 reference is quoted.
+fn sheet_prefix(name: &str) -> String {
+    let identifier = name
+        .chars()
+        .next()
+        .is_some_and(|first| first.is_alphabetic() || first == '_')
+        && name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '.');
+    let letters = name.chars().take_while(|c| c.is_ascii_alphabetic()).count();
+    let cell_like = (1..=3).contains(&letters)
+        && name.len() > letters
+        && name[letters..].chars().all(|c| c.is_ascii_digit());
+    if identifier && !cell_like {
+        name.to_string()
+    } else {
+        format!("'{}'", name.replace('\'', "''"))
+    }
 }
 
 fn reject() -> String {
@@ -277,6 +349,49 @@ fn cell(row: u16, col: u16, anchor: (u16, u16), relative_offsets: bool) -> Strin
     )
 }
 
+/// An area as text; an area spanning every BIFF8 column (0..=0xFF) or row
+/// (0..=0xFFFF) with absolute bounds is written as a whole-row or
+/// whole-column range, as Excel writes it in SpreadsheetML (sample-1:
+/// `$A$3:$IV$3` is saved as `$3:$3`, sample-4: `$C$1:$C$65536` as `$C:$C`).
+fn area_text(
+    rows: (u16, u16),
+    cols: (u16, u16),
+    anchor: (u16, u16),
+    relative_offsets: bool,
+) -> String {
+    let col_absolute = cols.0 & 0x4000 == 0 && cols.1 & 0x4000 == 0;
+    let row_absolute = cols.0 & 0x8000 == 0 && cols.1 & 0x8000 == 0;
+    if col_absolute && cols.0 & 0x3fff == 0 && cols.1 & 0x3fff == 0xff {
+        let row = |row: u16, col: u16| {
+            let relative = col & 0x8000 != 0;
+            let row = if relative && relative_offsets {
+                anchor.0.wrapping_add(row)
+            } else {
+                row
+            };
+            format!("{}{}", if relative { "" } else { "$" }, u32::from(row) + 1)
+        };
+        return format!("{}:{}", row(rows.0, cols.0), row(rows.1, cols.1));
+    }
+    if row_absolute && rows.0 == 0 && rows.1 == 0xffff {
+        let col = |col: u16| {
+            let relative = col & 0x4000 != 0;
+            let index = if relative && relative_offsets {
+                anchor.1.wrapping_add(col & 0x3fff) & 0x00ff
+            } else {
+                col & 0x3fff
+            };
+            format!("{}{}", if relative { "" } else { "$" }, column(index))
+        };
+        return format!("{}:{}", col(cols.0), col(cols.1));
+    }
+    format!(
+        "{}:{}",
+        cell(rows.0, cols.0, anchor, relative_offsets),
+        cell(rows.1, cols.1, anchor, relative_offsets)
+    )
+}
+
 /// ECMA-376 18.17.2.x number literal: the shortest round-trip decimal.
 fn number(value: f64) -> Result<String, String> {
     if !value.is_finite() {
@@ -291,6 +406,115 @@ pub(in super::super) fn decompile(
     rgce: &[u8],
     anchor: (u16, u16),
     externs: &Externs,
+) -> Result<String, String> {
+    decompile_with(rgce, &[], anchor, externs, false)
+}
+
+/// Decompile a NameParsedFormula (2.5.198.21): its 3-D references are
+/// RgceLocRel (2.5.198.85), which SpreadsheetML writes relative to A1;
+/// `extra` is the RgbExtra (2.5.198.103) holding array constants.
+pub(in super::super) fn decompile_name(
+    rgce: &[u8],
+    extra: &[u8],
+    externs: &Externs,
+) -> Result<(String, usize), String> {
+    let mut used = 0;
+    let text = decompile_inner(rgce, extra, &mut used, (0, 0), externs, true)?;
+    Ok((text, used))
+}
+
+fn decompile_with(
+    rgce: &[u8],
+    extra: &[u8],
+    anchor: (u16, u16),
+    externs: &Externs,
+    name: bool,
+) -> Result<String, String> {
+    let mut used = 0;
+    let text = decompile_inner(rgce, extra, &mut used, anchor, externs, name)?;
+    if used != extra.len() {
+        return Err(reject());
+    }
+    Ok(text)
+}
+
+/// PtgExtraArray (2.5.198.59) at `extra[*used..]` as an ECMA-376
+/// 18.17.2 array constant: columns separated by `,`, rows by `;`.
+fn array(extra: &[u8], used: &mut usize) -> Result<String, String> {
+    let mut at = *used;
+    let cols = usize::from(*extra.get(at).ok_or_else(truncated)?) + 1;
+    let rows = usize::from(u16_at(extra, at + 1)?) + 1;
+    at += 3;
+    let mut text = String::from("{");
+    for row in 0..rows {
+        if row > 0 {
+            text.push(';');
+        }
+        for col in 0..cols {
+            if col > 0 {
+                text.push(',');
+            }
+            // SerAr (2.5.198.112).
+            match *extra.get(at).ok_or_else(truncated)? {
+                0x00 => at += 9,
+                0x01 => {
+                    text.push_str(&number(f64_at(extra, at + 1)?)?);
+                    at += 9;
+                }
+                0x02 => {
+                    let count = usize::from(u16_at(extra, at + 1)?);
+                    let (value, size) = match *extra.get(at + 3).ok_or_else(truncated)? {
+                        0 => (
+                            extra
+                                .get(at + 4..at + 4 + count)
+                                .ok_or_else(truncated)?
+                                .iter()
+                                .map(|&byte| char::from(byte))
+                                .collect::<String>(),
+                            count,
+                        ),
+                        1 => {
+                            let bytes = extra
+                                .get(at + 4..at + 4 + count * 2)
+                                .ok_or_else(truncated)?;
+                            let units: Vec<u16> = bytes
+                                .chunks_exact(2)
+                                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                                .collect();
+                            (
+                                String::from_utf16(&units).map_err(|_| truncated())?,
+                                count * 2,
+                            )
+                        }
+                        _ => return Err(reject()),
+                    };
+                    text.push_str(&format!("\"{}\"", value.replace('"', "\"\"")));
+                    at += 4 + size;
+                }
+                0x04 => {
+                    text.push_str(if *extra.get(at + 1).ok_or_else(truncated)? != 0 {
+                        "TRUE"
+                    } else {
+                        "FALSE"
+                    });
+                    at += 9;
+                }
+                _ => return Err(reject()),
+            }
+        }
+    }
+    text.push('}');
+    *used = at;
+    Ok(text)
+}
+
+fn decompile_inner(
+    rgce: &[u8],
+    extra: &[u8],
+    used: &mut usize,
+    anchor: (u16, u16),
+    externs: &Externs,
+    name: bool,
 ) -> Result<String, String> {
     let mut stack: Vec<Item> = Vec::new();
     let mut space = String::new();
@@ -465,20 +689,40 @@ pub(in super::super) fn decompile(
                 // PtgArea / PtgAreaN.
                 0x05 | 0x0d => {
                     let relative = token & 0x1f == 0x0d;
-                    let first = cell(
-                        u16_at(rgce, at + 1)?,
-                        u16_at(rgce, at + 5)?,
+                    let text = area_text(
+                        (u16_at(rgce, at + 1)?, u16_at(rgce, at + 3)?),
+                        (u16_at(rgce, at + 5)?, u16_at(rgce, at + 7)?),
                         anchor,
                         relative,
                     );
-                    let last = cell(
-                        u16_at(rgce, at + 3)?,
-                        u16_at(rgce, at + 7)?,
-                        anchor,
-                        relative,
-                    );
-                    stack.push(Item::Text(format!("{pending}{first}:{last}")));
+                    stack.push(Item::Text(format!("{pending}{text}")));
                     at += 9;
+                }
+                // PtgArray (2.5.198.32): its values are the next
+                // PtgExtraArray of the RgbExtra.
+                0x00 => {
+                    rgce.get(at + 1..at + 8).ok_or_else(truncated)?;
+                    let text = array(extra, used)?;
+                    stack.push(Item::Text(format!("{pending}{text}")));
+                    at += 8;
+                }
+                // PtgRef3d / PtgArea3d on one sheet of this workbook.
+                0x1a | 0x1b => {
+                    let sheet = externs
+                        .sheet(u16_at(rgce, at + 1)?)
+                        .ok_or_else(|| unsupported("unsupported XLS 3-D reference"))?;
+                    let text = if token & 0x1f == 0x1a {
+                        cell(u16_at(rgce, at + 3)?, u16_at(rgce, at + 5)?, anchor, name)
+                    } else {
+                        area_text(
+                            (u16_at(rgce, at + 3)?, u16_at(rgce, at + 5)?),
+                            (u16_at(rgce, at + 7)?, u16_at(rgce, at + 9)?),
+                            anchor,
+                            name,
+                        )
+                    };
+                    stack.push(Item::Text(format!("{pending}{sheet}!{text}")));
+                    at += if token & 0x1f == 0x1a { 7 } else { 11 };
                 }
                 // PtgName (2.5.198.76): a user-defined name, written by name
                 // as in SpreadsheetML (sample-2: a data-validation list
@@ -580,7 +824,14 @@ mod tests {
         let externs = Externs {
             xti_names: vec![Some(vec!["EOMONTH".into(), "MYUDF".into()])],
             names: vec![Some("List".into()), None],
+            xti_sheets: vec![Some("Data".into())],
         };
+        // 'Data'!$B$4:$I$49 through a name's PtgArea3d.
+        let area = [0x3b, 0, 0, 3, 0, 48, 0, 1, 0xc0, 8, 0xc0];
+        assert_eq!(
+            decompile_name(&area, &[], &externs).unwrap().0,
+            "Data!B4:I49"
+        );
         assert_eq!(
             decompile(&[0x23, 1, 0, 0, 0], (0, 0), &externs).unwrap(),
             "List"

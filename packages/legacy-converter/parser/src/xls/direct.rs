@@ -479,6 +479,19 @@ fn project_sheet(
             .sum(),
     )?;
     worksheet.data_validations = sheet.data_validations;
+    charge(
+        budget,
+        sheet
+            .defined_names
+            .iter()
+            .map(|name| {
+                std::mem::size_of::<xlsx_model::DefinedName>()
+                    + name.name.len()
+                    + name.formula.len()
+            })
+            .sum(),
+    )?;
+    worksheet.defined_names = sheet.defined_names;
     if let Some(color) = sheet.tab_color {
         charge(budget, color.len())?;
         worksheet.tab_color = Some(color);

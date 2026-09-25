@@ -29,6 +29,7 @@ mod drawing_media;
 mod filters;
 mod geometry;
 mod hyperlinks;
+mod names;
 mod pictures;
 mod print;
 mod rich;
@@ -184,6 +185,8 @@ struct SheetData {
     validation_records: tables::Records,
     /// Their XLSX-model projection (direct path only).
     data_validations: Vec<xlsx_model::DataValidation>,
+    /// Defined names visible on this sheet (direct path only).
+    defined_names: Vec<xlsx_model::DefinedName>,
 }
 
 pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<XlsConversion, String> {
@@ -339,6 +342,11 @@ fn prepare_workbook(
     let mut dxfs = Vec::new();
     let mut table_styles = None;
     let mut filter_databases = None;
+    let mut defined_names = None;
+    let has_names = records
+        .iter()
+        .take_while(|record| record.kind != EOF)
+        .any(|record| record.kind == 0x0018);
     for (tab, sheet) in sheets.into_iter().enumerate() {
         if sheet.sheet_type != 0 {
             skipped_non_worksheets = true;
@@ -367,6 +375,19 @@ fn prepare_workbook(
                     hyperlinks::tooltip(record)?;
                 }
             }
+        }
+        if direct && has_names {
+            if conditional_theme.is_none() {
+                conditional_theme = Some((
+                    theme::Colors::parse(&records)?,
+                    conditional::Externs::parse(&records)?,
+                ));
+            }
+            if defined_names.is_none() {
+                let (_, externs) = conditional_theme.as_ref().expect("parsed theme");
+                defined_names = Some(names::Names::parse(&records, externs)?);
+            }
+            data.defined_names = defined_names.as_ref().expect("parsed names").for_sheet(tab);
         }
         if direct && !data.validation_records.is_empty() {
             if conditional_theme.is_none() {
