@@ -57,7 +57,7 @@ export function createDirectSourceRuntime<G extends DirectSourceGlue, A extends 
   let domain: TrapDomain | undefined;
   const failure = (): WasmTrapError | undefined => initializationPoison ?? domain?.failure;
   const failTrap = (error: unknown): never => {
-    if (!isWasmTrap(error)) throw error;
+    if (!isWasmTrap(error)) throw asError(error);
     const normalized = failure() ?? new WasmTrapError(`${config.label} WASM runtime trapped and is unavailable`);
     if (domain) {
       domain.failure ??= normalized;
@@ -218,4 +218,13 @@ function throwIfAborted(signal: AbortSignal | undefined, label: string): void {
   const error = new Error(`${label} direct source was aborted`);
   error.name = 'AbortError';
   throw error;
+}
+
+/**
+ * wasm-bindgen surfaces a Rust `Err(JsValue::from_str(..))` as a thrown
+ * string. Callers of every reader receive an Error with that message instead,
+ * so a DOC, XLS or PPT failure has the same shape as any other load failure.
+ */
+function asError(error: unknown): unknown {
+  return typeof error === 'string' ? new Error(error) : error;
 }

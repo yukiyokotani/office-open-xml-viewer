@@ -32,10 +32,19 @@ impl Position {
                     self.y = value;
                 }
             }
-            0x9410 => self.distances[0] = nonnegative(b)?,
-            0x9411 => self.distances[1] = nonnegative(b)?,
-            0x941e => self.distances[2] = nonnegative(b)?,
-            0x941f => self.distances[3] = nonnegative(b)?,
+            0x9410 | 0x9411 | 0x941e | 0x941f => {
+                // sprmTDxaFromText/…: wrap distances use the same 0..31680
+                // twips domain as widths, with their own diagnostic.
+                let distance = nonnegative(b)
+                    .map_err(|_| super::unsupported("invalid Word table wrap distance"))?;
+                let slot = match code {
+                    0x9410 => 0,
+                    0x9411 => 1,
+                    0x941e => 2,
+                    _ => 3,
+                };
+                self.distances[slot] = distance;
+            }
             0x3465 => self.no_overlap = boolean(b[0])?,
             _ => return Ok(false),
         }
