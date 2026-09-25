@@ -14,9 +14,9 @@
 //! metadata is partial like the XLSX parser's.
 //!
 //! Formatting the renderer cannot draw fails closed: a PivotTable AutoFormat
-//! (fAutoFormat), OLAP views (SXViewEx), the default-style flag, built-in
-//! PivotTable styles (their Annex G formats live in the XLSX parser), and
-//! page-field or column-subheading style elements that would apply.
+//! (fAutoFormat), OLAP views (SXViewEx), a built-in style in a theme-less
+//! workbook, and page-field or column-subheading style elements that would
+//! apply.
 
 use super::{tables, u16_at, unsupported};
 
@@ -414,7 +414,10 @@ fn table(
 }
 
 /// SXAddl_SXCView_SXDTableStyleClient (2.4.273.107): the option bits and
-/// the applied table style, resolved to the workbook's TableStyle.
+/// the applied table style: a workbook TableStyle, else a built-in
+/// PivotTable style (ECMA-376 Annex G, shared with the XLSX parser) under
+/// the workbook theme. fDefaultStyle applies the workbook's default
+/// PivotTable style (2.4.322 TableStyles) instead of stName.
 fn style(
     record: &[u8],
     styles: &tables::Styles,
@@ -432,30 +435,54 @@ fn style(
         .chunks_exact(2)
         .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
         .collect();
-    let name = String::from_utf16(&units).map_err(|_| truncated())?;
-    // fDefaultStyle names the workbook default instead; no corpus file
-    // shows which of it and stName Excel applies.
+    let mut name = String::from_utf16(&units).map_err(|_| truncated())?;
     if flags & 0x0040 != 0 {
-        return Err(unsupported("XLS PivotTable default style is not projected"));
+        name = styles
+            .default_pivot_style()
+            .ok_or_else(|| unsupported("XLS PivotTable default style is not named"))?
+            .to_string();
     }
     let show_last_column = flags & 0x0002 != 0;
     let show_row_stripes = flags & 0x0004 != 0;
     let show_column_stripes = flags & 0x0008 != 0;
     let show_row_headers = flags & 0x0010 != 0;
     let show_column_headers = flags & 0x0020 != 0;
-    let elements = styles
-        .pivot_elements(&name, context)?
-        .ok_or_else(|| unsupported("XLS built-in PivotTable styles are not projected"))?;
-    let mut projected = Vec::new();
-    for (tse, size, dxf) in elements {
-        let Some(kind) = element_kind(tse) else {
-            continue;
+    let elements: Vec<(&'static str, u32, xlsx_model::Dxf)> =
+        match styles.pivot_elements(&name, context)? {
+            Some(elements) => elements
+                .into_iter()
+                .filter_map(|(tse, size, dxf)| Some((element_kind(tse)?, size, dxf)))
+                .collect(),
+            None => {
+                let presets = ooxml_common::spreadsheet_style_presets::pivot_style(&name)
+                    .ok_or_else(|| unsupported("unknown XLS PivotTable style"))?;
+                // A theme-less workbook has no colors for the preset's theme
+                // references; no Office default theme is assumed.
+                let theme = context
+                    .theme
+                    .scheme()
+                    .ok_or_else(|| unsupported("XLS built-in PivotTable style lacks its theme"))?;
+                presets
+                    .into_iter()
+                    .map(|preset| {
+                        (
+                            preset.kind,
+                            preset.size,
+                            xlsx_model::style_presets::preset_dxf(preset.dxf, &theme),
+                        )
+                    })
+                    .collect()
+            }
         };
+    let mut projected = Vec::new();
+    for (kind, size, dxf) in elements {
         // The renderer draws neither the page field area nor column
         // subheadings (it lacks the column header layout).
-        let undrawn = match tse {
-            0x1a | 0x1b => has_pages,
-            0x14..=0x16 => has_columns && show_column_headers,
+        let undrawn = match kind {
+            "pageFieldLabels" | "pageFieldValues" => has_pages,
+            "firstColumnSubheading" | "secondColumnSubheading" | "thirdColumnSubheading" => {
+                has_columns && show_column_headers
+            }
             _ => false,
         };
         if undrawn {
@@ -526,8 +553,15 @@ mod tests {
         list: &[(u16, Vec<u8>)],
         globals: &[super::super::Record<'_>],
     ) -> Result<Vec<xlsx_model::PivotTableMetadata>, String> {
+        project_themed(list, globals, super::super::theme::Colors::default())
+    }
+
+    fn project_themed(
+        list: &[(u16, Vec<u8>)],
+        globals: &[super::super::Record<'_>],
+        theme: super::super::theme::Colors,
+    ) -> Result<Vec<xlsx_model::PivotTableMetadata>, String> {
         let cell_styles = super::super::styles::Styles::parse(&[]).unwrap();
-        let theme = super::super::theme::Colors::default();
         let context = tables::Context {
             styles: &cell_styles,
             theme: &theme,
@@ -680,7 +714,63 @@ mod tests {
     }
 
     #[test]
-    fn autoformat_olap_and_builtin_styles_fail_closed() {
+    fn built_in_and_default_styles_resolve_under_the_workbook_theme() {
+        let scheme = [
+            [0x00, 0x00, 0x00],
+            [0xff, 0xff, 0xff],
+            [0x44, 0x54, 0x6a],
+            [0xe7, 0xe6, 0xe6],
+            [0x44, 0x72, 0xc4],
+            [0xed, 0x7d, 0x31],
+            [0xa5, 0xa5, 0xa5],
+            [0xff, 0xc0, 0x00],
+            [0x5b, 0x9b, 0xd5],
+            [0x70, 0xad, 0x47],
+            [0x05, 0x63, 0xc1],
+            [0x95, 0x4f, 0x72],
+        ];
+        let theme: Vec<String> = scheme
+            .iter()
+            .map(|[r, g, b]| format!("#{r:02X}{g:02X}{b:02X}"))
+            .collect();
+        let expected = serde_json::to_string(
+            &xlsx_model::style_presets::pivot_style_elements("PivotStyleLight16", &theme).unwrap(),
+        )
+        .unwrap();
+        let view = || (0x00b0, sx_view([0, 0, 0, 0, 0, 0], 0));
+        let tables = project_themed(
+            &[view(), (0x0864, style_client(0x0036, "PivotStyleLight16"))],
+            &[],
+            super::super::theme::Colors::from_scheme(scheme),
+        )
+        .unwrap();
+        let style = tables[0].style.as_ref().unwrap();
+        assert_eq!(style.name, "PivotStyleLight16");
+        assert_eq!(serde_json::to_string(&style.elements).unwrap(), expected);
+        // fDefaultStyle takes the TableStyles default PivotTable style.
+        let mut defaults = frt(0x088e);
+        defaults.extend(0u32.to_le_bytes());
+        defaults.extend(1u16.to_le_bytes());
+        defaults.extend(17u16.to_le_bytes());
+        for unit in "TPivotStyleLight16".encode_utf16() {
+            defaults.extend(unit.to_le_bytes());
+        }
+        let globals = [super::super::Record {
+            kind: 0x088e,
+            offset: 0,
+            data: &defaults,
+        }];
+        let tables = project_themed(
+            &[view(), (0x0864, style_client(0x0076, "Other"))],
+            &globals,
+            super::super::theme::Colors::from_scheme(scheme),
+        )
+        .unwrap();
+        assert_eq!(tables[0].style.as_ref().unwrap().name, "PivotStyleLight16");
+    }
+
+    #[test]
+    fn autoformat_olap_and_unresolvable_styles_fail_closed() {
         let base = || (0x00b0, sx_view([0, 0, 0, 0, 0, 0], 0));
         assert!(
             project_view(&[(0x00b0, sx_view([0, 0, 0, 0, 0, 0], 0x0008))])
@@ -690,9 +780,16 @@ mod tests {
         assert!(project_view(&[base(), (0x080c, vec![0; 16])])
             .unwrap_err()
             .contains("OLAP"));
-        let style = style_client(0x0036, "Pv16");
-        assert!(project_view(&[base(), (0x0864, style)])
-            .unwrap_err()
-            .contains("built-in"));
+        assert!(
+            project_view(&[base(), (0x0864, style_client(0x0036, "Pv16"))])
+                .unwrap_err()
+                .contains("unknown")
+        );
+        // A built-in style needs the workbook theme colors.
+        assert!(
+            project_view(&[base(), (0x0864, style_client(0x0036, "PivotStyleLight16"))])
+                .unwrap_err()
+                .contains("theme")
+        );
     }
 }

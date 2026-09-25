@@ -69,6 +69,21 @@ impl Colors {
         Some(format!("rgb=\"{a:02X}{r:02X}{g:02X}{b:02X}\""))
     }
 
+    #[cfg(test)]
+    pub(super) fn from_scheme(colors: [[u8; 3]; 12]) -> Self {
+        Self(colors.map(Some))
+    }
+
+    /// The color scheme in clrScheme order (dk1, lt1, dk2, lt2, accent1-6,
+    /// hlink, folHlink) as the XLSX parser holds a workbook theme, when all
+    /// twelve colors are present.
+    pub(super) fn scheme(&self) -> Option<Vec<String>> {
+        self.0
+            .iter()
+            .map(|color| color.map(|[r, g, b]| format!("#{r:02X}{g:02X}{b:02X}")))
+            .collect()
+    }
+
     pub(super) fn argb(&self, index: u32) -> Option<[u8; 4]> {
         let [r, g, b] = self.0.get(index as usize).copied().flatten()?;
         Some([0xff, r, g, b])
