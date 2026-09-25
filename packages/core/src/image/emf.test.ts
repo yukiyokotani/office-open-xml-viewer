@@ -8,6 +8,7 @@ import {
   isOoxmlIncompleteMetafileError,
 } from './raster-or-metafile.js';
 import { dropBitmapCacheByPath, getCachedBitmapByPath } from './bitmap-image-by-path.js';
+import { getCachedDuotoneBitmapByPath } from './duotone-bitmap-by-path.js';
 
 // ── EMF (Enhanced Metafile) player unit tests ───────────────────────────────
 // The renderer falls back to this player for true `.emf` blips the browser can't
@@ -1264,6 +1265,29 @@ describe('renderEmfToBitmap', () => {
     expect(getIncompleteMetafileReport(strict)).toBeUndefined();
   });
 
+  it('keeps the incomplete report on a bitmap derived by a pixel effect', async () => {
+    const fetchImage = async () => new Blob([partial() as Uint8Array<ArrayBuffer>], { type: 'image/x-emf' });
+    const offscreenFactory = (w: number, h: number) => ({
+      width: w,
+      height: h,
+      getContext: () => ({
+        drawImage() {},
+        getImageData: () => ({ data: new Uint8ClampedArray(w * h * 4) }),
+        putImageData() {},
+      }),
+    }) as unknown as OffscreenCanvas;
+    const opts = { widthPt: 48, heightPt: 36, offscreenFactory };
+    const base = await getCachedBitmapByPath('p.emf', 'image/x-emf', fetchImage, opts);
+    const effects = { effects: [{ type: 'grayscale' as const }] };
+    const derived = await getCachedDuotoneBitmapByPath('p.emf', 'image/x-emf', effects, fetchImage, opts);
+    expect(derived).not.toBe(base);
+    expect(getIncompleteMetafileReport(derived)).toEqual({ format: 'emf', unsupported: ['EMR_POLYTEXTOUTW'] });
+    // A later hit on the derived cache entry carries it as well.
+    const again = await getCachedDuotoneBitmapByPath('p.emf', 'image/x-emf', effects, fetchImage, opts);
+    expect(getIncompleteMetafileReport(again)?.unsupported).toEqual(['EMR_POLYTEXTOUTW']);
+    dropBitmapCacheByPath(fetchImage);
+  });
+
   it('never serves a cached partial picture to a strict request', async () => {
     const fetchImage = vi.fn(async () => new Blob([partial() as Uint8Array<ArrayBuffer>], { type: 'image/x-emf' }));
     const opts = { widthPt: 48, heightPt: 36 };
@@ -1538,6 +1562,49 @@ describe('playEmf — clip records inside an open path bracket ([MS-EMF] 2.3.2, 
     expect(m.calls.find((c) => c.op === 'clip')?.args).toEqual(['Path2D', 'nonzero']);
     expect(regions).toHaveLength(1);
     expect(m.styles.fill).toEqual(['#000000']);
+  });
+
+  it('keeps a closed path across a clip record until FILLPATH consumes it', () => {
+    const regions = stubPath2D();
+    // BEGINPATH, RECTANGLE, ENDPATH, then INTERSECTCLIPRECT before FILLPATH.
+    const m = run([
+      record(EMR.SELECTOBJECT, (w) => w.u32(0x80000004)),
+      record(EMR.BEGINPATH, () => {}),
+      record(43, (w) => w.i32(10).i32(10).i32(20).i32(20)),
+      record(EMR.ENDPATH, () => {}),
+      record(INTERSECTCLIPRECT, (w) => w.i32(0).i32(0).i32(90).i32(90)),
+      record(EMR.FILLPATH, (w) => w.i32(0).i32(0).i32(100).i32(100)),
+    ]);
+    const ops = m.calls.map((c) => c.op);
+    expect(ops.slice(ops.indexOf('moveTo'), ops.indexOf('fill') + 1))
+      .toEqual(['moveTo', 'lineTo', 'lineTo', 'lineTo', 'closePath', 'clip', 'fill']);
+    expect(m.calls.find((c) => c.op === 'moveTo')?.args).toEqual([10, 10]);
+    expect(regions[0][0]).toEqual(['moveTo', 0, 0]);
+    expect(m.reported).toEqual([]);
+    // Once FILLPATH consumed the path, a clip record traces on the current path again.
+    const after = run([
+      record(EMR.SELECTOBJECT, (w) => w.u32(0x80000004)),
+      record(EMR.BEGINPATH, () => {}),
+      record(43, (w) => w.i32(10).i32(10).i32(20).i32(20)),
+      record(EMR.ENDPATH, () => {}),
+      record(EMR.FILLPATH, (w) => w.i32(0).i32(0).i32(100).i32(100)),
+      record(INTERSECTCLIPRECT, (w) => w.i32(0).i32(0).i32(90).i32(90)),
+    ]);
+    expect(after.calls.filter((c) => c.op === 'clip').map((c) => c.args)).toEqual([['nonzero']]);
+  });
+
+  it('without Path2D keeps a closed path across a clip record and reports the clip', () => {
+    const m = run([
+      record(EMR.SELECTOBJECT, (w) => w.u32(0x80000004)),
+      record(EMR.BEGINPATH, () => {}),
+      record(43, (w) => w.i32(10).i32(10).i32(20).i32(20)),
+      record(EMR.ENDPATH, () => {}),
+      record(INTERSECTCLIPRECT, (w) => w.i32(0).i32(0).i32(90).i32(90)),
+      record(EMR.FILLPATH, (w) => w.i32(0).i32(0).i32(100).i32(100)),
+    ]);
+    expect(m.calls.find((c) => c.op === 'moveTo')?.args).toEqual([10, 10]);
+    expect(m.styles.fill).toEqual(['#000000']);
+    expect(m.reported).toEqual(['EMR_INTERSECTCLIPRECT (over a retained path, no Path2D)']);
   });
 
   it('without Path2D leaves the clip out, reports it, and keeps the bracket', () => {
@@ -1880,5 +1947,95 @@ describe('playEmf — EMF+ bitmap records', () => {
     // A truncated EMF+-only stream is reported the same way.
     const payload = concat(header(false), attributes(), bitmap(), drawImage([0, 0, 2, 1]), new Uint8Array([0, 0, 0, 0]));
     expect(run([rawComment(4 + payload.length, payload)]).reported).toEqual(['EMF+ record (truncated header)']);
+  });
+  it('never admits a non-finite placement, so the GDI alternative is kept', () => {
+    const draw = (...state: Uint8Array[]) => [comment(header(true), attributes(), bitmap(), ...state, drawImage([0, 0, 2, 1]))];
+    const cases = [
+      draw(plusRecord(0x4030, 0x0002, f32(NaN))), // PageScale NaN
+      draw(plusRecord(0x4030, 0x0002, f32(Infinity))), // PageScale infinite
+      draw(plusRecord(0x402a, 0, [1, NaN, 0, 1, 0, 0].flatMap(f32))), // world matrix
+      draw(plusRecord(0x402d, 0, [...f32(Infinity), ...f32(0)])), // translate
+      [comment(header(true), attributes(), bitmap(), drawImage([Infinity, 0, 2, 1]))],
+      [comment(header(true), attributes(), bitmap(), drawImage([0, 0, 2, 1], [NaN, 0, 2, 1]))],
+    ];
+    for (const records of cases) {
+      const scan = scanEmfPlus(file(records));
+      expect(scan.play).toBe(false);
+      expect(scan.failures).toEqual(['EMF+ DrawImage placement (non-finite value)']);
+      const played = run(records, gdiPolygon());
+      expect(played.draws).toHaveLength(0);
+      expect(played.styles.fill).toEqual(['#000000']);
+      expect(played.reported).toEqual([]);
+    }
+  });
+
+  it('applies the shared image budget before a bitmap or a continued object is allocated', () => {
+    // 40,000 × 1 exceeds the shared per-axis ceiling (MAX_RASTER_DIMENSION).
+    const wide = new Uint8Array(28 + 40000 * 4);
+    const v = new DataView(wide.buffer);
+    [0xdbc01002, 1, 40000, 1, 160000, 0x0026200a, 0].forEach((x, i) => v.setUint32(i * 4, x, true));
+    const oversize = [comment(header(true), attributes(), plusRecord(0x4008, 0x0501, [...wide]), drawImage([0, 0, 2, 1]))];
+    expect(scanEmfPlus(file(oversize))).toMatchObject({ play: false, failures: expect.arrayContaining(['EMF+ bitmap (decoded-image budget)']) });
+    const played = run(oversize, gdiPolygon());
+    expect(played.draws).toHaveLength(0);
+    expect(played.styles.fill).toEqual(['#000000']);
+    // A continued object declaring more than the player's decoded-byte
+    // ceiling is refused at its first fragment, before any assembly buffer.
+    const huge = plusRecord(0x4008, 0x8501, [...u32(0xffffff00), 1, 2, 3, 4]);
+    expect(scanEmfPlus(file([comment(header(true), attributes(), huge, drawImage([0, 0, 2, 1]))])).failures)
+      .toContain('EMF+ bitmap (decoded-image budget)');
+  });
+
+  it('reports a bitmap blit that fails at run time instead of dropping it silently', () => {
+    const noHelper = () => vi.stubGlobal('OffscreenCanvas', class { getContext() { return null; } });
+    const records = [comment(header(true), attributes(), bitmap(), drawImage([0, 0, 2, 1]))];
+    // Dual file without GDI drawing (as Excel writes): nothing replaces the image.
+    noHelper();
+    const m = makeRecordingCtx();
+    const reported: string[] = [];
+    const drew = playEmf(file(records, []), m.ctx, 100, 100, { onUnsupported: (r) => reported.push(...r) });
+    vi.unstubAllGlobals();
+    expect(drew).toBe(false);
+    expect(reported).toEqual(['EMF+ DrawImage (the bitmap could not be drawn)']);
+    // Dual file with a GDI rendering: the partial EMF+ drawing is cleared and
+    // the complete GDI alternative plays; the EMF+ failure is still reported.
+    noHelper();
+    const g = makeRecordingCtx();
+    const clears: number[][] = [];
+    (g.ctx as unknown as { clearRect: unknown }).clearRect = (...a: number[]) => clears.push(a);
+    const gdiReported: string[] = [];
+    expect(playEmf(file(records), g.ctx, 100, 100, { onUnsupported: (r) => gdiReported.push(...r) })).toBe(true);
+    vi.unstubAllGlobals();
+    expect(clears).toContainEqual([0, 0, 100, 100]);
+    expect(g.styles.fill).toEqual(['#000000']);
+    expect(gdiReported).toEqual(['EMF+ DrawImage (the bitmap could not be drawn)']);
+    // EMF+-only file: no alternative, the failure is reported.
+    noHelper();
+    const only: string[] = [];
+    playEmf(file([comment(header(false), attributes(), bitmap(), drawImage([0, 0, 2, 1]))], []), makeRecordingCtx().ctx, 100, 100, {
+      onUnsupported: (r) => only.push(...r),
+    });
+    vi.unstubAllGlobals();
+    expect(only).toEqual(['EMF+ DrawImage (the bitmap could not be drawn)']);
+  });
+
+  it('rejects a strict decode whose EMF+ blit fails instead of returning null', async () => {
+    // A dual file: even its GDI rendering does not stand in silently.
+    const bytes = file([comment(header(true), attributes(), bitmap(), drawImage([0, 0, 2, 1]))]);
+    vi.stubGlobal('OffscreenCanvas', class {
+      constructor(public width: number, public height: number) {}
+      // The 2×1 helper surface of the blit is refused; the target is not.
+      getContext() { return this.width === 2 ? null : makeRecordingCtx().ctx; }
+    });
+    vi.stubGlobal('createImageBitmap', async (src: { width: number; height: number }) => ({ width: src.width, height: src.height, close() {} }));
+    try {
+      const outcome = await decodeRasterOrMetafile(new Blob([bytes as Uint8Array<ArrayBuffer>]), {
+        widthPt: 48, heightPt: 36, incompleteMetafile: 'reject',
+      }).then(() => undefined, (error: unknown) => error);
+      expect(isOoxmlIncompleteMetafileError(outcome)).toBe(true);
+      expect(outcome).toMatchObject({ unsupported: ['EMF+ DrawImage (the bitmap could not be drawn)'] });
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

@@ -27,6 +27,7 @@ import {
 import { imageNaturalSize } from './crop';
 import { MAX_IMAGE_EFFECT_BASE_PIXELS, MAX_RASTER_PIXELS } from './pixel-budget.js';
 import { decodedBitmapTargetResizeOptions } from './raster-target.js';
+import { carryIncompleteMetafileReport } from './raster-or-metafile.js';
 
 type FetchImage = (path: string, mime: string) => Promise<Blob>;
 
@@ -176,9 +177,14 @@ export async function getCachedDuotoneBitmapByPath(
           throw new Error('createImageBitmap is unavailable for duotone fallback resampling');
         }
         const resized = await createImageBitmap(base, resizeOptions);
+        carryIncompleteMetafileReport(base, resized);
         return { bitmap: resized, owned: resized !== base };
       }
       const bitmap = recoloured as ImageBitmap;
+      // A partially drawn metafile stays partial after an effect or a
+      // resample; the derived entry (and every later cache hit on it) keeps
+      // the base picture's report.
+      carryIncompleteMetafileReport(base, bitmap);
       return { bitmap, owned: bitmap !== base };
     },
     epoch,
