@@ -818,8 +818,23 @@ impl LayoutPlaceholders {
     /// Look up inherited line spacing (spcPct val, e.g. 90000 = 90%) for this placeholder.
     /// Idx-strict per ECMA-376 §19.3.1.36 (see `lookup_fill`'s rationale).
     pub(crate) fn lookup_line_spacing(&self, ph_type: &str, ph_idx: Option<u32>) -> Option<f64> {
+        // The layout placeholder itself inherits the master text style for its
+        // type (ECMA-376 §19.3.1.36 / §19.3.1.51), so an idx-matched layout
+        // placeholder without lnSpc still yields the master level-1 value.
+        let master = || {
+            self.by_type_master_line_spacing
+                .get(ph_type)
+                .copied()
+                .or_else(|| {
+                    if ph_type == "body" {
+                        self.by_type_master_line_spacing.get("").copied()
+                    } else {
+                        None
+                    }
+                })
+        };
         if let Some(i) = ph_idx {
-            return self.by_idx_line_spacing.get(&i).copied();
+            return self.by_idx_line_spacing.get(&i).copied().or_else(master);
         }
         self.by_type_line_spacing
             .get(ph_type)
@@ -831,14 +846,7 @@ impl LayoutPlaceholders {
                     None
                 }
             })
-            .or_else(|| self.by_type_master_line_spacing.get(ph_type).copied())
-            .or_else(|| {
-                if ph_type == "body" {
-                    self.by_type_master_line_spacing.get("").copied()
-                } else {
-                    None
-                }
-            })
+            .or_else(master)
     }
 }
 
@@ -1389,9 +1397,7 @@ pub(crate) fn parse_master_txstyle_color(
 /// Parse default paragraph spacing from master txStyles.
 /// Returns (space_before_map, space_after_map, line_spacing_map) keyed by ph_type string.
 /// space_before/after values are in hundredths of a point (same as Paragraph.space_before/after).
-/// Note: line_spacing_map is intentionally NOT populated. Inheriting txStyles lnSpc hurts VRT
-/// scores because our font substitutes (sans-serif) have different em-square metrics than the
-/// original Aptos font, so applying the master's 120% line spacing over-expands text layout.
+/// line_spacing values are the level-1 `lnSpc/spcPct` val (e.g. 90000 = 90%).
 pub(crate) fn parse_master_txstyle_spacing(
     root: roxmltree::Node<'_, '_>,
 ) -> (
@@ -1401,7 +1407,7 @@ pub(crate) fn parse_master_txstyle_spacing(
 ) {
     let mut before_map: HashMap<String, ParagraphSpacing> = HashMap::new();
     let mut after_map: HashMap<String, ParagraphSpacing> = HashMap::new();
-    let line_map: HashMap<String, f64> = HashMap::new(); // intentionally not populated
+    let mut line_map: HashMap<String, f64> = HashMap::new();
     let tx_styles = match child(root, "txStyles") {
         Some(n) => n,
         None => return (before_map, after_map, line_map),
@@ -1411,6 +1417,15 @@ pub(crate) fn parse_master_txstyle_spacing(
         let lvl1 = child(tx_styles, style_name).and_then(|sn| child(sn, "lvl1pPr"));
         let spc_before = lvl1.and_then(|lp| paragraph_spacing(lp, "spcBef"));
         let spc_after = lvl1.and_then(|lp| paragraph_spacing(lp, "spcAft"));
+        let line = lvl1
+            .and_then(|lp| child(lp, "lnSpc"))
+            .and_then(|ls| child(ls, "spcPct"))
+            .and_then(|s| attr_f64(&s, "val"));
+        if let Some(v) = line {
+            for ph_type in *ph_types {
+                line_map.entry(ph_type.to_string()).or_insert(v);
+            }
+        }
         if let Some(v) = spc_before {
             for ph_type in *ph_types {
                 before_map.entry(ph_type.to_string()).or_insert(v);
@@ -2318,6 +2333,47 @@ mod placeholder_geometry_tests {
     /// absent. The values below are bounded to an Office-produced matrix that
     /// distinguishes title, body/subtitle, and object placeholders. These are
     /// application defaults, not fabricated defaults for ordinary text boxes.
+    /// ECMA-376 §19.3.1.51 txStyles: a placeholder without its own or a layout
+    /// lnSpc inherits the master level-1 lnSpc for its type. An idx-matched
+    /// layout placeholder without lnSpc also falls through to the master.
+    #[test]
+    fn master_tx_styles_line_spacing_is_inherited() {
+        let xml = r#"<p:sldMaster
+          xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+          xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <p:cSld><p:spTree/></p:cSld>
+          <p:txStyles>
+            <p:titleStyle><a:lvl1pPr><a:lnSpc><a:spcPct val="85000"/></a:lnSpc></a:lvl1pPr></p:titleStyle>
+            <p:bodyStyle><a:lvl1pPr><a:lnSpc><a:spcPct val="90000"/></a:lnSpc></a:lvl1pPr></p:bodyStyle>
+          </p:txStyles>
+        </p:sldMaster>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let (_, _, lines) = parse_master_txstyle_spacing(doc.root_element());
+        assert_eq!(lines.get("title"), Some(&85000.0));
+        assert_eq!(lines.get("body"), Some(&90000.0));
+        assert_eq!(lines.get("obj"), Some(&90000.0));
+        assert_eq!(lines.get("dt"), None);
+
+        let placeholders = LayoutPlaceholders {
+            by_idx_line_spacing: HashMap::from([(12, 120000.0)]),
+            by_type_master_line_spacing: lines,
+            ..LayoutPlaceholders::default()
+        };
+        assert_eq!(
+            placeholders.lookup_line_spacing("body", Some(11)),
+            Some(90000.0)
+        );
+        assert_eq!(
+            placeholders.lookup_line_spacing("body", Some(12)),
+            Some(120000.0)
+        );
+        assert_eq!(
+            placeholders.lookup_line_spacing("title", None),
+            Some(85000.0)
+        );
+        assert_eq!(placeholders.lookup_line_spacing("dt", Some(3)), None);
+    }
+
     #[test]
     fn master_without_tx_styles_uses_powerpoint_placeholder_font_defaults() {
         let xml = r#"<p:sldMaster
