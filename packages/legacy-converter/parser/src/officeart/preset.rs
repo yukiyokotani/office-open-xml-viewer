@@ -394,7 +394,10 @@ mod tests {
             (7, -62575.0),
         ] {
             let value = border3[slot].unwrap();
-            assert!((value - expected).abs() < 2.5, "{slot}: {value} vs {expected}");
+            assert!(
+                (value - expected).abs() < 2.5,
+                "{slot}: {value} vs {expected}"
+            );
         }
     }
 
