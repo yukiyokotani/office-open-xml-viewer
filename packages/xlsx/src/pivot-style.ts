@@ -3,7 +3,10 @@
 // A PivotTable style is a list of `tableStyleElement`s, each a differential
 // format for one structured region of the PivotTable (§18.18.77, whose
 // region diagrams define the areas below). Elements apply in the PivotTable
-// style element order of §18.8.41; a later element wins per property. A
+// style element order of §18.8.41; a later element wins per property. Each
+// element is a differential format (§18.8.14-15, applied on top of what is
+// already there), so a font toggle the element's dxf omits leaves the earlier
+// value, and an explicit off (`<b val="0"/>`) turns an earlier on off. A
 // region's border edges apply to its outline and its `horizontal` /
 // `vertical` edges to its interior rules; an edge whose style is `none`
 // (an explicitly cleared edge) overrides an earlier element's edge.
@@ -156,15 +159,19 @@ function regions(p: PivotTableMetadata, sizes: Map<string, number>): Map<string,
   return out;
 }
 
+const FONT_TOGGLES = ['bold', 'italic', 'underline', 'strike'] as const;
+
 function apply(target: PivotCellFormat, dxf: Dxf, rect: Rect, row: number, col: number): void {
   if (dxf.fill) target.fill = dxf.fill;
   const font = dxf.font;
   if (font) {
     if (font.color) target.fontColor = font.color;
-    if (font.bold) target.bold = true;
-    if (font.italic) target.italic = true;
-    if (font.underline) target.underline = true;
-    if (font.strike) target.strike = true;
+    for (const key of FONT_TOGGLES) {
+      // The authored toggle when the parser supplies it; a model without it
+      // (older producer) can only say "on".
+      const value = dxf.fontToggles ? dxf.fontToggles[key] : font[key] || undefined;
+      if (value !== undefined) target[key] = value;
+    }
   }
   const border = dxf.border;
   if (!border) return;

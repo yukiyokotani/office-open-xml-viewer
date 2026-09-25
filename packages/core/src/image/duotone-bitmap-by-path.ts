@@ -19,12 +19,13 @@ import {
 } from './duotone';
 import {
   applyBlipPixelEffects,
+  assertBlipPixelEffectsBudget,
   blipPixelEffectsKey,
   isBlipPixelEffects,
   type BlipPixelEffects,
 } from './blip-effects';
 import { imageNaturalSize } from './crop';
-import { MAX_RASTER_PIXELS } from './pixel-budget.js';
+import { MAX_IMAGE_EFFECT_BASE_PIXELS, MAX_RASTER_PIXELS } from './pixel-budget.js';
 import { decodedBitmapTargetResizeOptions } from './raster-target.js';
 
 type FetchImage = (path: string, mime: string) => Promise<Blob>;
@@ -89,7 +90,7 @@ export async function getCachedDuotoneBitmapByPath(
         // byte ceiling so transient pixel work cannot silently double it.
         maxRetainedPixels: Math.min(
           requestedBitmapOpts.maxRetainedPixels ?? MAX_RASTER_PIXELS,
-          Math.floor(MAX_RASTER_PIXELS / 4),
+          MAX_IMAGE_EFFECT_BASE_PIXELS,
         ),
       }
     : requestedBitmapOpts;
@@ -99,6 +100,9 @@ export async function getCachedDuotoneBitmapByPath(
   const sourceBitmapOpts = duotone
     ? { ...bitmapOpts, targetWidthPx: undefined, targetHeightPx: undefined }
     : bitmapOpts;
+  // An over-long effect list is rejected before anything is fetched or
+  // decoded; the cumulative pixel work is checked once the grid is known.
+  if (isBlipPixelEffects(duotone)) assertBlipPixelEffectsBudget(duotone, 0);
   const epoch = duotone
     ? captureDecodedBitmapCacheEpoch(fetchImage, DUOTONE_CACHE_NAMESPACE)
     : undefined;
@@ -139,6 +143,9 @@ export async function getCachedDuotoneBitmapByPath(
       if (w <= 0 || h <= 0) {
         return { bitmap: failClosedOnDuotoneFailure ? null : base, owned: false };
       }
+      // Before the transform allocates its surfaces: passes × pixels must fit
+      // the shared effect-work ceiling (a quota error, never a partial list).
+      if (isBlipPixelEffects(duotone)) assertBlipPixelEffectsBudget(duotone, w * h);
       const transformOptions = {
         width: w,
         height: h,

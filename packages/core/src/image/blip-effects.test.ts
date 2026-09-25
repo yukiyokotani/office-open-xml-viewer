@@ -1,5 +1,18 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { applyBlipPixelEffects, blipGrayLevel, blipLuminance, type BlipPixelEffects } from './blip-effects';
+import {
+  applyBlipPixelEffects,
+  assertBlipPixelEffectsBudget,
+  blipGrayLevel,
+  blipLuminance,
+  type BlipEffect,
+  type BlipPixelEffects,
+} from './blip-effects';
+import {
+  MAX_IMAGE_EFFECT_BASE_PIXELS,
+  MAX_IMAGE_EFFECT_PASSES,
+  MAX_IMAGE_EFFECT_PIXEL_WORK,
+  isOoxmlDecodedImageLimitError,
+} from './pixel-budget';
 import {
   getCachedDuotoneBitmapByPath,
   duotoneCacheKey,
@@ -131,6 +144,102 @@ describe('getCachedDuotoneBitmapByPath with CT_Blip effects', () => {
     expect([...written[0]]).toEqual([255, 255, 255, 255]);
     expect(duotoneCacheKey(path, effects)).toBe(`${path}|fx:g,b0.5`);
     expect(duotoneCacheKey(path, { clr1: '000000', clr2: 'FFFFFF' })).toBe(`${path}|duo:000000:FFFFFF`);
+    dropDuotoneBitmapCache(fetchImage);
+    dropBitmapCacheByPath(fetchImage);
+  });
+});
+
+describe('CT_Blip effect workload budget (shared resource policy)', () => {
+  const grays = (count: number): BlipEffect[] => Array.from({ length: count }, () => ({ type: 'grayscale' }));
+  const limitOf = (run: () => unknown) => {
+    try {
+      run();
+    } catch (error) {
+      if (!isOoxmlDecodedImageLimitError(error)) throw error;
+      return { metric: error.metric, limit: error.limit, observed: error.observed };
+    }
+    return undefined;
+  };
+
+  it('derives the pass limit from the work ceiling at the largest effect base', () => {
+    expect(MAX_IMAGE_EFFECT_PASSES).toBe(16);
+    expect(MAX_IMAGE_EFFECT_PASSES * MAX_IMAGE_EFFECT_BASE_PIXELS).toBe(MAX_IMAGE_EFFECT_PIXEL_WORK);
+  });
+
+  it('admits the pass limit and rejects one more pass before touching a pixel', () => {
+    const atLimit = buffer([255, 0, 0, 9]);
+    applyBlipPixelEffects(atLimit, { effects: grays(MAX_IMAGE_EFFECT_PASSES) });
+    expect(atLimit.data[0]).toBe(atLimit.data[1]);
+
+    const over = buffer([255, 0, 0, 9]);
+    expect(limitOf(() => applyBlipPixelEffects(over, { effects: grays(MAX_IMAGE_EFFECT_PASSES + 1) })))
+      .toEqual({ metric: 'image-effect-count', limit: 16, observed: 17 });
+    expect([...over.data]).toEqual([255, 0, 0, 9]);
+    // A duotone without a position marker is one more pass.
+    expect(limitOf(() => applyBlipPixelEffects(buffer([255, 0, 0, 9]), {
+      effects: grays(MAX_IMAGE_EFFECT_PASSES),
+      duotone: { clr1: '000000', clr2: 'FFFFFF' },
+    }))).toEqual({ metric: 'image-effect-count', limit: 16, observed: 17 });
+  });
+
+  it('admits cumulative work at the ceiling and rejects one pixel visit more', () => {
+    const two = { effects: grays(2) };
+    const half = MAX_IMAGE_EFFECT_PIXEL_WORK / 2;
+    expect(limitOf(() => assertBlipPixelEffectsBudget(two, half))).toBeUndefined();
+    expect(limitOf(() => assertBlipPixelEffectsBudget(two, half + 1)))
+      .toEqual({ metric: 'image-effect-work', limit: MAX_IMAGE_EFFECT_PIXEL_WORK, observed: 2 * (half + 1) });
+    // The applied transform checks the grid it would scan before reading it:
+    // this buffer has no pixel storage at all, only its length.
+    const unread = { data: { length: (half + 1) * 4 } as unknown as Uint8ClampedArray, width: half + 1, height: 1 };
+    expect(limitOf(() => applyBlipPixelEffects(unread, two))?.metric).toBe('image-effect-work');
+  });
+});
+
+describe('getCachedDuotoneBitmapByPath effect budget', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const factory = ((w: number, h: number) => ({
+    width: w,
+    height: h,
+    getContext() {
+      return {
+        drawImage() {},
+        getImageData() {
+          return { data: new Uint8ClampedArray([255, 0, 0, 255]), width: 1, height: 1 } as unknown as ImageData;
+        },
+        putImageData() {},
+      };
+    },
+  })) as unknown as OffscreenFactory;
+  const grays = (count: number): BlipEffect[] => Array.from({ length: count }, () => ({ type: 'grayscale' }));
+
+  it('rejects an over-long effect list before fetching or decoding the blip', async () => {
+    const fetchImage = vi.fn(async (_p: string, mime: string) => new Blob([new Uint8Array([1])], { type: mime }));
+    const rejected = getCachedDuotoneBitmapByPath(
+      'ppt/media/too-many-effects.png',
+      'image/png',
+      { effects: grays(MAX_IMAGE_EFFECT_PASSES + 1), duotone: null },
+      fetchImage,
+      { offscreenFactory: factory },
+    );
+    await expect(rejected).rejects.toMatchObject({ code: 'ooxml-decoded-image-limit', metric: 'image-effect-count' });
+    expect(fetchImage).not.toHaveBeenCalled();
+  });
+
+  it('runs the pass limit on the largest effect base (work exactly at the ceiling)', async () => {
+    // 4096 × 2048 = MAX_IMAGE_EFFECT_BASE_PIXELS; 16 passes = 2^27 visits.
+    const base = { width: 4096, height: 2048, close() {} } as unknown as ImageBitmap;
+    const transformed = { width: 4096, height: 2048, close() {} } as unknown as ImageBitmap;
+    vi.stubGlobal('createImageBitmap', vi.fn(async (src: unknown) => (src instanceof Blob ? base : transformed)));
+    const fetchImage = vi.fn(async (_p: string, mime: string) => new Blob([new Uint8Array([1])], { type: mime }));
+    const result = await getCachedDuotoneBitmapByPath(
+      'ppt/media/largest-effect-base.png',
+      'image/png',
+      { effects: grays(MAX_IMAGE_EFFECT_PASSES), duotone: null },
+      fetchImage,
+      { offscreenFactory: factory },
+    );
+    expect(result).toBe(transformed);
     dropDuotoneBitmapCache(fetchImage);
     dropBitmapCacheByPath(fetchImage);
   });

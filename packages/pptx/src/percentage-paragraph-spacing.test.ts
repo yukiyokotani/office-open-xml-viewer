@@ -217,4 +217,24 @@ describe('pptx DrawingML percentage paragraph spacing', () => {
     const ys = baselines([paragraph('A', 20, { spaceBefore: 1200 })], 't', true);
     expect(ys[0] - plain[0]).toBeCloseTo(12, 5);
   });
+
+  it('suppresses centre-anchored trailing point and percentage gaps when omitted or false', () => {
+    // PowerPoint PDF controls: 32pt Arial, centre anchor, 12pt or 50% spcAft.
+    // Only spcFirstLastPara=1 lifts the glyph by half the authored gap.
+    const base = baselines([paragraph('A', 20, {})], 'ctr')[0];
+    for (const spacing of [{ spaceAfter: 1200 }, { spaceAfterPct: 50000 }]) {
+      expect(baselines([paragraph('A', 20, spacing)], 'ctr')[0]).toBeCloseTo(base, 5);
+      expect(baselines([paragraph('A', 20, spacing)], 'ctr', false)[0]).toBeCloseTo(base, 5);
+      expect(base - baselines([paragraph('A', 20, spacing)], 'ctr', true)[0]).toBeCloseTo(6, 5);
+    }
+  });
+
+  it('keeps spcAft before an empty final paragraph as an interior gap', () => {
+    const without = baselines([paragraph('A', 20, {}), paragraph('', 20, {})], 'ctr');
+    const withGap = baselines([
+      paragraph('A', 20, { spaceAfter: 1200 }),
+      paragraph('', 20, {}),
+    ], 'ctr');
+    expect(without[0] - withGap[0]).toBeCloseTo(6, 5);
+  });
 });

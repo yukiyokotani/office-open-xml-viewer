@@ -1695,7 +1695,7 @@ pub struct Styles {
     pub dxfs: Vec<Dxf>,
 }
 
-#[derive(Debug, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Dxf {
     pub font: Option<Font>,
@@ -1706,9 +1706,33 @@ pub struct Dxf {
     /// replaces the cell's own style numFmt (e.g. switching a calendar cell
     /// from `d` to `m"月"d"日"` on the first of each month).
     pub num_fmt: Option<NumFmt>,
+    /// The toggles of the dxf's `<font>` as authored. `font.bold` etc. are
+    /// plain booleans shared with cell fonts, which cannot tell an absent
+    /// `<b>` from `<b val="0"/>`; a differential format needs both, because an
+    /// explicit off turns off what an earlier format turned on while an
+    /// absent element changes nothing (ECMA-376 §18.8.14-15 dxf, §18.8.2 b
+    /// CT_BooleanProperty `val` default true). Absent when the dxf has no
+    /// `<font>`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_toggles: Option<DxfFontToggles>,
 }
 
-#[derive(Debug, Serialize, Default)]
+/// A differential font's toggle properties: `None` when the element is
+/// absent, `Some(false)` for an explicit off (`val="0"`, or `<u val="none"/>`).
+#[derive(Debug, Clone, Copy, Serialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DxfFontToggles {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bold: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub italic: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub underline: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strike: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Font {
     pub bold: bool,
@@ -1737,7 +1761,7 @@ pub struct Font {
     pub vert_align: Option<String>,
 }
 
-#[derive(Debug, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Fill {
     pub pattern_type: String,
@@ -1750,7 +1774,7 @@ pub struct Fill {
     pub gradient: Option<GradientFillSpec>,
 }
 
-#[derive(Debug, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct GradientFillSpec {
     /// "linear" (default) or "path". Linear uses `degree`; path uses top/bottom/left/right.
@@ -1765,14 +1789,14 @@ pub struct GradientFillSpec {
     pub stops: Vec<GradientStopSpec>,
 }
 
-#[derive(Debug, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct GradientStopSpec {
     pub position: f64,
     pub color: String,
 }
 
-#[derive(Debug, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Border {
     pub left: Option<BorderEdge>,
@@ -1828,7 +1852,7 @@ pub struct CellXf {
     pub reading_order: Option<u32>,
 }
 
-#[derive(Debug, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct NumFmt {
     pub num_fmt_id: u32,

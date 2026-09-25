@@ -39,6 +39,7 @@
 import {
   decodeRasterOrMetafile,
   decodeRasterOrMetafileWithInspection,
+  type IncompleteMetafilePolicy,
 } from './raster-or-metafile.js';
 import { inspectRasterBlob, type RasterBlobInspection } from './raster-blob-inspection.js';
 import { rasterExceedsBudget } from './raster-dimensions.js';
@@ -516,6 +517,11 @@ export interface CachedBitmapOptions {
   maxRetainedPixels?: number;
   /** Worker-only SVG decoder. Window renderers use HTMLImageElement instead. */
   svgDecoder?: SvgBlobDecoder;
+  /** Policy for a metafile that cannot be fully played (default
+   *  `'draw-supported'`, the OOXML renderers' compatibility policy); see
+   *  `IncompleteMetafilePolicy` in raster-or-metafile.ts. The two policies
+   *  never share a cache entry. */
+  incompleteMetafile?: IncompleteMetafilePolicy;
 }
 
 function normalizedRasterTarget(value: number | undefined): number | undefined {
@@ -593,6 +599,7 @@ interface MetafileVariant {
   readonly height: number;
   readonly suppressBoundaryFrame: boolean;
   readonly pixelLimit: number;
+  readonly rejectIncomplete: boolean;
 }
 
 function profileIsMetafile(profile: RasterSourceProfile): boolean {
@@ -606,12 +613,16 @@ function metafileVariant(opts: CachedBitmapOptions): MetafileVariant {
     height: target.h,
     suppressBoundaryFrame: opts.suppressBoundaryFrame === true,
     pixelLimit: retainedPixelLimit(opts),
+    rejectIncomplete: opts.incompleteMetafile === 'reject',
   };
 }
 
 function metafileVariantPrefix(imagePath: string, variant: MetafileVariant): string {
   const pathKey = `${imagePath.length}:${imagePath}`;
-  return `metafile:${pathKey}:s${variant.suppressBoundaryFrame ? 1 : 0}:p${variant.pixelLimit}:`;
+  // A strict (reject) decode must never be satisfied by a partial picture a
+  // compatibility decode cached, nor the reverse; the default key is unchanged.
+  const strict = variant.rejectIncomplete ? 'r1:' : '';
+  return `metafile:${pathKey}:s${variant.suppressBoundaryFrame ? 1 : 0}:p${variant.pixelLimit}:${strict}`;
 }
 
 function metafileVariantKey(
@@ -953,6 +964,7 @@ export function getCachedBitmapByPath(
     targetHeightPx,
     maxRetainedPixels,
     svgDecoder,
+    incompleteMetafile,
   } = normalized;
   if (mimeType === 'image/svg+xml' && svgDecoder) {
     return getCachedDecodedBitmap(
@@ -989,6 +1001,7 @@ export function getCachedBitmapByPath(
           targetWidthPx: resizeToTarget ? targetWidthPx : undefined,
           targetHeightPx: resizeToTarget ? targetHeightPx : undefined,
           maxRetainedPixels,
+          incompleteMetafile,
         };
         const bitmap = initial
           ? await decodeRasterOrMetafileWithInspection(blob, decodeOpts, initial.inspection)

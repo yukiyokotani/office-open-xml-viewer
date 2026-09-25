@@ -112,146 +112,153 @@ pub(crate) fn parse_style_projection(
 }
 
 pub(crate) fn parse_dxfs(doc: &roxmltree::Document, theme_colors: &[String]) -> Vec<Dxf> {
-    let mut dxfs = Vec::new();
-    for dxfs_node in doc.descendants() {
-        if dxfs_node.tag_name().name() != "dxfs" || !is_x_ns(dxfs_node.tag_name().namespace()) {
-            continue;
-        }
-        for dxf_node in dxfs_node.children() {
-            if dxf_node.tag_name().name() != "dxf" {
-                continue;
-            }
-            let mut d = Dxf::default();
-            for child in dxf_node.children() {
-                match child.tag_name().name() {
-                    "font" => {
-                        let mut f = Font {
-                            size: 11.0,
-                            ..Default::default()
-                        };
-                        for fc in child.children() {
-                            match fc.tag_name().name() {
-                                "b" => f.bold = parse_st_on_off(&fc),
-                                "i" => f.italic = parse_st_on_off(&fc),
-                                "u" => {
-                                    let v = fc.attribute("val").unwrap_or("single");
-                                    if v != "none" {
-                                        f.underline = true;
-                                        if v != "single" {
-                                            f.underline_style = Some(v.to_string());
-                                        }
-                                    }
-                                }
-                                "strike" => f.strike = parse_st_on_off(&fc),
-                                "vertAlign" => {
-                                    if let Some(v) = fc.attribute("val") {
-                                        if v != "baseline" {
-                                            f.vert_align = Some(v.to_string());
-                                        }
-                                    }
-                                }
-                                "sz" => {
-                                    if let Some(v) =
-                                        fc.attribute("val").and_then(|s| s.parse().ok())
-                                    {
-                                        f.size = v;
-                                    }
-                                }
-                                "name" => {
-                                    f.name = fc.attribute("val").map(|s| s.to_string());
-                                }
-                                "scheme" => {
-                                    f.scheme = fc
-                                        .attribute("val")
-                                        .filter(|value| matches!(*value, "major" | "minor"))
-                                        .map(str::to_owned);
-                                }
-                                "charset" => {
-                                    f.charset = fc
-                                        .attribute("val")
-                                        .and_then(|value| value.parse::<u8>().ok());
-                                }
-                                "color" => {
-                                    f.color = parse_color(&fc, theme_colors);
-                                }
-                                _ => {}
-                            }
+    doc.descendants()
+        .find(|node| node.tag_name().name() == "dxfs" && is_x_ns(node.tag_name().namespace()))
+        .map(|dxfs_node| {
+            dxfs_node
+                .children()
+                .filter(|node| node.tag_name().name() == "dxf")
+                .map(|dxf_node| parse_dxf(dxf_node, theme_colors))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// One `<dxf>` (ECMA-376 §18.8.14), read in its own document so every
+/// namespace declaration in scope applies.
+pub(crate) fn parse_dxf(dxf_node: roxmltree::Node, theme_colors: &[String]) -> Dxf {
+    let mut d = Dxf::default();
+    for child in dxf_node.children() {
+        match child.tag_name().name() {
+            "font" => {
+                let mut f = Font {
+                    size: 11.0,
+                    ..Default::default()
+                };
+                let mut toggles = DxfFontToggles::default();
+                for fc in child.children() {
+                    match fc.tag_name().name() {
+                        "b" => {
+                            f.bold = parse_st_on_off(&fc);
+                            toggles.bold = Some(f.bold);
                         }
-                        d.font = Some(f);
-                    }
-                    "fill" => {
-                        let mut f = Fill::default();
-                        for pf in child.children() {
-                            if pf.tag_name().name() == "gradientFill" {
-                                // ECMA-376 §18.8.24 in a dxf, e.g. a table or
-                                // PivotTable style element's gradient.
-                                f.gradient = parse_gradient_fill(pf, theme_colors);
+                        "i" => {
+                            f.italic = parse_st_on_off(&fc);
+                            toggles.italic = Some(f.italic);
+                        }
+                        "u" => {
+                            let v = fc.attribute("val").unwrap_or("single");
+                            if v != "none" {
+                                f.underline = true;
+                                if v != "single" {
+                                    f.underline_style = Some(v.to_string());
+                                }
                             }
-                            if pf.tag_name().name() == "patternFill" {
-                                f.pattern_type =
-                                    pf.attribute("patternType").unwrap_or("solid").to_string();
-                                for color_node in pf.children() {
-                                    match color_node.tag_name().name() {
-                                        "fgColor" => {
-                                            f.fg_color = parse_color(&color_node, theme_colors)
-                                        }
-                                        "bgColor" => {
-                                            f.bg_color = parse_color(&color_node, theme_colors)
-                                        }
-                                        _ => {}
-                                    }
+                            toggles.underline = Some(v != "none");
+                        }
+                        "strike" => {
+                            f.strike = parse_st_on_off(&fc);
+                            toggles.strike = Some(f.strike);
+                        }
+                        "vertAlign" => {
+                            if let Some(v) = fc.attribute("val") {
+                                if v != "baseline" {
+                                    f.vert_align = Some(v.to_string());
                                 }
                             }
                         }
-                        // In dxf, conditional format fills often only have bgColor; mirror into fgColor
-                        if f.fg_color.is_none() && f.bg_color.is_some() {
-                            f.fg_color = f.bg_color.clone();
-                        }
-                        d.fill = Some(f);
-                    }
-                    "border" => {
-                        let mut b = Border::default();
-                        for edge_node in child.children() {
-                            let style = edge_node.attribute("style").unwrap_or("").to_string();
-                            if style.is_empty() {
-                                continue;
-                            }
-                            let color = edge_node
-                                .children()
-                                .find(|c| c.is_element())
-                                .and_then(|c| parse_color(&c, theme_colors));
-                            let edge = Some(BorderEdge { style, color });
-                            match edge_node.tag_name().name() {
-                                "left" => b.left = edge,
-                                "right" => b.right = edge,
-                                "top" => b.top = edge,
-                                "bottom" => b.bottom = edge,
-                                "horizontal" => b.horizontal = edge,
-                                "vertical" => b.vertical = edge,
-                                _ => {}
+                        "sz" => {
+                            if let Some(v) = fc.attribute("val").and_then(|s| s.parse().ok()) {
+                                f.size = v;
                             }
                         }
-                        d.border = Some(b);
+                        "name" => {
+                            f.name = fc.attribute("val").map(|s| s.to_string());
+                        }
+                        "scheme" => {
+                            f.scheme = fc
+                                .attribute("val")
+                                .filter(|value| matches!(*value, "major" | "minor"))
+                                .map(str::to_owned);
+                        }
+                        "charset" => {
+                            f.charset = fc
+                                .attribute("val")
+                                .and_then(|value| value.parse::<u8>().ok());
+                        }
+                        "color" => {
+                            f.color = parse_color(&fc, theme_colors);
+                        }
+                        _ => {}
                     }
-                    "numFmt" => {
-                        let num_fmt_id = child
-                            .attribute("numFmtId")
-                            .and_then(|v| v.parse().ok())
-                            .unwrap_or(0);
-                        let format_code = child.attribute("formatCode").unwrap_or("").to_string();
-                        d.num_fmt = Some(NumFmt {
-                            num_fmt_id,
-                            format_code,
-                        });
-                    }
-                    _ => {}
                 }
+                d.font = Some(f);
+                d.font_toggles = Some(toggles);
             }
-            dxfs.push(d);
+            "fill" => {
+                let mut f = Fill::default();
+                for pf in child.children() {
+                    if pf.tag_name().name() == "gradientFill" {
+                        // ECMA-376 §18.8.24 in a dxf, e.g. a table or
+                        // PivotTable style element's gradient.
+                        f.gradient = parse_gradient_fill(pf, theme_colors);
+                    }
+                    if pf.tag_name().name() == "patternFill" {
+                        f.pattern_type = pf.attribute("patternType").unwrap_or("solid").to_string();
+                        for color_node in pf.children() {
+                            match color_node.tag_name().name() {
+                                "fgColor" => f.fg_color = parse_color(&color_node, theme_colors),
+                                "bgColor" => f.bg_color = parse_color(&color_node, theme_colors),
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                // In dxf, conditional format fills often only have bgColor; mirror into fgColor
+                if f.fg_color.is_none() && f.bg_color.is_some() {
+                    f.fg_color = f.bg_color.clone();
+                }
+                d.fill = Some(f);
+            }
+            "border" => {
+                let mut b = Border::default();
+                for edge_node in child.children() {
+                    let style = edge_node.attribute("style").unwrap_or("").to_string();
+                    if style.is_empty() {
+                        continue;
+                    }
+                    let color = edge_node
+                        .children()
+                        .find(|c| c.is_element())
+                        .and_then(|c| parse_color(&c, theme_colors));
+                    let edge = Some(BorderEdge { style, color });
+                    match edge_node.tag_name().name() {
+                        "left" => b.left = edge,
+                        "right" => b.right = edge,
+                        "top" => b.top = edge,
+                        "bottom" => b.bottom = edge,
+                        "horizontal" => b.horizontal = edge,
+                        "vertical" => b.vertical = edge,
+                        _ => {}
+                    }
+                }
+                d.border = Some(b);
+            }
+            "numFmt" => {
+                let num_fmt_id = child
+                    .attribute("numFmtId")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
+                let format_code = child.attribute("formatCode").unwrap_or("").to_string();
+                d.num_fmt = Some(NumFmt {
+                    num_fmt_id,
+                    format_code,
+                });
+            }
+            _ => {}
         }
-        break;
     }
-    dxfs
+    d
 }
 
 pub(crate) fn parse_num_fmts(doc: &roxmltree::Document) -> Vec<NumFmt> {

@@ -1148,6 +1148,13 @@ export interface Dxf {
     fill: CellFill | null;
     border: Border | null;
     numFmt?: NumFmt | null;
+    fontToggles?: DxfFontToggles;
+}
+export interface DxfFontToggles {
+    bold?: boolean;
+    italic?: boolean;
+    underline?: boolean;
+    strike?: boolean;
 }
 type ExtensibleLiteral<Known extends string> = Known | (string & Record<never, never>);
 type Fill = SolidFill | NoFill | GradientFill | PatternFill | ImageFill;
@@ -1459,7 +1466,7 @@ export class OoxmlDecodedImageLimitError extends RangeError {
     readonly code: 'ooxml-decoded-image-limit';
     constructor(metric: OoxmlDecodedImageLimitMetric, limit: number, observed: number);
 }
-export type OoxmlDecodedImageLimitMetric = 'image-dimension' | 'image-pixels' | 'active-decoded-bytes';
+export type OoxmlDecodedImageLimitMetric = 'image-dimension' | 'image-pixels' | 'active-decoded-bytes' | 'image-effect-count' | 'image-effect-work';
 export class OoxmlError extends Error {
     readonly code: OoxmlErrorCode;
     constructor(code: OoxmlErrorCode, message: string);
