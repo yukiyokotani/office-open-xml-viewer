@@ -199,6 +199,19 @@ fn traverses_only_owned_groups_in_order_and_bounds_the_stack() {
     data[3].1 = bytes[cut..cut + 8].to_vec();
     data.insert(6, (0xec, bytes[cut + 8..].to_vec()));
     assert_eq!(run(&data).unwrap()[0].group_depth, 2);
+    // The projecting walk drops that nested shape; the strict walk used by the
+    // direct reader rejects it instead of losing drawn content.
+    let walk_as = |policy| {
+        let mut work = 1000;
+        let mut remaining = MAX_BYTES;
+        let mut drawing = assemble(&records(&data), 0, &mut work, &mut remaining)?.unwrap();
+        let mut result = Vec::new();
+        walk_with_policy(&mut drawing, 4, &mut work, &mut result, policy).map(|()| result)
+    };
+    assert!(walk_as(Policy::Projectable).unwrap().is_empty());
+    assert!(walk_as(Policy::Strict)
+        .unwrap_err()
+        .contains("grouped or transformed drawing shapes"));
 
     let mut body = head(11);
     for id in 12..(MAX_DEPTH as u32 + 14) {

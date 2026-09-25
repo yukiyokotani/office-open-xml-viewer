@@ -10,7 +10,7 @@ mod reader;
 mod tests;
 
 use super::drawing_anchors::{self, CellCorner};
-use super::{rich, styles, theme, u16_at, CellValue, Record, SheetData};
+use super::{rich, styles, theme, u16_at, unsupported, CellValue, Record, SheetData};
 use std::collections::BTreeMap;
 
 pub(crate) use project::Palette;
@@ -149,7 +149,6 @@ struct PreparedChart {
 #[derive(Default)]
 pub(super) struct Charts {
     sheets: BTreeMap<usize, Vec<PreparedChart>>,
-    unsupported: bool,
 }
 
 impl Charts {
@@ -159,16 +158,11 @@ impl Charts {
         styles: &styles::Styles<'_>,
         sheets: &[(String, SheetData)],
         shared: &[rich::Text],
-    ) -> Self {
+    ) -> Result<Self, String> {
         let sheet_ids: BTreeMap<_, _> = tabs.iter().enumerate().map(|(i, &tab)| (tab, i)).collect();
         let cells = Cells::new(records, &sheet_ids, sheets, shared);
         let references = |rgce: &[u8]| cells.resolve(rgce);
-        let Ok(anchors) = drawing_anchors::projectable(records) else {
-            return Self {
-                unsupported: true,
-                ..Self::default()
-            };
-        };
+        let anchors = drawing_anchors::projectable(records)?;
         let theme = theme::Colors::parse(records).unwrap_or_default();
         let color = |icv: u16| styles.chart_color(icv);
         let global_font = |index: u16| styles.global_font(index);
@@ -190,29 +184,26 @@ impl Charts {
             else {
                 continue;
             };
-            let Some(substream) = records.get(start..=end) else {
-                charts.unsupported = true;
-                continue;
-            };
-            match parse(substream, &palette, &references) {
-                Ok(Some(model)) => charts.sheets.entry(sheet).or_default().push(PreparedChart {
-                    from: anchor.from,
-                    to: anchor.to,
-                    model,
-                }),
-                Ok(None) => {}
-                Err(_) => charts.unsupported = true,
-            }
+            let substream = records
+                .get(start..=end)
+                .ok_or_else(|| unsupported("BIFF chart substream out of range"))?;
+            // Excel draws a chart without series as its frame, title and
+            // axes; the shared chart model needs series, so such a chart is
+            // rejected rather than dropped.
+            let model = parse(substream, &palette, &references)?.ok_or_else(|| {
+                unsupported("BIFF chart without drawable series is not projected")
+            })?;
+            charts.sheets.entry(sheet).or_default().push(PreparedChart {
+                from: anchor.from,
+                to: anchor.to,
+                model,
+            });
         }
-        charts
+        Ok(charts)
     }
 
     pub(super) fn is_empty(&self) -> bool {
         self.sheets.is_empty()
-    }
-
-    pub(super) fn has_unsupported(&self) -> bool {
-        self.unsupported
     }
 
     /// Resolve MS-XLS 2.5.193 cell fractions to DrawingML cell offsets.

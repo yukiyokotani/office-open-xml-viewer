@@ -135,9 +135,28 @@ impl DirectSession {
                 })?;
             self.native_charts =
                 std::mem::take(&mut self.charts).resolve(pending, mdw, &mut self.warnings);
+            // Geometry the byte converter omits with a warning (a sheet
+            // without stored defaults, a formula-display window or an anchor
+            // past the resolved grid) rejects the direct session instead.
+            if let Some(omitted) = self.warnings.iter().find(|warning| {
+                matches!(
+                    warning.as_str(),
+                    "legacy-xls:unresolved-picture-geometry-omitted"
+                        | "legacy-xls:unresolved-chart-geometry-omitted"
+                )
+            }) {
+                let message = if omitted.contains("chart") {
+                    "unresolved XLS chart anchor geometry"
+                } else {
+                    "unresolved XLS picture anchor geometry"
+                };
+                return self.fail(message);
+            }
         } else {
+            // The caller declined to measure the Normal font's maximum digit
+            // width, which every chart and picture anchor needs.
             self.warnings
-                .push("legacy-xls:unmeasured-pictures-omitted".into());
+                .push("legacy-xls:unmeasured-pictures-and-charts-omitted".into());
             self.pictures = pictures::Pictures::default();
             self.charts = chart::Charts::default();
         }
@@ -607,6 +626,12 @@ pub(super) mod tests {
         stream.extend(record(NUMBER, &number));
         stream.extend(record(MERGEDCELLS, &[1, 0, 0, 0, 0, 0, 2, 0, 2, 0]));
         stream.extend(record(EOF, &[]));
+        scoped_cfb(stream)
+    }
+
+    /// A one-stream compound file whose directory tree the scoped stream
+    /// reader accepts.
+    fn scoped_cfb(stream: Vec<u8>) -> Vec<u8> {
         let mut bytes = build_cfb(&[("Workbook", stream)]);
         let directory_sector = u32::from_le_bytes(bytes[48..52].try_into().unwrap()) as usize;
         let directory = 512 + directory_sector * 512;
@@ -656,6 +681,43 @@ pub(super) mod tests {
             .map(|name| (name.into(), SheetData::default()))
             .collect();
         DirectSession::from_prepared(prepared).unwrap()
+    }
+
+    #[test]
+    fn rejects_chart_and_macro_sheets_and_makes_no_blanket_omission_claim() {
+        // The direct reader projects drawings and conditional formatting or
+        // rejects the workbook, so it never reports the byte converter's
+        // blanket omission.
+        assert!(!wire_fixture()
+            .warnings()
+            .iter()
+            .any(|warning| warning.contains("drawings-conditional-formatting")));
+        for (dt, expected) in [(2u8, "chart sheets"), (1, "macro sheets")] {
+            let mut stream = record(BOF, &[0, 6, 5, 0]);
+            let first = stream.len() + 4;
+            stream.extend(record(BOUNDSHEET8, &[0, 0, 0, 0, 0, 0, 1, 0, b'S']));
+            let second = stream.len() + 4;
+            stream.extend(record(BOUNDSHEET8, &[0, 0, 0, 0, 0, dt, 1, 0, b'C']));
+            stream.extend(record(EOF, &[]));
+            let sheet = stream.len() as u32;
+            stream[first..first + 4].copy_from_slice(&sheet.to_le_bytes());
+            stream.extend(record(BOF, &[0, 6, 0x10, 0]));
+            stream.extend(record(EOF, &[]));
+            let other = stream.len() as u32;
+            stream[second..second + 4].copy_from_slice(&other.to_le_bytes());
+            stream.extend(record(BOF, &[0, 6, 0x20, 0]));
+            stream.extend(record(EOF, &[]));
+            let bytes = scoped_cfb(stream);
+            let cfb = CompoundFile::open(&bytes).unwrap();
+            let error = DirectSession::new(&cfb).err().expect("rejected");
+            assert!(error.contains(expected), "{expected}: {error}");
+            // The byte converter keeps its documented tab omission.
+            assert!(prepare(&cfb, false)
+                .unwrap()
+                .warnings
+                .iter()
+                .any(|warning| warning == "legacy-xls:non-worksheet-tabs-omitted"));
+        }
     }
 
     #[test]
@@ -821,7 +883,7 @@ pub(super) mod tests {
         assert!(session
             .warnings()
             .iter()
-            .any(|warning| warning == "legacy-xls:unmeasured-pictures-omitted"));
+            .any(|warning| warning == "legacy-xls:unmeasured-pictures-and-charts-omitted"));
         assert!(session.configure_mdw(Some(7.0)).is_err());
     }
 }

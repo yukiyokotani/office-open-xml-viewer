@@ -2409,6 +2409,7 @@ be closed before an experimental release.
 | XLS | Table (ListObject) styles, conditional-format data bars/icons and pivot styling are absent | about 5 |
 | XLS | Formula text is not decompiled from Ptg tokens, so volatile functions are not recalculated as Excel does at export | 2 |
 | XLS | Clip-art pictures, text boxes, strikethrough and one vertical merge are missing | 1 to 3 each |
+| XLS | The direct reader rejects, instead of omitting, drawn objects it does not project: EMF+-only pictures, shapes and text boxes, grouped shapes, chart and macro sheets, and drawings whose OfficeArt data continues after an Obj record | 19 of 139 |
 | PPT | ~~Only seven MS-ODRAW shape types map to presets~~ 100+ shape types map as PowerPoint converts them, with evidenced adjust formulas (officeart::preset); adjusted callout2/3 families, arrow callouts, curved arrows, ribbons and tall cubes/hexagons/parallelograms still fail closed | several |
 | PPT | ~~Native/OLE charts are missing~~ Resolved: embedded OLE objects show their stored presentation picture (bfc835d3) | 3 |
 | PPT | ~~Rotation by multiples of 90 degrees and combined flips use the wrong bounds or order~~ Resolved from the 120-case PowerPoint control (aa9dc5c1) | 1 |

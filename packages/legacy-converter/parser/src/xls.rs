@@ -314,6 +314,17 @@ fn prepare_workbook(
     let mut dxfs = Vec::new();
     for (tab, sheet) in sheets.into_iter().enumerate() {
         if sheet.sheet_type != 0 {
+            // MS-XLS 2.4.28 BoundSheet8.dt: 1 macro sheet, 2 chart sheet, 6 VB
+            // module. A VB module has no sheet content to display; the direct
+            // reader rejects macro and chart sheets rather than dropping tabs
+            // whose cells or chart Excel shows.
+            if direct && sheet.sheet_type != 6 {
+                return Err(unsupported(match sheet.sheet_type {
+                    1 => "XLS macro sheets are not projected",
+                    2 => "XLS chart sheets are not projected",
+                    _ => "unknown XLS sheet type",
+                }));
+            }
             skipped_non_worksheets = true;
             continue;
         }
@@ -353,10 +364,16 @@ fn prepare_workbook(
         ));
     }
     resolved_styles.set_dxfs(dxfs);
-    let mut warnings = vec![
-        "legacy-xls:drawings-conditional-formatting-and-external-links-omitted".into(),
-        "legacy-xls:phonetic-data-print-areas-titles-and-extended-headers-omitted".into(),
-    ];
+    // The byte converter omits drawings and conditional formatting and says
+    // so. The direct reader projects pictures, charts and conditional
+    // formatting or rejects the workbook (below), and never evaluates external
+    // links, whose cached cell values it shows, so it makes no such claim.
+    let mut warnings: Vec<String> = if direct {
+        Vec::new()
+    } else {
+        vec!["legacy-xls:drawings-conditional-formatting-and-external-links-omitted".into()]
+    };
+    warnings.push("legacy-xls:phonetic-data-print-areas-titles-and-extended-headers-omitted".into());
     if styles.extensions_omitted {
         warnings.push("legacy-xls:extended-styles-omitted".into());
     }
@@ -372,14 +389,23 @@ fn prepare_workbook(
     if skipped_non_worksheets {
         warnings.push("legacy-xls:non-worksheet-tabs-omitted".into());
     }
+    if with_pictures && direct {
+        validate_direct_drawings(&records, &tabs)?;
+    }
     let pictures = if with_pictures {
         match pictures::Pictures::prepare(&records, &tabs) {
             Ok(value) => {
                 if value.has_unsupported_images() {
+                    if direct {
+                        return Err(unsupported(
+                            "BIFF picture BLIP is not a supported image",
+                        ));
+                    }
                     warnings.push("legacy-xls:invalid-or-unsupported-pictures-omitted".into());
                 }
                 value
             }
+            Err(error) if direct => return Err(format!("{error} (XLS picture)")),
             Err(_) => {
                 // Optional passive content fails closed without discarding
                 // otherwise valid cells. Never copy the rejected image bytes.
@@ -393,13 +419,10 @@ fn prepare_workbook(
     // Only the direct model projects charts; the byte converter keeps its
     // documented drawing omission.
     let charts = if with_pictures && direct {
-        chart::Charts::prepare(&records, &tabs, &styles, &converted, &shared_strings)
+        chart::Charts::prepare(&records, &tabs, &styles, &converted, &shared_strings)?
     } else {
         chart::Charts::default()
     };
-    if charts.has_unsupported() {
-        warnings.push("legacy-xls:unsupported-charts-omitted".into());
-    }
     let font = if with_pictures && (!pictures.is_empty() || !charts.is_empty()) {
         styles.normal_font()
     } else {
@@ -416,6 +439,85 @@ fn prepare_workbook(
         pictures,
         charts,
     })
+}
+
+/// The direct reader must not drop drawn content: every sheet-anchored
+/// drawing object on a projected worksheet is an embedded chart (MS-XLS
+/// 2.4.181 ot 5 with its chart substream) or a picture (ot 8 with a BLIP
+/// reference); any other object (lines, shapes, text boxes, controls, cell
+/// comments), a grouped shape, or a chart/picture without its data is rejected
+/// with the reason.
+fn validate_direct_drawings(records: &[Record<'_>], tabs: &[usize]) -> Result<(), String> {
+    let projected: std::collections::BTreeSet<_> = tabs.iter().copied().collect();
+    for anchor in drawing_anchors::strict(records)? {
+        if projected.contains(&anchor.sheet) {
+            admit_direct_object(&anchor)?;
+        }
+    }
+    Ok(())
+}
+
+fn admit_direct_object(anchor: &drawing_anchors::DrawingAnchor) -> Result<(), String> {
+    {
+        match anchor.object_type {
+            5 if anchor.chart.is_some() => {}
+            5 => return Err(unsupported("BIFF chart object without its chart substream")),
+            8 if anchor.picture.is_some() => {}
+            8 => return Err(unsupported("BIFF picture object without a BLIP reference")),
+            25 => return Err(unsupported("BIFF cell comments are not projected")),
+            kind => {
+                return Err(unsupported(format!(
+                    "BIFF drawing object type {kind} is not projected"
+                )))
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod direct_drawing_tests {
+    use super::drawing_anchors::{CellCorner, DrawingAnchor};
+
+    #[test]
+    fn direct_objects_are_charts_with_data_or_referenced_pictures() {
+        let corner = CellCorner { column: 0, row: 0, dx: 0, dy: 0 };
+        let anchor = |object_type, chart, picture| DrawingAnchor {
+            sheet: 0,
+            shape_id: 1,
+            shape_flags: 0,
+            object_id: 1,
+            object_type,
+            object_flags: 0,
+            group_depth: 1,
+            behavior: 0,
+            from: corner,
+            to: corner,
+            picture,
+            chart,
+        };
+        let picture = || {
+            Some(super::drawing_anchors::PictureReference {
+                store_index: 1,
+                crop: [0; 4],
+                rotation: 0,
+                clipboard_format: 0,
+                auto_picture: false,
+            })
+        };
+        assert!(super::admit_direct_object(&anchor(5, Some((1, 2)), None)).is_ok());
+        assert!(super::admit_direct_object(&anchor(8, None, picture())).is_ok());
+        for (kind, chart, expected) in [
+            (5, None, "without its chart substream"),
+            (8, None, "without a BLIP reference"),
+            (25, None, "cell comments"),
+            (2, None, "type 2 is not projected"),
+            (6, None, "type 6 is not projected"),
+        ] {
+            let error = super::admit_direct_object(&anchor(kind, chart, None)).unwrap_err();
+            assert!(error.contains(expected), "{expected}: {error}");
+        }
+    }
 }
 
 fn prepare_direct(cfb: &CompoundFile<'_>) -> Result<PreparedXls, String> {
