@@ -1,9 +1,10 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync, existsSync, readFileSync, readdirSync, writeFileSync } from 'fs';
+import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'fs';
 import { PNG } from 'pngjs';
 import pixelmatch from 'pixelmatch';
 import {
   captureOrComparePrivateItem,
+  listPrivateCorpus,
   preparePrivateCorpus,
   verifyPrivateItemManifest,
 } from '../../../../tests/visual/private-corpus.mjs';
@@ -236,9 +237,7 @@ test.describe('visual regression', () => {
 });
 
 const PPTX_PRIVATE_CORPUS = process.env.VRT_PRIVATE_CORPUS === '1'
-  ? readdirSync('public/private')
-      .filter((file) => file.endsWith('.pptx') && !file.startsWith('~$'))
-      .sort((left, right) => left.localeCompare(right, undefined, { numeric: true }))
+  ? listPrivateCorpus('pptx')
   : [];
 
 if (process.env.VRT_PRIVATE_CORPUS === '1') {
