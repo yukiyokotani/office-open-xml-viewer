@@ -52,7 +52,9 @@ use shape::*;
 mod smartart_fallback;
 
 mod master;
+mod standalone;
 use master::*;
+pub use standalone::{parse_standalone_shape_part, StandaloneShape};
 
 // Test-only counter for `roxmltree::Document::parse` calls on the D4 hot paths
 // (slide master build, layout, slide XML + decorations). It exists ONLY under
@@ -170,7 +172,7 @@ fn note_bootstrap_output_slide_retained() {
 /// resulting `ArrayBuffer` to the main thread as a transferable and the main
 /// thread does a single `TextDecoder.decode` + `JSON.parse`, collapsing three
 /// serializations (Rust String → JsString → structured clone) into one decode.
-#[wasm_bindgen]
+#[cfg_attr(feature = "wasm-entry", wasm_bindgen)]
 pub fn parse_pptx(
     data: &[u8],
     max_archive_entry_bytes: Option<u64>,
@@ -191,7 +193,7 @@ pub fn parse_pptx(
 /// WASM-callable markdown projection. Shares the body of `to_markdown_native`
 /// so the browser / Node WASM path and the native mcp-server path stay in
 /// lock-step. See `to_markdown_native` for the design rationale.
-#[wasm_bindgen]
+#[cfg_attr(feature = "wasm-entry", wasm_bindgen)]
 pub fn pptx_to_markdown(
     data: &[u8],
     max_archive_entry_bytes: Option<u64>,
@@ -229,7 +231,7 @@ fn pptx_parser_js_error(error: String) -> JsValue {
 /// Extract raw bytes for a single entry (e.g. "ppt/media/media2.mp4") from a
 /// pptx zip archive. Used by the main thread to materialize media blobs for
 /// interactive playback without re-parsing the whole file.
-#[wasm_bindgen]
+#[cfg_attr(feature = "wasm-entry", wasm_bindgen)]
 pub fn extract_media(
     data: &[u8],
     path: &str,
@@ -249,7 +251,7 @@ pub fn extract_media(
 /// Extract raw bytes for a single embedded image entry (e.g.
 /// "ppt/media/image1.png") from a pptx zip archive. Used by the main thread to
 /// lazily materialize image blobs on demand through a bounded package operation.
-#[wasm_bindgen]
+#[cfg_attr(feature = "wasm-entry", wasm_bindgen)]
 pub fn extract_image(
     data: &[u8],
     path: &str,
@@ -267,7 +269,7 @@ pub fn extract_image(
 }
 
 /// Extract one font part referenced by `p:embeddedFontLst`.
-#[wasm_bindgen]
+#[cfg_attr(feature = "wasm-entry", wasm_bindgen)]
 pub fn extract_font(
     data: &[u8],
     path: &str,
@@ -293,7 +295,7 @@ pub fn extract_font(
 /// viewer's parse-then-lazily-load-media pattern) pays the copy + open cost a
 /// single time. The session owns the source bytes, validated central-directory
 /// index, resource governor, and first package-wide poison error.
-#[wasm_bindgen]
+#[cfg_attr(feature = "wasm-entry", wasm_bindgen)]
 pub struct PptxArchive {
     /// The opened archive, or the container-open error string when the ZIP itself
     /// was truncated / corrupt (#774, RB7 MAJOR). Deferring the failure here —
@@ -537,7 +539,7 @@ fn serialize_presentation_bootstrap(
     serde_json::to_vec(&bootstrap).map_err(|error| format!("serialize error: {error}"))
 }
 
-#[wasm_bindgen]
+#[cfg_attr(feature = "wasm-entry", wasm_bindgen)]
 impl PptxArchive {
     fn ensure_presentation(&mut self) -> Result<(), String> {
         if self.presentation.is_none() {
@@ -560,7 +562,7 @@ impl PptxArchive {
     /// JS→WASM boundary. Taking `&[u8]` would force a second `to_vec()` copy so
     /// the `Cursor` could own its backing store, transiently doubling WASM
     /// linear memory to ~2x the file size during construction.
-    #[wasm_bindgen(constructor)]
+    #[cfg_attr(feature = "wasm-entry", wasm_bindgen(constructor))]
     pub fn new(
         data: Vec<u8>,
         max_archive_entry_bytes: Option<u64>,
