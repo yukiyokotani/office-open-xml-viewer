@@ -10,7 +10,7 @@ import {
   isStructuralTrailingParagraph,
 } from './table-cell-blocks.js';
 import type { ParagraphBorderEdges } from './paragraph-border-adjacency.js';
-import { layoutTable } from './table.js';
+import { layoutTable, measureTableCellBlockFlowHeightPt } from './table.js';
 import { tableCellHorizontalSpacingInsets } from './table-columns.js';
 import { snapshotPlainData } from './plain-data.js';
 import { eastAsianUprightPaintOps } from './vertical-glyph-orientation.js';
@@ -253,16 +253,13 @@ function verticalCellMode(
 }
 
 /**
- * Natural line extent of rotated cell content laid out on an unconstrained
- * line: each line's placement span (independent of its alignment on that
+ * Line extent of rotated cell content at an acquired line width: each line's
+ * placement span (independent of its alignment on that
  * line) plus the paragraph's side indents and, on the first line, a positive
- * first-line indent. For automatic rows this is the length the rotated
- * lines require: ECMA-376 §17.4.80/§17.4.81 size a row to its content, and
- * the rotated content's extent along the row axis is its line length. This
- * rule is derived from the specification alone. Rotated cells in automatic
- * or atLeast rows have no Word compatibility evidence yet (a Word control
- * for that case is pending); the observed documents only exercised rows
- * whose height a taller neighbour cell governs.
+ * first-line indent. The line box advance is also a minimum along the rotated
+ * row axis, even when a glyph is narrower; see WORD_ROTATED_CELL_AUTO_ROW_WRAP.
+ * The unconstrained extent is an upper bound on the row height needed to fit
+ * the rotated content; it is not the auto-row minimum.
  */
 function naturalLineExtentPt(
   layouts: readonly (ParagraphLayout | TableLayout)[],
@@ -279,6 +276,7 @@ function naturalLineExtentPt(
     const sideIndentsPt = Math.max(0, paragraph?.indentLeft ?? 0)
       + Math.max(0, paragraph?.indentRight ?? 0);
     layout.lines.forEach((line, lineIndex) => {
+      extentPt = Math.max(extentPt, line.advancePt);
       let startPt = Number.POSITIVE_INFINITY;
       let endPt = Number.NEGATIVE_INFINITY;
       for (const placement of line.placements) {
@@ -292,6 +290,38 @@ function naturalLineExtentPt(
     });
   });
   return Math.min(MAXIMUM_ROTATED_LINE_LENGTH_PT, Math.ceil(extentPt * 100) / 100);
+}
+
+/** Find the shortest rotated line axis that fits all resulting columns within
+ * the physical cell width. ECMA-376 §17.4.72 rotates the text frame and
+ * §17.4.80 lets auto/atLeast rows grow to fit their content. The
+ * compatibility observation and its tested bounds are registered as
+ * WORD_ROTATED_CELL_AUTO_ROW_WRAP in table-compatibility.ts.
+ *
+ * Most cells need only the narrowest and unconstrained acquisitions. Search
+ * only when the narrowest columns overflow the cell width; bisection is
+ * bounded by the existing 0.01pt line-length resolution.
+ */
+function fittingRotatedLineLengthPt(
+  minimumPt: number,
+  contentWidthPt: number,
+  acquire: (lineLengthPt: number) => TableLayoutInput['rows'][number]['cells'][number]['blocks'],
+  maximumPt: () => number,
+): number {
+  const fits = (lengthPt: number) =>
+    measureTableCellBlockFlowHeightPt(acquire(lengthPt)) <= contentWidthPt + ROTATED_LINE_LENGTH_EPSILON_PT;
+  if (fits(minimumPt)) return minimumPt;
+  const unconstrainedPt = Math.max(minimumPt, maximumPt());
+  if (!fits(unconstrainedPt)) return unconstrainedPt;
+  let lowerPt = minimumPt;
+  let upperPt = unconstrainedPt;
+  while (upperPt - lowerPt > ROTATED_LINE_LENGTH_EPSILON_PT) {
+    const middlePt = Math.floor((lowerPt + upperPt) * 50) / 100;
+    if (middlePt <= lowerPt || middlePt >= upperPt) break;
+    if (fits(middlePt)) upperPt = middlePt;
+    else lowerPt = middlePt;
+  }
+  return upperPt;
 }
 
 /** eaVert keeps East Asian clusters upright inside the rotated frame, as the
@@ -472,14 +502,20 @@ export function acquireRetainedTable<State>(
         const rowRule = rowFormat?.height?.rule ?? 'auto';
         const rowHeightPt = rowFormat?.height?.valuePt ?? 0;
         const authoredLengthPt = Math.max(0, rowHeightPt - formatMargins.top - formatMargins.bottom);
-        const naturalLengthPt = rowRule === 'exact'
+        const minimumLengthPt = rowRule === 'exact'
           ? authoredLengthPt
-          : naturalLineExtentPt(acquireAt(MAXIMUM_ROTATED_LINE_LENGTH_PT), cell.content);
+          : Math.max(
+              authoredLengthPt,
+              naturalLineExtentPt(acquireAt(0), cell.content),
+            );
         const lineLengthPt = rowRule === 'exact'
           ? authoredLengthPt
-          : rowRule === 'atLeast'
-            ? Math.max(authoredLengthPt, naturalLengthPt)
-            : naturalLengthPt;
+          : fittingRotatedLineLengthPt(
+              minimumLengthPt,
+              physicalContentWidthPt,
+              (lengthPt) => cellBlocks(acquireAt(lengthPt)),
+              () => naturalLineExtentPt(acquireAt(MAXIMUM_ROTATED_LINE_LENGTH_PT), cell.content),
+            );
         acquired = orientRotatedCellBlocks(acquireAt(lineLengthPt), verticalMode);
         verticalText = { mode: verticalMode, lineLengthPt, requiredLineLengthPt: lineLengthPt };
         rotatedCells.push({
