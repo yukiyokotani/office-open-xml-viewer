@@ -222,6 +222,7 @@ export {
   paintDrawingMLShape,
   clipDrawingMLShape,
   withDrawingMLShapeTransform,
+  type DrawingMLPathPaint,
   type DrawingMLShapeFill,
   type DrawingMLShapeGeometry,
   type DrawingMLShapePaintPlan,
@@ -378,6 +379,14 @@ export {
 // applies its `<a:duotone>` recolour once per (path + colours). Shared by the
 // docx and pptx renderers so a duotone picture decodes + recolours once and is
 // reused across page/slide revisits. xlsx keeps its own worksheet-scoped map.
+// CT_Blip pixel effects (grayscl, biLevel, clrChange) applied in document
+// order with the duotone, through the same decode cache.
+export {
+  applyBlipPixelEffects,
+  blipLuminance,
+  type BlipEffect,
+  type BlipPixelEffects,
+} from './image/blip-effects';
 export {
   getCachedDuotoneBitmapByPath,
   duotoneCacheKey,
@@ -400,6 +409,7 @@ export {
   buildPresetGeometryFillPath,
   getPresetGeometryBounds,
   getConnectorAnchors,
+  pathFillModeOverlay,
 } from './shape/preset-geometry';
 export { type PresetPath } from './shape/preset-geometry/path-executor';
 // ECMA-376 §20.1.9.19 WordArt text-warp envelopes (presetTextWarpDefinitions.xml).

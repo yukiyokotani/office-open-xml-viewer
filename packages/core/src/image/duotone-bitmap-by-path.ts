@@ -11,7 +11,18 @@ import {
   resolvedCachedBitmapVariantKey,
   type CachedBitmapOptions,
 } from './bitmap-image-by-path';
-import { applyDuotone, type Duotone, type OffscreenFactory } from './duotone';
+import {
+  applyDuotone,
+  applyImageDataTransform,
+  type Duotone,
+  type OffscreenFactory,
+} from './duotone';
+import {
+  applyBlipPixelEffects,
+  blipPixelEffectsKey,
+  isBlipPixelEffects,
+  type BlipPixelEffects,
+} from './blip-effects';
 import { imageNaturalSize } from './crop';
 import { MAX_RASTER_PIXELS } from './pixel-budget.js';
 import { decodedBitmapTargetResizeOptions } from './raster-target.js';
@@ -25,7 +36,11 @@ type FetchImage = (path: string, mime: string) => Promise<Blob>;
  *  when warming the cache and when drawing, so the two agree without sharing a
  *  cache reference. Mirrors xlsx's `imageCacheKey` and docx's former
  *  `imageKey(path, colorReplaceFrom)`. */
-export function duotoneCacheKey(imagePath: string, duotone?: Duotone | null): string {
+export function duotoneCacheKey(
+  imagePath: string,
+  duotone?: Duotone | BlipPixelEffects | null,
+): string {
+  if (isBlipPixelEffects(duotone)) return `${imagePath}|fx:${blipPixelEffectsKey(duotone)}`;
   return duotone ? `${imagePath}|duo:${duotone.clr1}:${duotone.clr2}` : imagePath;
 }
 
@@ -54,7 +69,7 @@ const DUOTONE_CACHE_NAMESPACE = 'duotone';
 export async function getCachedDuotoneBitmapByPath(
   imagePath: string,
   mimeType: string,
-  duotone: Duotone | null | undefined,
+  duotone: Duotone | BlipPixelEffects | null | undefined,
   fetchImage: FetchImage,
   opts: CachedBitmapOptions & {
     offscreenFactory?: OffscreenFactory;
@@ -124,13 +139,24 @@ export async function getCachedDuotoneBitmapByPath(
       if (w <= 0 || h <= 0) {
         return { bitmap: failClosedOnDuotoneFailure ? null : base, owned: false };
       }
-      const recoloured = await applyDuotone(base, duotone, {
+      const transformOptions = {
         width: w,
         height: h,
         offscreenFactory,
         targetWidthPx: requestedBitmapOpts.targetWidthPx,
         targetHeightPx: requestedBitmapOpts.targetHeightPx,
-      });
+      };
+      // CT_Blip pixel effects (grayscl/biLevel/clrChange, with the duotone at
+      // its document position) share the duotone's decode, cache and budget.
+      const recoloured = isBlipPixelEffects(duotone)
+        ? await applyImageDataTransform(
+          base,
+          (data) => {
+            applyBlipPixelEffects(data, duotone);
+          },
+          transformOptions,
+        )
+        : await applyDuotone(base, duotone, transformOptions);
       // `applyDuotone` returns a CanvasImageSource; when the pixel pipeline ran
       // it is a fresh ImageBitmap, otherwise it is the unchanged current
       // source. Strict callers fail closed. Compatibility callers still bake a
