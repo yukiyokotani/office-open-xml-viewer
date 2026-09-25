@@ -18,11 +18,9 @@ import type { TextRunData } from '@silurus/ooxml-core';
 //     paragraph genuinely wraps, which trips the consistent measurement anyway
 //     — but the measurement's *contract* was wrong, so the three expressions
 //     could drift apart in the future. The fix makes them one shared helper.)
-//  2. For a NEGATIVE non-bullet indent the wrap pass clamps to 0 (full width),
-//     but the draw side honored the raw negative `indentPx`, shifting the first
-//     line left of marL and widening its centre/justify region. Draw and wrap
-//     must agree: a negative non-bullet first-line indent is clamped to 0
-//     everywhere (we do not extend the first line into the marL gutter).
+//  2. A NEGATIVE non-bullet indent extends the first line left of marL. The
+//     measurement, wrap and draw paths must all preserve this signed value;
+//     clamping every path consistently is still incorrect DrawingML geometry.
 
 const SCALE = 1 / 12700; // emuToPx(emu) = emu * scale ⇒ 1pt → 1px
 const emu = (px: number) => Math.round(px * 12700); // px → EMU at this scale
@@ -130,7 +128,7 @@ describe('pptx spAutoFit measurement includes DrawingML rPr@spc (§21.1.2.3.9)',
 });
 
 describe('pptx first-line indent: the draw path matches the wrap path for a negative indent (§21.1.2.2.7)', () => {
-  it('draws a negative non-bullet first-line indent at the SAME x as indent 0 (no left shift)', () => {
+  it('draws a negative non-bullet first-line indent left of marL', () => {
     // Short single-line text, wrap disabled so only the draw offset is in play.
     const zero = mockCtx();
     renderTextBody(zero.ctx, makeBody(makePara({ runs: [run('AAAA')], indent: 0 }), { wrap: 'none' }), 0, 0, 200, 200, SCALE);
@@ -140,10 +138,45 @@ describe('pptx first-line indent: the draw path matches the wrap path for a nega
     expect(zero.texts.length).toBeGreaterThan(0);
     expect(neg.texts.length).toBeGreaterThan(0);
     const firstX = (t: Array<{ x: number }>) => Math.min(...t.map((c) => c.x));
-    // Negative non-bullet indent is clamped to 0 at draw time (matching the wrap
-    // pass), so the first line starts at the same x as a zero indent — it is NOT
-    // shifted ~50px left into the marL gutter.
-    expect(firstX(neg.texts)).toBeCloseTo(firstX(zero.texts), 5);
+    expect(firstX(neg.texts) - firstX(zero.texts)).toBeCloseTo(-50, 5);
+  });
+
+  it('extends only the first wrap line and keeps continuation lines at marL', () => {
+    const para = makePara({ runs: [run('あ'.repeat(40))], indent: emu(-50) });
+    para.marL = emu(50);
+    const { ctx, texts } = mockCtx();
+    renderTextBody(ctx, makeBody(para, { lIns: 0, rIns: 0 }), 0, 0, 200, 200, SCALE);
+    const rows = [...new Set(texts.map(t => t.y))].map(y => texts.filter(t => t.y === y));
+    expect(rows.map(row => row.map(t => t.text).join('').length)).toEqual([20, 15, 5]);
+    expect(rows.map(row => Math.min(...row.map(t => t.x)))).toEqual([0, 50, 50]);
+    for (const row of rows) expect(Math.max(...row.map(t => t.x + t.text.length * 10))).toBeLessThanOrEqual(200);
+  });
+
+  it.each(['l', 'ctr', 'r'] as const)('uses the same expanded first-line region for %s alignment', alignment => {
+    const para = makePara({ runs: [run('AAAA')], indent: emu(-50), alignment });
+    para.marL = emu(50);
+    const { ctx, texts } = mockCtx();
+    renderTextBody(ctx, makeBody(para, { lIns: 0, rIns: 0, wrap: 'none' }), 0, 0, 200, 200, SCALE);
+    expect(Math.min(...texts.map(t => t.x))).toBeCloseTo({ l: 0, ctr: 80, r: 160 }[alignment], 5);
+  });
+
+  it('keeps tab stops anchored to the text body while the first line hangs left', () => {
+    const para = makePara({ runs: [run('A\tB')], indent: emu(-50) });
+    para.marL = emu(50);
+    para.tabStops = [{ pos: emu(100), algn: 'l' }];
+    const { ctx, texts } = mockCtx();
+    renderTextBody(ctx, makeBody(para, { lIns: 0, rIns: 0 }), 0, 0, 200, 200, SCALE);
+    expect(texts.find(t => t.text === 'A')?.x).toBeCloseTo(0, 5);
+    expect(texts.find(t => t.text === 'B')?.x).toBeCloseTo(100, 5);
+  });
+
+  it('does not request wrapping when text fits the expanded first-line region', () => {
+    const para = makePara({ runs: [run('あ'.repeat(18))], indent: emu(-50) });
+    para.marL = emu(50);
+    const { ctx } = mockCtx();
+    expect(naturalWidthExceedsBbox(ctx, makeBody(para), 200, 7.2, 7.2, SCALE, RC)).toBe(false);
+    para.indent = 0;
+    expect(naturalWidthExceedsBbox(ctx, makeBody(para), 200, 7.2, 7.2, SCALE, RC)).toBe(true);
   });
 
   it('still applies a POSITIVE non-bullet first-line indent at draw time (regression guard)', () => {
