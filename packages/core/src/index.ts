@@ -118,52 +118,36 @@ export {
 // CFB (OLE2) container sniffer: the `load()` factories call this on the raw
 // bytes before touching the parser worker, so a password-protected or legacy
 // .doc/.xls/.ppt file becomes a typed OoxmlError instead of an opaque zip error.
-export {
-  sniffCfb,
-  sniffLegacyOfficeFormat,
-  type CfbKind,
-  type LegacyCfbFormat,
-} from './errors/cfb-sniff';
+export { cfbDirectoryNames, sniffCfb, type CfbKind } from './errors/cfb-sniff';
 // Shared load() guard: throws the right OoxmlError when the bytes are a CFB
 // container (encrypted / legacy-binary / other) instead of an OOXML ZIP.
 // `resolveOoxmlContainer` is the decrypt-aware superset the load() factories
 // call: it returns plaintext ZIP bytes, decrypting an Agile-encrypted file when
 // a password is supplied ([MS-OFFCRYPTO], PD8).
 export { assertNotCfbContainer, resolveOoxmlContainer, toArrayBuffer } from './errors/cfb-guard';
+// Application-supplied model sources (LoadOptions.modelSources): a
+// format-generic contract for opening non-OOXML input into a renderer's own
+// model archive. Core and the format packages never name a concrete source.
 export {
-  DEFAULT_LEGACY_CONVERSION_TIMEOUT_MS,
-  DEFAULT_MAX_CONVERTED_OOXML_BYTES,
-  DEFAULT_MAX_LEGACY_INPUT_BYTES,
-  HARD_MAX_LEGACY_CONVERSION_BYTES,
-  normalizeOfficeInput,
-  validateConvertedOoxml,
-  type LegacyOfficeConversionInput,
-  type LegacyOfficeConversionOptions,
-  type LegacyOfficeConversionRecord,
-  type LegacyOfficeConversionResult,
-  type LegacyOfficeConverter,
-  type LegacyOfficeFormatConversionOptions,
-  type LegacyPptDirectConversionOptions,
-  type LegacyXlsDirectConversionOptions,
-  type NormalizedOfficeInput,
-} from './conversion/legacy-office';
-export type { LegacyPptDirectSourceDescriptor } from './conversion/legacy-ppt-source';
-export type { LegacyXlsDirectSourceDescriptor } from './conversion/legacy-xls-source';
-export {
-  LegacyOfficeConversionError,
-  type LegacyOfficeConversionFailureReason,
-  type LegacyOfficeFormat,
-} from './conversion/legacy-office-error';
-export {
-  createDisposableWorkerLegacyOfficeConverter,
-  installLegacyOfficeConversionWorkerHandler,
-  type LegacyOfficeConversionWorker,
-  type LegacyOfficeConversionWorkerAdapterOptions,
-  type LegacyOfficeConversionWorkerFactory,
-  type LegacyOfficeConversionWorkerScope,
-  type LegacyOfficeWorkerRequest,
-  type LegacyOfficeWorkerResponse,
-} from './conversion/worker-converter';
+  MODEL_SOURCE_MODULE_PROTOCOL,
+  beginModelSourceLoad,
+  hasModelSourceCapability,
+  openModelSourceModule,
+  requireModelSourceArchiveMethods,
+  selectModelSource,
+  unsupportedModelSourceCapability,
+  validateModelSourceModuleDescriptor,
+  type AdmittedModelSourceLoad,
+  type ModelSource,
+  type ModelSourceConfig,
+  type ModelSourceConfigValue,
+  type ModelSourceLoad,
+  type ModelSourceModule,
+  type ModelSourceModuleDescriptor,
+  type ModelSourceTarget,
+  type OpenedModelSource,
+  type OpenedModelSourceModule,
+} from './source/model-source';
 // Agile Encryption decryption ([MS-OFFCRYPTO]): `decryptOoxml` turns an
 // encrypted CFB + password into plaintext ZIP bytes. Lower-level primitives
 // (key derivation, EncryptionInfo parse) are exported for testing / advanced use.

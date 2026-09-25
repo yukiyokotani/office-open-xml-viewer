@@ -49,7 +49,6 @@ const MAX_DIR_ENTRIES = 4096;
 const MAX_CHAIN_SECTORS = 8192;
 
 export type CfbKind = 'encrypted' | 'legacy-binary-format' | 'cfb-unknown';
-export type LegacyCfbFormat = 'doc' | 'xls' | 'ppt';
 
 /** Directory-entry names that mark a legacy binary Office document. Compared
  *  case-sensitively — [MS-CFB] entry names are case-preserving and these are
@@ -82,19 +81,14 @@ export function sniffCfb(bytes: Uint8Array): CfbKind | null {
 }
 
 /**
- * Return an unambiguous legacy family when the CFB directory contains markers
- * for exactly one Office binary format. Multiple markers can legitimately
- * occur for embedded OLE objects, so ambiguous containers return `null` and
- * remain the converter's responsibility to validate.
+ * The [MS-CFB] §2.6 directory-entry names of a compound file, for callers
+ * that classify a container themselves (for example an application-supplied
+ * model source). Returns `null` when the bytes are not a CFB container; an
+ * unreadable directory yields an empty set. Names are case-preserving.
  */
-export function sniffLegacyOfficeFormat(bytes: Uint8Array): LegacyCfbFormat | null {
+export function cfbDirectoryNames(bytes: Uint8Array): ReadonlySet<string> | null {
   const inspection = inspectCfb(bytes);
-  if (inspection?.kind !== 'legacy-binary-format') return null;
-  const formats = new Set<LegacyCfbFormat>();
-  if (inspection.names.has('WordDocument')) formats.add('doc');
-  if (inspection.names.has('Workbook') || inspection.names.has('Book')) formats.add('xls');
-  if (inspection.names.has('PowerPoint Document')) formats.add('ppt');
-  return formats.size === 1 ? [...formats][0] as LegacyCfbFormat : null;
+  return inspection ? new Set(inspection.names) : null;
 }
 
 function inspectCfb(bytes: Uint8Array): Readonly<{ kind: CfbKind; names: ReadonlySet<string> }> | null {

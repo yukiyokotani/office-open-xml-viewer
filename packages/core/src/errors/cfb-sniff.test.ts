@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { sniffCfb, sniffLegacyOfficeFormat } from './cfb-sniff';
+import { cfbDirectoryNames, sniffCfb } from './cfb-sniff';
 import { buildCfbFixture } from '../testing/cfb-fixture';
 
 /**
@@ -269,7 +269,7 @@ describe('sniffCfb — classification', () => {
 
   it('uses extension DIFAT sectors to classify a large legacy container', () => {
     expect(sniffCfb(extendedDifatCfb('WordDocument'))).toBe('legacy-binary-format');
-    expect(sniffLegacyOfficeFormat(extendedDifatCfb('WordDocument'))).toBe('doc');
+    expect(cfbDirectoryNames(extendedDifatCfb('WordDocument'))?.has('WordDocument')).toBe(true);
   });
 
   it('detects an encrypted container built as a major-version-4 (4096-byte sector) CFB', () => {
@@ -286,22 +286,15 @@ describe('sniffCfb — classification', () => {
   });
 });
 
-describe('sniffLegacyOfficeFormat', () => {
-  it.each([
-    ['WordDocument', 'doc'],
-    ['Workbook', 'xls'],
-    ['Book', 'xls'],
-    ['PowerPoint Document', 'ppt'],
-  ] as const)('classifies an unambiguous %s marker as %s', (stream, format) => {
-    expect(sniffLegacyOfficeFormat(new Uint8Array(buildCfbFixture(['Root Entry', stream])))).toBe(format);
-  });
-
-  it('does not guess when embedded-object markers make the family ambiguous', () => {
-    expect(sniffLegacyOfficeFormat(new Uint8Array(buildCfbFixture([
+describe('cfbDirectoryNames', () => {
+  it('returns the directory names of a compound file and null for other bytes', () => {
+    const names = cfbDirectoryNames(new Uint8Array(buildCfbFixture([
       'Root Entry',
       'WordDocument',
       'Workbook',
-    ])))).toBeNull();
+    ])));
+    expect([...(names ?? [])].sort()).toEqual(['Root Entry', 'WordDocument', 'Workbook']);
+    expect(cfbDirectoryNames(new Uint8Array([0x50, 0x4b, 0x03, 0x04]))).toBeNull();
   });
 });
 
