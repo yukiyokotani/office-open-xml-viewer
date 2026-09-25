@@ -2,7 +2,7 @@
 
 use super::{payload, ModelBudget};
 use crate::doc::{
-    table::{Color, PreferredIndent, PreferredWidth, Properties},
+    table::{cell_text_flow, Color, PreferredIndent, PreferredWidth, Properties},
     table_structure::{Assembler, Event, LogicalTable, Payload, PlannedRow},
     unsupported,
 };
@@ -227,6 +227,23 @@ fn project_table(
             if align > 2 {
                 return Err(unsupported("invalid Word vertical cell alignment"));
             }
+            // [MS-DOC] 2.9.317 TCGRF textFlow (from TC80 or sprmTTextFlow)
+            // is a 2.9.323 TextFlow; ECMA-376 Part 1 §17.18.93 names the same
+            // arrangements (sample-19's DOC/DOCX pair: 5 = tbRlV).
+            let text_direction = match cell_text_flow(source.flags) {
+                0 => None,
+                1 => Some("tbRl"),
+                3 => Some("btLr"),
+                5 => Some("tbRlV"),
+                // The shared renderer lays lrTbV cells out without rotating
+                // their East Asian glyphs, so projecting it would misdisplay.
+                4 => {
+                    return Err(unsupported(
+                        "direct DOC model cannot display grpfTFlrtbv cell text flow",
+                    ));
+                }
+                _ => return Err(unsupported("invalid Word cell text flow")),
+            };
             let mut content = Vec::new();
             reserve(&mut content, cell.content.0.len().max(1), &mut |n| {
                 charge_cell(remaining, n)
@@ -244,6 +261,17 @@ fn project_table(
                         }
                     });
                 }
+            }
+            if text_direction.is_some()
+                && content
+                    .iter()
+                    .any(|element| matches!(element, CellElement::Table(_)))
+            {
+                // The shared renderer keeps a rotated cell holding a nested
+                // table horizontal; projecting it would misdisplay.
+                return Err(unsupported(
+                    "direct DOC model cannot display rotated cells containing tables",
+                ));
             }
             let fallback = |side: usize| match side {
                 0 => Some(if row_index == 0 { 0 } else { 4 }),
@@ -299,7 +327,7 @@ fn project_table(
                     preferred_width: source.preferred.map(width),
                     margins: Some(margin_wire(margins)),
                 },
-                text_direction: None,
+                text_direction: text_direction.map(str::to_owned),
             });
         }
         let height = planned.source.height;
@@ -561,6 +589,55 @@ mod tests {
         assert_eq!(table.table_layout.logical_row_offset, 0);
         assert_eq!(table.table_layout.logical_total_rows, 1);
         assert!(table.table_layout.ordinary_flow);
+    }
+    #[test]
+    fn tcgrf_text_flow_projects_and_rotated_cells_with_nested_tables_fail_closed() {
+        // [MS-DOC] 2.9.317 TCGRF textFlow authored by a TC80 (grpfTFbtlr).
+        let mut end = row(1, &[1000]);
+        end.row.cells[0].flags |= 3 << 2;
+        let mut sequence = 0;
+        let mut writer = Writer::new(&mut sequence);
+        let mut budget = ModelBudget::new(1_000_000);
+        writer
+            .push(cell(1), '\u{7}', paragraph("a"), &mut budget)
+            .unwrap();
+        writer
+            .push(end, '\u{7}', Blocks::default(), &mut budget)
+            .unwrap();
+        let body = writer.finish(&mut budget).unwrap();
+        let Block::Table(table) = &body.0[0] else {
+            panic!()
+        };
+        assert_eq!(
+            table.rows[0].cells[0].text_direction.as_deref(),
+            Some("btLr")
+        );
+
+        // The same flow on a cell holding a nested table is rejected.
+        let mut end = row(1, &[1000]);
+        end.row.cells[0].flags |= 1 << 2;
+        let mut sequence = 0;
+        let mut writer = Writer::new(&mut sequence);
+        let mut budget = ModelBudget::new(1_000_000);
+        // Nested cells and rows end at paragraph marks carrying
+        // fInnerTableCell / fInnerTtp ([MS-DOC] 2.4.3).
+        let mut inner_cell = cell(2);
+        inner_cell.inner_cell = true;
+        writer
+            .push(inner_cell, '\r', paragraph("inner"), &mut budget)
+            .unwrap();
+        writer
+            .push(row(2, &[500]), '\r', Blocks::default(), &mut budget)
+            .unwrap();
+        writer
+            .push(cell(1), '\u{7}', paragraph("a"), &mut budget)
+            .unwrap();
+        let error = writer
+            .push(end, '\u{7}', Blocks::default(), &mut budget)
+            .and_then(|_| writer.finish(&mut budget).map(|_| ()))
+            .err()
+            .unwrap();
+        assert!(error.contains("rotated cells containing tables"), "{error}");
     }
     #[test]
     fn no_overlap_alone_remains_ordinary_but_positioned_table_fails_closed() {

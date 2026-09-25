@@ -1028,6 +1028,7 @@ mod tests {
         margin_wires: Vec<[String; 4]>,
         borders: Vec<[Option<(String, f64)>; 4]>,
         border_styles: Vec<[Option<String>; 4]>,
+        text_directions: Vec<Option<String>>,
         unsupported_table: bool,
         unsupported_character: bool,
         unsupported_paragraph: bool,
@@ -1673,6 +1674,7 @@ mod tests {
             let mut margin_wires = Vec::new();
             let mut borders = Vec::new();
             let mut border_styles = Vec::new();
+            let mut text_directions = Vec::new();
             for element in &body {
                 let BodyElement::Table(table) = element else {
                     continue;
@@ -1681,6 +1683,7 @@ mod tests {
                     row_cell_counts.push(row.cells.len());
                     for cell in &row.cells {
                         col_spans.push(cell.col_span);
+                        text_directions.push(cell.text_direction.clone());
                         backgrounds.push(cell.background.clone());
                         margins.push([
                             cell.margin_top.unwrap(),
@@ -1748,6 +1751,7 @@ mod tests {
                 margin_wires,
                 borders,
                 border_styles,
+                text_directions,
                 unsupported_table: facts.formatting.unsupported_table_properties,
                 unsupported_character: facts.formatting.unsupported_character_properties,
                 unsupported_paragraph: facts.formatting.unsupported_paragraph_properties,
@@ -3421,14 +3425,41 @@ mod tests {
             .err()
             .unwrap();
         assert!(error.contains("preferred row part"), "{error}");
-        // hideMark and cell text flow have no model representation.
-        for unmodeled in [sprm(0xd642, &[3, 0, 1, 1]), sprm(0x7629, &[0, 1, 5, 0])] {
-            assert!(
-                try_default_styled_table(&[], &unmodeled)
-                    .unwrap()
-                    .unsupported_table
-            );
+        // hideMark has no model representation.
+        assert!(
+            try_default_styled_table(&[], &sprm(0xd642, &[3, 0, 1, 1]))
+                .unwrap()
+                .unsupported_table
+        );
+    }
+
+    #[test]
+    fn native_story_projects_cell_text_flow_as_ecma_text_direction() {
+        // [MS-DOC] 2.9.323 TextFlow -> ECMA-376 Part 1 §17.18.93.
+        for (text_flow, expected) in [
+            (0u8, None),
+            (1, Some("tbRl")),
+            (3, Some("btLr")),
+            (5, Some("tbRlV")),
+        ] {
+            let projected =
+                try_default_styled_table(&[], &sprm(0x7629, &[0, 1, text_flow, 0])).unwrap();
+            assert!(!projected.unsupported_table, "{text_flow}");
+            assert_eq!(projected.text_directions, [expected.map(str::to_owned)]);
         }
+        // grpfTFlrtbv is valid but the shared renderer cannot display it.
+        let error = try_default_styled_table(&[], &sprm(0x7629, &[0, 1, 4, 0]))
+            .err()
+            .unwrap();
+        assert!(error.contains("grpfTFlrtbv"), "{error}");
+        // An undefined TextFlow value is invalid.
+        assert!(try_default_styled_table(&[], &sprm(0x7629, &[0, 1, 2, 0])).is_err());
+        // Authored before TIstd, its replacement is unobserved.
+        assert!(
+            try_default_styled_table(&sprm(0x7629, &[0, 1, 5, 0]), &[])
+                .unwrap()
+                .unsupported_table
+        );
     }
 
     fn cell_border_sides(sides: u8, border: [u8; 8]) -> Vec<u8> {

@@ -16,7 +16,9 @@ mod native_admission;
 #[cfg(feature = "direct-doc")]
 pub(in crate::doc) use geometry::{NativeGeometry, NativeGeometryApply};
 #[cfg(feature = "direct-doc")]
-pub(in crate::doc) use native_admission::{NativeAdmission, NativeAdmissionApply, PreferredIndent};
+pub(in crate::doc) use native_admission::{
+    cell_text_flow, NativeAdmission, NativeAdmissionApply, PreferredIndent,
+};
 mod width;
 pub(crate) use width::PreferredWidth;
 
