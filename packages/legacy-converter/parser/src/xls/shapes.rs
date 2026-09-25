@@ -772,6 +772,12 @@ fn custom_geometry(decoded: &crate::officeart::geometry::Decoded) -> xlsx_model:
         .map(|path| xlsx_model::PathInfo {
             w,
             h,
+            // MS-ODRAW segment escapes (noFill/noLine) per path, as
+            // ECMA-376 §20.1.9.15 path@fill="none" / path@stroke="0". The
+            // authored flag is used: PowerPoint's open-path fill veto has no
+            // Excel evidence.
+            fill: (!path.authored_fill()).then(|| "none".to_owned()),
+            stroke: path.stroke(),
             commands: path
                 .commands()
                 .map(|command| match command {
