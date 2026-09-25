@@ -74,7 +74,7 @@ describe('PivotTable style regions (ECMA-376 §18.8.41, §18.18.77)', () => {
     // An even row has no stripe.
     expect(map.get('4:2')).toEqual({ fontColor: '#595959' });
     // A subheading on an odd row restores the colour; its null edges leave
-    // the stripe box, and the stripe's bold stays (a dxf cannot unset it).
+    // the stripe box, and the stripe's bold stays (its font omits <b>).
     expect(map.get('3:2')).toMatchObject({ fontColor: '#595959', bold: true });
     // The grand total row takes the total-row fill last.
     expect(map.get('8:3')?.fill?.fgColor).toBe('#EEEEEE');
@@ -119,6 +119,25 @@ describe('PivotTable style regions (ECMA-376 §18.8.41, §18.18.77)', () => {
     table.style!.showRowStripes = false;
     const map = buildPivotStyleMap({ pivotTables: [table] } as unknown as Worksheet);
     expect(map.get('3:2')).toEqual({ fontColor: '#595959' });
+  });
+
+  it('lets a later explicit off remove an earlier toggle, and an omitted toggle keep it', () => {
+    const on = { bold: true, italic: true, underline: true, strike: true };
+    const off = { bold: false, italic: false, underline: false, strike: false };
+    const table = pivot([{ kind: 'data', depth: 1 }]);
+    table.style!.showRowStripes = false;
+    table.style!.elements = [
+      { kind: 'wholeTable', size: 1, dxf: dxf({ font: font('#595959', true), fontToggles: on }) },
+      // headerRow: <b val="0"/><i val="0"/><u val="none"/><strike val="0"/>.
+      { kind: 'headerRow', size: 1, dxf: dxf({ font: font('#000001'), fontToggles: off }) },
+      // totalRow's font sets only a colour: every toggle is left as it was.
+      { kind: 'totalRow', size: 1, dxf: dxf({ font: font('#000002'), fontToggles: {} }) },
+    ];
+    table.rowItems = [{ kind: 'data', depth: 1 }, { kind: 'grand', depth: 0 }];
+    const map = buildPivotStyleMap({ pivotTables: [table] } as unknown as Worksheet);
+    expect(map.get('2:2')).toEqual({ fontColor: '#000001', ...off });
+    expect(map.get('3:2')).toEqual({ fontColor: '#595959', ...on });
+    expect(map.get('4:2')).toEqual({ fontColor: '#000002', ...on });
   });
 
   it('draws nothing without a style', () => {

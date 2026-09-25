@@ -8,7 +8,7 @@
 //! §18.8.41 layering).
 
 use crate::resolve_color_attrs;
-use crate::types::{Border, BorderEdge, Dxf, Fill, Font, PivotTableStyleElement};
+use crate::types::{Border, BorderEdge, Dxf, DxfFontToggles, Fill, Font, PivotTableStyleElement};
 use ooxml_common::spreadsheet_style_presets::{self, PresetColor, PresetDxf, PresetEdge};
 
 /// A preset theme reference resolved exactly as a `<color theme tint>`
@@ -42,6 +42,12 @@ pub(crate) fn preset_dxf(dxf: &PresetDxf, theme_colors: &[String]) -> Dxf {
             bold: font.bold,
             size: 11.0,
             color: color(font.color, theme_colors),
+            ..Default::default()
+        }),
+        // Annex G writes bold only as `<b/>` (the generator rejects any other
+        // form), so a preset font either turns bold on or leaves it alone.
+        font_toggles: dxf.font.map(|font| DxfFontToggles {
+            bold: font.bold.then_some(true),
             ..Default::default()
         }),
         fill: dxf.fill.map(|fill| {

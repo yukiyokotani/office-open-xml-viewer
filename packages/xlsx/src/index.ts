@@ -195,6 +195,7 @@ export type {
   PhoneticAlignment,
   // Differential / gradient style sub-types (reachable via Styles).
   Dxf,
+  DxfFontToggles,
   GradientFillSpec,
   // Conditional formatting (reachable via Worksheet.conditionalFormats).
   ConditionalFormat,

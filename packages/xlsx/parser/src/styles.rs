@@ -135,10 +135,17 @@ pub(crate) fn parse_dxf(dxf_node: roxmltree::Node, theme_colors: &[String]) -> D
                     size: 11.0,
                     ..Default::default()
                 };
+                let mut toggles = DxfFontToggles::default();
                 for fc in child.children() {
                     match fc.tag_name().name() {
-                        "b" => f.bold = parse_st_on_off(&fc),
-                        "i" => f.italic = parse_st_on_off(&fc),
+                        "b" => {
+                            f.bold = parse_st_on_off(&fc);
+                            toggles.bold = Some(f.bold);
+                        }
+                        "i" => {
+                            f.italic = parse_st_on_off(&fc);
+                            toggles.italic = Some(f.italic);
+                        }
                         "u" => {
                             let v = fc.attribute("val").unwrap_or("single");
                             if v != "none" {
@@ -147,8 +154,12 @@ pub(crate) fn parse_dxf(dxf_node: roxmltree::Node, theme_colors: &[String]) -> D
                                     f.underline_style = Some(v.to_string());
                                 }
                             }
+                            toggles.underline = Some(v != "none");
                         }
-                        "strike" => f.strike = parse_st_on_off(&fc),
+                        "strike" => {
+                            f.strike = parse_st_on_off(&fc);
+                            toggles.strike = Some(f.strike);
+                        }
                         "vertAlign" => {
                             if let Some(v) = fc.attribute("val") {
                                 if v != "baseline" {
@@ -182,6 +193,7 @@ pub(crate) fn parse_dxf(dxf_node: roxmltree::Node, theme_colors: &[String]) -> D
                     }
                 }
                 d.font = Some(f);
+                d.font_toggles = Some(toggles);
             }
             "fill" => {
                 let mut f = Fill::default();

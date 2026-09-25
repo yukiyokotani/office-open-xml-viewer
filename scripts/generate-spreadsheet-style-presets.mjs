@@ -31,6 +31,9 @@ function dxfExpr(dxf) {
   for (const [, name] of dxf.matchAll(/<\/?(\w+)/g)) {
     if (!known.test(name)) throw new Error(`unsupported dxf element ${name} in ${dxf}`);
   }
+  // PresetFont.bold means "<b/> present"; any other <b> form (val="0", ...)
+  // would need the absent/explicit-off distinction the preset type lacks.
+  if (/<b\s[^>]*>/.test(dxf)) throw new Error(`unsupported bold form in ${dxf}`);
   const font = /<font>([\s\S]*?)<\/font>/.exec(dxf);
   const fontExpr = font
     ? `Some(PresetFont { bold: ${/<b\/>/.test(font[1])}, color: ${color(/<color [^>]*\/>/.exec(font[1])?.[0])} })`

@@ -1041,6 +1041,10 @@ mod style_tests {
             .collect();
         let default = styles(&variants[0]).elements("S", &[]).unwrap().unwrap();
         assert_eq!(default.len(), 2);
+        assert_eq!(default[0].dxf.font_toggles.unwrap().bold, Some(true));
+        assert_eq!(default[0].dxf.font_toggles.unwrap().italic, Some(false));
+        // An element the dxf font omits is no change, not an explicit off.
+        assert_eq!(default[0].dxf.font_toggles.unwrap().underline, None);
         assert_eq!(
             default[0]
                 .dxf
@@ -1113,6 +1117,7 @@ mod style_tests {
         assert!(kinds.contains(&"headerRow") && kinds.contains(&"totalRow"));
         let total = elements.iter().find(|e| e.kind == "totalRow").unwrap();
         assert!(total.dxf.font.as_ref().unwrap().bold);
+        assert_eq!(total.dxf.font_toggles.unwrap().bold, Some(true));
         assert!(styles.elements("NoSuchStyle", &theme).unwrap().is_none());
     }
 }

@@ -1026,6 +1026,24 @@ export interface Dxf {
    *  style numFmt for rendering — e.g. switching a calendar cell from `d` to
    *  `m"月"d"日"` on the first day of each month. */
   numFmt?: NumFmt | null;
+  /** The dxf `<font>` toggles as authored, present when the dxf has a
+   *  `<font>`: `font.bold` etc. cannot tell an absent element from an
+   *  explicit off, which a differential format needs (see DxfFontToggles). */
+  fontToggles?: DxfFontToggles;
+}
+
+/**
+ * A differential font's toggles (ECMA-376 §18.8.14-15 dxf, §18.8.2 b
+ * CT_BooleanProperty `val` default true): a key is absent when the dxf's
+ * `<font>` omits the element (no change) and `false` for an explicit off
+ * (`val="0"`, or `<u val="none"/>`), which turns off what an earlier format
+ * turned on.
+ */
+export interface DxfFontToggles {
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  strike?: boolean;
 }
 
 export interface CellFont {
