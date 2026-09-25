@@ -274,13 +274,18 @@ impl Paint {
     /// Solid fill for a host whose absent properties resolve through an
     /// unimplemented drawing-default layer: an explicit fill property is
     /// required before the MS-ODRAW defaults are used.
-    pub(crate) fn solid_fill_values(&self, allow_fill: bool) -> Option<(u32, u32)> {
-        let fill_set = self.fill.is_some()
+    /// Whether the shape states any fill property. Without one the
+    /// projection draws no fill.
+    pub(crate) fn fill_stated(&self) -> bool {
+        self.fill.is_some()
             || self.filled.is_some()
             || self.fill_type.is_some()
-            || self.fill_alpha.is_some();
+            || self.fill_alpha.is_some()
+    }
+
+    pub(crate) fn solid_fill_values(&self, allow_fill: bool) -> Option<(u32, u32)> {
         (allow_fill
-            && fill_set
+            && self.fill_stated()
             && self.filled.unwrap_or(true)
             && self.fill_ok.unwrap_or(true)
             && !self.fill_rect.unwrap_or(false)

@@ -286,7 +286,7 @@ impl DecodedPath<'_> {
 
     /// The fill flag as authored (segment escapes only), before the
     /// PowerPoint open-path veto applied by `fill`.
-    #[cfg(any(test, feature = "direct-xls"))]
+    #[cfg(any(test, feature = "direct-ppt", feature = "direct-xls"))]
     pub(crate) fn authored_fill(&self) -> bool {
         self.path.authored_fill
     }

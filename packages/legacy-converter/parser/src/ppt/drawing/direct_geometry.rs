@@ -13,6 +13,9 @@ pub(super) struct ModelGeometry {
     pub fill: bool,
     pub stroke: bool,
     pub paint: Option<Vec<PathPaint>>,
+    /// Each path's authored (fill, stroke) flags, before the open-path
+    /// display rule: what the binary records, for `ppt::metro`.
+    pub authored: Vec<(bool, bool)>,
 }
 
 pub(super) fn project(
@@ -26,6 +29,7 @@ pub(super) fn project(
             fill: true,
             stroke: true,
             paint: None,
+            authored: Vec::new(),
         });
     };
     let flags = (first.fill(), first.stroke());
@@ -43,7 +47,9 @@ pub(super) fn project(
             decoded
                 .paths()
                 .len()
-                .checked_mul(std::mem::size_of::<Vec<PathCmd>>())
+                .checked_mul(
+                    std::mem::size_of::<Vec<PathCmd>>() + std::mem::size_of::<(bool, bool)>(),
+                )
                 .and_then(|outer| bytes.checked_add(outer))
         })
         .ok_or_else(|| unsupported("OfficeArt custom-geometry model budget exceeded"))?;
@@ -51,6 +57,15 @@ pub(super) fn project(
         .checked_sub(allocation)
         .ok_or_else(|| unsupported("OfficeArt custom-geometry model budget exceeded"))?;
 
+    let mut authored = Vec::new();
+    authored
+        .try_reserve_exact(decoded.paths().len())
+        .map_err(|_| unsupported("OfficeArt custom-geometry allocation failed"))?;
+    authored.extend(
+        decoded
+            .paths()
+            .map(|path| (path.authored_fill(), path.stroke())),
+    );
     let width = decoded.width() as f64;
     let height = decoded.height() as f64;
     let mut result = Vec::new();
@@ -91,6 +106,7 @@ pub(super) fn project(
             fill: flags.0,
             stroke: flags.1,
             paint: None,
+            authored,
         });
     }
     let paint: Vec<PathPaint> = decoded
@@ -105,6 +121,7 @@ pub(super) fn project(
         fill: paint.iter().any(|p| p.fill.is_none()),
         stroke: paint.iter().any(|p| p.stroke),
         paint: Some(paint),
+        authored,
     })
 }
 
@@ -156,7 +173,8 @@ mod tests {
             geometry.scalar(id, value as u32).unwrap();
         }
         let decoded = geometry.decode(&mut 100).unwrap().unwrap();
-        let required = 6 * std::mem::size_of::<PathCmd>() + 2 * std::mem::size_of::<Vec<PathCmd>>();
+        let required = 6 * std::mem::size_of::<PathCmd>()
+            + 2 * (std::mem::size_of::<Vec<PathCmd>>() + std::mem::size_of::<(bool, bool)>());
         let mut model_budget = required;
         let model = project(&decoded, &mut model_budget).unwrap();
         assert_eq!(model_budget, 0);

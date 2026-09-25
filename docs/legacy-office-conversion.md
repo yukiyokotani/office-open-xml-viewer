@@ -2467,21 +2467,46 @@ specification says it SHOULD be ignored; implementation note 32 says Office
   renders without the alternative's other run properties, while decks whose
   sizes agree render them.
 
-The direct PPT source therefore adopts the alternative XML for a shape only
-when it agrees with the binary shape on what both record and the direct model
-can compare: the same preset (and adjust values within master-unit rounding,
-an omitted value standing for the preset default of ECMA-376
-`presetShapeDefinitions.xml`) or custom geometry on both sides, the same untransformed position, size,
-rotation and flips (group children in their unscaled child space), the same
-solid fill color when both have one, the same run font size, bold and italic
-where both state them, and the same paragraph, run and line-break structure
-at equal UTF-16 lengths. The XML's text characters are masked, so the adopted
-shape takes its characters, transform and identifier from the binary. The
-XML is parsed by the ordinary PPTX shape parser, resolving theme references
-against the master's round-trip theme and color map; no OOXML is generated.
-Placeholders (no layout context), shapes whose XML references relationships,
-math runs, non-shape parts (pictures, groups, connectors, SmartArt), and any
-parse, resource or budget failure keep the binary projection. The downrev
+The alternative therefore carries display information the binary lacks, so
+the direct PPT source resolves each shape's alternative to one of three
+outcomes:
+
+- The package names no alternative part (only the `downRev` checksums), or
+  the alternative verifiably disagrees with the binary on a compared
+  attribute: the binary projection is used, as PowerPoint does.
+- The alternative agrees on every compared attribute: it is adopted. Its
+  text characters are masked, so the adopted shape takes its characters,
+  transform and identifier from the binary. The XML is parsed by the ordinary
+  PPTX shape parser, resolving theme references against the master's
+  round-trip theme and color map; no OOXML is generated. Its serialized size
+  is charged to the session's model budget.
+- Otherwise agreement cannot be established and the presentation fails
+  closed as unsupported input: an oversized, over-budget, duplicated or
+  unreadable blob, package or round-trip theme; an alternative part that is
+  not a shape or connector (pictures, groups, SmartArt, ink); a placeholder,
+  whose alternative inherits from a slide layout the binary file does not
+  have; relationship references; and any compared attribute the two forms
+  state in ways the reader cannot equate.
+
+The compared attributes are those the controls cover, each in one unit
+system. Presets compare by name and by adjust values within the range the
+binary inputs' rounding allows (a whole 21600-based value on an anchor that
+rounds PowerPoint's extent to one master unit), an omitted value standing
+for the preset default of ECMA-376 `presetShapeDefinitions.xml`; a preset
+against custom geometry is not comparable, because PowerPoint saves a preset
+without an MS-ODRAW shape type as a freeform. Custom geometry compares path
+by path in normalized path coordinates, including the authored per-path fill
+and stroke flags, after dropping a closing line to the subpath start that the
+binary stores explicitly. Position, size, rotation and flips compare in the
+binary anchor's unit (master units, or a group's unscaled child units) within
+one unit. The recorded fill compares before PowerPoint's open-path display
+rule: solid colors within one unit per channel (independent rounding of a
+theme color transform), gradients and patterns only when identical within
+their fixed-point rounding. Run font size, bold and italic compare where both
+state them, and paragraphs, runs and line breaks must line up at equal UTF-16
+lengths. XML 1.0 cannot carry the vertical tab that breaks a line in a binary
+paragraph; the masked alternative states it as one masked character of the
+enclosing run, which becomes a line break in the adopted shape. The downrev
 checksums beside the XML are not recomputable (they are not checksums of the
 binary records), so structural agreement stands in for them; a binary edit
 that preserves every compared property would still adopt a stale XML.

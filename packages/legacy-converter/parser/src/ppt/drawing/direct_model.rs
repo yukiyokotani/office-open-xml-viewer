@@ -374,14 +374,20 @@ impl Context<'_> {
                 ));
             }
         }
-        // Alternative shape XML (`ppt::metro`) is a candidate only with a
-        // single blob and the master's round-trip theme. Text effects the
-        // binary cannot express are then deferred: the adopted alternative
-        // carries them, and they reject only when it is not adopted.
+        // Alternative shape XML (`ppt::metro`) needs a single blob (two are
+        // an ambiguity MS-ODRAW does not resolve) and the master's
+        // round-trip theme to resolve it against; a blob without either
+        // cannot be verified. Text effects the binary cannot express are
+        // deferred: the adopted alternative carries them, and they reject
+        // only when it is not adopted.
         let metro_theme = self.presentation.metro_themes[self.index].clone();
         let metro_blob = match (&shape.props.metro, &metro_theme) {
-            (Some(span), Some(_)) if !shape.props.metro_ambiguous => Some(span.clone()),
-            _ => None,
+            (None, _) => None,
+            (Some(_), _) if shape.props.metro_ambiguous => {
+                return Err(crate::ppt::metro::unverifiable("property"));
+            }
+            (Some(_), None) => return Err(crate::ppt::metro::unverifiable("theme")),
+            (Some(span), Some(_)) => Some(span.clone()),
         };
         let deferred_effect = std::cell::Cell::new(None);
         let mut raw_text = None;
@@ -401,6 +407,7 @@ impl Context<'_> {
         if pictured && text.is_none() {
             return Ok(());
         }
+        let mut adjust_bounds = [None; 8];
         let (preset, adjust) = if custom.is_some() || pictured {
             (None, None)
         } else {
@@ -416,13 +423,28 @@ impl Context<'_> {
                 local_extent.0,
                 local_extent.1,
             )?;
+            if metro_blob.is_some() {
+                // One master unit, the resolution of the anchor the extent
+                // was read from (rounded up to whole EMU).
+                adjust_bounds = crate::officeart::preset::adjustment_bounds(
+                    shape.kind,
+                    &paint.adjust,
+                    local_extent.0,
+                    local_extent.1,
+                    1588,
+                )?;
+            }
             (Some(name), adjust)
         };
         self.charge_shape_strings()?;
         let mut cust_geom_paint = None;
+        let fill_area =
+            custom.is_some() || (preset.is_some() && !matches!(shape.kind, 20 | 32 | 34 | 38));
+        let mut authored_paths = None;
         let (geometry_name, paths, allow_fill, allow_line) = match custom {
             Some(g) => {
                 cust_geom_paint = g.paint;
+                authored_paths = Some(g.authored);
                 ("custGeom".to_owned(), Some(g.paths), g.fill, g.stroke)
             }
             None => (
@@ -527,16 +549,47 @@ impl Context<'_> {
             sp3d: None,
         };
         let adopted = match (&metro_blob, &metro_theme) {
-            (Some(span), Some(theme)) => crate::ppt::metro::adopt(
-                &element,
-                &local,
-                !ancestors.is_empty(),
-                raw_text.as_deref(),
-                span.view(self.backing)?,
-                theme,
-                self.work_budget,
-                self.text_budget,
-            ),
+            (Some(span), Some(theme)) => {
+                let recorded_fill = if !fill_area {
+                    crate::ppt::metro::RecordedFill::NotDisplayed
+                } else if !paint.fill_stated() {
+                    crate::ppt::metro::RecordedFill::Unstated
+                } else if !paint.filled.unwrap_or(true) || !paint.fill_ok.unwrap_or(true) {
+                    crate::ppt::metro::RecordedFill::Stated(None)
+                } else if allow_fill {
+                    crate::ppt::metro::RecordedFill::Stated(element.fill.clone().map(Box::new))
+                } else {
+                    // Custom geometry whose paths the open-path display rule
+                    // leaves unfilled: the recorded fill is still stated.
+                    match paint.solid_fill_values(true).and_then(|(color, alpha)| {
+                        paint::model_solid(
+                            color,
+                            alpha,
+                            self.presentation.schemes[self.index].as_ref(),
+                        )
+                    }) {
+                        Some(fill) => crate::ppt::metro::RecordedFill::Stated(Some(Box::new(fill))),
+                        None => crate::ppt::metro::RecordedFill::Unknown,
+                    }
+                };
+                let binary = crate::ppt::metro::BinaryShape {
+                    element: &element,
+                    leaf: &local,
+                    nested: !ancestors.is_empty(),
+                    text: raw_text.as_deref(),
+                    fill: recorded_fill,
+                    path_paint: authored_paths.take(),
+                    adjust_bounds,
+                };
+                crate::ppt::metro::adopt(
+                    &binary,
+                    span.view(self.backing)?,
+                    theme,
+                    self.work_budget,
+                    self.text_budget,
+                    self.model_budget,
+                )?
+            }
             _ => None,
         };
         if adopted.is_none() {

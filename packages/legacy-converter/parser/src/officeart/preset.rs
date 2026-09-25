@@ -301,9 +301,83 @@ pub(crate) fn adjustments(
     Ok(Some(output))
 }
 
+/// The range each converted adjust value spans under the rounding of its
+/// inputs: each authored value is a whole 21600-based unit (so it varies by
+/// one unit), and the shape's width and height each vary by `slack` (the
+/// resolution of the anchor they come from). Every rule is monotonic in its
+/// one authored value and in each dimension, so the extremes lie at the
+/// corners of that box.
+#[cfg(any(test, feature = "direct-ppt"))]
+pub(crate) fn adjustment_bounds(
+    kind: u16,
+    legacy: &[Option<i32>; 10],
+    width: i64,
+    height: i64,
+    slack: i64,
+) -> Result<[Option<(f64, f64)>; 8], String> {
+    let mut bounds = [None::<(f64, f64)>; 8];
+    let Some(nominal) = adjustments(kind, legacy, width, height)? else {
+        return Ok(bounds);
+    };
+    for (slot, value) in nominal.iter().enumerate() {
+        bounds[slot] = value.map(|v| (v, v));
+    }
+    for step in [-1, 1] {
+        let shifted = legacy.map(|value| value.map(|v| v.saturating_add(step)));
+        for (dw, dh) in [
+            (-slack, -slack),
+            (-slack, slack),
+            (slack, -slack),
+            (slack, slack),
+        ] {
+            // A corner that leaves the conversion's domain (a degenerate or
+            // reoriented extent, or an exact midpoint rule) cannot be the
+            // shape's true value.
+            let Ok(Some(corner)) = adjustments(
+                kind,
+                &shifted,
+                width.saturating_add(dw),
+                height.saturating_add(dh),
+            ) else {
+                continue;
+            };
+            for (bound, value) in bounds.iter_mut().zip(corner) {
+                if let (Some((low, high)), Some(value)) = (bound.as_mut(), value) {
+                    *low = low.min(value);
+                    *high = high.max(value);
+                }
+            }
+        }
+    }
+    Ok(bounds)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adjustment_bounds_follow_value_and_extent_rounding() {
+        let mut legacy = [None; 10];
+        legacy[0] = Some(3600);
+        // roundRect scales by the short side only: one 21600 unit.
+        let [round, ..] = adjustment_bounds(2, &legacy, 1000, 500, 10).unwrap();
+        let (low, high) = round.unwrap();
+        assert!((low - 3599.0 / 21600.0 * 100_000.0).abs() < 1e-9);
+        assert!((high - 3601.0 / 21600.0 * 100_000.0).abs() < 1e-9);
+        // homePlate's value is relative to the width over the short side, so
+        // a narrow anchor's rounding moves it further.
+        legacy[0] = Some(16200);
+        let wide = adjustment_bounds(15, &legacy, 30_000, 10_000, 1588).unwrap()[0].unwrap();
+        let narrow = adjustment_bounds(15, &legacy, 30_000, 3_000, 1588).unwrap()[0].unwrap();
+        let nominal = adjustments(15, &legacy, 30_000, 3_000).unwrap().unwrap()[0].unwrap();
+        assert!(narrow.0 < nominal && nominal < narrow.1);
+        assert!(narrow.1 - narrow.0 > wide.1 - wide.0);
+        assert_eq!(
+            adjustment_bounds(15, &[None; 10], 30_000, 3_000, 1588).unwrap(),
+            [None; 8]
+        );
+    }
 
     fn adj(kind: u16, values: &[(usize, i32)], w: i64, h: i64) -> [Option<f64>; 8] {
         let mut legacy = [None; 10];
