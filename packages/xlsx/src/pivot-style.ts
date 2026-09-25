@@ -12,6 +12,14 @@
 // (§18.10.1.49), the row items (one per body row) and the column items
 // (one per data column). Column subheadings need the column header layout,
 // which the model does not carry; they are not drawn.
+//
+// Style option gating follows [MS-XLS] 2.4.273.107 SXAddl_SXCView_SXDTableStyleClient, which
+// states the same Excel behavior the XLSX pivotTableStyleInfo booleans
+// (§18.10.1.74) name: showRowHeaders applies firstColumn and the row
+// subheadings; showColumnHeaders applies headerRow and the column
+// subheadings; showLastColumn applies lastColumn; the stripe flags apply
+// their stripes. firstHeaderCell, blank rows, subtotals and the grand total
+// row are not gated.
 import {
   assertCoordinateRangeArea,
   setCoordinateIndexValue,
@@ -70,7 +78,16 @@ const SUBTOTALS = new Set([
 
 interface Rect { top: number; bottom: number; left: number; right: number }
 
-const LEVELS = ['first', 'second', 'third'] as const;
+/**
+ * The subtotal / subheading element level of an axis field at `depth`:
+ * [MS-XLS] 2.4.321 TableStyleElement (tseType 0x10-0x12, 0x14-0x19) gives
+ * the outermost field `first`, then alternates `second` (odd positions) and
+ * `third` (even positions after the first) through the deeper fields.
+ */
+function level(depth: number): 'first' | 'second' | 'third' {
+  if (depth === 0) return 'first';
+  return depth % 2 === 1 ? 'second' : 'third';
+}
 
 /** Row bands cycling `first` (size a) and `second` (size b) rows. */
 function bands(from: number, to: number, a: number, b: number): { first: Rect[]; second: Rect[] } {
@@ -113,28 +130,28 @@ function regions(p: PivotTableMetadata, sizes: Map<string, number>): Map<string,
   }
   if (style.showRowHeaders) add('firstColumn', { top, bottom, left, right: dataLeft - 1 });
   if (style.showColumnHeaders) add('headerRow', { top, bottom: bodyTop - 1, left, right });
-  if (style.showRowHeaders && style.showColumnHeaders) {
-    add('firstHeaderCell', { top, bottom: bodyTop - 2, left, right: dataLeft - 1 });
-  }
+  add('firstHeaderCell', { top, bottom: bodyTop - 2, left, right: dataLeft - 1 });
   const leafLevel = Math.max(0, p.rowFields.length - 1);
   (p.rowItems ?? []).forEach((item: PivotAxisItem, index) => {
     const row = bodyTop + index;
     if (row > bottom) return;
     const rect = { top: row, bottom: row, left, right };
-    const level = LEVELS[Math.min(item.depth, 2)];
+    const lvl = level(item.depth);
     if (item.kind === 'blank') add('blankRow', rect);
     else if (item.kind === 'grand') add('totalRow', rect);
-    else if (SUBTOTALS.has(item.kind)) add(`${level}SubtotalRow`, rect);
-    else if (item.kind === 'data' && item.depth < leafLevel) add(`${level}RowSubheading`, rect);
+    else if (SUBTOTALS.has(item.kind)) add(`${lvl}SubtotalRow`, rect);
+    else if (item.kind === 'data' && item.depth < leafLevel && style.showRowHeaders) {
+      add(`${lvl}RowSubheading`, rect);
+    }
   });
   (p.columnItems ?? []).forEach((item: PivotAxisItem, index) => {
     const col = dataLeft + index;
     if (col > right) return;
     const rect = { top, bottom, left: col, right: col };
-    const level = LEVELS[Math.min(item.depth, 2)];
+    const lvl = level(item.depth);
     if (item.kind === 'grand') {
       if (style.showLastColumn) add('lastColumn', rect);
-    } else if (SUBTOTALS.has(item.kind)) add(`${level}SubtotalColumn`, rect);
+    } else if (SUBTOTALS.has(item.kind)) add(`${lvl}SubtotalColumn`, rect);
   });
   return out;
 }

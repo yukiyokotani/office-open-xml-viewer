@@ -811,9 +811,11 @@ impl WorkbookTableStyles {
                 "<dxfs xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"{prefix}>{dxf}</dxfs>"
             );
             let doc = parse_guarded(&wrapped).ok()?;
-            crate::styles::parse_dxfs(&doc, theme_colors)
+            let mut dxf = crate::styles::parse_dxfs(&doc, theme_colors)
                 .into_iter()
-                .next()
+                .next()?;
+            explicit_none_edges(&doc, &mut dxf);
+            Some(dxf)
         };
         if let Some(elements) = self.styles.get(name) {
             return Some(
@@ -848,6 +850,41 @@ impl WorkbookTableStyles {
     }
 }
 
+/// A style element's border edge written without a style (`<left/>`, or
+/// `style="none"`) is an explicitly cleared edge: CT_BorderPr's style
+/// defaults to `none` (§18.8.6), and in a differential format a present
+/// edge element overrides the edge of an earlier style element (§18.8.41
+/// layering). The shared dxf parser drops such edges, so they are restored
+/// here as `none` edges for the PivotTable renderer.
+fn explicit_none_edges(doc: &roxmltree::Document<'_>, dxf: &mut Dxf) {
+    let Some(border) = doc.descendants().find(|n| {
+        n.is_element() && n.tag_name().name() == "border" && is_x_ns(n.tag_name().namespace())
+    }) else {
+        return;
+    };
+    let target = dxf.border.get_or_insert_with(Default::default);
+    for edge in border.children().filter(|n| n.is_element()) {
+        if edge.attribute("style").is_some_and(|style| style != "none") {
+            continue;
+        }
+        let slot = match edge.tag_name().name() {
+            "left" => &mut target.left,
+            "right" => &mut target.right,
+            "top" => &mut target.top,
+            "bottom" => &mut target.bottom,
+            "horizontal" => &mut target.horizontal,
+            "vertical" => &mut target.vertical,
+            _ => continue,
+        };
+        if slot.is_none() {
+            *slot = Some(crate::BorderEdge {
+                style: "none".into(),
+                color: None,
+            });
+        }
+    }
+}
+
 #[cfg(test)]
 mod style_tests {
     use super::*;
@@ -862,6 +899,23 @@ mod style_tests {
             .map(|item| (item.kind.as_str(), item.depth))
             .collect();
         assert_eq!(facts, vec![("data", 0), ("data", 1), ("grand", 0)]);
+    }
+
+    #[test]
+    fn style_element_edges_without_a_style_are_cleared_edges() {
+        let styles = WorkbookTableStyles {
+            dxfs_xml: vec![r#"<dxf><border><left/><right style="none"/><top style="thin"/><bottom/></border></dxf>"#.into()],
+            styles: [("S".to_string(), vec![("firstRowSubheading".to_string(), 1, 0)])]
+                .into_iter()
+                .collect(),
+        };
+        let elements = styles.elements("S", &[]).unwrap();
+        let border = elements[0].dxf.border.as_ref().unwrap();
+        assert_eq!(border.left.as_ref().unwrap().style, "none");
+        assert_eq!(border.right.as_ref().unwrap().style, "none");
+        assert_eq!(border.top.as_ref().unwrap().style, "thin");
+        assert_eq!(border.bottom.as_ref().unwrap().style, "none");
+        assert!(border.vertical.is_none());
     }
 
     #[test]
