@@ -111,6 +111,24 @@ const TOOLPAK: [&str; 91] = [
     "YIELD",
 ];
 
+/// Functions new in Excel 2007 that BIFF8 stores as `_xlfn.` future
+/// functions and that ECMA-376 18.17.7 predefines, so SpreadsheetML writes
+/// them by name (sample-5: `_xlfn.IFERROR` is saved as `IFERROR(...)`).
+const ECMA_FUTURE: [&str; 12] = [
+    "AVERAGEIF",
+    "AVERAGEIFS",
+    "COUNTIFS",
+    "CUBEKPIMEMBER",
+    "CUBEMEMBER",
+    "CUBEMEMBERPROPERTY",
+    "CUBERANKEDMEMBER",
+    "CUBESET",
+    "CUBESETCOUNT",
+    "CUBEVALUE",
+    "IFERROR",
+    "SUMIFS",
+];
+
 /// Add-in function names reachable through EXTERNSHEET XTIs (2.4.106):
 /// for each XTI, the UDF names (AddinUdf 2.5.1) of its SupBook (2.4.271)
 /// when that SupBook is the add-in marker (cch 0x3A01).
@@ -118,7 +136,7 @@ const TOOLPAK: [&str; 91] = [
 pub(in super::super) struct Externs {
     xti_names: Vec<Option<Vec<String>>>,
     /// Lbl (2.4.150) names in record order; built-in names are `None`.
-    names: Vec<Option<String>>,
+    names: Vec<Option<(String, bool)>>,
     /// Formula sheet prefix (quoted when needed) per XTI of this workbook's
     /// own SupBook that names exactly one sheet.
     xti_sheets: Vec<Option<String>>,
@@ -225,7 +243,10 @@ impl Externs {
                         }
                         _ => return Err(unsupported("invalid XLS defined name")),
                     };
-                    defined.push((!builtin && !name.is_empty()).then_some(name));
+                    // fProc (bit 3): the name calls a procedure, e.g. the
+                    // hidden `_xlfn.` future-function names (2.2.2.3).
+                    let procedure = u16_at(data, 0)? & 0x0008 != 0;
+                    defined.push((!builtin && !name.is_empty()).then_some((name, procedure)));
                 }
                 _ => {}
             }
@@ -255,9 +276,10 @@ impl Externs {
     }
 
     /// A one-based Lbl index as the user-defined name it names.
-    fn name(&self, index: u32) -> Option<&str> {
+    fn name(&self, index: u32) -> Option<(&str, bool)> {
         let index = usize::try_from(index).ok()?.checked_sub(1)?;
-        self.names.get(index)?.as_deref()
+        let (name, procedure) = self.names.get(index)?.as_ref()?;
+        Some((name.as_str(), *procedure))
     }
 
     fn addin(&self, xti: u16, index: u32) -> Option<&str> {
@@ -397,6 +419,19 @@ fn number(value: f64) -> Result<String, String> {
     if !value.is_finite() {
         return Err(unsupported("invalid XLS conditional formatting number"));
     }
+    // Very large or small magnitudes use SpreadsheetML's exponent form
+    // (sample-1: 9.99E+307 in a MATCH lookup value).
+    let magnitude = value.abs();
+    if magnitude != 0.0 && !(1e-7..1e21).contains(&magnitude) {
+        let text = format!("{value:e}");
+        let (mantissa, exponent) = text.split_once('e').expect("exponent form");
+        let exponent: i32 = exponent.parse().expect("exponent");
+        return Ok(format!(
+            "{mantissa}E{}{}",
+            if exponent < 0 { '-' } else { '+' },
+            exponent.abs()
+        ));
+    }
     Ok(format!("{value}"))
 }
 
@@ -421,6 +456,17 @@ pub(in super::super) fn decompile_name(
     let mut used = 0;
     let text = decompile_inner(rgce, extra, &mut used, (0, 0), externs, true)?;
     Ok((text, used))
+}
+
+/// Decompile a parsed formula with its RgbExtra (cell, shared and array
+/// formulas), relative to the cell `anchor`.
+pub(in super::super) fn decompile_cell(
+    rgce: &[u8],
+    extra: &[u8],
+    anchor: (u16, u16),
+    externs: &Externs,
+) -> Result<String, String> {
+    decompile_with(rgce, extra, anchor, externs, false)
 }
 
 fn decompile_with(
@@ -596,6 +642,19 @@ fn decompile_inner(
                 match kind {
                     // PtgAttrSemi: volatile marker, no text.
                     0x01 => at += 4,
+                    // PtgAttrIf / PtgAttrGoto: evaluation jumps, no text.
+                    0x02 | 0x08 => at += 4,
+                    // PtgAttrChoose: jump table of cOffset + 1 entries.
+                    0x04 => {
+                        let count = usize::from(u16_at(rgce, at + 2)?);
+                        at += 4 + 2 * (count + 1);
+                    }
+                    // PtgAttrSum: SUM of the operand on the stack.
+                    0x10 => {
+                        let value = pop(&mut stack)?;
+                        stack.push(Item::Text(format!("{pending}SUM({value})")));
+                        at += 4;
+                    }
                     // PtgAttrSpace type 0 (spaces before the next token) and
                     // type 2 (spaces before an opening parenthesis); both
                     // precede the next token's own text.
@@ -664,8 +723,14 @@ fn decompile_inner(
                     let text = if tab == 0x00ff {
                         let arguments =
                             arguments(&mut stack, count.checked_sub(1).ok_or_else(reject)?)?;
-                        let Some(Item::Function(name)) = stack.pop() else {
-                            return Err(reject());
+                        // The callee is normally a function name; Excel also
+                        // stores a call whose callee is a cell reference (a
+                        // function unknown to BIFF8, e.g. sample-5's C6) and
+                        // writes it as `B11(...)` in its .xlsx counterpart.
+                        let name = match stack.pop() {
+                            Some(Item::Function(name)) => name,
+                            Some(Item::Text(reference)) if is_reference(&reference) => reference,
+                            _ => return Err(reject()),
                         };
                         format!("{pending}{name}({})", arguments.join(","))
                     } else {
@@ -728,10 +793,25 @@ fn decompile_inner(
                 // as in SpreadsheetML (sample-2: a data-validation list
                 // `人リスト`). Built-in names are not projected.
                 0x03 => {
-                    let name = externs
+                    let (name, procedure) = externs
                         .name(u32_at(rgce, at + 1)?)
                         .ok_or_else(|| unsupported("unsupported XLS formula defined name"))?;
-                    stack.push(Item::Text(format!("{pending}{name}")));
+                    if procedure {
+                        // A future function called through PtgFuncVar 0x00FF
+                        // (MS-XLS 2.2.2.3): functions ECMA-376 predefines
+                        // are written without the `_xlfn.` prefix, later
+                        // ones keep it, as SpreadsheetML does.
+                        let function = name
+                            .strip_prefix("_xlfn.")
+                            .filter(|base| ECMA_FUTURE.contains(base))
+                            .unwrap_or(name);
+                        if !pending.is_empty() || !name.starts_with("_xlfn.") {
+                            return Err(reject());
+                        }
+                        stack.push(Item::Function(function.to_string()));
+                    } else {
+                        stack.push(Item::Text(format!("{pending}{name}")));
+                    }
                     at += 5;
                 }
                 // PtgRefErr / PtgAreaErr: #REF!, whose payload MUST be
@@ -776,6 +856,14 @@ fn decompile_inner(
         (Some(Item::Text(text)), true) => Ok(text),
         _ => Err(unsupported("malformed XLS conditional formatting formula")),
     }
+}
+
+/// A single A1 cell reference as the decompiler writes it.
+fn is_reference(text: &str) -> bool {
+    let body = text.trim_start_matches('$');
+    let letters = body.chars().take_while(|c| c.is_ascii_uppercase()).count();
+    let rest = body[letters..].trim_start_matches('$');
+    (1..=3).contains(&letters) && !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit())
 }
 
 fn arguments(stack: &mut Vec<Item>, count: usize) -> Result<Vec<String>, String> {
@@ -823,7 +911,7 @@ mod tests {
     fn resolves_toolpak_addins_and_rejects_other_names() {
         let externs = Externs {
             xti_names: vec![Some(vec!["EOMONTH".into(), "MYUDF".into()])],
-            names: vec![Some("List".into()), None],
+            names: vec![Some(("List".into(), false)), None],
             xti_sheets: vec![Some("Data".into())],
         };
         // 'Data'!$B$4:$I$49 through a name's PtgArea3d.
@@ -852,5 +940,8 @@ mod tests {
         // Unknown tokens (PtgArray) and dangling operands reject.
         assert!(decompile(&[0x20], (0, 0), &externs).is_err());
         assert!(decompile(&[0x1e, 1, 0, 0x1e, 2, 0], (0, 0), &externs).is_err());
+        assert_eq!(number(9.99e307).unwrap(), "9.99E+307");
+        assert_eq!(number(1e-10).unwrap(), "1E-10");
+        assert_eq!(number(35.3).unwrap(), "35.3");
     }
 }

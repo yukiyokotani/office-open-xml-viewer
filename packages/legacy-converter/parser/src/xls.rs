@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, HashSet};
 use crate::cfb::CompoundFile;
 use crate::ooxml::{write_package, xml_attr, xml_text, ROOT_RELS_XLSX};
 
+mod cell_formulas;
 mod chart;
 mod conditional;
 pub(crate) mod direct;
@@ -190,6 +191,10 @@ struct SheetData {
     /// A cell, row or column shows phonetic guides (MS-XLS 2.4.192
     /// PhoneticInfo sqref, ROW/COLINFO fPhonetic).
     shows_phonetic: bool,
+    /// FORMULA, SHRFMLA, ARRAY and TABLE records, in order.
+    formula_records: tables::Records,
+    /// Formula text by cell (direct path only).
+    formulas: BTreeMap<(u16, u16), String>,
 }
 
 pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<XlsConversion, String> {
@@ -384,6 +389,16 @@ fn prepare_workbook(
         if direct && data.shows_phonetic {
             return Err(unsupported("XLS phonetic guides are not projected"));
         }
+        if direct && !data.formula_records.is_empty() {
+            if conditional_theme.is_none() {
+                conditional_theme = Some((
+                    theme::Colors::parse(&records)?,
+                    conditional::Externs::parse(&records)?,
+                ));
+            }
+            let (_, externs) = conditional_theme.as_ref().expect("parsed theme");
+            data.formulas = cell_formulas::project(data.formula_records.iter(), externs)?;
+        }
         if direct && has_names {
             if conditional_theme.is_none() {
                 conditional_theme = Some((
@@ -502,7 +517,9 @@ fn prepare_workbook(
     if custom_views_omitted {
         warnings.push("legacy-xls:saved-custom-views-omitted".into());
     }
-    if formula_results {
+    // The direct model carries formula text with the cached results, as the
+    // XLSX model does, so only the byte converter replaces formulas.
+    if formula_results && !direct {
         warnings.push("legacy-xls:formulas-replaced-with-cached-results".into());
     }
     if skipped_non_worksheets {
@@ -1147,6 +1164,7 @@ fn parse_sheet(
                 insert_cell(&mut output, row, column, value, &mut cell_count)?;
             }
             FORMULA => {
+                output.formula_records.push(record.kind, record.data)?;
                 let (row, column) = cell_position(record.data)?;
                 match formula_cached_value(record.data)? {
                     FormulaResult::Value(value) => {
@@ -1177,6 +1195,7 @@ fn parse_sheet(
             }
             0x01b8 | 0x0800 => output.hyperlink_records.push(record.kind, record.data)?,
             0x009d => output.autofilter_info = true,
+            0x04bc | 0x0221 | 0x0236 => output.formula_records.push(record.kind, record.data)?,
             0x00ef => output.shows_phonetic |= u16_at(record.data, 4)? != 0,
             0x0208 => output.shows_phonetic |= u16_at(record.data, 14)? & 0x4000 != 0,
             0x007d => output.shows_phonetic |= u16_at(record.data, 8)? & 0x0008 != 0,
