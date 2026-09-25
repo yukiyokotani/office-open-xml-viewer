@@ -117,12 +117,15 @@ const TOOLPAK: [&str; 91] = [
 #[derive(Default)]
 pub(in super::super) struct Externs {
     xti_names: Vec<Option<Vec<String>>>,
+    /// Lbl (2.4.150) names in record order; built-in names are `None`.
+    names: Vec<Option<String>>,
 }
 
 impl Externs {
     pub(in super::super) fn parse(records: &[Record<'_>]) -> Result<Self, String> {
         let mut books: Vec<Option<Vec<String>>> = Vec::new();
         let mut xtis = Vec::new();
+        let mut defined = Vec::new();
         for record in records.iter().take_while(|r| r.kind != super::super::EOF) {
             match record.kind {
                 0x01ae => {
@@ -166,6 +169,31 @@ impl Externs {
                         xtis.push(u16_at(record.data, 2 + index * 6)?);
                     }
                 }
+                0x0018 => {
+                    // Lbl: flags (fBuiltin bit 5), chKey, cch, ..., Name at 14
+                    // (XLUnicodeStringNoCch).
+                    let data = record.data;
+                    let builtin = u16_at(data, 0)? & 0x0020 != 0;
+                    let count = usize::from(*data.get(3).ok_or_else(truncated)?);
+                    let name = match *data.get(14).ok_or_else(truncated)? {
+                        0 => data
+                            .get(15..15 + count)
+                            .ok_or_else(truncated)?
+                            .iter()
+                            .map(|&byte| char::from(byte))
+                            .collect::<String>(),
+                        1 => {
+                            let bytes = data.get(15..15 + count * 2).ok_or_else(truncated)?;
+                            let units: Vec<u16> = bytes
+                                .chunks_exact(2)
+                                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                                .collect();
+                            String::from_utf16(&units).map_err(|_| truncated())?
+                        }
+                        _ => return Err(unsupported("invalid XLS defined name")),
+                    };
+                    defined.push((!builtin && !name.is_empty()).then_some(name));
+                }
                 _ => {}
             }
         }
@@ -174,7 +202,14 @@ impl Externs {
                 .into_iter()
                 .map(|book| books.get(usize::from(book)).cloned().flatten())
                 .collect(),
+            names: defined,
         })
+    }
+
+    /// A one-based Lbl index as the user-defined name it names.
+    fn name(&self, index: u32) -> Option<&str> {
+        let index = usize::try_from(index).ok()?.checked_sub(1)?;
+        self.names.get(index)?.as_deref()
     }
 
     fn addin(&self, xti: u16, index: u32) -> Option<&str> {
@@ -252,7 +287,7 @@ fn number(value: f64) -> Result<String, String> {
 
 /// Decompile a CFParsedFormulaNoCCE for a rule anchored at `anchor`
 /// (zero-based row, column).
-pub(super) fn decompile(
+pub(in super::super) fn decompile(
     rgce: &[u8],
     anchor: (u16, u16),
     externs: &Externs,
@@ -445,6 +480,16 @@ pub(super) fn decompile(
                     stack.push(Item::Text(format!("{pending}{first}:{last}")));
                     at += 9;
                 }
+                // PtgName (2.5.198.76): a user-defined name, written by name
+                // as in SpreadsheetML (sample-2: a data-validation list
+                // `人リスト`). Built-in names are not projected.
+                0x03 => {
+                    let name = externs
+                        .name(u32_at(rgce, at + 1)?)
+                        .ok_or_else(|| unsupported("unsupported XLS formula defined name"))?;
+                    stack.push(Item::Text(format!("{pending}{name}")));
+                    at += 5;
+                }
                 // PtgRefErr / PtgAreaErr: #REF!, whose payload MUST be
                 // ignored. sample-3 has CF12 rules whose PtgRefErr keeps a
                 // relative (0, -1) payload; Excel's .xlsx counterpart prints
@@ -534,7 +579,13 @@ mod tests {
     fn resolves_toolpak_addins_and_rejects_other_names() {
         let externs = Externs {
             xti_names: vec![Some(vec!["EOMONTH".into(), "MYUDF".into()])],
+            names: vec![Some("List".into()), None],
         };
+        assert_eq!(
+            decompile(&[0x23, 1, 0, 0, 0], (0, 0), &externs).unwrap(),
+            "List"
+        );
+        assert!(decompile(&[0x23, 2, 0, 0, 0], (0, 0), &externs).is_err());
         // EOMONTH($I$7,0): NameX, ref, int, FuncVar(3, 0xFF).
         let rgce = [
             0x39, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x24, 0x06, 0x00, 0x08, 0x00, 0x1e, 0x00,

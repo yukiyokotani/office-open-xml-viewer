@@ -35,6 +35,7 @@ mod rich;
 mod styles;
 mod tables;
 mod theme;
+mod validation;
 mod views;
 
 const BOF: u16 = 0x0809;
@@ -179,6 +180,10 @@ struct SheetData {
     autofilter_info: bool,
     /// Its `_FilterDatabase` range (direct path only).
     auto_filter: Option<xlsx_model::CellRange>,
+    /// MS-XLS 2.4.96 DVal and 2.4.95 Dv records, in order.
+    validation_records: tables::Records,
+    /// Their XLSX-model projection (direct path only).
+    data_validations: Vec<xlsx_model::DataValidation>,
 }
 
 pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<XlsConversion, String> {
@@ -362,6 +367,16 @@ fn prepare_workbook(
                     hyperlinks::tooltip(record)?;
                 }
             }
+        }
+        if direct && !data.validation_records.is_empty() {
+            if conditional_theme.is_none() {
+                conditional_theme = Some((
+                    theme::Colors::parse(&records)?,
+                    conditional::Externs::parse(&records)?,
+                ));
+            }
+            let (_, externs) = conditional_theme.as_ref().expect("parsed theme");
+            data.data_validations = validation::project(data.validation_records.iter(), externs)?;
         }
         if direct && data.autofilter_info {
             if filter_databases.is_none() {
@@ -1125,6 +1140,7 @@ fn parse_sheet(
             }
             0x01b8 | 0x0800 => output.hyperlink_records.push(record.kind, record.data)?,
             0x009d => output.autofilter_info = true,
+            0x01b2 | 0x01be => output.validation_records.push(record.kind, record.data)?,
             0x0862 => {
                 if output.sheet_ext.replace(record.data.to_vec()).is_some() {
                     return Err(unsupported("duplicate BIFF sheet extension"));

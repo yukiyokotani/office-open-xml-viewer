@@ -25,10 +25,10 @@
 //! never dropped silently.
 
 mod dxf;
-mod formula;
+pub(super) mod formula;
 mod ftab;
 
-pub(super) use formula::Externs;
+pub(super) use formula::{decompile, Externs};
 
 use super::{f64_at, styles, theme, u16_at, u32_at, unsupported};
 use std::collections::BTreeMap;

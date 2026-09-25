@@ -454,6 +454,31 @@ fn project_sheet(
     )?;
     worksheet.hyperlinks = sheet.hyperlinks;
     worksheet.auto_filter = sheet.auto_filter;
+    charge(
+        budget,
+        sheet
+            .data_validations
+            .iter()
+            .map(|dv| {
+                std::mem::size_of::<xlsx_model::DataValidation>()
+                    + dv.sqref.len()
+                    + [
+                        &dv.validation_type,
+                        &dv.operator,
+                        &dv.formula1,
+                        &dv.formula2,
+                        &dv.prompt_title,
+                        &dv.prompt,
+                        &dv.error_title,
+                        &dv.error_message,
+                    ]
+                    .iter()
+                    .map(|text| text.as_ref().map_or(0, String::len))
+                    .sum::<usize>()
+            })
+            .sum(),
+    )?;
+    worksheet.data_validations = sheet.data_validations;
     if let Some(color) = sheet.tab_color {
         charge(budget, color.len())?;
         worksheet.tab_color = Some(color);
