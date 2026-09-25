@@ -187,6 +187,9 @@ struct SheetData {
     data_validations: Vec<xlsx_model::DataValidation>,
     /// Defined names visible on this sheet (direct path only).
     defined_names: Vec<xlsx_model::DefinedName>,
+    /// A cell, row or column shows phonetic guides (MS-XLS 2.4.192
+    /// PhoneticInfo sqref, ROW/COLINFO fPhonetic).
+    shows_phonetic: bool,
 }
 
 pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<XlsConversion, String> {
@@ -376,6 +379,11 @@ fn prepare_workbook(
                 }
             }
         }
+        // Phonetic guides (ExtRst runs in the shared strings) are not
+        // projected; a sheet that displays them fails closed.
+        if direct && data.shows_phonetic {
+            return Err(unsupported("XLS phonetic guides are not projected"));
+        }
         if direct && has_names {
             if conditional_theme.is_none() {
                 conditional_theme = Some((
@@ -465,10 +473,18 @@ fn prepare_workbook(
         ));
     }
     resolved_styles.set_dxfs(dxfs);
-    let mut warnings = vec![
-        "legacy-xls:drawings-conditional-formatting-and-external-links-omitted".into(),
-        "legacy-xls:phonetic-data-print-areas-titles-and-extended-headers-omitted".into(),
-    ];
+    let mut warnings =
+        vec!["legacy-xls:drawings-conditional-formatting-and-external-links-omitted".into()];
+    // The direct model carries print areas and titles as defined names;
+    // page setup, headers and footers (including 2.4.136 HeaderFooter) only
+    // affect printing, which neither the XLSX model nor its viewer has.
+    // Phonetic strings (ExtRst) display only in cells marked by
+    // PhoneticInfo, ROW or COLINFO, which the direct path rejects instead.
+    if !direct {
+        warnings.push(
+            "legacy-xls:phonetic-data-print-areas-titles-and-extended-headers-omitted".into(),
+        );
+    }
     // The direct model projects XFExt colors, indentation and gradient
     // fills; StyleExt (2.4.270) only extends the cell-style gallery entries,
     // which cells reach through their XFs. Anything else fails closed.
@@ -1161,6 +1177,9 @@ fn parse_sheet(
             }
             0x01b8 | 0x0800 => output.hyperlink_records.push(record.kind, record.data)?,
             0x009d => output.autofilter_info = true,
+            0x00ef => output.shows_phonetic |= u16_at(record.data, 4)? != 0,
+            0x0208 => output.shows_phonetic |= u16_at(record.data, 14)? & 0x4000 != 0,
+            0x007d => output.shows_phonetic |= u16_at(record.data, 8)? & 0x0008 != 0,
             0x01b2 | 0x01be => output.validation_records.push(record.kind, record.data)?,
             0x0862 => {
                 if output.sheet_ext.replace(record.data.to_vec()).is_some() {
