@@ -171,7 +171,7 @@ describe('virtualized cell text overflow', () => {
     // a left-anchored scan would have culled it.
     const general: Styles = {
       ...STYLES,
-      cellXfs: [{ ...STYLES.cellXfs[0], alignH: undefined } as Styles['cellXfs'][number]],
+      cellXfs: [{ ...STYLES.cellXfs[0], alignH: null }],
     };
     const ws = worksheet([
       { row: 1, col: 3, styleIndex: 0, value: { type: 'bool', bool: true } } as Cell,

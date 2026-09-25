@@ -227,6 +227,9 @@ export type {
   SlicerElementStyle,
   // Metadata-only pivot facts (reachable via Worksheet.pivotTables).
   PivotTableMetadata,
+  PivotTableStyle,
+  PivotTableStyleElement,
+  PivotAxisItem,
   PivotLocation,
   PivotPageField,
   PivotDataField,

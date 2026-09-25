@@ -335,7 +335,7 @@ describe('XLSX automatic row height (ECMA-376 §18.3.1.73 / Office auto-fit)', (
     });
     const generalStyles: Styles = {
       ...styles,
-      cellXfs: [{ ...xf(0, { wrapText: true, indent: 1 }), alignH: undefined }],
+      cellXfs: [{ ...xf(0, { wrapText: true, indent: 1 }), alignH: null }],
     };
     const bool = general({ type: 'bool', bool: true });
     const text = general({ type: 'text', text: 'TRUE' });

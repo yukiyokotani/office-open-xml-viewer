@@ -1,3 +1,4 @@
+import { buildPivotStyleMap, type PivotCellFormat } from './pivot-style.js';
 import type {
   Worksheet, Styles, Cell, CellValue, CellFont, CellFill, Border, BorderEdge, CellXf,
   ViewportRange, RenderViewportOptions, XlsxTextRunInfo,
@@ -1546,6 +1547,7 @@ interface RenderContext {
   commentCells: Set<string>;
   /** row:col → table-style overlay (bold header, banded rows, borders). */
   tableStyleMap: Map<string, TableCellStyle>;
+  pivotStyleMap: Map<string, PivotCellFormat>;
   /** row:col → render-ready SparklineModel for cells that host an
    *  `x14:sparkline`. Built once at viewport start by flattening the
    *  parser's SparklineGroup + per-cell Sparkline pair. */
@@ -2236,6 +2238,11 @@ function renderQuadrant(
       //   Trellis): render via a small repeating tile using createPattern so
       //   the hatch actually shows, rather than approximating as a blend.
       let hasCellBackground = paintCellPatternFill(ctx, effectiveFill, cx, cy, cellW, cellH);
+      // PivotTable style fill (§18.8.41) under the cell's own fill.
+      const pivotFormat = rc.pivotStyleMap.get(key);
+      if (!hasCellBackground && pivotFormat?.fill) {
+        hasCellBackground = paintCellPatternFill(ctx, pivotFormat.fill, cx, cy, cellW, cellH);
+      }
       if (hasCellBackground) {
         // own fill painted; tableStyle fallbacks intentionally skipped
       } else if (tableStyle && tableFillDxf?.fill?.fgColor) {
@@ -2315,6 +2322,16 @@ function renderQuadrant(
         ? resolveMergeBorder(border, rowIndex, colIndex, mergeInfo.right, mergeInfo.bottom, cellMap, styles)
         : border;
       let mergedBorder = mergeBorders(baseBorder, cf.border);
+      // PivotTable style edges (§18.8.41) fill the edges the cell leaves unset.
+      if (pivotFormat) {
+        mergedBorder = {
+          ...mergedBorder,
+          top: mergedBorder.top?.style ? mergedBorder.top : (pivotFormat.top ?? mergedBorder.top),
+          bottom: mergedBorder.bottom?.style ? mergedBorder.bottom : (pivotFormat.bottom ?? mergedBorder.bottom),
+          left: mergedBorder.left?.style ? mergedBorder.left : (pivotFormat.left ?? mergedBorder.left),
+          right: mergedBorder.right?.style ? mergedBorder.right : (pivotFormat.right ?? mergedBorder.right),
+        };
+      }
       // centerContinuous: hide internal vertical borders so the run reads as
       // one visual span (matches Excel — see precompute block above).
       if (suppressRightGridCol.has(ci) || suppressLeftGridCol.has(ci)) {
@@ -2455,10 +2472,10 @@ function renderQuadrant(
             ? !!tableFontDxf?.font?.bold
             : (tableStyle.isHeader || tableStyle.isTotals))
         : false;
-      const effectiveBold = font.bold || !!cf.fontBold || tableBold;
-      const effectiveItalic = font.italic || !!cf.fontItalic;
-      const effectiveUnderline = font.underline || !!cf.fontUnderline;
-      const effectiveStrike = font.strike || !!cf.fontStrike;
+      const effectiveBold = font.bold || !!cf.fontBold || tableBold || !!pivotFormat?.bold;
+      const effectiveItalic = font.italic || !!cf.fontItalic || !!pivotFormat?.italic;
+      const effectiveUnderline = font.underline || !!cf.fontUnderline || !!pivotFormat?.underline;
+      const effectiveStrike = font.strike || !!cf.fontStrike || !!pivotFormat?.strike;
       const fontForDraw: CellFont = (
         effectiveBold !== font.bold || effectiveItalic !== font.italic ||
         effectiveUnderline !== font.underline || effectiveStrike !== font.strike
@@ -2469,7 +2486,7 @@ function renderQuadrant(
       const hyperlinkUrl = rc.hyperlinkMap.get(key);
       // Table-style element dxfs can override font color (ECMA-376 §18.8.83),
       // following the same element hierarchy as the fill/bold above.
-      const tableFontColor = tableFontDxf?.font?.color ?? null;
+      const tableFontColor = tableFontDxf?.font?.color ?? pivotFormat?.fontColor ?? null;
       // Colour precedence: hyperlink > conditional-formatting font colour >
       // number-format section colour ([Red] etc., §18.8.30) > table-style dxf
       // colour > the cell's own font colour.
@@ -2933,6 +2950,7 @@ interface SheetRenderCache {
   hyperlinkMap: Map<string, string>;
   commentCells: Set<string>;
   tableStyleMap: Map<string, TableCellStyle>;
+  pivotStyleMap: Map<string, PivotCellFormat>;
   sparklineMap: Map<string, SparklineModel>;
 }
 const sheetRenderCache = new WeakMap<Worksheet, SheetRenderCache>();
@@ -3027,6 +3045,7 @@ export function getSheetRenderCache(worksheet: Worksheet): SheetRenderCache {
     hyperlinkMap,
     commentCells,
     tableStyleMap: buildTableStyleMap(worksheet),
+    pivotStyleMap: buildPivotStyleMap(worksheet),
     sparklineMap: buildSparklineMap(worksheet),
   };
   sheetRenderCache.set(worksheet, entry);
@@ -3050,6 +3069,7 @@ function effectiveMeasurementFont(
   cf: CfResult,
   tableStyle: TableCellStyle | undefined,
   styles: Styles,
+  pivotFormat?: PivotCellFormat,
 ): CellFont {
   const dxfList = styles.dxfs ?? [];
   const tableFontDxf = tableStyle
@@ -3070,8 +3090,8 @@ function effectiveMeasurementFont(
       ? !!tableFontDxf?.font?.bold
       : tableStyle.isHeader || tableStyle.isTotals
     : false;
-  const bold = base.bold || !!cf.fontBold || tableBold;
-  const italic = base.italic || !!cf.fontItalic;
+  const bold = base.bold || !!cf.fontBold || tableBold || !!pivotFormat?.bold;
+  const italic = base.italic || !!cf.fontItalic || !!pivotFormat?.italic;
   return bold === base.bold && italic === base.italic
     ? base
     : { ...base, bold, italic };
@@ -3461,6 +3481,7 @@ function virtualizedTextOverflowOverscan(
   nonEmptyColsByRow: Map<number, readonly number[]>,
   cfContext: CfContext,
   tableStyleMap: Map<string, TableCellStyle>,
+  pivotStyleMap: Map<string, PivotCellFormat>,
   mergeAnchorMap: Map<string, { totalW: number; totalH: number; right: number; bottom: number }>,
   colAxis: GridAxisGeometry,
   rowAxis: GridAxisGeometry,
@@ -3511,8 +3532,10 @@ function virtualizedTextOverflowOverscan(
             : tableStyle?.stripeDxf ?? tableStyle?.wholeTableDxf;
     const tableFontDxf = tableFontDxfId != null ? styles.dxfs?.[tableFontDxfId] : undefined;
     const builtInTableBold = !!tableStyle && !tableStyle.isCustom && (tableStyle.isHeader || tableStyle.isTotals);
-    const effectiveBold = font.bold || !!cf.fontBold || builtInTableBold || !!tableFontDxf?.font?.bold;
-    const effectiveItalic = font.italic || !!cf.fontItalic;
+    const pivotFormat = pivotStyleMap.get(key);
+    const effectiveBold = font.bold || !!cf.fontBold || builtInTableBold || !!tableFontDxf?.font?.bold
+      || !!pivotFormat?.bold;
+    const effectiveItalic = font.italic || !!cf.fontItalic || !!pivotFormat?.italic;
     const effectiveFont = (effectiveBold !== font.bold || effectiveItalic !== font.italic)
       ? { ...font, bold: effectiveBold, italic: effectiveItalic }
       : font;
@@ -3665,7 +3688,7 @@ export function renderViewport(
   // ── Viewport-independent lookups (memoized per Worksheet) ────
   const {
     cellMap, cfContext, mergeSkipSet, autoFilterCells,
-    hyperlinkMap, commentCells, tableStyleMap, sparklineMap,
+    hyperlinkMap, commentCells, tableStyleMap, pivotStyleMap, sparklineMap,
     nonEmptyColsByRow,
   } = getSheetRenderCache(worksheet);
 
@@ -3702,6 +3725,7 @@ export function renderViewport(
     nonEmptyColsByRow,
     cfContext,
     tableStyleMap,
+    pivotStyleMap,
     mergeAnchorMap,
     colAxis,
     rowAxis,
@@ -3738,6 +3762,7 @@ export function renderViewport(
     hyperlinkMap,
     commentCells,
     tableStyleMap,
+    pivotStyleMap,
     sparklineMap,
     overflowTextAnchors: overflowOverscan.anchorKeys,
     mdw,
