@@ -82,7 +82,7 @@ impl Level<'_> {
         let placeholders: Vec<(u8, u8)> = self.placeholders.iter().flatten().copied().collect();
         if current_level > 8
             || placeholders.len() > 9
-            || self.text.len() % 2 != 0
+            || !self.text.len().is_multiple_of(2)
             || self.text.len() / 2 > ooxml_common::numbering::MAX_MARKER_BYTES
         {
             return Err(unsupported("invalid Word numbering template"));
