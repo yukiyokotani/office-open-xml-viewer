@@ -28,6 +28,7 @@ fn empty<'a>() -> Formatting<'a> {
         unsupported_piece_properties: false,
         missing_tables: true,
         unsupported_table_properties: false,
+        revision_authors: Some(&[]),
     }
 }
 

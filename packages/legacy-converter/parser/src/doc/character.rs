@@ -61,6 +61,16 @@ pub struct Properties {
     /// MS-DOC 2.6.1 sprmCFFldVanish (field text hidden). Both sprmCPlain and
     /// sprmCIstd preserve it.
     field_vanish: Option<bool>,
+    /// MS-DOC 2.6.1 insertion revision mark: sprmCFRMarkIns, sprmCIbstRMark
+    /// and sprmCDttmRMark. All three survive sprmCPlain and sprmCIstd.
+    insertion: InsertionMark,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct InsertionMark {
+    inserted: Option<bool>,
+    author: Option<u16>,
+    date: Option<u32>,
 }
 
 /// Character properties whose MS-DOC semantics map onto the direct DOCX
@@ -202,6 +212,7 @@ impl Default for Properties {
             direct_only: DirectOnly::default(),
             symbol: None,
             field_vanish: None,
+            insertion: InsertionMark::default(),
         }
     }
 }
@@ -224,6 +235,7 @@ impl Properties {
             direct_only: DirectOnly::default(),
             symbol: None,
             field_vanish: None,
+            insertion: InsertionMark::default(),
         }
     }
 
@@ -260,6 +272,15 @@ impl Properties {
             }
         }
         self.direct_only.overlay(&patch.direct_only);
+        if patch.insertion.inserted.is_some() {
+            self.insertion.inserted = patch.insertion.inserted;
+        }
+        if patch.insertion.author.is_some() {
+            self.insertion.author = patch.insertion.author;
+        }
+        if patch.insertion.date.is_some() {
+            self.insertion.date = patch.insertion.date;
+        }
         if patch.field_vanish.is_some() {
             self.field_vanish = patch.field_vanish;
         }
@@ -273,7 +294,10 @@ impl Properties {
     /// True when an accepted property is projected only by the direct model;
     /// the WordprocessingML adapter keeps reporting it as omitted.
     pub(super) fn has_direct_only_properties(&self) -> bool {
-        self.direct_only.any() || self.symbol.is_some() || self.field_vanish == Some(true)
+        self.direct_only.any()
+            || self.symbol.is_some()
+            || self.field_vanish == Some(true)
+            || self.insertion.inserted == Some(true)
     }
 
     pub fn reset_to(&mut self, paragraph: &Self, preserve_object: bool) {
@@ -285,6 +309,7 @@ impl Properties {
         let font_hint_present = self.font_hint_present;
         let symbol = self.symbol;
         let field_vanish = self.field_vanish;
+        let insertion = self.insertion;
         if !preserve_object {
             picture.object = paragraph.picture.object;
         }
@@ -300,6 +325,7 @@ impl Properties {
         self.font_hint_present = font_hint_present;
         self.symbol = symbol;
         self.field_vanish = field_vanish;
+        self.insertion = insertion;
         for (key, value) in preserved {
             if let Some(value) = value {
                 self.values.insert(key, value);
@@ -423,6 +449,39 @@ impl Properties {
                     return Err(unsupported("invalid Word character revision session ID"));
                 }
                 let _ = u32_at(operand, 0)?;
+                return Ok(true);
+            }
+            0x0801 => {
+                // MS-DOC 2.6.1 sprmCFRMarkIns (ToggleOperand): text inserted
+                // while revision marking was on. Deletions (sprmCFRMarkDel)
+                // remain unsupported.
+                if operand.len() != 1 {
+                    return Err(unsupported("invalid Word character toggle"));
+                }
+                let base = style.insertion.inserted.unwrap_or(false);
+                self.insertion.inserted = Some(match operand[0] {
+                    0 => false,
+                    1 => true,
+                    0x80 => base,
+                    0x81 => !base,
+                    _ => return Err(unsupported("invalid Word character toggle")),
+                });
+                return Ok(true);
+            }
+            0x4804 => {
+                // sprmCIbstRMark: a non-negative index into SttbfRMark.
+                if operand.len() != 2 || (u16_at(operand, 0)? as i16) < 0 {
+                    return Err(unsupported("invalid Word revision author index"));
+                }
+                self.insertion.author = Some(u16_at(operand, 0)?);
+                return Ok(true);
+            }
+            0x6805 => {
+                // sprmCDttmRMark: DTTM of the insertion (MS-DOC 2.9.65).
+                if operand.len() != 4 {
+                    return Err(unsupported("invalid Word revision date"));
+                }
+                self.insertion.date = Some(u32_at(operand, 0)?);
                 return Ok(true);
             }
             0x0868 | 0x0802 => {
@@ -1029,6 +1088,35 @@ mod tests {
         assert!(base.clone().apply(0x6887, &[0, 0, 0, 0x80], &base).is_err());
         assert!(base.clone().apply(0x6887, &[0, 0, 0], &base).is_err());
         assert!(base.clone().apply(0x4888, &[0], &base).is_err());
+    }
+
+    #[test]
+    fn insertion_marks_are_style_relative_and_survive_resets() {
+        let base = Properties::default();
+        let mut value = base.clone();
+        assert!(value.apply(0x0801, &[0x81], &base).unwrap());
+        assert!(value.apply(0x4804, &1u16.to_le_bytes(), &base).unwrap());
+        assert!(value
+            .apply(0x6805, &0x86a1_2d2eu32.to_le_bytes(), &base)
+            .unwrap());
+        assert_eq!(value.direct_insertion(), Some((Some(1), Some(0x86a1_2d2e))));
+        assert!(value.has_direct_only_properties());
+        // Both CPlain and CIstd preserve the revision-mark properties.
+        for preserve_object in [false, true] {
+            let mut reset = value.clone();
+            reset.reset_to(&base, preserve_object);
+            assert_eq!(reset.direct_insertion(), Some((Some(1), Some(0x86a1_2d2e))));
+        }
+        value.apply(0x0801, &[0], &base).unwrap();
+        assert_eq!(value.direct_insertion(), None);
+        // Deletions stay unsupported; malformed operands fail.
+        assert!(!base.clone().apply(0x0800, &[1], &base).unwrap());
+        assert!(base
+            .clone()
+            .apply(0x4804, &0x8000u16.to_le_bytes(), &base)
+            .is_err());
+        assert!(base.clone().apply(0x0801, &[2], &base).is_err());
+        assert!(base.clone().apply(0x6805, &[0; 3], &base).is_err());
     }
 
     #[test]

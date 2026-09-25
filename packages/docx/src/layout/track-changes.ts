@@ -68,8 +68,22 @@ export function createRevisionAuthorColorResolver(
 }
 
 /** ECMA-376 defines no bar geometry; the hairline weight is the fixed
- * convention claimed by the `word-track-change-bar` compatibility rule. */
+ * convention claimed by the `word-track-change-bar` compatibility rule. A
+ * Word-exported PDF confirms it: a solid black 0.75pt bar spanning each
+ * changed line box. */
 const CHANGE_BAR_WIDTH_PT = 0.75;
+/** Word PDF evidence (a page with a 90pt left margin): the bar's left edge is
+ * 36pt left of the text margin (x = 54pt), not centered in the margin. For a
+ * 72pt margin both conventions coincide within 0.4pt. Narrower margins are
+ * unmeasured and keep the centered placement. */
+const CHANGE_BAR_TEXT_OFFSET_PT = 36;
+
+function changeBarLeftPt(marginLeftPt: number): number {
+  const offset = marginLeftPt - CHANGE_BAR_TEXT_OFFSET_PT;
+  return offset >= 0
+    ? offset
+    : Math.max(0, marginLeftPt / 2 - CHANGE_BAR_WIDTH_PT / 2);
+}
 
 function lineHasRevisionText(line: LineLayout): boolean {
   return line.placements.some(
@@ -85,7 +99,7 @@ function sliceRevisionLines(slice: ParagraphLayout | TableLayout): readonly Line
 
 /**
  * Markup-view post-pass (`word-track-change-bar`): attach one margin bar per
- * line that retains revision content, centered in the left page margin. Pure
+ * line that retains revision content, in the left page margin. Pure
  * geometry translation over the completed body layers — no measurement, no
  * repagination — mirroring the §17.6.8 line-number composition pass. Pages
  * without revision lines are returned unchanged, and the default final-view
@@ -99,7 +113,7 @@ export function attachTrackChangeBars(layout: DocumentLayout): DocumentLayout {
     ));
     if (lines.length === 0) return page;
     attached = true;
-    const xPt = Math.max(0, page.section.geometry.marginLeft / 2 - CHANGE_BAR_WIDTH_PT / 2);
+    const xPt = changeBarLeftPt(page.section.geometry.marginLeft);
     const changeBars: readonly ChangeBarLayout[] = Object.freeze(lines.map((line) => Object.freeze({
       bounds: Object.freeze({
         xPt,

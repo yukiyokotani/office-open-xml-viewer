@@ -96,6 +96,11 @@ impl Formatting<'_> {
             Err(_) => true,
         };
         let table_frame = resolved.properties.table_paragraph_frame();
+        if mark.direct_insertion().is_some() {
+            // An inserted paragraph mark has no DOCX-model run to carry the
+            // revision; keep it unsupported rather than drop the markup.
+            self.unsupported_character_properties = true;
+        }
         paragraph.mark_vanish = mark.direct_vanish();
         let mark_facts = mark.direct_font_facts(&self.fonts)?;
         paragraph.default_font_size = mark_facts.font_size;
@@ -120,8 +125,51 @@ impl Formatting<'_> {
         prcs: &[&[u8]],
         text: String,
     ) -> Result<Option<TextRun>, String> {
-        self.run_properties_with_table(paragraph_style, table_style, fc, prm, prcs)?
-            .direct_text_run(text, &self.fonts)
+        let properties =
+            self.run_properties_with_table(paragraph_style, table_style, fc, prm, prcs)?;
+        let Some(mut run) = properties.direct_text_run(text, &self.fonts)? else {
+            return Ok(None);
+        };
+        if let Some((author, date)) = properties.direct_insertion() {
+            let revision = self.direct_insertion_revision(author, date)?;
+            if let Some(wire) = run.typography_acquisition.as_mut() {
+                wire.revision = Some(docx_model::RevisionTypographyWire {
+                    kind: revision.kind.clone(),
+                    id: docx_model::TypographyValueWire::default(),
+                    author: revision.author.clone(),
+                    date: revision.date.clone(),
+                });
+            }
+            run.revision = Some(revision);
+        }
+        Ok(Some(run))
+    }
+
+    /// MS-DOC 2.6.1 sprmCFRMarkIns with sprmCIbstRMark (index into
+    /// SttbfRMark, 2.9.290) and sprmCDttmRMark (DTTM, 2.9.65) as the ECMA-376
+    /// 17.13.5.18 `w:ins` provenance the DOCX model carries. MS-DOC has no
+    /// revision identifier, so `id` stays absent.
+    fn direct_insertion_revision(
+        &self,
+        author: Option<u16>,
+        date: Option<u32>,
+    ) -> Result<docx_model::RunRevision, String> {
+        let authors = revision_authors(self.revision_authors.ok_or_else(|| {
+            super::super::unsupported("Word revision author table outside table stream")
+        })?)?;
+        // "By default, this index is zero, which is the index of the
+        // 'unknown' author."
+        let index = usize::from(author.unwrap_or(0));
+        let author = authors.get(index).cloned().ok_or_else(|| {
+            super::super::unsupported("Word revision author index outside SttbfRMark")
+        })?;
+        Ok(docx_model::RunRevision {
+            kind: "insertion".into(),
+            id: None,
+            author: Some(author),
+            date: date.map(dttm).transpose()?.flatten(),
+            typography_id: docx_model::TypographyValueWire::default(),
+        })
     }
 
     /// MS-DOC 2.6.1 sprmCLbcCRJ on a U+000B line break (see
@@ -214,5 +262,81 @@ impl<'a> Formatting<'a> {
             .filter(|length| *length >= 0x44)
             .and_then(|length| data.get(offset + 0x44..offset + length))
             .ok_or_else(invalid)
+    }
+}
+
+/// MS-DOC 2.9.290 SttbfRMark: an extended (UTF-16) STTB without extra data.
+fn revision_authors(bytes: &[u8]) -> Result<Vec<String>, String> {
+    use super::super::{u16_at, unsupported};
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+    if u16_at(bytes, 0)? != 0xffff || u16_at(bytes, 4)? != 0 {
+        return Err(unsupported("invalid Word revision author table"));
+    }
+    let count = usize::from(u16_at(bytes, 2)?);
+    let mut offset = 6;
+    let mut authors = Vec::with_capacity(count.min(bytes.len() / 2));
+    for _ in 0..count {
+        let length = usize::from(u16_at(bytes, offset)?);
+        offset += 2;
+        let units = bytes
+            .get(offset..offset + length * 2)
+            .ok_or_else(|| unsupported("truncated Word revision author name"))?
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect::<Vec<_>>();
+        authors.push(
+            String::from_utf16(&units)
+                .map_err(|_| unsupported("invalid Word revision author name"))?,
+        );
+        offset += length * 2;
+    }
+    Ok(authors)
+}
+
+/// MS-DOC 2.9.65 DTTM as an ECMA-376 `w:date` xsd:dateTime. All-zero means
+/// no recorded date.
+fn dttm(value: u32) -> Result<Option<String>, String> {
+    if value == 0 {
+        return Ok(None);
+    }
+    let minute = value & 0x3f;
+    let hour = (value >> 6) & 0x1f;
+    let day = (value >> 11) & 0x1f;
+    let month = (value >> 16) & 0x0f;
+    let year = 1900 + ((value >> 20) & 0x1ff);
+    if minute > 59 || hour > 23 || !(1..=31).contains(&day) || !(1..=12).contains(&month) {
+        return Err(super::super::unsupported("invalid Word revision date"));
+    }
+    Ok(Some(format!(
+        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:00Z"
+    )))
+}
+
+#[cfg(test)]
+mod revision_tests {
+    use super::*;
+
+    #[test]
+    fn revision_author_table_and_dttm_decode_per_ms_doc() {
+        let mut table = vec![0xff, 0xff, 2, 0, 0, 0];
+        for name in ["Unknown", "Jim"] {
+            table.extend((name.len() as u16).to_le_bytes());
+            for unit in name.encode_utf16() {
+                table.extend(unit.to_le_bytes());
+            }
+        }
+        assert_eq!(revision_authors(&table).unwrap(), ["Unknown", "Jim"]);
+        assert!(revision_authors(&table[..table.len() - 1]).is_err());
+        assert!(revision_authors(&[0, 0, 0, 0, 0, 0]).is_err());
+        assert!(revision_authors(&[]).unwrap().is_empty());
+        // 0x86A12D2E: 2006-01-05 20:46 (Thursday).
+        assert_eq!(
+            dttm(0x86a1_2d2e).unwrap().as_deref(),
+            Some("2006-01-05T20:46:00Z")
+        );
+        assert_eq!(dttm(0).unwrap(), None);
+        assert!(dttm(0x0000_003c).is_err());
     }
 }

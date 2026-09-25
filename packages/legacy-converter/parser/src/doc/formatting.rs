@@ -119,6 +119,11 @@ pub struct Formatting<'a> {
     pub unsupported_piece_properties: bool,
     pub missing_tables: bool,
     pub unsupported_table_properties: bool,
+    /// MS-DOC 2.5.6 fcSttbfRMark/lcbSttbfRMark: raw SttbfRMark (revision
+    /// author names), decoded only when a revision mark is projected. `None`
+    /// records an out-of-range table so documents without revision marks are
+    /// unaffected, while a revision mark that needs it still fails.
+    revision_authors: Option<&'a [u8]>,
 }
 
 pub(in crate::doc) struct ResolvedParagraph {
@@ -168,6 +173,8 @@ impl<'a> Formatting<'a> {
             unsupported_piece_properties: false,
             missing_tables,
             unsupported_table_properties: false,
+            // FibRgFcLcb97 entry 51 (0x9A + 51 * 8).
+            revision_authors: fkp::table_part(word, table, 0x232).ok(),
         })
     }
 
@@ -1093,6 +1100,7 @@ mod tests {
             unsupported_piece_properties: false,
             missing_tables: true,
             unsupported_table_properties: false,
+            revision_authors: Some(&[]),
         }
     }
 
@@ -3450,6 +3458,56 @@ mod tests {
         f.styles = vec![Some(style())];
         f.paragraph_xml(0, 0, 1, &[&bar]).unwrap();
         assert!(!f.unsupported_paragraph_properties);
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn direct_insertion_revisions_carry_the_sttbfrmark_author_and_dttm() {
+        let mut table = vec![0xff, 0xff, 2, 0, 0, 0];
+        for name in ["Unknown", "Reviewer"] {
+            table.extend((name.len() as u16).to_le_bytes());
+            for unit in name.encode_utf16() {
+                table.extend(unit.to_le_bytes());
+            }
+        }
+        let table: &'static [u8] = Box::leak(table.into_boxed_slice());
+        let mut f = empty();
+        f.styles = vec![Some(Style {
+            kind: 1,
+            base: 0xfff,
+            chpx: &[],
+            papx: &[],
+            table: None,
+            language_compatibility: StyleLanguageCompatibility::default(),
+        })];
+        f.revision_authors = Some(table);
+        let piece = [
+            0x01, 0x08, 1, 0x04, 0x48, 1, 0, 0x05, 0x68, 0x2e, 0x2d, 0xa1, 0x86,
+        ];
+        let run = f
+            .direct_text_run(0, None, 0, 1, &[&piece], "x".into())
+            .unwrap()
+            .unwrap();
+        let revision = run.revision.unwrap();
+        assert_eq!(revision.kind, "insertion");
+        assert_eq!(revision.author.as_deref(), Some("Reviewer"));
+        assert_eq!(revision.date.as_deref(), Some("2006-01-05T20:46:00Z"));
+        assert_eq!(revision.id, None);
+        let wire = run.typography_acquisition.unwrap().revision.unwrap();
+        assert_eq!(wire.author.as_deref(), Some("Reviewer"));
+        // An author index outside the table or a missing table fails.
+        let outside = [0x01, 0x08, 1, 0x04, 0x48, 5, 0];
+        assert!(f
+            .direct_text_run(0, None, 0, 1, &[&outside], "x".into())
+            .is_err());
+        f.revision_authors = None;
+        assert!(f
+            .direct_text_run(0, None, 0, 1, &[&piece], "x".into())
+            .is_err());
+        // An inserted paragraph mark stays unsupported.
+        f.revision_authors = Some(table);
+        f.direct_paragraph(0, None, 0, 1, &[&piece]).unwrap();
+        assert!(f.unsupported_character_properties);
     }
 
     #[cfg(feature = "direct-doc")]
