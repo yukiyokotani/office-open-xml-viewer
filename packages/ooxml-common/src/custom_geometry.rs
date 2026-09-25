@@ -22,6 +22,12 @@ pub struct CustomPath {
     pub width: f64,
     /// Effective path coordinate-system height.
     pub height: f64,
+    /// `a:path@fill` (ECMA-376 20.1.9.15, ST_PathFillMode 20.1.10.37):
+    /// `none`, `lighten`, `lightenLess`, `darken` or `darkenLess`. `None` is
+    /// the default `norm` (and any unrecognized value).
+    pub fill: Option<String>,
+    /// `a:path@stroke`, default true.
+    pub stroke: bool,
     pub commands: Vec<PathCommand>,
 }
 
@@ -275,9 +281,22 @@ pub fn parse_custom_geometry(
                 .filter(|node| node.is_element())
                 .filter_map(|node| parse_command(node, &env))
                 .collect();
+            let fill = path
+                .attribute("fill")
+                .filter(|mode| {
+                    matches!(
+                        *mode,
+                        "none" | "lighten" | "lightenLess" | "darken" | "darkenLess"
+                    )
+                })
+                .map(str::to_owned);
+            // xsd:boolean
+            let stroke = !matches!(path.attribute("stroke"), Some("0" | "false"));
             CustomPath {
                 width,
                 height,
+                fill,
+                stroke,
                 commands,
             }
         })
@@ -313,6 +332,34 @@ mod tests {
                     x: 75.0,
                     y: 0.0,
                 },
+            ]
+        );
+    }
+
+    #[test]
+    fn path_fill_mode_and_stroke_flags_are_retained() {
+        let xml = r#"<custGeom><pathLst>
+          <path w="1" h="1"/>
+          <path w="1" h="1" fill="none" stroke="0"/>
+          <path w="1" h="1" fill="darkenLess" stroke="true"/>
+          <path w="1" h="1" fill="norm" stroke="false"/>
+          <path w="1" h="1" fill="bogus"/>
+        </pathLst></custGeom>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let geometry = parse_custom_geometry(doc.root_element(), 1.0, 1.0);
+        let flags: Vec<_> = geometry
+            .paths
+            .iter()
+            .map(|p| (p.fill.as_deref(), p.stroke))
+            .collect();
+        assert_eq!(
+            flags,
+            [
+                (None, true),
+                (Some("none"), false),
+                (Some("darkenLess"), true),
+                (None, false),
+                (None, true),
             ]
         );
     }

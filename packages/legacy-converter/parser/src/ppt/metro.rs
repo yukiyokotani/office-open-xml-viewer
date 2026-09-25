@@ -21,7 +21,8 @@
 //! The direct model therefore adopts the alternative only when it agrees with
 //! the binary shape on everything the two record in common and the direct
 //! model can compare: the geometry (same preset name, same adjust values
-//! within a master-unit rounding tolerance, or custom geometry on both
+//! within a master-unit rounding tolerance, an omitted value standing for
+//! the preset default, or custom geometry on both
 //! sides), the untransformed position and size, rotation and flips, a solid
 //! fill color when both sides have one, run font size, bold and italic where
 //! both state them, and the text structure (the same paragraphs, runs and
@@ -217,13 +218,20 @@ fn same_geometry(binary: &ShapeElement, alternative: &ShapeElement) -> bool {
     if binary.geometry == "custGeom" {
         return binary.cust_geom.is_some() && alternative.cust_geom.is_some();
     }
+    // An omitted adjust means the preset default, so an explicit value equal
+    // to that default is the same geometry (ECMA-376 20.1.9.5).
+    let defaults = crate::officeart::preset_defaults::defaults(&binary.geometry).unwrap_or(&[]);
     adjusts(binary)
         .iter()
         .zip(adjusts(alternative))
-        .all(|(a, b)| match (a, b) {
-            (None, None) => true,
-            (Some(a), Some(b)) => (a - b).abs() <= ADJUST_TOLERANCE,
-            _ => false,
+        .enumerate()
+        .all(|(index, (a, b))| {
+            let default = defaults.get(index).map(|&v| f64::from(v));
+            match (a.or(default), b.or(default)) {
+                (None, None) => true,
+                (Some(a), Some(b)) => (a - b).abs() <= ADJUST_TOLERANCE,
+                _ => false,
+            }
         })
 }
 
@@ -376,13 +384,23 @@ mod tests {
         let mut binary = shape("roundRect");
         let mut alternative = shape("roundRect");
         assert!(same_geometry(&binary, &alternative));
+        // roundRect's default adjust is 16667: an explicit default matches.
         binary.adj = Some(16667.0);
+        assert!(same_geometry(&binary, &alternative));
+        binary.adj = Some(30000.0);
         assert!(!same_geometry(&binary, &alternative));
-        alternative.adj = Some(16660.0);
+        alternative.adj = Some(29990.0);
         assert!(same_geometry(&binary, &alternative));
         alternative.adj = Some(50000.0);
         assert!(!same_geometry(&binary, &alternative));
         assert!(!same_geometry(&shape("rect"), &shape("ellipse")));
+        // An explicit default adjust equals an omitted one.
+        let binary = shape("wedgeRoundRectCallout");
+        let mut alternative = shape("wedgeRoundRectCallout");
+        alternative.adj3 = Some(16667.0);
+        assert!(same_geometry(&binary, &alternative));
+        alternative.adj3 = Some(20000.0);
+        assert!(!same_geometry(&binary, &alternative));
     }
 
     #[test]

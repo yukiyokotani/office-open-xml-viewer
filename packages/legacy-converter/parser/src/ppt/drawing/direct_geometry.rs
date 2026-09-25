@@ -1,13 +1,18 @@
 //! Direct projection of decoded OfficeArt paths into the renderer model.
 //! ECMA-376 20.1.9.14 path coordinates are normalized by each path's w/h.
 use crate::officeart::geometry::{Decoded, DecodedCommand};
-use pptx_model::PathCmd;
+use pptx_model::{PathCmd, PathPaint};
 
+/// `fill`/`stroke` say whether any path is filled or stroked; `paint` carries
+/// the per-path flags (ECMA-376 20.1.9.15) when the paths differ. MS-ODRAW
+/// path escapes only switch a path's fill or line off (msopathEscape noFill
+/// and noLine), so a projected fill mode is `none` or `norm`.
 #[derive(Debug)]
 pub(super) struct ModelGeometry {
     pub paths: Vec<Vec<PathCmd>>,
     pub fill: bool,
     pub stroke: bool,
+    pub paint: Option<Vec<PathPaint>>,
 }
 
 pub(super) fn project(
@@ -20,16 +25,14 @@ pub(super) fn project(
             paths: Vec::new(),
             fill: true,
             stroke: true,
+            paint: None,
         });
     };
     let flags = (first.fill(), first.stroke());
+    let mut mixed = false;
     let mut command_count = first.commands().len();
     for path in paths {
-        if (path.fill(), path.stroke()) != flags {
-            return Err(unsupported(
-                "mixed OfficeArt custom-geometry fill or stroke flags",
-            ));
-        }
+        mixed |= (path.fill(), path.stroke()) != flags;
         command_count = command_count
             .checked_add(path.commands().len())
             .ok_or_else(|| unsupported("OfficeArt custom-geometry model budget exceeded"))?;
@@ -82,10 +85,26 @@ pub(super) fn project(
         }
         result.push(commands);
     }
+    if !mixed {
+        return Ok(ModelGeometry {
+            paths: result,
+            fill: flags.0,
+            stroke: flags.1,
+            paint: None,
+        });
+    }
+    let paint: Vec<PathPaint> = decoded
+        .paths()
+        .map(|path| PathPaint {
+            fill: (!path.fill()).then(|| "none".to_owned()),
+            stroke: path.stroke(),
+        })
+        .collect();
     Ok(ModelGeometry {
         paths: result,
-        fill: flags.0,
-        stroke: flags.1,
+        fill: paint.iter().any(|p| p.fill.is_none()),
+        stroke: paint.iter().any(|p| p.stroke),
+        paint: Some(paint),
     })
 }
 
@@ -171,14 +190,30 @@ mod tests {
     }
 
     #[test]
-    fn rejects_mixed_path_paint_and_empty_source_decodes_to_none() {
+    fn mixed_path_paint_projects_per_path_flags_and_empty_source_decodes_to_none() {
         let vertices = vertices(&[[0, 0], [1, 1], [2, 2], [3, 3]]);
         let segments = segments(&[0x4000, 1, 0xaa00, 0x8000, 0x4000, 1, 0x6001, 0x8000]);
         let mut geometry = Geometry::default();
         geometry.complex(0x145, vertices.as_slice());
         geometry.complex(0x146, segments.as_slice());
         let decoded = geometry.decode(&mut 100).unwrap().unwrap();
-        assert!(project(&decoded, &mut 100).unwrap_err().contains("mixed"));
+        // Path 1 ends with msopathEscape noFill (0xaa00); path 2 is closed
+        // and painted normally.
+        let model = project(&decoded, &mut 1000).unwrap();
+        assert!(model.fill && model.stroke);
+        assert_eq!(
+            model.paint,
+            Some(vec![
+                PathPaint {
+                    fill: Some("none".into()),
+                    stroke: true
+                },
+                PathPaint {
+                    fill: None,
+                    stroke: true
+                },
+            ])
+        );
         assert!(Geometry::default().decode(&mut 0).unwrap().is_none());
     }
 }

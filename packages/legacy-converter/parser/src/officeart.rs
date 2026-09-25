@@ -6,6 +6,7 @@ pub(crate) mod gradient;
 mod metafile;
 pub(crate) mod paint;
 pub(crate) mod preset;
+pub(crate) mod preset_defaults;
 pub(crate) mod properties;
 #[cfg(test)]
 pub(crate) use metafile::tests::{emf_test_blip, wmf_test_blip};

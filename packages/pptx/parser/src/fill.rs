@@ -785,9 +785,32 @@ pub(crate) fn parse_cust_geom(
     shape_w: f64,
     shape_h: f64,
 ) -> Vec<Vec<PathCmd>> {
+    parse_cust_geom_with_paint(cust_geom, shape_w, shape_h).0
+}
+
+/// Like [`parse_cust_geom`], also returning the per-path paint flags
+/// (ECMA-376 20.1.9.15) when any path departs from `norm` fill and stroke.
+pub(crate) fn parse_cust_geom_with_paint(
+    cust_geom: roxmltree::Node<'_, '_>,
+    shape_w: f64,
+    shape_h: f64,
+) -> (Vec<Vec<PathCmd>>, Option<Vec<PathPaint>>) {
     use ooxml_common::custom_geometry::{parse_custom_geometry, PathCommand};
 
-    parse_custom_geometry(cust_geom, shape_w, shape_h)
+    let geometry = parse_custom_geometry(cust_geom, shape_w, shape_h);
+    let paint: Vec<PathPaint> = geometry
+        .paths
+        .iter()
+        .map(|path| PathPaint {
+            fill: path.fill.clone(),
+            stroke: path.stroke,
+        })
+        .collect();
+    let paint = paint
+        .iter()
+        .any(|p| p.fill.is_some() || !p.stroke)
+        .then_some(paint);
+    let paths = geometry
         .paths
         .into_iter()
         .map(|path| {
@@ -838,7 +861,8 @@ pub(crate) fn parse_cust_geom(
                 })
                 .collect()
         })
-        .collect()
+        .collect();
+    (paths, paint)
 }
 
 // ===========================

@@ -329,6 +329,13 @@ export interface ShapeElement {
   /** Custom geometry sub-paths (set only when geometry === "custGeom").
    *  Outer array: one entry per <a:path>; inner: path commands with coords in [0,1]. */
   custGeom: PathCmd[][] | null;
+  /**
+   * Per-path paint of `custGeom` (ECMA-376 §20.1.9.15 `a:path@fill` /
+   * `@stroke`), one entry per path. Absent when every path is filled
+   * normally and stroked. `fill` is `none`, `lighten`, `lightenLess`,
+   * `darken` or `darkenLess`; `null` means `norm`.
+   */
+  custGeomPaint?: { fill: string | null; stroke: boolean }[];
   /** First adjustment value from prstGeom avLst (e.g. trapezoid inset). Range 0–100000. */
   adj: number | null;
   /** Second adjustment value from prstGeom avLst (e.g. arrow head width). Range 0–100000. */

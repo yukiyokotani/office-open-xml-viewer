@@ -1858,6 +1858,10 @@ export interface ShapeElement {
     textBody: TextBody | null;
     defaultTextColor: string | null;
     custGeom: PathCmd[][] | null;
+    custGeomPaint?: {
+        fill: string | null;
+        stroke: boolean;
+    }[];
     adj: number | null;
     adj2: number | null;
     adj3: number | null;
