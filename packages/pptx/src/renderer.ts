@@ -4664,9 +4664,12 @@ export function renderTextBody(
       // Percentage spacing scales this renderer's PowerPoint-compatible natural
       // line box (ECMA-376 §21.1.2.2.5/.11 defines the authored percentage;
       // Office output supplies the line-box compatibility behaviour). A positive
-      // a:tr@h remains a minimum: a lone terminal line may fit by its glyph box,
-      // while multi-line content must retain every painted line box. Neither
-      // path substitutes the font's design box for the baseline pitch.
+      // a:tr@h remains a minimum. A PowerPoint table control with 16pt text,
+      // 120% lnSpc and 8.5pt vertical cell margins grows a 36.85pt row;
+      // changing only lnSpc to 100% or the margins to zero does not. Explicit
+      // percentage spacing therefore consumes the painted natural line box
+      // even for one final line. Omitted lnSpc keeps its glyph-box exception
+      // in a positive row. Neither path uses a substituted font's design box.
       const naturalSingle = maxSizePx * 1.2;
       const useResolvedFontMetrics = isSpAutoFit && resolvedFontLine > naturalSingle;
       // A live resolved font box describes containment, not baseline advance.
@@ -4679,8 +4682,6 @@ export function renderTextBody(
       // itself evidence that PowerPoint grows the authored minimum. An explicit
       // percentage, however, is part of the authored content extent, and every
       // line in a multi-line body consumes the painted line box.
-      const isFinalBodyLine = paraIdx === body.paragraphs.length - 1 && isLast;
-      const isOnlyBodyLine = body.paragraphs.length === 1 && lines.length === 1;
       let paintedLineHeight: number;
       if (para.spaceLine) {
         if (para.spaceLine.type === 'pct') {
@@ -4695,8 +4696,6 @@ export function renderTextBody(
       if (measureOnly && !isSpAutoFit && !measureNaturalLineSpacing) {
         if (!para.spaceLine) {
           lineHeight = maxSizePx;
-        } else if (para.spaceLine.type === 'pct' && isFinalBodyLine && isOnlyBodyLine) {
-          lineHeight = maxSizePx * (para.spaceLine.val / 100000);
         }
       }
       // PowerPoint retains its established percentage-line advance, but seats
@@ -4735,10 +4734,11 @@ export function renderTextBody(
         : spaceBeforePx;
       // ECMA-376 §21.1.2.1.1 bodyPr@spcFirstLastPara (default false): the
       // first paragraph's space before and the last paragraph's space after
-      // are not respected at the edges of the text body. Otherwise
-      // placeholders whose layout-default `spcBef` is 10 pt (sample-1 slide-5
-      // "Figure 1." caption) get pushed below the placeholder top, and a
-      // bottom- or centre-anchored body is lifted by its trailing spcAft.
+      // are not respected at the edges of the text body. PowerPoint PDF
+      // controls agree for t/ctr/b anchors in both pts and pct: with the
+      // attribute absent or 0 the edge spacing moves no glyph, and only 1
+      // applies it. A trailing empty paragraph turns the previous spcAft into
+      // inter-paragraph spacing, which is respected.
       const respectEdges = body.spcFirstLastPara === true;
       const lastParagraph = paraIdx === body.paragraphs.length - 1;
       const linePx  = lineHeight
@@ -6690,6 +6690,16 @@ export function renderTable(
   const x0 = emuToPx(el.x, scale);
   const y0 = emuToPx(el.y, scale);
 
+  // ECMA-376 §21.1.2.1.1 describes spcFirstLastPara for a text body, but
+  // PowerPoint does not apply its edge exception inside a:tc. PDF controls
+  // with centred and top-anchored table cells retain identical glyph and row
+  // positions for absent/0/1, with 12pt spcPts and 50% spcPct before or
+  // after. A second paragraph does receive spcAft as an interior gap. Keep the
+  // Office table-cell rule in both measurement and paint.
+  const tableTextBody = (body: TextBody): TextBody => body.spcFirstLastPara
+    ? { ...body, spcFirstLastPara: false }
+    : body;
+
   // Convert col widths to pixels.
   const colWidths = el.cols.map(c => emuToPx(c, scale));
   const numCols = colWidths.length;
@@ -6732,7 +6742,7 @@ export function renderTable(
       if (row.height > 0 && !hasAuthoredRowGrowthSignal) continue;
       const cellW = spannedWidth(ci, cell.gridSpan || 1);
       const needed = (renderTextBody(
-        ctx, cell.textBody, 0, 0, cellW, 0, scale, null, 0, false, false,
+        ctx, tableTextBody(cell.textBody), 0, 0, cellW, 0, scale, null, 0, false, false,
         '#000000', slideNumber, rc, undefined, true, undefined, false, row.height === 0,
       ) as number) || 0;
       if (needed > rowHeights[ri]) rowHeights[ri] = needed;
@@ -6755,7 +6765,7 @@ export function renderTable(
         .some((spannedRow) => spannedRow.height === 0);
       if (!hasAutoHeightRow && !hasAuthoredRowGrowthSignal) continue;
       const needed = (renderTextBody(
-        ctx, cell.textBody, 0, 0, cellW, 0, scale, null, 0, false, false,
+        ctx, tableTextBody(cell.textBody), 0, 0, cellW, 0, scale, null, 0, false, false,
         '#000000', slideNumber, rc, undefined, true, undefined, false, hasAutoHeightRow,
       ) as number) || 0;
       let have = 0;
@@ -6911,7 +6921,7 @@ export function renderTable(
       const cellDefaultColor = cell.textColor ? hexToRgba(cell.textColor) : null;
       renderTextBody(
         ctx,
-        cell.textBody,
+        tableTextBody(cell.textBody),
         colX,
         rowY,
         cellW,
