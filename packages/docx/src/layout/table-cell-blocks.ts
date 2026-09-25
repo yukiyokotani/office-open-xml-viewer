@@ -60,10 +60,8 @@ export interface RetainedCellBlockPlacement {
  * the required paragraph after a nested table, and, in a cell with
  * `hideMark` (ECMA-376 §17.4.21: the end-of-cell mark is ignored for the
  * row height), for a final paragraph that holds only that mark, including
- * the sole paragraph of an empty cell. Word's PDFs of sample-26 (DOC and
- * DOCX) end a hideMark cell's row at its last text paragraph although the
- * cell ends with an empty paragraph, so the rule is per cell rather than
- * MS-DOC's row condition that every cell be empty.
+ * the sole paragraph of an empty cell. The rule applies to each hideMark
+ * cell independently of the other cells in the row.
  */
 export function isStructuralTrailingParagraph(
   content: TableCellLayoutSource['content'],
