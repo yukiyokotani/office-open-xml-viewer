@@ -18,6 +18,7 @@ import {
   sheetAnchoredRectX,
 } from './renderer.js';
 import { usesNativeOneCellExtent } from './internal/cell-anchor-geometry.js';
+import { inverseImageTransformPoint, rotatedImageBounds } from './internal/image-anchor-transform.js';
 import type { GridAxisGeometry } from './internal/grid-axis-geometry.js';
 import type { XlsxElementContext } from './selection.js';
 
@@ -388,7 +389,13 @@ function hitImage(
   for (let index = worksheet.images.length - 1; index >= 0; index--) {
     const anchor: ImageAnchor = worksheet.images[index];
     const rect = anchoredCanvasRect(anchor, context);
-    if (!rect || !intersectsClip(rect, context) || !pointInRect(point, rect)) continue;
+    if (!rect) continue;
+    const bounds = rotatedImageBounds(rect, anchor.rotation);
+    if (!intersectsClip(bounds, context)) continue;
+    const local = inverseImageTransformPoint(
+      point, rect, anchor.rotation, anchor.flipH, anchor.flipV,
+    );
+    if (!pointInRect(local, rect)) continue;
     return {
       ...baseContext(worksheet, sheetIndex, 'image', index, anchor, undefined, false, maxTextCharacters),
       mimeType: anchor.svgImagePath ? 'image/svg+xml' : anchor.mimeType,

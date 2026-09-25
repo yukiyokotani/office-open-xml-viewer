@@ -75,6 +75,15 @@ describe('hitTestXlsxElementContext', () => {
     expect(hitTestXlsxElementContext(ws, 0, { x: 20, y: 10 }, viewport)).toBeNull();
   });
 
+  it('hit-tests the rotated picture footprint rather than its unrotated box', () => {
+    const ws = worksheet();
+    ws.charts = [];
+    ws.images[0].rotation = 90;
+    expect(hitTestXlsxElementContext(ws, 0, { x: 180, y: 180 }, viewport))
+      .toMatchObject({ elementType: 'image' });
+    expect(hitTestXlsxElementContext(ws, 0, { x: 60, y: 80 }, viewport)).toBeNull();
+  });
+
   it('does no worksheet-cell scan during an object hit', () => {
     const ws = worksheet();
     Object.defineProperty(ws, 'rows', {

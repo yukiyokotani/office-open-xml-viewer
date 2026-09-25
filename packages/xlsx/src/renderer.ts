@@ -38,6 +38,7 @@ import { GridGeometry, MAX_WORKSHEET_COL } from './internal/grid-geometry.js';
 import type { GridAxisGeometry } from './internal/grid-axis-geometry.js';
 import { usesNativeOneCellExtent } from './internal/cell-anchor-geometry.js';
 import { isOptionalImageUnavailable } from './internal/optional-image-fallback.js';
+import { rotatedImageBounds } from './internal/image-anchor-transform.js';
 import {
   MDW_FALLBACK,
   colWidthToPx,
@@ -4683,9 +4684,14 @@ function renderImages(
     const canvasX = sheetAnchoredRectX(logicalCanvasX, imgW, canvasW, rtl);
     const canvasY = scrollAreaY + (imgSheetY1 - scrollOriginSheetY) - scrollOffsetY;
 
-    // Early out when entirely off-screen
-    if (canvasX + imgW < clipX || canvasX > clipX + scrollAreaW) continue;
-    if (canvasY + imgH < scrollAreaY || canvasY > scrollAreaY + scrollAreaH) continue;
+    // A rotated rectangle can intersect the viewport even when its unrotated
+    // box does not. Flips preserve the same axis-aligned bounds.
+    const bounds = rotatedImageBounds(
+      { x: canvasX, y: canvasY, width: imgW, height: imgH },
+      anchor.rotation,
+    );
+    if (bounds.x + bounds.width < clipX || bounds.x > clipX + scrollAreaW) continue;
+    if (bounds.y + bounds.height < scrollAreaY || bounds.y > scrollAreaY + scrollAreaH) continue;
 
     // ECMA-376 §20.1.8.6 `<a:alphaModFix>`: scale the picture's opacity so it
     // composites over the cells beneath it. Saved/restored so it never leaks
@@ -4699,13 +4705,32 @@ function renderImages(
         });
       }
     };
-    if (anchor.alpha != null && anchor.alpha < 1) {
-      ctx.save();
-      ctx.globalAlpha = anchor.alpha;
-      paint();
-      ctx.restore();
+    const paintWithAlpha = () => {
+      if (anchor.alpha != null && anchor.alpha < 1) {
+        ctx.save();
+        try {
+          ctx.globalAlpha = anchor.alpha;
+          paint();
+        } finally {
+          ctx.restore();
+        }
+      } else {
+        paint();
+      }
+    };
+    const rotation = anchor.rotation ?? 0;
+    const flipH = anchor.flipH ?? false;
+    const flipV = anchor.flipV ?? false;
+    if (rotation === 0 && !flipH && !flipV) {
+      paintWithAlpha();
     } else {
-      paint();
+      withDrawingMLShapeTransform(ctx, {
+        rect: { x: canvasX, y: canvasY, w: imgW, h: imgH },
+        geometry: { kind: 'preset', name: 'rect', adjustments: [] },
+        fill: null,
+        stroke: null,
+        transform: { rotationDeg: rotation, flipH, flipV },
+      }, paintWithAlpha);
     }
   }
 
