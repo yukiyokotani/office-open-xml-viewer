@@ -684,23 +684,17 @@ impl Leaf {
             let decoded = geometry
                 .decode(&mut 1_000_000usize)?
                 .ok_or_else(|| unsupported("XLS freeform uses guide formulas or path escapes"))?;
-            // The shape model carries one fill and one line for all paths.
-            // Paths flagged without fill or line are representable only
-            // when the shape itself has none, and whether Excel fills an
-            // open path is not established, so a filled shape needs every
-            // path closed and filled.
-            let (path_fill, path_stroke) = decoded
-                .uniform_paint()
-                .ok_or_else(|| unsupported("XLS freeform paths with differing paint"))?;
-            let authored_fill = decoded.uniform_authored_paint().map(|paint| paint.0);
-            if fill.is_some() && !(path_fill && authored_fill == Some(true)) {
+            // Each path carries its authored noFill/noLine escape
+            // (ECMA-376 path@fill/@stroke, see `custom_geometry`). Whether
+            // Excel fills an open subpath of a filled shape is not
+            // established (PowerPoint does not), so such a path is rejected.
+            if fill.is_some()
+                && decoded
+                    .paths()
+                    .any(|path| path.authored_fill() && !path.fill())
+            {
                 return Err(unsupported(
-                    "XLS filled freeforms with open or unfilled paths are not projected",
-                ));
-            }
-            if line.is_some() && !path_stroke {
-                return Err(unsupported(
-                    "XLS freeform paths without their line are not projected",
+                    "XLS filled freeforms with open paths are not projected",
                 ));
             }
             custom_geometry(&decoded)

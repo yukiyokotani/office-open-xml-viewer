@@ -565,3 +565,55 @@ fn grouped_pictures_reference_their_store_media_with_the_picture_crop() {
     assert_eq!((crop.t, crop.b, crop.l, crop.r), (0.25, 0.0, 0.5, 0.0));
     assert!(info.fill.is_none() && info.stroke_color.is_none() && info.text.is_none());
 }
+
+#[test]
+fn open_freeform_paths_are_projected_only_without_a_shape_fill() {
+    // An open two-segment line in a 100x50 path space.
+    let vertices = [
+        vec![3, 0, 3, 0, 8, 0],
+        [0i32, 0, 100, 0, 50, 50]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect(),
+    ]
+    .concat();
+    let segments = [
+        vec![3, 0, 3, 0, 2, 0],
+        [0x4000u16, 0x0002, 0x8000]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect::<Vec<u8>>(),
+    ]
+    .concat();
+    let owned = workbook(0x0212, &compressed("x"), 1, &[(0, 0)]);
+    let shape = |fill: u32| {
+        let mut shape = source(
+            &owned,
+            0,
+            &[
+                (0x0142, 100),
+                (0x0143, 50),
+                (0xc145, vertices.len() as u32),
+                (0xc146, segments.len() as u32),
+                (0x0181, 0xff),
+                (0x01bf, fill),
+                (0x01c0, 0),
+                (0x01ff, 0x0008_0008),
+            ],
+        );
+        shape.text = None;
+        shape.complex = vec![(0x145, vertices.clone()), (0x146, segments.clone())];
+        shape
+    };
+    // Whether Excel fills an open path of a filled shape is not established.
+    assert!(
+        project(&owned, &excel_defaults(), &shape(0x0010_0010), 0xa00)
+            .unwrap_err()
+            .contains("open paths")
+    );
+    let info = project(&owned, &excel_defaults(), &shape(0x0010_0000), 0xa00)
+        .unwrap()
+        .unwrap();
+    assert!(info.fill.is_none());
+    assert!(matches!(&info.geom, xlsx_model::ShapeGeom::Custom { paths } if paths[0].stroke));
+}
