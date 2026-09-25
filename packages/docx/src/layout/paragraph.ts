@@ -75,7 +75,7 @@ import {
   type RetainedEmphasisMarkInput,
 } from './retained-typography.js';
 import type { RunTypographyAcquisitionInput } from './typography-input.js';
-import { resolveAnchorFrame, type AnchorReferenceFramesInput, type AnchorFrameResult } from './anchor-frame.js';
+import { alignedAnchorPlacement, resolveAnchorFrame, type AnchorReferenceFramesInput, type AnchorFrameResult } from './anchor-frame.js';
 import { paragraphGapPt } from './paragraph-spacing.js';
 import {
   translateDrawing,
@@ -3097,17 +3097,35 @@ function acquireAnchorOccurrence(
     const textBoxRect = uprightTransform
       ? logicalRectToUprightDrawingLocal(authoredRect, uprightTransform)
       : authoredRect;
-    const textBox = acquireShapeTextBoxLayout(outer.run, textBoxRect, {
+    const shapeRun = outer.run;
+    const acquireTextBox = (frame: LayoutRect) => acquireShapeTextBoxLayout(shapeRun, frame, {
       id: `${options.id}:anchor-textbox:${occurrenceId}:${outer.runIndex}`,
       source,
       flowDomainId: options.flowDomainId,
       context: options.context,
       measurer: options.measurer,
       environment: uprightEnvironment,
-      input: outer.run.textBoxInput,
+      input: shapeRun.textBoxInput,
       acquireCompleteStory: options.acquireCompleteStory,
       ...(uprightTransform ? { coordinateSpace: 'upright-physical' as const } : {}),
     });
+    let textBox = acquireTextBox(textBoxRect);
+    // A spAutoFit box aligned to the bottom or centre of its container keeps
+    // that alignment at its fitted height: Word draws a bottom-aligned
+    // fit-to-text box with its fitted bottom on the margin edge, not with its
+    // authored extent's bottom there (ECMA-376 §20.4.3.1 wp:align,
+    // §21.1.2.1.3 spAutoFit).
+    const fitShiftPt = textBox && !uprightTransform
+      ? alignedAutofitShiftPt(
+          outer.run.anchorAcquisitionInput.vertical.choice,
+          baseFrames?.pageParity ?? null,
+          textBoxRect.heightPt,
+          textBox.flowBounds.heightPt,
+        )
+      : 0;
+    if (fitShiftPt !== 0) {
+      textBox = acquireTextBox({ ...textBoxRect, yPt: textBoxRect.yPt + fitShiftPt });
+    }
     if (textBox) {
       acquiredShapeTextBoxes.set(outer.runIndex, textBox);
       rect = uprightTransform
@@ -3149,6 +3167,10 @@ function acquireAnchorOccurrence(
         behavior.relativeHeight,
         entry.relativeHeight,
       ));
+    const paragraphOccurrenceIds = new Set(paragraph.runs.flatMap((run) =>
+      anchoredPayloadRun(run) && run.anchorAcquisitionInput
+        ? [run.anchorAcquisitionInput.occurrenceId]
+        : []));
     const blockerBounds = normativeCollision
       ? [...externalCollisions, ...sameParagraphBlockers]
           .filter((entry) => entry.occurrenceId !== occurrenceId)
@@ -3157,7 +3179,12 @@ function acquireAnchorOccurrence(
             bounds: entry.bounds,
           }))
       : externalExclusions
-          .filter((exclusion) => exclusion.anchorOccurrenceId !== occurrenceId)
+          // Page-owned prescan registers this paragraph's own anchors on the
+          // page before the paragraph lays out. They are same-paragraph
+          // siblings, not different-paragraph blockers, so the compatibility
+          // policy leaves them to overlap as allowOverlap=true permits.
+          .filter((exclusion) => exclusion.anchorOccurrenceId === undefined
+            || !paragraphOccurrenceIds.has(exclusion.anchorOccurrenceId))
           .map((exclusion) => ({
             occurrenceId: exclusion.anchorOccurrenceId ?? exclusion.id,
             bounds: exclusion.bounds,
@@ -3649,6 +3676,29 @@ function translateVerticalTextBoxTable(
 
 /** Acquires a DrawingML/WPS text body through the same paragraph measurement
  * and retained layout seam used by ordinary WordprocessingML paragraphs. */
+/**
+ * Vertical displacement that keeps an aligned anchor's `wp:align` value when a
+ * spAutoFit text box changes its height from the authored extent: `bottom`
+ * (or a trailing `inside`/`outside`) keeps the bottom edge and `center` the
+ * centre. Offsets, percentages and leading alignments keep the top edge.
+ */
+export function alignedAutofitShiftPt(
+  choice: Readonly<import('./anchor-input.js').AnchorAcquisitionInput['vertical']['choice']>,
+  pageParity: 'odd' | 'even' | null,
+  authoredHeightPt: number,
+  fittedHeightPt: number,
+): number {
+  if (choice.kind !== 'align' || !Number.isFinite(authoredHeightPt)
+    || !Number.isFinite(fittedHeightPt)) {
+    return 0;
+  }
+  const delta = authoredHeightPt - fittedHeightPt;
+  const placement = alignedAnchorPlacement('vertical', choice.value, pageParity);
+  if (placement === 'trailing') return delta;
+  if (placement === 'center') return delta / 2;
+  return 0;
+}
+
 export function acquireShapeTextBoxLayout(
   shape: import('./types.js').DeepReadonly<ShapeRun>,
   rect: LayoutRect,
