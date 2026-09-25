@@ -17,13 +17,14 @@ pub(crate) fn read_store_entry<'a>(
 
 /// Which bytes a PNG/JPEG BLIP may carry. The content-signature variants are
 /// host decisions backed by that host's own output: Word writes TIFF data
-/// inside PNG BLIPs and reads it back as TIFF (see the DOC picture store), and
-/// PowerPoint displays GIF data stored in PNG BLIPs (its PDF export shows the
-/// GIF image). No host has evidence for the other combination.
+/// inside PNG BLIPs and reads it back as TIFF, and displays GIF data stored in
+/// PNG BLIPs (see the DOC picture store), and PowerPoint displays GIF data
+/// stored in PNG BLIPs (its PDF export shows the GIF image). No host has
+/// evidence for TIFF in PowerPoint.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Raster {
     Advertised,
-    TiffAware,
+    TiffAndGifAware,
     GifAware,
     /// Advertised raster encodings, plus EMF files with the end-of-file
     /// layout GDI+ writes, which Excel displays (see the metafile validator).
@@ -337,10 +338,12 @@ fn decode(
         || (extension == "jpg" && !bytes.starts_with(&[0xff, 0xd8]))
     {
         extension = match raster {
-            Raster::TiffAware if bytes.starts_with(b"II*\0") || bytes.starts_with(b"MM\0*") => {
+            Raster::TiffAndGifAware
+                if bytes.starts_with(b"II*\0") || bytes.starts_with(b"MM\0*") =>
+            {
                 "tiff"
             }
-            Raster::GifAware
+            Raster::GifAware | Raster::TiffAndGifAware
                 if extension == "png"
                     && (bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a")) =>
             {
@@ -618,14 +621,13 @@ mod tests {
             let bytes = blip(gif(sig, 40, 30), 0xf01e, 0x6e00);
             let (record, _) = crate::officeart::record_with_end(&bytes, 0, &mut 10, "t").unwrap();
             assert!(read(record, &mut 100, usize::MAX).unwrap().is_none());
-            assert!(read_as(record, &mut 100, usize::MAX, Raster::TiffAware)
-                .unwrap()
-                .is_none());
-            let image = read_as(record, &mut 100, usize::MAX, Raster::GifAware)
-                .unwrap()
-                .unwrap();
-            assert_eq!(image.extension, "gif");
-            assert!(image.bytes.starts_with(sig));
+            for raster in [Raster::GifAware, Raster::TiffAndGifAware] {
+                let image = read_as(record, &mut 100, usize::MAX, raster)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(image.extension, "gif");
+                assert!(image.bytes.starts_with(sig));
+            }
         }
         // A JPEG slot is not read as GIF; zero, oversized or truncated headers
         // are rejected.
@@ -651,7 +653,7 @@ mod tests {
         let (blip_record, _) = crate::officeart::record_with_end(&blip, 0, &mut 10, "t").unwrap();
         // The shared reader keeps admitting only the advertised encoding.
         assert!(read(blip_record, &mut 100, usize::MAX).unwrap().is_none());
-        let image = read_as(blip_record, &mut 100, usize::MAX, Raster::TiffAware)
+        let image = read_as(blip_record, &mut 100, usize::MAX, Raster::TiffAndGifAware)
             .unwrap()
             .unwrap();
         assert_eq!(image.extension, "tiff");
@@ -659,7 +661,7 @@ mod tests {
         let big = tiff_in_png(false, &[(257, 3, 30), (256, 3, 40)]);
         let (blip_record, _) = crate::officeart::record_with_end(&big, 0, &mut 10, "t").unwrap();
         assert_eq!(
-            read_as(blip_record, &mut 100, usize::MAX, Raster::TiffAware)
+            read_as(blip_record, &mut 100, usize::MAX, Raster::TiffAndGifAware)
                 .unwrap()
                 .unwrap()
                 .extension,
@@ -676,15 +678,19 @@ mod tests {
             let (blip_record, _) =
                 crate::officeart::record_with_end(&blip, 0, &mut 10, "t").unwrap();
             assert!(
-                read_as(blip_record, &mut 100, usize::MAX, Raster::TiffAware).is_err(),
+                read_as(blip_record, &mut 100, usize::MAX, Raster::TiffAndGifAware).is_err(),
                 "{entries:?}"
             );
         }
+        // TIFF data is not admitted for the GIF-only host.
+        assert!(read_as(blip_record, &mut 100, usize::MAX, Raster::GifAware)
+            .unwrap()
+            .is_none());
         // Other data in a PNG BLIP is still omitted.
-        let other = record(0x6e00, 0xf01e, &[vec![0; 17], b"GIF89a".to_vec()].concat());
+        let other = record(0x6e00, 0xf01e, &[vec![0; 17], b"BM\0\0".to_vec()].concat());
         let (blip_record, _) = crate::officeart::record_with_end(&other, 0, &mut 10, "t").unwrap();
         assert!(
-            read_as(blip_record, &mut 100, usize::MAX, Raster::TiffAware)
+            read_as(blip_record, &mut 100, usize::MAX, Raster::TiffAndGifAware)
                 .unwrap()
                 .is_none()
         );

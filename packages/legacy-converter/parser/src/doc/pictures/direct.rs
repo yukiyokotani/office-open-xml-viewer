@@ -198,9 +198,11 @@ fn key(offset: usize) -> String {
 /// content-sniffing metafile players render them; no DOC-specific paint path.
 fn mime(extension: &str) -> Result<&'static str, String> {
     match extension {
-        "png" | "jpg" | "emf" | "wmf" | "tiff" => Ok(ooxml_common::blip::mime_from_ext(extension)),
+        "png" | "jpg" | "gif" | "emf" | "wmf" | "tiff" => {
+            Ok(ooxml_common::blip::mime_from_ext(extension))
+        }
         _ => Err(unsupported(
-            "direct DOC model supports only PNG/JPEG/EMF/WMF inline pictures",
+            "direct DOC model supports only PNG/JPEG/GIF/TIFF/EMF/WMF inline pictures",
         )),
     }
 }
