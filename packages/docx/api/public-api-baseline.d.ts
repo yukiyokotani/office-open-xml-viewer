@@ -2178,6 +2178,10 @@ export interface ShapeRun {
     behindDoc?: boolean;
     zOrder: number;
     subpaths: PathCmd[][];
+    subpathPaint?: Array<{
+        fill?: 'none' | 'lighten' | 'lightenLess' | 'darken' | 'darkenLess';
+        stroke?: false;
+    }>;
     presetGeometry?: string | null;
     adjValues?: Array<number | null>;
     fill: ShapeFill | null;

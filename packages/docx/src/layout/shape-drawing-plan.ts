@@ -223,6 +223,11 @@ export function planShapeDrawing(
       : {
           kind: 'custom',
           subpaths: shape.subpaths.map((subpath) => subpath.map((command) => ({ ...command }))),
+          // ECMA-376 §20.1.9.15 per-path fill/stroke, kept only when it
+          // lines up with the subpaths.
+          ...(shape.subpathPaint?.length && shape.subpathPaint.length === shape.subpaths.length
+            ? { paint: shape.subpathPaint.map((paint) => ({ ...paint })) }
+            : {}),
         },
     fill: shape.fill && shape.fill.fillType !== 'image' ? { ...shape.fill, ...(shape.fill.fillType === 'gradient'
       ? { stops: shape.fill.stops.map((stop) => ({ ...stop })) }

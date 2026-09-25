@@ -12,7 +12,7 @@ import type {
   ChartRegionMapRenderer,
   ChartExRenderer,
 } from '@silurus/ooxml-core';
-import { chartImageFillKey, paintOptionalImagePlaceholder, withDrawingMLShapeTransform } from '@silurus/ooxml-core';
+import { chartImageFillKey, paintOptionalImagePlaceholder, pathFillModeOverlay, withDrawingMLShapeTransform } from '@silurus/ooxml-core';
 import { placePhoneticRuns } from './phonetic.js';
 import {
   cssTailFor,
@@ -4461,7 +4461,18 @@ function drawShape(
             break;
         }
       }
-      fillAndStroke(ctx, shape, sw, sh);
+      // ECMA-376 §20.1.9.15: each custom path carries its own fill mode and
+      // stroke flag. `fill="none"` leaves the path unfilled and `stroke="0"`
+      // unstroked. The lighten/darken modes shade the fill by the amounts
+      // measured from PowerPoint's output (shared with the preset engine).
+      if (path.fill !== 'none' && fillShape(ctx, shape, sw, sh)) {
+        const overlay = pathFillModeOverlay(path.fill);
+        if (overlay) {
+          ctx.fillStyle = overlay;
+          ctx.fill();
+        }
+      }
+      if (path.stroke !== false) strokeShapePath(ctx, shape, sw, sh);
     }
   } else if (shape.geom.type === 'preset') {
     // Drive the shape off the ECMA-376 §20.1.9 spec-driven preset engine
@@ -4992,15 +5003,25 @@ function fillAndStroke(
   width: number,
   height: number,
 ): void {
+  fillShape(ctx, shape, width, height);
+  strokeShapePath(ctx, shape, width, height);
+}
+
+/** Fill the current path with the shape fill; returns whether it painted. */
+function fillShape(
+  ctx: CanvasRenderingContext2D,
+  shape: ShapeInfo,
+  width: number,
+  height: number,
+): boolean {
   const fill = shape.fill ?? (shape.fillColor
     ? { fillType: 'solid' as const, color: shape.fillColor }
     : null);
   const paint = resolveFill(fill, ctx, 0, 0, width, height, shape.rot);
-  if (paint) {
-    ctx.fillStyle = paint;
-    ctx.fill();
-  }
-  strokeShapePath(ctx, shape, width, height);
+  if (!paint) return false;
+  ctx.fillStyle = paint;
+  ctx.fill();
+  return true;
 }
 
 function shapeStroke(shape: ShapeInfo): Stroke | null {
