@@ -11,6 +11,7 @@ pub(super) struct PresentationStorage<R, S, B> {
     pub outline_slide_numbers: Vec<Vec<Vec<u32>>>,
     pub first_slide_number: u16,
     pub text_masters: Vec<Option<std::rc::Rc<text_style::Master>>>,
+    pub metro_themes: Vec<Option<std::rc::Rc<metro::Theme>>>,
     pub document_text_axes: Option<text_style::DocumentAxes>,
     pub fonts: Vec<String>,
     pub schemes: Vec<Option<scheme::Scheme>>,
@@ -45,6 +46,7 @@ impl OwnedPresentation {
             outline_slide_numbers: self.outline_slide_numbers,
             first_slide_number: self.first_slide_number,
             text_masters: self.text_masters,
+            metro_themes: self.metro_themes,
             document_text_axes: self.document_text_axes,
             fonts: self.fonts,
             schemes: self.schemes,
@@ -328,6 +330,10 @@ pub(super) fn resolve_owned(
         text_masters: slides
             .iter()
             .map(|(slide, _)| schemes.text_master(slide.view(document)?, budget))
+            .collect::<Result<_, _>>()?,
+        metro_themes: slides
+            .iter()
+            .map(|(slide, _)| schemes.metro_theme(slide.view(document)?, budget))
             .collect::<Result<_, _>>()?,
         document_text_axes: schemes.document_text_axes,
         outline_types,

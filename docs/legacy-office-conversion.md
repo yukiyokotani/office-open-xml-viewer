@@ -333,10 +333,11 @@ Multiple local ruler records are rejected as unsupported ambiguity; the inline
 record grammar permits them, but precedence is not inferred by this subset.
 This is not a claim of full binary/Office visual equality.
 
-OfficeArt `metroBlob` alternative shape XML is currently ignored. A modern
-Office-saved PPT can retain paragraph properties there rather than in its
-classic text ruler; see the [controlled probe protocol](../scripts/legacy-ppt-ruler-probes.md)
-before attributing those differences to an implicit ruler rule.
+A modern Office-saved PPT can retain paragraph properties in the OfficeArt
+`metroBlob` alternative shape XML rather than in its classic text ruler. The
+direct PPT source adopts that XML under the rule described with the release
+gap inventory below; see also the [controlled probe protocol](../scripts/legacy-ppt-ruler-probes.md)
+before attributing differences to an implicit ruler rule.
 
 Local Office-reference checks confirm that restoring these stops improves
 tab-separated text, but residual RTL anchoring and ruler-indent differences
@@ -2420,7 +2421,7 @@ be closed before an experimental release.
 | PPT | ~~Only seven MS-ODRAW shape types map to presets~~ 100+ shape types map as PowerPoint converts them, with evidenced adjust formulas (officeart::preset); adjusted callout2/3 families, arrow callouts, curved arrows, ribbons and tall cubes/hexagons/parallelograms still fail closed | several |
 | PPT | ~~Native/OLE charts are missing~~ Resolved: embedded OLE objects show their stored presentation picture (bfc835d3) | 3 |
 | PPT | ~~Rotation by multiples of 90 degrees and combined flips use the wrong bounds or order~~ Resolved from the 120-case PowerPoint control (aa9dc5c1) | 1 |
-| PPT | ~~Slide gradient backgrounds~~ linear/scaled/two-colour/translucent shades resolved (95b74d19); path (5, 6) and title (8) shades now fail closed. Bullets, letter spacing and autofit are missing | several |
+| PPT | ~~Slide gradient backgrounds~~ linear/scaled/two-colour/translucent shades resolved (95b74d19); path (5, 6) and title (8) shades now fail closed. Bullets resolved through master levels; letter spacing, shrink-to-fit and per-paragraph indents come from adopted alternative shape XML where it agrees with the binary | several |
 | PPT | ~~Gradients on rotated shapes (or inside rotated/flipped groups) are replaced by the solid fill colour~~ Resolved (ef41f03a) | several |
 | PPT | Custom geometry with per-path fill/stroke flags is rejected; the PPTX model has no per-path `fill`/`stroke` (ECMA-376 §20.1.9.15), a generic PPTX gap | 1 |
 | PPT | ~~Unmapped shape types are dropped silently~~ Now rejected | several |
@@ -2430,10 +2431,37 @@ be closed before an experimental release.
 | DOC | Picture washout/brightness and space-before after a page break differ from Word | 2 |
 
 PowerPoint 2007+ also stores a `metroBlob` (MS-ODRAW 2.3.4.41, an OPC
-package with the shape's DrawingML) on most shapes. The specification says it
-SHOULD be ignored, and a PowerPoint 16 control agrees for the case that
-matters: with a shape's binary adjust and fill edited but its metroBlob kept,
-PowerPoint's PDF follows the binary, identically to a copy whose metroBlob was
-removed. The direct PPT path therefore renders the binary properties only.
-metroBlob contents are used solely as analysis evidence (binary-to-DrawingML
-pairs), never for rendering.
+package with the shape's DrawingML, `drs/shapexml.xml`) on most shapes. The
+specification says it SHOULD be ignored; implementation note 32 says Office
+2007 and 2010 use it. PowerPoint 16 controls settle how it is used:
+
+- With only the alternative XML edited (binary byte-identical, the package
+  rebuilt at the same length), PowerPoint's PDF renders the edited XML: a card
+  fill changed in the XML only is drawn in the new color, and character
+  spacing raised in the XML only is drawn raised.
+- With a shape's binary adjust and fill edited but its alternative XML kept,
+  PowerPoint's PDF follows the binary, identically to a copy whose XML was
+  removed.
+- A corpus deck whose alternative states 10.5 pt text over a binary 10 pt run
+  renders without the alternative's other run properties, while decks whose
+  sizes agree render them.
+
+The direct PPT source therefore adopts the alternative XML for a shape only
+when it agrees with the binary shape on what both record and the direct model
+can compare: the same preset (and adjust values within master-unit rounding)
+or custom geometry on both sides, the same untransformed position, size,
+rotation and flips (group children in their unscaled child space), the same
+solid fill color when both have one, the same run font size, bold and italic
+where both state them, and the same paragraph, run and line-break structure
+at equal UTF-16 lengths. The XML's text characters are masked, so the adopted
+shape takes its characters, transform and identifier from the binary. The
+XML is parsed by the ordinary PPTX shape parser, resolving theme references
+against the master's round-trip theme and color map; no OOXML is generated.
+Placeholders (no layout context), shapes whose XML references relationships,
+math runs, non-shape parts (pictures, groups, connectors, SmartArt), and any
+parse, resource or budget failure keep the binary projection. The downrev
+checksums beside the XML are not recomputable (they are not checksums of the
+binary records), so structural agreement stands in for them; a binary edit
+that preserves every compared property would still adopt a stale XML.
+Glyph shadow and emboss, which the binary cannot express, reject a shape only
+when its alternative XML is not adopted.

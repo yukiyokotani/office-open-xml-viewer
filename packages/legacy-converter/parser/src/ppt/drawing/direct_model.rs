@@ -257,7 +257,7 @@ impl Context<'_> {
         }
         let local = direct_transform::leaf(&shape)?;
         let local_extent = (local.cx, local.cy);
-        let transform = direct_transform::flatten(local, ancestors);
+        let transform = direct_transform::flatten(local.clone(), ancestors);
         let master = shape
             .master()
             .map(|id| self.presentation.shape_masters.paint(id))
@@ -373,7 +373,23 @@ impl Context<'_> {
                 ));
             }
         }
-        let text = self.text_body(&shape, inherited)?;
+        // Alternative shape XML (`ppt::metro`) is a candidate only with a
+        // single blob and the master's round-trip theme. Text effects the
+        // binary cannot express are then deferred: the adopted alternative
+        // carries them, and they reject only when it is not adopted.
+        let metro_theme = self.presentation.metro_themes[self.index].clone();
+        let metro_blob = match (&shape.props.metro, &metro_theme) {
+            (Some(span), Some(_)) if !shape.props.metro_ambiguous => Some(span.clone()),
+            _ => None,
+        };
+        let deferred_effect = std::cell::Cell::new(None);
+        let mut raw_text = None;
+        let text = self.text_body(
+            &shape,
+            inherited,
+            &mut raw_text,
+            metro_blob.as_ref().map(|_| &deferred_effect),
+        )?;
         // Shape types map to presets as PowerPoint converts them; an unmapped
         // type is rejected rather than dropped or drawn as an unfilled box.
         // Adjust values convert on the shape's own (pre-group) extent, where
@@ -462,46 +478,64 @@ impl Context<'_> {
             .map(|value| value.to_model(self.model_budget))
             .transpose()?;
         let fill = gradient_fill.or(fill);
-        self.push(
-            SlideElement::Shape(ShapeElement {
-                x: transform.x,
-                y: transform.y,
-                width: transform.cx,
-                height: transform.cy,
-                rotation: transform.rot,
-                flip_h: transform.flip_h,
-                flip_v: transform.flip_v,
-                geometry: geometry_name,
-                fill,
-                stroke,
-                text_body: text,
-                default_text_color: None,
-                cust_geom: paths,
-                adj,
-                adj2,
-                adj3,
-                adj4,
-                adj5,
-                adj6,
-                adj7,
-                adj8,
-                shadow: None,
-                inner_shadow: None,
-                glow: None,
-                soft_edge: None,
-                reflection: None,
-                id: Some(shape.id.to_string()),
-                name: None,
-                hyperlink: None,
-                hyperlink_action: None,
-                placeholder_type: None,
-                placeholder_idx: None,
-                text_rect: None,
-                scene3d: None,
-                sp3d: None,
-            }),
-            inherited,
-        )
+        let element = ShapeElement {
+            x: transform.x,
+            y: transform.y,
+            width: transform.cx,
+            height: transform.cy,
+            rotation: transform.rot,
+            flip_h: transform.flip_h,
+            flip_v: transform.flip_v,
+            geometry: geometry_name,
+            fill,
+            stroke,
+            text_body: text,
+            default_text_color: None,
+            cust_geom: paths,
+            adj,
+            adj2,
+            adj3,
+            adj4,
+            adj5,
+            adj6,
+            adj7,
+            adj8,
+            shadow: None,
+            inner_shadow: None,
+            glow: None,
+            soft_edge: None,
+            reflection: None,
+            id: Some(shape.id.to_string()),
+            name: None,
+            hyperlink: None,
+            hyperlink_action: None,
+            placeholder_type: None,
+            placeholder_idx: None,
+            text_rect: None,
+            scene3d: None,
+            sp3d: None,
+        };
+        let adopted = match (&metro_blob, &metro_theme) {
+            (Some(span), Some(theme)) => crate::ppt::metro::adopt(
+                &element,
+                &local,
+                !ancestors.is_empty(),
+                raw_text.as_deref(),
+                span.view(self.backing)?,
+                theme,
+                self.work_budget,
+                self.text_budget,
+            ),
+            _ => None,
+        };
+        if adopted.is_none() {
+            if let Some(name) = deferred_effect.get() {
+                return Err(unsupported(format!(
+                    "PowerPoint text {name} effect is not projected"
+                )));
+            }
+        }
+        self.push(SlideElement::Shape(adopted.unwrap_or(element)), inherited)
     }
 
     /// OLE shapes (fOleShape, MS-ODRAW 2.2.40) show the presentation picture
@@ -743,6 +777,8 @@ impl Context<'_> {
         &mut self,
         shape: &SpannedShape,
         inherited: bool,
+        raw_text: &mut Option<String>,
+        deferred_effect: Option<&std::cell::Cell<Option<&'static str>>>,
     ) -> Result<Option<TextBody>, String> {
         let Some(textbox) = shape.textbox.as_ref() else {
             return Ok(None);
@@ -845,6 +881,7 @@ impl Context<'_> {
             None
         };
         let levels = linked.or(direct.as_ref().map(|d| d.levels.as_slice()));
+        *raw_text = Some(blocks[0].clone());
         slide_numbers.sort_unstable();
         let default_style = style
             .is_none()
@@ -875,6 +912,7 @@ impl Context<'_> {
                     None
                 },
                 auto_number: None,
+                deferred_effect,
             },
             text_style::direct_model::DirectAxes {
                 ruler: local_ruler,
@@ -1081,6 +1119,7 @@ mod tests {
             outline_slide_numbers: vec![Vec::new()],
             first_slide_number: 1,
             text_masters: vec![None],
+            metro_themes: vec![None],
             document_text_axes: None,
             fonts: Vec::new(),
             schemes: vec![None],

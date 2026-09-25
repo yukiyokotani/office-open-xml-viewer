@@ -314,9 +314,14 @@ fn model_run(
     // model does not read. Reject rather than drop the effect.
     for (bit, name) in [(0x10u16, "shadow"), (0x200, "emboss")] {
         if character.mask & u32::from(bit) != 0 && character.style & bit != 0 {
-            return Err(unsupported(format!(
-                "PowerPoint text {name} effect is not projected"
-            )));
+            match context.deferred_effect {
+                Some(deferred) => deferred.set(Some(name)),
+                None => {
+                    return Err(unsupported(format!(
+                        "PowerPoint text {name} effect is not projected"
+                    )))
+                }
+            }
         }
     }
     let color = model_color(character.color, context.scheme, model_budget)?;
