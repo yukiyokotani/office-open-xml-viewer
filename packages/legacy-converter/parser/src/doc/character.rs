@@ -1091,6 +1091,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "direct-doc")]
     fn insertion_marks_are_style_relative_and_survive_resets() {
         let base = Properties::default();
         let mut value = base.clone();
