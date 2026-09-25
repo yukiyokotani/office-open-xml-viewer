@@ -427,7 +427,13 @@ fn project_sheet(
                     .cell_styles
                     .get(&(row_index, column))
                     .map(|v| u32::from(*v)),
-                formula: None,
+                formula: match sheet.formulas.get(&(row_index, column)) {
+                    Some(text) => {
+                        charge(budget, text.len())?;
+                        Some(text.clone())
+                    }
+                    None => None,
+                },
                 show_phonetic: false,
             });
         }
