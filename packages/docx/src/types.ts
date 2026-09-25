@@ -69,11 +69,13 @@ export interface DocxDocumentModel {
    *  (kinsoku) configuration. Absent when settings.xml has no relevant
    *  elements (the renderer then uses spec defaults: kinsoku ON). */
   settings?: DocSettings;
-  /** RB7 partial degradation: set when `word/document.xml` (the body part) could
-   *  not be read or parsed. The document still "opens" — `body` is empty and this
-   *  part-tagged error (e.g. `"word/document.xml: <detail>"`) is carried — so the
-   *  viewer shows a visible placeholder page instead of throwing. Absent
-   *  (`undefined`) for every healthy document. */
+  /** RB7 partial degradation: set when `word/document.xml` (the body part) is
+   *  present but could not be parsed. The document still "opens" — `body` is
+   *  empty and this part-tagged error (e.g. `"word/document.xml: <detail>"`) is
+   *  carried — so the viewer shows a visible placeholder page instead of
+   *  throwing. Absent (`undefined`) for every healthy document. Input that is not
+   *  a WordprocessingML package (not a ZIP, no `[Content_Types].xml`, or no
+   *  `word/document.xml`) is rejected with `OoxmlError('not-ooxml')` instead. */
   parseError?: string;
 }
 

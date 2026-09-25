@@ -22,6 +22,9 @@ import {
 } from './pull-credit-error.js';
 
 const RESOURCE_LIMIT_PREFIX = 'OOXML_RESOURCE_LIMIT:';
+/** Rust `ooxml_common::opc::NOT_OOXML_PREFIX`: the input is not a readable ZIP,
+ * not an OPC package, or lacks the format's main part (ECMA-376 Part 2). */
+const NOT_OOXML_PREFIX = 'OOXML_NOT_OOXML:';
 const MAX_IDENTIFIER_LENGTH = 128;
 const MAX_OPERATION_LENGTH = 256;
 const MAX_PART_LENGTH = 4_096;
@@ -237,6 +240,21 @@ export function parseResourceLimitError(error: unknown): OoxmlResourceLimitError
   return new OoxmlResourceLimitError(resourceLimitMessage(data.details), data.details);
 }
 
+/** Parse only an exact Rust not-OOXML envelope into `OoxmlError('not-ooxml')`. */
+function parseNotOoxmlError(error: unknown): OoxmlError | undefined {
+  const text = error instanceof Error ? error.message : String(error);
+  if (!text.startsWith(NOT_OOXML_PREFIX)) return undefined;
+  const detail = text.slice(NOT_OOXML_PREFIX.length);
+  return new OoxmlError('not-ooxml', `This file is not an Office Open XML document: ${detail}`);
+}
+
+/** Reconstruct the typed error carried by a Rust parser envelope, if any. */
+export function parseTypedParserError(
+  error: unknown,
+): OoxmlResourceLimitError | OoxmlError | undefined {
+  return parseResourceLimitError(error) ?? parseNotOoxmlError(error);
+}
+
 function serializeWorkerErrorUnchecked(error: unknown): WorkerErrorPayload {
   const decodedImage = getOoxmlDecodedImageLimitDetails(error);
   if (decodedImage) {
@@ -275,7 +293,7 @@ function serializeWorkerErrorUnchecked(error: unknown): WorkerErrorPayload {
   const typed =
     error instanceof OoxmlError || error instanceof OoxmlResourceLimitError
       ? error
-      : parseResourceLimitError(error);
+      : parseTypedParserError(error);
   if (typed instanceof OoxmlResourceLimitError) {
     const resourceLimit = detailsForWire(typed.details);
     if (!resourceLimit) {

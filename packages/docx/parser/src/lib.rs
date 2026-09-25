@@ -62,21 +62,12 @@ fn render_markdown_from_bytes_with_limits(
     max_archive_entry_bytes: Option<u64>,
     max_total_inflated_bytes: Option<u64>,
 ) -> Result<String, String> {
-    let mut zip = match parser::open_zip_with_limits(
+    let mut zip = parser::open_document_package(
         data.to_vec(),
         max_archive_entry_bytes,
         max_total_inflated_bytes,
-    ) {
-        Ok(zip) => zip,
-        Err(error) if error.starts_with("OOXML_RESOURCE_LIMIT:") => return Err(error),
-        Err(error) => {
-            let output = markdown::render_document_with_limit(
-                &parser::degraded_container_document(error),
-                docx_markdown_limit(),
-            );
-            return Ok(output.into_string());
-        }
-    };
+        None,
+    )?;
     zip.run_operation("markdown", render_markdown_from_zip)
 }
 
@@ -194,12 +185,10 @@ fn serialize_document_unit(
 
 #[wasm_bindgen]
 pub struct DocxArchive {
-    /// The opened archive, or the container-open error string when the ZIP itself
-    /// was truncated / corrupt (RB7 MAJOR). Deferring the failure here — instead of
-    /// erroring out of `new` — lets `parse()` return a degraded placeholder
-    /// document (symmetric with a corrupt inner part) rather than the constructor
-    /// throwing an opaque error the viewer can't turn into a placeholder page.
-    archive: Result<parser::Zip, String>,
+    /// The admitted OPC package. Construction fails closed when the input is not
+    /// a ZIP, not an OPC package, or lacks `word/document.xml`
+    /// (`ooxml_common::opc`), so every method operates on a real document.
+    archive: parser::Zip,
     document_cursor: Option<DocumentCursorState>,
     prepared_document_chunk: Option<PreparedDocumentChunk>,
     last_document_usage: Option<ResourceUsage>,
@@ -225,20 +214,13 @@ impl DocxArchive {
         max_archive_entries: Option<u64>,
     ) -> Result<DocxArchive, JsValue> {
         console_error_panic_hook::set_once();
-        // RB7 (MAJOR): a truncated / corrupt CONTAINER is deferred, not thrown, so
-        // `parse()` can degrade it to a placeholder document instead of the
-        // constructor failing with an opaque error.
-        let archive = parser::open_zip_with_policy(
+        let archive = parser::open_document_package(
             data,
             max_archive_entry_bytes,
             max_total_inflated_bytes,
             max_archive_entries,
-        );
-        if let Err(error) = &archive {
-            if error.starts_with("OOXML_RESOURCE_LIMIT:") {
-                return Err(JsValue::from_str(error));
-            }
-        }
+        )
+        .map_err(|error| JsValue::from_str(&error))?;
         Ok(DocxArchive {
             archive,
             document_cursor: None,
@@ -249,17 +231,15 @@ impl DocxArchive {
 
     /// Parse the retained archive and return the model as UTF-8 JSON bytes.
     /// Byte-for-byte identical to `parse_docx` on the same file — same parser,
-    /// same serializer, same error strings. When the CONTAINER failed to open
-    /// (RB7 MAJOR) the model is a degraded placeholder tagged with the container.
+    /// same serializer, same error strings.
     pub fn parse(&mut self) -> Result<Vec<u8>, JsValue> {
         if self.document_cursor.is_some() || self.prepared_document_chunk.is_some() {
             return Err(JsValue::from_str("a document cursor is active"));
         }
-        let doc = match self.archive.as_mut() {
-            Ok(zip) => zip.run_operation("parse", parser::parse_streamed_compatible),
-            Err(e) => Ok(parser::degraded_container_document(e.clone())),
-        };
-        let doc = doc.map_err(docx_parser_js_error)?;
+        let doc = self
+            .archive
+            .run_operation("parse", parser::parse_streamed_compatible)
+            .map_err(docx_parser_js_error)?;
         serde_json::to_vec(&doc).map_err(|e| JsValue::from_str(&format!("serialize error: {e}")))
     }
 
@@ -286,46 +266,32 @@ impl DocxArchive {
             return Err("a document cursor is already active".to_string());
         }
         self.last_document_usage = None;
-        match self.archive.as_mut() {
-            Ok(zip) => {
-                zip.begin_operation("document-cursor")?;
-                match parser::DocxBodyCursor::start(zip) {
-                    Ok(cursor) => {
-                        self.document_cursor = Some(DocumentCursorState {
-                            operation_id,
-                            generation,
-                            next_sequence: 0,
-                            accepted_json_bytes: 0,
-                            cursor: Some(cursor),
-                            degraded_terminal: None,
-                        });
-                        Ok(())
-                    }
-                    Err(failure) => {
-                        if let Err(resource_error) = zip.assert_healthy() {
-                            zip.cancel_operation();
-                            return Err(resource_error);
-                        }
-                        self.document_cursor = Some(DocumentCursorState {
-                            operation_id,
-                            generation,
-                            next_sequence: 0,
-                            accepted_json_bytes: 0,
-                            cursor: None,
-                            degraded_terminal: Some(failure.into_degraded_document()),
-                        });
-                        Ok(())
-                    }
-                }
+        let zip = &mut self.archive;
+        zip.begin_operation("document-cursor")?;
+        match parser::DocxBodyCursor::start(zip) {
+            Ok(cursor) => {
+                self.document_cursor = Some(DocumentCursorState {
+                    operation_id,
+                    generation,
+                    next_sequence: 0,
+                    accepted_json_bytes: 0,
+                    cursor: Some(cursor),
+                    degraded_terminal: None,
+                });
+                Ok(())
             }
-            Err(error) => {
+            Err(failure) => {
+                if let Err(resource_error) = zip.assert_healthy() {
+                    zip.cancel_operation();
+                    return Err(resource_error);
+                }
                 self.document_cursor = Some(DocumentCursorState {
                     operation_id,
                     generation,
                     next_sequence: 0,
                     accepted_json_bytes: 0,
                     cursor: None,
-                    degraded_terminal: Some(parser::degraded_container_document(error.clone())),
+                    degraded_terminal: Some(failure.into_degraded_document()),
                 });
                 Ok(())
             }
@@ -385,9 +351,7 @@ impl DocxArchive {
         if identity != (sequence, operation_id, generation) {
             return Err("document cursor identity or sequence is stale".to_string());
         }
-        if let Ok(zip) = self.archive.as_ref() {
-            zip.assert_healthy()?;
-        }
+        self.archive.assert_healthy()?;
 
         let result = (|| -> Result<(Vec<u8>, bool), String> {
             let state = self
@@ -396,11 +360,7 @@ impl DocxArchive {
                 .expect("document cursor checked above");
             let unit =
                 if let Some(cursor) = state.cursor.as_mut() {
-                    let zip = self
-                        .archive
-                        .as_mut()
-                        .map_err(|error| format!("docx-parser error: {error}"))?;
-                    cursor.next_unit(zip)?
+                    cursor.next_unit(&mut self.archive)?
                 } else {
                     parser::StreamedDocumentUnit::Complete {
                         document: Box::new(state.degraded_terminal.take().ok_or_else(|| {
@@ -409,23 +369,15 @@ impl DocxArchive {
                     }
                 };
             let done = matches!(unit, parser::StreamedDocumentUnit::Complete { .. });
-            let reporter = match self.archive.as_mut() {
-                Ok(zip) => Some(zip.operation()?.limit_reporter()?),
-                Err(_) => None,
-            };
-            let bytes = serialize_document_unit(&unit, reporter.as_ref())?;
+            let reporter = self.archive.operation()?.limit_reporter()?;
+            let bytes = serialize_document_unit(&unit, Some(&reporter))?;
             Ok((bytes, done))
         })();
         let (bytes, done) = match result {
             Ok(prepared) => prepared,
             Err(error) => {
                 self.cancel_document_cursor();
-                return Err(self
-                    .archive
-                    .as_ref()
-                    .ok()
-                    .and_then(|zip| zip.assert_healthy().err())
-                    .unwrap_or(error));
+                return Err(self.archive.assert_healthy().err().unwrap_or(error));
             }
         };
         let byte_length = bytes.len();
@@ -436,28 +388,19 @@ impl DocxArchive {
             .accepted_json_bytes;
         let accepted_json_bytes_after = accepted_json_bytes.saturating_add(byte_length as u64);
         let retained_model_limit = docx_retained_model_json_limit();
-        let retained_limit = match self.archive.as_mut() {
-            Ok(zip) => zip.operation()?.limit_reporter()?.observe_hard_limit(
+        let retained_limit = self
+            .archive
+            .operation()?
+            .limit_reporter()?
+            .observe_hard_limit(
                 HardResourceLimitKind::DocxRetainedModelJsonBytes,
                 Some("word/document.xml"),
                 retained_model_limit,
                 accepted_json_bytes_after,
-            ),
-            Err(_) if accepted_json_bytes_after > retained_model_limit => Err(
-                format!(
-                    "document retained model JSON exceeds its hard ceiling: {accepted_json_bytes_after} > {retained_model_limit}"
-                ),
-            ),
-            Err(_) => Ok(()),
-        };
+            );
         if let Err(error) = retained_limit {
             self.cancel_document_cursor();
-            return Err(self
-                .archive
-                .as_ref()
-                .ok()
-                .and_then(|zip| zip.assert_healthy().err())
-                .unwrap_or(error));
+            return Err(self.archive.assert_healthy().err().unwrap_or(error));
         }
         self.prepared_document_chunk = Some(PreparedDocumentChunk {
             operation_id,
@@ -509,18 +452,14 @@ impl DocxArchive {
         if prepared.bytes.is_some() {
             return Err("document unit cannot be acknowledged before delivery".to_string());
         }
-        if let Ok(zip) = self.archive.as_ref() {
-            zip.assert_healthy()?;
-        }
+        self.archive.assert_healthy()?;
         let done = prepared.done;
         let accepted_json_bytes_after = prepared.accepted_json_bytes_after;
         self.prepared_document_chunk.take();
         if done {
             self.document_cursor.take();
-            if let Ok(zip) = self.archive.as_mut() {
-                self.last_document_usage = zip.operation_usage();
-                zip.finish_operation()?;
-            }
+            self.last_document_usage = self.archive.operation_usage();
+            self.archive.finish_operation()?;
         } else if let Some(state) = self.document_cursor.as_mut() {
             state.next_sequence = state.next_sequence.saturating_add(1);
             state.accepted_json_bytes = accepted_json_bytes_after;
@@ -531,12 +470,10 @@ impl DocxArchive {
     pub fn cancel_document_cursor(&mut self) {
         self.prepared_document_chunk.take();
         self.document_cursor.take();
-        if let Ok(zip) = self.archive.as_mut() {
-            if let Some(usage) = zip.operation_usage() {
-                self.last_document_usage = Some(usage);
-            }
-            zip.cancel_operation();
+        if let Some(usage) = self.archive.operation_usage() {
+            self.last_document_usage = Some(usage);
         }
+        self.archive.cancel_operation();
     }
 
     pub fn close_document_session(&mut self) {
@@ -547,9 +484,7 @@ impl DocxArchive {
     pub fn document_cursor_resource_usage(&self) -> Result<Vec<u8>, JsValue> {
         let usage = self
             .archive
-            .as_ref()
-            .ok()
-            .and_then(parser::Zip::operation_usage)
+            .operation_usage()
             .or(self.last_document_usage)
             .ok_or_else(|| JsValue::from_str("document cursor usage is unavailable"))?;
         serde_json::to_vec(&usage)
@@ -559,48 +494,33 @@ impl DocxArchive {
     /// Session-wide archive accounting after parsing or any later lazy part
     /// extraction. Diagnostic only: this is not an allocator-memory estimate.
     pub fn resource_usage(&self) -> Result<Vec<u8>, JsValue> {
-        let usage = self
-            .archive
-            .as_ref()
-            .map(parser::Zip::usage)
-            .map_err(|_| JsValue::from_str("docx resource usage is unavailable"))?;
+        let usage = self.archive.usage();
         serde_json::to_vec(&usage)
             .map_err(|error| JsValue::from_str(&format!("serialize error: {error}")))
     }
 
     /// Fail cached worker operations after this package session was poisoned.
     pub fn assert_healthy(&self) -> Result<(), JsValue> {
-        match &self.archive {
-            Ok(zip) => zip.assert_healthy().map_err(|e| JsValue::from_str(&e)),
-            Err(_) => Ok(()),
-        }
+        self.archive
+            .assert_healthy()
+            .map_err(|e| JsValue::from_str(&e))
     }
 
     /// Extract raw bytes for one embedded entry (e.g. "word/media/image1.png")
     /// from the retained archive. Twin of the free `extract_image`, but reads
-    /// through the already-open archive instead of re-opening it. A corrupt
-    /// container has no entries, so this surfaces the container-open error.
+    /// through the already-open archive instead of re-opening it.
     pub fn extract_image(&mut self, path: &str) -> Result<Vec<u8>, JsValue> {
-        let zip = self
-            .archive
-            .as_mut()
-            .map_err(|e| JsValue::from_str(&format!("docx-parser error: {e}")))?;
-        zip.run_operation("extract-image", |zip| parser::read_zip_bytes(zip, path))
+        self.archive
+            .run_operation("extract-image", |zip| parser::read_zip_bytes(zip, path))
             .map_err(|e| JsValue::from_str(&e))
     }
 
     /// GitHub-flavoured markdown projection of the retained archive. Mirrors the
-    /// free `docx_to_markdown`. A corrupt container degrades to an empty document.
+    /// free `docx_to_markdown`.
     pub fn to_markdown(&mut self) -> Result<String, JsValue> {
-        let markdown = match self.archive.as_mut() {
-            Ok(zip) => zip.run_operation("markdown", render_markdown_from_zip),
-            Err(error) => Ok(markdown::render_document_with_limit(
-                &parser::degraded_container_document(error.clone()),
-                docx_markdown_limit(),
-            )
-            .into_string()),
-        };
-        markdown.map_err(docx_markdown_js_error)
+        self.archive
+            .run_operation("markdown", render_markdown_from_zip)
+            .map_err(docx_markdown_js_error)
     }
 }
 
@@ -623,7 +543,7 @@ pub fn to_markdown_native(data: &[u8]) -> Result<String, String> {
 }
 
 fn docx_parser_js_error(error: String) -> JsValue {
-    if error.starts_with("OOXML_RESOURCE_LIMIT:") {
+    if error.starts_with("OOXML_RESOURCE_LIMIT:") || ooxml_common::opc::is_not_ooxml_error(&error) {
         JsValue::from_str(&error)
     } else {
         JsValue::from_str(&format!("docx-parser error: {error}"))
@@ -673,6 +593,7 @@ mod tests {
         let mut bytes = Vec::new();
         {
             let mut writer = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            crate::parser::write_test_content_types(&mut writer);
             let options = zip::write::SimpleFileOptions::default()
                 .compression_method(zip::CompressionMethod::Stored);
             for (path, body) in parts {
@@ -797,7 +718,7 @@ mod tests {
 
     fn cursor_archive(data: &[u8]) -> DocxArchive {
         DocxArchive {
-            archive: Ok(parser::open_zip(data.to_vec()).unwrap()),
+            archive: parser::open_zip(data.to_vec()).unwrap(),
             document_cursor: None,
             prepared_document_chunk: None,
             last_document_usage: None,
@@ -901,8 +822,6 @@ mod tests {
         archive.cancel_document_cursor();
         let parsed = archive
             .archive
-            .as_mut()
-            .unwrap()
             .run_operation("after-cancel", parser::parse_streamed)
             .unwrap();
         assert_eq!(parsed.body.len(), 2);
@@ -975,10 +894,7 @@ mod tests {
         DOCX_RETAINED_MODEL_JSON_LIMIT_OVERRIDE.with(|limit| limit.set(None));
         assert!(error.starts_with("OOXML_RESOURCE_LIMIT:"), "{error}");
         assert!(error.contains("docx-retained-model-json"), "{error}");
-        assert_eq!(
-            archive.archive.as_ref().unwrap().assert_healthy(),
-            Err(error)
-        );
+        assert_eq!(archive.archive.assert_healthy(), Err(error));
     }
 
     #[test]
@@ -987,6 +903,7 @@ mod tests {
         let mut buf = Vec::new();
         {
             let mut w = zip::ZipWriter::new(Cursor::new(&mut buf));
+            crate::parser::write_test_content_types(&mut w);
             let o = zip::write::SimpleFileOptions::default();
             w.start_file("word/media/i.png", o).unwrap();
             w.write_all(b"X").unwrap();
@@ -995,38 +912,6 @@ mod tests {
         assert_eq!(
             extract_image(&buf, "word/media/i.png", None, None).unwrap(),
             b"X"
-        );
-    }
-
-    /// The docx JSON path never hand-assembles `{"error":"…"}` — a message with a
-    /// `"` used to produce invalid JSON that made the TS-side `JSON.parse` throw a
-    /// confusing SyntaxError. Since RB7 (MAJOR) a non-zip / corrupt CONTAINER no
-    /// longer errors at all: `parse_from_bytes` degrades to a placeholder Document
-    /// whose `parse_error` field is serialized by serde, so any quotes in the
-    /// message are escaped by construction. This pins both facts: the input
-    /// degrades (does not panic / error out) AND the placeholder serializes to
-    /// valid JSON with the message intact.
-    #[test]
-    fn parse_non_zip_bytes_degrades_without_json_escaping_hazard() {
-        // Not a zip archive — degrades to a placeholder, does not error or panic.
-        let doc = parser::parse_from_bytes(&[1, 2, 3])
-            .expect("non-zip bytes degrade to a placeholder, not an error");
-        let err = doc
-            .parse_error
-            .as_deref()
-            .expect("placeholder carries a container-tagged parse_error");
-        assert!(
-            err.contains("zip container"),
-            "names the container; got {err:?}"
-        );
-        // serde escapes any quotes: the serialized model is valid JSON and the
-        // message round-trips through it unharmed (the old hand-built JSON hazard).
-        let json = serde_json::to_string(&doc).expect("serializes to valid JSON");
-        let round: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
-        assert_eq!(
-            round["parseError"],
-            serde_json::Value::String(err.to_string()),
-            "parse_error round-trips through serde JSON intact"
         );
     }
 
@@ -1140,7 +1025,7 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_rb7_failures_still_degrade() {
+    fn damaged_main_part_degrades_inside_an_admitted_package() {
         let malformed = zip_parts(&[
             ("word/document.xml", br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>"#),
             ("word/_rels/document.xml.rels", br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>"#),
@@ -1151,24 +1036,63 @@ mod tests {
             .parse_error
             .as_deref()
             .is_some_and(|error| error.starts_with("word/document.xml:")));
+    }
 
-        let missing = zip_parts(&[(
-            "word/_rels/document.xml.rels",
+    /// Input that is not a WordprocessingML package fails closed at every public
+    /// Rust boundary instead of materializing a placeholder with a 0x0 section.
+    #[test]
+    fn non_ooxml_input_is_rejected_at_every_public_boundary() {
+        use std::io::{Cursor, Write};
+        let mut not_opc = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(Cursor::new(&mut not_opc));
+            writer
+                .start_file(
+                    "word/document.xml",
+                    zip::write::SimpleFileOptions::default(),
+                )
+                .unwrap();
+            writer.write_all(b"<w:document/>").unwrap();
+            writer.finish().unwrap();
+        }
+        let missing_main = zip_parts(&[(
+            "_rels/.rels",
             br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>"#,
         )]);
-        let missing_doc = parser::parse_from_bytes_with_limits(&missing, None, None, "parse")
-            .expect("missing document.xml degrades");
-        assert!(missing_doc
-            .parse_error
-            .as_deref()
-            .is_some_and(|error| error.starts_with("word/document.xml:")));
-
-        let container = parser::parse_from_bytes_with_limits(b"not a zip", None, None, "parse")
-            .expect("ordinary corrupt container degrades");
-        assert!(container
-            .parse_error
-            .as_deref()
-            .is_some_and(|error| error.starts_with("(zip container): ")));
+        let cases: [(&str, &[u8], &str); 4] = [
+            ("garbage", &[1, 2, 3], "not a readable ZIP package"),
+            ("empty", &[], "not a readable ZIP package"),
+            ("zip-not-opc", &not_opc, "[Content_Types].xml"),
+            ("opc-missing-main-part", &missing_main, "word/document.xml"),
+        ];
+        for (name, bytes, detail) in cases {
+            let assert_rejected = |boundary: &str, error: String| {
+                assert!(
+                    ooxml_common::opc::is_not_ooxml_error(&error) && error.contains(detail),
+                    "{name} via {boundary}: {error}"
+                );
+            };
+            assert_rejected(
+                "archive",
+                parser::open_document_package(bytes.to_vec(), None, None, None)
+                    .err()
+                    .expect("archive rejects"),
+            );
+            assert_rejected(
+                "parse",
+                parser::parse_from_bytes(bytes).expect_err("parse rejects"),
+            );
+            assert_rejected(
+                "streamed parse",
+                parser::parse_from_bytes_streamed_with_limits(bytes, None, None, "parse")
+                    .expect_err("streamed parse rejects"),
+            );
+            assert_rejected(
+                "markdown",
+                render_markdown_from_bytes_with_limits(bytes, None, None)
+                    .expect_err("markdown rejects"),
+            );
+        }
     }
 
     #[test]

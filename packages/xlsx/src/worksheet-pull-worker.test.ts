@@ -204,7 +204,7 @@ describe('WorksheetPullWorker', () => {
     expect(archive.cancel_sheet_cursor).toHaveBeenCalledOnce();
   });
 
-  it('allows only the deferred-container missing usage checkpoint', async () => {
+  it('rejects a pull whose usage checkpoint fails', async () => {
     const terminal = new TextEncoder().encode(JSON.stringify({ kind: 'finished', worksheet: {
       name: 'Sheet1', rows: [], colWidths: {}, rowHeights: {}, defaultColWidth: 8.43,
       defaultRowHeight: 15, mergeCells: [], freezeRows: 0, freezeCols: 0,
@@ -219,17 +219,6 @@ describe('WorksheetPullWorker', () => {
       cancel_sheet_cursor: vi.fn(),
       close_sheet_cursor: vi.fn(),
     });
-
-    const unavailable = makeArchive(new Error('worksheet cursor usage is unavailable'));
-    const deferred = new WorksheetPullWorker(() => unavailable);
-    const deferredReplies: PullSessionResponse<ArrayBuffer, number>[] = [];
-    await openWorker(deferred);
-    await deferred.dispatch(
-      command(1, { kind: 'pull', sequence: 0, byteCredit: 64 * 1024 * 1024 }),
-      (response) => deferredReplies.push(response),
-    );
-    expect(deferredReplies[0]).toMatchObject({ kind: 'chunk', done: true });
-    expect(deferredReplies[0]?.usage).toBeUndefined();
 
     const violation = makeArchive(new Error('OOXML_RESOURCE_LIMIT: usage checkpoint failed'));
     const rejected = new WorksheetPullWorker(() => violation);

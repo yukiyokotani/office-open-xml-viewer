@@ -6,7 +6,9 @@ import type { Row } from '@silurus/ooxml-xlsx';
 // @ts-ignore — wasm-pack generated JavaScript is local build output.
 import * as xlsxWasm from '../../xlsx/src/wasm/xlsx_parser.js';
 import { generateSyntheticXlsx } from '../scripts/generate-synthetic-xlsx.mjs';
-import { openXlsxWorkbook } from './xlsx.ts';
+import { OoxmlError } from '@silurus/ooxml-core';
+import { nonOoxmlInputs } from '@silurus/ooxml-core/testing';
+import { materializeXlsxWorkbook, openXlsxWorkbook } from './xlsx.ts';
 
 let directory = '';
 let bytes: Buffer;
@@ -23,20 +25,14 @@ afterAll(async () => {
 });
 
 describe('Node bounded XLSX workbook session', () => {
-  it('keeps the degraded-container diagnostic when archive usage is unavailable', async () => {
-    const workbook = await openXlsxWorkbook(new Uint8Array([0x50, 0x4b, 0x03, 0x04]));
-    try {
-      expect(workbook.resourceUsage).toBeUndefined();
-      expect(workbook.workbookIndex.workbook.parseError)
-        .toContain('(zip container): ZIP central directory preflight failed');
-
-      let terminalError: string | undefined;
-      for await (const chunk of workbook.worksheetRows(0)) {
-        if (chunk.kind === 'finished') terminalError = chunk.worksheet.parseError;
-      }
-      expect(terminalError).toContain('(zip container): ZIP central directory preflight failed');
-    } finally {
-      await workbook.close();
+  it.each(nonOoxmlInputs('xlsx'))('rejects %s with OoxmlError not-ooxml', async (_name, input) => {
+    for (const open of [() => openXlsxWorkbook(input), () => materializeXlsxWorkbook(input)]) {
+      const error = await open().then(
+        () => { throw new Error('resolved a non-OOXML workbook'); },
+        (rejection: unknown) => rejection,
+      );
+      expect(error).toBeInstanceOf(OoxmlError);
+      expect(error).toMatchObject({ code: 'not-ooxml' });
     }
   });
 

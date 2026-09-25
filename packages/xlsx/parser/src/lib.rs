@@ -152,11 +152,6 @@ fn settle_xlsx_operation<T>(archive: &mut XlsxZip, result: Result<T, String>) ->
     archive.operation.settle(&archive.session, result)
 }
 
-/// Part-name tag for a whole-container degradation (#774). Already parenthesized
-/// (`"(zip container)"`), symmetric with docx / pptx `"(zip container)"` — so
-/// error formatting below must not wrap it in another pair of parens.
-const CONTAINER_PART: &str = "(zip container)";
-
 #[derive(Default)]
 struct WorksheetModelUsage {
     rows: u64,
@@ -227,26 +222,16 @@ fn row_cell_content_utf8_bytes(
     })
 }
 
-/// Open a xlsx ZIP container, tagging a failure with the container part name.
+/// Open a ZIP container without admitting it as an OPC package.
 ///
-/// #774 (RB7 MAJOR, symmetric with docx / pptx `open_zip`): a truncated / corrupt
-/// ZIP is the MOST COMMON way a xlsx is broken (an incomplete download, a
-/// byte-mangled attachment). `ZipArchive::new` maps that to an opaque
-/// `zip::result::ZipError` that, if propagated, throws with no indication that the
-/// CONTAINER (not some inner part) is the problem. Naming the failure lets the
-/// caller build a `degraded_container_workbook` / `degraded_container_sheet`
-/// tagged with the container, symmetric with how a corrupt sheet part is tagged
-/// inside [`parse_sheet_with`].
-///
-/// `CONTAINER_PART` already carries its own parens, so this formats as
-/// `"{CONTAINER_PART}: {e}"` — NOT `"({CONTAINER_PART}): {e}"`, which would
-/// double-parenthesize into `"((zip container)): ..."` (docx / pptx avoid this
-/// by writing the literal `"(zip container)"` directly instead of a
-/// pre-parenthesized constant).
+/// Test helper only: public entry points admit input through
+/// [`open_workbook_package`], which also enforces the OPC shape.
+#[cfg(test)]
 pub(crate) fn open_zip(data: Vec<u8>) -> Result<XlsxZip, String> {
     open_zip_with_limits(data, None, None)
 }
 
+#[cfg(test)]
 fn open_zip_with_limits(
     data: Vec<u8>,
     max_archive_entry_bytes: Option<u64>,
@@ -280,37 +265,51 @@ fn open_zip_with_policy(
     .map_err(ooxml_common::zip::tag_container_error)
 }
 
-/// A placeholder [`ParsedWorkbook`] for a xlsx whose ZIP CONTAINER could not be
-/// opened (truncated / corrupt / not a zip). No parts are readable, so there is
-/// no styles / theme / sharedStrings to derive — surface a single placeholder
-/// sheet carrying the container-tagged error so the viewer lists one tab and
-/// paints a "could not be displayed" overlay. Mirrors the per-sheet
-/// [`Worksheet::placeholder`] used inside [`parse_sheet_with`], but for the
-/// whole-container case.
-fn degraded_container_workbook(parse_error: String) -> ParsedWorkbook {
-    ParsedWorkbook {
-        workbook: Workbook {
-            sheets: vec![SheetMeta {
-                name: CONTAINER_PART.to_string(),
-                sheet_id: 1,
-                r_id: String::new(),
-                tab_color: None,
-                visibility: SheetVisibility::Visible,
-            }],
-            date1904: false,
-            parse_error: Some(parse_error),
-        },
-        styles: Styles::default(),
-        shared_strings: Vec::new(),
-    }
+/// Admit a public-boundary input as a SpreadsheetML package.
+///
+/// Fails closed with the `ooxml_common::opc` not-OOXML envelope when the bytes
+/// are not a readable ZIP, the ZIP is not an OPC package, or the package lacks
+/// `xl/workbook.xml`; no placeholder workbook is fabricated. Damage inside an
+/// admitted package (a malformed sheet part) still degrades per part inside
+/// [`parse_sheet_with`].
+fn open_workbook_package(
+    data: Vec<u8>,
+    max_archive_entry_bytes: Option<u64>,
+    max_total_inflated_bytes: Option<u64>,
+    max_archive_entries: Option<u64>,
+) -> Result<XlsxZip, String> {
+    let zip = open_zip_with_policy(
+        data,
+        max_archive_entry_bytes,
+        max_total_inflated_bytes,
+        max_archive_entries,
+    )
+    .map_err(ooxml_common::opc::container_open_error)?;
+    ooxml_common::opc::require_ooxml_package(
+        &zip.session,
+        ooxml_common::resource::OoxmlFormat::Xlsx,
+    )?;
+    Ok(zip)
 }
 
-/// The single placeholder [`Worksheet`] for the whole-container degradation
-/// (#774): the viewer parses sheet 0 of a [`degraded_container_workbook`] and
-/// gets this back, so it paints the same part-tagged error overlay the per-sheet
-/// break uses. `name` is the placeholder tab name (`CONTAINER_PART`).
-fn degraded_container_sheet(parse_error: String) -> Worksheet {
-    Worksheet::placeholder(CONTAINER_PART, parse_error)
+/// Test fixtures reach the public admission boundary, so each synthetic ZIP
+/// must carry the OPC Media Types stream.
+#[cfg(test)]
+pub(crate) fn write_test_content_types<W: std::io::Write + std::io::Seek>(
+    writer: &mut zip::ZipWriter<W>,
+) {
+    use std::io::Write;
+    writer
+        .start_file(
+            ooxml_common::opc::CONTENT_TYPES_ITEM,
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+    writer
+        .write_all(
+            br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>"#,
+        )
+        .unwrap();
 }
 
 // Excel built-in indexed color palette (indices 0-63)
@@ -980,6 +979,7 @@ mod retained_model_limit_tests {
                 )
                 .unwrap();
             writer.write_all(b"x").unwrap();
+            crate::write_test_content_types(&mut writer);
             writer.finish().unwrap();
         }
         let mut archive = XlsxZip::new(Cursor::new(package)).unwrap();
@@ -1023,19 +1023,12 @@ fn parse_xlsx_inner_with_limits(
     max_archive_entry_bytes: Option<u64>,
     max_total_inflated_bytes: Option<u64>,
 ) -> Result<ParsedWorkbook, String> {
-    // #774 (RB7 MAJOR): a corrupt / truncated CONTAINER degrades to a placeholder
-    // workbook (one placeholder sheet) rather than erroring, consistent with a
-    // corrupt inner sheet — the viewer shows a "could not display" tab instead of
-    // nothing.
-    let mut archive = match open_zip_with_limits(
+    let mut archive = open_workbook_package(
         data.to_vec(),
         max_archive_entry_bytes,
         max_total_inflated_bytes,
-    ) {
-        Ok(zip) => zip,
-        Err(error) if error.starts_with("OOXML_RESOURCE_LIMIT:") => return Err(error),
-        Err(e) => return Ok(degraded_container_workbook(e)),
-    };
+        None,
+    )?;
     archive.run_operation("parse", |archive| {
         let (shared, styles) = WorkbookShared::load_with_styles(archive)?;
         parse_xlsx_inner_with(archive, &shared, styles)
@@ -3614,13 +3607,10 @@ pub fn extract_image(
 /// poison state are retained by that same session across public operations.
 #[wasm_bindgen]
 pub struct XlsxArchive {
-    /// The opened archive, or the container-open error string when the ZIP itself
-    /// was truncated / corrupt (#774, RB7 MAJOR). Deferring the failure here —
-    /// instead of erroring out of `new` — lets `parse()` and worksheet cursors return a
-    /// degraded placeholder (symmetric with a corrupt inner sheet) rather than the
-    /// constructor throwing an opaque error the viewer can't turn into a
-    /// placeholder tab.
-    archive: Result<XlsxZip, String>,
+    /// The admitted OPC package. Construction fails closed when the input is not
+    /// a ZIP, not an OPC package, or lacks `xl/workbook.xml`
+    /// (`ooxml_common::opc`), so every method operates on a real workbook.
+    archive: XlsxZip,
     /// Workbook-level parts parsed once and reused across sheet switches. Loaded
     /// lazily on the first workbook-index or worksheet operation.
     shared: Option<WorkbookShared>,
@@ -3643,14 +3633,9 @@ struct ActiveWorksheetCursor {
 enum ActiveWorksheetSource {
     Streaming(Box<WorksheetCursor>),
     Ready(Box<Worksheet>),
-    DeferredFailure(CursorOpenFailure),
+    /// A sheet part that could not be opened; pulled as a part-tagged placeholder.
+    DeferredFailure(String),
     Prepared,
-}
-
-#[derive(Clone)]
-enum CursorOpenFailure {
-    Container(String),
-    Sheet(String),
 }
 
 fn serialize_cursor_finished(
@@ -3700,20 +3685,13 @@ impl XlsxArchive {
         max_archive_entries: Option<u64>,
     ) -> Result<XlsxArchive, JsValue> {
         console_error_panic_hook::set_once();
-        // #774 (RB7 MAJOR): a truncated / corrupt CONTAINER is deferred, not
-        // thrown, so `parse()` / `parse_sheet()` can degrade it to a placeholder
-        // instead of the constructor failing with an opaque error.
-        let archive = open_zip_with_policy(
+        let archive = open_workbook_package(
             data,
             max_archive_entry_bytes,
             max_total_inflated_bytes,
             max_archive_entries,
-        );
-        if let Err(error) = &archive {
-            if error.starts_with("OOXML_RESOURCE_LIMIT:") {
-                return Err(JsValue::from_str(error));
-            }
-        }
+        )
+        .map_err(|error| JsValue::from_str(&error))?;
         Ok(XlsxArchive {
             archive,
             shared: None,
@@ -3726,33 +3704,19 @@ impl XlsxArchive {
 
     /// Parse (once) and return the workbook-level shared parts, caching them for
     /// reuse. Borrows `self` split so the cached `shared` and the `archive` can be
-    /// used together by callers. Assumes the container opened; the corrupt-container
-    /// case is short-circuited by the callers before they reach here.
+    /// used together by callers.
     fn ensure_shared(&mut self) -> Result<(), String> {
         if self.shared.is_none() {
-            let zip = self
-                .archive
-                .as_mut()
-                .map_err(|error| format!("xlsx-parser error: {error}"))?;
-            let shared = WorkbookShared::load(zip)?;
+            let shared = WorkbookShared::load(&mut self.archive)?;
             self.shared = Some(shared);
         }
         Ok(())
     }
 
     /// Parse the workbook index (sheet list + styles + shared strings) and return
-    /// it as UTF-8 JSON bytes. Byte-for-byte identical to `parse_xlsx`. When the
-    /// CONTAINER failed to open (#774) the model is a degraded placeholder
-    /// workbook tagged with the container.
+    /// it as UTF-8 JSON bytes. Byte-for-byte identical to `parse_xlsx`.
     pub fn parse(&mut self) -> Result<Vec<u8>, JsValue> {
-        if let Err(error) = &self.archive {
-            let workbook = degraded_container_workbook(error.clone());
-            return serde_json::to_vec(&workbook)
-                .map_err(|error| JsValue::from_str(&format!("serialize error: {error}")));
-        }
         self.archive
-            .as_mut()
-            .expect("container open checked above")
             .begin_operation("parse")
             .map_err(|error| JsValue::from_str(&error))?;
         let result = (|| -> Result<Vec<u8>, String> {
@@ -3762,20 +3726,17 @@ impl XlsxArchive {
                 // later asks for the workbook index, and move it directly into
                 // the serialized result.
                 let theme_colors = Rc::clone(&shared.theme_colors);
-                let zip = self.archive.as_mut().expect("container open checked above");
-                parse_styles(zip, theme_colors.as_ref()).map(|parsed| parsed.styles)
+                parse_styles(&mut self.archive, theme_colors.as_ref()).map(|parsed| parsed.styles)
             } else {
-                let zip = self.archive.as_mut().expect("container open checked above");
-                let (shared, styles) = WorkbookShared::load_with_styles(zip)?;
+                let (shared, styles) = WorkbookShared::load_with_styles(&mut self.archive)?;
                 self.shared = Some(shared);
                 styles
             };
             let shared = self.shared.as_ref().expect("shared loaded above");
-            let zip = self.archive.as_mut().expect("container open checked above");
-            let workbook = parse_xlsx_inner_with(zip, shared, styles)?;
+            let workbook = parse_xlsx_inner_with(&mut self.archive, shared, styles)?;
             serde_json::to_vec(&workbook).map_err(|error| format!("serialize error: {error}"))
         })();
-        let zip = self.archive.as_mut().expect("container open checked above");
+        let zip = &mut self.archive;
         let result = settle_xlsx_operation(zip, result);
         if result.is_err() && zip.assert_healthy().is_err() {
             self.shared = None;
@@ -3785,22 +3746,15 @@ impl XlsxArchive {
 
     /// Fail cached worker operations after this package session was poisoned.
     pub fn assert_healthy(&self) -> Result<(), JsValue> {
-        match &self.archive {
-            Ok(archive) => archive
-                .assert_healthy()
-                .map_err(|error| JsValue::from_str(&error)),
-            Err(_) => Ok(()),
-        }
+        self.archive
+            .assert_healthy()
+            .map_err(|error| JsValue::from_str(&error))
     }
 
     /// Session-wide archive accounting after workbook bootstrap or any later
     /// operation. This is diagnostic data, not an allocator-memory estimate.
     pub fn resource_usage(&self) -> Result<Vec<u8>, JsValue> {
-        let usage = self
-            .archive
-            .as_ref()
-            .map(XlsxZip::usage)
-            .map_err(|_| JsValue::from_str("xlsx resource usage is unavailable"))?;
+        let usage = self.archive.usage();
         serde_json::to_vec(&usage)
             .map_err(|error| JsValue::from_str(&format!("serialize error: {error}")))
     }
@@ -3814,23 +3768,8 @@ impl XlsxArchive {
         self.last_cursor_pull_terminal = false;
         self.terminal_awaiting_ack = false;
         self.last_cursor_usage = None;
-        if let Err(error) = &self.archive {
-            self.active_worksheet = Some(ActiveWorksheetCursor {
-                source: ActiveWorksheetSource::DeferredFailure(CursorOpenFailure::Container(
-                    error.clone(),
-                )),
-                sheet_index,
-                name: CONTAINER_PART.to_string(),
-                sheet_path: String::new(),
-                reference_index: None,
-            });
-            return Ok(());
-        }
-        let zip = self
-            .archive
-            .as_mut()
-            .map_err(|error| JsValue::from_str(&format!("xlsx-parser error: {error}")))?;
-        zip.begin_operation("worksheet-cursor")
+        self.archive
+            .begin_operation("worksheet-cursor")
             .map_err(|error| JsValue::from_str(&error))?;
         let result = (|| -> Result<ActiveWorksheetCursor, String> {
             self.ensure_shared()?;
@@ -3843,7 +3782,7 @@ impl XlsxArchive {
             let sheet_path = resolve_sheet_path(&rels_doc, &sheet.r_id)
                 .ok_or_else(|| format!("rId {} not found in rels", sheet.r_id))?;
             let part = format!("xl/{sheet_path}");
-            let zip = self.archive.as_mut().expect("container open checked above");
+            let zip = &mut self.archive;
             let sheet_part_kind = resolve_sheet_part_kind(&rels_doc, &sheet.r_id);
             let source = match sheet_part_kind {
                 SheetPartKind::ChartSheet => {
@@ -3861,7 +3800,7 @@ impl XlsxArchive {
                         Ok(worksheet) => ActiveWorksheetSource::Ready(Box::new(worksheet)),
                         Err(error) => {
                             zip.assert_healthy()?;
-                            ActiveWorksheetSource::DeferredFailure(CursorOpenFailure::Sheet(error))
+                            ActiveWorksheetSource::DeferredFailure(error)
                         }
                     }
                 }
@@ -3869,7 +3808,7 @@ impl XlsxArchive {
                     Ok((worksheet, _, _)) => ActiveWorksheetSource::Ready(Box::new(worksheet)),
                     Err(error) => {
                         zip.assert_healthy()?;
-                        ActiveWorksheetSource::DeferredFailure(CursorOpenFailure::Sheet(error))
+                        ActiveWorksheetSource::DeferredFailure(error)
                     }
                 },
                 SheetPartKind::Worksheet => match zip.open_worksheet_cursor(
@@ -3880,7 +3819,7 @@ impl XlsxArchive {
                     Ok(cursor) => ActiveWorksheetSource::Streaming(Box::new(cursor)),
                     Err(error) => {
                         zip.assert_healthy()?;
-                        ActiveWorksheetSource::DeferredFailure(CursorOpenFailure::Sheet(error))
+                        ActiveWorksheetSource::DeferredFailure(error)
                     }
                 },
             };
@@ -3899,8 +3838,7 @@ impl XlsxArchive {
                 Ok(())
             }
             Err(error) => {
-                let zip = self.archive.as_mut().expect("container open checked above");
-                zip.cancel_operation();
+                self.archive.cancel_operation();
                 Err(JsValue::from_str(&error))
             }
         }
@@ -3926,30 +3864,21 @@ impl XlsxArchive {
             .ok_or_else(|| "worksheet cursor is not open".to_string())?
             .source
         {
-            ActiveWorksheetSource::DeferredFailure(failure) => Some(failure.clone()),
+            ActiveWorksheetSource::DeferredFailure(error) => Some(error.clone()),
             ActiveWorksheetSource::Streaming(_) | ActiveWorksheetSource::Ready(_) => None,
             ActiveWorksheetSource::Prepared => {
                 return Err("worksheet terminal product is prepared".to_string());
             }
         };
-        if let Some(failure) = deferred {
+        if let Some(error) = deferred {
             let active = self
                 .active_worksheet
                 .as_ref()
                 .expect("cursor checked above");
-            let part = (!active.sheet_path.is_empty()).then(|| format!("xl/{}", active.sheet_path));
-            let worksheet = match failure {
-                CursorOpenFailure::Container(error) => degraded_container_sheet(error),
-                CursorOpenFailure::Sheet(error) => Worksheet::placeholder(
-                    &active.name,
-                    format!("xl/{}: {error}", active.sheet_path),
-                ),
-            };
-            let reporter = match self.archive.as_ref() {
-                Ok(zip) => Some(zip.active_operation()?.limit_reporter()?),
-                Err(_) => None,
-            };
-            let bytes = serialize_cursor_finished(worksheet, reporter.as_ref(), part.as_deref())?;
+            let part = format!("xl/{}", active.sheet_path);
+            let worksheet = Worksheet::placeholder(&active.name, format!("{part}: {error}"));
+            let reporter = self.archive.active_operation()?.limit_reporter()?;
+            let bytes = serialize_cursor_finished(worksheet, Some(&reporter), Some(&part))?;
             self.active_worksheet
                 .as_mut()
                 .expect("cursor checked above")
@@ -3977,12 +3906,7 @@ impl XlsxArchive {
                 .as_ref()
                 .expect("cursor checked above");
             let part = format!("xl/{}", active.sheet_path);
-            let reporter = self
-                .archive
-                .as_ref()
-                .expect("container open checked above")
-                .active_operation()?
-                .limit_reporter()?;
+            let reporter = self.archive.active_operation()?.limit_reporter()?;
             let bytes = serialize_cursor_finished(*worksheet, Some(&reporter), Some(&part))?;
             self.last_cursor_pull_terminal = true;
             self.terminal_awaiting_ack = true;
@@ -4044,7 +3968,7 @@ impl XlsxArchive {
                         builder.mark_hidden_columns(&parsed.0.col_hidden)?;
                         Some(builder.finish())
                     });
-                    let zip = self.archive.as_mut().expect("container open checked above");
+                    let zip = &mut self.archive;
                     let worksheet = finalize_projected_sheet(
                         zip,
                         shared,
@@ -4065,7 +3989,7 @@ impl XlsxArchive {
                 let bytes = match result {
                     Ok(bytes) => bytes,
                     Err(error) => {
-                        let zip = self.archive.as_mut().expect("container open checked above");
+                        let zip = &mut self.archive;
                         if let Err(resource_error) = zip.assert_healthy() {
                             self.active_worksheet.take();
                             zip.cancel_operation();
@@ -4076,12 +4000,7 @@ impl XlsxArchive {
                             .as_ref()
                             .expect("cursor checked above");
                         let part = format!("xl/{}", active.sheet_path);
-                        let reporter = self
-                            .archive
-                            .as_ref()
-                            .expect("container open checked above")
-                            .active_operation()?
-                            .limit_reporter()?;
+                        let reporter = self.archive.active_operation()?.limit_reporter()?;
                         serialize_cursor_finished(
                             Worksheet::placeholder(&active.name, format!("{part}: {error}")),
                             Some(&reporter),
@@ -4098,7 +4017,7 @@ impl XlsxArchive {
                 Ok(bytes)
             }
             Err(error) => {
-                let zip = self.archive.as_mut().expect("container open checked above");
+                let zip = &mut self.archive;
                 if let Err(resource_error) = zip.assert_healthy() {
                     self.active_worksheet.take();
                     zip.cancel_operation();
@@ -4109,12 +4028,7 @@ impl XlsxArchive {
                     .as_ref()
                     .expect("cursor checked above");
                 let part = format!("xl/{}", active.sheet_path);
-                let reporter = self
-                    .archive
-                    .as_ref()
-                    .expect("container open checked above")
-                    .active_operation()?
-                    .limit_reporter()?;
+                let reporter = self.archive.active_operation()?.limit_reporter()?;
                 let bytes = serialize_cursor_finished(
                     Worksheet::placeholder(&active.name, format!("{part}: {error}")),
                     Some(&reporter),
@@ -4141,9 +4055,8 @@ impl XlsxArchive {
     pub fn sheet_cursor_resource_usage(&self) -> Result<Vec<u8>, JsValue> {
         let usage = self
             .archive
-            .as_ref()
-            .ok()
-            .and_then(|zip| zip.operation.usage())
+            .operation
+            .usage()
             .or(self.last_cursor_usage)
             .ok_or_else(|| JsValue::from_str("worksheet cursor usage is unavailable"))?;
         serde_json::to_vec(&usage)
@@ -4161,12 +4074,7 @@ impl XlsxArchive {
         if !self.terminal_awaiting_ack {
             return Err("worksheet terminal product is not awaiting acknowledgement".to_string());
         }
-        if self.archive.is_err() {
-            self.active_worksheet.take();
-            self.terminal_awaiting_ack = false;
-            return Ok(());
-        }
-        let zip = self.archive.as_mut().expect("container open checked above");
+        let zip = &mut self.archive;
         self.last_cursor_usage = zip.operation.usage();
         let result = zip.finish_operation();
         if let Err(resource_error) = zip.assert_healthy() {
@@ -4190,10 +4098,8 @@ impl XlsxArchive {
         }
         self.terminal_awaiting_ack = false;
         self.last_cursor_pull_terminal = false;
-        if let Ok(zip) = self.archive.as_mut() {
-            self.last_cursor_usage = zip.operation.usage().or(self.last_cursor_usage);
-            zip.cancel_operation();
-        }
+        self.last_cursor_usage = self.archive.operation.usage().or(self.last_cursor_usage);
+        self.archive.cancel_operation();
     }
 
     /// Close an open cursor and release its decoder lease. Idempotent.
@@ -4204,35 +4110,26 @@ impl XlsxArchive {
             if let ActiveWorksheetSource::Streaming(cursor) = &mut active.source {
                 cursor.close();
             }
-            if let Ok(zip) = self.archive.as_mut() {
-                self.last_cursor_usage = zip.operation.usage().or(self.last_cursor_usage);
-                zip.cancel_operation();
-            }
+            self.last_cursor_usage = self.archive.operation.usage().or(self.last_cursor_usage);
+            self.archive.cancel_operation();
             self.last_cursor_pull_terminal = false;
         }
     }
 
     /// Extract raw bytes for one embedded image entry (e.g.
     /// "xl/media/image1.png") from the retained archive. Twin of the free
-    /// `extract_image`, but reads through the already-open archive. A corrupt
-    /// container has no entries, so this surfaces the container-open error.
+    /// `extract_image`, but reads through the already-open archive.
     pub fn extract_image(&mut self, path: &str) -> Result<Vec<u8>, JsValue> {
-        let zip = self
-            .archive
-            .as_mut()
-            .map_err(|e| JsValue::from_str(&format!("xlsx-parser error: {e}")))?;
-        zip.run_operation("extract-image", |zip| read_zip_bytes(zip, path))
+        self.archive
+            .run_operation("extract-image", |zip| read_zip_bytes(zip, path))
             .map_err(|error| JsValue::from_str(&error))
     }
 
     /// GitHub-flavoured markdown projection of the retained archive. Mirrors the
-    /// free `xlsx_to_markdown`. A corrupt container degrades to an empty document.
+    /// free `xlsx_to_markdown`.
     pub fn to_markdown(&mut self) -> Result<String, JsValue> {
-        let zip = self
-            .archive
-            .as_mut()
-            .map_err(|error| JsValue::from_str(&format!("xlsx-parser error: {error}")))?;
-        zip.run_operation("markdown", to_markdown_from_archive)
+        self.archive
+            .run_operation("markdown", to_markdown_from_archive)
             .map_err(|error| JsValue::from_str(&error))
     }
 }
@@ -4255,17 +4152,12 @@ fn to_markdown_impl_with_limits(
     max_archive_entry_bytes: Option<u64>,
     max_total_inflated_bytes: Option<u64>,
 ) -> Result<String, String> {
-    // #774: a corrupt CONTAINER has no sheets to render — degrade to an empty
-    // markdown document instead of erroring, symmetric with the JSON path.
-    let mut archive = match open_zip_with_limits(
+    let mut archive = open_workbook_package(
         data.to_vec(),
         max_archive_entry_bytes,
         max_total_inflated_bytes,
-    ) {
-        Ok(zip) => zip,
-        Err(error) if error.starts_with("OOXML_RESOURCE_LIMIT:") => return Err(error),
-        Err(_) => return Ok(String::new()),
-    };
+        None,
+    )?;
     archive.run_operation("markdown", to_markdown_from_archive)
 }
 
@@ -4302,15 +4194,7 @@ fn to_markdown_from_archive(archive: &mut XlsxZip) -> Result<String, String> {
 /// the WASM `parse_sheet`, then decodes the JSON bytes to a `String` — so the
 /// native and WASM paths can never drift.
 pub fn parse_sheet_native(data: &[u8], sheet_index: u32, name: &str) -> Result<String, String> {
-    // #774: mirror the WASM `parse_sheet` — a corrupt CONTAINER degrades to the
-    // container-tagged placeholder sheet rather than erroring.
-    let mut archive = match open_zip(data.to_vec()) {
-        Ok(zip) => zip,
-        Err(e) => {
-            let ws = degraded_container_sheet(e);
-            return serde_json::to_string(&ws).map_err(|e| e.to_string());
-        }
-    };
+    let mut archive = open_workbook_package(data.to_vec(), None, None, None)?;
     archive.run_operation("parse-sheet", |archive| {
         let shared = WorkbookShared::load(archive)?;
         let json = parse_sheet_with(archive, &shared, sheet_index, name)?;
@@ -5145,6 +5029,7 @@ mod threaded_comment_tests {
                 writer.start_file(path, options).unwrap();
                 writer.write_all(body.as_bytes()).unwrap();
             }
+            crate::write_test_content_types(&mut writer);
             writer.finish().unwrap();
         }
         bytes
@@ -5409,6 +5294,7 @@ mod extract_image_tests {
             let o = zip::write::SimpleFileOptions::default();
             w.start_file("xl/media/i.png", o).unwrap();
             w.write_all(b"X").unwrap();
+            crate::write_test_content_types(&mut w);
             w.finish().unwrap();
         }
         assert_eq!(
@@ -5456,6 +5342,7 @@ mod workbook_theme_tests {
                 writer.start_file(path, options).unwrap();
                 writer.write_all(body.as_bytes()).unwrap();
             }
+            crate::write_test_content_types(&mut writer);
             writer.finish().unwrap();
         }
         let mut archive = XlsxZip::new(Cursor::new(bytes)).unwrap();
@@ -5487,6 +5374,7 @@ mod workbook_theme_tests {
             let options = zip::write::SimpleFileOptions::default();
             writer.start_file("placeholder", options).unwrap();
             writer.write_all(b"x").unwrap();
+            crate::write_test_content_types(&mut writer);
             writer.finish().unwrap();
         }
         let mut archive = XlsxZip::new(Cursor::new(bytes)).unwrap();
@@ -5592,6 +5480,7 @@ mod chartsheet_tests {
                 zip.start_file(path, options).unwrap();
                 zip.write_all(content.as_bytes()).unwrap();
             }
+            crate::write_test_content_types(&mut zip);
             zip.finish().unwrap();
         }
         bytes
@@ -5677,6 +5566,7 @@ mod dialogsheet_tests {
                 zip.start_file(path, options).unwrap();
                 zip.write_all(content.as_bytes()).unwrap();
             }
+            crate::write_test_content_types(&mut zip);
             zip.finish().unwrap();
         }
         bytes
@@ -6493,6 +6383,7 @@ mod package_streaming_integration_tests {
                 writer.start_file(path, options).unwrap();
                 writer.write_all(body).unwrap();
             }
+            crate::write_test_content_types(&mut writer);
             writer.finish().unwrap();
         }
 
@@ -6584,6 +6475,7 @@ mod rb7_partial_degradation_tests {
                 w.start_file(name.as_str(), o).unwrap();
                 w.write_all(body.as_bytes()).unwrap();
             }
+            crate::write_test_content_types(&mut w);
             w.finish().unwrap();
         }
         buf
@@ -6651,74 +6543,57 @@ mod rb7_partial_degradation_tests {
         );
     }
 
-    // ── #774: whole-container degradation ────────────────────────────────────
-
-    /// #774 MAJOR: a truncated / corrupt ZIP CONTAINER — the most common way a
-    /// xlsx is broken — degrades to a placeholder workbook (one tab) tagged with
-    /// the container, rather than throwing an opaque `ZipArchive::new` error before
-    /// any part is read. Symmetric with docx / pptx container degradation.
+    /// Input that is not a SpreadsheetML package fails closed at every public
+    /// Rust boundary instead of materializing a placeholder workbook.
     #[test]
-    fn corrupt_zip_container_degrades_to_placeholder_workbook() {
-        // Truncated container: a valid workbook cut off partway is not a readable zip.
-        let full = build_three_sheet_workbook(9, None); // 9 ⇒ no sheet is broken
-        let truncated = &full[..full.len() / 2];
-
-        // Workbook index opens with a single placeholder sheet + a container error.
-        let wb_json =
-            parse_workbook_native(truncated).expect("a corrupt container must open, not error out");
-        let wb: serde_json::Value = serde_json::from_str(&wb_json).unwrap();
-        let sheets = wb["sheets"]
-            .as_array()
-            .expect("placeholder workbook has sheets");
-        assert_eq!(sheets.len(), 1, "one placeholder tab for the whole file");
-        let wb_err = wb["parseError"]
-            .as_str()
-            .expect("degraded workbook carries a container-tagged parseError");
-        assert!(
-            wb_err.starts_with("(zip container): "),
-            "workbook error is tagged with the container exactly once (one paren pair); got {wb_err:?}"
-        );
-        assert_eq!(
-            wb_err.matches("zip container").count(),
-            1,
-            "the container tag must not be doubled; got {wb_err:?}"
-        );
-
-        // The lazily-parsed sheet 0 is the container-tagged placeholder overlay.
-        let ws = parse_sheet_json(truncated, 0, "(zip container)");
-        let ws_err = ws["parseError"]
-            .as_str()
-            .expect("placeholder sheet carries a parseError");
-        assert!(
-            ws_err.starts_with("(zip container): "),
-            "sheet error is tagged with the container exactly once (one paren pair); got {ws_err:?}"
-        );
-        assert_eq!(
-            ws_err.matches("zip container").count(),
-            1,
-            "the container tag must not be doubled; got {ws_err:?}"
-        );
-        assert!(
-            ws["rows"].as_array().unwrap().is_empty(),
-            "placeholder sheet has no rows"
-        );
-
-        // Not-a-zip-at-all also degrades (no local file header).
-        let garbage =
-            parse_workbook_native(b"this is definitely not a zip file").expect("non-zip opens");
-        let gv: serde_json::Value = serde_json::from_str(&garbage).unwrap();
-        let garbage_err = gv["parseError"]
-            .as_str()
-            .expect("non-zip degrades with a container-tagged error");
-        assert!(
-            garbage_err.starts_with("(zip container): "),
-            "error is tagged with the container exactly once (one paren pair); got {garbage_err:?}"
-        );
-        assert_eq!(
-            garbage_err.matches("zip container").count(),
-            1,
-            "the container tag must not be doubled; got {garbage_err:?}"
-        );
+    fn non_ooxml_input_is_rejected_at_every_public_boundary() {
+        let zip_of = |entries: &[&str]| {
+            let mut buf = Vec::new();
+            {
+                let mut w = zip::ZipWriter::new(Cursor::new(&mut buf));
+                for name in entries {
+                    w.start_file(*name, zip::write::SimpleFileOptions::default())
+                        .unwrap();
+                    w.write_all(b"<x/>").unwrap();
+                }
+                w.finish().unwrap();
+            }
+            buf
+        };
+        let not_opc = zip_of(&["xl/workbook.xml"]);
+        let missing_main = zip_of(&[ooxml_common::opc::CONTENT_TYPES_ITEM, "_rels/.rels"]);
+        let cases: [(&str, &[u8], &str); 4] = [
+            ("garbage", &[1, 2, 3], "not a readable ZIP package"),
+            ("empty", &[], "not a readable ZIP package"),
+            ("zip-not-opc", &not_opc, "[Content_Types].xml"),
+            ("opc-missing-main-part", &missing_main, "xl/workbook.xml"),
+        ];
+        for (name, bytes, detail) in cases {
+            let assert_rejected = |boundary: &str, error: String| {
+                assert!(
+                    ooxml_common::opc::is_not_ooxml_error(&error) && error.contains(detail),
+                    "{name} via {boundary}: {error}"
+                );
+            };
+            assert_rejected(
+                "archive",
+                open_workbook_package(bytes.to_vec(), None, None, None)
+                    .err()
+                    .expect("archive rejects"),
+            );
+            assert_rejected(
+                "parse",
+                parse_workbook_native(bytes).expect_err("parse rejects"),
+            );
+            assert_rejected(
+                "sheet",
+                parse_sheet_native(bytes, 0, "Sheet1").expect_err("sheet rejects"),
+            );
+            assert_rejected(
+                "markdown",
+                to_markdown_native(bytes).expect_err("markdown rejects"),
+            );
+        }
     }
 
     // ── #832 / #833-1: implicit references through the whole-archive path ─────
@@ -6760,6 +6635,7 @@ mod rb7_partial_degradation_tests {
                 w.start_file(name.as_str(), o).unwrap();
                 w.write_all(body.as_bytes()).unwrap();
             }
+            crate::write_test_content_types(&mut w);
             w.finish().unwrap();
         }
         buf
@@ -6779,6 +6655,7 @@ mod rb7_partial_degradation_tests {
                 writer.start_file(path, options).unwrap();
                 writer.write_all(body.as_bytes()).unwrap();
             }
+            crate::write_test_content_types(&mut writer);
             writer.finish().unwrap();
         }
         bytes
@@ -6800,6 +6677,7 @@ mod rb7_partial_degradation_tests {
                 writer.start_file(path, options).unwrap();
                 writer.write_all(body.as_bytes()).unwrap();
             }
+            crate::write_test_content_types(&mut writer);
             writer.finish().unwrap();
         }
         bytes
@@ -6829,6 +6707,7 @@ mod rb7_partial_degradation_tests {
                 writer.start_file(path, options).unwrap();
                 writer.write_all(body.as_bytes()).unwrap();
             }
+            crate::write_test_content_types(&mut writer);
             writer.finish().unwrap();
         }
 
@@ -6915,6 +6794,7 @@ mod rb7_partial_degradation_tests {
                 writer.start_file(path, options).unwrap();
                 writer.write_all(body.as_bytes()).unwrap();
             }
+            crate::write_test_content_types(&mut writer);
             writer.finish().unwrap();
         }
         bytes
@@ -6938,7 +6818,7 @@ mod rb7_partial_degradation_tests {
             let value: serde_json::Value = serde_json::from_slice(&payload).unwrap();
             if value["kind"] == "finished" {
                 assert!(archive.terminal_awaiting_ack);
-                assert!(archive.archive.as_ref().unwrap().operation.is_active());
+                assert!(archive.archive.operation.is_active());
                 assert_eq!(value["worksheet"]["rows"], serde_json::json!([]));
                 let usage: serde_json::Value =
                     serde_json::from_slice(&archive.sheet_cursor_resource_usage().unwrap())
@@ -6950,7 +6830,7 @@ mod rb7_partial_degradation_tests {
         archive.acknowledge_sheet_cursor_terminal().unwrap();
         assert!(!archive.terminal_awaiting_ack);
         assert!(archive.active_worksheet.is_none());
-        assert!(!archive.archive.as_ref().unwrap().operation.is_active());
+        assert!(!archive.archive.operation.is_active());
         assert!(archive.sheet_cursor_resource_usage().is_ok());
         archive.close_sheet_cursor();
     }
@@ -7006,7 +6886,7 @@ mod rb7_partial_degradation_tests {
         archive.cancel_sheet_cursor();
         assert!(!archive.terminal_awaiting_ack);
         assert!(archive.active_worksheet.is_none());
-        assert!(!archive.archive.as_ref().unwrap().operation.is_active());
+        assert!(!archive.archive.operation.is_active());
         assert_eq!(archive.sheet_cursor_resource_usage().unwrap(), usage);
     }
 
@@ -7022,31 +6902,9 @@ mod rb7_partial_degradation_tests {
             .as_str()
             .unwrap()
             .starts_with("xl/worksheets/missing.xml: "));
-        assert!(archive.archive.as_ref().unwrap().operation.is_active());
+        assert!(archive.archive.operation.is_active());
         archive.acknowledge_sheet_cursor_terminal().unwrap();
-        assert!(!archive.archive.as_ref().unwrap().operation.is_active());
-    }
-
-    #[test]
-    fn wasm_cursor_corrupt_container_matches_legacy_placeholder_and_commits_on_ack() {
-        let mut archive = XlsxArchive::new(b"not a zip".to_vec(), None, None, None).unwrap();
-        let container_error = match &archive.archive {
-            Err(error) => error.clone(),
-            Ok(_) => panic!("corrupt container must be deferred"),
-        };
-        archive.open_sheet_cursor(0, "ignored").unwrap();
-        assert!(!archive.sheet_cursor_pull_finished());
-        let payload = archive.pull_sheet_cursor(128).unwrap();
-        let value: serde_json::Value = serde_json::from_slice(&payload).unwrap();
-        assert_eq!(value["kind"], "finished");
-        assert_eq!(
-            value["worksheet"],
-            serde_json::to_value(degraded_container_sheet(container_error)).unwrap()
-        );
-        assert!(archive.terminal_awaiting_ack);
-        archive.acknowledge_sheet_cursor_terminal_inner().unwrap();
-        assert!(archive.active_worksheet.is_none());
-        assert!(!archive.terminal_awaiting_ack);
+        assert!(!archive.archive.operation.is_active());
     }
 
     #[test]
@@ -7058,7 +6916,7 @@ mod rb7_partial_degradation_tests {
         assert!(!archive.sheet_cursor_pull_finished());
         assert!(!archive.terminal_awaiting_ack);
         assert!(archive.active_worksheet.is_none());
-        assert!(!archive.archive.as_ref().unwrap().operation.is_active());
+        assert!(!archive.archive.operation.is_active());
         assert!(archive.acknowledge_sheet_cursor_terminal_inner().is_err());
         archive.cancel_sheet_cursor();
         archive.close_sheet_cursor();
@@ -7088,7 +6946,7 @@ mod rb7_partial_degradation_tests {
         assert!(!archive.sheet_cursor_pull_finished());
         assert!(!archive.terminal_awaiting_ack);
         assert!(archive.active_worksheet.is_none());
-        assert!(!archive.archive.as_ref().unwrap().operation.is_active());
+        assert!(!archive.archive.operation.is_active());
         assert!(archive.acknowledge_sheet_cursor_terminal_inner().is_err());
     }
 
@@ -7248,6 +7106,7 @@ mod rb7_partial_degradation_tests {
                 w.start_file(name.as_str(), o).unwrap();
                 w.write_all(body.as_bytes()).unwrap();
             }
+            crate::write_test_content_types(&mut w);
             w.finish().unwrap();
         }
         buf
@@ -7288,6 +7147,7 @@ mod rb7_partial_degradation_tests {
                 w.start_file(name.as_str(), o).unwrap();
                 w.write_all(body.as_bytes()).unwrap();
             }
+            crate::write_test_content_types(&mut w);
             w.finish().unwrap();
         }
         buf
@@ -7429,6 +7289,7 @@ mod pivot_metadata_tests {
                 zip.start_file(path, options).unwrap();
                 zip.write_all(xml.as_bytes()).unwrap();
             }
+            crate::write_test_content_types(&mut zip);
             zip.finish().unwrap();
         }
         bytes
@@ -7471,6 +7332,7 @@ mod pivot_metadata_tests {
                 zip.start_file(path, options).unwrap();
                 zip.write_all(content).unwrap();
             }
+            crate::write_test_content_types(&mut zip);
             zip.finish().unwrap();
         }
         bytes

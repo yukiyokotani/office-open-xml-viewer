@@ -457,8 +457,8 @@ fn write_quoted_comment_md(
     }
 }
 
-/// Materialized-model oracle retained for compatibility/degraded paths and
-/// sequential-output equivalence tests.
+/// Materialized-model oracle for sequential-output equivalence tests.
+#[cfg(test)]
 pub(crate) fn render_presentation_md(pres: &Presentation) -> String {
     let (mut out, mut review_comments) = MarkdownWriter::shared(u64::MAX);
     let mut has_comments = false;

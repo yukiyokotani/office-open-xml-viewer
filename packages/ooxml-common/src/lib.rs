@@ -22,6 +22,7 @@ pub mod line;
 pub mod math;
 pub mod mce;
 pub mod ns;
+pub mod opc;
 pub mod package_session;
 pub mod pull;
 pub mod rels;

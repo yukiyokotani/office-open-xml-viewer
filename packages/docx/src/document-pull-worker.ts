@@ -39,20 +39,15 @@ export type DocxDocumentArchiveExecutor = <T>(
   operation: (archive: DocxDocumentCursorArchive) => T,
 ) => T;
 
-/** Decode the cursor checkpoint while preserving the degraded-container path. */
+/** Decode the cursor checkpoint. Every opened cursor owns a PackageOperation
+ * ledger (the archive admits only OPC packages), so a missing, malformed, or
+ * failed checkpoint is a real error; only a non-WASM archive lacking the
+ * method reports no usage. */
 export function readDocxDocumentCursorUsage(
   execute: DocxDocumentArchiveExecutor,
 ): ReturnType<typeof decodeOoxmlResourceUsage> | undefined {
-  try {
-    const bytes = execute((archive) => archive.document_cursor_resource_usage?.());
-    return bytes ? decodeOoxmlResourceUsage(bytes) : undefined;
-  } catch (error) {
-    // A corrupt container is represented by a degraded terminal document and
-    // has no PackageOperation ledger. Only that unavailable checkpoint is
-    // optional; malformed checkpoints and real parser/resource failures escape.
-    if (String(error).includes('document cursor usage is unavailable')) return undefined;
-    throw error;
-  }
+  const bytes = execute((archive) => archive.document_cursor_resource_usage?.());
+  return bytes ? decodeOoxmlResourceUsage(bytes) : undefined;
 }
 
 /**

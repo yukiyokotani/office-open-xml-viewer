@@ -388,18 +388,12 @@ export class WorksheetPullWorker {
     }
   }
 
-  private readResourceUsage(): OoxmlResourceUsageSnapshot | undefined {
-    try {
-      return decodeOoxmlResourceUsage(
-        this.executeArchive((archive) => archive.sheet_cursor_resource_usage()),
-      );
-    } catch (error) {
-      // A corrupt container is deliberately represented by a deferred terminal
-      // placeholder and has no PackageOperation ledger. That one legacy state
-      // has no checkpoint; every real resource/worker error must still escape.
-      if (String(error).includes('worksheet cursor usage is unavailable')) return undefined;
-      throw error;
-    }
+  // Every opened worksheet cursor owns a PackageOperation ledger (the archive
+  // admits only OPC packages), so any checkpoint failure is a real error.
+  private readResourceUsage(): OoxmlResourceUsageSnapshot {
+    return decodeOoxmlResourceUsage(
+      this.executeArchive((archive) => archive.sheet_cursor_resource_usage()),
+    );
   }
 }
 

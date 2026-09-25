@@ -1,7 +1,7 @@
 import {
   normalizeLoadResourceOptions,
   OoxmlResourceMetricsSession,
-  parseResourceLimitError,
+  parseTypedParserError,
   resourcePolicyForWasm,
 } from '@silurus/ooxml-core/worker';
 import {
@@ -108,7 +108,7 @@ export async function acquirePptxNodeSession(
     };
   } catch (error) {
     try { handle?.close((archive: PptxNodeArchive) => archive.free()); } catch {}
-    const normalized = parseResourceLimitError(error) ?? error;
+    const normalized = parseTypedParserError(error) ?? error;
     metrics.fail(normalized);
     throw normalized;
   }

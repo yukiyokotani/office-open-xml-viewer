@@ -10,6 +10,8 @@ import {
   openDocxDocument,
 } from './docx.ts';
 import type { NodeCanvasFactory } from './render.ts';
+import { OoxmlError } from '@silurus/ooxml-core';
+import { nonOoxmlInputs } from '@silurus/ooxml-core/testing';
 
 const factory: NodeCanvasFactory = {
   createCanvas: (width, height) =>
@@ -34,6 +36,20 @@ describe('Node bounded DOCX document session', () => {
       expect(parse).not.toHaveBeenCalled();
     } finally {
       parse.mockRestore();
+    }
+  });
+
+  it.each(nonOoxmlInputs('docx'))('rejects %s with OoxmlError not-ooxml', async (_name, input) => {
+    for (const open of [
+      () => materializeDocxDocument(input),
+      () => openDocxDocument(input, { factory }),
+    ]) {
+      const error = await open().then(
+        (document) => { throw new Error(`resolved ${JSON.stringify(document).slice(0, 80)}`); },
+        (rejection: unknown) => rejection,
+      );
+      expect(error).toBeInstanceOf(OoxmlError);
+      expect(error).toMatchObject({ code: 'not-ooxml' });
     }
   });
 
