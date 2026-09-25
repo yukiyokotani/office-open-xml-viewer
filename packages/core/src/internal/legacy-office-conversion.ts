@@ -4,6 +4,7 @@ import {
   validateLegacyDocSourceDescriptor,
 } from '../conversion/legacy-doc-source.js';
 import {
+  legacyXlsHostServices,
   MAX_LEGACY_XLS_SOURCE_BYTES,
   validateLegacyXlsSourceDescriptor,
 } from '../conversion/legacy-xls-source.js';
@@ -81,6 +82,8 @@ export type ResolvedXlsWorkbookInput =
     bytes: Uint8Array;
     source: import('../conversion/legacy-xls-source.js').LegacyXlsDirectSourceDescriptor;
     signal?: AbortSignal;
+    /** Services bound to the caller's source by its factory, if any. */
+    hostServices?: import('../conversion/legacy-xls-source.js').LegacyXlsHostServices;
   }>;
 
 export async function resolveXlsWorkbookInput(
@@ -88,10 +91,16 @@ export async function resolveXlsWorkbookInput(
   options?: LegacyOfficeConversionOptions,
   password?: string,
 ): Promise<ResolvedXlsWorkbookInput> {
-  return resolveNativeInput(
+  const resolved = await resolveNativeInput(
     'xls', 'xlsx', validateLegacyXlsSourceDescriptor,
     MAX_LEGACY_XLS_SOURCE_BYTES, bytes, options, password,
   );
+  if (resolved.kind !== 'legacy-xls') return resolved;
+  const selected = options?.xls;
+  const hostServices = selected && 'source' in selected
+    ? legacyXlsHostServices(selected.source)
+    : undefined;
+  return hostServices ? { ...resolved, hostServices } : resolved;
 }
 
 async function resolveNativeInput<F extends 'doc' | 'ppt' | 'xls', D>(
