@@ -10,13 +10,28 @@
 //   PowerPoint's PDF export of grayscl + biLevel(50%) pictures turns
 //   (2,167,223) white and (0,147,190), (0,126,229), (9,74,178) black; Rec. 601
 //   weights put the first below 50% (0.486), Rec. 709 weights (0.532) and the
-//   others on the observed sides, so the effects use Rec. 709 luma of the
-//   stored (gamma-encoded) values.
+//   others on the observed sides. Boundary evidence: a layout picture that
+//   PowerPoint 16 reads from a binary .ppt as grayscl + biLevel(50%), compared
+//   with PowerPoint's PDF of that .ppt at every PDF pixel whose source block is
+//   a single colour that candidate rules classify differently (7,068 blocks of
+//   JPEG blues around the threshold): Rec. 709 luma of the stored
+//   (gamma-encoded) values with the grayscale truncated to a whole 8-bit level
+//   matches all 7,068; rounding that level instead fails 30 (e.g.
+//   (99,131,178): luma 127.59 must become 127, black), unquantized Rec. 709
+//   fails 30, Rec. 601 fails at least 1,534, the channel average 4,553 and
+//   linear-light Rec. 709 is contradicted on nearly every block. So grayscl
+//   writes floor(Rec. 709 luma) and biLevel compares Rec. 709 luma with the
+//   threshold. (No block sat exactly on a threshold, so >= follows the text:
+//   "values greater than or equal to the threshold are set to white".)
 // - clrChange. MS-OI29500 says Office leaves alpha alone unless useA is set,
 //   but PowerPoint's own "set transparent colour" output (clrTo = the same
-//   colour with alpha 0, useA absent) renders transparent in its PDF export.
-//   Exact RGB matches therefore take clrTo's colour and alpha; with useA the
-//   source alpha must match clrFrom's alpha as well.
+//   colour with alpha 0, useA absent) renders transparent in its PDF export:
+//   comparing the PDF soft masks with the source pictures, every block that is
+//   pure clrFrom white becomes transparent (2,286 blocks with no counterexample
+//   in one picture, 291 in another; 971 of them transparent where keeping the
+//   source alpha would leave them opaque), and every non-matching block stays
+//   opaque. Exact RGB matches therefore take clrTo's colour and alpha; with
+//   useA the source alpha must match clrFrom's alpha as well.
 
 import type { RgbaBuffer, Duotone } from './duotone';
 import { duotoneImageData, hex6ToRgb } from './duotone';
@@ -73,6 +88,13 @@ export function blipLuminance(r: number, g: number, b: number): number {
   return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
 }
 
+/** grayscl's 8-bit level: the Rec. 709 luma truncated to a whole level (see
+ *  the evidence above). The epsilon keeps white at 255 despite the weights'
+ *  binary rounding. */
+export function blipGrayLevel(r: number, g: number, b: number): number {
+  return Math.floor(blipLuminance(r, g, b) * 255 + 1e-6);
+}
+
 /** Apply the effects in place, in order. Alpha is preserved except by
  *  clrChange, whose target alpha replaces the matched pixel's. */
 export function applyBlipPixelEffects(buf: RgbaBuffer, value: BlipPixelEffects): RgbaBuffer {
@@ -82,7 +104,7 @@ export function applyBlipPixelEffects(buf: RgbaBuffer, value: BlipPixelEffects):
     switch (effect.type) {
       case 'grayscale':
         for (let i = 0; i < d.length; i += 4) {
-          const gray = Math.round(blipLuminance(d[i], d[i + 1], d[i + 2]) * 255);
+          const gray = blipGrayLevel(d[i], d[i + 1], d[i + 2]);
           d[i] = gray;
           d[i + 1] = gray;
           d[i + 2] = gray;
