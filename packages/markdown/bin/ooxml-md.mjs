@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import { resolve, dirname, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -52,12 +52,22 @@ const {
   initPptxFromBytes,
   initDocxFromBytes,
   initXlsxFromBytes,
-} = await import('../src/index.ts').catch(() => import('../dist/index.js'));
-// Dev (monorepo) runs the TS source directly via Node's type stripping; a
-// published install has no `src/` (it ships `dist/`), so the first import
-// rejects with a not-found / unknown-extension error and we fall back to the
-// compiled `dist/index.js`. Node refuses to strip types from `.ts` files under
+} = await loadSource().catch(() => import('../dist/index.js'));
+
+// Dev (monorepo) runs the TS source through Vite's module runner: the source
+// imports the shared typed errors from `@silurus/ooxml-core`, which ships
+// TypeScript that Node's strip-only mode cannot execute (parameter properties,
+// bundler-style `.js` specifiers). A published install has neither `src/` nor
+// Vite, so this rejects and we fall back to the compiled `dist/index.js`, which
+// inlines those helpers. Node refuses to strip types from `.ts` files under
 // node_modules, so the standalone package MUST expose compiled JS here.
+async function loadSource() {
+  const source = fileURLToPath(new URL('../src/index.ts', import.meta.url));
+  if (!existsSync(source)) throw new Error('no TypeScript source');
+  const { runnerImport } = await import('vite');
+  const { module } = await runnerImport(source, { configFile: false, logLevel: 'silent' });
+  return module;
+}
 
 const buf = readFileSync(filePath);
 let md;

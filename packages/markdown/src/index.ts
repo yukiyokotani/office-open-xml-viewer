@@ -26,6 +26,7 @@ import * as pptxWasm from '@silurus/ooxml-pptx/wasm';
 import * as docxWasm from '@silurus/ooxml-docx/wasm';
 // @ts-ignore
 import * as xlsxWasm from '@silurus/ooxml-xlsx/wasm';
+import { parseTypedParserError } from '@silurus/ooxml-core/worker';
 
 type WasmModule = {
   initSync: (init: { module: WebAssembly.Module }) => unknown;
@@ -70,13 +71,25 @@ function toUint8(buffer: ArrayBuffer | Uint8Array): Uint8Array {
   return new Uint8Array(buffer);
 }
 
+/** The Rust projections throw bare `OOXML_RESOURCE_LIMIT:` / `OOXML_NOT_OOXML:`
+ *  envelope strings. Reconstruct them as the same `OoxmlResourceLimitError` /
+ *  `OoxmlError('not-ooxml')` the viewer and Node load paths throw, so callers
+ *  can branch on one typed contract; any other failure propagates unchanged. */
+function project(convert: (bytes: Uint8Array) => string, buffer: ArrayBuffer | Uint8Array): string {
+  try {
+    return convert(toUint8(buffer));
+  } catch (error) {
+    throw parseTypedParserError(error) ?? error;
+  }
+}
+
 /** Convert a `.pptx` archive's bytes to GitHub-flavoured markdown. Title
  *  slides become `# heading`s, body shapes become nested bullets at the
  *  paragraph's `lvl`, tables become pipe tables, charts become summarised
  *  bullets, speaker notes and comments are collated. */
 export function pptxToMarkdown(buffer: ArrayBuffer | Uint8Array): string {
   if (!pptxState.initialized) throw new Error('pptx wasm not initialized — call initPptxFromBytes() first');
-  return (pptxWasm as unknown as { pptx_to_markdown: (b: Uint8Array) => string }).pptx_to_markdown(toUint8(buffer));
+  return project((pptxWasm as unknown as { pptx_to_markdown: (b: Uint8Array) => string }).pptx_to_markdown, buffer);
 }
 
 /** Convert a `.docx` archive's bytes to GitHub-flavoured markdown. Headings
@@ -84,7 +97,7 @@ export function pptxToMarkdown(buffer: ArrayBuffer | Uint8Array): string {
  *  preserve vMerge continuation, footnotes/endnotes/comments are collated. */
 export function docxToMarkdown(buffer: ArrayBuffer | Uint8Array): string {
   if (!docxState.initialized) throw new Error('docx wasm not initialized — call initDocxFromBytes() first');
-  return (docxWasm as unknown as { docx_to_markdown: (b: Uint8Array) => string }).docx_to_markdown(toUint8(buffer));
+  return project((docxWasm as unknown as { docx_to_markdown: (b: Uint8Array) => string }).docx_to_markdown, buffer);
 }
 
 /** Convert a `.xlsx` archive's bytes to GitHub-flavoured markdown. Each
@@ -93,5 +106,5 @@ export function docxToMarkdown(buffer: ArrayBuffer | Uint8Array): string {
  *  masked. */
 export function xlsxToMarkdown(buffer: ArrayBuffer | Uint8Array): string {
   if (!xlsxState.initialized) throw new Error('xlsx wasm not initialized — call initXlsxFromBytes() first');
-  return (xlsxWasm as unknown as { xlsx_to_markdown: (b: Uint8Array) => string }).xlsx_to_markdown(toUint8(buffer));
+  return project((xlsxWasm as unknown as { xlsx_to_markdown: (b: Uint8Array) => string }).xlsx_to_markdown, buffer);
 }
