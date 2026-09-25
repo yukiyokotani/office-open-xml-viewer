@@ -31,14 +31,14 @@ test.describe('legacy DOC corpus survey', () => {
       const pdf = resolve(corpus, name.replace(/\.doc$/iu, '.pdf'));
       const reference = existsSync(pdf) ? pdfPages(pdf, resolve(out, 'word')) : [];
       const width = reference[0]?.width ?? 816;
-      const directDoc = resolve(packagesDir, 'legacy-converter/src/direct-doc.ts');
+      const directDoc = resolve(packagesDir, 'legacy-converter/src/legacy-doc.ts');
       await page.goto(`${viewerOrigin('doc')}/tests/visual/fixture.html`);
       const rendered = await page.evaluate(async ({ file, width: requested, module }) => {
         const pages: string[] = [];
         try {
           const { DocxDocument } = await import('/src/document.ts');
           const { math } = await import('/tests/visual/math-engine.ts');
-          const { createLegacyDocSource } = await import(/* @vite-ignore */ module);
+          const { legacyDocSource } = await import(/* @vite-ignore */ module);
           // The dev server decodes paths with decodeURI, which keeps reserved
           // escapes such as %2B; encodeURI leaves those characters literal.
           const response = await fetch(`/private/doc/${encodeURI(file)}`);
@@ -47,7 +47,7 @@ test.describe('legacy DOC corpus survey', () => {
           const document = await DocxDocument.load(bytes, {
             useGoogleFonts: false,
             math,
-            legacyConversion: { doc: { source: createLegacyDocSource() } },
+            modelSources: [legacyDocSource()],
           });
           try {
             for (let index = 0; index < document.pageCount; index += 1) {

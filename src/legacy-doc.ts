@@ -1,5 +1,4 @@
 export {
-  createLegacyDocSource,
-  type LegacyDocDirectSourceDescriptor,
+  legacyDocSource,
   type LegacyDocSourceOptions,
-} from '../packages/legacy-converter/src/direct-doc.js';
+} from '../packages/legacy-converter/src/legacy-doc.js';

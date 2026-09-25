@@ -31,33 +31,23 @@ test.describe('legacy XLS corpus survey', () => {
       const pdf = resolve(corpus, name.replace(/\.xls$/iu, '.pdf'));
       const reference = existsSync(pdf) ? pdfPages(pdf, resolve(out, 'excel')) : [];
       const width = 1100;
-      const directXls = resolve(packagesDir, 'legacy-converter/src/direct-xls.ts');
+      const directXls = resolve(packagesDir, 'legacy-converter/src/legacy-xls.ts');
       await page.goto(`${viewerOrigin('xls')}/tests/visual/fixture.html`);
       const rendered = await page.evaluate(async ({ file, width: requested, module }) => {
         const pages: string[] = [];
         try {
           const { XlsxWorkbook } = await import('/src/workbook.ts');
-          const { createLegacyXlsSource } = await import(/* @vite-ignore */ module);
+          const { legacyXlsSource } = await import(/* @vite-ignore */ module);
           // The dev server decodes paths with decodeURI, which keeps reserved
           // escapes such as %2B; encodeURI leaves those characters literal.
           const response = await fetch(`/private/xls/${encodeURI(file)}`);
           if (!response.ok) throw new Error(`fetch failed: ${response.status}`);
           const bytes = await response.arrayBuffer();
-          // Excel column widths depend on the Normal font's maximum digit
-          // width in whole pixels (ECMA-376 §18.3.1.13). The library default
-          // measures only an installed face; this survey measures whatever
-          // face the browser resolves so drawings remain reviewable.
-          const measure = (font: { family: string; sizePoints: number; bold: boolean; italic: boolean }) => {
-            const context = document.createElement('canvas').getContext('2d')!;
-            const px = font.sizePoints * 96 / 72;
-            context.font = `${font.italic ? 'italic ' : ''}${font.bold ? 'bold ' : ''}${px}px "${font.family}"`;
-            let widest = 0;
-            for (const digit of '0123456789') widest = Math.max(widest, context.measureText(digit).width);
-            return Math.max(1, Math.round(widest));
-          };
+          // Excel column widths and drawing anchors depend on the Normal
+          // font's maximum digit width (ECMA-376 §18.3.1.13); the XLSX
+          // renderer measures it with the same code that sizes the grid.
           const workbook = await XlsxWorkbook.load(bytes, {
-            legacyConversion: { xls: { source: createLegacyXlsSource() } },
-            measureLegacyXlsNormalFont: measure,
+            modelSources: [legacyXlsSource()],
           });
           try {
             for (let index = 0; index < workbook.sheetCount; index += 1) {

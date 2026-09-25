@@ -8,8 +8,23 @@ interface RuntimeHandle { invalidate(): void }
 interface TrapDomain { failure?: WasmTrapError; live: Set<RuntimeHandle> }
 const trapDomains = new WeakMap<object, TrapDomain>();
 
-export interface DirectSourceDescriptor {
-  readonly wasmUrl: string;
+const SUPPORTED_WASM_PROTOCOLS = new Set(['http:', 'https:', 'file:', 'blob:', 'data:']);
+
+/** Admit only an absolute WASM URL; the module never resolves one itself. */
+export function validateDirectWasmUrl(value: unknown, label: string): string {
+  if (typeof value !== 'string' || value.length === 0 || value.trim() !== value) {
+    throw new TypeError(`${label} wasmUrl must be a nonempty absolute URL`);
+  }
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new TypeError(`${label} wasmUrl must be a nonempty absolute URL`);
+  }
+  if (!SUPPORTED_WASM_PROTOCOLS.has(url.protocol)) {
+    throw new TypeError(`${label} wasmUrl protocol is unsupported`);
+  }
+  return value;
 }
 
 export interface DirectSourceArchive {
@@ -26,17 +41,16 @@ export interface DirectSourceGlue {
   default(input: { module_or_path: unknown }): Promise<unknown>;
 }
 
-export function createDirectSourceRuntime<D extends DirectSourceDescriptor, G extends DirectSourceGlue, A extends DirectSourceArchive>(
+export function createDirectSourceRuntime<G extends DirectSourceGlue, A extends DirectSourceArchive>(
   config: Readonly<{
     label: string;
     maximumSourceBytes: number;
-    validate(value: unknown): D;
     loadGlue(): Promise<G>;
     resolveWasm(wasmUrl: string): Promise<unknown>;
     construct(glue: G, bytes: Uint8Array): A;
     closeNative(archive: A): void;
   }>,
-): Readonly<{ open(bytes: Uint8Array, descriptor: D, signal?: AbortSignal): Promise<OwnedDirectSource<A>> }> {
+): Readonly<{ open(bytes: Uint8Array, wasmUrl: string, signal?: AbortSignal): Promise<OwnedDirectSource<A>> }> {
   let initialized: Promise<G> | undefined;
   let initializedUrl: string | undefined;
   let initializationPoison: WasmTrapError | undefined;
@@ -87,17 +101,17 @@ export function createDirectSourceRuntime<D extends DirectSourceDescriptor, G ex
   };
 
   return Object.freeze({
-    async open(bytes, descriptor, signal) {
+    async open(bytes, wasmUrl, signal) {
       const poisoned = failure();
       if (poisoned) throw poisoned;
-      const validated = config.validate(descriptor);
+      const validatedUrl = validateDirectWasmUrl(wasmUrl, config.label);
       if (bytes.byteLength > config.maximumSourceBytes) {
         throw new RangeError(`${config.label} direct source byte budget exceeded`);
       }
       throwIfAborted(signal, config.label);
       let glue: G;
       try {
-        glue = await waitForInitialization(initialize(validated.wasmUrl), signal, config.label);
+        glue = await waitForInitialization(initialize(validatedUrl), signal, config.label);
       } catch (error) {
         return failTrap(error);
       }
@@ -158,10 +172,10 @@ export function createDirectSourceRuntime<D extends DirectSourceDescriptor, G ex
 }
 
 export async function resolveDirectWasmInput(wasmUrl: string): Promise<unknown> {
-  // Every per-format descriptor validator admits only absolute URLs. Avoid an
+  // The runtime admits only absolute URLs (validateDirectWasmUrl). Avoid an
   // import.meta-relative fallback here: besides being unreachable through a
-  // validated descriptor, it would make the emitted worker asset unsuitable
-  // for consumers that copy it as an opaque classic-script-compatible file.
+  // validated URL, it would make the emitted source module unsuitable for
+  // consumers that copy it as an opaque file.
   const url = new URL(wasmUrl);
   const nodeProcess = (globalThis as { process?: { versions?: { node?: string } } }).process;
   if (url.protocol === 'file:' && nodeProcess?.versions?.node) {

@@ -1,4 +1,4 @@
--- Local verification only. Never used by the shipped converter.
+-- Local verification only. Never shipped with the legacy readers.
 -- The caller must provide a disposable copy and a fresh output path.
 on sameLocalFile(actualPath, expectedPath)
     -- Office can return a different symbolic-link spelling of the same path.

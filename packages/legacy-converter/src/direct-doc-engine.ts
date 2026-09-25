@@ -1,13 +1,12 @@
 import {
-  validateLegacyDocSourceDescriptor,
-  MAX_LEGACY_DOC_SOURCE_BYTES,
-  type LegacyDocDirectSourceDescriptor,
-} from '@silurus/ooxml-core/internal/legacy-doc-source';
-import {
   createDirectSourceRuntime,
   resolveDirectWasmInput,
   type OwnedDirectSource,
 } from './direct-source-runtime.js';
+
+import { MAX_LEGACY_SOURCE_BYTES as MAX_LEGACY_DOC_SOURCE_BYTES } from './legacy-source-limits.js';
+
+export { MAX_LEGACY_DOC_SOURCE_BYTES };
 
 export interface LegacyDocNativeDocument {
   free(): void;
@@ -47,7 +46,7 @@ export function createLegacyDocSourceEngine(
   resolveWasm: (wasmUrl: string) => Promise<unknown>,
   modelBudget?: number,
 ): Readonly<{
-  open(bytes: Uint8Array, descriptor: LegacyDocDirectSourceDescriptor, signal?: AbortSignal): Promise<OwnedLegacyDocSource>;
+  open(bytes: Uint8Array, wasmUrl: string, signal?: AbortSignal): Promise<OwnedLegacyDocSource>;
 }> {
   if (modelBudget !== undefined && (
     !Number.isSafeInteger(modelBudget) || modelBudget <= 0
@@ -58,7 +57,6 @@ export function createLegacyDocSourceEngine(
   return createDirectSourceRuntime({
     label: 'legacy DOC',
     maximumSourceBytes: MAX_LEGACY_DOC_SOURCE_BYTES,
-    validate: validateLegacyDocSourceDescriptor,
     loadGlue,
     resolveWasm,
     construct: (glue, bytes) => new glue.LegacyDocDocument(bytes, modelBudget),
@@ -67,15 +65,17 @@ export function createLegacyDocSourceEngine(
   });
 }
 
-const defaultEngine = createLegacyDocSourceEngine(
-  () => import('./wasm-direct-doc/legacy_office_converter.js'),
-  resolveDirectWasmInput,
-);
-
-export function openLegacyDocSource(
-  bytes: Uint8Array,
-  descriptor: LegacyDocDirectSourceDescriptor,
-  signal?: AbortSignal,
-): Promise<OwnedLegacyDocSource> {
-  return defaultEngine.open(bytes, descriptor, signal);
+/**
+ * The DOCX view the DOC asks for: its revision markup when it prints that
+ * markup (fRMPrint) and actually carries revision marks. Word's PDF output is
+ * the display target for legacy DOC, so the print setting decides.
+ */
+export function legacyDocViewDefaults(
+  document: Pick<LegacyDocNativeDocument, 'revision_markup_in_print' | 'has_revision_marks'>,
+): Readonly<{ showTrackedChanges?: boolean }> {
+  return document.revision_markup_in_print?.() === true && document.has_revision_marks?.() === true
+    ? { showTrackedChanges: true }
+    : {};
 }
+
+export { resolveDirectWasmInput };

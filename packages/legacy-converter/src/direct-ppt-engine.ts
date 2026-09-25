@@ -1,14 +1,12 @@
 import {
-  validateLegacyPptSourceDescriptor,
-  type LegacyPptDirectSourceDescriptor,
-} from '@silurus/ooxml-core/internal/legacy-ppt-source';
-import {
   createDirectSourceRuntime,
   resolveDirectWasmInput,
   type OwnedDirectSource,
 } from './direct-source-runtime.js';
 
-const MAX_DIRECT_PPT_SOURCE_BYTES = 256 * 1024 * 1024;
+import { MAX_LEGACY_SOURCE_BYTES as MAX_LEGACY_PPT_SOURCE_BYTES } from './legacy-source-limits.js';
+
+export { MAX_LEGACY_PPT_SOURCE_BYTES };
 
 export interface LegacyPptNativeArchive {
   free(): void;
@@ -19,36 +17,26 @@ export interface LegacyPptNativeArchive {
   close_presentation_session(): void;
   assert_healthy(): void;
   extract_image(path: string): Uint8Array;
-  extract_media(path: string): Uint8Array;
-  extract_font(path: string): Uint8Array;
   slide_cursor_resource_usage(): Uint8Array;
 }
 
 export type OwnedLegacyPptSource = OwnedDirectSource<LegacyPptNativeArchive>;
 
-interface LegacyPptGlue {
+export interface LegacyPptGlue {
   default(input: { module_or_path: unknown }): Promise<unknown>;
   LegacyPptPresentation: new (bytes: Uint8Array) => LegacyPptNativeArchive;
 }
 
-type LoadGlue = () => Promise<LegacyPptGlue>;
-type ResolveWasm = (wasmUrl: string) => Promise<unknown>;
-
 /** Internal engine factory; injectable dependencies keep ownership tests content-free. */
 export function createLegacyPptSourceEngine(
-  loadGlue: LoadGlue,
-  resolveWasm: ResolveWasm,
+  loadGlue: () => Promise<LegacyPptGlue>,
+  resolveWasm: (wasmUrl: string) => Promise<unknown>,
 ): Readonly<{
-  open(
-    bytes: Uint8Array,
-    descriptor: LegacyPptDirectSourceDescriptor,
-    signal?: AbortSignal,
-  ): Promise<OwnedLegacyPptSource>;
+  open(bytes: Uint8Array, wasmUrl: string, signal?: AbortSignal): Promise<OwnedLegacyPptSource>;
 }> {
   return createDirectSourceRuntime({
     label: 'legacy PPT',
-    maximumSourceBytes: MAX_DIRECT_PPT_SOURCE_BYTES,
-    validate: validateLegacyPptSourceDescriptor,
+    maximumSourceBytes: MAX_LEGACY_PPT_SOURCE_BYTES,
     loadGlue,
     resolveWasm,
     construct: (glue, bytes) => new glue.LegacyPptPresentation(bytes),
@@ -56,17 +44,4 @@ export function createLegacyPptSourceEngine(
   });
 }
 
-// Generated glue is a realm singleton. Keep exactly one production engine and
-// pin it to the first attempted asset URL in this realm, including sticky failure.
-const defaultEngine = createLegacyPptSourceEngine(
-  () => import('./wasm-direct-ppt/legacy_office_converter.js'),
-  resolveDirectWasmInput,
-);
-
-export function openLegacyPptSource(
-  bytes: Uint8Array,
-  descriptor: LegacyPptDirectSourceDescriptor,
-  signal?: AbortSignal,
-): Promise<OwnedLegacyPptSource> {
-  return defaultEngine.open(bytes, descriptor, signal);
-}
+export { resolveDirectWasmInput };

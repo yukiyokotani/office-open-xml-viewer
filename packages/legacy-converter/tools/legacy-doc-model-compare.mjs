@@ -418,15 +418,15 @@ export async function runHarness(options, dependencies = {}) {
       ['candidate', candidate, paths.candidateTarget, paths.candidateWasm, candidateResult],
     ];
     for (const [label, source, target, wasm, result] of builds) {
-      const args = ['build', join(source, 'packages/legacy-converter/parser'), '--mode', 'no-install', '--release', '--target', 'web', '--out-dir', wasm, '--features', 'direct-doc', '--locked', '--offline'];
+      const args = ['build', join(source, 'packages/legacy-converter/parser'), '--mode', 'no-install', '--release', '--target', 'web', '--out-dir', wasm, '--out-name', 'legacy_doc_direct', '--features', 'direct-doc', '--locked', '--offline'];
       await deps.loggedCommand(tools.wasmPack.invocation, args, {
         cwd: source,
         env: { ...process.env, CARGO_TARGET_DIR: target, CARGO_NET_OFFLINE: 'true' },
         logPath: join(output, `${label}-build.log`),
       });
       await deps.captureBuild({
-        gluePath: join(wasm, 'legacy_office_converter.js'),
-        wasmPath: join(wasm, 'legacy_office_converter_bg.wasm'),
+        gluePath: join(wasm, 'legacy_doc_direct.js'),
+        wasmPath: join(wasm, 'legacy_doc_direct_bg.wasm'),
         manifestPath,
         resultPath: result,
         node: tools.node.invocation,
@@ -451,12 +451,12 @@ export async function runHarness(options, dependencies = {}) {
       limits: manifest.limits,
       baseline: {
         requested: options.baseline, resolved: baselineSha,
-        wasmSha256: sha256(await readBoundedFile(join(paths.baselineWasm, 'legacy_office_converter_bg.wasm'), MAX_WASM_BYTES)),
+        wasmSha256: sha256(await readBoundedFile(join(paths.baselineWasm, 'legacy_doc_direct_bg.wasm'), MAX_WASM_BYTES)),
         build: buildConfiguration,
       },
       candidate: {
         path: candidate, resolved: candidateSha, sourceManifest: candidateSource,
-        wasmSha256: sha256(await readBoundedFile(join(paths.candidateWasm, 'legacy_office_converter_bg.wasm'), MAX_WASM_BYTES)),
+        wasmSha256: sha256(await readBoundedFile(join(paths.candidateWasm, 'legacy_doc_direct_bg.wasm'), MAX_WASM_BYTES)),
         build: buildConfiguration,
       },
       equal: cases.every(entry => entry.equal),

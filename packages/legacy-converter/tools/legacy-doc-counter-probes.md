@@ -15,7 +15,7 @@ Run the script with the bundled document Python runtime and a new output
 directory:
 
 ```bash
-python scripts/legacy-doc-counter-probes.py /new/output/directory
+python packages/legacy-converter/tools/legacy-doc-counter-probes.py /new/output/directory
 ```
 
 Existing output paths are rejected. The result contains a deterministic
@@ -89,7 +89,7 @@ behavior. The native files and detailed provenance remain local-only.
 ## Tests
 
 ```bash
-python scripts/legacy-doc-counter-probes.test.py
+python packages/legacy-converter/tools/legacy-doc-counter-probes.test.py
 ```
 
 The tests inspect the package in memory. They verify input passivity,

@@ -9,8 +9,8 @@ expected precedence rule, and generating them does not establish Office behavior
 Use a Python environment with `python-docx` and `lxml` installed:
 
 ```sh
-python scripts/legacy-doc-list-probes.test.py
-python scripts/legacy-doc-list-probes.py /tmp/doc-list-probes-new
+python packages/legacy-converter/tools/legacy-doc-list-probes.test.py
+python packages/legacy-converter/tools/legacy-doc-list-probes.py /tmp/doc-list-probes-new
 ```
 
 The output directory must not already exist. The generator creates one DOCX
@@ -39,7 +39,7 @@ one-twip boundaries around zero and matching list indents, cumulative left/right
 first-line overrides, and conflicting list/paragraph bidi in both directions:
 
 ```sh
-python scripts/legacy-doc-list-probes.py /tmp/doc-list-probes-interactions --phase interactions
+python packages/legacy-converter/tools/legacy-doc-list-probes.py /tmp/doc-list-probes-interactions --phase interactions
 ```
 
 This creates another 64 cases, identified by `Q` rather than `P`. Its manifest
@@ -55,7 +55,7 @@ indentation, direct-left zero/1440, direct-first-line zero, and combined zeros,
 in both directions, with unchanged repeats:
 
 ```sh
-python scripts/legacy-doc-list-probes.py /tmp/doc-list-probes-style-association --phase style-association
+python packages/legacy-converter/tools/legacy-doc-list-probes.py /tmp/doc-list-probes-style-association --phase style-association
 ```
 
 This creates 48 `R` cases without changing the authored `P` or `Q` files. It
@@ -65,7 +65,7 @@ does not establish whether Word will create or retain a list-style association.
 The fourth phase isolates bidirectional word ordering from indentation:
 
 ```sh
-python scripts/legacy-doc-list-probes.py /tmp/doc-list-probes-bidi-boundaries --phase bidi-boundaries
+python packages/legacy-converter/tools/legacy-doc-list-probes.py /tmp/doc-list-probes-bidi-boundaries --phase bidi-boundaries
 ```
 
 It creates 32 `S` conditions, half LTR and half RTL. Controls vary terminal
@@ -93,7 +93,7 @@ word-order test is not approval of an indentation rule or whole-page fidelity.
 The fifth phase authors a small paragraph-alignment precedence matrix:
 
 ```sh
-python scripts/legacy-doc-list-probes.py /tmp/doc-list-probes-alignment --phase alignment-precedence
+python packages/legacy-converter/tools/legacy-doc-list-probes.py /tmp/doc-list-probes-alignment --phase alignment-precedence
 ```
 
 It creates 18 `T` cases: nine per paragraph direction. Each direction includes

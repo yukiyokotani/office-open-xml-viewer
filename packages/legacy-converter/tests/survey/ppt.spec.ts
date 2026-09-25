@@ -31,20 +31,20 @@ test.describe('legacy PPT corpus survey', () => {
       const pdf = resolve(corpus, name.replace(/\.ppt$/iu, '.pdf'));
       const reference = existsSync(pdf) ? pdfPages(pdf, resolve(out, 'office')) : [];
       const width = reference[0]?.width ?? 960;
-      const directPpt = resolve(packagesDir, 'legacy-converter/src/direct-ppt.ts');
+      const directPpt = resolve(packagesDir, 'legacy-converter/src/legacy-ppt.ts');
       await page.goto(`${viewerOrigin('ppt')}/tests/visual/fixture.html`);
       const rendered = await page.evaluate(async ({ file, width: requested, module }) => {
         const pages: string[] = [];
         try {
           const { PptxPresentation } = await import('/src/presentation.ts');
-          const { createLegacyPptSource } = await import(/* @vite-ignore */ module);
+          const { legacyPptSource } = await import(/* @vite-ignore */ module);
           // The dev server decodes paths with decodeURI, which keeps reserved
           // escapes such as %2B; encodeURI leaves those characters literal.
           const response = await fetch(`/private/ppt/${encodeURI(file)}`);
           if (!response.ok) throw new Error(`fetch failed: ${response.status}`);
           const bytes = await response.arrayBuffer();
           const presentation = await PptxPresentation.load(bytes, {
-            legacyConversion: { ppt: { source: createLegacyPptSource() } },
+            modelSources: [legacyPptSource()],
           });
           try {
             for (let index = 0; index < presentation.slideCount; index += 1) {

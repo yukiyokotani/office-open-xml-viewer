@@ -55,16 +55,9 @@ export function wasmAssetUrl(
       if (!id.endsWith(SUFFIX)) return null;
       const filePath = id.slice(0, -SUFFIX.length);
       const source = await readAsset(filePath);
-      const emittedName = /[\\/]wasm-direct-doc[\\/]/.test(filePath)
-        ? 'legacy_doc_direct_bg.wasm'
-        : /[\\/]wasm-direct-ppt[\\/]/.test(filePath)
-          ? 'legacy_ppt_direct_bg.wasm'
-          : /[\\/]wasm-direct-xls[\\/]/.test(filePath)
-            ? 'legacy_xls_direct_bg.wasm'
-            : basename(filePath);
       const referenceId = this.emitFile({
         type: 'asset',
-        name: emittedName,
+        name: basename(filePath),
         source,
       });
       // `import.meta.ROLLUP_FILE_URL_<id>` expands at render time to Rollup's
@@ -141,17 +134,11 @@ export default defineConfig(({ command, mode }) => ({
         // Opt-in TIFF 6.0 software decoder. Native raster users retain only the
         // lightweight codec contract and header guard.
         tiff: resolve(__dirname, 'src/tiff.ts'),
-        // Opt-in disposable Worker transport for application-owned legacy
-        // Office converter engines. No converter WASM is bundled here.
-        'legacy-conversion': resolve(__dirname, 'src/legacy-conversion.ts'),
-        // Opt-in descriptor for the native legacy DOC reader. Importing this
-        // entry emits its dedicated WASM asset URL but does not initialize it.
+        // Opt-in legacy Office model sources (ModelSource factories). Each
+        // entry emits its reader's WASM and self-contained source module as
+        // assets; nothing is fetched until a claimed input is loaded.
         'legacy-doc': resolve(__dirname, 'src/legacy-doc.ts'),
-        // Opt-in descriptor for the native legacy PPT reader. Importing this
-        // entry emits its dedicated WASM asset URL but does not initialize it.
         'legacy-ppt': resolve(__dirname, 'src/legacy-ppt.ts'),
-        // Opt-in descriptor for the native legacy XLS reader. Its dedicated
-        // WASM URL is emitted without initializing either legacy engine.
         'legacy-xls': resolve(__dirname, 'src/legacy-xls.ts'),
         // Node-only bounded sessions and server render helpers. Kept as a
         // separate entry so browser consumers never load Node built-ins.

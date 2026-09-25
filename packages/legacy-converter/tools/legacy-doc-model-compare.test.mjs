@@ -120,8 +120,8 @@ function mockDependencies(value, {
         }
       }
       await mkdir(out);
-      await writeFile(join(out, 'legacy_office_converter.js'), 'export default async()=>{};\n');
-      await writeFile(join(out, 'legacy_office_converter_bg.wasm'), command);
+      await writeFile(join(out, 'legacy_doc_direct.js'), 'export default async()=>{};\n');
+      await writeFile(join(out, 'legacy_doc_direct_bg.wasm'), command);
       calls.builds.push({ out, target: options.env.CARGO_TARGET_DIR, args });
     } else throw new Error(`unexpected logged command: ${args.join(' ')}`);
   };
@@ -173,7 +173,7 @@ test('source mutation fails comparison after cleaning only the owned worktree', 
   }, mock.dependencies), /build sources changed/);
   assert.equal(mock.calls.removed, true);
   await readFile(join(value.output, 'baseline-build.log'));
-  await readFile(join(value.output, 'candidate-wasm/legacy_office_converter_bg.wasm'));
+  await readFile(join(value.output, 'candidate-wasm/legacy_doc_direct_bg.wasm'));
 });
 
 test('baseline cleanup failure is surfaced without deleting comparison artifacts', async t => {

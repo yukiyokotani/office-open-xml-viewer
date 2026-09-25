@@ -5,8 +5,8 @@ into `TextRulerAtom` and `StyleTextPropAtom`. They do not encode a converter rul
 or an expected Office result.
 
 ```sh
-node --test scripts/legacy-ppt-ruler-probes.test.mjs
-node scripts/legacy-ppt-ruler-probes.mjs
+node --test packages/legacy-converter/tools/legacy-ppt-ruler-probes.test.mjs
+node packages/legacy-converter/tools/legacy-ppt-ruler-probes.mjs
 ```
 
 The second command prints a JSON manifest only. It does not generate a deck or
@@ -109,8 +109,8 @@ converter behavior follows from the first roundtrip alone.
 ### Separate-body and text-slot source conditions
 
 ```sh
-node --test scripts/legacy-ppt-text-probes.test.mjs
-node scripts/legacy-ppt-text-probes.mjs
+node --test packages/legacy-converter/tools/legacy-ppt-text-probes.test.mjs
+node packages/legacy-converter/tools/legacy-ppt-text-probes.mjs
 ```
 
 The second manifest preserves all 29 ruler conditions as `S001` through `S029`,

@@ -1,5 +1,4 @@
 export {
-  createLegacyPptSource,
-  type LegacyPptDirectSourceDescriptor,
+  legacyPptSource,
   type LegacyPptSourceOptions,
-} from '../packages/legacy-converter/src/direct-ppt.js';
+} from '../packages/legacy-converter/src/legacy-ppt.js';
