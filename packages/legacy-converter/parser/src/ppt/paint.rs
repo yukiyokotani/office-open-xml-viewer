@@ -6,6 +6,32 @@ mod gradient;
 pub(super) use crate::officeart::paint::Paint;
 
 impl Paint {
+    /// Plain foreground msofillPattern (MS-ODRAW 2.4.11): the fillBlip BLIP
+    /// is the pattern, fillColor its foreground and fillBackColor its
+    /// background (2.3.7.2 table). Returns the BLIP, both colours and their
+    /// opacities, under the same placement vetoes as a picture fill.
+    pub(super) fn pattern_image(&self) -> Option<(u32, u32, u32, u32, u32)> {
+        (self.fill_type == Some(1)
+            && self.fill_blip.unwrap_or(0) != 0
+            && !self.fill_rect.unwrap_or(false)
+            && self.fill_shape.unwrap_or(true)
+            && !self.rotate_fill_with_shape.unwrap_or(false)
+            && self.fill_dztype.unwrap_or(0) == 0
+            && self
+                .fill_origins
+                .iter()
+                .all(|value| value.unwrap_or(0) == 0)
+            && self.filled.unwrap_or(true)
+            && self.fill_ok.unwrap_or(true))
+        .then_some((
+            self.fill_blip.unwrap_or(0),
+            self.fill.unwrap_or(0xffffff),
+            self.fill_alpha.unwrap_or(65536),
+            self.fill_back.unwrap_or(0xffffff),
+            self.fill_back_alpha.unwrap_or(65536),
+        ))
+    }
+
     /// Picture-frame backing fill. PowerPoint 16 writes the ~2,000 corpus
     /// picture frames that do not set fFilled themselves as `noFill` (even
     /// though the drawing-group defaults set fFilled), and the frames with an
@@ -222,7 +248,11 @@ pub(super) fn model_solid(
     model_color(color, opacity, scheme).map(|color| Fill::Solid { color })
 }
 
-fn model_color(color: u32, opacity: u32, scheme: Option<&scheme::Scheme>) -> Option<String> {
+pub(super) fn model_color(
+    color: u32,
+    opacity: u32,
+    scheme: Option<&scheme::Scheme>,
+) -> Option<String> {
     let color = scheme::drawing(color, scheme)?;
     let mut result = format!(
         "{:02X}{:02X}{:02X}",

@@ -423,7 +423,18 @@ impl Context<'_> {
         } else {
             None
         };
-        if allow_fill && image.is_none() {
+        let pattern = match (allow_fill, paint.pattern_image()) {
+            (true, Some(pattern)) => {
+                if transform.rot != 0.0 || transform.flip_h || transform.flip_v {
+                    return Err(unsupported(
+                        "PowerPoint pattern fill on a rotated or flipped shape is not projected",
+                    ));
+                }
+                Some(self.pattern_fill(pattern)?)
+            }
+            _ => None,
+        };
+        if allow_fill && image.is_none() && pattern.is_none() {
             if let Some(kind) = paint.blip_fill_type() {
                 return Err(unprojected_blip_fill(kind));
             }
@@ -434,6 +445,7 @@ impl Context<'_> {
             allow_line,
             image,
         );
+        let fill = pattern.or(fill);
         // Rotation and flips (own or inherited from groups) do not change the
         // projected shade: in every rotated or flipped corpus shape whose
         // metroBlob shows PowerPoint's own DrawingML (90/180/270 degrees, with
@@ -614,6 +626,88 @@ impl Context<'_> {
             }
         }
         Ok(effects)
+    }
+
+    /// msofillPattern as a tiled DrawingML picture fill (ECMA-376 §20.1.8.58).
+    ///
+    /// Evidence (PowerPoint's PDF export of a deck with pattern fills, and its
+    /// own PPTX save of the same binary deck): PowerPoint draws the pattern
+    /// BLIP's white pixels in fillColor and its black pixels in fillBackColor
+    /// (the PPTX save bakes exactly that mapping into its tiled image), tiles
+    /// only the top-left 8x8 pixels of the 10x10 pattern bitmap it stores
+    /// (the two transparent rows and columns never appear), draws one pattern
+    /// pixel per point, and registers the tiles at the shape's top-left
+    /// corner. The black/white mapping is a duotone of the two colours; the
+    /// 8x8 area is a source crop; one pixel per point is 72 DPI. Other bitmap
+    /// sizes, translucent colours and background patterns have no evidence.
+    fn pattern_fill(&mut self, pattern: (u32, u32, u32, u32, u32)) -> Result<Fill, String> {
+        let (id, fore, fore_alpha, back, back_alpha) = pattern;
+        if fore_alpha != 65536 || back_alpha != 65536 {
+            return Err(unsupported(
+                "translucent PowerPoint pattern fill is not projected",
+            ));
+        }
+        if !self
+            .media
+            .reference(id, self.backing, self.pictures, self.work_budget)?
+        {
+            return Err(unsupported(
+                "PowerPoint pattern BLIP is not a supported image",
+            ));
+        }
+        let (extension, bytes) = self
+            .media
+            .image(id, self.backing, self.pictures)?
+            .ok_or_else(|| unsupported("PowerPoint image was not retained"))?;
+        let size = match extension {
+            "gif" => crate::officeart::raster::gif_size(bytes)?,
+            "png" => crate::officeart::raster::png_size(bytes)?,
+            _ => {
+                return Err(unsupported(
+                    "PowerPoint pattern BLIP is not a bitmap pattern",
+                ))
+            }
+        };
+        if size != (10, 10) {
+            return Err(unsupported(
+                "PowerPoint pattern bitmap size is not projected",
+            ));
+        }
+        let scheme = self.presentation.schemes[self.index].as_ref();
+        let color = |value| {
+            paint::model_color(value, 65536, scheme)
+                .ok_or_else(|| unsupported("unresolved PowerPoint pattern color"))
+        };
+        Ok(Fill::Image {
+            image_path: format!("legacy-ppt/image/{id}"),
+            mime_type: ooxml_common::blip::mime_from_ext(extension).to_owned(),
+            svg_image_path: None,
+            dpi: Some(72),
+            rot_with_shape: Some(false),
+            src_rect: Some(SrcRect {
+                l: 0.0,
+                t: 0.0,
+                r: 0.2,
+                b: 0.2,
+            }),
+            fill_rect: None,
+            stretch: false,
+            tile: Some(ooxml_common::fill::TileInfo {
+                tx: Some(0),
+                ty: Some(0),
+                sx: Some(1.0),
+                sy: Some(1.0),
+                flip: Some("none".to_owned()),
+                algn: Some("tl".to_owned()),
+            }),
+            alpha: None,
+            // Black -> clr1, white -> clr2 (luminance ramp, §20.1.8.23).
+            duotone: Some(ooxml_common::blip::Duotone {
+                clr1: color(back)?,
+                clr2: color(fore)?,
+            }),
+            blip_effects: Vec::new(),
+        })
     }
 
     fn image_fill(&mut self, id: u32, opacity: u32, rotate: bool) -> Result<Option<Fill>, String> {
@@ -1638,7 +1732,11 @@ mod tests {
         }
         // Pattern, texture and non-plain picture fills are not left unfilled.
         for (values, expected) in [
-            (vec![(0x180, 1), (0x4186, 1)], Some("pattern fill")),
+            (vec![(0x180, 1), (0x4186, 1)], Some("pattern bitmap size")),
+            (
+                vec![(0x180, 1), (0x4186, 1), (0x1bf, 0x0002_0002)],
+                Some("pattern fill is not projected"),
+            ),
             (vec![(0x180, 2), (0x4186, 1)], Some("texture fill")),
             (
                 vec![(0x180, 3), (0x4186, 1), (0x1bf, 0x0002_0002)],
@@ -1688,6 +1786,68 @@ mod tests {
         assert!(backing(&[(0x180, 4), (0x181, 0xff), (0x1bf, 0x0010_0010)])
             .unwrap_err()
             .contains("non-solid"));
+        // msofillPattern: a 10x10 pattern bitmap tiles its 8x8 area at one
+        // pixel per point, white in fillColor and black in fillBackColor.
+        let gif_blip = |w: u16, h: u16| {
+            let mut gif = b"GIF89a".to_vec();
+            gif.extend(w.to_le_bytes());
+            gif.extend(h.to_le_bytes());
+            gif.extend([0x80, 0, 0, 0, 0, 0, 0xff, 0xff, 0xff, 0x3b]);
+            record(0x6e00, 0xf01e, &[vec![0; 17], gif].concat())
+        };
+        let pattern = [
+            (0x180, 1),
+            (0x181, 0x00a87e21),
+            (0x183, 0x000d0b0b),
+            (0x4186, 1),
+        ];
+        let model = project(1, 0x200, vec![properties(&pattern)], gif_blip(10, 10), None).unwrap();
+        let SlideElement::Shape(shape) = &model.elements[0] else {
+            panic!("shape")
+        };
+        let Some(Fill::Image {
+            mime_type,
+            dpi,
+            src_rect,
+            tile,
+            duotone,
+            stretch,
+            ..
+        }) = &shape.fill
+        else {
+            panic!("pattern fill: {:?}", shape.fill)
+        };
+        assert_eq!(mime_type, "image/gif");
+        assert_eq!(*dpi, Some(72));
+        assert!(!stretch);
+        let crop = src_rect.as_ref().unwrap();
+        assert_eq!((crop.l, crop.t, crop.r, crop.b), (0.0, 0.0, 0.2, 0.2));
+        let tile = tile.as_ref().unwrap();
+        assert_eq!((tile.sx, tile.algn.as_deref()), (Some(1.0), Some("tl")));
+        let duotone = duotone.as_ref().unwrap();
+        assert_eq!(
+            (duotone.clr1.as_str(), duotone.clr2.as_str()),
+            ("0B0B0D", "217EA8")
+        );
+        for (values, blip, flags, expected) in [
+            (pattern.to_vec(), gif_blip(8, 8), 0x200, "bitmap size"),
+            (
+                [pattern.to_vec(), vec![(0x182, 0x8000)]].concat(),
+                gif_blip(10, 10),
+                0x200,
+                "translucent",
+            ),
+            (
+                pattern.to_vec(),
+                gif_blip(10, 10),
+                0x240,
+                "rotated or flipped",
+            ),
+            (pattern.to_vec(), png_blip(), 0x200, "bitmap size"),
+        ] {
+            let error = project(1, flags, vec![properties(&values)], blip, None).unwrap_err();
+            assert!(error.contains(expected), "{expected}: {error}");
+        }
         // pib_complex names a linked file rather than a BLIP.
         let mut linked = properties(&[(0xc104, 4)]);
         linked.extend_from_slice(&[b'a', 0, b'b', 0]);

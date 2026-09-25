@@ -327,12 +327,16 @@ impl SpanStore {
                 .entries
                 .get((index - 1) as usize)
                 .ok_or_else(|| unsupported("PowerPoint picture index out of range"))?;
-            let image = crate::officeart::raster::read_store_entry_span(
+            // PowerPoint displays GIF data stored in PNG BLIPs (its PDF export
+            // of a deck with such slots shows the GIF image), so PPT reads a
+            // PNG slot by the GIF content signature as well.
+            let image = crate::officeart::raster::read_store_entry_span_as(
                 entry,
                 primary,
                 pictures,
                 budget,
                 self.remaining,
+                crate::officeart::raster::Raster::GifAware,
             )?;
             if let Some(image) = &image {
                 self.remaining = self
@@ -368,7 +372,8 @@ impl SpanStore {
         primary: &'a [u8],
         pictures: Option<&'a [u8]>,
     ) -> Result<Option<(&'static str, &'a [u8])>, String> {
-        self.images.get(&index)
+        self.images
+            .get(&index)
             .ok_or_else(|| unsupported("PowerPoint image was not admitted"))?
             .as_ref()
             .map(|image| Ok((image.image.extension, image.view(primary, pictures)?)))
@@ -650,7 +655,10 @@ mod tests {
         assert_eq!(store.images(&primary, None).unwrap().len(), 1);
         store.begin_slide();
         assert_eq!(store.used_images().count(), 0);
-        assert_eq!(store.image(1, &primary, None).unwrap().unwrap(), ("png", png(1, 1).as_slice()));
+        assert_eq!(
+            store.image(1, &primary, None).unwrap().unwrap(),
+            ("png", png(1, 1).as_slice())
+        );
         assert!(store.image(2, &primary, None).is_err());
         assert_eq!(store.images(&primary, None).unwrap().len(), 1);
         assert!(store.reference(2, &primary, None, &mut 100).unwrap());
@@ -660,7 +668,10 @@ mod tests {
             [2]
         );
         assert_eq!(store.images(&primary, None).unwrap().len(), 2);
-        assert_eq!(store.image(2, &primary, None).unwrap().unwrap(), ("png", png(2, 2).as_slice()));
+        assert_eq!(
+            store.image(2, &primary, None).unwrap().unwrap(),
+            ("png", png(2, 2).as_slice())
+        );
     }
 
     #[test]

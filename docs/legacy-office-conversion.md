@@ -170,6 +170,18 @@ linked objects and ActiveX controls, pictures without a supported BLIP, and
 pattern, texture or non-stretched picture fills are rejected instead of being
 drawn without them.
 
+PowerPoint displays GIF data that a producer stored in a PNG picture slot,
+so the direct PPT reader identifies such a slot by its GIF87a/GIF89a
+signature and emits it as `image/gif`; other mismatched content stays
+rejected.
+
+Pattern fills on unrotated shapes become tiled picture fills that follow
+PowerPoint's own output: the 8x8 area of the stored 10x10 pattern bitmap,
+one pattern pixel per point, white pixels in the fill colour and black
+pixels in the background colour. Pattern fills on rotated or flipped shapes,
+other pattern bitmap sizes, translucent pattern colours, background
+patterns and texture fills stay rejected.
+
 Picture colour settings follow how PowerPoint itself reads the binary
 properties when it saves a binary deck as PPTX: "Black and White" becomes
 DrawingML `grayscl` plus `biLevel` at 50%, and a transparent colour becomes a
@@ -2404,6 +2416,7 @@ be closed before an experimental release.
 | XLS | Table (ListObject) styles, conditional-format data bars/icons and pivot styling are absent | about 5 |
 | XLS | Formula text is not decompiled from Ptg tokens, so volatile functions are not recalculated as Excel does at export | 2 |
 | XLS | Clip-art pictures, text boxes, strikethrough and one vertical merge are missing | 1 to 3 each |
+| XLS | The direct reader rejects, instead of omitting, drawn objects it does not project: EMF+-only pictures, shapes and text boxes, grouped shapes, chart and macro sheets, and drawings whose OfficeArt data continues after an Obj record | 19 of 139 |
 | PPT | ~~Only seven MS-ODRAW shape types map to presets~~ 100+ shape types map as PowerPoint converts them, with evidenced adjust formulas (officeart::preset); adjusted callout2/3 families, arrow callouts, curved arrows, ribbons and tall cubes/hexagons/parallelograms still fail closed | several |
 | PPT | ~~Native/OLE charts are missing~~ Resolved: embedded OLE objects show their stored presentation picture (bfc835d3) | 3 |
 | PPT | ~~Rotation by multiples of 90 degrees and combined flips use the wrong bounds or order~~ Resolved from the 120-case PowerPoint control (aa9dc5c1) | 1 |

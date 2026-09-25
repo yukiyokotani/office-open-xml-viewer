@@ -45,18 +45,36 @@ pub struct DrawingAnchor {
     pub chart: Option<(usize, usize)>,
 }
 
+/// Which anchors a walk returns. `Projectable` skips shapes whose sheet
+/// placement this subset does not flatten (nested groups, child anchors,
+/// excluded patriarchs); `Strict` rejects them instead, for readers that must
+/// not drop drawn content.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Policy {
+    #[cfg(any(test, all(feature = "inspection", not(target_arch = "wasm32"))))]
+    All,
+    Projectable,
+    Strict,
+}
+
 #[cfg(any(test, all(feature = "inspection", not(target_arch = "wasm32"))))]
 pub(super) fn workbook(records: &[Record<'_>]) -> Result<Vec<DrawingAnchor>, String> {
-    workbook_with_policy(records, false)
+    workbook_with_policy(records, Policy::All)
+}
+
+/// Every sheet-anchored drawing object, rejecting any drawn shape whose
+/// placement is not projected (grouped shapes and their children).
+pub(super) fn strict(records: &[Record<'_>]) -> Result<Vec<DrawingAnchor>, String> {
+    workbook_with_policy(records, Policy::Strict)
 }
 
 pub(super) fn projectable(records: &[Record<'_>]) -> Result<Vec<DrawingAnchor>, String> {
-    workbook_with_policy(records, true)
+    workbook_with_policy(records, Policy::Projectable)
 }
 
 fn workbook_with_policy(
     records: &[Record<'_>],
-    projectable_only: bool,
+    policy: Policy,
 ) -> Result<Vec<DrawingAnchor>, String> {
     let first = records
         .first()
@@ -103,7 +121,7 @@ fn workbook_with_policy(
         let end = starts.get(ordinal + 1).map_or(records.len(), |s| s.0);
         let data = assemble(&records[start..end], start, &mut work, &mut remaining)?;
         if let Some(mut drawing) = data {
-            walk_with_policy(&mut drawing, tab, &mut work, &mut output, projectable_only)?;
+            walk_with_policy(&mut drawing, tab, &mut work, &mut output, policy)?;
         }
     }
     Ok(output)
@@ -239,7 +257,7 @@ fn walk(
     work: &mut usize,
     output: &mut Vec<DrawingAnchor>,
 ) -> Result<(), String> {
-    walk_with_policy(drawing, sheet, work, output, false)
+    walk_with_policy(drawing, sheet, work, output, Policy::All)
 }
 
 fn walk_with_policy(
@@ -247,7 +265,7 @@ fn walk_with_policy(
     sheet: usize,
     work: &mut usize,
     output: &mut Vec<DrawingAnchor>,
-    projectable_only: bool,
+    policy: Policy,
 ) -> Result<(), String> {
     let (root, end) = record_with_end(&drawing.bytes, 0, work, "XLS drawing")?;
     if root.kind != 0xf002 || root.version != 15 || root.instance != 0 || end != drawing.bytes.len()
@@ -376,13 +394,23 @@ fn walk_with_policy(
                         || shape_flags & (8 | 16 | 64 | 128 | 1024) != 0
                         || picture.excluded();
                 }
+                if policy == Policy::Strict && anchor.is_none() && child_anchor {
+                    return Err(unsupported("BIFF grouped drawing shapes are not projected"));
+                }
                 if let Some((behavior, from, to)) = anchor {
                     let (object_id, object_type, object_flags) = object
                         .ok_or_else(|| unsupported("BIFF cell anchor has no owned object"))?;
                     if output.len() >= MAX_OBJECTS {
                         return Err(unsupported("BIFF retained anchor budget exceeded"));
                     }
-                    if projectable_only && (excluded || depth > 1 || child_anchor) {
+                    if matches!(policy, Policy::Projectable | Policy::Strict)
+                        && (excluded || depth > 1 || child_anchor)
+                    {
+                        if policy == Policy::Strict {
+                            return Err(unsupported(
+                                "BIFF grouped or transformed drawing shapes are not projected",
+                            ));
+                        }
                         at = next;
                         continue;
                     }

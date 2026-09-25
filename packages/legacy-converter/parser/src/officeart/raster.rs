@@ -15,13 +15,16 @@ pub(crate) fn read_store_entry<'a>(
     read_store_entry_as(entry, delayed, budget, remaining_bytes, Raster::Advertised)
 }
 
-/// Which bytes a PNG/JPEG BLIP may carry. `TiffAware` is a host decision:
-/// Word writes TIFF data inside PNG BLIPs and reads it back as TIFF (see the
-/// DOC picture store); no other host has that evidence.
+/// Which bytes a PNG/JPEG BLIP may carry. The content-signature variants are
+/// host decisions backed by that host's own output: Word writes TIFF data
+/// inside PNG BLIPs and reads it back as TIFF (see the DOC picture store), and
+/// PowerPoint displays GIF data stored in PNG BLIPs (its PDF export shows the
+/// GIF image). No host has evidence for the other combination.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Raster {
     Advertised,
     TiffAware,
+    GifAware,
 }
 
 pub(crate) fn read_store_entry_as<'a>(
@@ -92,13 +95,33 @@ pub(crate) fn read_store_entry_span(
     budget: &mut usize,
     remaining_bytes: usize,
 ) -> Result<Option<StoreImageSpan>, String> {
+    read_store_entry_span_as(
+        entry,
+        primary,
+        delayed,
+        budget,
+        remaining_bytes,
+        Raster::Advertised,
+    )
+}
+
+pub(crate) fn read_store_entry_span_as(
+    entry: &RecordSpan,
+    primary: &[u8],
+    delayed: Option<&[u8]>,
+    budget: &mut usize,
+    remaining_bytes: usize,
+    raster: Raster,
+) -> Result<Option<StoreImageSpan>, String> {
     let viewed = entry.view(primary)?;
     let (source, backing, bytes) = match locate_store_entry(viewed)? {
         StoreLocation::Direct => {
             return Ok(
-                read_span(entry, primary, budget, remaining_bytes)?.map(|image| StoreImageSpan {
-                    image,
-                    backing: StoreBacking::Primary,
+                read_span_as(entry, primary, budget, remaining_bytes, raster)?.map(|image| {
+                    StoreImageSpan {
+                        image,
+                        backing: StoreBacking::Primary,
+                    }
                 }),
             )
         }
@@ -129,7 +152,7 @@ pub(crate) fn read_store_entry_span(
     if end != source.range().end {
         return Err(unsupported("OfficeArt BLIP record size mismatch"));
     }
-    Ok(read_span(&blip, bytes, budget, remaining_bytes)?
+    Ok(read_span_as(&blip, bytes, budget, remaining_bytes, raster)?
         .map(|image| StoreImageSpan { image, backing }))
 }
 
@@ -246,8 +269,18 @@ pub(crate) fn read_span(
     budget: &mut usize,
     remaining_bytes: usize,
 ) -> Result<Option<ImageSpan>, String> {
+    read_span_as(blip, backing, budget, remaining_bytes, Raster::Advertised)
+}
+
+fn read_span_as(
+    blip: &RecordSpan,
+    backing: &[u8],
+    budget: &mut usize,
+    remaining_bytes: usize,
+    raster: Raster,
+) -> Result<Option<ImageSpan>, String> {
     let viewed = blip.view(backing)?;
-    decode(viewed, budget, remaining_bytes, Raster::Advertised)?
+    decode(viewed, budget, remaining_bytes, raster)?
         .map(|image| {
             Ok(ImageSpan {
                 bytes: match image.bytes {
@@ -297,16 +330,23 @@ fn decode(
     if (extension == "png" && !bytes.starts_with(b"\x89PNG\r\n\x1a\n"))
         || (extension == "jpg" && !bytes.starts_with(&[0xff, 0xd8]))
     {
-        if raster != Raster::TiffAware
-            || !(bytes.starts_with(b"II*\0") || bytes.starts_with(b"MM\0*"))
-        {
-            return Ok(None);
-        }
-        extension = "tiff";
+        extension = match raster {
+            Raster::TiffAware if bytes.starts_with(b"II*\0") || bytes.starts_with(b"MM\0*") => {
+                "tiff"
+            }
+            Raster::GifAware
+                if extension == "png"
+                    && (bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a")) =>
+            {
+                "gif"
+            }
+            _ => return Ok(None),
+        };
     }
     let (width, height) = match extension {
         "png" => png_size(bytes)?,
         "jpg" => jpeg_size(bytes, budget)?,
+        "gif" => gif_size(bytes)?,
         _ => tiff_size(bytes, budget)?,
     };
     if width == 0
@@ -327,6 +367,20 @@ fn decode(
         extension,
     }))
 }
+/// GIF87a/89a logical screen descriptor (GIF89a specification section 18):
+/// the signature and version, then the 16-bit little-endian logical screen
+/// width and height. A header check only; the ordinary image decoder remains
+/// responsible for the data stream.
+pub(crate) fn gif_size(b: &[u8]) -> Result<(u32, u32), String> {
+    if b.len() < 13 || !(b.starts_with(b"GIF87a") || b.starts_with(b"GIF89a")) {
+        return Err(unsupported("invalid OfficeArt GIF header"));
+    }
+    Ok((
+        u32::from(u16::from_le_bytes([b[6], b[7]])),
+        u32::from(u16::from_le_bytes([b[8], b[9]])),
+    ))
+}
+
 /// Bounded TIFF 6.0 header check: byte order, the magic number, the first
 /// IFD inside the data and its ImageWidth (256) and ImageLength (257) tags
 /// with SHORT or LONG single values. Decoding stays with the renderer.
@@ -533,6 +587,56 @@ mod tests {
         }
         tiff.extend([0; 4]);
         record(0x6e00, 0xf01e, &[vec![0; 17], tiff].concat())
+    }
+
+    #[test]
+    fn gif_data_in_png_blips_is_admitted_only_for_the_gif_aware_host() {
+        let gif = |sig: &[u8], w: u16, h: u16| {
+            let mut data = sig.to_vec();
+            data.extend(w.to_le_bytes());
+            data.extend(h.to_le_bytes());
+            data.extend([0x80, 0, 0, 0, 0, 0, 0xff, 0xff, 0xff, 0x3b]);
+            data
+        };
+        let blip = |data: Vec<u8>, kind: u16, options: u16| {
+            let payload = [vec![0; 17], data].concat();
+            [
+                options.to_le_bytes().as_slice(),
+                kind.to_le_bytes().as_slice(),
+                (payload.len() as u32).to_le_bytes().as_slice(),
+                &payload,
+            ]
+            .concat()
+        };
+        for sig in [b"GIF87a", b"GIF89a"] {
+            let bytes = blip(gif(sig, 40, 30), 0xf01e, 0x6e00);
+            let (record, _) = crate::officeart::record_with_end(&bytes, 0, &mut 10, "t").unwrap();
+            assert!(read(record, &mut 100, usize::MAX).unwrap().is_none());
+            assert!(read_as(record, &mut 100, usize::MAX, Raster::TiffAware)
+                .unwrap()
+                .is_none());
+            let image = read_as(record, &mut 100, usize::MAX, Raster::GifAware)
+                .unwrap()
+                .unwrap();
+            assert_eq!(image.extension, "gif");
+            assert!(image.bytes.starts_with(sig));
+        }
+        // A JPEG slot is not read as GIF; zero, oversized or truncated headers
+        // are rejected.
+        let jpeg = blip(gif(b"GIF89a", 40, 30), 0xf01d, 0x46a0);
+        let (record, _) = crate::officeart::record_with_end(&jpeg, 0, &mut 10, "t").unwrap();
+        assert!(read_as(record, &mut 100, usize::MAX, Raster::GifAware)
+            .unwrap()
+            .is_none());
+        for data in [
+            gif(b"GIF89a", 0, 30),
+            gif(b"GIF89a", 40_000, 30),
+            b"GIF89a\x01".to_vec(),
+        ] {
+            let bytes = blip(data, 0xf01e, 0x6e00);
+            let (record, _) = crate::officeart::record_with_end(&bytes, 0, &mut 10, "t").unwrap();
+            assert!(read_as(record, &mut 100, usize::MAX, Raster::GifAware).is_err());
+        }
     }
 
     #[test]
