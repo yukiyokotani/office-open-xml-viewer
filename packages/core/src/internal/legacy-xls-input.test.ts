@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { buildCfbFixture, buildStoredZip } from '../testing';
 import { resolveXlsWorkbookInput } from './legacy-office-conversion.js';
+import { bindLegacyXlsHostServices } from '../conversion/legacy-xls-source.js';
 import { normalizeOfficeInput } from '../conversion/legacy-office.js';
 
 const source = {
@@ -16,6 +17,17 @@ describe('direct XLS input selection', () => {
     await expect(resolveXlsWorkbookInput(bytes)).rejects.toThrow();
     await expect(resolveXlsWorkbookInput(bytes, { ppt: { converter: { convert: vi.fn() } } }))
       .rejects.toThrow();
+  });
+
+  it('hands the bound host services of the source to the spreadsheet host', async () => {
+    const bytes = buildCfbFixture(['Root Entry', 'Workbook']);
+    const services = { resolve: vi.fn(), attach: vi.fn() };
+    const bound = bindLegacyXlsHostServices({ ...source }, services);
+    const resolved = await resolveXlsWorkbookInput(bytes, { xls: { source: bound } });
+    expect(resolved).toMatchObject({ kind: 'legacy-xls', hostServices: services });
+    // A descriptor without services carries none.
+    expect(await resolveXlsWorkbookInput(bytes, { xls: { source } }))
+      .not.toHaveProperty('hostServices');
   });
 
   it('leaves OOXML on the existing path', async () => {

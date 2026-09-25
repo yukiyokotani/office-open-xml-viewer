@@ -4,7 +4,7 @@ export {
   type RenderViewportToBitmapOptions,
 } from './workbook.js';
 export { XlsxViewer, XlsxSheetViewer } from './viewer.js';
-export type { LegacyXlsFontMeasurement, LegacyXlsNormalFont } from '@silurus/ooxml-legacy-converter/internal/xls-font-worker';
+export type { LegacyXlsFontMeasurement, LegacyXlsNormalFont } from '@silurus/ooxml-core/internal/legacy-xls-source';
 // Resolved list-validation values (reachable via XlsxWorkbook.resolveValidationList).
 export type { ResolvedList } from './validation-list.js';
 export type {
@@ -227,6 +227,9 @@ export type {
   SlicerElementStyle,
   // Metadata-only pivot facts (reachable via Worksheet.pivotTables).
   PivotTableMetadata,
+  PivotTableStyle,
+  PivotTableStyleElement,
+  PivotAxisItem,
   PivotLocation,
   PivotPageField,
   PivotDataField,

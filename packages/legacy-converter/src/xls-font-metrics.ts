@@ -1,24 +1,12 @@
 import { fontStackFor } from '@silurus/ooxml-core/internal/spreadsheet-font-stack';
-/** The actual BIFF Normal-style font, resolved through its style XF. */
-export interface LegacyXlsNormalFont {
-  readonly family: string;
-  readonly sizePoints: number;
-  readonly bold: boolean;
-  readonly italic: boolean;
-}
-
-/**
- * Measure digits 0–9 in this font at 96 dpi, then return the rounded maximum
- * advance in pixels (integer 1–4096). Load the intended font before measuring.
- * Returning undefined omits geometry-dependent drawings with a warning; the
- * default measurement instead measures the face the renderer paints.
- * The signal is aborted if conversion is cancelled. Never fetch a font URL
- * supplied by the document: family is an untrusted name, not a resource URL.
- */
-export type LegacyXlsFontMeasurement = (
-  font: Readonly<LegacyXlsNormalFont>,
-  signal: AbortSignal,
-) => number | undefined | Promise<number | undefined>;
+export type {
+  LegacyXlsFontMeasurement,
+  LegacyXlsNormalFont,
+} from '@silurus/ooxml-core/internal/legacy-xls-source';
+import type {
+  LegacyXlsFontMeasurement,
+  LegacyXlsNormalFont,
+} from '@silurus/ooxml-core/internal/legacy-xls-source';
 
 /** The callback cannot keep a prepared WASM model alive after cancellation. */
 export function measureXlsFont(

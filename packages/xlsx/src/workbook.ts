@@ -19,12 +19,10 @@ import {
   workerRendererDescriptors,
 } from '@silurus/ooxml-core';
 import { resolveXlsWorkbookInput } from '@silurus/ooxml-core/internal/legacy-office-conversion';
-import type { LegacyXlsDirectSourceDescriptor } from '@silurus/ooxml-core/internal/legacy-xls-source';
-import {
-  attachXlsFontMeasurement,
-  resolveXlsFontMeasurement,
-} from '@silurus/ooxml-legacy-converter/internal/xls-font-worker';
-type LegacyXlsFontMeasurement = Parameters<typeof attachXlsFontMeasurement>[1];
+import type {
+  LegacyXlsDirectSourceDescriptor,
+  LegacyXlsFontMeasurement,
+} from '@silurus/ooxml-core/internal/legacy-xls-source';
 import {
   deserializeWorkerError,
   disposeRejectedLoad,
@@ -116,8 +114,8 @@ interface RetainedFontSet {
  *  deprecated `maxZipEntryBytes` alias, and `math`) with worker rendering. */
 export interface LoadOptions extends CoreLoadOptions {
   /** Measure the actual Normal-style font for direct XLS column geometry.
-   *  Defaults to loading and measuring the named font in the current
-   *  document; pictures and charts are omitted when it cannot be measured. */
+   *  The legacy XLS source supplies the default when this is omitted;
+   *  pictures and charts are omitted when the font cannot be measured. */
   measureLegacyXlsNormalFont?: LegacyXlsFontMeasurement;
   /**
    * 'main' (default): parse in a worker, render on the main thread (current
@@ -387,14 +385,14 @@ export class XlsxWorkbook {
     let wb: XlsxWorkbook | undefined;
     try {
       wb = new XlsxWorkbook(worker, mode, opts.wasmUrl, nativeSource === undefined);
-      // The opt-in legacy module owns the default measurement policy.
+      // The legacy source's host services own the measurement policy,
+      // including its default; resolve it once for this load.
+      const hostServices = resolvedInput.kind === 'legacy-xls' ? resolvedInput.hostServices : undefined;
       const measureLegacyXlsNormalFont = nativeSource
-        ? resolveXlsFontMeasurement(opts.measureLegacyXlsNormalFont)
+        ? hostServices?.resolve(opts.measureLegacyXlsNormalFont)
         : undefined;
-      if (measureLegacyXlsNormalFont) {
-        wb.legacyXlsMeasurementCleanup = attachXlsFontMeasurement(
-          worker, measureLegacyXlsNormalFont,
-        );
+      if (hostServices && measureLegacyXlsNormalFont) {
+        wb.legacyXlsMeasurementCleanup = hostServices.attach(worker, measureLegacyXlsNormalFont);
       }
       wb.metrics = metrics;
       await wb.bindLegacyXlsSignal(wb._load(
@@ -404,6 +402,7 @@ export class XlsxWorkbook {
         (usage) => metrics.observeUsage(usage),
         preserveCallerBuffer,
         nativeSource,
+        measureLegacyXlsNormalFont !== undefined,
       ), nativeSignal);
       metrics.checkpoint('workbook index ready');
       metrics.succeed({ sheets: wb.sheetCount });
@@ -430,6 +429,7 @@ export class XlsxWorkbook {
     onUsage?: (usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => void,
     preserveCallerBuffer = false,
     nativeSource?: LegacyXlsDirectSourceDescriptor,
+    measureLegacyXlsNormalFont = false,
   ): Promise<void> {
     const bridge = this.requireBridge();
     this.resourceFailure = null;
@@ -480,8 +480,6 @@ export class XlsxWorkbook {
     // the resolved ZIP is literally the caller's buffer. URL and decrypted
     // buffers are library-owned and can transfer directly without a peak copy.
     const workerData = preserveCallerBuffer ? data.slice(0) : data;
-    const measureLegacyXlsNormalFont = nativeSource !== undefined
-      && resolveXlsFontMeasurement(opts.measureLegacyXlsNormalFont) !== undefined;
     const parsed = await bridge.request(
       (id) =>
         this._mode === 'worker'

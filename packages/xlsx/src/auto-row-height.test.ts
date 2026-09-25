@@ -322,6 +322,28 @@ describe('XLSX automatic row height (ECMA-376 §18.3.1.73 / Office auto-fit)', (
     expect(withIcon.rowHeights[1]).toBeGreaterThan(base.rowHeights[1] ?? base.defaultRowHeight);
   });
 
+  it('measures a wrapped General boolean with the inset paint uses', () => {
+    // General centres booleans (§18.18.40); like paint, measurement keeps the
+    // General indent inset, so an indented TRUE in a narrow wrapping column
+    // fits exactly as the same General text does.
+    const general = (value: Worksheet['rows'][number]['cells'][number]['value']): Worksheet => ({
+      ...worksheet(),
+      rows: [{ index: 1, height: null, cells: [{ row: 1, col: 1, styleIndex: 0, value }] }],
+      colWidths: { 1: 1.5 },
+      rowHeights: {},
+      mergeCells: [],
+    });
+    const generalStyles: Styles = {
+      ...styles,
+      cellXfs: [{ ...xf(0, { wrapText: true, indent: 1 }), alignH: null }],
+    };
+    const bool = general({ type: 'bool', bool: true });
+    const text = general({ type: 'text', text: 'TRUE' });
+    applyAutoRowHeights(measurementContext(), bool, generalStyles);
+    applyAutoRowHeights(measurementContext(), text, generalStyles);
+    expect(bool.rowHeights[1]).toBe(text.rowHeights[1]);
+  });
+
   it('preserves the caller-authoritative MDW on a render-local auto-height projection', () => {
     const source = worksheet();
     source.rowHeights = {};

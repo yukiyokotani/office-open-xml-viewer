@@ -552,6 +552,8 @@ fn project_sheet(
             .sum(),
     )?;
     worksheet.defined_names = sheet.defined_names;
+    charge(budget, pivot_bytes(&sheet.pivot_tables))?;
+    worksheet.pivot_tables = sheet.pivot_tables;
     if let Some(color) = sheet.tab_color {
         charge(budget, color.len())?;
         worksheet.tab_color = Some(color);
@@ -559,6 +561,46 @@ fn project_sheet(
     sheet.geometry.project(&mut worksheet, mdw, budget)?;
     sheet.views.project(&mut worksheet);
     Ok(worksheet)
+}
+
+/// Retained model bytes of projected PivotTables (resource accounting).
+fn pivot_bytes(tables: &[xlsx_model::PivotTableMetadata]) -> usize {
+    let text = |value: &Option<String>| value.as_ref().map_or(0, String::len);
+    tables
+        .iter()
+        .map(|table| {
+            std::mem::size_of::<xlsx_model::PivotTableMetadata>()
+                + table.name.len()
+                + (table.row_fields.len() + table.column_fields.len()) * 4
+                + table
+                    .page_fields
+                    .iter()
+                    .map(|field| {
+                        std::mem::size_of::<xlsx_model::PivotPageField>() + text(&field.name)
+                    })
+                    .sum::<usize>()
+                + table
+                    .data_fields
+                    .iter()
+                    .map(|field| {
+                        std::mem::size_of::<xlsx_model::PivotDataField>()
+                            + text(&field.subtotal)
+                            + text(&field.name)
+                    })
+                    .sum::<usize>()
+                + table
+                    .row_items
+                    .iter()
+                    .chain(&table.column_items)
+                    .map(|item| std::mem::size_of::<xlsx_model::PivotAxisItem>() + item.kind.len())
+                    .sum::<usize>()
+                + table.style.as_ref().map_or(0, |style| {
+                    style.name.len()
+                        + style.elements.len()
+                            * (std::mem::size_of::<xlsx_model::PivotTableStyleElement>() + 64)
+                })
+        })
+        .sum()
 }
 
 /// Retained model bytes of projected conditional formats (resource accounting).
