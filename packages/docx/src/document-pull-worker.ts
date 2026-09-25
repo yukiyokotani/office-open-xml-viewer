@@ -25,7 +25,8 @@ export interface DocxDocumentCursorArchive {
     byteCredit: number,
   ): Uint8Array;
   document_chunk_done(): boolean;
-  document_cursor_resource_usage?(): Uint8Array;
+  /** `undefined` when the package has no document-cursor checkpoint. */
+  document_cursor_resource_usage?(): Uint8Array | undefined;
   acknowledge_document_chunk(
     sequence: number,
     operationId: number,
@@ -43,16 +44,12 @@ export type DocxDocumentArchiveExecutor = <T>(
 export function readDocxDocumentCursorUsage(
   execute: DocxDocumentArchiveExecutor,
 ): ReturnType<typeof decodeOoxmlResourceUsage> | undefined {
-  try {
-    const bytes = execute((archive) => archive.document_cursor_resource_usage?.());
-    return bytes ? decodeOoxmlResourceUsage(bytes) : undefined;
-  } catch (error) {
-    // A corrupt container is represented by a degraded terminal document and
-    // has no PackageOperation ledger. Only that unavailable checkpoint is
-    // optional; malformed checkpoints and real parser/resource failures escape.
-    if (String(error).includes('document cursor usage is unavailable')) return undefined;
-    throw error;
-  }
+  // A corrupt container is represented by a degraded terminal document and
+  // has no PackageOperation ledger; the archive reports that checkpoint as a
+  // typed absence (`undefined`). Malformed checkpoints and every thrown
+  // parser/resource failure escape, whatever their text.
+  const bytes = execute((archive) => archive.document_cursor_resource_usage?.());
+  return bytes ? decodeOoxmlResourceUsage(bytes) : undefined;
 }
 
 /**

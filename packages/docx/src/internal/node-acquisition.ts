@@ -32,7 +32,8 @@ export interface DocxNodeAcquisitionOptions {
 export interface DocxNodeArchive extends DocxDocumentCursorArchive {
   free(): void;
   extract_image(path: string): Uint8Array;
-  document_cursor_resource_usage(): Uint8Array;
+  /** `undefined` when the package has no document-cursor checkpoint. */
+  document_cursor_resource_usage(): Uint8Array | undefined;
   resource_usage(): Uint8Array;
 }
 

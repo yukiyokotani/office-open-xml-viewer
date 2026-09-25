@@ -16,6 +16,7 @@ import { measureParagraph } from '../paragraph-measure.js';
 import { createLayoutServices } from '../layout-runtime.js';
 import type { DocParagraph } from '../types.js';
 import type { AnchorAcquisitionInput } from './anchor-input.js';
+import type { LayoutRect } from './types.js';
 import type { VerticalGlyphMeasurementService } from './measurement-capabilities.js';
 
 const fontRoute = {
@@ -1400,6 +1401,210 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
       anchorYRelativeFrom: 'line',
       anchorYPt: 3,
     }).yPt).toBe(13);
+  });
+
+  it('keeps a bottom/centre aligned spAutoFit box aligned at its fitted height', () => {
+    // ECMA-376 §20.4.3.1 wp:align + §21.1.2.1.3 spAutoFit: the aligned edge
+    // belongs to the drawn (fitted) extent, not to the authored extent.
+    const services = createLayoutServices({
+      section: {
+        pageWidth: 200, pageHeight: 300,
+        marginTop: 30, marginRight: 20, marginBottom: 30, marginLeft: 20,
+        headerDistance: 15, footerDistance: 15,
+        titlePage: false, evenAndOddHeaders: false,
+      },
+      body: [],
+      headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+    }, { measureContext });
+    const host = {
+      text: '', metricOnly: true, sourceRunIndex: 0, measuredWidth: 0,
+      fontSize: 10, fontFamily: 'Test Sans', fontRoute,
+    } as unknown as LayoutTextSeg;
+    const measured = {
+      lines: [{
+        layout: {
+          segments: [host], height: 10, ascent: 8, descent: 2,
+          visibleAscent: 8, visibleDescent: 2, intendedSingle: 10,
+          visibleIntendedSingle: 10, xOffset: 0, availWidth: 100,
+        },
+        topYPt: 40, advancePt: 12,
+      }],
+      markOnly: false, requestedSpaceBeforePt: 0, requestedSpaceAfterPt: 0,
+      uniformRubyAdvancePt: 0, contentStartYPt: 40, contentEndYPt: 52,
+      lastLineBelowBaselinePt: 2,
+      placement: {
+        startYPt: 40, paragraphXPt: 20, availableWidthPt: 160,
+        maximumYPt: 270, suppressSpaceBefore: false,
+      },
+    } as unknown as MeasuredParagraph;
+    const occurrenceId = 'aligned-autofit-anchor';
+    const layoutFor = (options: Readonly<{
+      vertical: AnchorAcquisitionInput['vertical']['choice'];
+      horizontal?: AnchorAcquisitionInput['horizontal']['choice'];
+      textAutofit?: string;
+      widthPt?: number;
+      heightPt?: number;
+      textVert?: string;
+      verticalSection?: boolean;
+    }>) => {
+      const widthPt = options.widthPt ?? 40;
+      const heightPt = options.heightPt ?? 100;
+      const input = retainedAnchor(occurrenceId, {
+        horizontal: {
+          relativeFrom: 'margin', relativeFromStatus: 'valid',
+          choice: options.horizontal ?? { kind: 'align', value: 'left' },
+        },
+        vertical: {
+          relativeFrom: 'margin', relativeFromStatus: 'valid', choice: options.vertical,
+        },
+        extent: { widthPt, widthStatus: 'valid', heightPt, heightStatus: 'valid' },
+        wrap: {
+          kind: 'none', authoredKinds: [], side: null,
+          distances: retainedAnchor(occurrenceId).wrap.distances,
+          effectExtent: null, polygon: null,
+        },
+      });
+      const anchored = {
+        ...paragraph,
+        runs: [
+          { type: 'anchorHost', fontSize: 10, anchorOccurrenceId: occurrenceId },
+          {
+            type: 'shape',
+            widthPt,
+            heightPt,
+            anchorXPt: 0,
+            anchorYPt: 0,
+            anchorXFromMargin: true,
+            anchorYFromPara: false,
+            anchorAcquisitionInput: input,
+            zOrder: 0,
+            subpaths: [],
+            presetGeometry: 'rect',
+            fill: null,
+            stroke: null,
+            textAutofit: options.textAutofit ?? 'sp',
+            textInsetL: 0, textInsetT: 0, textInsetR: 0, textInsetB: 0,
+            textAnchor: 't',
+            ...(options.textVert ? { textVert: options.textVert } : {}),
+            textBlocks: [{
+              text: 'abcdefghij', fontSizePt: 10, color: '112233', alignment: 'left',
+              runs: [{ text: 'abcdefghij', fontSizePt: 10, color: '112233' }],
+            }],
+          },
+        ],
+      } as unknown as DocParagraph;
+      const verticalSection = options.verticalSection ?? false;
+      return paragraphLayoutFromMeasurement(anchored as never, {
+        id: 'aligned-autofit', source, flowDomainId: 'body', ordinaryFlow: true,
+        context: acquisitionContext,
+        placement: measured.placement,
+        measurer: { context: measureContext, fontFamilyClasses: {} } as never,
+        environment: {
+          pageIndex: 0, totalPages: 1, documentHasEastAsianText: false,
+          layoutServices: services,
+          pageWritingMode: verticalSection ? 'vertical-rl' : 'horizontal-tb',
+          verticalPageFrame: verticalSection,
+        } as never,
+        exclusions: [],
+        anchorFrames: {
+          page: { xPt: 0, yPt: 0, widthPt: 200, heightPt: 300 },
+          margin: { xPt: 20, yPt: 30, widthPt: 160, heightPt: 240 },
+          column: { xPt: 20, yPt: 30, widthPt: 160, heightPt: 240 },
+          pageParity: 'odd',
+        },
+      }, measured);
+    };
+    const acquire = (
+      choice: AnchorAcquisitionInput['vertical']['choice'],
+      textAutofit = 'sp',
+    ) => layoutFor({ vertical: choice, textAutofit }).drawings[0]!.flowBounds;
+
+    const top = acquire({ kind: 'align', value: 'top' });
+    expect(top.yPt).toBe(30);
+    expect(top.heightPt).toBeLessThan(100);
+    const bottom = acquire({ kind: 'align', value: 'bottom' });
+    expect(bottom.heightPt).toBe(top.heightPt);
+    expect(bottom.yPt + bottom.heightPt).toBeCloseTo(270, 9);
+    const center = acquire({ kind: 'align', value: 'center' });
+    expect(center.heightPt).toBe(top.heightPt);
+    expect(center.yPt + center.heightPt / 2).toBeCloseTo(150, 9);
+    // inside/outside follow page parity: outside on an odd page is trailing.
+    const outside = acquire({ kind: 'align', value: 'outside' });
+    expect(outside.yPt + outside.heightPt).toBeCloseTo(270, 9);
+    // Offsets and percentages keep the authored top edge.
+    expect(acquire({ kind: 'offset', valuePt: 12 }).yPt).toBe(42);
+    expect(acquire({ kind: 'percent', fraction: 0.5 }).yPt).toBe(150);
+    // Without spAutoFit the authored extent is the drawn extent.
+    expect(acquire({ kind: 'align', value: 'bottom' }, 'none'))
+      .toMatchObject({ yPt: 170, heightPt: 100 });
+
+    // Invariance: an aligned spAutoFit box draws exactly like a fixed box
+    // authored at its fitted extent — drawing frame, text-box frame and text
+    // lines, all compared in section-logical points (a vertical section may
+    // choose a different upright-local origin for the same geometry). This
+    // also covers vertical text (the fitted axis is the width, so positionH
+    // carries the alignment) and vertical sections (alignment in the upright
+    // physical drawing frame).
+    type Affine = Readonly<{ a: number; b: number; c: number; d: number; e: number; f: number }>;
+    const logicalRect = (rect: LayoutRect, transforms: readonly (Affine | undefined)[]) => {
+      const corners = [
+        [rect.xPt, rect.yPt], [rect.xPt + rect.widthPt, rect.yPt],
+        [rect.xPt, rect.yPt + rect.heightPt], [rect.xPt + rect.widthPt, rect.yPt + rect.heightPt],
+      ].map(([x, y]) => transforms.reduce(([px, py], m) => m
+        ? [m.a * px! + m.c * py! + m.e, m.b * px! + m.d * py! + m.f]
+        : [px!, py!], [x!, y!]));
+      const xs = corners.map(([x]) => x!);
+      const ys = corners.map(([, y]) => y!);
+      const round = (value: number) => Math.round(value * 1e6) / 1e6;
+      return {
+        xPt: round(Math.min(...xs)), yPt: round(Math.min(...ys)),
+        widthPt: round(Math.max(...xs) - Math.min(...xs)),
+        heightPt: round(Math.max(...ys) - Math.min(...ys)),
+      };
+    };
+    const geometry = (layout: ReturnType<typeof layoutFor>) => {
+      const drawing = layout.drawings[0]!;
+      const textBox = layout.textBoxes[0]!;
+      const block = textBox.story.blocks[0]!;
+      const toLogical = [textBox.transform, drawing.transform];
+      return {
+        drawing: drawing.flowBounds,
+        textBox: logicalRect(textBox.flowBounds, [drawing.transform]),
+        line: block.kind === 'paragraph' ? logicalRect(block.lines[0]!.bounds, toLogical) : null,
+      };
+    };
+    for (const verticalSection of [false, true]) {
+      for (const choice of [
+        { kind: 'align', value: 'bottom' },
+        { kind: 'align', value: 'center' },
+      ] as const) {
+        const fitted = layoutFor({ vertical: choice, verticalSection });
+        const fittedHeightPt = fitted.textBoxes[0]!.flowBounds.heightPt;
+        expect(fittedHeightPt).toBeLessThan(100);
+        const fixed = layoutFor({
+          vertical: choice, verticalSection, textAutofit: 'none', heightPt: fittedHeightPt,
+        });
+        expect(geometry(fitted)).toEqual(geometry(fixed));
+      }
+      for (const choice of [
+        { kind: 'align', value: 'right' },
+        { kind: 'align', value: 'center' },
+      ] as const) {
+        const fitted = layoutFor({
+          vertical: { kind: 'align', value: 'top' }, horizontal: choice,
+          textVert: 'eaVert', widthPt: 100, heightPt: 40, verticalSection,
+        });
+        const fittedWidthPt = fitted.textBoxes[0]!.flowBounds.widthPt;
+        expect(fittedWidthPt).not.toBe(100);
+        const fixed = layoutFor({
+          vertical: { kind: 'align', value: 'top' }, horizontal: choice,
+          textVert: 'eaVert', widthPt: fittedWidthPt, heightPt: 40, verticalSection,
+          textAutofit: 'none',
+        });
+        expect(geometry(fitted)).toEqual(geometry(fixed));
+      }
+    }
   });
 
   it('acquires ordinary CJK as complete service-shaped grapheme clusters', () => {

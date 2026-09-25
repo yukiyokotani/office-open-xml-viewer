@@ -13,6 +13,7 @@ import type { ParagraphBorderEdges } from './paragraph-border-adjacency.js';
 import { layoutTable } from './table.js';
 import { tableCellHorizontalSpacingInsets } from './table-columns.js';
 import { snapshotPlainData } from './plain-data.js';
+import { eastAsianUprightPaintOps } from './vertical-glyph-orientation.js';
 import type {
   FloatingTablePositionInput,
   DrawingMLCollisionEntryPt,
@@ -21,6 +22,7 @@ import type {
   PaintNode,
   ParagraphLayout,
   TableBorderInput,
+  TableCellVerticalMode,
   TableEdgeInputs,
   TableFormatInput,
   TableLayout,
@@ -214,6 +216,102 @@ function paragraphHasPageDependency(layout: ParagraphLayout): boolean {
   )));
 }
 
+/** The largest page dimension Word can author (MS-DOC 2.6.4 sprmSXaPage /
+ * sprmSYaPage: at most 31680 twips = 1584pt). A rotated line can never be
+ * longer than a page, so this bound serves only as the unconstrained line
+ * length for measuring a rotated cell's natural line extent. */
+const MAXIMUM_ROTATED_LINE_LENGTH_PT = 1584;
+const ROTATED_LINE_LENGTH_EPSILON_PT = 0.01;
+
+interface RotatedCellAcquisition {
+  readonly rowIndex: number;
+  readonly cellIndex: number;
+  readonly margins: Readonly<{ top: number; bottom: number }>;
+  reacquire(lineLengthPt: number): TableLayoutInput['rows'][number]['cells'][number]['blocks'];
+}
+
+/**
+ * ECMA-376 §17.4.72 cell text direction projected onto the rotated-frame
+ * modes this renderer paints. tbRl and btLr rotate the whole text frame a
+ * quarter turn; tbRlV additionally keeps East Asian glyphs upright (the
+ * DrawingML eaVert projection). lrTbV (horizontal lines with rotated East
+ * Asian glyphs) and tbLrV (vertical lines advancing left to right) are not
+ * rendered rotated yet, and a cell containing a nested table keeps
+ * horizontal layout because a nested table cannot be re-acquired along the
+ * rotated line axis. Those cells lay out horizontally.
+ */
+function verticalCellMode(
+  cell: TableLayoutSource['rows'][number]['cells'][number],
+): TableCellVerticalMode | undefined {
+  if (cell.content.some((element) => element.type === 'table')) return undefined;
+  switch (cell.textDirection) {
+    case 'tbRl': return 'vert';
+    case 'btLr': return 'vert270';
+    case 'tbRlV': return 'eaVert';
+    default: return undefined;
+  }
+}
+
+/**
+ * Natural line extent of rotated cell content laid out on an unconstrained
+ * line: each line's placement span (independent of its alignment on that
+ * line) plus the paragraph's side indents and, on the first line, a positive
+ * first-line indent. For automatic rows this is the length the rotated
+ * lines require: ECMA-376 §17.4.80/§17.4.81 size a row to its content, and
+ * the rotated content's extent along the row axis is its line length. This
+ * rule is derived from the specification alone. Rotated cells in automatic
+ * or atLeast rows have no Word compatibility evidence yet (a Word control
+ * for that case is pending); the observed documents only exercised rows
+ * whose height a taller neighbour cell governs.
+ */
+function naturalLineExtentPt(
+  layouts: readonly (ParagraphLayout | TableLayout)[],
+  content: TableLayoutSource['rows'][number]['cells'][number]['content'],
+): number {
+  let extentPt = 0;
+  layouts.forEach((layout, index) => {
+    if (layout.kind !== 'paragraph') {
+      extentPt = Math.max(extentPt, layout.flowBounds.widthPt);
+      return;
+    }
+    const source = content[index];
+    const paragraph = source?.type === 'paragraph' ? source : undefined;
+    const sideIndentsPt = Math.max(0, paragraph?.indentLeft ?? 0)
+      + Math.max(0, paragraph?.indentRight ?? 0);
+    layout.lines.forEach((line, lineIndex) => {
+      let startPt = Number.POSITIVE_INFINITY;
+      let endPt = Number.NEGATIVE_INFINITY;
+      for (const placement of line.placements) {
+        if (!('bounds' in placement) || !placement.bounds) continue;
+        startPt = Math.min(startPt, placement.bounds.xPt);
+        endPt = Math.max(endPt, placement.bounds.xPt + placement.bounds.widthPt);
+      }
+      if (endPt < startPt) return;
+      const firstLinePt = lineIndex === 0 ? Math.max(0, paragraph?.indentFirst ?? 0) : 0;
+      extentPt = Math.max(extentPt, endPt - startPt + sideIndentsPt + firstLinePt);
+    });
+  });
+  return Math.min(MAXIMUM_ROTATED_LINE_LENGTH_PT, Math.ceil(extentPt * 100) / 100);
+}
+
+/** eaVert keeps East Asian clusters upright inside the rotated frame, as the
+ * DrawingML vertical text boxes do (shared projection). */
+function orientRotatedCellBlocks(
+  layouts: readonly (ParagraphLayout | TableLayout)[],
+  mode: TableCellVerticalMode,
+): (ParagraphLayout | TableLayout)[] {
+  if (mode !== 'eaVert') return [...layouts];
+  return layouts.map((layout) => layout.kind !== 'paragraph' ? layout : {
+    ...layout,
+    lines: layout.lines.map((line) => ({
+      ...line,
+      placements: line.placements.map((placement) => placement.kind === 'text'
+        ? { ...placement, paintOps: eastAsianUprightPaintOps(placement) }
+        : placement),
+    })),
+  });
+}
+
 /**
  * Acquire an ordinary or nested table from final-width retained children.
  * Parser-private authored-presence and lexical facts arrive only through the
@@ -250,6 +348,7 @@ export function acquireRetainedTable<State>(
     : (table.tblInd ?? 0);
   const nestedById: Record<string, RetainedTableAcquisition> = {};
   const floatingTables: NestedFloatingTableOccurrence[] = [];
+  const rotatedCells: RotatedCellAcquisition[] = [];
   const rows: TableLayoutInput['rows'] = table.rows.map((row, rowIndex) => {
     const rowFormat = format.rows[rowIndex];
     let columnStart = Math.max(0, Math.min(columnWidthsPt.length, row.gridBefore ?? 0));
@@ -277,7 +376,15 @@ export function acquireRetainedTable<State>(
       );
       const cellPath = [...sourcePath, rowIndex, cellIndex];
       const cellId = `${flowDomainId}:cell:${rowIndex}.${cellIndex}`;
-      const acquired = cell.vMerge === false
+      // Same grouped insets as the horizontal content width below.
+      const physicalContentWidthPt = Math.max(
+        0,
+        cellTotalWidthPt
+          - (spacingInsets.startPt + spacingInsets.endPt)
+          - (formatMargins.left + formatMargins.right),
+      );
+      const verticalMode = cell.vMerge === false ? undefined : verticalCellMode(cell);
+      const acquireAt = (lineWidthPt: number | undefined) => cell.vMerge === false
         ? []
         : acquireTableCellBlocks({
             cell,
@@ -291,8 +398,9 @@ export function acquireRetainedTable<State>(
             // those groups avoids rounding an exact measured-width boundary
             // below its own minimum. This preserves the measured boundary
             // without adding a width allowance. Margin ownership is
-            // ECMA-376 §17.4.41/.42.
-            resolveContentWidthPt: (_cell, _table, totalWidthPt) => Math.max(
+            // ECMA-376 §17.4.41/.42. A rotated cell is re-acquired along its
+            // rotated line axis instead (see verticalCellMode).
+            resolveContentWidthPt: (_cell, _table, totalWidthPt) => lineWidthPt ?? Math.max(
               0,
               totalWidthPt
                 - (spacingInsets.startPt + spacingInsets.endPt)
@@ -358,6 +466,33 @@ export function acquireRetainedTable<State>(
             },
             advanceState: dependencies.advanceState,
           });
+      let acquired: ReturnType<typeof acquireAt>;
+      let verticalText: TableLayoutInput['rows'][number]['cells'][number]['verticalText'];
+      if (verticalMode) {
+        const rowRule = rowFormat?.height?.rule ?? 'auto';
+        const rowHeightPt = rowFormat?.height?.valuePt ?? 0;
+        const authoredLengthPt = Math.max(0, rowHeightPt - formatMargins.top - formatMargins.bottom);
+        const naturalLengthPt = rowRule === 'exact'
+          ? authoredLengthPt
+          : naturalLineExtentPt(acquireAt(MAXIMUM_ROTATED_LINE_LENGTH_PT), cell.content);
+        const lineLengthPt = rowRule === 'exact'
+          ? authoredLengthPt
+          : rowRule === 'atLeast'
+            ? Math.max(authoredLengthPt, naturalLengthPt)
+            : naturalLengthPt;
+        acquired = orientRotatedCellBlocks(acquireAt(lineLengthPt), verticalMode);
+        verticalText = { mode: verticalMode, lineLengthPt, requiredLineLengthPt: lineLengthPt };
+        rotatedCells.push({
+          rowIndex,
+          cellIndex,
+          margins: formatMargins,
+          reacquire: (lengthPt) => cellBlocks(
+            orientRotatedCellBlocks(acquireAt(lengthPt), verticalMode),
+          ),
+        });
+      } else {
+        acquired = acquireAt(undefined);
+      }
       return {
         id: cellId,
         source: sourceAt(cellPath),
@@ -379,7 +514,17 @@ export function acquireRetainedTable<State>(
           },
         } : {}),
         borders: retainedEdges(cell.borders),
-        blocks: acquired.flatMap((layout, sourceBlockIndex) => {
+        ...(cell.borders.tl2br || cell.borders.tr2bl ? {
+          diagonalBorders: Object.freeze({
+            tl2br: retainedBorder(cell.borders.tl2br ?? null),
+            tr2bl: retainedBorder(cell.borders.tr2bl ?? null),
+          }),
+        } : {}),
+        ...(verticalText ? { verticalText } : {}),
+        blocks: cellBlocks(acquired),
+      };
+      function cellBlocks(layouts: typeof acquired) {
+        return layouts.flatMap((layout, sourceBlockIndex) => {
           const sourceElement = cell.content[sourceBlockIndex];
           // ECMA-376 §17.4.57 keeps tblpPr tables at their logical source
           // position only for anchoring; they do not participate in cell flow.
@@ -398,12 +543,16 @@ export function acquireRetainedTable<State>(
             ...((layout.kind === 'paragraph' && paragraphHasPageDependency(layout))
               ? { pageDependent: true }
               : {}),
-            ...(isStructuralTrailingParagraph(cell.content, sourceBlockIndex)
+            ...(isStructuralTrailingParagraph(
+              cell.content,
+              sourceBlockIndex,
+              cell.hideMark === true,
+            )
               ? { structuralTrailing: true }
               : {}),
           }];
-        }),
-      };
+        });
+      }
     });
     const heightRule = rowFormat?.height?.rule ?? 'auto';
     return {
@@ -442,13 +591,51 @@ export function acquireRetainedTable<State>(
     widthPt: contentWidthPt,
     heightPt: 1,
   };
-  const layout = layoutTable(input, {
-    container: { id: flowDomainId, kind: 'tableCell', bounds },
+  const placement = {
+    container: { id: flowDomainId, kind: 'tableCell' as const, bounds },
     cursor: { xPt: 0, yPt: 0 },
     availableBounds: bounds,
-  }, services).layout;
+  };
+  let finalInput = input;
+  let layout = layoutTable(input, placement, services).layout;
+  // A rotated cell's lines run along its final height. When other cells or a
+  // merge make that height larger than the acquired line length, acquire the
+  // lines again at the final length so paragraph alignment uses it; the row
+  // requirement stays the natural length, so row heights cannot change.
+  const grown = rotatedCells.flatMap((rotated) => {
+    const laidOut = layout.rows[rotated.rowIndex]?.cells[rotated.cellIndex];
+    const current = input.rows[rotated.rowIndex]?.cells[rotated.cellIndex]?.verticalText;
+    if (!laidOut || !current) return [];
+    const finalLengthPt = Math.max(
+      0,
+      laidOut.flowBounds.heightPt - rotated.margins.top - rotated.margins.bottom,
+    );
+    return finalLengthPt > current.lineLengthPt + ROTATED_LINE_LENGTH_EPSILON_PT
+      ? [{ rotated, finalLengthPt, current }]
+      : [];
+  });
+  if (grown.length > 0) {
+    const replacements = new Map(grown.map(({ rotated, finalLengthPt, current }) => [
+      `${rotated.rowIndex}:${rotated.cellIndex}`,
+      {
+        blocks: rotated.reacquire(finalLengthPt),
+        verticalText: { ...current, lineLengthPt: finalLengthPt },
+      },
+    ]));
+    finalInput = snapshotPlainData<TableLayoutInput>({
+      ...input,
+      rows: input.rows.map((row, rowIndex) => ({
+        ...row,
+        cells: row.cells.map((cell, cellIndex) => {
+          const replacement = replacements.get(`${rowIndex}:${cellIndex}`);
+          return replacement ? { ...cell, ...replacement } : cell;
+        }),
+      })),
+    }, 'RetainedTableAcquisition.input') as TableLayoutInput;
+    layout = layoutTable(finalInput, placement, services).layout;
+  }
   return Object.freeze({
-    input,
+    input: finalInput,
     layout,
     nestedById: Object.freeze(nestedById),
     floatingTables: snapshotPlainData(

@@ -14,6 +14,21 @@ export function autoResize(render: (width: number, height: number) => void | Pro
 export interface AutoResizeOptions {
     pauseWhenHidden?: boolean;
 }
+export type BlipEffect = {
+    type: 'grayscale';
+} | {
+    type: 'biLevel';
+    thresh: number;
+} | {
+    type: 'colorChange';
+    from: string;
+    fromAlpha: number;
+    to: string;
+    toAlpha: number;
+    useAlpha: boolean;
+} | {
+    type: 'duotone';
+};
 export type BodyElement = ({
     type: 'paragraph';
 } & DocParagraph) | ({
@@ -50,6 +65,8 @@ export interface CellBorders {
     right: BorderSpec | null;
     insideH: BorderSpec | null;
     insideV: BorderSpec | null;
+    tl2br?: BorderSpec;
+    tr2bl?: BorderSpec;
 }
 export type CellElement = ({
     type: 'paragraph';
@@ -379,6 +396,7 @@ export interface ChartModel {
     title: string | null;
     titleRichRuns?: ChartTextRun[] | null;
     titlePresent?: boolean;
+    authoredWithoutSeries?: boolean;
     categories: string[];
     categorySourceHidden?: boolean[] | null;
     categoryLevels?: string[][] | null;
@@ -1155,6 +1173,7 @@ export interface DocTableCell {
     marginBottom?: number | null;
     marginLeft?: number | null;
     marginRight?: number | null;
+    textDirection?: string;
 }
 export interface DocTableRow {
     cells: DocTableCell[];
@@ -1403,6 +1422,7 @@ export interface DocxTextRun {
     fontSizeCs?: number;
     boldCs?: boolean;
     italicCs?: boolean;
+    langDefault?: string;
     langBidi?: string;
     snapToGrid?: boolean;
     charSpacing?: number;
@@ -1530,6 +1550,7 @@ export interface FieldRun {
     smallCaps?: boolean;
     doubleStrikethrough?: boolean;
     highlight?: string | null;
+    langDefault?: string;
     emphasisMark?: EmphasisMark;
 }
 type Fill = SolidFill | NoFill | GradientFill | PatternFill | ImageFill;
@@ -1621,6 +1642,7 @@ export interface ImageFill {
     tile?: TileInfo;
     alpha?: number;
     duotone?: Duotone;
+    blipEffects?: BlipEffect[];
 }
 export interface ImageResourceOptions {
     decodedByteBudget?: number;
@@ -2246,6 +2268,10 @@ export interface ShapeRun {
     behindDoc?: boolean;
     zOrder: number;
     subpaths: PathCmd[][];
+    subpathPaint?: Array<{
+        fill?: 'none' | 'lighten' | 'lightenLess' | 'darken' | 'darkenLess';
+        stroke?: false;
+    }>;
     presetGeometry?: string | null;
     adjValues?: Array<number | null>;
     fill: ShapeFill | null;

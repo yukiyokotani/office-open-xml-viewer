@@ -99,6 +99,9 @@ describe('canonical body layout input', () => {
     expect(acquired.noteLayoutSettings).toEqual({
       footnotePosition: 'pageBottom',
       endnotePosition: 'docEnd',
+      // §17.11.17/.18/.20 defaults for both note kinds.
+      footnoteNumbering: { format: 'decimal', start: 1 },
+      endnoteNumbering: { format: 'decimal', start: 1 },
     });
   });
 
@@ -112,12 +115,17 @@ describe('canonical body layout input', () => {
       __noteLayoutSettings: {
         footnotePosition: 'beneathText',
         endnotePosition: 'sectEnd',
+        footnoteNumberFormat: 'upperLetter',
+        footnoteNumberStart: 4,
+        endnoteNumberFormat: 'lowerRoman',
       },
     } as unknown as DocxDocumentModel;
 
     expect(createBodyLayoutInput(document).noteLayoutSettings).toEqual({
       footnotePosition: 'beneathText',
       endnotePosition: 'sectEnd',
+      footnoteNumbering: { format: 'upperLetter', start: 4 },
+      endnoteNumbering: { format: 'lowerRoman', start: 1 },
     });
   });
 
