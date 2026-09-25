@@ -806,8 +806,19 @@ mod tests {
         assert!(archive.document_cursor.is_none());
         assert!(archive.prepared_document_chunk.is_none());
         let usage: serde_json::Value =
-            serde_json::from_slice(&archive.document_cursor_resource_usage().unwrap()).unwrap();
+            serde_json::from_slice(&archive.document_cursor_resource_usage().unwrap().unwrap())
+                .unwrap();
         assert!(usage["operationInflatedBytes"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn missing_document_cursor_checkpoint_is_a_typed_absence() {
+        // A package that fails before its document cursor opens has no
+        // checkpoint; the archive reports that as `None`, not as an error.
+        let archive = DocxArchive::new(vec![0, 1, 2, 3], None, None, None).unwrap_or_else(|_| {
+            panic!("an unreadable package still constructs a placeholder session")
+        });
+        assert!(archive.document_cursor_resource_usage().unwrap().is_none());
     }
 
     #[test]
