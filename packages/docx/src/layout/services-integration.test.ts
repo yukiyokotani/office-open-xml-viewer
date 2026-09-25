@@ -7,7 +7,7 @@ import {
 } from '../line-layout.js';
 import { createLayoutServices } from '../layout-runtime.js';
 import { layoutDocument } from '../document-layout.js';
-import type { DocRun, DocxDocumentModel } from '../types.js';
+import type { DocParagraph, DocRun, DocxDocumentModel } from '../types.js';
 import type { InternalDocxDocumentModel, InternalFieldRun } from '../parser-model.js';
 import type { TextLayoutService } from './text.js';
 import { mathResourceKey } from './resources.js';
@@ -15,6 +15,7 @@ import { layoutSourceStore } from '../layout-source-model-adapter.js';
 import { privateResourceLookupOf } from './runtime-state.js';
 import { normalizeInternalDocumentModel } from '../parser-model.js';
 import { canvasFontString } from '@silurus/ooxml-core';
+import { referenceFontLineMetrics } from '../reference-font-line-metrics.js';
 
 function measureContext(): CanvasRenderingContext2D {
   return {
@@ -158,6 +159,66 @@ describe('production layout service integration', () => {
     expect(ctx.fontKerning).toBe('auto');
   });
 
+  it('measures an explicitly unkerned WordprocessingML run and restores the canvas state', () => {
+    let fontKerning: CanvasFontKerning = 'auto';
+    const states: CanvasFontKerning[] = [];
+    const ctx = {
+      font: '',
+      letterSpacing: '0px',
+      get fontKerning() { return fontKerning; },
+      set fontKerning(value: CanvasFontKerning) { fontKerning = value; },
+      measureText(text: string) {
+        states.push(fontKerning);
+        return {
+          width: text.length * 10,
+          actualBoundingBoxAscent: 8,
+          actualBoundingBoxDescent: 2,
+          fontBoundingBoxAscent: 8,
+          fontBoundingBoxDescent: 2,
+        } as TextMetrics;
+      },
+    } as unknown as CanvasRenderingContext2D;
+    const services = createLayoutServices(model(), { measureContext: ctx });
+
+    services.text.shape({
+      text: 'AV', fontSizePt: 10, weight: 400, style: 'normal', measure: true,
+      fonts: { ascii: 'Authored Sans' }, kerning: false,
+    });
+
+    expect(states).toContain('none');
+    expect(ctx.fontKerning).toBe('auto');
+  });
+
+  it('preserves the Canvas kerning policy for non-WordprocessingML text', () => {
+    let fontKerning: CanvasFontKerning = 'auto';
+    const states: CanvasFontKerning[] = [];
+    const ctx = {
+      font: '',
+      letterSpacing: '0px',
+      get fontKerning() { return fontKerning; },
+      set fontKerning(value: CanvasFontKerning) { fontKerning = value; },
+      measureText(text: string) {
+        states.push(fontKerning);
+        return {
+          width: text.length * 10,
+          actualBoundingBoxAscent: 8,
+          actualBoundingBoxDescent: 2,
+          fontBoundingBoxAscent: 8,
+          fontBoundingBoxDescent: 2,
+        } as TextMetrics;
+      },
+    } as unknown as CanvasRenderingContext2D;
+    const services = createLayoutServices(model(), { measureContext: ctx });
+
+    services.text.shape({
+      text: 'VML', fontSizePt: 10, weight: 400, style: 'normal', measure: true,
+      fonts: { ascii: 'Authored Sans' },
+    });
+
+    expect(states).toContain('auto');
+    expect(ctx.fontKerning).toBe('auto');
+  });
+
   it('projects finite Canvas ink metrics for retained trim geometry', () => {
     const ctx = {
       ...measureContext(),
@@ -245,7 +306,7 @@ describe('production layout service integration', () => {
       : false)).toEqual([true, false]);
   });
 
-  it('classifies Latin runs with a resolved eastAsia axis only when useFELayout is active', () => {
+  it('classifies Latin runs with a resolved eastAsia axis only on an active useFELayout line grid', () => {
     const hinted = textRun('Hinted Latin title', {
       fontFamilyEastAsia: 'EA Face',
       fontHint: 'eastAsia',
@@ -259,7 +320,7 @@ describe('production layout service integration', () => {
     const off = buildSegments([hinted, unhinted], { pageIndex: 0, totalPages: 1 });
     const on = buildSegments(
       [hinted, unhinted],
-      { pageIndex: 0, totalPages: 1, useFeLayout: true },
+      { pageIndex: 0, totalPages: 1, useFeLayout: true, lineGridActive: true },
     );
 
     expect(off.filter((segment) => 'text' in segment)
@@ -377,20 +438,254 @@ describe('production layout service integration', () => {
     expect(present.text.fingerprint).not.toBe(absent.text.fingerprint);
   });
 
-  it('takes one deeply immutable local-metric snapshot at the document boundary', () => {
+  it('keeps embedded resource metrics separate from local-font resolution', () => {
+    const family = 'Arbitrary Embedded Face';
+    const alias = '__ooxml_docx_embedded_arbitrary';
+    const services = createLayoutServices(model({
+      embeddedFonts: [{
+        fontName: family,
+        style: 'regular',
+        partPath: 'word/fonts/font1.odttf',
+        fontKey: '{00000000-0000-0000-0000-000000000000}',
+      }],
+    }), {
+      measureContext: measureContext(),
+      embeddedRoutes: [{ requestedFamily: family, resolvedFamily: alias,
+        weight: 400, style: 'normal', resourceIdentity: `embedded:${alias}` }],
+      fontMetrics: {
+        'arbitrary embedded face': {
+          family: alias,
+          requestedFamily: family,
+          weight: 400,
+          style: 'normal',
+          sourceIdentity: `embedded:${alias}`,
+          eastAsianLineHeightRatio: 1.43,
+        },
+      },
+    });
+
+    expect(services.text.shape({
+      text: '国',
+      fontSizePt: 10,
+      fonts: { eastAsia: family },
+    }).spans[0]?.font).toMatchObject({
+      source: 'embedded',
+      requestedFamily: family,
+      resolvedFamily: alias,
+    });
+    expect(services.text.fontMetrics?.['arbitrary embedded face'])
+      .toMatchObject({ eastAsianLineHeightRatio: 1.43 });
+  });
+
+  it('uses each document’s isolated embedded registration for measurement and paint', () => {
+    const requestedFamily = 'Shared Authored Face';
+    const document = model({ embeddedFonts: [{
+      fontName: requestedFamily, style: 'regular',
+      partPath: 'word/fonts/shared.ttf', fontKey: '',
+    }] });
+    const makeServices = (alias: string, ratio: number) => createLayoutServices(document, {
+      measureContext: measureContext(),
+      embeddedRoutes: [{
+        requestedFamily, resolvedFamily: alias, weight: 400, style: 'normal',
+        resourceIdentity: `embedded:${alias}`,
+      }],
+      fontMetrics: { 'shared authored face': {
+        family: alias, requestedFamily, weight: 400, style: 'normal',
+        sourceIdentity: `embedded:${alias}`, lineHeightRatio: ratio,
+        unicodeRanges: [[0x41, 0x5a]],
+      } },
+    });
+    const first = makeServices('__ooxml_docx_embedded_first', 1.1);
+    const second = makeServices('__ooxml_docx_embedded_second', 1.4);
+    const request = { text: 'A', fontSizePt: 10, fonts: { ascii: requestedFamily } };
+    expect(first.text.shape(request).spans[0]?.font).toMatchObject({
+      resolvedFamily: '__ooxml_docx_embedded_first',
+      resourceIdentity: 'embedded:__ooxml_docx_embedded_first',
+    });
+    expect(second.text.shape(request).spans[0]?.font).toMatchObject({
+      resolvedFamily: '__ooxml_docx_embedded_second',
+      resourceIdentity: 'embedded:__ooxml_docx_embedded_second',
+    });
+    const lineRatio = (services: typeof first) => {
+      const [segment] = buildSegments([textRun('A', { fontFamily: requestedFamily })], {
+        pageIndex: 0, totalPages: 1, layoutServices: services,
+        resolvedLocalFonts: services.text.fontMetrics,
+      });
+      return 'text' in segment ? segment.resolvedLineHeightRatio : undefined;
+    };
+    expect(lineRatio(first)).toBe(1.1);
+    expect(lineRatio(second)).toBe(1.4);
+  });
+
+  it('routes an explicitly supplied substitute through its own vertical metric', () => {
+    const alias = '__ooxml_provided_fallback_regular';
+    const identity = 'provided:test-face';
+    const services = createLayoutServices(model(), {
+      measureContext: measureContext(),
+      officeRoutes: [{ requestedFamily: 'Calibri', family: alias,
+        source: 'substitute', resourceIdentity: identity, weight: 400,
+        style: 'normal', metric: { family: alias, requestedFamily: 'Calibri',
+          sourceIdentity: identity, weight: 400, style: 'normal',
+          lineHeightRatio: 1.22, designAscentRatio: 0.98,
+          designDescentRatio: 0.24, unicodeRanges: [[0x41, 0x5a]] } }],
+    });
+    const [segment] = buildSegments([textRun('A', { fontFamily: 'Calibri' })], {
+      pageIndex: 0, totalPages: 1, layoutServices: services,
+      resolvedLocalFonts: services.text.fontMetrics,
+    });
+    expect(services.text.shape({ text: 'A', fontSizePt: 10,
+      fonts: { ascii: 'Calibri' } }).spans[0]?.font).toMatchObject({
+      source: 'substitute', resolvedFamily: alias, resourceIdentity: identity,
+    });
+    expect('text' in segment && segment.resolvedLineHeightRatio).toBe(1.22);
+  });
+
+  it('keeps a proven local Calibri face on the bounded platform reference policy', () => {
+    const alias = '__ooxml_office_local_calibri_regular';
+    const identity = 'office-local:local("Calibri")';
+    const services = createLayoutServices(model(), {
+      measureContext: measureContext(),
+      officeRoutes: [{ requestedFamily: 'Calibri', family: alias,
+        source: 'local', resourceIdentity: identity, weight: 400,
+        style: 'normal', metric: { family: alias, requestedFamily: 'Calibri',
+          sourceIdentity: identity, weight: 400, style: 'normal' } }],
+    });
+    const [segment] = buildSegments([textRun('A', { fontFamily: 'Calibri' })], {
+      pageIndex: 0, totalPages: 1, layoutServices: services,
+      resolvedLocalFonts: services.text.fontMetrics,
+    });
+    const reference = referenceFontLineMetrics('Calibri');
+    expect(reference).toBeDefined();
+    expect(services.text.shape({ text: 'A', fontSizePt: 10,
+      fonts: { ascii: 'Calibri' } }).spans[0]?.font).toMatchObject({
+      source: 'local', resolvedFamily: alias, resourceIdentity: identity,
+    });
+    expect('text' in segment && segment.resolvedLineHeightRatio)
+      .toBeCloseTo(reference?.lineHeightRatio ?? NaN, 8);
+  });
+
+  it('keeps a matching authored embedded tuple ahead of a bundled substitute', () => {
+    const embeddedAlias = '__ooxml_docx_embedded_calibri';
+    const bundledAlias = '__ooxml_office_fallback_carlito_regular';
+    const services = createLayoutServices(model(), {
+      measureContext: measureContext(),
+      embeddedRoutes: [{ requestedFamily: 'Calibri', resolvedFamily: embeddedAlias,
+        weight: 400, style: 'normal', resourceIdentity: `embedded:${embeddedAlias}` }],
+      fontMetrics: { calibri: { family: embeddedAlias,
+        requestedFamily: 'Calibri', weight: 400, style: 'normal',
+        sourceIdentity: `embedded:${embeddedAlias}`, lineHeightRatio: 1.11 } },
+      officeRoutes: [{ requestedFamily: 'Calibri', family: bundledAlias,
+        source: 'substitute', resourceIdentity: 'bundled:test-carlito-regular',
+        weight: 400, style: 'normal', metric: { family: bundledAlias,
+          requestedFamily: 'Calibri', weight: 400, style: 'normal',
+          sourceIdentity: 'bundled:test-carlito-regular', lineHeightRatio: 1.22 } }],
+    });
+    const [segment] = buildSegments([textRun('A', { fontFamily: 'Calibri' })], {
+      pageIndex: 0, totalPages: 1, layoutServices: services,
+      resolvedLocalFonts: services.text.fontMetrics,
+    });
+    expect(services.text.shape({ text: 'A', fontSizePt: 10,
+      fonts: { ascii: 'Calibri' } }).spans[0]?.font).toMatchObject({
+      source: 'embedded', resolvedFamily: embeddedAlias,
+    });
+    expect('text' in segment && segment.resolvedLineHeightRatio).toBe(1.11);
+  });
+
+  it('does not apply a regular embedded metric to an unavailable bold tuple', () => {
+    const family = 'Arbitrary Embedded Face';
+    const alias = '__ooxml_docx_embedded_regular';
+    const document = model({
+      embeddedFonts: [{
+        fontName: family,
+        style: 'regular',
+        partPath: 'word/fonts/font1.odttf',
+        fontKey: '{00000000-0000-0000-0000-000000000000}',
+      }],
+      body: [{
+        type: 'paragraph',
+        runs: [textRun('国', { fontFamilyEastAsia: family, bold: true })],
+      } as DocxDocumentModel['body'][number]],
+    });
+    const services = createLayoutServices(document, {
+      measureContext: measureContext(),
+      embeddedRoutes: [{ requestedFamily: family, resolvedFamily: alias,
+        weight: 400, style: 'normal', resourceIdentity: `embedded:${alias}` }],
+      fontMetrics: {
+        'arbitrary embedded face': {
+          family: alias,
+          requestedFamily: family,
+          weight: 400,
+          style: 'normal',
+          sourceIdentity: `embedded:${alias}`,
+          eastAsianLineHeightRatio: 1.43,
+        },
+      },
+    });
+
+    const [segment] = buildSegments((document.body[0] as DocParagraph).runs, {
+      pageIndex: 0,
+      totalPages: 1,
+      layoutServices: services,
+      resolvedLocalFonts: services.text.fontMetrics,
+    });
+    expect('text' in segment && segment.resolvedEastAsianLineHeightRatio).toBeUndefined();
+  });
+
+  it('does not promote one Canvas glyph probe into whole-font Word line geometry', () => {
+    let font = '12px serif';
+    const ctx = {
+      ...measureContext(),
+      get font() { return font; },
+      set font(value: string) { font = value; },
+      measureText(text: string) {
+        const selected = font.includes('Unlisted CJK Face');
+        return {
+          width: selected ? 100 : 92,
+          actualBoundingBoxAscent: selected ? 80 : 78,
+          actualBoundingBoxDescent: selected ? 21 : 20,
+          fontBoundingBoxAscent: selected ? 106 : 90,
+          fontBoundingBoxDescent: selected ? 44 : 25,
+        } as TextMetrics;
+      },
+    } as CanvasRenderingContext2D;
+    const document = model({
+      body: [{
+        type: 'paragraph',
+        runs: [
+          textRun('国', { fontFamilyEastAsia: 'Unlisted CJK Face' }),
+          textRun('語', { fontFamilyEastAsia: 'Fallback Only Face' }),
+        ],
+      } as DocxDocumentModel['body'][number]],
+    });
+    (document as unknown as { fontFamilyCharsets: Record<string, string> }).fontFamilyCharsets = {
+      'Unlisted CJK Face': '80',
+      'Fallback Only Face': '80',
+    };
+    const services = createLayoutServices(document, {
+      measureContext: ctx,
+    });
+
+    // The probe can measure one selected glyph, but cannot establish the
+    // face's code-page class or coverage of other scalars in this paragraph.
+    expect(services.text.fontMetrics?.['unlisted cjk face']).toBeUndefined();
+    expect(services.text.fontMetrics?.['fallback only face']).toBeUndefined();
+    expect(font).toBe('12px serif');
+  });
+
+  it('takes one deeply immutable font-resource metric snapshot at the document boundary', () => {
     const callerMetric = {
       family: '__local_authored',
       lineHeightRatio: 1.25,
       requestedFamily: 'Authored Sans',
       weight: 400,
       style: 'normal' as const,
-      sourceIdentity: 'local:Authored Sans',
+      sourceIdentity: 'embedded:test-face',
       synthesized: false,
     };
     const caller: Record<string, typeof callerMetric> = { 'authored sans:400:normal': callerMetric };
     const services = createLayoutServices(model(), {
       measureContext: measureContext(),
-      localMetrics: caller,
+      fontMetrics: caller,
     });
     const before = services.text.fingerprint;
 
@@ -405,7 +700,7 @@ describe('production layout service integration', () => {
         requestedFamily: 'Authored Sans',
         weight: 400,
         style: 'normal',
-        sourceIdentity: 'local:Authored Sans',
+        sourceIdentity: 'embedded:test-face',
         synthesized: false,
       },
     });
@@ -524,7 +819,6 @@ describe('production layout service integration', () => {
     });
     const failed = createLayoutServices(doc, {
       measureContext: measureContext(),
-      embeddedFaces: [],
       googleFaces: [],
       useGoogleFonts: true,
     });
@@ -537,38 +831,12 @@ describe('production layout service integration', () => {
     const carlito = { family: 'Carlito', weight: '400', style: 'normal', status: 'loaded' } as FontFace;
     const loaded = createLayoutServices(doc, {
       measureContext: measureContext(),
-      embeddedFaces: [],
       googleFaces: [carlito],
       useGoogleFonts: true,
     });
     const substituted = loaded.text.shape({ text: 'x', fontSizePt: 10, fonts: { ascii: 'Calibri' } });
     expect(substituted.spans[0]?.font).toMatchObject({ source: 'substitute', resolvedFamily: 'Carlito' });
     expect(substituted.diagnostics[0]?.message).toMatch(/implementation-dependent/i);
-  });
-
-  it('requires loaded status and an exact family/weight/style match for every face', () => {
-    const doc = model({
-      embeddedFonts: [
-        { fontName: 'Partial Embedded', partPath: 'word/fonts/regular.odttf', fontKey: '', style: 'regular' },
-        { fontName: 'Partial Embedded', partPath: 'word/fonts/bold.odttf', fontKey: '', style: 'bold' },
-      ],
-    });
-    const services = createLayoutServices(doc, {
-      measureContext: measureContext(),
-      embeddedFaces: [
-        { family: '"Partial Embedded"', weight: '400', style: 'normal', status: 'loaded' },
-        { family: 'Partial Embedded', weight: '700', style: 'normal', status: 'error' },
-        { family: 'Timed Out', weight: '400', style: 'normal', status: 'loading' },
-      ] as FontFace[],
-    });
-    const shape = (family: string, weight: number, style: 'normal' | 'italic' = 'normal') =>
-      services.text.shape({ text: 'x', fontSizePt: 10, weight, style, fonts: { ascii: family } });
-
-    expect(shape('Partial Embedded', 400).spans[0]?.font)
-      .toMatchObject({ source: 'embedded', resolvedFamily: 'Partial Embedded' });
-    expect(shape('Partial Embedded', 700).spans[0]?.font.source).toBe('native');
-    expect(shape('Partial Embedded', 400, 'italic').spans[0]?.font.source).toBe('native');
-    expect(shape('Timed Out', 400).spans[0]?.font.source).toBe('native');
   });
 
   it('collects every currently representable math story, including rich text boxes and nested tables', () => {
@@ -674,10 +942,10 @@ describe('production layout service integration', () => {
   });
 
   it('gives main and worker factories identical fingerprints for identical successful snapshots', () => {
-    const embedded = { family: 'Embedded', weight: '700', style: 'italic', status: 'loaded' } as FontFace;
     const options = {
       measureContext: measureContext(),
-      embeddedFaces: [embedded],
+      embeddedRoutes: [{ requestedFamily: 'Embedded', resolvedFamily: '__ooxml_docx_embedded_same',
+        weight: 700, style: 'italic' as const, resourceIdentity: 'embedded:__ooxml_docx_embedded_same' }],
       googleFaces: [] as FontFace[],
       localMetrics: { authored: { family: '__local_authored', lineHeightRatio: 1.25 } },
     };
@@ -688,4 +956,42 @@ describe('production layout service integration', () => {
     expect(main.images.fingerprint).toBe(worker.images.fingerprint);
     expect(main.math.fingerprint).toBe(worker.math.fingerprint);
   });
+});
+
+
+it('retains CJK routes in registered and generic fonts with different service fingerprints', () => {
+  const document = model({ majorFont: 'Calibri', minorFont: 'Calibri' });
+  const options = { measureContext: measureContext(), useGoogleFonts: true,
+    googleFaces: [{ family: 'Carlito', status: 'loaded', weight: '400', style: 'normal' }] as FontFace[],
+  };
+  const sc = createLayoutServices(document, { ...options, cjkFallback: 'sc' });
+  const tc = createLayoutServices(document, { ...options, cjkFallback: 'tc' });
+  expect(sc.text.fingerprint).not.toBe(tc.text.fingerprint);
+  const request = { text: '漢', slot: 'eastAsia' as const, fonts: { eastAsia: 'Calibri' } };
+  // The resolved substitute must keep its CJK fallback during measurement and paint.
+  const scRun = sc.text.resolve(request);
+  expect(scRun.route.familyList).toContain('Noto Sans SC');
+  expect(tc.text.resolve(request).route.familyList).toContain('Noto Sans TC');
+});
+
+
+it('uses preserved DOCX language on Han-only runs and keeps authored fonts authoritative', () => {
+  const services = createLayoutServices(model({ majorFont: 'Calibri', fontFamilyClasses: { SimSun: 'roman' } }), {
+    measureContext: measureContext(), cjkFallback: 'sc',
+  });
+  const japanese = services.text.resolve({
+    text: '漢', fonts: { ascii: 'Calibri' }, slot: 'eastAsia', eastAsiaLanguage: 'ja-JP',
+  }).route.familyList;
+  expect(japanese.indexOf('Noto Sans JP')).toBeLessThan(japanese.indexOf('Noto Sans SC'));
+  const chinese = services.text.resolve({
+    text: '漢', fonts: { eastAsia: 'SimSun' }, slot: 'eastAsia', eastAsiaLanguage: 'ja-JP',
+  }).route.familyList;
+  expect(chinese.indexOf('Noto Serif SC')).toBeLessThan(chinese.indexOf('Noto Serif JP'));
+  const latin = services.text.resolve({
+    text: 'à', fonts: { ascii: 'Calibri' }, slot: 'eastAsia', eastAsiaLanguage: 'ja-JP',
+  }).route.familyList;
+  const neutralLatin = services.text.resolve({
+    text: 'à', fonts: { ascii: 'Calibri' }, slot: 'eastAsia',
+  }).route.familyList;
+  expect(latin).toBe(neutralLatin);
 });

@@ -491,6 +491,7 @@ interface PendingAcceptance {
 
 /** @internal Test-only lowering; production cannot raise or replace the hard ceiling. */
 export interface PresentationPreflightBuilderOptions {
+  readonly cjkFallback?: import('@silurus/ooxml-core').CjkLang;
   readonly hardLimitForTesting?: number;
 }
 
@@ -545,6 +546,7 @@ export class PresentationPreflightBuilder {
     this.fonts = new PptxFontPreloadAccumulator(
       this.majorFontValue,
       this.minorFontValue,
+      undefined, undefined, options.cjkFallback,
     );
     this.fontPreloadNames = Object.freeze(this.fonts.names());
     this.fontProjectionBytes = measureStructuralJson(

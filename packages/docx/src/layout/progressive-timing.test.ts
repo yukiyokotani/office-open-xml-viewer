@@ -37,7 +37,7 @@ import { setDocumentLayoutValidation } from './validation-policy.js';
  *
  *   - worker spin-up, the render-worker module fetch/eval and the init handshake
  *   - WASM instantiation, ZIP/XML parse and model materialization
- *   - font preload (Google, embedded, local metrics) — all of which precede
+ *   - font preload and resource metrics (Google, embedded, native) — all of which precede
  *     pagination and all of which are on the real first-paint critical path
  *   - math conversion and rasterization
  *   - the wire: structured clone per publication, and ImageBitmap transfer

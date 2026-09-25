@@ -290,6 +290,7 @@ export class DocxViewer implements ZoomableViewer {
           password: this._opts.password,
           legacyConversion: conversion.options,
           useGoogleFonts: this._opts.useGoogleFonts,
+          cjkFallback: this._opts.cjkFallback,
           maxZipEntryBytes: this._opts.maxZipEntryBytes,
           resourceLimits: this._opts.resourceLimits,
           debug: this._opts.debug,

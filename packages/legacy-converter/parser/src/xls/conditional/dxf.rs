@@ -191,6 +191,9 @@ fn dxfn(
             },
             color: color.flatten(),
             name,
+            // BIFF differential fonts carry no theme font scheme.
+            scheme: None,
+            charset: None,
             underline_style: underline_style.map(str::to_string),
             vert_align,
         });

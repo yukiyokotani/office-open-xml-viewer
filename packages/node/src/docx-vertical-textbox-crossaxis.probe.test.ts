@@ -48,7 +48,7 @@ const rendererMod = await loadDocxRendererForTests();
 type Any = any;
 
 const SAMPLE = fileURLToPath(
-  new URL('../../docx/public/private/sample-53.docx', import.meta.url),
+  new URL('../../docx/public/private/docx/sample-53.docx', import.meta.url),
 );
 const MINCHO = '/System/Library/Fonts/ヒラギノ明朝 ProN.ttc';
 const havePrereqs = existsSync(SAMPLE) && existsSync(MINCHO);

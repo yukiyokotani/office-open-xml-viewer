@@ -1,6 +1,13 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { preloadGoogleFonts, unloadGoogleFonts, parseFontFaceRules, _resetCssCacheForTests, type FontPreloadEntry } from './preload.js';
+import {
+  preloadGoogleFonts,
+  unloadGoogleFonts,
+  parseFontFaceRules,
+  _resetCssCacheForTests,
+  type FontPreloadEntry,
+} from './preload.js';
 import { _resetFontRegistryForTests } from './font-registry.js';
+import { SCRIPT_GOOGLE_FONTS } from './scripts.js';
 
 const G = globalThis as Record<string, unknown>;
 const ORIG = { document: G.document, self: G.self, fetch: G.fetch, FontFace: G.FontFace };
@@ -45,6 +52,27 @@ describe('parseFontFaceRules', () => {
     });
     expect(faces[1].descriptors.style).toBe('normal');
   });
+
+  it.each([
+    ['url(../files/a.woff2)', 'url("https://cdn.internal.example/files/a.woff2")'],
+    ["url('/files/a.woff2')", 'url("https://cdn.internal.example/files/a.woff2")'],
+    ['url(a.woff2)', 'url("https://cdn.internal.example/styles/a.woff2")'],
+    [
+      'url(//assets.internal.example/a.woff2)',
+      'url("https://assets.internal.example/a.woff2")',
+    ],
+    [
+      'local("Internal"), url(/files/a.woff2) format("woff2")',
+      'local("Internal"), url("https://cdn.internal.example/files/a.woff2") format("woff2")',
+    ],
+  ])('resolves font sources against the final stylesheet URL: %s', (src, expected) => {
+    const faces = parseFontFaceRules(
+      `@font-face { font-family: 'Internal'; src: ${src}; }`,
+      'https://cdn.internal.example/styles/css2?family=Internal',
+    );
+
+    expect(faces[0].src).toBe(expected);
+  });
 });
 
 interface FakeFace {
@@ -87,6 +115,98 @@ const MAP: Record<string, FontPreloadEntry> = {
 };
 
 describe('preloadGoogleFonts', () => {
+  it('preserves a caller-supplied non-Google stylesheet map', async () => {
+    const { set } = installFakes();
+    G.document = { fonts: set };
+    delete G.self;
+    const customMap = {
+      calibri: {
+        url: 'https://existing.internal.example/fonts/carlito.css?version=1',
+        loadFamily: 'Carlito',
+      },
+    };
+
+    await preloadGoogleFonts(['Calibri'], customMap, set as unknown as FontFaceSet);
+
+    expect(G.fetch).toHaveBeenCalledWith(
+      'https://existing.internal.example/fonts/carlito.css?version=1',
+    );
+  });
+
+  it('uses the redirected stylesheet URL as the base for relative font files', async () => {
+    const { set, added } = installFakes();
+    G.document = { fonts: set };
+    delete G.self;
+    G.fetch = vi.fn(async () => ({
+      ok: true,
+      url: 'https://assets.internal.example/google/css?family=Carlito',
+      text: async () =>
+        "@font-face { font-family: 'Carlito'; src: url(../fonts/carlito.woff2) format('woff2'); }",
+    }));
+
+    await preloadGoogleFonts(['Calibri'], MAP, set as unknown as FontFaceSet);
+
+    expect(added[0].source).toContain(
+      'url("https://assets.internal.example/fonts/carlito.woff2")',
+    );
+  });
+
+  it('uses the requested stylesheet URL when a response URL is unavailable', async () => {
+    const { set, added } = installFakes();
+    G.document = { fonts: set };
+    delete G.self;
+    G.fetch = vi.fn(async () => ({
+      ok: true,
+      text: async () =>
+        '@font-face { font-family: Carlito; src: local("Carlito"), url(/fonts/carlito.woff2) format("woff2"); }',
+    }));
+
+    await preloadGoogleFonts(['Calibri'], MAP, set as unknown as FontFaceSet);
+
+    expect(added[0].source).toBe(
+      'local("Carlito"), url("https://fonts.googleapis.com/fonts/carlito.woff2") format("woff2")',
+    );
+  });
+
+  it('trims a native Noto CJK name and fetches the aliased Google family', async () => {
+    const { set, added } = installFakes();
+    G.document = { fonts: set };
+    delete G.self;
+    const notoCss = CSS.replaceAll('Carlito', 'Noto Sans SC');
+    G.fetch = vi.fn(async () => ({ ok: true, text: async () => notoCss }));
+
+    await preloadGoogleFonts(['  NoTo SaNs CjK Sc  '], SCRIPT_GOOGLE_FONTS);
+
+    expect(G.fetch).toHaveBeenCalledWith(expect.stringContaining('family=Noto+Sans+SC'));
+    expect(added.map((face) => face.family)).toEqual(['Noto Sans SC', 'Noto Sans SC']);
+    expect(added.every((face) => face.loadCalls === 1)).toBe(true);
+  });
+
+  it('fetches and registers the Google Fonts HK sans family for its native alias', async () => {
+    const { set, added } = installFakes();
+    G.document = { fonts: set };
+    delete G.self;
+    const notoCss = CSS.replaceAll('Carlito', 'Noto Sans HK');
+    G.fetch = vi.fn(async () => ({ ok: true, text: async () => notoCss }));
+
+    await preloadGoogleFonts(['Noto Sans CJK HK'], SCRIPT_GOOGLE_FONTS);
+
+    expect(G.fetch).toHaveBeenCalledWith(expect.stringContaining('family=Noto+Sans+HK'));
+    expect(added.map((face) => face.family)).toEqual(['Noto Sans HK', 'Noto Sans HK']);
+  });
+
+  it('does not request a Google Fonts substitute for the native HK serif family', async () => {
+    const { set } = installFakes();
+    G.document = { fonts: set };
+    delete G.self;
+    const fetch = vi.fn();
+    G.fetch = fetch;
+
+    await preloadGoogleFonts(['Noto Serif CJK HK'], SCRIPT_GOOGLE_FONTS);
+
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it('fetches the CSS once, registers FontFaces and force-loads them (document.fonts)', async () => {
     const { set, added } = installFakes();
     G.document = { fonts: set };

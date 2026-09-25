@@ -4,7 +4,7 @@
 // consuming app's bundler from re-bundling — and over-including — the MathJax
 // source.
 //
-// The generated bundle is ~3 MB of minified IIFE, so — like the WASM parsers —
+// The generated bundle is ~4 MB of minified IIFE, so — like the WASM parsers —
 // it is NOT committed (see .gitignore) and is instead regenerated from source.
 // This script runs automatically on install via core's `prepare` script; run it
 // by hand with `pnpm --filter @silurus/ooxml-core build:mathjax`.

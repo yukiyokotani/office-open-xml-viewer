@@ -301,10 +301,10 @@ fn color_node_hex(node: roxmltree::Node<'_, '_>) -> Option<String> {
     }
 }
 
-/// The parsed `<a:fontScheme>`: the major (heading) and minor (body) typeface
-/// for each script axis. Stored as owned strings; a script with no `typeface`
-/// (or an empty one) is `None`. Each parser maps these onto its own key format
-/// (pptx `+mj-lt`, docx `major/latin`, …) in its adapter.
+/// The parsed `<a:fontScheme>`: major (heading) and minor (body) typefaces.
+/// ECMA-376 `CT_FontCollection` has the latin/ea/cs axes followed by zero or
+/// more `CT_SupplementalFont` entries keyed by script. Each host maps these
+/// authored facts onto its own font-selection policy.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThemeFonts {
@@ -314,19 +314,48 @@ pub struct ThemeFonts {
     pub minor: ThemeFontGroup,
 }
 
-/// The three script typefaces of one font group (`<a:majorFont>` or
-/// `<a:minorFont>`): Latin (`<a:latin>`), East-Asian (`<a:ea>`) and
-/// complex-script (`<a:cs>`). Empty `typeface=""` (common for `ea`/`cs`) is
-/// normalized to `None`.
+/// One `<a:majorFont>` or `<a:minorFont>` collection. Empty `typeface=""`
+/// (common for `ea`/`cs`) is normalized to `None` or omitted from the
+/// supplemental list. Supplemental entries retain source order so malformed
+/// duplicate script mappings are not silently resolved by parse order.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThemeFontGroup {
     pub latin: Option<String>,
     pub ea: Option<String>,
     pub cs: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supplemental: Vec<ThemeSupplementalFont>,
+}
+
+/// ECMA-376 `CT_SupplementalFont`: an authored script-to-typeface association.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThemeSupplementalFont {
+    pub script: String,
+    pub typeface: String,
+}
+
+impl ThemeFontGroup {
+    /// Return a unique supplemental face for `script`. A conflicting duplicate
+    /// is ambiguous input and must not be converted into a font-selection rule.
+    pub fn typeface_for_script(&self, script: &str) -> Option<&str> {
+        let mut selected = None;
+        for font in self
+            .supplemental
+            .iter()
+            .filter(|font| font.script == script)
+        {
+            match selected {
+                Some(previous) if previous != font.typeface => return None,
+                Some(_) => {}
+                None => selected = Some(font.typeface.as_str()),
+            }
+        }
+        selected
+    }
 }
 
 impl ThemeFonts {
-    /// Parse the `<a:fontScheme>` (major + minor × latin/ea/cs). Missing scheme
+    /// Parse the `<a:fontScheme>` collections. Missing scheme
     /// or malformed XML yields all-`None`.
     pub fn parse(xml: &str) -> Self {
         let Ok(doc) = crate::depth::parse_guarded(xml) else {
@@ -365,6 +394,18 @@ fn parse_font_group(scheme: roxmltree::Node<'_, '_>, group_name: &str) -> ThemeF
         latin: read("latin"),
         ea: read("ea"),
         cs: read("cs"),
+        supplemental: group
+            .children()
+            .filter(|n| n.is_element() && n.tag_name().name() == "font")
+            .filter_map(|n| {
+                let script = n.attribute("script").filter(|s| !s.is_empty())?;
+                let typeface = n.attribute("typeface").filter(|s| !s.is_empty())?;
+                Some(ThemeSupplementalFont {
+                    script: script.to_owned(),
+                    typeface: typeface.to_owned(),
+                })
+            })
+            .collect(),
     }
 }
 
@@ -804,6 +845,39 @@ mod tests {
         assert_eq!(f.minor.latin.as_deref(), Some("Aptos"));
         assert_eq!(f.minor.ea, None);
         assert_eq!(f.minor.cs, None);
+    }
+
+    #[test]
+    fn font_scheme_preserves_supplemental_scripts_and_rejects_ambiguous_duplicates() {
+        // ECMA-376 CT_FontCollection permits repeated CT_SupplementalFont
+        // children. Preserve their order while avoiding an arbitrary winner.
+        let xml = r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <a:themeElements><a:fontScheme name="Test">
+            <a:majorFont><a:latin typeface="Heading"/><a:ea typeface=""/><a:cs typeface=""/>
+              <a:font script="Jpan" typeface="Yu Gothic"/>
+              <a:font script="Arab" typeface="Arabic Face"/>
+              <a:font script="Jpan" typeface="Yu Gothic"/>
+              <a:font script="" typeface="Ignored"/>
+              <a:font script="Hani" typeface=""/>
+            </a:majorFont>
+            <a:minorFont><a:latin typeface="Body"/><a:ea typeface=""/><a:cs typeface=""/>
+              <a:font script="Jpan" typeface="Yu Gothic"/>
+              <a:font script="Jpan" typeface="Meiryo"/>
+            </a:minorFont>
+          </a:fontScheme></a:themeElements>
+        </a:theme>"#;
+        let fonts = ThemeFonts::parse(xml);
+        assert_eq!(fonts.major.supplemental.len(), 3);
+        assert_eq!(fonts.major.supplemental[0].script, "Jpan");
+        assert_eq!(fonts.major.typeface_for_script("Jpan"), Some("Yu Gothic"));
+        assert_eq!(fonts.major.typeface_for_script("Arab"), Some("Arabic Face"));
+        assert_eq!(fonts.major.typeface_for_script("Hani"), None);
+        assert_eq!(fonts.minor.supplemental.len(), 2);
+        assert_eq!(fonts.minor.typeface_for_script("Jpan"), None);
+        assert_eq!(fonts.minor.typeface_for_script("Arab"), None);
+        let round_trip: ThemeFonts =
+            serde_json::from_str(&serde_json::to_string(&fonts).unwrap()).unwrap();
+        assert_eq!(round_trip, fonts);
     }
 
     #[test]

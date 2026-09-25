@@ -3,7 +3,6 @@ import type { WorkerLike } from '@silurus/ooxml-core';
 import * as core from '@silurus/ooxml-core';
 import { buildCfbFixture } from '@silurus/ooxml-core/testing';
 import { DocxDocument } from './document.js';
-import * as localFontMetrics from './local-font-metrics.js';
 import * as renderer from './renderer.js';
 
 class SilentWorker implements WorkerLike {
@@ -190,10 +189,10 @@ describe('DocxDocument direct DOC routing', () => {
     let finishMetrics!: () => void;
     const metricsPending = new Promise<void>((resolve) => { finishMetrics = resolve; });
     const face = {} as FontFace;
-    const unload = vi.spyOn(core, 'unloadLocalFontMetrics');
-    vi.spyOn(localFontMetrics, 'loadDocxLocalFontMetrics').mockImplementation(async () => {
+    const unload = vi.spyOn(core, 'unloadOfficeFontFallbacks');
+    vi.spyOn(core, 'loadOfficeFontFallbacks').mockImplementation(async () => {
       await metricsPending;
-      return { faces: [face], metrics: new Map() } as never;
+      return { faces: [face], routes: {} } as never;
     });
     const parse = install().mockImplementationOnce(async function (this: unknown) {
       (this as { _document: unknown })._document = { body: [] };
@@ -202,7 +201,7 @@ describe('DocxDocument direct DOC routing', () => {
     const loading = DocxDocument.load(docBuffer(), {
       legacyConversion: { doc: { source, signal: controller.signal } },
     });
-    await vi.waitFor(() => expect(localFontMetrics.loadDocxLocalFontMetrics).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(core.loadOfficeFontFallbacks).toHaveBeenCalledOnce());
     controller.abort();
     await expect(loading).rejects.toMatchObject({ name: 'AbortError' });
     finishMetrics();
@@ -214,8 +213,8 @@ describe('DocxDocument direct DOC routing', () => {
   it('rejects abort while deferred math preparation remains pending', async () => {
     let finishMath!: () => void;
     const mathPending = new Promise<void>((resolve) => { finishMath = resolve; });
-    vi.spyOn(localFontMetrics, 'loadDocxLocalFontMetrics').mockResolvedValue({
-      faces: [], metrics: new Map(),
+    vi.spyOn(core, 'loadOfficeFontFallbacks').mockResolvedValue({
+      faces: [], routes: {},
     } as never);
     vi.spyOn(renderer, 'documentHasMath').mockReturnValue(true);
     const prepare = vi.spyOn(renderer, 'prepareMathRuns').mockImplementation(async () => {

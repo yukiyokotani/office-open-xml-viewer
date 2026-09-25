@@ -1,6 +1,13 @@
-import { canvasFontString } from '@silurus/ooxml-core';
-import type { ResolvedLocalFontMetric } from '@silurus/ooxml-core';
+import { type CjkLang } from '@silurus/ooxml-core';
+import {
+  activeFontSet,
+  canvasFontString,
+  fontFaceWeightCovers,
+} from '@silurus/ooxml-core';
+import type { ResolvedFontMetric } from '@silurus/ooxml-core';
+import type { OfficeFontFallbackRoute } from '@silurus/ooxml-core';
 import { DOCX_GOOGLE_FONTS } from '../google-fonts.js';
+import type { LoadedEmbeddedFontRoute } from '../embedded-fonts.js';
 import { normalizeFontFamilyUncached } from '../line-layout.js';
 import type { LayoutSourceStore } from './layout-source-store.js';
 import { createFontResolver, type FontInventoryFace } from './font-service.js';
@@ -22,7 +29,7 @@ import {
 import {
   classifyDocxFontGeneric,
   createTextLayoutService,
-  snapshotLocalMetrics,
+  snapshotFontMetrics,
   type GlyphMeasureRequest,
 } from './text.js';
 import type { LayoutServices } from './types.js';
@@ -35,13 +42,20 @@ export interface LoadedFontFaceRecord {
 }
 
 export interface ProductionLayoutServiceOptions {
-  readonly localMetrics?: Readonly<Record<string, ResolvedLocalFontMetric>>;
+  readonly localMetrics?: Readonly<Record<string, ResolvedFontMetric>>;
+  readonly fontMetrics?: Readonly<Record<string, ResolvedFontMetric>>;
   readonly useGoogleFonts?: boolean;
+  readonly cjkFallback?: CjkLang;
   readonly mathResources?: readonly MathLayoutResource[];
   readonly mathDrawables?: ReadonlyMap<string, CanvasImageSource>;
   readonly measureContext: MeasurementTextContext | null;
+  /** FontFaceSet of the measuring canvas, including foreign DOM realms. */
+  readonly fontSet?: FontFaceSet | null;
   readonly verticalGlyphMeasurement: VerticalGlyphMeasurementService;
-  readonly embeddedFaces?: readonly LoadedFontFaceRecord[];
+  /** Exact registrations returned by the DOCX loader. */
+  readonly embeddedRoutes?: readonly LoadedEmbeddedFontRoute[];
+  /** Exact local registrations, scoped to this FontFaceSet. */
+  readonly officeRoutes?: readonly OfficeFontFallbackRoute[];
   readonly googleFaces?: readonly LoadedFontFaceRecord[];
 }
 
@@ -49,7 +63,6 @@ export function createProductionLayoutServices(
   source: LayoutSourceStore,
   options: ProductionLayoutServiceOptions,
 ): LayoutServices {
-  const localMetrics = snapshotLocalMetrics(options.localMetrics);
   const fontFamilyCharsets = Object.freeze(Object.fromEntries(
     Object.entries(source.fontFamilyCharsets)
       .map(([family, charset]) => [family.trim().toLowerCase(), charset]),
@@ -63,45 +76,82 @@ export function createProductionLayoutServices(
     const style = face.style.trim().toLocaleLowerCase('en-US');
     return style === 'normal' || style === 'italic' ? style : null;
   };
-  const loadedFaceWeight = (face: LoadedFontFaceRecord): number | null => {
+  const loadedFaceWeights = (face: LoadedFontFaceRecord): number[] => {
     const weight = face.weight.trim().toLocaleLowerCase('en-US');
-    if (weight === 'normal') return 400;
-    if (weight === 'bold') return 700;
-    if (!/^\d+$/.test(weight)) return null;
-    const numeric = Number(weight);
-    return numeric >= 100 && numeric <= 900 ? numeric : null;
+    if (weight === 'normal') return [400];
+    if (weight === 'bold') return [700];
+    if (/^\d+$/.test(weight)) {
+      const numeric = Number(weight);
+      return numeric >= 100 && numeric <= 900 ? [numeric] : [];
+    }
+    // WML exposes regular/bold tuples. A loaded CSS variable face may cover
+    // both; use the same descriptor rule as the local-face preflight.
+    return [400, 700].filter((tupleWeight) => fontFaceWeightCovers(weight, tupleWeight));
   };
   const loadedFaces = (faces: readonly LoadedFontFaceRecord[]) => faces.flatMap((face) => {
     if (face.status !== 'loaded') return [];
-    const weight = loadedFaceWeight(face);
     const style = loadedFaceStyle(face);
-    return weight == null || style == null ? [] : [{
+    return style == null ? [] : loadedFaceWeights(face).map((weight) => ({
       family: normalizedFaceFamily(face.family),
       displayFamily: displayFaceFamily(face.family),
       weight,
       style,
-    }];
+    }));
   });
-  const successfulEmbedded = new Map(loadedFaces(options.embeddedFaces ?? []).map((loaded) => [
-    `${loaded.family}:${loaded.weight}:${loaded.style}`, loaded,
-  ]));
-  const inventory: FontInventoryFace[] = source.fonts.embeddedFonts.flatMap((font) => {
-    const weight = font.style === 'bold' || font.style === 'boldItalic' ? 700 : 400;
-    const style = font.style === 'italic' || font.style === 'boldItalic' ? 'italic' as const : 'normal' as const;
-    const loaded = successfulEmbedded.get(`${normalizedFaceFamily(font.fontName)}:${weight}:${style}`);
-    return loaded ? [{
-      requestedFamily: font.fontName,
-      resolvedFamily: loaded.displayFamily,
+  const inventory: FontInventoryFace[] = (options.embeddedRoutes ?? []).map((route) => ({
+      requestedFamily: route.requestedFamily,
+      resolvedFamily: route.resolvedFamily,
+      resourceIdentity: route.resourceIdentity,
       source: 'embedded' as const,
-      weight,
-      style,
-    }] : [];
+      weight: route.weight,
+      style: route.style,
+    }));
+  // Caller resources are optional substitutes. An authored embedded face wins
+  // the same tuple even when its loader supplies no numeric metric; do not
+  // overwrite that face's measured/default metrics with caller alias geometry.
+  const embeddedTuples = new Set(inventory.map((face) =>
+    `${normalizedFaceFamily(face.requestedFamily)}:${face.weight}:${face.style}`));
+  const unshadowed = (metrics: Readonly<Record<string, ResolvedFontMetric>> = {}) =>
+    Object.fromEntries(Object.entries(metrics).filter(([key, metric]) =>
+      !metric.sourceIdentity?.startsWith('provided-sfnt:')
+      || !embeddedTuples.has(`${normalizedFaceFamily(metric.requestedFamily ?? key)}:${metric.weight ?? 400}:${metric.style ?? 'normal'}`)));
+  const localMetrics = snapshotFontMetrics(unshadowed(options.localMetrics));
+  const localTuples = new Set(Object.entries(localMetrics).map(([key, metric]) =>
+    `${normalizedFaceFamily(metric.requestedFamily ?? key)}:${metric.weight ?? 400}:${metric.style ?? 'normal'}`));
+  // A document-embedded face and an application-provided exact resource outrank
+  // the library's offline fallback for the same authored tuple.
+  const officeRoutes = (options.officeRoutes ?? []).filter((route) => {
+    const tuple = `${normalizedFaceFamily(route.requestedFamily)}:${route.weight}:${route.style}`;
+    return !embeddedTuples.has(tuple) && !localTuples.has(tuple);
   });
+  const officeMetrics = Object.fromEntries(officeRoutes.flatMap((route) => {
+    if (route.metric.lineHeightRatio == null) return [];
+    const requested = normalizedFaceFamily(route.requestedFamily);
+    const key = route.weight === 400 && route.style === 'normal'
+      ? requested : `${requested}:${route.weight}:${route.style}`;
+    return [[key, route.metric]];
+  }));
+  const fontMetrics = snapshotFontMetrics({
+    ...localMetrics,
+    ...officeMetrics,
+    ...unshadowed(options.fontMetrics),
+  });
+  for (const route of officeRoutes) {
+    inventory.push({
+      requestedFamily: route.requestedFamily,
+      resolvedFamily: route.family,
+      source: route.source,
+      resourceIdentity: route.resourceIdentity,
+      weight: route.weight,
+      style: route.style,
+    });
+  }
   for (const [requestedFamily, metric] of Object.entries(localMetrics)) {
     inventory.push({
       requestedFamily: metric.requestedFamily ?? requestedFamily,
       resolvedFamily: metric.family,
       source: 'local',
+      ...(metric.sourceIdentity === undefined ? {} : { resourceIdentity: metric.sourceIdentity }),
       weight: metric.weight ?? 400,
       style: metric.style ?? 'normal',
     });
@@ -139,8 +189,36 @@ export function createProductionLayoutServices(
     ...(source.fonts.majorFamily ? [source.fonts.majorFamily] : []),
     ...(source.fonts.minorFamily ? [source.fonts.minorFamily] : []),
   ])];
+  // An application-owned @font-face with the authored family is a real Canvas
+  // route, even though the library cannot read its font bytes. Snapshot loaded
+  // tuples at service creation so line layout uses Canvas's own line box rather
+  // than the pinned reference for a different version of the same family.
+  // A face loaded after this snapshot needs a new layout service/pagination.
+  const requestedNames = new Set(routedFontFamilies.map(normalizedFaceFamily));
+  const fontSet = options.fontSet === undefined ? activeFontSet() : options.fontSet;
+  if (fontSet && typeof fontSet[Symbol.iterator] === 'function') {
+    for (const face of fontSet) {
+      if (!requestedNames.has(normalizedFaceFamily(face.family))) continue;
+      for (const loaded of loadedFaces([face])) {
+        inventory.push({
+          requestedFamily: loaded.displayFamily,
+          resolvedFamily: loaded.displayFamily,
+          source: 'css',
+          weight: loaded.weight,
+          style: loaded.style,
+        });
+      }
+    }
+  }
   const text = createTextLayoutService({
     fonts: createFontResolver(inventory, {
+      regionalFamilyLists: Object.fromEntries((['sc', 'tc', 'hk', 'jp', 'kr'] as const).map(region => [
+        region,
+        Object.fromEntries([...new Set([...routedFontFamilies, 'sans-serif', 'serif', 'monospace'])]
+          .map(family => [family, normalizeFontFamilyUncached(
+            family, source.fonts.familyClasses, source.fonts.familyPitches, region,
+          )])),
+      ])),
       nativeFamilyLists: Object.fromEntries(routedFontFamilies.map((family) => [
         family,
         normalizeFontFamilyUncached(
@@ -150,7 +228,8 @@ export function createProductionLayoutServices(
         ),
       ])),
     }),
-    localMetrics,
+    cjkFallback: options.cjkFallback,
+    fontMetrics,
     eastAsiaFontCharsets: fontFamilyCharsets,
     genericFamilies: Object.fromEntries(routedFontFamilies.map((family) => [
       family,

@@ -1,35 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
-  applyLinearTintOrShade,
   isObservedAutomaticSurfaceCamera,
-  legacyPattern2Color,
   surfaceMaterialFactor,
   surfacePerspectiveTangentGain,
 } from './material-color.js';
 import { automaticSurfaceMajorUnit } from './axis-scale.js';
-
-const ACCENTS = ['156082', 'E97132', '196B24', '0F9ED5', 'A02B93', '4EA72E'];
-
-describe('legacy Pattern 2 generated colours', () => {
-  it('matches the shared parser linear-sRGB transform parity fixtures', () => {
-    expect(applyLinearTintOrShade('#156082', -0.35)).toBe('#0F4E6A');
-    expect(applyLinearTintOrShade('#156082', 0)).toBe('#156082');
-    expect(applyLinearTintOrShade('#156082', 0.35)).toBe('#A1AFBB');
-  });
-  it('keeps a partial first set at the base accents', () => {
-    expect(Array.from({ length: 4 }, (_, index) =>
-      legacyPattern2Color(ACCENTS, index, 4, 2)))
-      .toEqual(['#156082', '#E97132', '#196B24', '#0F9ED5']);
-  });
-
-  it('uses the registered six-object shade and tints the trailing seventh object', () => {
-    expect(Array.from({ length: 7 }, (_, index) =>
-      legacyPattern2Color(ACCENTS, index, 7, 2)))
-      .toEqual([
-        '#115473', '#CF642B', '#155E1F', '#0C8CBD', '#8E2582', '#449428', '#869AAA',
-      ]);
-  });
-});
 
 describe('surface automatic material', () => {
   it('is winding-invariant and bounded to the surface compatibility range', () => {

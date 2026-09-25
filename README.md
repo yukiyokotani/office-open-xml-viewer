@@ -174,14 +174,18 @@ await sheet.load('/report.dat', { format: 'delimited-text', delimiter: '|' });
 
 OMML equations (`m:oMath` / `m:oMathPara`) in `.docx`, `.pptx` and `.xlsx` are rendered with
 [MathJax](https://www.mathjax.org/) + [STIX Two Math](https://github.com/stipub/stixfonts).
-That engine is ~3 MB, so it is **opt-in**: import the `math` engine from the separate
+That engine is ~4 MB, so it is **opt-in**: import the `math` engine from the separate
 `@silurus/ooxml/math` entry and pass it to the viewer. Pass it and equations render;
 omit it and the engine asset is not fetched or evaluated (equations are simply skipped;
-the on-demand render-worker asset retains a small loader). When you *do* pass it, the ~3 MB engine ships
+the on-demand render-worker asset retains a small loader). When you *do* pass it, the ~4 MB engine ships
 as a **standalone asset file** next to the bundle rather than an inline data URL, and is
 fetched **on demand — only the first time a document actually contains an equation**, so
 equation-free documents never pay for it. It is fully self-contained: served from your own
 origin, no cross-origin requests.
+
+Accented Latin letters use STIX Two Math paths in normal, italic, bold and bold-italic
+equations. Less common Cyrillic, phonetic and dingbat characters use a system-font
+fallback, so their appearance can vary by platform.
 
 ```typescript
 import { DocxViewer } from '@silurus/ooxml/docx';
@@ -592,16 +596,65 @@ page count, or completion state changes), `onVisibleSlideChange` (fires when the
 top-most visible slide or PPTX completion state changes; its slide count is
 final from first paint), and `onError` (async per-page render failures are routed
 here instead of crashing the scroll loop). The parse/render knobs from the
-headless engines (`mode`, `useGoogleFonts`, `resourceLimits`, the deprecated
+headless engines (`mode`, `useGoogleFonts`, `cjkFallback`, `resourceLimits`, the deprecated
 `maxZipEntryBytes` alias, `math`, `dpr`) are accepted too.
+
+### CJK fallback region
+
+All document engines and viewers accept `cjkFallback: 'auto' | 'sc' | 'tc' | 'hk' | 'jp' | 'kr'`.
+The same Unicode Han character can have different regional glyph shapes. This
+option chooses which regional fallback family is tried first when Han text
+reaches font fallback and the document has not already identified a region. It
+does not replace the document's requested font.
+
+```ts
+const viewer = new DocxViewer(canvas, { cjkFallback: 'sc' });
+```
+
+Omitting the option is equivalent to `'auto'`: at load time, resolve the first
+usable CJK language from `<html lang>`, then `navigator.languages` in order,
+then `navigator.language`. If none is available, use `'jp'`. For Chinese,
+explicit Hans/Hant maps to SC/TC and takes precedence over region; without an
+explicit script, HK/MO maps to HK and TW maps to TC. Bare `zh` maps to SC.
+Japanese and Korean map to JP and KR.
+The resolved preference is shared with workers and remains fixed for that load.
+
+The requested font remains first. Recognized regional CJK font names, an East
+Asian run language where the format provides one, and unambiguous Kana or
+Hangul can determine the region before `cjkFallback` is consulted. Text without
+Han keeps its existing font route. For example, `cjkFallback: 'sc'` selects SC
+for otherwise unqualified Han text, but a Meiryo run or text containing Kana
+continues to select JP.
+
+No migration is required. Set an explicit region when the fallback choice must
+not depend on the browser locale, server, or Node host. This makes the regional
+choice deterministic; it does not by itself guarantee pixel-identical output
+across machines because the available fonts still matter. `cjkFallback` does
+not download fonts. Use `useGoogleFonts: true` or provide local/self-hosted
+fallback fonts when the same fallback faces must be available everywhere.
+
+HK retains the existing sans-only webfont support. This option covers document
+text, spreadsheet cells/shapes, and slide text; embedded chart and equation
+renderers retain their own font policies. XLSX automatic script inference uses
+the shared-string table; inline cell strings and shape text do not contribute
+to that workbook-level inference.
 
 ### Markdown export
 
-Every headless engine can project its document to GitHub-flavoured markdown for
-LLM ingestion, full-text search, or diffing — headings, lists, tables, and (for
-docx) footnotes / comments are preserved; layout, fonts, and positioning are
-dropped. The projection is compiled into the parser WASM you already ship, so it
-adds **zero** bundle weight. `toMarkdown()` works in both `mode: 'main'` and
+Every headless engine can produce a best-effort, text-focused GitHub-flavoured
+markdown projection for LLM ingestion, full-text search, or diffing. Explicit
+headings, lists, and tables are preserved where available, but visual layout,
+fonts, positioning, and inferred relationships between shapes are intentionally
+dropped. Treat the result as full-text extraction, not an authoritative semantic
+or reading-order representation.
+
+Review comments are kept out of the document body and collected in a final
+`## Review comments` appendix. Comment text is quoted, replies use nested quotes,
+and only reliable locations (such as a slide number or worksheet cell) are
+reported. Speaker notes remain separate from review comments.
+
+The projection is compiled into each format's existing parser WASM; there is no
+separate markdown WASM to load. `toMarkdown()` works in both `mode: 'main'` and
 `mode: 'worker'` (it runs off the archive opened at `load()`):
 
 ```typescript
@@ -612,8 +665,8 @@ const md = await doc.toMarkdown();
 ```
 
 `PptxPresentation.toMarkdown()` (title slides → `#` headings, body → nested
-bullets, notes / comments collated) and `XlsxWorkbook.toMarkdown()` (each sheet →
-a `## SheetName` pipe table) are the twins.
+bullets, speaker notes kept with their slide) and `XlsxWorkbook.toMarkdown()`
+(each sheet → a `## SheetName` pipe table) are the twins.
 
 The repository also contains a low-level adapter and CLI for workspace tooling.
 They are internal implementation utilities, not separately published packages;
@@ -938,7 +991,7 @@ file without uploading it.
 - **[`packages/markdown/`](packages/markdown/)** — internal workspace adapter and `ooxml-md` development CLI for the same GitHub-flavoured Markdown projection exposed by each format model's `toMarkdown()` method.
 - **[`packages/node/`](packages/node/)** — the implementation behind the public Node-only `@silurus/ooxml/node` subpath. Its canonical APIs are the explicitly owned, bounded `openPptxPresentation`, `openDocxDocument`, and `openXlsxWorkbook` sessions. Async `materializePptxPresentation`, `materializeDocxDocument`, `materializeXlsxWorkbookIndex`, `materializeXlsxWorksheet`, and `materializeXlsxWorkbook` are provided when a complete caller-owned graph is actually needed. Each `open*` call returns an explicit, idempotent `close()`-able session; PPTX streams `slides()`, DOCX completes format-required sequential pagination before streaming `pages()`, and XLSX parses its workbook index once before sequential `worksheetRows(sheetIndex)` streams reuse the retained archive. Useful for CI checks and headless rendering pipelines; canvas rendering accepts a user-supplied backend such as `skia-canvas` without making it a runtime dependency.
   See the [0.75 to 0.76 migration guide](docs/migration-0.76.md) for every removed synchronous helper and its replacement.
-- **[`packages/vscode-extension/`](packages/vscode-extension/)** — VS Code extension (`ooxml-viewer`) that registers `CustomEditorProvider`s for `.docx`, `.xlsx`, and `.pptx`, and (opt-in) auto-installs and registers the `ooxml-mcp-server` for GitHub Copilot Chat in Agent mode, including active Viewer selection. Claude Code and Codex can configure the same binary separately for path-based file tools, but do not receive the active selection bridge. The preview is offline by default; an opt-in `ooxmlViewer.useGoogleFonts` setting (off, and force-disabled in untrusted workspaces) surfaces the library's metric-compatible font substitution, widening the webview CSP to the Google Fonts CDN only while enabled.
+- **[`packages/vscode-extension/`](packages/vscode-extension/)** — VS Code extension (`ooxml-viewer`) that registers `CustomEditorProvider`s for `.docx`, `.xlsx`, and `.pptx`, and (opt-in) auto-installs and registers the `ooxml-mcp-server` for GitHub Copilot Chat in Agent mode, including active Viewer selection. Claude Code and Codex can configure the same binary separately for path-based file tools, but do not receive the active selection bridge. The preview is offline by default; an opt-in `ooxmlViewer.useGoogleFonts` setting (off, and force-disabled in untrusted workspaces) loads optional webfont substitutes and script fallbacks, widening the webview CSP to the Google Fonts CDN only while enabled.
 - **[`packages/mcp-server/`](packages/mcp-server/)** — Rust MCP server (`ooxml-mcp-server`) exposing the parsers as tools for AI agents (Claude, Copilot, Codex, etc.). Provides structured queries (`docx_get_structure`, `xlsx_get_cell_range`, `pptx_get_slide_structure`, …) so agents can inspect OOXML files without shelling out to `unzip`. Prebuilt binaries are attached to each [GitHub Release](https://github.com/yukiyokotani/office-open-xml-viewer/releases) for macOS / Linux / Windows; the VS Code extension downloads them on demand.
 
 ---
@@ -982,6 +1035,27 @@ Viewer APIs report failures from awaitable operations by rejecting the returned
 Promise. This includes `viewer.load()` parsing and its initial render, whether
 or not the Viewer has an `onError(error)` callback. A failure is never delivered
 through both channels.
+
+All three formats use a module Web Worker for parsing, including the default
+`mode: 'main'`; the mode selects where rendering runs, not whether parsing uses
+a Worker. The supported browser setup requires a page with a normal,
+non-opaque origin where Worker loading is permitted. An iframe with
+`sandbox="allow-scripts"` but no `allow-same-origin` has an opaque origin. Worker
+loading may fail there depending on the browser and Worker script, so this
+embedding setup is not supported even if it happens to work in one browser.
+There is no classic-Worker or no-Worker fallback for this configuration.
+
+For a regular iframe, omit `sandbox`. To retain sandbox restrictions, serve
+the viewer page from a dedicated origin distinct from the parent and use, for
+example,
+`<iframe sandbox="allow-scripts allow-same-origin" src="https://viewer.example.net/viewer.html"></iframe>`.
+Here `allow-same-origin` retains the **iframe page's** origin; it does not give
+the iframe the parent's origin. This separate-origin setup requires a `src`
+URL; `srcdoc` inherits the parent's origin when origin sandboxing is disabled.
+If module scripts or other resources are fetched across origins, configure
+CORS as required; the page's CSP must also allow its module Worker and required
+assets. The Worker error message includes an opaque-origin hint when the
+browser gives no detail, but it cannot identify every Worker failure.
 
 Use `onError` for later Viewer-managed work that has no directly awaitable
 result, such as virtualized scroll-view rendering or embedded-media playback.
@@ -1109,7 +1183,7 @@ try {
   The package counters and raster-image guards are deterministic admission limits, not exact JavaScript/WASM process-memory accounting. XML trees, document models, canvas backing stores, browser decoder overhead, renderer state, and browser-managed SVG/vector parse or decoded storage can still require several times the measured input. SVG has no portable decoded-byte measure or explicit browser release primitive; the library count-bounds its cache and revokes owned object URLs, but cannot charge it as RGBA bytes. The defaults therefore reduce risk but cannot promise that an OOM is impossible on every device. Running parse and render work in `mode: 'worker'` can contain many failures away from the main UI thread, but a Worker is not a separate operating-system process or a strict memory sandbox.
 
   A measured limit crossing is reported as `OoxmlResourceLimitError`. A residual WASM failure that reaches a recognized trap-shaped boundary is reported conservatively as `parser-crashed`, not `parser-oom`: with the current aborting Rust/WASM boundary, panic, allocation failure, explicit `unreachable`, and stack overflow can lose their distinct causes and converge on the same generic runtime error. Inferring OOM from an exception class or message would misclassify some parser defects as large-file failures. Reliable OOM classification would require preserving a structured cause before the trap across every relevant allocation path; it cannot be recovered from the generic trap afterward. The WebAssembly JavaScript embedding also permits implementation-defined stack/OOM failures, including an indistinguishable plain `Error` or process termination, so converting and poisoning every engine-level failure cannot be guaranteed.
-- **No network by default.** The library does not send telemetry or analytics, and does not contact third-party services unless you ask it to. In particular, theme webfonts, Office font metric substitutes (Carlito/Caladea), and the script fallback fonts are **not** loaded from Google Fonts unless you pass `useGoogleFonts: true` to the relevant `Viewer` / `load(...)` options — supported uniformly by `DocxViewer`, `PptxViewer`, `XlsxViewer`, and `XlsxSheetViewer`. When enabled, fonts for non-Latin scripts are supplied on demand from Noto families so text does not fall back to tofu: Arabic (Noto Naskh/Sans Arabic), CJK (Noto Sans/Serif KR · SC · TC · JP, picked per document language so shared Han glyphs take the right shapes), Cyrillic (Noto Sans/Serif), Hebrew (Noto Sans/Serif Hebrew, RTL), Thai (Noto Sans Thai) and Devanagari (Noto Sans Devanagari). No font binaries ship in the bundle. Enabling this option causes the end-user's browser to send an HTTP request (IP and User-Agent) to `fonts.googleapis.com`, which may have GDPR implications for your application — consider self-hosting the required fonts via `@font-face` instead.
+- **No network by default.** The library does not send telemetry or analytics, and does not contact third-party services unless you ask it to. In particular, theme webfonts, Office font metric substitutes (Carlito/Caladea), and the script fallback fonts are **not** loaded from Google Fonts unless you pass `useGoogleFonts: true` to the relevant `Viewer` / `load(...)` options — supported uniformly by `DocxViewer`, `PptxViewer`, `XlsxViewer`, and `XlsxSheetViewer`. When enabled, fonts for non-Latin scripts are supplied on demand from Noto families so text does not fall back to tofu: Arabic (Noto Naskh/Sans Arabic), CJK (Noto Sans/Serif KR · SC · TC · JP, plus Noto Sans HK, picked per document language so shared Han glyphs take the right shapes), Cyrillic (Noto Sans/Serif), Hebrew (Noto Sans/Serif Hebrew, RTL), Thai (Noto Sans Thai) and Devanagari (Noto Sans Devanagari). No font binaries ship in the bundle. This sends the end-user's IP and User-Agent to `fonts.googleapis.com`, which may have GDPR implications.
 - **XML parsing.** Uses `roxmltree`, which does not resolve external entities (XXE-safe by default).
 - **Encrypted OOXML ([MS-OFFCRYPTO] Agile Encryption).** Password-protected `.docx` / `.xlsx` / `.pptx` files are OLE2/CFB containers, not ZIPs. Pass `password` to `load(...)` and the file is decrypted **client-side** via WebCrypto — no bytes and no password leave the browser:
   ```ts
@@ -1132,7 +1206,7 @@ tarball) for the full list and license texts. Highlights:
   (Apache License 2.0) — the equation-rendering engine behind the
   opt-in `@silurus/ooxml/math` entry described in
   [Rendering equations](#rendering-equations). It ships in the tarball as
-  a standalone ~3 MB asset but is never loaded by a consuming app unless
+  a standalone ~4 MB asset but is never loaded by a consuming app unless
   that app imports `@silurus/ooxml/math` and the viewer is handed a
   document that actually contains an equation.
 - **Rust crate dependencies** of the WASM parsers (docx/pptx/xlsx) — all

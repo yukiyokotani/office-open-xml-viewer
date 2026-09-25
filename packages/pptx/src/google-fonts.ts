@@ -1,9 +1,13 @@
+import type { CjkLang } from '@silurus/ooxml-core';
 import {
   classifyCjkFont,
+  cjkFallbackForText,
+  scriptPreloadNamesForText,
   GOOGLE_FONT_SUBSTITUTES,
   SCRIPT_GOOGLE_FONTS,
   type FontPreloadEntry,
   type TextBody,
+  type OfficeFontFallbackRequest,
 } from '@silurus/ooxml-core';
 import { ScriptPreloadAccumulator } from '@silurus/ooxml-core/internal/script-preload-accumulator';
 import type { Presentation, Slide, SlideElement } from './types';
@@ -11,15 +15,16 @@ import type { Presentation, Slide, SlideElement } from './types';
 /** Theme-referenced typefaces commonly used by PPTX templates. Keys are
  *  lower-cased family names.
  *
- *  {@link GOOGLE_FONT_SUBSTITUTES} supplies the Office substitutes (Calibri /
- *  Calibri Light → Carlito, Cambria / Cambria Math → Caladea), the popular free
+ *  {@link GOOGLE_FONT_SUBSTITUTES} supplies base text-face substitutes
+ *  (Calibri → Carlito, Cambria → Caladea), the popular free
  *  web fonts and the Arabic Noto fallbacks — shared with docx/xlsx; the
  *  renderer puts each substitute into the canvas font stack so a missing Office
- *  font degrades to a same-width webfont instead of a wider system serif/sans.
+ *  font degrades to an advance-width alternative instead of a generic system serif/sans.
  *  {@link SCRIPT_GOOGLE_FONTS} adds the CJK / Cyrillic / Thai / Devanagari /
  *  Hebrew Noto faces (CJK ordered by document language). Both load only when
- *  `useGoogleFonts` is on — no binaries ship in the bundle. PPTX currently has
- *  no format-specific additions. */
+ *  `useGoogleFonts` is on. The exact local Calibri route is applied only to
+ *  named font choices; the CSS alias for an unavailable face is likewise
+ *  enabled only by that explicit opt-in. PPTX has no format-specific additions. */
 export const PPTX_GOOGLE_FONTS: Record<string, FontPreloadEntry> = {
   ...GOOGLE_FONT_SUBSTITUTES,
   ...SCRIPT_GOOGLE_FONTS,
@@ -76,8 +81,10 @@ export class PptxFontPreloadAccumulator {
     private readonly minorFont: string | null,
     scripts?: ScriptPreloadAccumulator,
     families?: Set<string>,
+    private readonly fallback?: CjkLang,
+    private readonly scriptNames = new Set<string>(),
   ) {
-    const cjkLang = classifyCjkFont(majorFont) ?? classifyCjkFont(minorFont) ?? null;
+    const cjkLang = classifyCjkFont(majorFont) ?? classifyCjkFont(minorFont) ?? fallback ?? null;
     this.scripts = scripts ?? new ScriptPreloadAccumulator(cjkLang);
     this.families = families ?? new Set();
     if (majorFont) this.families.add(majorFont);
@@ -86,6 +93,12 @@ export class PptxFontPreloadAccumulator {
 
   addSlide(slide: Slide): void {
     this.scripts.addText(pptxSlideTextRuns(slide));
+    // Keep the union of per-slide choices: later kana must not remove a Han-only
+    // slide's SC preload after that slide has already been published.
+    for (const name of scriptPreloadNamesForText(pptxSlideTextRuns(slide),
+      classifyCjkFont(this.majorFont) ?? classifyCjkFont(this.minorFont) ?? this.fallback ?? null)) {
+      this.scriptNames.add(name);
+    }
     for (const el of slide.elements as SlideElement[]) {
       if (el.type === 'shape') {
         for (const family of textBodyFontFamilies(el.textBody)) this.families.add(family);
@@ -100,7 +113,7 @@ export class PptxFontPreloadAccumulator {
   }
 
   names(): (string | null)[] {
-    return [...this.families, ...this.scripts.names()];
+    return [...new Set([...this.families, ...this.scripts.names(), ...this.scriptNames])];
   }
 
   withSlide(slide: Slide): PptxFontPreloadAccumulator {
@@ -109,6 +122,8 @@ export class PptxFontPreloadAccumulator {
       this.minorFont,
       this.scripts.clone(),
       new Set(this.families),
+      this.fallback,
+      new Set(this.scriptNames),
     );
     candidate.addSlide(slide);
     return candidate;
@@ -130,11 +145,74 @@ export class PptxFontPreloadAccumulator {
  */
 export function pptxFontPreloadNames(
   pres: Presentation,
+  fallback?: CjkLang,
 ): (string | null | undefined)[] {
   const accumulator = new PptxFontPreloadAccumulator(
     pres.majorFont,
     pres.minorFont,
+    undefined, undefined, fallback,
   );
   for (const slide of pres.slides) accumulator.addSlide(slide);
   return accumulator.names();
+}
+
+/** Calibri tuples actually painted by this slide. DrawingML run properties
+ * inherit through paragraph/body defaults (§21.1.2.3.9); theme tokens resolve
+ * against the same major/minor values used by the renderer. Loading is delayed
+ * until the slide is requested, so unused slides and styles fetch no assets. */
+export function pptxSlideOfficeFontRequests(
+  slide: Slide,
+  majorFont: string | null,
+  minorFont: string | null,
+): OfficeFontFallbackRequest[] {
+  const requests = new Map<string, OfficeFontFallbackRequest>();
+  const resolved = (family: string | null | undefined): string | null => {
+    // A missing family has no authored or inherited font resource. The theme
+    // minor face is the renderer's CSS fallback, but it must not be treated as
+    // a document request for an exact Office face. Explicit +mn-* still is.
+    if (!family) return null;
+    if (family.startsWith('+mn-')) return minorFont;
+    if (family.startsWith('+mj-')) return majorFont;
+    return family.split(',')[0]?.trim() ?? null;
+  };
+  const add = (family: string | null | undefined, bold: boolean, italic: boolean) => {
+    if (resolved(family)?.toLowerCase() !== 'calibri') return;
+    const weight = bold ? 700 : 400;
+    const style = italic ? 'italic' : 'normal';
+    requests.set(`${weight}:${style}`, { family: 'Calibri', weight, style });
+  };
+  const body = (textBody: TextBody | null | undefined) => {
+    for (const paragraph of textBody?.paragraphs ?? []) {
+      for (const run of paragraph.runs) {
+        if (run.type !== 'text') continue;
+        const bold = run.bold ?? paragraph.defBold ?? textBody?.defaultBold ?? false;
+        const italic = run.italic ?? paragraph.defItalic ?? textBody?.defaultItalic ?? false;
+        add(run.fontFamily ?? paragraph.defFontFamily, bold, italic);
+        if (run.fontFamilyEa) add(run.fontFamilyEa, bold, italic);
+        if (run.fontFamilySym) add(run.fontFamilySym, bold, italic);
+      }
+      if (paragraph.bullet.type === 'char' || paragraph.bullet.type === 'autoNum') {
+        // The marker renderer uses normal weight/style for both bullet kinds.
+        // autoNum inherits the first text run's family when buFont is absent.
+        const firstRun = paragraph.runs.find((run) => run.type === 'text' && !!run.fontFamily);
+        const firstRunFamily = firstRun?.type === 'text' ? firstRun.fontFamily : null;
+        add(paragraph.bullet.fontFamily ?? (paragraph.bullet.type === 'autoNum'
+          ? firstRunFamily ?? paragraph.defFontFamily
+          : undefined), false, false);
+      }
+    }
+  };
+  for (const element of slide.elements) {
+    if (element.type === 'shape') body(element.textBody);
+    if (element.type === 'table') {
+      for (const row of element.rows) for (const cell of row.cells) body(cell.textBody);
+    }
+  }
+  return [...requests.values()];
+}
+
+
+export function pptxSlideCjkFallback(slide: Slide, major: string | null, minor: string | null, fallback: CjkLang): CjkLang {
+  return cjkFallbackForText(pptxSlideTextRuns(slide),
+    classifyCjkFont(major) ?? classifyCjkFont(minor) ?? fallback);
 }

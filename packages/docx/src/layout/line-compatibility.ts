@@ -1,13 +1,38 @@
 import { defineCompatibilityRule } from './compatibility.js';
+import { OFFICE_FAR_EAST_SINGLE_LINE_FACTOR, officeOpenTypeAutoLineRatios } from '@silurus/ooxml-core/internal/office-auto-line';
 import type { LineSpacing, TabStop } from '../types.js';
+
+export const WORD_OPENTYPE_FEATURES_COMPAT_KERNING = defineCompatibilityRule({
+  id: 'word-opentype-features-compat-kerning',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/run-char-metrics-render.test.ts#enables absent-threshold kerning only under enableOpenTypeFeatures',
+  },
+  description: '[MS-DOCX] §2.3.3 stores enableOpenTypeFeatures as a named compatibility setting. When enabled, an unqualified run enables OpenType kerning; an explicit or style-resolved w:kern threshold remains authoritative. Both line measurement and paint use the same resolved threshold.',
+});
+
+export const WORD_NUMBERING_MARKER_FIRST_LINE_UNION = defineCompatibilityRule({
+  id: 'word-numbering-marker-first-line-union',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'numbering-marker-font-size-line-box-matrix',
+    application: 'Microsoft Word',
+    version: '16.113.2',
+    platform: 'macOS 27.0',
+  },
+  description: 'In a non-grid paragraph with 1.15 automatic spacing, a text marker participates in the first-line ascent/descent union. Relative to a marker-free control, 8, 14, and 20 pt markers added 0, 1.68, and 7.68 pt to the line advance; changing the marker alone shifted subsequent paragraph baselines by the same amount. Added automatic leading follows the body text single-line height rather than scaling the taller marker box. Exact spacing, grids, ruby, wrapping floats, picture markers, and continuation lines are outside the measured scope.',
+});
 
 export const WORD_EAST_ASIAN_GRID_LINE_ALLOCATION = defineCompatibilityRule({
   id: 'word-east-asian-grid-line-allocation',
   evidence: {
-    kind: 'regression-test',
-    reference: 'packages/docx/src/layout/compatibility.test.ts#pins East Asian grid allocation and the untabled Far East metric factor',
+    kind: 'office-observation',
+    syntheticFixtureId: 'word-font-metrics-resource-matrix',
+    application: 'Microsoft Word',
+    version: '16.111.1',
+    platform: 'macOS 26.5.2',
   },
-  description: 'For an East Asian single-spaced line on a document grid, preserve the measured whole-cell allocation from the intended face design height and use the established 1.3-times-em fallback only when that design height is unavailable.',
+  description: 'Across eight East-Asian resources, six sizes, and no-grid/grid/useFELayout variants, Word allocated grid cells from the selected face line height, rounding up to whole pitches. A later controlled font-table intervention found that OS/2 code-page bits 17–20, rather than cmap/script alone, select the 1.3-times-hhea line box in Word for Mac. The grid-cell rule takes the resulting height as input; it does not itself classify the face. Mixed rFonts slots also prevent a family-wide Latin override.',
 });
 
 export const WORD_TABLE_CELL_IGNORES_GRID_RIGHT_INDENT_ADJUSTMENT = defineCompatibilityRule({
@@ -259,7 +284,19 @@ export const WORD_OVERFLOW_PUNCTUATION_LANGUAGE_SETS = defineCompatibilityRule({
     kind: 'microsoft-note',
     reference: '[MS-OE376] §2.1.56',
   },
-  description: 'Apply the language-specific punctuation sets documented for Word in [MS-OE376] §2.1.56, and let overflowPunct override kinsoku when both rules affect the same character.',
+  description: 'Apply the language-specific punctuation sets documented for Word in [MS-OE376] §2.1.56 to Chinese, Japanese, and Korean language runs, and let overflowPunct override kinsoku when both rules affect the same character. When an effective East Asian language is absent, content that actually selects the East Asian script path retains the union as a bounded fallback.',
+});
+
+export const WORD_OVERFLOW_PUNCTUATION_LATIN_PARENT_RUN = defineCompatibilityRule({
+  id: 'word-overflow-punctuation-latin-parent-run',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'latin-ascii-punctuation-advance-boundary-matrix',
+    application: 'Microsoft Word',
+    version: '16.111.1',
+    platform: 'macOS 26.5.2',
+  },
+  description: 'Although [MS-OE376] §2.1.56 presents concrete punctuation sets by CJK language, Office-produced Latin boundary controls admit `.` and `,` beyond the ordinary word-fit extent. Controls at 9 and 14 points in Calibri and Arial instead wrap `)` and `}` with the word at the measured advance boundary; 10-point controls also wrap `!`, `%`, `:`, `;`, `>`, `?`, and `]`. Complex-script segments with no explicit RTL-primary bidi language retain their separate observed fallback; an explicit `ar-SA` bidi language is its counterexample.',
 });
 
 export const WORD_FULL_WIDTH_CHARACTER_SPACING_SCOPE = defineCompatibilityRule({
@@ -307,18 +344,6 @@ export const WORD_SOURCE_RUN_SPACE_SEQUENCE = defineCompatibilityRule({
   description: 'At a source-run boundary, Word keeps a space-only continuation attached when the preceding run already ends in a space. A single leading space in a distinct run without a preceding space remains a break opportunity. This isolates source-boundary compatibility from the ordinary UAX #14 LB7 handling within one authored run.',
 });
 
-export const WORD_CONSECUTIVE_SPACE_NATURAL_ADVANCE = defineCompatibilityRule({
-  id: 'word-consecutive-space-natural-advance',
-  evidence: {
-    kind: 'office-observation',
-    syntheticFixtureId: 'consecutive-space-wrap-grid-matrix',
-    application: 'Microsoft Word',
-    version: '16.111.1',
-    platform: 'macOS 26.5.2',
-  },
-  description: 'When visible text follows two or more authored consecutive spaces, Word preserves the sequence at natural advance instead of using it as Knuth-Plass inter-word shrink capacity. The result is invariant across linesAndChars with negative/zero charSpace and a line-only grid; source-run boundaries remain governed separately by the source-space-sequence rule.',
-});
-
 export const WORD_BALANCED_CONSECUTIVE_SPACE_CELL = defineCompatibilityRule({
   id: 'word-balanced-consecutive-space-cell',
   evidence: {
@@ -356,6 +381,18 @@ export const WORD_BALANCED_LINES_AND_CHARS_GRID_DELTA = defineCompatibilityRule(
     platform: 'macOS 26.5.2',
   },
   description: 'With balanceSingleByteDoubleByteWidth enabled on linesAndChars, Word applies half of the authored charSpace delta to ASCII SBCS text and to U+0020/U+3000 space characters, while applying the full delta to CJK ideographs and full-width ASCII forms. The Word-output evidence covers ASCII digits, letters, punctuation, spaces, CJK, full-width ASCII, mixed text, proportional/fixed-pitch faces, negative/zero/positive charSpace, and line-only controls. Non-ASCII high-ANSI and complex-script text are outside the observed matrix and retain the preexisting grid behavior.',
+});
+
+export const WORD_LATIN_INTERWORD_XAVG_FLOOR = defineCompatibilityRule({
+  id: 'word-latin-interword-xavg-floor',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'latin-space-os2-xavg-one-twip-matrix',
+    application: 'Microsoft Word',
+    version: '16.111.1',
+    platform: 'macOS 26.5.2',
+  },
+  description: 'For left-aligned homogeneous Latin words using one U+0020 separator and characterSpacingControl=compressPunctuation, Word reduces each natural inter-word space only as far as half the selected static face\'s positive OS/2 xAvgCharWidth. First-fit and beta-origin controls varied only U+0020 hmtx, then only xAvg, with fixed outlines and non-space advances at 8/11/16pt; a distinct Carlito outline provided a counterexample where natural U+0020 was narrower than the floor. Two-gap controls showed equal required-deficit allocation. A one-twip linesAndChars control preserved the xAvg-dependent deficit while moving both control and natural boundaries by the separate character-grid pitch. [MS-OE376] §2.1.472 documents lineWrapLikeWord6 as an explicit uncompressed-fit override. Mixed faces, explicit run spacing or scaling, justification, and snapToChars remain outside the observed scope.',
 });
 
 export const WORD_IDEOGRAPHIC_SPACE_LINE_END_ALLOWANCE = defineCompatibilityRule({
@@ -399,18 +436,6 @@ export function wordBalancedLinesAndCharsGridDeltaFactor(
     ? 0.5
     : undefined;
 }
-
-export const WORD_MS_MINCHO_EMPTY_EAST_ASIAN_MARK_HEIGHT = defineCompatibilityRule({
-  id: 'word-ms-mincho-empty-east-asian-mark-height',
-  evidence: {
-    kind: 'office-observation',
-    syntheticFixtureId: 'ms-mincho-empty-east-asian-paragraph-mark',
-    application: 'Microsoft Word',
-    version: '16.111.1',
-    platform: 'macOS 26.5.2',
-  },
-  description: 'In the observed compatibility fixture, an empty 12-point East-Asian paragraph mark routed to MS Mincho occupies a 15.6-point single-line box. Scope this 1.3-em floor to empty East-Asian paragraph marks; ordinary MS Mincho text lines and Latin marks retain their independently measured metrics.',
-});
 
 /** Compatibility projection governed by
  * {@link WORD_JAPANESE_PUNCTUATION_COMPRESSION_CELL}. */
@@ -460,12 +485,21 @@ const ALL_WORD_OVERFLOW_PUNCTUATION = new Set([
   ...WORD_OVERFLOW_PUNCTUATION.zhHant,
   ...WORD_OVERFLOW_PUNCTUATION.ko,
 ]);
+const LATIN_WORD_OVERFLOW_PUNCTUATION = new Set(['.', ',']);
+
+export const RTL_PRIMARY_SUBTAGS = new Set([
+  'ar', 'fa', 'ur', 'he', 'iw', 'yi', 'ji', 'ps', 'sd', 'ug', 'dv', 'syr', 'ckb',
+]);
 
 /** Compatibility projection governed by
  * {@link WORD_OVERFLOW_PUNCTUATION_LANGUAGE_SETS}. */
 export function wordIsOverflowPunctuation(
   character: string,
   language: string | undefined,
+  parentRunHasEastAsianText = false,
+  parentRunHasLatinText = false,
+  parentRunHasComplexScriptText = false,
+  bidiLanguage?: string,
 ): boolean {
   const normalized = language?.toLowerCase();
   if (normalized?.startsWith('ja')) return WORD_OVERFLOW_PUNCTUATION.ja.has(character);
@@ -475,7 +509,22 @@ export function wordIsOverflowPunctuation(
       ? WORD_OVERFLOW_PUNCTUATION.zhHant
       : WORD_OVERFLOW_PUNCTUATION.zhHans).has(character);
   }
-  return ALL_WORD_OVERFLOW_PUNCTUATION.has(character);
+  // ECMA-376 §17.3.1.21 is script-neutral. Although [MS-OE376] §2.1.56
+  // describes Word's concrete sets as CJK-language behavior, Office-produced
+  // boundary controls hang `.` and `,` in Latin parent runs; 9/14pt Calibri
+  // and Arial counterexamples wrap `)` and `}` at the normal measured advance
+  // boundary. Complex-script production controls with an absent bidi tag
+  // hang `.`, `:`, `)` and `>`; an explicit RTL-primary tag such as
+  // `ar-SA` is the counterexample. A CJK run carrying an inherited
+  // non-CJK language also uses the union, because its actual script route is
+  // more authoritative than that inherited language.
+  const bidiPrimary = bidiLanguage?.split('-')[0].toLowerCase();
+  const explicitRtlBidi = bidiPrimary != null && RTL_PRIMARY_SUBTAGS.has(bidiPrimary);
+  const observedComplexFallback = parentRunHasComplexScriptText && !explicitRtlBidi;
+  if (parentRunHasEastAsianText || observedComplexFallback) {
+    return ALL_WORD_OVERFLOW_PUNCTUATION.has(character);
+  }
+  return parentRunHasLatinText && LATIN_WORD_OVERFLOW_PUNCTUATION.has(character);
 }
 
 /** Compatibility projection governed by {@link WORD_JUSTIFIED_CANDIDATE_SEPARATOR_FIT}. */
@@ -488,15 +537,6 @@ export function wordCandidateFitWidthPx(input: Readonly<{
   return input.lineWillJustify && input.wrapNarrowed !== true
     ? input.widthPx
     : input.widthPx - input.trailingSpacePx;
-}
-
-/** A calibrated same-route allowance cannot be projected across a line whose
- * characters resolve to different measurement routes. */
-export function wordJustifiedCandidateFitAllowancePx(input: Readonly<{
-  biasBudgetPx: number;
-  resolvedMeasurementRouteCount: number;
-}>): number {
-  return input.resolvedMeasurementRouteCount === 1 ? input.biasBudgetPx : 0;
 }
 
 export const WORD_RUBY_PARAGRAPH_UNIFORM_LINE_ADVANCE = defineCompatibilityRule({
@@ -591,15 +631,6 @@ export const WORD_TAB_STOP_PAGE_EDGE_CLAMP = defineCompatibilityRule({
   description: 'Clamp content assigned to a tab stop beyond the trailing text edge back onto that edge instead of placing ink outside the page content band.',
 });
 
-export const WORD_DICTIONARY_SEA_NATURAL_FIT = defineCompatibilityRule({
-  id: 'word-dictionary-sea-natural-fit',
-  evidence: {
-    kind: 'regression-test',
-    reference: 'packages/docx/src/sea-justified-fit.test.ts#Rule 1: wraps the paragraph-final Thai word on a thaiDistribute closing line (zero space-shrink)',
-  },
-  description: 'Do not admit a dictionary Southeast-Asian word by compressing preceding inter-word spaces when its natural advance exceeds the remaining line width.',
-});
-
 export const WORD_DICTIONARY_SEA_ATOMIC_CHUNK = defineCompatibilityRule({
   id: 'word-dictionary-sea-atomic-chunk',
   evidence: {
@@ -681,7 +712,7 @@ export const WORD_UNIFORM_RUN_POSITION_LEADING = defineCompatibilityRule({
     version: '16.111.1',
     platform: 'macOS 26.5.2',
   },
-  description: 'When every metric-bearing item on a line has the same non-zero w:position, Word preserves the enlarged line extent but shares the resulting surplus above and below the glyphs. A line containing a differently-positioned item retains the full relative displacement.',
+  description: 'When every metric-bearing item on a line has the same non-zero w:position, Word places the allocated line box around the positioned glyphs. A line containing a differently-positioned item retains the full relative displacement; automatic line allocation is handled separately.',
 });
 
 /** Paint-relative baseline position governed by
@@ -706,20 +737,49 @@ export function wordRunVerticalAlignRaisePt(
   return 0;
 }
 
-export const WORD_FAR_EAST_SINGLE_LINE_FACTOR = 1.3;
+export const WORD_FAR_EAST_SINGLE_LINE_FACTOR = OFFICE_FAR_EAST_SINGLE_LINE_FACTOR;
 
-/** Compatibility projection governed by
- * {@link WORD_MS_MINCHO_EMPTY_EAST_ASIAN_MARK_HEIGHT}. */
-export function wordMsMinchoEmptyEastAsianMarkSingleLinePx(
-  family: string | null | undefined,
-  emPx: number,
-  eastAsianMark: boolean,
+export const WORD_INLINE_PICTURE_AUTO_LEADING = defineCompatibilityRule({
+  id: 'word-inline-picture-auto-leading',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'inline-picture-auto-leading-height-matrix',
+    application: 'Microsoft Word',
+    version: '16.113.2',
+    platform: 'macOS 27.0',
+  },
+  description: 'For an inline picture with automatic spacing at or above one line, add the authored leading of the selected text/paragraph-mark face to the natural picture/text baseline union, rather than multiplying the picture height. Image-only, text-only and alternating 28.35pt-picture controls at line=240/259 and exact=259 distinguish the two advances; earlier Word controls covered picture heights 5–255pt at auto multiples 1, 1.079 and 1.15. Exact spacing and non-picture lines retain their own allocation.',
+});
+
+/** Word-observed inline-picture projection of ECMA-376 §17.3.1.33. */
+export function wordInlinePictureAutoLineHeightPx(
+  naturalUnionPx: number,
+  textSinglePx: number,
+  multiple: number,
 ): number {
-  if (!eastAsianMark || !family) return 0;
-  const normalized = family.trim().toLowerCase();
-  return normalized === 'ms mincho' || normalized === 'ｍｓ 明朝'
-    ? emPx * WORD_FAR_EAST_SINGLE_LINE_FACTOR
-    : 0;
+  void WORD_INLINE_PICTURE_AUTO_LEADING;
+  return naturalUnionPx + textSinglePx * (multiple - 1);
+}
+
+/** Word for Mac 16.112.4 automatic line allocation observed with independently
+ * varied synthetic fonts. With OS/2 code-page bits 17–20, the line box is
+ * 1.3 × the hhea ascent/descent box and the added 0.3 is split equally above
+ * and below. With those bits clear, signed hhea lineGap is placed above the
+ * baseline. A Latin cmap alone did not change the code-page class. ECMA-376
+ * §17.3.1.33 specifies the spacing multiplier, not this font-table choice.
+ * Unsupported or malformed geometry leaves measurement in charge. */
+export function wordOpenTypeAutoLineRatios(metrics: Readonly<{
+  unitsPerEm: number;
+  hheaAscent: number;
+  hheaDescent: number;
+  hheaLineGap: number;
+  farEastCodePage: boolean;
+}>): Readonly<{
+  lineHeightRatio: number;
+  designAscentRatio: number;
+  designDescentRatio: number;
+}> | null {
+  return officeOpenTypeAutoLineRatios(metrics);
 }
 
 export function wordEastAsianGridLineCells(

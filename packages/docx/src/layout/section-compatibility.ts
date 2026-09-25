@@ -24,7 +24,7 @@ export const WORD_TRAILING_EMPTY_MARK_BASELINE_ADMISSION = defineCompatibilityRu
     kind: 'regression-test',
     reference: 'packages/docx/src/paginate-trailing-empty-mark-fit.test.ts#KEEPS an inkless empty paragraph on the page when ink-bearing content follows and only its below-baseline whitespace overflows',
   },
-  description: 'At the unreserved physical body edge, Word admits an undecorated non-terminal empty paragraph mark by its baseline when later ink follows in the same flow.',
+  description: 'At the unreserved physical body edge, Word admits an undecorated non-terminal empty paragraph mark by its baseline when later ink follows in the same flow and the mark does not occupy a document-grid line cell. An observed 18pt line-grid mark with only 17.65pt remaining moves to the next page with its complete cell. Next-page section marks retain their separate blank-page suppression.',
 });
 
 export const WORD_SECTION_MARK_BLANK_PAGE_SUPPRESSION = defineCompatibilityRule({
@@ -74,6 +74,7 @@ export function wordTrailingEmptyMarkAdmissionAllowancePt(input: Readonly<{
   followsNextPageSectionBoundary: boolean;
   markExtentPt: number;
   markBelowBaselinePt: number;
+  markOnLineGrid: boolean;
 }>): number {
   const eligible = !input.hasContinuationBoundary
     && input.inkless
@@ -84,6 +85,11 @@ export function wordTrailingEmptyMarkAdmissionAllowancePt(input: Readonly<{
     && input.physicalRegionBottomIsActive;
   if (!eligible) return 0;
   if (input.followsNextPageSectionBoundary) return Math.max(0, input.markExtentPt);
+  // §17.6.5 gives a grid-aligned paragraph mark a whole line cell. Word moves
+  // an 18pt cell when 17.65pt remain; baseline-only admission would clip that
+  // cell and raise the first visible line on the next page by one grid pitch.
+  // This narrows the observed non-grid empty-mark compatibility rule (#981).
+  if (input.markOnLineGrid) return 0;
   return input.hasFollowingInk ? input.markBelowBaselinePt : 0;
 }
 

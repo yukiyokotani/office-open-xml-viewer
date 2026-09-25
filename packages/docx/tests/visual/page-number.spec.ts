@@ -31,7 +31,7 @@ const CASES: { file: string; pageCount: number; width: number; expected: string[
   // §17.6.12 continuous restart (#804): continuous start=50 shares p.1 and spills.
   // The DISTINGUISHING signal is that the section's FIRST OWNED page shows 51 (not
   // 50) — the shared page it does not own counts as the section's page 50. Word's
-  // PDF (public/private/sample-27.pdf) is 3 pages [Page 1, Page 51, Page 52]; this
+  // PDF (public/private/docx/sample-27.pdf) is 3 pages [Page 1, Page 51, Page 52]; this
   // renderer packs ~50 body paragraphs per page vs Word's ~46, so it fits section 2
   // in ONE fewer page and shows [1, 51] over 2 pages. That page-DENSITY gap is a
   // separate pagination-fidelity concern, out of scope for #804 — the RESTART

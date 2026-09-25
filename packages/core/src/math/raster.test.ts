@@ -5,6 +5,7 @@ import {
   sizeMathSvgForRaster,
 } from './raster.js';
 import { MAX_CANVAS_AREA } from '../canvas/clamp.js';
+import { mathMLToSvg } from './engine.js';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -60,6 +61,22 @@ describe('worker-safe math SVG rasterization', () => {
     expect(context.fill).toHaveBeenCalledTimes(2);
     expect(path.rect).toHaveBeenCalledWith(1, 2, 3, 4);
     expect(context.fillStyle).toBe('#123456');
+  });
+
+  it('paints MathJax fallback text for an excluded font range', async () => {
+    const output = await mathMLToSvg(
+      '<math xmlns="http://www.w3.org/1998/Math/MathML"><mi>Ж</mi></math>',
+    );
+    const context = {
+      save: vi.fn(), restore: vi.fn(), setTransform: vi.fn(), scale: vi.fn(),
+      fillText: vi.fn(), fillStyle: '', strokeStyle: '', lineWidth: 1,
+      lineCap: 'butt', lineJoin: 'miter', globalAlpha: 1, font: '',
+    } as unknown as OffscreenCanvasRenderingContext2D;
+
+    drawMathJaxSvg(context, output.svg, 600, 950);
+
+    expect(context.fillText).toHaveBeenCalledWith('Ж', 0, 0);
+    expect(context.font).toMatch(/italic .*px serif/);
   });
 
   it('rejects malformed view boxes before painting', () => {

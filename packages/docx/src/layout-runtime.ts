@@ -1,7 +1,9 @@
-import { withVertFeatureCanvasScope } from '@silurus/ooxml-core';
+import { classifyCjkFont, type CjkLang, type OfficeFontFallbackRoute } from '@silurus/ooxml-core';
+import { activeFontSet, isHTMLCanvas, withVertFeatureCanvasScope } from '@silurus/ooxml-core';
 import type { DocxDocumentModel } from './types.js';
-import type { ResolvedLocalFontMetric } from './layout/text.js';
-import { snapshotLocalMetrics } from './layout/text.js';
+import type { LoadedEmbeddedFontRoute } from './embedded-fonts.js';
+import type { ResolvedFontMetric } from './layout/text.js';
+import { snapshotFontMetrics } from './layout/text.js';
 import type { MathLayoutResource } from './layout/resources.js';
 import type { BodyLayoutKernel } from './layout/body-layout-kernel.js';
 import type { LayoutServices } from './layout/types.js';
@@ -31,24 +33,29 @@ import {
 function createConcreteBodyLayoutKernel(
   source: LayoutSourceStore,
   measureContext: MeasurementTextContext | null,
-  resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>>,
+  resolvedLocalFonts: Readonly<Record<string, ResolvedFontMetric>>,
+  cjkFallback?: CjkLang,
 ): BodyLayoutKernel {
   return createProductionBodyLayoutRuntime(
     source,
     measureContext,
     resolvedLocalFonts,
+    cjkFallback,
   ).kernel;
 }
 
 export function createLayoutServices(
   input: DocxDocumentModel | LayoutSourceStore,
   options: {
-    readonly localMetrics?: Readonly<Record<string, ResolvedLocalFontMetric>>;
+    readonly localMetrics?: Readonly<Record<string, ResolvedFontMetric>>;
+    readonly fontMetrics?: Readonly<Record<string, ResolvedFontMetric>>;
     readonly useGoogleFonts?: boolean;
+    readonly cjkFallback?: CjkLang;
     readonly mathResources?: readonly MathLayoutResource[];
     readonly mathDrawables?: ReadonlyMap<string, CanvasImageSource>;
     readonly measureContext?: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
-    readonly embeddedFaces?: readonly FontFace[];
+    readonly embeddedRoutes?: readonly LoadedEmbeddedFontRoute[];
+    readonly officeRoutes?: readonly OfficeFontFallbackRoute[];
     readonly googleFaces?: readonly FontFace[];
   } = {},
 ): LayoutServices {
@@ -133,20 +140,36 @@ export function createLayoutServices(
       });
     },
   });
-  const localMetrics = snapshotLocalMetrics(options.localMetrics);
+  const localMetrics = snapshotFontMetrics(options.localMetrics);
+  const inputFontMetrics = snapshotFontMetrics({
+    ...localMetrics,
+    ...options.fontMetrics,
+  });
+  const cjkFallback = source.fonts.scriptCjkLanguage
+    ?? classifyCjkFont(source.fonts.majorFamily) ?? classifyCjkFont(source.fonts.minorFamily) ?? options.cjkFallback;
   const services = createProductionLayoutServices(source, {
     ...options,
+    cjkFallback,
     localMetrics,
+    fontMetrics: inputFontMetrics,
     measureContext: context,
+    // A caller canvas may belong to a popup/iframe. CSS face admission must
+    // inspect the FontFaceSet that also shapes this context's glyphs.
+    fontSet: (isHTMLCanvas(canvasElement) ? canvasElement.ownerDocument?.fonts : undefined)
+      ?? activeFontSet(),
     verticalGlyphMeasurement,
   });
+  // Body layout and text measurement share one immutable resource snapshot,
+  // including caller-supplied or decoded embedded font metrics.
+  const fontMetrics = services.text.fontMetrics ?? inputFontMetrics;
   attachLayoutSourceStore(services, source);
   attachBodyLayoutKernel(
     services,
     createConcreteBodyLayoutKernel(
       source,
       context,
-      localMetrics,
+      fontMetrics,
+      cjkFallback,
     ),
   );
   return services;

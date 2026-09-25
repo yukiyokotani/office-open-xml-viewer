@@ -1,10 +1,12 @@
+import { resolveCjkFallback, type CjkLang } from '@silurus/ooxml-core';
 import InlineWorker from './worker.ts?worker&inline';
 import wasmAssetUrl from './wasm/docx_parser_bg.wasm?url';
 import {
   preloadGoogleFonts,
+  loadOfficeFontFallbacks,
+  unloadOfficeFontFallbacks,
   releaseOwnedBitmap,
   unloadGoogleFonts,
-  unloadLocalFontMetrics,
   unregisterEmbeddedFonts,
   WorkerBridge,
   defaultDpr,
@@ -44,9 +46,8 @@ import type { DocxDocumentModel, RenderPageOptions, WorkerRequest, WorkerRespons
 import { renderLayoutSourceToCanvas, documentHasMath, prepareMathRuns, type DocxTextRunInfo } from './renderer';
 import { createLayoutServices } from './layout-runtime.js';
 import { buildBookmarkPageMap } from './bookmark-nav';
-import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts';
+import { DOCX_GOOGLE_FONTS, docxFontPreloadNames, docxOfficeFontFallbackRequests } from './google-fonts';
 import { loadEmbeddedFonts } from './embedded-fonts';
-import { loadDocxLocalFontMetrics } from './local-font-metrics';
 import {
   attachDocumentLayoutRuntime,
   documentLayoutRuntimeOf,
@@ -103,7 +104,10 @@ import {
 
 /** Options for {@link DocxDocument.load}. Extends the shared load-options type
  *  from `@silurus/ooxml-core` (`useGoogleFonts`, `resourceLimits`, and the
- *  deprecated `maxZipEntryBytes` alias) with the opt-in math engine. */
+ *  deprecated `maxZipEntryBytes` alias) with the opt-in math engine.
+ *  Font acquisition stays inside the document/browser paths: ordinary loading
+ *  must not require an application font catalog or device-font permission.
+ *  Embedded fonts and the existing optional web-font preload remain supported. */
 export interface LoadOptions extends CoreLoadOptions {
   /**
    * Opt-in OMML equation engine. Import it from the separate `@silurus/ooxml/math`
@@ -184,10 +188,12 @@ export interface LoadOptions extends CoreLoadOptions {
    */
   progressiveLayout?: boolean;
   /**
-   * Called once the full layout has replaced the provisional one, or with the
-   * failure if background layout threw. Only fires when
-   * {@link progressiveLayout} actually deferred work. Observer failures are
-   * reported and isolated from the layout result.
+   * Called exactly once when a successful {@link progressiveLayout} load has
+   * reached its authoritative full layout, whether that happens before or
+   * after `load()` resolves. A failure after an early publication is delivered
+   * as the argument; a failure before the first publication rejects `load()`
+   * directly and does not call this observer. Observer failures are reported
+   * and isolated from the layout result.
    */
   onLayoutComplete?: (error?: unknown) => void;
   /**
@@ -322,6 +328,7 @@ function snapshotReviewData(
 
 export class DocxDocument {
   private _metrics: OoxmlResourceMetricsSession | null = null;
+  private _cjkFallback: CjkLang = 'jp';
   private _document: DocxDocumentModel | null = null;
   private _source: LayoutSourceStore | null = null;
   private _meta: DocumentMeta | null = null;
@@ -383,14 +390,14 @@ export class DocxDocument {
    *  the shared FontFaceSet for the lifetime of the SPA (deduped + refcounted in
    *  core, so a font shared with another open document survives until both go). */
   private _embeddedFontFaces: FontFace[] = [];
+  /** Library-owned exact-local or pinned substitute faces in main mode. */
+  private _officeFontFaces: FontFace[] = [];
   /** Google-Fonts `FontFace` objects this document preloaded into `document.fonts`
    *  (main mode only — in worker mode the worker owns them and terminates with its
    *  own FontFaceSet). Released in {@link destroy} so they do not leak into the
    *  shared FontFaceSet for the lifetime of the SPA (deduped + refcounted in core,
    *  so a web font shared with another open document survives until both go). */
   private _googleFontFaces: FontFace[] = [];
-  /** Exact local faces used for version-adaptive Office line metrics. */
-  private _localMetricFontFaces: FontFace[] = [];
   /** One stable closure per instance: core's path-keyed SVG cache namespaces on
    *  this identity, so two open documents never swap a shared zip path (e.g.
    *  word/media/image1.svg). Reusing one reference also lets the SVG cache hit
@@ -445,6 +452,7 @@ export class DocxDocument {
   }
 
   static async load(source: string | ArrayBuffer, opts: LoadOptions = {}): Promise<DocxDocument> {
+    const cjkFallback = resolveCjkFallback(opts.cjkFallback);
     const resourceOptions = normalizeLoadResourceOptions(opts);
     const defaultCurrentDateMs = Date.now();
     const mode = opts.mode ?? 'main';
@@ -494,6 +502,7 @@ export class DocxDocument {
       doc = new DocxDocument(worker, mode, defaultCurrentDateMs, opts.wasmUrl);
       doc._sourceKind = resolvedInput.kind;
       doc._metrics = metrics;
+      doc._cjkFallback = cjkFallback;
       // The variant the caller will actually render, recorded for BOTH render
       // modes and recorded BEFORE the parse: geometry accessors and the
       // per-call option fill-in (`_withActiveView`) read it, the wire options
@@ -585,31 +594,42 @@ export class DocxDocument {
         );
       }
       doc._tiff = doc._mode === 'worker' ? undefined : opts.tiff;
-      if (doc._mode === 'main' && opts.useGoogleFonts && doc._document) {
-        doc._googleFontFaces = await doc._awaitNativeDoc(preloadGoogleFonts(
-          docxFontPreloadNames(doc._document),
-          DOCX_GOOGLE_FONTS,
-        ), nativeSignal, unloadGoogleFonts);
-      }
       // ECMA-376 §17.8.1 / §17.8.3 — register the document's embedded fonts (via
       // the worker's zip-entry extraction) before the lazy first pagination, so
       // text measures/draws with the authored typeface. Worker mode does this
       // inside the worker (before it paginates); here it runs on the main thread.
+      let embeddedMetrics: Awaited<ReturnType<typeof loadEmbeddedFonts>>['metrics'] | undefined;
+      let embeddedRoutes: Awaited<ReturnType<typeof loadEmbeddedFonts>>['routes'] | undefined;
       if (doc._mode === 'main' && doc._document?.embeddedFonts?.length) {
         const loadingDocument = doc;
-        doc._embeddedFontFaces = await doc._awaitNativeDoc(loadEmbeddedFonts(
+        const loadedEmbedded = await doc._awaitNativeDoc(loadEmbeddedFonts(
           doc._document,
           (p) => loadingDocument.getFontBytes(p),
-        ), nativeSignal, unregisterEmbeddedFonts);
+        ), nativeSignal, (late) => unregisterEmbeddedFonts(late.faces));
+        doc._embeddedFontFaces = loadedEmbedded.faces;
+        embeddedMetrics = loadedEmbedded.metrics;
+        embeddedRoutes = loadedEmbedded.routes;
       }
-      let localMetrics: Awaited<ReturnType<typeof loadDocxLocalFontMetrics>> | undefined;
-      if (doc._mode === 'main' && doc._document) {
-        localMetrics = await doc._awaitNativeDoc(
-          loadDocxLocalFontMetrics(doc._document),
+      const officeFonts = doc._mode === 'main' && doc._document
+        ? await doc._awaitNativeDoc(
+            loadOfficeFontFallbacks(docxOfficeFontFallbackRequests(doc._document).filter((request) =>
+              !embeddedRoutes?.some((route) => route.requestedFamily.toLowerCase() === request.family.toLowerCase()
+                && route.weight === (request.weight ?? 400) && route.style === (request.style ?? 'normal')))),
+            nativeSignal,
+            (late) => unloadOfficeFontFallbacks(late.faces),
+          )
+        : { faces: [], routes: {} };
+      doc._officeFontFaces = officeFonts.faces;
+      if (doc._mode === 'main' && opts.useGoogleFonts && doc._document) {
+        // A proven local Calibri face already resolves this authored family;
+        // avoid the optional Google Fonts substitution for the same request.
+        const names = docxFontPreloadNames(doc._document, cjkFallback).filter((name) =>
+          name?.toLowerCase() !== 'calibri' || !('calibri' in officeFonts.routes));
+        doc._googleFontFaces = await doc._awaitNativeDoc(
+          preloadGoogleFonts(names, DOCX_GOOGLE_FONTS),
           nativeSignal,
-          (late) => unloadLocalFontMetrics(late.faces),
+          unloadGoogleFonts,
         );
-        doc._localMetricFontFaces = localMetrics.faces;
       }
       // Equations are converted + rasterized before pagination (which reads their
       // extents synchronously). Requires the opt-in `math` engine; without it,
@@ -626,9 +646,11 @@ export class DocxDocument {
         const layoutDocument = doc;
         const runtime = documentLayoutRuntimeOf(doc);
         runtime.services = createLayoutServices(doc._source, {
-          localMetrics: localMetrics?.metrics,
+          fontMetrics: embeddedMetrics,
           useGoogleFonts: !!opts.useGoogleFonts,
-          embeddedFaces: doc._embeddedFontFaces,
+          cjkFallback,
+          embeddedRoutes,
+          officeRoutes: Object.values(officeFonts.routes),
           googleFaces: doc._googleFontFaces,
           mathResources: preparedMath?.records,
           mathDrawables: preparedMath?.drawables,
@@ -746,11 +768,12 @@ export class DocxDocument {
               exact: true,
               complete: true,
             });
-            if (publishedLayout !== null) {
-              progressiveDocument._layoutObservers.notify(
-                'onLayoutComplete', opts.onLayoutComplete,
-              );
-            }
+            // The terminal success callback fires exactly once per load,
+            // whether or not any partial was published — consumers must not
+            // have to infer completion from document speed.
+            progressiveDocument._layoutObservers.notify(
+              'onLayoutComplete', opts.onLayoutComplete,
+            );
             // Nothing was published: there was nothing to show early, so
             // load() resolves here, on the layout that would have been built
             // anyway. Resolving an already-resolved deferred is a no-op.
@@ -853,7 +876,7 @@ export class DocxDocument {
     const res = await this._bridge.request(
       (id) =>
         this._mode === 'worker'
-          ? ({ type: 'parse', id, data: buffer, resourcePolicy, ...(nativeSource ? { source: nativeSource } : {}), useGoogleFonts, defaultCurrentDateMs: documentLayoutRuntimeOf(this).defaultCurrentDateMs, ...this._parseViewFields(), renderers } satisfies RenderWorkerRequest)
+          ? ({ type: 'parse', id, data: buffer, resourcePolicy, ...(nativeSource ? { source: nativeSource } : {}), useGoogleFonts, cjkFallback: this._cjkFallback, defaultCurrentDateMs: documentLayoutRuntimeOf(this).defaultCurrentDateMs, ...this._parseViewFields(), renderers } satisfies RenderWorkerRequest)
           : ({ type: 'parse', id, data: buffer, resourcePolicy, ...(nativeSource ? { source: nativeSource } : {}) } satisfies WorkerRequest),
       [buffer],
       { timeoutMs },
@@ -1079,9 +1102,10 @@ export class DocxDocument {
     // A load whose worker published nothing resolves here instead — there was
     // never anything to show early, so `load()` waited for the real document.
     progressive.firstPublication.resolve();
-    if (progressive.published) {
-      this._layoutObservers.notify('onLayoutComplete', progressive.onComplete);
-    }
+    // The terminal success callback fires exactly once per load, published
+    // partials or not; `settled` above keeps the failure path from ever
+    // adding a second notification.
+    this._layoutObservers.notify('onLayoutComplete', progressive.onComplete);
   }
 
   /** Bookmark pages and the review anchor projections are derived from the
@@ -1221,6 +1245,7 @@ export class DocxDocument {
           resourcePolicy,
           ...(nativeSource ? { source: nativeSource } : {}),
           useGoogleFonts,
+          cjkFallback: this._cjkFallback,
           defaultCurrentDateMs: documentLayoutRuntimeOf(this).defaultCurrentDateMs,
           ...this._parseViewFields(),
           renderers,
@@ -1323,6 +1348,10 @@ export class DocxDocument {
       unregisterEmbeddedFonts(this._embeddedFontFaces);
       this._embeddedFontFaces = [];
     }
+    if (this._officeFontFaces.length > 0) {
+      unloadOfficeFontFallbacks(this._officeFontFaces);
+      this._officeFontFaces = [];
+    }
     // Release the Google-Fonts substitutes this document preloaded into the
     // shared FontFaceSet (main mode). Same refcount contract as the embedded
     // fonts: a web font also used by another open document stays until that one
@@ -1331,10 +1360,6 @@ export class DocxDocument {
     if (this._googleFontFaces.length > 0) {
       unloadGoogleFonts(this._googleFontFaces);
       this._googleFontFaces = [];
-    }
-    if (this._localMetricFontFaces.length > 0) {
-      unloadLocalFontMetrics(this._localMetricFontFaces);
-      this._localMetricFontFaces = [];
     }
     // Release both image owners keyed by this document's stable loader: the
     // shared decoded owner (base + derived colour surfaces) and the SVG lookup
@@ -1401,12 +1426,15 @@ export class DocxDocument {
   }
 
   /**
-   * Project the document to GitHub-flavoured markdown: headings (from
+   * Produce a best-effort, text-focused GitHub-flavoured markdown projection:
+   * headings (from
    * `<w:outlineLvl>`), bullet / numbered lists, tables (with vMerge
    * continuation), and rich-text formatting (bold / italic / strikethrough /
-   * hyperlink), with footnotes / endnotes / comments collated at the end.
+   * hyperlink), with footnotes / endnotes collated at the end and review
+   * comments kept in a final quoted appendix.
    * Positioning, section properties, fonts, and drawing shapes are discarded —
-   * the projection is meant for AI ingestion and full-text search, not layout.
+   * the projection is meant for AI ingestion and full-text search, not an
+   * authoritative semantic or reading-order representation.
    *
    * Runs entirely in the worker off the archive opened at {@link load} (no
    * re-copy of the file, no re-parse of the model on the main thread), so it

@@ -137,8 +137,8 @@ beforeAll(() => {
   };
 });
 
-// An untabled synthetic font so the font-metrics single-line FLOOR
-// (intendedSingleLinePx) is 0 and the line box is exactly the mock's ascent +
+// An uncatalogued synthetic font has no reference single-line floor; the line
+// box is exactly the mock's ascent +
 // descent — isolating the metric non-linearity that the canonical path must avoid.
 const TEST_FONT = 'Synthetic Untabled Serif';
 

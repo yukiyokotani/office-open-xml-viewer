@@ -117,6 +117,35 @@ generated WASM (`pnpm build:wasm` or the per-package command) whenever parser
 (Rust) source has changed or `packages/*/src/wasm/` may be stale — stale
 generated WASM can both hide real parser defects and fabricate failures.
 
+### Test value and consolidation
+
+For every test, answer: **What realistic defect would go undetected if this
+test were deleted?** Compare that protection with execution cost, flakiness,
+fixture complexity, and the maintenance burden of legitimate refactoring.
+
+- Do not retain or add tests merely as a precaution, to preserve a test count,
+  or to maintain a coverage percentage. TDD means a focused regression for the
+  actual defect; it does not require keeping every exploratory case.
+- Delete implementation copies, tests that only verify their own mocks or
+  fixtures, and assertions that merely restate type-system or dependency
+  guarantees. Exercise production behavior with an independent expectation.
+- Consolidate overlapping tests under the narrowest meaningful production
+  boundary. Keep a distinct case only when it catches a distinct plausible
+  failure: for example precedence, a real boundary, ownership, or a race.
+- Avoid asserting private fields, helper call order, source text, or exact
+  internal object shape when an observable contract can express the guarantee.
+  Do not replace behavior tests with snapshots of implementation details.
+- Reduce exploratory parameter matrices to representative cases and meaningful
+  boundaries. Parameterizing the same redundant matrix does not reduce its
+  execution cost or improve its value.
+- Shared-helper coverage does not prove each format is wired correctly. Keep
+  focused DOCX/XLSX/PPTX integration cases where their production paths differ;
+  do not repeat the helper's entire input matrix in every format.
+- In a test audit, identify the exact cases to remove or merge, the remaining
+  test that supplies any claimed replacement, and the realistic protection
+  lost. Distinguish unconditional deletion from removal that first requires a
+  replacement. Do not report a static review as measured runtime savings.
+
 ## OOXML Implementation Policy
 
 Be specification-first.
@@ -126,8 +155,8 @@ Be specification-first.
   Microsoft extension notes such as `[MS-DOCX]`, `[MS-XLSX]`, `[MS-PPTX]`, and
   `[MS-ODRAWXML]` when Office-specific behavior or extensions are involved.
 - Record the relevant specification section, schema element, or observed Office
-  behavior in the commit body or code comment when it materially explains the
-  implementation.
+  behavior beside the implementing source when it materially explains the
+  implementation. A commit body alone is not a durable substitute.
 - Prefer ECMA-376 / ISO-29500 behavior over sample-specific tuning.
 - Do not add heuristics only to improve one VRT/sample number, such as arbitrary
   thresholds, empirical scaling constants, or special-casing a sample path.
@@ -143,6 +172,35 @@ Be specification-first.
   heuristic.
 - If a temporary heuristic is unavoidable, mark it clearly in code with the
   missing spec/implementation work and track it for removal.
+
+### Source is the durable specification
+
+Express every settled library behavior in production source. Put necessary
+decision rationale, tradeoffs, evidence boundaries, and intentionally unsupported
+behavior in concise comments next to the responsible implementation. Distinguish
+normative specification rules from observed Office behavior and library policy.
+For an observed rule, record the tested input classes and boundary/counterexample
+results needed to explain its scope, without private sample contents or paths.
+
+- Code and these adjacent comments must remain understandable without local
+  experiment files, handoff notes, chat history, PR descriptions, or a separate
+  design document. Tests verify the contract; they must not be its only record.
+- When an investigation settles a rule, incorporate it and its essential
+  rationale into the responsible source before declaring the work complete or
+  deleting the evidence. Do not copy an entire experiment log into comments.
+- Parameter sweeps, generated Office samples/PDFs/images, probe scripts, logs,
+  comparison builds, and scratch notes are temporary investigation artifacts.
+  Create them in a task-owned temporary directory outside the checkout by
+  default. Remove owned artifacts once their conclusions are captured in source
+  and focused regression coverage. Do not accumulate permanent `output/` or
+  `outputs/` directories as an alternative specification store.
+- Unresolved observations are not established compatibility rules. Record any
+  implemented limitation beside its gate; preserve only the evidence still
+  needed by an active investigation, with an owner and a cleanup point.
+- Before cleanup, inspect contents, tracked status, symlinks, and active-task
+  ownership. Do not delete another task's ongoing evidence, original private
+  samples, specification documents, or maintained VRT references. Never follow
+  scratch-directory symlinks into dependencies or other worktrees for deletion.
 
 ## Cross-Package Integration
 
@@ -211,9 +269,9 @@ be committed.
 
 Typical local-only paths:
 
-- `packages/docx/public/private/`
-- `packages/xlsx/public/private/`
-- `packages/pptx/public/private/`
+- `packages/docx/public/private/docx/`
+- `packages/xlsx/public/private/xlsx/`
+- `packages/pptx/public/private/pptx/`
 - `packages/*/src/*privateDemo.stories.ts`
 - `packages/*/src/wasm/`
 

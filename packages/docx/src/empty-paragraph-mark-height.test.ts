@@ -4,6 +4,8 @@ import { layoutDocument } from './document-layout.js';
 import { renderDocumentToCanvas } from './renderer.js';
 import { paragraphMarkBelowBaselinePt, paragraphMarkLineHeight } from './line-layout.js';
 import { paragraphMarkShapeInput } from './parser-model.js';
+import { createFontResolver } from './layout/font-service.js';
+import { createTextLayoutService } from './layout/text.js';
 import { canvasFontString } from '@silurus/ooxml-core';
 import type {
   BodyElement,
@@ -214,7 +216,75 @@ describe('empty paragraph mark line height (§17.3.1.29 / §17.3.1.33)', () => {
     expect(paragraphMarkLineHeight(p, 1, { type: null, linePitchPt: null }, false, true, ctx, {})).toBe(30);
   });
 
-  it('uses the MS Mincho Far East single-line height for an empty East Asian mark', () => {
+  it('uses an arbitrary resolved font resource metric for an empty East Asian mark', () => {
+    const family = 'Arbitrary Embedded EA';
+    const p = {
+      ...para(''),
+      defaultFontSize: 12,
+      defaultFontFamily: 'Century',
+      defaultFontFamilyEastAsia: family,
+    } as DocParagraph;
+    const ctx = {
+      font: '',
+      measureText: () => ({
+        width: 12,
+        fontBoundingBoxAscent: 10.3125,
+        fontBoundingBoxDescent: 1.6875,
+        actualBoundingBoxAscent: 10.3125,
+        actualBoundingBoxDescent: 1.6875,
+      } as TextMetrics),
+    } as unknown as CanvasRenderingContext2D;
+    const metric = { family, eastAsianLineHeightRatio: 1.3,
+      sourceIdentity: 'test-resource:east-asian-mark' };
+    const textService = createTextLayoutService({
+      fonts: createFontResolver([{
+        requestedFamily: family, resolvedFamily: family, source: 'local',
+        resourceIdentity: metric.sourceIdentity,
+      }]),
+      measurer: {
+        fingerprint: 'selected-east-asian-mark',
+        measure: () => ({
+          advancePt: 12, ascentPt: 10.3125, descentPt: 1.6875,
+        }),
+      },
+      fontMetrics: { [family.toLowerCase()]: metric },
+    });
+
+    expect(paragraphMarkLineHeight(
+      p,
+      1,
+      { type: null, linePitchPt: null },
+      false,
+      false,
+      ctx,
+      {},
+      null,
+      {},
+      textService,
+      {
+        fontSizePt: 12,
+        fonts: { complexScript: 'Times New Roman' },
+        themeFonts: {
+          ascii: family,
+          highAnsi: family,
+          eastAsia: family,
+        },
+        themeFontPresence: {
+          ascii: true,
+          highAnsi: true,
+          eastAsia: true,
+          complexScript: false,
+        },
+        weight: 400,
+        style: 'normal',
+        complexScript: false,
+        fontHint: 'eastAsia',
+        eastAsiaLanguage: 'ja-jp',
+      },
+    )).toBeCloseTo(15.6, 5);
+  });
+
+  it('uses measured geometry when an East Asian mark has no admitted resource or reference', () => {
     const p = {
       ...para(''),
       defaultFontSize: 12,
@@ -263,10 +333,11 @@ describe('empty paragraph mark line height (§17.3.1.29 / §17.3.1.33)', () => {
         fontHint: 'eastAsia',
         eastAsiaLanguage: 'ja-jp',
       },
-    )).toBeCloseTo(15.6, 5);
+    )).toBeCloseTo(12, 5);
   });
 
-  it('keeps the following East-Asian line on page two in the observed MS Mincho fixture', async () => {
+  it('uses a selected local resource metric for both pagination and paint', async () => {
+    const family = 'Arbitrary Embedded EA';
     const observedParagraph = (text: string, shading?: string): DocParagraph => ({
       ...para(text),
       runs: text === ''
@@ -276,16 +347,16 @@ describe('empty paragraph mark line height (§17.3.1.29 / §17.3.1.33)', () => {
             ...textRun(text),
             fontSize: 12,
             fontFamily: 'Century',
-            fontFamilyEastAsia: 'ＭＳ 明朝',
+            fontFamilyEastAsia: family,
           } as DocParagraph['runs'][number]],
       defaultFontSize: 12,
       defaultFontFamily: 'Century',
-      defaultFontFamilyEastAsia: 'ＭＳ 明朝',
+      defaultFontFamilyEastAsia: family,
       shading,
       paragraphMarkFontFacts: {
         fontSize: 12,
         fontFamily: 'Century',
-        fontFamilyEastAsia: 'ＭＳ 明朝',
+        fontFamilyEastAsia: family,
         fontHint: 'eastAsia',
         langEastAsia: 'ja-jp',
       },
@@ -299,14 +370,21 @@ describe('empty paragraph mark line height (§17.3.1.29 / §17.3.1.33)', () => {
     model.section.pageHeight = 39;
     model.fontFamilyClasses = {};
     const measurement = makeResolvedMetricCanvas();
+    const resolved = {
+      'arbitrary embedded ea': {
+        family,
+        eastAsianLineHeightRatio: 1.3,
+        sourceIdentity: 'test-resource:pagination-paint',
+      },
+    };
     const services = createLayoutServices(model, {
       measureContext: measurement.canvas.getContext('2d') as CanvasRenderingContext2D,
+      localMetrics: resolved,
     });
 
-    // Word records the empty 12pt MS Mincho EA mark as a 15.6pt line. Together
-    // with the two 12pt visible lines this is 39.6pt, so the final line starts
-    // on page two. Treating the mark as the font's raw 12pt design box would
-    // incorrectly fit all three lines into the 39pt first-page band.
+    // The resolved 1.3-em East-Asian mark plus the two 12pt visible lines is
+    // 39.6pt, so the final line starts on page two. Omitting the resource metric
+    // would incorrectly fit all three lines into the 39pt first-page band.
     const layout = layoutDocument(model, services, { currentDateMs: 0 });
     expect(layout.pages).toHaveLength(2);
 
@@ -422,14 +500,36 @@ describe('empty paragraph mark line height (§17.3.1.29 / §17.3.1.33)', () => {
       },
     } as unknown as CanvasRenderingContext2D;
     const resolved = {
-      'authored family': { family: '__ooxml_local_exact', lineHeightRatio: 1.5 },
+      'authored family': { family: '__ooxml_local_exact', lineHeightRatio: 1.5,
+        sourceIdentity: 'test-resource:local-mark' },
     };
+    const textService = createTextLayoutService({
+      fonts: createFontResolver([{
+        requestedFamily: 'Authored Family',
+        resolvedFamily: '__ooxml_local_exact', source: 'local',
+        resourceIdentity: 'test-resource:local-mark',
+      }]),
+      measurer: {
+        fingerprint: 'selected-local-mark-alias',
+        measure: (request) => {
+          const local = request.fontRoute.familyList.includes('__ooxml_local_exact');
+          return {
+            advancePt: 0,
+            ascentPt: local ? 12 : 8,
+            descentPt: local ? 3 : 2,
+          };
+        },
+      },
+      fontMetrics: resolved,
+    });
 
     expect(paragraphMarkLineHeight(
       p, 1, { type: null, linePitchPt: null }, false, false, ctx, {}, null, resolved,
+      textService,
     )).toBe(15);
     expect(paragraphMarkBelowBaselinePt(
       p, { type: null, linePitchPt: null }, false, false, ctx, {}, null, resolved,
+      textService,
     )).toBe(3);
     expect(font).toBe('');
   });
@@ -494,14 +594,18 @@ describe('empty paragraph mark line height (§17.3.1.29 / §17.3.1.33)', () => {
     );
 
     expect(main.text.fingerprint).toBe(worker.text.fingerprint);
+    // The registered substitute determines both the mark's measured line box
+    // and its paint route. Main and worker services must agree on that box.
     expect(measureMark(mainContext.ctx, main.text)).toBe(15);
     expect(measureMark(workerContext.ctx, worker.text)).toBe(15);
-    const expectedRoute = main.text.shape({
+    const selected = main.text.shape({
       text: 'x', fontSizePt: 10,
       fonts: { ascii: 'Legacy Direct' },
       themeFonts: { ascii: 'Calibri' },
       themeFontPresence: { ascii: true },
-    }).spans[0]!.fontRoute;
+    }).spans[0]!;
+    expect(selected.font.source).toBe('substitute');
+    const expectedRoute = selected.fontRoute;
     const expectedFont = canvasFontString(expectedRoute, 10, 400, 'normal');
     expect(mainContext.measured.filter(({ text }) => text === 'x').map(({ font }) => font))
       .toContain(expectedFont);

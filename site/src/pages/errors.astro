@@ -221,6 +221,7 @@ try {
       <p class="error-kicker">Fallback</p>
       <h2>Untyped errors</h2>
       <p>Configuration, fetch, parser, renderer, worker, browser and media failures may remain ordinary <code>Error</code>, <code>TypeError</code> or <code>RangeError</code> values. This is intentional where the library cannot promise a stable cause classification.</p>
+      <p>All three formats parse in a module Worker, even in the default <code>mode: 'main'</code>. Opaque-origin iframes such as <code>sandbox="allow-scripts"</code> are not a supported embedding setup: the browser may reject the Worker load. Use an ordinary iframe, or serve the viewer from a dedicated origin with <code>src</code> and <code>sandbox="allow-scripts allow-same-origin"</code>. An empty browser Worker error in an opaque-origin page includes a diagnostic hint, not a stable cause classification. <a href="/production#rendering-mode">See embedding guidance</a>.</p>
       <p class="note">Messages are for logs and diagnostics, not control flow. Keep a generic user-facing fallback and report the original error object to your observability system.</p>
     </section>
 

@@ -15,7 +15,6 @@ use ooxml_common::text::{parse_lnspc, SpaceLine};
 use ooxml_common::units::text_point_to_pt;
 use std::collections::HashMap;
 
-/// Extract the lvl1pPr defRPr font size from a txBody node.
 /// One `CT_TextSpacing` choice from `<a:spcBef>` / `<a:spcAft>` (ECMA-376
 /// §21.1.2.2.9-.10): an absolute `<a:spcPts>` in hundredths of a point or a
 /// `<a:spcPct>` in thousandths of a percent of the text size.
@@ -52,6 +51,7 @@ impl ParagraphSpacing {
     }
 }
 
+/// Extract the lvl1pPr defRPr font size from a txBody node.
 pub(crate) fn extract_lvl1_font_size(tx_body: roxmltree::Node<'_, '_>) -> Option<f64> {
     child(tx_body, "lstStyle")
         .and_then(|ls| child(ls, "lvl1pPr"))
@@ -103,6 +103,45 @@ pub(crate) fn merge_level_sizes(
         out[lvl] = primary[lvl].or(fallback[lvl]);
     }
     out
+}
+
+/// Per-list-level default text colours. Index 0..=8 maps to
+/// `lvl1pPr`..`lvl9pPr` (ECMA-376 §21.1.2.4). Keeping these per level is
+/// essential: applying a layout's lvl1 colour as a body-wide fallback makes a
+/// `pPr@lvl="1"` paragraph inherit the wrong tier.
+pub(crate) type LevelColors = [Option<String>; 9];
+
+pub(crate) fn read_level_colors(
+    list_style: roxmltree::Node<'_, '_>,
+    theme: &HashMap<String, String>,
+) -> LevelColors {
+    let mut out: LevelColors = std::array::from_fn(|_| None);
+    for (lvl, slot) in out.iter_mut().enumerate() {
+        let tag = format!("lvl{}pPr", lvl + 1);
+        *slot = list_style
+            .children()
+            .find(|n| n.is_element() && n.tag_name().name() == tag)
+            .and_then(|lp| child(lp, "defRPr"))
+            .and_then(|rp| text_property_color(rp, theme));
+    }
+    out
+}
+
+pub(crate) fn extract_level_colors(
+    tx_body: roxmltree::Node<'_, '_>,
+    theme: &HashMap<String, String>,
+) -> LevelColors {
+    child(tx_body, "lstStyle")
+        .map(|list_style| read_level_colors(list_style, theme))
+        .unwrap_or_else(|| std::array::from_fn(|_| None))
+}
+
+pub(crate) fn has_any_level_color(colors: &LevelColors) -> bool {
+    colors.iter().any(Option::is_some)
+}
+
+pub(crate) fn merge_level_colors(primary: &LevelColors, fallback: &LevelColors) -> LevelColors {
+    std::array::from_fn(|lvl| primary[lvl].clone().or_else(|| fallback[lvl].clone()))
 }
 
 /// Per-list-level paragraph indents (EMU) — the `marL`/`marR`/`indent` attributes
@@ -389,9 +428,11 @@ pub(crate) fn merge_level_bullets(primary: &LevelBullets, fallback: &LevelBullet
 /// Which `<a:objectDefaults>` slot to consult when the shape's own bodyPr
 /// leaves an attribute unset. `Tx` ⇔ "text box" (slide-level
 /// `<p:cNvSpPr txBox="1"/>`), which inherits from `<a:txDef>`. `Sp` ⇔
-/// "regular shape with text" — table cell, placeholder, or a
-/// preset-geometry shape carrying a `<p:txBody>` — which inherits from
-/// `<a:spDef>`. Falling back to txDef for non-text-boxes is wrong because
+/// "regular shape with text" — a placeholder or preset-geometry shape carrying
+/// a `<p:txBody>` — which inherits from `<a:spDef>`. `TableCell` is DrawingML
+/// table content rather than a shape and therefore uses CT_TextBodyProperties'
+/// own defaults instead of theme objectDefaults. Falling back to txDef for
+/// non-text-boxes is wrong because
 /// txDef commonly carries `<a:spAutoFit/>` (PowerPoint's default for
 /// freshly-inserted text boxes); applying that to e.g. a placeholder body
 /// makes the whole paragraph spill horizontally instead of wrapping.
@@ -399,15 +440,16 @@ pub(crate) fn merge_level_bullets(primary: &LevelBullets, fallback: &LevelBullet
 pub(crate) enum ShapeKind {
     Tx,
     Sp,
+    TableCell,
 }
 
-/// Return a text-property solid fill only when it appears in the
+/// Return the text-property fill choice only when it appears in the
 /// `CT_TextCharacterProperties` sequence position defined by ECMA-376
 /// §21.1.2.3.9 / dml-main.xsd. The fill choice precedes effects, highlight,
 /// underline properties and the latin/ea/cs font children. PowerPoint ignores
 /// an out-of-order fill (a pattern emitted by some non-Office producers), so a
 /// name-only descendant lookup would invent formatting Office does not apply.
-pub(crate) fn text_property_solid_fill<'a, 'input>(
+fn text_property_fill<'a, 'input>(
     properties: roxmltree::Node<'a, 'input>,
 ) -> Option<roxmltree::Node<'a, 'input>> {
     let sequence_rank = |name: &str| -> Option<u8> {
@@ -435,12 +477,42 @@ pub(crate) fn text_property_solid_fill<'a, 'input>(
         let Some(rank) = sequence_rank(name) else {
             continue;
         };
-        if name == "solidFill" {
+        if matches!(
+            name,
+            "noFill" | "solidFill" | "gradFill" | "blipFill" | "pattFill" | "grpFill"
+        ) {
             return (highest_preceding_rank <= rank).then_some(node);
         }
         highest_preceding_rank = highest_preceding_rank.max(rank);
     }
     None
+}
+
+/// Resolve the colour of a text fill when it is either a solid fill or a
+/// gradient whose every stop has the same resolved colour. The latter is
+/// visually a solid colour despite its gradient encoding, so it fits the
+/// existing text-run colour model without approximating a genuine gradient.
+pub(crate) fn text_property_color(
+    properties: roxmltree::Node<'_, '_>,
+    theme: &HashMap<String, String>,
+) -> Option<String> {
+    let fill = text_property_fill(properties)?;
+    match fill.tag_name().name() {
+        "solidFill" => parse_color_node(fill, theme),
+        "gradFill" => {
+            let colors = child(fill, "gsLst")?
+                .children()
+                .filter(|node| node.is_element() && node.tag_name().name() == "gs")
+                .map(|stop| parse_color_node(stop, theme))
+                .collect::<Option<Vec<_>>>()?;
+            let first = colors.first()?.clone();
+            colors
+                .into_iter()
+                .all(|color| color == first)
+                .then_some(first)
+        }
+        _ => None,
+    }
 }
 
 // Carries the resolved master/layout/placeholder inheritance context (theme,
@@ -455,6 +527,7 @@ pub(crate) fn parse_text_body(
     inherited_font_size: Option<f64>,
     inherited_font_family: Option<String>,
     inherited_level_font_sizes: LevelFontSizes,
+    inherited_level_colors: LevelColors,
     inherited_level_indents: LevelIndents,
     inherited_level_bullets: &LevelBullets,
     inherited_bold: Option<bool>,
@@ -463,6 +536,7 @@ pub(crate) fn parse_text_body(
     inherited_reflection: Option<Reflection>,
     inherited_anchor: Option<String>,
     inherited_text_insets: Option<[Option<i64>; 4]>,
+    inherited_auto_fit: Option<String>,
     inherited_alignment: Option<String>,
     inherited_ea_ln_brk: Option<bool>,
     inherited_space_before: Option<ParagraphSpacing>,
@@ -481,17 +555,20 @@ pub(crate) fn parse_text_body(
     // Shape-kind-aware lookup: text boxes consult txDef, regular shapes spDef.
     // Cross-fall is intentionally NOT done — see ShapeKind doc.
     let def_prefix = match shape_kind {
-        ShapeKind::Tx => "+txDef",
-        ShapeKind::Sp => "+spDef",
+        ShapeKind::Tx => Some("+txDef"),
+        ShapeKind::Sp => Some("+spDef"),
+        ShapeKind::TableCell => None,
     };
-    let theme_default_str =
-        |key: &str| -> Option<String> { theme.get(&format!("{def_prefix}-bodyPr-{key}")).cloned() };
+    let theme_default_str = |key: &str| -> Option<String> {
+        def_prefix.and_then(|prefix| theme.get(&format!("{prefix}-bodyPr-{key}")).cloned())
+    };
     let theme_default_i64 =
         |key: &str| -> Option<i64> { theme_default_str(key).and_then(|v| v.parse::<i64>().ok()) };
     let theme_default_u32 =
         |key: &str| -> Option<u32> { theme_default_str(key).and_then(|v| v.parse::<u32>().ok()) };
-    let theme_auto_fit =
-        || -> Option<String> { theme.get(&format!("{def_prefix}-autoFit")).cloned() };
+    let theme_auto_fit = || -> Option<String> {
+        def_prefix.and_then(|prefix| theme.get(&format!("{prefix}-autoFit")).cloned())
+    };
 
     // Shared `<a:bodyPr>` grammar (anchor / wrap / vert / insets / autofit) via
     // ooxml_common::text::parse_body_pr. pptx's inheritance + theme
@@ -526,7 +603,9 @@ pub(crate) fn parse_text_body(
         b_ins: inherited_text_insets[3]
             .or_else(|| theme_default_i64("bIns"))
             .unwrap_or(spec.b_ins),
-        auto_fit: theme_auto_fit().unwrap_or(spec.auto_fit),
+        auto_fit: inherited_auto_fit
+            .or_else(theme_auto_fit)
+            .unwrap_or(spec.auto_fit),
     };
     let body = match body_pr {
         Some(n) => ooxml_common::text::parse_body_pr(n, &body_pr_defaults),
@@ -643,6 +722,8 @@ pub(crate) fn parse_text_body(
     // their size by `lvl` so nested bullets shrink (ECMA-376 §21.1.2.4).
     let own_level_sizes = extract_level_font_sizes(tx_body);
     let effective_level_sizes = merge_level_sizes(&own_level_sizes, &inherited_level_font_sizes);
+    let own_level_colors = extract_level_colors(tx_body, theme);
+    let effective_level_colors = merge_level_colors(&own_level_colors, &inherited_level_colors);
     // Effective per-list-level indents: this shape's own lstStyle wins per
     // axis/level, else the layout/master inherited per-level indents. A paragraph
     // that omits marL/marR/indent picks them by `lvl` from this cascade before
@@ -723,6 +804,17 @@ pub(crate) fn parse_text_body(
             )
         })
         .collect();
+
+    // A paragraph's own pPr > defRPr remains the most specific colour. When
+    // absent, inherit the defRPr fill from the matching list level rather than
+    // the text body's lvl1 default. `pPr@lvl="1"` selects lvl2pPr.
+    for paragraph in &mut paragraphs {
+        if paragraph.def_color.is_none() {
+            paragraph.def_color = effective_level_colors
+                .get(paragraph.lvl as usize)
+                .and_then(Clone::clone);
+        }
+    }
 
     // ECMA-376 §21.1.2.3.9, ST_TextCapsType §20.1.10.64: a run inherits
     // cap="all"/"small" from the shape's own lstStyle defRPr, else from the
@@ -1005,9 +1097,7 @@ pub(crate) fn parse_paragraph(
     // Paragraph-level default run properties (pPr > defRPr)
     let def_rpr = p_pr.and_then(|n| child(n, "defRPr"));
     let def_font_size = def_rpr.and_then(|n| attr_f64(&n, "sz")).map(|v| v / 100.0);
-    let def_color = def_rpr
-        .and_then(text_property_solid_fill)
-        .and_then(|n| parse_color_node(n, theme));
+    let def_color = def_rpr.and_then(|n| text_property_color(n, theme));
     let def_bold = def_rpr
         .and_then(|n| attr(&n, "b"))
         .map(|v| v == "1" || v == "true");
@@ -1048,9 +1138,7 @@ pub(crate) fn parse_paragraph(
                     .to_string();
                 let r_pr = child(node, "rPr");
                 let font_size = r_pr.and_then(|n| attr_f64(&n, "sz")).map(|v| v / 100.0);
-                let color = r_pr
-                    .and_then(text_property_solid_fill)
-                    .and_then(|n| parse_color_node(n, theme));
+                let color = r_pr.and_then(|n| text_property_color(n, theme));
                 let bold = r_pr
                     .and_then(|n| attr(&n, "b"))
                     .map(|v| v == "1" || v == "true");
@@ -1407,13 +1495,8 @@ fn parse_run_with_reflection(
         .map(|v| v / 100.0);
 
     let color = r_pr
-        .and_then(text_property_solid_fill)
-        .and_then(|n| parse_color_node(n, theme))
-        .or_else(|| {
-            def_rpr
-                .and_then(text_property_solid_fill)
-                .and_then(|n| parse_color_node(n, theme))
-        });
+        .and_then(|n| text_property_color(n, theme))
+        .or_else(|| def_rpr.and_then(|n| text_property_color(n, theme)));
 
     let font_family = r_pr
         .and_then(|n| child(n, "latin"))

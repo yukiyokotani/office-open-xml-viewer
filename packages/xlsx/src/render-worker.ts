@@ -1,3 +1,5 @@
+import type { CjkLang } from '@silurus/ooxml-core';
+import { xlsxCjkFallback } from './google-fonts.js';
 /**
  * Render-capable worker entry: parse → font preload → (lazy) per-sheet parse →
  * render, all worker-side; renders a sheet viewport into an OffscreenCanvas and
@@ -13,6 +15,9 @@ import init, { XlsxArchive, reinit } from './wasm/xlsx_parser.js';
 import {
   decodeDataUrl,
   preloadGoogleFonts,
+  loadOfficeFontFallbacks,
+  unloadOfficeFontFallbacks,
+  type OfficeFontFallbackRoute,
   WasmParserHost,
   dropDecodedBitmapCache,
   dropSvgImageCache,
@@ -34,7 +39,8 @@ import {
   type WorkerSvgDecodeResponse,
 } from '@silurus/ooxml-core/worker';
 import { workerRenderDeps } from './worker-render-deps.js';
-import { XLSX_GOOGLE_FONTS, xlsxFontPreloadNames } from './google-fonts.js';
+import { XLSX_GOOGLE_FONTS, xlsxFontPreloadNames, xlsxOfficeFontRequests, xlsxWorksheetOfficeFontRequests } from './google-fonts.js';
+import { officeRequestKey } from './shape-office-line.js';
 import { resolveSharedStringRows } from './shared-strings.js';
 import {
   addWorksheetCacheUsage,
@@ -44,7 +50,6 @@ import {
 } from './worksheet-resource-limits.js';
 import type { ParsedWorkbook, Worksheet } from './types.js';
 import { WorksheetViewProjectionCache } from './worker-protocol.js';
-import { GridGeometry } from './internal/grid-geometry.js';
 import { readXlsxArchiveBootstrap } from './internal/archive-bootstrap.js';
 import type { RenderWorkerRequest, RenderWorkerResponse } from './worker-protocol.js';
 import { isWorksheetPullCommand, WorksheetPullWorker } from './worksheet-pull-worker.js';
@@ -65,6 +70,7 @@ const host = new WasmParserHost<XlsxArchive>(init, {
 });
 const source = new WorkerWorksheetSourceOwner(host);
 let ooxmlWasmInput: Parameters<typeof host.setWasmInput>[0] | undefined;
+let cjkFallback: CjkLang = 'jp';
 let workbook: ParsedWorkbook | null = null;
 let archiveBacked = false;
 let renderers: LoadedWorkerRenderers = {};
@@ -73,6 +79,26 @@ let renderers: LoadedWorkerRenderers = {};
  *  FontFaceSet (`self.fonts`) and terminates with it, so there is nothing to
  *  release — only the sequencing (fonts landed before first paint) matters. */
 let fontsLoaded: Promise<unknown> = Promise.resolve();
+let officeFontFaces: FontFace[] = [];
+let officeFontRoutes: Record<string, OfficeFontFallbackRoute> = {};
+let checkedOfficeTupleSet = new Set<string>();
+let googleSubstitutes = false;
+let officeSheetLoads = new WeakMap<Worksheet, Promise<void>>();
+let officeSheetLoadQueue: Promise<void> = Promise.resolve();
+
+function startFontLoad(parsed: ParsedWorkbook, useGoogleFonts: boolean): void {
+  googleSubstitutes = useGoogleFonts;
+  fontsLoaded = Promise.all([
+    useGoogleFonts
+      ? preloadGoogleFonts(xlsxFontPreloadNames(parsed, cjkFallback), XLSX_GOOGLE_FONTS)
+      : Promise.resolve([]),
+    loadOfficeFontFallbacks(xlsxOfficeFontRequests(parsed)),
+  ]).then(([, office]) => {
+    officeFontFaces = office.faces;
+    officeFontRoutes = office.routes;
+    checkedOfficeTupleSet = new Set(office.checked);
+  });
+}
 const sheetCache = new Map<number, Worksheet>();
 const viewProjectionCache = new WorksheetViewProjectionCache();
 const sheetCacheUsage = new Map<number, WorksheetCacheUsage>();
@@ -210,6 +236,15 @@ self.onmessage = async (e: MessageEvent<
       // next document from being served a stale bitmap for an identically-named
       // zip path. Symmetric with XlsxWorkbook.destroy() and the docx/pptx render
       // workers (issue #781).
+      cjkFallback = req.cjkFallback ?? 'jp';
+      await fontsLoaded;
+      await officeSheetLoadQueue;
+      unloadOfficeFontFallbacks(officeFontFaces);
+      officeFontFaces = [];
+      officeFontRoutes = {};
+      checkedOfficeTupleSet = new Set();
+      officeSheetLoads = new WeakMap();
+      officeSheetLoadQueue = Promise.resolve();
       sheetCache.clear();
       viewProjectionCache.clear();
       sheetCacheUsage.clear();
@@ -225,13 +260,12 @@ self.onmessage = async (e: MessageEvent<
         const { parseDelimitedWorksheet } = await delimitedTextModule;
         const parsed = parseDelimitedWorksheet(req.data, req.options);
         workbook = parsed.workbook;
+        cjkFallback = xlsxCjkFallback(workbook, cjkFallback);
         const measured = measureWorksheet(parsed.worksheet);
         retainedSheetUsage = measured;
         sheetCache.set(0, parsed.worksheet);
         sheetCacheUsage.set(0, measured);
-        fontsLoaded = req.useGoogleFonts
-          ? preloadGoogleFonts(xlsxFontPreloadNames(parsed.workbook), XLSX_GOOGLE_FONTS)
-          : Promise.resolve();
+        startFontLoad(parsed.workbook, !!req.useGoogleFonts);
         const worksheetJson = new TextEncoder()
           .encode(JSON.stringify(parsed.worksheet)).buffer as ArrayBuffer;
         post({
@@ -275,13 +309,8 @@ self.onmessage = async (e: MessageEvent<
           : host.run(() => source.ooxml('resource usage').resource_usage()),
       );
       workbook = bootstrap.workbook;
-      if (req.useGoogleFonts) {
-        // Mirror XlsxWorkbook._load exactly: queue Google Fonts substitutes for
-        // every styled font name, plus the generic Arabic fallbacks. Fonts must
-        // land before rendering (which measures text), so we keep the promise
-        // and await it in the renderViewport handler.
-        fontsLoaded = preloadGoogleFonts(xlsxFontPreloadNames(workbook), XLSX_GOOGLE_FONTS);
-      }
+      cjkFallback = xlsxCjkFallback(workbook, cjkFallback);
+      startFontLoad(workbook, !!req.useGoogleFonts);
       post({
         type: 'parsed', id, workbook, usage: bootstrap.usage,
         maximumDigitWidth: source.maximumDigitWidth,
@@ -295,6 +324,29 @@ self.onmessage = async (e: MessageEvent<
       const { renderWorksheetViewport } = await orchestratorModule;
       const ws = sheetCache.get(req.sheetIndex);
       if (!ws) throw new Error('Worksheet is not loaded through its pull session');
+      let sheetFonts = officeSheetLoads.get(ws);
+      if (!sheetFonts) {
+        // Different sheets may be rendered concurrently. Serialize their
+        // worksheet-only probes so a completed missing tuple is tried once,
+        // while a tuple omitted by a preflight budget can be retried later.
+        sheetFonts = officeSheetLoadQueue.then(async () => {
+          const extraRequests = xlsxWorksheetOfficeFontRequests(ws).filter((request) => {
+            const key = officeRequestKey(request);
+            return !checkedOfficeTupleSet.has(key) && !(key in officeFontRoutes);
+          });
+          if (extraRequests.length === 0) return;
+          const extra = await loadOfficeFontFallbacks(extraRequests);
+          officeFontFaces.push(...extra.faces);
+          for (const key of extra.checked) {
+            if (checkedOfficeTupleSet.has(key)) continue;
+            checkedOfficeTupleSet.add(key);
+          }
+          Object.assign(officeFontRoutes, extra.routes);
+        });
+        officeSheetLoadQueue = sheetFonts.catch(() => {});
+        officeSheetLoads.set(ws, sheetFonts);
+      }
+      await sheetFonts;
       // Apply view-only size mutations to a render-local projection. Multiple
       // viewers may share this worker cache while retaining different outline
       // and resize state, so the cached worksheet itself must stay unchanged.
@@ -310,22 +362,18 @@ self.onmessage = async (e: MessageEvent<
       if (req.viewProjection?.autoRowHeightsPrepared) {
         markAutoRowHeightsPrepared(renderWorksheet);
       }
-      const maximumDigitWidth = req.layoutMetrics?.maximumDigitWidth
-        ?? source.maximumDigitWidth;
-      if (maximumDigitWidth !== undefined) {
-        if (!Number.isFinite(maximumDigitWidth) || maximumDigitWidth <= 0) {
-          throw new Error('XLSX maximum digit width must be a finite positive number');
-        }
-        GridGeometry.forWorksheet(renderWorksheet, maximumDigitWidth);
-      }
       const canvas = new OffscreenCanvas(1, 1); // orchestrator resizes it
       await renderWorksheetViewport(
-        workerRenderDeps(renderWorksheet, workbook.styles, renderers),
+        { ...workerRenderDeps(renderWorksheet, workbook.styles, renderers), cjkFallback },
         canvas,
         req.viewport,
         // Supply the in-worker byte loader so embedded images decode straight
-        // from the retained archive (no main-thread round-trip).
-        { ...renderOpts, fetchImage: getImage },
+        // from the retained archive (no main-thread round-trip). Pass the
+        // viewer's MDW through the render bind: seeding GridGeometry before
+        // that bind is ineffective because the worker's FontFaceSet can
+        // invalidate it on first use.
+        { ...renderOpts, authoritativeMdw: req.layoutMetrics?.maximumDigitWidth ?? source.maximumDigitWidth,
+          officeFontRoutes, googleSubstitutes, fetchImage: getImage },
         svgDecodeClient.decode,
       );
       const bitmap = canvas.transferToImageBitmap();

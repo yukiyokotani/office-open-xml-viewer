@@ -631,11 +631,15 @@ fn validate_local_entry(
         || le_u16(data, local + 4) != le_u16(data, entry.header + 6)
         || le_u16(data, local + 6) != Some(fields.flags)
         || le_u16(data, local + 8) != Some(fields.compression_method)
-        || le_u16(data, local + 10) != le_u16(data, entry.header + 12)
-        || le_u16(data, local + 12) != le_u16(data, entry.header + 14)
     {
         return None;
     }
+
+    // ECMA-376 Part 2, Annex B.2 requires duplicated local/central fields to
+    // agree, including the DOS timestamp. Some otherwise consistent packages
+    // carry a timestamp-only mismatch (#1495). Accept that bounded compatibility
+    // case because timestamps do not select or validate the payload; names,
+    // flags, compression, CRC, sizes, descriptors, and bounds remain exact.
 
     let payload_end = data_start.checked_add(usize::try_from(fields.compressed_size).ok()?)?;
     if payload_end > directory.start {
@@ -1604,6 +1608,28 @@ mod tests {
             zip::ZipArchive::with_config(preflight.read_config(), Cursor::new(bytes.as_slice()))
                 .unwrap();
         preflight.validate_archive_item_names(&mut archive).unwrap();
+    }
+
+    #[test]
+    fn preflight_accepts_local_and_central_timestamp_mismatch() {
+        let mut bytes = archive_bytes_with_single("word/document.xml", b"document");
+        let central = last_signature(&bytes, CENTRAL_DIRECTORY_HEADER_SIGNATURE);
+        assert_eq!(le_u16(&bytes, 10), le_u16(&bytes, central + 12));
+        assert_eq!(le_u16(&bytes, 12), le_u16(&bytes, central + 14));
+
+        bytes[10..12].copy_from_slice(&1u16.to_le_bytes());
+        bytes[12..14].copy_from_slice(&34u16.to_le_bytes());
+
+        let preflight = preflight_archive_limits(&bytes)
+            .expect("timestamp-only mismatch is a bounded compatibility case");
+        let mut archive =
+            zip::ZipArchive::with_config(preflight.read_config(), Cursor::new(bytes.as_slice()))
+                .unwrap();
+        preflight.validate_archive_item_names(&mut archive).unwrap();
+        let mut entry = archive.by_name("word/document.xml").unwrap();
+        let mut body = Vec::new();
+        entry.read_to_end(&mut body).unwrap();
+        assert_eq!(body, b"document");
     }
 
     #[test]

@@ -260,9 +260,9 @@ function verticalCellMode(
  * lines require: ECMA-376 §17.4.80/§17.4.81 size a row to its content, and
  * the rotated content's extent along the row axis is its line length. This
  * rule is derived from the specification alone. Rotated cells in automatic
- * or atLeast rows have no compatibility evidence yet; the pending control
- * is c03 (legacy-doc tables controls, DOC-TBL-3). In sample-19 a taller
- * neighbour row governs the height, so that pair does not exercise it.
+ * or atLeast rows have no Word compatibility evidence yet (a Word control
+ * for that case is pending); the observed documents only exercised rows
+ * whose height a taller neighbour cell governs.
  */
 function naturalLineExtentPt(
   layouts: readonly (ParagraphLayout | TableLayout)[],
@@ -376,13 +376,12 @@ export function acquireRetainedTable<State>(
       );
       const cellPath = [...sourcePath, rowIndex, cellIndex];
       const cellId = `${flowDomainId}:cell:${rowIndex}.${cellIndex}`;
+      // Same grouped insets as the horizontal content width below.
       const physicalContentWidthPt = Math.max(
         0,
         cellTotalWidthPt
-          - spacingInsets.startPt
-          - spacingInsets.endPt
-          - formatMargins.left
-          - formatMargins.right,
+          - (spacingInsets.startPt + spacingInsets.endPt)
+          - (formatMargins.left + formatMargins.right),
       );
       const verticalMode = cell.vMerge === false ? undefined : verticalCellMode(cell);
       const acquireAt = (lineWidthPt: number | undefined) => cell.vMerge === false
@@ -394,7 +393,19 @@ export function acquireRetainedTable<State>(
             outerState,
             sourcePath: cellPath,
           }, {
-            resolveContentWidthPt: () => lineWidthPt ?? physicalContentWidthPt,
+            // Match the grouped insets added to the intrinsic AutoFit minimum
+            // (intrinsic-width.ts and table-source-acquisition.ts). Reversing
+            // those groups avoids rounding an exact measured-width boundary
+            // below its own minimum. This preserves the measured boundary
+            // without adding a width allowance. Margin ownership is
+            // ECMA-376 §17.4.41/.42. A rotated cell is re-acquired along its
+            // rotated line axis instead (see verticalCellMode).
+            resolveContentWidthPt: (_cell, _table, totalWidthPt) => lineWidthPt ?? Math.max(
+              0,
+              totalWidthPt
+                - (spacingInsets.startPt + spacingInsets.endPt)
+                - (formatMargins.left + formatMargins.right),
+            ),
             createCellState: dependencies.createCellState,
             acquireParagraph: (
               cellState,
@@ -524,6 +535,11 @@ export function acquireRetainedTable<State>(
           return [{
             layout,
             sourceBlockIndex,
+            ...(sourceElement?.type === 'paragraph' ? {
+              keepLines: sourceElement.keepLines === true,
+              // §17.3.1.44: omission enables widow/orphan control.
+              widowControl: sourceElement.widowControl !== false,
+            } : {}),
             ...((layout.kind === 'paragraph' && paragraphHasPageDependency(layout))
               ? { pageDependent: true }
               : {}),

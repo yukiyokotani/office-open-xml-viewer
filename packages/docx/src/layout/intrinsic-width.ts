@@ -132,8 +132,10 @@ function compatibleTextKey(segment: LayoutTextSeg): string {
     segment.widthBalanceSpaceAdjustmentPt ?? null,
     // The snap-to-character-grid allocator consumes contiguous script blocks.
     // A shaping-compatible Latin→East-Asian seam is therefore still a semantic
-    // grid boundary and must survive this intrinsic-only merge.
-    segment.script,
+    // grid boundary and must survive this intrinsic-only merge. The slot is
+    // optional: metric-only anchor-host segments never pass through the
+    // shaping service, so their script stays unset.
+    segment.script ?? null,
     segment.tateChuYoko ?? false,
     // A tate-chu-yoko run is one authored one-em cell (§17.3.2.10). Two
     // adjacent runs with identical fonts remain two cells, so their source-run
@@ -475,7 +477,11 @@ export function measureParagraphIntrinsicWidths(
   }
   if (maximumWidthPt === 0) return { minWidthPt: 0, maxWidthPt: 0 };
 
-  const segments = mergeCompatibleTextSegments(buildSegments(paragraph.runs, environment));
+  const segments = mergeCompatibleTextSegments(buildSegments(paragraph.runs, {
+    ...environment,
+    lineSpacing: context.lineSpacing,
+    lineGridActive: context.lineGrid.active,
+  }));
   const paragraphWidthPt = Math.max(
     1,
     maximumWidthPt - context.physicalIndentLeftPt - context.physicalIndentRightPt,

@@ -153,7 +153,9 @@ async function measurePitch(bytes: Uint8Array, axis: 'y' | 'x', marker = '国境
     const key = family.toLowerCase();
     const metric = {
       family: 'serif', requestedFamily: family, weight: 400, style: 'normal' as const,
-      ...(family === '游明朝' ? { lineHeightRatio } : {}),
+      // Both authored aliases resolve to the same CSS face in this test
+      // backend, so they must agree on its vertical geometry.
+      lineHeightRatio,
       sourceIdentity: 'test-fixture:node-skia-generic-serif',
       synthesized: false,
     };

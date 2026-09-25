@@ -1,7 +1,7 @@
 # Third-Party Notices
 
 `@silurus/ooxml` is MIT-licensed (see [LICENSE](./LICENSE)). It bundles the
-third-party components listed below, none of which are copyleft. This file
+third-party components listed below. This file
 is included in the npm tarball so it travels with every install.
 
 ## JavaScript / bundled asset
@@ -23,7 +23,7 @@ claim.
 
 The optional equation-rendering engine (`@silurus/ooxml/math`, opt-in —
 see the [README's "Rendering equations" section](./README.md#rendering-equations))
-pre-bundles two Apache-2.0 packages into a single ~3 MB asset
+pre-bundles two Apache-2.0 packages into a single ~4 MB asset
 (`packages/core/assets/mathjax-stix2.js`, built by
 [`packages/core/build/build-mathjax.mjs`](./packages/core/build/build-mathjax.mjs)).
 It ships in the npm tarball but is only fetched by a consuming app at

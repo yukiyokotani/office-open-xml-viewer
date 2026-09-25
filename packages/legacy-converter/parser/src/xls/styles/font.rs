@@ -129,6 +129,11 @@ impl ResolvedFont {
             size: f64::from(self.size_twips) / 20.0,
             color,
             name: Some(self.name.clone()),
+            // BIFF8 FONT names the face directly; there is no theme scheme.
+            // bCharSet is the same authored metadata as SpreadsheetML
+            // `<charset val>` (the XLSX model keeps it without behaviour).
+            scheme: None,
+            charset: Some(self.charset),
             underline_style: match self.underline {
                 Underline::None | Underline::Single => None,
                 value => Some(value.xml_value().to_string()),

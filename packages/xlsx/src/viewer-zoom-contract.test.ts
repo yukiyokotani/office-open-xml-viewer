@@ -498,12 +498,10 @@ describe('XlsxViewer built-in +/- buttons follow the shared ladder (issue #842)'
 });
 
 /**
- * Non-regression: the pre-IX9 slider position ↔ scale mapping (PR #315's
- * "100% dead-center piecewise-linear" behaviour) is unchanged. These call the
- * private helpers directly so a future contract change can't silently alter the
- * slider feel.
+ * Slider interaction and non-regression coverage for the pre-IX9 position ↔
+ * scale mapping (PR #315's "100% dead-center piecewise-linear" behaviour).
  */
-describe('XlsxViewer zoom slider mapping (pre-IX9 non-regression)', () => {
+describe('XlsxViewer zoom slider', () => {
   it('slider position 50 maps to 100% for any bounds', () => {
     installDom();
     const { v } = mount(makeSheet());
@@ -516,5 +514,42 @@ describe('XlsxViewer zoom slider mapping (pre-IX9 non-regression)', () => {
     // Each half is its own linear segment.
     expect(priv.zoomPosToScale(0, 0.1, 4)).toBeCloseTo(0.1, 10);
     expect(priv.zoomPosToScale(100, 0.1, 4)).toBeCloseTo(4, 10);
+  });
+
+  it('magnetically snaps the thumb to 100% while dragged near the center', () => {
+    installDom();
+    const container = makeContainer();
+    const v = new XlsxViewer(container as unknown as HTMLElement, { cellScale: 0.5 });
+    const slider = container.querySelector('input[aria-label="Zoom"]');
+    if (!slider) throw new Error('built-in zoom slider not found');
+
+    // The attraction zone is expressed in slider-position units so it feels
+    // equally wide on both sides of the asymmetric 10%→100%→400% mapping.
+    slider.value = '48';
+    slider.dispatch('input');
+    expect(v.getScale()).toBe(1);
+    expect(slider.value).toBe('50');
+
+    v.setScale(1.5);
+    slider.value = '52';
+    slider.dispatch('input');
+    expect(v.getScale()).toBe(1);
+    expect(slider.value).toBe('50');
+  });
+
+  it('keeps continuous slider zoom outside the 100% attraction zone', () => {
+    installDom();
+    const container = makeContainer();
+    const v = new XlsxViewer(container as unknown as HTMLElement, { cellScale: 0.5 });
+    const slider = container.querySelector('input[aria-label="Zoom"]');
+    if (!slider) throw new Error('built-in zoom slider not found');
+
+    slider.value = '47';
+    slider.dispatch('input');
+    expect(v.getScale()).toBe(0.95);
+
+    slider.value = '53';
+    slider.dispatch('input');
+    expect(v.getScale()).toBe(1.18);
   });
 });

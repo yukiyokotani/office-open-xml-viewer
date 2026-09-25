@@ -1,7 +1,7 @@
 // Opt-in math engine entry point: `@silurus/ooxml/math`.
 //
 // Importing this module pulls in the MathJax v4 + STIX Two Math engine asset
-// (~3 MB). It is intentionally a SEPARATE bundle entry so that docx/pptx
+// (~4 MB). It is intentionally a SEPARATE bundle entry so that docx/pptx
 // viewers stay lean by default — equations only render when the consumer
 // explicitly wires the engine in via a named import:
 //

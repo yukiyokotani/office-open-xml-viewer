@@ -1,7 +1,7 @@
 {
   "name": "@silurus/ooxml-core",
   "private": true,
-  "version": "0.85.3",
+  "version": "0.88.0",
   "description": "Shared rendering primitives and types (internal workspace package of @silurus/ooxml)",
   "license": "MIT",
   "author": "Yuki Yokotani <silurus.dev@gmail.com>",
@@ -38,6 +38,7 @@
     "./internal/legacy-xls-source": "./src/conversion/legacy-xls-source.ts",
     "./internal/legacy-office-conversion": "./src/internal/legacy-office-conversion.ts",
     "./internal/owned-session": "./src/internal/owned-session.ts",
+    "./internal/office-auto-line": "./src/fonts/office-auto-line.ts",
     "./internal/progressive-layout-lifecycle": "./src/internal/progressive-layout-lifecycle.ts",
     "./internal/progressive-layout-observers": "./src/internal/progressive-layout-observers.ts",
     "./internal/resource-measurement": "./src/internal/resource-measurement.ts",

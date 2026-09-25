@@ -204,6 +204,91 @@ fn collect_merge_continuation_cells(merge_cells: &Value) -> HashSet<(u32, u32)> 
     set
 }
 
+pub(crate) fn render_sheet_comments(sheet: &Value, out: &mut String, has_comments: &mut bool) {
+    let Some(comments) = sheet["comments"].as_array() else {
+        return;
+    };
+    if comments.is_empty() {
+        return;
+    }
+    if !*has_comments {
+        out.push_str("\n## Review comments\n\n");
+        *has_comments = true;
+    }
+    let sheet_name = sheet["name"].as_str().unwrap_or("(unnamed)");
+    for comment in comments {
+        let cell = comment["cellRef"].as_str().unwrap_or("(unknown cell)");
+        let status = if comment["resolved"].as_bool() == Some(true) {
+            " (resolved)"
+        } else {
+            ""
+        };
+        let _ = writeln!(
+            out,
+            "### {} — {}{}\n",
+            escape_heading_text(sheet_name),
+            escape_heading_text(cell),
+            status
+        );
+        let text = comment["rootText"]
+            .as_str()
+            .or_else(|| comment["text"].as_str())
+            .unwrap_or("");
+        write_quoted_comment(
+            comment["author"].as_str().unwrap_or("(unknown)"),
+            text,
+            ">",
+            "",
+            out,
+        );
+        if let Some(replies) = comment["replies"].as_array() {
+            for reply in replies {
+                let status = if reply["resolved"].as_bool() == Some(true) {
+                    " (resolved)"
+                } else {
+                    ""
+                };
+                write_quoted_comment(
+                    reply["author"].as_str().unwrap_or("(unknown)"),
+                    reply["text"].as_str().unwrap_or(""),
+                    ">>",
+                    status,
+                    out,
+                );
+            }
+        }
+        out.push('\n');
+    }
+}
+
+fn write_quoted_comment(author: &str, text: &str, prefix: &str, status: &str, out: &mut String) {
+    let author = escape_inline_text(&author.replace(['\r', '\n'], " "));
+    let _ = writeln!(out, "{prefix} **{author}**{status}");
+    let _ = writeln!(out, "{prefix}");
+    if text.is_empty() {
+        let _ = writeln!(out, "{prefix}");
+    } else {
+        for line in text.lines() {
+            let _ = writeln!(out, "{prefix} {line}");
+        }
+    }
+}
+
+fn escape_heading_text(value: &str) -> String {
+    value
+        .replace(['\r', '\n'], " ")
+        .replace('\\', "\\\\")
+        .replace('#', "\\#")
+}
+
+fn escape_inline_text(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('*', "\\*")
+        .replace('_', "\\_")
+        .replace('`', "\\`")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,5 +351,32 @@ mod tests {
         render_sheet(&sheet, &shared, &mut out);
         // No populated cells → only the heading is emitted (no table body).
         assert!(!out.contains('|'), "empty sheet must have no table: {out}");
+    }
+
+    #[test]
+    fn review_comments_are_separated_quoted_and_threaded() {
+        let sheet = json!({
+            "name": "Review",
+            "comments": [{
+                "cellRef": "B4",
+                "author": "Reviewer",
+                "rootText": "Check this cell.\nKeep the formula.",
+                "text": "Check this cell.\nKeep the formula.\nUpdated.",
+                "resolved": true,
+                "replies": [{ "author": "Editor", "text": "Updated." }]
+            }]
+        });
+        let mut out = String::new();
+        let mut has_comments = false;
+
+        render_sheet_comments(&sheet, &mut out, &mut has_comments);
+
+        assert!(out.starts_with("\n## Review comments\n"), "{out}");
+        assert!(out.contains("### Review — B4 (resolved)"), "{out}");
+        assert!(
+            out.contains("> **Reviewer**\n>\n> Check this cell.\n> Keep the formula."),
+            "{out}"
+        );
+        assert!(out.contains(">> **Editor**\n>>\n>> Updated."), "{out}");
     }
 }

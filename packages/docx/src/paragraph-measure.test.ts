@@ -10,6 +10,8 @@ import {
   type WrapOracle,
 } from './paragraph-measure.js';
 import { measureParagraphIntrinsicWidth } from './layout/frame.js';
+import { createFontResolver } from './layout/font-service.js';
+import { createTextLayoutService } from './layout/text.js';
 import type { ParagraphLayoutContext } from './layout-context.js';
 import type { LayoutTextSeg } from './line-layout.js';
 import type { DocParagraph, DocxTextRun, FieldRun, ImageRun } from './types.js';
@@ -48,6 +50,42 @@ const environment = (
   documentHasEastAsianText: false,
   ...overrides,
 });
+
+const RESOLVED_EA_FAMILY = 'Arbitrary Resolved EA';
+const RESOLVED_EA_RATIO = 3269 / 2048;
+const resolvedEaMetrics = (ratio = RESOLVED_EA_RATIO) => ({
+  [RESOLVED_EA_FAMILY.toLowerCase()]: {
+    family: RESOLVED_EA_FAMILY,
+    eastAsianLineHeightRatio: ratio,
+    sourceIdentity: 'test-resource:resolved-east-asia',
+  },
+});
+
+function resolvedEaEnvironment(ratio?: number): ParagraphMeasurementEnvironment {
+  const metrics = ratio === undefined ? {} : resolvedEaMetrics(ratio);
+  const text = createTextLayoutService({
+    fonts: createFontResolver(ratio === undefined ? [] : [{
+      requestedFamily: RESOLVED_EA_FAMILY,
+      resolvedFamily: RESOLVED_EA_FAMILY,
+      source: 'local',
+      resourceIdentity: 'test-resource:resolved-east-asia',
+    }]),
+    measurer: {
+      fingerprint: 'resolved-east-asian-mark-test',
+      measure: (request) => ({
+        advancePt: [...request.text].length * request.fontSizePt * 0.5,
+        ascentPt: request.fontSizePt * 0.8,
+        descentPt: request.fontSizePt * 0.2,
+      }),
+    },
+    fontMetrics: metrics,
+    localMetrics: metrics,
+  });
+  return environment({
+    useFeLayout: true,
+    layoutServices: { text } as NonNullable<ParagraphMeasurementEnvironment['layoutServices']>,
+  });
+}
 
 const paragraph = (overrides: Partial<DocParagraph> = {}): DocParagraph => ({
   alignment: 'left',
@@ -119,6 +157,31 @@ const measuredTextSequence = (
   .join(''));
 
 describe('measureParagraph', () => {
+  it('allocates the selected text marker and body line union before pagination', () => {
+    const doc = paragraph({ runs: [{ type: 'text', ...textRun('List item') }] });
+    const auto = layoutContext({
+      spaceBeforePt: 0,
+      lineSpacing: { rule: 'auto', value: 1.15, explicit: true },
+    });
+    const first = measureParagraph(
+      doc, auto, placement({ startYPt: 0 }), measurer,
+      environment({ firstLineNumberingMarkerBox: { ascentPt: 12, descentPt: 1 } }),
+    );
+    const plain = measureParagraph(
+      doc, auto, placement({ startYPt: 0 }), measurer, environment(),
+    );
+    expect(plain.lines[0]?.advancePt).toBeCloseTo(11.5);
+    expect(first.lines[0]?.advancePt).toBeCloseTo(15.5);
+    expect(first.contentEndYPt).toBeCloseTo(15.5);
+    expect(first.lines[0]?.layout.ascent).toBeCloseTo(12);
+
+    const exact = measureParagraph(
+      doc, layoutContext({ spaceBeforePt: 0, lineSpacing: { rule: 'exact', value: 12, explicit: true } }),
+      placement({ startYPt: 0 }), measurer,
+      environment({ firstLineNumberingMarkerBox: { ascentPt: 12, descentPt: 1 } }),
+    );
+    expect(exact.lines[0]?.advancePt).toBeCloseTo(12);
+  });
   it('uses the same character-grid right-edge adjustment for line partitioning', () => {
     const source = paragraph({
       runs: [{ type: 'text', ...textRun('あ'.repeat(20)) }],
@@ -218,6 +281,25 @@ describe('measureParagraph', () => {
     // keeps the 35pt natural line intact, then caps the preferred width to the
     // real 25pt anchor band.
     expect(measureParagraphIntrinsicWidth(doc, context, 25, measurer, environment())).toBe(25);
+  });
+
+  it('fingerprints anchor-host segments whose shaping script slot is unset', () => {
+    // anchorHost runs acquire as metric-only empty segments (line-layout.ts),
+    // which never pass through the shaping service, so their optional
+    // LayoutTextSeg.script stays undefined. The intrinsic-merge fingerprint
+    // must tolerate that instead of throwing "Cannot fingerprint undefined".
+    const doc = paragraph({
+      spaceBefore: 0,
+      spaceAfter: 0,
+      runs: [
+        { type: 'anchorHost', fontSize: 10 },
+        { type: 'text', ...textRun('abc') },
+      ],
+    });
+    const context = layoutContext({ spaceBeforePt: 0, spaceAfterPt: 0 });
+
+    expect(measureParagraphIntrinsicWidth(doc, context, 200, measurer, environment()))
+      .toBe(15);
   });
 
   it('includes paragraph indents, hanging numbering space, tabs, bidi, and inline resources', () => {
@@ -396,16 +478,16 @@ describe('measureParagraph', () => {
     expect(result.contentEndYPt).toBe(40);
   });
 
-  it('uses face-specific Far East design metrics for useFELayout empty marks', () => {
+  it('uses resolved-resource Far East metrics for useFELayout empty marks', () => {
     const markAdvance = (
       fontSize: number,
       pitchPt: number,
-      family: string,
+      ratio?: number,
     ): number => measureParagraph(
       paragraph({
         defaultFontSize: fontSize,
-        defaultFontFamily: family,
-        defaultFontFamilyEastAsia: family,
+        defaultFontFamily: RESOLVED_EA_FAMILY,
+        defaultFontFamilyEastAsia: RESOLVED_EA_FAMILY,
         spaceBefore: 0,
       }),
       layoutContext({
@@ -414,18 +496,17 @@ describe('measureParagraph', () => {
       }),
       placement({ startYPt: 0 }),
       measurer,
-      environment({ useFeLayout: true }),
+      resolvedEaEnvironment(ratio),
     ).contentEndYPt;
 
-    // Word 16.111.1 / macOS 26.5.2 synthetic matrix. Meiryo UI uses
-    // 1.3 * hhea while the other requested faces stay below one grid pitch.
-    expect(markAdvance(10, 18, 'Meiryo UI')).toBe(18);
-    expect(markAdvance(11, 18, 'Meiryo UI')).toBe(36);
-    expect(markAdvance(12, 20, 'Meiryo UI')).toBe(20);
-    expect(markAdvance(13, 20, 'Meiryo UI')).toBe(40);
-    expect(markAdvance(11, 18, 'Times New Roman')).toBe(18);
-    expect(markAdvance(11, 18, 'Yu Gothic')).toBe(18);
-    expect(markAdvance(11, 18, 'ＭＳ 明朝')).toBe(18);
+    // A parsed 1.651025-em resource crosses these grid boundaries; the same
+    // arbitrary family without a resource metric stays on the generic path.
+    const ratio = ((2171 + 430) * 1.3) / 2048;
+    expect(markAdvance(10, 18, ratio)).toBe(18);
+    expect(markAdvance(11, 18, ratio)).toBe(36);
+    expect(markAdvance(12, 20, ratio)).toBe(20);
+    expect(markAdvance(13, 20, ratio)).toBe(40);
+    expect(markAdvance(11, 18)).toBe(18);
   });
 
   it('keeps positive atLeast useFELayout marks on the grid unless exact spacing overrides it', () => {
@@ -434,8 +515,8 @@ describe('measureParagraph', () => {
     const measure = (lineSpacing: typeof atLeast | typeof exact): number => measureParagraph(
       paragraph({
         defaultFontSize: 11,
-        defaultFontFamily: 'Meiryo UI',
-        defaultFontFamilyEastAsia: 'Meiryo UI',
+        defaultFontFamily: RESOLVED_EA_FAMILY,
+        defaultFontFamilyEastAsia: RESOLVED_EA_FAMILY,
         lineSpacing,
         spaceBefore: 0,
       }),
@@ -446,7 +527,7 @@ describe('measureParagraph', () => {
       }),
       placement({ startYPt: 0 }),
       measurer,
-      environment({ useFeLayout: true }),
+      resolvedEaEnvironment(((2171 + 430) * 1.3) / 2048),
     ).contentEndYPt;
 
     // §17.6.5 names exact spacing (not atLeast) as the grid-line override.
@@ -461,8 +542,8 @@ describe('measureParagraph', () => {
       const result = measureParagraph(
         paragraph({
           defaultFontSize: 10,
-          defaultFontFamily: 'Meiryo',
-          defaultFontFamilyEastAsia: 'Meiryo',
+          defaultFontFamily: RESOLVED_EA_FAMILY,
+          defaultFontFamilyEastAsia: RESOLVED_EA_FAMILY,
           lineSpacing: atLeastZero,
           spaceBefore: 0,
         }),
@@ -473,13 +554,13 @@ describe('measureParagraph', () => {
         }),
         placement({ startYPt: 0 }),
         measurer,
-        environment({ useFeLayout: true }),
+        resolvedEaEnvironment(RESOLVED_EA_RATIO),
       );
 
       // Word's atLeast-zero compatibility path keeps a line whose design box
       // exceeds one grid pitch at its raw design advance instead of rounding
       // it to a second grid cell. Empty paragraph marks follow the same rule.
-      expect(result.contentEndYPt).toBeCloseTo(10 * 3269 / 2048, 12);
+      expect(result.contentEndYPt).toBeCloseTo(10 * RESOLVED_EA_RATIO, 12);
     },
   );
 
@@ -492,8 +573,8 @@ describe('measureParagraph', () => {
     const result = measureParagraph(
       paragraph({
         defaultFontSize: 10,
-        defaultFontFamily: 'Meiryo',
-        defaultFontFamilyEastAsia: 'Meiryo',
+        defaultFontFamily: RESOLVED_EA_FAMILY,
+        defaultFontFamilyEastAsia: RESOLVED_EA_FAMILY,
         lineSpacing,
         spaceBefore: 0,
       }),
@@ -504,7 +585,7 @@ describe('measureParagraph', () => {
       }),
       placement({ startYPt: 0 }),
       measurer,
-      environment({ useFeLayout: true }),
+      resolvedEaEnvironment(RESOLVED_EA_RATIO),
     );
 
     expect(result.contentEndYPt).toBeCloseTo(expected, 12);
@@ -520,18 +601,18 @@ describe('measureParagraph', () => {
     const result = measureParagraph(
       paragraph({
         defaultFontSize: 10,
-        defaultFontFamily: 'Meiryo',
-        defaultFontFamilyEastAsia: 'Meiryo',
+        defaultFontFamily: RESOLVED_EA_FAMILY,
+        defaultFontFamilyEastAsia: RESOLVED_EA_FAMILY,
         lineSpacing,
         spaceBefore: 0,
       }),
       layoutContext({ lineGrid, lineSpacing, spaceBeforePt: 0 }),
       placement({ startYPt: 0 }),
       measurer,
-      environment({ useFeLayout: true }),
+      resolvedEaEnvironment(RESOLVED_EA_RATIO),
     );
 
-    expect(result.contentEndYPt).toBeCloseTo(10 * 3269 / 2048, 12);
+    expect(result.contentEndYPt).toBeCloseTo(10 * RESOLVED_EA_RATIO, 12);
   });
 
   it('matches observed Word spacing for an explicit atLeast line on a body grid', () => {
@@ -704,6 +785,52 @@ describe('measureParagraph', () => {
 
     expect(result.markOnly).toBe(false);
     expect(result.lines[0].advancePt).toBe(24);
+  });
+
+  it('takes an image-only line’s auto leading from its selected paragraph-mark face', () => {
+    const multiple = 259 / 240;
+    const imageHeightPt = 360000 / 12700;
+    const text = createTextLayoutService({
+      // The Word PDF comparison assumes a loaded Calibri paragraph-mark face.
+      // An authored CSS name alone cannot establish that face in Canvas.
+      fonts: createFontResolver([{
+        requestedFamily: 'Calibri', resolvedFamily: 'Calibri', source: 'local',
+        resourceIdentity: 'office-local:local("Calibri")',
+      }]),
+      measurer: {
+        fingerprint: 'inline-picture-mark-face',
+        measure: (request) => ({
+          advancePt: [...request.text].length * request.fontSizePt * 0.5,
+          ascentPt: request.fontSizePt * 0.8,
+          descentPt: request.fontSizePt * 0.2,
+        }),
+      },
+      fontMetrics: {}, localMetrics: {},
+    });
+    const source = paragraph({
+      defaultFontFamily: 'Calibri', defaultFontSize: 11,
+      spaceBefore: 0, spaceAfter: 0,
+      lineSpacing: { rule: 'auto', value: multiple, explicit: true },
+      runs: [{
+        type: 'image', imagePath: 'word/media/inline.png', mimeType: 'image/png',
+        widthPt: imageHeightPt, heightPt: imageHeightPt, anchor: false,
+      }],
+    });
+    const result = measureParagraph(
+      source,
+      layoutContext({
+        spaceBeforePt: 0, spaceAfterPt: 0,
+        lineSpacing: { rule: 'auto', value: multiple, explicit: true },
+      }),
+      placement(), measurer,
+      environment({
+        layoutServices: { text } as NonNullable<ParagraphMeasurementEnvironment['layoutServices']>,
+      }),
+    );
+
+    // Controlled Word PDF advances 29.363pt between successive image tops;
+    // multiplying the 28.346pt picture by 259/240 would advance 30.591pt.
+    expect(result.lines[0].advancePt).toBeCloseTo(29.363, 1);
   });
 
   it('preserves exact line spacing verbatim', () => {

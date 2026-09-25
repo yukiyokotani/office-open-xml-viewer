@@ -801,7 +801,15 @@ function getCachedOwnedBitmap(
   }
 
   const produced = withDecodedImageSlot(owner, produce);
-  const ownedPromise = produced.then(({ bitmap, owned }) => (owned ? bitmap : null));
+  // This branch exists only so eviction/teardown can eventually close a surface
+  // owned by the entry. A failed producer owns nothing to close, so normalize
+  // that outcome immediately instead of retaining a rejected cleanup promise.
+  // In particular, a render-pass lease may defer consuming this branch until a
+  // slower sibling image settles; leaving it rejected meanwhile would surface a
+  // global unhandled rejection even though the caller handled `promise` below.
+  const ownedPromise = produced
+    .then(({ bitmap, owned }) => (owned ? bitmap : null))
+    .catch(() => null);
   const promise = produced.then(({ bitmap, owned }) => {
     try {
       registerActiveBitmap(owner, bitmap);

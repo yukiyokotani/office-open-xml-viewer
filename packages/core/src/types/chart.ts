@@ -9,16 +9,20 @@
 import type {
   DrawingMLCustomDashSegment,
   Fill,
+  Glow,
   GradientFill,
   PatternFill,
+  Reflection,
+  Shadow,
+  SoftEdge,
   SolidFill,
 } from './common';
 
 export interface ChartSeries {
   name: string;
-  /** Effective ChartEx `CT_Series@formatIdx` used to select linked Chart Style
-   * formatting. When the attribute is omitted the parser stores the series'
-   * original document-order index, before hidden series are removed. */
+  /** Effective source formatting index used to select Chart Style paint:
+   * ChartEx `CT_Series@formatIdx`, or classic `<c:ser><c:idx>`. When omitted,
+   * the parser stores the original document-order index before filtering. */
   chartexFormatIdx?: number | null;
   /** Hex without '#'. null = fall back to palette. */
   color: string | null;
@@ -70,8 +74,8 @@ export interface ChartSeries {
    * consumes this only when `ChartModel.plotVisibleOnly` is explicitly true. */
   sourceHidden?: boolean[] | null;
   /**
-   * Per-data-point colors (pie / doughnut). Hex without '#'. null inside the
-   * array = use palette for that slice. Omit entirely for non-pie series.
+   * Direct per-data-point colors from `<c:dPt>`. Hex without '#'; null means
+   * the point has no direct fill and may use linked/numeric style paint.
    */
   dataPointColors?: (string | null)[] | null;
   /**
@@ -182,8 +186,12 @@ export interface ChartSeries {
    * resolved or its grammar is not represented by the current marker model.
    * This keeps a less-specific linked Chart Style from replacing it. */
   markerFillPaintAuthored?: boolean | null;
+  /** Direct `<c:marker><c:spPr>` DrawingML effect component. */
+  markerStyle?: ChartExElementStyle | null;
   /** `<c:marker><c:spPr><a:ln><a:solidFill>` resolved hex (no `#`). */
   markerLine?: string | null;
+  /** A direct marker-outline paint was authored even when unresolved. */
+  markerLinePaintAuthored?: boolean | null;
   /** `<c:marker><c:spPr><a:ln w>` marker-outline width in EMU. */
   markerLineWidthEmu?: number | null;
   /**
@@ -255,6 +263,8 @@ export interface ChartSeries {
  * fitted to the series' data points.
  */
 export interface ChartTrendline {
+  /** Direct `<c:trendline><c:spPr>` provenance/effects for style modifiers. */
+  style?: ChartExElementStyle | null;
   /** Optional authored `<c:name>` shown in the legend. */
   name?: string | null;
   /**
@@ -323,6 +333,8 @@ export interface ChartTrendline {
   lineDash?: string | null;
   /** `<c:spPr><a:ln><a:noFill/>` — suppress the trendline stroke. */
   lineHidden?: boolean | null;
+  /** A direct trendline line paint was authored even when unresolved. */
+  linePaintAuthored?: boolean | null;
 }
 
 export interface ChartDataPointOverride {
@@ -331,9 +343,9 @@ export interface ChartDataPointOverride {
   color?: string;
   /** Direct point `<a:noFill/>`; suppresses series/style fill fallback. */
   fillHidden?: boolean;
-  /** Direct `<c:dPt><c:spPr>` DrawingML shape paint. Bubble charts consume
-   * this carrier for gradient, pattern, picture, and unresolved fill
-   * provenance; other classic families retain their established point model. */
+  /** Direct `<c:dPt><c:spPr>` DrawingML shape paint. All classic families use
+   * this bounded carrier for structured and unresolved paint precedence;
+   * scalar fields remain compatibility projections. */
   chartexStyle?: ChartExElementStyle | null;
   /** Direct point outline color (no `#`). */
   lineColor?: string;
@@ -351,7 +363,11 @@ export interface ChartDataPointOverride {
   /** Direct point marker-fill provenance; retained independently from the
    * resolved paint so unsupported/unresolved paint still wins precedence. */
   markerFillPaintAuthored?: boolean | null;
+  /** Direct `<c:dPt><c:marker><c:spPr>` DrawingML effect component. */
+  markerStyle?: ChartExElementStyle | null;
   markerLine?: string;
+  /** A direct marker-outline paint was authored even when unresolved. */
+  markerLinePaintAuthored?: boolean | null;
   /** Direct point marker-outline width in EMU. */
   markerLineWidthEmu?: number;
   /** Direct `<c:dPt><c:bubble3D>` override. Only bubble charts consume it. */
@@ -454,9 +470,20 @@ export interface ChartDataLabelOverride {
  *  fields optional: absent → transparent / unbordered. Mirror of Rust
  *  `ChartLabelBox`. */
 export interface ChartLabelBox {
+  /** Direct label `<c:spPr>` provenance/effects for style modifiers. */
+  style?: ChartExElementStyle | null;
+  /** Renderer-facing linked/numeric effect layer. Kept separate so a local
+   * shape effect can override it atomically without losing palette domains. */
+  effectFallbackStyle?: ChartExElementStyle | null;
+  /** Palette index for the local shape effect (normally zero). */
+  effectStyleIndex?: number;
+  /** Series/point formatting index for the linked/numeric effect role. */
+  effectFallbackIndex?: number;
   /** `<a:solidFill>` resolved hex (no `#`). Box background. */
   fill?: string;
-  fillPaint?: SolidFill | GradientFill | PatternFill | null;
+  /** Full DrawingML shape fill. Linked Chart Style roles may resolve a
+   * theme-owned picture fill even when the chart-local shape is omitted. */
+  fillPaint?: Fill | null;
   fillHidden?: boolean | null;
   fillPaintAuthored?: boolean | null;
   /** `<a:ln><a:solidFill>` resolved hex (no `#`). Border stroke. */
@@ -530,9 +557,15 @@ export interface ChartSeriesDataLabels {
   leaderLineHidden?: boolean;
   /** DrawingML preset dash for the leader-line stroke. */
   leaderLineDash?: string;
+  /** A direct leader-line paint was authored even when unresolved. */
+  leaderLinePaintAuthored?: boolean | null;
+  /** Direct `<c:leaderLines><c:spPr>` provenance/effects. */
+  leaderLineStyle?: ChartExElementStyle | null;
 }
 
 export interface ChartErrBars {
+  /** Direct `<c:errBars><c:spPr>` provenance/effects for style modifiers. */
+  style?: ChartExElementStyle | null;
   /** "x" | "y". */
   dir: string;
   /** "plus" | "minus" | "both". */
@@ -547,6 +580,8 @@ export interface ChartErrBars {
   dash?: string;
   /** Explicit `<c:errBars><c:spPr><a:ln><a:noFill/>`. */
   hidden?: boolean;
+  /** A direct error-bar line paint was authored even when unresolved. */
+  linePaintAuthored?: boolean | null;
 }
 
 /**
@@ -598,6 +633,8 @@ export interface ChartPlotGroup {
   barDirection?: string | null;
   scatterStyle?: string | null;
   radarStyle?: string | null;
+  /** Group-local `<c:varyColors>`; point domains must not depend on siblings. */
+  varyColors?: boolean | null;
   gapWidth?: number | null;
   overlap?: number | null;
   bubbleScale?: number | null;
@@ -610,11 +647,23 @@ export type ChartLineDashSegment = DrawingMLCustomDashSegment;
 
 /** Effective paint for one role in an Office 2013+ Chart Style part. */
 export interface ChartExElementStyle {
+  /** The source carried a local `spPr`; used by CT_StyleEntry override mods. */
+  shapePropertiesPresent?: boolean | null;
+  /** Permit a present direct `spPr` with omitted fill to mean no fill. */
+  allowNoFillOverride?: boolean | null;
+  /** Permit a present direct `spPr` with omitted line to mean no line. */
+  allowNoLineOverride?: boolean | null;
   /** Linked Chart Style text defaults (`fontRef` + `defRPr`). */
   fontSizeHpt?: number | null;
   fontBold?: boolean | null;
   fontItalic?: boolean | null;
   fontColor?: string | null;
+  /** Per-color-style-index text colors resolved from `fontRef/styleClr`. */
+  fontColors?: Array<string | null> | null;
+  /** Fixed zero-based Chart Colors index; absent means relative (`auto`). */
+  fontColorIndex?: number | null;
+  /** Source formatting indexes corresponding to compact text palette slots. */
+  fontFormattingIndices?: number[] | null;
   fontPaintAuthored?: boolean | null;
   fontHidden?: boolean | null;
   fontFace?: string | null;
@@ -666,10 +715,35 @@ export interface ChartExElementStyle {
    * ratios observed in Office vector output for `dbl`, `thinThick`,
    * `thickThin`, and `tri`. */
   lineCompound?: string | null;
+  /** Per-color-style-index DrawingML effects after `phClr` substitution. */
+  shadows?: Array<Shadow | null> | null;
+  innerShadows?: Array<Shadow | null> | null;
+  glows?: Array<Glow | null> | null;
+  softEdges?: Array<SoftEdge | null> | null;
+  reflections?: Array<Reflection | null> | null;
+  /** A concrete local or referenced effect component was authored. */
+  effectAuthored?: boolean | null;
+  /** `effectRef idx=0` is the only linked-effect fallthrough sentinel. */
+  effectNoStyle?: boolean | null;
+  /** Concrete effects were malformed, missing, or outside the shared model. */
+  effectUnsupported?: boolean | null;
   /** Fixed zero-based Chart Colors index; absent means relative (`auto`). */
   fillColorIndex?: number | null;
+  /** Source formatting indexes corresponding to compact fill palette slots. */
+  fillFormattingIndices?: number[] | null;
+  /** Numeric-style slots which deliberately fall through to the semantic
+   * automatic mark paint, rather than representing authored unresolved paint. */
+  fillSemanticFallbackIndices?: number[] | null;
   /** Fixed zero-based Chart Colors index; absent means relative (`auto`). */
   lineColorIndex?: number | null;
+  /** Source formatting indexes corresponding to compact line palette slots. */
+  lineFormattingIndices?: number[] | null;
+  /** Numeric-style outline slots which deliberately use semantic fallback. */
+  lineSemanticFallbackIndices?: number[] | null;
+  /** Source formatting indexes corresponding to compact effect palette slots. */
+  effectFormattingIndices?: number[] | null;
+  /** Fixed zero-based Chart Colors index for an effect styleClr reference. */
+  effectColorIndex?: number | null;
 }
 
 /**
@@ -699,8 +773,18 @@ export interface ChartSurfaceBandFormat {
   lineHidden?: boolean | null;
 }
 
+/** Numeric `c:style` dataPoint3D roles resolved in the semantic Surface-band
+ * index domain. Pattern palettes are count-independent; Table 5 Fade palettes
+ * retain one bounded role for each evidenced 1..48 band count. */
+export interface ChartClassicSurfaceBandStyles {
+  fixed?: ChartExElementStyle | null;
+  byBandCount?: Array<ChartExElementStyle | null> | null;
+}
+
 /** `<c:plotArea><c:dTable>` (`CT_DTable`) for classic DrawingML charts. */
 export interface ChartDataTable {
+  /** Direct `<c:dTable><c:spPr>` provenance/effects for style modifiers. */
+  style?: ChartExElementStyle | null;
   showHorizontalBorder: boolean;
   showVerticalBorder: boolean;
   showOutline: boolean;
@@ -708,6 +792,9 @@ export interface ChartDataTable {
   fontSizeHpt?: number | null;
   fontFace?: string | null;
   fontColor?: string | null;
+  /** Direct data-table text paint owns the component, even when unresolved. */
+  fontPaintAuthored?: boolean | null;
+  fontHidden?: boolean | null;
   fontBold?: boolean | null;
   fontItalic?: boolean | null;
   /** Resolved solid compatibility projection of `<c:dTable><c:spPr>`. */
@@ -724,6 +811,8 @@ export interface ChartDataTable {
   lineWidthEmu?: number | null;
   lineDash?: string | null;
   lineHidden?: boolean | null;
+  /** A direct data-table line paint was authored even when unresolved. */
+  linePaintAuthored?: boolean | null;
 }
 
 export interface ChartModel {
@@ -759,6 +848,21 @@ export interface ChartModel {
   /** Text boxes in the Chart Drawing part referenced by `<c:userShapes>`.
    *  Coordinates are chart-space fractions from `<cdr:relSizeAnchor>`. */
   chartTextBoxes?: ChartTextBox[] | null;
+  /** Chart-space `txPr`, inherited between element-local text and chart style. */
+  chartTextStyle?: ChartExElementStyle | null;
+  /** Direct shape-property carriers retained for linked-style modifiers/effects. */
+  chartAreaStyle?: ChartExElementStyle | null;
+  plotAreaStyle?: ChartExElementStyle | null;
+  legendStyle?: ChartExElementStyle | null;
+  titleStyle?: ChartExElementStyle | null;
+  catAxisStyle?: ChartExElementStyle | null;
+  valAxisStyle?: ChartExElementStyle | null;
+  catAxisTitleStyle?: ChartExElementStyle | null;
+  valAxisTitleStyle?: ChartExElementStyle | null;
+  catAxisMajorGridlineStyle?: ChartExElementStyle | null;
+  catAxisMinorGridlineStyle?: ChartExElementStyle | null;
+  valAxisMajorGridlineStyle?: ChartExElementStyle | null;
+  valAxisMinorGridlineStyle?: ChartExElementStyle | null;
   /**
    * §21.2.2.227 `<c:varyColors val="1"/>` on a SINGLE-series bar/column chart:
    * color each data point (bar) from the theme/palette sequence and list one
@@ -856,6 +960,7 @@ export interface ChartModel {
   titleFontSizeHpt: number | null;
   /** Title font color as a hex string without '#' (e.g. "1B4332"). null = default. */
   titleFontColor: string | null;
+  titleFontPaintAuthored?: boolean | null;
   /** Title font family from `<a:latin typeface>` (ECMA-376 §20.1.4.2.24). null = default. */
   titleFontFace: string | null;
   /** `<c:catAx><c:txPr>` font size (hpt). null = fall back to proportional default. */
@@ -865,12 +970,17 @@ export interface ChartModel {
   /** `<c:catAx><c:txPr>…<a:solidFill>` tick-label color (hex without '#').
    *  null = renderer default. Lets templates color category labels gray. */
   catAxisFontColor?: string | null;
+  catAxisFontPaintAuthored?: boolean | null;
   /** `<c:valAx><c:txPr>…<a:solidFill>` tick-label color (hex without '#'). */
   valAxisFontColor?: string | null;
+  valAxisFontPaintAuthored?: boolean | null;
   /** `<c:dLbls><c:txPr>` font size (hpt) for data-point value labels. */
   dataLabelFontSizeHpt: number | null;
   /** `<c:dLbls|cx:dataLabels>` text bold flag. null = chart-style default. */
   dataLabelFontBold?: boolean | null;
+  dataLabelFontItalic?: boolean | null;
+  dataLabelFontLanguage?: string | null;
+  dataLabelFontBaseline?: number | null;
   /** Waterfall subtotal category indices. */
   subtotalIndices: number[];
   /** `<c:legend><c:manualLayout>` absolute placement fractions of the chart
@@ -879,10 +989,12 @@ export interface ChartModel {
    *  gets the reserved band. null = use default layout. */
   legendManualLayout?: LegendManualLayout | null;
   /**
-   * `<c:valAx><c:numFmt@formatCode>` — format code applied to value-axis tick
-   * labels (ECMA-376 §21.2.2.21). null = plain numeric formatting.
+   * Effective value-axis tick format after source linking is resolved.
+   * null = plain numeric formatting.
    */
   valAxisFormatCode?: string | null;
+  /** Authored axis code/linkage, retained apart from the effective tick code. */
+  valAxisNumberFormat?: ChartAxisNumberFormat | null;
   /** `<c:valAx><c:dispUnits>` display-only divisor and optional label. Series
    * values and plot geometry stay in their authored units. */
   valAxisDisplayUnits?: ChartDisplayUnits | null;
@@ -907,6 +1019,7 @@ export interface ChartModel {
   dataLabelPosition?: string | null;
   /** Hex (no `#`) for data label text, resolved from `<c:dLbls><c:txPr>`. */
   dataLabelFontColor?: string | null;
+  dataLabelFontPaintAuthored?: boolean | null;
   /**
    * `<c:dLbls><c:numFmt@formatCode>` — chart-level override for data label
    * number format (ECMA-376 §21.2.2.35). When absent, `valFormatCode` on each
@@ -915,6 +1028,9 @@ export interface ChartModel {
   dataLabelFormatCode?: string | null;
   /** `<c:title>...defRPr@b>` chart title bold flag. */
   titleFontBold?: boolean | null;
+  titleFontItalic?: boolean | null;
+  titleFontLanguage?: string | null;
+  titleFontBaseline?: number | null;
   /** `<c:catAx><c:txPr>...defRPr@b>` X-axis tick label bold flag. */
   catAxisFontBold?: boolean | null;
   /** `<c:catAx><c:txPr>...defRPr@i>` X-axis tick label italic flag. */
@@ -932,6 +1048,7 @@ export interface ChartModel {
   catAxisTitleFontItalic?: boolean | null;
   /** `<c:catAx><c:title>` run-prop color (hex without '#'). null = default. */
   catAxisTitleFontColor?: string | null;
+  catAxisTitleFontPaintAuthored?: boolean | null;
   /** Authored `<c:catAx><c:title>` DrawingML `bodyPr@rot` in raw `ST_Angle`
    *  units (60000ths of a degree). Applied independently from `vert`. */
   catAxisTitleRotation?: number | null;
@@ -959,6 +1076,7 @@ export interface ChartModel {
   valAxisTitleFontItalic?: boolean | null;
   /** `<c:valAx><c:title>` run-prop color (hex without '#'). null = default. */
   valAxisTitleFontColor?: string | null;
+  valAxisTitleFontPaintAuthored?: boolean | null;
   /** Authored `<c:valAx><c:title>` DrawingML `bodyPr@rot` in raw `ST_Angle`
    *  units (60000ths of a degree). */
   valAxisTitleRotation?: number | null;
@@ -997,10 +1115,14 @@ export interface ChartModel {
   legendFontFace?: string | null;
   /** `<c:legend><c:txPr>…<a:solidFill>` legend text color (hex without '#'). */
   legendFontColor?: string | null;
+  legendFontPaintAuthored?: boolean | null;
   /** `<c:legend><c:txPr>` legend font size (OOXML hundredths of a point). */
   legendFontSizeHpt?: number | null;
   /** `<c:legend><c:txPr>…defRPr@b` legend bold flag. */
   legendFontBold?: boolean | null;
+  legendFontItalic?: boolean | null;
+  legendFontLanguage?: string | null;
+  legendFontBaseline?: number | null;
   /** `<c:legend><c:spPr>` explicit frame fill (hex without '#'). */
   legendFillColor?: string | null;
   /** Structured `<c:legend><c:spPr>` fill. Solid fills are also mirrored in
@@ -1080,10 +1202,11 @@ export interface ChartModel {
   /** A direct `<c:valAx><c:spPr><a:ln>` paint was authored. */
   valAxisLinePaintAuthored?: boolean | null;
   /**
-   * `<c:catAx><c:numFmt@formatCode>` (or scatter X-axis valAx). When set,
-   * the renderer formats X-axis tick labels with this code (e.g. dates).
+   * Effective category-axis tick format (or scatter X-axis valAx).
    */
   catAxisFormatCode?: string | null;
+  /** Authored axis code/linkage, retained apart from the effective tick code. */
+  catAxisNumberFormat?: ChartAxisNumberFormat | null;
   /**
    * `<c:catAx><c:scaling><c:min/max>` — explicit X-axis range. Used by
    * scatter / bubble charts whose X axis is numeric. null = derive from
@@ -1103,6 +1226,12 @@ export interface ChartModel {
    * default when the element or its `val` is omitted.
    */
   plotAreaManualLayout?: ChartManualLayout | null;
+  /**
+   * Host-specific automatic-layout policy selected by the format adapter.
+   * This is intentionally a closed set: it records an observed Office host
+   * behavior without exposing unbounded tuning constants as public input.
+   */
+  cartesianAutoLayoutProfile?: 'wordClassicColumn' | null;
   /**
    * `<c:scatterChart><c:scatterStyle val>` (ECMA-376 §21.2.2.42). Drives
    * whether scatter charts connect points with lines and whether those
@@ -1230,6 +1359,8 @@ export interface ChartModel {
   valAxisGridlineWidthEmu?: number | null;
   /** `<c:valAx><c:majorGridlines>...<a:prstDash val>` dash preset. */
   valAxisGridlineDash?: string | null;
+  /** Direct major-gridline line paint provenance. */
+  valAxisGridlinePaintAuthored?: boolean | null;
   /**
    * `<c:catAx><c:majorGridlines><c:spPr><a:ln><a:solidFill>` resolved gridline
    * color (hex without `#`). Only meaningful when {@link catAxisMajorGridlines}
@@ -1240,6 +1371,8 @@ export interface ChartModel {
   catAxisGridlineWidthEmu?: number | null;
   /** `<c:catAx><c:majorGridlines>...<a:prstDash val>` dash preset. */
   catAxisGridlineDash?: string | null;
+  /** Direct category major-gridline line paint provenance. */
+  catAxisGridlinePaintAuthored?: boolean | null;
   /** `<c:valAx><c:minorGridlines>` presence (§21.2.2.109). Only drawn when a
    *  minor step is resolvable (see {@link valAxisMinorUnit}). */
   valAxisMinorGridlines?: boolean | null;
@@ -1247,12 +1380,16 @@ export interface ChartModel {
   valAxisMinorGridlineColor?: string | null;
   valAxisMinorGridlineWidthEmu?: number | null;
   valAxisMinorGridlineDash?: string | null;
+  /** Direct value minor-gridline line paint provenance. */
+  valAxisMinorGridlinePaintAuthored?: boolean | null;
   /** `<c:catAx|valAx><c:minorGridlines>` on the horizontal/scatter axis. */
   catAxisMinorGridlines?: boolean | null;
   /** Authored horizontal-axis minor-gridline paint. */
   catAxisMinorGridlineColor?: string | null;
   catAxisMinorGridlineWidthEmu?: number | null;
   catAxisMinorGridlineDash?: string | null;
+  /** Direct category minor-gridline line paint provenance. */
+  catAxisMinorGridlinePaintAuthored?: boolean | null;
   /**
    * `<c:valAx><c:majorUnit val>` (§21.2.2.103) — explicit distance between major
    * gridlines/ticks, overriding the Excel-style auto "nice" step. null/undefined
@@ -1418,6 +1555,28 @@ export interface ChartModel {
    * takes precedence in the renderer; this map is a linked-style fallback.
    */
   chartStyleRoles?: Partial<Record<ChartStyleRole, ChartExElementStyle>> | null;
+  /**
+   * ECMA-376 §21.2.3.46 built-in `c:style` defaults. Kept separate from
+   * {@link chartStyleRoles} so a partial linked Office 2013+ style can override
+   * one paint component without erasing the numeric style's other defaults.
+   */
+  classicChartStyleRoles?: Partial<Record<ChartStyleRole, ChartExElementStyle>> | null;
+  /** Surface-specific numeric style materialized in the value-band domain. */
+  classicSurfaceBandStyles?: ChartClassicSurfaceBandStyles | null;
+  /** Raw linked style table retained after renderer-facing effective roles are
+   * composed, so Surface can resolve direct > linked > numeric per band. */
+  linkedChartStyleRoles?: Partial<Record<ChartStyleRole, ChartExElementStyle>> | null;
+  /** Numeric dataPoint/dataPoint3D roles for the most common bounded point
+   * domain among varyColors groups. Group slots with the same domain inherit
+   * this shared table instead of cloning its palettes. */
+  classicVaryingPointChartStyleRoles?: Partial<Record<ChartStyleRole, ChartExElementStyle>> | null;
+  /** Group-aligned numeric point-domain exceptions; slots match `plotGroups`.
+   * `null` inherits the shared table when that group varies by point. */
+  classicVaryingPointChartStyleRolesByGroup?: Array<Partial<Record<ChartStyleRole, ChartExElementStyle>> | null> | null;
+  /** Renderer-facing linked-over-numeric point-domain roles. */
+  varyingPointChartStyleRoles?: Partial<Record<ChartStyleRole, ChartExElementStyle>> | null;
+  /** Renderer-facing linked-over-numeric point roles aligned with `plotGroups`. */
+  varyingPointChartStyleRolesByGroup?: Array<Partial<Record<ChartStyleRole, ChartExElementStyle>> | null> | null;
   /** Total resolved color set associated with the linked Chart Style part. */
   chartStyleColorPalette?: Array<string | null> | null;
   /** `<cs:colorStyle meth>` used when selecting a linked role color. */
@@ -1443,8 +1602,10 @@ export interface ChartModel {
 }
 
 export interface ChartStockBarPaint {
+  /** Direct `<c:upBars|downBars><c:spPr>` DrawingML effect component. */
+  style?: ChartExElementStyle | null;
   fillColor?: string | null;
-  fill?: SolidFill | GradientFill | PatternFill | null;
+  fill?: Fill | null;
   /** Direct/linked fill owns this component even when it cannot be resolved. */
   fillPaintAuthored?: boolean | null;
   fillHidden?: boolean | null;
@@ -1466,7 +1627,11 @@ export interface ChartStockUpDownBarStyle {
 }
 
 export interface ChartDecorationLineStyle {
+  /** Direct decoration `<c:spPr>` provenance/effects for style modifiers. */
+  style?: ChartExElementStyle | null;
   color?: string | null;
+  /** Structured DrawingML stroke paint. */
+  fill?: SolidFill | GradientFill | PatternFill | null;
   /** Direct/linked outline owns this component even when it cannot be resolved. */
   paintAuthored?: boolean | null;
   widthEmu?: number | null;
@@ -1515,6 +1680,8 @@ export interface ChartOfPie {
   /** Gap between the primary and secondary plots, as a percent. */
   gapWidthPercent: number;
   seriesLines: boolean;
+  /** Direct `<c:serLines>` line style for the primary/secondary connectors. */
+  seriesLineStyle?: ChartDecorationLineStyle | null;
 }
 
 /** Supported DrawingML paint authored on a 3-D chart surface (`floor`,
@@ -1579,6 +1746,10 @@ export interface ChartThreeD {
 }
 
 export interface ChartThreeDSeriesAxis {
+  style?: ChartExElementStyle | null;
+  titleStyle?: ChartExElementStyle | null;
+  majorGridlineStyle?: ChartExElementStyle | null;
+  minorGridlineStyle?: ChartExElementStyle | null;
   title?: string | null;
   hidden: boolean;
   orientation?: 'minMax' | 'maxMin' | string | null;
@@ -1589,6 +1760,7 @@ export interface ChartThreeDSeriesAxis {
   /** `<c:serAx><c:minorTickMark>`; omission means no minor tick marks. */
   minorTickMark?: string | null;
   fontColor?: string | null;
+  fontPaintAuthored?: boolean | null;
   fontSizeHpt?: number | null;
   fontBold?: boolean | null;
   fontItalic?: boolean | null;
@@ -1603,6 +1775,7 @@ export interface ChartThreeDSeriesAxis {
   titleFontBold?: boolean | null;
   titleFontItalic?: boolean | null;
   titleFontColor?: string | null;
+  titleFontPaintAuthored?: boolean | null;
   titleFontFace?: string | null;
   titleRotation?: number | null;
   titleVerticalMode?: ChartModel['catAxisTitleVerticalMode'];
@@ -1780,6 +1953,13 @@ export interface ChartexHistogramBinning {
   overflow?: number | null;
 }
 
+/** Authored axis format, separate from the effective tick format. */
+export interface ChartAxisNumberFormat {
+  authoredCode: string;
+  /** Omission means true per ECMA-376 §21.2.2.121. */
+  sourceLinked?: boolean | null;
+}
+
 /**
  * A secondary value axis (combo charts). Mirrors the primary value-axis
  * properties but lives in its own object so the flat primary-axis fields stay
@@ -1787,6 +1967,11 @@ export interface ChartexHistogramBinning {
  * `<c:crosses val="max">`).
  */
 export interface SecondaryValueAxis {
+  /** Instance-local direct shape carriers for linked-style modifiers/effects. */
+  style?: ChartExElementStyle | null;
+  titleStyle?: ChartExElementStyle | null;
+  majorGridlineStyle?: ChartExElementStyle | null;
+  minorGridlineStyle?: ChartExElementStyle | null;
   /** `<c:scaling><c:min val>`. null = derive from the series data. */
   min: number | null;
   /** `<c:scaling><c:max val>`. null = derive from the series data. */
@@ -1795,12 +1980,15 @@ export interface SecondaryValueAxis {
   title: string | null;
   /** `<c:delete val="1"/>` — hide labels/ticks entirely. */
   hidden: boolean;
-  /** `<c:numFmt formatCode>` for tick labels. */
+  /** Effective tick format after source linking is resolved. */
   formatCode?: string | null;
+  /** Authored axis code/linkage, retained apart from the effective tick code. */
+  numberFormat?: ChartAxisNumberFormat | null;
   /** `<c:dispUnits>` for this auxiliary value axis. */
   displayUnits?: ChartDisplayUnits | null;
   /** `<c:txPr>…<a:solidFill>` tick-label color (hex without '#'). */
   fontColor?: string | null;
+  fontPaintAuthored?: boolean | null;
   /** `<c:txPr>` tick-label font size (hpt). */
   fontSizeHpt?: number | null;
   /** `<c:txPr>` tick-label italic flag. */
@@ -1815,6 +2003,8 @@ export interface SecondaryValueAxis {
   lineWidthEmu?: number | null;
   /** `<c:spPr><a:ln><a:prstDash val>` axis-line dash preset. */
   lineDash?: string | null;
+  /** A direct auxiliary-axis line paint was authored even when unresolved. */
+  linePaintAuthored?: boolean | null;
   /** `<c:spPr><a:ln><a:noFill>` — Office-compatible suppression of the
    *  secondary axis rule and tick marks; labels and gridlines remain. */
   lineHidden: boolean;
@@ -1827,11 +2017,13 @@ export interface SecondaryValueAxis {
   minorGridlineColor?: string | null;
   minorGridlineWidthEmu?: number | null;
   minorGridlineDash?: string | null;
+  minorGridlinePaintAuthored?: boolean | null;
   /** `<c:majorGridlines>` presence and authored line paint. */
   majorGridlines?: boolean;
   majorGridlineColor?: string | null;
   majorGridlineWidthEmu?: number | null;
   majorGridlineDash?: string | null;
+  majorGridlinePaintAuthored?: boolean | null;
   /**
    * `<c:valAx><c:majorUnit val>` (§21.2.2.103) — explicit distance between
    * major ticks/gridlines on THIS secondary axis, overriding the Excel-style
@@ -1867,6 +2059,7 @@ export interface SecondaryValueAxis {
   titleFontItalic?: boolean | null;
   /** `<c:title>` run-prop color (hex without '#'). */
   titleFontColor?: string | null;
+  titleFontPaintAuthored?: boolean | null;
   titleFontFace?: string | null;
   /** Authored `<c:title>` DrawingML `bodyPr@rot` in raw `ST_Angle` units. */
   titleRotation?: number | null;
@@ -1905,6 +2098,9 @@ export interface ChartDisplayUnitsLabel {
   fontBold?: boolean | null;
   fontItalic?: boolean | null;
   fontColor?: string | null;
+  /** Direct DrawingML text-paint ownership, including noFill/unresolved paint. */
+  fontPaintAuthored?: boolean | null;
+  fontHidden?: boolean | null;
   fontFace?: string | null;
   /** DrawingML `bodyPr@rot`, in 60000ths of a degree. */
   rotation?: number | null;
@@ -1953,6 +2149,7 @@ export interface ChartLegendEntryOverride {
   fontColor?: string | null;
   fontSizeHpt?: number | null;
   fontBold?: boolean | null;
+  fontItalic?: boolean | null;
 }
 
 export interface ChartRect {

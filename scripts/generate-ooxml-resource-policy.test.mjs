@@ -21,10 +21,12 @@ function fixture(policy = {
     maxDocxBodyChunkJsonBytes: 640,
     maxDocxBootstrapJsonBytes: 640,
     maxDocxRetainedModelJsonBytes: 1280,
+    maxDocxMarkdownBytes: 640,
     maxPptxSlideXmlBytes: 320,
     maxPptxSlideJsonBytes: 640,
     maxPptxSharedDependencyXmlBytes: 160,
     maxXmlDomComplexity: 20,
+    maxPptxSlideXmlDomComplexity: 24,
     maxPptxSharedDependencyProjectionBytes: 320,
     maxPptxSharedCacheEntries: 25,
     maxPptxSharedCacheProjectionBytes: 960,
@@ -125,6 +127,10 @@ test('generates matching TypeScript and Rust constants from one policy source', 
   );
   assert.match(
     readFileSync(path.join(root, 'packages/ooxml-common/src/resource-policy.generated.rs'), 'utf8'),
+    /HARD_MAX_PPTX_SLIDE_XML_DOM_COMPLEXITY: u64 = 24/,
+  );
+  assert.match(
+    readFileSync(path.join(root, 'packages/ooxml-common/src/resource-policy.generated.rs'), 'utf8'),
     /HARD_MAX_PPTX_SHARED_CACHE_PROJECTION_BYTES: u64 = 960/,
   );
   assert.match(
@@ -146,6 +152,10 @@ test('generates matching TypeScript and Rust constants from one policy source', 
   assert.match(
     readFileSync(path.join(root, 'packages/core/src/worker/resource-policy.generated.ts'), 'utf8'),
     /HARD_MAX_RAW_PART_CACHE_ENTRIES = 8/,
+  );
+  assert.match(
+    readFileSync(path.join(root, 'packages/ooxml-common/src/resource-policy.generated.rs'), 'utf8'),
+    /HARD_MAX_DOCX_MARKDOWN_BYTES: u64 = 640/,
   );
   assert.match(
     readFileSync(path.join(root, 'packages/ooxml-common/src/resource-policy.generated.rs'), 'utf8'),
@@ -192,10 +202,12 @@ test('rejects invalid or internally inconsistent policy values', (context) => {
       maxDocxBodyChunkJsonBytes: 640,
       maxDocxBootstrapJsonBytes: 640,
       maxDocxRetainedModelJsonBytes: 1280,
+      maxDocxMarkdownBytes: 640,
       maxPptxSlideXmlBytes: 320,
       maxPptxSlideJsonBytes: 640,
       maxPptxSharedDependencyXmlBytes: 160,
       maxXmlDomComplexity: 20,
+      maxPptxSlideXmlDomComplexity: 24,
       maxPptxSharedDependencyProjectionBytes: 320,
       maxPptxSharedCacheEntries: 25,
       maxPptxSharedCacheProjectionBytes: 960,

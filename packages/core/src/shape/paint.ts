@@ -99,6 +99,35 @@ export function hexToRgba(hex: string, alpha = 1): string {
   return `rgba(${r},${g},${b},${a})`;
 }
 
+function colorCanProduceVisiblePixels(color: string): boolean {
+  const normalized = color.startsWith('#') ? color.slice(1) : color;
+  if (normalized.length < 8) return true;
+  const alpha = Number.parseInt(normalized.slice(6, 8), 16);
+  // Parsed OOXML colours are well formed. Treat malformed hand-authored
+  // public-model input conservatively as visible rather than silently
+  // suppressing paint or changing a chart-style role.
+  return !Number.isFinite(alpha) || alpha !== 0;
+}
+
+/**
+ * Static visibility bound for one DrawingML fill recipe. `true` means the
+ * recipe may produce visible pixels; image contents themselves remain opaque
+ * to this layer. A finite non-positive `a:alphaModFix` is nevertheless known
+ * to make every image pixel transparent, so it must not trigger image decode,
+ * resource charging, or callout-style selection.
+ */
+export function fillCanProduceVisiblePixels(fill: Fill | null | undefined): boolean {
+  if (!fill || fill.fillType === 'none') return false;
+  if (fill.fillType === 'solid') return colorCanProduceVisiblePixels(fill.color);
+  if (fill.fillType === 'gradient') {
+    return fill.stops.some(stop => colorCanProduceVisiblePixels(stop.color));
+  }
+  if (fill.fillType === 'pattern') {
+    return colorCanProduceVisiblePixels(fill.fg) || colorCanProduceVisiblePixels(fill.bg);
+  }
+  return fill.alpha == null || !Number.isFinite(fill.alpha) || fill.alpha > 0;
+}
+
 /**
  * Rec.601 perceptual luma (`0.299·R + 0.587·G + 0.114·B`) of a colour, on the
  * 0–255 scale. Accepts a 6- or 8-char hex; a leading `#` is tolerated and the

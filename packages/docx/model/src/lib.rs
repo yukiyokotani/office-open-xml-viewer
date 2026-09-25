@@ -314,6 +314,14 @@ pub struct DocumentSettings {
     /// punctuation compression / spacing control.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub character_spacing_control: Option<String>,
+    /// §17.15.3.31 `w:compat/w:lineWrapLikeWord6` — determine line fit before
+    /// character-level whitespace compression, even when paint is compressed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line_wrap_like_word6: Option<bool>,
+    /// [MS-DOCX] §2.3.3 `enableOpenTypeFeatures` compatibility setting.
+    /// Absent defaults to disabled; explicit `w:kern` remains authoritative.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enable_open_type_features: Option<bool>,
     /// ECMA-376 Part 4 §14.8.3.50 `w:compat` / `w:useFELayout` — enable Far
     /// East layout compatibility behavior.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -731,6 +739,13 @@ pub struct SectionPageGeometryWire {
     pub footer_distance: Option<f64>,
 }
 
+#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum PageBreakOrigin {
+    Authored,
+    CoverPageSynthetic,
+}
+
 #[derive(Serialize, Debug, Clone)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum BodyElement {
@@ -746,6 +761,10 @@ pub enum BodyElement {
     /// 1-based page), `Some("even")` = evenPage. `None` = a plain `nextPage`
     /// or `<w:br w:type="page"/>` break.
     PageBreak {
+        /// Optional for backward-compatible wire consumers. A missing value
+        /// does not prove that the break was authored by the document.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        origin: Option<PageBreakOrigin>,
         #[serde(skip_serializing_if = "Option::is_none")]
         parity: Option<String>,
         /// True only when the hard break was authored after visible content in

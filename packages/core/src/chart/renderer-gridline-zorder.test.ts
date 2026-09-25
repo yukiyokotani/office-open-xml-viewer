@@ -181,7 +181,9 @@ describe('CH — value-axis gridlines paint under the data series', () => {
     }), RECT, 1);
 
     const fills = rec.events.filter(event => event.op === 'fill');
-    expect(fills.map(event => event.fillStyle.toLowerCase())).toEqual(['#00000000', '#1696d2']);
+    // The transparent compatibility color represents direct noFill, so it
+    // contributes to stacking geometry without issuing a redundant fill.
+    expect(fills.map(event => event.fillStyle.toLowerCase())).toEqual(['#1696d2']);
     const lineOverlay = rec.events.find(event =>
       event.op === 'stroke'
       && event.strokeStyle.toLowerCase() === '#000000'

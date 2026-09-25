@@ -2,6 +2,7 @@ import type {
   ChartDataLabelOverride,
   ChartDataPointOverride,
   ChartDisplayUnits,
+  ChartExElementStyle,
   ChartLegendEntryOverride,
   ChartModel,
   ChartRect,
@@ -9,15 +10,16 @@ import type {
 } from '../types/chart.js';
 import type { Fill } from '../types/common.js';
 import { chartImageFillSource, paintChartImageFill } from './image-fill.js';
+import {
+  chartThreeDDatumFillDecision,
+  threeDDatumStyleIndex,
+} from './three-d-datum-style.js';
 import { paintChartThreeDSurfacePicture } from './three-d-surface-picture.js';
 import {
   effectiveMarkerSymbol,
   hasVisiblePointMarkerOverride,
   markerFillColorFor,
-  markerFillPaintFor,
   markerPaintComponents,
-  seriesMarkerFillColor,
-  seriesMarkerFillPaint,
   seriesHasMarkerDetail,
 } from './marker-style.js';
 import { dataLabelIsDeleted } from './data-label-style.js';
@@ -104,7 +106,11 @@ import { paintPlotAreaFrame } from './plot-area-frame.js';
 import { resolveFill } from '../shape/paint.js';
 import {
   chartThreeDSurfacePaint,
-  chartStyleFillDecision,
+  chartStyleDirectFillDecision,
+  chartStyleDirectLineDecision,
+  chartStyleDirectNoLineDecision,
+  chartStyleFillCascade,
+  chartStyleLineCascade,
   chartStyleLineDecision,
 } from './style-paint.js';
 import { drawingmlLineDashArray } from '../draw/dash.js';
@@ -112,6 +118,17 @@ import {
   MAX_CHART_PAINT_COMPONENTS,
   MAX_CHART_PAINT_RECIPE_COMPONENTS,
 } from './resource-limits.js';
+import {
+  chartStyleEffectOwner,
+  paintChartStyleEffects,
+  paintChartStyleOuterEffectBehind,
+} from './style-effects.js';
+import {
+  chartDataPointStyleRole,
+  chartSeriesVariesByPoint,
+  chartStyleDashChoice,
+  rawLinkedChartStyleRole,
+} from './effective-style.js';
 
 interface ThreeDLegendTextStyle {
   fontPx: number;
@@ -142,9 +159,10 @@ function threeDLegendTextStyle(
   ) ?? 9 * ptToPx;
   const face = override?.fontFace ?? chart.legendFontFace;
   const bold = override?.fontBold ?? chart.legendFontBold ?? false;
+  const italic = override?.fontItalic ?? chart.legendFontItalic ?? false;
   return {
     fontPx,
-    font: `${bold ? 'bold ' : ''}${fontPx}px ${fontFamily(face)}`,
+    font: `${italic ? 'italic ' : ''}${bold ? 'bold ' : ''}${fontPx}px ${fontFamily(face)}`,
     color: override?.fontColor
       ? `#${override.fontColor}`
       : chart.legendFontColor ? `#${chart.legendFontColor}` : '#595959',
@@ -239,7 +257,7 @@ interface ThreeDDatumPaint {
   color: string;
   fill: Fill | null | undefined;
   lineColor: string | null;
-  lineFill: ChartModel['plotAreaLineFill'] | null | undefined;
+  lineFill: Fill | null | undefined;
   lineWidthEmu: number | null | undefined;
   lineDash: string | null | undefined;
   lineCustomDash: ChartModel['plotAreaLineCustomDash'];
@@ -250,7 +268,7 @@ interface ThreeDDatumPaint {
 function threeDPaintsWithinBudget<T>(
   items: readonly T[],
   fillFor: (item: T) => Fill | null | undefined,
-  lineFor: (item: T) => ChartModel['plotAreaLineFill'] | null | undefined,
+  lineFor: (item: T) => Fill | null | undefined,
 ): boolean {
   let total = 0;
   for (const item of items) {
@@ -335,7 +353,7 @@ function threeDSafeAdd(left: number, right: number): number {
 function threeDChartPaintsWithinBudget(chart: ChartModel): boolean {
   const paints: Array<{
     fill: Fill | null | undefined;
-    line: ChartModel['plotAreaLineFill'] | null | undefined;
+    line: Fill | null | undefined;
   }> = [];
   for (const [surface, role] of [
     [chart.threeD?.floor, 'floor'],
@@ -523,65 +541,71 @@ function threeDDatumPaint(
   point: ChartDataPointOverride | undefined,
   pointIndex: number,
   seriesIndex: number,
+  includePointColor = true,
 ): ThreeDDatumPaint {
   // `ChartSeries.color` and `dataPointColors` are effective legacy colors:
   // the parser may materialize the automatic accent palette there. Keep them
   // as the final automatic fallback so an authored/linked 3-D paint recipe can
   // still own the mark. Direct spPr provenance is carried by chartexStyle.
-  const automaticColor = series.dataPointColors?.[pointIndex]
+  const automaticColor = includePointColor && series.dataPointColors?.[pointIndex]
     ? `#${series.dataPointColors[pointIndex]}`
     : colorFor(seriesIndex, series);
   // Chart Style palettes normally advance by series. Pie slices, and the
   // single-series bar case explicitly carrying varyColors, advance by point.
   // Keep this independent from `pointIndex`: that index still selects direct
   // dPt formatting, while linked/series roles describe the owning series.
-  const styleIndex = chart.chartType === 'pie'
-    || (chart.varyColors === true
-      && chart.series.length === 1
-      && chart.chartType.includes('Bar'))
+  const styleIndex = chartSeriesVariesByPoint(chart, seriesIndex)
     ? pointIndex
-    : seriesIndex;
+    : series.chartexFormatIdx ?? seriesIndex;
+  const family = series.seriesType ?? chart.chartType;
+  const lineRibbonFamily = family === 'line'
+    || family === 'stackedLine'
+    || family === 'stackedLinePct';
+  const linkedDataPointStyle = chartDataPointStyleRole(chart, 'dataPoint3D', seriesIndex);
+  const rawLinkedDataPointStyle = rawLinkedChartStyleRole(chart, 'dataPoint3D');
   let fill: Fill | null | undefined;
   let color = automaticColor;
-  const pointDecision = chartStyleFillDecision(point?.chartexStyle, pointIndex);
-  if (pointDecision !== undefined) {
-    ({ color, fill } = solidOrStructured(pointDecision, color));
-  } else if (point?.fillHidden === true || point?.color === '00000000') {
-    fill = null;
-  } else if (point?.color) {
-    color = `#${point.color}`;
-  } else {
-    const seriesDecision = chartStyleFillDecision(series.chartexStyle, styleIndex);
-    if (seriesDecision !== undefined) {
-      ({ color, fill } = solidOrStructured(seriesDecision, color));
-    } else {
-      const linkedDecision = chartStyleFillDecision(
-        chart.chartStyleRoles?.dataPoint3D, styleIndex,
-      );
-      if (linkedDecision !== undefined) {
-        ({ color, fill } = solidOrStructured(linkedDecision, color));
-      }
-    }
-  }
+  const fillDecision = chartThreeDDatumFillDecision(
+    chart, series, point, pointIndex, seriesIndex,
+  );
+  if (fillDecision !== undefined) ({ color, fill } = solidOrStructured(fillDecision, color));
 
-  let lineFill: ChartModel['plotAreaLineFill'] | null | undefined;
+  let lineFill: Fill | null | undefined;
   let lineColor: string | null = null;
-  const pointLine = chartStyleLineDecision(point?.chartexStyle, pointIndex);
+  let pointLine = chartStyleDirectLineDecision(
+    point?.chartexStyle, rawLinkedDataPointStyle, pointIndex,
+  );
+  if (pointLine === undefined && point?.lineHidden === true) {
+    pointLine = chartStyleDirectNoLineDecision(rawLinkedDataPointStyle);
+  }
   if (pointLine !== undefined) {
     if (pointLine?.fillType === 'solid') lineColor = `#${pointLine.color}`;
     else lineFill = pointLine;
-  } else if (point?.lineHidden === true) lineFill = null;
+  }
   else if (point?.lineColor) lineColor = `#${point.lineColor}`;
   else {
-    const seriesLine = chartStyleLineDecision(series.chartexStyle, styleIndex);
+    let seriesLine = chartStyleDirectLineDecision(
+      series.chartexStyle, rawLinkedDataPointStyle, styleIndex,
+    );
+    if (seriesLine === undefined && series.lineHidden === true) {
+      seriesLine = chartStyleDirectNoLineDecision(rawLinkedDataPointStyle);
+    }
     if (seriesLine !== undefined) {
       if (seriesLine?.fillType === 'solid') lineColor = `#${seriesLine.color}`;
       else lineFill = seriesLine;
-    } else if (series.lineHidden === true) lineFill = null;
+    }
     else if (series.lineColor) lineColor = `#${series.lineColor}`;
-    else {
-      const linkedLine = chartStyleLineDecision(
-        chart.chartStyleRoles?.dataPoint3D, styleIndex,
+    else if (lineRibbonFamily) {
+      // ECMA-376 §21.2.3.46 Table 1 classifies every 3-D chart mark under
+      // "Fills for Data Points (3-D)". A Line3D ribbon is therefore painted
+      // by dataPoint3D's fill component; its Table 5 No Line suppresses only
+      // the solid's outline, not the ribbon itself. Direct c:ser/c:dPt line
+      // formatting above still owns the segment and can explicitly hide it.
+      lineFill = fill === null ? null : fill;
+    } else {
+      const linkedLine = chartStyleLineCascade(
+        linkedDataPointStyle, rawLinkedDataPointStyle, styleIndex,
+        point?.chartexStyle, series.chartexStyle,
       );
       if (linkedLine !== undefined) {
         if (linkedLine?.fillType === 'solid') lineColor = `#${linkedLine.color}`;
@@ -589,12 +613,15 @@ function threeDDatumPaint(
       }
     }
   }
-  const linkedGeometry = chart.chartStyleRoles?.dataPoint3D?.lineNoStyle === true
-    ? undefined : chart.chartStyleRoles?.dataPoint3D;
+  const linkedGeometry = lineRibbonFamily ? undefined : linkedDataPointStyle;
   const lineCapValue = point?.chartexStyle?.lineCap
     ?? series.chartexStyle?.lineCap ?? linkedGeometry?.lineCap;
   const lineJoinValue = point?.chartexStyle?.lineJoin
     ?? series.chartexStyle?.lineJoin ?? linkedGeometry?.lineJoin;
+  const pointDash = point?.lineDash != null
+    ? { lineDash: point.lineDash, lineDashAuthored: true }
+    : point?.chartexStyle;
+  const dash = chartStyleDashChoice(pointDash, series.chartexStyle, linkedGeometry);
   return {
     color,
     fill,
@@ -603,10 +630,8 @@ function threeDDatumPaint(
     lineWidthEmu: point?.lineWidthEmu ?? point?.chartexStyle?.lineWidthEmu
       ?? series.lineWidthEmu ?? series.chartexStyle?.lineWidthEmu
       ?? linkedGeometry?.lineWidthEmu,
-    lineDash: point?.lineDash ?? point?.chartexStyle?.lineDash
-      ?? series.chartexStyle?.lineDash ?? linkedGeometry?.lineDash,
-    lineCustomDash: point?.chartexStyle?.lineCustomDash
-      ?? series.chartexStyle?.lineCustomDash ?? linkedGeometry?.lineCustomDash,
+    lineDash: dash?.lineDash,
+    lineCustomDash: dash?.lineCustomDash,
     lineCap: lineCapValue === 'rnd' ? 'round' : lineCapValue === 'sq' ? 'square' : 'butt',
     lineJoin: lineJoinValue === 'round' || lineJoinValue === 'bevel'
       ? lineJoinValue : 'miter',
@@ -1172,6 +1197,27 @@ function paintSceneFace(ctx: CanvasRenderingContext2D, item: SceneFace): void {
   ctx.setLineDash([]);
 }
 
+/** Paint one combined projected silhouette so a native Canvas effect is cast
+ * once per datum, not once per visible mesh face. Null paint stays absent, but
+ * outline polygons still participate when a datum is authored noFill. */
+function paintSceneEffectSilhouette(
+  ctx: CanvasRenderingContext2D,
+  faces: readonly SceneFace[],
+): void {
+  const visible = faces.filter(face => face.paint !== null && face.points.length >= 3);
+  if (!visible.length) return;
+  ctx.beginPath();
+  for (const face of visible) {
+    ctx.moveTo(face.points[0].x, face.points[0].y);
+    for (let index = 1; index < face.points.length; index++) {
+      ctx.lineTo(face.points[index].x, face.points[index].y);
+    }
+    ctx.closePath();
+  }
+  ctx.fillStyle = '#000000';
+  ctx.fill();
+}
+
 /** Resolve one authored fill recipe once for a complete projected datum, then
  * share the Canvas paint across its faces. This keeps gradient-stop work
  * O(datums × stops), never O(faces × stops). */
@@ -1257,10 +1303,53 @@ function paintThreeDMarker(
   fillPaint: Fill | null | undefined = undefined,
   shapeRotationDeg = 0,
   ptToPx = PT_TO_PX,
+  effectDirect: ChartExElementStyle | null | undefined = undefined,
+  effectFallback: ChartExElementStyle | null | undefined = undefined,
+  effectIndex = 0,
+  effectFallbackIndex = effectIndex,
+  linePaint: Fill | null | undefined = undefined,
+  lineDash: string | null | undefined = undefined,
+  lineCustomDash: ChartModel['plotAreaLineCustomDash'] = undefined,
+  lineCap: string | null | undefined = undefined,
+  lineJoin: string | null | undefined = undefined,
 ): void {
   if (!(size > 0) || !Number.isFinite(point.x) || !Number.isFinite(point.y)) return;
   const radius = size / 2;
+  if (effectDirect !== undefined || effectFallback !== undefined) {
+    paintChartStyleEffects(
+      ctx,
+      effectDirect,
+      effectFallback,
+      effectIndex,
+      { x: point.x - radius, y: point.y - radius, w: size, h: size },
+      ptToPx,
+      target => paintThreeDMarker(
+        target, point, symbol, size, fill, line, lineWidth,
+        fillPaint, shapeRotationDeg, ptToPx,
+        undefined, undefined, 0, 0,
+        linePaint, lineDash, lineCustomDash, lineCap, lineJoin,
+      ),
+      effectFallbackIndex,
+    );
+    return;
+  }
   ctx.beginPath();
+  const resolvedLinePaint = linePaint === undefined
+    ? line
+    : linePaint == null
+      ? null
+      : linePaint.fillType === 'solid'
+        ? `#${linePaint.color}`
+        : resolveFill(
+            linePaint, ctx, point.x - radius, point.y - radius, size, size, shapeRotationDeg,
+          );
+  if (resolvedLinePaint) {
+    ctx.strokeStyle = resolvedLinePaint;
+    ctx.lineWidth = lineWidth;
+    ctx.setLineDash(drawingmlLineDashArray(lineCustomDash, lineDash, lineWidth));
+    ctx.lineCap = lineCap === 'rnd' ? 'round' : lineCap === 'sq' ? 'square' : 'butt';
+    ctx.lineJoin = lineJoin === 'round' || lineJoin === 'bevel' ? lineJoin : 'miter';
+  }
   switch (symbol) {
     case 'square':
       ctx.rect(point.x - radius, point.y - radius, size, size);
@@ -1285,9 +1374,7 @@ function paintThreeDMarker(
       ctx.lineTo(point.x + radius, point.y + (diagonal ? radius : 0));
       ctx.moveTo(point.x + (diagonal ? -radius : 0), point.y + radius);
       ctx.lineTo(point.x + (diagonal ? radius : 0), point.y - radius);
-      ctx.strokeStyle = line;
-      ctx.lineWidth = lineWidth;
-      ctx.stroke();
+      if (resolvedLinePaint) ctx.stroke();
       return;
     }
     case 'dash':
@@ -1317,9 +1404,7 @@ function paintThreeDMarker(
           shapeRotationDeg,
         );
       }
-      ctx.strokeStyle = line;
-      ctx.lineWidth = lineWidth;
-      ctx.strokeRect(point.x - radius, point.y - radius, size, size);
+      if (resolvedLinePaint) ctx.strokeRect(point.x - radius, point.y - radius, size, size);
       return;
     }
     default:
@@ -1346,9 +1431,7 @@ function paintThreeDMarker(
     );
     ctx.restore();
   }
-  ctx.strokeStyle = line;
-  ctx.lineWidth = lineWidth;
-  ctx.stroke();
+  if (resolvedLinePaint) ctx.stroke();
 }
 
 function drawThreeDDataLabel(
@@ -1880,9 +1963,178 @@ function drawThreeDSeriesAxis(
   }
 }
 
+interface ThreeDMarkerPaint {
+  fill: string;
+  fillPaint: Fill | null | undefined;
+  line: string;
+  linePaint: Fill | null | undefined;
+  lineWidth: number;
+  lineDash: string | null | undefined;
+  lineCustomDash: ChartModel['plotAreaLineCustomDash'];
+  lineCap: string | null | undefined;
+  lineJoin: string | null | undefined;
+  effectDirect: ChartExElementStyle | null | undefined;
+  effectFallback: ChartExElementStyle | null | undefined;
+  effectIndex: number;
+  effectFallbackIndex: number;
+}
+
+/** Resolve a marker once for the 3-D plot and its legend key. Direct point and
+ * series marker formatting remain authoritative; the effective linked-over-
+ * numeric marker role supplies only omitted components. */
+function threeDMarkerPaint(
+  chart: ChartModel,
+  series: ChartSeries,
+  point: ChartDataPointOverride | undefined,
+  pointIndex: number,
+  seriesIndex: number,
+  fallbackColor: string,
+  ptToPx: number,
+): ThreeDMarkerPaint {
+  const linked = chartDataPointStyleRole(chart, 'dataPointMarker', seriesIndex);
+  const rawLinked = rawLinkedChartStyleRole(chart, 'dataPointMarker');
+  const seriesStyleIndex = series.chartexFormatIdx ?? seriesIndex;
+  const pointStyleFill = chartStyleDirectFillDecision(
+    point?.markerStyle, rawLinked, pointIndex,
+  );
+  const seriesStyleFill = chartStyleDirectFillDecision(
+    series.markerStyle, rawLinked, seriesStyleIndex,
+  );
+  const pointFillAuthored = pointStyleFill !== undefined
+    || point?.markerFillPaint !== undefined || point?.markerFill != null
+    || point?.color != null
+    || point?.markerFillPaintAuthored === true && point.markerStyle?.fillHidden !== true;
+  const seriesFillAuthored = seriesStyleFill !== undefined
+    || series.markerFillPaint !== undefined || series.markerFill != null
+    || series.markerFillPaintAuthored === true && series.markerStyle?.fillHidden !== true;
+  const linkedFill = chartStyleFillCascade(linked, rawLinked, seriesStyleIndex);
+  const fillDecision = pointFillAuthored
+    ? pointStyleFill ?? point?.markerFillPaint
+    : seriesFillAuthored
+      ? seriesStyleFill ?? series.markerFillPaint
+      : linkedFill;
+  let fill = markerFillColorFor(series, point, pointIndex, fallbackColor);
+  let fillPaint = fillDecision;
+  if (fillDecision?.fillType === 'solid') {
+    fill = fillDecision.color;
+    fillPaint = undefined;
+  } else if (fillDecision === null) fill = '00000000';
+
+  const pointLine = chartStyleDirectLineDecision(
+    point?.markerStyle, rawLinked, pointIndex,
+  );
+  const seriesLine = chartStyleDirectLineDecision(
+    series.markerStyle, rawLinked, seriesStyleIndex,
+  );
+  const pointLineAuthored = pointLine !== undefined || point?.markerLine != null
+    || point?.markerLinePaintAuthored === true && point.markerStyle?.lineHidden !== true;
+  const seriesLineAuthored = seriesLine !== undefined || series.markerLine != null
+    || series.markerLinePaintAuthored === true && series.markerStyle?.lineHidden !== true;
+  const linkedLine = chartStyleLineDecision(linked, seriesStyleIndex);
+  const linePaint = pointLineAuthored
+    ? pointLine ?? (point?.markerLinePaintAuthored === true ? null : undefined)
+    : seriesLineAuthored
+      ? seriesLine ?? (series.markerLinePaintAuthored === true ? null : undefined)
+      : linkedLine;
+  let line = point?.markerLine ?? series.markerLine ?? series.lineColor ?? fallbackColor;
+  let effectiveLinePaint = linePaint;
+  if (linePaint?.fillType === 'solid') {
+    line = linePaint.color;
+    effectiveLinePaint = undefined;
+  } else if (linePaint === null) line = '00000000';
+  const geometry = point?.markerStyle ?? series.markerStyle ?? linked;
+  const dash = chartStyleDashChoice(point?.markerStyle, series.markerStyle, linked);
+  return {
+    fill,
+    fillPaint,
+    line,
+    linePaint: effectiveLinePaint,
+    lineWidth: (point?.markerLineWidthEmu ?? series.markerLineWidthEmu
+      ?? geometry?.lineWidthEmu) != null
+      ? Math.max(0.25, (point?.markerLineWidthEmu ?? series.markerLineWidthEmu
+        ?? geometry?.lineWidthEmu ?? 0) / EMU_PER_PT * ptToPx)
+      : Math.max(0.75, ptToPx),
+    lineDash: dash?.lineDash,
+    lineCustomDash: dash?.lineCustomDash,
+    lineCap: geometry?.lineCap,
+    lineJoin: geometry?.lineJoin,
+    effectDirect: chartStyleEffectOwner(
+      point?.markerStyle, point?.chartexStyle, series.markerStyle,
+    ),
+    effectFallback: linked,
+    effectIndex: point?.markerStyle || point?.chartexStyle ? pointIndex : seriesStyleIndex,
+    effectFallbackIndex: seriesStyleIndex,
+  };
+}
+
+function paintThreeDDatumLegendSwatch(
+  ctx: CanvasRenderingContext2D,
+  chart: ChartModel,
+  series: ChartSeries,
+  point: ChartDataPointOverride | undefined,
+  pointIndex: number,
+  seriesIndex: number,
+  x: number,
+  y: number,
+  key: number,
+  ptToPx: number,
+  shapeRotationDeg: number,
+  pointOwned: boolean,
+): void {
+  const paint = threeDDatumPaint(
+    chart, series, point, pointIndex, seriesIndex, pointOwned,
+  );
+  const styleIndex = threeDDatumStyleIndex(chart, series, pointIndex, seriesIndex);
+  const bounds = { x, y: y - key / 2, w: key, h: key };
+  const body = (target: CanvasRenderingContext2D): void => {
+    if (paint.fill !== null) {
+      const resolved = paint.fill === undefined
+        ? paint.color
+        : paint.fill.fillType === 'image'
+          ? null // Legend picture swatches are intentionally fail-closed.
+          : resolveFill(paint.fill, target, bounds.x, bounds.y, bounds.w, bounds.h,
+              shapeRotationDeg);
+      if (resolved) {
+        target.fillStyle = resolved;
+        target.fillRect(bounds.x, bounds.y, bounds.w, bounds.h);
+      }
+    }
+    const linePaint = paint.lineFill === undefined
+      ? paint.lineColor
+      : paint.lineFill == null || paint.lineFill.fillType === 'image'
+        ? null
+        : resolveFill(paint.lineFill, target, bounds.x, bounds.y, bounds.w, bounds.h,
+            shapeRotationDeg);
+    if (!linePaint) return;
+    target.strokeStyle = linePaint;
+    target.lineWidth = paint.lineWidthEmu != null
+      ? Math.max(0.25, paint.lineWidthEmu / EMU_PER_PT * ptToPx) : 0.75 * ptToPx;
+    target.setLineDash(drawingmlLineDashArray(
+      paint.lineCustomDash, paint.lineDash, target.lineWidth,
+    ));
+    target.lineCap = paint.lineCap;
+    target.lineJoin = paint.lineJoin;
+    target.strokeRect(bounds.x, bounds.y, bounds.w, bounds.h);
+    target.setLineDash([]);
+  };
+  const directEffect = chartStyleEffectOwner(point?.chartexStyle, series.chartexStyle);
+  paintChartStyleEffects(
+    ctx,
+    directEffect,
+    chartDataPointStyleRole(chart, 'dataPoint3D', seriesIndex),
+    directEffect === point?.chartexStyle ? pointIndex : styleIndex,
+    bounds,
+    ptToPx,
+    body,
+    styleIndex,
+  );
+}
+
 function paintThreeDLineLegendKey(
   ctx: CanvasRenderingContext2D,
+  chart: ChartModel,
   series: ChartSeries,
+  seriesIndex: number,
   color: string,
   x: number,
   y: number,
@@ -1890,41 +2142,87 @@ function paintThreeDLineLegendKey(
   ptToPx: number,
   shapeRotationDeg: number,
 ): void {
-  if (series.lineHidden !== true) {
-    const lineWidth = series.lineWidthEmu != null
-      ? Math.max(0.5, series.lineWidthEmu / EMU_PER_PT * ptToPx)
+  const datum = threeDDatumPaint(
+    chart, series, undefined, seriesIndex, seriesIndex, false,
+  );
+  const datumFill = datum.lineFill === undefined
+    ? datum.lineColor != null
+      ? ({ fillType: 'solid', color: datum.lineColor.replace(/^#/, '') } as const)
+      : datum.fill
+    : datum.lineFill;
+  if (datumFill !== null) {
+    const lineWidth = datum.lineWidthEmu != null
+      ? Math.max(0.5, datum.lineWidthEmu / EMU_PER_PT * ptToPx)
       : Math.max(1, 2 * ptToPx);
-    ctx.beginPath();
-    ctx.moveTo(x, y);
-    ctx.lineTo(x + key, y);
-    ctx.strokeStyle = series.lineColor ? `#${series.lineColor}` : scaleHexColor(color, 0.70);
-    ctx.lineWidth = lineWidth;
-    ctx.setLineDash(pptxPresetDashArray(series.chartexStyle?.lineDash ?? 'solid', lineWidth));
-    ctx.stroke();
-    ctx.setLineDash([]);
+    const keyBounds = { x, y: y - lineWidth / 2, w: key, h: lineWidth };
+    const resolved = datumFill === undefined
+      ? datum.color
+      : datumFill.fillType === 'image'
+        ? null
+        : datumFill.fillType === 'solid'
+          ? `#${datumFill.color}`
+        : resolveFill(datumFill, ctx, x, y - lineWidth / 2, key, lineWidth,
+            shapeRotationDeg);
+    if (resolved) {
+      const paintLine = (target: CanvasRenderingContext2D): void => {
+        target.beginPath();
+        target.moveTo(x, y);
+        target.lineTo(x + key, y);
+        target.strokeStyle = target === ctx ? resolved : datumFill === undefined
+          ? datum.color
+          : datumFill.fillType === 'image'
+            ? 'rgba(0,0,0,0)'
+            : datumFill.fillType === 'solid'
+              ? `#${datumFill.color}`
+            : resolveFill(
+                datumFill, target, x, y - lineWidth / 2, key, lineWidth,
+                shapeRotationDeg,
+              ) ?? 'rgba(0,0,0,0)';
+        target.lineWidth = lineWidth;
+        target.setLineDash(drawingmlLineDashArray(
+          datum.lineCustomDash, datum.lineDash, lineWidth,
+        ));
+        target.stroke();
+        target.setLineDash([]);
+      };
+      const styleIndex = threeDDatumStyleIndex(chart, series, seriesIndex, seriesIndex);
+      paintChartStyleEffects(
+        ctx,
+        chartStyleEffectOwner(series.chartexStyle),
+        chartDataPointStyleRole(chart, 'dataPoint3D', seriesIndex),
+        styleIndex,
+        keyBounds,
+        ptToPx,
+        paintLine,
+        styleIndex,
+      );
+    }
   }
   if (series.showMarker !== true || series.markerSymbol === 'none') return;
   const symbol = series.markerSymbol ?? 'circle';
-  const fill = seriesMarkerFillColor(series, color.replace(/^#/, ''));
-  const fillCss = fill === '00000000'
-    ? 'transparent' : fill.startsWith('#') ? fill : `#${fill}`;
-  const markerLine = series.markerLine ?? series.lineColor ?? color.replace(/^#/, '');
-  const lineCss = markerLine === '00000000'
-    ? 'rgba(0,0,0,0)' : markerLine.startsWith('#') ? markerLine : `#${markerLine}`;
-  const markerLineWidth = series.markerLineWidthEmu != null
-    ? Math.max(0.25, series.markerLineWidthEmu / EMU_PER_PT * ptToPx)
-    : Math.max(0.75, ptToPx);
+  const marker = threeDMarkerPaint(
+    chart, series, undefined, seriesIndex, seriesIndex, color.replace(/^#/, ''), ptToPx,
+  );
   paintThreeDMarker(
     ctx,
     { x: x + key / 2, y },
     symbol,
     Math.min(key, Math.max(2, (series.markerSize ?? 5) * ptToPx)),
-    fillCss,
-    lineCss,
-    markerLineWidth,
-    seriesMarkerFillPaint(series),
+    marker.fill === '00000000' ? 'transparent' : `#${marker.fill.replace(/^#/, '')}`,
+    marker.line === '00000000' ? 'rgba(0,0,0,0)' : `#${marker.line.replace(/^#/, '')}`,
+    marker.lineWidth,
+    marker.fillPaint,
     shapeRotationDeg,
     ptToPx,
+    marker.effectDirect,
+    marker.effectFallback,
+    marker.effectIndex,
+    marker.effectFallbackIndex,
+    marker.linePaint,
+    marker.lineDash,
+    marker.lineCustomDash,
+    marker.lineCap,
+    marker.lineJoin,
   );
 }
 
@@ -1954,6 +2252,7 @@ function simpleLegend(
           series: chart.series[0],
           point: indexedPoints.get(index),
           sourceIndex: index,
+          seriesIndex: 0,
         };
       })
     : chart.series.map((series, index) => ({
@@ -1962,6 +2261,7 @@ function simpleLegend(
       series,
       point: undefined,
       sourceIndex: index,
+      seriesIndex: index,
     }));
   const legendOverrides = threeDLegendOverrideMap(chart);
   const entries = rawEntries.filter(entry =>
@@ -2008,32 +2308,13 @@ function simpleLegend(
         const lineKey = !categoryDriven && chart.chartType.toLowerCase().includes('line');
         if (lineKey && entry.series) {
           paintThreeDLineLegendKey(
-            ctx, entry.series, entry.color, itemX, rowY, key, ptToPx, shapeRotationDeg,
+            ctx, chart, entry.series, entry.seriesIndex, entry.color,
+            itemX, rowY, key, ptToPx, shapeRotationDeg,
           );
-        } else {
-          if (entry.color !== 'transparent') {
-            ctx.fillStyle = entry.color;
-            ctx.fillRect(itemX, rowY - key / 2, key, key);
-          }
-          const lineHidden = entry.point?.lineHidden ?? entry.series?.lineHidden;
-          const lineColor = entry.point?.lineColor ?? entry.series?.lineColor;
-          if (lineHidden !== true && lineColor) {
-            ctx.strokeStyle = `#${lineColor}`;
-            ctx.lineWidth = (entry.point?.lineWidthEmu ?? entry.series?.lineWidthEmu) != null
-              ? Math.max(
-                0.25,
-                (entry.point?.lineWidthEmu ?? entry.series?.lineWidthEmu ?? 0)
-                  / EMU_PER_PT * ptToPx,
-              )
-              : 0.75 * ptToPx;
-            ctx.setLineDash(pptxPresetDashArray(
-              entry.point?.lineDash ?? entry.series?.chartexStyle?.lineDash ?? 'solid',
-              ctx.lineWidth,
-            ));
-            ctx.strokeRect(itemX, rowY - key / 2, key, key);
-            ctx.setLineDash([]);
-          }
-        }
+        } else if (entry.series) paintThreeDDatumLegendSwatch(
+          ctx, chart, entry.series, entry.point, entry.sourceIndex, entry.seriesIndex,
+          itemX, rowY, key, ptToPx, shapeRotationDeg, categoryDriven,
+        );
         ctx.fillStyle = textStyle.color;
         ctx.fillText(elideToWidth(ctx, entry.label, available), itemX + key + 4, rowY);
         itemX += widths[position] + 12;
@@ -2064,28 +2345,13 @@ function simpleLegend(
     const lineKey = !categoryDriven && chart.chartType.toLowerCase().includes('line');
     if (lineKey && entry.series) {
       paintThreeDLineLegendKey(
-        ctx, entry.series, entry.color, bounds.x + 4, cy, key, ptToPx, shapeRotationDeg,
+        ctx, chart, entry.series, entry.seriesIndex, entry.color,
+        bounds.x + 4, cy, key, ptToPx, shapeRotationDeg,
       );
-    } else {
-      if (entry.color !== 'transparent') {
-        ctx.fillStyle = entry.color;
-        ctx.fillRect(bounds.x + 4, cy - key / 2, key, key);
-      }
-      const lineHidden = entry.point?.lineHidden ?? entry.series?.lineHidden;
-      const lineColor = entry.point?.lineColor ?? entry.series?.lineColor;
-      if (lineHidden !== true && lineColor) {
-        ctx.strokeStyle = `#${lineColor}`;
-        ctx.lineWidth = (entry.point?.lineWidthEmu ?? entry.series?.lineWidthEmu) != null
-          ? Math.max(0.25, (entry.point?.lineWidthEmu ?? entry.series?.lineWidthEmu ?? 0) / EMU_PER_PT * ptToPx)
-          : 0.75 * ptToPx;
-        ctx.setLineDash(pptxPresetDashArray(
-          entry.point?.lineDash ?? entry.series?.chartexStyle?.lineDash ?? 'solid',
-          ctx.lineWidth,
-        ));
-        ctx.strokeRect(bounds.x + 4, cy - key / 2, key, key);
-        ctx.setLineDash([]);
-      }
-    }
+    } else if (entry.series) paintThreeDDatumLegendSwatch(
+      ctx, chart, entry.series, entry.point, entry.sourceIndex, entry.seriesIndex,
+      bounds.x + 4, cy, key, ptToPx, shapeRotationDeg, categoryDriven,
+    );
     ctx.fillStyle = textStyle.color;
     const firstY = cy - (lines.length - 1) * lineHeight / 2;
     lines.forEach((line, lineIndex) => ctx.fillText(line, textX, firstY + lineIndex * lineHeight));
@@ -3091,7 +3357,7 @@ function renderCartesian(
       nearDepth: number; farDepth: number;
       categoryIndex: number; seriesIndex: number; color: string;
       fillPaint: Fill | null | undefined;
-      lineFill: ChartModel['plotAreaLineFill'] | null | undefined;
+      lineFill: Fill | null | undefined;
       shape: string; baseCoord: number; endCoord: number; endScale: number;
       baseScale: number; omitBaseCap: boolean; omitEndCap: boolean;
       outline: boolean; outlineColor: string; outlineWidth: number;
@@ -3300,7 +3566,7 @@ function renderCartesian(
       remaining: MAX_PROJECTED_STROKE_PRIMITIVES,
       exceeded: false,
     };
-    const sceneFaces = primitives.flatMap(item => {
+    const datumFaces = primitives.map(item => {
       const faces = shapeMeshFaces(
         projection,
         item.shape,
@@ -3325,13 +3591,37 @@ function renderCartesian(
       );
       applyScenePaint(ctx, faces, 'fill', item.fillPaint, shapeRotationDeg);
       applyScenePaint(ctx, faces, 'outline', item.lineFill, shapeRotationDeg);
-      return faces;
+      return { item, faces };
     });
+    const sceneFaces = datumFaces.flatMap(datum => datum.faces);
     if (meshBudget.exceeded) {
       paintThreeDTooManyDataPoints(ctx, rect);
       return true;
     }
     for (const item of sortProjectedSceneFaces(sceneFaces)) paintSceneFace(ctx, item);
+    // 3-D faces from different datums interleave after camera-depth sorting, so
+    // applying a normal per-datum effect wrapper would repaint nearer faces in
+    // the wrong order. Emit only the native outer effect behind the completed
+    // scene; raster effects stay resolved but intentionally suppressed by the
+    // helper's documented 3-D boundary.
+    for (const { item, faces } of datumFaces) {
+      const series = chart.series[item.seriesIndex];
+      const point = pointOverrides[item.seriesIndex].get(item.categoryIndex);
+      const styleIndex = threeDDatumStyleIndex(
+        chart, series, item.categoryIndex, item.seriesIndex,
+      );
+      const pointEffect = chartStyleEffectOwner(point?.chartexStyle);
+      const seriesEffect = chartStyleEffectOwner(series.chartexStyle);
+      paintChartStyleOuterEffectBehind(
+        ctx,
+        pointEffect ?? seriesEffect,
+        chartDataPointStyleRole(chart, 'dataPoint3D', item.seriesIndex),
+        pointEffect ? item.categoryIndex : styleIndex,
+        ptToPx,
+        target => paintSceneEffectSilhouette(target, faces),
+        styleIndex,
+      );
+    }
     for (const item of primitives) {
       const series = chart.series[item.seriesIndex];
       const anchor = horizontal
@@ -3926,26 +4216,27 @@ function renderCartesian(
           );
           if (symbol === 'none') continue;
           const sizePt = override?.markerSize ?? series.markerSize ?? 5;
-          const markerFill = markerFillColorFor(
-            series,
-            override,
-            categoryIndex,
-            series.color ?? PALETTE[seriesIndex % PALETTE.length],
+          const marker = threeDMarkerPaint(
+            chart, series, override, categoryIndex, seriesIndex,
+            series.color ?? PALETTE[seriesIndex % PALETTE.length], ptToPx,
           );
-          const markerFillPaint = markerFillPaintFor(series, override, categoryIndex);
-          const markerLine = override?.markerLine ?? series.markerLine ?? series.lineColor ?? series.color
-            ?? PALETTE[seriesIndex % PALETTE.length];
-          const markerLineWidth = (override?.markerLineWidthEmu ?? series.markerLineWidthEmu) != null
-            ? Math.max(0.25, (override?.markerLineWidthEmu ?? series.markerLineWidthEmu ?? 0) / EMU_PER_PT * ptToPx)
-            : Math.max(0.75, series.lineWidthEmu != null
-              ? series.lineWidthEmu / EMU_PER_PT * ptToPx
-              : ptToPx);
           foregroundMarkers.push(() => paintThreeDMarker(
-              ctx, point, symbol, Math.max(2, sizePt) * ptToPx,
-              markerFill === '00000000' ? 'transparent' : `#${markerFill}`,
-              `#${markerLine}`, markerLineWidth,
-              markerFillPaint, shapeRotationDeg, ptToPx,
-            ));
+            ctx, point, symbol, Math.max(2, sizePt) * ptToPx,
+            marker.fill === '00000000' ? 'transparent' : `#${marker.fill.replace(/^#/, '')}`,
+            marker.line === '00000000' ? 'rgba(0,0,0,0)'
+              : `#${marker.line.replace(/^#/, '')}`,
+            marker.lineWidth,
+            marker.fillPaint, shapeRotationDeg, ptToPx,
+            marker.effectDirect,
+            marker.effectFallback,
+            marker.effectIndex,
+            marker.effectFallbackIndex,
+            marker.linePaint,
+            marker.lineDash,
+            marker.lineCustomDash,
+            marker.lineCap,
+            marker.lineJoin,
+          ));
         }
       }
       for (let categoryIndex = 0; categoryIndex < points.length; categoryIndex++) {
@@ -4281,7 +4572,7 @@ function renderPie(
     segments: number;
     mesh: ThreeDMesh;
     lineColor: string | null;
-    lineFill: ChartModel['plotAreaLineFill'] | null | undefined;
+    lineFill: Fill | null | undefined;
     lineWidthEmu: number | null;
     lineDash: string;
     lineCustomDash: ChartModel['plotAreaLineCustomDash'];
@@ -4377,13 +4668,14 @@ function renderPie(
   // Fill solids remain independently colored and depth-sorted. A uniform,
   // non-exploded pie uses semantic continuous outline paths; differently
   // styled or exploded points retain independent authored solid outlines.
-  const pieFillFaces = slices.flatMap(slice => {
+  const pieFillFaceGroups = slices.map(slice => {
     const faces = projectThreeDMesh(
       projection, slice.mesh, slice.color, undefined, pieBudget,
     );
     applyScenePaint(ctx, faces, 'fill', slice.fillPaint, shapeRotationDeg);
-    return faces;
+    return { slice, faces };
   });
+  const pieFillFaces = pieFillFaceGroups.flatMap(group => group.faces);
   const pieOutlineFaces: SceneFace[] = [];
   const outlineStyles = slices.map(outlineStyleForSlice);
   const firstOutline = outlineStyles[0];
@@ -4426,6 +4718,20 @@ function renderPie(
     for (const item of sortProjectedSceneFaces([
       ...pieFillFaces, ...pieOutlineFaces,
     ])) paintSceneFace(ctx, item);
+  }
+  for (const { slice, faces } of pieFillFaceGroups) {
+    const point = pointOverrides.get(slice.index);
+    const styleIndex = threeDDatumStyleIndex(chart, series, slice.index, 0);
+    const pointEffect = chartStyleEffectOwner(point?.chartexStyle);
+    paintChartStyleOuterEffectBehind(
+      ctx,
+      pointEffect ?? chartStyleEffectOwner(series.chartexStyle),
+      chartDataPointStyleRole(chart, 'dataPoint3D', 0),
+      pointEffect ? slice.index : styleIndex,
+      ptToPx,
+      target => paintSceneEffectSilhouette(target, faces),
+      styleIndex,
+    );
   }
   for (const slice of slices) {
     const middle = (slice.start + slice.end) / 2;
@@ -4518,8 +4824,12 @@ function renderPie(
   const categories = series.categories?.length ? series.categories : chart.categories;
   const legendPointColors = Array.from({ length: categories.length }, (_, index) => {
     const pointOverride = pointOverrides.get(index);
-    const authored = pointOverride?.fillHidden === true
-      ? '00000000'
+    const decision = chartThreeDDatumFillDecision(
+      chart, series, pointOverride, index, 0,
+    );
+    if (decision === null) return '00000000';
+    const authored = decision?.fillType === 'solid'
+      ? decision.color
       : pointOverride?.color ?? series.dataPointColors?.[index] ?? series.color;
     if (authored === '00000000') return '00000000';
     return scaleHexColor(authored ? `#${authored}` : colorFor(index), 0.80).replace(/^#/, '');

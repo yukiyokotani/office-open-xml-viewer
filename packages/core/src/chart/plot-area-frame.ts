@@ -4,6 +4,7 @@ import { resolveFill } from '../shape/paint.js';
 import { EMU_PER_PT } from '../units.js';
 import { strokeChartFrameRect } from './compound-frame.js';
 import { paintChartImageFill } from './image-fill.js';
+import { paintChartStyleEffects } from './style-effects.js';
 
 /** Paint the effective DrawingML plot-area frame behind chart geometry.
  *
@@ -20,47 +21,55 @@ export function paintPlotAreaFrame(
   ptToPx: number,
   shapeRotationDeg = 0,
 ): void {
-  if (chart.plotAreaFillHidden !== true) {
-    if (chart.plotAreaFill?.fillType === 'image') {
-      paintChartImageFill(
-        ctx, chart.plotAreaFill, x, y, w, h, ptToPx, shapeRotationDeg,
-      );
-    } else {
-      const fill = chart.plotAreaFill
-        ? resolveFill(chart.plotAreaFill, ctx, x, y, w, h, shapeRotationDeg)
-        : chart.plotAreaBg ? `#${chart.plotAreaBg}` : null;
-      if (fill) {
-        ctx.fillStyle = fill;
-        ctx.fillRect(x, y, w, h);
+  paintChartStyleEffects(
+    ctx,
+    chart.plotAreaStyle,
+    chart.threeD ? chart.chartStyleRoles?.plotArea3D : chart.chartStyleRoles?.plotArea,
+    0,
+    { x, y, w, h },
+    ptToPx,
+    target => {
+      if (chart.plotAreaFillHidden !== true) {
+        if (chart.plotAreaFill?.fillType === 'image') {
+          paintChartImageFill(
+            target, chart.plotAreaFill, x, y, w, h, ptToPx, shapeRotationDeg,
+          );
+        } else {
+          const fill = chart.plotAreaFill
+            ? resolveFill(chart.plotAreaFill, target, x, y, w, h, shapeRotationDeg)
+            : chart.plotAreaBg ? `#${chart.plotAreaBg}` : null;
+          if (fill) {
+            target.fillStyle = fill;
+            target.fillRect(x, y, w, h);
+          }
+        }
       }
-    }
-  }
-  if (chart.plotAreaLineHidden === true
-    || (!chart.plotAreaLineFill && !chart.plotAreaLineColor)) return;
+      if (chart.plotAreaLineHidden === true
+        || (!chart.plotAreaLineFill && !chart.plotAreaLineColor)) return;
 
-  const lineWidth = chart.plotAreaLineWidthEmu
-    ? Math.max(0.5, chart.plotAreaLineWidthEmu / EMU_PER_PT) * ptToPx
-    : 1;
-  ctx.save();
-  const stroke = chart.plotAreaLineFill
-    ? resolveFill(chart.plotAreaLineFill, ctx, x, y, w, h, shapeRotationDeg)
-    : chart.plotAreaLineColor ? `#${chart.plotAreaLineColor}` : null;
-  if (!stroke) {
-    ctx.restore();
-    return;
-  }
-  ctx.strokeStyle = stroke;
-  ctx.setLineDash(drawingmlLineDashArray(
-    chart.plotAreaLineCustomDash,
-    chart.plotAreaLineDash,
-    lineWidth,
-  ));
-  ctx.lineCap = chart.plotAreaLineCap === 'rnd'
-    ? 'round' : chart.plotAreaLineCap === 'sq' ? 'square' : 'butt';
-  ctx.lineJoin = chart.plotAreaLineJoin === 'round' || chart.plotAreaLineJoin === 'bevel'
-    ? chart.plotAreaLineJoin : 'miter';
-  strokeChartFrameRect(
-    ctx, x, y, w, h, lineWidth, chart.plotAreaLineCompound,
+      const lineWidth = chart.plotAreaLineWidthEmu
+        ? Math.max(0.5, chart.plotAreaLineWidthEmu / EMU_PER_PT) * ptToPx
+        : 1;
+      target.save();
+      const stroke = chart.plotAreaLineFill
+        ? resolveFill(chart.plotAreaLineFill, target, x, y, w, h, shapeRotationDeg)
+        : chart.plotAreaLineColor ? `#${chart.plotAreaLineColor}` : null;
+      if (stroke) {
+        target.strokeStyle = stroke;
+        target.setLineDash(drawingmlLineDashArray(
+          chart.plotAreaLineCustomDash,
+          chart.plotAreaLineDash,
+          lineWidth,
+        ));
+        target.lineCap = chart.plotAreaLineCap === 'rnd'
+          ? 'round' : chart.plotAreaLineCap === 'sq' ? 'square' : 'butt';
+        target.lineJoin = chart.plotAreaLineJoin === 'round' || chart.plotAreaLineJoin === 'bevel'
+          ? chart.plotAreaLineJoin : 'miter';
+        strokeChartFrameRect(
+          target, x, y, w, h, lineWidth, chart.plotAreaLineCompound,
+        );
+      }
+      target.restore();
+    },
   );
-  ctx.restore();
 }

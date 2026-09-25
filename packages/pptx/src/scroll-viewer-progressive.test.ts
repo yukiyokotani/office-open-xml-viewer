@@ -57,8 +57,12 @@ describe('PptxScrollViewer progressive layout', () => {
       { overscan: 3, onVisibleSlideChange },
     ) as PptxScrollViewer;
     const slots = (viewer as unknown as { _slots: Map<number, { loadingLayer: FakeEl }> })._slots;
+    const loadingLayer = slots.get(1)?.loadingLayer;
 
-    expect(slots.get(1)?.loadingLayer.style.display).toBe('flex');
+    expect(loadingLayer?.style.display).toBe('flex');
+    expect(loadingLayer?.children.some((child) => child.tag === 'progress')).toBe(false);
+    expect(loadingLayer?.children[0]?.className).toBe('ooxml-pptx-progress-circle');
+    expect(loadingLayer?.children[0]?.style['border-radius']).toBe('50%');
     expect(onVisibleSlideChange).toHaveBeenLastCalledWith(0, 4, false);
 
     engine.setLayoutProgress(4, true);

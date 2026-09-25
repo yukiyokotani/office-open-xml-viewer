@@ -8,7 +8,6 @@ export interface ArrowEnd {
     w: string;
     len: string;
 }
-function attachXlsFontMeasurement(worker: MessagePort, measure: LegacyXlsFontMeasurement): () => void;
 export function autoResize(render: (width: number, height: number) => void | Promise<void>, element: Element, opts?: AutoResizeOptions): () => void;
 export interface AutoResizeOptions {
     pauseWhenHidden?: boolean;
@@ -25,6 +24,10 @@ export type BlipEffect = {
     to: string;
     toAlpha: number;
     useAlpha: boolean;
+} | {
+    type: 'luminance';
+    bright: number;
+    contrast: number;
 } | {
     type: 'duotone';
 };
@@ -69,6 +72,8 @@ export interface CellFont {
     size: number;
     color: string | null;
     name: string | null;
+    scheme?: 'major' | 'minor';
+    charset?: number;
     underlineStyle?: string;
     vertAlign?: 'superscript' | 'subscript';
 }
@@ -184,9 +189,17 @@ export interface ChartAreaGroupDecorations {
     groupIndex: number;
     dropLines?: ChartDecorationLineStyle | null;
 }
+export interface ChartAxisNumberFormat {
+    authoredCode: string;
+    sourceLinked?: boolean | null;
+}
 export interface ChartBarGroupDecorations {
     groupIndex: number;
     seriesLines?: ChartDecorationLineStyle[] | null;
+}
+export interface ChartClassicSurfaceBandStyles {
+    fixed?: ChartExElementStyle | null;
+    byBandCount?: Array<ChartExElementStyle | null> | null;
 }
 export interface ChartDataLabelOverride {
     idx: number;
@@ -238,12 +251,15 @@ export interface ChartDataPointOverride {
     markerFill?: string;
     markerFillPaint?: Fill | null;
     markerFillPaintAuthored?: boolean | null;
+    markerStyle?: ChartExElementStyle | null;
     markerLine?: string;
+    markerLinePaintAuthored?: boolean | null;
     markerLineWidthEmu?: number;
     bubble3D?: boolean | null;
     explosion?: number;
 }
 export interface ChartDataTable {
+    style?: ChartExElementStyle | null;
     showHorizontalBorder: boolean;
     showVerticalBorder: boolean;
     showOutline: boolean;
@@ -251,6 +267,8 @@ export interface ChartDataTable {
     fontSizeHpt?: number | null;
     fontFace?: string | null;
     fontColor?: string | null;
+    fontPaintAuthored?: boolean | null;
+    fontHidden?: boolean | null;
     fontBold?: boolean | null;
     fontItalic?: boolean | null;
     fillColor?: string | null;
@@ -261,9 +279,12 @@ export interface ChartDataTable {
     lineWidthEmu?: number | null;
     lineDash?: string | null;
     lineHidden?: boolean | null;
+    linePaintAuthored?: boolean | null;
 }
 export interface ChartDecorationLineStyle {
+    style?: ChartExElementStyle | null;
     color?: string | null;
+    fill?: SolidFill | GradientFill | PatternFill | null;
     paintAuthored?: boolean | null;
     widthEmu?: number | null;
     dash?: string | null;
@@ -283,11 +304,14 @@ export interface ChartDisplayUnitsLabel {
     fontBold?: boolean | null;
     fontItalic?: boolean | null;
     fontColor?: string | null;
+    fontPaintAuthored?: boolean | null;
+    fontHidden?: boolean | null;
     fontFace?: string | null;
     rotation?: number | null;
     boxStyle?: ChartLabelBox | null;
 }
 export interface ChartErrBars {
+    style?: ChartExElementStyle | null;
     dir: string;
     barType: string;
     plus: (number | null)[];
@@ -297,6 +321,7 @@ export interface ChartErrBars {
     lineWidthEmu?: number;
     dash?: string;
     hidden?: boolean;
+    linePaintAuthored?: boolean | null;
 }
 export interface ChartexBoxSeries {
     name: string;
@@ -318,10 +343,16 @@ export interface ChartexBoxWhisker {
     series: ChartexBoxSeries[];
 }
 export interface ChartExElementStyle {
+    shapePropertiesPresent?: boolean | null;
+    allowNoFillOverride?: boolean | null;
+    allowNoLineOverride?: boolean | null;
     fontSizeHpt?: number | null;
     fontBold?: boolean | null;
     fontItalic?: boolean | null;
     fontColor?: string | null;
+    fontColors?: Array<string | null> | null;
+    fontColorIndex?: number | null;
+    fontFormattingIndices?: number[] | null;
     fontPaintAuthored?: boolean | null;
     fontHidden?: boolean | null;
     fontFace?: string | null;
@@ -353,8 +384,22 @@ export interface ChartExElementStyle {
     lineCap?: string | null;
     lineJoin?: string | null;
     lineCompound?: string | null;
+    shadows?: Array<Shadow | null> | null;
+    innerShadows?: Array<Shadow | null> | null;
+    glows?: Array<Glow | null> | null;
+    softEdges?: Array<SoftEdge | null> | null;
+    reflections?: Array<Reflection | null> | null;
+    effectAuthored?: boolean | null;
+    effectNoStyle?: boolean | null;
+    effectUnsupported?: boolean | null;
     fillColorIndex?: number | null;
+    fillFormattingIndices?: number[] | null;
+    fillSemanticFallbackIndices?: number[] | null;
     lineColorIndex?: number | null;
+    lineFormattingIndices?: number[] | null;
+    lineSemanticFallbackIndices?: number[] | null;
+    effectFormattingIndices?: number[] | null;
+    effectColorIndex?: number | null;
 }
 export interface ChartexGeography {
     projectionType?: 'mercator' | 'miller' | 'robinson' | 'albers' | string | null;
@@ -411,8 +456,12 @@ export interface ChartexValueColorStop {
     value?: number | null;
 }
 export interface ChartLabelBox {
+    style?: ChartExElementStyle | null;
+    effectFallbackStyle?: ChartExElementStyle | null;
+    effectStyleIndex?: number;
+    effectFallbackIndex?: number;
     fill?: string;
-    fillPaint?: SolidFill | GradientFill | PatternFill | null;
+    fillPaint?: Fill | null;
     fillHidden?: boolean | null;
     fillPaintAuthored?: boolean | null;
     borderColor?: string;
@@ -434,6 +483,7 @@ export interface ChartLegendEntryOverride {
     fontColor?: string | null;
     fontSizeHpt?: number | null;
     fontBold?: boolean | null;
+    fontItalic?: boolean | null;
 }
 export type ChartLineDashSegment = DrawingMLCustomDashSegment;
 export interface ChartLineGroupDecorations {
@@ -465,6 +515,19 @@ export interface ChartModel {
     series: ChartSeries[];
     plotGroups?: ChartPlotGroup[] | null;
     chartTextBoxes?: ChartTextBox[] | null;
+    chartTextStyle?: ChartExElementStyle | null;
+    chartAreaStyle?: ChartExElementStyle | null;
+    plotAreaStyle?: ChartExElementStyle | null;
+    legendStyle?: ChartExElementStyle | null;
+    titleStyle?: ChartExElementStyle | null;
+    catAxisStyle?: ChartExElementStyle | null;
+    valAxisStyle?: ChartExElementStyle | null;
+    catAxisTitleStyle?: ChartExElementStyle | null;
+    valAxisTitleStyle?: ChartExElementStyle | null;
+    catAxisMajorGridlineStyle?: ChartExElementStyle | null;
+    catAxisMinorGridlineStyle?: ChartExElementStyle | null;
+    valAxisMajorGridlineStyle?: ChartExElementStyle | null;
+    valAxisMinorGridlineStyle?: ChartExElementStyle | null;
     varyColors?: boolean | null;
     showDataLabels: boolean;
     valMin: number | null;
@@ -509,24 +572,35 @@ export interface ChartModel {
     catAxisMinorTickMark?: 'cross' | 'out' | 'in' | 'none' | string | null;
     titleFontSizeHpt: number | null;
     titleFontColor: string | null;
+    titleFontPaintAuthored?: boolean | null;
     titleFontFace: string | null;
     catAxisFontSizeHpt: number | null;
     valAxisFontSizeHpt: number | null;
     catAxisFontColor?: string | null;
+    catAxisFontPaintAuthored?: boolean | null;
     valAxisFontColor?: string | null;
+    valAxisFontPaintAuthored?: boolean | null;
     dataLabelFontSizeHpt: number | null;
     dataLabelFontBold?: boolean | null;
+    dataLabelFontItalic?: boolean | null;
+    dataLabelFontLanguage?: string | null;
+    dataLabelFontBaseline?: number | null;
     subtotalIndices: number[];
     legendManualLayout?: LegendManualLayout | null;
     valAxisFormatCode?: string | null;
+    valAxisNumberFormat?: ChartAxisNumberFormat | null;
     valAxisDisplayUnits?: ChartDisplayUnits | null;
     catAxisDisplayUnits?: ChartDisplayUnits | null;
     barGapWidth?: number | null;
     barOverlap?: number | null;
     dataLabelPosition?: string | null;
     dataLabelFontColor?: string | null;
+    dataLabelFontPaintAuthored?: boolean | null;
     dataLabelFormatCode?: string | null;
     titleFontBold?: boolean | null;
+    titleFontItalic?: boolean | null;
+    titleFontLanguage?: string | null;
+    titleFontBaseline?: number | null;
     catAxisFontBold?: boolean | null;
     catAxisFontItalic?: boolean | null;
     valAxisFontBold?: boolean | null;
@@ -535,6 +609,7 @@ export interface ChartModel {
     catAxisTitleFontBold?: boolean | null;
     catAxisTitleFontItalic?: boolean | null;
     catAxisTitleFontColor?: string | null;
+    catAxisTitleFontPaintAuthored?: boolean | null;
     catAxisTitleRotation?: number | null;
     catAxisTitleVerticalMode?: 'horz' | 'vert' | 'vert270' | 'wordArtVert' | 'eaVert' | 'mongolianVert' | 'wordArtVertRtl' | null;
     catAxisTitleManualLayout?: ChartManualLayout | null;
@@ -543,6 +618,7 @@ export interface ChartModel {
     valAxisTitleFontBold?: boolean | null;
     valAxisTitleFontItalic?: boolean | null;
     valAxisTitleFontColor?: string | null;
+    valAxisTitleFontPaintAuthored?: boolean | null;
     valAxisTitleRotation?: number | null;
     valAxisTitleVerticalMode?: 'horz' | 'vert' | 'vert270' | 'wordArtVert' | 'eaVert' | 'mongolianVert' | 'wordArtVertRtl' | null;
     valAxisTitleManualLayout?: ChartManualLayout | null;
@@ -554,8 +630,12 @@ export interface ChartModel {
     dataLabelFontFace?: string | null;
     legendFontFace?: string | null;
     legendFontColor?: string | null;
+    legendFontPaintAuthored?: boolean | null;
     legendFontSizeHpt?: number | null;
     legendFontBold?: boolean | null;
+    legendFontItalic?: boolean | null;
+    legendFontLanguage?: string | null;
+    legendFontBaseline?: number | null;
     legendFillColor?: string | null;
     legendFill?: Fill | null;
     legendFillHidden?: boolean | null;
@@ -597,10 +677,12 @@ export interface ChartModel {
     valAxisLineDash?: string | null;
     valAxisLinePaintAuthored?: boolean | null;
     catAxisFormatCode?: string | null;
+    catAxisNumberFormat?: ChartAxisNumberFormat | null;
     catAxisMin?: number | null;
     catAxisMax?: number | null;
     titleManualLayout?: ChartManualLayout | null;
     plotAreaManualLayout?: ChartManualLayout | null;
+    cartesianAutoLayoutProfile?: 'wordClassicColumn' | null;
     scatterStyle?: string | null;
     bubbleScale?: number | null;
     bubbleSizeRepresents?: 'area' | 'w' | null;
@@ -618,17 +700,21 @@ export interface ChartModel {
     valAxisGridlineColor?: string | null;
     valAxisGridlineWidthEmu?: number | null;
     valAxisGridlineDash?: string | null;
+    valAxisGridlinePaintAuthored?: boolean | null;
     catAxisGridlineColor?: string | null;
     catAxisGridlineWidthEmu?: number | null;
     catAxisGridlineDash?: string | null;
+    catAxisGridlinePaintAuthored?: boolean | null;
     valAxisMinorGridlines?: boolean | null;
     valAxisMinorGridlineColor?: string | null;
     valAxisMinorGridlineWidthEmu?: number | null;
     valAxisMinorGridlineDash?: string | null;
+    valAxisMinorGridlinePaintAuthored?: boolean | null;
     catAxisMinorGridlines?: boolean | null;
     catAxisMinorGridlineColor?: string | null;
     catAxisMinorGridlineWidthEmu?: number | null;
     catAxisMinorGridlineDash?: string | null;
+    catAxisMinorGridlinePaintAuthored?: boolean | null;
     valAxisMajorUnit?: number | null;
     valAxisMinorUnit?: number | null;
     catAxisMajorUnit?: number | null;
@@ -679,6 +765,13 @@ export interface ChartModel {
     chartexColorPalette?: Array<string | null> | null;
     chartexColorStyleMethod?: string | null;
     chartStyleRoles?: Partial<Record<ChartStyleRole, ChartExElementStyle>> | null;
+    classicChartStyleRoles?: Partial<Record<ChartStyleRole, ChartExElementStyle>> | null;
+    classicSurfaceBandStyles?: ChartClassicSurfaceBandStyles | null;
+    linkedChartStyleRoles?: Partial<Record<ChartStyleRole, ChartExElementStyle>> | null;
+    classicVaryingPointChartStyleRoles?: Partial<Record<ChartStyleRole, ChartExElementStyle>> | null;
+    classicVaryingPointChartStyleRolesByGroup?: Array<Partial<Record<ChartStyleRole, ChartExElementStyle>> | null> | null;
+    varyingPointChartStyleRoles?: Partial<Record<ChartStyleRole, ChartExElementStyle>> | null;
+    varyingPointChartStyleRolesByGroup?: Array<Partial<Record<ChartStyleRole, ChartExElementStyle>> | null> | null;
     chartStyleColorPalette?: Array<string | null> | null;
     chartStyleColorMethod?: string | null;
     chartStyleMarkerSizePt?: number | null;
@@ -701,6 +794,7 @@ export interface ChartOfPie {
     secondPieSizePercent: number;
     gapWidthPercent: number;
     seriesLines: boolean;
+    seriesLineStyle?: ChartDecorationLineStyle | null;
 }
 export interface ChartPlotGroup {
     kind: ChartPlotGroupKind;
@@ -714,6 +808,7 @@ export interface ChartPlotGroup {
     barDirection?: string | null;
     scatterStyle?: string | null;
     radarStyle?: string | null;
+    varyColors?: boolean | null;
     gapWidth?: number | null;
     overlap?: number | null;
     bubbleScale?: number | null;
@@ -777,7 +872,9 @@ export interface ChartSeries {
     markerFill?: string | null;
     markerFillPaint?: Fill | null;
     markerFillPaintAuthored?: boolean | null;
+    markerStyle?: ChartExElementStyle | null;
     markerLine?: string | null;
+    markerLinePaintAuthored?: boolean | null;
     markerLineWidthEmu?: number | null;
     dataPointOverrides?: ChartDataPointOverride[] | null;
     dataLabelOverrides?: ChartDataLabelOverride[] | null;
@@ -826,10 +923,13 @@ export interface ChartSeriesDataLabels {
     leaderLineWidthEmu?: number;
     leaderLineHidden?: boolean;
     leaderLineDash?: string;
+    leaderLinePaintAuthored?: boolean | null;
+    leaderLineStyle?: ChartExElementStyle | null;
 }
 export interface ChartStockBarPaint {
+    style?: ChartExElementStyle | null;
     fillColor?: string | null;
-    fill?: SolidFill | GradientFill | PatternFill | null;
+    fill?: Fill | null;
     fillPaintAuthored?: boolean | null;
     fillHidden?: boolean | null;
     lineColor?: string | null;
@@ -921,6 +1021,10 @@ export interface ChartThreeDRenderer {
     render(ctx: CanvasRenderingContext2D, chart: ChartModel, rect: ChartRect, ptToPx: number, shapeRotationDeg?: number): boolean;
 }
 export interface ChartThreeDSeriesAxis {
+    style?: ChartExElementStyle | null;
+    titleStyle?: ChartExElementStyle | null;
+    majorGridlineStyle?: ChartExElementStyle | null;
+    minorGridlineStyle?: ChartExElementStyle | null;
     title?: string | null;
     hidden: boolean;
     orientation?: 'minMax' | 'maxMin' | string | null;
@@ -930,6 +1034,7 @@ export interface ChartThreeDSeriesAxis {
     majorTickMark: string;
     minorTickMark?: string | null;
     fontColor?: string | null;
+    fontPaintAuthored?: boolean | null;
     fontSizeHpt?: number | null;
     fontBold?: boolean | null;
     fontItalic?: boolean | null;
@@ -943,6 +1048,7 @@ export interface ChartThreeDSeriesAxis {
     titleFontBold?: boolean | null;
     titleFontItalic?: boolean | null;
     titleFontColor?: string | null;
+    titleFontPaintAuthored?: boolean | null;
     titleFontFace?: string | null;
     titleRotation?: number | null;
     titleVerticalMode?: ChartModel['catAxisTitleVerticalMode'];
@@ -960,6 +1066,7 @@ export interface ChartThreeDSurface {
     pictureOptions?: ChartThreeDPictureOptions | null;
 }
 export interface ChartTrendline {
+    style?: ChartExElementStyle | null;
     name?: string | null;
     trendlineType: string;
     order?: number | null;
@@ -998,8 +1105,11 @@ export interface ChartTrendline {
     lineWidthEmu?: number | null;
     lineDash?: string | null;
     lineHidden?: boolean | null;
+    linePaintAuthored?: boolean | null;
 }
 export type ChartType = 'line' | 'stackedLine' | 'stackedLinePct' | 'clusteredBar' | 'clusteredBarH' | 'stackedBar' | 'stackedBarH' | 'stackedBarPct' | 'stackedBarHPct' | 'area' | 'stackedArea' | 'stackedAreaPct' | 'pie' | 'doughnut' | 'scatter' | 'bubble' | 'radar' | 'waterfall' | 'stock' | 'surface' | 'surface3D' | 'boxWhisker' | 'sunburst' | 'treemap' | string;
+export type CjkFallback = 'auto' | CjkLang;
+type CjkLang = 'kr' | 'sc' | 'tc' | 'hk' | 'jp';
 export interface ConditionalFormat {
     sqref: WorksheetCellRange[];
     rules: CfRule[];
@@ -1059,6 +1169,11 @@ export interface FindMatch<Loc = unknown> {
 export interface FindMatchesOptions {
     caseSensitive?: boolean;
 }
+export interface Glow {
+    color: string;
+    alpha: number;
+    radius: number;
+}
 export interface GradientFill {
     fillType: 'gradient';
     stops: GradientStop[];
@@ -1116,9 +1231,6 @@ export interface ImageAnchor {
     editAs?: string;
     nativeExtCx: number;
     nativeExtCy: number;
-    rotation?: number;
-    flipH?: boolean;
-    flipV?: boolean;
     imagePath: string;
     mimeType: string;
     svgImagePath?: string;
@@ -1153,94 +1265,6 @@ export interface ImageResourceOptions {
 }
 export function isOoxmlDecodedImageLimitError(error: unknown): error is OoxmlDecodedImageLimitError;
 export function isTiffDecodeError(error: unknown): error is TiffDecodeError;
-interface LegacyDirectSourceDescriptor<F extends 'doc' | 'ppt' | 'xls'> {
-    readonly protocol: `ooxml-legacy-${F}-source/v1`;
-    readonly builtin: F;
-    readonly wasmUrl: string;
-}
-interface LegacyDocDirectConversionOptions {
-    readonly source: LegacyDocDirectSourceDescriptor;
-    readonly converter?: never;
-    readonly maxInputBytes?: number;
-    readonly signal?: AbortSignal;
-}
-interface LegacyDocDirectSourceDescriptor extends LegacyDirectSourceDescriptor<'doc'> {
-}
-export class LegacyOfficeConversionError extends Error {
-    readonly code: 'legacy-office-conversion';
-    readonly stage: 'conversion';
-    readonly reason: LegacyOfficeConversionFailureReason;
-    readonly from: LegacyOfficeFormat;
-    readonly to: OoxmlFormat;
-    constructor(reason: LegacyOfficeConversionFailureReason, from: LegacyOfficeFormat, to: OoxmlFormat, message?: string);
-}
-export type LegacyOfficeConversionFailureReason = 'aborted' | 'timeout' | 'source-too-large' | 'output-too-large' | 'capacity-exceeded' | 'unsupported-input' | 'failed' | 'invalid-output';
-export interface LegacyOfficeConversionInput {
-    readonly bytes: Uint8Array;
-    readonly from: LegacyOfficeFormat;
-    readonly to: OoxmlFormat;
-    readonly maxOutputBytes: number;
-    readonly signal: AbortSignal;
-}
-export interface LegacyOfficeConversionOptions {
-    readonly doc?: LegacyOfficeFormatConversionOptions | LegacyDocDirectConversionOptions;
-    readonly xls?: LegacyOfficeFormatConversionOptions | LegacyXlsDirectConversionOptions;
-    readonly ppt?: LegacyOfficeFormatConversionOptions | LegacyPptDirectConversionOptions;
-}
-export interface LegacyOfficeConversionRecord {
-    readonly from: LegacyOfficeFormat;
-    readonly to: OoxmlFormat;
-    readonly inputBytes: number;
-    readonly outputBytes: number;
-    readonly engine?: string;
-    readonly engineVersion?: string;
-    readonly outputSha256?: string;
-    readonly warnings?: readonly string[];
-}
-export interface LegacyOfficeConversionResult {
-    readonly bytes: Uint8Array | ArrayBuffer;
-    readonly engine?: string;
-    readonly engineVersion?: string;
-    readonly outputSha256?: string;
-    readonly warnings?: readonly string[];
-}
-export interface LegacyOfficeConverter {
-    convert(input: Readonly<LegacyOfficeConversionInput>): Promise<LegacyOfficeConversionResult>;
-}
-export type LegacyOfficeFormat = 'doc' | 'xls' | 'ppt';
-export interface LegacyOfficeFormatConversionOptions {
-    readonly converter: LegacyOfficeConverter;
-    readonly signal?: AbortSignal;
-    readonly timeoutMs?: number;
-    readonly maxInputBytes?: number;
-    readonly maxOutputBytes?: number;
-    readonly onResult?: (result: Readonly<LegacyOfficeConversionRecord>) => void | Promise<void>;
-    readonly source?: never;
-}
-export interface LegacyPptDirectConversionOptions {
-    readonly source: LegacyPptDirectSourceDescriptor;
-    readonly converter?: never;
-    readonly maxInputBytes?: number;
-    readonly signal?: AbortSignal;
-}
-export interface LegacyPptDirectSourceDescriptor extends LegacyDirectSourceDescriptor<'ppt'> {
-}
-export interface LegacyXlsDirectConversionOptions {
-    readonly source: LegacyXlsDirectSourceDescriptor;
-    readonly converter?: never;
-    readonly maxInputBytes?: number;
-    readonly signal?: AbortSignal;
-}
-export interface LegacyXlsDirectSourceDescriptor extends LegacyDirectSourceDescriptor<'xls'> {
-}
-export type LegacyXlsFontMeasurement = (font: Readonly<LegacyXlsNormalFont>, signal: AbortSignal) => number | undefined | Promise<number | undefined>;
-type LegacyXlsFontMeasurement__emitterCollision1 = Parameters<typeof attachXlsFontMeasurement>[1];
-export interface LegacyXlsNormalFont {
-    readonly family: string;
-    readonly sizePoints: number;
-    readonly bold: boolean;
-    readonly italic: boolean;
-}
 export interface LegendManualLayout {
     xMode?: string;
     yMode?: string;
@@ -1252,13 +1276,12 @@ export interface LegendManualLayout {
     h?: number;
 }
 export interface LoadOptions extends LoadOptions__emitterCollision1 {
-    measureLegacyXlsNormalFont?: LegacyXlsFontMeasurement__emitterCollision1;
     mode?: 'main' | 'worker';
 }
 interface LoadOptions__emitterCollision1 {
     useGoogleFonts?: boolean;
+    cjkFallback?: CjkFallback;
     password?: string;
-    legacyConversion?: LegacyOfficeConversionOptions;
     wasmUrl?: string | URL;
     maxZipEntryBytes?: number;
     resourceLimits?: OoxmlResourceLimits;
@@ -1394,11 +1417,6 @@ export interface MergeCell {
     left: number;
     bottom: number;
     right: number;
-}
-interface MessagePort {
-    addEventListener(type: 'message', listener: EventListener): void;
-    removeEventListener(type: 'message', listener: EventListener): void;
-    postMessage(message: unknown): void;
 }
 export interface NoFill {
     fillType: 'none';
@@ -1552,6 +1570,10 @@ export interface PhoneticRun {
     text: string;
 }
 export type PhoneticType = 'fullwidthKatakana' | 'halfwidthKatakana' | 'Hiragana' | 'noConversion';
+export interface PivotAxisItem {
+    kind: string;
+    depth: number;
+}
 export type PivotCacheSource = {
     kind: 'worksheet';
     sheet?: string;
@@ -1647,6 +1669,34 @@ export interface PivotTableMetadata {
     cacheSource?: PivotCacheSource;
     status: PivotMetadataStatus;
     extensionUris?: string[];
+    style?: PivotTableStyle;
+    rowItems?: PivotAxisItem[];
+    columnItems?: PivotAxisItem[];
+}
+export interface PivotTableStyle {
+    name: string;
+    showRowHeaders: boolean;
+    showColumnHeaders: boolean;
+    showRowStripes: boolean;
+    showColumnStripes: boolean;
+    showLastColumn: boolean;
+    elements: PivotTableStyleElement[];
+}
+export interface PivotTableStyleElement {
+    kind: string;
+    size: number;
+    dxf: Dxf;
+}
+export interface Reflection {
+    blur: number;
+    dist: number;
+    dir: number;
+    stA: number;
+    stPos: number;
+    endA: number;
+    endPos: number;
+    sx: number;
+    sy: number;
 }
 export type RenderViewportToBitmapOptions = Omit<XlsxRenderViewportOptions, 'onTextRun'> & {
     width: number;
@@ -1685,13 +1735,19 @@ export interface RunFont {
     vertAlign?: 'superscript' | 'subscript';
 }
 export interface SecondaryValueAxis {
+    style?: ChartExElementStyle | null;
+    titleStyle?: ChartExElementStyle | null;
+    majorGridlineStyle?: ChartExElementStyle | null;
+    minorGridlineStyle?: ChartExElementStyle | null;
     min: number | null;
     max: number | null;
     title: string | null;
     hidden: boolean;
     formatCode?: string | null;
+    numberFormat?: ChartAxisNumberFormat | null;
     displayUnits?: ChartDisplayUnits | null;
     fontColor?: string | null;
+    fontPaintAuthored?: boolean | null;
     fontSizeHpt?: number | null;
     fontItalic?: boolean | null;
     fontBold?: boolean | null;
@@ -1699,6 +1755,7 @@ export interface SecondaryValueAxis {
     lineColor?: string | null;
     lineWidthEmu?: number | null;
     lineDash?: string | null;
+    linePaintAuthored?: boolean | null;
     lineHidden: boolean;
     majorTickMark: string;
     minorTickMark?: string | null;
@@ -1706,10 +1763,12 @@ export interface SecondaryValueAxis {
     minorGridlineColor?: string | null;
     minorGridlineWidthEmu?: number | null;
     minorGridlineDash?: string | null;
+    minorGridlinePaintAuthored?: boolean | null;
     majorGridlines?: boolean;
     majorGridlineColor?: string | null;
     majorGridlineWidthEmu?: number | null;
     majorGridlineDash?: string | null;
+    majorGridlinePaintAuthored?: boolean | null;
     majorUnit?: number | null;
     minorUnit?: number | null;
     logBase?: number | null;
@@ -1725,10 +1784,24 @@ export interface SecondaryValueAxis {
     titleFontBold?: boolean | null;
     titleFontItalic?: boolean | null;
     titleFontColor?: string | null;
+    titleFontPaintAuthored?: boolean | null;
     titleFontFace?: string | null;
     titleRotation?: number | null;
     titleVerticalMode?: 'horz' | 'vert' | 'vert270' | 'wordArtVert' | 'eaVert' | 'mongolianVert' | 'wordArtVertRtl' | null;
     titleManualLayout?: ChartManualLayout | null;
+}
+export interface Shadow {
+    color: string;
+    alpha: number;
+    blur: number;
+    dist: number;
+    dir: number;
+    sx?: number;
+    sy?: number;
+    kx?: number;
+    ky?: number;
+    algn?: 'tl' | 't' | 'tr' | 'l' | 'ctr' | 'r' | 'bl' | 'b' | 'br';
+    rotWithShape?: boolean;
 }
 export interface ShapeAnchor {
     fromCol: number;
@@ -1888,6 +1961,9 @@ export interface SlicerStyle {
     selectedItemWithData?: SlicerElementStyle;
     unselectedItemWithData?: SlicerElementStyle;
 }
+export interface SoftEdge {
+    radius: number;
+}
 export interface SolidFill {
     fillType: 'solid';
     color: string;
@@ -2020,6 +2096,7 @@ export interface Workbook {
 export interface Worksheet {
     name: string;
     isChartSheet?: boolean;
+    isDialogSheet?: boolean;
     rows: Row[];
     colWidths: Record<number, number>;
     colWidthRanges?: Array<{
@@ -2037,6 +2114,7 @@ export interface Worksheet {
     colCollapsed?: Record<number, boolean>;
     colHidden?: Record<number, boolean>;
     defaultColWidth: number;
+    baseColWidth?: number;
     defaultRowHeight: number;
     defaultRowHeightCustom?: boolean;
     mergeCells: MergeCell[];
@@ -2064,6 +2142,10 @@ export interface Worksheet {
     sparklineGroups?: SparklineGroup[];
     defaultFontFamily?: string;
     defaultFontSize?: number;
+    defaultFontBold?: boolean;
+    defaultFontItalic?: boolean;
+    themeJapaneseMajorFont?: string;
+    themeJapaneseMinorFont?: string;
     date1904?: boolean;
     parseError?: string;
 }

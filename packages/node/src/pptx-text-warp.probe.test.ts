@@ -11,14 +11,9 @@
  *
  * Assertions, all purely geometric (no eyeballing):
  *   - textArchUp: Follow Path (issue #846) — the word keeps its NATURAL width
- *     and follows the arch from the path start (stAng = 180°, the LEFT end)
- *     for only its own arc length. So the ink occupies a compact LEADING
- *     segment of the arch and climbs monotonically toward the apex; the right
- *     side of the box stays empty. (An earlier revision asserted the apex at
- *     the horizontal centre — that presumed the pre-#846 behaviour of
- *     stretching the run across the ENTIRE path, which PowerPoint's PDF of the
- *     warp fixture disproves: measured arch ink is 1.75in ≈ natural width, not
- *     the full 5.4-6.1in path.)
+ *     and its paragraph alignment selects where that compact segment sits on
+ *     the path. The centred fixture therefore stays compact around the apex
+ *     instead of stretching across the entire arch.
  *   - textPlain (control): the ink stays flat — the topmost inked row is roughly
  *     constant across the width. This guards against the warp path accidentally
  *     bending un-warpable ("identity") text.
@@ -259,15 +254,13 @@ function minTopInBand(topRow: (c: number) => number | null, c0: number, c1: numb
 }
 
 describe.skipIf(!skia)('node WordArt text-warp geometry (prstTxWarp)', () => {
-  it('textArchUp follows the path at natural width from the start (Follow Path, #846)', async () => {
+  it('textArchUp follows the path at natural width with paragraph alignment (Follow Path, #846)', async () => {
     // Shape box: x=40, w=320 (canvas px). The arch baseline is the top half of
     // the box ellipse, running clockwise from stAng=180° (LEFT end, mid-height)
     // over the apex (270°) to the right end. Follow Path lays "WARP" along only
-    // its natural arc length from that start, so the ink is a compact leading
-    // segment climbing the LEFT side of the arch (measured locally: ink columns
-    // ≈[30,166] of the 400px canvas, top profile 112→44). The pre-#846 renderer
-    // stretched the run across the whole 180° arc (ink ≈[40,360], symmetric
-    // about the apex) — each assertion below fails against that behaviour.
+    // its natural arc length, while the centred paragraph positions that short
+    // segment around the apex. The pre-#846 renderer stretched the run across
+    // the whole 180° arc (ink ≈[40,360]).
     const { topRow, width } = await renderInk('textArchUp');
     const shapeX = 40;
     const shapeW = 320;
@@ -288,28 +281,22 @@ describe.skipIf(!skia)('node WordArt text-warp geometry (prstTxWarp)', () => {
     // box width (a full-arch distribution spans ~the whole 320px).
     expect(maxC! - minC!).toBeLessThan(shapeW * 0.75);
 
-    // The word STARTS at the path start — the left end of the arch. (Glyph
-    // centring lets the first glyph overhang slightly left of the box edge.)
-    expect(minC!).toBeLessThan(shapeX + shapeW * 0.25);
+    // The authored centre alignment is preserved on the path rather than being
+    // pinned to stAng. Font rasterisation may shift either edge slightly, so
+    // compare the span centre to the shape centre instead of exact columns.
+    const inkCentre = (minC! + maxC!) / 2;
+    expect(Math.abs(inkCentre - (shapeX + shapeW / 2))).toBeLessThan(shapeW * 0.05);
 
-    // …and does NOT wrap around toward the far side: the right quarter of the
-    // box is empty. Before #846 the run reached the arch's right end.
-    const rightQuarter = minTopInBand(
-      topRow,
-      shapeX + Math.floor(shapeW * 0.75),
-      shapeX + shapeW,
-    );
-    expect(rightQuarter).toBeNull();
-
-    // Within its span the ink CLIMBS toward the apex: the trailing end of the
-    // word sits meaningfully higher (smaller y) than its start at mid-height.
-    // The pre-#846 symmetric distribution had start and end at the same height.
+    // Within its span the middle of the word rises toward the arch apex. This
+    // distinguishes the curved placement from a compact but flat text run.
     const span = maxC! - minC!;
     const startTop = minTopInBand(topRow, minC!, minC! + Math.max(1, Math.floor(span * 0.15)));
     const endTop = minTopInBand(topRow, maxC! - Math.max(1, Math.floor(span * 0.15)), maxC! + 1);
+    const centreTop = minTopInBand(topRow, minC! + Math.floor(span * 0.4), minC! + Math.ceil(span * 0.6));
     expect(startTop).not.toBeNull();
+    expect(centreTop).not.toBeNull();
     expect(endTop).not.toBeNull();
-    expect(endTop!).toBeLessThan(startTop! - 20);
+    expect(centreTop!).toBeLessThan(Math.min(startTop!, endTop!));
   });
 
   it('textPlain leaves the ink flat (control)', async () => {

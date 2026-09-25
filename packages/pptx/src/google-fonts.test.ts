@@ -4,8 +4,57 @@ import {
   PPTX_GOOGLE_FONTS,
   PptxFontPreloadAccumulator,
   pptxFontPreloadNames,
+  pptxSlideCjkFallback,
+  pptxSlideOfficeFontRequests,
 } from './google-fonts';
 import type { Presentation, Slide } from './types';
+
+describe('PPTX exact Office face requests', () => {
+  it('does not pin a theme font when no run or inherited style names a face', () => {
+    const slide = {
+      elements: [{ type: 'shape', textBody: { paragraphs: [{
+        defFontFamily: null, bullet: { type: 'none' },
+        runs: [{ type: 'text', text: 'unstyled', fontFamily: null }],
+      }] } }],
+    } as unknown as Slide;
+    expect(pptxSlideOfficeFontRequests(slide, 'Calibri Light', 'Calibri')).toEqual([]);
+  });
+
+  it('resolves theme, paragraph, and run style while excluding unrelated faces', () => {
+    const slide = {
+      elements: [{ type: 'shape', textBody: {
+        defaultBold: false, defaultItalic: false,
+        paragraphs: [{
+          defFontFamily: '+mn-lt', defBold: false, defItalic: false,
+          bullet: { type: 'none' },
+          runs: [
+            { type: 'text', text: 'regular', fontFamily: null, bold: null, italic: null },
+            { type: 'text', text: 'bold', fontFamily: null, bold: true, italic: null },
+            { type: 'text', text: 'other', fontFamily: 'Arial', bold: true, italic: true },
+          ],
+        }],
+      } }],
+    } as unknown as Slide;
+    expect(pptxSlideOfficeFontRequests(slide, 'Cambria', 'Calibri')).toEqual([
+      { family: 'Calibri', weight: 400, style: 'normal' },
+      { family: 'Calibri', weight: 700, style: 'normal' },
+    ]);
+  });
+
+  it('requests the face actually used by character and auto-number markers', () => {
+    const slide = {
+      elements: [{ type: 'shape', textBody: { paragraphs: [
+        { defBold: true, defItalic: true, bullet: { type: 'char', char: '•', fontFamily: 'Calibri' }, runs: [] },
+        { defBold: true, defItalic: true, bullet: { type: 'autoNum', numType: 'arabicPeriod', fontFamily: null },
+          runs: [{ type: 'text', text: 'Item', fontFamily: 'Calibri', bold: true, italic: true }] },
+      ] } }],
+    } as unknown as Slide;
+    expect(pptxSlideOfficeFontRequests(slide, null, 'Calibri')).toEqual(expect.arrayContaining([
+      { family: 'Calibri', weight: 400, style: 'normal' },
+      { family: 'Calibri', weight: 700, style: 'italic' },
+    ]));
+  });
+});
 
 // Verbatim snapshot of the PPTX Office-font substitute map BEFORE the shared
 // registry consolidation (Phase 3 C7), excluding the SCRIPT_GOOGLE_FONTS spread
@@ -35,10 +84,13 @@ const PPTX_GOOGLE_FONTS_OLD: Record<string, FontPreloadEntry> = {
 };
 
 describe('PPTX_GOOGLE_FONTS — shared registry consolidation (oracle)', () => {
-  it('preserves every pre-consolidation entry byte-for-byte', () => {
+  it('preserves valid pre-consolidation entries byte-for-byte', () => {
     for (const [key, entry] of Object.entries(PPTX_GOOGLE_FONTS_OLD)) {
+      if (key === 'calibri light' || key === 'cambria math') continue;
       expect(PPTX_GOOGLE_FONTS[key], `entry "${key}"`).toEqual(entry);
     }
+    expect(PPTX_GOOGLE_FONTS['calibri light']).toBeUndefined();
+    expect(PPTX_GOOGLE_FONTS['cambria math']).toBeUndefined();
   });
 
   it('adds the safe, documented Ubuntu and Franklin-family substitutes', () => {
@@ -134,4 +186,24 @@ describe('PptxFontPreloadAccumulator', () => {
       'Noto Sans Hebrew', 'Noto Serif Hebrew',
     ]);
   });
+});
+
+
+it('keeps the union of stable per-slide preferences during progressive preflight', () => {
+  const slideWith = (text: string) => ({ elements: [{ type: 'shape', textBody: {
+    paragraphs: [{ runs: [{ type: 'text', text }] }],
+  } }] } as Slide);
+  const han = slideWith('漢字');
+  const kana = slideWith('漢字かな');
+  const korean = slideWith('漢字한글');
+  const fonts = new PptxFontPreloadAccumulator('Calibri', 'Calibri', undefined, undefined, 'sc');
+  fonts.addSlide(han);
+  expect(fonts.names()).toContain('Noto Sans SC');
+  const next = fonts.withSlide(kana);
+  expect(next.names()).toContain('Noto Sans SC');
+  expect(next.names()).toContain('Noto Sans JP');
+  expect(fonts.names()).not.toContain('Noto Sans JP');
+  expect(pptxSlideCjkFallback(han, 'Calibri', 'Calibri', 'sc')).toBe('sc');
+  expect(pptxSlideCjkFallback(kana, 'Calibri', 'Calibri', 'sc')).toBe('jp');
+  expect(pptxSlideCjkFallback(korean, 'Calibri', 'Calibri', 'sc')).toBe('kr');
 });

@@ -49,6 +49,7 @@ export type {
   ChartSeriesDataLabels,
   ChartStockBarPaint,
   ChartStockUpDownBarStyle,
+  ChartClassicSurfaceBandStyles,
   ChartSurfaceBandFormat,
   ChartTextBox,
   ChartTextParagraph,
@@ -62,6 +63,7 @@ export type {
   ChartThreeDSeriesAxis,
   ChartDisplayUnits,
   ChartDisplayUnitsLabel,
+  ChartAxisNumberFormat,
   ChartExElementStyle,
   ChartLineDashSegment,
   ChartexHistogramBinning,
@@ -175,24 +177,52 @@ export {
   type AgileEncryptionDescriptor,
 } from './crypto';
 export { readCfbStream } from './errors/cfb-read';
-export { preloadGoogleFonts, unloadGoogleFonts, type FontPreloadEntry } from './fonts/preload';
+export {
+  preloadGoogleFonts,
+  unloadGoogleFonts,
+  activeFontSet,
+  type FontPreloadEntry,
+} from './fonts/preload';
 // Embedded-font registration: docx `.odttf` (§17.8.1 obfuscated) + pptx
 // `.fntdata` (raw sfnt) faces turned into FontFace objects in the active set.
 export {
   registerEmbeddedFonts,
   unregisterEmbeddedFonts,
   deobfuscateOdttf,
+  embeddedFontBytesAreWithinLimit,
   type EmbeddedFontFace,
 } from './fonts/embedded';
 // Shared Office-font → Google-Fonts substitute registry (Calibri → Carlito,
 // Cambria → Caladea, popular web fonts, Arabic Noto fallbacks). Each package
 // spreads this into its own map; script-fallback Noto faces live in
 // SCRIPT_GOOGLE_FONTS below.
-export { GOOGLE_FONT_SUBSTITUTES } from './fonts/google-fonts';
+export { GOOGLE_FONT_SUBSTITUTES, loadedGoogleRegularAliases } from './fonts/google-fonts';
+export {
+  fontFaceWeightCovers,
+  loadOfficeFontFallbacks,
+  unloadOfficeFontFallbacks,
+  type OfficeFontFallbackRequest,
+  type OfficeFontFallbackRoute,
+  type LoadedOfficeFontFallbacks,
+} from './fonts/office-fallback';
 export { canvasFontString, createCanvasFontRoute, type CanvasFontRoute } from './fonts/canvas-route';
 export {
+  parseOpenTypeLineMetrics,
+  parseOpenTypeResourceMetrics,
+  type OpenTypeLineMetrics,
+} from './fonts/open-type-metrics';
+export {
+  measureResolvedCanvasFontBoxRatio,
+  type CanvasFontBoxProbeContext,
+  type CanvasFontBoxProbeOptions,
+} from './fonts/canvas-font-box';
+export { resolveCjkFallback, cjkLangFromLanguage, type CjkFallback } from './fonts/cjk-fallback.js';
+export {
   classifyCjkFont,
+  cjkFallbackForText,
   classifyFontGeneric,
+  GOOGLE_CJK_FONT_ALIASES,
+  googleCjkFontAlias,
   isComplexScriptCodePoint,
   cjkFallbackChain,
   NON_CJK_SANS_FALLBACKS,
@@ -725,17 +755,23 @@ export {
   sanitizeHyperlinkUrl,
   openExternalHyperlink,
 } from './interaction/hyperlink';
-// Format-agnostic font design line-metrics (OS/2 win / hhea sums) for faces the
-// browser substitutes with different metrics — shared so docx (Word's design
-// line box), pptx and xlsx can size line boxes / floor single-line height
-// uniformly instead of each under-measuring a substituted Meiryo/Sakkal face.
+// Resolved font-resource metrics used when a loader owns concrete bytes or a
+// browser-selected face.
 export {
-  fontWinLineHeightRatio,
-  intendedSingleLinePx,
-  correctLineMetrics,
-} from './text/line-metrics';
-// Exact local-font metric probing. Shared contract for docx/xlsx/pptx; format
-// packages supply only their evidence-backed Office line-height policy.
+  normalizeFontMetricFamily,
+  openTypeDesignLineRatios,
+  type ResolvedFontMetric,
+} from './fonts/resource-metrics';
+export {
+  findReferenceFontMetrics,
+  type FindReferenceFontMetricsOptions,
+  type ReferenceFontMetricProfile,
+  type ReferenceFontSource,
+  type ReferenceFontStyle,
+} from './fonts/reference-font-metrics';
+// Backward-compatible exact-local resource loader. Format packages should not
+// add family-specific requests; DOCX now derives its metrics from resolved
+// resources and no longer uses this API for a Meiryo-only path.
 export {
   loadLocalFontMetrics,
   unloadLocalFontMetrics,
@@ -744,9 +780,7 @@ export {
   type ResolvedLocalFontMetric,
   type LoadedLocalFontMetrics,
 } from './fonts/local-metrics';
-// Format-agnostic same-font Canvas-vs-Word line-fit bias. Consumers keep their
-// layout/paint wiring local, while the metric provenance and normalized family
-// matching remain shared data.
+// Deprecated compatibility export; production layout no longer calls it.
 export { fontAdvanceBiasEm } from './text/font-advance-metrics';
 // IX2 in-document text search (findText). Format-agnostic index + match →
 // run-slice resolution (buildTextIndex/findMatches), the pure highlight-extent

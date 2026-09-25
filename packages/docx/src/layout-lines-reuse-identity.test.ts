@@ -255,7 +255,7 @@ async function assertRetainedScaleInvariant(
   model: DocxDocumentModel,
 ): Promise<{ layout: DocumentLayout; fingerprints: string[] }> {
   const layout = layoutDocument(model, createLayoutServices(model, {
-    localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]),
+    localMetrics: testFontSnapshot([{ family: 'Times New Roman', lineHeightRatio: 2355 / 2048 }]),
   }), { currentDateMs: 0 });
   const before = retainedFingerprints(layout);
   expect(before.length).toBeGreaterThan(0);
@@ -294,7 +294,7 @@ async function assertRetainedPaint(model: DocxDocumentModel): Promise<{
   measures: number;
   streams: Call[][];
 }> {
-  const layout = layoutDocument(model, createLayoutServices(model, { localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]) }), { currentDateMs: 0 });
+  const layout = layoutDocument(model, createLayoutServices(model, { localMetrics: testFontSnapshot([{ family: 'Times New Roman', lineHeightRatio: 2355 / 2048 }]) }), { currentDateMs: 0 });
   const split = layout.pages.some((page) => page.layers.body.some((node) => node.kind === 'paragraph' && node.continuation?.continuesOnNext));
   const before = retainedFingerprints(layout);
   const first = await renderAllPages(layout);
@@ -380,7 +380,7 @@ describe('body retained paragraph acquisition and paint', () => {
       pageField as unknown as BodyElement,
     ]);
     const layout = layoutDocument(model, createLayoutServices(model, {
-      localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]),
+      localMetrics: testFontSnapshot([{ family: 'Times New Roman', lineHeightRatio: 2355 / 2048 }]),
     }), { currentDateMs: 0 });
     expect(layout.pages).toHaveLength(2);
     const production = await renderAllPages(layout);
@@ -398,7 +398,7 @@ describe('body retained paragraph acquisition and paint', () => {
     });
     const model = doc([split as unknown as BodyElement]);
     const layout = layoutDocument(model, createLayoutServices(model, {
-      localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]),
+      localMetrics: testFontSnapshot([{ family: 'Times New Roman', lineHeightRatio: 2355 / 2048 }]),
     }), { currentDateMs: 0 });
     const fieldPageIndex = layout.pages.findIndex((page) => page.layers.body.some((node) =>
       node.kind === 'paragraph'
@@ -426,7 +426,7 @@ describe('body retained paragraph acquisition and paint', () => {
     }
     const model = doc(body);
     const layout = layoutDocument(model, createLayoutServices(model, {
-      localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]),
+      localMetrics: testFontSnapshot([{ family: 'Times New Roman', lineHeightRatio: 2355 / 2048 }]),
     }), { currentDateMs: 0 });
     expect(layout.pages).toHaveLength(10);
     const pageTenFragment = layout.pages[9].layers.body
@@ -459,7 +459,7 @@ describe('body retained paragraph acquisition and paint', () => {
       pageNumType: { start: 50, fmt: 'upperRoman' },
     };
     const layout = layoutDocument(model, createLayoutServices(model, {
-      localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]),
+      localMetrics: testFontSnapshot([{ family: 'Times New Roman', lineHeightRatio: 2355 / 2048 }]),
     }), { currentDateMs: 0 });
     const production = await renderAllPages(layout);
 
@@ -613,7 +613,7 @@ describe('body table retained layout paint', () => {
     const cellPara = para(Array.from({ length: 40 }, () => 'wrap').join(' '));
     const model = doc([tableOf([cellPara])], 60);
     const layout = layoutDocument(model, createLayoutServices(model, {
-      localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]),
+      localMetrics: testFontSnapshot([{ family: 'Times New Roman', lineHeightRatio: 2355 / 2048 }]),
     }), { currentDateMs: 0 });
     const sliceTables = layout.pages.flatMap((page) =>
       page.layers.body.filter((node) => node.kind === 'table')) as TableFragmentLayout[];
@@ -648,7 +648,7 @@ describe('table-cell retained paragraph paint', () => {
     ], 400);
 
     const layout = layoutDocument(model, createLayoutServices(model, {
-      localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]),
+      localMetrics: testFontSnapshot([{ family: 'Times New Roman', lineHeightRatio: 2355 / 2048 }]),
     }), { currentDateMs: 0 });
     const table = layout.pages[0].layers.body[0];
     if (table?.kind !== 'table') {
@@ -672,7 +672,7 @@ describe('table-cell retained paragraph paint', () => {
     };
     const model = doc([tableOf([cellPara])], 400);
     const layout = layoutDocument(model, createLayoutServices(model, {
-      localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]),
+      localMetrics: testFontSnapshot([{ family: 'Times New Roman', lineHeightRatio: 2355 / 2048 }]),
     }), { currentDateMs: 0 });
     const production = await renderAllPages(layout);
     expect(production.measures).toBe(0);
@@ -722,7 +722,7 @@ describe('table-cell retained paragraph paint', () => {
     table.rows = [row(para('first')), row(para('second')), row(pageField)];
     const model = doc([table as unknown as BodyElement], 60);
     const layout = layoutDocument(model, createLayoutServices(model, {
-      localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]),
+      localMetrics: testFontSnapshot([{ family: 'Times New Roman', lineHeightRatio: 2355 / 2048 }]),
     }), { currentDateMs: 0 });
 
     const pageFieldFragments = layout.pages.flatMap((page, pageIndex) =>
@@ -779,7 +779,7 @@ describe('table-cell retained paragraph paint', () => {
       pageNumType: { start: 9, fmt: 'upperRoman' },
     };
     const layout = layoutDocument(model, createLayoutServices(model, {
-      localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]),
+      localMetrics: testFontSnapshot([{ family: 'Times New Roman', lineHeightRatio: 2355 / 2048 }]),
     }), { currentDateMs: 0 });
 
     expect(layout.pages).toHaveLength(3);

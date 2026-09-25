@@ -25,6 +25,7 @@ describe('buildContentSecurityPolicy', () => {
 
     // Baseline directives are still present.
     expect(csp).toContain("default-src 'none'");
+    expect(csp).toContain(`base-uri ${CSP_SOURCE}`);
     expect(csp).toContain(`script-src 'nonce-${NONCE}' 'wasm-unsafe-eval'`);
     expect(csp).toContain("style-src 'unsafe-inline'");
     expect(csp).toContain(`font-src ${CSP_SOURCE}`);
@@ -53,6 +54,18 @@ describe('buildContentSecurityPolicy', () => {
 });
 
 describe('getWebviewHtml', () => {
+  it('resolves local asset URLs beside the webview script', () => {
+    const html = getWebviewHtml(
+      {
+        cspSource: CSP_SOURCE,
+        asWebviewUri: () => 'vscode-webview://extension/dist/webview.js',
+      } as never,
+      {} as never,
+      'docx',
+    );
+
+    expect(html).toContain('<base href="vscode-webview://extension/dist/" />');
+  });
   it('embeds the host-issued selection session without executable interpolation', () => {
     const html = getWebviewHtml(
       {

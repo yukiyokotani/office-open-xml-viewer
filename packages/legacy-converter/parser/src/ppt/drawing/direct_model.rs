@@ -1258,7 +1258,9 @@ mod tests {
             &mut media,
             &mut 100,
             &mut 100,
-            &mut 100_000,
+            // The slot charge follows the inline SlideElement size, which
+            // tracks the shared chart model; budget one element plus text.
+            &mut (2 * std::mem::size_of::<SlideElement>() + 100_000),
         )
         .unwrap();
         assert_eq!(model.slide_number, 1);
@@ -1960,4 +1962,14 @@ mod tests {
             .unwrap_err()
             .contains("linked PowerPoint picture"));
     }
+}
+#[cfg(test)]
+#[test]
+fn tmp_print_sizes() {
+    eprintln!(
+        "SIZE SlideElement={} Source={} ShapeElement={}",
+        std::mem::size_of::<SlideElement>(),
+        std::mem::size_of::<SlideElementSource>(),
+        std::mem::size_of::<pptx_model::ShapeElement>()
+    );
 }

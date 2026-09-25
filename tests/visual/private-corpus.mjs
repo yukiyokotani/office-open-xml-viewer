@@ -1,6 +1,7 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { join, parse, resolve, sep } from 'node:path';
 import { PNG } from 'pngjs';
 
 const SCHEMA_VERSION = 1;
@@ -73,25 +74,6 @@ function baselineRevision(snapshot = false) {
   return resolved;
 }
 
-/** List a package's private corpus inputs of one extension, relative to
- * `public/private`. The local corpus convention keeps each format's inputs in
- * a folder named after the format (`public/private/docx/NAME.docx`), while
- * older checkouts keep them at the top level; both layouts are enumerated.
- * Office lock files (`~$...`) are skipped. The relative path (including its
- * folder) is the item identity, so identical basenames cannot collide. */
-export function listPrivateCorpus(extension, root = 'public/private') {
-  if (!existsSync(root)) return [];
-  const accepted = (file) => file.endsWith(`.${extension}`) && !file.startsWith('~$');
-  const nested = `${root}/${extension}`;
-  const files = [
-    ...readdirSync(root).filter(accepted),
-    ...(existsSync(nested)
-      ? readdirSync(nested).filter(accepted).map((file) => `${extension}/${file}`)
-      : []),
-  ];
-  return files.sort((left, right) => left.localeCompare(right, undefined, { numeric: true }));
-}
-
 function corpusFiles(files) {
   return files.map((name) => ({
     name,
@@ -133,6 +115,37 @@ export function preparePrivateCorpus({ format, files, snapshot }) {
     writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`);
   } else {
     assertExactManifest(readJson(path), manifest, path);
+  }
+}
+
+/** A prior candidate run may have rendered more pages than this one. Remove
+ * only this input's generated screenshots before capture, so downstream
+ * reviews cannot mistake stale page-N files for the current renderer output.
+ * Baselines and non-image evidence are never touched. */
+export function clearPrivateCandidateItemOutput({
+  stem,
+  itemKind,
+  outputRoot = 'tests/visual/screenshots/private-corpus',
+}) {
+  if (!/^(docx|xlsx|pptx)\/[^/\\]+$/.test(stem)
+    || ['.', '..'].includes(stem.split('/')[1])
+    || !/^(page|sheet|slide)$/.test(itemKind)) {
+    throw new Error('invalid private corpus output identity');
+  }
+  const directory = resolve(outputRoot, stem);
+  // Generated-output directories can be local symlinks. Never follow one when
+  // removing stale files: it may point into another worktree or dependencies.
+  let ancestor = parse(directory).root;
+  for (const component of directory.slice(ancestor.length).split(sep).filter(Boolean)) {
+    ancestor = join(ancestor, component);
+    if (existsSync(ancestor) && lstatSync(ancestor).isSymbolicLink()) {
+      throw new Error(`refusing to clear symlinked private corpus output: ${ancestor}`);
+    }
+  }
+  if (!existsSync(directory)) return;
+  const item = new RegExp(`^${itemKind}-\\d+\\.png$`);
+  for (const file of readdirSync(directory)) {
+    if (item.test(file)) unlinkSync(`${directory}/${file}`);
   }
 }
 

@@ -29,57 +29,6 @@ export function scaleHexColor(color: string, factor: number): string {
   return `#${channel(0)}${channel(2)}${channel(4)}`.toUpperCase();
 }
 
-const srgbToLinear = (channel: number): number => channel <= 0.04045
-  ? channel / 12.92
-  : ((channel + 0.055) / 1.055) ** 2.4;
-
-const linearToSrgb = (channel: number): number => channel <= 0.0031308
-  ? channel * 12.92
-  : 1.055 * channel ** (1 / 2.4) - 0.055;
-
-/** Apply the generated DrawingML shade/tint used by classic Excel chart
- * palettes. XLSX uses the linear-sRGB transform also used by DrawingML theme
- * colours; this mirrors ooxml-common's node-free generated-colour path. */
-export function applyLinearTintOrShade(color: string, amount: number): string {
-  const value = color.replace(/^#/, '');
-  if (!/^[0-9a-f]{6}$/i.test(value) || !Number.isFinite(amount)) return color;
-  const bounded = Math.max(-1, Math.min(1, amount));
-  const channel = (offset: number): string => {
-    const encoded = Number.parseInt(value.slice(offset, offset + 2), 16) / 255;
-    const linear = srgbToLinear(encoded);
-    const transformed = bounded < 0
-      ? linear * (1 + bounded)
-      : linear * (1 - bounded) + bounded;
-    return Math.round(Math.max(0, Math.min(1, linearToSrgb(transformed))) * 255)
-      .toString(16).padStart(2, '0');
-  };
-  return `#${channel(0)}${channel(2)}${channel(4)}`.toUpperCase();
-}
-
-/** Resolve one generated colour from legacy six-accent Pattern 2.
- *
- * ECMA-376 Part 1 §21.2.3.46 Tables 5-6 define the accent cycle and require
- * repeated sets to vary their tint/shade. The application-defined endpoints
- * are the already-registered 1..48-point Office boundary rule used by the
- * shared parser; surface bands need the same rule at paint time because their
- * count depends on the final automatic value-axis plan. */
-export function legacyPattern2Color(
-  accents: readonly string[],
-  objectIndex: number,
-  objectCount: number,
-  chartStyle: number | null | undefined,
-): string | null {
-  const accentCount = 6;
-  if (accents.length < accentCount || objectIndex < 0 || objectCount <= 0) return null;
-  const base = accents[objectIndex % accentCount];
-  if (!base) return null;
-  if (![2, 10, 18, 26, 34, 42].includes(chartStyle ?? -1)) return `#${base}`.toUpperCase();
-  const completedSets = Math.floor(objectCount / accentCount);
-  const setIndex = Math.floor(objectIndex / accentCount);
-  const amount = -0.70 + 1.40 * ((setIndex + 1) / (completedSets + 2));
-  return applyLinearTintOrShade(base, amount);
-}
-
 /** Surface-only automatic material response.
  *
  * ECMA-376 carries the view and source mesh but leaves the automatic material

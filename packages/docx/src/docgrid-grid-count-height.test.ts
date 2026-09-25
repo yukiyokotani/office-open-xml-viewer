@@ -58,10 +58,16 @@ function integerRoundedCtx(): CanvasRenderingContext2D {
   } as unknown as CanvasRenderingContext2D;
 }
 
-function seg(text: string, fontFamily: string, fontSize: number): LayoutTextSeg {
+function seg(
+  text: string,
+  fontFamily: string,
+  fontSize: number,
+  eastAsianLineHeightRatio?: number,
+): LayoutTextSeg {
   return {
     text, bold: false, italic: false, underline: false, strikethrough: false,
     fontSize, color: null, fontFamily, vertAlign: null, measuredWidth: 0,
+    resolvedEastAsianLineHeightRatio: eastAsianLineHeightRatio,
   };
 }
 
@@ -76,9 +82,8 @@ function layout(segs: LayoutTextSeg[], width = 400) {
 const YU = (2257 * 1.3) / 2048;
 
 describe('layoutLines — per-line gridCountSingle (§17.6.5 docGrid cell height)', () => {
-  it('a tabled EA line counts from its DESIGN height, not the (larger) measured box', () => {
-    // 12pt Yu Mincho CJK: measured box 12px (linear stub) but design 17.19px.
-    const [line] = layout([seg('あいうえお', 'Yu Mincho', 12)]);
+  it('a resolved EA line counts from its resource DESIGN height, not the measured box', () => {
+    const [line] = layout([seg('あいうえお', 'Arbitrary Resolved EA', 12, YU)]);
     expect(line.gridCountSingle).toBeCloseTo(12 * YU, 4);
     expect(line.gridCountSingle).toBeGreaterThan(12); // above the raw box
   });
@@ -94,7 +99,10 @@ describe('layoutLines — per-line gridCountSingle (§17.6.5 docGrid cell height
     // §17.6.5 "Latin is not cell-rounded" rule yields the CJK design alone.
     // (The tall-Latin mixed line has no Word ground truth of its own — this
     // characterizes the deliberate rule, consistent with the Latin-only case.)
-    const [line] = layout([seg('TABLE 1 = ', 'Yu Mincho', 20), seg('固定幅（両軸拘束）。', 'Yu Mincho', 12)]);
+    const [line] = layout([
+      seg('TABLE 1 = ', 'Arbitrary Resolved EA', 20, YU),
+      seg('固定幅（両軸拘束）。', 'Arbitrary Resolved EA', 12, YU),
+    ]);
     expect(line.gridCountSingle).toBeCloseTo(12 * YU, 4);
     expect(line.gridCountSingle).toBeLessThan(20); // the 20pt Latin box did NOT count
   });
@@ -103,7 +111,10 @@ describe('layoutLines — per-line gridCountSingle (§17.6.5 docGrid cell height
     // Small 12pt Yu Mincho (design 17.19) + a large 24pt untabled CJK face.
     // Word's untabled FE fallback is 1.3em, so the latter contributes 31.2px;
     // its substituted Canvas box (24px in this stub) is irrelevant.
-    const [line] = layout([seg('小', 'Yu Mincho', 12), seg('大きい', 'PMingLiU', 24)]);
+    const [line] = layout([
+      seg('小', 'Arbitrary Resolved EA', 12, YU),
+      seg('大きい', 'Unresolved EA', 24),
+    ]);
     expect(line.gridCountSingle).toBeCloseTo(24 * 1.3, 4);
   });
 

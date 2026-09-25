@@ -11,7 +11,7 @@ const dirname =
     : path.dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig({
-  plugins: [wasm()],
+  plugins: [wasmAssetUrl(), wasm()],
   root: dirname,
   resolve: {
     alias: {

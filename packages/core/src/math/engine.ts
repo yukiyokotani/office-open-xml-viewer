@@ -3,7 +3,7 @@
 // MathML → SVG via a pre-bundled MathJax v4 + STIX Two Math converter.
 //
 // This module is the *heavy* half of the math feature: it references the
-// pre-built engine asset `assets/mathjax-stix2.js` (~3 MB; MathJax core + the
+// pre-built engine asset `assets/mathjax-stix2.js` (~4 MB; MathJax core + the
 // statically-baked STIX2 font), so anything that statically imports it drags
 // that asset into the bundle.
 //
@@ -19,7 +19,7 @@
 
 // `?url` (not a bare `new URL(..., import.meta.url)`) so the same `wasmAssetUrl`
 // build plugin that keeps the WASM parsers out of the base64 data-URL trap emits
-// this ~3 MB engine as a real asset too. In Vite **library mode** a bare
+// this ~4 MB engine as a real asset too. In Vite **library mode** a bare
 // `new URL` is force-inlined as a `data:text/javascript;base64,…` string, which
 // turned the opt-in `math.mjs` chunk into a 4.1 MB base64 blob; the `?url` form
 // is intercepted by the plugin, `emitFile`d as a real asset next to the chunk,

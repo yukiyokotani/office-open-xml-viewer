@@ -2,7 +2,6 @@ import { describe, it, expect } from 'vitest';
 import { createLayoutServices } from './layout-runtime.js';
 import { layoutDocument } from './document-layout.js';
 import { renderDocumentToCanvas } from './renderer.js';
-import { testFontSnapshot } from './layout/test-font-snapshot.js';
 import type { BodyElement, DocParagraph, DocxDocumentModel, SectionProps } from './types';
 
 // ECMA-376 §17.6.4 (newspaper columns) + the renderer's scale-independent
@@ -94,82 +93,66 @@ function doc(body: BodyElement[], pageHeight: number): DocxDocumentModel {
   } as unknown as DocxDocumentModel;
 }
 
-async function paintedParagraphGeometry() {
-  const paragraph = longPara(Array.from({ length: 180 }, () => 'w').join(' '));
-  paragraph.spaceBefore = 6;
-  paragraph.spaceAfter = 4;
-  const model = doc([paragraph as unknown as BodyElement], 80);
-  const services = createLayoutServices(model, { localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]) });
-  const layout = layoutDocument(model, services, { currentDateMs: 0 });
-  const paintedPages: Array<{ lineCount: number; topYPx: number | null }> = [];
-  for (let pageIndex = 0; pageIndex < layout.pages.length; pageIndex++) {
-    const { canvas, calls } = makeNonLinearCanvas();
-    await renderDocumentToCanvas(model, canvas, pageIndex, {
-      dpr: 1,
-      width: 200,
-      layoutServices: services,
-    });
-    const textCalls = calls.filter((call) => call.text.includes('w'));
-    paintedPages.push({
-      lineCount: textCalls.length,
-      topYPx: textCalls.length > 0 ? textCalls[0].y : null,
-    });
-  }
-  return { pageCount: layout.pages.length, paintedPages };
-}
-
 describe('paginate/paint line-count divergence — paint never indexes a phantom line (ECMA-376 §17.6.4)', () => {
-  // A long paragraph of single-letter "words" (each followed by a space so the
-  // line breaker has wrap opportunities). Narrow page + short page height force
-  // it to wrap to many lines and split across multiple pages, so a later page
-  // carries an explicit retained continuation range.
-  const text = Array.from({ length: 400 }, () => 'w').join(' ');
-  const body = (): BodyElement[] => [longPara(text) as unknown as BodyElement];
-
-  it('preserves page count, painted line counts, and continuation top positions', async () => {
-    const geometry = await paintedParagraphGeometry();
-
-    // Word admits the final visible line at a region edge without requiring the
-    // paragraph's authored trailing spaceAfter to fit. The retained line split
-    // therefore completes on page 2 while paint still consumes every one of the
-    // 180 canonical line placements exactly once.
-    expect(geometry).toEqual({
-      pageCount: 2,
-      paintedPages: [
-        { lineCount: 84, topYPx: 24.74951171875 },
-        { lineCount: 96, topYPx: 18.74951171875 },
-      ],
-    });
-  });
-
-  it('renders every retained continuation page without remeasuring or throwing', async () => {
-    const pageHeight = 80; // short page → the paragraph spans several pages
-    const model = doc(body(), pageHeight);
-    const services = createLayoutServices(model, {
-      localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]),
-    });
-    const layout = layoutDocument(model, services, { currentDateMs: 0 });
-    let totalLines = 0;
-    let threw: unknown = null;
-    for (let p = 0; p < layout.pages.length; p++) {
-      const { canvas, calls } = makeNonLinearCanvas();
-      try {
-        await renderDocumentToCanvas(model, canvas, p, {
-          dpr: 1, width: 400,
-          layoutServices: services,
-        });
-      } catch (e) {
-        threw = e;
-        break;
+  it.each(['Latin words', 'East Asian grid'] as const)(
+    'retains and paints every source token exactly once across pages: %s',
+    async (route) => {
+      // Unique ordered labels detect missing, duplicated, or reordered content;
+      // counting repeated glyphs cannot distinguish those failures. The grid
+      // case exercises 20pt East Asian text at a 20pt grid-cell boundary, where
+      // changing a single-line metric can move the paragraph continuation cursor.
+      const eastAsian = route === 'East Asian grid';
+      const tokens = Array.from({ length: eastAsian ? 36 : 60 }, (_, index) => {
+        const number = String(index + 1).padStart(3, '0');
+        return eastAsian
+          ? `項目${number.replace(/\d/g, (digit) => String.fromCharCode(0xff10 + Number(digit)))}`
+          : `item${number}`;
+      });
+      const text = tokens.join(eastAsian ? '' : ' ');
+      const paragraph = longPara(text);
+      if (eastAsian) {
+        paragraph.runs = paragraph.runs.map((run) => ({
+          ...run, fontSize: 20, fontFamily: 'Unresolved Grid Face',
+          fontFamilyEastAsia: 'Unresolved Grid Face',
+        }));
+        paragraph.defaultFontSize = 20;
+        paragraph.defaultFontFamily = 'Unresolved Grid Face';
+        paragraph.defaultFontFamilyEastAsia = 'Unresolved Grid Face';
       }
-      totalLines += calls.filter((c) => c.text.includes('w')).length;
-    }
+      const model = doc([{ type: 'paragraph', ...paragraph }], eastAsian ? 140 : 80);
+      if (eastAsian) {
+        model.section.docGridType = 'lines';
+        model.section.docGridLinePitch = 20;
+        model.settings = { useFeLayout: true };
+      }
+      const services = createLayoutServices(model);
+      const layout = layoutDocument(model, services, { currentDateMs: 0 });
 
-    expect(threw).toBeNull();
+      // Soft wrapping may suppress separator spaces at line ends. Compare all
+      // visible source characters in order, retaining the unique token identity.
+      const visibleText = (value: string) => value.replace(/ /g, '');
+      const retainedPages = layout.pages.map((page) => page.layers.body
+        .filter((node) => node.kind === 'paragraph')
+        .flatMap((node) => node.lines)
+        .flatMap((line) => line.placements)
+        .filter((placement) => placement.kind === 'text')
+        .map((placement) => placement.text).join(''));
+      expect(retainedPages.length).toBeGreaterThan(1);
+      expect(retainedPages.every((page) => visibleText(page).length > 0)).toBe(true);
+      expect(visibleText(retainedPages.join(''))).toBe(visibleText(text));
 
-    // NON-TRIVIALITY: the document actually painted content across pages (the
-    // long paragraph really did wrap and split — otherwise the invariant above
-    // would be vacuous).
-    expect(totalLines).toBeGreaterThan(0);
-  });
+      const paintedPages: string[] = [];
+      for (let p = 0; p < layout.pages.length; p++) {
+        const { canvas, calls } = makeNonLinearCanvas();
+        // Paint at twice the layout width: the deliberately nonlinear measurer
+        // would choose different lines if paint reacquired paragraph geometry.
+        await renderDocumentToCanvas(model, canvas, p, {
+          dpr: 1, width: 400, layoutServices: services,
+        });
+        paintedPages.push(calls.map((call) => call.text).join(''));
+      }
+      expect(paintedPages.map(visibleText)).toEqual(retainedPages.map(visibleText));
+      expect(visibleText(paintedPages.join(''))).toBe(visibleText(text));
+    },
+  );
 });

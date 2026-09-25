@@ -51,7 +51,7 @@ const ROOT = resolve(HERE, '../../..');
 const docxMod = skia ? await importForTests(() => import('./docx.ts'), './docx.ts (docx WASM)') : null;
 const rendererMod = skia ? await loadDocxRendererForTests() : null;
 
-const samplePath = (n: number) => resolve(ROOT, `packages/docx/public/private/sample-${n}.docx`);
+const samplePath = (n: number) => resolve(ROOT, `packages/docx/public/private/docx/sample-${n}.docx`);
 const have = (n: number) => existsSync(samplePath(n));
 
 interface Run { text: string; x: number; y: number; w: number; h: number; fontSize: number }

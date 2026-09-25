@@ -36,6 +36,22 @@ export interface DocxDocumentCursorArchive {
   close_document_session(): void;
 }
 
+export type DocxDocumentArchiveExecutor = <T>(
+  operation: (archive: DocxDocumentCursorArchive) => T,
+) => T;
+
+/** Decode the cursor checkpoint while preserving the degraded-container path. */
+export function readDocxDocumentCursorUsage(
+  execute: DocxDocumentArchiveExecutor,
+): ReturnType<typeof decodeOoxmlResourceUsage> | undefined {
+  // A corrupt container is represented by a degraded terminal document and
+  // has no PackageOperation ledger; the archive reports that checkpoint as a
+  // typed absence (`undefined`). Malformed checkpoints and every thrown
+  // parser/resource failure escape, whatever their text.
+  const bytes = execute((archive) => archive.document_cursor_resource_usage?.());
+  return bytes ? decodeOoxmlResourceUsage(bytes) : undefined;
+}
+
 /**
  * Destructive, bounded cursor over an already-materialized compatibility model.
  * This is used only when render-worker capability detection requires the model
@@ -214,11 +230,7 @@ export class DocumentPullWorker {
         },
         cancel: () => this.executeArchive((archive) => archive.cancel_document_cursor()),
         close: () => this.executeArchive((archive) => archive.close_document_session()),
-        resourceUsage: () => {
-          const bytes = this.executeArchive((archive) =>
-            archive.document_cursor_resource_usage?.());
-          return bytes ? decodeOoxmlResourceUsage(bytes) : undefined;
-        },
+        resourceUsage: () => readDocxDocumentCursorUsage(this.executeArchive),
       },
     });
   }

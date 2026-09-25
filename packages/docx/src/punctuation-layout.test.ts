@@ -50,7 +50,7 @@ function context(): CanvasRenderingContext2D {
 
 function textRun(
   text: string,
-  eastAsiaLanguage = 'ja-jp',
+  eastAsiaLanguage: string | null = 'ja-jp',
 ): DocParagraph['runs'][number] {
   const run: DocxTextRun = {
     text,
@@ -72,7 +72,7 @@ function textRun(
     ...run,
     // Parser-only effective language input consumed by the isolated
     // overflow-punctuation compatibility projection.
-    langEastAsia: eastAsiaLanguage,
+    langEastAsia: eastAsiaLanguage ?? undefined,
   } as DocParagraph['runs'][number];
 }
 
@@ -578,25 +578,71 @@ describe('ECMA-376 East-Asian punctuation fit', () => {
     expect(lines(middleDot, 375, false)).toHaveLength(2);
   });
 
-  it('admits an eligible trailing punctuation character independently of script', () => {
+  it('uses the bidi language boundary for complex-script closing punctuation', () => {
     const latin = buildSegments([textRun('A B.', 'en-us')], {
       pageIndex: 0,
       totalPages: 1,
     });
 
+    // Office boundary controls in Latin Calibri/Arial keep . and , but wrap
+    // the complete word ending in ) or } once its advance exceeds the line.
     expect(lines(latin, 30, true).map(textOf)).toEqual(['A B.']);
-    expect(lines(buildSegments([textRun('A B.', 'en-us')], {
+    expect(lines(buildSegments([textRun('A B,', 'en-us')], {
       pageIndex: 0,
       totalPages: 1,
-    }), 30, false).map(textOf)).toEqual(['A ', 'B.']);
+    }), 30, true).map(textOf)).toEqual(['A B,']);
+    expect(lines(buildSegments([textRun('A B)', 'en-us')], {
+      pageIndex: 0,
+      totalPages: 1,
+    }), 30, true).map(textOf)).toEqual(['A ', 'B)']);
+    expect(lines(buildSegments([textRun('A B}', 'en-us')], {
+      pageIndex: 0,
+      totalPages: 1,
+    }), 30, true).map(textOf)).toEqual(['A ', 'B}']);
+    expect(lines(buildSegments([textRun('A B.', null)], {
+      pageIndex: 0,
+      totalPages: 1,
+    }), 30, true).map(textOf)).toEqual(['A B.']);
+    expect(lines(buildSegments([textRun('A B.', 'ja-jp')], {
+      pageIndex: 0,
+      totalPages: 1,
+    }), 30, true).map(textOf)).toEqual(['A B.']);
+    expect(lines(buildSegments([textRun('甲 A)', null)], {
+      pageIndex: 0,
+      totalPages: 1,
+    }), 30, true).map(textOf)).toEqual(['甲 A)']);
+    expect(lines(buildSegments([textRun('甲 A)', 'en-us')], {
+      pageIndex: 0,
+      totalPages: 1,
+    }), 30, true).map(textOf)).toEqual(['甲 A)']);
+    expect(wordIsOverflowPunctuation('.', 'en-us', false, true)).toBe(true);
+    expect(wordIsOverflowPunctuation(',', 'en-us', false, true)).toBe(true);
+    // Office-produced Calibri/Arial boundary controls wrap these Latin words
+    // at their normal advance; the older ASCII-union projection overhung them.
+    expect(wordIsOverflowPunctuation('}', undefined, false, true)).toBe(false);
+    expect(wordIsOverflowPunctuation(')', 'en-us', false, true)).toBe(false);
+    expect(wordIsOverflowPunctuation(':', 'en-us', false, true)).toBe(false);
+    expect(wordIsOverflowPunctuation('>', 'en-us', false, true)).toBe(false);
+    expect(wordIsOverflowPunctuation('.', 'ar-sa', false, false)).toBe(false);
+    expect(wordIsOverflowPunctuation('.', 'en-us', false, false, true, undefined)).toBe(true);
+    expect(wordIsOverflowPunctuation(':', 'en-us', false, false, true, 'en-us')).toBe(true);
+    expect(wordIsOverflowPunctuation(')', 'en-us', false, false, true, 'ar-sa')).toBe(false);
+
+    const complex = (bidiLanguage?: string) => buildSegments([{
+      ...textRun('اب.', 'en-us'),
+      rtl: true,
+      langBidi: bidiLanguage,
+    } as DocParagraph['runs'][number]], { pageIndex: 0, totalPages: 1 });
+    expect(lines(complex(), 20, true).map(textOf)).toEqual(['اب.']);
+    expect(lines(complex('ar-sa'), 20, true).map(textOf)).toEqual(['اب', '.']);
   });
 
   it('finds the final visible punctuation before a collapsible separator', () => {
-    const enabled = buildSegments([textRun('A B. C', 'en-us')], {
+    const enabled = buildSegments([textRun('A B. C', 'ja-jp')], {
       pageIndex: 0,
       totalPages: 1,
     });
-    const disabled = buildSegments([textRun('A B. C', 'en-us')], {
+    const disabled = buildSegments([textRun('A B. C', 'ja-jp')], {
       pageIndex: 0,
       totalPages: 1,
     });

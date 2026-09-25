@@ -54,6 +54,9 @@ function projectTextRun(
     x: origin.xPt,
     y: origin.yPt,
     w: placement.bounds.widthPt * inlineScale,
+    ...(placement.trailingSpaceCompressionPt !== undefined ? {
+      trailingSpaceCompressionPx: placement.trailingSpaceCompressionPt * inlineScale,
+    } : {}),
     h: placement.bounds.heightPt * blockScale,
     ...(placement.highlightBounds && highlightOrigin ? {
       highlightBounds: Object.freeze({

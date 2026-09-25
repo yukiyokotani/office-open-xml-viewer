@@ -8,7 +8,8 @@ class FakeWorker implements WorkerLike {
   transfers: (Transferable[] | undefined)[] = [];
   terminated = false;
   private messageListeners = new Set<(e: MessageEvent) => void>();
-  private errorListeners = new Set<(e: ErrorEvent | MessageEvent) => void>();
+  private errorListeners = new Set<(e: ErrorEvent) => void>();
+  private messageErrorListeners = new Set<(e: MessageEvent) => void>();
 
   postMessage(message: unknown, transfer?: Transferable[]): void {
     this.posted.push(message);
@@ -19,14 +20,16 @@ class FakeWorker implements WorkerLike {
     listener: (e: never) => void,
   ): void {
     if (type === 'message') this.messageListeners.add(listener as (e: MessageEvent) => void);
-    else this.errorListeners.add(listener as (e: ErrorEvent | MessageEvent) => void);
+    else if (type === 'error') this.errorListeners.add(listener as (e: ErrorEvent) => void);
+    else this.messageErrorListeners.add(listener as (e: MessageEvent) => void);
   }
   removeEventListener(
     type: 'message' | 'messageerror' | 'error',
     listener: (e: never) => void,
   ): void {
     if (type === 'message') this.messageListeners.delete(listener as (e: MessageEvent) => void);
-    else this.errorListeners.delete(listener as (e: ErrorEvent | MessageEvent) => void);
+    else if (type === 'error') this.errorListeners.delete(listener as (e: ErrorEvent) => void);
+    else this.messageErrorListeners.delete(listener as (e: MessageEvent) => void);
   }
   terminate(): void {
     this.terminated = true;
@@ -37,7 +40,10 @@ class FakeWorker implements WorkerLike {
   }
   /** Fire the worker's `error` event (uncaught exception / load failure). */
   emitError(message?: string): void {
-    for (const l of this.errorListeners) l({ message } as ErrorEvent);
+    for (const l of this.errorListeners) l({ type: 'error', message } as ErrorEvent);
+  }
+  emitMessageError(): void {
+    for (const l of this.messageErrorListeners) l({ type: 'messageerror' } as MessageEvent);
   }
   /** Number of live `message` listeners — asserts the bridge cleans up. */
   get messageListenerCount(): number {
@@ -446,8 +452,27 @@ describe('WorkerBridge', () => {
       const bridge = makeBridge(w);
       const p = bridge.request((id) => ({ kind: 'parse', id }));
       // messageerror events carry no `.message`; the reject is still generic.
-      w.emitError();
+      w.emitMessageError();
       await expect(p).rejects.toThrow(/Worker error/);
+    });
+
+    it('explains an empty worker load error from an opaque origin', async () => {
+      vi.stubGlobal('origin', 'null');
+      try {
+        const w = new FakeWorker();
+        const bridge = makeBridge(w);
+        const pending = bridge.request((id) => ({ kind: 'parse', id }));
+        w.emitError('');
+        await expect(pending).rejects.toThrow(/sandboxed iframe.*allow-same-origin/);
+
+        const invalidResponseWorker = new FakeWorker();
+        const invalidResponse = makeBridge(invalidResponseWorker)
+          .request((id) => ({ kind: 'parse', id }));
+        invalidResponseWorker.emitMessageError();
+        await expect(invalidResponse).rejects.toThrow(/^Worker error$/);
+      } finally {
+        vi.unstubAllGlobals();
+      }
     });
 
     it('clears a pending timeout when the worker errors (no leaked timer)', async () => {

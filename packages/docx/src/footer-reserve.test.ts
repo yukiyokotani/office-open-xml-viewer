@@ -125,7 +125,7 @@ async function renderPage0(doc: DocxDocumentModel): Promise<Call[]> {
   await renderDocumentToCanvas(doc, canvas, 0, {
     dpr: 1, width: 400,
     layoutServices: createLayoutServices(doc, {
-      localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]), measureContext: canvas.getContext('2d'),
+      localMetrics: testFontSnapshot([{ family: 'Times New Roman', lineHeightRatio: 2355 / 2048 }]), measureContext: canvas.getContext('2d'),
     }),
   });
   return calls;

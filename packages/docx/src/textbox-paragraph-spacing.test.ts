@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { renderDocumentToCanvas } from './renderer.js';
+import { createLayoutServices } from './layout-runtime.js';
+import { testFontSnapshot } from './layout/test-font-snapshot.js';
 import type { BodyElement, DocParagraph, DocxDocumentModel, SectionProps, ShapeRun, ShapeText } from './types';
 
 // ECMA-376 §17.3.1.33 — inside a text box, consecutive paragraphs collapse their
@@ -80,21 +82,30 @@ function docWithTwoBlockTextbox(): DocxDocumentModel {
 describe('text-box paragraph spacing (§17.3.1.33)', () => {
   it("collapses the inter-paragraph gap to max(prev.after, this.before), not the sum", async () => {
     const { canvas, calls } = makeRecordingCanvas();
-    await renderDocumentToCanvas(docWithTwoBlockTextbox(), canvas, 0, { dpr: 1, width: 400 });
+    const model = docWithTwoBlockTextbox();
+    await renderDocumentToCanvas(model, canvas, 0, {
+      dpr: 1,
+      width: 400,
+      layoutServices: createLayoutServices(model, {
+        measureContext: canvas.getContext('2d'),
+        localMetrics: testFontSnapshot([{
+          family: 'Times New Roman',
+          lineHeightRatio: 2355 / 2048,
+        }]),
+      }),
+    });
     const a = calls.find((c) => c.text === 'AAA');
     const b = calls.find((c) => c.text === 'BBB');
     expect(a).toBeDefined();
     expect(b).toBeDefined();
-    // One line of 10 pt Times New Roman ⇒ block height = the font's INTENDED
-    // single-line box (font-metrics.ts floors the substituted-face measurement to
-    // the design hhea height 2355/2048 = 1.1499 em, so 11.499 px — larger than the
+    // The explicit fixture resource has a 2355/2048 design ratio, so one 10pt
+    // line is 11.499px—larger than the
     // mock's naive 0.8 + 0.2 = 1.0 em / 10 px). Both lines share font/size and
     // carry no line-spacing rule, so no box expansion ⇒ their half-leading
     // baseline offsets are equal and cancel in the delta. Gap A→B baseline =
     // blockHeight + max(after=20, before=10) = 11.499 + 20 = 31.499 (COLLAPSE),
     // NOT 11.499 + (20 + 10) = 41.499 (sum). The collapse-vs-sum distinction — the
-    // point of this test — is unchanged; only the block height is now the metric
-    // floor rather than the mock's flat em.
+    // point of this test—is independent of the explicit resource metric.
     const gap = (b as Call).y - (a as Call).y;
     expect(gap).toBeCloseTo(31.5, 1);
   });

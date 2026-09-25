@@ -252,7 +252,9 @@ describe('PresentationPreflightBuilder', () => {
     }));
     expect(facts.fontPreloadNames).toContain('Noto Sans KR');
     expect(facts.fontPreloadNames).toContain('Noto Sans JP');
-    expect(facts.fontPreloadNames).not.toContain('Noto Sans SC');
+    // The Han-only slide retains its theme-derived SC route even when later
+    // slides introduce stronger Hangul/Kana hints.
+    expect(facts.fontPreloadNames).toContain('Noto Sans SC');
   });
 
   it('rejects identity drift, extra units, and incomplete finalization', () => {

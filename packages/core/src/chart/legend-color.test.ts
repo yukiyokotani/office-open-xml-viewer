@@ -65,8 +65,7 @@ describe('legendEntryColor', () => {
 
   describe('§21.2.2.227 varyColors single-series bar — one legend entry per point', () => {
     // The `varyByPoint` flag makes a bar legend resolve per DATA POINT of the
-    // first series (like a pie) instead of per series (issue #931). The parser
-    // sets the accents into `dataPointColors`; here we assert the resolution.
+    // first series (like a pie) instead of per series (issue #931).
     const s: ChartSeries[] = [
       series({ name: 'Region', color: '4472C4', values: [10, 20, 30, 40] }),
     ];
@@ -81,7 +80,7 @@ describe('legendEntryColor', () => {
       );
     });
 
-    it('honors accent/dPt colors resolved into dataPointColors', () => {
+    it('honors explicit dPt colors carried in dataPointColors', () => {
       const withAccents: ChartSeries[] = [
         series({
           name: 'Region',
@@ -116,10 +115,19 @@ describe('chartVariesColorsByPoint', () => {
     expect(chartVariesColorsByPoint(model({ chartType: 'stackedBar', series: oneSeries, varyColors: true }))).toBe(true);
   });
 
-  it('is false without the flag, for multi-series, or for non-bar types', () => {
+  it('varies lone line, scatter, and non-filled radar groups but not filled radar or area', () => {
+    expect(chartVariesColorsByPoint(model({ chartType: 'line', series: oneSeries, varyColors: true }))).toBe(true);
+    expect(chartVariesColorsByPoint(model({ chartType: 'scatter', series: oneSeries, varyColors: true }))).toBe(true);
+    expect(chartVariesColorsByPoint(model({ chartType: 'radar', series: oneSeries, varyColors: true }))).toBe(true);
+    expect(chartVariesColorsByPoint(model({
+      chartType: 'radar', radarStyle: 'filled', series: oneSeries, varyColors: true,
+    }))).toBe(false);
+    expect(chartVariesColorsByPoint(model({ chartType: 'area', series: oneSeries, varyColors: true }))).toBe(false);
+  });
+
+  it('is false without the flag or for multiple series', () => {
     expect(chartVariesColorsByPoint(model({ series: oneSeries, varyColors: false }))).toBe(false);
     expect(chartVariesColorsByPoint(model({ series: twoSeries, varyColors: true }))).toBe(false);
-    expect(chartVariesColorsByPoint(model({ chartType: 'line', series: oneSeries, varyColors: true }))).toBe(false);
     expect(chartVariesColorsByPoint(model({ chartType: 'pie', series: oneSeries, varyColors: true }))).toBe(false);
   });
 

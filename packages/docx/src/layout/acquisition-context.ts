@@ -2,7 +2,7 @@ import type { NoteNumbering } from '../line-layout.js';
 import type {
   KinsokuRules,
   NumberFormat,
-  ResolvedLocalFontMetric,
+  ResolvedFontMetric,
 } from '@silurus/ooxml-core';
 import type { FloatRect } from '../float-layout.js';
 import type {
@@ -109,7 +109,7 @@ export interface BodyAcquisitionState extends AnchorFloatRegistrationState {
   storyContext: StoryContext;
   docEastAsian: boolean;
   fontFamilyClasses: Record<string, string>;
-  resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>>;
+  resolvedLocalFonts: Readonly<Record<string, ResolvedFontMetric>>;
   layoutServices?: LayoutServices;
   retainedTableAcquisition:
     RetainedTableAcquisitionDependencies<BodyAcquisitionState>;

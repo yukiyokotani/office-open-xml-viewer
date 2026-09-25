@@ -3,7 +3,8 @@ import { activeFontSet, withFontCeiling } from './preload.js';
 
 /** A family-level local-font measurement request. This API is shared by all
  * OOXML formats; each format decides which Office behavior requires a measured
- * multiplier and supplies the evidence-backed value. */
+ * multiplier and supplies the evidence-backed value. Do not add family-specific
+ * requests when the selected font resource can be measured directly. */
 export interface LocalFontMetricRequest {
   /** Authored OOXML family name used as the lookup key. */
   family: string;
@@ -40,6 +41,15 @@ export interface LoadedLocalFontMetrics {
   faces: FontFace[];
   /** Normalized authored family → exact local face and measured line ratio. */
   metrics: Record<string, ResolvedLocalFontMetric>;
+}
+
+// Keep probe timing out of the public result shape. A completed job can still
+// contain a local() probe that hit its own ceiling; callers must not treat that
+// as evidence that the authored face is unavailable.
+const timedOutProbes = new WeakSet<LoadedLocalFontMetrics>();
+
+export function hadLocalFontProbeTimeout(result: LoadedLocalFontMetrics): boolean {
+  return timedOutProbes.has(result);
 }
 
 export function normalizeLocalFontMetricFamily(family: string): string {
@@ -80,12 +90,14 @@ function measureContext():
  */
 export async function loadLocalFontMetrics(
   requests: readonly LocalFontMetricRequest[],
+  targetFontSet: FontFaceSet | null = activeFontSet(),
 ): Promise<LoadedLocalFontMetrics> {
-  const set = activeFontSet();
+  const set = targetFontSet;
   if (!set || typeof FontFace === 'undefined') return { faces: [], metrics: {} };
 
   const faces: FontFace[] = [];
   const metrics: Record<string, ResolvedLocalFontMetric> = {};
+  let timedOut = false;
   type PreparedRequest = LocalFontMetricRequest & {
     family: string;
     normalizedFamily: string;
@@ -128,6 +140,7 @@ export async function loadLocalFontMetrics(
       // pending load, so await it for every holder before measuring; `isNew`
       // alone is not a sufficient loaded-state guarantee under concurrent opens.
       const loaded = await withFontCeiling(face.load());
+      if (!loaded || face.status !== 'loaded') timedOut = true;
       if (!loaded || face.status !== 'loaded') throw new Error('local font load timed out');
       let hasRoute = false;
       for (const request of group.requests) {
@@ -164,7 +177,9 @@ export async function loadLocalFontMetrics(
       releaseFaces([face]);
     }
   }
-  return { faces, metrics };
+  const result = { faces, metrics };
+  if (timedOut) timedOutProbes.add(result);
+  return result;
 }
 
 export function unloadLocalFontMetrics(faces: Iterable<FontFace>): void {

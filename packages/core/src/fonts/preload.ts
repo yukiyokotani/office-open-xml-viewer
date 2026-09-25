@@ -84,7 +84,7 @@ export interface ParsedFontFace {
 /** Extract @font-face rules from a Google Fonts stylesheet. Deliberately
  *  minimal: Google's CSS is machine-generated (one declaration per line, no
  *  nesting), so a brace-block regex is sufficient and avoids a CSS parser. */
-export function parseFontFaceRules(css: string): ParsedFontFace[] {
+export function parseFontFaceRules(css: string, stylesheetUrl?: string): ParsedFontFace[] {
   const faces: ParsedFontFace[] = [];
   const blockRe = /@font-face\s*\{([^}]*)\}/g;
   let m: RegExpExecArray | null;
@@ -93,8 +93,22 @@ export function parseFontFaceRules(css: string): ParsedFontFace[] {
     const prop = (name: string): string | undefined =>
       body.match(new RegExp(`(?:^|;|\\n)\\s*${name}\\s*:\\s*([^;]+)`, 'i'))?.[1].trim();
     const familyRaw = prop('font-family');
-    const src = prop('src');
-    if (!familyRaw || !src) continue;
+    const rawSrc = prop('src');
+    if (!familyRaw || !rawSrc) continue;
+    const src = stylesheetUrl
+      ? rawSrc.replace(
+          /url\(\s*(?:(['"])(.*?)\1|([^)]*?))\s*\)/gi,
+          (original, _quote: string | undefined, quoted: string | undefined, unquoted: string | undefined) => {
+            const value = (quoted ?? unquoted ?? '').trim();
+            if (!value) return original;
+            try {
+              return `url("${new URL(value, stylesheetUrl).href}")`;
+            } catch {
+              return original;
+            }
+          },
+        )
+      : rawSrc;
     const descriptors: FontFaceDescriptors = {};
     const style = prop('font-style');
     if (style) descriptors.style = style;
@@ -168,18 +182,21 @@ export async function preloadGoogleFonts(
 
   for (const name of fontNames) {
     if (!name) continue;
-    const key = name.toLowerCase();
+    const requestedName = name.trim();
+    if (!requestedName) continue;
+    const key = requestedName.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
     const entry = map[key];
     if (!entry) continue;
-    cssUrls.add(entry.url);
-    const family = (entry.loadFamily ?? name).toLowerCase();
+    const cssUrl = entry.url;
+    cssUrls.add(cssUrl);
+    const family = (entry.loadFamily ?? requestedName).toLowerCase();
     targetFamilies.add(family);
-    let targets = urlTargets.get(entry.url);
+    let targets = urlTargets.get(cssUrl);
     if (!targets) {
       targets = new Set<string>();
-      urlTargets.set(entry.url, targets);
+      urlTargets.set(cssUrl, targets);
     }
     targets.add(family);
   }
@@ -201,7 +218,7 @@ export async function preloadGoogleFonts(
           try {
             const res = await fetch(url);
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            return parseFontFaceRules(await res.text());
+            return parseFontFaceRules(await res.text(), res.url || url);
           } catch {
             cssFetches.delete(url); // free the slot so a later call retries
             for (const family of urlTargets.get(url) ?? []) {

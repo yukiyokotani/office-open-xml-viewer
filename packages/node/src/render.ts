@@ -1,3 +1,4 @@
+import { resolveCjkFallback, type CjkFallback } from '@silurus/ooxml-core';
 /**
  * Server-side rendering helpers. These adapt the browser-bound canvas
  * renderers in `@silurus/ooxml-{pptx,docx,xlsx}` to a user-supplied
@@ -235,6 +236,7 @@ export async function renderSlideNode(
   opts: {
     width?: number;
     dpr?: number;
+    cjkFallback?: CjkFallback;
     factory?: NodeCanvasFactory;
     /**
      * Lazily resolve an embedded image (by zip path + MIME) to a Blob. Pictures
@@ -247,6 +249,7 @@ export async function renderSlideNode(
     fetchMedia?: (path: string) => Promise<Blob>;
   } = {},
 ): Promise<void> {
+  const cjkFallback = resolveCjkFallback(opts.cjkFallback);
   // Direct import of the pure renderer module — avoids `presentation.ts`
   // and `viewer.ts`, both of which pull Vite-specific worker / asset
   // imports that don't resolve under Node.
@@ -276,6 +279,7 @@ export async function renderSlideNode(
       {
         width,
         dpr,
+        cjkFallback,
         defaultTextColor: presentation.defaultTextColor,
         majorFont: presentation.majorFont,
         minorFont: presentation.minorFont,

@@ -4,6 +4,7 @@ import {
   computeVisibleRange,
   computeVisibleWindow,
   createVirtualScrollGeometry,
+  resolveItemStartScrollTop,
 } from './virtual-scroll.js';
 
 // Design §5.1 contract. computeVisibleRange(heights, gap, scrollTop,
@@ -275,5 +276,32 @@ describe('cached virtual-scroll geometry', () => {
       topIndex: expected.topIndex,
       totalHeight: expected.totalHeight,
     });
+  });
+});
+
+describe('fractional item-start navigation targets', () => {
+  // heights 100.4 × 3, gap 10 → offsets [0, 110.4, 220.8]. Visible-range
+  // boundaries stay exact for manual scrolling and arbitrary coordinate lookup.
+  const heights = [100.4, 100.4, 100.4];
+
+  it('keeps a viewport just before a fractional boundary on the preceding item', () => {
+    expect(computeVisibleRange(heights, 10, 110, 50, 0).topIndex).toBe(0);
+    expect(computeVisibleRange(heights, 10, 220, 50, 0).topIndex).toBe(1);
+    // viewportHeight 0 mirrors PPTX's arbitrary coordinate-to-slide lookup.
+    expect(computeUniformVisibleWindow(3, 100.4, 10, 110, 0, 0).topIndex).toBe(0);
+  });
+
+  it('keeps the exact item boundary inclusive', () => {
+    expect(computeVisibleRange(heights, 10, 110.4, 50, 0).topIndex).toBe(1);
+    expect(computeUniformVisibleWindow(3, 100.4, 10, 110.4, 50, 0).topIndex).toBe(1);
+  });
+
+  it('rounds only a programmatic item-start target forward and respects maxTop', () => {
+    expect(resolveItemStartScrollTop(110.4, 500)).toBe(111);
+    expect(resolveItemStartScrollTop(110, 500)).toBe(110);
+    expect(resolveItemStartScrollTop(110.4, 110.6)).toBe(110.6);
+    expect(resolveItemStartScrollTop(110.4, 110.2)).toBe(110.2);
+    expect(resolveItemStartScrollTop(-5, 500)).toBe(0);
+    expect(resolveItemStartScrollTop(50, -10)).toBe(0);
   });
 });

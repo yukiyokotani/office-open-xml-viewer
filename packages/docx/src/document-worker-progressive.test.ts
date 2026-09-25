@@ -97,8 +97,8 @@ function progressiveDocument(opts: {
     // Field initializers the real constructor runs; destroy() reads them.
     _rawParts: new BoundedRawPartCache({ maxEntries: 4, maxBytes: 1024 }),
     _embeddedFontFaces: [],
+    _officeFontFaces: [],
     _googleFontFaces: [],
-    _localMetricFontFaces: [],
     _nativeDocSignalCleanup: () => undefined,
     _bridge: {
       request: (factory: (id: number) => RenderWorkerRequest) => {
@@ -223,6 +223,40 @@ describe('worker-mode progressive load', () => {
     expect(harness.document.layoutComplete).toBe(true);
     expect(harness.document.getBookmarkPage('outro')).toBe(39);
     expect(completed).toBe(1);
+  });
+
+  it('reports completion exactly once when the worker publishes nothing (fast document)', async () => {
+    // A document short enough to finish before the first checkpoint push never
+    // sends `layoutPartial`: load() resolves on the authoritative meta itself.
+    // The terminal callback contract must not depend on that — the consumer
+    // registered for completion either way.
+    const completions: unknown[] = [];
+    const harness = progressiveDocument({
+      onComplete: (error) => completions.push(error),
+    });
+
+    harness.settle({ type: 'parsedMeta', id: 11, meta: fullMeta(2) });
+    await harness.parsed;
+    await harness.document.waitUntilLayoutComplete();
+
+    expect(harness.document.pageCount).toBe(2);
+    expect(harness.document.layoutComplete).toBe(true);
+    expect(completions).toEqual([undefined]);
+  });
+
+  it('reports completion exactly once after partials (no double-fire)', async () => {
+    const completions: unknown[] = [];
+    const harness = progressiveDocument({
+      onComplete: (error) => completions.push(error),
+    });
+
+    harness.push({ type: 'layoutPartial', forId: 11, partial: partial(2, { review: REVIEW }) });
+    await harness.parsed;
+    harness.push({ type: 'layoutPartial', forId: 11, partial: partial(9) });
+    harness.settle({ type: 'parsedMeta', id: 11, meta: fullMeta(40) });
+    await harness.document.waitUntilLayoutComplete();
+
+    expect(completions).toEqual([undefined]);
   });
 
   it('sends the default view as no view fields at all', async () => {

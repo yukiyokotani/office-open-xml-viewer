@@ -109,7 +109,7 @@ export function shapeNumberingMarkerText(
     complexScript: input.complexScript,
     fontHint: input.fontHint,
     eastAsiaLanguage: input.eastAsiaLanguage,
-    kerning: input.kerning,
+    kerning: input.kerning ?? false,
     measure: true,
     clusterGeometry,
   });

@@ -205,6 +205,68 @@ describe('DrawingML <a:tbl> — shared interior gridline drawn once (spec-silent
     expect(horizontalAt(render(t), 18)).toHaveLength(1);
   });
 
+  it('grows a positive row for every painted baseline before the final glyph box', () => {
+    // [MS-OE376] §2.1.1347 gives Office's minimum-row rule. A lone terminal line
+    // may fit by its glyph box, but multi-line content consumes every line box
+    // used by paint. Three 18pt lines at explicit 100% use 3 * 21.6pt plus
+    // 3.6pt top/bottom insets = 72pt.
+    const textBody = {
+      verticalAnchor: 'ctr',
+      paragraphs: [{
+        alignment: 'l', marL: 0, marR: 0, indent: 0,
+        spaceBefore: null, spaceAfter: null,
+        spaceLine: { type: 'pct', val: 100000 },
+        runs: [
+          { type: 'text', text: 'one', fontSize: 18, fontFamily: 'Arial' },
+          { type: 'break' },
+          { type: 'text', text: 'two', fontSize: 18, fontFamily: 'Arial' },
+          { type: 'break' },
+          { type: 'text', text: 'three', fontSize: 18, fontFamily: 'Arial' },
+        ],
+        bullet: { type: 'none' }, eaLnBrk: true,
+      }],
+      defaultFontSize: null, defaultBold: null, defaultItalic: null,
+      lIns: 0, rIns: 0, tIns: 3.6 * EMU, bIns: 3.6 * EMU,
+      wrap: 'square', vert: 'horz', autoFit: 'none',
+    } as unknown as TextBody;
+    const t = tableOf([[cell({ textBody, borderB: ln() })]], [COL]);
+    t.rows[0].height = 60 * EMU;
+    t.height = 72 * EMU;
+
+    expect(horizontalAt(render(t), 72)).toHaveLength(1);
+  });
+
+  it('does not invent positive-row growth when row minima already fill the frame', () => {
+    const textBody = {
+      verticalAnchor: 'ctr',
+      paragraphs: [{
+        alignment: 'l', marL: 0, marR: 0, indent: 0,
+        spaceBefore: null, spaceAfter: null,
+        spaceLine: { type: 'pct', val: 100000 },
+        runs: [
+          { type: 'text', text: 'one', fontSize: 18, fontFamily: 'Arial' },
+          { type: 'break' },
+          { type: 'text', text: 'two', fontSize: 18, fontFamily: 'Arial' },
+          { type: 'break' },
+          { type: 'text', text: 'three', fontSize: 18, fontFamily: 'Arial' },
+        ],
+        bullet: { type: 'none' }, eaLnBrk: true,
+      }],
+      defaultFontSize: null, defaultBold: null, defaultItalic: null,
+      lIns: 0, rIns: 0, tIns: 3.6 * EMU, bIns: 3.6 * EMU,
+      wrap: 'square', vert: 'horz', autoFit: 'none',
+    } as unknown as TextBody;
+    const t = tableOf([
+      [cell({ textBody, borderB: ln() })],
+      [cell({ borderT: ln() })],
+    ], [COL]);
+    t.rows[0].height = 60 * EMU;
+    t.rows[1].height = 40 * EMU;
+    t.height = 100 * EMU;
+
+    expect(horizontalAt(render(t), 60)).toHaveLength(1);
+  });
+
   it('shared VERTICAL gridline is drawn exactly ONCE (not once per cell)', () => {
     // Left cell right = 1pt; right cell left = 1pt (same). Previously TWO strokes
     // at x=60 (one per cell); now exactly one.

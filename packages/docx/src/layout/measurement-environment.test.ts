@@ -97,6 +97,7 @@ describe('layout measurement environment', () => {
         compat: {
           useFeLayout: true,
           balanceSingleByteDoubleByteWidth: true,
+          lineWrapLikeWord6: true,
         },
       },
       resolvedLocalFonts: {},
@@ -115,6 +116,7 @@ describe('layout measurement environment', () => {
       documentHasEastAsianText: true,
       useFeLayout: true,
       balanceSingleByteDoubleByteWidth: true,
+      lineWrapLikeWord6: true,
     });
     const segments = segmentEnvironmentOf(state);
     expect(segments).not.toBe(state);
@@ -125,6 +127,7 @@ describe('layout measurement environment', () => {
       verticalCJK: true,
       characterSpacingControl: 'compressPunctuation',
       balanceSingleByteDoubleByteWidth: true,
+      lineWrapLikeWord6: true,
     });
     expect(paragraphMeasurementEnvironment(upright).verticalCJK).toBe(true);
   });

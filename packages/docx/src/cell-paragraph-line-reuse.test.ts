@@ -216,7 +216,7 @@ async function retainedPaint(model: DocxDocumentModel, width = 300): Promise<{
   layout: DocumentLayout; drawn: number; measures: number; streams: Call[][];
 }> {
   const layout = layoutDocument(model, createLayoutServices(model, {
-    localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]),
+    localMetrics: testFontSnapshot([{ family: 'Times New Roman', lineHeightRatio: 2355 / 2048 }]),
   }), { currentDateMs: 0 });
   const painted = await renderAll(layout, width);
   return {
@@ -230,7 +230,7 @@ async function retainedPaint(model: DocxDocumentModel, width = 300): Promise<{
 function tableMeasurementGeometry() {
   const model = doc([wrapTable(8) as unknown as BodyElement]);
   const layout = layoutDocument(model, createLayoutServices(model, {
-    localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]),
+    localMetrics: testFontSnapshot([{ family: 'Times New Roman', lineHeightRatio: 2355 / 2048 }]),
   }), { currentDateMs: 0 });
   const fragments = layout.pages.flatMap((page) => page.layers.body.filter((node) => node.kind === 'table'));
   return {
@@ -275,7 +275,7 @@ describe('table-cell paragraph line reuse — B2 T2', () => {
   it('(b) retained cell acquisition never writes obsolete parser line stamps', async () => {
     const model = doc([wrapTable(16) as unknown as BodyElement]);
     const layout = layoutDocument(model, createLayoutServices(model, {
-      localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]),
+      localMetrics: testFontSnapshot([{ family: 'Times New Roman', lineHeightRatio: 2355 / 2048 }]),
     }), { currentDateMs: 0 });
     const before = await renderAll(layout, 300);
     for (const element of model.body) {
@@ -293,7 +293,7 @@ describe('table-cell paragraph line reuse — B2 T2', () => {
 
   it('(c) wrap partition is zoom-invariant: scale 1 and scale 0.75 break each cell paragraph identically', async () => {
     const model = doc([wrapTable(10) as unknown as BodyElement]);
-    const layout = layoutDocument(model, createLayoutServices(model, { localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]) }), { currentDateMs: 0 });
+    const layout = layoutDocument(model, createLayoutServices(model, { localMetrics: testFontSnapshot([{ family: 'Times New Roman', lineHeightRatio: 2355 / 2048 }]) }), { currentDateMs: 0 });
     // Same paint text at two scales; the fillText SEQUENCE (line partition) must be
     // identical — only the x/y coordinates scale. Compare the per-line text runs.
     const at1 = await renderAll(layout, 300);   // scale 1
@@ -334,7 +334,7 @@ describe('table-cell paragraph line reuse — B2 T2', () => {
 
   it('(e) same page painted twice is identical (the retained tree is not mutated)', async () => {
     const model = doc([wrapTable(16) as unknown as BodyElement]);
-    const layout = layoutDocument(model, createLayoutServices(model, { localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]) }), { currentDateMs: 0 });
+    const layout = layoutDocument(model, createLayoutServices(model, { localMetrics: testFontSnapshot([{ family: 'Times New Roman', lineHeightRatio: 2355 / 2048 }]) }), { currentDateMs: 0 });
     const first = await renderAll(layout, 300);
     const second = await renderAll(layout, 300);
     for (let p = 0; p < first.perPage.length; p++) expect(second.perPage[p]).toEqual(first.perPage[p]);

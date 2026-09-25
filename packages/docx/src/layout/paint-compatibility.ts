@@ -1,5 +1,17 @@
 import { defineCompatibilityRule } from './compatibility.js';
 
+export const WORD_CLASSIC_CHART_SPACE_FRAME = defineCompatibilityRule({
+  id: 'word-classic-chart-space-frame',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'classic-chart-space-frame-style-matrix',
+    application: 'Microsoft Word',
+    version: '16.112.4',
+    platform: 'macOS 26.6.2',
+  },
+  description: 'For classic DOCX charts with omitted direct frame properties, the complete ST_Style 1..48 matrix uses 10pt rounded chart-space corners; omitted style and styles 1..40 use a 0.5pt #898989 outline, while styles 41..48 use no outline. Direct roundedCorners and line paint remain authoritative, followed by a linked chartStyle chartArea role.',
+});
+
 export const WORD_TRACK_CHANGE_AUTHOR_PALETTE = defineCompatibilityRule({
   id: 'word-track-change-author-palette',
   evidence: {

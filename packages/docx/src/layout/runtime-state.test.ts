@@ -10,6 +10,7 @@ import {
   documentLayoutRuntimeOf,
   fieldAcquisitionContextOf,
   paragraphAcquisitionCacheOf,
+  PARAGRAPH_ACQUISITION_MISS_BUDGET,
   paintResourceRegistryOf,
   privateResourceLookupOf,
 } from './runtime-state.js';
@@ -119,30 +120,22 @@ describe('document layout runtime state', () => {
     expect(Object.keys(firstScope)).toEqual(['text', 'images', 'math']);
   });
 
-  it('evicts least-recent paragraph candidates across sources and keys', () => {
-    const services = { text: {}, images: {}, math: {} } as unknown as LayoutServices;
+  it('shares one acquisition-miss budget across field convergence views', () => {
+    const services = {
+      text: {}, images: {}, math: {},
+    } as unknown as LayoutServices;
     attachUnusedKernel(services);
-    const scoped = createParagraphAcquisitionCacheServicesView(services);
-    const cache = paragraphAcquisitionCacheOf(scoped)!;
-    const sources = Array.from({ length: 129 }, () => ({}));
-    const first = {};
-    cache.set(sources[0]!, 'original', first);
-    // Replacement must not consume another slot.
-    cache.set(sources[0]!, 'original', first);
-    for (let index = 1; index < 128; index++) cache.set(sources[index]!, 'same-key', index);
-    // Replacing an entry at full capacity must not evict another candidate.
-    cache.set(sources[0]!, 'original', first);
-    expect(cache.get(sources[0]!, 'original')).toBe(first);
-    cache.set(sources[128]!, 'same-key', 128);
-    expect(cache.get(sources[1]!, 'same-key')).toBeUndefined();
-    expect(cache.get(sources[0]!, 'original')).toBe(first);
-    expect(cache.get(sources[128]!, 'same-key')).toBe(128);
-    expect(cache.get(sources[2]!, 'same-key')).toBe(2);
-    // Many candidates for a single source count against the same global bound.
-    for (let index = 0; index < 128; index++) cache.set(sources[0]!, `variant:${index}`, index);
-    expect(cache.get(sources[0]!, 'original')).toBeUndefined();
-    expect(cache.get(sources[128]!, 'same-key')).toBeUndefined();
-    expect(cache.get(sources[0]!, 'variant:127')).toBe(127);
+    const scope = createParagraphAcquisitionCacheServicesView(services);
+    const fieldView = createFieldAcquisitionServicesView(scope, { totalPages: 12 });
+    const scopeCache = paragraphAcquisitionCacheOf(scope)!;
+    const fieldCache = paragraphAcquisitionCacheOf(fieldView)!;
+
+    for (let index = 0; index < PARAGRAPH_ACQUISITION_MISS_BUDGET; index += 1) {
+      (index % 2 === 0 ? scopeCache : fieldCache).noteMiss();
+    }
+
+    expect(() => fieldCache.noteMiss())
+      .toThrow(/NON_CONVERGENCE.*operational miss budget 25000/i);
   });
 
   it('keeps destination-page resolution private to its immutable pagination iteration view', () => {

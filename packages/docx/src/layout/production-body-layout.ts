@@ -1,5 +1,6 @@
+import type { CjkLang } from '@silurus/ooxml-core';
 import type { BodyElement, DocParagraph, DocTable, DocTableCell, DocRun, ImageRun, ChartRun, ShapeRun, SectionProps } from '../types';
-import type { ResolvedLocalFontMetric } from '@silurus/ooxml-core';
+import type { ResolvedFontMetric } from '@silurus/ooxml-core';
 import { type FloatRect, FLOAT_OVERLAP_EPS, isWrapFloat } from '../float-layout.js';
 import { type FrameBox, computeFrameBox, frameXContainer, pushFloatRect, registerFrameFloat } from '../frame-geometry.js';
 import { resolveFloatingTableBoxPt } from '../float-table-geometry.js';
@@ -40,7 +41,7 @@ import { combineAdjacentTableLayoutInputs } from './adjacent-table-layout-input.
 import { layoutTable as layoutRetainedTableInput } from './table.js';
 import { startTableFragmentCursor, takeTableFragment, type PageDependentTableBlockRequest } from './table-pagination.js';
 import { paragraphGapAdjustment } from './paragraph-spacing.js';
-import { bottomBorderExtentPt, resolveParagraphBorderEdges } from './paragraph-border-adjacency.js';
+import { bottomBorderExtentPt, resolveParagraphBorderEdges, topBorderExtentPt, type ParagraphBorderEdges } from './paragraph-border-adjacency.js';
 import { acquireParagraphResult, acquireRetainedFrameGroup, bodyFrameGroupFor, bodyParagraphBorderEdgesFor, projectPhysicalAnchorResult, retainedFrameMaximumBaselineLoweringPt, type BodyFrameGroup } from './paragraph.js';
 import { wordLoweredDropCapAnchorLeadingPt } from './body-pagination-compatibility.js';
 import type { CompleteTextBoxStoryAcquirer } from './paragraph.js';
@@ -48,6 +49,7 @@ import type { AnchorFloatRegistrationState, BodyAcquisitionState, BodyMeasuremen
 import { ownedParagraphAnchorCollisions, inheritedParagraphAuthorityForReacquisition, TRANSIENT_TABLE_FINAL_FRAME_EXCLUSION_PREFIX } from './paragraph-wrap-registry.js';
 import { acquireRegisteredParagraph } from './registered-paragraph-acquisition.js';
 import { paragraphAnchorCollisions, paragraphWrapExclusions } from './paragraph-float-authority.js';
+import { bodyRootFloatingTablePlacementKey } from './source-key.js';
 import { applyDrawingMLCollisionRegistryDelta, createDrawingMLCollisionRegistry, drawingMLCollisionRegistryDelta, validateDrawingMLCollisionRegistryDelta } from './drawingml-collision-registry.js';
 import { resolveAnchorFrame } from './anchor-frame.js';
 import { isPageLevelWrapFloat } from './anchor-classification.js';
@@ -72,7 +74,8 @@ import {
 export function createProductionBodyLayoutRuntime(
   source: LayoutSourceStore,
   measureContext: MeasurementTextContext | null,
-  resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>>,
+  resolvedLocalFonts: Readonly<Record<string, ResolvedFontMetric>>,
+  cjkFallback?: CjkLang,
 ) {
   prepareBodyFrameMetadata(source.blocks.body);
   const model = source.acquisition;
@@ -92,12 +95,33 @@ export function createProductionBodyLayoutRuntime(
 /** Retained default separator leading used by the shared note story layout. */
 const FOOTNOTE_SEPARATOR_GAP_PT = 6;
 
+/** A visible §17.3.1.42 top border owns space above the first line in every
+ * paragraph container. Page/cell-start suppression removes authored w:before,
+ * never the border's own spacing or outer half-stroke. */
+function paragraphContextWithTopBorder<T extends { readonly spaceBeforePt: number }>(
+  context: T,
+  paragraph: { readonly borders?: DocParagraph['borders'] },
+  topEdge: ParagraphBorderEdges['top'],
+  suppressSpaceBefore: boolean,
+  continuing = false,
+): { context: T; suppressSpaceBefore: boolean } {
+  const reservePt = continuing ? 0 : topBorderExtentPt(paragraph.borders, topEdge);
+  if (reservePt === 0) return { context, suppressSpaceBefore };
+  return {
+    context: {
+      ...context,
+      spaceBeforePt: (suppressSpaceBefore ? 0 : context.spaceBeforePt) + reservePt,
+    },
+    suppressSpaceBefore: false,
+  };
+}
+
 function buildMeasureState(
   ctx: MeasurementTextContext,
   section: SectionProps,
   fontFamilyClasses: Record<string, string> = {},
   layoutSettings: DocumentLayoutSettings,
-  resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>> = {},
+  resolvedLocalFonts: Readonly<Record<string, ResolvedFontMetric>> = {},
   layoutServices: LayoutServices,
   layoutOptions?: LayoutOptions,
 ): BodyAcquisitionState {
@@ -185,6 +209,9 @@ function buildMeasureState(
           );
         }
         const context = resolveStateParagraphLayoutContext(cellState, paragraph);
+        const topBorder = paragraphContextWithTopBorder(
+          context, paragraph, paragraphBorderEdges?.top ?? 'top', true,
+        );
         const layout = acquireRegisteredParagraph(
           cellState,
           cellState.acquisitionInputs.paragraphAcquisitionInput(paragraph, source),
@@ -193,13 +220,13 @@ function buildMeasureState(
             source,
             flowDomainId,
             ordinaryFlow: true,
-            context,
+            context: topBorder.context,
             placement: {
               startYPt: cellState.y,
               paragraphXPt: 0,
               availableWidthPt: paragraphWidthPt,
               maximumYPt: cellState.pageH,
-              suppressSpaceBefore: true,
+              suppressSpaceBefore: topBorder.suppressSpaceBefore,
             },
             measurer: {
               context: cellState.ctx,
@@ -238,7 +265,7 @@ function buildMeasureState(
           advancePt: layout.advancePt + paragraph.spaceBefore,
           spacing: Object.freeze({
             ...layout.spacing,
-            beforePt: paragraph.spaceBefore,
+            beforePt: (layout.spacing?.beforePt ?? 0) + paragraph.spaceBefore,
           }),
         });
       },
@@ -352,7 +379,7 @@ function buildMeasureState(
 function buildConcreteBodyLayoutKernel(
   source: LayoutSourceStore,
   measureContext: MeasurementTextContext | null,
-  resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>>,
+  resolvedLocalFonts: Readonly<Record<string, ResolvedFontMetric>>,
 ): BodyLayoutKernel {
   const ordinaryAcquisitionInputForAdjacentGroup = (
     group: ReturnType<typeof combineAdjacentTableLayoutInputs>,
@@ -413,6 +440,10 @@ function buildConcreteBodyLayoutKernel(
       bottom: 'bottom' as const,
     };
     const context = resolveBodyParagraphLayoutContext(state, paragraph);
+    const topBorder = paragraphContextWithTopBorder(
+      context, paragraph, edges.top, suppressSpaceBefore,
+      continuation.boundary !== null,
+    );
     return acquireParagraphResult(
       paragraph,
       {
@@ -420,13 +451,13 @@ function buildConcreteBodyLayoutKernel(
         source,
         flowDomainId: location.flowDomainId,
         ordinaryFlow: true,
-        context,
+        context: topBorder.context,
         placement: {
           startYPt: state.y,
           paragraphXPt: location.availableBounds.xPt,
           availableWidthPt: availableInlineExtentPt,
           maximumYPt: state.pageH,
-          suppressSpaceBefore,
+          suppressSpaceBefore: topBorder.suppressSpaceBefore,
         },
         measurer: { context: state.ctx, fontFamilyClasses: state.fontFamilyClasses },
         environment: paragraphMeasurementEnvironment(state),
@@ -893,6 +924,9 @@ function buildConcreteBodyLayoutKernel(
             }
             const context = resolveStateParagraphLayoutContext(candidate, paragraph);
             const borderEdges = resolveParagraphBorderEdges(previous, paragraph, next);
+            const topBorder = paragraphContextWithTopBorder(
+              context, paragraph, borderEdges.top, spacing.suppressBefore,
+            );
             const result = acquireRegisteredParagraph(
               candidate,
               paragraph,
@@ -901,13 +935,13 @@ function buildConcreteBodyLayoutKernel(
                 source: block.source,
                 flowDomainId: placement.container.id,
                 ordinaryFlow: true,
-                context,
+                context: topBorder.context,
                 placement: {
                   startYPt,
                   paragraphXPt: placement.container.bounds.xPt,
                   availableWidthPt: placement.container.bounds.widthPt,
                   maximumYPt: placement.availableBounds.yPt + placement.availableBounds.heightPt,
-                  suppressSpaceBefore: spacing.suppressBefore,
+                  suppressSpaceBefore: topBorder.suppressSpaceBefore,
                 },
                 measurer: {
                   context: candidate.ctx,
@@ -1097,6 +1131,8 @@ function buildConcreteBodyLayoutKernel(
             drawingCollisionRegistry.entries,
           );
           const { measured, layout } = acquired;
+          const markOnLineGrid = measured.markOnly
+            && resolveBodyParagraphLayoutContext(candidate, paragraph).lineGrid.active;
           const allBoundaries = measured.lines.map((line) => {
             const boundary = line.layout.consumedEnd;
             if (!boundary) throw new Error('Measured line omitted its source boundary');
@@ -1119,7 +1155,10 @@ function buildConcreteBodyLayoutKernel(
                   lineEndBoundaries: Object.freeze(allBoundaries),
                 }),
             ...(measured.markOnly
-              ? { markBelowBaselinePt: measured.lastLineBelowBaselinePt }
+              ? {
+                  markBelowBaselinePt: measured.lastLineBelowBaselinePt,
+                  markOnLineGrid,
+                }
               : {}),
             ...(measured.uniformRubyAdvancePt == null
               ? {}
@@ -1258,6 +1297,9 @@ function buildConcreteBodyLayoutKernel(
             return Object.freeze({
               layout: result.fragment,
               blockExtentPt: result.fragment.advancePt,
+              ...(result.fragment.unpaintedOverflowPt !== undefined
+                ? { unpaintedOverflowPt: result.fragment.unpaintedOverflowPt }
+                : {}),
               nextCursor: nextGroupCursor
                 ? Object.freeze({ kind: 'adjacent-table-group' as const, cursor: nextGroupCursor })
                 : null,
@@ -1307,6 +1349,26 @@ function buildConcreteBodyLayoutKernel(
               tableWidthPt,
               retained.layout.advancePt,
             );
+            const ownPrescanOccurrenceId = bodyRootFloatingTablePlacementKey(
+              request.input.source,
+              request.location.pageIndex,
+              cursor.rowIndex,
+              cursor.rowFragmentIndex,
+            );
+            // The advance registration is for text before this table. Its
+            // nested contents must acquire against other floats, not against
+            // the table that owns them.
+            const hasOwnPrescan = (positioning.vertAnchor === 'page'
+              || positioning.vertAnchor === 'margin')
+              && floatRegistry.entries.some((entry) =>
+                entry.occurrenceId === ownPrescanOccurrenceId);
+            const nestedAcquisitionRegistry = hasOwnPrescan
+              ? Object.freeze({
+                  ...floatRegistry,
+                  entries: Object.freeze(floatRegistry.entries.filter((entry) =>
+                    entry.occurrenceId !== ownPrescanOccurrenceId)),
+                })
+              : floatRegistry;
             const pageAnchoredCollision = request.cursor?.kind !== 'table'
               && (positioning.vertAnchor === 'page' || positioning.vertAnchor === 'margin')
               && resolvePageAnchoredTableDeferral({
@@ -1316,7 +1378,9 @@ function buildConcreteBodyLayoutKernel(
                   widthPt: raw.w,
                   heightPt: raw.h,
                 },
-                blockers: floatRegistry.entries.map(floatRegistryParticipant),
+                blockers: floatRegistry.entries
+                  .filter((entry) => entry.occurrenceId !== ownPrescanOccurrenceId)
+                  .map(floatRegistryParticipant),
                 overlapEpsilonPt: FLOAT_OVERLAP_EPS,
               }).defer;
             if (pageAnchoredCollision) {
@@ -1421,7 +1485,7 @@ function buildConcreteBodyLayoutKernel(
                       margin: frames.margin,
                       column: frames.text,
                     },
-                    floatingTableRegistry: floatRegistry,
+                    floatingTableRegistry: nestedAcquisitionRegistry,
                     finalPlacementTranslationPt: parentFrame,
                     reacquirePageDependentBlock: reacquireTableBlock,
                   });
@@ -1433,7 +1497,12 @@ function buildConcreteBodyLayoutKernel(
                   }
                   const sourcePlacement: FloatingTablePlacementLayout = Object.freeze({
                     kind: 'floating-table-placement',
-                    occurrenceId: `${retained.input.id}:root:${request.location.pageIndex}:${cursor.rowIndex}:${cursor.rowFragmentIndex}`,
+                    occurrenceId: bodyRootFloatingTablePlacementKey(
+                      request.input.source,
+                      request.location.pageIndex,
+                      cursor.rowIndex,
+                      cursor.rowFragmentIndex,
+                    ),
                     ownership: 'source',
                     physicalPageIndex: request.location.pageIndex,
                     displayPageNumber: state.displayPageNumber
@@ -1724,6 +1793,9 @@ function buildConcreteBodyLayoutKernel(
           return Object.freeze({
             layout: result.fragment,
             blockExtentPt: result.fragment.advancePt,
+            ...(result.fragment.unpaintedOverflowPt !== undefined
+              ? { unpaintedOverflowPt: result.fragment.unpaintedOverflowPt }
+              : {}),
             nextCursor: result.nextCursor
               ? Object.freeze({ kind: 'table' as const, cursor: result.nextCursor })
               : null,
@@ -1951,6 +2023,40 @@ function buildConcreteBodyLayoutKernel(
             return paragraphIds.get(key)!;
           };
           const entries = request.anchors.flatMap((anchor): readonly FloatRegistryEntryPt[] => {
+            if (anchor.kind === 'floating-table') {
+              // §17.4.57 topFromText is the minimum gap above a positioned
+              // table. In controlled Word output, a page-positioned table
+              // keeps its authored y while preceding paragraph lines that
+              // intersect its exclusion move below it. This holds with and
+              // without an intervening empty mark; increasing topFromText
+              // can move even the first line. Reuse the first pass's actual
+              // page/fragment bounds rather than guessing table height here.
+              const table = sourceElement(anchor.tableSource);
+              if (table.type !== 'table') {
+                throw new Error('Page-positioned table prescan source kind mismatch');
+              }
+              const positioning = state.acquisitionInputs.tableFormatInput(table).positioning;
+              if (!positioning || (positioning.vertAnchor !== 'page'
+                && positioning.vertAnchor !== 'margin')) {
+                throw new Error('Page-positioned table prescan requires a page-owned vertical axis');
+              }
+              const { bounds } = anchor;
+              return [Object.freeze({
+                kind: 'table' as const,
+                occurrenceId: anchor.occurrenceId,
+                overlap: table.overlap === 'never' ? 'never' as const : 'overlap' as const,
+                paragraphId: paragraphIdFor(anchor.tableSource),
+                bounds,
+                exclusionBounds: Object.freeze({
+                  xPt: bounds.xPt - positioning.leftFromTextPt,
+                  yPt: bounds.yPt - positioning.topFromTextPt,
+                  widthPt: bounds.widthPt + positioning.leftFromTextPt
+                    + positioning.rightFromTextPt,
+                  heightPt: bounds.heightPt + positioning.topFromTextPt
+                    + positioning.bottomFromTextPt,
+                }),
+              })];
+            }
             const paragraph = sourceElement(anchor.paragraphSource);
             if (paragraph.type !== 'paragraph') {
               throw new Error('Page-anchor prescan source kind mismatch');
@@ -3149,6 +3255,9 @@ function effCellMargins(
 // drift against the whole-string measure (約物半角 contextual collapse stays
 // honoured). See packages/core/src/text/justify-positions.ts.
 
+  // Keep the canonical layout-runtime transport explicit. Regional glyph
+  // selection itself belongs to the text service and is applied only to Han.
+  void cjkFallback;
   const kernel = buildConcreteBodyLayoutKernel(source, measureContext, resolvedLocalFonts);
   return Object.freeze({
     kernel,

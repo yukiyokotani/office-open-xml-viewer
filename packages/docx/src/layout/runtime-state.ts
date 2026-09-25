@@ -6,6 +6,7 @@ import type { LayoutVariantStore } from './variant-store.js';
 import type { VerticalGlyphMeasurementService } from './measurement-capabilities.js';
 import type { LayoutSourceStore } from './layout-source-store.js';
 import type { LayoutOptions } from './options.js';
+import { LayoutInvariantError } from './diagnostics.js';
 
 export interface DocumentLayoutRuntimeState {
   services: LayoutServices | null;
@@ -80,14 +81,25 @@ const verticalGlyphMeasurementServices = new WeakMap<
 >();
 const layoutVariantStores = new WeakMap<LayoutServices, LayoutVariantStore>();
 
-/** One pagination invocation owns this memo. It never enters
- * LayoutServices or DocumentLayout; field-acquisition service views inherit the
- * same private handle through createLayoutServicesRuntimeView. */
+/** One paginateBodySteps execution owns this memo, whether a synchronous or
+ * progressive driver consumes it. It never enters LayoutServices or
+ * DocumentLayout; field-acquisition service views inherit the same private
+ * handle through createLayoutServicesRuntimeView. */
 export interface ParagraphAcquisitionRuntimeCache {
   objectIdentity(value: object): number;
   get(input: object, key: string): unknown;
   set(input: object, key: string, value: unknown): void;
+  noteMiss(): void;
 }
+
+/**
+ * Fail closed before cache-missed paragraph acquisition can exhaust the host.
+ * One pagination session may incur 25,000 misses; miss 25,001 throws
+ * NON_CONVERGENCE. Each paragraph retains only its two most recent placements.
+ * The budget belongs to the pagination cache scope so field-convergence service
+ * views cannot reset it while sharing the same retained acquisition values.
+ */
+export const PARAGRAPH_ACQUISITION_MISS_BUDGET = 25_000;
 
 const paragraphAcquisitionCaches = new WeakMap<
   LayoutServices,
@@ -96,18 +108,9 @@ const paragraphAcquisitionCaches = new WeakMap<
 
 function createParagraphAcquisitionRuntimeCache(): ParagraphAcquisitionRuntimeCache {
   const identities = new WeakMap<object, number>();
-  interface Entry {
-    readonly owner: Map<string, Entry>;
-    readonly key: string;
-    readonly value: unknown;
-  }
-  const results = new WeakMap<object, Map<string, Entry>>();
-  const recency = new Map<Entry, true>();
-  // Operational memo policy, not an OOXML limit or a heap-byte guarantee.
-  // Final page layouts retain their own geometry; older acquisition envelopes
-  // are disposable and must not grow with every paragraph/placement/pass.
-  const maxEntries = 128;
+  const results = new WeakMap<object, Map<string, unknown>>();
   let nextIdentity = 1;
+  let missCount = 0;
   return Object.freeze({
     objectIdentity(value: object): number {
       let retained = identities.get(value);
@@ -119,11 +122,12 @@ function createParagraphAcquisitionRuntimeCache(): ParagraphAcquisitionRuntimeCa
       return retained;
     },
     get(input: object, key: string): unknown {
-      const entry = results.get(input)?.get(key);
-      if (!entry) return undefined;
-      recency.delete(entry);
-      recency.set(entry, true);
-      return entry.value;
+      const byKey = results.get(input);
+      if (!byKey?.has(key)) return undefined;
+      const value = byKey.get(key);
+      byKey.delete(key);
+      byKey.set(key, value);
+      return value;
     },
     set(input: object, key: string, value: unknown): void {
       let byKey = results.get(input);
@@ -131,16 +135,26 @@ function createParagraphAcquisitionRuntimeCache(): ParagraphAcquisitionRuntimeCa
         byKey = new Map();
         results.set(input, byKey);
       }
-      const previous = byKey.get(key);
-      if (previous) recency.delete(previous);
-      if (recency.size === maxEntries) {
-        const oldest = recency.keys().next().value!;
-        oldest.owner.delete(oldest.key);
-        recency.delete(oldest);
+      byKey.set(key, value);
+      // Acquisition cache keys carry the exact placement, so every
+      // keep-with-next preflight and every convergence pass adds fresh
+      // keys that are almost never re-read. Values stay reachable through
+      // the session-lived input objects, so without a bound the cache
+      // retains every measurement of the session (unbounded memory on
+      // pathological documents). Keep only the most recent placements per
+      // paragraph; a miss only costs a re-measurement.
+      while (byKey.size > 2) {
+        byKey.delete(byKey.keys().next().value!);
       }
-      const entry: Entry = { owner: byKey, key, value };
-      byKey.set(key, entry);
-      recency.set(entry, true);
+    },
+    noteMiss(): void {
+      missCount += 1;
+      if (missCount > PARAGRAPH_ACQUISITION_MISS_BUDGET) {
+        throw new LayoutInvariantError(
+          'NON_CONVERGENCE',
+          `paragraph acquisition exceeded the operational miss budget ${PARAGRAPH_ACQUISITION_MISS_BUDGET}`,
+        );
+      }
     },
   });
 }

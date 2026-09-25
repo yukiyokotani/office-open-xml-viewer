@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { hexToRgba, relativeLuma, autoContrastColor, applyStroke, resolveFill } from './paint.js';
+import {
+  hexToRgba,
+  relativeLuma,
+  autoContrastColor,
+  applyStroke,
+  fillCanProduceVisiblePixels,
+  resolveFill,
+} from './paint.js';
 import type { Stroke } from '../types/common.js';
 
 // hexToRgba is the colour pipeline's exit point: the pptx parser resolves a
@@ -28,6 +35,23 @@ describe('hexToRgba', () => {
 
   it('applies the alpha argument only to 6-char hex', () => {
     expect(hexToRgba('FFFF00', 0.5)).toBe('rgba(255,255,0,0.5)');
+  });
+});
+
+describe('fillCanProduceVisiblePixels', () => {
+  const picture = {
+    fillType: 'image' as const,
+    imagePath: 'word/media/image.png',
+    mimeType: 'image/png',
+    stretch: true,
+  };
+
+  it('rejects only finite non-positive picture alpha as definitely invisible', () => {
+    expect(fillCanProduceVisiblePixels({ ...picture, alpha: 0 })).toBe(false);
+    expect(fillCanProduceVisiblePixels({ ...picture, alpha: -1 })).toBe(false);
+    expect(fillCanProduceVisiblePixels({ ...picture, alpha: 0.01 })).toBe(true);
+    expect(fillCanProduceVisiblePixels(picture)).toBe(true);
+    expect(fillCanProduceVisiblePixels({ ...picture, alpha: Number.NaN })).toBe(true);
   });
 });
 

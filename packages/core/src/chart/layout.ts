@@ -437,6 +437,17 @@ export const TITLE_BAND_FONT_FRAC = 2.25;
  *  percent of the frame on the larger xlsx demo charts. */
 export const CAT_AXIS_LABEL_BAND_FONT_FRAC = 2.75;
 
+// Word's classic 2-D column-chart auto layout is observably distinct from the
+// PowerPoint/Excel default above. ECMA-376 does not prescribe this geometry.
+// A Word-produced sweep of every built-in numeric style (1..48), with automatic
+// layout, selected 2.15/3.05 for the title/category bands: all 48 cases moved
+// toward the Office render. Neighbor probes (2.14/3.00, 2.16/3.05, 2.15/3.15)
+// were worse. The DOCX adapter only opts in single-group, 2-D vertical columns;
+// manual layouts, horizontal bars, 3-D charts, combinations, and other families
+// remain on the shared default because they were counterexamples or untested.
+const WORD_CLASSIC_COLUMN_TITLE_BAND_FONT_FRAC = 2.15;
+const WORD_CLASSIC_COLUMN_CAT_AXIS_LABEL_BAND_FONT_FRAC = 3.05;
+
 /** Font-proportional TITLE band for a cartesian chart (bar/line/area/scatter).
  *  Replaces the frac-based {@link chartTitleBand} for these families: the total
  *  band height is `titleFontPx × TITLE_BAND_FONT_FRAC` (independent of the chart
@@ -452,7 +463,10 @@ export function cartesianTitleBand(
 ): ChartTitleBand {
   if (!chart.title && !chart.titlePresent) return { fontPx: 0, topPad: 0, bottomPad: 0, bandH: 0 };
   const fontPx = chartTitleFontPx(chart, h, ptToPx);
-  const bandH = fontPx * TITLE_BAND_FONT_FRAC;
+  const bandFrac = chart.cartesianAutoLayoutProfile === 'wordClassicColumn'
+    ? WORD_CLASSIC_COLUMN_TITLE_BAND_FONT_FRAC
+    : TITLE_BAND_FONT_FRAC;
+  const bandH = fontPx * bandFrac;
   const topPad = Math.min(Math.max(0, bandH - fontPx), fontPx * TITLE_TOP_PAD_FONT_FRAC);
   const bottomPad = bandH - fontPx - topPad;
   return { fontPx, topPad, bottomPad, bandH };
@@ -465,10 +479,14 @@ export function cartesianTitleBand(
 export function catAxisLabelBandH(
   catAxFontPx: number,
   labelOffsetPercent?: number | null,
+  profile?: ChartModel['cartesianAutoLayoutProfile'],
 ): number {
   const defaultGap = categoryTickLabelGapPx(catAxFontPx);
   const offsetGap = categoryLabelOffsetPx(defaultGap, labelOffsetPercent);
-  return catAxFontPx * CAT_AXIS_LABEL_BAND_FONT_FRAC + offsetGap - defaultGap;
+  const bandFrac = profile === 'wordClassicColumn'
+    ? WORD_CLASSIC_COLUMN_CAT_AXIS_LABEL_BAND_FONT_FRAC
+    : CAT_AXIS_LABEL_BAND_FONT_FRAC;
+  return catAxFontPx * bandFrac + offsetGap - defaultGap;
 }
 
 /** Office's default distance from an axis rule to one line of tick-label text,

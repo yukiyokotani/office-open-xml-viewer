@@ -103,6 +103,12 @@ pub struct Worksheet {
     /// Omitted for ordinary worksheets to preserve the existing wire shape.
     #[serde(skip_serializing_if = "std::ops::Not::not", default)]
     pub is_chart_sheet: bool,
+    /// `true` for an `xl/dialogsheets/*.xml` part (ECMA-376 Part 1 §12.3.7).
+    /// Dialog sheets are legacy custom-dialog definitions, not cell grids;
+    /// callers render a non-error informational surface instead of attempting
+    /// to interpret the part as a worksheet.
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    pub is_dialog_sheet: bool,
     pub rows: Vec<Row>,
     /// Serialized as `BTreeMap`s so JSON key order is deterministic (columns /
     /// rows in ascending index order), making the parser output byte-stable for
@@ -131,6 +137,10 @@ pub struct Worksheet {
     #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
     pub col_hidden: BTreeMap<u32, bool>,
     pub default_col_width: f64,
+    /// `<sheetFormatPr baseColWidth>` is distinct from an authored
+    /// `defaultColWidth`; the renderer derives implicit column pixels from it.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub base_col_width: Option<u32>,
     pub default_row_height: f64,
     /// `<sheetFormatPr customHeight>` (§18.3.1.81): the sheet-wide default row
     /// height was manually set. Omitted when false, the schema default.
@@ -224,6 +234,20 @@ pub struct Worksheet {
     /// Used together with `default_font_family` to compute Max Digit Width.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_font_size: Option<f64>,
+    /// `<fonts>[Normal.fontId]` style bits. Omitted when false so an ordinary
+    /// workbook keeps the compact worksheet model. MDW must use this exact
+    /// tuple rather than assuming the regular face.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_font_bold: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_font_italic: Option<bool>,
+    /// Workbook DrawingML theme's Jpan faces for scheme-marked cell fonts.
+    /// Excel for Mac with a Japanese UI locale selects this script face even
+    /// for Latin cells; retain the authored scheme separately on each font.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub theme_japanese_major_font: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub theme_japanese_minor_font: Option<String>,
     /// Workbook date system (`<workbookPr date1904>`, ECMA-376 §18.2.28),
     /// denormalized onto every worksheet so the cell formatter can resolve
     /// serial dates (§18.17.4.1) without a workbook back-reference. `true` =
@@ -245,6 +269,7 @@ impl Worksheet {
         Worksheet {
             name: name.to_string(),
             is_chart_sheet: false,
+            is_dialog_sheet: false,
             rows: Vec::new(),
             col_widths: BTreeMap::new(),
             col_width_ranges: Vec::new(),
@@ -254,6 +279,7 @@ impl Worksheet {
             col_collapsed: BTreeMap::new(),
             col_hidden: BTreeMap::new(),
             default_col_width: 0.0,
+            base_col_width: None,
             default_row_height: 0.0,
             default_row_height_custom: false,
             merge_cells: Vec::new(),
@@ -281,6 +307,10 @@ impl Worksheet {
             sparkline_groups: Vec::new(),
             default_font_family: None,
             default_font_size: None,
+            default_font_bold: None,
+            default_font_italic: None,
+            theme_japanese_major_font: None,
+            theme_japanese_minor_font: None,
             date1904: false,
             parse_error: None,
         }
@@ -291,6 +321,15 @@ impl Worksheet {
     pub fn chart_sheet(name: &str) -> Self {
         let mut worksheet = Self::empty(name);
         worksheet.is_chart_sheet = true;
+        worksheet.show_gridlines = false;
+        worksheet
+    }
+
+    /// A healthy row-free legacy dialog sheet. ECMA-376 §18.3.1.34 gives
+    /// this part its own `dialogsheet` root and no worksheet `sheetData` grid.
+    pub fn dialog_sheet(name: &str) -> Self {
+        let mut worksheet = Self::empty(name);
+        worksheet.is_dialog_sheet = true;
         worksheet.show_gridlines = false;
         worksheet
     }
@@ -1679,6 +1718,14 @@ pub struct Font {
     pub size: f64,
     pub color: Option<String>,
     pub name: Option<String>,
+    /// ECMA-376 §18.8.33 `<scheme val>` chooses the workbook major/minor
+    /// theme face. A present scheme is not equivalent to a direct font name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheme: Option<String>,
+    /// ECMA-376 §18.8.1 `<charset val>` retained as authored metadata; it does
+    /// not by itself authorize a script substitution.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub charset: Option<u8>,
     /// ECMA-376 §18.4.13 ST_UnderlineValues. Only emitted when not the default
     /// "single" — values: "double", "singleAccounting", "doubleAccounting".
     /// "none" sets `underline = false` and leaves this field absent.

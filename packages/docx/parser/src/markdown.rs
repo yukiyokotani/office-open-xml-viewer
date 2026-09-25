@@ -4,14 +4,84 @@
 // footnote bodies, and rich-text formatting; discards geometry, section
 // properties, font metrics, drawing shapes, page layout.
 
-use std::fmt::Write as _;
+use std::collections::{HashMap, HashSet};
+use std::fmt::{self, Write as _};
 
 use crate::types::{
     BodyElement, CellElement, DocParagraph, DocRun, DocTable, DocTableCell, Document, TextRun,
 };
 
+/// UTF-8 markdown sink that stops retaining bytes at the configured ceiling.
+/// Public conversion paths report the crossing through the package resource
+/// governor; this writer prevents the oversized projection from being
+/// materialized before that report can be produced.
+pub(crate) struct MarkdownWriter {
+    value: String,
+    limit: u64,
+    observed: u64,
+    exceeded: bool,
+}
+
+impl MarkdownWriter {
+    pub(crate) fn new(limit: u64) -> Self {
+        Self {
+            value: String::new(),
+            limit,
+            observed: 0,
+            exceeded: false,
+        }
+    }
+
+    pub(crate) fn observed(&self) -> u64 {
+        self.observed
+    }
+
+    fn exceeded(&self) -> bool {
+        self.exceeded
+    }
+
+    pub(crate) fn into_string(self) -> String {
+        self.value
+    }
+
+    fn push_str(&mut self, value: &str) {
+        if self.exceeded {
+            return;
+        }
+        self.observed = self
+            .observed
+            .saturating_add(u64::try_from(value.len()).unwrap_or(u64::MAX));
+        if self.observed > self.limit {
+            self.exceeded = true;
+            return;
+        }
+        self.value.push_str(value);
+    }
+
+    fn push(&mut self, value: char) {
+        let mut encoded = [0; 4];
+        self.push_str(value.encode_utf8(&mut encoded));
+    }
+}
+
+impl fmt::Write for MarkdownWriter {
+    fn write_str(&mut self, value: &str) -> fmt::Result {
+        self.push_str(value);
+        if self.exceeded {
+            Err(fmt::Error)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn render_document(doc: &Document) -> String {
-    let mut out = String::new();
+    render_document_with_limit(doc, u64::MAX).into_string()
+}
+
+pub(crate) fn render_document_with_limit(doc: &Document, limit: u64) -> MarkdownWriter {
+    let mut out = MarkdownWriter::new(limit);
     render_body(&doc.body, &mut out);
 
     if !doc.footnotes.is_empty() {
@@ -37,16 +107,153 @@ pub(crate) fn render_document(doc: &Document) -> String {
         }
     }
     if !doc.comments.is_empty() {
-        out.push_str("\n## Comments\n\n");
-        for c in &doc.comments {
-            let author = c.author.as_deref().unwrap_or("(unknown)");
-            let _ = writeln!(out, "> **{}**: {}", author, c.text.trim());
-        }
+        render_review_comments(&doc.comments, &mut out);
     }
     out
 }
 
-fn render_body(body: &[BodyElement], out: &mut String) {
+fn render_review_comments(comments: &[crate::types::DocxComment], out: &mut MarkdownWriter) {
+    if comments.is_empty() {
+        return;
+    }
+    out.push_str("\n## Review comments\n\n");
+
+    let mut children = HashMap::<&str, Vec<usize>>::new();
+    for (index, comment) in comments.iter().enumerate() {
+        if let Some(parent_id) = comment.parent_id.as_deref() {
+            children.entry(parent_id).or_default().push(index);
+        }
+    }
+
+    let mut emitted = HashSet::new();
+    for comment in comments
+        .iter()
+        .filter(|comment| comment.parent_id.is_none())
+    {
+        render_comment_thread(comment, comments, &children, &mut emitted, out);
+        if out.exceeded() {
+            return;
+        }
+    }
+    // Malformed extension metadata may reference a missing parent or form a
+    // cycle. Keep every comment visible once instead of guessing a repair.
+    for comment in comments {
+        if !emitted.contains(&comment.id) {
+            render_comment_thread(comment, comments, &children, &mut emitted, out);
+            if out.exceeded() {
+                return;
+            }
+        }
+    }
+}
+
+fn render_comment_thread(
+    comment: &crate::types::DocxComment,
+    comments: &[crate::types::DocxComment],
+    children: &HashMap<&str, Vec<usize>>,
+    emitted: &mut HashSet<String>,
+    out: &mut MarkdownWriter,
+) {
+    if !emitted.insert(comment.id.clone()) {
+        return;
+    }
+    let status = if comment.resolved == Some(true) {
+        " (resolved)"
+    } else {
+        ""
+    };
+    let _ = writeln!(
+        out,
+        "### Comment {}{}\n",
+        escape_heading_label(&comment.id),
+        status
+    );
+    write_quoted_comment(
+        comment.author.as_deref().unwrap_or("(unknown)"),
+        comment.text.trim(),
+        1,
+        "",
+        out,
+    );
+
+    let mut pending: Vec<(usize, usize)> = children
+        .get(comment.id.as_str())
+        .into_iter()
+        .flatten()
+        .rev()
+        .map(|index| (*index, 2))
+        .collect();
+    while let Some((index, depth)) = pending.pop() {
+        let reply = &comments[index];
+        if !emitted.insert(reply.id.clone()) {
+            continue;
+        }
+        let status = if reply.resolved == Some(true) {
+            " (resolved)"
+        } else {
+            ""
+        };
+        write_quoted_comment(
+            reply.author.as_deref().unwrap_or("(unknown)"),
+            reply.text.trim(),
+            depth,
+            status,
+            out,
+        );
+        if out.exceeded() {
+            break;
+        }
+        if let Some(grandchildren) = children.get(reply.id.as_str()) {
+            pending.extend(
+                grandchildren
+                    .iter()
+                    .rev()
+                    .map(|child_index| (*child_index, depth + 1)),
+            );
+        }
+    }
+    out.push('\n');
+}
+
+fn write_quote_prefix(depth: usize, out: &mut MarkdownWriter) -> fmt::Result {
+    for _ in 0..depth {
+        out.write_char('>')?;
+    }
+    Ok(())
+}
+
+fn write_quoted_comment(
+    author: &str,
+    text: &str,
+    depth: usize,
+    status: &str,
+    out: &mut MarkdownWriter,
+) {
+    let author = escape_inline_md(&author.replace(['\r', '\n'], " "));
+    let _ = write_quote_prefix(depth, out).and_then(|()| writeln!(out, " **{author}**{status}"));
+    let _ = write_quote_prefix(depth, out).and_then(|()| writeln!(out));
+    if text.is_empty() {
+        let _ = write_quote_prefix(depth, out).and_then(|()| writeln!(out));
+    } else {
+        for line in text.lines() {
+            if write_quote_prefix(depth, out)
+                .and_then(|()| writeln!(out, " {line}"))
+                .is_err()
+            {
+                break;
+            }
+        }
+    }
+}
+
+fn escape_heading_label(value: &str) -> String {
+    value
+        .replace(['\r', '\n'], " ")
+        .replace('\\', "\\\\")
+        .replace('#', "\\#")
+}
+
+fn render_body(body: &[BodyElement], out: &mut MarkdownWriter) {
     for el in body {
         match el {
             BodyElement::Paragraph(p) => render_paragraph(p, out),
@@ -58,10 +265,13 @@ fn render_body(body: &[BodyElement], out: &mut String) {
                 // in the projection.
             }
         }
+        if out.exceeded() {
+            return;
+        }
     }
 }
 
-fn render_paragraph(p: &DocParagraph, out: &mut String) {
+fn render_paragraph(p: &DocParagraph, out: &mut MarkdownWriter) {
     let text = render_runs(&p.runs, &p.run_revisions);
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -221,7 +431,7 @@ fn escape_inline_md(s: &str) -> String {
         .replace('`', "\\`")
 }
 
-fn render_table(t: &DocTable, out: &mut String) {
+fn render_table(t: &DocTable, out: &mut MarkdownWriter) {
     if t.rows.is_empty() {
         return;
     }
@@ -269,3 +479,87 @@ fn render_table_cell(cell: &DocTableCell) -> String {
 // Silence unused-import warnings when the cfg gate excludes some types.
 #[allow(dead_code)]
 fn _ensure_types_used(_t: TextRun) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::DocxComment;
+
+    #[test]
+    fn review_comments_are_separated_quoted_and_threaded() {
+        let comments = vec![
+            DocxComment {
+                id: "12".to_string(),
+                author: Some("Reviewer".to_string()),
+                initials: None,
+                date: None,
+                text: "Check this line.\nKeep the wording.".to_string(),
+                parent_id: None,
+                resolved: Some(true),
+                paragraphs: Vec::new(),
+            },
+            DocxComment {
+                id: "13".to_string(),
+                author: Some("Editor".to_string()),
+                initials: None,
+                date: None,
+                text: "Updated.".to_string(),
+                parent_id: Some("12".to_string()),
+                resolved: None,
+                paragraphs: Vec::new(),
+            },
+        ];
+        let mut out = MarkdownWriter::new(u64::MAX);
+
+        render_review_comments(&comments, &mut out);
+        let out = out.into_string();
+
+        assert!(out.starts_with("\n## Review comments\n"), "{out}");
+        assert!(out.contains("### Comment 12 (resolved)"), "{out}");
+        assert!(
+            out.contains("> **Reviewer**\n>\n> Check this line.\n> Keep the wording."),
+            "{out}"
+        );
+        assert!(out.contains(">> **Editor**\n>>\n>> Updated."), "{out}");
+        assert_eq!(out.matches("### Comment").count(), 1, "{out}");
+    }
+
+    #[test]
+    fn deep_review_thread_stops_at_the_shared_markdown_ceiling() {
+        let comments = (0..20_000)
+            .map(|index| DocxComment {
+                id: index.to_string(),
+                author: Some("Reviewer".to_string()),
+                initials: None,
+                date: None,
+                text: String::new(),
+                parent_id: (index > 0).then(|| (index - 1).to_string()),
+                resolved: None,
+                paragraphs: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let limit = 4_096;
+
+        let output = render_document_with_limit(
+            &Document {
+                comments,
+                ..Document::default()
+            },
+            limit,
+        );
+
+        assert!(output.observed() > limit);
+        assert!(output.value.len() as u64 <= limit);
+    }
+
+    #[test]
+    fn writer_counts_utf8_bytes_and_stops_at_the_first_crossing() {
+        let mut output = MarkdownWriter::new(3);
+        output.push_str("é");
+        output.push_str("é");
+        output.push_str("ignored after crossing");
+
+        assert_eq!(output.observed(), 4);
+        assert_eq!(output.into_string(), "é");
+    }
+}

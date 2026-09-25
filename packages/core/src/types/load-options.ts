@@ -1,3 +1,4 @@
+import type { CjkFallback } from '../fonts/cjk-fallback.js';
 import type { MathRenderer } from '../math/mathjax';
 import type { ChartThreeDRenderer } from '../chart/three-d-contract';
 import type { ChartRegionMapRenderer } from '../chart/region-map-contract';
@@ -67,6 +68,20 @@ export interface LoadOptions {
    * via `@font-face` in your application CSS.
    */
   useGoogleFonts?: boolean;
+  /**
+   * Regional preference used when Han text reaches font fallback and the
+   * document has not already identified a region. The requested font remains
+   * first; recognized regional CJK font names, an East Asian run language where
+   * available, and unambiguous Kana or Hangul take priority. Text without Han
+   * keeps its existing font route.
+   *
+   * `auto` (also the omitted default) snapshots HTML lang, then
+   * navigator.languages / navigator.language; without a usable CJK language it
+   * uses `jp`. Bare `zh` uses `sc`. An explicit value makes the regional choice
+   * independent of the host locale, but does not enable webfonts or by itself
+   * guarantee pixel-identical output across different font environments.
+   */
+  cjkFallback?: CjkFallback;
   /**
    * Password for an encrypted OOXML file ([MS-OFFCRYPTO] Agile Encryption).
    *
@@ -177,7 +192,7 @@ export interface LoadOptions {
    */
   workerTimeoutMs?: number;
   /**
-   * Opt-in OMML equation engine (MathJax + STIX Two Math, ~3 MB). Inject it
+   * Opt-in OMML equation engine (MathJax + STIX Two Math, ~4 MB). Inject it
    * **once** here and every render of this document / presentation / workbook
    * uses it — the same dependency-injection contract across all three formats
    * and their viewers. Import it from the separate `@silurus/ooxml/math` entry
@@ -216,8 +231,10 @@ export interface LoadOptions {
    * stripped bilevel, 8-bit grayscale, RGB, RGBA and process-CMYK images, plus
    * CCITT Group 4 bilevel images. Without this option, recognized TIFF images
    * use a visible unavailable-image placeholder and the document keeps
-   * rendering. Unsupported or malformed input passed to a configured codec
-   * reports `TiffDecodeError`. The built-in codec works in main and worker modes.
+   * rendering. Unsupported or malformed input makes standalone codec calls and
+   * DOCX/PPTX rendering report `TiffDecodeError`; XLSX rendering, including
+   * `XlsxViewer`, contains it at that picture and shows the placeholder. The
+   * built-in codec works in main and worker modes.
    */
   tiff?: TiffRenderer;
 }

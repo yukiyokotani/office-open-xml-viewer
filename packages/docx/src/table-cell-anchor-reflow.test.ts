@@ -886,6 +886,36 @@ describe('table-cell parser-owned anchor reflow', () => {
 
     expect(rowHeight(withOverlay)).toBe(rowHeight(baseline));
   });
+
+  it('moves a cell-owned overlay row when its image would leave the remaining page band', () => {
+    const document = model([
+      paragraph(anchoredImageRuns({
+        occurrenceId: 'page-edge-cell-image',
+        verticalRelativeFrom: 'paragraph',
+        verticalOffsetPt: 10,
+        widthPt: 20,
+        heightPt: 70,
+        allowOverlap: true,
+        wrapKind: 'none',
+      })),
+      paragraph([]), paragraph([]), paragraph([]), paragraph([]),
+    ]);
+    const table = document.body[0] as DocTable;
+    table.rows[0]!.rowHeight = 49;
+    table.rows[0]!.rowHeightRule = 'atLeast';
+    const leading = paragraph([textRun('leading')]);
+    leading.spaceAfter = 80;
+    document.body = [leading, table] as unknown as BodyElement[];
+
+    const result = layoutDocument(
+      document,
+      createLayoutServices(document, { measureContext: makeCtx() }),
+      { currentDateMs: 0 },
+    );
+    expect(result.pages[0]?.layers.body.some((node) => node.kind === 'table')).toBe(false);
+    expect(result.pages[1]?.layers.body.find((node) => node.kind === 'table'))
+      .toMatchObject({ rows: [{ fragmentIndex: 0 }] });
+  });
 });
 
 describe('body parser-owned anchor collision carry', () => {

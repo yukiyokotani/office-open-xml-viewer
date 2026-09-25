@@ -196,7 +196,7 @@ function verticalTableDoc(): DocxDocumentModel {
 function documentLayout(doc: DocxDocumentModel): DocumentLayout {
   const measure = makeRecordingCanvas();
   return layoutDocument(doc, createLayoutServices(doc, {
-    localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]),
+    localMetrics: testFontSnapshot([{ family: 'Times New Roman', lineHeightRatio: 2355 / 2048 }]),
     measureContext: measure.canvas.getContext('2d'),
   }), { currentDateMs: 0 });
 }
@@ -204,7 +204,7 @@ function documentLayout(doc: DocxDocumentModel): DocumentLayout {
 function documentServices(doc: DocxDocumentModel): ReturnType<typeof createLayoutServices> {
   const measure = makeRecordingCanvas();
   return createLayoutServices(doc, {
-    localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]),
+    localMetrics: testFontSnapshot([{ family: 'Times New Roman', lineHeightRatio: 2355 / 2048 }]),
     measureContext: measure.canvas.getContext('2d'),
   });
 }

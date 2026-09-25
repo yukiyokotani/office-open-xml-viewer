@@ -1,16 +1,7 @@
 import type { Fill } from '../types/common';
 import type { ChartDataPointOverride, ChartModel, ChartSeries } from '../types/chart';
 import { dataLabelIsDeleted } from './data-label-style.js';
-
-/** Index series legend deletions once instead of rescanning all entries for
- * every series at the public-model resource boundary. */
-export function deletedLegendEntryIndices(chart: ChartModel): ReadonlySet<number> {
-  const deleted = new Set<number>();
-  for (const entry of chart.legendEntries ?? []) {
-    if (entry.deleted === true) deleted.add(entry.idx);
-  }
-  return deleted;
-}
+export { deletedLegendEntryIndices } from './legend-entry-plan.js';
 
 /** True when a series has authored marker geometry/paint or point overrides. */
 export function seriesHasMarkerDetail(series: ChartSeries): boolean {
@@ -19,7 +10,9 @@ export function seriesHasMarkerDetail(series: ChartSeries): boolean {
     || series.markerFill != null
     || series.markerFillPaint !== undefined
     || series.markerFillPaintAuthored === true
+    || series.markerStyle != null
     || series.markerLine != null
+    || series.markerLinePaintAuthored === true
     || series.markerLineWidthEmu != null;
 }
 
@@ -31,7 +24,10 @@ export function pointHasMarkerDetail(point: ChartDataPointOverride | undefined):
     || point.color != null
     || point.markerFillPaint !== undefined
     || point.markerFillPaintAuthored === true
+    || point.chartexStyle != null
+    || point.markerStyle != null
     || point.markerLine != null
+    || point.markerLinePaintAuthored === true
     || point.markerLineWidthEmu != null
   );
 }
@@ -78,6 +74,7 @@ export function classicMarkerPointIsPainted(
     showNegativeBubbles?: boolean | null;
   },
 ): boolean {
+  if (series.sourceHidden?.[index] === true) return false;
   const chartType = groupSettings?.chartType ?? chart.chartType;
   const value = series.values[index];
   let painted = value != null;
@@ -103,6 +100,53 @@ export function classicMarkerPointIsPainted(
   return true;
 }
 
+/** Whether one classic-series point reaches the shared data-label painter.
+ * This deliberately differs from marker visibility: area and stacked-line
+ * families materialize authored null cells at zero for labels. Keep resource
+ * preflight, picture warming, and paint on this single family-aware rule. */
+export function classicDataLabelPointIsPainted(
+  chart: ChartModel,
+  series: ChartSeries,
+  family: string,
+  index: number,
+  scatterHasNumericX: boolean,
+  sourceSeriesIndex = 0,
+): boolean {
+  if (series.sourceHidden?.[index] === true) return false;
+  if (family === 'surface') return false;
+  if (family === 'ofPie' || (family === 'doughnut' && sourceSeriesIndex > 0)) return false;
+  if (family === 'area' || family === 'stackedArea' || family === 'stackedAreaPct') {
+    return index < Math.max(
+      chart.categories.length,
+      series.categories?.length ?? 0,
+      series.values.length,
+    );
+  }
+  const value = series.values[index];
+  if ((family === 'line' || family === 'stackedLine' || family === 'stackedLinePct')
+    && value == null) {
+    const renderedByLineFamily = chart.chartType === 'line'
+      || chart.chartType === 'stackedLine' || chart.chartType === 'stackedLinePct';
+    return renderedByLineFamily
+      && (chart.chartType !== 'line' || chart.dispBlanksAs === 'zero');
+  }
+  if (value == null || !Number.isFinite(value)) return false;
+  if (family === 'pie' || family === 'doughnut' || family === 'ofPie') {
+    // Pie geometry uses absolute source values. Rich labels intentionally keep
+    // zero-valued categories when the ring has at least one visible slice, so
+    // prefetch/effect/paint-work must retain the same label domain.
+    return series.values.some(candidate =>
+      candidate != null && Number.isFinite(candidate) && Math.abs(candidate) > 0
+    );
+  }
+  if (family === 'scatter') {
+    if (!scatterHasNumericX) return true;
+    const category = (series.categories ?? chart.categories)[index];
+    return category != null && Number.isFinite(Number.parseFloat(category));
+  }
+  return true;
+}
+
 /** Count visible data-label legend keys that reuse the series marker paint. */
 export function dataLabelLegendKeyCount(
   chart: ChartModel,
@@ -110,7 +154,8 @@ export function dataLabelLegendKeyCount(
   family: string,
   pointCount: number,
   scatterHasNumericX: boolean,
-  groupSettings?: Parameters<typeof classicMarkerPointIsPainted>[5],
+  _groupSettings?: Parameters<typeof classicMarkerPointIsPainted>[5],
+  sourceSeriesIndex = 0,
 ): number {
   // Radar currently has no data-label consumer; do not prefetch or charge keys
   // that the family renderer cannot paint.
@@ -122,8 +167,8 @@ export function dataLabelLegendKeyCount(
     const point = overrides.get(index);
     if (dataLabelIsDeleted(series.seriesDataLabels, point)) continue;
     if ((point?.showLegendKey ?? series.seriesDataLabels?.showLegendKey ?? false) !== true) continue;
-    if (!classicMarkerPointIsPainted(
-      chart, series, family, index, scatterHasNumericX, groupSettings,
+    if (!classicDataLabelPointIsPainted(
+      chart, series, family, index, scatterHasNumericX, sourceSeriesIndex,
     )) continue;
     count++;
   }

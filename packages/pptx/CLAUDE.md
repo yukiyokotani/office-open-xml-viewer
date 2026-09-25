@@ -1,133 +1,144 @@
 # CLAUDE.md
 
-## 自律作業の原則
+## Principles for Autonomous Work
 
-- AM1時〜AM9時はユーザー確認不要。確認を求めると作業が止まるので、破壊的操作以外はすべて自律的に進めること。
-- 確認なしで進めてよい作業: コード修正・WASM ビルド・テスト実行・commit/push・Python スクリプト実行・npm スクリプト実行。
-- commit / push は改善確認後に適宜実施してよい。
-- `git push` は `http.postBuffer 524288000` を設定してから実行（大きな pack のため HTTP 400 が出ることがある）。
-- 参照画像（`tests/visual/references/`）はユーザー指示のみ更新。絶対に自動更新しない。
+- From 1:00 AM to 9:00 AM, do not ask the user for confirmation. Asking for confirmation stops the work, so proceed autonomously with everything except destructive operations.
+- Work that may proceed without confirmation: code changes, WASM builds, test execution, commits and pushes, Python scripts, and npm scripts.
+- Commit and push as appropriate after confirming that the changes are improvements.
+- Before running `git push`, set `http.postBuffer 524288000` (large packs can cause HTTP 400 errors).
+- Update reference images (`tests/visual/references/`) only when the user explicitly requests it. Never update them automatically.
 
-## プロジェクト概要
+## Project Overview
 
-OOXML (PowerPoint .pptx) をブラウザ上の Canvas に描画するライブラリ。
-Rust/WASM パーサー + TypeScript Canvas レンダラー構成。
+This library renders OOXML PowerPoint (`.pptx`) files to browser Canvas.
+It consists of a Rust/WASM parser and a TypeScript Canvas renderer.
 
-## ディレクトリ構成
+## Directory Structure
 
 ```
-pptx-parser/          ← Rust/wasm-pack パーサー
-  src/lib.rs          ← OOXML解析コア。serde で camelCase JSON を出力
-  pkg/                ← wasm-pack build の出力先
+pptx-parser/          <- Rust/wasm-pack parser
+  src/lib.rs          <- Core OOXML parser; outputs camelCase JSON with serde
+  pkg/                <- wasm-pack build output
 
 src/
-  wasm/               ← ★ pkg/ の手動コピー先。アプリはここを読む
-  types.ts            ← Rust の JSON 出力と1:1対応する TypeScript 型
-  renderer.ts         ← Canvas 2D API でスライドを描画
-  index.ts            ← PptxViewer 公開 API
-  worker.ts           ← Web Worker で WASM を呼び出す
+  wasm/               <- Manual copy destination for pkg/; the application reads from here
+  types.ts            <- TypeScript types matching the Rust JSON output one-to-one
+  renderer.ts         <- Renders slides with the Canvas 2D API
+  index.ts            <- Public PptxViewer API
+  worker.ts           <- Calls WASM from a Web Worker
 
-public/sample.pptx    ← テスト用 PPTX (5スライド)
+public/sample.pptx    <- Test PPTX (5 slides)
 
 tests/visual/
-  visual.spec.ts      ← Playwright ビジュアルリグレッションテスト
-  fixture.html        ← テスト用 HTML (width=1920)
-  references/         ← 正解画像 slide-1.png〜slide-5.png
-  screenshots/        ← 実行ごとに更新されるスクリーンショット
-  diffs/              ← ピクセル差分画像
+  visual.spec.ts      <- Playwright visual regression tests
+  fixture.html        <- Test HTML (width=1920)
+  references/         <- Expected images, slide-1.png through slide-5.png
+  screenshots/        <- Screenshots updated on every run
+  diffs/              <- Pixel-difference images
 ```
 
-## WASM ビルド手順（重要）
+## WASM Build Procedure (Important)
 
 ```bash
 cd pptx-parser && wasm-pack build --target web
 
-# ★ 必ず src/wasm/ にコピーする（別物なので自動同期されない）
+# Always copy the files to src/wasm/ (these are separate and are not synchronized automatically)
 cp pptx-parser/pkg/pptx_parser_bg.wasm pptx-parser/pkg/pptx_parser.js src/wasm/
 ```
 
-コピー忘れると古い WASM が使われ続ける。
+If you forget to copy the files, the old WASM build will continue to be used.
 
 ## Storybook
 
-Storybook はルート一本化のため、パッケージ単体では起動しない。
-ルートから `pnpm storybook` で全パッケージのストーリーが参照できる。
+Storybook is unified at the repository root, so do not start it from the package directory.
+Run `pnpm storybook` from the repository root to access stories from every package.
 
-## テスト実行
+## Running Tests
 
 ```bash
 npx playwright test --reporter=list
-# 例: slide 4: match=93.8%  diff=6.2%  (127,638 / 2,073,600 px)
+# Example: slide 4: match=93.8%  diff=6.2%  (127,638 / 2,073,600 px)
 ```
 
-## 現在のテスト結果 (session 3, 2026-04-16)
+## Current Test Results (Session 3, 2026-04-16)
 
-| スライド | match% | 備考 |
-|---------|--------|------|
+| Slide | match% | Notes |
+|-------|--------|-------|
 | 1 | 99.6% | |
 | 2 | 100.0% | |
 | 3 | 99.4% | |
 | 4 | 99.0% | |
 | 5 | 98.8% | |
 
-## 修正済みバグ (session 2)
+## Fixed Bugs (Session 2)
 
-### タブストップ（スライド4「22%」の右揃えズレ）
-- `pPr > tabLst > tab` をパース → `Paragraph.tabStops: TabStop[]` に格納
-- `layoutParagraph` で `\t` トークン検出時に `tabStop.segments` に後続テキストを蓄積
-- 描画時 `tabAbsX - totalTabW` で右揃えレンダリング
+### Tab stops (right-alignment offset for "22%" on slide 4)
 
-### grpFill 継承（flipオブジェクトが塗りつぶされない）
-- `parse_sp_tree_node` / `parse_shape` に `group_fill: Option<&Fill>` を追加
-- `spPr > grpFill` の図形が親グループの solidFill を継承するように
-- スライド5のアワードバッジ（金賞等）のリース葉が accent4 ゴールド (#EBC83C) で塗られるように
+- Parse `pPr > tabLst > tab` and store it in `Paragraph.tabStops: TabStop[]`.
+- When `layoutParagraph` detects a `\t` token, collect the following text in `tabStop.segments`.
+- During painting, right-align the text using `tabAbsX - totalTabW`.
 
-## 修正済みバグ (session 3)
+### `grpFill` inheritance (flipped objects are not filled)
 
-### グループ回転が子シェイプに未適用（リース葉の回転ズレ）
-- `GroupTransform` に `rot: f64` フィールドを追加
-- grpSp の `xfrm` から `rot / 60000` を読み取るように
-- `apply_to_transform`: 子の中心をグループ中心周りに回転（clockwise screen coords）
-- 子の rot の正しい公式: `child.rot = group.rot + (group.flipH XOR group.flipV ? -t.rot : t.rot)`
-  - グループにネットflip（flipH XOR flipV）がある場合、子の回転方向が反転するため t.rot を負にする
-  - 単純な `t.rot + group.rot` は誤り（flipH時に方向が逆になる）
-- `apply_group_transform_to_element`: `s.rotation = nt.rot` / `p.rotation = nt.rot` を追加（以前は破棄していた）
+- Added `group_fill: Option<&Fill>` to `parse_sp_tree_node` and `parse_shape`.
+- Shapes with `spPr > grpFill` now inherit their parent group's `solidFill`.
+- The wreath leaves on the award badges on slide 5 (gold award, etc.) are now filled with the accent4 gold color (`#EBC83C`).
 
-### レイアウトプレースホルダーの枠線誤継承（タイトルの黒枠線）
-- slideLayout の `spPr > ln` は編集モード用インジケーターで、描画時は不要
-- `by_type_stroke` フィールドと `lookup_stroke()` を削除
-- `parse_shape` での `lph.lookup_stroke()` 呼び出しを削除
+## Fixed Bugs (Session 3)
 
-### trapezoid adj（スライド5 角デコレーションが三角形になる）
-- OOXML 仕様: `ss = min(w, h)`, `inset = adj / 100000 * ss`
-- 修正: `const ss = Math.min(w, h); const inset = Math.min(w/2, adj/100000 * ss)`
-- adj=99828, w=159, h=31 → inset=30.95px（正しい台形）
+### Group rotation is not applied to child shapes (misaligned wreath-leaf rotation)
 
-## 残課題
+- Added a `rot: f64` field to `GroupTransform`.
+- Read `rot / 60000` from the `grpSp` `xfrm`.
+- `apply_to_transform`: rotate the child's center around the group center using clockwise screen coordinates.
+- Correct formula for the child's rotation: `child.rot = group.rot + (group.flipH XOR group.flipV ? -t.rot : t.rot)`.
+  - When the group has a net flip (`flipH XOR flipV`), negate `t.rot` because the child's rotation direction is reversed.
+  - Simply using `t.rot + group.rot` is incorrect because the direction is reversed when `flipH` is set.
+- Added `s.rotation = nt.rot` and `p.rotation = nt.rot` to `apply_group_transform_to_element`; the rotation was previously discarded.
 
-### スライド3・5 のフォントサイズが小さい
-- プレースホルダーシェイプのフォントサイズがスライドレイアウト/マスターから継承されていない
-- 調査先: `ppt/slideLayouts/` と `ppt/slideMasters/` の `lstStyle > lvl1pPr > defRPr sz`
-- `parse_text_body` でレイアウト/マスターのデフォルトを読む処理が未実装
+### Incorrect inheritance of layout-placeholder outlines (black title outline)
 
-### autofit 未実装
-- `bodyPr > spAutoFit` でテキストが収まらない場合にフォントサイズ縮小する仕様
-- 現在はクリッピングのみ
+- A slide layout's `spPr > ln` is an editing-mode indicator and should not be painted.
+- Removed the `by_type_stroke` field and `lookup_stroke()`.
+- Removed the call to `lph.lookup_stroke()` from `parse_shape`.
 
-### lumMod/lumOff の色変換精度
-- `tx2 + lumMod=50000` などのスキームカラー修飾の近似精度に課題あり
+### Trapezoid adjustment (corner decoration on slide 5 becomes a triangle)
 
-### leftBracket などのプリセット形状
-- 未実装の prstGeom は `rect` にフォールバック中（スライド5で使用あり）
+- OOXML rule: `ss = min(w, h)`, `inset = adj / 100000 * ss`.
+- Fix: `const ss = Math.min(w, h); const inset = Math.min(w/2, adj/100000 * ss)`.
+- With `adj=99828`, `w=159`, and `h=31`, the inset is `30.95px`, producing the correct trapezoid.
 
-## 重要な技術メモ
+## Remaining Work
 
-### OOXML 単位
-- 回転: `rot / 60000` → 度
-- フォントサイズ: `sz / 100` → pt  (例: 2400 → 24pt)
-- スペース: `spaceBefore/spaceAfter` は hundredths of pt → `/ 100 * PT_TO_EMU * scale` で px
+### Font sizes are too small on slides 3 and 5
 
-### テーマカラー (sample.pptx)
+- Placeholder shapes do not inherit font sizes from the slide layout or master.
+- Investigate `lstStyle > lvl1pPr > defRPr sz` in `ppt/slideLayouts/` and `ppt/slideMasters/`.
+- `parse_text_body` does not yet read defaults from the layout or master.
+
+### Autofit is not implemented
+
+- `bodyPr > spAutoFit` requires the font size to shrink when the text does not fit.
+- Currently, the text is only clipped.
+
+### Accuracy of `lumMod`/`lumOff` color conversion
+
+- The approximation of scheme-color modifiers such as `tx2 + lumMod=50000` needs improvement.
+
+### Preset shapes such as `leftBracket`
+
+- Unsupported `prstGeom` values currently fall back to `rect`; slide 5 uses one of these shapes.
+
+## Important Technical Notes
+
+### OOXML Units
+
+- Rotation: `rot / 60000` -> degrees
+- Font size: `sz / 100` -> pt (for example, `2400` -> `24pt`)
+- Spacing: `spaceBefore` and `spaceAfter` are in hundredths of a point; convert to px with `/ 100 * PT_TO_EMU * scale`.
+
+### Theme Colors (`sample.pptx`)
+
 | name | hex |
 |------|-----|
 | dk2 / tx2 | #196ECA |
@@ -135,8 +146,9 @@ npx playwright test --reporter=list
 | accent4 | #EBC83C (gold) |
 | accent5 | #00A08C |
 
-### layoutParagraph のシグネチャ
+### `layoutParagraph` Signature
+
 ```typescript
 layoutParagraph(ctx, para, maxWidthPx, defaultFontSizePx, defaultColor, scale, marLPx)
-//                                                                                ↑ タブストップ計算用
+//                                                                                ^ Used for tab-stop calculations
 ```

@@ -52,6 +52,14 @@ export type PptxWorkerRequest =
       buffer: ArrayBuffer;
       source?: import('@silurus/ooxml-core/internal/legacy-ppt-source').LegacyPptDirectSourceDescriptor;
       resourcePolicy: NormalizedOoxmlResourcePolicy;
+      /** Resolved regional Han fallback. PPTX derives its font-preload set from
+       *  the preflight built inside this worker, so the region Window resolved
+       *  has to cross the protocol — docx/xlsx compute their main-mode preload
+       *  names in Window from the returned model and carry no such field.
+       *  Required rather than optional: `load()` always knows the concrete
+       *  region, and dropping it silently preloads the `jp` default while the
+       *  renderer paints the resolved one. */
+      cjkFallback: import('@silurus/ooxml-core').CjkLang;
       progressiveLayout?: boolean;
     }
   | ({
@@ -90,6 +98,7 @@ export type RenderWorkerRequest =
       source?: import('@silurus/ooxml-core/internal/legacy-ppt-source').LegacyPptDirectSourceDescriptor;
       resourcePolicy: NormalizedOoxmlResourcePolicy;
       useGoogleFonts?: boolean;
+      cjkFallback?: import('@silurus/ooxml-core').CjkLang;
       renderers?: WorkerRendererDescriptors;
       progressiveLayout?: boolean;
     }

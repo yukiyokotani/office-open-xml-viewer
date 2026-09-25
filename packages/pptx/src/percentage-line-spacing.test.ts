@@ -6,12 +6,12 @@ import type { TextRun } from '@silurus/ooxml-core';
 /**
  * DrawingML percentage line spacing is authored explicitly by `a:lnSpc >
  * a:spcPct` (ECMA-376 §21.1.2.2.5 / §21.1.2.2.11). It is based on the
- * largest text size on the line. A document-font design-height floor used for
- * implicit single spacing must therefore not override an explicit percentage.
+ * largest text size on the line. The same natural single-line base is used
+ * when `a:lnSpc` is omitted; a font's design box is not the baseline pitch.
  *
  * The regression was visible with Meiryo UI: its 1.596-em design-height floor
- * expanded an authored 100% line pitch, while PowerPoint kept the same pitch as
- * another face at the same point size.
+ * expanded the pitch, while PowerPoint kept the same 120%-of-point-size natural
+ * pitch as Arial for fixed and spAutoFit shapes.
  */
 
 const SCALE = 1 / 12700; // 1 pt => 1 px
@@ -147,10 +147,12 @@ describe('pptx DrawingML percentage line spacing', () => {
       .toBeCloseTo(baselinePitch('Arial', pct100, bullet), 5);
   });
 
-  it('keeps the Meiryo design-height floor for implicit single spacing', () => {
-    expect(baselinePitch('Meiryo UI', null))
-      .toBeGreaterThan(baselinePitch('Arial', null));
-  });
+  it.each(['Meiryo UI', 'Arial'])(
+    'uses the natural 120%% pitch for omitted line spacing in %s',
+    (fontFamily) => {
+      expect(baselinePitch(fontFamily, null)).toBeCloseTo(20 * 1.2, 5);
+    },
+  );
 
   it('keeps absolute point line spacing independent of the font design height', () => {
     const pts18: Paragraph['spaceLine'] = { type: 'pts', val: 18 };

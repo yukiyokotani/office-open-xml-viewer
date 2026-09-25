@@ -36,6 +36,180 @@ export interface Announcement {
 
 export const announcements: readonly Announcement[] = [
   {
+    slug: 'v088-chart-fidelity-and-safer-word-layout',
+    date: '2026-09-21',
+    label: 'Release note',
+    version: 'v0.88.0',
+    title: 'More faithful charts and safer Word layout in v0.88.0',
+    summary: 'v0.88.0 brings classic Office charts closer to their authored appearance across Word, Excel and PowerPoint, while bounding runaway keep-with-next pagination in complex Word documents.',
+    audience: 'Applications that display Office charts, complex Word documents, presentation SVGs or multilingual PowerPoint text. Most Viewer integrations can upgrade without code changes.',
+    sections: [
+      {
+        title: 'In short',
+        kind: 'summary',
+        paragraphs: [
+          'This release concentrates on visual fidelity and dependable viewing. Classic charts now follow the built-in Office styles more closely across all three formats, and Word layout stays bounded when a document contains unusually long groups that must remain together.',
+        ],
+        bullets: [
+          'Render classic chart frames, colours, fills, outlines, labels and effects more like the Office host that authored them.',
+          'Bound repeated keep-with-next pagination work before it can exhaust browser memory.',
+          'Preserve PowerPoint SVG artwork when its compatibility image is unavailable.',
+          'Prepare the selected regional CJK fallback font consistently in PowerPoint main-thread loading.',
+        ],
+      },
+      {
+        title: 'Classic charts across Word, Excel and PowerPoint',
+        modules: ['DOCX', 'XLSX', 'PPTX'],
+        paragraphs: [
+          'Classic charts now resolve the built-in numeric style range 1 through 48 while retaining each host application\'s visual conventions. Chart frames, automatic text contrast, series and point styling, picture fills, markers, labels, legends, axes and three-dimensional surfaces all keep authored formatting ahead of built-in style defaults.',
+          'The change is intentionally visible in affected documents. Existing charts may gain the frame, palette, text contrast, transparency or outline that Word, Excel or PowerPoint applies to the saved style. Direct formatting and linked chart styles remain authoritative, and ChartEx continues through its existing optional entry point.',
+        ],
+      },
+      {
+        title: 'Safer and more faithful Word layout',
+        modules: ['DOCX', 'Node'],
+        paragraphs: [
+          'Word documents with very long keep-with-next groups now stop speculative measurement once the group cannot fit on a fresh page. Paragraph layout also keeps a bounded working set and fails with a layout diagnostic if repeated acquisition exceeds its operational limit, instead of continuing until the browser or Node process runs out of memory.',
+          'Default paragraph and table styles now participate in inheritance for every valid on/off form.',
+        ],
+      },
+      {
+        title: 'Presentation and spreadsheet details',
+        modules: ['PPTX', 'XLSX'],
+        paragraphs: [
+          'PowerPoint image-filled shapes can use their SVG source when the older compatibility raster is missing or unreadable. If neither source resolves, the authored image fill remains transparent instead of turning into an unrelated solid fill. When Google Fonts loading is enabled, main-thread PowerPoint loading also prepares the selected regional CJK fallback family, matching the other loading modes.',
+          'The built-in Excel zoom slider now settles naturally on its 100% centre mark when dragged nearby, while continuous zoom remains available immediately outside that small attraction zone. Programmatic zoom and the existing buttons and wheel controls keep their previous behaviour.',
+        ],
+      },
+      {
+        title: 'Upgrading',
+        paragraphs: [
+          'No public option or method is removed or renamed, and most Viewer integrations require no code changes. The release intentionally changes rendering for documents that rely on corrected Office chart styles, Word layout rules, SVG fallbacks or regional CJK font selection. Applications with pixel baselines should review those differences against the authored document or an Office-produced reference instead of expecting every pixel to match v0.87.0.',
+          'Applications that implement a custom chart renderer against the low-level public chart model should review the added optional style data and the broader image-capable fill type. Built-in chart rendering requires no setup change.',
+          'The Word layout limits apply only after unusually repeated acquisition work. Ordinary documents keep the same loading contract; a document that exceeds the limit now reports non-convergence instead of consuming memory without a bound.',
+        ],
+      },
+      {
+        title: 'Technical note',
+        paragraphs: [
+          'The public chart model gains optional style and effect metadata, and a small number of paint fields accept the broader Fill union so picture fills can retain their authored form. Viewer integrations need no changes. Applications that exhaustively match the low-level chart model should account for the added optional data and image-fill case when upgrading.',
+          'Word paragraph acquisition now uses bounded internal caching and a pagination-scoped operational budget. The budget counts cache misses within one pagination session: it permits 25,000 misses, returns a NON_CONVERGENCE layout diagnostic on miss 25,001, and retains only the two most recent placements for each paragraph. The safety boundary does not change the successful layout contract for ordinary documents.',
+        ],
+      },
+    ],
+  },
+  {
+    slug: 'v087-regional-cjk-fallbacks',
+    date: '2026-09-13',
+    label: 'Release note',
+    version: 'v0.87.0',
+    title: 'Regional CJK fallbacks and steadier loading in v0.87.0',
+    summary: 'v0.87.0 lets applications choose regional CJK fallback forms and picks up several reliability fixes for progressive loading, navigation, and file opening.',
+    audience: 'Applications that display CJK documents, use progressive DOCX or PPTX loading, or need consistent programmatic navigation. Existing integrations can upgrade without API changes.',
+    sections: [
+      {
+        title: 'In short',
+        kind: 'summary',
+        paragraphs: [
+          'This release focuses on predictable multilingual display rather than a large new viewing feature. Word, Excel and PowerPoint content can use the appropriate regional fallback for ambiguous Han characters, alongside reliability fixes for loading, navigation and file opening.',
+        ],
+        bullets: [
+          'Choose Simplified Chinese, Traditional Chinese, Hong Kong, Japanese or Korean fallback forms.',
+          'Use the host language automatically, or choose one fallback region independently of the host locale.',
+          'Keep fast progressive loads and programmatic page or slide navigation consistent.',
+        ],
+      },
+      {
+        title: 'Regional CJK fallback',
+        modules: ['DOCX', 'XLSX', 'PPTX', 'Node'],
+        paragraphs: [
+          'The same Unicode Han character can have different regional glyph shapes. The new cjkFallback option chooses which Simplified Chinese, Traditional Chinese, Hong Kong, Japanese or Korean fallback family is tried first when the document does not already identify a region. Choose sc, tc, hk, jp or kr explicitly, or leave the default auto mode to resolve the host language once when loading starts.',
+          'The document\'s requested font remains first. Recognized regional CJK font names, an East Asian run language where the format provides one, and unambiguous Kana or Hangul can determine the region before cjkFallback is consulted. Text without Han keeps its existing font route.',
+          'cjkFallback changes the fallback preference; it does not install or download fonts. An explicit value makes that regional choice independent of the host locale, but pixel-identical output across hosts still requires the same fonts. Applications can provide those fonts themselves or separately opt into useGoogleFonts.',
+        ],
+        examples: [
+          {
+            title: 'Choose a fallback region independently of the host locale',
+            code: `const viewer = new DocxViewer(canvas, {
+  cjkFallback: 'sc',
+});`,
+          },
+        ],
+      },
+      {
+        title: 'Steadier completion, navigation and file opening',
+        paragraphs: [
+          'Progressive DOCX and PPTX loads now deliver one successful onLayoutComplete notification even when a small file finishes before load() returns. Programmatic page and slide navigation also stays on the requested item when a browser rounds a fractional scroll position.',
+          'The shared package reader accepts otherwise consistent Office files whose duplicated ZIP headers differ only in legacy timestamp metadata. Word intrinsic-width measurement also handles empty anchored runs without failing the document layout.',
+        ],
+      },
+      {
+        title: 'Upgrading',
+        paragraphs: [
+          'No option or method is removed or renamed, and most applications can upgrade without changes. The auto CJK fallback can intentionally choose different regional Han glyphs when the host language provides that preference. Set cjkFallback explicitly when the fallback region must not depend on the browser locale, server or Node host. This stabilizes the regional choice; exact visual output still depends on the fonts available in each environment.',
+          'Applications that observe progressive onLayoutComplete should allow the callback after every successful progressive load. It is still called exactly once; failures before any layout is published continue to reject load() directly.',
+        ],
+      },
+    ],
+  },
+  {
+    slug: 'v086-presentation-text-and-csv-previews',
+    date: '2026-09-05',
+    label: 'Release note',
+    version: 'v0.86.0',
+    title: 'More faithful presentation text, plus CSV previews, in v0.86.0',
+    summary: 'v0.86.0 improves multiline and CJK text in PowerPoint, keeps usable Excel content visible in more files, and changes Markdown exports to collect review comments separately. CSV and TSV previews are included as a small extra.',
+    audience: 'Applications that export Office files as Markdown, display multilingual presentations, or open varied Excel files. Most applications can upgrade without code changes.',
+    sections: [
+      {
+        title: 'In short',
+        kind: 'summary',
+        paragraphs: [
+          'PowerPoint presentations now keep multiline and mixed-language text closer to their authored appearance. Excel also continues displaying usable content in more cases when one item on a sheet cannot be shown. Markdown exports now collect review discussions separately from document text.',
+        ],
+        bullets: [
+          'Improve PowerPoint multiline spacing and wrapping across mixed CJK and Latin text.',
+          'Match more native Noto CJK font names across Word, Excel and PowerPoint.',
+          'Keep usable Excel content visible when an unsupported picture or legacy sheet is encountered.',
+          'Collect review comments and replies after the document body in Markdown exports.',
+        ],
+      },
+      {
+        title: 'Presentation text, Markdown, and steadier viewing',
+        paragraphs: [
+          'DOCX, XLSX and PPTX Markdown exports now collect review comments and their replies in a final quoted appendix, separate from the document body. PowerPoint speaker notes remain with their slide. This remains a best-effort text projection for search, comparison and AI workflows, not a reconstruction of visual layout.',
+          'PowerPoint text wraps more naturally across mixed CJK and Latin content, and multiline spacing more closely follows PowerPoint when no explicit spacing is stored. Shared CJK font matching also recognizes more native Noto family names across Word, Excel and PowerPoint.',
+          'Excel workbooks created by some older libraries open more reliably. Legacy dialog sheets now show a neutral notice, and an unsupported TIFF picture no longer prevents the usable cells and other pictures on that sheet from appearing.',
+        ],
+      },
+      {
+        title: 'A small extra: preview delimited text',
+        paragraphs: [
+          'As a small extra, CSV and TSV files can now use the same read-only sheet surface as Excel workbooks. Try Yours recognizes those two formats automatically, and library applications can preview text separated by another chosen delimiter in regular or worker rendering mode.',
+          'Pass an explicit format when loading delimited text with XlsxSheetViewer. CSV uses a comma and TSV uses a tab by default; delimited-text accepts another single-character separator. Dates, leading zeroes, long identifiers and values beginning with = remain authored text instead of being inferred as spreadsheet values.',
+          'This is a focused preview convenience rather than spreadsheet import. XlsxWorkbook and the container-backed XlsxViewer continue to open OOXML workbooks only.',
+        ],
+        examples: [
+          {
+            title: 'Preview delimited text',
+            code: `await sheet.load('/export.csv', { format: 'csv' });
+await sheet.load('/report.txt', {
+  format: 'delimited-text',
+  delimiter: '|',
+});`,
+          },
+        ],
+      },
+      {
+        title: 'Upgrading',
+        paragraphs: [
+          'No viewer API migration is required. Existing DOCX, XLSX and PPTX loading keeps the same defaults and public methods. Applications that parse generated Markdown should account for review comments moving to the final appendix.',
+          'Delimited-text preview is opt-in for library applications: pass format: \'csv\', format: \'tsv\' or format: \'delimited-text\' to XlsxSheetViewer.load(). Existing XLSX calls without a format continue to open workbooks as before.',
+        ],
+      },
+    ],
+  },
+  {
     slug: 'v085-large-images-and-rendering',
     date: '2026-09-02',
     label: 'Release note',

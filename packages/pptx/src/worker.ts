@@ -132,7 +132,7 @@ self.onmessage = async (
         // keeping a second builder here would duplicate the bounded projection.
         preflightBuilder = request.progressiveLayout
           ? null
-          : new PresentationPreflightBuilder(bootstrap);
+          : new PresentationPreflightBuilder(bootstrap, { cjkFallback: request.cjkFallback });
         post({ kind: 'presentationOpened', id, bootstrap });
         presentationState = 'ready';
         return;

@@ -43,6 +43,18 @@ function numericAttribute(source: string, name: string, fallback = 0): number {
   return Number.isFinite(value) ? value : fallback;
 }
 
+function decodeXmlText(value: string): string {
+  return value.replace(/&(#(?:x[\da-fA-F]+|\d+)|amp|lt|gt|quot|apos);/g, (entity, code: string) => {
+    if (code[0] === '#') {
+      const point = code[1] === 'x'
+        ? Number.parseInt(code.slice(2), 16)
+        : Number.parseInt(code.slice(1), 10);
+      return point <= 0x10ffff ? String.fromCodePoint(point) : entity;
+    }
+    return { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" }[code as 'amp' | 'lt' | 'gt' | 'quot' | 'apos'];
+  });
+}
+
 function presentationAttributes(source: string): Map<string, string> {
   const properties = new Map<string, string>();
   for (const name of [
@@ -150,7 +162,9 @@ function paintPath(context: AuxContext, path: Path2D, state: PaintState): void {
 
 /** Draw the deliberately small SVG vocabulary emitted by the bundled MathJax
  * SVG output. This avoids `createImageBitmap(svgBlob)`, which Chromium workers
- * do not decode, and keeps Window/Worker pixels on the same Canvas path. */
+ * do not decode, and keeps Window/Worker pixels on the same Canvas path.
+ * Unsupported STIX2 ranges use MathJax's system-font <text> fallback, which
+ * must be painted here as well or the glyph silently disappears in workers. */
 export function drawMathJaxSvg(
   context: AuxContext,
   svg: string,
@@ -201,6 +215,27 @@ export function drawMathJaxSvg(
       context.save();
       state = applyPresentation(context, attributes, state);
       applyTransform(context, attribute(attributes, 'transform'));
+      continue;
+    }
+    if (name === 'text') {
+      const end = svg.indexOf('</text>', tags.lastIndex);
+      if (end < 0) throw new TypeError('MathJax SVG text must have a closing tag');
+      context.save();
+      const textState = applyPresentation(context, attributes, state);
+      applyTransform(context, attribute(attributes, 'transform'));
+      const style = attribute(attributes, 'font-style') === 'italic' ? 'italic ' : '';
+      const weight = attribute(attributes, 'font-weight') === 'bold' ? 'bold ' : '';
+      const size = numericAttribute(attributes, 'font-size', 1000);
+      const family = attribute(attributes, 'font-family') ?? 'serif';
+      context.font = `${style}${weight}${size}px ${family}`;
+      context.textBaseline = 'alphabetic';
+      const content = decodeXmlText(svg.slice(tags.lastIndex, end));
+      const x = numericAttribute(attributes, 'x');
+      const y = numericAttribute(attributes, 'y');
+      if (textState.fill) context.fillText(content, x, y);
+      if (textState.stroke && context.lineWidth > 0) context.strokeText(content, x, y);
+      context.restore();
+      tags.lastIndex = end + '</text>'.length;
       continue;
     }
     if (name !== 'path' && name !== 'rect' && name !== 'line') continue;

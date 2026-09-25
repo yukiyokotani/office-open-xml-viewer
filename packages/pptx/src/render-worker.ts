@@ -1,6 +1,7 @@
+import type { CjkLang } from '@silurus/ooxml-core';
 import init, { PptxArchive, reinit } from './wasm/pptx_parser.js';
 import type { PptxTextRunInfo } from './renderer';
-import { PPTX_GOOGLE_FONTS } from './google-fonts';
+import { PPTX_GOOGLE_FONTS, pptxSlideOfficeFontRequests } from './google-fonts';
 import {
   findPreflightMimeType,
   PresentationPreflightBuilder,
@@ -11,12 +12,14 @@ import { loadPptxSlideFromCursor, readPptxSlideCursorUsage } from './slide-curso
 import { SlidePullWorker } from './slide-pull-worker';
 import {
   preloadGoogleFonts,
+  loadOfficeFontFallbacks,
+  unloadOfficeFontFallbacks,
   decodeDataUrl,
   WasmParserHost,
   dropDecodedBitmapCache,
   dropSvgImageCache,
 } from '@silurus/ooxml-core';
-import type { OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
+import type { LoadedOfficeFontFallbacks, OfficeFontFallbackRoute, OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
 import {
   decodeOoxmlResourceUsage,
   HARD_MAX_PPTX_CACHED_SLIDES,
@@ -39,7 +42,7 @@ import type {
   RenderWorkerResponse,
 } from './worker-protocol';
 import { findPptxElementBoundsByIds, hitTestPptxSlideContext } from './element-selection';
-import { excludeEmbeddedFontFamilies, loadEmbeddedFonts } from './embedded-fonts';
+import { excludeEmbeddedFontFamilies, loadEmbeddedFonts, uncoveredOfficeFontRequests } from './embedded-fonts';
 import { ProgressivePreflightGate } from './progressive-preflight-gate';
 import { WorkerPresentationSourceOwner } from './internal/worker-presentation-source';
 
@@ -59,6 +62,8 @@ const slidePull = new SlidePullWorker(
 );
 
 let preflight: PresentationPreflight | null = null;
+let cjkFallback: CjkLang | undefined;
+let googleSubstitutes = false;
 let preflightBuilder: PresentationPreflightBuilder | null = null;
 let slides: PptxSlideRepository | null = null;
 let availableSlideCount = 0;
@@ -69,8 +74,33 @@ let nextOperationId = 1;
 type PresentationLifecycleState = 'empty' | 'opening' | 'ready' | 'failed';
 let presentationState: PresentationLifecycleState = 'empty';
 let fontsLoaded: Promise<unknown> = Promise.resolve();
+const officeFontLoads = new Map<string, Promise<LoadedOfficeFontFallbacks>>();
+
+async function officeRoutesForRequests(
+  requests: readonly import('@silurus/ooxml-core').OfficeFontFallbackRequest[],
+): Promise<Record<string, OfficeFontFallbackRoute>> {
+  const uncovered = uncoveredOfficeFontRequests(requests, embeddedFontTuples);
+  const loaded = await Promise.all(uncovered.map((request) => {
+    const key = `calibri:${request.weight}:${request.style}`;
+    let pending = officeFontLoads.get(key);
+    if (!pending) {
+      pending = loadOfficeFontFallbacks([request]);
+      officeFontLoads.set(key, pending);
+    }
+    return pending;
+  }));
+  return Object.assign({}, ...loaded.map((entry) => entry.routes)) as Record<string, OfficeFontFallbackRoute>;
+}
+
+function releaseOfficeFonts(): void {
+  for (const pending of officeFontLoads.values()) {
+    void pending.then((loaded) => unloadOfficeFontFallbacks(loaded.faces));
+  }
+  officeFontLoads.clear();
+}
 let embeddedFontAliases: ReadonlyMap<string, string> = new Map();
 let embeddedFontAuthoredFamilies: ReadonlyMap<string, string> = new Map();
+let embeddedFontTuples: ReadonlySet<string> = new Set();
 let resourceUsage: OoxmlResourceUsageSnapshot | undefined;
 let renderers: LoadedWorkerRenderers = {};
 const rawParts = new BoundedRawPartCache({
@@ -150,6 +180,7 @@ function getFontBytes(path: string): Promise<Uint8Array> {
 }
 
 async function openPresentation(request: Extract<RenderWorkerRequest, { kind: 'parse' }>) {
+  releaseOfficeFonts();
   progressivePreflightGate.reset();
   await slidePull.reset();
   slides?.clear();
@@ -166,6 +197,7 @@ async function openPresentation(request: Extract<RenderWorkerRequest, { kind: 'p
   fontsLoaded = Promise.resolve();
   embeddedFontAliases = new Map();
   embeddedFontAuthoredFamilies = new Map();
+  embeddedFontTuples = new Set();
   resourceUsage = undefined;
   renderers = await loadWorkerRenderers(request.renderers);
 
@@ -176,7 +208,9 @@ async function openPresentation(request: Extract<RenderWorkerRequest, { kind: 'p
   // decoding can overlap the sequential slide preflight without sharing cursor
   // ownership. First paint still waits for `fontsLoaded` below.
   const embeddedFontsLoaded = loadEmbeddedFonts(bootstrap.embeddedFonts, getFontBytes);
-  preflightBuilder = new PresentationPreflightBuilder(bootstrap);
+  cjkFallback = request.cjkFallback;
+  googleSubstitutes = request.useGoogleFonts === true;
+  preflightBuilder = new PresentationPreflightBuilder(bootstrap, { cjkFallback });
   slides = new PptxSlideRepository({
     slideCount: bootstrap.slideCount,
     maxCachedSlides: HARD_MAX_PPTX_CACHED_SLIDES,
@@ -189,6 +223,7 @@ async function openPresentation(request: Extract<RenderWorkerRequest, { kind: 'p
       const embedded = await embeddedFontsLoaded;
       embeddedFontAliases = embedded.aliases;
       embeddedFontAuthoredFamilies = embedded.authoredFamilies;
+      embeddedFontTuples = embedded.tuples;
       if (!request.useGoogleFonts) return;
       const requested = excludeEmbeddedFontFamilies(
         preflightBuilder!.currentFontPreloadNames,
@@ -233,6 +268,7 @@ async function openPresentation(request: Extract<RenderWorkerRequest, { kind: 'p
       const embedded = await embeddedFontsLoaded;
       embeddedFontAliases = embedded.aliases;
       embeddedFontAuthoredFamilies = embedded.authoredFamilies;
+      embeddedFontTuples = embedded.tuples;
       if (!request.useGoogleFonts) return embedded.faces;
       const substitutes = await preloadGoogleFonts(
         excludeEmbeddedFontFamilies(preflight.fontPreloadNames, embedded.aliases),
@@ -321,9 +357,12 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest | WorkerSvgDecod
     await slidePull.run(() => executeArchive((archive) => archive.assert_healthy()));
 
     if (request.kind === 'renderSlide') {
+      const officeRequests = await requireSlides().withSlide(request.slideIndex, (slide) =>
+        pptxSlideOfficeFontRequests(slide, compact.majorFont, compact.minorFont));
+      await fontsLoaded;
+      const officeFontRoutes = await officeRoutesForRequests(officeRequests);
       const { bitmap, runs } = await requireSlides().withSlide(request.slideIndex, async (slide) => {
         await slidePull.run(() => executeArchive((archive) => archive.assert_healthy()));
-        await fontsLoaded;
         const { renderSlideWithEmbeddedFonts } = await rendererModule;
         const canvas = new OffscreenCanvas(1, 1);
         const runs: PptxTextRunInfo[] = [];
@@ -332,11 +371,15 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest | WorkerSvgDecod
           dpr: request.dpr,
           imageResources: request.imageResources,
           defaultTextColor: compact.defaultTextColor,
+          cjkFallback,
           majorFont: compact.majorFont,
           minorFont: compact.minorFont,
           hlinkColor: compact.hlinkColor,
           embeddedFontAliases,
           embeddedFontAuthoredFamilies,
+          embeddedFontTuples,
+          officeFontRoutes,
+          googleSubstitutes,
           fetchMedia: getMedia,
           fetchImage: getImage,
           svgDecoder: svgDecodeClient.decode,
@@ -355,20 +398,27 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest | WorkerSvgDecod
     }
 
     if (request.kind === 'collectRuns') {
+      const officeRequests = await requireSlides().withSlide(request.slideIndex, (slide) =>
+        pptxSlideOfficeFontRequests(slide, compact.majorFont, compact.minorFont));
+      await fontsLoaded;
+      const officeFontRoutes = await officeRoutesForRequests(officeRequests);
       const runs = await requireSlides().withSlide(request.slideIndex, async (slide) => {
         await slidePull.run(() => executeArchive((archive) => archive.assert_healthy()));
-        await fontsLoaded;
         const { renderSlideWithEmbeddedFonts } = await rendererModule;
         const canvas = new OffscreenCanvas(1, 1);
         const runs: PptxTextRunInfo[] = [];
         await renderSlideWithEmbeddedFonts(canvas, slide, compact.slideWidth, compact.slideHeight, {
           width: request.width,
           defaultTextColor: compact.defaultTextColor,
+          cjkFallback,
           majorFont: compact.majorFont,
           minorFont: compact.minorFont,
           hlinkColor: compact.hlinkColor,
           embeddedFontAliases,
           embeddedFontAuthoredFamilies,
+          embeddedFontTuples,
+          officeFontRoutes,
+          googleSubstitutes,
           fetchMedia: getMedia,
           fetchImage: getImage,
           svgDecoder: svgDecodeClient.decode,
@@ -435,7 +485,7 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest | WorkerSvgDecod
       wakeSlideAvailabilityWaiters();
       try { source.closeLegacy(); } catch {}
     }
-    if (request.kind === 'parse') {
+    if (ownsParseReservation) {
       progressivePreflightGate.reset();
       slides?.clear();
       slides = null;

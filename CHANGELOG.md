@@ -7,6 +7,109 @@ the corresponding minor release.
 
 ## Unreleased
 
+## 0.88.0 — 2026-09-21
+
+Compatible minor release improving classic chart fidelity across Word, Excel and
+PowerPoint while making complex Word pagination safer and more faithful.
+
+- **classic Office charts:** apply the built-in style range 1 through 48 with
+  host-specific chart frames, automatic text contrast, series and point
+  styling, picture fills, markers, labels, legends, axes and three-dimensional
+  surface effects while preserving authored formatting and linked styles.
+- **bounded Word pagination:** stop keep-with-next preflight once a group cannot
+  fit on a fresh page, keep paragraph acquisition within a bounded working set,
+  and report non-convergence instead of allowing pathological repeated work to
+  exhaust browser or Node memory.
+- **more faithful Word styling:** apply default paragraph and table style
+  inheritance for every valid on/off form.
+- **steadier presentation and spreadsheet viewing:** preserve an SVG image fill
+  when its compatibility raster is unavailable, prepare the selected regional
+  CJK fallback consistently during main-thread PowerPoint loading, and let the
+  Excel zoom slider settle naturally on 100% when dragged nearby.
+- **compatibility:** no public option or method is removed or renamed, and most
+  Viewer integrations require no migration. Rendering changes are intentional
+  for affected documents. Custom renderers that exhaustively match the public
+  low-level chart model should account for added optional style/effect metadata
+  and image-capable fill values.
+
+## 0.87.0 — 2026-09-13
+
+Compatible minor release making CJK fallback selection more predictable while
+tightening several loading and navigation edge cases.
+
+- **regional CJK fallback:** DOCX, XLSX and PPTX loads can select SC, TC, HK,
+  JP or KR fallback forms explicitly, or derive them once from the host
+  language. Authored font regions and document language evidence retain
+  priority, and only ambiguous Han text uses the selected fallback.
+- **consistent progressive completion:** DOCX and PPTX progressive loads now
+  call `onLayoutComplete` exactly once after every successful load, including
+  small files that finish before `load()` returns. Pre-publication failures
+  still reject `load()` directly.
+- **steadier viewing and opening:** programmatic DOCX/PPTX navigation remains on
+  the requested page or slide when the browser rounds a fractional scroll
+  position; otherwise valid OOXML packages can open when duplicate ZIP headers
+  differ only in DOS timestamp metadata; and an empty anchored DOCX run no
+  longer fails intrinsic-width measurement.
+- **compatibility:** no option or method is removed or renamed. Existing
+  applications require no migration. For deterministic ambiguous-Han glyphs
+  across browsers, locales and Node hosts, set `cjkFallback` explicitly rather
+  than relying on the new `auto` default.
+
+## 0.86.1 — 2026-09-06
+
+Compatible patch release improving older PowerPoint compatibility, curved-text
+layout, Word pagination fidelity, and rendering resource bounds.
+
+- **older PowerPoint fidelity:** legacy reflected text, preset shapes, diagram
+  fallbacks, table fills and borders, authored row heights, and inherited text
+  colors now follow the saved presentation more closely.
+- **curved PowerPoint text:** Follow Path WordArt uses concentric per-line paths,
+  keeps authored Latin hyphens as valid wrap points in ordinary text, and avoids
+  overlap or excessive rotation in no-wrap curved text.
+- **resilient presentation loading:** primary slides use a measured complexity
+  allowance for dense but valid content while dependency parts retain their
+  stricter limit, and file opening uses the same modern loading indicator as the
+  rest of the viewer.
+- **resolved Word font metrics:** CJK line allocation is derived from the font
+  resource actually selected by the browser or embedded in the document. This
+  removes the previous Meiryo-only resource override without guessing a
+  substitute when the authored font is unavailable.
+- **Word page fields:** complex fields whose markers share a run preserve their
+  authored order, so page-dependent footer values such as page numbers remain
+  visible after pagination.
+- **bounded rendering work:** crafted EMF path brackets, hyphen-rich curved text,
+  and empty WordArt lines can no longer multiply Canvas work beyond the
+  renderer's established resource envelope.
+- **compatibility:** no existing option or method is removed or renamed, and no
+  application changes are required.
+
+## 0.86.0 — 2026-09-05
+
+Compatible minor release improving PowerPoint text fidelity, Markdown review
+workflows, and resilience when opening varied Excel files. A small delimited-text
+preview convenience is included for applications that already use the sheet
+viewer.
+
+- **PowerPoint text fidelity:** explicit percentage line spacing and tall
+  fallback-font metrics now keep top-anchored, auto-fit text closer to
+  PowerPoint, while multiline and mixed CJK/Latin text retain more natural
+  spacing and wrapping.
+- **Markdown review workflows:** DOCX, XLSX and PPTX exports collect review
+  comments and replies in a final quoted appendix, separate from document text;
+  PowerPoint speaker notes remain with their slide.
+- **safer Markdown projection:** DOCX and PPTX enforce one bounded output budget,
+  including deeply nested review threads and the combined presentation body and
+  comments.
+- **steadier Excel viewing:** model-backed workbooks, legacy dialog sheets,
+  unsupported TIFF pictures and compatible ZIP descriptors no longer prevent
+  otherwise usable sheet content from opening.
+- **delimited-text preview:** `XlsxSheetViewer` can display CSV, TSV or another
+  explicitly selected single-character delimiter as authored text. This is a
+  small preview convenience; `XlsxWorkbook` and `XlsxViewer` remain OOXML-only.
+- **compatibility:** no viewer option or method is removed or renamed. Existing
+  viewer integrations require no migration. Applications that parse generated
+  Markdown should account for review comments moving to the final appendix.
+
 ## 0.85.3 — 2026-09-04
 
 Compatible patch release improving progressive Word opening, PowerPoint text

@@ -1326,7 +1326,9 @@ export function layoutTable(
       const contentBounds = {
         xPt: cellXPt + cell.margins.leftPt,
         yPt: cellTopPt + inkOffsetPt,
-        widthPt: Math.max(0, cellWidthPt - cell.margins.leftPt - cell.margins.rightPt),
+        // Use the same grouped horizontal margins as acquisition so retained
+        // geometry and line layout agree at an intrinsic equality.
+        widthPt: Math.max(0, cellWidthPt - (cell.margins.leftPt + cell.margins.rightPt)),
         heightPt: availableContentHeightPt,
       };
       const cellFlowBounds = { xPt: cellXPt, yPt: cellTopPt, widthPt: cellWidthPt, heightPt: cellHeightPt };

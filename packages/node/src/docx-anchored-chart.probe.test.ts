@@ -32,7 +32,7 @@ const ROOT = resolve(HERE, '../../..');
 const docxMod = skia ? await importForTests(() => import('./docx.ts'), './docx.ts (docx WASM)') : null;
 const rendererMod = skia ? await loadDocxRendererForTests() : null;
 
-const SAMPLE_24 = resolve(ROOT, 'packages/docx/public/private/sample-24.docx');
+const SAMPLE_24 = resolve(ROOT, 'packages/docx/public/private/docx/sample-24.docx');
 const haveSample = existsSync(SAMPLE_24);
 const sampleBytes = haveSample ? readFileSync(SAMPLE_24) : null;
 

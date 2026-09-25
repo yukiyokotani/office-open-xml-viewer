@@ -111,6 +111,29 @@ function allSourcePointsHidden(series: ChartSeries): boolean {
   return hidden != null && hidden.length > 0 && hidden.every(Boolean);
 }
 
+function projectPlotGroups(
+  chart: ChartModel,
+  keptSeriesIndices: readonly number[],
+): ChartModel['plotGroups'] {
+  if (chart.plotGroups == null) return chart.plotGroups;
+  const kept = new Set(keptSeriesIndices);
+  let projectedStart = 0;
+  return chart.plotGroups.map(group => {
+    let projectedCount = 0;
+    const end = group.seriesStart + group.seriesCount;
+    for (let index = group.seriesStart; index < end; index++) {
+      if (kept.has(index)) projectedCount++;
+    }
+    const projected = {
+      ...group,
+      seriesStart: projectedStart,
+      seriesCount: projectedCount,
+    };
+    projectedStart += projectedCount;
+    return projected;
+  });
+}
+
 export const EXCEL_AUTOMATIC_SCATTER_MARKERS = [
   'diamond', 'square', 'triangle', 'x', 'star', 'circle',
 ] as const;
@@ -135,7 +158,8 @@ function applyExcelFilteredScatterAutomaticStyle(
   const hasDirectMarkerStyle = series.markerSymbol != null
     || series.markerFill != null
     || series.markerFillPaintAuthored === true
-    || series.markerLine != null;
+    || series.markerLine != null
+    || series.markerLinePaintAuthored === true;
   if (
     chart.scatterStyle !== 'marker'
     || !accents?.length
@@ -171,21 +195,31 @@ export function applyPlotVisibleOnly(chart: ChartModel): ChartModel {
   if (chart.plotVisibleOnly !== true) return chart;
 
   if (isScatterLike(chart)) {
+    const keptSeriesIndices: number[] = [];
     return {
       ...chart,
-      series: chart.series.flatMap(series => {
+      series: chart.series.flatMap((series, seriesIndex) => {
         const effective = series.categories == null
           ? { ...series, categories: chart.categories }
           : series;
         const hidden = effective.sourceHidden;
         const plan = hidden && makeVisibilityPlan(hidden, pointCount(effective));
-        if (!plan) return [effective];
+        if (!plan) {
+          keptSeriesIndices.push(seriesIndex);
+          return [effective];
+        }
         if (plan.keep.length === 0) return [];
+        keptSeriesIndices.push(seriesIndex);
         const filtered = applyPlanToSeries(effective, plan);
         return chart.chartType === 'scatter'
           ? [applyExcelFilteredScatterAutomaticStyle(chart, filtered)]
           : [filtered];
       }),
+      // Plot groups own contiguous slices of the flattened series array.
+      // Filtering whole source series must project those ranges in lockstep;
+      // otherwise a later combo-chart group inherits the removed group's
+      // point-style domain and axis/family policy.
+      plotGroups: projectPlotGroups(chart, keptSeriesIndices),
     };
   }
 
@@ -197,12 +231,15 @@ export function applyPlotVisibleOnly(chart: ChartModel): ChartModel {
   const categoryPlan = chart.categorySourceHidden
     ? makeVisibilityPlan(chart.categorySourceHidden, globalPointCount)
     : null;
-  const series = chart.series.flatMap(source => {
+  const keptSeriesIndices: number[] = [];
+  const series = chart.series.flatMap((source, seriesIndex) => {
     const categoryFiltered = categoryPlan ? applyPlanToSeries(source, categoryPlan) : source;
     if (categoryPlan?.keep.length === 0 || allSourcePointsHidden(categoryFiltered)) return [];
+    keptSeriesIndices.push(seriesIndex);
     return [suppressHiddenSeriesPoints(categoryFiltered)];
   });
-  if (!categoryPlan) return { ...chart, series };
+  const plotGroups = projectPlotGroups(chart, keptSeriesIndices);
+  if (!categoryPlan) return { ...chart, series, plotGroups };
 
   const subtotalIndices = chart.subtotalIndices.flatMap(index => {
     if (index >= categoryPlan.remap.length) return [];
@@ -216,5 +253,6 @@ export function applyPlotVisibleOnly(chart: ChartModel): ChartModel {
     categorySourceHidden: select(chart.categorySourceHidden, categoryPlan),
     subtotalIndices,
     series,
+    plotGroups,
   };
 }

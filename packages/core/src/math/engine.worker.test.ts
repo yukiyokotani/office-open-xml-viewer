@@ -31,4 +31,22 @@ describe('MathJax engine outside Window', () => {
 
     expect([...names].sort()).toEqual(['g', 'path', 'rect', 'svg']);
   });
+
+  it('renders accented Latin glyphs as STIX2 paths in every OMML math style', async () => {
+    for (const variant of ['normal', 'italic', 'bold', 'bold-italic']) {
+      const output = await mathMLToSvg(
+        `<math xmlns="http://www.w3.org/1998/Math/MathML"><mi mathvariant="${variant}">á</mi></math>`,
+      );
+      expect(output.svg).toMatch(/<path[^>]*data-c="E1"/);
+      expect(output.svg).not.toContain('<text');
+    }
+  });
+
+  it('uses a synchronous fallback for an excluded range on repeated conversion', async () => {
+    const equation = '<math xmlns="http://www.w3.org/1998/Math/MathML"><mi>Ж</mi></math>';
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const output = await mathMLToSvg(equation);
+      expect(output.svg).toContain('>Ж</text>');
+    }
+  });
 });

@@ -27,7 +27,7 @@ describe('VS Code extension package boundary', () => {
     const fixture = mkdtempSync(resolve(tmpdir(), 'ooxml-vscode-package-'));
     fixtures.push(fixture);
     mkdirSync(resolve(fixture, 'dist'));
-    for (const file of ['package.json', 'README.md', 'icon.png', '.vscodeignore']) {
+    for (const file of ['package.json', 'README.md', 'icon.png', 'LICENSE', '.vscodeignore']) {
       copyFileSync(resolve(extensionRoot, file), resolve(fixture, file));
     }
     writeFileSync(resolve(fixture, 'dist/extension.js'), 'module.exports = {};');
@@ -36,6 +36,7 @@ describe('VS Code extension package boundary', () => {
     writeFileSync(resolve(fixture, 'dist/webview.js.map'), '{"version":3}');
     writeFileSync(resolve(fixture, 'esbuild-worker-stub.mjs'), 'export const plugin = {};');
     writeFileSync(resolve(fixture, 'esbuild-worker-stub.d.mts'), 'export const plugin: unknown;');
+    writeFileSync(resolve(fixture, 'esbuild-asset-sidecars.mjs'), 'export const plugin = {};');
 
     const files = execFileSync(process.execPath, [vsce, 'ls', '--no-dependencies'], {
       cwd: fixture,
@@ -44,7 +45,9 @@ describe('VS Code extension package boundary', () => {
 
     expect(files).toContain('dist/extension.js');
     expect(files).toContain('dist/webview.js');
+    expect(files).toContain('LICENSE');
     expect(files.filter((file) => file.endsWith('.map'))).toEqual([]);
     expect(files.filter((file) => file.startsWith('esbuild-worker-stub.'))).toEqual([]);
+    expect(files).not.toContain('esbuild-asset-sidecars.mjs');
   });
 });

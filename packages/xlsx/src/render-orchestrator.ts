@@ -1,3 +1,4 @@
+import type { CjkLang } from '@silurus/ooxml-core';
 import {
   defaultDpr,
   isHTMLCanvas,
@@ -38,6 +39,8 @@ import {
 import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions } from './types.js';
 import {
   renderViewport,
+  bindXlsxOfficeFontRoutes,
+  pinXlsxGridGeometry,
   prepareWorksheetMath,
   worksheetHasUncachedMath,
   imageCacheKey,
@@ -394,9 +397,10 @@ export async function decodeImageSource(
  *  renderer skip a falsy source without a re-fetch.
  *
  *  A no-op when `fetchImage` is absent (no byte source). Ordinary per-image
- *  failures are swallowed so one broken picture doesn't sink the grid. A
- *  missing optional TIFF codec is retained as a frame-local placeholder mark;
- *  decoded-image quota and actual TIFF codec failures remain actionable. */
+ *  failures are swallowed so one broken picture doesn't sink the grid. A TIFF
+ *  unavailable because its optional codec is missing or cannot decode it is
+ *  retained as a frame-local placeholder mark; decoded-image quota failures
+ *  remain actionable. */
 export async function prefetchImages(
   ws: Worksheet,
   imageCache: Map<string, CanvasImageSource | null>,
@@ -719,12 +723,12 @@ export async function prefetchImages(
         // metafile, so the renderer skips a falsy source without a re-fetch).
         imageCache.set(key, src);
       } catch (error) {
-        if (isOptionalImageCodecUnavailableError(error, 'tiff')) {
+        if (isOptionalImageCodecUnavailableError(error, 'tiff') || isTiffDecodeError(error)) {
           imageCache.set(key, null);
           markOptionalImageUnavailable(imageCache, key, 'tiff');
           return;
         }
-        if (isOoxmlDecodedImageLimitError(error) || isTiffDecodeError(error)) throw error;
+        if (isOoxmlDecodedImageLimitError(error)) throw error;
         // Transient failure: DELETE any prior lookup entry rather than leaving
         // it. A prior entry is re-resolved precisely because its shared-cache
         // backing may be gone (LRU-evicted and GPU-closed); when the re-resolve
@@ -737,6 +741,7 @@ export async function prefetchImages(
 }
 
 export interface RenderDeps {
+  cjkFallback?: CjkLang;
   ws: Worksheet;
   styles: ParsedWorkbook['styles'];
   math?: MathRenderer;
@@ -752,6 +757,7 @@ export function worksheetWithAutoRowHeights(
   ctx: CanvasRenderingContext2D,
   source: Worksheet,
   styles: ParsedWorkbook['styles'],
+  cjkFallback?: CjkLang,
 ): Worksheet {
   if (hasPreparedAutoRowHeights(source)) return source;
   const cached = autoHeightProjectionCache.get(source);
@@ -766,7 +772,7 @@ export function worksheetWithAutoRowHeights(
   // so worker/direct auto-fit wraps at the exact same column pixels.
   const mdw = getGridGeometryForWorksheet(source).maximumDigitWidth;
   GridGeometry.forWorksheet(projection, mdw);
-  applyAutoRowHeights(ctx, projection, styles);
+  applyAutoRowHeights(ctx, projection, styles, cjkFallback);
   // applyAutoRowHeights invalidates geometry after deriving row sizes; seed the
   // rebuilt row axis with the same authoritative MDW rather than remeasuring in
   // another Canvas realm.
@@ -793,13 +799,15 @@ export async function renderWorksheetViewport(
   svgDecoder?: SvgBlobDecoder,
 ): Promise<void> {
   const paint = () => renderWorksheetViewportLeased(deps, target, viewport, opts, svgDecoder);
-  const hasDecodedImages = (deps.ws.images?.length ?? 0) > 0
+  const hasDecodedImages = !deps.ws.isDialogSheet && (
+    (deps.ws.images?.length ?? 0) > 0
     || (deps.ws.shapeGroups?.some(group => (
       group.shapes.some(shape => shape.geom.type === 'image')
     )) ?? false)
     || collectChartImageFillUsagesForCharts(
       (deps.ws.charts ?? []).map(chart => chart.chart),
-    ).length > 0;
+    ).length > 0
+  );
   return opts.fetchImage && hasDecodedImages
     ? withBitmapCacheLease(opts.fetchImage, opts.imageResources, paint)
     : paint();
@@ -818,7 +826,11 @@ async function renderWorksheetViewportLeased(
   const styles = deps.styles;
   const measurementCtx = target.getContext('2d') as CanvasRenderingContext2D | null;
   if (!measurementCtx) throw new Error('XLSX render target does not provide a 2-D canvas context');
-  const ws = worksheetWithAutoRowHeights(measurementCtx, deps.ws, styles);
+  bindXlsxOfficeFontRoutes(measurementCtx, deps.ws, opts.officeFontRoutes, opts.googleSubstitutes === true);
+  pinXlsxGridGeometry(deps.ws, opts.authoritativeMdw);
+  const ws = deps.ws.isDialogSheet
+    ? deps.ws
+    : worksheetWithAutoRowHeights(measurementCtx, deps.ws, styles, deps.cjkFallback);
   const rawW = isHTMLCanvas(target) ? (target.clientWidth || 800) : target.width;
   const rawH = isHTMLCanvas(target) ? (target.clientHeight || 600) : target.height;
   const width = opts.width ?? rawW;
@@ -843,18 +855,20 @@ async function renderWorksheetViewportLeased(
   // every scroll frame. By awaiting first (and only when there's something
   // uncached), the whole resize+draw runs synchronously in a single tick and
   // the old frame stays visible until the new one is ready.
-  await prefetchImages(ws, imageCache, opts.fetchImage, {
-    viewport,
-    width,
-    height,
-    cellScale: opts.cellScale,
-    freezeRows: opts.freezeRows,
-    freezeCols: opts.freezeCols,
-    tiff: deps.tiff,
-    effectiveDpr,
-    svgDecoder,
-    imageResources: opts.imageResources,
-  });
+  if (!ws.isDialogSheet) {
+    await prefetchImages(ws, imageCache, opts.fetchImage, {
+      viewport,
+      width,
+      height,
+      cellScale: opts.cellScale,
+      freezeRows: opts.freezeRows,
+      freezeCols: opts.freezeCols,
+      tiff: deps.tiff,
+      effectiveDpr,
+      svgDecoder,
+      imageResources: opts.imageResources,
+    });
+  }
 
   // ── Step 1b: Pre-rasterize equations in shapes BEFORE the canvas resize,
   // for the same no-white-flash reason as the image preload. Gated on
@@ -862,7 +876,7 @@ async function renderWorksheetViewportLeased(
   // await and stay fully synchronous — only the first frame that reveals new
   // equations pays the (idempotently cached) MathJax cost. Opt-in: skipped
   // entirely unless the caller supplies a `math` engine.
-  if (deps.math && worksheetHasUncachedMath(ws)) {
+  if (!ws.isDialogSheet && deps.math && worksheetHasUncachedMath(ws)) {
     await prepareWorksheetMath(ws, deps.math);
   }
 
@@ -918,6 +932,10 @@ async function renderWorksheetViewportLeased(
     drawSheetParseErrorOverlay(ctx, width, height, ws.name, ws.parseError);
     return;
   }
+  if (ws.isDialogSheet) {
+    drawDialogSheetNotice(ctx, width, height);
+    return;
+  }
 
   renderViewport(ctx, ws, styles, viewport, {
     ...opts,
@@ -926,7 +944,29 @@ async function renderWorksheetViewportLeased(
     threeD: deps.threeD,
     regionMap: deps.regionMap,
     chartEx: deps.chartEx,
-  });
+  }, deps.cjkFallback);
+}
+
+/**
+ * Paint a neutral, non-error surface for a valid legacy Dialogsheet part.
+ * Dialog sheets describe custom forms rather than a worksheet cell grid, so
+ * no parser diagnostic or package-internal path belongs in the viewer UI.
+ */
+function drawDialogSheetNotice(
+  ctx: CanvasRenderingContext2D,
+  widthPx: number,
+  heightPx: number,
+): void {
+  ctx.save();
+  ctx.fillStyle = '#f7f7f8';
+  ctx.fillRect(0, 0, widthPx, heightPx);
+  const base = Math.min(widthPx, heightPx);
+  ctx.fillStyle = '#555555';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = `${Math.max(13, base * 0.035)}px sans-serif`;
+  ctx.fillText('Legacy dialog sheets are not displayed', widthPx / 2, heightPx / 2);
+  ctx.restore();
 }
 
 /**

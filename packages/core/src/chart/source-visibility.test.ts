@@ -4,6 +4,7 @@ import {
   applyPlotVisibleOnly,
   hasFilteredScatterAutomaticPointStyle,
 } from './source-visibility';
+import { chartSeriesVariesByPoint } from './effective-style';
 
 const series = (overrides: Partial<ChartSeries> = {}): ChartSeries => ({
   name: 'Series',
@@ -165,5 +166,37 @@ describe('plotVisOnly source filtering', () => {
       dataPointOverrides: (filtered.series[0].dataPointOverrides ?? []).map(point => ({ ...point })),
     };
     expect(hasFilteredScatterAutomaticPointStyle(coincidentalPublicSeries)).toBe(false);
+  });
+
+  it('projects combo plot-group ownership when an earlier group loses whole series', () => {
+    const input = chart({
+      plotVisibleOnly: true,
+      series: [
+        series({ sourceHidden: [true, true, true, true] }),
+        series({ name: 'Visible line', sourceHidden: [false, false, false, false] }),
+      ],
+      plotGroups: [
+        {
+          kind: 'area', seriesStart: 0, seriesCount: 1,
+          categoryAxis: 'primary', valueAxis: 'primary', seriesAxis: 'none',
+        },
+        {
+          kind: 'line', seriesStart: 1, seriesCount: 1, varyColors: true,
+          categoryAxis: 'primary', valueAxis: 'primary', seriesAxis: 'none',
+        },
+      ],
+      varyingPointChartStyleRolesByGroup: [
+        { dataPoint: { fillColors: ['111111'] } },
+        { dataPoint: { fillColors: ['222222'] } },
+      ],
+    });
+
+    const filtered = applyPlotVisibleOnly(input);
+    expect(filtered.series.map(item => item.name)).toEqual(['Visible line']);
+    expect(filtered.plotGroups).toMatchObject([
+      { kind: 'area', seriesStart: 0, seriesCount: 0 },
+      { kind: 'line', seriesStart: 0, seriesCount: 1 },
+    ]);
+    expect(chartSeriesVariesByPoint(filtered, 0)).toBe(true);
   });
 });

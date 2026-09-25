@@ -1,3 +1,6 @@
+import { pptxSlideCjkFallback } from './google-fonts.js';
+import type { CjkLang } from '@silurus/ooxml-core';
+import { containsHanScript } from '@silurus/ooxml-core/internal/script-preload-accumulator';
 import type {
   Slide,
   SlideElement,
@@ -69,12 +72,14 @@ import {
   MAX_CANVAS_AREA,
   classifyCjkFont,
   classifyFontGeneric,
+  googleCjkFontAlias,
   cjkFallbackChain,
   NON_CJK_SANS_FALLBACKS,
   NON_CJK_SERIF_FALLBACKS,
   DEFAULT_KINSOKU_RULES,
   isCjkBreakChar,
   isUax14NoBreakPair,
+  lineBreakClass,
   containsSeaScript,
   isGraphemeFillText,
   seaMixedBreakOffsets,
@@ -107,7 +112,6 @@ import {
   symbolFontToUnicode,
   isSymbolFontFamily,
   drawUnderline,
-  intendedSingleLinePx,
   hasTextWarp,
   buildWarpEnvelope,
   warpGlyphTransform,
@@ -155,12 +159,17 @@ import { drawEaVertRun } from './vertical-text.js';
 
 /** Theme font context threaded through the render call chain. */
 export interface RenderContext {
+  cjkFallback?: CjkLang;
+  officeFontRoutes?: Readonly<Record<string, import('@silurus/ooxml-core').OfficeFontFallbackRoute>>;
+  /** Presentation load explicitly enabled Google Fonts substitutions. */
+  googleSubstitutes?: boolean;
   themeMajorFont: string | null;
   themeMinorFont: string | null;
   /** Lower-cased authored family → this presentation's isolated FontFace alias. */
   embeddedFontAliases?: ReadonlyMap<string, string>;
   /** Isolated FontFace alias → lower-cased authored family for fallback policy. */
   embeddedFontAuthoredFamilies?: ReadonlyMap<string, string>;
+  embeddedFontTuples?: ReadonlySet<string>;
   /** Theme hyperlink colour as a 6-char hex (no leading #), or null. */
   themeHlinkColor?: string | null;
   /**
@@ -684,15 +693,6 @@ type LayoutSegment = {
   isTab?: true;
   /** Reading-frame gap resolved against a:tabLst immediately before paint. */
   tabWidthPx?: number;
-  /**
-   * Raw (normalized) font-family requested for this segment's glyphs, kept
-   * alongside the composed CSS `font` string so the line-height pass can floor
-   * the single-line box to the DOCUMENT font's design line height via core's
-   * `intendedSingleLinePx` (ECMA-376 §17.3.1.33 single spacing). Only the
-   * tabled substituted faces (Meiryo / Sakkal Majalla) raise the floor; every
-   * other family returns 0 and leaves PowerPoint's flat 1.2×em untouched.
-   */
-  fontFamily?: string;
   sizePx: number;
   /**
    * Actual glyph size used for paint and width measurement. PowerPoint renders
@@ -779,6 +779,10 @@ function normalizeFontFamily(family: string | null, rc: RenderContext): string {
   return isolated(primary);
 }
 
+function hasNamedFontFamily(family: string | null | undefined): boolean {
+  return !!family?.trim();
+}
+
 /** CSS generic font families — must NOT be quoted in a canvas font string. */
 const CSS_GENERIC_FAMILIES = new Set([
   'serif', 'sans-serif', 'monospace', 'cursive', 'fantasy', 'system-ui',
@@ -793,25 +797,18 @@ function genericFallback(family: string): string {
 }
 
 /**
- * Office fonts → metric-compatible, freely-distributable substitutes
- * (`presentation.ts` preloads these webfonts). Putting the substitute in the
- * canvas font stack means a viewer that lacks Calibri/Cambria (macOS, Linux)
- * renders at the SAME advance widths as PowerPoint instead of a wider system
- * serif/sans — without which `wrap="none"` lines overflow the slide. Keys are
- * lower-cased; both the Office face and its substitute share glyph metrics.
+ * Optional published web aliases for authored Office faces. These enter the
+ * canvas stack only when `useGoogleFonts` is enabled. The authored family
+ * remains first, followed by a fallback of the same generic class. Keys are
+ * lower-cased; this map is not a metric correction or a line-break rule.
  */
 const OFFICE_FONT_SUBSTITUTE: Record<string, string> = {
   'calibri': 'Carlito',
-  'calibri light': 'Carlito',
   'cambria': 'Caladea',
-  'cambria math': 'Caladea',
   'franklin gothic book': 'Libre Franklin',
   'franklin gothic medium': 'Libre Franklin',
-  // Common Arabic-script faces that hosts rarely ship. Map them to Noto
-  // substitutes so RTL slides (e.g. sample-10, which requests Sakkal Majalla /
-  // Univers Next Arabic) render with a real web font instead of an oversized
-  // OS fallback. "Naskh" covers traditional serif-like Arabic faces; "Sans"
-  // covers the modern geometric ones.
+  // Optional aliases for common Arabic-script faces. "Naskh" covers
+  // traditional serif-like faces; "Sans" covers geometric ones.
   'sakkal majalla': 'Noto Naskh Arabic',
   'traditional arabic': 'Noto Naskh Arabic',
   'simplified arabic': 'Noto Naskh Arabic',
@@ -819,22 +816,19 @@ const OFFICE_FONT_SUBSTITUTE: Record<string, string> = {
   'univers next arabic': 'Noto Sans Arabic',
 };
 
-/** Generic Arabic fallbacks appended to an Arabic-script font's canvas stack
- *  (before the CSS generic) so Arabic glyphs in an Arabic-targeted family that
- *  the host lacks still resolve to a real Arabic web font when `useGoogleFonts`
- *  is on. */
-const ARABIC_FALLBACKS = '"Noto Naskh Arabic", "Noto Sans Arabic"';
+/** Arabic fallbacks apply only to runs containing Arabic codepoints, before
+ * the CSS generic so a missing authored face can retain the script. */
+const ARABIC_TEXT_RE = /[\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff]/u;
 
 /**
- * True when `family` names an Arabic-script face. Only such faces get the Noto
- * Arabic web fonts appended to their canvas stack.
+ * True when `family` names an Arabic-script face. Its Arabic runs place the
+ * script fallbacks before CJK and other script tails.
  *
  * These fallback faces (esp. Noto Naskh Arabic) also carry serif-style *Latin*
  * glyphs, so appending them to every font stack made Latin text in an
- * uninstalled Latin/CJK face (e.g. a Japanese gothic carrying "About us") fall
+ * uninstalled Latin/CJK face fall
  * into the serif Naskh face instead of degrading to the sans-serif generic.
- * Gating on Arabic-script faces keeps RTL decks (Amiri, Sakkal Majalla, …)
- * correct while letting Latin/CJK text degrade to the right generic.
+ * Gating on actual Arabic text lets Latin/CJK runs degrade to their generic.
  */
 function isArabicScriptFace(family: string): boolean {
   // Faces we explicitly substitute to a Noto Arabic web font are Arabic-script.
@@ -851,10 +845,10 @@ function quoteAll(names: readonly string[]): string {
 
 /**
  * Build the CSS font-family LIST for a (already-normalized, non-generic) face:
- * named face + metric-compatible Office substitute + script Noto fallbacks +
+ * named face + optional web alias + script Noto fallbacks +
  * inferred generic. The script fallbacks are:
  *
- * - Arabic-script faces: the Arabic Notos lead (Latin/digits share that face).
+ * - Arabic runs: matching-class Arabic Notos enter only that run's stack.
  * - CJK faces (Noto KR/SC/TC/JP, ordered by the document's CJK language so
  *   shared Han glyphs take the right shapes — see core/fonts/scripts.ts).
  * - Non-CJK scripts (Cyrillic via Noto Sans/Serif, Thai, Devanagari, Hebrew)
@@ -862,21 +856,41 @@ function quoteAll(names: readonly string[]): string {
  *
  * Exported for unit testing the fallback ordering.
  */
-export function cssFontStack(normalized: string, authoredFamily = normalized): string {
+export function cssFontStack(
+  normalized: string,
+  authoredFamily = normalized,
+  fallback?: CjkLang,
+  text = '',
+  googleSubstitutes = false,
+): string {
   const generic = genericFallback(authoredFamily);
-  const sub = OFFICE_FONT_SUBSTITUTE[authoredFamily.toLowerCase()];
+  const arabicText = ARABIC_TEXT_RE.test(text);
+  const alias = googleSubstitutes ? OFFICE_FONT_SUBSTITUTE[authoredFamily.toLowerCase()] : undefined;
+  const sub = alias?.includes('Arabic') && !arabicText ? undefined : alias;
   const subPart = sub ? `"${sub}", ` : '';
-  // Arabic faces keep the historical chain unchanged (Arabic leads; appending a
-  // CJK or non-CJK tail would let Latin/digits leak away from the Arabic face).
-  if (isArabicScriptFace(authoredFamily)) {
-    return `"${normalized}", ${subPart}${ARABIC_FALLBACKS}, ${generic}`;
+  const googleAlias = googleCjkFontAlias(authoredFamily);
+  const aliasPart = googleAlias ? `"${googleAlias}", ` : '';
+  // Arabic faces lead with script fallbacks only for Arabic runs.
+  const arabicFamilies = generic === 'serif'
+    ? ['Noto Naskh Arabic', 'Noto Sans Arabic']
+    : ['Noto Sans Arabic'];
+  const arabicPart = arabicText ? `${quoteAll(arabicFamilies)}, ` : '';
+  if (isArabicScriptFace(authoredFamily) && arabicText) {
+    const cjk = fallback ? cjkFallbackChain(fallback, 'sans') : [];
+    return `"${normalized}", ${subPart}${arabicPart}${cjk.length ? `${quoteAll(cjk)}, ` : ''}${generic}`;
   }
   const variant: 'sans' | 'serif' = generic === 'serif' ? 'serif' : 'sans';
-  const cjk = classifyCjkFont(authoredFamily);
-  const cjkPart = cjk ? `${quoteAll(cjkFallbackChain(cjk, variant))}, ` : '';
+  const authoredCjk = classifyCjkFont(authoredFamily);
+  const cjk = authoredCjk ?? fallback;
+  const cjkFamilies = cjk
+    ? cjkFallbackChain(cjk, variant).filter((name) => name !== googleAlias)
+    : [];
+  const cjkPart = cjkFamilies.length > 0 ? `${quoteAll(cjkFamilies)}, ` : '';
   const nonCjk = variant === 'serif' ? NON_CJK_SERIF_FALLBACKS : NON_CJK_SANS_FALLBACKS;
   const nonCjkPart = `${quoteAll(nonCjk)}, `;
-  return `"${normalized}", ${subPart}${cjkPart}${nonCjkPart}${generic}`;
+  return authoredCjk
+    ? `"${normalized}", ${subPart}${aliasPart}${cjkPart}${nonCjkPart}${arabicPart}${generic}`
+    : `"${normalized}", ${subPart}${aliasPart}${nonCjkPart}${cjkPart}${arabicPart}${generic}`;
 }
 
 /**
@@ -1031,16 +1045,46 @@ function applyTextRunReflection(
   liveCtx.restore();
 }
 
-export function buildFont(bold: boolean, italic: boolean, sizePx: number, family: string, rc: RenderContext): string {
+export function buildFont(
+  bold: boolean,
+  italic: boolean,
+  sizePx: number,
+  family: string,
+  rc: RenderContext,
+  text = '',
+  hasNamedFamily = true,
+): string {
   const style  = italic ? 'italic ' : '';
   const normalized = normalizeFontFamily(family, rc);
   const authoredFamily = rc.embeddedFontAuthoredFamilies?.get(normalized) ?? normalized;
   const inferredWeight = namedFaceWeight(authoredFamily);
   const weight = bold ? 'bold ' : inferredWeight ? `${inferredWeight} ` : '';
+  const routeKey = bold || inferredWeight === 700
+    ? `calibri:700:${italic ? 'italic' : 'normal'}`
+    : italic ? 'calibri:400:italic' : 'calibri';
+  const embeddedTuple = `calibri:${bold || inferredWeight === 700 ? 700 : 400}:${italic ? 'italic' : 'normal'}`;
+  // ECMA-376 §19.3.1.52: master txStyles is an optional source of text style.
+  // The theme-minor CSS fallback when every font slot is absent is renderer
+  // policy, not evidence that an exact Calibri resource was selected. Preserve
+  // that established fallback until a run or inherited style names a face.
+  const officeRoute = hasNamedFamily && authoredFamily.toLowerCase() === 'calibri'
+    && !rc.embeddedFontTuples?.has(embeddedTuple)
+    ? rc.officeFontRoutes?.[routeKey]
+    : undefined;
+  const fallback = containsHanScript(text)
+    ? rc.cjkFallback ?? classifyCjkFont(rc.themeMajorFont) ?? classifyCjkFont(rc.themeMinorFont) ?? undefined
+    : undefined;
   if (CSS_GENERIC_FAMILIES.has(normalized)) {
-    return `${style}${weight}${sizePx}px ${normalized}`;
+    const families = fallback ? cjkFallbackChain(fallback, normalized === 'serif' ? 'serif' : 'sans') : [];
+    const latin = normalized === 'monospace' ? ['Courier New', 'Liberation Mono']
+      : normalized === 'serif' ? [...NON_CJK_SERIF_FALLBACKS, 'Times New Roman', 'Liberation Serif']
+      : [...NON_CJK_SANS_FALLBACKS, 'Arial', 'Helvetica', 'Liberation Sans'];
+    return `${style}${weight}${sizePx}px ${families.length ? `${quoteAll([...latin, ...families])}, ` : ''}${normalized}`;
   }
-  return `${style}${weight}${sizePx}px ${cssFontStack(normalized, authoredFamily)}`;
+  return `${style}${weight}${sizePx}px ${cssFontStack(
+    officeRoute?.family ?? normalized, authoredFamily, fallback, text,
+    rc.googleSubstitutes === true,
+  )}`;
 }
 
 /**
@@ -1100,6 +1144,67 @@ function firstLineIndentPxFor(hasBullet: boolean, indentPx: number): number {
   return hasBullet ? 0 : indentPx;
 }
 
+/**
+ * Whether the seam is the explicit hyphen boundary of an alphabetic compound.
+ *
+ * UAX #14 gives HY (U+002D) and HH (for example U+2010) a break opportunity
+ * AFTER the hyphen. Keep this helper deliberately narrower than a full UAX #14
+ * implementation: it accepts only Latin-letter–hyphen–Latin-letter compounds,
+ * rejecting the numeric-range case covered by LB25 and leaving other scripts
+ * (including LB21a's Hebrew exception) to their dedicated layout paths.
+ * DrawingML `latinLnBrk="0"` forbids splitting a Latin word without adding a
+ * hyphen; it does not erase a break opportunity supplied by an authored hyphen.
+ */
+const LATIN_SCALAR_RE = /^\p{Script_Extensions=Latin}$/u;
+const LETTER_SCALAR_RE = /^\p{L}$/u;
+const ASCII_SCALARS_RE = /^[\u0000-\u007f]*$/u;
+
+function isLatinCompoundHyphenBoundary(before: string, hyphen: string, after: string): boolean {
+  const hyphenCp = hyphen.codePointAt(0) as number;
+  // All ASCII scalars other than U+002D are permanently outside HY/HH. Most
+  // tokens take this constant-time path without searching the Unicode table.
+  if (hyphenCp <= 0x7f && hyphenCp !== 0x2d) return false;
+  // HY/HH are punctuation classes, so non-ASCII letters cannot be candidates.
+  if (LETTER_SCALAR_RE.test(hyphen)) return false;
+  const hyphenClass = lineBreakClass(hyphenCp);
+  if (hyphenClass !== 'HY' && hyphenClass !== 'HH') return false;
+  return LATIN_SCALAR_RE.test(before) && LATIN_SCALAR_RE.test(after);
+}
+
+/** Split one non-whitespace Latin token at its authored compound hyphens. */
+function splitLatinCompoundToken(text: string): { text: string; breakBefore: boolean }[] {
+  // The overwhelmingly common ASCII token without U+002D cannot contain an
+  // HY/HH scalar. Avoid a scalar array and per-boundary classification there.
+  if (!text.includes('-') && ASCII_SCALARS_RE.test(text)) {
+    return [{ text, breakBefore: false }];
+  }
+  const chars = [...text];
+  const pieces: { text: string; breakBefore: boolean }[] = [];
+  let start = 0;
+  for (let i = 1; i + 1 < chars.length; i++) {
+    if (!isLatinCompoundHyphenBoundary(chars[i - 1], chars[i], chars[i + 1])) {
+      continue;
+    }
+    const end = i + 1;
+    pieces.push({ text: chars.slice(start, end).join(''), breakBefore: pieces.length > 0 });
+    start = end;
+  }
+  pieces.push({ text: chars.slice(start).join(''), breakBefore: pieces.length > 0 });
+  return pieces;
+}
+
+/** Last two painted text scalars, without joining the whole line. */
+function trailingTextScalars(line: LayoutLine): string[] {
+  const tail: string[] = [];
+  for (let i = line.segments.length - 1; i >= 0 && tail.length < 2; i--) {
+    const segment = line.segments[i];
+    if (segment.isTab || segment.math) continue;
+    const chars = [...segment.text];
+    for (let j = chars.length - 1; j >= 0 && tail.length < 2; j--) tail.unshift(chars[j]);
+  }
+  return tail;
+}
+
 /** PowerPoint paints non-zero DrawingML baseline runs at about 65% of their
  * authored size. The authored size still owns line height and baseline offset;
  * this helper is only for the glyph font used by measure and paint. */
@@ -1156,7 +1261,15 @@ export function naturalWidthExceedsBbox(
       const family = normalizeFontFamily(run.fontFamily ?? para.defFontFamily ?? null, rc);
       const isBold = run.bold ?? para.defBold ?? body.defaultBold ?? false;
       const isItalic = run.italic ?? para.defItalic ?? body.defaultItalic ?? false;
-      ctx.font = buildFont(isBold, isItalic, baselineDrawSizePx(sizePx, run.baseline ?? undefined), family, rc);
+      ctx.font = buildFont(
+        isBold,
+        isItalic,
+        baselineDrawSizePx(sizePx, run.baseline ?? undefined),
+        family,
+        rc,
+        run.text,
+        hasNamedFontFamily(run.fontFamily ?? para.defFontFamily),
+      );
       const letterSpacingPx = (run.letterSpacing ?? 0) * PT_TO_EMU * scale;
       lineW += measureTextAdvance(ctx, run.text, letterSpacingPx);
       if (lineW > textMaxW) return true;
@@ -1417,8 +1530,6 @@ export function layoutParagraph(
       reflection?: import('@silurus/ooxml-core').Reflection;
       outline?: import('@silurus/ooxml-core').TextOutline;
       highlight?: string;
-      /** Raw normalized family for the design-line-height floor (see LayoutSegment). */
-      fontFamily?: string;
       /** Resolved hyperlink target (IX1) — passed through to the overlay span. */
       hyperlink?: HyperlinkTarget;
       sourceRunId?: number;
@@ -1440,7 +1551,6 @@ export function layoutParagraph(
     const reflection = extras?.reflection;
     const outline = extras?.outline;
     const highlight = extras?.highlight;
-    const fontFamily = extras?.fontFamily;
     const hyperlink = extras?.hyperlink;
     const drawSizePx = extras?.drawSizePx ?? sizePx;
     // Shadow / outline use object identity for merging — adjacent runs share
@@ -1462,7 +1572,6 @@ export function layoutParagraph(
       a.reflection === reflection &&
       a.outline === outline &&
       (a.highlight ?? '') === (highlight ?? '') &&
-      (a.fontFamily ?? '') === (fontFamily ?? '') &&
       (a.drawSizePx ?? a.sizePx) === drawSizePx &&
       hyperlinkKey(a.hyperlink) === hyperlinkKey(hyperlink) &&
       (lsPx === 0 || a.sourceRunId === sourceRunId);
@@ -1494,7 +1603,7 @@ export function layoutParagraph(
         && sourceRunId != null && last.sourceRunId === sourceRunId
         ? lsPx
         : 0;
-      currentLine.segments.push({ text, font, fontFamily, sizePx, drawSizePx, color, underline, underlineStyle, underlineColor, strikethrough, strikeDouble, letterSpacingPx: lsPx || undefined, sourceRunId, leadingLetterSpacingPx: leadingLetterSpacingPx || undefined, baseline, shadow, reflection, outline, highlight, hyperlink });
+      currentLine.segments.push({ text, font, sizePx, drawSizePx, color, underline, underlineStyle, underlineColor, strikethrough, strikeDouble, letterSpacingPx: lsPx || undefined, sourceRunId, leadingLetterSpacingPx: leadingLetterSpacingPx || undefined, baseline, shadow, reflection, outline, highlight, hyperlink });
     }
   };
 
@@ -1536,7 +1645,6 @@ export function layoutParagraph(
       reflection: seg.reflection,
       outline: seg.outline,
       highlight: seg.highlight,
-      fontFamily: seg.fontFamily,
       sourceRunId: seg.sourceRunId,
       drawSizePx: seg.drawSizePx,
     });
@@ -1615,9 +1723,10 @@ export function layoutParagraph(
     // Cascade: run → paragraph defRPr → body/layout default → false
     const isBold   = run.bold   ?? para.defBold   ?? defaultBold;
     const isItalic = run.italic ?? para.defItalic ?? defaultItalic;
-    const font   = buildFont(isBold, isItalic, drawSizePx, family, rc);
+    const font   = buildFont(isBold, isItalic, drawSizePx, family, rc, run.text,
+      hasNamedFontFamily(run.fontFamily ?? para.defFontFamily));
     const fontEa = familyEa
-      ? buildFont(isBold, isItalic, drawSizePx, familyEa, rc)
+      ? buildFont(isBold, isItalic, drawSizePx, familyEa, rc, run.text)
       : font;
     ctx.font = font;
 
@@ -1651,10 +1760,6 @@ export function layoutParagraph(
       shadow: run.shadow,
       reflection: run.reflection,
       outline: run.outline,
-      // Raw latin/primary family for the design-line-height floor. CJK per-char
-      // pushes below override this to `familyEa` when they draw with `fontEa`,
-      // so a Meiryo set only as the East Asian typeface is still floored.
-      fontFamily: family,
       // §21.1.2.3.4 — highlight is a resolved hex (6-char opaque or 8-char
       // RRGGBBAA); hexToRgba handles both, matching how text/underline colours
       // are converted for canvas.
@@ -1669,10 +1774,23 @@ export function layoutParagraph(
       drawSizePx,
     };
 
-    // Split on whitespace boundaries, keeping the whitespace tokens
-    const tokens = runText.split(/(\s+)/);
+    // Split on whitespace boundaries, keeping the whitespace tokens. Within a
+    // non-whitespace Latin token, retain authored compound hyphens as UAX #14
+    // soft-wrap seams (`non-managed` -> `non-` | `managed`).
+    const tokens = runText.split(/(\s+)/).flatMap((token) => {
+      if (!token) return [];
+      if (/^\s+$/u.test(token)) return [{ text: token, breakBefore: false }];
+      // Authored hyphens are soft-wrap seams only. WordArt deliberately lays
+      // text out at infinite width before mapping it to a curve, so fragmenting
+      // a compound there adds repeated prefix measurement without changing a
+      // possible line break.
+      return Number.isFinite(maxWidthPx)
+        ? splitLatinCompoundToken(token)
+        : [{ text: token, breakBefore: false }];
+    });
 
-    for (const token of tokens) {
+    for (const tokenPart of tokens) {
+      const token = tokenPart.text;
       if (!token) continue;
 
       // ── Tab character ────────────────────────────────────────────────────
@@ -1691,7 +1809,6 @@ export function layoutParagraph(
             text: '',
             isTab: true,
             font,
-            fontFamily: family,
             sizePx,
             color,
             underline: false,
@@ -1704,7 +1821,7 @@ export function layoutParagraph(
       }
 
       ctx.font = font;
-      const tokW = incomingTextAdvance(token, font, lsPx, sourceRunId);
+      let tokW = incomingTextAdvance(token, font, lsPx, sourceRunId);
       const isWhitespace = /^\s+$/.test(token);
 
       // ── Symbol-font characters (Wingdings/Webdings/Symbol) ───────────────
@@ -1729,9 +1846,9 @@ export function layoutParagraph(
             const mapped = symbolFontToUnicode(ch, symName);
             if (mapped !== ch) {
               drawCh = mapped;
-              chFont = buildFont(isBold, isItalic, drawSizePx, 'sans-serif', rc);
+              chFont = buildFont(isBold, isItalic, drawSizePx, 'sans-serif', rc, drawCh);
             } else {
-              chFont = buildFont(isBold, isItalic, drawSizePx, symName, rc);
+              chFont = buildFont(isBold, isItalic, drawSizePx, symName, rc, drawCh);
             }
           }
           ctx.font = chFont;
@@ -1759,8 +1876,12 @@ export function layoutParagraph(
       // whole. A CJK token with no SEA is unchanged.
       const routeCjk = hasCJK && (!containsSeaScript(token) || para.eaLnBrk === false);
       if (routeCjk) {
-        // Measure each grapheme with its per-char font (latin/ea boundary stays
-        // clean), then place chars according to a:pPr@eaLnBrk (ECMA-376
+        // Measure each CJK grapheme with its EA font, but keep every contiguous
+        // non-CJK span as ONE word unit. A mixed run such as `日本語Power`
+        // may wrap at the CJK/Latin boundary, never between the Latin letters.
+        // This is the same word-vs-CJK distinction used by the XLSX wrapper;
+        // previously this path treated every Latin letter as a CJK break unit.
+        // Place the resulting units according to a:pPr@eaLnBrk (ECMA-376
         // §21.1.2.2.7, "East Asian Line Break"):
         //   • eaLnBrk=true (default) → East Asian text MAY break at character
         //     boundaries, so we wrap char-by-char with kinsoku (§17.15.1.58–.60):
@@ -1775,16 +1896,30 @@ export function layoutParagraph(
         // forbidden-set element (w:noLineBreaksBefore/After are WordprocessingML-only).
         // docx's analogous CJK path (renderer.ts, fitCJKPrefix) is intentionally
         // separate: substring binary-search fit + cross-run 追い出し. Do not unify them.
-        const measured: (MeasuredChar & { font: string; family: string })[] = [];
+        const measured: (MeasuredChar & { font: string })[] = [];
+        let westernWord = '';
+        const flushWesternWord = (): void => {
+          if (westernWord === '') return;
+          ctx.font = font;
+          measured.push({
+            ch: westernWord,
+            w: measureTextAdvance(ctx, westernWord, lsPx),
+            font,
+          });
+          westernWord = '';
+        };
         for (const ch of token) {
-          const isEa = isCjkBreakChar(ch.codePointAt(0) ?? 0) && familyEa != null;
-          const chFont = isEa ? fontEa : font;
-          // Floor to the family actually rendering this glyph: `familyEa` for
-          // CJK when an East Asian typeface was declared, else the latin family.
-          const chFamily = isEa ? (familyEa as string) : family;
+          const isCjk = isCjkBreakChar(ch.codePointAt(0) ?? 0);
+          if (!isCjk) {
+            westernWord += ch;
+            continue;
+          }
+          flushWesternWord();
+          const chFont = familyEa != null ? fontEa : font;
           ctx.font = chFont;
-          measured.push({ ch, w: measureTextAdvance(ctx, ch, 0), font: chFont, family: chFamily });
+          measured.push({ ch, w: measureTextAdvance(ctx, ch, 0), font: chFont });
         }
+        flushWesternWord();
         if (para.eaLnBrk === false) {
           // Keep the East Asian word whole. If the current line already has
           // content and the token would overflow, wrap once before placing it;
@@ -1798,7 +1933,7 @@ export function layoutParagraph(
             + (leadingBoundary && measured.length > 0 ? lsPx : 0);
           if (lineW > 0 && !fitsW(tokenW)) newLine();
           for (const m of measured) {
-            push(m.ch, m.font, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, { ...segExtras, fontFamily: m.family });
+            push(m.ch, m.font, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, segExtras);
           }
           continue;
         }
@@ -1831,7 +1966,7 @@ export function layoutParagraph(
           }
           for (let i = 0; i < n; i++) {
             const m = rest[i];
-            push(m.ch, m.font, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, { ...segExtras, fontFamily: m.family });
+            push(m.ch, m.font, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, segExtras);
           }
           rest = rest.slice(n);
           if (rest.length > 0) newLine();
@@ -1889,8 +2024,7 @@ export function layoutParagraph(
           const flush = (): void => {
             if (runText === '') return;
             const pFont = runEa ? (fontEa as string) : font;
-            const pFamily = runEa ? (familyEa as string) : family;
-            push(runText, pFont, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, { ...segExtras, fontFamily: pFamily });
+            push(runText, pFont, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, segExtras);
             runText = '';
           };
           for (const ch of piece) {
@@ -1926,6 +2060,24 @@ export function layoutParagraph(
         continue;
       }
 
+      // A formatting-run boundary must not erase an authored hyphen break. The
+      // token splitter above covers an in-run compound; this seam check covers
+      // `non-` and `managed` stored in adjacent runs. Break only when the
+      // combined text no longer fits, preserving greedy single-line layout.
+      if (!fitsW(tokW) && (lineW > 0 || lineHasTab)) {
+        let hyphenBreakBefore = tokenPart.breakBefore;
+        if (!hyphenBreakBefore) {
+          const currentTail = trailingTextScalars(currentLine);
+          const nextHead = [...token][0];
+          hyphenBreakBefore = currentTail.length === 2 && nextHead !== undefined
+            && isLatinCompoundHyphenBoundary(currentTail[0], currentTail[1], nextHead);
+        }
+        if (hyphenBreakBefore) {
+          newLine();
+          tokW = incomingTextAdvance(token, font, lsPx, sourceRunId);
+        }
+      }
+
       if (fitsW(tokW)) {
         push(token, font, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, segExtras);
         if (isWhitespace) hasWhitespaceOnLine = true;
@@ -1944,7 +2096,17 @@ export function layoutParagraph(
         // unbroken sequence of non-whitespace text (e.g. "YoY+11.9%" split
         // across mixed-size runs). Office never breaks mid-sequence in that
         // case; it lets the shape overflow and relies on spAutoFit / lIns to
-        // size the bbox correctly. Match that behavior.
+        // size the bbox correctly. A CJK/Latin script boundary is different:
+        // it is a real soft-wrap opportunity even without ASCII whitespace, so
+        // move the incoming Latin word intact rather than overflowing it.
+        const previousText = currentLine.segments.at(-1)?.text ?? '';
+        const previousCp = [...previousText].at(-1)?.codePointAt(0);
+        const firstCp = token.codePointAt(0);
+        const cjkBoundary = previousCp !== undefined
+          && firstCp !== undefined
+          && isCjkBreakChar(previousCp) !== isCjkBreakChar(firstCp)
+          && !isUax14NoBreakPair(previousCp, firstCp);
+        if (cjkBoundary && lineW > 0) newLine();
         push(token, font, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, segExtras);
       } else {
         // UAX #14 segment-boundary glue: LB13 keeps a non-starter with the word
@@ -2821,7 +2983,8 @@ function renderWarpedText(
 
   // Lay each paragraph out flat at the natural size (no wrap — WordArt fits the
   // shape width itself). Collect every line's segments in order.
-  const lines: LayoutLine[] = [];
+  const lines: Array<{ line: LayoutLine; alignment: Paragraph['alignment']; baseline: number }> = [];
+  let flatTop = 0;
   for (const para of body.paragraphs) {
     const paraDefaultFontSizePx =
       para.defFontSize != null ? para.defFontSize * PT_TO_EMU * scale : bodyDefaultFontSizePx;
@@ -2841,7 +3004,19 @@ function renderWarpedText(
       rc,
       0,
     );
-    for (const l of laid) lines.push(l);
+    if (lines.length > 0) flatTop += (para.spaceBefore ?? 0) / 100 * PT_TO_EMU * scale;
+    for (const line of laid) {
+      const size = line.segments.reduce((max, seg) => Math.max(max, seg.sizePx), 0) || paraDefaultFontSizePx;
+      // Same natural line box as ordinary PowerPoint text. The independent
+      // flat/Follow Path Office controls cover 50–200%, fixed point spacing,
+      // mixed sizes and paragraph gaps; no warp-specific pitch multiplier.
+      const height = para.spaceLine?.type === 'pts'
+        ? para.spaceLine.val * PT_TO_EMU * scale
+        : size * 1.2 * (para.spaceLine ? para.spaceLine.val / 100000 : 1);
+      lines.push({ line, alignment: para.alignment, baseline: flatTop + height * 0.8 });
+      flatTop += height;
+    }
+    flatTop += (para.spaceAfter ?? 0) / 100 * PT_TO_EMU * scale;
   }
   if (lines.length === 0) return;
 
@@ -2866,8 +3041,18 @@ function renderWarpedText(
   };
 
   const lineCount = lines.length;
+  // Follow Path is not the paired-edge vertical-band operation in §20.1.9.19.
+  // Office-produced controls show concentric ellipses: clockwise paths anchor
+  // the last line, counterclockwise paths the first. Derive winding from the
+  // authored path, not screen up/down (adjusted arches can cross either half).
+  const p0 = env.top[0];
+  const p1 = env.top[1];
+  const clockwise = p0 && p1
+    ? (p0.x - boxW / 2) * (p1.y - boxH / 2) - (p0.y - boxH / 2) * (p1.x - boxW / 2) > 0
+    : true;
+  const anchoredBaseline = lines[clockwise ? lineCount - 1 : 0]!.baseline;
   for (let li = 0; li < lineCount; li++) {
-    const line = lines[li];
+    const { line, alignment } = lines[li];
     // Per-line vertical band [v0, v1] of the envelope's height. One line fills
     // the whole band; multiple lines split it evenly top→bottom.
     const v0 = li / lineCount;
@@ -2897,6 +3082,14 @@ function renderWarpedText(
       if (m.actualBoundingBoxDescent > 0) maxD = Math.max(maxD, m.actualBoundingBoxDescent);
     }
     if (totalW <= 0) continue;
+    // Empty manual lines affect authored baseline spacing, but have no glyphs
+    // to map. Avoid rebuilding a sampled curve for them.
+    const outset = env.singleEdge
+      ? Math.max(0, clockwise ? anchoredBaseline - lines[li]!.baseline : lines[li]!.baseline - anchoredBaseline)
+      : 0;
+    const lineEnv = outset > 0
+      ? buildWarpEnvelope(preset, adj, boxW + 2 * outset, boxH + 2 * outset) ?? env
+      : env;
 
     // PowerPoint's WordArt semantics for the envelope (paired-edge) presets:
     // the FLAT text's INK RECTANGLE (totalW × ink height) is first STRETCHED to
@@ -2920,19 +3113,28 @@ function renderWarpedText(
     // "Follow Path" semantics place the text at its NATURAL width along the
     // arc without stretching the glyphs (vScale stays 1 inside
     // warpGlyphTransform); they keep the flat renderer's 0.8 ascent fallback
-    // for the baseline drop below the arc. The text also follows the path for
-    // only its natural arc-length span from the start (stAng): a glyph's `u`
-    // fraction is scaled by naturalWidth/arcLength via `followPathUScale`, so a
-    // word narrower than the arc occupies a LEADING segment of the path rather
-    // than being scattered over the whole ellipse. Paired-edge presets return
-    // scale 1 (they stretch the flat ink box to fill the envelope width).
+    // for the baseline drop below the arc. A glyph's `u` fraction is scaled by
+    // naturalWidth/arcLength via `followPathUScale`, and paragraph alignment
+    // chooses where that compact segment sits on the path. Paired-edge presets
+    // return scale 1 (they stretch the flat ink box to fill the envelope width).
     const inkH = maxA + maxD > 0 ? maxA + maxD : maxSize;
     const baselineFrac = env.singleEdge ? 0.8 : inkH > 0 ? maxA / inkH : 0.8;
     const hScale = env.singleEdge ? 1 : boxW / totalW;
-    const warpBoxH = env.singleEdge ? boxH : inkH / (v1 - v0);
+    // `warpGlyphTransform` expects the FLAT line box height. For Follow Path
+    // presets this determines only the small baseline-to-curve descent. Passing
+    // the entire shape height displaced short text by tens of pixels normal to
+    // the arc (and, after shape rotation, outside the intended ring segment).
+    const warpBoxH = env.singleEdge ? inkH : inkH / (v1 - v0);
     // Follow Path: fraction of the arc the natural-width text actually spans.
     // 1 for paired-edge (no clamp); ≤1 for arch/circle.
-    const followScale = followPathUScale(env, totalW);
+    const followScale = followPathUScale(lineEnv, totalW);
+    // A Follow Path warp keeps the text's natural arc length, but its paragraph
+    // alignment still selects where that shorter segment sits on the path.
+    // PowerPoint-generated circular diagrams commonly use centred paragraphs;
+    // pinning every short label to stAng piles the labels onto a wedge edge.
+    const followOffset = env.singleEdge
+      ? (1 - followScale) * (alignment === 'r' ? 1 : alignment === 'ctr' ? 0.5 : 0)
+      : 0;
 
     // Walk glyphs left→right. `penW` accumulates the flat advance so each glyph's
     // CENTRE maps to its u fraction; the glyph is drawn at a per-glyph transform.
@@ -2951,7 +3153,7 @@ function renderWarpedText(
         const chW = ctx.measureText(ch).width + ls;
         // Blend the per-line vertical band into the baseline fraction so line 2
         // sits below line 1 within the envelope.
-        const bandFrac = v0 + baselineFrac * (v1 - v0);
+        const bandFrac = env.singleEdge ? baselineFrac : v0 + baselineFrac * (v1 - v0);
 
         // Paired-edge (envelope) presets: the envelope map is NON-affine within a
         // glyph (on Inflate/Deflate the vertical stretch varies across the glyph's
@@ -2961,8 +3163,8 @@ function renderWarpedText(
         // its own centre-u) so the mapping converges to PowerPoint's continuous
         // outline warp (§20.1.9.19). Needs no auxiliary canvas, so it runs
         // unconditionally (main thread, worker, headless node alike). The
-        // single-edge (Follow Path) branch below is UNCHANGED (byte-identical):
-        // its glyphs are rigidly rotated onto a baseline, already exact per glyph.
+        // single-edge (Follow Path) branch below keeps rigid per-glyph rotation;
+        // its separate placement rules preserve natural size and alignment.
         if (!env.singleEdge && chW > 0) {
           drawWarpedGlyphStrips(
             ctx,
@@ -2986,11 +3188,13 @@ function renderWarpedText(
         }
 
         // Horizontal fraction of THIS glyph's centre along the whole line,
-        // scaled by the Follow Path factor so single-edge (arch/circle) text
-        // spans only its natural arc length from the start rather than the whole
+        // scaled and offset so single-edge (arch/circle) text spans only its
+        // naturally sized, paragraph-aligned arc segment rather than the whole
         // path. `followScale` is 1 for paired-edge presets (unchanged).
-        const u = ((penW + chW / 2) / totalW) * followScale;
-        const g = warpGlyphTransform(env, u, warpBoxH, bandFrac);
+        const u = followOffset + ((penW + chW / 2) / totalW) * followScale;
+        const g = warpGlyphTransform(lineEnv, u, warpBoxH, bandFrac);
+        g.x -= outset;
+        g.y -= outset;
         ctx.save();
         ctx.translate(boxX + g.x, boxY + g.y);
         ctx.rotate(g.angle);
@@ -3329,6 +3533,30 @@ function paintWithRasterEffects(
     );
     ctx.restore();
   }
+}
+
+/**
+ * Resolve the rotation PowerPoint uses for text in a singly-reflected shape.
+ *
+ * ECMA-376 §20.1.7.6 permits rotation and axis flips in the same transform.
+ * For a one-axis reflection, two decompositions describe the same geometry:
+ * rotating by another 180 degrees while exchanging flipH and flipV leaves the
+ * shape matrix unchanged. PowerPoint chooses the decomposition whose text
+ * rotation is in the readable -90..90 degree half-plane. Geometry continues
+ * to use the authored transform verbatim; only its unmirrored text frame uses
+ * this equivalent rotation.
+ */
+export function reflectedShapeTextRotation(
+  rotation: number,
+  flipH: boolean,
+  flipV: boolean,
+): number {
+  if (flipH === flipV || !Number.isFinite(rotation)) return rotation;
+
+  let readable = ((rotation + 180) % 360 + 360) % 360 - 180;
+  if (readable > 90) readable -= 180;
+  else if (readable < -90) readable += 180;
+  return Object.is(readable, -0) ? 0 : readable;
 }
 
 function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: number, themeDefaultColor = '#000000', slideNumber?: number, rc: RenderContext = { themeMajorFont: null, themeMinorFont: null, dpr: 1 }, onTextRun?: TextRunCallback, fetchImage?: FetchImage) {
@@ -3947,6 +4175,7 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
   // Render text inside the rotation context so text follows shape rotation
   if (el.textBody) {
     const defaultTextColor = shapeDefaultTextColor(el, rc);
+    const textRotation = reflectedShapeTextRotation(el.rotation, el.flipH, el.flipV);
     ctx.save();
     if (el.flipH || el.flipV) {
       const cx = x + w / 2;
@@ -3956,6 +4185,14 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
       ctx.translate(cx, cy);
       if (el.flipH) ctx.scale(-1, 1);
       if (el.flipV) ctx.scale(1, -1);
+      ctx.translate(-cx, -cy);
+    }
+    const rotationDelta = (textRotation - el.rotation) % 360;
+    if (rotationDelta !== 0) {
+      const cx = x + w / 2;
+      const cy = y + h / 2;
+      ctx.translate(cx, cy);
+      ctx.rotate((rotationDelta * Math.PI) / 180);
       ctx.translate(-cx, -cy);
     }
     // For ellipses, PowerPoint positions text relative to the inscribed rectangle
@@ -3982,8 +4219,8 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
       const tr = presetTextRect(geom, x, y, w, h, el.adj, el.adj2);
       if (tr) { tx = tr.tx; ty = tr.ty; tw = tr.tw; th = tr.th; }
     }
-    // Pass el.rotation so the text-layer overlay can CSS-rotate the shape div to match.
-    renderTextBody(ctx, el.textBody, tx, ty, tw, th, scale, defaultTextColor, el.rotation, false, false, themeDefaultColor, slideNumber, rc, shapeTextRunCallback, false, fetchImage);
+    // Carry the same readable rotation into the selectable text overlay.
+    renderTextBody(ctx, el.textBody, tx, ty, tw, th, scale, defaultTextColor, textRotation, false, false, themeDefaultColor, slideNumber, rc, shapeTextRunCallback, false, fetchImage);
     ctx.restore();
   }
 
@@ -4151,9 +4388,10 @@ export function renderTextBody(
   // paths byte-identical.
   eaVertUpright = false,
   // A zero-height table row asks PowerPoint to derive its height from the
-  // natural line box. A positive a:tr@h is instead an authored minimum: use the
-  // glyph-size box when checking whether content actually exceeds that minimum,
-  // so implicit leading alone does not enlarge an already-sufficient row.
+  // natural line box. Office treats a positive a:tr@h as an authored minimum
+  // ([MS-OE376] §2.1.1347): use the glyph-size box when checking whether content
+  // actually exceeds that minimum, so implicit leading alone does not enlarge
+  // an already-sufficient row.
   measureNaturalLineSpacing = measureOnly,
 ): number | void {
   // Vertical text: rotate rendering context so text flows top-to-bottom.
@@ -4279,6 +4517,7 @@ export function renderTextBody(
     line: LayoutLine;
     linePx: number;       // spacing advancement (lineHeight + spaceAfter for last line)
     lineHeight: number;   // pure line height used for baseline positioning (without spaceAfter)
+    baselineLineHeight: number; // authored box used only to seat this line's glyph baseline
     topGapPx: number;     // spaceBefore for first line of paragraph
     textXOffset: number;  // additional X offset for first-line indent (non-bullet)
     bulletLabel: string;  // text to render as bullet ('' = none)
@@ -4301,10 +4540,19 @@ export function renderTextBody(
   }
 
   // buildLayout runs Pass 1 at a given font scale (1.0 = normal; <1 = normAutoFit shrink)
-  const buildLayout = (fontScale: number): { allLines: LineEntry[], totalHeight: number } => {
+  const buildLayout = (fontScale: number): {
+    allLines: LineEntry[];
+    totalHeight: number;
+    requiredHeight: number;
+  } => {
   const bodyDefaultFontSizePx = (body.defaultFontSize ?? 18) * PT_TO_EMU * scale * fontScale;
   const allLines: LineEntry[] = [];
   let totalHeight = 0;
+  // Visual bounds may be taller than the baseline advance. This is especially
+  // important for spAutoFit: the live Canvas font box must enlarge the SHAPE
+  // enough to contain the last line, but must not silently become the pitch of
+  // every preceding line when a:lnSpc is omitted (#1473).
+  let requiredHeight = 0;
 
   // AutoNum counters per list level
   const autoNumCounters = new Map<number, number>();
@@ -4395,7 +4643,8 @@ export function renderTextBody(
       // If the char was mapped to a Unicode symbol, use sans-serif for reliable rendering.
       // Otherwise use the specified font (e.g. Wingdings on systems that have it).
       const convertedFamily = bulletLabel !== b.char ? 'sans-serif' : normalizeFontFamily(b.fontFamily ?? null, rc);
-      bulletFont  = buildFont(false, false, bSizePx, convertedFamily, rc);
+      bulletFont  = buildFont(false, false, bSizePx, convertedFamily, rc, bulletLabel,
+        hasNamedFontFamily(b.fontFamily));
       bulletColor = b.color ? hexToRgba(b.color) : bulletInheritedColor;
     } else if (bullet.type === 'autoNum') {
       const b = bullet;
@@ -4410,6 +4659,8 @@ export function renderTextBody(
         bSizePx,
         normalizeFontFamily(b.fontFamily ?? firstRunFontFamily, rc),
         rc,
+        bulletLabel,
+        hasNamedFontFamily(b.fontFamily ?? firstRunFontFamily),
       );
       // ECMA-376 §21.1.2.4.4 (buClr): an explicit `<a:buClr>` colours the
       // auto-number marker, mirroring the char-bullet branch above. Only when it
@@ -4472,18 +4723,10 @@ export function renderTextBody(
       // defaults like `defRPr sz="30000"` (300pt prompt-text marker) would
       // inflate lineHeight and push real 24pt runs far below the anchor.
       let maxSizePx = 0;
-      // Design single-line-height FLOOR for IMPLICIT single spacing, shared
-      // with docx via core's `intendedSingleLinePx`. For a substituted face
-      // whose Windows design line height is taller than the 1.2×em fallback
-      // (Meiryo 1.596×em, Sakkal Majalla 1.3965×em), the floor keeps omitted
-      // `<a:lnSpc>` from collapsing. It must not override an explicitly
-      // authored `<a:spcPct>`; §21.1.2.2.5 / §21.1.2.2.11 define percentage
-      // spacing from the line's largest text size.
-      let designSingle = 0;
-      // spAutoFit is recalculated by the consuming application. Measure the
-      // fonts Canvas actually resolved (including browser substitutions) so
-      // that a shape saved with another machine's font metrics is not laid out
-      // again with those stale design metrics.
+      // Measure the fonts Canvas actually resolved (including browser
+      // substitutions). A tall live font box is retained for containment under
+      // spAutoFit, but PowerPoint does not repeat that box as the implicit
+      // baseline pitch when `<a:lnSpc>` is omitted.
       let resolvedFontLine = 0;
       for (const seg of line.segments) {
         // For an equation, the line must be at least as tall as its own font
@@ -4495,10 +4738,7 @@ export function renderTextBody(
           ? Math.max(seg.sizePx, (seg.math.ascent + seg.math.descent) / 1.2)
           : seg.sizePx;
         if (effSize > maxSizePx) maxSizePx = effSize;
-        // Equations carry no text family; only text segments contribute a floor.
         if (!seg.math) {
-          const ds = intendedSingleLinePx(seg.fontFamily, seg.sizePx);
-          if (ds > designSingle) designSingle = ds;
           if (isSpAutoFit) {
             ctx.font = seg.font;
             const metrics = ctx.measureText(seg.text || 'M');
@@ -4523,34 +4763,55 @@ export function renderTextBody(
         maxSizePx = bulletImage.sizePx;
       }
 
-      // PowerPoint's natural single-line box is 120% of the authored text size.
-      // An explicit percentage is instead based directly on that authored size
-      // (ECMA-376 §21.1.2.2.5/.11). Table measurement therefore retains the
-      // natural 120% box only when line spacing is omitted in an auto-height
-      // row. A positive a:tr@h remains a minimum and uses the glyph-size box for
-      // overflow measurement. Both exclude a substituted font's larger
-      // design-metric floor; glyph painting may keep that floor below without
-      // enlarging the table structure.
+      // PowerPoint's natural single-line pitch is 120% of the authored text size.
+      // An Office-produced boundary deck confirms that this is independent of
+      // the chosen font and of spAutoFit: Meiryo and Arial, fixed and spAutoFit
+      // shapes all keep the same omitted-lnSpc pitch at a given point size.
+      // Percentage spacing scales this renderer's PowerPoint-compatible natural
+      // line box (ECMA-376 §21.1.2.2.5/.11 defines the authored percentage;
+      // Office output supplies the line-box compatibility behaviour). A positive
+      // a:tr@h remains a minimum: a lone terminal line may fit by its glyph box,
+      // while multi-line content must retain every painted line box. Neither
+      // path substitutes the font's design box for the baseline pitch.
       const naturalSingle = maxSizePx * 1.2;
-      const useResolvedFontMetrics = isSpAutoFit
-        && designSingle > naturalSingle
-        && resolvedFontLine > 0;
-      const implicitSingle = useResolvedFontMetrics
-        ? Math.max(naturalSingle, resolvedFontLine)
-        : Math.max(naturalSingle, designSingle);
-      let lineHeight: number;
+      const useResolvedFontMetrics = isSpAutoFit && resolvedFontLine > naturalSingle;
+      // A live resolved font box describes containment, not baseline advance.
+      // Keeping the two values separate prevents a tall Meiryo design box from
+      // being repeated between every pair of lines under spAutoFit (#1473).
+      const implicitSingle = naturalSingle;
+      // Paint and table measurement must agree for explicitly authored
+      // percentage spacing. Positive rows with omitted lnSpc retain the
+      // existing glyph-box containment rule: the implicit leading is not by
+      // itself evidence that PowerPoint grows the authored minimum. An explicit
+      // percentage, however, is part of the authored content extent, and every
+      // line in a multi-line body consumes the painted line box.
+      const isFinalBodyLine = paraIdx === body.paragraphs.length - 1 && isLast;
+      const isOnlyBodyLine = body.paragraphs.length === 1 && lines.length === 1;
+      let paintedLineHeight: number;
       if (para.spaceLine) {
         if (para.spaceLine.type === 'pct') {
-          const percentageBase = measureOnly ? maxSizePx : naturalSingle;
-          lineHeight = percentageBase * (para.spaceLine.val / 100000);
+          paintedLineHeight = naturalSingle * (para.spaceLine.val / 100000);
         } else {
-          lineHeight = para.spaceLine.val * PT_TO_EMU * scale;
+          paintedLineHeight = para.spaceLine.val * PT_TO_EMU * scale;
         }
       } else {
-        lineHeight = measureOnly && !isSpAutoFit
-          ? (measureNaturalLineSpacing ? naturalSingle : maxSizePx)
-          : implicitSingle;
+        paintedLineHeight = implicitSingle;
       }
+      let lineHeight = paintedLineHeight;
+      if (measureOnly && !isSpAutoFit && !measureNaturalLineSpacing) {
+        if (!para.spaceLine) {
+          lineHeight = maxSizePx;
+        } else if (para.spaceLine.type === 'pct' && isFinalBodyLine && isOnlyBodyLine) {
+          lineHeight = maxSizePx * (para.spaceLine.val / 100000);
+        }
+      }
+      // PowerPoint retains its established percentage-line advance, but seats
+      // glyphs from a tall resolved fallback inside the authored percentage
+      // box. Keeping that box separate from `lineHeight` fixes the first-line
+      // origin without tightening every continuation line in the paragraph.
+      const baselineLineHeight = para.spaceLine?.type === 'pct'
+        ? maxSizePx * (para.spaceLine.val / 100000)
+        : lineHeight;
       // normAutofit lnSpcReduction (ECMA-376 §21.1.2.1.3): PowerPoint reduces
       // each paragraph's line spacing by this fraction alongside the font
       // shrink. Apply it only when normAutofit stored a value AND the paragraph
@@ -4603,7 +4864,7 @@ export function renderTextBody(
       const entryBulletImage = isFirst && lineHasContent ? bulletImage : null;
 
       allLines.push({
-        line, linePx, lineHeight, topGapPx: topGap,
+        line, linePx, lineHeight, baselineLineHeight, topGapPx: topGap,
         textXOffset,
         bulletLabel: isFirst ? bulletLabel : '',
         bulletFont, bulletColor, bulletX,
@@ -4614,14 +4875,25 @@ export function renderTextBody(
         para,
         useResolvedFontMetrics,
       });
+      const lineTop = totalHeight + topGap;
       totalHeight += linePx + topGap;
+      const requiredLineHeight = useResolvedFontMetrics
+        ? Math.max(lineHeight, resolvedFontLine)
+        : lineHeight;
+      requiredHeight = Math.max(
+        requiredHeight,
+        totalHeight,
+        // The space after actually applied to this line: percentage and
+        // spcFirstLastPara edge rules included (linePx above).
+        lineTop + requiredLineHeight + (linePx - lineHeight),
+      );
     }
   }
 
-  return { allLines, totalHeight };
+  return { allLines, totalHeight, requiredHeight };
   }; // end buildLayout
 
-  let { allLines, totalHeight } = buildLayout(1.0);
+  let { allLines, totalHeight, requiredHeight } = buildLayout(1.0);
 
   // ── normAutoFit ──────────────────────────────────────────────────────────
   // PowerPoint stores the font-shrink ratio it computed at edit time in
@@ -4631,16 +4903,16 @@ export function renderTextBody(
   // was stored do we fall back to fitting the text by search.
   if (body.autoFit === 'norm') {
     if (body.fontScale != null && body.fontScale > 0) {
-      if (body.fontScale < 1.0) ({ allLines, totalHeight } = buildLayout(body.fontScale));
+      if (body.fontScale < 1.0) ({ allLines, totalHeight, requiredHeight } = buildLayout(body.fontScale));
     } else {
       const maxContentH = bh - tPad - bPad;
-      if (totalHeight > maxContentH && maxContentH > 0) {
+      if (requiredHeight > maxContentH && maxContentH > 0) {
         let lo = 0.1, hi = 1.0;
         for (let i = 0; i < 6; i++) {
           const mid = (lo + hi) / 2;
-          if (buildLayout(mid).totalHeight <= maxContentH) lo = mid; else hi = mid;
+          if (buildLayout(mid).requiredHeight <= maxContentH) lo = mid; else hi = mid;
         }
-        ({ allLines, totalHeight } = buildLayout(lo));
+        ({ allLines, totalHeight, requiredHeight } = buildLayout(lo));
       }
     }
   }
@@ -4649,7 +4921,7 @@ export function renderTextBody(
   // Used by renderTable to grow rows to fit their tallest cell (ECMA-376
   // §21.1.3.18: a:tr@h is a minimum). Returns padding + laid-out text height.
   if (measureOnly) {
-    return tPad + totalHeight + bPad;
+    return tPad + requiredHeight + bPad;
   }
 
   // ── anchor="b" with bh=0: auto-height growing upward from by ────────────
@@ -4658,13 +4930,13 @@ export function renderTextBody(
   let effectiveBy = by;
   let effectiveBh: number;
   if (bh === 0 && anchor === 'b') {
-    effectiveBh = tPad + totalHeight + bPad;
+    effectiveBh = tPad + requiredHeight + bPad;
     effectiveBy = by - effectiveBh;
   } else {
     // ── Effective height (spAutoFit: shape expands to fit text) ─────────────
     const isSpAutoFit = body.autoFit === 'sp';
     effectiveBh = isSpAutoFit
-      ? Math.max(bh, tPad + totalHeight + bPad)
+      ? Math.max(bh, tPad + requiredHeight + bPad)
       : bh;
   }
 
@@ -4672,9 +4944,9 @@ export function renderTextBody(
   let cursorY: number;
   const contentH = Math.max(0, effectiveBh - tPad - bPad);
   if (anchor === 'ctr') {
-    cursorY = effectiveBy + tPad + (contentH - totalHeight) / 2;
+    cursorY = effectiveBy + tPad + (contentH - requiredHeight) / 2;
   } else if (anchor === 'b') {
-    cursorY = effectiveBy + effectiveBh - bPad - totalHeight;
+    cursorY = effectiveBy + effectiveBh - bPad - requiredHeight;
   } else {
     cursorY = effectiveBy + tPad;
   }
@@ -4731,7 +5003,7 @@ export function renderTextBody(
   const trailingSpaceAfter = lastEntry
     ? Math.max(0, lastEntry.linePx - lastEntry.lineHeight)
     : 0;
-  const occupiedHeight = totalHeight - trailingSpaceAfter;
+  const occupiedHeight = requiredHeight - trailingSpaceAfter;
   const fitsInOneCol = bh === 0 || occupiedHeight <= colHeightCapacity + 0.5;
   const useMultiCol = numCol > 1 && !fitsInOneCol;
   const linesPerCol = useMultiCol ? Math.ceil(allLines.length / numCol) : allLines.length;
@@ -4846,12 +5118,19 @@ export function renderTextBody(
     }
     const baselineOffset = useResolvedFontMetrics && resolvedFontHeight > 0
       ? anchor === 't' && maxAscent > 0
-        // PowerPoint's spAutoFit recalculation seats the visible ink at the
-        // top inset for a top-anchored body. fontBoundingBoxAscent includes
-        // leading above that ink; using it here leaves the exact downward gap
-        // spAutoFit is meant to remove. Keep the font box for line advance and
-        // required height, but use the actual glyph ascent for this origin.
-        ? maxAscent
+        // PowerPoint's spAutoFit recalculation normally seats the visible ink
+        // at the top inset. A top-anchored percentage a:lnSpc is the one
+        // exception confirmed by the Office boundary matrix: it retains the
+        // authored percentage box and centers a taller resolved fallback in
+        // that box. Absolute-point spacing and non-top anchors retain the
+        // established behavior; applying this correction there moves them
+        // away from the PowerPoint output.
+        ? entry.para.spaceLine?.type === 'pct'
+          ? Math.max(
+              maxAscent,
+              resolvedFontAscent + (entry.baselineLineHeight - resolvedFontHeight) / 2,
+            )
+          : maxAscent
         : Math.max(
             maxAscent,
             resolvedFontAscent + Math.max(0, lineHeight - resolvedFontHeight) / 2,
@@ -6525,15 +6804,25 @@ export function renderTable(
     return w;
   };
 
-  // ── Row heights: ECMA-376 §21.1.3.18 (a:tr@h) is a MINIMUM ────────────────
-  // PowerPoint grows a row to fit its tallest cell's laid-out text (like
-  // Word's "at least" line rule). A literal h=0 therefore becomes
+  // ── Row heights: Office minimum-row semantics ─────────────────────────────
+  // ECMA-376 §21.1.3.18 defines a:tr@h as the row height; [MS-OE376]
+  // §2.1.1347 additionally constrains it to zero or at least the minimum row
+  // height. PowerPoint grows a row to fit its tallest cell's laid-out text. A
+  // literal h=0 therefore becomes
   // content-driven. We measure each cell's text body at its spanned width
   // (reusing the same renderTextBody machinery via measureOnly) and take
   // max(tr@h, tallest single-row cell content). A rowSpan cell distributes
   // its content height across the rows it covers so it doesn't inflate the
   // first row.
-  const rowHeights = el.rows.map(r => emuToPx(r.height, scale));
+  const authoredRowHeights = el.rows.map(r => emuToPx(r.height, scale));
+  const rowHeights = [...authoredRowHeights];
+  const authoredRowsTotalEmu = el.rows.reduce((sum, row) => sum + row.height, 0);
+  // The graphic-frame extent is the table's authored outer height. PowerPoint
+  // can leave slack between that extent and the sum of positive a:tr@h minima;
+  // that discrepancy signals that text-driven row growth was present when the
+  // table was authored. When the positive minima already fill the frame, do not
+  // invent growth merely because browser font metrics wrap differently.
+  const hasAuthoredRowGrowthSignal = el.height > authoredRowsTotalEmu;
 
   // First pass: single-row (rowSpan ≤ 1) cells set their own row's minimum.
   for (let ri = 0; ri < el.rows.length; ri++) {
@@ -6543,6 +6832,7 @@ export function renderTable(
       if (cell.hMerge || cell.vMerge) continue;
       if ((cell.rowSpan || 1) > 1) continue;
       if (!cell.textBody) continue;
+      if (row.height > 0 && !hasAuthoredRowGrowthSignal) continue;
       const cellW = spannedWidth(ci, cell.gridSpan || 1);
       const needed = (renderTextBody(
         ctx, cell.textBody, 0, 0, cellW, 0, scale, null, 0, false, false,
@@ -6566,6 +6856,7 @@ export function renderTable(
       const hasAutoHeightRow = el.rows
         .slice(ri, Math.min(el.rows.length, ri + span))
         .some((spannedRow) => spannedRow.height === 0);
+      if (!hasAutoHeightRow && !hasAuthoredRowGrowthSignal) continue;
       const needed = (renderTextBody(
         ctx, cell.textBody, 0, 0, cellW, 0, scale, null, 0, false, false,
         '#000000', slideNumber, rc, undefined, true, undefined, false, hasAutoHeightRow,
@@ -6980,8 +7271,12 @@ export type SlideRenderOptions = RenderOptions & {
  * render options. They are an implementation detail of embedded-font lifetime
  * isolation, not a caller-configurable rendering policy. */
 type InternalSlideRenderOptions = SlideRenderOptions & {
+  cjkFallback?: CjkLang;
+  officeFontRoutes?: Readonly<Record<string, import('@silurus/ooxml-core').OfficeFontFallbackRoute>>;
+  googleSubstitutes?: boolean;
   embeddedFontAliases?: ReadonlyMap<string, string>;
   embeddedFontAuthoredFamilies?: ReadonlyMap<string, string>;
+  embeddedFontTuples?: ReadonlySet<string>;
   svgDecoder?: SvgBlobDecoder;
 };
 
@@ -7213,11 +7508,15 @@ async function renderSlideLeased(
   const pictureBulletImages = new Map<string, SvgImageSource | null>();
   const shapeFillImages = new Map<string, PreparedShapeFill | null>();
   const rc: RenderContext = {
+    cjkFallback: opts.cjkFallback ? pptxSlideCjkFallback(slide, opts.majorFont ?? null, opts.minorFont ?? null, opts.cjkFallback) : undefined,
     themeMajorFont: opts.majorFont ?? null,
     themeMinorFont: opts.minorFont ?? null,
     themeHlinkColor: opts.hlinkColor ?? null,
     embeddedFontAliases: opts.embeddedFontAliases,
     embeddedFontAuthoredFamilies: opts.embeddedFontAuthoredFamilies,
+    embeddedFontTuples: opts.embeddedFontTuples,
+    officeFontRoutes: opts.officeFontRoutes,
+    googleSubstitutes: opts.googleSubstitutes,
     // The backing store may have been clamped below `canvasSize × dpr`; downstream
     // crisp-offset math must use the SAME effective dpr the ctx was scaled by.
     dpr: effectiveDpr,

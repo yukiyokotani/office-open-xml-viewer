@@ -85,10 +85,19 @@ if (bitmap) {
             <tbody>
               <tr><th>Layout and paint</th><td>Main thread</td><td>Web Worker</td></tr>
               <tr><th>Best fit</th><td>Most previews and custom renderer objects</td><td>Large or complex files</td></tr>
-              <tr><th>Browser requirement</th><td>Canvas</td><td>Worker and OffscreenCanvas</td></tr>
+              <tr><th>Browser requirement</th><td>Worker and Canvas</td><td>Worker and OffscreenCanvas</td></tr>
             </tbody>
           </table>
         </div>
+        <p>
+          Both modes need to start a module Worker, so opaque-origin iframes such as
+          <code>sandbox="allow-scripts"</code> are not a supported embedding setup. For a regular
+          iframe, omit <code>sandbox</code>. To keep sandbox restrictions, serve the viewer
+          from a dedicated origin separate from the parent and use
+          <code>sandbox="allow-scripts allow-same-origin"</code> with a <code>src</code> URL.
+          A <code>srcdoc</code> frame inherits the parent's origin in this setup and cannot provide
+          that separation. Cross-origin assets still need appropriate CORS permissions.
+        </p>
         <p class="related"><a href="/bundle-size">See current bundle sizes →</a></p>
       </section>
 

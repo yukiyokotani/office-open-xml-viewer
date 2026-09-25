@@ -99,6 +99,9 @@ const SHARED_PAINT_IMPORTS = new Map([
     ['acquireBitmapCacheLease', 'value'],
     ['applyDuotone', 'value'],
     ['autoContrastColor', 'value'],
+    // A retained run-shading preset is rasterized as an 8x8 paint tile;
+    // this helper cannot measure text or change the layout result.
+    ['buildPatternBitmap', 'value'],
     ['captureDecodedBitmapCacheEpoch', 'value'],
     ['canvasFontString', 'value'],
     ['clampCanvasSize', 'value'],
@@ -2048,9 +2051,9 @@ function assertBodyKernelServiceOwner(root) {
     && ts.isIdentifier(parentCall.arguments[0])
     && parentCall.arguments[0].text === 'services'
     && parentCall.arguments[1] === call
-    && call.arguments.length === 3
+    && call.arguments.length === 4
     && call.arguments.every((argument, index) => (
-      ts.isIdentifier(argument) && argument.text === ['source', 'context', 'localMetrics'][index]
+      ts.isIdentifier(argument) && argument.text === ['source', 'context', 'fontMetrics', 'cjkFallback'][index]
     ));
   let insideOwner = false;
   for (let node = parentCall; node; node = node.parent) {

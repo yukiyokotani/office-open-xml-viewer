@@ -10,6 +10,12 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 const initMock = vi.fn();
 const openLegacyMock = vi.fn();
+const fontMocks = vi.hoisted(() => ({
+  load: vi.fn(),
+  unload: vi.fn(),
+  requests: vi.fn(),
+  render: vi.fn(),
+}));
 let bootstrapEmbeddedFonts: unknown[] = [];
 let extractedFontCount = 0;
 function deferred<T>() {
@@ -83,6 +89,16 @@ vi.mock('./wasm/pptx_parser.js', () => ({
 vi.mock('@silurus/ooxml-legacy-converter/internal/direct-ppt-engine', () => ({
   openLegacyPptSource: (...args: unknown[]) => openLegacyMock(...args),
 }));
+vi.mock('@silurus/ooxml-core', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@silurus/ooxml-core')>(),
+  loadOfficeFontFallbacks: fontMocks.load,
+  unloadOfficeFontFallbacks: fontMocks.unload,
+}));
+vi.mock('./google-fonts', async (importOriginal) => ({
+  ...await importOriginal<typeof import('./google-fonts')>(),
+  pptxSlideOfficeFontRequests: fontMocks.requests,
+}));
+vi.mock('./renderer', () => ({ renderSlideWithEmbeddedFonts: fontMocks.render }));
 
 interface FakeSelf {
   onmessage: ((e: MessageEvent) => void) | null;
@@ -114,6 +130,10 @@ async function loadRenderWorker(): Promise<FakeSelf> {
 beforeEach(() => {
   initMock.mockReset();
   openLegacyMock.mockReset();
+  fontMocks.load.mockReset();
+  fontMocks.unload.mockReset();
+  fontMocks.requests.mockReset();
+  fontMocks.render.mockReset();
   bootstrapEmbeddedFonts = [];
   extractedFontCount = 0;
 });
@@ -271,5 +291,45 @@ describe('pptx render-worker.ts — init failure never hangs a request (AR4)', (
       kind: 'presentationReady',
       id: 12,
     })));
+  });
+
+  it('keeps the current slide and its Office font after rejecting a second parse', async () => {
+    initMock.mockResolvedValue(undefined);
+    const face = { family: 'active-deck-face' };
+    const route = { family: 'active-deck-face' };
+    fontMocks.requests.mockReturnValue([{ family: 'Calibri', weight: 400, style: 'normal' }]);
+    fontMocks.load.mockResolvedValue({ faces: [face], routes: { 'calibri:400:normal': route } });
+    fontMocks.render.mockResolvedValue(undefined);
+    vi.stubGlobal('OffscreenCanvas', class { constructor(_width: number, _height: number) {} });
+    const fake = await loadRenderWorker();
+    const send = (data: unknown) => fake.onmessage?.({ data } as MessageEvent);
+
+    send({ kind: 'init', wasmUrl: 'x' });
+    send({ kind: 'parse', id: 30, buffer: new ArrayBuffer(4), resourcePolicy });
+    await vi.waitFor(() => expect(fake.posted).toContainEqual(expect.objectContaining({
+      kind: 'presentationReady', id: 30,
+    })));
+    send({ kind: 'collectRuns', id: 31, slideIndex: 0, width: 100 });
+    await vi.waitFor(() => expect(fake.posted).toContainEqual(expect.objectContaining({
+      kind: 'runsCollected', id: 31,
+    })));
+    expect(fontMocks.load).toHaveBeenCalledTimes(1);
+
+    send({ kind: 'parse', id: 32, buffer: new ArrayBuffer(4), resourcePolicy });
+    await vi.waitFor(() => expect(fake.posted).toContainEqual(expect.objectContaining({
+      kind: 'error', id: 32, code: 'ooxml-pptx-parse-already-started',
+    })));
+    send({ kind: 'collectRuns', id: 33, slideIndex: 0, width: 100 });
+    await vi.waitFor(() => expect(fake.posted).toContainEqual(expect.objectContaining({
+      kind: 'runsCollected', id: 33,
+    })));
+
+    expect(fontMocks.unload).not.toHaveBeenCalled();
+    expect(fontMocks.load).toHaveBeenCalledTimes(1);
+    expect(fontMocks.render).toHaveBeenLastCalledWith(
+      expect.anything(), expect.anything(), expect.any(Number), expect.any(Number),
+      expect.objectContaining({ officeFontRoutes: { 'calibri:400:normal': route } }),
+      expect.any(Function),
+    );
   });
 });

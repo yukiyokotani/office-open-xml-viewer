@@ -3,6 +3,7 @@ import type { FindHighlightColors, FindMatch, FindMatchesOptions, HyperlinkTarge
 import {
   computeVisibleWindow,
   createVirtualScrollGeometry,
+  resolveItemStartScrollTop,
   type VirtualScrollGeometry,
   type VisibleRange,
 } from '@silurus/ooxml-core/internal/virtual-scroll';
@@ -649,6 +650,7 @@ export class DocxScrollViewer implements ZoomableViewer {
           password: this._opts.password,
           legacyConversion: conversion.options,
           useGoogleFonts: this._opts.useGoogleFonts,
+          cjkFallback: this._opts.cjkFallback,
           maxZipEntryBytes: this._opts.maxZipEntryBytes,
           resourceLimits: this._opts.resourceLimits,
           debug: this._opts.debug,
@@ -2253,7 +2255,9 @@ export class DocxScrollViewer implements ZoomableViewer {
    * Scroll so page `index`'s top edge sits at the viewport top. Clamps `index` to
    * `[0, pageCount-1]` (the pager convention) and the resulting scrollTop to
    * `[0, totalHeight − viewportHeight]` so the last pages don't scroll past the
-   * end. A no-op when nothing is loaded or the document is empty.
+   * end. Fractional item-start targets are rounded forward to a whole CSS pixel
+   * so an integer-quantizing scroll surface cannot land on the preceding page.
+   * A no-op when nothing is loaded or the document is empty.
    *
    * `opts.behavior` ('auto' | 'smooth', default 'auto') is honoured via
    * `scrollHost.scrollTo({ top, behavior })` when the host supports it (a real
@@ -2280,7 +2284,7 @@ export class DocxScrollViewer implements ZoomableViewer {
     );
     const target = r.offsets[clamped] ?? 0;
     const maxTop = Math.max(0, r.totalHeight - this._scrollHost.clientHeight);
-    const top = Math.min(maxTop, Math.max(0, target));
+    const top = resolveItemStartScrollTop(target, maxTop);
     const host = this._scrollHost as HTMLDivElement & {
       scrollTo?: (opts: { top: number; behavior?: 'auto' | 'smooth' }) => void;
     };

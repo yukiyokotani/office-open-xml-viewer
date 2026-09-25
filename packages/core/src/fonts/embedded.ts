@@ -28,6 +28,16 @@ import { activeFontSet, withFontCeiling } from './preload.js';
 import { retainFace, releaseFaces, _resetFontRegistryForTests } from './font-registry.js';
 import { HARD_MAX_EMBEDDED_FONT_BYTES } from '../worker/resource-policy.generated.js';
 
+/** Shared admission check for work that must inspect an embedded font before
+ * registration. Keeping the generated ceiling private prevents format loaders
+ * from copying the policy value or exposing it as an unrelated public constant. */
+export function embeddedFontBytesAreWithinLimit(
+  bytes: Readonly<{ byteLength: number }>,
+  maxBytes = HARD_MAX_EMBEDDED_FONT_BYTES,
+): boolean {
+  return bytes.byteLength > 0 && bytes.byteLength <= maxBytes;
+}
+
 /** Test hook — clears the shared FontFace refcount registry (does NOT touch any
  *  FontFaceSet; tests install a fresh fake set per case). Re-exported here under
  *  the embedded name so existing embedded-font tests keep their reset call; the
@@ -161,7 +171,7 @@ export async function registerEmbeddedFonts(
   const failed: string[] = [];
   for (const face of faces) {
     try {
-      if (face.bytes.length === 0 || face.bytes.length > maxBytes) {
+      if (!embeddedFontBytesAreWithinLimit(face.bytes, maxBytes)) {
         failed.push(face.family);
         continue;
       }

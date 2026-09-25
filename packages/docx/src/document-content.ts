@@ -13,6 +13,7 @@ import type {
 
 type InternalRenderedFontAxes = Readonly<{
   fontFamilyHighAnsi?: string | null;
+  langEastAsia?: string;
   fontFamilyEastAsia?: string | null;
   fontFamilyCs?: string | null;
   boldCs?: boolean;
@@ -24,14 +25,21 @@ type InternalRenderedFontAxes = Readonly<{
  * affect line metrics even when they paint no glyphs. */
 export interface DocxRenderedTextUsage {
   text: string;
+  eastAsiaLanguage?: string;
   fontFamilies: readonly (string | null | undefined)[];
+  /** Latin/highAnsi slot after paragraph inheritance; null means theme minor.
+   * Undefined marks usage records that describe only another script slot. */
+  latinFontFamily?: string | null;
   bold?: boolean;
   italic?: boolean;
 }
 
 function* shapeTextUsages(shape: ShapeRun): Generator<DocxRenderedTextUsage> {
   if (shape.textPath) {
-    yield { text: shape.textPath.string, fontFamilies: [shape.textPath.fontFamily], bold: shape.textPath.bold, italic: shape.textPath.italic };
+    yield {
+      text: shape.textPath.string,
+      fontFamilies: [shape.textPath.fontFamily],
+    };
   }
   for (const block of shape.textBlocks ?? []) {
     yield* shapeBlockUsages(block);
@@ -43,8 +51,6 @@ function* shapeBlockUsages(block: ShapeText): Generator<DocxRenderedTextUsage> {
     yield {
       text: block.numbering.text,
       fontFamilies: [block.numbering.fontFamily, block.numbering.fontFamilyEastAsia],
-      bold: false,
-      italic: false,
     };
   }
   if (block.runs?.length) {
@@ -57,12 +63,19 @@ function* shapeBlockUsages(block: ShapeText): Generator<DocxRenderedTextUsage> {
           run.fontFamilyEastAsia,
           block.fontFamily,
         ],
+        latinFontFamily: run.fontFamily ?? block.fontFamily ?? null,
         bold: run.bold ?? block.bold,
         italic: run.italic ?? block.italic,
       };
     }
   } else {
-    yield { text: block.text, fontFamilies: [block.fontFamily], bold: block.bold, italic: block.italic };
+    yield {
+      text: block.text,
+      fontFamilies: [block.fontFamily],
+      latinFontFamily: block.fontFamily ?? null,
+      bold: block.bold,
+      italic: block.italic,
+    };
   }
 }
 
@@ -71,13 +84,18 @@ function* runUsages(run: DocRun): Generator<DocxRenderedTextUsage> {
     const text = run as DocxTextRun & InternalRenderedFontAxes;
     yield {
       text: run.text,
+      eastAsiaLanguage: text.langEastAsia,
       fontFamilies: [run.fontFamily, text.fontFamilyHighAnsi, run.fontFamilyEastAsia],
+      latinFontFamily: run.fontFamily ?? text.fontFamilyHighAnsi ?? null,
       bold: run.bold,
       italic: run.italic,
     };
-    yield {
+    if (run.fontFamilyCs) yield {
       text: run.text,
+      eastAsiaLanguage: text.langEastAsia,
       fontFamilies: [run.fontFamilyCs],
+      // ECMA-376 §17.3.2.3/§17.3.2.17: bCs/iCs are independent of b/i.
+      // Probe the tuple that complex-script paint actually requests.
       bold: run.boldCs ?? false,
       italic: run.italicCs ?? false,
     };
@@ -85,12 +103,15 @@ function* runUsages(run: DocRun): Generator<DocxRenderedTextUsage> {
     const field = run as FieldRun & InternalRenderedFontAxes;
     yield {
       text: field.fallbackText,
+      eastAsiaLanguage: field.langEastAsia,
       fontFamilies: [field.fontFamily, field.fontFamilyHighAnsi, field.fontFamilyEastAsia],
+      latinFontFamily: field.fontFamily ?? field.fontFamilyHighAnsi ?? null,
       bold: field.bold,
       italic: field.italic,
     };
-    yield {
+    if (field.fontFamilyCs) yield {
       text: field.fallbackText,
+      eastAsiaLanguage: field.langEastAsia,
       fontFamilies: [field.fontFamilyCs],
       bold: field.boldCs ?? false,
       italic: field.italicCs ?? false,
@@ -122,7 +143,19 @@ function* paragraphUsages(paragraph: DocParagraph): Generator<DocxRenderedTextUs
       ],
     };
   }
-  for (const run of paragraph.runs) yield* runUsages(run);
+  for (const run of paragraph.runs) {
+    for (const usage of runUsages(run)) {
+      const inherited = usage.fontFamilies.some(Boolean) ? usage.fontFamilies
+        : [paragraph.defaultFontFamily, paragraph.defaultFontFamilyEastAsia];
+      yield {
+        ...usage,
+        fontFamilies: inherited,
+        ...(usage.latinFontFamily === null
+          ? { latinFontFamily: paragraph.defaultFontFamily ?? null }
+          : {}),
+      };
+    }
+  }
 }
 
 function* tableUsages(table: DocTable): Generator<DocxRenderedTextUsage> {
@@ -157,10 +190,10 @@ function* bodyUsages(body: readonly BodyElement[]): Generator<DocxRenderedTextUs
   }
 }
 
-/** Traverse every rendered DOCX story once. This is shared by script-aware web
- * font preloading and exact-local metric discovery so those paths cannot drift
- * on nested tables, section headers/footers, notes, or drawing text. Comments
- * are excluded because the page renderer does not paint comment bodies. */
+/** Traverse every rendered DOCX story once. Script-aware web preloading and
+ * resolved native-resource probing share this traversal so those paths cannot
+ * drift on nested tables, section headers/footers, notes, or drawing text.
+ * Comments are excluded because the page renderer does not paint them. */
 export function* docxRenderedTextUsages(
   doc: DocxDocumentModel,
 ): Generator<DocxRenderedTextUsage> {

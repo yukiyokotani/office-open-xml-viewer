@@ -1,13 +1,15 @@
 // Entry for the pre-bundled MathJax v4 + STIX Two Math converter.
 //
 // esbuild bundles this (and only this) into `assets/mathjax-stix2.js`, an
-// opaque, tree-shaken, minified IIFE (~3 MB). The renderer loads that asset
+// opaque, tree-shaken, minified IIFE (~4 MB). The renderer loads that asset
 // lazily, so it never bloats non-math viewers and is never re-bundled by the
 // consuming app's bundler. The STIX2 font is baked in statically: the
 // math-relevant glyph ranges below are imported up-front so `dynamicSetup`
 // marks them loaded → DOM-free, zero network, zero cross-origin (no on-demand
-// range fetches). Non-math ranges (cyrillic, phonetics, dingbats, accented
-// Latin variants) are intentionally omitted to keep the bundle small.
+// range fetches). ECMA-376's shared-math schema permits m:sty p/b/i/bi on
+// equation runs; Latin glyphs in those four styles need all four ranges.
+// Cyrillic, phonetics and dingbats remain omitted to
+// keep the opt-in asset smaller.
 import { mathjax } from '@mathjax/src/mjs/mathjax.js';
 import { MathML } from '@mathjax/src/mjs/input/mathml.js';
 import { SVG } from '@mathjax/src/mjs/output/svg.js';
@@ -22,6 +24,10 @@ import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/double-struck.js';
 import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/enclosed.js';
 import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/fraktur.js';
 import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/greek.js';
+import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/latin-b.js';
+import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/latin-bi.js';
+import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/latin-i.js';
+import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/latin.js';
 import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/math.js';
 import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/monospace.js';
 import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/sans-serif.js';
@@ -35,6 +41,14 @@ import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/variants.js';
 
 const adaptor = liteAdaptor();
 RegisterHTMLHandler(adaptor);
+// MathJax v4 advertises every STIX2 dynamic range to a new font instance,
+// including ranges we did not bundle. Their placeholder characters otherwise
+// trigger an async load that this self-contained asset cannot satisfy. Remove
+// those ranges before SVG constructs its font, so their characters use MathJax's
+// synchronous unknown-glyph fallback instead of a retry and unhandled rejection.
+for (const name of ['cyrillic', 'dingbats', 'phonetics']) {
+  delete MathJaxStix2Font.dynamicFiles[name];
+}
 // `linebreaks.inline:false` + `displayOverflow:'overflow'`: never auto-break an
 // equation into multiple sibling <svg>s (MathJax v4 separates them with
 // <mjx-break>, which our single-<svg> extraction / <img> rasterization can't
@@ -47,13 +61,13 @@ const svgJax = new SVG({
 });
 const doc = mathjax.document('', { InputJax: new MathML(), OutputJax: svgJax });
 
-// Force-load every dynamic glyph range into the font instance up-front.
+// Force-load every bundled dynamic glyph range into the font instance up-front.
 //
 // `dynamicSetup` (run by the range imports above) only stores a `setup(font)`
 // closure on each `dynamicFiles` entry; the glyphs aren't defined until that
 // closure runs (normally triggered by an on-demand, async, cross-origin fetch).
 // Since the ranges are already bundled, we run the closures synchronously here
-// against the output's font instance. This makes EVERY styled glyph (script,
+// against the output's font instance. This makes every bundled styled glyph (script,
 // fraktur, double-struck, calligraphic, sans-serif, stretchy bars, …) render
 // as a `<path>` immediately — no `<text>` fallback (wrong font/metrics), no
 // "retry" exception, and no network request.

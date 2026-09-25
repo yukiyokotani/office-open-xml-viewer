@@ -35,7 +35,7 @@ type Any = any;
 // ---------- recording 2D context ----------
 interface FillTextCall { text: string; x: number; y: number; font: string; }
 
-function makeRecordingCanvas(): {
+function makeRecordingCanvas(metricRatios?: readonly [number, number]): {
   canvas: HTMLCanvasElement;
   fillTextCalls: FillTextCall[];
 } {
@@ -50,8 +50,8 @@ function makeRecordingCanvas(): {
       const p = px();
       return {
         width: [...s].length * p,
-        fontBoundingBoxAscent: p * 0.8,
-        fontBoundingBoxDescent: p * 0.2,
+        fontBoundingBoxAscent: p * (metricRatios?.[0] ?? 0.8),
+        fontBoundingBoxDescent: p * (metricRatios?.[1] ?? 0.2),
         actualBoundingBoxAscent: p * 0.8,
         actualBoundingBoxDescent: p * 0.2,
       } as TextMetrics;
@@ -79,7 +79,7 @@ function makeRecordingCanvas(): {
 
 // A SYNTHETIC, untabled font: the mock canvas reports a clean 1.0 em box
 // (ascent 0.8 / descent 0.2) for it, so these tests isolate the line-spacing
-// MULTIPLIER from the substituted-font single-line FLOOR (intendedSingleLinePx).
+// MULTIPLIER from any selected-resource or reference single-line floor.
 const TEST_FONT = 'Synthetic Untabled Serif';
 
 function textRun(text: string): DocxTextRun {
@@ -138,6 +138,100 @@ const atLeast = (pt: number): LineSpacing => ({ value: pt, rule: 'atLeast', expl
 const ASCENT = 8;
 const NATURAL = 10;
 const TOL = 0.05;
+
+describe('Word for Mac uniform positioned text in an automatic line', () => {
+  const arial = (text: string, position: number, size = 10, family = 'Arial'): BodyElement => {
+    const p = paragraph(text, auto(276 / 240)) as Any;
+    p.defaultFontFamily = family;
+    p.defaultFontSize = size;
+    p.runs[0].fontFamily = family;
+    p.runs[0].fontSize = size;
+    p.runs[0].position = position;
+    return p as BodyElement;
+  };
+
+  async function baselines(...paragraphs: BodyElement[]): Promise<number[]> {
+    const family = (paragraphs[0] as Any).runs[0].fontFamily as string;
+    const ratios: readonly [number, number] = family === 'Calibri'
+      ? [1950 / 2048, 550 / 2048]
+      : [1854 / 2048, 434 / 2048];
+    const { canvas, fillTextCalls } = makeRecordingCanvas(ratios);
+    const model = docWith(...paragraphs) as Any;
+    model.fontFamilyClasses = { [family]: 'swiss' };
+    // The recording Canvas models a loaded Office face. Make that identity
+    // explicit so its pinned hhea reference is not lent to a CSS fallback.
+    const exactLocal = testFontSnapshot([{ family }]);
+    const key = family.toLowerCase();
+    exactLocal[key] = {
+      ...exactLocal[key], sourceIdentity: `office-local:local("${family}")`,
+    };
+    await renderDocumentToCanvas(model, canvas, 0, {
+      dpr: 1,
+      width: 400,
+      layoutServices: createLayoutServices(model, {
+        localMetrics: exactLocal,
+        measureContext: canvas.getContext('2d'),
+      }),
+    });
+    return paragraphs.map((p) => {
+      const label = (p as Any).runs[0].text as string;
+      const call = fillTextCalls.find((c) => c.text === label);
+      expect(call, label).toBeDefined();
+      return call!.y;
+    });
+  }
+
+  it('keeps raised 10pt Arial at the Word-observed baseline pitch', async () => {
+    const y = await baselines(arial('A', 3), arial('B', 3), arial('C', 3));
+    // Word for Mac PDF: 14.16, 14.16, 13.92 pt after twip rounding.
+    expect(y[1]! - y[0]!).toBeCloseTo(13.2 + 3 - 434 / 2048 * 10, 1);
+    expect(y[2]! - y[1]!).toBeCloseTo(13.2 + 3 - 434 / 2048 * 10, 1);
+  });
+
+  it('keeps a smaller raise inside the 16pt face descent reserve', async () => {
+    const y = await baselines(arial('A', 3, 16), arial('B', 3, 16));
+    // At 16pt, 3pt is below Arial's 3.39pt descent; Word stays at 21.12pt.
+    expect(y[1]! - y[0]!).toBeCloseTo(16 * 1.15 * 276 / 240, 1);
+  });
+
+  it('uses Calibri’s larger descent reserve without a font-specific offset', async () => {
+    const y = await baselines(
+      arial('A', 3, 10, 'Calibri'),
+      arial('B', 3, 10, 'Calibri'),
+    );
+    // Word for Mac: 14.32pt; the OpenType projection yields about 14.35pt.
+    expect(y[1]! - y[0]!).toBeCloseTo((2500 / 2048) * 10 * 1.15 + 3 - (550 / 2048) * 10, 1);
+  });
+
+  it('retains Word’s ordinary pitch for a uniformly lowered run', async () => {
+    const y = await baselines(arial('A', -3), arial('B', -3));
+    expect(y[1]! - y[0]!).toBeCloseTo(10 * 1.15 * 276 / 240, 1);
+  });
+
+  it('retains the full relative shift when positions are mixed on a line', async () => {
+    const mixed = (label: string): BodyElement => {
+      const p = arial(label, 0) as Any;
+      p.runs.push({ ...p.runs[0], text: 'X', position: 3 });
+      return p as BodyElement;
+    };
+    const y = await baselines(mixed('A'), mixed('B'));
+    // Word's mixed 0/+3pt control advances by about 16.2pt.
+    expect(y[1]! - y[0]!).toBeGreaterThan(16.1);
+    expect(y[1]! - y[0]!).toBeLessThan(16.4);
+  });
+
+  it('does not shrink exact or atLeast line allocation', async () => {
+    const raised = arial('A', 3) as Any;
+    raised.lineSpacing = exact(15);
+    const next = arial('B', 3) as Any;
+    next.lineSpacing = atLeast(15);
+    const last = arial('C', 3) as Any;
+    last.lineSpacing = atLeast(15);
+    const y = await baselines(raised, next, last);
+    expect(y[1]! - y[0]!).toBeCloseTo(15, 1);
+    expect(y[2]! - y[1]!).toBeGreaterThanOrEqual(15);
+  });
+});
 
 describe('lineRule=auto (multiple spacing) pins the baseline at natural ascent — extra leading below (§17.3.1.33, #990)', () => {
   it('1.0× places the baseline at top + ascent (no extra)', async () => {
@@ -238,7 +332,7 @@ describe('lineRule=auto — the substituted-font single-line FLOOR is centred; o
     await renderDocumentToCanvas(model, canvas, 0, {
       dpr: 1, width: 400,
       layoutServices: createLayoutServices(model, {
-        localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]), measureContext: canvas.getContext('2d'),
+        localMetrics: testFontSnapshot([{ family: 'Times New Roman', lineHeightRatio: 2355 / 2048 }]), measureContext: canvas.getContext('2d'),
       }),
     });
     const t = fillTextCalls.find((c) => c.text === 'T');

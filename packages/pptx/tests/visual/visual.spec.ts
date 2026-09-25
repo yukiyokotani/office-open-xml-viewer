@@ -1,10 +1,10 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'fs';
+import { mkdirSync, existsSync, readFileSync, readdirSync, writeFileSync } from 'fs';
 import { PNG } from 'pngjs';
 import pixelmatch from 'pixelmatch';
 import {
   captureOrComparePrivateItem,
-  listPrivateCorpus,
+  clearPrivateCandidateItemOutput,
   preparePrivateCorpus,
   verifyPrivateItemManifest,
 } from '../../../../tests/visual/private-corpus.mjs';
@@ -237,7 +237,10 @@ test.describe('visual regression', () => {
 });
 
 const PPTX_PRIVATE_CORPUS = process.env.VRT_PRIVATE_CORPUS === '1'
-  ? listPrivateCorpus('pptx')
+  ? readdirSync('public/private/pptx')
+      .filter((file) => file.endsWith('.pptx') && !file.startsWith('~$'))
+      .map((file) => `pptx/${file}`)
+      .sort((left, right) => left.localeCompare(right, undefined, { numeric: true }))
   : [];
 
 if (process.env.VRT_PRIVATE_CORPUS === '1') {
@@ -249,6 +252,7 @@ test.describe('private corpus self regression', () => {
     test(file, async ({ page }) => {
       test.setTimeout(600_000);
       const stem = file.slice(0, -'.pptx'.length);
+      if (!SNAPSHOT) clearPrivateCandidateItemOutput({ stem, itemKind: 'slide' });
       const openSlide = async (slideIndex: number) => {
         await page.goto(
           `/tests/visual/fixture.html?pptx=${encodeURIComponent(`private/${stem}`)}`

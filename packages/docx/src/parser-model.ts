@@ -857,14 +857,20 @@ function acquiredBodyParagraph(paragraph: DocParagraph, source: SourceRef) {
     contextualSpacing: paragraph.contextualSpacing === true,
     styleId: paragraph.styleId ?? null,
     inkless: !paragraphHasUnavailableDrawing(paragraph) && isInklessParagraph(paragraph),
+    onlyVisibleText: paragraph.runs.every((run) => run.type === 'text')
+      && paragraph.runs.some((run) => run.type === 'text' && /\S/u.test(run.text)),
     ...(pageOwnedAnchorOccurrenceIds.length === 0 ? {} : { pageOwnedAnchorOccurrenceIds }),
   });
 }
 
-function acquiredBodyTable(source: SourceRef) {
+function acquiredBodyTable(source: SourceRef, table: TableLayoutSource) {
+  const positioning = effectiveTablePositioning(table);
   return Object.freeze({
     kind: 'table' as const,
     source,
+    ...(positioning?.vertAnchor === 'page' || positioning?.vertAnchor === 'margin'
+      ? { pageOwnedFloatingTable: true }
+      : {}),
   });
 }
 
@@ -882,7 +888,7 @@ function bodyLayoutSequenceInput(
         logicalSequenceId: entry.logicalSequenceId,
         source: bodySourceAt(firstIndex),
         tables: Object.freeze(entry.tables.map((table, tableIndex) => Object.freeze({
-          ...acquiredBodyTable(bodySourceAt(firstIndex + tableIndex)),
+          ...acquiredBodyTable(bodySourceAt(firstIndex + tableIndex), table),
           rowCount: table.rows.length,
         }))),
       });
@@ -901,7 +907,7 @@ function bodyLayoutSequenceInput(
     if (element.type === 'table') {
       return Object.freeze({
         kind: 'body-block' as const,
-        block: acquiredBodyTable(source),
+        block: acquiredBodyTable(source, element),
       });
     }
     if (element.type === 'pageBreak' || element.type === 'columnBreak') {
@@ -909,6 +915,9 @@ function bodyLayoutSequenceInput(
         kind: 'authored-break' as const,
         source,
         break: element.type === 'pageBreak' ? 'page' as const : 'column' as const,
+        ...(element.type === 'pageBreak' && element.origin !== undefined
+          ? { origin: element.origin }
+          : {}),
         ...(element.type === 'pageBreak' && element.parity !== undefined
           ? { parity: element.parity }
           : {}),

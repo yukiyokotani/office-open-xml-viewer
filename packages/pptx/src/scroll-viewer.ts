@@ -1,6 +1,7 @@
 import { EMU_PER_PX, zoomStepScale, anchoredZoomOffset, nextZoomStep, prevZoomStep, fitScale, type FindHighlightColors, type FindMatch, type FindMatchesOptions, type HyperlinkTarget, type OoxmlResourceMetrics, type ViewerContextMenuEvent, type ZoomableViewer, openExternalHyperlink } from '@silurus/ooxml-core';
 import {
   computeUniformVisibleWindow,
+  resolveItemStartScrollTop,
   type VisibleWindow,
 } from '@silurus/ooxml-core/internal/virtual-scroll';
 import {
@@ -43,6 +44,7 @@ import {
   subscribePptxLayout,
   type PptxLayoutPublication,
 } from './presentation-layout-events';
+import { createPptxLoadingLayer } from './loading-indicator';
 
 /**
  * Debounce window (ms) after the last `setScale` in a zoom burst before the
@@ -605,6 +607,7 @@ export class PptxScrollViewer implements ZoomableViewer {
           password: this._opts.password,
           legacyConversion: conversion.options,
           useGoogleFonts: this._opts.useGoogleFonts,
+          cjkFallback: this._opts.cjkFallback,
           maxZipEntryBytes: this._opts.maxZipEntryBytes,
           resourceLimits: this._opts.resourceLimits,
           debug: this._opts.debug,
@@ -1074,26 +1077,7 @@ export class PptxScrollViewer implements ZoomableViewer {
       'position:absolute;top:0;left:0;width:100%;height:100%;' +
       'overflow:hidden;pointer-events:none;';
     wrapper.appendChild(highlightLayer);
-    const loadingLayer = document.createElement('span');
-    loadingLayer.style.cssText = [
-      'position:absolute',
-      'top:0',
-      'right:0',
-      'bottom:0',
-      'left:0',
-      'display:none',
-      'align-items:center',
-      'justify-content:center',
-      'background:rgba(255,255,255,0.72)',
-      'pointer-events:none',
-      'z-index:4',
-    ].join(';');
-    loadingLayer.setAttribute('role', 'status');
-    loadingLayer.setAttribute('aria-live', 'polite');
-    loadingLayer.setAttribute('aria-label', 'Loading slide');
-    const progress = document.createElement('progress');
-    progress.setAttribute('aria-hidden', 'true');
-    loadingLayer.appendChild(progress);
+    const loadingLayer = createPptxLoadingLayer(document);
     wrapper.appendChild(loadingLayer);
     let commentMarkerLayer: HTMLDivElement | null = null;
     let commentMargin: HTMLDivElement | null = null;
@@ -2338,7 +2322,9 @@ export class PptxScrollViewer implements ZoomableViewer {
    * Scroll so slide `index`'s top edge sits at the viewport top. Clamps `index` to
    * `[0, slideCount-1]` (the pager convention) and the resulting scrollTop to
    * `[0, totalHeight − viewportHeight]` so the last slides don't scroll past the
-   * end. A no-op when nothing is loaded or the deck is empty.
+   * end. Fractional item-start targets are rounded forward to a whole CSS pixel
+   * so an integer-quantizing scroll surface cannot land on the preceding slide.
+   * A no-op when nothing is loaded or the deck is empty.
    *
    * `opts.behavior` ('auto' | 'smooth', default 'auto') is honoured via
    * `scrollHost.scrollTo({ top, behavior })` when the host supports it (a real
@@ -2359,7 +2345,7 @@ export class PptxScrollViewer implements ZoomableViewer {
     const r = this._rangeAt(0, this._overscan());
     const target = this._slideOffset(clamped);
     const maxTop = Math.max(0, r.totalHeight - this._scrollHost.clientHeight);
-    const top = Math.min(maxTop, Math.max(0, target));
+    const top = resolveItemStartScrollTop(target, maxTop);
     const host = this._scrollHost as HTMLDivElement & {
       scrollTo?: (opts: { top: number; behavior?: 'auto' | 'smooth' }) => void;
     };

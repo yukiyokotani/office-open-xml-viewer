@@ -11,9 +11,10 @@ import init, { DocxArchive, reinit } from './wasm/docx_parser.js';
 import {
   decodeDataUrl,
   preloadGoogleFonts,
+  loadOfficeFontFallbacks,
+  unloadOfficeFontFallbacks,
   unloadGoogleFonts,
   unregisterEmbeddedFonts,
-  unloadLocalFontMetrics,
   WasmParserHost,
   dropDecodedBitmapCache,
   dropSvgImageCache,
@@ -38,9 +39,8 @@ import {
 } from '@silurus/ooxml-core/worker';
 import { prepareMathRuns, renderLayoutSourceToCanvas } from './renderer';
 import { createLayoutServices } from './layout-runtime.js';
-import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts';
+import { DOCX_GOOGLE_FONTS, docxFontPreloadNames, docxOfficeFontFallbackRequests } from './google-fonts';
 import { loadEmbeddedFonts } from './embedded-fonts';
-import { loadDocxLocalFontMetrics } from './local-font-metrics';
 import type {
   RenderWorkerResponse,
   RenderWorkerWireRequest,
@@ -105,17 +105,17 @@ let layoutAbort: AbortController | null = null;
  *  host can only render one of per frame. */
 const LAYOUT_PROGRESS_POST_INTERVAL_MS = 100;
 let renderers: LoadedWorkerRenderers = {};
-let localMetricFontFaces: FontFace[] = [];
 let googleFontFaces: FontFace[] = [];
 let embeddedFontFaces: FontFace[] = [];
+let officeFontFaces: FontFace[] = [];
 function releaseRetainedFonts(): void {
-  const local = localMetricFontFaces;
+  const office = officeFontFaces;
   const google = googleFontFaces;
   const embedded = embeddedFontFaces;
-  localMetricFontFaces = [];
+  officeFontFaces = [];
   googleFontFaces = [];
   embeddedFontFaces = [];
-  try { unloadLocalFontMetrics(local); } catch {}
+  try { unloadOfficeFontFallbacks(office); } catch {}
   try { unloadGoogleFonts(google); } catch {}
   try { unregisterEmbeddedFonts(embedded); } catch {}
 }
@@ -277,24 +277,15 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
         revisions: model.revisions ?? [],
       };
       let googleFaces: FontFace[] = [];
-      let embeddedFaces: FontFace[] = [];
-      let localFaces: FontFace[] = [];
+      let embeddedFonts: Awaited<ReturnType<typeof loadEmbeddedFonts>> = { faces: [], metrics: {}, routes: [] };
+      let officeFaces: FontFace[] = [];
       let fontsTransferred = false;
       try {
-      if (req.useGoogleFonts) {
-        // Pagination measures text, so fonts must land before canonical layout —
-        // same ordering the main-mode load() guarantees.
-        googleFaces = await preloadGoogleFonts(
-          docxFontPreloadNames(model),
-          DOCX_GOOGLE_FONTS,
-        );
-        if (requestedGeneration !== parseGeneration) throw new Error('render-worker parse was superseded');
-      }
       // ECMA-376 §17.8.1 / §17.8.3 — register embedded fonts into the worker's
       // FontFaceSet (self.fonts) before pagination measures text. Bytes are read
       // straight from the retained archive (extract_image reads any zip entry).
       if (model.embeddedFonts?.length) {
-        embeddedFaces = await loadEmbeddedFonts(model, async (p) => {
+        embeddedFonts = await loadEmbeddedFonts(model, async (p) => {
           if (requestedGeneration !== parseGeneration) {
             throw new Error('render-worker parse was superseded');
           }
@@ -302,18 +293,30 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
         });
         if (requestedGeneration !== parseGeneration) throw new Error('render-worker parse was superseded');
       }
-      const localMetrics = await loadDocxLocalFontMetrics(model);
-      localFaces = localMetrics.faces;
+      const officeFonts = await loadOfficeFontFallbacks(docxOfficeFontFallbackRequests(model).filter((request) =>
+        !embeddedFonts.routes.some((route) => route.requestedFamily.toLowerCase() === request.family.toLowerCase()
+          && route.weight === (request.weight ?? 400) && route.style === (request.style ?? 'normal'))));
+      officeFaces = officeFonts.faces;
       if (requestedGeneration !== parseGeneration) throw new Error('render-worker parse was superseded');
+      if (req.useGoogleFonts) {
+        // Pagination measures text, so each admitted face must be available
+        // before canonical layout in both worker and main mode.
+        const names = docxFontPreloadNames(model, req.cjkFallback).filter((name) =>
+          name?.toLowerCase() !== 'calibri' || !officeFonts.routes.calibri);
+        googleFaces = await preloadGoogleFonts(names, DOCX_GOOGLE_FONTS);
+        if (requestedGeneration !== parseGeneration) throw new Error('render-worker parse was superseded');
+      }
       let preparedMath: Awaited<ReturnType<typeof prepareMathRuns>> | undefined;
       preparedMath = requestedRenderers.math && source.mathOccurrences.length > 0
         ? await prepareMathRuns(model, requestedRenderers.math)
         : undefined;
       if (requestedGeneration !== parseGeneration) throw new Error('render-worker parse was superseded');
       const layoutServices = createLayoutServices(source, {
-        localMetrics: localMetrics.metrics,
+        fontMetrics: embeddedFonts.metrics,
         useGoogleFonts: !!req.useGoogleFonts,
-        embeddedFaces,
+        cjkFallback: req.cjkFallback,
+        embeddedRoutes: embeddedFonts.routes,
+        officeRoutes: Object.values(officeFonts.routes),
         googleFaces,
         mathResources: preparedMath?.records,
         mathDrawables: preparedMath?.drawables,
@@ -324,17 +327,17 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
         req.defaultCurrentDateMs,
       );
       if (requestedGeneration !== parseGeneration) throw new Error('render-worker parse was superseded');
-      localMetricFontFaces = localFaces;
+      officeFontFaces = officeFaces;
       googleFontFaces = googleFaces;
-      embeddedFontFaces = embeddedFaces;
+      embeddedFontFaces = embeddedFonts.faces;
       fontsTransferred = true;
       reviewIndexInput = requestedReviewIndexInput;
       doc = requestedDoc;
       } finally {
         if (!fontsTransferred) {
-          try { unloadLocalFontMetrics(localFaces); } catch {}
+          try { unloadOfficeFontFallbacks(officeFaces); } catch {}
           try { unloadGoogleFonts(googleFaces); } catch {}
-          try { unregisterEmbeddedFonts(embeddedFaces); } catch {}
+          try { unregisterEmbeddedFonts(embeddedFonts.faces); } catch {}
         }
       }
       // The variant this load will actually be viewed as. Everything below —

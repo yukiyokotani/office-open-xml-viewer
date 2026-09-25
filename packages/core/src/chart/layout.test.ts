@@ -17,6 +17,7 @@ import {
   axisTitleRotationRad,
   axisTitleVerticalInsetPx,
   chartTitleFontPx,
+  catAxisLabelBandH,
   resolveManualLayoutRect,
   TITLE_TOP_PAD_FONT_FRAC,
   type FrameParams,
@@ -141,6 +142,19 @@ describe('chartTitleBand', () => {
   it('reserves the title band for an authored empty title placeholder', () => {
     expect(chartTitleBand(model({ titlePresent: true }), H, PTPX, 0.02, 0.025).bandH).toBeGreaterThan(0);
     expect(cartesianTitleBand(model({ titlePresent: true }), H, PTPX).bandH).toBeGreaterThan(0);
+  });
+  it('uses the bounded Word classic-column auto-layout profile', () => {
+    const defaultChart = model({ title: 'T', titleFontSizeHpt: 1400 });
+    const wordChart = model({
+      title: 'T',
+      titleFontSizeHpt: 1400,
+      cartesianAutoLayoutProfile: 'wordClassicColumn',
+    });
+
+    expect(cartesianTitleBand(defaultChart, H, 1).bandH).toBeCloseTo(31.5);
+    expect(cartesianTitleBand(wordChart, H, 1).bandH).toBeCloseTo(30.1);
+    expect(catAxisLabelBandH(10, 100)).toBeCloseTo(27.5);
+    expect(catAxisLabelBandH(10, 100, 'wordClassicColumn')).toBeCloseTo(30.5);
   });
   it('keeps the bar family bandH but uses a font-proportional top pad', () => {
     const f = chartTitleFontPx(model({ title: 'T' }), H, PTPX);

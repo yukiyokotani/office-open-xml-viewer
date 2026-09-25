@@ -50,6 +50,8 @@ describe('PptxPresentation resource-policy wiring', () => {
           useGoogleFonts: boolean,
           timeout: number,
           onUsage: (usage: unknown) => void,
+          renderers?: unknown,
+          progressive?: unknown,
         ): Promise<void>;
       }
     )._parse(new ArrayBuffer(1), policy, false, 30_000, onUsage);

@@ -11,6 +11,130 @@ const siteFooter = readFileSync(new URL('./components/SiteFooter.astro', import.
 const capabilities = readFileSync(new URL('./components/Capabilities.astro', import.meta.url), 'utf8');
 const readme = readFileSync(new URL('../../README.md', import.meta.url), 'utf8');
 
+describe('v0.88 chart fidelity and safer Word layout announcement', () => {
+  const announcement = announcements.find((item) => item.slug === 'v088-chart-fidelity-and-safer-word-layout');
+
+  it('leads with the release outcomes and gives explicit upgrade guidance', () => {
+    expect(announcement).toMatchObject({
+      label: 'Release note',
+      version: 'v0.88.0',
+      date: '2026-09-21',
+      title: 'More faithful charts and safer Word layout in v0.88.0',
+    });
+    expect(announcement?.sections[0]).toMatchObject({ title: 'In short', kind: 'summary' });
+    expect(announcement?.sections.at(-2)?.title).toBe('Upgrading');
+    expect(announcement?.sections.at(-1)?.title).toBe('Technical note');
+
+    const text = announcement?.sections.flatMap((section) => [
+      section.title,
+      ...(section.modules ?? []),
+      ...section.paragraphs,
+      ...(section.bullets ?? []),
+    ]).join('\n') ?? '';
+
+    for (const outcome of ['DOCX', 'XLSX', 'PPTX', 'classic', 'browser memory', 'SVG', 'regional CJK fallback', '100%']) {
+      expect(text).toContain(outcome);
+    }
+    expect(text).toContain('most Viewer integrations require no code changes');
+    expect(text).toContain('intentionally changes rendering');
+    expect(text).toContain('low-level chart model');
+    expect(text).toContain('NON_CONVERGENCE');
+    const technicalNote = announcement?.sections.at(-1)?.paragraphs.join('\n') ?? '';
+    expect(technicalNote).toContain('25,000 misses');
+    expect(technicalNote).toContain('miss 25,001');
+    expect(technicalNote).toContain('two most recent placements');
+    expect(text).toContain('When Google Fonts loading is enabled');
+    expect(text).not.toContain('fontResources');
+    expect(text).not.toContain('one synchronous pagination run');
+    expect(text).not.toMatch(/private\/|sample-\d+/i);
+    const userFacingText = announcement?.sections.slice(0, -1).flatMap((section) => [
+      ...section.paragraphs,
+      ...(section.bullets ?? []),
+    ]).join('\n') ?? '';
+    expect(userFacingText).not.toMatch(/field-convergence|cache-miss|25,000|most recently used placement/i);
+  });
+});
+
+describe('v0.87 regional CJK fallback announcement', () => {
+  const announcement = announcements.find((item) => item.slug === 'v087-regional-cjk-fallbacks');
+
+  it('leads with the user-visible outcome and upgrade guidance', () => {
+    expect(announcement).toMatchObject({
+      label: 'Release note',
+      version: 'v0.87.0',
+      date: '2026-09-13',
+    });
+    expect(announcement?.sections[0]).toMatchObject({ title: 'In short', kind: 'summary' });
+    expect(announcement?.sections.at(-1)?.title).toBe('Upgrading');
+    expect(announcement?.title).toContain('Regional CJK fallbacks');
+  });
+
+  it('documents the new controls and the intentional auto-mode behavior', () => {
+    const text = announcement?.sections.flatMap((section) => [
+      ...section.paragraphs,
+      ...(section.bullets ?? []),
+      ...(section.examples?.map(({ code }) => code) ?? []),
+    ]).join(' ') ?? '';
+
+    expect(text).toContain('cjkFallback');
+    expect(text).toContain('Set cjkFallback explicitly');
+    expect(text).toContain('does not install or download fonts');
+    expect(text).toContain('pixel-identical output');
+    expect(text).toContain('Kana or Hangul');
+    expect(text).toContain('onLayoutComplete');
+    expect(text).not.toMatch(/private\/|sample-\d+/i);
+  });
+});
+
+describe('v0.86 presentation-text and CSV announcement', () => {
+  const announcement = announcements.find((item) => item.slug === 'v086-presentation-text-and-csv-previews');
+
+  it('leads with presentation fidelity, keeps CSV and Markdown in their intended roles and states the migration boundary', () => {
+    expect(announcement).toMatchObject({
+      label: 'Release note',
+      version: 'v0.86.0',
+      title: 'More faithful presentation text, plus CSV previews, in v0.86.0',
+    });
+    expect(announcement?.sections[0]).toMatchObject({ title: 'In short', kind: 'summary' });
+    expect(announcement?.sections[1]?.title).toBe('Presentation text, Markdown, and steadier viewing');
+    expect(announcement?.sections[2]?.title).toBe('A small extra: preview delimited text');
+    expect(announcement?.sections.at(-1)?.title).toBe('Upgrading');
+
+    expect(announcement?.title).toContain('presentation text');
+    expect(announcement?.title).toContain('plus CSV previews');
+    expect(announcement?.title).not.toMatch(/Markdown|cleaner/i);
+
+    const summaryAndLead = [
+      announcement?.summary,
+      ...(announcement?.sections[0]?.paragraphs ?? []),
+      ...(announcement?.sections[0]?.bullets ?? []),
+    ].join('\n');
+    for (const outcome of ['Markdown', 'review comments', 'document body', 'PowerPoint', 'CJK', 'Excel']) {
+      expect(summaryAndLead).toContain(outcome);
+    }
+    expect(announcement?.summary).toContain('changes Markdown exports to collect review comments separately');
+    expect(announcement?.summary).not.toMatch(/(?:cleaner|improv\w*) Markdown|Markdown[^.]*improv/i);
+
+    const text = announcement?.sections.flatMap((section) => [
+      section.title,
+      ...section.paragraphs,
+      ...(section.bullets ?? []),
+      ...(section.examples?.map(({ code }) => code) ?? []),
+    ]).join('\n') ?? '';
+
+    for (const outcome of ['CSV', 'TSV', 'Try Yours', 'XlsxSheetViewer']) {
+      expect(text).toContain(outcome);
+    }
+    expect(text).toContain('As a small extra');
+    expect(text).toContain('No viewer API migration is required');
+    expect(text).toContain('Applications that parse generated Markdown should account for review comments moving');
+    expect(text).toContain("format: 'delimited-text'");
+    expect(text).toContain('Existing XLSX calls without a format continue to open workbooks as before');
+    expect(text).not.toMatch(/WorkerBridge|TextDecoder|worksheet-model|cache eviction|parser diagnostic|signed data descriptor/i);
+    expect(text).not.toMatch(/\b(?:KB|KiB|MiB|gzip)\b/i);
+  });
+});
+
 describe('v0.85 large-image and rendering announcement', () => {
   const announcement = announcements.find((item) => item.slug === 'v085-large-images-and-rendering');
 
@@ -200,15 +324,16 @@ describe('v0.81 ChartEx migration guide', () => {
 
 describe('stable documentation boundaries', () => {
   it('keeps the current bundle measurements on one stable page', () => {
-    expect(bundleSizePage).toContain('Current production assets for v0.85.3');
+    expect(bundleSizePage).toContain('Current production assets for v0.88.0');
     expect(bundleSizePage).toContain('DOCX static JavaScript');
-    expect(bundleSizePage).toMatch(/<td>1,967 KiB<\/td>\s*<td>479 KiB<\/td>/);
+    expect(bundleSizePage).toMatch(/<td>2,082 KiB<\/td>\s*<td>508 KiB<\/td>/);
     expect(bundleSizePage).toContain('XLSX static JavaScript');
-    expect(bundleSizePage).toMatch(/<td>1,283 KiB<\/td>\s*<td>306 KiB<\/td>/);
+    expect(bundleSizePage).toMatch(/<td>1,389 KiB<\/td>\s*<td>333 KiB<\/td>/);
     expect(bundleSizePage).toContain('PPTX static JavaScript');
-    expect(bundleSizePage).toMatch(/<td>1,330 KiB<\/td>\s*<td>311 KiB<\/td>/);
-    expect(bundleSizePage).toContain('<tr><th>DOCX parser WASM</th><td>1,786 KiB</td><td>741 KiB</td></tr>');
-    expect(bundleSizePage).toContain('<tr><th>PPTX parser WASM</th><td>1,650 KiB</td><td>649 KiB</td></tr>');
+    expect(bundleSizePage).toMatch(/<td>1,432 KiB<\/td>\s*<td>336 KiB<\/td>/);
+    expect(bundleSizePage).toContain('<tr><th>DOCX parser WASM</th><td>1,900 KiB</td><td>787 KiB</td></tr>');
+    expect(bundleSizePage).toContain('<tr><th>XLSX parser WASM</th><td>1,683 KiB</td><td>690 KiB</td></tr>');
+    expect(bundleSizePage).toContain('<tr><th>PPTX parser WASM</th><td>1,782 KiB</td><td>700 KiB</td></tr>');
     expect(bundleSizePage).toContain('ChartEx');
     expect(bundleSizePage.match(/<th>TIFF image codec<\/th>/g)).toHaveLength(1);
     expect(bundleSizePage).toContain('<td>22.2 KiB</td><td>6.7 KiB</td>');

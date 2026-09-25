@@ -149,19 +149,6 @@ function options(
 }
 
 describe('paragraph acquisition cache', () => {
-  it('reacquires identical geometry after its memo candidate is evicted', () => {
-    const services = scopedServices();
-    const input = paragraphAcquisitionInput(textParagraph(), source);
-    const first = acquireParagraphResult(input, options(services));
-    const cache = paragraphAcquisitionCacheOf(services)!;
-    for (let index = 0; index < 128; index++) cache.set({}, `evict:${index}`, {});
-    const second = acquireParagraphResult(input, options(services));
-    expect(second).not.toBe(first);
-    expect(second.layout).toEqual(first.layout);
-    expect(second.measured).toEqual(first.measured);
-    expect(acquireParagraphResult(input, options(services))).toBe(second);
-  });
-
   it('reuses the immutable result across initial and field service views', () => {
     const services = scopedServices();
     const fieldView = createFieldAcquisitionServicesView(services, { totalPages: 1 });
@@ -252,6 +239,22 @@ describe('paragraph acquisition cache', () => {
     expect(second).not.toBe(first);
   });
 
+  it('retains only the two most recent placements for one paragraph input', () => {
+    const services = scopedServices();
+    const input = paragraphAcquisitionInput(textParagraph(), source);
+    const at = (startYPt: number) => acquireParagraphResult(input, options(services, {
+      placement: { ...options(services).placement, startYPt },
+    }));
+
+    const first = at(72);
+    const second = at(73);
+    expect(at(72)).toBe(first);
+    at(74);
+
+    expect(at(72)).toBe(first);
+    expect(at(73)).not.toBe(second);
+  });
+
   it('keys every value that can change acquisition output', () => {
     const services = scopedServices();
     const cache = paragraphAcquisitionCacheOf(services);
@@ -321,6 +324,7 @@ describe('paragraph acquisition cache', () => {
       key({ environment: { ...base.environment, verticalPageFrame: true } }),
       key({ environment: { ...base.environment, documentHasEastAsianText: true } }),
       key({ environment: { ...base.environment, useFeLayout: true } }),
+      key({ environment: { ...base.environment, lineWrapLikeWord6: true } }),
       key({ environment: {
         ...base.environment,
         balanceSingleByteDoubleByteWidth: true,

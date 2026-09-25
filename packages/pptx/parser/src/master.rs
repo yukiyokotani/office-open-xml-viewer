@@ -6,21 +6,23 @@
 //! `MasterBundle` → `ParsedMaster` type rename (fields unchanged).
 
 use crate::fill::{
-    parse_background, parse_blip_fill, parse_color_node, parse_cust_geom_with_paint, parse_fill,
-    parse_reflection, parse_xfrm,
+    parse_background, parse_blip_alpha, parse_cust_geom_with_paint, parse_fill, parse_reflection,
+    parse_xfrm,
 };
 use crate::shape::{
     extract_decorative_shapes, resolve_picture_shape_properties, PictureShapeProperties,
 };
 use crate::text::{
-    empty_level_bullets, extract_level_bullets, extract_level_font_sizes, extract_level_indents,
-    extract_lvl1_font_size, has_any_level_bullet, has_any_level_indent, has_any_level_size,
-    merge_level_bullets, merge_level_indents, merge_level_sizes, paragraph_spacing,
-    read_level_bullets, read_level_font_sizes, read_level_indents, text_property_solid_fill,
-    BuMarker, LevelBullets, LevelFontSizes, LevelIndents, ParagraphSpacing,
+    empty_level_bullets, extract_level_bullets, extract_level_colors, extract_level_font_sizes,
+    extract_level_indents, extract_lvl1_font_size, has_any_level_bullet, has_any_level_color,
+    has_any_level_indent, has_any_level_size, merge_level_bullets, merge_level_colors,
+    merge_level_indents, merge_level_sizes, paragraph_spacing, read_level_bullets,
+    read_level_colors, read_level_font_sizes, read_level_indents, text_property_color, BuMarker,
+    LevelBullets, LevelColors, LevelFontSizes, LevelIndents, ParagraphSpacing,
 };
 use crate::theme::{
-    bake_clr_map, parse_theme_part, resolve_theme_typeface, PptxTheme, PptxThemeSource,
+    bake_clr_map, parse_theme_part, resolve_theme_typeface, PptxSchemeResolver, PptxTheme,
+    PptxThemeSource,
 };
 use crate::types::*;
 use crate::{
@@ -28,9 +30,13 @@ use crate::{
     note_layout_master_parse, parse_preflighted_pptx_xml, parse_rels, read_zip_str, resolve_path,
     PptxZip,
 };
-use ooxml_common::blip::{mime_from_ext, Duotone, SrcRect};
+use ooxml_common::blip::{
+    mime_from_ext, parse_blip_duotone, parse_blip_effects, parse_src_rect, Duotone, SrcRect,
+};
 use ooxml_common::rels::relationship_part_path;
 use std::collections::HashMap;
+
+type MasterTextBodyPropertyMaps = (HashMap<String, [Option<i64>; 4]>, HashMap<String, String>);
 
 /// Keyed first by idx (integer), then by type string.
 // `Clone` lets `parse_layout` cache one resolved `LayoutPlaceholders` per layout
@@ -68,6 +74,9 @@ pub(crate) struct LayoutPlaceholders {
     /// Per-list-level default font sizes (pt) per placeholder type.
     pub(crate) by_type_level_sizes: HashMap<String, LevelFontSizes>,
     pub(crate) by_type_master_level_sizes: HashMap<String, LevelFontSizes>,
+    pub(crate) by_idx_level_colors: HashMap<u32, LevelColors>,
+    pub(crate) by_type_level_colors: HashMap<String, LevelColors>,
+    pub(crate) by_type_master_level_colors: HashMap<String, LevelColors>,
     /// Per-list-level paragraph indents (`marL`/`marR`/`indent`, EMU) per
     /// placeholder idx — what a paragraph with no own `marL`/`marR`/`indent`
     /// inherits from the authored list-style cascade (ECMA-376 §21.1.2.4.13),
@@ -105,6 +114,13 @@ pub(crate) struct LayoutPlaceholders {
     /// by a synthetic layout default.
     pub(crate) by_idx_text_insets: HashMap<u32, [Option<i64>; 4]>,
     pub(crate) by_type_text_insets: HashMap<String, [Option<i64>; 4]>,
+    pub(crate) by_type_master_text_insets: HashMap<String, [Option<i64>; 4]>,
+    /// Text autofit mode inherited through the placeholder cascade. Autofit is
+    /// a child of `bodyPr`, not an attribute, but follows the same
+    /// slide → layout → master precedence as the body-property attributes.
+    pub(crate) by_idx_auto_fit: HashMap<u32, String>,
+    pub(crate) by_type_auto_fit: HashMap<String, String>,
+    pub(crate) by_type_master_auto_fit: HashMap<String, String>,
     /// Default paragraph alignment per placeholder type, from layout/master lstStyle
     pub(crate) by_type_alignment: HashMap<String, String>,
     /// Paragraph alignment per placeholder idx — layout placeholder's own algn,
@@ -115,6 +131,12 @@ pub(crate) struct LayoutPlaceholders {
     /// Default East Asian line-break (eaLnBrk) per placeholder type, from the
     /// layout lstStyle > lvl1pPr @eaLnBrk (ECMA-376 §21.1.2.2.7)
     pub(crate) by_type_ea_ln_brk: HashMap<String, bool>,
+    /// Default space-before/after (hundredths of pt) per placeholder idx, from
+    /// the matching layout placeholder's lstStyle. The idx tier prevents one of
+    /// several same-type layout slots from leaking paragraph spacing into its
+    /// siblings (ECMA-376 §19.3.1.36 placeholder matching).
+    pub(crate) by_idx_space_before: HashMap<u32, ParagraphSpacing>,
+    pub(crate) by_idx_space_after: HashMap<u32, ParagraphSpacing>,
     /// Default space-before (hundredths of pt) per placeholder type, from layout lstStyle
     pub(crate) by_type_space_before: HashMap<String, ParagraphSpacing>,
     /// Default space-after (hundredths of pt) per placeholder type, from layout lstStyle
@@ -245,13 +267,7 @@ pub(crate) struct InheritedBlipFill {
     pub(crate) image_path: String,
     /// MIME of the blip at `image_path`.
     pub(crate) mime_type: String,
-    pub(crate) svg_image_path: Option<String>,
-    pub(crate) dpi: Option<u32>,
-    pub(crate) rot_with_shape: Option<bool>,
     pub(crate) src_rect: Option<SrcRect>,
-    pub(crate) fill_rect: Option<FillRect>,
-    pub(crate) tile: Option<TileInfo>,
-    pub(crate) stretch: bool,
     pub(crate) alpha: Option<f64>,
     /// ECMA-376 §20.1.8.23 `<a:duotone>` recolour on the layout placeholder's
     /// blipFill, resolved through the theme. Inherited onto the slide picture
@@ -371,6 +387,35 @@ impl LayoutPlaceholders {
                 }
             })
             .unwrap_or([None; 9])
+    }
+
+    pub(crate) fn lookup_level_colors(&self, ph_type: &str, ph_idx: Option<u32>) -> LevelColors {
+        if let Some(i) = ph_idx {
+            return self
+                .by_idx_level_colors
+                .get(&i)
+                .cloned()
+                .or_else(|| self.by_type_master_level_colors.get(ph_type).cloned())
+                .or_else(|| {
+                    if ph_type == "obj" {
+                        self.by_type_master_level_colors.get("").cloned()
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| std::array::from_fn(|_| None));
+        }
+        self.by_type_level_colors
+            .get(ph_type)
+            .cloned()
+            .or_else(|| {
+                if ph_type == "body" {
+                    self.by_type_level_colors.get("").cloned()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| std::array::from_fn(|_| None))
     }
 
     /// Per-list-level inherited paragraph indents (lvl1..lvl9). Same idx-strict
@@ -530,15 +575,50 @@ impl LayoutPlaceholders {
         ph_idx: Option<u32>,
     ) -> Option<[Option<i64>; 4]> {
         if let Some(i) = ph_idx {
-            return self.by_idx_text_insets.get(&i).copied();
+            return self
+                .by_idx_text_insets
+                .get(&i)
+                .copied()
+                .or_else(|| self.by_type_master_text_insets.get(ph_type).copied());
         }
-        self.by_type_text_insets.get(ph_type).copied().or_else(|| {
-            if ph_type == "body" {
-                self.by_type_text_insets.get("").copied()
-            } else {
-                None
-            }
-        })
+        self.by_type_text_insets
+            .get(ph_type)
+            .copied()
+            .or_else(|| self.by_type_master_text_insets.get(ph_type).copied())
+            .or_else(|| {
+                if ph_type == "body" {
+                    self.by_type_text_insets
+                        .get("")
+                        .copied()
+                        .or_else(|| self.by_type_master_text_insets.get("").copied())
+                } else {
+                    None
+                }
+            })
+    }
+
+    pub(crate) fn lookup_auto_fit(&self, ph_type: &str, ph_idx: Option<u32>) -> Option<String> {
+        if let Some(i) = ph_idx {
+            return self
+                .by_idx_auto_fit
+                .get(&i)
+                .cloned()
+                .or_else(|| self.by_type_master_auto_fit.get(ph_type).cloned());
+        }
+        self.by_type_auto_fit
+            .get(ph_type)
+            .cloned()
+            .or_else(|| self.by_type_master_auto_fit.get(ph_type).cloned())
+            .or_else(|| {
+                if ph_type == "body" {
+                    self.by_type_auto_fit
+                        .get("")
+                        .cloned()
+                        .or_else(|| self.by_type_master_auto_fit.get("").cloned())
+                } else {
+                    None
+                }
+            })
     }
 
     /// Look up inherited paragraph alignment for this placeholder.
@@ -604,17 +684,23 @@ impl LayoutPlaceholders {
             })
     }
 
-    pub(crate) fn lookup_space_before(&self, ph_type: &str) -> Option<ParagraphSpacing> {
-        self.by_type_space_before
-            .get(ph_type)
-            .copied()
-            .or_else(|| {
+    pub(crate) fn lookup_space_before(
+        &self,
+        ph_type: &str,
+        ph_idx: Option<u32>,
+    ) -> Option<ParagraphSpacing> {
+        let layout = if let Some(idx) = ph_idx {
+            self.by_idx_space_before.get(&idx).copied()
+        } else {
+            self.by_type_space_before.get(ph_type).copied().or_else(|| {
                 if ph_type == "body" {
                     self.by_type_space_before.get("").copied()
                 } else {
                     None
                 }
             })
+        };
+        layout
             .or_else(|| self.by_type_master_space_before.get(ph_type).copied())
             .or_else(|| {
                 if ph_type == "body" {
@@ -625,17 +711,23 @@ impl LayoutPlaceholders {
             })
     }
 
-    pub(crate) fn lookup_space_after(&self, ph_type: &str) -> Option<ParagraphSpacing> {
-        self.by_type_space_after
-            .get(ph_type)
-            .copied()
-            .or_else(|| {
+    pub(crate) fn lookup_space_after(
+        &self,
+        ph_type: &str,
+        ph_idx: Option<u32>,
+    ) -> Option<ParagraphSpacing> {
+        let layout = if let Some(idx) = ph_idx {
+            self.by_idx_space_after.get(&idx).copied()
+        } else {
+            self.by_type_space_after.get(ph_type).copied().or_else(|| {
                 if ph_type == "body" {
                     self.by_type_space_after.get("").copied()
                 } else {
                     None
                 }
             })
+        };
+        layout
             .or_else(|| self.by_type_master_space_after.get(ph_type).copied())
             .or_else(|| {
                 if ph_type == "body" {
@@ -876,6 +968,54 @@ pub(crate) fn parse_master_anchors(root: roxmltree::Node<'_, '_>) -> HashMap<Str
         }
     }
     map
+}
+
+/// Parse the placeholder-scoped `bodyPr` values that must survive the master →
+/// layout → slide cascade even when the layout/slide authors an empty bodyPr.
+pub(crate) fn parse_master_text_body_properties(
+    root: roxmltree::Node<'_, '_>,
+) -> MasterTextBodyPropertyMaps {
+    let mut insets = HashMap::new();
+    let mut auto_fit = HashMap::new();
+    if let Some(sp_tree) = child(root, "cSld").and_then(|n| child(n, "spTree")) {
+        for sp in sp_tree
+            .children()
+            .filter(|n| n.is_element() && n.tag_name().name() == "sp")
+        {
+            let Some(ph) = sp
+                .descendants()
+                .find(|n| n.is_element() && n.tag_name().name() == "ph")
+            else {
+                continue;
+            };
+            let ph_type = attr(&ph, "type").unwrap_or_default();
+            let Some(body_pr) = child(sp, "txBody").and_then(|tb| child(tb, "bodyPr")) else {
+                continue;
+            };
+            let value = [
+                attr_i64(&body_pr, "lIns"),
+                attr_i64(&body_pr, "tIns"),
+                attr_i64(&body_pr, "rIns"),
+                attr_i64(&body_pr, "bIns"),
+            ];
+            if value.iter().any(Option::is_some) {
+                insets.entry(ph_type.clone()).or_insert(value);
+            }
+            let mode = if child(body_pr, "spAutoFit").is_some() {
+                Some("sp")
+            } else if child(body_pr, "normAutofit").is_some() {
+                Some("norm")
+            } else if child(body_pr, "noAutofit").is_some() {
+                Some("none")
+            } else {
+                None
+            };
+            if let Some(mode) = mode {
+                auto_fit.entry(ph_type).or_insert_with(|| mode.to_owned());
+            }
+        }
+    }
+    (insets, auto_fit)
 }
 
 /// txStyles style node → the placeholder types it defaults. ECMA-376 §19.3.1.52
@@ -1122,6 +1262,57 @@ pub(crate) fn parse_master_level_font_sizes(
     map
 }
 
+/// Per-list-level default run colours from the master placeholder cascade.
+/// Per-placeholder list styles win per level; missing levels fall back to the
+/// matching master txStyles category.
+pub(crate) fn parse_master_level_colors(
+    root: roxmltree::Node<'_, '_>,
+    theme: &HashMap<String, String>,
+) -> HashMap<String, LevelColors> {
+    let mut specific: HashMap<String, LevelColors> = HashMap::new();
+    if let Some(sp_tree) = child(root, "cSld").and_then(|n| child(n, "spTree")) {
+        for sp in sp_tree
+            .children()
+            .filter(|n| n.is_element() && n.tag_name().name() == "sp")
+        {
+            if let Some(ph) = sp
+                .descendants()
+                .find(|n| n.is_element() && n.tag_name().name() == "ph")
+            {
+                let ph_type = attr(&ph, "type").unwrap_or_default();
+                if let Some(tx_body) = child(sp, "txBody") {
+                    let colors = extract_level_colors(tx_body, theme);
+                    if has_any_level_color(&colors) {
+                        specific.entry(ph_type).or_insert(colors);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut generic: HashMap<String, LevelColors> = HashMap::new();
+    if let Some(tx_styles) = child(root, "txStyles") {
+        for (style_name, ph_types) in MASTER_TXSTYLE_PH_TYPES {
+            if let Some(style_node) = child(tx_styles, style_name) {
+                let colors = read_level_colors(style_node, theme);
+                if has_any_level_color(&colors) {
+                    for ph_type in *ph_types {
+                        generic.insert((*ph_type).to_owned(), colors.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    for (ph_type, colors) in generic {
+        specific
+            .entry(ph_type)
+            .and_modify(|current| *current = merge_level_colors(current, &colors))
+            .or_insert(colors);
+    }
+    specific
+}
+
 /// Per-list-level paragraph indents (`marL`/`marR`/`indent`, EMU) from the master,
 /// keyed by ph_type. Mirrors `parse_master_level_font_sizes` exactly (same per-shape
 /// lstStyle then `txStyles` tiers via `MASTER_TXSTYLE_PH_TYPES`): a master body
@@ -1364,8 +1555,7 @@ pub(crate) fn parse_master_txstyle_color(
                     .and_then(|tb| child(tb, "lstStyle"))
                     .and_then(|ls| child(ls, "lvl1pPr"))
                     .and_then(|lp| child(lp, "defRPr"))
-                    .and_then(text_property_solid_fill)
-                    .and_then(|sf| parse_color_node(sf, theme))
+                    .and_then(|rp| text_property_color(rp, theme))
                 {
                     map.entry(ph_type).or_insert(color);
                 }
@@ -1380,8 +1570,7 @@ pub(crate) fn parse_master_txstyle_color(
             if let Some(color) = child(tx_styles, style_name)
                 .and_then(|sn| child(sn, "lvl1pPr"))
                 .and_then(|lp| child(lp, "defRPr"))
-                .and_then(text_property_solid_fill)
-                .and_then(|sf| parse_color_node(sf, theme))
+                .and_then(|rp| text_property_color(rp, theme))
             {
                 for ph_type in *ph_types {
                     map.entry(ph_type.to_string()).or_insert(color.clone());
@@ -1473,9 +1662,12 @@ pub(crate) fn parse_layout_placeholders(
     master_font_sizes: &HashMap<String, f64>,
     master_font_families: &HashMap<String, String>,
     master_level_font_sizes: &HashMap<String, LevelFontSizes>,
+    master_level_colors: &HashMap<String, LevelColors>,
     master_level_indents: &HashMap<String, LevelIndents>,
     master_level_bullets: &HashMap<String, LevelBullets>,
     master_anchors: &HashMap<String, String>,
+    master_text_insets: &HashMap<String, [Option<i64>; 4]>,
+    master_auto_fit: &HashMap<String, String>,
     master_transforms: &HashMap<String, Transform>,
     master_alignments: &HashMap<String, String>,
     master_ea_ln_brk: &HashMap<String, bool>,
@@ -1493,9 +1685,12 @@ pub(crate) fn parse_layout_placeholders(
         by_type_master_font_size: master_font_sizes.clone(),
         by_type_master_font_family: master_font_families.clone(),
         by_type_master_level_sizes: master_level_font_sizes.clone(),
+        by_type_master_level_colors: master_level_colors.clone(),
         by_type_master_level_indents: master_level_indents.clone(),
         by_type_master_level_bullets: master_level_bullets.clone(),
         by_type_master_anchor: master_anchors.clone(),
+        by_type_master_text_insets: master_text_insets.clone(),
+        by_type_master_auto_fit: master_auto_fit.clone(),
         by_type_master_alignment: master_alignments.clone(),
         by_type_master_ea_ln_brk: master_ea_ln_brk.clone(),
         by_type_master_space_before: master_space_before.clone(),
@@ -1519,6 +1714,9 @@ pub(crate) fn parse_layout_placeholders(
         let ph_node = sp
             .descendants()
             .find(|n| n.is_element() && n.tag_name().name() == "ph");
+        let layout_ph_type = ph_node
+            .and_then(|ph| attr(&ph, "type"))
+            .unwrap_or_else(|| "obj".to_owned());
         let sp_pr = match child(sp, "spPr") {
             Some(n) => n,
             None => continue,
@@ -1544,6 +1742,9 @@ pub(crate) fn parse_layout_placeholders(
         let layout_level_sizes: LevelFontSizes = child(sp, "txBody")
             .map(extract_level_font_sizes)
             .unwrap_or([None; 9]);
+        let layout_level_colors: LevelColors = child(sp, "txBody")
+            .map(|tx_body| extract_level_colors(tx_body, theme))
+            .unwrap_or_else(|| std::array::from_fn(|_| None));
         // Per-level indents (marL/marR/indent) from the layout placeholder's own
         // lstStyle, the inherited list-indent cascade (ECMA-376 §21.1.2.4.13).
         let layout_level_indents: LevelIndents = child(sp, "txBody")
@@ -1578,9 +1779,8 @@ pub(crate) fn parse_layout_placeholders(
         let layout_reflection = layout_def_rpr
             .and_then(|rp| child(rp, "effectLst"))
             .and_then(parse_reflection);
-        let layout_color: Option<String> = layout_def_rpr
-            .and_then(text_property_solid_fill)
-            .and_then(|sf| parse_color_node(sf, theme));
+        let layout_color: Option<String> =
+            layout_def_rpr.and_then(|rp| text_property_color(rp, theme));
         let layout_alignment: Option<String> = layout_lvl1_ppr
             .and_then(|lp| attr(&lp, "algn"))
             .map(|a| a.to_string());
@@ -1607,7 +1807,27 @@ pub(crate) fn parse_layout_placeholders(
             layout_body_pr.and_then(|bp| attr_i64(&bp, "rIns")),
             layout_body_pr.and_then(|bp| attr_i64(&bp, "bIns")),
         ];
-        let has_layout_text_inset = layout_text_insets.iter().any(Option::is_some);
+        let layout_auto_fit = layout_body_pr.and_then(|body_pr| {
+            if child(body_pr, "spAutoFit").is_some() {
+                Some("sp".to_owned())
+            } else if child(body_pr, "normAutofit").is_some() {
+                Some("norm".to_owned())
+            } else if child(body_pr, "noAutofit").is_some() {
+                Some("none".to_owned())
+            } else {
+                None
+            }
+        });
+        let master_insets = master_text_insets
+            .get(&layout_ph_type)
+            .copied()
+            .unwrap_or([None; 4]);
+        let effective_text_insets =
+            std::array::from_fn(|i| layout_text_insets[i].or(master_insets[i]));
+        let has_effective_text_inset = effective_text_insets.iter().any(Option::is_some);
+        let effective_auto_fit = layout_auto_fit
+            .clone()
+            .or_else(|| master_auto_fit.get(&layout_ph_type).cloned());
 
         // A picture placeholder inherits the same CT_ShapeProperties component
         // cascade as an ordinary picture. Resolve the layout's local/style
@@ -1638,41 +1858,24 @@ pub(crate) fn parse_layout_placeholders(
             // `read_zip_bytes` which decompressed the entry just to discard it.
             zip.index_for_name(&image_path)?;
             let mime_type = mime_from_ext(&image_path).to_owned();
-            let mut resolve = |relationship_id: &str| {
-                let target = layout_rels.get(relationship_id)?;
-                let path = resolve_path(layout_dir, target);
-                zip.index_for_name(&path)?;
-                Some(path)
-            };
-            let Fill::Image {
-                svg_image_path,
-                dpi,
-                rot_with_shape,
-                src_rect,
-                fill_rect,
-                stretch,
-                tile,
-                alpha,
-                duotone,
-                blip_effects,
-                ..
-            } = parse_blip_fill(bf, theme, &mut resolve)?
-            else {
-                return None;
-            };
             Some(InheritedBlipFill {
                 image_path,
                 mime_type,
-                svg_image_path,
-                dpi,
-                rot_with_shape,
-                src_rect,
-                fill_rect,
-                tile,
-                stretch,
-                alpha,
-                duotone,
-                blip_effects,
+                src_rect: parse_src_rect(bf),
+                alpha: parse_blip_alpha(bf),
+                // §20.1.8.23 duotone on the layout placeholder blipFill, resolved
+                // through the theme; inherited onto the slide picture placeholder.
+                duotone: parse_blip_duotone(
+                    bf,
+                    &PptxSchemeResolver { theme },
+                    ooxml_common::color::TintMode::PowerPointLinear,
+                ),
+                // CT_Blip pixel effects travel with the inherited blipFill.
+                blip_effects: parse_blip_effects(
+                    bf,
+                    &PptxSchemeResolver { theme },
+                    ooxml_common::color::TintMode::PowerPointLinear,
+                ),
             })
         });
 
@@ -1711,6 +1914,14 @@ pub(crate) fn parse_layout_placeholders(
                 if has_any_level_size(&level_sizes) {
                     lph.by_idx_level_sizes.entry(idx).or_insert(level_sizes);
                 }
+                let empty_colors: LevelColors = std::array::from_fn(|_| None);
+                let level_colors = merge_level_colors(
+                    &layout_level_colors,
+                    master_level_colors.get(&ph_type).unwrap_or(&empty_colors),
+                );
+                if has_any_level_color(&level_colors) {
+                    lph.by_idx_level_colors.entry(idx).or_insert(level_colors);
+                }
                 // Per-level indents: layout lstStyle wins per axis/level, else master.
                 let level_indents = merge_level_indents(
                     &layout_level_indents,
@@ -1741,10 +1952,21 @@ pub(crate) fn parse_layout_placeholders(
                 if let Some(ls) = layout_line_spacing {
                     lph.by_idx_line_spacing.entry(idx).or_insert(ls);
                 }
-                if has_layout_text_inset {
+                if let Some(v) = layout_space_before {
+                    lph.by_idx_space_before.entry(idx).or_insert(v);
+                }
+                if let Some(v) = layout_space_after {
+                    lph.by_idx_space_after.entry(idx).or_insert(v);
+                }
+                if has_effective_text_inset {
                     lph.by_idx_text_insets
                         .entry(idx)
-                        .or_insert(layout_text_insets);
+                        .or_insert(effective_text_insets);
+                }
+                if let Some(ref mode) = effective_auto_fit {
+                    lph.by_idx_auto_fit
+                        .entry(idx)
+                        .or_insert_with(|| mode.clone());
                 }
                 if let Some(ref bf) = layout_blip_fill {
                     lph.by_idx_blip_fill.entry(idx).or_insert(bf.clone());
@@ -1800,6 +2022,16 @@ pub(crate) fn parse_layout_placeholders(
                     .entry(ph_type.clone())
                     .or_insert(type_level_sizes);
             }
+            let empty_colors: LevelColors = std::array::from_fn(|_| None);
+            let type_level_colors = merge_level_colors(
+                &layout_level_colors,
+                master_level_colors.get(&ph_type).unwrap_or(&empty_colors),
+            );
+            if has_any_level_color(&type_level_colors) {
+                lph.by_type_level_colors
+                    .entry(ph_type.clone())
+                    .or_insert(type_level_colors);
+            }
             let type_level_indents = merge_level_indents(
                 &layout_level_indents,
                 master_level_indents
@@ -1852,10 +2084,13 @@ pub(crate) fn parse_layout_placeholders(
                     .entry(ph_type.clone())
                     .or_insert(ls);
             }
-            if has_layout_text_inset {
+            if has_effective_text_inset {
                 lph.by_type_text_insets
                     .entry(ph_type.clone())
-                    .or_insert(layout_text_insets);
+                    .or_insert(effective_text_insets);
+            }
+            if let Some(mode) = effective_auto_fit {
+                lph.by_type_auto_fit.entry(ph_type.clone()).or_insert(mode);
             }
             // Anchor: layout bodyPr > fall back to master anchor map
             let effective_anchor = layout_anchor
@@ -1912,6 +2147,11 @@ pub(crate) fn parse_layout_placeholders(
         lph.by_type_level_sizes
             .entry(ph_type.clone())
             .or_insert(*value);
+    }
+    for (ph_type, value) in master_level_colors {
+        lph.by_type_level_colors
+            .entry(ph_type.clone())
+            .or_insert_with(|| value.clone());
     }
     for (ph_type, value) in master_level_indents {
         lph.by_type_level_indents
@@ -1992,9 +2232,12 @@ pub(crate) fn parse_layout(
     master_font_sizes: &HashMap<String, f64>,
     master_font_families: &HashMap<String, String>,
     master_level_font_sizes: &HashMap<String, LevelFontSizes>,
+    master_level_colors: &HashMap<String, LevelColors>,
     master_level_indents: &HashMap<String, LevelIndents>,
     master_level_bullets: &HashMap<String, LevelBullets>,
     master_anchors: &HashMap<String, String>,
+    master_text_insets: &HashMap<String, [Option<i64>; 4]>,
+    master_auto_fit: &HashMap<String, String>,
     master_transforms: &HashMap<String, Transform>,
     master_alignments: &HashMap<String, String>,
     master_ea_ln_brk: &HashMap<String, bool>,
@@ -2020,9 +2263,12 @@ pub(crate) fn parse_layout(
         master_font_sizes,
         master_font_families,
         master_level_font_sizes,
+        master_level_colors,
         master_level_indents,
         master_level_bullets,
         master_anchors,
+        master_text_insets,
+        master_auto_fit,
         master_transforms,
         master_alignments,
         master_ea_ln_brk,
@@ -2086,9 +2332,12 @@ pub(crate) struct ParsedMaster {
     pub(crate) master_font_sizes: HashMap<String, f64>,
     pub(crate) master_font_families: HashMap<String, String>,
     pub(crate) master_level_font_sizes: HashMap<String, LevelFontSizes>,
+    pub(crate) master_level_colors: HashMap<String, LevelColors>,
     pub(crate) master_level_indents: HashMap<String, LevelIndents>,
     pub(crate) master_level_bullets: HashMap<String, LevelBullets>,
     pub(crate) master_anchors: HashMap<String, String>,
+    pub(crate) master_text_insets: HashMap<String, [Option<i64>; 4]>,
+    pub(crate) master_auto_fit: HashMap<String, String>,
     pub(crate) master_transforms: HashMap<String, Transform>,
     pub(crate) master_alignments: HashMap<String, String>,
     pub(crate) master_ea_ln_brk: HashMap<String, bool>,
@@ -2117,6 +2366,8 @@ pub(crate) struct EffectiveMaster {
     pub(crate) master_bg: Option<Fill>,
     /// Master txStyles placeholder colors re-resolved against `theme`.
     pub(crate) master_color: HashMap<String, String>,
+    /// Master list-level colours re-resolved against `theme`.
+    pub(crate) master_level_colors: HashMap<String, LevelColors>,
     /// Master per-level bullet colors re-resolved against `theme`.
     pub(crate) master_level_bullets: HashMap<String, LevelBullets>,
 }
@@ -2209,6 +2460,9 @@ pub(crate) fn build_master_bundle(
     let master_level_font_sizes = master_root
         .map(parse_master_level_font_sizes)
         .unwrap_or_default();
+    let master_level_colors = master_root
+        .map(|root| parse_master_level_colors(root, &theme))
+        .unwrap_or_default();
     let master_level_indents = master_root
         .map(parse_master_level_indents)
         .unwrap_or_default();
@@ -2216,6 +2470,9 @@ pub(crate) fn build_master_bundle(
         .map(|root| parse_master_level_bullets(root, &theme, &master_rels, &master_dir, zip))
         .unwrap_or_default();
     let master_anchors = master_root.map(parse_master_anchors).unwrap_or_default();
+    let (master_text_insets, master_auto_fit) = master_root
+        .map(parse_master_text_body_properties)
+        .unwrap_or_default();
     let master_transforms = master_root.map(parse_master_transforms).unwrap_or_default();
     let master_alignments = master_root.map(parse_master_alignments).unwrap_or_default();
     let master_ea_ln_brk = master_root.map(parse_master_ea_ln_brk).unwrap_or_default();
@@ -2258,9 +2515,12 @@ pub(crate) fn build_master_bundle(
         master_font_sizes,
         master_font_families,
         master_level_font_sizes,
+        master_level_colors,
         master_level_indents,
         master_level_bullets,
         master_anchors,
+        master_text_insets,
+        master_auto_fit,
         master_transforms,
         master_alignments,
         master_ea_ln_brk,
@@ -2306,8 +2566,11 @@ mod placeholder_geometry_tests {
             master_font_sizes,
             &HashMap::<String, String>::new(),
             &HashMap::<String, LevelFontSizes>::new(),
+            &HashMap::<String, LevelColors>::new(),
             &HashMap::<String, LevelIndents>::new(),
             &HashMap::<String, LevelBullets>::new(),
+            &HashMap::<String, String>::new(),
+            &HashMap::<String, [Option<i64>; 4]>::new(),
             &HashMap::<String, String>::new(),
             &HashMap::<String, Transform>::new(),
             &HashMap::<String, String>::new(),
@@ -2609,7 +2872,10 @@ mod placeholder_geometry_tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             &master_bullets,
+            &HashMap::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -2675,7 +2941,9 @@ mod placeholder_geometry_tests {
             </p:nvSpPr>
             <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="12192000" cy="500000"/></a:xfrm></p:spPr>
             <p:txBody>
-              <a:bodyPr lIns="216000" tIns="72000" rIns="216000" bIns="72000" anchor="ctr"/>
+              <a:bodyPr lIns="216000" tIns="72000" rIns="216000" bIns="72000" anchor="ctr">
+                <a:spAutoFit/>
+              </a:bodyPr>
               <a:lstStyle/><a:p/>
             </p:txBody>
           </p:sp>"#;
@@ -2694,6 +2962,7 @@ mod placeholder_geometry_tests {
         assert_eq!(body.r_ins, 216_000);
         assert_eq!(body.b_ins, 72_000);
         assert_eq!(body.vertical_anchor, "ctr");
+        assert_eq!(body.auto_fit, "sp");
 
         let local_left_override = slide.replace("<a:bodyPr/>", "<a:bodyPr lIns=\"0\"/>");
         let shape = parse_slide_shape(&local_left_override, &placeholders);
@@ -2702,6 +2971,50 @@ mod placeholder_geometry_tests {
         assert_eq!(body.t_ins, 72_000);
         assert_eq!(body.r_ins, 216_000);
         assert_eq!(body.b_ins, 72_000);
+    }
+
+    #[test]
+    fn slide_placeholder_falls_back_to_master_text_body_properties() {
+        let placeholders = LayoutPlaceholders {
+            by_type_master_text_insets: HashMap::from([(
+                "body".to_owned(),
+                [Some(0), Some(0), Some(0), Some(0)],
+            )]),
+            by_type_master_auto_fit: HashMap::from([("body".to_owned(), "none".to_owned())]),
+            ..LayoutPlaceholders::default()
+        };
+        let slide = r#"
+          <p:nvSpPr><p:cNvPr id="2" name="Body"/><p:cNvSpPr/>
+            <p:nvPr><p:ph type="body" idx="10"/></p:nvPr>
+          </p:nvSpPr>
+          <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1000" cy="1000"/></a:xfrm></p:spPr>
+          <p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Body</a:t></a:r></a:p></p:txBody>"#;
+
+        let body = parse_slide_shape(slide, &placeholders)
+            .text_body
+            .expect("placeholder text body");
+        assert_eq!([body.l_ins, body.t_ins, body.r_ins, body.b_ins], [0; 4]);
+        assert_eq!(body.auto_fit, "none");
+    }
+
+    #[test]
+    fn master_text_body_properties_preserve_explicit_zero_insets() {
+        let xml = r#"
+          <p:sldMaster xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+            <p:cSld><p:spTree><p:sp>
+              <p:nvSpPr><p:nvPr><p:ph type="body"/></p:nvPr></p:nvSpPr>
+              <p:txBody><a:bodyPr lIns="0" tIns="0" rIns="0" bIns="0"><a:noAutofit/></a:bodyPr></p:txBody>
+            </p:sp></p:spTree></p:cSld>
+          </p:sldMaster>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let (insets, auto_fit) = parse_master_text_body_properties(doc.root_element());
+
+        assert_eq!(
+            insets.get("body"),
+            Some(&[Some(0), Some(0), Some(0), Some(0)])
+        );
+        assert_eq!(auto_fit.get("body").map(String::as_str), Some("none"));
     }
 
     #[test]

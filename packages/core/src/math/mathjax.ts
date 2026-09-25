@@ -1,9 +1,9 @@
 // Light, dependency-free helpers for the math feature.
 //
 // IMPORTANT: this module must stay free of the heavy MathJax engine asset (that
-// lives in `./engine`, referenced via `new URL`). The docx/pptx renderers
+// lives in `./engine`, referenced as a separate asset URL). The docx/pptx renderers
 // import ONLY from here (extents math, recolor, the `MathRenderer` contract),
-// so the ~3 MB engine asset tree-shakes out of their bundles. The engine is
+// so the ~4 MB engine asset tree-shakes out of their bundles. The engine is
 // injected at runtime via the `math` viewer option — see `MathRenderer`.
 
 export interface MathSvg {
@@ -26,7 +26,7 @@ export interface MathSvg {
  * new DocxViewer(canvas, { math });
  * ```
  *
- * Omit it and the equation engine (MathJax + STIX Two Math, ~3 MB) is not
+ * Omit it and the equation engine (MathJax + STIX Two Math, ~4 MB) is not
  * fetched or evaluated. The self-contained worker asset retains only the
  * worker-side loader until the built-in is supplied and a document uses math.
  */

@@ -1,3 +1,4 @@
+use crate::chart_compatibility::apply_excel_classic_chart_space_frame;
 use crate::read_zip_string;
 use crate::types::*;
 use crate::worksheet_reference::{
@@ -369,7 +370,7 @@ impl ooxml_common::chart::ChartReferenceResolver for XlsxChartReferenceResolver<
 /// Read the chartStyle part (`styleN.xml`) associated with a chart part at
 /// `chart_path` (e.g. `xl/charts/chart1.xml`), following that part's own
 /// relationships (`xl/charts/_rels/chart1.xml.rels`) to the
-/// `.../2011/relationships/chartStyle` target. Returns `None` when the chart
+/// Office 2011 or MS-ODRAWXML 2012 `chartStyle` target. Returns `None` when the chart
 /// has no chartStyle relationship or the part cannot be read (the chartEx
 /// title then falls back to its inline size, or the renderer's default).
 struct ChartRelatedParts {
@@ -404,11 +405,17 @@ fn load_chart_related_parts(archive: &mut crate::XlsxZip, chart_path: &str) -> C
                     .is_some_and(|kind| kind.ends_with(suffix))
         })
     };
-    if let Some(style_relationship) =
-        internal_target(ooxml_common::chart::CHART_STYLE_REL_TYPE_SUFFIX)
-    {
+    let style_relationship = relationships.values().find(|relationship| {
+        relationship.mode == ooxml_common::rels::TargetMode::Internal
+            && relationship
+                .relationship_type
+                .as_deref()
+                .is_some_and(ooxml_common::chart::is_chart_style_relationship_type)
+    });
+    if let Some(style_relationship) = style_relationship {
         let style_path = ooxml_common::rels::resolve_target(base_dir, &style_relationship.target);
-        result.style_xml = read_zip_string(archive, &style_path).ok();
+        result.style_xml =
+            Some(read_zip_string(archive, &style_path).unwrap_or_else(|_| "\0".to_owned()));
         let style_rels_path = ooxml_common::rels::relationship_part_path(&style_path);
         if let Ok(style_rels_xml) = read_zip_string(archive, &style_rels_path) {
             let style_relationships = ooxml_common::rels::parse_rels(&style_rels_xml);
@@ -423,7 +430,8 @@ fn load_chart_related_parts(archive: &mut crate::XlsxZip, chart_path: &str) -> C
         internal_target(ooxml_common::chart::CHART_COLOR_STYLE_REL_TYPE_SUFFIX)
     {
         let color_path = ooxml_common::rels::resolve_target(base_dir, &color_relationship.target);
-        result.color_style_xml = read_zip_string(archive, &color_path).ok();
+        result.color_style_xml =
+            Some(read_zip_string(archive, &color_path).unwrap_or_else(|_| "\0".to_owned()));
     }
     result
 }
@@ -697,7 +705,7 @@ pub(crate) fn load_sheet_charts_with_theme_images(
                 // A chartEx part reads its title font size from the associated
                 // chartStyle sidecar (`styleN.xml`), reached via the chart part's
                 // OWN rels (`xl/charts/_rels/chartN.xml.rels`,
-                // `.../2011/relationships/chartStyle`). Read it best-effort now
+                // Office 2011 / MS-ODRAWXML 2012 `chartStyle`). Read it best-effort now
                 // (before the chart doc is parsed, since both borrow `archive`);
                 // legacy `<c:>` charts ignore it (their title size is inline).
                 let related_parts = load_chart_related_parts(archive, &chart_path);
@@ -782,6 +790,9 @@ pub(crate) fn load_sheet_charts_with_theme_images(
                 let Some(mut chart) = chart_opt else {
                     continue;
                 };
+                if !is_chartex {
+                    apply_excel_classic_chart_space_frame(&mut chart);
+                }
                 if let Some(user_shapes_xml) = user_shapes_xml.as_deref() {
                     if let Ok(user_shapes_doc) = parse_guarded(user_shapes_xml) {
                         let text_boxes = ooxml_common::chart::parse_chart_user_shapes_for_chart(
@@ -886,6 +897,21 @@ impl ooxml_common::chart::ColorResolver for XlsxColorResolver<'_> {
 
     fn implicit_outline_only_negative_column_style(&self) -> bool {
         true
+    }
+
+    fn office_dark_text_contrast_applies(&self, style: u8) -> bool {
+        style == 41
+    }
+
+    fn classic_pattern2_set_transform(&self, set_index: usize) -> Option<f64> {
+        // ECMA-376 §21.2.3.46 Table 6 specifies the first six accents but
+        // leaves repeated-set tint/shade values to the application. Excel 16.111.1
+        // exports for 1–48 points establish these eight sets; 6/7/12/13-point
+        // controls establish count independence. The ninth set is unobserved.
+        // This evidence belongs to Excel and must not enroll Word/PowerPoint.
+        [0.0, -0.4, 0.2, -0.2, 0.4, -0.5, 0.3, -0.3]
+            .get(set_index)
+            .copied()
     }
 }
 /// Locate the first resolvable `<a:solidFill>` among `parent`'s direct children
@@ -1003,6 +1029,85 @@ mod solid_fill_color_tests {
         let doc = Document::parse(&xml).unwrap();
         let out = extract_solid_fill_in_drawingml(&doc.root_element(), &theme());
         assert_eq!(out.as_deref(), Some("FF8000"));
+    }
+
+    #[test]
+    fn excel_chart_host_style_scope_preserves_seventh_point_transform() {
+        let mut colors = theme();
+        colors[4] = "#808080".to_string();
+        let resolver = XlsxColorResolver {
+            theme_colors: &colors,
+            theme_major_font_latin: None,
+            theme_minor_font_latin: None,
+            theme_format_scheme: None,
+        };
+        let points = (0..7)
+            .map(|index| format!(r#"<c:pt idx="{index}"><c:v>1</c:v></c:pt>"#))
+            .collect::<String>();
+        let parse = |style: u8| {
+            let xml = format!(
+                r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+                  <c:style val="{style}"/><c:chart><c:plotArea><c:pieChart><c:varyColors val="1"/>
+                    <c:ser><c:idx val="0"/><c:order val="0"/>
+                      <c:dPt><c:idx val="5"/><c:spPr><a:solidFill><a:srgbClr val="ABCDEF"/></a:solidFill><a:ln><a:solidFill><a:srgbClr val="123456"/></a:solidFill></a:ln></c:spPr></c:dPt>
+                      <c:val><c:numLit><c:ptCount val="7"/>{points}</c:numLit></c:val>
+                    </c:ser>
+                  </c:pieChart></c:plotArea></c:chart>
+                </c:chartSpace>"#,
+            );
+            {
+                let document = Document::parse(&xml).expect("chart XML");
+                ooxml_common::chart::parse_chart_part(document.root_element(), &resolver)
+                    .expect("Excel chart")
+            }
+        };
+        let chart = parse(2);
+        let role = &chart
+            .classic_varying_point_chart_style_roles
+            .as_ref()
+            .expect("point-domain numeric roles")["dataPoint"];
+        let colors = role
+            .fill_colors
+            .as_ref()
+            .unwrap_or_else(|| panic!("point palette: {role:?}"));
+        assert_eq!(colors[0].as_deref(), Some("808080"));
+        assert_eq!(colors[6].as_deref(), Some("656565"));
+        assert_eq!(role.fill_semantic_fallback_indices.as_deref(), None);
+        // Direct point paint stays separate from the automatic palette so
+        // the renderer can preserve its precedence at either host boundary.
+        assert!(chart.series[0]
+            .data_point_colors
+            .as_ref()
+            .expect("direct point color")[5]
+            .as_deref()
+            .is_some_and(|color| color.eq_ignore_ascii_case("ABCDEF")));
+        let point = chart.series[0]
+            .data_point_overrides
+            .as_ref()
+            .expect("point formatting")
+            .iter()
+            .find(|point| point.idx == 5)
+            .expect("formatted point");
+        assert_eq!(point.line_color.as_deref(), Some("123456"));
+        for (style, expected) in [
+            (40, "111111"),
+            (41, "FEFEFE"),
+            (42, "111111"),
+            (48, "111111"),
+        ] {
+            let chart = parse(style);
+            assert_eq!(
+                chart
+                    .classic_chart_style_roles
+                    .as_ref()
+                    .expect("numeric roles")["categoryAxis"]
+                    .font_color
+                    .as_deref()
+                    .map(str::to_uppercase),
+                Some(expected.to_string()),
+                "style {style}",
+            );
+        }
     }
 
     /// A chart series is a DrawingML shape too: its `<c:spPr>` fill must retain
@@ -1652,6 +1757,188 @@ mod worksheet_reference_tests {
     }
 
     #[test]
+    fn linked_value_axis_uses_worksheet_format_instead_of_chart_cache() {
+        let base = chart_xml(true)
+            .replace("<c:numCache>", "<c:numCache><c:formatCode>0.00</c:formatCode>")
+            .replace(
+            "<c:valAx><c:axId val=\"100\"/><c:axPos val=\"l\"/></c:valAx>",
+            "<c:valAx><c:axId val=\"100\"/><c:axPos val=\"l\"/><c:numFmt formatCode=\"0.00\" sourceLinked=\"1\"/></c:valAx>",
+            );
+        let linked = load_model(&base);
+        assert_eq!(linked.val_axis_format_code.as_deref(), Some("#,##0"));
+        assert_eq!(
+            linked
+                .val_axis_number_format
+                .as_ref()
+                .map(|format| (format.authored_code.as_str(), format.source_linked,)),
+            Some(("0.00", Some(true))),
+        );
+        let unlinked = base.replace("sourceLinked=\"1\"", "sourceLinked=\"0\"");
+        let unlinked = load_model(&unlinked);
+        assert_eq!(unlinked.val_axis_format_code.as_deref(), Some("0.00"));
+        assert_eq!(
+            unlinked.val_axis_number_format.unwrap().source_linked,
+            Some(false),
+        );
+        let default_linked = base.replace(" sourceLinked=\"1\"", "");
+        let default_linked = load_model(&default_linked);
+        assert_eq!(
+            default_linked.val_axis_format_code.as_deref(),
+            Some("#,##0")
+        );
+        assert_eq!(
+            default_linked.val_axis_number_format.unwrap().source_linked,
+            None,
+        );
+    }
+
+    #[test]
+    fn linked_secondary_axis_uses_its_own_series_source() {
+        let secondary_group = r#"<c:lineChart><c:ser><c:idx val="1"/><c:order val="1"/><c:cat><c:numRef><c:f>'التقرير'!$C$2:$C$4</c:f></c:numRef></c:cat><c:val><c:numRef><c:f>'التقرير'!$D$2:$D$4</c:f></c:numRef></c:val></c:ser><c:axId val="11"/><c:axId val="101"/></c:lineChart>"#;
+        let xml = chart_xml(false)
+            .replace("</c:barChart>", &format!("</c:barChart>{secondary_group}"))
+            .replace(
+                "<c:valAx><c:axId val=\"100\"/><c:axPos val=\"l\"/></c:valAx>",
+                "<c:valAx><c:axId val=\"100\"/><c:axPos val=\"l\"/><c:numFmt formatCode=\"0.00\" sourceLinked=\"1\"/></c:valAx><c:catAx><c:axId val=\"11\"/><c:axPos val=\"t\"/><c:numFmt formatCode=\"0.00\" sourceLinked=\"1\"/></c:catAx><c:valAx><c:axId val=\"101\"/><c:axPos val=\"r\"/><c:numFmt formatCode=\"0.00\" sourceLinked=\"1\"/></c:valAx>",
+            );
+        let chart = load_model(&xml);
+        assert_eq!(chart.val_axis_format_code.as_deref(), Some("#,##0"));
+        let secondary = chart.secondary_val_axis.expect("secondary value axis");
+        assert_eq!(secondary.format_code, None);
+        assert_eq!(
+            secondary
+                .number_format
+                .map(|format| (format.authored_code, format.source_linked,)),
+            Some(("0.00".to_string(), Some(true))),
+        );
+        assert_eq!(
+            chart
+                .secondary_cat_axis
+                .and_then(|axis| axis.format_code)
+                .as_deref(),
+            Some("#,##0"),
+        );
+    }
+
+    #[test]
+    fn linked_axis_uses_first_series_when_source_formats_differ() {
+        let second = r#"<c:ser><c:idx val="1"/><c:order val="1"/><c:cat><c:strRef><c:f>'التقرير'!$A$2:$A$4</c:f></c:strRef></c:cat><c:val><c:numRef><c:f>'التقرير'!$D$2:$D$4</c:f></c:numRef></c:val></c:ser>"#;
+        let with_second = |first_formula: &str, second_series: &str| {
+            chart_xml(false)
+                .replace("$C$2:$C$4", first_formula)
+                .replace(
+                    "<c:axId val=\"10\"/><c:axId val=\"100\"/>",
+                    &format!("{second_series}<c:axId val=\"10\"/><c:axId val=\"100\"/>"),
+                )
+                .replace(
+                    "<c:valAx><c:axId val=\"100\"/><c:axPos val=\"l\"/></c:valAx>",
+                    "<c:valAx><c:axId val=\"100\"/><c:axPos val=\"l\"/><c:numFmt formatCode=\"0.00\" sourceLinked=\"1\"/></c:valAx>",
+                )
+        };
+        assert_eq!(
+            load_model(&with_second("$C$2:$C$4", second))
+                .val_axis_format_code
+                .as_deref(),
+            Some("#,##0"),
+        );
+        let reversed_order_second = second.replace(
+            "<c:idx val=\"1\"/><c:order val=\"1\"/>",
+            "<c:idx val=\"1\"/><c:order val=\"0\"/>",
+        );
+        let reversed_order = with_second("$C$2:$C$4", &reversed_order_second).replace(
+            "<c:idx val=\"0\"/><c:order val=\"0\"/>",
+            "<c:idx val=\"0\"/><c:order val=\"1\"/>",
+        );
+        assert_eq!(
+            load_model(&reversed_order).val_axis_format_code.as_deref(),
+            Some("#,##0"),
+        );
+        let second_formatted = second.replace("$D$2:$D$4", "$C$2:$C$4");
+        assert_eq!(
+            load_model(&with_second("$D$2:$D$4", &second_formatted)).val_axis_format_code,
+            None,
+        );
+    }
+
+    #[test]
+    fn linked_category_and_date_axes_resolve_numeric_source_style() {
+        for axis_tag in ["catAx", "dateAx"] {
+            let xml = format!(
+                r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:lineChart><c:ser><c:idx val="0"/><c:order val="0"/><c:cat><c:numRef><c:f>'التقرير'!$C$2:$C$4</c:f></c:numRef></c:cat><c:val><c:numRef><c:f>'التقرير'!$D$2:$D$4</c:f></c:numRef></c:val></c:ser><c:axId val="10"/><c:axId val="100"/></c:lineChart><c:{axis_tag}><c:axId val="10"/><c:axPos val="b"/><c:numFmt formatCode="0.00" sourceLinked="1"/></c:{axis_tag}><c:valAx><c:axId val="100"/><c:axPos val="l"/></c:valAx></c:plotArea></c:chart></c:chartSpace>"#,
+            );
+            assert_eq!(
+                load_model(&xml).cat_axis_format_code.as_deref(),
+                Some("#,##0"),
+                "{axis_tag}",
+            );
+        }
+    }
+
+    #[test]
+    fn linked_scatter_and_bubble_axes_follow_x_and_y_sources() {
+        for kind in ["scatterChart", "bubbleChart"] {
+            let bubble_size = if kind == "bubbleChart" {
+                r#"<c:bubbleSize><c:numRef><c:f>'التقرير'!$E$2:$E$4</c:f></c:numRef></c:bubbleSize>"#
+            } else {
+                ""
+            };
+            let xml = format!(
+                r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:{kind}><c:ser><c:idx val="0"/><c:order val="0"/><c:xVal><c:numRef><c:f>'التقرير'!$C$2:$C$4</c:f></c:numRef></c:xVal><c:yVal><c:numRef><c:f>'التقرير'!$D$2:$D$4</c:f></c:numRef></c:yVal>{bubble_size}</c:ser><c:axId val="10"/><c:axId val="100"/></c:{kind}><c:valAx><c:axId val="10"/><c:axPos val="b"/><c:numFmt formatCode="0.00" sourceLinked="1"/></c:valAx><c:valAx><c:axId val="100"/><c:axPos val="l"/><c:numFmt formatCode="0.00" sourceLinked="1"/></c:valAx></c:plotArea></c:chart></c:chartSpace>"#,
+            );
+            let chart = load_model(&xml);
+            assert_eq!(
+                chart.cat_axis_format_code.as_deref(),
+                Some("#,##0"),
+                "{kind}"
+            );
+            assert_eq!(chart.val_axis_format_code, None, "{kind}");
+        }
+    }
+
+    #[test]
+    fn linked_axis_uses_first_plot_group_when_chart_kinds_share_it() {
+        let group = |kind: &str, formula: &str, index: usize| {
+            format!(
+                r#"<c:{kind}><c:ser><c:idx val="{index}"/><c:order val="{index}"/><c:val><c:numRef><c:f>'التقرير'!${formula}$2:${formula}$4</c:f></c:numRef></c:val></c:ser><c:axId val="10"/><c:axId val="100"/></c:{kind}>"#,
+            )
+        };
+        let chart = |first: &str, second: &str| {
+            format!(
+                r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea>{first}{second}<c:catAx><c:axId val="10"/><c:axPos val="b"/></c:catAx><c:valAx><c:axId val="100"/><c:axPos val="l"/><c:numFmt formatCode="0.00" sourceLinked="1"/></c:valAx></c:plotArea></c:chart></c:chartSpace>"#,
+            )
+        };
+        let general_first = chart(&group("lineChart", "D", 0), &group("barChart", "C", 1));
+        assert_eq!(load_model(&general_first).val_axis_format_code, None);
+        let formatted_first = chart(&group("barChart", "C", 0), &group("lineChart", "D", 1));
+        assert_eq!(
+            load_model(&formatted_first).val_axis_format_code.as_deref(),
+            Some("#,##0"),
+        );
+    }
+
+    #[test]
+    fn linked_axis_uses_first_literal_series_instead_of_later_worksheet_source() {
+        let chart = |literal_code: &str, linked: bool| {
+            let linkage = if linked { "1" } else { "0" };
+            format!(
+                r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:lineChart><c:ser><c:idx val="0"/><c:order val="0"/><c:val><c:numLit>{literal_code}<c:ptCount val="2"/><c:pt idx="0"><c:v>1</c:v></c:pt><c:pt idx="1"><c:v>2</c:v></c:pt></c:numLit></c:val></c:ser><c:ser><c:idx val="1"/><c:order val="1"/><c:val><c:numRef><c:f>'التقرير'!$C$2:$C$4</c:f></c:numRef></c:val></c:ser><c:axId val="10"/><c:axId val="100"/></c:lineChart><c:catAx><c:axId val="10"/><c:axPos val="b"/></c:catAx><c:valAx><c:axId val="100"/><c:axPos val="l"/><c:numFmt formatCode="0.00" sourceLinked="{linkage}"/></c:valAx></c:plotArea></c:chart></c:chartSpace>"#,
+            )
+        };
+        let one_decimal = chart("<c:formatCode>0.0</c:formatCode>", true);
+        assert_eq!(
+            load_model(&one_decimal).val_axis_format_code.as_deref(),
+            Some("0.0"),
+        );
+        let no_literal_format = chart("", true);
+        assert_eq!(load_model(&no_literal_format).val_axis_format_code, None);
+        let unlinked = chart("<c:formatCode>0.0</c:formatCode>", false);
+        assert_eq!(
+            load_model(&unlinked).val_axis_format_code.as_deref(),
+            Some("0.00")
+        );
+    }
+
+    #[test]
     fn authored_chart_caches_take_precedence_over_live_cells() {
         let xml = chart_xml(true);
         let chart = load_model(&xml);
@@ -1851,7 +2138,7 @@ mod chartex_tests {
                 ("xl/charts/chart1.xml", classic_line_chart_xml()),
                 (
                     "xl/charts/_rels/chart1.xml.rels",
-                    r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdStyle" Type="http://schemas.microsoft.com/office/2011/relationships/chartStyle" Target="style1.xml"/><Relationship Id="rIdColors" Type="http://schemas.microsoft.com/office/2011/relationships/chartColorStyle" Target="colors1.xml"/></Relationships>"#,
+                    r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdStyle" Type="http://schemas.microsoft.com/office/2012/relationships/chartStyle" Target="style1.xml"/><Relationship Id="rIdColors" Type="http://schemas.microsoft.com/office/2011/relationships/chartColorStyle" Target="colors1.xml"/></Relationships>"#,
                 ),
                 (
                     "xl/charts/style1.xml",
@@ -1935,18 +2222,59 @@ mod chartex_tests {
     }
 
     #[test]
-    fn classic_graphicframe_loads_linked_chart_style_roles() {
+    fn classic_graphicframe_keeps_numeric_and_linked_chart_style_roles_separate() {
         let mut archive = archive_with_classic_chart_style();
+        let theme_colors = vec![
+            "#000000".into(),
+            "#FFFFFF".into(),
+            "#44546A".into(),
+            "#E7E6E6".into(),
+            "#4472C4".into(),
+            "#ED7D31".into(),
+            "#A5A5A5".into(),
+            "#FFC000".into(),
+            "#5B9BD5".into(),
+            "#70AD47".into(),
+            "#0563C1".into(),
+            "#954F72".into(),
+        ];
+        let theme_xml = r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements>
+          <a:fmtScheme name="Office"><a:fillStyleLst>
+            <a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
+            <a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
+            <a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
+          </a:fillStyleLst><a:lnStyleLst>
+            <a:ln w="6350"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln>
+            <a:ln w="12700"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln>
+            <a:ln w="19050"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln>
+          </a:lnStyleLst><a:effectStyleLst/><a:bgFillStyleLst/></a:fmtScheme>
+        </a:themeElements></a:theme>"#;
+        let format_scheme = ooxml_common::theme::ThemeFormatScheme::parse(theme_xml);
         let charts = load_sheet_charts(
             &mut archive,
             "worksheets/sheet1.xml",
             None,
-            &theme(),
+            &theme_colors,
             (None, None),
-            None,
+            Some(&format_scheme),
         );
         let chart = &charts.first().expect("classic chart").chart;
         assert_eq!(chart.chart_type, "line");
+        assert_eq!(chart.rounded_corners, Some(true));
+        let frame = chart
+            .classic_chart_style_roles
+            .as_ref()
+            .and_then(|roles| roles.get("chartArea"))
+            .expect("Excel implicit chart-area frame");
+        assert_eq!(
+            frame.fill_colors.as_deref(),
+            Some(&[Some("FFFFFF".to_string())][..]),
+        );
+        assert_eq!(
+            frame.line_colors.as_deref(),
+            Some(&[Some("898989".to_string())][..]),
+        );
+        assert_eq!(frame.line_width_emu, Some(12_700));
         assert_eq!(
             chart
                 .chart_style_roles
@@ -2014,5 +2342,25 @@ mod chartex_tests {
                 Some((expected_image_path.to_string(), "image/png".to_string())),
             );
         }
+    }
+
+    #[test]
+    fn chart_related_parts_preserve_missing_sidecar_relationships() {
+        let mut bytes = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            writer
+                .start_file(
+                    "xl/charts/_rels/chart9.xml.rels",
+                    SimpleFileOptions::default(),
+                )
+                .unwrap();
+            writer.write_all(br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rStyle" Type="http://schemas.microsoft.com/office/2011/relationships/chartStyle" Target="missing-style.xml"/><Relationship Id="rColors" Type="http://schemas.microsoft.com/office/2011/relationships/chartColorStyle" Target="missing-colors.xml"/></Relationships>"#).unwrap();
+            writer.finish().unwrap();
+        }
+        let mut archive = crate::XlsxZip::new(Cursor::new(bytes)).unwrap();
+        let related = load_chart_related_parts(&mut archive, "xl/charts/chart9.xml");
+        assert_eq!(related.style_xml.as_deref(), Some("\0"));
+        assert_eq!(related.color_style_xml.as_deref(), Some("\0"));
     }
 }

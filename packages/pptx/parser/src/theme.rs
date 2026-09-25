@@ -22,6 +22,7 @@ const RAW_SCHEME_PREFIX: &str = "+rawScheme-";
 pub(crate) struct PptxTheme {
     values: HashMap<String, String>,
     pub(crate) format_scheme: ThemeFormatScheme,
+    format_scheme_present: bool,
     pub(crate) chart_images: ooxml_common::chart::ChartImageRelationships,
 }
 
@@ -35,6 +36,7 @@ impl PptxTheme {
         Self {
             values: parse_theme_colors(xml),
             format_scheme,
+            format_scheme_present: true,
             chart_images: ooxml_common::chart::ChartImageRelationships::default(),
         }
     }
@@ -85,7 +87,7 @@ impl PptxThemeSource for PptxTheme {
     }
 
     fn format_scheme(&self) -> Option<&ThemeFormatScheme> {
-        Some(&self.format_scheme)
+        self.format_scheme_present.then_some(&self.format_scheme)
     }
 
     fn chart_images(&self) -> Option<&ooxml_common::chart::ChartImageRelationships> {
@@ -487,6 +489,7 @@ impl ooxml_common::color::ThemeResolver for PptxSchemeResolver<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Cursor, Write};
 
     #[test]
     fn color_map_swaps_are_resolved_from_the_immutable_scheme_palette() {
@@ -530,6 +533,27 @@ mod tests {
         apply_clr_map(&mut theme, Some(&second));
         assert_eq!(theme.get("accent1").map(String::as_str), Some("0000CC"));
         assert_eq!(theme.get("accent2").map(String::as_str), Some("00BB00"));
+    }
+
+    #[test]
+    fn absent_theme_and_broken_theme_part_keep_distinct_chart_semantics() {
+        assert!(PptxTheme::default().format_scheme().is_none());
+
+        let mut bytes = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            let options = zip::write::SimpleFileOptions::default();
+            writer.start_file("placeholder", options).unwrap();
+            writer.write_all(b"x").unwrap();
+            writer.finish().unwrap();
+        }
+        let mut archive = PptxZip::new(Cursor::new(bytes)).unwrap();
+        let broken = parse_theme_part("ppt/theme/missing.xml", &mut archive);
+        assert!(broken.format_scheme().is_some());
+        assert!(matches!(
+            broken.format_scheme.lookup_fill_ref(1),
+            ooxml_common::theme::StyleMatrixLookup::Missing
+        ));
     }
 
     #[test]

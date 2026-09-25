@@ -84,16 +84,17 @@ export function renderDocumentToCanvas(doc, canvas, pageIndex, opts) {
 `;
 
 const canonicalLayoutRuntime = `
-function createConcreteBodyLayoutKernel(source, context, localMetrics) {
-  return { source, context, localMetrics };
+function createConcreteBodyLayoutKernel(source, context, fontMetrics) {
+  return { source, context, fontMetrics };
 }
-export function createLayoutServices(input, context, localMetrics) {
+export function createLayoutServices(input, context, fontMetrics) {
   const source = layoutSourceStore(input);
   const services = {};
   attachBodyLayoutKernel(services, createConcreteBodyLayoutKernel(
     source,
     context,
-    localMetrics,
+    fontMetrics,
+    cjkFallback,
   ));
   return services;
 }
@@ -361,11 +362,15 @@ test('requires one private concrete body-kernel owner with exact loud attachment
     )],
     ['missing attachment', canonicalLayoutRuntime.replace(
       /attachBodyLayoutKernel\(services, createConcreteBodyLayoutKernel\([\s\S]*?\n  \)\);/,
-      'createConcreteBodyLayoutKernel(source, context, localMetrics);',
+      'createConcreteBodyLayoutKernel(source, context, fontMetrics);',
     )],
     ['wrong owner arguments', canonicalLayoutRuntime.replace(
-      '    context,\n    localMetrics,',
-      '    localMetrics,',
+      '    context,\n    fontMetrics,',
+      '    fontMetrics,',
+    )],
+    ['wrong CJK preference', canonicalLayoutRuntime.replace(
+      '    cjkFallback,',
+      '    unrelatedPreference,',
     )],
     ['wrong source', canonicalLayoutRuntime.replace(
       '    source,',
@@ -374,7 +379,7 @@ test('requires one private concrete body-kernel owner with exact loud attachment
     ['duplicate owner', canonicalLayoutRuntime.replace(
       'return services;',
       'attachBodyLayoutKernel(services, createConcreteBodyLayoutKernel(\n'
-        + '    source, context, localMetrics,\n'
+        + '    source, context, fontMetrics,\n'
         + '  ));\n  return services;',
     )],
   ]) {

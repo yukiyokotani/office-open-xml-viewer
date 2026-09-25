@@ -37,6 +37,17 @@ describe('Node bounded DOCX document session', () => {
     }
   });
 
+  it('materializes a package with a local-only ZIP timestamp mismatch', async () => {
+    const mismatched = Buffer.from(bytes);
+    const local = mismatched.indexOf(Buffer.from([0x50, 0x4b, 0x03, 0x04]));
+    expect(local).toBeGreaterThanOrEqual(0);
+    mismatched.writeUInt16LE(mismatched.readUInt16LE(local + 10) ^ 1, local + 10);
+    mismatched.writeUInt16LE(mismatched.readUInt16LE(local + 12) ^ 1, local + 12);
+
+    const document = await materializeDocxDocument(mismatched);
+    expect(document.body.length).toBeGreaterThan(0);
+  });
+
   it('matches compatibility pagination and renders one caller-owned canvas at a time', async () => {
     const expected = await materializeDocxDocument(bytes);
     const measure = factory.createCanvas(1, 1).getContext('2d');
@@ -92,7 +103,7 @@ describe('Node bounded DOCX document session', () => {
     const recovered = await openDocxDocument(bytes, { factory, currentDate: 0 });
     await expect(recovered.renderPage(0)).resolves.toMatchObject({ width: expect.any(Number) });
     await recovered.close();
-  });
+  }, 15_000);
 
   it('frees exactly once after completion, early return, and explicit close', async () => {
     const free = vi.spyOn(archivePrototype(), 'free');

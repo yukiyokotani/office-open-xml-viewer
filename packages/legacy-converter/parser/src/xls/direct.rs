@@ -699,6 +699,7 @@ fn empty_worksheet(
     xlsx_model::Worksheet {
         name,
         is_chart_sheet: false,
+        is_dialog_sheet: false,
         rows: Vec::new(),
         col_widths: BTreeMap::new(),
         col_width_ranges: Vec::new(),
@@ -708,6 +709,7 @@ fn empty_worksheet(
         col_collapsed: BTreeMap::new(),
         col_hidden: BTreeMap::new(),
         default_col_width: 0.0,
+        base_col_width: None,
         default_row_height: 0.0,
         default_row_height_custom: false,
         merge_cells: Vec::new(),
@@ -735,6 +737,10 @@ fn empty_worksheet(
         sparkline_groups: Vec::new(),
         default_font_family,
         default_font_size,
+        default_font_bold: None,
+        default_font_italic: None,
+        theme_japanese_major_font: None,
+        theme_japanese_minor_font: None,
         date1904,
         parse_error: None,
     }

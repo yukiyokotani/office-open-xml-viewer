@@ -88,12 +88,13 @@ function para(text: string, extra: Partial<DocParagraph> = {}): DocParagraph {
   } as unknown as DocParagraph;
 }
 
-function doc(body: BodyElement[], pageHeight: number): DocxDocumentModel {
+function doc(body: BodyElement[], pageHeight: number, sectionOverrides: Partial<SectionProps> = {}): DocxDocumentModel {
   const section: SectionProps = {
     pageWidth: 200, pageHeight,
     marginTop: 10, marginRight: 10, marginBottom: 10, marginLeft: 10,
     headerDistance: 4, footerDistance: 4, titlePage: false, evenAndOddHeaders: false,
     sectionStart: 'nextPage', columns: null,
+    ...sectionOverrides,
   } as SectionProps;
   return {
     section, body,
@@ -107,7 +108,7 @@ function doc(body: BodyElement[], pageHeight: number): DocxDocumentModel {
 const B = (...ps: DocParagraph[]): BodyElement[] => ps.map((p) => p as unknown as BodyElement);
 const bodyPages = (model: DocxDocumentModel) => layoutDocument(
   model,
-  createLayoutServices(model, { localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]) }),
+  createLayoutServices(model, { localMetrics: testFontSnapshot([{ family: 'Times New Roman', lineHeightRatio: 2355 / 2048 }]) }),
   { currentDateMs: 0 },
 ).pages.map((page) => page.layers.body);
 
@@ -117,6 +118,20 @@ const bodyPages = (model: DocxDocumentModel) => layoutDocument(
 const PAGE_HEIGHT = 77;
 
 describe('canonical body layout — trailing empty-paragraph mark grazes the bottom margin (issue #981)', () => {
+  it('moves a complete document-grid mark cell to the next page when it crosses the body edge', () => {
+    // Four 18pt grid lines leave 17.65pt of the body band. The next 18pt mark
+    // is invisible but owns one complete §17.6.5 line-grid cell. A following
+    // visible line makes its page assignment observable at the next page top.
+    const pages = bodyPages(doc(
+      B(para('a'), para('b'), para('c'), para('d'), para(''), para('e')),
+      109.65,
+      { docGridType: 'lines', docGridLinePitch: 18 },
+    ));
+    expect(pages[0].length).toBe(4);
+    expect(pages[1].length).toBe(2);
+    expect(pages[1][0]?.source.path[0]).toBe(4);
+  });
+
   it('KEEPS an inkless empty paragraph on the page when ink-bearing content follows and only its below-baseline whitespace overflows', () => {
     // a,b,c,d fill page 1; the empty grazes the bottom (baseline within the band) and
     // is KEPT (page 1 = a,b,c,d,empty = 5); the following visible "e" flows to page 2.

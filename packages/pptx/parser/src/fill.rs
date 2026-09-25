@@ -474,41 +474,9 @@ fn parse_shadow_node_with_resolver<R: ThemeResolver + ?Sized>(
     resolver: &R,
     tint_mode: ooxml_common::color::TintMode,
 ) -> Option<Shadow> {
-    let blur = attr_i64(&n, "blurRad").unwrap_or(0);
-    let dist = attr_i64(&n, "dist").unwrap_or(0);
-    let dir = attr_f64(&n, "dir").unwrap_or(0.0) / 60_000.0;
-    // CT_OuterShadowEffect (§20.1.8.45). These attributes do not exist on
-    // CT_InnerShadowEffect, so the shared reader keeps them optional.
-    let sx = attr_f64(&n, "sx").map(|value| value / 100_000.0);
-    let sy = attr_f64(&n, "sy").map(|value| value / 100_000.0);
-    let kx = attr_f64(&n, "kx").map(|value| value / 60_000.0);
-    let ky = attr_f64(&n, "ky").map(|value| value / 60_000.0);
-    let algn = attr(&n, "algn");
-    let rot_with_shape =
-        attr(&n, "rotWithShape").map(|value| value == "1" || value.eq_ignore_ascii_case("true"));
-
-    let color_str = ooxml_common::color::parse_color_node(n, resolver, tint_mode)
-        .unwrap_or_else(|| "000000".to_owned());
-    let (color, alpha) = if color_str.len() >= 8 {
-        let a = u8::from_str_radix(&color_str[6..8], 16).unwrap_or(255) as f64 / 255.0;
-        (color_str[..6].to_owned(), a)
-    } else {
-        (color_str, 1.0)
-    };
-
-    Some(Shadow {
-        color,
-        alpha,
-        blur,
-        dist,
-        dir,
-        sx,
-        sy,
-        kx,
-        ky,
-        algn,
-        rot_with_shape,
-    })
+    Some(ooxml_common::effect::parse_shadow_effect(
+        n, resolver, tint_mode,
+    ))
 }
 
 /// Parse spPr > effectLst > glow into a Glow effect — ECMA-376 §20.1.8.17
@@ -526,32 +494,22 @@ pub(crate) fn parse_glow(
     )
 }
 
+#[cfg(test)]
 fn parse_glow_node_with_resolver<R: ThemeResolver + ?Sized>(
     g: roxmltree::Node<'_, '_>,
     resolver: &R,
     tint_mode: ooxml_common::color::TintMode,
 ) -> Option<Glow> {
-    let radius = attr_i64(&g, "rad").unwrap_or(0);
-    let color_str = ooxml_common::color::parse_color_node(g, resolver, tint_mode)
-        .unwrap_or_else(|| "000000".to_owned());
-    let (color, alpha) = if color_str.len() >= 8 {
-        let a = u8::from_str_radix(&color_str[6..8], 16).unwrap_or(255) as f64 / 255.0;
-        (color_str[..6].to_owned(), a)
-    } else {
-        (color_str, 1.0)
-    };
-    Some(Glow {
-        color,
-        alpha,
-        radius,
-    })
+    Some(ooxml_common::effect::parse_glow_effect(
+        g, resolver, tint_mode,
+    ))
 }
 
 /// Parse spPr > effectLst > softEdge into a SoftEdge — ECMA-376 §20.1.8.31.
+#[cfg(test)]
 pub(crate) fn parse_soft_edge(effect_lst: roxmltree::Node<'_, '_>) -> Option<SoftEdge> {
     let n = child(effect_lst, "softEdge")?;
-    let radius = attr_i64(&n, "rad").unwrap_or(0);
-    Some(SoftEdge { radius })
+    Some(ooxml_common::effect::parse_soft_edge_effect(n))
 }
 
 /// Parse spPr > effectLst > reflection — ECMA-376 §20.1.8.27. Defaults
@@ -559,34 +517,14 @@ pub(crate) fn parse_soft_edge(effect_lst: roxmltree::Node<'_, '_>) -> Option<Sof
 /// stPos=0, endA=0, endPos=100000 (=1.0), sx=100000, sy=-100000.
 pub(crate) fn parse_reflection(effect_lst: roxmltree::Node<'_, '_>) -> Option<Reflection> {
     let r = child(effect_lst, "reflection")?;
-    let pct = |name: &str, default: f64| -> f64 {
-        attr_f64(&r, name).map(|v| v / 100_000.0).unwrap_or(default)
-    };
-    Some(Reflection {
-        blur: attr_i64(&r, "blurRad").unwrap_or(0),
-        dist: attr_i64(&r, "dist").unwrap_or(0),
-        dir: attr_f64(&r, "dir").unwrap_or(0.0) / 60_000.0,
-        st_a: pct("stA", 1.0),
-        st_pos: pct("stPos", 0.0),
-        end_a: pct("endA", 0.0),
-        end_pos: pct("endPos", 1.0),
-        sx: pct("sx", 1.0),
-        sy: pct("sy", -1.0),
-    })
+    Some(ooxml_common::effect::parse_reflection_effect(r))
 }
 
 /// Effects pulled from `spPr > effectLst`. The five members are independent
 /// siblings inside `CT_EffectList` — ECMA-376 §20.1.8.16. Used by both shapes
 /// (`p:sp`) and pictures (`p:pic`): `p:spPr` is `CT_ShapeProperties` in both
 /// cases (§19.3.1.37), so `effectLst` applies equally to images.
-#[derive(Default)]
-pub(crate) struct EffectLst {
-    pub(crate) shadow: Option<Shadow>,
-    pub(crate) inner_shadow: Option<Shadow>,
-    pub(crate) glow: Option<Glow>,
-    pub(crate) soft_edge: Option<SoftEdge>,
-    pub(crate) reflection: Option<Reflection>,
-}
+pub(crate) type EffectLst = ooxml_common::effect::DrawingMlEffects;
 
 /// One entry in theme `effectStyleLst` (ECMA-376 §20.1.4.1.11).
 /// `scene3d` and `sp3d` are peers of the effect property choice and must not be
@@ -616,19 +554,9 @@ fn parse_effect_lst_with_resolver<R: ThemeResolver + ?Sized>(
     resolver: &R,
     tint_mode: ooxml_common::color::TintMode,
 ) -> EffectLst {
-    EffectLst {
-        shadow: effect_lst
-            .and_then(|node| child(node, "outerShdw"))
-            .and_then(|node| parse_shadow_node_with_resolver(node, resolver, tint_mode)),
-        inner_shadow: effect_lst
-            .and_then(|node| child(node, "innerShdw"))
-            .and_then(|node| parse_shadow_node_with_resolver(node, resolver, tint_mode)),
-        glow: effect_lst
-            .and_then(|node| child(node, "glow"))
-            .and_then(|node| parse_glow_node_with_resolver(node, resolver, tint_mode)),
-        soft_edge: effect_lst.and_then(parse_soft_edge),
-        reflection: effect_lst.and_then(parse_reflection),
-    }
+    effect_lst
+        .map(|node| ooxml_common::effect::parse_effect_list(node, resolver, tint_mode))
+        .unwrap_or_default()
 }
 
 /// Resolve `p:style/a:effectRef` through the theme format matrix.
@@ -929,22 +857,20 @@ pub(crate) fn parse_background<F: FnMut(&str) -> Option<String>>(
     None
 }
 
-/// Resolve a table-style `<a:fill>` wrapper's colour. Identical to `parse_fill`
-/// for the common solid/no-fill cases, except `<a:tint>` uses the literal
-/// ECMA-376 §20.1.2.3.34 formula (`TintMode::WordLiteral`) so a band's
-/// `accent + tint 20%` renders as the near-white wash PowerPoint draws, rather
-/// than the saturated linear-lerp used for SmartArt accents. Gradient/pattern/
-/// blip fills (rare in table styles) defer to the generic `parse_fill`.
+/// Resolve a table-style `<a:fill>` wrapper's colour. PowerPoint applies the
+/// ECMA-376 §20.1.2.3.34 retained-input tint in linear sRGB for these DrawingML
+/// fills, just as it does for other presentation fills. Gradient/pattern/blip
+/// fills (rare in table styles) defer to the generic `parse_fill`.
 pub(crate) fn parse_table_style_fill(
     fill_wrapper: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
 ) -> Option<Fill> {
-    use ooxml_common::color::TintMode::WordLiteral;
+    use ooxml_common::color::TintMode::PowerPointLinear;
     for c in fill_wrapper.children().filter(|n| n.is_element()) {
         match c.tag_name().name() {
             "noFill" => return Some(Fill::None),
             "solidFill" => {
-                return parse_color_node_tint(c, theme, WordLiteral)
+                return parse_color_node_tint(c, theme, PowerPointLinear)
                     .map(|color| Fill::Solid { color });
             }
             _ => {}

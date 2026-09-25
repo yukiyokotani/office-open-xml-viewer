@@ -1,6 +1,5 @@
 import type { OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
 import {
-  decodeOoxmlResourceUsage,
   normalizeLoadResourceOptions,
   OoxmlResourceMetricsSession,
   parseResourceLimitError,
@@ -15,7 +14,10 @@ import {
   type WasmModuleRuntime,
 } from '@silurus/ooxml-core/internal/wasm-runtime-generation';
 import type { DocxDocumentCursorArchive } from '../document-pull-worker.js';
-import { DocumentPullWorker } from '../document-pull-worker.js';
+import {
+  DocumentPullWorker,
+  readDocxDocumentCursorUsage,
+} from '../document-pull-worker.js';
 // @ts-ignore wasm-pack generated module has no declaration entry
 import * as docxWasm from '../wasm/docx_parser.js';
 
@@ -136,7 +138,7 @@ export async function acquireDocxNodeDocument<TResult>(
         metrics.observeUsage(checkpoint);
       },
     });
-    usage ??= decodeUsage(archive.document_cursor_resource_usage());
+    usage ??= readDocxDocumentCursorUsage((operation) => operation(archive));
     metrics.observeUsage(usage);
     metrics.checkpoint('model streamed');
     await pull.reset();
@@ -155,15 +157,6 @@ export async function acquireDocxNodeDocument<TResult>(
     const normalized = parseResourceLimitError(error) ?? error;
     metrics.fail(normalized);
     throw normalized;
-  }
-}
-
-function decodeUsage(bytes: Uint8Array | undefined): OoxmlResourceUsageSnapshot | undefined {
-  if (!bytes) return undefined;
-  try {
-    return decodeOoxmlResourceUsage(bytes);
-  } catch {
-    return undefined;
   }
 }
 

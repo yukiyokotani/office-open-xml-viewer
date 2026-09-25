@@ -15,23 +15,27 @@ import {
 
 const workerMocks = vi.hoisted(() => ({
   opens: [] as Array<(...args: unknown[]) => Promise<OwnedLegacyDocSource>>,
-  metrics: vi.fn(async (): Promise<{ faces: FontFace[]; metrics: undefined }> => (
-    { faces: [], metrics: undefined }
+  metrics: vi.fn(async (): Promise<{ faces: FontFace[]; routes: Record<string, never> }> => (
+    { faces: [], routes: {} }
   )),
   unloadLocal: vi.fn(),
   paginate: vi.fn(async () => undefined),
 }));
 vi.mock('@silurus/ooxml-core', async importOriginal => ({
   ...await importOriginal<typeof import('@silurus/ooxml-core')>(),
-  unloadLocalFontMetrics: workerMocks.unloadLocal,
+  loadOfficeFontFallbacks: workerMocks.metrics,
+  unloadOfficeFontFallbacks: workerMocks.unloadLocal,
 }));
 vi.mock('./wasm/docx_parser.js', () => ({ default: vi.fn(), reinit: vi.fn(), DocxArchive: class {} }));
 vi.mock('@silurus/ooxml-legacy-converter/internal/direct-doc-engine', () => ({
   openLegacyDocSource: (...args: unknown[]) => workerMocks.opens.at(-1)!(...args),
 }));
-vi.mock('./local-font-metrics.js', () => ({ loadDocxLocalFontMetrics: workerMocks.metrics }));
-vi.mock('./google-fonts.js', () => ({ DOCX_GOOGLE_FONTS: {}, docxFontPreloadNames: () => [] }));
-vi.mock('./embedded-fonts.js', () => ({ loadEmbeddedFonts: async () => [] }));
+vi.mock('./google-fonts.js', () => ({
+  DOCX_GOOGLE_FONTS: {}, docxFontPreloadNames: () => [], docxOfficeFontFallbackRequests: () => [],
+}));
+vi.mock('./embedded-fonts.js', () => ({
+  loadEmbeddedFonts: async () => ({ faces: [], metrics: {}, routes: [] }),
+}));
 vi.mock('./renderer.js', () => ({ prepareMathRuns: vi.fn(), renderLayoutSourceToCanvas: vi.fn() }));
 vi.mock('./vertical-render-capability.js', () => ({ documentRequiresDomVerticalGlyphLayout: () => false }));
 vi.mock('./layout-source-model-adapter.js', () => ({
@@ -132,13 +136,13 @@ describe('render-worker direct DOC source route', () => {
     Object.assign(globalThis, { self: { postMessage: posts, onmessage: null } });
     let release!: () => void;
     const staleFace = {} as FontFace;
-    const oldMetrics = new Promise<{ faces: FontFace[]; metrics: undefined }>(resolve => {
-      release = () => resolve({ faces: [staleFace], metrics: undefined });
+    const oldMetrics = new Promise<{ faces: FontFace[]; routes: Record<string, never> }>(resolve => {
+      release = () => resolve({ faces: [staleFace], routes: {} });
     });
     let metricCall = 0;
     workerMocks.metrics.mockImplementation(() => metricCall++ === 0
       ? oldMetrics
-      : Promise.resolve({ faces: [], metrics: undefined }));
+      : Promise.resolve({ faces: [], routes: {} }));
     const old = nativeSource(); const current = nativeSource();
     workerMocks.opens.push(vi.fn().mockResolvedValueOnce(old.owned).mockResolvedValueOnce(current.owned));
     await import('./render-worker.js');
@@ -164,7 +168,7 @@ describe('render-worker direct DOC source route', () => {
     workerMocks.unloadLocal.mockClear();
     workerMocks.paginate.mockReset();
     const face = {} as FontFace;
-    workerMocks.metrics.mockResolvedValue({ faces: [face], metrics: undefined });
+    workerMocks.metrics.mockResolvedValue({ faces: [face], routes: {} });
     workerMocks.paginate.mockRejectedValueOnce(new Error('pagination failed'));
     const posts = vi.fn();
     Object.assign(globalThis, { self: { postMessage: posts, onmessage: null } });

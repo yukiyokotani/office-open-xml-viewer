@@ -221,11 +221,20 @@ impl ResolvedStyleSheet {
     #[allow(dead_code)] // Consumed by the direct XLS session in the next unit.
     pub(super) fn into_model(self) -> xlsx_model::Styles {
         let gradients = self.gradients;
+        // The synthesized minimal stylesheet has no BIFF FONT record, so its
+        // font carries no authored bCharSet.
+        let minimal = self.minimal;
         let mut model = xlsx_model::Styles {
             fonts: self
                 .fonts
                 .into_iter()
-                .map(|v| v.font.model(v.color.model()))
+                .map(|v| {
+                    let mut font = v.font.model(v.color.model());
+                    if minimal {
+                        font.charset = None;
+                    }
+                    font
+                })
                 .collect(),
             fills: self.fills.into_iter().map(fill_model).collect(),
             borders: self.borders.into_iter().map(border_model).collect(),

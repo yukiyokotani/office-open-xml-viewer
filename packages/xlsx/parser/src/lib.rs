@@ -46,6 +46,7 @@ mod styles;
 use styles::*;
 mod chart;
 use chart::*;
+mod chart_compatibility;
 mod drawing;
 use drawing::*;
 mod slicer;
@@ -353,6 +354,7 @@ struct WorkbookShared {
     /// sheet's shape tree. Keeping the complete recipes avoids the previous
     /// per-sheet theme re-inflate and width-only `lnStyleLst` projection.
     theme_format_scheme: Rc<ooxml_common::theme::ThemeFormatScheme>,
+    theme_format_scheme_present: bool,
     /// Image relationships owned by the workbook theme part. Chart Style
     /// `fillRef` recipes resolve `blipFill` rIds in this scope, not in the
     /// chart or style part.
@@ -360,10 +362,11 @@ struct WorkbookShared {
     /// Workbook theme `(majorFont.latin, minorFont.latin)` Latin faces
     /// (§20.1.4.2). Chart-text fallback font (CH10).
     theme_fonts: (Option<String>, Option<String>),
+    theme_japanese_fonts: (Option<String>, Option<String>),
     /// Lightweight style projections used while materializing sheets. Full
     /// workbook styles stay owned by the full-parse path instead of being
     /// retained and deeply cloned here.
-    default_font: (Option<String>, Option<f64>),
+    default_font: DefaultFont,
     chart_number_formats: ChartNumberFormatCache,
     shared_strings: Rc<[SharedString]>,
     /// #773: a part-tagged degradation error set when `xl/sharedStrings.xml` was
@@ -383,7 +386,9 @@ struct WorkbookShared {
 struct XlsxThemeData {
     colors: Vec<String>,
     format_scheme: ooxml_common::theme::ThemeFormatScheme,
+    format_scheme_present: bool,
     fonts: (Option<String>, Option<String>),
+    japanese_fonts: (Option<String>, Option<String>),
     chart_images: ooxml_common::chart::ChartImageRelationships,
 }
 
@@ -394,7 +399,10 @@ impl XlsxThemeData {
         };
         let theme_path = resolve_zip_path("xl", &target);
         let Ok(xml) = read_zip_string(archive, &theme_path) else {
-            return Self::default();
+            return Self {
+                format_scheme_present: true,
+                ..Self::default()
+            };
         };
         let mut theme = Self::parse(&xml);
         let rels_path = ooxml_common::rels::relationship_part_path(&theme_path);
@@ -416,10 +424,22 @@ impl XlsxThemeData {
             .map(|hex| format!("#{}", hex.to_uppercase()))
             .collect();
         let theme_fonts = ooxml_common::theme::ThemeFonts::parse(xml);
+        let japanese_fonts = (
+            theme_fonts
+                .major
+                .typeface_for_script("Jpan")
+                .map(str::to_owned),
+            theme_fonts
+                .minor
+                .typeface_for_script("Jpan")
+                .map(str::to_owned),
+        );
         Self {
             colors,
             format_scheme: ooxml_common::theme::ThemeFormatScheme::parse(xml),
+            format_scheme_present: true,
             fonts: (theme_fonts.major.latin, theme_fonts.minor.latin),
+            japanese_fonts,
             chart_images: ooxml_common::chart::ChartImageRelationships::default(),
         }
     }
@@ -462,7 +482,9 @@ impl WorkbookShared {
         let theme = XlsxThemeData::load(archive, &rels_xml);
         let theme_colors: Rc<[String]> = theme.colors.into();
         let theme_format_scheme = Rc::new(theme.format_scheme);
+        let theme_format_scheme_present = theme.format_scheme_present;
         let theme_fonts = theme.fonts;
+        let theme_japanese_fonts = theme.japanese_fonts;
         let theme_chart_images = Rc::new(theme.chart_images);
         let (default_font, chart_number_formats, styles) = if include_full_styles {
             match parse_styles(archive, theme_colors.as_ref()) {
@@ -472,7 +494,7 @@ impl WorkbookShared {
                     Some(Ok(parsed.styles)),
                 ),
                 Err(error) => (
-                    (None, None),
+                    (None, None, false, false),
                     ChartNumberFormatCache::default(),
                     Some(Err(error)),
                 ),
@@ -480,7 +502,11 @@ impl WorkbookShared {
         } else {
             match styles::parse_style_projection(archive) {
                 Ok(parsed) => (parsed.default_font, parsed.chart_number_formats, None),
-                Err(_) => ((None, None), ChartNumberFormatCache::default(), None),
+                Err(_) => (
+                    (None, None, false, false),
+                    ChartNumberFormatCache::default(),
+                    None,
+                ),
             }
         };
         let (shared_strings, shared_strings_error) =
@@ -492,8 +518,10 @@ impl WorkbookShared {
                 sheets,
                 theme_colors,
                 theme_format_scheme,
+                theme_format_scheme_present,
                 theme_chart_images,
                 theme_fonts,
+                theme_japanese_fonts,
                 default_font,
                 chart_number_formats,
                 shared_strings: shared_strings.into(),
@@ -534,14 +562,7 @@ fn parse_sheet_with(
 
     let sheet_path = resolve_sheet_path(&rels_doc, &sheet_meta.r_id)
         .ok_or_else(|| format!("rId {} not found in rels", sheet_meta.r_id))?;
-    let is_chart_sheet = rels_doc.descendants().any(|node| {
-        node.is_element()
-            && node.tag_name().name() == "Relationship"
-            && node.attribute("Id") == Some(sheet_meta.r_id.as_str())
-            && node
-                .attribute("Type")
-                .is_some_and(|relationship_type| relationship_type.ends_with("/chartsheet"))
-    });
+    let sheet_part_kind = resolve_sheet_part_kind(&rels_doc, &sheet_meta.r_id);
 
     let theme_colors = shared.theme_colors.as_ref();
     let sheet_part = format!("xl/{}", sheet_path);
@@ -552,16 +573,16 @@ fn parse_sheet_with(
     // names the offending part, so the OTHER sheets stay openable. Everything
     // after (images / charts / comments / …) is already lenient (returns empty
     // on error), so it stays outside this guard.
-    let sheet_read_parse = if is_chart_sheet {
-        parse_chart_sheet_shell(archive, &sheet_part, name)
-    } else {
-        stream_sheet_data_from_archive(
+    let sheet_read_parse = match sheet_part_kind {
+        SheetPartKind::ChartSheet => parse_chart_sheet_shell(archive, &sheet_part, name),
+        SheetPartKind::DialogSheet => parse_dialog_sheet_shell(archive, &sheet_part, name),
+        SheetPartKind::Worksheet => stream_sheet_data_from_archive(
             archive,
             &sheet_part,
             Rc::clone(&shared.shared_strings),
             Rc::clone(&shared.theme_colors),
         )
-        .and_then(|streamed| parse_projected_worksheet(streamed, theme_colors, name))
+        .and_then(|streamed| parse_projected_worksheet(streamed, theme_colors, name)),
     };
     let parsed = match sheet_read_parse {
         Ok(parsed) => parsed,
@@ -570,6 +591,13 @@ fn parse_sheet_with(
             return serialize_worksheet_bounded(archive, &sheet_part, &ws);
         }
     };
+    // Dialog sheets are legacy form definitions, not worksheet grids. Their
+    // DrawingML/control relationships are not displayable as worksheet content,
+    // so do not spend bounded package resources materializing content the
+    // renderer intentionally replaces with an informational surface.
+    if sheet_part_kind == SheetPartKind::DialogSheet {
+        return serialize_worksheet_bounded(archive, &sheet_part, &parsed.0);
+    }
     let worksheet = finalize_projected_sheet(
         archive,
         shared,
@@ -580,6 +608,46 @@ fn parse_sheet_with(
         CurrentSheetLookup::BuildFromMaterializedRows,
     )?;
     serialize_worksheet_bounded(archive, &sheet_part, &worksheet)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SheetPartKind {
+    Worksheet,
+    ChartSheet,
+    DialogSheet,
+}
+
+fn resolve_sheet_part_kind(doc: &roxmltree::Document, r_id: &str) -> SheetPartKind {
+    const PACKAGE_RELATIONSHIPS: &str =
+        "http://schemas.openxmlformats.org/package/2006/relationships";
+    let relationship_type = doc.descendants().find_map(|node| {
+        (node.is_element()
+            && node.tag_name().name() == "Relationship"
+            && node.tag_name().namespace() == Some(PACKAGE_RELATIONSHIPS)
+            && node.attribute("Id") == Some(r_id))
+        .then(|| node.attribute("Type"))
+        .flatten()
+    });
+    match relationship_type {
+        Some(value) if is_office_relationship_type(value, "chartsheet") => {
+            SheetPartKind::ChartSheet
+        }
+        Some(value) if is_office_relationship_type(value, "dialogsheet") => {
+            SheetPartKind::DialogSheet
+        }
+        _ => SheetPartKind::Worksheet,
+    }
+}
+
+fn is_office_relationship_type(value: &str, local_name: &str) -> bool {
+    [relationships::TRANSITIONAL, relationships::STRICT]
+        .into_iter()
+        .any(|base| {
+            value
+                .strip_prefix(base)
+                .and_then(|suffix| suffix.strip_prefix('/'))
+                == Some(local_name)
+        })
 }
 
 fn parse_chart_sheet_shell(
@@ -594,6 +662,20 @@ fn parse_chart_sheet_shell(
         return Err("expected SpreadsheetML chartsheet root".to_string());
     }
     Ok((Worksheet::chart_sheet(name), Vec::new(), xml))
+}
+
+fn parse_dialog_sheet_shell(
+    archive: &mut XlsxZip,
+    sheet_part: &str,
+    name: &str,
+) -> Result<(Worksheet, HyperlinkRids, String), String> {
+    let xml = read_zip_string(archive, sheet_part)?;
+    let document = parse_guarded(&xml).map_err(|error| error.to_string())?;
+    let root = document.root_element();
+    if root.tag_name().name() != "dialogsheet" || !is_x_ns(root.tag_name().namespace()) {
+        return Err("expected SpreadsheetML dialogsheet root".to_string());
+    }
+    Ok((Worksheet::dialog_sheet(name), Vec::new(), xml))
 }
 
 enum CurrentSheetLookup {
@@ -650,7 +732,9 @@ fn finalize_projected_sheet(
             shared.theme_fonts.0.as_deref(),
             shared.theme_fonts.1.as_deref(),
         ),
-        Some(shared.theme_format_scheme.as_ref()),
+        shared
+            .theme_format_scheme_present
+            .then_some(shared.theme_format_scheme.as_ref()),
         shared.theme_chart_images.as_ref(),
     );
     ws.charts = charts;
@@ -681,6 +765,10 @@ fn finalize_projected_sheet(
     ws.sparkline_groups = sparkline_groups;
     ws.default_font_family = shared.default_font.0.clone();
     ws.default_font_size = shared.default_font.1;
+    ws.default_font_bold = shared.default_font.2.then_some(true);
+    ws.default_font_italic = shared.default_font.3.then_some(true);
+    ws.theme_japanese_major_font = shared.theme_japanese_fonts.0.clone();
+    ws.theme_japanese_minor_font = shared.theme_japanese_fonts.1.clone();
     // Denormalize the workbook-wide date system onto this sheet so the cell
     // formatter can resolve serial dates without a workbook back-reference
     // (ECMA-376 §18.2.28 / §18.17.4.1).
@@ -1390,6 +1478,7 @@ fn parse_projected_worksheet(
     let mut freeze_rows: u32 = 0;
     let mut freeze_cols: u32 = 0;
     let mut default_col_width = 8.43;
+    let mut base_col_width: Option<u32> = None;
     // Intrinsic default row height in *points* — ECMA-376 §18.3.1.81.
     // 15 pt = 20 CSS px at 96 DPI, Excel's baseline for the Calibri 11
     // Normal style. The renderer multiplies by 4/3 at display time, so
@@ -1531,6 +1620,11 @@ fn parse_projected_worksheet(
     for node in doc.descendants() {
         match node.tag_name().name() {
             "sheetFormatPr" if is_x_ns(node.tag_name().namespace()) => {
+                // ECMA-376 §18.3.1.81: baseColWidth describes implicit columns
+                // only when the sheet does not supply defaultColWidth.
+                if node.attribute("defaultColWidth").is_none() {
+                    base_col_width = node.attribute("baseColWidth").and_then(|s| s.parse().ok());
+                }
                 if let Some(v) = node
                     .attribute("defaultColWidth")
                     .and_then(|s| s.parse::<f64>().ok())
@@ -2099,6 +2193,7 @@ fn parse_projected_worksheet(
     let worksheet = Worksheet {
         name: name.to_string(),
         is_chart_sheet: false,
+        is_dialog_sheet: false,
         rows,
         col_widths,
         col_width_ranges,
@@ -2108,6 +2203,7 @@ fn parse_projected_worksheet(
         col_collapsed,
         col_hidden,
         default_col_width,
+        base_col_width,
         default_row_height,
         default_row_height_custom,
         merge_cells,
@@ -2135,6 +2231,10 @@ fn parse_projected_worksheet(
         sparkline_groups: Vec::new(),
         default_font_family: None,
         default_font_size: None,
+        default_font_bold: None,
+        default_font_italic: None,
+        theme_japanese_major_font: None,
+        theme_japanese_minor_font: None,
         // Set by `parse_sheet_with` from the workbook-level `<workbookPr
         // date1904>` (ECMA-376 §18.2.28); a bare `parse_worksheet` (tests)
         // defaults to the 1900 date system.
@@ -3573,34 +3673,35 @@ impl XlsxArchive {
                 .ok_or_else(|| format!("rId {} not found in rels", sheet.r_id))?;
             let part = format!("xl/{sheet_path}");
             let zip = self.archive.as_mut().expect("container open checked above");
-            let is_chart_sheet = rels_doc.descendants().any(|node| {
-                node.is_element()
-                    && node.tag_name().name() == "Relationship"
-                    && node.attribute("Id") == Some(sheet.r_id.as_str())
-                    && node
-                        .attribute("Type")
-                        .is_some_and(|relationship_type| relationship_type.ends_with("/chartsheet"))
-            });
-            let source = if is_chart_sheet {
-                match parse_chart_sheet_shell(zip, &part, name).and_then(|parsed| {
-                    finalize_projected_sheet(
-                        zip,
-                        shared,
-                        sheet_index,
-                        name,
-                        &sheet_path,
-                        parsed,
-                        CurrentSheetLookup::BuildFromMaterializedRows,
-                    )
-                }) {
-                    Ok(worksheet) => ActiveWorksheetSource::Ready(Box::new(worksheet)),
+            let sheet_part_kind = resolve_sheet_part_kind(&rels_doc, &sheet.r_id);
+            let source = match sheet_part_kind {
+                SheetPartKind::ChartSheet => {
+                    match parse_chart_sheet_shell(zip, &part, name).and_then(|parsed| {
+                        finalize_projected_sheet(
+                            zip,
+                            shared,
+                            sheet_index,
+                            name,
+                            &sheet_path,
+                            parsed,
+                            CurrentSheetLookup::BuildFromMaterializedRows,
+                        )
+                    }) {
+                        Ok(worksheet) => ActiveWorksheetSource::Ready(Box::new(worksheet)),
+                        Err(error) => {
+                            zip.assert_healthy()?;
+                            ActiveWorksheetSource::DeferredFailure(CursorOpenFailure::Sheet(error))
+                        }
+                    }
+                }
+                SheetPartKind::DialogSheet => match parse_dialog_sheet_shell(zip, &part, name) {
+                    Ok((worksheet, _, _)) => ActiveWorksheetSource::Ready(Box::new(worksheet)),
                     Err(error) => {
                         zip.assert_healthy()?;
                         ActiveWorksheetSource::DeferredFailure(CursorOpenFailure::Sheet(error))
                     }
-                }
-            } else {
-                match zip.open_worksheet_cursor(
+                },
+                SheetPartKind::Worksheet => match zip.open_worksheet_cursor(
                     &part,
                     Rc::clone(&shared.shared_strings),
                     Rc::clone(&shared.theme_colors),
@@ -3610,14 +3711,15 @@ impl XlsxArchive {
                         zip.assert_healthy()?;
                         ActiveWorksheetSource::DeferredFailure(CursorOpenFailure::Sheet(error))
                     }
-                }
+                },
             };
             Ok(ActiveWorksheetCursor {
                 source,
                 sheet_index,
                 name: name.to_string(),
                 sheet_path,
-                reference_index: (!is_chart_sheet).then(WorksheetCellLookupBuilder::bounded),
+                reference_index: (sheet_part_kind == SheetPartKind::Worksheet)
+                    .then(WorksheetCellLookupBuilder::bounded),
             })
         })();
         match result {
@@ -4004,6 +4106,8 @@ fn to_markdown_impl_with_limits(
 fn to_markdown_from_archive(archive: &mut XlsxZip) -> Result<String, String> {
     let shared = WorkbookShared::load(archive)?;
     let mut out = String::new();
+    let mut review_comments = String::new();
+    let mut has_comments = false;
     for (idx, sheet_meta) in shared.sheets.iter().enumerate() {
         let sheet_json =
             parse_sheet_with(archive, &shared, idx as u32, &sheet_meta.name).map_err(|error| {
@@ -4015,7 +4119,9 @@ fn to_markdown_from_archive(archive: &mut XlsxZip) -> Result<String, String> {
         let sheet: serde_json::Value =
             serde_json::from_slice(&sheet_json).map_err(|e| e.to_string())?;
         markdown::render_sheet(&sheet, &shared.shared_strings, &mut out);
+        markdown::render_sheet_comments(&sheet, &mut review_comments, &mut has_comments);
     }
+    out.push_str(&review_comments);
     Ok(out)
 }
 
@@ -4454,6 +4560,22 @@ mod sheet_view_tests {
         assert_eq!(ws.default_row_height, 15.0);
         assert_eq!(ws.col_widths.get(&1).copied(), Some(8.43));
         assert!(ws.row_heights.is_empty());
+    }
+
+    #[test]
+    fn sheet_base_width_is_retained_only_without_authored_default_width() {
+        let base = format!(
+            r#"<worksheet xmlns="{NS}"><sheetFormatPr baseColWidth="10" defaultRowHeight="16"/><sheetData/></worksheet>"#
+        );
+        let (ws, _) = parse_worksheet(&base, &[], &[], "Sheet1").expect("worksheet parses");
+        assert_eq!(ws.base_col_width, Some(10));
+
+        let explicit = format!(
+            r#"<worksheet xmlns="{NS}"><sheetFormatPr baseColWidth="10" defaultColWidth="12.5" defaultRowHeight="16"/><sheetData/></worksheet>"#
+        );
+        let (ws, _) = parse_worksheet(&explicit, &[], &[], "Sheet1").expect("worksheet parses");
+        assert_eq!(ws.base_col_width, None);
+        assert_eq!(ws.default_col_width, 12.5);
     }
 
     /// The serialized worksheet JSON is deterministic: `colWidths` keys come out
@@ -4913,7 +5035,7 @@ mod comment_tests {
 mod threaded_comment_tests {
     use super::{
         merge_sheet_comments, parse_comments_xml, parse_sheet_native, parse_threaded_comments_xml,
-        XlsxCommentKind,
+        to_markdown_native, XlsxCommentKind,
     };
     use std::collections::HashMap;
     use std::io::{Cursor, Write};
@@ -4986,6 +5108,29 @@ mod threaded_comment_tests {
         assert_eq!(
             parsed_thread_author(&package).as_deref(),
             Some("Referenced Reviewer")
+        );
+    }
+
+    #[test]
+    fn markdown_collects_cell_comments_after_all_sheet_data() {
+        let package = workbook_with_threaded_comment(
+            r#"<Relationship Id="rPersons" Type="http://schemas.microsoft.com/office/2017/10/relationships/person" Target="reviewers/custom-person-list.xml"/>"#,
+            &[(
+                "xl/reviewers/custom-person-list.xml",
+                r#"<personList><person id="{p1}" displayName="Referenced Reviewer"/></personList>"#,
+            )],
+        );
+
+        let markdown = to_markdown_native(&package).expect("markdown projects");
+
+        assert!(
+            markdown.find("## Sheet1").unwrap() < markdown.find("## Review comments").unwrap(),
+            "{markdown}"
+        );
+        assert!(markdown.contains("### Sheet1 — A1"), "{markdown}");
+        assert!(
+            markdown.contains("> **Referenced Reviewer**\n>\n> Review this."),
+            "{markdown}"
         );
     }
 
@@ -5237,7 +5382,7 @@ mod workbook_theme_tests {
     #[test]
     fn loads_the_theme_target_declared_by_workbook_relationships_once() {
         let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rTheme" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="themes/custom.xml"/></Relationships>"#;
-        let custom = r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:clrScheme name="custom"><a:dk1><a:srgbClr val="010203"/></a:dk1></a:clrScheme><a:fontScheme name="custom"><a:majorFont><a:latin typeface="Major Custom"/></a:majorFont><a:minorFont><a:latin typeface="Minor Custom"/></a:minorFont></a:fontScheme><a:fmtScheme name="custom"><a:fillStyleLst><a:solidFill><a:srgbClr val="ABCDEF"/></a:solidFill></a:fillStyleLst></a:fmtScheme></a:themeElements></a:theme>"#;
+        let custom = r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:clrScheme name="custom"><a:dk1><a:srgbClr val="010203"/></a:dk1></a:clrScheme><a:fontScheme name="custom"><a:majorFont><a:latin typeface="Major Custom"/><a:font script="Jpan" typeface="Major Japanese"/></a:majorFont><a:minorFont><a:latin typeface="Minor Custom"/><a:font script="Jpan" typeface="Minor Japanese"/></a:minorFont></a:fontScheme><a:fmtScheme name="custom"><a:fillStyleLst><a:solidFill><a:srgbClr val="ABCDEF"/></a:solidFill></a:fillStyleLst></a:fmtScheme></a:themeElements></a:theme>"#;
         let decoy = r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:clrScheme name="decoy"><a:dk1><a:srgbClr val="FFFFFF"/></a:dk1></a:clrScheme></a:themeElements></a:theme>"#;
         let mut bytes = Vec::new();
         {
@@ -5259,6 +5404,8 @@ mod workbook_theme_tests {
         assert_eq!(theme.colors.first().map(String::as_str), Some("#010203"));
         assert_eq!(theme.fonts.0.as_deref(), Some("Major Custom"));
         assert_eq!(theme.fonts.1.as_deref(), Some("Minor Custom"));
+        assert_eq!(theme.japanese_fonts.0.as_deref(), Some("Major Japanese"));
+        assert_eq!(theme.japanese_fonts.1.as_deref(), Some("Minor Japanese"));
         assert!(matches!(
             theme.format_scheme.lookup_fill_ref(1),
             ooxml_common::theme::StyleMatrixLookup::Entry(_)
@@ -5269,6 +5416,31 @@ mod workbook_theme_tests {
     fn external_theme_relationship_is_not_treated_as_a_package_part() {
         let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rTheme" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="https://example.invalid/theme.xml" TargetMode="External"/></Relationships>"#;
         assert_eq!(find_internal_rel_target_by_type(rels, "/theme"), None);
+    }
+
+    #[test]
+    fn absent_theme_and_broken_theme_relationship_keep_distinct_chart_semantics() {
+        let mut bytes = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            let options = zip::write::SimpleFileOptions::default();
+            writer.start_file("placeholder", options).unwrap();
+            writer.write_all(b"x").unwrap();
+            writer.finish().unwrap();
+        }
+        let mut archive = XlsxZip::new(Cursor::new(bytes)).unwrap();
+        archive.begin_operation("theme-presence-test").unwrap();
+
+        let absent = XlsxThemeData::load(&mut archive, "");
+        assert!(!absent.format_scheme_present);
+
+        let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rTheme" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="themes/missing.xml"/></Relationships>"#;
+        let broken = XlsxThemeData::load(&mut archive, rels);
+        assert!(broken.format_scheme_present);
+        assert!(matches!(
+            broken.format_scheme.lookup_fill_ref(1),
+            ooxml_common::theme::StyleMatrixLookup::Missing
+        ));
     }
 }
 
@@ -5413,6 +5585,184 @@ mod chartsheet_tests {
                 .and_then(|v| v.as_array())
                 .map(Vec::len),
             Some(1),
+        );
+    }
+}
+
+#[cfg(test)]
+mod dialogsheet_tests {
+    use super::*;
+    use std::io::{Cursor, Write};
+    use zip::write::SimpleFileOptions;
+
+    const TRANSITIONAL_RELATIONSHIPS: &str =
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    const STRICT_RELATIONSHIPS: &str = "http://purl.oclc.org/ooxml/officeDocument/relationships";
+
+    fn dialogsheet_bytes(relationship_base: &str, sheet_xml: &str) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut zip = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            let options = SimpleFileOptions::default();
+            let workbook = r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Dialog" sheetId="1" r:id="rSheet"/></sheets></workbook>"#;
+            let relationships = format!(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rSheet" Type="{relationship_base}/dialogsheet" Target="dialogsheets/sheet1.xml"/></Relationships>"#,
+            );
+            for (path, content) in [
+                ("xl/workbook.xml", workbook),
+                ("xl/_rels/workbook.xml.rels", relationships.as_str()),
+                ("xl/dialogsheets/sheet1.xml", sheet_xml),
+            ] {
+                zip.start_file(path, options).unwrap();
+                zip.write_all(content.as_bytes()).unwrap();
+            }
+            zip.finish().unwrap();
+        }
+        bytes
+    }
+
+    fn valid_dialogsheet_xml() -> &'static str {
+        r#"<dialogsheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView workbookViewId="0"/></sheetViews></dialogsheet>"#
+    }
+
+    fn assert_dialogsheet_model(worksheet: &serde_json::Value) {
+        assert_eq!(
+            worksheet
+                .get("isDialogSheet")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            worksheet
+                .get("rows")
+                .and_then(|value| value.as_array())
+                .map(Vec::len),
+            Some(0)
+        );
+        assert!(
+            worksheet.get("parseError").is_none(),
+            "a valid dialogsheet is not a broken worksheet: {worksheet}"
+        );
+    }
+
+    /// ECMA-376 Part 1 §12.3.7 / §18.3.1.34 defines a Dialogsheet as a
+    /// distinct Workbook target whose root is `dialogsheet`, not `worksheet`.
+    #[test]
+    fn dialog_sheet_is_a_normal_row_free_model() {
+        let mut archive = XlsxZip::new(Cursor::new(dialogsheet_bytes(
+            TRANSITIONAL_RELATIONSHIPS,
+            valid_dialogsheet_xml(),
+        )))
+        .expect("dialogsheet zip opens");
+        let shared = WorkbookShared::load(&mut archive).expect("shared workbook parts");
+        let bytes =
+            parse_sheet_with(&mut archive, &shared, 0, "Dialog").expect("dialogsheet materializes");
+        let worksheet: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_dialogsheet_model(&worksheet);
+    }
+
+    /// The browser viewer uses the resumable cursor path. It must produce the
+    /// same non-error terminal model as the monolithic/native path.
+    #[test]
+    fn dialog_sheet_production_cursor_returns_terminal_model() {
+        let mut archive = XlsxArchive::new(
+            dialogsheet_bytes(TRANSITIONAL_RELATIONSHIPS, valid_dialogsheet_xml()),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        archive.open_sheet_cursor(0, "Dialog").unwrap();
+
+        let bytes = archive.pull_sheet_cursor_inner(1).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            value.get("kind").and_then(|item| item.as_str()),
+            Some("finished")
+        );
+        assert_dialogsheet_model(value.get("worksheet").expect("terminal worksheet model"));
+    }
+
+    /// Strict packages use the purl relationship base but the same part/root
+    /// contract. Exact recognition must cover both conformance classes.
+    #[test]
+    fn strict_dialog_sheet_relationship_is_recognized() {
+        let mut archive = XlsxArchive::new(
+            dialogsheet_bytes(STRICT_RELATIONSHIPS, valid_dialogsheet_xml()),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        archive.open_sheet_cursor(0, "Dialog").unwrap();
+
+        let bytes = archive.pull_sheet_cursor_inner(1).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_dialogsheet_model(value.get("worksheet").expect("terminal worksheet model"));
+    }
+
+    /// Relationship type determines the part kind, but the corresponding root
+    /// still has to satisfy the Dialogsheet host schema.
+    #[test]
+    fn dialog_sheet_relationship_with_wrong_root_remains_a_parse_error() {
+        let bytes = dialogsheet_bytes(
+            TRANSITIONAL_RELATIONSHIPS,
+            r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>"#,
+        );
+        let mut archive = XlsxArchive::new(bytes, None, None, None).unwrap();
+        archive.open_sheet_cursor(0, "Dialog").unwrap();
+
+        let bytes = archive.pull_sheet_cursor_inner(1).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let worksheet = value.get("worksheet").expect("terminal worksheet model");
+        assert!(worksheet.get("isDialogSheet").is_none());
+        assert!(worksheet["parseError"]
+            .as_str()
+            .is_some_and(|error| error.contains("expected SpreadsheetML dialogsheet root")));
+    }
+
+    #[test]
+    fn dialog_sheet_root_in_a_foreign_namespace_remains_a_parse_error() {
+        let bytes = dialogsheet_bytes(
+            TRANSITIONAL_RELATIONSHIPS,
+            r#"<dialogsheet xmlns="urn:foreign"><sheetViews/></dialogsheet>"#,
+        );
+        let mut archive = XlsxArchive::new(bytes, None, None, None).unwrap();
+        archive.open_sheet_cursor(0, "Dialog").unwrap();
+
+        let bytes = archive.pull_sheet_cursor_inner(1).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let worksheet = value.get("worksheet").expect("terminal worksheet model");
+        assert!(worksheet.get("isDialogSheet").is_none());
+        assert!(worksheet["parseError"]
+            .as_str()
+            .is_some_and(|error| error.contains("expected SpreadsheetML dialogsheet root")));
+    }
+
+    #[test]
+    fn foreign_relationship_suffix_is_not_a_dialog_sheet() {
+        let bytes = dialogsheet_bytes("urn:foreign", valid_dialogsheet_xml());
+        let mut archive = XlsxArchive::new(bytes, None, None, None).unwrap();
+        archive.open_sheet_cursor(0, "Dialog").unwrap();
+
+        let bytes = archive.pull_sheet_cursor_inner(1).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let worksheet = value.get("worksheet").expect("terminal worksheet model");
+        assert!(worksheet.get("isDialogSheet").is_none());
+        assert!(worksheet["parseError"]
+            .as_str()
+            .is_some_and(|error| error.contains("MCE-processed worksheet root")));
+    }
+
+    #[test]
+    fn strict_chart_sheet_relationship_keeps_the_chart_part_kind() {
+        let relationships = format!(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rSheet" Type="{STRICT_RELATIONSHIPS}/chartsheet" Target="chartsheets/sheet1.xml"/></Relationships>"#,
+        );
+        let document = parse_guarded(&relationships).unwrap();
+        assert_eq!(
+            resolve_sheet_part_kind(&document, "rSheet"),
+            SheetPartKind::ChartSheet
         );
     }
 }
@@ -6482,7 +6832,7 @@ mod rb7_partial_degradation_tests {
         let sheet_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rDrawing" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>"#;
         let drawing = r#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><xdr:twoCellAnchor><xdr:from><xdr:col>3</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>0</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>8</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>10</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:graphicFrame><xdr:nvGraphicFramePr><xdr:cNvPr id="1" name="Chart"/></xdr:nvGraphicFramePr><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart r:id="rChart"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>"#;
         let drawing_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rChart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/></Relationships>"#;
-        let styles = r#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><numFmts count="1"><numFmt numFmtId="165" formatCode="0.0000"/></numFmts><fonts count="1"><font><sz val="13"/><name val="Cursor Test Font"/></font></fonts><fills count="0"/><borders count="0"/><cellStyleXfs count="1"><xf fontId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0"/><xf numFmtId="165" fontId="0"/></cellXfs></styleSheet>"#;
+        let styles = r#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><numFmts count="1"><numFmt numFmtId="165" formatCode="0.0000"/></numFmts><fonts count="1"><font><b/><i/><sz val="13"/><name val="Cursor Test Font"/></font></fonts><fills count="0"/><borders count="0"/><cellStyleXfs count="1"><xf fontId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0"/><xf numFmtId="165" fontId="0"/></cellXfs></styleSheet>"#;
         let mut entries = vec![
             ("xl/workbook.xml", workbook.as_str()),
             ("xl/_rels/workbook.xml.rels", workbook_rels.as_str()),
@@ -6566,6 +6916,8 @@ mod rb7_partial_degradation_tests {
             terminal["worksheet"]["defaultFontFamily"],
             "Cursor Test Font"
         );
+        assert_eq!(terminal["worksheet"]["defaultFontBold"], true);
+        assert_eq!(terminal["worksheet"]["defaultFontItalic"], true);
         assert_eq!(
             terminal["worksheet"]["charts"][0]["chart"]["series"][0]["catFormatBuiltinId"],
             165

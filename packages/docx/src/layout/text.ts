@@ -2,8 +2,9 @@ import type { LayoutDiagnostic } from './types.js';
 import {
   classifyFontGeneric,
   graphemeClusterOffsets,
-  normalizeLocalFontMetricFamily,
-  type ResolvedLocalFontMetric,
+  normalizeFontMetricFamily,
+  type CjkLang,
+  type ResolvedFontMetric,
 } from '@silurus/ooxml-core';
 import type {
   FontResolution,
@@ -11,7 +12,7 @@ import type {
   FontStyle,
 } from './font-service.js';
 import type { CanvasFontRoute } from '@silurus/ooxml-core';
-export type { ResolvedLocalFontMetric } from '@silurus/ooxml-core';
+export type { ResolvedFontMetric, ResolvedLocalFontMetric } from '@silurus/ooxml-core';
 import { stableFingerprint } from './fingerprint.js';
 import type {
   DocParagraph,
@@ -27,6 +28,7 @@ import type {
   SourceRef,
   VmlTextPathAcquisitionInput,
 } from './types.js';
+import { containsHanScript } from '@silurus/ooxml-core/internal/script-preload-accumulator';
 import type { TextBoxAcquisitionInput } from './textbox-input.js';
 import type { AnchorAcquisitionInput } from './anchor-input.js';
 
@@ -276,8 +278,8 @@ export interface TextShapeRequest {
   readonly eastAsiaFontCharset?: string;
   readonly genericFamily?: 'serif' | 'sans-serif' | 'monospace';
   readonly letterSpacingPt?: number;
-  /** Resolved §17.3.2.19 w:kern state at this run size. Absent preserves the
-   * measurement adapter's inherited kerning policy. */
+  /** Resolved §17.3.2.19 w:kern state at this run size. Absence preserves the
+   * measurement adapter's inherited kerning policy, matching the paint path. */
   readonly kerning?: boolean;
   /** Resolve script slots and faces without touching the measurement adapter. */
   readonly measure?: boolean;
@@ -287,6 +289,10 @@ export interface TextShapeRequest {
 }
 
 export interface TextFontResolveRequest {
+  /** Text covered by this request. Language-selected regional fallback applies
+   * only when the text actually contains Han; it must not capture Latin glyphs. */
+  readonly text?: string;
+  readonly eastAsiaLanguage?: string;
   readonly fonts: TextFontSlots;
   readonly themeFonts?: TextFontSlots;
   readonly themeFontPresence?: TextFontSlotPresence;
@@ -358,7 +364,11 @@ export interface TextShapeResult extends GlyphMeasurement {
 
 export interface TextLayoutService {
   readonly fingerprint: string;
-  readonly localMetrics: Readonly<Record<string, Readonly<ResolvedLocalFontMetric>>>;
+  /** Geometry keyed by a resolved resource identity. This is the authoritative
+   * metric snapshot used by layout. */
+  readonly fontMetrics?: Readonly<Record<string, Readonly<ResolvedFontMetric>>>;
+  /** @deprecated Compatibility alias for {@link fontMetrics}. */
+  readonly localMetrics: Readonly<Record<string, Readonly<ResolvedFontMetric>>>;
   resolve(request: Readonly<TextFontResolveRequest>): FontResolution;
   shape(request: Readonly<TextShapeRequest>): TextShapeResult;
 }
@@ -366,7 +376,11 @@ export interface TextLayoutService {
 export interface TextLayoutServiceInput {
   readonly fonts: FontResolver;
   readonly measurer: GlyphMeasurer;
-  readonly localMetrics?: Readonly<Record<string, Readonly<ResolvedLocalFontMetric>>>;
+  readonly cjkFallback?: CjkLang;
+  readonly fontMetrics?: Readonly<Record<string, Readonly<ResolvedFontMetric>>>;
+  /** Exact local aliases also participate in resolution; retained separately
+   * from resource-only metrics so an embedded face is never mislabeled local. */
+  readonly localMetrics?: Readonly<Record<string, Readonly<ResolvedFontMetric>>>;
   readonly eastAsiaFontCharsets?: Readonly<Record<string, string>>;
   readonly genericFamilies?: Readonly<Record<string, 'serif' | 'sans-serif' | 'monospace'>>;
 }
@@ -397,43 +411,98 @@ function defaultGenericForSlot(
   return slot === 'eastAsia' ? 'sans-serif' : 'serif';
 }
 
-const LOCAL_METRIC_SNAPSHOT = Symbol('docx.localMetricSnapshot');
-type LocalMetricSnapshot = Readonly<Record<string, Readonly<ResolvedLocalFontMetric>>> & {
-  readonly [LOCAL_METRIC_SNAPSHOT]: true;
+const FONT_METRIC_SNAPSHOT = Symbol('docx.fontMetricSnapshot');
+type FontMetricSnapshot = Readonly<Record<string, Readonly<ResolvedFontMetric>>> & {
+  readonly [FONT_METRIC_SNAPSHOT]: true;
 };
+
+function snapshotUnicodeRanges(
+  ranges: readonly (readonly [number, number])[],
+): readonly (readonly [number, number])[] {
+  if (ranges.length > 32_768) throw new RangeError('Font cmap coverage has too many ranges');
+  const sorted = ranges.map(([start, end]) => {
+    if (!Number.isInteger(start) || !Number.isInteger(end)
+      || start < 0 || end > 0x10ffff || start > end) {
+      throw new RangeError('Font cmap coverage contains an invalid range');
+    }
+    return [start, end] as const;
+  }).sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const merged: Array<readonly [number, number]> = [];
+  for (const [start, end] of sorted) {
+    const last = merged[merged.length - 1];
+    if (last && start <= last[1] + 1) {
+      merged[merged.length - 1] = [last[0], Math.max(last[1], end)];
+    } else {
+      merged.push([start, end]);
+    }
+  }
+  return Object.freeze(merged.map((range) => Object.freeze(range)));
+}
 
 /** Copy successful face routes once at the document boundary. The brand lets
  * downstream services share the same deeply frozen object without retaining
  * caller-owned mutable records. */
-export function snapshotLocalMetrics(
-  input: Readonly<Record<string, Readonly<ResolvedLocalFontMetric>>> = {},
-): Readonly<Record<string, Readonly<ResolvedLocalFontMetric>>> {
-  if ((input as Partial<LocalMetricSnapshot>)[LOCAL_METRIC_SNAPSHOT]) return input;
+export function snapshotFontMetrics(
+  input: Readonly<Record<string, Readonly<ResolvedFontMetric>>> = {},
+): Readonly<Record<string, Readonly<ResolvedFontMetric>>> {
+  if ((input as Partial<FontMetricSnapshot>)[FONT_METRIC_SNAPSHOT]) return input;
   const entries = Object.entries(input)
     .map(([key, metric]) => {
-      if (!metric.family?.trim()) throw new TypeError(`Local metric ${key} requires a family`);
+      if (!metric.family?.trim()) throw new TypeError(`Font metric ${key} requires a family`);
       if (metric.lineHeightRatio !== undefined
         && (!Number.isFinite(metric.lineHeightRatio) || metric.lineHeightRatio < 0)) {
-        throw new RangeError(`Local metric ${key} lineHeightRatio must be finite and non-negative`);
+        throw new RangeError(`Font metric ${key} lineHeightRatio must be finite and non-negative`);
+      }
+      if (metric.designAscentRatio !== undefined
+        && (!Number.isFinite(metric.designAscentRatio) || metric.designAscentRatio < 0)) {
+        throw new RangeError(`Font metric ${key} designAscentRatio must be finite and non-negative`);
+      }
+      if (metric.designDescentRatio !== undefined
+        && (!Number.isFinite(metric.designDescentRatio) || metric.designDescentRatio < 0)) {
+        throw new RangeError(`Font metric ${key} designDescentRatio must be finite and non-negative`);
+      }
+      if (metric.eastAsianLineHeightRatio !== undefined
+        && (!Number.isFinite(metric.eastAsianLineHeightRatio) || metric.eastAsianLineHeightRatio < 0)) {
+        throw new RangeError(`Font metric ${key} eastAsianLineHeightRatio must be finite and non-negative`);
+      }
+      if (metric.fontBoxRatio !== undefined
+        && (!Number.isFinite(metric.fontBoxRatio) || metric.fontBoxRatio <= 0)) {
+        throw new RangeError(`Font metric ${key} fontBoxRatio must be finite and positive`);
+      }
+      if (metric.averageCharWidthRatio !== undefined
+        && (!Number.isFinite(metric.averageCharWidthRatio) || metric.averageCharWidthRatio <= 0)) {
+        throw new RangeError(`Font metric ${key} averageCharWidthRatio must be finite and positive`);
       }
       if (metric.weight !== undefined
         && (!Number.isFinite(metric.weight) || metric.weight < 1 || metric.weight > 1000)) {
-        throw new RangeError(`Local metric ${key} weight must be finite and between 1 and 1000`);
+        throw new RangeError(`Font metric ${key} weight must be finite and between 1 and 1000`);
       }
-      const copy: ResolvedLocalFontMetric = {
+      const copy: ResolvedFontMetric = {
         family: metric.family,
         ...(metric.lineHeightRatio === undefined ? {} : { lineHeightRatio: metric.lineHeightRatio }),
+        ...(metric.designAscentRatio === undefined ? {} : { designAscentRatio: metric.designAscentRatio }),
+        ...(metric.designDescentRatio === undefined ? {} : { designDescentRatio: metric.designDescentRatio }),
+        ...(metric.eastAsianLineHeightRatio === undefined
+          ? {}
+          : { eastAsianLineHeightRatio: metric.eastAsianLineHeightRatio }),
+        ...(metric.fontBoxRatio === undefined ? {} : { fontBoxRatio: metric.fontBoxRatio }),
+        ...(metric.averageCharWidthRatio === undefined
+          ? {}
+          : { averageCharWidthRatio: metric.averageCharWidthRatio }),
+        ...(metric.unicodeRanges === undefined
+          ? {}
+          : { unicodeRanges: snapshotUnicodeRanges(metric.unicodeRanges) }),
         ...(metric.requestedFamily === undefined ? {} : { requestedFamily: metric.requestedFamily }),
         ...(metric.weight === undefined ? {} : { weight: metric.weight }),
         ...(metric.style === undefined ? {} : { style: metric.style }),
         ...(metric.sourceIdentity === undefined ? {} : { sourceIdentity: metric.sourceIdentity }),
         ...(metric.synthesized === undefined ? {} : { synthesized: metric.synthesized }),
       };
-      return [normalizeLocalFontMetricFamily(key), Object.freeze(copy)] as const;
+      return [normalizeFontMetricFamily(key), Object.freeze(copy)] as const;
     })
     .sort(([a], [b]) => a.localeCompare(b));
-  const snapshot = Object.fromEntries(entries) as LocalMetricSnapshot;
-  Object.defineProperty(snapshot, LOCAL_METRIC_SNAPSHOT, { value: true });
+  const snapshot = Object.fromEntries(entries) as FontMetricSnapshot;
+  Object.defineProperty(snapshot, FONT_METRIC_SNAPSHOT, { value: true });
   return Object.freeze(snapshot);
 }
 
@@ -538,7 +607,10 @@ function requestedFamily(
  * authored East Asian and complex-script faces.
  */
 export function createTextLayoutService(input: TextLayoutServiceInput): TextLayoutService {
-  const localMetrics = snapshotLocalMetrics(input.localMetrics);
+  const fontMetrics = snapshotFontMetrics({
+    ...input.localMetrics,
+    ...input.fontMetrics,
+  });
   const genericFamilies = Object.freeze(Object.fromEntries(
     Object.entries(input.genericFamilies ?? {})
       .map(([family, generic]) => [family.trim().toLocaleLowerCase('en-US'), generic])
@@ -552,7 +624,8 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
   const fingerprint = stableFingerprint('text', {
     fonts: input.fonts.fingerprint,
     measurer: input.measurer.fingerprint,
-    localMetrics,
+    cjkFallback: input.cjkFallback ?? null,
+    fontMetrics,
     eastAsiaFontCharsets,
     genericFamilies,
   });
@@ -567,8 +640,13 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
       // consumer policy changes only the script classes covered by Word output
       // evidence; every authored direct/theme face remains authoritative above.
       : request.genericFamily ?? defaultGenericForSlot(request.slot);
+    const hasHan = containsHanScript(request.text ?? '');
     return input.fonts.resolve({
       requestedFamily: authoredFamily,
+      cjkFallback: hasHan ? input.cjkFallback : undefined,
+      language: request.slot === 'eastAsia' && hasHan
+        ? request.eastAsiaLanguage
+        : undefined,
       genericFamily,
       weight: request.weight,
       style: request.style,
@@ -613,7 +691,8 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
   const shapeCache = new Map<string, TextShapeResult>();
   return Object.freeze({
     fingerprint,
-    localMetrics,
+    fontMetrics,
+    localMetrics: fontMetrics,
     resolve,
     shape(request: Readonly<TextShapeRequest>): TextShapeResult {
       if (!Number.isFinite(request.fontSizePt) || request.fontSizePt < 0) {
@@ -692,6 +771,8 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
           themeFonts: request.themeFonts,
           themeFontPresence: request.themeFontPresence,
           slot: group.script,
+          text: group.text,
+          eastAsiaLanguage: request.eastAsiaLanguage,
           weight: request.weight,
           style: request.style,
           genericFamily: request.genericFamily,

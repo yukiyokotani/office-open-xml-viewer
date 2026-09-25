@@ -1685,7 +1685,10 @@ describe('DocxScrollViewer — self-load path (T7 story)', () => {
     expect(loadSpy).toHaveBeenCalledTimes(1);
     expect(loadSpy).toHaveBeenCalledWith(
       'sample.docx',
-      expect.objectContaining({ password: 'secret', tiff }),
+      expect.objectContaining({
+        password: 'secret',
+        tiff,
+      }),
     );
     // Layout happened: slots mounted and the spacer was sized.
     expect(v.mountedPageIndicesForTest().length).toBeGreaterThan(0);
@@ -2378,6 +2381,29 @@ describe('DocxScrollViewer — navigation, resize, empty (T6)', () => {
     v.scrollToPage(5);
     v.scrollToPage(5);
     expect(changes).toEqual([0, 5]);
+    v.destroy();
+  });
+
+  it('rounds a fractional page target forward before an integer-quantizing scrollTo', () => {
+    const { v, scrollHost, container } = setup();
+    container.clientWidth = 199.9;
+    scrollHost.clientWidth = 199.9; // fractional fit scale → fractional page px
+    v.resizeForTest();
+
+    let requestedTop = -1;
+    (scrollHost as FakeEl & {
+      scrollTo: (opts: { top: number }) => void;
+    }).scrollTo = ({ top }) => {
+      requestedTop = top;
+      scrollHost.scrollTop = Math.floor(top);
+    };
+
+    v.scrollToPage(3);
+    const fractionalTarget = 3 * (PAGE_H * 199.9 / 200 + GAP);
+    expect(fractionalTarget % 1).not.toBe(0);
+    expect(requestedTop).toBe(Math.ceil(fractionalTarget));
+    expect(scrollHost.scrollTop).toBe(requestedTop);
+    expect(v.topVisiblePage).toBe(3);
     v.destroy();
   });
 

@@ -192,6 +192,7 @@ describe('PptxPresentation progressive layout lifecycle', () => {
 
   it('publishes the opening slide while keeping the final slide count stable', async () => {
     const releaseSecondSlide = deferred<void>();
+    const secondSlidePullStart = deferred<void>();
     let secondSlidePullStarted = false;
     const slideIndexBySession = new Map<number, number>();
     let pullRequestId = 1;
@@ -203,6 +204,7 @@ describe('PptxPresentation progressive layout lifecycle', () => {
           if (index === undefined) throw new Error('missing slide session');
           if (index === 1) {
             secondSlidePullStarted = true;
+            secondSlidePullStart.resolve();
             await releaseSecondSlide.promise;
           }
           const payload = new TextEncoder().encode(JSON.stringify(slide(index))).buffer;
@@ -320,8 +322,7 @@ describe('PptxPresentation progressive layout lifecycle', () => {
     // The opening publication releases the load continuation before the next
     // host task starts slide 2 preflight. A Viewer can therefore enqueue the
     // opening paint/resource work in this gap, matching worker-mode ACK gating.
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    expect(secondSlidePullStarted).toBe(true);
+    await secondSlidePullStart.promise;
 
     let completed = false;
     const completion = presentation.waitUntilLayoutComplete().then(() => {
@@ -514,7 +515,7 @@ describe('PptxPresentation progressive layout lifecycle', () => {
   });
 
   it.each(['main', 'worker'] as const)(
-    'treats a one-slide progressive %s load as complete without a deferred callback',
+    'reports completion once for a one-slide progressive %s load',
     async (mode) => {
       const bootstrap = {
         slideCount: 1,
@@ -573,13 +574,52 @@ describe('PptxPresentation progressive layout lifecycle', () => {
       (presentation as unknown as {
         _finishProgressiveLayout(prefix: typeof complete, progressive: typeof lifecycle): void;
       })._finishProgressiveLayout(complete, lifecycle);
+      // A duplicate terminal response is ignored by the settled guard.
+      (presentation as unknown as {
+        _finishProgressiveLayout(prefix: typeof complete, progressive: typeof lifecycle): void;
+      })._finishProgressiveLayout(complete, lifecycle);
       await lifecycle.firstPublication.promise;
 
       expect(lifecycle.deferred).toBe(false);
       expect(presentation.layoutComplete).toBe(true);
-      expect(onComplete).not.toHaveBeenCalled();
+      expect(onComplete).toHaveBeenCalledTimes(1);
+      expect(onComplete).toHaveBeenCalledWith();
     },
   );
+
+  it('keeps a one-slide pre-release failure on the load rejection channel', () => {
+    const instance = Object.create(PptxPresentation.prototype) as Record<string, unknown>;
+    Object.assign(instance, {
+      _destroyed: false,
+      _layoutWaiters: new Set(),
+      _layoutLifecycle: new ProgressiveLayoutLifecycle(),
+      _layoutObservers: new ProgressiveLayoutObserverNotifier(),
+      _availableSlideCount: 1,
+      _progressiveWatchdog: undefined,
+      _progressiveWatchdogMs: undefined,
+    });
+    const presentation = instance as unknown as PptxPresentation;
+    const reject = vi.fn();
+    const onComplete = vi.fn();
+    const lifecycle = {
+      // A complete one-slide prefix is retained internally, so `published` is
+      // true even though `load()` has not been released and no work was deferred.
+      firstPublication: { promise: Promise.resolve(), resolve: vi.fn(), reject },
+      published: true,
+      deferred: false,
+      settled: false,
+      onComplete,
+    };
+    const error = new Error('authoritative response failed');
+
+    (presentation as unknown as {
+      _failProgressiveLayout(cause: unknown, progressive: typeof lifecycle): void;
+    })._failProgressiveLayout(error, lifecycle);
+
+    expect(reject).toHaveBeenCalledOnce();
+    expect(reject).toHaveBeenCalledWith(error);
+    expect(onComplete).not.toHaveBeenCalled();
+  });
 
   it('completes an actual one-slide main parse before releasing load', async () => {
     const bootstrap = {
@@ -644,7 +684,8 @@ describe('PptxPresentation progressive layout lifecycle', () => {
     expect(slideSessionId).toBeGreaterThan(0);
     expect(presentation.layoutComplete).toBe(true);
     expect(presentation.availableSlideCount).toBe(1);
-    expect(onComplete).not.toHaveBeenCalled();
+    expect(onComplete).toHaveBeenCalledTimes(1);
+    expect(onComplete).toHaveBeenCalledWith();
   });
 
   it('waits for the authoritative final response in an actual one-slide worker parse', async () => {
@@ -707,6 +748,7 @@ describe('PptxPresentation progressive layout lifecycle', () => {
     });
     await parsing;
     expect(presentation.layoutComplete).toBe(true);
-    expect(onComplete).not.toHaveBeenCalled();
+    expect(onComplete).toHaveBeenCalledTimes(1);
+    expect(onComplete).toHaveBeenCalledWith();
   });
 });

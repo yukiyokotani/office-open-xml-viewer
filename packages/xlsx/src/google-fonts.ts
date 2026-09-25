@@ -1,18 +1,22 @@
 import {
   classifyCjkFont,
+  cjkFallbackForText,
   scriptPreloadNamesForText,
   GOOGLE_FONT_SUBSTITUTES,
   SCRIPT_GOOGLE_FONTS,
+  findReferenceFontMetrics,
   type CjkLang,
   type FontPreloadEntry,
+  type OfficeFontFallbackRequest,
 } from '@silurus/ooxml-core';
-import type { ParsedWorkbook } from './types.js';
+import type { ParsedWorkbook, Worksheet } from './types.js';
+import { officeRequestKey, singleNaturalShapeRun } from './shape-office-line.js';
 
-/** Office font name → metric-compatible Google Fonts substitute for XLSX cells.
+/** Office font name → Google Fonts substitute for XLSX cells.
  *
  *  {@link GOOGLE_FONT_SUBSTITUTES} supplies the Office substitutes (Calibri →
- *  Carlito, Cambria → Caladea — same advance widths / vertical metrics, so
- *  text-width measurements stay close to Excel's), the popular free web fonts
+ *  Carlito, Cambria → Caladea — advance-width alternatives for base text faces,
+ *  without an exact Excel layout guarantee), the popular free web fonts
  *  and the Arabic Noto fallbacks — shared with docx/pptx. {@link
  *  SCRIPT_GOOGLE_FONTS} adds the CJK / Cyrillic / Thai / Devanagari / Hebrew
  *  Noto faces (the renderer chooses the CJK Noto per cell from the cell's font
@@ -43,7 +47,7 @@ function* xlsxTextRuns(wb: ParsedWorkbook | undefined): Generator<string> {
  * The font-family names to preload for a workbook: every styled cell font, plus
  * only the script-fallback Noto faces whose script the workbook's TEXT actually
  * contains ({@link scriptPreloadNamesForText}). Office faces map to
- * metric-compatible substitutes (Calibri → Carlito, Cambria → Caladea); the
+ * advance-width substitutes (Calibri → Carlito, Cambria → Caladea); the
  * renderer's default chain still ends with the full Noto set, but eagerly
  * fetching the multi-MB CJK families for a workbook that has no CJK glyphs would
  * block first paint for nothing; an un-preloaded face loads lazily if it ever
@@ -55,17 +59,98 @@ function* xlsxTextRuns(wb: ParsedWorkbook | undefined): Generator<string> {
  * both modes preload an identical set — worker/main rendering must stay
  * pixel-equivalent.
  */
-export function xlsxFontPreloadNames(wb: ParsedWorkbook | undefined): Set<string> {
+export function xlsxFontPreloadNames(wb: ParsedWorkbook | undefined, fallback?: CjkLang): Set<string> {
   const names = new Set<string>();
   let cjkLang: CjkLang | null = null;
   for (const f of wb?.styles?.fonts ?? []) {
     if (f.name) {
       names.add(f.name);
+      // OOXML may store a full regular face name while Google Fonts registers
+      // the same face under its base CSS family. Queue only a known same-name
+      // family: an unrelated substitute is not an alias for the authored face.
+      const regular = /^(.*?)\s+Regular$/i.exec(f.name.trim());
+      if (regular) {
+        const base = regular[1]!.trim();
+        const entry = XLSX_GOOGLE_FONTS[base.toLocaleLowerCase('en-US')];
+        if (entry && (!entry.loadFamily || entry.loadFamily.toLocaleLowerCase('en-US') === base.toLocaleLowerCase('en-US')))
+          names.add(base);
+      }
       cjkLang ??= classifyCjkFont(f.name);
     }
   }
-  for (const n of scriptPreloadNamesForText(xlsxTextRuns(wb), cjkLang)) {
+  for (const n of scriptPreloadNamesForText(xlsxTextRuns(wb), cjkLang ?? fallback ?? null)) {
     names.add(n);
   }
   return names;
+}
+
+/** The same workbook hint is used for preloading and ambiguous cell fallback. */
+export function xlsxCjkFallback(wb: ParsedWorkbook | undefined, fallback: CjkLang): CjkLang {
+  for (const font of wb?.styles?.fonts ?? []) {
+    const region = classifyCjkFont(font.name);
+    if (region) return cjkFallbackForText(xlsxTextRuns(wb), region);
+  }
+  return cjkFallbackForText(xlsxTextRuns(wb), fallback);
+}
+
+/** Exact Calibri style slots in the workbook style and shared-string tables.
+ * An omitted font name uses the workbook default Calibri chain; unrelated
+ * authored families never borrow Carlito merely through a CSS fallback tail.
+ * Styles are prepared before a sheet is pulled so Normal-font MDW and viewer
+ * geometry cannot be captured against a different fallback resource. This can
+ * prepare an unused style slot, bounded by the four supported tuples. */
+export function xlsxOfficeFontRequests(wb: ParsedWorkbook | undefined): OfficeFontFallbackRequest[] {
+  const found = new Map<string, OfficeFontFallbackRequest>();
+  const add = (name: string | null | undefined, bold: boolean, italic: boolean) => {
+    if ((name?.trim().toLowerCase() || 'calibri') !== 'calibri') return;
+    const weight = bold ? 700 : 400;
+    const style = italic ? 'italic' : 'normal';
+    found.set(`${weight}:${style}`, { family: 'Calibri', weight, style });
+  };
+  for (const font of wb?.styles?.fonts ?? []) add(font.name, font.bold, font.italic);
+  for (const shared of wb?.sharedStrings ?? []) {
+    for (const run of shared.runs ?? []) {
+      if (run.font) add(run.font.name, run.font.bold, run.font.italic);
+    }
+  }
+  return [...found.values()];
+}
+
+/** Inline strings and DrawingML shapes are worksheet-local and absent from the
+ * bootstrap shared-string table. Shape preflight is limited to one natural
+ * text run with a catalogued exact style; cell requests remain Calibri-only. */
+export function xlsxWorksheetOfficeFontRequests(ws: Worksheet): OfficeFontFallbackRequest[] {
+  const found = new Map<string, OfficeFontFallbackRequest>();
+  // The parser resolves Normal through cellStyleXfs[0].fontId. Preflight that
+  // authored face before measuring column MDW, including families that occur
+  // nowhere in a cell's text. Exact local bytes win over catalog references.
+  const normalFamily = ws.defaultFontFamily?.trim();
+  const normalWeight = ws.defaultFontBold ? 700 : 400;
+  const normalStyle = ws.defaultFontItalic ? 'italic' : 'normal';
+  if (normalFamily && findReferenceFontMetrics(normalFamily, { weight: normalWeight, style: normalStyle }).length) {
+    const request = { family: normalFamily, weight: normalWeight, style: normalStyle } as const;
+    found.set(officeRequestKey(request), request);
+  }
+  for (const row of ws.rows) for (const cell of row.cells) {
+    if (cell.value.type !== 'text') continue;
+    for (const run of cell.value.runs ?? []) {
+      const font = run.font;
+      if (!font || (font.name?.trim().toLowerCase() || 'calibri') !== 'calibri') continue;
+      const weight = font.bold ? 700 : 400;
+      const style = font.italic ? 'italic' : 'normal';
+      const request = { family: 'Calibri', weight, style } as const;
+      found.set(officeRequestKey(request), request);
+    }
+  }
+  for (const anchor of ws.shapeGroups ?? []) for (const shape of anchor.shapes) {
+    if (!shape.text) continue;
+    const run = singleNaturalShapeRun(shape.text);
+    if (!run) continue;
+    const weight = run.bold ? 700 : 400;
+    const style = run.italic ? 'italic' : 'normal';
+    if (findReferenceFontMetrics(run.fontFace!, { weight, style }).length === 0) continue;
+    const request = { family: run.fontFace!.trim(), weight, style } as const;
+    found.set(officeRequestKey(request), request);
+  }
+  return [...found.values()];
 }

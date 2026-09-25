@@ -505,6 +505,9 @@ pub(super) fn project(
             Block::PageBreak {
                 same_paragraph_as_previous,
             } => BodyElement::PageBreak {
+                // A break character in the DOC text is an authored break,
+                // exactly as the converted DOCX reports it.
+                origin: Some(docx_model::PageBreakOrigin::Authored),
                 parity: None,
                 same_paragraph_as_previous,
             },

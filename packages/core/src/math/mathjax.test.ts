@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { svgExtents, recolorSvg } from './mathjax';
 
-// mathMLToSvg loads MathJax from a CDN and needs a DOM, so it is exercised in the
-// browser (Storybook / VRT), not here. These cover the pure helpers.
+// The self-contained engine conversion is covered by engine.worker.test.ts;
+// these cover only the pure SVG helpers.
 
 describe('svgExtents', () => {
   it('parses the viewBox into baseline-relative em extents', () => {

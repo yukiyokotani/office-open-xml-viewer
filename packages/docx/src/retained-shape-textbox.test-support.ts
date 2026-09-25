@@ -12,6 +12,7 @@ import type { BodyAcquisitionState } from './layout/acquisition-context.js';
 import { textBoxAcquisitionInput } from './parser-model.js';
 import type { TextBoxLayout } from './layout/types.js';
 import type { DocxDocumentModel, ShapeRun } from './types.js';
+import type { ResolvedFontMetric } from '@silurus/ooxml-core';
 
 export type ShapeAcquisitionTestState =
   Omit<Partial<BodyAcquisitionState>, 'layoutSettings' | 'sectionLayout'>
@@ -23,6 +24,7 @@ export type ShapeAcquisitionTestState =
 function servicesFor(
   ctx: CanvasRenderingContext2D,
   fontFamilyClasses: Record<string, string>,
+  localMetrics?: Readonly<Record<string, ResolvedFontMetric>>,
 ): ReturnType<typeof createLayoutServices> {
   return createLayoutServices({
     section: {
@@ -35,7 +37,7 @@ function servicesFor(
     headers: { default: null, first: null, even: null },
     footers: { default: null, first: null, even: null },
     fontFamilyClasses,
-  } as DocxDocumentModel, { measureContext: ctx });
+  } as DocxDocumentModel, { measureContext: ctx, localMetrics });
 }
 
 /** Minimal acquisition cursor for tests that need to inject document services
@@ -61,7 +63,8 @@ export function acquireShapeTextBoxForTest(
   fontFamilyClasses: Record<string, string> = {},
   state?: ShapeAcquisitionTestState,
 ): TextBoxLayout | undefined {
-  const services = state?.layoutServices ?? servicesFor(ctx, fontFamilyClasses);
+  const services = state?.layoutServices
+    ?? servicesFor(ctx, fontFamilyClasses, state?.resolvedLocalFonts);
   const grid = state?.sectionLayout?.grid;
   const lineGridActive = grid?.linePitchPt != null && grid.linePitchPt > 0
     && (grid.kind === 'lines' || grid.kind === 'linesAndChars' || grid.kind === 'snapToChars');
@@ -113,7 +116,9 @@ export function acquireShapeTextBoxForTest(
       documentHasEastAsianText: state?.docEastAsian
         ?? shape.textBlocks?.some((block) => /[\u3000-\u9fff\uf900-\ufaff]/u.test(block.text))
         ?? false,
-      resolvedLocalFonts: state?.resolvedLocalFonts ?? services.text.localMetrics,
+      resolvedLocalFonts: state?.resolvedLocalFonts
+        ?? services.text.fontMetrics
+        ?? services.text.localMetrics,
       layoutServices: services,
     },
     input: textBoxAcquisitionInput(shape, source),

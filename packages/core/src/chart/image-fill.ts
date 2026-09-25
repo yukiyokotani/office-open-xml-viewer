@@ -1,13 +1,16 @@
 import type { ImageFill } from '../types/common.js';
-import type { ChartExElementStyle, ChartModel } from '../types/chart.js';
+import type {
+  ChartDataPointOverride, ChartExElementStyle, ChartModel, ChartSeries, ChartStockBarPaint,
+} from '../types/chart.js';
 import { drawImageCropped, imageNaturalSize, srcRectHasVisibleArea } from '../image/crop.js';
+import { fillCanProduceVisiblePixels } from '../shape/paint.js';
 import { EMU_PER_PT, PT_TO_PX } from '../units.js';
 import { computeBoxWhiskerStats } from './box-whisker.js';
 import {
+  classicDataLabelPointIsPainted,
   classicMarkerPointIsPainted,
   chartDataTableFamilyIsPainted,
   dataLabelLegendKeyCount,
-  deletedLegendEntryIndices,
   effectiveMarkerSymbol,
   hasVisiblePointMarkerOverride,
   markersSuppressedByChartStyle,
@@ -18,14 +21,50 @@ import {
   visibleBubbleSize,
 } from './marker-style.js';
 import {
+  deletedLegendEntryIndices,
+  legendEntryIsVisible,
+  legendEntryRanges,
+  legendSeriesHasVisibleEntry,
+} from './legend-entry-plan.js';
+import {
   MAX_CANVAS_CHART_POINTS,
   MAX_CHART_IMAGE_FILL_TILES,
   MAX_CHART_MARKER_IMAGE_SOURCES,
   sourceChartStructureCount,
 } from './resource-limits.js';
 import { indexChartPlotGroups, markerChartTypeForPlotGroup } from './plot-groups.js';
-import { chartThreeDSurfacePaint } from './style-paint.js';
+import {
+  chartStyleDirectFillDecision,
+  chartStyleDirectNoFillDecision,
+  chartStyleFillCascade,
+  chartStockBarFillDecision,
+  chartStyleFillDecision,
+  chartThreeDSurfacePaint,
+} from './style-paint.js';
+import {
+  chartDataPointStyleRole,
+  chartSeriesVariesByPoint,
+  rawLinkedChartStyleRole,
+  withChartStyleIndexCache,
+  withEffectiveChartStyleRoles,
+} from './effective-style.js';
+import { withSparseStyleIndexCache } from './sparse-style-index.js';
 import { planChartThreeDSurfacePicture } from './three-d-surface-picture-plan.js';
+import { classicDataPointFillDecision } from './classic-data-point-style.js';
+import { dataLabelIsDeleted } from './data-label-style.js';
+import {
+  chartLabelBoxHasVisiblePaint,
+  effectiveChartLabelBoxFill,
+  mergeChartLabelBoxes,
+} from './label-box.js';
+import { effectiveLegendFrameFill } from './legend-frame.js';
+import { applyPlotVisibleOnly } from './source-visibility.js';
+import { withActiveChartImageFillPainter } from './image-fill-context.js';
+import {
+  visitChartExHierarchyBodySites,
+  visitChartExHierarchyLabelSites,
+} from './chart-ex-hierarchy-labels.js';
+import { planWaterfallPaintSites } from './waterfall-plan.js';
 
 const SURFACE_PICTURE_FAMILIES = new Set([
   'line', 'stackedLine', 'stackedLinePct',
@@ -60,7 +99,7 @@ export function withChartImageLookup<T>(
   const previous = activeLookup;
   activeLookup = lookup;
   try {
-    return paint();
+    return withActiveChartImageFillPainter(paintChartImageFill, paint);
   } finally {
     activeLookup = previous;
   }
@@ -153,7 +192,7 @@ function chartImageTileStaticMetrics(fill: ImageFill): ChartImageTileStaticMetri
 /** Return the synchronously preloaded source for a validated chart image fill.
  * Kept internal to chart modules; hosts still own all fetch/decode work. */
 export function chartImageFillSource(fill: ImageFill): CanvasImageSource | null {
-  if (!imageFillModeIsPaintable(fill)) return null;
+  if (!fillCanProduceVisiblePixels(fill) || !imageFillModeIsPaintable(fill)) return null;
   return activeLookup?.(fill) ?? null;
 }
 
@@ -232,8 +271,8 @@ export function chartImageFillPaintWork(
   ptToPx = PT_TO_PX,
 ): number {
   if (!(w > 0) || !(h > 0)) return 0;
-  if (!imageFillModeIsPaintable(fill)) return 0;
-  const image = lookup?.(fill);
+  if (!fillCanProduceVisiblePixels(fill) || !imageFillModeIsPaintable(fill)) return 0;
+  const image = (lookup ?? activeLookup)?.(fill);
   if (!image) return 0;
   if (!fill.tile) return 1;
   const geometry = imageTileGeometry(fill, image, w, h, ptToPx);
@@ -253,8 +292,8 @@ export function chartImageFillPaintWorkUpperBound(
   ptToPx = PT_TO_PX,
 ): number {
   if (!(w > 0) || !(h > 0)) return 0;
-  if (!imageFillModeIsPaintable(fill)) return 0;
-  const image = lookup?.(fill);
+  if (!fillCanProduceVisiblePixels(fill) || !imageFillModeIsPaintable(fill)) return 0;
+  const image = (lookup ?? activeLookup)?.(fill);
   if (!image) return 0;
   if (!fill.tile) return 1;
   const geometry = imageTileGeometry(fill, image, w, h, ptToPx);
@@ -334,7 +373,7 @@ export function chartImageFillUsageSize(
 }
 
 function chartImageFillOccurrence(fill: ImageFill): ChartImageFillOccurrence | null {
-  if (!imageFillModeIsPaintable(fill)) return null;
+  if (!fillCanProduceVisiblePixels(fill) || !imageFillModeIsPaintable(fill)) return null;
   const logicalWidth = fill.srcRect ? 1 - fill.srcRect.l - fill.srcRect.r : 1;
   const logicalHeight = fill.srcRect ? 1 - fill.srcRect.t - fill.srcRect.b : 1;
   if (!(Number.isFinite(logicalWidth) && logicalWidth > 0)
@@ -411,6 +450,13 @@ function collectChartMarkerImageFillResult(
   if (sourceCount > MAX_CANVAS_CHART_POINTS) {
     return { usages: [], sourceLimitExceeded: false, usageRejected: false };
   }
+  // Match the renderer's first semantic projection. Hidden source points must
+  // not consume the decoded-image source ceiling or suppress a visible peer.
+  chart = applyPlotVisibleOnly(chart);
+  // The host preflights image resources before the synchronous renderer runs.
+  // Resolve the same numeric-plus-linked role cascade here so the image that is
+  // warmed is exactly the one the renderer can select.
+  chart = withEffectiveChartStyleRoles(chart);
   const usages = new Map<string, ChartImageFillUsage>();
   let sourceLimitExceeded = false;
   let usageRejected = false;
@@ -437,27 +483,73 @@ function collectChartMarkerImageFillResult(
     }
     usages.set(key, usage);
   };
-  const selectedStylePaint = (
-    style: ChartExElementStyle | null | undefined,
-    index: number,
-  ) => {
-    const paints = style?.fillPaints;
-    if (!paints?.length) return undefined;
-    return paints[(style?.fillColorIndex ?? index) % paints.length];
-  };
   const styleImageDecision = (
     style: ChartExElementStyle | null | undefined,
     index: number,
   ): ImageFill | null | undefined => {
-    if (!style) return undefined;
-    if (style.fillHidden === true) return style.fillNoStyle ? undefined : null;
-    const paint = selectedStylePaint(style, index);
-    if (paint?.fillType === 'image') return paint;
-    if (paint != null || style.fillPaintAuthored === true) return null;
-    const colors = style.fillColors;
-    return colors?.length && colors[(style.fillColorIndex ?? index) % colors.length]
-      ? null
-      : undefined;
+    const fill = chartStyleFillDecision(style, index);
+    return fill?.fillType === 'image' ? fill : fill == null ? fill : null;
+  };
+  const directStyleImageDecision = (
+    style: ChartExElementStyle | null | undefined,
+    rawLinked: ChartExElementStyle | null | undefined,
+    index: number,
+  ): ImageFill | null | undefined => {
+    const fill = chartStyleDirectFillDecision(style, rawLinked, index);
+    return fill?.fillType === 'image' ? fill : fill == null ? fill : null;
+  };
+  const dataPointImageDecision = (
+    local: ChartExElementStyle | null | undefined,
+    legacyColor: string | null | undefined,
+    linked: ChartExElementStyle | null | undefined,
+    rawLinked: ChartExElementStyle | null | undefined,
+    index: number,
+  ): ImageFill | null | undefined => {
+    const fill = local?.fillHidden
+      ? chartStyleDirectNoFillDecision(rawLinked)
+      : chartStyleDirectFillDecision(local, rawLinked, index);
+    if (fill !== undefined) return fill?.fillType === 'image' ? fill : null;
+    if (legacyColor) return null;
+    const fallback = chartStyleFillDecision(linked, index);
+    return fallback?.fillType === 'image' ? fallback : fallback == null ? fallback : null;
+  };
+  const waterfallBodyImageDecision = (
+    point: ChartDataPointOverride | undefined,
+    series: ChartSeries | undefined,
+    semanticIndex: number,
+  ): ImageFill | null | undefined => {
+    const pointAuthors = point?.fillHidden === true || point?.color != null
+      || point?.chartexStyle?.fillPaintAuthored === true
+      || point?.chartexStyle?.fillHidden != null
+      || point?.chartexStyle?.fillColors?.some(color => color != null) === true
+      || point?.chartexStyle?.fillPaints?.some(paint => paint != null) === true;
+    if (pointAuthors) {
+      const pointStyle = point?.fillHidden === true
+        ? { ...point.chartexStyle, fillHidden: true, fillPaintAuthored: true }
+        : point?.chartexStyle;
+      return dataPointImageDecision(
+        pointStyle,
+        point?.color,
+        chart.chartexDataPointStyle,
+        rawLinkedChartStyleRole(chart, 'dataPoint')
+          ?? (chart.classicChartStyleRoles == null ? chart.chartexDataPointStyle : undefined),
+        semanticIndex,
+      );
+    }
+    if (series?.chartexStyle?.fillPaintAuthored === true) {
+      return dataPointImageDecision(
+        series.chartexStyle,
+        series.color,
+        chart.chartexDataPointStyle,
+        rawLinkedChartStyleRole(chart, 'dataPoint')
+          ?? (chart.classicChartStyleRoles == null ? chart.chartexDataPointStyle : undefined),
+        semanticIndex,
+      );
+    }
+    return dataPointImageDecision(
+      series?.chartexStyle, series?.color, chart.chartexDataPointStyle,
+      rawLinkedChartStyleRole(chart, 'dataPoint'), semanticIndex,
+    );
   };
   const frameImageDecision = (
     directFill: ChartModel['chartFill'] | ChartModel['plotAreaFill'],
@@ -465,12 +557,19 @@ function collectChartMarkerImageFillResult(
     hidden: boolean | null | undefined,
     paintAuthored: boolean | null | undefined,
     linked: ChartExElementStyle | null | undefined,
+    rawLinked: ChartExElementStyle | null | undefined,
+    directStyle: ChartExElementStyle | null | undefined,
   ): ImageFill | null | undefined => {
-    if (hidden === true) return null;
+    if (hidden === true) {
+      const noFill = chartStyleDirectNoFillDecision(rawLinked);
+      if (noFill !== undefined) return noFill;
+    }
     if (directFill?.fillType === 'image') return directFill;
-    if (directFill != null || directColor != null || paintAuthored === true) return null;
+    if (directFill != null || directColor != null
+      || paintAuthored === true && hidden !== true) return null;
     if (linked?.fillNoStyle === true) return undefined;
-    return styleImageDecision(linked, 0);
+    const fill = chartStyleFillCascade(linked, rawLinked, 0, directStyle);
+    return fill?.fillType === 'image' ? fill : fill == null ? fill : null;
   };
   const chartAreaImage = frameImageDecision(
     chart.chartFill,
@@ -480,6 +579,8 @@ function collectChartMarkerImageFillResult(
     chart.chartFillHidden,
     chart.chartFillPaintAuthored,
     chart.chartStyleRoles?.chartArea,
+    rawLinkedChartStyleRole(chart, 'chartArea'),
+    chart.chartAreaStyle,
   );
   if (chartAreaImage) add(chartAreaImage);
   const plotAreaImage = frameImageDecision(
@@ -488,8 +589,78 @@ function collectChartMarkerImageFillResult(
     chart.plotAreaFillHidden,
     chart.plotAreaFillPaintAuthored,
     chart.threeD ? chart.chartStyleRoles?.plotArea3D : chart.chartStyleRoles?.plotArea,
+    rawLinkedChartStyleRole(chart, chart.threeD ? 'plotArea3D' : 'plotArea'),
+    chart.plotAreaStyle,
   );
   if (plotAreaImage) add(plotAreaImage);
+  // Legend layout and its frame remain visible even when every legend entry
+  // is deleted (or no series exists), so prefetch the frame by the same
+  // `showLegend` gate used by paint/effect preflight rather than entry count.
+  if (chart.showLegend) add(effectiveLegendFrameFill(chart));
+  const addLabelBoxFill = (
+    direct: Parameters<typeof effectiveChartLabelBoxFill>[0],
+    linked: Parameters<typeof effectiveChartLabelBoxFill>[1],
+    rawLinked: Parameters<typeof effectiveChartLabelBoxFill>[2],
+    linkedIndex = 0,
+  ): void => {
+    add(effectiveChartLabelBoxFill(
+      direct, linked, rawLinked, true, 0, linkedIndex,
+    )?.fillPaint);
+  };
+  if (chart.title) {
+    addLabelBoxFill(
+      chart.titleStyle ? { style: chart.titleStyle } : undefined,
+      chart.chartStyleRoles?.title,
+      rawLinkedChartStyleRole(chart, 'title'),
+    );
+  }
+  if (chart.catAxisTitle) {
+    addLabelBoxFill(
+      chart.catAxisTitleStyle ? { style: chart.catAxisTitleStyle } : undefined,
+      chart.chartStyleRoles?.axisTitle,
+      rawLinkedChartStyleRole(chart, 'axisTitle'),
+    );
+  }
+  if (chart.valAxisTitle) {
+    addLabelBoxFill(
+      chart.valAxisTitleStyle ? { style: chart.valAxisTitleStyle } : undefined,
+      chart.chartStyleRoles?.axisTitle,
+      rawLinkedChartStyleRole(chart, 'axisTitle'),
+    );
+  }
+  for (const axis of [chart.secondaryValAxis, chart.secondaryCatAxis]) {
+    if (axis?.title) {
+      addLabelBoxFill(
+        axis.titleStyle ? { style: axis.titleStyle } : undefined,
+        chart.chartStyleRoles?.axisTitle,
+        rawLinkedChartStyleRole(chart, 'axisTitle'),
+      );
+    }
+    if (axis?.displayUnits?.label) {
+      addLabelBoxFill(
+        axis.displayUnits.label.boxStyle,
+        chart.chartStyleRoles?.axisTitle,
+        rawLinkedChartStyleRole(chart, 'axisTitle'),
+      );
+    }
+  }
+  if (chart.threeD?.seriesAxis?.title) {
+    addLabelBoxFill(
+      chart.threeD.seriesAxis.titleStyle
+        ? { style: chart.threeD.seriesAxis.titleStyle } : undefined,
+      chart.chartStyleRoles?.axisTitle,
+      rawLinkedChartStyleRole(chart, 'axisTitle'),
+    );
+  }
+  for (const units of [chart.valAxisDisplayUnits, chart.catAxisDisplayUnits]) {
+    if (units?.label) {
+      addLabelBoxFill(
+        units.label.boxStyle,
+        chart.chartStyleRoles?.axisTitle,
+        rawLinkedChartStyleRole(chart, 'axisTitle'),
+      );
+    }
+  }
   const finiteSurfaceValue = chart.series.some(series =>
     series.values.some(value => value != null && Number.isFinite(value))
   );
@@ -515,6 +686,56 @@ function collectChartMarkerImageFillResult(
     }
   }
   const plotGroupBySeries = indexChartPlotGroups(chart);
+  const upDownBarImage = (
+    direct: ChartStockBarPaint,
+    role: 'upBar' | 'downBar',
+  ): ImageFill | null | undefined => {
+    const fill = chartStockBarFillDecision(chart, direct, role);
+    return fill?.fillType === 'image' ? fill : fill == null ? fill : null;
+  };
+  const collectUpDownDirections = (
+    start: ChartModel['series'][number] | undefined,
+    end: ChartModel['series'][number] | undefined,
+    direct: NonNullable<ChartModel['stockUpDownBarStyle']>,
+  ) => {
+    if (!start || !end) return;
+    let hasUp = false;
+    let hasDown = false;
+    const count = Math.max(start.values.length, end.values.length);
+    for (let index = 0; index < count && !(hasUp && hasDown); index++) {
+      const startValue = start.values[index];
+      const endValue = end.values[index];
+      if (startValue == null || endValue == null
+        || !Number.isFinite(startValue) || !Number.isFinite(endValue)
+        || startValue === endValue) continue;
+      if (endValue > startValue) hasUp = true;
+      else hasDown = true;
+    }
+    if (hasUp) add(upDownBarImage(direct.up, 'upBar'));
+    if (hasDown) add(upDownBarImage(direct.down, 'downBar'));
+  };
+  for (const decoration of chart.lineGroupDecorations ?? []) {
+    if (!decoration.upDownBars) continue;
+    let members = chart.series.filter(series => series.lineGroupIndex === decoration.groupIndex);
+    if (members.length === 0 && decoration.groupIndex === 0
+      && ['line', 'stackedLine', 'stackedLinePct'].includes(chart.chartType)) {
+      members = chart.series.filter(series => series.seriesType == null || series.seriesType === 'line');
+    }
+    collectUpDownDirections(
+      members[0], members.at(-1), decoration.upDownBars,
+    );
+  }
+  if (chart.stockUpDownBars) {
+    const stockGroup = chart.plotGroups?.find(group => group.kind === 'stock');
+    const stockSeries = stockGroup
+      ? chart.series.slice(stockGroup.seriesStart, stockGroup.seriesStart + stockGroup.seriesCount)
+      : chart.series;
+    collectUpDownDirections(
+      stockSeries[0],
+      stockSeries.at(-1),
+      chart.stockUpDownBarStyle ?? { gapWidthPercent: 150, up: {}, down: {} },
+    );
+  }
   const scatterHasNumericX = chart.series.some((series, seriesIndex) => {
     const group = plotGroupBySeries[seriesIndex];
     const family = group?.kind === 'bubble' || group?.kind === 'scatter'
@@ -524,13 +745,16 @@ function collectChartMarkerImageFillResult(
       Number.isFinite(Number.parseFloat(category))
     );
   });
-  const linkedMarkerStyle = chart.chartStyleRoles?.dataPointMarker;
   const deletedLegendEntries = deletedLegendEntryIndices(chart);
+  const legendRanges = legendEntryRanges(chart, true);
   const chartHasCategories = chart.categories.length > 0
     || (chart.series[0]?.categories?.length ?? 0) > 0
     || chart.series.some(series => series.values.length > 0);
   for (let seriesIndex = 0; seriesIndex < chart.series.length; seriesIndex++) {
     const series = chart.series[seriesIndex];
+    const sourceSeriesIndex = series.chartexFormatIdx ?? seriesIndex;
+    const variesByPoint = chartSeriesVariesByPoint(chart, seriesIndex);
+    const linkedMarkerStyle = chartDataPointStyleRole(chart, 'dataPointMarker', seriesIndex);
     const group = plotGroupBySeries[seriesIndex];
     const isBubble = group?.kind === 'bubble'
       || (group == null && chart.chartType === 'bubble');
@@ -549,9 +773,6 @@ function collectChartMarkerImageFillResult(
       || family === 'stackedLinePct' || family === 'area'
       || family === 'stackedArea' || family === 'stackedAreaPct'
       || family === 'scatter' || family === 'radar' || family === 'stock';
-    if (!markerFamily || markersSuppressedByChartStyle(
-      family, effectiveChartType, effectiveScatterStyle, effectiveRadarStyle,
-    )) continue;
     const areaFamily = family === 'area' || family === 'stackedArea'
       || family === 'stackedAreaPct';
     const seriesVisible = areaFamily
@@ -560,63 +781,237 @@ function collectChartMarkerImageFillResult(
       : family === 'stock'
         ? series.markerSymbol != null && series.markerSymbol !== 'none'
         : series.showMarker !== false && series.markerSymbol !== 'none';
-    const legendDeleted = deletedLegendEntries.has(seriesIndex);
+    const seriesLegendVisible = legendSeriesHasVisibleEntry(
+      legendRanges, deletedLegendEntries, seriesIndex,
+    );
     const pointCount = Math.max(
       series.values.length, series.categories?.length ?? 0, chart.categories.length,
     );
+    const dataLabelOverrides = new Map(
+      (series.dataLabelOverrides ?? []).map(label => [label.idx, label]),
+    );
+    for (let index = 0; index < pointCount; index++) {
+      const label = dataLabelOverrides.get(index);
+      if (dataLabelIsDeleted(series.seriesDataLabels, label)) continue;
+      const hasContent = Boolean(
+        label?.text
+        || (label?.showVal ?? series.seriesDataLabels?.showVal ?? chart.showDataLabels)
+        || (label?.showCatName ?? series.seriesDataLabels?.showCatName)
+        || (label?.showSerName ?? series.seriesDataLabels?.showSerName)
+        || (label?.showPercent ?? series.seriesDataLabels?.showPercent)
+        || (label?.showBubbleSize ?? series.seriesDataLabels?.showBubbleSize)
+        || (label?.showLegendKey ?? series.seriesDataLabels?.showLegendKey)
+      );
+      if (!hasContent || !classicDataLabelPointIsPainted(
+        chart, series, family, index, scatterHasNumericX, seriesIndex,
+      )) continue;
+      const direct = mergeChartLabelBoxes(label?.labelBox, series.seriesDataLabels?.labelBox);
+      const usesCalloutRole = chartLabelBoxHasVisiblePaint(direct);
+      const linked = usesCalloutRole
+        ? chart.chartStyleRoles?.dataLabelCallout ?? chart.chartStyleRoles?.dataLabel
+        : chart.chartStyleRoles?.dataLabel;
+      const rawLinked = usesCalloutRole
+        ? rawLinkedChartStyleRole(chart, 'dataLabelCallout')
+          ?? rawLinkedChartStyleRole(chart, 'dataLabel')
+        : rawLinkedChartStyleRole(chart, 'dataLabel');
+      addLabelBoxFill(direct, linked, rawLinked, label ? index : sourceSeriesIndex);
+    }
+    for (const trendline of series.trendLines ?? []) {
+      const hasLabelContent = trendline.dispEq === true || trendline.dispRSqr === true
+        || Boolean(trendline.labelText)
+        || trendline.labelRichRuns?.some(run => run.text.length > 0) === true;
+      if (hasLabelContent) {
+        addLabelBoxFill(
+          trendline.labelBox,
+          chart.chartStyleRoles?.trendlineLabel,
+          rawLinkedChartStyleRole(chart, 'trendlineLabel'),
+          sourceSeriesIndex,
+        );
+      }
+    }
     const labelKeyVisible = dataLabelLegendKeyCount(
-      chart, series, family, pointCount, scatterHasNumericX, markerContext,
+      chart, series, family, pointCount, scatterHasNumericX, markerContext, seriesIndex,
     ) > 0;
-    const seriesKeyVisible = seriesLegendMarkerIsVisible(
+    const labelOverrides = new Map(
+      (series.dataLabelOverrides ?? []).map(label => [label.idx, label]),
+    );
+    const pointLabelKeyVisible = (pointIndex: number): boolean => {
+      const label = labelOverrides.get(pointIndex);
+      return !dataLabelIsDeleted(series.seriesDataLabels, label)
+        && (label?.showLegendKey ?? series.seriesDataLabels?.showLegendKey ?? false) === true
+        && classicDataLabelPointIsPainted(
+          chart, series, family, pointIndex, scatterHasNumericX, seriesIndex,
+        );
+    };
+    const pointDrivenLegend = legendRanges[seriesIndex]?.pointDriven === true;
+    const seriesKeyVisible = !pointDrivenLegend && seriesLegendMarkerIsVisible(
       effectiveChartType, effectiveScatterStyle, series, effectiveRadarStyle,
-    ) && ((chart.showLegend && !legendDeleted)
+    ) && ((chart.showLegend && seriesLegendVisible)
       || (chart.dataTable?.showKeys === true && chartDataTableFamilyIsPainted(chart.chartType)
         && chartHasCategories)
       || labelKeyVisible);
     const seriesKeySymbol = series.markerSymbol ?? (family === 'stock' ? 'none' : 'circle');
+    const classicThreeDGroup = group?.kind === 'bar3D' || group?.kind === 'pie3D'
+      || group?.kind === 'area3D' || group?.kind === 'line3D'
+      || group?.kind === 'surface3D';
+    // Parsed classic bar series retain the canonical `seriesType: "bar"`;
+    // group.kind owns the 2-D/3-D distinction. Preflight only the flat body
+    // painters that can actually consume these pictures.
+    const classicFilledFamily = !classicThreeDGroup
+      && (group?.kind === 'bar' || family === 'bar'
+      || family === 'clusteredBar' || family === 'clusteredBarH'
+      || family === 'stackedBar' || family === 'stackedBarH'
+      || family === 'stackedBarPct' || family === 'stackedBarHPct'
+      || family === 'pie' || family === 'doughnut'
+      || family === 'ofPie' || areaFamily
+      || (family === 'radar' && effectiveRadarStyle === 'filled'));
+    if (classicFilledFamily) {
+      const pointOverrides = new Map(
+        (series.dataPointOverrides ?? []).map(point => [point.idx, point]),
+      );
+      const bodyHasGeometry = areaFamily
+        ? series.values.length > 0
+        : family === 'radar'
+          ? pointCount > 2 && Array.from({ length: pointCount }, (_, index) =>
+              series.values[index] != null && Number.isFinite(series.values[index])
+            ).every(Boolean)
+          : family === 'pie' || family === 'pie3D' || family === 'doughnut' || family === 'ofPie'
+            ? series.values.some(value => value != null && Number.isFinite(value) && value !== 0)
+            : series.values.some(value => value != null && Number.isFinite(value) && value !== 0);
+      const keyCanPaint = (chart.showLegend && seriesLegendVisible)
+        || (chart.dataTable?.showKeys === true && chartDataTableFamilyIsPainted(chart.chartType)
+          && chartHasCategories)
+        || labelKeyVisible;
+      const pointDrivenKeys = variesByPoint
+        || family === 'pie' || family === 'doughnut' || family === 'ofPie';
+      if (bodyHasGeometry || keyCanPaint) {
+        if (areaFamily || (family === 'radar' && !variesByPoint)) {
+          const decision = classicDataPointFillDecision(
+            chart, series, undefined, sourceSeriesIndex,
+          );
+          if (decision?.fillType === 'image') add(decision);
+        } else if (family === 'radar') {
+          const point = pointOverrides.get(0);
+          const decision = classicDataPointFillDecision(chart, series, point, 0, 0);
+          if (decision?.fillType === 'image') add(decision);
+        } else {
+          // A series-driven legend/table/label key is painted once without a
+          // dPt override. Collect it independently from body reachability.
+          if (keyCanPaint && !pointDrivenKeys) {
+            const keyDecision = classicDataPointFillDecision(
+              chart, series, undefined, sourceSeriesIndex,
+            );
+            if (keyDecision?.fillType === 'image') add(keyDecision);
+          }
+          for (let pointIndex = 0; pointIndex < pointCount; pointIndex++) {
+            const value = series.values[pointIndex];
+            const bodyPointCanPaint = value != null
+              && Number.isFinite(value) && value !== 0;
+            const pointKeyCanPaint = pointDrivenKeys && (
+              (chart.showLegend && legendEntryIsVisible(
+                legendRanges, deletedLegendEntries, seriesIndex, pointIndex,
+              ))
+              || (chart.dataTable?.showKeys === true
+                && chartDataTableFamilyIsPainted(chart.chartType)
+                && chartHasCategories && pointIndex === 0)
+              || pointLabelKeyVisible(pointIndex)
+            );
+            if (!bodyPointCanPaint && !pointKeyCanPaint) continue;
+            const point = pointOverrides.get(pointIndex);
+            const styleIndex = variesByPoint ? pointIndex : sourceSeriesIndex;
+            const decision = classicDataPointFillDecision(
+              chart, series, point, styleIndex, pointIndex,
+            );
+            if (decision?.fillType === 'image') add(decision);
+          }
+        }
+      }
+    }
+    if (!markerFamily || markersSuppressedByChartStyle(
+      family, effectiveChartType, effectiveScatterStyle, effectiveRadarStyle,
+    )) continue;
     if (seriesKeyVisible && markerSymbolConsumesFill(seriesKeySymbol)) {
       if (isBubble) {
-        const seriesShape = styleImageDecision(series.chartexStyle, seriesIndex);
+        const rawDataPointRole = rawLinkedChartStyleRole(chart, 'dataPoint');
+        const seriesShape = directStyleImageDecision(
+          series.chartexStyle, rawDataPointRole, sourceSeriesIndex,
+        );
         if (seriesShape) add(seriesShape);
         if (seriesShape === undefined && series.color == null) {
-          const linkedShape = styleImageDecision(chart.chartStyleRoles?.dataPoint, seriesIndex);
+          const linkedShape = styleImageDecision(
+            chartDataPointStyleRole(chart, 'dataPoint', seriesIndex),
+            sourceSeriesIndex,
+          );
           if (linkedShape) add(linkedShape);
         }
       } else add(series.markerFillPaint);
       if (!isBubble
         && series.markerFillPaint === undefined && series.markerFill == null
-        && series.markerFillPaintAuthored !== true) {
-        add(selectedStylePaint(linkedMarkerStyle, seriesIndex));
+        && !(series.markerFillPaintAuthored === true
+          && series.markerStyle?.fillHidden !== true)) {
+        if (!variesByPoint) {
+          const linkedFill = chartStyleFillCascade(
+            linkedMarkerStyle,
+            rawLinkedChartStyleRole(chart, 'dataPointMarker'),
+            sourceSeriesIndex,
+            series.markerStyle,
+          );
+          if (linkedFill?.fillType === 'image') add(linkedFill);
+        }
       }
     }
     if (!seriesVisible && !hasVisiblePointMarkerOverride(series)) continue;
     const overrides = new Map((series.dataPointOverrides ?? []).map(point => [point.idx, point]));
     for (let index = 0; index < pointCount; index++) {
-      if (!classicMarkerPointIsPainted(
+      const plotPointVisible = classicMarkerPointIsPainted(
         chart, series, family, index, scatterHasNumericX, markerContext,
-      )) continue;
+      ) && (!isBubble
+        || ((group?.bubbleScale ?? chart.bubbleScale ?? 100) > 0
+          && visibleBubbleSize(
+            { showNegativeBubbles: group?.showNegativeBubbles ?? chart.showNegativeBubbles },
+            series.bubbleSizes?.[index],
+          ) != null));
+      const legendKeyVisible = pointDrivenLegend && chart.showLegend
+        && legendEntryIsVisible(legendRanges, deletedLegendEntries, seriesIndex, index);
+      const tableKeyVisible = pointDrivenLegend
+        && chart.dataTable?.showKeys === true
+        && chartDataTableFamilyIsPainted(chart.chartType)
+        && chartHasCategories && index === 0;
+      const labelPointKeyVisible = pointDrivenLegend && pointLabelKeyVisible(index);
+      if (!plotPointVisible && !legendKeyVisible && !tableKeyVisible && !labelPointKeyVisible) {
+        continue;
+      }
       const point = overrides.get(index);
       const symbol = effectiveMarkerSymbol(series, point, 'circle', seriesVisible);
       if (!markerSymbolConsumesFill(symbol)) continue;
       if (isBubble) {
-        const effectiveBubbleSettings = {
-          showNegativeBubbles: group?.showNegativeBubbles ?? chart.showNegativeBubbles,
-        };
-        if ((group?.bubbleScale ?? chart.bubbleScale ?? 100) <= 0
-          || visibleBubbleSize(effectiveBubbleSettings, series.bubbleSizes?.[index]) == null) continue;
         // MS-OE376 §2.1.1504(b): a visible negative bubble uses the
         // application's inverted fill, not its positive direct/linked image.
-        // The current wire model's alternate bubble default is solid/noFill,
-        // so none of these positive image sources is reachable.
-        if ((series.bubbleSizes?.[index] ?? 0) < 0) continue;
-        const pointShape = styleImageDecision(point?.chartexStyle, index);
+        if ((series.bubbleSizes?.[index] ?? 0) < 0) {
+          continue;
+        }
+        const linkedPointRole = chartDataPointStyleRole(chart, 'dataPoint', seriesIndex);
+        const linkedPointIndex = chartSeriesVariesByPoint(chart, seriesIndex)
+          ? index : sourceSeriesIndex;
+        const rawDataPointRole = rawLinkedChartStyleRole(chart, 'dataPoint');
+        const pointDecision = chartStyleDirectFillDecision(
+          point?.chartexStyle, rawDataPointRole, index,
+        );
+        const pointShape = pointDecision?.fillType === 'image'
+          ? pointDecision : pointDecision == null ? pointDecision : null;
         if (pointShape) add(pointShape);
-        if (pointShape !== undefined || point?.fillHidden === true || point?.color != null) continue;
+        const pointNoFill = point?.fillHidden === true
+          ? chartStyleDirectNoFillDecision(rawDataPointRole)
+          : undefined;
+        if (pointShape !== undefined || pointNoFill !== undefined
+          || point?.color != null) continue;
         if (series.dataPointColors?.[index] != null) continue;
-        const seriesShape = styleImageDecision(series.chartexStyle, index);
+        const seriesShape = directStyleImageDecision(
+          series.chartexStyle, rawDataPointRole, sourceSeriesIndex,
+        );
         if (seriesShape) add(seriesShape);
         if (seriesShape !== undefined || series.color != null) continue;
-        const linkedShape = styleImageDecision(chart.chartStyleRoles?.dataPoint, index);
+        const linkedShape = styleImageDecision(linkedPointRole, linkedPointIndex);
         if (linkedShape) add(linkedShape);
         continue;
       }
@@ -624,9 +1019,20 @@ function collectChartMarkerImageFillResult(
       add(paint);
       if (paint === undefined && point?.markerFill == null && point?.color == null
         && series.dataPointColors?.[index] == null && series.markerFill == null
-        && point?.markerFillPaintAuthored !== true
-        && series.markerFillPaintAuthored !== true) {
-        add(selectedStylePaint(linkedMarkerStyle, seriesIndex));
+        && !(point?.markerFillPaintAuthored === true
+          && point.markerStyle?.fillHidden !== true)
+        && !(series.markerFillPaintAuthored === true
+          && series.markerStyle?.fillHidden !== true)) {
+        const directStyle = point?.markerStyle?.shapePropertiesPresent === true
+          ? point.markerStyle
+          : series.markerStyle;
+        const linkedFill = chartStyleFillCascade(
+          linkedMarkerStyle,
+          rawLinkedChartStyleRole(chart, 'dataPointMarker'),
+          variesByPoint ? index : sourceSeriesIndex,
+          directStyle,
+        );
+        if (linkedFill?.fillType === 'image') add(linkedFill);
       }
     }
   }
@@ -645,15 +1051,75 @@ function collectChartMarkerImageFillResult(
     if (markerCount === 0) continue;
     const styleIndex = series.chartexFormatIdx ?? seriesIndex;
     const localStyle = series.chartexStyle;
-    const local = styleImageDecision(localStyle, styleIndex);
+    const linkedStyle = chart.chartexDataPointMarkerStyle
+      ?? chart.chartexDataPointStyle ?? undefined;
+    const rawLinkedStyle = chart.chartexDataPointMarkerStyle != null
+      ? rawLinkedChartStyleRole(chart, 'dataPointMarker')
+        ?? (chart.classicChartStyleRoles == null ? linkedStyle : undefined)
+      : rawLinkedChartStyleRole(chart, 'dataPoint')
+        ?? (chart.classicChartStyleRoles == null ? linkedStyle : undefined);
+    const local = directStyleImageDecision(localStyle, rawLinkedStyle, styleIndex);
     if (local) add(local);
     if (local !== undefined || series.color != null) continue;
-    const linked = styleImageDecision(
-      chart.chartexDataPointMarkerStyle ?? chart.chartexDataPointStyle ?? undefined,
-      styleIndex,
-    );
+    const linked = styleImageDecision(linkedStyle, styleIndex);
     if (linked) add(linked);
   }
+  if (chart.chartType === 'waterfall') {
+    const series = chart.series[0];
+    const overrides = new Map((series?.dataPointOverrides ?? []).map(point => [point.idx, point]));
+    const plan = planWaterfallPaintSites(
+      series?.values ?? [], chart.categories.length, chart.subtotalIndices,
+    );
+    if (!plan.cumulativeOverflow && plan.rawMax > plan.rawMin) {
+      for (let index = 0; index < plan.bars.length; index++) {
+        const bar = plan.bars[index]!;
+        if (!bar.paintSlot) continue;
+        add(waterfallBodyImageDecision(overrides.get(index), series, bar.semanticIndex));
+      }
+    }
+  } else if (chart.chartType === 'funnel') {
+    const series = chart.series[0];
+    if ((series?.values ?? []).some(value => value != null && value > 0)) {
+      add(dataPointImageDecision(
+        series?.chartexStyle, series?.color, chart.chartexDataPointStyle,
+        rawLinkedChartStyleRole(chart, 'dataPoint'), 0,
+      ));
+    }
+  }
+  for (let seriesIndex = 0; seriesIndex < (chart.chartexBox?.series.length ?? 0); seriesIndex++) {
+    const series = chart.chartexBox!.series[seriesIndex]!;
+    if (!series.valuesByCategory.some(values =>
+      computeBoxWhiskerStats(values, series.quartileMethod) != null)) continue;
+    add(dataPointImageDecision(
+      series.chartexStyle, series.color, chart.chartexDataPointStyle,
+      rawLinkedChartStyleRole(chart, 'dataPoint'),
+      series.chartexFormatIdx ?? seriesIndex,
+    ));
+  }
+  const hierarchySeries = chart.series[0];
+  visitChartExHierarchyBodySites(chart, ({ node, paintsBody }) => {
+    if (!paintsBody) return;
+    add(dataPointImageDecision(
+      hierarchySeries?.chartexStyle, hierarchySeries?.color,
+      chart.chartexDataPointStyle, rawLinkedChartStyleRole(chart, 'dataPoint'),
+      node.branchIndex,
+    ));
+  });
+  visitChartExHierarchyLabelSites(chart, ({ label, linkedStyleIndex }) => {
+    const direct = label.labelBox;
+    const usesCalloutRole = chartLabelBoxHasVisiblePaint(direct);
+    const linked = usesCalloutRole
+      ? chart.chartStyleRoles?.dataLabelCallout ?? chart.chartStyleRoles?.dataLabel
+      : chart.chartStyleRoles?.dataLabel;
+    const rawLinked = usesCalloutRole
+      ? rawLinkedChartStyleRole(chart, 'dataLabelCallout')
+        ?? rawLinkedChartStyleRole(chart, 'dataLabel')
+      : rawLinkedChartStyleRole(chart, 'dataLabel');
+    const effective = effectiveChartLabelBoxFill(
+      direct, linked, rawLinked, linked != null, 0, linkedStyleIndex,
+    );
+    if (effective?.fillPaint?.fillType === 'image') add(effective.fillPaint);
+  });
   return {
     usages: sourceLimitExceeded || usageRejected ? [] : [...usages.values()],
     sourceLimitExceeded,
@@ -662,7 +1128,9 @@ function collectChartMarkerImageFillResult(
 }
 
 export function collectChartImageFillUsages(chart: ChartModel): ChartImageFillUsage[] {
-  return collectChartMarkerImageFillResult(chart).usages;
+  return withChartStyleIndexCache(() => withSparseStyleIndexCache(() =>
+    collectChartMarkerImageFillResult(chart).usages
+  ));
 }
 
 export function collectChartMarkerImageFills(chart: ChartModel): ImageFill[] {
@@ -676,29 +1144,31 @@ export function collectChartImageFillUsagesForCharts(
   charts: readonly ChartModel[],
   acceptUsage?: (usage: ChartImageFillUsage, chartIndex: number) => boolean,
 ): ChartImageFillUsage[] {
-  const usages = new Map<string, ChartImageFillUsage>();
-  for (let chartIndex = 0; chartIndex < charts.length; chartIndex++) {
-    const chart = charts[chartIndex]!;
-    const result = collectChartMarkerImageFillResult(
-      chart,
-      acceptUsage ? usage => acceptUsage(usage, chartIndex) : undefined,
-    );
-    // Host frame validation rejects the whole owning chart before either its
-    // per-chart source ceiling or the aggregate ceiling can suppress peers.
-    if (result.usageRejected) continue;
-    if (result.sourceLimitExceeded) return [];
-    for (const usage of result.usages) {
-      const key = chartImageFillKey(usage.fill);
-      const prior = usages.get(key);
-      if (prior) {
-        usages.set(key, mergeChartImageFillUsages(prior, usage));
-        continue;
+  return withChartStyleIndexCache(() => withSparseStyleIndexCache(() => {
+    const usages = new Map<string, ChartImageFillUsage>();
+    for (let chartIndex = 0; chartIndex < charts.length; chartIndex++) {
+      const chart = charts[chartIndex]!;
+      const result = collectChartMarkerImageFillResult(
+        chart,
+        acceptUsage ? usage => acceptUsage(usage, chartIndex) : undefined,
+      );
+      // Host frame validation rejects the whole owning chart before either its
+      // per-chart source ceiling or the aggregate ceiling can suppress peers.
+      if (result.usageRejected) continue;
+      if (result.sourceLimitExceeded) return [];
+      for (const usage of result.usages) {
+        const key = chartImageFillKey(usage.fill);
+        const prior = usages.get(key);
+        if (prior) {
+          usages.set(key, mergeChartImageFillUsages(prior, usage));
+          continue;
+        }
+        if (usages.size >= MAX_CHART_MARKER_IMAGE_SOURCES) return [];
+        usages.set(key, usage);
       }
-      if (usages.size >= MAX_CHART_MARKER_IMAGE_SOURCES) return [];
-      usages.set(key, usage);
     }
-  }
-  return [...usages.values()];
+    return [...usages.values()];
+  }));
 }
 
 export function collectChartMarkerImageFillsForCharts(
@@ -717,9 +1187,10 @@ export function paintChartImageFill(
   ptToPx = PT_TO_PX,
   shapeRotationDeg = 0,
 ): boolean {
-  const image = activeLookup?.(fill);
-  if (!image || !(w > 0) || !(h > 0)) return false;
+  if (!fillCanProduceVisiblePixels(fill) || !(w > 0) || !(h > 0)) return false;
   if (!imageFillModeIsPaintable(fill)) return false;
+  const image = activeLookup?.(fill);
+  if (!image) return false;
   if (shapeRotationDeg !== 0 && fill.rotWithShape == null) return false;
   ctx.save();
   ctx.beginPath();

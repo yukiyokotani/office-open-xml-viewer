@@ -23,6 +23,7 @@
     "../pptx/src/types.ts",
     "../docx/src/types.ts",
     "../xlsx/src/types.ts",
+    "../core/src/vite-env.d.ts",
     "typecheck/docx-public-types.ts"
   ]
 }
