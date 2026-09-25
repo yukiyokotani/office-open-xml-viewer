@@ -28,6 +28,7 @@ pub mod pull;
 pub mod rels;
 pub mod resource;
 pub mod spreadsheet_color;
+pub mod spreadsheet_style_presets;
 pub mod text;
 pub mod theme;
 pub mod units;

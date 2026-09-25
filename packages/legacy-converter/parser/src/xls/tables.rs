@@ -68,6 +68,9 @@ pub(super) struct Styles {
     styles: BTreeMap<String, Elements>,
     /// DXF record index -> workbook dxf id, filled as tables use them.
     projected: BTreeMap<u32, u32>,
+    /// The default PivotTable style (2.4.322 TableStyles
+    /// rgchDefPivotStyle).
+    default_pivot_style: Option<String>,
 }
 
 fn utf16(data: &[u8], offset: usize, count: usize) -> Result<String, String> {
@@ -138,6 +141,20 @@ impl Styles {
                         return Err(unsupported("invalid XLS table style"));
                     }
                     pending = Some((utf16(data, 20, chars)?, Elements::default(), count));
+                }
+                // TableStyles (2.4.322): cts, then the default table and
+                // PivotTable style names (UTF-16, lengths in characters).
+                0x088e => {
+                    let table = usize::from(u16_at(data, 16)?);
+                    let pivot = usize::from(u16_at(data, 18)?);
+                    if u16_at(data, 0)? != 0x088e
+                        || data.len() != 20 + (table + pivot) * 2
+                        || result.default_pivot_style.is_some()
+                    {
+                        return Err(unsupported("invalid XLS table styles"));
+                    }
+                    result.default_pivot_style =
+                        Some(utf16(data, 20 + table * 2, pivot)?).filter(|name| !name.is_empty());
                 }
                 0x0890 => return Err(unsupported("orphan XLS table style element")),
                 _ => {}
@@ -379,6 +396,11 @@ impl Styles {
 }
 
 impl Styles {
+    /// The workbook's default PivotTable style name, if it names one.
+    pub(super) fn default_pivot_style(&self) -> Option<&str> {
+        self.default_pivot_style.as_deref()
+    }
+
     /// The elements of the workbook table style `name` (tseType, band size,
     /// format), with explicitly cleared border edges kept as `none` edges
     /// for PivotTable style layering; `None` when the workbook defines no

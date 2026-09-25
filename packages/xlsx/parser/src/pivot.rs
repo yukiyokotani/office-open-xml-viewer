@@ -800,9 +800,9 @@ impl WorkbookTableStyles {
         result
     }
 
-    /// The elements of `name`: a workbook style (§18.8.40), else a built-in
-    /// Annex G PivotTable style, each with its format parsed as the XLSX
-    /// parser parses `<dxf>`.
+    /// The elements of `name`: a workbook style (§18.8.40), each with its
+    /// format parsed as the XLSX parser parses `<dxf>`, else a built-in
+    /// Annex G PivotTable style from the shared preset table.
     fn elements(&self, name: &str, theme_colors: &[String]) -> Option<Vec<PivotTableStyleElement>> {
         let parse = |dxf: &str, prefix: &str| -> Option<Dxf> {
             // The dxf keeps its namespace prefix context; parse it inside a
@@ -832,21 +832,7 @@ impl WorkbookTableStyles {
                     .collect(),
             );
         }
-        let (_, elements) = crate::pivot_presets::STYLES
-            .iter()
-            .find(|(preset, _)| *preset == name)?;
-        Some(
-            elements
-                .iter()
-                .filter_map(|(kind, size, index)| {
-                    Some(PivotTableStyleElement {
-                        kind: (*kind).to_string(),
-                        size: *size,
-                        dxf: parse(crate::pivot_presets::DXFS.get(*index as usize)?, "")?,
-                    })
-                })
-                .collect(),
-        )
+        xlsx_model::style_presets::pivot_style_elements(name, theme_colors)
     }
 }
 
