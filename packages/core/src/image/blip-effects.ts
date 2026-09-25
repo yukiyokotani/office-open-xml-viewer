@@ -46,6 +46,11 @@
 
 import type { RgbaBuffer, Duotone } from './duotone';
 import { duotoneImageData, hex6ToRgb } from './duotone';
+import {
+  MAX_IMAGE_EFFECT_PASSES,
+  MAX_IMAGE_EFFECT_PIXEL_WORK,
+  OoxmlDecodedImageLimitError,
+} from './pixel-budget.js';
 
 /** One CT_Blip pixel effect, as emitted by the parsers (camelCase JSON). */
 export type BlipEffect =
@@ -109,10 +114,44 @@ export function blipGrayLevel(r: number, g: number, b: number): number {
   return Math.floor(blipLuminance(r, g, b) * 255 + 1e-6);
 }
 
+/** Full pixel passes a transform runs: one per listed effect, plus the
+ *  duotone when it applies after the list (no position marker). */
+export function blipPixelEffectPasses(value: BlipPixelEffects): number {
+  const trailingDuotone = value.duotone
+    && !value.effects.some((effect) => effect.type === 'duotone');
+  return value.effects.length + (trailingDuotone ? 1 : 0);
+}
+
+/**
+ * Reject a transform whose pass count or cumulative pixel work exceeds the
+ * shared resource policy (`MAX_IMAGE_EFFECT_PASSES`,
+ * `MAX_IMAGE_EFFECT_PIXEL_WORK` in pixel-budget.ts) before any pixel is
+ * touched. A crossing is an `OoxmlDecodedImageLimitError`, the same catchable
+ * quota failure as an over-budget decode; effects are never dropped or
+ * truncated to fit. `pixels` 0 checks the pass count alone (before decoding).
+ */
+export function assertBlipPixelEffectsBudget(value: BlipPixelEffects, pixels: number): void {
+  const passes = blipPixelEffectPasses(value);
+  if (passes > MAX_IMAGE_EFFECT_PASSES) {
+    throw new OoxmlDecodedImageLimitError('image-effect-count', MAX_IMAGE_EFFECT_PASSES, passes);
+  }
+  const work = passes * Math.max(0, Math.ceil(pixels));
+  if (!Number.isSafeInteger(work) || work > MAX_IMAGE_EFFECT_PIXEL_WORK) {
+    throw new OoxmlDecodedImageLimitError(
+      'image-effect-work',
+      MAX_IMAGE_EFFECT_PIXEL_WORK,
+      Number.isSafeInteger(work) ? work : Number.MAX_SAFE_INTEGER,
+    );
+  }
+}
+
 /** Apply the effects in place, in order. Alpha is preserved except by
- *  clrChange, whose target alpha replaces the matched pixel's. */
+ *  clrChange, whose target alpha replaces the matched pixel's. Throws
+ *  `OoxmlDecodedImageLimitError` before touching the buffer when the transform
+ *  exceeds the effect budget (see {@link assertBlipPixelEffectsBudget}). */
 export function applyBlipPixelEffects(buf: RgbaBuffer, value: BlipPixelEffects): RgbaBuffer {
   const d = buf.data;
+  assertBlipPixelEffectsBudget(value, d.length / 4);
   let duotoneApplied = false;
   for (const effect of value.effects) {
     switch (effect.type) {

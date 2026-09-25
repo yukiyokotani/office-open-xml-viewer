@@ -325,6 +325,9 @@ export {
   HARD_MAX_DECODED_IMAGE_BYTES,
   MAX_CONCURRENT_IMAGE_DECODES,
   MAX_DECODED_IMAGE_BYTES,
+  MAX_IMAGE_EFFECT_BASE_PIXELS,
+  MAX_IMAGE_EFFECT_PASSES,
+  MAX_IMAGE_EFFECT_PIXEL_WORK,
   MAX_RASTER_DIMENSION,
   MAX_RASTER_SOURCE_DIMENSION,
   MAX_RASTER_PIXELS,
@@ -383,6 +386,7 @@ export {
 // order with the duotone, through the same decode cache.
 export {
   applyBlipPixelEffects,
+  assertBlipPixelEffectsBudget,
   blipLuminance,
   type BlipEffect,
   type BlipPixelEffects,
