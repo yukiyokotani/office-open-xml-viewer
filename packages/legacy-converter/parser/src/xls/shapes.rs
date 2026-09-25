@@ -772,6 +772,10 @@ fn custom_geometry(decoded: &crate::officeart::geometry::Decoded) -> xlsx_model:
         .map(|path| xlsx_model::PathInfo {
             w,
             h,
+            // Paths with differing paint are rejected above, so every path
+            // carries the shape's own fill and line.
+            fill: None,
+            stroke: true,
             commands: path
                 .commands()
                 .map(|command| match command {
