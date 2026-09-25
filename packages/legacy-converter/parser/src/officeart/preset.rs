@@ -187,23 +187,31 @@ fn rules(kind: u16) -> Option<&'static [Option<Rule>]> {
         70 => &[None, Some(Height(1))],
         85 | 86 => &[Some(Height(0))],
         87 | 88 => &[Some(Height(0)), Some(Scale(1))],
-        41 => &[
+        // Callout1 family (callout1, accentCallout1, borderCallout1,
+        // accentBorderCallout1): MS-ODRAW and ECMA-376 give the four members
+        // the same adjust layout. callout1 is evidenced for all four values;
+        // an accentCallout1 metroBlob pair (PowerPoint's own DrawingML beside
+        // the binary) confirms the leader point for the family.
+        41 | 44 | 47 | 50 => &[
             Some(Scale(3)),
             Some(Scale(2)),
             Some(Scale(1)),
             Some(Scale(0)),
         ],
-        // Callout3 family: points in reverse order as for callout1. Only the
-        // x coordinates are evidenced (PowerPoint's defaults round trip);
-        // an authored y coordinate has no rule and is rejected.
+        // Callout3 family: points in reverse order as for callout1. The x
+        // coordinates round trip PowerPoint's defaults; an
+        // accentBorderCallout3 metroBlob pair gives the y coordinates of all
+        // three leader points (adjust2/4/6Value -> adj7/adj5/adj3). The
+        // first point's y (adjust8Value -> adj1) is not evidenced and is
+        // rejected.
         43 | 46 | 49 | 52 => &[
             None,
             Some(Scale(6)),
-            None,
+            Some(Scale(5)),
             Some(Scale(4)),
-            None,
+            Some(Scale(3)),
             Some(Scale(2)),
-            None,
+            Some(Scale(1)),
             Some(Scale(0)),
         ],
         53 => &[Some(Scale(1))],
@@ -356,6 +364,38 @@ mod tests {
         close(callout[1], 148.0);
         close(callout[2], 122296.0);
         close(callout[3], -22296.0);
+        // metroBlob pairs: PowerPoint's DrawingML beside the binary values.
+        let accent = adj(44, &[(0, -11740), (1, 9416)], 3301229, 3085679);
+        assert_eq!((accent[0], accent[1]), (None, None));
+        close(accent[2], 43593.0);
+        close(accent[3], -54352.0);
+        let border3 = adj(
+            52,
+            &[
+                (0, -13516),
+                (1, 22284),
+                (2, -18037),
+                (3, 15089),
+                (4, -4655),
+                (5, 388),
+                (6, -1800),
+            ],
+            4285543,
+            2923781,
+        );
+        assert_eq!(border3[0], None);
+        for (slot, expected) in [
+            (1, -8333.0),
+            (2, 1794.0),
+            (3, -21551.0),
+            (4, 69855.0),
+            (5, -83506.0),
+            (6, 103166.0),
+            (7, -62575.0),
+        ] {
+            let value = border3[slot].unwrap();
+            assert!((value - expected).abs() < 2.5, "{slot}: {value} vs {expected}");
+        }
     }
 
     #[test]
@@ -373,8 +413,9 @@ mod tests {
         assert!(adjustments(999, &tall, 100, 100).is_err());
         assert!(adjustments(16, &tall, 100, 200).is_err());
         assert!(adjustments(22, &tall, 200, 100).is_err());
+        // The first leader point's y (adjust8Value) stays unevidenced.
         let mut y = [None; 10];
-        y[1] = Some(20000);
+        y[7] = Some(20000);
         assert!(adjustments(43, &y, 100, 100).is_err());
         let mut curve = [None; 10];
         curve[0] = Some(5400);
