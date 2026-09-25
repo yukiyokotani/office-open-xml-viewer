@@ -10268,6 +10268,35 @@ mod tests {
         ));
     }
 
+    /// ECMA-376 §20.1.9.15: per-path fill mode and stroke flags reach the model
+    /// only when some path departs from the defaults.
+    #[test]
+    fn custom_geometry_retains_per_path_paint() {
+        use crate::fill::parse_cust_geom_with_paint;
+        let parse = |paths: &str| {
+            let xml = format!("<custGeom><pathLst>{paths}</pathLst></custGeom>");
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            parse_cust_geom_with_paint(doc.root_element(), 100.0, 100.0).1
+        };
+        let segment = r#"<moveTo><pt x="0" y="0"/></moveTo><lnTo><pt x="1" y="1"/></lnTo>"#;
+        assert_eq!(
+            parse(&format!(r#"<path w="1" h="1">{segment}</path><path w="1" h="1" fill="norm" stroke="1">{segment}</path>"#)),
+            None
+        );
+        assert_eq!(
+            parse(&format!(
+                r#"<path w="1" h="1" stroke="0">{segment}</path><path w="1" h="1" fill="none">{segment}</path><path w="1" h="1" fill="darken">{segment}</path>"#
+            )),
+            Some(vec![
+                PathPaint { fill: None, stroke: false },
+                PathPaint { fill: Some("none".into()), stroke: true },
+                PathPaint { fill: Some("darken".into()), stroke: true },
+            ])
+        );
+        let json = serde_json::to_string(&PathPaint { fill: None, stroke: false }).unwrap();
+        assert_eq!(json, r#"{"fill":null,"stroke":false}"#);
+    }
+
     /// A line chart whose horizontal axis is a `<c:dateAx>` (§21.2.2.39) — the
     /// date/time-series category axis. `axis_inner` is spliced into the dateAx.
     fn date_axis_chart_xml(axis_inner: &str) -> String {

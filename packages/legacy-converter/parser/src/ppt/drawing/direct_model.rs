@@ -492,6 +492,7 @@ impl Context<'_> {
             text_body: text,
             default_text_color: None,
             cust_geom: paths,
+            cust_geom_paint: None,
             adj,
             adj2,
             adj3,

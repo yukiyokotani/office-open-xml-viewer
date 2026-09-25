@@ -316,7 +316,7 @@ export function renderPresetShape(
         ctx.restore();
       }
       if (painted) {
-        const overlay = tintOverlay(fillMode);
+        const overlay = pathFillModeOverlay(fillMode);
         if (overlay) {
           ctx.save();
           ctx.fillStyle = overlay;
@@ -335,7 +335,7 @@ export function renderPresetShape(
       // For "lighten" / "darken" modifiers, overlay a translucent tint so
       // multi-path 3D shapes (can, cube, pentagon) get highlights/shadows
       // without re-parsing the base fill.
-      const overlay = tintOverlay(fillMode);
+      const overlay = pathFillModeOverlay(fillMode);
       if (overlay) {
         ctx.fillStyle = overlay;
         ctx.fill();
@@ -459,7 +459,12 @@ export function getConnectorAnchors(
   };
 }
 
-function tintOverlay(mode: string | null): string | null {
+/**
+ * Translucent overlay that approximates an `a:path@fill` shading mode
+ * (ECMA-376 §20.1.10.37 ST_PathFillMode) over the already-painted base fill.
+ * Shared by preset geometry and custom geometry paths.
+ */
+export function pathFillModeOverlay(mode: string | null | undefined): string | null {
   switch (mode) {
     case 'lighten':     return 'rgba(255,255,255,0.30)';
     case 'lightenLess': return 'rgba(255,255,255,0.15)';

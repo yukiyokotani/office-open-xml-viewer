@@ -461,6 +461,13 @@ pub struct ShapeElement {
     /// Custom geometry paths (only set when geometry == "custGeom").
     /// Outer vec: one entry per <a:path>; inner vec: path commands with coords in [0,1].
     pub cust_geom: Option<Vec<Vec<PathCmd>>>,
+    /// Per-path paint of `cust_geom` (ECMA-376 20.1.9.15 `a:path@fill` and
+    /// `@stroke`), one entry per path. Absent when every path uses the
+    /// defaults (`norm` fill, stroked), so ordinary geometry serializes
+    /// unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub cust_geom_paint: Option<Vec<PathPaint>>,
     /// First adjustment value from prstGeom avLst (e.g. trapezoid inset).
     /// Value is in OOXML units (0–100000 range).
     pub adj: Option<f64>,
@@ -929,6 +936,17 @@ pub struct Stroke {
     /// "thinThick" | "thickThin" | "tri". None = single line.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cmpd: Option<String>,
+}
+
+/// Paint flags of one custGeom path (ECMA-376 20.1.9.15).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PathPaint {
+    /// ST_PathFillMode (20.1.10.37): `none`, `lighten`, `lightenLess`,
+    /// `darken` or `darkenLess`; `None` is `norm`.
+    pub fill: Option<String>,
+    /// Whether the path is stroked.
+    pub stroke: bool,
 }
 
 /// A single path command inside a custGeom pathLst.
