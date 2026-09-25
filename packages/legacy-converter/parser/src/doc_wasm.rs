@@ -92,6 +92,10 @@ impl LegacyDocDocument {
     pub fn revision_markup_in_print(&self) -> bool {
         self.cursor.revision_markup_in_print()
     }
+    /// Whether the projected model carries any revision mark.
+    pub fn has_revision_marks(&self) -> bool {
+        self.cursor.has_revision_marks()
+    }
     /// MS-DOC 2.7.2 DopBase fRMView: the DOC asks for its revision markup on
     /// screen.
     pub fn revision_markup_on_screen(&self) -> bool {

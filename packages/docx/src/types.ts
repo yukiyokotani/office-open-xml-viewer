@@ -1617,6 +1617,8 @@ export type WorkerRequest =
   | { type: 'parse'; id: number; data: ArrayBuffer; resourcePolicy: NormalizedOoxmlResourcePolicy; source?: import('@silurus/ooxml-core/internal/legacy-doc-source').LegacyDocDirectSourceDescriptor }
   | { type: 'extractImage'; id: number; path: string }
   | { type: 'resourceUsage'; id: number }
+  // Legacy DOC only: the source's own revision-markup view (false for OOXML).
+  | { type: 'sourceRevisionView'; id: number }
   // Project the retained archive to GitHub-flavoured markdown (`DocxArchive.to_markdown`,
   // the handle already opened at `parse` — no re-copy of the file). Twin of
   // `extractImage`: the archive stays in the worker, only the string crosses back.
@@ -1627,6 +1629,7 @@ export type WorkerResponse =
   | { type: 'imageExtracted'; id: number; bytes: ArrayBuffer }
   | { type: 'resourceUsage'; id: number; usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot }
   | { type: 'markdownRendered'; id: number; markdown: string }
+  | { type: 'sourceRevisionView'; id: number; markup: boolean }
   | ({
       type: 'error';
       id: number;
