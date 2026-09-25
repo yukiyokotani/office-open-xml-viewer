@@ -242,7 +242,7 @@ fn project_table(
             }
             // [MS-DOC] 2.9.317 TCGRF textFlow (from TC80 or sprmTTextFlow)
             // is a 2.9.323 TextFlow; ECMA-376 Part 1 §17.18.93 names the same
-            // arrangements (sample-19's DOC/DOCX pair: 5 = tbRlV).
+            // arrangements (observed in a Word DOC/DOCX pair: 5 = tbRlV).
             let text_direction = match cell_text_flow(source.flags) {
                 0 => None,
                 1 => Some("tbRl"),

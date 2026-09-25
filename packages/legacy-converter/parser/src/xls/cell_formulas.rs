@@ -8,8 +8,9 @@
 //! MS-XLS 2.4.127 Formula carries a CellParsedFormula; one that is only a
 //! PtgExp (2.5.198.58) or PtgTbl refers to the 2.4.260 ShrFmla, 2.4.4 Array or 2.4.313
 //! Table record that follows its anchor cell. Shared formulas use relative
-//! PtgRefN/PtgAreaN tokens, written for the anchor cell as Excel's
-//! Excel-saved .xlsx counterparts do (sample-3: `TEXT(D5,"aaaa")` on D4).
+//! PtgRefN/PtgAreaN tokens, written for the anchor cell as the Excel-saved
+//! .xlsx counterparts do (observed with a shared formula whose members each
+//! refer to a neighbouring cell).
 //! Formulas the decompiler cannot express reject the workbook.
 
 use super::conditional::{decompile_cell, Externs};

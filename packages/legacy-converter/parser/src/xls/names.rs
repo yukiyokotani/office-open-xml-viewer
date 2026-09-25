@@ -79,8 +79,8 @@ impl Names {
             let start = 15 + count * width;
             let rgce = data.get(start..start + cce).ok_or_else(truncated)?;
             // Macro names (fProc) name procedures, not formulas or ranges;
-            // Excel's .xlsx counterparts omit them (sample-1, sample-12:
-            // the hidden `_xlfn.IFERROR` future-function names). A name
+            // Excel's .xlsx counterparts omit them (observed: the hidden
+            // `_xlfn.` future-function names). A name
             // without a formula defines nothing a formula can resolve.
             if flags & 0x0008 != 0 || rgce.is_empty() {
                 continue;

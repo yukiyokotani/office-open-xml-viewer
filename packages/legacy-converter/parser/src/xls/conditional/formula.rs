@@ -113,7 +113,7 @@ const TOOLPAK: [&str; 91] = [
 
 /// Functions new in Excel 2007 that BIFF8 stores as `_xlfn.` future
 /// functions and that ECMA-376 18.17.7 predefines, so SpreadsheetML writes
-/// them by name (sample-5: `_xlfn.IFERROR` is saved as `IFERROR(...)`).
+/// them by name (observed: `_xlfn.IFERROR` is saved as `IFERROR(...)`).
 const ECMA_FUTURE: [&str; 12] = [
     "AVERAGEIF",
     "AVERAGEIFS",
@@ -295,8 +295,8 @@ fn truncated() -> String {
 
 /// A sheet name as a formula prefix: quoted (with doubled apostrophes)
 /// unless it is a plain identifier. Excel's own .xlsx files leave names of
-/// letters (including CJK), digits, `_` and `.` unquoted (sample-3:
-/// `夏休み!$C$4`) and quote names with spaces (`'WATERFALL CHART'!…`); a
+/// letters (including CJK), digits, `_` and `.` unquoted (`Name!$C$4`) and
+/// quote names with spaces (`'Two Words'!$C$4`); a
 /// name that begins with a digit or reads as an A1 reference is quoted.
 fn sheet_prefix(name: &str) -> String {
     let identifier = name
@@ -373,8 +373,8 @@ fn cell(row: u16, col: u16, anchor: (u16, u16), relative_offsets: bool) -> Strin
 
 /// An area as text; an area spanning every BIFF8 column (0..=0xFF) or row
 /// (0..=0xFFFF) with absolute bounds is written as a whole-row or
-/// whole-column range, as Excel writes it in SpreadsheetML (sample-1:
-/// `$A$3:$IV$3` is saved as `$3:$3`, sample-4: `$C$1:$C$65536` as `$C:$C`).
+/// whole-column range, as Excel writes it in SpreadsheetML (observed:
+/// `$A$3:$IV$3` is saved as `$3:$3` and `$C$1:$C$65536` as `$C:$C`).
 fn area_text(
     rows: (u16, u16),
     cols: (u16, u16),
@@ -420,7 +420,7 @@ fn number(value: f64) -> Result<String, String> {
         return Err(unsupported("invalid XLS conditional formatting number"));
     }
     // Very large or small magnitudes use SpreadsheetML's exponent form
-    // (sample-1: 9.99E+307 in a MATCH lookup value).
+    // (observed: a 9.99E+307 lookup value is saved in that form).
     let magnitude = value.abs();
     if magnitude != 0.0 && !(1e-7..1e21).contains(&magnitude) {
         let text = format!("{value:e}");
@@ -725,8 +725,8 @@ fn decompile_inner(
                             arguments(&mut stack, count.checked_sub(1).ok_or_else(reject)?)?;
                         // The callee is normally a function name; Excel also
                         // stores a call whose callee is a cell reference (a
-                        // function unknown to BIFF8, e.g. sample-5's C6) and
-                        // writes it as `B11(...)` in its .xlsx counterpart.
+                        // function unknown to BIFF8) and writes it as, for
+                        // example, `B11(...)` in its .xlsx counterpart.
                         let name = match stack.pop() {
                             Some(Item::Function(name)) => name,
                             Some(Item::Text(reference)) if is_reference(&reference) => reference,
@@ -790,8 +790,8 @@ fn decompile_inner(
                     at += if token & 0x1f == 0x1a { 7 } else { 11 };
                 }
                 // PtgName (2.5.198.76): a user-defined name, written by name
-                // as in SpreadsheetML (sample-2: a data-validation list
-                // `人リスト`). Built-in names are not projected.
+                // as in SpreadsheetML (observed with a data-validation list
+                // naming a defined range). Built-in names are not projected.
                 0x03 => {
                     let (name, procedure) = externs
                         .name(u32_at(rgce, at + 1)?)
@@ -815,10 +815,10 @@ fn decompile_inner(
                     at += 5;
                 }
                 // PtgRefErr / PtgAreaErr: #REF!, whose payload MUST be
-                // ignored. sample-3 has CF12 rules whose PtgRefErr keeps a
-                // relative (0, -1) payload; Excel's .xlsx counterpart prints
-                // it as B5, but Excel's own PDF of the .xls shows those rules
-                // never apply (no bold day numbers), matching #REF!.
+                // ignored. Observed: CF12 rules whose PtgRefErr keeps a
+                // relative (0, -1) payload are printed as a cell reference in
+                // Excel's .xlsx counterpart, but Excel's own PDF of the .xls
+                // shows those rules never apply, matching #REF!.
                 0x0a => {
                     stack.push(Item::Text(format!("{pending}#REF!")));
                     at += 5;

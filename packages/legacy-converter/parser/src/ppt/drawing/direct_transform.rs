@@ -15,7 +15,7 @@ pub(super) fn leaf<R, C, S>(shape: &ShapeStorage<R, C, S>) -> Result<Transform, 
 ///
 /// MS-ODRAW 2.3.18.5 only defines the angle (clockwise, about the centre).
 /// Two further rules are Office behaviour, established by a PowerPoint
-/// control (`converter-rotation-matrix-v1`: one custom polygon at 0, 30,
+/// control (one custom polygon at 0, 30,
 /// 44.99, 45, 45.01, 60, 90, 120, 134.99, 135 ... 359 degrees, each with all
 /// four flip combinations, authored as PPTX and saved as PPT by PowerPoint;
 /// all 120 PPTX transforms are reproduced by these rules) and confirmed on

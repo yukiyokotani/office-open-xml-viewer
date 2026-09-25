@@ -190,14 +190,14 @@ impl NativeAdmission {
                 // condition (no height only when every cell is empty); ECMA-376
                 // §17.4.21 hideMark ignores each cell's end-of-cell mark.
                 // Word's output follows the per-cell reading, which the DOCX
-                // table layout implements: in its PDFs of sample-26 (DOC and
-                // DOCX) a hideMark cell ending with an empty paragraph, in a
-                // table whose other rows have content, ends its row at the
-                // last text paragraph (bottom 271.5pt = last text line top
-                // 248.0pt + one 23.28pt paragraph advance), while the same
-                // structure without hideMark keeps that line (sample-42). The
-                // all-empty hideMark row of sample-37 collapses to its 1pt
-                // minimum in both PDFs.
+                // table layout implements. In Word's PDFs (from the DOC and
+                // its DOCX pair) a hideMark cell ending with an empty
+                // paragraph, in a table whose other rows have content, ends
+                // its row at the last text paragraph (the row bottom equals
+                // the last text line top plus one paragraph advance), while
+                // the same structure without hideMark keeps that line. An
+                // all-empty hideMark row collapses to its 1pt minimum in both
+                // PDFs.
                 if operand.len() != 4 || operand[0] != 3 {
                     return Err(unsupported("invalid Word cell hide-mark operand"));
                 }

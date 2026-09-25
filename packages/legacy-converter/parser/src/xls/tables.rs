@@ -220,8 +220,8 @@ pub(super) fn project(
                     let (name, size) = unicode_string(data, 20)?;
                     // stListStyleName MUST be non-empty, yet Excel writes an
                     // empty name for a table without a style; the Excel-saved
-                    // counterpart (sample-4) has `tableStyleInfo` with only
-                    // the show* flags, i.e. no style.
+                    // counterpart of such a table has `tableStyleInfo` with
+                    // only the show* flags, i.e. no style.
                     if 20 + size != data.len() || table.style.is_some() {
                         return Err(unsupported("invalid XLS table style information"));
                     }
@@ -375,11 +375,11 @@ impl Styles {
         if let Some(id) = self.projected.get(&index) {
             return Ok(*id);
         }
-        // DXFId (2.5.94): zero-based over the globals' DXF records. The
-        // private corpus confirms it: sample-5's styles match the Excel-saved
-        // .xlsx dxf for dxf, and in sample-2, whose .xlsx reorders the style
-        // formats, Excel's PDF of the .xls shows the zero-based header format
-        // (dark red text, no fill) rather than the .xlsx one.
+        // DXFId (2.5.94): zero-based over the globals' DXF records. Observed:
+        // table styles of Excel-saved workbooks match their .xlsx dxfs one
+        // for one, and where the .xlsx reorders the style formats, Excel's
+        // PDF of the .xls shows the header format at the zero-based index
+        // rather than the .xlsx one.
         let data = self
             .dxf_records
             .get(index as usize)

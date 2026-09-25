@@ -6,8 +6,8 @@
 //! Formulas are decompiled like conditional-formatting formulas, relative
 //! to the top-left cell of the first range. An explicit list (fStrLookup)
 //! is one string whose items are NUL-separated; SpreadsheetML writes it as
-//! a quoted comma-separated list (sample-3: "日曜日\0 月曜日" is saved as
-//! `"日曜日, 月曜日"`). Excel stores an absent title or message as a single
+//! a quoted comma-separated list (observed: items "A\0 B" are saved as
+//! `"A, B"`). Excel stores an absent title or message as a single
 //! NUL character.
 //!
 //! The error style, IME mode and the show-prompt/show-error switches only

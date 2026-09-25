@@ -183,8 +183,9 @@ fn element_kind(tse: u32) -> Option<&'static str> {
 
 /// SXLI pivot lines (2.4.293): SXLIItem structures of `entries` pivot line
 /// entries each. The depth is isxviMac less one, as the XLSX `i` element's
-/// `r` plus its `x` count less one: sample-2's .xls lines match its
-/// Excel-saved .xlsx rowItems (cSic = r, isxviMac - cSic = x count).
+/// `r` plus its `x` count less one: the lines of a corpus workbook's .xls
+/// match its Excel-saved .xlsx rowItems (cSic = r, isxviMac - cSic = x
+/// count).
 fn lines(
     data: &[u8],
     count: usize,
@@ -514,7 +515,7 @@ mod tests {
 
     fn sx_view(counts: [u16; 6], flags: u16) -> Vec<u8> {
         let mut data = Vec::new();
-        // B9:C42, head row 9, data row 9, data column 2 (sample-2).
+        // B9:C42, head row 9, data row 9, data column 2.
         for value in [8u16, 41, 1, 2, 9, 9, 2, 0, 0, 2, 0xffff, 7] {
             data.extend(value.to_le_bytes());
         }

@@ -396,8 +396,8 @@ fn condition(
         }
         // Filter (5) with CFExFilterParams (2.5.26): ECMA-376 top10. The
         // CF formula is Excel's compatibility rendering for older versions
-        // (sample-9: bottom 4 stored with a SMALL formula, saved as
-        // top10 bottom="1" rank="4").
+        // (observed: a bottom-N rule stored with a SMALL formula is saved by
+        // Excel as `top10 bottom="1" rank="N"`).
         (2, 5) => {
             let flags = *parameters.first().ok_or_else(truncated)?;
             let rank = u16_at(parameters, 1)?;

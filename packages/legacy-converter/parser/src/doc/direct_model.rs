@@ -98,8 +98,8 @@ pub(super) fn build(
     facts.floating.load_direct_parts()?;
     // Word stores TIFF data in PNG BLIPs and reads it back as TIFF: its own
     // DOCX of a corpus document writes that BLIP as media/*.tiff. It also
-    // displays GIF data stored in a PNG BLIP: sample-21's DOC PDF shows the
-    // 12x12 GIF and Word's DOCX of it writes media/image1.gif. The package
+    // displays GIF data stored in a PNG BLIP: Word's PDF of such a DOC shows
+    // the GIF and Word's DOCX of it writes the BLIP as a .gif part. The package
     // writer keeps rejecting such BLIPs. Painting TIFF needs the caller's
     // optional TIFF decoder.
     facts.pictures.raster = crate::officeart::raster::Raster::TiffAndGifAware;

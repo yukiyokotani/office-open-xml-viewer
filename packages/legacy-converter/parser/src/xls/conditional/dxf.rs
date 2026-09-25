@@ -54,7 +54,7 @@ fn unicode(data: &[u8], offset: usize, count: usize) -> Result<(String, usize), 
 /// IcvXF/IcvFont (2.5.161/2.5.160) as a dxf color. 0x40 and 0x41 are the
 /// default foreground and background, and 0x7FFF the automatic font color;
 /// Excel writes all of them as `auto="1"` in the dxfs of the Excel-saved
-/// counterparts (sample-3: DXFPat icv 64/65 -> fgColor/bgColor auto), which
+/// counterparts (observed: DXFPat icv 64/65 -> fgColor/bgColor auto), which
 /// the XLSX model leaves unset.
 fn icv(context: &Context<'_>, value: u16) -> Option<String> {
     match value {

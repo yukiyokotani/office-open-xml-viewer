@@ -579,9 +579,9 @@ impl Row {
             // [MS-DOC] 2.9.305 TableBrcOperand allows 0x01-0x20 (edges plus
             // the tl-br 0x10 and tr-bl 0x20 diagonals); 2.9.304
             // TableBrc80Operand allows only the four edges. Word nevertheless
-            // writes the tl-br bit 0x10 in sprmTSetBrc80: sample-19.doc row 35
-            // carries sprmTSetBrc80 sides 0x10 (single, 4/8 pt, auto) for the
-            // cell that its DOCX pair gives `w:tl2br w:val="single" w:sz="4"
+            // writes the tl-br bit 0x10 in sprmTSetBrc80: a Word-saved DOC
+            // row carries sprmTSetBrc80 sides 0x10 (single, 4/8 pt, auto) for
+            // a cell that its DOCX pair gives `w:tl2br w:val="single" w:sz="4"
             // w:color="auto"`, followed by an equal sprmTSetBrc 0x10. Bit 0x10
             // of the 80 operand is therefore read with the same diagonal
             // meaning; 0x20 and higher bits have no evidence and stay gated.

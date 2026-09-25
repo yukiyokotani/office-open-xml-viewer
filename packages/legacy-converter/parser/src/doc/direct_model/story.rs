@@ -3524,7 +3524,7 @@ mod tests {
 
     #[test]
     fn native_story_reads_word_written_tset_brc80_diagonal_bit() {
-        // sample-19.doc row 35: sprmTSetBrc80 bit 0x10 (outside 2.9.304's
+        // A Word-saved row: sprmTSetBrc80 bit 0x10 (outside 2.9.304's
         // edge bits) followed by an equal sprmTSetBrc 0x10; the DOCX pair has
         // `w:tl2br w:val="single" w:sz="4" w:color="auto"`.
         let brc80 = sprm(0xd620, &[7, 0, 1, 0x10, 4, 1, 0, 0]);
