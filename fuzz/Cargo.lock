@@ -89,10 +89,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "docx-model"
+version = "0.1.0"
+dependencies = [
+ "ooxml-common",
+ "serde",
+]
+
+[[package]]
 name = "docx-parser"
 version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
+ "docx-model",
  "ooxml-common",
  "quick-xml",
  "roxmltree",
@@ -122,6 +131,30 @@ checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
 dependencies = [
  "crc32fast",
  "miniz_oxide",
+]
+
+[[package]]
+name = "futures-core"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92d699e522242e69e3003b94ecc1f960f3a5e015aa7c5d7486e65ad01dd94f5e"
+
+[[package]]
+name = "futures-task"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd417de3d1d015fc3bfd2b1ea46dfc7bab72ef86f1cc7cc9c78e728b34a6d1fd"
+
+[[package]]
+name = "futures-util"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d50a92467f8ba5dd6e3ee5d4bd04d73ab2e4e1c44474a0674821dfce14b79bc"
+dependencies = [
+ "futures-core",
+ "futures-task",
+ "pin-project-lite",
+ "slab",
 ]
 
 [[package]]
@@ -169,15 +202,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "js-sys"
+version = "0.3.103"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53b44bfcdb3f8d5837a46dae1ca9660a837176eee74a28b229bc626816589102"
+dependencies = [
+ "cfg-if",
+ "futures-util",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "legacy-office-converter"
 version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
+ "docx-model",
  "flate2",
+ "js-sys",
  "ooxml-common",
  "pptx-model",
+ "pptx-parser",
  "quick-xml",
+ "roxmltree",
+ "serde",
+ "serde_json",
  "wasm-bindgen",
+ "xlsx-model",
  "zip",
 ]
 
@@ -249,6 +300,12 @@ dependencies = [
  "pptx-parser",
  "xlsx-parser",
 ]
+
+[[package]]
+name = "pin-project-lite"
+version = "0.2.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pptx-model"
@@ -373,6 +430,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "703d5c7ef118737c72f1af64ad2f6f8c5e1921f818cdcb97b8fe6fc69bf66214"
 
 [[package]]
+name = "slab"
+version = "0.4.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
+
+[[package]]
 name = "syn"
 version = "2.0.118"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -470,6 +533,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
+name = "xlsx-model"
+version = "0.1.0"
+dependencies = [
+ "ooxml-common",
+ "serde",
+]
+
+[[package]]
 name = "xlsx-parser"
 version = "0.1.0"
 dependencies = [
@@ -480,6 +551,7 @@ dependencies = [
  "serde",
  "serde_json",
  "wasm-bindgen",
+ "xlsx-model",
  "zip",
 ]
 

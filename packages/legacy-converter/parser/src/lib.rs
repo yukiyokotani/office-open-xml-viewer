@@ -12,6 +12,8 @@ mod cfb;
 mod doc;
 #[cfg(feature = "direct-doc")]
 mod doc_wasm;
+#[cfg(feature = "fuzzing")]
+pub mod fuzzing;
 mod lcid;
 mod officeart;
 mod ooxml;

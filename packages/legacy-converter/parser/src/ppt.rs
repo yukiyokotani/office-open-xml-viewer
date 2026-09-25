@@ -626,6 +626,69 @@ fn unsupported(message: impl Into<String>) -> String {
     format!("UNSUPPORTED:{}", message.into())
 }
 
+/// Fuzz driver for alternative shape XML resolution (`crate::fuzzing`):
+/// `data` as a whole metroBlob package, and as the shape part of a package
+/// whose relationships are well formed, against a fixed binary text shape.
+#[cfg(all(feature = "fuzzing", feature = "direct-ppt"))]
+pub(crate) fn fuzz_alternative(data: &[u8]) {
+    use std::io::Write;
+    let Ok(mut element) = serde_json::from_value::<pptx_model::ShapeElement>(serde_json::json!({
+        "x": 0, "y": 0, "width": 1_587_500, "height": 793_750, "rotation": 0.0,
+        "flipH": false, "flipV": false, "geometry": "rect",
+        "fill": null, "stroke": null, "textBody": null,
+        "defaultTextColor": null, "custGeom": null,
+        "adj": null, "adj2": null, "adj3": null, "adj4": null,
+        "adj5": null, "adj6": null, "adj7": null, "adj8": null,
+        "id": "2", "name": null, "hyperlink": null,
+        "placeholderType": null, "placeholderIdx": null
+    })) else {
+        unreachable!("fixed fuzz shape deserializes");
+    };
+    element.fill = Some(pptx_model::Fill::Solid {
+        color: "FF0000".to_owned(),
+    });
+    let leaf = pptx_model::Transform {
+        cx: element.width,
+        cy: element.height,
+        ..Default::default()
+    };
+    let binary = metro::BinaryShape {
+        element: &element,
+        leaf: &leaf,
+        nested: false,
+        text: Some("AB\u{b}C\rD"),
+        fill: metro::RecordedFill::Stated(element.fill.clone().map(Box::new)),
+        path_paint: None,
+        adjust_bounds: [None; 8],
+    };
+    let theme = metro::Theme::Readable {
+        theme_xml: theme(),
+        clr_map: None,
+    };
+    let mut package = std::io::Cursor::new(Vec::new());
+    {
+        let mut writer = zip::ZipWriter::new(&mut package);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        let parts: [(&str, &[u8]); 2] = [
+            ("_rels/.rels", br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.microsoft.com/office/2006/relationships/shapeXml" Target="drs/shapexml.xml"/></Relationships>"#),
+            ("drs/shapexml.xml", data),
+        ];
+        for (name, bytes) in parts {
+            if writer.start_file(name, options).is_err() || writer.write_all(bytes).is_err() {
+                return;
+            }
+        }
+        if writer.finish().is_err() {
+            return;
+        }
+    }
+    for blob in [data, package.get_ref().as_slice()] {
+        let (mut work, mut text, mut model) = (64, 16 * 1024 * 1024, 64 * 1024 * 1024);
+        let _ = metro::adopt(&binary, blob, &theme, &mut work, &mut text, &mut model);
+    }
+}
+
 fn u16_at(bytes: &[u8], offset: usize) -> Result<u16, String> {
     let raw = bytes
         .get(offset..offset + 2)
@@ -642,6 +705,15 @@ fn u32_at(bytes: &[u8], offset: usize) -> Result<u32, String> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(all(feature = "fuzzing", feature = "direct-ppt"))]
+    #[test]
+    fn alternative_fuzz_driver_builds_its_fixed_shape() {
+        super::fuzz_alternative(b"");
+        super::fuzz_alternative(
+            br#"<p:sp xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"/>"#,
+        );
+    }
+
     #[test]
     fn owned_and_borrowed_scans_preserve_padding_and_record_budgets() {
         for padding in 0..=16 {

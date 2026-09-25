@@ -13,7 +13,14 @@ docx-parser = { path = "../packages/docx/parser" }
 pptx-parser = { path = "../packages/pptx/parser" }
 xlsx-parser = { path = "../packages/xlsx/parser" }
 ooxml-common = { path = "../packages/ooxml-common" }
-legacy-office-converter = { path = "../packages/legacy-converter/parser", features = ["fuzzing"] }
+# The direct features build the native drivers of the DOC, XLS and PPT direct
+# sources (`legacy_office_converter::fuzzing`), not only the byte conversion.
+legacy-office-converter = { path = "../packages/legacy-converter/parser", features = [
+    "fuzzing",
+    "direct-doc",
+    "direct-xls",
+    "direct-ppt",
+] }
 
 # Use independent workspace for fuzzers so `cargo fuzz` doesn't pull the whole
 # monorepo workspace (with its wasm32 cdylib targets) into the fuzz build.
@@ -61,6 +68,34 @@ bench = false
 [[bin]]
 name = "fuzz_legacy_office_converter"
 path = "fuzz_targets/fuzz_legacy_office_converter.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_legacy_direct_doc"
+path = "fuzz_targets/fuzz_legacy_direct_doc.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_legacy_direct_xls"
+path = "fuzz_targets/fuzz_legacy_direct_xls.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_legacy_direct_ppt"
+path = "fuzz_targets/fuzz_legacy_direct_ppt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_legacy_ppt_alternative"
+path = "fuzz_targets/fuzz_legacy_ppt_alternative.rs"
 test = false
 doc = false
 bench = false
