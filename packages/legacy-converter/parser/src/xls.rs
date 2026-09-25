@@ -26,6 +26,7 @@ mod direct_styles_tests;
 pub(crate) mod direct_wire;
 pub(crate) mod drawing_anchors;
 mod drawing_media;
+mod filters;
 mod geometry;
 mod hyperlinks;
 mod pictures;
@@ -174,6 +175,10 @@ struct SheetData {
     hyperlink_records: tables::Records,
     /// Their XLSX-model projection (direct path only).
     hyperlinks: Vec<xlsx_model::Hyperlink>,
+    /// MS-XLS 2.4.8 AutoFilterInfo: the sheet has an AutoFilter.
+    autofilter_info: bool,
+    /// Its `_FilterDatabase` range (direct path only).
+    auto_filter: Option<xlsx_model::CellRange>,
 }
 
 pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<XlsConversion, String> {
@@ -328,6 +333,7 @@ fn prepare_workbook(
     let mut conditional_theme = None;
     let mut dxfs = Vec::new();
     let mut table_styles = None;
+    let mut filter_databases = None;
     for (tab, sheet) in sheets.into_iter().enumerate() {
         if sheet.sheet_type != 0 {
             skipped_non_worksheets = true;
@@ -356,6 +362,17 @@ fn prepare_workbook(
                     hyperlinks::tooltip(record)?;
                 }
             }
+        }
+        if direct && data.autofilter_info {
+            if filter_databases.is_none() {
+                filter_databases = Some(filters::Databases::parse(&records)?);
+            }
+            let range = filter_databases
+                .as_ref()
+                .expect("parsed filter databases")
+                .range(tab)
+                .ok_or_else(|| unsupported("BIFF AutoFilter lacks its filter database"))?;
+            data.auto_filter = Some(xlsx_model::CellRange { ..*range });
         }
         if direct && !data.table_records.is_empty() {
             if conditional_theme.is_none() {
@@ -1107,6 +1124,7 @@ fn parse_sheet(
                 output.conditional_records.push(record.kind, record.data)?
             }
             0x01b8 | 0x0800 => output.hyperlink_records.push(record.kind, record.data)?,
+            0x009d => output.autofilter_info = true,
             0x0862 => {
                 if output.sheet_ext.replace(record.data.to_vec()).is_some() {
                     return Err(unsupported("duplicate BIFF sheet extension"));

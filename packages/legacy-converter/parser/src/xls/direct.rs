@@ -453,6 +453,7 @@ fn project_sheet(
             .sum(),
     )?;
     worksheet.hyperlinks = sheet.hyperlinks;
+    worksheet.auto_filter = sheet.auto_filter;
     if let Some(color) = sheet.tab_color {
         charge(budget, color.len())?;
         worksheet.tab_color = Some(color);
