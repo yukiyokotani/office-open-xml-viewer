@@ -21,6 +21,9 @@ mod tables;
 pub(crate) struct DirectDocResult {
     pub(crate) document: Document,
     pub(crate) resources: Vec<super::pictures::DirectPictureResource>,
+    /// The DOC's own revision-markup display settings. Kept beside the model:
+    /// the DOCX model and its OOXML default view are unchanged by them.
+    pub(crate) revision_markup: super::settings::RevisionMarkup,
 }
 
 pub(super) fn build(
@@ -245,12 +248,18 @@ pub(super) fn build(
         note_layout_settings,
         ..Document::default()
     };
+    let revision_markup = facts
+        .document_settings
+        .as_ref()
+        .map(|settings| settings.revision_markup)
+        .unwrap_or_default();
     if !facts.pictures.has_selected_direct_resources()
         && !facts.floating.has_selected_direct_resources()
     {
         return Ok(DirectDocResult {
             document,
             resources: Vec::new(),
+            revision_markup,
         });
     }
     let references = direct_picture_references(&document, &mut budget)?;
@@ -265,6 +274,7 @@ pub(super) fn build(
     Ok(DirectDocResult {
         document,
         resources,
+        revision_markup,
     })
 }
 

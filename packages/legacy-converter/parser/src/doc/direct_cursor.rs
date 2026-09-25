@@ -31,6 +31,7 @@ struct Prepared {
 }
 
 pub(crate) struct DirectCursor {
+    revision_markup: crate::doc::settings::RevisionMarkup,
     pending: Option<Document>,
     active: Option<Active>,
     prepared: Option<Prepared>,
@@ -58,6 +59,7 @@ impl DirectCursor {
             return Err("duplicate DOC direct resource key".into());
         }
         Ok(Self {
+            revision_markup: result.revision_markup,
             pending: Some(result.document),
             active: None,
             prepared: None,
@@ -70,6 +72,17 @@ impl DirectCursor {
             },
             failure: None,
         })
+    }
+
+    /// MS-DOC 2.7.2 DopBase fRMPrint of the source document: whether Word
+    /// prints (and exports to PDF) its revision markup.
+    pub(crate) fn revision_markup_in_print(&self) -> bool {
+        self.revision_markup.in_print
+    }
+
+    /// MS-DOC 2.7.2 DopBase fRMView of the source document.
+    pub(crate) fn revision_markup_on_screen(&self) -> bool {
+        self.revision_markup.on_screen
     }
 
     pub(crate) fn open_document_cursor(
@@ -319,7 +332,23 @@ mod tests {
                 mime_type: "image/png",
                 bytes: vec![1, 2, 3],
             }],
+            revision_markup: Default::default(),
         }
+    }
+
+    #[test]
+    fn revision_markup_settings_are_exposed_beside_the_model() {
+        let cursor = DirectCursor::new(result(Vec::new())).unwrap();
+        assert!(!cursor.revision_markup_in_print());
+        assert!(!cursor.revision_markup_on_screen());
+        let mut value = result(Vec::new());
+        value.revision_markup = crate::doc::settings::RevisionMarkup {
+            on_screen: true,
+            in_print: false,
+        };
+        let cursor = DirectCursor::new(value).unwrap();
+        assert!(cursor.revision_markup_on_screen());
+        assert!(!cursor.revision_markup_in_print());
     }
 
     fn pull(cursor: &mut DirectCursor, sequence: u32, credit: usize) -> Vec<u8> {
