@@ -496,13 +496,42 @@ fn strict_walk_flattens_sheet_groups_through_nested_group_rectangles() {
     let members: Vec<_> = group
         .members
         .iter()
-        .map(|m| (m.order, m.object_type, m.bounds, m.shape.is_some()))
+        .map(|m| {
+            (
+                m.order,
+                m.object_type,
+                m.anchor,
+                m.groups.len(),
+                m.shape.is_some(),
+            )
+        })
         .collect();
     assert_eq!(
         members,
         vec![
-            (3, 2, [0.5, 0.0, 0.5, 0.5], true),
-            (4, 6, [0.25, 0.5, 0.25, 0.5], true),
+            (3, 2, [100, 0, 200, 50], 1, true),
+            (4, 6, [5, 0, 10, 10], 2, true),
+        ]
+    );
+    // The enclosing frames: the sheet group (placed by its cell anchor) and
+    // the nested group at its child anchor.
+    assert_eq!(
+        group.members[1].groups,
+        vec![
+            GroupFrame {
+                anchor: None,
+                rect: [0, 0, 200, 100],
+                rotation: 0,
+                flip_h: false,
+                flip_v: false
+            },
+            GroupFrame {
+                anchor: Some([0, 50, 100, 100]),
+                rect: [0, 0, 10, 10],
+                rotation: 0,
+                flip_h: false,
+                flip_v: false
+            },
         ]
     );
     // The projecting walk used by pictures and charts still skips groups.
@@ -510,15 +539,19 @@ fn strict_walk_flattens_sheet_groups_through_nested_group_rectangles() {
 }
 
 #[test]
-fn strict_walk_rejects_rotated_groups_and_unanchored_members() {
+fn strict_walk_keeps_group_rotation_and_rejects_unanchored_members() {
     let rotation = art(
         0xf00b,
         0x13,
-        &[4u16.to_le_bytes().to_vec(), 1u32.to_le_bytes().to_vec()].concat(),
+        &[
+            4u16.to_le_bytes().to_vec(),
+            0x002d_0000u32.to_le_bytes().to_vec(),
+        ]
+        .concat(),
     );
-    assert!(walk_as(&group_fixture(&rotation, 0xa02), Policy::Strict)
-        .unwrap_err()
-        .contains("rotated or flipped"));
+    // Rotation is kept on the frame for the host to compose.
+    let anchors = walk_as(&group_fixture(&rotation, 0xa02), Policy::Strict).unwrap();
+    assert_eq!(anchors[0].members[0].groups[0].rotation, 0x002d_0000);
     // A member that is not flagged as a group child.
     assert!(walk_as(&group_fixture(&[], 0xa00), Policy::Strict)
         .unwrap_err()

@@ -1,3 +1,4 @@
+use super::super::drawing_anchors::GroupFrame;
 use super::*;
 
 fn font(twips: u16, flags: u16, icv: u16, weight: u16, underline: u8, name: &str) -> Vec<u8> {
@@ -71,6 +72,7 @@ fn source(owned: &[(u16, Vec<u8>)], kind: u16, properties: &[(u16, u32)]) -> Sha
     ShapeSource {
         kind,
         properties: properties.to_vec(),
+        complex: Vec::new(),
         text: Some(records(owned)[TXO].offset),
     }
 }
@@ -80,7 +82,6 @@ fn leaf(flags: u32) -> Leaf {
         flags,
         child: false,
         order: 3,
-        bounds: [0.0, 0.0, 1.0, 1.0],
     }
 }
 
@@ -92,7 +93,9 @@ fn project(
 ) -> Result<Option<xlsx_model::ShapeInfo>, String> {
     let records = records(owned);
     let styles = styles::Styles::parse(&records).unwrap();
-    leaf(flags).project(&records, &styles, defaults, shape)
+    leaf(flags)
+        .project(&records, &styles, defaults, shape)
+        .map(|leaf| leaf.map(|(info, _)| info))
 }
 
 /// Excel's own drawing defaults in every corpus workbook (MS-ODRAW 2.2.12):
@@ -128,7 +131,6 @@ fn rectangle_and_text_match_excels_xlsx_counterpart() {
         .unwrap()
         .unwrap();
     assert_eq!(info.z_order, 3);
-    assert!(info.flip_h && !info.flip_v);
     assert_eq!(info.fill_color.as_deref(), Some("#1B79AD"));
     assert!(info.stroke_color.is_none());
     assert_eq!(info.stroke_width, 0);
@@ -331,7 +333,6 @@ fn unevidenced_shape_facts_fail_closed() {
     reject(&[], 3, 0xa00, "shape type 3");
     reject(&[], 1, 0xa10, "shape flags");
     reject(&[], 1, 0x200, "shape flags");
-    reject(&[(0x0004, 0x002d_0000)], 1, 0xa00, "rotated");
     reject(&[(0x023f, 0x0002_0002)], 1, 0xa00, "shadows");
     reject(&[(0x0180, 1)], 1, 0xa00, "non-solid");
     reject(&[(0x0085, 1)], 1, 0xa00, "wrapping");
@@ -420,10 +421,147 @@ fn drawing_group_hidden_and_property_checks() {
     let group = |properties: &[(u16, u32)]| ShapeSource {
         kind: 0,
         properties: properties.to_vec(),
+        complex: Vec::new(),
         text: None,
     };
     assert!(!group_hidden(&defaults, &group(&[(0x0004, 0), (0x03bf, 0x0002_0000)])).unwrap());
     assert!(group_hidden(&defaults, &group(&[(0x03bf, 0x0002_0002)])).unwrap());
-    assert!(group_hidden(&defaults, &group(&[(0x0004, 1)])).is_err());
+    // Rotation belongs to the group frame and is composed with the members.
+    assert!(!group_hidden(&defaults, &group(&[(0x0004, 1)])).unwrap());
     assert!(group_hidden(&defaults, &group(&[(0x0200, 1)])).is_err());
+}
+
+fn placement(
+    groups: Vec<GroupFrame>,
+    anchor: Option<[i32; 4]>,
+    rotation: i32,
+    flips: (bool, bool),
+) -> Placement {
+    Placement {
+        groups,
+        anchor,
+        rotation,
+        flip_h: flips.0,
+        flip_v: flips.1,
+    }
+}
+
+fn close(actual: f64, expected: f64) -> bool {
+    (actual - expected).abs() < 1e-6
+}
+
+#[test]
+fn placement_follows_the_office_rotation_and_flip_rules() {
+    // A flipped shape filling its anchor keeps its box and flips.
+    let flipped = placement(Vec::new(), None, 0, (true, false)).resolve(200.0, 100.0);
+    assert!(close(flipped.width, 200.0) && flipped.flip_h && !flipped.flip_v);
+    // 90 degrees: the stored anchor holds the rotated bounds (swap about the
+    // centre); one flip negates the angle.
+    let swapped = placement(Vec::new(), None, 90 * 65_536, (false, true)).resolve(200.0, 100.0);
+    assert!(close(swapped.x, 50.0) && close(swapped.y, -50.0));
+    assert!(close(swapped.width, 100.0) && close(swapped.height, 200.0));
+    assert!(close(swapped.rotation_degrees, -90.0));
+    // -45 degrees (315) is outside the half-open swap intervals: Excel's XLSX
+    // of the sample keeps that freeform's child anchor unswapped.
+    let diagonal = placement(Vec::new(), None, -45 * 65_536, (false, false)).resolve(200.0, 100.0);
+    assert!(close(diagonal.width, 200.0) && close(diagonal.rotation_degrees, -45.0));
+}
+
+#[test]
+fn placement_composes_group_frames_in_true_proportions() {
+    let frame = |anchor, rect, rotation| GroupFrame {
+        anchor,
+        rect,
+        rotation,
+        flip_h: false,
+        flip_v: false,
+    };
+    // A member in the right half of a 180-degree rotated group lands in the
+    // left half, turned 180 degrees.
+    let groups = vec![frame(None, [0, 0, 200, 100], 180 * 65_536)];
+    let rect = placement(groups, Some([100, 0, 200, 100]), 0, (false, false)).resolve(400.0, 100.0);
+    assert!(close(rect.x, 0.0) && close(rect.width, 200.0));
+    assert!(close(rect.rotation_degrees, 180.0));
+    // A nested group scales its own coordinates into its child anchor.
+    let groups = vec![
+        frame(None, [0, 0, 100, 100], 0),
+        frame(Some([50, 0, 100, 50]), [0, 0, 10, 10], 0),
+    ];
+    let rect = placement(groups, Some([0, 0, 5, 10]), 0, (false, false)).resolve(100.0, 100.0);
+    assert!(close(rect.x, 50.0) && close(rect.width, 25.0) && close(rect.height, 50.0));
+}
+
+#[test]
+fn freeform_polygons_become_custom_geometry() {
+    // A closed triangle in a 100x50 path space (MS-ODRAW 2.3.6.7/9 arrays).
+    let vertices = [
+        vec![3, 0, 3, 0, 8, 0],
+        [0i32, 0, 100, 0, 50, 50]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect(),
+    ]
+    .concat();
+    let segments = [
+        vec![4, 0, 4, 0, 2, 0],
+        [0x4000u16, 0x0002, 0x6001, 0x8000]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect::<Vec<u8>>(),
+    ]
+    .concat();
+    let owned = workbook(0x0212, &compressed("x"), 1, &[(0, 0)]);
+    let mut shape = source(
+        &owned,
+        0,
+        &[
+            (0x0142, 100),
+            (0x0143, 50),
+            (0xc145, vertices.len() as u32),
+            (0xc146, segments.len() as u32),
+            (0x0181, 0xff),
+            (0x01c0, 0),
+            (0x01ff, 0x0008_0008),
+        ],
+    );
+    shape.text = None;
+    shape.complex = vec![(0x145, vertices), (0x146, segments)];
+    let info = project(&owned, &excel_defaults(), &shape, 0xa00)
+        .unwrap()
+        .unwrap();
+    let xlsx_model::ShapeGeom::Custom { paths } = &info.geom else {
+        panic!("custom geometry expected");
+    };
+    assert_eq!(paths.len(), 1);
+    assert_eq!((paths[0].w, paths[0].h), (100.0, 50.0));
+    assert!(matches!(
+        paths[0].commands.last(),
+        Some(xlsx_model::PathCmd::Close)
+    ));
+    assert_eq!(paths[0].commands.len(), 4);
+}
+
+#[test]
+fn grouped_pictures_reference_their_store_media_with_the_picture_crop() {
+    let picture = drawing_anchors::PictureReference {
+        store_index: 7,
+        crop: [0x4000, 0, 0x8000, 0],
+        rotation: 0,
+        clipboard_format: 0,
+        auto_picture: false,
+    };
+    let info = picture_leaf(9, &picture);
+    assert_eq!(info.z_order, 9);
+    let xlsx_model::ShapeGeom::Image {
+        image_path,
+        src_rect,
+        ..
+    } = &info.geom
+    else {
+        panic!("image leaf expected");
+    };
+    assert_eq!(image_path, "legacy-xls/image/7");
+    let crop = src_rect.as_ref().unwrap();
+    assert_eq!((crop.t, crop.b, crop.l, crop.r), (0.25, 0.0, 0.5, 0.0));
+    assert!(info.fill.is_none() && info.stroke_color.is_none() && info.text.is_none());
 }

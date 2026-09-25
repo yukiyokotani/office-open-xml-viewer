@@ -53,8 +53,8 @@
 // Drawing records that are not implemented (text variants other than
 // EXTTEXTOUTW, POLYDRAW, region painting, flood fill, other blits, gradient
 // fill, glyph paths, WIDENPATH, EMF+-only content, arcs under a reflected
-// mapping) are reported through `EmfPlaybackOptions.onUnsupported` (default: a
-// once-per-record console warning) instead of being dropped silently. State
+// mapping) are reported through the opt-in `EmfPlaybackOptions.onUnsupported`
+// callback, so a caller can surface them; playback has no global side effect. State
 // records without a visible effect (SETICMMODE, SETMITERLIMIT, SETROP2,
 // SETSTRETCHBLTMODE, SETMETARGN, palettes, dual-mode EMF+ comments) and
 // unrecognized iTypes are skipped by nSize.
@@ -1578,22 +1578,10 @@ function doStretchDibits(s: PlayState, c: EmfCursor, dv: DataView, recStart: num
  * skipped gracefully when absent).
  */
 export interface EmfPlaybackOptions {
-  /** Receives the names of drawing records the playback could not draw (each
-   *  once per playback). Defaults to a once-per-record `console.warn`. */
+  /** Receives the names of drawing records the picture was drawn with but
+   *  could not draw (each once per playback). Opt-in: without a callback the
+   *  playback reports nothing and has no global side effect. */
   readonly onUnsupported?: (records: readonly string[]) => void;
-}
-
-const warnedUnsupported = new Set<string>();
-
-/** Default report: warn once per record name per process, so a deck with many
- *  similar pictures does not flood the console, but a gap is never silent. */
-function warnUnsupported(records: readonly string[]): void {
-  const fresh = records.filter((name) => !warnedUnsupported.has(name));
-  if (fresh.length === 0) return;
-  for (const name of fresh) warnedUnsupported.add(name);
-  if (typeof console !== 'undefined' && typeof console.warn === 'function') {
-    console.warn(`[ooxml] EMF picture drawn without unsupported records: ${fresh.join(', ')}`);
-  }
 }
 
 export function playEmf(
@@ -2212,9 +2200,7 @@ export function playEmf(
 
   // Unwind the SAVEDC levels left open by the metafile and the base save.
   for (let i = 0; i <= s.stack.length; i++) ctx.restore();
-  if (s.unsupported.size > 0) {
-    (options.onUnsupported ?? warnUnsupported)([...s.unsupported]);
-  }
+  if (s.unsupported.size > 0) options.onUnsupported?.([...s.unsupported]);
   return s.drew;
 }
 

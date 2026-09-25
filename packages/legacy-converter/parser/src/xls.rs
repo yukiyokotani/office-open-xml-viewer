@@ -574,6 +574,12 @@ fn prepare_workbook(
             .collect();
         validate_direct_drawings(&records, &tabs, &filters)?;
     }
+    // Rectangles, text boxes, freeforms and their groups: direct model only.
+    let mut shapes = if with_pictures && direct {
+        shapes::Shapes::prepare(&records, &tabs, &styles)?
+    } else {
+        shapes::Shapes::default()
+    };
     let pictures = if with_pictures {
         // The direct reader follows Excel, which displays GDI+ metafiles with
         // their short end-of-file record; the byte converter keeps its
@@ -583,7 +589,7 @@ fn prepare_workbook(
         } else {
             crate::officeart::raster::Raster::Advertised
         };
-        match pictures::Pictures::prepare(&records, &tabs, raster) {
+        match pictures::Pictures::prepare(&records, &tabs, raster, &shapes.picture_indices()) {
             Ok(value) => {
                 if value.has_unsupported_images() {
                     if direct {
@@ -611,12 +617,7 @@ fn prepare_workbook(
     } else {
         chart::Charts::default()
     };
-    // Rectangles, text boxes and their groups: direct model only.
-    let shapes = if with_pictures && direct {
-        shapes::Shapes::prepare(&records, &tabs, &styles)?
-    } else {
-        shapes::Shapes::default()
-    };
+    shapes.attach_images(&pictures)?;
     let mut chart_sheets = Vec::with_capacity(pending_chart_sheets.len());
     for &(index, offset) in &pending_chart_sheets {
         let start = records
@@ -654,9 +655,9 @@ fn prepare_workbook(
 /// The direct reader must not drop drawn content: every sheet-anchored
 /// drawing object on a projected worksheet is an embedded chart (MS-XLS
 /// 2.4.181 ot 5 with its chart substream), a picture (ot 8 with a BLIP
-/// reference), a rectangle or text box (ot 2 or 6) or a group (ot 0) of
-/// rectangles and text boxes; any other object (lines, ovals, controls, cell
-/// comments), grouped pictures or charts, or a chart/picture without its data
+/// reference), a rectangle, text box or freeform polygon (ot 2, 6 or 9) or a
+/// group (ot 0) of those and pictures; any other object (lines, ovals,
+/// controls, cell comments), grouped charts, or a chart/picture without its data
 /// is rejected with the reason. `shapes` validates each shape's properties.
 fn validate_direct_drawings(
     records: &[Record<'_>],
@@ -690,12 +691,12 @@ fn admit_direct_object(anchor: &drawing_anchors::DrawingAnchor) -> Result<(), St
             5 => return Err(unsupported("BIFF chart object without its chart substream")),
             8 if anchor.picture.is_some() => {}
             8 => return Err(unsupported("BIFF picture object without a BLIP reference")),
-            2 | 6 => {}
+            2 | 6 | 9 => {}
             0 => {
-                if let Some(member) = anchor
-                    .members
-                    .iter()
-                    .find(|member| !matches!(member.object_type, 2 | 6))
+                if let Some(member) = anchor.members.iter().find(|member| {
+                    !matches!(member.object_type, 2 | 6 | 9)
+                        && !(member.object_type == 8 && member.picture.is_some())
+                })
                 {
                     return Err(unsupported(format!(
                         "grouped BIFF drawing object type {} is not projected",
@@ -760,6 +761,7 @@ mod direct_drawing_tests {
             (25, None, "cell comments"),
             (1, None, "type 1 is not projected"),
             (3, None, "type 3 is not projected"),
+            (4, None, "type 4 is not projected"),
         ] {
             let error = super::admit_direct_object(&anchor(kind, chart, None)).unwrap_err();
             assert!(error.contains(expected), "{expected}: {error}");
