@@ -157,10 +157,18 @@ it.each([{ stale: true }, { cellHasExtension: false }])
   expect(model.cellXfs[2]).toMatchObject({ indent: 7, readingOrder: 1 });
 });
 
-it.each([color([4, 0, 0, 0], 3), color([1, 2, 3, 255], 2, 8191), color([0, 0, 0, 0], 0)])
+it.each([color([4, 0, 0, 0], 3), color([0, 0, 0, 0], 0)])
 ('retains palette fallback for color modes that need a separate resolver', async value => {
   const { xml } = await convert(fixture([prop(13, value)]));
   expect(xml.match(/<font>/g)).toHaveLength(1);
+});
+
+// FullColorExt nTintShade is n/32767 (Excel's standard tints 26213, 13106,
+// 19660, -8191 and 16383 are 0.8, 0.4, 0.6, -0.25 and 0.5 across the local
+// corpus); the ECMA-376 18.8.19 tint lightens 010203 by 8191/32767 to 214162.
+it('applies a FullColorExt tint to an RGB color', async () => {
+  const { xml } = await convert(fixture([prop(13, color([1, 2, 3, 255], 2, 8191))]));
+  expect(xml).toContain('<color rgb="FF214162"/>');
 });
 
 it.each([
@@ -211,19 +219,23 @@ it.each(themeNames.map((name, index) => [name, index] as const).slice(4))('resol
   expect(model.fonts[model.cellXfs[1].fontId].color).toBe(`#${hex(themeColor(index))}`);
 });
 
-it.each([0, 1, 2, 3])('retains the BIFF palette for ambiguous light/dark theme index %s', async index => {
+// Theme indices 0-3 follow the SpreadsheetML light/dark order (0 = lt1,
+// 1 = dk1, 2 = lt2, 3 = dk2), not MS-XLS 2.5.49's listing: Excel's palette
+// fallback beside every XFExt fill in the local corpus pairs theme 0 with
+// white, 1 with black, 2 with white/silver and 3 with dark blue (211 fills).
+it.each([0, 1, 2, 3])('resolves light/dark theme index %s in SpreadsheetML order', async index => {
   const { xml, model } = await convert(fixture([4, 5, 7, 8, 9, 10, 11, 13].map(kind => prop(kind, color([index, 0, 0, 0], 3))), { themeRecords: themeRecords(themeZip()) }));
-  expect(xml.match(/<font>/g)).toHaveLength(1);
-  expect(xml).toContain('<color auto="1"/>');
-  expect(model.cellXfs[1].fontId).toBe(model.cellXfs[0].fontId);
-  expect(xml).toBe((await convert(fixture([]))).xml);
+  const slot = themeColor(index ^ 1);
+  expect(xml.match(/<font>/g)).toHaveLength(2);
+  expect(xml).toContain(`<color rgb="FF${hex(slot)}"/>`);
+  expect(xml).toContain(`<fgColor rgb="FF${hex(slot)}"/>`);
+  expect(model.fonts[model.cellXfs[1].fontId].color).toBe(`#${hex(slot)}`);
 });
 
-it('does not inflate an unresolved light/dark theme just to retain the palette', async () => {
-  const { xml } = await convert(fixture([prop(13, color([1, 0, 0, 0], 3))], {
+it('rejects a malformed theme that a light/dark theme color needs', async () => {
+  await expect(convert(fixture([prop(13, color([1, 0, 0, 0], 3))], {
     themeRecords: [rec(0x896, new Uint8Array([1]))],
-  }));
-  expect(xml.match(/<font>/g)).toHaveLength(1);
+  }))).rejects.toMatchObject({ reason: 'unsupported-input' });
 });
 
 it.each([[4, 'fgColor'], [5, 'bgColor'], [7, 'top'], [8, 'bottom'], [9, 'left'], [10, 'right'], [11, 'diagonal']] as const)
@@ -262,9 +274,20 @@ it('does not read a theme for an unowned CellXF extension', async () => {
   expect(xml.match(/<font>/g)).toHaveLength(1);
 });
 
-it.each([124226, 123820])('retains base palette rather than inventing version-only default theme %s', async version => {
+// MS-XLS 2.4.326 dwThemeVersion 124226 (and 123820, footnote <137>) is
+// Excel's "Default theme": every corpus workbook carrying it was saved from
+// an XLSX with the Office scheme, whose accent1 is 4F81BD.
+it.each([124226, 123820])('resolves version-only default theme %s to the Office scheme', async version => {
   const { xml } = await convert(fixture([prop(13, color([4, 0, 0, 0], 3))], {
     themeRecords: [rec(0x896, concat(frt(0x896), little32(version)))],
+  }));
+  expect(xml.match(/<font>/g)).toHaveLength(2);
+  expect(xml).toContain('<color rgb="FF4F81BD"/>');
+});
+
+it('retains base palette for another version-only theme', async () => {
+  const { xml } = await convert(fixture([prop(13, color([4, 0, 0, 0], 3))], {
+    themeRecords: [rec(0x896, concat(frt(0x896), little32(1)))],
   }));
   expect(xml.match(/<font>/g)).toHaveLength(1);
 });
@@ -279,10 +302,14 @@ it.each([
     .rejects.toMatchObject({ reason: 'unsupported-input' });
 });
 
-it('does not erase a theme transform or a FullColorExt tint to force a color match', async () => {
+it('does not erase a theme transform to force a color match', async () => {
   const transformed = themeXml().replace(`<a:srgbClr val="${hex(themeColor(4))}"/>`, `<a:srgbClr val="${hex(themeColor(4))}"><a:tint val="50000"/></a:srgbClr>`);
-  for (const [zip, tint] of [[themeZip(transformed), 0], [themeZip(), 8191]] as const) {
-    const { xml } = await convert(fixture([prop(13, color([4, 0, 0, 0], 3, tint))], { themeRecords: themeRecords(zip) }));
-    expect(xml.match(/<font>/g)).toHaveLength(1);
-  }
+  const { xml } = await convert(fixture([prop(13, color([4, 0, 0, 0], 3))], { themeRecords: themeRecords(themeZip(transformed)) }));
+  expect(xml.match(/<font>/g)).toHaveLength(1);
+});
+
+it('applies a FullColorExt tint to a theme color', async () => {
+  // 051525 lightened by 8191/32767 (ECMA-376 18.8.19).
+  const { xml } = await convert(fixture([prop(13, color([4, 0, 0, 0], 3, 8191))], { themeRecords: themeRecords(themeZip()) }));
+  expect(xml).toContain('<color rgb="FF134F8C"/>');
 });
