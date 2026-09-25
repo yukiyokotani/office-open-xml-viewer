@@ -110,7 +110,18 @@ impl<'a> Textboxes<'a> {
         if textbox.lid != spid {
             return Err(unsupported("Word textbox belongs to another shape"));
         }
-        Ok((&self.story.text[textbox.bytes.clone()], textbox.cp))
+        let text = &self.story.text[textbox.bytes.clone()];
+        // MS-DOC 2.8.32: each range ends with a 0x0D that separates it from
+        // the next range. When the range's content already ends with its
+        // final paragraph (or cell) mark, that separator is not a paragraph:
+        // Word's own DOCX of the corpus documents has exactly one paragraph
+        // fewer than the range's marks in every textbox (26 boxes, five
+        // documents). A range whose only final mark is the separator keeps
+        // it as its last paragraph mark.
+        match text.strip_suffix('\r') {
+            Some(content) if content.ends_with(['\r', '\u{7}']) => Ok((content, textbox.cp)),
+            _ => Ok((text, textbox.cp)),
+        }
     }
 }
 
@@ -292,6 +303,22 @@ mod tests {
         };
         assert_eq!(story.text(1, 7).unwrap(), ("ab\r", 0));
         assert_eq!(story.text(2, 8).unwrap(), ("cé\r", 3));
+        // A range ending with its paragraph mark plus the separator drops
+        // the separator.
+        let text = "ab\r\rc\r";
+        let table = plc(&[0, 4, 7], &[ftxbxs(false, 7), ftxbxs(false, 0)]);
+        let breaks = plc(&[0, 4, 7], &[tbkd(0), tbkd(-1)]);
+        let story = Textboxes {
+            story: Story {
+                text: text.into(),
+                pieces: Vec::new(),
+                prcs: Vec::new(),
+            },
+            boxes: super::boxes(text, 7, &table, &breaks).unwrap(),
+            fields: StoryFields::analyze(text, &header_fields::Table::for_test(&[], 0), &[])
+                .unwrap(),
+        };
+        assert_eq!(story.text(1, 7).unwrap(), ("ab\r", 0));
         // Spare, out-of-range and foreign-shape references fail closed.
         assert!(story.text(3, 0).is_err());
         assert!(story.text(0, 7).is_err());
