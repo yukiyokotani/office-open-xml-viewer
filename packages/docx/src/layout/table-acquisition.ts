@@ -529,7 +529,11 @@ export function acquireRetainedTable<State>(
             ...((layout.kind === 'paragraph' && paragraphHasPageDependency(layout))
               ? { pageDependent: true }
               : {}),
-            ...(isStructuralTrailingParagraph(cell.content, sourceBlockIndex)
+            ...(isStructuralTrailingParagraph(
+              cell.content,
+              sourceBlockIndex,
+              cell.hideMark === true,
+            )
               ? { structuralTrailing: true }
               : {}),
           }];

@@ -123,6 +123,9 @@ pub struct Cell {
     /// [MS-DOC] 2.9.28 fNoWrap from sprmTFCellNoWrap (native acquisition).
     #[cfg(feature = "direct-doc")]
     pub(in crate::doc) no_wrap: bool,
+    /// [MS-DOC] 2.9.26 bArg from sprmTCellFHideMark (native acquisition).
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) hide_mark: bool,
 }
 
 pub struct Properties<R = Row> {

@@ -1030,6 +1030,7 @@ mod tests {
         border_styles: Vec<[Option<String>; 4]>,
         text_directions: Vec<Option<String>>,
         diagonals: Vec<[Option<(String, f64, Option<String>)>; 2]>,
+        hide_marks: Vec<bool>,
         unsupported_table: bool,
         unsupported_character: bool,
         unsupported_paragraph: bool,
@@ -1677,6 +1678,7 @@ mod tests {
             let mut border_styles = Vec::new();
             let mut text_directions = Vec::new();
             let mut diagonals = Vec::new();
+            let mut hide_marks = Vec::new();
             for element in &body {
                 let BodyElement::Table(table) = element else {
                     continue;
@@ -1690,6 +1692,7 @@ mod tests {
                             b.as_ref()
                                 .map(|b| (b.style.clone(), b.width, b.color.clone()))
                         }));
+                        hide_marks.push(cell.hide_mark);
                         backgrounds.push(cell.background.clone());
                         margins.push([
                             cell.margin_top.unwrap(),
@@ -1759,6 +1762,7 @@ mod tests {
                 border_styles,
                 text_directions,
                 diagonals,
+                hide_marks,
                 unsupported_table: facts.formatting.unsupported_table_properties,
                 unsupported_character: facts.formatting.unsupported_character_properties,
                 unsupported_paragraph: facts.formatting.unsupported_paragraph_properties,
@@ -3432,12 +3436,17 @@ mod tests {
             .err()
             .unwrap();
         assert!(error.contains("preferred row part"), "{error}");
-        // hideMark has no model representation.
-        assert!(
-            try_default_styled_table(&[], &sprm(0xd642, &[3, 0, 1, 1]))
-                .unwrap()
-                .unsupported_table
-        );
+    }
+
+    #[test]
+    fn native_story_projects_cell_hide_mark() {
+        // [MS-DOC] 2.9.26 bArg -> ECMA-376 Part 1 §17.4.21 hideMark.
+        for (value, expected) in [(1u8, true), (0, false)] {
+            let projected =
+                try_default_styled_table(&[], &sprm(0xd642, &[3, 0, 1, value])).unwrap();
+            assert!(!projected.unsupported_table, "{value}");
+            assert_eq!(projected.hide_marks, [expected]);
+        }
     }
 
     #[test]

@@ -3364,6 +3364,10 @@ pub struct DocTableCell {
     /// `tbLrV`). The default `lrTb` is `None`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_direction: Option<String>,
+    /// ECMA-376 §17.4.21 `<w:tcPr><w:hideMark>`: the cell's end-of-cell mark
+    /// does not count toward the row height. Omitted when false.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub hide_mark: bool,
 }
 
 #[derive(Serialize, Debug, Clone, Default)]

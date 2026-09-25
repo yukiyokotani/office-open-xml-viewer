@@ -343,6 +343,7 @@ fn project_table(
                     margins: Some(margin_wire(margins)),
                 },
                 text_direction: text_direction.map(str::to_owned),
+                hide_mark: source.hide_mark,
             });
         }
         let height = planned.source.height;
