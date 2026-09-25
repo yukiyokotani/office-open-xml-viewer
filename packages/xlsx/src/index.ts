@@ -4,7 +4,6 @@ export {
   type RenderViewportToBitmapOptions,
 } from './workbook.js';
 export { XlsxViewer, XlsxSheetViewer } from './viewer.js';
-export type { LegacyXlsFontMeasurement, LegacyXlsNormalFont } from '@silurus/ooxml-core/internal/legacy-xls-source';
 // Resolved list-validation values (reachable via XlsxWorkbook.resolveValidationList).
 export type { ResolvedList } from './validation-list.js';
 export type {
@@ -133,11 +132,22 @@ export { type HyperlinkTarget, openExternalHyperlink } from '@silurus/ooxml-core
 // (ECMA-376 §18.4.8). Exported so headless callers that parse a Worksheet
 // directly (for example a bounded Node worksheet session) can concretize cell text.
 export { resolveSharedStrings } from './shared-strings.js';
+// Application-supplied model sources (LoadOptions.modelSources): the
+// format-generic contract for opening input that is not an OOXML package.
+export type {
+  ModelSource,
+  ModelSourceConfig,
+  ModelSourceConfigValue,
+  ModelSourceLoad,
+  ModelSourceModule,
+  ModelSourceModuleDescriptor,
+  ModelSourceTarget,
+  OpenedModelSource,
+} from '@silurus/ooxml-core';
 // Typed load-time error surfaced by XlsxWorkbook.load (e.g. a password-protected
 // or legacy-binary .xls file). Re-exported so `@silurus/ooxml/xlsx` consumers can
 // narrow on `err.code`.
 export {
-  LegacyOfficeConversionError,
   OoxmlError,
   OoxmlDecodedImageLimitError,
   OoxmlResourceLimitError,
@@ -147,18 +157,6 @@ export {
   type OoxmlDecodedImageLimitMetric,
   type DecodedImageBudgetStrategy,
   type ImageResourceOptions,
-  type LegacyOfficeConversionFailureReason,
-  type LegacyOfficeConversionInput,
-  type LegacyOfficeConversionOptions,
-  type LegacyOfficeConversionRecord,
-  type LegacyOfficeConversionResult,
-  type LegacyOfficeConverter,
-  type LegacyOfficeFormatConversionOptions,
-  type LegacyPptDirectConversionOptions,
-  type LegacyPptDirectSourceDescriptor,
-  type LegacyXlsDirectConversionOptions,
-  type LegacyXlsDirectSourceDescriptor,
-  type LegacyOfficeFormat,
   type OoxmlErrorCode,
   type OoxmlErrorStage,
   type OoxmlFormat,

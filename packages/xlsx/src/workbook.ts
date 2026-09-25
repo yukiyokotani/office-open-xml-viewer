@@ -14,7 +14,11 @@ import {
   isHTMLCanvas,
   dropDecodedBitmapCache,
   dropSvgImageCache,
+  resolveOoxmlContainer,
   toArrayBuffer,
+  beginModelSourceLoad,
+  selectModelSource,
+  type AdmittedModelSourceLoad,
   type LoadOptions as CoreLoadOptions,
   type MathRenderer,
   type ChartThreeDRenderer,
@@ -25,11 +29,6 @@ import {
   type OoxmlResourceMetrics,
   workerRendererDescriptors,
 } from '@silurus/ooxml-core';
-import { resolveXlsWorkbookInput } from '@silurus/ooxml-core/internal/legacy-office-conversion';
-import type {
-  LegacyXlsDirectSourceDescriptor,
-  LegacyXlsFontMeasurement,
-} from '@silurus/ooxml-core/internal/legacy-xls-source';
 import {
   deserializeWorkerError,
   disposeRejectedLoad,
@@ -81,7 +80,8 @@ import {
   isXlsxWorksheetPullResponse,
   XlsxWorksheetPullClient,
 } from './worksheet-pull-client.js';
-import { applyAutoRowHeights, bindXlsxOfficeFontRoutes, bindXlsxWorksheetOfficeFontRoutes, inheritSheetRenderCache, getGridGeometryForWorksheet, pinXlsxGridGeometry } from './renderer.js';
+import { applyAutoRowHeights, bindXlsxOfficeFontRoutes, bindXlsxWorksheetOfficeFontRoutes, computeMdw, inheritSheetRenderCache, getGridGeometryForWorksheet, pinXlsxGridGeometry } from './renderer.js';
+import { respondToHostLayoutRequest } from './internal/host-layout.js';
 import {
   assertDelimitedTextSourceBytes,
   resolveDelimitedTextOptions,
@@ -119,11 +119,17 @@ interface RetainedFontSet {
 /** Options for {@link XlsxWorkbook.load}. Extends the shared load-options type
  *  from `@silurus/ooxml-core` (`useGoogleFonts`, `resourceLimits`, the
  *  deprecated `maxZipEntryBytes` alias, and `math`) with worker rendering. */
+/** Parse-request fields for an application-selected model source. */
+function modelSourceFields(
+  load: AdmittedModelSourceLoad | undefined,
+): { source?: AdmittedModelSourceLoad['module']; sourceTransfer?: readonly Transferable[] } {
+  if (!load) return {};
+  return load.transfer.length > 0
+    ? { source: load.module, sourceTransfer: load.transfer }
+    : { source: load.module };
+}
+
 export interface LoadOptions extends CoreLoadOptions {
-  /** Measure the actual Normal-style font for direct XLS column geometry.
-   *  The legacy XLS source supplies the default when this is omitted;
-   *  pictures and charts are omitted when the font cannot be measured. */
-  measureLegacyXlsNormalFont?: LegacyXlsFontMeasurement;
   /**
    * 'main' (default): parse in a worker, render on the main thread (current
    * behaviour). 'worker': parse AND render inside the worker; use
@@ -202,10 +208,6 @@ export class XlsxWorkbook {
    * on main, so this latch is the document-level poison boundary for every
    * later public operation on the same workbook instance. */
   private resourceFailure: OoxmlResourceLimitError | null = null;
-  private legacyXlsSignalCleanup: () => void = () => undefined;
-  private destroyed = false;
-  private legacyXlsMeasurementCleanup: () => void = () => undefined;
-  private legacyXlsMaximumDigitWidth: number | undefined;
 
   private constructor(
     worker: Worker | null,
@@ -230,6 +232,20 @@ export class XlsxWorkbook {
       toError: (res) =>
         'type' in res && res.type === 'error' ? deserializeWorkerError(res) : undefined,
       onUnsolicited: (res) => {
+        // A model source's parse worker asks the page, which owns the
+        // renderer in this mode, to measure its Normal font (host-layout.ts).
+        if (respondToHostLayoutRequest(
+          (message) => worker.postMessage(message),
+          res,
+          (font) => computeMdw(
+            font.family,
+            font.sizePt,
+            undefined,
+            this.googleSubstitutes,
+            font.bold ? 700 : 400,
+            font.italic ? 'italic' : 'normal',
+          ),
+        )) return;
         respondToWorkerSvgDecodeRequest(
           (message, transfer) => (
             worker.postMessage as (value: unknown, transfer?: Transferable[]) => void
@@ -377,14 +393,16 @@ export class XlsxWorkbook {
     } else {
       buffer = source;
     }
-    const resolvedInput = await resolveXlsWorkbookInput(
-      buffer,
-      opts.legacyConversion,
-      opts.password,
-    );
-    buffer = toArrayBuffer(resolvedInput.bytes);
-    const nativeSource = resolvedInput.kind === 'legacy-xls' ? resolvedInput.source : undefined;
-    const nativeSignal = resolvedInput.kind === 'legacy-xls' ? resolvedInput.signal : undefined;
+    // An application-supplied model source claims its input from the raw bytes
+    // before OOXML container resolution; without `modelSources` nothing here
+    // runs and the OOXML path is unchanged.
+    let sourceLoad: AdmittedModelSourceLoad | undefined;
+    if (opts.modelSources !== undefined) {
+      const selected = selectModelSource(opts.modelSources, 'xlsx', new Uint8Array(buffer));
+      if (selected) sourceLoad = beginModelSourceLoad(selected, 'xlsx');
+    }
+    try {
+    if (!sourceLoad) buffer = toArrayBuffer(await resolveOoxmlContainer(buffer, opts.password));
     const preserveCallerBuffer = buffer === callerBuffer;
     metrics.setSourceBytes(buffer.byteLength);
     metrics.checkpoint('container ready');
@@ -396,26 +414,16 @@ export class XlsxWorkbook {
         : new InlineWorker();
     let wb: XlsxWorkbook | undefined;
     try {
-      wb = new XlsxWorkbook(worker, mode, opts.wasmUrl, nativeSource === undefined);
-      // The legacy source's host services own the measurement policy,
-      // including its default; resolve it once for this load.
-      const hostServices = resolvedInput.kind === 'legacy-xls' ? resolvedInput.hostServices : undefined;
-      const measureLegacyXlsNormalFont = nativeSource
-        ? hostServices?.resolve(opts.measureLegacyXlsNormalFont)
-        : undefined;
-      if (hostServices && measureLegacyXlsNormalFont) {
-        wb.legacyXlsMeasurementCleanup = hostServices.attach(worker, measureLegacyXlsNormalFont);
-      }
+      wb = new XlsxWorkbook(worker, mode, opts.wasmUrl, sourceLoad === undefined);
       wb.metrics = metrics;
-      await wb.bindLegacyXlsSignal(wb._load(
+      await wb._load(
         buffer,
         opts,
         resourceOptions.policy,
         (usage) => metrics.observeUsage(usage),
         preserveCallerBuffer,
-        nativeSource,
-        measureLegacyXlsNormalFont !== undefined,
-      ), nativeSignal);
+        sourceLoad,
+      );
       metrics.checkpoint('workbook index ready');
       metrics.succeed({ sheets: wb.sheetCount });
       return wb;
@@ -423,6 +431,9 @@ export class XlsxWorkbook {
       const rejectedWorkbook = wb;
       disposeRejectedLoad(worker, rejectedWorkbook ? () => rejectedWorkbook.destroy() : undefined);
       throw error;
+    }
+    } finally {
+      sourceLoad?.release();
     }
     } catch (error) {
       metrics.fail(error);
@@ -440,8 +451,7 @@ export class XlsxWorkbook {
     resourcePolicy: NormalizedOoxmlResourcePolicy = normalizeResourcePolicy(opts),
     onUsage?: (usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => void,
     preserveCallerBuffer = false,
-    nativeSource?: LegacyXlsDirectSourceDescriptor,
-    measureLegacyXlsNormalFont = false,
+    sourceLoad?: AdmittedModelSourceLoad,
   ): Promise<void> {
     const bridge = this.requireBridge();
     this.resourceFailure = null;
@@ -505,18 +515,16 @@ export class XlsxWorkbook {
               useGoogleFonts: !!opts.useGoogleFonts,
               cjkFallback: this.cjkFallback,
               renderers: rendererDescriptors,
-              source: nativeSource,
-              measureLegacyXlsNormalFont,
+              ...modelSourceFields(sourceLoad),
             } satisfies RenderWorkerRequest)
           : ({
               type: 'parse',
               id,
               data: workerData,
               resourcePolicy,
-              source: nativeSource,
-              measureLegacyXlsNormalFont,
+              ...modelSourceFields(sourceLoad),
             } satisfies WorkerRequest),
-      [workerData],
+      [workerData, ...(sourceLoad?.transfer ?? [])],
       { timeoutMs: opts.workerTimeoutMs },
     );
     // Both modes carry the light, workbook-level ParsedWorkbook back, so
@@ -525,15 +533,15 @@ export class XlsxWorkbook {
     if (this._mode === 'worker') {
       const response = parsed as Extract<RenderWorkerResponse, { type: 'parsed' }>;
       this.parsedWorkbook = response.workbook;
-      this.legacyXlsMaximumDigitWidth = response.maximumDigitWidth;
       if (response.usage) onUsage?.(response.usage);
     } else {
-      const { workbookJson, usage } = parsed as Extract<WorkerResponse, { type: 'parsed' }>;
-      this.legacyXlsMaximumDigitWidth = (parsed as Extract<WorkerResponse, { type: 'parsed' }>).maximumDigitWidth;
+      const { workbookJson, usage, layoutMetrics } = parsed as Extract<WorkerResponse, { type: 'parsed' }>;
       if (usage) onUsage?.(usage);
-      this.parsedWorkbook = JSON.parse(
+      const decoded = JSON.parse(
         new TextDecoder().decode(new Uint8Array(workbookJson)),
       ) as ParsedWorkbook;
+      if (layoutMetrics) decoded.layoutMetrics = { maximumDigitWidth: layoutMetrics.maximumDigitWidth };
+      this.parsedWorkbook = decoded;
     }
     const parsedWorkbook = this.parsedWorkbook;
     if (!parsedWorkbook) throw new Error('XLSX worker returned no workbook metadata');
@@ -869,11 +877,11 @@ export class XlsxWorkbook {
       const mainOffice = typeof document !== 'undefined'
         ? this.retainedFontSets.get(document.fonts)?.loaded?.office : undefined;
       bindXlsxWorksheetOfficeFontRoutes(terminal, mainOffice?.routes, this.googleSubstitutes);
-      // A direct legacy XLS source supplies its measured Normal-font MDW;
-      // pin it after the font-route bind, which may invalidate geometry.
-      if (this.legacyXlsMaximumDigitWidth !== undefined) {
-        pinXlsxGridGeometry(terminal, this.legacyXlsMaximumDigitWidth);
-      }
+      // A model source's host layout fixed the Normal-font width before
+      // parsing; pin it after the font-route bind, which may invalidate
+      // geometry, so the grid keeps the width its anchors were resolved with.
+      const hostLayoutMdw = this.parsedWorkbook?.layoutMetrics?.maximumDigitWidth;
+      if (hostLayoutMdw !== undefined) pinXlsxGridGeometry(terminal, hostLayoutMdw);
       return terminal;
     } catch (error) {
       if (error instanceof OoxmlResourceLimitError) this.resourceFailure ??= error;
@@ -1104,7 +1112,7 @@ export class XlsxWorkbook {
         {
           ...renderOpts,
           authoritativeMdw: extracted.layoutMetrics?.maximumDigitWidth
-            ?? this.legacyXlsMaximumDigitWidth,
+            ?? this.parsedWorkbook?.layoutMetrics?.maximumDigitWidth,
           officeFontRoutes: targetFontSet
             ? this.retainedFontSets.get(targetFontSet)?.loaded?.office.routes
             : undefined,
@@ -1152,9 +1160,7 @@ export class XlsxWorkbook {
             viewport,
             opts: wireOpts,
             layoutMetrics: extracted.layoutMetrics
-              ?? (this.legacyXlsMaximumDigitWidth === undefined ? undefined : {
-                maximumDigitWidth: this.legacyXlsMaximumDigitWidth,
-              }),
+              ?? this.parsedWorkbook?.layoutMetrics,
             viewProjection: extracted.projection,
           }) satisfies RenderWorkerRequest,
         ));
@@ -1216,10 +1222,6 @@ export class XlsxWorkbook {
   }
 
   destroy(): void {
-    this.legacyXlsMeasurementCleanup?.();
-    this.legacyXlsMeasurementCleanup = () => undefined;
-    this.legacyXlsSignalCleanup?.();
-    this.destroyed = true;
     this.generation = (this.generation ?? 1) + 1;
     void this.worksheetPullClient?.cancelAll('closed').catch(() => undefined);
     this.worksheetPullClient = null;
@@ -1247,55 +1249,6 @@ export class XlsxWorkbook {
     dropSvgImageCache(this._fetchImage);
     this.rawParts.clear();
     this.queuedImageLoads?.clear();
-  }
-
-  /** @internal Transfer viewer-composed direct XLS signal cleanup to this owner. */
-  _retainLegacyXlsSignalCleanup(cleanup: () => void): void {
-    if (this.destroyed) {
-      cleanup();
-      return;
-    }
-    const releaseNativeListener = this.legacyXlsSignalCleanup;
-    let active = true;
-    this.legacyXlsSignalCleanup = () => {
-      if (!active) return;
-      active = false;
-      try {
-        releaseNativeListener?.();
-      } finally {
-        cleanup();
-      }
-    };
-  }
-
-  private bindLegacyXlsSignal<T>(pending: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
-    if (!signal) return pending;
-    this.legacyXlsSignalCleanup?.();
-    return new Promise<T>((resolve, reject) => {
-      let settled = false;
-      const cleanup = (): void => signal.removeEventListener('abort', onAbort);
-      const abortError = (): Error => {
-        const error = new Error('Legacy XLS workbook session was aborted');
-        error.name = 'AbortError';
-        return error;
-      };
-      const onAbort = (): void => {
-        this.legacyXlsSignalCleanup();
-        try { this.destroy(); } catch {}
-        if (!settled) reject(abortError());
-      };
-      this.legacyXlsSignalCleanup = () => {
-        cleanup();
-        this.legacyXlsSignalCleanup = () => undefined;
-      };
-      signal.addEventListener('abort', onAbort, { once: true });
-      pending.then((value) => { settled = true; resolve(value); }, (error: unknown) => {
-        settled = true;
-        this.legacyXlsSignalCleanup();
-        reject(error);
-      });
-      if (signal.aborted) onAbort();
-    });
   }
 
   private assertResourceHealthy(): void {

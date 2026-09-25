@@ -27,7 +27,8 @@
     },
     "./wasm": "./src/wasm/xlsx_parser.js",
     "./wasm-binary": "./src/wasm/xlsx_parser_bg.wasm",
-    "./internal/session": "./src/internal/session.ts"
+    "./internal/session": "./src/internal/session.ts",
+    "./internal/host-layout-measure": "./src/internal/host-layout-measure.ts"
   },
   "files": [
     "dist",
@@ -58,7 +59,6 @@
     "vite-plugin-wasm": "^3.6.0"
   },
   "dependencies": {
-    "@silurus/ooxml-core": "workspace:*",
-    "@silurus/ooxml-legacy-converter": "workspace:*"
+    "@silurus/ooxml-core": "workspace:*"
   }
 }

@@ -54,7 +54,6 @@ import { readXlsxArchiveBootstrap } from './internal/archive-bootstrap.js';
 import type { RenderWorkerRequest, RenderWorkerResponse } from './worker-protocol.js';
 import { isWorksheetPullCommand, WorksheetPullWorker } from './worksheet-pull-worker.js';
 import { WorkerWorksheetSourceOwner } from './internal/worker-worksheet-source.js';
-import { XLS_FONT_RESULT } from '@silurus/ooxml-legacy-converter/internal/xls-font-worker';
 
 // RB6: self-poison + auto-respawn. A trap during parse / per-sheet parse / image
 // read recycles the instance so the next workbook renders on clean linear
@@ -178,9 +177,6 @@ self.onmessage = async (e: MessageEvent<
 >) => {
   const req = e.data;
 
-  // Consumed by requestXlsFontMeasurement's listener, outside the correlated
-  // renderer protocol.
-  if ((req as { type?: unknown }).type === XLS_FONT_RESULT) return;
   if (isWorkerSvgDecodeResponse(req)) {
     svgDecodeClient.accept(req);
     return;
@@ -254,7 +250,7 @@ self.onmessage = async (e: MessageEvent<
       rawParts.clear();
       renderers = await loadWorkerRenderers(req.renderers);
       if (req.type === 'parseDelimitedText') {
-        source.closeLegacy();
+        source.closeModelSource();
         host.disposeArchive();
         archiveBacked = false;
         const { parseDelimitedWorksheet } = await delimitedTextModule;
@@ -277,11 +273,24 @@ self.onmessage = async (e: MessageEvent<
         return;
       }
       archiveBacked = true;
-      source.closeLegacy();
+      source.closeModelSource();
       if (req.source) {
         host.disposeArchive();
-        await source.openLegacy(
-          new Uint8Array(req.data), req.source, req.measureLegacyXlsNormalFont === true,
+        // This worker owns the renderer, so it measures the model source's
+        // Normal font with the same computeMdw that sizes the painted grid.
+        const { computeMdw } = await rendererModule;
+        await source.openModelSource(
+          new Uint8Array(req.data),
+          req.source,
+          (font) => computeMdw(
+            font.family,
+            font.sizePt,
+            undefined,
+            !!req.useGoogleFonts,
+            font.bold ? 700 : 400,
+            font.italic ? 'italic' : 'normal',
+          ),
+          req.sourceTransfer,
         );
       } else {
         if (ooxmlWasmInput === undefined) throw new Error('XLSX WASM input was not configured');
@@ -304,17 +313,14 @@ self.onmessage = async (e: MessageEvent<
         () => JSON.parse(new TextDecoder().decode(
           source.execute((archive) => archive.parse()),
         )) as ParsedWorkbook,
-        () => source.kind === 'legacy-xls'
-          ? (() => { throw new Error('xlsx resource usage is unavailable'); })()
-          : host.run(() => source.ooxml('resource usage').resource_usage()),
+        () => source.resourceUsage(),
       );
       workbook = bootstrap.workbook;
+      const maximumDigitWidth = source.maximumDigitWidth;
+      if (maximumDigitWidth !== undefined) workbook.layoutMetrics = { maximumDigitWidth };
       cjkFallback = xlsxCjkFallback(workbook, cjkFallback);
       startFontLoad(workbook, !!req.useGoogleFonts);
-      post({
-        type: 'parsed', id, workbook, usage: bootstrap.usage,
-        maximumDigitWidth: source.maximumDigitWidth,
-      });
+      post({ type: 'parsed', id, workbook, usage: bootstrap.usage });
       return;
     }
     if (req.type === 'renderViewport') {
@@ -372,7 +378,8 @@ self.onmessage = async (e: MessageEvent<
         // viewer's MDW through the render bind: seeding GridGeometry before
         // that bind is ineffective because the worker's FontFaceSet can
         // invalidate it on first use.
-        { ...renderOpts, authoritativeMdw: req.layoutMetrics?.maximumDigitWidth ?? source.maximumDigitWidth,
+        { ...renderOpts, authoritativeMdw: req.layoutMetrics?.maximumDigitWidth
+          ?? workbook?.layoutMetrics?.maximumDigitWidth,
           officeFontRoutes, googleSubstitutes, fetchImage: getImage },
         svgDecodeClient.decode,
       );
@@ -396,10 +403,12 @@ self.onmessage = async (e: MessageEvent<
     if (req.type === 'resourceUsage') {
       const archive = source.cursor();
       if (!archive) throw new Error('Workbook not loaded');
-      const usage = host.run(() => decodeOoxmlResourceUsage(
-        source.ooxml('resource usage').resource_usage(),
-      ));
-      post({ type: 'resourceUsage', id, usage });
+      const bytes = source.resourceUsage();
+      post({
+        type: 'resourceUsage',
+        id,
+        usage: bytes === undefined ? undefined : decodeOoxmlResourceUsage(bytes),
+      });
       return;
     }
     if (req.type === 'toMarkdown') {
@@ -407,7 +416,7 @@ self.onmessage = async (e: MessageEvent<
       // worker already holds (same source as worker.ts's parse-mode arm).
       const archive = source.cursor();
       if (!archive) throw new Error('Workbook not loaded');
-      const markdown = host.run(() => source.ooxml('markdown').to_markdown());
+      const markdown = source.toMarkdown();
       post({ type: 'markdownRendered', id, markdown });
       return;
     }
@@ -415,7 +424,7 @@ self.onmessage = async (e: MessageEvent<
   } catch (err) {
     if (req.type === 'openSheetSession') worksheetPull.abandonOpen(req.sessionId);
     if (req.type === 'parse') {
-      try { source.closeLegacy(); } catch {}
+      try { source.closeModelSource(); } catch {}
     }
     try {
       post({ type: 'error', id, ...serializeWorkerError(err) });

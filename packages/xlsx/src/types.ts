@@ -1113,6 +1113,13 @@ export interface ParsedWorkbook {
   workbook: Workbook;
   styles: Styles;
   sharedStrings: SharedString[];
+  /**
+   * Host layout settled before parsing for a model-source workbook whose
+   * archive asked the host to measure its Normal font (ECMA-376 §18.3.1.13
+   * maximum digit width, in CSS pixels). Absent for OOXML packages, whose grid
+   * measures the Normal font when it binds a worksheet.
+   */
+  layoutMetrics?: { maximumDigitWidth: number };
 }
 
 export interface ViewportRange {
@@ -1209,8 +1216,9 @@ export type WorkerRequest =
       id: number;
       data: ArrayBuffer;
       resourcePolicy: NormalizedOoxmlResourcePolicy;
-      source?: import('@silurus/ooxml-core/internal/legacy-xls-source').LegacyXlsDirectSourceDescriptor;
-      measureLegacyXlsNormalFont?: boolean;
+      /** Application-selected model source (LoadOptions.modelSources). */
+      source?: import('@silurus/ooxml-core').ModelSourceModuleDescriptor;
+      sourceTransfer?: readonly Transferable[];
     }
   | ({ type: 'openSheetSession'; id: number; sheetIndex: number; sheetName: string } &
       PullSessionIdentity<number>)
@@ -1235,10 +1243,12 @@ export type WorkerResponse =
       id: number;
       workbookJson: ArrayBuffer;
       usage?: OoxmlResourceUsageSnapshot;
-      maximumDigitWidth?: number;
+      /** Host layout settled for a model source (see ParsedWorkbook.layoutMetrics). */
+      layoutMetrics?: { maximumDigitWidth: number };
     }
   | ({ type: 'sheetSessionOpened'; id: number } & PullSessionIdentity<number>)
   | { type: 'imageExtracted'; id: number; bytes: ArrayBuffer }
-  | { type: 'resourceUsage'; id: number; usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot }
+  // `usage` is absent when the loaded model source has no ZIP accounting.
+  | { type: 'resourceUsage'; id: number; usage?: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot }
   | { type: 'markdownRendered'; id: number; markdown: string }
   | ({ type: 'error'; id: number } & WorkerErrorPayload);

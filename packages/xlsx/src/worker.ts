@@ -13,7 +13,7 @@ import type { WorkerRequest, WorkerResponse } from './types.js';
 import { readXlsxArchiveBootstrap } from './internal/archive-bootstrap.js';
 import { isWorksheetPullCommand, WorksheetPullWorker } from './worksheet-pull-worker.js';
 import { WorkerWorksheetSourceOwner } from './internal/worker-worksheet-source.js';
-import { XLS_FONT_RESULT } from '@silurus/ooxml-legacy-converter/internal/xls-font-worker';
+import { isHostLayoutResult, requestHostLayoutFromPage } from './internal/host-layout.js';
 
 // RB6: a `panic = "abort"` build traps (not unwinds) on a Rust panic / OOM /
 // stack overflow, poisoning this worker's single WASM instance so every LATER
@@ -50,9 +50,9 @@ const worksheetPull = new WorksheetPullWorker(
 self.onmessage = async (e: MessageEvent<WorkerRequest | PullSessionCommand<number>>) => {
   const req = e.data;
 
-  // The disposable direct-XLS measurement bridge owns this uncorrelated
-  // response. It must never enter the ordinary request-id dispatcher.
-  if ((req as { type?: unknown }).type === XLS_FONT_RESULT) return;
+  // A model source's host-layout reply is consumed by its own listener
+  // (requestHostLayoutFromPage) and never enters the request-id dispatcher.
+  if (isHostLayoutResult(req)) return;
 
   if (isWorksheetPullCommand(req)) {
     await worksheetPull.dispatchSafely(req, (response, transfer) =>
@@ -99,11 +99,15 @@ self.onmessage = async (e: MessageEvent<WorkerRequest | PullSessionCommand<numbe
       source.execute((archive) => archive.assert_healthy());
     }
     if (req.type === 'parse') {
-      source.closeLegacy();
+      source.closeModelSource();
       if (req.source) {
         host.disposeArchive();
-        await source.openLegacy(
-          new Uint8Array(req.data), req.source, req.measureLegacyXlsNormalFont === true,
+        // The renderer lives on the page in this mode, so the page measures.
+        await source.openModelSource(
+          new Uint8Array(req.data),
+          req.source,
+          (font) => requestHostLayoutFromPage(self as unknown as Parameters<typeof requestHostLayoutFromPage>[0], font),
+          req.sourceTransfer,
         );
       } else {
         if (ooxmlWasmInput === undefined) throw new Error('XLSX WASM input was not configured');
@@ -126,14 +130,13 @@ self.onmessage = async (e: MessageEvent<WorkerRequest | PullSessionCommand<numbe
       // here. The single decode + JSON.parse happens on main.
       const { workbook: json, usage } = readXlsxArchiveBootstrap(
         () => source.execute((current) => current.parse()),
-        () => source.kind === 'legacy-xls'
-          ? (() => { throw new Error('xlsx resource usage is unavailable'); })()
-          : host.run(() => source.ooxml('resource usage').resource_usage()),
+        () => source.resourceUsage(),
       );
       const workbookJson = json.buffer as ArrayBuffer;
+      const maximumDigitWidth = source.maximumDigitWidth;
       const res: WorkerResponse = {
         type: 'parsed', id, workbookJson, usage,
-        maximumDigitWidth: source.maximumDigitWidth,
+        ...(maximumDigitWidth === undefined ? {} : { layoutMetrics: { maximumDigitWidth } }),
       };
       (self.postMessage as (message: unknown, transfer: Transferable[]) => void)(res, [
         workbookJson,
@@ -158,9 +161,8 @@ self.onmessage = async (e: MessageEvent<WorkerRequest | PullSessionCommand<numbe
 
     if (req.type === 'resourceUsage') {
       if (!archive) throw new Error('No xlsx loaded');
-      const usage = host.run(() => decodeOoxmlResourceUsage(
-        source.ooxml('resource usage').resource_usage(),
-      ));
+      const bytes = source.resourceUsage();
+      const usage = bytes === undefined ? undefined : decodeOoxmlResourceUsage(bytes);
       self.postMessage({ type: 'resourceUsage', id, usage } satisfies WorkerResponse);
       return;
     }
@@ -170,7 +172,7 @@ self.onmessage = async (e: MessageEvent<WorkerRequest | PullSessionCommand<numbe
       // Project the already-opened handle to markdown (no re-copy of the file,
       // no re-scan of the central directory). A plain string has no transferable
       // backing, so it is posted by structured clone like any other value.
-      const markdown = host.run(() => source.ooxml('markdown').to_markdown());
+      const markdown = source.toMarkdown();
       const res: WorkerResponse = { type: 'markdownRendered', id, markdown };
       self.postMessage(res);
       return;
@@ -179,7 +181,7 @@ self.onmessage = async (e: MessageEvent<WorkerRequest | PullSessionCommand<numbe
   } catch (err) {
     if (req.type === 'openSheetSession') worksheetPull.abandonOpen(req.sessionId);
     if (req.type === 'parse') {
-      try { source.closeLegacy(); } catch {}
+      try { source.closeModelSource(); } catch {}
     }
     const res: WorkerResponse = { type: 'error', id, ...serializeWorkerError(err) };
     try {

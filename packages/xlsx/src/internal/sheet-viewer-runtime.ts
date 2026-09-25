@@ -16,7 +16,7 @@ export class SheetAcquisition {
   }
 
   async replace(
-    load: (signal: AbortSignal) => Promise<XlsxWorkbook>,
+    load: () => Promise<XlsxWorkbook>,
     beforeCommit?: (previous: XlsxWorkbook | null) => void,
   ): Promise<XlsxWorkbook | null> {
     return await this.owner.replace(load, beforeCommit);

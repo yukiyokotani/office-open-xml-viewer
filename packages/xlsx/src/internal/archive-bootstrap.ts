@@ -16,13 +16,15 @@ export interface XlsxArchiveBootstrap<TWorkbook> {
  */
 export function readXlsxArchiveBootstrap<TWorkbook>(
   readWorkbook: () => TWorkbook,
-  readUsage: () => Uint8Array,
+  readUsage: () => Uint8Array | undefined,
 ): XlsxArchiveBootstrap<TWorkbook> {
   const workbook = readWorkbook();
   try {
+    // `undefined`: the loaded model source has no ZIP accounting.
+    const usage = readUsage();
     return {
       workbook,
-      usage: decodeOoxmlResourceUsage(readUsage()),
+      usage: usage === undefined ? undefined : decodeOoxmlResourceUsage(usage),
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
