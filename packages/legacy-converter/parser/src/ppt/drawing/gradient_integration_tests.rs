@@ -167,6 +167,7 @@ fn presentation(span: RecordSpan) -> persist::OwnedPresentation {
         outline_slide_numbers: vec![Vec::new()],
         first_slide_number: 1,
         text_masters: vec![None],
+            metro_themes: vec![None],
         document_text_axes: None,
         fonts: Vec::new(),
         schemes: vec![None],

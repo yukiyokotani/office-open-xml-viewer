@@ -11,7 +11,7 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 fuzzing = []
-direct-ppt = ["dep:js-sys", "dep:serde_json"]
+direct-ppt = ["dep:js-sys", "dep:serde_json", "dep:pptx-parser"]
 direct-xls = ["dep:js-sys", "dep:serde", "dep:serde_json"]
 direct-doc = ["dep:docx-model", "dep:serde", "dep:serde_json"]
 inspection = ["direct-ppt"]
@@ -38,6 +38,9 @@ quick-xml = { workspace = true }
 roxmltree = { workspace = true }
 serde = { workspace = true, optional = true }
 pptx-model = { workspace = true }
+# Direct PPT parses alternative shape XML with the ordinary PPTX shape parser,
+# without its WASM entry points.
+pptx-parser = { path = "../../pptx/parser", default-features = false, optional = true }
 ooxml-common = { workspace = true }
 xlsx-model = { workspace = true }
 docx-model = { workspace = true, optional = true }

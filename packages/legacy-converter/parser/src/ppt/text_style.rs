@@ -18,6 +18,9 @@ pub(super) struct Context<'a> {
     pub ruler_tabs: Option<ruler::Tabs<'a>>,
     pub style9: Option<&'a [u8]>,
     pub auto_number: Option<auto_number::Number>,
+    /// Direct model only: record a glyph effect the model cannot express
+    /// here instead of rejecting, for a caller with an alternative source.
+    pub deferred_effect: Option<&'a std::cell::Cell<Option<&'static str>>>,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]

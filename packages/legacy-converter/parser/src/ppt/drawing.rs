@@ -553,6 +553,11 @@ struct PropertiesStorage<T> {
     font_direction: Option<u32>,
     /// MS-ODRAW 2.3.21.15 fFitShapeToText (honored only with its use bit).
     fit_shape_to_text: bool,
+    /// MS-ODRAW 2.3.4.41 metroBlob: the alternative shape XML package, adopted
+    /// only when it agrees with the binary shape (see `ppt::metro`). A second
+    /// copy makes the alternative ambiguous and it is never adopted.
+    metro: Option<T>,
+    metro_ambiguous: bool,
 }
 type Properties<'a> = PropertiesStorage<&'a [u8]>;
 type SpannedProperties = PropertiesStorage<ByteSpan>;
@@ -585,6 +590,8 @@ impl<T> Default for PropertiesStorage<T> {
             text_flow: None,
             font_direction: None,
             fit_shape_to_text: false,
+            metro: None,
+            metro_ambiguous: false,
         }
     }
 }
@@ -595,6 +602,13 @@ impl<T: Default + Clone> PropertiesStorage<T> {
         }
         if opid == 0x013f && complex.is_none() {
             self.blip_booleans(value)?;
+        }
+        if opid & 0x3fff == 0x03a9 {
+            if let Some(complex) = complex {
+                if self.metro.replace(complex).is_some() {
+                    self.metro_ambiguous = true;
+                }
+            }
         }
         Ok(())
     }
@@ -1455,6 +1469,7 @@ impl Writer<'_, '_> {
                                 None
                             },
                             auto_number: None,
+                            deferred_effect: None,
                         },
                         &mut self.output,
                         self.remaining,

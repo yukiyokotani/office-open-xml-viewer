@@ -72,6 +72,7 @@ pub(super) struct Resolver {
     masters: BTreeMap<u32, Entry>,
     cache: BTreeMap<u32, Option<Scheme>>,
     text_styles: BTreeMap<u32, std::rc::Rc<text_style::Master>>,
+    metro_themes: BTreeMap<u32, std::rc::Rc<metro::Theme>>,
     backgrounds: BTreeMap<u32, Option<drawing::SpannedBackground>>,
     background_cache: BTreeMap<u32, Option<drawing::SpannedBackground>>,
     records: BTreeMap<u32, RecordSpan>,
@@ -94,6 +95,7 @@ impl Resolver {
         let mut masters = BTreeMap::new();
         let defaults = text_style::document_defaults(children, budget)?;
         let mut text_styles = BTreeMap::new();
+        let mut metro_themes = BTreeMap::new();
         let mut backgrounds = BTreeMap::new();
         let mut master_records = Vec::new();
         if let Some(list) = lists.first() {
@@ -129,6 +131,9 @@ impl Resolver {
                 master_records.push((id, record_span));
                 if record.kind == 1016 {
                     let records = parse_records(record.payload, budget)?;
+                    if let Some(theme) = metro::master_theme(&records) {
+                        metro_themes.insert(id, std::rc::Rc::new(theme));
+                    }
                     text_styles.insert(
                         id,
                         std::rc::Rc::new(text_style::Master::parse(
@@ -146,6 +151,7 @@ impl Resolver {
             masters,
             cache: BTreeMap::new(),
             text_styles,
+            metro_themes,
             backgrounds,
             background_cache: BTreeMap::new(),
             records: master_records.iter().cloned().collect(),
@@ -283,6 +289,35 @@ impl Resolver {
                 return Ok(Some(style.clone()));
             }
             parent = e.main_parent;
+        }
+        Ok(None)
+    }
+    /// The main master's round-trip theme for alternative shape XML, if any.
+    pub fn metro_theme(
+        &self,
+        slide: Record<'_>,
+        budget: &mut usize,
+    ) -> Result<Option<std::rc::Rc<metro::Theme>>, String> {
+        let mut parent = entry(slide, budget)?.main_parent;
+        let mut path = Vec::new();
+        while let Some(id) = parent {
+            *budget = budget
+                .checked_sub(1)
+                .ok_or_else(|| unsupported("PowerPoint theme master work budget exceeded"))?;
+            if path.len() >= MAX_DEPTH || path.contains(&id) {
+                return Err(unsupported(
+                    "cyclic or excessive PowerPoint theme master inheritance",
+                ));
+            }
+            path.push(id);
+            if let Some(theme) = self.metro_themes.get(&id) {
+                return Ok(Some(theme.clone()));
+            }
+            parent = self
+                .masters
+                .get(&id)
+                .ok_or_else(|| unsupported("unresolved PowerPoint theme master"))?
+                .main_parent;
         }
         Ok(None)
     }
