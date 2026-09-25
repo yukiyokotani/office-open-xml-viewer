@@ -1943,7 +1943,11 @@ mod tests {
         };
         assert!(matches!(
             &shape.fill,
-            Some(Fill::Image { rot_with_shape: Some(false), tile: Some(_), .. })
+            Some(Fill::Image {
+                rot_with_shape: Some(false),
+                tile: Some(_),
+                ..
+            })
         ));
         // pib_complex names a linked file rather than a BLIP.
         let mut linked = properties(&[(0xc104, 4)]);

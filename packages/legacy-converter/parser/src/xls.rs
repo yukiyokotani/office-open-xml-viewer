@@ -725,8 +725,7 @@ fn admit_direct_object(anchor: &drawing_anchors::DrawingAnchor) -> Result<(), St
                 if let Some(member) = anchor.members.iter().find(|member| {
                     !matches!(member.object_type, 2 | 6 | 9)
                         && !(member.object_type == 8 && member.picture.is_some())
-                })
-                {
+                }) {
                     return Err(unsupported(format!(
                         "grouped BIFF drawing object type {} is not projected",
                         member.object_type
