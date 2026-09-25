@@ -848,6 +848,16 @@ export function cssFontStack(
   const subPart = sub ? `"${sub}", ` : '';
   const googleAlias = googleCjkFontAlias(authoredFamily);
   const aliasPart = googleAlias ? `"${googleAlias}", ` : '';
+  // macOS exposes the same Yu Gothic face to Canvas as "YuGothic". A theme
+  // naming it "Yu Gothic" otherwise falls through to Noto even with the
+  // Office face installed. An Office PDF control using that explicit theme
+  // reproduced the reference glyphs; Canvas with this local family name
+  // reduced the difference, while MS Gothic and an unavailable theme face
+  // retained their normal fallback. Keep the authored name first so Windows
+  // and embedded font routing still take precedence.
+  const localAliasPart = authoredFamily.toLowerCase() === 'yu gothic'
+    ? '"YuGothic", '
+    : '';
   // Arabic faces lead with script fallbacks only for Arabic runs.
   const arabicFamilies = generic === 'serif'
     ? ['Noto Naskh Arabic', 'Noto Sans Arabic']
@@ -867,8 +877,8 @@ export function cssFontStack(
   const nonCjk = variant === 'serif' ? NON_CJK_SERIF_FALLBACKS : NON_CJK_SANS_FALLBACKS;
   const nonCjkPart = `${quoteAll(nonCjk)}, `;
   return authoredCjk
-    ? `"${normalized}", ${subPart}${aliasPart}${cjkPart}${nonCjkPart}${arabicPart}${generic}`
-    : `"${normalized}", ${subPart}${aliasPart}${nonCjkPart}${cjkPart}${arabicPart}${generic}`;
+    ? `"${normalized}", ${subPart}${localAliasPart}${aliasPart}${cjkPart}${nonCjkPart}${arabicPart}${generic}`
+    : `"${normalized}", ${subPart}${localAliasPart}${aliasPart}${nonCjkPart}${cjkPart}${arabicPart}${generic}`;
 }
 
 /**
@@ -4664,9 +4674,12 @@ export function renderTextBody(
       // Percentage spacing scales this renderer's PowerPoint-compatible natural
       // line box (ECMA-376 §21.1.2.2.5/.11 defines the authored percentage;
       // Office output supplies the line-box compatibility behaviour). A positive
-      // a:tr@h remains a minimum: a lone terminal line may fit by its glyph box,
-      // while multi-line content must retain every painted line box. Neither
-      // path substitutes the font's design box for the baseline pitch.
+      // a:tr@h remains a minimum. A PowerPoint table control with 16pt text,
+      // 120% lnSpc and 8.5pt vertical cell margins grows a 36.85pt row;
+      // changing only lnSpc to 100% or the margins to zero does not. Explicit
+      // percentage spacing therefore consumes the painted natural line box
+      // even for one final line. Omitted lnSpc keeps its glyph-box exception
+      // in a positive row. Neither path uses a substituted font's design box.
       const naturalSingle = maxSizePx * 1.2;
       const useResolvedFontMetrics = isSpAutoFit && resolvedFontLine > naturalSingle;
       // A live resolved font box describes containment, not baseline advance.
@@ -4679,8 +4692,6 @@ export function renderTextBody(
       // itself evidence that PowerPoint grows the authored minimum. An explicit
       // percentage, however, is part of the authored content extent, and every
       // line in a multi-line body consumes the painted line box.
-      const isFinalBodyLine = paraIdx === body.paragraphs.length - 1 && isLast;
-      const isOnlyBodyLine = body.paragraphs.length === 1 && lines.length === 1;
       let paintedLineHeight: number;
       if (para.spaceLine) {
         if (para.spaceLine.type === 'pct') {
@@ -4695,8 +4706,6 @@ export function renderTextBody(
       if (measureOnly && !isSpAutoFit && !measureNaturalLineSpacing) {
         if (!para.spaceLine) {
           lineHeight = maxSizePx;
-        } else if (para.spaceLine.type === 'pct' && isFinalBodyLine && isOnlyBodyLine) {
-          lineHeight = maxSizePx * (para.spaceLine.val / 100000);
         }
       }
       // PowerPoint retains its established percentage-line advance, but seats

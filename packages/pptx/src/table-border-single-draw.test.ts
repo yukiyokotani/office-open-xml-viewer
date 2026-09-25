@@ -202,9 +202,41 @@ describe('PowerPoint table-cell paragraph boundaries', () => {
 });
 
 describe('DrawingML <a:tbl> — shared interior gridline drawn once (spec-silent)', () => {
+  it('grows a positive header row for explicit percentage line spacing and cell margins', () => {
+    // PowerPoint PDF of a table with 16pt text, 36.85pt header minimum,
+    // 8.5pt top/bottom margins and 120% lnSpc grows the header. The same
+    // table at 100% lnSpc, or with zero vertical margins, keeps the minimum.
+    const boundary = (pct: number, marginPt: number): number => {
+      const textBody = {
+        verticalAnchor: 'b', paragraphs: [{
+          alignment: 'ctr', marL: 0, marR: 0, indent: 0,
+          spaceBefore: null, spaceAfter: 300,
+          spaceLine: { type: 'pct', val: pct },
+          runs: [{ type: 'text', text: 'Header', fontSize: 16, fontFamily: 'Yu Gothic' }],
+          bullet: { type: 'none' }, eaLnBrk: true,
+        }],
+        defaultFontSize: null, defaultBold: null, defaultItalic: null,
+        lIns: 108000, rIns: 108000,
+        tIns: marginPt * EMU, bIns: marginPt * EMU,
+        wrap: 'square', vert: 'horz', autoFit: 'none',
+      } as unknown as TextBody;
+      const t = tableOf([
+        [cell({ textBody, borderB: ln() })],
+        [cell({ borderT: ln() })],
+      ], [200 * EMU]);
+      t.rows[0].height = 36.85 * EMU;
+      t.height = 60 * EMU; // authored frame exceeds the row minima
+      return render(t).find((s) => s.y1 === s.y2 && s.y1 > 0)?.y1 ?? -1;
+    };
+
+    expect(boundary(120000, 8.5) - boundary(100000, 8.5)).toBeCloseTo(4, 2);
+    expect(boundary(120000, 0)).toBeCloseTo(boundary(100000, 8.5), 2);
+  });
+
   it('does not grow an authored row from substituted-font design metrics', () => {
     // ECMA-376 §21.1.2.2.5/.11: 120% line spacing is based on the largest
-    // authored text size. 16pt * 120% + 3pt after + 2 * 8.5pt insets = 39.2pt,
+    // authored natural line box. The terminal 3pt spcAft is suppressed:
+    // 16pt * 120% natural * 120% authored + 2 * 8.5pt insets = 40.04pt,
     // so the authored 40.6pt row already fits. The old measure-only path used
     // Meiryo's ~1.596em design line box and moved this boundary down to 42.5pt.
     const textBody = {
@@ -233,9 +265,8 @@ describe('DrawingML <a:tbl> — shared interior gridline drawn once (spec-silent
   it('uses the natural 120% line box when table line spacing is omitted', () => {
     // ECMA-376 leaves omitted line spacing to the text font. Current
     // PowerPoint grows a zero-height table row from the natural single-line
-    // box: 16pt * 120% + 1pt top + 1pt bottom = 21.2pt. This is distinct from
-    // an authored `<a:spcPct val="120000"/>`, whose percentage base is the
-    // authored 16pt size rather than a second 120% multiplication.
+    // box: 16pt * 120% + 1pt top + 1pt bottom = 21.2pt. An authored
+    // `<a:spcPct val="120000"/>` scales that natural line box again.
     const textBody = {
       verticalAnchor: 'ctr',
       paragraphs: [{
