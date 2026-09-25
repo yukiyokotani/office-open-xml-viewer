@@ -1,4 +1,5 @@
 import type { Worksheet, Cell, WorksheetCellRange, CfStop, CfValue, Dxf, CfRule, CellFill, Border, DefinedName } from './types.js';
+import { dxfFontToggle } from './dxf-font.js';
 import { evalFormulaToBool } from './formula.js';
 import { buildCellCoordinateIndex } from './renderer-coordinate-index.js';
 
@@ -33,6 +34,14 @@ export interface CfContext {
 export interface CfResult {
   fill?: CellFill;
   fontColor?: string;
+  /** Font toggles from the matched rules' dxfs: `false` is an explicit off
+   *  that overrides the cell's formatting, `undefined` leaves it. CF is the
+   *  top formatting layer, so a renderer takes a defined value over the
+   *  cell/table/PivotTable toggle. Observed in Excel's PDF export: cell-style
+   *  bold/italic/underline/strike and a built-in table-style header's bold
+   *  print off under an explicit-off rule and stay under a rule whose font
+   *  omits them. The PivotTable-style case follows the same layering and
+   *  was not separately exported. */
   fontBold?: boolean;
   fontItalic?: boolean;
   fontUnderline?: boolean;
@@ -253,10 +262,14 @@ function applyDxfToResult(result: CfResult, dxf: Dxf | null | undefined): void {
   // second-guessing the fill's shape here.
   if (dxf.fill && !result.fill) result.fill = dxf.fill;
   if (dxf.font?.color && result.fontColor == null) result.fontColor = dxf.font.color;
-  if (dxf.font?.bold && result.fontBold == null) result.fontBold = true;
-  if (dxf.font?.italic && result.fontItalic == null) result.fontItalic = true;
-  if (dxf.font?.underline && result.fontUnderline == null) result.fontUnderline = true;
-  if (dxf.font?.strike && result.fontStrike == null) result.fontStrike = true;
+  // A font toggle is tri-state: an explicit off (`<b val="0"/>`) is a
+  // property the rule sets, so it both claims the property against
+  // lower-priority rules and turns off bold the cell formatting turns on;
+  // an omitted element leaves both alone (§18.8.14-15, §18.8.2).
+  result.fontBold ??= dxfFontToggle(dxf, 'bold');
+  result.fontItalic ??= dxfFontToggle(dxf, 'italic');
+  result.fontUnderline ??= dxfFontToggle(dxf, 'underline');
+  result.fontStrike ??= dxfFontToggle(dxf, 'strike');
   if (dxf.numFmt && result.numFmt == null) {
     result.numFmt = {
       numFmtId: dxf.numFmt.numFmtId,

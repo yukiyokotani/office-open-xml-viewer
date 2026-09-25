@@ -396,3 +396,22 @@ describe('rule priority — lower number wins per property', () => {
     expect(res.fill?.fgColor).toBe('#FF0000');
   });
 });
+
+describe('font toggles — explicit off is a set property (ECMA-376 §18.8.2)', () => {
+  it('a higher-priority explicit off claims every toggle over a lower-priority on', () => {
+    const font = { bold: false, italic: false, underline: false, strike: false, size: 11, color: null, name: null };
+    const off: Dxf = {
+      font, fill: null, border: null,
+      fontToggles: { bold: false, italic: false, underline: false, strike: false },
+    };
+    const on: Dxf = {
+      font: { ...font, bold: true, italic: true, underline: true, strike: true }, fill: null, border: null,
+      fontToggles: { bold: true, italic: true, underline: true, strike: true },
+    };
+    const high: CfRule = { type: 'cellIs', operator: 'greaterThan', formulas: ['0'], dxfId: 0, priority: 1 };
+    const low: CfRule = { type: 'cellIs', operator: 'greaterThan', formulas: ['0'], dxfId: 1, priority: 2 };
+    const ws = sheetFromColumn([5], [{ sqref: [fullColumnSqref(1)], rules: [low, high] }]);
+    const res = evaluateCf(numCell(0, 0, 5), 0, 0, compileCf(ws), [off, on]);
+    expect(res).toMatchObject({ fontBold: false, fontItalic: false, fontUnderline: false, fontStrike: false });
+  });
+});

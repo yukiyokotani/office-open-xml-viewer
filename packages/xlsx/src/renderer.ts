@@ -2404,10 +2404,11 @@ function renderQuadrant(
     const text = formatted.text;
     if (!text || (text === '0' && rc.worksheet.showZeros === false)) continue;
 
-    const effectiveBold = font.bold || !!cf.fontBold;
-    const effectiveItalic = font.italic || !!cf.fontItalic;
-    const effectiveUnderline = font.underline || !!cf.fontUnderline;
-    const effectiveStrike = font.strike || !!cf.fontStrike;
+    // A matched CF rule's toggle, on or off, overrides the cell's (CfResult).
+    const effectiveBold = cf.fontBold ?? font.bold;
+    const effectiveItalic = cf.fontItalic ?? font.italic;
+    const effectiveUnderline = cf.fontUnderline ?? font.underline;
+    const effectiveStrike = cf.fontStrike ?? font.strike;
     const fontForDraw: CellFont = (
       effectiveBold !== font.bold || effectiveItalic !== font.italic ||
       effectiveUnderline !== font.underline || effectiveStrike !== font.strike
@@ -2846,10 +2847,12 @@ function renderQuadrant(
             ? !!tableFontDxf?.font?.bold
             : (tableStyle.isHeader || tableStyle.isTotals))
         : false;
-      const effectiveBold = font.bold || !!cf.fontBold || tableBold || !!pivotFormat?.bold;
-      const effectiveItalic = font.italic || !!cf.fontItalic || !!pivotFormat?.italic;
-      const effectiveUnderline = font.underline || !!cf.fontUnderline || !!pivotFormat?.underline;
-      const effectiveStrike = font.strike || !!cf.fontStrike || !!pivotFormat?.strike;
+      // CF is the top layer: a matched rule's toggle, on or off, overrides
+      // the cell, table and PivotTable formatting beneath it (CfResult).
+      const effectiveBold = cf.fontBold ?? (font.bold || tableBold || !!pivotFormat?.bold);
+      const effectiveItalic = cf.fontItalic ?? (font.italic || !!pivotFormat?.italic);
+      const effectiveUnderline = cf.fontUnderline ?? (font.underline || !!pivotFormat?.underline);
+      const effectiveStrike = cf.fontStrike ?? (font.strike || !!pivotFormat?.strike);
       const fontForDraw: CellFont = (
         effectiveBold !== font.bold || effectiveItalic !== font.italic ||
         effectiveUnderline !== font.underline || effectiveStrike !== font.strike
@@ -3464,8 +3467,8 @@ function effectiveMeasurementFont(
       ? !!tableFontDxf?.font?.bold
       : tableStyle.isHeader || tableStyle.isTotals
     : false;
-  const bold = base.bold || !!cf.fontBold || tableBold || !!pivotFormat?.bold;
-  const italic = base.italic || !!cf.fontItalic || !!pivotFormat?.italic;
+  const bold = cf.fontBold ?? (base.bold || tableBold || !!pivotFormat?.bold);
+  const italic = cf.fontItalic ?? (base.italic || !!pivotFormat?.italic);
   return bold === base.bold && italic === base.italic
     ? base
     : { ...base, bold, italic };
@@ -3905,9 +3908,9 @@ function virtualizedTextOverflowOverscan(
     const tableFontDxf = tableFontDxfId != null ? styles.dxfs?.[tableFontDxfId] : undefined;
     const builtInTableBold = !!tableStyle && !tableStyle.isCustom && (tableStyle.isHeader || tableStyle.isTotals);
     const pivotFormat = pivotStyleMap.get(key);
-    const effectiveBold = font.bold || !!cf.fontBold || builtInTableBold || !!tableFontDxf?.font?.bold
-      || !!pivotFormat?.bold;
-    const effectiveItalic = font.italic || !!cf.fontItalic || !!pivotFormat?.italic;
+    const effectiveBold = cf.fontBold ?? (font.bold || builtInTableBold || !!tableFontDxf?.font?.bold
+      || !!pivotFormat?.bold);
+    const effectiveItalic = cf.fontItalic ?? (font.italic || !!pivotFormat?.italic);
     const effectiveFont = (effectiveBold !== font.bold || effectiveItalic !== font.italic)
       ? { ...font, bold: effectiveBold, italic: effectiveItalic }
       : font;
