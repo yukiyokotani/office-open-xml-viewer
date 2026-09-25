@@ -13,7 +13,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
  */
 
 const initMock = vi.fn();
-const openLegacyMock = vi.fn();
+const openSourceMock = vi.fn();
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((resolvePromise) => { resolve = resolvePromise; });
@@ -63,9 +63,28 @@ vi.mock('./wasm/pptx_parser.js', () => ({
   reinit: (arg: unknown) => initMock(arg),
   PptxArchive: FakePptxArchive,
 }));
-vi.mock('@silurus/ooxml-legacy-converter/internal/direct-ppt-engine', () => ({
-  openLegacyPptSource: (...args: unknown[]) => openLegacyMock(...args),
+vi.mock('@silurus/ooxml-core', async (load) => ({
+  ...await load<typeof import('@silurus/ooxml-core')>(),
+  openModelSourceModule: (...args: unknown[]) => openSourceMock(...args),
 }));
+
+const modelSource = {
+  protocol: 'ooxml-model-source-module/v1',
+  target: 'pptx',
+  moduleUrl: 'https://example.test/source.mjs',
+  config: {},
+} as const;
+
+/** A model-source archive: the parser archive's reads minus every optional capability. */
+function sourceArchive() {
+  const parser = new FakePptxArchive(new Uint8Array());
+  return {
+    presentation_bootstrap: () => parser.presentation_bootstrap(),
+    close_presentation_session: () => parser.close_presentation_session(),
+    assert_healthy: () => parser.assert_healthy(),
+    extract_image: (path: string) => parser.extract_image(path),
+  };
+}
 
 interface FakeSelf {
   onmessage: ((e: MessageEvent) => void) | null;
@@ -97,7 +116,7 @@ async function loadWorker(): Promise<FakeSelf> {
 
 beforeEach(() => {
   initMock.mockReset();
-  openLegacyMock.mockReset();
+  openSourceMock.mockReset();
 });
 
 afterEach(() => {
@@ -106,60 +125,55 @@ afterEach(() => {
 });
 
 describe('pptx worker.ts — init failure never hangs a request (AR4)', () => {
-  it('opens a direct PPT cursor without initializing OOXML WASM', async () => {
-    const archive = new FakePptxArchive(new Uint8Array());
-    const closeArchive = vi.fn();
-    openLegacyMock.mockResolvedValue({ archive, sourceByteLength: 4, closeArchive });
+  it('opens a model-source cursor without initializing OOXML WASM and closes it on a trap', async () => {
+    const archive = sourceArchive();
+    const close = vi.fn();
+    openSourceMock.mockResolvedValue({ archive, viewDefaults: {}, close });
     const fake = await loadWorker();
     fake.onmessage?.({ data: { kind: 'init', wasmUrl: 'x' } } as MessageEvent);
     fake.onmessage?.({ data: {
-      kind: 'parse', id: 30, buffer: new ArrayBuffer(4), resourcePolicy,
-      source: {
-        protocol: 'ooxml-legacy-ppt-source/v1', builtin: 'ppt',
-        wasmUrl: 'https://example.test/direct.wasm',
-      },
+      kind: 'parse', id: 30, buffer: new ArrayBuffer(4), resourcePolicy, source: modelSource,
     } } as MessageEvent);
     await vi.waitFor(() => expect(fake.posted).toContainEqual(expect.objectContaining({
       kind: 'presentationOpened', id: 30,
     })));
     expect(initMock).not.toHaveBeenCalled();
-    expect(openLegacyMock).toHaveBeenCalledTimes(1);
+    expect(openSourceMock).toHaveBeenCalledTimes(1);
 
+    // Missing optional capabilities degrade instead of reaching for OOXML.
     fake.onmessage?.({ data: { kind: 'resourceUsage', id: 31 } } as MessageEvent);
+    await vi.waitFor(() => expect(fake.posted).toContainEqual({ kind: 'resourceUsage', id: 31, usage: undefined }));
+    fake.onmessage?.({ data: { kind: 'extractMedia', id: 34, path: 'ppt/media/1' } } as MessageEvent);
     await vi.waitFor(() => expect(fake.posted).toContainEqual(expect.objectContaining({
-      kind: 'error', id: 31, message: expect.stringContaining('unsupported'),
+      kind: 'error', id: 34, message: 'media extraction is unsupported for this source',
     })));
-    expect(closeArchive).not.toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
 
     vi.spyOn(archive, 'extract_image').mockImplementation(() => {
-      throw new WebAssembly.RuntimeError('native trap');
+      throw new WebAssembly.RuntimeError('source trap');
     });
-    fake.onmessage?.({ data: { kind: 'extractImage', id: 32, path: 'legacy-ppt/image/1' } } as MessageEvent);
+    fake.onmessage?.({ data: { kind: 'extractImage', id: 32, path: 'ppt/media/1' } } as MessageEvent);
     await vi.waitFor(() => expect(fake.posted).toContainEqual(expect.objectContaining({
-      kind: 'error', id: 32, message: expect.stringContaining('native trap'),
+      kind: 'error', id: 32, message: expect.stringContaining('source trap'),
     })));
-    expect(closeArchive).toHaveBeenCalledTimes(1);
+    expect(close).toHaveBeenCalledTimes(1);
   });
 
-  it('terminally closes a direct source on bootstrap trap without losing the trap', async () => {
-    const archive = new FakePptxArchive(new Uint8Array());
+  it('terminally closes a model source on bootstrap trap without losing the trap', async () => {
+    const archive = sourceArchive();
     vi.spyOn(archive, 'presentation_bootstrap').mockImplementation(() => {
       throw new WebAssembly.RuntimeError('bootstrap trap');
     });
-    const closeArchive = vi.fn(() => { throw new Error('cleanup failed'); });
-    openLegacyMock.mockResolvedValue({ archive, sourceByteLength: 4, closeArchive });
+    const close = vi.fn(() => { throw new Error('cleanup failed'); });
+    openSourceMock.mockResolvedValue({ archive, viewDefaults: {}, close });
     const fake = await loadWorker();
     fake.onmessage?.({ data: {
-      kind: 'parse', id: 33, buffer: new ArrayBuffer(4), resourcePolicy,
-      source: {
-        protocol: 'ooxml-legacy-ppt-source/v1', builtin: 'ppt',
-        wasmUrl: 'https://example.test/direct.wasm',
-      },
+      kind: 'parse', id: 33, buffer: new ArrayBuffer(4), resourcePolicy, source: modelSource,
     } } as MessageEvent);
     await vi.waitFor(() => expect(fake.posted).toContainEqual(expect.objectContaining({
       kind: 'error', id: 33, message: expect.stringContaining('bootstrap trap'),
     })));
-    expect(closeArchive).toHaveBeenCalledTimes(1);
+    expect(close).toHaveBeenCalledTimes(1);
     expect(initMock).not.toHaveBeenCalled();
   });
 

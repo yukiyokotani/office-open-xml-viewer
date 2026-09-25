@@ -1,62 +1,67 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { WasmParserHost } from '@silurus/ooxml-core';
-import type { LegacyDocDirectSourceDescriptor } from '@silurus/ooxml-core/internal/legacy-doc-source';
-import type { OwnedLegacyDocSource } from '@silurus/ooxml-legacy-converter/internal/direct-doc-engine';
+import type {
+  ModelSourceModuleDescriptor,
+  OpenedModelSourceModule,
+  WasmParserHost,
+} from '@silurus/ooxml-core';
 import {
   WorkerDocumentSourceOwner,
+  type DocxModelSourceArchive,
   type OoxmlWorkerDocumentArchive,
-  type WorkerDocumentArchive,
 } from './worker-document-source.js';
 
-const descriptor: LegacyDocDirectSourceDescriptor = {
-  protocol: 'ooxml-legacy-doc-source/v1', builtin: 'doc',
-  wasmUrl: 'https://example.test/direct-doc.wasm',
+const descriptor: ModelSourceModuleDescriptor = {
+  protocol: 'ooxml-model-source-module/v1',
+  target: 'docx',
+  moduleUrl: 'https://example.test/source.mjs',
+  config: {},
 };
 
+type Opened = OpenedModelSourceModule<DocxModelSourceArchive>;
+
 describe('WorkerDocumentSourceOwner', () => {
-  it('opens native lazily without touching the DOCX runtime and retains images after cursor close', async () => {
-    const native = archive();
-    const closeArchive = vi.fn();
-    const open = vi.fn(async (): Promise<OwnedLegacyDocSource> => ({
-      archive: native, sourceByteLength: 3, closeArchive,
-    }));
+  it('opens a model source without touching the DOCX runtime and keeps images after the cursor closes', async () => {
+    const source = archive();
+    const close = vi.fn();
+    const transfer = [new ArrayBuffer(1)];
+    const open = vi.fn(async (): Promise<Opened> => ({ archive: source, viewDefaults: {}, close }));
     const host = hostFor(null);
     const owner = new WorkerDocumentSourceOwner(host.value, open);
-    const signal = new AbortController().signal;
 
-    expect(await owner.openNative(new Uint8Array([1, 2, 3]), descriptor, signal)).toBe(native);
-    expect(open).toHaveBeenCalledExactlyOnceWith(new Uint8Array([1, 2, 3]), descriptor, signal);
-    expect(host.run).not.toHaveBeenCalled();
-    expect(owner.kind).toBe('legacy-doc');
+    await expect(owner.openModelSource(new Uint8Array([1, 2, 3]), descriptor, transfer))
+      .resolves.toEqual({});
+    expect(open).toHaveBeenCalledExactlyOnceWith(descriptor, new Uint8Array([1, 2, 3]), transfer);
+    expect(owner.kind).toBe('model-source');
     owner.execute((current) => current.close_document_session());
-    expect(owner.execute((current) => current.extract_image('legacy-doc/image/1')))
-      .toEqual(new Uint8Array([9]));
-    expect(closeArchive).not.toHaveBeenCalled();
-    owner.closeNative(); owner.closeNative();
-    expect(closeArchive).toHaveBeenCalledTimes(1);
+    expect(owner.execute((current) => current.extract_image('media/1'))).toEqual(new Uint8Array([9]));
+    expect(host.run).not.toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
+    owner.closeModelSource();
+    owner.closeModelSource();
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(owner.kind).toBe('ooxml');
   });
 
-  it('reports source revision markup only for a native DOC with print markup and marks', async () => {
-    const ooxml = archive() as OoxmlWorkerDocumentArchive;
-    expect(new WorkerDocumentSourceOwner(hostFor(ooxml).value).sourceRevisionMarkup()).toBe(false);
-    for (const [print, marks, expected] of [
-      [true, true, true], [true, false, false], [false, true, false],
-      [undefined, undefined, false],
-    ] as const) {
-      const native = {
-        ...archive(),
-        ...(print === undefined ? {} : { revision_markup_in_print: () => print }),
-        ...(marks === undefined ? {} : { has_revision_marks: () => marks }),
-      };
-      const owner = new WorkerDocumentSourceOwner(hostFor(null).value, async () => ({
-        archive: native as never, sourceByteLength: 3, closeArchive: vi.fn(),
-      }));
-      await owner.openNative(new Uint8Array([1]), descriptor);
-      expect(owner.sourceRevisionMarkup()).toBe(expected);
-    }
+  it('admits only a boolean showTrackedChanges view default and closes a source reporting others', async () => {
+    const accepted = new WorkerDocumentSourceOwner(hostFor(null).value, async () => ({
+      archive: archive(), viewDefaults: { showTrackedChanges: true }, close: vi.fn(),
+    }));
+    await expect(accepted.openModelSource(new Uint8Array([1]), descriptor))
+      .resolves.toEqual({ showTrackedChanges: true });
+    expect(accepted.viewDefaults).toEqual({ showTrackedChanges: true });
+
+    const close = vi.fn();
+    const rejected = new WorkerDocumentSourceOwner(hostFor(null).value, async () => ({
+      archive: archive(), viewDefaults: { showTrackedChanges: true, showComments: false }, close,
+    }));
+    await expect(rejected.openModelSource(new Uint8Array([1]), descriptor))
+      .rejects.toThrow('unsupported DOCX model source view default: showComments');
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(rejected.cursor()).toBeNull();
+    expect(rejected.viewDefaults).toEqual({});
   });
 
-  it('uses an existing OOXML archive without loading legacy glue', () => {
+  it('runs an existing OOXML archive under the parser host without opening a source', () => {
     const ooxml = archive() as OoxmlWorkerDocumentArchive;
     ooxml.resource_usage = vi.fn(() => new Uint8Array([4]));
     ooxml.to_markdown = vi.fn(() => 'markdown');
@@ -66,92 +71,109 @@ describe('WorkerDocumentSourceOwner', () => {
 
     expect(owner.execute((current) => current.extract_image('word/media/a.png')))
       .toEqual(new Uint8Array([9]));
-    expect(host.run).toHaveBeenCalledTimes(1);
-    expect(owner.ooxml('resource usage')).toBe(ooxml);
+    expect(owner.resourceUsage()).toEqual(new Uint8Array([4]));
+    expect(owner.toMarkdown()).toBe('markdown');
+    expect(host.run).toHaveBeenCalledTimes(3);
     expect(open).not.toHaveBeenCalled();
   });
 
-  it('does not fall back to OOXML when native opening fails', async () => {
-    const failure = new Error('native failed');
+  it('reports missing optional capabilities instead of reaching for the OOXML archive', async () => {
+    const owner = new WorkerDocumentSourceOwner(hostFor(null).value, async () => ({
+      archive: archive(), viewDefaults: {}, close: vi.fn(),
+    }));
+    await owner.openModelSource(new Uint8Array(), descriptor);
+    expect(owner.resourceUsage()).toBeUndefined();
+    expect(() => owner.toMarkdown()).toThrow('Markdown conversion is unsupported for this source');
+
+    const capable = { ...archive(), resource_usage: () => new Uint8Array([7]), to_markdown: () => '# md' };
+    const full = new WorkerDocumentSourceOwner(hostFor(null).value, async () => ({
+      archive: capable, viewDefaults: {}, close: vi.fn(),
+    }));
+    await full.openModelSource(new Uint8Array(), descriptor);
+    expect(full.resourceUsage()).toEqual(new Uint8Array([7]));
+    expect(full.toMarkdown()).toBe('# md');
+  });
+
+  it('closes the source when one of its calls traps, but not on an ordinary error', async () => {
+    const close = vi.fn();
+    const owner = new WorkerDocumentSourceOwner(hostFor(null).value, async () => ({
+      archive: archive(), viewDefaults: {}, close,
+    }));
+    await owner.openModelSource(new Uint8Array(), descriptor);
+    expect(() => owner.execute(() => { throw new Error('bad path'); })).toThrow('bad path');
+    expect(close).not.toHaveBeenCalled();
+    const trap = Object.assign(new Error('unreachable'), { name: 'RuntimeError' });
+    expect(() => owner.execute(() => { throw trap; })).toThrow(trap);
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(owner.cursor()).toBeNull();
+  });
+
+  it('does not fall back to OOXML when opening fails and allows a later open', async () => {
+    const failure = new Error('open failed');
+    const close = vi.fn();
+    const open = vi.fn()
+      .mockRejectedValueOnce(failure)
+      .mockResolvedValueOnce({ archive: archive(), viewDefaults: {}, close });
     const host = hostFor(null);
-    const owner = new WorkerDocumentSourceOwner(host.value, vi.fn(async () => { throw failure; }));
-    await expect(owner.openNative(new Uint8Array(), descriptor)).rejects.toBe(failure);
+    const owner = new WorkerDocumentSourceOwner(host.value, open);
+    await expect(owner.openModelSource(new Uint8Array(), descriptor)).rejects.toBe(failure);
     expect(owner.cursor()).toBeNull();
     expect(host.run).not.toHaveBeenCalled();
+    await expect(owner.openModelSource(new Uint8Array(), descriptor)).resolves.toEqual({});
+    expect(owner.kind).toBe('model-source');
   });
 
-  it('rejects OOXML-only operations and replacement while native is owned', async () => {
-    const native = archive();
-    const closeArchive = vi.fn();
-    const open = vi.fn(async () => ({ archive: native, sourceByteLength: 0, closeArchive }));
+  it('rejects replacing a loaded source until it is closed', async () => {
+    const close = vi.fn();
+    const open = vi.fn(async (): Promise<Opened> => ({ archive: archive(), viewDefaults: {}, close }));
     const owner = new WorkerDocumentSourceOwner(hostFor(null).value, open);
-    await owner.openNative(new Uint8Array(), descriptor);
-    expect(() => owner.ooxml('resource usage')).toThrow(
-      'resource usage is unsupported for direct legacy DOC sources',
-    );
-    await expect(owner.openNative(new Uint8Array(), descriptor)).rejects.toThrow('already loaded');
+    await owner.openModelSource(new Uint8Array(), descriptor);
+    await expect(owner.openModelSource(new Uint8Array(), descriptor)).rejects.toThrow('already loaded');
     expect(open).toHaveBeenCalledTimes(1);
-    owner.closeNative();
-    await owner.openNative(new Uint8Array(), descriptor);
+    owner.closeModelSource();
+    await owner.openModelSource(new Uint8Array(), descriptor);
     expect(open).toHaveBeenCalledTimes(2);
-    owner.closeNative();
-    expect(closeArchive).toHaveBeenCalledTimes(2);
+    owner.closeModelSource();
+    expect(close).toHaveBeenCalledTimes(2);
+
+    const loaded = new WorkerDocumentSourceOwner(hostFor(archive() as OoxmlWorkerDocumentArchive).value, open);
+    await expect(loaded.openModelSource(new Uint8Array(), descriptor)).rejects.toThrow('already loaded');
+    expect(open).toHaveBeenCalledTimes(2);
   });
 
-  it('rejects overlapping opens and disposes a result invalidated while pending', async () => {
-    let resolve!: (source: OwnedLegacyDocSource) => void;
-    const pending = new Promise<OwnedLegacyDocSource>((accept) => { resolve = accept; });
-    const open = vi.fn(() => pending);
+  it('rejects overlapping opens and closes a result invalidated while pending', async () => {
+    let resolve!: (source: Opened) => void;
+    const open = vi.fn(() => new Promise<Opened>((accept) => { resolve = accept; }));
     const owner = new WorkerDocumentSourceOwner(hostFor(null).value, open);
-    const first = owner.openNative(new Uint8Array([1]), descriptor);
-    await expect(owner.openNative(new Uint8Array([2]), descriptor)).rejects.toThrow('opening');
-    owner.closeNative();
-    const closeArchive = vi.fn();
-    resolve({ archive: archive(), sourceByteLength: 1, closeArchive });
+    const first = owner.openModelSource(new Uint8Array([1]), descriptor);
+    await expect(owner.openModelSource(new Uint8Array([2]), descriptor)).rejects.toThrow('opening');
+    owner.closeModelSource();
+    const close = vi.fn();
+    resolve({ archive: archive(), viewDefaults: {}, close });
     await expect(first).rejects.toThrow('superseded');
-    expect(closeArchive).toHaveBeenCalledTimes(1);
+    expect(close).toHaveBeenCalledTimes(1);
     expect(owner.cursor()).toBeNull();
   });
 
-  it('does not let a late old open clear or overwrite a newer pending generation', async () => {
-    const resolvers: ((source: OwnedLegacyDocSource) => void)[] = [];
-    const open = vi.fn(() => new Promise<OwnedLegacyDocSource>((resolve) => { resolvers.push(resolve); }));
+  it('does not let a late old open clear or overwrite a newer pending open', async () => {
+    const resolvers: ((source: Opened) => void)[] = [];
+    const open = vi.fn(() => new Promise<Opened>((resolve) => { resolvers.push(resolve); }));
     const owner = new WorkerDocumentSourceOwner(hostFor(null).value, open);
-    const oldOpen = owner.openNative(new Uint8Array([1]), descriptor);
-    owner.closeNative();
-    const newOpen = owner.openNative(new Uint8Array([2]), descriptor);
+    const oldOpen = owner.openModelSource(new Uint8Array([1]), descriptor);
+    owner.closeModelSource();
+    const newOpen = owner.openModelSource(new Uint8Array([2]), descriptor);
     const oldClose = vi.fn();
-    resolvers[0]!({ archive: archive(), sourceByteLength: 1, closeArchive: oldClose });
+    resolvers[0]!({ archive: archive(), viewDefaults: {}, close: oldClose });
     await expect(oldOpen).rejects.toThrow('superseded');
-    await expect(owner.openNative(new Uint8Array([3]), descriptor)).rejects.toThrow('opening');
+    await expect(owner.openModelSource(new Uint8Array([3]), descriptor)).rejects.toThrow('opening');
     const current = archive();
     const newClose = vi.fn();
-    resolvers[1]!({ archive: current, sourceByteLength: 1, closeArchive: newClose });
-    await expect(newOpen).resolves.toBe(current);
+    resolvers[1]!({ archive: current, viewDefaults: { showTrackedChanges: false }, close: newClose });
+    await expect(newOpen).resolves.toEqual({ showTrackedChanges: false });
+    expect(owner.cursor()).toBe(current);
     expect(oldClose).toHaveBeenCalledTimes(1);
-    owner.closeNative();
+    owner.closeModelSource();
     expect(newClose).toHaveBeenCalledTimes(1);
-  });
-
-  it('clears failed pending state and post-validates cancellation', async () => {
-    const controller = new AbortController();
-    const closeArchive = vi.fn();
-    const native = archive();
-    const open = vi.fn()
-      .mockRejectedValueOnce(new Error('failed'))
-      .mockImplementationOnce(async () => {
-        controller.abort();
-        return { archive: native, sourceByteLength: 0, closeArchive };
-      })
-      .mockResolvedValueOnce({ archive: native, sourceByteLength: 0, closeArchive });
-    const owner = new WorkerDocumentSourceOwner(hostFor(null).value, open);
-    await expect(owner.openNative(new Uint8Array(), descriptor)).rejects.toThrow('failed');
-    await expect(owner.openNative(new Uint8Array(), descriptor, controller.signal))
-      .rejects.toMatchObject({ name: 'AbortError' });
-    expect(closeArchive).toHaveBeenCalledTimes(1);
-    await expect(owner.openNative(new Uint8Array(), descriptor)).resolves.toBe(native);
-    owner.closeNative();
-    expect(closeArchive).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -163,12 +185,12 @@ function hostFor(current: OoxmlWorkerDocumentArchive | null) {
   };
 }
 
-function archive(): WorkerDocumentArchive & { free(): void } {
+function archive(): DocxModelSourceArchive & { free(): void } {
   return {
     free: vi.fn(), assert_healthy: vi.fn(),
     open_document_cursor: vi.fn(), pull_document_chunk: vi.fn(() => new Uint8Array()),
     document_chunk_done: vi.fn(() => true), acknowledge_document_chunk: vi.fn(),
     cancel_document_cursor: vi.fn(), close_document_session: vi.fn(),
     extract_image: vi.fn(() => new Uint8Array([9])),
-  };
+  } as unknown as DocxModelSourceArchive & { free(): void };
 }

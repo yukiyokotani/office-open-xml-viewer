@@ -288,8 +288,9 @@ class DocxDocumentSessionImpl implements DocxDocumentSession {
 
   private refreshResourceUsage(): OoxmlResourceUsageSnapshot | undefined {
     // A model-source archive may have no ZIP accounting.
-    if (!this.archive.resource_usage) return this.lastResourceUsage;
     try {
+      // Inside the try: reading a trapped runtime's archive property throws.
+      if (!this.archive.resource_usage) return this.lastResourceUsage;
       this.lastResourceUsage = decodeOoxmlResourceUsage(this.archive.resource_usage());
       this.metrics.observeUsage(this.lastResourceUsage);
     } catch {

@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { XlsxViewer, type XlsxViewerOptions } from './viewer.js';
+import { XlsxViewer } from './viewer.js';
 import { XlsxWorkbook } from './workbook.js';
 import { installDom, makeContainer } from './viewer-destroy-test-dom.js';
 
@@ -31,10 +31,10 @@ function fakeWorkbook() {
  * workbook must stay live and untouched. A generation token (`_loadGen`) closes it.
  */
 describe('XlsxViewer.load() — concurrent-load latch', () => {
-  function build(options: XlsxViewerOptions = {}) {
+  function build() {
     installDom();
     const container = makeContainer();
-    const v = new XlsxViewer(container as unknown as HTMLElement, options);
+    const v = new XlsxViewer(container as unknown as HTMLElement);
     // Isolate the latch from the sheet-render path: showSheet needs a full
     // worksheet model, out of scope here. The engine-swap happens in load() BEFORE
     // showSheet, so a resolved no-op keeps this test on the leak.
@@ -104,70 +104,5 @@ describe('XlsxViewer.load() — concurrent-load latch', () => {
 
     v.destroy();
     expect(b.destroy).toHaveBeenCalledTimes(1);
-  });
-
-  it('forwards and aborts the converter signal when a newer load supersedes it', async () => {
-    const converter = { convert: vi.fn(async () => ({ bytes: new Uint8Array() })) };
-    const { v } = build({ legacyConversion: { xls: { converter } } });
-    const a = fakeWorkbook();
-    const b = fakeWorkbook();
-    const da = deferredLoad(a.wb);
-    const db = deferredLoad(b.wb);
-    let firstSignal: AbortSignal | undefined;
-    vi.spyOn(XlsxWorkbook, 'load')
-      .mockImplementationOnce((_source, options) => {
-        firstSignal = options?.legacyConversion?.xls?.signal;
-        return da.promise;
-      })
-      .mockImplementationOnce(() => db.promise);
-    const first = v.load('a.xls');
-    expect(firstSignal?.aborted).toBe(false);
-    const second = v.load('b.xls');
-    expect(firstSignal?.aborted).toBe(true);
-    db.resolve();
-    await second;
-    da.resolve();
-    await first;
-    v.destroy();
-  });
-
-  it('retains a direct source signal after success until the owned workbook is destroyed', async () => {
-    const sourceController = new AbortController();
-    const source = {
-      protocol: 'ooxml-legacy-xls-source/v1' as const,
-      builtin: 'xls' as const,
-      wasmUrl: 'https://example.test/direct.wasm',
-    };
-    const measureLegacyXlsNormalFont = vi.fn(() => 9);
-    const { v } = build({
-      legacyConversion: { xls: { source, signal: sourceController.signal } },
-      measureLegacyXlsNormalFont,
-    });
-    let retainedCleanup: () => void = () => undefined;
-    let closed = false;
-    const destroy = vi.fn(() => {
-      if (closed) return;
-      closed = true;
-      retainedCleanup();
-    });
-    const workbook = {
-      sheetNames: ['Sheet1'],
-      tabColors: {} as Record<number, string>,
-      destroy,
-      getWorksheet: vi.fn().mockResolvedValue(undefined),
-      _retainLegacyXlsSignalCleanup(cleanup: () => void) { retainedCleanup = cleanup; },
-    } as unknown as XlsxWorkbook;
-    vi.spyOn(XlsxWorkbook, 'load').mockImplementation(async (_source, options) => {
-      expect(options?.measureLegacyXlsNormalFont).toBe(measureLegacyXlsNormalFont);
-      options?.legacyConversion?.xls?.signal?.addEventListener('abort', destroy, { once: true });
-      return workbook;
-    });
-
-    await v.load('book.xls');
-    expect(destroy).not.toHaveBeenCalled();
-    sourceController.abort();
-    expect(destroy).toHaveBeenCalledOnce();
-    v.destroy();
-    expect(destroy).toHaveBeenCalledTimes(2);
   });
 });

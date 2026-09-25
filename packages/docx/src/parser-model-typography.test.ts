@@ -21,7 +21,7 @@ const runWire: InternalRunTypographyWire = {
   characterScale: null,
   kerningThresholdPt: null,
   emphasis: missing(),
-  languages: { default: null, eastAsia: null, bidi: null },
+  languages: { eastAsia: null, bidi: null },
   eastAsianLayout: {
     vert: null,
     vertCompress: null,

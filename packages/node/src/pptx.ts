@@ -326,8 +326,9 @@ class PptxPresentationSessionImpl implements PptxPresentationSession {
   }
 
   private refreshResourceUsage(): OoxmlResourceUsageSnapshot | undefined {
-    if (!this.archive.resource_usage) return this.usage;
     try {
+      // Inside the try: reading a trapped runtime's archive property throws.
+      if (!this.archive.resource_usage) return this.usage;
       this.usage = decodeOoxmlResourceUsage(this.archive.resource_usage());
       this.metrics.observeUsage(this.usage);
     } catch {

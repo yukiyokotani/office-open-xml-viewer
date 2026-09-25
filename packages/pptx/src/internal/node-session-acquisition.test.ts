@@ -25,31 +25,17 @@ function encoded(value: unknown): Uint8Array {
   return new TextEncoder().encode(JSON.stringify(value));
 }
 
-describe('PPTX owned archive admission', () => {
-  it('admits a bootstrap and closes the owned archive exactly once', () => {
-    const closeArchive = vi.fn();
-    const acquired = acquirePptxSessionFromArchive({
-      archive: archiveWith(() => encoded(validBootstrap)),
-      sourceByteLength: 123,
-      closeArchive,
-    });
-
-    expect(acquired.bootstrap.slideCount).toBe(0);
-    acquired.closeArchive();
-    acquired.closeArchive();
-    expect(closeArchive).toHaveBeenCalledTimes(1);
-  });
-
-  it('admits and cleans up a native owned source without fabricated ZIP metrics', () => {
+describe('acquirePptxSessionFromArchive', () => {
+  it('admits a source archive without resource_usage and closes it exactly once', () => {
     const closeArchive = vi.fn();
     const archive = archiveWith(() => encoded(validBootstrap));
-    expect(archive.resource_usage).toBeUndefined();
     const acquired = acquirePptxSessionFromArchive({
       archive,
       sourceByteLength: 456,
       closeArchive,
     });
     expect(acquired.bootstrap).toEqual(validBootstrap);
+    acquired.closeArchive();
     acquired.closeArchive();
     expect(closeArchive).toHaveBeenCalledOnce();
   });

@@ -206,8 +206,10 @@ class XlsxWorkbookSessionImpl implements XlsxWorkbookSession {
   }
 
   get resourceUsage(): OoxmlResourceUsageSnapshot | undefined {
-    if (this.closed || !this.archive.resource_usage) return this.lastUsage;
+    if (this.closed) return this.lastUsage;
     try {
+      // Inside the try: reading a trapped runtime's archive property throws.
+      if (!this.archive.resource_usage) return this.lastUsage;
       this.lastUsage = decodeUsage(this.archive.resource_usage());
     } catch {
       // Keep the last valid diagnostic after a trapped or closing archive.

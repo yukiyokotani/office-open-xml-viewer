@@ -1,22 +1,27 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { WasmParserHost } from '@silurus/ooxml-core';
-import type { LegacyXlsDirectSourceDescriptor } from '@silurus/ooxml-core/internal/legacy-xls-source';
-import type { OoxmlWorksheetArchive } from './worker-worksheet-source.js';
-import { WorkerWorksheetSourceOwner } from './worker-worksheet-source.js';
-import { GridGeometry } from './grid-geometry.js';
-import { colWidthToPx } from '../renderer.js';
-import type { Worksheet } from '../types.js';
+import { describe, expect, it, vi } from 'vitest';
+import type {
+  ModelSourceModuleDescriptor,
+  OpenedModelSourceModule,
+  WasmParserHost,
+} from '@silurus/ooxml-core';
+import {
+  WorkerWorksheetSourceOwner,
+  type OoxmlWorksheetArchive,
+  type XlsxModelSourceArchive,
+} from './worker-worksheet-source.js';
+import { respondToHostLayoutRequest, XLSX_HOST_LAYOUT_REQUEST, XLSX_HOST_LAYOUT_RESULT } from './host-layout.js';
 
-const descriptor: LegacyXlsDirectSourceDescriptor = {
-  protocol: 'ooxml-legacy-xls-source/v1',
-  builtin: 'xls',
-  wasmUrl: 'https://example.test/direct-xls.wasm',
+const descriptor: ModelSourceModuleDescriptor = {
+  protocol: 'ooxml-model-source-module/v1',
+  target: 'xlsx',
+  moduleUrl: 'https://example.test/source.mjs',
+  config: {},
 };
+const CALIBRI_11 = { family: 'Calibri', sizePt: 11, bold: false, italic: false };
+const encode = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
 
-function directArchive(required = true) {
-  return {
-    measurement_request: vi.fn(() => new TextEncoder().encode(JSON.stringify({ required, font: null }))),
-    configure_mdw: vi.fn(),
+function sourceArchive(request?: unknown) {
+  const archive = {
     parse: vi.fn(() => new Uint8Array()),
     open_sheet_cursor: vi.fn(),
     pull_sheet_cursor: vi.fn(() => new Uint8Array()),
@@ -25,160 +30,144 @@ function directArchive(required = true) {
     acknowledge_sheet_cursor_terminal: vi.fn(),
     cancel_sheet_cursor: vi.fn(),
     close_sheet_cursor: vi.fn(),
-    extract_image: vi.fn(() => new Uint8Array()),
-    resource_usage: vi.fn(() => new Uint8Array()),
-    to_markdown: vi.fn(() => ''),
+    extract_image: vi.fn(() => new Uint8Array([5])),
     assert_healthy: vi.fn(),
-    close_workbook_session: vi.fn(),
-    free: vi.fn(),
+    configure_host_layout: vi.fn(),
+    ...(request === undefined ? {} : { host_layout_request: vi.fn(() => encode(request)) }),
   };
+  return archive as typeof archive & XlsxModelSourceArchive & { host_layout_request?: ReturnType<typeof vi.fn> };
+}
+
+function owner(
+  archive: XlsxModelSourceArchive,
+  options: { viewDefaults?: Record<string, boolean>; close?: () => void; host?: object } = {},
+) {
+  const close = vi.fn(options.close ?? (() => undefined));
+  const open = vi.fn(async (): Promise<OpenedModelSourceModule<XlsxModelSourceArchive>> => ({
+    archive, viewDefaults: options.viewDefaults ?? {}, close,
+  }));
+  const host = (options.host ?? { archive: null, run: vi.fn(), ensureReady: vi.fn() }) as
+    unknown as WasmParserHost<OoxmlWorksheetArchive>;
+  return { owner: new WorkerWorksheetSourceOwner(host, open), open, close, host };
 }
 
 describe('WorkerWorksheetSourceOwner', () => {
-  afterEach(() => vi.unstubAllGlobals());
+  it('opens a model source without the OOXML host and configures the measured Normal-font width', async () => {
+    const archive = sourceArchive(CALIBRI_11);
+    const { owner: sources, open, close, host } = owner(archive);
+    const measure = vi.fn(() => 7);
+    const transfer = [new ArrayBuffer(1)];
 
-  it('closes malformed native measurement requests before exposing a source', async () => {
-    const host = { archive: null } as unknown as WasmParserHost<OoxmlWorksheetArchive>;
-    const archive = directArchive();
-    archive.measurement_request.mockReturnValue(new TextEncoder().encode('{"required":true}'));
-    const closeArchive = vi.fn();
-    const owner = new WorkerWorksheetSourceOwner(host, async () => ({ archive, sourceByteLength: 0, closeArchive }));
-    await expect(owner.openLegacy(new Uint8Array(), descriptor)).rejects.toThrow('invalid legacy XLS measurement request');
-    expect(closeArchive).toHaveBeenCalledOnce();
-    expect(owner.cursor()).toBeNull();
-    expect(archive.configure_mdw).not.toHaveBeenCalled();
+    await sources.openModelSource(new Uint8Array([1, 2, 3]), descriptor, measure, transfer);
+    expect(open).toHaveBeenCalledExactlyOnceWith(descriptor, new Uint8Array([1, 2, 3]), transfer);
+    expect(measure).toHaveBeenCalledExactlyOnceWith(CALIBRI_11);
+    expect(archive.configure_host_layout).toHaveBeenCalledExactlyOnceWith(7);
+    expect(archive.parse).not.toHaveBeenCalled();
+    expect(sources.maximumDigitWidth).toBe(7);
+    expect(sources.kind).toBe('model-source');
+    expect(sources.execute((current) => current.extract_image('xl/media/1'))).toEqual(new Uint8Array([5]));
+    expect((host as unknown as { run: ReturnType<typeof vi.fn> }).run).not.toHaveBeenCalled();
+    expect((host as unknown as { ensureReady: ReturnType<typeof vi.fn> }).ensureReady).not.toHaveBeenCalled();
+
+    sources.closeModelSource();
+    sources.closeModelSource();
+    expect(close).toHaveBeenCalledOnce();
+    expect(sources.maximumDigitWidth).toBeUndefined();
   });
 
-  it('opens direct XLS without initializing or running the OOXML host', async () => {
-    const host = {
-      archive: null,
-      run: vi.fn(),
-      ensureReady: vi.fn(),
-    } as unknown as WasmParserHost<OoxmlWorksheetArchive>;
-    const archive = directArchive();
-    const closeArchive = vi.fn();
-    const open = vi.fn(async () => ({ archive, sourceByteLength: 3, closeArchive }));
-    const owner = new WorkerWorksheetSourceOwner(host, open);
+  it('configures no width when the source names no font or the host cannot measure it', async () => {
+    const unnamed = sourceArchive(null);
+    const measure = vi.fn(() => 7);
+    const first = owner(unnamed).owner;
+    await first.openModelSource(new Uint8Array(), descriptor, measure);
+    expect(measure).not.toHaveBeenCalled();
+    expect(unnamed.configure_host_layout).toHaveBeenCalledExactlyOnceWith(undefined);
+    expect(first.maximumDigitWidth).toBeUndefined();
 
-    expect(await owner.openLegacy(new Uint8Array([1, 2, 3]), descriptor)).toBe(archive);
-    expect(host.run).not.toHaveBeenCalled();
-    expect(host.ensureReady).not.toHaveBeenCalled();
-    expect(archive.configure_mdw).toHaveBeenCalledOnce();
-    expect(archive.configure_mdw).toHaveBeenCalledWith(undefined);
-    expect(owner.execute((current) => current.parse())).toEqual(new Uint8Array());
-    expect(host.run).not.toHaveBeenCalled();
-
-    owner.closeLegacy();
-    owner.closeLegacy();
-    expect(closeArchive).toHaveBeenCalledOnce();
+    // A non-integer or out-of-range width is not admitted.
+    const unmeasured = sourceArchive(CALIBRI_11);
+    const second = owner(unmeasured).owner;
+    await second.openModelSource(new Uint8Array(), descriptor, () => 7.5);
+    expect(unmeasured.configure_host_layout).toHaveBeenCalledExactlyOnceWith(undefined);
   });
 
-  it('does not configure measurement when the native session does not request it', async () => {
-    const host = { archive: null } as unknown as WasmParserHost<OoxmlWorksheetArchive>;
-    const archive = directArchive(false);
-    const owner = new WorkerWorksheetSourceOwner(host, async () => ({
-      archive, sourceByteLength: 0, closeArchive: vi.fn(),
-    }));
-    await owner.openLegacy(new Uint8Array(), descriptor);
-    expect(archive.configure_mdw).not.toHaveBeenCalled();
+  it('does not configure host layout when the source does not ask for it', async () => {
+    const archive = sourceArchive();
+    const measure = vi.fn(() => 7);
+    const { owner: sources } = owner(archive);
+    await sources.openModelSource(new Uint8Array(), descriptor, measure);
+    expect(measure).not.toHaveBeenCalled();
+    expect(archive.configure_host_layout).not.toHaveBeenCalled();
+    expect(sources.maximumDigitWidth).toBeUndefined();
   });
 
-  it('applies one worker-bridged measurement and retains it for worksheet geometry', async () => {
-    const listeners = new Set<EventListener>();
-    const scope = {
-      addEventListener: (_type: string, listener: EventListener) => listeners.add(listener),
-      removeEventListener: (_type: string, listener: EventListener) => listeners.delete(listener),
-      postMessage: vi.fn((message: unknown) => {
-        if ((message as { type?: string }).type === 'legacy-xls-font-request') {
-          queueMicrotask(() => {
-            const event = { data: { type: 'legacy-xls-font-result', width: 9 } } as MessageEvent;
-            for (const listener of [...listeners]) listener(event);
-          });
-        }
-      }),
-    };
-    vi.stubGlobal('self', scope);
-    const host = { archive: null } as unknown as WasmParserHost<OoxmlWorksheetArchive>;
-    const archive = directArchive();
-    archive.measurement_request.mockReturnValue(new TextEncoder().encode(JSON.stringify({
-      required: true,
-      font: { name: 'Arial', sizePoints: 10, bold: false, italic: false },
-    })));
-    const closeArchive = vi.fn();
-    const owner = new WorkerWorksheetSourceOwner(host, async () => ({
-      archive, sourceByteLength: 0, closeArchive,
-    }));
+  it('closes the source when its host layout request is invalid or its measurement fails', async () => {
+    for (const request of [{ family: 'Calibri', sizePt: 11 }, { ...CALIBRI_11, sizePt: -1 }]) {
+      const archive = sourceArchive(request);
+      const { owner: sources, close } = owner(archive);
+      await expect(sources.openModelSource(new Uint8Array(), descriptor, () => 7))
+        .rejects.toThrow('invalid XLSX host layout font');
+      expect(close).toHaveBeenCalledOnce();
+      expect(sources.cursor()).toBeNull();
+      expect(archive.configure_host_layout).not.toHaveBeenCalled();
+    }
 
-    await owner.openLegacy(new Uint8Array(), descriptor, true);
-    expect(archive.configure_mdw).toHaveBeenCalledWith(9);
-    expect(owner.maximumDigitWidth).toBe(9);
-    const worksheet = {
-      rows: [], colWidths: { 1: 8.43 }, rowHeights: {}, defaultColWidth: 8.43,
-      defaultRowHeight: 15, mergeCells: [], conditionalFormats: [], images: [], charts: [],
-    } as unknown as Worksheet;
-    expect(GridGeometry.forWorksheet(worksheet, owner.maximumDigitWidth ?? 0).col.sizeOf(1))
-      .toBe(colWidthToPx(8.43, 9));
-    expect(listeners).toHaveLength(0);
-
-    owner.closeLegacy();
-    expect(owner.maximumDigitWidth).toBeUndefined();
-    expect(closeArchive).toHaveBeenCalledOnce();
+    const archive = sourceArchive(CALIBRI_11);
+    const { owner: sources, close } = owner(archive);
+    await expect(sources.openModelSource(new Uint8Array(), descriptor, async () => {
+      throw new Error('measurement failed');
+    })).rejects.toThrow('measurement failed');
+    expect(close).toHaveBeenCalledOnce();
+    expect(sources.cursor()).toBeNull();
   });
 
-  it('closes the direct source when the main-realm provider fails', async () => {
-    const listeners = new Set<EventListener>();
-    vi.stubGlobal('self', {
-      addEventListener: (_type: string, listener: EventListener) => listeners.add(listener),
-      removeEventListener: (_type: string, listener: EventListener) => listeners.delete(listener),
-      postMessage: () => queueMicrotask(() => {
-        const event = { data: { type: 'legacy-xls-font-result', failed: true } } as MessageEvent;
-        for (const listener of [...listeners]) listener(event);
-      }),
-    });
-    const host = { archive: null } as unknown as WasmParserHost<OoxmlWorksheetArchive>;
-    const archive = directArchive();
-    archive.measurement_request.mockReturnValue(new TextEncoder().encode(JSON.stringify({
-      required: true,
-      font: { name: 'Arial', sizePoints: 10, bold: false, italic: false },
-    })));
-    const closeArchive = vi.fn();
-    const owner = new WorkerWorksheetSourceOwner(host, async () => ({
-      archive, sourceByteLength: 0, closeArchive,
-    }));
-
-    await expect(owner.openLegacy(new Uint8Array(), descriptor, true))
-      .rejects.toThrow('XLS measurement failed');
-    expect(closeArchive).toHaveBeenCalledOnce();
-    expect(archive.configure_mdw).not.toHaveBeenCalled();
-    expect(listeners).toHaveLength(0);
+  it('rejects any view default because XLSX defines none', async () => {
+    const archive = sourceArchive(CALIBRI_11);
+    const { owner: sources, close } = owner(archive, { viewDefaults: { showGridLines: true } });
+    await expect(sources.openModelSource(new Uint8Array(), descriptor, () => 7))
+      .rejects.toThrow('unsupported XLSX model source view default: showGridLines');
+    expect(close).toHaveBeenCalledOnce();
+    expect(archive.host_layout_request).not.toHaveBeenCalled();
+    expect(sources.cursor()).toBeNull();
   });
 
-  it('aborts an in-flight request and ignores a late measurement reply', async () => {
-    const listeners = new Set<EventListener>();
-    vi.stubGlobal('self', {
-      addEventListener: (_type: string, listener: EventListener) => listeners.add(listener),
-      removeEventListener: (_type: string, listener: EventListener) => listeners.delete(listener),
-      postMessage: vi.fn(),
-    });
-    const host = { archive: null } as unknown as WasmParserHost<OoxmlWorksheetArchive>;
-    const archive = directArchive();
-    archive.measurement_request.mockReturnValue(new TextEncoder().encode(JSON.stringify({
-      required: true,
-      font: { name: 'Arial', sizePoints: 10, bold: false, italic: false },
-    })));
-    const closeArchive = vi.fn();
-    const owner = new WorkerWorksheetSourceOwner(host, async () => ({
-      archive, sourceByteLength: 0, closeArchive,
-    }));
+  it('degrades missing optional capabilities and closes the source on a trap', async () => {
+    const { owner: sources, close } = owner(sourceArchive());
+    await sources.openModelSource(new Uint8Array(), descriptor, () => undefined);
+    expect(sources.resourceUsage()).toBeUndefined();
+    expect(() => sources.toMarkdown()).toThrow('Markdown conversion is unsupported for this source');
+    const trap = Object.assign(new Error('unreachable'), { name: 'RuntimeError' });
+    expect(() => sources.execute(() => { throw trap; })).toThrow(trap);
+    expect(close).toHaveBeenCalledOnce();
+    expect(sources.cursor()).toBeNull();
+  });
 
-    const opening = owner.openLegacy(new Uint8Array(), descriptor, true);
-    await Promise.resolve();
-    owner.closeLegacy();
-    await expect(opening).rejects.toThrow('legacy XLS font measurement aborted');
-    const late = { data: { type: 'legacy-xls-font-result', width: 7 } } as MessageEvent;
-    for (const listener of [...listeners]) listener(late);
-    expect(archive.configure_mdw).not.toHaveBeenCalled();
-    expect(closeArchive).toHaveBeenCalledOnce();
-    expect(listeners).toHaveLength(0);
+  it('rejects a source while another workbook is loaded', async () => {
+    const loaded = owner(sourceArchive(), { host: { archive: {}, run: vi.fn() } });
+    await expect(loaded.owner.openModelSource(new Uint8Array(), descriptor, () => 7))
+      .rejects.toThrow('already loaded');
+    expect(loaded.open).not.toHaveBeenCalled();
+  });
+});
+
+describe('respondToHostLayoutRequest', () => {
+  it('answers a host layout request with the measured width and nothing for a failed measurement', () => {
+    const post = vi.fn();
+    expect(respondToHostLayoutRequest(post, { type: 'other' }, () => 7)).toBe(false);
+    expect(respondToHostLayoutRequest(
+      post, { type: XLSX_HOST_LAYOUT_REQUEST, requestId: 3, font: CALIBRI_11 }, () => 7,
+    )).toBe(true);
+    expect(respondToHostLayoutRequest(
+      post, { type: XLSX_HOST_LAYOUT_REQUEST, requestId: 4, font: { family: 'Calibri' } }, () => 7,
+    )).toBe(true);
+    expect(respondToHostLayoutRequest(
+      post, { type: XLSX_HOST_LAYOUT_REQUEST, requestId: 5, font: CALIBRI_11 },
+      () => { throw new Error('no canvas'); },
+    )).toBe(true);
+    expect(post.mock.calls.map(([message]) => message)).toEqual([
+      { type: XLSX_HOST_LAYOUT_RESULT, requestId: 3, maximumDigitWidth: 7 },
+      { type: XLSX_HOST_LAYOUT_RESULT, requestId: 4 },
+      { type: XLSX_HOST_LAYOUT_RESULT, requestId: 5 },
+    ]);
   });
 });

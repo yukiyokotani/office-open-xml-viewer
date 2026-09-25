@@ -43,7 +43,7 @@ const runWire: InternalRunTypographyWire = {
   fitText: { valTwips: 2400, id: '-7' },
   kerningThresholdPt: 12,
   emphasis: value('dot', 'dot'),
-  languages: { default: 'en-us', eastAsia: 'ja-jp', bidi: 'ar-sa' },
+  languages: { eastAsia: 'ja-jp', bidi: 'ar-sa' },
   eastAsianLayout: {
     vert: true,
     vertCompress: false,
@@ -80,15 +80,8 @@ describe('private typography acquisition projection', () => {
       type: 'text', text: 'ABC',
       __typographyAcquisition: runWire,
     } as unknown as DocxTextRun;
-    const publicFieldRun: FieldRun = {
-      fieldType: 'page', instruction: 'PAGE', fallbackText: 'ABC',
-      bold: false, italic: false, underline: false, strikethrough: false,
-      fontSize: 10, color: null, fontFamily: null, background: null,
-      vertAlign: null, langDefault: 'en-us',
-    };
     const fieldRun = {
-      ...publicFieldRun,
-      type: 'field',
+      type: 'field', fallbackText: 'ABC',
       __typographyAcquisition: runWire,
     } as unknown as FieldRun;
 
@@ -97,12 +90,9 @@ describe('private typography acquisition projection', () => {
 
     expect(text).toEqual({ sourceText: 'ABC', ...runWire });
     expect(field).toEqual(text);
-    expect(publicFieldRun.langDefault).toBe('en-us');
     expect(text).not.toBe(runWire);
-    expect(text?.languages.default).toBe('en-us');
     expect(structuredClone(text)).toEqual(text);
     expect(Object.isFrozen(text)).toBe(true);
-    expect(Object.isFrozen(text?.languages)).toBe(true);
     expect(Object.isFrozen(text?.ruby?.guideRuns)).toBe(true);
   });
 

@@ -2683,7 +2683,7 @@ describe('planLine visual geometry', () => {
       snapToGrid: null, characterSpacingPt: null, characterScale: null,
       kerningThresholdPt: null,
       emphasis: { status: 'valid', raw: 'dot', value: 'dot' },
-      languages: { default: null, eastAsia: null, bidi: null },
+      languages: { eastAsia: null, bidi: null },
       eastAsianLayout: {
         vert: null, vertCompress: null, combine: null,
         combineBrackets: { status: 'missing', raw: null, value: null },

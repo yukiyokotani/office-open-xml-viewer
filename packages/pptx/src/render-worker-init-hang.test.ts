@@ -9,7 +9,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
  */
 
 const initMock = vi.fn();
-const openLegacyMock = vi.fn();
+const openSourceMock = vi.fn();
 const fontMocks = vi.hoisted(() => ({
   load: vi.fn(),
   unload: vi.fn(),
@@ -86,11 +86,9 @@ vi.mock('./wasm/pptx_parser.js', () => ({
   reinit: (arg: unknown) => initMock(arg),
   PptxArchive: FakePptxArchive,
 }));
-vi.mock('@silurus/ooxml-legacy-converter/internal/direct-ppt-engine', () => ({
-  openLegacyPptSource: (...args: unknown[]) => openLegacyMock(...args),
-}));
 vi.mock('@silurus/ooxml-core', async (importOriginal) => ({
   ...await importOriginal<typeof import('@silurus/ooxml-core')>(),
+  openModelSourceModule: (...args: unknown[]) => openSourceMock(...args),
   loadOfficeFontFallbacks: fontMocks.load,
   unloadOfficeFontFallbacks: fontMocks.unload,
 }));
@@ -99,6 +97,13 @@ vi.mock('./google-fonts', async (importOriginal) => ({
   pptxSlideOfficeFontRequests: fontMocks.requests,
 }));
 vi.mock('./renderer', () => ({ renderSlideWithEmbeddedFonts: fontMocks.render }));
+
+const modelSource = {
+  protocol: 'ooxml-model-source-module/v1',
+  target: 'pptx',
+  moduleUrl: 'https://example.test/source.mjs',
+  config: {},
+} as const;
 
 interface FakeSelf {
   onmessage: ((e: MessageEvent) => void) | null;
@@ -129,7 +134,7 @@ async function loadRenderWorker(): Promise<FakeSelf> {
 
 beforeEach(() => {
   initMock.mockReset();
-  openLegacyMock.mockReset();
+  openSourceMock.mockReset();
   fontMocks.load.mockReset();
   fontMocks.unload.mockReset();
   fontMocks.requests.mockReset();
@@ -144,44 +149,38 @@ afterEach(() => {
 });
 
 describe('pptx render-worker.ts — init failure never hangs a request (AR4)', () => {
-  it('preflights a direct PPT cursor without initializing OOXML WASM', async () => {
+  it('preflights a model-source cursor without initializing OOXML WASM', async () => {
     const archive = new FakePptxArchive(new Uint8Array());
-    openLegacyMock.mockResolvedValue({ archive, sourceByteLength: 4, closeArchive: vi.fn() });
+    openSourceMock.mockResolvedValue({ archive, viewDefaults: {}, close: vi.fn() });
     const fake = await loadRenderWorker();
     fake.onmessage?.({ data: { kind: 'init', wasmUrl: 'x' } } as MessageEvent);
     fake.onmessage?.({ data: {
       kind: 'parse', id: 40, buffer: new ArrayBuffer(4), resourcePolicy,
-      source: {
-        protocol: 'ooxml-legacy-ppt-source/v1', builtin: 'ppt',
-        wasmUrl: 'https://example.test/direct.wasm',
-      },
+      source: modelSource,
     } } as MessageEvent);
     await vi.waitFor(() => expect(fake.posted).toContainEqual(expect.objectContaining({
       kind: 'presentationReady', id: 40,
     })));
     expect(initMock).not.toHaveBeenCalled();
-    expect(openLegacyMock).toHaveBeenCalledTimes(1);
+    expect(openSourceMock).toHaveBeenCalledTimes(1);
 
     fake.onmessage?.({ data: { kind: 'toMarkdown', id: 41 } } as MessageEvent);
     await vi.waitFor(() => expect(fake.posted).toContainEqual(expect.objectContaining({
-      kind: 'error', id: 41, message: expect.stringContaining('unsupported'),
+      kind: 'error', id: 41, message: 'Markdown conversion is unsupported for this source',
     })));
   });
 
-  it('closes a direct render source when bootstrap traps', async () => {
+  it('closes a model source when bootstrap traps', async () => {
     const archive = new FakePptxArchive(new Uint8Array());
     vi.spyOn(archive, 'presentation_bootstrap').mockImplementation(() => {
       throw new WebAssembly.RuntimeError('render bootstrap trap');
     });
     const closeArchive = vi.fn();
-    openLegacyMock.mockResolvedValue({ archive, sourceByteLength: 4, closeArchive });
+    openSourceMock.mockResolvedValue({ archive, viewDefaults: {}, close: closeArchive });
     const fake = await loadRenderWorker();
     fake.onmessage?.({ data: {
       kind: 'parse', id: 42, buffer: new ArrayBuffer(4), resourcePolicy,
-      source: {
-        protocol: 'ooxml-legacy-ppt-source/v1', builtin: 'ppt',
-        wasmUrl: 'https://example.test/direct.wasm',
-      },
+      source: modelSource,
     } } as MessageEvent);
     await vi.waitFor(() => expect(fake.posted).toContainEqual(expect.objectContaining({
       kind: 'error', id: 42, message: expect.stringContaining('render bootstrap trap'),

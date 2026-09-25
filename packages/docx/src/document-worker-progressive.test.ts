@@ -99,7 +99,6 @@ function progressiveDocument(opts: {
     _embeddedFontFaces: [],
     _officeFontFaces: [],
     _googleFontFaces: [],
-    _nativeDocSignalCleanup: () => undefined,
     _bridge: {
       request: (factory: (id: number) => RenderWorkerRequest) => {
         requests.push(factory(11));
