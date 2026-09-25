@@ -848,16 +848,6 @@ export function cssFontStack(
   const subPart = sub ? `"${sub}", ` : '';
   const googleAlias = googleCjkFontAlias(authoredFamily);
   const aliasPart = googleAlias ? `"${googleAlias}", ` : '';
-  // macOS exposes the same Yu Gothic face to Canvas as "YuGothic". A theme
-  // naming it "Yu Gothic" otherwise falls through to Noto even with the
-  // Office face installed. An Office PDF control using that explicit theme
-  // reproduced the reference glyphs; Canvas with this local family name
-  // reduced the difference, while MS Gothic and an unavailable theme face
-  // retained their normal fallback. Keep the authored name first so Windows
-  // and embedded font routing still take precedence.
-  const localAliasPart = authoredFamily.toLowerCase() === 'yu gothic'
-    ? '"YuGothic", '
-    : '';
   // Arabic faces lead with script fallbacks only for Arabic runs.
   const arabicFamilies = generic === 'serif'
     ? ['Noto Naskh Arabic', 'Noto Sans Arabic']
@@ -877,8 +867,8 @@ export function cssFontStack(
   const nonCjk = variant === 'serif' ? NON_CJK_SERIF_FALLBACKS : NON_CJK_SANS_FALLBACKS;
   const nonCjkPart = `${quoteAll(nonCjk)}, `;
   return authoredCjk
-    ? `"${normalized}", ${subPart}${localAliasPart}${aliasPart}${cjkPart}${nonCjkPart}${arabicPart}${generic}`
-    : `"${normalized}", ${subPart}${localAliasPart}${aliasPart}${nonCjkPart}${cjkPart}${arabicPart}${generic}`;
+    ? `"${normalized}", ${subPart}${aliasPart}${cjkPart}${nonCjkPart}${arabicPart}${generic}`
+    : `"${normalized}", ${subPart}${aliasPart}${nonCjkPart}${cjkPart}${arabicPart}${generic}`;
 }
 
 /**
@@ -4744,10 +4734,11 @@ export function renderTextBody(
         : spaceBeforePx;
       // ECMA-376 §21.1.2.1.1 bodyPr@spcFirstLastPara (default false): the
       // first paragraph's space before and the last paragraph's space after
-      // are not respected at the edges of the text body. Otherwise
-      // placeholders whose layout-default `spcBef` is 10 pt (sample-1 slide-5
-      // "Figure 1." caption) get pushed below the placeholder top, and a
-      // bottom- or centre-anchored body is lifted by its trailing spcAft.
+      // are not respected at the edges of the text body. PowerPoint PDF
+      // controls agree for t/ctr/b anchors in both pts and pct: with the
+      // attribute absent or 0 the edge spacing moves no glyph, and only 1
+      // applies it. A trailing empty paragraph turns the previous spcAft into
+      // inter-paragraph spacing, which is respected.
       const respectEdges = body.spcFirstLastPara === true;
       const lastParagraph = paraIdx === body.paragraphs.length - 1;
       const linePx  = lineHeight
