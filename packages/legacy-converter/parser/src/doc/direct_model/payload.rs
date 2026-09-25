@@ -98,11 +98,17 @@ pub(super) fn table(value: &docx_model::DocTable) -> Result<usize, String> {
 }
 
 pub(super) fn text_run(run: &TextRun) -> Result<usize, String> {
-    if run.no_break_hyphen_offsets.capacity() != 0 || run.revision.is_some() {
+    if run.no_break_hyphen_offsets.capacity() != 0 {
         return Err(unsupported("unaccounted direct DOC text-run payload"));
     }
     let mut total = Total::default();
     total.string(&run.text)?;
+    if let Some(revision) = &run.revision {
+        total.string(&revision.kind)?;
+        for value in [&revision.id, &revision.author, &revision.date] {
+            total.option_string(value)?;
+        }
+    }
     if let Some(border) = &run.border {
         total.string(&border.style)?;
         total.option_string(&border.color)?;
@@ -464,8 +470,11 @@ impl Total {
     }
 
     fn run_typography(&mut self, value: &RunTypographyWire) -> Result<(), String> {
-        if value.revision.is_some() {
-            return Err(unsupported("unaccounted direct DOC run typography payload"));
+        if let Some(revision) = &value.revision {
+            self.string(&revision.kind)?;
+            self.typography_string(&revision.id)?;
+            self.option_string(&revision.author)?;
+            self.option_string(&revision.date)?;
         }
         if let Some(ruby) = &value.ruby {
             self.ruby_typography(ruby)?;

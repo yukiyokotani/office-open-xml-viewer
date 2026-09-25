@@ -240,6 +240,13 @@ impl Properties {
             .is_some_and(|value| value & 3 != 0)
     }
 
+    /// `Some((author index, raw DTTM))` when the text is an insertion
+    /// revision (MS-DOC 2.6.1 sprmCFRMarkIns).
+    pub(in crate::doc) fn direct_insertion(&self) -> Option<(Option<u16>, Option<u32>)> {
+        (self.insertion.inserted == Some(true))
+            .then_some((self.insertion.author, self.insertion.date))
+    }
+
     pub(in crate::doc) fn direct_vanish(&self) -> bool {
         self.bool_value("vanish").unwrap_or(false)
     }
