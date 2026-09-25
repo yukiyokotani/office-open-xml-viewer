@@ -9,10 +9,10 @@
 use wasm_bindgen::prelude::*;
 
 mod cfb;
-mod lcid;
 mod doc;
 #[cfg(feature = "direct-doc")]
 mod doc_wasm;
+mod lcid;
 mod officeart;
 mod ooxml;
 mod ppt;

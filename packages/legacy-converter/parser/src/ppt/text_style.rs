@@ -151,13 +151,10 @@ pub(super) fn write(
         let base = context
             .levels
             .and_then(|levels| levels.get(usize::from(pf[pi].1.level)));
-        let properties = pf[pi]
-            .1
-            .inherit(base.map(|v| &v.paragraph))
-            .xml(Context {
-                auto_number: auto_number::paragraph(&groups, &mut number_group, cp, para_end),
-                ..context
-            })?;
+        let properties = pf[pi].1.inherit(base.map(|v| &v.paragraph)).xml(Context {
+            auto_number: auto_number::paragraph(&groups, &mut number_group, cp, para_end),
+            ..context
+        })?;
         if let Some(tabs) = context.ruler_tabs {
             let prefix = properties
                 .strip_suffix("</a:pPr>")
@@ -661,7 +658,9 @@ impl AuthoredFontSizes {
     }
     #[cfg(test)]
     pub fn get(self, level: usize) -> Option<u16> {
-        (level < self.level_count()).then(|| self.values[level]).flatten()
+        (level < self.level_count())
+            .then(|| self.values[level])
+            .flatten()
     }
 }
 pub(super) type AuthoredFontSizeTable = [Option<AuthoredFontSizes>; 9];
@@ -1248,22 +1247,47 @@ mod tests {
     #[test]
     fn master_retains_authored_type_level_count_and_explicit_sizes_before_defaults_merge() {
         let default_bytes = [
-            u16s(2), u32s(0), u32s(0x20000), u16s(18),
-            u32s(0), u32s(0x20000), u16s(16),
-        ].concat();
+            u16s(2),
+            u32s(0),
+            u32s(0x20000),
+            u16s(18),
+            u32s(0),
+            u32s(0x20000),
+            u16s(16),
+        ]
+        .concat();
         let defaults = read_levels(
-            Record { version: 0, instance: 4, kind: 4003, payload: &default_bytes },
+            Record {
+                version: 0,
+                instance: 4,
+                kind: 4003,
+                payload: &default_bytes,
+            },
             &mut 100,
-        ).unwrap();
+        )
+        .unwrap();
         let authored_bytes = [
-            u16s(2), u16s(0), u32s(0), u32s(0x20000), u16s(20),
-            u16s(1), u32s(0), u32s(0),
-        ].concat();
+            u16s(2),
+            u16s(0),
+            u32s(0),
+            u32s(0x20000),
+            u16s(20),
+            u16s(1),
+            u32s(0),
+            u32s(0),
+        ]
+        .concat();
         let master = Master::parse(
-            &[Record { version: 0, instance: 8, kind: 4003, payload: &authored_bytes }],
+            &[Record {
+                version: 0,
+                instance: 8,
+                kind: 4003,
+                payload: &authored_bytes,
+            }],
             &defaults,
             &mut 100,
-        ).unwrap();
+        )
+        .unwrap();
         let authored = master.authored_font_sizes(8).unwrap();
         assert_eq!(authored.level_count(), 2);
         assert_eq!(authored.get(0), Some(20));

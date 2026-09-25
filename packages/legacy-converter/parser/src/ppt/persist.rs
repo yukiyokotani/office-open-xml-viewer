@@ -30,17 +30,27 @@ pub(super) type OwnedPresentation =
 impl OwnedPresentation {
     fn into_borrowed(self, document: &[u8]) -> Result<Presentation<'_>, String> {
         Ok(PresentationStorage {
-            slides: self.slides.into_iter()
+            slides: self
+                .slides
+                .into_iter()
                 .map(|(record, text)| Ok((record.view(document)?, text)))
                 .collect::<Result<_, String>>()?,
-            outline_styles: self.outline_styles.into_iter()
-                .map(|styles| styles.into_iter()
-                    .map(|style| style.map(|span| span.view(document)).transpose())
-                    .collect::<Result<_, _>>())
+            outline_styles: self
+                .outline_styles
+                .into_iter()
+                .map(|styles| {
+                    styles
+                        .into_iter()
+                        .map(|style| style.map(|span| span.view(document)).transpose())
+                        .collect::<Result<_, _>>()
+                })
                 .collect::<Result<_, _>>()?,
             ole_objects: self.ole_objects,
-            image_entries: self.image_entries.into_iter()
-                .map(|record| record.view(document)).collect::<Result<_, _>>()?,
+            image_entries: self
+                .image_entries
+                .into_iter()
+                .map(|record| record.view(document))
+                .collect::<Result<_, _>>()?,
             shape_masters: self.shape_masters,
             outline_types: self.outline_types,
             outline_slide_numbers: self.outline_slide_numbers,
@@ -478,10 +488,18 @@ pub(crate) mod tests {
         assert_eq!(owned.outline_slide_numbers, borrowed.outline_slide_numbers);
         for (index, (span, text)) in owned.slides.iter().enumerate() {
             assert_eq!(text, &borrowed.slides[index].1);
-            assert_eq!(span.view(&stream).unwrap().payload, borrowed.slides[index].0.payload);
-            for (span, bytes) in owned.outline_styles[index].iter()
-                .zip(&borrowed.outline_styles[index]) {
-                assert_eq!(span.as_ref().map(|span| span.view(&stream).unwrap()), *bytes);
+            assert_eq!(
+                span.view(&stream).unwrap().payload,
+                borrowed.slides[index].0.payload
+            );
+            for (span, bytes) in owned.outline_styles[index]
+                .iter()
+                .zip(&borrowed.outline_styles[index])
+            {
+                assert_eq!(
+                    span.as_ref().map(|span| span.view(&stream).unwrap()),
+                    *bytes
+                );
             }
         }
         drop(borrowed);
@@ -497,7 +515,10 @@ pub(crate) mod tests {
         assert_eq!(viewed.document_text_axes, Some(axes));
         assert_eq!(viewed.slides[0].1, ["second"]);
         assert_eq!(viewed.slides[1].1, ["first"]);
-        assert!(viewed.outline_styles.iter().all(|styles| styles[0].is_some()));
+        assert!(viewed
+            .outline_styles
+            .iter()
+            .all(|styles| styles[0].is_some()));
         assert_eq!(viewed.slides.len(), 2); // Dead physical slide remains excluded.
     }
 
@@ -505,8 +526,12 @@ pub(crate) mod tests {
     fn owned_presentation_rejects_short_backing_at_view_time() {
         let (stream, edit) = fixture_with_styles(true);
         let owned = resolve_owned(&stream, edit, &mut MAX_RECORDS.clone()).unwrap();
-        let last_slide_end = owned.slides.iter()
-            .map(|(record, _)| record.payload_span().range().end).max().unwrap();
+        let last_slide_end = owned
+            .slides
+            .iter()
+            .map(|(record, _)| record.payload_span().range().end)
+            .max()
+            .unwrap();
         assert!(owned.into_borrowed(&stream[..last_slide_end - 1]).is_err());
     }
 

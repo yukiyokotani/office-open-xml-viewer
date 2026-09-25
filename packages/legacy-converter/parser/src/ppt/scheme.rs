@@ -544,7 +544,10 @@ mod tests {
         // retained until paint, using the destination slide's current scheme.
         let input = background_slide(1006, 200, 4, 0x123456);
         let input_span = record_span_with_end(&input, 0, &mut 100, "test").unwrap().0;
-        let paint = r.background(&input, &input_span, &mut 100).unwrap().unwrap();
+        let paint = r
+            .background(&input, &input_span, &mut 100)
+            .unwrap()
+            .unwrap();
         assert!(paint
             .paint
             .background_fill(Some(&[0xabcdef; 8]))

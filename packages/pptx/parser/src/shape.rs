@@ -6,8 +6,8 @@
 
 use crate::chart::{parse_chartex_with_images, parse_legacy_chart_with_style_parts_and_images};
 use crate::fill::{
-    line_properties_to_stroke, parse_blip_alpha, parse_blip_fill, parse_color_node, parse_cust_geom,
-    parse_effect_lst, parse_fill, parse_scene3d, parse_sp3d, parse_stroke,
+    line_properties_to_stroke, parse_blip_alpha, parse_blip_fill, parse_color_node,
+    parse_cust_geom, parse_effect_lst, parse_fill, parse_scene3d, parse_sp3d, parse_stroke,
     parse_style_matrix_effects, parse_style_matrix_fill_from_source, parse_table_style_fill,
     parse_xfrm, EffectLst,
 };
@@ -1049,40 +1049,46 @@ pub(crate) fn parse_shape(
         group_fill.cloned()
     } else {
         let authored_fill = sp_pr.and_then(|p| {
-            p.children().find(|node| node.is_element() && matches!(
-                node.tag_name().name(),
-                "noFill" | "solidFill" | "gradFill" | "pattFill" | "blipFill"
-            ))
+            p.children().find(|node| {
+                node.is_element()
+                    && matches!(
+                        node.tag_name().name(),
+                        "noFill" | "solidFill" | "gradFill" | "pattFill" | "blipFill"
+                    )
+            })
         });
-        let own = if let Some(blip_fill) = authored_fill.filter(|n| n.tag_name().name() == "blipFill") {
-            let mut resolve = |relationship_id: &str| {
-                let target = rels.get(relationship_id)?;
-                let path = resolve_path(source_dir, target);
-                zip.index_for_name(&path)?;
-                Some(path)
+        let own =
+            if let Some(blip_fill) = authored_fill.filter(|n| n.tag_name().name() == "blipFill") {
+                let mut resolve = |relationship_id: &str| {
+                    let target = rels.get(relationship_id)?;
+                    let path = resolve_path(source_dir, target);
+                    zip.index_for_name(&path)?;
+                    Some(path)
+                };
+                parse_blip_fill(blip_fill, theme, &mut resolve)
+            } else {
+                sp_pr.and_then(|p| parse_fill(p, theme))
             };
-            parse_blip_fill(blip_fill, theme, &mut resolve)
-        } else {
-            sp_pr.and_then(|p| parse_fill(p, theme))
-        };
         if authored_fill.is_some_and(|node| node.tag_name().name() == "blipFill") {
             own
         } else {
             let inherited = if style_fill.is_none() && ph_node.is_some() {
-                lph.lookup_blip_fill(&ph_type, ph_idx).map(|bf| Fill::Image {
-                    image_path: bf.image_path,
-                    mime_type: bf.mime_type,
-                    svg_image_path: bf.svg_image_path,
-                    dpi: bf.dpi,
-                    rot_with_shape: bf.rot_with_shape,
-                    src_rect: bf.src_rect,
-                    fill_rect: bf.fill_rect,
-                    stretch: bf.stretch,
-                    tile: bf.tile,
-                    alpha: bf.alpha,
-                    duotone: bf.duotone,
-                    blip_effects: bf.blip_effects,
-                }).or_else(|| lph.lookup_fill(&ph_type, ph_idx))
+                lph.lookup_blip_fill(&ph_type, ph_idx)
+                    .map(|bf| Fill::Image {
+                        image_path: bf.image_path,
+                        mime_type: bf.mime_type,
+                        svg_image_path: bf.svg_image_path,
+                        dpi: bf.dpi,
+                        rot_with_shape: bf.rot_with_shape,
+                        src_rect: bf.src_rect,
+                        fill_rect: bf.fill_rect,
+                        stretch: bf.stretch,
+                        tile: bf.tile,
+                        alpha: bf.alpha,
+                        duotone: bf.duotone,
+                        blip_effects: bf.blip_effects,
+                    })
+                    .or_else(|| lph.lookup_fill(&ph_type, ph_idx))
             } else {
                 None
             };
@@ -1221,7 +1227,9 @@ pub(crate) fn parse_shape(
         .unwrap_or_default();
     let style_scene3d = style_effects.scene3d;
     let style_sp3d = style_effects.sp3d;
-    let has_style_effect_ref = style_node.and_then(|style| child(style, "effectRef")).is_some();
+    let has_style_effect_ref = style_node
+        .and_then(|style| child(style, "effectRef"))
+        .is_some();
     let local_effect_node =
         sp_pr.and_then(|p| child(p, "effectLst").or_else(|| child(p, "effectDag")));
     let EffectLst {
@@ -1238,11 +1246,21 @@ pub(crate) fn parse_shape(
         style_effects.effects
     } else {
         EffectLst {
-            shadow: inherited_picture_properties.as_ref().and_then(|p| p.shadow.clone()),
-            inner_shadow: inherited_picture_properties.as_ref().and_then(|p| p.inner_shadow.clone()),
-            glow: inherited_picture_properties.as_ref().and_then(|p| p.glow.clone()),
-            soft_edge: inherited_picture_properties.as_ref().and_then(|p| p.soft_edge.clone()),
-            reflection: inherited_picture_properties.as_ref().and_then(|p| p.reflection.clone()),
+            shadow: inherited_picture_properties
+                .as_ref()
+                .and_then(|p| p.shadow.clone()),
+            inner_shadow: inherited_picture_properties
+                .as_ref()
+                .and_then(|p| p.inner_shadow.clone()),
+            glow: inherited_picture_properties
+                .as_ref()
+                .and_then(|p| p.glow.clone()),
+            soft_edge: inherited_picture_properties
+                .as_ref()
+                .and_then(|p| p.soft_edge.clone()),
+            reflection: inherited_picture_properties
+                .as_ref()
+                .and_then(|p| p.reflection.clone()),
         }
     };
 
@@ -1281,16 +1299,27 @@ pub(crate) fn parse_shape(
         placeholder_type: placeholder_type_out,
         placeholder_idx: ph_idx,
         text_rect: None,
-        scene3d: sp_pr
-            .and_then(parse_scene3d)
-            .or(style_scene3d)
-            .or_else(|| (!has_style_effect_ref).then(|| inherited_picture_properties.as_ref()
-                .and_then(|p| p.scene3d.clone())).flatten()),
+        scene3d: sp_pr.and_then(parse_scene3d).or(style_scene3d).or_else(|| {
+            (!has_style_effect_ref)
+                .then(|| {
+                    inherited_picture_properties
+                        .as_ref()
+                        .and_then(|p| p.scene3d.clone())
+                })
+                .flatten()
+        }),
         sp3d: sp_pr
             .and_then(|node| parse_sp3d(node, theme))
             .or(style_sp3d)
-            .or_else(|| (!has_style_effect_ref).then(|| inherited_picture_properties.as_ref()
-                .and_then(|p| p.sp3d.clone())).flatten()),
+            .or_else(|| {
+                (!has_style_effect_ref)
+                    .then(|| {
+                        inherited_picture_properties
+                            .as_ref()
+                            .and_then(|p| p.sp3d.clone())
+                    })
+                    .flatten()
+            }),
     })
 }
 
@@ -2534,7 +2563,8 @@ pub(crate) fn parse_sp_tree_node(
                                         intrinsic_width_px,
                                         intrinsic_height_px,
                                         stroke,
-                                        fill: child(node, "spPr").and_then(|sp| parse_fill(sp, theme)),
+                                        fill: child(node, "spPr")
+                                            .and_then(|sp| parse_fill(sp, theme)),
                                         prst_geom: None,
                                         prst_adjust: None,
                                         src_rect: blip_fill.and_then(parse_src_rect),
@@ -3514,7 +3544,10 @@ mod picture_property_resolution_tests {
         let mut out = Vec::new();
         let rels = HashMap::from([
             ("rIdImg".to_owned(), "../media/image1.png".to_owned()),
-            ("rIdLink".to_owned(), "https://example.invalid/shape".to_owned()),
+            (
+                "rIdLink".to_owned(),
+                "https://example.invalid/shape".to_owned(),
+            ),
         ]);
         parse_sp_tree_node(
             doc.root_element(),
@@ -3571,7 +3604,9 @@ mod picture_property_resolution_tests {
             &LayoutPlaceholders::default(),
             &theme,
             &mut zip,
-        ) else { panic!("expected ordinary picture") };
+        ) else {
+            panic!("expected ordinary picture")
+        };
         assert_eq!(ordinary.id.as_deref(), Some("1"));
         assert_theme_properties(&ordinary);
 
@@ -3591,13 +3626,33 @@ mod picture_property_resolution_tests {
             &LayoutPlaceholders::default(),
             &theme,
             &mut zip,
-        ) else { panic!("expected one owning shape") };
+        ) else {
+            panic!("expected one owning shape")
+        };
         assert_eq!(blip_shape.id.as_deref(), Some("2"));
         assert_eq!(blip_shape.name.as_deref(), Some("Blip shape"));
-        assert_eq!(blip_shape.hyperlink.as_deref(), Some("https://example.invalid/shape"));
-        assert_eq!(blip_shape.stroke.as_ref().map(|stroke| stroke.width), Some(22_222));
-        assert_eq!(blip_shape.shadow.as_ref().map(|shadow| shadow.dist), Some(200));
-        let Some(Fill::Image { dpi, rot_with_shape, src_rect, fill_rect, stretch, alpha, .. }) = blip_shape.fill else {
+        assert_eq!(
+            blip_shape.hyperlink.as_deref(),
+            Some("https://example.invalid/shape")
+        );
+        assert_eq!(
+            blip_shape.stroke.as_ref().map(|stroke| stroke.width),
+            Some(22_222)
+        );
+        assert_eq!(
+            blip_shape.shadow.as_ref().map(|shadow| shadow.dist),
+            Some(200)
+        );
+        let Some(Fill::Image {
+            dpi,
+            rot_with_shape,
+            src_rect,
+            fill_rect,
+            stretch,
+            alpha,
+            ..
+        }) = blip_shape.fill
+        else {
             panic!("expected image fill")
         };
         assert_eq!(dpi, Some(144));
@@ -3606,7 +3661,8 @@ mod picture_property_resolution_tests {
         assert_eq!(src_rect.map(|rect| rect.l), Some(0.1));
         assert_eq!(fill_rect.map(|rect| rect.r), Some(0.2));
         assert_eq!(alpha, Some(0.5));
-        let TextRun::Text(run) = &blip_shape.text_body.as_ref().unwrap().paragraphs[0].runs[0] else {
+        let TextRun::Text(run) = &blip_shape.text_body.as_ref().unwrap().paragraphs[0].runs[0]
+        else {
             panic!("expected text run")
         };
         assert_eq!(run.text, "Image fill text");
@@ -3615,21 +3671,31 @@ mod picture_property_resolution_tests {
     #[test]
     fn unresolved_or_explicit_no_fill_keeps_the_owning_shape_and_text() {
         for (fill_xml, expect_no_fill) in [
-            (r#"<a:blipFill><a:blip r:embed="missing"/><a:stretch/></a:blipFill>"#, false),
+            (
+                r#"<a:blipFill><a:blip r:embed="missing"/><a:stretch/></a:blipFill>"#,
+                false,
+            ),
             ("<a:noFill/>", true),
         ] {
-            let xml = format!(r#"<p:sp xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+            let xml = format!(
+                r#"<p:sp xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
                 xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
                 xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
               <p:nvSpPr><p:cNvPr id="7" name="Owner"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
               <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1000" cy="1000"/></a:xfrm>
                 <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>{fill_xml}</p:spPr>
               <p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Still owned</a:t></a:r></a:p></p:txBody>
-            </p:sp>"#);
+            </p:sp>"#
+            );
             let mut zip = image_zip();
             let SlideElement::Shape(shape) = run_tree_child(
-                &xml, &LayoutPlaceholders::default(), &HashMap::new(), &mut zip,
-            ) else { panic!("must remain one shape") };
+                &xml,
+                &LayoutPlaceholders::default(),
+                &HashMap::new(),
+                &mut zip,
+            ) else {
+                panic!("must remain one shape")
+            };
             assert_eq!(shape.id.as_deref(), Some("7"));
             assert_eq!(matches!(shape.fill, Some(Fill::None)), expect_no_fill);
             assert!(shape.text_body.is_some());
@@ -3651,7 +3717,9 @@ mod picture_property_resolution_tests {
             &LayoutPlaceholders::default(),
             &HashMap::from([("accent1".to_owned(), "00AA44".to_owned())]),
             &mut zip,
-        ) else { panic!("expected shape") };
+        ) else {
+            panic!("expected shape")
+        };
         assert!(matches!(shape.fill, Some(Fill::Solid { ref color }) if color == "00AA44"));
         assert!(shape.text_body.is_some());
     }
@@ -3731,9 +3799,17 @@ mod picture_property_resolution_tests {
             &placeholders,
             &HashMap::new(),
             &mut zip,
-        ) else { panic!("expected inherited image-filled shape") };
-        assert_eq!(inherited_shape.stroke.as_ref().map(|stroke| stroke.width), Some(33_333));
-        assert_eq!(inherited_shape.shadow.as_ref().map(|shadow| shadow.dist), Some(700));
+        ) else {
+            panic!("expected inherited image-filled shape")
+        };
+        assert_eq!(
+            inherited_shape.stroke.as_ref().map(|stroke| stroke.width),
+            Some(33_333)
+        );
+        assert_eq!(
+            inherited_shape.shadow.as_ref().map(|shadow| shadow.dist),
+            Some(700)
+        );
         assert!(matches!(inherited_shape.fill, Some(Fill::Image { .. })));
 
         let mut zip = image_zip();
@@ -3747,7 +3823,9 @@ mod picture_property_resolution_tests {
             &placeholders,
             &HashMap::new(),
             &mut zip,
-        ) else { panic!("expected placeholder picture") };
+        ) else {
+            panic!("expected placeholder picture")
+        };
         assert_inherited(&placeholder_picture);
     }
 

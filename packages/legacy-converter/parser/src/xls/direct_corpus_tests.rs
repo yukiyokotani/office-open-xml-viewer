@@ -183,7 +183,8 @@ fn native_session_matches_immutable_archive_models() {
             let sheet_name = actual_bootstrap["workbook"]["sheets"][sheet_index]["name"]
                 .as_str()
                 .expect("native sheet name");
-            let projected = direct.projected_sheet(sheet_index, sheet_name)
+            let projected = direct
+                .projected_sheet(sheet_index, sheet_name)
                 .unwrap_or_else(|error| {
                     panic!("corpus index {document} sheet {sheet_index} error: {error}")
                 });

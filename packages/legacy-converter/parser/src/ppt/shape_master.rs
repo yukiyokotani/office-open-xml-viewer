@@ -95,10 +95,7 @@ impl Resolver {
             .map(|v| &v.geometry)
             .ok_or_else(|| unsupported("unresolved PowerPoint master geometry"))
     }
-    pub fn gradient(
-        &self,
-        id: u32,
-    ) -> Result<&crate::officeart::gradient::Spanned, String> {
+    pub fn gradient(&self, id: u32) -> Result<&crate::officeart::gradient::Spanned, String> {
         self.resolved
             .get(&id)
             .map(|value| &value.gradient)
@@ -341,11 +338,10 @@ mod tests {
         for id in 1..=MAX_MASTER_SHAPES as u32 {
             r.insert(node(id, None)).unwrap();
         }
-        assert!(
-            r.insert(node(MAX_MASTER_SHAPES as u32 + 1, None))
-                .unwrap_err()
-                .contains("limit")
-        );
+        assert!(r
+            .insert(node(MAX_MASTER_SHAPES as u32 + 1, None))
+            .unwrap_err()
+            .contains("limit"));
         let mut r = Resolver::default();
         r.insert(node(1, None)).unwrap();
         assert!(r.insert(node(1, None)).unwrap_err().contains("duplicate"));
@@ -355,7 +351,8 @@ mod tests {
     fn resolved_master_geometry_survives_backing_move_and_empty_child_reset() {
         let mut backing = [2u16.to_le_bytes(), 2u16.to_le_bytes(), 8u16.to_le_bytes()].concat();
         backing.extend([0i32, 0, 10, 10].into_iter().flat_map(i32::to_le_bytes));
-        let span = crate::officeart::ByteSpan::new(0..backing.len(), backing.len(), "geometry").unwrap();
+        let span =
+            crate::officeart::ByteSpan::new(0..backing.len(), backing.len(), "geometry").unwrap();
         let mut root = node(1, None);
         root.geometry.complex(0x145, span);
         let mut child = node(2, Some(1));
@@ -365,19 +362,33 @@ mod tests {
         resolver.insert(child).unwrap();
         resolver.finish(&mut 20).unwrap();
         let moved = backing;
-        assert!(resolver.geometry(1).unwrap().view(&moved).unwrap().decode(&mut 10).unwrap().is_some());
-        assert!(resolver.geometry(2).unwrap().view(&moved).unwrap().decode(&mut 10).unwrap().is_none());
-        assert!(resolver.geometry(1).unwrap().view(&moved[..moved.len() - 1]).is_err());
+        assert!(resolver
+            .geometry(1)
+            .unwrap()
+            .view(&moved)
+            .unwrap()
+            .decode(&mut 10)
+            .unwrap()
+            .is_some());
+        assert!(resolver
+            .geometry(2)
+            .unwrap()
+            .view(&moved)
+            .unwrap()
+            .decode(&mut 10)
+            .unwrap()
+            .is_none());
+        assert!(resolver
+            .geometry(1)
+            .unwrap()
+            .view(&moved[..moved.len() - 1])
+            .is_err());
     }
     #[test]
     fn resolved_master_gradient_inherits_and_explicit_reset_vetoes_parent() {
         let backing = vec![1, 0, 1, 0, 8, 0, 7, 0, 0, 0, 0, 0, 0, 0];
-        let span = crate::officeart::ByteSpan::new(
-            0..backing.len(),
-            backing.len(),
-            "gradient",
-        )
-        .unwrap();
+        let span =
+            crate::officeart::ByteSpan::new(0..backing.len(), backing.len(), "gradient").unwrap();
         let mut root = node(1, None);
         root.gradient.set(span);
         let inherited = node(2, Some(1));

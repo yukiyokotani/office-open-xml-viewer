@@ -3708,15 +3708,16 @@ mod blip_svg_tests {
     fn picture_xfrm_preserves_rotation_and_flips_without_extent() {
         let mut rels = HashMap::new();
         rels.insert("rIdPng".to_string(), "../media/image1.png".to_string());
-        let xml = drawing_xml(r#"<a:blip r:embed="rIdPng"/>"#)
-            .replace(
-                "<a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"300000\" cy=\"300000\"/></a:xfrm>",
-                "<a:xfrm rot=\"-5400000\" flipH=\"true\" flipV=\"1\"><a:off x=\"0\" y=\"0\"/></a:xfrm>",
-            );
+        let xml = drawing_xml(r#"<a:blip r:embed="rIdPng"/>"#).replace(
+            "<a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"300000\" cy=\"300000\"/></a:xfrm>",
+            "<a:xfrm rot=\"-5400000\" flipH=\"true\" flipV=\"1\"><a:off x=\"0\" y=\"0\"/></a:xfrm>",
+        );
         let data = build_media_zip(PNG_1X1, SVG);
         let mut archive = crate::XlsxZip::new(Cursor::new(data)).unwrap();
         let anchor = parse_drawing_anchors(&xml, &rels, "xl/drawings", &mut archive, &[])
-            .into_iter().next().unwrap();
+            .into_iter()
+            .next()
+            .unwrap();
 
         assert_eq!(anchor.native_ext_cx, 0);
         assert_eq!(anchor.native_ext_cy, 0);
@@ -3730,12 +3731,16 @@ mod blip_svg_tests {
         let mut rels = HashMap::new();
         rels.insert("rIdPng".to_string(), "../media/image1.png".to_string());
         for rot in ["0", "NaN", "inf", "5400000.5", "2147483648"] {
-            let xml = drawing_xml(r#"<a:blip r:embed="rIdPng"/>"#)
-                .replace("<a:xfrm>", &format!("<a:xfrm rot=\"{rot}\" flipH=\"false\" flipV=\"0\">"));
+            let xml = drawing_xml(r#"<a:blip r:embed="rIdPng"/>"#).replace(
+                "<a:xfrm>",
+                &format!("<a:xfrm rot=\"{rot}\" flipH=\"false\" flipV=\"0\">"),
+            );
             let data = build_media_zip(PNG_1X1, SVG);
             let mut archive = crate::XlsxZip::new(Cursor::new(data)).unwrap();
             let anchor = parse_drawing_anchors(&xml, &rels, "xl/drawings", &mut archive, &[])
-                .into_iter().next().unwrap();
+                .into_iter()
+                .next()
+                .unwrap();
             assert_eq!(anchor.rotation, None, "rot={rot}");
             assert_eq!(anchor.flip_h, None);
             assert_eq!(anchor.flip_v, None);

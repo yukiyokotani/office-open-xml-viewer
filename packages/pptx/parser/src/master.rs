@@ -20,8 +20,7 @@ use crate::text::{
     BuMarker, LevelBullets, LevelFontSizes, LevelIndents, ParagraphSpacing,
 };
 use crate::theme::{
-    bake_clr_map, parse_theme_part, resolve_theme_typeface, PptxTheme,
-    PptxThemeSource,
+    bake_clr_map, parse_theme_part, resolve_theme_typeface, PptxTheme, PptxThemeSource,
 };
 use crate::types::*;
 use crate::{
@@ -1646,14 +1645,35 @@ pub(crate) fn parse_layout_placeholders(
                 Some(path)
             };
             let Fill::Image {
-                svg_image_path, dpi, rot_with_shape, src_rect, fill_rect,
-                stretch, tile, alpha, duotone, blip_effects, ..
-            } = parse_blip_fill(bf, theme, &mut resolve)? else {
+                svg_image_path,
+                dpi,
+                rot_with_shape,
+                src_rect,
+                fill_rect,
+                stretch,
+                tile,
+                alpha,
+                duotone,
+                blip_effects,
+                ..
+            } = parse_blip_fill(bf, theme, &mut resolve)?
+            else {
                 return None;
             };
-            Some(InheritedBlipFill { image_path, mime_type, svg_image_path, dpi,
-                rot_with_shape, src_rect, fill_rect, tile, stretch, alpha, duotone,
-                blip_effects })
+            Some(InheritedBlipFill {
+                image_path,
+                mime_type,
+                svg_image_path,
+                dpi,
+                rot_with_shape,
+                src_rect,
+                fill_rect,
+                tile,
+                stretch,
+                alpha,
+                duotone,
+                blip_effects,
+            })
         });
 
         if let Some(ph) = ph_node {
