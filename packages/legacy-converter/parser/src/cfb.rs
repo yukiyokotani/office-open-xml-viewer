@@ -6,7 +6,9 @@
 //! [MS-CFB] sections 2.2 through 2.6. Existing top-level lookup remains flat;
 //! parent-scoped lookup additionally validates the directory hierarchy.
 
-use std::collections::{HashMap, HashSet};
+#[cfg(any(test, feature = "direct-xls", feature = "direct-ppt"))]
+use std::collections::HashMap;
+use std::collections::HashSet;
 
 // [MS-CFB] 2.2 Compound File Header (`_abSig`). This is a byte sequence,
 // not a little-endian integer; reversing it would reject every Office file.
@@ -15,6 +17,9 @@ const FREE_SECTOR: u32 = 0xffff_ffff;
 const END_OF_CHAIN: u32 = 0xffff_fffe;
 const FAT_SECTOR: u32 = 0xffff_fffd;
 const DIFAT_SECTOR: u32 = 0xffff_fffc;
+// Directory hierarchy (siblings, children) is validated only for the
+// parent-scoped lookups of the direct XLS and PPT readers.
+#[cfg(any(test, feature = "direct-xls", feature = "direct-ppt"))]
 const NO_STREAM: u32 = 0xffff_ffff;
 const HEADER_BYTES: usize = 512;
 const DIRECTORY_ENTRY_BYTES: usize = 128;
@@ -23,14 +28,21 @@ const MAX_DIRECTORY_ENTRIES: usize = 1_000_000;
 #[derive(Debug, Clone, Copy)]
 struct DirectoryEntry {
     object_type: u8,
+    #[cfg(any(test, feature = "direct-xls", feature = "direct-ppt"))]
     left_sibling: u32,
+    #[cfg(any(test, feature = "direct-xls", feature = "direct-ppt"))]
     right_sibling: u32,
+    #[cfg(any(test, feature = "direct-xls", feature = "direct-ppt"))]
     child: u32,
     start_sector: u32,
     stream_size: u64,
 }
 
 type DirectorySlot = Option<(String, DirectoryEntry)>;
+/// The root entry, each storage's children by name, and whether a storage
+/// has a non-ASCII child name.
+#[cfg(any(test, feature = "direct-xls", feature = "direct-ppt"))]
+type Hierarchy = (usize, Vec<HashMap<String, usize>>, Vec<bool>);
 
 pub struct CompoundFile<'a> {
     bytes: &'a [u8],
@@ -45,6 +57,7 @@ pub struct CompoundFile<'a> {
     root_mini_stream: Vec<u8>,
 }
 
+#[cfg(any(test, feature = "direct-xls", feature = "direct-ppt"))]
 pub struct ScopedStreams<'cfb, 'data> {
     compound: &'cfb CompoundFile<'data>,
     root: usize,
@@ -52,7 +65,9 @@ pub struct ScopedStreams<'cfb, 'data> {
     has_non_ascii_child: Vec<bool>,
 }
 
+#[cfg(any(test, feature = "direct-xls", feature = "direct-ppt"))]
 impl ScopedStreams<'_, '_> {
+    #[cfg(any(test, feature = "direct-ppt"))]
     pub fn has_stream(&self, path: &[&str]) -> Result<bool, String> {
         Ok(self.resolve_stream_entry(path)?.is_some())
     }
@@ -337,6 +352,7 @@ impl<'a> CompoundFile<'a> {
         self.read_stream(*entry)
     }
 
+    #[cfg(any(test, feature = "direct-xls", feature = "direct-ppt"))]
     /// Validate and index raw MS-CFB directory IDs once for repeated ASCII
     /// parent-scoped lookups. Existing flat lookup does not require this view.
     pub fn scoped_streams(&self) -> Result<ScopedStreams<'_, 'a>, String> {
@@ -368,9 +384,8 @@ impl<'a> CompoundFile<'a> {
         }
     }
 
-    fn validate_hierarchy(
-        &self,
-    ) -> Result<(usize, Vec<HashMap<String, usize>>, Vec<bool>), String> {
+    #[cfg(any(test, feature = "direct-xls", feature = "direct-ppt"))]
+    fn validate_hierarchy(&self) -> Result<Hierarchy, String> {
         let roots: Vec<_> = self
             .directory
             .iter()
@@ -544,8 +559,11 @@ fn parse_directory(bytes: &[u8], major: u16) -> Result<Vec<DirectorySlot>, Strin
             name,
             DirectoryEntry {
                 object_type,
+                #[cfg(any(test, feature = "direct-xls", feature = "direct-ppt"))]
                 left_sibling: u32_at(entry_bytes, 68)?,
+                #[cfg(any(test, feature = "direct-xls", feature = "direct-ppt"))]
                 right_sibling: u32_at(entry_bytes, 72)?,
+                #[cfg(any(test, feature = "direct-xls", feature = "direct-ppt"))]
                 child: u32_at(entry_bytes, 76)?,
                 start_sector,
                 stream_size,
