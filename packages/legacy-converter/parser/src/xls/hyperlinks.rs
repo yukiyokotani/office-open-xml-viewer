@@ -181,7 +181,7 @@ pub(super) fn hlink(data: &[u8]) -> Result<xlsx_model::Hyperlink, String> {
 
 /// HLinkTooltip (2.4.141): validated only (see the module note).
 pub(super) fn tooltip(data: &[u8]) -> Result<(), String> {
-    if u16_at(data, 0)? != 0x0800 || data.len() < 14 || data.len() % 2 != 0 {
+    if u16_at(data, 0)? != 0x0800 || data.len() < 14 || !data.len().is_multiple_of(2) {
         return Err(unsupported("invalid XLS hyperlink ToolTip"));
     }
     let units = (data.len() - 10) / 2;

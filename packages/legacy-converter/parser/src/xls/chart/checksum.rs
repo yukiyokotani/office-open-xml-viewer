@@ -12,6 +12,7 @@
 //! of Excel-saved charts (frames, axes, series, points, markers, drop bars):
 //! - the CRC starts from 0;
 //! - a LineFormat `lns` of 5 (no line) enters the `pattern` byte as 0xFF.
+//!
 //! Every non-picture case matched with these rules. Picture-filled frames did
 //! not yet match; such a mismatch only selects the BIFF records, which is the
 //! specified fallback, so an unmatched case never adopts unverified XML.

@@ -77,7 +77,7 @@ let out = `// Built-in PivotTable styles of ECMA-376 Part 1 Annex G
 static PIVOT_DXFS: [PresetDxf; ${dxfIds.size}] = [\n`;
 for (const expr of dxfIds.keys()) out += `    ${expr},\n`;
 out += `];\n\n/// (style name, [(element type, band size, PIVOT_DXFS index)]).
-static PIVOT_STYLES: [(&str, &[(&str, u32, u16)]); ${styles.length}] = [\n`;
+static PIVOT_STYLES: [PresetStyleEntry; ${styles.length}] = [\n`;
 for (const [name, elements] of styles) {
   out += `    (${JSON.stringify(name)}, &[${elements.map(([t, s, d]) => `(${JSON.stringify(t)}, ${s}, ${d})`).join(', ')}]),\n`;
 }

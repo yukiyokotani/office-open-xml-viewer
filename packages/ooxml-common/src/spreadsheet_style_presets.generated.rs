@@ -527,7 +527,7 @@ static PIVOT_DXFS: [PresetDxf; 520] = [
 ];
 
 /// (style name, [(element type, band size, PIVOT_DXFS index)]).
-static PIVOT_STYLES: [(&str, &[(&str, u32, u16)]); 84] = [
+static PIVOT_STYLES: [PresetStyleEntry; 84] = [
     ("PivotStyleMedium28", &[("wholeTable", 1, 5), ("headerRow", 1, 4), ("totalRow", 1, 3), ("firstColumn", 1, 0), ("secondRowStripe", 1, 2), ("secondColumnStripe", 1, 2), ("firstSubtotalRow", 1, 1), ("secondSubtotalRow", 1, 1), ("firstRowSubheading", 1, 1), ("pageFieldLabels", 1, 0)]),
     ("PivotStyleMedium27", &[("wholeTable", 1, 10), ("headerRow", 1, 9), ("totalRow", 1, 8), ("firstColumn", 1, 6), ("secondRowStripe", 1, 7), ("secondColumnStripe", 1, 7), ("firstSubtotalRow", 1, 1), ("secondSubtotalRow", 1, 1), ("firstRowSubheading", 1, 1), ("pageFieldLabels", 1, 6)]),
     ("PivotStyleMedium26", &[("wholeTable", 1, 15), ("headerRow", 1, 14), ("totalRow", 1, 13), ("firstColumn", 1, 11), ("secondRowStripe", 1, 12), ("secondColumnStripe", 1, 12), ("firstSubtotalRow", 1, 1), ("secondSubtotalRow", 1, 1), ("firstRowSubheading", 1, 1), ("pageFieldLabels", 1, 11)]),

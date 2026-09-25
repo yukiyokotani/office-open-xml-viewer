@@ -9,13 +9,16 @@ use crate::officeart::{raster, record_with_end};
 const MAX_DRAWING_BYTES: usize = 128 * 1024 * 1024;
 const MAX_MEDIA_BYTES: usize = 128 * 1024 * 1024;
 
+/// A selected image: store index, file extension and decoded bytes.
+pub(super) type Media = (u32, &'static str, Vec<u8>);
+
 /// Resolve only admitted, owned references. Unused catalog images are neither
 /// inflated nor validated; malformed *referenced* images still fail closed.
 pub(super) fn selected(
     records: &[Record<'_>],
     indices: &std::collections::BTreeSet<u32>,
     raster: raster::Raster,
-) -> Result<Vec<(u32, &'static str, Vec<u8>)>, String> {
+) -> Result<Vec<Media>, String> {
     if indices.is_empty() {
         return Ok(Vec::new());
     }
@@ -45,7 +48,7 @@ pub(super) fn selected(
 /// Native-only catalog inspection. Production conversion uses owned, selected
 /// references instead of exposing every global catalog entry.
 #[cfg(any(test, all(feature = "inspection", not(target_arch = "wasm32"))))]
-pub(super) fn images(records: &[Record<'_>]) -> Result<Vec<(u32, &'static str, Vec<u8>)>, String> {
+pub(super) fn images(records: &[Record<'_>]) -> Result<Vec<Media>, String> {
     let first = records
         .first()
         .ok_or_else(|| unsupported("empty BIFF workbook"))?;
@@ -65,11 +68,7 @@ pub(super) fn images(records: &[Record<'_>]) -> Result<Vec<(u32, &'static str, V
 }
 
 #[cfg(any(test, all(feature = "inspection", not(target_arch = "wasm32"))))]
-fn extract(
-    bytes: &[u8],
-    work: &mut usize,
-    mut remaining: usize,
-) -> Result<Vec<(u32, &'static str, Vec<u8>)>, String> {
+fn extract(bytes: &[u8], work: &mut usize, mut remaining: usize) -> Result<Vec<Media>, String> {
     let entries = catalog(bytes, work)?;
     let mut output = Vec::new();
     for (index, entry) in entries.into_iter().enumerate() {

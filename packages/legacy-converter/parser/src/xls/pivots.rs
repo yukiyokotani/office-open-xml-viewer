@@ -63,7 +63,7 @@ pub(super) const RECORDS: [u16; 7] = [0x00b0, 0x00b4, 0x00b5, 0x00b6, 0x00c5, 0x
 
 /// Records whose Continue records extend them (PIVOTIVD, PIVOTPI, PIVOTLI).
 pub(super) fn continued(kind: u16) -> bool {
-    matches!(kind, 0x00b4 | 0x00b5 | 0x00b6)
+    matches!(kind, 0x00b4..=0x00b6)
 }
 
 /// One PivotTable view's records.
@@ -117,9 +117,9 @@ fn views(records: &tables::Records) -> Result<Vec<View>, String> {
             0x080c => view.olap = true,
             // SXAddlHdr (2.5.249): frtHeaderOld, then sxc and sxd.
             0x0864 if data.get(4..6) == Some(&[0x00, 0x1e]) => {
-                if view.style.replace(data.to_vec()).is_some() {
-                    return Err(unsupported("duplicate XLS PivotTable style"));
-                }
+                view.style.replace(data.to_vec()).map_or(Ok(()), |_| {
+                    Err(unsupported("duplicate XLS PivotTable style"))
+                })?
             }
             _ => {}
         }

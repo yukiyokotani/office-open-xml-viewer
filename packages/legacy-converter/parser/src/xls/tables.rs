@@ -395,6 +395,9 @@ impl Styles {
     }
 }
 
+/// A table style element for a PivotTable: tseType, band size, format.
+pub(super) type PivotElement = (u32, u32, xlsx_model::Dxf);
+
 impl Styles {
     /// The workbook's default PivotTable style name, if it names one.
     pub(super) fn default_pivot_style(&self) -> Option<&str> {
@@ -409,7 +412,7 @@ impl Styles {
         &self,
         name: &str,
         context: &Context<'_>,
-    ) -> Result<Option<Vec<(u32, u32, xlsx_model::Dxf)>>, String> {
+    ) -> Result<Option<Vec<PivotElement>>, String> {
         let Some(elements) = self.styles.get(name) else {
             return Ok(None);
         };

@@ -137,8 +137,6 @@ pub(crate) struct Series {
     pub group: u16,
     pub series_format: Option<Format>,
     pub point_formats: BTreeMap<u16, Format>,
-    /// Series.sdtX == 3 (text categories); otherwise numeric.
-    pub text_categories: bool,
     pub trend_or_error: bool,
     /// BRAI (2.4.29) worksheet references by id (0 name, 1 values,
     /// 2 categories, 3 bubble sizes): the ChartParsedFormula rgce bytes.
@@ -375,11 +373,11 @@ pub(crate) fn read(records: &[Record<'_>]) -> Result<RawChart, String> {
                 if chart.series.len() >= MAX_SERIES {
                     return Err(unsupported("too many chart series"));
                 }
-                let sdt_x = u16_at(record.data, 0)?;
-                chart.series.push(Series {
-                    text_categories: sdt_x == 3,
-                    ..Series::default()
-                });
+                // Series (2.4.252) sdtX: the projection takes category values
+                // from the cached cells whatever their type, so only the
+                // record's presence is checked.
+                u16_at(record.data, 0)?;
+                chart.series.push(Series::default());
                 pending = Some(Owner::Series(chart.series.len() - 1));
             }
             id::DATA_FORMAT => {
@@ -578,9 +576,9 @@ pub(crate) fn read(records: &[Record<'_>]) -> Result<RawChart, String> {
             id::VALUE_RANGE => {
                 let flags = u16_at(record.data, 40)?;
                 let pick = |bit: u16, offset: usize| -> Result<Option<f64>, String> {
-                    Ok((flags & bit == 0)
+                    (flags & bit == 0)
                         .then(|| f64_at(record.data, offset))
-                        .transpose()?)
+                        .transpose()
                 };
                 let (min, max, major) = (pick(1, 0)?, pick(2, 8)?, pick(4, 16)?);
                 if let Some(axis) = stack.last_mut().and_then(|b| b.axis.as_mut()) {

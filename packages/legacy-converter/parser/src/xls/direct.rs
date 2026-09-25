@@ -21,6 +21,8 @@ pub(crate) struct DirectSession {
     native_charts: BTreeMap<usize, Vec<xlsx_model::ChartAnchor>>,
     shapes: shapes::Shapes,
     native_shapes: BTreeMap<usize, Vec<xlsx_model::ShapeAnchor>>,
+    /// The next sheet of the sequential test cursor.
+    #[cfg(test)]
     sheet_index: usize,
     measurement_font: Option<styles::NormalFont>,
     default_font: Option<(String, f64)>,
@@ -32,8 +34,8 @@ pub(crate) struct DirectSession {
 }
 
 enum SheetSlot {
-    Neutral { name: String, sheet: SheetData },
-    Projected(ProjectedSheet),
+    Neutral { name: String, sheet: Box<SheetData> },
+    Projected(Box<ProjectedSheet>),
     Consumed,
 }
 
@@ -106,6 +108,7 @@ impl DirectSession {
             native_charts: BTreeMap::new(),
             shapes: std::mem::take(&mut prepared.shapes),
             native_shapes: BTreeMap::new(),
+            #[cfg(test)]
             sheet_index: 0,
             measurement_font: prepared.font,
             default_font,
@@ -141,10 +144,7 @@ impl DirectSession {
             self.native_pictures = std::mem::take(&mut self.pictures)
                 .resolve(pending, mdw, &mut self.warnings)
                 .into_models(&mut self.model_budget)
-                .map_err(|error| {
-                    self.poisoned = true;
-                    error
-                })?;
+                .inspect_err(|_| self.poisoned = true)?;
             self.native_charts =
                 std::mem::take(&mut self.charts).resolve(pending, mdw, &mut self.warnings);
             self.native_shapes =
@@ -250,6 +250,7 @@ impl DirectSession {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn next_sheet(&mut self) -> Result<Option<xlsx_model::Worksheet>, String> {
         self.healthy()?;
         if !self.bootstrapped {
@@ -270,8 +271,11 @@ impl DirectSession {
         else {
             return self.fail("XLS direct sheet was already consumed");
         };
-        let mut worksheet = projected.worksheet;
-        worksheet.rows = projected.rows;
+        let ProjectedSheet {
+            mut worksheet,
+            rows,
+        } = *projected;
+        worksheet.rows = rows;
         Ok(Some(worksheet))
     }
 
@@ -309,7 +313,7 @@ impl DirectSession {
             };
             let projected = project_sheet(
                 name,
-                sheet,
+                *sheet,
                 self.date1904,
                 self.mdw,
                 self.default_font.as_ref(),
@@ -332,7 +336,7 @@ impl DirectSession {
                 .extend(self.native_charts.remove(&index).unwrap_or_default());
             worksheet.shape_groups = self.native_shapes.remove(&index).unwrap_or_default();
             let rows = std::mem::take(&mut worksheet.rows);
-            self.sheets[index] = SheetSlot::Projected(ProjectedSheet { worksheet, rows });
+            self.sheets[index] = SheetSlot::Projected(Box::new(ProjectedSheet { worksheet, rows }));
         }
         let SheetSlot::Projected(projected) = &self.sheets[index] else {
             unreachable!("consumed slot rejected above")
@@ -343,6 +347,7 @@ impl DirectSession {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn warnings(&self) -> &[String] {
         &self.warnings
     }
@@ -393,11 +398,10 @@ impl DirectSession {
             self.poisoned = true;
             return Err(error);
         }
-        sheets.extend(
-            pending
-                .into_iter()
-                .map(|(name, sheet)| SheetSlot::Neutral { name, sheet }),
-        );
+        sheets.extend(pending.into_iter().map(|(name, sheet)| SheetSlot::Neutral {
+            name,
+            sheet: Box::new(sheet),
+        }));
         self.sheets = sheets;
         Ok(())
     }

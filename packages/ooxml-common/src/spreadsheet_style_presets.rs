@@ -91,6 +91,9 @@ impl PresetDxf {
     }
 }
 
+/// A generated style entry: (name, [(element type, band size, format index)]).
+type PresetStyleEntry = (&'static str, &'static [(&'static str, u32, u16)]);
+
 include!("spreadsheet_style_presets.generated.rs");
 
 /// The elements of the built-in PivotTable style `name` (e.g.

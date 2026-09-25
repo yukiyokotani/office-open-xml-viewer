@@ -553,7 +553,7 @@ impl Leaf {
                 0x0004 => rotation = value as i32,
                 // Protection (2.3.1-2.3.2) and the text identifier, whose
                 // text Excel stores in the TxO record.
-                0x0040..=0x007f | 0x0080 => {}
+                0x0040..=0x0080 => {}
                 0x0081..=0x0084 => {
                     if value > 0x132f540 {
                         return Err(unsupported("invalid XLS text margin"));

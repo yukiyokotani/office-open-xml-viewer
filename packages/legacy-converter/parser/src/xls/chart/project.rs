@@ -368,7 +368,7 @@ pub(crate) fn project(
                 }
                 series.references[usize::from(numindex)]
                     .as_deref()
-                    .and_then(|rgce| references(rgce))
+                    .and_then(references)
                     .unwrap_or_default()
             };
         let series_values = part(1, values)
@@ -612,7 +612,7 @@ pub(crate) fn project(
             model.plot_area_fill_hidden = Some(true);
         }
         model.plot_area_line_color = area.line;
-        model.plot_area_line_width_emu = area.line_width_emu.and_then(|w| u32::try_from(w).ok());
+        model.plot_area_line_width_emu = area.line_width_emu;
         if area.line_hidden {
             model.plot_area_line_hidden = Some(true);
         }

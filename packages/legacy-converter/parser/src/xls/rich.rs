@@ -384,7 +384,7 @@ mod tests {
         let mut comparison_budget = super::MAX_MODEL_BYTES;
         assert_eq!(
             serde_json::to_value(
-                &prepared.shared_strings[0]
+                prepared.shared_strings[0]
                     .model(&prepared.styles, &mut comparison_budget)
                     .unwrap()
             )

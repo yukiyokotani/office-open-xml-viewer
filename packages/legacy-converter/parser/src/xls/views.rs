@@ -34,6 +34,7 @@ pub(super) fn read_window(data: &[u8], count: &mut usize) -> Result<(), String> 
 pub(super) struct SheetViews(Vec<u16>, Vec<Option<(u16, u16)>>);
 
 impl SheetViews {
+    #[cfg(any(test, feature = "direct-xls"))]
     /// Apply the display flags selected by the existing XLSX parser contract.
     /// The byte adapter emits every Window2 in workbook-view order and that
     /// parser retains the last sheetView. This is compatibility behavior, not
@@ -127,17 +128,21 @@ mod tests {
 
     fn parsed_view(flags: Vec<u16>) -> serde_json::Value {
         let count = flags.len();
-        let mut sheet = super::super::SheetData::default();
-        sheet.views = SheetViews(flags.clone(), vec![None; flags.len()]);
+        let sheet = super::super::SheetData {
+            views: SheetViews(flags.clone(), vec![None; flags.len()]),
+            ..Default::default()
+        };
         let bytes = super::super::build_xlsx_with_drawings(
             &[("S".into(), sheet)],
             &super::super::styles::minimal_resolved(),
             Vec::new(),
             false,
             count,
-            1_000_000,
-            None,
-            None,
+            super::super::Emission {
+                max_output_bytes: 1_000_000,
+                mdw: None,
+                drawings: None,
+            },
         )
         .unwrap();
         serde_json::from_str(&xlsx_parser::parse_sheet_native(&bytes, 0, "S").unwrap()).unwrap()

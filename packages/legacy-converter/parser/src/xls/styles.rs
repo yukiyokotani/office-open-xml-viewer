@@ -191,6 +191,7 @@ impl ResolvedStyleFont {
 }
 
 impl ResolvedStyleSheet {
+    #[cfg(any(test, feature = "direct-xls"))]
     pub(super) fn default_font(&self) -> Option<(&str, f64)> {
         let font = self.fonts.get(self.xfs.first()?.font_id)?;
         Some((&font.font.name, f64::from(font.font.size_twips) / 20.0))
@@ -270,6 +271,7 @@ impl ResolvedStyleSheet {
         self.dxfs = dxfs;
     }
 
+    #[cfg(any(test, feature = "direct-xls"))]
     pub(super) fn into_model_bounded(
         self,
         budget: &mut usize,
@@ -430,6 +432,7 @@ impl ResolvedStyleSheet {
     }
 }
 
+#[cfg(any(test, feature = "direct-xls"))]
 /// Drawing-shape text font resolved from a BIFF Font record (MS-XLS 2.4.122)
 /// selected by a TxO formatting run's FontIndex (2.5.129).
 #[derive(Debug, Clone)]
@@ -447,6 +450,7 @@ pub(super) struct ShapeFont {
     pub automatic_color: bool,
 }
 
+#[cfg(any(test, feature = "direct-xls"))]
 /// Chart text font resolved from a BIFF Font record.
 #[derive(Debug, Clone)]
 pub(super) struct ChartFont {
@@ -547,11 +551,13 @@ impl<'a> Styles<'a> {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "direct-xls"))]
     /// Number of Font records in the Globals Substream (FontX indexing, 2.4.123).
     pub(super) fn font_count(&self) -> usize {
         self.fonts.len()
     }
 
+    #[cfg(any(test, feature = "direct-xls"))]
     /// Decode a Font record (2.4.122) for chart text: name, twip size,
     /// weight/italic and palette color.
     pub(super) fn chart_font(&self, data: &[u8]) -> Option<ChartFont> {
@@ -565,6 +571,7 @@ impl<'a> Styles<'a> {
         })
     }
 
+    #[cfg(any(test, feature = "direct-xls"))]
     /// A shape text run's font by FontIndex: 4 is reserved and indices above
     /// it are one-based (MS-XLS 2.5.129).
     pub(super) fn shape_font(&self, index: u16) -> Result<ShapeFont, String> {
@@ -592,6 +599,7 @@ impl<'a> Styles<'a> {
         })
     }
 
+    #[cfg(any(test, feature = "direct-xls"))]
     /// FontX.iFont (2.4.123) one-based index into the global Font records.
     pub(super) fn global_font(&self, index: u16) -> Option<ChartFont> {
         let data = *self.fonts.get(usize::from(index).checked_sub(1)?)?;
@@ -993,6 +1001,7 @@ fn fill_xml(value: &ResolvedFill) -> String {
     }
 }
 
+#[cfg(any(test, feature = "direct-xls"))]
 /// Retained model bytes of one conditional-formatting dxf.
 fn dxf_bytes(dxf: &xlsx_model::Dxf) -> usize {
     let color = |value: &Option<String>| value.as_ref().map_or(0, String::len);
@@ -1140,7 +1149,7 @@ mod tests {
         }
         value
     }
-    fn extended_indent<'a>(xfs: &'a [[u8; 20]], index: u16, value: u16) -> ([u8; 20], Vec<u8>) {
+    fn extended_indent(xfs: &[[u8; 20]], index: u16, value: u16) -> ([u8; 20], Vec<u8>) {
         let mut check = [0; 20];
         check[..2].copy_from_slice(&0x087cu16.to_le_bytes());
         check[14..16].copy_from_slice(&(xfs.len() as u16).to_le_bytes());
@@ -1594,7 +1603,7 @@ mod tests {
                 }
                 "duplicate" => {
                     ext[18..20].copy_from_slice(&2u16.to_le_bytes());
-                    ext.extend_from_slice(&ext[20..26].to_vec());
+                    ext.extend_from_within(20..26);
                 }
                 _ => {}
             }

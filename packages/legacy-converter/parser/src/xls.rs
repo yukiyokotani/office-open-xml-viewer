@@ -14,8 +14,11 @@ use crate::cfb::CompoundFile;
 use crate::ooxml::{write_package, xml_attr, xml_text, ROOT_RELS_XLSX};
 
 mod cell_formulas;
+// Charts and shapes are projected by the direct model only.
+#[cfg(any(test, feature = "direct-xls"))]
 mod chart;
 mod conditional;
+#[cfg(any(test, feature = "direct-xls"))]
 pub(crate) mod direct;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod direct_corpus_tests;
@@ -35,6 +38,7 @@ mod pictures;
 mod pivots;
 mod print;
 mod rich;
+#[cfg(any(test, feature = "direct-xls"))]
 mod shapes;
 mod styles;
 mod tables;
@@ -65,9 +69,7 @@ const MAX_SHEETS: usize = 65_536;
 const MAX_CELLS: usize = 10_000_000;
 
 #[cfg(all(feature = "inspection", not(target_arch = "wasm32")))]
-pub(crate) fn inspect_images(
-    cfb: &CompoundFile<'_>,
-) -> Result<Vec<(u32, &'static str, Vec<u8>)>, String> {
+pub(crate) fn inspect_images(cfb: &CompoundFile<'_>) -> Result<Vec<drawing_media::Media>, String> {
     let workbook = cfb
         .stream("Workbook")
         .or_else(|_| cfb.stream("Book"))
@@ -172,6 +174,7 @@ struct SheetData {
     /// Their XLSX-model projection (direct path only).
     conditional_formats: Vec<xlsx_model::ConditionalFormat>,
     /// A chart sheet's chart (direct path only); such a sheet has no cells.
+    #[cfg(any(test, feature = "direct-xls"))]
     chart_sheet: Option<chart::ChartSheet>,
     /// MS-XLS 2.4.113 FeatHdr11, 2.4.114 Feature11, 2.4.115 Feature12 and
     /// 2.4.157 List12 records (tables), in stream order.
@@ -229,7 +232,9 @@ pub(crate) struct PreparedXls {
     warnings: Vec<String>,
     pub(crate) font: Option<styles::NormalFont>,
     pictures: pictures::Pictures,
+    #[cfg(any(test, feature = "direct-xls"))]
     charts: chart::Charts,
+    #[cfg(any(test, feature = "direct-xls"))]
     shapes: shapes::Shapes,
 }
 
@@ -259,9 +264,11 @@ impl PreparedXls {
             self.shared_strings,
             self.date1904,
             self.window_count,
-            max_output_bytes,
-            mdw,
-            drawings.as_ref(),
+            Emission {
+                max_output_bytes,
+                mdw,
+                drawings: drawings.as_ref(),
+            },
         )?;
         Ok(XlsConversion {
             bytes,
@@ -605,11 +612,16 @@ fn prepare_workbook(
         validate_direct_drawings(&records, &tabs, &filters)?;
     }
     // Rectangles, text boxes, freeforms and their groups: direct model only.
+    #[cfg(any(test, feature = "direct-xls"))]
     let mut shapes = if with_pictures && direct {
         shapes::Shapes::prepare(&records, &tabs, &styles)?
     } else {
         shapes::Shapes::default()
     };
+    #[cfg(any(test, feature = "direct-xls"))]
+    let grouped_pictures = shapes.picture_indices();
+    #[cfg(not(any(test, feature = "direct-xls")))]
+    let grouped_pictures = std::collections::BTreeSet::new();
     let pictures = if with_pictures {
         // The direct reader follows Excel, which displays GDI+ metafiles with
         // their short end-of-file record; the byte converter keeps its
@@ -619,7 +631,7 @@ fn prepare_workbook(
         } else {
             crate::officeart::raster::Raster::Advertised
         };
-        match pictures::Pictures::prepare(&records, &tabs, raster, &shapes.picture_indices()) {
+        match pictures::Pictures::prepare(&records, &tabs, raster, &grouped_pictures) {
             Ok(value) => {
                 if value.has_unsupported_images() {
                     if direct {
@@ -642,31 +654,42 @@ fn prepare_workbook(
     };
     // Only the direct model projects charts; the byte converter keeps its
     // documented drawing omission.
+    #[cfg(any(test, feature = "direct-xls"))]
     let charts = if with_pictures && direct {
         chart::Charts::prepare(&records, &tabs, &styles, &converted, &shared_strings)?
     } else {
         chart::Charts::default()
     };
-    shapes.attach_images(&pictures)?;
-    let mut chart_sheets = Vec::with_capacity(pending_chart_sheets.len());
-    for &(index, offset) in &pending_chart_sheets {
-        let start = records
-            .binary_search_by_key(&offset, |record| record.offset)
-            .map_err(|_| unsupported("BOUNDSHEET8 points outside the BIFF record stream"))?;
-        chart_sheets.push((
-            index,
-            chart::chart_sheet(&records, start, &tabs, &styles, &converted, &shared_strings)?,
-        ));
-    }
-    for (index, chart_sheet) in chart_sheets {
-        converted[index].1.chart_sheet = Some(chart_sheet);
-    }
-    let font =
-        if with_pictures && (!pictures.is_empty() || !charts.is_empty() || !shapes.is_empty()) {
-            styles.normal_font()
-        } else {
-            None
-        };
+    #[cfg(any(test, feature = "direct-xls"))]
+    let direct_drawings = {
+        shapes.attach_images(&pictures)?;
+        let mut chart_sheets = Vec::with_capacity(pending_chart_sheets.len());
+        for &(index, offset) in &pending_chart_sheets {
+            let start = records
+                .binary_search_by_key(&offset, |record| record.offset)
+                .map_err(|_| unsupported("BOUNDSHEET8 points outside the BIFF record stream"))?;
+            chart_sheets.push((
+                index,
+                chart::chart_sheet(&records, start, &tabs, &styles, &converted, &shared_strings)?,
+            ));
+        }
+        for (index, chart_sheet) in chart_sheets {
+            converted[index].1.chart_sheet = Some(chart_sheet);
+        }
+        !charts.is_empty() || !shapes.is_empty()
+    };
+    // Only the direct model queues chart sheets, and it is not built here.
+    #[cfg(not(any(test, feature = "direct-xls")))]
+    let direct_drawings = if pending_chart_sheets.is_empty() {
+        false
+    } else {
+        return Err(unsupported("XLS chart sheets need the direct model"));
+    };
+    let font = if with_pictures && (!pictures.is_empty() || direct_drawings) {
+        styles.normal_font()
+    } else {
+        None
+    };
     Ok(PreparedXls {
         sheets: converted,
         styles: resolved_styles,
@@ -676,7 +699,9 @@ fn prepare_workbook(
         warnings,
         font,
         pictures,
+        #[cfg(any(test, feature = "direct-xls"))]
         charts,
+        #[cfg(any(test, feature = "direct-xls"))]
         shapes,
     })
 }
@@ -725,8 +750,7 @@ fn admit_direct_object(anchor: &drawing_anchors::DrawingAnchor) -> Result<(), St
                 if let Some(member) = anchor.members.iter().find(|member| {
                     !matches!(member.object_type, 2 | 6 | 9)
                         && !(member.object_type == 8 && member.picture.is_some())
-                })
-                {
+                }) {
                     return Err(unsupported(format!(
                         "grouped BIFF drawing object type {} is not projected",
                         member.object_type
@@ -821,6 +845,7 @@ fn tab_color(
     })?))
 }
 
+#[cfg(any(test, feature = "direct-xls"))]
 fn prepare_direct(cfb: &CompoundFile<'_>) -> Result<PreparedXls, String> {
     const MAX_DIRECT_WORKBOOK_BYTES: usize = 256 * 1024 * 1024;
     let streams = cfb.scoped_streams().map_err(unsupported)?;
@@ -1593,16 +1618,26 @@ fn decode_rk(raw: u32) -> f64 {
     value
 }
 
+/// Output limits and measured drawings of one XLSX package emission.
+struct Emission<'a> {
+    max_output_bytes: usize,
+    mdw: Option<f64>,
+    drawings: Option<&'a pictures::Parts>,
+}
+
 fn build_xlsx_with_drawings(
     sheets: &[(String, SheetData)],
     styles: &styles::ResolvedStyleSheet,
     shared_strings: Vec<rich::Text>,
     date1904: bool,
     window_count: usize,
-    max_output_bytes: usize,
-    mdw: Option<f64>,
-    drawings: Option<&pictures::Parts>,
+    emission: Emission<'_>,
 ) -> Result<Vec<u8>, String> {
+    let Emission {
+        max_output_bytes,
+        mdw,
+        drawings,
+    } = emission;
     let mut shared_xml_budget = 256 * 1024 * 1024usize;
     let mut shared_xml = Vec::new();
     shared_xml

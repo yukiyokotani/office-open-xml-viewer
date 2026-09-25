@@ -61,6 +61,7 @@ pub(super) struct Geometry {
 }
 
 impl Geometry {
+    #[cfg(any(test, feature = "direct-xls"))]
     /// Apply already-validated BIFF geometry to the renderer worksheet model.
     /// The 8.43/15.0 values are the existing XLSX parser's model defaults when
     /// SpreadsheetML omits sheetFormatPr; they are not additional BIFF facts.
@@ -383,10 +384,12 @@ impl Geometry {
     }
 }
 
+#[cfg(any(test, feature = "direct-xls"))]
 fn checked_product(count: usize, size: usize) -> Result<usize, String> {
     count.checked_mul(size).ok_or_else(model_budget_error)
 }
 
+#[cfg(any(test, feature = "direct-xls"))]
 fn model_budget_error() -> String {
     unsupported("XLS direct geometry model byte budget exceeded")
 }
@@ -415,9 +418,11 @@ mod tests {
         // [MS-XLS] 2.4.98: DxGCol already stores width in 1/256 Normal
         // digit units. Only conversion to pixels needs a measured digit width.
         for width in [0_u16, 1, 2560, 65535] {
-            let mut geometry = Geometry::default();
-            geometry.default_row = Some((300, 0));
-            geometry.default_column = Some((3072, 0, 0));
+            let mut geometry = Geometry {
+                default_row: Some((300, 0)),
+                default_column: Some((3072, 0, 0)),
+                ..Geometry::default()
+            };
             geometry
                 .read(&Record {
                     kind: 0x0099,
@@ -439,11 +444,13 @@ mod tests {
 
     #[test]
     fn unknown_digit_width_keeps_default_column_and_explicit_column_policy() {
-        let mut geometry = Geometry::default();
-        geometry.default_row = Some((300, 0));
-        geometry.default_column = Some((3072, 0, 0));
-        geometry.base_width = Some(8);
-        geometry.digit_width = Some(2560);
+        let mut geometry = Geometry {
+            default_row: Some((300, 0)),
+            default_column: Some((3072, 0, 0)),
+            base_width: Some(8),
+            digit_width: Some(2560),
+            ..Geometry::default()
+        };
         // A non-two-byte DxGCol selects the existing unknown-layout policy. It
         // invalidates the stored digit width and font-dependent base route,
         // but not the independent default ColInfo record.
@@ -470,9 +477,11 @@ mod tests {
 
     #[test]
     fn stored_digit_width_without_default_column_and_explicit_override_are_distinct() {
-        let mut geometry = Geometry::default();
-        geometry.default_row = Some((300, 0));
-        geometry.digit_width = Some(2560);
+        let mut geometry = Geometry {
+            default_row: Some((300, 0)),
+            digit_width: Some(2560),
+            ..Geometry::default()
+        };
         geometry.columns.insert(0, (4096, 0, 2));
         let mut model = worksheet();
         let mut budget = usize::MAX;
@@ -484,9 +493,11 @@ mod tests {
 
     #[test]
     fn unknown_digit_width_without_default_column_omits_width_even_when_measured() {
-        let mut geometry = Geometry::default();
-        geometry.default_row = Some((300, 0));
-        geometry.base_width = Some(8);
+        let mut geometry = Geometry {
+            default_row: Some((300, 0)),
+            base_width: Some(8),
+            ..Geometry::default()
+        };
         geometry
             .read(&Record {
                 kind: 0x0099,
@@ -663,7 +674,7 @@ mod tests {
 
     #[test]
     fn native_geometry_matches_parser_across_flag_combinations() {
-        use super::super::{build_xlsx_with_drawings, styles, CellValue, SheetData};
+        use super::super::{build_xlsx_with_drawings, styles, CellValue, Emission, SheetData};
         for default_flags in 0..4 {
             for flags in 0..128_u32 {
                 let mut source = SheetData::default();
@@ -693,9 +704,11 @@ mod tests {
                     Vec::new(),
                     false,
                     1,
-                    1024 * 1024,
-                    None,
-                    None,
+                    Emission {
+                        max_output_bytes: 1024 * 1024,
+                        mdw: None,
+                        drawings: None,
+                    },
                 )
                 .unwrap();
                 let expected: serde_json::Value =

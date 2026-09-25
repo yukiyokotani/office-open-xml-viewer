@@ -548,7 +548,7 @@ mod tests {
 
     #[test]
     fn row_envelopes_split_at_soft_target_without_omission() {
-        let rows = vec![row(1, "small"), row(2, &"x".repeat(300)), row(3, "tail")];
+        let rows = [row(1, "small"), row(2, &"x".repeat(300)), row(3, "tail")];
         let mut position = 0;
         let mut seen = Vec::new();
         while position < rows.len() {

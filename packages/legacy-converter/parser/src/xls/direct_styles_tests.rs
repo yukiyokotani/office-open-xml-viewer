@@ -103,7 +103,7 @@ fn native_style_matrix_matches_existing_archive_parser() {
                         | ((count % 64) << 16)
                         | ((count % 64) << 23)
                         | ((count % 4) << 30);
-                    let b2 = count % 64
+                    let b2 = (count % 64)
                         | ((count % 64) << 7)
                         | ((count % 64) << 14)
                         | (edge << 21)
@@ -111,7 +111,7 @@ fn native_style_matrix_matches_existing_archive_parser() {
                     xf[10..14].copy_from_slice(&b1.to_le_bytes());
                     xf[14..18].copy_from_slice(&b2.to_le_bytes());
                     xf[18..20].copy_from_slice(
-                        &((count % 64 | ((count % 64) << 7)) as u16).to_le_bytes(),
+                        &(((count % 64) | ((count % 64) << 7)) as u16).to_le_bytes(),
                     );
                     stream.extend(record(0xe0, &xf));
                     count += 1;

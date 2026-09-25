@@ -47,10 +47,12 @@ struct ResolvedPicture {
     store_index: u32,
     extension: &'static str,
     edit_as: &'static str,
+    #[cfg(any(test, feature = "direct-xls"))]
     /// Document (paint) order among all of the sheet's drawing objects.
     order: u64,
 }
 
+#[cfg(any(test, feature = "direct-xls"))]
 pub(super) struct NativePictures {
     pub sheets: BTreeMap<usize, Vec<xlsx_model::ImageAnchor>>,
     pub resources: BTreeMap<String, Vec<u8>>,
@@ -93,6 +95,7 @@ impl Pictures {
         self.anchors.is_empty()
     }
 
+    #[cfg(any(test, feature = "direct-xls"))]
     /// The file extension of a store entry's decoded media.
     pub fn extension(&self, id: u32) -> Option<&'static str> {
         self.images
@@ -225,8 +228,9 @@ impl Pictures {
                     flip_h: anchor.shape_flags & 64 != 0,
                     flip_v: anchor.shape_flags & 128 != 0,
                     store_index: id,
-                    extension: *ext,
+                    extension: ext,
                     edit_as,
+                    #[cfg(any(test, feature = "direct-xls"))]
                     order: anchor.order,
                 });
             }
@@ -250,6 +254,7 @@ impl Pictures {
 }
 
 impl ResolvedPictures {
+    #[cfg(any(test, feature = "direct-xls"))]
     /// Charge retained payload and model slots, excluding allocator bookkeeping.
     /// Source anchor/media limits bound map entry counts separately.
     pub(super) fn into_models(self, budget: &mut usize) -> Result<NativePictures, String> {
@@ -568,9 +573,11 @@ mod tests {
             Vec::new(),
             false,
             1,
-            16 * 1024 * 1024,
-            Some(7.0),
-            Some(&parts),
+            super::super::Emission {
+                max_output_bytes: 16 * 1024 * 1024,
+                mdw: Some(7.0),
+                drawings: Some(&parts),
+            },
         )
         .unwrap();
         let parsed: serde_json::Value =

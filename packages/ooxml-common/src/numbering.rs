@@ -172,8 +172,8 @@ where
                 deeper > level && level < threshold
             })
             .collect();
-        let value = if first_for_instance && start_override.is_some() {
-            start_override.expect("checked above")
+        let value = if let Some(start) = start_override.filter(|_| first_for_instance) {
+            start
         } else {
             match self
                 .counters
