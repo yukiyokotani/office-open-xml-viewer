@@ -6690,6 +6690,16 @@ export function renderTable(
   const x0 = emuToPx(el.x, scale);
   const y0 = emuToPx(el.y, scale);
 
+  // ECMA-376 §21.1.2.1.1 describes spcFirstLastPara for a text body, but
+  // PowerPoint does not apply its edge exception inside a:tc. PDF controls
+  // with centred and top-anchored table cells retain identical glyph and row
+  // positions for absent/0/1, with 12pt spcPts and 50% spcPct before or
+  // after. A second paragraph does receive spcAft as an interior gap. Keep the
+  // Office table-cell rule in both measurement and paint.
+  const tableTextBody = (body: TextBody): TextBody => body.spcFirstLastPara
+    ? { ...body, spcFirstLastPara: false }
+    : body;
+
   // Convert col widths to pixels.
   const colWidths = el.cols.map(c => emuToPx(c, scale));
   const numCols = colWidths.length;
@@ -6732,7 +6742,7 @@ export function renderTable(
       if (row.height > 0 && !hasAuthoredRowGrowthSignal) continue;
       const cellW = spannedWidth(ci, cell.gridSpan || 1);
       const needed = (renderTextBody(
-        ctx, cell.textBody, 0, 0, cellW, 0, scale, null, 0, false, false,
+        ctx, tableTextBody(cell.textBody), 0, 0, cellW, 0, scale, null, 0, false, false,
         '#000000', slideNumber, rc, undefined, true, undefined, false, row.height === 0,
       ) as number) || 0;
       if (needed > rowHeights[ri]) rowHeights[ri] = needed;
@@ -6755,7 +6765,7 @@ export function renderTable(
         .some((spannedRow) => spannedRow.height === 0);
       if (!hasAutoHeightRow && !hasAuthoredRowGrowthSignal) continue;
       const needed = (renderTextBody(
-        ctx, cell.textBody, 0, 0, cellW, 0, scale, null, 0, false, false,
+        ctx, tableTextBody(cell.textBody), 0, 0, cellW, 0, scale, null, 0, false, false,
         '#000000', slideNumber, rc, undefined, true, undefined, false, hasAutoHeightRow,
       ) as number) || 0;
       let have = 0;
@@ -6911,7 +6921,7 @@ export function renderTable(
       const cellDefaultColor = cell.textColor ? hexToRgba(cell.textColor) : null;
       renderTextBody(
         ctx,
-        cell.textBody,
+        tableTextBody(cell.textBody),
         colX,
         rowY,
         cellW,
