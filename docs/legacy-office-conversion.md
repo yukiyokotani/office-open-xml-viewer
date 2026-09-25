@@ -175,6 +175,13 @@ so the direct PPT reader identifies such a slot by its GIF87a/GIF89a
 signature and emits it as `image/gif`; other mismatched content stays
 rejected.
 
+Pattern fills on unrotated shapes become tiled picture fills that follow
+PowerPoint's own output: the 8x8 area of the stored 10x10 pattern bitmap,
+one pattern pixel per point, white pixels in the fill colour and black
+pixels in the background colour. Pattern fills on rotated or flipped shapes,
+other pattern bitmap sizes, translucent pattern colours, background
+patterns and texture fills stay rejected.
+
 Picture colour settings follow how PowerPoint itself reads the binary
 properties when it saves a binary deck as PPTX: "Black and White" becomes
 DrawingML `grayscl` plus `biLevel` at 50%, and a transparent colour becomes a
