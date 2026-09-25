@@ -34,24 +34,34 @@
 //! runs and any parse or resource failure keep the binary projection. The
 //! adopted shape keeps the binary's transform, identifier and characters.
 use super::*;
+#[cfg(any(test, feature = "direct-ppt"))]
 use pptx_model::{ShapeElement, TextRun};
 
 /// Implementation resource policy, not a format limit.
+#[cfg(feature = "direct-ppt")]
 const MAX_BLOB_BYTES: usize = 4 * 1024 * 1024;
+#[cfg(feature = "direct-ppt")]
 const MAX_PART_BYTES: u64 = 1024 * 1024;
+#[cfg(feature = "direct-ppt")]
 const MAX_PACKAGE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_THEME_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_THEME_ENTRIES: usize = 64;
 /// One master unit (1/576 inch) rounds to at most 1588 EMU per coordinate.
+#[cfg(any(test, feature = "direct-ppt"))]
 const XFRM_TOLERANCE_EMU: i64 = 1588;
 /// A 21600-based adjust value converts to 1/100000 with at most 4.63 units of
 /// rounding per step; allow two steps.
+#[cfg(any(test, feature = "direct-ppt"))]
 const ADJUST_TOLERANCE: f64 = 10.0;
 
 /// The main master's round-trip theme (MS-PPT RoundTripTheme12Atom, 0x040E)
 /// and color map (RoundTripColorMapping12Atom, 0x040F).
 pub(in crate::ppt) struct Theme {
+    // Read only by `adopt`.
+    #[cfg_attr(not(feature = "direct-ppt"), allow(dead_code))]
     theme_xml: String,
+    // Read only by `adopt`.
+    #[cfg_attr(not(feature = "direct-ppt"), allow(dead_code))]
     clr_map: Option<String>,
 }
 
@@ -120,6 +130,7 @@ fn theme_part(package: &[u8]) -> Option<String> {
 /// `nested` whether it sits in a group's child coordinate space, and `text`
 /// its binary characters, if any.
 #[cfg(feature = "direct-ppt")]
+#[allow(clippy::too_many_arguments)]
 pub(in crate::ppt) fn adopt(
     binary: &ShapeElement,
     leaf: &pptx_model::Transform,
@@ -172,8 +183,10 @@ pub(in crate::ppt) fn adopt(
     Some(shape)
 }
 
-/// Without the direct presentation model feature nothing is adopted.
-#[cfg(not(feature = "direct-ppt"))]
+/// Without the direct presentation model feature nothing is adopted (only the
+/// feature-less unit tests compile the direct model).
+#[cfg(all(test, not(feature = "direct-ppt")))]
+#[allow(clippy::too_many_arguments)]
 pub(in crate::ppt) fn adopt(
     _binary: &ShapeElement,
     _leaf: &pptx_model::Transform,
@@ -201,9 +214,10 @@ fn inflated_size(blob: &[u8]) -> Option<usize> {
         }
         total = total.checked_add(entry.size())?;
     }
-    (total <= MAX_PACKAGE_BYTES).then(|| total as usize)
+    (total <= MAX_PACKAGE_BYTES).then_some(total as usize)
 }
 
+#[cfg(any(test, feature = "direct-ppt"))]
 fn adjusts(shape: &ShapeElement) -> [Option<f64>; 8] {
     [
         shape.adj, shape.adj2, shape.adj3, shape.adj4, shape.adj5, shape.adj6, shape.adj7,
@@ -211,6 +225,7 @@ fn adjusts(shape: &ShapeElement) -> [Option<f64>; 8] {
     ]
 }
 
+#[cfg(any(test, feature = "direct-ppt"))]
 fn same_geometry(binary: &ShapeElement, alternative: &ShapeElement) -> bool {
     if binary.geometry != alternative.geometry {
         return false;
@@ -238,6 +253,7 @@ fn same_geometry(binary: &ShapeElement, alternative: &ShapeElement) -> bool {
 /// A group's child anchors (MS-ODRAW OfficeArtChildAnchor) are read with the
 /// master-unit scale; the alternative XML stores the same child coordinate
 /// values unscaled (`a:chOff`/`a:chExt` space), so compare them unscaled.
+#[cfg(any(test, feature = "direct-ppt"))]
 fn same_transform(leaf: &pptx_model::Transform, nested: bool, alternative: &ShapeElement) -> bool {
     let scale = if nested { 1587.5 } else { 1.0 };
     let close = |a: i64, b: i64| (a as f64 / scale - b as f64).abs() <= XFRM_TOLERANCE_EMU as f64;
@@ -251,6 +267,7 @@ fn same_transform(leaf: &pptx_model::Transform, nested: bool, alternative: &Shap
         && leaf.flip_v == alternative.flip_v
 }
 
+#[cfg(feature = "direct-ppt")]
 fn same_solid_fill(binary: &ShapeElement, alternative: &ShapeElement) -> bool {
     use pptx_model::Fill;
     match (&binary.fill, &alternative.fill) {
@@ -268,6 +285,7 @@ fn same_solid_fill(binary: &ShapeElement, alternative: &ShapeElement) -> bool {
 /// properties (its character spacing), while a deck whose sizes agree
 /// renders them. Paragraphs holding fields are compared structurally only,
 /// because the binary projection substitutes field text.
+#[cfg(any(test, feature = "direct-ppt"))]
 fn same_run_formatting(binary: &ShapeElement, alternative: &ShapeElement) -> bool {
     let (Some(b), Some(a)) = (&binary.text_body, &alternative.text_body) else {
         return true;
@@ -321,6 +339,7 @@ fn same_run_formatting(binary: &ShapeElement, alternative: &ShapeElement) -> boo
 /// Replace the masked characters of the alternative text with the binary
 /// characters. Every paragraph, run and line break must line up exactly at
 /// UTF-16 lengths; a run boundary inside a surrogate pair does not.
+#[cfg(any(test, feature = "direct-ppt"))]
 fn substitute_text(shape: &mut ShapeElement, text: Option<&str>) -> Option<()> {
     let Some(body) = shape.text_body.as_mut() else {
         return text.is_none_or(str::is_empty).then_some(());

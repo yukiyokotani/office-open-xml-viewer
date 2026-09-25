@@ -29,7 +29,11 @@ struct Resolved {
 }
 #[derive(Clone)]
 struct TextBase {
+    // Read only by the unit tests.
+    #[cfg_attr(not(test), allow(dead_code))]
     authored_font_sizes: Rc<text_style::AuthoredFontSizeTable>,
+    // Read only by the unit tests.
+    #[cfg_attr(not(test), allow(dead_code))]
     text_type: u16,
 }
 impl Resolver {
@@ -58,6 +62,7 @@ impl Resolver {
             .map(|v| v.levels.as_slice())
             .ok_or_else(|| unsupported("unresolved PowerPoint master shape"))
     }
+    #[cfg(test)]
     pub fn authored_base_font_sizes(
         &self,
         id: u32,

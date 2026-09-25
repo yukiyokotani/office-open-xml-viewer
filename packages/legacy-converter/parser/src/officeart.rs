@@ -213,7 +213,7 @@ mod span_tests {
             .view(&[0, 1, 2, 3])
             .unwrap_err()
             .contains("outside backing"));
-        assert!(ByteSpan::new(5..2, 5, "test").is_err());
+        assert!(ByteSpan::new(Range { start: 5, end: 2 }, 5, "test").is_err());
 
         let parent = ByteSpan::new(2..5, 5, "test").unwrap();
         assert_eq!(
@@ -221,7 +221,9 @@ mod span_tests {
             3..5
         );
         assert!(parent.checked_subrange(0..4, "child").is_err());
-        assert!(parent.checked_subrange(2..1, "child").is_err());
+        assert!(parent
+            .checked_subrange(Range { start: 2, end: 1 }, "child")
+            .is_err());
     }
 
     #[test]

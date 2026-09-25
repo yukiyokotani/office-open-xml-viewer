@@ -1,6 +1,8 @@
 //! Passive image BLIP validation shared by binary Office converters.
 //! MS-ODRAW 2.2.24-32; W3C PNG IHDR; ITU-T T.81 JPEG frame headers.
-use super::{ByteSpan, Record, RecordSpan};
+use super::Record;
+#[cfg(any(test, feature = "direct-ppt"))]
+use super::{ByteSpan, RecordSpan};
 use std::borrow::Cow;
 use std::ops::Range;
 
@@ -24,7 +26,11 @@ pub(crate) fn read_store_entry<'a>(
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Raster {
     Advertised,
+    // Chosen only by the direct DOC reader.
+    #[cfg_attr(not(any(test, feature = "direct-doc")), allow(dead_code))]
     TiffAndGifAware,
+    // Chosen only by the direct PPT reader.
+    #[cfg_attr(not(any(test, feature = "direct-ppt")), allow(dead_code))]
     GifAware,
     /// Advertised raster encodings, plus EMF files with the end-of-file
     /// layout GDI+ writes, which Excel displays (see the metafile validator).
@@ -61,17 +67,20 @@ pub(crate) fn read_store_entry_as<'a>(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(any(test, feature = "direct-ppt"))]
 pub(crate) enum StoreBacking {
     Primary,
     Delayed,
 }
 
 #[derive(Debug, PartialEq, Eq)]
+#[cfg(any(test, feature = "direct-ppt"))]
 pub(crate) struct StoreImageSpan {
     pub image: ImageSpan,
     pub backing: StoreBacking,
 }
 
+#[cfg(any(test, feature = "direct-ppt"))]
 impl StoreImageSpan {
     pub(crate) fn view<'a>(
         &'a self,
@@ -92,6 +101,7 @@ impl StoreImageSpan {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn read_store_entry_span(
     entry: &RecordSpan,
     primary: &[u8],
@@ -109,6 +119,7 @@ pub(crate) fn read_store_entry_span(
     )
 }
 
+#[cfg(any(test, feature = "direct-ppt"))]
 pub(crate) fn read_store_entry_span_as(
     entry: &RecordSpan,
     primary: &[u8],
@@ -209,12 +220,14 @@ pub(crate) struct Image<'a> {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+#[cfg(any(test, feature = "direct-ppt"))]
 pub(crate) enum ImageSpanBytes {
     Source(ByteSpan),
     Owned(Vec<u8>),
 }
 
 #[derive(Debug, PartialEq, Eq)]
+#[cfg(any(test, feature = "direct-ppt"))]
 pub(crate) struct ImageSpan {
     pub bytes: ImageSpanBytes,
     pub extension: &'static str,
@@ -242,6 +255,7 @@ fn unsupported(message: impl Into<String>) -> String {
     format!("UNSUPPORTED:{}", message.into())
 }
 
+#[cfg(test)]
 pub(crate) fn read<'a>(
     blip: Record<'a>,
     budget: &mut usize,
@@ -267,6 +281,7 @@ fn read_as<'a>(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn read_span(
     blip: &RecordSpan,
     backing: &[u8],
@@ -276,6 +291,7 @@ pub(crate) fn read_span(
     read_span_as(blip, backing, budget, remaining_bytes, Raster::Advertised)
 }
 
+#[cfg(any(test, feature = "direct-ppt"))]
 fn read_span_as(
     blip: &RecordSpan,
     backing: &[u8],

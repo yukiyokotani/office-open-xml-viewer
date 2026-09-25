@@ -655,9 +655,11 @@ pub(super) struct AuthoredFontSizes {
     values: [Option<u16>; 5],
 }
 impl AuthoredFontSizes {
+    #[cfg(test)]
     pub fn level_count(self) -> usize {
         usize::from(self.level_count)
     }
+    #[cfg(test)]
     pub fn get(self, level: usize) -> Option<u16> {
         (level < self.level_count()).then(|| self.values[level]).flatten()
     }
@@ -671,6 +673,8 @@ pub(super) struct Master {
     authored_font_sizes: std::rc::Rc<AuthoredFontSizeTable>,
     defaults: Vec<Level>,
     /// Unmerged atom levels for the direct model's level-chain resolution.
+    // Read only by the direct model.
+    #[cfg_attr(not(any(test, feature = "direct-ppt")), allow(dead_code))]
     raw: std::collections::BTreeMap<u16, Vec<Level>>,
 }
 impl Master {
@@ -716,6 +720,7 @@ impl Master {
         })
     }
     /// Direct-model levels for text of `kind` (see [`master_chain`]).
+    #[cfg(any(test, feature = "direct-ppt"))]
     pub fn direct_levels(&self, kind: u16) -> Option<master_chain::DirectLevels> {
         let own = self.raw.get(&kind);
         let base = master_chain::base_type(kind).and_then(|b| self.raw.get(&b));
@@ -729,6 +734,7 @@ impl Master {
         ))
     }
     /// Direct-model levels of the document Tx_TYPE_OTHER atom alone.
+    #[cfg(any(test, feature = "direct-ppt"))]
     pub fn document_levels(&self) -> Option<master_chain::DirectLevels> {
         (!self.defaults.is_empty()).then(|| master_chain::resolve(&[], &[], &self.defaults))
     }
@@ -738,6 +744,7 @@ impl Master {
             .map(Vec::as_slice)
             .or_else(|| (!self.defaults.is_empty()).then_some(self.defaults.as_slice()))
     }
+    #[cfg(test)]
     pub fn authored_font_sizes(&self, kind: u16) -> Option<AuthoredFontSizes> {
         self.authored_font_sizes
             .get(usize::from(kind))

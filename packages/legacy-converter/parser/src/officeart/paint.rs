@@ -230,6 +230,7 @@ impl Paint {
     /// MS-ODRAW 2.3.7.1: msofillPattern (1), msofillTexture (2) and
     /// msofillPicture (3) paint with the fillBlip BLIP. Returns the active one
     /// so a caller that cannot project it can reject instead of drawing none.
+    #[cfg(any(test, feature = "direct-ppt"))]
     pub fn blip_fill_type(&self) -> Option<u32> {
         let kind = self.fill_type.unwrap_or(0);
         (matches!(kind, 1..=3) && self.filled.unwrap_or(true) && self.fill_ok.unwrap_or(true))
@@ -368,6 +369,7 @@ impl Paint {
     /// - Without fillShadeColors, fillOpacity applies to every stop taken from
     ///   the fill colour and fillBackOpacity to every stop taken from the back
     ///   colour (e.g. 27525/65536 -> alpha 42000, back 0 -> alpha 0).
+    ///
     /// Opacity combined with an authored shade-colour array has no evidence
     /// and is rejected, as are the path shades (5, 6) and the host-defined
     /// title shade (8).

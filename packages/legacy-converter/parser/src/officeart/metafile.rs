@@ -19,6 +19,7 @@ pub(super) fn read<'a>(
     }))
 }
 
+#[cfg(test)]
 pub(super) fn decode(
     record: Record<'_>,
     budget: &mut usize,
@@ -133,7 +134,7 @@ fn validate_emf(bytes: &[u8], budget: &mut usize, gdiplus_end: bool) -> Result<(
         let kind = number(tail, 0);
         let size = number(tail, 4) as usize;
         if size < 8
-            || size % 4 != 0
+            || !size.is_multiple_of(4)
             || size > tail.len()
             || (position == 0 && size < 88)
             || (position != 0 && kind == 1)

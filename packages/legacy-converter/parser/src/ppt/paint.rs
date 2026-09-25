@@ -1,5 +1,6 @@
 //! OfficeArt preset geometry and solid paint, without renderer extensions.
 use super::scheme;
+#[cfg(any(test, feature = "direct-ppt"))]
 use pptx_model::{ArrowEnd, Fill, Stroke};
 mod gradient;
 
@@ -10,6 +11,7 @@ impl Paint {
     /// is the pattern, fillColor its foreground and fillBackColor its
     /// background (2.3.7.2 table). Returns the BLIP, both colours and their
     /// opacities, under the same placement vetoes as a picture fill.
+    #[cfg(any(test, feature = "direct-ppt"))]
     pub(super) fn pattern_image(&self) -> Option<(u32, u32, u32, u32, u32)> {
         (self.fill_type == Some(1)
             && self.fill_blip.unwrap_or(0) != 0
@@ -39,6 +41,7 @@ impl Paint {
     /// export paints behind transparent pixels. Only that evidenced case is
     /// projected: `Ok(None)` for an unfilled frame, `Err` for a filled frame
     /// whose fill type or colour source has no evidence.
+    #[cfg(any(test, feature = "direct-ppt"))]
     pub(super) fn picture_backing(&self) -> Result<Option<(u32, u32)>, String> {
         if self.filled != Some(true) || !self.fill_ok.unwrap_or(true) {
             return Ok(None);
@@ -69,6 +72,7 @@ impl Paint {
             scheme,
         )
     }
+    #[cfg(test)]
     pub(super) fn model(
         &self,
         kind: u16,
@@ -81,6 +85,7 @@ impl Paint {
         self.model_with_custom_geometry(scheme, !matches!(kind, 20 | 32), true, image_fill)
     }
 
+    #[cfg(any(test, feature = "direct-ppt"))]
     pub(super) fn model_with_custom_geometry(
         &self,
         scheme: Option<&scheme::Scheme>,
@@ -103,6 +108,7 @@ impl Paint {
         (Some(fill.unwrap_or(Fill::None)), stroke)
     }
 
+    #[cfg(any(test, feature = "direct-ppt"))]
     pub(super) fn background_model(
         &self,
         scheme: Option<&scheme::Scheme>,
@@ -128,6 +134,7 @@ impl Paint {
             .flatten()
     }
 
+    #[cfg(any(test, feature = "direct-ppt"))]
     fn model_stroke(&self, scheme: Option<&scheme::Scheme>) -> Option<Stroke> {
         let color = model_color(
             self.line.unwrap_or(0),
@@ -240,6 +247,7 @@ fn solid(color: u32, opacity: u32, scheme: Option<&scheme::Scheme>) -> Option<St
     Some(xml)
 }
 
+#[cfg(any(test, feature = "direct-ppt"))]
 pub(super) fn model_solid(
     color: u32,
     opacity: u32,
@@ -248,6 +256,7 @@ pub(super) fn model_solid(
     model_color(color, opacity, scheme).map(|color| Fill::Solid { color })
 }
 
+#[cfg(any(test, feature = "direct-ppt"))]
 pub(super) fn model_color(
     color: u32,
     opacity: u32,
@@ -276,15 +285,17 @@ mod tests {
             for enabled in [None, Some(false), Some(true)] {
                 for ok in [None, Some(false), Some(true)] {
                     for kind in [None, Some(0), Some(3), Some(7)] {
-                        let mut p = Paint::default();
-                        p.fill = Some(0x332211);
-                        p.line = Some(0x665544);
-                        p.filled = enabled;
-                        p.lined = enabled;
-                        p.fill_ok = ok;
-                        p.line_ok = ok;
-                        p.fill_type = kind;
-                        p.line_type = kind;
+                        let p = Paint {
+                            fill: Some(0x332211),
+                            line: Some(0x665544),
+                            filled: enabled,
+                            lined: enabled,
+                            fill_ok: ok,
+                            line_ok: ok,
+                            fill_type: kind,
+                            line_type: kind,
+                            ..Paint::default()
+                        };
                         let (fill, line) = p.model_with_custom_geometry(None, allow, allow, None);
                         let xml = p.xml_with_custom_geometry(None, allow, allow);
                         assert_eq!(

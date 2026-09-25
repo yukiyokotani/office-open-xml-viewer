@@ -159,7 +159,7 @@ fn read(r: &mut Reader<'_, '_>) -> Result<Option<Number>, String> {
             return Err(unsupported("invalid PowerPoint automatic numbering start"));
         }
         Some(Number {
-            scheme: *SCHEMES
+            scheme: SCHEMES
                 .get(usize::from(scheme))
                 .ok_or_else(|| unsupported("invalid PowerPoint automatic numbering scheme"))?,
             start,
