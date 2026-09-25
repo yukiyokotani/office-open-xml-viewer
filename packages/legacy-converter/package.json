@@ -37,13 +37,19 @@
     "wasm:direct-doc": "cd parser && wasm-pack build --target web --out-dir ../src/wasm-direct-doc --features direct-doc && node ../../../scripts/append-wasm-reinit.mjs ../src/wasm-direct-doc/legacy_office_converter.js",
     "wasm:direct-ppt": "cd parser && wasm-pack build --target web --out-dir ../src/wasm-direct-ppt --features direct-ppt && node ../../../scripts/append-wasm-reinit.mjs ../src/wasm-direct-ppt/legacy_office_converter.js",
     "wasm:direct-xls": "cd parser && wasm-pack build --target web --out-dir ../src/wasm-direct-xls --features direct-xls && node ../../../scripts/append-wasm-reinit.mjs ../src/wasm-direct-xls/legacy_office_converter.js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "survey": "playwright test --config playwright.config.ts"
   },
   "dependencies": {
     "@silurus/ooxml-core": "workspace:*"
   },
   "devDependencies": {
+    "@playwright/test": "^1.59.1",
     "@types/node": "^25.6.0",
+    "@types/pngjs": "^6.0.5",
+    "pixelmatch": "^7.1.0",
+    "playwright": "^1.59.1",
+    "pngjs": "^7.0.0",
     "typescript": "^7.0.2",
     "vite": "^8.0.8",
     "vitest": "^4.1.4"
