@@ -231,6 +231,7 @@ export {
   paintDrawingMLShape,
   clipDrawingMLShape,
   withDrawingMLShapeTransform,
+  type DrawingMLPathPaint,
   type DrawingMLShapeFill,
   type DrawingMLShapeGeometry,
   type DrawingMLShapePaintPlan,

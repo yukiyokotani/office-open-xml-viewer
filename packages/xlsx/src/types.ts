@@ -715,6 +715,11 @@ export interface Duotone {
 export interface PathInfo {
   w: number;
   h: number;
+  /** ECMA-376 §20.1.9.15 `a:path@fill` when not `norm` (ST_PathFillMode
+   *  §20.1.10.37). `none` leaves the path unfilled. */
+  fill?: 'none' | 'lighten' | 'lightenLess' | 'darken' | 'darkenLess';
+  /** ECMA-376 §20.1.9.15 `a:path@stroke`; present only when `false`. */
+  stroke?: false;
   commands: PathCmd[];
 }
 

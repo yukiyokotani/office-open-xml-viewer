@@ -4562,16 +4562,21 @@ export function renderTextBody(
         lineHeight *= 1 - body.lnSpcReduction;
       }
       // ECMA-376 §21.1.2.2.9-.10 with §21.1.2.3.11: a percentage spcBef /
-      // spcAft is a fraction of the text size, measured like a percentage
-      // lnSpc (the same single-line base, before lnSpcReduction), on the first
-      // line for space before and the last line for space after. 100000 is
-      // one line.
-      const percentSpacingBase = measureOnly ? maxSizePx : naturalSingle;
+      // spcAft is a fraction of the text size, 100000 being one line. It is
+      // taken from the first line for space before and from the last line for
+      // space after. PowerPoint's unit is one single line of that text: its
+      // largest size × 1.2. It does not depend on the paragraph's lnSpc,
+      // lnSpcReduction, or a substituted font's design line. This comes from
+      // PowerPoint's PDF of a spacing control deck: 100% before and after
+      // 40 pt Arial or Meiryo adds 48 pt with lnSpc 100% and with lnSpc 80%.
+      // A 20 pt line adds 24 pt, a 20 + 40 pt line adds 48 pt, and a two-line
+      // paragraph uses its first line for before and its last line for after.
+      // Paint and table measurement use the same base.
       const lineSpaceAfterPx = isLast && para.spaceAfterPct != null
-        ? percentSpacingBase * (para.spaceAfterPct / 100000)
+        ? naturalSingle * (para.spaceAfterPct / 100000)
         : spaceAfterPx;
       const lineSpaceBeforePx = isFirst && para.spaceBeforePct != null
-        ? percentSpacingBase * (para.spaceBeforePct / 100000)
+        ? naturalSingle * (para.spaceBeforePct / 100000)
         : spaceBeforePx;
       // ECMA-376 §21.1.2.1.1 bodyPr@spcFirstLastPara (default false): the
       // first paragraph's space before and the last paragraph's space after

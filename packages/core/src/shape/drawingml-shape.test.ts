@@ -218,4 +218,41 @@ describe('shared DrawingML shape painter', () => {
       { name: 'clip', args: [] },
     ]);
   });
+
+  // ECMA-376 §20.1.9.15: custom paths are filled and stroked on their own.
+  it('honours per-path fill modes and stroke flags of custom geometry', () => {
+    const square = (at: number) => [
+      { cmd: 'moveTo' as const, x: at, y: at },
+      { cmd: 'lineTo' as const, x: at + .2, y: at },
+      { cmd: 'lineTo' as const, x: at + .2, y: at + .2 },
+      { cmd: 'close' as const },
+    ];
+    const plan: DrawingMLShapePaintPlan = {
+      rect: { x: 0, y: 0, w: 100, h: 100 },
+      geometry: {
+        kind: 'custom',
+        subpaths: [square(0), square(.3), square(.6)],
+        paint: [{ fill: 'none' }, { stroke: false }, { fill: 'darken' }],
+      },
+      fill: { fillType: 'solid', color: 'FF0000' },
+      stroke: { color: '0000FF', width: 1 },
+      transform: { rotationDeg: 0, flipH: false, flipV: false },
+    };
+    const { ctx, operations } = recordingContext();
+    paintDrawingMLShape(ctx, plan, 1);
+    const paints = operations
+      .filter(({ name }) => name === 'fill' || name === 'stroke' || name === 'beginPath')
+      .map(({ name }) => name);
+    expect(paints).toEqual([
+      'beginPath', 'stroke',
+      'beginPath', 'fill',
+      'beginPath', 'fill', 'fill', 'stroke',
+    ]);
+    expect(operations.filter(({ name }) => name === 'fillStyle').map(({ args }) => args[0]))
+      .toContain('rgba(0,0,0,0.4)');
+
+    const clip = recordingContext();
+    clipDrawingMLShape(clip.ctx, plan);
+    expect(clip.operations.filter(({ name }) => name === 'moveTo')).toHaveLength(2);
+  });
 });

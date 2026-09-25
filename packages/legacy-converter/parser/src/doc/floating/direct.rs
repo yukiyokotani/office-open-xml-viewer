@@ -661,6 +661,7 @@ fn direct_shape(
         z_order: facts.z_order.saturating_add(member),
         preset_geometry: shape.preset.map(str::to_owned),
         subpaths: shape.subpaths.clone(),
+        subpath_paint: Vec::new(),
         adj_values: shape.adjustments.clone(),
         fill,
         stroke: line.map(|line| line.color.clone()),

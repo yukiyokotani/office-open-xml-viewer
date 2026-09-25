@@ -1106,7 +1106,20 @@ pub struct PathInfo {
     pub w: f64,
     /// Path's own coordinate system height.
     pub h: f64,
+    /// ECMA-376 §20.1.9.15 `a:path@fill` (ST_PathFillMode §20.1.10.37) when
+    /// it is not `norm`: `none`, `lighten`, `lightenLess`, `darken` or
+    /// `darkenLess`. `None` is the default `norm`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fill: Option<String>,
+    /// ECMA-376 §20.1.9.15 `a:path@stroke` (default true). Serialized only
+    /// when false.
+    #[serde(skip_serializing_if = "is_true")]
+    pub stroke: bool,
     pub commands: Vec<PathCmd>,
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 #[derive(Debug, Serialize)]

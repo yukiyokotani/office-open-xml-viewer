@@ -875,6 +875,12 @@ export interface ShapeRun {
   /** Normalized [0,1] custom-geometry sub-paths. Empty when `presetGeometry`
    *  is set; the renderer chooses between buildCustomPath and buildShapePath. */
   subpaths: PathCmd[][];
+  /** ECMA-376 §20.1.9.15 per-path `fill` mode and `stroke` flag, parallel to
+   *  `subpaths`; absent when every path uses the defaults. */
+  subpathPaint?: Array<{
+    fill?: 'none' | 'lighten' | 'lightenLess' | 'darken' | 'darkenLess';
+    stroke?: false;
+  }>;
   /** OOXML <a:prstGeom prst> name (e.g. "rect", "ellipse", "rtTriangle").
    *  When set the renderer calls core's buildShapePath with `adjValues`. */
   presetGeometry?: string | null;
