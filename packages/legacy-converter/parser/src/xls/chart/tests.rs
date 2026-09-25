@@ -200,3 +200,32 @@ fn shape_xml_is_used_only_when_its_checksum_matches_the_biff_formats() {
         assert_eq!(model.series[0].color.as_deref(), Some(expected));
     }
 }
+
+#[test]
+fn a_chart_without_series_records_is_an_authored_empty_chart() {
+    let owned = vec![
+        record(0x0809, u16s(&[0x0600, 0x0020, 0, 0])),
+        record(0x1002, vec![0; 16]),
+        record(0x1033, vec![]),
+        record(0x1041, vec![0; 18]),
+        record(0x1033, vec![]),
+        record(0x1014, [vec![0; 16], u16s(&[0, 0])].concat()),
+        record(0x1033, vec![]),
+        record(0x1017, u16s(&[0, 150, 1])),
+        record(0x1034, vec![]),
+        record(0x1034, vec![]),
+        record(0x1034, vec![]),
+        record(0x000a, vec![]),
+    ];
+    let raw = read(&as_records(&owned)).unwrap();
+    let model = project(&raw, &palette(), &|_| None).unwrap();
+    assert!(model.authored_without_series);
+    assert!(model.series.is_empty());
+    // A chart with a Series record is never marked authored-empty.
+    let with_series = read(&as_records(&bar_chart(true, None))).unwrap();
+    assert!(
+        !project(&with_series, &palette(), &|_| None)
+            .unwrap()
+            .authored_without_series
+    );
+}

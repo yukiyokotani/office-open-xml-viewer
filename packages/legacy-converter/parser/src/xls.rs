@@ -160,6 +160,8 @@ struct SheetData {
     conditional_records: conditional::Records,
     /// Their XLSX-model projection (direct path only).
     conditional_formats: Vec<xlsx_model::ConditionalFormat>,
+    /// A chart sheet's chart (direct path only); such a sheet has no cells.
+    chart_sheet: Option<chart::ChartSheet>,
 }
 
 pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<XlsConversion, String> {
@@ -306,6 +308,7 @@ fn prepare_workbook(
     }
 
     let mut converted = Vec::new();
+    let mut pending_chart_sheets = Vec::new();
     let mut skipped_non_worksheets = false;
     let mut formula_results = false;
     let mut incomplete_print_margins = false;
@@ -316,13 +319,25 @@ fn prepare_workbook(
     for (tab, sheet) in sheets.into_iter().enumerate() {
         if sheet.sheet_type != 0 {
             // MS-XLS 2.4.28 BoundSheet8.dt: 1 macro sheet, 2 chart sheet, 6 VB
-            // module. A VB module has no sheet content to display; the direct
-            // reader rejects macro and chart sheets rather than dropping tabs
-            // whose cells or chart Excel shows.
+            // module. A VB module has no sheet content to display. The direct
+            // reader projects chart sheets (their charts are parsed once all
+            // worksheets they reference are read) and rejects macro sheets
+            // rather than dropping tabs whose cells Excel shows.
+            if direct && sheet.sheet_type == 2 {
+                pending_chart_sheets.push((converted.len(), sheet.offset));
+                converted.push((
+                    sheet.name,
+                    SheetData {
+                        visibility: sheet.visibility,
+                        ..SheetData::default()
+                    },
+                ));
+                tabs.push(tab);
+                continue;
+            }
             if direct && sheet.sheet_type != 6 {
                 return Err(unsupported(match sheet.sheet_type {
                     1 => "XLS macro sheets are not projected",
-                    2 => "XLS chart sheets are not projected",
                     _ => "unknown XLS sheet type",
                 }));
             }
@@ -432,6 +447,19 @@ fn prepare_workbook(
     } else {
         chart::Charts::default()
     };
+    let mut chart_sheets = Vec::with_capacity(pending_chart_sheets.len());
+    for &(index, offset) in &pending_chart_sheets {
+        let start = records
+            .binary_search_by_key(&offset, |record| record.offset)
+            .map_err(|_| unsupported("BOUNDSHEET8 points outside the BIFF record stream"))?;
+        chart_sheets.push((
+            index,
+            chart::chart_sheet(&records, start, &tabs, &styles, &converted, &shared_strings)?,
+        ));
+    }
+    for (index, chart_sheet) in chart_sheets {
+        converted[index].1.chart_sheet = Some(chart_sheet);
+    }
     let font = if with_pictures && (!pictures.is_empty() || !charts.is_empty()) {
         styles.normal_font()
     } else {

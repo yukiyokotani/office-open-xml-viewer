@@ -144,6 +144,113 @@ struct PreparedChart {
     model: ooxml_common::chart::ChartModel,
 }
 
+/// The palette and cell references every chart of the workbook resolves
+/// through.
+fn with_context<R>(
+    records: &[Record<'_>],
+    tabs: &[usize],
+    styles: &styles::Styles<'_>,
+    sheets: &[(String, SheetData)],
+    shared: &[rich::Text],
+    body: impl FnOnce(&Palette<'_>, &project::References<'_>) -> R,
+) -> R {
+    let sheet_ids: BTreeMap<_, _> = tabs.iter().enumerate().map(|(i, &tab)| (tab, i)).collect();
+    let cells = Cells::new(records, &sheet_ids, sheets, shared);
+    let references = |rgce: &[u8]| cells.resolve(rgce);
+    let theme = theme::Colors::parse(records).unwrap_or_default();
+    let color = |icv: u16| styles.chart_color(icv);
+    let global_font = |index: u16| styles.global_font(index);
+    let decode_font = |data: &[u8]| styles.chart_font(data);
+    let palette = Palette {
+        global_font: &global_font,
+        decode_font: &decode_font,
+        global_font_count: styles.font_count(),
+        icv: &color,
+        theme: std::array::from_fn(|index| {
+            theme
+                .argb(index as u32)
+                .map(|[_, r, g, b]| format!("{r:02X}{g:02X}{b:02X}"))
+        }),
+    };
+    body(&palette, &references)
+}
+
+/// A chart sheet's chart (MS-XLS 2.1.7.20.1 chart sheet substream) and the
+/// chart area rectangle from its Chart record (2.4.39: x, y, dx, dy as
+/// FixedPoint points), in EMU.
+pub(crate) struct ChartSheet {
+    pub model: ooxml_common::chart::ChartModel,
+    pub x_emu: i64,
+    pub y_emu: i64,
+    pub width_emu: i64,
+    pub height_emu: i64,
+}
+
+/// Parse the chart sheet whose BOF (dt 0x0020) is `records[start]`.
+pub(super) fn chart_sheet(
+    records: &[Record<'_>],
+    start: usize,
+    tabs: &[usize],
+    styles: &styles::Styles<'_>,
+    sheets: &[(String, SheetData)],
+    shared: &[rich::Text],
+) -> Result<ChartSheet, String> {
+    let bof = records
+        .get(start)
+        .ok_or_else(|| unsupported("XLS chart sheet outside the record stream"))?;
+    if bof.kind != super::BOF || u16_at(bof.data, 2)? != 0x0020 {
+        return Err(unsupported(
+            "XLS chart sheet does not start with a chart BOF",
+        ));
+    }
+    let mut depth = 0usize;
+    let mut end = None;
+    let mut area = None;
+    for (index, record) in records.iter().enumerate().skip(start) {
+        match record.kind {
+            super::BOF => depth += 1,
+            super::EOF => {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(index);
+                    break;
+                }
+            }
+            // The chart sheet's own Chart record (not one of a nested
+            // substream).
+            0x1002 if depth == 1 && area.is_none() => {
+                let value = |at| {
+                    super::u32_at(record.data, at).map(|v| i64::from(v as i32) * 12_700 / 65_536)
+                };
+                area = Some((value(0)?, value(4)?, value(8)?, value(12)?));
+            }
+            _ => {}
+        }
+    }
+    let end = end.ok_or_else(|| unsupported("XLS chart sheet lacks its EOF"))?;
+    let (x_emu, y_emu, width_emu, height_emu) =
+        area.ok_or_else(|| unsupported("XLS chart sheet lacks its Chart record"))?;
+    if width_emu <= 0 || height_emu <= 0 {
+        return Err(unsupported("empty XLS chart sheet chart area"));
+    }
+    let model = with_context(
+        records,
+        tabs,
+        styles,
+        sheets,
+        shared,
+        |palette, references| parse(&records[start..=end], palette, references),
+    )?
+    .ok_or_else(|| unsupported("BIFF chart without drawable series is not projected"))?;
+    Ok(ChartSheet {
+        model,
+        x_emu,
+        y_emu,
+        width_emu,
+        height_emu,
+    })
+}
+
 /// Embedded worksheet charts, parsed once and anchored after the Normal-font
 /// maximum digit width is measured (column widths depend on it).
 #[derive(Default)]
@@ -160,24 +267,26 @@ impl Charts {
         shared: &[rich::Text],
     ) -> Result<Self, String> {
         let sheet_ids: BTreeMap<_, _> = tabs.iter().enumerate().map(|(i, &tab)| (tab, i)).collect();
-        let cells = Cells::new(records, &sheet_ids, sheets, shared);
-        let references = |rgce: &[u8]| cells.resolve(rgce);
         let anchors = drawing_anchors::projectable(records)?;
-        let theme = theme::Colors::parse(records).unwrap_or_default();
-        let color = |icv: u16| styles.chart_color(icv);
-        let global_font = |index: u16| styles.global_font(index);
-        let decode_font = |data: &[u8]| styles.chart_font(data);
-        let palette = Palette {
-            global_font: &global_font,
-            decode_font: &decode_font,
-            global_font_count: styles.font_count(),
-            icv: &color,
-            theme: std::array::from_fn(|index| {
-                theme
-                    .argb(index as u32)
-                    .map(|[_, r, g, b]| format!("{r:02X}{g:02X}{b:02X}"))
-            }),
-        };
+        with_context(
+            records,
+            tabs,
+            styles,
+            sheets,
+            shared,
+            |palette, references| {
+                Self::prepare_anchors(records, anchors, &sheet_ids, palette, references)
+            },
+        )
+    }
+
+    fn prepare_anchors(
+        records: &[Record<'_>],
+        anchors: Vec<drawing_anchors::DrawingAnchor>,
+        sheet_ids: &BTreeMap<usize, usize>,
+        palette: &Palette<'_>,
+        references: &project::References<'_>,
+    ) -> Result<Self, String> {
         let mut charts = Self::default();
         for anchor in anchors {
             let (Some((start, end)), Some(&sheet)) = (anchor.chart, sheet_ids.get(&anchor.sheet))
@@ -187,10 +296,9 @@ impl Charts {
             let substream = records
                 .get(start..=end)
                 .ok_or_else(|| unsupported("BIFF chart substream out of range"))?;
-            // Excel draws a chart without series as its frame, title and
-            // axes; the shared chart model needs series, so such a chart is
-            // rejected rather than dropped.
-            let model = parse(substream, &palette, &references)?.ok_or_else(|| {
+            // A chart without Series records projects as an authored empty
+            // chart; series that exist but cannot be resolved are rejected.
+            let model = parse(substream, palette, references)?.ok_or_else(|| {
                 unsupported("BIFF chart without drawable series is not projected")
             })?;
             charts.sheets.entry(sheet).or_default().push(PreparedChart {

@@ -21116,6 +21116,15 @@ describe('canvas state leak (#766) — renderChart restores ctx state', () => {
     expect(ctx.textBaseline).toBe(before.textBaseline);
   });
 
+  it('draws an authored series-less chart as its empty area, without the "(no data)" placeholder', () => {
+    const { ctx, texts } = stackfulMockCtx();
+    renderChart(ctx, baseModel({ chartType: 'bar', series: [], authoredWithoutSeries: true }), RECT, 1);
+    expect(texts.some((t) => String(t).includes('(no data)') || (t as { text?: string }).text === '(no data)')).toBe(false);
+    const placeholder = stackfulMockCtx();
+    renderChart(placeholder.ctx, baseModel({ chartType: 'bar', series: [] }), RECT, 1);
+    expect(JSON.stringify(placeholder.texts)).toContain('(no data)');
+  });
+
   it('restores state via the unknown-chart-type default-case path', () => {
     const { ctx } = stackfulMockCtx();
     const before = { textAlign: ctx.textAlign, textBaseline: ctx.textBaseline };

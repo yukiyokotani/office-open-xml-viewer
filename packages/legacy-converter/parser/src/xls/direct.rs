@@ -304,7 +304,9 @@ impl DirectSession {
                 .sheets
                 .remove(&index)
                 .unwrap_or_default();
-            worksheet.charts = self.native_charts.remove(&index).unwrap_or_default();
+            worksheet
+                .charts
+                .extend(self.native_charts.remove(&index).unwrap_or_default());
             let rows = std::mem::take(&mut worksheet.rows);
             self.sheets[index] = SheetSlot::Projected(ProjectedSheet { worksheet, rows });
         }
@@ -393,6 +395,28 @@ fn project_sheet(
         charge(budget, name.len())?;
     }
     let mut worksheet = empty_worksheet(name, date1904, default_font.cloned());
+    if let Some(chart) = sheet.chart_sheet {
+        // A chart sheet (ECMA-376 §18.3.1.12 CT_Chartsheet in the XLSX model)
+        // has no grid; its chart is placed as the model's absolute anchor
+        // (same-cell corners carrying EMU offsets) at the Chart record's
+        // chart-area rectangle.
+        worksheet.is_chart_sheet = true;
+        worksheet.show_gridlines = false;
+        worksheet.charts.push(xlsx_model::ChartAnchor {
+            z_order: 0,
+            from_col: 0,
+            from_col_off: chart.x_emu,
+            from_row: 0,
+            from_row_off: chart.y_emu,
+            to_col: 0,
+            to_col_off: chart.x_emu + chart.width_emu,
+            to_row: 0,
+            to_row_off: chart.y_emu + chart.height_emu,
+            chart: chart.model,
+        });
+        sheet.views.project(&mut worksheet);
+        return Ok(worksheet);
+    }
     reserve_model(&mut worksheet.rows, sheet.rows.len(), budget)?;
     for (row_index, cells) in sheet.rows {
         let mut row = xlsx_model::Row {
@@ -684,7 +708,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn rejects_chart_and_macro_sheets_and_makes_no_blanket_omission_claim() {
+    fn rejects_macro_and_malformed_chart_sheets_and_makes_no_blanket_omission_claim() {
         // The direct reader projects drawings and conditional formatting or
         // rejects the workbook, so it never reports the byte converter's
         // blanket omission.
@@ -692,7 +716,8 @@ pub(super) mod tests {
             .warnings()
             .iter()
             .any(|warning| warning.contains("drawings-conditional-formatting")));
-        for (dt, expected) in [(2u8, "chart sheets"), (1, "macro sheets")] {
+        // Chart sheets are projected; one without its Chart record fails closed.
+        for (dt, expected) in [(2u8, "lacks its Chart record"), (1, "macro sheets")] {
             let mut stream = record(BOF, &[0, 6, 5, 0]);
             let first = stream.len() + 4;
             stream.extend(record(BOUNDSHEET8, &[0, 0, 0, 0, 0, 0, 1, 0, b'S']));

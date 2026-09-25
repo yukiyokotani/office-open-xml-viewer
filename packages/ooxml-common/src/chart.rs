@@ -434,6 +434,13 @@ pub struct ChartModel {
     /// Empty title placeholders still reserve their authored layout band.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub title_present: bool,
+    /// The source chart declares no series at all: every classic CT_PlotArea
+    /// chart group is empty (ECMA-376 §21.2.2.145 allows `ser` 0..n), or a
+    /// BIFF chart has no Series record. Excel draws such a chart as its empty
+    /// chart area (its PDF export of a series-less chart sheet shows only the
+    /// chart-area border), unlike a chart whose series could not be read.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub authored_without_series: bool,
     pub categories: Vec<String>,
     /// Host-resolved visibility of the shared category reference. Authored
     /// chart caches remain authoritative for text/value content.
@@ -7556,6 +7563,8 @@ pub fn parse_chartex_part_with_references_style_parts_and_images(
         title: chartex_title,
         title_rich_runs: None,
         title_present: chartex_title_present,
+        // chartEx data lives in its structured fields; not asserted here.
+        authored_without_series: false,
         categories,
         category_source_hidden: None,
         category_levels: None,
@@ -12967,6 +12976,7 @@ pub fn parse_chart_part_with_references_style_parts_and_images(
         title,
         title_rich_runs,
         title_present,
+        authored_without_series: !has_nonempty_classic_group,
         categories,
         category_source_hidden,
         category_levels,
@@ -13281,6 +13291,7 @@ mod tests {
             title: None,
             title_rich_runs: None,
             title_present: false,
+            authored_without_series: false,
             categories: vec!["A".to_string(), "B".to_string()],
             category_source_hidden: None,
             category_levels: None,

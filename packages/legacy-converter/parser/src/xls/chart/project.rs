@@ -503,9 +503,18 @@ pub(crate) fn project(
         series_models.push(model_series);
     }
     if series_models.is_empty() {
-        return None;
+        // A chart with no Series record at all is authored empty: Excel draws
+        // its chart area (see ChartModel::authored_without_series). Series
+        // that exist but resolve to nothing are not projected.
+        if raw.series.iter().any(|series| !series.trend_or_error) {
+            return None;
+        }
+        model.authored_without_series = true;
     }
-    model.categories = series_models[0].categories.clone().unwrap_or_default();
+    model.categories = series_models
+        .first()
+        .and_then(|series| series.categories.clone())
+        .unwrap_or_default();
     model.series = series_models;
     if let Some(legend) = raw.groups.iter().find_map(|g| g.legend) {
         model.show_legend = true;
