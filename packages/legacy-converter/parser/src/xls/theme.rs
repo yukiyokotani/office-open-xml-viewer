@@ -19,6 +19,29 @@ const MAX_EXPANDED_BYTES: u64 = 2 * 1024 * 1024;
 pub(super) struct Colors([Option<[u8; 3]>; 12]);
 
 impl Colors {
+    /// The color scheme of Excel's "Default theme" (dwThemeVersion 124226),
+    /// in clrScheme order. Evidence: every corpus workbook whose XLS carries
+    /// that version without theme contents was saved by Excel from an XLSX
+    /// whose theme is exactly this "Office" scheme (six workbooks: dk1
+    /// windowText 000000, lt1 window FFFFFF, dk2 1F497D, lt2 EEECE1, accents
+    /// 4F81BD C0504D 9BBB59 8064A2 4BACC6 F79646, hlink 0000FF, folHlink
+    /// 800080), and Excel's PDFs of those XLS files draw automatic chart
+    /// series in 4F81BD, C0504D and 9BBB59, not a later Office default.
+    const DEFAULT_THEME: Self = Self([
+        Some([0x00, 0x00, 0x00]),
+        Some([0xff, 0xff, 0xff]),
+        Some([0x1f, 0x49, 0x7d]),
+        Some([0xee, 0xec, 0xe1]),
+        Some([0x4f, 0x81, 0xbd]),
+        Some([0xc0, 0x50, 0x4d]),
+        Some([0x9b, 0xbb, 0x59]),
+        Some([0x80, 0x64, 0xa2]),
+        Some([0x4b, 0xac, 0xc6]),
+        Some([0xf7, 0x96, 0x46]),
+        Some([0x00, 0x00, 0xff]),
+        Some([0x80, 0x00, 0x80]),
+    ]);
+
     pub(super) fn parse(records: &[Record<'_>]) -> Result<Self, String> {
         let globals = records.iter().take_while(|r| r.kind != super::EOF).count();
         let mut matches = records[..globals]
@@ -53,12 +76,15 @@ impl Colors {
             bytes.extend_from_slice(payload);
         }
         if bytes.is_empty() {
-            if u32_at(record.data, 12)? == 0 {
-                return Err(unsupported("missing custom BIFF theme"));
-            }
-            // A version-only default theme is not an embedded color scheme.
-            // Keep the palette fallback; do not guess a current Office theme.
-            return Ok(Self::default());
+            return match u32_at(record.data, 12)? {
+                0 => Err(unsupported("missing custom BIFF theme")),
+                // MS-XLS 2.4.326 dwThemeVersion 124226 (and 123820, <137>):
+                // "Default theme", with no embedded contents.
+                124_226 | 123_820 => Ok(Self::DEFAULT_THEME),
+                // Another version names no color scheme; keep the palette
+                // fallback rather than guess one.
+                _ => Ok(Self::default()),
+            };
         }
         Self::package(&bytes)
     }
@@ -421,7 +447,7 @@ mod tests {
     }
 
     #[test]
-    fn validates_theme_header_and_global_ownership_but_does_not_guess_defaults() {
+    fn validates_theme_header_and_resolves_only_the_default_theme_version() {
         let mut data = record_data(&[]);
         assert!(Colors::parse(&[Record {
             kind: 0x0896,
@@ -436,9 +462,19 @@ mod tests {
                 offset: 0,
                 data: &data,
             };
-            assert!(Colors::parse(&[r]).unwrap().rgb(0).is_none());
+            let colors = Colors::parse(&[r]).unwrap();
+            assert_eq!(colors.argb(4), Some([0xff, 0x4f, 0x81, 0xbd]));
+            assert_eq!(colors.argb(2), Some([0xff, 0x1f, 0x49, 0x7d]));
             assert!(Colors::parse(&[r, r]).is_err());
         }
+        // Any other version without contents names no scheme.
+        data[12..16].copy_from_slice(&202_300u32.to_le_bytes());
+        let other = Record {
+            kind: 0x0896,
+            offset: 0,
+            data: &data,
+        };
+        assert!(Colors::parse(&[other]).unwrap().rgb(0).is_none());
         let hidden = [
             Record {
                 kind: super::super::EOF,
