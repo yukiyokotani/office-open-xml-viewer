@@ -30,3 +30,7 @@ files:
   - "packages/xlsx/parser/src/**/*.rs"
   - "packages/docx/parser/src/**/*.rs"
   - "packages/ooxml-common/src/**/*.rs"
+# Test modules kept in their own file (`#[cfg(test)] #[path = "…_tests.rs"] mod
+# …_tests;`) have no enclosing `mod` item inside that file.
+ignores:
+  - "**/*_tests.rs"

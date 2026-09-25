@@ -37,6 +37,16 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # The legacy Office readers are feature-gated per format (no feature
+      # builds nothing), so the workspace defaults above do not compile them.
+      # Lint and test each reader alone and all together.
+      - name: Legacy reader clippy (per feature)
+        run: |
+          for features in direct-doc direct-xls direct-ppt inspection; do
+            cargo clippy -p legacy-office-converter --all-targets --features "$features" -- -D warnings
+          done
+          cargo clippy -p legacy-office-converter --all-targets --all-features -- -D warnings
+
       # The cargo-fuzz harness is an intentionally independent workspace, so
       # the root workspace checks above do not format, lint, or compile it.
       - name: Fuzz target format check
@@ -49,6 +59,13 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
+
+      - name: Legacy reader tests (per feature)
+        run: |
+          for features in direct-doc direct-xls direct-ppt; do
+            cargo test -p legacy-office-converter --features "$features"
+          done
+          cargo test -p legacy-office-converter --all-features
 
   # RB8 — dependency vulnerability audit. Report-only for now
   # (continue-on-error): one known advisory already exists at introduction —
@@ -145,6 +162,11 @@ jobs:
           node scripts/check-docx-layout-boundaries.mjs --final
           pnpm check:docx-compatibility
 
+      - name: Core legacy boundary
+        run: |
+          node --test scripts/check-core-legacy-boundary.test.mjs
+          pnpm check:core-legacy-boundary
+
       # The WASM parsers are git-ignored build output; the TypeScript packages
       # import their generated .d.ts/.js, so typecheck requires building them first.
       - name: Build WASM
@@ -175,11 +197,10 @@ jobs:
           pnpm check:production-render-workers
           pnpm check:optional-chart-ex
           pnpm check:optional-tiff
-          pnpm check:optional-legacy-conversion
           pnpm check:optional-legacy-doc
           pnpm check:optional-legacy-ppt
           pnpm check:optional-legacy-xls
-          node --test scripts/vite-wasm-asset-name.test.mjs
+          pnpm check:legacy-wasm-exports
           pnpm check:public-type-exports
           pnpm check:public-api:built
 

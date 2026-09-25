@@ -12,6 +12,8 @@
   <canvas id="docx-chart-ex"></canvas>
   <canvas id="xlsx-chart-ex"></canvas>
   <canvas id="pptx-chart-ex"></canvas>
+  <canvas id="legacy-doc-main"></canvas>
+  <canvas id="legacy-doc-worker"></canvas>
   <script type="module">
     import { DocxDocument } from '/dist/docx.mjs';
     import { XlsxSheetViewer, XlsxWorkbook } from '/dist/xlsx.mjs';
@@ -20,7 +22,8 @@
     import { threeD } from '/dist/three-d.mjs';
     import { regionMap } from '/dist/region-map.mjs';
     import { chartEx } from '/dist/chart-ex.mjs';
-    import { createLegacyOfficeWasmWorkerConverter } from '/dist/legacy-conversion.mjs';
+    import { legacyDocSource } from '/dist/legacy-doc.mjs';
+    import { runModelSourceStages } from '/tests/worker-dist/model-source-stages.mjs';
 
     const renderers = { math, threeD, regionMap, chartEx };
     const paint = (id, bitmap) => {
@@ -37,22 +40,6 @@
     };
 
     try {
-      document.body.dataset.stage = 'legacy-converter-worker';
-      const legacyConverter = createLegacyOfficeWasmWorkerConverter();
-      try {
-        await legacyConverter.convert({
-          bytes: new Uint8Array([1, 2, 3]),
-          from: 'doc',
-          to: 'docx',
-          maxOutputBytes: 1024 * 1024,
-          signal: new AbortController().signal,
-        });
-        throw new Error('legacy converter unexpectedly accepted malformed CFB');
-      } catch (error) {
-        if (error?.reason !== 'unsupported-input') throw error;
-        document.body.dataset.legacyConverter = 'ready';
-      }
-
       const docx = await DocxDocument.load(
         await bytes('/packages/docx/public/demo/sample-1.docx'),
         { mode: 'worker', ...renderers },
@@ -146,6 +133,14 @@
       );
       paint('pptx-chart-ex', await chartExPptx.renderSlideToBitmap(0, { width: 640, dpr: 1 }));
       chartExPptx.destroy();
+
+      await runModelSourceStages({
+        DocxDocument,
+        XlsxWorkbook,
+        legacyDocSource,
+        bytes,
+        paintCanvas: (id) => document.getElementById(id),
+      });
 
       document.body.dataset.status = 'ready';
     } catch (error) {

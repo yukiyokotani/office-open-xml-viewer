@@ -204,24 +204,31 @@ per-render argument. (Excel stores "Insert > Equation" as OMML inside the shared
 DrawingML `<xdr:txBody>` grammar, so `XlsxViewer` renders equations embedded in
 shapes / text boxes the same way.)
 
-### Opt-in legacy DOC, XLS, and PPT conversion
+### Experimental legacy DOC, XLS, and PPT sources
 
-Legacy binary Office input can be routed through an asynchronous converter
-before the existing OOXML parser runs (`.doc -> .docx`, `.xls -> .xlsx`,
-`.ppt -> .pptx`). This is fully opt-in per format: applications explicitly
-inject `legacyConversion.doc`, `.xls`, and/or `.ppt`, and enabling one never
-enables the others. Importing
-`@silurus/ooxml/legacy-conversion` provides an early, deliberately limited local
-WASM converter as well as the implementation-neutral adapter API. It never
-uploads document bytes, and ordinary OOXML loads do not import or initialize the
-converter Worker or its WASM.
-Without a converter, the existing typed `legacy-binary-format` rejection is
-unchanged. Converter output is validated as same-family, macro-free OOXML before
-parser handoff. The built-in browser entry runs in a disposable Worker so its
-WASM memory is released before parser peak memory. Initial fidelity is limited
-to passive text and cell-value subsets; consult the explicit support matrix
-before enabling it on production archives. See
-[Opt-in legacy Office conversion](docs/legacy-office-conversion.md).
+Legacy binary Office files can be read directly into the ordinary document,
+workbook and presentation models through **model sources**, a format-generic
+`modelSources` load option. The legacy readers are separate opt-in entries, one
+per format; each returns a model source for the matching loader or viewer:
+
+```typescript
+import { DocxViewer } from '@silurus/ooxml/docx';
+import { legacyDocSource } from '@silurus/ooxml/legacy-doc';
+
+const canvas = document.querySelector('canvas') as HTMLCanvasElement;
+const viewer = new DocxViewer(canvas, { modelSources: [legacyDocSource()] });
+await viewer.load(docOrDocxBytes);
+```
+
+`legacyXlsSource()` (`@silurus/ooxml/legacy-xls`) and `legacyPptSource()`
+(`@silurus/ooxml/legacy-ppt`) work the same way for XLSX and PPTX. A source
+claims only its own binary family; every other input takes the unchanged OOXML
+path, and without a source a legacy file still rejects with the typed
+`legacy-binary-format` error. Creating a source fetches nothing: its
+self-contained source module and WASM load in the parser worker (or in Node)
+only when a claimed file is opened, and no OOXML package is generated. The
+readers are narrow and experimental and reject unsupported content rather than
+guessing; see [Experimental legacy Office sources](docs/legacy-office-conversion.md).
 
 ### Optional rendering modules
 

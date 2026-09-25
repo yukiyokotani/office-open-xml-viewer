@@ -115,15 +115,13 @@ jobs:
       - name: Verify optional TIFF bundle boundary
         run: pnpm check:optional-tiff
 
-      - name: Verify optional legacy Office converter boundary
-        run: pnpm check:optional-legacy-conversion
-
-      - name: Verify per-format native Office bundle boundaries
+      - name: Verify per-format legacy Office model source boundaries
         run: |
+          pnpm check:core-legacy-boundary
           pnpm check:optional-legacy-doc
           pnpm check:optional-legacy-ppt
           pnpm check:optional-legacy-xls
-          node --test scripts/vite-wasm-asset-name.test.mjs
+          pnpm check:legacy-wasm-exports
 
       # ── Verify the package that is about to be published ──────────────────────
       # publint checks packaging correctness (exports ordering, file presence,

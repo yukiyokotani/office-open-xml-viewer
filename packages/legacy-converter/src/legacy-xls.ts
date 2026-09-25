@@ -1,7 +1,7 @@
 import type { ModelSource } from '@silurus/ooxml-core';
 import { createLegacySource, type LegacySourceOptions } from './legacy-source.js';
 import defaultWasmUrl from './wasm-direct-xls/legacy_xls_direct_bg.wasm?url';
-import defaultModuleUrl from './legacy-xls-source-module.ts?worker&url';
+import defaultModuleUrl from './legacy-xls-source-module.ts?url';
 
 export type LegacyXlsSourceOptions = LegacySourceOptions;
 

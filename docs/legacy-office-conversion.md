@@ -1,39 +1,114 @@
-# Opt-in legacy Office conversion
+# Experimental legacy Office sources
 
-The byte-conversion API can normalize legacy binary Office bytes before an
-existing OOXML parser runs:
+Legacy binary Office files can be opened with the ordinary viewers and
+loaders through optional model sources:
 
-- `.doc` to macro-free `.docx`
-- `.xls` to macro-free `.xlsx`
-- `.ppt` to macro-free `.pptx`
+- `.doc` with the DOCX loaders and `DocxViewer`
+- `.xls` with the XLSX loaders and `XlsxViewer`
+- `.ppt` with the PPTX loaders and `PptxViewer`
 
-The opt-in `@silurus/ooxml/legacy-conversion` entry contains both a purpose-built
-local WASM converter and the implementation-neutral adapter API. Ordinary DOCX,
-XLSX, and PPTX entry points do not import, fetch, initialize, or retain the
-converter Worker or its WASM. If neither a converter nor the matching direct
-source is supplied, legacy input continues to reject with
-`OoxmlError.code === 'legacy-binary-format'`.
+Each reader is a separate opt-in entry. It reads a supported binary subset
+directly into the existing document, workbook or presentation model, without
+generating an OOXML package, and the ordinary layout and Canvas renderers
+draw the result. Importing the ordinary DOCX, XLSX or PPTX entries alone does
+not import, fetch or initialize any legacy reader. Without a matching source,
+legacy input continues to reject with
+`OoxmlError.code === 'legacy-binary-format'`, so no migration is required for
+applications that do not opt in.
 
-Experimental direct sources are available for DOC, PPT and XLS. They read
-supported binary subsets into the existing document, presentation or workbook
-models without generating an OOXML ZIP or reparsing generated XML. These paths
-use the ordinary layout and Canvas renderers.
+These readers are experimental and deliberately narrow. They reject input
+they cannot represent instead of showing a partial document, and none of them
+executes macros, fields, formulas, actions or embedded objects.
 
-## Experimental direct DOC source (browser)
+## Enabling a source
 
-Import the separate `@silurus/ooxml/legacy-doc` entry and enable it only for
-`doc`. The factory returns a validated descriptor without fetching or
-initializing WASM. The browser document loader opens the dedicated
-`legacy_doc_direct_bg.wasm` asset only when a DOC input selects this source.
+Pass the source in the format-generic `modelSources` option. It is available
+on the DOCX, XLSX and PPTX `load()` options, on the viewers, and on the Node
+session options (`openDocxDocument`, `materializeDocxDocument`,
+`openXlsxWorkbook`, `openPptxPresentation` and their siblings).
+
+```typescript
+import { DocxViewer } from '@silurus/ooxml/docx';
+import { legacyDocSource } from '@silurus/ooxml/legacy-doc';
+
+const canvas = document.querySelector('canvas') as HTMLCanvasElement;
+const viewer = new DocxViewer(canvas, { modelSources: [legacyDocSource()] });
+await viewer.load(docOrDocxBytes);
+```
+
+| Input | Entry | Factory | Loaders and viewers |
+| --- | --- | --- | --- |
+| DOC | `@silurus/ooxml/legacy-doc` | `legacyDocSource()` | `DocxViewer`, `DocxDocument.load`, `openDocxDocument`, `materializeDocxDocument` |
+| XLS | `@silurus/ooxml/legacy-xls` | `legacyXlsSource()` | `XlsxViewer`, `XlsxWorkbook.load`, `openXlsxWorkbook` |
+| PPT | `@silurus/ooxml/legacy-ppt` | `legacyPptSource()` | `PptxViewer`, `PptxPresentation.load`, `openPptxPresentation` |
+
+Each factory accepts the same optional settings:
+
+```typescript
+interface LegacySourceOptions {
+  wasmUrl?: string; // absolute URL of the reader's WASM
+  moduleUrl?: string; // absolute URL of the reader's source module
+  maxInputBytes?: number; // defaults to, and may not exceed, 256 MiB
+}
+```
+
+Creating a source fetches nothing. When a claimed file loads, the parser
+Worker (or Node) imports the source's self-contained ES module, emitted as
+`legacy-<format>-source-module*.js` next to the package files, and initializes
+the reader's dedicated WASM: `legacy_doc_direct_bg.wasm`,
+`legacy_xls_direct_bg.wasm` or `legacy_ppt_direct_bg.wasm`. Serve these files
+with the other package assets, and allow the module URL wherever a Content
+Security Policy restricts `script-src` or Worker imports. Applications with a
+custom asset pipeline pass absolute `moduleUrl` and `wasmUrl` values:
+
+```typescript
+const source = legacyPptSource({
+  moduleUrl: new URL('/assets/legacy-ppt-source-module.js', location.href).href,
+  wasmUrl: new URL('/assets/legacy_ppt_direct_bg.wasm', location.href).href,
+});
+```
+
+Module URLs come only from application options; document content never
+selects or rewrites them.
+
+A source can report the document's own view preferences. Precedence is: an
+explicit caller option, then the source's view default, then the renderer
+default. Capabilities that a source lacks degrade the same way for every
+format: resource metrics are reported without a ZIP usage snapshot, and
+`toMarkdown()` rejects with an "... is unsupported for this source" error.
+All three legacy readers lack Markdown export and ZIP accounting.
+
+To cancel a load, destroy the document or viewer, or start another load in
+its place. Node sessions keep their `signal` option.
+
+## Admission and failure behavior
+
+A source's synchronous `claim(bytes)` accepts only its own [MS-CFB] family:
+a compound file whose directory names `WordDocument` (DOC), `Workbook` or
+`Book` (XLS), or `PowerPoint Document` (PPT). A container that names more than
+one family, or that carries `EncryptionInfo`, is not claimed. Every input a
+source does not claim takes the unchanged OOXML path, so:
+
+- a legacy file without a matching source rejects with the typed
+  `legacy-binary-format` error;
+- encrypted OOXML packages keep their existing encryption errors;
+- configuring `legacyDocSource()` does not enable XLS or PPT input.
+
+Claimed input larger than `maxInputBytes` throws a `RangeError`. The limit is
+resource policy, not an Office format limit. After a source claims a file, a
+reader failure rejects the load: there is no fallback to another source or to
+the OOXML path. Password-protected legacy binaries, pre-CFB Office formats and
+unsupported binary structures are rejected by the readers. These checks are
+structural, never filename-based.
+
+## Experimental direct DOC source
 
 ```typescript
 import { DocxDocument } from '@silurus/ooxml/docx';
-import { createLegacyDocSource } from '@silurus/ooxml/legacy-doc';
+import { legacyDocSource } from '@silurus/ooxml/legacy-doc';
 
 const document = await DocxDocument.load(legacyDocArrayBuffer, {
-  legacyConversion: {
-    doc: { source: createLegacyDocSource() },
-  },
+  modelSources: [legacyDocSource()],
 });
 const canvas = window.document.querySelector('canvas') as HTMLCanvasElement;
 
@@ -44,20 +119,36 @@ try {
 }
 ```
 
+Node supports DOC through the same reader:
+
+```typescript
+import { openDocxDocument } from '@silurus/ooxml/node';
+import { legacyDocSource } from '@silurus/ooxml/legacy-doc';
+
+const session = await openDocxDocument(legacyDocBytes, {
+  factory,
+  modelSources: [legacyDocSource()],
+});
+```
+
 Both browser rendering modes and progressive layout use the same retained
-layout pipeline. A custom asset pipeline can supply an absolute `wasmUrl` to
-`createLegacyDocSource`. The native source remains alive for image reads until
-the document is destroyed; finishing a model cursor does not dispose it.
-An optional `legacyConversion.doc.signal` can cancel loading and remains
-attached to the loaded document until destruction.
+layout pipeline. The native source remains alive for image reads until the
+document is destroyed; finishing a model cursor does not dispose it.
 
 This is a narrow experimental reader, not full DOC support. Unsupported
 formatting, fields, numbering, notes and other unimplemented structures may
-reject the entire document. The byte-converter support matrix below does not
-describe native-reader coverage. No fallback to byte conversion occurs after
-a native failure. ZIP resource metrics and Markdown export are unsupported for
-this source. Node document APIs do not yet support the direct DOC source;
-continue using byte conversion there. Neither route executes macros.
+reject the entire document.
+
+When a DOC prints its revision markup (MS-DOC `DopBase.fRMPrint`) and carries
+revision marks, the reader reports `showTrackedChanges: true` as its view
+default. An explicit `showTrackedChanges` option, including `false`, always
+wins.
+
+Missing header and footer distances use the MS-DOC 2.6.4 defaults for the
+stored producer installation LCID when the specification lists that LCID.
+Explicit values, including zero, win. Unlisted languages keep the
+unresolved-margin recovery. The host locale and the document's text language
+are not used to guess the producer's settings.
 
 Fields in the direct DOC source are checked against each story's own field
 table: the main document, headers and footers, footnotes, endnotes and
@@ -93,23 +184,14 @@ stories.
 
 ## Experimental direct PPT source
 
-Import `createLegacyPptSource` from the separate
-`@silurus/ooxml/legacy-ppt` entry and enable it only for `ppt`. Importing the
-entry makes the dedicated `legacy_ppt_direct_bg.wasm` asset available, but the
-factory only returns a validated source descriptor: it does not fetch or
-initialize WASM. The presentation loader initializes that asset only when a
-legacy PPT input selects the source.
-
 Browser:
 
 ```typescript
 import { PptxPresentation } from '@silurus/ooxml/pptx';
-import { createLegacyPptSource } from '@silurus/ooxml/legacy-ppt';
+import { legacyPptSource } from '@silurus/ooxml/legacy-ppt';
 
 const presentation = await PptxPresentation.load(legacyPptArrayBuffer, {
-  legacyConversion: {
-    ppt: { source: createLegacyPptSource() },
-  },
+  modelSources: [legacyPptSource()],
 });
 const canvas = document.querySelector('canvas') as HTMLCanvasElement;
 
@@ -124,12 +206,10 @@ Node:
 
 ```typescript
 import { openPptxPresentation } from '@silurus/ooxml/node';
-import { createLegacyPptSource } from '@silurus/ooxml/legacy-ppt';
+import { legacyPptSource } from '@silurus/ooxml/legacy-ppt';
 
 const session = await openPptxPresentation(legacyPptBytes, {
-  legacyConversion: {
-    ppt: { source: createLegacyPptSource() },
-  },
+  modelSources: [legacyPptSource()],
 });
 
 try {
@@ -141,23 +221,16 @@ try {
 }
 ```
 
-Applications with a custom asset pipeline can override the emitted asset URL:
-
-```typescript
-const source = createLegacyPptSource({
-  wasmUrl: new URL('/assets/legacy_ppt_direct_bg.wasm', location.href).href,
-});
-```
-
 The direct source is an experimental, bounded subset, not a full-fidelity
-PowerPoint implementation. Its current omissions include audio/video media,
-embedded fonts, Markdown production, and ZIP-based resource-usage metrics.
-The support matrix below describes the byte-conversion engine, not the direct
-reader's admission contract. The direct reader is currently narrower and can
-reject otherwise convertible constructs, including unresolved paragraph
-margin or indentation and positive paragraph before/after percentages. Its
-explicit unsupported diagnostics are authoritative; conversion support does
-not imply direct-reader support.
+PowerPoint implementation. Besides Markdown and ZIP accounting, it currently
+lacks audio/video media and embedded fonts. It rejects constructs it cannot
+represent, including unresolved paragraph margin or indentation and positive
+paragraph before/after percentages. Its explicit unsupported diagnostics are
+authoritative.
+
+A slide's own `SlideShowSlideInfoAtom.fHidden` marks it hidden; hidden slides
+and their content remain in the presentation. Display follows the existing
+`PptxViewer` `hiddenSlideMode` option, whose default remains `'show'`.
 
 The direct reader shows an embedded OLE object, such as an Excel or Graph
 chart, as the presentation picture the file stores for it: an OLE shape is a
@@ -174,6 +247,17 @@ PowerPoint displays GIF data that a producer stored in a PNG picture slot,
 so the direct PPT reader identifies such a slot by its GIF87a/GIF89a
 signature and emits it as `image/gif`; other mismatched content stays
 rejected.
+
+Classic linear gradients (MS-ODRAW `msofillShade` and `msofillShadeScale`)
+keep their ordered shade colours, signed focus and 16.16 angle. Explicit
+shade-array stops at either endpoint take precedence over scalar front or
+back colours; a missing final endpoint uses the scalar back colour. Linear,
+scaled, two-colour and translucent shades are projected, including on rotated
+shapes and inside rotated or flipped groups. Path and title shades, other
+shade types, custom fill rectangles and opacity combined with a shade-colour
+array fail closed. Twenty controlled Office comparisons covered focus, angle,
+endpoint conflicts and leaf flips; the projected positions were within one
+DrawingML position unit of Office's serialized integers.
 
 Pattern fills on unrotated shapes become tiled picture fills that follow
 PowerPoint's own output: the 8x8 area of the stored 10x10 pattern bitmap,
@@ -197,802 +281,68 @@ black-and-white (whose order has no evidence), grayscale or black-and-white
 alone, recolouring and adjustments on picture fills stay rejected until
 Office output confirms their rendering.
 
-## Experimental direct XLS source
-
-Like DOC and PPT, XLS is a per-format opt-in. XLS applications can import
-`createLegacyXlsSource` from `@silurus/ooxml/legacy-xls` and select it only in
-`legacyConversion.xls`:
-
-```typescript
-import { XlsxWorkbook } from '@silurus/ooxml/xlsx';
-import { createLegacyXlsSource } from '@silurus/ooxml/legacy-xls';
-
-const workbook = await XlsxWorkbook.load(legacyXlsArrayBuffer, {
-  legacyConversion: {
-    xls: { source: createLegacyXlsSource() },
-  },
-});
-```
-
-The direct XLS source is likewise experimental and bounded. It preserves its
-supported BIFF workbook subset in the shared worksheet model; unsupported
-features still reject or remain omitted as documented by diagnostics. Its
-dedicated asset is `legacy_xls_direct_bg.wasm`, and the factory accepts the same
-kind of optional absolute `wasmUrl` override as the PPT factory.
-
-Beyond the byte converter's subset, the direct source projects conditional
-formatting (classic CF with its CFEx extensions, CF12 comparison, formula,
-color-scale, data-bar and icon-set rules, their differential formats and
-decompiled formulas), Excel tables with custom table styles, frozen panes, tab
-colors, XFExt gradient fills, hyperlinks, worksheet AutoFilter ranges (whose
-application-inserted drop-down objects become the renderer's filter buttons;
-active filter criteria reject), data validations and defined names, plus
-embedded charts, chart sheets, pictures, and rectangles, text boxes and their
-groups as shape anchors. Variants the shared model cannot show (for
-example inactive rules, suppressed list drop-downs, displayed phonetic guides,
-or table-style elements outside the model) reject the workbook instead of being
-dropped. Print areas and titles travel as defined names; page setup, headers
-and footers affect printing only and are not part of the model.
-
-Existing converter options and `convert()` behavior are unchanged, so no
-migration is required unless an application chooses a native source.
-Each `doc`, `ppt` or `xls` configuration selects
-either `source` or `converter`, never both.
-Importing the ordinary DOCX, XLSX, or PPTX entries alone does not select this
-functionality or fetch a dedicated WASM asset.
-
-## Built-in browser converter
-
-Use one shared converter instance so all viewers share its bounded queue. Each
-active conversion receives a new Worker; the Worker and converter WASM memory
-are released before the converted package enters the existing parser Worker.
-
-```typescript
-import { DocxViewer } from '@silurus/ooxml/docx';
-import {
-  createLegacyOfficeWasmWorkerConverter,
-} from '@silurus/ooxml/legacy-conversion';
-
-const legacyConverter = createLegacyOfficeWasmWorkerConverter({
-  maxConcurrency: 1,
-  maxQueuedConversions: 4,
-});
-
-const canvas = document.querySelector('canvas') as HTMLCanvasElement;
-const viewer = new DocxViewer(canvas, {
-  legacyConversion: {
-    doc: {
-      converter: legacyConverter,
-      timeoutMs: 120_000,
-    },
-  },
-});
-await viewer.load(legacyDocBytes);
-```
-
-`XlsxViewer` and `PptxViewer` use the matching `xls` and `ppt` fields. Each
-field is an independent opt-in: configuring `doc` does not enable legacy input
-for either other viewer. Importing the opt-in entry emits a separate
-`legacy_office_converter_bg.wasm` asset. Applications must serve that asset with
-the other package assets; it is not fetched or initialized until an enabled
-legacy input actually reaches the converter.
-
-For Node, use `createLegacyOfficeWasmConverter()`. Its default loader reads the
-emitted WASM asset locally; `wasm` can be supplied explicitly as bytes or a
-compiled module when an application has its own asset pipeline. Direct browser
-use is also possible, but conversion is synchronous after WASM initialization
-and should therefore remain inside a Worker.
-
-## Initial support matrix
-
-This first engine version is suitable for feasibility testing and text/value
-ingestion experiments. It is not a general-fidelity replacement for opening a
-legacy document in Microsoft Office.
-
-| Input | Accepted subset | Preserved | Deliberately omitted / rejected |
-|---|---|---|---|
-| DOC | CFB Word 97-2003 documents with a readable main-story CLX piece table | main-story text, paragraphs, tabs, custom tab stops and document-wide default tab interval, line/page/column breaks, displayed field results, font names and explicit sizes, paragraph-style character defaults, character styles and direct bold/italic/underline/strike/caps/color/spacing properties, paragraph alignment/indentation/line spacing/before-after spacing/keep options, ordinary single-level and multilevel list definitions, list starts/restarts and marker formatting, literal list-bullet glyph references with resolved marker fonts, nested table structure, explicit cell widths/margins/borders/merges and row heights, section boundaries, page size/orientation, explicit body margins and gutter, columns, vertical alignment, document grid, inline JPEG/PNG/EMF/WMF picture frames with display size, cropping, rotation and flips, explicitly positioned main-story floating JPEG/PNG/EMF/WMF frames with basic wrapping, formatted header/footer variants and supported passive page-number fields, paragraph borders, formatted footnote/endnote content and references | frames, unsupported paragraph/list-style interactions and conditional table styles, legacy automatic-numbering fields and unrepresentable list templates, advanced table/character/section properties, header/footer and note floating drawings, note numbering/positioning/custom separators and custom-mark rendering, advanced floating drawings, non-raster images other than EMF/WMF, picture borders/effects and nonrectangular geometry, revisions, OLE; non-Western compressed code-page pieces are not decoded yet |
-| XLS | CFB BIFF8 workbooks, including shared-string character data split across `CONTINUE` records | worksheet names and visibility (including very hidden), scalar values, cached formula results, merged ranges, date system, BIFF8 number formats, fonts, palette colors and supported checksum-bound extension colors, fills, borders, alignment, shared-string rich-text runs, styled blank cells, row heights and column widths, row/column hiding and outlines, print setup/margins/options, basic header/footer commands, manual page breaks, and measured passive embedded PNG/JPEG/EMF/WMF picture frames with supported cell anchors, cropping, rotation and flips | formula programs, phonetic string data, unsupported extended styles/theme colors/gradients, conditional formatting, print areas/titles, extended headers/footers, saved custom views, charts, non-picture drawings, grouped or active/linked picture objects, picture effects, external links, pre-BIFF8 sheets |
-| PPT | CFB PowerPoint 97-2003 files with a resolvable current edit chain and persist directory | live slide order and dimensions, UTF-16/compressed Unicode text and outline references, individual shape anchors, nested group coordinates, basic rotation/flips, direct text margins/wrapping/vertical anchoring, direct font names/sizes/bold/italic/underline, literal and slide/master-scheme colors, paragraph alignment/spacing and explicit local ruler custom tabs, character bullets, explicit shape-local automatic numbering and paragraph-style offsets, verified-placeholder and explicit master-shape text-style inheritance, manual line breaks, unmodified basic presets with direct or explicitly linked master solid fill/line colors, supported classic linear gradients, line widths and opacity, line caps/joins, arrow ends and standard dash patterns, embedded/delayed JPEG, PNG, EMF and WMF picture frames with signed cropping, local/inherited solid, linear-gradient and stretched-image backgrounds, eligible foreground picture fills on supported preset and uniform custom paths, enabled non-placeholder master objects using the same supported drawing subset, static slide-number metacharacters, explicit full-coordinate line/cubic paths with uniform path paint; superseded slides, deleted and explicitly hidden shapes are not emitted | unlinked placeholder and nonuniform master text overrides, unlinked/drawing-default paint, master placeholder content and header/footer fields, system/palette color indices, inherited/outline automatic numbering, picture bullets, text-ruler offsets/default intervals and inherited ruler tabs, advanced character formatting, embedded fonts, guide-dependent or compact custom geometry, arc/editing escapes, mixed per-path paint, some rotated/grouped geometry, rotated gradient shapes or gradients inside rotated/reflected groups, non-linear gradients, patterns, custom dash arrays/compound lines, effects, custom fill rectangles and origins, charts, notes, PICT/DIB/TIFF/other image formats, picture effects and advanced foreground image-fill sizing, audio/video, transitions, animations, actions, OLE |
-
-XLS literal, untinted RGBA colors in checksum-matched XF extensions are preserved
-for text, pattern fills, and all five border edges. Cell-specific font colors do
-not change other cells sharing the original font. Missing or stale XF checksums
-retain the base palette formatting. Untinted accent and hyperlink theme colors
-are resolved through the embedded theme package's internal relationships and named color slots,
-including saved system-color `lastClr` values. The theme is read only when an
-owned extension needs it; no theme package, links, or active content are copied
-to the output. The first four light/dark theme indices retain their BIFF palette
-fallback: the documented index ordering conflicts with observed Office output,
-and no compatibility remapping is inferred. Version-only default themes,
-unsupported theme color forms or transforms, tinted extension colors, gradient fills, and font-scheme extensions
-still use the base-format fallback; extended-style warnings remain. No migration
-is required.
-
-Embedded XLS theme parsing is a bounded metadata subset, not a general OPC
-validator: it accepts UTF-8 XML and internal, unescaped part names; rejects
-ambiguous packages, external theme relationships, DTDs, and malformed XML; and
-caps ZIP input at 4 MiB, entries at 64, each expanded part at 256 KiB, and declared
-aggregate expansion at 2 MiB. XML depth, events, attributes, and retained strings
-are also bounded. These are converter resource policies, not Office format
-limits. No host system-color lookup or default-theme guess is performed.
-
-XLS gridline visibility, zero-value display, and right-to-left sheet direction
-are preserved through ordinary OOXML sheet views. Row/column header visibility
-is retained as metadata but is not yet applied by the viewer. Multiple window
-associations are retained; the converter does not reconstruct window placement,
-pane selections, scrolling, or zoom. No migration is required; XLS remains a
-separate opt-in.
-
-XLS worksheet visibility is preserved as OOXML metadata. Display follows the
-existing `XlsxViewer` `hiddenSheetMode` option; its default remains `'show'`.
-Hidden sheets and their cell data are retained, not removed.
-
-PPT slide visibility is also preserved as OOXML metadata. The slide's own
-`SlideShowSlideInfoAtom.fHidden` becomes `p:sld/@show="0"`; hidden slides and
-their content remain in the presentation. Display follows the existing
-`PptxViewer` `hiddenSlideMode` option, whose default remains `'show'`.
-Master visibility is not inherited. Transitions, sounds, and actions remain
-omitted. No migration or additional opt-in is required for this metadata fix;
-PPT conversion still requires its existing per-format opt-in.
-
-PPT local text-body ruler custom tabs are preserved as explicit DrawingML
-paragraph tab lists, including signed positions, all four alignment values, and
-an explicitly empty list. This applies to owned inline text and outline text
-references, including master objects that are themselves rendered. No migration
-is required; PPT conversion retains its existing independent opt-in.
-
-The converter reads the local `TextRulerAtom` (MS-PPT 2.9.23-24, 2.9.29-30)
-without inventing a paragraph-margin adjustment. It charges both decoding and
-each paragraph's tab emission against the existing work and XML budgets. The
-ordinary PPTX parser and renderer consume the output. Ruler margin/indent fields,
-ruler default intervals, document default rulers, linked-master ruler inheritance,
-and conflicting direct paragraph tab arrays remain unsupported.
-Malformed local tab records fail rather than producing a partially decoded list.
-Multiple local ruler records are rejected as unsupported ambiguity; the inline
-record grammar permits them, but precedence is not inferred by this subset.
-This is not a claim of full binary/Office visual equality.
-
 A modern Office-saved PPT can retain paragraph properties in the OfficeArt
 `metroBlob` alternative shape XML rather than in its classic text ruler. The
 direct PPT source adopts that XML under the rule described with the release
-gap inventory below; see also the [controlled probe protocol](../scripts/legacy-ppt-ruler-probes.md)
+gap inventory below; see also the [controlled probe protocol](../packages/legacy-converter/tools/legacy-ppt-ruler-probes.md)
 before attributing differences to an implicit ruler rule.
 
-Local Office-reference checks confirm that restoring these stops improves
-tab-separated text, but residual RTL anchoring and ruler-indent differences
-remain. Fidelity checks must load the intended fonts: fallback metrics can cause
-extra wrapping even when the tab position matches Office. These checks are
-separate from byte-exact previous-converter/unchanged-renderer comparisons.
-
-PPT paragraph text direction is retained as DrawingML `a:pPr/@rtl`
-(MS-PPT 2.9.20/21 and 2.13.30; ECMA-376 21.1.2.2.7). Supported master and
-direct formatting paths inherit an absent direction, while explicit left-to-right
-clears an inherited right-to-left value. Alignment remains independent and
-logical Unicode text order is unchanged. Reserved direction values are rejected.
-The ordinary PPTX parser and renderer handle the resulting metadata; no
-renderer changes, migration or additional opt-in are required. This does not
-claim complete Office-equivalent bidirectional shaping or punctuation placement.
-
-PPT text-body direction preserves an owned primary `txflTextFlow=1` as
-DrawingML `bodyPr/@vert="eaVert"` when `cdirFont` is absent or zero. This is a
-PowerPoint compatibility mapping, not a literal interpretation of the generic
-MS-ODRAW enumeration. Controlled local Office down-save/reopen/PDF/roundtrip
-tests found that both OOXML `vert` and `eaVert` become the same binary value,
-and that Office reopens that value with East Asian vertical behavior. The
-converter targets the binary presentation, not recovery of a source OOXML
-distinction lost by Office during down-save.
-
-The controls used Latin, CJK, mixed text and punctuation with two font families;
-additional controls varied unrotated frames, positive/negative 45- and 90-degree
-rotation, 180-degree rotation, and horizontal/vertical/both flips. The mapping
-does not branch on characters, fonts, sample names, or rotation angles. A group
-control lost its geometry during Office down-save and is not evidence of group
-visual fidelity. Combined transforms, other producers and arbitrary grouped
-layouts are not certified by these controls. Other text-flow values, nonzero
-font direction, tertiary direction properties and inherited direction remain
-unsupported; the existing advanced-text warning still applies. Invalid primary
-direction enums, scalar flags and duplicate direction properties are rejected.
-Geometry and the ordinary OOXML renderer are unchanged. Restoring body direction
-does not implement Office's automatic upright digit grouping or resolve existing
-font and geometry differences. No migration is required.
-
-XLS extended indentation (`XFExt` property `0x000F`, MS-XLS 2.5.108) is preserved
-as ordinary SpreadsheetML `alignment/@indent`, including values above the base
-four-bit limit through 250. Extensions require the existing matching XF checksum
-and owning-XF checks. Cell and style XFs retain their own indentation and reading
-order; style XF fields are not treated as reserved (MS-XLS 2.5.249). Invalid
-extension sizes/ranges and duplicate properties fail through the existing error
-contract. This is a direct specification mapping, not an Office-layout heuristic;
-the existing XLSX parser and renderer consume it without a binary-specific path.
-No migration or opt-in change is required.
-
-Version-3 and version-4 CFB containers are admitted. Password-protected legacy
-binaries and pre-CFB Office formats are rejected. These limits are structural,
-not filename-based. Unsupported binary structures fail with
-`reason === 'unsupported-input'`. Accepted documents can still lose the features
-listed above: their warning identifiers are not a fidelity certificate.
-
-DOC inline/floating images, measured XLS picture frames, and PPT
-picture/background images can retain passive
-EMF and WMF BLIPs (MS-ODRAW 2.2.24-25/31). Both UID layouts and uncompressed or RFC 1950
-zlib-compressed data are supported. Validated metafile bytes become ordinary image
-parts without rasterization, geometry rewriting or execution of metafile
-commands by the converter. Existing OOXML image handling renders the supported
-EMF/WMF drawing subset; this is not full metafile or Office visual parity. PICT
-and unsupported binary drawing containers remain omitted. XLS support is limited
-to the eligible passive picture subset described below; it does not reconstruct
-charts, arbitrary drawing shapes, grouped pictures or active/linked objects.
-The shared OOXML image renderer supports retained line, polygon, rectangle and
-cubic-Bezier paths, including fill, stroke, stroke-and-fill, abort and saved-DC
-path state (MS-EMF 2.3.10, 2.3.5.9, 2.3.5.38-39 and 3.1.1.2.4). This can restore
-outline-based content in retained EMFs without a binary-format renderer.
-Glyph-to-path, ellipse/arc path construction, flattening and widening remain
-unsupported; affected paths are omitted rather than painted as fragments.
-Path clipping retains intersection-only support. Other clip combination modes
-and full GDI pen/brush semantics are not implemented. Preserving EMF bytes is
-still not proof of complete visible output or original-binary layout fidelity.
-Restored outlines also do not establish color or opacity fidelity. Visual
-evaluation must compare every changed page with the previous renderer and an
-Office reference, and record remaining differences separately from restored
-content. A reference exported from OOXML does not certify binary-input layout.
-
-As renderer resource policy (not format limits), one path retains at most
-65,536 commands; one EMF playback allocates at most 262,144 path commands and
-replays at most 1,048,576 stored commands. Saved DCs share immutable geometry
-and these budgets. Malformed or over-budget path geometry is discarded; a
-replay-budget rejection issues no partial path drawing. The existing image
-failure/omission behavior and cache ownership remain unchanged.
-
-Metafile extraction checks the declared compressed/expanded lengths, stream end,
-header and record envelope. As resource policy, each metafile is limited to 32 MiB
-stored and expanded, with the existing 128 MiB per-media-store retention cap
-checked before decompression. DOC inline and floating stores have separate
-caps. Repeated image references share one retained buffer; cache lifetime ends
-with conversion. Existing work and generated-package limits still apply.
-
-WMF admission accepts standard and placeable headers and validates the bounded
-record envelope through its terminal record (MS-WMF 2.3 and 2.3.2.1-3). It
-preserves the original drawing bytes, including unknown drawing operations;
-it does not evaluate them. This is structural validation, not a claim that all
-WMF operations are supported by the existing Canvas image player. Text-heavy
-metafiles can retain their image dimensions while their text remains unpainted
-by that player; preserving the image is not evidence of equation-text fidelity.
-When a size-declared WMF contains data after a valid terminal record, the entire
-image remains unsupported and is omitted through the existing media-omission
-path. The converter neither removes nor forwards those trailing bytes. This is
-an admission policy, not a rule that Office padding is valid or safely ignorable.
-Malformed records or over-budget expansion fail the existing media validation.
-DOC and PPT propagate those errors as unsupported input; XLS retains its
-existing picture-set omission and warning behavior. No public API, per-format
-opt-in or application migration change
-is required. DOC, XLS and PPT conversion remain independently opt-in.
-
-PPT master object inheritance follows `SlideFlags.fMasterObjects` independently
-of color-scheme and background inheritance (MS-PPT 2.5.10-11). Live main/title
-master chains are resolved through the persist directory and emitted below
-slide-local objects in ordinary PresentationML shape order (ECMA-376 19.3.1.45).
-The destination slide's resolved color scheme applies to inherited objects.
-Master placeholder exemplars are not copied as visible content; header/footer
-field synthesis remains unsupported. Explicit hidden flags are respected and
-script anchors are omitted before following text or image references.
-One writer shares IDs, image relationships and work/XML budgets across layers.
-Borrowed master chains are cached per conversion with cycle and depth checks;
-expanded output is still charged for every destination slide. Missing local
-drawings retain the warned unpositioned-text fallback without duplicating IDs.
-No renderer, worker protocol or per-format opt-in migration is required.
-Geometry support remains partial: an omitted foreground shape can expose a
-master object that Office would cover. Object inheritance alone is not a
-guarantee of visual fidelity.
-
-PPT vector shapes can also carry explicit custom paths: full 32-bit coordinate
-pairs, straight lines, cubic Bezier curves, moves, closes and path ends are
-converted into ordinary DrawingML custom geometry (MS-ODRAW 2.2.51/53-55,
-2.3.6.1-9, 2.4.9/30-31; ECMA-376 20.1.9). Geometry-space origins and reversed
-axes are normalized algebraically; explicitly linked master geometry inherits
-individual properties without copying source arrays. Path-level no-fill/no-line
-flags remain separate from shape paint. Point and segment expansion consumes
-the shared work budget, and generated path XML consumes the output budget.
-Compact coordinate encodings, guide-dependent points, arc/editing escapes,
-mixed per-path paint and picture-frame clipping geometry remain unsupported.
-Rotated shapes and nonuniformly transformed groups can still differ in aspect
-ratio, orientation or placement from Office; explicit path support does not
-resolve those existing transform limitations. Effects remain unsupported.
-DOC/XLS drawing reconstruction is not enabled by this PPT integration; the
-OfficeArt decoder is shared so later format-specific wiring need not duplicate it.
-
-PPT classic linear gradients retain ordered shade colors, signed focus and the
-16.16 angle through the compatibility and direct-model projections. Explicit
-shade-array stops at either endpoint take precedence over scalar front or back
-colors; a missing final endpoint uses the scalar back color. The current subset
-requires a nonempty shade array beginning at position zero and linear RGB
-interpolation. Admission excludes rotated leaves, rotated or reflected ancestor
-groups, nonopaque fills,
-`fillUseRect`, non-shape fill modes and other gradient types. Leaf flips and
-unrotated scaled groups remain supported, and `rotateFillWithShape` is
-preserved. Twenty controlled Office comparisons covered focus, angle, endpoint
-conflicts and leaf flips. Native rational positions were within one DrawingML
-position unit of Office's serialized integers. Compatibility gradient XML
-matched 18 cases semantically; two focus cases differed by one serialized
-position unit. These
-checks define the tested subset and do not claim complete gradient fidelity.
-
-Plain eligible `msofillPicture` foreground fills resolve through the converter's
-existing validated passive media store and become ordinary DrawingML image fills.
-Supported presets and uniform supported custom paths clip the image through the
-same OOXML shape geometry used for solid paint. A text-bearing source remains one
-ordinary OOXML `ShapeElement`, retaining its image fill, outline and text rather
-than being converted into a picture with a separate text overlay. This uses the
-existing PPT conversion opt-in; no migration or additional option is required.
-
-This is a bounded mapping, not full picture-fill fidelity. Custom binary fill
-rectangles, fill origins and other unsupported sizing controls are not
-reconstructed. Image-frame placement for rotated or flipped shapes that
-explicitly disable rotation with the shape remains a fidelity limit. These
-limits are separate from the supported geometry clip and passive media lookup,
-and no inferred transform or sample-specific sizing is applied.
-
-Supported PPT solid outlines preserve flat, round and square caps; bevel, round
-and miter joins; and triangular, stealth, diamond, oval and open-arrow ends with
-independent widths and lengths (MS-ODRAW 2.3.8.15/20-27, 2.4.16-20;
-ECMA-376 20.1.8.38/43/57 and CT_LineProperties). Explicitly linked master
-properties inherit independently, including explicit no-arrow overrides.
-The binary defaults are flat caps and round joins; these are emitted explicitly
-instead of relying on renderer defaults. Arrow editability does not suppress
-authored ends. Unrepresentable miter limits are rejected rather than clamped.
-These properties use the ordinary PPTX parser and renderer, with no opt-in API
-change or migration. They do not restore unsupported connector geometry or
-guarantee Office-identical arrow sizing and shaft trimming.
-
-All ten standard OfficeArt dash/dot patterns map to their DrawingML preset
-counterparts (MS-ODRAW 2.3.8.17/2.4.15; ECMA-376 20.1.8.48/20.1.10.49).
-An explicit solid style clears an inherited preset; absent styles still inherit.
-Dash patterns do not suppress the line, its cap or its arrow ends. Invalid
-preset enums are rejected. Custom `lineDashStyle` arrays are not reconstructed.
-The ordinary OOXML renderer's existing preset-cadence approximations remain,
-so this mapping does not promise Office-identical dash spacing. No migration
-or renderer change is required.
-
-Unadjusted straight connectors (`msosptStraightConnector1`, MS-ODRAW 2.4.24)
-also retain their static DrawingML `straightConnector1` path, including zero
-width/height, line styling and arrow ends. They do not acquire a fill. Conversion
-preserves the saved geometry; it does not recreate editable endpoint bindings
-or run a routing algorithm. Bent/curved connector presets and adjusted geometry
-remain outside this preset mapping, and the existing rotation/group-transform
-limitations still apply to connector placement.
-
-Slide-number metacharacters in positioned text, including inherited ordinary
-master objects and outline-referenced text, become static decimal text using
-the document's starting number and live slide order (MS-PPT 2.4.2, 2.9.47).
-Only declared character positions are replaced; literal asterisks remain text.
-Original UTF-16 style boundaries are retained even for multi-digit numbers.
-This does not synthesize missing master placeholders, evaluate arbitrary fields,
-or add dynamic numbering to the generated presentation.
-
-PPT paragraph default tab intervals are retained through direct and supported
-master text-style inheritance (MS-PPT 2.9.20/2.2.29). Signed master-unit values
-become ordinary DrawingML `defTabSz` coordinates (ECMA-376 21.1.2.2.7), including
-explicit zero instead of accidentally inheriting another interval. The existing
-OOXML parser/renderer uses positive intervals; nonpositive values remain in the
-package but currently use the viewer's fallback interval. Custom tab-stop lists
-and TextRuler properties remain unsupported. No migration, legacy-specific
-renderer change, or opt-in API change is required.
-
-XLS shared-string formatting uses `FormatRun` UTF-16 character offsets and
-`FontIndex` references, including the reserved index-4 gap and ignored terminal
-run (MS-XLS 2.5.129, 2.5.132 and 2.5.293). Run fonts become ordinary
-SpreadsheetML `r/rPr/rFont` properties (ECMA-376 18.4.4-7); an unformatted prefix
-retains the cell font, while explicit normal formatting resets bold/italic and
-other run properties. Continued character fragments are joined before decoding
-UTF-16, so surrogate pairs spanning record boundaries stay intact. Phonetic
-extensions are skipped, not promoted into visible text. Invalid live font
-references, unordered/out-of-range run starts and surrogate-splitting boundaries
-reject the input rather than attaching formatting to the wrong characters.
-The converter shares immutable encoded string fragments between cells and
-caches run font properties for one workbook, encoding each entry before reading
-the next. Resource policies cap SST entries and total format runs at one million
-each, retained encoded strings at 256 MiB and aggregate
-worksheet XML at 256 MiB, independently of the compressed output limit.
-Retained run properties still depend on existing OOXML parser/renderer support;
-automatic font-color resets and advanced font effects do not have verified
-visual parity. This does not change the per-format opt-in API.
-
-DOC character properties follow physical FKP ranges through the logical CLX
-piece table, including UTF-16 positions and displayed-field gaps. Supported
-style properties are resolved into ordinary OOXML run properties; fonts are
-referenced by name, not embedded or downloaded. Missing formatting tables use
-explicitly warned defaults. Style depth, formatting pages/runs and property
-application work have converter resource limits; these are implementation
-policies, not limits of the Office file format. The generated DOC main XML part
-also has a 256 MiB resource ceiling, separate from the output ZIP byte limit.
-The main story is limited to 64 Mi UTF-16 units before decoding repeated pieces
-and one million control characters before constructing paragraphs/tokens.
-Supported paragraph properties resolve through styles, direct PAPX and piece
-properties, including bounded references into the binary Data stream. Fixed,
-minimum and proportional line spacing retain their original units. Table rows
-use the definitions on their terminating marks; nested cells remain nested and
-row marks do not become visible paragraphs. Shared grids retain explicit edges,
-including zero-width cells, and horizontal merges become ordinary OOXML spans.
-Table style inheritance, preferred percentage widths, shading, text rotation,
-floating/frame placement and protection-bookmark table separation are incomplete.
-Unknown optional border-side flags are omitted with a warning, not reinterpreted.
-Nesting (32), rows per section (100,000) and grid boundaries (65,536) have resource
-ceilings. Paragraph text and pending tables remain bounded by the XML budget.
-Floating-frame support remains partial; line wrapping and pagination can differ
-significantly. No existing renderer changes are required.
-
-DOC list tables and list-format overrides are emitted as ordinary
-WordprocessingML numbering. Supported output includes single-level and
-multilevel lists, supported literal bullets and level templates, number formats,
-suffixes and justification, starts and restart boundaries, and marker-only
-character formatting. Lists with the same binary LSID share a counter even when
-paragraphs use different LFOs; a start override applies once for its original
-LFO and level. The main story, each header/footer story and each note use
-independent numbering scopes. Legal-number formatting is retained without
-collapsing a zero-padded decimal format to ordinary decimal.
-
-List paragraph and marker properties are resolved without replaying document
-defaults as direct formatting. Marker CHPX can vary without creating a new
-counter sequence. Explicit direct paragraph bidi, common alignment values and
-absolute twip indentation (including zero) are retained after list formatting;
-style-only, default and relative-indent values are not promoted by this
-compatibility rule. This precedence is based on bounded Word-produced controls,
-not the literal list-last ordering described by MS-DOC. The controls covered
-ordinary common alignments and both paragraph directions, but did not establish
-universal behavior for piece-level direct formatting or exotic alignment enum
-values.
-
-The list decoding and counter mapping follow MS-DOC 2.4.6.3-4 and 2.9.150,
-and ECMA-376 17.9.10 and 17.9.26. The direct-format precedence exception above
-is an observed Office behavior, not an amendment to those specifications.
-
-Local checkpoints exercised 36 numbered paragraphs across nine list cases, 352
-paragraphs for indentation and bidi compatibility, and 18 common-alignment
-cases. These measurements bound the compatibility claim; they are not a general
-Office conformance certificate.
-
-The converter emits OOXML consumed by the existing DOCX parser and renderer; no
-legacy-specific renderer path was added. This support does not guarantee exact
-Office display, pagination, marker placement or bidirectional word order.
-Literal UTF-16 bullet glyph references and their resolved marker fonts are
-preserved without converting code points or branching on font names or font
-charsets. This compatibility behavior is based on 250 used body-list references
-across 16 Office-produced pairs: one companion DOCX was produced from an
-original DOC, while the other pairs began as OOXML and were saved as DOC.
-Direct DOC display confirmed representative Symbol, Wingdings, Arial,
-and Japanese-font markers; two less common marker shapes remain unadjudicated.
-Font availability and font-axis selection in the unchanged renderer can still
-affect display. Unsupported automatic-number fields and list templates that
-cannot be expressed safely report
-`legacy-doc:unsupported-numbering-text-or-autonum-omitted`.
-
-DOC tables retain the compatibility cell-shading arrays (`Shd80` and `Shd`),
-explicit cell ranges (including alternating cells), and table-wide shading
-(MS-DOC 2.6.3, 2.9.52-53, 2.9.247-249, 2.9.308). Foreground and background
-colors, automatic colors, no-shading sentinels and the 38 documented OOXML
-pattern mappings become ordinary `w:shd` properties (ECMA-376 17.3.5,
-17.4.30-32, 17.18.78). Row-level exceptions preserve a shared table grid;
-omitted trailing entries in modern shading arrays clear stale segment values.
-Unmappable binary patterns remain warned and omitted,
-not approximated by a percentage tint. Array/range work consumes the formatting
-budget, and output consumes the existing XML budget.
-
-This converter does not interpret conditional table styles, so it uses the
-legacy compatibility shading specified for readers without table-style support.
-The separate `ShdRaw` style-inheritance arrays remain unsupported; in particular,
-their `ShdNil` is not treated as an explicit clear override of the compatibility
-array. These limitations remain visible in conversion warnings. The existing
-DOCX viewer currently renders background fills but does not reproduce every
-shading pattern or automatic-color/inheritance case. Preserving that metadata
-does not claim pattern-level visual parity. No renderer change, migration, or
-additional opt-in is required.
-
-DOC table-level floating positions now become ordinary `w:tblpPr` and
-`w:tblOverlap` properties (MS-DOC 2.4.3, 2.6.3, 2.7.13, 2.9.208/351/357;
-ECMA-376 17.4.57). The converter preserves page/margin/column/text anchors,
-symbolic alignment, signed coordinates, physical text clearances and explicit
-overlap prevention. Encoded absolute distances are decremented by one as
-specified; reserved alignment values are mapped separately. Non-positioned
-anchor codes remain inline. No renderer-specific offset or wrapping correction
-is applied. Paragraph-frame-derived table positioning remains unsupported, and
-the existing DOCX renderer's floating-table layout limitations still apply.
-No migration or per-format opt-in change is required.
-
-DOC header/footer stories follow MS-DOC 2.3.3 and 2.8.22: the six separator
-stories are not page headers, and each section has even/default/first header
-and footer slots. Zero-length ranges inherit the previous section's matching
-variant; an explicit blank paragraph creates an empty part instead. Guard marks
-are removed, while paragraph/table formatting and supported inline pictures
-use the same physical piece/FKP resolution as the main story. Image relationships
-are scoped to their containing part. Document-facing-page and section-title-page
-flags become ordinary OOXML settings (ECMA-376 17.10); no legacy-specific
-renderer path is added.
-
-Unnested, unlocked PAGE and NUMPAGES fields with supported general formatting
-switches retain their dynamic meaning in headers/footers. The field table's
-lock flag keeps cached text, and private field results are suppressed.
-Other field instructions are discarded while their cached display is retained;
-they are not evaluated and cannot open links, files, macros or external services.
-Section page-number formats, continuation and explicit restarts become ordinary
-`w:pgNumType` (MS-DOC 2.6.4; MS-OSHARED 2.2.1.3; ECMA-376 17.6.12). A stored
-start is ignored unless restart is enabled; an enabled restart without an
-explicit start retains the binary format's default zero. Both unsigned 16-bit
-and 32-bit starts are supported. Formats reset independently per section; the
-non-counting bullet format uses the decimal fallback allowed by MS-DOC.
-`none` suppresses the number. Language-dependent/unsupported number formats
-retain their OOXML token, but the shared renderer may still display decimal.
-The shared field-number formatter bounds each expanded ordinal to 4,096 UTF-16
-units before allocating repeated glyphs. Exceeding this resource budget fails
-rendering instead of changing the format; large decimal starts remain supported.
-This does not restore active main-story fields: their cached display remains.
-Header floating drawings, advanced field switches, chapter-number prefixes,
-and exact Office pagination remain incomplete.
-Each aggregate main/header story has a 64 Mi UTF-16-unit decoding ceiling and
-one million controls; headers additionally allow at most 4,096 nonempty parts.
-The aggregate generated XML has a 256 MiB ceiling. These are resource policies,
-not format limits. No migration or opt-in API change is required.
-
-Footnote and endnote text now retains its paragraphs, character formatting,
-supported tables and inline pictures in ordinary `footnotes.xml`/`endnotes.xml`
-parts. The converter joins the main-story reference PLC with the corresponding
-note-text PLC (MS-DOC 2.3.2/5, 2.8.16/17/19/20), preserving UTF-16 positions
-across the main, footnote, header and comment documents. Automatic reference
-characters require the special-character property. An empty reference PLC is
-distinct from a malformed or missing text range. Fields retain cached text;
-their instructions are not emitted or executed. The aggregate decoded note
-text has a 64 Mi UTF-16-unit budget and each kind allows at most 65,536 notes,
-in addition to the existing XML/structure budgets. These are resource policies.
-
-Note numbering formats/restarts/offsets, positioning, custom separators and
-floating drawings remain incomplete. Literal custom marks are retained with
-the standard `customMarkFollows` attribute, but the existing OOXML viewer does
-not yet honor that attribute when numbering/painting references; an extra
-number can appear. No legacy-only renderer is added to compensate for this
-shared limitation. Page-bottom notes now use the page's terminal continuous
-section region, avoiding placement inside an earlier region's body text.
-The shared DOCX paginator now keeps at most 128 recent paragraph acquisition
-candidates, releasing older measurement copies that previously caused heap
-exhaustion in long note-bearing documents. This is a cache-retention policy,
-not an OOXML limit or an overall heap-byte guarantee: retained document geometry
-and other resources still require substantial memory for large documents.
-Preserving note content does not imply exact Office pagination or successful
-rendering for every input. No migration or opt-in API change is required.
-
-Paragraph borders retain top, bottom, logical left/right and between edges from
-both Brc80 and Brc operands (MS-DOC 2.6.2, 2.9.16/17/21). The converter resolves
-style inheritance and direct/piece overrides per edge, then projects logical
-sides after the final paragraph direction is known. Width, spacing, color and
-applicable shadow/frame flags become ordinary `w:pBdr` (ECMA-376 17.3.1.24).
-This also restores paragraph rules in supported headers, footers and table cells.
-Explicit `none` clears an edge. As input recovery, the converter also recognizes
-the documented NilBrc/Brc80MayBeNil no-border sentinels in paragraph operands,
-where Office can store them, and preserves them as `nil`; this is distinct from
-the ordinary Brc value constraints. Adjacency/group painting remains owned by
-the existing OOXML renderer. Binary PGP grouping metadata, paragraph shading,
-frames and exact Office border-effect appearance remain incomplete.
-
-Custom paragraph tabs resolve `sprmPChgTabsPapx` and `sprmPChgTabs` through the
-same style/PAPX/PRM cascade (MS-DOC 2.9.179-183). Deletions remove inherited stops
-within the specified range, including the normative 25-twip minimum tolerance;
-`XAS_plusOne` deletion distances are decoded before use. The resulting sorted
-stops preserve signed positions, alignment and leaders as ordinary `w:tabs`
-(ECMA-376 17.3.1.37-38). Binary heavy leaders mean underscores, not OOXML heavy
-lines; bar-tab leaders and unused descriptor bits are ignored as specified.
-Variable-length edits consume the formatting-work budget, and the resolved set
-has a 256-stop resource cap independent of the per-record 64-entry format limit.
-The document-wide default interval is read from `DopBase.dxaTab` (MS-DOC
-2.7.2) and written into a related `word/settings.xml` part as `w:defaultTabStop`
-(ECMA-376 17.15.1.25). The ordinary DOCX parser and layout retain precedence of
-custom paragraph stops over automatic stops. Missing document properties use
-the OOXML default with a warning as an explicit recovery policy; a present but
-truncated DOP or zero interval is rejected, not silently assigned new spacing.
-Only the shared DOP prefix is interpreted; this does not claim preservation of
-other document settings or version-specific compatibility flags. Preserving tabs
-or list metadata does not imply Word pagination equivalence.
-
-Section text flow preserves the basic top-to-bottom, right-to-left-column mode
-(`sprmSTextFlow` / `msotxflTtoBA`, MS-DOC 2.6.4 and MS-ODRAW 2.4.5) as ordinary
-`w:sectPr/w:textDirection w:val="tbRl"` (ECMA-376 17.6.20, 17.18.93 and Part 4
-14.11.7). Each section resolves its own properties; an explicit horizontal reset
-does not retain a previous vertical direction. Existing DOCX layout and Canvas
-painting handle the orientation, with no binary-only renderer path. Other
-rotation variants and version-dependent column-direction modes remain omitted
-under the advanced-section-property warning; unknown enumeration values reject.
-This does not yet preserve frame/cell text directions, all drawings, every list
-marker form, all East Asian character formatting, or exact Word line wrapping.
-
-DOC inline pictures follow `sprmCFSpec` and `sprmCPicLocation` through the same
-style/CHPX/CLX cascade as other character properties. Only passive picture-frame
-JPEG/PNG BLIPs are retained; binary-data and OLE markers are not dereferenced.
-`PICMID` supplies the scaled display extent (MS-DOC 2.9.190-193). Inline BLIPs
-are matched by property encounter order, not their ignored index or complex flag
-(MS-ODRAW 2.2.15). Cropping and transforms become ordinary DrawingML pictures;
-the existing DOCX parser and renderer remain unchanged. Unsupported inline
-pictures emit a loss warning. Restoring image extents can change line heights
-and pagination; this is not a claim of complete Word layout fidelity.
-
-DOC floating JPEG/PNG picture frames use main-story `PlcfSpa` anchors and
-`OfficeArtClientAnchor` indices (MS-DOC 2.8.27, 2.9.168, 2.9.253). The drawing
-store's delayed BLIPs refer to `WordDocument`, not the inline picture `Data`
-stream (2.9.171). Explicit signed positions relative to the page, margin,
-column or paragraph, rectangular extents, cropping, flips, top/bottom and
-square wrapping, front/behind placement, and overlap/anchor settings become
-ordinary DrawingML anchors (ECMA-376 20.4.2.3). No DOC-specific layout or paint
-path is introduced. Header drawings and nested groups are not reassigned to
-the body. Rotated or alignment-based floating positions, tight/through wrap
-contours, non-picture shapes and non-raster media remain omitted with a loss
-warning. Alignment-based positions require further reconciliation of producer
-values with the published OfficeArt position-origin enumeration; the converter
-does not guess that mapping. Restored floating pictures can alter wrapping;
-preserving an anchor does not establish Word-compatible pagination.
-
-The inline and floating picture caches are document-owned and each limited to
-100,000 source locations/anchors, one million record/property/marker operations
-and 128 MiB of retained media. Floating occurrences also have a 100,000 limit.
-Raster dimension validation is shared with PPT. Repeated references reuse the
-same borrowed image bytes and package part, with unique drawing occurrence IDs.
-These are resource policies, not binary-format limits. No source filename or
-external picture URL is followed or copied into the output package.
-
-Every output package is created from scratch and contains no source macro,
-VBA/Excel 4.0 program, ActiveX control, OLE object, hyperlink action, or external
-relationship. The converter never executes formulas, field programs, actions,
-links, or macros; passive slide-number substitution is described above.
-Fixed, content-free warning identifiers report the intentional loss
-class in the conversion provenance record.
-
-PPT picture frames resolve their one-based BLIP references through the current
-document's image store (MS-PPT 2.1.3/2.4.3 and MS-ODRAW 2.2.20–32). Only referenced
-JPEG/PNG bytes are packaged; repeated references share a part, and each slide
-gets only its own internal image relationships. Unsupported encodings, including
-payloads whose signature disagrees with the BLIP type, are omitted rather than
-relabelled or fetched elsewhere. Malformed supported headers/ranges fail closed.
-The converter checks image headers without decoding pixels: supported JPEG
-frames use 8-bit Huffman baseline, sequential or progressive encoding. Resource
-policy caps each image at 32,768 pixels per side and 40 million pixels total,
-and retained media parts at 128 MiB independently of the output ZIP limit.
-These are implementation limits, not Office format limits. Normal OOXML image
-decoding and rendering still apply; the header checks are not full codec validation.
-Signed crop fractions (MS-ODRAW 2.3.23) become ordinary DrawingML `a:srcRect`,
-with existing picture/group transforms preserving positions, rotations and flips.
-No additional opt-in or renderer-specific legacy path is introduced.
-
-PPT backgrounds follow `SlideFlags.fMasterBackground` independently of scheme
-and foreground-object inheritance (MS-PPT 2.5.10–11). Current main/title masters
-are resolved with cycle/depth/work checks and a per-conversion cache. The
-ungrouped live OfficeArt background shape supplies fill properties; it is not
-rendered as a foreground rectangle. Supported solid colors, opacity and picture
-fills become PresentationML `p:bgPr` before the shape tree. Master scheme-color
-references resolve against the destination slide's active scheme. Image bytes
-and relationships use the same bounded store as picture frames. Gradient,
-pattern, texture and custom-rectangle background fills remain unsupported.
-Background fidelity alone does not imply complete foreground-text fidelity.
-Explicit `fHaveMaster` / `hspMaster` links (MS-ODRAW 2.2.40 / 2.3.2.1) now
-resolve against live master shapes, independently of placeholder-position metadata.
-Uniform character/paragraph formatting at each master indent level overrides the
-containing master's text-type defaults; direct slide-run properties still win,
-including explicit black text and false bold/italic values. Referenced master
-chains are checked for missing IDs, cycles and excessive depth. Only immutable
-resolved levels and paint remain after parsing; master-shape metadata has a 100,000-node
-resource cap. Exemplar text itself, actions and links are never copied.
-Nonuniform exemplar formatting at a level is omitted with a warning rather than
-selecting an arbitrary run. Unsupported font indices are also omitted, leaving
-normal font fallback without guessing a replacement index. Unlinked placeholder
-formatting and other unsupported text properties remain fidelity limitations.
-No contrast-based recoloring or sample-specific background suppression is applied.
-
-The same explicit master-shape links also supply solid fill/line properties,
-including color, opacity and line width. Local properties override inherited
-values independently; Boolean use bits preserve explicit no-fill/no-line and
-geometry paint vetoes. Scheme colors resolve only at the destination slide.
-Unsupported inherited fill types and dashed lines remain omitted rather than
-being replaced by solid defaults. Inherited custom geometry still suppresses
-unadjusted preset reconstruction. Unlinked masters, drawing defaults, master
-foreground objects and advanced paint remain unsupported. This does not add
-legacy-specific behavior to any OOXML parser or renderer.
-
-Character bullets preserve `TextPFException` flags and values independently
-(MS-PPT 2.9.20-22): direct no-bullet and follow-text flags override inherited
-choices without discarding still-inherited glyph, font, size or color values.
-Valid UTF-16 BMP glyphs become DrawingML `buChar`; color resolves through the
-destination slide's scheme. Bullet size preserves percentages or absolute
-points (MS-PPT 2.2.3). Unsupported glyphs suppress the marker, while unsupported
-optional size, font and color values are omitted with a warning. No substitute
-glyph, guessed font index or size clamping is applied.
-
-Explicit shape-local automatic numbering uses `PP9ShapeBinaryTagExtension` and
-`StyleTextProp9Atom` (MS-PPT 2.7.18, 2.9.26-27, 2.9.67-68). The converter follows
-the owning shape's passive `___PPT9` tag and binds entries to consecutive
-character-run groups using the specified `pp9rt` modulo-16 matching rule.
-An enabled bullet with an explicit numbering flag, scheme and valid start number
-becomes DrawingML `buAutoNum`; all 41 numbering scheme identities and starts
-1-32767 are retained. Numbering does not replace the text or bypass the ordinary
-PPTX parser/renderer. Bullet color, size and typeface remain independent.
-No migration is required; PPT conversion remains separately opt-in.
-
-This subset requires a uniform explicit choice across the whole paragraph,
-including its terminator. Missing flags/schemes, conflicting paragraph choices,
-picture bullets, outline PP9 bindings and PP9 master/default inheritance remain
-unsupported, preserving the available base character bullet. No default scheme,
-restart or picture-vs-number precedence is guessed. Retaining a valid scheme is
-not a guarantee that every script/font is faithfully rendered. Existing offset
-limitations can also leave multi-digit numbers too close to or overlapping text;
-the converter does not silently expand margins to hide that fidelity gap.
-
-Paragraph-style text and bullet offsets are converted from master units into
-DrawingML `marL` and relative `indent`, after per-level inheritance. Negative or
-out-of-range left margins and offsets outside the DrawingML schema bounds are
-omitted, not clamped. A first-line offset without a resolved text offset is also
-omitted. `TextRulerAtom` overrides and tab stops remain unsupported. The ordinary
-PPTX renderer preserves signed non-bullet first-line indents consistently in
-measurement, wrapping and painting: a negative indent extends the first line
-left of `marL`, while continuation lines keep that margin. This is general
-DrawingML support, not a binary-specific rendering exception. Font metrics,
-tabs and unsupported geometry can still cause visible differences from Office;
-preserving offsets does not guarantee layout equivalence.
-
-## Measured XLS picture conversion
-
-No migration is required. DOC, XLS and PPT remain separate format opt-ins, and
-the converter still produces ordinary macro-free OOXML for the existing parsers
-and renderers. Passive XLS pictures additionally need the workbook's actual
-Normal-font metrics. Enable them with `measureXlsNormalFont` on either
-`createLegacyOfficeWasmConverter` or `createLegacyOfficeWasmWorkerConverter`:
+## Experimental direct XLS source
 
 ```typescript
-const converter = createLegacyOfficeWasmWorkerConverter({
-  measureXlsNormalFont: async (font, signal) => {
-    // Application-owned: load this font from your trusted font collection,
-    // measure digits 0–9 at font.sizePoints / 72 * 96 CSS pixels (including
-    // font.bold / font.italic), and round the maximum measured advance.
-    // Return undefined if the intended font is unavailable. Do not substitute
-    // a guessed width or treat an untrusted font.family as a resource URL.
-    return measureInstalledNormalFont(font, signal);
-  },
-});
+import { XlsxViewer } from '@silurus/ooxml/xlsx';
+import { legacyXlsSource } from '@silurus/ooxml/legacy-xls';
+
+const container = document.querySelector('#workbook') as HTMLElement;
+const viewer = new XlsxViewer(container, { modelSources: [legacyXlsSource()] });
+await viewer.load(legacyXlsBytes);
 ```
 
-The callback returns an integer width from 1 to 4096 pixels, or `undefined`.
-The upper limit is resource policy, not an Office font-layout rule. Load the
-same font used by the viewer before measuring. Callback rejection fails the
-conversion; unavailable metrics omit pictures with an explicit warning.
-Direct converters retain at most one prepared XLS model while measuring;
-another measured XLS request reports `capacity-exceeded`. The worker adapter
-keeps its existing bounded queue and concurrency settings. Cancellation frees
-the prepared model or terminates its worker, aborts the host measurement signal,
-and discards late replies. Apply a conversion timeout if a font loader can hang.
+`XlsxWorkbook.load(bytes, { modelSources: [legacyXlsSource()] })` and the Node
+`openXlsxWorkbook(bytes, { modelSources: [legacyXlsSource()], factory })`
+accept the same source.
 
-The worker sends only a bounded font descriptor to the main thread and receives
-a numeric width or failure. Functions and WASM pointers never cross realms.
-CFB/BIFF parsing is performed once; the owned cell/style/picture data survives
-measurement without retaining the parser's source slices. DOC and PPT never
-invoke this XLS hook, and omitting the hook preserves the previous output path.
+The direct XLS source is experimental and bounded. It reads a BIFF8 workbook
+subset into the shared worksheet model: sheet names, cell values and cached
+formula results, merged ranges, the date system, number formats, fonts,
+palette and extension colors, fills, borders, alignment, rich-text runs, row
+heights and column widths, and row/column hiding and outlines. It also
+projects conditional formatting (classic CF with its CFEx extensions, CF12
+comparison, formula, color-scale, data-bar and icon-set rules, their
+differential formats and decompiled formulas), Excel tables with custom table
+styles, frozen panes, tab colors, XFExt gradient fills, hyperlinks, worksheet
+AutoFilter ranges (whose application-inserted drop-down objects become the
+renderer's filter buttons; active filter criteria reject), data validations
+and defined names, plus embedded charts, chart sheets, pictures, and
+rectangles, text boxes and their groups as shape anchors. Variants the shared
+model cannot show (for example inactive rules, suppressed list drop-downs,
+displayed phonetic guides, or table-style elements outside the model) reject
+the workbook instead of being dropped. Print areas and titles travel as
+defined names; page setup, headers and footers affect printing only and are
+not part of the model.
 
-The current subset emits owned, explicitly sized, embedded PNG/JPEG/validated
-EMF/WMF picture frames outside nested groups. It preserves cell-relative anchor
-offsets, movement/resize behavior, crop and local flip/rotation attributes in
-ordinary SpreadsheetDrawing XML. Coordinate conversion uses MS-XLS 2.5.193 and
-ECMA-376 18.3.1.13/81, not a fixed assumed digit width. Normal font selection
-follows XF zero and its FontIndex (MS-XLS 2.2.6.1.2.2/2.5.129).
+Worksheet visibility, including very hidden sheets, is kept as model
+metadata; display follows the existing `XlsxViewer` `hiddenSheetMode` option,
+whose default remains `'show'`. Gridline visibility, zero-value display and
+right-to-left direction come from the sheet's window settings. Pane
+selections, scrolling, zoom and window placement are not reconstructed.
 
-Nested group transforms, active/linked objects, unsupported font variants,
-picture effects and unresolved geometry remain best-effort omissions. A rejected
-optional drawing/media stage drops pictures with a warning while preserving
-otherwise valid cells; it never repairs or copies rejected payloads. The shared
-image validators are unchanged. Geometry prefix construction has a cumulative
-two-million-operation budget, in addition to the existing drawing/media limits.
-Output ZIP bytes are bounded and repeated image references reuse one media part.
-This is not a claim of complete Excel display fidelity: the ordinary XLSX
-renderer also has its own DrawingML capability limits. In particular, the
-current XLSX image model does not expose the saved flip/rotation attributes,
-and its fixed-size handling currently specializes `editAs="oneCell"`; retaining
-those properties in OOXML does not establish their full display fidelity yet.
+Column widths and drawing anchors depend on the Normal font's maximum digit
+width (ECMA-376 §18.3.1.13). The XLS source asks the host for it through a
+generic host-layout capability, and the XLSX renderer answers with its own
+`computeMdw`, the same measurement that sizes the painted grid. It measures
+in the rendering realm: the render Worker in `mode: 'worker'`, the page in
+main mode, and the session canvas `factory` in Node. There is no measurement
+callback option. Without a measurable font (for example in Node without a
+`factory`), charts, pictures and shapes are omitted. On macOS the renderer
+quantizes the advance to whole points like Excel for Mac, so XLS drawings
+follow that platform's rule.
 
 ## XLS drawing inspection for development
 
-Separately, a native-only inspection helper can
+A native-only inspection helper can
 extract the supported passive PNG, JPEG, EMF and WMF entries from a BIFF8 global
-image store without requiring font metrics or generating an OOXML package:
+image store without requiring font metrics:
 
 ```sh
 cargo run -p legacy-office-converter --features inspection \
@@ -1017,7 +367,7 @@ at 128 MiB each, and the drawing/decoding walk at two million records. Shared
 image limits also apply. These are independent resource ceilings, not a combined
 process-memory guarantee: source, workbook, assembled data and extracted images
 can coexist. The helper is excluded from production WASM even when its Cargo
-feature is enabled. It does not change the converter contract or renderer.
+feature is enabled. It does not change the reader or renderer.
 
 The companion `inspect_xls_anchors` native example prints raw worksheet anchor
 metadata without extracting images:
@@ -1058,7 +408,7 @@ catalog entries are not inflated; an invalid referenced image or out-of-range
 index still fails inspection. There is no fallback to another image, file or URL.
 The anchor and media stages each retain their separate two-million-work budget.
 This raw inspection is not an assertion of complete inherited visibility or
-geometry. The measured production path applies additional picture eligibility.
+geometry. The direct XLS reader applies additional picture eligibility.
 
 Anchor inspection limits cumulative drawing bytes to 128 MiB, record work to
 two million, substream/group nesting to 32, retained anchors to 65,536, and
@@ -1066,224 +416,52 @@ per-sheet shape/client identities to 65,536. The disjoint ranges prevent repeate
 scanning through overlapping worksheet references. Native metadata does not prove
 visibility, image eligibility or complete object validity: non-picture objects,
 deleted shapes and OLE-marked shapes can have anchors too. These development
-helpers remain separate from the measured runtime conversion described above.
-
-## Custom converter contract
-
-```typescript
-import { DocxDocument, type LegacyOfficeConverter } from '@silurus/ooxml/docx';
-
-const converter: LegacyOfficeConverter = {
-  async convert({ bytes, from, to, maxOutputBytes, signal }) {
-    // Run an application-owned local engine or explicitly configured service.
-    // The library never supplies a remote endpoint or uploads these bytes.
-    const result = await convertLegacyOffice(bytes, {
-      from,
-      to,
-      maxOutputBytes,
-      signal,
-    });
-    return {
-      bytes: result.bytes,
-      engine: 'example-engine',
-      engineVersion: '1.0.0',
-      outputSha256: result.outputSha256,
-      warnings: result.warnings,
-    };
-  },
-};
-
-const document = await DocxDocument.load(input, {
-  legacyConversion: {
-    doc: {
-      converter,
-      timeoutMs: 120_000,
-      maxInputBytes: 256 * 1024 * 1024,
-      maxOutputBytes: 512 * 1024 * 1024,
-      onResult(record) {
-        // Content-free provenance: formats, sizes, engine, version, digest, warnings.
-        conversionAuditLog.push(record);
-      },
-    },
-  },
-});
-```
-
-The matching format must be opted in independently. `DocxDocument` reads only
-`legacyConversion.doc` and requests `doc -> docx`; `XlsxWorkbook` reads only
-`legacyConversion.xls` and requests `xls -> xlsx`; `PptxPresentation` reads only
-`legacyConversion.ppt` and requests `ppt -> pptx`. Supplying one field never
-enables the other two. A converter must still verify the binary structures it
-receives and return `unsupported-input` for an unsupported version or feature
-set.
-
-The same `legacyConversion` option is available on the browser viewers and the
-Node `open*` / `materialize*` APIs. Node resolves conversion before it lazily
-initializes parser WASM.
-
-## Custom disposable Worker adapter
-
-CPU-heavy browser conversion should run in a dedicated Worker. The shared
-adapter transfers the source `ArrayBuffer` into one disposable Worker, transfers
-the generated package back, and terminates that Worker on success, failure,
-cancellation, or timeout:
-
-```typescript
-import {
-  createDisposableWorkerLegacyOfficeConverter,
-} from '@silurus/ooxml/legacy-conversion';
-
-const converter = createDisposableWorkerLegacyOfficeConverter(
-  () => new Worker(new URL('./legacy-office.worker.js', import.meta.url), {
-    type: 'module',
-  }),
-  {
-    maxConcurrency: 1,
-    maxQueuedConversions: 4,
-  },
-);
-```
-
-The Worker installs the matching one-shot host around the application-owned
-converter or WASM wrapper:
-
-```typescript
-import {
-  installLegacyOfficeConversionWorkerHandler,
-  type LegacyOfficeConverter,
-} from '@silurus/ooxml/legacy-conversion';
-
-const wasmConverter: LegacyOfficeConverter = {
-  async convert(input) {
-    await initializeConverterWasm();
-    return convertWithWasm(input);
-  },
-};
-
-installLegacyOfficeConversionWorkerHandler(self, wasmConverter);
-```
-
-Converter WASM and parser WASM own separate linear memories. The generated
-OOXML package must therefore materialize as a standalone buffer once. Transfer
-lists prevent additional JavaScript-realm clones, but they cannot eliminate the
-copy from converter memory into that buffer or the parser's later copy into its
-own memory.
-
-The converter owns its request bytes and may detach their backing buffer. After
-resolution, ownership of the returned bytes belongs to the host. Neither side
-may retain or mutate bytes after ownership has moved.
-
-## Validation and failure behavior
-
-Converter output is rejected before parser handoff unless it has a bounded,
-consistent ZIP central directory, the requested main document part, and a
-readable `[Content_Types].xml` that declares that part as DOCX, XLSX, or PPTX.
-The preflight also rejects ZIP encryption, unsupported ZIP compression,
-duplicate entries and content-type declarations, macro-capable content types,
-known VBA and ActiveX part names, malformed content-types XML, and output beyond
-the configured limit. These checks are defense in depth; the converter remains
-responsible for removing macros and embedded executable content, and the viewer
-never executes those features. The ordinary OOXML path is intentionally
-unchanged by this converter-only preflight.
-
-Conversion failures are `LegacyOfficeConversionError` instances with stable
-`code === 'legacy-office-conversion'`, `stage === 'conversion'`, formats, and one
-of these reasons:
-
-- `aborted`
-- `timeout`
-- `source-too-large`
-- `output-too-large`
-- `unsupported-input`
-- `failed`
-- `invalid-output`
-
-Free-form converter exception messages are not propagated. Converter identity,
-version, optional lowercase SHA-256, and warnings are bounded metadata supplied
-by the converter and must never include document text, filenames, source URLs,
-or passwords. The host checks the digest syntax but deliberately does not make a
-second full pass over potentially large output. Verify it independently when the
-converter is outside the ingestion system's trust boundary.
-
-The defaults admit a 256 MiB source, a 512 MiB output, and two minutes of
-conversion. Both byte limits have a non-configurable 1 GiB hard ceiling. A
-custom in-process converter must honor the supplied `AbortSignal`; the disposable
-Worker adapter enforces cancellation by terminating the Worker even if its WASM
-code cannot cooperatively yield. The converter also receives `maxOutputBytes`
-so it can stop before materializing an inadmissible package. Viewer reload,
-supersession, and destruction
-are combined with an application-supplied conversion signal, so an in-flight
-disposable converter Worker is also terminated when its owning view no longer
-needs the result. One disposable-adapter instance defaults to one live Worker
-and four queued conversions; share that instance wherever an application needs
-one common concurrency boundary. A full queue rejects with
-`capacity-exceeded`.
-
-Encrypted legacy binaries are outside this initial contract. They continue to
-fail through the existing encryption path. Macros, external-link updates, and
-embedded code must never be executed by a converter.
+helpers remain separate from the direct XLS reader.
 
 ## Current implementation boundary
 
-The repository now contains the first purpose-built WASM engine in addition to
-the opt-in contract, browser/Node normalization, converter-output preflight,
-typed errors, and disposable Worker transport. An opt-in local regression run
-checks every installed Office-produced legacy counterpart and passes each
-generated package to the existing OOXML parser:
+The repository contains only the direct readers; legacy input is never
+converted to OOXML. The Rust crate `legacy-office-converter` builds one reader
+per feature: `direct-doc`, `direct-xls` and `direct-ppt`. Building it for
+`wasm32` with none of them enabled is a compile error. The `inspection`
+feature adds the native-only examples above, and `fuzzing` exposes the fuzz
+entry points.
 
-```bash
-pnpm build:wasm
-pnpm test:legacy-converter-private
-```
-
+The local direct-render survey described below renders every installed
+legacy sample through its source and pairs it with the Office-exported PDF.
 The corpus is deliberately not redistributed. Broader binary-record coverage,
-visual fidelity evaluation against Office, fuzzing, and resource measurements
-remain part of
-[issue #1472](https://github.com/yukiyokotani/office-open-xml-viewer/issues/1472).
+visual fidelity against Office, fuzzing and resource measurements remain part
+of [issue #1472](https://github.com/yukiyokotani/office-open-xml-viewer/issues/1472).
 
 ## Best-effort fidelity evaluation
 
-Parser acceptance is a smoke test, **not converter completion**. The target is
-useful best-effort preservation of the binary input's content and display, with
-missing content and visual differences explicitly reported. Pixel equality and
-byte-identical ZIP files are not required for each incremental improvement.
-Pairing a legacy file with its original
-OOXML is useful for investigation, but does not prove fidelity: saving to an old
-format can itself change or remove features. Use Office opening the actual legacy
-file as the visual reference. Office's upgraded OOXML is useful for mapping
-binary records to XML, but conversion itself can change layout and is not an
-absolute visual oracle. In particular, rebuilt/down-saved corpus members
-must not silently be treated as lossless copies of their original OOXML.
+Loading without an error is a smoke test, **not reader completion**. The
+target is useful best-effort preservation of the binary input's content and
+display, with missing content and visual differences explicitly reported.
+Pixel equality is not required for each incremental improvement. Pairing a
+legacy file with its original OOXML is useful for investigation, but does not
+prove fidelity: saving to an old format can itself change or remove features.
+Use Office opening the actual legacy file as the visual reference. Office's
+upgraded OOXML is useful for mapping binary records to XML, but Office's own
+conversion can change layout and is not an absolute visual oracle. In
+particular, rebuilt or down-saved corpus members must not silently be treated
+as lossless copies of their original OOXML.
 
-The local macOS oracle opens disposable copies using installed Microsoft Office,
-with macros disabled and Word/Excel external-link updates disabled, and exports
-both the legacy file and this converter's OOXML to PDF. It compares page counts,
-page sizes, and every pixel at 96 DPI. Missing pages, export errors, and any pixel
-difference make the exact-comparison run nonzero; this is a diagnostic finding,
-not a requirement to add sample-specific adjustments. No blur, registration, resized comparison, or relaxed
-threshold hides a discrepancy. PDFs, page images, difference images, source/output
-hashes, converter WASM hash, and a report stay in a newly created local temporary
-directory; no private artifact is committed or uploaded.
+The local macOS exporter opens a disposable copy with installed Microsoft
+Office, with macros disabled and Word/Excel external-link updates disabled,
+and writes a PDF to a fresh output path:
 
 ```bash
-pnpm --filter @silurus/ooxml-legacy-converter wasm
-node scripts/legacy-office-fidelity.mjs --format=xls --limit=10 --python=python3
-python3 scripts/legacy-office-compare.test.py
+osascript packages/legacy-converter/tools/legacy-office-export.applescript \
+  doc disposable-copy.doc fresh-output.pdf
 ```
 
-To reuse an already exported binary-input reference, explicitly supply
-`--format=doc --input=PATH --reference-pdf=PATH` (or the matching XLS/PPT format).
-Both paths are required together. The tool hashes the supplied PDF and exports
-only the candidate OOXML through Office; it never infers PDF provenance from a
-filename. The corpus smoke test also accepts `OOXML_LEGACY_CORPUS_ROOT` for a
-separate local checkout and discovers nested files without following symlinks.
-
-The oracle requires Office for macOS, macOS automation permission for each Office
-application, Poppler (`pdftoppm`), and Python with Pillow and pypdf. Omit `--format`
-and `--limit` to select the full locally installed corpus. Runs are sequential;
-an Office failure stops the batch rather than accumulating open documents or
-dialogs. Original corpus files and existing visual references are never changed.
-Temporary Office-container copies are intentionally retained for diagnosis.
+The first argument is `doc`, `xls` or `ppt`. The exporter requires Office for
+macOS and macOS automation permission for each Office application. Runs are
+sequential; an Office failure stops rather than accumulating open documents
+or dialogs. Original corpus files and existing visual references are never
+changed, and PDFs and page images stay in a local temporary directory; no
+private artifact is committed or uploaded.
 
 The exporter refuses to open a document unless Office reports its automation
 security setting and confirms that macros are disabled. PowerPoint builds that
@@ -1292,108 +470,14 @@ automation permission is granted. Word and Excel PDF export have been exercised;
 the PowerPoint export path is not yet validated end to end. Do not weaken this
 guard to obtain a passing report.
 
-Office-versus-Office PDF comparison helps isolate conversion loss. It is not
-sufficient for the viewer's evaluation: compare the converted OOXML's
-Canvas output to the same Office oracle separately. Keep renderer self-regression
-tests against the previous renderer separate from both fidelity comparisons.
-Neither whole-corpus Office equality nor Canvas display equality has been reached.
+Compare the direct reader's Canvas output with those Office PDFs through the
+local direct-render survey. Keep renderer self-regression tests against the
+previous renderer separate from this fidelity comparison. Neither whole-corpus
+Office equality nor Canvas display equality has been reached.
 
-DOC section decoding is bounded to 16,384 sections and one million property
-operations per input (resource policy, not format limits). Intermediate section
-properties remain attached to the section-ending paragraph; manual page breaks
-are distinct from section breaks. Missing header/footer distances use the
-MS-DOC §2.6.4 defaults for the stored producer installation LCID when that LCID
-is listed by the specification. Explicit values, including zero, win. Unlisted
-languages retain the unresolved-margin warning and zero-distance recovery;
-known body margins are retained. The host locale and document text language are
-not used to guess the producer's installation settings.
-XLS saved custom-view print records cannot override the active worksheet's print
-settings, and undefined printer fields are not emitted. These changes do not add
-legacy-specific renderer behavior or change per-format opt-in defaults.
-
-Resource policy for PPT reconstruction additionally limits each of retained
-outline text and emitted slide text to 128 MiB, and charges persist-directory
-entries against the record-work budget. Repeated references cannot bypass the
-text limit. Expanded slide XML is capped at 256 MiB across the presentation;
-escaping and paragraph markup are charged before appending. Shape property
-entries share the record-work budget, group nesting is bounded to 64, and each
-slide can emit at most 100,000 shapes/groups. These are implementation resource
-policies, not file-format limits. XLS style tables are bounded, repeated fills/borders are interned,
-and the BIFF column-256 default-format sentinel never creates an extra column.
-
-PPT text-frame reconstruction follows [MS-PPT] `OfficeArtClientAnchor` and
-`OfficeArtClientTextbox`, and [MS-ODRAW] group/child anchors and shape properties.
-Only a shape's own text container supplies its text; action data is not traversed
-for display content. Child coordinate systems are preserved as ordinary PPTX
-groups. Basic unmodified rectangles, ellipses, diamonds, isosceles/right triangles,
-straight lines and text boxes map from [MS-ODRAW] `MSOSPT` to ordinary DrawingML
-presets. Shapes without text retain their place in the drawing order. Explicit
-solid fill/line properties retain literal RGB, opacity and line width; geometry
-and style Boolean use bits can independently suppress paint. Entirely absent
-paint layers stay transparent pending master/drawing-default resolution. Within
-an explicit layer, unspecified properties use the documented MS-ODRAW defaults;
-this is not a claim of complete inheritance support. Unresolved colors, nonsolid
-paint and custom fill rectangles are omitted, not substituted with guessed colors.
-Unknown or customized geometry keeps its text as a transparent frame, without
-painting a replacement rectangle. Direct `StyleTextPropAtom`
-character and paragraph runs are retained for both inline and outline-referenced
-text. Run boundaries count UTF-16 units and include the implicit final paragraph
-mark; invalid counts and surrogate-splitting runs fail closed. Font names are
-escaped and referenced, not embedded or fetched. Literal RGB and scheme colors are
-retained. For verified placeholders, missing supported character/paragraph
-properties inherit by text type and indentation level from the main master's
-`TextMasterStyleAtom`, then the document's master-style defaults. Direct properties,
-including explicit bold/italic/underline resets, take precedence. Ordinary text
-boxes do not inherit placeholder styles. Missing unresolved font sizes still use
-the warned 18-point fallback. Negative paragraph spacing converts from
-master units, while nonnegative spacing retains its percentage semantics.
-VT, LF and Unicode line separators become DrawingML line breaks within the same
-paragraph; CR remains the PPT paragraph boundary. This follows Unicode UAX #14
-BK/LF semantics and does not add a binary-specific renderer path.
-
-Color schemes follow [MS-PPT] `SlideFlags.fMasterScheme`: either the slide's active
-eight-color scheme or the scheme of its referenced main/title master is used.
-Master IDs resolve through the current persist directory, not stream order;
-available-scheme lists are not mistaken for the active scheme. Main masters are
-roots, while title masters may inherit. Cycles, dangling references and malformed
-active schemes fail closed. A master scheme is cached per conversion, with a
-64-level traversal limit and every reference charged to the parsing-work budget.
-These bounds are resource policy, not normative file-format limits. Text's
-`ColorIndexStruct` and OfficeArt's `fSchemeIndex` have separate index encodings;
-both resolve to literal DrawingML RGB for the existing renderer. `fSystemRGB`
-also contains literal RGB; system/palette indices remain unresolved. Color-scheme
-inheritance does not imply support for master objects, backgrounds or paint-property
-inheritance.
-
-Placeholder text inheritance follows [MS-PPT] 2.7.8 and 2.9.35-36/41/44:
-only a direct `PlaceholderAtom` whose position is not `0xFFFFFFFF` enables it.
-The corresponding inline or outline-referenced `TextHeaderAtom` selects the text
-type. Non-placeholder title-like text does not automatically inherit a title style;
-compatibility for detached placeholder metadata remains unsupported. Title-master
-references are followed to the main master, but title-master shape-specific text
-overrides remain omitted. Style tables are parsed once per main master and shared
-across slides; at most 10,000 master references, eight types per master and five
-levels per type can be retained. The master-count limit is resource policy; type
-and level bounds follow the format. Character and paragraph properties beyond the
-supported direct subset, including inherited custom rulers, remain omitted.
-
-Missing drawing records retain the earlier unpositioned-text fallback with a
-separate warning. Invalid or missing anchors in emitted drawing-backed shapes, ambiguous
-coordinate spaces and zero-scale groups fail closed instead of guessing positions.
-No migration is required and the independent per-format opt-ins are unchanged.
-
-Text style runs and tab entries share the bounded parsing-work budget. Outline
-style records borrow their input bytes until their owning frame is emitted;
-unreferenced outline text is not treated as a visible slide object. Intermediate
-run tables are released after each text body, and expanded XML is charged against
-the presentation-wide limit, including manual breaks and escaped font/text data.
-
-Treat converted OOXML as a derived search/view representation, preserve the
-original binary as the authoritative source, and gate production use on a
-corpus representative of the documents being ingested. A custom local or remote
-adapter remains supported for applications that need a broader conversion
-engine; the library still supplies no remote endpoint and never silently uploads
-document bytes.
+Treat the rendered model as a derived view of the original binary, keep the
+binary as the authoritative source, and gate production use on a corpus
+representative of the documents being ingested.
 
 ## Direct DOC implementation backlog
 
@@ -1465,7 +549,7 @@ outside this selection are recorded without starting another automatic batch.
 | DOC-38 | Apply Raw shading replacement order | Preparation implemented; runtime remains under DOC-41: Later nil or omitted entries remove stale earlier direct shading in the addressed segment|
 | DOC-39 | Preserve shading ownership across cell edits | Preparation implemented; runtime remains under DOC-41: Insert/delete/redefine operations move or discard only the corresponding source-cell facts|
 | DOC-40 | Select compatibility shading by version and capability | Preparation implemented; runtime remains under DOC-41: Preserve the legacy path; ignore compatibility arrays/ranges only under the documented style-capable rule|
-| DOC-41 | Connect style-aware shading to native acquisition | Connected for native projection: effective FIB policy is configured before profile caching; actual-story tests resolve source-cell Raw values against the selected style. XML conversion keeps its previous path and unresolved compatibility arrays remain gated |
+| DOC-41 | Connect style-aware shading to native acquisition | Connected for native projection: effective FIB policy is configured before profile caching; actual-story tests resolve source-cell Raw values against the selected style. Unresolved compatibility arrays remain gated |
 | DOC-42 | Preserve table positioning at TIstd application | Connected bounded reset: anchors, positive absolute positions and four wrapping distances survive TIstd; only the independently authored no-overlap flag resets. Native controls and actual acquisition tests cover both property orders |
 | DOC-43 | Preserve dimensions and style options at TIstd application | Connected preservation of height, preferred width, autofit, gap and style options. Independent bidi properties now retain their own last boolean values and combine by the documented OR; native 5664 compatibility remains gated under DOC-62. Gap controls establish only before/after equality; revision semantics remain unsupported |
 | DOC-44 | Reset remaining row properties at TIstd application | Connected bounded reset of row alignment, header, modern cantSplit and no-overlap, with later direct overrides and repeated TIstd acquisition tests. Cell geometry and TDxaLeft survive. This does not resolve the full TAPX replacement cascade or legacy cantSplit compatibility |
@@ -1506,8 +590,7 @@ Scoped adversarial review checked exact nested border framing, effective row
 origins, source-cell ownership, unchanged unstyled border order, fixed profile
 storage, late payload accounting and live-resource finalization. Unsupported
 conditional cascades do not expose a partial border patch. No renderer or
-shared-model change was needed for this checkpoint; XLS/PPT conversion paths
-remain separate. Full-branch architecture and browser/visual acceptance remain
+shared-model change was needed for this checkpoint. Full-branch architecture and browser/visual acceptance remain
 outstanding before integration.
 
 DOC-24 native acceptance subsequently verified 16 marker locations in the
@@ -1575,7 +658,7 @@ selection are recorded without automatically extending the batch.
 | DOC-68 | Validate probe Raw shading segment framing | Implemented exact RawShd segment framing and 22/22/19 cell limits; individual shading values are not claimed as fully validated semantics |
 | DOC-69 | Validate positive-probe property families and PAPX prefixes | Implemented replacement UPX family and PAPX-owner checks, recognized TAPX placement restrictions and required default-style width checks; untouched property sets are not recertified semantically |
 | DOC-70 | Bound positive-probe validation work and negative-control handling | Implemented shared 1 MiB/4096-SPRM validation budgets and an explicit specification-invalid placement mode that cannot bypass malformed operand framing |
-| DOC-71 | Separate native row compatibility policy from XML conversion | Implemented explicit native-reader cantSplit policy while preserving generic/XML behavior |
+| DOC-71 | Separate native row compatibility policy from the generic path | Implemented explicit native-reader cantSplit policy while preserving generic behavior |
 | DOC-72 | Verify ordered legacy and modern row-split properties | Implemented and tested ordered 3403/3466 handling, independent of nFib, with native-current-Word behavior distinguished from generic/XML acquisition |
 | DOC-73 | Establish semantic defaults used for row identity | Implemented only the documented false no-overlap default normalization. Other raw identity defaults remain outside this slice |
 | DOC-74 | Verify repeated TIstd row-reset interactions | Verified repeated TIstd resets and later modern cantSplit overrides through actual native acquisition; ignored legacy values cannot resurrect cleared state |
@@ -1944,14 +1027,14 @@ account for competing cell definitions and width properties.
 ### Probe assertion contracts
 
 The read-only `check-trace INPUT ASSERTIONS` command in
-`scripts/legacy-doc-papx-probes.py` accepts `legacy-doc-property-trace/v1`.
+`packages/legacy-converter/tools/legacy-doc-papx-probes.py` accepts `legacy-doc-property-trace/v1`.
 Each source-hash-bound target declares a physical `fc`, `owner` (`ttp` or
 `paragraph`), and nonempty `properties` mapping lowercase four-digit SPRM codes
 to exact framed operand arrays. An empty array asserts absence. Optional `order`
 asserts the complete acquired sequence filtered to those property codes.
 
 The fixed-fixture `check-target INPUT ASSERTIONS` command in
-`scripts/legacy-doc-table-style-probes.py` accepts
+`packages/legacy-converter/tools/legacy-doc-table-style-probes.py` accepts
 `legacy-doc-table-style-target-assertions/v1`. It requires an exact marker or
 table/row selector, an exact authored `style` name, `direct_pjc` as null or an
 exact `{code, operand}` object, and `acquired` property assertions. Despite the
@@ -2214,7 +1297,7 @@ unapplied diagnostic provenance and still consume framing/work budgets.
 Filtering stops at referenced Data: the shared traversal preserves those
 records, its cycle/depth limits, and the rule that indirection discards the
 remaining array tail. Native paragraph and table readers use the same policy;
-style, direct-PAPX and XML compatibility paths retain their existing behavior.
+style and direct-PAPX paths retain their existing behavior.
 The diagnostic probe applies source selection consistently to acquired traces
 and mutation-target validation, without rewriting raw inspection.
 
@@ -2334,15 +1417,15 @@ admission gates.
 | Additional item | Scope | Status |
 | --- | --- | --- |
 | DOC-273 | Cross-source row definition after explicit widths | Open: one control showed a piece TDefTable replacing earlier direct-chain TDxaCol widths; the geometry source boundary stays gated |
-| TOOL-1 | Office export restoration | Open: `scripts/legacy-office-export.applescript` cannot restore Word/Excel settings when `open` returns no value; it also adopts an unrestored ForceDisable baseline |
-| LEGACY-OOXML | Remove the OOXML-generation path | Open: legacy support is unreleased, so delete the byte converter, its WASM/TS entry points and XML writers instead of deprecating them; direct paths must not depend on them |
+| TOOL-1 | Office export restoration | Open: `packages/legacy-converter/tools/legacy-office-export.applescript` cannot restore Word/Excel settings when `open` returns no value; it also adopts an unrestored ForceDisable baseline |
+| LEGACY-OOXML | Remove the OOXML-generation path | Done: legacy support was unreleased, so the OOXML generator, its WASM/TS entry points and XML writers were deleted rather than deprecated; the direct readers do not depend on them |
 
 ### Direct-model table-style admission checkpoint
 
 The direct DOC model now admits table-style selection instead of rejecting
 every table that carries sprmTIstd or sprmTTlp. The table-style profile
 (TAPX/PAPX/CHPX, conditional selection, borders, margins, shading) keeps its
-own per-property gates; the XML conversion path is unchanged. The decisions
+own per-property gates. The decisions
 and their evidence are recorded next to the code in
 `doc/table/native_admission.rs`, `doc/table/position.rs`,
 `doc/direct_model/tables.rs` and `doc/direct_model/story/borders.rs` and
@@ -2431,7 +1514,7 @@ be closed before an experimental release.
 | Area | Gap | Samples |
 | --- | --- | --- |
 | XLS | ~~BIFF8 embedded charts are not projected into `ChartModel`~~ Projected (89f3db02, f7dcb0fa, 06da6a7a); chart sheets and the items below remain | 127 of 139 |
-| XLS | Chart and picture anchors need the Normal font's digit width. The browser default measures only an installed face, so they are omitted when Office fonts such as Calibri are not installed; shared reference font metrics are needed | all with drawings |
+| XLS | Chart and picture anchors need the Normal font's digit width. The renderer measures it with the same `computeMdw` that sizes the painted grid, so anchors follow the grid, but they match Excel only when Excel's fonts (such as Calibri) are available; without a measurable font they are omitted, and shared reference font metrics are needed | all with drawings |
 | XLS | Chart text omits TextPropsStream (its checksum is not implemented), Fbi font autoscaling, the outline Excel draws around inverted negative points, plot-area layout, drop/high-low lines and 3-D walls | most chart samples |
 | XLS | ~~Extended colors (XFExt theme/tint) fall back to palette approximations~~ Resolved: tints (b09eae6a) and theme 0-3 in Excel's lt1/dk1/lt2/dk2 order (0adbc794) | about 6 |
 | XLS | Table (ListObject) styles, conditional-format data bars/icons and pivot styling are absent | about 5 |

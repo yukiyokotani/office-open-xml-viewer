@@ -10,7 +10,6 @@ async function expectWorkerBitmaps(page: import('@playwright/test').Page, url: s
   if (status !== 'ready') {
     throw new Error(await page.locator('body').getAttribute('data-error-message') ?? status ?? '');
   }
-  await expect(page.locator('body')).toHaveAttribute('data-legacy-converter', 'ready');
 
   for (const id of [
     'docx',
@@ -21,6 +20,8 @@ async function expectWorkerBitmaps(page: import('@playwright/test').Page, url: s
     'xlsx-bordered',
     'xlsx-csv-main',
     'xlsx-csv-worker',
+    'legacy-doc-main',
+    'legacy-doc-worker',
   ]) {
     const ink = await page.locator(`#${id}`).evaluate((canvas: HTMLCanvasElement) => {
       // Worker-backed viewers own a `bitmaprenderer` context, so acquiring a
@@ -41,6 +42,8 @@ async function expectWorkerBitmaps(page: import('@playwright/test').Page, url: s
     });
     expect(ink, `${id} worker bitmap should contain ink`).toBeGreaterThan(100);
   }
+
+  await expect(page.locator('body')).toHaveAttribute('data-model-sources', 'ready');
 
   const pptxTextRuns = await page.evaluate(() => (
     window as typeof window & { pptxTextRuns?: Array<Record<string, unknown>> }

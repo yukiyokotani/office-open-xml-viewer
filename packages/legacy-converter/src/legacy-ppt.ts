@@ -1,7 +1,7 @@
 import type { ModelSource } from '@silurus/ooxml-core';
 import { createLegacySource, type LegacySourceOptions } from './legacy-source.js';
 import defaultWasmUrl from './wasm-direct-ppt/legacy_ppt_direct_bg.wasm?url';
-import defaultModuleUrl from './legacy-ppt-source-module.ts?worker&url';
+import defaultModuleUrl from './legacy-ppt-source-module.ts?url';
 
 export type LegacyPptSourceOptions = LegacySourceOptions;
 

@@ -9,7 +9,7 @@ const require = createRequire(new URL('../package.json', import.meta.url));
 const ts = require('typescript-compiler-api');
 const typesDir = path.resolve(process.cwd(), 'dist/types');
 const formats = ['docx', 'pptx', 'xlsx'];
-const files = ['index', ...formats, 'math', 'three-d', 'region-map', 'chart-ex', 'tiff', 'legacy-conversion', 'legacy-doc', 'legacy-ppt', 'legacy-xls']
+const files = ['index', ...formats, 'math', 'three-d', 'region-map', 'chart-ex', 'tiff', 'legacy-doc', 'legacy-ppt', 'legacy-xls']
   .map((entry) => path.join(typesDir, `${entry}.d.ts`));
 
 const program = ts.createProgram(files, {
@@ -95,72 +95,18 @@ assert.deepEqual(
   'The ./tiff declaration entry must expose the runtime codec and its shared contract.',
 );
 
-const legacyConversionExports = moduleExports(path.join(typesDir, 'legacy-conversion.d.ts'));
-assert.deepEqual(
-  [...legacyConversionExports.keys()].sort(),
-  [
-    'LEGACY_OFFICE_WASM_ENGINE',
-    'LEGACY_OFFICE_WASM_ENGINE_VERSION',
-    'LegacyOfficeConversionError',
-    'LegacyOfficeConversionFailureReason',
-    'LegacyOfficeConversionInput',
-    'LegacyOfficeConversionOptions',
-    'LegacyOfficeConversionRecord',
-    'LegacyOfficeConversionResult',
-    'LegacyOfficeFormatConversionOptions',
-    'LegacyOfficeConversionWorker',
-    'LegacyOfficeConversionWorkerAdapterOptions',
-    'LegacyOfficeConversionWorkerFactory',
-    'LegacyOfficeConversionWorkerScope',
-    'LegacyOfficeConverter',
-    'LegacyOfficeFormat',
-    'LegacyOfficeWasmConverterOptions',
-    'LegacyOfficeWasmWorkerConverterOptions',
-    'LegacyOfficeWorkerRequest',
-    'LegacyOfficeWorkerResponse',
-    'LegacyXlsFontMeasurement',
-    'LegacyXlsNormalFont',
-    'createDisposableWorkerLegacyOfficeConverter',
-    'createLegacyOfficeWasmConverter',
-    'createLegacyOfficeWasmWorkerConverter',
-    'installLegacyOfficeConversionWorkerHandler',
-    'validateConvertedOoxml',
-  ].sort(),
-  'The ./legacy-conversion declaration entry must expose the Worker transport and shared contract.',
-);
-
-const legacyPptExports = moduleExports(path.join(typesDir, 'legacy-ppt.d.ts'));
-const legacyDocExports = moduleExports(path.join(typesDir, 'legacy-doc.d.ts'));
-assert.deepEqual(
-  [...legacyDocExports.keys()].sort(),
-  [
-    'LegacyDocDirectSourceDescriptor',
-    'LegacyDocSourceOptions',
-    'createLegacyDocSource',
-  ].sort(),
-  'The ./legacy-doc declaration entry must expose only the direct DOC descriptor factory and types.',
-);
-
-assert.deepEqual(
-  [...legacyPptExports.keys()].sort(),
-  [
-    'LegacyPptDirectSourceDescriptor',
-    'LegacyPptSourceOptions',
-    'createLegacyPptSource',
-  ].sort(),
-  'The ./legacy-ppt declaration entry must expose only the direct PPT descriptor factory and types.',
-);
-
-const legacyXlsExports = moduleExports(path.join(typesDir, 'legacy-xls.d.ts'));
-assert.deepEqual(
-  [...legacyXlsExports.keys()].sort(),
-  [
-    'LegacyXlsDirectSourceDescriptor',
-    'LegacyXlsSourceOptions',
-    'createLegacyXlsSource',
-  ].sort(),
-  'The ./legacy-xls declaration entry must expose only the direct XLS descriptor factory and types.',
-);
+for (const [entry, factory, options] of [
+  ['legacy-doc', 'legacyDocSource', 'LegacyDocSourceOptions'],
+  ['legacy-ppt', 'legacyPptSource', 'LegacyPptSourceOptions'],
+  ['legacy-xls', 'legacyXlsSource', 'LegacyXlsSourceOptions'],
+]) {
+  const exports = moduleExports(path.join(typesDir, `${entry}.d.ts`));
+  assert.deepEqual(
+    [...exports.keys()].sort(),
+    [options, factory].sort(),
+    `The ./${entry} declaration entry must expose only its model source factory and options.`,
+  );
+}
 
 process.stdout.write(
   'Published declaration entries compile; root namespace exports and shared OOXML contracts match.\n',

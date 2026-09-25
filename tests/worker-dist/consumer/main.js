@@ -5,7 +5,8 @@ import { math } from '@silurus/ooxml/math';
 import { threeD } from '@silurus/ooxml/three-d';
 import { regionMap } from '@silurus/ooxml/region-map';
 import { chartEx } from '@silurus/ooxml/chart-ex';
-import { createLegacyOfficeWasmWorkerConverter } from '@silurus/ooxml/legacy-conversion';
+import { legacyDocSource } from '@silurus/ooxml/legacy-doc';
+import { runModelSourceStages } from '../model-source-stages.mjs';
 
 const renderers = { math, threeD, regionMap, chartEx };
 const paint = (id, bitmap) => {
@@ -22,22 +23,6 @@ const bytes = async (url) => {
 };
 
 try {
-  document.body.dataset.stage = 'legacy-converter-worker';
-  const legacyConverter = createLegacyOfficeWasmWorkerConverter();
-  try {
-    await legacyConverter.convert({
-      bytes: new Uint8Array([1, 2, 3]),
-      from: 'doc',
-      to: 'docx',
-      maxOutputBytes: 1024 * 1024,
-      signal: new AbortController().signal,
-    });
-    throw new Error('legacy converter unexpectedly accepted malformed CFB');
-  } catch (error) {
-    if (error?.reason !== 'unsupported-input') throw error;
-    document.body.dataset.legacyConverter = 'ready';
-  }
-
   const docx = await DocxDocument.load(
     await bytes('/packages/docx/public/demo/sample-1.docx'),
     { mode: 'worker', ...renderers },
@@ -131,6 +116,14 @@ try {
   );
   paint('pptx-chart-ex', await chartExPptx.renderSlideToBitmap(0, { width: 640, dpr: 1 }));
   chartExPptx.destroy();
+
+  await runModelSourceStages({
+    DocxDocument,
+    XlsxWorkbook,
+    legacyDocSource,
+    bytes,
+    paintCanvas: (id) => document.getElementById(id),
+  });
 
   document.body.dataset.status = 'ready';
 } catch (error) {

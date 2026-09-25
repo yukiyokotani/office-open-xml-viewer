@@ -4,6 +4,7 @@ import { dts } from 'rolldown-plugin-dts';
 import { resolve, dirname, basename } from 'path';
 import { fileURLToPath } from 'url';
 import { readFile } from 'fs/promises';
+import { rolldown } from 'rolldown';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -54,10 +55,18 @@ export function wasmAssetUrl(
     async load(id) {
       if (!id.endsWith(SUFFIX)) return null;
       const filePath = id.slice(0, -SUFFIX.length);
-      const source = await readAsset(filePath);
+      // A `?url` import of a TypeScript module names a self-contained ES
+      // module asset (an application-loaded model source module, see
+      // packages/legacy-converter/src/legacy-*.ts). It is bundled on its own,
+      // with every dependency inlined and its exports preserved, because the
+      // realm that imports it by URL cannot resolve sibling chunks.
+      const moduleAsset = /\.[cm]?ts$/.test(filePath);
+      const source = moduleAsset
+        ? await bundleSelfContainedModule(filePath)
+        : await readAsset(filePath);
       const referenceId = this.emitFile({
         type: 'asset',
-        name: basename(filePath),
+        name: moduleAsset ? basename(filePath).replace(/\.[cm]?ts$/, '.mjs') : basename(filePath),
         source,
       });
       // `import.meta.ROLLUP_FILE_URL_<id>` expands at render time to Rollup's
@@ -85,6 +94,31 @@ export function wasmAssetUrl(
       return restored === code ? null : { code: restored, map: null };
     },
   };
+}
+
+/** Bundle one ES module with all of its imports inlined and its exports kept. */
+async function bundleSelfContainedModule(entry: string): Promise<string> {
+  const bundle = await rolldown({
+    input: entry,
+    platform: 'neutral',
+    resolve: {
+      alias: {
+        '@silurus/ooxml-core/worker': resolve(__dirname, 'packages/core/src/worker/index.ts'),
+        '@silurus/ooxml-core': resolve(__dirname, 'packages/core/src/index.ts'),
+      },
+      extensionAlias: { '.js': ['.ts', '.js'] },
+    },
+    preserveEntrySignatures: 'strict',
+  });
+  try {
+    const { output } = await bundle.generate({ format: 'es', codeSplitting: false, minify: true });
+    if (output.length !== 1 || output[0].type !== 'chunk') {
+      throw new Error(`${basename(entry)} did not bundle into one self-contained module`);
+    }
+    return output[0].code;
+  } finally {
+    await bundle.close();
+  }
 }
 
 export default defineConfig(({ command, mode }) => ({
