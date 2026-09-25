@@ -849,9 +849,13 @@ fn parse_sheet(
         let prior_kind = std::mem::replace(&mut previous_kind, record.kind);
         // [MS-XLS] 2.1.7: an embedded chart has its own BOF/EOF
         // substream. Its records are not worksheet cells or geometry.
+        if matches!(record.kind, BOF | EOF) && pending_formula_string.is_some() {
+            return Err(unsupported(
+                "BIFF formula string result lacks its STRING record",
+            ));
+        }
         if record.kind == BOF {
             nested_substreams += 1;
-            pending_formula_string = None;
             continue;
         }
         if record.kind == EOF {
@@ -885,8 +889,14 @@ fn parse_sheet(
         if custom_view {
             continue;
         }
-        if record.kind != STRING {
-            pending_formula_string = None;
+        // [MS-XLS] 2.1.7.20.6: FORMULA = [Uncalced] Formula [Array / Table /
+        // ShrFmla / SUB] [String *Continue] -- the cached string result may
+        // follow the formula's Array, Table or ShrFmla record.
+        let formula_part = prior_kind == FORMULA && matches!(record.kind, 0x0221 | 0x0236 | 0x04bc);
+        if record.kind != STRING && !formula_part && pending_formula_string.is_some() {
+            return Err(unsupported(
+                "BIFF formula string result lacks its STRING record",
+            ));
         }
         if matches!(
             record.kind,
@@ -1469,6 +1479,44 @@ mod tests {
             build_sheet_xml(&sheet, xml.len() - 1).unwrap_err(),
             "OUTPUT_TOO_LARGE"
         );
+    }
+
+    #[test]
+    fn formula_string_results_follow_shared_formula_records() {
+        use super::*;
+        let bof = [0, 6, 0x10, 0];
+        // Row 0, column 0, XF 15; cached string result; PtgExp to itself.
+        let mut formula = vec![0, 0, 0, 0, 15, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff];
+        formula.extend([8, 0, 0, 0, 0, 0, 5, 0, 1, 0, 0, 0, 0]);
+        let shared = [0u8; 10];
+        let string = [2, 0, 0, b'o', b'k'];
+        let record = |kind, offset, data| Record { kind, offset, data };
+        let bound = BoundSheet {
+            offset: 0,
+            name: "A".into(),
+            sheet_type: 0,
+            visibility: SheetVisibility::Visible,
+        };
+        let records = [
+            record(BOF, 0, &bof[..]),
+            record(FORMULA, 10, &formula),
+            record(0x04bc, 50, &shared),
+            record(STRING, 70, &string),
+            record(EOF, 80, &[]),
+        ];
+        let sheet = parse_sheet(&records, &bound, &[]).unwrap();
+        assert!(matches!(
+            sheet.rows.get(&0).and_then(|row| row.get(&0)),
+            Some(CellValue::Text(text)) if text == "ok"
+        ));
+        // A string result without its STRING record is malformed.
+        let records = [
+            record(BOF, 0, &bof[..]),
+            record(FORMULA, 10, &formula),
+            record(0x04bc, 50, &shared),
+            record(EOF, 80, &[]),
+        ];
+        assert!(parse_sheet(&records, &bound, &[]).is_err());
     }
 
     #[test]
