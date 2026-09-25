@@ -46,8 +46,9 @@
 // SETBKMODE, BITBLT (DIB source, or PATCOPY/BLACKNESS/WHITENESS/D without
 // one), STRETCHDIBITS (minimal DIB decoder), EOF.
 // BEGINPATH/ENDPATH/CLOSEFIGURE retain line/polygon/cubic/rectangle/arc/ellipse
-// geometry; FILLPATH/STROKEPATH/STROKEANDFILLPATH paint it, FLATTENPATH keeps
-// it, ABORTPATH discards it. Clipping: SELECTCLIPPATH (AND/COPY),
+// geometry in the device context's own path (EmfPath), apart from ordinary
+// drawing; FILLPATH/STROKEPATH/STROKEANDFILLPATH paint it, FLATTENPATH keeps
+// it, ABORTPATH discards it, and SAVEDC/RESTOREDC save and restore it. Clipping: SELECTCLIPPATH (AND/COPY),
 // INTERSECTCLIPRECT, EXCLUDECLIPRECT and EXTSELECTCLIPRGN (AND/COPY/DIFF and
 // the default-clip reset), scoped by SAVEDC/RESTOREDC; a clip record inside an
 // open path bracket, or after ENDPATH while the closed path awaits the record
@@ -395,10 +396,12 @@ interface PlayState {
   curY: number;
   stack: SavedDc[]; // SAVEDC/RESTOREDC graphics-state stack
   drew: boolean;
-  inPath: boolean; // between BEGINPATH and ENDPATH — geometry builds a path, no draw
+  // The device context's path ([MS-EMF] 2.3.10), kept apart from the Canvas
+  // current path that ordinary drawing records use (see EmfPath).
+  path: EmfPath;
+  inPath: boolean; // between BEGINPATH and ENDPATH — geometry builds `path`, no draw
   // A bracket closed by ENDPATH whose path no FILLPATH, STROKEPATH,
-  // STROKEANDFILLPATH, SELECTCLIPPATH or ABORTPATH has consumed yet: the
-  // Canvas current path still holds it ([MS-EMF] 2.3.10).
+  // STROKEANDFILLPATH, SELECTCLIPPATH or ABORTPATH has consumed yet.
   pathHeld: boolean;
   pathCommandCount: number;
   pathDiscarded: boolean;
@@ -425,13 +428,99 @@ interface EmfReplayLimits {
   maxPathCommands?: number;
 }
 
+/**
+ * The path of the playback device context ([MS-EMF] 2.3.10 path bracket
+ * records; GDI path semantics as exercised by Wine's gdi32 path tests).
+ *
+ * GDI keeps one path per device context, separate from ordinary drawing:
+ *   - BEGINPATH discards any previous path and opens a new one; drawing
+ *     records until ENDPATH add figures to it instead of painting.
+ *   - ENDPATH closes the bracket; the path is then held in the DC. Drawing
+ *     records outside a bracket paint immediately and never touch it.
+ *   - FILLPATH, STROKEPATH, STROKEANDFILLPATH and SELECTCLIPPATH consume the
+ *     held path; FLATTENPATH and WIDENPATH transform it and keep it held.
+ *     All of them fail, leaving the path as it is, while the bracket is still
+ *     open or when no path is held. ABORTPATH discards an open or held path.
+ *   - SAVEDC saves the path with the rest of the DC state and RESTOREDC
+ *     brings it back, including whether the bracket was open ([MS-EMF] 2.3.11
+ *     state records EMR_SAVEDC / EMR_RESTOREDC restore the saved DC).
+ *
+ * Canvas has a single current path, which ordinary drawing resets, and
+ * save()/restore() do not preserve it (HTML Canvas 2D). The DC path is
+ * therefore recorded here in target pixels and traced onto the context only
+ * by the record that consumes it.
+ *
+ * `ops` is shared with SAVEDC snapshots (see SavedDc): it is only appended
+ * to, or truncated back to the snapshot being restored. Every record that
+ * discards the path installs a fresh array, so an older snapshot is never
+ * mutated.
+ */
+class EmfPath implements Sink {
+  ops: number[] = [];
+  moveTo(x: number, y: number): void {
+    this.ops.push(PATH_MOVE, x, y);
+  }
+  lineTo(x: number, y: number): void {
+    this.ops.push(PATH_LINE, x, y);
+  }
+  bezierCurveTo(x1: number, y1: number, x2: number, y2: number, x: number, y: number): void {
+    this.ops.push(PATH_CUBIC, x1, y1, x2, y2, x, y);
+  }
+  closePath(): void {
+    this.ops.push(PATH_CLOSE);
+  }
+}
+const PATH_MOVE = 0;
+const PATH_LINE = 1;
+const PATH_CUBIC = 2;
+const PATH_CLOSE = 3;
+
+/** Trace recorded path commands onto a fresh Canvas current path. */
+function tracePath(ctx: AnyCtx, ops: readonly number[]): void {
+  ctx.beginPath();
+  for (let i = 0; i < ops.length;) {
+    switch (ops[i]) {
+      case PATH_MOVE:
+        ctx.moveTo(ops[i + 1], ops[i + 2]);
+        i += 3;
+        break;
+      case PATH_LINE:
+        ctx.lineTo(ops[i + 1], ops[i + 2]);
+        i += 3;
+        break;
+      case PATH_CUBIC:
+        ctx.bezierCurveTo(ops[i + 1], ops[i + 2], ops[i + 3], ops[i + 4], ops[i + 5], ops[i + 6]);
+        i += 7;
+        break;
+      default:
+        ctx.closePath();
+        i += 1;
+    }
+  }
+}
+
+/** Where a geometry record's figure goes: the DC path inside a bracket,
+ *  otherwise the Canvas current path it paints at once. */
+function geometrySink(s: PlayState): Sink {
+  return s.inPath ? s.path : s.ctx;
+}
+
+/** Drop the DC path (open or held) and start from an empty one. */
+function discardPath(s: PlayState): void {
+  s.path.ops = [];
+  s.inPath = false;
+  s.pathHeld = false;
+  s.pathCommandCount = 0;
+  s.pathDiscarded = false;
+}
+
 function reservePathCommands(s: PlayState, additional: number): boolean {
   if (!s.inPath) return true;
   if (s.pathDiscarded) return false;
   const next = s.pathCommandCount + additional;
   if (!Number.isSafeInteger(next) || additional < 0 || next > s.maxPathCommands) {
     // Never leave a paintable prefix of an over-budget attacker-controlled path.
-    s.ctx.beginPath();
+    s.path.ops = [];
     s.pathDiscarded = true;
     return false;
   }
@@ -468,6 +557,14 @@ interface SavedDc {
   arcDirection: number;
   clipped: boolean;
   outerClipped: boolean;
+  // The DC path (see EmfPath): the shared command array and its length at
+  // SAVEDC, and the bracket state and budget that go with it.
+  pathOps: number[];
+  pathLength: number;
+  inPath: boolean;
+  pathHeld: boolean;
+  pathCommandCount: number;
+  pathDiscarded: boolean;
 }
 
 // ── coordinate pipeline ─────────────────────────────────────────────────────
@@ -726,6 +823,7 @@ function strokePolyline(s: PlayState, c: EmfCursor, rp: PointReader): void {
     return;
   }
   const { ctx } = s;
+  const sink = geometrySink(s);
   const appendPath = reservePathCommands(s, readablePointCount(c, count, rp));
   if (!s.inPath) ctx.beginPath();
   let lx = 0;
@@ -735,8 +833,8 @@ function strokePolyline(s: PlayState, c: EmfCursor, rp: PointReader): void {
     const [xl, yl] = rp(c);
     const [px, py] = toPx(s, xl, yl);
     if (appendPath) {
-      if (i === 0) ctx.moveTo(px, py);
-      else ctx.lineTo(px, py);
+      if (i === 0) sink.moveTo(px, py);
+      else sink.lineTo(px, py);
     }
     lx = xl;
     ly = yl;
@@ -772,7 +870,7 @@ function strokePolylineTo(s: PlayState, c: EmfCursor, rp: PointReader): void {
     const [xl, yl] = rp(c);
     if (draw && appendPath) {
       const [px, py] = toPx(s, xl, yl);
-      ctx.lineTo(px, py);
+      geometrySink(s).lineTo(px, py);
     }
     s.curX = xl;
     s.curY = yl;
@@ -791,6 +889,7 @@ function fillStrokePolygon(s: PlayState, c: EmfCursor, rp: PointReader): void {
   const count = c.u32();
   if (count < 2 || count > 0x100000) return;
   const { ctx } = s;
+  const sink = geometrySink(s);
   const appendPath = reservePathCommands(s, readablePointCount(c, count, rp) + 1);
   if (!s.inPath) ctx.beginPath();
   let started = false;
@@ -799,12 +898,12 @@ function fillStrokePolygon(s: PlayState, c: EmfCursor, rp: PointReader): void {
     const [xl, yl] = rp(c);
     const [px, py] = toPx(s, xl, yl);
     if (!started) {
-      if (appendPath) ctx.moveTo(px, py);
+      if (appendPath) sink.moveTo(px, py);
       started = true;
-    } else if (appendPath) ctx.lineTo(px, py);
+    } else if (appendPath) sink.lineTo(px, py);
   }
   if (!started) return;
-  if (appendPath) ctx.closePath();
+  if (appendPath) sink.closePath();
   if (s.inPath) return; // path bracket: defer fill/stroke
   if (s.curBrush && s.curBrush.fill != null) {
     ctx.fillStyle = s.curBrush.fill;
@@ -854,10 +953,11 @@ function strokePolyBezier(
   }
   const draw = s.inPath || (s.curPen != null && s.curPen.stroke != null);
   const { ctx } = s;
+  const sink = geometrySink(s);
   if (draw) {
     if (!s.inPath) ctx.beginPath();
     const start = isTo ? toPx(s, s.curX, s.curY) : toPx(s, pts[0][0], pts[0][1]);
-    if (!isTo || !s.inPath) ctx.moveTo(start[0], start[1]);
+    if (!isTo || !s.inPath) sink.moveTo(start[0], start[1]);
   }
   let i = isTo ? 0 : 1;
   for (; i + 2 < pts.length + (isTo ? 1 : 0); i += 3) {
@@ -869,7 +969,7 @@ function strokePolyBezier(
       const p1 = toPx(s, c1[0], c1[1]);
       const p2 = toPx(s, c2[0], c2[1]);
       const pe = toPx(s, end[0], end[1]);
-      ctx.bezierCurveTo(p1[0], p1[1], p2[0], p2[1], pe[0], pe[1]);
+      sink.bezierCurveTo(p1[0], p1[1], p2[0], p2[1], pe[0], pe[1]);
     }
     s.curX = end[0];
     s.curY = end[1];
@@ -911,7 +1011,8 @@ function fillStrokePolyPoly(
     s,
     readablePointCount(c, totalPoints, rp) + (isPolygon ? numPolys : 0),
   );
-  if (!s.inPath) ctx.beginPath(); // in a path bracket: accumulate, don't reset
+  const sink = geometrySink(s);
+  if (!s.inPath) ctx.beginPath(); // in a path bracket: accumulate in the DC path
   let any = false;
   for (const cnt of counts) {
     if (cnt < 2) {
@@ -923,11 +1024,11 @@ function fillStrokePolyPoly(
       const [xl, yl] = rp(c);
       if (appendPath) {
         const [px, py] = toPx(s, xl, yl);
-        if (i === 0) ctx.moveTo(px, py);
-        else ctx.lineTo(px, py);
+        if (i === 0) sink.moveTo(px, py);
+        else sink.lineTo(px, py);
       }
     }
-    if (isPolygon && appendPath) ctx.closePath();
+    if (isPolygon && appendPath) sink.closePath();
     any = true;
   }
   if (!any || s.inPath) return; // path bracket: geometry added, defer fill/stroke
@@ -951,14 +1052,15 @@ function fillStrokeRect(s: PlayState, l: number, t: number, r: number, b: number
   const c1 = toPx(s, r, t);
   const c2 = toPx(s, r, b);
   const c3 = toPx(s, l, b);
+  const sink = geometrySink(s);
   const appendPath = reservePathCommands(s, 5);
   if (!s.inPath) ctx.beginPath();
   if (appendPath) {
-    ctx.moveTo(c0[0], c0[1]);
-    ctx.lineTo(c1[0], c1[1]);
-    ctx.lineTo(c2[0], c2[1]);
-    ctx.lineTo(c3[0], c3[1]);
-    ctx.closePath();
+    sink.moveTo(c0[0], c0[1]);
+    sink.lineTo(c1[0], c1[1]);
+    sink.lineTo(c2[0], c2[1]);
+    sink.lineTo(c3[0], c3[1]);
+    sink.closePath();
   }
   if (s.inPath) return; // path bracket: defer fill/stroke
   if (s.curBrush && s.curBrush.fill != null) {
@@ -974,25 +1076,29 @@ function fillStrokeRect(s: PlayState, l: number, t: number, r: number, b: number
   }
 }
 
-/** Consume the current path with the selected brush and/or pen ([MS-EMF] 2.3.10). */
+/** EMR_FILLPATH / STROKEPATH / STROKEANDFILLPATH: consume the held DC path
+ *  with the selected brush and/or pen ([MS-EMF] 2.3.10). Without a held path
+ *  (none, or a bracket still open) GDI fails and the path stays as it is. */
 function paintSelectedPath(s: PlayState, fill: boolean, stroke: boolean): void {
-  if (!s.pathDiscarded && fill && s.curBrush?.fill != null) {
-    s.ctx.fillStyle = s.curBrush.fill;
-    s.ctx.fill(s.fillRule);
+  if (!s.pathHeld) return;
+  const ops = s.path.ops;
+  const paint = !s.pathDiscarded;
+  discardPath(s);
+  if (!paint) return;
+  const { ctx } = s;
+  tracePath(ctx, ops);
+  if (fill && s.curBrush?.fill != null) {
+    ctx.fillStyle = s.curBrush.fill;
+    ctx.fill(s.fillRule);
     s.drew = true;
   }
-  if (!s.pathDiscarded && stroke && s.curPen?.stroke != null) {
-    s.ctx.strokeStyle = s.curPen.stroke;
-    s.ctx.lineWidth = deviceLineWidth(s, s.curPen.width);
-    s.ctx.stroke();
+  if (stroke && s.curPen?.stroke != null) {
+    ctx.strokeStyle = s.curPen.stroke;
+    ctx.lineWidth = deviceLineWidth(s, s.curPen.width);
+    ctx.stroke();
     s.drew = true;
   }
-  // EMR_FILLPATH / STROKEPATH / STROKEANDFILLPATH close the path bracket.
-  // Clear Canvas's persistent current path so later records cannot repaint it.
-  s.ctx.beginPath();
-  s.pathHeld = false;
-  s.pathCommandCount = 0;
-  s.pathDiscarded = false;
+  ctx.beginPath();
 }
 
 // ── elliptical arcs, pies, chords and rounded rectangles ([MS-EMF] 2.3.5) ─────
@@ -1146,11 +1252,11 @@ function drawRadialArc(s: PlayState, c: EmfCursor, kind: ArcKind, name: string):
   }
   const geometry = radialArc(box, p0, p1, s.arcDirection);
   if (!geometry) return; // an empty bounding box has no curve
-  // Inside a path bracket the geometry is appended to the Canvas current path
+  // Inside a path bracket the geometry is appended to the DC path
   // under the bracket's command budget (move/line, curves, radial, close).
   if (!reservePathCommands(s, geometry.curves.length + 3)) return;
   const { ctx } = s;
-  const sink: Sink = ctx;
+  const sink = geometrySink(s);
   const start = toPx(s, geometry.start[0], geometry.start[1]);
   if (!s.inPath) ctx.beginPath();
   if (kind === 'arcTo') {
@@ -1201,7 +1307,7 @@ function drawAngleArc(s: PlayState, c: EmfCursor): void {
   const geometry = ellipseArc(cx, cy, radius, radius, theta0, (-sweep * Math.PI) / 180);
   if (!reservePathCommands(s, geometry.curves.length + 1)) return;
   const { ctx } = s;
-  const sink: Sink = ctx;
+  const sink = geometrySink(s);
   const start = toPx(s, geometry.start[0], geometry.start[1]);
   if (!s.inPath) {
     ctx.beginPath();
@@ -1235,7 +1341,7 @@ function drawRoundRect(s: PlayState, c: EmfCursor): void {
   // Four corners of at most one curve each, four joining moves/lines, close.
   if (!reservePathCommands(s, 9)) return;
   const { ctx } = s;
-  const sink: Sink = ctx;
+  const sink = geometrySink(s);
   if (!s.inPath) ctx.beginPath();
   // Clockwise (increasing angle, y-down) corner order: top-right, bottom-right,
   // bottom-left, top-left; counterclockwise walks the same corners backwards.
@@ -1269,7 +1375,7 @@ function clipRect(s: PlayState, c: EmfCursor, exclude: boolean): void {
   const r = c.i32();
   const b = c.i32();
   const corners = [toPx(s, l, t), toPx(s, r, t), toPx(s, r, b), toPx(s, l, b)];
-  clipWith(s, exclude ? 'EMR_EXCLUDECLIPRECT' : 'EMR_INTERSECTCLIPRECT', exclude ? 'evenodd' : 'nonzero', (sink) => {
+  clipWith(s, exclude ? 'evenodd' : 'nonzero', (sink) => {
     if (exclude) outerFrame(sink);
     sink.moveTo(...corners[0]);
     for (const corner of corners.slice(1)) sink.lineTo(...corner);
@@ -1285,40 +1391,23 @@ function clipRect(s: PlayState, c: EmfCursor, exclude: boolean): void {
  * bracket must leave the bracket's figures intact for the FILLPATH,
  * STROKEPATH or SELECTCLIPPATH that closes it, and applies to that later
  * painting. The same holds after ENDPATH: the closed path stays selected in
- * the device context until one of those records (or ABORTPATH) consumes it,
- * so a clip record between ENDPATH and FILLPATH must not replace it either.
- * With no path open or held, the region is traced on the Canvas current path
- * like every other clip. Otherwise the current path holds the EMF path, so the
- * region is traced into its own Path2D and applied with `clip(path, rule)`,
- * which leaves the current default path untouched (HTML Canvas 2D). A runtime
- * without Path2D cannot do that; the clip is then left out and reported,
- * matching the playback that predates clip-record support.
+ * the device context until one of those records (or ABORTPATH) consumes it.
+ * The DC path lives in its own EmfPath, so the region is simply traced on the
+ * Canvas current path and clipped.
  */
 function clipWith(
   s: PlayState,
-  name: string,
   rule: CanvasFillRule,
   build: (sink: Sink) => void,
 ): void {
-  if (!s.inPath && !s.pathHeld) {
-    s.ctx.beginPath();
-    build(s.ctx);
-    applyClip(s, rule);
-    return;
-  }
-  if (typeof Path2D === 'undefined') {
-    s.unsupported.add(`${name} (${s.inPath ? 'inside a path bracket' : 'over a retained path'}, no Path2D)`);
-    return;
-  }
-  const region = new Path2D();
-  build(region);
-  applyClip(s, rule, region);
+  s.ctx.beginPath();
+  build(s.ctx);
+  applyClip(s, rule);
 }
 
-function applyClip(s: PlayState, rule: CanvasFillRule, region?: Path2D): void {
+function applyClip(s: PlayState, rule: CanvasFillRule): void {
   try {
-    if (region) s.ctx.clip(region, rule);
-    else s.ctx.clip(rule);
+    s.ctx.clip(rule);
     s.clipped = true;
   } catch {
     /* a ctx without clip() (some mocks): leave unclipped */
@@ -1382,7 +1471,7 @@ function extSelectClipRgn(s: PlayState, c: EmfCursor): void {
   if (mode === RGN_DIFF) {
     // Subtract each rectangle on its own, so overlapping rectangles stay exact.
     for (const r of rects) {
-      clipWith(s, name, 'evenodd', (sink) => {
+      clipWith(s, 'evenodd', (sink) => {
         outerFrame(sink);
         rect(sink, r);
       });
@@ -1390,7 +1479,7 @@ function extSelectClipRgn(s: PlayState, c: EmfCursor): void {
     return;
   }
   // Same-orientation rectangles under non-zero winding form their union.
-  clipWith(s, name, 'nonzero', (sink) => {
+  clipWith(s, 'nonzero', (sink) => {
     for (const r of rects) rect(sink, r);
   });
 }
@@ -1749,6 +1838,7 @@ export function playEmf(
     curY: 0,
     stack: [],
     drew: false,
+    path: new EmfPath(),
     inPath: false,
     pathHeld: false,
     pathCommandCount: 0,
@@ -2000,6 +2090,12 @@ function replayRecords(
             arcDirection: s.arcDirection,
             clipped: s.clipped,
             outerClipped: s.outerClipped,
+            pathOps: s.path.ops,
+            pathLength: s.path.ops.length,
+            inPath: s.inPath,
+            pathHeld: s.pathHeld,
+            pathCommandCount: s.pathCommandCount,
+            pathDiscarded: s.pathDiscarded,
           });
           s.outerClipped = s.clipped;
           break;
@@ -2037,21 +2133,28 @@ function replayRecords(
             s.arcDirection = saved.arcDirection;
             s.clipped = saved.clipped;
             s.outerClipped = saved.outerClipped;
+            // The saved path comes back with its open/held/discarded state
+            // (see EmfPath). Snapshots above this one were popped with it, so
+            // truncating the shared array cannot change a live snapshot.
+            saved.pathOps.length = saved.pathLength;
+            s.path.ops = saved.pathOps;
+            s.inPath = saved.inPath;
+            s.pathHeld = saved.pathHeld;
+            s.pathCommandCount = saved.pathCommandCount;
+            s.pathDiscarded = saved.pathDiscarded;
           }
           break;
         }
         case EMR.BEGINPATH: {
-          // Start a path bracket ([MS-EMF] 2.3.10): subsequent geometry records
-          // build the path instead of drawing it, until ENDPATH.
-          s.ctx.beginPath();
+          // Start a path bracket ([MS-EMF] 2.3.10): any previous path is
+          // discarded, and geometry records build the new one instead of
+          // drawing, until ENDPATH.
+          discardPath(s);
           s.inPath = true;
-          s.pathHeld = false;
-          s.pathCommandCount = 0;
-          s.pathDiscarded = false;
           break;
         }
         case EMR.CLOSEFIGURE: {
-          if (s.inPath && reservePathCommands(s, 1)) s.ctx.closePath();
+          if (s.inPath && reservePathCommands(s, 1)) s.path.closePath();
           break;
         }
         case EMR.ENDPATH: {
@@ -2073,21 +2176,18 @@ function replayRecords(
         }
         case EMR.ABORTPATH: {
           // Close the bracket and discard its path ([MS-EMF] 2.3.10).
-          s.ctx.beginPath();
-          s.inPath = false;
-          s.pathHeld = false;
-          s.pathCommandCount = 0;
-          s.pathDiscarded = false;
+          discardPath(s);
           break;
         }
         case EMR.FLATTENPATH:
-          // Flattening only replaces curves by lines; it does not change the
-          // painted area beyond curve-approximation tolerance.
+          // Flattening only replaces the held path's curves by lines; it does
+          // not change the painted area beyond curve-approximation tolerance.
           break;
         case EMR.WIDENPATH:
-          // Not implemented: the path keeps its unwidened figures (the
+          // Not implemented: the held path keeps its unwidened figures (the
           // playback before this record was recognized) and is reported.
-          s.unsupported.add('EMR_WIDENPATH');
+          // Without a held path GDI fails and nothing changes.
+          if (s.pathHeld) s.unsupported.add('EMR_WIDENPATH');
           break;
         case EMR.SELECTCLIPPATH: {
           // data: u32 RegionMode. AND intersects; COPY replaces the clip.
@@ -2095,6 +2195,9 @@ function replayRecords(
           // reported and intersect instead (the playback that predates the
           // RegionMode operand).
           const mode = c.remaining >= 4 ? c.u32() : RGN_AND;
+          // Without a held path (none, or a bracket still open) GDI fails
+          // and neither the clip nor the path changes.
+          if (!s.pathHeld) break;
           if (mode !== RGN_AND && mode !== RGN_COPY) {
             s.unsupported.add(`EMR_SELECTCLIPPATH (mode ${mode})`);
           } else if (mode === RGN_COPY) {
@@ -2105,10 +2208,13 @@ function replayRecords(
           // relies on, e.g. sample-13 Fig.3 clips a bar-chart DIB to the bar
           // shapes so its background is masked out). Scoped by the enclosing
           // SAVEDC/RESTOREDC.
-          if (!s.pathDiscarded) applyClip(s, s.fillRule);
-          s.pathHeld = false;
-          s.pathCommandCount = 0;
-          s.pathDiscarded = false;
+          const ops = s.path.ops;
+          const apply = !s.pathDiscarded;
+          discardPath(s);
+          if (apply) {
+            tracePath(s.ctx, ops);
+            applyClip(s, s.fillRule);
+          }
           break;
         }
         case EMR.INTERSECTCLIPRECT:
@@ -2231,16 +2337,15 @@ function replayRecords(
           s.curY = c.i32();
           if (s.inPath && reservePathCommands(s, 1)) {
             const [px, py] = toPx(s, s.curX, s.curY);
-            s.ctx.moveTo(px, py);
+            s.path.moveTo(px, py);
           }
           break;
         }
         case EMR.LINETO: {
           const xl = c.i32();
           const yl = c.i32();
-          if (s.inPath && reservePathCommands(s, 1)) {
-            const [px1, py1] = toPx(s, xl, yl);
-            s.ctx.lineTo(px1, py1);
+          if (s.inPath) {
+            if (reservePathCommands(s, 1)) s.path.lineTo(...toPx(s, xl, yl));
           } else if (s.curPen && s.curPen.stroke != null) {
             const [px0, py0] = toPx(s, s.curX, s.curY);
             const [px1, py1] = toPx(s, xl, yl);
@@ -2282,9 +2387,9 @@ function replayRecords(
             const sweep = s.arcDirection === AD_CLOCKWISE ? 2 * Math.PI : -2 * Math.PI;
             const arc = ellipseArc((left + right) / 2, (top + bottom) / 2, rx, ry, 0, sweep);
             if (!reservePathCommands(s, arc.curves.length + 2)) break;
-            ctx.moveTo(...toPx(s, arc.start[0], arc.start[1]));
-            emitCurves(s, ctx, arc);
-            ctx.closePath();
+            s.path.moveTo(...toPx(s, arc.start[0], arc.start[1]));
+            emitCurves(s, s.path, arc);
+            s.path.closePath();
             break;
           }
           const [cxl, cyl] = [(left + right) / 2, (top + bottom) / 2];

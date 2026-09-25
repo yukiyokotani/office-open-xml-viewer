@@ -1524,48 +1524,35 @@ describe('playEmf — clip records inside an open path bracket ([MS-EMF] 2.3.2, 
     });
     return { ...m, reported };
   }
-  /** Records the geometry traced into each Path2D region. */
-  function stubPath2D() {
-    const regions: (string | number)[][][] = [];
-    vi.stubGlobal('Path2D', class {
-      ops: (string | number)[][] = [];
-      constructor() {
-        regions.push(this.ops);
-      }
-      moveTo(x: number, y: number) { this.ops.push(['moveTo', x, y]); }
-      lineTo(x: number, y: number) { this.ops.push(['lineTo', x, y]); }
-      closePath() { this.ops.push(['closePath']); }
-    });
-    return regions;
-  }
-
-  it('clips with a separate region and still fills the bracket figures under that clip', () => {
-    const regions = stubPath2D();
-    const m = run(bracket(record(INTERSECTCLIPRECT, (w) => w.i32(10).i32(10).i32(50).i32(50))));
+  /** The ops from the first clip on: the clip region, then the DC path traced
+   *  for FILLPATH. */
+  const fromClip = (m: ReturnType<typeof run>) => {
     const ops = m.calls.map((c) => c.op);
-    // The polygon stays on the current path: no beginPath between it and the fill.
-    const polygon = ops.indexOf('moveTo');
-    expect(ops.slice(polygon, ops.indexOf('fill') + 1)).toEqual(['moveTo', 'lineTo', 'lineTo', 'closePath', 'clip', 'fill']);
-    expect(m.calls.find((c) => c.op === 'clip')?.args).toEqual(['Path2D', 'nonzero']);
-    expect(regions).toEqual([[['moveTo', 10, 10], ['lineTo', 50, 10], ['lineTo', 50, 50], ['lineTo', 10, 50], ['closePath']]]);
+    return ops.slice(ops.indexOf('clip') - 5, ops.indexOf('fill') + 1);
+  };
+
+  it('clips at once and still fills the bracket figures under that clip', () => {
+    const m = run(bracket(record(INTERSECTCLIPRECT, (w) => w.i32(10).i32(10).i32(50).i32(50))));
+    expect(fromClip(m)).toEqual([
+      'moveTo', 'lineTo', 'lineTo', 'lineTo', 'closePath', 'clip', // the clip rectangle
+      'beginPath', 'moveTo', 'lineTo', 'lineTo', 'closePath', 'fill', // the bracket's polygon
+    ]);
+    expect(m.calls.find((c) => c.op === 'clip')?.args).toEqual(['nonzero']);
     expect(m.styles.fill).toEqual(['#000000']);
     expect(m.reported).toEqual([]);
   });
 
   it('applies region data (EXTSELECTCLIPRGN) inside a bracket the same way', () => {
-    const regions = stubPath2D();
     const m = run(bracket(record(EXTSELECTCLIPRGN, (w) => {
       w.u32(48).u32(1);
       w.u32(32).u32(1).u32(1).u32(16).i32(0).i32(0).i32(100).i32(100);
       w.i32(0).i32(0).i32(20).i32(20);
     })));
-    expect(m.calls.find((c) => c.op === 'clip')?.args).toEqual(['Path2D', 'nonzero']);
-    expect(regions).toHaveLength(1);
+    expect(fromClip(m).slice(-6)).toEqual(['beginPath', 'moveTo', 'lineTo', 'lineTo', 'closePath', 'fill']);
     expect(m.styles.fill).toEqual(['#000000']);
   });
 
   it('keeps a closed path across a clip record until FILLPATH consumes it', () => {
-    const regions = stubPath2D();
     // BEGINPATH, RECTANGLE, ENDPATH, then INTERSECTCLIPRECT before FILLPATH.
     const m = run([
       record(EMR.SELECTOBJECT, (w) => w.u32(0x80000004)),
@@ -1575,43 +1562,84 @@ describe('playEmf — clip records inside an open path bracket ([MS-EMF] 2.3.2, 
       record(INTERSECTCLIPRECT, (w) => w.i32(0).i32(0).i32(90).i32(90)),
       record(EMR.FILLPATH, (w) => w.i32(0).i32(0).i32(100).i32(100)),
     ]);
-    const ops = m.calls.map((c) => c.op);
-    expect(ops.slice(ops.indexOf('moveTo'), ops.indexOf('fill') + 1))
-      .toEqual(['moveTo', 'lineTo', 'lineTo', 'lineTo', 'closePath', 'clip', 'fill']);
-    expect(m.calls.find((c) => c.op === 'moveTo')?.args).toEqual([10, 10]);
-    expect(regions[0][0]).toEqual(['moveTo', 0, 0]);
+    const moves = m.calls.filter((c) => c.op === 'moveTo').map((c) => c.args);
+    expect(moves).toEqual([[0, 0], [10, 10]]); // clip region, then the held rectangle
+    expect(fromClip(m).slice(-7)).toEqual(['beginPath', 'moveTo', 'lineTo', 'lineTo', 'lineTo', 'closePath', 'fill']);
     expect(m.reported).toEqual([]);
-    // Once FILLPATH consumed the path, a clip record traces on the current path again.
-    const after = run([
-      record(EMR.SELECTOBJECT, (w) => w.u32(0x80000004)),
-      record(EMR.BEGINPATH, () => {}),
-      record(43, (w) => w.i32(10).i32(10).i32(20).i32(20)),
-      record(EMR.ENDPATH, () => {}),
-      record(EMR.FILLPATH, (w) => w.i32(0).i32(0).i32(100).i32(100)),
-      record(INTERSECTCLIPRECT, (w) => w.i32(0).i32(0).i32(90).i32(90)),
-    ]);
-    expect(after.calls.filter((c) => c.op === 'clip').map((c) => c.args)).toEqual([['nonzero']]);
+  });
+});
+
+describe('playEmf — the device context path ([MS-EMF] 2.3.10, 2.3.11)', () => {
+  const RECTANGLE = 43;
+  const ABORTPATH = 68;
+  const rect = (l: number, t: number, r: number, b: number) => record(RECTANGLE, (w) => w.i32(l).i32(t).i32(r).i32(b));
+  const fillPath = record(EMR.FILLPATH, (w) => w.i32(0).i32(0).i32(100).i32(100));
+  const saveDc = record(EMR.SAVEDC, () => {});
+  const restoreDc = record(EMR.RESTOREDC, (w) => w.i32(-1));
+  /** BEGINPATH, rectangle A (10..20), ENDPATH: A is held in the DC. */
+  const holdA = [record(EMR.BEGINPATH, () => {}), rect(10, 10, 20, 20), record(EMR.ENDPATH, () => {})];
+  const A = [['M', 10, 10], ['L', 20, 10], ['L', 20, 20], ['L', 10, 20], ['Z']];
+  const B = [['M', 50, 50], ['L', 60, 50], ['L', 60, 60], ['L', 50, 60], ['Z']];
+
+  /** Each fill's geometry, and each clip's. */
+  function play(records: Uint8Array[]) {
+    const m = makeRecordingCtx();
+    let current: unknown[] = [];
+    const fills: unknown[][] = [];
+    const clips: unknown[][] = [];
+    m.ctx.beginPath = () => { current = []; };
+    m.ctx.moveTo = (...a) => { current.push(['M', ...a]); };
+    m.ctx.lineTo = (...a) => { current.push(['L', ...a]); };
+    m.ctx.closePath = () => { current.push(['Z']); };
+    m.ctx.fill = () => { fills.push([...current]); };
+    m.ctx.clip = () => { clips.push([...current]); };
+    const unsupported: string[] = [];
+    playEmf(concat(
+      emfHeader(),
+      record(EMR.SELECTOBJECT, (w) => w.u32(0x80000004)), // BLACK_BRUSH
+      record(EMR.SELECTOBJECT, (w) => w.u32(0x80000007)), // BLACK_PEN
+      ...records,
+      record(EMR.EOF, () => {}),
+    ), m.ctx, 100, 100, { onUnsupported: (r) => unsupported.push(...r) });
+    expect(unsupported).toEqual([]);
+    return { fills: fills.filter((p) => p.length), clips };
+  }
+
+  it('keeps the held path across ordinary drawing outside the bracket', () => {
+    // RECTANGLE and LINETO after ENDPATH paint at once and leave A held.
+    expect(play([...holdA, rect(50, 50, 60, 60), fillPath]).fills).toEqual([B, A]);
+    expect(play([...holdA, record(EMR.LINETO, (w) => w.i32(90).i32(90)), fillPath]).fills).toEqual([A]);
   });
 
-  it('without Path2D keeps a closed path across a clip record and reports the clip', () => {
-    const m = run([
-      record(EMR.SELECTOBJECT, (w) => w.u32(0x80000004)),
-      record(EMR.BEGINPATH, () => {}),
-      record(43, (w) => w.i32(10).i32(10).i32(20).i32(20)),
-      record(EMR.ENDPATH, () => {}),
-      record(INTERSECTCLIPRECT, (w) => w.i32(0).i32(0).i32(90).i32(90)),
-      record(EMR.FILLPATH, (w) => w.i32(0).i32(0).i32(100).i32(100)),
-    ]);
-    expect(m.calls.find((c) => c.op === 'moveTo')?.args).toEqual([10, 10]);
-    expect(m.styles.fill).toEqual(['#000000']);
-    expect(m.reported).toEqual(['EMR_INTERSECTCLIPRECT (over a retained path, no Path2D)']);
+  it('consumes the path once, and paints nothing after ABORTPATH', () => {
+    expect(play([...holdA, fillPath, fillPath]).fills).toEqual([A]);
+    expect(play([...holdA, record(ABORTPATH, () => {}), rect(50, 50, 60, 60), fillPath]).fills).toEqual([B]);
   });
 
-  it('without Path2D leaves the clip out, reports it, and keeps the bracket', () => {
-    const m = run(bracket(record(INTERSECTCLIPRECT, (w) => w.i32(10).i32(10).i32(50).i32(50))));
-    expect(m.calls.some((c) => c.op === 'clip')).toBe(false);
-    expect(m.styles.fill).toEqual(['#000000']);
-    expect(m.reported).toEqual(['EMR_INTERSECTCLIPRECT (inside a path bracket, no Path2D)']);
+  it('fails FILLPATH and SELECTCLIPPATH while the bracket is open, leaving it open', () => {
+    const r = play([
+      record(EMR.BEGINPATH, () => {}), rect(10, 10, 20, 20),
+      fillPath, record(EMR.SELECTCLIPPATH, (w) => w.u32(1)),
+      rect(10, 10, 20, 20), record(EMR.ENDPATH, () => {}), fillPath,
+    ]);
+    expect(r.clips).toEqual([]);
+    expect(r.fills).toEqual([[...A, ...A]]);
+    // With no path at all SELECTCLIPPATH changes no clip either.
+    expect(play([rect(50, 50, 60, 60), record(EMR.SELECTCLIPPATH, (w) => w.u32(1))]).clips).toEqual([]);
+  });
+
+  it('saves and restores the path with the DC', () => {
+    // A held, saved twice, aborted, restored twice: A is back and fills.
+    expect(play([...holdA, saveDc, saveDc, record(ABORTPATH, () => {}), restoreDc, restoreDc, fillPath]).fills).toEqual([A]);
+    // A bracket saved while open is open again after RESTOREDC (Wine gdi32
+    // path tests), so the figures drawn before ENDPATH join the path.
+    expect(play([
+      record(EMR.BEGINPATH, () => {}), rect(10, 10, 20, 20), saveDc,
+      record(EMR.ENDPATH, () => {}), fillPath, restoreDc,
+      fillPath, rect(50, 50, 60, 60), record(EMR.ENDPATH, () => {}), fillPath,
+    ]).fills).toEqual([A, [...A, ...B]]);
+    // A path begun after SAVEDC goes away with RESTOREDC.
+    expect(play([saveDc, ...holdA, restoreDc, fillPath]).fills).toEqual([]);
   });
 });
 
@@ -1649,8 +1677,8 @@ describe('playEmf — explicit report of records it cannot draw', () => {
       record(EMR.BEGINPATH, () => {}),
       polygon,
       record(97, (w) => w.u32(0)), // POLYTEXTOUTW
-      record(66 /* WIDENPATH */, () => {}),
       record(EMR.ENDPATH, () => {}),
+      record(66 /* WIDENPATH */, () => {}),
       record(EMR.FILLPATH, (w) => w.i32(0).i32(0).i32(100).i32(100)),
     ]);
     expect(m.styles.fill).toEqual(['#000000']);
