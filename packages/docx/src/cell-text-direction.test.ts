@@ -232,6 +232,15 @@ describe('ECMA-376 §17.4.72 cell text direction', () => {
       expect(height(rotated, shortNeighbor, 5, 'atLeast')).toBeCloseTo(natural, 1);
       expect(height(rotated, shortNeighbor, 60, 'atLeast')).toBeCloseTo(60, 1);
       expect(height(rotated, shortNeighbor, 20, 'exact')).toBeCloseTo(20, 1);
+      // ECMA-376 §17.4.80: an explicitly authored auto rule ignores @val.
+      const authoredAuto = {
+        ...row([rotated, shortNeighbor], 90, 'auto'),
+        __tableRowLayout: {
+          height: { value: String(90 * 20), rule: 'auto', ruleAuthored: true },
+          beforeWidth: null, afterWidth: null, cellSpacing: null, exception: null,
+        },
+      } as DocTableRow;
+      expect(firstRowHeight({ ...tableOf([authoredAuto]), colWidths: [220, 140] })).toBeCloseTo(natural, 1);
       expect(height(cell('ABCD', { textDirection: direction, marginTop: 12, marginBottom: 8 }), shortNeighbor))
         .toBeCloseTo(natural + 20, 1);
       const narrowGlyphs = {

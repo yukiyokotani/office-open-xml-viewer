@@ -500,7 +500,12 @@ export function acquireRetainedTable<State>(
       let verticalText: TableLayoutInput['rows'][number]['cells'][number]['verticalText'];
       if (verticalMode) {
         const rowRule = rowFormat?.height?.rule ?? 'auto';
-        const rowHeightPt = rowFormat?.height?.valuePt ?? 0;
+        // ECMA-376 §17.4.80 (trHeight): only exact and atLeast give @val a
+        // meaning; an explicit auto row ignores it and sizes to its content
+        // (as the row track does, see semanticRowFloor in table.ts), so it is
+        // no floor on the rotated line length either. The rule arrives
+        // normalized; see WORD_OMITTED_ROW_HEIGHT_RULE_AT_LEAST.
+        const rowHeightPt = rowRule === 'auto' ? 0 : rowFormat?.height?.valuePt ?? 0;
         const authoredLengthPt = Math.max(0, rowHeightPt - formatMargins.top - formatMargins.bottom);
         const minimumLengthPt = rowRule === 'exact'
           ? authoredLengthPt
