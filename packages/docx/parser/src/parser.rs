@@ -13605,6 +13605,9 @@ fn parse_cell_borders(node: roxmltree::Node) -> CellBorders {
             .map(parse_border_spec),
         inside_h: child_w(node, "insideH").map(parse_border_spec),
         inside_v: child_w(node, "insideV").map(parse_border_spec),
+        // §17.4.73 / §17.4.79: the cell diagonals (CT_TcBorders only).
+        tl2br: child_w(node, "tl2br").map(parse_border_spec),
+        tr2bl: child_w(node, "tr2bl").map(parse_border_spec),
     }
 }
 
@@ -13646,6 +13649,12 @@ fn apply_cond_cell_borders(dst: &mut CellBorders, src: &RawTblBorders) {
     }
     if dst.inside_v.is_none() {
         dst.inside_v = src.inside_v.as_ref().map(edge_to_border_spec);
+    }
+    if dst.tl2br.is_none() {
+        dst.tl2br = src.tl2br.as_ref().map(edge_to_border_spec);
+    }
+    if dst.tr2bl.is_none() {
+        dst.tr2bl = src.tr2bl.as_ref().map(edge_to_border_spec);
     }
 }
 
@@ -26564,6 +26573,57 @@ mod numbering_marker_font_tests {
             </w:styles>"#,
             ns = W_NS
         ))
+    }
+
+    // ECMA-376 §17.4.73 / §17.4.79: cell diagonals are read from direct
+    // tcBorders and from a conditional table style's tcBorders; a direct value
+    // wins per diagonal, exactly like the four edges.
+    #[test]
+    fn cell_diagonal_borders_fold_direct_over_conditional_style() {
+        let t = parse_tbl_styled(
+            r#"<w:tblPr/>
+               <w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid>
+               <w:tr><w:tc><w:tcPr><w:tcBorders>
+                 <w:tl2br w:val="single" w:sz="4" w:space="0" w:color="auto"/>
+               </w:tcBorders></w:tcPr><w:p/></w:tc></w:tr>"#,
+            &StyleMap::default(),
+        );
+        let borders = &t.rows[0].cells[0].borders;
+        let tl2br = borders.tl2br.as_ref().expect("tl2br");
+        assert_eq!(tl2br.style, "single");
+        assert!((tl2br.width - 0.5).abs() < 1e-9);
+        assert!(borders.tr2bl.is_none());
+
+        let styles = StyleMap::parse(&format!(
+            r#"<w:styles xmlns:w="{ns}">
+                <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:rPr/></w:style>
+                <w:style w:type="table" w:styleId="Diag">
+                    <w:tblStylePr w:type="firstRow">
+                        <w:tcPr><w:tcBorders>
+                            <w:tl2br w:val="double" w:sz="8" w:color="FF0000"/>
+                            <w:tr2bl w:val="dotted" w:sz="4" w:color="00FF00"/>
+                        </w:tcBorders></w:tcPr>
+                    </w:tblStylePr>
+                </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        ));
+        let t = parse_tbl_styled(
+            r#"<w:tblPr><w:tblStyle w:val="Diag"/><w:tblLook w:val="0020"/></w:tblPr>
+               <w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>
+               <w:tr><w:tc><w:tcPr><w:tcBorders>
+                 <w:tr2bl w:val="nil"/>
+               </w:tcBorders></w:tcPr><w:p/></w:tc></w:tr>"#,
+            &styles,
+        );
+        let borders = &t.rows[0].cells[0].borders;
+        let tl2br = borders.tl2br.as_ref().expect("conditional tl2br");
+        assert_eq!(tl2br.style, "double");
+        assert_eq!(tl2br.color.as_deref(), Some("ff0000"));
+        assert_eq!(
+            borders.tr2bl.as_ref().map(|b| b.style.as_str()),
+            Some("nil")
+        );
     }
 
     #[test]

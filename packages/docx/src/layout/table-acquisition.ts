@@ -505,6 +505,12 @@ export function acquireRetainedTable<State>(
           },
         } : {}),
         borders: retainedEdges(cell.borders),
+        ...(cell.borders.tl2br || cell.borders.tr2bl ? {
+          diagonalBorders: Object.freeze({
+            tl2br: retainedBorder(cell.borders.tl2br ?? null),
+            tr2bl: retainedBorder(cell.borders.tr2bl ?? null),
+          }),
+        } : {}),
         ...(verticalText ? { verticalText } : {}),
         blocks: cellBlocks(acquired),
       };

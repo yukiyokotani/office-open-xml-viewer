@@ -308,6 +308,8 @@ fn project_table(
                     right: border(3),
                     inside_h: None,
                     inside_v: None,
+                    tl2br: None,
+                    tr2bl: None,
                 },
                 background,
                 v_align: ["top", "center", "bottom"][align as usize].into(),

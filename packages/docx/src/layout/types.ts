@@ -1318,6 +1318,12 @@ export interface TableCellLayoutInput {
   readonly vAlign: 'top' | 'center' | 'bottom';
   readonly background?: FillPaint;
   readonly borders: TableEdgeInputs;
+  /** ECMA-376 §17.4.73 / §17.4.79 cell diagonals (outside edge conflict
+   * resolution). Absent when the cell authors neither. */
+  readonly diagonalBorders?: Readonly<{
+    tl2br: TableBorderInput | null;
+    tr2bl: TableBorderInput | null;
+  }>;
   readonly blocks: readonly TableCellBlockInput[];
   /** ECMA-376 §17.4.72 rotated cell text. Blocks were acquired with
    * `lineLengthPt` as their line width; the cell requires

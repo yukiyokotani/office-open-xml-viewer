@@ -64,6 +64,8 @@ export interface CellBorders {
     right: BorderSpec | null;
     insideH: BorderSpec | null;
     insideV: BorderSpec | null;
+    tl2br?: BorderSpec;
+    tr2bl?: BorderSpec;
 }
 export type CellElement = ({
     type: 'paragraph';

@@ -1611,6 +1611,11 @@ export interface CellBorders {
    *  border" (e.g. banded data rows in Medium List 2 / Medium Shading 2). */
   insideH: BorderSpec | null;
   insideV: BorderSpec | null;
+  /** ECMA-376 §17.4.73 tl2br / §17.4.79 tr2bl: diagonal borders drawn from
+   *  the cell's physical top-left to bottom-right corner and from its
+   *  top-right to bottom-left corner. Absent = no diagonal. */
+  tl2br?: BorderSpec;
+  tr2bl?: BorderSpec;
 }
 
 // ===== Worker message protocol =====
