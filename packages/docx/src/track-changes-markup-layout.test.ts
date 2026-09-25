@@ -148,7 +148,8 @@ describe('markup-view margin change bars (word-track-change-bar)', () => {
     // The revision paragraph occupies one line; the plain paragraph none.
     expect(bars).toHaveLength(1);
     const bar = bars[0]!;
-    // Centered in the 20pt left margin at the fixed 0.75pt convention width.
+    // A margin narrower than Word's measured 36pt bar offset keeps the bar
+    // centered, at the fixed 0.75pt convention width.
     expect(bar.bounds.widthPt).toBeCloseTo(0.75, 6);
     expect(bar.bounds.xPt).toBeCloseTo(20 / 2 - 0.75 / 2, 6);
     // Spans the revision line's vertical extent.
@@ -166,6 +167,20 @@ describe('markup-view margin change bars (word-track-change-bar)', () => {
     })();
     expect(bar.bounds.yPt).toBeCloseTo(revisionLineBounds.yPt, 6);
     expect(bar.bounds.heightPt).toBeCloseTo(revisionLineBounds.heightPt, 6);
+  });
+
+  it('places the bar 36pt left of the text margin, as Word does for a 90pt margin', () => {
+    const model = revisionDoc();
+    const wide = {
+      ...model,
+      section: { ...model.section, marginLeft: 90 },
+    } as DocxDocumentModel;
+    const bars = layoutOf(wide, true).pages[0]!.changeBars ?? [];
+    expect(bars.length).toBeGreaterThan(0);
+    for (const bar of bars) {
+      expect(bar.bounds.xPt).toBeCloseTo(54, 6);
+      expect(bar.bounds.widthPt).toBeCloseTo(0.75, 6);
+    }
   });
 
   it('the default final view attaches no change bars', () => {
