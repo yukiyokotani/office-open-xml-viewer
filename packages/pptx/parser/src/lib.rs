@@ -10280,7 +10280,9 @@ mod tests {
         };
         let segment = r#"<moveTo><pt x="0" y="0"/></moveTo><lnTo><pt x="1" y="1"/></lnTo>"#;
         assert_eq!(
-            parse(&format!(r#"<path w="1" h="1">{segment}</path><path w="1" h="1" fill="norm" stroke="1">{segment}</path>"#)),
+            parse(&format!(
+                r#"<path w="1" h="1">{segment}</path><path w="1" h="1" fill="norm" stroke="1">{segment}</path>"#
+            )),
             None
         );
         assert_eq!(
@@ -10288,12 +10290,25 @@ mod tests {
                 r#"<path w="1" h="1" stroke="0">{segment}</path><path w="1" h="1" fill="none">{segment}</path><path w="1" h="1" fill="darken">{segment}</path>"#
             )),
             Some(vec![
-                PathPaint { fill: None, stroke: false },
-                PathPaint { fill: Some("none".into()), stroke: true },
-                PathPaint { fill: Some("darken".into()), stroke: true },
+                PathPaint {
+                    fill: None,
+                    stroke: false
+                },
+                PathPaint {
+                    fill: Some("none".into()),
+                    stroke: true
+                },
+                PathPaint {
+                    fill: Some("darken".into()),
+                    stroke: true
+                },
             ])
         );
-        let json = serde_json::to_string(&PathPaint { fill: None, stroke: false }).unwrap();
+        let json = serde_json::to_string(&PathPaint {
+            fill: None,
+            stroke: false,
+        })
+        .unwrap();
         assert_eq!(json, r#"{"fill":null,"stroke":false}"#);
     }
 

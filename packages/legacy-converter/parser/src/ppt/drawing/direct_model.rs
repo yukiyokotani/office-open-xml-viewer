@@ -418,8 +418,12 @@ impl Context<'_> {
             (Some(name), adjust)
         };
         self.charge_shape_strings()?;
+        let mut cust_geom_paint = None;
         let (geometry_name, paths, allow_fill, allow_line) = match custom {
-            Some(g) => ("custGeom".to_owned(), Some(g.paths), g.fill, g.stroke),
+            Some(g) => {
+                cust_geom_paint = g.paint;
+                ("custGeom".to_owned(), Some(g.paths), g.fill, g.stroke)
+            }
             None => (
                 preset.unwrap_or("rect").to_owned(),
                 None,
@@ -492,7 +496,7 @@ impl Context<'_> {
             text_body: text,
             default_text_color: None,
             cust_geom: paths,
-            cust_geom_paint: None,
+            cust_geom_paint,
             adj,
             adj2,
             adj3,
