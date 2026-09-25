@@ -59,6 +59,7 @@ pub(super) const CHARACTER: u32 = !PARAGRAPH;
 
 /// Master levels with the fields whose inheritance order is ambiguous.
 #[derive(Clone)]
+#[cfg(any(test, feature = "direct-ppt"))]
 pub(in crate::ppt) struct DirectLevels {
     pub levels: Vec<Level>,
     pub ambiguous: [u32; 5],
@@ -113,6 +114,7 @@ impl Character {
 }
 
 /// Fields whose effective values differ between two resolved levels.
+#[cfg(any(test, feature = "direct-ppt"))]
 fn differing(a: &Level, b: &Level) -> u32 {
     let (p, q) = (&a.paragraph, &b.paragraph);
     let (x, y) = (&a.character, &b.character);
@@ -152,6 +154,7 @@ fn differing(a: &Level, b: &Level) -> u32 {
     .fold(0, |mask, bit| mask | bit)
 }
 
+#[cfg(any(test, feature = "direct-ppt"))]
 fn fold<'a>(level: usize, sources: impl Iterator<Item = &'a Level>) -> Level {
     sources.fold(Level::empty(level as u16), |acc, source| {
         acc.inherit(Some(source))
@@ -160,6 +163,7 @@ fn fold<'a>(level: usize, sources: impl Iterator<Item = &'a Level>) -> Level {
 
 /// Resolve five levels from an atom's own levels, an optional base atom
 /// (body or title for the derived placeholder types) and the document atom.
+#[cfg(any(test, feature = "direct-ppt"))]
 pub(super) fn resolve(own: &[Level], base: &[Level], document: &[Level]) -> DirectLevels {
     let mut levels = Vec::with_capacity(5);
     let mut ambiguous = [0; 5];
@@ -194,6 +198,7 @@ pub(super) fn resolve(own: &[Level], base: &[Level], document: &[Level]) -> Dire
 
 /// The atom whose levels a derived placeholder type inherits before the
 /// document atom: body for center/half/quarter body, title for center title.
+#[cfg(any(test, feature = "direct-ppt"))]
 pub(super) fn base_type(kind: u16) -> Option<u16> {
     match kind {
         5 | 7 | 8 => Some(1),

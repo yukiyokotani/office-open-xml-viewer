@@ -1,13 +1,16 @@
 //! Passive image BLIPs: MS-PPT 2.1.3/2.4.3; MS-ODRAW 2.2.20-32.
 use super::*;
+use crate::officeart::raster::Image;
+#[cfg(any(test, feature = "direct-ppt"))]
+use crate::officeart::raster::StoreImageSpan;
 #[cfg(test)]
 use crate::officeart::raster::{jpeg_size, png_size};
-use crate::officeart::raster::{Image, StoreImageSpan};
 use std::collections::{BTreeMap, BTreeSet};
 
 // Resource policy: do not pass dimension bombs to the ordinary image decoder.
 const MAX_MEDIA_BYTES: usize = 128 * 1024 * 1024;
 
+#[cfg(test)]
 pub(super) fn catalog<'a>(
     children: &[Record<'a>],
     budget: &mut usize,
@@ -124,6 +127,7 @@ pub(super) struct OleCatalog {
 }
 
 impl OleCatalog {
+    #[cfg(any(test, feature = "direct-ppt"))]
     pub fn get(&self, id: u32) -> Result<OleObject, String> {
         if let Some(error) = &self.error {
             return Err(error.clone());
@@ -291,6 +295,11 @@ impl<'a> Store<'a> {
 /// Owned media catalog/cache for direct sessions. The session owns the backing
 /// streams separately and supplies them when resolving or emitting a part;
 /// cached spans record which stream must be used.
+/// A retained image: store index, extension and bytes.
+#[cfg(test)]
+type RetainedImage<'a> = (u32, &'static str, &'a [u8]);
+
+#[cfg(any(test, feature = "direct-ppt"))]
 pub(super) struct SpanStore {
     entries: Vec<RecordSpan>,
     images: BTreeMap<u32, Option<StoreImageSpan>>,
@@ -298,6 +307,7 @@ pub(super) struct SpanStore {
     remaining: usize,
 }
 
+#[cfg(any(test, feature = "direct-ppt"))]
 impl SpanStore {
     pub fn new(entries: Vec<RecordSpan>) -> Self {
         Self {
@@ -353,6 +363,7 @@ impl SpanStore {
         Ok(true)
     }
 
+    #[cfg(test)]
     pub fn used_images(&self) -> impl Iterator<Item = (u32, &StoreImageSpan)> {
         self.used.iter().map(|index| {
             (
@@ -385,7 +396,7 @@ impl SpanStore {
         &'a self,
         primary: &'a [u8],
         pictures: Option<&'a [u8]>,
-    ) -> Result<Vec<(u32, &'static str, &'a [u8])>, String> {
+    ) -> Result<Vec<RetainedImage<'a>>, String> {
         self.images
             .iter()
             .filter_map(|(id, image)| {

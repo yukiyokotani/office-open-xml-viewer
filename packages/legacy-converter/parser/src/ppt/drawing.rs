@@ -132,8 +132,11 @@ impl Rect {
     }
 }
 
+#[cfg(any(test, feature = "direct-ppt"))]
 mod direct_geometry;
+#[cfg(any(test, feature = "direct-ppt"))]
 pub(super) mod direct_model;
+#[cfg(any(test, feature = "direct-ppt"))]
 mod direct_transform;
 #[cfg(test)]
 mod gradient_integration_tests;
@@ -330,7 +333,7 @@ impl<R: Clone, C: Default + Clone, S> ShapeStorage<R, C, S> {
             if view.kind == 0xf004 && view.version == 15 {
                 Ok(())
             } else {
-                return Err(unsupported("invalid PowerPoint shape container"));
+                Err(unsupported("invalid PowerPoint shape container"))
             }
         })?;
         let mut flags = None;
@@ -484,9 +487,11 @@ impl<R, C, S> ShapeStorage<R, C, S> {
     /// (fOleShape, MS-ODRAW 2.2.40) is not omitted: it is a picture frame whose
     /// pib names the BLIP to display (MS-ODRAW 2.3.23.5), and the direct model
     /// either shows that stored presentation picture or rejects the shape.
+    #[cfg(any(test, feature = "direct-ppt"))]
     fn direct_omitted(&self) -> bool {
         self.flags & (8 | 1024) != 0 || self.props.script
     }
+    #[cfg(any(test, feature = "direct-ppt"))]
     fn is_ole(&self) -> bool {
         self.flags & 16 != 0
     }
@@ -538,9 +543,13 @@ struct PropertiesStorage<T> {
     picture_bilevel: Option<bool>,
     /// MS-PPT 2.7.7 ExObjRefAtom from the shape's client data: the external
     /// object behind an OLE shape.
+    // Read only by the direct model.
+    #[cfg_attr(not(any(test, feature = "direct-ppt")), allow(dead_code))]
     ole_ref: Option<u32>,
     /// MS-PPT 2.7.9 RecolorInfoAtom.fShouldRecolor from the shape's client
     /// data: metafile color remapping of the displayed picture.
+    // Read only by the direct model.
+    #[cfg_attr(not(any(test, feature = "direct-ppt")), allow(dead_code))]
     recolor: bool,
     crop: [i64; 4],
     paint: paint::Paint,
@@ -818,6 +827,7 @@ impl SpannedBackground {
     }
 }
 
+#[cfg(test)]
 pub(super) fn background<'a>(
     slide: &'a [u8],
     budget: &mut usize,
@@ -916,6 +926,7 @@ pub(super) fn master_shapes(
     budget: &mut usize,
     text_budget: &mut usize,
 ) -> Result<(), String> {
+    #[allow(clippy::too_many_arguments)]
     fn visit(
         backing: &[u8],
         record: RecordSpan,
@@ -1331,12 +1342,14 @@ impl Writer<'_, '_> {
                                 .transpose()?
                                 .unwrap_or(false);
                             Ok::<_, String>(referenced.then(|| {
-                                let alpha = (opacity != 65536).then(|| {
+                                let alpha = if opacity != 65536 {
                                     format!(
                                         "<a:alphaModFix amt=\"{}\"/>",
                                         (u64::from(opacity) * 100000 + 32768) / 65536
                                     )
-                                }).unwrap_or_default();
+                                } else {
+                                    String::new()
+                                };
                                 format!("<a:blipFill rotWithShape=\"{}\"><a:blip r:embed=\"rImg{index}\">{alpha}</a:blip><a:stretch><a:fillRect/></a:stretch></a:blipFill>", u8::from(rotate))
                             }))
                         })

@@ -357,6 +357,7 @@ impl Decoded {
     /// Like `uniform_paint`, but with each path's authored fill flag: a host
     /// whose application fills open paths (DrawingML closes them implicitly
     /// for fill) uses this instead of the open-path veto.
+    #[cfg(feature = "direct-doc")]
     pub fn uniform_authored_paint(&self) -> Option<(bool, bool)> {
         let first = self.paths.first()?;
         self.paths

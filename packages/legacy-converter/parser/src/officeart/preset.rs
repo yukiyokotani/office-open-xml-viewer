@@ -15,9 +15,11 @@
 //! - "W"/"H" distances are fractions of the shape width/height rescaled to
 //!   the DrawingML short side, measured on the DrawingML extent (after the
 //!   rotated-bounds swap; a 77-degree rotated brace only matches that way).
+//!
 //! Any adjusted shape type without such evidence is rejected, never guessed.
 
 /// DrawingML preset for a legacy shape type, as PowerPoint converts it.
+#[cfg(any(test, feature = "direct-ppt", feature = "direct-doc"))]
 pub(crate) fn name(kind: u16) -> Option<&'static str> {
     Some(match kind {
         // Not-primitive without vertices, picture frames and text boxes are
@@ -134,11 +136,13 @@ pub(crate) fn name(kind: u16) -> Option<&'static str> {
     })
 }
 
+#[cfg(any(test, feature = "direct-ppt"))]
 const SPACE: f64 = 21_600.0;
 
 /// One DrawingML guide computed from one legacy adjust value (index 0 is
 /// adjustValue, 0x147).
 #[derive(Clone, Copy)]
+#[cfg(any(test, feature = "direct-ppt"))]
 enum Rule {
     /// a / 21600
     Scale(usize),
@@ -166,6 +170,7 @@ enum Rule {
 /// Guides per DrawingML slot (adj/adj1 .. adj8) for the evidenced shapes.
 /// `None` in a slot keeps the preset default; the legacy values a shape may
 /// carry are exactly those named by its rules.
+#[cfg(any(test, feature = "direct-ppt"))]
 fn rules(kind: u16) -> Option<&'static [Option<Rule>]> {
     use Rule::*;
     Some(match kind {
@@ -222,6 +227,7 @@ fn rules(kind: u16) -> Option<&'static [Option<Rule>]> {
     })
 }
 
+#[cfg(any(test, feature = "direct-ppt"))]
 fn source(rule: Rule) -> usize {
     match rule {
         Rule::Scale(i)
@@ -240,6 +246,7 @@ fn source(rule: Rule) -> usize {
 /// DrawingML guide values (100000 = 1) for `kind` from the legacy adjust
 /// values and the DrawingML extent. `Ok(None)` means no adjust value is
 /// authored, so the preset defaults apply.
+#[cfg(any(test, feature = "direct-ppt"))]
 pub(crate) fn adjustments(
     kind: u16,
     legacy: &[Option<i32>; 10],

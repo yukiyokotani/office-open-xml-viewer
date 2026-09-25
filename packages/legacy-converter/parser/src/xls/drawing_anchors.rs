@@ -293,10 +293,11 @@ fn assemble<'a>(
             // one) is never drawing data.
             continue;
         }
-        if owner == Owner::Drawing && matches!(record.kind, 0x005d | 0x01b6) {
-            if clients.len() >= MAX_OBJECTS || clients.insert(length, record).is_some() {
-                return Err(unsupported("ambiguous or excessive BIFF drawing clients"));
-            }
+        if owner == Owner::Drawing
+            && matches!(record.kind, 0x005d | 0x01b6)
+            && (clients.len() >= MAX_OBJECTS || clients.insert(length, record).is_some())
+        {
+            return Err(unsupported("ambiguous or excessive BIFF drawing clients"));
         }
         last_object = (record.kind == 0x005d).then_some(length);
         // Excel continues the sheet's OfficeArt stream in Continue records
