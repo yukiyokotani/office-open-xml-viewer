@@ -507,7 +507,7 @@ fn typed_template_rejects_unconsumed_offsets_before_callbacks() {
             .numbering_template(0, |_| panic!("invalid offsets reached lookup"))
             .is_err());
     }
-    let odd = typed_level(&[b'a']);
+    let odd = typed_level(b"a");
     assert!(odd
         .numbering_template(0, |_| panic!("odd UTF-16 reached lookup"))
         .is_err());
@@ -517,7 +517,7 @@ fn typed_template_rejects_unconsumed_offsets_before_callbacks() {
 
 #[test]
 fn typed_template_literal_utf8_budget_is_not_a_character_count() {
-    let exact = vec![b'a', 0].repeat(ooxml_common::numbering::MAX_MARKER_BYTES);
+    let exact = [b'a', 0].repeat(ooxml_common::numbering::MAX_MARKER_BYTES);
     let value = typed_level(&exact);
     assert_eq!(
         value
@@ -528,7 +528,7 @@ fn typed_template_literal_utf8_budget_is_not_a_character_count() {
             .len(),
         ooxml_common::numbering::MAX_MARKER_BYTES
     );
-    let oversized_utf8 = vec![0x42, 0x30].repeat(ooxml_common::numbering::MAX_MARKER_BYTES / 3 + 1);
+    let oversized_utf8 = [0x42, 0x30].repeat(ooxml_common::numbering::MAX_MARKER_BYTES / 3 + 1);
     assert!(typed_level(&oversized_utf8)
         .numbering_template(0, |_| None)
         .is_err());

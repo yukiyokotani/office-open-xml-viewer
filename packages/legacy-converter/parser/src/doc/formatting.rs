@@ -202,6 +202,7 @@ impl<'a> Formatting<'a> {
         self.effective_nfib > 0x00d9 && self.interpret_table_styles
     }
 
+    #[cfg(any(test, feature = "direct-doc"))]
     pub(in crate::doc) fn resolve_table_style_id(&self, selected: Option<usize>) -> Option<usize> {
         let selected = selected?;
         // [MS-DOC] 2.6.3 sprmTIstd: an empty, missing, or wrong-kind style is
@@ -315,10 +316,10 @@ impl<'a> Formatting<'a> {
                 sprm::TopLevelFilter::All
             };
             Some((*bytes, filter))
-        } else if let Some(bytes) = simple_piece.as_ref() {
-            Some((&bytes[..], sprm::TopLevelFilter::All))
         } else {
-            None
+            simple_piece
+                .as_ref()
+                .map(|bytes| (&bytes[..], sprm::TopLevelFilter::All))
         };
         let direct_properties = self.apply_paragraph_sources(&mut props, direct, appended)?;
         if direct_properties.alignment.is_some() {
@@ -747,6 +748,7 @@ impl<'a> Formatting<'a> {
         Ok(())
     }
 
+    #[cfg(feature = "direct-doc")]
     fn paragraph_base(&mut self, id: usize) -> Result<Properties, String> {
         self.paragraph_base_with_table(id, None)
     }
@@ -1014,8 +1016,9 @@ fn read_styles(bytes: &[u8]) -> Result<(Properties, Vec<Option<Style<'_>>>), Str
                     .get(2..)
                     .ok_or_else(|| unsupported("missing Word style paragraph index"))?;
             }
-            if kind == 3 {
-                table_sets[i] = Some(upx);
+            // A table style has exactly three property sets (checked above).
+            if let Some(set) = table_sets.get_mut(i).filter(|_| kind == 3) {
+                *set = Some(upx);
             }
             p += n + n % 2;
         }

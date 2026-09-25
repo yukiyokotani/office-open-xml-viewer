@@ -236,10 +236,23 @@ pub(crate) struct Decoded {
     paths: Vec<Path>,
 }
 
+/// Decoded-path accessors for the direct-model projections.
+#[cfg(any(
+    test,
+    feature = "direct-ppt",
+    feature = "direct-doc",
+    feature = "direct-xls"
+))]
 pub(crate) struct DecodedPath<'a> {
     path: &'a Path,
 }
 
+#[cfg(any(
+    test,
+    feature = "direct-ppt",
+    feature = "direct-doc",
+    feature = "direct-xls"
+))]
 impl Decoded {
     pub(crate) fn width(&self) -> i64 {
         self.width
@@ -254,17 +267,26 @@ impl Decoded {
     }
 }
 
+#[cfg(any(
+    test,
+    feature = "direct-ppt",
+    feature = "direct-doc",
+    feature = "direct-xls"
+))]
 impl DecodedPath<'_> {
+    #[cfg(any(test, feature = "direct-ppt", feature = "direct-xls"))]
     pub(crate) fn fill(&self) -> bool {
         self.path.fill
     }
 
+    #[cfg(any(test, feature = "direct-ppt", feature = "direct-xls"))]
     pub(crate) fn stroke(&self) -> bool {
         self.path.stroke
     }
 
     /// The fill flag as authored (segment escapes only), before the
     /// PowerPoint open-path veto applied by `fill`.
+    #[cfg(any(test, feature = "direct-xls"))]
     pub(crate) fn authored_fill(&self) -> bool {
         self.path.authored_fill
     }

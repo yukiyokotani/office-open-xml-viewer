@@ -227,20 +227,22 @@ mod tests {
 
     #[test]
     fn sink_error_stops_before_later_paragraph_emission() {
-        let mut para = DocParagraph::default();
-        para.runs = vec![
-            DocRun::Text(Box::new(crate::TextRun {
-                text: "a".into(),
-                ..Default::default()
-            })),
-            DocRun::Break {
-                break_type: BreakType::Page,
-            },
-            DocRun::Text(Box::new(crate::TextRun {
-                text: "b".into(),
-                ..Default::default()
-            })),
-        ];
+        let para = DocParagraph {
+            runs: vec![
+                DocRun::Text(Box::new(crate::TextRun {
+                    text: "a".into(),
+                    ..Default::default()
+                })),
+                DocRun::Break {
+                    break_type: BreakType::Page,
+                },
+                DocRun::Text(Box::new(crate::TextRun {
+                    text: "b".into(),
+                    ..Default::default()
+                })),
+            ],
+            ..Default::default()
+        };
         let mut calls = 0;
         let result = visit_para_on_page_breaks(para, |_| {
             calls += 1;

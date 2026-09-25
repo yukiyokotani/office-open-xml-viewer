@@ -151,6 +151,7 @@ enum LanguageResolution {
     Unsupported(u16),
 }
 
+#[cfg(feature = "direct-doc")]
 #[derive(Clone, Copy)]
 pub(super) struct ResolvedLanguages {
     pub(super) default: Option<&'static str>,
@@ -808,6 +809,7 @@ impl Properties {
         Ok(true)
     }
 
+    #[cfg(test)]
     pub fn xml(&self, fonts: &[String]) -> Result<String, String> {
         self.xml_with_language_policy(fonts, false)
             .map(|(xml, _)| xml)
@@ -911,6 +913,7 @@ impl Properties {
         Ok((xml, omitted_language))
     }
 
+    #[cfg(feature = "direct-doc")]
     pub(super) fn resolved_languages(&self) -> Result<ResolvedLanguages, String> {
         Ok(ResolvedLanguages {
             default: self.resolve_language_axis(
@@ -931,6 +934,7 @@ impl Properties {
         })
     }
 
+    #[cfg(feature = "direct-doc")]
     fn resolve_language_axis(
         &self,
         lid: Option<u16>,
