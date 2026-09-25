@@ -3620,7 +3620,13 @@ export function renderViewport(
   const hw = chartSheet ? 0 : sp(HEADER_W);  // scaled header column width
   const hh = chartSheet ? 0 : sp(HEADER_H);  // scaled header row height
 
-  const { row: startRow, col: startCol, rows: numRows, cols: numCols } = viewport;
+  // Viewport rows and columns are 1-based. The grid bands already clamp a
+  // start below 1 to the first row/column; clamp it once here so anchored
+  // drawings (positioned from the same start) stay registered with the grid
+  // instead of shifting by one default column width / row height.
+  const { rows: numRows, cols: numCols } = viewport;
+  const startRow = Math.max(1, Math.trunc(viewport.row) || 1);
+  const startCol = Math.max(1, Math.trunc(viewport.col) || 1);
   const scrollOffsetX = (opts.scrollOffsetX ?? 0) * cs;
   const scrollOffsetY = (opts.scrollOffsetY ?? 0) * cs;
   const { col: colAxis, row: rowAxis } = geometry.axesAtScale(cs);

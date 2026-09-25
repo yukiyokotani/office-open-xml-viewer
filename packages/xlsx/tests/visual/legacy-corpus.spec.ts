@@ -99,7 +99,7 @@ test.describe('legacy XLS corpus survey', () => {
               await workbook.renderViewport(
                 canvas,
                 index,
-                { row: 0, col: 0, rows: 45, cols: 14 },
+                { row: 1, col: 1, rows: 45, cols: 14 },
                 { width: requested, height: 850, dpr: 1 },
               );
               pages.push(canvas.toDataURL('image/png'));
