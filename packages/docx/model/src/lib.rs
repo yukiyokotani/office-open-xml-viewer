@@ -3390,4 +3390,12 @@ pub struct CellBorders {
     /// spec); a `Some` with style "nil"/"none" = an explicit "no interior border".
     pub inside_h: Option<BorderSpec>,
     pub inside_v: Option<BorderSpec>,
+    /// ECMA-376 §17.4.73 tl2br / §17.4.79 tr2bl: the diagonal borders drawn
+    /// inside the cell from its physical top-left to bottom-right corner and
+    /// from its top-right to bottom-left corner. They take no part in the
+    /// §17.4.66 edge conflict resolution. Absent = no diagonal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tl2br: Option<BorderSpec>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tr2bl: Option<BorderSpec>,
 }

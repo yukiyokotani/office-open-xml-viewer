@@ -297,6 +297,10 @@ pub struct RawTblBorders {
     pub right: Option<EdgeBorder>,
     pub inside_h: Option<EdgeBorder>,
     pub inside_v: Option<EdgeBorder>,
+    /// §17.4.73 / §17.4.79 cell diagonals, meaningful only in a style's
+    /// `w:tcPr/w:tcBorders` (CT_TblBorders has no diagonal).
+    pub tl2br: Option<EdgeBorder>,
+    pub tr2bl: Option<EdgeBorder>,
 }
 
 /// Conditional formatting block (`w:tblStylePr`) — the subset we resolve.
@@ -2326,6 +2330,8 @@ fn parse_raw_tbl_borders(node: roxmltree::Node) -> RawTblBorders {
             "right" | "end" => b.right = Some(e),
             "insideH" => b.inside_h = Some(e),
             "insideV" => b.inside_v = Some(e),
+            "tl2br" => b.tl2br = Some(e),
+            "tr2bl" => b.tr2bl = Some(e),
             _ => {}
         }
     }
@@ -2350,6 +2356,12 @@ fn merge_raw_borders(dst: &mut RawTblBorders, src: &RawTblBorders) {
     }
     if src.inside_v.is_some() {
         dst.inside_v = src.inside_v.clone();
+    }
+    if src.tl2br.is_some() {
+        dst.tl2br = src.tl2br.clone();
+    }
+    if src.tr2bl.is_some() {
+        dst.tr2bl = src.tr2bl.clone();
     }
 }
 

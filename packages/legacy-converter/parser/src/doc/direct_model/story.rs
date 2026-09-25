@@ -1029,6 +1029,7 @@ mod tests {
         borders: Vec<[Option<(String, f64)>; 4]>,
         border_styles: Vec<[Option<String>; 4]>,
         text_directions: Vec<Option<String>>,
+        diagonals: Vec<[Option<(String, f64, Option<String>)>; 2]>,
         unsupported_table: bool,
         unsupported_character: bool,
         unsupported_paragraph: bool,
@@ -1675,6 +1676,7 @@ mod tests {
             let mut borders = Vec::new();
             let mut border_styles = Vec::new();
             let mut text_directions = Vec::new();
+            let mut diagonals = Vec::new();
             for element in &body {
                 let BodyElement::Table(table) = element else {
                     continue;
@@ -1684,6 +1686,10 @@ mod tests {
                     for cell in &row.cells {
                         col_spans.push(cell.col_span);
                         text_directions.push(cell.text_direction.clone());
+                        diagonals.push([&cell.borders.tl2br, &cell.borders.tr2bl].map(|b| {
+                            b.as_ref()
+                                .map(|b| (b.style.clone(), b.width, b.color.clone()))
+                        }));
                         backgrounds.push(cell.background.clone());
                         margins.push([
                             cell.margin_top.unwrap(),
@@ -1752,6 +1758,7 @@ mod tests {
                 borders,
                 border_styles,
                 text_directions,
+                diagonals,
                 unsupported_table: facts.formatting.unsupported_table_properties,
                 unsupported_character: facts.formatting.unsupported_character_properties,
                 unsupported_paragraph: facts.formatting.unsupported_paragraph_properties,
@@ -3479,10 +3486,57 @@ mod tests {
             [std::array::from_fn(|_| Some("nil".to_string()))]
         );
 
-        // A drawn diagonal has no cell-model representation.
-        let diagonal = cell_border_sides(0x10, border_bytes([0, 0, 0], 8));
-        let projected = try_default_styled_table(&[], &diagonal);
-        assert!(projected.map_or(true, |table| table.unsupported_table));
+        // Nil diagonals are the default absence of a diagonal.
+        assert_eq!(projected.diagonals, [[None, None]]);
+    }
+
+    #[test]
+    fn native_story_projects_cell_diagonals_as_ecma_tl2br_and_tr2bl() {
+        // [MS-DOC] 2.9.305: 0x10 top-left to bottom-right, 0x20 top-right to
+        // bottom-left (ECMA-376 §17.4.73 / §17.4.79).
+        let after = [
+            cell_border_sides(0x10, border_bytes([0xff, 0, 0], 8)),
+            cell_border_sides(0x20, border_bytes([0, 0, 0xff], 4)),
+        ]
+        .concat();
+        let projected = try_default_styled_table(&[], &after).unwrap();
+        assert!(!projected.unsupported_table);
+        assert_eq!(
+            projected.diagonals,
+            [[
+                Some(("single".to_string(), 1.0, Some("ff0000".to_string()))),
+                Some(("single".to_string(), 0.5, Some("0000ff".to_string()))),
+            ]]
+        );
+    }
+
+    #[test]
+    fn native_story_reads_word_written_tset_brc80_diagonal_bit() {
+        // sample-19.doc row 35: sprmTSetBrc80 bit 0x10 (outside 2.9.304's
+        // edge bits) followed by an equal sprmTSetBrc 0x10; the DOCX pair has
+        // `w:tl2br w:val="single" w:sz="4" w:color="auto"`.
+        let brc80 = sprm(0xd620, &[7, 0, 1, 0x10, 4, 1, 0, 0]);
+        let modern = cell_border_sides(0x10, [0, 0, 0, 0xff, 4, 1, 0, 0]);
+        let projected = try_default_styled_table(&[], &[brc80.clone(), modern].concat()).unwrap();
+        assert!(!projected.unsupported_table);
+        assert_eq!(
+            projected.diagonals,
+            [[Some(("single".to_string(), 0.5, None)), None]]
+        );
+        // Alone, the 80 diagonal is an old direct value, which stays gated
+        // under a table style like any other sprmTSetBrc80 value.
+        assert!(
+            try_default_styled_table(&[], &brc80)
+                .unwrap()
+                .unsupported_table
+        );
+        // Bit 0x20 of the 80 operand has no evidence.
+        let tr2bl80 = sprm(0xd620, &[7, 0, 1, 0x20, 4, 1, 0, 0]);
+        assert!(
+            try_default_styled_table(&[], &tr2bl80)
+                .unwrap()
+                .unsupported_table
+        );
     }
 
     #[test]

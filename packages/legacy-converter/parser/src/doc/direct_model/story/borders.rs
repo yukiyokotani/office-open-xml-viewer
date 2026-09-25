@@ -319,14 +319,10 @@ fn resolve_row(
     // [MS-DOC] 2.9.20/2.9.157: a direct NilBrc states that the cells have no
     // border on that side. It is an ordinary direct value above the table
     // style (projected as an explicit "nil" edge), and a Nil diagonal is the
-    // same as the default absence of a diagonal. Only drawn diagonals, which
-    // the cell model cannot carry, stay gated.
-    let has_diagonal_direct = row.cells.iter().any(|cell| {
-        cell.prepared_borders[4..]
-            .iter()
-            .flatten()
-            .any(|border| !border.is_nil())
-    });
+    // same as the default absence of a diagonal. Cell diagonals (sprmTSetBrc
+    // 0x10/0x20) are direct cell values that no table style supplies, so
+    // they project as ECMA-376 tl2br/tr2bl over the style like any other
+    // direct cell value.
     let has_tc80 = row
         .cells
         .iter()
@@ -339,7 +335,6 @@ fn resolve_row(
     if border_style_interaction
         && (has_tc80
             || has_old_direct
-            || has_diagonal_direct
             || (has_style && row.bidi)
             || ((has_style || has_direct) && row.border_tistd_count > 1))
     {
