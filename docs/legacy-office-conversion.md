@@ -214,6 +214,17 @@ features still reject or remain omitted as documented by diagnostics. Its
 dedicated asset is `legacy_xls_direct_bg.wasm`, and the factory accepts the same
 kind of optional absolute `wasmUrl` override as the PPT factory.
 
+Beyond the byte converter's subset, the direct source projects conditional
+formatting (classic CF with its CFEx extensions, CF12 comparison, formula,
+color-scale, data-bar and icon-set rules, their differential formats and
+decompiled formulas), Excel tables with custom table styles, frozen panes, tab
+colors, XFExt gradient fills, hyperlinks, worksheet AutoFilter ranges, data
+validations and defined names. Variants the shared model cannot show (for
+example inactive rules, suppressed list drop-downs, displayed phonetic guides,
+or table-style elements outside the model) reject the workbook instead of being
+dropped. Print areas and titles travel as defined names; page setup, headers
+and footers affect printing only and are not part of the model.
+
 Existing converter options and `convert()` behavior are unchanged, so no
 migration is required unless an application chooses a native source.
 Each `doc`, `ppt` or `xls` configuration selects

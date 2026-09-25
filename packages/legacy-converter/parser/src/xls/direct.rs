@@ -10,6 +10,8 @@ pub(crate) struct DirectSession {
     pending_sheets: Option<Vec<(String, SheetData)>>,
     sheets: Vec<SheetSlot>,
     sheet_meta: Vec<(String, SheetVisibility)>,
+    /// Resolved SheetExt tab colors, by sheet.
+    tab_colors: Vec<Option<String>>,
     styles: Option<styles::ResolvedStyleSheet>,
     shared_strings: Vec<rich::Text>,
     date1904: bool,
@@ -76,6 +78,11 @@ impl DirectSession {
                 .iter()
                 .map(|(name, sheet)| (name.clone(), sheet.visibility)),
         );
+        let tab_colors = prepared
+            .sheets
+            .iter()
+            .map(|(_, sheet)| sheet.tab_color.clone())
+            .collect();
         let default_font = prepared
             .styles
             .default_font()
@@ -84,6 +91,7 @@ impl DirectSession {
             pending_sheets: Some(std::mem::take(&mut prepared.sheets)),
             sheets: Vec::new(),
             sheet_meta,
+            tab_colors,
             styles: Some(prepared.styles),
             shared_strings: prepared.shared_strings,
             date1904: prepared.date1904,
@@ -192,11 +200,16 @@ impl DirectSession {
             charge(&mut self.model_budget, name.len())?;
             let digits = (index + 1).ilog10() as usize + 1;
             charge(&mut self.model_budget, "rId".len() + digits)?;
+            let tab_color = self.tab_colors.get(index).cloned().flatten();
+            charge(
+                &mut self.model_budget,
+                tab_color.as_ref().map_or(0, String::len),
+            )?;
             sheets.push(xlsx_model::SheetMeta {
                 name: name.clone(),
                 sheet_id: u32::try_from(index + 1).map_err(|_| model_error())?,
                 r_id: format!("rId{}", index + 1),
-                tab_color: None,
+                tab_color,
                 visibility: visibility.model(),
             });
         }
@@ -431,6 +444,77 @@ fn project_sheet(
     }
     charge(budget, conditional_bytes(&sheet.conditional_formats))?;
     worksheet.conditional_formats = sheet.conditional_formats;
+    charge(
+        budget,
+        sheet
+            .tables
+            .iter()
+            .map(|table| {
+                std::mem::size_of::<xlsx_model::TableInfo>()
+                    + table.style_name.len()
+                    + table.accent_color.len()
+            })
+            .sum(),
+    )?;
+    worksheet.tables = sheet.tables;
+    charge(
+        budget,
+        sheet
+            .hyperlinks
+            .iter()
+            .map(|link| {
+                std::mem::size_of::<xlsx_model::Hyperlink>()
+                    + [&link.url, &link.location, &link.display]
+                        .iter()
+                        .map(|text| text.as_ref().map_or(0, String::len))
+                        .sum::<usize>()
+            })
+            .sum(),
+    )?;
+    worksheet.hyperlinks = sheet.hyperlinks;
+    worksheet.auto_filter = sheet.auto_filter;
+    charge(
+        budget,
+        sheet
+            .data_validations
+            .iter()
+            .map(|dv| {
+                std::mem::size_of::<xlsx_model::DataValidation>()
+                    + dv.sqref.len()
+                    + [
+                        &dv.validation_type,
+                        &dv.operator,
+                        &dv.formula1,
+                        &dv.formula2,
+                        &dv.prompt_title,
+                        &dv.prompt,
+                        &dv.error_title,
+                        &dv.error_message,
+                    ]
+                    .iter()
+                    .map(|text| text.as_ref().map_or(0, String::len))
+                    .sum::<usize>()
+            })
+            .sum(),
+    )?;
+    worksheet.data_validations = sheet.data_validations;
+    charge(
+        budget,
+        sheet
+            .defined_names
+            .iter()
+            .map(|name| {
+                std::mem::size_of::<xlsx_model::DefinedName>()
+                    + name.name.len()
+                    + name.formula.len()
+            })
+            .sum(),
+    )?;
+    worksheet.defined_names = sheet.defined_names;
+    if let Some(color) = sheet.tab_color {
+        charge(budget, color.len())?;
+        worksheet.tab_color = Some(color);
+    }
     sheet.geometry.project(&mut worksheet, mdw, budget)?;
     sheet.views.project(&mut worksheet);
     Ok(worksheet)

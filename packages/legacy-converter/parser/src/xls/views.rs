@@ -1,12 +1,15 @@
 //! [MS-XLS] 2.4.345 Window1 / 2.4.346 Window2 -> ECMA-376
 //! 18.3.1.87 sheetView and 18.2.30 workbookView.
-//! Only display booleans are projected: no formula-token reconstruction,
-//! pane/selection, zoom, scroll-position, or window-geometry inference.
+//! Only display booleans are projected into XML: no formula-token
+//! reconstruction, pane/selection, zoom, scroll-position, or window-geometry
+//! inference. The direct model also takes frozen panes (2.4.189 Pane), as
+//! the XLSX parser reads `pane state="frozen|frozenSplit"`.
 
 use super::{u16_at, unsupported, Record};
 
 pub(super) const WINDOW1: u16 = 0x003d;
 const WINDOW2: u16 = 0x023e;
+const PANE: u16 = 0x0041;
 // Resource policy, not a BIFF format limit. Bound retained views and XML fanout.
 const MAX_WINDOWS: usize = 1024;
 
@@ -28,7 +31,7 @@ pub(super) fn read_window(data: &[u8], count: &mut usize) -> Result<(), String> 
 }
 
 #[derive(Default)]
-pub(super) struct SheetViews(Vec<u16>);
+pub(super) struct SheetViews(Vec<u16>, Vec<Option<(u16, u16)>>);
 
 impl SheetViews {
     /// Apply the display flags selected by the existing XLSX parser contract.
@@ -43,12 +46,39 @@ impl SheetViews {
         worksheet.show_gridlines = gridlines;
         worksheet.show_zeros = zeros;
         worksheet.right_to_left = right_to_left;
+        // Window2 fFrozen (bit 3): the Pane split counts cells. An unfrozen
+        // split (twips) is a window arrangement the XLSX model does not
+        // carry, as the XLSX parser reads only frozen panes.
+        if flags & 0x0008 != 0 {
+            if let Some(Some((x, y))) = self.1.last() {
+                worksheet.freeze_cols = u32::from(*x);
+                worksheet.freeze_rows = u32::from(*y);
+            }
+        }
     }
 
     pub(super) fn displays_formulas(&self) -> bool {
         self.0.iter().any(|flags| flags & 1 != 0)
     }
     pub(super) fn read(&mut self, record: &Record<'_>) -> Result<(), String> {
+        if record.kind == PANE {
+            // WINDOW = Window2 [PLV] [Scl] [Pane] *Selection (2.1.7.20.5).
+            let pane = self
+                .1
+                .last_mut()
+                .filter(|pane| pane.is_none())
+                .ok_or_else(|| unsupported("BIFF pane without its window"))?;
+            if record.data.len() != 10 {
+                return Err(unsupported("invalid BIFF pane"));
+            }
+            let (x, y) = (u16_at(record.data, 0)?, u16_at(record.data, 2)?);
+            let frozen = self.0.last().is_some_and(|flags| flags & 0x0008 != 0);
+            if frozen && x > 255 {
+                return Err(unsupported("invalid BIFF frozen pane"));
+            }
+            *pane = Some((x, y));
+            return Ok(());
+        }
         if record.kind != WINDOW2 {
             return Ok(());
         }
@@ -58,6 +88,7 @@ impl SheetViews {
             return Err(unsupported("invalid or excessive BIFF worksheet windows"));
         }
         self.0.push(u16_at(record.data, 0)?);
+        self.1.push(None);
         Ok(())
     }
 
@@ -97,7 +128,7 @@ mod tests {
     fn parsed_view(flags: Vec<u16>) -> serde_json::Value {
         let count = flags.len();
         let mut sheet = super::super::SheetData::default();
-        sheet.views = SheetViews(flags);
+        sheet.views = SheetViews(flags.clone(), vec![None; flags.len()]);
         let bytes = super::super::build_xlsx_with_drawings(
             &[("S".into(), sheet)],
             &super::super::styles::minimal_resolved(),
@@ -115,7 +146,7 @@ mod tests {
     #[test]
     fn all_flag_combinations_project_only_the_four_display_bits() {
         for flags in 0..=u16::MAX {
-            let xml = SheetViews(vec![flags]).xml();
+            let xml = SheetViews(vec![flags], vec![None]).xml();
             for (attr, bit) in [
                 ("showGridLines", 2),
                 ("showRowColHeaders", 4),
@@ -124,8 +155,42 @@ mod tests {
             ] {
                 assert!(xml.contains(&format!("{attr}=\"{}\"", u8::from(flags & bit != 0))));
             }
-            assert_eq!(xml, SheetViews(vec![flags & 0x56]).xml());
+            assert_eq!(xml, SheetViews(vec![flags & 0x56], vec![None]).xml());
         }
+    }
+
+    #[test]
+    fn frozen_panes_follow_their_window() {
+        let record = |kind, data: &'static [u8]| Record {
+            kind,
+            offset: 0,
+            data,
+        };
+        let mut window = [0u8; 18];
+        window[0] = 0x08;
+        let window: &'static [u8] = Box::leak(Box::new(window));
+        let mut views = SheetViews::default();
+        views.read(&record(WINDOW2, window)).unwrap();
+        views
+            .read(&record(PANE, &[2, 0, 7, 0, 7, 0, 2, 0, 0, 0]))
+            .unwrap();
+        let mut model = xlsx_model::Worksheet::placeholder("S", "test".into());
+        views.project(&mut model);
+        assert_eq!((model.freeze_rows, model.freeze_cols), (7, 2));
+        // A second pane for the same window, or one without a window, rejects.
+        assert!(views
+            .read(&record(PANE, &[2, 0, 7, 0, 7, 0, 2, 0, 0, 0]))
+            .is_err());
+        assert!(SheetViews::default().read(&record(PANE, &[0; 10])).is_err());
+        // An unfrozen split is not a frozen pane.
+        let mut views = SheetViews::default();
+        views.read(&record(WINDOW2, &[0; 18])).unwrap();
+        views
+            .read(&record(PANE, &[0x40, 0x1f, 0, 0, 0, 0, 0, 0, 0, 0]))
+            .unwrap();
+        let mut model = xlsx_model::Worksheet::placeholder("S", "test".into());
+        views.project(&mut model);
+        assert_eq!((model.freeze_rows, model.freeze_cols), (0, 0));
     }
 
     #[test]
@@ -170,7 +235,7 @@ mod tests {
 
     #[test]
     fn model_projection_uses_the_same_last_view_as_the_xml_parser() {
-        let views = SheetViews(vec![0x52, 0x04]);
+        let views = SheetViews(vec![0x52, 0x04], vec![None, None]);
         let mut model = xlsx_model::Worksheet::placeholder("S", "test".into());
         views.project(&mut model);
         let parsed = parsed_view(vec![0x52, 0x04]);

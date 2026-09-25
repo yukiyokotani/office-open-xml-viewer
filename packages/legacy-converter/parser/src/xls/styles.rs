@@ -82,6 +82,19 @@ pub(super) struct ResolvedStyleSheet {
     formats: BTreeMap<u16, String>,
     /// Conditional-formatting differential formats (direct model only).
     dxfs: Vec<xlsx_model::Dxf>,
+    /// XFExt gradient fills by XF index (direct model only): the XML path
+    /// keeps the XF's palette pattern fill.
+    gradients: Vec<(usize, ResolvedGradient)>,
+}
+
+struct ResolvedGradient {
+    path: bool,
+    degree: f64,
+    left: f64,
+    right: f64,
+    top: f64,
+    bottom: f64,
+    stops: Vec<(f64, String)>,
 }
 
 #[derive(Clone)]
@@ -206,7 +219,8 @@ impl ResolvedStyleSheet {
 
     #[allow(dead_code)] // Consumed by the direct XLS session in the next unit.
     pub(super) fn into_model(self) -> xlsx_model::Styles {
-        xlsx_model::Styles {
+        let gradients = self.gradients;
+        let mut model = xlsx_model::Styles {
             fonts: self
                 .fonts
                 .into_iter()
@@ -224,7 +238,32 @@ impl ResolvedStyleSheet {
                 })
                 .collect(),
             dxfs: self.dxfs,
+        };
+        // ECMA-376 18.8.24 gradientFill: one fill per XF gradient, which the
+        // XF then uses instead of its palette pattern fallback.
+        for (index, gradient) in gradients {
+            let Some(xf) = model.cell_xfs.get_mut(index) else {
+                continue;
+            };
+            xf.fill_id = model.fills.len() as u32;
+            model.fills.push(xlsx_model::Fill {
+                gradient: Some(xlsx_model::GradientFillSpec {
+                    gradient_type: if gradient.path { "path" } else { "linear" }.into(),
+                    degree: gradient.degree,
+                    left: gradient.left,
+                    right: gradient.right,
+                    top: gradient.top,
+                    bottom: gradient.bottom,
+                    stops: gradient
+                        .stops
+                        .into_iter()
+                        .map(|(position, color)| xlsx_model::GradientStopSpec { position, color })
+                        .collect(),
+                }),
+                ..Default::default()
+            });
         }
+        model
     }
 
     pub(super) fn set_dxfs(&mut self, dxfs: Vec<xlsx_model::Dxf>) {
@@ -307,6 +346,16 @@ impl ResolvedStyleSheet {
         for format in self.formats.values() {
             bytes = bytes
                 .checked_add(format.capacity())
+                .ok_or_else(|| unsupported("XLS style model byte budget exceeded"))?;
+        }
+        for (_, gradient) in &self.gradients {
+            bytes = bytes
+                .checked_add(
+                    std::mem::size_of::<xlsx_model::Fill>()
+                        + std::mem::size_of::<xlsx_model::GradientFillSpec>()
+                        + gradient.stops.len()
+                            * (std::mem::size_of::<xlsx_model::GradientStopSpec>() + 7),
+                )
                 .ok_or_else(|| unsupported("XLS style model byte budget exceeded"))?;
         }
         for dxf in &self.dxfs {
@@ -467,6 +516,11 @@ impl<'a> Styles<'a> {
         }
         styles.extensions = extensions::Extensions::parse(records, &styles.xfs)?;
         Ok(styles)
+    }
+
+    /// Whether an XF extension carries formatting the model cannot resolve.
+    pub(super) fn extensions_unrepresented(&self) -> bool {
+        self.extensions.unrepresented
     }
 
     pub fn validate_xf(&self, index: u16) -> Result<(), String> {
@@ -712,6 +766,48 @@ impl<'a> Styles<'a> {
         if xfs.is_empty() {
             xfs.push(ResolvedXf::default_xf());
         }
+        let mut gradients = Vec::new();
+        for index in 0..self.xfs.len() {
+            let Some(gradient) = self.extensions.gradient(index) else {
+                continue;
+            };
+            let mut stops = Vec::with_capacity(gradient.stops.len());
+            for (position, color) in &gradient.stops {
+                use ooxml_common::spreadsheet_color::{resolve_color, SpreadsheetColor};
+                let color = match *color {
+                    extensions::StopColor::Argb(argb) => {
+                        resolve_color(SpreadsheetColor::Argb(argb), None, &[])
+                    }
+                    extensions::StopColor::Indexed(icv, tint) => match self.color(icv) {
+                        ColorIdentity::Argb(argb) => resolve_color(
+                            SpreadsheetColor::Argb(argb),
+                            (tint != 0.0).then_some(tint),
+                            &[],
+                        ),
+                        ColorIdentity::Indexed(index) if index < 64 => resolve_color(
+                            SpreadsheetColor::Indexed(index.into()),
+                            (tint != 0.0).then_some(tint),
+                            &[],
+                        ),
+                        _ => None,
+                    },
+                }
+                .ok_or_else(|| unsupported("unsupported BIFF gradient stop color"))?;
+                stops.push((*position, color));
+            }
+            gradients.push((
+                index,
+                ResolvedGradient {
+                    path: gradient.path,
+                    degree: gradient.degree,
+                    left: gradient.left,
+                    right: gradient.right,
+                    top: gradient.top,
+                    bottom: gradient.bottom,
+                    stops,
+                },
+            ));
+        }
         Ok(ResolvedStyleSheet {
             minimal: false,
             original_font_count,
@@ -721,6 +817,7 @@ impl<'a> Styles<'a> {
             xfs,
             formats: self.formats.clone(),
             dxfs: Vec::new(),
+            gradients,
         })
     }
 
@@ -786,6 +883,7 @@ pub(super) fn minimal_resolved() -> ResolvedStyleSheet {
         xfs: vec![ResolvedXf::default_xf()],
         formats: BTreeMap::new(),
         dxfs: Vec::new(),
+        gradients: Vec::new(),
     }
 }
 
