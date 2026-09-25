@@ -837,9 +837,11 @@ function buildConcreteBodyLayoutKernel(
                   frameGroup,
                   candidate,
                   frameAnchorLineHeightPx(root, frameGroup.owner, candidate),
-                  (acquired) => { acquiredGroup = acquired; },
-                  { story: block.source.story, storyInstance: block.source.storyInstance },
-                  (member) => storyFrameBorderEdges(frameGroup, member),
+                  {
+                    onAcquired: (acquired) => { acquiredGroup = acquired; },
+                    story: { story: block.source.story, storyInstance: block.source.storyInstance },
+                    borderEdgesFor: (member) => storyFrameBorderEdges(frameGroup, member),
+                  },
                 );
                 if (!acquiredGroup) throw new Error('Story frame acquisition omitted its retained group');
                 acquisition = {
@@ -1005,7 +1007,7 @@ function buildConcreteBodyLayoutKernel(
               frameGroup,
               state,
               frameAnchorLineHeightPx(source.blocks.body, paragraph, state),
-              (acquired) => { acquiredGroup = acquired; },
+              { onAcquired: (acquired) => { acquiredGroup = acquired; } },
             );
             if (!acquiredGroup) throw new Error('Body frame acquisition omitted its retained group');
             const member = acquiredGroup.members.find((candidate) => candidate.paragraph === paragraph);
@@ -2498,17 +2500,24 @@ function storyFrameBorderEdges(
 }
 
 /** Resolve a prepared body frame group and attach its retained member layouts. */
+/** How a frame box reports its retained group, and the story context when
+ * the frame lives in a header/footer story rather than the body. */
+type FrameBoxAcquisitionOptions = Readonly<{
+  onAcquired?: (acquired: ReturnType<typeof acquireRetainedFrameGroup>) => void;
+  story?: Readonly<{ story: SourceRef['story']; storyInstance: string }>;
+  borderEdgesFor?: (
+    paragraph: LayoutParagraphBlock,
+  ) => ReturnType<typeof bodyParagraphBorderEdgesFor>;
+}>;
+
 function resolveFrameBox(
   para: ParagraphLayoutSource,
   group: BodyFrameGroup<LayoutParagraphBlock>,
   state: BodyAcquisitionState,
   anchorLineHPt: number,
-  onAcquired?: (acquired: ReturnType<typeof acquireRetainedFrameGroup>) => void,
-  story?: Readonly<{ story: SourceRef['story']; storyInstance: string }>,
-  borderEdgesFor: (
-    paragraph: LayoutParagraphBlock,
-  ) => ReturnType<typeof bodyParagraphBorderEdgesFor> = bodyParagraphBorderEdgesFor,
+  acquisition: FrameBoxAcquisitionOptions,
 ): FrameBox {
+  const { onAcquired, story, borderEdgesFor = bodyParagraphBorderEdgesFor } = acquisition;
   const measurer = { context: state.ctx, fontFamilyClasses: state.fontFamilyClasses };
   const environment = paragraphMeasurementEnvironment(state);
   const borderEdges = group.members.map(borderEdgesFor);

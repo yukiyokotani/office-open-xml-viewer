@@ -87,8 +87,8 @@ export class WorkerDocumentSourceOwner<TArchive extends OoxmlWorkerDocumentArchi
 
   /**
    * Legacy DOC only: whether the source document asks for its revision
-   * markup in print/PDF output (MS-DOC DopBase fRMPrint; Word's PDF is the
-   * display target for legacy DOC) and actually carries revision marks.
+   * markup in print output (as reported by the legacy source) and actually
+   * carries revision marks.
    * Always false for OOXML packages, whose view follows the caller alone.
    */
   sourceRevisionMarkup(): boolean {

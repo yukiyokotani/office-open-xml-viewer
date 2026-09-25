@@ -534,8 +534,8 @@ export class DocxDocument {
       ), nativeSignal);
       doc._throwIfNativeDocAborted(nativeSignal);
       // Legacy DOC only: when the caller did not choose a tracked-change view,
-      // follow the DOC's own print-markup setting (Word's PDF of the .doc is
-      // the display target). OOXML inputs never take this branch, and an
+      // follow the source's own print-markup setting as reported by the
+      // legacy source. OOXML inputs never take this branch, and an
       // explicit `showTrackedChanges` always wins.
       if (resolvedInput.kind === 'legacy-doc' && opts.showTrackedChanges === undefined) {
         const markup = await doc._bindNativeDocSignal(
