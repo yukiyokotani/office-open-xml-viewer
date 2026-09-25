@@ -1684,7 +1684,7 @@ pub struct Styles {
     pub dxfs: Vec<Dxf>,
 }
 
-#[derive(Debug, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Dxf {
     pub font: Option<Font>,
@@ -1697,7 +1697,7 @@ pub struct Dxf {
     pub num_fmt: Option<NumFmt>,
 }
 
-#[derive(Debug, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Font {
     pub bold: bool,
@@ -1726,7 +1726,7 @@ pub struct Font {
     pub vert_align: Option<String>,
 }
 
-#[derive(Debug, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Fill {
     pub pattern_type: String,
@@ -1739,7 +1739,7 @@ pub struct Fill {
     pub gradient: Option<GradientFillSpec>,
 }
 
-#[derive(Debug, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct GradientFillSpec {
     /// "linear" (default) or "path". Linear uses `degree`; path uses top/bottom/left/right.
@@ -1754,14 +1754,14 @@ pub struct GradientFillSpec {
     pub stops: Vec<GradientStopSpec>,
 }
 
-#[derive(Debug, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct GradientStopSpec {
     pub position: f64,
     pub color: String,
 }
 
-#[derive(Debug, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Border {
     pub left: Option<BorderEdge>,
@@ -1817,7 +1817,7 @@ pub struct CellXf {
     pub reading_order: Option<u32>,
 }
 
-#[derive(Debug, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct NumFmt {
     pub num_fmt_id: u32,
