@@ -2448,6 +2448,7 @@ be closed before an experimental release.
 | PPT | ~~Unmapped shape types are dropped silently~~ Now rejected | several |
 | PPT | ~~Picture brightness/contrast (washout)~~ projected as `lum` from the gray-ramp control; pattern fills (including on rotated shapes) are projected; pattern fills on flipped shapes, texture fills, and OLE icons, links and controls are rejected | several |
 | PPT | Implicit paragraph margin/indent and percentage spacing are rejected | 12 of 34 load failures |
+| PPT | Alternative shape XML (metroBlob) that cannot be verified against the binary shape fails closed: placeholders (no slide layout), a preset against freeform geometry, and fills stated in non-comparable forms | first error of 14 of 34 (10 previously loaded) |
 | DOC | 55 of 59 samples are rejected (formatting, notes, fields, positioned tables, drawings, header pictures, non-PNG/JPEG images, list ancestry, FIB version, language ID) | 55 |
 | DOC | Picture washout/brightness and space-before after a page break differ from Word | 2 |
 
