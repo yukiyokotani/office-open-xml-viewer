@@ -1703,6 +1703,10 @@ pub struct ShapeRun {
     /// when `preset_geometry` is set; the renderer chooses between
     /// buildCustomPath (custGeom) and buildShapePath (prstGeom).
     pub subpaths: Vec<Vec<PathCmd>>,
+    /// ECMA-376 §20.1.9.15 per-path `fill` mode and `stroke` flag, parallel to
+    /// `subpaths`. Empty when every path uses the defaults (`norm`, stroked).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub subpath_paint: Vec<PathPaint>,
     /// OOXML <a:prstGeom prst="..."> name (e.g. "rect", "ellipse",
     /// "roundRect", "rtTriangle"). Empty when the shape is custGeom.
     /// `adj_values` carries <a:gd name="adj{n}"> values in adj1..adj8 order
@@ -1991,6 +1995,19 @@ pub struct GradientStop {
     pub position: f64,
     /// hex 6-char
     pub color: String,
+}
+
+/// Paint flags of one custom geometry path (ECMA-376 §20.1.9.15).
+#[derive(Serialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PathPaint {
+    /// ST_PathFillMode (§20.1.10.37) other than `norm`: `none`, `lighten`,
+    /// `lightenLess`, `darken` or `darkenLess`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fill: Option<String>,
+    /// `a:path@stroke`; serialized only when false.
+    #[serde(skip_serializing_if = "is_true")]
+    pub stroke: bool,
 }
 
 /// Custom geometry path command (shape rendering). Mirrors the pptx
@@ -3364,6 +3381,10 @@ pub struct DocTableCell {
     /// `tbLrV`). The default `lrTb` is `None`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_direction: Option<String>,
+    /// ECMA-376 §17.4.21 `<w:tcPr><w:hideMark>`: the cell's end-of-cell mark
+    /// does not count toward the row height. Omitted when false.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub hide_mark: bool,
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
@@ -3390,4 +3411,12 @@ pub struct CellBorders {
     /// spec); a `Some` with style "nil"/"none" = an explicit "no interior border".
     pub inside_h: Option<BorderSpec>,
     pub inside_v: Option<BorderSpec>,
+    /// ECMA-376 §17.4.73 tl2br / §17.4.79 tr2bl: the diagonal borders drawn
+    /// inside the cell from its physical top-left to bottom-right corner and
+    /// from its top-right to bottom-left corner. They take no part in the
+    /// §17.4.66 edge conflict resolution. Absent = no diagonal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tl2br: Option<BorderSpec>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tr2bl: Option<BorderSpec>,
 }

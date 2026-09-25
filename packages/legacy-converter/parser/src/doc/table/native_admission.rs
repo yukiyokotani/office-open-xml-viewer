@@ -184,6 +184,26 @@ impl NativeAdmission {
                 }
                 Ok(NativeAdmissionApply::Handled)
             }
+            0xd642 => {
+                // [MS-DOC] 2.9.26 CellHideMarkOperand: cb MUST be 3, then an
+                // ItcFirstLim and a Bool8. The projection is ECMA-376
+                // §17.4.21 hideMark, which Word applies per cell (see the
+                // DOCX table layout): its PDFs of sample-26 drop a hideMark
+                // cell's final empty paragraph although the row has content.
+                if operand.len() != 4 || operand[0] != 3 {
+                    return Err(unsupported("invalid Word cell hide-mark operand"));
+                }
+                let value = match operand[3] {
+                    0 => false,
+                    1 => true,
+                    _ => return Err(unsupported("invalid Word cell hide-mark boolean")),
+                };
+                let cells = range(&operand[1..], row.cells.len())?;
+                for cell in &mut row.cells[cells] {
+                    cell.hide_mark = value;
+                }
+                Ok(NativeAdmissionApply::Handled)
+            }
             0x7629 => {
                 // [MS-DOC] 2.6.3 sprmTTextFlow: a CellRangeTextFlow (2.9.29),
                 // an ItcFirstLim (2.9.123) followed by a 2-byte TextFlow
@@ -283,7 +303,8 @@ mod tests {
             assert_eq!(target.table_style, Some(3));
         }
         // Vertical alignment is replaced by TIstd, but that replacement is not
-        // implemented; a preceding hide-mark has no projection at all.
+        // implemented; no control shows whether TIstd resets a preceding
+        // hide-mark, which a style cannot carry (2.9.340).
         for before in [0xd62c, 0xd642, 0xf661, 0xd639, 0x5622, 0xd605] {
             let mut admission = NativeAdmission::new(true);
             let mut target = row(1);
@@ -352,10 +373,38 @@ mod tests {
             admission.apply(&mut target, 0x7479, &[1, 2, 3, 4]).unwrap(),
             NativeAdmissionApply::Handled
         );
+    }
+
+    #[test]
+    fn hide_mark_applies_to_its_cell_range_and_validates_the_operand() {
+        let mut admission = NativeAdmission::new(true);
+        let mut target = row(3);
         assert_eq!(
-            admission.apply(&mut target, 0xd642, &[3, 0, 1, 1]).unwrap(),
-            NativeAdmissionApply::Unhandled
+            admission.apply(&mut target, 0xd642, &[3, 0, 2, 1]).unwrap(),
+            NativeAdmissionApply::Handled
         );
+        assert_eq!(
+            target
+                .cells
+                .iter()
+                .map(|cell| cell.hide_mark)
+                .collect::<Vec<_>>(),
+            [true, true, false]
+        );
+        admission.apply(&mut target, 0xd642, &[3, 1, 2, 0]).unwrap();
+        assert!(!target.cells[1].hide_mark);
+        for invalid in [
+            vec![3, 0, 1],
+            vec![2, 0, 1, 1],
+            vec![3, 0, 1, 2],
+            vec![3, 2, 1, 1],
+            vec![3, 0, 4, 1],
+        ] {
+            assert!(
+                admission.apply(&mut target, 0xd642, &invalid).is_err(),
+                "{invalid:?}"
+            );
+        }
     }
 
     #[test]

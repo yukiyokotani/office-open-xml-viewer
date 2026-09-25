@@ -162,4 +162,23 @@ describe('virtualized cell text overflow', () => {
 
     expect(recording.texts).toContain(OVERFLOW_TEXT);
   });
+
+  it('spills a General boolean both ways, as paint centres it', () => {
+    const recording = recordingContext();
+    // ECMA-376 §18.18.40 General centres booleans. "TRUE" overflows its
+    // narrow C column by the same amount on each side, so the half that
+    // spills left into the visible B keeps the off-screen anchor painted;
+    // a left-anchored scan would have culled it.
+    const general: Styles = {
+      ...STYLES,
+      cellXfs: [{ ...STYLES.cellXfs[0], alignH: null }],
+    };
+    const ws = worksheet([
+      { row: 1, col: 3, styleIndex: 0, value: { type: 'bool', bool: true } } as Cell,
+    ]);
+    ws.colWidths = { 1: 8.43, 2: 8.43, 3: 1 };
+    renderViewport(recording.ctx, ws, general, { row: 1, col: 1, rows: 1, cols: 2 });
+
+    expect(recording.texts).toContain('TRUE');
+  });
 });

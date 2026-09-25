@@ -605,7 +605,7 @@ function borderSegment(
   to: Readonly<{ xPt: number; yPt: number }>,
 ): ResolvedBorderSegment {
   return {
-    edge: resolved.edge,
+    ...(resolved.edge ? { edge: resolved.edge } : {}),
     from,
     to,
     color: resolved.border.color,
@@ -967,6 +967,41 @@ function materializeBorders(
       );
       push(visibleBorder(edges.right), 'right', { xPt: rightPt, yPt: topPt }, { xPt: rightPt, yPt: bottomPt });
       push(visibleBorder(edges.left), 'left', { xPt: leftPt, yPt: topPt }, { xPt: leftPt, yPt: bottomPt });
+    }
+  });
+
+  // ECMA-376 §17.4.73 tl2br / §17.4.79 tr2bl: a cell diagonal runs between
+  // the physical corners of the cell box (the merged box for a vertical or
+  // horizontal merge). Diagonals take no part in the §17.4.66 edge conflict
+  // resolution, so they are materialized from the owning cell alone.
+  input.rows.forEach((row, rowIndex) => {
+    for (const cell of row.cells) {
+      if (!cell.diagonalBorders || cell.verticalMerge === 'continue') continue;
+      const lastRowIndex = cell.verticalMerge === 'restart'
+        ? mergeEndRow(input.rows, rowIndex, cell.columnStart, cell.columnSpan)
+        : rowIndex;
+      const startXPt = columnX(rowIndex, cell.columnStart);
+      const endXPt = columnX(rowIndex, Math.min(
+        input.columnWidthsPt.length,
+        cell.columnStart + cell.columnSpan,
+      ));
+      const { startPt: logicalStartInsetPt, endPt: logicalEndInsetPt } =
+        tableCellHorizontalSpacingInsets(
+          effectiveCellSpacingPt(row),
+          cell.columnStart,
+          cell.columnSpan,
+          input.columnWidthsPt.length,
+        );
+      const leftPt = Math.min(startXPt, endXPt)
+        + (input.bidiVisual ? logicalEndInsetPt : logicalStartInsetPt);
+      const rightPt = Math.max(startXPt, endXPt)
+        - (input.bidiVisual ? logicalStartInsetPt : logicalEndInsetPt);
+      const topPt = rowY(rowIndex) + rowSpacingInsets(input.rows, rowIndex).topPt;
+      const bottomPt = rowY(lastRowIndex + 1)
+        - rowSpacingInsets(input.rows, lastRowIndex).bottomPt;
+      const { tl2br, tr2bl } = cell.diagonalBorders;
+      push(tl2br, undefined, { xPt: leftPt, yPt: topPt }, { xPt: rightPt, yPt: bottomPt });
+      push(tr2bl, undefined, { xPt: rightPt, yPt: topPt }, { xPt: leftPt, yPt: bottomPt });
     }
   });
   return segments;

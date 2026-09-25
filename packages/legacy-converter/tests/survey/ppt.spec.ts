@@ -1,18 +1,16 @@
-// Local-only legacy PPT fidelity survey against PowerPoint-exported PDFs.
-// Renders every private `.ppt` through the direct PPT source (no OOXML
-// generation) and writes per-page reference/actual/diff PNGs plus a summary
-// into LEGACY_CORPUS_OUT. It reports; it does not gate or update references.
-import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
-import { basename, dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+// Local-only legacy PPT survey against Office-exported PDFs, run from the
+// legacy converter package (see playwright.config.ts). The page is the
+// PPTX package's own VRT fixture on its dev server; this package supplies
+// the direct PPT source, so no OOXML package test imports the converter.
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { test } from '@playwright/test';
 import pixelmatch from 'pixelmatch';
 import { PNG } from 'pngjs';
+import { packagesDir, viewerOrigin, padded, pdfPages, sideBySide, type Rendered } from './survey.js';
 
-const here = dirname(fileURLToPath(import.meta.url));
 const enabled = process.env.LEGACY_CORPUS === '1';
-const corpus = resolve(here, '../../public/private/ppt');
+const corpus = resolve(packagesDir, 'pptx/public/private/ppt');
 const filter = process.env.LEGACY_CORPUS_FILTER;
 const names = enabled && existsSync(corpus)
   ? readdirSync(corpus)
@@ -20,37 +18,6 @@ const names = enabled && existsSync(corpus)
     .filter((name) => !filter || name.includes(filter))
     .sort()
   : [];
-
-interface Rendered {
-  readonly error?: string;
-  readonly pages: readonly string[];
-}
-
-function pdfPages(pdf: string, prefix: string): PNG[] {
-  execFileSync('pdftoppm', ['-png', '-r', '72', pdf, prefix], { stdio: 'ignore' });
-  const directory = resolve(prefix, '..');
-  const stem = basename(prefix);
-  return readdirSync(directory)
-    .filter((name) => name.startsWith(`${stem}-`) && name.endsWith('.png'))
-    .sort((a, b) => Number(/-(\d+)\.png$/u.exec(a)![1]) - Number(/-(\d+)\.png$/u.exec(b)![1]))
-    .map((name) => PNG.sync.read(readFileSync(resolve(directory, name))));
-}
-
-function padded(source: PNG, width: number, height: number): PNG {
-  const result = new PNG({ width, height });
-  result.data.fill(255);
-  PNG.bitblt(source, result, 0, 0, Math.min(source.width, width), Math.min(source.height, height), 0, 0);
-  return result;
-}
-
-function sideBySide(left: PNG, right: PNG): PNG {
-  const height = Math.max(left.height, right.height);
-  const result = new PNG({ width: left.width + right.width + 8, height });
-  result.data.fill(128);
-  PNG.bitblt(left, result, 0, 0, left.width, left.height, 0, 0);
-  PNG.bitblt(right, result, 0, 0, right.width, right.height, left.width + 8, 0);
-  return result;
-}
 
 test.describe('legacy PPT corpus survey', () => {
   test.skip(!enabled, 'Set LEGACY_CORPUS=1 and LEGACY_CORPUS_OUT to run');
@@ -64,8 +31,8 @@ test.describe('legacy PPT corpus survey', () => {
       const pdf = resolve(corpus, name.replace(/\.ppt$/iu, '.pdf'));
       const reference = existsSync(pdf) ? pdfPages(pdf, resolve(out, 'office')) : [];
       const width = reference[0]?.width ?? 960;
-      const directPpt = resolve(here, '../../../legacy-converter/src/direct-ppt.ts');
-      await page.goto('/tests/visual/fixture.html');
+      const directPpt = resolve(packagesDir, 'legacy-converter/src/direct-ppt.ts');
+      await page.goto(`${viewerOrigin('ppt')}/tests/visual/fixture.html`);
       const rendered = await page.evaluate(async ({ file, width: requested, module }) => {
         const pages: string[] = [];
         try {

@@ -195,6 +195,37 @@ export interface PivotTableMetadata {
   cacheSource?: PivotCacheSource;
   status: PivotMetadataStatus;
   extensionUris?: string[];
+  /** ECMA-376 §18.10.1.97 applied PivotTable style, elements resolved. */
+  style?: PivotTableStyle;
+  /** ECMA-376 §18.10.1.84 row items, one per body row. */
+  rowItems?: PivotAxisItem[];
+  /** ECMA-376 §18.10.1.19 column items, one per data column. */
+  columnItems?: PivotAxisItem[];
+}
+
+export interface PivotTableStyle {
+  name: string;
+  showRowHeaders: boolean;
+  showColumnHeaders: boolean;
+  showRowStripes: boolean;
+  showColumnStripes: boolean;
+  showLastColumn: boolean;
+  elements: PivotTableStyleElement[];
+}
+
+export interface PivotTableStyleElement {
+  /** ECMA-376 §18.18.77 ST_TableStyleType. */
+  kind: string;
+  /** Stripe band size (§18.8.41). */
+  size: number;
+  dxf: Dxf;
+}
+
+export interface PivotAxisItem {
+  /** ECMA-376 §18.18.43 ST_ItemType (`data`, `default`, …, `grand`, `blank`). */
+  kind: string;
+  /** Zero-based field level of the item. */
+  depth: number;
 }
 
 export interface PivotLocation extends WorksheetCellRange {
@@ -684,6 +715,11 @@ export interface Duotone {
 export interface PathInfo {
   w: number;
   h: number;
+  /** ECMA-376 §20.1.9.15 `a:path@fill` when not `norm` (ST_PathFillMode
+   *  §20.1.10.37). `none` leaves the path unfilled. */
+  fill?: 'none' | 'lighten' | 'lightenLess' | 'darken' | 'darkenLess';
+  /** ECMA-376 §20.1.9.15 `a:path@stroke`; present only when `false`. */
+  stroke?: false;
   commands: PathCmd[];
 }
 

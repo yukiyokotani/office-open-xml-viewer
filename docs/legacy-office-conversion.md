@@ -187,9 +187,15 @@ properties when it saves a binary deck as PPTX: "Black and White" becomes
 DrawingML `grayscl` plus `biLevel` at 50%, and a transparent colour becomes a
 `clrChange` to the same colour with zero alpha. The presentation renderer
 applies these blip effects in document order for PPTX files as well.
-Brightness/contrast (washout), grayscale or black-and-white alone, recolouring
-and adjustments on picture fills stay rejected until Office output confirms
-their rendering.
+Brightness/contrast (washout) on a picture becomes DrawingML `lum`: bright is
+the brightness over 0x8000, and contrast is k - 1 or 1 - 1/k for the stored
+16.16 slope k. PowerPoint writes exactly these values when it saves the
+binary deck as PPTX. The renderer's `lum` formula reproduces PowerPoint's PDF
+of a gray ramp under a bright × contrast grid, from both PPTX and .ppt, to
+within 0.7 of 255. Brightness/contrast combined with a transparent colour or
+black-and-white (whose order has no evidence), grayscale or black-and-white
+alone, recolouring and adjustments on picture fills stay rejected until
+Office output confirms their rendering.
 
 ## Experimental direct XLS source
 
@@ -2397,16 +2403,17 @@ Admission is not visual fidelity.
 
 ### Local direct-render survey
 
-`packages/{docx,pptx,xlsx}/tests/visual/legacy-corpus.spec.ts` render each
-local private legacy sample through its direct source. Each sample is written
-beside its same-named Office PDF export as paired PNGs and a summary. The
-survey reports only: it never gates, updates references, or generates OOXML.
-Run it with an output directory outside the checkout:
+`packages/legacy-converter/tests/survey/{doc,ppt,xls}.spec.ts` render each
+local private legacy sample through its direct source, on the matching viewer
+package's own VRT fixture and dev server. Each sample is written beside its
+same-named Office PDF export as paired PNGs and a summary. The survey reports
+only: it never gates, updates references, or generates OOXML. Run it with an
+output directory outside the checkout (`VRT_PORT` serves DOC, `+1` PPT and
+`+2` XLS; `LEGACY_CORPUS_FORMATS` and `LEGACY_CORPUS_FILTER` narrow the run):
 
 ```bash
-LEGACY_CORPUS=1 LEGACY_CORPUS_OUT=/tmp/legacy-survey VRT_PRIVATE_CORPUS=1 \
-  pnpm --filter @silurus/ooxml-pptx exec playwright test \
-  --config playwright.config.ts --project=chrome legacy-corpus.spec.ts
+LEGACY_CORPUS=1 LEGACY_CORPUS_OUT=/tmp/legacy-survey LEGACY_CORPUS_FORMATS=ppt \
+  pnpm --filter @silurus/ooxml-legacy-converter survey
 ```
 
 Pixel percentages are only a triage signal. For example, a slide can score
@@ -2439,7 +2446,7 @@ be closed before an experimental release.
 | PPT | ~~Gradients on rotated shapes (or inside rotated/flipped groups) are replaced by the solid fill colour~~ Resolved (ef41f03a) | several |
 | PPT | Custom geometry with per-path fill/stroke flags is rejected; the PPTX model has no per-path `fill`/`stroke` (ECMA-376 §20.1.9.15), a generic PPTX gap | 1 |
 | PPT | ~~Unmapped shape types are dropped silently~~ Now rejected | several |
-| PPT | Picture brightness/contrast (washout), texture fills, pattern fills on flipped shapes, and OLE icons, links and controls are rejected (pattern fills, including on rotated shapes, are projected) | several |
+| PPT | ~~Picture brightness/contrast (washout)~~ projected as `lum` from the gray-ramp control; pattern fills (including on rotated shapes) are projected; pattern fills on flipped shapes, texture fills, and OLE icons, links and controls are rejected | several |
 | PPT | Implicit paragraph margin/indent and percentage spacing are rejected | 12 of 34 load failures |
 | DOC | 55 of 59 samples are rejected (formatting, notes, fields, positioned tables, drawings, header pictures, non-PNG/JPEG images, list ancestry, FIB version, language ID) | 55 |
 | DOC | Picture washout/brightness and space-before after a page break differ from Word | 2 |

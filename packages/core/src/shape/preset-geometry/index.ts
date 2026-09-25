@@ -460,16 +460,29 @@ export function getConnectorAnchors(
 }
 
 /**
- * Translucent overlay that approximates an `a:path@fill` shading mode
- * (ECMA-376 §20.1.10.37 ST_PathFillMode) over the already-painted base fill.
- * Shared by preset geometry and custom geometry paths.
+ * Translucent overlay for an `a:path@fill` shading mode (ECMA-376 §20.1.10.37
+ * ST_PathFillMode) over the already-painted base fill. Shared by preset
+ * geometry and custom geometry paths.
+ *
+ * The standard names the modes without amounts. The amounts come from
+ * PowerPoint's PDF export of custom-geometry paths in each mode over six
+ * solid fills (4472C4, ED7D31, 808080, 000000, FFFFFF, 70AD47); the colours
+ * were read exactly from the PDF content stream. Each channel v (0–255)
+ * becomes:
+ * - darken: v × 153/255 (808080 → 4D4D4D, FFFFFF → 999999)
+ * - darkenLess: v × 205/255 (808080 → 676767, FFFFFF → CDCDCD)
+ * - lighten: 255 − (255 − v) × 153/255 (000000 → 666666)
+ * - lightenLess: 255 − (255 − v) × 205/255 (000000 → 323232)
+ * All 24 cases are within rounding. Source-over black or white at alpha
+ * 102/255 (the full modes) or 50/255 (the "less" modes) produces exactly
+ * this.
  */
 export function pathFillModeOverlay(mode: string | null | undefined): string | null {
   switch (mode) {
-    case 'lighten':     return 'rgba(255,255,255,0.30)';
-    case 'lightenLess': return 'rgba(255,255,255,0.15)';
-    case 'darken':      return 'rgba(0,0,0,0.30)';
-    case 'darkenLess':  return 'rgba(0,0,0,0.15)';
+    case 'lighten':     return `rgba(255,255,255,${102 / 255})`;
+    case 'lightenLess': return `rgba(255,255,255,${50 / 255})`;
+    case 'darken':      return `rgba(0,0,0,${102 / 255})`;
+    case 'darkenLess':  return `rgba(0,0,0,${50 / 255})`;
     default: return null;
   }
 }

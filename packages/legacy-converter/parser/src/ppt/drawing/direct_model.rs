@@ -594,10 +594,16 @@ impl Context<'_> {
     /// - pictureBrightness/pictureContrast as `<a:lum>` (0x8000 -> bright
     ///   100000; 0x599a/0x4ccd -> bright 70000, contrast -70000).
     /// PowerPoint's PDF exports agree with the first two (black/white by a
-    /// luminance threshold, white made transparent). The presentation renderer
-    /// has no `<a:lum>` rendering whose formula is confirmed by Office output,
-    /// and gray alone, bi-level alone, recolor and colour modifiers have no
-    /// evidence, so they stay rejected. Picture fills reject every adjustment.
+    /// luminance threshold, white made transparent). For brightness/contrast,
+    /// PowerPoint's PDF of a gray ramp saved as .ppt (with and without its
+    /// metroBlobs) renders the same levels as the `<a:lum>` formula of the
+    /// presentation renderer. It uses brightness / 0x8000 as the bright
+    /// fraction and the 16.16 contrast as the slope k. Contrast is therefore
+    /// k - 1 for k <= 1 and 1 - 1/k above. Brightness/contrast together with
+    /// the transparent colour or the black-and-white pair has no evidence for
+    /// the order PowerPoint applies them in, so that stays rejected. Gray
+    /// alone, bi-level alone, recolor and colour modifiers have no evidence
+    /// and stay rejected too. Picture fills reject every adjustment.
     fn picture_display_effects(
         &self,
         shape: &SpannedShape,
@@ -614,20 +620,33 @@ impl Context<'_> {
                 "PowerPoint picture recoloring is not projected",
             ));
         }
-        if p.picture_contrast.is_some_and(|value| value != 0x10000)
-            || p.picture_brightness.is_some_and(|value| value != 0)
-        {
-            return Err(unsupported(
-                "PowerPoint picture brightness/contrast adjustment is not projected",
-            ));
-        }
+        let contrast = p.picture_contrast.filter(|&value| value != 0x10000);
+        let brightness = p.picture_brightness.filter(|&value| value != 0);
         let gray = p.picture_gray.unwrap_or(false);
         let bilevel = p.picture_bilevel.unwrap_or(false);
         let transparent = p.picture_transparent;
-        if !picture_frame && (gray || bilevel || transparent.is_some()) {
+        let luminance = contrast.is_some() || brightness.is_some();
+        if !picture_frame && (gray || bilevel || transparent.is_some() || luminance) {
             return Err(unsupported(
                 "PowerPoint picture fill color adjustment is not projected",
             ));
+        }
+        if luminance {
+            if gray || bilevel || transparent.is_some() {
+                return Err(unsupported(
+                    "PowerPoint picture brightness/contrast combined with other color adjustments is not projected",
+                ));
+            }
+            // MS-ODRAW 2.3.23.11-12: pictureContrast is a 16.16 fixed
+            // multiplier (0x10000 = unchanged), pictureBrightness a signed
+            // fraction of 0x8000.
+            let k = f64::from(contrast.unwrap_or(0x10000)) / 65536.0;
+            let contrast = if k <= 1.0 { k - 1.0 } else { 1.0 - 1.0 / k };
+            let bright = f64::from(brightness.unwrap_or(0) as i32) / 32768.0;
+            return Ok(vec![BlipEffect::Luminance {
+                bright: bright.clamp(-1.0, 1.0),
+                contrast: contrast.clamp(-1.0, 1.0),
+            }]);
         }
         let mut effects = Vec::new();
         if let Some(color) = transparent {
@@ -1685,9 +1704,8 @@ mod tests {
             .unwrap_err()
             .contains("fill BLIP"));
         for (values, expected) in [
-            (vec![(0x109, 0x599a)], "brightness"),
-            (vec![(0x108, 0x4ccd)], "contrast"),
             (vec![(0x109, 0x8000), (0x13f, 0x0006_0006)], "brightness"),
+            (vec![(0x108, 0x4ccd), (0x107, 0x00ff_ffff)], "brightness"),
             (
                 vec![(0x107, 0x0800_0001)],
                 "indexed picture transparent color",
@@ -1722,6 +1740,31 @@ mod tests {
                 BlipEffect::BiLevel { thresh: 0.5 },
             ]
         );
+        // Brightness/contrast alone project as <a:lum>: PowerPoint's own
+        // reading of 0x599a / 0x4ccd is bright 70000, contrast -70000, and a
+        // stored 16.16 slope above 1 maps back to contrast 1 - 1/k.
+        for (values, bright, contrast) in [
+            (vec![(0x109, 0x599a), (0x108, 0x4ccd)], 0.7, -0.7),
+            (vec![(0x109, (-22938i32) as u32)], -0.7, 0.0),
+            (vec![(0x108, 218453)], 0.0, 0.7),
+        ] {
+            let values = [vec![(0x4104, 1)], values].concat();
+            let model = project(75, 0x200, vec![properties(&values)], png_blip(), None).unwrap();
+            let SlideElement::Picture(picture) = &model.elements[0] else {
+                panic!("picture")
+            };
+            let [BlipEffect::Luminance {
+                bright: b,
+                contrast: c,
+            }] = picture.blip_effects.as_slice()
+            else {
+                panic!("luminance: {:?}", picture.blip_effects)
+            };
+            assert!(
+                (b - bright).abs() < 1e-3 && (c - contrast).abs() < 1e-3,
+                "{b} {c}"
+            );
+        }
         // Colour adjustments on a picture fill stay rejected.
         let fill = properties(&[
             (0x180, 3),

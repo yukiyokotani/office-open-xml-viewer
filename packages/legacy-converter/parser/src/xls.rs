@@ -32,6 +32,7 @@ mod geometry;
 mod hyperlinks;
 mod names;
 mod pictures;
+mod pivots;
 mod print;
 mod rich;
 mod shapes;
@@ -99,8 +100,11 @@ pub(crate) fn inspect_pictures(
         .iter()
         .filter_map(|a| a.picture.map(|p| p.store_index))
         .collect();
-    let images =
-        drawing_media::selected(&records, &indices, crate::officeart::raster::Raster::Advertised)?;
+    let images = drawing_media::selected(
+        &records,
+        &indices,
+        crate::officeart::raster::Raster::Advertised,
+    )?;
     let supported: HashSet<u32> = images.iter().map(|i| i.0).collect();
     anchors.retain(|a| {
         a.picture
@@ -203,6 +207,11 @@ struct SheetData {
     formula_records: tables::Records,
     /// Formula text by cell (direct path only).
     formulas: BTreeMap<(u16, u16), String>,
+    /// PivotTable view records (see `pivots::RECORDS`) with their Continue
+    /// records, in order.
+    pivot_records: tables::Records,
+    /// Their XLSX-model projection (direct path only).
+    pivot_tables: Vec<xlsx_model::PivotTableMetadata>,
 }
 
 pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<XlsConversion, String> {
@@ -489,6 +498,27 @@ fn prepare_workbook(
                 &mut dxfs,
             )?;
         }
+        if direct && !data.pivot_records.is_empty() {
+            if conditional_theme.is_none() {
+                conditional_theme = Some((
+                    theme::Colors::parse(&records)?,
+                    conditional::Externs::parse(&records)?,
+                ));
+            }
+            if table_styles.is_none() {
+                table_styles = Some(tables::Styles::parse(&records)?);
+            }
+            let (theme, _) = conditional_theme.as_ref().expect("parsed theme");
+            let context = tables::Context {
+                styles: &styles,
+                theme,
+            };
+            data.pivot_tables = pivots::project(
+                &data.pivot_records,
+                table_styles.as_ref().expect("parsed table styles"),
+                &context,
+            )?;
+        }
         if direct && !data.conditional_records.is_empty() {
             if conditional_theme.is_none() {
                 conditional_theme = Some((
@@ -631,13 +661,12 @@ fn prepare_workbook(
     for (index, chart_sheet) in chart_sheets {
         converted[index].1.chart_sheet = Some(chart_sheet);
     }
-    let font = if with_pictures
-        && (!pictures.is_empty() || !charts.is_empty() || !shapes.is_empty())
-    {
-        styles.normal_font()
-    } else {
-        None
-    };
+    let font =
+        if with_pictures && (!pictures.is_empty() || !charts.is_empty() || !shapes.is_empty()) {
+            styles.normal_font()
+        } else {
+            None
+        };
     Ok(PreparedXls {
         sheets: converted,
         styles: resolved_styles,
@@ -673,9 +702,9 @@ fn validate_direct_drawings(
         // worksheet renderer from the projected range.
         if anchor.object_type == 20
             && anchor.object_flags & 0x100 != 0
-            && filters
-                .get(&anchor.sheet)
-                .is_some_and(|range| filters::owns_button(range, anchor.from.column, anchor.from.row))
+            && filters.get(&anchor.sheet).is_some_and(|range| {
+                filters::owns_button(range, anchor.from.column, anchor.from.row)
+            })
         {
             continue;
         }
@@ -1219,8 +1248,12 @@ fn parse_sheet(
     let mut found_eof = false;
     let mut custom_view = false;
     let mut previous_kind = 0u16;
+    let mut pivot_continues = false;
     for record in &all_records[start_index + 1..] {
         let prior_kind = std::mem::replace(&mut previous_kind, record.kind);
+        // PIVOTIVD, PIVOTPI and PIVOTLI (2.1.7.20.5) continue their record.
+        let pivot_continue = record.kind == CONTINUE && pivot_continues;
+        pivot_continues = pivots::continued(record.kind) || pivot_continue;
         // [MS-XLS] 2.1.7: an embedded chart has its own BOF/EOF
         // substream. Its records are not worksheet cells or geometry.
         if matches!(record.kind, BOF | EOF) && pending_formula_string.is_some() {
@@ -1409,6 +1442,9 @@ fn parse_sheet(
             }
             // ContinueFrt11 (2.4.60) of a table record is not reassembled.
             0x0875 => return Err(unsupported("continued XLS table record")),
+            kind if pivots::RECORDS.contains(&kind) || pivot_continue => {
+                output.pivot_records.push(kind, record.data)?
+            }
             // A continued conditional formatting record is not reassembled.
             CONTINUE
                 if !output.conditional_records.is_empty()

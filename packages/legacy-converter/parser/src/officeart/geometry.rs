@@ -263,6 +263,12 @@ impl DecodedPath<'_> {
         self.path.stroke
     }
 
+    /// The fill flag as authored (segment escapes only), before the
+    /// PowerPoint open-path veto applied by `fill`.
+    pub(crate) fn authored_fill(&self) -> bool {
+        self.path.authored_fill
+    }
+
     pub(crate) fn commands(&self) -> impl ExactSizeIterator<Item = DecodedCommand> + '_ {
         self.path.commands.iter().copied()
     }

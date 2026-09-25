@@ -89,6 +89,26 @@ describe('ShapeRun drawing command planner', () => {
         { cmd: 'moveTo' }, { cmd: 'cubicBezTo' }, { cmd: 'arcTo' },
       ]],
     });
+    expect(result.command.plan.geometry).not.toHaveProperty('paint');
+  });
+
+  it('carries per-path fill and stroke flags aligned with the subpaths', () => {
+    const subpaths: ShapeRun['subpaths'] = [
+      [{ cmd: 'moveTo', x: 0, y: 0 }, { cmd: 'lineTo', x: 1, y: 1 }],
+      [{ cmd: 'moveTo', x: 1, y: 0 }, { cmd: 'lineTo', x: 0, y: 1 }],
+    ];
+    const plan = (subpathPaint: ShapeRun['subpathPaint']) => {
+      const result = planShapeDrawing(shape({ presetGeometry: null, subpaths, subpathPaint }),
+        { xPt: 0, yPt: 0, widthPt: 10, heightPt: 10 });
+      if (result.status !== 'planned' || result.command.kind !== 'drawingml-shape') {
+        throw new Error('expected a DrawingML shape command');
+      }
+      return result.command.plan.geometry;
+    };
+    expect(plan([{ fill: 'none' }, { stroke: false }])).toMatchObject({
+      kind: 'custom', paint: [{ fill: 'none' }, { stroke: false }],
+    });
+    expect(plan([{ fill: 'none' }])).not.toHaveProperty('paint');
   });
 
   it('plans a stretched blip fill as a resource clipped by the shape geometry', () => {

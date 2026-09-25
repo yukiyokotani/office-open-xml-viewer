@@ -165,6 +165,11 @@ pub(crate) fn parse_dxfs(doc: &roxmltree::Document, theme_colors: &[String]) -> 
                     "fill" => {
                         let mut f = Fill::default();
                         for pf in child.children() {
+                            if pf.tag_name().name() == "gradientFill" {
+                                // ECMA-376 §18.8.24 in a dxf, e.g. a table or
+                                // PivotTable style element's gradient.
+                                f.gradient = parse_gradient_fill(pf, theme_colors);
+                            }
                             if pf.tag_name().name() == "patternFill" {
                                 f.pattern_type =
                                     pf.attribute("patternType").unwrap_or("solid").to_string();
@@ -349,62 +354,7 @@ pub(crate) fn parse_fills(doc: &roxmltree::Document, theme_colors: &[String]) ->
                                 }
                             }
                         }
-                        "gradientFill" => {
-                            // ECMA-376 §18.8.24 gradientFill — linear (default) uses
-                            // `degree`, path uses top/bottom/left/right as a relative
-                            // bounding box; children <stop position="n"><color/></stop>.
-                            let gtype = pf.attribute("type").unwrap_or("linear").to_string();
-                            let degree = pf
-                                .attribute("degree")
-                                .and_then(|s| s.parse::<f64>().ok())
-                                .unwrap_or(0.0);
-                            let left = pf
-                                .attribute("left")
-                                .and_then(|s| s.parse::<f64>().ok())
-                                .unwrap_or(0.0);
-                            let right = pf
-                                .attribute("right")
-                                .and_then(|s| s.parse::<f64>().ok())
-                                .unwrap_or(0.0);
-                            let top = pf
-                                .attribute("top")
-                                .and_then(|s| s.parse::<f64>().ok())
-                                .unwrap_or(0.0);
-                            let bottom = pf
-                                .attribute("bottom")
-                                .and_then(|s| s.parse::<f64>().ok())
-                                .unwrap_or(0.0);
-                            let mut stops: Vec<GradientStopSpec> = pf
-                                .children()
-                                .filter(|n| n.is_element() && n.tag_name().name() == "stop")
-                                .filter_map(|stop| {
-                                    let position = stop
-                                        .attribute("position")
-                                        .and_then(|s| s.parse::<f64>().ok())?;
-                                    let color_node = stop.children().find(|c| {
-                                        c.is_element() && c.tag_name().name() == "color"
-                                    })?;
-                                    let color = parse_color(&color_node, theme_colors)?;
-                                    Some(GradientStopSpec { position, color })
-                                })
-                                .collect();
-                            stops.sort_by(|a, b| {
-                                a.position
-                                    .partial_cmp(&b.position)
-                                    .unwrap_or(std::cmp::Ordering::Equal)
-                            });
-                            if !stops.is_empty() {
-                                f.gradient = Some(GradientFillSpec {
-                                    gradient_type: gtype,
-                                    degree,
-                                    left,
-                                    right,
-                                    top,
-                                    bottom,
-                                    stops,
-                                });
-                            }
-                        }
+                        "gradientFill" => f.gradient = parse_gradient_fill(pf, theme_colors),
                         _ => {}
                     }
                 }
@@ -634,5 +584,77 @@ mod strict_namespace_tests {
         let cell_xfs = parse_cell_xfs(&doc);
         assert_eq!(cell_xfs[0].align_h, None);
         assert_eq!(cell_xfs[1].align_h.as_deref(), Some("left"));
+    }
+}
+
+/// ECMA-376 §18.8.24 gradientFill as the model's gradient: linear (default)
+/// uses `degree`, path uses top/bottom/left/right as a relative bounding box;
+/// children <stop position="n"><color/></stop>. `None` without stops.
+fn parse_gradient_fill(pf: roxmltree::Node, theme_colors: &[String]) -> Option<GradientFillSpec> {
+    // ECMA-376 §18.8.24 gradientFill — linear (default) uses
+    // `degree`, path uses top/bottom/left/right as a relative
+    // bounding box; children <stop position="n"><color/></stop>.
+    let gtype = pf.attribute("type").unwrap_or("linear").to_string();
+    let degree = pf
+        .attribute("degree")
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let left = pf
+        .attribute("left")
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let right = pf
+        .attribute("right")
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let top = pf
+        .attribute("top")
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let bottom = pf
+        .attribute("bottom")
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let mut stops: Vec<GradientStopSpec> = pf
+        .children()
+        .filter(|n| n.is_element() && n.tag_name().name() == "stop")
+        .filter_map(|stop| {
+            let position = stop
+                .attribute("position")
+                .and_then(|s| s.parse::<f64>().ok())?;
+            let color_node = stop
+                .children()
+                .find(|c| c.is_element() && c.tag_name().name() == "color")?;
+            let color = parse_color(&color_node, theme_colors)?;
+            Some(GradientStopSpec { position, color })
+        })
+        .collect();
+    stops.sort_by(|a, b| {
+        a.position
+            .partial_cmp(&b.position)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    (!stops.is_empty()).then_some(GradientFillSpec {
+        gradient_type: gtype,
+        degree,
+        left,
+        right,
+        top,
+        bottom,
+        stops,
+    })
+}
+
+#[cfg(test)]
+mod dxf_gradient_tests {
+    #[test]
+    fn dxf_gradient_fills_are_parsed_like_cell_gradients() {
+        let xml = r#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dxfs count="1"><dxf><font><color rgb="FFFFFFFF"/></font><fill><gradientFill degree="90"><stop position="0"><color rgb="FF9F2121"/></stop><stop position="1"><color rgb="FF761818"/></stop></gradientFill></fill></dxf></dxfs></styleSheet>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let dxf = super::parse_dxfs(&doc, &[]).remove(0);
+        let gradient = dxf.fill.unwrap().gradient.unwrap();
+        assert_eq!(gradient.degree, 90.0);
+        assert_eq!(gradient.stops.len(), 2);
+        assert_eq!(gradient.stops[0].color, "#9F2121");
     }
 }

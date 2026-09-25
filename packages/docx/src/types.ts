@@ -875,6 +875,12 @@ export interface ShapeRun {
   /** Normalized [0,1] custom-geometry sub-paths. Empty when `presetGeometry`
    *  is set; the renderer chooses between buildCustomPath and buildShapePath. */
   subpaths: PathCmd[][];
+  /** ECMA-376 §20.1.9.15 per-path `fill` mode and `stroke` flag, parallel to
+   *  `subpaths`; absent when every path uses the defaults. */
+  subpathPaint?: Array<{
+    fill?: 'none' | 'lighten' | 'lightenLess' | 'darken' | 'darkenLess';
+    stroke?: false;
+  }>;
   /** OOXML <a:prstGeom prst> name (e.g. "rect", "ellipse", "rtTriangle").
    *  When set the renderer calls core's buildShapePath with `adjValues`. */
   presetGeometry?: string | null;
@@ -1596,6 +1602,9 @@ export interface DocTableCell {
   /** ECMA-376 §17.4.72 `<w:textDirection>` as a transitional §17.18.93 value
    *  (`tbRl`, `btLr`, `lrTbV`, `tbRlV`, `tbLrV`); absent for the default `lrTb`. */
   textDirection?: string;
+  /** ECMA-376 §17.4.21 `<w:hideMark>`: the end-of-cell mark does not count
+   *  toward the row height. Absent when false. */
+  hideMark?: boolean;
 }
 
 export interface CellBorders {
@@ -1611,6 +1620,11 @@ export interface CellBorders {
    *  border" (e.g. banded data rows in Medium List 2 / Medium Shading 2). */
   insideH: BorderSpec | null;
   insideV: BorderSpec | null;
+  /** ECMA-376 §17.4.73 tl2br / §17.4.79 tr2bl: diagonal borders drawn from
+   *  the cell's physical top-left to bottom-right corner and from its
+   *  top-right to bottom-left corner. Absent = no diagonal. */
+  tl2br?: BorderSpec;
+  tr2bl?: BorderSpec;
 }
 
 // ===== Worker message protocol =====

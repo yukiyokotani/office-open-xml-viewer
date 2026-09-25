@@ -9439,8 +9439,9 @@ fn parse_wsp_shape(
     let cust_geom = sp_pr
         .children()
         .find(|n| n.is_element() && n.tag_name().name() == "custGeom");
-    let (subpaths, preset_geometry, adj_values) = if let Some(cg) = cust_geom {
-        (parse_custom_geometry(cg, cx, cy), None, Vec::new())
+    let (subpaths, subpath_paint, preset_geometry, adj_values) = if let Some(cg) = cust_geom {
+        let (subpaths, paint) = parse_custom_geometry_with_paint(cg, cx, cy);
+        (subpaths, paint, None, Vec::new())
     } else {
         // Defer prstGeom rendering to core's buildShapePath. Carry the preset
         // name + adjustment values so the renderer can call into the shared
@@ -9456,7 +9457,7 @@ fn parse_wsp_shape(
             .unwrap_or("rect")
             .to_string();
         let adj_values = prst_node.map(parse_preset_adj).unwrap_or_default();
-        (Vec::new(), Some(prst), adj_values)
+        (Vec::new(), Vec::new(), Some(prst), adj_values)
     };
     if subpaths.is_empty() && preset_geometry.is_none() {
         return None;
@@ -9557,6 +9558,7 @@ fn parse_wsp_shape(
         behind_doc: false,
         z_order,
         subpaths,
+        subpath_paint,
         preset_geometry,
         adj_values,
         fill,
@@ -10750,6 +10752,7 @@ fn parse_vml_pict(
         behind_doc,
         z_order: 0,
         subpaths: Vec::new(),
+        subpath_paint: Vec::new(),
         preset_geometry,
         adj_values,
         fill: resolved_fill.fill,
@@ -12201,17 +12204,33 @@ fn parse_docx_drawingml_fill(
 
 /// Parse <a:custGeom><a:pathLst><a:path w="W" h="H">...</a:path></a:pathLst>.
 /// Path coords inside each <a:path> are absolute within W×H; normalize to [0,1].
+#[cfg(test)]
 fn parse_custom_geometry(
     cust_geom: roxmltree::Node,
     shape_width: f64,
     shape_height: f64,
 ) -> Vec<Vec<PathCmd>> {
+    parse_custom_geometry_with_paint(cust_geom, shape_width, shape_height).0
+}
+
+/// [`parse_custom_geometry`] plus each kept path's ECMA-376 §20.1.9.15
+/// `fill`/`stroke` flags, parallel to the subpaths. The paint list is empty
+/// when every path uses the defaults.
+fn parse_custom_geometry_with_paint(
+    cust_geom: roxmltree::Node,
+    shape_width: f64,
+    shape_height: f64,
+) -> (Vec<Vec<PathCmd>>, Vec<PathPaint>) {
     use ooxml_common::custom_geometry::{parse_custom_geometry as parse_shared, PathCommand};
 
-    parse_shared(cust_geom, shape_width, shape_height)
+    let (subpaths, paint): (Vec<_>, Vec<_>) = parse_shared(cust_geom, shape_width, shape_height)
         .paths
         .into_iter()
         .filter_map(|path| {
+            let paint = PathPaint {
+                fill: path.fill.clone(),
+                stroke: path.stroke,
+            };
             let commands: Vec<PathCmd> = path
                 .commands
                 .into_iter()
@@ -12259,9 +12278,15 @@ fn parse_custom_geometry(
                     PathCommand::Close => PathCmd::Close,
                 })
                 .collect();
-            (!commands.is_empty()).then_some(commands)
+            (!commands.is_empty()).then_some((commands, paint))
         })
-        .collect()
+        .unzip();
+    let paint = if paint.iter().all(|p| p.fill.is_none() && p.stroke) {
+        Vec::new()
+    } else {
+        paint
+    };
+    (subpaths, paint)
 }
 
 /// Resolve a color container (e.g. <a:solidFill>, <a:gs>) into a hex string by
@@ -13420,6 +13445,12 @@ fn parse_table_cell(
         .and_then(|v| attr_w(v, "val"))
         .and_then(|value| cell_text_direction(&value));
 
+    // ECMA-376 §17.4.21 hideMark (CT_OnOff): ignore the end-of-cell mark when
+    // calculating the row height.
+    let hide_mark = tc_pr
+        .and_then(|p| bool_prop(p, "hideMark"))
+        .unwrap_or(false);
+
     // Empty = not set inline; parse_table fills it from the table style (else "top").
     let v_align = tc_pr
         .and_then(|p| child_w(p, "vAlign"))
@@ -13547,6 +13578,7 @@ fn parse_table_cell(
         margin_right,
         table_cell_layout,
         text_direction,
+        hide_mark,
     }
 }
 
@@ -13603,6 +13635,9 @@ fn parse_cell_borders(node: roxmltree::Node) -> CellBorders {
             .map(parse_border_spec),
         inside_h: child_w(node, "insideH").map(parse_border_spec),
         inside_v: child_w(node, "insideV").map(parse_border_spec),
+        // §17.4.73 / §17.4.79: the cell diagonals (CT_TcBorders only).
+        tl2br: child_w(node, "tl2br").map(parse_border_spec),
+        tr2bl: child_w(node, "tr2bl").map(parse_border_spec),
     }
 }
 
@@ -13644,6 +13679,12 @@ fn apply_cond_cell_borders(dst: &mut CellBorders, src: &RawTblBorders) {
     }
     if dst.inside_v.is_none() {
         dst.inside_v = src.inside_v.as_ref().map(edge_to_border_spec);
+    }
+    if dst.tl2br.is_none() {
+        dst.tl2br = src.tl2br.as_ref().map(edge_to_border_spec);
+    }
+    if dst.tr2bl.is_none() {
+        dst.tr2bl = src.tr2bl.as_ref().map(edge_to_border_spec);
     }
 }
 
@@ -14486,6 +14527,26 @@ mod tests {
                 expected,
                 "{authored}"
             );
+        }
+    }
+
+    // ECMA-376 §17.4.21 hideMark is CT_OnOff: present means on unless its
+    // w:val turns it off.
+    #[test]
+    fn cell_hide_mark_reads_on_off() {
+        for (tc_pr, expected) in [
+            ("", false),
+            ("<w:hideMark/>", true),
+            (r#"<w:hideMark w:val="true"/>"#, true),
+            (r#"<w:hideMark w:val="0"/>"#, false),
+            (r#"<w:hideMark w:val="false"/>"#, false),
+        ] {
+            let t = parse_tbl(&format!(
+                r#"<w:tblPr/>
+                   <w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid>
+                   <w:tr><w:tc><w:tcPr>{tc_pr}</w:tcPr><w:p/></w:tc></w:tr>"#
+            ));
+            assert_eq!(t.rows[0].cells[0].hide_mark, expected, "{tc_pr}");
         }
     }
 
@@ -19598,6 +19659,39 @@ mod svg_blip_tests {
             !json.contains("\"sw_ang\""),
             "ArcTo must not emit snake_case sw_ang; got: {json}"
         );
+    }
+
+    /// ECMA-376 §20.1.9.15: per-path `fill`/`stroke` flags stay aligned with the
+    /// kept subpaths (an empty path is dropped with its flags) and are omitted
+    /// when every path uses the defaults.
+    #[test]
+    fn custom_geometry_keeps_per_path_fill_and_stroke_flags() {
+        let parse = |paths: &str| {
+            let xml = format!(
+                r#"<a:custGeom xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:pathLst>{paths}</a:pathLst></a:custGeom>"#
+            );
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            parse_custom_geometry_with_paint(doc.root_element(), 10.0, 10.0)
+        };
+        let path = |attrs: &str| {
+            format!(
+                r#"<a:path w="10" h="10" {attrs}><a:moveTo><a:pt x="0" y="0"/></a:moveTo><a:lnTo><a:pt x="10" y="10"/></a:lnTo></a:path>"#
+            )
+        };
+        let (subpaths, paint) = parse(&format!(
+            r#"{}<a:path w="10" h="10" fill="none"/>{}{}"#,
+            path(r#"fill="none""#),
+            path(r#"stroke="0""#),
+            path(r#"fill="darken""#)
+        ));
+        assert_eq!(subpaths.len(), 3);
+        assert_eq!(
+            serde_json::to_value(&paint).unwrap(),
+            serde_json::json!([{"fill": "none"}, {"stroke": false}, {"fill": "darken"}])
+        );
+        let (subpaths, paint) = parse(&format!("{}{}", path(""), path(r#"stroke="1""#)));
+        assert_eq!(subpaths.len(), 2);
+        assert!(paint.is_empty());
     }
 
     /// Value-level check that the parsed `ArcTo` carries the expected numbers:
@@ -26579,6 +26673,57 @@ mod numbering_marker_font_tests {
             </w:styles>"#,
             ns = W_NS
         ))
+    }
+
+    // ECMA-376 §17.4.73 / §17.4.79: cell diagonals are read from direct
+    // tcBorders and from a conditional table style's tcBorders; a direct value
+    // wins per diagonal, exactly like the four edges.
+    #[test]
+    fn cell_diagonal_borders_fold_direct_over_conditional_style() {
+        let t = parse_tbl_styled(
+            r#"<w:tblPr/>
+               <w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid>
+               <w:tr><w:tc><w:tcPr><w:tcBorders>
+                 <w:tl2br w:val="single" w:sz="4" w:space="0" w:color="auto"/>
+               </w:tcBorders></w:tcPr><w:p/></w:tc></w:tr>"#,
+            &StyleMap::default(),
+        );
+        let borders = &t.rows[0].cells[0].borders;
+        let tl2br = borders.tl2br.as_ref().expect("tl2br");
+        assert_eq!(tl2br.style, "single");
+        assert!((tl2br.width - 0.5).abs() < 1e-9);
+        assert!(borders.tr2bl.is_none());
+
+        let styles = StyleMap::parse(&format!(
+            r#"<w:styles xmlns:w="{ns}">
+                <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:rPr/></w:style>
+                <w:style w:type="table" w:styleId="Diag">
+                    <w:tblStylePr w:type="firstRow">
+                        <w:tcPr><w:tcBorders>
+                            <w:tl2br w:val="double" w:sz="8" w:color="FF0000"/>
+                            <w:tr2bl w:val="dotted" w:sz="4" w:color="00FF00"/>
+                        </w:tcBorders></w:tcPr>
+                    </w:tblStylePr>
+                </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        ));
+        let t = parse_tbl_styled(
+            r#"<w:tblPr><w:tblStyle w:val="Diag"/><w:tblLook w:val="0020"/></w:tblPr>
+               <w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>
+               <w:tr><w:tc><w:tcPr><w:tcBorders>
+                 <w:tr2bl w:val="nil"/>
+               </w:tcBorders></w:tcPr><w:p/></w:tc></w:tr>"#,
+            &styles,
+        );
+        let borders = &t.rows[0].cells[0].borders;
+        let tl2br = borders.tl2br.as_ref().expect("conditional tl2br");
+        assert_eq!(tl2br.style, "double");
+        assert_eq!(tl2br.color.as_deref(), Some("ff0000"));
+        assert_eq!(
+            borders.tr2bl.as_ref().map(|b| b.style.as_str()),
+            Some("nil")
+        );
     }
 
     #[test]

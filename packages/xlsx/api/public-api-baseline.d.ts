@@ -1513,6 +1513,8 @@ export type PathCmd = {
 export interface PathInfo {
     w: number;
     h: number;
+    fill?: 'none' | 'lighten' | 'lightenLess' | 'darken' | 'darkenLess';
+    stroke?: false;
     commands: PathCmd[];
 }
 export interface PatternFill {
