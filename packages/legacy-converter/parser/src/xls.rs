@@ -30,6 +30,7 @@ mod geometry;
 mod pictures;
 mod print;
 mod rich;
+mod shapes;
 mod styles;
 mod theme;
 mod views;
@@ -180,6 +181,7 @@ pub(crate) struct PreparedXls {
     pub(crate) font: Option<styles::NormalFont>,
     pictures: pictures::Pictures,
     charts: chart::Charts,
+    shapes: shapes::Shapes,
 }
 
 impl PreparedXls {
@@ -447,6 +449,12 @@ fn prepare_workbook(
     } else {
         chart::Charts::default()
     };
+    // Rectangles, text boxes and their groups: direct model only.
+    let shapes = if with_pictures && direct {
+        shapes::Shapes::prepare(&records, &tabs, &styles)?
+    } else {
+        shapes::Shapes::default()
+    };
     let mut chart_sheets = Vec::with_capacity(pending_chart_sheets.len());
     for &(index, offset) in &pending_chart_sheets {
         let start = records
@@ -460,7 +468,9 @@ fn prepare_workbook(
     for (index, chart_sheet) in chart_sheets {
         converted[index].1.chart_sheet = Some(chart_sheet);
     }
-    let font = if with_pictures && (!pictures.is_empty() || !charts.is_empty()) {
+    let font = if with_pictures
+        && (!pictures.is_empty() || !charts.is_empty() || !shapes.is_empty())
+    {
         styles.normal_font()
     } else {
         None
@@ -475,15 +485,17 @@ fn prepare_workbook(
         font,
         pictures,
         charts,
+        shapes,
     })
 }
 
 /// The direct reader must not drop drawn content: every sheet-anchored
 /// drawing object on a projected worksheet is an embedded chart (MS-XLS
-/// 2.4.181 ot 5 with its chart substream) or a picture (ot 8 with a BLIP
-/// reference); any other object (lines, shapes, text boxes, controls, cell
-/// comments), a grouped shape, or a chart/picture without its data is rejected
-/// with the reason.
+/// 2.4.181 ot 5 with its chart substream), a picture (ot 8 with a BLIP
+/// reference), a rectangle or text box (ot 2 or 6) or a group (ot 0) of
+/// rectangles and text boxes; any other object (lines, ovals, controls, cell
+/// comments), grouped pictures or charts, or a chart/picture without its data
+/// is rejected with the reason. `shapes` validates each shape's properties.
 fn validate_direct_drawings(records: &[Record<'_>], tabs: &[usize]) -> Result<(), String> {
     let projected: std::collections::BTreeSet<_> = tabs.iter().copied().collect();
     for anchor in drawing_anchors::strict(records)? {
@@ -501,6 +513,19 @@ fn admit_direct_object(anchor: &drawing_anchors::DrawingAnchor) -> Result<(), St
             5 => return Err(unsupported("BIFF chart object without its chart substream")),
             8 if anchor.picture.is_some() => {}
             8 => return Err(unsupported("BIFF picture object without a BLIP reference")),
+            2 | 6 => {}
+            0 => {
+                if let Some(member) = anchor
+                    .members
+                    .iter()
+                    .find(|member| !matches!(member.object_type, 2 | 6))
+                {
+                    return Err(unsupported(format!(
+                        "grouped BIFF drawing object type {} is not projected",
+                        member.object_type
+                    )));
+                }
+            }
             25 => return Err(unsupported("BIFF cell comments are not projected")),
             kind => {
                 return Err(unsupported(format!(
@@ -527,6 +552,9 @@ mod direct_drawing_tests {
             object_type,
             object_flags: 0,
             group_depth: 1,
+            order: 1,
+            shape: None,
+            members: Vec::new(),
             behavior: 0,
             from: corner,
             to: corner,
@@ -548,8 +576,8 @@ mod direct_drawing_tests {
             (5, None, "without its chart substream"),
             (8, None, "without a BLIP reference"),
             (25, None, "cell comments"),
-            (2, None, "type 2 is not projected"),
-            (6, None, "type 6 is not projected"),
+            (1, None, "type 1 is not projected"),
+            (3, None, "type 3 is not projected"),
         ] {
             let error = super::admit_direct_object(&anchor(kind, chart, None)).unwrap_err();
             assert!(error.contains(expected), "{expected}: {error}");

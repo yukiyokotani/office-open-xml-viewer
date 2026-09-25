@@ -2414,8 +2414,8 @@ be closed before an experimental release.
 | XLS | ~~Extended colors (XFExt theme/tint) fall back to palette approximations~~ Resolved: tints (b09eae6a) and theme 0-3 in Excel's lt1/dk1/lt2/dk2 order (0adbc794) | about 6 |
 | XLS | Table (ListObject) styles, conditional-format data bars/icons and pivot styling are absent | about 5 |
 | XLS | Formula text is not decompiled from Ptg tokens, so volatile functions are not recalculated as Excel does at export | 2 |
-| XLS | Clip-art pictures, text boxes, strikethrough and one vertical merge are missing | 1 to 3 each |
-| XLS | The direct reader rejects, instead of omitting, drawn objects it does not project: shapes and text boxes, grouped shapes, macro sheets, move-without-size anchors and drawings whose OfficeArt data continues after an Obj record. Chart sheets are projected as chart-sheet worksheets with the chart at its Chart record rectangle | 7 of 139 |
+| XLS | Clip-art pictures, strikethrough and one vertical merge are missing | 1 to 3 each |
+| XLS | The direct reader rejects, instead of omitting, drawn objects it does not project: lines, ovals and other shape types, grouped pictures or charts, rotated shapes or groups, macro sheets, move-without-size anchors and drawings whose OfficeArt data continues after an Obj record. Chart sheets are projected as chart-sheet worksheets with the chart at its Chart record rectangle; rectangles, text boxes and their sheet groups are projected as XLSX-model shape anchors with solid paint and TxO text, following Excel's own XLSX of the same workbooks | 3 of 139 |
 | XLS | The chart area's automatic border (Excel draws it on a chart sheet) is not projected, so an authored series-less chart renders blank | 1 |
 | PPT | ~~Only seven MS-ODRAW shape types map to presets~~ 100+ shape types map as PowerPoint converts them, with evidenced adjust formulas (officeart::preset); adjusted callout2/3 families, arrow callouts, curved arrows, ribbons and tall cubes/hexagons/parallelograms still fail closed | several |
 | PPT | ~~Native/OLE charts are missing~~ Resolved: embedded OLE objects show their stored presentation picture (bfc835d3) | 3 |

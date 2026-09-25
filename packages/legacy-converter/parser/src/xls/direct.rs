@@ -17,6 +17,8 @@ pub(crate) struct DirectSession {
     native_pictures: pictures::NativePictures,
     charts: chart::Charts,
     native_charts: BTreeMap<usize, Vec<xlsx_model::ChartAnchor>>,
+    shapes: shapes::Shapes,
+    native_shapes: BTreeMap<usize, Vec<xlsx_model::ShapeAnchor>>,
     sheet_index: usize,
     measurement_font: Option<styles::NormalFont>,
     default_font: Option<(String, f64)>,
@@ -94,6 +96,8 @@ impl DirectSession {
             },
             charts: std::mem::take(&mut prepared.charts),
             native_charts: BTreeMap::new(),
+            shapes: std::mem::take(&mut prepared.shapes),
+            native_shapes: BTreeMap::new(),
             sheet_index: 0,
             measurement_font: prepared.font,
             default_font,
@@ -103,7 +107,7 @@ impl DirectSession {
             bootstrapped: false,
             poisoned: false,
         };
-        if session.pictures.is_empty() && session.charts.is_empty() {
+        if session.pictures.is_empty() && session.charts.is_empty() && session.shapes.is_empty() {
             session.initialize_sheet_slots()?;
         }
         Ok(session)
@@ -135,6 +139,8 @@ impl DirectSession {
                 })?;
             self.native_charts =
                 std::mem::take(&mut self.charts).resolve(pending, mdw, &mut self.warnings);
+            self.native_shapes =
+                std::mem::take(&mut self.shapes).resolve(pending, mdw, &mut self.warnings);
             // Geometry the byte converter omits with a warning (a sheet
             // without stored defaults, a formula-display window or an anchor
             // past the resolved grid) rejects the direct session instead.
@@ -143,10 +149,13 @@ impl DirectSession {
                     warning.as_str(),
                     "legacy-xls:unresolved-picture-geometry-omitted"
                         | "legacy-xls:unresolved-chart-geometry-omitted"
+                        | "legacy-xls:unresolved-shape-geometry-omitted"
                 )
             }) {
                 let message = if omitted.contains("chart") {
                     "unresolved XLS chart anchor geometry"
+                } else if omitted.contains("shape") {
+                    "unresolved XLS shape anchor geometry"
                 } else {
                     "unresolved XLS picture anchor geometry"
                 };
@@ -154,11 +163,12 @@ impl DirectSession {
             }
         } else {
             // The caller declined to measure the Normal font's maximum digit
-            // width, which every chart and picture anchor needs.
+            // width, which every chart, picture and shape anchor needs.
             self.warnings
-                .push("legacy-xls:unmeasured-pictures-and-charts-omitted".into());
+                .push("legacy-xls:unmeasured-drawings-omitted".into());
             self.pictures = pictures::Pictures::default();
             self.charts = chart::Charts::default();
+            self.shapes = shapes::Shapes::default();
         }
         self.mdw = mdw;
         self.initialize_sheet_slots()
@@ -307,6 +317,7 @@ impl DirectSession {
             worksheet
                 .charts
                 .extend(self.native_charts.remove(&index).unwrap_or_default());
+            worksheet.shape_groups = self.native_shapes.remove(&index).unwrap_or_default();
             let rows = std::mem::take(&mut worksheet.rows);
             self.sheets[index] = SheetSlot::Projected(ProjectedSheet { worksheet, rows });
         }
@@ -908,7 +919,7 @@ pub(super) mod tests {
         assert!(session
             .warnings()
             .iter()
-            .any(|warning| warning == "legacy-xls:unmeasured-pictures-and-charts-omitted"));
+            .any(|warning| warning == "legacy-xls:unmeasured-drawings-omitted"));
         assert!(session.configure_mdw(Some(7.0)).is_err());
     }
 }

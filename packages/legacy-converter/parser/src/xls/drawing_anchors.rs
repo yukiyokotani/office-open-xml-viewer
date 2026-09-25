@@ -24,7 +24,7 @@ pub struct CellCorner {
     pub dy: i16,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DrawingAnchor {
     /// Zero-based BoundSheet tab order, including non-worksheet tabs.
     pub sheet: usize,
@@ -43,6 +43,40 @@ pub struct DrawingAnchor {
     /// Absolute record range (BOF..=EOF) of the chart substream that follows
     /// this anchor's Obj record (MS-XLS 2.1.7.20.6 `OBJ = Obj *Continue *CHART`).
     pub chart: Option<(usize, usize)>,
+    /// One-based position of this shape container among all shape
+    /// containers of the sheet drawing, in document (paint) order.
+    pub order: u64,
+    /// OfficeArt facts of a rectangle or text box (Obj ot 2 or 6), whose
+    /// interpretation belongs to the projecting host.
+    pub shape: Option<ShapeSource>,
+    /// Members of a group placed on the sheet (Obj ot 0), in document order.
+    /// Only the strict walk flattens groups.
+    pub members: Vec<GroupMember>,
+}
+
+/// An OfficeArt shape's own facts: its MS-ODRAW 2.4.24 shape type (the FSP
+/// instance), its primary then tertiary FOPT entries (full opid with fBid and
+/// fComplex, and value) and the stream offset of its TxO client (MS-XLS
+/// 2.4.329), if any.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShapeSource {
+    pub kind: u16,
+    pub properties: Vec<(u16, u32)>,
+    pub text: Option<usize>,
+}
+
+/// A leaf of a sheet-anchored group. `bounds` is left, top, width and height
+/// as fractions of the group's anchor rectangle, composed through nested
+/// group rectangles (MS-ODRAW 2.2.38 OfficeArtFSPGR, 2.2.39 child anchors).
+#[derive(Debug, Clone, PartialEq)]
+pub struct GroupMember {
+    pub order: u64,
+    pub shape_id: u32,
+    pub shape_flags: u32,
+    pub object_id: u16,
+    pub object_type: u16,
+    pub bounds: [f64; 4],
+    pub shape: Option<ShapeSource>,
 }
 
 /// Which anchors a walk returns. `Projectable` skips shapes whose sheet
@@ -260,6 +294,366 @@ fn walk(
     walk_with_policy(drawing, sheet, work, output, Policy::All)
 }
 
+/// One OfficeArtSpContainer's owned facts (MS-ODRAW 2.2.14), with its native
+/// Obj/TxO clients bound by fragment boundary.
+struct Facts<'a> {
+    shape_id: u32,
+    shape_flags: u32,
+    kind: u16,
+    anchor: Option<(u16, CellCorner, CellCorner)>,
+    /// OfficeArtChildAnchor (2.2.39): left, top, right, bottom.
+    child_anchor: Option<[i32; 4]>,
+    /// OfficeArtFSPGR (2.2.38): the group's own coordinate rectangle.
+    group_rect: Option<[i32; 4]>,
+    object: Option<(u16, u16, u16)>,
+    object_data: Option<&'a [u8]>,
+    chart: Option<(usize, usize)>,
+    text: Option<usize>,
+    picture: picture::Properties,
+    properties: Vec<(u16, u32)>,
+}
+
+impl Facts<'_> {
+    fn source(&self) -> ShapeSource {
+        ShapeSource {
+            kind: self.kind,
+            properties: self.properties.clone(),
+            text: self.text,
+        }
+    }
+
+    fn rotation(&self) -> u32 {
+        self.properties
+            .iter()
+            .find(|(id, _)| *id == 0x0004)
+            .map_or(0, |(_, value)| *value)
+    }
+}
+
+fn rectangle(payload: &[u8]) -> Result<[i32; 4], String> {
+    if payload.len() != 16 {
+        return Err(unsupported("invalid BIFF drawing rectangle"));
+    }
+    Ok(std::array::from_fn(|i| {
+        i32::from_le_bytes(payload[i * 4..i * 4 + 4].try_into().unwrap())
+    }))
+}
+
+fn read_shape<'a>(
+    drawing: &mut Drawing<'a>,
+    start: usize,
+    next: usize,
+    work: &mut usize,
+    ids: &mut HashSet<u32>,
+    objects: &mut HashSet<u16>,
+) -> Result<Facts<'a>, String> {
+    let mut position = start;
+    let mut shape = None;
+    let mut facts = Facts {
+        shape_id: 0,
+        shape_flags: 0,
+        kind: 0,
+        anchor: None,
+        child_anchor: None,
+        group_rect: None,
+        object: None,
+        object_data: None,
+        chart: None,
+        text: None,
+        picture: picture::Properties::default(),
+        properties: Vec::new(),
+    };
+    let mut textbox = false;
+    while position < next {
+        let (child, child_end) =
+            record_with_end(&drawing.bytes[..next], position, work, "XLS shape")?;
+        match child.kind {
+            0xf00f => {
+                if facts.child_anchor.is_some() || child.version != 0 || child.instance != 0 {
+                    return Err(unsupported("invalid BIFF child anchor"));
+                }
+                facts.child_anchor = Some(rectangle(child.payload)?);
+            }
+            0xf009 => {
+                if facts.group_rect.is_some() || child.version != 1 || child.instance != 0 {
+                    return Err(unsupported("invalid BIFF group rectangle"));
+                }
+                facts.group_rect = Some(rectangle(child.payload)?);
+            }
+            0xf00b | 0xf122 => {
+                if child.kind == 0xf00b {
+                    facts.picture.read(child, work)?;
+                }
+                let retain = |p: crate::officeart::properties::Property<'_>| {
+                    if facts.properties.len() >= 4096 {
+                        return Err(unsupported("excessive BIFF shape properties"));
+                    }
+                    facts.properties.push((p.opid, p.value));
+                    Ok(())
+                };
+                if child.kind == 0xf00b {
+                    crate::officeart::properties::visit(child, work, retain)?;
+                } else {
+                    crate::officeart::properties::visit_tertiary(child, work, retain)?;
+                }
+            }
+            0xf00a => {
+                if shape.is_some() || child.version != 2 || child.payload.len() != 8 {
+                    return Err(unsupported("invalid BIFF shape identity"));
+                }
+                let id = u32_at(child.payload, 0)?;
+                if ids.len() >= MAX_OBJECTS || !ids.insert(id) {
+                    return Err(unsupported("duplicate or excessive BIFF shapes"));
+                }
+                shape = Some((id, u32_at(child.payload, 4)?, child.instance));
+            }
+            0xf010 => {
+                if facts.anchor.is_some()
+                    || child.version != 0
+                    || child.instance != 0
+                    || child.payload.len() != 18
+                {
+                    return Err(unsupported("invalid BIFF cell anchor"));
+                }
+                let flags = u16_at(child.payload, 0)? & 3;
+                if flags == 1 {
+                    return Err(unsupported("invalid BIFF anchor movement flags"));
+                }
+                facts.anchor = Some((flags, corner(child.payload, 2)?, corner(child.payload, 10)?));
+            }
+            0xf011 | 0xf00d => {
+                if child.version != 0 || child.instance != 0 || !child.payload.is_empty() {
+                    return Err(unsupported("invalid BIFF drawing client marker"));
+                }
+                let client = drawing.clients.remove(&child_end).ok_or_else(|| {
+                    unsupported("BIFF drawing client is not at its fragment boundary")
+                })?;
+                if child.kind == 0xf011 {
+                    facts.chart = drawing.charts.remove(&child_end);
+                    if facts.object.is_some()
+                        || client.kind != 0x005d
+                        || client.data.len() < 22
+                        || u16_at(client.data, 0)? != 0x15
+                        || u16_at(client.data, 2)? != 0x12
+                    {
+                        return Err(unsupported("invalid BIFF drawing object owner"));
+                    }
+                    let kind = u16_at(client.data, 4)?;
+                    if !matches!(kind, 0..=9 | 11..=20 | 25 | 30) {
+                        return Err(unsupported("invalid BIFF object type"));
+                    }
+                    let id = u16_at(client.data, 6)?;
+                    if !objects.insert(id) {
+                        return Err(unsupported("duplicate BIFF drawing object id"));
+                    }
+                    facts.object = Some((id, kind, u16_at(client.data, 8)?));
+                    facts.object_data = Some(client.data);
+                } else {
+                    if textbox || client.kind != 0x01b6 {
+                        return Err(unsupported("invalid BIFF drawing textbox owner"));
+                    }
+                    textbox = true;
+                    facts.text = Some(client.offset);
+                }
+            }
+            _ => {} // No formula, action, OLE or hyperlink decoding.
+        }
+        position = child_end;
+    }
+    let (shape_id, shape_flags, kind) =
+        shape.ok_or_else(|| unsupported("missing BIFF shape identity"))?;
+    facts.shape_id = shape_id;
+    facts.shape_flags = shape_flags;
+    facts.kind = kind;
+    Ok(facts)
+}
+
+/// Group members flattened into fractions of the anchored group's rectangle.
+/// `map` is the affine map (ax, bx, ay, by) from the enclosing group's
+/// coordinates to those fractions.
+#[allow(clippy::too_many_arguments)]
+fn read_group_members<'a>(
+    drawing: &mut Drawing<'a>,
+    start: usize,
+    end: usize,
+    map: [f64; 4],
+    depth: usize,
+    work: &mut usize,
+    ids: &mut HashSet<u32>,
+    objects: &mut HashSet<u16>,
+    order: &mut u64,
+    members: &mut Vec<GroupMember>,
+) -> Result<(), String> {
+    if depth > MAX_DEPTH {
+        return Err(unsupported("BIFF drawing group depth exceeded"));
+    }
+    let mut at = start;
+    while at < end {
+        spend(work)?;
+        let (record, next) = record_with_end(&drawing.bytes[..end], at, work, "XLS drawing")?;
+        if !matches!(record.kind, 0xf003 | 0xf004) || record.version != 15 || record.instance != 0 {
+            return Err(unsupported("invalid BIFF drawing group child"));
+        }
+        let place = |rect: [i32; 4]| -> Result<[f64; 4], String> {
+            let [left, top, right, bottom] = rect.map(f64::from);
+            if right < left || bottom < top {
+                return Err(unsupported("invalid BIFF child anchor"));
+            }
+            Ok([
+                map[0] + map[1] * left,
+                map[2] + map[3] * top,
+                map[1] * (right - left),
+                map[3] * (bottom - top),
+            ])
+        };
+        if record.kind == 0xf003 {
+            // A nested group: its head's child anchor places it in this
+            // group, and its own rectangle scales its members.
+            let (head, head_end) =
+                record_with_end(&drawing.bytes[..next], at + 8, work, "XLS drawing")?;
+            if head.kind != 0xf004 || head.version != 15 || head.instance != 0 {
+                return Err(unsupported("invalid BIFF drawing group child"));
+            }
+            let facts = read_shape(drawing, at + 16, head_end, work, ids, objects)?;
+            let (Some(child), Some(rect)) = (facts.child_anchor, facts.group_rect) else {
+                return Err(unsupported(
+                    "BIFF nested drawing group without its rectangles",
+                ));
+            };
+            if facts.shape_flags & 0x3 != 0x3
+                || facts.shape_flags & (0x40 | 0x80) != 0
+                || facts.rotation() != 0
+                || facts.anchor.is_some()
+                || facts.object.is_some_and(|(_, kind, _)| kind != 0)
+            {
+                return Err(unsupported(
+                    "rotated, flipped or anchored nested BIFF drawing groups are not projected",
+                ));
+            }
+            let placed = place(child)?;
+            let inner = inner_map(placed, rect)?;
+            read_group_members(
+                drawing,
+                head_end,
+                next,
+                inner,
+                depth + 1,
+                work,
+                ids,
+                objects,
+                order,
+                members,
+            )?;
+        } else {
+            let facts = read_shape(drawing, at + 8, next, work, ids, objects)?;
+            let child = facts
+                .child_anchor
+                .filter(|_| facts.shape_flags & 0x3 == 0x2 && facts.anchor.is_none())
+                .ok_or_else(|| unsupported("BIFF group member without its child anchor"))?;
+            let (object_id, object_type, _) = facts
+                .object
+                .ok_or_else(|| unsupported("BIFF group member has no owned object"))?;
+            if members.len() >= MAX_OBJECTS {
+                return Err(unsupported("BIFF retained anchor budget exceeded"));
+            }
+            *order += 1;
+            members.push(GroupMember {
+                order: *order,
+                shape_id: facts.shape_id,
+                shape_flags: facts.shape_flags,
+                object_id,
+                object_type,
+                bounds: place(child)?,
+                shape: matches!(object_type, 2 | 6).then(|| facts.source()),
+            });
+        }
+        at = next;
+    }
+    Ok(())
+}
+
+/// The affine map from a group's own coordinates (`rect`, OfficeArtFSPGR) to
+/// anchor fractions, given where the group itself was placed.
+fn inner_map(placed: [f64; 4], rect: [i32; 4]) -> Result<[f64; 4], String> {
+    let [left, top, right, bottom] = rect.map(f64::from);
+    if right <= left || bottom <= top {
+        return Err(unsupported("empty BIFF drawing group rectangle"));
+    }
+    let (bx, by) = (placed[2] / (right - left), placed[3] / (bottom - top));
+    Ok([placed[0] - bx * left, bx, placed[1] - by * top, by])
+}
+
+/// A group placed directly on the sheet (MS-ODRAW 2.2.13 inside the
+/// patriarch): its head carries the cell anchor and an Obj of type 0.
+#[allow(clippy::too_many_arguments)]
+fn read_sheet_group<'a>(
+    drawing: &mut Drawing<'a>,
+    at: usize,
+    next: usize,
+    sheet: usize,
+    work: &mut usize,
+    ids: &mut HashSet<u32>,
+    objects: &mut HashSet<u16>,
+    order: &mut u64,
+) -> Result<DrawingAnchor, String> {
+    let (head, head_end) = record_with_end(&drawing.bytes[..next], at + 8, work, "XLS drawing")?;
+    if head.kind != 0xf004 || head.version != 15 || head.instance != 0 {
+        return Err(unsupported("invalid BIFF drawing group child"));
+    }
+    let facts = read_shape(drawing, at + 16, head_end, work, ids, objects)?;
+    let (Some((behavior, from, to)), Some(rect)) = (facts.anchor, facts.group_rect) else {
+        return Err(unsupported("BIFF drawing group without its anchor"));
+    };
+    let (object_id, object_type, object_flags) = facts
+        .object
+        .filter(|(_, kind, _)| *kind == 0)
+        .ok_or_else(|| unsupported("BIFF drawing group without its group object"))?;
+    if facts.shape_flags & 0x3 != 0x1
+        || facts.shape_flags & (0x40 | 0x80) != 0
+        || facts.rotation() != 0
+        || facts.child_anchor.is_some()
+    {
+        return Err(unsupported(
+            "rotated or flipped BIFF drawing groups are not projected",
+        ));
+    }
+    *order += 1;
+    let group_order = *order;
+    let mut members = Vec::new();
+    read_group_members(
+        drawing,
+        head_end,
+        next,
+        inner_map([0.0, 0.0, 1.0, 1.0], rect)?,
+        2,
+        work,
+        ids,
+        objects,
+        order,
+        &mut members,
+    )?;
+    if members.is_empty() {
+        return Err(unsupported("empty BIFF drawing group"));
+    }
+    Ok(DrawingAnchor {
+        sheet,
+        shape_id: facts.shape_id,
+        shape_flags: facts.shape_flags,
+        object_id,
+        object_type,
+        object_flags,
+        group_depth: 2,
+        behavior,
+        from,
+        to,
+        picture: None,
+        chart: None,
+        order: group_order,
+        shape: Some(facts.source()),
+        members,
+    })
+}
+
 fn walk_with_policy(
     drawing: &mut Drawing<'_>,
     sheet: usize,
@@ -275,6 +669,8 @@ fn walk_with_policy(
     let mut stack = vec![(8usize, end, 0usize, false, true, false)];
     let mut ids = HashSet::new();
     let mut objects = HashSet::new();
+    // Paint order: every shape container in document order (MS-ODRAW 2.2.13).
+    let mut order = 0u64;
     while let Some((mut at, end, depth, group, mut first, mut excluded)) = stack.pop() {
         if depth > MAX_DEPTH {
             return Err(unsupported("BIFF drawing group depth exceeded"));
@@ -294,6 +690,31 @@ fn walk_with_policy(
                 return Err(unsupported("invalid BIFF shape container"));
             }
             if record.kind == 0xf003 {
+                if policy == Policy::Strict && depth == 1 {
+                    // A group placed on the sheet: flatten its members into
+                    // its anchor. Deeper nesting is composed inside.
+                    if excluded {
+                        return Err(unsupported(
+                            "BIFF grouped or transformed drawing shapes are not projected",
+                        ));
+                    }
+                    if output.len() >= MAX_OBJECTS {
+                        return Err(unsupported("BIFF retained anchor budget exceeded"));
+                    }
+                    let anchor = read_sheet_group(
+                        drawing,
+                        at,
+                        next,
+                        sheet,
+                        work,
+                        &mut ids,
+                        &mut objects,
+                        &mut order,
+                    )?;
+                    output.push(anchor);
+                    at = next;
+                    continue;
+                }
                 // Resume siblings after the owned group; bounded stack, no
                 // recursive descent into arbitrary application-specific data.
                 stack.push((next, end, depth, group, false, excluded));
@@ -301,110 +722,31 @@ fn walk_with_policy(
                 break;
             }
             if record.kind == 0xf004 {
-                let (mut position, mut shape, mut anchor, mut object, mut textbox) =
-                    (at + 8, None, None, None, false);
-                let mut chart = None;
-                let mut object_data = None;
-                let mut picture = picture::Properties::default();
-                let mut child_anchor = false;
-                while position < next {
-                    let (child, child_end) =
-                        record_with_end(&drawing.bytes[..next], position, work, "XLS shape")?;
-                    match child.kind {
-                        0xf00f => child_anchor = true,
-                        0xf00b => picture.read(child, work)?,
-                        0xf00a => {
-                            if shape.is_some() || child.version != 2 || child.payload.len() != 8 {
-                                return Err(unsupported("invalid BIFF shape identity"));
-                            }
-                            let id = u32_at(child.payload, 0)?;
-                            if ids.len() >= MAX_OBJECTS || !ids.insert(id) {
-                                return Err(unsupported("duplicate or excessive BIFF shapes"));
-                            }
-                            shape = Some((id, u32_at(child.payload, 4)?));
-                        }
-                        0xf010 => {
-                            if anchor.is_some()
-                                || child.version != 0
-                                || child.instance != 0
-                                || child.payload.len() != 18
-                            {
-                                return Err(unsupported("invalid BIFF cell anchor"));
-                            }
-                            let flags = u16_at(child.payload, 0)? & 3;
-                            if flags == 1 {
-                                return Err(unsupported("invalid BIFF anchor movement flags"));
-                            }
-                            anchor = Some((
-                                flags,
-                                corner(child.payload, 2)?,
-                                corner(child.payload, 10)?,
-                            ));
-                        }
-                        0xf011 | 0xf00d => {
-                            if child.version != 0
-                                || child.instance != 0
-                                || !child.payload.is_empty()
-                            {
-                                return Err(unsupported("invalid BIFF drawing client marker"));
-                            }
-                            let client = drawing.clients.remove(&child_end).ok_or_else(|| {
-                                unsupported("BIFF drawing client is not at its fragment boundary")
-                            })?;
-                            if child.kind == 0xf011 {
-                                chart = drawing.charts.remove(&child_end);
-                            }
-                            if child.kind == 0xf011 {
-                                if object.is_some()
-                                    || client.kind != 0x005d
-                                    || client.data.len() < 22
-                                    || u16_at(client.data, 0)? != 0x15
-                                    || u16_at(client.data, 2)? != 0x12
-                                {
-                                    return Err(unsupported("invalid BIFF drawing object owner"));
-                                }
-                                let kind = u16_at(client.data, 4)?;
-                                if !matches!(kind, 0..=9 | 11..=20 | 25 | 30) {
-                                    return Err(unsupported("invalid BIFF object type"));
-                                }
-                                let id = u16_at(client.data, 6)?;
-                                if !objects.insert(id) {
-                                    return Err(unsupported("duplicate BIFF drawing object id"));
-                                }
-                                object = Some((id, kind, u16_at(client.data, 8)?));
-                                object_data = Some(client.data);
-                            } else {
-                                if textbox || client.kind != 0x01b6 {
-                                    return Err(unsupported("invalid BIFF drawing textbox owner"));
-                                }
-                                textbox = true;
-                            }
-                        }
-                        _ => {} // No formula, action, OLE or hyperlink decoding.
-                    }
-                    position = child_end;
-                }
-                let (shape_id, shape_flags) =
-                    shape.ok_or_else(|| unsupported("missing BIFF shape identity"))?;
+                let facts = read_shape(drawing, at + 8, next, work, &mut ids, &mut objects)?;
+                order += 1;
                 if group_head {
                     // Only the top-level patriarch is transparent to sheet
                     // coordinates. Nested group transforms are not flattened.
                     excluded |= depth != 1
-                        || shape_flags & 5 != 5
-                        || shape_flags & (8 | 16 | 64 | 128 | 1024) != 0
-                        || picture.excluded();
+                        || facts.shape_flags & 5 != 5
+                        || facts.shape_flags & (8 | 16 | 64 | 128 | 1024) != 0
+                        || facts.picture.excluded();
                 }
-                if policy == Policy::Strict && anchor.is_none() && child_anchor {
+                if policy == Policy::Strict
+                    && facts.anchor.is_none()
+                    && facts.child_anchor.is_some()
+                {
                     return Err(unsupported("BIFF grouped drawing shapes are not projected"));
                 }
-                if let Some((behavior, from, to)) = anchor {
-                    let (object_id, object_type, object_flags) = object
+                if let Some((behavior, from, to)) = facts.anchor {
+                    let (object_id, object_type, object_flags) = facts
+                        .object
                         .ok_or_else(|| unsupported("BIFF cell anchor has no owned object"))?;
                     if output.len() >= MAX_OBJECTS {
                         return Err(unsupported("BIFF retained anchor budget exceeded"));
                     }
                     if matches!(policy, Policy::Projectable | Policy::Strict)
-                        && (excluded || depth > 1 || child_anchor)
+                        && (excluded || depth > 1 || facts.child_anchor.is_some())
                     {
                         if policy == Policy::Strict {
                             return Err(unsupported(
@@ -416,8 +758,8 @@ fn walk_with_policy(
                     }
                     output.push(DrawingAnchor {
                         sheet,
-                        shape_id,
-                        shape_flags,
+                        shape_id: facts.shape_id,
+                        shape_flags: facts.shape_flags,
                         object_id,
                         object_type,
                         object_flags,
@@ -425,8 +767,13 @@ fn walk_with_policy(
                         behavior,
                         from,
                         to,
-                        picture: picture.reference(shape_flags, object_data)?,
-                        chart: chart.filter(|_| object_type == 5),
+                        picture: facts
+                            .picture
+                            .reference(facts.shape_flags, facts.object_data)?,
+                        chart: facts.chart.filter(|_| object_type == 5),
+                        order,
+                        shape: matches!(object_type, 2 | 6).then(|| facts.source()),
+                        members: Vec::new(),
                     });
                 }
             }

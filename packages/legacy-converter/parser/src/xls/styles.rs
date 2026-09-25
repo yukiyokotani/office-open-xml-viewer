@@ -381,6 +381,23 @@ impl ResolvedStyleSheet {
     }
 }
 
+/// Drawing-shape text font resolved from a BIFF Font record (MS-XLS 2.4.122)
+/// selected by a TxO formatting run's FontIndex (2.5.129).
+#[derive(Debug, Clone)]
+pub(super) struct ShapeFont {
+    pub name: String,
+    pub size_twips: u16,
+    pub weight: u16,
+    pub italic: bool,
+    pub underline: bool,
+    pub strike: bool,
+    /// Superscript/subscript, outline, shadow, condense or extend.
+    pub other_effects: bool,
+    /// Resolved palette color; `None` for the automatic color (0x7FFF).
+    pub color: Option<String>,
+    pub automatic_color: bool,
+}
+
 /// Chart text font resolved from a BIFF Font record.
 #[derive(Debug, Clone)]
 pub(super) struct ChartFont {
@@ -491,6 +508,33 @@ impl<'a> Styles<'a> {
             bold: font.weight >= 700,
             italic: font.italic,
             color: self.chart_color(font.color_index),
+        })
+    }
+
+    /// A shape text run's font by FontIndex: 4 is reserved and indices above
+    /// it are one-based (MS-XLS 2.5.129).
+    pub(super) fn shape_font(&self, index: u16) -> Result<ShapeFont, String> {
+        let data = self
+            .fonts
+            .get(usize::from(index - u16::from(index > 4)))
+            .filter(|_| index != 4)
+            .ok_or_else(|| unsupported("BIFF shape text font index out of range"))?;
+        let font = ResolvedFont::decode(data)?;
+        let automatic_color = matches!(self.color(font.color_index), ColorIdentity::Auto);
+        Ok(ShapeFont {
+            color: self.chart_color(font.color_index),
+            automatic_color,
+            size_twips: font.size_twips,
+            weight: font.weight,
+            italic: font.italic,
+            underline: font.underline != Underline::None,
+            strike: font.strike,
+            other_effects: font.script != Script::Baseline
+                || font.outline
+                || font.shadow
+                || font.condense
+                || font.extend,
+            name: font.name,
         })
     }
 

@@ -141,6 +141,7 @@ impl<'a> Cells<'a> {
 struct PreparedChart {
     from: CellCorner,
     to: CellCorner,
+    order: u64,
     model: ooxml_common::chart::ChartModel,
 }
 
@@ -304,6 +305,7 @@ impl Charts {
             charts.sheets.entry(sheet).or_default().push(PreparedChart {
                 from: anchor.from,
                 to: anchor.to,
+                order: anchor.order,
                 model,
             });
         }
@@ -356,13 +358,14 @@ impl Charts {
                 ))
             };
             let mut anchors = Vec::new();
-            for (ordinal, chart) in charts.into_iter().enumerate() {
+            for chart in charts {
                 let (Some(from), Some(to)) = (locate(chart.from), locate(chart.to)) else {
                     omitted = true;
                     continue;
                 };
                 anchors.push(xlsx_model::ChartAnchor {
-                    z_order: ordinal as u64,
+                    // OfficeArt document order, shared with pictures and shapes.
+                    z_order: chart.order,
                     from_col: from.0,
                     from_col_off: from.1,
                     from_row: from.2,

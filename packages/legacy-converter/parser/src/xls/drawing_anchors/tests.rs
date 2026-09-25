@@ -88,6 +88,9 @@ fn preserves_signed_fractional_endpoints_and_exact_object_ownership() {
             object_type: 8,
             object_flags: 0x11,
             group_depth: 0,
+            order: 1,
+            shape: None,
+            members: Vec::new(),
             behavior: 3,
             picture: None,
             chart: None,
@@ -314,7 +317,7 @@ fn enforces_shape_identity_and_global_retained_anchor_limits() {
     let mut drawing = assemble(&records(&source), 0, &mut 1000, &mut remaining)
         .unwrap()
         .unwrap();
-    let mut retained = vec![run(&source).unwrap()[0]; MAX_OBJECTS];
+    let mut retained = vec![run(&source).unwrap()[0].clone(); MAX_OBJECTS];
     assert!(walk(&mut drawing, 0, &mut 1000, &mut retained)
         .unwrap_err()
         .contains("retained anchor budget"));
@@ -359,4 +362,144 @@ fn binds_only_the_owning_shapes_picture_property_and_plain_native_object() {
     );
     source[2].1[32] = 16; // ActiveX cannot become a passive catalog reference.
     assert!(run(&source).unwrap()[0].picture.is_none());
+}
+
+fn cmo_of(id: u16, kind: u16) -> Vec<u8> {
+    let mut data = cmo(id);
+    data[4..6].copy_from_slice(&kind.to_le_bytes());
+    data
+}
+
+fn identity(id: u32, flags: u32) -> Vec<u8> {
+    art(0xf00a, 2, &[id.to_le_bytes(), flags.to_le_bytes()].concat())
+}
+
+fn rect(values: [i32; 4]) -> Vec<u8> {
+    values.into_iter().flat_map(i32::to_le_bytes).collect()
+}
+
+/// Worksheet records for one drawing whose Obj clients follow each OfficeArt
+/// client-data marker, as Excel interleaves them.
+fn interleaved(drawing: &[u8], objects: &[Vec<u8>]) -> Vec<(u16, Vec<u8>)> {
+    let marker = [0, 0, 0x11, 0xf0, 0, 0, 0, 0];
+    let mut data = vec![(BOF, vec![0, 6, 0x10, 0])];
+    let mut start = 0;
+    let mut objects = objects.iter();
+    for at in 0..drawing.len() - 7 {
+        if drawing[at..at + 8] == marker {
+            data.push((0xec, drawing[start..at + 8].to_vec()));
+            data.push((0x5d, objects.next().unwrap().clone()));
+            start = at + 8;
+        }
+    }
+    if start < drawing.len() {
+        data.push((0xec, drawing[start..].to_vec()));
+    }
+    data.push((EOF, vec![]));
+    data
+}
+
+/// A sheet group (rectangle 200 x 100) holding a rectangle and a nested
+/// group (rectangle 10 x 10) that holds a text box.
+fn group_fixture(group_extra: &[u8], leaf_flags: u32) -> Vec<(u16, Vec<u8>)> {
+    let client = art(0xf011, 0, &[]);
+    let head = art(0xf004, 15, &identity(1, 5));
+    let group_head = art(
+        0xf004,
+        15,
+        &[
+            art(0xf009, 1, &rect([0, 0, 200, 100])),
+            identity(2, 0x201),
+            group_extra.to_vec(),
+            art(0xf010, 0, &anchor()),
+            client.clone(),
+        ]
+        .concat(),
+    );
+    let leaf = |id, child: [i32; 4]| {
+        art(
+            0xf004,
+            15,
+            &[
+                identity(id, leaf_flags),
+                art(0xf00f, 0, &rect(child)),
+                client.clone(),
+            ]
+            .concat(),
+        )
+    };
+    let nested = art(
+        0xf003,
+        15,
+        &[
+            art(
+                0xf004,
+                15,
+                &[
+                    art(0xf009, 1, &rect([0, 0, 10, 10])),
+                    identity(4, 0x203),
+                    art(0xf00f, 0, &rect([0, 50, 100, 100])),
+                ]
+                .concat(),
+            ),
+            leaf(5, [5, 0, 10, 10]),
+        ]
+        .concat(),
+    );
+    let group = art(
+        0xf003,
+        15,
+        &[group_head, leaf(3, [100, 0, 200, 50]), nested].concat(),
+    );
+    let drawing = art(0xf002, 15, &art(0xf003, 15, &[head, group].concat()));
+    interleaved(&drawing, &[cmo_of(1, 0), cmo_of(2, 2), cmo_of(3, 6)])
+}
+
+fn walk_as(data: &[(u16, Vec<u8>)], policy: Policy) -> Result<Vec<DrawingAnchor>, String> {
+    let mut work = 10_000;
+    let mut remaining = MAX_BYTES;
+    let mut drawing = assemble(&records(data), 0, &mut work, &mut remaining)?.unwrap();
+    let mut result = Vec::new();
+    walk_with_policy(&mut drawing, 0, &mut work, &mut result, policy).map(|()| result)
+}
+
+#[test]
+fn strict_walk_flattens_sheet_groups_through_nested_group_rectangles() {
+    let data = group_fixture(&[], 0xa02);
+    let anchors = walk_as(&data, Policy::Strict).unwrap();
+    assert_eq!(anchors.len(), 1);
+    let group = &anchors[0];
+    assert_eq!((group.object_type, group.order, group.shape_id), (0, 2, 2));
+    assert_eq!(group.behavior, 3);
+    assert!(group.shape.is_some());
+    let members: Vec<_> = group
+        .members
+        .iter()
+        .map(|m| (m.order, m.object_type, m.bounds, m.shape.is_some()))
+        .collect();
+    assert_eq!(
+        members,
+        vec![
+            (3, 2, [0.5, 0.0, 0.5, 0.5], true),
+            (4, 6, [0.25, 0.5, 0.25, 0.5], true),
+        ]
+    );
+    // The projecting walk used by pictures and charts still skips groups.
+    assert!(walk_as(&data, Policy::Projectable).unwrap().is_empty());
+}
+
+#[test]
+fn strict_walk_rejects_rotated_groups_and_unanchored_members() {
+    let rotation = art(
+        0xf00b,
+        0x13,
+        &[4u16.to_le_bytes().to_vec(), 1u32.to_le_bytes().to_vec()].concat(),
+    );
+    assert!(walk_as(&group_fixture(&rotation, 0xa02), Policy::Strict)
+        .unwrap_err()
+        .contains("rotated or flipped"));
+    // A member that is not flagged as a group child.
+    assert!(walk_as(&group_fixture(&[], 0xa00), Policy::Strict)
+        .unwrap_err()
+        .contains("child anchor"));
 }

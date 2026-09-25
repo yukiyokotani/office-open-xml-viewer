@@ -44,6 +44,8 @@ struct ResolvedPicture {
     store_index: u32,
     extension: &'static str,
     edit_as: &'static str,
+    /// Document (paint) order among all of the sheet's drawing objects.
+    order: u64,
 }
 
 pub(super) struct NativePictures {
@@ -211,6 +213,7 @@ impl Pictures {
                     store_index: id,
                     extension: *ext,
                     edit_as,
+                    order: anchor.order,
                 });
             }
             if !resolved.is_empty() {
@@ -264,13 +267,14 @@ impl ResolvedPictures {
             anchors
                 .try_reserve_exact(values.len())
                 .map_err(|_| super::unsupported("XLS picture model allocation failed"))?;
-            for (ordinal, value) in values.into_iter().enumerate() {
+            for value in values {
                 let image_path = key(value.store_index, budget)?;
                 let mime = ooxml_common::blip::mime_from_ext(value.extension);
                 charge(budget, mime.len() + value.edit_as.len())?;
                 anchors.push(xlsx_model::ImageAnchor {
-                    // Relative picture order, not an artificial XML byte offset.
-                    z_order: ordinal as u64,
+                    // OfficeArt document order, shared with charts and
+                    // shapes, not an artificial XML byte offset.
+                    z_order: value.order,
                     from_col: u32::from(value.from.column),
                     from_row: u32::from(value.from.row),
                     from_col_off: value.dx,
@@ -406,6 +410,9 @@ pub(super) fn session_fixture() -> (Pictures, SheetData, &'static str, Vec<u8>) 
         object_type: 8,
         object_flags: 0,
         group_depth: 1,
+        order: 1,
+        shape: None,
+        members: Vec::new(),
         behavior: 2,
         chart: None,
         from: CellCorner {
@@ -495,6 +502,9 @@ mod tests {
             object_type: 8,
             object_flags: 0,
             group_depth: 1,
+            order: 1,
+            shape: None,
+            members: Vec::new(),
             behavior: 2,
             chart: None,
             from: CellCorner {
@@ -518,6 +528,12 @@ mod tests {
             }),
         }
     }
+    /// Two pictures in OfficeArt document order.
+    fn two() -> Vec<DrawingAnchor> {
+        let mut second = anchor();
+        second.order = 2;
+        vec![anchor(), second]
+    }
     fn pictures(anchors: Vec<DrawingAnchor>) -> Pictures {
         Pictures {
             anchors: BTreeMap::from([(0, anchors)]),
@@ -529,7 +545,7 @@ mod tests {
     #[test]
     fn native_picture_projection_matches_existing_xlsx_parser() {
         let sheets = [("S".into(), sheet())];
-        let parts = pictures(vec![anchor(), anchor()]).emit(&sheets, 7.0, &mut Vec::new());
+        let parts = pictures(two()).emit(&sheets, 7.0, &mut Vec::new());
         let bytes = super::super::build_xlsx_with_drawings(
             &sheets,
             &super::super::styles::minimal_resolved(),
@@ -545,7 +561,7 @@ mod tests {
             serde_json::from_str(&xlsx_parser::parse_sheet_native(&bytes, 0, "S").unwrap())
                 .unwrap();
         let mut budget = usize::MAX;
-        let native = pictures(vec![anchor(), anchor()])
+        let native = pictures(two())
             .resolve(&sheets, 7.0, &mut Vec::new())
             .into_models(&mut budget)
             .unwrap();
@@ -553,22 +569,17 @@ mod tests {
         assert_eq!(expected.len(), native.sheets[&0].len());
         for (ordinal, (expected, actual)) in expected.iter().zip(&native.sheets[&0]).enumerate() {
             let mut expected = expected.clone();
-            // Resource identity and relative ordering replace ZIP paths/XML offsets.
+            // Resource identity and OfficeArt document order replace ZIP
+            // paths/XML offsets.
             expected["imagePath"] = serde_json::json!("legacy-xls/image/1");
-            expected["zOrder"] = serde_json::json!(ordinal);
+            expected["zOrder"] = serde_json::json!(ordinal + 1);
             assert_eq!(expected, serde_json::to_value(actual).unwrap());
         }
     }
 
     #[test]
     fn native_picture_models_preserve_transforms_and_charge_exact_payload_budget() {
-        let resolve = || {
-            pictures(vec![anchor(), anchor()]).resolve(
-                &[("S".into(), sheet())],
-                7.0,
-                &mut Vec::new(),
-            )
-        };
+        let resolve = || pictures(two()).resolve(&[("S".into(), sheet())], 7.0, &mut Vec::new());
         let mut remaining = usize::MAX;
         let native = resolve().into_models(&mut remaining).unwrap();
         let required = usize::MAX - remaining;
@@ -666,7 +677,7 @@ mod tests {
         let mut picture = anchor();
         picture.to.row = 65535;
         let pictures = Pictures {
-            anchors: (0..32).map(|i| (i, vec![picture])).collect(),
+            anchors: (0..32).map(|i| (i, vec![picture.clone()])).collect(),
             images: vec![(1, "png", vec![1])],
             unsupported_images: false,
         };
@@ -683,6 +694,7 @@ mod tests {
         use std::io::{Cursor, Read};
         let prepared = PreparedXls {
             charts: Default::default(),
+            shapes: Default::default(),
             sheets: vec![("Picture".into(), sheet()), ("Cells".into(), sheet())],
             styles: styles::minimal_resolved(),
             shared_strings: vec![],
@@ -718,6 +730,7 @@ mod tests {
         use std::io::{Cursor, Read};
         let prepared = PreparedXls {
             charts: Default::default(),
+            shapes: Default::default(),
             sheets: vec![
                 ("Picture".into(), base_width_sheet()),
                 ("Cells".into(), base_width_sheet()),
