@@ -28,7 +28,10 @@ export function buildPptShapeImageFillFixture(wmf?: Uint8Array): Uint8Array {
     record(0xf00a, concat(little32(42), little32(0x200)), (3 << 4) | 2),
     record(0xf010, concat(...[0, 0, 1152, 576].map(little32))),
     properties,
-    record(0xf00d, record(4008, new TextEncoder().encode('Picture fill text')), 15),
+    // A TextRulerAtom authors level-0 zero margin/indent origins: the direct
+    // reader never invents paragraph geometry for a text box without styles.
+    record(0xf00d, concat(record(4008, new TextEncoder().encode('Picture fill text')),
+      record(4006, concat(little32(8 | 256), little32(0)))), 15),
   ), 15);
   return buildPptFixture(record(1036, record(0xf002, shape, 15), 15), new Uint8Array(), undefined,
     { entries: [blip] });

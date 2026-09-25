@@ -1,6 +1,6 @@
 /** Authored passive BIFF8 fixture; no private or Office-generated data. */
 import { concat, little16, little32 } from './test-fixtures.js';
-import { buildCfbWithStreams } from '@silurus/ooxml-core/testing';
+import { workbookCfb } from './xls-workbook-fixture.js';
 
 export const picturePng = Uint8Array.from(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLttAAAAABJRU5ErkJggg==', 'base64'));
 const wmfRecord = (fn: number, words: number[] = []) => concat(little32(3 + words.length), little16(fn), ...words.map(little16));
@@ -61,5 +61,5 @@ export function buildXlsPicturesFixture(options: {
   const number = new Uint8Array(14); new DataView(number.buffer).setFloat64(6, 42.5, true);
   const workbook = concat(globals(), bof(16), biff(0x225, new Uint8Array([0, 0, 44, 1])),
     biff(0x55, little16(8)), biff(0x99, little16(2560)), biff(0x203, number), biff(0xec, drawing), biff(0x5d, obj), biff(10));
-  return new Uint8Array(buildCfbWithStreams([{ name: 'Workbook', data: workbook }]));
+  return workbookCfb(workbook);
 }

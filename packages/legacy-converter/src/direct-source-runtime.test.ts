@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createDirectSourceRuntime, resolveDirectWasmInput } from './direct-source-runtime.js';
+import {
+  createDirectSourceRuntime,
+  resolveDirectWasmInput,
+  validateDirectWasmUrl,
+} from './direct-source-runtime.js';
 
 class Archive {
   free = vi.fn();
@@ -8,12 +12,11 @@ class Archive {
   __destroy_into_raw = vi.fn(() => 1);
 }
 
-const descriptor = { wasmUrl: 'https://example.test/runtime.wasm' };
+const wasmUrl = 'https://example.test/runtime.wasm';
 
 function engine(glue: object, construct: () => Archive) {
   return createDirectSourceRuntime({
     label: 'test', maximumSourceBytes: 100,
-    validate: () => descriptor,
     loadGlue: async () => glue as { default(input: { module_or_path: unknown }): Promise<unknown> },
     resolveWasm: async () => new Uint8Array(),
     construct,
@@ -34,6 +37,30 @@ describe('direct source WASM trap containment', () => {
 
   it('rejects a relative WASM input instead of resolving it against worker code', async () => {
     await expect(resolveDirectWasmInput('./direct.wasm')).rejects.toThrow();
+    for (const value of ['', './direct.wasm', ' https://example.test/x.wasm', 'javascript:alert(1)', 7]) {
+      expect(() => validateDirectWasmUrl(value, 'test')).toThrow(TypeError);
+    }
+    expect(validateDirectWasmUrl('data:application/wasm;base64,AGFzbQ==', 'test'))
+      .toBe('data:application/wasm;base64,AGFzbQ==');
+  });
+
+  it('rejects URL, byte budget and abort failures before loading, then pins one WASM URL', async () => {
+    const glue = { default: vi.fn(async () => undefined) };
+    const loadGlue = vi.fn(async () => glue);
+    const runtime = createDirectSourceRuntime({
+      label: 'test', maximumSourceBytes: 2, loadGlue,
+      resolveWasm: async () => new Uint8Array(), construct: () => new Archive(),
+      closeNative: archive => archive.close(),
+    });
+    await expect(runtime.open(new Uint8Array(), './relative.wasm')).rejects.toThrow(TypeError);
+    await expect(runtime.open(new Uint8Array(3), wasmUrl)).rejects.toThrow(RangeError);
+    await expect(runtime.open(new Uint8Array(), wasmUrl, AbortSignal.abort()))
+      .rejects.toMatchObject({ name: 'AbortError' });
+    expect(loadGlue).not.toHaveBeenCalled();
+    const source = await runtime.open(new Uint8Array(2), wasmUrl);
+    await expect(runtime.open(new Uint8Array(), 'https://example.test/other.wasm')).rejects.toThrow('pinned');
+    source.closeArchive();
+    expect(glue.default).toHaveBeenCalledOnce();
   });
 
   it('poisons sibling live handles and never calls poisoned destructors', async () => {
@@ -41,8 +68,8 @@ describe('direct source WASM trap containment', () => {
     const firstArchive = new Archive(); const secondArchive = new Archive();
     const archives = [firstArchive, secondArchive];
     const runtime = engine(glue, () => archives.shift()!);
-    const first = await runtime.open(new Uint8Array(), descriptor);
-    const second = await runtime.open(new Uint8Array(), descriptor);
+    const first = await runtime.open(new Uint8Array(), wasmUrl);
+    const second = await runtime.open(new Uint8Array(), wasmUrl);
     const cached = second.archive.call;
     firstArchive.call.mockImplementation(() => { throw new WebAssembly.RuntimeError('trap'); });
     let failure: unknown;
@@ -55,7 +82,7 @@ describe('direct source WASM trap containment', () => {
     first.closeArchive(); second.closeArchive();
     expect(firstArchive.free).not.toHaveBeenCalled();
     expect(secondArchive.free).not.toHaveBeenCalled();
-    await expect(runtime.open(new Uint8Array(), descriptor)).rejects.toThrow('WASM runtime trapped');
+    await expect(runtime.open(new Uint8Array(), wasmUrl)).rejects.toThrow('WASM runtime trapped');
   });
 
   it('shares poisoning by generated glue identity across engine wrappers', async () => {
@@ -63,19 +90,19 @@ describe('direct source WASM trap containment', () => {
     const firstArchive = new Archive(); const secondArchive = new Archive();
     const firstRuntime = engine(glue, () => firstArchive);
     const secondRuntime = engine(glue, () => secondArchive);
-    const first = await firstRuntime.open(new Uint8Array(), descriptor);
-    const second = await secondRuntime.open(new Uint8Array(), descriptor);
+    const first = await firstRuntime.open(new Uint8Array(), wasmUrl);
+    const second = await secondRuntime.open(new Uint8Array(), wasmUrl);
     secondArchive.call.mockImplementation(() => { throw new WebAssembly.RuntimeError('trap'); });
     const failure = capture(() => second.archive.call());
     expect(capture(() => first.archive.call())).toBe(failure);
-    expect(await captureAsync(() => firstRuntime.open(new Uint8Array(), descriptor))).toBe(failure);
+    expect(await captureAsync(() => firstRuntime.open(new Uint8Array(), wasmUrl))).toBe(failure);
     expect(firstArchive.__destroy_into_raw).toHaveBeenCalledOnce();
   });
 
   it('keeps ordinary Result-style exceptions nonfatal and preserves exact close', async () => {
     const archive = new Archive();
     const runtime = engine({ default: vi.fn(async () => undefined) }, () => archive);
-    const source = await runtime.open(new Uint8Array(), descriptor);
+    const source = await runtime.open(new Uint8Array(), wasmUrl);
     const ordinary = new Error('ordinary');
     archive.call.mockImplementationOnce(() => { throw ordinary; });
     expect(() => source.archive.call()).toThrow(ordinary);
@@ -90,12 +117,12 @@ describe('direct source WASM trap containment', () => {
   it('makes constructor and close traps sticky without re-entering free', async () => {
     const glue = { default: vi.fn(async () => undefined) };
     const constructorRuntime = engine(glue, () => { throw new WebAssembly.RuntimeError('ctor'); });
-    await expect(constructorRuntime.open(new Uint8Array(), descriptor)).rejects.toThrow('WASM runtime trapped');
-    await expect(constructorRuntime.open(new Uint8Array(), descriptor)).rejects.toThrow('WASM runtime trapped');
+    await expect(constructorRuntime.open(new Uint8Array(), wasmUrl)).rejects.toThrow('WASM runtime trapped');
+    await expect(constructorRuntime.open(new Uint8Array(), wasmUrl)).rejects.toThrow('WASM runtime trapped');
 
     const archive = new Archive();
     const closeRuntime = engine({ default: vi.fn(async () => undefined) }, () => archive);
-    const source = await closeRuntime.open(new Uint8Array(), descriptor);
+    const source = await closeRuntime.open(new Uint8Array(), wasmUrl);
     archive.close.mockImplementation(() => { throw new WebAssembly.RuntimeError('close'); });
     expect(() => source.closeArchive()).toThrow('WASM runtime trapped');
     expect(archive.free).not.toHaveBeenCalled();
@@ -104,22 +131,22 @@ describe('direct source WASM trap containment', () => {
 
     const freeArchive = new Archive();
     const freeRuntime = engine({ default: vi.fn(async () => undefined) }, () => freeArchive);
-    const freeSource = await freeRuntime.open(new Uint8Array(), descriptor);
+    const freeSource = await freeRuntime.open(new Uint8Array(), wasmUrl);
     freeArchive.free.mockImplementation(() => { throw new WebAssembly.RuntimeError('free'); });
     expect(() => freeSource.closeArchive()).toThrow('WASM runtime trapped');
     expect(freeArchive.close).toHaveBeenCalledOnce();
     expect(freeArchive.free).toHaveBeenCalledOnce();
     expect(freeArchive.__destroy_into_raw).toHaveBeenCalledOnce();
-    await expect(freeRuntime.open(new Uint8Array(), descriptor)).rejects.toThrow('WASM runtime trapped');
+    await expect(freeRuntime.open(new Uint8Array(), wasmUrl)).rejects.toThrow('WASM runtime trapped');
   });
 
   it('makes an initialization trap sticky without constructing', async () => {
     const glue = { default: vi.fn(async () => { throw new WebAssembly.RuntimeError('init'); }) };
     const construct = vi.fn(() => new Archive());
     const runtime = engine(glue, construct);
-    const failure = await captureAsync(() => runtime.open(new Uint8Array(), descriptor));
+    const failure = await captureAsync(() => runtime.open(new Uint8Array(), wasmUrl));
     expect(failure).toBeInstanceOf(Error);
-    expect(await captureAsync(() => runtime.open(new Uint8Array(), descriptor))).toBe(failure);
+    expect(await captureAsync(() => runtime.open(new Uint8Array(), wasmUrl))).toBe(failure);
     expect(glue.default).toHaveBeenCalledOnce();
     expect(construct).not.toHaveBeenCalled();
   });

@@ -110,7 +110,7 @@
     "build:runtime": "vite build --mode runtime",
     "build:packages": "pnpm -r build",
     "build:packages:ci": "pnpm --filter @silurus/ooxml-docx --filter @silurus/ooxml-pptx --filter @silurus/ooxml-xlsx --filter @silurus/ooxml-markdown --filter @silurus/ooxml-site -r --workspace-concurrency=1 build:ci",
-    "typecheck": "tsc --build && pnpm --filter @silurus/ooxml-markdown --filter @silurus/ooxml-node --filter ./packages/vscode-extension typecheck",
+    "typecheck": "tsc --build && pnpm --filter @silurus/ooxml-markdown --filter @silurus/ooxml-node --filter @silurus/ooxml-legacy-converter --filter ./packages/vscode-extension typecheck",
     "storybook": "storybook dev -p 6006",
     "build-storybook": "storybook build",
     "build:wasm": "pnpm --filter @silurus/ooxml-docx wasm && pnpm --filter @silurus/ooxml-xlsx wasm && pnpm --filter @silurus/ooxml-pptx wasm && pnpm build:wasm:legacy-doc && pnpm build:wasm:legacy-ppt && pnpm build:wasm:legacy-xls",
