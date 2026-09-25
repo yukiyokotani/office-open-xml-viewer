@@ -2,6 +2,12 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { isEmf } from './wmf.js';
 import { playEmf, renderEmfToBitmap } from './emf.js';
 import { scanEmfPlus } from './emf-plus.js';
+import {
+  decodeRasterOrMetafile,
+  getIncompleteMetafileReport,
+  isOoxmlIncompleteMetafileError,
+} from './raster-or-metafile.js';
+import { dropBitmapCacheByPath, getCachedBitmapByPath } from './bitmap-image-by-path.js';
 
 // ── EMF (Enhanced Metafile) player unit tests ───────────────────────────────
 // The renderer falls back to this player for true `.emf` blips the browser can't
@@ -268,8 +274,9 @@ function makeRecordingCtx(): MockCtx {
     rotate(a: number) {
       calls.push({ op: 'rotate', args: [a] });
     },
-    clip(rule?: string) {
-      calls.push({ op: 'clip', args: rule ? [rule] : [] });
+    clip(...a: unknown[]) {
+      // clip(rule) or clip(path, rule): a Path2D region is recorded by name.
+      calls.push({ op: 'clip', args: a.filter((v) => v !== undefined).map((v) => (typeof v === 'string' ? v : 'Path2D')) });
     },
   };
   return { ctx: ctx as unknown as CanvasRenderingContext2D, calls, styles };
@@ -1194,27 +1201,79 @@ describe('renderEmfToBitmap', () => {
       ),
       record(EMR.EOF, () => {}),
     );
-    const bmp = await renderEmfToBitmap(file, 64, 48);
+    const { bitmap: bmp, unsupported } = await renderEmfToBitmap(file, 64, 48);
     expect(bmp).not.toBeNull();
     expect(bmp?.width).toBe(64);
     expect(bmp?.height).toBe(48);
+    expect(unsupported).toEqual([]);
   });
 
-  it('returns null for non-EMF bytes', async () => {
-    const bmp = await renderEmfToBitmap(new Uint8Array([1, 2, 3, 4]), 10, 10);
-    expect(bmp).toBeNull();
+  it('returns a null bitmap for non-EMF bytes', async () => {
+    expect(await renderEmfToBitmap(new Uint8Array([1, 2, 3, 4]), 10, 10)).toEqual({ bitmap: null, unsupported: [] });
   });
 
-  it('returns null when nothing draws (header + EOF only)', async () => {
+  it('returns a null bitmap when nothing draws (header + EOF only)', async () => {
     const file = concat(emfHeader(0, 0, 10, 10), record(EMR.EOF, () => {}));
-    const bmp = await renderEmfToBitmap(file, 16, 16);
-    expect(bmp).toBeNull();
+    expect(await renderEmfToBitmap(file, 16, 16)).toEqual({ bitmap: null, unsupported: [] });
   });
 
-  it('returns null for a non-positive target size', async () => {
+  it('returns a null bitmap for a non-positive target size', async () => {
     const file = concat(emfHeader(0, 0, 10, 10), record(EMR.EOF, () => {}));
-    expect(await renderEmfToBitmap(file, 0, 10)).toBeNull();
-    expect(await renderEmfToBitmap(file, 10, 0)).toBeNull();
+    expect((await renderEmfToBitmap(file, 0, 10)).bitmap).toBeNull();
+    expect((await renderEmfToBitmap(file, 10, 0)).bitmap).toBeNull();
+  });
+
+  // A drawn polyline followed by POLYTEXTOUTW, a text record the player does
+  // not implement: the partial picture the player has always drawn.
+  const partial = () => concat(
+    emfHeader(0, 0, 100, 100),
+    record(EMR.CREATEPEN, (w) => w.u32(1).u32(0).i32(1).i32(0).u32(0)),
+    record(EMR.SELECTOBJECT, (w) => w.u32(1)),
+    record(EMR.POLYLINE16, (w) => w.i32(0).i32(0).i32(100).i32(100).u32(2).i16(0).i16(0).i16(50).i16(50)),
+    record(97, (w) => w.u32(0)),
+    record(EMR.EOF, () => {}),
+  );
+
+  it('returns the unsupported content with the bitmap through the normal loading path', async () => {
+    const { bitmap, unsupported } = await renderEmfToBitmap(partial(), 64, 48);
+    expect(bitmap).not.toBeNull();
+    expect(unsupported).toEqual(['EMR_POLYTEXTOUTW']);
+  });
+
+  it('decodeRasterOrMetafile keeps the partial drawing with its report by default, and rejects it on request', async () => {
+    const blob = () => new Blob([partial() as Uint8Array<ArrayBuffer>], { type: 'image/x-emf' });
+    const drawn = await decodeRasterOrMetafile(blob(), { widthPt: 48, heightPt: 36 });
+    expect(drawn).not.toBeNull();
+    expect(getIncompleteMetafileReport(drawn)).toEqual({ format: 'emf', unsupported: ['EMR_POLYTEXTOUTW'] });
+
+    const rejected = await decodeRasterOrMetafile(blob(), { widthPt: 48, heightPt: 36, incompleteMetafile: 'reject' })
+      .then(() => undefined, (error: unknown) => error);
+    expect(isOoxmlIncompleteMetafileError(rejected)).toBe(true);
+    expect(rejected).toMatchObject({ code: 'ooxml-incomplete-metafile', format: 'emf', unsupported: ['EMR_POLYTEXTOUTW'] });
+
+    // A complete metafile carries no report under either policy.
+    const complete = concat(
+      emfHeader(0, 0, 100, 100),
+      record(EMR.CREATEPEN, (w) => w.u32(1).u32(0).i32(1).i32(0).u32(0)),
+      record(EMR.SELECTOBJECT, (w) => w.u32(1)),
+      record(EMR.POLYLINE16, (w) => w.i32(0).i32(0).i32(100).i32(100).u32(2).i16(0).i16(0).i16(50).i16(50)),
+      record(EMR.EOF, () => {}),
+    );
+    const strict = await decodeRasterOrMetafile(new Blob([complete as Uint8Array<ArrayBuffer>]), { widthPt: 48, heightPt: 36, incompleteMetafile: 'reject' });
+    expect(strict).not.toBeNull();
+    expect(getIncompleteMetafileReport(strict)).toBeUndefined();
+  });
+
+  it('never serves a cached partial picture to a strict request', async () => {
+    const fetchImage = vi.fn(async () => new Blob([partial() as Uint8Array<ArrayBuffer>], { type: 'image/x-emf' }));
+    const opts = { widthPt: 48, heightPt: 36 };
+    const drawn = await getCachedBitmapByPath('word/media/partial.emf', 'image/x-emf', fetchImage, opts);
+    expect(getIncompleteMetafileReport(drawn)?.unsupported).toEqual(['EMR_POLYTEXTOUTW']);
+    await expect(getCachedBitmapByPath('word/media/partial.emf', 'image/x-emf', fetchImage, {
+      ...opts,
+      incompleteMetafile: 'reject',
+    })).rejects.toMatchObject({ code: 'ooxml-incomplete-metafile' });
+    dropBitmapCacheByPath(fetchImage);
   });
 });
 
@@ -1421,6 +1480,74 @@ describe('playEmf — clip rectangles and regions', () => {
   });
 });
 
+describe('playEmf — clip records inside an open path bracket ([MS-EMF] 2.3.2, 2.3.10)', () => {
+  const INTERSECTCLIPRECT = 30;
+  const EXTSELECTCLIPRGN = 75;
+  afterEach(() => vi.unstubAllGlobals());
+  const bracket = (clip: Uint8Array) => [
+    record(EMR.SELECTOBJECT, (w) => w.u32(0x80000004)),
+    record(EMR.BEGINPATH, () => {}),
+    record(EMR.POLYGON16, (w) => w.i32(0).i32(0).i32(10).i32(10).u32(3).i16(0).i16(0).i16(40).i16(0).i16(0).i16(40)),
+    clip,
+    record(EMR.ENDPATH, () => {}),
+    record(EMR.FILLPATH, (w) => w.i32(0).i32(0).i32(100).i32(100)),
+  ];
+  function run(records: Uint8Array[]) {
+    const m = makeRecordingCtx();
+    const reported: string[] = [];
+    playEmf(concat(emfHeader(), ...records, record(EMR.EOF, () => {})), m.ctx, 100, 100, {
+      onUnsupported: (r) => reported.push(...r),
+    });
+    return { ...m, reported };
+  }
+  /** Records the geometry traced into each Path2D region. */
+  function stubPath2D() {
+    const regions: (string | number)[][][] = [];
+    vi.stubGlobal('Path2D', class {
+      ops: (string | number)[][] = [];
+      constructor() {
+        regions.push(this.ops);
+      }
+      moveTo(x: number, y: number) { this.ops.push(['moveTo', x, y]); }
+      lineTo(x: number, y: number) { this.ops.push(['lineTo', x, y]); }
+      closePath() { this.ops.push(['closePath']); }
+    });
+    return regions;
+  }
+
+  it('clips with a separate region and still fills the bracket figures under that clip', () => {
+    const regions = stubPath2D();
+    const m = run(bracket(record(INTERSECTCLIPRECT, (w) => w.i32(10).i32(10).i32(50).i32(50))));
+    const ops = m.calls.map((c) => c.op);
+    // The polygon stays on the current path: no beginPath between it and the fill.
+    const polygon = ops.indexOf('moveTo');
+    expect(ops.slice(polygon, ops.indexOf('fill') + 1)).toEqual(['moveTo', 'lineTo', 'lineTo', 'closePath', 'clip', 'fill']);
+    expect(m.calls.find((c) => c.op === 'clip')?.args).toEqual(['Path2D', 'nonzero']);
+    expect(regions).toEqual([[['moveTo', 10, 10], ['lineTo', 50, 10], ['lineTo', 50, 50], ['lineTo', 10, 50], ['closePath']]]);
+    expect(m.styles.fill).toEqual(['#000000']);
+    expect(m.reported).toEqual([]);
+  });
+
+  it('applies region data (EXTSELECTCLIPRGN) inside a bracket the same way', () => {
+    const regions = stubPath2D();
+    const m = run(bracket(record(EXTSELECTCLIPRGN, (w) => {
+      w.u32(48).u32(1);
+      w.u32(32).u32(1).u32(1).u32(16).i32(0).i32(0).i32(100).i32(100);
+      w.i32(0).i32(0).i32(20).i32(20);
+    })));
+    expect(m.calls.find((c) => c.op === 'clip')?.args).toEqual(['Path2D', 'nonzero']);
+    expect(regions).toHaveLength(1);
+    expect(m.styles.fill).toEqual(['#000000']);
+  });
+
+  it('without Path2D leaves the clip out, reports it, and keeps the bracket', () => {
+    const m = run(bracket(record(INTERSECTCLIPRECT, (w) => w.i32(10).i32(10).i32(50).i32(50))));
+    expect(m.calls.some((c) => c.op === 'clip')).toBe(false);
+    expect(m.styles.fill).toEqual(['#000000']);
+    expect(m.reported).toEqual(['EMR_INTERSECTCLIPRECT (inside a path bracket, no Path2D)']);
+  });
+});
+
 describe('playEmf — explicit report of records it cannot draw', () => {
   function run(records: Uint8Array[]) {
     const m = makeRecordingCtx();
@@ -1446,6 +1573,49 @@ describe('playEmf — explicit report of records it cannot draw', () => {
     } finally {
       warn.mockRestore();
     }
+  });
+
+  it('keeps the other figures of a path bracket around an unsupported record, as before it was reported', () => {
+    const polygon = record(EMR.POLYGON16, (w) => w.i32(0).i32(0).i32(10).i32(10).u32(3).i16(0).i16(0).i16(40).i16(0).i16(0).i16(40));
+    const m = run([
+      record(EMR.SELECTOBJECT, (w) => w.u32(0x80000004)),
+      record(EMR.BEGINPATH, () => {}),
+      polygon,
+      record(97, (w) => w.u32(0)), // POLYTEXTOUTW
+      record(66 /* WIDENPATH */, () => {}),
+      record(EMR.ENDPATH, () => {}),
+      record(EMR.FILLPATH, (w) => w.i32(0).i32(0).i32(100).i32(100)),
+    ]);
+    expect(m.styles.fill).toEqual(['#000000']);
+    expect(m.calls.filter((c) => c.op === 'lineTo')).toHaveLength(2);
+    expect(m.reported).toEqual(['EMR_POLYTEXTOUTW', 'EMR_WIDENPATH']);
+  });
+
+  it('draws EXTTEXTOUTW inside a path bracket directly and reports the missing glyph path', () => {
+    const font = record(EMR.EXTCREATEFONTINDIRECTW, (w) => {
+      w.u32(1).i32(-12).i32(0).i32(0).i32(0).i32(400).raw(0, 0, 0, 0).raw(0, 0, 0, 0);
+      w.utf16('Arial');
+      for (let i = 5; i < 32; i++) w.u16(0);
+    });
+    const text = record(EMR.EXTTEXTOUTW, (w) => {
+      w.i32(0).i32(0).i32(100).i32(100).u32(1).f32(1).f32(1); // rclBounds, iGraphicsMode, exScale, eyScale
+      w.i32(10).i32(20).u32(1).u32(76).u32(0).i32(0).i32(0).i32(0).i32(0).u32(0); // EMRTEXT
+      w.utf16('A');
+    });
+    const m = run([font, record(EMR.SELECTOBJECT, (w) => w.u32(1)), record(EMR.BEGINPATH, () => {}), text, record(EMR.ENDPATH, () => {})]);
+    expect(m.styles.text).toHaveLength(1);
+    expect(m.reported).toEqual(['EMR_EXTTEXTOUTW (glyph path)']);
+  });
+
+  it('reports a truncated record stream and a malformed record, keeping what drew', () => {
+    const polygon = record(EMR.POLYGON16, (w) => w.i32(0).i32(0).i32(10).i32(10).u32(3).i16(0).i16(0).i16(40).i16(0).i16(0).i16(40));
+    const truncated = concat(emfHeader(), record(EMR.SELECTOBJECT, (w) => w.u32(0x80000004)), polygon, new Uint8Array([86, 0, 0, 0, 64, 0, 0, 0]));
+    const m = makeRecordingCtx();
+    const reported: string[] = [];
+    expect(playEmf(truncated, m.ctx, 100, 100, { onUnsupported: (r) => reported.push(...r) })).toBe(true);
+    expect(reported).toEqual(['EMF record stream (truncated or invalid record size)']);
+    // SETWORLDTRANSFORM without its XFORM is malformed.
+    expect(run([record(EMR.SETWORLDTRANSFORM, (w) => w.u32(0))]).reported).toEqual(['EMF record 35 (malformed)']);
   });
 
   it('paints PATCOPY/BLACKNESS pattern blits and reports other brush-only raster operations', () => {

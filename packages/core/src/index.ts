@@ -303,7 +303,12 @@ export {
 // Cross-format raster/metafile admission and decode boundary.
 export {
   decodeRasterOrMetafile,
+  getIncompleteMetafileReport,
+  isOoxmlIncompleteMetafileError,
+  OoxmlIncompleteMetafileError,
   type DecodeRasterOptions,
+  type IncompleteMetafilePolicy,
+  type IncompleteMetafileReport,
 } from './image/raster-or-metafile';
 export {
   TiffDecodeError,

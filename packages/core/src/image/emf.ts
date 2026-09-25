@@ -49,15 +49,20 @@
 // geometry; FILLPATH/STROKEPATH/STROKEANDFILLPATH paint it, FLATTENPATH keeps
 // it, ABORTPATH discards it. Clipping: SELECTCLIPPATH (AND/COPY),
 // INTERSECTCLIPRECT, EXCLUDECLIPRECT and EXTSELECTCLIPRGN (AND/COPY/DIFF and
-// the default-clip reset), scoped by SAVEDC/RESTOREDC.
-// Drawing records that are not implemented (text variants other than
-// EXTTEXTOUTW, POLYDRAW, region painting, flood fill, other blits, gradient
-// fill, glyph paths, WIDENPATH, EMF+-only content, arcs under a reflected
-// mapping) are reported through the opt-in `EmfPlaybackOptions.onUnsupported`
-// callback, so a caller can surface them; playback has no global side effect. State
-// records without a visible effect (SETICMMODE, SETMITERLIMIT, SETROP2,
-// SETSTRETCHBLTMODE, SETMETARGN, palettes, dual-mode EMF+ comments) and
-// unrecognized iTypes are skipped by nSize.
+// the default-clip reset), scoped by SAVEDC/RESTOREDC; a clip record inside an
+// open path bracket clips without touching the bracket's figures.
+// Content the player cannot reproduce (text variants other than EXTTEXTOUTW,
+// POLYDRAW, region painting, flood fill, other blits, gradient fill, glyph
+// paths, WIDENPATH, arcs under a reflected mapping, EMF+-only content that
+// fails validation, damaged or malformed records) is collected into the
+// playback's report. `renderEmfToBitmap` returns it with the bitmap
+// (`EmfRasterResult`), and `decodeRasterOrMetafile` applies the caller's
+// `IncompleteMetafilePolicy`: reject the picture, or keep the partial drawing
+// with the report attached. Around a gap, playback draws exactly what it drew
+// before the gap was detected, so the compatibility policy changes no output;
+// playback has no global side effect. State records without a visible effect
+// (SETICMMODE, SETMITERLIMIT, SETROP2, SETSTRETCHBLTMODE, SETMETARGN, palettes,
+// dual-mode EMF+ comments) and unrecognized iTypes are skipped by nSize.
 //
 // Shared across the docx, pptx and xlsx renderers via
 // {@link ./raster-or-metafile.ts}#decodeRasterOrMetafile, which sniffs the bytes and routes
@@ -1108,18 +1113,13 @@ function paintFigure(s: PlayState, filled: boolean): void {
   }
 }
 
-/** Report a drawing record this playback leaves out. Inside a path bracket
- *  the incomplete path is also discarded, never painted partially. */
+/** Record a drawing record this playback leaves out. The picture's report
+ *  carries it (see {@link EmfRasterResult}); the rest of the picture, including
+ *  the open path bracket's other figures, plays exactly as it did before the
+ *  record was recognized, so a compatibility caller keeps its previous output
+ *  and a strict caller rejects the picture on the report. */
 function unsupportedDrawing(s: PlayState, name: string): void {
   s.unsupported.add(name);
-  if (s.inPath) discardPath(s);
-}
-
-/** Drop the geometry of the open path bracket so no partial outline is
- *  painted; the bracket stays open and swallows the rest of its records. */
-function discardPath(s: PlayState): void {
-  s.ctx.beginPath();
-  s.pathDiscarded = true;
 }
 
 type ArcKind = 'arc' | 'arcTo' | 'chord' | 'pie';
@@ -1262,29 +1262,54 @@ function clipRect(s: PlayState, c: EmfCursor, exclude: boolean): void {
   const t = c.i32();
   const r = c.i32();
   const b = c.i32();
-  if (clipInsidePathBracket(s, exclude ? 'EMR_EXCLUDECLIPRECT' : 'EMR_INTERSECTCLIPRECT')) return;
-  const { ctx } = s;
-  ctx.beginPath();
-  if (exclude) outerFrame(ctx);
   const corners = [toPx(s, l, t), toPx(s, r, t), toPx(s, r, b), toPx(s, l, b)];
-  ctx.moveTo(...corners[0]);
-  for (const corner of corners.slice(1)) ctx.lineTo(...corner);
-  ctx.closePath();
-  applyClip(s, exclude ? 'evenodd' : 'nonzero');
+  clipWith(s, exclude ? 'EMR_EXCLUDECLIPRECT' : 'EMR_INTERSECTCLIPRECT', exclude ? 'evenodd' : 'nonzero', (sink) => {
+    if (exclude) outerFrame(sink);
+    sink.moveTo(...corners[0]);
+    for (const corner of corners.slice(1)) sink.lineTo(...corner);
+    sink.closePath();
+  });
 }
 
-/** The open path bracket's geometry lives on the Canvas current path, which a
- *  clip region would have to replace. Clip changes inside a bracket are rare;
- *  report them and drop the bracket instead of painting a corrupted path. */
-function clipInsidePathBracket(s: PlayState, name: string): boolean {
-  if (!s.inPath) return false;
-  unsupportedDrawing(s, `${name} (inside a path bracket)`);
-  return true;
+/**
+ * Intersect the clip with the region `build` traces. A clipping record acts
+ * on the device context's clip region at once and never on the path
+ * ([MS-EMF] 2.3.2 clipping records; the path bracket of 2.3.10 collects only
+ * drawing records), so a clip change inside an open BEGINPATH … ENDPATH
+ * bracket must leave the bracket's figures intact for the FILLPATH,
+ * STROKEPATH or SELECTCLIPPATH that closes it, and applies to that later
+ * painting. Outside a bracket the region is traced on the Canvas current path
+ * like every other clip. Inside one the current path holds the bracket, so the
+ * region is traced into its own Path2D and applied with `clip(path, rule)`,
+ * which leaves the current default path untouched (HTML Canvas 2D). A runtime
+ * without Path2D cannot do that; the clip is then left out and reported,
+ * matching the playback that predates clip-record support.
+ */
+function clipWith(
+  s: PlayState,
+  name: string,
+  rule: CanvasFillRule,
+  build: (sink: Sink) => void,
+): void {
+  if (!s.inPath) {
+    s.ctx.beginPath();
+    build(s.ctx);
+    applyClip(s, rule);
+    return;
+  }
+  if (typeof Path2D === 'undefined') {
+    s.unsupported.add(`${name} (inside a path bracket, no Path2D)`);
+    return;
+  }
+  const region = new Path2D();
+  build(region);
+  applyClip(s, rule, region);
 }
 
-function applyClip(s: PlayState, rule: CanvasFillRule): void {
+function applyClip(s: PlayState, rule: CanvasFillRule, region?: Path2D): void {
   try {
-    s.ctx.clip(rule);
+    if (region) s.ctx.clip(region, rule);
+    else s.ctx.clip(rule);
     s.clipped = true;
   } catch {
     /* a ctx without clip() (some mocks): leave unclipped */
@@ -1314,7 +1339,6 @@ function extSelectClipRgn(s: PlayState, c: EmfCursor): void {
   const size = c.u32();
   const mode = c.u32();
   const name = 'EMR_EXTSELECTCLIPRGN';
-  if (clipInsidePathBracket(s, name)) return;
   if (mode === RGN_COPY && size === 0) {
     resetClip(s, name);
     return;
@@ -1337,30 +1361,29 @@ function extSelectClipRgn(s: PlayState, c: EmfCursor): void {
     ((x - s.left) * s.W) / s.boundsW,
     ((y - s.top) * s.H) / s.boundsH,
   ];
-  const { ctx } = s;
   const rects: Array<[number, number, number, number]> = [];
   for (let i = 0; i < count; i++) rects.push([c.i32(), c.i32(), c.i32(), c.i32()]);
-  const rect = ([l, t, r, b]: [number, number, number, number]) => {
-    ctx.moveTo(...dev(l, t));
-    ctx.lineTo(...dev(r, t));
-    ctx.lineTo(...dev(r, b));
-    ctx.lineTo(...dev(l, b));
-    ctx.closePath();
+  const rect = (sink: Sink, [l, t, r, b]: [number, number, number, number]) => {
+    sink.moveTo(...dev(l, t));
+    sink.lineTo(...dev(r, t));
+    sink.lineTo(...dev(r, b));
+    sink.lineTo(...dev(l, b));
+    sink.closePath();
   };
   if (mode === RGN_DIFF) {
     // Subtract each rectangle on its own, so overlapping rectangles stay exact.
     for (const r of rects) {
-      ctx.beginPath();
-      outerFrame(ctx);
-      rect(r);
-      applyClip(s, 'evenodd');
+      clipWith(s, name, 'evenodd', (sink) => {
+        outerFrame(sink);
+        rect(sink, r);
+      });
     }
     return;
   }
   // Same-orientation rectangles under non-zero winding form their union.
-  ctx.beginPath();
-  for (const r of rects) rect(r);
-  applyClip(s, 'nonzero');
+  clipWith(s, name, 'nonzero', (sink) => {
+    for (const r of rects) rect(sink, r);
+  });
 }
 
 /** A frame far outside any target raster; with a rectangle under even-odd
@@ -1656,9 +1679,9 @@ function doStretchDibits(s: PlayState, c: EmfCursor, dv: DataView, recStart: num
  * skipped gracefully when absent).
  */
 export interface EmfPlaybackOptions {
-  /** Receives the names of drawing records the picture was drawn with but
-   *  could not draw (each once per playback). Opt-in: without a callback the
-   *  playback reports nothing and has no global side effect. */
+  /** Receives, once per playback, the content the picture was drawn without
+   *  (each entry once). `renderEmfToBitmap` always collects it into its
+   *  `EmfRasterResult`; direct `playEmf` callers opt in here. */
   readonly onUnsupported?: (records: readonly string[]) => void;
 }
 
@@ -1749,9 +1772,13 @@ export function playEmf(
     const iType = dv.getUint32(pos, true);
     const nSize = dv.getUint32(pos + 4, true);
     // Validate: nSize ≥ 8 (the iType+nSize header) and 4-aligned and in-bounds.
-    if (nSize < 8 || (nSize & 3) !== 0) break;
+    // A damaged record walk ends playback; what drew so far is kept and the
+    // damage is reported.
+    if (nSize < 8 || (nSize & 3) !== 0 || pos + nSize > bytes.length) {
+      s.unsupported.add('EMF record stream (truncated or invalid record size)');
+      break;
+    }
     const recEnd = pos + nSize;
-    if (recEnd > bytes.length) break; // truncated → partial render
     if (iType === EMR.EOF) break;
 
     // A cursor over the data region (starts at record offset 8).
@@ -2002,18 +2029,20 @@ export function playEmf(
           // painted area beyond curve-approximation tolerance.
           break;
         case EMR.WIDENPATH:
-          // Unsupported path transformation: do not paint the untransformed path.
+          // Not implemented: the path keeps its unwidened figures (the
+          // playback before this record was recognized) and is reported.
           s.unsupported.add('EMR_WIDENPATH');
-          discardPath(s);
           break;
         case EMR.SELECTCLIPPATH: {
           // data: u32 RegionMode. AND intersects; COPY replaces the clip.
+          // OR/XOR/DIFF, and a COPY that cannot drop an inherited clip, are
+          // reported and intersect instead (the playback that predates the
+          // RegionMode operand).
           const mode = c.remaining >= 4 ? c.u32() : RGN_AND;
           if (mode !== RGN_AND && mode !== RGN_COPY) {
             s.unsupported.add(`EMR_SELECTCLIPPATH (mode ${mode})`);
-            discardPath(s);
-          } else if (mode === RGN_COPY && !resetClip(s, 'EMR_SELECTCLIPPATH')) {
-            discardPath(s);
+          } else if (mode === RGN_COPY) {
+            resetClip(s, 'EMR_SELECTCLIPPATH');
           }
           // Use the path just defined as the clip region (intersecting the
           // current clip — the common RGN_AND case, and what a following blit
@@ -2240,9 +2269,11 @@ export function playEmf(
           break;
         }
         case EMR.EXTTEXTOUTW:
-          // Canvas text cannot supply GDI glyph outlines to a retained path.
+          // Canvas text cannot supply GDI glyph outlines to a retained path:
+          // inside a bracket the text is reported and still drawn directly,
+          // as it was before path brackets were modelled.
           if (s.inPath) unsupportedDrawing(s, 'EMR_EXTTEXTOUTW (glyph path)');
-          else drawText(s, c, dv, pos);
+          drawText(s, c, dv, pos);
           break;
         case EMR.BITBLT:
           doBitBlt(s, c, dv, pos);
@@ -2280,7 +2311,9 @@ export function playEmf(
         }
       }
     } catch {
-      // A malformed record must never abort the whole render — just advance.
+      // A malformed record must never abort the whole render: it is reported
+      // and playback advances to the next record.
+      s.unsupported.add(`EMF record ${iType} (malformed)`);
     }
 
     pos = recEnd;
@@ -2292,33 +2325,53 @@ export function playEmf(
   return s.drew;
 }
 
+/**
+ * The outcome of rasterizing an EMF through the normal image loading path
+ * ({@link renderEmfToBitmap} → `decodeRasterOrMetafile`). `unsupported` names,
+ * once each, the content the player could not reproduce: unimplemented drawing
+ * records, EMF+ content of an EMF+-only file that failed validation, and
+ * damaged or malformed records. An empty list means the picture is complete.
+ * The bitmap is what playback drew around those gaps (`null` when nothing
+ * drew); a caller decides whether that partial picture is acceptable.
+ */
+export interface EmfRasterResult {
+  readonly bitmap: ImageBitmap | null;
+  readonly unsupported: readonly string[];
+}
+
 // ── async OffscreenCanvas wrapper ───────────────────────────────────────────
 
 /**
  * Rasterize an EMF metafile to an `ImageBitmap` of `targetW`×`targetH`, replaying
- * onto an `OffscreenCanvas` 2D context. Returns `null` if the bytes are not a
- * parseable EMF or nothing drew (so the caller can fall back to the existing
- * "missing image" behavior without crashing). Mirrors
+ * onto an `OffscreenCanvas` 2D context, with the report of content it could
+ * not reproduce ({@link EmfRasterResult}). The bitmap is `null` if the bytes
+ * are not a parseable EMF or nothing drew (so the caller can fall back to the
+ * existing "missing image" behavior without crashing). Mirrors
  * {@link ./wmf.ts}#renderWmfToBitmap.
  */
 export async function renderEmfToBitmap(
   bytes: Uint8Array,
   targetW: number,
   targetH: number,
-): Promise<ImageBitmap | null> {
-  if (!isEmf(bytes)) return null;
-  if (targetW <= 0 || targetH <= 0) return null;
+): Promise<EmfRasterResult> {
+  const none: EmfRasterResult = { bitmap: null, unsupported: [] };
+  if (!isEmf(bytes)) return none;
+  if (targetW <= 0 || targetH <= 0) return none;
   // Rasterize on a shared aux canvas (OffscreenCanvas, else a detached <canvas>).
   // Absent both (e.g. a headless test / SSR runtime without either) ⇒ degrade
   // gracefully to null, exactly as the caller already handles an unsupported
   // metafile — never throw.
   const canvas = createAuxCanvas(targetW, targetH);
-  if (!canvas) return null;
+  if (!canvas) return none;
   const ctx = canvas.getContext('2d') as AnyCtx | null;
-  if (!ctx) return null;
+  if (!ctx) return none;
   ctx.lineJoin = 'round';
   ctx.lineCap = 'round';
-  const drew = playEmf(bytes, ctx, targetW, targetH);
-  if (!drew) return null;
-  return createImageBitmap(canvas);
+  let unsupported: readonly string[] = [];
+  const drew = playEmf(bytes, ctx, targetW, targetH, {
+    onUnsupported: (records) => {
+      unsupported = records;
+    },
+  });
+  return { bitmap: drew ? await createImageBitmap(canvas) : null, unsupported };
 }

@@ -27,6 +27,77 @@ import {
 import { OptionalImageCodecUnavailableError } from './optional-image-fallback.js';
 import { isEmf, isWmf, renderWmfToBitmap, wmfRasterTarget } from './wmf.js';
 
+/**
+ * What the loading path does with a metafile whose playback could not
+ * reproduce all of its content (unimplemented records, an EMF+-only stream
+ * that fails validation, damaged records; see `EmfRasterResult` in emf.ts):
+ *
+ * - `'draw-supported'` (default): return what playback drew, with the gap
+ *   attached to the bitmap ({@link getIncompleteMetafileReport}). This is the
+ *   OOXML renderers' deliberate compatibility policy, not an oversight: the
+ *   player drew these same partial pictures before it could detect the gaps,
+ *   so DOCX/XLSX/PPTX documents keep rendering exactly as they did while the
+ *   gap stays observable.
+ * - `'reject'`: throw {@link OoxmlIncompleteMetafileError}. For callers that
+ *   must not present a partial picture as complete, such as a conversion
+ *   whose output would otherwise silently lose content.
+ */
+export type IncompleteMetafilePolicy = 'draw-supported' | 'reject';
+
+/** The content a drawn metafile left out, attached to its bitmap. */
+export interface IncompleteMetafileReport {
+  readonly format: 'emf';
+  readonly unsupported: readonly string[];
+}
+
+/** A metafile the caller required to be complete could not be fully played. */
+export class OoxmlIncompleteMetafileError extends Error {
+  readonly code = 'ooxml-incomplete-metafile' as const;
+
+  constructor(
+    readonly format: 'emf',
+    readonly unsupported: readonly string[],
+  ) {
+    super(`OOXML ${format} metafile could not be fully played: ${unsupported.join(', ')}`);
+    this.name = 'OoxmlIncompleteMetafileError';
+    Object.setPrototypeOf(this, OoxmlIncompleteMetafileError.prototype);
+  }
+}
+
+export function isOoxmlIncompleteMetafileError(error: unknown): error is OoxmlIncompleteMetafileError {
+  if (!error || typeof error !== 'object') return false;
+  try {
+    const candidate = error as { readonly code?: unknown; readonly unsupported?: unknown };
+    return candidate.code === 'ooxml-incomplete-metafile' && Array.isArray(candidate.unsupported);
+  } catch {
+    return false;
+  }
+}
+
+const incompleteMetafileReports = new WeakMap<object, IncompleteMetafileReport>();
+
+/** The gap report of a metafile bitmap decoded under `'draw-supported'`, or
+ *  `undefined` for a complete picture (and for every non-metafile bitmap). */
+export function getIncompleteMetafileReport(
+  bitmap: ImageBitmap | null | undefined,
+): IncompleteMetafileReport | undefined {
+  return bitmap ? incompleteMetafileReports.get(bitmap) : undefined;
+}
+
+function applyIncompleteMetafilePolicy(
+  bitmap: ImageBitmap | null,
+  unsupported: readonly string[],
+  policy: IncompleteMetafilePolicy,
+): ImageBitmap | null {
+  if (unsupported.length === 0) return bitmap;
+  if (policy === 'reject') {
+    if (bitmap) closeImageBitmapIfSupported(bitmap);
+    throw new OoxmlIncompleteMetafileError('emf', unsupported);
+  }
+  if (bitmap) incompleteMetafileReports.set(bitmap, { format: 'emf', unsupported });
+  return bitmap;
+}
+
 export interface DecodeRasterOptions {
   widthPt?: number;
   heightPt?: number;
@@ -37,6 +108,9 @@ export interface DecodeRasterOptions {
   /** Retained base-surface ceiling. Effect pipelines lower this so their base
    * and derived surfaces fit the aggregate decoded-byte budget. */
   maxRetainedPixels?: number;
+  /** Policy for a metafile that cannot be fully played (default
+   *  `'draw-supported'`); see {@link IncompleteMetafilePolicy}. */
+  incompleteMetafile?: IncompleteMetafilePolicy;
 }
 
 function exceedsRetainedBudget(source: RasterDimensions, pixelLimit: number): boolean {
@@ -129,6 +203,7 @@ export async function decodeRasterOrMetafileWithInspection(
     targetWidthPx,
     targetHeightPx,
     maxRetainedPixels = MAX_RASTER_PIXELS,
+    incompleteMetafile = 'draw-supported',
   } = opts;
   const retainedPixelLimit = Number.isSafeInteger(maxRetainedPixels) && maxRetainedPixels > 0
     ? Math.min(maxRetainedPixels, MAX_RASTER_PIXELS)
@@ -144,8 +219,9 @@ export async function decodeRasterOrMetafileWithInspection(
   }
   if (isEmf(head)) {
     const { w, h } = wmfRasterTarget(widthPt, heightPt);
+    const played = await renderEmfToBitmap(new Uint8Array(await data.arrayBuffer()), w, h);
     return enforceDecodedBitmapBudget(
-      await renderEmfToBitmap(new Uint8Array(await data.arrayBuffer()), w, h),
+      applyIncompleteMetafilePolicy(played.bitmap, played.unsupported, incompleteMetafile),
       retainedPixelLimit,
     );
   }
