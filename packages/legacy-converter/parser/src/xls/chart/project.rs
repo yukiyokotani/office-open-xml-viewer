@@ -576,7 +576,25 @@ pub(crate) fn project(
     model.val_axis_title = raw.axis_titles.get(&2).cloned();
     model.cat_axis_title = raw.axis_titles.get(&3).cloned();
     if let Some(format) = raw.chart_format.as_ref() {
-        let area = paint(format, palette);
+        // An empty verified ShapePropsStream on the chart area is automatic
+        // formatting, and Excel writes that automatic chart area into the
+        // BIFF records it keeps for older readers (a solid 0x808080 hairline
+        // over a white AreaFormat). The shared chart model has no automatic
+        // chart-area outline, so the chart area takes those BIFF records:
+        // Excel's PDFs of such XLS files (21 corpus charts, all authored in
+        // XLSX without a chartSpace spPr) draw that gray outline, where the
+        // automatic projection drew none. Series keep their automatic
+        // colours: Excel's PDFs draw theme accents there, not the BIFF
+        // palette colours written beside an empty stream.
+        let empty_stream = format
+            .shape_xml
+            .get(&0)
+            .is_some_and(|xml| xml.trim().is_empty());
+        let area = if empty_stream {
+            biff_paint(format, palette)
+        } else {
+            paint(format, palette)
+        };
         model.chart_bg = area.fill;
         if area.fill_hidden {
             model.chart_fill_hidden = Some(true);

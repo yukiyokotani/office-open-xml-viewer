@@ -229,3 +229,38 @@ fn a_chart_without_series_records_is_an_authored_empty_chart() {
             .authored_without_series
     );
 }
+
+#[test]
+fn an_automatic_chart_area_takes_the_biff_outline_excel_writes_for_it() {
+    let line = line_format(0, 0, 10);
+    let area = area_format(0, 10);
+    let mut data = checksum::line_properties(&line).unwrap().to_vec();
+    data.extend(checksum::interior_properties(&area, &area).unwrap());
+    let valid = checksum::crc(&data);
+    let chart = |xml: &str| {
+        let mut owned = bar_chart(true, None);
+        let at = owned.iter().position(|(kind, _)| *kind == 0x1002).unwrap() + 2;
+        owned.splice(
+            at..at,
+            [
+                record(0x1032, u16s(&[0, 2])),
+                record(0x1033, vec![]),
+                record(0x1007, line.clone()),
+                record(0x100a, area.clone()),
+                record(0x08a4, shape_props(0, valid, xml)),
+                record(0x1034, vec![]),
+            ],
+        );
+        let raw = read(&as_records(&owned)).unwrap();
+        project(&raw, &palette(), &|_| None).unwrap()
+    };
+    // Empty stream: the BIFF outline and fill.
+    let empty = chart("");
+    assert_eq!(empty.chart_border_color.as_deref(), Some("FF0000"));
+    assert_eq!(empty.chart_bg.as_deref(), Some("FF0000"));
+    // A stream with DrawingML still supersedes the BIFF records.
+    let xml = r#"<a:spPr xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:ln><a:noFill/></a:ln></a:spPr>"#;
+    let styled = chart(xml);
+    assert_eq!(styled.chart_border_color, None);
+    assert_eq!(styled.chart_border_hidden, Some(true));
+}
