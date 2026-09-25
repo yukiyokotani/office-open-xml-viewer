@@ -84,4 +84,3 @@ export function cssTailFor(name: string | null | undefined): string {
 export function fontStackFor(name: string | null | undefined): string {
   return name ? `"${name}", ${cssTailFor(name)}` : DEFAULT_FONT_FAMILY;
 }
-
