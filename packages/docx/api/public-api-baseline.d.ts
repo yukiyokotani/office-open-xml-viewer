@@ -27,6 +27,10 @@ export type BlipEffect = {
     toAlpha: number;
     useAlpha: boolean;
 } | {
+    type: 'luminance';
+    bright: number;
+    contrast: number;
+} | {
     type: 'duotone';
 };
 export type BodyElement = ({
@@ -1174,6 +1178,7 @@ export interface DocTableCell {
     marginLeft?: number | null;
     marginRight?: number | null;
     textDirection?: string;
+    hideMark?: boolean;
 }
 export interface DocTableRow {
     cells: DocTableCell[];
@@ -1422,7 +1427,6 @@ export interface DocxTextRun {
     fontSizeCs?: number;
     boldCs?: boolean;
     italicCs?: boolean;
-    langDefault?: string;
     langBidi?: string;
     snapToGrid?: boolean;
     charSpacing?: number;
@@ -1550,7 +1554,6 @@ export interface FieldRun {
     smallCaps?: boolean;
     doubleStrikethrough?: boolean;
     highlight?: string | null;
-    langDefault?: string;
     emphasisMark?: EmphasisMark;
 }
 type Fill = SolidFill | NoFill | GradientFill | PatternFill | ImageFill;

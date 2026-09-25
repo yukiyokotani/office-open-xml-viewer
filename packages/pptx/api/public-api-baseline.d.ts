@@ -37,6 +37,10 @@ export type BlipEffect = {
     toAlpha: number;
     useAlpha: boolean;
 } | {
+    type: 'luminance';
+    bright: number;
+    contrast: number;
+} | {
     type: 'duotone';
 };
 export function buildPptxHighlightLayer(layer: HTMLDivElement, runs: PptxTextRunInfo[], matches: PptxHighlightMatch[], cssWidth: number, cssHeight: number, measureForFont: (font: string) => (s: string) => number, colors?: PptxHighlightColors): void;

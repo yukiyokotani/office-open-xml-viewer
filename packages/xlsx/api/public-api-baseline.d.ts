@@ -25,6 +25,10 @@ export type BlipEffect = {
     toAlpha: number;
     useAlpha: boolean;
 } | {
+    type: 'luminance';
+    bright: number;
+    contrast: number;
+} | {
     type: 'duotone';
 };
 export interface Border {
@@ -1566,6 +1570,10 @@ export interface PhoneticRun {
     text: string;
 }
 export type PhoneticType = 'fullwidthKatakana' | 'halfwidthKatakana' | 'Hiragana' | 'noConversion';
+export interface PivotAxisItem {
+    kind: string;
+    depth: number;
+}
 export type PivotCacheSource = {
     kind: 'worksheet';
     sheet?: string;
@@ -1661,6 +1669,23 @@ export interface PivotTableMetadata {
     cacheSource?: PivotCacheSource;
     status: PivotMetadataStatus;
     extensionUris?: string[];
+    style?: PivotTableStyle;
+    rowItems?: PivotAxisItem[];
+    columnItems?: PivotAxisItem[];
+}
+export interface PivotTableStyle {
+    name: string;
+    showRowHeaders: boolean;
+    showColumnHeaders: boolean;
+    showRowStripes: boolean;
+    showColumnStripes: boolean;
+    showLastColumn: boolean;
+    elements: PivotTableStyleElement[];
+}
+export interface PivotTableStyleElement {
+    kind: string;
+    size: number;
+    dxf: Dxf;
 }
 export interface Reflection {
     blur: number;
