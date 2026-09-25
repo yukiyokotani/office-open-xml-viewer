@@ -20,6 +20,20 @@ pub(super) struct Properties {
     /// DopTypography.iJustification; `None` when the DOP predates Dop97.
     #[cfg_attr(not(feature = "direct-doc"), allow(dead_code))]
     pub character_spacing_control: Option<&'static str>,
+    /// MS-DOC 2.7.2 DopBase fRMView / fRMPrint.
+    #[cfg_attr(not(feature = "direct-doc"), allow(dead_code))]
+    pub revision_markup: RevisionMarkup,
+}
+
+/// MS-DOC 2.7.2 DopBase: fRMView "whether to show any revision markup that is
+/// present in this document" and fRMPrint "whether to print" it (note <166>:
+/// they can differ). A Word-exported PDF of a document with both set shows
+/// insertions underlined with margin change bars.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(not(feature = "direct-doc"), allow(dead_code))]
+pub(crate) struct RevisionMarkup {
+    pub(crate) on_screen: bool,
+    pub(crate) in_print: bool,
 }
 
 /// MS-DOC 2.7.2 DopBase fpc/rncFtn/nFtn/rncEdn/nEdn/epc and 2.7.4 Dop97
@@ -101,8 +115,16 @@ pub(super) fn read(word: &[u8], table: &[u8]) -> Result<Option<Properties>, Stri
     } else {
         None
     };
+    // DopBase second flag word (offset 4): h = fRMView (bit 27), i = fRMPrint
+    // (bit 28), counting from the least significant bit as for fpc above.
+    let flags = u32_at(dop, 4)?;
+    let revision_markup = RevisionMarkup {
+        on_screen: flags & (1 << 27) != 0,
+        in_print: flags & (1 << 28) != 0,
+    };
     // MS-DOC 2.7.3 DopBase.fFacingPages explicitly maps to evenAndOddHeaders.
     Ok(Some(Properties {
+        revision_markup,
         default_tab_twips: interval,
         even_and_odd_headers: dop[0] & 1 != 0,
         notes,
@@ -156,6 +178,27 @@ mod tests {
                     .xml()
                     .contains(&format!("w:val=\"{interval}\"")));
             }
+        }
+    }
+
+    #[test]
+    fn revision_markup_display_flags_come_from_dopbase() {
+        for (flags, on_screen, in_print) in [
+            (0u32, false, false),
+            (1 << 27, true, false),
+            (1 << 28, false, true),
+            ((1 << 27) | (1 << 28), true, true),
+            (!((1 << 27) | (1 << 28)), false, false),
+        ] {
+            let (word, mut table) = fixture(84, 720);
+            // Dop at table offset 7; the second DopBase flag word at offset 4.
+            table[7 + 4..7 + 8].copy_from_slice(&flags.to_le_bytes());
+            let markup = read(&word, &table).unwrap().unwrap().revision_markup;
+            assert_eq!(
+                (markup.on_screen, markup.in_print),
+                (on_screen, in_print),
+                "{flags:#x}"
+            );
         }
     }
 

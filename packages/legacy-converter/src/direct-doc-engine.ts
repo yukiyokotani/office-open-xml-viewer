@@ -25,6 +25,11 @@ export interface LegacyDocNativeDocument {
   assert_healthy(): void;
   extract_image(key: string): Uint8Array;
   image_mime_type?(key: string): string;
+  /** MS-DOC 2.7.2 DopBase fRMPrint: the DOC shows its revision markup in
+   *  print/PDF output (Word's PDF is the display target for legacy DOC). */
+  revision_markup_in_print?(): boolean;
+  /** MS-DOC 2.7.2 DopBase fRMView: the DOC shows its revision markup on screen. */
+  revision_markup_on_screen?(): boolean;
 }
 
 export type OwnedLegacyDocSource = OwnedDirectSource<LegacyDocNativeDocument>;

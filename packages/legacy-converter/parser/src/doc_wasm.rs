@@ -86,6 +86,17 @@ impl LegacyDocDocument {
     pub fn extract_image(&self, key: &str) -> Result<Vec<u8>, JsValue> {
         self.cursor.extract_image(key).map_err(string_error)
     }
+    /// MS-DOC 2.7.2 DopBase fRMPrint: the DOC asks for its revision markup
+    /// in print/PDF output. A host may use it to select the tracked-change
+    /// view for this legacy input when the caller did not choose one.
+    pub fn revision_markup_in_print(&self) -> bool {
+        self.cursor.revision_markup_in_print()
+    }
+    /// MS-DOC 2.7.2 DopBase fRMView: the DOC asks for its revision markup on
+    /// screen.
+    pub fn revision_markup_on_screen(&self) -> bool {
+        self.cursor.revision_markup_on_screen()
+    }
     pub fn image_mime_type(&self, key: &str) -> Result<String, JsValue> {
         self.cursor
             .resource_mime_type(key)
