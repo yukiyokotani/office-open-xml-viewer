@@ -17,6 +17,12 @@ export function buildDocFixture(options: { text?: string; paragraphProperties?: 
   const view = new DataView(word.buffer);
   view.setUint16(0, 0xa5ec, true);
   view.setUint16(2, 0x00c1, true);
+  // MS-DOC 2.5.1: the canonical Word 97 FIB counts csw = 0x000E,
+  // cslw = 0x0016 and cbRgFcLcb = 0x005D precede the fixed field offsets the
+  // readers use (cswNew at byte 898 stays 0, so nFib 0x00C1 applies).
+  view.setUint16(32, 0x000e, true);
+  view.setUint16(62, 0x0016, true);
+  view.setUint16(152, 0x005d, true);
   view.setUint32(0x4c, text.length, true);
   view.setUint32(0x50, footnotes.length, true);
   view.setUint32(0x54, headerText.length, true);
