@@ -402,7 +402,15 @@ fn prepare_workbook(
         "legacy-xls:drawings-conditional-formatting-and-external-links-omitted".into(),
         "legacy-xls:phonetic-data-print-areas-titles-and-extended-headers-omitted".into(),
     ];
-    if styles.extensions_omitted {
+    // The direct model projects XFExt colors, indentation and gradient
+    // fills; StyleExt (2.4.270) only extends the cell-style gallery entries,
+    // which cells reach through their XFs. Anything else fails closed.
+    if direct && styles.extensions_unrepresented() {
+        return Err(unsupported(
+            "XLS extended cell formatting is not representable",
+        ));
+    }
+    if styles.extensions_omitted && !direct {
         warnings.push("legacy-xls:extended-styles-omitted".into());
     }
     if incomplete_print_margins {

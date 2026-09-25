@@ -534,8 +534,8 @@ fn xfprops(data: &[u8], offset: usize, context: &Context<'_>) -> Result<xlsx_mod
             0x26 => format_code = Some(unicode_string(value, 0)?.0),
             0x29 => format_id = Some(u16_at(value, 0)?),
             // XFPropGradient (2.5.286) as ECMA-376 18.8.24 gradientFill; its
-            // XFPropGradientStop (2.5.287) entries follow. The XLSX model
-            // keeps patternType "none" beside a gradient.
+            // XFPropGradientStop (2.5.287) entries follow. Like the XLSX
+            // parser's gradient fills, it has no pattern type.
             3 => {
                 if fill.is_some() {
                     return Err(unsupported("invalid XLS DXF gradient fill"));
@@ -552,7 +552,6 @@ fn xfprops(data: &[u8], offset: usize, context: &Context<'_>) -> Result<xlsx_mod
                     return Err(unsupported("invalid XLS DXF gradient"));
                 }
                 fill = Some(xlsx_model::Fill {
-                    pattern_type: "none".into(),
                     gradient: Some(xlsx_model::GradientFillSpec {
                         gradient_type: if kind == 0 { "linear" } else { "path" }.into(),
                         degree: number(4)?,
