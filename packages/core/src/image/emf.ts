@@ -403,8 +403,10 @@ interface PlayState {
   // A bracket closed by ENDPATH whose path no FILLPATH, STROKEPATH,
   // STROKEANDFILLPATH, SELECTCLIPPATH or ABORTPATH has consumed yet.
   pathHeld: boolean;
-  pathCommandCount: number;
   pathDiscarded: boolean;
+  // Path commands held by every live PathBuffer: the current path's and the
+  // prefixes SAVEDC snapshots still reach, each buffer counted once.
+  pathRetained: number;
   maxPathCommands: number;
   arcDirection: number; // EMR_SETARCDIRECTION ArcDirection; default AD_COUNTERCLOCKWISE
   // Clipping state. Each DC level owns exactly one outstanding canvas save
@@ -420,6 +422,11 @@ interface PlayState {
  * every previously admitted single geometry record: POLYPOLYGON may contain up
  * to 0x200000 points in at most 0x10000 closed sub-paths. The cumulative bound
  * prevents many individually valid records from multiplying that retained work.
+ *
+ * The same bound covers everything the device context retains, not only the
+ * open bracket: the current path plus every prefix a SAVEDC snapshot keeps
+ * (see PathBuffer). Repeated SAVEDC therefore cannot hold more path data than
+ * one maximal path, which is what the playback kept before paths were saved.
  */
 const MAX_EMF_PATH_COMMANDS = 0x200000 + 0x10000;
 
@@ -450,25 +457,57 @@ interface EmfReplayLimits {
  * therefore recorded here in target pixels and traced onto the context only
  * by the record that consumes it.
  *
- * `ops` is shared with SAVEDC snapshots (see SavedDc): it is only appended
- * to, or truncated back to the snapshot being restored. Every record that
- * discards the path installs a fresh array, so an older snapshot is never
- * mutated.
+ * The commands live in a PathBuffer that SAVEDC snapshots share instead of
+ * copying (see PathBuffer for how unreachable data is released).
  */
 class EmfPath implements Sink {
-  ops: number[] = [];
+  buf: PathBuffer = newPathBuffer();
   moveTo(x: number, y: number): void {
-    this.ops.push(PATH_MOVE, x, y);
+    this.buf.ops.push(PATH_MOVE, x, y);
   }
   lineTo(x: number, y: number): void {
-    this.ops.push(PATH_LINE, x, y);
+    this.buf.ops.push(PATH_LINE, x, y);
   }
   bezierCurveTo(x1: number, y1: number, x2: number, y2: number, x: number, y: number): void {
-    this.ops.push(PATH_CUBIC, x1, y1, x2, y2, x, y);
+    this.buf.ops.push(PATH_CUBIC, x1, y1, x2, y2, x, y);
   }
   closePath(): void {
-    this.ops.push(PATH_CLOSE);
+    this.buf.ops.push(PATH_CLOSE);
   }
+}
+
+/**
+ * Recorded path commands shared by the current path and SAVEDC snapshots.
+ *
+ * A buffer is only appended to while it is the current path. SAVEDC records
+ * the buffer's extent in `saved` (and in its SavedDc) rather than copying it;
+ * extents on one buffer are pushed in order and never decrease, so the last
+ * one is the longest prefix any snapshot reaches. When the current path
+ * leaves a buffer (a record discards the path, or RESTOREDC selects another
+ * one) or a snapshot is popped, the buffer is cut back to that last extent,
+ * or emptied when no snapshot is left, so no snapshot keeps the tail appended
+ * after it was taken. `commands` counts the budgeted commands the buffer
+ * holds and is charged to PlayState.pathRetained.
+ */
+interface PathBuffer {
+  ops: number[];
+  commands: number;
+  saved: { length: number; commands: number }[];
+}
+
+function newPathBuffer(): PathBuffer {
+  return { ops: [], commands: 0, saved: [] };
+}
+
+/** Cut a buffer that is no longer the current path back to what its
+ *  remaining snapshots reach. Idempotent. */
+function releasePathBuffer(s: PlayState, buf: PathBuffer): void {
+  const keep = buf.saved[buf.saved.length - 1] ?? { length: 0, commands: 0 };
+  if (buf.ops.length <= keep.length && buf.commands <= keep.commands) return;
+  s.pathRetained -= buf.commands - keep.commands;
+  buf.commands = keep.commands;
+  // Shrinking the length lets the engine trim the backing store.
+  buf.ops.length = keep.length;
 }
 const PATH_MOVE = 0;
 const PATH_LINE = 1;
@@ -505,26 +544,39 @@ function geometrySink(s: PlayState): Sink {
   return s.inPath ? s.path : s.ctx;
 }
 
+/** Give the current path a fresh, empty buffer and release the old one. */
+function replacePathBuffer(s: PlayState): void {
+  const old = s.path.buf;
+  s.path.buf = newPathBuffer();
+  releasePathBuffer(s, old);
+}
+
 /** Drop the DC path (open or held) and start from an empty one. */
 function discardPath(s: PlayState): void {
-  s.path.ops = [];
+  replacePathBuffer(s);
   s.inPath = false;
   s.pathHeld = false;
-  s.pathCommandCount = 0;
   s.pathDiscarded = false;
 }
 
+const PATH_BUDGET_FAILURE = 'EMF path (path command budget)';
+
+/** Charge `additional` commands to the open bracket before they are recorded.
+ *  Past MAX_EMF_PATH_COMMANDS for everything the DC retains, the bracket is
+ *  discarded (never a paintable prefix) and the picture is reported as
+ *  incomplete. */
 function reservePathCommands(s: PlayState, additional: number): boolean {
   if (!s.inPath) return true;
   if (s.pathDiscarded) return false;
-  const next = s.pathCommandCount + additional;
+  const next = s.pathRetained + additional;
   if (!Number.isSafeInteger(next) || additional < 0 || next > s.maxPathCommands) {
-    // Never leave a paintable prefix of an over-budget attacker-controlled path.
-    s.path.ops = [];
+    replacePathBuffer(s);
     s.pathDiscarded = true;
+    s.unsupported.add(PATH_BUDGET_FAILURE);
     return false;
   }
-  s.pathCommandCount = next;
+  s.pathRetained = next;
+  s.path.buf.commands += additional;
   return true;
 }
 
@@ -557,13 +609,13 @@ interface SavedDc {
   arcDirection: number;
   clipped: boolean;
   outerClipped: boolean;
-  // The DC path (see EmfPath): the shared command array and its length at
-  // SAVEDC, and the bracket state and budget that go with it.
-  pathOps: number[];
+  // The DC path (see PathBuffer): the shared buffer and its extent at
+  // SAVEDC, and the bracket state that goes with it.
+  pathBuf: PathBuffer;
   pathLength: number;
+  pathCommands: number;
   inPath: boolean;
   pathHeld: boolean;
-  pathCommandCount: number;
   pathDiscarded: boolean;
 }
 
@@ -1081,12 +1133,13 @@ function fillStrokeRect(s: PlayState, l: number, t: number, r: number, b: number
  *  (none, or a bracket still open) GDI fails and the path stays as it is. */
 function paintSelectedPath(s: PlayState, fill: boolean, stroke: boolean): void {
   if (!s.pathHeld) return;
-  const ops = s.path.ops;
   const paint = !s.pathDiscarded;
+  const ops = s.path.buf.ops;
+  // Trace before the path is discarded: releasing its buffer may cut it.
+  if (paint) tracePath(s.ctx, ops);
   discardPath(s);
   if (!paint) return;
   const { ctx } = s;
-  tracePath(ctx, ops);
   if (fill && s.curBrush?.fill != null) {
     ctx.fillStyle = s.curBrush.fill;
     ctx.fill(s.fillRule);
@@ -1841,8 +1894,8 @@ export function playEmf(
     path: new EmfPath(),
     inPath: false,
     pathHeld: false,
-    pathCommandCount: 0,
     pathDiscarded: false,
+    pathRetained: 0,
     maxPathCommands: Number.isSafeInteger(limits.maxPathCommands)
       && (limits.maxPathCommands as number) > 0
       ? Math.min(limits.maxPathCommands as number, MAX_EMF_PATH_COMMANDS)
@@ -2090,13 +2143,14 @@ function replayRecords(
             arcDirection: s.arcDirection,
             clipped: s.clipped,
             outerClipped: s.outerClipped,
-            pathOps: s.path.ops,
-            pathLength: s.path.ops.length,
+            pathBuf: s.path.buf,
+            pathLength: s.path.buf.ops.length,
+            pathCommands: s.path.buf.commands,
             inPath: s.inPath,
             pathHeld: s.pathHeld,
-            pathCommandCount: s.pathCommandCount,
             pathDiscarded: s.pathDiscarded,
           });
+          s.path.buf.saved.push({ length: s.path.buf.ops.length, commands: s.path.buf.commands });
           s.outerClipped = s.clipped;
           break;
         }
@@ -2106,9 +2160,15 @@ function replayRecords(
           const iRelative = c.i32();
           const times = Math.min(Math.abs(iRelative) || 1, s.stack.length);
           let saved: SavedDc | undefined;
+          // Buffers the popped snapshots leave behind, released below.
+          const left = new Set<PathBuffer>();
           for (let i = 0; i < times; i++) {
             saved = s.stack.pop();
             s.ctx.restore(); // unwind the matching canvas save (clip/state)
+            if (saved) {
+              saved.pathBuf.saved.pop();
+              left.add(saved.pathBuf);
+            }
           }
           if (saved) {
             s.wt = saved.wt;
@@ -2134,13 +2194,18 @@ function replayRecords(
             s.clipped = saved.clipped;
             s.outerClipped = saved.outerClipped;
             // The saved path comes back with its open/held/discarded state
-            // (see EmfPath). Snapshots above this one were popped with it, so
-            // truncating the shared array cannot change a live snapshot.
-            saved.pathOps.length = saved.pathLength;
-            s.path.ops = saved.pathOps;
+            // (see PathBuffer). Snapshots above this one were popped with it,
+            // so cutting the shared buffer back cannot change a live snapshot.
+            left.add(s.path.buf);
+            const buf = saved.pathBuf;
+            s.path.buf = buf;
+            left.delete(buf);
+            s.pathRetained -= buf.commands - saved.pathCommands;
+            buf.commands = saved.pathCommands;
+            buf.ops.length = saved.pathLength;
+            for (const other of left) releasePathBuffer(s, other);
             s.inPath = saved.inPath;
             s.pathHeld = saved.pathHeld;
-            s.pathCommandCount = saved.pathCommandCount;
             s.pathDiscarded = saved.pathDiscarded;
           }
           break;
@@ -2208,13 +2273,11 @@ function replayRecords(
           // relies on, e.g. sample-13 Fig.3 clips a bar-chart DIB to the bar
           // shapes so its background is masked out). Scoped by the enclosing
           // SAVEDC/RESTOREDC.
-          const ops = s.path.ops;
-          const apply = !s.pathDiscarded;
-          discardPath(s);
-          if (apply) {
-            tracePath(s.ctx, ops);
+          if (!s.pathDiscarded) {
+            tracePath(s.ctx, s.path.buf.ops);
             applyClip(s, s.fillRule);
           }
+          discardPath(s);
           break;
         }
         case EMR.INTERSECTCLIPRECT:

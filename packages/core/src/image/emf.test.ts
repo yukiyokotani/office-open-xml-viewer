@@ -1581,8 +1581,9 @@ describe('playEmf — the device context path ([MS-EMF] 2.3.10, 2.3.11)', () => 
   const A = [['M', 10, 10], ['L', 20, 10], ['L', 20, 20], ['L', 10, 20], ['Z']];
   const B = [['M', 50, 50], ['L', 60, 50], ['L', 60, 60], ['L', 50, 60], ['Z']];
 
-  /** Each fill's geometry, and each clip's. */
-  function play(records: Uint8Array[]) {
+  /** Each fill's geometry, and each clip's. `maxPathCommands` lowers the
+   *  path budget; `reported` then collects what playback left out. */
+  function play(records: Uint8Array[], maxPathCommands?: number) {
     const m = makeRecordingCtx();
     let current: unknown[] = [];
     const fills: unknown[][] = [];
@@ -1600,9 +1601,12 @@ describe('playEmf — the device context path ([MS-EMF] 2.3.10, 2.3.11)', () => 
       record(EMR.SELECTOBJECT, (w) => w.u32(0x80000007)), // BLACK_PEN
       ...records,
       record(EMR.EOF, () => {}),
-    ), m.ctx, 100, 100, { onUnsupported: (r) => unsupported.push(...r) });
-    expect(unsupported).toEqual([]);
-    return { fills: fills.filter((p) => p.length), clips };
+    ), m.ctx, 100, 100, {
+      onUnsupported: (r) => unsupported.push(...r),
+      ...(maxPathCommands ? { maxPathCommands } : {}),
+    } as Parameters<typeof playEmf>[4]);
+    if (!maxPathCommands) expect(unsupported).toEqual([]);
+    return { fills: fills.filter((p) => p.length), clips, reported: unsupported };
   }
 
   it('keeps the held path across ordinary drawing outside the bracket', () => {
@@ -1640,6 +1644,47 @@ describe('playEmf — the device context path ([MS-EMF] 2.3.10, 2.3.11)', () => 
     ]).fills).toEqual([A, [...A, ...B]]);
     // A path begun after SAVEDC goes away with RESTOREDC.
     expect(play([saveDc, ...holdA, restoreDc, fillPath]).fills).toEqual([]);
+  });
+
+  // A RECTANGLE is 5 path commands; the budget covers the current path plus
+  // every prefix a SAVEDC snapshot keeps, counting a shared buffer once.
+  const hold = (l: number) => [record(EMR.BEGINPATH, () => {}), rect(l, l, l + 10, l + 10), record(EMR.ENDPATH, () => {})];
+  const BUDGET = ['EMF path (path command budget)'];
+
+  it('bounds the paths kept by repeated SAVEDC and reports the one past the budget', () => {
+    // Two saved 5-command paths retain 10 of 12; a third bracket would hold 15.
+    const r = play([
+      ...hold(10), saveDc, ...hold(50), saveDc, ...hold(70),
+      fillPath, restoreDc, fillPath, restoreDc, fillPath,
+    ], 12);
+    expect(r.reported).toEqual(BUDGET);
+    expect(r.fills).toEqual([B, A]); // the over-budget bracket paints nothing
+    // Snapshots of one buffer are one retained copy: A saved three times
+    // still leaves room for a second 5-command path.
+    const shared = play([...holdA, saveDc, saveDc, saveDc, ...hold(50), fillPath, restoreDc, fillPath], 12);
+    expect(shared.reported).toEqual([]);
+    expect(shared.fills).toEqual([B, A]);
+  });
+
+  it('keeps only the saved prefix, so an empty snapshot retains nothing', () => {
+    // Each round saves an empty path, then appends 10 commands and aborts.
+    // Those tails are unreachable; were they kept, the last path (10 of 12)
+    // would exceed the budget.
+    const round = [record(EMR.BEGINPATH, () => {}), saveDc, rect(0, 0, 5, 5), rect(0, 0, 6, 6), record(ABORTPATH, () => {})];
+    const r = play([
+      ...round, ...round, ...round,
+      record(EMR.BEGINPATH, () => {}), rect(10, 10, 20, 20), rect(50, 50, 60, 60), record(EMR.ENDPATH, () => {}), fillPath,
+    ], 12);
+    expect(r.reported).toEqual([]);
+    expect(r.fills).toEqual([[...A, ...B]]);
+    // A snapshot of an open bracket keeps its prefix: restoring it drops the
+    // commands appended after SAVEDC, and they no longer count.
+    const prefix = play([
+      record(EMR.BEGINPATH, () => {}), rect(10, 10, 20, 20), saveDc, rect(50, 50, 60, 60), restoreDc,
+      rect(50, 50, 60, 60), record(EMR.ENDPATH, () => {}), fillPath,
+    ], 10);
+    expect(prefix.reported).toEqual([]);
+    expect(prefix.fills).toEqual([[...A, ...B]]);
   });
 });
 
