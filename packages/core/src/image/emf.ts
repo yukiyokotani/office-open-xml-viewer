@@ -50,7 +50,8 @@
 // it, ABORTPATH discards it. Clipping: SELECTCLIPPATH (AND/COPY),
 // INTERSECTCLIPRECT, EXCLUDECLIPRECT and EXTSELECTCLIPRGN (AND/COPY/DIFF and
 // the default-clip reset), scoped by SAVEDC/RESTOREDC; a clip record inside an
-// open path bracket clips without touching the bracket's figures.
+// open path bracket, or after ENDPATH while the closed path awaits the record
+// that consumes it, clips without touching the path's figures.
 // Content the player cannot reproduce (text variants other than EXTTEXTOUTW,
 // POLYDRAW, region painting, flood fill, other blits, gradient fill, glyph
 // paths, WIDENPATH, arcs under a reflected mapping, EMF+-only content that
@@ -395,6 +396,10 @@ interface PlayState {
   stack: SavedDc[]; // SAVEDC/RESTOREDC graphics-state stack
   drew: boolean;
   inPath: boolean; // between BEGINPATH and ENDPATH — geometry builds a path, no draw
+  // A bracket closed by ENDPATH whose path no FILLPATH, STROKEPATH,
+  // STROKEANDFILLPATH, SELECTCLIPPATH or ABORTPATH has consumed yet: the
+  // Canvas current path still holds it ([MS-EMF] 2.3.10).
+  pathHeld: boolean;
   pathCommandCount: number;
   pathDiscarded: boolean;
   maxPathCommands: number;
@@ -985,6 +990,7 @@ function paintSelectedPath(s: PlayState, fill: boolean, stroke: boolean): void {
   // EMR_FILLPATH / STROKEPATH / STROKEANDFILLPATH close the path bracket.
   // Clear Canvas's persistent current path so later records cannot repaint it.
   s.ctx.beginPath();
+  s.pathHeld = false;
   s.pathCommandCount = 0;
   s.pathDiscarded = false;
 }
@@ -1278,8 +1284,11 @@ function clipRect(s: PlayState, c: EmfCursor, exclude: boolean): void {
  * drawing records), so a clip change inside an open BEGINPATH … ENDPATH
  * bracket must leave the bracket's figures intact for the FILLPATH,
  * STROKEPATH or SELECTCLIPPATH that closes it, and applies to that later
- * painting. Outside a bracket the region is traced on the Canvas current path
- * like every other clip. Inside one the current path holds the bracket, so the
+ * painting. The same holds after ENDPATH: the closed path stays selected in
+ * the device context until one of those records (or ABORTPATH) consumes it,
+ * so a clip record between ENDPATH and FILLPATH must not replace it either.
+ * With no path open or held, the region is traced on the Canvas current path
+ * like every other clip. Otherwise the current path holds the EMF path, so the
  * region is traced into its own Path2D and applied with `clip(path, rule)`,
  * which leaves the current default path untouched (HTML Canvas 2D). A runtime
  * without Path2D cannot do that; the clip is then left out and reported,
@@ -1291,14 +1300,14 @@ function clipWith(
   rule: CanvasFillRule,
   build: (sink: Sink) => void,
 ): void {
-  if (!s.inPath) {
+  if (!s.inPath && !s.pathHeld) {
     s.ctx.beginPath();
     build(s.ctx);
     applyClip(s, rule);
     return;
   }
   if (typeof Path2D === 'undefined') {
-    s.unsupported.add(`${name} (inside a path bracket, no Path2D)`);
+    s.unsupported.add(`${name} (${s.inPath ? 'inside a path bracket' : 'over a retained path'}, no Path2D)`);
     return;
   }
   const region = new Path2D();
@@ -1705,7 +1714,7 @@ export function playEmf(
 
   const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 
-  const s: PlayState = {
+  const newState = (): PlayState => ({
     ctx,
     W,
     H,
@@ -1741,6 +1750,7 @@ export function playEmf(
     stack: [],
     drew: false,
     inPath: false,
+    pathHeld: false,
     pathCommandCount: 0,
     pathDiscarded: false,
     maxPathCommands: Number.isSafeInteger(limits.maxPathCommands)
@@ -1751,17 +1761,59 @@ export function playEmf(
     clipped: false,
     outerClipped: false,
     unsupported: new Set(),
-  };
+  });
+
   // EMF+ ([MS-EMFPLUS]): play the EMF+ rendering instead of the GDI records
   // when the metafile has one this player implements (see emf-plus.ts). An
   // EMF+-only file whose stream fails validation has no complete alternative:
   // its failures join the report and the GDI records play as they did before
   // EMF+ support (a dual file's complete GDI rendering needs no report).
   const scan = scanEmfPlus(bytes);
-  const plus = scan.play ? new EmfPlusPlayer(s) : null;
-  if (!scan.play && !scan.dual) {
-    for (const failure of scan.failures) s.unsupported.add(failure);
+  let s = newState();
+  if (!scan.play) {
+    if (!scan.dual) for (const failure of scan.failures) s.unsupported.add(failure);
+    replayRecords(s, null, false, dv, bytes);
+  } else {
+    const plus = new EmfPlusPlayer(s);
+    replayRecords(s, plus, scan.dual, dv, bytes);
+    // The dry run validates everything a record states, but drawing can still
+    // fail at run time (e.g. the helper surface of a bitmap blit is refused).
+    // A dual file's GDI records are the complete alternative the header
+    // asserts, so the partial EMF+ drawing is cleared (EmfPlusClear already
+    // owns the whole W×H target, [MS-EMFPLUS] 2.3.4.1) and the GDI rendering
+    // is played instead of a picture with a hole. The EMF+ rendering — the one
+    // an EMF+-aware player shows — was nevertheless not produced, and Excel
+    // writes dual-flagged files whose GDI part draws nothing (see
+    // emf-plus.ts), so the failure stays in the report either way: a strict
+    // caller rejects the picture, a compatibility caller keeps the GDI drawing
+    // with its report. An EMF+-only file keeps what drew and reports it.
+    if (plus.drawFailed && scan.dual) {
+      const lost = [...s.unsupported];
+      try {
+        ctx.clearRect(0, 0, W, H);
+      } catch {
+        /* a ctx without clearRect (some mocks) */
+      }
+      s = newState();
+      replayRecords(s, null, false, dv, bytes);
+      for (const failure of lost) s.unsupported.add(failure);
+    }
   }
+  if (s.unsupported.size > 0) options.onUnsupported?.([...s.unsupported]);
+  return s.drew;
+}
+
+/** One pass over the record stream. `plus` plays the EMF+ rendering (GDI
+ *  records then draw only inside EmfPlusGetDC); `stopOnPlusFailure` ends the
+ *  pass at the first EMF+ drawing failure, when a GDI replay will replace it. */
+function replayRecords(
+  s: PlayState,
+  plus: EmfPlusPlayer | null,
+  stopOnPlusFailure: boolean,
+  dv: DataView,
+  bytes: Uint8Array,
+): void {
+  const ctx = s.ctx;
   // The playback's own base save: every DC level owns one outstanding canvas
   // save, so a clip reset can restore to it, and playback leaves the caller's
   // context state (including clips) as it found it.
@@ -1787,6 +1839,7 @@ export function playEmf(
     if (plus && iType !== EMR.HEADER) {
       if (iType === EMR.GDICOMMENT) {
         plus.playComment(dv, pos, recEnd);
+        if (stopOnPlusFailure && plus.drawFailed) break;
         pos = recEnd;
         continue;
       }
@@ -1992,6 +2045,7 @@ export function playEmf(
           // build the path instead of drawing it, until ENDPATH.
           s.ctx.beginPath();
           s.inPath = true;
+          s.pathHeld = false;
           s.pathCommandCount = 0;
           s.pathDiscarded = false;
           break;
@@ -2001,6 +2055,7 @@ export function playEmf(
           break;
         }
         case EMR.ENDPATH: {
+          if (s.inPath) s.pathHeld = true;
           s.inPath = false;
           break;
         }
@@ -2020,6 +2075,7 @@ export function playEmf(
           // Close the bracket and discard its path ([MS-EMF] 2.3.10).
           s.ctx.beginPath();
           s.inPath = false;
+          s.pathHeld = false;
           s.pathCommandCount = 0;
           s.pathDiscarded = false;
           break;
@@ -2050,6 +2106,7 @@ export function playEmf(
           // shapes so its background is masked out). Scoped by the enclosing
           // SAVEDC/RESTOREDC.
           if (!s.pathDiscarded) applyClip(s, s.fillRule);
+          s.pathHeld = false;
           s.pathCommandCount = 0;
           s.pathDiscarded = false;
           break;
@@ -2321,8 +2378,6 @@ export function playEmf(
 
   // Unwind the SAVEDC levels left open by the metafile and the base save.
   for (let i = 0; i <= s.stack.length; i++) ctx.restore();
-  if (s.unsupported.size > 0) options.onUnsupported?.([...s.unsupported]);
-  return s.drew;
 }
 
 /**
