@@ -800,6 +800,10 @@ function buildConcreteBodyLayoutKernel(
         // identical framePr form one frame anchored to the next non-frame
         // paragraph of the same story (headers and footers included).
         const storyFrameGroups = collectBodyFrameGroups(root);
+        const storyFrameAcquisitions = new Map<BodyFrameGroup<LayoutParagraphBlock>, Readonly<{
+          box: FrameBox;
+          members: ReadonlyMap<ParagraphLayoutSource, ReturnType<typeof acquireRetainedFrameGroup>['members'][number]>;
+        }>>();
         const algorithms: BlockLayoutAlgorithms = {
           layoutParagraph(block, placement) {
             const paragraph = storyElement(block.source);
@@ -818,22 +822,35 @@ function buildConcreteBodyLayoutKernel(
               && frameGroup.framePr.vAnchor === 'text'
               && frameGroup.framePr.dropCap === 'none'
             ) {
-              candidate.y = placement.cursor.yPt;
-              candidate.contentX = placement.container.bounds.xPt;
-              candidate.contentW = placement.container.bounds.widthPt;
-              let acquiredGroup: ReturnType<typeof acquireRetainedFrameGroup> | undefined;
-              const box = resolveFrameBox(
-                paragraph,
-                frameGroup,
-                candidate,
-                frameAnchorLineHeightPx(root, paragraph, candidate),
-                (acquired) => { acquiredGroup = acquired; },
-                { story: block.source.story, storyInstance: block.source.storyInstance },
-                (member) => storyFrameBorderEdges(frameGroup, member),
-              );
-              const member = acquiredGroup?.members.find((entry) => entry.paragraph === paragraph);
+              // Acquire each group once, at its owner (the first member, whose
+              // cursor all members share because frames add no story advance),
+              // and reuse it for the remaining members: re-acquiring per member
+              // would re-fingerprint the whole group each time.
+              let acquisition = storyFrameAcquisitions.get(frameGroup);
+              if (!acquisition) {
+                candidate.y = placement.cursor.yPt;
+                candidate.contentX = placement.container.bounds.xPt;
+                candidate.contentW = placement.container.bounds.widthPt;
+                let acquiredGroup: ReturnType<typeof acquireRetainedFrameGroup> | undefined;
+                const box = resolveFrameBox(
+                  frameGroup.owner,
+                  frameGroup,
+                  candidate,
+                  frameAnchorLineHeightPx(root, frameGroup.owner, candidate),
+                  (acquired) => { acquiredGroup = acquired; },
+                  { story: block.source.story, storyInstance: block.source.storyInstance },
+                  (member) => storyFrameBorderEdges(frameGroup, member),
+                );
+                if (!acquiredGroup) throw new Error('Story frame acquisition omitted its retained group');
+                acquisition = {
+                  box,
+                  members: new Map(acquiredGroup.members.map((entry) => [entry.paragraph, entry])),
+                };
+                storyFrameAcquisitions.set(frameGroup, acquisition);
+                registerFrameFloat(box, frameGroup.framePr, candidate);
+              }
+              const member = acquisition.members.get(paragraph);
               if (!member) throw new Error('Story frame acquisition omitted its retained member');
-              registerFrameFloat(box, frameGroup.framePr, candidate);
               // The frame occupies no ordinary story flow; the anchor paragraph
               // that follows starts at the same cursor and wraps around it.
               // Story flow owns every retained root it returns (layoutFlowBlocks
