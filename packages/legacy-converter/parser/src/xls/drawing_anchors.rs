@@ -62,12 +62,31 @@ pub struct DrawingAnchor {
 pub struct ShapeSource {
     pub kind: u16,
     pub properties: Vec<(u16, u32)>,
+    /// Complex data of the geometry arrays (MS-ODRAW 2.3.6: pVertices,
+    /// pSegmentInfo, pConnectionSites and their directions, pAdjustHandles,
+    /// pGuides and pInscribe), by property id.
+    pub complex: Vec<(u16, Vec<u8>)>,
     pub text: Option<usize>,
 }
 
-/// A leaf of a sheet-anchored group. `bounds` is left, top, width and height
-/// as fractions of the group's anchor rectangle, composed through nested
-/// group rectangles (MS-ODRAW 2.2.38 OfficeArtFSPGR, 2.2.39 child anchors).
+/// One enclosing group of a group member (MS-ODRAW 2.2.38 OfficeArtFSPGR,
+/// 2.2.39 child anchor, 2.3.18.5 rotation, 2.2.40 flips), without any
+/// interpretation of how Office composes them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupFrame {
+    /// Left, top, right, bottom in the parent group's coordinates; `None`
+    /// for the sheet-anchored group, which its cell anchor places.
+    pub anchor: Option<[i32; 4]>,
+    /// The group's own coordinate rectangle: left, top, right, bottom.
+    pub rect: [i32; 4],
+    /// Raw signed 16.16 degrees.
+    pub rotation: i32,
+    pub flip_h: bool,
+    pub flip_v: bool,
+}
+
+/// A leaf of a sheet-anchored group: its child anchor in the innermost
+/// group's coordinates and its enclosing groups, outermost first.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GroupMember {
     pub order: u64,
@@ -75,8 +94,10 @@ pub struct GroupMember {
     pub shape_flags: u32,
     pub object_id: u16,
     pub object_type: u16,
-    pub bounds: [f64; 4],
+    pub anchor: [i32; 4],
+    pub groups: Vec<GroupFrame>,
     pub shape: Option<ShapeSource>,
+    pub picture: Option<PictureReference>,
 }
 
 /// Which anchors a walk returns. `Projectable` skips shapes whose sheet
@@ -389,6 +410,7 @@ struct Facts<'a> {
     text: Option<usize>,
     picture: picture::Properties,
     properties: Vec<(u16, u32)>,
+    complex: Vec<(u16, Vec<u8>)>,
 }
 
 impl Facts<'_> {
@@ -396,6 +418,7 @@ impl Facts<'_> {
         ShapeSource {
             kind: self.kind,
             properties: self.properties.clone(),
+            complex: self.complex.clone(),
             text: self.text,
         }
     }
@@ -406,7 +429,26 @@ impl Facts<'_> {
             .find(|(id, _)| *id == 0x0004)
             .map_or(0, |(_, value)| *value)
     }
+
+    /// This group's frame; `anchor` is its child anchor, if nested.
+    fn frame(&self, anchor: Option<[i32; 4]>) -> Result<GroupFrame, String> {
+        let rect = self
+            .group_rect
+            .filter(|[left, top, right, bottom]| right > left && bottom > top)
+            .ok_or_else(|| unsupported("empty BIFF drawing group rectangle"))?;
+        Ok(GroupFrame {
+            anchor,
+            rect,
+            rotation: self.rotation() as i32,
+            flip_h: self.shape_flags & 0x40 != 0,
+            flip_v: self.shape_flags & 0x80 != 0,
+        })
+    }
 }
+
+/// Geometry arrays retained for hosts that draw OfficeArt freeforms.
+const GEOMETRY_ARRAYS: [u16; 7] = [0x145, 0x146, 0x151, 0x152, 0x155, 0x156, 0x157];
+const MAX_SHAPE_COMPLEX_BYTES: usize = 4 * 1024 * 1024;
 
 fn rectangle(payload: &[u8]) -> Result<[i32; 4], String> {
     if payload.len() != 16 {
@@ -440,7 +482,9 @@ fn read_shape<'a>(
         text: None,
         picture: picture::Properties::default(),
         properties: Vec::new(),
+        complex: Vec::new(),
     };
+    let mut complex_bytes = 0usize;
     let mut textbox = false;
     while position < next {
         let (child, child_end) =
@@ -467,6 +511,15 @@ fn read_shape<'a>(
                         return Err(unsupported("excessive BIFF shape properties"));
                     }
                     facts.properties.push((p.opid, p.value));
+                    if let Some(data) = p.complex {
+                        if GEOMETRY_ARRAYS.contains(&(p.opid & 0x3fff)) {
+                            complex_bytes += data.len();
+                            if complex_bytes > MAX_SHAPE_COMPLEX_BYTES {
+                                return Err(unsupported("oversized BIFF shape geometry"));
+                            }
+                            facts.complex.push((p.opid & 0x3fff, data.to_vec()));
+                        }
+                    }
                     Ok(())
                 };
                 if child.kind == 0xf00b {
@@ -545,25 +598,31 @@ fn read_shape<'a>(
     Ok(facts)
 }
 
-/// Group members flattened into fractions of the anchored group's rectangle.
-/// `map` is the affine map (ax, bx, ay, by) from the enclosing group's
-/// coordinates to those fractions.
+/// Members of one group container, with their enclosing group frames
+/// (outermost first). Interpretation of rotation, flips and scaling belongs
+/// to the host.
 #[allow(clippy::too_many_arguments)]
 fn read_group_members<'a>(
     drawing: &mut Drawing<'a>,
     start: usize,
     end: usize,
-    map: [f64; 4],
-    depth: usize,
+    groups: &[GroupFrame],
     work: &mut usize,
     ids: &mut HashSet<u32>,
     objects: &mut HashSet<u16>,
     order: &mut u64,
     members: &mut Vec<GroupMember>,
 ) -> Result<(), String> {
-    if depth > MAX_DEPTH {
+    if groups.len() > MAX_DEPTH {
         return Err(unsupported("BIFF drawing group depth exceeded"));
     }
+    let checked = |rect: [i32; 4]| -> Result<[i32; 4], String> {
+        let [left, top, right, bottom] = rect;
+        if right < left || bottom < top {
+            return Err(unsupported("invalid BIFF child anchor"));
+        }
+        Ok(rect)
+    };
     let mut at = start;
     while at < end {
         spend(work)?;
@@ -571,55 +630,28 @@ fn read_group_members<'a>(
         if !matches!(record.kind, 0xf003 | 0xf004) || record.version != 15 || record.instance != 0 {
             return Err(unsupported("invalid BIFF drawing group child"));
         }
-        let place = |rect: [i32; 4]| -> Result<[f64; 4], String> {
-            let [left, top, right, bottom] = rect.map(f64::from);
-            if right < left || bottom < top {
-                return Err(unsupported("invalid BIFF child anchor"));
-            }
-            Ok([
-                map[0] + map[1] * left,
-                map[2] + map[3] * top,
-                map[1] * (right - left),
-                map[3] * (bottom - top),
-            ])
-        };
         if record.kind == 0xf003 {
             // A nested group: its head's child anchor places it in this
-            // group, and its own rectangle scales its members.
+            // group, and its own rectangle is its members' coordinates.
             let (head, head_end) =
                 record_with_end(&drawing.bytes[..next], at + 8, work, "XLS drawing")?;
             if head.kind != 0xf004 || head.version != 15 || head.instance != 0 {
                 return Err(unsupported("invalid BIFF drawing group child"));
             }
             let facts = read_shape(drawing, at + 16, head_end, work, ids, objects)?;
-            let (Some(child), Some(rect)) = (facts.child_anchor, facts.group_rect) else {
-                return Err(unsupported(
-                    "BIFF nested drawing group without its rectangles",
-                ));
-            };
+            let child = facts
+                .child_anchor
+                .ok_or_else(|| unsupported("BIFF nested drawing group without its child anchor"))?;
             if facts.shape_flags & 0x3 != 0x3
-                || facts.shape_flags & (0x40 | 0x80) != 0
-                || facts.rotation() != 0
                 || facts.anchor.is_some()
                 || facts.object.is_some_and(|(_, kind, _)| kind != 0)
             {
-                return Err(unsupported(
-                    "rotated, flipped or anchored nested BIFF drawing groups are not projected",
-                ));
+                return Err(unsupported("invalid BIFF nested drawing group"));
             }
-            let placed = place(child)?;
-            let inner = inner_map(placed, rect)?;
+            let mut inner = groups.to_vec();
+            inner.push(facts.frame(Some(checked(child)?))?);
             read_group_members(
-                drawing,
-                head_end,
-                next,
-                inner,
-                depth + 1,
-                work,
-                ids,
-                objects,
-                order,
-                members,
+                drawing, head_end, next, &inner, work, ids, objects, order, members,
             )?;
         } else {
             let facts = read_shape(drawing, at + 8, next, work, ids, objects)?;
@@ -640,24 +672,17 @@ fn read_group_members<'a>(
                 shape_flags: facts.shape_flags,
                 object_id,
                 object_type,
-                bounds: place(child)?,
-                shape: matches!(object_type, 2 | 6).then(|| facts.source()),
+                anchor: checked(child)?,
+                groups: groups.to_vec(),
+                shape: (object_type != 8).then(|| facts.source()),
+                picture: facts
+                    .picture
+                    .reference(facts.shape_flags, facts.object_data)?,
             });
         }
         at = next;
     }
     Ok(())
-}
-
-/// The affine map from a group's own coordinates (`rect`, OfficeArtFSPGR) to
-/// anchor fractions, given where the group itself was placed.
-fn inner_map(placed: [f64; 4], rect: [i32; 4]) -> Result<[f64; 4], String> {
-    let [left, top, right, bottom] = rect.map(f64::from);
-    if right <= left || bottom <= top {
-        return Err(unsupported("empty BIFF drawing group rectangle"));
-    }
-    let (bx, by) = (placed[2] / (right - left), placed[3] / (bottom - top));
-    Ok([placed[0] - bx * left, bx, placed[1] - by * top, by])
 }
 
 /// A group placed directly on the sheet (MS-ODRAW 2.2.13 inside the
@@ -678,7 +703,7 @@ fn read_sheet_group<'a>(
         return Err(unsupported("invalid BIFF drawing group child"));
     }
     let facts = read_shape(drawing, at + 16, head_end, work, ids, objects)?;
-    let (Some((behavior, from, to)), Some(rect)) = (facts.anchor, facts.group_rect) else {
+    let Some((behavior, from, to)) = facts.anchor else {
         return Err(unsupported("BIFF drawing group without its anchor"));
     };
     if behavior == 1 {
@@ -688,14 +713,8 @@ fn read_sheet_group<'a>(
         .object
         .filter(|(_, kind, _)| *kind == 0)
         .ok_or_else(|| unsupported("BIFF drawing group without its group object"))?;
-    if facts.shape_flags & 0x3 != 0x1
-        || facts.shape_flags & (0x40 | 0x80) != 0
-        || facts.rotation() != 0
-        || facts.child_anchor.is_some()
-    {
-        return Err(unsupported(
-            "rotated or flipped BIFF drawing groups are not projected",
-        ));
+    if facts.shape_flags & 0x3 != 0x1 || facts.child_anchor.is_some() {
+        return Err(unsupported("invalid BIFF drawing group"));
     }
     *order += 1;
     let group_order = *order;
@@ -704,8 +723,7 @@ fn read_sheet_group<'a>(
         drawing,
         head_end,
         next,
-        inner_map([0.0, 0.0, 1.0, 1.0], rect)?,
-        2,
+        &[facts.frame(None)?],
         work,
         ids,
         objects,
@@ -858,7 +876,7 @@ fn walk_with_policy(
                             .reference(facts.shape_flags, facts.object_data)?,
                         chart: facts.chart.filter(|_| object_type == 5),
                         order,
-                        shape: matches!(object_type, 2 | 6).then(|| facts.source()),
+                        shape: matches!(object_type, 2 | 6 | 9).then(|| facts.source()),
                         members: Vec::new(),
                     });
                 }
