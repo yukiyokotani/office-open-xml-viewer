@@ -445,9 +445,14 @@ impl Context<'_> {
         };
         let pattern = match (allow_fill, paint.pattern_image()) {
             (true, Some(pattern)) => {
-                if transform.rot != 0.0 || transform.flip_h || transform.flip_v {
+                // A pattern does not rotate with its shape (fRotateFillWithShape
+                // is clear for every projected pattern): PowerPoint's own PPTX
+                // save of a 180-degree rotated pattern freeform writes the same
+                // tile as for unrotated ones (algn tl, tx/ty 0,
+                // rotWithShape 0). Flipped pattern shapes have no evidence.
+                if transform.flip_h || transform.flip_v {
                     return Err(unsupported(
-                        "PowerPoint pattern fill on a rotated or flipped shape is not projected",
+                        "PowerPoint pattern fill on a flipped shape is not projected",
                     ));
                 }
                 Some(self.pattern_fill(pattern)?)
@@ -1881,17 +1886,22 @@ mod tests {
                 0x200,
                 "translucent",
             ),
-            (
-                pattern.to_vec(),
-                gif_blip(10, 10),
-                0x240,
-                "rotated or flipped",
-            ),
+            (pattern.to_vec(), gif_blip(10, 10), 0x240, "flipped shape"),
             (pattern.to_vec(), png_blip(), 0x200, "bitmap size"),
         ] {
             let error = project(1, flags, vec![properties(&values)], blip, None).unwrap_err();
             assert!(error.contains(expected), "{expected}: {error}");
         }
+        // A rotated pattern shape keeps the unrotated tile (rotWithShape 0).
+        let rotated = [pattern.to_vec(), vec![(0x0004, 180 << 16)]].concat();
+        let model = project(1, 0x200, vec![properties(&rotated)], gif_blip(10, 10), None).unwrap();
+        let SlideElement::Shape(shape) = &model.elements[0] else {
+            panic!("shape")
+        };
+        assert!(matches!(
+            &shape.fill,
+            Some(Fill::Image { rot_with_shape: Some(false), tile: Some(_), .. })
+        ));
         // pib_complex names a linked file rather than a BLIP.
         let mut linked = properties(&[(0xc104, 4)]);
         linked.extend_from_slice(&[b'a', 0, b'b', 0]);
