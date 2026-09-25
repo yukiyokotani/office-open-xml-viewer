@@ -89,9 +89,6 @@ importers:
       '@silurus/ooxml-core':
         specifier: workspace:*
         version: link:../core
-      '@silurus/ooxml-legacy-converter':
-        specifier: workspace:*
-        version: link:../legacy-converter
     devDependencies:
       '@playwright/test':
         specifier: ^1.59.1
@@ -185,9 +182,6 @@ importers:
       '@silurus/ooxml-docx':
         specifier: workspace:*
         version: link:../docx
-      '@silurus/ooxml-legacy-converter':
-        specifier: workspace:*
-        version: link:../legacy-converter
       '@silurus/ooxml-pptx':
         specifier: workspace:*
         version: link:../pptx
@@ -213,9 +207,6 @@ importers:
       '@silurus/ooxml-core':
         specifier: workspace:*
         version: link:../core
-      '@silurus/ooxml-legacy-converter':
-        specifier: workspace:*
-        version: link:../legacy-converter
     devDependencies:
       '@playwright/test':
         specifier: ^1.59.1
@@ -287,9 +278,6 @@ importers:
       '@silurus/ooxml-core':
         specifier: workspace:*
         version: link:../core
-      '@silurus/ooxml-legacy-converter':
-        specifier: workspace:*
-        version: link:../legacy-converter
     devDependencies:
       '@playwright/test':
         specifier: ^1.59.1

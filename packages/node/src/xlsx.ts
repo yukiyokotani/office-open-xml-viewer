@@ -22,19 +22,19 @@ import {
   measureRows,
   XlsxWorksheetPullClient,
   WorksheetPullWorker,
+  configureHostLayout,
+  validateXlsxModelSourceArchive,
+  validateXlsxModelSourceViewDefaults,
   type WorksheetCacheUsage,
   type WorksheetModelUsage,
-  type XlsxNodeArchive,
+  type XlsxNodeSessionArchive,
 } from '@silurus/ooxml-xlsx/internal/session';
 import { InProcessPullTransport } from '@silurus/ooxml-core/internal/in-process-pull-transport';
 import type { OoxmlNodeSessionOptions } from './session-options.ts';
-import type { LegacyXlsFontMeasurement } from '@silurus/ooxml-legacy-converter';
+import type { NodeCanvasFactory } from './render.ts';
 import { createLazyWasmModule, resolveWasm } from './wasm-loader.ts';
 import { usingOwnedSession } from '@silurus/ooxml-core/internal/owned-session';
-import {
-  bindLegacyOfficeConversionSignal,
-  resolveXlsWorkbookInput,
-} from '@silurus/ooxml-core/internal/legacy-office-conversion';
+import { resolveNodeSessionInput } from './model-source.ts';
 
 const getXlsxWasmModule = createLazyWasmModule(() => resolveWasm(
     import.meta.url,
@@ -58,8 +58,12 @@ export interface MaterializedXlsxWorkbook {
 
 /** Options for the bounded Node workbook session. */
 export type OpenXlsxWorkbookOptions = OoxmlNodeSessionOptions & {
-  /** Measure the actual Normal-style font for direct XLS. No fallback is assumed. */
-  readonly measureLegacyXlsNormalFont?: LegacyXlsFontMeasurement;
+  /**
+   * Canvas used when a model source asks the host to measure its Normal font
+   * (ECMA-376 §18.3.1.13 maximum digit width) with the XLSX renderer's own
+   * measurement. Without it such a source is told no width is available.
+   */
+  readonly factory?: NodeCanvasFactory;
 };
 
 export type XlsxWorksheetRowChunk =
@@ -90,8 +94,6 @@ export interface XlsxWorkbookSession {
   readonly sheetCount: number;
   readonly sheetNames: ReadonlyArray<string>;
   readonly resourceUsage: OoxmlResourceUsageSnapshot | undefined;
-  /** Native source geometry metric, when genuinely measured; absent for ordinary OOXML. */
-  readonly maximumDigitWidth?: number;
   worksheetRows(sheetIndex: number): AsyncGenerator<XlsxWorksheetRowChunk, void, void>;
   close(): Promise<void>;
 }
@@ -105,39 +107,48 @@ export async function openXlsxWorkbook(
   buffer: ArrayBuffer | Uint8Array,
   options: OpenXlsxWorkbookOptions = {},
 ): Promise<XlsxWorkbookSession> {
-  const bound = bindLegacyOfficeConversionSignal(options.legacyConversion, 'xlsx', options.signal);
-  let acquired: ReturnType<typeof acquireXlsxSessionFromArchive> | undefined;
-  let maximumDigitWidth: number | undefined;
-  try {
-    const resolved = await resolveXlsWorkbookInput(buffer, bound.options, options.password);
-    let signal = options.signal;
-    if (resolved.kind === 'ooxml') {
-      acquired = await acquireXlsxNodeSession(resolved.bytes, getXlsxWasmModule(), options);
-      bound.cleanup();
-    } else {
-      const { openLegacyXlsSource, configureLegacyXlsMeasurement } = await import('@silurus/ooxml-legacy-converter/internal/direct-xls-engine');
-      const owned = await openLegacyXlsSource(resolved.bytes, resolved.source, resolved.signal);
-      try {
-        maximumDigitWidth = await configureLegacyXlsMeasurement(
-          owned.archive, options.measureLegacyXlsNormalFont, resolved.signal,
-        );
-      } catch (error) {
-        try { owned.closeArchive(); } catch {}
-        throw error;
-      }
-      signal = resolved.signal;
-      acquired = acquireXlsxSessionFromArchive(owned, { ...options, signal });
+  const input = await resolveNodeSessionInput(
+    buffer,
+    'xlsx',
+    options,
+    validateXlsxModelSourceArchive,
+  );
+  let acquired: ReturnType<typeof acquireXlsxSessionFromArchive>;
+  if (input.kind === 'ooxml') {
+    acquired = await acquireXlsxNodeSession(input.bytes, getXlsxWasmModule(), options);
+  } else {
+    const { opened } = input;
+    let maximumDigitWidth: number | undefined;
+    try {
+      validateXlsxModelSourceViewDefaults(opened.viewDefaults);
+      maximumDigitWidth = await configureHostLayout(opened.archive, async (font) => {
+        if (!options.factory) return undefined;
+        const { measureHostLayoutFont } = await import('@silurus/ooxml-xlsx/internal/host-layout-measure');
+        const context = options.factory.createCanvas(1, 1).getContext('2d');
+        return context
+          ? measureHostLayoutFont(font, context as unknown as CanvasRenderingContext2D)
+          : undefined;
+      });
+      throwIfAborted(options.signal);
+    } catch (error) {
+      try { opened.close(); } catch {}
+      throw error;
     }
-    const owned = acquired;
-    return new XlsxWorkbookSessionImpl(
-      () => { try { owned.closeArchive(); } finally { bound.cleanup(); } },
-      owned.archive, owned.workbookIndex, owned.metrics, owned.usage, signal, maximumDigitWidth,
-    );
-  } catch (error) {
-    try { acquired?.closeArchive(); } catch {}
-    bound.cleanup();
-    throw error;
+    acquired = acquireXlsxSessionFromArchive({
+      archive: opened.archive,
+      sourceByteLength: input.sourceByteLength,
+      ...(maximumDigitWidth === undefined ? {} : { layoutMetrics: { maximumDigitWidth } }),
+      closeArchive: opened.close,
+    }, options);
   }
+  return new XlsxWorkbookSessionImpl(
+    acquired.closeArchive,
+    acquired.archive,
+    acquired.workbookIndex,
+    acquired.metrics,
+    acquired.usage,
+    options.signal,
+  );
 }
 
 type ActiveWorksheetOperation = {
@@ -162,12 +173,11 @@ class XlsxWorkbookSessionImpl implements XlsxWorkbookSession {
 
   constructor(
     private readonly closeArchive: () => void,
-    private readonly archive: XlsxNodeArchive,
+    private readonly archive: XlsxNodeSessionArchive,
     workbook: ParsedWorkbook,
     private readonly metrics: OoxmlResourceMetricsSession,
     usage: OoxmlResourceUsageSnapshot | undefined,
     private readonly signal?: AbortSignal,
-    readonly maximumDigitWidth?: number,
   ) {
     this.workbookIndex = freezeRecursively(workbook);
     this.sheetNames = Object.freeze(this.workbookIndex.workbook.sheets.map((sheet) => sheet.name));
@@ -196,7 +206,7 @@ class XlsxWorkbookSessionImpl implements XlsxWorkbookSession {
   }
 
   get resourceUsage(): OoxmlResourceUsageSnapshot | undefined {
-    if (this.closed) return this.lastUsage;
+    if (this.closed || !this.archive.resource_usage) return this.lastUsage;
     try {
       this.lastUsage = decodeUsage(this.archive.resource_usage());
     } catch {
@@ -242,10 +252,11 @@ class XlsxWorkbookSessionImpl implements XlsxWorkbookSession {
           };
           continue;
         }
-        if (this.maximumDigitWidth !== undefined) {
-          // Preserve the native source's one measured metric for both grid
-          // geometry and anchored pictures; do not remeasure in the renderer.
-          GridGeometry.forWorksheet(unit.worksheet, this.maximumDigitWidth);
+        const hostLayoutMdw = this.workbookIndex.layoutMetrics?.maximumDigitWidth;
+        if (hostLayoutMdw !== undefined) {
+          // Keep the width a model source's anchors were resolved with for the
+          // grid geometry of every worksheet; never remeasure it later.
+          GridGeometry.forWorksheet(unit.worksheet, hostLayoutMdw);
         }
         yield {
           kind: 'finished',
@@ -475,4 +486,11 @@ function decodeUsage(bytes: Uint8Array): OoxmlResourceUsageSnapshot | undefined 
     if (String(error).includes('worksheet cursor usage is unavailable')) return undefined;
     throw error;
   }
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (!signal?.aborted) return;
+  const error = new Error('XLSX workbook session was aborted');
+  error.name = 'AbortError';
+  throw error;
 }
