@@ -25,20 +25,26 @@
 //! alternative PowerPoint uses. Each shape resolves to one of three
 //! outcomes (`adopt`):
 //! - no alternative part (a package with only the `downRev` checksums), or
-//!   an alternative that verifiably disagrees with the binary on a compared
-//!   attribute: the binary projection;
-//! - an alternative that agrees on every compared attribute: the
+//!   an ordinary alternative that verifiably disagrees with the binary on a
+//!   compared attribute: the binary projection;
+//! - an alternative that agrees on every applicable compared attribute: the
 //!   alternative, with the binary's transform, identifier and characters;
+//!   a binary freeform keeps its outline, and a placeholder inherits locally
+//!   omitted shape properties from the binary projection;
 //! - anything else fails closed as unsupported: an oversized, over-budget,
 //!   ambiguous or unreadable package or theme, a part that is not a shape or
-//!   connector, a placeholder (its alternative inherits from a slide layout
-//!   a binary file does not have), relationship references, and a compared
-//!   attribute that the two forms state in ways this reader cannot equate.
+//!   connector, relationship references, and a compared attribute that the
+//!   two forms state in ways this reader cannot equate. Placeholder shape
+//!   properties omitted locally inherit from the binary projection; their
+//!   transform always follows the binary anchor (PowerPoint 16 controls).
+//!   A disagreement in a locally stated placeholder fill or geometry is also
+//!   unsupported because its edited side cannot be determined.
 //!
 //! The compared attributes are those the evidence covers: geometry (preset
-//! name and adjust values, or custom paths), the untransformed position,
-//! size, rotation and flips, the recorded fill, run font size, bold and
-//! italic where both state them, and the text structure (the same
+//! name and adjust values, or custom paths, except a binary freeform with an
+//! XML preset), the untransformed position, size, rotation and flips for
+//! ordinary shapes, the recorded fill when locally stated, run font size,
+//! bold and italic where both state them, and the text structure (the same
 //! paragraphs, runs and line breaks at the same UTF-16 lengths). Stroke,
 //! effects and other text properties are not compared, so a binary edit that
 //! preserves every compared attribute would still adopt a stale alternative.
@@ -320,24 +326,67 @@ pub(in crate::ppt) fn adopt(
             ))
         })?
         .ok_or_else(|| unverifiable("part"))?;
-    // A placeholder's alternative inherits from a slide layout that a binary
-    // file does not have, and relationship references (pictures, links)
-    // name parts this projection does not compare: neither is complete.
-    if parsed.placeholder {
-        return Err(unverifiable("placeholder"));
-    }
+    // Relationship references (pictures, links) name parts this projection
+    // does not compare. A PowerPoint 16 control changes the rendered crop
+    // through an XML-only picture-fill edit, so keeping the binary here would
+    // silently discard visible information.
     if parsed.relationship_references {
         return Err(unverifiable("relationship"));
     }
+    let local = if parsed.placeholder {
+        Some(placeholder_locals(blob, &part)?)
+    } else {
+        None
+    };
     let mut shape = parsed.element;
+    // PowerPoint 16 controls with a binary OfficeArt freeform and an XML
+    // preset (frame and trapezoid, including visibly matching outlines)
+    // retain the binary outline when the XML preset alone changes. An XML
+    // fill edit on the same freeform is visible. This is geometry-specific
+    // precedence, not rejection of the whole alternative. The converse
+    // (binary preset, XML freeform) has not been established and stays closed.
+    let binary_freeform_preset =
+        binary.element.geometry == "custGeom" && shape.geometry != "custGeom";
     let substituted = {
         let mut candidate = shape.clone();
         substitute_text(&mut candidate, binary.text).map(|()| candidate)
     };
+    // A local placeholder override is ambiguous when it disagrees: XML-only
+    // geometry/fill edits render from the alternative, whereas binary-only
+    // edits on the same controls invalidate it and render from the binary.
+    // The proprietary checksum cannot be recomputed here to identify which
+    // side was edited. Reject that pair rather than guessing its provenance.
+    let local_override = |verdict, stated, attribute| {
+        if stated && matches!(verdict, Verdict::Differs(_)) {
+            Verdict::Unverifiable(attribute)
+        } else {
+            verdict
+        }
+    };
     let verdicts = [
-        same_geometry(binary, &shape),
-        same_transform(binary.leaf, binary.nested, &shape),
-        same_fill(&binary.fill, &shape),
+        if binary_freeform_preset || local.is_some_and(|p| !p.geometry) {
+            Verdict::Same
+        } else {
+            local_override(
+                same_geometry(binary, &shape),
+                parsed.placeholder,
+                "placeholder geometry precedence",
+            )
+        },
+        if parsed.placeholder {
+            Verdict::Same
+        } else {
+            same_transform(binary.leaf, binary.nested, &shape)
+        },
+        if local.is_some_and(|p| !p.fill) {
+            Verdict::Same
+        } else {
+            local_override(
+                same_fill(&binary.fill, &shape, binary.element.rotation),
+                parsed.placeholder,
+                "placeholder fill precedence",
+            )
+        },
         same_run_formatting(binary.element, &shape),
         match &substituted {
             Ok(_) => Verdict::Same,
@@ -349,6 +398,43 @@ pub(in crate::ppt) fn adopt(
     }
     shape = substituted.unwrap_or_else(|_| unreachable!("text agreement was decided"));
     let element = binary.element;
+    if binary_freeform_preset || local.is_some_and(|p| !p.geometry) {
+        shape.geometry = element.geometry.clone();
+        shape.cust_geom = element.cust_geom.clone();
+        shape.cust_geom_paint = element.cust_geom_paint.clone();
+        shape.adj = element.adj;
+        shape.adj2 = element.adj2;
+        shape.adj3 = element.adj3;
+        shape.adj4 = element.adj4;
+        shape.adj5 = element.adj5;
+        shape.adj6 = element.adj6;
+        shape.adj7 = element.adj7;
+        shape.adj8 = element.adj8;
+    }
+    if let Some(local) = local {
+        // ECMA-376 Part 1 Annex L.3.2.3: a placeholder takes absent shape
+        // properties from its layout/master. The standalone DrawingML part
+        // has no layout; the binary projection already holds those values.
+        // PowerPoint 16 controls with title/body/subtitle placeholders show
+        // XML-only font and bold edits but binary-anchor position/size. An
+        // XML-only local fill or geometry edit is visible; a binary edit can
+        // invalidate the blob, so explicit values still pass the ordinary
+        // agreement gate above. Do not infer missing local values from the
+        // standalone parser's defaults.
+        if !local.fill {
+            shape.fill = element.fill.clone();
+        }
+        if !local.stroke {
+            shape.stroke = element.stroke.clone();
+        }
+        if !local.effects {
+            shape.shadow = element.shadow.clone();
+            shape.inner_shadow = element.inner_shadow.clone();
+            shape.glow = element.glow.clone();
+            shape.soft_edge = element.soft_edge.clone();
+            shape.reflection = element.reflection.clone();
+        }
+    }
     shape.x = element.x;
     shape.y = element.y;
     shape.width = element.width;
@@ -367,6 +453,64 @@ pub(in crate::ppt) fn adopt(
         .checked_sub(retained)
         .ok_or_else(|| unsupported("PowerPoint direct slide model budget exceeded"))?;
     Ok(Some(shape))
+}
+
+#[cfg(feature = "direct-ppt")]
+#[derive(Clone, Copy)]
+struct PlaceholderLocals {
+    geometry: bool,
+    fill: bool,
+    stroke: bool,
+    effects: bool,
+}
+
+/// A standalone placeholder parser supplies schema defaults where the actual
+/// shape relies on a missing layout. Inspect only the direct `p:spPr` children
+/// to distinguish a local override from inherited geometry and fill. The
+/// archive and part sizes have already passed `inflated_size` and the PPTX
+/// standalone parser's bounds; this second read is limited to placeholders.
+#[cfg(feature = "direct-ppt")]
+fn placeholder_locals(blob: &[u8], part: &str) -> Result<PlaceholderLocals, String> {
+    use std::io::Read;
+    let unreadable = || unsupported("unreadable PowerPoint alternative shape XML placeholder");
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(blob)).map_err(|_| unreadable())?;
+    let entry = archive.by_name(part).map_err(|_| unreadable())?;
+    if entry.size() > MAX_PART_BYTES || entry.encrypted() {
+        return Err(unreadable());
+    }
+    let mut xml = String::new();
+    entry
+        .take(MAX_PART_BYTES + 1)
+        .read_to_string(&mut xml)
+        .map_err(|_| unreadable())?;
+    if xml.len() as u64 > MAX_PART_BYTES {
+        return Err(unreadable());
+    }
+    let doc = roxmltree::Document::parse(&xml).map_err(|_| unreadable())?;
+    let sp_pr = doc
+        .root_element()
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "spPr");
+    let has = |names: &[&str]| {
+        sp_pr.is_some_and(|sp_pr| {
+            sp_pr
+                .children()
+                .any(|n| n.is_element() && names.contains(&n.tag_name().name()))
+        })
+    };
+    Ok(PlaceholderLocals {
+        geometry: has(&["prstGeom", "custGeom"]),
+        fill: has(&[
+            "noFill",
+            "solidFill",
+            "gradFill",
+            "pattFill",
+            "blipFill",
+            "grpFill",
+        ]),
+        stroke: has(&["ln"]),
+        effects: has(&["effectLst", "effectDag"]),
+    })
 }
 
 /// Without the direct presentation model feature there is no DrawingML
@@ -419,7 +563,9 @@ fn adjusts(shape: &ShapeElement) -> [Option<f64>; 8] {
 /// preset (`officeart::preset`), so two different preset names are
 /// different shapes. PowerPoint saves a preset that has no MS-ODRAW shape
 /// type as a binary freeform: a preset on one side and custom geometry on
-/// the other would need the preset's formulas evaluated to compare.
+/// the other would need the preset's formulas evaluated to compare. `adopt`
+/// handles the observed binary-freeform/XML-preset precedence before calling
+/// this comparator; the converse still reaches its unverifiable result.
 #[cfg(any(test, feature = "direct-ppt"))]
 fn same_geometry(binary: &BinaryShape<'_>, alternative: &ShapeElement) -> Verdict {
     let element = binary.element;
@@ -601,9 +747,13 @@ fn same_transform(
 /// off on one side and solid on the other is a different paint. Other
 /// fill kinds on either side have no common model representation this
 /// reader can equate (PowerPoint may restate a binary fill as another
-/// DrawingML kind), except identical gradient and pattern projections.
+/// DrawingML kind), except identical gradient and pattern projections. In a
+/// PowerPoint 16 control, an XML pattern over a binary duotone image changes
+/// when only its XML foreground changes; editing the binary uses its image.
+/// That pair stays unverifiable. So does a rotated gradient whose binary says
+/// `rotWithShape=false` while XML omits it: the schema has no default.
 #[cfg(any(test, feature = "direct-ppt"))]
-fn same_fill(binary: &RecordedFill, alternative: &ShapeElement) -> Verdict {
+fn same_fill(binary: &RecordedFill, alternative: &ShapeElement, rotation: f64) -> Verdict {
     use pptx_model::Fill;
     let paint = |fill: Option<&Fill>| match fill {
         None | Some(Fill::None) => None,
@@ -628,7 +778,7 @@ fn same_fill(binary: &RecordedFill, alternative: &ShapeElement) -> Verdict {
         (None, Some(Fill::Solid { .. })) | (Some(Fill::Solid { .. }), None) => {
             Verdict::Differs("fill")
         }
-        (Some(a), Some(b)) if same_paint(a, b) => Verdict::Same,
+        (Some(a), Some(b)) if same_paint(a, b, rotation) => Verdict::Same,
         _ => Verdict::Unverifiable("fill"),
     }
 }
@@ -661,9 +811,18 @@ fn same_color(binary: &str, alternative: &str) -> Option<bool> {
 /// Identical gradient or pattern paint. Gradient stop positions are 16.16
 /// fractions in the binary (MS-ODRAW 2.3.7.17 fillShadeColors) and
 /// 1/100000 in DrawingML (ECMA-376 20.1.8.36), so each may round by one
-/// step of either unit; angles are whole degrees on both sides.
+/// step of either unit; angles are whole degrees on both sides. PowerPoint 16
+/// uses the XML in an Office-saved multi-stop gradient whose binary duplicates
+/// a terminal color and whose XML has fewer, shifted stops; changing only the
+/// binary fill color makes it use the binary instead. That restatement has no
+/// established general mapping, so unequal stop arrays remain unverifiable.
+/// ECMA-376 CT_GradientFillProperties gives `flip` the default `none`; a
+/// `tileRect` with all zero offsets covers the whole shape, like no tileRect.
+/// `rotWithShape` has no visible effect when the projected shape has no
+/// rotation; keep its absent/present distinction for rotated shapes because
+/// the schema declares no default.
 #[cfg(any(test, feature = "direct-ppt"))]
-fn same_paint(binary: &pptx_model::Fill, alternative: &pptx_model::Fill) -> bool {
+fn same_paint(binary: &pptx_model::Fill, alternative: &pptx_model::Fill, rotation: f64) -> bool {
     use pptx_model::Fill;
     const POSITION: f64 = 1.0 / 65536.0 + 1.0 / 100_000.0;
     fn sorted(stops: &[pptx_model::GradStop]) -> Vec<(f64, &str)> {
@@ -675,6 +834,9 @@ fn same_paint(binary: &pptx_model::Fill, alternative: &pptx_model::Fill) -> bool
         stops
     }
     let rect = |r: &Option<ooxml_common::fill::FillRect>| r.as_ref().map(|r| [r.l, r.t, r.r, r.b]);
+    let tile_rect =
+        |r: &Option<ooxml_common::fill::FillRect>| rect(r).unwrap_or([0.0, 0.0, 0.0, 0.0]);
+    let rotation_irrelevant = rotation.rem_euclid(360.0) == 0.0;
     match (binary, alternative) {
         (
             Fill::Gradient {
@@ -711,9 +873,9 @@ fn same_paint(binary: &pptx_model::Fill, alternative: &pptx_model::Fill) -> bool
                 && bsc == asc
                 && bp == ap
                 && rect(bf) == rect(af)
-                && rect(btr) == rect(atr)
-                && bfl == afl
-                && br == ar
+                && tile_rect(btr) == tile_rect(atr)
+                && bfl.as_deref().unwrap_or("none") == afl.as_deref().unwrap_or("none")
+                && (br == ar || rotation_irrelevant)
         }
         (
             Fill::Pattern {
@@ -1083,20 +1245,20 @@ mod tests {
     fn fills_compare_the_recorded_paint() {
         let mut alternative = shape("rect");
         assert_eq!(
-            same_fill(&RecordedFill::Unstated, &alternative),
+            same_fill(&RecordedFill::Unstated, &alternative, 90.0),
             Verdict::Same
         );
         alternative.fill = solid("FFFFFF");
         assert_eq!(
-            same_fill(&RecordedFill::Unstated, &alternative),
+            same_fill(&RecordedFill::Unstated, &alternative, 90.0),
             Verdict::Unverifiable("fill")
         );
         assert_eq!(
-            same_fill(&RecordedFill::NotDisplayed, &alternative),
+            same_fill(&RecordedFill::NotDisplayed, &alternative, 90.0),
             Verdict::Same
         );
         assert_eq!(
-            same_fill(&RecordedFill::Stated(None), &alternative),
+            same_fill(&RecordedFill::Stated(None), &alternative, 90.0),
             Verdict::Differs("fill")
         );
         // A color transform resolved independently may round one unit away.
@@ -1104,21 +1266,24 @@ mod tests {
         assert_eq!(
             same_fill(
                 &RecordedFill::Stated(solid("7f7f7f").map(Box::new)),
-                &alternative
+                &alternative,
+                90.0
             ),
             Verdict::Same
         );
         assert_eq!(
             same_fill(
                 &RecordedFill::Stated(solid("7E7F7F").map(Box::new)),
-                &alternative
+                &alternative,
+                90.0
             ),
             Verdict::Differs("solid fill color")
         );
         assert_eq!(
             same_fill(
                 &RecordedFill::Stated(solid("80808080").map(Box::new)),
-                &alternative
+                &alternative,
+                90.0
             ),
             Verdict::Differs("solid fill color")
         );
@@ -1145,16 +1310,35 @@ mod tests {
             gradient(&[(0.0, "000000"), (0.3099975, "FFFFFF")], Some(true)).map(Box::new),
         );
         alternative.fill = gradient(&[(0.31, "FFFFFF"), (0.0, "000000")], Some(true));
-        assert_eq!(same_fill(&recorded, &alternative), Verdict::Same);
+        assert_eq!(same_fill(&recorded, &alternative, 90.0), Verdict::Same);
+        // ECMA-376 CT_GradientFillProperties defaults flip to "none";
+        // tileRect with all-zero edges covers the same whole shape as none.
+        if let Some(Fill::Gradient {
+            tile_rect, flip, ..
+        }) = alternative.fill.as_mut()
+        {
+            *tile_rect = Some(ooxml_common::fill::FillRect::default());
+            *flip = Some("none".into());
+        }
+        assert_eq!(same_fill(&recorded, &alternative, 90.0), Verdict::Same);
+        let no_rotation = RecordedFill::Stated(
+            gradient(&[(0.0, "000000"), (0.3099975, "FFFFFF")], Some(false)).map(Box::new),
+        );
+        alternative.fill = gradient(&[(0.31, "FFFFFF"), (0.0, "000000")], None);
+        assert_eq!(same_fill(&no_rotation, &alternative, 0.0), Verdict::Same);
+        assert_eq!(
+            same_fill(&no_rotation, &alternative, 90.0),
+            Verdict::Unverifiable("fill")
+        );
         // Another stop layout or an unstated rotation may restate the same
         // paint: not comparable.
         alternative.fill = gradient(&[(0.0, "000000"), (0.31, "FFFFFF")], None);
         assert_eq!(
-            same_fill(&recorded, &alternative),
+            same_fill(&recorded, &alternative, 90.0),
             Verdict::Unverifiable("fill")
         );
         assert_eq!(
-            same_fill(&RecordedFill::Unknown, &alternative),
+            same_fill(&RecordedFill::Unknown, &alternative, 90.0),
             Verdict::Unverifiable("fill")
         );
     }
@@ -1380,6 +1564,106 @@ mod tests {
         }
 
         #[test]
+        fn placeholder_inherits_missing_shape_properties_from_the_binary() {
+            let placeholder = SHAPE_XML
+                .replace("<p:nvPr/>", r#"<p:nvPr><p:ph type="title"/></p:nvPr>"#)
+                .replace(
+                    r#"<p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1587500" cy="793750"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></p:spPr>"#,
+                    "<p:spPr/>",
+                );
+            let adopted = run_adopt(&element("FF0000"), &blob(&placeholder), &theme(), AMPLE)
+                .0
+                .unwrap()
+                .expect("placeholder alternative");
+            assert_eq!(adopted.geometry, "rect");
+            assert!(matches!(adopted.fill, Some(Fill::Solid { color }) if color == "FF0000"));
+            assert_eq!((adopted.width, adopted.height), (1587500, 793750));
+        }
+
+        #[test]
+        fn placeholder_uses_binary_transform_even_with_a_local_xml_transform() {
+            let placeholder = SHAPE_XML
+                .replace("<p:nvPr/>", r#"<p:nvPr><p:ph type="body"/></p:nvPr>"#)
+                .replace(r#"<a:off x="0" y="0"/>"#, r#"<a:off x="635000" y="0"/>"#);
+            let adopted = run_adopt(&element("FF0000"), &blob(&placeholder), &theme(), AMPLE)
+                .0
+                .unwrap()
+                .expect("binary anchor wins");
+            assert_eq!(adopted.x, 0);
+            assert!(matches!(adopted.fill, Some(Fill::Solid { color }) if color == "FF0000"));
+        }
+
+        #[test]
+        fn disagreeing_local_placeholder_overrides_have_unknown_provenance() {
+            let placeholder =
+                SHAPE_XML.replace("<p:nvPr/>", r#"<p:nvPr><p:ph type="body"/></p:nvPr>"#);
+            let geometry = placeholder.replace("prst=\"rect\"", "prst=\"ellipse\"");
+            let fill = placeholder.replace("val=\"FF0000\"", "val=\"00FF00\"");
+            for (xml, attribute) in [
+                (geometry.as_str(), "placeholder geometry precedence"),
+                (fill.as_str(), "placeholder fill precedence"),
+            ] {
+                let error = run_adopt(&element("FF0000"), &blob(xml), &theme(), AMPLE)
+                    .0
+                    .unwrap_err();
+                assert!(error.starts_with("UNSUPPORTED:") && error.contains(attribute));
+            }
+        }
+
+        #[test]
+        fn placeholder_keeps_alternative_text_formatting_with_binary_characters() {
+            let xml = SHAPE_XML
+                .replace("<p:nvPr/>", r#"<p:nvPr><p:ph type="title"/></p:nvPr>"#)
+                .replace(
+                    "</p:sp>",
+                    "<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr sz=\"4400\" b=\"1\"/><a:t>_____</a:t></a:r></a:p></p:txBody></p:sp>",
+                );
+            let mut element = element("FF0000");
+            element.text_body = body(&[&[run("HELLO")]]);
+            let leaf = pptx_model::Transform {
+                cx: element.width,
+                cy: element.height,
+                ..Default::default()
+            };
+            let mut binary = binary(&element, &leaf);
+            binary.text = Some("HELLO");
+            let (mut work, mut text, mut model) = AMPLE;
+            let adopted = adopt(
+                &binary,
+                &blob(&xml),
+                &theme(),
+                &mut work,
+                &mut text,
+                &mut model,
+            )
+            .unwrap()
+            .expect("placeholder alternative");
+            let run = &adopted.text_body.unwrap().paragraphs[0].runs[0];
+            assert!(
+                matches!(run, TextRun::Text(data) if data.text == "HELLO" && data.font_size == Some(44.0) && data.bold == Some(true))
+            );
+        }
+
+        #[test]
+        fn freeform_binary_keeps_its_outline_with_a_preset_alternative() {
+            let mut element = element("FF0000");
+            element.geometry = "custGeom".into();
+            element.cust_geom = Some(vec![vec![
+                pptx_model::PathCmd::MoveTo { x: 0.0, y: 0.0 },
+                pptx_model::PathCmd::LineTo { x: 1.0, y: 0.0 },
+                pptx_model::PathCmd::LineTo { x: 1.0, y: 1.0 },
+                pptx_model::PathCmd::Close,
+            ]]);
+            let adopted = run_adopt(&element, &blob(SHAPE_XML), &theme(), AMPLE)
+                .0
+                .unwrap()
+                .expect("alternative formatting with binary outline");
+            assert_eq!(adopted.geometry, "custGeom");
+            assert!(adopted.cust_geom.is_some());
+            assert!(matches!(adopted.fill, Some(Fill::Solid { color }) if color == "FF0000"));
+        }
+
+        #[test]
         fn unverifiable_alternatives_fail_closed() {
             let element = element("FF0000");
             let unsupported = |result: (Result<Option<ShapeElement>, String>, usize)| {
@@ -1413,10 +1697,7 @@ mod tests {
                 &Theme::Unreadable,
                 AMPLE,
             ));
-            // Incomplete or non-shape alternatives.
-            let placeholder =
-                SHAPE_XML.replace("<p:nvPr/>", r#"<p:nvPr><p:ph type="title"/></p:nvPr>"#);
-            unsupported(run_adopt(&element, &blob(&placeholder), &theme(), AMPLE));
+            // Non-shape alternatives.
             let group = package(
                 &[("drs/groupshapexml.xml", "<x/>")],
                 &[
