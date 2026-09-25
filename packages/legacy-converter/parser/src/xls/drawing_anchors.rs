@@ -415,10 +415,9 @@ fn read_shape<'a>(
                 {
                     return Err(unsupported("invalid BIFF cell anchor"));
                 }
+                // fMove without fSize is invalid (MS-XLS 2.5.193); the owner
+                // check below admits it only for AutoFilter drop-downs.
                 let flags = u16_at(child.payload, 0)? & 3;
-                if flags == 1 {
-                    return Err(unsupported("invalid BIFF anchor movement flags"));
-                }
                 facts.anchor = Some((flags, corner(child.payload, 2)?, corner(child.payload, 10)?));
             }
             0xf011 | 0xf00d => {
@@ -604,6 +603,9 @@ fn read_sheet_group<'a>(
     let (Some((behavior, from, to)), Some(rect)) = (facts.anchor, facts.group_rect) else {
         return Err(unsupported("BIFF drawing group without its anchor"));
     };
+    if behavior == 1 {
+        return Err(unsupported("invalid BIFF anchor movement flags"));
+    }
     let (object_id, object_type, object_flags) = facts
         .object
         .filter(|(_, kind, _)| *kind == 0)
@@ -742,6 +744,12 @@ fn walk_with_policy(
                     let (object_id, object_type, object_flags) = facts
                         .object
                         .ok_or_else(|| unsupported("BIFF cell anchor has no owned object"))?;
+                    // Excel anchors the application-inserted drop-down
+                    // objects of AutoFilters (Obj ot 20 with fUIObj) with
+                    // fMove but not fSize; any other such anchor is invalid.
+                    if behavior == 1 && !(object_type == 20 && object_flags & 0x100 != 0) {
+                        return Err(unsupported("invalid BIFF anchor movement flags"));
+                    }
                     if output.len() >= MAX_OBJECTS {
                         return Err(unsupported("BIFF retained anchor budget exceeded"));
                     }

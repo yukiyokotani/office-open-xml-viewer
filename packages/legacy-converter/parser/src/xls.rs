@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, HashSet};
 use crate::cfb::CompoundFile;
 use crate::ooxml::{write_package, xml_attr, xml_text, ROOT_RELS_XLSX};
 
+mod autofilter;
 mod chart;
 mod conditional;
 pub(crate) mod direct;
@@ -163,6 +164,8 @@ struct SheetData {
     conditional_formats: Vec<xlsx_model::ConditionalFormat>,
     /// A chart sheet's chart (direct path only); such a sheet has no cells.
     chart_sheet: Option<chart::ChartSheet>,
+    /// The worksheet's AutoFilter range (direct path only).
+    auto_filter: Option<autofilter::AutoFilter>,
 }
 
 pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<XlsConversion, String> {
@@ -408,7 +411,11 @@ fn prepare_workbook(
         warnings.push("legacy-xls:non-worksheet-tabs-omitted".into());
     }
     if with_pictures && direct {
-        validate_direct_drawings(&records, &tabs)?;
+        let filters = autofilter::workbook(&records)?;
+        validate_direct_drawings(&records, &tabs, &filters)?;
+        for (index, tab) in tabs.iter().enumerate() {
+            converted[index].1.auto_filter = filters.get(tab).copied();
+        }
     }
     let pictures = if with_pictures {
         // The direct reader follows Excel, which displays GDI+ metafiles with
@@ -496,12 +503,27 @@ fn prepare_workbook(
 /// rectangles and text boxes; any other object (lines, ovals, controls, cell
 /// comments), grouped pictures or charts, or a chart/picture without its data
 /// is rejected with the reason. `shapes` validates each shape's properties.
-fn validate_direct_drawings(records: &[Record<'_>], tabs: &[usize]) -> Result<(), String> {
+fn validate_direct_drawings(
+    records: &[Record<'_>],
+    tabs: &[usize],
+    filters: &BTreeMap<usize, autofilter::AutoFilter>,
+) -> Result<(), String> {
     let projected: std::collections::BTreeSet<_> = tabs.iter().copied().collect();
     for anchor in drawing_anchors::strict(records)? {
-        if projected.contains(&anchor.sheet) {
-            admit_direct_object(&anchor)?;
+        if !projected.contains(&anchor.sheet) {
+            continue;
         }
+        // An AutoFilter's own column buttons (see `autofilter`): drawn by
+        // the worksheet renderer from the projected range.
+        if anchor.object_type == 20
+            && anchor.object_flags & 0x100 != 0
+            && filters
+                .get(&anchor.sheet)
+                .is_some_and(|filter| filter.owns_button(anchor.from.column, anchor.from.row))
+        {
+            continue;
+        }
+        admit_direct_object(&anchor)?;
     }
     Ok(())
 }

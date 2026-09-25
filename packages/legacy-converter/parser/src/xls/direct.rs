@@ -464,6 +464,7 @@ fn project_sheet(
             right: u32::from(last_column) + 1,
         });
     }
+    worksheet.auto_filter = sheet.auto_filter.map(autofilter::AutoFilter::model);
     charge(budget, conditional_bytes(&sheet.conditional_formats))?;
     worksheet.conditional_formats = sheet.conditional_formats;
     sheet.geometry.project(&mut worksheet, mdw, budget)?;
