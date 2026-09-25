@@ -186,10 +186,18 @@ impl NativeAdmission {
             }
             0xd642 => {
                 // [MS-DOC] 2.9.26 CellHideMarkOperand: cb MUST be 3, then an
-                // ItcFirstLim and a Bool8. The projection is ECMA-376
-                // §17.4.21 hideMark, which Word applies per cell (see the
-                // DOCX table layout): its PDFs of sample-26 drop a hideMark
-                // cell's final empty paragraph although the row has content.
+                // ItcFirstLim and a Bool8. MS-DOC describes the flag as a row
+                // condition (no height only when every cell is empty); ECMA-376
+                // §17.4.21 hideMark ignores each cell's end-of-cell mark.
+                // Word's output follows the per-cell reading, which the DOCX
+                // table layout implements: in its PDFs of sample-26 (DOC and
+                // DOCX) a hideMark cell ending with an empty paragraph, in a
+                // table whose other rows have content, ends its row at the
+                // last text paragraph (bottom 271.5pt = last text line top
+                // 248.0pt + one 23.28pt paragraph advance), while the same
+                // structure without hideMark keeps that line (sample-42). The
+                // all-empty hideMark row of sample-37 collapses to its 1pt
+                // minimum in both PDFs.
                 if operand.len() != 4 || operand[0] != 3 {
                     return Err(unsupported("invalid Word cell hide-mark operand"));
                 }

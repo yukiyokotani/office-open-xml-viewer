@@ -280,6 +280,7 @@ impl Frame {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "direct-doc")]
     fn frame(entries: &[(u16, &[u8])]) -> Frame {
         let mut frame = Frame::default();
         for (code, operand) in entries {

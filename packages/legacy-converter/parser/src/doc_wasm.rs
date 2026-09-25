@@ -88,7 +88,11 @@ impl LegacyDocDocument {
     }
     /// MS-DOC 2.7.2 DopBase fRMPrint: the DOC asks for its revision markup
     /// in print/PDF output. A host may use it to select the tracked-change
-    /// view for this legacy input when the caller did not choose one.
+    /// view for this legacy input when the caller did not choose one: the
+    /// display target for a legacy DOC is Word's PDF export, which follows
+    /// fRMPrint (a corpus DOC with fRMView and fRMPrint set exports with
+    /// insertions underlined and margin change bars), not the on-screen
+    /// fRMView setting (MS-DOC 2.7.2 note <166>: the two can differ).
     pub fn revision_markup_in_print(&self) -> bool {
         self.cursor.revision_markup_in_print()
     }

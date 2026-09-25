@@ -19,6 +19,8 @@ pub(crate) struct DirectSession {
 }
 
 pub(crate) struct Resource<'a> {
+    // Read by the inspection API.
+    #[cfg_attr(not(any(test, feature = "inspection")), allow(dead_code))]
     pub extension: &'static str,
     pub bytes: &'a [u8],
 }
@@ -139,6 +141,7 @@ impl DirectSession {
         self.presentation.slides.len()
     }
 
+    #[cfg(feature = "direct-ppt")]
     pub fn size(&self) -> (u32, u32) {
         self.presentation.size
     }
@@ -178,7 +181,8 @@ fn resource_index(key: &str) -> Result<u32, String> {
         .ok_or_else(|| unsupported("invalid PowerPoint resource key"))
 }
 
-#[cfg(test)]
+/// The direct cursor's tests use this session fixture.
+#[cfg(all(test, feature = "direct-ppt"))]
 pub(super) fn cursor_fixture() -> (DirectSession, Vec<u8>) {
     tests::cursor_fixture()
 }

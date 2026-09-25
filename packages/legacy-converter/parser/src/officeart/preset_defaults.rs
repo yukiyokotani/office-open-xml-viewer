@@ -4,6 +4,7 @@
 //! same geometry as an omitted one (ECMA-376 20.1.9.5). The source defines
 //! `upDownArrow` twice with identical values; it is listed once.
 
+#[cfg(any(test, feature = "direct-ppt"))]
 const DEFAULTS: &[(&str, &[i32])] = &[
     ("accentBorderCallout1", &[18750, -8333, 112500, -38333]),
     (
@@ -160,6 +161,7 @@ const DEFAULTS: &[(&str, &[i32])] = &[
 ];
 
 /// The preset's default adjust values in `avLst` order, if it has any.
+#[cfg(any(test, feature = "direct-ppt"))]
 pub(crate) fn defaults(name: &str) -> Option<&'static [i32]> {
     DEFAULTS
         .binary_search_by(|(preset, _)| preset.cmp(&name))

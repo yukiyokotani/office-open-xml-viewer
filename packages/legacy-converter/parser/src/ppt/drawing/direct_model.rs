@@ -57,6 +57,7 @@ fn unprojected_blip_fill(kind: u32) -> String {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::ppt) fn slide(
     index: usize,
     presentation: &persist::OwnedPresentation,
@@ -127,7 +128,7 @@ impl Context<'_> {
                         self.work_budget,
                         self.model_budget,
                     )?
-                    .map(|value| value.to_model(self.model_budget))
+                    .map(|value| value.into_model(self.model_budget))
                     .transpose()?;
                 if gradient.is_none() && image.is_none() {
                     if let Some(kind) = background.paint.blip_fill_type() {
@@ -404,7 +405,7 @@ impl Context<'_> {
             (None, None)
         } else {
             let name = crate::officeart::preset::name(shape.kind).ok_or_else(|| {
-                unsupported(&format!(
+                unsupported(format!(
                     "PowerPoint shape type {} has no evidenced preset geometry",
                     shape.kind
                 ))
@@ -484,7 +485,7 @@ impl Context<'_> {
                 self.work_budget,
                 self.model_budget,
             )?
-            .map(|value| value.to_model(self.model_budget))
+            .map(|value| value.into_model(self.model_budget))
             .transpose()?;
         let fill = gradient_fill.or(fill);
         let element = ShapeElement {
@@ -593,6 +594,7 @@ impl Context<'_> {
     ///   same colour with alpha 0 (written before the gray/bilevel pair);
     /// - pictureBrightness/pictureContrast as `<a:lum>` (0x8000 -> bright
     ///   100000; 0x599a/0x4ccd -> bright 70000, contrast -70000).
+    ///
     /// PowerPoint's PDF exports agree with the first two (black/white by a
     /// luminance threshold, white made transparent). For brightness/contrast,
     /// PowerPoint's PDF of a gray ramp saved as .ppt (with and without its
@@ -1943,7 +1945,11 @@ mod tests {
         };
         assert!(matches!(
             &shape.fill,
-            Some(Fill::Image { rot_with_shape: Some(false), tile: Some(_), .. })
+            Some(Fill::Image {
+                rot_with_shape: Some(false),
+                tile: Some(_),
+                ..
+            })
         ));
         // pib_complex names a linked file rather than a BLIP.
         let mut linked = properties(&[(0xc104, 4)]);

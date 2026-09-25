@@ -3,8 +3,10 @@
 use super::Paint;
 use crate::officeart::gradient as office_gradient;
 use crate::ppt::{scheme, unsupported};
+#[cfg(any(test, feature = "direct-ppt"))]
 use pptx_model::{Fill, GradStop};
 use std::fmt::Write;
+#[cfg(any(test, feature = "direct-ppt"))]
 use std::mem::size_of;
 
 pub(in crate::ppt) struct ResolvedGradient {
@@ -47,7 +49,8 @@ impl Paint {
 }
 
 impl ResolvedGradient {
-    pub(in crate::ppt) fn to_model(self, byte_budget: &mut usize) -> Result<Fill, String> {
+    #[cfg(any(test, feature = "direct-ppt"))]
+    pub(in crate::ppt) fn into_model(self, byte_budget: &mut usize) -> Result<Fill, String> {
         let count = self.projection.stops.len();
         let bytes = count
             .checked_mul(size_of::<GradStop>() + 8)
@@ -186,14 +189,15 @@ mod tests {
     }
 
     fn paint() -> Paint {
-        let mut result = Paint::default();
-        result.fill_type = Some(4);
-        result.fill = Some(0x0033_2211);
-        result.fill_back = Some(0x0066_5544);
-        result.fill_focus = Some(100);
-        result.fill_angle = Some(270 << 16);
-        result.fill_shade_type = Some(0x4000_0003);
-        result
+        Paint {
+            fill_type: Some(4),
+            fill: Some(0x0033_2211),
+            fill_back: Some(0x0066_5544),
+            fill_focus: Some(100),
+            fill_angle: Some(270 << 16),
+            fill_shade_type: Some(0x4000_0003),
+            ..Paint::default()
+        }
     }
 
     fn resolved(paint: &Paint, source: &office_gradient::Borrowed<'_>) -> Option<ResolvedGradient> {
@@ -269,7 +273,7 @@ mod tests {
         p.fill_focus = Some(50);
         let Fill::Gradient { stops, scaled, .. } = resolved(&p, &source(&[]))
             .unwrap()
-            .to_model(&mut usize::MAX.clone())
+            .into_model(&mut usize::MAX.clone())
             .unwrap()
         else {
             panic!("expected gradient")
@@ -301,14 +305,16 @@ mod tests {
         let source = source(&[(0x0033_2211, 0)]);
         let mut parent = paint();
         parent.rotate_fill_with_shape = Some(true);
-        let mut local = Paint::default();
-        local.fill_type = Some(4);
-        local.fill = parent.fill;
-        local.fill_back = parent.fill_back;
-        local.fill_focus = parent.fill_focus;
-        local.fill_angle = parent.fill_angle;
-        local.fill_shade_type = parent.fill_shade_type;
-        local.rotate_fill_with_shape = Some(false);
+        let local = Paint {
+            fill_type: Some(4),
+            fill: parent.fill,
+            fill_back: parent.fill_back,
+            fill_focus: parent.fill_focus,
+            fill_angle: parent.fill_angle,
+            fill_shade_type: parent.fill_shade_type,
+            rotate_fill_with_shape: Some(false),
+            ..Paint::default()
+        };
         let (mut work, mut bytes) = (usize::MAX, usize::MAX);
         let mut model_bytes = usize::MAX;
         let model = local
@@ -316,7 +322,7 @@ mod tests {
             .project_gradient(&source, true, None, &mut work, &mut bytes)
             .unwrap()
             .unwrap()
-            .to_model(&mut model_bytes)
+            .into_model(&mut model_bytes)
             .unwrap();
         assert!(matches!(
             model,
@@ -343,7 +349,7 @@ mod tests {
         let mut model_bytes = usize::MAX;
         let model = resolved(&paint(), &source)
             .unwrap()
-            .to_model(&mut model_bytes)
+            .into_model(&mut model_bytes)
             .unwrap();
         match model {
             Fill::Gradient {
@@ -418,16 +424,16 @@ mod tests {
         );
         let descriptor = resolved(&paint(), &source).unwrap();
         let mut unlimited = usize::MAX;
-        descriptor.to_model(&mut unlimited).unwrap();
+        descriptor.into_model(&mut unlimited).unwrap();
         let model_len = usize::MAX - unlimited;
         assert!(resolved(&paint(), &source)
             .unwrap()
-            .to_model(&mut (model_len - 1))
+            .into_model(&mut (model_len - 1))
             .is_err());
         let mut exact = model_len;
         assert!(resolved(&paint(), &source)
             .unwrap()
-            .to_model(&mut exact)
+            .into_model(&mut exact)
             .is_ok());
         assert_eq!(exact, 0);
     }
