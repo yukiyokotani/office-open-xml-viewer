@@ -444,10 +444,28 @@ export class EmfPlusPlayer {
         this.pending = { id, total, parts: [], length: 0 };
       }
       const part = data.subarray(4);
+      // TotalObjectSize is the size of the assembled object, so the fragments
+      // may add up to it and no further. A fragment that overruns it is a
+      // validation failure (the GDI alternative is kept), and the assembly
+      // buffer is only ever sized by the admitted total.
+      if (part.length > this.pending.total - this.pending.length) {
+        this.target.unsupported.add('EMF+ continued object (fragments exceed TotalObjectSize)');
+        this.pending = null;
+        this.objects.delete(id);
+        return;
+      }
       this.pending.parts.push(part);
       this.pending.length += part.length;
       if (this.pending.length < this.pending.total) return;
-      const whole = new Uint8Array(this.pending.length);
+      // Re-admit right before allocating: what the table retains now, plus
+      // the assembly buffer about to be created.
+      if (!this.admits(this.pending.total)) {
+        this.target.unsupported.add(BUDGET_FAILURE);
+        this.pending = null;
+        this.objects.delete(id);
+        return;
+      }
+      const whole = new Uint8Array(this.pending.total);
       let at = 0;
       for (const piece of this.pending.parts) {
         whole.set(piece, at);
