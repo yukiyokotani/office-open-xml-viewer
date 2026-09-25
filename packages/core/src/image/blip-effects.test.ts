@@ -58,6 +58,29 @@ describe('applyBlipPixelEffects (ECMA-376 §20.1.8.11/16/34)', () => {
     applyBlipPixelEffects(unmarked, { effects: [{ type: 'grayscale' }], duotone });
     expect([...unmarked.data]).toEqual([255, 0, 0, 255]);
   });
+
+  // Levels read from PowerPoint's PDF export of a 256-step gray ramp under
+  // <a:lum> (inputs 0, 32, 64, 96, 128, 160, 192, 224, 255).
+  it('lum follows the brightness/contrast levels PowerPoint renders', () => {
+    const inputs = [0, 32, 64, 96, 128, 160, 192, 224, 255];
+    const levels = (bright: number, contrast: number) => {
+      const buf = buffer(inputs.flatMap((v) => [v, v, v, 200]));
+      applyBlipPixelEffects(buf, { effects: [{ type: 'luminance', bright, contrast }] });
+      expect([...buf.data].filter((_, i) => i % 4 === 3).every((a) => a === 200)).toBe(true);
+      return [...buf.data].filter((_, i) => i % 4 === 0);
+    };
+    const near = (actual: number[], office: number[]) => actual.forEach((value, i) => {
+      expect(Math.abs(value - office[i])).toBeLessThanOrEqual(1);
+    });
+    near(levels(0, -0.7), [89, 99, 108, 118, 128, 137, 147, 156, 166]);
+    near(levels(0, -0.35), [45, 65, 86, 107, 128, 149, 169, 190, 210]);
+    near(levels(0.35, 0), [89, 121, 153, 185, 217, 249, 255, 255, 255]);
+    near(levels(0.7, -0.7), [205, 215, 224, 234, 244, 253, 255, 255, 255]);
+    expect(levels(1, 0)).toEqual(Array(9).fill(255));
+    expect(levels(-1, 0)).toEqual(Array(9).fill(0));
+    expect(levels(0, -1)).toEqual(Array(9).fill(128));
+    expect(levels(0, 1)).toEqual([0, 0, 0, 0, 255, 255, 255, 255, 255]);
+  });
 });
 
 describe('getCachedDuotoneBitmapByPath with CT_Blip effects', () => {

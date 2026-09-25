@@ -17,6 +17,17 @@
 //   colour with alpha 0, useA absent) renders transparent in its PDF export.
 //   Exact RGB matches therefore take clrTo's colour and alpha; with useA the
 //   source alpha must match clrFrom's alpha as well.
+// - lum. ECMA-376 §20.1.8.42 names brightness and contrast but gives no
+//   formula. Evidence: PowerPoint's PDF export of a 256-step gray ramp under
+//   a grid of bright × contrast values (±35%, ±70%, ±100%, and 0). Every
+//   channel follows
+//     out = clamp(k · (v + b/2 − ½) + ½ + b/2),
+//   with v and out in 0–1 and b the brightness fraction. k = 1 + c for
+//   contrast c ≤ 0 and 1 / (1 − c) for c > 0. So half of the brightness
+//   shift is applied before the contrast scaling around mid-gray and half
+//   after. This matches every measured level to within 0.7 of 255. The ramp
+//   saved as a binary .ppt matches it too, with the stored contrast used
+//   directly as k. At c = 1 the result is a threshold at v + b/2 = ½.
 
 import type { RgbaBuffer, Duotone } from './duotone';
 import { duotoneImageData, hex6ToRgb } from './duotone';
@@ -33,6 +44,7 @@ export type BlipEffect =
       toAlpha: number;
       useAlpha: boolean;
     }
+  | { type: 'luminance'; bright: number; contrast: number }
   | { type: 'duotone' };
 
 /** A picture's pixel transform: ordered effects plus the duotone colours the
@@ -56,6 +68,8 @@ export function blipPixelEffectsKey(value: BlipPixelEffects): string {
         return `b${effect.thresh}`;
       case 'colorChange':
         return `c${effect.from}.${effect.fromAlpha}>${effect.to}.${effect.toAlpha}${effect.useAlpha ? 'a' : ''}`;
+      case 'luminance':
+        return `l${effect.bright}.${effect.contrast}`;
       case 'duotone':
         return value.duotone ? `d${value.duotone.clr1}.${value.duotone.clr2}` : 'd';
     }
@@ -113,6 +127,15 @@ export function applyBlipPixelEffects(buf: RgbaBuffer, value: BlipPixelEffects):
         }
         break;
       }
+      case 'luminance': {
+        const table = luminanceTable(effect.bright, effect.contrast);
+        for (let i = 0; i < d.length; i += 4) {
+          d[i] = table[d[i]];
+          d[i + 1] = table[d[i + 1]];
+          d[i + 2] = table[d[i + 2]];
+        }
+        break;
+      }
       case 'duotone':
         if (value.duotone) duotoneImageData(buf, value.duotone.clr1, value.duotone.clr2);
         duotoneApplied = true;
@@ -121,4 +144,24 @@ export function applyBlipPixelEffects(buf: RgbaBuffer, value: BlipPixelEffects):
   }
   if (!duotoneApplied && value.duotone) duotoneImageData(buf, value.duotone.clr1, value.duotone.clr2);
   return buf;
+}
+
+/** Per-channel lookup table for `<a:lum>` (see the evidence above): bright
+ *  and contrast are signed fractions in [-1, 1]. */
+export function luminanceTable(bright: number, contrast: number): Uint8ClampedArray {
+  const table = new Uint8ClampedArray(256);
+  const b = Math.max(-1, Math.min(1, bright));
+  const c = Math.max(-1, Math.min(1, contrast));
+  for (let v = 0; v < 256; v++) {
+    const shifted = v / 255 + b / 2 - 0.5;
+    let out: number;
+    if (c >= 1) {
+      out = shifted > 0 ? 1 : shifted < 0 ? 0 : 0.5 + b / 2;
+    } else {
+      const k = c <= 0 ? 1 + c : 1 / (1 - c);
+      out = k * shifted + 0.5 + b / 2;
+    }
+    table[v] = Math.round(Math.max(0, Math.min(1, out)) * 255);
+  }
+  return table;
 }

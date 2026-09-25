@@ -272,13 +272,17 @@ pub enum BlipEffect {
         to_alpha: f64,
         use_alpha: bool,
     },
+    /// §20.1.8.42 `<a:lum bright contrast>` as signed fractions (100000 =
+    /// 1.0). The rendering formula comes from PowerPoint's output (see the
+    /// renderer).
+    Luminance { bright: f64, contrast: f64 },
     /// Position of the blip's `<a:duotone>` among the effects.
     Duotone,
 }
 
 /// Parse the ordered CT_Blip pixel effects of a `<a:blipFill>`'s `<a:blip>`.
-/// Returns an empty list unless the blip carries grayscl, biLevel or
-/// clrChange, so a picture with at most a duotone keeps its existing
+/// Returns an empty list unless the blip carries grayscl, biLevel, clrChange
+/// or a non-identity lum, so a picture with at most a duotone keeps its existing
 /// duotone-only rendering path. A malformed effect (missing threshold or an
 /// unresolvable colour) is kept out of the list rather than half-applied.
 pub fn parse_blip_effects<R: crate::color::ThemeResolver + ?Sized>(
@@ -332,6 +336,21 @@ pub fn parse_blip_effects<R: crate::color::ThemeResolver + ?Sized>(
                                 .attribute("useA")
                                 .is_some_and(|v| v == "1" || v == "true"),
                         })
+                    }
+                    _ => None,
+                }
+            }
+            // §20.1.8.42 CT_LuminanceEffect: ST_FixedPercentage bright and
+            // contrast, both defaulting to 0. The identity is not an effect.
+            "lum" => {
+                let fraction = |name: &str| match node.attribute(name) {
+                    None => Some(0.0),
+                    Some(value) => crate::units::drawingml_percentage_to_fraction(value)
+                        .map(|value| value.clamp(-1.0, 1.0)),
+                };
+                match (fraction("bright"), fraction("contrast")) {
+                    (Some(bright), Some(contrast)) if bright != 0.0 || contrast != 0.0 => {
+                        Some(BlipEffect::Luminance { bright, contrast })
                     }
                     _ => None,
                 }
@@ -631,6 +650,41 @@ mod tests {
             crate::color::TintMode::PowerPointLinear
         )
         .is_empty());
+    }
+
+    #[test]
+    fn parse_blip_effects_reads_luminance_brightness_and_contrast() {
+        let parse = |lum: &str| {
+            let xml = format!(
+                r#"<a:blipFill xmlns:a="{A_NS}"><a:blip xmlns:r="{R_NS}" r:embed="rId1">{lum}</a:blip></a:blipFill>"#
+            );
+            parse_blip_effects(
+                Document::parse(&xml).unwrap().root_element(),
+                &DuoResolver,
+                crate::color::TintMode::PowerPointLinear,
+            )
+        };
+        let effects = parse(r#"<a:lum bright="70000" contrast="-70000"/>"#);
+        assert_eq!(
+            effects,
+            vec![BlipEffect::Luminance {
+                bright: 0.7,
+                contrast: -0.7
+            }]
+        );
+        assert_eq!(
+            serde_json::to_value(&effects[0]).unwrap(),
+            serde_json::json!({"type": "luminance", "bright": 0.7, "contrast": -0.7})
+        );
+        assert_eq!(
+            parse(r#"<a:lum bright="100000"/>"#),
+            vec![BlipEffect::Luminance {
+                bright: 1.0,
+                contrast: 0.0
+            }]
+        );
+        assert!(parse(r#"<a:lum/>"#).is_empty());
+        assert!(parse(r#"<a:lum bright="0" contrast="0"/>"#).is_empty());
     }
 
     #[test]
