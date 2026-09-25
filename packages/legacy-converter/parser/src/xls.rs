@@ -165,6 +165,10 @@ struct SheetData {
     table_records: tables::Records,
     /// Their XLSX-model projection (direct path only).
     tables: Vec<xlsx_model::TableInfo>,
+    /// MS-XLS 2.4.259 SheetExt (tab color), if present.
+    sheet_ext: Option<Vec<u8>>,
+    /// Its resolved tab color (direct path only).
+    tab_color: Option<String>,
 }
 
 pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<XlsConversion, String> {
@@ -327,6 +331,18 @@ fn prepare_workbook(
         let mut data = parse_sheet(&records, &sheet, &shared_strings)?;
         // Only the direct model projects conditional formatting; the byte
         // converter keeps its documented omission warning.
+        if direct {
+            if let Some(ext) = data.sheet_ext.as_deref() {
+                if conditional_theme.is_none() {
+                    conditional_theme = Some((
+                        theme::Colors::parse(&records)?,
+                        conditional::Externs::parse(&records)?,
+                    ));
+                }
+                let (theme, _) = conditional_theme.as_ref().expect("parsed theme");
+                data.tab_color = tab_color(ext, &styles, theme)?;
+            }
+        }
         if direct && !data.table_records.is_empty() {
             if conditional_theme.is_none() {
                 conditional_theme = Some((
@@ -445,6 +461,29 @@ fn prepare_workbook(
         pictures,
         charts,
     })
+}
+
+/// MS-XLS 2.4.259 SheetExt: icvPlain (0x7F = no color), refined by the
+/// SheetExtOptional CFColor when its icvPlain12 agrees with icvPlain.
+fn tab_color(
+    data: &[u8],
+    styles: &styles::Styles<'_>,
+    theme: &theme::Colors,
+) -> Result<Option<String>, String> {
+    let size = u32_at(data, 12)?;
+    if u16_at(data, 0)? != 0x0862 || !matches!((size, data.len()), (20, 20) | (40, 40)) {
+        return Err(unsupported("invalid BIFF sheet extension"));
+    }
+    let icv = (u32_at(data, 16)? & 0x7f) as u16;
+    if icv == 0x7f {
+        return Ok(None);
+    }
+    if size == 40 && (u32_at(data, 20)? & 0x7f) as u16 == icv {
+        return conditional::cf_color(data, 24, styles, theme).map(Some);
+    }
+    Ok(Some(styles.chart_color(icv).ok_or_else(|| {
+        unsupported("invalid BIFF sheet tab color")
+    })?))
 }
 
 fn prepare_direct(cfb: &CompoundFile<'_>) -> Result<PreparedXls, String> {
@@ -1044,6 +1083,11 @@ fn parse_sheet(
             MERGEDCELLS => parse_merged_cells(record.data, &mut output.merged)?,
             0x01b0 | 0x01b1 | 0x0879 | 0x087a | 0x087b => {
                 output.conditional_records.push(record.kind, record.data)?
+            }
+            0x0862 => {
+                if output.sheet_ext.replace(record.data.to_vec()).is_some() {
+                    return Err(unsupported("duplicate BIFF sheet extension"));
+                }
             }
             0x0871 | 0x0872 | 0x0877 | 0x0878 => {
                 output.table_records.push(record.kind, record.data)?

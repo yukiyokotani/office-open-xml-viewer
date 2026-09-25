@@ -637,6 +637,16 @@ fn number(value: f64) -> String {
 
 /// MS-XLS 2.5.21 CFColor as the XLSX model's resolved `#RRGGBB`.
 fn color(data: &[u8], offset: usize, context: &Context<'_>) -> Result<String, String> {
+    cf_color(data, offset, context.styles, context.theme)
+}
+
+/// MS-XLS 2.5.21 CFColor as a resolved `#RRGGBB` (also used by SheetExt).
+pub(super) fn cf_color(
+    data: &[u8],
+    offset: usize,
+    styles: &styles::Styles<'_>,
+    theme: &theme::Colors,
+) -> Result<String, String> {
     use ooxml_common::spreadsheet_color::{resolve_color, SpreadsheetColor};
     let kind = u32_at(data, offset)?;
     let value = u32_at(data, offset + 4)?;
@@ -649,8 +659,7 @@ fn color(data: &[u8], offset: usize, context: &Context<'_>) -> Result<String, St
         // XCLRINDEXED ColorICV: the workbook Palette or built-in palette.
         1 => {
             let index = u16::try_from(value).map_err(|_| truncated())?;
-            let base = context
-                .styles
+            let base = styles
                 .chart_color(index)
                 .ok_or_else(|| unsupported("unsupported XLS conditional formatting color index"))?;
             let hex = base.trim_start_matches('#');
@@ -671,7 +680,7 @@ fn color(data: &[u8], offset: usize, context: &Context<'_>) -> Result<String, St
         // parsed scheme is in clrScheme order; swap each light/dark pair.
         3 if value <= 11 => {
             let slot = if value < 4 { value ^ 1 } else { value };
-            let argb = context.theme.argb(slot).ok_or_else(|| {
+            let argb = theme.argb(slot).ok_or_else(|| {
                 unsupported("XLS themed conditional formatting color lacks a theme")
             })?;
             resolve_color(SpreadsheetColor::Argb(argb), tint, &[])
