@@ -3131,7 +3131,7 @@ function requiredAutoCellHeightPx(
 ): number {
   const paddingX = 3;
   const paddingY = 2;
-  const alignH = xf.alignH ?? (cell.value.type === 'number' ? 'right' : 'left');
+  const alignH = xf.alignH ?? generalHorizontalAlignment(cell.value.type);
   const indentPx = xf.indent ? Math.round(xf.indent * 3 * mdw) : 0;
   // Keep the wrapping width identical to paint: icon-set cells reserve their
   // current icon square plus 4px. The icon itself scales with the row height,
@@ -3518,7 +3518,7 @@ function virtualizedTextOverflowOverscan(
       : font;
     ctx.font = buildFont(effectiveFont, cs);
 
-    const alignH = xf.alignH ?? 'left';
+    const alignH = xf.alignH ?? generalHorizontalAlignment(cell.value.type);
     const paddingX = 3;
     const indentPx = xf.indent ? Math.round(xf.indent * 3 * mdw) : 0;
     const cellW = colAxis.sizeOf(col);
