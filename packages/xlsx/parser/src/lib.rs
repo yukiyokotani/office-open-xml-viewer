@@ -19,7 +19,6 @@ use ooxml_common::resource::{
 
 mod markdown;
 mod pivot;
-mod pivot_presets;
 use pivot::*;
 
 mod worksheet_reference;
