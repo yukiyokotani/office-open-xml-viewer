@@ -307,7 +307,11 @@ function buildCfb(streams: ReadonlyArray<readonly [string, Uint8Array]>): Uint8A
   padded.forEach((entry, index) => {
     const offset = directoryOffset + (index + 1) * 128;
     writeDirectoryEntry(output.subarray(offset, offset + 128), entry.name, 2, starts[index].start, starts[index].size);
+    // Every stream is a child of the root storage (a right-sibling chain),
+    // as parent-scoped stream lookup requires.
+    if (index + 1 < padded.length) view.setUint32(offset + 72, index + 2, true);
   });
+  if (padded.length > 0) view.setUint32(directoryOffset + 76, 1, true);
   sector += directorySectors;
   const fatStart = sector;
   const fat = new Uint32Array(fatSectors * 128).fill(0xffffffff);
