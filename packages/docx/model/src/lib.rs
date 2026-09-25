@@ -3359,6 +3359,11 @@ pub struct DocTableCell {
     pub margin_right: Option<f64>,
     #[serde(rename = "__tableCellLayout")]
     pub table_cell_layout: TableCellLayoutAcquisitionWire,
+    /// ECMA-376 §17.4.72 `<w:tcPr><w:textDirection w:val>` as a transitional
+    /// §17.18.93 ST_TextDirection value (`tbRl`, `btLr`, `lrTbV`, `tbRlV`,
+    /// `tbLrV`). The default `lrTb` is `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_direction: Option<String>,
 }
 
 #[derive(Serialize, Debug, Clone, Default)]

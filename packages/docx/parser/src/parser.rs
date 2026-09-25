@@ -13414,6 +13414,14 @@ fn parse_table_cell(
         .filter(|f| f != "auto" && f.len() == 6)
         .map(|f| f.to_lowercase());
 
+    // ECMA-376 §17.4.72 cell text direction. Strict §17.18.93 names are
+    // normalized to their transitional equivalents; the default lrTb and
+    // unknown values are None (horizontal).
+    let text_direction = tc_pr
+        .and_then(|p| child_w(p, "textDirection"))
+        .and_then(|v| attr_w(v, "val"))
+        .and_then(|value| cell_text_direction(&value));
+
     // Empty = not set inline; parse_table fills it from the table style (else "top").
     let v_align = tc_pr
         .and_then(|p| child_w(p, "vAlign"))
@@ -13540,7 +13548,23 @@ fn parse_table_cell(
         margin_left,
         margin_right,
         table_cell_layout,
+        text_direction,
     }
+}
+
+/// ECMA-376 §17.18.93 ST_TextDirection for a table cell: transitional values
+/// are kept, strict values map to their transitional equivalents, and the
+/// default (`lrTb`/`tb`) or an unknown token is `None`.
+fn cell_text_direction(value: &str) -> Option<String> {
+    let transitional = match value {
+        "tbRl" | "rl" => "tbRl",
+        "btLr" | "lr" => "btLr",
+        "lrTbV" | "tbV" => "lrTbV",
+        "tbRlV" | "rlV" => "tbRlV",
+        "tbLrV" | "lrV" => "tbLrV",
+        _ => return None,
+    };
+    Some(transitional.to_string())
 }
 
 fn parse_table_borders(node: roxmltree::Node) -> TableBorders {
@@ -14435,6 +14459,36 @@ mod tests {
                <w:tr><w:tc><w:p/></w:tc></w:tr>"#,
         );
         assert_eq!(t.tbl_ind, None);
+    }
+
+    // ECMA-376 §17.4.72 cell text direction: transitional values are kept,
+    // strict values normalize, and the default/unknown values stay unset.
+    #[test]
+    fn cell_text_direction_surfaces_transitional_values() {
+        for (authored, expected) in [
+            ("tbRl", Some("tbRl")),
+            ("btLr", Some("btLr")),
+            ("tbRlV", Some("tbRlV")),
+            ("lrTbV", Some("lrTbV")),
+            ("tbLrV", Some("tbLrV")),
+            ("rl", Some("tbRl")),
+            ("lr", Some("btLr")),
+            ("rlV", Some("tbRlV")),
+            ("lrTb", None),
+            ("tb", None),
+            ("sideways", None),
+        ] {
+            let t = parse_tbl(&format!(
+                r#"<w:tblPr/>
+                   <w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid>
+                   <w:tr><w:tc><w:tcPr><w:textDirection w:val="{authored}"/></w:tcPr><w:p/></w:tc></w:tr>"#
+            ));
+            assert_eq!(
+                t.rows[0].cells[0].text_direction.as_deref(),
+                expected,
+                "{authored}"
+            );
+        }
     }
 
     // Regression guard for the direct-rPr merge path. `apply_direct_run` now

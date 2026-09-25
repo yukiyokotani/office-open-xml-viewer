@@ -499,6 +499,21 @@ function visitTable(
         && cell.visualMergeOwnership === 'continuation';
       if (cell.verticalMerge === 'continue' && !ownsContinuationPaint) continue;
       const cellProjection = withClip(tableProjection, cell.clipBounds);
+      if (cell.verticalText) {
+        // ECMA-376 §17.4.72: map the rotated local frame into the table.
+        const rotatedProjection: NodeProjection = {
+          ...cellProjection,
+          pointToPage: composeAffine(cellProjection.pointToPage, cell.verticalText.transform),
+          textBoxVerticalMode: cell.verticalText.mode,
+        };
+        for (const block of cell.blocks) {
+          visitNode(block.layout, placedChildProjection(block.layout, {
+            xPt: cell.contentBounds.xPt,
+            yPt: block.offsetPt,
+          }, rotatedProjection), context);
+        }
+        continue;
+      }
       for (const block of cell.blocks) {
         const child = block.layout;
         visitNode(child, placedChildProjection(child, {

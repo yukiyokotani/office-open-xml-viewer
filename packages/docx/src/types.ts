@@ -1593,6 +1593,9 @@ export interface DocTableCell {
   marginBottom?: number | null;
   marginLeft?: number | null;
   marginRight?: number | null;
+  /** ECMA-376 §17.4.72 `<w:textDirection>` as a transitional §17.18.93 value
+   *  (`tbRl`, `btLr`, `lrTbV`, `tbRlV`, `tbLrV`); absent for the default `lrTb`. */
+  textDirection?: string;
 }
 
 export interface CellBorders {

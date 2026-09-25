@@ -1047,6 +1047,7 @@ export interface DocTableCell {
     marginBottom?: number | null;
     marginLeft?: number | null;
     marginRight?: number | null;
+    textDirection?: string;
 }
 export interface DocTableRow {
     cells: DocTableCell[];

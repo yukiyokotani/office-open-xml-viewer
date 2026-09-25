@@ -27,6 +27,7 @@ import {
   widthBalanceSpaceAdjustmentForTextPt,
 } from '../line-layout.js';
 import { calcEffectiveFontPx, EAST_ASIAN_RE, shapeRunToDocRun } from './text.js';
+import { eastAsianUprightPaintOps } from './vertical-glyph-orientation.js';
 import { wordTrackChangeDecoration } from './paint-compatibility.js';
 import type { DocParagraph, DocRun, ShapeRun } from '../types.js';
 import {
@@ -3490,25 +3491,7 @@ function orientVerticalTextBoxParagraph(
           : placement;
       }
       const paintOps = eastAsianUpright
-        ? placement.clusters.map((cluster) => {
-            const text = placement.text.slice(
-              cluster.range.start - placement.range.start,
-              cluster.range.end - placement.range.start,
-            );
-            const template = placement.paintOps.find((operation) =>
-              operation.range.start <= cluster.range.start && operation.range.end >= cluster.range.end)
-              ?? placement.paintOps[0]!;
-            const upright = EAST_ASIAN_RE.test(text);
-            return {
-              ...template,
-              text,
-              range: cluster.range,
-              offset: upright
-                ? { xPt: cluster.offset.xPt + cluster.advancePt / 2, yPt: cluster.offset.yPt }
-                : cluster.offset,
-              glyphOrientation: upright ? 'upright' as const : 'sideways' as const,
-            };
-          })
+        ? eastAsianUprightPaintOps(placement)
         : placement.paintOps;
       return translatePlacementY({ ...placement, paintOps }, deltaYPt);
     });

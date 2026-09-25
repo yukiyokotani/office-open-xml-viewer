@@ -299,6 +299,7 @@ fn project_table(
                     preferred_width: source.preferred.map(width),
                     margins: Some(margin_wire(margins)),
                 },
+                text_direction: None,
             });
         }
         let height = planned.source.height;

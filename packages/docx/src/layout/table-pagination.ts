@@ -748,6 +748,25 @@ function selectCell(
   if (cell.verticalMerge === 'continue') {
     return { input: cell, range: [], next: cursor, complete: true };
   }
+  if (cell.verticalText) {
+    // ECMA-376 §17.4.72: rotated lines run along the row, so the block axis
+    // is the cell width and cannot be sliced across a page break. The first
+    // fragment owns the whole rotated content.
+    const atStart = cursor.blockIndex === 0 && cursor.paragraphLineStart === 0;
+    return {
+      input: { ...cell, blocks: atStart ? cell.blocks : [] },
+      range: atStart
+        ? cell.blocks.map((block) => ({ kind: 'whole' as const, blockIndex: block.sourceBlockIndex }))
+        : [],
+      next: Object.freeze({
+        blockIndex: cell.blocks.length,
+        paragraphLineStart: 0,
+        nestedCursor: null,
+        nestedFragmentIndex: 0,
+      }),
+      complete: true,
+    };
+  }
   const blocks: TableCellBlockInput[] = [];
   const range: BlockContinuationRange[] = [];
   let blockIndex = cursor.blockIndex;

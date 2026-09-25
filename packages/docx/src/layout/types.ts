@@ -677,6 +677,18 @@ export interface TableCellBlockLayout {
   readonly advancePt: number;
 }
 
+/** ECMA-376 §17.4.72 rotated cell text, expressed with the DrawingML text-box
+ * vertical modes that share its paint semantics: `vert` (§17.18.93 tbRl),
+ * `vert270` (btLr) and `eaVert` (tbRlV, East Asian glyphs upright). */
+export type TableCellVerticalMode = 'vert' | 'vert270' | 'eaVert';
+
+export interface TableCellVerticalTextLayout {
+  readonly mode: TableCellVerticalMode;
+  /** Maps the cell's local horizontal content frame (origin at the start of
+   * the first line, x along the line, y across lines) to table points. */
+  readonly transform: Matrix2DData;
+}
+
 export interface TableCellLayout extends LayoutNodeBase {
   readonly kind: 'table-cell';
   readonly contentBounds: LayoutRect;
@@ -684,6 +696,8 @@ export interface TableCellLayout extends LayoutNodeBase {
   readonly vAlign: 'top' | 'center' | 'bottom';
   readonly background?: FillPaint;
   readonly blocks: readonly TableCellBlockLayout[];
+  /** Present for rotated cell text: blocks are in the local frame. */
+  readonly verticalText?: TableCellVerticalTextLayout;
 }
 
 export interface TableRowLayout extends LayoutNodeBase {
@@ -1305,6 +1319,14 @@ export interface TableCellLayoutInput {
   readonly background?: FillPaint;
   readonly borders: TableEdgeInputs;
   readonly blocks: readonly TableCellBlockInput[];
+  /** ECMA-376 §17.4.72 rotated cell text. Blocks were acquired with
+   * `lineLengthPt` as their line width; the cell requires
+   * `requiredLineLengthPt` of physical content height. */
+  readonly verticalText?: Readonly<{
+    mode: TableCellVerticalMode;
+    lineLengthPt: number;
+    requiredLineLengthPt: number;
+  }>;
 }
 
 export interface TableRowLayoutInput {
