@@ -6,8 +6,18 @@ import type { TextRun } from '@silurus/ooxml-core';
 /**
  * `a:spcBef` / `a:spcAft` may hold `a:spcPct` instead of `a:spcPts`
  * (ECMA-376 §21.1.2.2.9-.10, §21.1.2.3.11): a percentage of the text size,
- * 100000 being one line. It is measured on the same single-line base as a
- * percentage `a:lnSpc`, on the line the spacing is attached to.
+ * 100000 being one line. PowerPoint's line unit is the largest text size on
+ * the line the spacing is attached to × 1.2. That is the first line for space
+ * before and the last line for space after. The expected values below come
+ * from PowerPoint's PDF of a spacing control deck:
+ * - 100% before or after 40 pt Arial adds 48 pt.
+ * - 200% adds 96 pt.
+ * - 100% on 20 pt adds 24 pt.
+ * - A 20 + 40 pt line adds 48 pt.
+ * - In a paragraph whose lines are 20 pt then 40 pt (or the reverse), before
+ *   follows the first line and after follows the last line.
+ * - With lnSpc 80%, 100% still adds 48 pt.
+ * - 40 pt Meiryo adds 48 pt, not its taller design line.
  */
 
 const SCALE = 1 / 12700; // 1 pt => 1 px
@@ -65,6 +75,8 @@ function textRun(text: string, fontSize: number): TextRun {
     fontFamily: 'Arial',
   };
 }
+
+const lineBreak = { type: 'break' } as unknown as TextRun;
 
 function paragraph(text: string, fontSize: number, spacing: Partial<Paragraph>): Paragraph {
   return {
@@ -133,6 +145,40 @@ describe('pptx DrawingML percentage paragraph spacing', () => {
       paragraph('B', 40, { spaceBeforePct: 100000 }),
     ]);
     expect(ys[1] - ys[0] - (large[1] - large[0])).toBeCloseTo(40 * 1.2, 5);
+  });
+
+  it('measures space before on the largest run of a mixed-size first line', () => {
+    const mixed = [textRun('B', 20), textRun('C', 40)];
+    const without = baselines([paragraph('A', 40, {}), paragraph('', 40, { runs: mixed })]);
+    const ys = baselines([
+      paragraph('A', 40, {}),
+      paragraph('', 40, { runs: mixed, spaceBeforePct: 100000 }),
+    ]);
+    expect(ys[1] - ys[0] - (without[1] - without[0])).toBeCloseTo(48, 5);
+  });
+
+  it('uses the first line for space before and the last line for space after', () => {
+    const lines = (first: number, last: number, spacing: Partial<Paragraph>) => [
+      paragraph('A', 40, {}),
+      paragraph('', 40, { runs: [textRun('B', first), lineBreak, textRun('C', last)], ...spacing }),
+      paragraph('D', 40, {}),
+    ];
+    for (const [first, last] of [[20, 40], [40, 20]]) {
+      const plainYs = baselines(lines(first, last, {}));
+      const spacedYs = baselines(lines(first, last, { spaceBeforePct: 100000, spaceAfterPct: 100000 }));
+      expect(spacedYs[1] - plainYs[1]).toBeCloseTo(first * 1.2, 5);
+      expect(spacedYs[3] - spacedYs[2] - (plainYs[3] - plainYs[2])).toBeCloseTo(last * 1.2, 5);
+    }
+  });
+
+  it('keeps the percentage unit independent of the paragraph line spacing', () => {
+    const tight = { spaceLine: { type: 'pct' as const, val: 80000 } };
+    const without = baselines([paragraph('A', 40, tight), paragraph('B', 40, tight)]);
+    const ys = baselines([
+      paragraph('A', 40, tight),
+      paragraph('B', 40, { ...tight, spaceBeforePct: 100000 }),
+    ]);
+    expect(ys[1] - ys[0] - (without[1] - without[0])).toBeCloseTo(48, 5);
   });
 
   it('adds a percentage of the last line after a paragraph', () => {
