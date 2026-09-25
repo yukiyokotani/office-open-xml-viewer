@@ -473,8 +473,16 @@ fn parse_pivot_table(
             elements,
         })
     });
-    let row_items = axis_items(root, "rowItems");
-    let column_items = axis_items(root, "colItems");
+    let mut items = |parent: &str| {
+        axis_items(root, parent).unwrap_or_else(|()| {
+            reasons.push(PivotPartialReason::MalformedField {
+                field: format!("{parent}.i"),
+            });
+            Vec::new()
+        })
+    };
+    let row_items = items("rowItems");
+    let column_items = items("colItems");
 
     let status = if reasons.is_empty() {
         PivotMetadataStatus::Complete
@@ -715,33 +723,36 @@ fn parse_bool(value: Option<&str>) -> Result<bool, ()> {
 /// ECMA-376 §18.10.1.44 `i` items of `rowItems`/`colItems`: the item type
 /// (`t`, default `data`) and its field level, `r` (the count of leading
 /// fields repeated from the previous item) plus its `x` count less one.
-fn axis_items(root: roxmltree::Node<'_, '_>, parent: &str) -> Vec<PivotAxisItem> {
-    child(root, parent)
-        .map(|items| {
-            items
-                .children()
-                .filter(|n| {
-                    n.is_element()
-                        && n.tag_name().name() == "i"
-                        && is_x_ns(n.tag_name().namespace())
-                })
-                .map(|item| {
-                    let repeated: u32 = item
-                        .attribute("r")
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(0);
-                    let indices = item
-                        .children()
-                        .filter(|n| n.is_element() && n.tag_name().name() == "x")
-                        .count() as u32;
-                    PivotAxisItem {
-                        kind: item.attribute("t").unwrap_or("data").to_string(),
-                        depth: (repeated + indices).saturating_sub(1),
-                    }
-                })
-                .collect()
+/// `r` is an xsd:unsignedInt (default 0); a value that does not parse, or a
+/// level that overflows u32, rejects the whole list (`Err`) rather than
+/// yielding a wrapped or clamped level.
+fn axis_items(root: roxmltree::Node<'_, '_>, parent: &str) -> Result<Vec<PivotAxisItem>, ()> {
+    let Some(items) = child(root, parent) else {
+        return Ok(Vec::new());
+    };
+    items
+        .children()
+        .filter(|n| {
+            n.is_element() && n.tag_name().name() == "i" && is_x_ns(n.tag_name().namespace())
         })
-        .unwrap_or_default()
+        .map(|item| {
+            let repeated: u32 = match item.attribute("r") {
+                None => 0,
+                Some(value) => value.parse().map_err(|_| ())?,
+            };
+            let indices = u32::try_from(
+                item.children()
+                    .filter(|n| n.is_element() && n.tag_name().name() == "x")
+                    .count(),
+            )
+            .map_err(|_| ())?;
+            let fields = repeated.checked_add(indices).ok_or(())?;
+            Ok(PivotAxisItem {
+                kind: item.attribute("t").unwrap_or("data").to_string(),
+                depth: fields.saturating_sub(1),
+            })
+        })
+        .collect()
 }
 
 /// The workbook's `<tableStyles>` (§18.8.42) with their `<dxfs>`, read once
@@ -875,16 +886,44 @@ fn explicit_none_edges(doc: &roxmltree::Document<'_>, dxf: &mut Dxf) {
 mod style_tests {
     use super::*;
 
+    const SML: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+
+    fn axis(xml_items: &str) -> Result<Vec<(String, u32)>, ()> {
+        let xml = format!(
+            r#"<pivotTableDefinition xmlns="{SML}"><rowItems>{xml_items}</rowItems></pivotTableDefinition>"#
+        );
+        let doc = parse_guarded(&xml).unwrap();
+        axis_items(doc.root_element(), "rowItems").map(|items| {
+            items
+                .into_iter()
+                .map(|item| (item.kind, item.depth))
+                .collect()
+        })
+    }
+
     #[test]
     fn axis_items_carry_type_and_field_level() {
-        let xml = r#"<pivotTableDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><rowItems count="3"><i><x/></i><i r="1"><x v="2"/></i><i t="grand"><x/></i></rowItems></pivotTableDefinition>"#;
-        let doc = parse_guarded(xml).unwrap();
-        let items = axis_items(doc.root_element(), "rowItems");
-        let facts: Vec<_> = items
-            .iter()
-            .map(|item| (item.kind.as_str(), item.depth))
-            .collect();
-        assert_eq!(facts, vec![("data", 0), ("data", 1), ("grand", 0)]);
+        assert_eq!(
+            axis(r#"<i><x/></i><i r="1"><x v="2"/></i><i t="grand"><x/></i>"#).unwrap(),
+            vec![("data".into(), 0), ("data".into(), 1), ("grand".into(), 0)]
+        );
+    }
+
+    /// r + x-count is computed with checked arithmetic, so the boundary holds
+    /// identically in debug (overflow panics) and release (it would wrap).
+    #[test]
+    fn axis_item_level_rejects_u32_overflow_and_unparsable_r() {
+        assert_eq!(
+            axis(r#"<i r="4294967294"><x/></i>"#).unwrap(),
+            vec![("data".into(), 4294967294)]
+        );
+        assert_eq!(axis(r#"<i r="4294967295"><x/></i>"#), Err(()));
+        assert_eq!(
+            axis(r#"<i r="4294967295"/>"#).unwrap(),
+            vec![("data".into(), 4294967294)]
+        );
+        assert_eq!(axis(r#"<i r="-1"><x/></i>"#), Err(()));
+        assert_eq!(axis(r#"<i r="x"><x/></i>"#), Err(()));
     }
 
     #[test]
