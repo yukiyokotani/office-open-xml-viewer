@@ -548,7 +548,7 @@ impl ModelBudget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cfb::{test_support::build_cfb, CompoundFile};
+    use crate::cfb::{test_support::build_scoped_cfb, CompoundFile};
     use std::io::{Cursor, Read};
 
     fn source(text: &str) -> Vec<u8> {
@@ -826,7 +826,7 @@ mod tests {
             bte.extend((page_number as u32).to_le_bytes());
             append_table_part(&mut word, &mut table, fib_offset, &bte);
         }
-        build_cfb(&[("WordDocument", word), ("0Table", table)])
+        build_scoped_cfb(&[("WordDocument", word), ("0Table", table)])
     }
 
     /// MS-DOC 2.8.25 Plcfld for every field character in `story`: flt from
@@ -932,7 +932,7 @@ mod tests {
         page[8] = 32;
         page[64] = 5;
         page[65..74].copy_from_slice(&[0, 0, 0x0a, 0x26, 0, 0x0b, 0x46, 1, 0]);
-        build_cfb(&[("WordDocument", word), ("0Table", table)])
+        build_scoped_cfb(&[("WordDocument", word), ("0Table", table)])
     }
 
     fn hide_first_utf16_unit(bytes: &[u8]) -> Vec<u8> {
@@ -950,7 +950,7 @@ mod tests {
         page[13] = 0;
         page[64..68].copy_from_slice(&[3, 0x3c, 0x08, 1]);
         page[511] = 2;
-        build_cfb(&[("WordDocument", word), ("0Table", table)])
+        build_scoped_cfb(&[("WordDocument", word), ("0Table", table)])
     }
 
     fn picture_record(kind: u16, options: u16, body: &[u8]) -> Vec<u8> {
@@ -982,7 +982,7 @@ mod tests {
         page[8] = 32;
         page[64] = chpx.len() as u8;
         page[65..65 + chpx.len()].copy_from_slice(&chpx);
-        build_cfb(&[("WordDocument", word), ("0Table", table)])
+        build_scoped_cfb(&[("WordDocument", word), ("0Table", table)])
     }
 
     pub(super) fn with_picture_data(source: &[u8], vanish: bool) -> Vec<u8> {
@@ -1034,7 +1034,7 @@ mod tests {
         let length = data.len() as u32;
         data[..4].copy_from_slice(&length.to_le_bytes());
         data[88..92].copy_from_slice(&0xc0u32.to_le_bytes());
-        build_cfb(&[("WordDocument", word), ("0Table", table), ("Data", data)])
+        build_scoped_cfb(&[("WordDocument", word), ("0Table", table), ("Data", data)])
     }
 
     fn floating_picture_source(text: &str, vanish: bool) -> Vec<u8> {
@@ -1131,7 +1131,7 @@ mod tests {
         word[0x22a..0x22e].copy_from_slice(&(table.len() as u32).to_le_bytes());
         word[0x22e..0x232].copy_from_slice(&(art.len() as u32).to_le_bytes());
         table.extend(art);
-        build_cfb(&[("WordDocument", word), ("0Table", table)])
+        build_scoped_cfb(&[("WordDocument", word), ("0Table", table)])
     }
 
     /// A textbox (msosptTextBox) or rectangle anchored in the main or header
@@ -1335,7 +1335,7 @@ mod tests {
             tbkd.extend([0, 0, 0, 0, 0, 0, 0xff, 0xff, 0, 0, 0, 0]);
             append_table_part(&mut word, &mut table, 0x2f2, &tbkd);
         }
-        build_cfb(&[("WordDocument", word), ("0Table", table)])
+        build_scoped_cfb(&[("WordDocument", word), ("0Table", table)])
     }
 
     #[test]
@@ -1538,7 +1538,7 @@ mod tests {
         ] {
             let mut table = table.clone();
             table[at + offset] = value;
-            let changed = build_cfb(&[("WordDocument", word.clone()), ("0Table", table)]);
+            let changed = build_scoped_cfb(&[("WordDocument", word.clone()), ("0Table", table)]);
             assert!(super::super::direct_model(
                 &CompoundFile::open(&changed).unwrap(),
                 1024 * 1024
@@ -1570,7 +1570,7 @@ mod tests {
         let art = u32::from_le_bytes(word[0x22a..0x22e].try_into().unwrap()) as usize;
         let mut table = table;
         table[art + 8] = 1; // Relabel the drawing container as the header's.
-        let relabeled = build_cfb(&[("WordDocument", word), ("0Table", table)]);
+        let relabeled = build_scoped_cfb(&[("WordDocument", word), ("0Table", table)]);
         assert!(
             super::super::direct_model(&CompoundFile::open(&relabeled).unwrap(), 1024 * 1024)
                 .unwrap_err()
@@ -1587,7 +1587,7 @@ mod tests {
         // Point the FTXBXS at another shape identifier.
         let ftxbxs = u32::from_le_bytes(word[0x25a..0x25e].try_into().unwrap()) as usize;
         table[ftxbxs + 12 + 14] = 3;
-        let foreign = build_cfb(&[("WordDocument", word), ("0Table", table)]);
+        let foreign = build_scoped_cfb(&[("WordDocument", word), ("0Table", table)]);
         assert!(
             super::super::direct_model(&CompoundFile::open(&foreign).unwrap(), 1024 * 1024)
                 .unwrap_err()
@@ -1604,7 +1604,7 @@ mod tests {
         let page = &mut word[page_number * 512..(page_number + 1) * 512];
         page[8] = 32;
         page[64..68].copy_from_slice(&[3, 0x55, 0x08, 1]);
-        build_cfb(&[("WordDocument", word), ("0Table", table)])
+        build_scoped_cfb(&[("WordDocument", word), ("0Table", table)])
     }
 
     fn make_normal_style_self_referential(bytes: &[u8]) -> Vec<u8> {
@@ -1615,7 +1615,7 @@ mod tests {
         // STSHI is prefixed by its 2-byte size. The first STD follows the
         // 18-byte header and its own 2-byte size; offset 2 is sti/base.
         table[styles + 24..styles + 26].copy_from_slice(&1u16.to_le_bytes());
-        build_cfb(&[("WordDocument", word), ("0Table", table)])
+        build_scoped_cfb(&[("WordDocument", word), ("0Table", table)])
     }
 
     fn mark_header_field_results_private(bytes: &[u8]) -> Vec<u8> {
@@ -1631,7 +1631,7 @@ mod tests {
                 table[records + index * 2 + 1] |= 0x20;
             }
         }
-        build_cfb(&[("WordDocument", word), ("0Table", table)])
+        build_scoped_cfb(&[("WordDocument", word), ("0Table", table)])
     }
 
     #[test]

@@ -50,6 +50,9 @@ const LCB_CLX_OFFSET: usize = 0x01a6;
 const MAX_PIECES: usize = 1_000_000;
 // Resource policy independent of the caller's compressed output ZIP ceiling.
 const MAX_DOCUMENT_XML_BYTES: usize = 256 * 1024 * 1024;
+/// Implementation resource policy for each retained source stream, not an
+/// MS-DOC format limit.
+const MAX_DOC_STREAM_BYTES: usize = 256 * 1024 * 1024;
 const MAX_MAIN_STORY_UNITS: usize = 64 * 1024 * 1024;
 const MAX_STORY_CONTROLS: usize = 1_000_000;
 
@@ -140,7 +143,14 @@ fn with_acquired_doc<T>(
     interpret_table_styles: bool,
     visit: impl FnOnce(AcquiredDoc<'_>) -> Result<T, String>,
 ) -> Result<T, String> {
-    let word = cfb.stream("WordDocument").map_err(unsupported)?;
+    // MS-DOC 2.1: the WordDocument, table and Data streams are children of
+    // the root storage. Resolving them through the validated hierarchy keeps
+    // a same-named stream inside an embedded storage (ObjectPool, for
+    // example) or an unreachable directory entry from standing in for them.
+    let streams = cfb.scoped_streams().map_err(unsupported)?;
+    let word = streams
+        .stream(&["WordDocument"], MAX_DOC_STREAM_BYTES)
+        .map_err(unsupported)?;
     if word.len() < LCB_CLX_OFFSET + 4 {
         return Err(unsupported("truncated Word FIB"));
     }
@@ -167,7 +177,9 @@ fn with_acquired_doc<T>(
     } else {
         "0Table"
     };
-    let table = cfb.stream(table_name).map_err(unsupported)?;
+    let table = streams
+        .stream(&[table_name], MAX_DOC_STREAM_BYTES)
+        .map_err(unsupported)?;
     let document_settings = settings::read(&word, &table)?;
     let ccp_text = usize::try_from(u32_at(&word, CCP_TEXT_OFFSET)?)
         .map_err(|_| unsupported("Word main story is too large"))?;
@@ -188,11 +200,10 @@ fn with_acquired_doc<T>(
     if let Some(headers) = &headers {
         headers.attach_references(&mut sections)?;
     }
-    let data = if cfb.has_entry("Data") {
-        cfb.stream("Data").map_err(unsupported)?
-    } else {
-        Vec::new()
-    };
+    let data = streams
+        .optional_stream(&["Data"], MAX_DOC_STREAM_BYTES)
+        .map_err(unsupported)?
+        .unwrap_or_default();
     let mut formatting = formatting::Formatting::read(&word, &table, &data)?;
     formatting.configure_table_styles(effective_nfib, interpret_table_styles);
     let note_references = notes::References::read(&note_stories, &story, &mut formatting)?;
@@ -1166,12 +1177,116 @@ pub(crate) fn write_minimal_word97_test_header(word: &mut [u8]) {
 #[cfg(test)]
 mod tests {
     use super::{decode_piece_table, tokenize_story, Token};
-    use crate::cfb::{test_support::build_cfb, CompoundFile};
+    use crate::cfb::{test_support::build_scoped_cfb, CompoundFile};
 
     fn acquisition_error(word: Vec<u8>) -> String {
-        let bytes = build_cfb(&[("WordDocument", word)]);
+        let bytes = build_scoped_cfb(&[("WordDocument", word)]);
         let cfb = CompoundFile::open(&bytes).unwrap();
         super::with_acquired_doc(&cfb, false, |_| Ok(())).unwrap_err()
+    }
+
+    /// A Word 97 document with one Unicode piece, as root streams.
+    fn minimal_streams() -> (Vec<u8>, Vec<u8>) {
+        let units: Vec<u16> = "Root body".encode_utf16().collect();
+        let text_offset = 0x400usize;
+        let mut word = vec![0u8; text_offset + units.len() * 2];
+        super::write_minimal_word97_test_header(&mut word);
+        word[0x4c..0x50].copy_from_slice(&(units.len() as u32).to_le_bytes());
+        word[0x1a2..0x1a6].copy_from_slice(&0u32.to_le_bytes());
+        word[0x1a6..0x1aa].copy_from_slice(&21u32.to_le_bytes());
+        for (index, unit) in units.iter().enumerate() {
+            word[text_offset + index * 2..text_offset + index * 2 + 2]
+                .copy_from_slice(&unit.to_le_bytes());
+        }
+        let mut table = vec![0x02];
+        table.extend_from_slice(&16u32.to_le_bytes());
+        table.extend_from_slice(&0u32.to_le_bytes());
+        table.extend_from_slice(&(units.len() as u32).to_le_bytes());
+        table.extend_from_slice(&0u16.to_le_bytes());
+        table.extend_from_slice(&(text_offset as u32).to_le_bytes());
+        table.extend_from_slice(&0u16.to_le_bytes());
+        (word, table)
+    }
+
+    /// Set a directory entry's left (68), right (72) or child (76) link.
+    fn link(bytes: &mut [u8], id: usize, field: usize, target: u32) {
+        let sector = u32::from_le_bytes(bytes[48..52].try_into().unwrap()) as usize;
+        let offset = 512 + sector * 512 + id * 128 + field;
+        bytes[offset..offset + 4].copy_from_slice(&target.to_le_bytes());
+    }
+
+    fn make_storage(bytes: &mut [u8], id: usize) {
+        let sector = u32::from_le_bytes(bytes[48..52].try_into().unwrap()) as usize;
+        let offset = 512 + sector * 512 + id * 128;
+        bytes[offset + 66] = 1;
+        bytes[offset + 116..offset + 120].copy_from_slice(&0xffff_fffeu32.to_le_bytes());
+        bytes[offset + 120..offset + 128].fill(0);
+    }
+
+    fn acquire(bytes: &[u8]) -> Result<usize, String> {
+        let cfb = CompoundFile::open(bytes).unwrap();
+        super::with_acquired_doc(&cfb, false, |facts| Ok(facts.story.text.len()))
+    }
+
+    #[test]
+    fn doc_streams_resolve_from_the_root_storage_only() {
+        let (word, table) = minimal_streams();
+        let body = acquire(&build_scoped_cfb(&[
+            ("WordDocument", word.clone()),
+            ("0Table", table.clone()),
+        ]))
+        .unwrap();
+        // An embedded storage holding same-named streams (ObjectPool, an
+        // embedded document) cannot stand in for, or collide with, the
+        // root streams.
+        let mut bytes = build_scoped_cfb(&[
+            ("WordDocument", word.clone()),
+            ("0Table", table.clone()),
+            ("ObjectPool", Vec::new()),
+            ("WordDocument", vec![0xff; 64]),
+            ("0Table", vec![0xff; 64]),
+        ]);
+        make_storage(&mut bytes, 3);
+        link(&mut bytes, 3, 72, u32::MAX);
+        link(&mut bytes, 3, 76, 4);
+        assert_eq!(acquire(&bytes), Ok(body));
+        // The same streams only inside the embedded storage are missing.
+        let mut nested = build_scoped_cfb(&[
+            ("ObjectPool", Vec::new()),
+            ("WordDocument", word.clone()),
+            ("0Table", table.clone()),
+        ]);
+        make_storage(&mut nested, 1);
+        link(&mut nested, 1, 72, u32::MAX);
+        link(&mut nested, 1, 76, 2);
+        let error = acquire(&nested).unwrap_err();
+        assert!(
+            error.contains("missing CFB path entry: WordDocument"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn doc_streams_reject_unreachable_entries_and_duplicate_names() {
+        let (word, table) = minimal_streams();
+        let mut unreachable = build_scoped_cfb(&[
+            ("WordDocument", word.clone()),
+            ("0Table", table.clone()),
+            ("Data", vec![0; 16]),
+        ]);
+        link(&mut unreachable, 2, 72, u32::MAX);
+        let error = acquire(&unreachable).unwrap_err();
+        assert!(
+            error.starts_with("UNSUPPORTED:") && error.contains("CFB"),
+            "{error}"
+        );
+        let duplicate = build_scoped_cfb(&[
+            ("WordDocument", word.clone()),
+            ("0Table", table),
+            ("WordDocument", word),
+        ]);
+        let error = acquire(&duplicate).unwrap_err();
+        assert!(error.contains("duplicate ASCII CFB child name"), "{error}");
     }
 
     #[test]

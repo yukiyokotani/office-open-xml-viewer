@@ -130,7 +130,7 @@ pub struct NativeConversionOutput {
 #[cfg(feature = "fuzzing")]
 pub fn build_fuzz_input(data: &[u8], format: LegacyFormat) -> Vec<u8> {
     match format {
-        LegacyFormat::Doc => cfb::test_support::build_cfb(&[
+        LegacyFormat::Doc => cfb::test_support::build_scoped_cfb(&[
             ("WordDocument", data.to_vec()),
             ("0Table", data.to_vec()),
         ]),
@@ -293,7 +293,7 @@ pub fn convert_legacy_office(
 mod tests {
     use std::io::{Cursor, Read};
 
-    use super::cfb::test_support::build_cfb;
+    use super::cfb::test_support::{build_cfb, build_scoped_cfb};
     use super::{convert_native, LegacyFormat};
 
     fn zip_text(bytes: Vec<u8>, name: &str) -> String {
@@ -328,7 +328,7 @@ mod tests {
         table.extend_from_slice(&0u16.to_le_bytes());
         table.extend_from_slice(&(text_offset as u32).to_le_bytes());
         table.extend_from_slice(&0u16.to_le_bytes());
-        let cfb = build_cfb(&[("WordDocument", word), ("0Table", table)]);
+        let cfb = build_scoped_cfb(&[("WordDocument", word), ("0Table", table)]);
         let output = convert_native(&cfb, LegacyFormat::Doc, 1024 * 1024).unwrap();
         let xml = zip_text(output.bytes, "word/document.xml");
         assert!(xml.contains("Hello 日本語"));
@@ -503,7 +503,7 @@ mod tests {
         let mut word = vec![0u8; 900];
         crate::doc::write_minimal_word97_test_header(&mut word);
         word[0x0a..0x0c].copy_from_slice(&0x0100u16.to_le_bytes());
-        let doc = build_cfb(&[("WordDocument", word)]);
+        let doc = build_scoped_cfb(&[("WordDocument", word)]);
         assert!(convert_native(&doc, LegacyFormat::Doc, 1024)
             .unwrap_err()
             .contains("encrypted"));

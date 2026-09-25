@@ -965,7 +965,7 @@ fn textbox_content(
 mod tests {
     use super::super::table_tests::with_papx;
     use super::*;
-    use crate::cfb::{test_support::build_cfb, CompoundFile};
+    use crate::cfb::{test_support::build_scoped_cfb, CompoundFile};
     use crate::doc::{with_acquired_doc, Fields};
     use docx_model::CellElement;
 
@@ -1388,7 +1388,7 @@ mod tests {
         word[0xa2..0xa6].copy_from_slice(&(table.len() as u32).to_le_bytes());
         word[0xa6..0xaa].copy_from_slice(&(stylesheet.len() as u32).to_le_bytes());
         table.extend(stylesheet);
-        build_cfb(&[("WordDocument", word), ("0Table", table)])
+        build_scoped_cfb(&[("WordDocument", word), ("0Table", table)])
     }
 
     fn with_fonts(source: &[u8], names: &[&str]) -> Vec<u8> {
@@ -1407,7 +1407,7 @@ mod tests {
         word[0x112..0x116].copy_from_slice(&(table.len() as u32).to_le_bytes());
         word[0x116..0x11a].copy_from_slice(&(font_table.len() as u32).to_le_bytes());
         table.extend(font_table);
-        build_cfb(&[("WordDocument", word), ("0Table", table)])
+        build_scoped_cfb(&[("WordDocument", word), ("0Table", table)])
     }
 
     fn cell() -> Vec<u8> {

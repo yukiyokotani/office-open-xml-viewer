@@ -3,10 +3,11 @@
 //! This intentionally implements only the read path needed by the converter.
 //! Sector chains, DIFAT/FAT tables, MiniFAT streams, and directory entries are
 //! validated before a legacy-format parser sees any bytes. The bounds follow
-//! [MS-CFB] sections 2.2 through 2.6. Existing top-level lookup remains flat;
-//! parent-scoped lookup additionally validates the directory hierarchy.
+//! [MS-CFB] sections 2.2 through 2.6. Format classification and the byte
+//! conversion's XLS and PPT readers still use flat lookup; parent-scoped
+//! lookup, used by the DOC readers and the direct XLS and PPT sources,
+//! additionally validates the directory hierarchy from the root storage.
 
-#[cfg(any(test, feature = "direct-xls", feature = "direct-ppt"))]
 use std::collections::HashMap;
 use std::collections::HashSet;
 
@@ -17,9 +18,8 @@ const FREE_SECTOR: u32 = 0xffff_ffff;
 const END_OF_CHAIN: u32 = 0xffff_fffe;
 const FAT_SECTOR: u32 = 0xffff_fffd;
 const DIFAT_SECTOR: u32 = 0xffff_fffc;
-// Directory hierarchy (siblings, children) is validated only for the
-// parent-scoped lookups of the direct XLS and PPT readers.
-#[cfg(any(test, feature = "direct-xls", feature = "direct-ppt"))]
+// Directory hierarchy (siblings, children) is validated only for
+// parent-scoped lookups.
 const NO_STREAM: u32 = 0xffff_ffff;
 const HEADER_BYTES: usize = 512;
 const DIRECTORY_ENTRY_BYTES: usize = 128;
@@ -28,11 +28,8 @@ const MAX_DIRECTORY_ENTRIES: usize = 1_000_000;
 #[derive(Debug, Clone, Copy)]
 struct DirectoryEntry {
     object_type: u8,
-    #[cfg(any(test, feature = "direct-xls", feature = "direct-ppt"))]
     left_sibling: u32,
-    #[cfg(any(test, feature = "direct-xls", feature = "direct-ppt"))]
     right_sibling: u32,
-    #[cfg(any(test, feature = "direct-xls", feature = "direct-ppt"))]
     child: u32,
     start_sector: u32,
     stream_size: u64,
@@ -41,7 +38,6 @@ struct DirectoryEntry {
 type DirectorySlot = Option<(String, DirectoryEntry)>;
 /// The root entry, each storage's children by name, and whether a storage
 /// has a non-ASCII child name.
-#[cfg(any(test, feature = "direct-xls", feature = "direct-ppt"))]
 type Hierarchy = (usize, Vec<HashMap<String, usize>>, Vec<bool>);
 
 pub struct CompoundFile<'a> {
@@ -57,7 +53,6 @@ pub struct CompoundFile<'a> {
     root_mini_stream: Vec<u8>,
 }
 
-#[cfg(any(test, feature = "direct-xls", feature = "direct-ppt"))]
 pub struct ScopedStreams<'cfb, 'data> {
     compound: &'cfb CompoundFile<'data>,
     root: usize,
@@ -65,7 +60,6 @@ pub struct ScopedStreams<'cfb, 'data> {
     has_non_ascii_child: Vec<bool>,
 }
 
-#[cfg(any(test, feature = "direct-xls", feature = "direct-ppt"))]
 impl ScopedStreams<'_, '_> {
     #[cfg(any(test, feature = "direct-ppt"))]
     pub fn has_stream(&self, path: &[&str]) -> Result<bool, String> {
@@ -352,7 +346,6 @@ impl<'a> CompoundFile<'a> {
         self.read_stream(*entry)
     }
 
-    #[cfg(any(test, feature = "direct-xls", feature = "direct-ppt"))]
     /// Validate and index raw MS-CFB directory IDs once for repeated ASCII
     /// parent-scoped lookups. Existing flat lookup does not require this view.
     pub fn scoped_streams(&self) -> Result<ScopedStreams<'_, 'a>, String> {
@@ -384,7 +377,6 @@ impl<'a> CompoundFile<'a> {
         }
     }
 
-    #[cfg(any(test, feature = "direct-xls", feature = "direct-ppt"))]
     fn validate_hierarchy(&self) -> Result<Hierarchy, String> {
         let roots: Vec<_> = self
             .directory
@@ -559,11 +551,8 @@ fn parse_directory(bytes: &[u8], major: u16) -> Result<Vec<DirectorySlot>, Strin
             name,
             DirectoryEntry {
                 object_type,
-                #[cfg(any(test, feature = "direct-xls", feature = "direct-ppt"))]
                 left_sibling: u32_at(entry_bytes, 68)?,
-                #[cfg(any(test, feature = "direct-xls", feature = "direct-ppt"))]
                 right_sibling: u32_at(entry_bytes, 72)?,
-                #[cfg(any(test, feature = "direct-xls", feature = "direct-ppt"))]
                 child: u32_at(entry_bytes, 76)?,
                 start_sector,
                 stream_size,
@@ -816,6 +805,25 @@ pub(crate) mod test_support {
             }
         }
         let _ = DIFAT_SECTOR;
+        bytes
+    }
+
+    /// [`build_cfb`] with every stream linked as a child of the root
+    /// storage (a right-sibling chain), as parent-scoped lookup requires.
+    pub fn build_scoped_cfb(streams: &[(&str, Vec<u8>)]) -> Vec<u8> {
+        let mut bytes = build_cfb(streams);
+        let directory_sector = u32::from_le_bytes(bytes[48..52].try_into().unwrap()) as usize;
+        let directory = HEADER_BYTES + directory_sector * 512;
+        let link = |bytes: &mut [u8], id: usize, at: usize, target: u32| {
+            let offset = directory + id * 128 + at;
+            bytes[offset..offset + 4].copy_from_slice(&target.to_le_bytes());
+        };
+        if !streams.is_empty() {
+            link(&mut bytes, 0, 76, 1);
+        }
+        for id in 1..streams.len() {
+            link(&mut bytes, id, 72, id as u32 + 1);
+        }
         bytes
     }
 

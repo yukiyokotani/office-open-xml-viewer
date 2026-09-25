@@ -1,7 +1,7 @@
 //! Full-container acceptance fixtures for direct binary table projection.
 
 use super::tests::{source_with_typography, with_numbering, with_picture_data};
-use crate::cfb::{test_support::build_cfb, CompoundFile};
+use crate::cfb::{test_support::build_scoped_cfb, CompoundFile};
 use crate::doc::table_structure::Payload;
 use docx_model::{BodyElement, CellElement, DocRun};
 
@@ -85,7 +85,7 @@ pub(super) fn with_papx(source: &[u8], runs: &[(usize, usize, Vec<u8>)]) -> Vec<
         page[bx + index * 13] = (payload / 2) as u8;
     }
     page[511] = n as u8;
-    build_cfb(&[("WordDocument", word), ("0Table", table)])
+    build_scoped_cfb(&[("WordDocument", word), ("0Table", table)])
 }
 
 fn body_table_source(text: &str) -> Vec<u8> {
@@ -125,7 +125,7 @@ fn with_piece_prc_and_prm(source: &[u8], prc: &[u8], data: &[u8], prm: u16) -> V
         .copy_from_slice(&prm.to_le_bytes());
     word[0x1a2..0x1a6].copy_from_slice(&(replacement_offset as u32).to_le_bytes());
     word[0x1a6..0x1aa].copy_from_slice(&((prefix + clx_size) as u32).to_le_bytes());
-    build_cfb(&[
+    build_scoped_cfb(&[
         ("WordDocument", word),
         ("0Table", replacement),
         ("Data", data.to_vec()),
