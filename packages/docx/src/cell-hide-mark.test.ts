@@ -14,10 +14,10 @@ import type {
 
 // ECMA-376 §17.4.21 `<w:tcPr><w:hideMark>`: a cell's end-of-cell mark does not
 // count toward the row height. The final paragraph that holds only that mark
-// (the whole content of an empty cell) owns no height, per cell: Word's PDFs
-// of sample-26 end such a row at the cell's last text paragraph although other
-// rows' cells have content, and sample-37's all-empty hideMark row collapses
-// to its 1pt minimum.
+// (the whole content of an empty cell) owns no height, per cell. Observed in
+// Word's PDF output: such a row ends at the cell's last text paragraph even
+// when other rows' cells have content, and an all-empty hideMark row
+// collapses to its 1pt minimum.
 
 interface Matrix { a: number; b: number; c: number; d: number; e: number; f: number }
 interface FillTextCall { text: string; x: number; y: number; matrix: Matrix }

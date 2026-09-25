@@ -7,31 +7,31 @@
 // Office behaviour that the standard leaves implicit, and the evidence used:
 // - Luminance. ECMA-376 converts to gray "corresponding to their luminance"
 //   and thresholds bi-level by luminance without defining the weights.
-//   PowerPoint's PDF export of grayscl + biLevel(50%) pictures turns
-//   (2,167,223) white and (0,147,190), (0,126,229), (9,74,178) black; Rec. 601
-//   weights put the first below 50% (0.486), Rec. 709 weights (0.532) and the
-//   others on the observed sides. Boundary evidence: a layout picture that
-//   PowerPoint 16 reads from a binary .ppt as grayscl + biLevel(50%), compared
-//   with PowerPoint's PDF of that .ppt at every PDF pixel whose source block is
-//   a single colour that candidate rules classify differently (7,068 blocks of
-//   JPEG blues around the threshold): Rec. 709 luma of the stored
-//   (gamma-encoded) values with the grayscale truncated to a whole 8-bit level
-//   matches all 7,068; rounding that level instead fails 30 (e.g.
-//   (99,131,178): luma 127.59 must become 127, black), unquantized Rec. 709
-//   fails 30, Rec. 601 fails at least 1,534, the channel average 4,553 and
-//   linear-light Rec. 709 is contradicted on nearly every block. So grayscl
-//   writes floor(Rec. 709 luma) and biLevel compares Rec. 709 luma with the
-//   threshold. (No block sat exactly on a threshold, so >= follows the text:
-//   "values greater than or equal to the threshold are set to white".)
-// - clrChange. MS-OI29500 says Office leaves alpha alone unless useA is set,
-//   but PowerPoint's own "set transparent colour" output (clrTo = the same
-//   colour with alpha 0, useA absent) renders transparent in its PDF export:
-//   comparing the PDF soft masks with the source pictures, every block that is
-//   pure clrFrom white becomes transparent (2,286 blocks with no counterexample
-//   in one picture, 291 in another; 971 of them transparent where keeping the
-//   source alpha would leave them opaque), and every non-matching block stays
-//   opaque. Exact RGB matches therefore take clrTo's colour and alpha; with
-//   useA the source alpha must match clrFrom's alpha as well.
+//   Input: pictures under grayscl followed by biLevel(50%), exported to PDF by
+//   PowerPoint. Result: (2,167,223) turns white and (0,147,190), (0,126,229),
+//   (9,74,178) black. Rec. 601 weights put the first below 50% (0.486);
+//   Rec. 709 weights (0.532) put all four on the observed sides. Boundary
+//   input: a JPEG picture under the same effects, compared with PowerPoint's
+//   PDF at every pixel whose source block is a single colour that the
+//   candidate rules classify differently (7,068 blocks of blues around the
+//   threshold). Result: Rec. 709 luma of the stored (gamma-encoded) values,
+//   with the grayscale truncated to a whole 8-bit level, matches all 7,068.
+//   Rounding that level instead fails 30 (a luma of 127.59 must become 127,
+//   black), unquantized Rec. 709 fails 30, Rec. 601 fails at least 1,534, the
+//   channel average 4,553, and linear-light Rec. 709 is contradicted on nearly
+//   every block. So grayscl writes floor(Rec. 709 luma) and biLevel compares
+//   Rec. 709 luma with the threshold. (No block sat exactly on a threshold, so
+//   >= follows the text: "values greater than or equal to the threshold are
+//   set to white".)
+// - clrChange. MS-OI29500 says Office leaves alpha alone unless useA is set.
+//   Input: PowerPoint's own "set transparent colour" output (clrTo = the same
+//   colour with alpha 0, useA absent) on two pictures, exported to PDF by
+//   PowerPoint and compared through the PDF soft masks. Result: every block
+//   that is pure clrFrom white becomes transparent (2,577 blocks, no
+//   counterexample; 971 of them transparent where keeping the source alpha
+//   would leave them opaque), and every non-matching block stays opaque.
+//   Exact RGB matches therefore take clrTo's colour and alpha; with useA the
+//   source alpha must match clrFrom's alpha as well.
 // - lum. ECMA-376 §20.1.8.42 names brightness and contrast but gives no
 //   formula. Evidence: PowerPoint's PDF export of a 256-step gray ramp under
 //   a grid of bright × contrast values (±35%, ±70%, ±100%, and 0). Every
