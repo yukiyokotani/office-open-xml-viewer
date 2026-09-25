@@ -2439,7 +2439,7 @@ be closed before an experimental release.
 | PPT | ~~Gradients on rotated shapes (or inside rotated/flipped groups) are replaced by the solid fill colour~~ Resolved (ef41f03a) | several |
 | PPT | Custom geometry with per-path fill/stroke flags is rejected; the PPTX model has no per-path `fill`/`stroke` (ECMA-376 §20.1.9.15), a generic PPTX gap | 1 |
 | PPT | ~~Unmapped shape types are dropped silently~~ Now rejected | several |
-| PPT | Picture brightness/contrast (washout), pattern/texture fills, and OLE icons, links and controls are rejected | several |
+| PPT | Picture brightness/contrast (washout), texture fills, pattern fills on flipped shapes, and OLE icons, links and controls are rejected (pattern fills, including on rotated shapes, are projected) | several |
 | PPT | Implicit paragraph margin/indent and percentage spacing are rejected | 12 of 34 load failures |
 | DOC | 55 of 59 samples are rejected (formatting, notes, fields, positioned tables, drawings, header pictures, non-PNG/JPEG images, list ancestry, FIB version, language ID) | 55 |
 | DOC | Picture washout/brightness and space-before after a page break differ from Word | 2 |
