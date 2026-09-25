@@ -271,6 +271,36 @@ fn solid_lines_use_their_explicit_color_width_and_dash() {
     assert_eq!(info.stroke_width, 19_050);
     assert_eq!(info.stroke_dash_style.as_deref(), Some("dash"));
     assert_eq!(info.stroke_line_join.as_deref(), Some("round"));
+    // Translucent paint: the XLSX counterpart's `a:alpha 50000` line is
+    // saved as lineOpacity 0x8080, the same alpha byte.
+    let shape = source(
+        &owned,
+        1,
+        &[
+            (0x0181, 0xff),
+            (0x0182, 0x4000),
+            (0x01c0, 0xccff),
+            (0x01c1, 0x8080),
+            (0x01ff, 0x0008_0008),
+        ],
+    );
+    let info = project(&owned, &excel_defaults(), &shape, 0xa00)
+        .unwrap()
+        .unwrap();
+    assert_eq!(info.fill_color.as_deref(), Some("#FF000040"));
+    assert_eq!(info.stroke_color.as_deref(), Some("#FFCC0080"));
+}
+
+#[test]
+fn editing_only_shape_booleans_are_accepted() {
+    // fLockShapeType (Excel writes it explicitly false) and its siblings.
+    let owned = workbook(0x0224, &compressed("2018"), 4, &[(0, 0)]);
+    let mut properties = RECTANGLE.to_vec();
+    properties.push((0x033f, 0x0008_0000));
+    let shape = source(&owned, 1, &properties);
+    assert!(project(&owned, &excel_defaults(), &shape, 0xa00)
+        .unwrap()
+        .is_some());
 }
 
 #[test]
@@ -304,11 +334,13 @@ fn unevidenced_shape_facts_fail_closed() {
     reject(&[(0x0004, 0x002d_0000)], 1, 0xa00, "rotated");
     reject(&[(0x023f, 0x0002_0002)], 1, 0xa00, "shadows");
     reject(&[(0x0180, 1)], 1, 0xa00, "non-solid");
-    reject(&[(0x0182, 0x8000)], 1, 0xa00, "translucent");
     reject(&[(0x0085, 1)], 1, 0xa00, "wrapping");
     reject(&[(0x0087, 0)], 1, 0xa00, "disagrees");
     reject(&[(0x008b, 1)], 1, 0xa00, "property 0x008b");
     reject(&[(0x0304, 0)], 1, 0xa00, "property 0x0304");
+    reject(&[(0x033f, 0x0001_0001)], 1, 0xa00, "background");
+    reject(&[(0x033f, 0x0020_0020)], 1, 0xa00, "OLE icon");
+    reject(&[(0x033f, 0x0080_0000)], 1, 0xa00, "flip overrides");
     reject(&[(0xc105, 4)], 1, 0xa00, "complex property");
     reject(&[(0x4186, 1)], 1, 0xa00, "BLIP property");
     // Primary and tertiary tables that disagree have no precedence.

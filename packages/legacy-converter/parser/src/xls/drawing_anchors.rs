@@ -188,7 +188,8 @@ fn assemble<'a>(
     if first.kind != BOF || u16_at(first.data, 0)? != BIFF8 || u16_at(first.data, 2)? != WORKSHEET {
         return Err(unsupported("invalid BIFF drawing worksheet BOF"));
     }
-    let (mut depth, mut active, mut length, mut complete) = (0usize, false, 0usize, false);
+    let (mut depth, mut length, mut complete) = (0usize, 0usize, false);
+    let mut owner = Owner::None;
     let mut fragments = Vec::new();
     let mut clients = BTreeMap::new();
     let mut charts = BTreeMap::new();
@@ -205,7 +206,7 @@ fn assemble<'a>(
             if depth == 1 && u16_at(record.data, 2)? == 0x0020 {
                 chart_start = last_object.map(|client| (client, base + offset));
             }
-            active = false;
+            owner = Owner::None;
             continue;
         }
         if record.kind == EOF {
@@ -214,19 +215,47 @@ fn assemble<'a>(
                 break;
             }
             depth -= 1;
+            owner = Owner::None;
             if depth == 0 {
                 if let Some((client, start)) = chart_start.take() {
                     charts.insert(client, (start, base + offset));
+                    // OBJ = Obj *Continue *CHART is complete.
+                    owner = Owner::Complete;
                 }
                 last_object = None;
             }
-            active = false;
             continue;
         }
         if depth != 0 {
             continue;
         }
-        if record.kind == 0x00ec || (active && record.kind == 0x003c) {
+        let drawing = match (record.kind, &mut owner) {
+            (0x00ec, _) | (0x003c, Owner::Drawing | Owner::Complete) => true,
+            (0x003c, Owner::Text { characters, runs }) => {
+                // TEXTOBJECT = TxO *Continue: the text fragments, then the
+                // formatting runs (MS-XLS 2.4.329).
+                if *characters > 0 {
+                    let (flag, chars) = record
+                        .data
+                        .split_first()
+                        .ok_or_else(|| unsupported("empty BIFF TxO text fragment"))?;
+                    let count = if *flag & 1 != 0 {
+                        chars.len() / 2
+                    } else {
+                        chars.len()
+                    };
+                    *characters = characters.saturating_sub(count);
+                } else {
+                    *runs = runs.saturating_sub(record.data.len());
+                }
+                if *characters == 0 && *runs == 0 {
+                    owner = Owner::Complete;
+                }
+                false
+            }
+            _ => false,
+        };
+        if drawing {
             if record.data.len() > 8224 {
                 return Err(unsupported("oversized BIFF sheet drawing fragment"));
             }
@@ -235,23 +264,40 @@ fn assemble<'a>(
                 .filter(|n| *n <= *remaining)
                 .ok_or_else(|| unsupported("BIFF sheet drawing byte budget exceeded"))?;
             fragments.push(record.data);
-            active = true;
-        } else {
-            if active && matches!(record.kind, 0x005d | 0x01b6) {
-                if clients.len() >= MAX_OBJECTS || clients.insert(length, record).is_some() {
-                    return Err(unsupported("ambiguous or excessive BIFF drawing clients"));
+            owner = Owner::Drawing;
+            continue;
+        }
+        if record.kind == 0x003c {
+            // A continuation its native owner still claims (or an unowned
+            // one) is never drawing data.
+            continue;
+        }
+        if owner == Owner::Drawing && matches!(record.kind, 0x005d | 0x01b6) {
+            if clients.len() >= MAX_OBJECTS || clients.insert(length, record).is_some() {
+                return Err(unsupported("ambiguous or excessive BIFF drawing clients"));
+            }
+        }
+        last_object = (record.kind == 0x005d).then_some(length);
+        // Excel continues the sheet's OfficeArt stream in Continue records
+        // after an Obj or TxO once that native record is complete, which the
+        // OBJECTS grammar (MS-XLS 2.1.7.20.5) would assign to the Obj/TxO.
+        // Ownership follows the native record's own length: a complete Obj
+        // (its subrecords end with FtEnd at the record end) or a TxO whose
+        // text and runs are consumed owns no further Continue. Any Obj whose
+        // length cannot be established keeps its continuations.
+        owner = match record.kind {
+            0x005d if object_complete(record.data) => Owner::Complete,
+            0x01b6 if record.data.len() >= 14 => {
+                let characters = usize::from(u16_at(record.data, 10)?);
+                let runs = usize::from(u16_at(record.data, 12)?);
+                if characters == 0 && runs == 0 {
+                    Owner::Complete
+                } else {
+                    Owner::Text { characters, runs }
                 }
             }
-            if record.kind == 0x005d {
-                last_object = Some(length);
-            } else if record.kind != 0x003c {
-                last_object = None;
-            }
-            // This subset assigns post-Obj/TxO continuations to their native
-            // client. Reclassifying interleaved producer continuations needs
-            // complete client-length ownership, not an OfficeArt header sniff.
-            active = false;
-        }
+            _ => Owner::None,
+        };
     }
     if !complete {
         return Err(unsupported("missing BIFF drawing worksheet EOF"));
@@ -269,6 +315,38 @@ fn assemble<'a>(
         clients,
         charts,
     }))
+}
+
+/// Who owns a Continue record at this point of the worksheet substream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Owner {
+    None,
+    /// The sheet's OfficeArt stream (MsoDrawing and its continuations).
+    Drawing,
+    /// A complete Obj or TxO: a following Continue resumes the drawing.
+    Complete,
+    /// A TxO still owning this many characters and formatting-run bytes.
+    Text {
+        characters: usize,
+        runs: usize,
+    },
+}
+
+/// Whether an Obj record's subrecords (MS-XLS 2.4.181) end with FtEnd exactly
+/// at the record end. FtLbsData (ft 0x0013) does not state its own length,
+/// so an Obj containing it is never taken as complete.
+fn object_complete(data: &[u8]) -> bool {
+    let mut at = 0usize;
+    while at + 4 <= data.len() {
+        let kind = u16::from_le_bytes([data[at], data[at + 1]]);
+        let size = usize::from(u16::from_le_bytes([data[at + 2], data[at + 3]]));
+        match kind {
+            0x0000 => return size == 0 && at + 4 == data.len(),
+            0x0013 => return false,
+            _ => at += 4 + size,
+        }
+    }
+    false
 }
 
 fn corner(bytes: &[u8], offset: usize) -> Result<CellCorner, String> {

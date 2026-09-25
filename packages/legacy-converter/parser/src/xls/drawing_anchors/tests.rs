@@ -61,8 +61,10 @@ fn fixture() -> Vec<(u16, Vec<u8>)> {
         (0xec, whole[..cut].to_vec()),
         (0x5d, cmo(7)),
         (0xec, whole[cut..].to_vec()),
-        (0x1b6, vec![0; 18]),
-        (0x3c, vec![0xff; 8]),
+        // A TxO owning 7 characters and 16 bytes of formatting runs.
+        (0x1b6, [vec![0; 10], vec![7, 0, 16, 0], vec![0; 4]].concat()),
+        (0x3c, [vec![0], vec![0xff; 7]].concat()),
+        (0x3c, vec![0xee; 16]),
         (EOF, vec![]),
     ]
 }
@@ -128,7 +130,7 @@ fn only_drawing_continuations_are_joined_at_every_byte_boundary() {
     assert_eq!(run(&data).unwrap(), expected);
     // Embedded chart drawing streams have their own BOF/EOF owner.
     data.splice(
-        3..3,
+        4..4,
         [
             (BOF, vec![0, 6, 0x20, 0]),
             (0xec, vec![0xff; 40]),
@@ -136,6 +138,25 @@ fn only_drawing_continuations_are_joined_at_every_byte_boundary() {
         ],
     );
     assert_eq!(run(&data).unwrap(), expected);
+
+    // Excel continues the OfficeArt stream in Continue records once the Obj
+    // before them is complete (its subrecords end with FtEnd).
+    let mut data = source.clone();
+    data[3].0 = 0x3c;
+    assert!(run(&data).is_err());
+    data[2].1.extend_from_slice(&[0; 4]);
+    assert_eq!(run(&data).unwrap(), expected);
+    // After the TxO's text and runs, further continuations are drawing data;
+    // before them they are not.
+    let mut data = source.clone();
+    let extra = art(0x7777, 0, &[]);
+    let root = u32::from_le_bytes(data[1].1[4..8].try_into().unwrap()) + extra.len() as u32;
+    data[1].1[4..8].copy_from_slice(&root.to_le_bytes());
+    let mut early = data.clone();
+    data.insert(7, (0x3c, extra.clone()));
+    assert_eq!(run(&data).unwrap(), expected);
+    early.insert(6, (0x3c, extra));
+    assert!(run(&early).is_err());
 }
 
 #[test]
@@ -200,7 +221,7 @@ fn traverses_only_owned_groups_in_order_and_bounds_the_stack() {
     // The client textbox marker ends before the later sibling shape, so give
     // that sibling its own fragment after the TxO/Continue pair.
     data[3].1 = bytes[cut..cut + 8].to_vec();
-    data.insert(6, (0xec, bytes[cut + 8..].to_vec()));
+    data.insert(7, (0xec, bytes[cut + 8..].to_vec()));
     assert_eq!(run(&data).unwrap()[0].group_depth, 2);
     // The projecting walk drops that nested shape; the strict walk used by the
     // direct reader rejects it instead of losing drawn content.

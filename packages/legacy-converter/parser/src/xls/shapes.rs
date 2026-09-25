@@ -394,7 +394,9 @@ impl Leaf {
                 | 0x01d0..=0x01d7
                 | 0x01ff => paint.property(id, value)?,
                 0x01cd if value == 0 => {}
-                0x023f | 0x03bf => {}
+                // Shadow, Shape and Group Shape Boolean Properties
+                // (MS-ODRAW 2.3.13.23, 2.3.2.12 and 2.3.4.44): checked below.
+                0x023f | 0x033f | 0x03bf => {}
                 _ => {
                     return Err(unsupported(format!(
                         "XLS drawing shape property {id:#06x}={value:#x} is not projected"
@@ -410,10 +412,18 @@ impl Leaf {
             (0x1ff, 9, "XLS opaque line background is not projected"),
             (0x1ff, 6, "XLS inset line pens are not projected"),
             (0x1ff, 0, "XLS no-line dash rendering is not projected"),
+            // Shape Boolean Properties: background shapes and OLE icons. The
+            // shape-type lock, relative-resize preference, rules initiator
+            // and policy labels only affect editing.
+            (0x33f, 0, "XLS background drawing shapes are not projected"),
+            (0x33f, 5, "XLS OLE icon shapes are not projected"),
         ] {
             if table.boolean(id, bit) == Some(true) {
                 return Err(unsupported(reason));
             }
+        }
+        if table.boolean(0x33f, 6).is_some() || table.boolean(0x33f, 7).is_some() {
+            return Err(unsupported("XLS drawing flip overrides are not projected"));
         }
         if table.boolean(0xbf, 3) == Some(true) {
             margins = DEFAULT_MARGINS;
@@ -423,10 +433,10 @@ impl Leaf {
             if paint.fill_type.unwrap_or(0) != 0 || paint.fill_rect == Some(true) {
                 return Err(unsupported("non-solid XLS shape fills are not projected"));
             }
-            if paint.fill_alpha.unwrap_or(65_536) != 65_536 {
-                return Err(unsupported("translucent XLS shape fills are not projected"));
-            }
-            Some(rgb(paint.fill.unwrap_or(0x00ff_ffff))?)
+            Some(rgb(
+                paint.fill.unwrap_or(0x00ff_ffff),
+                paint.fill_alpha.unwrap_or(65_536),
+            )?)
         } else {
             None
         };
@@ -434,13 +444,13 @@ impl Leaf {
             if paint.line_type.unwrap_or(0) != 0 {
                 return Err(unsupported("non-solid XLS shape lines are not projected"));
             }
-            if paint.line_alpha.unwrap_or(65_536) != 65_536 {
-                return Err(unsupported("translucent XLS shape lines are not projected"));
-            }
             if paint.details.line_end(0).is_some() || paint.details.line_end(1).is_some() {
                 return Err(unsupported("XLS shape line ends are not projected"));
             }
-            Some(rgb(paint.line.unwrap_or(0))?)
+            Some(rgb(
+                paint.line.unwrap_or(0),
+                paint.line_alpha.unwrap_or(65_536),
+            )?)
         } else {
             None
         };
@@ -504,20 +514,32 @@ fn right_to_left(c: char) -> bool {
     matches!(u32::from(c), 0x0590..=0x08ff | 0xfb1d..=0xfdff | 0xfe70..=0xfeff)
 }
 
-/// OfficeArtCOLORREF (MS-ODRAW 2.2.2) as an RGB color. Palette, scheme and
-/// system indexes need Excel's color tables and are rejected.
-fn rgb(color: u32) -> Result<String, String> {
+/// OfficeArtCOLORREF (MS-ODRAW 2.2.2) with a 16.16 opacity (fillOpacity
+/// 2.3.7.5, lineOpacity 2.3.8.2) as the model's `#RRGGBB`, or `#RRGGBBAA`
+/// when translucent, with the alpha byte and opaque threshold of the shared
+/// DrawingML color parser. Excel's XLSX of a 50% line (`a:alpha 50000`)
+/// saves lineOpacity 0x8080, i.e. the same alpha byte 0x80. Palette, scheme
+/// and system indexes need Excel's color tables and are rejected.
+fn rgb(color: u32, alpha: u32) -> Result<String, String> {
     if !matches!(color & 0xff00_0000, 0 | 0x0400_0000) {
         return Err(unsupported(
             "XLS drawing palette or scheme colors are not projected",
         ));
     }
-    Ok(format!(
+    let mut hex = format!(
         "#{:02X}{:02X}{:02X}",
         color & 0xff,
         (color >> 8) & 0xff,
         (color >> 16) & 0xff
-    ))
+    );
+    let alpha = f64::from(alpha) / 65_536.0;
+    if (alpha - 1.0).abs() >= 0.004 {
+        hex.push_str(&format!(
+            "{:02X}",
+            (alpha.clamp(0.0, 1.0) * 255.0).round() as u8
+        ));
+    }
+    Ok(hex)
 }
 
 /// TxO (MS-XLS 2.4.329): the text string in Continue records of
