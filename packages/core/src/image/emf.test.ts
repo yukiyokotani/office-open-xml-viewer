@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { isEmf } from './wmf.js';
 import { playEmf, renderEmfToBitmap } from './emf.js';
+import { scanEmfPlus } from './emf-plus.js';
 
 // ── EMF (Enhanced Metafile) player unit tests ───────────────────────────────
 // The renderer falls back to this player for true `.emf` blips the browser can't
@@ -1638,15 +1639,76 @@ describe('playEmf — EMF+ bitmap records', () => {
     ))).toBe(1);
   });
 
-  it('plays an EMF+-only file as far as implemented and reports the rest', () => {
+  const gdiPolygon = () => [
+    record(EMR.SELECTOBJECT, (w) => w.u32(0x80000004)),
+    record(EMR.POLYGON16, (w) => w.i32(0).i32(0).i32(10).i32(10).u32(3).i16(0).i16(0).i16(10).i16(0).i16(0).i16(10)),
+  ];
+  const file = (records: Uint8Array[], gdi: Uint8Array[] = gdiPolygon()) =>
+    concat(emfHeader(0, 0, 100, 100), ...gdi, ...records, record(EMR.EOF, () => {}));
+  /** An EMR_COMMENT whose EMF+ payload is written byte for byte. */
+  const rawComment = (dataSize: number, payload: Uint8Array) => record(70, (w) => {
+    w.u32(dataSize).u32(0x2b464d45);
+    for (const byte of payload) w.raw(byte);
+  });
+
+  it('does not play EMF+ over a complete GDI rendering when a later record is truncated', () => {
+    // A valid DrawImage, then 8 bytes: less than one EMF+ record header.
+    const payload = concat(header(true), attributes(), bitmap(), drawImage([0, 0, 2, 1]), new Uint8Array([0x02, 0x40, 0, 0, 12, 0, 0, 0]));
+    const records = [rawComment(4 + payload.length, payload)];
+    expect(scanEmfPlus(file(records))).toEqual({
+      present: true, dual: true, play: false, failures: ['EMF+ record (truncated header)'],
+    });
+    const played = run(records, gdiPolygon());
+    expect(played.draws).toHaveLength(0);
+    expect(played.styles.fill).toEqual(['#000000']);
+    // The dual file's GDI rendering is complete: nothing is reported.
+    expect(played.reported).toEqual([]);
+  });
+
+  it('treats invalid record and comment sizes as validation failures', () => {
+    const valid = concat(header(true), attributes(), bitmap(), drawImage([0, 0, 2, 1]));
+    // A record whose Size runs past its comment.
+    const overrun = concat(valid, new Writer().u16(0x4002).u16(0).u32(64).u32(0).build());
+    expect(scanEmfPlus(file([rawComment(4 + overrun.length, overrun)])).failures)
+      .toEqual(['EMF+ record 0x4002 (invalid Size or DataSize)']);
+    // DataSize larger than Size − 12.
+    const badData = concat(valid, new Writer().u16(0x4002).u16(0).u32(12).u32(4).build());
+    expect(scanEmfPlus(file([rawComment(4 + badData.length, badData)])).failures)
+      .toEqual(['EMF+ record 0x4002 (invalid Size or DataSize)']);
+    // An EMR_COMMENT DataSize that leaves the comment record.
+    expect(scanEmfPlus(file([rawComment(4 + valid.length + 16, valid)]))).toMatchObject({
+      play: false, failures: ['EMF+ comment (invalid DataSize)'],
+    });
+  });
+
+  it('treats an unfinished or interleaved continued object as a validation failure', () => {
+    const data = bitmap().slice(12);
+    const first = plusRecord(0x4008, 0x8501, [...u32(data.length), ...data.slice(0, 10)]);
+    const second = plusRecord(0x4008, 0x8501, [...u32(data.length), ...data.slice(10)]);
+    const unfinished = scanEmfPlus(file([comment(header(true), attributes(), first, drawImage([0, 0, 2, 1]))]));
+    expect(unfinished.play).toBe(false);
+    expect(unfinished.failures).toContain('EMF+ continued object (unfinished)');
+    const interleaved = scanEmfPlus(file([comment(header(true), attributes(), first, plusRecord(0x401e, 0), second, drawImage([0, 0, 2, 1]))]));
+    expect(interleaved.play).toBe(false);
+    expect(interleaved.failures).toContain('EMF+ continued object (unfinished)');
+    // Consecutive fragments remain a valid object.
+    expect(scanEmfPlus(file([comment(header(true), attributes(), first, second, drawImage([0, 0, 2, 1]))])))
+      .toEqual({ present: true, dual: true, play: true, failures: [] });
+  });
+
+  it('reports the failures of an EMF+-only file, which has no GDI alternative, and plays its GDI records as before', () => {
     const result = run([
       comment(header(false), plusRecord(0x400a, 0, u32(0)), bitmap(0x0501, 0x00022009), drawImage([0, 0, 2, 1])),
-    ]);
+    ], gdiPolygon());
     expect(result.draws).toHaveLength(0);
+    expect(result.styles.fill).toEqual(['#000000']);
     expect(result.reported).toEqual(expect.arrayContaining([
       'EMF+ record 0x400a',
       'EMF+ image other than an uncompressed 32-bit bitmap',
       'EMF+ DrawImage of an unavailable image',
     ]));
+    // A truncated EMF+-only stream is reported the same way.
+    const payload = concat(header(false), attributes(), bitmap(), drawImage([0, 0, 2, 1]), new Uint8Array([0, 0, 0, 0]));
+    expect(run([rawComment(4 + payload.length, payload)]).reported).toEqual(['EMF+ record (truncated header)']);
   });
 });

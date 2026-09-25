@@ -1730,8 +1730,15 @@ export function playEmf(
     unsupported: new Set(),
   };
   // EMF+ ([MS-EMFPLUS]): play the EMF+ rendering instead of the GDI records
-  // when the metafile has one this player implements (see emf-plus.ts).
-  const plus = scanEmfPlus(bytes).play ? new EmfPlusPlayer(s) : null;
+  // when the metafile has one this player implements (see emf-plus.ts). An
+  // EMF+-only file whose stream fails validation has no complete alternative:
+  // its failures join the report and the GDI records play as they did before
+  // EMF+ support (a dual file's complete GDI rendering needs no report).
+  const scan = scanEmfPlus(bytes);
+  const plus = scan.play ? new EmfPlusPlayer(s) : null;
+  if (!scan.play && !scan.dual) {
+    for (const failure of scan.failures) s.unsupported.add(failure);
+  }
   // The playback's own base save: every DC level owns one outstanding canvas
   // save, so a clip reset can restore to it, and playback leaves the caller's
   // context state (including clips) as it found it.

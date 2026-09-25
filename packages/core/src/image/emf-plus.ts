@@ -10,14 +10,21 @@
 // one of the two. `scanEmfPlus` therefore decides up front, semantically: it
 // plays the whole EMF+ stream through this same player in a dry run (every
 // record, object, unit, transform, rectangle and image-attribute check, no
-// drawing) and
-//   - plays the EMF+ stream only when it contains drawing records and the dry
-//     run reports nothing unsupported or malformed;
-//   - otherwise a dual-mode file keeps its complete GDI rendering, and an
-//     EMF+-only file is played as far as it is implemented with the gaps
-//     reported, never dropped silently.
-// So a GDI alternative is never discarded for EMF+ content that playback
-// would later reject.
+// drawing) and plays the EMF+ stream only when it contains drawing records
+// and the dry run reports no failure. Structural damage counts as a failure
+// exactly like an unsupported record: an EMF record or EMF+ comment whose
+// size leaves its container, an EMF+ record whose Size/DataSize is invalid
+// ([MS-EMFPLUS] 2.3 EmfPlusRecord: Size covers the 12-byte header and the
+// data, DataSize ≤ Size − 12), a trailing fragment shorter than a record
+// header, and a continued EmfPlusObject ([MS-EMFPLUS] 2.3.5.1 flag C) that
+// is interleaved, inconsistent or never completed. Otherwise
+//   - a dual-mode file keeps its complete GDI rendering, so a GDI alternative
+//     is never discarded for EMF+ content that playback would reject or only
+//     partly draw;
+//   - an EMF+-only file has no complete alternative: the failures are
+//     returned (`EmfPlusScan.failures`) for the caller to surface as an
+//     incomplete picture, and the GDI records are played as they were before
+//     EMF+ support existed (see emf.ts).
 // Evidence for choosing the EMF+ rendering: Excel's PDF exports of GDI+
 // metafiles whose GDI part has no drawing records (a bitmap drawn by
 // EmfPlusDrawImage) show that bitmap; PowerPoint's PDF export of dual files
@@ -79,19 +86,38 @@ interface PlusRecord {
   end: number;
 }
 
-/** Walk the EMF+ records of one EMR_COMMENT (record starting at `pos`). */
-function* plusRecords(dv: DataView, pos: number, recEnd: number): Generator<PlusRecord> {
+/** Walk the EMF+ records of one EMR_COMMENT (record starting at `pos`).
+ *  A comment that is not an EMF+ comment yields nothing; structural damage in
+ *  an EMF+ comment is reported through `fail` and ends the walk. */
+function* plusRecords(
+  dv: DataView,
+  pos: number,
+  recEnd: number,
+  fail: (reason: string) => void,
+): Generator<PlusRecord> {
   if (recEnd - pos < 16) return;
-  const dataSize = dv.getUint32(pos + 8, true);
   if (dv.getUint32(pos + 12, true) !== 0x2b464d45) return; // 'EMF+'
-  const end = Math.min(recEnd, pos + 12 + dataSize);
+  // EMR_COMMENT DataSize counts the identifier and the EMF+ records.
+  const dataSize = dv.getUint32(pos + 8, true);
+  if (dataSize < 4 || pos + 12 + dataSize > recEnd) {
+    fail('EMF+ comment (invalid DataSize)');
+    return;
+  }
+  const end = pos + 12 + dataSize;
   let p = pos + 16;
-  while (p + 12 <= end) {
+  while (p < end) {
+    if (end - p < 12) {
+      fail('EMF+ record (truncated header)');
+      return;
+    }
     const type = dv.getUint16(p, true);
     const flags = dv.getUint16(p + 2, true);
     const size = dv.getUint32(p + 4, true);
     const dataLength = dv.getUint32(p + 8, true);
-    if (size < 12 || p + size > end || dataLength > size - 12) return;
+    if (size < 12 || size > end - p || dataLength > size - 12) {
+      fail(`EMF+ record 0x${type.toString(16)} (invalid Size or DataSize)`);
+      return;
+    }
     yield { type, flags, start: p + 12, end: p + 12 + dataLength };
     p += size;
   }
@@ -104,12 +130,18 @@ export interface EmfPlusScan {
   dual: boolean;
   /** Play the EMF+ records instead of the GDI drawing. */
   play: boolean;
+  /** Why the EMF+ stream is not played: unsupported content and structural
+   *  damage found by the dry run (empty when it is fully playable, and for a
+   *  file without EMF+ comments). A file whose EMF+ comments are damaged
+   *  before any EmfPlusHeader has failures with `present: false`. */
+  failures: readonly string[];
 }
 
 /** Decide which of a metafile's renderings to play (see the module note). */
 export function scanEmfPlus(bytes: Uint8Array): EmfPlusScan {
   const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   let present = false;
+  let seen = false;
   let dual = false;
   let drawing = false;
   const dry: EmfPlusTarget = {
@@ -124,13 +156,20 @@ export function scanEmfPlus(bytes: Uint8Array): EmfPlusScan {
     unsupported: new Set(),
   };
   const player = new EmfPlusPlayer(dry, true);
+  const ignore = () => {};
   let pos = 0;
   while (pos + 8 <= bytes.length) {
     const type = dv.getUint32(pos, true);
     const size = dv.getUint32(pos + 4, true);
-    if (size < 8 || pos + size > bytes.length) break;
+    // The EMF record walk of playEmf: a 4-aligned size inside the file.
+    if (size < 8 || (size & 3) !== 0 || pos + size > bytes.length) {
+      dry.unsupported.add('EMF record stream (truncated or invalid record size)');
+      break;
+    }
     if (type === 70) {
-      for (const record of plusRecords(dv, pos, pos + size)) {
+      if (size >= 16 && dv.getUint32(pos + 12, true) === 0x2b464d45) seen = true;
+      // Structural failures are recorded once, by the dry-run player below.
+      for (const record of plusRecords(dv, pos, pos + size, ignore)) {
         if (record.type === PLUS.HEADER) {
           present = true;
           dual = (record.flags & 1) !== 0;
@@ -142,8 +181,12 @@ export function scanEmfPlus(bytes: Uint8Array): EmfPlusScan {
     if (type === 14) break;
     pos += size;
   }
-  const playable = dry.unsupported.size === 0;
-  return { present, dual, play: present && drawing && (playable || !dual) };
+  player.finish();
+  // Failures count once the file carries EMF+ at all: a damaged first comment
+  // can hide the EmfPlusHeader, and then there is no Flags bit asserting that
+  // the GDI records are a complete alternative.
+  const failures = seen ? [...dry.unsupported] : [];
+  return { present, dual, play: present && drawing && failures.length === 0, failures };
 }
 
 /** The subset of the GDI player state the EMF+ player draws through. */
@@ -215,14 +258,32 @@ export class EmfPlusPlayer {
 
   /** Play the EMF+ records of one EMR_COMMENT record. */
   playComment(dv: DataView, pos: number, recEnd: number): void {
-    for (const record of plusRecords(dv, pos, recEnd)) {
+    const fail = (reason: string) => this.target.unsupported.add(reason);
+    for (const record of plusRecords(dv, pos, recEnd, fail)) {
       this.gdiAllowed = false;
+      // [MS-EMFPLUS] 2.3.5.1: the fragments of a continued object are
+      // consecutive EmfPlusObject records; anything else in between leaves
+      // the pending object unfinished.
+      if (this.pending && !(record.type === PLUS.OBJECT && (record.flags & 0x8000) !== 0)) {
+        this.abandonPending();
+      }
       try {
         this.play(dv, record);
       } catch {
         this.target.unsupported.add(`EMF+ record 0x${record.type.toString(16)} (malformed)`);
       }
     }
+  }
+
+  /** End of the metafile: a continued object that never completed is a
+   *  failure, not a silently missing object. */
+  finish(): void {
+    if (this.pending) this.abandonPending();
+  }
+
+  private abandonPending(): void {
+    this.target.unsupported.add('EMF+ continued object (unfinished)');
+    this.pending = null;
   }
 
   private play(dv: DataView, r: PlusRecord): void {
@@ -349,9 +410,12 @@ export class EmfPlusPlayer {
       if (data.length < 4) throw new RangeError('Truncated EMF+ object');
       const total = dv.getUint32(r.start, true);
       if (total > MAX_OBJECT_BYTES) throw new RangeError('EMF+ object too large');
-      if (!this.pending || this.pending.id !== id) {
-        this.pending = { id, total, parts: [], length: 0 };
+      if (this.pending && (this.pending.id !== id || this.pending.total !== total)) {
+        // A different object (or a changed TotalObjectSize) before the
+        // pending one completed.
+        this.abandonPending();
       }
+      if (!this.pending) this.pending = { id, total, parts: [], length: 0 };
       const part = data.subarray(4);
       this.pending.parts.push(part);
       this.pending.length += part.length;
