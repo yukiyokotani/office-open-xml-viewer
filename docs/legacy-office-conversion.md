@@ -2397,16 +2397,17 @@ Admission is not visual fidelity.
 
 ### Local direct-render survey
 
-`packages/{docx,pptx,xlsx}/tests/visual/legacy-corpus.spec.ts` render each
-local private legacy sample through its direct source. Each sample is written
-beside its same-named Office PDF export as paired PNGs and a summary. The
-survey reports only: it never gates, updates references, or generates OOXML.
-Run it with an output directory outside the checkout:
+`packages/legacy-converter/tests/survey/{doc,ppt,xls}.spec.ts` render each
+local private legacy sample through its direct source, on the matching viewer
+package's own VRT fixture and dev server. Each sample is written beside its
+same-named Office PDF export as paired PNGs and a summary. The survey reports
+only: it never gates, updates references, or generates OOXML. Run it with an
+output directory outside the checkout (`VRT_PORT` serves DOC, `+1` PPT and
+`+2` XLS; `LEGACY_CORPUS_FORMATS` and `LEGACY_CORPUS_FILTER` narrow the run):
 
 ```bash
-LEGACY_CORPUS=1 LEGACY_CORPUS_OUT=/tmp/legacy-survey VRT_PRIVATE_CORPUS=1 \
-  pnpm --filter @silurus/ooxml-pptx exec playwright test \
-  --config playwright.config.ts --project=chrome legacy-corpus.spec.ts
+LEGACY_CORPUS=1 LEGACY_CORPUS_OUT=/tmp/legacy-survey LEGACY_CORPUS_FORMATS=ppt \
+  pnpm --filter @silurus/ooxml-legacy-converter survey
 ```
 
 Pixel percentages are only a triage signal. For example, a slide can score
