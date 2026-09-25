@@ -123,6 +123,7 @@ pub struct Formatting<'a> {
     /// author names), decoded only when a revision mark is projected. `None`
     /// records an out-of-range table so documents without revision marks are
     /// unaffected, while a revision mark that needs it still fails.
+    #[cfg(feature = "direct-doc")]
     revision_authors: Option<&'a [u8]>,
 }
 
@@ -174,6 +175,7 @@ impl<'a> Formatting<'a> {
             missing_tables,
             unsupported_table_properties: false,
             // FibRgFcLcb97 entry 51 (0x9A + 51 * 8).
+            #[cfg(feature = "direct-doc")]
             revision_authors: fkp::table_part(word, table, 0x232).ok(),
         })
     }
@@ -1100,6 +1102,7 @@ mod tests {
             unsupported_piece_properties: false,
             missing_tables: true,
             unsupported_table_properties: false,
+            #[cfg(feature = "direct-doc")]
             revision_authors: Some(&[]),
         }
     }

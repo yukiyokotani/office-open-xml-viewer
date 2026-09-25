@@ -15,9 +15,9 @@ use crate::ooxml::{write_package_bytes, xml_text, ROOT_RELS_DOCX};
 mod border;
 mod character;
 #[cfg(feature = "direct-doc")]
-mod direct_model;
-#[cfg(feature = "direct-doc")]
 pub(crate) mod direct_cursor;
+#[cfg(feature = "direct-doc")]
+mod direct_model;
 mod fib;
 mod fkp;
 mod floating;
@@ -35,8 +35,8 @@ mod sprm;
 mod table;
 mod table_context;
 mod table_output;
-mod table_style_condition;
 mod table_structure;
+mod table_style_condition;
 mod tabs;
 
 const FIB_IDENT: u16 = 0xa5ec;
@@ -68,12 +68,15 @@ struct AcquiredDoc<'a> {
     formatting: formatting::Formatting<'a>,
     /// MS-DOC 2.8.25 PlcfFldMom. Only the direct model consumes it, so a
     /// malformed table does not change the byte converter's behavior.
+    #[cfg(feature = "direct-doc")]
     main_fields: Result<header_fields::Table, String>,
     /// PlcfFldFtn (0x12A) and PlcfFldEdn (0x21A), consumed only by the direct
     /// model; CPs are relative to each note document.
+    #[cfg(feature = "direct-doc")]
     note_fields: [Result<header_fields::Table, String>; 2],
     /// MS-DOC 2.5.15 effective nFib, which scopes DOP versus section note
     /// properties (MS-DOC 2.7.2).
+    #[cfg(feature = "direct-doc")]
     effective_nfib: u16,
     note_references: notes::References,
     pictures: pictures::Store<'a>,
@@ -193,7 +196,9 @@ fn with_acquired_doc<T>(
     let note_references = notes::References::read(&note_stories, &story, &mut formatting)?;
     let pictures = pictures::Store::new(&data);
     let floating = floating::Store::read_stories(&word, &table, clx, ccp_text)?;
+    #[cfg(feature = "direct-doc")]
     let main_fields = header_fields::Table::read_at(&word, &table, 0x11a, ccp_text);
+    #[cfg(feature = "direct-doc")]
     let note_fields = [(0x12a, 0x50), (0x21a, 0x60)].map(|(fib_offset, length_offset)| {
         let length = u32_at(&word, length_offset)? as usize;
         header_fields::Table::read_at(&word, &table, fib_offset, length)
@@ -205,8 +210,11 @@ fn with_acquired_doc<T>(
         sections,
         headers,
         formatting,
+        #[cfg(feature = "direct-doc")]
         main_fields,
+        #[cfg(feature = "direct-doc")]
         note_fields,
+        #[cfg(feature = "direct-doc")]
         effective_nfib,
         note_references,
         pictures,
@@ -228,9 +236,12 @@ fn build_conversion(
         note_references,
         mut pictures,
         mut floating,
-        main_fields: _,
-        note_fields: _,
-        effective_nfib: _,
+        #[cfg(feature = "direct-doc")]
+            main_fields: _,
+        #[cfg(feature = "direct-doc")]
+            note_fields: _,
+        #[cfg(feature = "direct-doc")]
+            effective_nfib: _,
     } = facts;
     let document_xml = build_formatted_story(
         &story,

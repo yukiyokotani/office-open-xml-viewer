@@ -59,8 +59,8 @@ enum Mode {
 #[derive(Default)]
 struct Drawings<'a> {
     anchors: Vec<Anchor>,
-    /// spid -> (anchor index, [package order, document order], container).
-    shapes: BTreeMap<u32, (usize, [u32; 2], Record<'a>)>,
+    /// spid -> registered shape.
+    shapes: BTreeMap<u32, ContainerShape<'a>>,
 }
 
 pub(super) struct Store<'a> {
@@ -649,12 +649,16 @@ fn records<'a>(bytes: &'a [u8], budget: &mut usize) -> Result<Vec<Record<'a>>, S
     Ok(result)
 }
 
+/// A registered shape: (anchor index, [package order, document order],
+/// shape or group container).
+type ContainerShape<'a> = (usize, [u32; 2], Record<'a>);
+
 /// The anchored shapes and groups of one OfficeArtDgContainer's patriarch.
 /// Groups are kept whole: their members use the group coordinate space.
 fn container_shapes<'a>(
     drawing: Record<'a>,
     budget: &mut usize,
-) -> Result<BTreeMap<u32, (usize, [u32; 2], Record<'a>)>, String> {
+) -> Result<BTreeMap<u32, ContainerShape<'a>>, String> {
     let mut shapes = BTreeMap::new();
     let mut independent = 0u32;
     for child in records(drawing.payload, budget)? {

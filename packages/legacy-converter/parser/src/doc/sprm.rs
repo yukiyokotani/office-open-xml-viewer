@@ -63,6 +63,7 @@ pub fn paragraph_properties<'a>(
 ///   paragraph SPRMs (sgc 1): Word applied a piece TDefTable and TIstd to the
 ///   row mark. Other groups (character, picture, section) stay excluded, as in
 ///   2.4.6.1 step 5. Simple Prm0 values only encode paragraph/character SPRMs.
+///
 /// The last callback argument reports whether the Prl came from the piece.
 pub fn paragraph_properties_appended<'a>(
     direct: &'a [u8],
