@@ -41,6 +41,7 @@ use worksheet_cursor::{
 
 mod types;
 pub use types::*;
+mod style_presets;
 mod styles;
 use styles::*;
 mod chart;
@@ -770,7 +771,7 @@ fn finalize_projected_sheet(
     ws.defined_names = defined_names;
     ws.tables = load_sheet_tables(archive, sheet_path, theme_colors);
     ws.slicers = load_sheet_slicers(archive, sheet_path, theme_colors);
-    (ws.pivot_tables, ws.pivot_diagnostics) = load_sheet_pivots(archive, sheet_path);
+    (ws.pivot_tables, ws.pivot_diagnostics) = load_sheet_pivots(archive, sheet_path, theme_colors);
     let sparkline_groups = load_sheet_sparklines(
         archive,
         &sheet_shell_xml,

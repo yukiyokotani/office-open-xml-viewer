@@ -78,7 +78,7 @@ function toStr(v: EvalValue): string {
 }
 
 interface Tok {
-  kind: 'num' | 'str' | 'op' | 'lparen' | 'rparen' | 'comma' | 'ref' | 'name' | 'bool' | 'colon';
+  kind: 'num' | 'str' | 'op' | 'lparen' | 'rparen' | 'comma' | 'ref' | 'name' | 'bool' | 'colon' | 'error';
   text: string;
   /** For 'ref': pre-parsed reference. */
   ref?: { colAbs: boolean; col: number; rowAbs: boolean; row: number };
@@ -106,6 +106,16 @@ function tokenize(formula: string): Tok[] {
       }
       toks.push({ kind: 'str', text: buf });
       i = j + 1;
+      continue;
+    }
+    if (c === '#') {
+      // ECMA-376 §18.17.2 error literals (e.g. `#REF!` left by a deleted
+      // reference). Skipping the `#` would read `REF` as an unknown name
+      // worth 0 and let the rule match.
+      const m = /^#(?:NULL!|DIV\/0!|VALUE!|REF!|NAME\?|NUM!|N\/A|GETTING_DATA)/u.exec(s.slice(i));
+      if (!m) throw new Error('unknown error literal');
+      toks.push({ kind: 'error', text: m[0] });
+      i += m[0].length;
       continue;
     }
     if (c >= '0' && c <= '9') {
@@ -294,6 +304,10 @@ function parsePrimary(p: Parser, ctx: EvalCtx): EvalValue {
   if (t.kind === 'num') return parseFloat(t.text);
   if (t.kind === 'str') return t.text;
   if (t.kind === 'bool') return t.text === 'TRUE';
+  // An error value propagates through the operators and functions this
+  // evaluator models, so the rule's result is an error: Excel applies a
+  // conditional format only when its formula evaluates to TRUE.
+  if (t.kind === 'error') throw new Error(t.text);
   if (t.kind === 'lparen') {
     const v = parseExpr(p, ctx);
     const next = consume(p);

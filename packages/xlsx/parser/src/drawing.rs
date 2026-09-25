@@ -748,6 +748,8 @@ fn parse_custom_paths(
             PathInfo {
                 w: path.width,
                 h: path.height,
+                fill: path.fill,
+                stroke: path.stroke,
                 commands,
             }
         })
@@ -3812,6 +3814,38 @@ mod custom_path_arc_tests {
     use super::*;
 
     const NS: &str = r#"xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main""#;
+
+    /// ECMA-376 §20.1.9.15: `a:path@fill` and `@stroke` are carried per path;
+    /// the defaults (`norm`, stroked) are omitted from the wire model.
+    #[test]
+    fn custom_paths_carry_fill_mode_and_stroke_flag() {
+        let xml = format!(
+            r#"<a:custGeom {NS}><a:pathLst>
+                 <a:path w="10" h="10"><a:moveTo><a:pt x="0" y="0"/></a:moveTo></a:path>
+                 <a:path w="10" h="10" fill="none"><a:moveTo><a:pt x="0" y="0"/></a:moveTo></a:path>
+                 <a:path w="10" h="10" fill="darkenLess" stroke="0"><a:moveTo><a:pt x="0" y="0"/></a:moveTo></a:path>
+               </a:pathLst></a:custGeom>"#
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let json: Vec<_> = parse_custom_paths(doc.root_element(), 10.0, 10.0)
+            .iter()
+            .map(|path| {
+                let value = serde_json::to_value(path).unwrap();
+                (value.get("fill").cloned(), value.get("stroke").cloned())
+            })
+            .collect();
+        assert_eq!(
+            json,
+            vec![
+                (None, None),
+                (Some(serde_json::json!("none")), None),
+                (
+                    Some(serde_json::json!("darkenLess")),
+                    Some(serde_json::json!(false))
+                ),
+            ]
+        );
+    }
 
     /// `PathCmd`'s enum-level `rename_all = "camelCase"` (tag = "op") renames
     /// only the variant tags, not the fields. Without a per-variant

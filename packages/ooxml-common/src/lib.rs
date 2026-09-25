@@ -26,6 +26,7 @@ pub mod package_session;
 pub mod pull;
 pub mod rels;
 pub mod resource;
+pub mod spreadsheet_style_presets;
 pub mod text;
 pub mod theme;
 pub mod units;
