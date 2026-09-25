@@ -13422,6 +13422,12 @@ fn parse_table_cell(
         .and_then(|v| attr_w(v, "val"))
         .and_then(|value| cell_text_direction(&value));
 
+    // ECMA-376 §17.4.21 hideMark (CT_OnOff): ignore the end-of-cell mark when
+    // calculating the row height.
+    let hide_mark = tc_pr
+        .and_then(|p| bool_prop(p, "hideMark"))
+        .unwrap_or(false);
+
     // Empty = not set inline; parse_table fills it from the table style (else "top").
     let v_align = tc_pr
         .and_then(|p| child_w(p, "vAlign"))
@@ -13549,6 +13555,7 @@ fn parse_table_cell(
         margin_right,
         table_cell_layout,
         text_direction,
+        hide_mark,
     }
 }
 
@@ -14488,6 +14495,26 @@ mod tests {
                 expected,
                 "{authored}"
             );
+        }
+    }
+
+    // ECMA-376 §17.4.21 hideMark is CT_OnOff: present means on unless its
+    // w:val turns it off.
+    #[test]
+    fn cell_hide_mark_reads_on_off() {
+        for (tc_pr, expected) in [
+            ("", false),
+            ("<w:hideMark/>", true),
+            (r#"<w:hideMark w:val="true"/>"#, true),
+            (r#"<w:hideMark w:val="0"/>"#, false),
+            (r#"<w:hideMark w:val="false"/>"#, false),
+        ] {
+            let t = parse_tbl(&format!(
+                r#"<w:tblPr/>
+                   <w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid>
+                   <w:tr><w:tc><w:tcPr>{tc_pr}</w:tcPr><w:p/></w:tc></w:tr>"#
+            ));
+            assert_eq!(t.rows[0].cells[0].hide_mark, expected, "{tc_pr}");
         }
     }
 

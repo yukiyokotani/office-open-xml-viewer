@@ -328,6 +328,8 @@ fn project_table(
                     margins: Some(margin_wire(margins)),
                 },
                 text_direction: text_direction.map(str::to_owned),
+                // sprmTCellFHideMark (0xD642) is not admitted yet.
+                hide_mark: false,
             });
         }
         let height = planned.source.height;

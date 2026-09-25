@@ -55,16 +55,26 @@ export interface RetainedCellBlockPlacement {
   readonly inkBlock: Readonly<{ topPt: number; heightPt: number }>;
 }
 
+/**
+ * Whether a cell's final empty paragraph owns no row height. That holds for
+ * the required paragraph after a nested table, and, in a cell with
+ * `hideMark` (ECMA-376 §17.4.21: the end-of-cell mark is ignored for the
+ * row height), for a final paragraph that holds only that mark, including
+ * the sole paragraph of an empty cell. Word's PDFs of sample-26 (DOC and
+ * DOCX) end a hideMark cell's row at its last text paragraph although the
+ * cell ends with an empty paragraph, so the rule is per cell rather than
+ * MS-DOC's row condition that every cell be empty.
+ */
 export function isStructuralTrailingParagraph(
   content: TableCellLayoutSource['content'],
   index: number,
+  hideMark = false,
 ): boolean {
-  if (index !== content.length - 1 || index === 0) return false;
+  if (index !== content.length - 1) return false;
   const current = content[index];
-  const previous = content[index - 1];
-  return current?.type === 'paragraph'
-    && previous?.type === 'table'
-    && current.runs.length === 0;
+  if (current?.type !== 'paragraph') return false;
+  if (!hideMark && (index === 0 || content[index - 1]?.type !== 'table')) return false;
+  return current.runs.length === 0;
 }
 
 /**
@@ -89,7 +99,11 @@ export function resolveRetainedCellBlockPlacement(
   for (let index = 0; index < blocks.length; index += 1) {
     const block = blocks[index]!;
     const element = cell.content[index];
-    const structural = isStructuralTrailingParagraph(cell.content, index);
+    const structural = isStructuralTrailingParagraph(
+      cell.content,
+      index,
+      cell.hideMark === true,
+    );
     if (block.kind === 'paragraph' && element?.type === 'paragraph') {
       const paragraph: ParagraphLayoutSource = element;
       const blockBeforePt = block.spacing?.beforePt ?? 0;
