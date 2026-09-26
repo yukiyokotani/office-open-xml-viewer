@@ -1,4 +1,4 @@
-import { resolveCjkFallback, type CjkFallback, type CjkLang } from '@silurus/ooxml-core';
+import { resolveCjkFallback, unsupportedModelSourceCapability, type CjkFallback, type CjkLang } from '@silurus/ooxml-core';
 import {
   dropDecodedBitmapCache,
   dropSvgImageCache,
@@ -20,16 +20,20 @@ import { usingOwnedSession } from '@silurus/ooxml-core/internal/owned-session';
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 import {
   acquirePptxNodeSession,
+  acquirePptxSessionFromArchive,
+  validatePptxModelSourceArchive,
+  validatePptxModelSourceViewDefaults,
   PptxSlidePullClient,
   readPptxSlideCursorUsage,
   SlidePullWorker,
   type PresentationBootstrap,
-  type PptxNodeArchive,
+  type PptxNodeSessionArchive as PptxNodeArchive,
 } from '@silurus/ooxml-pptx/internal/session';
 import { InProcessPullTransport } from '@silurus/ooxml-core/internal/in-process-pull-transport';
 import type { OoxmlNodeSessionOptions } from './session-options.ts';
 import type { NodeCanvasFactory, NodeCanvasLike } from './render.ts';
 import { createLazyWasmModule, resolveWasm } from './wasm-loader.ts';
+import { resolveNodeSessionInput } from './model-source.ts';
 
 const getPptxWasmModule = createLazyWasmModule(() => resolveWasm(
     import.meta.url,
@@ -87,7 +91,28 @@ async function openPptxPresentationImpl(
   options: OpenPptxPresentationOptions = {},
 ): Promise<PptxPresentationSessionImpl> {
   const cjkFallback = resolveCjkFallback(options.cjkFallback);
-  const acquired = await acquirePptxNodeSession(toUint8(buffer), getPptxWasmModule(), options);
+  const input = await resolveNodeSessionInput(
+    buffer,
+    'pptx',
+    options,
+    validatePptxModelSourceArchive,
+  );
+  let acquired: ReturnType<typeof acquirePptxSessionFromArchive>;
+  if (input.kind === 'ooxml') {
+    acquired = await acquirePptxNodeSession(input.bytes, getPptxWasmModule(), options);
+  } else {
+    try {
+      validatePptxModelSourceViewDefaults(input.opened.viewDefaults);
+    } catch (error) {
+      try { input.opened.close(); } catch {}
+      throw error;
+    }
+    acquired = acquirePptxSessionFromArchive({
+      archive: input.opened.archive,
+      sourceByteLength: input.sourceByteLength,
+      closeArchive: input.opened.close,
+    }, options);
+  }
   return new PptxPresentationSessionImpl(
     acquired.closeArchive,
     acquired.archive,
@@ -116,7 +141,7 @@ class PptxPresentationSessionImpl implements PptxPresentationSession {
   private readonly fetchImage = (path: string, mimeType: string): Promise<Blob> =>
     this.getPartInternal(path, mimeType, (archive) => archive.extract_image(path));
   private readonly fetchMedia = (path: string): Promise<Blob> =>
-    this.getPartInternal(path, 'application/octet-stream', (archive) => archive.extract_media(path));
+    this.getPartInternal(path, 'application/octet-stream', (archive) => extractMedia(archive, path));
   private readonly rawParts = new BoundedRawPartCache({
     maxEntries: HARD_MAX_RAW_PART_CACHE_ENTRIES,
     maxBytes: HARD_MAX_RAW_PART_CACHE_BYTES,
@@ -181,7 +206,7 @@ class PptxPresentationSessionImpl implements PptxPresentationSession {
 
   async getMedia(path: string, mimeType = 'application/octet-stream'): Promise<Blob> {
     this.assertOpen();
-    return this.getPartInternal(path, mimeType, (archive) => archive.extract_media(path))
+    return this.getPartInternal(path, mimeType, (archive) => extractMedia(archive, path))
       .catch((error: unknown) => this.failOperation(error));
   }
 
@@ -302,6 +327,8 @@ class PptxPresentationSessionImpl implements PptxPresentationSession {
 
   private refreshResourceUsage(): OoxmlResourceUsageSnapshot | undefined {
     try {
+      // Inside the try: reading a trapped runtime's archive property throws.
+      if (!this.archive.resource_usage) return this.usage;
       this.usage = decodeOoxmlResourceUsage(this.archive.resource_usage());
       this.metrics.observeUsage(this.usage);
     } catch {
@@ -341,8 +368,10 @@ export async function materializePptxPresentation(
   );
 }
 
-function toUint8(buffer: ArrayBuffer | Uint8Array): Uint8Array {
-  return buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer as ArrayBuffer);
+/** Media reads are an optional model-source capability. */
+function extractMedia(archive: PptxNodeArchive, path: string): Uint8Array {
+  if (!archive.extract_media) throw unsupportedModelSourceCapability('media extraction');
+  return archive.extract_media(path);
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {

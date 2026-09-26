@@ -15,10 +15,19 @@ import {
 } from '@silurus/ooxml-core/worker';
 import {
   acquireDocxNodeDocument,
+  acquireDocxSessionFromArchive,
   normalizeDocxDocumentModel,
+  normalizeLayoutOptions,
   materializeDocumentPullLayoutSession,
   materializeDocumentPullSession,
-  type DocxNodeArchive,
+  validateDocxModelSourceArchive,
+  validateDocxModelSourceViewDefaults,
+  type AcquiredDocxNodeDocument,
+  type DocxNodeAcquisitionOptions,
+  type DocxNodePullIdentity,
+  type DocxNodePullOptions,
+  type DocxNodePullTransport,
+  type DocxNodeSessionArchive,
   createLayoutServices,
   retainRenderWorkerDocumentLayout,
   renderLayoutSourceToCanvas,
@@ -31,6 +40,7 @@ import {
 } from './render.ts';
 import { createLazyWasmModule, resolveWasm } from './wasm-loader.ts';
 import { usingOwnedSession } from '@silurus/ooxml-core/internal/owned-session';
+import { resolveNodeSessionInput } from './model-source.ts';
 
 const getDocxWasmModule = createLazyWasmModule(() => resolveWasm(
     import.meta.url,
@@ -88,9 +98,8 @@ export async function openDocxDocument(
 ): Promise<DocxDocumentSession> {
   if (!options?.factory) throw new TypeError('openDocxDocument requires a canvas factory');
   const cjkFallback = resolveCjkFallback(options.cjkFallback);
-  const acquired = await acquireDocxNodeDocument(
-    toUint8(buffer),
-    getDocxWasmModule(),
+  const { acquired, viewDefaults } = await acquireDocxInput(
+    buffer,
     options,
     (transport, identity, pullOptions) =>
       materializeDocumentPullLayoutSession(transport, identity, pullOptions),
@@ -108,7 +117,14 @@ export async function openDocxDocument(
       services,
       defaultCurrentDateMs,
     );
-    const layout = retained.layoutVariants.defaultLayout;
+    // Node sessions offer no view option, so a model source's own view default
+    // (else the renderer default, the final view) selects the paginated view.
+    const showTrackedChanges = viewDefaults.showTrackedChanges === true;
+    const layout = showTrackedChanges
+      ? retained.layoutVariants.layoutFor(
+        normalizeLayoutOptions(defaultCurrentDateMs, defaultCurrentDateMs, true),
+      )
+      : retained.layoutVariants.defaultLayout;
     const session = new DocxDocumentSessionImpl(
       acquired.closeArchive,
       acquired.archive,
@@ -120,6 +136,7 @@ export async function openDocxDocument(
       acquired.usage,
       acquired.metrics,
       options.signal,
+      showTrackedChanges,
     );
     acquired.metrics.observeUsage(session.resourceUsage);
     acquired.metrics.checkpoint('pagination ready');
@@ -144,9 +161,8 @@ export async function materializeDocxDocument(
 ): Promise<DocxDocumentModel> {
   return usingOwnedSession(
     async () => {
-      const acquired = await acquireDocxNodeDocument(
-        toUint8(buffer),
-        getDocxWasmModule(),
+      const { acquired } = await acquireDocxInput(
+        buffer,
         options,
         (transport, identity, pullOptions) =>
           materializeDocumentPullSession(transport, identity, pullOptions),
@@ -180,6 +196,46 @@ export async function materializeDocxDocument(
   );
 }
 
+/** Acquire the document from a claimed model source or the OOXML parser. */
+async function acquireDocxInput<TResult>(
+  buffer: ArrayBuffer | Uint8Array,
+  options: OoxmlNodeSessionOptions & DocxNodeAcquisitionOptions,
+  consume: (
+    transport: DocxNodePullTransport,
+    identity: DocxNodePullIdentity,
+    options: DocxNodePullOptions,
+  ) => Promise<TResult>,
+): Promise<Readonly<{
+  acquired: AcquiredDocxNodeDocument<TResult>;
+  viewDefaults: Readonly<{ showTrackedChanges?: boolean }>;
+}>> {
+  const input = await resolveNodeSessionInput(
+    buffer,
+    'docx',
+    options,
+    validateDocxModelSourceArchive,
+  );
+  if (input.kind === 'ooxml') {
+    return {
+      acquired: await acquireDocxNodeDocument(input.bytes, getDocxWasmModule(), options, consume),
+      viewDefaults: {},
+    };
+  }
+  let viewDefaults: Readonly<{ showTrackedChanges?: boolean }>;
+  try {
+    viewDefaults = validateDocxModelSourceViewDefaults(input.opened.viewDefaults);
+  } catch (error) {
+    try { input.opened.close(); } catch {}
+    throw error;
+  }
+  const acquired = await acquireDocxSessionFromArchive({
+    archive: input.opened.archive,
+    sourceByteLength: input.sourceByteLength,
+    closeArchive: input.opened.close,
+  }, options, consume);
+  return { acquired, viewDefaults };
+}
+
 type SessionState = Readonly<{
   source: Awaited<ReturnType<typeof materializeDocumentPullLayoutSession>>;
   services: ReturnType<typeof createLayoutServices>;
@@ -205,7 +261,7 @@ class DocxDocumentSessionImpl implements DocxDocumentSession {
 
   constructor(
     private readonly closeArchive: () => void,
-    private readonly archive: DocxNodeArchive,
+    private readonly archive: DocxNodeSessionArchive,
     source: SessionState['source'],
     services: SessionState['services'],
     layout: DefaultDocumentLayout,
@@ -214,6 +270,7 @@ class DocxDocumentSessionImpl implements DocxDocumentSession {
     usage: OoxmlResourceUsageSnapshot | undefined,
     private readonly metrics: OoxmlResourceMetricsSession,
     private readonly signal?: AbortSignal,
+    private readonly showTrackedChanges = false,
   ) {
     this.state = { source, services };
     this.pageCount = layout.pages.length;
@@ -230,7 +287,10 @@ class DocxDocumentSessionImpl implements DocxDocumentSession {
   }
 
   private refreshResourceUsage(): OoxmlResourceUsageSnapshot | undefined {
+    // A model-source archive may have no ZIP accounting.
     try {
+      // Inside the try: reading a trapped runtime's archive property throws.
+      if (!this.archive.resource_usage) return this.lastResourceUsage;
       this.lastResourceUsage = decodeOoxmlResourceUsage(this.archive.resource_usage());
       this.metrics.observeUsage(this.lastResourceUsage);
     } catch {
@@ -266,6 +326,7 @@ class DocxDocumentSessionImpl implements DocxDocumentSession {
           ...options,
           currentDate: this.defaultCurrentDateMs,
           defaultCurrentDateMs: this.defaultCurrentDateMs,
+          ...(this.showTrackedChanges ? { showTrackedChanges: true } : {}),
           layoutServices: state.services,
           fetchImage: this.fetchImage,
         },
@@ -347,10 +408,6 @@ function normalizeCurrentDate(value: Date | number | undefined): number {
     throw new RangeError('currentDate must resolve to finite epoch milliseconds');
   }
   return current;
-}
-
-function toUint8(buffer: ArrayBuffer | Uint8Array): Uint8Array {
-  return buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer as ArrayBuffer);
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
