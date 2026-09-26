@@ -2,6 +2,8 @@ import { readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { build } from 'vite';
+// Node strips the fixture module's type annotations; it has no imports.
+import { buildDocFixture } from '../packages/legacy-converter/src/test-fixtures.ts';
 
 const root = resolve(new URL('..', import.meta.url).pathname);
 const outDir = join(tmpdir(), 'ooxml-worker-consumer-dist');
@@ -76,6 +78,7 @@ await build({
       '@silurus/ooxml/three-d': entry('three-d'),
       '@silurus/ooxml/region-map': entry('region-map'),
       '@silurus/ooxml/chart-ex': entry('chart-ex'),
+      '@silurus/ooxml/legacy-doc': entry('legacy-doc'),
     },
   },
   build: {
@@ -114,6 +117,11 @@ writeFileSync(join(outDir, 'equation.docx'), storedZip([
       </w:body>
     </w:document>`],
 ]));
+
+// The legacy readers' own synthetic Word 97 fixture (canonical FIB, one
+// Unicode piece, root-linked CFB streams): it proves that a consumer bundle
+// keeps the legacy DOC source module and its WASM loadable by URL.
+writeFileSync(join(outDir, 'legacy.doc'), buildDocFixture({ text: 'Legacy worker source\rSecond paragraph\r' }));
 
 // A tracked insertion and deletion make the final and markup views differ, so a
 // model source's view default is observable in the rendered page.
@@ -406,4 +414,11 @@ const workers = readdirSync(join(outDir, 'assets'))
 if (workers.length !== 3) {
   throw new Error(`Vite consumer output must contain 3 render workers, found ${workers.length}`);
 }
-console.log(`Vite consumer bundle: ${workers.length} self-contained render workers`);
+// The legacy DOC model source is loaded by URL inside the parser worker; the
+// consumer bundler must copy both its self-contained module and its WASM.
+const legacyAssets = readdirSync(join(outDir, 'assets'))
+  .filter((name) => /^legacy-doc-source-module[\w-]*\.m?js$/.test(name) || /^legacy_doc_direct_bg[\w-]*\.wasm$/.test(name));
+if (legacyAssets.length !== 2) {
+  throw new Error(`Vite consumer output must copy the legacy DOC source module and WASM, found ${legacyAssets.join(', ') || 'none'}`);
+}
+console.log(`Vite consumer bundle: ${workers.length} self-contained render workers, legacy DOC source assets`);

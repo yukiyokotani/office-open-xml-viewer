@@ -20,6 +20,8 @@ async function expectWorkerBitmaps(page: import('@playwright/test').Page, url: s
     'xlsx-bordered',
     'xlsx-csv-main',
     'xlsx-csv-worker',
+    'legacy-doc-main',
+    'legacy-doc-worker',
   ]) {
     const ink = await page.locator(`#${id}`).evaluate((canvas: HTMLCanvasElement) => {
       // Worker-backed viewers own a `bitmaprenderer` context, so acquiring a

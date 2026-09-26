@@ -204,26 +204,27 @@ per-render argument. (Excel stores "Insert > Equation" as OMML inside the shared
 DrawingML `<xdr:txBody>` grammar, so `XlsxViewer` renders equations embedded in
 shapes / text boxes the same way.)
 
-### Experimental legacy XLS and PPT sources
+### Experimental legacy DOC, XLS, and PPT sources
 
-Legacy binary Office files can be read directly into the ordinary workbook
-and presentation models through **model sources**, a format-generic
-`modelSources` load option. The legacy readers are separate opt-in entries,
-one per format; each returns a model source for the matching loader or viewer:
+Legacy binary Office files can be read directly into the ordinary document,
+workbook and presentation models through **model sources**, a format-generic
+`modelSources` load option. The legacy readers are separate opt-in entries, one
+per format; each returns a model source for the matching loader or viewer:
 
 ```typescript
-import { PptxViewer } from '@silurus/ooxml/pptx';
-import { legacyPptSource } from '@silurus/ooxml/legacy-ppt';
+import { DocxViewer } from '@silurus/ooxml/docx';
+import { legacyDocSource } from '@silurus/ooxml/legacy-doc';
 
 const canvas = document.querySelector('canvas') as HTMLCanvasElement;
-const viewer = new PptxViewer(canvas, { modelSources: [legacyPptSource()] });
-await viewer.load(pptOrPptxBytes);
+const viewer = new DocxViewer(canvas, { modelSources: [legacyDocSource()] });
+await viewer.load(docOrDocxBytes);
 ```
 
-`legacyXlsSource()` (`@silurus/ooxml/legacy-xls`) works the same way for
-XLSX. A source claims only its own binary family; every other input takes the
-unchanged OOXML path, and without a source a legacy file still rejects with
-the typed `legacy-binary-format` error. Creating a source fetches nothing: its
+`legacyXlsSource()` (`@silurus/ooxml/legacy-xls`) and `legacyPptSource()`
+(`@silurus/ooxml/legacy-ppt`) work the same way for XLSX and PPTX. A source
+claims only its own binary family; every other input takes the unchanged OOXML
+path, and without a source a legacy file still rejects with the typed
+`legacy-binary-format` error. Creating a source fetches nothing: its
 self-contained source module and WASM load in the parser worker (or in Node)
 only when a claimed file is opened, and no OOXML package is generated. The
 readers are narrow and experimental and reject unsupported content rather than

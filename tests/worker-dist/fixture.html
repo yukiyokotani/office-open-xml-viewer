@@ -12,6 +12,8 @@
   <canvas id="docx-chart-ex"></canvas>
   <canvas id="xlsx-chart-ex"></canvas>
   <canvas id="pptx-chart-ex"></canvas>
+  <canvas id="legacy-doc-main"></canvas>
+  <canvas id="legacy-doc-worker"></canvas>
   <script type="module">
     import { DocxDocument } from '/dist/docx.mjs';
     import { XlsxSheetViewer, XlsxWorkbook } from '/dist/xlsx.mjs';
@@ -20,6 +22,7 @@
     import { threeD } from '/dist/three-d.mjs';
     import { regionMap } from '/dist/region-map.mjs';
     import { chartEx } from '/dist/chart-ex.mjs';
+    import { legacyDocSource } from '/dist/legacy-doc.mjs';
     import { runModelSourceStages } from '/tests/worker-dist/model-source-stages.mjs';
 
     const renderers = { math, threeD, regionMap, chartEx };
@@ -134,7 +137,9 @@
       await runModelSourceStages({
         DocxDocument,
         XlsxWorkbook,
+        legacyDocSource,
         bytes,
+        paintCanvas: (id) => document.getElementById(id),
       });
 
       document.body.dataset.status = 'ready';

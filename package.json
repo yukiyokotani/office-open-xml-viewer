@@ -83,6 +83,11 @@
       "import": "./dist/tiff.mjs",
       "default": "./dist/tiff.mjs"
     },
+    "./legacy-doc": {
+      "types": "./dist/types/legacy-doc.d.ts",
+      "import": "./dist/legacy-doc.mjs",
+      "default": "./dist/legacy-doc.mjs"
+    },
     "./legacy-ppt": {
       "types": "./dist/types/legacy-ppt.d.ts",
       "import": "./dist/legacy-ppt.mjs",
@@ -108,7 +113,8 @@
     "typecheck": "tsc --build && pnpm --filter @silurus/ooxml-markdown --filter @silurus/ooxml-node --filter @silurus/ooxml-legacy-converter --filter ./packages/vscode-extension typecheck",
     "storybook": "storybook dev -p 6006",
     "build-storybook": "storybook build",
-    "build:wasm": "pnpm --filter @silurus/ooxml-docx wasm && pnpm --filter @silurus/ooxml-xlsx wasm && pnpm --filter @silurus/ooxml-pptx wasm && pnpm build:wasm:legacy-ppt && pnpm build:wasm:legacy-xls",
+    "build:wasm": "pnpm --filter @silurus/ooxml-docx wasm && pnpm --filter @silurus/ooxml-xlsx wasm && pnpm --filter @silurus/ooxml-pptx wasm && pnpm build:wasm:legacy-doc && pnpm build:wasm:legacy-ppt && pnpm build:wasm:legacy-xls",
+    "build:wasm:legacy-doc": "pnpm --filter @silurus/ooxml-legacy-converter wasm:direct-doc",
     "build:wasm:legacy-ppt": "pnpm --filter @silurus/ooxml-legacy-converter wasm:direct-ppt",
     "build:wasm:legacy-xls": "pnpm --filter @silurus/ooxml-legacy-converter wasm:direct-xls",
     "vrt": "pnpm -r --workspace-concurrency=1 vrt",
@@ -129,6 +135,7 @@
     "check:optional-region-map": "node scripts/check-optional-region-map.mjs dist",
     "check:optional-chart-ex": "node scripts/check-optional-chart-ex.mjs dist",
     "check:optional-tiff": "node scripts/check-optional-tiff.mjs dist",
+    "check:optional-legacy-doc": "node scripts/check-optional-legacy-source.mjs doc dist",
     "check:optional-legacy-ppt": "node scripts/check-optional-legacy-source.mjs ppt dist",
     "check:optional-legacy-xls": "node scripts/check-optional-legacy-source.mjs xls dist",
     "lint": "ast-grep scan",

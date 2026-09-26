@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { OoxmlError } from '@silurus/ooxml-core';
 import { buildCfbFixture } from '@silurus/ooxml-core/testing';
-import { buildPptFixture, buildXlsFixture } from '../test-fixtures.js';
-import { testPptSource, testXlsSource } from '../test-sources.js';
+import { buildDocFixture, buildPptFixture, buildXlsFixture } from '../test-fixtures.js';
+import { testDocSource, testPptSource, testXlsSource } from '../test-sources.js';
 import {
   materializeDocxDocument,
   materializePptxPresentation,
@@ -27,19 +27,24 @@ describe('Node openers and legacy model sources', () => {
   });
 
   it('leave foreign-family and ambiguous containers to the OOXML rejection', async () => {
+    const doc = { modelSources: [testDocSource()] };
     const xls = { modelSources: [testXlsSource()] };
     const ppt = { modelSources: [testPptSource()] };
+    await expect(materializeDocxDocument(cfb('Workbook'), doc)).rejects.toMatchObject(legacyRejection);
+    await expect(materializeDocxDocument(cfb('WordDocument', 'Workbook'), doc)).rejects.toMatchObject(legacyRejection);
     await expect(openXlsxWorkbook(cfb('PowerPoint Document'), xls)).rejects.toMatchObject(legacyRejection);
-    await expect(openXlsxWorkbook(cfb('Workbook', 'WordDocument'), xls)).rejects.toMatchObject(legacyRejection);
     await expect(openPptxPresentation(cfb('WordDocument'), ppt)).rejects.toMatchObject(legacyRejection);
     // An encrypted package is never claimed; the OOXML path reports it.
-    await expect(openXlsxWorkbook(cfb('EncryptionInfo', 'EncryptedPackage', 'Workbook'), xls))
+    await expect(materializeDocxDocument(cfb('EncryptionInfo', 'EncryptedPackage', 'WordDocument'), doc))
       .rejects.toMatchObject({ code: 'encrypted' });
     // A source for another target is a configuration error, not a fallback.
     await expect(materializeDocxDocument(cfb('WordDocument'), xls as never)).rejects.toThrow(TypeError);
   });
 
   it('route each own family to its direct reader', async () => {
+    const document = await materializeDocxDocument(buildDocFixture(), { modelSources: [testDocSource()] });
+    expect(JSON.stringify(document.body)).toContain('Hello 日本語');
+
     const workbook = await materializeXlsxWorkbook(buildXlsFixture(), { modelSources: [testXlsSource()] });
     expect(JSON.stringify(workbook.workbookIndex.workbook)).toContain('表計算');
     expect(workbook.worksheets).toHaveLength(1);
@@ -54,8 +59,8 @@ describe('Node openers and legacy model sources', () => {
   });
 
   it('reject an oversize claimed input before opening it', async () => {
-    const bytes = buildXlsFixture();
-    await expect(materializeXlsxWorkbook(bytes, { modelSources: [testXlsSource({ maxInputBytes: bytes.byteLength - 1 })] }))
+    const bytes = buildDocFixture();
+    await expect(materializeDocxDocument(bytes, { modelSources: [testDocSource({ maxInputBytes: bytes.byteLength - 1 })] }))
       .rejects.toThrow(RangeError);
   });
 });

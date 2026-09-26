@@ -118,6 +118,7 @@ jobs:
       - name: Verify per-format legacy Office model source boundaries
         run: |
           pnpm check:core-legacy-boundary
+          pnpm check:optional-legacy-doc
           pnpm check:optional-legacy-ppt
           pnpm check:optional-legacy-xls
           pnpm check:legacy-wasm-exports

@@ -171,6 +171,7 @@ export default defineConfig(({ command, mode }) => ({
         // Opt-in legacy Office model sources (ModelSource factories). Each
         // entry emits its reader's WASM and self-contained source module as
         // assets; nothing is fetched until a claimed input is loaded.
+        'legacy-doc': resolve(__dirname, 'src/legacy-doc.ts'),
         'legacy-ppt': resolve(__dirname, 'src/legacy-ppt.ts'),
         'legacy-xls': resolve(__dirname, 'src/legacy-xls.ts'),
         // Node-only bounded sessions and server render helpers. Kept as a

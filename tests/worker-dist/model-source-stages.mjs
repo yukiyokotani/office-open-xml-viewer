@@ -1,6 +1,7 @@
 // Model-source stages shared by the published-dist fixture and the Vite
 // consumer bundle. They load real OOXML archives through a test-only source
-// module by URL (fake-model-source.mjs), in main and worker modes.
+// module by URL (fake-model-source.mjs) and a legacy DOC through the published
+// legacy-doc source, in main and worker modes.
 
 const FAKE_MODULE = new URL('/tests/worker-dist/fake-model-source.mjs', location.href).href;
 
@@ -66,7 +67,7 @@ function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 
-export async function runModelSourceStages({ DocxDocument, XlsxWorkbook, bytes }) {
+export async function runModelSourceStages({ DocxDocument, XlsxWorkbook, legacyDocSource, bytes, paintCanvas }) {
   const tracked = await bytes('/consumer/tracked.docx');
   const bordered = await bytes('/consumer/bordered.xlsx');
   for (const mode of ['main', 'worker']) {
@@ -118,5 +119,26 @@ export async function runModelSourceStages({ DocxDocument, XlsxWorkbook, bytes }
   delete document.body.dataset.xlsxHostLayoutMain;
   delete document.body.dataset.xlsxHostLayoutWorker;
 
+  for (const mode of ['main', 'worker']) {
+    document.body.dataset.stage = `legacy-doc-${mode}`;
+    const legacy = await DocxDocument.load(await bytes('/consumer/legacy.doc'), {
+      mode,
+      modelSources: [legacyDocSource()],
+    });
+    try {
+      const target = paintCanvas(`legacy-doc-${mode}`);
+      if (legacy.mode === 'worker') {
+        const bitmap = await legacy.renderPageToBitmap(0, { width: 360, dpr: 1 });
+        target.width = bitmap.width;
+        target.height = bitmap.height;
+        target.getContext('2d').drawImage(bitmap, 0, 0);
+        bitmap.close();
+      } else {
+        await legacy.renderPage(target, 0, { width: 360, dpr: 1 });
+      }
+    } finally {
+      legacy.destroy();
+    }
+  }
   document.body.dataset.modelSources = 'ready';
 }

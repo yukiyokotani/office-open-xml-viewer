@@ -1,16 +1,17 @@
 // Passive EMF/WMF pictures (MS-ODRAW OfficeArtBlipEMF/WMF, MS-EMF, MS-WMF)
-// through the direct PPT reader. The blip decoding matrix (raw and
+// through the direct DOC and PPT readers. The blip decoding matrix (raw and
 // zlib, one or two UIDs, declared sizes, post-EOF payloads, malformed
-// framing) is Rust-covered in officeart/metafile.rs; these cases check the
-// wiring from the binary file to the model, the retained bytes and the core
-// metafile players.
+// framing) is Rust-covered in officeart/metafile.rs; these cases check each
+// family's wiring from the binary file to the model, the retained bytes and
+// the core metafile players.
 import { deflateSync } from 'node:zlib';
 import { expect, it, vi } from 'vitest';
 import { playEmf } from '../../../core/src/image/emf.js';
 import { playWmf } from '../../../core/src/image/wmf.js';
-import { buildPptFixture, concat, little16, little32 } from '../test-fixtures.js';
-import { testPptSource } from '../test-sources.js';
-import { openPptxPresentation } from './node-facade.js';
+import { openModelSource as openDocSource } from '../legacy-doc-source-module.js';
+import { buildDocFixture, buildPptFixture, concat, little16, little32 } from '../test-fixtures.js';
+import { TEST_SOURCE_URLS, testDocSource, testPptSource } from '../test-sources.js';
+import { materializeDocxDocument, openPptxPresentation } from './node-facade.js';
 
 const record = (kind: number, options: number, bytes: Uint8Array) => concat(little16(options), little16(kind), little32(bytes.length), bytes);
 
@@ -45,6 +46,19 @@ function blip(kind: Kind, source: Uint8Array, compressed: boolean, two: boolean,
   const [type, instance] = kind === 'emf' ? [0xf01a, 0x3d4] : [0xf01b, 0x216];
   return record(type, (instance + (two ? 1 : 0)) << 4, concat(new Uint8Array(two ? 32 : 16), header, image));
 }
+function doc(bytes: Uint8Array): Uint8Array {
+  const picf = new Uint8Array(68);
+  const view = new DataView(picf.buffer);
+  for (const [offset, value] of [[4, 68], [6, 100], [28, 1440], [30, 1440], [32, 1000], [34, 1000]]) view.setUint16(offset, value, true);
+  const shape = record(0xf004, 15, concat(
+    record(0xf00a, (75 << 4) | 2, concat(little32(1), little32(0x800))),
+    record(0xf00b, 0x13, concat(little16(0x0104), little32(1))),
+  ));
+  const data = concat(picf, shape, bytes);
+  new DataView(data.buffer).setUint32(0, data.length, true);
+  return buildDocFixture({ text: '\u0001\u0001\r', data,
+    characterProperties: concat(little16(0x0855), new Uint8Array([1]), little16(0x6a03), little32(0)) });
+}
 function ppt(bytes: Uint8Array, delayed: boolean, kind: Kind): Uint8Array {
   const shape = record(0xf004, 15, concat(
     record(0xf00a, (75 << 4) | 2, concat(little32(42), little32(0xa00))),
@@ -62,6 +76,15 @@ function ppt(bytes: Uint8Array, delayed: boolean, kind: Kind): Uint8Array {
 }
 
 interface Picture { imagePath: string; mimeType: string }
+async function docPictures(bytes: Uint8Array): Promise<{ pictures: Picture[]; extract(path: string): Uint8Array }> {
+  const model = await materializeDocxDocument(bytes, { modelSources: [testDocSource()] }) as unknown as { body: { runs?: ({ type: string } & Picture)[] }[] };
+  const source = await openDocSource(bytes, { wasmUrl: TEST_SOURCE_URLS.doc.wasmUrl, maxInputBytes: bytes.length });
+  try {
+    const pictures = model.body.flatMap(block => block.runs ?? []).filter(run => run.type === 'image');
+    const images = new Map(pictures.map(p => [p.imagePath, source.archive.extract_image(p.imagePath)]));
+    return { pictures, extract: path => images.get(path) as Uint8Array };
+  } finally { source.close(); }
+}
 async function pptPictures(bytes: Uint8Array): Promise<{ pictures: Picture[]; extract(path: string): Uint8Array }> {
   // Slide images are admitted as their slide is pulled; read them meanwhile.
   const session = await openPptxPresentation(bytes, { modelSources: [testPptSource()] });
@@ -80,13 +103,17 @@ async function pptPictures(bytes: Uint8Array): Promise<{ pictures: Picture[]; ex
 }
 
 it.each([
-  { kind: 'emf', compressed: false, two: false, delayed: false },
-  { kind: 'wmf', compressed: true, two: true, delayed: true },
-] as const)('retains a passive $kind through ppt (compressed=$compressed twoUIDs=$two delayed=$delayed)', async ({ kind, compressed, two, delayed }) => {
+  { family: 'doc', kind: 'emf', compressed: true, two: true, delayed: false },
+  { family: 'doc', kind: 'wmf', compressed: false, two: false, delayed: false },
+  { family: 'ppt', kind: 'emf', compressed: false, two: false, delayed: false },
+  { family: 'ppt', kind: 'wmf', compressed: true, two: true, delayed: true },
+] as const)('retains a passive $kind through $family (compressed=$compressed twoUIDs=$two delayed=$delayed)', async ({ family, kind, compressed, two, delayed }) => {
   const source = kind === 'emf' ? emf : wmf;
   const bytes = blip(kind, source, compressed, two);
-  const { pictures, extract } = await pptPictures(ppt(bytes, delayed, kind));
-  expect(pictures).toHaveLength(1);
+  const { pictures, extract } = family === 'doc' ? await docPictures(doc(bytes)) : await pptPictures(ppt(bytes, delayed, kind));
+  // The DOC fixture places the same picture twice; both share one resource.
+  expect(pictures).toHaveLength(family === 'doc' ? 2 : 1);
+  expect(new Set(pictures.map(p => p.imagePath)).size).toBe(1);
   expect(pictures[0].mimeType).toBe(kind === 'emf' ? 'image/emf' : 'image/wmf');
   const extracted = extract(pictures[0].imagePath);
   expect(extracted).toEqual(source);
@@ -96,23 +123,26 @@ it.each([
   expect(stroke).toHaveBeenCalled(); // The core metafile player receives visible geometry.
 });
 
-it('direct rejects a ppt picture whose WMF declares a payload after its EOF record', async () => {
-  // The converter omitted the picture with a warning; the direct reader does
+it.each([
+  ['doc', 'UNSUPPORTED:direct DOC model encountered omitted drawing content'],
+  ['ppt', 'UNSUPPORTED:PowerPoint picture BLIP is not a supported image'],
+] as const)('direct rejects a %s picture whose WMF declares a payload after its EOF record', async (family, reason) => {
+  // The converter omitted the picture with a warning; the direct readers do
   // not drop authored drawing content (the Rust metafile validator returns
   // no image for any post-EOF payload).
   const tailed = concat(wmf, new Uint8Array(8).fill(0xa5));
   new DataView(tailed.buffer).setUint32(6, tailed.length / 2, true);
   const bytes = blip('wmf', tailed, true, false);
-  await expect(pptPictures(ppt(bytes, false, 'wmf'))).rejects.toMatchObject({ message: 'UNSUPPORTED:PowerPoint picture BLIP is not a supported image' });
+  await expect(family === 'doc' ? docPictures(doc(bytes)) : pptPictures(ppt(bytes, false, 'wmf'))).rejects.toMatchObject({ message: reason });
 });
 
-it('rejects malformed WMF data before EOF through ppt', async () => {
+it.each(['doc', 'ppt'] as const)('rejects malformed WMF data before EOF through %s', async family => {
   const malformed = new Uint8Array(wmf); malformed[malformed.length - 2] = 1;
   const bytes = blip('wmf', malformed, false, false);
-  await expect(pptPictures(ppt(bytes, false, 'wmf'))).rejects.toMatchObject({ message: 'UNSUPPORTED:missing WMF end record' });
+  await expect(family === 'doc' ? docPictures(doc(bytes)) : pptPictures(ppt(bytes, false, 'wmf'))).rejects.toMatchObject({ message: 'UNSUPPORTED:missing WMF end record' });
 });
 
-it('rejects an EMF expansion-size bomb through ppt', async () => {
+it.each(['doc', 'ppt'] as const)('rejects an EMF expansion-size bomb through %s', async family => {
   const bytes = blip('emf', emf, true, false, 0xffffffff);
-  await expect(pptPictures(ppt(bytes, true, 'emf'))).rejects.toMatchObject({ message: 'UNSUPPORTED:OfficeArt metafile byte budget exceeded' });
+  await expect(family === 'doc' ? docPictures(doc(bytes)) : pptPictures(ppt(bytes, true, 'emf'))).rejects.toMatchObject({ message: 'UNSUPPORTED:OfficeArt metafile byte budget exceeded' });
 });

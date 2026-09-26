@@ -4,13 +4,14 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
+  materializeDocxDocument,
   materializePptxPresentation,
   materializeXlsxWorkbook,
   skia,
   skiaFactory,
 } from './node/node-facade.js';
 import type { ModelSource, ModelSourceTarget } from '@silurus/ooxml-core';
-import { testPptSource, testXlsSource } from './test-sources.js';
+import { testDocSource, testPptSource, testXlsSource } from './test-sources.js';
 
 // Opt-in walk of the local, uncommitted Office-produced corpus through the Node
 // facade with the direct legacy readers. A sample passes when it either
@@ -37,6 +38,15 @@ function observed<T extends ModelSourceTarget>(source: ModelSource<T>): { source
 }
 
 const formats = [
+  {
+    from: 'doc',
+    to: 'docx',
+    directory: new URL('../../docx/public/private/', import.meta.url),
+    open: (bytes: Uint8Array, source = observed(testDocSource())) => ({
+      claimed: source.claimed,
+      done: materializeDocxDocument(bytes, { modelSources: [source.source] }),
+    }),
+  },
   {
     from: 'xls',
     to: 'xlsx',

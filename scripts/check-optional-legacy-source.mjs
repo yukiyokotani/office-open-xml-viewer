@@ -8,19 +8,20 @@
 //    sibling chunk or package) that exports `openModelSource`;
 //  - no OOXML entry, other legacy entry or render worker reaches this reader.
 //
-// Usage: node scripts/check-optional-legacy-source.mjs <xls|ppt> [dist]
+// Usage: node scripts/check-optional-legacy-source.mjs <doc|xls|ppt> [dist]
 import { readFile, readdir, stat } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const FORMATS = {
+  doc: { target: 'docx', factory: 'legacyDocSource', nativeClass: 'LegacyDocDocument' },
   xls: { target: 'xlsx', factory: 'legacyXlsSource', nativeClass: 'LegacyXlsWorkbook' },
   ppt: { target: 'pptx', factory: 'legacyPptSource', nativeClass: 'LegacyPptPresentation' },
 };
 
 const family = process.argv[2];
 const format = FORMATS[family];
-if (!format) throw new Error('usage: check-optional-legacy-source.mjs <xls|ppt> [dist]');
+if (!format) throw new Error('usage: check-optional-legacy-source.mjs <doc|xls|ppt> [dist]');
 const distDir = resolve(process.argv[3] ?? 'dist');
 const entry = `legacy-${family}.mjs`;
 const wasmAsset = `legacy_${family}_direct_bg.wasm`;

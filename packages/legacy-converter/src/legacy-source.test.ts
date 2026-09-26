@@ -10,11 +10,14 @@ import { buildCfbFixture } from '@silurus/ooxml-core/testing';
 // Creating, claiming and describing a source must never load native code:
 // the glue and source modules may be imported only by the archive realm.
 const loaded = vi.hoisted(() => [] as string[]);
+vi.mock('./wasm-direct-doc/legacy_doc_direct.js', () => { loaded.push('doc glue'); return {}; });
 vi.mock('./wasm-direct-xls/legacy_xls_direct.js', () => { loaded.push('xls glue'); return {}; });
 vi.mock('./wasm-direct-ppt/legacy_ppt_direct.js', () => { loaded.push('ppt glue'); return {}; });
+vi.mock('./legacy-doc-source-module.ts', () => { loaded.push('doc module'); return {}; });
 vi.mock('./legacy-xls-source-module.ts', () => { loaded.push('xls module'); return {}; });
 vi.mock('./legacy-ppt-source-module.ts', () => { loaded.push('ppt module'); return {}; });
 
+import { legacyDocSource } from './legacy-doc.js';
 import { legacyPptSource } from './legacy-ppt.js';
 import { MAX_LEGACY_SOURCE_BYTES, createLegacySource, type LegacyFamily } from './legacy-source.js';
 import { legacyXlsSource } from './legacy-xls.js';
@@ -25,6 +28,7 @@ const WASM = 'https://cdn.example.test/legacy.wasm';
 const MODULE = 'https://cdn.example.test/legacy-source-module.js';
 
 const factories = [
+  { family: 'doc', target: 'docx', create: legacyDocSource, streams: [['WordDocument']] },
   { family: 'xls', target: 'xlsx', create: legacyXlsSource, streams: [['Workbook'], ['Book']] },
   { family: 'ppt', target: 'pptx', create: legacyPptSource, streams: [['PowerPoint Document']] },
 ] as const satisfies ReadonlyArray<{
@@ -33,11 +37,6 @@ const factories = [
   create: (options?: { wasmUrl?: string; moduleUrl?: string; maxInputBytes?: number }) => ModelSource;
   streams: ReadonlyArray<readonly string[]>;
 }>;
-// Binary families whose readers are not in this package yet; a source must
-// still recognise their containers as foreign.
-const readerlessFamilies = [
-  { family: 'doc', streams: [['WordDocument']] },
-] as const satisfies ReadonlyArray<{ family: LegacyFamily; streams: ReadonlyArray<readonly string[]> }>;
 
 describe.each(factories)('legacy $family source factory', ({ family, target, create, streams }) => {
   it('describes its own target with frozen, admissible default asset URLs', () => {
@@ -75,7 +74,7 @@ describe.each(factories)('legacy $family source factory', ({ family, target, cre
   it('claims only an unencrypted CFB whose single binary family is its own', () => {
     const source = create();
     for (const own of streams) expect(source.claim(cfb(...own))).toBe(true);
-    const others = [...factories.filter((other) => other.family !== family), ...readerlessFamilies];
+    const others = factories.filter((other) => other.family !== family);
     for (const other of others) {
       for (const foreign of other.streams) expect(source.claim(cfb(...foreign))).toBe(false);
       // Embedded objects can make the family ambiguous; do not guess.
@@ -93,7 +92,7 @@ describe.each(factories)('legacy $family source factory', ({ family, target, cre
     const source = create({ maxInputBytes: own.byteLength - 1 });
     expect(() => source.claim(own)).toThrow(RangeError);
     expect(create({ maxInputBytes: own.byteLength }).claim(own)).toBe(true);
-    const foreign = [...factories, ...readerlessFamilies].find((other) => other.family !== family)!.streams[0];
+    const foreign = factories.find((other) => other.family !== family)!.streams[0];
     expect(source.claim(cfb(...foreign))).toBe(false);
     expect(source.claim(buildStoredZip({ big: new Uint8Array(own.byteLength) }))).toBe(false);
   });

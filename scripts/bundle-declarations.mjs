@@ -20,6 +20,7 @@ const entries = [
   'region-map',
   'chart-ex',
   'tiff',
+  'legacy-doc',
   'legacy-ppt',
   'legacy-xls',
   'node',

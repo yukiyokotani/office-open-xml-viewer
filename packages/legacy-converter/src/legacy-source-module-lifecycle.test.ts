@@ -9,11 +9,15 @@ const fake = vi.hoisted(() => {
     frees = 0;
     constructor(readonly bytes: Uint8Array) { fake.opened.push(this); }
     free() { this.frees += 1; }
+    close_document_session() { this.closes += 1; }
     close_workbook_session() { this.closes += 1; }
     close_presentation_session() { this.closes += 1; }
+    revision_markup_in_print(): boolean { return fake.revision.inPrint(); }
+    has_revision_marks(): boolean { return fake.revision.hasMarks; }
   }
   const glue = {
     default: async () => undefined,
+    LegacyDocDocument: Native,
     LegacyXlsWorkbook: Native,
     LegacyPptPresentation: Native,
   };
@@ -23,6 +27,7 @@ const fake = vi.hoisted(() => {
     loads: [] as string[],
     resolved: [] as string[],
     opened: [] as InstanceType<typeof Native>[],
+    revision: { inPrint: (): boolean => false, hasMarks: false },
   };
 });
 
@@ -39,15 +44,18 @@ function engineMock(create: string) {
     };
   };
 }
+vi.mock('./direct-doc-engine.js', engineMock('createLegacyDocSourceEngine'));
 vi.mock('./direct-xls-engine.js', engineMock('createLegacyXlsSourceEngine'));
 vi.mock('./direct-ppt-engine.js', engineMock('createLegacyPptSourceEngine'));
 
+import { openModelSource as openDoc } from './legacy-doc-source-module.js';
 import { openModelSource as openPpt } from './legacy-ppt-source-module.js';
 import { MAX_LEGACY_SOURCE_BYTES } from './legacy-source.js';
 import { openModelSource as openXls } from './legacy-xls-source-module.js';
 
 const WASM = 'https://cdn.example.test/legacy.wasm';
 const modules = [
+  { family: 'DOC', open: openDoc },
   { family: 'XLS', open: openXls },
   { family: 'PPT', open: openPpt },
 ] as const;
@@ -80,5 +88,32 @@ describe.each(modules)('legacy $family source module lifecycle', ({ open }) => {
     opened.close();
     expect([native.closes, native.frees]).toEqual([1, 1]);
     expect(() => (opened.archive as unknown as { free(): void }).free()).toThrow(/closed/);
+  });
+});
+
+describe('legacy DOC source module view defaults', () => {
+  const open = (bytes = new Uint8Array(1)) => openDoc(bytes, { wasmUrl: WASM });
+
+  it('asks for the markup view only when the DOC prints revision markup and has marks', async () => {
+    const cases = [
+      { inPrint: true, hasMarks: true, expected: { showTrackedChanges: true } },
+      { inPrint: true, hasMarks: false, expected: {} },
+      { inPrint: false, hasMarks: true, expected: {} },
+    ];
+    for (const { inPrint, hasMarks, expected } of cases) {
+      fake.revision = { inPrint: () => inPrint, hasMarks };
+      const opened = await open();
+      expect(opened.viewDefaults).toEqual(expected);
+      opened.close();
+    }
+  });
+
+  it('closes the archive and rethrows when view defaults cannot be read', async () => {
+    const failure = new Error('settings unavailable');
+    fake.revision = { inPrint: () => { throw failure; }, hasMarks: true };
+    await expect(open()).rejects.toBe(failure);
+    const native = fake.opened.at(-1)!;
+    expect([native.closes, native.frees]).toEqual([1, 1]);
+    fake.revision = { inPrint: () => false, hasMarks: false };
   });
 });
