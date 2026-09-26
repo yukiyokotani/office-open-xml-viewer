@@ -2,12 +2,10 @@ use ooxml_common::content_types::PackageContentTypes;
 use ooxml_common::depth::{
     parse_guarded_with_node_limit, xml_dom_complexity_exceeds, GuardedParseError,
 };
-use ooxml_common::json_measurement::measure_json;
+use ooxml_common::json_measurement::{measure_json, serialize_json_with_limit};
 use ooxml_common::ns::{is_p_ns, is_r_ns};
-#[cfg(test)]
-use ooxml_common::package_session::PackageLimitReporter;
 use ooxml_common::package_session::{
-    PackageOperation, PackageSessionHandle, RetainedPackageOperation,
+    PackageLimitReporter, PackageOperation, PackageSessionHandle, RetainedPackageOperation,
 };
 use ooxml_common::pull::insufficient_credit_error;
 use ooxml_common::rels::{parse_rels as parse_opc_rels, relationship_part_path, TargetMode};
@@ -576,15 +574,16 @@ fn serialize_presentation_bootstrap(
         embedded_fonts: shared.embedded_fonts.clone(),
         slides,
     };
-    let final_json_bytes = measure_json(&bootstrap)?.json_bytes;
-    debug_assert_eq!(final_json_bytes, projected_json_bytes);
-    reporter.observe_hard_limit(
+    let bytes = serialize_json_with_limit(
+        &bootstrap,
+        Some(reporter),
         HardResourceLimitKind::PptxBootstrapJsonBytes,
         Some("ppt/presentation.xml"),
         limits.bootstrap_json_bytes,
-        final_json_bytes,
+        "presentation bootstrap JSON exceeds its hard ceiling",
     )?;
-    serde_json::to_vec(&bootstrap).map_err(|error| format!("serialize error: {error}"))
+    debug_assert_eq!(bytes.len() as u64, projected_json_bytes);
+    Ok(bytes)
 }
 
 #[wasm_bindgen]
@@ -756,10 +755,11 @@ impl PptxArchive {
                 shared,
                 zip,
                 Some(&mut journal),
+                serialize_slide_json,
             )
             .map_err(|error| error.to_string())?;
             zip.assert_healthy()?;
-            serde_json::to_vec(&produced.slide).map_err(|error| format!("serialize error: {error}"))
+            Ok(produced.output)
         })();
         let bytes = match result {
             Ok(bytes) => bytes,
@@ -2406,8 +2406,9 @@ fn render_markdown_from_shared(
                 output.observed(),
             )?;
         }
-        let produced = produce_slide_unit_with_journal(index, shared, zip, None)
-            .map_err(|error| error.to_string())?;
+        let produced =
+            produce_slide_unit_with_journal(index, shared, zip, None, measure_slide_json)
+                .map_err(|error| error.to_string())?;
         render_slide_md(&produced.slide, &mut output);
         render_review_comments_md(
             produced.slide.slide_number,
@@ -2458,14 +2459,14 @@ fn serialize_slide_unit_with_limit(
     reporter: &PackageLimitReporter,
     limit: u64,
 ) -> Result<Vec<u8>, String> {
-    let json_bytes = measure_json(slide)?.json_bytes;
-    reporter.observe_hard_limit(
+    serialize_json_with_limit(
+        slide,
+        Some(reporter),
         HardResourceLimitKind::PptxSlideJsonBytes,
         slide.part_name.as_deref(),
         limit,
-        json_bytes,
-    )?;
-    serde_json::to_vec(slide).map_err(|error| format!("serialize error: {error}"))
+        "slide JSON exceeds its hard ceiling",
+    )
 }
 
 #[cfg(test)]
@@ -2697,10 +2698,10 @@ fn produce_slide_unit(
     shared: &mut PresentationShared,
     zip: &mut PptxZip,
 ) -> Result<Slide, Box<dyn std::error::Error>> {
-    let produced = produce_slide_unit_with_journal(index, shared, zip, None)?;
+    let produced = produce_slide_unit_with_journal(index, shared, zip, None, measure_slide_json)?;
     let projected = shared
         .materialized_slide_json_bytes
-        .saturating_add(produced.json_bytes);
+        .saturating_add(produced.output);
     let reporter = zip.operation()?.limit_reporter()?;
     reporter.observe_hard_limit(
         HardResourceLimitKind::PptxMaterializedSlideJsonBytes,
@@ -2712,20 +2713,43 @@ fn produce_slide_unit(
     Ok(produced.slide)
 }
 
-struct ProducedSlide {
+struct ProducedSlide<T> {
     slide: Slide,
-    json_bytes: u64,
+    output: T,
+}
+
+fn measure_slide_json(slide: &Slide, reporter: &PackageLimitReporter) -> Result<u64, String> {
+    let json_bytes = measure_json(slide)?.json_bytes;
+    reporter.observe_hard_limit(
+        HardResourceLimitKind::PptxSlideJsonBytes,
+        slide.part_name.as_deref(),
+        pptx_slide_json_limit(),
+        json_bytes,
+    )?;
+    Ok(json_bytes)
+}
+
+fn serialize_slide_json(slide: &Slide, reporter: &PackageLimitReporter) -> Result<Vec<u8>, String> {
+    serialize_json_with_limit(
+        slide,
+        Some(reporter),
+        HardResourceLimitKind::PptxSlideJsonBytes,
+        slide.part_name.as_deref(),
+        pptx_slide_json_limit(),
+        "slide JSON exceeds its hard ceiling",
+    )
 }
 
 /// The one canonical slide producer. Cursor callers provide a mutation journal
 /// so only cache entries inserted by the unacknowledged slide can be rolled
 /// back; legacy drains pass `None` and pay no journaling overhead.
-fn produce_slide_unit_with_journal(
+fn produce_slide_unit_with_journal<T>(
     index: usize,
     shared: &mut PresentationShared,
     zip: &mut PptxZip,
     mut journal: Option<&mut SlideCacheJournal>,
-) -> Result<ProducedSlide, Box<dyn std::error::Error>> {
+    finish_output: impl FnOnce(&Slide, &PackageLimitReporter) -> Result<T, String>,
+) -> Result<ProducedSlide<T>, Box<dyn std::error::Error>> {
     let descriptor = shared
         .slide_descriptors
         .get(index)
@@ -3165,14 +3189,8 @@ fn produce_slide_unit_with_journal(
     // failed `.ok()` / `unwrap_or_default()` read can never become a Slide.
     zip.assert_healthy()?;
     let reporter = zip.operation()?.limit_reporter()?;
-    let json_bytes = measure_json(&slide)?.json_bytes;
-    reporter.observe_hard_limit(
-        HardResourceLimitKind::PptxSlideJsonBytes,
-        slide.part_name.as_deref(),
-        pptx_slide_json_limit(),
-        json_bytes,
-    )?;
-    Ok(ProducedSlide { slide, json_bytes })
+    let output = finish_output(&slide, &reporter)?;
+    Ok(ProducedSlide { slide, output })
 }
 
 #[cfg(test)]

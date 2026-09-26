@@ -5,7 +5,7 @@ use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 
 use ooxml_common::depth::parse_guarded;
-use ooxml_common::json_measurement::measure_json;
+use ooxml_common::json_measurement::{measure_json, serialize_json_with_limit};
 use ooxml_common::ns::{attr_ns, is_r_ns, is_x_ns, relationships};
 use ooxml_common::package_session::{
     PackageLimitReporter, PackageOperation, PackageSessionHandle, RetainedPackageOperation,
@@ -160,33 +160,20 @@ struct WorksheetModelUsage {
     owned_utf8_bytes: u64,
 }
 
-fn report_materialization_limit(
-    archive: &mut XlsxZip,
-    kind: HardResourceLimitKind,
-    part: &str,
-    limit: u64,
-    observed: u64,
-) -> Result<(), String> {
-    archive
-        .operation()?
-        .limit_reporter()?
-        .observe_hard_limit(kind, Some(part), limit, observed)
-}
-
 fn serialize_worksheet_bounded(
     archive: &mut XlsxZip,
     part: &str,
     worksheet: &Worksheet,
 ) -> Result<Vec<u8>, String> {
-    let json_bytes = measure_json(worksheet)?.json_bytes;
-    report_materialization_limit(
-        archive,
+    let reporter = archive.operation()?.limit_reporter()?;
+    serialize_json_with_limit(
+        worksheet,
+        Some(&reporter),
         HardResourceLimitKind::WorksheetJsonBytes,
-        part,
+        Some(part),
         HARD_MAX_XLSX_WORKSHEET_JSON_BYTES,
-        json_bytes,
-    )?;
-    serde_json::to_vec(worksheet).map_err(|error| format!("serialize error: {error}"))
+        "worksheet JSON exceeds its hard ceiling",
+    )
 }
 
 fn row_cell_content_utf8_bytes(
@@ -3696,16 +3683,14 @@ fn serialize_cursor_finished(
         kind: "finished",
         worksheet,
     };
-    let json_bytes = measure_json(&finished)?.json_bytes;
-    if let Some(reporter) = limit_reporter {
-        reporter.observe_hard_limit(
-            HardResourceLimitKind::WorksheetJsonBytes,
-            part,
-            HARD_MAX_XLSX_WORKSHEET_JSON_BYTES,
-            json_bytes,
-        )?;
-    }
-    serde_json::to_vec(&finished).map_err(|error| format!("serialize error: {error}"))
+    serialize_json_with_limit(
+        &finished,
+        limit_reporter,
+        HardResourceLimitKind::WorksheetJsonBytes,
+        part,
+        HARD_MAX_XLSX_WORKSHEET_JSON_BYTES,
+        "worksheet JSON exceeds its hard ceiling",
+    )
 }
 
 #[wasm_bindgen]
