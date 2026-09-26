@@ -339,6 +339,8 @@ pub(in crate::ppt) fn adopt(
     // edit, so keeping the binary here would silently discard visible
     // information. A theme blip is likewise unverifiable without its owning
     // package relationships, even when the shape XML has no r: attribute.
+    // The same flag includes a selected theme fragment that could not be
+    // inspected; it also needs this typed unverifiable result.
     if parsed.relationship_references {
         return Err(unverifiable("relationship"));
     }
@@ -1782,14 +1784,21 @@ mod tests {
                     "</p:sp>",
                     "<p:style><a:fillRef idx=\"1\"/></p:style></p:sp>",
                 );
-            let theme = Theme::Readable {
-                theme_xml: r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><a:themeElements><a:fmtScheme name="x"><a:fillStyleLst><a:blipFill><a:blip r:embed="rIdImage"/></a:blipFill></a:fillStyleLst></a:fmtScheme></a:themeElements></a:theme>"#.into(),
-                clr_map: None,
-            };
-            let error = run_adopt(&element, &blob(&xml), &theme, AMPLE)
-                .0
-                .expect_err("theme image relationship cannot be verified");
-            assert!(error.contains("relationship"), "{error}");
+            for prefix in ["r", "関係"] {
+                let theme = Theme::Readable {
+                    theme_xml: format!(
+                        r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:{prefix}="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><a:themeElements><a:fmtScheme name="x"><a:fillStyleLst><a:blipFill><a:blip {prefix}:embed="rIdImage"/></a:blipFill></a:fillStyleLst></a:fmtScheme></a:themeElements></a:theme>"#
+                    ),
+                    clr_map: None,
+                };
+                let error = run_adopt(&element, &blob(&xml), &theme, AMPLE)
+                    .0
+                    .expect_err("theme image relationship cannot be verified");
+                assert!(
+                    error.starts_with("UNSUPPORTED:") && error.contains("relationship"),
+                    "{error}"
+                );
+            }
         }
     }
 
