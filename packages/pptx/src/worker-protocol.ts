@@ -50,6 +50,9 @@ export type PptxWorkerRequest =
       kind: 'parse';
       id: number;
       buffer: ArrayBuffer;
+      /** Application-selected model source (LoadOptions.modelSources). */
+      source?: import('@silurus/ooxml-core').ModelSourceModuleDescriptor;
+      sourceTransfer?: readonly Transferable[];
       resourcePolicy: NormalizedOoxmlResourcePolicy;
       /** Resolved regional Han fallback. PPTX derives its font-preload set from
        *  the preflight built inside this worker, so the region Window resolved
@@ -80,7 +83,8 @@ export type PptxWorkerResponse =
   | { kind: 'mediaExtracted'; id: number; bytes: ArrayBuffer }
   | { kind: 'imageExtracted'; id: number; bytes: ArrayBuffer }
   | { kind: 'fontExtracted'; id: number; bytes: ArrayBuffer }
-  | { kind: 'resourceUsage'; id: number; usage: OoxmlResourceUsageSnapshot }
+  // `usage` is absent when the loaded model source has no ZIP accounting.
+  | { kind: 'resourceUsage'; id: number; usage?: OoxmlResourceUsageSnapshot }
   | { kind: 'markdownRendered'; id: number; markdown: string }
   | ({ kind: 'error'; id: number } & WorkerErrorPayload);
 
@@ -94,6 +98,9 @@ export type RenderWorkerRequest =
       kind: 'parse';
       id: number;
       buffer: ArrayBuffer;
+      /** Application-selected model source (LoadOptions.modelSources). */
+      source?: import('@silurus/ooxml-core').ModelSourceModuleDescriptor;
+      sourceTransfer?: readonly Transferable[];
       resourcePolicy: NormalizedOoxmlResourcePolicy;
       useGoogleFonts?: boolean;
       cjkFallback?: import('@silurus/ooxml-core').CjkLang;

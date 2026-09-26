@@ -44,20 +44,19 @@ import type {
 import { findPptxElementBoundsByIds, hitTestPptxSlideContext } from './element-selection';
 import { excludeEmbeddedFontFamilies, loadEmbeddedFonts, uncoveredOfficeFontRequests } from './embedded-fonts';
 import { ProgressivePreflightGate } from './progressive-preflight-gate';
+import { WorkerPresentationSourceOwner } from './internal/worker-presentation-source';
 
 const host = new WasmParserHost<PptxArchive>(init, {
   freeArchive: (archive) => archive.free(),
   reinit,
 });
+const source = new WorkerPresentationSourceOwner(host);
+let ooxmlWasmInput: Parameters<typeof host.setWasmInput>[0] | undefined;
 
-const executeArchive = <T>(operation: (archive: PptxArchive) => T): T => {
-  const archive = host.archive;
-  if (!archive) throw new Error('Presentation not loaded');
-  return host.run(() => operation(archive));
-};
+const executeArchive = source.execute.bind(source);
 
 const slidePull = new SlidePullWorker(
-  () => host.archive,
+  () => source.cursor(),
   undefined,
   (operation) => executeArchive(operation),
 );
@@ -159,7 +158,7 @@ function loadSlide(slideIndex: number) {
 function getMedia(path: string): Promise<Blob> {
   const mimeType = findPreflightMimeType(requirePreflight(), path);
   return rawParts.get(path, mimeType, () => slidePull.run(() => {
-    const bytes = executeArchive((archive) => archive.extract_media(path));
+    const bytes = source.extractMedia(path);
     return new Blob([bytes as BlobPart], { type: mimeType });
   }));
 }
@@ -173,7 +172,7 @@ function getImage(path: string, mimeType: string): Promise<Blob> {
 
 function getFontBytes(path: string): Promise<Uint8Array> {
   return slidePull.run(() => {
-    const bytes = executeArchive((archive) => archive.extract_font(path));
+    const bytes = source.extractFont(path);
     return new Uint8Array(bytes as Uint8Array);
   });
 }
@@ -200,12 +199,8 @@ async function openPresentation(request: Extract<RenderWorkerRequest, { kind: 'p
   resourceUsage = undefined;
   renderers = await loadWorkerRenderers(request.renderers);
 
-  const [maxEntry, maxTotal, maxEntries] = resourcePolicyForWasm(request.resourcePolicy);
   const bootstrap = await slidePull.run(() => executeArchiveFromNew(
-    request.buffer,
-    maxEntry,
-    maxTotal,
-    maxEntries,
+    request,
   ));
   // The retained archive exposes font reads as independent operations, so font
   // decoding can overlap the sequential slide preflight without sharing cursor
@@ -299,23 +294,25 @@ async function waitForSlideAvailability(slideIndex: number): Promise<void> {
   }
 }
 
-function executeArchiveFromNew(
-  buffer: ArrayBuffer,
-  maxEntry: bigint | null | undefined,
-  maxTotal: bigint | null | undefined,
-  maxEntries: bigint | null | undefined,
-): PresentationBootstrap {
+async function executeArchiveFromNew(
+  request: Extract<RenderWorkerRequest, { kind: 'parse' }>,
+): Promise<PresentationBootstrap> {
+  if (request.source) {
+    await source.openModelSource(new Uint8Array(request.buffer), request.source, request.sourceTransfer);
+    return JSON.parse(new TextDecoder().decode(
+      source.execute((archive) => archive.presentation_bootstrap()),
+    )) as PresentationBootstrap;
+  }
+  if (ooxmlWasmInput === undefined) throw new Error('PPTX WASM input was not configured');
+  host.setWasmInput(ooxmlWasmInput);
+  await host.ensureReady();
+  const [maxEntry, maxTotal, maxEntries] = resourcePolicyForWasm(request.resourcePolicy);
   return host.run(() => {
     const archive = new PptxArchive(
-      new Uint8Array(buffer),
-      maxEntry,
-      maxTotal,
-      maxEntries,
+      new Uint8Array(request.buffer), maxEntry, maxTotal, maxEntries,
     );
     host.setArchive(archive);
-    return JSON.parse(
-      new TextDecoder().decode(archive.presentation_bootstrap()),
-    ) as PresentationBootstrap;
+    return JSON.parse(new TextDecoder().decode(archive.presentation_bootstrap())) as PresentationBootstrap;
   });
 }
 
@@ -326,7 +323,7 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest | WorkerSvgDecod
     return;
   }
   if (request.kind === 'init') {
-    host.setWasmInput(decodeDataUrl(request.wasmUrl) ?? request.wasmUrl);
+    ooxmlWasmInput = decodeDataUrl(request.wasmUrl) ?? request.wasmUrl;
     return;
   }
   if (request.kind === 'continuePresentationPreflight') {
@@ -340,8 +337,6 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest | WorkerSvgDecod
       reservePresentationParse();
       ownsParseReservation = true;
     }
-    await host.ensureReady();
-
     if (request.kind === 'parse') {
       const compact = await openPresentation(request);
       post({
@@ -469,22 +464,21 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest | WorkerSvgDecod
       return;
     }
     if (request.kind === 'resourceUsage') {
-      const usage = decodeOoxmlResourceUsage(executeArchive(
-        (archive) => archive.resource_usage(),
-      ));
+      const bytes = source.resourceUsage();
+      const usage = bytes === undefined ? undefined : decodeOoxmlResourceUsage(bytes);
       post({ kind: 'resourceUsage', id: request.id, usage });
       return;
     }
 
     if (request.kind === 'toMarkdown') {
-      const markdown = await slidePull.run(() =>
-        executeArchive((archive) => archive.to_markdown()));
+      const markdown = await slidePull.run(() => source.toMarkdown());
       post({ kind: 'markdownRendered', id: request.id, markdown });
     }
   } catch (error) {
     if (ownsParseReservation) {
       presentationState = 'failed';
       wakeSlideAvailabilityWaiters();
+      try { source.closeModelSource(); } catch {}
     }
     if (ownsParseReservation) {
       progressivePreflightGate.reset();
