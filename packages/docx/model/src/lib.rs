@@ -2699,7 +2699,7 @@ pub struct ShapeText {
     /// markers in text boxes use the same Word-observed fallback as body lists.
     /// This field intentionally serializes `None` as null: null means resolution
     /// selected automatic/default ink, while an absent field remains available
-    /// to non-XML-produced `ShapeText` values as "paragraph mark unknown".
+    /// to a caller-built value that omits the field as "paragraph mark unknown".
     pub paragraph_mark_color: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub font_family: Option<String>,

@@ -17,9 +17,10 @@ pub struct StandaloneShape {
     pub element: ShapeElement,
     /// The shape carries `p:nvPr/p:ph`; layout/master inheritance is absent.
     pub placeholder: bool,
-    /// The shape or a selected theme style references a relationship (`r:`
-    /// namespace). Theme relationships belong to the theme part, which this
-    /// standalone API does not receive; callers must verify them separately.
+    /// The shape or a selected theme style references a relationship, or a
+    /// selected theme style could not be inspected. Theme relationships belong
+    /// to the theme part, which this standalone API does not receive; callers
+    /// must verify them separately.
     pub relationship_references: bool,
 }
 
@@ -91,35 +92,51 @@ pub fn parse_standalone_shape_part(
 }
 
 fn theme_style_has_relationship(root: roxmltree::Node<'_, '_>, theme: &PptxTheme) -> bool {
-    // A shape may repeat the same style reference in extension markup. Parse
-    // each selected entry at most once so work scales with the shape XML plus
-    // the selected theme entries, rather than their product.
+    // ECMA-376 §20.1.4.2: only the DrawingML references directly in the
+    // shape's p:style select theme matrix entries. Extension descendants do
+    // not select styles, even if their local names match a reference.
     let mut inspected = std::collections::HashMap::new();
-    root.descendants().any(|node| {
-        if !node.is_element() {
-            return false;
-        }
-        let Some(index) = node.attribute("idx").and_then(|value| value.parse().ok()) else {
-            return false;
-        };
-        let (kind, selected) = match node.tag_name().name() {
-            "fillRef" => (0, theme.format_scheme.lookup_fill_ref(index)),
-            "lnRef" => (1, theme.format_scheme.lookup_line_ref(index)),
-            "effectRef" => (2, theme.format_scheme.lookup_effect_ref(index)),
-            _ => return false,
-        };
-        if let Some(&has_relationship) = inspected.get(&(kind, index)) {
-            return has_relationship;
-        }
-        let StyleMatrixLookup::Entry(entry) = selected else {
-            return false;
-        };
-        let has_relationship = roxmltree::Document::parse(&entry.to_xml()).is_ok_and(|doc| {
-            doc.descendants()
-                .any(|n| n.attributes().any(|a| is_r_ns(a.namespace())))
-        });
-        inspected.insert((kind, index), has_relationship);
-        has_relationship
+    root.children()
+        .find(|node| {
+            node.is_element()
+                && node.tag_name().name() == "style"
+                && is_p_ns(node.tag_name().namespace())
+        })
+        .into_iter()
+        .flat_map(|style| style.children())
+        .any(|node| {
+            if !node.is_element() || !is_a_ns(node.tag_name().namespace()) {
+                return false;
+            }
+            let Some(index) = node.attribute("idx").and_then(|value| value.parse().ok()) else {
+                return false;
+            };
+            let (kind, selected) = match node.tag_name().name() {
+                "fillRef" => (0, theme.format_scheme.lookup_fill_ref(index)),
+                "lnRef" => (1, theme.format_scheme.lookup_line_ref(index)),
+                "effectRef" => (2, theme.format_scheme.lookup_effect_ref(index)),
+                _ => return false,
+            };
+            if let Some(&has_relationship) = inspected.get(&(kind, index)) {
+                return has_relationship;
+            }
+            let StyleMatrixLookup::Entry(entry) = selected else {
+                return false;
+            };
+            // A failed fragment parse leaves the dependency unverifiable. Never
+            // turn that state into a claim that this shape is self-contained.
+            let has_relationship = theme_fragment_needs_relationship_verification(&entry.to_xml());
+            inspected.insert((kind, index), has_relationship);
+            has_relationship
+        })
+}
+
+fn theme_fragment_needs_relationship_verification(xml: &str) -> bool {
+    roxmltree::Document::parse(xml).map_or(true, |doc| {
+        doc.descendants().any(|node| {
+            node.attributes()
+                .any(|attribute| is_r_ns(attribute.namespace()))
+        })
     })
 }
 
@@ -203,5 +220,52 @@ mod tests {
             let parsed = parse(&xml, &theme, None).unwrap().unwrap();
             assert_eq!(parsed.relationship_references, expected);
         }
+    }
+
+    #[test]
+    fn unicode_relationship_prefix_in_selected_theme_fill_is_reported() {
+        let theme = format!("<a:theme xmlns:a=\"{A}\" xmlns:関係=\"{R}\"><a:themeElements><a:fmtScheme name=\"x\"><a:fillStyleLst><a:blipFill><a:blip 関係:embed=\"rIdImage\"/></a:blipFill></a:fillStyleLst></a:fmtScheme></a:themeElements></a:theme>");
+        let xml = shape(Some(P), "sp", "<p:style><a:fillRef idx=\"1\"/></p:style>");
+        assert!(
+            parse(&xml, &theme, None)
+                .unwrap()
+                .unwrap()
+                .relationship_references
+        );
+    }
+
+    #[test]
+    fn unused_extension_style_reference_does_not_select_theme_fill() {
+        let theme = format!("<a:theme xmlns:a=\"{A}\" xmlns:r=\"{R}\"><a:themeElements><a:fmtScheme name=\"x\"><a:fillStyleLst><a:blipFill><a:blip r:embed=\"rIdImage\"/></a:blipFill></a:fillStyleLst></a:fmtScheme></a:themeElements></a:theme>");
+        let xml = shape(
+            Some(P),
+            "sp",
+            "<p:extLst><x:fillRef xmlns:x=\"urn:foreign\" idx=\"1\"/></p:extLst>",
+        );
+        assert!(
+            !parse(&xml, &theme, None)
+                .unwrap()
+                .unwrap()
+                .relationship_references
+        );
+        let xml = shape(
+            Some(P),
+            "sp",
+            "<p:style><x:fillRef xmlns:x=\"urn:foreign\" idx=\"1\"/></p:style>",
+        );
+        assert!(
+            !parse(&xml, &theme, None)
+                .unwrap()
+                .unwrap()
+                .relationship_references
+        );
+    }
+
+    #[test]
+    fn unparseable_theme_fragment_remains_unverifiable() {
+        assert!(theme_fragment_needs_relationship_verification(
+            "<a:blip r:embed=\"rIdImage\"/>"
+        ));
+        assert!(!theme_fragment_needs_relationship_verification("<fill/>"));
     }
 }
