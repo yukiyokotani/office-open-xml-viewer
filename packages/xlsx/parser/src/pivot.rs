@@ -892,7 +892,8 @@ impl WorkbookTableStyles {
                 .collect::<Result<Vec<_>, String>>()
                 .map(Some);
         }
-        if let Some(elements) = crate::style_presets::pivot_style_elements(name, theme_colors) {
+        if let Some(elements) = xlsx_model::style_presets::pivot_style_elements(name, theme_colors)
+        {
             return Ok(Some(elements));
         }
         if self.malformed_part {
