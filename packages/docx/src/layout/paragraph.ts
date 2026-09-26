@@ -4398,6 +4398,9 @@ export function acquireParagraphResult(
     : cache!.get(paragraph, cacheKey) as AcquiredParagraphResult | undefined;
   if (cached) return cached;
   cache?.noteMiss();
+  // Defer the second serialization until the exact placement misses. The
+  // first eligible miss must still retain a template: pagination may next
+  // acquire that paragraph at a different Y during convergence.
   const reusableLineKey = !lineBreakingDependsOnPosition(paragraph, options)
     && cache
     ? paragraphAcquisitionKey(cache, paragraph, options, continuation, true)
