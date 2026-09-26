@@ -2303,12 +2303,12 @@ pub(crate) fn write_test_content_types<W: std::io::Write + std::io::Seek>(
             ooxml_common::opc::CONTENT_TYPES_ITEM,
             zip::write::SimpleFileOptions::default(),
         )
-        .unwrap();
+        .expect("test fixture writes to an in-memory ZIP");
     writer
         .write_all(
             br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>"#,
         )
-        .unwrap();
+        .expect("test fixture writes to an in-memory ZIP");
 }
 
 /// Admit a public-boundary input as a PresentationML package.
@@ -3770,11 +3770,13 @@ mod tests {
             intrinsic_width_px: Some(64),
             intrinsic_height_px: Some(48),
             stroke: None,
+            fill: None,
             prst_geom: None,
             prst_adjust: None,
             src_rect: None,
             alpha: None,
             duotone: None,
+            blip_effects: Vec::new(),
             cust_geom: None,
             shadow: None,
             inner_shadow: None,
@@ -3819,6 +3821,7 @@ mod tests {
             tile: None,
             alpha: None,
             duotone: None,
+            blip_effects: Vec::new(),
         };
         let json = serde_json::to_string(&fill).unwrap();
         assert!(
@@ -4813,6 +4816,7 @@ mod tests {
                 tile,
                 alpha,
                 duotone: _,
+                blip_effects: _,
             } => {
                 assert_eq!(image_path, "ppt/media/image1.jpeg");
                 assert_eq!(mime_type, "image/jpeg");
@@ -6226,7 +6230,7 @@ mod tests {
         let m_str: HashMap<String, String> = HashMap::new();
         let m_tf: HashMap<String, Transform> = HashMap::new();
         let m_bool: HashMap<String, bool> = HashMap::new();
-        let m_i64: HashMap<String, i64> = HashMap::new();
+        let m_i64: HashMap<String, crate::text::ParagraphSpacing> = HashMap::new();
         let empty_rels: HashMap<String, String> = HashMap::new();
         let build = |accent1_hex: &str| -> ParsedLayout {
             let mut theme: HashMap<String, String> = HashMap::new();
@@ -7164,6 +7168,18 @@ mod tests {
             "rtl_col=false must be omitted from JSON; got {json}"
         );
 
+        // ECMA-376 §21.1.2.1.1 spcFirstLastPara: xsd:boolean, default false,
+        // serialized only when set.
+        assert!(!tb_absent.spc_first_last_para);
+        assert!(!json.contains("spcFirstLastPara"), "{json}");
+        for value in ["1", "true"] {
+            let tb = parse(&format!(r#"<bodyPr spcFirstLastPara="{value}"/>"#));
+            assert!(tb.spc_first_last_para, "{value}");
+            let json = serde_json::to_string(&tb).unwrap();
+            assert!(json.contains("\"spcFirstLastPara\":true"), "{json}");
+        }
+        assert!(!parse(r#"<bodyPr spcFirstLastPara="0"/>"#).spc_first_last_para);
+
         // rtlCol="1" appears under the camelCase key "rtlCol".
         let json_true = serde_json::to_string(&tb).unwrap();
         assert!(
@@ -7425,6 +7441,92 @@ mod tests {
             !json_absent.contains("defTabSz"),
             "absent defTabSz must be omitted from JSON; got {json_absent}"
         );
+    }
+
+    /// ECMA-376 §21.1.2.2.9-.10: `a:spcBef`/`a:spcAft` hold one CT_TextSpacing
+    /// choice. A percentage is retained separately from points, and the
+    /// nearest level's choice replaces an inherited value of the other kind.
+    #[test]
+    fn test_parse_paragraph_percentage_before_after_spacing() {
+        use crate::text::ParagraphSpacing;
+        let theme = HashMap::new();
+        let rels = HashMap::new();
+        let bytes = empty_zip_bytes();
+        let cursor = Cursor::new(bytes.clone());
+        let mut zip = PptxZip::new(cursor).unwrap();
+        let mut parse_para = |lst_style: &str,
+                              p_pr: &str,
+                              inherited: Option<ParagraphSpacing>|
+         -> Paragraph {
+            let xml = format!(
+                r#"<txBody xmlns="http://schemas.openxmlformats.org/drawingml/2006/main"><lstStyle>{lst_style}</lstStyle><p>{p_pr}<r><t>a</t></r></p></txBody>"#
+            );
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            let mut tb = parse_text_body(
+                doc.root_element(),
+                &theme,
+                &rels,
+                "ppt/slides",
+                None,
+                None,
+                [None; 9],
+                std::array::from_fn(|_| None),
+                Default::default(),
+                &empty_level_bullets(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                inherited,
+                inherited,
+                None,
+                ShapeKind::Sp,
+                &mut zip,
+            );
+            tb.paragraphs.remove(0)
+        };
+
+        let p = parse_para(
+            "",
+            r#"<pPr><spcBef><spcPct val="20000"/></spcBef><spcAft><spcPct val="50000"/></spcAft></pPr>"#,
+            None,
+        );
+        assert_eq!((p.space_before, p.space_before_pct), (None, Some(20000.0)));
+        assert_eq!((p.space_after, p.space_after_pct), (None, Some(50000.0)));
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(json.contains("\"spaceBeforePct\":20000.0"), "{json}");
+        assert!(json.contains("\"spaceAfterPct\":50000.0"), "{json}");
+
+        // Points stay in the existing field and the percentage keys are omitted.
+        let p = parse_para(
+            "",
+            r#"<pPr><spcBef><spcPts val="600"/></spcBef></pPr>"#,
+            None,
+        );
+        assert_eq!((p.space_before, p.space_before_pct), (Some(600), None));
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(!json.contains("spaceBeforePct"), "{json}");
+
+        // An own lstStyle percentage overrides inherited points, and a direct
+        // point value overrides an inherited percentage.
+        let p = parse_para(
+            r#"<lvl1pPr><spcBef><spcPct val="30000"/></spcBef></lvl1pPr>"#,
+            "",
+            Some(ParagraphSpacing::Points(1200)),
+        );
+        assert_eq!((p.space_before, p.space_before_pct), (None, Some(30000.0)));
+        let p = parse_para(
+            "",
+            r#"<pPr><spcAft><spcPts val="0"/></spcAft></pPr>"#,
+            Some(ParagraphSpacing::Percent(40000.0)),
+        );
+        assert_eq!((p.space_after, p.space_after_pct), (Some(0), None));
+        assert_eq!((p.space_before, p.space_before_pct), (None, Some(40000.0)));
     }
 
     /// ECMA-376 §21.1.3.13 (`a:tblPr@rtl`): a right-to-left table sets `rtl=true`
@@ -8695,6 +8797,104 @@ mod tests {
         let duo = pic.duotone.expect("duotone must be surfaced");
         assert_eq!(duo.clr1, "000000", "clr1 = black prstClr");
         assert_eq!(duo.clr2, "4472C4", "clr2 = accent1 resolved from theme");
+    }
+
+    #[test]
+    fn picture_blip_effects_surface_in_document_order() {
+        const PNG_1X1: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x62, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
+            0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+        // PowerPoint's "Black and White" with a transparent colour: CT_Blip
+        // effects in document order (ECMA-376 §20.1.8.13).
+        let pic_xml = r#"<p:pic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+  xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:nvPicPr><p:cNvPr id="5" name="DuoPic"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>
+  <p:blipFill>
+    <a:blip r:embed="rIdPng">
+      <a:clrChange><a:clrFrom><a:srgbClr val="FFFFFF"/></a:clrFrom>
+        <a:clrTo><a:srgbClr val="FFFFFF"><a:alpha val="0"/></a:srgbClr></a:clrTo></a:clrChange>
+      <a:grayscl/>
+      <a:biLevel thresh="50000"/>
+    </a:blip>
+    <a:stretch><a:fillRect/></a:stretch>
+  </p:blipFill>
+  <p:spPr><a:xfrm><a:off x="100" y="200"/><a:ext cx="300000" cy="300000"/></a:xfrm>
+    <a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+</p:pic>"#;
+        let doc = roxmltree::Document::parse(pic_xml).unwrap();
+        let pic_node = doc.root_element();
+        let mut rels = HashMap::new();
+        rels.insert("rIdPng".to_string(), "../media/image1.png".to_string());
+        let mut theme = HashMap::new();
+        theme.insert("accent1".to_string(), "4472C4".to_string());
+        let data = build_blip_media_zip(PNG_1X1, b"<svg/>");
+        let cursor = Cursor::new(data.clone());
+        let mut zip = PptxZip::new(cursor).unwrap();
+        let pic = parse_picture(pic_node, "ppt/slides", &rels, &theme, &mut zip)
+            .expect("parse_picture should succeed for a duotone picture");
+        assert!(pic.duotone.is_none());
+        assert_eq!(
+            pic.blip_effects,
+            vec![
+                ooxml_common::blip::BlipEffect::ColorChange {
+                    from: "FFFFFF".into(),
+                    from_alpha: 1.0,
+                    to: "FFFFFF".into(),
+                    to_alpha: 0.0,
+                    use_alpha: false,
+                },
+                ooxml_common::blip::BlipEffect::Grayscale,
+                ooxml_common::blip::BlipEffect::BiLevel { thresh: 0.5 },
+            ]
+        );
+        let json = serde_json::to_value(&pic).unwrap();
+        assert_eq!(json["blipEffects"][1]["type"], "grayscale");
+    }
+
+    #[test]
+    fn picture_sp_pr_fill_surfaces_as_backing_fill() {
+        const PNG_1X1: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x62, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
+            0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+        // A p:pic spPr fill (§19.3.1.37) is carried as the picture's backing fill.
+        let pic_xml = r#"<p:pic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+  xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:nvPicPr><p:cNvPr id="5" name="DuoPic"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>
+  <p:blipFill>
+    <a:blip r:embed="rIdPng">
+
+    </a:blip>
+    <a:stretch><a:fillRect/></a:stretch>
+  </p:blipFill>
+  <p:spPr><a:xfrm><a:off x="100" y="200"/><a:ext cx="300000" cy="300000"/></a:xfrm>
+    <a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="4D4D4D"/></a:solidFill></p:spPr>
+</p:pic>"#;
+        let doc = roxmltree::Document::parse(pic_xml).unwrap();
+        let pic_node = doc.root_element();
+        let mut rels = HashMap::new();
+        rels.insert("rIdPng".to_string(), "../media/image1.png".to_string());
+        let mut theme = HashMap::new();
+        theme.insert("accent1".to_string(), "4472C4".to_string());
+        let data = build_blip_media_zip(PNG_1X1, b"<svg/>");
+        let cursor = Cursor::new(data.clone());
+        let mut zip = PptxZip::new(cursor).unwrap();
+        let pic = parse_picture(pic_node, "ppt/slides", &rels, &theme, &mut zip)
+            .expect("parse_picture should succeed for a duotone picture");
+        assert!(matches!(
+            pic.fill,
+            Some(Fill::Solid { ref color }) if color == "4D4D4D"
+        ));
+        assert!(pic.blip_effects.is_empty());
     }
 
     /// A `<p:pic>` without a `<a:duotone>` leaves `duotone` None — guards the new
@@ -10171,6 +10371,50 @@ mod tests {
                 if (x1 - 0.5).abs() < 1e-9 && (y1 - 1.0).abs() < 1e-9
                     && (x - 1.0).abs() < 1e-9 && y.abs() < 1e-9
         ));
+    }
+
+    /// ECMA-376 §20.1.9.15: per-path fill mode and stroke flags reach the model
+    /// only when some path departs from the defaults.
+    #[test]
+    fn custom_geometry_retains_per_path_paint() {
+        use crate::fill::parse_cust_geom_with_paint;
+        let parse = |paths: &str| {
+            let xml = format!("<custGeom><pathLst>{paths}</pathLst></custGeom>");
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            parse_cust_geom_with_paint(doc.root_element(), 100.0, 100.0).1
+        };
+        let segment = r#"<moveTo><pt x="0" y="0"/></moveTo><lnTo><pt x="1" y="1"/></lnTo>"#;
+        assert_eq!(
+            parse(&format!(
+                r#"<path w="1" h="1">{segment}</path><path w="1" h="1" fill="norm" stroke="1">{segment}</path>"#
+            )),
+            None
+        );
+        assert_eq!(
+            parse(&format!(
+                r#"<path w="1" h="1" stroke="0">{segment}</path><path w="1" h="1" fill="none">{segment}</path><path w="1" h="1" fill="darken">{segment}</path>"#
+            )),
+            Some(vec![
+                PathPaint {
+                    fill: None,
+                    stroke: false
+                },
+                PathPaint {
+                    fill: Some("none".into()),
+                    stroke: true
+                },
+                PathPaint {
+                    fill: Some("darken".into()),
+                    stroke: true
+                },
+            ])
+        );
+        let json = serde_json::to_string(&PathPaint {
+            fill: None,
+            stroke: false,
+        })
+        .unwrap();
+        assert_eq!(json, r#"{"fill":null,"stroke":false}"#);
     }
 
     /// A line chart whose horizontal axis is a `<c:dateAx>` (§21.2.2.39) — the

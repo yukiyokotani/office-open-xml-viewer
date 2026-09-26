@@ -373,7 +373,19 @@ export function translateTableLayout(table: TableLayout, delta: LayoutTranslatio
         ...cell,
         flowBounds: translateRect(cell.flowBounds, delta), inkBounds: translateRect(cell.inkBounds, delta),
         ...(cell.clipBounds ? { clipBounds: translateRect(cell.clipBounds, delta) } : {}),
-        contentBounds: translateRect(cell.contentBounds, delta),
+        // A rotated cell (ECMA-376 §17.4.72) keeps its content in the local
+        // text frame; only the frame-to-page transform moves with the table.
+        ...(cell.verticalText ? {
+          contentBounds: cell.contentBounds,
+          verticalText: {
+            ...cell.verticalText,
+            transform: {
+              ...cell.verticalText.transform,
+              e: cell.verticalText.transform.e + delta.xPt,
+              f: cell.verticalText.transform.f + delta.yPt,
+            },
+          },
+        } : { contentBounds: translateRect(cell.contentBounds, delta) }),
         // Cell paint adds contentBounds/offsetPt; retained descendants are cell-local.
         blocks: cell.blocks,
       })),

@@ -37,6 +37,9 @@ if (values.help || positionals.length === 0) {
 Usage:
   ooxml-md <file>              # writes to stdout
   ooxml-md <file> -o out.md    # writes to file
+
+Exit codes: 1 usage, 2 unsupported extension, 3 not an OOXML document,
+4 OOXML resource limit exceeded.
 `);
   process.exit(values.help ? 0 : 1);
 }
@@ -69,20 +72,53 @@ async function loadSource() {
   return module;
 }
 
+// The parser rejects input with prefixed envelope strings rather than Error
+// instances (see `ooxml_common::opc::NOT_OOXML_PREFIX` and the resource-limit
+// envelope decoded by `@silurus/ooxml-core/worker`). The CLI cannot import that
+// TypeScript-source decoder under Node type stripping, so it recognises only
+// the stable prefixes and reports them as distinct exit codes.
+const NOT_OOXML_PREFIX = 'OOXML_NOT_OOXML:';
+const RESOURCE_LIMIT_PREFIX = 'OOXML_RESOURCE_LIMIT:';
+const EXIT_NOT_OOXML = 3;
+const EXIT_RESOURCE_LIMIT = 4;
+
+function failOnParserEnvelope(error) {
+  const text = error instanceof Error ? error.message : String(error);
+  if (text.startsWith(NOT_OOXML_PREFIX)) {
+    console.error(
+      `ooxml-md: ${positionals[0]} is not an Office Open XML document: ${text.slice(NOT_OOXML_PREFIX.length)}`,
+    );
+    process.exit(EXIT_NOT_OOXML);
+  }
+  if (text.startsWith(RESOURCE_LIMIT_PREFIX)) {
+    console.error(`ooxml-md: ${positionals[0]} exceeds an OOXML resource limit`);
+    process.exit(EXIT_RESOURCE_LIMIT);
+  }
+  throw error;
+}
+
+function convert(run) {
+  try {
+    return run();
+  } catch (error) {
+    return failOnParserEnvelope(error);
+  }
+}
+
 const buf = readFileSync(filePath);
 let md;
 if (ext === '.pptx') {
   const wasm = readFileSync(resolveWasm('@silurus/ooxml-pptx', '../../pptx/src/wasm/pptx_parser_bg.wasm'));
   initPptxFromBytes(wasm);
-  md = pptxToMarkdown(buf);
+  md = convert(() => pptxToMarkdown(buf));
 } else if (ext === '.docx') {
   const wasm = readFileSync(resolveWasm('@silurus/ooxml-docx', '../../docx/src/wasm/docx_parser_bg.wasm'));
   initDocxFromBytes(wasm);
-  md = docxToMarkdown(buf);
+  md = convert(() => docxToMarkdown(buf));
 } else if (ext === '.xlsx') {
   const wasm = readFileSync(resolveWasm('@silurus/ooxml-xlsx', '../../xlsx/src/wasm/xlsx_parser_bg.wasm'));
   initXlsxFromBytes(wasm);
-  md = xlsxToMarkdown(buf);
+  md = convert(() => xlsxToMarkdown(buf));
 } else {
   console.error(`Unsupported extension: ${ext}. Expected .pptx / .docx / .xlsx`);
   process.exit(2);

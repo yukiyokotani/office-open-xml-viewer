@@ -6,7 +6,8 @@
 //! `MasterBundle` → `ParsedMaster` type rename (fields unchanged).
 
 use crate::fill::{
-    parse_background, parse_blip_alpha, parse_cust_geom, parse_fill, parse_reflection, parse_xfrm,
+    parse_background, parse_blip_alpha, parse_cust_geom_with_paint, parse_fill, parse_reflection,
+    parse_xfrm,
 };
 use crate::shape::{
     extract_decorative_shapes, resolve_picture_shape_properties, PictureShapeProperties,
@@ -15,9 +16,9 @@ use crate::text::{
     empty_level_bullets, extract_level_bullets, extract_level_colors, extract_level_font_sizes,
     extract_level_indents, extract_lvl1_font_size, has_any_level_bullet, has_any_level_color,
     has_any_level_indent, has_any_level_size, merge_level_bullets, merge_level_colors,
-    merge_level_indents, merge_level_sizes, read_level_bullets, read_level_colors,
-    read_level_font_sizes, read_level_indents, text_property_color, BuMarker, LevelBullets,
-    LevelColors, LevelFontSizes, LevelIndents,
+    merge_level_indents, merge_level_sizes, paragraph_spacing, read_level_bullets,
+    read_level_colors, read_level_font_sizes, read_level_indents, text_property_color, BuMarker,
+    LevelBullets, LevelColors, LevelFontSizes, LevelIndents, ParagraphSpacing,
 };
 use crate::theme::{
     bake_clr_map, parse_theme_part, resolve_theme_typeface, PptxSchemeResolver, PptxTheme,
@@ -29,7 +30,9 @@ use crate::{
     note_layout_master_parse, parse_preflighted_pptx_xml, parse_rels, read_zip_str, resolve_path,
     PptxZip,
 };
-use ooxml_common::blip::{mime_from_ext, parse_blip_duotone, parse_src_rect, Duotone, SrcRect};
+use ooxml_common::blip::{
+    mime_from_ext, parse_blip_duotone, parse_blip_effects, parse_src_rect, Duotone, SrcRect,
+};
 use ooxml_common::rels::relationship_part_path;
 use std::collections::HashMap;
 
@@ -132,16 +135,16 @@ pub(crate) struct LayoutPlaceholders {
     /// the matching layout placeholder's lstStyle. The idx tier prevents one of
     /// several same-type layout slots from leaking paragraph spacing into its
     /// siblings (ECMA-376 §19.3.1.36 placeholder matching).
-    pub(crate) by_idx_space_before: HashMap<u32, i64>,
-    pub(crate) by_idx_space_after: HashMap<u32, i64>,
+    pub(crate) by_idx_space_before: HashMap<u32, ParagraphSpacing>,
+    pub(crate) by_idx_space_after: HashMap<u32, ParagraphSpacing>,
     /// Default space-before (hundredths of pt) per placeholder type, from layout lstStyle
-    pub(crate) by_type_space_before: HashMap<String, i64>,
+    pub(crate) by_type_space_before: HashMap<String, ParagraphSpacing>,
     /// Default space-after (hundredths of pt) per placeholder type, from layout lstStyle
-    pub(crate) by_type_space_after: HashMap<String, i64>,
+    pub(crate) by_type_space_after: HashMap<String, ParagraphSpacing>,
     /// Default space-before from master txStyles (fallback when layout has none)
-    pub(crate) by_type_master_space_before: HashMap<String, i64>,
+    pub(crate) by_type_master_space_before: HashMap<String, ParagraphSpacing>,
     /// Default space-after from master txStyles (fallback when layout has none)
-    pub(crate) by_type_master_space_after: HashMap<String, i64>,
+    pub(crate) by_type_master_space_after: HashMap<String, ParagraphSpacing>,
     /// Stroke per placeholder type from layout spPr > ln
     pub(crate) by_type_stroke: HashMap<String, Stroke>,
     /// Stroke per placeholder idx from layout spPr > ln
@@ -193,6 +196,7 @@ pub(crate) struct LayoutPlaceholders {
 pub(crate) struct InheritedShapeGeometry {
     pub(crate) geometry: String,
     pub(crate) cust_geom: Option<Vec<Vec<PathCmd>>>,
+    pub(crate) cust_geom_paint: Option<Vec<PathPaint>>,
     pub(crate) adjustments: [Option<f64>; 8],
 }
 
@@ -208,9 +212,11 @@ impl InheritedShapeGeometry {
         let cust_geom_node = child(sp_pr, "custGeom");
         let prst_geom_node = child(sp_pr, "prstGeom");
         if let Some(cust_geom_node) = cust_geom_node {
+            let (paths, paint) = parse_cust_geom_with_paint(cust_geom_node, shape_w, shape_h);
             return Some(Self {
                 geometry: "custGeom".to_owned(),
-                cust_geom: Some(parse_cust_geom(cust_geom_node, shape_w, shape_h)),
+                cust_geom: Some(paths),
+                cust_geom_paint: paint,
                 adjustments: [None; 8],
             });
         }
@@ -249,6 +255,7 @@ impl InheritedShapeGeometry {
         Some(Self {
             geometry,
             cust_geom: None,
+            cust_geom_paint: None,
             adjustments: std::array::from_fn(adjustment),
         })
     }
@@ -266,6 +273,8 @@ pub(crate) struct InheritedBlipFill {
     /// blipFill, resolved through the theme. Inherited onto the slide picture
     /// placeholder that omits its own blipFill (see `shape.rs`).
     pub(crate) duotone: Option<Duotone>,
+    /// CT_Blip pixel effects on the same blipFill, inherited with it.
+    pub(crate) blip_effects: Vec<ooxml_common::blip::BlipEffect>,
 }
 
 impl LayoutPlaceholders {
@@ -675,7 +684,11 @@ impl LayoutPlaceholders {
             })
     }
 
-    pub(crate) fn lookup_space_before(&self, ph_type: &str, ph_idx: Option<u32>) -> Option<i64> {
+    pub(crate) fn lookup_space_before(
+        &self,
+        ph_type: &str,
+        ph_idx: Option<u32>,
+    ) -> Option<ParagraphSpacing> {
         let layout = if let Some(idx) = ph_idx {
             self.by_idx_space_before.get(&idx).copied()
         } else {
@@ -698,7 +711,11 @@ impl LayoutPlaceholders {
             })
     }
 
-    pub(crate) fn lookup_space_after(&self, ph_type: &str, ph_idx: Option<u32>) -> Option<i64> {
+    pub(crate) fn lookup_space_after(
+        &self,
+        ph_type: &str,
+        ph_idx: Option<u32>,
+    ) -> Option<ParagraphSpacing> {
         let layout = if let Some(idx) = ph_idx {
             self.by_idx_space_after.get(&idx).copied()
         } else {
@@ -892,8 +909,23 @@ impl LayoutPlaceholders {
     /// Look up inherited line spacing (spcPct val, e.g. 90000 = 90%) for this placeholder.
     /// Idx-strict per ECMA-376 §19.3.1.36 (see `lookup_fill`'s rationale).
     pub(crate) fn lookup_line_spacing(&self, ph_type: &str, ph_idx: Option<u32>) -> Option<f64> {
+        // The layout placeholder itself inherits the master text style for its
+        // type (ECMA-376 §19.3.1.36 / §19.3.1.51), so an idx-matched layout
+        // placeholder without lnSpc still yields the master level-1 value.
+        let master = || {
+            self.by_type_master_line_spacing
+                .get(ph_type)
+                .copied()
+                .or_else(|| {
+                    if ph_type == "body" {
+                        self.by_type_master_line_spacing.get("").copied()
+                    } else {
+                        None
+                    }
+                })
+        };
         if let Some(i) = ph_idx {
-            return self.by_idx_line_spacing.get(&i).copied();
+            return self.by_idx_line_spacing.get(&i).copied().or_else(master);
         }
         self.by_type_line_spacing
             .get(ph_type)
@@ -905,14 +937,7 @@ impl LayoutPlaceholders {
                     None
                 }
             })
-            .or_else(|| self.by_type_master_line_spacing.get(ph_type).copied())
-            .or_else(|| {
-                if ph_type == "body" {
-                    self.by_type_master_line_spacing.get("").copied()
-                } else {
-                    None
-                }
-            })
+            .or_else(master)
     }
 }
 
@@ -1560,19 +1585,17 @@ pub(crate) fn parse_master_txstyle_color(
 /// Parse default paragraph spacing from master txStyles.
 /// Returns (space_before_map, space_after_map, line_spacing_map) keyed by ph_type string.
 /// space_before/after values are in hundredths of a point (same as Paragraph.space_before/after).
-/// Note: line_spacing_map is intentionally NOT populated. Inheriting txStyles lnSpc hurts VRT
-/// scores because our font substitutes (sans-serif) have different em-square metrics than the
-/// original Aptos font, so applying the master's 120% line spacing over-expands text layout.
+/// line_spacing values are the level-1 `lnSpc/spcPct` val (e.g. 90000 = 90%).
 pub(crate) fn parse_master_txstyle_spacing(
     root: roxmltree::Node<'_, '_>,
 ) -> (
-    HashMap<String, i64>,
-    HashMap<String, i64>,
+    HashMap<String, ParagraphSpacing>,
+    HashMap<String, ParagraphSpacing>,
     HashMap<String, f64>,
 ) {
-    let mut before_map: HashMap<String, i64> = HashMap::new();
-    let mut after_map: HashMap<String, i64> = HashMap::new();
-    let line_map: HashMap<String, f64> = HashMap::new(); // intentionally not populated
+    let mut before_map: HashMap<String, ParagraphSpacing> = HashMap::new();
+    let mut after_map: HashMap<String, ParagraphSpacing> = HashMap::new();
+    let mut line_map: HashMap<String, f64> = HashMap::new();
     let tx_styles = match child(root, "txStyles") {
         Some(n) => n,
         None => return (before_map, after_map, line_map),
@@ -1580,12 +1603,17 @@ pub(crate) fn parse_master_txstyle_spacing(
     let style_ph_map: &[(&str, &[&str])] = MASTER_TXSTYLE_PH_TYPES;
     for (style_name, ph_types) in style_ph_map {
         let lvl1 = child(tx_styles, style_name).and_then(|sn| child(sn, "lvl1pPr"));
-        let spc_before = lvl1
-            .and_then(|lp| child(lp, "spcBef"))
-            .and_then(|s| child(s, "spcPts").and_then(|n| attr_i64(&n, "val")));
-        let spc_after = lvl1
-            .and_then(|lp| child(lp, "spcAft"))
-            .and_then(|s| child(s, "spcPts").and_then(|n| attr_i64(&n, "val")));
+        let spc_before = lvl1.and_then(|lp| paragraph_spacing(lp, "spcBef"));
+        let spc_after = lvl1.and_then(|lp| paragraph_spacing(lp, "spcAft"));
+        let line = lvl1
+            .and_then(|lp| child(lp, "lnSpc"))
+            .and_then(|ls| child(ls, "spcPct"))
+            .and_then(|s| attr_f64(&s, "val"));
+        if let Some(v) = line {
+            for ph_type in *ph_types {
+                line_map.entry(ph_type.to_string()).or_insert(v);
+            }
+        }
         if let Some(v) = spc_before {
             for ph_type in *ph_types {
                 before_map.entry(ph_type.to_string()).or_insert(v);
@@ -1643,8 +1671,8 @@ pub(crate) fn parse_layout_placeholders(
     master_transforms: &HashMap<String, Transform>,
     master_alignments: &HashMap<String, String>,
     master_ea_ln_brk: &HashMap<String, bool>,
-    master_space_before: &HashMap<String, i64>,
-    master_space_after: &HashMap<String, i64>,
+    master_space_before: &HashMap<String, ParagraphSpacing>,
+    master_space_after: &HashMap<String, ParagraphSpacing>,
     master_line_spacing: &HashMap<String, f64>,
     theme_source: &(impl PptxThemeSource + ?Sized),
     layout_dir: &str,
@@ -1760,14 +1788,8 @@ pub(crate) fn parse_layout_placeholders(
         let layout_ea_ln_brk: Option<bool> = layout_lvl1_ppr
             .and_then(|lp| attr(&lp, "eaLnBrk"))
             .map(|v| v == "1" || v == "true");
-        let layout_space_before: Option<i64> = layout_lvl1_ppr
-            .and_then(|lp| child(lp, "spcBef"))
-            .and_then(|s| child(s, "spcPts"))
-            .and_then(|s| attr_i64(&s, "val"));
-        let layout_space_after: Option<i64> = layout_lvl1_ppr
-            .and_then(|lp| child(lp, "spcAft"))
-            .and_then(|s| child(s, "spcPts"))
-            .and_then(|s| attr_i64(&s, "val"));
+        let layout_space_before = layout_lvl1_ppr.and_then(|lp| paragraph_spacing(lp, "spcBef"));
+        let layout_space_after = layout_lvl1_ppr.and_then(|lp| paragraph_spacing(lp, "spcAft"));
         // lnSpc > spcPct val (e.g. 90000 = 90%)
         let layout_line_spacing: Option<f64> = layout_lvl1_ppr
             .and_then(|lp| child(lp, "lnSpc"))
@@ -1844,6 +1866,12 @@ pub(crate) fn parse_layout_placeholders(
                 // §20.1.8.23 duotone on the layout placeholder blipFill, resolved
                 // through the theme; inherited onto the slide picture placeholder.
                 duotone: parse_blip_duotone(
+                    bf,
+                    &PptxSchemeResolver { theme },
+                    ooxml_common::color::TintMode::PowerPointLinear,
+                ),
+                // CT_Blip pixel effects travel with the inherited blipFill.
+                blip_effects: parse_blip_effects(
                     bf,
                     &PptxSchemeResolver { theme },
                     ooxml_common::color::TintMode::PowerPointLinear,
@@ -2213,8 +2241,8 @@ pub(crate) fn parse_layout(
     master_transforms: &HashMap<String, Transform>,
     master_alignments: &HashMap<String, String>,
     master_ea_ln_brk: &HashMap<String, bool>,
-    master_space_before: &HashMap<String, i64>,
-    master_space_after: &HashMap<String, i64>,
+    master_space_before: &HashMap<String, ParagraphSpacing>,
+    master_space_after: &HashMap<String, ParagraphSpacing>,
     master_line_spacing: &HashMap<String, f64>,
     theme_source: &(impl PptxThemeSource + ?Sized),
     layout_dir: &str,
@@ -2313,8 +2341,8 @@ pub(crate) struct ParsedMaster {
     pub(crate) master_transforms: HashMap<String, Transform>,
     pub(crate) master_alignments: HashMap<String, String>,
     pub(crate) master_ea_ln_brk: HashMap<String, bool>,
-    pub(crate) master_space_before: HashMap<String, i64>,
-    pub(crate) master_space_after: HashMap<String, i64>,
+    pub(crate) master_space_before: HashMap<String, ParagraphSpacing>,
+    pub(crate) master_space_after: HashMap<String, ParagraphSpacing>,
     pub(crate) master_line_spacing: HashMap<String, f64>,
     pub(crate) master_bold: HashMap<String, bool>,
     pub(crate) master_italic: HashMap<String, bool>,
@@ -2547,8 +2575,8 @@ mod placeholder_geometry_tests {
             &HashMap::<String, Transform>::new(),
             &HashMap::<String, String>::new(),
             &HashMap::<String, bool>::new(),
-            &HashMap::<String, i64>::new(),
-            &HashMap::<String, i64>::new(),
+            &HashMap::<String, ParagraphSpacing>::new(),
+            &HashMap::<String, ParagraphSpacing>::new(),
             &HashMap::<String, f64>::new(),
             &HashMap::new(),
             "ppt/slideLayouts",
@@ -2588,6 +2616,47 @@ mod placeholder_geometry_tests {
     /// absent. The values below are bounded to an Office-produced matrix that
     /// distinguishes title, body/subtitle, and object placeholders. These are
     /// application defaults, not fabricated defaults for ordinary text boxes.
+    /// ECMA-376 §19.3.1.51 txStyles: a placeholder without its own or a layout
+    /// lnSpc inherits the master level-1 lnSpc for its type. An idx-matched
+    /// layout placeholder without lnSpc also falls through to the master.
+    #[test]
+    fn master_tx_styles_line_spacing_is_inherited() {
+        let xml = r#"<p:sldMaster
+          xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+          xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <p:cSld><p:spTree/></p:cSld>
+          <p:txStyles>
+            <p:titleStyle><a:lvl1pPr><a:lnSpc><a:spcPct val="85000"/></a:lnSpc></a:lvl1pPr></p:titleStyle>
+            <p:bodyStyle><a:lvl1pPr><a:lnSpc><a:spcPct val="90000"/></a:lnSpc></a:lvl1pPr></p:bodyStyle>
+          </p:txStyles>
+        </p:sldMaster>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let (_, _, lines) = parse_master_txstyle_spacing(doc.root_element());
+        assert_eq!(lines.get("title"), Some(&85000.0));
+        assert_eq!(lines.get("body"), Some(&90000.0));
+        assert_eq!(lines.get("obj"), Some(&90000.0));
+        assert_eq!(lines.get("dt"), None);
+
+        let placeholders = LayoutPlaceholders {
+            by_idx_line_spacing: HashMap::from([(12, 120000.0)]),
+            by_type_master_line_spacing: lines,
+            ..LayoutPlaceholders::default()
+        };
+        assert_eq!(
+            placeholders.lookup_line_spacing("body", Some(11)),
+            Some(90000.0)
+        );
+        assert_eq!(
+            placeholders.lookup_line_spacing("body", Some(12)),
+            Some(120000.0)
+        );
+        assert_eq!(
+            placeholders.lookup_line_spacing("title", None),
+            Some(85000.0)
+        );
+        assert_eq!(placeholders.lookup_line_spacing("dt", Some(3)), None);
+    }
+
     #[test]
     fn master_without_tx_styles_uses_powerpoint_placeholder_font_defaults() {
         let xml = r#"<p:sldMaster

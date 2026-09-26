@@ -48,6 +48,18 @@ function syncInit(mod: WasmModule, bytes: Uint8Array, state: { initialized: bool
   state.initialized = true;
 }
 
+/**
+ * Conversion failures are thrown as the parser's raw envelope values, not as
+ * the typed errors of the viewer/Node APIs, because this adapter must stay
+ * loadable by the Node-stripped `ooxml-md` CLI and cannot import the
+ * TypeScript-source `@silurus/ooxml-core`. Stable prefixes:
+ *
+ *   - `OOXML_NOT_OOXML:<detail>` — not a readable ZIP, no `[Content_Types].xml`,
+ *     or no main document part (`OoxmlError('not-ooxml')` elsewhere);
+ *   - `OOXML_RESOURCE_LIMIT:<json>` — a resource limit was exceeded
+ *     (`OoxmlResourceLimitError` elsewhere).
+ */
+
 /** Initialise from raw WASM bytes. Works in both Node and browser. */
 export function initPptxFromBytes(bytes: ArrayBuffer | Uint8Array): void {
   syncInit(pptxWasm as WasmModule, toUint8(bytes), pptxState);

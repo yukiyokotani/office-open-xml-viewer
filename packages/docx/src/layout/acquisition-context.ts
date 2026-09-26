@@ -1,3 +1,4 @@
+import type { NoteNumbering } from '../line-layout.js';
 import type {
   KinsokuRules,
   NumberFormat,
@@ -124,6 +125,8 @@ export interface BodyAcquisitionState extends AnchorFloatRegistrationState {
    * layout session (only when showTrackedChanges is set). */
   revisionAuthorColor?: (author?: string) => string;
   noteNumbers?: Map<string, number>;
+  /** §17.11.17/.18/.20 display format and start for each note kind. */
+  noteNumbering?: NoteNumbering;
   noteReferenceNumber?: number;
   containerShading?: string | null;
 }
@@ -155,6 +158,7 @@ export type BodyMeasurementContext = Readonly<Pick<
   | 'showTrackedChanges'
   | 'revisionAuthorColor'
   | 'noteNumbers'
+  | 'noteNumbering'
   | 'noteReferenceNumber'
   | 'verticalCJK'
   | 'verticalAllRotated'

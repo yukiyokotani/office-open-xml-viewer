@@ -15,6 +15,42 @@ use ooxml_common::text::{parse_lnspc, SpaceLine};
 use ooxml_common::units::text_point_to_pt;
 use std::collections::HashMap;
 
+/// One `CT_TextSpacing` choice from `<a:spcBef>` / `<a:spcAft>` (ECMA-376
+/// §21.1.2.2.9-.10): an absolute `<a:spcPts>` in hundredths of a point or a
+/// `<a:spcPct>` in thousandths of a percent of the text size.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
+pub(crate) enum ParagraphSpacing {
+    Points(i64),
+    Percent(f64),
+}
+
+/// Read `<a:spcBef>` / `<a:spcAft>` under a paragraph-properties node.
+pub(crate) fn paragraph_spacing(
+    properties: roxmltree::Node<'_, '_>,
+    name: &str,
+) -> Option<ParagraphSpacing> {
+    let spacing = child(properties, name)?;
+    child(spacing, "spcPts")
+        .and_then(|n| attr_i64(&n, "val"))
+        .map(ParagraphSpacing::Points)
+        .or_else(|| {
+            child(spacing, "spcPct")
+                .and_then(|n| attr_f64(&n, "val"))
+                .map(ParagraphSpacing::Percent)
+        })
+}
+
+impl ParagraphSpacing {
+    /// Split into the model's exclusive (points, percent) fields.
+    pub(crate) fn split(value: Option<Self>) -> (Option<i64>, Option<f64>) {
+        match value {
+            Some(Self::Points(v)) => (Some(v), None),
+            Some(Self::Percent(v)) => (None, Some(v)),
+            None => (None, None),
+        }
+    }
+}
+
 /// Extract the lvl1pPr defRPr font size from a txBody node.
 pub(crate) fn extract_lvl1_font_size(tx_body: roxmltree::Node<'_, '_>) -> Option<f64> {
     child(tx_body, "lstStyle")
@@ -503,8 +539,8 @@ pub(crate) fn parse_text_body(
     inherited_auto_fit: Option<String>,
     inherited_alignment: Option<String>,
     inherited_ea_ln_brk: Option<bool>,
-    inherited_space_before: Option<i64>,
-    inherited_space_after: Option<i64>,
+    inherited_space_before: Option<ParagraphSpacing>,
+    inherited_space_after: Option<ParagraphSpacing>,
     inherited_line_spacing: Option<f64>,
     shape_kind: ShapeKind,
     zip: &mut PptxZip,
@@ -619,6 +655,12 @@ pub(crate) fn parse_text_body(
         .or_else(|| theme_default_str("rtlCol"))
         .map(|v| v == "1" || v == "true")
         .unwrap_or(false);
+    // ECMA-376 §21.1.2.1.1 spcFirstLastPara: shape attribute → theme
+    // objectDefaults → spec default (false, edge spacing suppressed).
+    let spc_first_last_para = body_pr
+        .and_then(|n| attr(&n, "spcFirstLastPara"))
+        .or_else(|| theme_default_str("spcFirstLastPara"))
+        .is_some_and(|v| v == "1" || v == "true");
 
     // ECMA-376 §20.1.9.19 — `<a:bodyPr><a:prstTxWarp prst="…">` selects a WordArt
     // text-warp envelope (ST_TextShapeType). Its `<a:avLst>` carries `<a:gd>`
@@ -728,14 +770,8 @@ pub(crate) fn parse_text_body(
         .or(inherited_ea_ln_brk);
 
     // Own lstStyle > lvl1pPr spacing overrides inherited
-    let own_lvl1_spcbef: Option<i64> = own_lvl1_ppr
-        .and_then(|lp| child(lp, "spcBef"))
-        .and_then(|s| child(s, "spcPts"))
-        .and_then(|s| attr_i64(&s, "val"));
-    let own_lvl1_spcaft: Option<i64> = own_lvl1_ppr
-        .and_then(|lp| child(lp, "spcAft"))
-        .and_then(|s| child(s, "spcPts"))
-        .and_then(|s| attr_i64(&s, "val"));
+    let own_lvl1_spcbef = own_lvl1_ppr.and_then(|lp| paragraph_spacing(lp, "spcBef"));
+    let own_lvl1_spcaft = own_lvl1_ppr.and_then(|lp| paragraph_spacing(lp, "spcAft"));
     let body_default_space_before = own_lvl1_spcbef.or(inherited_space_before);
     let body_default_space_after = own_lvl1_spcaft.or(inherited_space_after);
 
@@ -820,6 +856,7 @@ pub(crate) fn parse_text_body(
         num_col,
         spc_col,
         rtl_col,
+        spc_first_last_para,
         text_warp,
     }
 }
@@ -915,8 +952,8 @@ pub(crate) fn parse_paragraph(
     source_dir: &str,
     body_default_alignment: Option<&str>,
     body_default_ea_ln_brk: Option<bool>,
-    body_default_space_before: Option<i64>,
-    body_default_space_after: Option<i64>,
+    body_default_space_before: Option<ParagraphSpacing>,
+    body_default_space_after: Option<ParagraphSpacing>,
     body_default_line_spacing: Option<f64>,
     body_default_font_family: Option<&str>,
     body_default_reflection: Option<&Reflection>,
@@ -1015,20 +1052,16 @@ pub(crate) fn parse_paragraph(
         .or(level_indent.indent)
         .unwrap_or(if has_bullet { -342900 } else { 0 });
 
-    let space_before = p_pr
-        .and_then(|n| {
-            child(n, "spcBef")
-                .and_then(|s| child(s, "spcPts"))
-                .and_then(|s| attr_i64(&s, "val"))
-        })
-        .or(body_default_space_before);
-    let space_after = p_pr
-        .and_then(|n| {
-            child(n, "spcAft")
-                .and_then(|s| child(s, "spcPts"))
-                .and_then(|s| attr_i64(&s, "val"))
-        })
-        .or(body_default_space_after);
+    // The nearest `<a:spcBef>`/`<a:spcAft>` wins as a whole: a percentage
+    // replaces an inherited point value and vice versa (xsd:choice).
+    let (space_before, space_before_pct) = ParagraphSpacing::split(
+        p_pr.and_then(|n| paragraph_spacing(n, "spcBef"))
+            .or(body_default_space_before),
+    );
+    let (space_after, space_after_pct) = ParagraphSpacing::split(
+        p_pr.and_then(|n| paragraph_spacing(n, "spcAft"))
+            .or(body_default_space_after),
+    );
 
     let space_line = p_pr
         .and_then(|n| child(n, "lnSpc"))
@@ -1183,6 +1216,8 @@ pub(crate) fn parse_paragraph(
         indent,
         space_before,
         space_after,
+        space_before_pct,
+        space_after_pct,
         space_line,
         lvl,
         bullet,

@@ -17366,11 +17366,14 @@ function renderChartImpl(
     const hasChartexData = chart.chartexBox != null || chart.chartexSunburst != null
       || chart.chartexTreemap != null || chart.chartexRegionMap != null;
     if (chart.series.length === 0 && !hasChartexData) {
-      ctx.fillStyle = '#888';
-      ctx.font = '12px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText('(no data)', x + w / 2, y + h / 2);
+      // An authored series-less chart is Office's empty chart area.
+      if (chart.authoredWithoutSeries !== true) {
+        ctx.fillStyle = '#888';
+        ctx.font = '12px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('(no data)', x + w / 2, y + h / 2);
+      }
       drawChartTextBoxes(ctx, chart, rect, ptToPx);
       return;
     }

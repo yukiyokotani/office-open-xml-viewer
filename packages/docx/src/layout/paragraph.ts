@@ -27,6 +27,7 @@ import {
   widthBalanceSpaceAdjustmentForTextPt,
 } from '../line-layout.js';
 import { calcEffectiveFontPx, EAST_ASIAN_RE, shapeRunToDocRun } from './text.js';
+import { eastAsianUprightPaintOps } from './vertical-glyph-orientation.js';
 import { wordTrackChangeDecoration } from './paint-compatibility.js';
 import type { DocParagraph, DocRun, ShapeRun } from '../types.js';
 import {
@@ -74,7 +75,7 @@ import {
   type RetainedEmphasisMarkInput,
 } from './retained-typography.js';
 import type { RunTypographyAcquisitionInput } from './typography-input.js';
-import { resolveAnchorFrame, type AnchorReferenceFramesInput, type AnchorFrameResult } from './anchor-frame.js';
+import { alignedAnchorPlacement, resolveAnchorFrame, type AnchorReferenceFramesInput, type AnchorFrameResult } from './anchor-frame.js';
 import { paragraphGapPt } from './paragraph-spacing.js';
 import {
   translateDrawing,
@@ -116,6 +117,7 @@ import {
   type FloatPlacementParticipant,
 } from './floats.js';
 import { unionLayoutRects } from './rect-union.js';
+import type { LayoutTranslation } from './retained-geometry-translation.js';
 import {
   measureParagraphIntrinsicWidth,
   type BodyFrameGroup,
@@ -2998,6 +3000,8 @@ function acquireAnchorOccurrence(
   sameParagraphExclusions: readonly WrapExclusion[],
   externalCollisions: readonly DrawingMLCollisionEntryPt[],
   sameParagraphCollisions: readonly DrawingMLCollisionEntryPt[],
+  /** Every anchor occurrence of this paragraph, computed once per paragraph. */
+  paragraphOccurrenceIds: ReadonlySet<string>,
 ): AcquiredAnchorOccurrence | null {
   let hostLineIndex = -1;
   let host: Extract<ParagraphPlacement, { kind: 'anchor-host' }> | undefined;
@@ -3105,7 +3109,7 @@ function acquireAnchorOccurrence(
     const textBoxRect = uprightTransform
       ? logicalRectToUprightDrawingLocal(authoredRect, uprightTransform)
       : authoredRect;
-    const textBox = acquireShapeTextBoxLayout(outer.run, textBoxRect, {
+    const acquired = acquireShapeTextBoxLayout(outer.run, textBoxRect, {
       id: `${options.id}:anchor-textbox:${occurrenceId}:${outer.runIndex}`,
       source,
       flowDomainId: options.flowDomainId,
@@ -3116,6 +3120,21 @@ function acquireAnchorOccurrence(
       acquireCompleteStory: options.acquireCompleteStory,
       ...(uprightTransform ? { coordinateSpace: 'upright-physical' as const } : {}),
     });
+    // The fitted text box keeps its anchor alignment. The acquired layout is
+    // immutable retained geometry in textBoxRect's space (logical page, or the
+    // upright drawing frame whose axes are the physical anchor axes), so the
+    // alignment is a translation of that layout, not a second acquisition.
+    const fitShift = acquired
+      ? alignedAutofitTranslation(
+          outer.run.anchorAcquisitionInput,
+          baseFrames?.pageParity ?? null,
+          textBoxRect,
+          acquired.flowBounds,
+        )
+      : { xPt: 0, yPt: 0 };
+    const textBox = acquired && (fitShift.xPt !== 0 || fitShift.yPt !== 0)
+      ? translateTextBox(acquired, fitShift)
+      : acquired;
     if (textBox) {
       acquiredShapeTextBoxes.set(outer.runIndex, textBox);
       rect = uprightTransform
@@ -3165,7 +3184,12 @@ function acquireAnchorOccurrence(
             bounds: entry.bounds,
           }))
       : externalExclusions
-          .filter((exclusion) => exclusion.anchorOccurrenceId !== occurrenceId)
+          // Page-owned prescan registers this paragraph's own anchors on the
+          // page before the paragraph lays out. They are same-paragraph
+          // siblings, not different-paragraph blockers, so the compatibility
+          // policy leaves them to overlap as allowOverlap=true permits.
+          .filter((exclusion) => exclusion.anchorOccurrenceId === undefined
+            || !paragraphOccurrenceIds.has(exclusion.anchorOccurrenceId))
           .map((exclusion) => ({
             occurrenceId: exclusion.anchorOccurrenceId ?? exclusion.id,
             bounds: exclusion.bounds,
@@ -3474,25 +3498,7 @@ function orientVerticalTextBoxParagraph(
           : placement;
       }
       const paintOps = eastAsianUpright
-        ? placement.clusters.map((cluster) => {
-            const text = placement.text.slice(
-              cluster.range.start - placement.range.start,
-              cluster.range.end - placement.range.start,
-            );
-            const template = placement.paintOps.find((operation) =>
-              operation.range.start <= cluster.range.start && operation.range.end >= cluster.range.end)
-              ?? placement.paintOps[0]!;
-            const upright = EAST_ASIAN_RE.test(text);
-            return {
-              ...template,
-              text,
-              range: cluster.range,
-              offset: upright
-                ? { xPt: cluster.offset.xPt + cluster.advancePt / 2, yPt: cluster.offset.yPt }
-                : cluster.offset,
-              glyphOrientation: upright ? 'upright' as const : 'sideways' as const,
-            };
-          })
+        ? eastAsianUprightPaintOps(placement)
         : placement.paintOps;
       return translatePlacementY({ ...placement, paintOps }, deltaYPt);
     });
@@ -3655,6 +3661,47 @@ function translateVerticalTextBoxTable(
     ...translated,
     ...(floatingTables ? { floatingTables } : {}),
     ...(resolvedFloatingTables ? { resolvedFloatingTables } : {}),
+  };
+}
+
+/**
+ * Translation that keeps an aligned anchor's `wp:align` values when spAutoFit
+ * gives a text box a fitted extent different from its authored one
+ * (ECMA-376 §20.4.3.1 wp:align, §21.1.2.1.3 spAutoFit): the aligned edge
+ * belongs to the drawn extent. A trailing value (`right`/`bottom`, or
+ * `inside`/`outside` by page parity) keeps the fitted box's trailing edge on
+ * the authored one and `center` keeps the centre. Offsets, percentages and
+ * leading values keep the fitted box where acquisition placed it. Both frames
+ * are in the same coordinate space, whose axes are the anchor's physical
+ * positionH/positionV axes (the logical page, or the upright drawing frame of
+ * a vertical section).
+ */
+export function alignedAutofitTranslation(
+  input: Readonly<Pick<import('./anchor-input.js').AnchorAcquisitionInput, 'horizontal' | 'vertical'>>,
+  pageParity: 'odd' | 'even' | null,
+  authored: LayoutRect,
+  fitted: LayoutRect,
+): LayoutTranslation {
+  const axisShift = (
+    axis: 'horizontal' | 'vertical',
+    authoredStart: number,
+    authoredSize: number,
+    fittedStart: number,
+    fittedSize: number,
+  ): number => {
+    const choice = input[axis].choice;
+    if (choice.kind !== 'align' || authoredSize === fittedSize) return 0;
+    const placement = alignedAnchorPlacement(axis, choice.value, pageParity);
+    const shift = placement === 'trailing'
+      ? authoredStart + authoredSize - fittedStart - fittedSize
+      : placement === 'center'
+        ? authoredStart + authoredSize / 2 - fittedStart - fittedSize / 2
+        : 0;
+    return Number.isFinite(shift) ? shift : 0;
+  };
+  return {
+    xPt: axisShift('horizontal', authored.xPt, authored.widthPt, fitted.xPt, fitted.widthPt),
+    yPt: axisShift('vertical', authored.yPt, authored.heightPt, fitted.yPt, fitted.heightPt),
   };
 }
 
@@ -4121,6 +4168,14 @@ export function paragraphAcquisitionCacheKey(
           .sort(([left], [right]) => left.localeCompare(right))
         : null,
       environment.noteReferenceNumber ?? null,
+      environment.noteNumbering
+        ? [
+          environment.noteNumbering.footnote.format,
+          environment.noteNumbering.footnote.start,
+          environment.noteNumbering.endnote.format,
+          environment.noteNumbering.endnote.start,
+        ]
+        : null,
       environment.pageWritingMode,
       environment.verticalCJK ?? null,
       environment.verticalPageFrame ?? null,
@@ -4412,6 +4467,9 @@ export interface RetainedFrameGroupOptions {
    * leak across the session whose resource/font facts produced their geometry. */
   readonly acquisitionSession: object;
   readonly placementSignature: string;
+  /** Owning story of the grouped paragraphs; `sourceIndices` are paths in its
+   * root block list. Defaults to the main body. */
+  readonly story?: Readonly<{ story: SourceRef['story']; storyInstance: string }>;
   readonly place: (
     contentWidthPt: number,
     contentHeightPt: number,
@@ -4462,7 +4520,13 @@ export function acquireRetainedFrameGroup(
     cache = new Map();
     retainedFrameGroupCache.set(options.acquisitionSession, cache);
   }
+  const owner = options.story ?? { story: 'body' as const, storyInstance: 'body' };
+  const framePrefix = owner.story === 'body'
+    ? 'body-frame'
+    : `${owner.story}:${owner.storyInstance}:frame`;
   const cacheKey = stableFingerprint('w:frame-acquisition', [
+    owner.story,
+    owner.storyInstance,
     group.id,
     options.placementSignature,
     options.maximumWidthPt,
@@ -4507,7 +4571,7 @@ export function acquireRetainedFrameGroup(
     heightPt: number;
     members: RetainedFrameGroupAcquisition['members'];
   }> => {
-    let wrapRegistry = createParagraphWrapRegistry(`body-frame:${group.id}`);
+    let wrapRegistry = createParagraphWrapRegistry(`${framePrefix}:${group.id}`);
     let cursorPt = 0;
     let previous: ParagraphLayoutSource | null = null;
     let previousAfterPt = 0;
@@ -4528,14 +4592,16 @@ export function acquireRetainedFrameGroup(
       };
       const borderExtentPt = options.borderExtentsPt[memberIndex] ?? 0;
       const source: SourceRef = {
-        story: 'body', storyInstance: 'body', path: [group.sourceIndices[memberIndex]!],
+        story: owner.story,
+        storyInstance: owner.storyInstance,
+        path: [group.sourceIndices[memberIndex]!],
       };
       const acquired = acquireParagraphResult(
         options.inputs[memberIndex]!,
         {
-          id: `body-frame:${group.id}:${memberIndex}`,
+          id: `${framePrefix}:${group.id}:${memberIndex}`,
           source,
-          flowDomainId: `body-frame:${group.id}`,
+          flowDomainId: `${framePrefix}:${group.id}`,
           ordinaryFlow: false,
           context,
           placement,
@@ -4674,6 +4740,7 @@ export function paragraphLayoutFromMeasurement(
     payloads.push({ run, runIndex });
     payloadsByOccurrence.set(run.anchorAcquisitionInput!.occurrenceId, payloads);
   });
+  const paragraphOccurrenceIds: ReadonlySet<string> = new Set(payloadsByOccurrence.keys());
   for (const [occurrenceId, payloads] of payloadsByOccurrence) {
     const acquired = acquireAnchorOccurrence(
       occurrenceId,
@@ -4686,6 +4753,7 @@ export function paragraphLayoutFromMeasurement(
       anchorExclusions,
       options.anchorCollisions ?? [],
       anchorCollisions,
+      paragraphOccurrenceIds,
     );
     if (!acquired) continue;
     anchorResults.push(acquired.result);

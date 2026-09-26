@@ -312,6 +312,13 @@ describe('paragraph acquisition cache', () => {
       key({ environment: { ...base.environment, currentDateMs: 101 } }),
       key({ environment: { ...base.environment, noteNumbers: new Map([['footnote:1', 1]]) } }),
       key({ environment: { ...base.environment, noteReferenceNumber: 1 } }),
+      key({ environment: {
+        ...base.environment,
+        noteNumbering: {
+          footnote: { format: 'decimal', start: 1 },
+          endnote: { format: 'lowerRoman', start: 1 },
+        },
+      } }),
       key({ environment: { ...base.environment, pageWritingMode: 'vertical-lr' } }),
       key({ environment: { ...base.environment, verticalCJK: true } }),
       key({ environment: { ...base.environment, verticalPageFrame: true } }),

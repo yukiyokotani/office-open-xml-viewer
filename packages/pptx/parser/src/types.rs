@@ -2,7 +2,7 @@
 //! helpers and pure transform types. Extracted verbatim from `lib.rs`; `lib.rs`
 //! re-exports these via `pub use types::*`.
 
-use ooxml_common::blip::{Duotone, SrcRect};
+use ooxml_common::blip::{BlipEffect, Duotone, SrcRect};
 use ooxml_common::drawing::{DrawingGroupSpec, DrawingGroupTransform, DrawingRect};
 use ooxml_common::math::MathNode;
 use ooxml_common::text::SpaceLine;
@@ -460,6 +460,13 @@ pub(crate) struct ShapeElement {
     /// Custom geometry paths (only set when geometry == "custGeom").
     /// Outer vec: one entry per <a:path>; inner vec: path commands with coords in [0,1].
     pub(crate) cust_geom: Option<Vec<Vec<PathCmd>>>,
+    /// Per-path paint of `cust_geom` (ECMA-376 20.1.9.15 `a:path@fill` and
+    /// `@stroke`), one entry per path. Absent when every path uses the
+    /// defaults (`norm` fill, stroked), so ordinary geometry serializes
+    /// unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub(crate) cust_geom_paint: Option<Vec<PathPaint>>,
     /// First adjustment value from prstGeom avLst (e.g. trapezoid inset).
     /// Value is in OOXML units (0–100000 range).
     pub(crate) adj: Option<f64>,
@@ -589,6 +596,12 @@ pub(crate) struct PictureElement {
     /// resolves to `<a:noFill/>` (border explicitly suppressed).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) stroke: Option<Stroke>,
+    /// `<p:spPr>` fill (ECMA-376 §19.3.1.37 routes a `p:pic`'s spPr through
+    /// CT_ShapeProperties): painted inside the picture silhouette BEHIND the
+    /// blip, so it shows through transparent pixels. `None` when the spPr has
+    /// no fill element.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) fill: Option<Fill>,
     /// `<p:spPr><a:prstGeom prst="…">` preset name (e.g. "roundRect",
     /// "ellipse"). ECMA-376 §20.1.9.18: a picture's preset geometry is its clip
     /// silhouette and the path its border / contour hug. None = plain rectangle
@@ -615,6 +628,12 @@ pub(crate) struct PictureElement {
     /// `applyDuotone`), matching PowerPoint's recolour.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) duotone: Option<Duotone>,
+    /// CT_Blip pixel effects (ECMA-376 §20.1.8.13: grayscl, biLevel,
+    /// clrChange, lum) in document order, with a `Duotone` entry marking where
+    /// the `duotone` above applies. Empty (the common case, and any picture
+    /// with at most a duotone) keeps the duotone-only decode path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) blip_effects: Vec<BlipEffect>,
     /// `<p:spPr><a:custGeom>` — custom geometry path used as a clip on the
     /// blitted image. Same shape model as `ShapeElement.cust_geom` (one or more
     /// `<a:path>` whose coordinates are normalized into [0,1] of the bbox).
@@ -761,6 +780,10 @@ pub(crate) enum Fill {
         /// picture FILL (§20.1.8.14) may carry just as a picture element can.
         #[serde(skip_serializing_if = "Option::is_none")]
         duotone: Option<Duotone>,
+        /// CT_Blip pixel effects in document order (see
+        /// `PictureElement::blip_effects`).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        blip_effects: Vec<BlipEffect>,
     },
 }
 
@@ -822,6 +845,17 @@ pub(crate) struct Stroke {
     /// "thinThick" | "thickThin" | "tri". None = single line.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) cmpd: Option<String>,
+}
+
+/// Paint flags of one custGeom path (ECMA-376 20.1.9.15).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PathPaint {
+    /// ST_PathFillMode (20.1.10.37): `none`, `lighten`, `lightenLess`,
+    /// `darken` or `darkenLess`; `None` is `norm`.
+    pub(crate) fill: Option<String>,
+    /// Whether the path is stroked.
+    pub(crate) stroke: bool,
 }
 
 /// A single path command inside a custGeom pathLst.
@@ -939,6 +973,12 @@ pub(crate) struct TextBody {
     #[serde(skip_serializing_if = "is_false")]
     #[serde(default)]
     pub(crate) rtl_col: bool,
+    /// `<a:bodyPr spcFirstLastPara>` (ECMA-376 §21.1.2.1.1) — whether the
+    /// space before of the first paragraph and the space after of the last
+    /// paragraph are respected. Default false: both edges are suppressed.
+    #[serde(skip_serializing_if = "is_false")]
+    #[serde(default)]
+    pub(crate) spc_first_last_para: bool,
     /// `<a:bodyPr><a:prstTxWarp>` — WordArt text warp (ECMA-376 §20.1.9.19).
     /// None when the body has no warp (the common case), so existing text bodies
     /// serialize byte-identically. When present the renderer maps each glyph
@@ -1053,8 +1093,24 @@ pub(crate) struct Paragraph {
     pub(crate) mar_r: i64,
     /// First-line indent in EMU (negative = hanging indent for bullets)
     pub(crate) indent: i64,
+    /// `<a:spcBef><a:spcPts val>` (ECMA-376 §21.1.2.2.10, §21.1.2.3.12) in
+    /// hundredths of a point. Mutually exclusive with `space_before_pct`.
     pub(crate) space_before: Option<i64>,
+    /// `<a:spcAft><a:spcPts val>` (ECMA-376 §21.1.2.2.9) in hundredths of a
+    /// point. Mutually exclusive with `space_after_pct`.
     pub(crate) space_after: Option<i64>,
+    /// `<a:spcBef><a:spcPct val>` (ECMA-376 §21.1.2.2.10, §21.1.2.3.11) in
+    /// thousandths of a percent (100000 = one line) of the text size of the
+    /// line it precedes. The spacing choice is exclusive: at most one of
+    /// `space_before` / `space_before_pct` is set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub(crate) space_before_pct: Option<f64>,
+    /// `<a:spcAft><a:spcPct val>` (ECMA-376 §21.1.2.2.9, §21.1.2.3.11), in
+    /// the same unit, of the text size of the paragraph's last line.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub(crate) space_after_pct: Option<f64>,
     pub(crate) space_line: Option<SpaceLine>,
     /// List nesting level (0–8)
     pub(crate) lvl: u32,

@@ -2,7 +2,7 @@ import type { CjkLang } from '@silurus/ooxml-core';
 import type { BodyElement, DocParagraph, DocTable, DocTableCell, DocRun, ImageRun, ChartRun, ShapeRun, SectionProps } from '../types';
 import type { ResolvedFontMetric } from '@silurus/ooxml-core';
 import { type FloatRect, FLOAT_OVERLAP_EPS, isWrapFloat } from '../float-layout.js';
-import { type FrameBox, computeFrameBox, frameXContainer, pushFloatRect } from '../frame-geometry.js';
+import { type FrameBox, computeFrameBox, frameXContainer, pushFloatRect, registerFrameFloat } from '../frame-geometry.js';
 import { resolveFloatingTableBoxPt } from '../float-table-geometry.js';
 import { xContainer, yContainer, resolveAnchorX, resolveAnchorY } from '../anchor-geometry.js';
 import { resolveParagraphLayoutContext, resolveSectionLayoutContext, type DocumentLayoutSettings, type SectionLayoutContext } from '../layout-context.js';
@@ -64,7 +64,7 @@ import type {
 } from './layout-source-store.js';
 import type { ParagraphChartRun, ParagraphImageRun, ParagraphLayoutSource, ParagraphShapeRun } from './text.js';
 import type { TableLayoutSource } from './table-source-acquisition.js';
-import { prepareBodyFrameMetadata } from './frame.js';
+import { collectBodyFrameGroups, prepareBodyFrameMetadata } from './frame.js';
 import {
   physicalToLogicalMatrix,
   uprightPhysicalExtent,
@@ -519,6 +519,11 @@ function buildConcreteBodyLayoutKernel(
       }
       const sourceFootnotes = source.blocks.footnotes;
       const sourceEndnotes = source.blocks.endnotes;
+      const noteSettings = source.bodyLayoutInput.noteLayoutSettings;
+      state.noteNumbering = {
+        footnote: noteSettings?.footnoteNumbering ?? { format: 'decimal', start: 1 },
+        endnote: noteSettings?.endnoteNumbering ?? { format: 'decimal', start: 1 },
+      };
       const footnotesById = indexNotes(sourceFootnotes);
       state.noteNumbers = new Map([
         ...[...buildNoteNumberMap(
@@ -822,11 +827,72 @@ function buildConcreteBodyLayoutKernel(
           ).input];
         });
         let previousParagraph: LayoutParagraphBlock | null = null;
+        // ECMA-376 §17.3.1.11 frames are story-local: adjacent paragraphs with
+        // identical framePr form one frame anchored to the next non-frame
+        // paragraph of the same story (headers and footers included).
+        const storyFrameGroups = collectBodyFrameGroups(root);
+        const storyFrameAcquisitions = new Map<BodyFrameGroup<LayoutParagraphBlock>, Readonly<{
+          box: FrameBox;
+          members: ReadonlyMap<ParagraphLayoutSource, ReturnType<typeof acquireRetainedFrameGroup>['members'][number]>;
+        }>>();
         const algorithms: BlockLayoutAlgorithms = {
           layoutParagraph(block, placement) {
             const paragraph = storyElement(block.source);
             if (paragraph.type !== 'paragraph') throw new Error('Story paragraph source kind mismatch');
             const sourceIndex = block.source.path[0]!;
+            const frameGroup = paragraph.framePr
+              ? storyFrameGroups.get(paragraph) as BodyFrameGroup<LayoutParagraphBlock> | undefined
+              : undefined;
+            // Page stories are laid out at the top of a page-sized container and
+            // then translated into their header/footer band, so only frames whose
+            // vertical anchor moves with the story text (vAnchor="text") keep
+            // their authored geometry. Page/margin-anchored frames and drop caps
+            // retain the historical in-flow fallback.
+            if (
+              frameGroup
+              && frameGroup.framePr.vAnchor === 'text'
+              && frameGroup.framePr.dropCap === 'none'
+            ) {
+              // Acquire each group once, at its owner (the first member, whose
+              // cursor all members share because frames add no story advance),
+              // and reuse it for the remaining members: re-acquiring per member
+              // would re-fingerprint the whole group each time.
+              let acquisition = storyFrameAcquisitions.get(frameGroup);
+              if (!acquisition) {
+                candidate.y = placement.cursor.yPt;
+                candidate.contentX = placement.container.bounds.xPt;
+                candidate.contentW = placement.container.bounds.widthPt;
+                let acquiredGroup: ReturnType<typeof acquireRetainedFrameGroup> | undefined;
+                const box = resolveFrameBox(
+                  frameGroup.owner,
+                  frameGroup,
+                  candidate,
+                  frameAnchorLineHeightPx(root, frameGroup.owner, candidate),
+                  {
+                    onAcquired: (acquired) => { acquiredGroup = acquired; },
+                    story: { story: block.source.story, storyInstance: block.source.storyInstance },
+                    borderEdgesFor: (member) => storyFrameBorderEdges(frameGroup, member),
+                  },
+                );
+                if (!acquiredGroup) throw new Error('Story frame acquisition omitted its retained group');
+                acquisition = {
+                  box,
+                  members: new Map(acquiredGroup.members.map((entry) => [entry.paragraph, entry])),
+                };
+                storyFrameAcquisitions.set(frameGroup, acquisition);
+                registerFrameFloat(box, frameGroup.framePr, candidate);
+              }
+              const member = acquisition.members.get(paragraph);
+              if (!member) throw new Error('Story frame acquisition omitted its retained member');
+              // The frame occupies no ordinary story flow; the anchor paragraph
+              // that follows starts at the same cursor and wraps around it.
+              // Story flow owns every retained root it returns (layoutFlowBlocks
+              // invariant); the positioned geometry itself is unchanged.
+              return {
+                layout: Object.freeze({ ...member.fragment, flowDomainId: placement.container.id }),
+                nextCursor: placement.cursor,
+              };
+            }
             const previousCandidate = sourceIndex > 0 ? root[sourceIndex - 1] : undefined;
             const previous: LayoutParagraphBlock | null = previousCandidate?.type === 'paragraph'
               ? previousCandidate : null;
@@ -975,7 +1041,7 @@ function buildConcreteBodyLayoutKernel(
               frameGroup,
               state,
               frameAnchorLineHeightPx(source.blocks.body, paragraph, state),
-              (acquired) => { acquiredGroup = acquired; },
+              { onAcquired: (acquired) => { acquiredGroup = acquired; } },
             );
             if (!acquiredGroup) throw new Error('Body frame acquisition omitted its retained group');
             const member = acquiredGroup.members.find((candidate) => candidate.paragraph === paragraph);
@@ -2525,17 +2591,42 @@ function frameAnchorLineHeightPx(
   );
 }
 
+/** Border adjacency inside one story-local frame group (ECMA-376 §17.3.1.11). */
+function storyFrameBorderEdges(
+  group: BodyFrameGroup<LayoutParagraphBlock>,
+  paragraph: LayoutParagraphBlock,
+): ReturnType<typeof resolveParagraphBorderEdges> {
+  const index = group.members.indexOf(paragraph);
+  return resolveParagraphBorderEdges(
+    group.members[index - 1] ?? null,
+    paragraph,
+    group.members[index + 1] ?? null,
+    true,
+  );
+}
+
 /** Resolve a prepared body frame group and attach its retained member layouts. */
+/** How a frame box reports its retained group, and the story context when
+ * the frame lives in a header/footer story rather than the body. */
+type FrameBoxAcquisitionOptions = Readonly<{
+  onAcquired?: (acquired: ReturnType<typeof acquireRetainedFrameGroup>) => void;
+  story?: Readonly<{ story: SourceRef['story']; storyInstance: string }>;
+  borderEdgesFor?: (
+    paragraph: LayoutParagraphBlock,
+  ) => ReturnType<typeof bodyParagraphBorderEdgesFor>;
+}>;
+
 function resolveFrameBox(
   para: ParagraphLayoutSource,
   group: BodyFrameGroup<LayoutParagraphBlock>,
   state: BodyAcquisitionState,
   anchorLineHPt: number,
-  onAcquired?: (acquired: ReturnType<typeof acquireRetainedFrameGroup>) => void,
+  acquisition: FrameBoxAcquisitionOptions,
 ): FrameBox {
+  const { onAcquired, story, borderEdgesFor = bodyParagraphBorderEdgesFor } = acquisition;
   const measurer = { context: state.ctx, fontFamilyClasses: state.fontFamilyClasses };
   const environment = paragraphMeasurementEnvironment(state);
-  const borderEdges = group.members.map(bodyParagraphBorderEdgesFor);
+  const borderEdges = group.members.map(borderEdgesFor);
   const horizontalBand = frameXContainer(group.framePr.hAnchor, state);
   const pointPlacement = {
     contentXPt: state.contentX,
@@ -2556,6 +2647,7 @@ function resolveFrameBox(
     containerShading: state.containerShading,
     maximumWidthPt: Math.max(0, horizontalBand.right - horizontalBand.left),
     acquisitionSession: state,
+    ...(story ? { story } : {}),
     placementSignature: [
       pointPlacement.contentXPt,
       pointPlacement.contentWidthPt,

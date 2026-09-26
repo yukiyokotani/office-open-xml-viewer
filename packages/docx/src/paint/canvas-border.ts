@@ -310,6 +310,35 @@ export function paintStrokeSegment(
     ctx.setLineDash([]);
     return;
   }
+  if (segment.style === 'double' && !axisAligned && path.length === 2) {
+    // A diagonal double border (ECMA-376 §17.4.73/§17.4.79 cell diagonals)
+    // keeps the same rail/gap geometry as an axis-aligned double rail, offset
+    // along the segment normal; there is no device row/column to snap to.
+    const dx = path[1]!.xPt - path[0]!.xPt;
+    const dy = path[1]!.yPt - path[0]!.yPt;
+    const length = Math.hypot(dx, dy);
+    const normal = length > 0 ? { xPt: -dy / length, yPt: dx / length } : null;
+    const scale = normal
+      ? Math.hypot(
+        pointToCss.a * normal.xPt + pointToCss.c * normal.yPt,
+        pointToCss.b * normal.xPt + pointToCss.d * normal.yPt,
+      )
+      : 0;
+    if (normal && scale > 0) {
+      const { railDev, gapDev } = doubleRailGeometry(segment.widthPt * scale, context.dpr);
+      const railPt = railDev / context.dpr / scale;
+      const offsetPt = (railDev + gapDev) / context.dpr / scale / 2;
+      ctx.lineWidth = railPt;
+      for (const side of [-1, 1]) {
+        ctx.beginPath();
+        ctx.moveTo(path[0]!.xPt + normal.xPt * offsetPt * side, path[0]!.yPt + normal.yPt * offsetPt * side);
+        ctx.lineTo(path[1]!.xPt + normal.xPt * offsetPt * side, path[1]!.yPt + normal.yPt * offsetPt * side);
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+      return;
+    }
+  }
   const cssOffset = finalVertical && normalScale > 0
     ? { xPt: crispOffset(finalPath[0]!.xPt, segment.widthPt * normalScale, context.dpr), yPt: 0 }
     : finalHorizontal && normalScale > 0

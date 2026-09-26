@@ -481,13 +481,14 @@ impl DocxArchive {
     }
 
     /// Current or most recently completed document-cursor resource checkpoint.
-    pub fn document_cursor_resource_usage(&self) -> Result<Vec<u8>, JsValue> {
-        let usage = self
-            .archive
-            .operation_usage()
-            .or(self.last_document_usage)
-            .ok_or_else(|| JsValue::from_str("document cursor usage is unavailable"))?;
+    /// `None` when no checkpoint exists: a package that fails before its
+    /// document cursor opens streams a placeholder document without one.
+    pub fn document_cursor_resource_usage(&self) -> Result<Option<Vec<u8>>, JsValue> {
+        let Some(usage) = self.archive.operation_usage().or(self.last_document_usage) else {
+            return Ok(None);
+        };
         serde_json::to_vec(&usage)
+            .map(Some)
             .map_err(|error| JsValue::from_str(&format!("serialize error: {error}")))
     }
 
@@ -807,8 +808,20 @@ mod tests {
         assert!(archive.document_cursor.is_none());
         assert!(archive.prepared_document_chunk.is_none());
         let usage: serde_json::Value =
-            serde_json::from_slice(&archive.document_cursor_resource_usage().unwrap()).unwrap();
+            serde_json::from_slice(&archive.document_cursor_resource_usage().unwrap().unwrap())
+                .unwrap();
         assert!(usage["operationInflatedBytes"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn missing_document_cursor_checkpoint_is_a_typed_absence() {
+        // Before any document cursor operation has run there is no
+        // checkpoint; the archive reports that as `None`, not as an error.
+        // (Unreadable input never constructs an archive: see
+        // `non_ooxml_input_is_rejected_at_every_public_boundary`.)
+        let data = cursor_test_package();
+        let archive = cursor_archive(&data);
+        assert!(archive.document_cursor_resource_usage().unwrap().is_none());
     }
 
     #[test]

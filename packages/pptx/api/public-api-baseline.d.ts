@@ -24,6 +24,25 @@ export interface BlipBullet {
     sizePct: number | null;
     sizePts?: number;
 }
+export type BlipEffect = {
+    type: 'grayscale';
+} | {
+    type: 'biLevel';
+    thresh: number;
+} | {
+    type: 'colorChange';
+    from: string;
+    fromAlpha: number;
+    to: string;
+    toAlpha: number;
+    useAlpha: boolean;
+} | {
+    type: 'luminance';
+    bright: number;
+    contrast: number;
+} | {
+    type: 'duotone';
+};
 export function buildPptxHighlightLayer(layer: HTMLDivElement, runs: PptxTextRunInfo[], matches: PptxHighlightMatch[], cssWidth: number, cssHeight: number, measureForFont: (font: string) => (s: string) => number, colors?: PptxHighlightColors): void;
 export function buildPptxTextLayer(layer: HTMLDivElement, runs: PptxTextRunInfo[], cssWidth: number, cssHeight: number, onHyperlinkClick?: (target: HyperlinkTarget) => void, slideIndex?: number): void;
 export type Bullet = Bullet__emitterCollision1 | BlipBullet;
@@ -388,6 +407,7 @@ export interface ChartModel {
     title: string | null;
     titleRichRuns?: ChartTextRun[] | null;
     titlePresent?: boolean;
+    authoredWithoutSeries?: boolean;
     categories: string[];
     categorySourceHidden?: boolean[] | null;
     categoryLevels?: string[][] | null;
@@ -1072,6 +1092,7 @@ export interface ImageFill {
     tile?: TileInfo;
     alpha?: number;
     duotone?: Duotone;
+    blipEffects?: BlipEffect[];
 }
 export interface ImageResourceOptions {
     decodedByteBudget?: number;
@@ -1266,7 +1287,7 @@ export class OoxmlDecodedImageLimitError extends RangeError {
     readonly code: 'ooxml-decoded-image-limit';
     constructor(metric: OoxmlDecodedImageLimitMetric, limit: number, observed: number);
 }
-export type OoxmlDecodedImageLimitMetric = 'image-dimension' | 'image-pixels' | 'active-decoded-bytes';
+export type OoxmlDecodedImageLimitMetric = 'image-dimension' | 'image-pixels' | 'active-decoded-bytes' | 'image-effect-count' | 'image-effect-work';
 export class OoxmlError extends Error {
     readonly code: OoxmlErrorCode;
     constructor(code: OoxmlErrorCode, message: string);
@@ -1350,6 +1371,8 @@ interface Paragraph__emitterCollision1 {
     indent: number;
     spaceBefore: number | null;
     spaceAfter: number | null;
+    spaceBeforePct?: number;
+    spaceAfterPct?: number;
     spaceLine: SpaceLine | null;
     lvl: number;
     bullet: Bullet__emitterCollision1;
@@ -1415,6 +1438,7 @@ export interface PictureElement {
     intrinsicWidthPx?: number;
     intrinsicHeightPx?: number;
     stroke: Stroke | null;
+    fill?: Fill;
     prstGeom?: string;
     prstAdjust?: number[];
     srcRect?: {
@@ -1425,6 +1449,7 @@ export interface PictureElement {
     };
     alpha?: number;
     duotone?: Duotone;
+    blipEffects?: BlipEffect[];
     custGeom?: PathCmd[][] | null;
     shadow?: Shadow;
     innerShadow?: Shadow;
@@ -1891,6 +1916,10 @@ export interface ShapeElement {
     textBody: TextBody | null;
     defaultTextColor: string | null;
     custGeom: PathCmd[][] | null;
+    custGeomPaint?: {
+        fill: string | null;
+        stroke: boolean;
+    }[];
     adj: number | null;
     adj2: number | null;
     adj3: number | null;
@@ -2024,6 +2053,7 @@ export interface TabStop {
 }
 export interface TextBody extends TextBody__emitterCollision1 {
     rtlCol?: boolean;
+    spcFirstLastPara?: boolean;
     textWarp?: {
         preset: string;
         adj?: number[];

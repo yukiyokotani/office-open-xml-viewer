@@ -11,10 +11,23 @@ import {
   resolvedCachedBitmapVariantKey,
   type CachedBitmapOptions,
 } from './bitmap-image-by-path';
-import { applyDuotone, type Duotone, type OffscreenFactory } from './duotone';
+import {
+  applyDuotone,
+  applyImageDataTransform,
+  type Duotone,
+  type OffscreenFactory,
+} from './duotone';
+import {
+  applyBlipPixelEffects,
+  assertBlipPixelEffectsBudget,
+  blipPixelEffectsKey,
+  isBlipPixelEffects,
+  type BlipPixelEffects,
+} from './blip-effects';
 import { imageNaturalSize } from './crop';
-import { MAX_RASTER_PIXELS } from './pixel-budget.js';
+import { MAX_IMAGE_EFFECT_BASE_PIXELS, MAX_RASTER_PIXELS } from './pixel-budget.js';
 import { decodedBitmapTargetResizeOptions } from './raster-target.js';
+import { carryIncompleteMetafileReport } from './raster-or-metafile.js';
 
 type FetchImage = (path: string, mime: string) => Promise<Blob>;
 
@@ -25,7 +38,11 @@ type FetchImage = (path: string, mime: string) => Promise<Blob>;
  *  when warming the cache and when drawing, so the two agree without sharing a
  *  cache reference. Mirrors xlsx's `imageCacheKey` and docx's former
  *  `imageKey(path, colorReplaceFrom)`. */
-export function duotoneCacheKey(imagePath: string, duotone?: Duotone | null): string {
+export function duotoneCacheKey(
+  imagePath: string,
+  duotone?: Duotone | BlipPixelEffects | null,
+): string {
+  if (isBlipPixelEffects(duotone)) return `${imagePath}|fx:${blipPixelEffectsKey(duotone)}`;
   return duotone ? `${imagePath}|duo:${duotone.clr1}:${duotone.clr2}` : imagePath;
 }
 
@@ -54,7 +71,7 @@ const DUOTONE_CACHE_NAMESPACE = 'duotone';
 export async function getCachedDuotoneBitmapByPath(
   imagePath: string,
   mimeType: string,
-  duotone: Duotone | null | undefined,
+  duotone: Duotone | BlipPixelEffects | null | undefined,
   fetchImage: FetchImage,
   opts: CachedBitmapOptions & {
     offscreenFactory?: OffscreenFactory;
@@ -74,7 +91,7 @@ export async function getCachedDuotoneBitmapByPath(
         // byte ceiling so transient pixel work cannot silently double it.
         maxRetainedPixels: Math.min(
           requestedBitmapOpts.maxRetainedPixels ?? MAX_RASTER_PIXELS,
-          Math.floor(MAX_RASTER_PIXELS / 4),
+          MAX_IMAGE_EFFECT_BASE_PIXELS,
         ),
       }
     : requestedBitmapOpts;
@@ -84,6 +101,9 @@ export async function getCachedDuotoneBitmapByPath(
   const sourceBitmapOpts = duotone
     ? { ...bitmapOpts, targetWidthPx: undefined, targetHeightPx: undefined }
     : bitmapOpts;
+  // An over-long effect list is rejected before anything is fetched or
+  // decoded; the cumulative pixel work is checked once the grid is known.
+  if (isBlipPixelEffects(duotone)) assertBlipPixelEffectsBudget(duotone, 0);
   const epoch = duotone
     ? captureDecodedBitmapCacheEpoch(fetchImage, DUOTONE_CACHE_NAMESPACE)
     : undefined;
@@ -124,13 +144,27 @@ export async function getCachedDuotoneBitmapByPath(
       if (w <= 0 || h <= 0) {
         return { bitmap: failClosedOnDuotoneFailure ? null : base, owned: false };
       }
-      const recoloured = await applyDuotone(base, duotone, {
+      // Before the transform allocates its surfaces: passes × pixels must fit
+      // the shared effect-work ceiling (a quota error, never a partial list).
+      if (isBlipPixelEffects(duotone)) assertBlipPixelEffectsBudget(duotone, w * h);
+      const transformOptions = {
         width: w,
         height: h,
         offscreenFactory,
         targetWidthPx: requestedBitmapOpts.targetWidthPx,
         targetHeightPx: requestedBitmapOpts.targetHeightPx,
-      });
+      };
+      // CT_Blip pixel effects (grayscl/biLevel/clrChange, with the duotone at
+      // its document position) share the duotone's decode, cache and budget.
+      const recoloured = isBlipPixelEffects(duotone)
+        ? await applyImageDataTransform(
+          base,
+          (data) => {
+            applyBlipPixelEffects(data, duotone);
+          },
+          transformOptions,
+        )
+        : await applyDuotone(base, duotone, transformOptions);
       // `applyDuotone` returns a CanvasImageSource; when the pixel pipeline ran
       // it is a fresh ImageBitmap, otherwise it is the unchanged current
       // source. Strict callers fail closed. Compatibility callers still bake a
@@ -143,9 +177,14 @@ export async function getCachedDuotoneBitmapByPath(
           throw new Error('createImageBitmap is unavailable for duotone fallback resampling');
         }
         const resized = await createImageBitmap(base, resizeOptions);
+        carryIncompleteMetafileReport(base, resized);
         return { bitmap: resized, owned: resized !== base };
       }
       const bitmap = recoloured as ImageBitmap;
+      // A partially drawn metafile stays partial after an effect or a
+      // resample; the derived entry (and every later cache hit on it) keeps
+      // the base picture's report.
+      carryIncompleteMetafileReport(base, bitmap);
       return { bitmap, owned: bitmap !== base };
     },
     epoch,
