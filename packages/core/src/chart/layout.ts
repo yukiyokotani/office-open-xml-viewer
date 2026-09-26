@@ -18,8 +18,8 @@
 //   • radial (pie/radar): no pad; the plot is centred in the space left after
 //     the title and legend bands, and the caller reads `plotRect` + `center`.
 //
-// The per-family MARK drawing (bars, lines, slices, points) stays in
-// renderer.ts; only the frame is shared.
+// The per-family mark drawing (bars, lines, slices, points) lives in
+// families/*.ts; only the frame is shared here.
 
 import type { ChartManualLayout, ChartModel } from '../types/chart';
 import { EMU_PER_PT } from '../units.js';
