@@ -15,9 +15,9 @@ const PIVOT_CACHE_REL_STRICT: &str =
     "http://purl.oclc.org/ooxml/officeDocument/relationships/pivotCacheDefinition";
 
 use crate::{
-    resolve_zip_path, CellRange, PivotCacheSource, PivotDataField, PivotDiagnostic,
-    PivotDiagnosticReason, PivotLocation, PivotMetadataStatus, PivotPageField, PivotPartialReason,
-    PivotTableMetadata, XlsxZip,
+    resolve_zip_path, CellRange, Dxf, PivotAxisItem, PivotCacheSource, PivotDataField,
+    PivotDiagnostic, PivotDiagnosticReason, PivotLocation, PivotMetadataStatus, PivotPageField,
+    PivotPartialReason, PivotTableMetadata, PivotTableStyle, PivotTableStyleElement, XlsxZip,
 };
 
 /// Parse pivot metadata without evaluating it. Saved worksheet cells and styles
@@ -25,6 +25,7 @@ use crate::{
 pub(crate) fn load_sheet_pivots(
     archive: &mut XlsxZip,
     sheet_path: &str,
+    theme_colors: &[String],
 ) -> (Vec<PivotTableMetadata>, Vec<PivotDiagnostic>) {
     let Some((sheet_dir, sheet_file)) = sheet_path.rsplit_once('/') else {
         return (Vec::new(), Vec::new());
@@ -142,6 +143,7 @@ pub(crate) fn load_sheet_pivots(
         };
         targets.push(resolve_zip_path(&base, target));
     }
+    let mut workbook_styles: Option<WorkbookTableStyles> = None;
     for part in targets {
         let xml = match read_zip_string(archive, &part) {
             Ok(xml) => xml,
@@ -153,7 +155,7 @@ pub(crate) fn load_sheet_pivots(
                 continue;
             }
         };
-        match parse_pivot_table(archive, &part, &xml) {
+        match parse_pivot_table(archive, &part, &xml, theme_colors, &mut workbook_styles) {
             Ok(table) => tables.push(table),
             Err(reason) => diagnostics.push(PivotDiagnostic { part, reason }),
         }
@@ -165,6 +167,8 @@ fn parse_pivot_table(
     archive: &mut XlsxZip,
     part: &str,
     xml: &str,
+    theme_colors: &[String],
+    workbook_styles: &mut Option<WorkbookTableStyles>,
 ) -> Result<PivotTableMetadata, PivotDiagnosticReason> {
     let doc = parse_guarded(xml).map_err(|_| PivotDiagnosticReason::MalformedXml)?;
     let root = doc.root_element();
@@ -453,6 +457,41 @@ fn parse_pivot_table(
         }
     }
 
+    let style = child(root, "pivotTableStyleInfo").and_then(|info| {
+        let name = info.attribute("name").filter(|name| !name.is_empty())?;
+        let styles =
+            workbook_styles.get_or_insert_with(|| WorkbookTableStyles::load(archive, theme_colors));
+        // A style that cannot be applied as authored is left off the whole
+        // PivotTable and reported, never applied with elements missing.
+        let elements = match styles.elements(name, theme_colors) {
+            Ok(elements) => elements?,
+            Err(field) => {
+                reasons.push(PivotPartialReason::MalformedField { field });
+                return None;
+            }
+        };
+        let flag = |key: &str| matches!(info.attribute(key), Some("1" | "true"));
+        Some(PivotTableStyle {
+            name: name.to_string(),
+            show_row_headers: flag("showRowHeaders"),
+            show_column_headers: flag("showColHeaders"),
+            show_row_stripes: flag("showRowStripes"),
+            show_column_stripes: flag("showColStripes"),
+            show_last_column: flag("showLastColumn"),
+            elements,
+        })
+    });
+    let mut items = |parent: &str| {
+        axis_items(root, parent).unwrap_or_else(|()| {
+            reasons.push(PivotPartialReason::MalformedField {
+                field: format!("{parent}.i"),
+            });
+            Vec::new()
+        })
+    };
+    let row_items = items("rowItems");
+    let column_items = items("colItems");
+
     let status = if reasons.is_empty() {
         PivotMetadataStatus::Complete
     } else {
@@ -472,6 +511,9 @@ fn parse_pivot_table(
         cache_source,
         status,
         extension_uris: recorded_extension_uris,
+        style,
+        row_items,
+        column_items,
     })
 }
 
@@ -683,5 +725,399 @@ fn parse_bool(value: Option<&str>) -> Result<bool, ()> {
         None | Some("0" | "false") => Ok(false),
         Some("1" | "true") => Ok(true),
         Some(_) => Err(()),
+    }
+}
+
+/// ECMA-376 §18.10.1.44 `i` items of `rowItems`/`colItems`: the item type
+/// (`t`, default `data`) and its field level, `r` (the count of leading
+/// fields repeated from the previous item) plus its `x` count less one.
+/// `r` is an xsd:unsignedInt (default 0); a value that does not parse, or a
+/// level that overflows u32, rejects the whole list (`Err`) rather than
+/// yielding a wrapped or clamped level.
+fn axis_items(root: roxmltree::Node<'_, '_>, parent: &str) -> Result<Vec<PivotAxisItem>, ()> {
+    let Some(items) = child(root, parent) else {
+        return Ok(Vec::new());
+    };
+    items
+        .children()
+        .filter(|n| {
+            n.is_element() && n.tag_name().name() == "i" && is_x_ns(n.tag_name().namespace())
+        })
+        .map(|item| {
+            let repeated: u32 = match item.attribute("r") {
+                None => 0,
+                Some(value) => value.parse().map_err(|_| ())?,
+            };
+            let indices = u32::try_from(
+                item.children()
+                    .filter(|n| n.is_element() && n.tag_name().name() == "x")
+                    .count(),
+            )
+            .map_err(|_| ())?;
+            let fields = repeated.checked_add(indices).ok_or(())?;
+            Ok(PivotAxisItem {
+                kind: item.attribute("t").unwrap_or("data").to_string(),
+                depth: fields.saturating_sub(1),
+            })
+        })
+        .collect()
+}
+
+/// One `tableStyleElement` (§18.8.41) as authored: `size` defaults to 1 and
+/// `dxfId` is optional (an element without one formats nothing, but its
+/// `size` still sets a stripe band).
+type AuthoredStyleElement = (String, u32, Option<u32>);
+
+/// The workbook's `<tableStyles>` (§18.8.42) with their `<dxfs>`, read once
+/// per sheet that has a styled PivotTable. Each `<dxf>` is parsed in place in
+/// the styles part, so the namespace declarations in scope there (a default
+/// namespace, a prefix bound on an ancestor, Transitional or Strict) apply
+/// exactly as they do to the rest of the part.
+pub(crate) struct WorkbookTableStyles {
+    dxfs: Vec<Dxf>,
+    styles: std::collections::HashMap<String, Result<Vec<AuthoredStyleElement>, String>>,
+    /// Set when `xl/styles.xml` exists but is not well-formed XML.
+    malformed_part: bool,
+}
+
+impl WorkbookTableStyles {
+    fn load(archive: &mut XlsxZip, theme_colors: &[String]) -> Self {
+        match read_zip_string(archive, "xl/styles.xml") {
+            Ok(xml) => Self::from_styles_xml(&xml, theme_colors),
+            // A workbook without a styles part defines no table styles.
+            Err(_) => Self {
+                dxfs: Vec::new(),
+                styles: std::collections::HashMap::new(),
+                malformed_part: false,
+            },
+        }
+    }
+
+    fn from_styles_xml(xml: &str, theme_colors: &[String]) -> Self {
+        let mut result = Self {
+            dxfs: Vec::new(),
+            styles: std::collections::HashMap::new(),
+            malformed_part: false,
+        };
+        let Ok(doc) = parse_guarded(xml) else {
+            result.malformed_part = true;
+            return result;
+        };
+        let mut dxfs_seen = false;
+        for node in doc
+            .descendants()
+            .filter(|n| n.is_element() && is_x_ns(n.tag_name().namespace()))
+        {
+            match node.tag_name().name() {
+                // The first `dxfs`, as the cell-style parser reads it.
+                "dxfs" if !dxfs_seen => {
+                    dxfs_seen = true;
+                    result.dxfs = node
+                        .children()
+                        .filter(|n| n.is_element() && n.tag_name().name() == "dxf")
+                        .map(|n| {
+                            let mut dxf = crate::styles::parse_dxf(n, theme_colors);
+                            explicit_none_edges(n, &mut dxf);
+                            dxf
+                        })
+                        .collect();
+                }
+                "tableStyle" => {
+                    let Some(name) = node.attribute("name") else {
+                        continue;
+                    };
+                    let elements = node
+                        .children()
+                        .filter(|n| n.is_element() && n.tag_name().name() == "tableStyleElement")
+                        .map(|n| {
+                            let kind = n
+                                .attribute("type")
+                                .ok_or_else(|| "tableStyleElement.type".to_string())?;
+                            let size = match n.attribute("size") {
+                                None => 1,
+                                Some(value) => value
+                                    .parse()
+                                    .map_err(|_| "tableStyleElement.size".to_string())?,
+                            };
+                            let dxf_id = match n.attribute("dxfId") {
+                                None => None,
+                                Some(value) => Some(
+                                    value
+                                        .parse()
+                                        .map_err(|_| "tableStyleElement.dxfId".to_string())?,
+                                ),
+                            };
+                            Ok((kind.to_string(), size, dxf_id))
+                        })
+                        .collect();
+                    result.styles.insert(name.to_string(), elements);
+                }
+                _ => {}
+            }
+        }
+        result
+    }
+
+    /// The elements of `name`: a workbook style (§18.8.40), each with its
+    /// parsed `<dxf>`, else a built-in Annex G PivotTable style from the
+    /// shared preset table, else `Ok(None)` (the name matches no style). A
+    /// workbook style that cannot be applied as authored (a malformed
+    /// element, a `dxfId` outside `<dxfs>`, an unreadable styles part) is an
+    /// `Err` naming the offending field; no element is dropped from a style
+    /// that is still applied.
+    fn elements(
+        &self,
+        name: &str,
+        theme_colors: &[String],
+    ) -> Result<Option<Vec<PivotTableStyleElement>>, String> {
+        if let Some(elements) = self.styles.get(name) {
+            let elements = elements.as_ref().map_err(Clone::clone)?;
+            return elements
+                .iter()
+                .map(|(kind, size, dxf_id)| {
+                    let dxf = match dxf_id {
+                        None => Dxf::default(),
+                        Some(index) => self
+                            .dxfs
+                            .get(*index as usize)
+                            .cloned()
+                            .ok_or_else(|| "tableStyleElement.dxfId".to_string())?,
+                    };
+                    Ok(PivotTableStyleElement {
+                        kind: kind.clone(),
+                        size: *size,
+                        dxf,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()
+                .map(Some);
+        }
+        if let Some(elements) = crate::style_presets::pivot_style_elements(name, theme_colors) {
+            return Ok(Some(elements));
+        }
+        if self.malformed_part {
+            return Err("styles.xml".to_string());
+        }
+        Ok(None)
+    }
+}
+
+/// A style element's border edge written without a style (`<left/>`, or
+/// `style="none"`) is an explicitly cleared edge: CT_BorderPr's style
+/// defaults to `none` (§18.8.6), and in a differential format a present
+/// edge element overrides the edge of an earlier style element (§18.8.41
+/// layering). The shared dxf parser drops such edges, so they are restored
+/// here as `none` edges for the PivotTable renderer.
+fn explicit_none_edges(dxf_node: roxmltree::Node<'_, '_>, dxf: &mut Dxf) {
+    let Some(border) = dxf_node.children().find(|n| {
+        n.is_element() && n.tag_name().name() == "border" && is_x_ns(n.tag_name().namespace())
+    }) else {
+        return;
+    };
+    let target = dxf.border.get_or_insert_with(Default::default);
+    for edge in border.children().filter(|n| n.is_element()) {
+        if edge.attribute("style").is_some_and(|style| style != "none") {
+            continue;
+        }
+        let slot = match edge.tag_name().name() {
+            "left" => &mut target.left,
+            "right" => &mut target.right,
+            "top" => &mut target.top,
+            "bottom" => &mut target.bottom,
+            "horizontal" => &mut target.horizontal,
+            "vertical" => &mut target.vertical,
+            _ => continue,
+        };
+        if slot.is_none() {
+            *slot = Some(crate::BorderEdge {
+                style: "none".into(),
+                color: None,
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+mod style_tests {
+    use super::*;
+
+    const SML: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+    const SML_STRICT: &str = "http://purl.oclc.org/ooxml/spreadsheetml/main";
+
+    fn axis(xml_items: &str) -> Result<Vec<(String, u32)>, ()> {
+        let xml = format!(
+            r#"<pivotTableDefinition xmlns="{SML}"><rowItems>{xml_items}</rowItems></pivotTableDefinition>"#
+        );
+        let doc = parse_guarded(&xml).unwrap();
+        axis_items(doc.root_element(), "rowItems").map(|items| {
+            items
+                .into_iter()
+                .map(|item| (item.kind, item.depth))
+                .collect()
+        })
+    }
+
+    #[test]
+    fn axis_items_carry_type_and_field_level() {
+        assert_eq!(
+            axis(r#"<i><x/></i><i r="1"><x v="2"/></i><i t="grand"><x/></i>"#).unwrap(),
+            vec![("data".into(), 0), ("data".into(), 1), ("grand".into(), 0)]
+        );
+    }
+
+    /// r + x-count is computed with checked arithmetic, so the boundary holds
+    /// identically in debug (overflow panics) and release (it would wrap).
+    #[test]
+    fn axis_item_level_rejects_u32_overflow_and_unparsable_r() {
+        assert_eq!(
+            axis(r#"<i r="4294967294"><x/></i>"#).unwrap(),
+            vec![("data".into(), 4294967294)]
+        );
+        assert_eq!(axis(r#"<i r="4294967295"><x/></i>"#), Err(()));
+        assert_eq!(
+            axis(r#"<i r="4294967295"/>"#).unwrap(),
+            vec![("data".into(), 4294967294)]
+        );
+        assert_eq!(axis(r#"<i r="-1"><x/></i>"#), Err(()));
+        assert_eq!(axis(r#"<i r="x"><x/></i>"#), Err(()));
+    }
+
+    fn styles(xml: &str) -> WorkbookTableStyles {
+        WorkbookTableStyles::from_styles_xml(xml, &[])
+    }
+
+    fn one_style(dxfs: &str, elements: &str) -> String {
+        format!(
+            r#"<styleSheet xmlns="{SML}"><dxfs>{dxfs}</dxfs><tableStyles><tableStyle name="S" pivot="1" table="0">{elements}</tableStyle></tableStyles></styleSheet>"#
+        )
+    }
+
+    #[test]
+    fn style_element_edges_without_a_style_are_cleared_edges() {
+        let styles = styles(&one_style(
+            r#"<dxf><border><left/><right style="none"/><top style="thin"/><bottom/></border></dxf>"#,
+            r#"<tableStyleElement type="firstRowSubheading" dxfId="0"/>"#,
+        ));
+        let elements = styles.elements("S", &[]).unwrap().unwrap();
+        let border = elements[0].dxf.border.as_ref().unwrap();
+        assert_eq!(border.left.as_ref().unwrap().style, "none");
+        assert_eq!(border.right.as_ref().unwrap().style, "none");
+        assert_eq!(border.top.as_ref().unwrap().style, "thin");
+        assert_eq!(border.bottom.as_ref().unwrap().style, "none");
+        assert!(border.vertical.is_none());
+    }
+
+    /// The same style written with a default namespace, with a prefix bound
+    /// only on an ancestor of `<dxfs>`, and in the Strict namespace parses to
+    /// the same formats: each `<dxf>` is read in place, in its own context.
+    #[test]
+    fn style_dxfs_parse_identically_under_default_prefixed_and_strict_namespaces() {
+        let body = |p: &str| {
+            format!(
+                r#"<{p}dxfs><{p}dxf><{p}font><{p}b/><{p}i val="0"/><{p}color rgb="FFFF0000"/></{p}font><{p}fill><{p}patternFill><{p}bgColor rgb="FF00FF00"/></{p}patternFill></{p}fill><{p}border><{p}left/><{p}top style="thin"/></{p}border></{p}dxf></{p}dxfs><{p}tableStyles><{p}tableStyle name="S"><{p}tableStyleElement type="wholeTable" dxfId="0"/><{p}tableStyleElement type="firstRowStripe" size="2"/></{p}tableStyle></{p}tableStyles>"#
+            )
+        };
+        let variants = [
+            format!(r#"<styleSheet xmlns="{SML}">{}</styleSheet>"#, body("")),
+            format!(
+                r#"<x:styleSheet xmlns:x="{SML}">{}</x:styleSheet>"#,
+                body("x:")
+            ),
+            format!(
+                r#"<styleSheet xmlns="{SML_STRICT}">{}</styleSheet>"#,
+                body("")
+            ),
+            format!(
+                r#"<s:styleSheet xmlns:s="{SML_STRICT}">{}</s:styleSheet>"#,
+                body("s:")
+            ),
+        ];
+        let rendered: Vec<String> = variants
+            .iter()
+            .map(|xml| {
+                let elements = styles(xml).elements("S", &[]).unwrap().unwrap();
+                serde_json::to_string(&elements).unwrap()
+            })
+            .collect();
+        let default = styles(&variants[0]).elements("S", &[]).unwrap().unwrap();
+        assert_eq!(default.len(), 2);
+        assert_eq!(default[0].dxf.font_toggles.unwrap().bold, Some(true));
+        assert_eq!(default[0].dxf.font_toggles.unwrap().italic, Some(false));
+        // An element the dxf font omits is no change, not an explicit off.
+        assert_eq!(default[0].dxf.font_toggles.unwrap().underline, None);
+        assert_eq!(
+            default[0]
+                .dxf
+                .border
+                .as_ref()
+                .unwrap()
+                .left
+                .as_ref()
+                .unwrap()
+                .style,
+            "none"
+        );
+        assert!(default[0].dxf.fill.as_ref().unwrap().fg_color.is_some());
+        // An element without dxfId formats nothing but keeps its band size.
+        assert_eq!((default[1].size, default[1].dxf.font.is_none()), (2, true));
+        for other in &rendered[1..] {
+            assert_eq!(other, &rendered[0]);
+        }
+    }
+
+    #[test]
+    fn a_style_that_cannot_be_applied_as_authored_is_an_error_not_a_shorter_style() {
+        let out_of_range = styles(&one_style(
+            "<dxf/>",
+            r#"<tableStyleElement type="wholeTable" dxfId="0"/><tableStyleElement type="headerRow" dxfId="1"/>"#,
+        ));
+        assert_eq!(
+            out_of_range.elements("S", &[]).map(|_| ()),
+            Err("tableStyleElement.dxfId".to_string())
+        );
+        let bad_size = styles(&one_style(
+            "<dxf/>",
+            r#"<tableStyleElement type="firstRowStripe" size="two" dxfId="0"/>"#,
+        ));
+        assert_eq!(
+            bad_size.elements("S", &[]).map(|_| ()),
+            Err("tableStyleElement.size".to_string())
+        );
+        let malformed = styles("<styleSheet");
+        assert_eq!(
+            malformed.elements("Custom", &[]).map(|_| ()),
+            Err("styles.xml".to_string())
+        );
+        // A built-in name still resolves, and an unknown name is no style.
+        assert!(malformed
+            .elements("PivotStyleLight16", &[])
+            .unwrap()
+            .is_some());
+        assert!(styles(&one_style("", ""))
+            .elements("NoSuchStyle", &[])
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn built_in_pivot_styles_resolve_from_annex_g() {
+        let styles = styles(&format!(r#"<styleSheet xmlns="{SML}"/>"#));
+        let theme: Vec<String> = [
+            "#FFFFFF", "#000000", "#E7E6E6", "#44546A", "#4472C4", "#ED7D31", "#A5A5A5", "#FFC000",
+            "#5B9BD5", "#70AD47", "#0563C1", "#954F72",
+        ]
+        .iter()
+        .map(|c| c.to_string())
+        .collect();
+        let elements = styles
+            .elements("PivotStyleLight16", &theme)
+            .unwrap()
+            .unwrap();
+        let kinds: Vec<_> = elements.iter().map(|e| e.kind.as_str()).collect();
+        assert!(kinds.contains(&"headerRow") && kinds.contains(&"totalRow"));
+        let total = elements.iter().find(|e| e.kind == "totalRow").unwrap();
+        assert!(total.dxf.font.as_ref().unwrap().bold);
+        assert_eq!(total.dxf.font_toggles.unwrap().bold, Some(true));
+        assert!(styles.elements("NoSuchStyle", &theme).unwrap().is_none());
     }
 }

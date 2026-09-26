@@ -202,6 +202,25 @@ function visitTableAnchoredDrawings(
       const cellFrames = cell.clipBounds
         ? Object.freeze([...tableFrames, clipFrame(cell.clipBounds)])
         : tableFrames;
+      if (cell.verticalText) {
+        // ECMA-376 §17.4.72: anchored content inside a rotated cell follows
+        // the cell's local-to-table rotation.
+        const rotatedFrames = Object.freeze([
+          ...cellFrames,
+          Object.freeze({ kind: 'transform' as const, transform: cell.verticalText.transform }),
+        ]);
+        for (const block of cell.blocks) {
+          visitPlacedTableChild(
+            block.layout,
+            { xPt: cell.contentBounds.xPt, yPt: block.offsetPt },
+            root,
+            rotatedFrames,
+            layoutTranslationPt,
+            candidates,
+          );
+        }
+        continue;
+      }
       for (const block of cell.blocks) {
         visitPlacedTableChild(
           block.layout,

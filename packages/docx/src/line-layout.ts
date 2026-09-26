@@ -716,6 +716,9 @@ export interface LineLayoutEnvironment {
    * when the markup variant is being built. */
   readonly revisionAuthorColor?: (author?: string) => string;
   readonly noteNumbers?: ReadonlyMap<string, number>;
+  /** ECMA-376 §17.11.17/.18 numFmt and §17.11.20 numStart per note kind.
+   * Absent means decimal numbering from 1. */
+  readonly noteNumbering?: NoteNumbering;
   readonly noteReferenceNumber?: number;
   readonly verticalCJK?: boolean;
   /** ECMA-376 Part 4 §14.8.3.50 w:useFELayout compatibility switch. */
@@ -2183,6 +2186,22 @@ export function splitSmallCapsCase(text: string): { text: string; reduced: boole
     else out.push({ text: ch, reduced });
   }
   return out.length ? out : [{ text, reduced: false }];
+}
+
+/** Display format and first number of automatic note references for each
+ * note kind (ECMA-376 §17.11.17/.18 numFmt, §17.11.20 numStart). */
+export interface NoteNumbering {
+  readonly footnote: Readonly<{ format: string; start: number }>;
+  readonly endnote: Readonly<{ format: string; start: number }>;
+}
+
+/** The label of the `ordinal`-th (1-based) automatic note of one kind. */
+export function formatNoteNumber(
+  ordinal: number,
+  numbering: Readonly<{ format: string; start: number }> | undefined,
+): string {
+  if (!numbering) return String(ordinal);
+  return formatOrdinalNumber(numbering.start + ordinal - 1, numbering.format as NumberFormat);
 }
 
 export function findNearbyFontSize(
@@ -3781,7 +3800,16 @@ export function buildSegments(
               : environment.noteReferenceNumber)
           : undefined;
       if (t.noteRef) {
-        const label = noteText != null ? String(noteText) : (t.text || '');
+        const label = noteText != null
+          ? formatNoteNumber(
+            noteText,
+            t.noteRef.kind === 'footnote'
+              ? environment.noteNumbering?.footnote
+              : t.noteRef.kind === 'endnote'
+                ? environment.noteNumbering?.endnote
+                : undefined,
+          )
+          : (t.text || '');
         if (label.length > 0) {
           pushTextPiece(
             label,

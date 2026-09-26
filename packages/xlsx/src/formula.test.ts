@@ -167,3 +167,12 @@ describe('evalFormulaToBool — WEEKDAY', () => {
     expect(ev('WEEKDAY(1)=2')).toBe(true);
   });
 });
+
+describe('evalFormulaToBool — error literals', () => {
+  it('an error literal makes the rule not apply instead of reading as 0', () => {
+    const c = ctx({ cells: [numCell(1, 2, 46180)] });
+    expect(evalFormulaToBool('MONTH(#REF!)<>MONTH(B1)', c)).toBe(false);
+    expect(evalFormulaToBool('#N/A=1', c)).toBe(false);
+    expect(evalFormulaToBool('MONTH(B1)=6', c)).toBe(true);
+  });
+});

@@ -396,3 +396,194 @@ describe('rule priority — lower number wins per property', () => {
     expect(res.fill?.fgColor).toBe('#FF0000');
   });
 });
+
+describe('font toggles — explicit off is a set property (ECMA-376 §18.8.2)', () => {
+  it('a higher-priority explicit off claims every toggle over a lower-priority on', () => {
+    const font = { bold: false, italic: false, underline: false, strike: false, size: 11, color: null, name: null };
+    const off: Dxf = {
+      font, fill: null, border: null,
+      fontToggles: { bold: false, italic: false, underline: false, strike: false },
+    };
+    const on: Dxf = {
+      font: { ...font, bold: true, italic: true, underline: true, strike: true }, fill: null, border: null,
+      fontToggles: { bold: true, italic: true, underline: true, strike: true },
+    };
+    const high: CfRule = { type: 'cellIs', operator: 'greaterThan', formulas: ['0'], dxfId: 0, priority: 1 };
+    const low: CfRule = { type: 'cellIs', operator: 'greaterThan', formulas: ['0'], dxfId: 1, priority: 2 };
+    const ws = sheetFromColumn([5], [{ sqref: [fullColumnSqref(1)], rules: [low, high] }]);
+    const res = evaluateCf(numCell(0, 0, 5), 0, 0, compileCf(ws), [off, on]);
+    expect(res).toMatchObject({ fontBold: false, fontItalic: false, fontUnderline: false, fontStrike: false });
+  });
+});
+
+// ─── stopIfTrue ──────────────────────────────────────────────────
+describe('stopIfTrue — a matching rule stops lower-priority rules (ECMA-376 §18.3.1.10)', () => {
+  // Column [1, 5]; the cell under test holds 5, which each stopping rule
+  // below matches (5 > 0, TRUE, top 1, above the mean 3).
+  const stoppers: Array<[string, CfRule]> = [
+    ['cellIs', { type: 'cellIs', operator: 'greaterThan', formulas: ['0'], dxfId: 1, priority: 1, stopIfTrue: true }],
+    ['expression', { type: 'expression', formula: 'TRUE', dxfId: 1, priority: 1, stopIfTrue: true }],
+    ['top10', { type: 'top10', top: true, percent: false, rank: 1, dxfId: 1, priority: 1, stopIfTrue: true }],
+    ['aboveAverage', { type: 'aboveAverage', aboveAverage: true, dxfId: 1, priority: 1, stopIfTrue: true }],
+  ];
+  // Lower-priority rules that would otherwise all apply to 5: a dxf fill,
+  // an icon set and a data bar.
+  const lower: CfRule[] = [
+    { type: 'expression', formula: 'TRUE', dxfId: 0, priority: 2, stopIfTrue: false },
+    { type: 'iconSet', iconSet: '3Arrows', cfvos: [{ kind: 'percent', value: '0' }, { kind: 'percent', value: '33' }, { kind: 'percent', value: '67' }], reverse: false, priority: 3 },
+    { type: 'dataBar', color: '#638EC6', min: { kind: 'min', value: null }, max: { kind: 'max', value: null }, priority: 4, gradient: true },
+  ];
+  const evalWith = (stopper: CfRule) => {
+    const ws = sheetFromColumn([1, 5], [{ sqref: [fullColumnSqref(2)], rules: [...lower, stopper] }]);
+    return evaluateCf(numCell(1, 0, 5), 1, 0, compileCf(ws), [FILL_RED, FONT_BLUE]);
+  };
+
+  it.each(stoppers)('%s: applies its own dxf and skips every lower-priority rule', (_, stopper) => {
+    const res = evalWith(stopper);
+    expect(res.fontColor).toBe('#0000FF');
+    expect(res.fill).toBeUndefined();
+    expect(res.iconSet).toBeUndefined();
+    expect(res.dataBar).toBeUndefined();
+  });
+
+  it('does not stop when the rule does not match, or when the flag is off', () => {
+    const miss = evalWith({ type: 'cellIs', operator: 'greaterThan', formulas: ['10'], dxfId: 1, priority: 1, stopIfTrue: true });
+    expect(miss.fontColor).toBeUndefined();
+    expect(miss.fill?.fgColor).toBe('#FF0000');
+    const noFlag = evalWith({ type: 'cellIs', operator: 'greaterThan', formulas: ['0'], dxfId: 1, priority: 1 });
+    expect(noFlag.fontColor).toBe('#0000FF');
+    expect(noFlag.fill?.fgColor).toBe('#FF0000');
+    expect(noFlag.iconSet).toBeDefined();
+    expect(noFlag.dataBar).toBeDefined();
+  });
+
+  // Excel for Mac honours a set flag on scale rules in SpreadsheetML (see
+  // evaluateCf): a lower bold rule stays off every numeric cell they format.
+  const scales: Array<[string, CfRule]> = [
+    ['colorScale', { type: 'colorScale', stops: [{ kind: 'min', value: null, color: '#FFFF00' }, { kind: 'max', value: null, color: '#00B0F0' }], priority: 1 }],
+    ['dataBar', { type: 'dataBar', color: '#638EC6', min: { kind: 'min', value: null }, max: { kind: 'max', value: null }, priority: 1, gradient: true }],
+    ['iconSet', { type: 'iconSet', iconSet: '3Arrows', cfvos: [{ kind: 'percent', value: '0' }, { kind: 'percent', value: '33' }, { kind: 'percent', value: '67' }], reverse: false, priority: 1 }],
+  ];
+  it.each(scales)('%s: stops lower-priority rules only when stopIfTrue is set', (_, scale) => {
+    const bold: Dxf = {
+      font: { bold: true, italic: false, underline: false, strike: false, size: 11, color: null, name: null },
+      fill: null, border: null, fontToggles: { bold: true },
+    };
+    const evalScale = (stopIfTrue: boolean) => {
+      const rules: CfRule[] = [
+        { ...scale, stopIfTrue } as CfRule,
+        { type: 'expression', formula: 'TRUE', dxfId: 0, priority: 2, stopIfTrue: false },
+      ];
+      const ws = sheetFromColumn([1, 9], [{ sqref: [fullColumnSqref(2)], rules }]);
+      return evaluateCf(numCell(1, 0, 9), 1, 0, compileCf(ws), [bold]);
+    };
+    expect(evalScale(true).fontBold).toBeUndefined();
+    expect(evalScale(false).fontBold).toBe(true);
+  });
+
+  it('a stopping colour-only rule keeps a lower-priority explicit font-toggle off from applying', () => {
+    const font = { bold: false, italic: false, underline: false, strike: false, size: 11, color: null, name: null };
+    const off: Dxf = { font, fill: null, border: null, fontToggles: { bold: false, italic: false } };
+    const colour: Dxf = { font: { ...font, color: '#FF0000' }, fill: null, border: null, fontToggles: {} };
+    const ws = sheetFromColumn([5], [{
+      sqref: [fullColumnSqref(1)],
+      rules: [
+        { type: 'cellIs', operator: 'greaterThan', formulas: ['0'], dxfId: 0, priority: 1, stopIfTrue: true },
+        { type: 'expression', formula: 'TRUE', dxfId: 1, priority: 2, stopIfTrue: false },
+      ],
+    }]);
+    const res = evaluateCf(numCell(0, 0, 5), 0, 0, compileCf(ws), [colour, off]);
+    expect(res.fontColor).toBe('#FF0000');
+    expect(res.fontBold).toBeUndefined();
+    expect(res.fontItalic).toBeUndefined();
+  });
+});
+
+// ─── A rule stops only where its match is established ────────────
+describe('stopIfTrue needs an established match', () => {
+  const lowerRed: CfRule = { type: 'expression', formula: 'TRUE', dxfId: 0, priority: 2, stopIfTrue: false };
+  const RED: Dxf = { font: { ...FONT_BLUE.font!, color: '#FF0000' }, fill: null, border: null };
+  // The evaluated cell holds `value`; `extra` cells sit in sheet row 1
+  // (so `B1` refers to `extra` column 2).
+  const evalAt = (rules: CfRule[], extra: Cell[] = [], value = 5) => {
+    const ws = sheetFromColumn([value], [{ sqref: [fullColumnSqref(1)], rules }]);
+    ws.rows.push({ index: 1, height: null, cells: extra });
+    return evaluateCf(ws.rows[0].cells[0], 0, 0, compileCf(ws), [RED]);
+  };
+  const cellIs = (operator: string, formula: string): CfRule =>
+    ({ type: 'cellIs', operator, formulas: [formula], dxfId: null, priority: 1, stopIfTrue: true });
+  const icons = (activeFormula?: string): CfRule => ({
+    type: 'iconSet', iconSet: '3Arrows', reverse: false, priority: 1, stopIfTrue: true, activeFormula,
+    cfvos: [{ kind: 'num', value: '0' }, { kind: 'num', value: '3' }, { kind: 'num', value: '7' }],
+  });
+
+  // Review reproducer: `0+10` used to be read as the literal 0, so 5 > 0
+  // matched and the stop removed the lower rule's red text. Formulas are
+  // not evaluated: only literals and single-cell references are decoded.
+  it('cellIs with a missing operand is no match and does not stop', () => {
+    const empty: CfRule = { type: 'cellIs', operator: 'greaterThan', formulas: [], dxfId: null, priority: 1, stopIfTrue: true };
+    expect(evalAt([empty, lowerRed]).fontColor).toBe('#FF0000');
+    const between: CfRule = { type: 'cellIs', operator: 'between', formulas: ['1'], dxfId: null, priority: 1, stopIfTrue: true };
+    expect(evalAt([between, lowerRed]).fontColor).toBe('#FF0000');
+  });
+
+  it('cellIs decodes literals and single-cell references, nothing else', () => {
+    expect(evalAt([cellIs('greaterThan', '0+10'), lowerRed]).fontColor).toBe('#FF0000');
+    expect(evalAt([cellIs('greaterThan', '0+1'), lowerRed]).fontColor).toBe('#FF0000');
+    expect(evalAt([cellIs('greaterThan', '4'), lowerRed]).fontColor).toBeUndefined();
+    // A cell reference reads the cached value (Excel: 5 > $B$1 = 3 matches).
+    expect(evalAt([cellIs('greaterThan', '$B$1'), lowerRed], [numCell(1, 2, 3)]).fontColor).toBeUndefined();
+    expect(evalAt([cellIs('greaterThan', '$B$1'), lowerRed], [numCell(1, 2, 9)]).fontColor).toBe('#FF0000');
+    // A blank or logical referenced value is not converted.
+    expect(evalAt([cellIs('greaterThan', '$B$1'), lowerRed]).fontColor).toBe('#FF0000');
+    const bool: Cell = { row: 1, col: 2, value: { type: 'bool', bool: false }, styleIndex: 0 };
+    expect(evalAt([cellIs('greaterThan', '$B$1'), lowerRed], [bool]).fontColor).toBe('#FF0000');
+    // Functions, arithmetic and ranges are not decodable (round-3 review
+    // reproducers included): no match, no stop.
+    const textTrue: Cell = { row: 1, col: 2, value: { type: 'text', text: 'TRUE' }, styleIndex: 0 };
+    for (const [operator, formula, extra, value] of [
+      ['greaterThan', 'IF(OR(0,B1),0,10)', [textTrue], 5],
+      ['greaterThan', 'IF(OR(1,"invalid"),0,10)', [], 5],
+      ['lessThan', 'IF(1,B1,0)+1', [], 1.5],
+      ['lessThan', 'B1*B1', [numCell(1, 2, 1e200)], 5],
+      ['greaterThan', 'UNSUPPORTED(1)', [], 5],
+      ['greaterThan', 'B1:B2', [numCell(1, 2, 1)], 5],
+    ] as Array<[string, string, Cell[], number]>) {
+      expect(evalAt([cellIs(operator, formula), lowerRed], extra, value).fontColor, formula).toBe('#FF0000');
+    }
+  });
+
+  // Review reproducer: an x14 icon set with activePresent="1" and xm:f 0
+  // is not displayed ([MS-XLSX] 2.6.27), so it must not stop the red text.
+  it('a scale rule applies and stops only while its activity formula is nonzero', () => {
+    const inactive = evalAt([icons('0'), lowerRed]);
+    expect(inactive.fontColor).toBe('#FF0000');
+    expect(inactive.iconSet).toBeUndefined();
+    const active = evalAt([icons('1'), lowerRed]);
+    expect(active.fontColor).toBeUndefined();
+    expect(active.iconSet).toBeDefined();
+    expect(evalAt([icons(), lowerRed]).fontColor).toBeUndefined();
+    // Relative references anchor at the rule range's top-left: over B2:B3
+    // (B2 = 5, B3 = 0), `B2` reads B2 at B2 and B3 at B3.
+    const relative = (formula: string, row: number) => {
+      const ws = sheetFromColumn([], [{ sqref: [{ top: 2, left: 2, bottom: 3, right: 2 }], rules: [icons(formula), lowerRed] }]);
+      ws.rows = [{ index: 2, height: null, cells: [numCell(2, 2, 5)] }, { index: 3, height: null, cells: [numCell(3, 2, 0)] }];
+      return evaluateCf(ws.rows[row - 2].cells[0], row, 2, compileCf(ws), [RED]).fontColor;
+    };
+    expect(relative('B2', 2)).toBeUndefined();
+    expect(relative('B2', 3)).toBe('#FF0000');
+    expect(relative('$B$2', 3)).toBeUndefined();
+    // A logical result is not read as zero / nonzero.
+    expect(evalAt([icons('B1'), lowerRed], [{ row: 1, col: 2, value: { type: 'bool', bool: true }, styleIndex: 0 }]).fontColor).toBe('#FF0000');
+    // Not decodable (a function, arithmetic): inactive rather than guessed.
+    for (const formula of ['UNSUPPORTED(A1)', 'IF(1,B1,0)', 'B1*B1', '1+0']) {
+      const unknown = evalAt([icons(formula), lowerRed], [numCell(1, 2, 1e200)]);
+      expect(unknown.fontColor, formula).toBe('#FF0000');
+      expect(unknown.iconSet, formula).toBeUndefined();
+    }
+    const scale: CfRule = { type: 'colorScale', stops: [{ kind: 'min', value: null, color: '#FFFF00' }, { kind: 'max', value: null, color: '#00B0F0' }], priority: 1, stopIfTrue: true, activeFormula: '0' };
+    const offScale = evalAt([scale, lowerRed]);
+    expect(offScale.fill).toBeUndefined();
+    expect(offScale.fontColor).toBe('#FF0000');
+  });
+});

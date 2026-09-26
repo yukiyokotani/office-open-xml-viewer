@@ -25,7 +25,8 @@ export interface DocxDocumentCursorArchive {
     byteCredit: number,
   ): Uint8Array;
   document_chunk_done(): boolean;
-  document_cursor_resource_usage?(): Uint8Array;
+  /** `undefined` when the package has no document-cursor checkpoint. */
+  document_cursor_resource_usage?(): Uint8Array | undefined;
   acknowledge_document_chunk(
     sequence: number,
     operationId: number,
@@ -39,10 +40,11 @@ export type DocxDocumentArchiveExecutor = <T>(
   operation: (archive: DocxDocumentCursorArchive) => T,
 ) => T;
 
-/** Decode the cursor checkpoint. Every opened cursor owns a PackageOperation
- * ledger (the archive admits only OPC packages), so a missing, malformed, or
- * failed checkpoint is a real error; only a non-WASM archive lacking the
- * method reports no usage. */
+/** Decode the cursor checkpoint. The archive admits only OPC packages, so every
+ * opened cursor owns a PackageOperation ledger; the archive reports a typed
+ * absence (`undefined`) only when no cursor operation has run yet. Malformed
+ * checkpoints and every thrown parser/resource failure escape, whatever their
+ * text. */
 export function readDocxDocumentCursorUsage(
   execute: DocxDocumentArchiveExecutor,
 ): ReturnType<typeof decodeOoxmlResourceUsage> | undefined {

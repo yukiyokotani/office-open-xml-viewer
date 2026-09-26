@@ -1,4 +1,6 @@
 import type { Worksheet, Cell, WorksheetCellRange, CfStop, CfValue, Dxf, CfRule, CellFill, Border, DefinedName } from './types.js';
+import { dxfFontToggle } from './dxf-font.js';
+import { decodeCfLiteral, decodeCfOperand, type CfOperandValue } from './cf-operand.js';
 import { evalFormulaToBool } from './formula.js';
 import { buildCellCoordinateIndex } from './renderer-coordinate-index.js';
 
@@ -21,6 +23,7 @@ export interface CompiledCfRule {
    *  aboveAverage rule carries a `stdDev` attribute (ECMA-376 §18.3.1.10). */
   avgStdDev?: number;
   iconThresholds?: number[];
+  cellIsOperands?: CellIsOperand[];
 }
 
 export interface CfContext {
@@ -33,6 +36,14 @@ export interface CfContext {
 export interface CfResult {
   fill?: CellFill;
   fontColor?: string;
+  /** Font toggles from the matched rules' dxfs: `false` is an explicit off
+   *  that overrides the cell's formatting, `undefined` leaves it. CF is the
+   *  top formatting layer, so a renderer takes a defined value over the
+   *  cell/table/PivotTable toggle. Observed in Excel's PDF export: cell-style
+   *  bold/italic/underline/strike and a built-in table-style header's bold
+   *  print off under an explicit-off rule and stay under a rule whose font
+   *  omits them. The PivotTable-style case follows the same layering and
+   *  was not separately exported. */
   fontBold?: boolean;
   fontItalic?: boolean;
   fontUnderline?: boolean;
@@ -149,6 +160,8 @@ export function compileCf(
         }
       } else if (rule.type === 'iconSet') {
         entry.iconThresholds = rule.cfvos.map(cfv => resolveCfvoValue(cfv, samples));
+      } else if (rule.type === 'cellIs') {
+        entry.cellIsOperands = rule.formulas.map(cellIsOperand);
       }
       compiled.push(entry);
     }
@@ -156,8 +169,8 @@ export function compileCf(
   // Excel evaluates CF rules in ascending priority (lowest number = highest
   // priority first). For each property (fill/fontColor/border/…) the first
   // matching rule wins, and `stopIfTrue` on a matching rule skips all later
-  // rules. Match that here by iterating asc and only setting properties that
-  // are still unset.
+  // rules for that cell (evaluateCf). Match that here by
+  // iterating asc and only setting properties that are still unset.
   compiled.sort((a, b) => {
     const pa = (a.rule as { priority: number }).priority ?? 0;
     const pb = (b.rule as { priority: number }).priority ?? 0;
@@ -187,14 +200,15 @@ function cellIsMatch(num: number, operator: string, args: number[]): boolean {
   }
 }
 
-function parseCellIsFormula(f: string): { text?: string; num?: number } {
-  const t = f.trim();
-  if (t.length >= 2 && t.startsWith('"') && t.endsWith('"')) {
-    return { text: t.slice(1, -1).replace(/""/g, '"') };
-  }
-  const n = parseFloat(t);
-  if (!isNaN(n)) return { num: n };
-  return { text: t };
+/** One `cellIs` operand ([MS-XLSX] 2.6.27: a formula, number or cell
+ *  reference). A literal is decoded once per rule; anything else is looked
+ *  up per cell by `decodeCfOperand` (a single-cell reference to a cached
+ *  value) and is otherwise not decodable. `0+10` is never read as 0. */
+type CellIsOperand = { literal: CfOperandValue } | { formula: string };
+
+function cellIsOperand(f: string): CellIsOperand {
+  const literal = decodeCfLiteral(f);
+  return literal !== undefined ? { literal } : { formula: f };
 }
 
 function cellIsTextMatch(text: string, operator: string, args: string[]): boolean {
@@ -253,10 +267,14 @@ function applyDxfToResult(result: CfResult, dxf: Dxf | null | undefined): void {
   // second-guessing the fill's shape here.
   if (dxf.fill && !result.fill) result.fill = dxf.fill;
   if (dxf.font?.color && result.fontColor == null) result.fontColor = dxf.font.color;
-  if (dxf.font?.bold && result.fontBold == null) result.fontBold = true;
-  if (dxf.font?.italic && result.fontItalic == null) result.fontItalic = true;
-  if (dxf.font?.underline && result.fontUnderline == null) result.fontUnderline = true;
-  if (dxf.font?.strike && result.fontStrike == null) result.fontStrike = true;
+  // A font toggle is tri-state: an explicit off (`<b val="0"/>`) is a
+  // property the rule sets, so it both claims the property against
+  // lower-priority rules and turns off bold the cell formatting turns on;
+  // an omitted element leaves both alone (§18.8.14-15, §18.8.2).
+  result.fontBold ??= dxfFontToggle(dxf, 'bold');
+  result.fontItalic ??= dxfFontToggle(dxf, 'italic');
+  result.fontUnderline ??= dxfFontToggle(dxf, 'underline');
+  result.fontStrike ??= dxfFontToggle(dxf, 'strike');
   if (dxf.numFmt && result.numFmt == null) {
     result.numFmt = {
       numFmtId: dxf.numFmt.numFmtId,
@@ -280,6 +298,38 @@ function applyDxfToResult(result: CfResult, dxf: Dxf | null | undefined): void {
   }
 }
 
+/**
+ * The activity condition of a colorScale / dataBar / iconSet rule: its
+ * optional formula ([MS-XLSX] 2.6.27 CT_CfRule: "When the formula returns
+ * zero, conditional formatting is not displayed. When the formula returns a
+ * nonzero value, or is not present, conditional formatting is displayed").
+ * Excel reads the SpreadsheetML `<formula>` of these types the same way (see
+ * `CfRule`). Relative references anchor at the top-left of the rule's range,
+ * as for `expression`. Formulas are not evaluated: only a literal or a
+ * single-cell reference to a cached value is decoded (`decodeCfOperand`). A
+ * condition that is not decodable, or that is not a number, leaves the rule
+ * inactive: it then neither formats the cell nor stops lower rules.
+ */
+function scaleRuleActive(
+  formula: string | undefined,
+  entry: CompiledCfRule,
+  row: number,
+  col: number,
+  cfCtx: CfContext,
+): boolean {
+  if (formula == null) return true;
+  const anchor = entry.sqref[0];
+  if (!anchor) return false;
+  const v = decodeCfOperand(formula, {
+    row, col,
+    anchorRow: anchor.top, anchorCol: anchor.left,
+    cellIndex: cfCtx.cellIndex,
+  });
+  // Only a number is established as "zero" or "nonzero"; a logical, text or
+  // blank result is not converted.
+  return typeof v === 'number' && v !== 0;
+}
+
 export function evaluateCf(cell: Cell | undefined, row: number, col: number, cfCtx: CfContext, dxfs: Dxf[]): CfResult {
   const result: CfResult = {};
   if (!cfCtx.compiled.length) return result;
@@ -288,39 +338,57 @@ export function evaluateCf(cell: Cell | undefined, row: number, col: number, cfC
     const rule = entry.rule;
     const numVal = cellNumericValue(cell);
 
+    // Each evaluated rule decides whether it matched this cell; a matched
+    // rule applies its formatting and then honours `stopIfTrue` (§18.3.1.10:
+    // "no rules with lower priority shall be applied over this rule, when
+    // this rule evaluates to true"). The stop is per cell and does not
+    // depend on whether the matched rule and the skipped ones touch the same
+    // properties, so a lower-priority rule's explicit font-toggle off cannot
+    // erase formatting beneath a stopping rule that sets only a colour.
+    let matched = false;
     if (rule.type === 'expression') {
       const anchor = entry.sqref[0];
       if (!anchor) continue;
-      const matched = evalFormulaToBool(rule.formula, {
+      matched = evalFormulaToBool(rule.formula, {
         row, col,
         anchorRow: anchor.top, anchorCol: anchor.left,
         cellIndex: cfCtx.cellIndex,
         definedNames: cfCtx.definedNames,
         depth: 0,
       });
-      if (matched) {
-        applyDxfToResult(result, rule.dxfId != null ? dxfs[rule.dxfId] : null);
-        if (rule.stopIfTrue) break;
-      }
-      continue;
-    }
-
-    if (rule.type === 'cellIs') {
-      const parsedArgs = rule.formulas.map(parseCellIsFormula);
+      if (matched) applyDxfToResult(result, rule.dxfId != null ? dxfs[rule.dxfId] : null);
+    } else if (rule.type === 'cellIs') {
+      // Compare only with decoded operands: an operand that is not
+      // decodable, or whose type differs from the cell's (including a blank
+      // or logical operand), is no match, so the rule neither formats nor
+      // stops.
+      const anchor = entry.sqref[0];
+      const operands = (entry.cellIsOperands ?? []).map((operand) => {
+        if ('literal' in operand) return operand.literal;
+        if (!anchor) return undefined;
+        return decodeCfOperand(operand.formula, {
+          row, col,
+          anchorRow: anchor.top, anchorCol: anchor.left,
+          cellIndex: cfCtx.cellIndex,
+        });
+      });
       const textVal = cellTextValue(cell);
-      let matched = false;
-      if (numVal != null && parsedArgs.every(a => a.num != null)) {
-        matched = cellIsMatch(numVal, rule.operator, parsedArgs.map(a => a.num!));
-      } else if (textVal != null && parsedArgs.every(a => a.text != null)) {
-        matched = cellIsTextMatch(textVal, rule.operator, parsedArgs.map(a => a.text!));
+      // §18.3.1.10: between/notBetween take two formulas, every other
+      // operator one. A rule missing an operand is no match, so it neither
+      // formats nor stops.
+      const arity = rule.operator === 'between' || rule.operator === 'notBetween' ? 2 : 1;
+      if (operands.length < arity) {
+        // no match
+      } else if (numVal != null && operands.every(a => typeof a === 'number')) {
+        matched = cellIsMatch(numVal, rule.operator, operands as number[]);
+      } else if (textVal != null && operands.every(a => typeof a === 'string')) {
+        matched = cellIsTextMatch(textVal, rule.operator, operands as string[]);
       }
-      if (matched) {
-        applyDxfToResult(result, rule.dxfId != null ? dxfs[rule.dxfId] : null);
-      }
+      if (matched) applyDxfToResult(result, rule.dxfId != null ? dxfs[rule.dxfId] : null);
     } else if (rule.type === 'top10') {
       if (numVal == null || entry.top10Threshold == null) continue;
-      const matches = entry.top10IsTop ? numVal >= entry.top10Threshold : numVal <= entry.top10Threshold;
-      if (matches) applyDxfToResult(result, rule.dxfId != null ? dxfs[rule.dxfId] : null);
+      matched = entry.top10IsTop ? numVal >= entry.top10Threshold : numVal <= entry.top10Threshold;
+      if (matched) applyDxfToResult(result, rule.dxfId != null ? dxfs[rule.dxfId] : null);
     } else if (rule.type === 'aboveAverage') {
       if (numVal == null || entry.avgValue == null) continue;
       // ECMA-376 §18.3.1.10: with `stdDev=N` the threshold is mean ± N·σ
@@ -329,12 +397,16 @@ export function evaluateCf(cell: Cell | undefined, row: number, col: number, cfC
       const band = entry.avgStdDev != null ? entry.avgStdDev * (rule.stdDev ?? 1) : 0;
       const threshold = entry.avgIsAbove ? entry.avgValue + band : entry.avgValue - band;
       const eq = rule.equalAverage === true;
-      const matches = entry.avgIsAbove
+      matched = entry.avgIsAbove
         ? (eq ? numVal >= threshold : numVal > threshold)
         : (eq ? numVal <= threshold : numVal < threshold);
-      if (matches) applyDxfToResult(result, rule.dxfId != null ? dxfs[rule.dxfId] : null);
+      if (matched) applyDxfToResult(result, rule.dxfId != null ? dxfs[rule.dxfId] : null);
     } else if (rule.type === 'iconSet') {
+      // A scale rule "evaluates to true" for every numeric cell it formats
+      // while its activity condition holds (scaleRuleActive).
       if (numVal == null || !entry.iconThresholds?.length) continue;
+      if (!scaleRuleActive(rule.activeFormula, entry, row, col, cfCtx)) continue;
+      matched = true;
       const thresholds = entry.iconThresholds;
       const n = thresholds.length;
       let iconIdx = 0;
@@ -353,16 +425,36 @@ export function evaluateCf(cell: Cell | undefined, row: number, col: number, cfC
       }
     } else if (rule.type === 'colorScale') {
       if (numVal == null || !entry.scaleStops) continue;
-      if (result.fill) continue;
-      const color = colorScaleAt(numVal, rule.stops, entry.scaleStops);
-      result.fill = { patternType: 'solid', fgColor: color, bgColor: color };
+      if (!scaleRuleActive(rule.activeFormula, entry, row, col, cfCtx)) continue;
+      matched = true;
+      if (!result.fill) {
+        const color = colorScaleAt(numVal, rule.stops, entry.scaleStops);
+        result.fill = { patternType: 'solid', fgColor: color, bgColor: color };
+      }
     } else if (rule.type === 'dataBar') {
       if (numVal == null || entry.barMin == null || entry.barMax == null) continue;
-      if (result.dataBar) continue;
-      const range = entry.barMax - entry.barMin;
-      const ratio = range === 0 ? 0 : Math.max(0, Math.min(1, (numVal - entry.barMin) / range));
-      result.dataBar = { color: rule.color, ratio, gradient: rule.gradient };
+      if (!scaleRuleActive(rule.activeFormula, entry, row, col, cfCtx)) continue;
+      matched = true;
+      if (!result.dataBar) {
+        const range = entry.barMax - entry.barMin;
+        const ratio = range === 0 ? 0 : Math.max(0, Math.min(1, (numVal - entry.barMin) / range));
+        result.dataBar = { color: rule.color, ratio, gradient: rule.gradient };
+      }
     }
+    // `other` kinds (timePeriod, duplicateValues, uniqueValues, …) are not
+    // evaluated yet: an unevaluated rule never matches, so it neither
+    // formats the cell nor stops the rules after it.
+    //
+    // The stop applies to colorScale / dataBar / iconSet too. Excel's rule
+    // editor does not offer the flag for them and Office's binary storage
+    // requires it to be 0 ([MS-XLSB] 2.4.23 BrtBeginCFRule `fStopTrue`,
+    // [MS-XLS] 2.4.43 CF12), but ECMA-376 places no type restriction on it,
+    // and Excel for Mac's PDF export of a control workbook honours a set
+    // flag in SpreadsheetML: a colorScale, dataBar or iconSet rule with
+    // stopIfTrue="1" kept a lower-priority bold+underline `expression` rule
+    // off every numeric cell it formatted, and the same rules without the
+    // flag let it apply. Non-numeric cells in a scale range were not tested.
+    if (matched && rule.stopIfTrue) break;
   }
   return result;
 }

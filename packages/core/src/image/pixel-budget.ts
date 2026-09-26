@@ -56,10 +56,44 @@ export const HARD_MAX_DECODED_IMAGE_BYTES = MAX_RASTER_SOURCE_PIXELS * 4;
 /** Keep simultaneous browser decoders bounded even before exact pixels exist. */
 export const MAX_CONCURRENT_IMAGE_DECODES = 2;
 
+/**
+ * Largest base grid a pixel-effect pipeline (duotone, CT_Blip effects)
+ * decodes: one quarter of the per-surface budget, because the source bitmap,
+ * the offscreen backing store, its ImageData and the result bitmap coexist at
+ * the peak of one transform.
+ */
+export const MAX_IMAGE_EFFECT_BASE_PIXELS = Math.floor(MAX_RASTER_PIXELS / 4);
+
+/**
+ * Per-picture pixel-effect work ceiling, in pixel visits (one effect pass over
+ * one pixel is one visit). CT_Blip's effect list (ECMA-376 §20.1.8.13) is an
+ * unbounded `xsd:choice` and every effect is a full pass over the decoded grid,
+ * so work = passes × pixels needs its own bound; the retained-surface budgets
+ * above bound memory, not passes. The ceiling reuses the per-image work
+ * envelope this policy already grants a decoder for one encoded source grid
+ * (MAX_RASTER_SOURCE_PIXELS = 2^27): transforming one picture may not visit
+ * more pixels than decoding the largest admissible source. Library policy, not
+ * a format limit.
+ */
+export const MAX_IMAGE_EFFECT_PIXEL_WORK = MAX_RASTER_SOURCE_PIXELS;
+
+/**
+ * Maximum pixel-effect passes per picture: the number of full passes over the
+ * largest effect base that fit the work ceiling (2^27 / 2^23 = 16). Every base
+ * the effect pipeline admits can therefore run this many passes inside the
+ * work ceiling, so the count never rejects a list the work check would admit
+ * at the largest base. The count check bounds what the work check cannot see:
+ * per-effect fixed costs (lookup tables, colour parsing, cache-key length) on
+ * small rasters, where 2^27 visits would admit millions of passes.
+ */
+export const MAX_IMAGE_EFFECT_PASSES = MAX_IMAGE_EFFECT_PIXEL_WORK / MAX_IMAGE_EFFECT_BASE_PIXELS;
+
 export type OoxmlDecodedImageLimitMetric =
   | 'image-dimension'
   | 'image-pixels'
-  | 'active-decoded-bytes';
+  | 'active-decoded-bytes'
+  | 'image-effect-count'
+  | 'image-effect-work';
 
 export interface OoxmlDecodedImageLimitDetails {
   readonly metric: OoxmlDecodedImageLimitMetric;
@@ -70,7 +104,9 @@ export interface OoxmlDecodedImageLimitDetails {
 function isDecodedImageLimitMetric(value: unknown): value is OoxmlDecodedImageLimitMetric {
   return value === 'image-dimension'
     || value === 'image-pixels'
-    || value === 'active-decoded-bytes';
+    || value === 'active-decoded-bytes'
+    || value === 'image-effect-count'
+    || value === 'image-effect-work';
 }
 
 function isNonNegativeSafeInteger(value: unknown): value is number {

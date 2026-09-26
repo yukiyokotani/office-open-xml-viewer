@@ -1,6 +1,7 @@
 import type { CjkLang } from '@silurus/ooxml-core';
 import { containsHanScript } from '@silurus/ooxml-core/internal/script-preload-accumulator';
 import { activeFontSet, findReferenceFontMetrics, isHTMLCanvas, loadedGoogleRegularAliases } from '@silurus/ooxml-core';
+import { buildPivotStyleMap, type PivotCellFormat } from './pivot-style.js';
 import type {
   Worksheet, Styles, Cell, CellValue, CellFont, CellFill, Border, BorderEdge, CellXf,
   ViewportRange, RenderViewportOptions, XlsxTextRunInfo,
@@ -15,13 +16,12 @@ import type {
   ChartRegionMapRenderer,
   ChartExRenderer,
 } from '@silurus/ooxml-core';
-import { chartImageFillKey, paintOptionalImagePlaceholder } from '@silurus/ooxml-core';
+import { chartImageFillKey, paintOptionalImagePlaceholder, pathFillModeOverlay, withDrawingMLShapeTransform } from '@silurus/ooxml-core';
 import { placePhoneticRuns } from './phonetic.js';
 import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, rasterizeMathSvg, tintMathRaster, classifyCjkFont, classifyFontGeneric, googleCjkFontAlias, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, isLatinWordCodePoint, isUax14NoBreakPair, containsSeaScript, isGraphemeFillText, seaMixedBreakOffsets, fitSeaWordPrefix, graphemeClusterOffsets, xlsxBorderDashArray, drawImageCropped, hexToRgba, verticalTrLongMark, verticalVertGlyphReachable, applyStroke, resolveFill, type SparklineModel, type MathNode, type MathRenderer, type RasterizedMathSvg } from '@silurus/ooxml-core';
 import { isMacDesktop } from './internal/platform.js';
 import { officeRequestKey, shapeOfficeNaturalLineRatio, shapeOfficeRouteKey, singleNaturalShapeRun } from './shape-office-line.js';
 import { XLSX_GOOGLE_FONTS } from './google-fonts.js';
-import { evalFormulaToBool, todaySerial, nowSerial } from './formula.js';
 import { formatCellValueWithColor } from './number-format.js';
 import { type CfContext, type CfResult, compileCf, evaluateCf } from './conditional-format.js';
 import { computeLineVisualOrder, cellBaseRtl, resolveCellBidi } from './bidi-line.js';
@@ -1516,6 +1516,15 @@ export function layoutRichTextLines(
   return lines;
 }
 
+/** ECMA-376 §18.18.40 `general` horizontal alignment: text is left-aligned,
+ *  numbers (including dates and times) right-aligned, and booleans centered.
+ *  Parsers represent `general` as an absent `alignH`. */
+export function generalHorizontalAlignment(type: CellValue['type']): 'left' | 'right' | 'center' {
+  if (type === 'number') return 'right';
+  if (type === 'bool') return 'center';
+  return 'left';
+}
+
 /** Cell geometry + alignment shared by the rich-text draw helpers (wrap and
  *  non-wrap). `alignH`/`alignV` accept the raw `xf` strings; any value other
  *  than `right`/`center` anchors left, and other than `top`/`center` anchors
@@ -1910,6 +1919,7 @@ interface RenderContext {
   commentCells: Set<string>;
   /** row:col → table-style overlay (bold header, banded rows, borders). */
   tableStyleMap: Map<string, TableCellStyle>;
+  pivotStyleMap: Map<string, PivotCellFormat>;
   /** row:col → render-ready SparklineModel for cells that host an
    *  `x14:sparkline`. Built once at viewport start by flattening the
    *  parser's SparklineGroup + per-cell Sparkline pair. */
@@ -1962,6 +1972,18 @@ function drawCfIcon(ctx: CanvasRenderingContext2D, name: string, index: number, 
       ctx.moveTo(x, y); ctx.lineTo(x + sz, y); ctx.lineTo(x + half, y + sz);
     } else {
       ctx.moveTo(x, y + sz * 0.3); ctx.lineTo(x + sz, y + half); ctx.lineTo(x, y + sz * 0.7);
+    }
+    ctx.closePath();
+    ctx.fill();
+  } else if (safeName === '3Signs' && index < 2) {
+    // ECMA-376 §18.18.42 3Signs: Excel draws a red diamond, a yellow
+    // triangle and a green circle (observed in Excel's PDF output).
+    ctx.beginPath();
+    if (index === 0) {
+      ctx.moveTo(x + sz / 2, y); ctx.lineTo(x + sz, y + sz / 2);
+      ctx.lineTo(x + sz / 2, y + sz); ctx.lineTo(x, y + sz / 2);
+    } else {
+      ctx.moveTo(x + sz / 2, y); ctx.lineTo(x + sz, y + sz); ctx.lineTo(x, y + sz);
     }
     ctx.closePath();
     ctx.fill();
@@ -2356,8 +2378,16 @@ function renderQuadrant(
     );
     const cf = evaluateCf(cell, aRow, aCol, cfContext, styles.dxfs ?? []);
     const effectiveFill = cf.fill ?? fill;
+    // Same layers as the main path's merged anchor: PivotTable style fill
+    // under the cell's own fill, and table / PivotTable font beneath CF.
+    // (Table fills and banding are not composed here: Excel does not allow
+    // merged cells inside a Table, see the table overlay note below.)
+    const tableStyle = rc.tableStyleMap.get(key);
+    const pivotFormat = rc.pivotStyleMap.get(key);
 
-    paintCellPatternFill(ctx, effectiveFill, aCx, aCy, cW, cH);
+    if (!paintCellPatternFill(ctx, effectiveFill, aCx, aCy, cW, cH) && pivotFormat?.fill) {
+      paintCellPatternFill(ctx, pivotFormat.fill, aCx, aCy, cW, cH);
+    }
     if (cf.dataBar && cf.dataBar.ratio > 0) {
       const bInset = 2;
       const bW = Math.max(0, (cW - bInset * 2) * cf.dataBar.ratio);
@@ -2381,26 +2411,22 @@ function renderQuadrant(
     const text = formatted.text;
     if (!text || (text === '0' && rc.worksheet.showZeros === false)) continue;
 
-    const effectiveBold = font.bold || !!cf.fontBold;
-    const effectiveItalic = font.italic || !!cf.fontItalic;
-    const effectiveUnderline = font.underline || !!cf.fontUnderline;
-    const effectiveStrike = font.strike || !!cf.fontStrike;
-    const fontForDraw: CellFont = (
-      effectiveBold !== font.bold || effectiveItalic !== font.italic ||
-      effectiveUnderline !== font.underline || effectiveStrike !== font.strike
-    ) ? { ...font, bold: effectiveBold, italic: effectiveItalic, underline: effectiveUnderline, strike: effectiveStrike }
-      : font;
+    const fontForDraw = layeredCellFont(font, cf, tableStyle, styles, pivotFormat);
     ctx.font = buildFont(ctx, fontForDraw, cs, cjkFallback, text);
     const hyperlinkUrl = rc.hyperlinkMap.get(key);
-    // Colour precedence: hyperlink theme colour > conditional-formatting font
-    // colour > number-format section colour ([Red] etc., §18.8.30) > the cell's
+    // Colour precedence (as the main path): hyperlink theme colour >
+    // conditional-formatting font colour > number-format section colour
+    // ([Red] etc., §18.8.30) > table / PivotTable style colour > the cell's
     // own font colour.
-    const textColor = hyperlinkUrl ? '#0563C1' : (cf.fontColor ?? formatted.color ?? font.color);
+    const tableFontColor = tableFontDxfFor(tableStyle, styles)?.font?.color ?? pivotFormat?.fontColor ?? null;
+    const textColor = hyperlinkUrl
+      ? '#0563C1'
+      : (cf.fontColor ?? formatted.color ?? tableFontColor ?? font.color);
     ctx.fillStyle = textColor ? hexToRgba(textColor) : '#000000';
 
     const paddingX = 3, paddingY = 2;
     const isNumeric = cell.value.type === 'number';
-    const alignH = xf.alignH ?? (isNumeric ? 'right' : 'left');
+    const alignH = xf.alignH ?? generalHorizontalAlignment(cell.value.type);
     const alignV = xf.alignV ?? 'bottom';
     // Indent: ECMA-376 §18.8.1 alignment@indent — one level indents by 3
     // character widths (MDW) of the workbook's normal-style font.
@@ -2589,6 +2615,11 @@ function renderQuadrant(
       //   Trellis): render via a small repeating tile using createPattern so
       //   the hatch actually shows, rather than approximating as a blend.
       let hasCellBackground = paintCellPatternFill(ctx, effectiveFill, cx, cy, cellW, cellH);
+      // PivotTable style fill (§18.8.41) under the cell's own fill.
+      const pivotFormat = rc.pivotStyleMap.get(key);
+      if (!hasCellBackground && pivotFormat?.fill) {
+        hasCellBackground = paintCellPatternFill(ctx, pivotFormat.fill, cx, cy, cellW, cellH);
+      }
       if (hasCellBackground) {
         // own fill painted; tableStyle fallbacks intentionally skipped
       } else if (tableStyle && tableFillDxf?.fill?.fgColor) {
@@ -2668,6 +2699,16 @@ function renderQuadrant(
         ? resolveMergeBorder(border, rowIndex, colIndex, mergeInfo.right, mergeInfo.bottom, cellMap, styles)
         : border;
       let mergedBorder = mergeBorders(baseBorder, cf.border);
+      // PivotTable style edges (§18.8.41) fill the edges the cell leaves unset.
+      if (pivotFormat) {
+        mergedBorder = {
+          ...mergedBorder,
+          top: mergedBorder.top?.style ? mergedBorder.top : (pivotFormat.top ?? mergedBorder.top),
+          bottom: mergedBorder.bottom?.style ? mergedBorder.bottom : (pivotFormat.bottom ?? mergedBorder.bottom),
+          left: mergedBorder.left?.style ? mergedBorder.left : (pivotFormat.left ?? mergedBorder.left),
+          right: mergedBorder.right?.style ? mergedBorder.right : (pivotFormat.right ?? mergedBorder.right),
+        };
+      }
       // centerContinuous: hide internal vertical borders so the run reads as
       // one visual span (matches Excel — see precompute block above).
       if (suppressRightGridCol.has(ci) || suppressLeftGridCol.has(ci)) {
@@ -2808,10 +2849,12 @@ function renderQuadrant(
             ? !!tableFontDxf?.font?.bold
             : (tableStyle.isHeader || tableStyle.isTotals))
         : false;
-      const effectiveBold = font.bold || !!cf.fontBold || tableBold;
-      const effectiveItalic = font.italic || !!cf.fontItalic;
-      const effectiveUnderline = font.underline || !!cf.fontUnderline;
-      const effectiveStrike = font.strike || !!cf.fontStrike;
+      // CF is the top layer: a matched rule's toggle, on or off, overrides
+      // the cell, table and PivotTable formatting beneath it (CfResult).
+      const effectiveBold = cf.fontBold ?? (font.bold || tableBold || !!pivotFormat?.bold);
+      const effectiveItalic = cf.fontItalic ?? (font.italic || !!pivotFormat?.italic);
+      const effectiveUnderline = cf.fontUnderline ?? (font.underline || !!pivotFormat?.underline);
+      const effectiveStrike = cf.fontStrike ?? (font.strike || !!pivotFormat?.strike);
       const fontForDraw: CellFont = (
         effectiveBold !== font.bold || effectiveItalic !== font.italic ||
         effectiveUnderline !== font.underline || effectiveStrike !== font.strike
@@ -2822,7 +2865,7 @@ function renderQuadrant(
       const hyperlinkUrl = rc.hyperlinkMap.get(key);
       // Table-style element dxfs can override font color (ECMA-376 §18.8.83),
       // following the same element hierarchy as the fill/bold above.
-      const tableFontColor = tableFontDxf?.font?.color ?? null;
+      const tableFontColor = tableFontDxf?.font?.color ?? pivotFormat?.fontColor ?? null;
       // Colour precedence: hyperlink > conditional-formatting font colour >
       // number-format section colour ([Red] etc., §18.8.30) > table-style dxf
       // colour > the cell's own font colour.
@@ -2834,7 +2877,7 @@ function renderQuadrant(
       const paddingX = 3;
       const paddingY = 2;
       const isNumeric = cell.value.type === 'number';
-      const alignH = xf.alignH ?? (isNumeric ? 'right' : 'left');
+      const alignH = xf.alignH ?? generalHorizontalAlignment(cell.value.type);
       const alignV = xf.alignV ?? 'bottom';
       // Indent: ECMA-376 §18.8.1 alignment@indent — one level indents by 3
       // character widths (MDW) of the workbook's normal-style font.
@@ -3286,6 +3329,7 @@ interface SheetRenderCache {
   hyperlinkMap: Map<string, string>;
   commentCells: Set<string>;
   tableStyleMap: Map<string, TableCellStyle>;
+  pivotStyleMap: Map<string, PivotCellFormat>;
   sparklineMap: Map<string, SparklineModel>;
 }
 const sheetRenderCache = new WeakMap<Worksheet, SheetRenderCache>();
@@ -3380,6 +3424,7 @@ export function getSheetRenderCache(worksheet: Worksheet): SheetRenderCache {
     hyperlinkMap,
     commentCells,
     tableStyleMap: buildTableStyleMap(worksheet),
+    pivotStyleMap: buildPivotStyleMap(worksheet),
     sparklineMap: buildSparklineMap(worksheet),
   };
   sheetRenderCache.set(worksheet, entry);
@@ -3398,36 +3443,50 @@ interface AutoRowHeightState {
 
 const autoRowHeightState = new WeakMap<Worksheet, AutoRowHeightState>();
 
-function effectiveMeasurementFont(
+/** The table-element dxf that supplies a table cell's font (header / total /
+ *  last / first column / stripe / whole table), by the same §18.8.83 element
+ *  hierarchy the main paint path uses. */
+function tableFontDxfFor(tableStyle: TableCellStyle | undefined, styles: Styles): Dxf | undefined {
+  if (!tableStyle) return undefined;
+  const dxfList = styles.dxfs ?? [];
+  return tableStyle.isHeader
+    ? dxfList[tableStyle.headerRowDxf ?? -1]
+    : tableStyle.isTotals
+      ? dxfList[tableStyle.totalRowDxf ?? -1]
+      : tableStyle.isLastCol && tableStyle.lastColumnDxf != null
+        ? dxfList[tableStyle.lastColumnDxf]
+        : tableStyle.isFirstCol && tableStyle.firstColumnDxf != null
+          ? dxfList[tableStyle.firstColumnDxf]
+          : tableStyle.stripeDxf != null
+            ? dxfList[tableStyle.stripeDxf]
+            : dxfList[tableStyle.wholeTableDxf ?? -1];
+}
+
+/** The cell font with its bold/italic/underline/strike composed from every
+ *  formatting layer: cell style, table style and PivotTable style beneath,
+ *  and conditional formatting on top, whose defined toggle (on or off) wins
+ *  (CfResult). Matches the main paint path. */
+function layeredCellFont(
   base: CellFont,
   cf: CfResult,
   tableStyle: TableCellStyle | undefined,
   styles: Styles,
+  pivotFormat: PivotCellFormat | undefined,
 ): CellFont {
-  const dxfList = styles.dxfs ?? [];
-  const tableFontDxf = tableStyle
-    ? tableStyle.isHeader
-      ? dxfList[tableStyle.headerRowDxf ?? -1]
-      : tableStyle.isTotals
-        ? dxfList[tableStyle.totalRowDxf ?? -1]
-        : tableStyle.isLastCol && tableStyle.lastColumnDxf != null
-          ? dxfList[tableStyle.lastColumnDxf]
-          : tableStyle.isFirstCol && tableStyle.firstColumnDxf != null
-            ? dxfList[tableStyle.firstColumnDxf]
-            : tableStyle.stripeDxf != null
-              ? dxfList[tableStyle.stripeDxf]
-              : dxfList[tableStyle.wholeTableDxf ?? -1]
-    : undefined;
+  const tableFontDxf = tableFontDxfFor(tableStyle, styles);
   const tableBold = tableStyle
     ? tableStyle.isCustom
       ? !!tableFontDxf?.font?.bold
       : tableStyle.isHeader || tableStyle.isTotals
     : false;
-  const bold = base.bold || !!cf.fontBold || tableBold;
-  const italic = base.italic || !!cf.fontItalic;
-  return bold === base.bold && italic === base.italic
+  const bold = cf.fontBold ?? (base.bold || tableBold || !!pivotFormat?.bold);
+  const italic = cf.fontItalic ?? (base.italic || !!pivotFormat?.italic);
+  const underline = cf.fontUnderline ?? (base.underline || !!pivotFormat?.underline);
+  const strike = cf.fontStrike ?? (base.strike || !!pivotFormat?.strike);
+  return bold === base.bold && italic === base.italic &&
+    underline === base.underline && strike === base.strike
     ? base
-    : { ...base, bold, italic };
+    : { ...base, bold, italic, underline, strike };
 }
 
 function richHardBreakLineMetrics(
@@ -3481,7 +3540,7 @@ function requiredAutoCellHeightPx(
 ): number {
   const paddingX = 3;
   const paddingY = 2;
-  const alignH = xf.alignH ?? (cell.value.type === 'number' ? 'right' : 'left');
+  const alignH = xf.alignH ?? generalHorizontalAlignment(cell.value.type);
   const indentPx = xf.indent ? Math.round(xf.indent * 3 * mdw) : 0;
   // Keep the wrapping width identical to paint: icon-set cells reserve their
   // current icon square plus 4px. The icon itself scales with the row height,
@@ -3593,7 +3652,8 @@ export function applyAutoRowHeights(
     1,
     1.2,
   );
-  const { cfContext, mergeAnchorSet, mergeSkipSet, tableStyleMap } = getSheetRenderCache(worksheet);
+  const { cfContext, mergeAnchorSet, mergeSkipSet, tableStyleMap, pivotStyleMap } =
+    getSheetRenderCache(worksheet);
   const derived = new Map<number, number>();
   let changed = false;
   ctx.save();
@@ -3631,7 +3691,9 @@ export function applyAutoRowHeights(
         // O(cells) with a small constant even on a dense virtualized sheet.
         if (!cellCanGrowAutomaticRow(cell, font, xf, defaultFontLineHeightPx)) continue;
         const cf = evaluateCf(cell, row.index, cell.col, cfContext, styles.dxfs ?? []);
-        const measuredFont = effectiveMeasurementFont(font, cf, tableStyleMap.get(key), styles);
+        const measuredFont = layeredCellFont(
+          font, cf, tableStyleMap.get(key), styles, pivotStyleMap.get(key),
+        );
         const formatted = formatCellValueWithColor(cell, styles, cf.numFmt, worksheet.date1904);
         const text = formatted.text;
         if (!text || (text === '0' && worksheet.showZeros === false)) continue;
@@ -3811,6 +3873,7 @@ function virtualizedTextOverflowOverscan(
   nonEmptyColsByRow: Map<number, readonly number[]>,
   cfContext: CfContext,
   tableStyleMap: Map<string, TableCellStyle>,
+  pivotStyleMap: Map<string, PivotCellFormat>,
   mergeAnchorMap: Map<string, { totalW: number; totalH: number; right: number; bottom: number }>,
   colAxis: GridAxisGeometry,
   rowAxis: GridAxisGeometry,
@@ -3862,14 +3925,16 @@ function virtualizedTextOverflowOverscan(
             : tableStyle?.stripeDxf ?? tableStyle?.wholeTableDxf;
     const tableFontDxf = tableFontDxfId != null ? styles.dxfs?.[tableFontDxfId] : undefined;
     const builtInTableBold = !!tableStyle && !tableStyle.isCustom && (tableStyle.isHeader || tableStyle.isTotals);
-    const effectiveBold = font.bold || !!cf.fontBold || builtInTableBold || !!tableFontDxf?.font?.bold;
-    const effectiveItalic = font.italic || !!cf.fontItalic;
+    const pivotFormat = pivotStyleMap.get(key);
+    const effectiveBold = cf.fontBold ?? (font.bold || builtInTableBold || !!tableFontDxf?.font?.bold
+      || !!pivotFormat?.bold);
+    const effectiveItalic = cf.fontItalic ?? (font.italic || !!pivotFormat?.italic);
     const effectiveFont = (effectiveBold !== font.bold || effectiveItalic !== font.italic)
       ? { ...font, bold: effectiveBold, italic: effectiveItalic }
       : font;
     ctx.font = buildFont(ctx, effectiveFont, cs, cjkFallback, text);
 
-    const alignH = xf.alignH ?? 'left';
+    const alignH = xf.alignH ?? generalHorizontalAlignment(cell.value.type);
     const paddingX = 3;
     const indentPx = xf.indent ? Math.round(xf.indent * 3 * mdw) : 0;
     const cellW = colAxis.sizeOf(col);
@@ -3974,7 +4039,13 @@ export function renderViewport(
   const hw = chartSheet ? 0 : sp(HEADER_W);  // scaled header column width
   const hh = chartSheet ? 0 : sp(HEADER_H);  // scaled header row height
 
-  const { row: startRow, col: startCol, rows: numRows, cols: numCols } = viewport;
+  // Viewport rows and columns are 1-based. The grid bands already clamp a
+  // start below 1 to the first row/column; clamp it once here so anchored
+  // drawings (positioned from the same start) stay registered with the grid
+  // instead of shifting by one default column width / row height.
+  const { rows: numRows, cols: numCols } = viewport;
+  const startRow = Math.max(1, Math.trunc(viewport.row) || 1);
+  const startCol = Math.max(1, Math.trunc(viewport.col) || 1);
   const scrollOffsetX = (opts.scrollOffsetX ?? 0) * cs;
   const scrollOffsetY = (opts.scrollOffsetY ?? 0) * cs;
   const { col: colAxis, row: rowAxis } = geometry.axesAtScale(cs);
@@ -4019,7 +4090,7 @@ export function renderViewport(
   // ── Viewport-independent lookups (memoized per Worksheet) ────
   const {
     cellMap, cfContext, mergeSkipSet, autoFilterCells,
-    hyperlinkMap, commentCells, tableStyleMap, sparklineMap,
+    hyperlinkMap, commentCells, tableStyleMap, pivotStyleMap, sparklineMap,
     nonEmptyColsByRow,
   } = getSheetRenderCache(worksheet);
 
@@ -4056,6 +4127,7 @@ export function renderViewport(
     nonEmptyColsByRow,
     cfContext,
     tableStyleMap,
+    pivotStyleMap,
     mergeAnchorMap,
     colAxis,
     rowAxis,
@@ -4092,6 +4164,7 @@ export function renderViewport(
     hyperlinkMap,
     commentCells,
     tableStyleMap,
+    pivotStyleMap,
     sparklineMap,
     overflowTextAnchors: overflowOverscan.anchorKeys,
     mdw,
@@ -4794,7 +4867,18 @@ function drawShape(
             break;
         }
       }
-      fillAndStroke(ctx, shape, sw, sh);
+      // ECMA-376 §20.1.9.15: each custom path carries its own fill mode and
+      // stroke flag. `fill="none"` leaves the path unfilled and `stroke="0"`
+      // unstroked. The lighten/darken modes shade the fill by the amounts
+      // measured from PowerPoint's output (shared with the preset engine).
+      if (path.fill !== 'none' && fillShape(ctx, shape, sw, sh)) {
+        const overlay = pathFillModeOverlay(path.fill);
+        if (overlay) {
+          ctx.fillStyle = overlay;
+          ctx.fill();
+        }
+      }
+      if (path.stroke !== false) strokeShapePath(ctx, shape, sw, sh);
     }
   } else if (shape.geom.type === 'preset') {
     // Drive the shape off the ECMA-376 §20.1.9 spec-driven preset engine
@@ -5323,15 +5407,25 @@ function fillAndStroke(
   width: number,
   height: number,
 ): void {
+  fillShape(ctx, shape, width, height);
+  strokeShapePath(ctx, shape, width, height);
+}
+
+/** Fill the current path with the shape fill; returns whether it painted. */
+function fillShape(
+  ctx: CanvasRenderingContext2D,
+  shape: ShapeInfo,
+  width: number,
+  height: number,
+): boolean {
   const fill = shape.fill ?? (shape.fillColor
     ? { fillType: 'solid' as const, color: shape.fillColor }
     : null);
   const paint = resolveFill(fill, ctx, 0, 0, width, height, shape.rot);
-  if (paint) {
-    ctx.fillStyle = paint;
-    ctx.fill();
-  }
-  strokeShapePath(ctx, shape, width, height);
+  if (!paint) return false;
+  ctx.fillStyle = paint;
+  ctx.fill();
+  return true;
 }
 
 function shapeStroke(shape: ShapeInfo): Stroke | null {

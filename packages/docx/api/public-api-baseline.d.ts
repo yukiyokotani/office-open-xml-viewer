@@ -14,6 +14,25 @@ export function autoResize(render: (width: number, height: number) => void | Pro
 export interface AutoResizeOptions {
     pauseWhenHidden?: boolean;
 }
+export type BlipEffect = {
+    type: 'grayscale';
+} | {
+    type: 'biLevel';
+    thresh: number;
+} | {
+    type: 'colorChange';
+    from: string;
+    fromAlpha: number;
+    to: string;
+    toAlpha: number;
+    useAlpha: boolean;
+} | {
+    type: 'luminance';
+    bright: number;
+    contrast: number;
+} | {
+    type: 'duotone';
+};
 export type BodyElement = ({
     type: 'paragraph';
 } & DocParagraph) | ({
@@ -50,6 +69,8 @@ export interface CellBorders {
     right: BorderSpec | null;
     insideH: BorderSpec | null;
     insideV: BorderSpec | null;
+    tl2br?: BorderSpec;
+    tr2bl?: BorderSpec;
 }
 export type CellElement = ({
     type: 'paragraph';
@@ -379,6 +400,7 @@ export interface ChartModel {
     title: string | null;
     titleRichRuns?: ChartTextRun[] | null;
     titlePresent?: boolean;
+    authoredWithoutSeries?: boolean;
     categories: string[];
     categorySourceHidden?: boolean[] | null;
     categoryLevels?: string[][] | null;
@@ -1155,6 +1177,8 @@ export interface DocTableCell {
     marginBottom?: number | null;
     marginLeft?: number | null;
     marginRight?: number | null;
+    textDirection?: string;
+    hideMark?: boolean;
 }
 export interface DocTableRow {
     cells: DocTableCell[];
@@ -1621,6 +1645,7 @@ export interface ImageFill {
     tile?: TileInfo;
     alpha?: number;
     duotone?: Duotone;
+    blipEffects?: BlipEffect[];
 }
 export interface ImageResourceOptions {
     decodedByteBudget?: number;
@@ -1869,7 +1894,7 @@ export class OoxmlDecodedImageLimitError extends RangeError {
     readonly code: 'ooxml-decoded-image-limit';
     constructor(metric: OoxmlDecodedImageLimitMetric, limit: number, observed: number);
 }
-export type OoxmlDecodedImageLimitMetric = 'image-dimension' | 'image-pixels' | 'active-decoded-bytes';
+export type OoxmlDecodedImageLimitMetric = 'image-dimension' | 'image-pixels' | 'active-decoded-bytes' | 'image-effect-count' | 'image-effect-work';
 export class OoxmlError extends Error {
     readonly code: OoxmlErrorCode;
     constructor(code: OoxmlErrorCode, message: string);
@@ -2246,6 +2271,10 @@ export interface ShapeRun {
     behindDoc?: boolean;
     zOrder: number;
     subpaths: PathCmd[][];
+    subpathPaint?: Array<{
+        fill?: 'none' | 'lighten' | 'lightenLess' | 'darken' | 'darkenLess';
+        stroke?: false;
+    }>;
     presetGeometry?: string | null;
     adjValues?: Array<number | null>;
     fill: ShapeFill | null;

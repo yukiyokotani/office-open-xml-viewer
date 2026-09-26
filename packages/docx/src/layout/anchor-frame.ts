@@ -583,19 +583,10 @@ function resolveAxis(
       );
       return { diagnostic: unsupportedAxis(axis, acquisition, problem), problem };
     }
-    const leadingName = axis === 'horizontal' ? 'left' : 'top';
-    const trailingName = axis === 'horizontal' ? 'right' : 'bottom';
-    const isInside = choice.value === 'inside';
-    const parityLeading = frames.pageParity === 'odd';
-    const alignedLeading = choice.value === leadingName
-      || (isInside && parityLeading)
-      || (choice.value === 'outside' && !parityLeading);
-    const alignedTrailing = choice.value === trailingName
-      || (isInside && !parityLeading)
-      || (choice.value === 'outside' && parityLeading);
-    resolvedOriginPt = alignedLeading
+    const placement = alignedAnchorPlacement(axis, choice.value, frames.pageParity);
+    resolvedOriginPt = placement === 'leading'
       ? baseResult.base.startPt
-      : alignedTrailing
+      : placement === 'trailing'
         ? baseResult.base.endPt - sizePt
         : baseResult.base.startPt + (lengthPt - sizePt) / 2;
     value = choice.value;
@@ -625,6 +616,36 @@ function resolveAxis(
         : null,
     },
   };
+}
+
+/**
+ * Which edge of the alignment base an ECMA-376 §20.4.3.1 `wp:align` value
+ * holds the object against. `inside`/`outside` follow the page parity
+ * (odd pages lead with inside). Callers validate the value beforehand.
+ */
+export function alignedAnchorPlacement(
+  axis: Axis,
+  value: string,
+  pageParity: 'odd' | 'even' | null,
+): 'leading' | 'center' | 'trailing' {
+  const leadingName = axis === 'horizontal' ? 'left' : 'top';
+  const trailingName = axis === 'horizontal' ? 'right' : 'bottom';
+  const parityLeading = pageParity === 'odd';
+  if (
+    value === leadingName
+    || (value === 'inside' && parityLeading)
+    || (value === 'outside' && !parityLeading)
+  ) {
+    return 'leading';
+  }
+  if (
+    value === trailingName
+    || (value === 'inside' && !parityLeading)
+    || (value === 'outside' && parityLeading)
+  ) {
+    return 'trailing';
+  }
+  return 'center';
 }
 
 function simpleAxis(

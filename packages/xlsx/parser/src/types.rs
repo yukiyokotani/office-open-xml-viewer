@@ -367,6 +367,53 @@ pub struct PivotTableMetadata {
     pub status: PivotMetadataStatus,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub extension_uris: Vec<String>,
+    /// ECMA-376 §18.10.1.97 `pivotTableStyleInfo`, with the applied style's
+    /// elements resolved to differential formats (a workbook `tableStyle` or
+    /// a built-in Annex G PivotTable style). `None` without a style.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub style: Option<PivotTableStyle>,
+    /// ECMA-376 §18.10.1.84 `rowItems`: one entry per body row, in order.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub row_items: Vec<PivotAxisItem>,
+    /// ECMA-376 §18.10.1.19 `colItems`: one entry per data column, in order.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub column_items: Vec<PivotAxisItem>,
+}
+
+/// A PivotTable style as applied to one PivotTable (§18.10.1.97, §18.8.40).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PivotTableStyle {
+    pub name: String,
+    pub show_row_headers: bool,
+    pub show_column_headers: bool,
+    pub show_row_stripes: bool,
+    pub show_column_stripes: bool,
+    pub show_last_column: bool,
+    /// The style's elements (§18.8.41), each with its format inline.
+    pub elements: Vec<PivotTableStyleElement>,
+}
+
+/// One `tableStyleElement` of a PivotTable style.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PivotTableStyleElement {
+    /// ECMA-376 §18.18.77 ST_TableStyleType, e.g. `firstRowSubheading`.
+    pub kind: String,
+    /// Band size for stripe elements (§18.8.41 `size`, default 1).
+    pub size: u32,
+    pub dxf: Dxf,
+}
+
+/// One `i` of `rowItems`/`colItems` (§18.10.1.44).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PivotAxisItem {
+    /// ECMA-376 §18.18.43 ST_ItemType (`data`, `default`, `sum`, …, `grand`,
+    /// `blank`).
+    pub kind: String,
+    /// Zero-based field level of the item: `r` plus its `x` count less one.
+    pub depth: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -1098,7 +1145,20 @@ pub struct PathInfo {
     pub w: f64,
     /// Path's own coordinate system height.
     pub h: f64,
+    /// ECMA-376 §20.1.9.15 `a:path@fill` (ST_PathFillMode §20.1.10.37) when
+    /// it is not `norm`: `none`, `lighten`, `lightenLess`, `darken` or
+    /// `darkenLess`. `None` is the default `norm`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fill: Option<String>,
+    /// ECMA-376 §20.1.9.15 `a:path@stroke` (default true). Serialized only
+    /// when false.
+    #[serde(skip_serializing_if = "is_true")]
+    pub stroke: bool,
     pub commands: Vec<PathCmd>,
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 #[derive(Debug, Serialize)]
@@ -1302,6 +1362,25 @@ pub struct ConditionalFormat {
     pub rules: Vec<CfRule>,
 }
 
+/// One `<cfRule>` (ECMA-376 §18.3.1.10).
+///
+/// `stopIfTrue`: "If this flag is 1, no rules with lower priority shall be
+/// applied over this rule, when this rule evaluates to true." The schema
+/// allows it on every `CT_CfRule`, so every variant keeps it, including
+/// `colorScale` / `dataBar` / `iconSet` (Excel honours a set flag on those in
+/// SpreadsheetML even though its rule editor does not offer it; the renderer
+/// records the evidence beside its evaluation) and the not-yet-evaluated
+/// `Other` kinds such as `timePeriod`, `duplicateValues` and `uniqueValues`.
+///
+/// A rule stops evaluation only where it is established to match. For
+/// `colorScale` / `dataBar` / `iconSet` an optional formula is an activity
+/// condition: [MS-XLSX] 2.6.27 CT_CfRule "When the formula returns zero,
+/// conditional formatting is not displayed. When the formula returns a
+/// nonzero value, or is not present, conditional formatting is displayed."
+/// Excel applies the same reading to the SpreadsheetML `<formula>` child of
+/// those rule types (observed in a PDF export: a colorScale or dataBar with
+/// formula `0` drew nothing and did not stop a lower rule; formula `1` drew
+/// the scale and stopped it).
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum CfRule {
@@ -1311,6 +1390,9 @@ pub enum CfRule {
         formulas: Vec<String>,
         dxf_id: Option<u32>,
         priority: i32,
+        /// §18.3.1.10 `stopIfTrue`; see `CfRule`. Serialized only when set.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        stop_if_true: bool,
     },
     #[serde(rename_all = "camelCase")]
     Expression {
@@ -1320,7 +1402,19 @@ pub enum CfRule {
         stop_if_true: bool,
     },
     #[serde(rename_all = "camelCase")]
-    ColorScale { stops: Vec<CfStop>, priority: i32 },
+    ColorScale {
+        stops: Vec<CfStop>,
+        priority: i32,
+        /// Activity condition: the rule's own formula (`<formula>`, or `xm:f`
+        /// in the x14 extension). When present, the rule formats a cell (and
+        /// can stop lower rules) only where it evaluates to nonzero; see
+        /// `CfRule`. Absent means always active.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        active_formula: Option<String>,
+        /// §18.3.1.10 `stopIfTrue`; see `CfRule`. Serialized only when set.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        stop_if_true: bool,
+    },
     #[serde(rename_all = "camelCase")]
     DataBar {
         color: String,
@@ -1328,6 +1422,15 @@ pub enum CfRule {
         max: CfValue,
         priority: i32,
         gradient: bool,
+        /// Activity condition: the rule's own formula (`<formula>`, or `xm:f`
+        /// in the x14 extension). When present, the rule formats a cell (and
+        /// can stop lower rules) only where it evaluates to nonzero; see
+        /// `CfRule`. Absent means always active.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        active_formula: Option<String>,
+        /// §18.3.1.10 `stopIfTrue`; see `CfRule`. Serialized only when set.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        stop_if_true: bool,
     },
     #[serde(rename_all = "camelCase")]
     Top10 {
@@ -1336,6 +1439,9 @@ pub enum CfRule {
         rank: u32,
         dxf_id: Option<u32>,
         priority: i32,
+        /// §18.3.1.10 `stopIfTrue`; see `CfRule`. Serialized only when set.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        stop_if_true: bool,
     },
     #[serde(rename_all = "camelCase")]
     AboveAverage {
@@ -1351,6 +1457,9 @@ pub enum CfRule {
         std_dev: Option<u32>,
         dxf_id: Option<u32>,
         priority: i32,
+        /// §18.3.1.10 `stopIfTrue`; see `CfRule`. Serialized only when set.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        stop_if_true: bool,
     },
     #[serde(rename_all = "camelCase")]
     IconSet {
@@ -1360,9 +1469,24 @@ pub enum CfRule {
         priority: i32,
         #[serde(skip_serializing_if = "Option::is_none")]
         custom_icons: Option<Vec<CfIcon>>,
+        /// Activity condition: the rule's own formula (`<formula>`, or `xm:f`
+        /// in the x14 extension). When present, the rule formats a cell (and
+        /// can stop lower rules) only where it evaluates to nonzero; see
+        /// `CfRule`. Absent means always active.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        active_formula: Option<String>,
+        /// §18.3.1.10 `stopIfTrue`; see `CfRule`. Serialized only when set.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        stop_if_true: bool,
     },
     #[serde(rename_all = "camelCase")]
-    Other { kind: String, priority: i32 },
+    Other {
+        kind: String,
+        priority: i32,
+        /// §18.3.1.10 `stopIfTrue`; see `CfRule`. Serialized only when set.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        stop_if_true: bool,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -1473,10 +1597,9 @@ pub struct Cell {
     /// `Some(0)` is intentionally distinct and resets to the Normal XF.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub style_index: Option<u32>,
-    /// Raw `<f>` formula text (ECMA-376 §18.3.1.40), when present. The
-    /// renderer uses this to recompute volatile functions like TODAY() /
-    /// NOW() at display time so the cached `<v>` (frozen when the file was
-    /// last saved) doesn't show a stale date.
+    /// Raw `<f>` formula text (ECMA-376 §18.3.1.40), when present. It is
+    /// informational only: formulas are never calculated, and the renderer
+    /// always shows the cached `<v>` in `value`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub formula: Option<String>,
     /// ECMA-376 §18.3.1.4 `<c ph="1">` — whether this cell should display its
@@ -1624,7 +1747,7 @@ pub struct Styles {
     pub dxfs: Vec<Dxf>,
 }
 
-#[derive(Debug, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Dxf {
     pub font: Option<Font>,
@@ -1635,9 +1758,33 @@ pub struct Dxf {
     /// replaces the cell's own style numFmt (e.g. switching a calendar cell
     /// from `d` to `m"月"d"日"` on the first of each month).
     pub num_fmt: Option<NumFmt>,
+    /// The toggles of the dxf's `<font>` as authored. `font.bold` etc. are
+    /// plain booleans shared with cell fonts, which cannot tell an absent
+    /// `<b>` from `<b val="0"/>`; a differential format needs both, because an
+    /// explicit off turns off what an earlier format turned on while an
+    /// absent element changes nothing (ECMA-376 §18.8.14-15 dxf, §18.8.2 b
+    /// CT_BooleanProperty `val` default true). Absent when the dxf has no
+    /// `<font>`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_toggles: Option<DxfFontToggles>,
 }
 
-#[derive(Debug, Serialize, Default)]
+/// A differential font's toggle properties: `None` when the element is
+/// absent, `Some(false)` for an explicit off (`val="0"`, or `<u val="none"/>`).
+#[derive(Debug, Clone, Copy, Serialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DxfFontToggles {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bold: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub italic: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub underline: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strike: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Font {
     pub bold: bool,
@@ -1666,7 +1813,7 @@ pub struct Font {
     pub vert_align: Option<String>,
 }
 
-#[derive(Debug, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Fill {
     pub pattern_type: String,
@@ -1679,7 +1826,7 @@ pub struct Fill {
     pub gradient: Option<GradientFillSpec>,
 }
 
-#[derive(Debug, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct GradientFillSpec {
     /// "linear" (default) or "path". Linear uses `degree`; path uses top/bottom/left/right.
@@ -1694,14 +1841,14 @@ pub struct GradientFillSpec {
     pub stops: Vec<GradientStopSpec>,
 }
 
-#[derive(Debug, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct GradientStopSpec {
     pub position: f64,
     pub color: String,
 }
 
-#[derive(Debug, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Border {
     pub left: Option<BorderEdge>,
@@ -1757,7 +1904,7 @@ pub struct CellXf {
     pub reading_order: Option<u32>,
 }
 
-#[derive(Debug, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct NumFmt {
     pub num_fmt_id: u32,
