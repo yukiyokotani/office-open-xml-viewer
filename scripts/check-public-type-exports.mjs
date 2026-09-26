@@ -9,7 +9,7 @@ const require = createRequire(new URL('../package.json', import.meta.url));
 const ts = require('typescript-compiler-api');
 const typesDir = path.resolve(process.cwd(), 'dist/types');
 const formats = ['docx', 'pptx', 'xlsx'];
-const files = ['index', ...formats, 'math', 'three-d', 'region-map', 'chart-ex', 'tiff', 'legacy-ppt']
+const files = ['index', ...formats, 'math', 'three-d', 'region-map', 'chart-ex', 'tiff', 'legacy-ppt', 'legacy-xls']
   .map((entry) => path.join(typesDir, `${entry}.d.ts`));
 
 const program = ts.createProgram(files, {
@@ -97,6 +97,7 @@ assert.deepEqual(
 
 for (const [entry, factory, options] of [
   ['legacy-ppt', 'legacyPptSource', 'LegacyPptSourceOptions'],
+  ['legacy-xls', 'legacyXlsSource', 'LegacyXlsSourceOptions'],
 ]) {
   const exports = moduleExports(path.join(typesDir, `${entry}.d.ts`));
   assert.deepEqual(

@@ -1,12 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { buildCfbFixture } from '@silurus/ooxml-core/testing';
 import { openModelSource as openPpt } from './legacy-ppt-source-module.js';
-import { buildPptFixture } from './test-fixtures.js';
+import { openModelSource as openXls } from './legacy-xls-source-module.js';
+import { buildPptFixture, buildXlsFixture } from './test-fixtures.js';
 import { TEST_SOURCE_URLS } from './test-sources.js';
 
 // The real source modules with the real direct-reader WASM, called the way
 // the renderer's archive realm calls them.
 const modules = [
+  { family: 'xls', open: openXls, fixture: () => buildXlsFixture(), stream: 'Workbook', cursor: 'open_sheet_cursor' },
   { family: 'ppt', open: openPpt, fixture: () => buildPptFixture(), stream: 'PowerPoint Document', cursor: 'presentation_bootstrap' },
 ] as const;
 

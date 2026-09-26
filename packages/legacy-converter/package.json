@@ -2,7 +2,7 @@
   "name": "@silurus/ooxml-legacy-converter",
   "private": true,
   "version": "0.85.3",
-  "description": "Optional legacy Office (PPT) model sources for @silurus/ooxml",
+  "description": "Optional legacy Office (XLS/PPT) model sources for @silurus/ooxml",
   "license": "MIT",
   "author": "Yuki Yokotani <silurus.dev@gmail.com>",
   "repository": {
@@ -13,12 +13,16 @@
   "type": "module",
   "sideEffects": false,
   "exports": {
+    "./legacy-xls": "./src/legacy-xls.ts",
     "./legacy-ppt": "./src/legacy-ppt.ts",
+    "./legacy-xls-source-module": "./src/legacy-xls-source-module.ts",
     "./legacy-ppt-source-module": "./src/legacy-ppt-source-module.ts",
+    "./wasm-direct-xls-binary": "./src/wasm-direct-xls/legacy_xls_direct_bg.wasm",
     "./wasm-direct-ppt-binary": "./src/wasm-direct-ppt/legacy_ppt_direct_bg.wasm"
   },
   "scripts": {
     "wasm:direct-ppt": "cd parser && wasm-pack build --target web --out-dir ../src/wasm-direct-ppt --out-name legacy_ppt_direct --features direct-ppt && node ../../../scripts/append-wasm-reinit.mjs ../src/wasm-direct-ppt/legacy_ppt_direct.js",
+    "wasm:direct-xls": "cd parser && wasm-pack build --target web --out-dir ../src/wasm-direct-xls --out-name legacy_xls_direct --features direct-xls && node ../../../scripts/append-wasm-reinit.mjs ../src/wasm-direct-xls/legacy_xls_direct.js",
     "typecheck": "tsc --noEmit",
     "survey": "playwright test --config playwright.config.ts"
   },

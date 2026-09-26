@@ -204,12 +204,12 @@ per-render argument. (Excel stores "Insert > Equation" as OMML inside the shared
 DrawingML `<xdr:txBody>` grammar, so `XlsxViewer` renders equations embedded in
 shapes / text boxes the same way.)
 
-### Experimental legacy PPT source
+### Experimental legacy XLS and PPT sources
 
-Legacy binary Office files can be read directly into the ordinary
-presentation model through **model sources**, a format-generic `modelSources`
-load option. The legacy PPT reader is a separate opt-in entry that returns a
-model source for the PPTX loaders and viewers:
+Legacy binary Office files can be read directly into the ordinary workbook
+and presentation models through **model sources**, a format-generic
+`modelSources` load option. The legacy readers are separate opt-in entries,
+one per format; each returns a model source for the matching loader or viewer:
 
 ```typescript
 import { PptxViewer } from '@silurus/ooxml/pptx';
@@ -220,14 +220,14 @@ const viewer = new PptxViewer(canvas, { modelSources: [legacyPptSource()] });
 await viewer.load(pptOrPptxBytes);
 ```
 
-The source claims only a PowerPoint 97-2003 binary; every other input takes
-the unchanged OOXML path, and without a source a legacy file still rejects
-with the typed `legacy-binary-format` error. Creating a source fetches
-nothing: its self-contained source module and WASM load in the parser worker
-(or in Node) only when a claimed file is opened, and no OOXML package is
-generated. The reader is narrow and experimental and rejects unsupported
-content rather than guessing; see
-[Experimental legacy Office sources](docs/legacy-office-conversion.md).
+`legacyXlsSource()` (`@silurus/ooxml/legacy-xls`) works the same way for
+XLSX. A source claims only its own binary family; every other input takes the
+unchanged OOXML path, and without a source a legacy file still rejects with
+the typed `legacy-binary-format` error. Creating a source fetches nothing: its
+self-contained source module and WASM load in the parser worker (or in Node)
+only when a claimed file is opened, and no OOXML package is generated. The
+readers are narrow and experimental and reject unsupported content rather than
+guessing; see [Experimental legacy Office sources](docs/legacy-office-conversion.md).
 
 ### Optional rendering modules
 

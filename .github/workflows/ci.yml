@@ -42,7 +42,7 @@ jobs:
       # Lint and test each reader alone and all together.
       - name: Legacy reader clippy (per feature)
         run: |
-          for features in direct-ppt inspection; do
+          for features in direct-xls direct-ppt inspection; do
             cargo clippy -p legacy-office-converter --all-targets --features "$features" -- -D warnings
           done
           cargo clippy -p legacy-office-converter --all-targets --all-features -- -D warnings
@@ -62,7 +62,7 @@ jobs:
 
       - name: Legacy reader tests (per feature)
         run: |
-          for features in direct-ppt; do
+          for features in direct-xls direct-ppt; do
             cargo test -p legacy-office-converter --features "$features"
           done
           cargo test -p legacy-office-converter --all-features
@@ -198,6 +198,7 @@ jobs:
           pnpm check:optional-chart-ex
           pnpm check:optional-tiff
           pnpm check:optional-legacy-ppt
+          pnpm check:optional-legacy-xls
           pnpm check:legacy-wasm-exports
           pnpm check:public-type-exports
           pnpm check:public-api:built

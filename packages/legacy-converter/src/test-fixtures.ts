@@ -1,4 +1,44 @@
 // Synthetic, redistributable Office binary fixtures for converter integration tests.
+export function buildXlsFixture(options: { sharedString?: Uint8Array; styleRecords?: Uint8Array } = {}): Uint8Array {
+  const bof = (kind: number) => biffRecord(0x0809, concat(
+    little16(0x0600), little16(kind), little16(0), little16(0),
+  ));
+  const sheetName = utf16le('表計算');
+  const boundSheet = concat(
+    little32(0), new Uint8Array([0, 0, 3, 1]), sheetName,
+  );
+  const string = utf16le('日本語');
+  const sst = concat(
+    little32(1), little32(1), options.sharedString ?? concat(little16(3), new Uint8Array([1]), string),
+  );
+  const globals = concat(
+    bof(0x0005),
+    biffRecord(0x0085, boundSheet),
+    options.styleRecords ?? new Uint8Array(),
+    biffRecord(0x00fc, sst),
+    biffRecord(0x000a, new Uint8Array()),
+  );
+  const number = new Uint8Array(14);
+  new DataView(number.buffer).setFloat64(6, 42.5, true);
+  const label = concat(little16(1), little16(1), little16(0), little32(0));
+  const sheet = concat(
+    bof(0x0010),
+    biffRecord(0x0203, number),
+    biffRecord(0x00fd, label),
+    biffRecord(0x000a, new Uint8Array()),
+  );
+  new DataView(boundSheet.buffer, boundSheet.byteOffset, boundSheet.byteLength)
+    .setUint32(0, globals.length, true);
+  return buildCfb([['Workbook', concat(
+    bof(0x0005),
+    biffRecord(0x0085, boundSheet),
+    options.styleRecords ?? new Uint8Array(),
+    biffRecord(0x00fc, sst),
+    biffRecord(0x000a, new Uint8Array()),
+    sheet,
+  )]]);
+}
+
 export function buildPptFixture(slidePayload?: Uint8Array, outlinePayload: Uint8Array = new Uint8Array(), masterPayload?: Uint8Array, media?: { entries: Uint8Array[]; pictures?: Uint8Array }): Uint8Array {
   const record = (version: number, kind: number, payload: Uint8Array) => concat(
     little16(version), little16(kind), little32(payload.length), payload,
@@ -32,6 +72,10 @@ export function buildPptFixture(slidePayload?: Uint8Array, outlinePayload: Uint8
     ['Current User', currentUser],
     ...(media?.pictures ? [['Pictures', media.pictures] as const] : []),
   ]);
+}
+
+function biffRecord(kind: number, payload: Uint8Array): Uint8Array {
+  return concat(little16(kind), little16(payload.length), payload);
 }
 
 export function little16(value: number): Uint8Array {

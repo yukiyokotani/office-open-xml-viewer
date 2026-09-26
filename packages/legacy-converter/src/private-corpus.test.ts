@@ -3,9 +3,14 @@ import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { materializePptxPresentation } from './node/node-facade.js';
+import {
+  materializePptxPresentation,
+  materializeXlsxWorkbook,
+  skia,
+  skiaFactory,
+} from './node/node-facade.js';
 import type { ModelSource, ModelSourceTarget } from '@silurus/ooxml-core';
-import { testPptSource } from './test-sources.js';
+import { testPptSource, testXlsSource } from './test-sources.js';
 
 // Opt-in walk of the local, uncommitted Office-produced corpus through the Node
 // facade with the direct legacy readers. A sample passes when it either
@@ -32,6 +37,19 @@ function observed<T extends ModelSourceTarget>(source: ModelSource<T>): { source
 }
 
 const formats = [
+  {
+    from: 'xls',
+    to: 'xlsx',
+    directory: new URL('../../xlsx/public/private/', import.meta.url),
+    // The factory canvas measures the Normal font; without it drawings are omitted.
+    open: (bytes: Uint8Array, source = observed(testXlsSource())) => ({
+      claimed: source.claimed,
+      done: materializeXlsxWorkbook(bytes, {
+        modelSources: [source.source],
+        ...(skia ? { factory: skiaFactory() } : {}),
+      }),
+    }),
+  },
   {
     from: 'ppt',
     to: 'pptx',

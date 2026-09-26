@@ -9,10 +9,12 @@ const fake = vi.hoisted(() => {
     frees = 0;
     constructor(readonly bytes: Uint8Array) { fake.opened.push(this); }
     free() { this.frees += 1; }
+    close_workbook_session() { this.closes += 1; }
     close_presentation_session() { this.closes += 1; }
   }
   const glue = {
     default: async () => undefined,
+    LegacyXlsWorkbook: Native,
     LegacyPptPresentation: Native,
   };
   return {
@@ -37,13 +39,16 @@ function engineMock(create: string) {
     };
   };
 }
+vi.mock('./direct-xls-engine.js', engineMock('createLegacyXlsSourceEngine'));
 vi.mock('./direct-ppt-engine.js', engineMock('createLegacyPptSourceEngine'));
 
 import { openModelSource as openPpt } from './legacy-ppt-source-module.js';
 import { MAX_LEGACY_SOURCE_BYTES } from './legacy-source.js';
+import { openModelSource as openXls } from './legacy-xls-source-module.js';
 
 const WASM = 'https://cdn.example.test/legacy.wasm';
 const modules = [
+  { family: 'XLS', open: openXls },
   { family: 'PPT', open: openPpt },
 ] as const;
 

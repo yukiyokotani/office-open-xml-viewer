@@ -29,6 +29,7 @@ on:
           - fuzz_xlsx_part
           - fuzz_pptx_part
           - fuzz_chart_part
+          - fuzz_legacy_direct_xls
           - fuzz_legacy_direct_ppt
           - fuzz_legacy_ppt_alternative
       duration_minutes:
@@ -66,6 +67,7 @@ jobs:
           - fuzz_xlsx_part
           - fuzz_pptx_part
           - fuzz_chart_part
+          - fuzz_legacy_direct_xls
           - fuzz_legacy_direct_ppt
           - fuzz_legacy_ppt_alternative
     steps:

@@ -3,10 +3,10 @@ import { resolve } from 'node:path';
 import { packagesDir, surveyPorts } from './tests/survey/survey.js';
 
 // Local-only legacy corpus surveys. Each format renders on its viewer
-// package's dev server; LEGACY_CORPUS_FORMATS (default ppt) limits
+// package's dev server; LEGACY_CORPUS_FORMATS (default ppt,xls) limits
 // which servers start.
 const ports = surveyPorts();
-const formats = (process.env.LEGACY_CORPUS_FORMATS ?? 'ppt')
+const formats = (process.env.LEGACY_CORPUS_FORMATS ?? 'ppt,xls')
   .split(',')
   .filter((format): format is 'doc' | 'ppt' | 'xls' => format in ports);
 const packages = { doc: 'docx', ppt: 'pptx', xls: 'xlsx' } as const;

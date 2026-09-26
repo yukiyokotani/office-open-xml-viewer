@@ -119,6 +119,7 @@ jobs:
         run: |
           pnpm check:core-legacy-boundary
           pnpm check:optional-legacy-ppt
+          pnpm check:optional-legacy-xls
           pnpm check:legacy-wasm-exports
 
       # ── Verify the package that is about to be published ──────────────────────

@@ -10,11 +10,14 @@ import { buildCfbFixture } from '@silurus/ooxml-core/testing';
 // Creating, claiming and describing a source must never load native code:
 // the glue and source modules may be imported only by the archive realm.
 const loaded = vi.hoisted(() => [] as string[]);
+vi.mock('./wasm-direct-xls/legacy_xls_direct.js', () => { loaded.push('xls glue'); return {}; });
 vi.mock('./wasm-direct-ppt/legacy_ppt_direct.js', () => { loaded.push('ppt glue'); return {}; });
+vi.mock('./legacy-xls-source-module.ts', () => { loaded.push('xls module'); return {}; });
 vi.mock('./legacy-ppt-source-module.ts', () => { loaded.push('ppt module'); return {}; });
 
 import { legacyPptSource } from './legacy-ppt.js';
 import { MAX_LEGACY_SOURCE_BYTES, createLegacySource, type LegacyFamily } from './legacy-source.js';
+import { legacyXlsSource } from './legacy-xls.js';
 import { buildStoredZip } from './zip-fixture.js';
 
 const cfb = (...streams: string[]) => new Uint8Array(buildCfbFixture(['Root Entry', ...streams]));
@@ -22,6 +25,7 @@ const WASM = 'https://cdn.example.test/legacy.wasm';
 const MODULE = 'https://cdn.example.test/legacy-source-module.js';
 
 const factories = [
+  { family: 'xls', target: 'xlsx', create: legacyXlsSource, streams: [['Workbook'], ['Book']] },
   { family: 'ppt', target: 'pptx', create: legacyPptSource, streams: [['PowerPoint Document']] },
 ] as const satisfies ReadonlyArray<{
   family: LegacyFamily;
@@ -33,7 +37,6 @@ const factories = [
 // still recognise their containers as foreign.
 const readerlessFamilies = [
   { family: 'doc', streams: [['WordDocument']] },
-  { family: 'xls', streams: [['Workbook'], ['Book']] },
 ] as const satisfies ReadonlyArray<{ family: LegacyFamily; streams: ReadonlyArray<readonly string[]> }>;
 
 describe.each(factories)('legacy $family source factory', ({ family, target, create, streams }) => {

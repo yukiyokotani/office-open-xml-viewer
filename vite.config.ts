@@ -172,6 +172,7 @@ export default defineConfig(({ command, mode }) => ({
         // entry emits its reader's WASM and self-contained source module as
         // assets; nothing is fetched until a claimed input is loaded.
         'legacy-ppt': resolve(__dirname, 'src/legacy-ppt.ts'),
+        'legacy-xls': resolve(__dirname, 'src/legacy-xls.ts'),
         // Node-only bounded sessions and server render helpers. Kept as a
         // separate entry so browser consumers never load Node built-ins.
         node:  resolve(__dirname, 'src/node.ts'),
