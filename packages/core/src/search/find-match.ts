@@ -28,4 +28,7 @@ export interface FindMatch<Loc = unknown> {
   text: string;
   /** Where the match is, in the format's own coordinates. */
   location: Loc;
+  /** The colour of the `FindTerm` that found this match, when that term
+   *  set one. Lets a caller tell which kind of term a match came from. */
+  color?: string;
 }

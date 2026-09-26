@@ -28,6 +28,23 @@ function controllerFor(sheets: { name: string; cells: FindCell[] }[]): XlsxFindC
 const cell = (row: number, col: number, text: string): FindCell => ({ row, col, text });
 
 describe('XlsxFindController.find', () => {
+  it('searches several terms at once, and treats an all-empty list as a clear', async () => {
+    const c = controllerFor([{ name: 'S', cells: [cell(1, 1, 'cat'), cell(1, 2, 'concatenate'), cell(2, 1, 'dog')] }]);
+    const matches = await c.find(['dog', 'cat'], { wholeWord: true });
+    expect(matches.map((m) => m.location.ref)).toEqual(['A1', 'A2']);
+    expect(await c.find([''])).toEqual([]);
+    expect(c.matches()).toEqual([]);
+  });
+
+  it("carries each term's colour into the matches and the highlights", async () => {
+    const c = controllerFor([{ name: 'S', cells: [cell(1, 1, 'cat'), cell(2, 1, 'dog')] }]);
+    const matches = await c.find([{ text: 'dog', color: 'red' }, 'cat']);
+    expect(matches.map((m) => [m.location.ref, m.color])).toEqual([['A1', undefined], ['A2', 'red']]);
+    expect(c.sheetHighlights(0).map((h) => h.color)).toEqual([undefined, 'red']);
+    c.next();
+    expect(c.next()?.color).toBe('red');
+  });
+
   it('commits only the latest overlapping search', async () => {
     const pending: Array<(cells: FindCell[]) => void> = [];
     const c = new XlsxFindController(

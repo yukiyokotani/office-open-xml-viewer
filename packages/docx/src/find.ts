@@ -19,11 +19,14 @@
 import {
   buildTextIndex,
   findMatches,
+  normalizeFindQuery,
   nextActive,
   prevActive,
   type FindMatch,
   type FindMatchesOptions,
+  type FindQuery,
   type TextMatch,
+  withFindColor,
 } from '@silurus/ooxml-core';
 import type { DocxTextRunInfo } from './renderer';
 
@@ -42,6 +45,8 @@ interface DocxResolvedMatch {
   text: string;
   /** Run-slices within `pageRuns[page]`, from core `findMatches`. */
   slices: TextMatch['slices'];
+  /** The colour of the term that found it, when that term set one. */
+  color?: string;
 }
 
 export class DocxFindController {
@@ -90,11 +95,11 @@ export class DocxFindController {
 
   /** All match slices that fall on a given page, tagged with whether each is the
    *  active match — the exact input the highlight overlay needs. */
-  pageHighlights(page: number): { slices: TextMatch['slices']; active: boolean }[] {
-    const out: { slices: TextMatch['slices']; active: boolean }[] = [];
+  pageHighlights(page: number): { slices: TextMatch['slices']; active: boolean; color?: string }[] {
+    const out: { slices: TextMatch['slices']; active: boolean; color?: string }[] = [];
     for (let i = 0; i < this._matches.length; i++) {
       const m = this._matches[i];
-      if (m.page === page) out.push({ slices: m.slices, active: i === this._active });
+      if (m.page === page) out.push(withFindColor({ slices: m.slices, active: i === this._active }, m.color));
     }
     return out;
   }
@@ -107,18 +112,18 @@ export class DocxFindController {
 
   /** The public match list for the current query. */
   matches(): FindMatch<DocxMatchLocation>[] {
-    return this._matches.map((m, i) => ({
+    return this._matches.map((m, i) => withFindColor({
       matchIndex: i,
       text: m.text,
       location: { page: m.page },
-    }));
+    }, m.color));
   }
 
   /** Run a fresh query across every page, resetting the cursor. Returns the
    *  public match list. An empty query clears matches. */
-  async find(query: string, opts: FindMatchesOptions = {}): Promise<FindMatch<DocxMatchLocation>[]> {
+  async find(query: FindQuery, opts: FindMatchesOptions = {}): Promise<FindMatch<DocxMatchLocation>[]> {
     const generation = ++this._generation;
-    if (query.length === 0) {
+    if (normalizeFindQuery(query).length === 0) {
       this._runsRevision++;
       this._pageRuns.clear();
       this._matches = [];
@@ -166,7 +171,7 @@ export class DocxFindController {
         const text = tm.slices
           .map((s) => runs[s.runIndex].text.slice(s.start, s.end))
           .join('');
-        matches.push({ page, text, slices: tm.slices });
+        matches.push(withFindColor({ page, text, slices: tm.slices }, tm.color));
       }
     }
     this._runsRevision++;
@@ -192,7 +197,7 @@ export class DocxFindController {
   private _activePublic(): FindMatch<DocxMatchLocation> | null {
     const m = this._matchAt(this._active);
     if (!m) return null;
-    return { matchIndex: this._active, text: m.text, location: { page: m.page } };
+    return withFindColor({ matchIndex: this._active, text: m.text, location: { page: m.page } }, m.color);
   }
 
 }

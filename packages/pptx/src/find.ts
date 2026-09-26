@@ -14,11 +14,14 @@
 import {
   buildTextIndex,
   findMatches,
+  normalizeFindQuery,
   nextActive,
   prevActive,
   type FindMatch,
   type FindMatchesOptions,
+  type FindQuery,
   type TextMatch,
+  withFindColor,
 } from '@silurus/ooxml-core';
 import type { PptxTextRunInfo } from './renderer';
 
@@ -31,6 +34,8 @@ interface PptxResolvedMatch {
   slide: number;
   text: string;
   slices: TextMatch['slices'];
+  /** The colour of the term that found it, when that term set one. */
+  color?: string;
 }
 
 function sameSearchContainer(left: PptxTextRunInfo, right: PptxTextRunInfo): boolean {
@@ -99,11 +104,11 @@ export class PptxFindController {
   }
 
   /** All match slices on a slide, tagged active — the highlight overlay input. */
-  slideHighlights(slide: number): { slices: TextMatch['slices']; active: boolean }[] {
-    const out: { slices: TextMatch['slices']; active: boolean }[] = [];
+  slideHighlights(slide: number): { slices: TextMatch['slices']; active: boolean; color?: string }[] {
+    const out: { slices: TextMatch['slices']; active: boolean; color?: string }[] = [];
     for (let i = 0; i < this._matches.length; i++) {
       const m = this._matches[i];
-      if (m.slide === slide) out.push({ slices: m.slices, active: i === this._active });
+      if (m.slide === slide) out.push(withFindColor({ slices: m.slices, active: i === this._active }, m.color));
     }
     return out;
   }
@@ -116,17 +121,17 @@ export class PptxFindController {
 
   /** The public match list for the current query. */
   matches(): FindMatch<PptxMatchLocation>[] {
-    return this._matches.map((m, i) => ({
+    return this._matches.map((m, i) => withFindColor({
       matchIndex: i,
       text: m.text,
       location: { slide: m.slide },
-    }));
+    }, m.color));
   }
 
   /** Run a fresh query across every slide, resetting the cursor. */
-  async find(query: string, opts: FindMatchesOptions = {}): Promise<FindMatch<PptxMatchLocation>[]> {
+  async find(query: FindQuery, opts: FindMatchesOptions = {}): Promise<FindMatch<PptxMatchLocation>[]> {
     const generation = ++this._generation;
-    if (query.length === 0) {
+    if (normalizeFindQuery(query).length === 0) {
       this._runsRevision++;
       this._slideRuns.clear();
       this._matches = [];
@@ -170,7 +175,7 @@ export class PptxFindController {
         const text = tm.slices
           .map((slice) => runs[slice.runIndex].text.slice(slice.start, slice.end))
           .join('');
-        matches.push({ slide, text, slices: tm.slices });
+        matches.push(withFindColor({ slide, text, slices: tm.slices }, tm.color));
       }
     }
     this._runsRevision++;
@@ -193,7 +198,7 @@ export class PptxFindController {
   private _activePublic(): FindMatch<PptxMatchLocation> | null {
     const m = this._matches[this._active];
     if (!m) return null;
-    return { matchIndex: this._active, text: m.text, location: { slide: m.slide } };
+    return withFindColor({ matchIndex: this._active, text: m.text, location: { slide: m.slide } }, m.color);
   }
 
 }

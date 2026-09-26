@@ -52,6 +52,12 @@ describe('findHighlightOverlayStyle', () => {
     expect(findHighlightOverlayStyle(false, colors).background).toBe(colors.match);
     expect(findHighlightOverlayStyle(true, colors).background).toBe(colors.active);
   });
+
+  it("uses a term's own colour for a match, but never for the active match", () => {
+    const colors = { match: 'rgba(1, 2, 3, 0.4)', active: '#ff00ff99' };
+    expect(findHighlightOverlayStyle(false, colors, 'red')).toEqual({ border: '2px solid red', background: 'red' });
+    expect(findHighlightOverlayStyle(true, colors, 'red').background).toBe(colors.active);
+  });
 });
 
 /**

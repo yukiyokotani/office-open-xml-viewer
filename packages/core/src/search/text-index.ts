@@ -87,7 +87,31 @@ export interface MatchRunSlice {
 export interface TextMatch {
   matchIndex: number;
   slices: MatchRunSlice[];
+  /** The {@link FindTerm.color} of the term that produced this match, when it
+   *  set one. */
+  color?: string;
 }
+
+/**
+ * One search term that carries its own highlight colour. Its matches are drawn
+ * in `color` instead of the viewer's `findHighlightColors.match`, so one query can
+ * show several kinds of hit apart (say, search terms and flagged phrases). The
+ * active match still uses `findHighlightColors.active`.
+ */
+export interface FindTerm {
+  /** The text to find. */
+  text: string;
+  /** CSS background for this term's matches. Omit to use the match colour. */
+  color?: string;
+}
+
+/**
+ * What to search for: one term, or several searched together. Several terms
+ * highlight at once — the shape a search UI produces when it hands over the
+ * words (or phrases) a query matched, rather than a single find-box string. A
+ * term may be a {@link FindTerm} to give its matches their own colour.
+ */
+export type FindQuery = string | readonly (string | FindTerm)[];
 
 /** Options for {@link findMatches}. */
 export interface FindMatchesOptions {
@@ -96,6 +120,100 @@ export interface FindMatchesOptions {
    * find-in-page). IX2 default — an integrator can pass `true`.
    */
   caseSensitive?: boolean;
+  /**
+   * Only match whole words. Default `false`. A match is rejected when a word
+   * character sits on either side of it AND the match's own edge character on
+   * that side is also a word character — the same boundary a regex `\b`
+   * draws, so `"cat"` does not match inside `"concatenate"` while `"C++"` still
+   * matches in `"C++,"`. Word characters are Unicode letters, combining marks,
+   * numbers and `_`. Scripts written without spaces between words (CJK, Thai)
+   * have no such boundary inside a run of text, so this option finds nothing
+   * mid-sentence there; it is meant for space-delimited scripts.
+   */
+  wholeWord?: boolean;
+}
+
+/**
+ * Reduce a {@link FindQuery} to the distinct non-empty terms to search for, as
+ * {@link FindTerm}s. Only a truly empty term is dropped (no trimming — the same
+ * contract as the single-string query), so a query with no terms left is the
+ * "clear the find" case. When the same text appears twice, the first one (and
+ * its colour) wins. Viewers use this to decide emptiness, because `['']` has a
+ * non-zero `length` but searches for nothing.
+ */
+export function normalizeFindQuery(query: FindQuery): FindTerm[] {
+  const entries = typeof query === 'string' ? [query] : query;
+  const byText = new Map<string, FindTerm>();
+  for (const entry of entries) {
+    const term = typeof entry === 'string' ? { text: entry } : entry;
+    if (term.text.length === 0 || byText.has(term.text)) continue;
+    byText.set(term.text, withFindColor({ text: term.text }, term.color));
+  }
+  return [...byText.values()];
+}
+
+/**
+ * `value` with `color` set when there is one, and no `color` key at all when
+ * there is not — so a match found by a plain term looks exactly as it did
+ * before terms could carry colours.
+ */
+export function withFindColor<T extends object>(value: T, color: string | undefined): T & { color?: string } {
+  return color === undefined ? value : { ...value, color };
+}
+
+const WORD_CHARACTER = /[\p{L}\p{M}\p{N}_]/u;
+
+function isWordCodePoint(codePoint: number | undefined): boolean {
+  return codePoint !== undefined && WORD_CHARACTER.test(String.fromCodePoint(codePoint));
+}
+
+/** The code point ending just before UTF-16 offset `at`, stepping back over a
+ *  surrogate pair as one character. */
+function codePointBefore(s: string, at: number): number | undefined {
+  if (at <= 0) return undefined;
+  const low = s.charCodeAt(at - 1);
+  if (low >= 0xdc00 && low <= 0xdfff && at >= 2) {
+    const high = s.charCodeAt(at - 2);
+    if (high >= 0xd800 && high <= 0xdbff) return s.codePointAt(at - 2);
+  }
+  return low;
+}
+
+/** Whether `[start, end)` of `text` stands as a whole word (see
+ *  {@link FindMatchesOptions.wholeWord}). */
+function isWholeWord(text: string, start: number, end: number): boolean {
+  const joinsBefore = isWordCodePoint(codePointBefore(text, start)) && isWordCodePoint(text.codePointAt(start));
+  const joinsAfter = isWordCodePoint(text.codePointAt(end)) && isWordCodePoint(codePointBefore(text, end));
+  return !joinsBefore && !joinsAfter;
+}
+
+/** A match's `[start, end)` in the joined text, plus the index of the term that
+ *  found it. */
+type TermRange = [number, number, number];
+
+/**
+ * Keep a non-overlapping subset of `ranges`, preferring the longer range where
+ * two collide (so a phrase term wins over one of its own words searched
+ * alongside it), then the earlier one. Returned in document order. Cost is
+ * linear in the total length of the candidate ranges.
+ */
+function dropOverlaps(ranges: TermRange[], textLength: number): TermRange[] {
+  const covered = new Uint8Array(textLength);
+  const byPreference = [...ranges].sort((a, b) => (b[1] - b[0]) - (a[1] - a[0]) || a[0] - b[0]);
+  const kept: TermRange[] = [];
+  for (const range of byPreference) {
+    let free = true;
+    for (let i = range[0]; i < range[1]; i++) {
+      if (covered[i]) {
+        free = false;
+        break;
+      }
+    }
+    if (!free) continue;
+    covered.fill(1, range[0], range[1]);
+    kept.push(range);
+  }
+  return kept.sort((a, b) => a[0] - b[0]);
 }
 
 /**
@@ -215,32 +333,52 @@ function sliceRange(index: TextIndex, matchStart: number, matchEnd: number): Mat
  * browser's find-in-page). An empty (or whitespace-trimmed-to-empty is NOT
  * applied — only truly empty) query returns `[]`.
  *
+ * `query` may be several terms. Each is searched on its own and the results are
+ * merged into one document-ordered list; where matches of different terms
+ * overlap, the longer match is kept (see {@link dropOverlaps}), so every
+ * highlighted character belongs to exactly one match. A match found by a
+ * {@link FindTerm} with a `color` carries that colour.
+ *
  * Pure: no DOM, no geometry. The viewer turns `slices` into pixel rectangles
  * using each run's font.
  */
 export function findMatches(
   index: TextIndex,
-  query: string,
+  query: FindQuery,
   opts: FindMatchesOptions = {},
 ): TextMatch[] {
-  if (query.length === 0) return [];
+  const terms = normalizeFindQuery(query);
+  if (terms.length === 0) return [];
   const caseSensitive = opts.caseSensitive ?? false;
+  const wholeWord = opts.wholeWord ?? false;
   const haystack = caseSensitive ? index.text : index.folded;
-  // The needle must be folded with the SAME length-preserving fold as the
-  // haystack: a plain toLowerCase() would expand e.g. "İ" to "i" + U+0307 and
-  // never match the haystack, where "İ" was deliberately kept unfolded.
-  const needle = caseSensitive ? query : foldPreservingLength(query);
 
-  const matches: TextMatch[] = [];
-  let from = 0;
-  let matchIndex = 0;
-  for (;;) {
-    const at = haystack.indexOf(needle, from);
-    if (at === -1) break;
-    matches.push({ matchIndex, slices: sliceRange(index, at, at + needle.length) });
-    matchIndex++;
-    // Advance past this match so occurrences never overlap.
-    from = at + needle.length;
+  const ranges: TermRange[] = [];
+  for (let termIndex = 0; termIndex < terms.length; termIndex++) {
+    const term = terms[termIndex].text;
+    // The needle must be folded with the SAME length-preserving fold as the
+    // haystack: a plain toLowerCase() would expand e.g. "İ" to "i" + U+0307 and
+    // never match the haystack, where "İ" was deliberately kept unfolded.
+    const needle = caseSensitive ? term : foldPreservingLength(term);
+    let from = 0;
+    for (;;) {
+      const at = haystack.indexOf(needle, from);
+      if (at === -1) break;
+      const end = at + needle.length;
+      if (wholeWord && !isWholeWord(index.text, at, end)) {
+        // A rejected occurrence must not hide one that starts inside it.
+        from = at + 1;
+        continue;
+      }
+      ranges.push([at, end, termIndex]);
+      // Advance past this match so occurrences never overlap.
+      from = end;
+    }
   }
-  return matches;
+
+  // One term's matches are already disjoint and in order; only a merge of
+  // several terms can collide.
+  const kept = terms.length === 1 ? ranges : dropOverlaps(ranges, haystack.length);
+  return kept.map(([start, end, termIndex], matchIndex) =>
+    withFindColor({ matchIndex, slices: sliceRange(index, start, end) }, terms[termIndex].color));
 }

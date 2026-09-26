@@ -11,8 +11,8 @@ import type { DocxTextRunInfo } from './renderer';
 import { buildDocxTextLayer } from './text-layer';
 import { buildDocxHighlightLayer, type DocxHighlightMatch } from './find-highlight-layer';
 import { DocxFindController, type DocxMatchLocation } from './find';
-import { openExternalHyperlink, PT_TO_PX, nextZoomStep, prevZoomStep, clampScale, fitScale } from '@silurus/ooxml-core';
-import type { FindHighlightColors, HyperlinkTarget, FindMatch, FindMatchesOptions, OoxmlResourceMetrics, ViewerContextMenuEvent, ZoomableViewer } from '@silurus/ooxml-core';
+import { openExternalHyperlink, PT_TO_PX, nextZoomStep, prevZoomStep, clampScale, fitScale, normalizeFindQuery } from '@silurus/ooxml-core';
+import type { FindHighlightColors, HyperlinkTarget, FindMatch, FindMatchesOptions, FindQuery, OoxmlResourceMetrics, ViewerContextMenuEvent, ZoomableViewer } from '@silurus/ooxml-core';
 import {
   CallerCanvasMount,
   CanvasOverlayHost,
@@ -503,16 +503,17 @@ export class DocxViewer implements ZoomableViewer {
    * matches on the same code path. An empty query clears the find and returns `[]`.
    */
   async findText(
-    query: string,
+    query: FindQuery,
     opts: FindMatchesOptions = {},
   ): Promise<FindMatch<DocxMatchLocation>[]> {
+    const terms = normalizeFindQuery(query);
     const doc = this._doc;
     if (!doc) return [];
     const generation = ++this._findRequestGeneration;
     // Preserve the established synchronous empty-query cancellation contract.
     // A real full-document search must wait for authoritative pagination or its
     // result would silently describe only the opening prefix.
-    if (query.length > 0 && !doc.layoutComplete) {
+    if (terms.length > 0 && !doc.layoutComplete) {
       await this._errorRouter.ownBackgroundLifecycle(() => doc.waitUntilLayoutComplete());
       if (this._destroyed || this._doc !== doc || generation !== this._findRequestGeneration) {
         return [];

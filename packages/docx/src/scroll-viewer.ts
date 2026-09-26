@@ -1,5 +1,5 @@
-import { openExternalHyperlink, PT_TO_PX, zoomStepScale, anchoredZoomOffset, nextZoomStep, prevZoomStep, fitScale } from '@silurus/ooxml-core';
-import type { FindHighlightColors, FindMatch, FindMatchesOptions, HyperlinkTarget, OoxmlResourceMetrics, ViewerContextMenuEvent, ZoomableViewer } from '@silurus/ooxml-core';
+import { openExternalHyperlink, PT_TO_PX, zoomStepScale, anchoredZoomOffset, nextZoomStep, prevZoomStep, fitScale, normalizeFindQuery } from '@silurus/ooxml-core';
+import type { FindHighlightColors, FindMatch, FindMatchesOptions, FindQuery, HyperlinkTarget, OoxmlResourceMetrics, ViewerContextMenuEvent, ZoomableViewer } from '@silurus/ooxml-core';
 import {
   computeVisibleWindow,
   createVirtualScrollGeometry,
@@ -2486,9 +2486,10 @@ export class DocxScrollViewer implements ZoomableViewer {
   /** Search the complete document, including pages outside the virtualized
    * mounted window. Matching is case-insensitive by default. */
   async findText(
-    query: string,
+    query: FindQuery,
     opts: FindMatchesOptions = {},
   ): Promise<FindMatch<DocxMatchLocation>[]> {
+    const terms = normalizeFindQuery(query);
     if (!this._doc) return [];
     const generation = ++this._findRequestGeneration;
     // Search spans every page, so a progressively-loaded document has to finish
@@ -2506,7 +2507,7 @@ export class DocxScrollViewer implements ZoomableViewer {
         return [];
       }
     }
-    this._findActive = query.length > 0;
+    this._findActive = terms.length > 0;
     const matches = await this._errorRouter.ownAwaitable(
       () => this._find.find(query, opts),
     );
