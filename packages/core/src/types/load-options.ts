@@ -5,6 +5,7 @@ import type { ChartRegionMapRenderer } from '../chart/region-map-contract';
 import type { ChartExRenderer } from '../chart/chart-ex-contract';
 import type { TiffRenderer } from '../image/tiff-contract';
 import type { OoxmlResourceMetrics } from './resource-metrics.js';
+import type { ModelSource } from '../source/model-source.js';
 
 /** A positive safe-integer byte count, or `null` to disable one public limit. */
 export type OoxmlResourceLimit = number | null;
@@ -110,6 +111,15 @@ export interface LoadOptions {
    *     is not detected — see "Security & Privacy" in the README.
    */
   password?: string;
+  /**
+   * Application-supplied sources for input that is not an OOXML package. Each
+   * source must target the loading format (`'docx'`, `'xlsx'` or `'pptx'`); a
+   * source for another format is a `TypeError`. The first source whose
+   * `claim()` accepts the raw bytes opens them in the parser realm through its
+   * own module; otherwise the ordinary OOXML path runs unchanged. Omitting
+   * this option imports and runs nothing extra.
+   */
+  modelSources?: readonly ModelSource[];
   /**
    * Override the URL the parser worker fetches the WebAssembly module from.
    *

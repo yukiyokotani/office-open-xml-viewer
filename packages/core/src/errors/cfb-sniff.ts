@@ -77,6 +77,21 @@ const ENCRYPTION_INFO_NAME = 'EncryptionInfo';
  *   - `null` — not a CFB at all (e.g. a ZIP-based .docx / .pptx / .xlsx).
  */
 export function sniffCfb(bytes: Uint8Array): CfbKind | null {
+  return inspectCfb(bytes)?.kind ?? null;
+}
+
+/**
+ * The [MS-CFB] §2.6 directory-entry names of a compound file, for callers
+ * that classify a container themselves (for example an application-supplied
+ * model source). Returns `null` when the bytes are not a CFB container; an
+ * unreadable directory yields an empty set. Names are case-preserving.
+ */
+export function cfbDirectoryNames(bytes: Uint8Array): ReadonlySet<string> | null {
+  const inspection = inspectCfb(bytes);
+  return inspection ? new Set(inspection.names) : null;
+}
+
+function inspectCfb(bytes: Uint8Array): Readonly<{ kind: CfbKind; names: ReadonlySet<string> }> | null {
   // Not a CFB unless the full header signature matches.
   if (bytes.length < HEADER_SIZE) {
     // Still confirm the signature so a merely-short CFB is distinguishable from
@@ -100,7 +115,9 @@ export function sniffCfb(bytes: Uint8Array): CfbKind | null {
   // 512-byte header region instead of past it, so the FAT/directory walk would
   // silently misinterpret header bytes as sector data instead of failing
   // closed. Reject anything else as 'cfb-unknown'.
-  if (sectorShift !== 9 && sectorShift !== 12) return 'cfb-unknown';
+  if (sectorShift !== 9 && sectorShift !== 12) {
+    return { kind: 'cfb-unknown', names: new Set() };
+  }
   const sectorSize = 1 << sectorShift;
 
   const firstDirSector = view.getUint32(0x30, true);
@@ -111,7 +128,7 @@ export function sniffCfb(bytes: Uint8Array): CfbKind | null {
     numDifatSectors: view.getUint32(0x48, true),
   };
   const fatSectors = collectCfbFatSectors(view, bytes.length, fatHeader);
-  if (fatSectors === null) return 'cfb-unknown';
+  if (fatSectors === null) return { kind: 'cfb-unknown', names: new Set() };
 
   const names = enumerateDirectoryNames(
     view,
@@ -120,15 +137,15 @@ export function sniffCfb(bytes: Uint8Array): CfbKind | null {
     firstDirSector,
     fatSectors,
   );
-  if (names === null) return 'cfb-unknown';
+  if (names === null) return { kind: 'cfb-unknown', names: new Set() };
 
   // Encryption wins over a legacy marker: an encrypted .doc is still routed to
   // the crypto path, not the legacy dead-end.
-  if (names.has(ENCRYPTION_INFO_NAME)) return 'encrypted';
+  if (names.has(ENCRYPTION_INFO_NAME)) return { kind: 'encrypted', names };
   for (const n of names) {
-    if (LEGACY_STREAM_NAMES.has(n)) return 'legacy-binary-format';
+    if (LEGACY_STREAM_NAMES.has(n)) return { kind: 'legacy-binary-format', names };
   }
-  return 'cfb-unknown';
+  return { kind: 'cfb-unknown', names };
 }
 
 /**

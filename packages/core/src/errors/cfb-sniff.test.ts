@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { sniffCfb } from './cfb-sniff';
+import { cfbDirectoryNames, sniffCfb } from './cfb-sniff';
 import { buildCfbFixture } from '../testing/cfb-fixture';
 
 /**
@@ -269,6 +269,7 @@ describe('sniffCfb — classification', () => {
 
   it('uses extension DIFAT sectors to classify a large legacy container', () => {
     expect(sniffCfb(extendedDifatCfb('WordDocument'))).toBe('legacy-binary-format');
+    expect(cfbDirectoryNames(extendedDifatCfb('WordDocument'))?.has('WordDocument')).toBe(true);
   });
 
   it('detects an encrypted container built as a major-version-4 (4096-byte sector) CFB', () => {
@@ -282,6 +283,18 @@ describe('sniffCfb — classification', () => {
       majorVersion: 4,
     });
     expect(sniffCfb(new Uint8Array(cfb))).toBe('encrypted');
+  });
+});
+
+describe('cfbDirectoryNames', () => {
+  it('returns the directory names of a compound file and null for other bytes', () => {
+    const names = cfbDirectoryNames(new Uint8Array(buildCfbFixture([
+      'Root Entry',
+      'WordDocument',
+      'Workbook',
+    ])));
+    expect([...(names ?? [])].sort()).toEqual(['Root Entry', 'WordDocument', 'Workbook']);
+    expect(cfbDirectoryNames(new Uint8Array([0x50, 0x4b, 0x03, 0x04]))).toBeNull();
   });
 });
 
