@@ -12792,20 +12792,26 @@ fn parse_docx_chart_with_style_parts_and_images(
     if is_chartex {
         // chartEx (waterfall/boxWhisker/…) reads its title font size from the
         // associated chartStyle part when the `<cx:title>` itself carries none.
-        ooxml_common::chart::parse_chartex_part_with_style_parts_and_images(
+        ooxml_common::chart::parse_chartex_part(
             root,
-            &resolver,
-            style_xml,
-            color_style_xml,
-            image_resolver,
+            &ooxml_common::chart::ChartParseContext::new(
+                &resolver,
+                style_xml,
+                color_style_xml,
+                Some(image_resolver),
+                None,
+            ),
         )
     } else {
-        let mut chart = ooxml_common::chart::parse_chart_part_with_style_parts_and_images(
+        let mut chart = ooxml_common::chart::parse_chart_part(
             root,
-            &resolver,
-            style_xml,
-            color_style_xml,
-            image_resolver,
+            &ooxml_common::chart::ChartParseContext::new(
+                &resolver,
+                style_xml,
+                color_style_xml,
+                Some(image_resolver),
+                None,
+            ),
         )?;
         apply_word_classic_chart_space_frame(&mut chart);
         Some(chart)

@@ -77,8 +77,14 @@ mod tests {
             r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart>{chart_children}<c:plotArea>{plot_children}</c:plotArea></c:chart></c:chartSpace>"#
         );
         let document = roxmltree::Document::parse(&xml).expect("chart XML");
-        let mut chart = ooxml_common::chart::parse_chart_part(document.root_element(), &NoTheme)
-            .expect("classic chart");
+        let mut chart = ooxml_common::chart::parse_chart_part(
+            document.root_element(),
+            &ooxml_common::chart::ChartParseContext {
+                color_resolver: Some(&NoTheme),
+                ..Default::default()
+            },
+        )
+        .expect("classic chart");
         apply_word_classic_chart_space_frame(&mut chart);
         chart
     }
@@ -105,8 +111,14 @@ mod tests {
     fn theme_less_package_keeps_default_numeric_role_paint() {
         let xml = r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:style val="2"/><c:chart><c:plotArea><c:barChart><c:barDir val="col"/><c:ser><c:idx val="0"/><c:order val="0"/><c:val><c:numLit><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#;
         let document = roxmltree::Document::parse(xml).unwrap();
-        let mut chart = ooxml_common::chart::parse_chart_part(document.root_element(), &NoTheme)
-            .expect("classic chart");
+        let mut chart = ooxml_common::chart::parse_chart_part(
+            document.root_element(),
+            &ooxml_common::chart::ChartParseContext {
+                color_resolver: Some(&NoTheme),
+                ..Default::default()
+            },
+        )
+        .expect("classic chart");
         apply_word_classic_chart_space_frame(&mut chart);
         let roles = chart.classic_chart_style_roles.as_ref().unwrap();
         assert!(roles["chartArea"]

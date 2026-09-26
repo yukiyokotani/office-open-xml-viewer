@@ -102,8 +102,14 @@ mod tests {
     fn theme_less_package_keeps_default_numeric_role_paint() {
         let xml = r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:style val="34"/><c:chart><c:plotArea><c:barChart><c:barDir val="col"/><c:ser><c:idx val="0"/><c:order val="0"/><c:val><c:numLit><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#;
         let document = roxmltree::Document::parse(xml).unwrap();
-        let mut chart = ooxml_common::chart::parse_chart_part(document.root_element(), &NoTheme)
-            .expect("classic chart");
+        let mut chart = ooxml_common::chart::parse_chart_part(
+            document.root_element(),
+            &ooxml_common::chart::ChartParseContext {
+                color_resolver: Some(&NoTheme),
+                ..Default::default()
+            },
+        )
+        .expect("classic chart");
         apply_powerpoint_classic_chart_space_frame(&mut chart);
         let roles = chart.classic_chart_style_roles.as_ref().unwrap();
         assert!(roles["chartArea"]
@@ -149,11 +155,14 @@ mod tests {
             </cs:chartStyle>"#
         );
         let document = roxmltree::Document::parse(&xml).unwrap();
-        let mut chart = ooxml_common::chart::parse_chartex_part_with_style_parts(
+        let mut chart = ooxml_common::chart::parse_chartex_part(
             document.root_element(),
-            &NoTheme,
-            Some(&style),
-            None,
+            &ooxml_common::chart::ChartParseContext {
+                color_resolver: Some(&NoTheme),
+                style_xml: Some(&style),
+                color_style_xml: None,
+                ..Default::default()
+            },
         )
         .expect("ChartEx chart");
 
@@ -162,11 +171,14 @@ mod tests {
         assert_eq!(chart.chart_border_hidden, Some(true));
         assert_eq!(chart.chart_border_paint_authored, Some(true));
 
-        let mut control = ooxml_common::chart::parse_chartex_part_with_style_parts(
+        let mut control = ooxml_common::chart::parse_chartex_part(
             document.root_element(),
-            &NoTheme,
-            Some(&style.replace(" mods=\"allowNoLineOverride\"", "")),
-            None,
+            &ooxml_common::chart::ChartParseContext {
+                color_resolver: Some(&NoTheme),
+                style_xml: Some(&style.replace(" mods=\"allowNoLineOverride\"", "")),
+                color_style_xml: None,
+                ..Default::default()
+            },
         )
         .expect("control ChartEx chart");
         apply_powerpoint_chartex_chart_space_frame(document.root_element(), &mut control);
@@ -178,11 +190,14 @@ mod tests {
             "<cx:spPr/>",
         );
         let empty_document = roxmltree::Document::parse(&empty_xml).unwrap();
-        let mut empty = ooxml_common::chart::parse_chartex_part_with_style_parts(
+        let mut empty = ooxml_common::chart::parse_chartex_part(
             empty_document.root_element(),
-            &NoTheme,
-            Some(&style),
-            None,
+            &ooxml_common::chart::ChartParseContext {
+                color_resolver: Some(&NoTheme),
+                style_xml: Some(&style),
+                color_style_xml: None,
+                ..Default::default()
+            },
         )
         .expect("empty chart-space properties");
         apply_powerpoint_chartex_chart_space_frame(empty_document.root_element(), &mut empty);
