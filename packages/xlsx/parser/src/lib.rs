@@ -1782,6 +1782,18 @@ fn parse_projected_worksheet(
                 reverse,
                 priority,
                 custom_icons: if custom { Some(custom_icons) } else { None },
+                // [MS-XLSX] 2.6.27: the rule's own `xm:f` child (flagged by
+                // `activePresent`) is its activity condition.
+                active_formula: x14_rule
+                    .children()
+                    .find(|n| n.tag_name().name() == "f")
+                    .and_then(|n| n.text())
+                    .map(|s| s.to_string()),
+                // [MS-XLSX] x14:cfRule carries the same `stopIfTrue`.
+                stop_if_true: x14_rule
+                    .attribute("stopIfTrue")
+                    .map(|v| v == "1" || v == "true")
+                    .unwrap_or(false),
             });
         }
         if !rules.is_empty() {
@@ -2028,6 +2040,19 @@ fn parse_projected_worksheet(
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(0);
                     let dxf_id: Option<u32> = cf.attribute("dxfId").and_then(|s| s.parse().ok());
+                    // §18.3.1.10 `stopIfTrue` (xsd:boolean, default false),
+                    // kept for every rule type (see `CfRule`).
+                    let stop_if_true = cf
+                        .attribute("stopIfTrue")
+                        .map(|v| v == "1" || v == "true")
+                        .unwrap_or(false);
+                    // colorScale / dataBar / iconSet: an optional `<formula>`
+                    // is the rule's activity condition (see `CfRule`).
+                    let active_formula = cf
+                        .children()
+                        .find(|n| n.tag_name().name() == "formula")
+                        .and_then(|n| n.text())
+                        .map(|s| s.to_string());
                     match kind.as_str() {
                         "cellIs" => {
                             let operator = cf.attribute("operator").unwrap_or("equal").to_string();
@@ -2041,6 +2066,7 @@ fn parse_projected_worksheet(
                                 formulas,
                                 dxf_id,
                                 priority,
+                                stop_if_true,
                             });
                         }
                         "expression" | "containsBlanks" | "notContainsBlanks" | "containsText"
@@ -2056,10 +2082,6 @@ fn parse_projected_worksheet(
                                 .and_then(|n| n.text())
                                 .unwrap_or("")
                                 .to_string();
-                            let stop_if_true = cf
-                                .attribute("stopIfTrue")
-                                .map(|v| v == "1" || v == "true")
-                                .unwrap_or(false);
                             rules.push(CfRule::Expression {
                                 formula,
                                 dxf_id,
@@ -2105,7 +2127,12 @@ fn parse_projected_worksheet(
                                         .unwrap_or_else(|| "#FFFFFF".to_string()),
                                 })
                                 .collect();
-                            rules.push(CfRule::ColorScale { stops, priority });
+                            rules.push(CfRule::ColorScale {
+                                stops,
+                                priority,
+                                active_formula,
+                                stop_if_true,
+                            });
                         }
                         "dataBar" => {
                             let bar = cf.children().find(|n| n.tag_name().name() == "dataBar");
@@ -2194,6 +2221,8 @@ fn parse_projected_worksheet(
                                 max,
                                 priority,
                                 gradient,
+                                active_formula,
+                                stop_if_true,
                             });
                         }
                         "top10" => {
@@ -2215,6 +2244,7 @@ fn parse_projected_worksheet(
                                 rank,
                                 dxf_id,
                                 priority,
+                                stop_if_true,
                             });
                         }
                         "aboveAverage" => {
@@ -2239,6 +2269,7 @@ fn parse_projected_worksheet(
                                 std_dev,
                                 dxf_id,
                                 priority,
+                                stop_if_true,
                             });
                         }
                         "iconSet" => {
@@ -2272,12 +2303,15 @@ fn parse_projected_worksheet(
                                 reverse,
                                 priority,
                                 custom_icons: None,
+                                active_formula,
+                                stop_if_true,
                             });
                         }
                         other => {
                             rules.push(CfRule::Other {
                                 kind: other.to_string(),
                                 priority,
+                                stop_if_true,
                             });
                         }
                     }
@@ -4965,6 +4999,112 @@ mod conditional_format_tests {
             }
             other => panic!("expected one AboveAverage rule, got {other:?}"),
         }
+    }
+
+    /// §18.3.1.10 `stopIfTrue` survives on every rule type (see `CfRule`).
+    #[test]
+    fn stop_if_true_kept_for_every_rule_type() {
+        let rule = |attrs: &str, body: &str| {
+            format!(r#"<cfRule {attrs} dxfId="0" priority="1" stopIfTrue="1">{body}</cfRule>"#)
+        };
+        let f = "<formula>TRUE</formula>";
+        let cf = [
+            rule(r#"type="cellIs" operator="greaterThan""#, "<formula>0</formula>"),
+            rule(r#"type="expression""#, f),
+            rule(r#"type="containsText" operator="containsText" text="a""#, f),
+            rule(r#"type="notContainsBlanks""#, f),
+            rule(r#"type="containsErrors""#, f),
+            rule(r#"type="top10" rank="3""#, ""),
+            rule(r#"type="aboveAverage""#, ""),
+            rule(r#"type="duplicateValues""#, ""),
+            rule(r#"type="uniqueValues""#, ""),
+            rule(r#"type="timePeriod" timePeriod="today""#, f),
+            rule(
+                r#"type="colorScale""#,
+                r#"<colorScale><cfvo type="min"/><cfvo type="max"/><color rgb="FF000000"/><color rgb="FFFFFFFF"/></colorScale>"#,
+            ),
+            rule(
+                r#"type="dataBar""#,
+                r#"<dataBar><cfvo type="min"/><cfvo type="max"/><color rgb="FF638EC6"/></dataBar>"#,
+            ),
+            rule(
+                r#"type="iconSet""#,
+                r#"<iconSet iconSet="3Arrows"><cfvo type="percent" val="0"/><cfvo type="percent" val="33"/><cfvo type="percent" val="67"/></iconSet>"#,
+            ),
+        ]
+        .concat();
+        let rules = parse_cf_rules(&format!(
+            r#"<conditionalFormatting sqref="A1:A5">{cf}</conditionalFormatting>"#
+        ));
+        let json = serde_json::to_value(&rules).expect("rules serialize");
+        let flags: Vec<(String, Option<bool>)> = json
+            .as_array()
+            .expect("array")
+            .iter()
+            .map(|r| {
+                let kind = r["kind"].as_str().or(r["type"].as_str()).unwrap_or("");
+                (kind.to_string(), r["stopIfTrue"].as_bool())
+            })
+            .collect();
+        let expected_on = [
+            "cellIs",
+            "expression",
+            "expression",
+            "expression",
+            "expression",
+            "top10",
+            "aboveAverage",
+            "duplicateValues",
+            "uniqueValues",
+            "timePeriod",
+            "colorScale",
+            "dataBar",
+            "iconSet",
+        ];
+        assert_eq!(flags.len(), expected_on.len());
+        for (i, kind) in expected_on.iter().enumerate() {
+            assert_eq!(flags[i], (kind.to_string(), Some(true)), "rule {i}");
+        }
+    }
+
+    /// The activity formula of a scale rule is kept from the SpreadsheetML
+    /// `<formula>` child and from the x14 rule's own `xm:f` (not the cfvo
+    /// `xm:f`s), and is absent when the rule has none.
+    #[test]
+    fn scale_rule_activity_formula() {
+        let x14 = r#"<extLst><ext uri="{78C0D931-6437-407D-A8EE-F0AAD7539E65}"><x14:conditionalFormattings><x14:conditionalFormatting><x14:cfRule type="iconSet" priority="1" stopIfTrue="1" activePresent="1"><xm:f>0</xm:f><x14:iconSet iconSet="3Arrows"><x14:cfvo type="num"><xm:f>0</xm:f></x14:cfvo><x14:cfvo type="num"><xm:f>3</xm:f></x14:cfvo><x14:cfvo type="num"><xm:f>7</xm:f></x14:cfvo></x14:iconSet></x14:cfRule><xm:sqref>A1</xm:sqref></x14:conditionalFormatting></x14:conditionalFormattings></ext></extLst>"#;
+        let xml = format!(
+            r#"<worksheet xmlns="{NS}" xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main" xmlns:xm="http://schemas.microsoft.com/office/excel/2006/main"><sheetData/><conditionalFormatting sqref="A2"><cfRule type="colorScale" priority="2"><formula>$B$1&gt;0</formula><colorScale><cfvo type="min"/><cfvo type="max"/><color rgb="FF000000"/><color rgb="FFFFFFFF"/></colorScale></cfRule><cfRule type="dataBar" priority="3"><dataBar><cfvo type="min"/><cfvo type="max"/><color rgb="FF638EC6"/></dataBar></cfRule></conditionalFormatting>{x14}</worksheet>"#
+        );
+        let (ws, _) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("worksheet parses");
+        let json = serde_json::to_value(&ws.conditional_formats).expect("serialize");
+        let formulas: Vec<(String, Option<String>)> = json
+            .as_array()
+            .expect("array")
+            .iter()
+            .flat_map(|cf| cf["rules"].as_array().expect("rules").clone())
+            .map(|r| {
+                (
+                    r["type"].as_str().unwrap_or("").to_string(),
+                    r["activeFormula"].as_str().map(str::to_string),
+                )
+            })
+            .collect();
+        assert!(formulas.contains(&("colorScale".into(), Some("$B$1>0".into()))));
+        assert!(formulas.contains(&("dataBar".into(), None)));
+        assert!(formulas.contains(&("iconSet".into(), Some("0".into()))));
+    }
+
+    /// An absent or false `stopIfTrue` is omitted from the wire on the
+    /// variants that serialize it only when set.
+    #[test]
+    fn stop_if_true_defaults_off() {
+        let rules = parse_cf_rules(
+            r#"<conditionalFormatting sqref="A1"><cfRule type="cellIs" operator="equal" dxfId="0" priority="1"><formula>1</formula></cfRule><cfRule type="top10" rank="1" dxfId="0" priority="2" stopIfTrue="0"/></conditionalFormatting>"#,
+        );
+        let json = serde_json::to_value(&rules).expect("rules serialize");
+        assert!(json[0].get("stopIfTrue").is_none());
+        assert!(json[1].get("stopIfTrue").is_none());
     }
 }
 

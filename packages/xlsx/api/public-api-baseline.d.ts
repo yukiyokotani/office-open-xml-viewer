@@ -121,6 +121,7 @@ export type CfRule = {
     formulas: string[];
     dxfId: number | null;
     priority: number;
+    stopIfTrue?: boolean;
 } | {
     type: 'expression';
     formula: string;
@@ -131,6 +132,8 @@ export type CfRule = {
     type: 'colorScale';
     stops: CfStop[];
     priority: number;
+    activeFormula?: string;
+    stopIfTrue?: boolean;
 } | {
     type: 'dataBar';
     color: string;
@@ -138,6 +141,8 @@ export type CfRule = {
     max: CfValue;
     priority: number;
     gradient: boolean;
+    activeFormula?: string;
+    stopIfTrue?: boolean;
 } | {
     type: 'top10';
     top: boolean;
@@ -145,6 +150,7 @@ export type CfRule = {
     rank: number;
     dxfId: number | null;
     priority: number;
+    stopIfTrue?: boolean;
 } | {
     type: 'aboveAverage';
     aboveAverage: boolean;
@@ -152,6 +158,7 @@ export type CfRule = {
     stdDev?: number;
     dxfId: number | null;
     priority: number;
+    stopIfTrue?: boolean;
 } | {
     type: 'iconSet';
     iconSet: string;
@@ -159,10 +166,13 @@ export type CfRule = {
     reverse: boolean;
     priority: number;
     customIcons?: CfIcon[];
+    activeFormula?: string;
+    stopIfTrue?: boolean;
 } | {
     type: 'other';
     kind: string;
     priority: number;
+    stopIfTrue?: boolean;
 };
 export interface CfStop {
     kind: string;
