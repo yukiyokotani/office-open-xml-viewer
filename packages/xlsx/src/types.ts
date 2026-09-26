@@ -831,15 +831,26 @@ export interface ConditionalFormat {
   rules: CfRule[];
 }
 
+/**
+ * One `<cfRule>` (ECMA-376 §18.3.1.10). `stopIfTrue`: once this rule matches
+ * a cell, no lower-priority rule applies to that cell. Every rule type carries
+ * it (`expression` always; the others only when set, so an absent value means
+ * false), including `colorScale` / `dataBar` / `iconSet`, which match every
+ * numeric cell they format while their optional `activeFormula` (the rule's
+ * own formula, [MS-XLSX] 2.6.27) is nonzero. Formulas are not evaluated: an
+ * activity formula or `cellIs` operand is used only when it is a literal or
+ * a single-cell reference to a cached value, and otherwise the rule does not
+ * match.
+ */
 export type CfRule =
-  | { type: 'cellIs'; operator: string; formulas: string[]; dxfId: number | null; priority: number }
+  | { type: 'cellIs'; operator: string; formulas: string[]; dxfId: number | null; priority: number; stopIfTrue?: boolean }
   | { type: 'expression'; formula: string; dxfId: number | null; priority: number; stopIfTrue: boolean }
-  | { type: 'colorScale'; stops: CfStop[]; priority: number }
-  | { type: 'dataBar'; color: string; min: CfValue; max: CfValue; priority: number; gradient: boolean }
-  | { type: 'top10'; top: boolean; percent: boolean; rank: number; dxfId: number | null; priority: number }
-  | { type: 'aboveAverage'; aboveAverage: boolean; equalAverage?: boolean; stdDev?: number; dxfId: number | null; priority: number }
-  | { type: 'iconSet'; iconSet: string; cfvos: CfValue[]; reverse: boolean; priority: number; customIcons?: CfIcon[] }
-  | { type: 'other'; kind: string; priority: number };
+  | { type: 'colorScale'; stops: CfStop[]; priority: number; activeFormula?: string; stopIfTrue?: boolean }
+  | { type: 'dataBar'; color: string; min: CfValue; max: CfValue; priority: number; gradient: boolean; activeFormula?: string; stopIfTrue?: boolean }
+  | { type: 'top10'; top: boolean; percent: boolean; rank: number; dxfId: number | null; priority: number; stopIfTrue?: boolean }
+  | { type: 'aboveAverage'; aboveAverage: boolean; equalAverage?: boolean; stdDev?: number; dxfId: number | null; priority: number; stopIfTrue?: boolean }
+  | { type: 'iconSet'; iconSet: string; cfvos: CfValue[]; reverse: boolean; priority: number; customIcons?: CfIcon[]; activeFormula?: string; stopIfTrue?: boolean }
+  | { type: 'other'; kind: string; priority: number; stopIfTrue?: boolean };
 
 export interface CfIcon {
   iconSet: string;
@@ -894,10 +905,9 @@ export interface Cell {
    *  its column's `<col style>` in the parser; absent here means Normal (0).
    *  Explicit `c/@s="0"` remains distinct while inheritance is resolved. */
   styleIndex?: number;
-  /** Raw `<f>` formula text (ECMA-376 §18.3.1.40), when present. The renderer
-   *  uses this to recompute volatile functions (TODAY, NOW) at display time
-   *  so the cached `<v>` — frozen when the file was last saved — doesn't
-   *  show a stale date. */
+  /** Raw `<f>` formula text (ECMA-376 §18.3.1.40), when present. It is
+   *  informational only (for example selection context): formulas are never
+   *  calculated, and the cell always renders its cached `value`. */
   formula?: string;
   /** Whether this cell displays its phonetic hint (furigana). The parser
    *  resolves it as `cell/@ph ?? row/@ph ?? false` — the per-cell `<c ph>`

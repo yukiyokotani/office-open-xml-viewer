@@ -23,6 +23,7 @@
 // subheadings; showLastColumn applies lastColumn; the stripe flags apply
 // their stripes. firstHeaderCell, blank rows, subtotals and the grand total
 // row are not gated.
+import { DXF_FONT_TOGGLES, dxfFontToggle } from './dxf-font.js';
 import {
   assertCoordinateRangeArea,
   setCoordinateIndexValue,
@@ -159,17 +160,13 @@ function regions(p: PivotTableMetadata, sizes: Map<string, number>): Map<string,
   return out;
 }
 
-const FONT_TOGGLES = ['bold', 'italic', 'underline', 'strike'] as const;
-
 function apply(target: PivotCellFormat, dxf: Dxf, rect: Rect, row: number, col: number): void {
   if (dxf.fill) target.fill = dxf.fill;
   const font = dxf.font;
   if (font) {
     if (font.color) target.fontColor = font.color;
-    for (const key of FONT_TOGGLES) {
-      // The authored toggle when the parser supplies it; a model without it
-      // (older producer) can only say "on".
-      const value = dxf.fontToggles ? dxf.fontToggles[key] : font[key] || undefined;
+    for (const key of DXF_FONT_TOGGLES) {
+      const value = dxfFontToggle(dxf, key);
       if (value !== undefined) target[key] = value;
     }
   }

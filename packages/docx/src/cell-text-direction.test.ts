@@ -162,6 +162,13 @@ function modelOf(table: DocTable, before: BodyElement[] = []): DocxDocumentModel
   } as unknown as DocxDocumentModel;
 }
 
+function firstRowHeight(table: DocTable): number {
+  const retained = layoutDocument(modelOf(table)).pages[0]?.layers.body
+    .find((node) => node.kind === 'table');
+  if (!retained || retained.kind !== 'table') throw new Error('Table was not laid out');
+  return retained.rows[0]!.heightPt;
+}
+
 async function render(table: DocTable, before: BodyElement[] = []): Promise<FillTextCall[]> {
   const { canvas, calls } = makeRecordingCanvas();
   await renderDocumentToCanvas(modelOf(table, before), canvas, 0, { dpr: 1, width: 400 });
@@ -179,15 +186,16 @@ function applyMatrix(m: { a: number; b: number; c: number; d: number; e: number;
 }
 
 describe('ECMA-376 §17.4.72 cell text direction', () => {
-  it('tbRl turns the text a quarter clockwise and sizes an auto row to the line length', async () => {
+  it('tbRl turns the text a quarter clockwise', async () => {
     const calls = await render(tableOf([
       row([cell('ABCDE', { textDirection: 'tbRl' }), cell('x')]),
     ]));
-    const text = calls.find((call) => call.text.includes('ABCDE'));
+    const text = calls.find((call) => call.text === 'A');
     expect(text).toBeDefined();
-    // Clockwise quarter turn: text x advances down the page.
+    // Clockwise quarter turn: each wrapped column advances from right to left.
     expect(text!.matrix.a).toBeCloseTo(0);
     expect(text!.matrix.b).toBeCloseTo(1);
+    expect(calls.filter((call) => /[A-E]/.test(call.text)).map((call) => call.text).join('')).toBe('ABCDE');
     // First line at the right edge of the 100pt cell: its baseline sits left of x=100.
     expect(text!.x).toBeLessThan(100);
     expect(text!.x).toBeGreaterThan(80);
@@ -196,16 +204,69 @@ describe('ECMA-376 §17.4.72 cell text direction', () => {
     expect(neighbour!.matrix.b).toBeCloseTo(0);
   });
 
+  it('auto rotated rows wrap into columns instead of growing with text length', () => {
+    for (const direction of ['tbRl', 'btLr']) {
+      const height = (text: string) => firstRowHeight({
+        ...tableOf([row([cell(text, { textDirection: direction }), cell('N')])]),
+        colWidths: [220, 140],
+      });
+      expect(height('ABCDEFGH')).toBeCloseTo(height('A'), 1);
+    }
+  });
+
+  it('grows a rotated row once its wrapped columns no longer fit the cell width', () => {
+    const height = (text: string) => firstRowHeight({
+      ...tableOf([row([cell(text, { textDirection: 'tbRl' }), cell('N')])]),
+      colWidths: [220, 140],
+    });
+    expect(height('A'.repeat(30))).toBeGreaterThan(height('A'.repeat(8)));
+  });
+
+  it('rotated auto and atLeast rows honor margins, authored floors, and a taller neighbor', () => {
+    const height = (rotated: DocTableCell, neighbor: DocTableCell, floor: number | null = null, rule = 'auto') =>
+      firstRowHeight({ ...tableOf([row([rotated, neighbor], floor, rule)]), colWidths: [220, 140] });
+    for (const direction of ['tbRl', 'btLr']) {
+      const rotated = cell('ABCD', { textDirection: direction });
+      const shortNeighbor = cell('N');
+      const natural = height(rotated, shortNeighbor);
+      expect(height(rotated, shortNeighbor, 5, 'atLeast')).toBeCloseTo(natural, 1);
+      expect(height(rotated, shortNeighbor, 60, 'atLeast')).toBeCloseTo(60, 1);
+      expect(height(rotated, shortNeighbor, 20, 'exact')).toBeCloseTo(20, 1);
+      // ECMA-376 §17.4.80: an explicitly authored auto rule ignores @val.
+      const authoredAuto = {
+        ...row([rotated, shortNeighbor], 90, 'auto'),
+        __tableRowLayout: {
+          height: { value: String(90 * 20), rule: 'auto', ruleAuthored: true },
+          beforeWidth: null, afterWidth: null, cellSpacing: null, exception: null,
+        },
+      } as DocTableRow;
+      expect(firstRowHeight({ ...tableOf([authoredAuto]), colWidths: [220, 140] })).toBeCloseTo(natural, 1);
+      expect(height(cell('ABCD', { textDirection: direction, marginTop: 12, marginBottom: 8 }), shortNeighbor))
+        .toBeCloseTo(natural + 20, 1);
+      const narrowGlyphs = {
+        ...paraOf('ABCD'),
+        runs: [{ type: 'text', ...textRun('ABCD'), charScale: 0.7 }],
+      } as CellElement;
+      expect(height(cell('ABCD', {
+        textDirection: direction, content: [narrowGlyphs], marginTop: 12, marginBottom: 8,
+      }), shortNeighbor)).toBeCloseTo(natural + 20, 1);
+      const tallNeighbor = cell('N', { content: [paraOf('1'), paraOf('2'), paraOf('3'), paraOf('4'), paraOf('5')] });
+      expect(height(rotated, tallNeighbor)).toBeCloseTo(height(cell('ABCD'), tallNeighbor), 1);
+      expect(height(cell('AB', { textDirection: direction, content: [paraOf('AB'), paraOf('CDE')] }), shortNeighbor))
+        .toBeCloseTo(natural, 1);
+    }
+  });
+
   it('btLr turns the text a quarter counter-clockwise starting at the bottom-left', async () => {
     const calls = await render(tableOf([
       row([cell('ABCDE', { textDirection: 'btLr' }), cell('x')]),
     ]));
-    const text = calls.find((call) => call.text.includes('ABCDE'))!;
+    const text = calls.find((call) => call.text === 'A')!;
     expect(text.matrix.b).toBeCloseTo(-1);
     expect(text.x).toBeGreaterThan(0);
     expect(text.x).toBeLessThan(20);
-    // Auto row: 5 glyphs of 10pt = 50pt line length; text starts at the bottom.
-    expect(text.y).toBeCloseTo(50, 0);
+    // The 10pt auto row wraps five glyphs into adjacent columns.
+    expect(text.y).toBeCloseTo(10, 0);
   });
 
   it('keeps an exact row height and aligns lines along it', async () => {
@@ -248,7 +309,7 @@ describe('ECMA-376 §17.4.72 cell text direction', () => {
     const calls = await render(tableOf([
       row([cell('ABCDE', { textDirection: 'tbRl' }), cell('x')]),
     ]), [lead, lead, lead]);
-    const text = calls.find((call) => call.text.includes('ABCDE'))!;
+    const text = calls.find((call) => call.text === 'A')!;
     const neighbour = calls.find((call) => call.text === 'x')!;
     expect(text.matrix.b).toBeCloseTo(1);
     expect(text.x).toBeGreaterThan(80);
@@ -262,24 +323,24 @@ describe('ECMA-376 §17.4.72 cell text direction', () => {
     const lead = paraOf('lead') as unknown as BodyElement;
     for (const [textDirection, b] of [['tbRl', 1], ['btLr', -1]] as const) {
       const table = tableOf([row([cell('ABCDE', { textDirection }), cell('x')])]);
-      const run = textRunGeometryForPage(layoutDocument(modelOf(table, [lead])), 0)
-        .find((geometry) => geometry.placement.text.includes('ABCDE'));
-      expect(run).toBeDefined();
-      expect(run!.pointToPage.b).toBeCloseTo(b);
-      const { bounds } = run!.placement;
-      const start = applyMatrix(run!.pointToPage, bounds.xPt, bounds.yPt);
-      const end = applyMatrix(run!.pointToPage, bounds.xPt + bounds.widthPt, bounds.yPt + bounds.heightPt);
-      // The run box covers the 50pt line along the page's y axis inside the
-      // 100pt-wide first column, below the 10pt lead paragraph.
-      const top = Math.min(start.y, end.y);
-      const bottom = Math.max(start.y, end.y);
-      const left = Math.min(start.x, end.x);
-      const right = Math.max(start.x, end.x);
-      expect(bottom - top).toBeCloseTo(50, 0);
+      const runs = textRunGeometryForPage(layoutDocument(modelOf(table, [lead])), 0)
+        .filter((geometry) => /^[A-E]$/.test(geometry.placement.text));
+      expect(runs.map((run) => run.placement.text).join('')).toBe('ABCDE');
+      expect(runs.every((run) => Math.abs(run.pointToPage.b - b) < 0.01)).toBe(true);
+      const points = runs.flatMap(({ pointToPage, placement: { bounds } }) => [
+        applyMatrix(pointToPage, bounds.xPt, bounds.yPt),
+        applyMatrix(pointToPage, bounds.xPt + bounds.widthPt, bounds.yPt + bounds.heightPt),
+      ]);
+      // Five one-glyph columns remain inside the 10pt row below the lead.
+      const top = Math.min(...points.map((point) => point.y));
+      const bottom = Math.max(...points.map((point) => point.y));
+      const left = Math.min(...points.map((point) => point.x));
+      const right = Math.max(...points.map((point) => point.x));
+      expect(bottom - top).toBeCloseTo(10, 0);
       expect(top).toBeGreaterThanOrEqual(9);
       expect(left).toBeGreaterThanOrEqual(0);
       expect(right).toBeLessThanOrEqual(100);
-      const painted = (await render(table, [lead])).find((call) => call.text.includes('ABCDE'))!;
+      const painted = (await render(table, [lead])).find((call) => call.text === 'A')!;
       expect(painted.matrix.b).toBeCloseTo(b);
       expect(painted.x).toBeGreaterThanOrEqual(left - 0.01);
       expect(painted.x).toBeLessThanOrEqual(right + 0.01);

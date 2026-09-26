@@ -4896,24 +4896,18 @@ export function renderTextBody(
   let { allLines, totalHeight, requiredHeight } = buildLayout(1.0);
 
   // ── normAutoFit ──────────────────────────────────────────────────────────
-  // PowerPoint stores the font-shrink ratio it computed at edit time in
-  // <a:normAutofit fontScale> (ECMA-376 §21.1.2.1.3). When present, apply it
-  // directly — this reproduces PowerPoint's exact layout instead of guessing a
-  // scale from our own (slightly different) text metrics. Only when no scale
-  // was stored do we fall back to fitting the text by search.
+  // ECMA-376 §21.1.2.1.3 gives an omitted fontScale the value 100% and an
+  // omitted lnSpcReduction the value 0%. PowerPoint did not synthesize a
+  // fontScale while opening, exporting, or saving an unchanged file.
+  // Mac PowerPoint PDF controls kept 24 pt text at 100% with no stored scale
+  // across fitting and overflowing boxes (44–140 pt), 90–120% line spacing,
+  // point/percentage paragraph spacing, a trailing paragraph, installed and
+  // substituted fonts, and slide-local/layout-inherited placeholders. Stored
+  // 50% and 80% scales were honored even when they did not fit the content.
+  // Therefore our own text metrics must not manufacture a new scale here.
   if (body.autoFit === 'norm') {
     if (body.fontScale != null && body.fontScale > 0) {
       if (body.fontScale < 1.0) ({ allLines, totalHeight, requiredHeight } = buildLayout(body.fontScale));
-    } else {
-      const maxContentH = bh - tPad - bPad;
-      if (requiredHeight > maxContentH && maxContentH > 0) {
-        let lo = 0.1, hi = 1.0;
-        for (let i = 0; i < 6; i++) {
-          const mid = (lo + hi) / 2;
-          if (buildLayout(mid).requiredHeight <= maxContentH) lo = mid; else hi = mid;
-        }
-        ({ allLines, totalHeight, requiredHeight } = buildLayout(lo));
-      }
     }
   }
 

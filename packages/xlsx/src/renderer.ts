@@ -22,7 +22,6 @@ import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAux
 import { isMacDesktop } from './internal/platform.js';
 import { officeRequestKey, shapeOfficeNaturalLineRatio, shapeOfficeRouteKey, singleNaturalShapeRun } from './shape-office-line.js';
 import { XLSX_GOOGLE_FONTS } from './google-fonts.js';
-import { evalFormulaToBool, todaySerial, nowSerial } from './formula.js';
 import { formatCellValueWithColor } from './number-format.js';
 import { type CfContext, type CfResult, compileCf, evaluateCf } from './conditional-format.js';
 import { computeLineVisualOrder, cellBaseRtl, resolveCellBidi } from './bidi-line.js';
@@ -2380,8 +2379,16 @@ function renderQuadrant(
     );
     const cf = evaluateCf(cell, aRow, aCol, cfContext, styles.dxfs ?? []);
     const effectiveFill = cf.fill ?? fill;
+    // Same layers as the main path's merged anchor: PivotTable style fill
+    // under the cell's own fill, and table / PivotTable font beneath CF.
+    // (Table fills and banding are not composed here: Excel does not allow
+    // merged cells inside a Table, see the table overlay note below.)
+    const tableStyle = rc.tableStyleMap.get(key);
+    const pivotFormat = rc.pivotStyleMap.get(key);
 
-    paintCellPatternFill(ctx, effectiveFill, aCx, aCy, cW, cH);
+    if (!paintCellPatternFill(ctx, effectiveFill, aCx, aCy, cW, cH) && pivotFormat?.fill) {
+      paintCellPatternFill(ctx, pivotFormat.fill, aCx, aCy, cW, cH);
+    }
     if (cf.dataBar && cf.dataBar.ratio > 0) {
       const bInset = 2;
       const bW = Math.max(0, (cW - bInset * 2) * cf.dataBar.ratio);
@@ -2405,21 +2412,17 @@ function renderQuadrant(
     const text = formatted.text;
     if (!text || (text === '0' && rc.worksheet.showZeros === false)) continue;
 
-    const effectiveBold = font.bold || !!cf.fontBold;
-    const effectiveItalic = font.italic || !!cf.fontItalic;
-    const effectiveUnderline = font.underline || !!cf.fontUnderline;
-    const effectiveStrike = font.strike || !!cf.fontStrike;
-    const fontForDraw: CellFont = (
-      effectiveBold !== font.bold || effectiveItalic !== font.italic ||
-      effectiveUnderline !== font.underline || effectiveStrike !== font.strike
-    ) ? { ...font, bold: effectiveBold, italic: effectiveItalic, underline: effectiveUnderline, strike: effectiveStrike }
-      : font;
+    const fontForDraw = layeredCellFont(font, cf, tableStyle, styles, pivotFormat);
     ctx.font = buildFont(ctx, fontForDraw, cs, cjkFallback, text);
     const hyperlinkUrl = rc.hyperlinkMap.get(key);
-    // Colour precedence: hyperlink theme colour > conditional-formatting font
-    // colour > number-format section colour ([Red] etc., §18.8.30) > the cell's
+    // Colour precedence (as the main path): hyperlink theme colour >
+    // conditional-formatting font colour > number-format section colour
+    // ([Red] etc., §18.8.30) > table / PivotTable style colour > the cell's
     // own font colour.
-    const textColor = hyperlinkUrl ? '#0563C1' : (cf.fontColor ?? formatted.color ?? font.color);
+    const tableFontColor = tableFontDxfFor(tableStyle, styles)?.font?.color ?? pivotFormat?.fontColor ?? null;
+    const textColor = hyperlinkUrl
+      ? '#0563C1'
+      : (cf.fontColor ?? formatted.color ?? tableFontColor ?? font.color);
     ctx.fillStyle = textColor ? hexToRgba(textColor) : '#000000';
 
     const paddingX = 3, paddingY = 2;
@@ -2847,10 +2850,12 @@ function renderQuadrant(
             ? !!tableFontDxf?.font?.bold
             : (tableStyle.isHeader || tableStyle.isTotals))
         : false;
-      const effectiveBold = font.bold || !!cf.fontBold || tableBold || !!pivotFormat?.bold;
-      const effectiveItalic = font.italic || !!cf.fontItalic || !!pivotFormat?.italic;
-      const effectiveUnderline = font.underline || !!cf.fontUnderline || !!pivotFormat?.underline;
-      const effectiveStrike = font.strike || !!cf.fontStrike || !!pivotFormat?.strike;
+      // CF is the top layer: a matched rule's toggle, on or off, overrides
+      // the cell, table and PivotTable formatting beneath it (CfResult).
+      const effectiveBold = cf.fontBold ?? (font.bold || tableBold || !!pivotFormat?.bold);
+      const effectiveItalic = cf.fontItalic ?? (font.italic || !!pivotFormat?.italic);
+      const effectiveUnderline = cf.fontUnderline ?? (font.underline || !!pivotFormat?.underline);
+      const effectiveStrike = cf.fontStrike ?? (font.strike || !!pivotFormat?.strike);
       const fontForDraw: CellFont = (
         effectiveBold !== font.bold || effectiveItalic !== font.italic ||
         effectiveUnderline !== font.underline || effectiveStrike !== font.strike
@@ -3439,37 +3444,50 @@ interface AutoRowHeightState {
 
 const autoRowHeightState = new WeakMap<Worksheet, AutoRowHeightState>();
 
-function effectiveMeasurementFont(
+/** The table-element dxf that supplies a table cell's font (header / total /
+ *  last / first column / stripe / whole table), by the same §18.8.83 element
+ *  hierarchy the main paint path uses. */
+function tableFontDxfFor(tableStyle: TableCellStyle | undefined, styles: Styles): Dxf | undefined {
+  if (!tableStyle) return undefined;
+  const dxfList = styles.dxfs ?? [];
+  return tableStyle.isHeader
+    ? dxfList[tableStyle.headerRowDxf ?? -1]
+    : tableStyle.isTotals
+      ? dxfList[tableStyle.totalRowDxf ?? -1]
+      : tableStyle.isLastCol && tableStyle.lastColumnDxf != null
+        ? dxfList[tableStyle.lastColumnDxf]
+        : tableStyle.isFirstCol && tableStyle.firstColumnDxf != null
+          ? dxfList[tableStyle.firstColumnDxf]
+          : tableStyle.stripeDxf != null
+            ? dxfList[tableStyle.stripeDxf]
+            : dxfList[tableStyle.wholeTableDxf ?? -1];
+}
+
+/** The cell font with its bold/italic/underline/strike composed from every
+ *  formatting layer: cell style, table style and PivotTable style beneath,
+ *  and conditional formatting on top, whose defined toggle (on or off) wins
+ *  (CfResult). Matches the main paint path. */
+function layeredCellFont(
   base: CellFont,
   cf: CfResult,
   tableStyle: TableCellStyle | undefined,
   styles: Styles,
-  pivotFormat?: PivotCellFormat,
+  pivotFormat: PivotCellFormat | undefined,
 ): CellFont {
-  const dxfList = styles.dxfs ?? [];
-  const tableFontDxf = tableStyle
-    ? tableStyle.isHeader
-      ? dxfList[tableStyle.headerRowDxf ?? -1]
-      : tableStyle.isTotals
-        ? dxfList[tableStyle.totalRowDxf ?? -1]
-        : tableStyle.isLastCol && tableStyle.lastColumnDxf != null
-          ? dxfList[tableStyle.lastColumnDxf]
-          : tableStyle.isFirstCol && tableStyle.firstColumnDxf != null
-            ? dxfList[tableStyle.firstColumnDxf]
-            : tableStyle.stripeDxf != null
-              ? dxfList[tableStyle.stripeDxf]
-              : dxfList[tableStyle.wholeTableDxf ?? -1]
-    : undefined;
+  const tableFontDxf = tableFontDxfFor(tableStyle, styles);
   const tableBold = tableStyle
     ? tableStyle.isCustom
       ? !!tableFontDxf?.font?.bold
       : tableStyle.isHeader || tableStyle.isTotals
     : false;
-  const bold = base.bold || !!cf.fontBold || tableBold || !!pivotFormat?.bold;
-  const italic = base.italic || !!cf.fontItalic || !!pivotFormat?.italic;
-  return bold === base.bold && italic === base.italic
+  const bold = cf.fontBold ?? (base.bold || tableBold || !!pivotFormat?.bold);
+  const italic = cf.fontItalic ?? (base.italic || !!pivotFormat?.italic);
+  const underline = cf.fontUnderline ?? (base.underline || !!pivotFormat?.underline);
+  const strike = cf.fontStrike ?? (base.strike || !!pivotFormat?.strike);
+  return bold === base.bold && italic === base.italic &&
+    underline === base.underline && strike === base.strike
     ? base
-    : { ...base, bold, italic };
+    : { ...base, bold, italic, underline, strike };
 }
 
 function richHardBreakLineMetrics(
@@ -3635,7 +3653,8 @@ export function applyAutoRowHeights(
     1,
     1.2,
   );
-  const { cfContext, mergeAnchorSet, mergeSkipSet, tableStyleMap } = getSheetRenderCache(worksheet);
+  const { cfContext, mergeAnchorSet, mergeSkipSet, tableStyleMap, pivotStyleMap } =
+    getSheetRenderCache(worksheet);
   const derived = new Map<number, number>();
   let changed = false;
   ctx.save();
@@ -3673,7 +3692,9 @@ export function applyAutoRowHeights(
         // O(cells) with a small constant even on a dense virtualized sheet.
         if (!cellCanGrowAutomaticRow(cell, font, xf, defaultFontLineHeightPx)) continue;
         const cf = evaluateCf(cell, row.index, cell.col, cfContext, styles.dxfs ?? []);
-        const measuredFont = effectiveMeasurementFont(font, cf, tableStyleMap.get(key), styles);
+        const measuredFont = layeredCellFont(
+          font, cf, tableStyleMap.get(key), styles, pivotStyleMap.get(key),
+        );
         const formatted = formatCellValueWithColor(cell, styles, cf.numFmt, worksheet.date1904);
         const text = formatted.text;
         if (!text || (text === '0' && worksheet.showZeros === false)) continue;
@@ -3906,9 +3927,9 @@ function virtualizedTextOverflowOverscan(
     const tableFontDxf = tableFontDxfId != null ? styles.dxfs?.[tableFontDxfId] : undefined;
     const builtInTableBold = !!tableStyle && !tableStyle.isCustom && (tableStyle.isHeader || tableStyle.isTotals);
     const pivotFormat = pivotStyleMap.get(key);
-    const effectiveBold = font.bold || !!cf.fontBold || builtInTableBold || !!tableFontDxf?.font?.bold
-      || !!pivotFormat?.bold;
-    const effectiveItalic = font.italic || !!cf.fontItalic || !!pivotFormat?.italic;
+    const effectiveBold = cf.fontBold ?? (font.bold || builtInTableBold || !!tableFontDxf?.font?.bold
+      || !!pivotFormat?.bold);
+    const effectiveItalic = cf.fontItalic ?? (font.italic || !!pivotFormat?.italic);
     const effectiveFont = (effectiveBold !== font.bold || effectiveItalic !== font.italic)
       ? { ...font, bold: effectiveBold, italic: effectiveItalic }
       : font;

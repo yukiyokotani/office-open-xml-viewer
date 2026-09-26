@@ -4,7 +4,6 @@ import {
   roundDecimalHalfUp,
 } from '@silurus/ooxml-core';
 import type { Cell, CellValue, Styles } from './types.js';
-import { todaySerial, nowSerial } from './formula.js';
 
 function cellValueText(value: CellValue): string {
   switch (value.type) {
@@ -72,20 +71,15 @@ export function formatCellValueWithColor(
     return { text: effectiveFmt ? applyTextSection(text, effectiveFmt) : text };
   }
 
-  // Volatile builtins: TODAY()/NOW() cells have a cached `<v>` from the last
-  // save, which the viewer would otherwise show as a stale date. Recompute
-  // them against the current system clock at render time.
-  const recomputed = recomputeVolatile(cell.formula);
-  const num = recomputed ?? cell.value.number;
-  // `todaySerial`/`nowSerial` always emit a 1900-system serial (they encode
-  // "today" as a calendar concept, independent of the workbook's date system),
-  // so a recomputed volatile must be formatted against the 1900 epoch even in a
-  // 1904 workbook. Formatting a 1900-system serial against the (later) 1904
-  // base date would push it 1462 days into the future — i.e. render it 1462
-  // days late. Stored cell values, by contrast, use the workbook's own date
-  // system.
-  const effectiveDate1904 = recomputed !== null ? false : date1904;
-  return applyFormat(num, effectiveFmtId, effectiveFmt, effectiveDate1904);
+  // Library policy: cell values are rendered from the cached `<v>` only
+  // (ECMA-376 §18.3.1.96). Cell formulas (`<f>`, §18.3.1.40) are never
+  // calculated, including volatile functions such as TODAY()/NOW(). Replacing
+  // one volatile cell with the current time would leave every cell derived from
+  // it at its cached value, so the render would be internally inconsistent; the
+  // cached values the producing application saved together are authoritative.
+  // A formula cell without a cached value is rendered like any other empty
+  // cell, regardless of which function it calls.
+  return applyFormat(cell.value.number, effectiveFmtId, effectiveFmt, date1904);
 }
 
 /**
@@ -138,16 +132,6 @@ function applyTextSection(text: string, formatCode: string): string {
     }
   }
   return out;
-}
-
-/** If `formula` is a volatile builtin (TODAY/NOW), return the current Excel
- *  serial. Tolerates surrounding whitespace and an optional leading `=`. */
-function recomputeVolatile(formula: string | undefined): number | null {
-  if (!formula) return null;
-  const f = formula.trim().replace(/^=/, '').toUpperCase().replace(/\s+/g, '');
-  if (f === 'TODAY()') return todaySerial();
-  if (f === 'NOW()') return nowSerial();
-  return null;
 }
 
 // ────────────────────────────────────────────────────────────────

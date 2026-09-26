@@ -362,11 +362,6 @@ fn condition(
             if (count == 2) == rgce2.is_empty() || rgce1.is_empty() {
                 return Err(unsupported("invalid XLS cell-value condition"));
             }
-            if stop_if_true {
-                return Err(unsupported(
-                    "XLS stop-if-true on a cell-value rule is not representable",
-                ));
-            }
             let mut formulas = vec![formula(rgce1)?];
             if count == 2 {
                 formulas.push(formula(rgce2)?);
@@ -376,6 +371,7 @@ fn condition(
                 formulas,
                 dxf_id,
                 priority,
+                stop_if_true,
             })
         }
         // Formula (1), contains text (8), blanks (9), no blanks (10),
@@ -405,17 +401,13 @@ fn condition(
             if flags & !0x03 != 0 || rank == 0 || rank > if percent { 100 } else { 1000 } {
                 return Err(unsupported("invalid XLS top/bottom filter"));
             }
-            if stop_if_true {
-                return Err(unsupported(
-                    "XLS stop-if-true on a top/bottom rule is not representable",
-                ));
-            }
             Ok(xlsx_model::CfRule::Top10 {
                 top: flags & 0x01 != 0,
                 percent,
                 rank: rank.into(),
                 dxf_id,
                 priority,
+                stop_if_true,
             })
         }
         _ => Err(unsupported(
@@ -553,9 +545,13 @@ fn cf12(
     if !matches!(ct, 3 | 4 | 6) {
         return Err(unsupported("XLS CF12 filter rules are not projected yet"));
     }
-    // CF12 2.4.43: color scales, data bars and icon sets carry no dxf, no
-    // comparison formulas and no stop-if-true; their optional activity
-    // formula (fmlaActive) has no XLSX-model equivalent here.
+    // CF12 2.4.43: color scales, data bars and icon sets carry no dxf and no
+    // comparison formulas, and fStopIfTrue "MUST be zero when ct is equal to
+    // 0x03, 0x04 or 0x06", so their model stop_if_true is always false. (A
+    // set flag is invalid binary storage and is rejected rather than honoured
+    // as SpreadsheetML would.) A non-empty fmlaActive was rejected above; it is
+    // not projected onto the model's active_formula yet, so every projected
+    // visual rule is unconditionally active (active_formula None).
     if dxf.is_some() || !rgce1.is_empty() || !rgce2.is_empty() || flags & 0x02 != 0 {
         return Err(unsupported("invalid XLS CF12 visual rule"));
     }
@@ -731,7 +727,15 @@ fn gradient(
         });
         offset += 24;
     }
-    Ok((xlsx_model::CfRule::ColorScale { stops, priority }, offset))
+    Ok((
+        xlsx_model::CfRule::ColorScale {
+            stops,
+            priority,
+            active_formula: None,
+            stop_if_true: false,
+        },
+        offset,
+    ))
 }
 
 /// MS-XLS 2.5.22 CFDatabar onto ECMA-376 18.3.1.28 dataBar.
@@ -765,6 +769,8 @@ fn databar(
             // CF12 data bars have no fill-type field; Excel draws them with
             // its 2007 gradient (observed in the same PDF).
             gradient: true,
+            active_formula: None,
+            stop_if_true: false,
         },
         end,
     ))
@@ -827,6 +833,8 @@ fn multistate(data: &[u8], priority: i32) -> Result<(xlsx_model::CfRule, usize),
             reverse: flags & 0x04 != 0,
             priority,
             custom_icons: None,
+            active_formula: None,
+            stop_if_true: false,
         },
         offset,
     ))
@@ -996,6 +1004,66 @@ mod tests {
             (color.as_str(), *gradient, max.value.as_deref()),
             ("#20A472", true, Some("1"))
         );
+    }
+
+    /// MS-XLS 2.4.43 fStopIfTrue is honoured on comparison rules (ECMA-376
+    /// 18.3.1.10 stopIfTrue on cellIs), while color scales, data bars and
+    /// icon sets project it as false and are unconditionally active.
+    #[test]
+    fn stop_if_true_reaches_cell_value_rules_and_scales_never_stop() {
+        let cell_value = |flags: u8| {
+            let mut data = vec![0u8; 12];
+            data[..2].copy_from_slice(&0x087au16.to_le_bytes());
+            // ct 1 (cell value), cp 5 (greaterThan), cce1 3, cce2 0.
+            data.extend([1, 5, 3, 0, 0, 0]);
+            data.extend(0u32.to_le_bytes());
+            data.extend([0, 0]);
+            // rgce1: PtgInt 5.
+            data.extend([0x1e, 5, 0]);
+            data.extend(0u16.to_le_bytes());
+            data.push(flags);
+            data.extend(7u16.to_le_bytes());
+            data.extend(0u16.to_le_bytes());
+            data.push(16);
+            data.extend([0u8; 16]);
+            data
+        };
+        for (flags, expected) in [(0x02, true), (0x00, false)] {
+            let formats =
+                project_records(&[(0x0879, cond_fmt12(1)), (0x087a, cell_value(flags))]).unwrap();
+            let xlsx_model::CfRule::CellIs {
+                operator,
+                formulas,
+                stop_if_true,
+                ..
+            } = &formats[0].rules[0]
+            else {
+                panic!("cell-value rule");
+            };
+            assert_eq!(
+                (operator.as_str(), formulas.as_slice(), *stop_if_true),
+                ("greaterThan", &["5".to_string()][..], expected)
+            );
+        }
+        let formats = project_records(&[
+            (0x0879, cond_fmt12(1)),
+            (0x087a, cf12(6, 4, 0, &[], &icon_set(0, 1))),
+        ])
+        .unwrap();
+        assert!(matches!(
+            &formats[0].rules[0],
+            xlsx_model::CfRule::IconSet {
+                stop_if_true: false,
+                active_formula: None,
+                ..
+            }
+        ));
+        // fStopIfTrue MUST be zero on a scale rule: invalid storage fails closed.
+        assert!(project_records(&[
+            (0x0879, cond_fmt12(1)),
+            (0x087a, cf12(6, 4, 0x02, &[], &icon_set(0, 1))),
+        ])
+        .is_err());
     }
 
     #[test]

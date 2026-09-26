@@ -1373,6 +1373,25 @@ pub struct ConditionalFormat {
     pub rules: Vec<CfRule>,
 }
 
+/// One `<cfRule>` (ECMA-376 §18.3.1.10).
+///
+/// `stopIfTrue`: "If this flag is 1, no rules with lower priority shall be
+/// applied over this rule, when this rule evaluates to true." The schema
+/// allows it on every `CT_CfRule`, so every variant keeps it, including
+/// `colorScale` / `dataBar` / `iconSet` (Excel honours a set flag on those in
+/// SpreadsheetML even though its rule editor does not offer it; the renderer
+/// records the evidence beside its evaluation) and the not-yet-evaluated
+/// `Other` kinds such as `timePeriod`, `duplicateValues` and `uniqueValues`.
+///
+/// A rule stops evaluation only where it is established to match. For
+/// `colorScale` / `dataBar` / `iconSet` an optional formula is an activity
+/// condition: [MS-XLSX] 2.6.27 CT_CfRule "When the formula returns zero,
+/// conditional formatting is not displayed. When the formula returns a
+/// nonzero value, or is not present, conditional formatting is displayed."
+/// Excel applies the same reading to the SpreadsheetML `<formula>` child of
+/// those rule types (observed in a PDF export: a colorScale or dataBar with
+/// formula `0` drew nothing and did not stop a lower rule; formula `1` drew
+/// the scale and stopped it).
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum CfRule {
@@ -1382,6 +1401,9 @@ pub enum CfRule {
         formulas: Vec<String>,
         dxf_id: Option<u32>,
         priority: i32,
+        /// §18.3.1.10 `stopIfTrue`; see `CfRule`. Serialized only when set.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        stop_if_true: bool,
     },
     #[serde(rename_all = "camelCase")]
     Expression {
@@ -1391,7 +1413,19 @@ pub enum CfRule {
         stop_if_true: bool,
     },
     #[serde(rename_all = "camelCase")]
-    ColorScale { stops: Vec<CfStop>, priority: i32 },
+    ColorScale {
+        stops: Vec<CfStop>,
+        priority: i32,
+        /// Activity condition: the rule's own formula (`<formula>`, or `xm:f`
+        /// in the x14 extension). When present, the rule formats a cell (and
+        /// can stop lower rules) only where it evaluates to nonzero; see
+        /// `CfRule`. Absent means always active.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        active_formula: Option<String>,
+        /// §18.3.1.10 `stopIfTrue`; see `CfRule`. Serialized only when set.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        stop_if_true: bool,
+    },
     #[serde(rename_all = "camelCase")]
     DataBar {
         color: String,
@@ -1399,6 +1433,15 @@ pub enum CfRule {
         max: CfValue,
         priority: i32,
         gradient: bool,
+        /// Activity condition: the rule's own formula (`<formula>`, or `xm:f`
+        /// in the x14 extension). When present, the rule formats a cell (and
+        /// can stop lower rules) only where it evaluates to nonzero; see
+        /// `CfRule`. Absent means always active.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        active_formula: Option<String>,
+        /// §18.3.1.10 `stopIfTrue`; see `CfRule`. Serialized only when set.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        stop_if_true: bool,
     },
     #[serde(rename_all = "camelCase")]
     Top10 {
@@ -1407,6 +1450,9 @@ pub enum CfRule {
         rank: u32,
         dxf_id: Option<u32>,
         priority: i32,
+        /// §18.3.1.10 `stopIfTrue`; see `CfRule`. Serialized only when set.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        stop_if_true: bool,
     },
     #[serde(rename_all = "camelCase")]
     AboveAverage {
@@ -1422,6 +1468,9 @@ pub enum CfRule {
         std_dev: Option<u32>,
         dxf_id: Option<u32>,
         priority: i32,
+        /// §18.3.1.10 `stopIfTrue`; see `CfRule`. Serialized only when set.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        stop_if_true: bool,
     },
     #[serde(rename_all = "camelCase")]
     IconSet {
@@ -1431,9 +1480,24 @@ pub enum CfRule {
         priority: i32,
         #[serde(skip_serializing_if = "Option::is_none")]
         custom_icons: Option<Vec<CfIcon>>,
+        /// Activity condition: the rule's own formula (`<formula>`, or `xm:f`
+        /// in the x14 extension). When present, the rule formats a cell (and
+        /// can stop lower rules) only where it evaluates to nonzero; see
+        /// `CfRule`. Absent means always active.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        active_formula: Option<String>,
+        /// §18.3.1.10 `stopIfTrue`; see `CfRule`. Serialized only when set.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        stop_if_true: bool,
     },
     #[serde(rename_all = "camelCase")]
-    Other { kind: String, priority: i32 },
+    Other {
+        kind: String,
+        priority: i32,
+        /// §18.3.1.10 `stopIfTrue`; see `CfRule`. Serialized only when set.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        stop_if_true: bool,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -1544,10 +1608,9 @@ pub struct Cell {
     /// `Some(0)` is intentionally distinct and resets to the Normal XF.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub style_index: Option<u32>,
-    /// Raw `<f>` formula text (ECMA-376 §18.3.1.40), when present. The
-    /// renderer uses this to recompute volatile functions like TODAY() /
-    /// NOW() at display time so the cached `<v>` (frozen when the file was
-    /// last saved) doesn't show a stale date.
+    /// Raw `<f>` formula text (ECMA-376 §18.3.1.40), when present. It is
+    /// informational only: formulas are never calculated, and the renderer
+    /// always shows the cached `<v>` in `value`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub formula: Option<String>,
     /// ECMA-376 §18.3.1.4 `<c ph="1">` — whether this cell should display its

@@ -830,7 +830,7 @@ file without uploading it.
 | **Workbook** | Multiple sheets, sheet names | ✅ |
 | | Sheet tab colors (`<sheetPr><tabColor>` — theme / tint / indexed / rgb) | ✅ |
 | **Cells** | Text, number, boolean, error values | ✅ |
-| | Formula results (from cached `<v>`) | ✅ |
+| | Formula results (cached `<v>` only; formulas, including `TODAY()` / `NOW()`, are never recalculated) | ✅ |
 | | Dates (ECMA-376 date format codes) | ✅ |
 | | Rich text (per-run formatting) | ✅ |
 | | East-Asian furigana (`<rPh>` §18.4.6 + `<phoneticPr>` §18.4.3 — drawn when a cell opts in via `ph="1"`; row-level `<row ph>` inheritance) | ✅ |
@@ -865,6 +865,7 @@ file without uploading it.
 | | Chart manual layout (`<c:title><c:layout>` and `<c:plotArea><c:layout>`) | ✅ |
 | | Sparklines (`x14:sparklineGroup` — line / column / win-loss, with markers and high/low/first/last/negative highlights) | ✅ |
 | **Advanced** | Conditional formatting (`cellIs`, `colorScale`, `dataBar`, `iconSet`, `top10`, `aboveAverage`) | ✅ |
+| | Conditional-formatting formulas (`expression`, text / blanks / errors rules — partial evaluator over cached values; complete evaluation tracked in [#1547](https://github.com/yukiyokotani/office-open-xml-viewer/issues/1547)) | ⚠️ Partial |
 | | Slicers (static, Office 2010 extension) | ✅ |
 | | Pivot tables (saved worksheet output renders unchanged; read-only metadata is exposed. Refresh, recalculation, filtering, restructuring, and interactivity are unsupported) | ⚠️ Partial |
 | | Cell comments / notes (classic `xl/commentsN.xml` + Office-365 threaded comments — red triangle indicator + author / text via the worksheet model; pointer or keyboard users can open the popup, with a polite screen-reader status) | ✅ |

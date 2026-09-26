@@ -2,8 +2,9 @@
 //! text of ECMA-376 18.3.1.40 `<f>`: a cell's own formula, the anchor cell
 //! of a shared or array formula (whose text SpreadsheetML stores once, on
 //! that cell), and no text for the other cells of a shared or array range
-//! or for data tables (`t="dataTable"` carries no text). The renderer uses
-//! the text to recompute volatile functions such as TODAY().
+//! or for data tables (`t="dataTable"` carries no text). As in the XLSX
+//! model the text is informational only: formulas are never calculated, and
+//! the renderer shows each cell's cached value, TODAY()/NOW() included.
 //!
 //! MS-XLS 2.4.127 Formula carries a CellParsedFormula; one that is only a
 //! PtgExp (2.5.198.58) or PtgTbl refers to the 2.4.260 ShrFmla, 2.4.4 Array or 2.4.313
