@@ -5,6 +5,18 @@ use ooxml_common::depth::parse_guarded;
 use ooxml_common::ns::{attr_ns, relationships};
 use std::collections::{HashMap, HashSet};
 
+#[cfg(test)]
+#[path = "numbering/restart_tests.rs"]
+mod restart_tests;
+
+#[cfg(test)]
+#[path = "numbering/legal_tests.rs"]
+mod legal_tests;
+
+#[cfg(test)]
+#[path = "numbering/counter_instance_tests.rs"]
+mod counter_instance_tests;
+
 /// Parse a single VML CSS length (e.g. `width:9pt`) from a `style` attribute
 /// into pt. Supports the units Word emits for picture-bullet shapes: `pt`
 /// (1pt), `in` (72pt), `pc`/`pi` (12pt), `cm` (28.3465pt), `mm` (2.83465pt). A
@@ -54,6 +66,12 @@ pub struct LevelDef {
     /// numerals), or "center". `<w:start>` is unrelated.
     pub lvl_jc: String,
     pub start: u32,
+    /// ECMA-376 17.9.10: one-based last ancestor that resets this level.
+    /// Zero means never; absence (or an invalid index) uses the previous level.
+    restart: Option<u32>,
+    /// ECMA-376 17.9.4: use decimal for every placeholder in this level's
+    /// marker, without changing the referenced levels' own number formats.
+    legal: bool,
     /// ECMA-376 §17.9.6 `<w:lvl><w:rPr>` — the level's run (character) properties
     /// for the number/bullet glyph itself. Merged OVER the paragraph's resolved
     /// run formatting at use-site so the marker's font axes (ascii/eastAsia)
@@ -113,6 +131,8 @@ impl Default for LevelDef {
             suff: "tab".to_string(),
             lvl_jc: "left".to_string(),
             start: 1,
+            restart: None,
+            legal: false,
             rpr: RunFmt::default(),
             pic_bullet: None,
             p_style: None,
@@ -143,26 +163,55 @@ pub struct NumberingMap {
     /// ECMA-376 §17.9.7 — numId → per-level FULL `<w:lvl>` replacements from
     /// `<w:num><w:lvlOverride><w:lvl>`: "the numbering level formatting which
     /// shall be substituted for the given numbering level of the abstract
-    /// definition". Formatting only — the abstract's shared running counter is
-    /// untouched (a restart needs `<w:startOverride>`, §17.9.27, tracked in
-    /// `num_overrides`). Consulted before the abstract's levels in `get_level`,
+    /// definition". A replacement alone does not immediately restart a live
+    /// counter (`startOverride`, tracked in `num_overrides`, does that). Its
+    /// `lvlRestart` still controls later ancestor-triggered resets. Consulted
+    /// before the abstract's levels in `get_level`,
     /// so lvlText/numFmt/indents/rPr/pStyle all substitute per-numId.
     num_level_overrides: HashMap<u32, HashMap<u32, LevelDef>>,
-    /// per-**abstractNumId** per-level counter. ECMA-376 §17.9: the running
-    /// count belongs to the abstract numbering definition, so every `<w:num>`
-    /// (numId) that references the same `<w:abstractNum>` shares one counter —
-    /// that is how Word's "continue previous list" works and how a restart on
-    /// one numId carries into the next (sample-13's masthead: numId=30 with a
-    /// `<w:startOverride>` restarts abstractNumId 20 to 1, then the body's
-    /// numId=6 — same abstract — continues 2, 3, 4 rather than resuming its own
-    /// page-1 tail at 5, 6, 7). Keyed by `CounterKey` so an unresolved numId
-    /// gets a disjoint counter instead of colliding with an abstractNumId.
-    counters: HashMap<CounterKey, HashMap<u32, u32>>,
+    /// Per-**abstractNumId** per-level counter. ECMA-376 §17.9.1 and §17.9.15
+    /// define abstract numbering definitions and concrete numbering instances;
+    /// they do not by themselves establish this runtime counter-store policy.
+    /// The §17.9.26 `startOverride` example establishes shared restart behavior:
+    /// numIds 5, 5, 6, 5 on one abstractNum produce 1, 2, 1, 2. The wider alias
+    /// and full-level-replacement policy is bounded native-Word compatibility
+    /// evidence (see `counter_instance_tests`). Keyed by `CounterKey` so an
+    /// unresolved numId gets a disjoint counter instead of colliding with an
+    /// abstractNumId.
+    counters: HashMap<CounterKey, LevelCounters>,
     /// (numId, level) pairs already advanced at least once. A numId carrying a
     /// `<w:lvlOverride><w:startOverride>` restarts the shared abstract counter
-    /// only on its FIRST appearance at that level (§17.9.6 / §17.9.7); afterward
-    /// it increments the shared counter like any other num on the abstract.
+    /// only on its FIRST appearance at that level. ECMA-376 §17.9.26 defines
+    /// `startOverride` and demonstrates its reset propagating across numIds on
+    /// one abstractNum; applying it only once per numId follows measured
+    /// native-Word compatibility behavior.
     started: HashSet<(u32, u32)>,
+}
+
+/// Live counters of one counter key. A level is live when it has an explicit
+/// value or lies below `seeded_below`; an implicitly live level shows 1.
+///
+/// Advancing level L seeds every shallower level to its start. Materialising
+/// that range made the work and memory of one paragraph proportional to its
+/// `w:ilvl`, so a huge authored ilvl exhausted the WASM heap. Only levels that
+/// have their own definition or `startOverride` for the advancing numId are
+/// stored; every other seeded level starts at 1 (the `get_start` default) and
+/// is represented by the range. The observable counters are unchanged. How
+/// Word displays an ilvl beyond its nine defined levels is not modelled here.
+#[derive(Default, Clone)]
+struct LevelCounters {
+    values: HashMap<u32, u32>,
+    seeded_below: u32,
+}
+
+impl LevelCounters {
+    fn get(&self, level: u32) -> Option<u32> {
+        match self.values.get(&level) {
+            Some(&value) => Some(value),
+            None if level < self.seeded_below => Some(1),
+            None => None,
+        }
+    }
 }
 
 /// Parse one `<w:lvl>` element (ECMA-376 §17.9.6) into a [`LevelDef`].
@@ -182,6 +231,13 @@ fn parse_level_def(
         .and_then(|n| attr_w(n, "val"))
         .and_then(|v| v.parse().ok())
         .unwrap_or(1);
+    // ECMA-376 17.9.10 also applies to complete level replacements (17.9.5).
+    // MS-OE376 2.1.285(b) records Word ignoring this property in replacements;
+    // keep the normative OOXML behavior instead of adding an Office heuristic.
+    let restart = child_w(lvl_node, "lvlRestart")
+        .and_then(|n| attr_w(n, "val"))
+        .and_then(|v| v.parse::<u32>().ok());
+    let legal = bool_prop(lvl_node, "isLgl").unwrap_or(false);
     let format = child_w(lvl_node, "numFmt")
         .and_then(|n| attr_w(n, "val"))
         .unwrap_or_else(|| "decimal".to_string());
@@ -256,6 +312,8 @@ fn parse_level_def(
         suff,
         lvl_jc,
         start,
+        restart,
+        legal,
         rpr,
         pic_bullet,
         p_style,
@@ -367,7 +425,7 @@ impl NumberingMap {
                     overrides.insert(ilvl, start_ov.parse().unwrap_or(1));
                 }
                 // §17.9.7 — a FULL <w:lvl> child substitutes the level's
-                // definition for this numId (formatting only; no restart).
+                // definition for this numId, without an immediate restart.
                 if let Some(lvl_node) = child_w(lvl_ov, "lvl") {
                     level_overrides
                         .insert(ilvl, parse_level_def(lvl_node, ilvl as usize, &pic_bullets));
@@ -407,8 +465,8 @@ impl NumberingMap {
     /// in the STYLE's own `numPr` "shall be ignored" in its favor. Goes through
     /// [`Self::get_level`] so a backlink carried by a per-numId `<w:lvlOverride>`
     /// substitution (§17.9.7) participates too. `None` ⇒ the list has no
-    /// association for this style (or the numId dangles). WordprocessingML caps
-    /// lists at 9 levels (ST_Ilvl, §17.18.38).
+    /// association for this style (or the numId dangles). This model supports nine levels, matching CT_AbstractNum's maximum of
+    /// nine lvl children (§A.1); ilvl itself uses ST_DecimalNumber (§17.9.3).
     pub fn level_for_style(&self, num_id: u32, style_id: &str) -> Option<u32> {
         (0..9).find(|&l| {
             self.get_level(num_id, l)
@@ -426,22 +484,26 @@ impl NumberingMap {
     /// Advance the counter for (numId, level), resetting deeper levels.
     ///
     /// The counter is keyed by the numId's **abstractNumId**, so all numIds that
-    /// share an abstract definition advance one running count (§17.9 — see the
-    /// `counters` field doc). Each level stores its CURRENT displayed value (not
+    /// share an abstract definition advance one running count. This storage
+    /// policy follows measured native-Word behavior; see the `counters` field
+    /// doc and `counter_instance_tests`. Each level stores its CURRENT value (not
     /// the next): a level's first appearance shows its `start`, each later
-    /// advance adds one, and advancing a level clears all deeper levels (§17.9.25
-    /// default `lvlRestart`). Shallower levels are seeded to their `start` so an
+    /// advance adds one. Advancing a level resets descendants whose effective
+    /// `lvlRestart` includes that ancestor (17.9.10); by default this means all
+    /// deeper levels. Shallower levels are seeded to their `start` so an
     /// ancestor that only prefixes the marker (e.g. `%1.%2`) still resolves when
     /// it is never advanced on its own.
     ///
     /// A numId whose `<w:lvlOverride>` carries a `<w:startOverride>` for this
     /// level RESTARTS the shared abstract counter to the override value on its
-    /// first appearance at that level (§17.9.6 / §17.9.7), then increments
-    /// normally. Returns the value to display.
+    /// first appearance at that level, then increments normally. ECMA-376
+    /// §17.9.26 defines `startOverride` and demonstrates the shared reset with
+    /// numIds 5, 5, 6, 5 producing 1, 2, 1, 2. The once-per-numId application is
+    /// measured native-Word compatibility behavior. Returns the value to display.
+    ///
+    /// Work is proportional to the levels this numId defines or overrides,
+    /// never to the authored level number (see [`LevelCounters`]).
     pub fn advance(&mut self, num_id: u32, level: u32) -> u32 {
-        // Pre-compute start values to avoid borrow conflicts. `get_start`
-        // already folds in any per-numId `<w:startOverride>` for the level.
-        let starts: Vec<u32> = (0..=level).map(|l| self.get_start(num_id, l)).collect();
         let key = self.counter_key(num_id);
         let has_override = self
             .num_overrides
@@ -449,34 +511,101 @@ impl NumberingMap {
             .is_some_and(|m| m.contains_key(&level));
         // `insert` returns true when the pair was NOT already present.
         let first_for_num = self.started.insert((num_id, level));
+        let specific = self.specific_levels(num_id);
+        let threshold = |map: &Self, deeper: u32| {
+            map.get_level(num_id, deeper)
+                .and_then(|def| def.restart)
+                .filter(|&value| value <= deeper)
+                .unwrap_or(deeper)
+        };
 
-        let entry = self.counters.entry(key).or_default();
-
-        // Reset deeper levels (§17.9.25 default lvlRestart).
-        let keys: Vec<u32> = entry.keys().copied().filter(|&l| l > level).collect();
-        for k in keys {
-            entry.remove(&k);
-        }
-
+        // Resolve each live descendant's own policy, including a complete
+        // level replacement. A never-restarting parent does not shield its
+        // children, and merely seeding an ancestor is not an occurrence of it.
+        // Iterate existing counters, never an input-provided restart range.
+        let empty = LevelCounters::default();
+        let current = self.counters.get(&key).unwrap_or(&empty);
+        let resets: Vec<u32> = current
+            .values
+            .keys()
+            .copied()
+            .filter(|&deeper| deeper > level && level < threshold(self, deeper))
+            .collect();
+        // Implicitly live levels deeper than `level` are reset too, except a
+        // level whose own definition keeps it; such a level stays live at 1.
+        let kept: Vec<u32> = specific
+            .iter()
+            .copied()
+            .filter(|&deeper| {
+                deeper > level
+                    && deeper < current.seeded_below
+                    && !current.values.contains_key(&deeper)
+                    && level >= threshold(self, deeper)
+            })
+            .collect();
         // Seed shallower levels to their start (their displayed value when they
         // are never advanced themselves) — but never clobber a live ancestor.
-        for (lvl, &start) in starts.iter().enumerate().take(level as usize) {
-            entry.entry(lvl as u32).or_insert(start);
-        }
+        let seeded_below = match level.checked_add(1) {
+            Some(next) => current.seeded_below.min(next),
+            None => current.seeded_below,
+        };
+        let seeds: Vec<(u32, u32)> = specific
+            .iter()
+            .copied()
+            .filter(|&l| l >= seeded_below && l < level && !current.values.contains_key(&l))
+            .map(|l| (l, self.get_start(num_id, l)))
+            .collect();
 
         // A startOverride restarts the shared counter on first use of this num;
         // otherwise the level shows `start` on its first appearance on the
         // abstract and increments thereafter.
         let val = if first_for_num && has_override {
-            starts[level as usize]
+            self.get_start(num_id, level)
         } else {
-            match entry.get(&level) {
-                Some(&v) => v + 1,
-                None => starts[level as usize],
+            match current
+                .values
+                .get(&level)
+                .copied()
+                .or_else(|| (level < seeded_below).then_some(1))
+            {
+                Some(v) => v + 1,
+                None => self.get_start(num_id, level),
             }
         };
-        entry.insert(level, val);
+
+        let entry = self.counters.entry(key).or_default();
+        for k in resets {
+            entry.values.remove(&k);
+        }
+        for k in kept {
+            entry.values.insert(k, 1);
+        }
+        for (k, start) in seeds {
+            entry.values.insert(k, start);
+        }
+        entry.seeded_below = seeded_below.max(level);
+        entry.values.insert(level, val);
         val
+    }
+
+    /// Levels with their own definition or `startOverride` for this numId:
+    /// the only levels whose start or restart can differ from the defaults.
+    fn specific_levels(&self, num_id: u32) -> Vec<u32> {
+        let defined = self
+            .num_to_abstract
+            .get(&num_id)
+            .and_then(|abs| self.abstract_nums.get(abs))
+            .map_or(0, Vec::len);
+        let mut levels: Vec<u32> = (0..defined).map(|l| l as u32).collect();
+        if let Some(starts) = self.num_overrides.get(&num_id) {
+            levels.extend(starts.keys());
+        }
+        if let Some(replacements) = self.num_level_overrides.get(&num_id) {
+            levels.extend(replacements.keys());
+        }
+        levels.sort_unstable();
+        levels.dedup();
+        levels
     }
 
     /// The counter-map key for a numId: the shared `Abstract(abstractNumId)`
@@ -501,6 +630,9 @@ impl NumberingMap {
     /// its start, so an ancestor that is never itself advanced (e.g. a list
     /// whose level 0 only exists to prefix subsection numbers with a fixed
     /// `start`) still resolves to its start value.
+    ///
+    /// Only placeholders present in the text are visited, deepest first, so the
+    /// work does not grow with the authored level number.
     pub fn resolve_text(&self, num_id: u32, level: u32, counter: u32) -> String {
         let Some(lvl) = self.get_level(num_id, level) else {
             return format!("{}.", counter);
@@ -511,24 +643,56 @@ impl NumberingMap {
         // Replace from the deepest placeholder down so "%1" can never partially
         // match a two-digit "%1N" (Word caps lists at 9 levels, so this is
         // belt-and-braces — but cheap).
-        for k in (0..=level).rev() {
+        let mut highest = Some(level);
+        while let Some(k) = highest.and_then(|hi| deepest_placeholder(&text, hi)) {
             let val = if k == level {
                 counter
             } else {
                 self.counters
                     .get(&key)
-                    .and_then(|m| m.get(&k))
-                    .copied()
+                    .and_then(|m| m.get(k))
                     .unwrap_or_else(|| self.get_start(num_id, k))
             };
-            let fmt = self
-                .get_level(num_id, k)
-                .map(|l| l.format.as_str())
-                .unwrap_or(lvl.format.as_str());
-            text = text.replace(&format!("%{}", k + 1), &format_counter(val, fmt));
+            // 17.9.4 applies to this marker's entire displayed level text,
+            // including its own placeholder. Keep authored formats intact so
+            // other markers continue to use their own definitions. MS-OE376
+            // 2.1.280(b) documents Word retaining `none`; this path follows the
+            // normative decimal rule, without a format-specific exception.
+            let fmt = if lvl.legal {
+                "decimal"
+            } else {
+                self.get_level(num_id, k)
+                    .map(|l| l.format.as_str())
+                    .unwrap_or(lvl.format.as_str())
+            };
+            text = text.replace(&format!("%{}", u64::from(k) + 1), &format_counter(val, fmt));
+            highest = k.checked_sub(1);
         }
         text
     }
+}
+
+/// The deepest level `k <= highest` whose placeholder `%{k+1}` occurs in
+/// `text`. Every `%` followed by digits contributes each digit prefix without a
+/// leading zero, because `%1` also matches inside `%12`.
+fn deepest_placeholder(text: &str, highest: u32) -> Option<u32> {
+    let bytes = text.as_bytes();
+    let mut best = None;
+    for (at, _) in text.match_indices('%') {
+        let mut number: u64 = 0;
+        for &digit in bytes[at + 1..].iter().take(10) {
+            if !digit.is_ascii_digit() || (number == 0 && digit == b'0') {
+                break;
+            }
+            number = number * 10 + u64::from(digit - b'0');
+            if let Ok(k) = u32::try_from(number - 1) {
+                if k <= highest && best.is_none_or(|b| k > b) {
+                    best = Some(k);
+                }
+            }
+        }
+    }
+    best
 }
 
 // ── ST_NumberFormat rendering (ECMA-376 §17.18.59) ──────────────────────────
@@ -540,6 +704,11 @@ impl NumberingMap {
 // the reference values. `bullet` is a list-only concern (no §17.18.59 numeric
 // meaning) and stays Rust-only.
 fn format_counter(n: u32, format: &str) -> String {
+    // ECMA-376 17.18.59: `none` suppresses the number, including start=0.
+    // Mirror the shared TS field formatter instead of using decimal fallback.
+    if format == "none" {
+        return String::new();
+    }
     if format == "bullet" {
         return "•".to_string();
     }
@@ -1219,12 +1388,9 @@ mod tests {
         assert_eq!(m.resolve_text(2, 1, c), "A.1");
     }
 
-    /// §17.9 — two numIds that reference the SAME abstractNum share one running
-    /// counter. sample-13's masthead: the article body numbers headings with
-    /// numId=6 (1..4), then a section restarts via numId=30 (same abstract 20,
-    /// a `<w:startOverride w:val="1"/>`) and the body resumes with numId=6. Word
-    /// shows 1, 2, 3, 4 across the restart — NOT 5, 6, 7 — because the count is
-    /// owned by abstract 20, not by each numId.
+    /// ECMA-376 §17.9.26 demonstrates that two numIds referencing one abstractNum
+    /// share a restart: the sequence 5, 5, 6, 5 produces 1, 2, 1, 2 when numId 6
+    /// has startOverride=1. This test exercises the same specified transition.
     #[test]
     fn shared_abstract_counter_restarts_on_start_override() {
         let mut m = map(r#"<w:abstractNum w:abstractNumId="20">
@@ -1463,7 +1629,7 @@ mod tests {
             // Documented residual / spell-outs fall back to decimal.
             ("cardinalText", &[(5, "5")]),
             ("thaiCounting", &[(5, "5")]),
-            ("none", &[(5, "5")]),
+            ("none", &[(0, ""), (1, ""), (5, "")]),
         ];
         for (fmt, rows) in cases {
             for (input, expected) in *rows {
@@ -1488,5 +1654,30 @@ mod tests {
         assert_eq!(m.resolve_text(9, 0, a), "一."); // 1 → 一
         let b = m.advance(9, 0);
         assert_eq!(m.resolve_text(9, 0, b), "二."); // 2 → 二
+    }
+
+    /// `w:ilvl` is ST_DecimalNumber (17.9.3); a level beyond the definition
+    /// still advances and seeds its ancestors, as before. The seeded range is
+    /// not materialised, so a huge level neither allocates nor loops per level.
+    #[test]
+    fn undefined_levels_keep_seeded_counters_without_per_level_work() {
+        let mut m = map(r#"<w:abstractNum w:abstractNumId="1">
+                 <w:lvl w:ilvl="0"><w:start w:val="3"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl>
+               </w:abstractNum>
+               <w:num w:numId="1"><w:abstractNumId w:val="1"/>
+                 <w:lvlOverride w:ilvl="4000000000"><w:lvl w:ilvl="4000000000"><w:start w:val="1"/><w:numFmt w:val="lowerLetter"/><w:lvlText w:val="%1.%3999999999.%4000000001"/></w:lvl></w:lvlOverride>
+               </w:num>"#);
+        assert_eq!(m.advance(1, 12), 1);
+        assert_eq!(m.resolve_text(1, 12, 1), "1.");
+        // Level 10 was seeded by level 12, so it continues; level 12 resets.
+        assert_eq!(m.advance(1, 10), 2);
+        assert_eq!(m.advance(1, 12), 1);
+        assert_eq!(m.advance(1, u32::MAX), 1);
+        assert_eq!(m.advance(1, u32::MAX - 1), 2);
+        // Level 0 was seeded to its start; level 3999999998 was seeded to 1.
+        assert_eq!(m.advance(1, 0), 4);
+        let c = m.advance(1, 4_000_000_000);
+        assert_eq!(c, 1);
+        assert_eq!(m.resolve_text(1, 4_000_000_000, c), "4.a.a");
     }
 }
