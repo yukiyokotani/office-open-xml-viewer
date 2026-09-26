@@ -27,6 +27,12 @@ enum Form {
     DotDot,
     /// `/word/footnotes.xml`
     Absolute,
+    /// `../WORD/FOOTNOTES.XML` (ASCII case-insensitive equivalence, §6.2.2.3)
+    MixedCase,
+    /// `%66%6F%6f...` (every letter percent-encoded: RFC 3986 §6.2.2.2)
+    PercentEncoded,
+    /// `x%2Ffootnotes.xml` (a percent-encoded `/` is not a part name)
+    EncodedSlash,
     /// `https://example.com/word/footnotes.xml` (Internal, names no part)
     Scheme,
     /// `//example.com/word/footnotes.xml` (Internal, names no part)
@@ -49,6 +55,25 @@ fn spell(form: Form, source_dir: &str, part: &str) -> (String, &'static str) {
         Form::Dot => (format!("./{relative}"), "Internal"),
         Form::DotDot => (format!("../{leaf_dir}/{relative}"), "Internal"),
         Form::Absolute => (format!("/{part}"), "Internal"),
+        Form::MixedCase => (
+            format!("../{}/{}", leaf_dir.to_uppercase(), relative.to_uppercase()),
+            "Internal",
+        ),
+        Form::PercentEncoded => (
+            relative
+                .bytes()
+                .enumerate()
+                .map(
+                    |(index, byte)| match (byte.is_ascii_alphabetic(), index % 2) {
+                        (true, 0) => format!("%{byte:02x}"),
+                        (true, _) => format!("%{byte:02X}"),
+                        (false, _) => char::from(byte).to_string(),
+                    },
+                )
+                .collect(),
+            "Internal",
+        ),
+        Form::EncodedSlash => (format!("x%2F{relative}"), "Internal"),
         Form::Scheme => (format!("https://example.com/{part}"), "Internal"),
         Form::Authority => (format!("//example.com/{part}"), "Internal"),
         Form::External => (relative.to_string(), "External"),
@@ -258,7 +283,7 @@ fn markdown(form: Form) -> String {
 }
 
 /// Observable evidence that each referenced part was found at its resolved
-/// name. Paths are the canonical part names, whatever the target spelling.
+/// name. Paths are the stored ZIP item names, whatever the target spelling.
 const LOADED_PART_EVIDENCE: &[(&str, &str)] = &[
     ("styles", r#""fontSize":23.0"#),
     ("numbering", "NUM-7:"),
@@ -282,8 +307,15 @@ const LOADED_PART_EVIDENCE: &[(&str, &str)] = &[
 ];
 
 #[test]
-fn every_part_kind_resolves_relative_dot_and_absolute_targets() {
-    for form in [Form::Plain, Form::Dot, Form::DotDot, Form::Absolute] {
+fn every_part_kind_resolves_relative_absolute_and_equivalent_targets() {
+    for form in [
+        Form::Plain,
+        Form::Dot,
+        Form::DotDot,
+        Form::Absolute,
+        Form::MixedCase,
+        Form::PercentEncoded,
+    ] {
         for (api, json) in [("native", native(form)), ("streamed", streamed(form))] {
             let json = json.to_string();
             for (part, evidence) in LOADED_PART_EVIDENCE {
@@ -316,7 +348,12 @@ fn targets_naming_no_package_part_behave_like_missing_parts() {
             "missing {part} must not be loaded ({evidence})"
         );
     }
-    for form in [Form::Scheme, Form::Authority, Form::External] {
+    for form in [
+        Form::Scheme,
+        Form::Authority,
+        Form::External,
+        Form::EncodedSlash,
+    ] {
         assert_eq!(native(form), missing_native, "native {form:?}");
         assert_eq!(streamed(form), missing_streamed, "streamed {form:?}");
         assert_eq!(markdown(form), missing_markdown, "markdown {form:?}");

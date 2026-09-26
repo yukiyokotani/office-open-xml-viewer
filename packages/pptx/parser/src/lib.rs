@@ -3749,6 +3749,11 @@ mod tests {
             extract_image(&buf, "ppt/media/i.png", None, None).unwrap(),
             b"X"
         );
+        // ECMA-376 Part 2 §6.2.2.3 part-name equivalence (shared package
+        // lookup): ASCII case and percent-encoded unreserved characters.
+        for spelling in ["PPT/Media/I.PNG", "ppt/%6Dedia/%69.png"] {
+            assert_eq!(extract_image(&buf, spelling, None, None).unwrap(), b"X");
+        }
     }
 
     /// A `PictureElement` serializes its blip as a zip path + mime, never as an

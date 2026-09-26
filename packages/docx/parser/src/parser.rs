@@ -103,8 +103,11 @@ impl Zip {
         self.session.assert_healthy()
     }
 
-    fn index_for_name(&self, path: &str) -> Option<()> {
-        self.session.contains_entry(path).then_some(())
+    /// Stored ZIP item name of the part equivalent to `path` (ECMA-376 Part 2
+    /// §6.2.2.3: ASCII case folding and percent-encoded unreserved
+    /// characters). Consults only the central directory; nothing is inflated.
+    fn entry_name(&self, path: &str) -> Option<String> {
+        self.session.entry_name(path)
     }
 }
 
@@ -1674,9 +1677,16 @@ fn finish_document(
                 read_zip_string(zip, &relationship_part_path(path)).unwrap_or_default();
             let mut fonts =
                 parse_embedded_fonts(&font_table_xml, &parse_opc_rels(&font_rels_xml), path);
-            // Like `load_media_map`, publish only parts that exist, so a target
-            // naming no package part and a missing part yield the same model.
-            fonts.retain(|font| zip.index_for_name(&font.part_path).is_some());
+            // Like `load_media_map`, publish only parts that exist (under their
+            // stored ZIP item name), so a target naming no package part and a
+            // missing part yield the same model.
+            fonts.retain_mut(|font| match zip.entry_name(&font.part_path) {
+                Some(stored) => {
+                    font.part_path = stored;
+                    true
+                }
+                None => false,
+            });
             fonts
         })
         .unwrap_or_default();
@@ -4425,7 +4435,9 @@ fn load_media_map(
 ) -> HashMap<String, String> {
     let mut media_map: HashMap<String, String> = HashMap::new();
     for (rid, relationship) in relationships {
-        let target = &relationship.target;
+        // The media filter compares the Target's part-name equivalence key, so
+        // `Media/Image1.png` and `%6Dedia/...` spell the same kind of target.
+        let target = ooxml_common::rels::part_name_equivalence_key(&relationship.target);
         if target.contains("media/") || target.contains("image") {
             // Resolve the Target against the source part via the shared OPC
             // resolver (ECMA-376 Part 2 §6.4/§6.5.2.3, RFC 3986 §5): this
@@ -4438,12 +4450,12 @@ fn load_media_map(
                 continue;
             };
             // Confirm the part exists before mapping the rId (keeps the lazy
-            // pipeline honest: a path in the map is always extractable).
-            // `index_for_name` consults only the central directory — no inflate,
-            // unlike the former `read_zip_bytes` which decompressed the whole
-            // entry just to throw the bytes away.
-            if zip.index_for_name(&path).is_some() {
-                media_map.insert(rid.clone(), path);
+            // pipeline honest: a path in the map is always extractable), and
+            // publish its stored ZIP item name so equivalent spellings of one
+            // part share one model path. `entry_name` consults only the
+            // central directory — no inflate.
+            if let Some(stored) = zip.entry_name(&path) {
+                media_map.insert(rid.clone(), stored);
             }
         }
     }
@@ -4473,10 +4485,16 @@ fn load_chart_map(
     // harmless.
     let mut chart_map: HashMap<String, ooxml_common::chart::ChartModel> = HashMap::new();
     for (rid, relationship) in relationships {
-        let Some(path) = relationship.resolve_part(source_part) else {
+        // Use the stored ZIP item name (§6.2.2.3 equivalence); an absent part
+        // is dropped exactly like an unreadable one.
+        let Some(path) = relationship
+            .resolve_part(source_part)
+            .and_then(|path| zip.entry_name(&path))
+        else {
             continue;
         };
-        if !(path.contains("charts/") && path.ends_with(".xml")) {
+        let key = ooxml_common::rels::part_name_equivalence_key(&path);
+        if !(key.contains("charts/") && key.ends_with(".xml")) {
             continue;
         }
         let Ok(xml) = read_zip_string(zip, &path) else {

@@ -170,12 +170,27 @@ pub fn resolve_target(base_dir: &str, target: &str) -> String {
 ///   not part of that grammar, and an empty or trailing-dot segment is not a
 ///   part name; each yields `None`. A fragment identifies a location inside
 ///   the resource and is removed before the part is named.
-/// - §7.3.4: the ZIP item name is the part name without its leading `/`.
+/// - RFC 3986 §6.2.2.1/§6.2.2.2 (the equivalence RFC 3987 §5.3.2.3 extends
+///   to IRIs): a percent-encoded unreserved ASCII character (`ALPHA / DIGIT /
+///   "-" / "." / "_" / "~"`) is equivalent to the character itself, so it is
+///   decoded; any other percent-encoding keeps its octet with uppercase hex.
+///   Part 2 §6.2.2.2 forbids *producers* from writing such encodings, but a
+///   consumer resolving a reference applies the RFC equivalence. As in the
+///   RFC 3986 §6.2.2 normalization ladder, percent-encoding normalization
+///   precedes path-segment normalization, so `%2E%2E` is the dot segment `..`
+///   (it still cannot leave the package root). A `%` not followed by two hex
+///   digits is not an IRI and yields `None`, as does a percent-encoded `/` or
+///   `\` (forbidden by §6.2.2.2; it is never decoded into a separator).
+/// - §7.3.4: the ZIP item name is the part name without its leading `/`, with
+///   every non-ASCII character percent-encoded (as UTF-8, uppercase hex).
+///
+/// ASCII case is kept as authored: part names are equivalent under ASCII
+/// case-insensitive matching (§6.2.2.3), which the package lookup applies
+/// through [`part_name_equivalence_key`]. The returned name may therefore
+/// differ in case from the stored ZIP item name while naming the same part.
 ///
 /// Library policy: `None` means "this relationship names no readable part".
 /// Callers treat it exactly as a relationship whose target part is absent.
-/// Percent-encoding and ASCII case folding (§6.2.2.3 equivalence) are not
-/// applied; the name is looked up as authored, as every parser already does.
 pub fn resolve_part_name(source_part: &str, target: &str) -> Option<String> {
     let reference = target.split_once('#').map_or(target, |(before, _)| before);
     if has_uri_scheme(reference) || reference.starts_with("//") || reference.contains('?') {
@@ -190,16 +205,107 @@ pub fn resolve_part_name(source_part: &str, target: &str) -> Option<String> {
         let directory_end = base.rfind('/').map_or(0, |index| index + 1);
         format!("{}{}", &base[..directory_end], reference)
     };
-    let path = remove_dot_segments(&merged);
-    let name = path.strip_prefix('/')?;
+    let path = remove_dot_segments(&normalize_percent_encoding(&merged)?);
+    let name = path.strip_prefix('/')?.to_owned();
     if name.is_empty()
-        || name
-            .split('/')
-            .any(|segment| segment.is_empty() || segment.ends_with('.'))
+        || name.split('/').any(|segment| {
+            segment.is_empty()
+                || segment.ends_with('.')
+                || segment.contains("%2F")
+                || segment.contains("%5C")
+        })
     {
         return None;
     }
-    Some(name.to_owned())
+    Some(name)
+}
+
+/// ASCII unreserved characters of RFC 3986 §2.3.
+fn is_unreserved_ascii(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~')
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Percent-encoding normalization of one part name (see
+/// [`resolve_part_name`]): decode percent-encoded unreserved ASCII, uppercase
+/// the hex of every other triplet, percent-encode non-ASCII characters
+/// (§7.3.4). `None` for a malformed `%` triplet.
+fn normalize_percent_encoding(name: &str) -> Option<String> {
+    let bytes = name.as_bytes();
+    let mut out = String::with_capacity(name.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'%' {
+            let high = hex_value(*bytes.get(index + 1)?)?;
+            let low = hex_value(*bytes.get(index + 2)?)?;
+            let decoded = high * 16 + low;
+            if is_unreserved_ascii(decoded) {
+                out.push(char::from(decoded));
+            } else {
+                out.push_str(&format!("%{decoded:02X}"));
+            }
+            index += 3;
+        } else if byte.is_ascii() {
+            out.push(char::from(byte));
+            index += 1;
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+            index += 1;
+        }
+    }
+    Some(out)
+}
+
+/// Equivalence key of a part name or ZIP item name (ECMA-376 Part 2 §6.2.2.3
+/// with the RFC 3986 §6.2.2 percent-encoding equivalence): two names name the
+/// same part exactly when their keys are equal.
+///
+/// The key decodes percent-encoded unreserved ASCII, percent-encodes non-ASCII
+/// (§7.3.4 ZIP mapping), and folds ASCII case — which also makes the hex of
+/// the remaining triplets case-insensitive, as RFC 3986 §6.2.2.1 requires. A
+/// malformed `%` is kept literally, since a stored ZIP item name must still
+/// have a key. Package validation rejects two items with the same key, so a
+/// key lookup is unambiguous.
+pub fn part_name_equivalence_key(name: &str) -> String {
+    let bytes = name.as_bytes();
+    let mut key = String::with_capacity(name.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        let triplet = (byte == b'%')
+            .then(|| {
+                Some(hex_value(*bytes.get(index + 1)?)? * 16 + hex_value(*bytes.get(index + 2)?)?)
+            })
+            .flatten();
+        match triplet {
+            Some(decoded) if is_unreserved_ascii(decoded) => {
+                key.push(char::from(decoded.to_ascii_lowercase()));
+                index += 3;
+            }
+            Some(decoded) => {
+                key.push_str(&format!("%{decoded:02x}"));
+                index += 3;
+            }
+            None if byte.is_ascii() => {
+                key.push(char::from(byte.to_ascii_lowercase()));
+                index += 1;
+            }
+            None => {
+                key.push_str(&format!("%{byte:02x}"));
+                index += 1;
+            }
+        }
+    }
+    key
 }
 
 /// RFC 3986 §3.1 `scheme ":"` prefix: `ALPHA *( ALPHA / DIGIT / "+" / "-" /
@@ -459,6 +565,31 @@ mod tests {
             ("word/document.xml", "..", None),
             ("word/document.xml", "a//b.xml", None),
             ("word/document.xml", "name.", None),
+            // RFC 3986 §6.2.2 percent-encoding normalization and §7.3.4.
+            (
+                "word/document.xml",
+                "%66ootnotes.xml",
+                Some("word/footnotes.xml"),
+            ),
+            ("word/document.xml", "%2e/%41.xml", Some("word/A.xml")),
+            ("word/document.xml", "a%20b.xml", Some("word/a%20b.xml")),
+            ("word/document.xml", "a%3cb.xml", Some("word/a%3Cb.xml")),
+            (
+                "word/document.xml",
+                "caf\u{e9}.xml",
+                Some("word/caf%C3%A9.xml"),
+            ),
+            ("word/document.xml", "%2E%2E/x.xml", Some("x.xml")),
+            ("word/document.xml", "a%2Fb.xml", None),
+            ("word/document.xml", "a%5cb.xml", None),
+            ("word/document.xml", "a%zzb.xml", None),
+            ("word/document.xml", "a%4", None),
+            // Case is kept; the package lookup folds it (§6.2.2.3).
+            (
+                "word/document.xml",
+                "../WORD/Footnotes.XML",
+                Some("WORD/Footnotes.XML"),
+            ),
         ];
         for (source, target, expected) in cases {
             assert_eq!(
@@ -467,6 +598,21 @@ mod tests {
                 "{source} + {target}"
             );
         }
+    }
+
+    #[test]
+    fn equivalence_key_folds_case_and_unreserved_percent_encoding() {
+        let key = part_name_equivalence_key;
+        assert_eq!(key("word/Footnotes.XML"), key("WORD/footnotes.xml"));
+        assert_eq!(key("word/%41.xml"), key("word/a.xml"));
+        assert_eq!(key("word/%7e%5F.xml"), key("word/~_.xml"));
+        assert_eq!(key("word/a%3Cb.xml"), key("word/a%3cb.xml"));
+        assert_eq!(key("word/caf\u{e9}.xml"), key("word/caf%C3%A9.xml"));
+        assert_ne!(key("word/a%20b.xml"), key("word/a b.xml"));
+        assert_ne!(key("word/a%2Fb.xml"), key("word/a/b.xml"));
+        assert_ne!(key("word/a.xml"), key("word/b.xml"));
+        // A malformed triplet still has a (literal) key.
+        assert_eq!(key("word/%zz"), "word/%zz");
     }
 
     #[test]
