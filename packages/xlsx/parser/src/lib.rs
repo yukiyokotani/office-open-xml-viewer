@@ -5,7 +5,7 @@ use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 
 use ooxml_common::depth::parse_guarded;
-use ooxml_common::json_measurement::measure_json;
+use ooxml_common::json_measurement::{measure_json, serialize_json_limited, LimitedJsonError};
 use ooxml_common::ns::{attr_ns, is_r_ns, is_x_ns, relationships};
 use ooxml_common::package_session::{
     PackageLimitReporter, PackageOperation, PackageSessionHandle, RetainedPackageOperation,
@@ -178,15 +178,30 @@ fn serialize_worksheet_bounded(
     part: &str,
     worksheet: &Worksheet,
 ) -> Result<Vec<u8>, String> {
-    let json_bytes = measure_json(worksheet)?.json_bytes;
+    let bytes = match serialize_json_limited(worksheet, HARD_MAX_XLSX_WORKSHEET_JSON_BYTES) {
+        Ok(bytes) => bytes,
+        Err(LimitedJsonError::LimitExceeded { observed, .. }) => {
+            report_materialization_limit(
+                archive,
+                HardResourceLimitKind::WorksheetJsonBytes,
+                part,
+                HARD_MAX_XLSX_WORKSHEET_JSON_BYTES,
+                observed,
+            )?;
+            unreachable!("an exceeded hard limit must be reported")
+        }
+        Err(LimitedJsonError::Serialize(error)) => {
+            return Err(format!("serialize measurement error: {error}"));
+        }
+    };
     report_materialization_limit(
         archive,
         HardResourceLimitKind::WorksheetJsonBytes,
         part,
         HARD_MAX_XLSX_WORKSHEET_JSON_BYTES,
-        json_bytes,
+        bytes.len() as u64,
     )?;
-    serde_json::to_vec(worksheet).map_err(|error| format!("serialize error: {error}"))
+    Ok(bytes)
 }
 
 fn row_cell_content_utf8_bytes(
@@ -3696,16 +3711,32 @@ fn serialize_cursor_finished(
         kind: "finished",
         worksheet,
     };
-    let json_bytes = measure_json(&finished)?.json_bytes;
+    let bytes = match serialize_json_limited(&finished, HARD_MAX_XLSX_WORKSHEET_JSON_BYTES) {
+        Ok(bytes) => bytes,
+        Err(LimitedJsonError::LimitExceeded { observed, .. }) => {
+            if let Some(reporter) = limit_reporter {
+                reporter.observe_hard_limit(
+                    HardResourceLimitKind::WorksheetJsonBytes,
+                    part,
+                    HARD_MAX_XLSX_WORKSHEET_JSON_BYTES,
+                    observed,
+                )?;
+            }
+            return Err(format!("worksheet JSON exceeds its hard ceiling: {observed} > {HARD_MAX_XLSX_WORKSHEET_JSON_BYTES}"));
+        }
+        Err(LimitedJsonError::Serialize(error)) => {
+            return Err(format!("serialize measurement error: {error}"));
+        }
+    };
     if let Some(reporter) = limit_reporter {
         reporter.observe_hard_limit(
             HardResourceLimitKind::WorksheetJsonBytes,
             part,
             HARD_MAX_XLSX_WORKSHEET_JSON_BYTES,
-            json_bytes,
+            bytes.len() as u64,
         )?;
     }
-    serde_json::to_vec(&finished).map_err(|error| format!("serialize error: {error}"))
+    Ok(bytes)
 }
 
 #[wasm_bindgen]

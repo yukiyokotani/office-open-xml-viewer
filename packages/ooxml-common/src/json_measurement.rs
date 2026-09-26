@@ -1,4 +1,4 @@
-//! Allocation-free measurement of serialized JSON resources.
+//! Measurement and bounded serialization of JSON resources.
 //!
 //! The JSON byte count is the exact output size produced by `serde_json`. The
 //! string-value count measures decoded UTF-8 content and deliberately excludes
@@ -7,6 +7,77 @@
 
 use serde::Serialize;
 use std::io::{self, Write};
+
+/// A serialization failure distinct from crossing a parser's JSON byte ceiling.
+#[derive(Debug)]
+pub enum LimitedJsonError {
+    LimitExceeded { observed: u64, limit: u64 },
+    Serialize(String),
+}
+
+#[derive(Debug)]
+struct JsonLimitExceeded {
+    observed: u64,
+    limit: u64,
+}
+
+impl std::fmt::Display for JsonLimitExceeded {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "JSON byte limit exceeded: {} > {}",
+            self.observed, self.limit
+        )
+    }
+}
+
+impl std::error::Error for JsonLimitExceeded {}
+
+struct LimitedJsonWriter {
+    bytes: Vec<u8>,
+    limit: u64,
+    exceeded: Option<u64>,
+}
+
+impl Write for LimitedJsonWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let observed = (self.bytes.len() as u64).saturating_add(bytes.len() as u64);
+        if observed > self.limit {
+            self.exceeded = Some(observed);
+            return Err(io::Error::other(JsonLimitExceeded {
+                observed,
+                limit: self.limit,
+            }));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Serialize directly into a byte-capped buffer, aborting on the first crossing.
+/// The reported observation is the first rejected write's cumulative size; it
+/// can be less than the complete JSON size, while retaining the exact ceiling.
+pub fn serialize_json_limited<T: Serialize>(
+    value: &T,
+    limit: u64,
+) -> Result<Vec<u8>, LimitedJsonError> {
+    let mut writer = LimitedJsonWriter {
+        bytes: Vec::new(),
+        limit,
+        exceeded: None,
+    };
+    if let Err(error) = serde_json::to_writer(&mut writer, value) {
+        if let Some(observed) = writer.exceeded {
+            return Err(LimitedJsonError::LimitExceeded { observed, limit });
+        }
+        return Err(LimitedJsonError::Serialize(error.to_string()));
+    }
+    Ok(writer.bytes)
+}
 
 /// Exact resource measurements for a serde JSON serialization.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -195,6 +266,23 @@ pub fn measure_json<T: Serialize>(value: &T) -> Result<JsonMeasurement, String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_serialization_preserves_bytes_and_rejects_the_first_overflow() {
+        let value = serde_json::json!({"text": "quote\" slash\\ é😀", "items": [1, null, true]});
+        let expected = serde_json::to_vec(&value).unwrap();
+        assert_eq!(
+            serialize_json_limited(&value, expected.len() as u64).unwrap(),
+            expected
+        );
+        match serialize_json_limited(&value, expected.len() as u64 - 1).unwrap_err() {
+            LimitedJsonError::LimitExceeded { observed, limit } => {
+                assert!(observed > limit);
+                assert_eq!(limit, expected.len() as u64 - 1);
+            }
+            other => panic!("expected a byte limit error, got {other:?}"),
+        }
+    }
 
     #[test]
     fn matches_exact_serde_json_bytes_and_excludes_property_names() {

@@ -2,7 +2,7 @@ use ooxml_common::content_types::PackageContentTypes;
 use ooxml_common::depth::{
     parse_guarded_with_node_limit, xml_dom_complexity_exceeds, GuardedParseError,
 };
-use ooxml_common::json_measurement::measure_json;
+use ooxml_common::json_measurement::{measure_json, serialize_json_limited, LimitedJsonError};
 use ooxml_common::ns::{is_p_ns, is_r_ns};
 #[cfg(test)]
 use ooxml_common::package_session::PackageLimitReporter;
@@ -576,15 +576,32 @@ fn serialize_presentation_bootstrap(
         embedded_fonts: shared.embedded_fonts.clone(),
         slides,
     };
-    let final_json_bytes = measure_json(&bootstrap)?.json_bytes;
-    debug_assert_eq!(final_json_bytes, projected_json_bytes);
+    let bytes = match serialize_json_limited(&bootstrap, limits.bootstrap_json_bytes) {
+        Ok(bytes) => bytes,
+        Err(LimitedJsonError::LimitExceeded { observed, .. }) => {
+            reporter.observe_hard_limit(
+                HardResourceLimitKind::PptxBootstrapJsonBytes,
+                Some("ppt/presentation.xml"),
+                limits.bootstrap_json_bytes,
+                observed,
+            )?;
+            return Err(format!(
+                "presentation bootstrap JSON exceeds its hard ceiling: {observed} > {}",
+                limits.bootstrap_json_bytes
+            ));
+        }
+        Err(LimitedJsonError::Serialize(error)) => {
+            return Err(format!("serialize measurement error: {error}"));
+        }
+    };
+    debug_assert_eq!(bytes.len() as u64, projected_json_bytes);
     reporter.observe_hard_limit(
         HardResourceLimitKind::PptxBootstrapJsonBytes,
         Some("ppt/presentation.xml"),
         limits.bootstrap_json_bytes,
-        final_json_bytes,
+        bytes.len() as u64,
     )?;
-    serde_json::to_vec(&bootstrap).map_err(|error| format!("serialize error: {error}"))
+    Ok(bytes)
 }
 
 #[wasm_bindgen]
@@ -756,10 +773,11 @@ impl PptxArchive {
                 shared,
                 zip,
                 Some(&mut journal),
+                true,
             )
             .map_err(|error| error.to_string())?;
             zip.assert_healthy()?;
-            serde_json::to_vec(&produced.slide).map_err(|error| format!("serialize error: {error}"))
+            Ok(produced.bytes.expect("cursor slide serialized by producer"))
         })();
         let bytes = match result {
             Ok(bytes) => bytes,
@@ -2406,7 +2424,7 @@ fn render_markdown_from_shared(
                 output.observed(),
             )?;
         }
-        let produced = produce_slide_unit_with_journal(index, shared, zip, None)
+        let produced = produce_slide_unit_with_journal(index, shared, zip, None, false)
             .map_err(|error| error.to_string())?;
         render_slide_md(&produced.slide, &mut output);
         render_review_comments_md(
@@ -2458,14 +2476,30 @@ fn serialize_slide_unit_with_limit(
     reporter: &PackageLimitReporter,
     limit: u64,
 ) -> Result<Vec<u8>, String> {
-    let json_bytes = measure_json(slide)?.json_bytes;
+    let bytes = match serialize_json_limited(slide, limit) {
+        Ok(bytes) => bytes,
+        Err(LimitedJsonError::LimitExceeded { observed, .. }) => {
+            reporter.observe_hard_limit(
+                HardResourceLimitKind::PptxSlideJsonBytes,
+                slide.part_name.as_deref(),
+                limit,
+                observed,
+            )?;
+            return Err(format!(
+                "slide JSON exceeds its hard ceiling: {observed} > {limit}"
+            ));
+        }
+        Err(LimitedJsonError::Serialize(error)) => {
+            return Err(format!("serialize measurement error: {error}"));
+        }
+    };
     reporter.observe_hard_limit(
         HardResourceLimitKind::PptxSlideJsonBytes,
         slide.part_name.as_deref(),
         limit,
-        json_bytes,
+        bytes.len() as u64,
     )?;
-    serde_json::to_vec(slide).map_err(|error| format!("serialize error: {error}"))
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -2697,7 +2731,7 @@ fn produce_slide_unit(
     shared: &mut PresentationShared,
     zip: &mut PptxZip,
 ) -> Result<Slide, Box<dyn std::error::Error>> {
-    let produced = produce_slide_unit_with_journal(index, shared, zip, None)?;
+    let produced = produce_slide_unit_with_journal(index, shared, zip, None, false)?;
     let projected = shared
         .materialized_slide_json_bytes
         .saturating_add(produced.json_bytes);
@@ -2715,6 +2749,7 @@ fn produce_slide_unit(
 struct ProducedSlide {
     slide: Slide,
     json_bytes: u64,
+    bytes: Option<Vec<u8>>,
 }
 
 /// The one canonical slide producer. Cursor callers provide a mutation journal
@@ -2725,6 +2760,7 @@ fn produce_slide_unit_with_journal(
     shared: &mut PresentationShared,
     zip: &mut PptxZip,
     mut journal: Option<&mut SlideCacheJournal>,
+    serialize: bool,
 ) -> Result<ProducedSlide, Box<dyn std::error::Error>> {
     let descriptor = shared
         .slide_descriptors
@@ -3165,14 +3201,44 @@ fn produce_slide_unit_with_journal(
     // failed `.ok()` / `unwrap_or_default()` read can never become a Slide.
     zip.assert_healthy()?;
     let reporter = zip.operation()?.limit_reporter()?;
-    let json_bytes = measure_json(&slide)?.json_bytes;
+    let bytes = if serialize {
+        match serialize_json_limited(&slide, pptx_slide_json_limit()) {
+            Ok(bytes) => Some(bytes),
+            Err(LimitedJsonError::LimitExceeded { observed, .. }) => {
+                reporter.observe_hard_limit(
+                    HardResourceLimitKind::PptxSlideJsonBytes,
+                    slide.part_name.as_deref(),
+                    pptx_slide_json_limit(),
+                    observed,
+                )?;
+                return Err(format!(
+                    "slide JSON exceeds its hard ceiling: {observed} > {}",
+                    pptx_slide_json_limit()
+                )
+                .into());
+            }
+            Err(LimitedJsonError::Serialize(error)) => {
+                return Err(format!("serialize measurement error: {error}").into());
+            }
+        }
+    } else {
+        None
+    };
+    let json_bytes = match &bytes {
+        Some(bytes) => bytes.len() as u64,
+        None => measure_json(&slide)?.json_bytes,
+    };
     reporter.observe_hard_limit(
         HardResourceLimitKind::PptxSlideJsonBytes,
         slide.part_name.as_deref(),
         pptx_slide_json_limit(),
         json_bytes,
     )?;
-    Ok(ProducedSlide { slide, json_bytes })
+    Ok(ProducedSlide {
+        slide,
+        json_bytes,
+        bytes,
+    })
 }
 
 #[cfg(test)]

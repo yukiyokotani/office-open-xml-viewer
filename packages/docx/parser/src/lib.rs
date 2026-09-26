@@ -1,4 +1,4 @@
-use ooxml_common::json_measurement::measure_json;
+use ooxml_common::json_measurement::{serialize_json_limited, LimitedJsonError};
 use ooxml_common::package_session::PackageLimitReporter;
 use ooxml_common::pull::insufficient_credit_error;
 use ooxml_common::resource::{
@@ -172,15 +172,24 @@ fn serialize_document_unit(
             HARD_MAX_DOCX_BOOTSTRAP_JSON_BYTES,
         ),
     };
-    let observed = measure_json(unit)?.json_bytes;
+    let bytes = match serialize_json_limited(unit, limit) {
+        Ok(bytes) => bytes,
+        Err(LimitedJsonError::LimitExceeded { observed, .. }) => {
+            if let Some(reporter) = reporter {
+                reporter.observe_hard_limit(kind, Some("word/document.xml"), limit, observed)?;
+            }
+            return Err(format!(
+                "document cursor JSON exceeds its hard ceiling: {observed} > {limit}"
+            ));
+        }
+        Err(LimitedJsonError::Serialize(error)) => {
+            return Err(format!("serialize measurement error: {error}"));
+        }
+    };
     if let Some(reporter) = reporter {
-        reporter.observe_hard_limit(kind, Some("word/document.xml"), limit, observed)?;
-    } else if observed > limit {
-        return Err(format!(
-            "document cursor JSON exceeds its hard ceiling: {observed} > {limit}"
-        ));
+        reporter.observe_hard_limit(kind, Some("word/document.xml"), limit, bytes.len() as u64)?;
     }
-    serde_json::to_vec(unit).map_err(|error| format!("serialize error: {error}"))
+    Ok(bytes)
 }
 
 #[wasm_bindgen]
