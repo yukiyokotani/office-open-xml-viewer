@@ -33,6 +33,12 @@ enum Form {
     PercentEncoded,
     /// `x%2Ffootnotes.xml` (a percent-encoded `/` is not a part name)
     EncodedSlash,
+    /// `%2E%2E/../footnotes.xml`: RFC 3986 §5 resolves the literal `..`
+    /// against the `%2E%2E` segment before §6.2.2 normalization.
+    EncodedDotDotThenDotDot,
+    /// `a b/../footnotes.xml`: not an IRI reference (RFC 3987 §2.2), even
+    /// though dot removal would drop the offending segment.
+    InvalidCharacter,
     /// `https://example.com/word/footnotes.xml` (Internal, names no part)
     Scheme,
     /// `//example.com/word/footnotes.xml` (Internal, names no part)
@@ -74,6 +80,8 @@ fn spell(form: Form, source_dir: &str, part: &str) -> (String, &'static str) {
             "Internal",
         ),
         Form::EncodedSlash => (format!("x%2F{relative}"), "Internal"),
+        Form::EncodedDotDotThenDotDot => (format!("%2E%2E/../{relative}"), "Internal"),
+        Form::InvalidCharacter => (format!("a b/../{relative}"), "Internal"),
         Form::Scheme => (format!("https://example.com/{part}"), "Internal"),
         Form::Authority => (format!("//example.com/{part}"), "Internal"),
         Form::External => (relative.to_string(), "External"),
@@ -127,11 +135,13 @@ fn package(form: Form) -> Vec<u8> {
             <w:r><w:commentReference w:id="1"/></w:r>
             <w:r><w:footnoteReference w:id="1"/></w:r><w:r><w:endnoteReference w:id="1"/></w:r></w:p>
           <w:p>{picture}</w:p>
+          <w:p>{svg_picture}</w:p>
           <w:p><w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><wp:extent cx="914400" cy="914400"/><wp:docPr id="2" name="C"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart r:id="rChart"/></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>
           <w:p><w:r><w:object w:dxaOrig="1440" w:dyaOrig="1440"><v:shape id="ole" style="width:72pt;height:72pt"><v:imagedata r:id="rOlePreview"/></v:shape><o:OLEObject Type="Embed" ProgID="Package" ShapeID="ole" r:id="rOle"/></w:object></w:r></w:p>
           <w:sectPr><w:headerReference w:type="default" r:id="rHeader"/><w:footerReference w:type="default" r:id="rFooter"/></w:sectPr>
         </w:body></w:document>"#,
         picture = inline_picture("rImage"),
+        svg_picture = inline_picture("rSvg"),
     );
     let document_rels = rels(
         form,
@@ -149,6 +159,8 @@ fn package(form: Form) -> Vec<u8> {
             ("rComments", "comments", "word/comments.xml"),
             ("rImage", "image", "word/media/image1.png"),
             ("rOlePreview", "image", "word/media/image2.png"),
+            // Stored as `word/media/image5.%73vg`, an equivalent item name.
+            ("rSvg", "image", "word/media/image5.svg"),
             ("rOle", "oleObject", "word/embeddings/oleObject1.bin"),
             ("rChart", "chart", "word/charts/chart1.xml"),
         ],
@@ -256,6 +268,10 @@ fn package(form: Form) -> Vec<u8> {
             zip.start_file(name, options).expect("in-memory zip");
             zip.write_all(PNG_1X1).expect("in-memory zip");
         }
+        zip.start_file("word/media/image5.%73vg", options)
+            .expect("in-memory zip");
+        zip.write_all(br#"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>"#)
+            .expect("in-memory zip");
         for name in ["word/fonts/font1.odttf", "word/embeddings/oleObject1.bin"] {
             zip.start_file(name, options).expect("in-memory zip");
             zip.write_all(b"\0").expect("in-memory zip");
@@ -303,6 +319,10 @@ const LOADED_PART_EVIDENCE: &[(&str, &str)] = &[
     ("comments", "COMMENT-TEXT"),
     ("image", r#""word/media/image1.png""#),
     ("embedded object preview", r#""word/media/image2.png""#),
+    (
+        "image stored under an equivalent item name",
+        r#""imagePath":"word/media/image5.%73vg","mimeType":"image/svg+xml""#,
+    ),
     ("chart", r#""lineWidthEmu":25400"#),
 ];
 
@@ -315,6 +335,7 @@ fn every_part_kind_resolves_relative_absolute_and_equivalent_targets() {
         Form::Absolute,
         Form::MixedCase,
         Form::PercentEncoded,
+        Form::EncodedDotDotThenDotDot,
     ] {
         for (api, json) in [("native", native(form)), ("streamed", streamed(form))] {
             let json = json.to_string();
@@ -353,6 +374,7 @@ fn targets_naming_no_package_part_behave_like_missing_parts() {
         Form::Authority,
         Form::External,
         Form::EncodedSlash,
+        Form::InvalidCharacter,
     ] {
         assert_eq!(native(form), missing_native, "native {form:?}");
         assert_eq!(streamed(form), missing_streamed, "streamed {form:?}");

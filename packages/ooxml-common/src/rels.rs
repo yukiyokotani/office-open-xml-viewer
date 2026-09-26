@@ -165,22 +165,32 @@ pub fn resolve_target(base_dir: &str, target: &str) -> String {
 ///   replaces the pack IRI's scheme/authority and therefore names a resource
 ///   outside this package. §6.5.3.4 requires an Internal target to be a
 ///   relative reference *to a part*, so such a target identifies no part.
-/// - §6.3.3(f): the resolved path must be a valid part name (§6.2.2.2:
-///   `1*( "/" isegment-nz )`, no segment ending in `.`). A query component is
-///   not part of that grammar, and an empty or trailing-dot segment is not a
-///   part name; each yields `None`. A fragment identifies a location inside
-///   the resource and is removed before the part is named.
-/// - RFC 3986 §6.2.2.1/§6.2.2.2 (the equivalence RFC 3987 §5.3.2.3 extends
-///   to IRIs): a percent-encoded unreserved ASCII character (`ALPHA / DIGIT /
+/// - RFC 3986 §5.2.1 applies normalization only *after* reference resolution,
+///   so merge and `remove_dot_segments` run on the reference exactly as
+///   authored: in `%2E%2E/../header.xml` the literal `..` removes the
+///   preceding `%2E%2E` segment, giving `word/header.xml`.
+/// - Then RFC 3986 §6.2.2 normalization (which RFC 3987 §5.3.2.3 extends to
+///   IRIs): a percent-encoded unreserved ASCII character (`ALPHA / DIGIT /
 ///   "-" / "." / "_" / "~"`) is equivalent to the character itself, so it is
-///   decoded; any other percent-encoding keeps its octet with uppercase hex.
-///   Part 2 §6.2.2.2 forbids *producers* from writing such encodings, but a
-///   consumer resolving a reference applies the RFC equivalence. As in the
-///   RFC 3986 §6.2.2 normalization ladder, percent-encoding normalization
-///   precedes path-segment normalization, so `%2E%2E` is the dot segment `..`
-///   (it still cannot leave the package root). A `%` not followed by two hex
-///   digits is not an IRI and yields `None`, as does a percent-encoded `/` or
-///   `\` (forbidden by §6.2.2.2; it is never decoded into a separator).
+///   decoded; any other triplet keeps its octet with uppercase hex (§6.2.2.1);
+///   and §6.2.2.3 path-segment normalization applies `remove_dot_segments`
+///   again to the decoded path, so a lone `%2E%2E` segment acts as `..` (it
+///   still cannot leave the package root). Part 2 §6.2.2.2 forbids *producers*
+///   from writing encoded unreserved characters, but a consumer applies the RFC
+///   equivalence.
+/// - §6.3.3(f): the result must be a valid part name. §6.2.2.2 is
+///   `1*( "/" isegment-nz )` with `isegment-nz = 1*ipchar` (RFC 3987 §2.2):
+///   `iunreserved / pct-encoded / sub-delims / ":" / "@"`, where non-ASCII
+///   `iunreserved` is `ucschar` (private-use `iprivate` is not allowed in a
+///   path). So a space, `\`, `[`, `]`, `"`, `<`, `>`, `^`, `` ` ``, `{`,
+///   `|`, `}` or a non-`ucschar` character is not a part name, nor is an empty
+///   segment, a segment ending in `.`, or a percent-encoded `/` or `\`. A
+///   malformed `%` triplet is not an IRI. In particular the Media Types
+///   stream `[Content_Types].xml` (a ZIP item, §7.3.7) is never a part name.
+///   A relative-path reference whose first segment contains `:` is not an IRI
+///   reference either (RFC 3986 §4.2). A query component is not part of the
+///   grammar. Each case yields `None`. A fragment identifies a location inside
+///   the resource and is removed before the part is named.
 /// - §7.3.4: the ZIP item name is the part name without its leading `/`, with
 ///   every non-ASCII character percent-encoded (as UTF-8, uppercase hex).
 ///
@@ -205,19 +215,94 @@ pub fn resolve_part_name(source_part: &str, target: &str) -> Option<String> {
         let directory_end = base.rfind('/').map_or(0, |index| index + 1);
         format!("{}{}", &base[..directory_end], reference)
     };
-    let path = remove_dot_segments(&normalize_percent_encoding(&merged)?);
-    let name = path.strip_prefix('/')?.to_owned();
-    if name.is_empty()
-        || name.split('/').any(|segment| {
-            segment.is_empty()
-                || segment.ends_with('.')
-                || segment.contains("%2F")
-                || segment.contains("%5C")
-        })
+    if !reference.starts_with('/')
+        && reference
+            .split('/')
+            .next()
+            .is_some_and(|first| first.contains(':'))
     {
         return None;
     }
+    // The reference itself must be an IRI reference: every character is an
+    // `ipchar`, a `/` separator or the `%` of a triplet (checked when
+    // normalized), including in segments that dot removal later drops.
+    if !reference.chars().all(|ch| {
+        if ch.is_ascii() {
+            u8::try_from(ch).is_ok_and(|byte| byte == b'/' || byte == b'%' || is_ipchar_ascii(byte))
+        } else {
+            is_ucschar(ch)
+        }
+    }) {
+        return None;
+    }
+    // RFC 3986 §5.2.4 on the reference as authored, then §6.2.2 normalization.
+    let resolved = remove_dot_segments(&merged);
+    let path = remove_dot_segments(&normalize_percent_encoding(&resolved)?);
+    let name = path.strip_prefix('/')?.to_owned();
+    if name.is_empty() || !name.split('/').all(is_part_name_segment) {
+        return None;
+    }
     Some(name)
+}
+
+/// One normalized part-name segment (see [`resolve_part_name`]): non-empty,
+/// only ASCII `ipchar` (non-ASCII is already percent-encoded), no trailing
+/// `.`, and no percent-encoded `/` or `\`.
+fn is_part_name_segment(segment: &str) -> bool {
+    let bytes = segment.as_bytes();
+    if bytes.is_empty() || segment.ends_with('.') {
+        return false;
+    }
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'%' {
+            let decoded = bytes
+                .get(index + 1)
+                .and_then(|high| hex_value(*high))
+                .zip(bytes.get(index + 2).and_then(|low| hex_value(*low)))
+                .map(|(high, low)| high * 16 + low);
+            match decoded {
+                Some(b'/' | b'\\') | None => return false,
+                Some(_) => index += 3,
+            }
+        } else if is_ipchar_ascii(byte) {
+            index += 1;
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
+/// ASCII `ipchar` other than `pct-encoded` (RFC 3987 §2.2): `iunreserved`,
+/// `sub-delims`, `:` and `@`.
+fn is_ipchar_ascii(byte: u8) -> bool {
+    is_unreserved_ascii(byte)
+        || matches!(
+            byte,
+            b'!' | b'$'
+                | b'&'
+                | b'\''
+                | b'('
+                | b')'
+                | b'*'
+                | b'+'
+                | b','
+                | b';'
+                | b'='
+                | b':'
+                | b'@'
+        )
+}
+
+/// RFC 3987 §2.2 `ucschar`.
+fn is_ucschar(ch: char) -> bool {
+    let code = u32::from(ch);
+    matches!(code, 0xA0..=0xD7FF | 0xF900..=0xFDCF | 0xFDF0..=0xFFEF)
+        || (0x10000..=0xEFFFD).contains(&code)
+            && (code & 0xFFFF) <= 0xFFFD
+            && !(0xE0000..=0xE0FFF).contains(&code)
 }
 
 /// ASCII unreserved characters of RFC 3986 §2.3.
@@ -580,6 +665,55 @@ mod tests {
                 Some("word/caf%C3%A9.xml"),
             ),
             ("word/document.xml", "%2E%2E/x.xml", Some("x.xml")),
+            // RFC 3986 §5.2.1: resolve (literal dot segments) before §6.2.2.
+            (
+                "word/document.xml",
+                "%2E%2E/../header.xml",
+                Some("word/header.xml"),
+            ),
+            (
+                "word/document.xml",
+                "a/%2e%2E/../b.xml",
+                Some("word/a/b.xml"),
+            ),
+            ("word/document.xml", "%2E/../x.xml", Some("word/x.xml")),
+            ("word/document.xml", "../%2E%2E/x.xml", Some("x.xml")),
+            (
+                "word/charts/chart1.xml",
+                "%2E%2E/../../x.xml",
+                Some("word/x.xml"),
+            ),
+            // RFC 3987 §2.2 isegment-nz grammar.
+            ("word/document.xml", "a b.xml", None),
+            // Invalid characters in a segment that dot removal would drop.
+            ("word/document.xml", "a b/../footnotes.xml", None),
+            ("word/document.xml", "x[1]/../footnotes.xml", None),
+            ("word/document.xml", "a\\b.xml", None),
+            ("word/document.xml", "a[b].xml", None),
+            ("word/document.xml", "a{b}.xml", None),
+            ("word/document.xml", "a|b.xml", None),
+            ("word/document.xml", "a\"b.xml", None),
+            ("word/document.xml", "a<b>.xml", None),
+            ("word/document.xml", "a^b.xml", None),
+            ("word/document.xml", "a`b.xml", None),
+            ("word/document.xml", "a\u{7f}b.xml", None),
+            ("word/document.xml", "a\u{e000}b.xml", None),
+            ("word/document.xml", "a\u{fffe}b.xml", None),
+            ("word/document.xml", "../[Content_Types].xml", None),
+            ("", "[Content_Types].xml", None),
+            ("word/document.xml", "/[Content_Types].xml", None),
+            ("word/document.xml", "1:x.xml", None),
+            ("word/document.xml", "./1:x.xml", Some("word/1:x.xml")),
+            (
+                "word/document.xml",
+                "a!$&'()*+,;=@~_-.x",
+                Some("word/a!$&'()*+,;=@~_-.x"),
+            ),
+            (
+                "word/document.xml",
+                "\u{1f600}.png",
+                Some("word/%F0%9F%98%80.png"),
+            ),
             ("word/document.xml", "a%2Fb.xml", None),
             ("word/document.xml", "a%5cb.xml", None),
             ("word/document.xml", "a%zzb.xml", None),
