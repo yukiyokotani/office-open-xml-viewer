@@ -13,6 +13,7 @@ crate-type = ["cdylib", "rlib"]
 fuzzing = []
 direct-ppt = ["dep:js-sys", "dep:serde_json", "dep:pptx-parser"]
 direct-xls = ["dep:js-sys", "dep:serde", "dep:serde_json"]
+direct-doc = ["dep:docx-model", "dep:serde", "dep:serde_json"]
 inspection = ["direct-ppt", "direct-xls"]
 
 [[example]]
@@ -42,12 +43,14 @@ pptx-model = { workspace = true }
 pptx-parser = { path = "../../pptx/parser", default-features = false, optional = true }
 ooxml-common = { workspace = true }
 xlsx-model = { workspace = true }
+docx-model = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 
 [dev-dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
 xlsx-parser = { path = "../../xlsx/parser" }
+docx-parser = { path = "../../docx/parser" }
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = ["-Oz"]

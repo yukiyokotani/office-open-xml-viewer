@@ -14,10 +14,11 @@ pptx-parser = { path = "../packages/pptx/parser" }
 xlsx-parser = { path = "../packages/xlsx/parser" }
 ooxml-common = { path = "../packages/ooxml-common" }
 zip = { version = "2", default-features = false, features = ["deflate-miniz"] }
-# The direct features build the native drivers of the XLS and PPT direct
+# The direct features build the native drivers of the DOC, XLS and PPT direct
 # sources (`legacy_office_converter::fuzzing`).
 legacy-office-converter = { path = "../packages/legacy-converter/parser", features = [
     "fuzzing",
+    "direct-doc",
     "direct-xls",
     "direct-ppt",
 ] }
@@ -96,6 +97,13 @@ bench = false
 [[bin]]
 name = "fuzz_chart_part"
 path = "fuzz_targets/fuzz_chart_part.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_legacy_direct_doc"
+path = "fuzz_targets/fuzz_legacy_direct_doc.rs"
 test = false
 doc = false
 bench = false

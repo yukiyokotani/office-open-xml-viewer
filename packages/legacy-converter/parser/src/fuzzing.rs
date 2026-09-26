@@ -7,12 +7,18 @@
 //! `wrapped_*` place arbitrary bytes into the streams of a root-linked
 //! compound file so the format readers are reached behind the container.
 
-#[cfg(any(feature = "direct-xls", feature = "direct-ppt"))]
+#[cfg(any(feature = "direct-doc", feature = "direct-xls", feature = "direct-ppt"))]
 use crate::cfb::{test_support::build_scoped_cfb, CompoundFile};
 
 /// A per-unit credit large enough for any unit the budgets admit.
-#[cfg(feature = "direct-ppt")]
+#[cfg(any(feature = "direct-doc", feature = "direct-ppt"))]
 const BYTE_CREDIT: usize = 256 * 1024 * 1024;
+
+/// `data` as the WordDocument and table streams of a root-linked DOC.
+#[cfg(feature = "direct-doc")]
+pub fn wrapped_doc(data: &[u8]) -> Vec<u8> {
+    build_scoped_cfb(&[("WordDocument", data.to_vec()), ("0Table", data.to_vec())])
+}
 
 /// `data` as the Workbook stream of a root-linked XLS.
 #[cfg(feature = "direct-xls")]
@@ -27,6 +33,47 @@ pub fn wrapped_ppt(data: &[u8]) -> Vec<u8> {
         ("PowerPoint Document", data.to_vec()),
         ("Current User", data.to_vec()),
     ])
+}
+
+/// Direct DOC projection and its document cursor.
+#[cfg(feature = "direct-doc")]
+pub fn direct_doc(data: &[u8]) {
+    use crate::doc::direct_cursor::DirectCursor;
+    let Ok(cfb) = CompoundFile::open(data) else {
+        return;
+    };
+    let Ok(result) = crate::doc::direct_model(&cfb, 64 * 1024 * 1024) else {
+        return;
+    };
+    let Ok(mut cursor) = DirectCursor::new(result) else {
+        return;
+    };
+    let _ = (
+        cursor.revision_markup_in_print(),
+        cursor.revision_markup_on_screen(),
+        cursor.has_revision_marks(),
+    );
+    if cursor.open_document_cursor(1, 1).is_err() {
+        return;
+    }
+    for sequence in 0u32.. {
+        if cursor
+            .pull_document_chunk(sequence, 1, 1, BYTE_CREDIT)
+            .is_err()
+        {
+            break;
+        }
+        let done = cursor.document_chunk_done().unwrap_or(true);
+        if cursor.acknowledge_document_chunk(sequence, 1, 1).is_err() || done {
+            break;
+        }
+    }
+    for index in 0..4 {
+        let key = format!("legacy-doc/image/{index}");
+        let _ = cursor.resource_mime_type(&key);
+        let _ = cursor.extract_image(&key);
+    }
+    cursor.close_document_session();
 }
 
 /// Direct XLS session: host layout decision, bootstrap and every worksheet.

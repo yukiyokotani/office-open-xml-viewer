@@ -240,12 +240,22 @@ pub(crate) struct Decoded {
 }
 
 /// Decoded-path accessors for the direct-model projections.
-#[cfg(any(test, feature = "direct-ppt", feature = "direct-xls"))]
+#[cfg(any(
+    test,
+    feature = "direct-ppt",
+    feature = "direct-doc",
+    feature = "direct-xls"
+))]
 pub(crate) struct DecodedPath<'a> {
     path: &'a Path,
 }
 
-#[cfg(any(test, feature = "direct-ppt", feature = "direct-xls"))]
+#[cfg(any(
+    test,
+    feature = "direct-ppt",
+    feature = "direct-doc",
+    feature = "direct-xls"
+))]
 impl Decoded {
     pub(crate) fn width(&self) -> i64 {
         self.width
@@ -260,7 +270,12 @@ impl Decoded {
     }
 }
 
-#[cfg(any(test, feature = "direct-ppt", feature = "direct-xls"))]
+#[cfg(any(
+    test,
+    feature = "direct-ppt",
+    feature = "direct-doc",
+    feature = "direct-xls"
+))]
 impl DecodedPath<'_> {
     #[cfg(any(feature = "direct-ppt", feature = "direct-xls"))]
     pub(crate) fn fill(&self) -> bool {
@@ -363,6 +378,20 @@ fn array(bytes: &[u8]) -> Result<(usize, usize, &[u8]), String> {
     }
     Ok((n, size, &bytes[6..]))
 }
+impl Decoded {
+    /// The (authored fill, stroke) flags shared by every path, if they agree.
+    /// A host whose application fills open paths (DrawingML closes them
+    /// implicitly for fill) uses the authored fill, not the open-path veto.
+    #[cfg(feature = "direct-doc")]
+    pub fn uniform_authored_paint(&self) -> Option<(bool, bool)> {
+        let first = self.paths.first()?;
+        self.paths
+            .iter()
+            .all(|p| p.authored_fill == first.authored_fill && p.stroke == first.stroke)
+            .then_some((first.authored_fill, first.stroke))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

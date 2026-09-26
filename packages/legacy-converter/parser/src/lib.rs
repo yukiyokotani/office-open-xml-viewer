@@ -2,25 +2,31 @@
 //!
 //! Each optional feature builds one experimental direct source that projects a
 //! documented passive subset of an untrusted CFB container straight into the
-//! shared renderer models: `direct-xls` (BIFF8 into the XLSX model) and
-//! `direct-ppt` (PowerPoint 97-2003 into the PPTX model). No path executes
-//! document code or creates an OOXML package; unsupported versions and
-//! encryption fail closed.
+//! shared renderer models: `direct-doc` (Word 97-2003 into the DOCX model),
+//! `direct-xls` (BIFF8 into the XLSX model) and `direct-ppt` (PowerPoint
+//! 97-2003 into the PPTX model). No path executes document code or creates an
+//! OOXML package; unsupported versions and encryption fail closed.
 
 #[cfg(all(
     target_arch = "wasm32",
-    not(any(feature = "direct-xls", feature = "direct-ppt"))
+    not(any(feature = "direct-doc", feature = "direct-xls", feature = "direct-ppt"))
 ))]
 compile_error!(
     "legacy-office-converter builds no WASM source without one of the \
-     `direct-xls` or `direct-ppt` features"
+     `direct-doc`, `direct-xls` or `direct-ppt` features"
 );
 
-#[cfg(any(feature = "direct-xls", feature = "direct-ppt"))]
+#[cfg(any(feature = "direct-doc", feature = "direct-xls", feature = "direct-ppt"))]
 mod cfb;
+#[cfg(feature = "direct-doc")]
+mod doc;
+#[cfg(feature = "direct-doc")]
+mod doc_wasm;
 #[cfg(feature = "fuzzing")]
 pub mod fuzzing;
-#[cfg(any(feature = "direct-xls", feature = "direct-ppt"))]
+#[cfg(feature = "direct-doc")]
+mod lcid;
+#[cfg(any(feature = "direct-doc", feature = "direct-xls", feature = "direct-ppt"))]
 mod officeart;
 #[cfg(any(feature = "direct-ppt", feature = "direct-xls"))]
 mod opc_part;

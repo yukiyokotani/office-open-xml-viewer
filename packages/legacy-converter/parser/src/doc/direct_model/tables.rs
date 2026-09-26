@@ -1,0 +1,1136 @@
+//! Direct projection for tables planned by the shared MS-DOC table grammar.
+
+use super::{payload, ModelBudget};
+use crate::doc::{
+    table::{cell_text_flow, Color, PreferredIndent, PreferredWidth, Properties},
+    table_structure::{Assembler, Event, LogicalTable, Payload, PlannedRow},
+    unsupported,
+};
+use docx_model::{
+    CellBorders, CellElement, DocParagraph, DocTable, DocTableCell, DocTableRow, TableBorders,
+    TableCellLayoutAcquisitionWire, TableGridAcquisitionWire, TableGridColumnAcquisitionWire,
+    TableLayoutAcquisitionWire, TableLayoutKindAcquisitionWire, TableMarginAcquisitionWire,
+    TablePropertyExceptionAcquisitionWire, TableRowHeightAcquisitionWire,
+    TableRowLayoutAcquisitionWire, TableWidthAcquisitionWire,
+};
+
+pub(super) enum Block {
+    Paragraph(Box<DocParagraph>),
+    Table(Box<DocTable>),
+    PageBreak {
+        same_paragraph_as_previous: Option<bool>,
+    },
+    ColumnBreak,
+}
+
+#[derive(Default)]
+pub(super) struct Blocks(pub(super) Vec<Block>);
+
+impl Payload for Blocks {
+    fn append<A: FnMut(usize) -> Result<(), String>>(
+        &mut self,
+        mut other: Self,
+        admit: &mut A,
+    ) -> Result<(), String> {
+        reserve(&mut self.0, other.0.len(), admit)?;
+        self.0.append(&mut other.0);
+        Ok(())
+    }
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+pub(super) struct Writer<'a> {
+    structure: Assembler<Blocks>,
+    sequence: &'a mut usize,
+    positioned_tables: bool,
+}
+
+impl<'a> Writer<'a> {
+    /// A writer that rejects absolutely positioned tables.
+    #[cfg(test)]
+    pub(super) fn new(sequence: &'a mut usize) -> Self {
+        Self::with_positioned_tables(sequence, false)
+    }
+
+    /// `positioned_tables` admits [MS-DOC] 2.6.3 table positioning as a
+    /// floating table. Only the main document story enables it: Word ignores
+    /// OOXML table positioning in notes, comments and text boxes
+    /// ([MS-OI29500] 2.1.162), and DOC header/footer or note positioning has
+    /// not been observed, so those stories keep positioned tables gated.
+    pub(super) fn with_positioned_tables(sequence: &'a mut usize, positioned_tables: bool) -> Self {
+        Self {
+            structure: Assembler::new(),
+            sequence,
+            positioned_tables,
+        }
+    }
+
+    /// The document-wide table identity counter, for a nested story (such as
+    /// a textbox) projected while this story's tables are still open.
+    pub(super) fn sequence(&mut self) -> &mut usize {
+        self.sequence
+    }
+
+    pub(super) fn push(
+        &mut self,
+        props: Properties,
+        mark: char,
+        paragraph: Blocks,
+        budget: &mut ModelBudget,
+    ) -> Result<(), String> {
+        let remaining = std::cell::Cell::new(budget.remaining_bytes);
+        let sequence = &mut *self.sequence;
+        let positioned_tables = self.positioned_tables;
+        self.structure.push(
+            props,
+            mark,
+            paragraph,
+            |Event(plans)| project_tables(plans, sequence, positioned_tables, &remaining),
+            &mut |bytes| charge_cell(&remaining, bytes),
+        )?;
+        budget.remaining_bytes = remaining.get();
+        Ok(())
+    }
+
+    pub(super) fn finish(self, budget: &mut ModelBudget) -> Result<Blocks, String> {
+        let remaining = std::cell::Cell::new(budget.remaining_bytes);
+        let positioned_tables = self.positioned_tables;
+        let blocks = self.structure.finish(
+            |Event(plans)| project_tables(plans, self.sequence, positioned_tables, &remaining),
+            &mut |bytes| charge_cell(&remaining, bytes),
+        )?;
+        budget.remaining_bytes = remaining.get();
+        Ok(blocks)
+    }
+}
+
+fn project_tables(
+    plans: Vec<LogicalTable<Blocks>>,
+    sequence: &mut usize,
+    positioned_tables: bool,
+    remaining: &std::cell::Cell<usize>,
+) -> Result<Blocks, String> {
+    let mut output = Blocks::default();
+    for plan in plans {
+        let table = project_table(plan, *sequence, positioned_tables, remaining)?;
+        *sequence = sequence.checked_add(1).ok_or("OUTPUT_TOO_LARGE")?;
+        reserve(&mut output.0, 1, &mut |n| charge_cell(remaining, n))?;
+        output.0.push(Block::Table(Box::new(table)));
+    }
+    Ok(output)
+}
+
+fn project_table(
+    plan: LogicalTable<Blocks>,
+    sequence: usize,
+    positioned_tables: bool,
+    remaining: &std::cell::Cell<usize>,
+) -> Result<DocTable, String> {
+    let first = &plan.rows[0].source;
+    if first.shading.is_some() {
+        return Err(unsupported(
+            "direct DOC model cannot retain table-level shading",
+        ));
+    }
+    let (tblp_pr, overlap) = first.position.direct();
+    // [MS-DOC] 2.6.3/2.7.13: nondefault position or wrapping properties make
+    // the table absolutely positioned; the shared model lays such a table
+    // out of the ordinary flow (ECMA-376 Part 1 17.4.57).
+    let ordinary_flow = tblp_pr.is_none();
+    if !ordinary_flow {
+        if !positioned_tables {
+            return Err(unsupported(
+                "direct DOC model cannot position a table outside the main story",
+            ));
+        }
+        first.position.check_direct_floating()?;
+    }
+    let (alignment, physical) = first.alignment;
+    let first_bidi = first.bidi;
+    let first_autofit = first.autofit;
+    let margins = first.margins;
+    let table_preferred = first.preferred_width;
+    let alignment = if physical && first_bidi {
+        2 - alignment
+    } else {
+        alignment
+    };
+    let row_count = plan.rows.len();
+    let mut col_widths = Vec::new();
+    reserve(&mut col_widths, plan.grid.len() - 1, &mut |n| {
+        charge_cell(remaining, n)
+    })?;
+    col_widths.extend(
+        plan.grid
+            .windows(2)
+            .map(|edge| f64::from(edge[1] - edge[0]) / 20.0),
+    );
+    let mut rows = Vec::new();
+    reserve(&mut rows, plan.rows.len(), &mut |n| {
+        charge_cell(remaining, n)
+    })?;
+    for (row_index, planned) in plan.rows.into_iter().enumerate() {
+        if planned.source.shading.is_some() {
+            return Err(unsupported(
+                "direct DOC model cannot retain row table-property shading",
+            ));
+        }
+        check_row_preferences(&planned)?;
+        let mut cells = Vec::new();
+        reserve(&mut cells, planned.cells.len(), &mut |n| {
+            charge_cell(remaining, n)
+        })?;
+        for cell in planned.cells {
+            let source = &cell.source;
+            let facts = source.shading.as_ref().map(|s| s.direct_facts());
+            let background = match facts {
+                None => None,
+                Some(f) if f.pattern == "clear" => {
+                    source.shading.as_ref().and_then(|s| s.direct_background())
+                }
+                Some(f) if f.pattern == "nil" => None,
+                Some(f) if f.pattern == "solid" => match f.foreground {
+                    Color::Rgb([r, g, b]) => Some(format!("{r:02x}{g:02x}{b:02x}")),
+                    Color::Auto => {
+                        return Err(unsupported(
+                            "direct DOC model cannot resolve automatic solid cell shading",
+                        ));
+                    }
+                },
+                Some(_) => {
+                    return Err(unsupported(
+                        "direct DOC model cannot retain patterned cell shading",
+                    ));
+                }
+            };
+            if source.no_wrap && !matches!(source.preferred, Some(PreferredWidth::Dxa(_))) {
+                // [MS-DOC] 2.9.28: fNoWrap is ignored only when the cell's
+                // preferred width is ftsDxa. Otherwise it changes autofit
+                // wrapping, which the shared cell model does not represent.
+                return Err(unsupported(
+                    "direct DOC model cannot retain no-wrap cells without an absolute preferred width",
+                ));
+            }
+            if source.flags & ((1 << 12) | (1 << 14)) != 0 {
+                return Err(unsupported(
+                    "direct DOC model cannot retain cell fit/hide facts",
+                ));
+            }
+            // [MS-DOC] 2.9.305 diagonal sides 0x10 (top left to bottom right)
+            // and 0x20 (top right to bottom left) are ECMA-376 §17.4.73 tl2br
+            // and §17.4.79 tr2bl. A cleared (none/Nil) diagonal is absence.
+            let diagonal = |side: usize| {
+                source.borders[side]
+                    .as_ref()
+                    .filter(|border| !border.is_cleared())
+                    .map(|border| border.direct_spec())
+            };
+            let (tl2br, tr2bl) = (diagonal(4), diagonal(5));
+            if (tl2br.is_some() || tr2bl.is_some()) && (cell.vertical != 0 || source.flags & 3 != 0)
+            {
+                // Each merged DOC cell carries its own TC; no control shows
+                // which member's diagonal Word draws across a merged box.
+                return Err(unsupported(
+                    "direct DOC model cannot place diagonals on merged cells",
+                ));
+            }
+            let align = (source.flags >> 7) & 3;
+            if align > 2 {
+                return Err(unsupported("invalid Word vertical cell alignment"));
+            }
+            // [MS-DOC] 2.9.317 TCGRF textFlow (from TC80 or sprmTTextFlow)
+            // is a 2.9.323 TextFlow; ECMA-376 Part 1 §17.18.93 names the same
+            // arrangements (observed in a Word DOC/DOCX pair: 5 = tbRlV).
+            let text_direction = match cell_text_flow(source.flags) {
+                0 => None,
+                1 => Some("tbRl"),
+                3 => Some("btLr"),
+                5 => Some("tbRlV"),
+                // The shared renderer lays lrTbV cells out without rotating
+                // their East Asian glyphs, so projecting it would misdisplay.
+                4 => {
+                    return Err(unsupported(
+                        "direct DOC model cannot display grpfTFlrtbv cell text flow",
+                    ));
+                }
+                _ => return Err(unsupported("invalid Word cell text flow")),
+            };
+            let mut content = Vec::new();
+            reserve(&mut content, cell.content.0.len().max(1), &mut |n| {
+                charge_cell(remaining, n)
+            })?;
+            if cell.vertical == 1 {
+                charge_cell(remaining, std::mem::size_of::<DocParagraph>())?;
+                content.push(CellElement::Paragraph(Box::default()));
+            } else {
+                for block in cell.content.0 {
+                    content.push(match block {
+                        Block::Paragraph(value) => CellElement::Paragraph(value),
+                        Block::Table(value) => CellElement::Table(value),
+                        Block::PageBreak { .. } | Block::ColumnBreak => {
+                            return Err(unsupported("table cell promoted a paragraph break"))
+                        }
+                    });
+                }
+            }
+            if text_direction.is_some()
+                && content
+                    .iter()
+                    .any(|element| matches!(element, CellElement::Table(_)))
+            {
+                // The shared renderer keeps a rotated cell holding a nested
+                // table horizontal; projecting it would misdisplay.
+                return Err(unsupported(
+                    "direct DOC model cannot display rotated cells containing tables",
+                ));
+            }
+            let fallback = |side: usize| match side {
+                0 => Some(if row_index == 0 { 0 } else { 4 }),
+                1 => Some(if cell.source_index == 0 { 1 } else { 5 }),
+                2 => Some(if row_index + 1 == row_count { 2 } else { 4 }),
+                3 => Some(if cell.source_end == planned.source_cell_count {
+                    3
+                } else {
+                    5
+                }),
+                _ => None,
+            };
+            let border = |side: usize| {
+                source.borders[side]
+                    .as_ref()
+                    .or_else(|| fallback(side).and_then(|s| planned.source.borders[s].as_ref()))
+                    .map(|b| b.direct_spec())
+            };
+            let margins = std::array::from_fn::<_, 4, _>(|s| {
+                source.margins[s].unwrap_or(planned.source.margins[s])
+            });
+            cells.push(DocTableCell {
+                content,
+                col_span: cell.grid_span as u32,
+                v_merge: match cell.vertical {
+                    1 => Some(false),
+                    3 => Some(true),
+                    _ => None,
+                },
+                borders: CellBorders {
+                    top: border(0),
+                    left: border(1),
+                    bottom: border(2),
+                    right: border(3),
+                    inside_h: None,
+                    inside_v: None,
+                    tl2br,
+                    tr2bl,
+                },
+                background,
+                v_align: ["top", "center", "bottom"][align as usize].into(),
+                width_pt: source.preferred.and_then(|w| match w {
+                    PreferredWidth::Dxa(value) => Some(f64::from(value) / 20.0),
+                    _ => None,
+                }),
+                width_pct: source.preferred.and_then(|w| match w {
+                    PreferredWidth::Percent(value) => Some(f64::from(value)),
+                    _ => None,
+                }),
+                margin_top: Some(f64::from(margins[0]) / 20.0),
+                margin_left: Some(f64::from(margins[1]) / 20.0),
+                margin_bottom: Some(f64::from(margins[2]) / 20.0),
+                margin_right: Some(f64::from(margins[3]) / 20.0),
+                table_cell_layout: TableCellLayoutAcquisitionWire {
+                    preferred_width: source.preferred.map(width),
+                    margins: Some(margin_wire(margins)),
+                },
+                text_direction: text_direction.map(str::to_owned),
+                hide_mark: source.hide_mark,
+            });
+        }
+        let height = planned.source.height;
+        rows.push(DocTableRow {
+            cells,
+            grid_before: planned.grid_before as u32,
+            grid_after: planned.grid_after as u32,
+            row_height: (height != 0).then(|| f64::from(height.abs()) / 20.0),
+            row_height_rule: if height < 0 {
+                "exact"
+            } else if height > 0 {
+                "atLeast"
+            } else {
+                "auto"
+            }
+            .into(),
+            is_header: planned.is_header,
+            cant_split: planned.source.cant_split,
+            table_row_layout: TableRowLayoutAcquisitionWire {
+                height: (height != 0).then(|| TableRowHeightAcquisitionWire {
+                    value: Some(height.abs().to_string()),
+                    rule: if height < 0 { "exact" } else { "atLeast" }.into(),
+                    rule_authored: true,
+                }),
+                before_width: (planned.grid_before != 0)
+                    .then(|| physical_width(planned.width_before)),
+                after_width: (planned.grid_after != 0).then(|| physical_width(planned.width_after)),
+                justification: None,
+                cell_spacing: None,
+                style_cell_spacing: None,
+                style_cell_margins: None,
+                exception: (planned.source.preferred_width != table_preferred).then(|| {
+                    TablePropertyExceptionAcquisitionWire {
+                        // None must actively clear an inherited table preference;
+                        // absence in tblPrEx would inherit it instead.
+                        preferred_width: Some(width(
+                            planned
+                                .source
+                                .preferred_width
+                                .unwrap_or(PreferredWidth::Auto),
+                        )),
+                        ..Default::default()
+                    }
+                }),
+            },
+        });
+    }
+    let mut grid_columns = Vec::new();
+    reserve(&mut grid_columns, plan.grid.len() - 1, &mut |n| {
+        charge_cell(remaining, n)
+    })?;
+    grid_columns.extend(
+        plan.grid
+            .windows(2)
+            .map(|e| TableGridColumnAcquisitionWire {
+                width: Some((e[1] - e[0]).to_string()),
+            }),
+    );
+    let table = DocTable {
+        col_widths,
+        rows,
+        borders: TableBorders::default(),
+        cell_margin_top: f64::from(margins[0]) / 20.0,
+        cell_margin_left: f64::from(margins[1]) / 20.0,
+        cell_margin_bottom: f64::from(margins[2]) / 20.0,
+        cell_margin_right: f64::from(margins[3]) / 20.0,
+        jc: ["left", "center", "right"][alignment as usize].into(),
+        tbl_ind: Some(f64::from(plan.origin) / 20.0),
+        layout: Some(if first_autofit { "autofit" } else { "fixed" }.into()),
+        width_pt: table_preferred.and_then(|w| match w {
+            PreferredWidth::Dxa(value) if value > 0 => Some(f64::from(value) / 20.0),
+            _ => None,
+        }),
+        width_pct: table_preferred.and_then(|w| match w {
+            PreferredWidth::Percent(value) if value > 0 => Some(f64::from(value)),
+            _ => None,
+        }),
+        bidi_visual: Some(first_bidi),
+        tblp_pr,
+        overlap,
+        table_layout: TableLayoutAcquisitionWire {
+            effective_style_id: None,
+            ordinary_flow,
+            logical_sequence_id: format!("legacy-doc/table/{sequence}"),
+            logical_row_offset: 0,
+            logical_total_rows: row_count,
+            grid: TableGridAcquisitionWire {
+                authored: true,
+                columns: grid_columns,
+                required_column_count: (plan.grid.len() - 1) as u32,
+            },
+            preferred_width: table_preferred.map(width),
+            layout: Some(TableLayoutKindAcquisitionWire {
+                kind: Some(if first_autofit { "autofit" } else { "fixed" }.into()),
+            }),
+            cell_spacing: None,
+            cell_margins: Some(margin_wire(margins)),
+        },
+    };
+    charge_cell(
+        remaining,
+        std::mem::size_of::<DocTable>() + payload::table(&table)?,
+    )?;
+    Ok(table)
+}
+
+/// Validate the row preferences that the projection represents through the
+/// physical row geometry instead of a separate model field.
+fn check_row_preferences(planned: &PlannedRow<Blocks>) -> Result<(), String> {
+    let source = &planned.source;
+    if source.bidi
+        && source.preferred_indent.is_some()
+        && !matches!(
+            source.preferred_indent,
+            Some(PreferredIndent::Dxa(value)) if i32::from(value) == source.origin()
+        )
+    {
+        // The preferred-indent evidence (see table::PreferredIndent) covers
+        // left-to-right tables only. The effective value includes the one
+        // inherited from the selected table style (story::preferences). A
+        // preference equal to the projected origin gives the same placement
+        // under either reading.
+        return Err(unsupported(
+            "direct DOC model cannot place a right-to-left table with a preferred indent",
+        ));
+    }
+    // [MS-DOC] 2.6.3 sprmTWidthBefore/sprmTWidthAfter are the preferred widths
+    // of the same leading/trailing row parts whose physical widths the grid
+    // projection emits as wBefore/wAfter. Admit them only where both agree, so
+    // the projection is the same whichever one Word lays out from. ftsNil is
+    // the documented absence of a preference.
+    for (preference, grid, physical) in [
+        (
+            source.preferred_before,
+            planned.grid_before,
+            planned.width_before,
+        ),
+        (
+            source.preferred_after,
+            planned.grid_after,
+            planned.width_after,
+        ),
+    ] {
+        match preference {
+            None | Some(None) => {}
+            Some(Some(PreferredWidth::Dxa(value)))
+                if i32::from(value) == if grid == 0 { 0 } else { physical } => {}
+            Some(Some(_)) => {
+                return Err(unsupported(
+                    "direct DOC model cannot reconcile a preferred row part width with its grid",
+                ))
+            }
+        }
+    }
+    Ok(())
+}
+
+fn physical_width(value: i32) -> TableWidthAcquisitionWire {
+    TableWidthAcquisitionWire {
+        kind: Some("dxa".into()),
+        value: Some(value.to_string()),
+    }
+}
+fn width(value: PreferredWidth) -> TableWidthAcquisitionWire {
+    TableWidthAcquisitionWire {
+        kind: Some(value.kind().into()),
+        value: Some(value.value().to_string()),
+    }
+}
+fn margin_wire(v: [u16; 4]) -> TableMarginAcquisitionWire {
+    TableMarginAcquisitionWire {
+        top: Some(physical_width(v[0].into())),
+        left: Some(physical_width(v[1].into())),
+        bottom: Some(physical_width(v[2].into())),
+        right: Some(physical_width(v[3].into())),
+        start: None,
+        end: None,
+    }
+}
+fn charge_cell(remaining: &std::cell::Cell<usize>, n: usize) -> Result<(), String> {
+    remaining.set(remaining.get().checked_sub(n).ok_or("OUTPUT_TOO_LARGE")?);
+    Ok(())
+}
+fn reserve<T, A: FnMut(usize) -> Result<(), String>>(
+    v: &mut Vec<T>,
+    add: usize,
+    admit: &mut A,
+) -> Result<(), String> {
+    let target = v.len().checked_add(add).ok_or("OUTPUT_TOO_LARGE")?;
+    if target > v.capacity() {
+        let old = v.capacity();
+        let growth = target - old;
+        admit(
+            growth
+                .checked_mul(std::mem::size_of::<T>())
+                .ok_or("OUTPUT_TOO_LARGE")?,
+        )?;
+        v.try_reserve_exact(add)
+            .map_err(|_| "OUTPUT_TOO_LARGE".to_string())?;
+        admit(
+            v.capacity()
+                .saturating_sub(target)
+                .checked_mul(std::mem::size_of::<T>())
+                .ok_or("OUTPUT_TOO_LARGE")?,
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn cell(depth: u32) -> Properties {
+        let mut p = Properties::default();
+        p.apply(0x6649, &depth.to_le_bytes()).unwrap();
+        p
+    }
+    fn row(depth: u32, widths: &[u16]) -> Properties {
+        let mut p = cell(depth);
+        p.row_end = true;
+        p.inner_row = true;
+        for (i, w) in widths.iter().enumerate() {
+            let [a, b] = w.to_le_bytes();
+            p.row.apply(0x7621, &[i as u8, 1, a, b]).unwrap();
+        }
+        p
+    }
+    fn paragraph(text: &str) -> Blocks {
+        let mut p = DocParagraph::default();
+        p.runs
+            .push(docx_model::DocRun::Text(Box::new(docx_model::TextRun {
+                text: text.into(),
+                ..Default::default()
+            })));
+        Blocks(vec![Block::Paragraph(Box::new(p))])
+    }
+    #[test]
+    fn plain_table_preserves_zero_grid_slots_merges_and_cell_break_runs() {
+        let mut sequence = 0;
+        let mut writer = Writer::new(&mut sequence);
+        let mut budget = ModelBudget::new(1_000_000);
+        writer
+            .push(cell(1), '\u{7}', paragraph("a"), &mut budget)
+            .unwrap();
+        writer
+            .push(cell(1), '\u{7}', paragraph("b"), &mut budget)
+            .unwrap();
+        writer
+            .push(row(1, &[0, 1000]), '\u{7}', Blocks::default(), &mut budget)
+            .unwrap();
+        let body = writer.finish(&mut budget).unwrap();
+        let Block::Table(table) = &body.0[0] else {
+            panic!()
+        };
+        assert_eq!(table.col_widths, vec![0.0, 50.0]);
+        assert_eq!(table.rows[0].cells.len(), 2);
+        assert_eq!(table.table_layout.logical_row_offset, 0);
+        assert_eq!(table.table_layout.logical_total_rows, 1);
+        assert!(table.table_layout.ordinary_flow);
+    }
+    #[test]
+    fn tcgrf_text_flow_projects_and_rotated_cells_with_nested_tables_fail_closed() {
+        // [MS-DOC] 2.9.317 TCGRF textFlow authored by a TC80 (grpfTFbtlr).
+        let mut end = row(1, &[1000]);
+        end.row.cells[0].flags |= 3 << 2;
+        let mut sequence = 0;
+        let mut writer = Writer::new(&mut sequence);
+        let mut budget = ModelBudget::new(1_000_000);
+        writer
+            .push(cell(1), '\u{7}', paragraph("a"), &mut budget)
+            .unwrap();
+        writer
+            .push(end, '\u{7}', Blocks::default(), &mut budget)
+            .unwrap();
+        let body = writer.finish(&mut budget).unwrap();
+        let Block::Table(table) = &body.0[0] else {
+            panic!()
+        };
+        assert_eq!(
+            table.rows[0].cells[0].text_direction.as_deref(),
+            Some("btLr")
+        );
+
+        // The same flow on a cell holding a nested table is rejected.
+        let mut end = row(1, &[1000]);
+        end.row.cells[0].flags |= 1 << 2;
+        let mut sequence = 0;
+        let mut writer = Writer::new(&mut sequence);
+        let mut budget = ModelBudget::new(1_000_000);
+        // Nested cells and rows end at paragraph marks carrying
+        // fInnerTableCell / fInnerTtp ([MS-DOC] 2.4.3).
+        let mut inner_cell = cell(2);
+        inner_cell.inner_cell = true;
+        writer
+            .push(inner_cell, '\r', paragraph("inner"), &mut budget)
+            .unwrap();
+        writer
+            .push(row(2, &[500]), '\r', Blocks::default(), &mut budget)
+            .unwrap();
+        writer
+            .push(cell(1), '\u{7}', paragraph("a"), &mut budget)
+            .unwrap();
+        let error = writer
+            .push(end, '\u{7}', Blocks::default(), &mut budget)
+            .and_then(|_| writer.finish(&mut budget).map(|_| ()))
+            .err()
+            .unwrap();
+        assert!(error.contains("rotated cells containing tables"), "{error}");
+    }
+    #[test]
+    fn cell_diagonals_project_and_merged_cell_diagonals_fail_closed() {
+        let diagonal =
+            || Some(crate::doc::border::Border::read(&[0, 0, 0, 0xff, 4, 1, 0, 0], false).unwrap());
+        let mut end = row(1, &[1000]);
+        end.row.cells[0].borders[5] = diagonal();
+        let mut sequence = 0;
+        let mut writer = Writer::new(&mut sequence);
+        let mut budget = ModelBudget::new(1_000_000);
+        writer
+            .push(cell(1), '\u{7}', paragraph("a"), &mut budget)
+            .unwrap();
+        writer
+            .push(end, '\u{7}', Blocks::default(), &mut budget)
+            .unwrap();
+        let body = writer.finish(&mut budget).unwrap();
+        let Block::Table(table) = &body.0[0] else {
+            panic!()
+        };
+        let borders = &table.rows[0].cells[0].borders;
+        assert!(borders.tl2br.is_none());
+        assert_eq!(borders.tr2bl.as_ref().unwrap().style, "single");
+
+        // The primary of a horizontal merge (TCGRF horzMerge 2) is rejected.
+        let mut end = row(1, &[500, 500]);
+        end.row.cells[0].flags |= 2;
+        end.row.cells[1].flags |= 1;
+        end.row.cells[0].borders[4] = diagonal();
+        let mut sequence = 0;
+        let mut writer = Writer::new(&mut sequence);
+        let mut budget = ModelBudget::new(1_000_000);
+        writer
+            .push(cell(1), '\u{7}', paragraph("a"), &mut budget)
+            .unwrap();
+        writer
+            .push(cell(1), '\u{7}', paragraph("b"), &mut budget)
+            .unwrap();
+        let error = writer
+            .push(end, '\u{7}', Blocks::default(), &mut budget)
+            .and_then(|_| writer.finish(&mut budget).map(|_| ()))
+            .err()
+            .unwrap();
+        assert!(error.contains("diagonals on merged cells"), "{error}");
+    }
+    #[test]
+    fn no_overlap_alone_remains_ordinary_but_positioned_table_fails_closed() {
+        let mut end = row(1, &[1000]);
+        end.row.apply(0x3465, &[1]).unwrap();
+        let mut sequence = 0;
+        let mut writer = Writer::new(&mut sequence);
+        let mut budget = ModelBudget::new(1_000_000);
+        writer
+            .push(cell(1), '\u{7}', paragraph("a"), &mut budget)
+            .unwrap();
+        writer
+            .push(end, '\u{7}', Blocks::default(), &mut budget)
+            .unwrap();
+        let body = writer.finish(&mut budget).unwrap();
+        let Block::Table(table) = &body.0[0] else {
+            panic!()
+        };
+        assert_eq!(table.overlap.as_deref(), Some("never"));
+        assert!(table.table_layout.ordinary_flow);
+
+        let mut end = row(1, &[1000]);
+        end.row.apply(0x940e, &721i16.to_le_bytes()).unwrap();
+        let mut sequence = 0;
+        let mut writer = Writer::new(&mut sequence);
+        let mut budget = ModelBudget::new(1_000_000);
+        writer
+            .push(cell(1), '\u{7}', paragraph("a"), &mut budget)
+            .unwrap();
+        writer
+            .push(end, '\u{7}', Blocks::default(), &mut budget)
+            .unwrap();
+        assert!(writer
+            .finish(&mut budget)
+            .err()
+            .unwrap()
+            .contains("outside the main story"));
+    }
+
+    fn positioned(sprms: &[(u16, &[u8])]) -> Result<DocTable, String> {
+        let mut end = row(1, &[1000]);
+        for (code, operand) in sprms {
+            end.row.apply(*code, operand).unwrap();
+        }
+        let mut sequence = 0;
+        let mut writer = Writer::with_positioned_tables(&mut sequence, true);
+        let mut budget = ModelBudget::new(1_000_000);
+        writer.push(cell(1), '\u{7}', paragraph("a"), &mut budget)?;
+        writer.push(end, '\u{7}', Blocks::default(), &mut budget)?;
+        let mut body = writer.finish(&mut budget)?;
+        let Some(Block::Table(table)) = body.0.pop() else {
+            panic!("table")
+        };
+        Ok(*table)
+    }
+
+    #[test]
+    fn main_story_positioned_table_leaves_the_ordinary_flow() {
+        // Paragraph-relative vertical and margin-relative horizontal anchors,
+        // a centered X and a 219-twip Y offset (YAS_plusOne 220).
+        let table = positioned(&[
+            (0x360d, &[0x60]),
+            (0x940e, &(-4i16).to_le_bytes()),
+            (0x940f, &220i16.to_le_bytes()),
+            (0x9410, &180u16.to_le_bytes()),
+            (0x941e, &180u16.to_le_bytes()),
+            (0x3465, &[1]),
+        ])
+        .unwrap();
+        assert!(!table.table_layout.ordinary_flow);
+        let position = table.tblp_pr.unwrap();
+        assert_eq!(position.vert_anchor, "text");
+        assert_eq!(position.horz_anchor, "margin");
+        assert_eq!(position.tblp_x_spec.as_deref(), Some("center"));
+        assert_eq!(position.tblp_y, 10.95);
+        assert_eq!(position.left_from_text, 9.0);
+        assert_eq!(position.right_from_text, 9.0);
+        assert_eq!(table.overlap.as_deref(), Some("never"));
+
+        // Reserved anchors mean "not absolutely positioned".
+        let table = positioned(&[(0x360d, &[0xf0]), (0x940f, &220i16.to_le_bytes())]).unwrap();
+        assert!(table.tblp_pr.is_none());
+        assert!(table.table_layout.ordinary_flow);
+    }
+
+    #[test]
+    fn positioned_tables_without_established_doc_display_fail_closed() {
+        // sprmTDyaAbs zero is the inline vertical alignment value.
+        let error = positioned(&[(0x360d, &[0x50]), (0x940e, &721i16.to_le_bytes())])
+            .err()
+            .unwrap();
+        assert!(error.contains("inline vertical"), "{error}");
+        // The DOC counterpart of the MS-OI29500 2.1.162 ignored tblpPr.
+        for x in [0i16, 1] {
+            let error = positioned(&[
+                (0x360d, &[0x10]),
+                (0x940e, &x.to_le_bytes()),
+                (0x940f, &1i16.to_le_bytes()),
+                (0x9410, &180u16.to_le_bytes()),
+            ])
+            .err()
+            .unwrap();
+            assert!(error.contains("zero-offset"), "{error}");
+        }
+        // A paragraph-relative vertical anchor is outside that exception.
+        assert!(positioned(&[(0x360d, &[0x20]), (0x940f, &1i16.to_le_bytes())]).is_ok());
+    }
+
+    #[test]
+    fn preferred_widths_project_without_replacing_physical_grid_geometry() {
+        let mut end = row(1, &[1000, 2000]);
+        end.row.preferred_width = Some(PreferredWidth::Percent(2500));
+        end.row.cells[0].preferred = Some(PreferredWidth::Dxa(720));
+        end.row.cells[1].preferred = Some(PreferredWidth::Percent(1250));
+        let mut sequence = 0;
+        let mut writer = Writer::new(&mut sequence);
+        let mut budget = ModelBudget::new(1_000_000);
+        writer
+            .push(cell(1), '\u{7}', paragraph("a"), &mut budget)
+            .unwrap();
+        writer
+            .push(cell(1), '\u{7}', paragraph("b"), &mut budget)
+            .unwrap();
+        writer
+            .push(end, '\u{7}', Blocks::default(), &mut budget)
+            .unwrap();
+        let body = writer.finish(&mut budget).unwrap();
+        let Block::Table(table) = &body.0[0] else {
+            panic!()
+        };
+        assert_eq!(table.col_widths, [50.0, 100.0]);
+        assert_eq!(table.width_pt, None);
+        assert_eq!(table.width_pct, Some(2500.0));
+        assert_eq!(
+            table
+                .table_layout
+                .preferred_width
+                .as_ref()
+                .unwrap()
+                .kind
+                .as_deref(),
+            Some("pct")
+        );
+        assert_eq!(table.rows[0].cells[0].width_pt, Some(36.0));
+        assert_eq!(table.rows[0].cells[0].width_pct, None);
+        assert_eq!(table.rows[0].cells[1].width_pt, None);
+        assert_eq!(table.rows[0].cells[1].width_pct, Some(1250.0));
+    }
+
+    #[test]
+    fn merged_cell_preference_projects_from_the_primary_source_only() {
+        fn projected(d635_cell: u8, preferred: u16) -> Box<DocTable> {
+            let mut end = cell(1);
+            end.row_end = true;
+            end.inner_row = true;
+            let mut definition = vec![70, 0, 3];
+            for boundary in [0i16, 1500, 6000, 9000] {
+                definition.extend_from_slice(&boundary.to_le_bytes());
+            }
+            definition.extend_from_slice(&[0; 60]); // Three ftsNil TC80 records.
+            end.row.apply(0xd608, &definition).unwrap();
+            let [low, high] = preferred.to_le_bytes();
+            end.row
+                .apply(0xd635, &[5, d635_cell, d635_cell + 1, 3, low, high])
+                .unwrap();
+            // MS-DOC 2.6.3 sprmTMerge: cell 0 is the primary; formatting of
+            // continuation cell 1 is not applied to the merged layout region.
+            end.row.apply(0x5624, &[0, 2]).unwrap();
+
+            let mut sequence = 0;
+            let mut writer = Writer::new(&mut sequence);
+            let mut budget = ModelBudget::new(1_000_000);
+            for text in ["a", "b", "c"] {
+                writer
+                    .push(cell(1), '\u{7}', paragraph(text), &mut budget)
+                    .unwrap();
+            }
+            writer
+                .push(end, '\u{7}', Blocks::default(), &mut budget)
+                .unwrap();
+            let body = writer.finish(&mut budget).unwrap();
+            let Block::Table(table) = body.0.into_iter().next().unwrap() else {
+                panic!()
+            };
+            table
+        }
+
+        for preferred in [1500, 3000] {
+            let table = projected(0, preferred);
+            let expected = preferred.to_string();
+            assert_eq!(table.col_widths, [75.0, 225.0, 150.0]);
+            assert_eq!(table.rows[0].cells.len(), 2);
+            assert_eq!(table.rows[0].cells[0].col_span, 2);
+            assert_eq!(
+                table.rows[0].cells[0].width_pt,
+                Some(f64::from(preferred) / 20.0)
+            );
+            assert_eq!(
+                table.rows[0].cells[0]
+                    .table_cell_layout
+                    .preferred_width
+                    .as_ref()
+                    .and_then(|width| width.value.as_deref()),
+                Some(expected.as_str())
+            );
+        }
+        for continuation_preferred in [1500, 6000] {
+            let table = projected(1, continuation_preferred);
+            assert_eq!(table.col_widths, [75.0, 225.0, 150.0]);
+            assert_eq!(table.rows[0].cells.len(), 2);
+            assert_eq!(table.rows[0].cells[0].col_span, 2);
+            assert_eq!(table.rows[0].cells[0].width_pt, None);
+            assert!(table.rows[0].cells[0]
+                .table_cell_layout
+                .preferred_width
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn merged_raw_tc80_preference_projects_from_the_primary_source_only() {
+        fn projected(tc80_cell: Option<usize>, autofit: bool) -> Box<DocTable> {
+            let mut end = cell(1);
+            end.row_end = true;
+            end.inner_row = true;
+            let mut definition = vec![70, 0, 3];
+            for boundary in [0i16, 1500, 6000, 9000] {
+                definition.extend_from_slice(&boundary.to_le_bytes());
+            }
+            for source_cell in 0..3 {
+                let (flags, preferred) = if tc80_cell == Some(source_cell) {
+                    (3u16 << 9, 3000u16)
+                } else {
+                    (0, 0)
+                };
+                definition.extend_from_slice(&flags.to_le_bytes());
+                definition.extend_from_slice(&preferred.to_le_bytes());
+                definition.extend_from_slice(&[0; 16]);
+            }
+            end.row.apply(0xd608, &definition).unwrap();
+            end.row.apply(0xf614, &[3, 0x70, 0x17]).unwrap();
+            end.row.apply(0x3615, &[u8::from(autofit)]).unwrap();
+            // Keep merge ownership independent from the TC80 formatting bits.
+            end.row.apply(0x5624, &[0, 2]).unwrap();
+
+            let mut sequence = 0;
+            let mut writer = Writer::new(&mut sequence);
+            let mut budget = ModelBudget::new(1_000_000);
+            for text in ["a", "b", "c"] {
+                writer
+                    .push(cell(1), '\u{7}', paragraph(text), &mut budget)
+                    .unwrap();
+            }
+            writer
+                .push(end, '\u{7}', Blocks::default(), &mut budget)
+                .unwrap();
+            let body = writer.finish(&mut budget).unwrap();
+            let Block::Table(table) = body.0.into_iter().next().unwrap() else {
+                panic!()
+            };
+            table
+        }
+
+        for autofit in [false, true] {
+            for tc80_cell in [None, Some(0), Some(1)] {
+                let table = projected(tc80_cell, autofit);
+                assert_eq!(table.col_widths, [75.0, 225.0, 150.0]);
+                assert_eq!(table.width_pt, Some(300.0));
+                assert_eq!(
+                    table.layout.as_deref(),
+                    Some(if autofit { "autofit" } else { "fixed" })
+                );
+                assert_eq!(
+                    table
+                        .table_layout
+                        .preferred_width
+                        .as_ref()
+                        .and_then(|width| width.value.as_deref()),
+                    Some("6000")
+                );
+                assert_eq!(
+                    table
+                        .table_layout
+                        .layout
+                        .as_ref()
+                        .and_then(|layout| layout.kind.as_deref()),
+                    Some(if autofit { "autofit" } else { "fixed" })
+                );
+                assert_eq!(table.rows[0].cells.len(), 2);
+                assert_eq!(table.rows[0].cells[0].col_span, 2);
+                let primary = &table.rows[0].cells[0];
+                assert_eq!(primary.width_pt, (tc80_cell == Some(0)).then_some(150.0));
+                assert_eq!(
+                    primary
+                        .table_cell_layout
+                        .preferred_width
+                        .as_ref()
+                        .and_then(|width| width.value.as_deref()),
+                    (tc80_cell == Some(0)).then_some("3000")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn row_nil_preference_projects_an_auto_exception_to_clear_table_width() {
+        let mut first = row(1, &[1000]);
+        first.row.preferred_width = Some(PreferredWidth::Dxa(2000));
+        let second = row(1, &[1000]);
+        let mut sequence = 0;
+        let mut writer = Writer::new(&mut sequence);
+        let mut budget = ModelBudget::new(1_000_000);
+        for end in [first, second] {
+            writer
+                .push(cell(1), '\u{7}', paragraph("x"), &mut budget)
+                .unwrap();
+            writer
+                .push(end, '\u{7}', Blocks::default(), &mut budget)
+                .unwrap();
+        }
+        let body = writer.finish(&mut budget).unwrap();
+        let Block::Table(table) = &body.0[0] else {
+            panic!()
+        };
+        let reset = table.rows[1]
+            .table_row_layout
+            .exception
+            .as_ref()
+            .unwrap()
+            .preferred_width
+            .as_ref()
+            .unwrap();
+        assert_eq!(reset.kind.as_deref(), Some("auto"));
+        assert_eq!(reset.value.as_deref(), Some("0"));
+    }
+
+    #[test]
+    fn zero_table_preference_is_lexical_only_but_zero_cell_preference_is_public() {
+        for preferred in [PreferredWidth::Dxa(0), PreferredWidth::Percent(0)] {
+            let mut end = row(1, &[1000]);
+            end.row.preferred_width = Some(preferred);
+            end.row.cells[0].preferred = Some(preferred);
+            let mut sequence = 0;
+            let mut writer = Writer::new(&mut sequence);
+            let mut budget = ModelBudget::new(1_000_000);
+            writer
+                .push(cell(1), '\u{7}', paragraph("x"), &mut budget)
+                .unwrap();
+            writer
+                .push(end, '\u{7}', Blocks::default(), &mut budget)
+                .unwrap();
+            let body = writer.finish(&mut budget).unwrap();
+            let Block::Table(table) = &body.0[0] else {
+                panic!()
+            };
+            assert_eq!((table.width_pt, table.width_pct), (None, None));
+            assert_eq!(
+                table
+                    .table_layout
+                    .preferred_width
+                    .as_ref()
+                    .unwrap()
+                    .value
+                    .as_deref(),
+                Some("0")
+            );
+            let cell = &table.rows[0].cells[0];
+            match preferred {
+                PreferredWidth::Dxa(_) => {
+                    assert_eq!((cell.width_pt, cell.width_pct), (Some(0.0), None))
+                }
+                PreferredWidth::Percent(_) => {
+                    assert_eq!((cell.width_pt, cell.width_pct), (None, Some(0.0)))
+                }
+                PreferredWidth::Auto => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn preferred_widths_follow_the_merged_leader_cell() {
+        fn configured_row() -> Properties {
+            let mut end = row(1, &[1000, 2000]);
+            end.row.preferred_width = Some(PreferredWidth::Percent(2500));
+            end.row.cells[0].preferred = Some(PreferredWidth::Dxa(720));
+            end.row.cells[0].flags = (end.row.cells[0].flags & !3) | 2;
+            end.row.cells[1].preferred = Some(PreferredWidth::Percent(1250));
+            end.row.cells[1].flags = (end.row.cells[1].flags & !3) | 1;
+            end
+        }
+
+        let mut sequence = 0;
+        let mut direct_writer = Writer::new(&mut sequence);
+        let mut budget = ModelBudget::new(1_000_000);
+        direct_writer
+            .push(cell(1), '\u{7}', paragraph(""), &mut budget)
+            .unwrap();
+        direct_writer
+            .push(cell(1), '\u{7}', paragraph(""), &mut budget)
+            .unwrap();
+        direct_writer
+            .push(configured_row(), '\u{7}', Blocks::default(), &mut budget)
+            .unwrap();
+        let direct = direct_writer.finish(&mut budget).unwrap();
+        let Block::Table(direct_table) = &direct.0[0] else {
+            panic!()
+        };
+        let direct_table = serde_json::to_value(direct_table).unwrap();
+        // MS-DOC 2.9.317: the leader's formatting extends across the merged
+        // set; the continuation's conflicting preference is not projected.
+        for (pointer, expected) in [
+            ("/widthPt", None),
+            ("/widthPct", Some(serde_json::json!(2500.0))),
+            (
+                "/__tableLayout/preferredWidth",
+                Some(serde_json::json!({"kind": "pct", "value": "2500"})),
+            ),
+            ("/rows/0/cells/0/widthPt", Some(serde_json::json!(36.0))),
+            ("/rows/0/cells/0/widthPct", None),
+            (
+                "/rows/0/cells/0/__tableCellLayout/preferredWidth",
+                Some(serde_json::json!({"kind": "dxa", "value": "720"})),
+            ),
+            ("/rows/0/cells/0/colSpan", Some(serde_json::json!(2))),
+        ] {
+            assert_eq!(
+                direct_table.pointer(pointer),
+                expected.as_ref(),
+                "{pointer}"
+            );
+        }
+        assert_eq!(direct_table["colWidths"], serde_json::json!([50.0, 100.0]));
+        assert_eq!(
+            direct_table["rows"][0]["cells"].as_array().unwrap().len(),
+            1
+        );
+    }
+}

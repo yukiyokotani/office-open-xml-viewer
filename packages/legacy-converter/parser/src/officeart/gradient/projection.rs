@@ -19,7 +19,7 @@ pub(crate) struct ProjectedShadeStop {
 }
 
 impl ProjectedShadeStop {
-    #[cfg(any(test, feature = "direct-ppt"))]
+    #[cfg(any(test, feature = "direct-ppt", feature = "direct-doc"))]
     pub(crate) fn position(self) -> f64 {
         self.position_numerator as f64 / POSITION_DENOMINATOR as f64
     }
@@ -32,7 +32,7 @@ pub(crate) struct RationalAngle {
 }
 
 impl RationalAngle {
-    #[cfg(any(test, feature = "direct-ppt"))]
+    #[cfg(any(test, feature = "direct-ppt", feature = "direct-doc"))]
     pub(crate) fn degrees(self) -> f64 {
         self.numerator as f64 / f64::from(self.denominator)
     }

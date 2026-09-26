@@ -210,6 +210,26 @@ impl Paint {
         }
         Ok(())
     }
+    #[cfg(feature = "direct-doc")]
+    pub fn geometry(&self, kind: u16) -> Option<&'static str> {
+        if self.custom_geometry {
+            return None;
+        }
+        // MS-ODRAW 2.4.24 -> ECMA-376 ST_ShapeType. Only presets whose
+        // unadjusted outlines correspond directly are included here.
+        match kind {
+            1 | 202 => Some("rect"),
+            3 => Some("ellipse"),
+            4 => Some("diamond"),
+            5 => Some("triangle"),
+            6 => Some("rtTriangle"),
+            20 => Some("line"),
+            // MS-ODRAW 2.4.24: distinct from msosptLine. Preserve the
+            // static preset path, not editable endpoint bindings/rerouting.
+            32 => Some("straightConnector1"),
+            _ => None,
+        }
+    }
     /// MS-ODRAW 2.3.7.1: msofillPattern (1), msofillTexture (2) and
     /// msofillPicture (3) paint with the fillBlip BLIP. Returns the active one
     /// so a caller that cannot project it can reject instead of drawing none.
@@ -235,7 +255,7 @@ impl Paint {
     /// fillShape to 1, fillUseRect to 0, and fUseShapeAnchor to 0. A distinct
     /// fill rectangle or view-relative fill cannot be represented by this
     /// shape-local DrawingML stretch without inventing placement semantics.
-    #[cfg(feature = "direct-ppt")]
+    #[cfg(any(feature = "direct-doc", feature = "direct-ppt"))]
     pub fn foreground_image(&self) -> Option<(u32, u32, bool)> {
         (self.fill_type == Some(3)
             && self.fill_blip.unwrap_or(0) != 0
@@ -300,11 +320,39 @@ impl Paint {
             && self.line_type.unwrap_or(0) == 0)
             .then_some((self.line.unwrap_or(0), self.line_alpha.unwrap_or(65536)))
     }
+
+    /// Solid fill for a host without any drawing-default layer: every absent
+    /// property takes its normative MS-ODRAW default (fFilled 1, fillColor
+    /// white, fillOpacity 1.0), while explicit vetoes and non-solid fill kinds
+    /// still suppress the solid projection.
+    #[cfg_attr(not(feature = "direct-doc"), allow(dead_code))]
+    pub(crate) fn solid_fill_or_default(&self, allow_fill: bool) -> Option<(u32, u32)> {
+        (allow_fill
+            && self.filled.unwrap_or(true)
+            && self.fill_ok.unwrap_or(true)
+            && !self.fill_rect.unwrap_or(false)
+            && self.fill_type.unwrap_or(0) == 0)
+            .then_some((
+                self.fill.unwrap_or(0xffffff),
+                self.fill_alpha.unwrap_or(65536),
+            ))
+    }
+
+    /// Solid line for a host without any drawing-default layer: fLine 1,
+    /// lineColor black and lineOpacity 1.0 are the MS-ODRAW defaults.
+    #[cfg_attr(not(feature = "direct-doc"), allow(dead_code))]
+    pub(crate) fn solid_line_or_default(&self, allow_line: bool) -> Option<(u32, u32)> {
+        (allow_line
+            && self.lined.unwrap_or(true)
+            && self.line_ok.unwrap_or(true)
+            && self.line_type.unwrap_or(0) == 0)
+            .then_some((self.line.unwrap_or(0), self.line_alpha.unwrap_or(65536)))
+    }
 }
 
 /// A linear OfficeArt shade projected to DrawingML stop order. Stop colours
 /// stay OfficeArtCOLORREF values for the host to resolve.
-#[cfg(feature = "direct-ppt")]
+#[cfg(any(feature = "direct-doc", feature = "direct-ppt"))]
 pub(crate) struct LinearShade {
     pub projection: super::gradient::projection::Projection,
     /// Per-stop 16.16 opacity, parallel to `projection.stops`.
@@ -315,9 +363,9 @@ pub(crate) struct LinearShade {
 
 // Two-colour shades are projected with these marker colours so each output
 // stop keeps its origin (fill or back colour) even when both colours match.
-#[cfg(feature = "direct-ppt")]
+#[cfg(any(feature = "direct-doc", feature = "direct-ppt"))]
 const FRONT_MARKER: u32 = 0;
-#[cfg(feature = "direct-ppt")]
+#[cfg(any(feature = "direct-doc", feature = "direct-ppt"))]
 const BACK_MARKER: u32 = 1;
 
 impl Paint {
@@ -341,7 +389,7 @@ impl Paint {
     /// Opacity combined with an authored shade-colour array has no evidence
     /// and is rejected, as are the path shades (5, 6) and the host-defined
     /// title shade (8).
-    #[cfg(feature = "direct-ppt")]
+    #[cfg(any(feature = "direct-doc", feature = "direct-ppt"))]
     pub(crate) fn linear_shade(
         &self,
         source: &super::gradient::Borrowed<'_>,

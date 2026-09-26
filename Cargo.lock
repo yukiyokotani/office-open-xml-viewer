@@ -422,6 +422,8 @@ name = "legacy-office-converter"
 version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
+ "docx-model",
+ "docx-parser",
  "flate2",
  "js-sys",
  "ooxml-common",

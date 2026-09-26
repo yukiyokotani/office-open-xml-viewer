@@ -1,0 +1,640 @@
+//! DOC inline PICF/OfficeArt pictures (MS-DOC 2.9.190-193; MS-ODRAW 2.2.15).
+use super::{u16_at, u32_at, unsupported};
+use crate::officeart::{raster::Image, record_with_end, Record};
+use std::collections::{BTreeMap, BTreeSet};
+
+mod direct;
+pub(in crate::doc) use direct::DirectInlinePicture;
+pub(crate) use direct::DirectPictureResource;
+
+pub(super) struct Store<'a> {
+    data: &'a [u8],
+    cache: BTreeMap<usize, Option<Picture<'a>>>,
+    part_offsets: BTreeSet<usize>,
+    /// PICF offsets holding the empty placeholder of a pseudo-inline shape.
+    placeholders: BTreeSet<usize>,
+    /// Whether PNG BLIPs holding TIFF data are admitted (direct model only).
+    pub raster: crate::officeart::raster::Raster,
+    budget: usize,
+    remaining_bytes: usize,
+    occurrences: u32,
+    pub omitted: bool,
+}
+impl<'a> Store<'a> {
+    pub fn new(data: &'a [u8]) -> Self {
+        Self {
+            data,
+            cache: BTreeMap::new(),
+            part_offsets: BTreeSet::new(),
+            placeholders: BTreeSet::new(),
+            raster: crate::officeart::raster::Raster::Advertised,
+            budget: 1_000_000,
+            remaining_bytes: 128 * 1024 * 1024,
+            occurrences: 0,
+            omitted: false,
+        }
+    }
+
+    fn load(&mut self, offset: usize) -> Result<(), String> {
+        if !self.cache.contains_key(&offset) {
+            if self.cache.len() >= 100_000 {
+                return Err(unsupported("Word picture cache budget exceeded"));
+            }
+            let mut placeholder = false;
+            let picture = read_with_limit(
+                self.data,
+                offset,
+                &mut self.budget,
+                self.remaining_bytes,
+                &mut placeholder,
+                self.raster,
+            )?;
+            if placeholder {
+                self.placeholders.insert(offset);
+            }
+            if let Some(picture) = &picture {
+                self.remaining_bytes = self
+                    .remaining_bytes
+                    .checked_sub(picture.image.bytes.len())
+                    .ok_or_else(|| unsupported("Word retained media budget exceeded"))?;
+            }
+            self.cache.insert(offset, picture);
+        }
+        Ok(())
+    }
+}
+
+pub(super) struct Picture<'a> {
+    pub image: Image<'a>,
+    pub extent: [i64; 2],
+    pub crop: [i64; 4],
+    pub flip: [bool; 2],
+    pub rotation: i64,
+}
+
+#[cfg(test)]
+fn read<'a>(
+    data: &'a [u8],
+    offset: usize,
+    budget: &mut usize,
+) -> Result<Option<Picture<'a>>, String> {
+    read_with_limit(
+        data,
+        offset,
+        budget,
+        128 * 1024 * 1024,
+        &mut false,
+        crate::officeart::raster::Raster::Advertised,
+    )
+}
+
+fn read_with_limit<'a>(
+    data: &'a [u8],
+    offset: usize,
+    budget: &mut usize,
+    remaining_bytes: usize,
+    placeholder: &mut bool,
+    raster: crate::officeart::raster::Raster,
+) -> Result<Option<Picture<'a>>, String> {
+    let tail = data
+        .get(offset..)
+        .ok_or_else(|| unsupported("Word PICF offset out of range"))?;
+    let size = u32_at(tail, 0)? as i32;
+    if size < 68 || u16_at(tail, 4)? != 68 {
+        return Err(unsupported("invalid Word PICF header"));
+    }
+    let data = tail
+        .get(..size as usize)
+        .ok_or_else(|| unsupported("truncated Word PICF data"))?;
+    let mm = u16_at(data, 6)?;
+    if !matches!(mm, 100 | 102) {
+        return Ok(None);
+    }
+    let extent = [extent(data, 28, 32)?, extent(data, 30, 34)?];
+    let start = if mm == 102 {
+        // An optional source path is metadata, never an instruction to open it.
+        69 + usize::from(
+            *data
+                .get(68)
+                .ok_or_else(|| unsupported("truncated Word picture name"))?,
+        )
+    } else {
+        68
+    };
+    let (shape, mut position) = record_with_end(data, start, budget, "Word inline shape")?;
+    if shape.kind != 0xf004 || shape.version != 15 {
+        return Err(unsupported("invalid Word inline shape container"));
+    }
+    let mut props = Options::default();
+    let mut child = 0;
+    while child < shape.payload.len() {
+        let (record, end) = record_with_end(shape.payload, child, budget, "Word inline shape")?;
+        child = end;
+        match record.kind {
+            0xf00b | 0xf122 => props.apply(record, budget)?,
+            0xf00a => {
+                if props.shape.is_some() || record.version != 2 || record.payload.len() != 8 {
+                    return Err(unsupported("invalid Word inline shape properties"));
+                }
+                props.shape = Some(record.instance);
+                let flags = u32_at(record.payload, 4)?;
+                props.passive_picture = flags & 0x11d == 0;
+                props.flip = [flags & 0x40 != 0, flags & 0x80 != 0];
+            }
+            _ => {} // No client data, OLE, script, or external resources executed.
+        }
+    }
+    // MS-ODRAW 2.2.40: groups, deleted shapes, OLE and connectors are not
+    // passive picture frames. Do not dereference their BLIPs.
+    if props.shape != Some(75) || !props.passive_picture {
+        return Ok(None);
+    }
+    let mut selected = None;
+    for index in 0..props.blips {
+        let (entry, end) = record_with_end(data, position, budget, "Word inline BLIP")?;
+        position = end;
+        if entry.kind != 0xf007 && !(0xf018..=0xf117).contains(&entry.kind) {
+            return Err(unsupported("invalid Word inline BLIP record"));
+        }
+        if props.pib == Some(index) {
+            selected = crate::officeart::raster::read_store_entry_as(
+                entry,
+                None,
+                budget,
+                remaining_bytes,
+                raster,
+            )?;
+        }
+    }
+    let Some(image) = selected else {
+        // A picture frame without any BLIP whose shape is marked
+        // fPseudoInline (MS-ODRAW 2.3.17.11) is the result placeholder that
+        // follows a pseudo-inline shape's anchor inside its SHAPE field.
+        *placeholder = props.blips == 0 && props.pib.is_none() && props.pseudo_inline;
+        return Ok(None);
+    };
+    if props.crop[0] + props.crop[1] >= 100000 || props.crop[2] + props.crop[3] >= 100000 {
+        return Err(unsupported("empty Word picture crop"));
+    }
+    Ok(Some(Picture {
+        image,
+        extent,
+        crop: props.crop,
+        flip: props.flip,
+        rotation: props.rotation,
+    }))
+}
+
+fn extent(data: &[u8], goal: usize, scale: usize) -> Result<i64, String> {
+    let goal = i64::from(u16_at(data, goal)? as i16);
+    let scaled = goal * i64::from(u16_at(data, scale)?);
+    // MS-DOC PICMID: final size is goal * scale/1000, 15..31680 twips.
+    if goal <= 0 || !(15000..=31680000).contains(&scaled) {
+        return Err(unsupported("invalid Word picture display size"));
+    }
+    Ok((scaled * 635 + 500) / 1000) // Exact twip-to-EMU factor, rounded to one EMU.
+}
+
+#[derive(Default)]
+pub(super) struct Options {
+    shape: Option<u16>,
+    passive_picture: bool,
+    blips: usize,
+    pub pib: Option<usize>,
+    pub crop: [i64; 4],
+    flip: [bool; 2],
+    pub rotation: i64,
+    pseudo_inline: bool,
+}
+impl Options {
+    fn apply(&mut self, record: Record<'_>, budget: &mut usize) -> Result<(), String> {
+        self.apply_mode(record, budget, true)
+    }
+    pub fn apply_indexed(&mut self, record: Record<'_>, budget: &mut usize) -> Result<(), String> {
+        self.apply_mode(record, budget, false)
+    }
+    fn apply_mode(
+        &mut self,
+        record: Record<'_>,
+        budget: &mut usize,
+        inline: bool,
+    ) -> Result<(), String> {
+        if record.version != 3 {
+            return Err(unsupported("invalid Word picture option version"));
+        }
+        let count = usize::from(record.instance);
+        *budget = budget
+            .checked_sub(count)
+            .ok_or_else(|| unsupported("Word picture option budget exceeded"))?;
+        let mut complex_end = count * 6;
+        if complex_end > record.payload.len() {
+            return Err(unsupported("truncated Word picture options"));
+        }
+        for entry in record.payload[..complex_end].chunks_exact(6) {
+            let key = u16_at(entry, 0)?;
+            let id = key & 0x3fff;
+            let value = u32_at(entry, 2)?;
+            // MS-ODRAW 2.2.15: all BLIP-valued properties consume a slot,
+            // regardless of fBid/fComplex/op. The visible picture is pib.
+            if inline
+                && matches!(
+                    id,
+                    0x104 | 0x10f | 0x186 | 0x1c5 | 0x545 | 0x585 | 0x5c5 | 0x605
+                )
+            {
+                if id == 0x104 {
+                    self.pib = Some(self.blips);
+                }
+                self.blips += 1;
+                continue;
+            }
+            if !inline && key == 0x4104 {
+                self.pib = (value as usize).checked_sub(1);
+                continue;
+            }
+            if key & 0x8000 != 0 {
+                complex_end = complex_end
+                    .checked_add(value as usize)
+                    .ok_or_else(|| unsupported("Word picture complex option overflow"))?;
+                if complex_end > record.payload.len() {
+                    return Err(unsupported("truncated Word picture complex option"));
+                }
+                continue;
+            }
+            match id {
+                0x100..=0x103 => {
+                    let fraction = i64::from(value as i32) * 100000;
+                    let percent = (fraction + fraction.signum() * 32768) / 65536;
+                    i32::try_from(percent)
+                        .map_err(|_| unsupported("Word crop exceeds DrawingML percentage range"))?;
+                    self.crop[usize::from(id - 0x100)] = percent;
+                }
+                4 => self.rotation = i64::from(value as i32) * 60000 / 65536,
+                0x53f if value & 0x0001_0001 == 0x0001_0001 => self.pseudo_inline = true,
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn record(kind: u16, options: u16, body: &[u8]) -> Vec<u8> {
+        [
+            options.to_le_bytes().as_slice(),
+            &kind.to_le_bytes(),
+            &(body.len() as u32).to_le_bytes(),
+            body,
+        ]
+        .concat()
+    }
+    fn png() -> Vec<u8> {
+        let mut b = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+        b.extend_from_slice(&2u32.to_be_bytes());
+        b.extend_from_slice(&3u32.to_be_bytes());
+        b.extend_from_slice(&[8, 2, 0, 0, 0, 0, 0, 0, 0]);
+        b
+    }
+    fn fixture(properties: &[(u16, u32)], images: &[Vec<u8>]) -> Vec<u8> {
+        let mut options = Vec::new();
+        for (key, value) in properties {
+            options.extend_from_slice(&key.to_le_bytes());
+            options.extend_from_slice(&value.to_le_bytes());
+        }
+        let mut shape = record(0xf00a, (75 << 4) | 2, &[1, 0, 0, 0, 0x40, 8, 0, 0]);
+        shape.extend(record(
+            0xf00b,
+            ((properties.len() as u16) << 4) | 3,
+            &options,
+        ));
+        let mut data = vec![0u8; 68];
+        data[4..6].copy_from_slice(&68u16.to_le_bytes());
+        data[6..8].copy_from_slice(&100u16.to_le_bytes());
+        data[28..30].copy_from_slice(&1440u16.to_le_bytes());
+        data[30..32].copy_from_slice(&720u16.to_le_bytes());
+        data[32..34].copy_from_slice(&500u16.to_le_bytes());
+        data[34..36].copy_from_slice(&2000u16.to_le_bytes());
+        data.extend(record(0xf004, 15, &shape));
+        for image in images {
+            data.extend(image);
+        }
+        let length = data.len() as u32;
+        data[..4].copy_from_slice(&length.to_le_bytes());
+        data
+    }
+    fn raster() -> Vec<u8> {
+        record(0xf01e, 0x6e0 << 4, &[vec![0; 17], png()].concat())
+    }
+    fn jpeg_raster() -> Vec<u8> {
+        let jpeg = [0xff, 0xd8, 0xff, 0xc0, 0, 11, 8, 0, 3, 0, 2, 1, 1, 0x11, 0];
+        record(0xf01d, 0x46a << 4, &[vec![0; 17], jpeg.to_vec()].concat())
+    }
+
+    #[test]
+    fn direct_inline_png_jpeg_metadata_resources_dedup_and_budget() {
+        for (image, mime) in [(raster(), "image/png"), (jpeg_raster(), "image/jpeg")] {
+            let mut data = fixture(
+                &[
+                    (0x0104, 1),
+                    (0x0100, 8192),
+                    (0x0101, 16384),
+                    (0x0102, 24576),
+                    (0x0103, 32768),
+                    (4, 90 * 65536),
+                ],
+                &[image],
+            );
+            data[88..92].copy_from_slice(&0xc0u32.to_le_bytes());
+            let mut store = Store::new(&data);
+            let mut model_budget = 4096;
+            let first = store.direct_inline(0, &mut model_budget).unwrap().unwrap();
+            let second = store.direct_inline(0, &mut model_budget).unwrap().unwrap();
+            assert_eq!(first, second);
+            assert_eq!(first.mime_type, mime);
+            assert_eq!((first.width_pt, first.height_pt), (36.0, 72.0));
+            assert_eq!(first.rotation, 90.0);
+            assert!(first.flip_h && first.flip_v);
+            let crop = first.crop.unwrap();
+            assert_eq!((crop.t, crop.b, crop.l, crop.r), (0.125, 0.25, 0.375, 0.5));
+
+            let mut too_small = 0;
+            assert_eq!(
+                store.finish_direct_resources(&mut too_small).unwrap_err(),
+                "OUTPUT_TOO_LARGE"
+            );
+
+            let mut store = Store::new(&data);
+            let mut model_budget = 4096;
+            store.direct_inline(0, &mut model_budget).unwrap().unwrap();
+            store.direct_inline(0, &mut model_budget).unwrap().unwrap();
+            let resources = store.finish_direct_resources(&mut model_budget).unwrap();
+            assert_eq!(resources.len(), 1);
+            assert_eq!(resources[0].key, "legacy-doc/image/0");
+            assert_eq!(resources[0].mime_type, mime);
+            assert!(!resources[0].bytes.is_empty());
+        }
+    }
+
+    #[test]
+    fn direct_inline_finalization_keeps_only_live_keys_and_rejects_dangling_keys() {
+        let mut data = fixture(&[(0x0104, 1)], &[raster()]);
+        data[88..92].copy_from_slice(&0xc0u32.to_le_bytes());
+
+        let mut orphan = Store::new(&data);
+        let mut budget = 4096;
+        orphan.direct_inline(0, &mut budget).unwrap().unwrap();
+        let before = budget;
+        let resources = orphan
+            .finish_referenced_direct_resources(&[], &mut budget)
+            .unwrap();
+        assert!(resources.is_empty());
+        assert_eq!(budget, before);
+
+        let dangling = || {
+            let mut store = Store::new(&data);
+            let mut budget = 4096;
+            store.direct_inline(0, &mut budget).unwrap().unwrap();
+            (store, budget)
+        };
+        for key in ["legacy-doc/image/1", "legacy-doc/image/00"] {
+            let (store, mut budget) = dangling();
+            assert!(store
+                .finish_referenced_direct_resources(&[key], &mut budget)
+                .is_err());
+        }
+
+        let (store, mut budget) = dangling();
+        let resources = store
+            .finish_referenced_direct_resources(&["legacy-doc/image/0"], &mut budget)
+            .unwrap();
+        assert_eq!(resources.len(), 1);
+        assert_eq!(resources[0].key, "legacy-doc/image/0");
+    }
+
+    #[test]
+    fn direct_inline_rejects_unavailable_types_and_admits_before_metadata() {
+        let unsupported_image = record(0xf01a, 0, &[]);
+        let data = fixture(&[(0x0104, 1)], &[unsupported_image]);
+        let mut store = Store::new(&data);
+        let mut budget = usize::MAX;
+        assert!(store.direct_inline(0, &mut budget).is_err());
+
+        let data = fixture(&[(0x0104, 1)], &[raster()]);
+        let mut store = Store::new(&data);
+        let mut budget = 0;
+        assert_eq!(
+            store.direct_inline(0, &mut budget).unwrap_err(),
+            "OUTPUT_TOO_LARGE"
+        );
+        assert!(store.part_offsets.is_empty());
+
+        let mut truncated = data;
+        truncated.truncate(truncated.len() - 1);
+        let mut store = Store::new(&truncated);
+        let mut budget = usize::MAX;
+        assert!(store.direct_inline(0, &mut budget).is_err());
+    }
+
+    #[test]
+    fn direct_owned_resource_budget_uses_retained_vector_capacity() {
+        let owned_store = || {
+            let mut bytes = Vec::with_capacity(128);
+            bytes.extend_from_slice(&png());
+            let mut store = Store::new(&[]);
+            store.cache.insert(
+                7,
+                Some(Picture {
+                    image: Image {
+                        bytes: std::borrow::Cow::Owned(bytes),
+                        extension: "png",
+                    },
+                    extent: [12_700, 12_700],
+                    crop: [0; 4],
+                    flip: [false; 2],
+                    rotation: 0,
+                }),
+            );
+            store.part_offsets.insert(7);
+            store
+        };
+        let key = "legacy-doc/image/7".to_string();
+        let mut bytes_only =
+            std::mem::size_of::<direct::DirectPictureResource>() + key.capacity() + png().len();
+        assert_eq!(
+            owned_store()
+                .finish_direct_resources(&mut bytes_only)
+                .unwrap_err(),
+            "OUTPUT_TOO_LARGE"
+        );
+        let mut sufficient = 4096;
+        let resources = owned_store()
+            .finish_direct_resources(&mut sufficient)
+            .unwrap();
+        assert_eq!(resources[0].bytes.capacity(), 128);
+        assert!(sufficient < 4096);
+    }
+    #[test]
+    fn pseudo_inline_placeholders_project_nothing_but_other_empty_frames_are_omitted() {
+        let placeholder = fixture(&[(0x53f, 0x0001_0001)], &[]);
+        let mut store = Store::new(&placeholder);
+        assert!(store
+            .direct_inline(0, &mut usize::MAX.clone())
+            .unwrap()
+            .is_none());
+        assert!(!store.omitted);
+        // An explicit false, or a BLIP-referencing frame, is not a placeholder.
+        for properties in [
+            &[(0x53fu16, 0x0001_0000u32)][..],
+            &[(0x53f, 0x0001_0001), (0x0104, 1)],
+        ] {
+            let data = fixture(properties, &[]);
+            let mut store = Store::new(&data);
+            let result = store.direct_inline(0, &mut usize::MAX.clone());
+            assert!(result.is_err() || store.omitted, "{properties:x?}");
+            assert!(store.placeholders.is_empty());
+        }
+    }
+
+    #[test]
+    fn direct_inline_passes_validated_metafiles_with_docx_media_types() {
+        for ((source, blip), mime) in [
+            (crate::officeart::emf_test_blip(), "image/emf"),
+            (crate::officeart::wmf_test_blip(), "image/wmf"),
+        ] {
+            let data = fixture(&[(0x0104, 1)], &[blip]);
+            let mut store = Store::new(&data);
+            let mut budget = usize::MAX;
+            let picture = store.direct_inline(0, &mut budget).unwrap().unwrap();
+            assert_eq!(picture.mime_type, mime);
+            let resources = store
+                .finish_referenced_direct_resources(&[picture.resource_key.as_str()], &mut budget)
+                .unwrap();
+            assert_eq!(resources.len(), 1);
+            assert_eq!(resources[0].mime_type, mime);
+            assert_eq!(resources[0].bytes, source);
+        }
+    }
+    #[test]
+    fn retains_owned_emf_once_for_repeated_inline_pictures() {
+        let (source, blip) = crate::officeart::emf_test_blip();
+        let data = fixture(&[(0x0104, 1)], &[blip]);
+        let mut store = Store::new(&data);
+        store.remaining_bytes = source.len();
+        let first = store.direct_inline(0, &mut usize::MAX.clone()).unwrap();
+        // A repeated occurrence reuses the cached picture: no record work and
+        // no second retention of the decoded metafile.
+        store.budget = 0;
+        let second = store.direct_inline(0, &mut usize::MAX.clone()).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(store.remaining_bytes, 0);
+        let resources = store
+            .finish_direct_resources(&mut usize::MAX.clone())
+            .unwrap();
+        assert_eq!(resources.len(), 1);
+        assert_eq!(resources[0].key, first.unwrap().resource_key);
+        assert_eq!(resources[0].bytes, source);
+    }
+    #[test]
+    fn inline_blips_follow_property_order_not_the_ignored_index_or_flags() {
+        // A fill BLIP in primary options precedes pib in tertiary options.
+        // Both fComplex and the huge op value are ignored for inline pib.
+        let mut data = fixture(&[(0x0186, 0)], &[record(0xf01a, 0, &[]), raster()]);
+        let properties = [
+            0x0102u16.to_le_bytes().as_slice(),
+            &16384u32.to_le_bytes(),
+            &0xc104u16.to_le_bytes(),
+            &u32::MAX.to_le_bytes(),
+        ]
+        .concat();
+        let tertiary = record(0xf122, (2 << 4) | 3, &properties);
+        let shape_length = u32_at(&data, 72).unwrap() as usize;
+        let end = 76 + shape_length;
+        data.splice(end..end, tertiary.iter().copied());
+        data[72..76].copy_from_slice(&((shape_length + tertiary.len()) as u32).to_le_bytes());
+        let length = data.len() as u32;
+        data[..4].copy_from_slice(&length.to_le_bytes());
+        let picture = read(&data, 0, &mut 100).unwrap().expect("inline PNG");
+        assert_eq!(picture.image.bytes, png());
+        assert_eq!(picture.extent, [457200, 914400]);
+        assert_eq!(picture.crop, [0, 0, 25000, 0]);
+        assert_eq!(picture.flip, [true, false]);
+    }
+    #[test]
+    fn non_picture_and_external_only_shapes_are_not_fabricated() {
+        let data = fixture(&[(0x0106, 2)], &[]);
+        assert!(read(&data, 0, &mut 100).unwrap().is_none());
+        for flag in [1u32, 4, 8, 16, 256] {
+            let mut data = fixture(&[(0x104, 1)], &[record(0xf01e, 0, &[])]);
+            data[88..92].copy_from_slice(&flag.to_le_bytes());
+            // A malformed BLIP is deliberately not dereferenced on an OLE,
+            // deleted, group, patriarch or connector shape.
+            assert!(read(&data, 0, &mut 100).unwrap().is_none());
+        }
+    }
+    #[test]
+    fn ranges_dimensions_and_work_are_bounded() {
+        let data = fixture(&[(0x0104, 1)], &[raster()]);
+        assert!(read(&data, 0, &mut 0).is_err());
+        assert!(read(&data[..data.len() - 1], 0, &mut 100).is_err());
+        let mut invalid = data.clone();
+        invalid[32..34].fill(0);
+        assert!(read(&invalid, 0, &mut 100).is_err());
+        let mut invalid = data;
+        invalid[4] = 67;
+        assert!(read(&invalid, 0, &mut 100).is_err());
+    }
+
+    #[test]
+    fn cached_images_share_one_resource_across_occurrences() {
+        let data = fixture(&[(0x0104, 1)], &[raster()]);
+        let mut store = Store::new(&data);
+        let first = store.direct_inline(0, &mut usize::MAX.clone()).unwrap();
+        let budget = store.budget;
+        for _ in 0..2 {
+            let again = store.direct_inline(0, &mut usize::MAX.clone()).unwrap();
+            assert_eq!(again, first);
+            assert_eq!(store.budget, budget);
+        }
+        assert_eq!(store.occurrences, 3);
+        assert_eq!(store.remaining_bytes, 128 * 1024 * 1024 - png().len());
+        let resources = store
+            .finish_direct_resources(&mut usize::MAX.clone())
+            .unwrap();
+        assert_eq!(resources.len(), 1);
+        let mut store = Store::new(&data);
+        store.remaining_bytes = 0;
+        assert!(store.direct_inline(0, &mut usize::MAX.clone()).is_err());
+    }
+
+    #[test]
+    fn inline_embedded_bse_is_supported_but_delayed_or_unsupported_data_is_not_followed() {
+        let blip = raster();
+        let mut bse = vec![0u8; 36];
+        bse[0] = 6;
+        bse[1] = 6;
+        bse[20..24].copy_from_slice(&(blip.len() as u32).to_le_bytes());
+        bse[24] = 1;
+        let data = fixture(
+            &[(0x104, 1)],
+            &[record(0xf007, 0x62, &[bse.clone(), blip].concat())],
+        );
+        assert_eq!(
+            read(&data, 0, &mut 100).unwrap().unwrap().image.bytes,
+            png()
+        );
+        bse[28..32].copy_from_slice(&u32::MAX.to_le_bytes());
+        let data = fixture(&[(0x104, 1)], &[record(0xf007, 0x62, &bse)]);
+        let mut store = Store::new(&data);
+        assert!(store
+            .direct_inline(0, &mut usize::MAX.clone())
+            .unwrap()
+            .is_none());
+        assert!(store.omitted);
+        assert!(store
+            .finish_direct_resources(&mut usize::MAX.clone())
+            .unwrap()
+            .is_empty());
+    }
+}
