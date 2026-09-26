@@ -210,6 +210,37 @@ export interface PivotTableMetadata {
   cacheSource?: PivotCacheSource;
   status: PivotMetadataStatus;
   extensionUris?: string[];
+  /** ECMA-376 §18.10.1.97 applied PivotTable style, elements resolved. */
+  style?: PivotTableStyle;
+  /** ECMA-376 §18.10.1.84 row items, one per body row. */
+  rowItems?: PivotAxisItem[];
+  /** ECMA-376 §18.10.1.19 column items, one per data column. */
+  columnItems?: PivotAxisItem[];
+}
+
+export interface PivotTableStyle {
+  name: string;
+  showRowHeaders: boolean;
+  showColumnHeaders: boolean;
+  showRowStripes: boolean;
+  showColumnStripes: boolean;
+  showLastColumn: boolean;
+  elements: PivotTableStyleElement[];
+}
+
+export interface PivotTableStyleElement {
+  /** ECMA-376 §18.18.77 ST_TableStyleType. */
+  kind: string;
+  /** Stripe band size (§18.8.41). */
+  size: number;
+  dxf: Dxf;
+}
+
+export interface PivotAxisItem {
+  /** ECMA-376 §18.18.43 ST_ItemType (`data`, `default`, …, `grand`, `blank`). */
+  kind: string;
+  /** Zero-based field level of the item. */
+  depth: number;
 }
 
 export interface PivotLocation extends WorksheetCellRange {
@@ -488,6 +519,7 @@ export type {
   ChartErrBars,
   ChartManualLayout,
   LegendManualLayout,
+  BlipEffect,
 } from '@silurus/ooxml-core';
 export interface ChartAnchor {
   /** DrawingML document order; higher values paint above lower values. */
@@ -694,6 +726,11 @@ export interface Duotone {
 export interface PathInfo {
   w: number;
   h: number;
+  /** ECMA-376 §20.1.9.15 `a:path@fill` when not `norm` (ST_PathFillMode
+   *  §20.1.10.37). `none` leaves the path unfilled. */
+  fill?: 'none' | 'lighten' | 'lightenLess' | 'darken' | 'darkenLess';
+  /** ECMA-376 §20.1.9.15 `a:path@stroke`; present only when `false`. */
+  stroke?: false;
   commands: PathCmd[];
 }
 
@@ -989,6 +1026,24 @@ export interface Dxf {
    *  style numFmt for rendering — e.g. switching a calendar cell from `d` to
    *  `m"月"d"日"` on the first day of each month. */
   numFmt?: NumFmt | null;
+  /** The dxf `<font>` toggles as authored, present when the dxf has a
+   *  `<font>`: `font.bold` etc. cannot tell an absent element from an
+   *  explicit off, which a differential format needs (see DxfFontToggles). */
+  fontToggles?: DxfFontToggles;
+}
+
+/**
+ * A differential font's toggles (ECMA-376 §18.8.14-15 dxf, §18.8.2 b
+ * CT_BooleanProperty `val` default true): a key is absent when the dxf's
+ * `<font>` omits the element (no change) and `false` for an explicit off
+ * (`val="0"`, or `<u val="none"/>`), which turns off what an earlier format
+ * turned on.
+ */
+export interface DxfFontToggles {
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  strike?: boolean;
 }
 
 export interface CellFont {

@@ -12,6 +12,25 @@ export function autoResize(render: (width: number, height: number) => void | Pro
 export interface AutoResizeOptions {
     pauseWhenHidden?: boolean;
 }
+export type BlipEffect = {
+    type: 'grayscale';
+} | {
+    type: 'biLevel';
+    thresh: number;
+} | {
+    type: 'colorChange';
+    from: string;
+    fromAlpha: number;
+    to: string;
+    toAlpha: number;
+    useAlpha: boolean;
+} | {
+    type: 'luminance';
+    bright: number;
+    contrast: number;
+} | {
+    type: 'duotone';
+};
 export interface Border {
     left: BorderEdge | null;
     right: BorderEdge | null;
@@ -489,6 +508,7 @@ export interface ChartModel {
     title: string | null;
     titleRichRuns?: ChartTextRun[] | null;
     titlePresent?: boolean;
+    authoredWithoutSeries?: boolean;
     categories: string[];
     categorySourceHidden?: boolean[] | null;
     categoryLevels?: string[][] | null;
@@ -1128,6 +1148,13 @@ export interface Dxf {
     fill: CellFill | null;
     border: Border | null;
     numFmt?: NumFmt | null;
+    fontToggles?: DxfFontToggles;
+}
+export interface DxfFontToggles {
+    bold?: boolean;
+    italic?: boolean;
+    underline?: boolean;
+    strike?: boolean;
 }
 type ExtensibleLiteral<Known extends string> = Known | (string & Record<never, never>);
 type Fill = SolidFill | NoFill | GradientFill | PatternFill | ImageFill;
@@ -1236,6 +1263,7 @@ export interface ImageFill {
     tile?: TileInfo;
     alpha?: number;
     duotone?: Duotone__emitterCollision1;
+    blipEffects?: BlipEffect[];
 }
 export interface ImageResourceOptions {
     decodedByteBudget?: number;
@@ -1411,7 +1439,7 @@ export class OoxmlDecodedImageLimitError extends RangeError {
     readonly code: 'ooxml-decoded-image-limit';
     constructor(metric: OoxmlDecodedImageLimitMetric, limit: number, observed: number);
 }
-export type OoxmlDecodedImageLimitMetric = 'image-dimension' | 'image-pixels' | 'active-decoded-bytes';
+export type OoxmlDecodedImageLimitMetric = 'image-dimension' | 'image-pixels' | 'active-decoded-bytes' | 'image-effect-count' | 'image-effect-work';
 export class OoxmlError extends Error {
     readonly code: OoxmlErrorCode;
     constructor(code: OoxmlErrorCode, message: string);
@@ -1527,6 +1555,8 @@ export type PathCmd = {
 export interface PathInfo {
     w: number;
     h: number;
+    fill?: 'none' | 'lighten' | 'lightenLess' | 'darken' | 'darkenLess';
+    stroke?: false;
     commands: PathCmd[];
 }
 export interface PatternFill {
@@ -1547,6 +1577,10 @@ export interface PhoneticRun {
     text: string;
 }
 export type PhoneticType = 'fullwidthKatakana' | 'halfwidthKatakana' | 'Hiragana' | 'noConversion';
+export interface PivotAxisItem {
+    kind: string;
+    depth: number;
+}
 export type PivotCacheSource = {
     kind: 'worksheet';
     sheet?: string;
@@ -1642,6 +1676,23 @@ export interface PivotTableMetadata {
     cacheSource?: PivotCacheSource;
     status: PivotMetadataStatus;
     extensionUris?: string[];
+    style?: PivotTableStyle;
+    rowItems?: PivotAxisItem[];
+    columnItems?: PivotAxisItem[];
+}
+export interface PivotTableStyle {
+    name: string;
+    showRowHeaders: boolean;
+    showColumnHeaders: boolean;
+    showRowStripes: boolean;
+    showColumnStripes: boolean;
+    showLastColumn: boolean;
+    elements: PivotTableStyleElement[];
+}
+export interface PivotTableStyleElement {
+    kind: string;
+    size: number;
+    dxf: Dxf;
 }
 export interface Reflection {
     blur: number;

@@ -78,6 +78,7 @@ export function paragraphMeasurementEnvironment(
     showTrackedChanges: state.showTrackedChanges,
     revisionAuthorColor: state.revisionAuthorColor,
     noteNumbers: state.noteNumbers,
+    noteNumbering: state.noteNumbering,
     noteReferenceNumber: state.noteReferenceNumber,
     pageWritingMode: writingModeFromTextDirection(state.sectionLayout.textDirection),
     // §17.6.20 btLr uses the horizontal line model rotated wholesale.

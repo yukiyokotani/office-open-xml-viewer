@@ -80,6 +80,7 @@ export type {
   ChartexRegionMapColors,
   ChartexValueColorStop,
   Duotone,
+  BlipEffect,
   DrawingMLCustomDashSegment,
   FillRect,
   GradientFill,

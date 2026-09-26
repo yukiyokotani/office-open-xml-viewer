@@ -222,6 +222,7 @@ export {
   paintDrawingMLShape,
   clipDrawingMLShape,
   withDrawingMLShapeTransform,
+  type DrawingMLPathPaint,
   type DrawingMLShapeFill,
   type DrawingMLShapeGeometry,
   type DrawingMLShapePaintPlan,
@@ -302,7 +303,12 @@ export {
 // Cross-format raster/metafile admission and decode boundary.
 export {
   decodeRasterOrMetafile,
+  getIncompleteMetafileReport,
+  isOoxmlIncompleteMetafileError,
+  OoxmlIncompleteMetafileError,
   type DecodeRasterOptions,
+  type IncompleteMetafilePolicy,
+  type IncompleteMetafileReport,
 } from './image/raster-or-metafile';
 export {
   TiffDecodeError,
@@ -324,6 +330,9 @@ export {
   HARD_MAX_DECODED_IMAGE_BYTES,
   MAX_CONCURRENT_IMAGE_DECODES,
   MAX_DECODED_IMAGE_BYTES,
+  MAX_IMAGE_EFFECT_BASE_PIXELS,
+  MAX_IMAGE_EFFECT_PASSES,
+  MAX_IMAGE_EFFECT_PIXEL_WORK,
   MAX_RASTER_DIMENSION,
   MAX_RASTER_SOURCE_DIMENSION,
   MAX_RASTER_PIXELS,
@@ -378,6 +387,15 @@ export {
 // applies its `<a:duotone>` recolour once per (path + colours). Shared by the
 // docx and pptx renderers so a duotone picture decodes + recolours once and is
 // reused across page/slide revisits. xlsx keeps its own worksheet-scoped map.
+// CT_Blip pixel effects (grayscl, biLevel, clrChange) applied in document
+// order with the duotone, through the same decode cache.
+export {
+  applyBlipPixelEffects,
+  assertBlipPixelEffectsBudget,
+  blipLuminance,
+  type BlipEffect,
+  type BlipPixelEffects,
+} from './image/blip-effects';
 export {
   getCachedDuotoneBitmapByPath,
   duotoneCacheKey,
@@ -400,6 +418,7 @@ export {
   buildPresetGeometryFillPath,
   getPresetGeometryBounds,
   getConnectorAnchors,
+  pathFillModeOverlay,
 } from './shape/preset-geometry';
 export { type PresetPath } from './shape/preset-geometry/path-executor';
 // ECMA-376 §20.1.9.19 WordArt text-warp envelopes (presetTextWarpDefinitions.xml).

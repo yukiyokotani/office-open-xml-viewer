@@ -41,6 +41,7 @@ use worksheet_cursor::{
 
 mod types;
 pub use types::*;
+mod style_presets;
 mod styles;
 use styles::*;
 mod chart;
@@ -770,7 +771,7 @@ fn finalize_projected_sheet(
     ws.defined_names = defined_names;
     ws.tables = load_sheet_tables(archive, sheet_path, theme_colors);
     ws.slicers = load_sheet_slicers(archive, sheet_path, theme_colors);
-    (ws.pivot_tables, ws.pivot_diagnostics) = load_sheet_pivots(archive, sheet_path);
+    (ws.pivot_tables, ws.pivot_diagnostics) = load_sheet_pivots(archive, sheet_path, theme_colors);
     let sparkline_groups = load_sheet_sparklines(
         archive,
         &sheet_shell_xml,
@@ -8113,6 +8114,53 @@ mod pivot_metadata_tests {
                 .iter()
                 .any(|reason| reason["field"] == "cacheSource.worksheetSource.ref"));
         }
+    }
+
+    fn workbook_with_pivot_and_styles(pivot_xml: &str, styles_xml: &str) -> Vec<u8> {
+        let base = workbook_with_pivot(pivot_xml, Some(PIVOT_RELS), Some(COMPLETE_CACHE));
+        let mut archive = zip::ZipArchive::new(Cursor::new(base)).unwrap();
+        let mut bytes = Vec::new();
+        {
+            let mut zip = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            let options = zip::write::SimpleFileOptions::default();
+            for index in 0..archive.len() {
+                let mut entry = archive.by_index(index).unwrap();
+                let mut content = Vec::new();
+                std::io::Read::read_to_end(&mut entry, &mut content).unwrap();
+                zip.start_file(entry.name(), options).unwrap();
+                zip.write_all(&content).unwrap();
+            }
+            zip.start_file("xl/styles.xml", options).unwrap();
+            zip.write_all(styles_xml.as_bytes()).unwrap();
+            zip.finish().unwrap();
+        }
+        bytes
+    }
+
+    #[test]
+    fn unusable_pivot_style_and_overflowing_axis_items_are_reported_not_dropped() {
+        let styled = COMPLETE_PIVOT.replace(
+            "<extLst>",
+            r#"<rowItems count="1"><i r="4294967295"><x/></i></rowItems><pivotTableStyleInfo name="Custom" showRowHeaders="1"/><extLst>"#,
+        );
+        let styles = r#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dxfs count="1"><dxf/></dxfs><tableStyles><tableStyle name="Custom" pivot="1"><tableStyleElement type="wholeTable" dxfId="0"/><tableStyleElement type="headerRow" dxfId="7"/></tableStyle></tableStyles></styleSheet>"#;
+        let sheet = parse(&workbook_with_pivot_and_styles(&styled, styles));
+        let pivot = &sheet["pivotTables"][0];
+        assert_eq!(pivot["status"]["state"], "partial");
+        let fields: Vec<_> = pivot["status"]["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|reason| reason["kind"] == "malformedField")
+            .map(|reason| reason["field"].as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            fields.contains(&"tableStyleElement.dxfId".to_string()),
+            "{fields:?}"
+        );
+        assert!(fields.contains(&"rowItems.i".to_string()), "{fields:?}");
+        assert!(pivot.get("style").is_none());
+        assert!(pivot.get("rowItems").is_none());
     }
 
     #[test]

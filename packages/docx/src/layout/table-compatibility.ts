@@ -2,6 +2,18 @@ import { defineCompatibilityRule } from './compatibility.js';
 import type { ParagraphLayoutSource } from './text.js';
 import type { LayoutRect } from './types.js';
 
+export const WORD_ROTATED_CELL_AUTO_ROW_WRAP = defineCompatibilityRule({
+  id: 'word-rotated-cell-auto-row-wrap',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'rotated-cell-row-height-direction-rule-matrix',
+    application: 'Microsoft Word',
+    version: '16.113.2',
+    platform: 'macOS 27.0',
+  },
+  description: 'In a fixed-width table, btLr and tbRl cells with 1, 4, or 8 glyphs keep the same automatic row height as a one-line horizontal neighbor by wrapping into additional columns. Two paragraphs and an explicit line break also keep that height when their columns fit. A 20pt top/bottom margin sum adds 20pt, revealing a line-box minimum even when the glyph advance is narrower; a 60pt atLeast minimum and a five-line horizontal neighbor govern their rows; exact remains authored. A horizontal text-direction control keeps its ordinary line. These Word PDF observations cover short text fitting across a 225pt cell in compatibility mode 14; larger content and other compatibility modes are not Office-verified by this matrix.',
+});
+
 export const WORD_AUTOFIT_EMPTY_PARAGRAPH_CONTENT_WIDTH = defineCompatibilityRule({
   id: 'word-autofit-empty-paragraph-content-width',
   evidence: {

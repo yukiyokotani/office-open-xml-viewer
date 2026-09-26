@@ -195,6 +195,7 @@ export type {
   PhoneticAlignment,
   // Differential / gradient style sub-types (reachable via Styles).
   Dxf,
+  DxfFontToggles,
   GradientFillSpec,
   // Conditional formatting (reachable via Worksheet.conditionalFormats).
   ConditionalFormat,
@@ -220,6 +221,9 @@ export type {
   SlicerElementStyle,
   // Metadata-only pivot facts (reachable via Worksheet.pivotTables).
   PivotTableMetadata,
+  PivotTableStyle,
+  PivotTableStyleElement,
+  PivotAxisItem,
   PivotLocation,
   PivotPageField,
   PivotDataField,
@@ -233,6 +237,7 @@ export type {
   // Drawings / shapes (reachable via Worksheet drawings).
   ImageAnchor,
   Duotone,
+  BlipEffect,
   ChartAnchor,
   ShapeAnchor,
   ShapeInfo,

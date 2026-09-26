@@ -295,6 +295,10 @@ pub struct RawTblBorders {
     pub right: Option<EdgeBorder>,
     pub inside_h: Option<EdgeBorder>,
     pub inside_v: Option<EdgeBorder>,
+    /// §17.4.73 / §17.4.79 cell diagonals, meaningful only in a style's
+    /// `w:tcPr/w:tcBorders` (CT_TblBorders has no diagonal).
+    pub tl2br: Option<EdgeBorder>,
+    pub tr2bl: Option<EdgeBorder>,
 }
 
 /// Conditional formatting block (`w:tblStylePr`) — the subset we resolve.
@@ -1415,7 +1419,7 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
 
     // Paragraph shading
     if let Some(shd) = child_w(ppr, "shd") {
-        fmt.shading = shd_fill_color(shd);
+        fmt.shading = shading_fill(shd);
     }
 
     // Page break before paragraph
@@ -2084,7 +2088,7 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
     // foregrounds over white and blue fills. Keep this Office-observed rule
     // local to runs; paragraph/cell/shape patterns have different paint paths.
     if let Some(shd) = child_w(rpr, "shd") {
-        fmt.background = run_shd_display_color(shd);
+        fmt.background = shading_fill(shd);
     }
 
     // Vertical alignment (superscript / subscript)
@@ -2247,8 +2251,10 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
 
 // ===== Table style parsing =====
 
+/// Table-style cell shading: the same ECMA-376 `w:shd` semantics as
+/// paragraph/run shading, so percentage patterns blend identically.
 fn shd_fill(node: roxmltree::Node) -> Option<String> {
-    child_w(node, "shd").and_then(shd_fill_color)
+    child_w(node, "shd").and_then(shading_fill)
 }
 
 fn shd_fill_color(shd: roxmltree::Node) -> Option<String> {
@@ -2260,7 +2266,13 @@ fn shd_fill_color(shd: roxmltree::Node) -> Option<String> {
     }
 }
 
-fn run_shd_display_color(shd: roxmltree::Node) -> Option<String> {
+/// ECMA-376 `w:shd` (paragraph §17.3.1.31, run §17.3.2.32, table cell and
+/// table-style cell §17.4.32/§17.4.33) as one displayed fill. The element has
+/// the same semantics in every location: ST_Shd `pctN` (§17.18.78) is an N%
+/// `w:color` pattern over `w:fill`, which Word paints as one solid color (its
+/// PDF of a `pct15` run with an automatic pattern color over white is
+/// #D9D9D9). Other patterns keep the fill-only projection.
+pub(crate) fn shading_fill(shd: roxmltree::Node) -> Option<String> {
     let fill = shd_fill_color(shd)?;
     // ST_Shd's pct12/pct37/pct62/pct87 mean 12.5/37.5/62.5/87.5%,
     // respectively (§17.18.78), not the integer encoded in their names.
@@ -2350,6 +2362,8 @@ fn parse_raw_tbl_borders(node: roxmltree::Node) -> RawTblBorders {
             "right" | "end" => b.right = Some(e),
             "insideH" => b.inside_h = Some(e),
             "insideV" => b.inside_v = Some(e),
+            "tl2br" => b.tl2br = Some(e),
+            "tr2bl" => b.tr2bl = Some(e),
             _ => {}
         }
     }
@@ -2374,6 +2388,12 @@ fn merge_raw_borders(dst: &mut RawTblBorders, src: &RawTblBorders) {
     }
     if src.inside_v.is_some() {
         dst.inside_v = src.inside_v.clone();
+    }
+    if src.tl2br.is_some() {
+        dst.tl2br = src.tl2br.clone();
+    }
+    if src.tr2bl.is_some() {
+        dst.tr2bl = src.tr2bl.clone();
     }
 }
 
@@ -3494,6 +3514,28 @@ mod tests {
         assert_eq!(fr.shd.as_deref(), Some("cccccc"));
     }
 
+    #[test]
+    fn table_style_cell_percentage_shading_blends_like_run_shading() {
+        let xml = format!(
+            r#"<w:styles xmlns:w="{ns}">
+              <w:style w:type="table" w:styleId="Pct">
+                <w:name w:val="Pct"/>
+                <w:tcPr><w:shd w:val="pct15" w:color="auto" w:fill="FFFFFF"/></w:tcPr>
+                <w:tblStylePr w:type="firstRow">
+                  <w:tcPr><w:shd w:val="pct25" w:color="00FF00" w:fill="FFFFFF"/></w:tcPr>
+                </w:tblStylePr>
+              </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        );
+        let def = StyleMap::parse(&xml).resolve_table_style("Pct");
+        assert_eq!(def.cell_shd.as_deref(), Some("d9d9d9"));
+        assert_eq!(
+            def.cond.get("firstRow").unwrap().shd.as_deref(),
+            Some("bfffbf")
+        );
+    }
+
     // ── WD4: run-level character metrics (§17.3.2.35 / .43 / .24 / .19) ──────
 
     #[test]
@@ -3541,6 +3583,36 @@ mod tests {
             base.fit_text.and_then(|fit_text| fit_text.id).is_none(),
             "a direct fitText WITHOUT w:id must clear the inherited id"
         );
+    }
+
+    #[test]
+    fn percentage_run_shading_is_one_blended_fill() {
+        // Word PDF evidence: pct15, automatic pattern color over white = D9D9D9.
+        for (shd, expected) in [
+            (
+                r#"<w:shd w:val="pct15" w:color="auto" w:fill="FFFFFF"/>"#,
+                Some("d9d9d9"),
+            ),
+            (r#"<w:shd w:val="pct15" w:fill="FFFFFF"/>"#, Some("d9d9d9")),
+            (
+                r#"<w:shd w:val="pct25" w:color="00FF00" w:fill="FFFFFF"/>"#,
+                Some("bfffbf"),
+            ),
+            (
+                r#"<w:shd w:val="clear" w:color="auto" w:fill="DDDDDD"/>"#,
+                Some("dddddd"),
+            ),
+            (
+                r#"<w:shd w:val="horzStripe" w:color="FF0000" w:fill="00FF00"/>"#,
+                Some("00ff00"),
+            ),
+            (
+                r#"<w:shd w:val="pct15" w:color="auto" w:fill="auto"/>"#,
+                None,
+            ),
+        ] {
+            assert_eq!(run_fmt_from(shd).background.as_deref(), expected, "{shd}");
+        }
     }
 
     #[test]

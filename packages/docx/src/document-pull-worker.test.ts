@@ -69,21 +69,25 @@ const identity: PullSessionIdentity<number> = {
 };
 
 describe('DOCX document pull integration', () => {
-  it('allows only the degraded-container missing usage checkpoint', () => {
+  it('allows only the typed degraded-container missing usage checkpoint', () => {
     const unavailable = {
-      document_cursor_resource_usage: () => {
-        throw new Error('document cursor usage is unavailable');
-      },
+      document_cursor_resource_usage: () => undefined,
     } as unknown as DocxDocumentCursorArchive;
     expect(readDocxDocumentCursorUsage((operation) => operation(unavailable))).toBeUndefined();
 
-    const violation = {
-      document_cursor_resource_usage: () => {
-        throw new Error('OOXML_RESOURCE_LIMIT: usage checkpoint failed');
-      },
-    } as unknown as DocxDocumentCursorArchive;
-    expect(() => readDocxDocumentCursorUsage((operation) => operation(violation)))
-      .toThrow('OOXML_RESOURCE_LIMIT: usage checkpoint failed');
+    // A thrown error is never an absence, whatever its text.
+    for (const message of [
+      'OOXML_RESOURCE_LIMIT: usage checkpoint failed',
+      'document cursor usage is unavailable',
+    ]) {
+      const violation = {
+        document_cursor_resource_usage: () => {
+          throw new Error(message);
+        },
+      } as unknown as DocxDocumentCursorArchive;
+      expect(() => readDocxDocumentCursorUsage((operation) => operation(violation)))
+        .toThrow(message);
+    }
   });
 
   it('materializes acknowledged body units and a body-free terminal envelope', async () => {
@@ -207,6 +211,37 @@ describe('DOCX document pull integration', () => {
       ),
     ).rejects.toThrow('unknown shape');
     expect(archive.canceled).toBe(true);
+  });
+
+  it('streams units when the archive reports no document-cursor checkpoint', async () => {
+    // A package that fails before its cursor opens streams a placeholder
+    // document with no checkpoint; the typed archive result is undefined.
+    class UnledgeredArchive extends FakeArchive {
+      document_cursor_resource_usage(): Uint8Array | undefined {
+        return undefined;
+      }
+    }
+    const unledgered = new UnledgeredArchive();
+    const worker = new DocumentPullWorker(() => unledgered);
+    worker.open(identity);
+    const document = await materializeDocumentPullSession(
+      createLocalDocumentPullTransport(worker),
+      identity,
+    );
+    expect(document.body.map((element) => element.type)).toEqual(['pageBreak', 'columnBreak']);
+
+    // Any thrown usage error, whatever its text, still fails the stream.
+    class BrokenUsageArchive extends FakeArchive {
+      document_cursor_resource_usage(): Uint8Array | undefined {
+        throw new Error('document cursor usage is unavailable');
+      }
+    }
+    const brokenArchive = new BrokenUsageArchive();
+    const broken = new DocumentPullWorker(() => brokenArchive);
+    broken.open(identity);
+    await expect(
+      materializeDocumentPullSession(createLocalDocumentPullTransport(broken), identity),
+    ).rejects.toThrow();
   });
 
   it('streams an already-materialized fallback model without a whole-model envelope', async () => {

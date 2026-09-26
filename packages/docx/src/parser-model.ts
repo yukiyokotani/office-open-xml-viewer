@@ -246,6 +246,10 @@ export interface InternalDocxDocumentModel extends DocxDocumentModel {
   readonly __noteLayoutSettings?: Readonly<{
     footnotePosition?: string;
     endnotePosition?: string;
+    footnoteNumberFormat?: string;
+    footnoteNumberStart?: number;
+    endnoteNumberFormat?: string;
+    endnoteNumberStart?: number;
   }>;
   readonly __documentTypographySettings?: Readonly<{
     normalStyleFontSizePt?: number;
@@ -289,6 +293,20 @@ export function documentPageLayoutSettingsInput(
 export interface DocumentNoteLayoutSettingsInput {
   readonly footnotePosition: string;
   readonly endnotePosition: string;
+  readonly footnoteNumbering: Readonly<{ format: string; start: number }>;
+  readonly endnoteNumbering: Readonly<{ format: string; start: number }>;
+}
+
+/** §17.11.17/.18 numFmt defaults to decimal and §17.11.20 numStart to 1 for
+ * both note kinds when the document-wide element is absent. */
+function noteNumberingInput(
+  format: string | undefined,
+  start: number | undefined,
+): Readonly<{ format: string; start: number }> {
+  return {
+    format: typeof format === 'string' && format.length > 0 ? format : 'decimal',
+    start: typeof start === 'number' && Number.isSafeInteger(start) ? start : 1,
+  };
 }
 
 export function documentNoteLayoutSettingsInput(
@@ -299,6 +317,14 @@ export function documentNoteLayoutSettingsInput(
     // §17.11.21/.22 defaults when document-wide w:pos is absent.
     footnotePosition: settings?.footnotePosition ?? 'pageBottom',
     endnotePosition: settings?.endnotePosition ?? 'docEnd',
+    footnoteNumbering: noteNumberingInput(
+      settings?.footnoteNumberFormat,
+      settings?.footnoteNumberStart,
+    ),
+    endnoteNumbering: noteNumberingInput(
+      settings?.endnoteNumberFormat,
+      settings?.endnoteNumberStart,
+    ),
   }, 'DOCX note layout settings input');
 }
 

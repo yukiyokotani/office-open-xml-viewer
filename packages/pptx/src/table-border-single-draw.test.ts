@@ -16,9 +16,10 @@ import type { TableCell, TableElement, TableRow, TextBody } from './types';
 interface StrokeSeg { x1: number; y1: number; x2: number; y2: number; width: number; color: string; }
 interface FillRect { x: number; y: number; width: number; height: number; color: string; }
 
-function makeRecordingCtx(): { ctx: CanvasRenderingContext2D; strokes: StrokeSeg[]; fills: FillRect[] } {
+function makeRecordingCtx(): { ctx: CanvasRenderingContext2D; strokes: StrokeSeg[]; fills: FillRect[]; texts: Array<{ text: string; y: number }> } {
   const strokes: StrokeSeg[] = [];
   const fills: FillRect[] = [];
+  const texts: Array<{ text: string; y: number }> = [];
   let cur = { x: 0, y: 0 };
   let pending: { x1: number; y1: number; x2: number; y2: number } | null = null;
   let lineWidth = 1;
@@ -52,7 +53,7 @@ function makeRecordingCtx(): { ctx: CanvasRenderingContext2D; strokes: StrokeSeg
     createLinearGradient() { return { addColorStop() {} }; },
     createPattern() { return null; },
     measureText: () => ({ width: 0, fontBoundingBoxAscent: 8, fontBoundingBoxDescent: 2, actualBoundingBoxAscent: 8, actualBoundingBoxDescent: 2 } as TextMetrics),
-    fillText() {}, strokeText() {},
+    fillText(text: string, _x: number, y: number) { texts.push({ text, y }); }, strokeText() {},
     font: '10px sans-serif',
     textAlign: 'left' as CanvasTextAlign,
     textBaseline: 'alphabetic' as CanvasTextBaseline,
@@ -60,7 +61,7 @@ function makeRecordingCtx(): { ctx: CanvasRenderingContext2D; strokes: StrokeSeg
     letterSpacing: '0px',
     globalCompositeOperation: 'source-over' as GlobalCompositeOperation,
   };
-  return { ctx: ctx as unknown as CanvasRenderingContext2D, strokes, fills };
+  return { ctx: ctx as unknown as CanvasRenderingContext2D, strokes, fills, texts };
 }
 
 const EMU = 12700; // 1 pt
@@ -129,10 +130,113 @@ function rgba(hex: string): string {
   return `rgba(${r},${g},${b},1)`;
 }
 
+describe('PowerPoint table-cell paragraph boundaries', () => {
+  it('ignores first and last paragraph edge gaps even with spcFirstLastPara=1', () => {
+    // PowerPoint PDF controls: a centred 24pt Arial cell with 12pt spcAft or
+    // 50% spcAft keeps the same glyph position for absent/0/1. Two paragraphs
+    // in the same cell retain the authored gap between them.
+    const tableY = (
+      spaceAfter: number | null,
+      second: boolean,
+      spaceBefore: number | null = null,
+      spaceAfterPct: number | null = null,
+    ): number[] => {
+      const para = (text: string, after: number | null) => ({
+        alignment: 'l', marL: 0, marR: 0, indent: 0,
+        spaceBefore: text === 'first' ? spaceBefore : null,
+        spaceAfter: after, spaceAfterPct: text === 'first' ? spaceAfterPct : null,
+        spaceLine: null,
+        runs: [{ type: 'text', text, fontSize: 24, fontFamily: 'Arial' }],
+        bullet: { type: 'none' }, eaLnBrk: true,
+      });
+      const textBody = {
+        verticalAnchor: 'ctr', spcFirstLastPara: true,
+        paragraphs: [para('first', spaceAfter), ...(second ? [para('second', null)] : [])],
+        defaultFontSize: null, defaultBold: null, defaultItalic: null,
+        lIns: 0, rIns: 0, tIns: 0, bIns: 0,
+        wrap: 'square', vert: 'horz', autoFit: 'none',
+      } as unknown as TextBody;
+      const t = tableOf([[cell({ textBody })]], [COL]);
+      t.rows[0].height = 100 * EMU;
+      const { ctx, texts } = makeRecordingCtx();
+      renderTable(ctx, t, SCALE);
+      return texts.map(({ y }) => y);
+    };
+
+    expect(tableY(1200, false)[0]).toBeCloseTo(tableY(null, false)[0], 5);
+    expect(tableY(null, false, 1200)[0]).toBeCloseTo(tableY(null, false)[0], 5);
+    expect(tableY(null, false, null, 50000)[0]).toBeCloseTo(tableY(null, false)[0], 5);
+    const plain = tableY(null, true);
+    const spaced = tableY(1200, true);
+    expect(spaced[1] - spaced[0] - (plain[1] - plain[0])).toBeCloseTo(12, 5);
+  });
+
+  it('does not grow an automatic row from the last paragraph gap when the flag is true', () => {
+    // PowerPoint PDF control with a:tr@h=0: the following row starts at the
+    // same position for 0pt and 12pt spcAft, including flag=1.
+    const boundaryY = (spaceAfter: number | null): number => {
+      const textBody = {
+        verticalAnchor: 't', spcFirstLastPara: true,
+        paragraphs: [{
+          alignment: 'l', marL: 0, marR: 0, indent: 0,
+          spaceBefore: null, spaceAfter, spaceLine: null,
+          runs: [{ type: 'text', text: 'first', fontSize: 24, fontFamily: 'Arial' }],
+          bullet: { type: 'none' }, eaLnBrk: true,
+        }],
+        defaultFontSize: null, defaultBold: null, defaultItalic: null,
+        lIns: 0, rIns: 0, tIns: 0, bIns: 0,
+        wrap: 'square', vert: 'horz', autoFit: 'none',
+      } as unknown as TextBody;
+      const t = tableOf([
+        [cell({ textBody, borderB: ln() })],
+        [cell({ borderT: ln() })],
+      ], [COL]);
+      t.rows[0].height = 0;
+      const border = render(t).find((s) => s.y1 === s.y2 && s.y1 > 0);
+      expect(border).toBeDefined();
+      return (border as StrokeSeg).y1;
+    };
+
+    expect(boundaryY(1200)).toBeCloseTo(boundaryY(null), 5);
+  });
+});
+
 describe('DrawingML <a:tbl> — shared interior gridline drawn once (spec-silent)', () => {
+  it('grows a positive header row for explicit percentage line spacing and cell margins', () => {
+    // PowerPoint PDF of a table with 16pt text, 36.85pt header minimum,
+    // 8.5pt top/bottom margins and 120% lnSpc grows the header. The same
+    // table at 100% lnSpc, or with zero vertical margins, keeps the minimum.
+    const boundary = (pct: number, marginPt: number): number => {
+      const textBody = {
+        verticalAnchor: 'b', paragraphs: [{
+          alignment: 'ctr', marL: 0, marR: 0, indent: 0,
+          spaceBefore: null, spaceAfter: 300,
+          spaceLine: { type: 'pct', val: pct },
+          runs: [{ type: 'text', text: 'Header', fontSize: 16, fontFamily: 'Yu Gothic' }],
+          bullet: { type: 'none' }, eaLnBrk: true,
+        }],
+        defaultFontSize: null, defaultBold: null, defaultItalic: null,
+        lIns: 108000, rIns: 108000,
+        tIns: marginPt * EMU, bIns: marginPt * EMU,
+        wrap: 'square', vert: 'horz', autoFit: 'none',
+      } as unknown as TextBody;
+      const t = tableOf([
+        [cell({ textBody, borderB: ln() })],
+        [cell({ borderT: ln() })],
+      ], [200 * EMU]);
+      t.rows[0].height = 36.85 * EMU;
+      t.height = 60 * EMU; // authored frame exceeds the row minima
+      return render(t).find((s) => s.y1 === s.y2 && s.y1 > 0)?.y1 ?? -1;
+    };
+
+    expect(boundary(120000, 8.5) - boundary(100000, 8.5)).toBeCloseTo(4, 2);
+    expect(boundary(120000, 0)).toBeCloseTo(boundary(100000, 8.5), 2);
+  });
+
   it('does not grow an authored row from substituted-font design metrics', () => {
     // ECMA-376 §21.1.2.2.5/.11: 120% line spacing is based on the largest
-    // authored text size. 16pt * 120% + 3pt after + 2 * 8.5pt insets = 39.2pt,
+    // authored natural line box. The terminal 3pt spcAft is suppressed:
+    // 16pt * 120% natural * 120% authored + 2 * 8.5pt insets = 40.04pt,
     // so the authored 40.6pt row already fits. The old measure-only path used
     // Meiryo's ~1.596em design line box and moved this boundary down to 42.5pt.
     const textBody = {
@@ -161,9 +265,8 @@ describe('DrawingML <a:tbl> — shared interior gridline drawn once (spec-silent
   it('uses the natural 120% line box when table line spacing is omitted', () => {
     // ECMA-376 leaves omitted line spacing to the text font. Current
     // PowerPoint grows a zero-height table row from the natural single-line
-    // box: 16pt * 120% + 1pt top + 1pt bottom = 21.2pt. This is distinct from
-    // an authored `<a:spcPct val="120000"/>`, whose percentage base is the
-    // authored 16pt size rather than a second 120% multiplication.
+    // box: 16pt * 120% + 1pt top + 1pt bottom = 21.2pt. An authored
+    // `<a:spcPct val="120000"/>` scales that natural line box again.
     const textBody = {
       verticalAnchor: 'ctr',
       paragraphs: [{

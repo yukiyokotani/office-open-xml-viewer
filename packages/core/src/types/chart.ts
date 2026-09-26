@@ -823,6 +823,13 @@ export interface ChartModel {
   titleRichRuns?: ChartTextRun[] | null;
   /** Direct chart title element exists; an empty title still reserves its band. */
   titlePresent?: boolean;
+  /**
+   * The source chart declares no series at all (every classic plot-area group
+   * is empty, or a binary chart has no Series record). Office draws such a
+   * chart as its empty chart area; the renderer does not show its "(no data)"
+   * placeholder, which it keeps for charts whose series could not be read.
+   */
+  authoredWithoutSeries?: boolean;
   categories: string[];
   /** Host-resolved visibility of the shared category source, aligned by point
    * index. Kept separate from the category strings so authored chart caches
