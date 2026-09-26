@@ -3233,7 +3233,7 @@ fn offset_slide_element(el: &mut SlideElement, dx: i64, dy: i64) {
 }
 
 /// Parse a connector shape (p:cxnSp) as a ShapeElement with line geometry.
-fn parse_connector(
+pub(crate) fn parse_connector(
     node: roxmltree::Node<'_, '_>,
     theme_source: &(impl PptxThemeSource + ?Sized),
     rels: &HashMap<String, String>,

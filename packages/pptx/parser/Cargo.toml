@@ -6,6 +6,13 @@ edition = "2021"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+# The WASM JS entry points (`parse_pptx`, `PptxArchive`, ...). Rust callers
+# that link the parser as a library can disable them so the linked module does
+# not export the presentation API.
+[features]
+default = ["wasm-entry"]
+wasm-entry = []
+
 [dependencies]
 wasm-bindgen = { workspace = true }
 serde = { workspace = true }
@@ -14,6 +21,7 @@ zip = { workspace = true }
 roxmltree = { workspace = true }
 console_error_panic_hook = { workspace = true }
 ooxml-common = { workspace = true }
+pptx-model = { workspace = true }
 
 # `-Oz` optimizes the wasm binary for size (over the default `-O`), shrinking
 # the artifact browsers download. wasm-pack runs this pass after wasm-bindgen.

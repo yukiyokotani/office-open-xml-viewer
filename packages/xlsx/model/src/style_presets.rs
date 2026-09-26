@@ -7,17 +7,17 @@
 //! PivotTable style element's edge (ECMA-376 §18.8.6 style default `none`,
 //! §18.8.41 layering).
 
-use crate::resolve_color_attrs;
-use crate::types::{Border, BorderEdge, Dxf, DxfFontToggles, Fill, Font, PivotTableStyleElement};
+use crate::{Border, BorderEdge, Dxf, DxfFontToggles, Fill, Font, PivotTableStyleElement};
+use ooxml_common::spreadsheet_color::{resolve_color, SpreadsheetColor};
 use ooxml_common::spreadsheet_style_presets::{self, PresetColor, PresetDxf, PresetEdge};
 
-/// A preset theme reference resolved exactly as a `<color theme tint>`
-/// attribute pair in `styles.xml` (§18.8.3, including the theme index remap).
 fn color(color: Option<PresetColor>, theme_colors: &[String]) -> Option<String> {
     let color = color?;
-    let theme = color.theme.to_string();
-    let tint = color.tint.map(|tint| tint.to_string());
-    resolve_color_attrs(None, Some(&theme), tint.as_deref(), None, theme_colors)
+    resolve_color(
+        SpreadsheetColor::Theme(color.theme),
+        color.tint,
+        theme_colors,
+    )
 }
 
 fn edge(edge: Option<PresetEdge>, theme_colors: &[String]) -> Option<BorderEdge> {
@@ -36,7 +36,7 @@ fn edge(edge: Option<PresetEdge>, theme_colors: &[String]) -> Option<BorderEdge>
 
 /// The model format of a preset `<dxf>` under `theme_colors` (the workbook
 /// theme in clrScheme order, as the XLSX parser holds it).
-pub(crate) fn preset_dxf(dxf: &PresetDxf, theme_colors: &[String]) -> Dxf {
+pub fn preset_dxf(dxf: &PresetDxf, theme_colors: &[String]) -> Dxf {
     Dxf {
         font: dxf.font.map(|font| Font {
             bold: font.bold,
@@ -74,7 +74,7 @@ pub(crate) fn preset_dxf(dxf: &PresetDxf, theme_colors: &[String]) -> Dxf {
 
 /// The elements of the built-in PivotTable style `name`, or `None` when it
 /// is not a built-in style.
-pub(crate) fn pivot_style_elements(
+pub fn pivot_style_elements(
     name: &str,
     theme_colors: &[String],
 ) -> Option<Vec<PivotTableStyleElement>> {

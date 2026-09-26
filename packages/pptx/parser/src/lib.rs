@@ -54,7 +54,9 @@ use shape::*;
 mod smartart_fallback;
 
 mod master;
+mod standalone;
 use master::*;
+pub use standalone::{parse_standalone_shape_part, StandaloneShape};
 
 // Test-only counter for `roxmltree::Document::parse` calls on the D4 hot paths
 // (slide master build, layout, slide XML + decorations). It exists ONLY under
@@ -181,7 +183,7 @@ fn note_bootstrap_output_slide_retained() {
 /// resulting `ArrayBuffer` to the main thread as a transferable and the main
 /// thread does a single `TextDecoder.decode` + `JSON.parse`, collapsing three
 /// serializations (Rust String → JsString → structured clone) into one decode.
-#[wasm_bindgen]
+#[cfg_attr(feature = "wasm-entry", wasm_bindgen)]
 pub fn parse_pptx(
     data: &[u8],
     max_archive_entry_bytes: Option<u64>,
@@ -202,7 +204,7 @@ pub fn parse_pptx(
 /// WASM-callable markdown projection. Shares the body of `to_markdown_native`
 /// so the browser / Node WASM path and the native mcp-server path stay in
 /// lock-step. See `to_markdown_native` for the design rationale.
-#[wasm_bindgen]
+#[cfg_attr(feature = "wasm-entry", wasm_bindgen)]
 pub fn pptx_to_markdown(
     data: &[u8],
     max_archive_entry_bytes: Option<u64>,
@@ -239,7 +241,7 @@ fn pptx_parser_js_error(error: String) -> JsValue {
 /// Extract raw bytes for a single entry (e.g. "ppt/media/media2.mp4") from a
 /// pptx zip archive. Used by the main thread to materialize media blobs for
 /// interactive playback without re-parsing the whole file.
-#[wasm_bindgen]
+#[cfg_attr(feature = "wasm-entry", wasm_bindgen)]
 pub fn extract_media(
     data: &[u8],
     path: &str,
@@ -259,7 +261,7 @@ pub fn extract_media(
 /// Extract raw bytes for a single embedded image entry (e.g.
 /// "ppt/media/image1.png") from a pptx zip archive. Used by the main thread to
 /// lazily materialize image blobs on demand through a bounded package operation.
-#[wasm_bindgen]
+#[cfg_attr(feature = "wasm-entry", wasm_bindgen)]
 pub fn extract_image(
     data: &[u8],
     path: &str,
@@ -277,7 +279,7 @@ pub fn extract_image(
 }
 
 /// Extract one font part referenced by `p:embeddedFontLst`.
-#[wasm_bindgen]
+#[cfg_attr(feature = "wasm-entry", wasm_bindgen)]
 pub fn extract_font(
     data: &[u8],
     path: &str,
@@ -303,7 +305,7 @@ pub fn extract_font(
 /// viewer's parse-then-lazily-load-media pattern) pays the copy + open cost a
 /// single time. The session owns the source bytes, validated central-directory
 /// index, resource governor, and first package-wide poison error.
-#[wasm_bindgen]
+#[cfg_attr(feature = "wasm-entry", wasm_bindgen)]
 pub struct PptxArchive {
     /// The admitted OPC package. Construction fails closed when the input is not
     /// a ZIP, not an OPC package, or lacks `ppt/presentation.xml`
@@ -441,47 +443,6 @@ fn observe_shared_cache_candidate<T: serde::Serialize>(
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct PresentationBootstrap {
-    slide_count: usize,
-    slide_width: i64,
-    slide_height: i64,
-    default_text_color: Option<String>,
-    major_font: Option<String>,
-    minor_font: Option<String>,
-    hlink_color: Option<String>,
-    fol_hlink_color: Option<String>,
-    embedded_fonts: Vec<PptxEmbeddedFontRef>,
-    slides: Vec<BootstrapSlide>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PptxEmbeddedFontRef {
-    font_name: String,
-    style: EmbeddedFontStyle,
-    part_path: String,
-    content_type: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-enum EmbeddedFontStyle {
-    Regular,
-    Bold,
-    Italic,
-    BoldItalic,
-}
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BootstrapSlide {
-    index: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    part_name: Option<String>,
-}
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
 struct PresentationBootstrapProjection<'a> {
     slide_count: usize,
     slide_width: i64,
@@ -586,7 +547,7 @@ fn serialize_presentation_bootstrap(
     Ok(bytes)
 }
 
-#[wasm_bindgen]
+#[cfg_attr(feature = "wasm-entry", wasm_bindgen)]
 impl PptxArchive {
     fn ensure_presentation(&mut self) -> Result<(), String> {
         if self.presentation.is_none() {
@@ -606,7 +567,7 @@ impl PptxArchive {
     /// JS→WASM boundary. Taking `&[u8]` would force a second `to_vec()` copy so
     /// the `Cursor` could own its backing store, transiently doubling WASM
     /// linear memory to ~2x the file size during construction.
-    #[wasm_bindgen(constructor)]
+    #[cfg_attr(feature = "wasm-entry", wasm_bindgen(constructor))]
     pub fn new(
         data: Vec<u8>,
         max_archive_entry_bytes: Option<u64>,

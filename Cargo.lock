@@ -200,10 +200,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "docx-model"
+version = "0.1.0"
+dependencies = [
+ "ooxml-common",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "docx-parser"
 version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
+ "docx-model",
  "ooxml-common",
  "quick-xml",
  "roxmltree",
@@ -554,11 +564,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
+name = "pptx-model"
+version = "0.1.0"
+dependencies = [
+ "ooxml-common",
+ "serde",
+]
+
+[[package]]
 name = "pptx-parser"
 version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
  "ooxml-common",
+ "pptx-model",
  "roxmltree",
  "serde",
  "serde_json",
@@ -1105,6 +1124,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "xlsx-model"
+version = "0.1.0"
+dependencies = [
+ "ooxml-common",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "xlsx-parser"
 version = "0.1.0"
 dependencies = [
@@ -1115,6 +1143,7 @@ dependencies = [
  "serde",
  "serde_json",
  "wasm-bindgen",
+ "xlsx-model",
  "zip",
 ]
 

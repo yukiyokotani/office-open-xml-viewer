@@ -20,22 +20,23 @@
 
 use crate::ns::is_a_ns;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
+
+type NamespaceDeclarations = Arc<[(Option<String>, Arc<str>)]>;
 
 /// One style-matrix entry retained for on-demand self-contained XML.
 ///
 /// A theme entry may use namespace prefixes declared only on `<a:theme>`
 /// (including extension namespaces such as `a14`). Keeping only the source
 /// range of `<a:ln>`/`<a:solidFill>` therefore produces an invalid fragment.
-/// This descriptor keeps the entry bytes and only the namespace prefixes the
-/// fragment actually references; namespace URIs are shared across entries.
-/// Consumers can therefore build a valid temporary wrapper without multiplying
-/// every root namespace by every style-matrix entry.
+/// This descriptor keeps the entry bytes and every in-scope namespace. Prefixes
+/// can be any valid XML NCName, so scanning the bytes as ASCII would lose valid
+/// declarations. Namespace sets and URIs are shared across entries.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StandaloneThemeStyleXml {
     fragment: String,
-    namespaces: Vec<(Option<String>, Arc<str>)>,
+    namespaces: NamespaceDeclarations,
 }
 
 impl StandaloneThemeStyleXml {
@@ -43,41 +44,31 @@ impl StandaloneThemeStyleXml {
         node: roxmltree::Node<'_, '_>,
         source: &str,
         namespace_pool: &mut HashMap<String, Arc<str>>,
+        namespace_sets: &mut HashSet<NamespaceDeclarations>,
     ) -> Self {
         let fragment = source[node.range()].to_owned();
-        let mut prefixes = BTreeSet::new();
-        let bytes = fragment.as_bytes();
-        for colon in bytes
-            .iter()
-            .enumerate()
-            .filter_map(|(index, byte)| (*byte == b':').then_some(index))
-        {
-            let mut start = colon;
-            while start > 0 && is_xml_name_byte(bytes[start - 1]) {
-                start -= 1;
-            }
-            if start < colon {
-                prefixes.insert(fragment[start..colon].to_owned());
-            }
-        }
-
         let intern = |uri: &str, pool: &mut HashMap<String, Arc<str>>| {
             pool.entry(uri.to_owned())
                 .or_insert_with(|| Arc::<str>::from(uri))
                 .clone()
         };
-        let mut namespaces = Vec::with_capacity(prefixes.len() + 1);
-        if let Some(uri) = node.lookup_namespace_uri(None) {
-            namespaces.push((None, intern(uri, namespace_pool)));
-        }
-        for prefix in prefixes {
-            if prefix == "xml" {
-                continue;
-            }
-            if let Some(uri) = node.lookup_namespace_uri(Some(&prefix)) {
-                namespaces.push((Some(prefix), intern(uri, namespace_pool)));
-            }
-        }
+        let namespaces: Vec<_> = node
+            .namespaces()
+            .filter(|namespace| namespace.name() != Some("xml"))
+            .map(|namespace| {
+                (
+                    namespace.name().map(str::to_owned),
+                    intern(namespace.uri(), namespace_pool),
+                )
+            })
+            .collect();
+        let namespaces = if let Some(existing) = namespace_sets.get(namespaces.as_slice()) {
+            Arc::clone(existing)
+        } else {
+            let shared: Arc<[_]> = namespaces.into();
+            namespace_sets.insert(Arc::clone(&shared));
+            shared
+        };
         Self {
             fragment,
             namespaces,
@@ -85,12 +76,11 @@ impl StandaloneThemeStyleXml {
     }
 
     /// Build a self-contained wrapper on demand. Namespace URIs are interned
-    /// across all entries and only prefixes referenced by this fragment are
-    /// retained, so parsing a theme cannot expand O(namespaces × entries) in
-    /// memory. The temporary wrapper lives only for the caller's DOM parse.
+    /// across all entries, and identical in-scope namespace sets are shared.
+    /// The temporary wrapper lives only for the caller's DOM parse.
     pub fn to_xml(&self) -> String {
         let mut xml = String::from("<themeStyleRoot");
-        for (prefix, uri) in &self.namespaces {
+        for (prefix, uri) in self.namespaces.iter() {
             match prefix {
                 Some(prefix) => {
                     xml.push_str(" xmlns:");
@@ -107,10 +97,6 @@ impl StandaloneThemeStyleXml {
         xml.push_str("</themeStyleRoot>");
         xml
     }
-}
-
-fn is_xml_name_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')
 }
 
 /// Result of resolving a style-matrix index. `NoStyle` is an authored sentinel
@@ -153,6 +139,7 @@ impl ThemeFormatScheme {
         };
 
         let mut namespace_pool = HashMap::new();
+        let mut namespace_sets = HashSet::new();
         let mut collect = |list_name: &str| -> Vec<StandaloneThemeStyleXml> {
             format_scheme
                 .children()
@@ -164,7 +151,14 @@ impl ThemeFormatScheme {
                 .into_iter()
                 .flat_map(|list| list.children())
                 .filter(|node| node.is_element() && is_a_ns(node.tag_name().namespace()))
-                .map(|node| StandaloneThemeStyleXml::from_node(node, xml, &mut namespace_pool))
+                .map(|node| {
+                    StandaloneThemeStyleXml::from_node(
+                        node,
+                        xml,
+                        &mut namespace_pool,
+                        &mut namespace_sets,
+                    )
+                })
                 .collect()
         };
 
@@ -941,28 +935,32 @@ mod tests {
     }
 
     #[test]
-    fn format_scheme_does_not_copy_unused_root_namespaces_into_every_entry() {
-        let unused = (0..128)
-            .map(|index| {
-                format!(
-                    r#" xmlns:u{index}="urn:unused:{index}:{}""#,
-                    "x".repeat(128)
-                )
-            })
-            .collect::<String>();
-        let xml = format!(
-            r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"{unused}><a:themeElements><a:fmtScheme name="bounded"><a:lnStyleLst><a:ln/><a:ln/></a:lnStyleLst></a:fmtScheme></a:themeElements></a:theme>"#
+    fn format_scheme_keeps_unicode_and_unused_in_scope_namespaces() {
+        let xml = r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+          xmlns:関係="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+          xmlns:érel="urn:extension" xmlns:unused="urn:unused">
+          <a:themeElements><a:fmtScheme name="Unicode">
+            <a:fillStyleLst><a:blipFill><a:blip 関係:embed="rId1" érel:flag="yes"/></a:blipFill></a:fillStyleLst>
+          </a:fmtScheme></a:themeElements>
+        </a:theme>"#;
+        let scheme = ThemeFormatScheme::parse(xml);
+        let StyleMatrixLookup::Entry(entry) = scheme.lookup_fill_ref(1) else {
+            panic!("fill style should exist");
+        };
+        let standalone = entry.to_xml();
+        let parsed = roxmltree::Document::parse(&standalone).expect("all prefixes remain bound");
+        let blip = parsed
+            .descendants()
+            .find(|node| node.tag_name().name() == "blip")
+            .unwrap();
+        assert_eq!(
+            blip.attribute((
+                "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+                "embed"
+            )),
+            Some("rId1")
         );
-        let scheme = ThemeFormatScheme::parse(&xml);
-        for index in [1, 2] {
-            let StyleMatrixLookup::Entry(entry) = scheme.lookup_line_ref(index) else {
-                panic!("line style should exist");
-            };
-            let standalone = entry.to_xml();
-            assert!(standalone.contains("xmlns:a="));
-            assert!(!standalone.contains("urn:unused"));
-            roxmltree::Document::parse(&standalone).expect("bounded wrapper parses");
-        }
+        assert!(standalone.contains("xmlns:unused=\"urn:unused\""));
     }
 
     #[test]

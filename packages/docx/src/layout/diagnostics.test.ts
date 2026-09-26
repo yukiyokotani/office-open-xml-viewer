@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import rustDiagnosticTypes from '../../parser/src/types.rs?raw';
+import rustDiagnosticTypes from '../../model/src/lib.rs?raw';
 import { createBodyLayoutInput } from '../body-layout-input.js';
 import { createLayoutServices } from '../layout-runtime.js';
 import { layoutDocument } from '../document-layout.js';
