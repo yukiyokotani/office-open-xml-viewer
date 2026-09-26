@@ -125,7 +125,7 @@ VS Code's own telemetry is independent of this extension and can be controlled v
 
 ## Known Limitations
 
-- XLSX: formula evaluation is not yet supported (raw cached values are shown).
+- XLSX: cell formulas are never recalculated; the values cached in the file are shown (including for `TODAY()` / `NOW()`). Conditional-formatting rules are evaluated against those cached values by a partial formula evaluator, so some rules may differ from Excel.
 - DOCX: image-anchored float wrap, footnotes, and header/footer rendering may differ slightly from Word.
 - PPTX: a small number of obscure preset shapes fall back to a rectangle placeholder.
 - PPTX media: VS Code Webviews support MP3 audio and H.264 video, but not AAC
