@@ -72,26 +72,20 @@ async function loadSource() {
   return module;
 }
 
-// The parser rejects input with prefixed envelope strings rather than Error
-// instances (see `ooxml_common::opc::NOT_OOXML_PREFIX` and the resource-limit
-// envelope decoded by `@silurus/ooxml-core/worker`). The CLI cannot import that
-// TypeScript-source decoder under Node type stripping, so it recognises only
-// the stable prefixes and reports them as distinct exit codes.
-const NOT_OOXML_PREFIX = 'OOXML_NOT_OOXML:';
-const RESOURCE_LIMIT_PREFIX = 'OOXML_RESOURCE_LIMIT:';
+// The projections throw the shared typed errors (`OoxmlError('not-ooxml')`,
+// `OoxmlResourceLimitError`); report each as a distinct exit code. Match on the
+// stable `code` rather than the class, because the source and dist entry points
+// carry different copies of those classes.
 const EXIT_NOT_OOXML = 3;
 const EXIT_RESOURCE_LIMIT = 4;
 
-function failOnParserEnvelope(error) {
-  const text = error instanceof Error ? error.message : String(error);
-  if (text.startsWith(NOT_OOXML_PREFIX)) {
-    console.error(
-      `ooxml-md: ${positionals[0]} is not an Office Open XML document: ${text.slice(NOT_OOXML_PREFIX.length)}`,
-    );
+function failOnTypedError(error) {
+  if (error?.code === 'not-ooxml') {
+    console.error(`ooxml-md: ${positionals[0]}: ${error.message}`);
     process.exit(EXIT_NOT_OOXML);
   }
-  if (text.startsWith(RESOURCE_LIMIT_PREFIX)) {
-    console.error(`ooxml-md: ${positionals[0]} exceeds an OOXML resource limit`);
+  if (error?.code === 'ooxml-resource-limit') {
+    console.error(`ooxml-md: ${positionals[0]}: ${error.message}`);
     process.exit(EXIT_RESOURCE_LIMIT);
   }
   throw error;
@@ -101,7 +95,7 @@ function convert(run) {
   try {
     return run();
   } catch (error) {
-    return failOnParserEnvelope(error);
+    return failOnTypedError(error);
   }
 }
 
