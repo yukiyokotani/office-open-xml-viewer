@@ -4,7 +4,7 @@ severity: error
 rule:
   pattern: $EXPR.unwrap()
   not:
-    # Exclude every `#[cfg(test)] mod *tests { … }` block. The parser crates name
+    # Exclude every `#[cfg(test)] mod *tests { … }` block. The parser and model crates name
     # their test modules `tests` or `<topic>_tests` (e.g. `sheet_view_tests`,
     # `strict_namespace_tests`), so a `tests$`-suffix match on the enclosing
     # module name covers both without leaking test *helper* fns (which a plain
@@ -29,6 +29,9 @@ files:
   - "packages/pptx/parser/src/**/*.rs"
   - "packages/xlsx/parser/src/**/*.rs"
   - "packages/docx/parser/src/**/*.rs"
+  - "packages/pptx/model/src/**/*.rs"
+  - "packages/xlsx/model/src/**/*.rs"
+  - "packages/docx/model/src/**/*.rs"
   - "packages/ooxml-common/src/**/*.rs"
 # Test modules kept in their own file (`#[cfg(test)] #[path = "…_tests.rs"] mod
 # …_tests;`) have no enclosing `mod` item inside that file.
