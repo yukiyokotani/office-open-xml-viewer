@@ -31,6 +31,7 @@
 // whose EMF+ part has no drawing records shows the GDI drawing.
 
 import { blitDibToCtx, type DecodedDib } from './dib.js';
+import { HARD_MAX_DECODED_IMAGE_BYTES, MAX_RASTER_DIMENSION, MAX_RASTER_PIXELS } from './pixel-budget.js';
 
 const PLUS = {
   HEADER: 0x4001,
@@ -74,9 +75,18 @@ const PIXEL_32BPP_PARGB = 0x000e200b;
 const UNIT_PIXEL = 2;
 /** [MS-EMFPLUS] 2.1.1.34 WrapMode: Tile .. Clamp. */
 const WRAP_MODE_MAX = 4;
-// Resource policy, not a format limit.
-const MAX_BITMAP_PIXELS = 40_000_000;
-const MAX_OBJECT_BYTES = 256 * 1024 * 1024;
+// Resource policy, not a format limit (see pixel-budget.ts). One bitmap
+// object obeys the shared per-surface limits (MAX_RASTER_DIMENSION per axis,
+// MAX_RASTER_PIXELS in total), like the DIBs of GDI records. The player's
+// whole decoded footprint — the RGBA of every Image object it retains, the
+// assembly buffer of a continued object, and the intermediates of one
+// DrawImage (the cropped source copy, the helper canvas backing store and its
+// ImageData) — must fit HARD_MAX_DECODED_IMAGE_BYTES: exactly the four
+// coexisting surfaces a single maximal bitmap needs to be retained, cropped
+// and blitted. The dry run applies the same accounting, so a stream that
+// exceeds it is rejected before a GDI alternative is given up.
+const MAX_PLAYER_DECODED_BYTES = HARD_MAX_DECODED_IMAGE_BYTES;
+const BUDGET_FAILURE = 'EMF+ bitmap (decoded-image budget)';
 
 interface PlusRecord {
   type: number;
@@ -214,7 +224,7 @@ interface Matrix {
 }
 const IDENTITY: Matrix = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
 
-/** `m1` then `m2` ([MS-EMFPLUS] 2.2.2.25 EmfPlusTransformMatrix order). */
+/** `m1` then `m2` ([MS-EMFPLUS] 2.2.2.47 EmfPlusTransformMatrix order). */
 function multiply(m1: Matrix, m2: Matrix): Matrix {
   return {
     a: m1.a * m2.a + m1.b * m2.c,
@@ -234,7 +244,7 @@ type TableObject =
   | { kind: 'image'; bitmap: Bitmap }
   | { kind: 'attributes'; wrapMode: number };
 
-/** The implemented graphics state saved by EmfPlusSave ([MS-EMFPLUS] 2.3.11.3). */
+/** The implemented graphics state saved by EmfPlusSave ([MS-EMFPLUS] 2.3.7.5). */
 interface GraphicsState {
   world: Matrix;
   unit: number;
@@ -252,6 +262,11 @@ export class EmfPlusPlayer {
   private pending: { id: number; total: number; parts: Uint8Array[]; length: number } | null = null;
   /** Inside EmfPlusGetDC until the next EMF+ record: GDI records draw. */
   gdiAllowed = false;
+  /** A record the dry run admitted failed in real playback (the failure is
+   *  also in the target's report), e.g. a refused blit surface. The dry run
+   *  cannot see such a failure, so the GDI player decides what replaces the
+   *  EMF+ rendering (see emf.ts). */
+  drawFailed = false;
 
   /** `dry`: validate everything playback checks, decode and draw nothing. */
   constructor(private readonly target: EmfPlusTarget, private readonly dry = false) {}
@@ -267,11 +282,13 @@ export class EmfPlusPlayer {
       if (this.pending && !(record.type === PLUS.OBJECT && (record.flags & 0x8000) !== 0)) {
         this.abandonPending();
       }
+      const reported = this.target.unsupported.size;
       try {
         this.play(dv, record);
       } catch {
         this.target.unsupported.add(`EMF+ record 0x${record.type.toString(16)} (malformed)`);
       }
+      if (!this.dry && this.target.unsupported.size > reported) this.drawFailed = true;
     }
   }
 
@@ -405,22 +422,50 @@ export class EmfPlusPlayer {
     const id = r.flags & 0xff;
     const kind = (r.flags >> 8) & 0x7f;
     let data = new Uint8Array(dv.buffer, dv.byteOffset + r.start, r.end - r.start);
+    // Bytes of an assembled continued object, alive while it is decoded.
+    let assembled = 0;
     if (r.flags & 0x8000) {
       // Continued: TotalObjectSize, then this fragment.
       if (data.length < 4) throw new RangeError('Truncated EMF+ object');
       const total = dv.getUint32(r.start, true);
-      if (total > MAX_OBJECT_BYTES) throw new RangeError('EMF+ object too large');
       if (this.pending && (this.pending.id !== id || this.pending.total !== total)) {
         // A different object (or a changed TotalObjectSize) before the
         // pending one completed.
         this.abandonPending();
       }
-      if (!this.pending) this.pending = { id, total, parts: [], length: 0 };
+      if (!this.pending) {
+        // The fragments are views of the file; only the assembled copy
+        // allocates, so it is admitted before the first fragment is kept.
+        if (!this.admits(total)) {
+          this.target.unsupported.add(BUDGET_FAILURE);
+          this.objects.delete(id);
+          return;
+        }
+        this.pending = { id, total, parts: [], length: 0 };
+      }
       const part = data.subarray(4);
+      // TotalObjectSize is the size of the assembled object, so the fragments
+      // may add up to it and no further. A fragment that overruns it is a
+      // validation failure (the GDI alternative is kept), and the assembly
+      // buffer is only ever sized by the admitted total.
+      if (part.length > this.pending.total - this.pending.length) {
+        this.target.unsupported.add('EMF+ continued object (fragments exceed TotalObjectSize)');
+        this.pending = null;
+        this.objects.delete(id);
+        return;
+      }
       this.pending.parts.push(part);
       this.pending.length += part.length;
       if (this.pending.length < this.pending.total) return;
-      const whole = new Uint8Array(this.pending.length);
+      // Re-admit right before allocating: what the table retains now, plus
+      // the assembly buffer about to be created.
+      if (!this.admits(this.pending.total)) {
+        this.target.unsupported.add(BUDGET_FAILURE);
+        this.pending = null;
+        this.objects.delete(id);
+        return;
+      }
+      const whole = new Uint8Array(this.pending.total);
       let at = 0;
       for (const piece of this.pending.parts) {
         whole.set(piece, at);
@@ -428,6 +473,7 @@ export class EmfPlusPlayer {
       }
       this.pending = null;
       data = whole;
+      assembled = whole.length;
     }
     const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
     this.objects.delete(id);
@@ -463,9 +509,14 @@ export class EmfPlusPlayer {
       this.target.unsupported.add('EMF+ image other than an uncompressed 32-bit bitmap');
       return;
     }
-    if (width <= 0 || height <= 0 || width * height > MAX_BITMAP_PIXELS
-      || stride < width * 4 || 28 + stride * height > data.length) {
+    if (width <= 0 || height <= 0 || stride < width * 4 || 28 + stride * height > data.length) {
       throw new RangeError('Invalid EMF+ bitmap');
+    }
+    if (width > MAX_RASTER_DIMENSION || height > MAX_RASTER_DIMENSION
+      || width * height > MAX_RASTER_PIXELS
+      || !this.admits(assembled + width * height * 4, id)) {
+      this.target.unsupported.add(BUDGET_FAILURE);
+      return;
     }
     if (this.dry) {
       this.objects.set(id, { kind: 'image', bitmap: { width, height, data: new Uint8ClampedArray(0) } });
@@ -487,6 +538,22 @@ export class EmfPlusPlayer {
       }
     }
     this.objects.set(id, { kind: 'image', bitmap: { width, height, data: rgba } });
+  }
+
+  /** Decoded bytes the object table retains, without the entry `except`
+   *  (about to be replaced). The dry run counts the bitmaps it only sized. */
+  private retainedBytes(except?: number): number {
+    let bytes = 0;
+    for (const [id, entry] of this.objects) {
+      if (id !== except && entry.kind === 'image') bytes += entry.bitmap.width * entry.bitmap.height * 4;
+    }
+    return bytes;
+  }
+
+  /** Whether `transient` more decoded bytes fit MAX_PLAYER_DECODED_BYTES next
+   *  to what the table retains (see the resource note at the top). */
+  private admits(transient: number, replacing?: number): boolean {
+    return this.retainedBytes(replacing) + transient <= MAX_PLAYER_DECODED_BYTES;
   }
 
   /** World → page → device pixels → target. Only UnitPixel pages are
@@ -522,10 +589,23 @@ export class EmfPlusPlayer {
       ? [0, 2, 4, 6].map((at) => dv.getInt16(r.start + 24 + at, true))
       : [f(24), f(28), f(32), f(36)];
     const [dx, dy, dw, dh] = dest;
-    const axisAligned = Math.abs(this.world.b) < 1e-9 && Math.abs(this.world.c) < 1e-9;
+    // Every number that places the image must be finite: the float fields of
+    // SrcRect/RectF, the world matrix, PageScale ([MS-EMFPLUS] 2.3.9.3) and
+    // the mapped corners (a finite chain of transforms can still overflow).
+    // A NaN or infinite placement draws nothing a player can reproduce, so
+    // the dry run rejects it and a GDI alternative is kept.
+    const w = this.world;
+    const [tx0, ty0] = this.toTarget(dx, dy);
+    const [tx1, ty1] = this.toTarget(dx + dw, dy + dh);
+    if (![sx, sy, sw, sh, dx, dy, dw, dh, w.a, w.b, w.c, w.d, w.e, w.f, this.pageScale, tx0, ty0, tx1, ty1]
+      .every(Number.isFinite)) {
+      this.target.unsupported.add('EMF+ DrawImage placement (non-finite value)');
+      return;
+    }
+    const axisAligned = Math.abs(w.b) < 1e-9 && Math.abs(w.c) < 1e-9;
     if (srcUnit !== UNIT_PIXEL || this.pageUnit !== UNIT_PIXEL || !axisAligned
       || !(dw > 0) || !(dh > 0) || !(sw > 0) || !(sh > 0)
-      || this.world.a <= 0 || this.world.d <= 0) {
+      || w.a <= 0 || w.d <= 0 || !(this.pageScale > 0)) {
       this.target.unsupported.add('EMF+ DrawImage placement (units, rotation or mirroring)');
       return;
     }
@@ -539,9 +619,17 @@ export class EmfPlusPlayer {
       this.target.unsupported.add('EMF+ DrawImage source outside the image');
       return;
     }
+    // Intermediates of the blit: the cropped copy (when cropping), then the
+    // helper canvas backing store and its ImageData (dib.ts blitDibToCtx).
+    const cropped = x0 !== 0 || y0 !== 0 || x1 !== image.width || y1 !== image.height;
+    const sourceBytes = (x1 - x0) * (y1 - y0) * 4;
+    if (!this.admits((cropped ? sourceBytes : 0) + 2 * sourceBytes)) {
+      this.target.unsupported.add(BUDGET_FAILURE);
+      return;
+    }
     if (this.dry) return;
     let source: Bitmap = image;
-    if (x0 !== 0 || y0 !== 0 || x1 !== image.width || y1 !== image.height) {
+    if (cropped) {
       const width = x1 - x0;
       const data = new Uint8ClampedArray(width * (y1 - y0) * 4);
       for (let y = y0; y < y1; y++) {
@@ -549,8 +637,6 @@ export class EmfPlusPlayer {
       }
       source = { width, height: y1 - y0, data };
     }
-    const [tx0, ty0] = this.toTarget(dx, dy);
-    const [tx1, ty1] = this.toTarget(dx + dw, dy + dh);
     const { ctx } = this.target;
     if (!ctx) return;
     if (this.sourceCopy) {
@@ -560,6 +646,12 @@ export class EmfPlusPlayer {
         /* a ctx without clearRect (some mocks) */
       }
     }
-    if (blitDibToCtx(ctx, source, tx0, ty0, tx1, ty1)) this.target.drew = true;
+    if (blitDibToCtx(ctx, source, tx0, ty0, tx1, ty1)) {
+      this.target.drew = true;
+    } else {
+      // No helper surface or a refused blit: the image is missing, which the
+      // result must say (the GDI rendering was set aside for this stream).
+      this.target.unsupported.add('EMF+ DrawImage (the bitmap could not be drawn)');
+    }
   }
 }

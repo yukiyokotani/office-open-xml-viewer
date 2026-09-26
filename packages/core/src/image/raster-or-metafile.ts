@@ -84,6 +84,18 @@ export function getIncompleteMetafileReport(
   return bitmap ? incompleteMetafileReports.get(bitmap) : undefined;
 }
 
+/** Attach the gap report of `source` to a bitmap derived from its pixels (an
+ *  effect result or a resampled copy): the derived picture lacks the same
+ *  content. Package-internal; not part of the public entry point. */
+export function carryIncompleteMetafileReport(
+  source: ImageBitmap | null | undefined,
+  derived: ImageBitmap | null | undefined,
+): void {
+  if (!source || !derived || source === derived) return;
+  const report = incompleteMetafileReports.get(source);
+  if (report) incompleteMetafileReports.set(derived, report);
+}
+
 function applyIncompleteMetafilePolicy(
   bitmap: ImageBitmap | null,
   unsupported: readonly string[],
