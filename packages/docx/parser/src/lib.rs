@@ -285,6 +285,11 @@ impl DocxArchive {
                     zip.cancel_operation();
                     return Err(resource_error);
                 }
+                if let Some(error) = failure.word_ilvl_error() {
+                    let error = error.to_string();
+                    zip.cancel_operation();
+                    return Err(error);
+                }
                 self.document_cursor = Some(DocumentCursorState {
                     operation_id,
                     generation,
@@ -544,7 +549,10 @@ pub fn to_markdown_native(data: &[u8]) -> Result<String, String> {
 }
 
 fn docx_parser_js_error(error: String) -> JsValue {
-    if error.starts_with("OOXML_RESOURCE_LIMIT:") || ooxml_common::opc::is_not_ooxml_error(&error) {
+    if error.starts_with("OOXML_RESOURCE_LIMIT:")
+        || error.starts_with(numbering::WORD_ILVL_ERROR_PREFIX)
+        || ooxml_common::opc::is_not_ooxml_error(&error)
+    {
         JsValue::from_str(&error)
     } else {
         JsValue::from_str(&format!("docx-parser error: {error}"))

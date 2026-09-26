@@ -2,7 +2,7 @@ use crate::styles::{parse_run_fmt, RunFmt};
 use crate::xml_util::*;
 use ooxml_common::blip::mime_from_ext;
 use ooxml_common::depth::parse_guarded;
-use ooxml_common::ns::{attr_ns, relationships};
+use ooxml_common::ns::{attr_ns, is_w_ns, relationships};
 use std::collections::{HashMap, HashSet};
 
 #[cfg(test)]
@@ -16,6 +16,142 @@ mod legal_tests;
 #[cfg(test)]
 #[path = "numbering/counter_instance_tests.rs"]
 mod counter_instance_tests;
+
+#[cfg(test)]
+#[path = "numbering/word_ilvl_tests.rs"]
+pub(crate) mod word_ilvl_tests;
+
+/// The authored paragraph reference is an XML Schema integer (ECMA-376 Part 1
+/// §17.9.3). Word 16.113's measured display path first narrows its decimal
+/// value to a byte, even for negative and >32-bit values. The lexical parser
+/// reduces each digit before the next one, so an arbitrarily long attribute
+/// cannot overflow or allocate in proportion to its numeric value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WordIlvlLexicalError {
+    Whitespace,
+    NonDecimal,
+}
+
+pub(crate) fn parse_word_ilvl(raw: &str) -> Result<u8, WordIlvlLexicalError> {
+    if raw.is_empty() {
+        // Four normal-open controls, including a clean-state retry of the
+        // identical file that once showed an open error, select level 0.
+        return Ok(0);
+    }
+    if raw.bytes().any(|byte| byte.is_ascii_whitespace()) {
+        return Err(WordIlvlLexicalError::Whitespace);
+    }
+    let (negative, digits) = match raw.as_bytes().first() {
+        Some(b'+') => (false, &raw[1..]),
+        Some(b'-') => (true, &raw[1..]),
+        _ => (false, raw),
+    };
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(WordIlvlLexicalError::NonDecimal);
+    }
+    let mut residue: u16 = 0;
+    for byte in digits.bytes() {
+        residue = residue
+            .checked_mul(10)
+            .and_then(|value| value.checked_add(u16::from(byte - b'0')))
+            .ok_or(WordIlvlLexicalError::NonDecimal)?
+            % 256;
+    }
+    let residue = if negative {
+        (256 - residue) % 256
+    } else {
+        residue
+    };
+    Ok(residue as u8)
+}
+
+/// Separate the formatting source from the advancing counter. ECMA-376 Part 1
+/// §17.9 defines only the reference/definition relationship; MS-OI29500
+/// §2.1.277 documents Word's 0..255 authoring limit, not its malformed-value
+/// rendering. These branches are observations from Word 16.113 controls:
+/// every byte 0..255; signed, leading-zero, plus, 2^31 and 2^32 boundaries;
+/// a two-level definition; a level-8 replacement; and style-origin numPr.
+/// Each control placed levels 0, 1, and 8 before/after the target and checked
+/// its marker and subsequent counters. Values 16..255 repeat every 16 bytes;
+/// 9..15 have the special first-block behavior encoded below. The fixed `9`
+/// is a fresh fallback marker value, even when level 8 has startOverride=20.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WordLevelUse {
+    pub marker_level: Option<u32>,
+    pub counter_level: Option<u32>,
+    /// `Some(0)` or `Some(9)` uses a display value independent of any counter.
+    pub fixed_counter: Option<u32>,
+}
+
+pub(crate) fn word_level_use(ilvl: u8) -> WordLevelUse {
+    let (marker_level, counter_level, fixed_counter) = match ilvl {
+        0..=8 => (Some(u32::from(ilvl)), Some(u32::from(ilvl)), None),
+        9..=12 => (None, None, None),
+        13..=14 => (Some(8), None, Some(9)),
+        15 => (Some(0), Some(0), None),
+        _ => match ilvl % 16 {
+            level @ 0..=7 => (Some(8), Some(u32::from(level)), Some(0)),
+            8 => (Some(8), Some(8), None),
+            _ => (Some(8), None, Some(9)),
+        },
+    };
+    WordLevelUse {
+        marker_level,
+        counter_level,
+        fixed_counter,
+    }
+}
+
+/// A stable parser envelope. The browser and Node adapters reconstruct this as
+/// a typed DOCX load error; it must bypass the ordinary degraded-document path.
+pub(crate) const WORD_ILVL_ERROR_PREFIX: &str = "OOXML_DOCX_ILVL:";
+
+/// Word 16.113 showed an open-error dialog for tested `" 8 "` and `"abc"`.
+/// Empty values reopened normally in four controls and select level 0; the
+/// initial open error for one identical file is retained in the local evidence
+/// as an unstable opening observation, not a universal input rule. Reject other
+/// whitespace/non-decimal lexical forms as a deterministic library policy; no
+/// normal-open control establishes their marker or counter behavior.
+pub(crate) fn validate_paragraph_ilvls(root: roxmltree::Node) -> Result<(), String> {
+    for node in root.descendants().filter(|node| {
+        node.is_element()
+            && is_w_ns(node.tag_name().namespace())
+            && node.tag_name().name() == "ilvl"
+    }) {
+        let Some(raw) = attr_w(node, "val") else {
+            // A present ilvl without its required val was not a measured class;
+            // retain the parser's pre-existing level-0 fallback for this case.
+            continue;
+        };
+        if let Err(reason) = parse_word_ilvl(&raw) {
+            let kind = match reason {
+                WordIlvlLexicalError::Whitespace => "whitespace",
+                WordIlvlLexicalError::NonDecimal => "non-decimal",
+            };
+            return Err(format!("{WORD_ILVL_ERROR_PREFIX}cannot-open:{kind}"));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_level_definitions(root: roxmltree::Node) -> Result<(), String> {
+    // MS-OI29500 §2.1.280(a): Word does not load a numbering-level definition
+    // with ilvl outside 0..8. A lvlOverride may contain a complete w:lvl, so
+    // check both abstract definitions and instance replacements. The measured
+    // level-9 replacement invokes Word's Open and Repair prompt.
+    for node in root.descendants().filter(|node| {
+        node.is_element() && is_w_ns(node.tag_name().namespace()) && node.tag_name().name() == "lvl"
+    }) {
+        if let Some(raw) = attr_w(node, "ilvl") {
+            if !raw.parse::<u8>().is_ok_and(|level| level <= 8) {
+                return Err(format!(
+                    "{WORD_ILVL_ERROR_PREFIX}repair-required:level-definition"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
 
 /// Parse a single VML CSS length (e.g. `width:9pt`) from a `style` attribute
 /// into pt. Supports the units Word emits for picture-bullet shapes: `pt`
@@ -568,7 +704,10 @@ impl NumberingMap {
                 .copied()
                 .or_else(|| (level < seeded_below).then_some(1))
             {
-                Some(v) => v + 1,
+                // OOXML's counter domain is broader than this model's u32.
+                // Saturate at the representable boundary rather than trapping
+                // on a hostile document with a maximal startOverride.
+                Some(v) => v.saturating_add(1),
                 None => self.get_start(num_id, level),
             }
         };
@@ -634,6 +773,26 @@ impl NumberingMap {
     /// Only placeholders present in the text are visited, deepest first, so the
     /// work does not grow with the authored level number.
     pub fn resolve_text(&self, num_id: u32, level: u32, counter: u32) -> String {
+        self.resolve_text_with_zero_mode(num_id, level, counter, false)
+    }
+
+    /// Word's malformed paragraph reference can display level 8 with a
+    /// synthetic zero while advancing another level. This is a display-only
+    /// value, not a live counter. In the measured decimalZero definition Word
+    /// prints `00`; in the upperRoman override it prints no numeral. The
+    /// controls used a single `%9` placeholder; other placeholders retain the
+    /// ordinary resolver's counter values as a library policy.
+    pub(crate) fn resolve_text_word_zero(&self, num_id: u32, level: u32) -> String {
+        self.resolve_text_with_zero_mode(num_id, level, 0, true)
+    }
+
+    fn resolve_text_with_zero_mode(
+        &self,
+        num_id: u32,
+        level: u32,
+        counter: u32,
+        word_zero: bool,
+    ) -> String {
         let Some(lvl) = self.get_level(num_id, level) else {
             return format!("{}.", counter);
         };
@@ -665,7 +824,16 @@ impl NumberingMap {
                     .map(|l| l.format.as_str())
                     .unwrap_or(lvl.format.as_str())
             };
-            text = text.replace(&format!("%{}", u64::from(k) + 1), &format_counter(val, fmt));
+            let rendered = if word_zero && k == level {
+                match fmt {
+                    "decimalZero" => "00".to_string(),
+                    "upperRoman" | "lowerRoman" | "upperLetter" | "lowerLetter" => String::new(),
+                    _ => format_counter(0, fmt),
+                }
+            } else {
+                format_counter(val, fmt)
+            };
+            text = text.replace(&format!("%{}", u64::from(k) + 1), &rendered);
             highest = k.checked_sub(1);
         }
         text

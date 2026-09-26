@@ -1380,7 +1380,8 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
         // ilvl defaults to 0 when absent
         fmt.num_level = child_w(pnpr, "ilvl")
             .and_then(|n| attr_w(n, "val"))
-            .and_then(|v| v.parse().ok())
+            .and_then(|v| crate::numbering::parse_word_ilvl(&v).ok())
+            .map(u32::from)
             .or(Some(0));
         if let Some(nid) = child_w(pnpr, "numId") {
             fmt.num_id = attr_w(nid, "val").and_then(|v| v.parse().ok());
