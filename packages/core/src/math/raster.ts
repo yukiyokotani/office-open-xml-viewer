@@ -183,14 +183,21 @@ export function drawMathJaxSvg(
     throw new TypeError('MathJax SVG viewBox must have positive dimensions');
   }
 
+  // The raster spans the baseline-relative band from `svgExtents` (ascent above
+  // to descent below the baseline), which always includes the baseline. A lone
+  // raised operator such as ∙ or ⋅ has a viewBox wholly above the baseline, so
+  // map that band — not the bare viewBox — or the glyph stretches vertically.
+  const bandTop = Math.min(minY, 0);
+  const bandHeight = Math.max(minY + viewHeight, 0) - bandTop;
+
   context.save();
   context.setTransform(
     widthPx / viewWidth,
     0,
     0,
-    heightPx / viewHeight,
+    heightPx / bandHeight,
     (-minX * widthPx) / viewWidth,
-    (-minY * heightPx) / viewHeight,
+    (-bandTop * heightPx) / bandHeight,
   );
   context.fillStyle = '#000000';
   context.strokeStyle = '#000000';

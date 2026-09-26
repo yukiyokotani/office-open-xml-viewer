@@ -63,6 +63,40 @@ describe('worker-safe math SVG rasterization', () => {
     expect(context.fillStyle).toBe('#123456');
   });
 
+  it('keeps the glyph aspect when the viewBox sits wholly above the baseline', () => {
+    // A lone raised operator (∙, ⋅) yields a viewBox that does not reach the
+    // baseline, while the raster band spans baseline → ascent. Scaling the
+    // viewBox onto that band would stretch the dot vertically.
+    const context = {
+      save: vi.fn(), restore: vi.fn(), setTransform: vi.fn(), scale: vi.fn(),
+      fill: vi.fn(), fillStyle: '', strokeStyle: '', lineWidth: 1, globalAlpha: 1,
+    } as unknown as OffscreenCanvasRenderingContext2D;
+    vi.stubGlobal('Path2D', class {});
+
+    // viewBox 0 -384 457 252 → ascent 0.384em, descent 0 (svgExtents).
+    drawMathJaxSvg(
+      context,
+      '<svg viewBox="0 -384 457 252"><g transform="scale(1,-1)"><path d="M0 0Z"/></g></svg>',
+      457,
+      384,
+    );
+
+    expect(context.setTransform).toHaveBeenCalledWith(1, 0, 0, 1, -0, 384);
+  });
+
+  it('keeps the glyph aspect when the viewBox sits wholly below the baseline', () => {
+    const context = {
+      save: vi.fn(), restore: vi.fn(), setTransform: vi.fn(), scale: vi.fn(),
+      fill: vi.fn(), fillStyle: '', strokeStyle: '', lineWidth: 1, globalAlpha: 1,
+    } as unknown as OffscreenCanvasRenderingContext2D;
+    vi.stubGlobal('Path2D', class {});
+
+    // viewBox 0 100 300 200 → ascent 0, descent 0.3em.
+    drawMathJaxSvg(context, '<svg viewBox="0 100 300 200"></svg>', 300, 300);
+
+    expect(context.setTransform).toHaveBeenCalledWith(1, 0, 0, 1, -0, -0);
+  });
+
   it('paints MathJax fallback text for an excluded font range', async () => {
     const output = await mathMLToSvg(
       '<math xmlns="http://www.w3.org/1998/Math/MathML"><mi>Ж</mi></math>',
