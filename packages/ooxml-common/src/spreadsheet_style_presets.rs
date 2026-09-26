@@ -4,7 +4,8 @@
 //! A workbook names a built-in style without defining it (pivotTableStyleInfo
 //! in XLSX, SXAddl_SXCView_SXDTableStyleClient in XLS), so every spreadsheet
 //! producer resolves it from this one table. Colors stay theme references
-//! (§18.8.3); callers resolve them against the workbook theme.
+//! (§18.8.3); callers resolve them against the workbook theme, e.g. with
+//! [`crate::spreadsheet_color::resolve_color`].
 
 /// A theme color reference (`theme`, optional `tint`) of a preset format.
 #[derive(Clone, Copy, Debug, PartialEq)]

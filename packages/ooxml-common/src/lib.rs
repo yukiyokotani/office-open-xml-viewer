@@ -22,11 +22,14 @@ pub mod line;
 pub mod math;
 pub mod mce;
 pub mod ns;
+#[doc(hidden)]
+pub mod numbering;
 pub mod opc;
 pub mod package_session;
 pub mod pull;
 pub mod rels;
 pub mod resource;
+pub mod spreadsheet_color;
 pub mod spreadsheet_style_presets;
 pub mod text;
 pub mod theme;
