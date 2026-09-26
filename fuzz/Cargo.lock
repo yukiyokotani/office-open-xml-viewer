@@ -224,8 +224,10 @@ dependencies = [
  "pptx-parser",
  "quick-xml",
  "roxmltree",
+ "serde",
  "serde_json",
  "wasm-bindgen",
+ "xlsx-model",
  "zip",
 ]
 

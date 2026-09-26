@@ -324,7 +324,7 @@ impl<'a> CompoundFile<'a> {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "inspection"))]
     pub fn stream(&self, expected: &str) -> Result<Vec<u8>, String> {
         let mut matches = self
             .directory

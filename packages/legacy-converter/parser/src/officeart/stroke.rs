@@ -32,7 +32,7 @@ pub(crate) struct Details {
 }
 
 /// A resolved arrowhead for the direct-model projections.
-#[cfg(any(test, feature = "direct-ppt"))]
+#[cfg(any(test, feature = "direct-ppt", feature = "direct-xls"))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct LineEnd<'a> {
     pub kind: &'a str,
@@ -83,7 +83,7 @@ impl Details {
         // MS-ODRAW defaults: flat cap and round join.
         ["rnd", "sq", "flat"][usize::from(self.values[7].unwrap_or(2))]
     }
-    #[cfg(any(test, feature = "direct-ppt"))]
+    #[cfg(any(test, feature = "direct-ppt", feature = "direct-xls"))]
     pub fn canvas_cap(&self) -> &'static str {
         match self.cap() {
             "rnd" => "round",
@@ -91,7 +91,7 @@ impl Details {
             _ => "butt",
         }
     }
-    #[cfg(any(test, feature = "direct-ppt"))]
+    #[cfg(any(test, feature = "direct-ppt", feature = "direct-xls"))]
     pub fn join(&self) -> (&'static str, Option<f64>) {
         match self.values[6].unwrap_or(2) {
             0 => ("bevel", None),
@@ -102,7 +102,7 @@ impl Details {
             _ => ("round", None),
         }
     }
-    #[cfg(any(test, feature = "direct-ppt"))]
+    #[cfg(any(test, feature = "direct-ppt", feature = "direct-xls"))]
     pub fn line_end(&self, index: usize) -> Option<LineEnd<'static>> {
         if index > 1 {
             return None;

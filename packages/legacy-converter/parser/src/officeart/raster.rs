@@ -3,13 +3,13 @@
 use super::Record;
 #[cfg(any(test, feature = "direct-ppt"))]
 use super::{ByteSpan, RecordSpan};
-#[cfg(test)]
+#[cfg(any(test, feature = "direct-xls"))]
 use std::borrow::Cow;
 use std::ops::Range;
 
 /// Resolve only in-stream BLIPs. `delayed` is the format-defined binary stream,
 /// never a file path; DOC inline shapes do not supply a delayed store.
-#[cfg(test)]
+#[cfg(any(test, all(feature = "inspection", not(target_arch = "wasm32"))))]
 pub(crate) fn read_store_entry<'a>(
     entry: Record<'a>,
     delayed: Option<&'a [u8]>,
@@ -27,7 +27,7 @@ pub(crate) fn read_store_entry<'a>(
 /// evidence for TIFF in PowerPoint.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Raster {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "inspection"))]
     Advertised,
     // Chosen only by the direct DOC reader.
     #[cfg_attr(not(test), allow(dead_code))]
@@ -40,7 +40,7 @@ pub(crate) enum Raster {
     ExcelMetafiles,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "direct-xls"))]
 pub(crate) fn read_store_entry_as<'a>(
     entry: Record<'a>,
     delayed: Option<&'a [u8]>,
@@ -218,7 +218,7 @@ fn locate_store_entry(entry: Record<'_>) -> Result<StoreLocation, String> {
 
 const MAX_PIXELS: u64 = 40_000_000;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "direct-xls"))]
 pub(crate) struct Image<'a> {
     pub bytes: Cow<'a, [u8]>,
     pub extension: &'static str,
@@ -269,7 +269,7 @@ pub(crate) fn read<'a>(
     read_as(blip, budget, remaining_bytes, Raster::Advertised)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "direct-xls"))]
 fn read_as<'a>(
     blip: Record<'a>,
     budget: &mut usize,
