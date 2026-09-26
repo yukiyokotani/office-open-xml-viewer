@@ -1,5 +1,9 @@
 // Classic bar chart family.
-import type { ChartModel, ChartRect, ChartSeries, SecondaryValueAxis } from '../../types/chart';
+import type { ChartDataLabelOverride, ChartLabelBox, ChartModel, ChartRect, ChartSeries, SecondaryValueAxis } from '../../types/chart';
+import type { DataLabelRect } from '../data-label-layout.js';
+import type { RichDataLabelOptions } from '../rich-data-label.js';
+import type { DataLabelTextStyle } from '../data-label-style.js';
+import { EMU_PER_PT } from '../../units.js';
 
 import { classicDataPointFillDecision } from '../classic-data-point-style.js';
 
@@ -27,6 +31,7 @@ import {
   categoryTickLabelGapPx,
   axisTitleMargin,
   valueTickLabelGapPx,
+  resolveManualLayoutRect,
 } from '../layout.js';
 import { planNumericValueAxis, finiteDataExtent } from '../axis-scale.js';
 import { axisLineWidthPx, resolveAxisLine, isCrossBetween } from '../axis-style.js';
@@ -53,79 +58,27 @@ import {
   chartStyleLineDecision,
 } from '../style-paint.js';
 
-import {
-  chartColor,
-  indexPointOverrides,
-  pieSliceColor,
-  applyClassicStyleLine,
-  IndexedLinePoint,
-  paintClassicVaryingLineSegments,
-  chartFontFamily,
-  chartFontCss,
-  drawAxisTitles,
-  chartHasDataTable,
-  chartDataTableBaseHeight,
-  chartDataTableHeaderWidth,
-  measureChartDataTable,
-  drawChartDataTable,
-  createDataLabelLegendKeyResolver,
-  measuredLegendReserve,
-  drawLegendForLayout,
-  manualTopLegendPlotInset,
-  drawAxisTick,
-  strokeAxisSegment,
-  axisTickLengthPx,
-  strokeValueGridlineH,
-  valGridStroke,
-  valMinorGridStroke,
-  drawCatMajorGridlines,
-  catGridStroke,
-  catGridlineFractions,
-  catAxisReversed,
-  drawValMajorGridlines,
-  formatPrimaryValueAxisTick,
-  formatAxisTickWithUnits,
-  planValueAxis,
-  drawSeriesTrendlines,
-  trendlineLegendSeries,
-  axisLabelPx,
-  wrapMeasuredText,
-  numericCategoryMetricTolerance,
-  catLabelsVisible,
-  catLabelRotationRad,
-  drawRotatedCatLabel,
-  chartDateAxisPlan,
-  forEachErrorBarEndpoint,
-  computeSecondaryAxis,
-  drawSecondaryValueGridlines,
-  drawSecondaryValueAxis,
-  drawSecondaryCategoryAxis,
-  measuredCartesianTitleBand,
-  drawChartTitleForLayout,
-  chartCategories,
-  dataLabelWithinAxisMaximum,
-  drawBarDataLabel,
-  applyDecorationLineStyle,
-  chartStyleRoleLine,
-  chartStyleRoleErrorBar,
-  drawLineGroupDecorations,
-  categoryAxisCrossingValue,
-  scatterXValue,
-  drawScatterSeriesLayer,
-  drawChartMarker,
-  seriesHasResolvedMarkerDetail,
-  customRichDataLabelOptions,
-  clamp,
-  appendCurve,
-  drawBarErrorBars,
-  chartExSeriesFormatIndex,
-  chartExDataPointFill,
-  chartExDataPointPaint,
-  paintClassicDataPointPath,
-  paintClassicDataPointRect,
-  applyChartExSeriesLineStyle,
-  chartExLegendSeries,
-} from '../shared/classic.js';
+import { chartColor, indexPointOverrides, pieSliceColor, applyClassicStyleLine, paintClassicVaryingLineSegments, chartExSeriesFormatIndex } from '../shared/palette.js';
+import type { IndexedLinePoint } from '../shared/palette.js';
+import { chartFontFamily, chartFontCss } from '../shared/fonts.js';
+import { drawAxisTitles } from '../shared/axis.js';
+import { chartHasDataTable, chartDataTableBaseHeight, chartDataTableHeaderWidth, measureChartDataTable, drawChartDataTable } from '../shared/data-table.js';
+import { createDataLabelLegendKeyResolver, measuredLegendReserve, drawLegendForLayout, LEGEND_HORIZONTAL_INSET, LEGEND_HORIZONTAL_PADDING } from '../shared/legend.js';
+import type { DataLabelLegendKey, MeasuredLegendLayout } from '../shared/legend.js';
+import { drawAxisTick, strokeAxisSegment, axisTickLengthPx, strokeValueGridlineH, valGridStroke, valMinorGridStroke, drawCatMajorGridlines, catGridStroke, catGridlineFractions, catAxisReversed, drawValMajorGridlines, formatPrimaryValueAxisTick, formatAxisTickWithUnits, planValueAxis, axisLabelPx, wrapMeasuredText, catLabelsVisible, catLabelRotationRad, drawRotatedCatLabel } from '../shared/axis.js';
+import { drawSeriesTrendlines, trendlineLegendSeries } from '../shared/trendline.js';
+import { chartDateAxisPlan, forEachErrorBarEndpoint, computeSecondaryAxis, drawSecondaryValueGridlines, drawSecondaryValueAxis, drawSecondaryCategoryAxis } from '../shared/secondary-axis.js';
+import { measuredCartesianTitleBand, drawChartTitleForLayout } from '../shared/title.js';
+import { dataLabelWithinAxisMaximum, customRichDataLabelOptions, drawBoundedDataLabelText } from '../shared/data-labels.js';
+import { chartCategories } from '../category-spacing.js';
+import { applyDecorationLineStyle, chartStyleRoleLine, chartStyleRoleErrorBar } from '../shared/style-roles.js';
+import { drawLineGroupDecorations, categoryAxisCrossingValue } from '../shared/line-decorations.js';
+import { scatterXValue } from '../shared/scatter-geometry.js';
+import { drawScatterSeriesLayer } from '../shared/scatter-paint.js';
+import { drawChartMarker, seriesHasResolvedMarkerDetail } from '../shared/markers.js';
+import { clamp, appendCurve, dashPatternForPreset } from '../shared/geometry.js';
+
+import { chartExDataPointFill, chartExDataPointPaint, paintClassicDataPointPath, paintClassicDataPointRect, applyChartExSeriesLineStyle, chartExLegendSeries } from '../shared/chartex-style.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Bar chart — vertical columns + horizontal bars, clustered + stacked +
@@ -2306,5 +2259,162 @@ export function renderBarChart(
   drawAxisTitles(
     ctx, chart, x, y, w, h, px0, py0, pw, ph,
     legLeftW, legBottomH, catTitlePx, valTitlePx, isH,
+  );
+}
+
+/**
+ * Draw a bar data label with the ECMA-376 §21.2.2.16 `dLblPos` semantics.
+ *
+ * For a vertical bar the coordinates describe the rectangle top-left + width +
+ * height; for a horizontal bar they describe the bar's left-edge `bx`, top `by`,
+ * length `barL`, and thickness `barW`. When `position` is "inBase" / "inEnd" /
+ * "ctr" the label sits inside the bar; "outEnd" (default for clustered bars)
+ * nudges the text just past the far edge. An explicit `color` overrides the
+ * default dark label fill — Excel's workbook typically pairs "inBase" with a
+ * white text color so labels stay readable against the bar fill.
+ */
+export function drawBarDataLabel(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  bx: number, by: number, barL: number, barW: number,
+  orient: 'vertical' | 'horizontal',
+  position: string | null,
+  color: string | null,
+  fontSizePx: number,
+  bounds: DataLabelRect,
+  layoutReferenceRect: DataLabelRect,
+  manualLayout?: ChartDataLabelOverride['manualLayout'],
+  negative = false,
+  rich?: RichDataLabelOptions,
+  legendKey?: DataLabelLegendKey,
+  textStyle?: DataLabelTextStyle,
+  ptToPx = 1,
+  labelBox?: ChartLabelBox,
+  shapeRotationDeg = 0,
+): void {
+  const rect = orient === 'vertical'
+    ? { x: bx, y: by, w: barW, h: barL }
+    : { x: bx, y: by, w: barL, h: barW };
+  drawBoundedDataLabelText(
+    ctx,
+    text,
+    { kind: 'bar', rect, orientation: orient, negative, position: position ?? 'outEnd' },
+    bounds,
+    fontSizePx,
+    color ? `#${color}` : '#333',
+    manualLayout,
+    layoutReferenceRect,
+    rich,
+    legendKey,
+    textStyle,
+    ptToPx,
+    labelBox,
+    shapeRotationDeg,
+  );
+}
+
+/** Draw value-axis error bars for a bar/column series. CT_ErrBars `errDir`
+ * follows the numeric axis: Y for columns and X for horizontal bars. Deltas
+ * have already been expanded by the shared parser (percentage/fixed/stdDev/
+ * custom), so this layer only maps the authored geometry. */
+export function drawBarErrorBars(
+  ctx: CanvasRenderingContext2D,
+  s: ChartSeries,
+  eb: NonNullable<ChartSeries['errBars']>[number],
+  n: number,
+  horizontal: boolean,
+  categoryAt: (ci: number) => number,
+  valueAt: (value: number) => number,
+  plotted: (ci: number) => number,
+  fallbackColor: string,
+  ptToPx: number,
+): void {
+  if (eb.hidden === true || (eb.linePaintAuthored === true && eb.color == null)) return;
+  if ((!horizontal && eb.dir === 'x') || (horizontal && eb.dir === 'y')) return;
+  const drawPlus = eb.barType === 'plus' || eb.barType === 'both';
+  const drawMinus = eb.barType === 'minus' || eb.barType === 'both';
+  ctx.save();
+  ctx.strokeStyle = eb.color ? `#${eb.color}` : fallbackColor;
+  ctx.lineWidth = eb.lineWidthEmu
+    ? Math.max(0.5, eb.lineWidthEmu / EMU_PER_PT * ptToPx)
+    : Math.max(0.5, ptToPx * 0.75);
+  ctx.setLineDash(dashPatternForPreset(eb.dash, ctx.lineWidth));
+  const capHalf = Math.max(ctx.lineWidth / 2, 2 * ptToPx);
+  for (let ci = 0; ci < n; ci++) {
+    if (s.values[ci] == null) continue;
+    const pv = plotted(ci);
+    const category = categoryAt(ci);
+    const origin = valueAt(pv);
+    const drawSegment = (delta: number): void => {
+      const endpoint = valueAt(pv + delta);
+      ctx.beginPath();
+      if (horizontal) {
+        ctx.moveTo(origin, category); ctx.lineTo(endpoint, category);
+      } else {
+        ctx.moveTo(category, origin); ctx.lineTo(category, endpoint);
+      }
+      ctx.stroke();
+      if (!eb.noEndCap) {
+        ctx.save(); ctx.setLineDash([]); ctx.beginPath();
+        if (horizontal) {
+          ctx.moveTo(endpoint, category - capHalf); ctx.lineTo(endpoint, category + capHalf);
+        } else {
+          ctx.moveTo(category - capHalf, endpoint); ctx.lineTo(category + capHalf, endpoint);
+        }
+        ctx.stroke(); ctx.restore();
+      }
+    };
+    if (drawPlus) { const value = eb.plus[ci]; if (value != null) drawSegment(value); }
+    if (drawMinus) { const value = eb.minus[ci]; if (value != null) drawSegment(-value); }
+  }
+  ctx.restore();
+}
+
+/** Office keeps short numeric category labels on one line when its native
+ * theme-font metrics fit the slot. A browser without that Office font may use
+ * a slightly wider fallback and otherwise split `10` into `1` / `0`. Permit a
+ * small metric-only overhang for numeric tokens; ordinary text still obeys the
+ * exact measured slot and genuinely over-wide numbers continue to wrap. */
+export function numericCategoryMetricTolerance(text: string, fontPx: number): number {
+  return /^[+-]?(?:\d+(?:[.,]\d*)?|[.,]\d+)%?$/.test(text)
+    ? fontPx * 0.15
+    : 0;
+}
+
+/** Expand a cartesian plot's automatic top inset around an authored top legend.
+ * A non-overlay manual legend still participates in chart layout: its authored
+ * rectangle replaces the automatic legend rectangle, so the plot must start
+ * below its actual bottom rather than below the shorter measured reserve. Keep
+ * the existing automatic legend-to-plot clearance unchanged. */
+export function manualTopLegendPlotInset(
+  chart: ChartModel,
+  legend: MeasuredLegendLayout | null,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  titleBandH: number,
+  automaticInset: number,
+): number {
+  if (!legend
+    || legend.side !== 't'
+    || chart.legendOverlay === true
+    || chart.legendManualLayout == null) return automaticInset;
+  const defaultBox = {
+    x: x + LEGEND_HORIZONTAL_INSET,
+    y: y + titleBandH + 2,
+    w: Math.max(0, w - LEGEND_HORIZONTAL_PADDING),
+    h: legend.reserveH,
+  };
+  const manualBox = resolveManualLayoutRect(
+    chart.legendManualLayout,
+    { x, y, w, h },
+    defaultBox,
+  );
+  if (!manualBox) return automaticInset;
+  const automaticGap = Math.max(0, y + automaticInset - (defaultBox.y + defaultBox.h));
+  return Math.max(
+    automaticInset,
+    manualBox.y + manualBox.h - y + automaticGap,
   );
 }

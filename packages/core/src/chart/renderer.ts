@@ -35,20 +35,13 @@ import { resolveFill } from '../shape/paint.js';
 
 import { EMU_PER_PT, PT_TO_PX } from '../units.js';
 
-import {
-  drawChartDisplayUnitLabels,
-  applyLinkedChartStyleRoles,
-  dashPatternForLine,
-  MAX_CANVAS_MARKER_PAINT_COMPONENTS,
-  MAX_CANVAS_LABEL_PAINT_COMPONENTS,
-  classicMarkerPaintWorkCount,
-  chartLabelPaintWorkCount,
-  classicThreeDWorkCount,
-  rejectOversizedCanvasChart,
-  drawChartTextBoxes,
-  CHART_SPACE_CORNER_RADIUS_PT,
-  chartSpaceRoundedPath,
-} from './shared/classic.js';
+import { drawChartDisplayUnitLabels } from './shared/axis.js';
+import { applyLinkedChartStyleRoles } from './shared/style-roles.js';
+import { dashPatternForLine } from './shared/geometry.js';
+import { MAX_CANVAS_MARKER_PAINT_COMPONENTS, MAX_CANVAS_LABEL_PAINT_COMPONENTS } from './shared/paint-limits.js';
+import { classicMarkerPaintWorkCount, classicThreeDWorkCount, rejectOversizedCanvasChart } from './shared/resource.js';
+import { chartLabelPaintWorkCount } from './shared/data-labels.js';
+import { drawChartTextBoxes, CHART_SPACE_CORNER_RADIUS_PT, chartSpaceRoundedPath } from './shared/frame.js';
 import { renderBarChart } from './families/bar.js';
 import { renderLineChart } from './families/line.js';
 import { renderStockChart } from './families/stock.js';
@@ -58,48 +51,18 @@ import { renderPieChart, renderOfPieChart } from './families/pie.js';
 import { renderRadarChart } from './families/radar.js';
 import { renderScatterChart } from './families/scatter.js';
 
-export {
-  CHART_PALETTE,
-  chartColor,
-  indexPointOverrides,
-  chartFontFamily,
-  chartFontCss,
-  legendEntryColor,
-  drawAxisTitles,
-  measuredLegendReserve,
-  drawLegendForLayout,
-  drawAxisTick,
-  strokeAxisSegment,
-  strokeValueGridlineH,
-  valGridStroke,
-  valMinorGridStroke,
-  drawValMajorGridlines,
-  formatPrimaryValueAxisTick,
-  planValueAxis,
-  axisLabelPx,
-  wrapMeasuredText,
-  measuredCartesianTitleBand,
-  drawChartTitleForLayout,
-  drawMarker,
-  richDataLabelOptions,
-  drawBoundedDataLabelText,
-  chartExSeriesFormatIndex,
-  chartExStyleColor,
-  chartExDataPointFill,
-  chartExMarkerPaint,
-  chartExDataPointPaint,
-  chartExFillStyle,
-  paintClassicDataPointPath,
-  paintClassicDataPointRect,
-  resolveChartExSeriesLineStyle,
-  applyResolvedChartExLineStyle,
-  applyChartExSeriesLineStyle,
-  chartExLegendSeries,
-  classicMarkerPaintWorkCount,
-  chartLabelPaintWorkCount,
-  rejectOversizedCanvasChart,
-} from './shared/classic.js';
-export type { ChartExStyle, ResolvedChartExLineStyle } from './shared/classic.js';
+export { CHART_PALETTE, chartColor, indexPointOverrides, chartExSeriesFormatIndex } from './shared/palette.js';
+export { chartFontFamily, chartFontCss } from './shared/fonts.js';
+export { legendEntryColor } from './shared/legend.js';
+export { drawAxisTitles } from './shared/axis.js';
+export { measuredLegendReserve, drawLegendForLayout } from './shared/legend.js';
+export { drawAxisTick, strokeAxisSegment, strokeValueGridlineH, valGridStroke, valMinorGridStroke, drawValMajorGridlines, formatPrimaryValueAxisTick, planValueAxis, axisLabelPx, wrapMeasuredText } from './shared/axis.js';
+export { measuredCartesianTitleBand, drawChartTitleForLayout } from './shared/title.js';
+export { drawMarker } from './shared/markers.js';
+export { richDataLabelOptions, drawBoundedDataLabelText, chartLabelPaintWorkCount } from './shared/data-labels.js';
+export { chartExStyleColor, chartExDataPointFill, chartExMarkerPaint, chartExDataPointPaint, chartExFillStyle, paintClassicDataPointPath, paintClassicDataPointRect, resolveChartExSeriesLineStyle, applyResolvedChartExLineStyle, applyChartExSeriesLineStyle, chartExLegendSeries } from './shared/chartex-style.js';
+export { classicMarkerPaintWorkCount, rejectOversizedCanvasChart } from './shared/resource.js';
+export type { ChartExStyle, ResolvedChartExLineStyle } from './shared/chartex-style.js';
 export { chartExValueTickLabelOffsetPx, renderBarChart } from './families/bar.js';
 export { renderLineChart } from './families/line.js';
 

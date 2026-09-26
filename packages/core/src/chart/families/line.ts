@@ -35,63 +35,23 @@ import { chartSeriesVariesByPoint } from '../effective-style.js';
 
 import { paintPlotAreaFrame } from '../plot-area-frame.js';
 
-import {
-  chartColor,
-  indexPointOverrides,
-  applyClassicStyleLine,
-  IndexedLinePoint,
-  paintClassicVaryingLineSegments,
-  chartFontFamily,
-  chartFontCss,
-  drawAxisTitles,
-  chartHasDataTable,
-  chartDataTableBaseHeight,
-  chartDataTableHeaderWidth,
-  measureChartDataTable,
-  drawChartDataTable,
-  createDataLabelLegendKeyResolver,
-  measuredLegendReserve,
-  drawLegendForLayout,
-  drawAxisTick,
-  strokeAxisSegment,
-  strokeValueGridlineH,
-  valGridStroke,
-  valMinorGridStroke,
-  drawCatMajorGridlines,
-  catGridStroke,
-  catGridlineFractions,
-  catAxisReversed,
-  drawValMajorGridlines,
-  formatPrimaryValueAxisTick,
-  displayUnitDivisor,
-  formatAxisTickWithUnits,
-  planValueAxis,
-  drawSeriesTrendlines,
-  axisLabelPx,
-  catLabelsVisible,
-  catLabelRotationRad,
-  drawRotatedCatLabel,
-  chartDateAxisPlan,
-  forEachErrorBarEndpoint,
-  computeSecondaryAxis,
-  drawSecondaryValueGridlines,
-  drawSecondaryValueAxis,
-  measuredCartesianTitleBand,
-  drawChartTitleForLayout,
-  chartCategories,
-  dataLabelWithinAxisMaximum,
-  chartStyleRoleErrorBar,
-  drawLineGroupDecorations,
-  axisCrossingValue,
-  categoryAxisCrossingValue,
-  drawChartMarker,
-  seriesHasResolvedMarkerDetail,
-  drawDataLabelText,
-  appendCurve,
-  drawCategoryErrorBars,
-  drawCategoryDataLabels,
-  chartExSeriesFormatIndex,
-} from '../shared/classic.js';
+import { chartColor, indexPointOverrides, applyClassicStyleLine, paintClassicVaryingLineSegments, chartExSeriesFormatIndex } from '../shared/palette.js';
+import type { IndexedLinePoint } from '../shared/palette.js';
+import { chartFontFamily, chartFontCss } from '../shared/fonts.js';
+import { drawAxisTitles } from '../shared/axis.js';
+import { chartHasDataTable, chartDataTableBaseHeight, chartDataTableHeaderWidth, measureChartDataTable, drawChartDataTable } from '../shared/data-table.js';
+import { createDataLabelLegendKeyResolver, measuredLegendReserve, drawLegendForLayout } from '../shared/legend.js';
+import { drawAxisTick, strokeAxisSegment, strokeValueGridlineH, valGridStroke, valMinorGridStroke, drawCatMajorGridlines, catGridStroke, catGridlineFractions, catAxisReversed, drawValMajorGridlines, formatPrimaryValueAxisTick, displayUnitDivisor, formatAxisTickWithUnits, planValueAxis, axisLabelPx, catLabelsVisible, catLabelRotationRad, drawRotatedCatLabel } from '../shared/axis.js';
+import { drawSeriesTrendlines } from '../shared/trendline.js';
+import { chartDateAxisPlan, forEachErrorBarEndpoint, computeSecondaryAxis, drawSecondaryValueGridlines, drawSecondaryValueAxis } from '../shared/secondary-axis.js';
+import { measuredCartesianTitleBand, drawChartTitleForLayout } from '../shared/title.js';
+import { dataLabelWithinAxisMaximum, drawDataLabelText, drawCategoryDataLabels } from '../shared/data-labels.js';
+import { chartCategories } from '../category-spacing.js';
+import { chartStyleRoleErrorBar } from '../shared/style-roles.js';
+import { drawLineGroupDecorations, axisCrossingValue, categoryAxisCrossingValue } from '../shared/line-decorations.js';
+import { drawChartMarker, seriesHasResolvedMarkerDetail } from '../shared/markers.js';
+import { appendCurve } from '../shared/geometry.js';
+import { drawCategoryErrorBars } from '../shared/error-bars.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Line chart

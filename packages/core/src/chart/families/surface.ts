@@ -55,28 +55,13 @@ import {
   type ThreeDScenePoint,
 } from '../three-d.js';
 
-import {
-  chartColor,
-  chartFontFamily,
-  chartFontCss,
-  measuredLegendReserve,
-  drawLegendForLayout,
-  strokeAxisSegment,
-  axisTickLengthPx,
-  valMinorGridStroke,
-  catMinorGridStroke,
-  catGridlineFractions,
-  valAxisReversed,
-  catAxisReversed,
-  drawValMajorGridlines,
-  planValueAxis,
-  axisLabelPx,
-  measuredCartesianTitleBand,
-  drawChartTitleForLayout,
-  chartCategories,
-  MAX_CANVAS_MARKER_GRADIENT_STOPS,
-  MAX_CANVAS_MARKER_PAINT_COMPONENTS,
-} from '../shared/classic.js';
+import { chartColor } from '../shared/palette.js';
+import { chartFontFamily, chartFontCss } from '../shared/fonts.js';
+import { measuredLegendReserve, drawLegendForLayout } from '../shared/legend.js';
+import { strokeAxisSegment, axisTickLengthPx, valMinorGridStroke, catMinorGridStroke, catGridlineFractions, valAxisReversed, catAxisReversed, drawValMajorGridlines, planValueAxis, axisLabelPx } from '../shared/axis.js';
+import { measuredCartesianTitleBand, drawChartTitleForLayout } from '../shared/title.js';
+import { chartCategories } from '../category-spacing.js';
+import { MAX_CANVAS_MARKER_GRADIENT_STOPS, MAX_CANVAS_MARKER_PAINT_COMPONENTS } from '../shared/paint-limits.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Surface / contour chart (ECMA-376 §21.2.2.204)

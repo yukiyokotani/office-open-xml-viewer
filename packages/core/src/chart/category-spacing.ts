@@ -1,3 +1,5 @@
+import type { ChartModel } from '../types/chart.js';
+
 /** Which format owns the omitted category-axis gap policy. */
 export type CategoryGapPolicy = 'legacy' | 'chartex';
 export type CategoryLabelAlignment = 'l' | 'ctr' | 'r' | string | null | undefined;
@@ -129,4 +131,18 @@ export function resolveCategoryGapWidthPercent(
     return Math.max(0, Math.min(500, authoredPercent));
   }
   return policy === 'legacy' ? 150 : 33;
+}
+
+// ─── Category helper ────────────────────────────────────────────────────────
+
+export function chartCategories(chart: ChartModel): string[] {
+  if (chart.categories.length > 0) return chart.categories;
+  const first = chart.series[0];
+  if (first?.categories && first.categories.length > 0) return first.categories;
+  // ECMA-376 §21.2.2.24 — when <c:cat> is absent the category axis uses
+  // integer values starting at 1. Fall back to the longest series so the
+  // chart still renders instead of bailing out at n === 0.
+  let n = 0;
+  for (const s of chart.series) if (s.values.length > n) n = s.values.length;
+  return n > 0 ? Array.from({ length: n }, (_, i) => String(i + 1)) : [];
 }

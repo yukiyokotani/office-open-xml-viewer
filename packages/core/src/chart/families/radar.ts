@@ -26,31 +26,16 @@ import { paintPlotAreaFrame } from '../plot-area-frame.js';
 
 import { hexToRgba } from '../../shape/paint.js';
 
-import {
-  chartColor,
-  indexPointOverrides,
-  applyClassicStyleLine,
-  IndexedLinePoint,
-  paintClassicVaryingLineSegments,
-  chartFontFamily,
-  chartFontCss,
-  measuredLegendReserve,
-  drawLegendForLayout,
-  drawAxisTick,
-  valGridStroke,
-  valMinorGridStroke,
-  valAxisReversed,
-  drawValMajorGridlines,
-  formatPrimaryValueAxisTick,
-  axisLabelPx,
-  catLabelsVisible,
-  drawChartTitleForLayout,
-  chartCategories,
-  drawChartMarker,
-  clamp,
-  chartExSeriesFormatIndex,
-  paintClassicDataPointPath,
-} from '../shared/classic.js';
+import { chartColor, indexPointOverrides, applyClassicStyleLine, paintClassicVaryingLineSegments, chartExSeriesFormatIndex } from '../shared/palette.js';
+import type { IndexedLinePoint } from '../shared/palette.js';
+import { chartFontFamily, chartFontCss } from '../shared/fonts.js';
+import { measuredLegendReserve, drawLegendForLayout } from '../shared/legend.js';
+import { drawAxisTick, valGridStroke, valMinorGridStroke, valAxisReversed, drawValMajorGridlines, formatPrimaryValueAxisTick, axisLabelPx, catLabelsVisible } from '../shared/axis.js';
+import { drawChartTitleForLayout } from '../shared/title.js';
+import { chartCategories } from '../category-spacing.js';
+import { drawChartMarker } from '../shared/markers.js';
+import { clamp } from '../shared/geometry.js';
+import { paintClassicDataPointPath } from '../shared/chartex-style.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Radar / Spider chart

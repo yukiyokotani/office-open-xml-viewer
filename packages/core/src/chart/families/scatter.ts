@@ -17,37 +17,17 @@ import { indexChartPlotGroups } from '../plot-groups.js';
 
 import { paintPlotAreaFrame } from '../plot-area-frame.js';
 
-import {
-  chartFontFamily,
-  chartFontCss,
-  drawAxisTitles,
-  measuredLegendReserve,
-  drawLegendForLayout,
-  drawAxisTick,
-  strokeAxisSegment,
-  axisTickOutwardExtentPx,
-  strokeValueGridlineH,
-  valGridStroke,
-  valMinorGridStroke,
-  drawCatMajorGridlines,
-  catGridStroke,
-  catMinorGridStroke,
-  valAxisReversed,
-  catAxisReversed,
-  drawValMajorGridlines,
-  formatPrimaryValueAxisTick,
-  formatAxisTickWithUnits,
-  axisLabelPx,
-  SecondaryAxisScale,
-  forEachErrorBarEndpoint,
-  drawSecondaryValueAxis,
-  measuredCartesianTitleBand,
-  drawChartTitleForLayout,
-  scatterXValue,
-  BubbleGroupSettings,
-  drawScatterSeriesLayer,
-  clamp,
-} from '../shared/classic.js';
+import { chartFontFamily, chartFontCss } from '../shared/fonts.js';
+import { drawAxisTitles } from '../shared/axis.js';
+import { measuredLegendReserve, drawLegendForLayout } from '../shared/legend.js';
+import { drawAxisTick, strokeAxisSegment, axisTickOutwardExtentPx, strokeValueGridlineH, valGridStroke, valMinorGridStroke, drawCatMajorGridlines, catGridStroke, catMinorGridStroke, valAxisReversed, catAxisReversed, drawValMajorGridlines, formatPrimaryValueAxisTick, formatAxisTickWithUnits, axisLabelPx } from '../shared/axis.js';
+import { forEachErrorBarEndpoint, drawSecondaryValueAxis } from '../shared/secondary-axis.js';
+import type { SecondaryAxisScale } from '../shared/secondary-axis.js';
+import { measuredCartesianTitleBand, drawChartTitleForLayout } from '../shared/title.js';
+import { scatterXValue } from '../shared/scatter-geometry.js';
+import type { BubbleGroupSettings } from '../shared/scatter-geometry.js';
+import { drawScatterSeriesLayer } from '../shared/scatter-paint.js';
+import { clamp } from '../shared/geometry.js';
 
 export function renderScatterChart(
   ctx: CanvasRenderingContext2D,

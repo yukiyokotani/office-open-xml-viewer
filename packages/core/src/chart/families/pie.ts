@@ -1,6 +1,7 @@
 // Classic pie chart family.
 import type {
   ChartDataLabelOverride,
+  ChartDataPointOverride,
   ChartLabelBox,
   ChartModel,
   ChartRect,
@@ -35,6 +36,7 @@ import {
 import { effectiveDataLabelText } from '../data-label-content.js';
 
 import { chartDataPointStyleRole, chartSeriesSourceIndex } from '../effective-style.js';
+import { chartStyleLineDecision } from '../style-paint.js';
 
 import { paintPlotAreaFrame } from '../plot-area-frame.js';
 
@@ -42,31 +44,15 @@ import { resolveDataLabelPlacement, type DataLabelRect } from '../data-label-lay
 
 import { EMU_PER_PT } from '../../units.js';
 
-import {
-  indexPointOverrides,
-  pieSliceColor,
-  piePointStyleIndex,
-  paintClassicPiePointOutline,
-  chartFontFamily,
-  drawLegendSwatch,
-  DataLabelLegendKey,
-  createDataLabelLegendKeyResolver,
-  LEGEND_SWATCH_TEXT_GAP,
-  legendSwatchWidths,
-  legendSwatchHeight,
-  measuredLegendReserve,
-  drawLegendForLayout,
-  drawChartTitleForLayout,
-  dataLabelRectIntersection,
-  applyDecorationLineStyle,
-  chartStyleRoleLine,
-  chartStyleRoleLeaderLine,
-  customRichDataLabelOptions,
-  drawBoundedDataLabelText,
-  dashPatternForPreset,
-  paintClassicDataPointPath,
-  paintClassicDataPointRect,
-} from '../shared/classic.js';
+import { indexPointOverrides, pieSliceColor, piePointStyleIndex, applyClassicStyleLine } from '../shared/palette.js';
+import { chartFontFamily } from '../shared/fonts.js';
+import { drawLegendSwatch, createDataLabelLegendKeyResolver, LEGEND_SWATCH_TEXT_GAP, legendSwatchWidths, legendSwatchHeight, measuredLegendReserve, drawLegendForLayout } from '../shared/legend.js';
+import type { DataLabelLegendKey } from '../shared/legend.js';
+import { drawChartTitleForLayout } from '../shared/title.js';
+import { customRichDataLabelOptions, drawBoundedDataLabelText } from '../shared/data-labels.js';
+import { applyDecorationLineStyle, chartStyleRoleLine, chartStyleRoleLeaderLine } from '../shared/style-roles.js';
+import { dashPatternForPreset } from '../shared/geometry.js';
+import { paintClassicDataPointPath, paintClassicDataPointRect } from '../shared/chartex-style.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Pie / Doughnut — supports dataPointColors (per slice).
@@ -1533,4 +1519,57 @@ function drawPieCalloutLabels(
     if (l.manualClip) ctx.restore();
   }
   ctx.restore();
+}
+
+export function paintClassicPiePointOutline(
+  ctx: CanvasRenderingContext2D,
+  chart: ChartModel,
+  series: ChartSeries,
+  point: ChartDataPointOverride | undefined,
+  styleIndex: number,
+  fallbackColor: string,
+  ptToPx: number,
+  bounds: ChartRect,
+  shapeRotationDeg: number,
+): void {
+  const pointStyle = point?.chartexStyle;
+  const sourceSeriesIndex = chartSeriesSourceIndex(chart, series);
+  const linkedPointStyle = chartDataPointStyleRole(
+    chart, 'dataPoint', sourceSeriesIndex >= 0 ? sourceSeriesIndex : styleIndex,
+  );
+  const seriesStyle = series.chartexStyle;
+  const pointOwnsPaint = chartStyleLineDecision(pointStyle, point?.idx ?? styleIndex) !== undefined
+    || point?.lineHidden === true || point?.lineColor != null;
+  const seriesOwnsPaint = chartStyleLineDecision(seriesStyle, styleIndex) !== undefined
+    || series.lineHidden === true || series.lineColor != null;
+  const linkedOwnsPaint = chartStyleLineDecision(linkedPointStyle, styleIndex) !== undefined;
+  // A programmatically constructed legacy ChartModel may carry neither a
+  // numeric/linked style role nor direct line formatting. Preserve that public
+  // contract's historical no-outline semantic; parsed OOXML always supplies
+  // the numeric dataPoint role, including its explicit Table 5 No Line cases.
+  if (!pointOwnsPaint && !seriesOwnsPaint && !linkedOwnsPaint) return;
+  ctx.save();
+  if (applyClassicStyleLine(
+    ctx,
+    chart,
+    'dataPoint',
+    series,
+    point,
+    styleIndex,
+    fallbackColor,
+    Math.max(.5, ptToPx * .75),
+    ptToPx,
+    bounds,
+    shapeRotationDeg,
+    false,
+  )) ctx.stroke();
+  ctx.restore();
+}
+
+export function dataLabelRectIntersection(a: DataLabelRect, b: DataLabelRect): DataLabelRect | null {
+  const x = Math.max(a.x, b.x);
+  const y = Math.max(a.y, b.y);
+  const right = Math.min(a.x + a.w, b.x + b.w);
+  const bottom = Math.min(a.y + a.h, b.y + b.h);
+  return right > x && bottom > y ? { x, y, w: right - x, h: bottom - y } : null;
 }
