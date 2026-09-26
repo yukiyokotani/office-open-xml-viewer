@@ -55,18 +55,19 @@ const {
   initPptxFromBytes,
   initDocxFromBytes,
   initXlsxFromBytes,
-} = await loadSource().catch(() => import('../dist/index.js'));
+} = await loadAdapter();
 
 // Dev (monorepo) runs the TS source through Vite's module runner: the source
 // imports the shared typed errors from `@silurus/ooxml-core`, which ships
 // TypeScript that Node's strip-only mode cannot execute (parameter properties,
-// bundler-style `.js` specifiers). A published install has neither `src/` nor
-// Vite, so this rejects and we fall back to the compiled `dist/index.js`, which
-// inlines those helpers. Node refuses to strip types from `.ts` files under
-// node_modules, so the standalone package MUST expose compiled JS here.
-async function loadSource() {
+// bundler-style `.js` specifiers). A published install has no `src/`, so it
+// loads the compiled `dist/index.js`, which inlines those helpers. Node refuses
+// to strip types from `.ts` files under node_modules, so the standalone package
+// MUST expose compiled JS here. When the source exists, a failure to load it
+// propagates rather than silently running a possibly stale `dist/`.
+async function loadAdapter() {
   const source = fileURLToPath(new URL('../src/index.ts', import.meta.url));
-  if (!existsSync(source)) throw new Error('no TypeScript source');
+  if (!existsSync(source)) return import('../dist/index.js');
   const { runnerImport } = await import('vite');
   const { module } = await runnerImport(source, { configFile: false, logLevel: 'silent' });
   return module;
