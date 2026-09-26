@@ -1730,6 +1730,7 @@ interface LoadOptions__emitterCollision1 {
     useGoogleFonts?: boolean;
     cjkFallback?: CjkFallback;
     password?: string;
+    modelSources?: readonly ModelSource[];
     wasmUrl?: string | URL;
     maxZipEntryBytes?: number;
     resourceLimits?: OoxmlResourceLimits;
@@ -1861,6 +1862,29 @@ export interface MathSvg {
     ascentEm: number;
     descentEm: number;
 }
+const MODEL_SOURCE_MODULE_PROTOCOL = 'ooxml-model-source-module/v1';
+export interface ModelSource<T extends ModelSourceTarget = ModelSourceTarget> {
+    readonly target: T;
+    claim(bytes: Uint8Array): boolean;
+    beginLoad(): ModelSourceLoad;
+}
+export type ModelSourceConfig = Readonly<Record<string, ModelSourceConfigValue>>;
+export type ModelSourceConfigValue = string | number | boolean | null;
+export interface ModelSourceLoad {
+    readonly module: ModelSourceModuleDescriptor;
+    readonly transfer?: readonly Transferable[];
+    release(): void;
+}
+export interface ModelSourceModule<TArchive = unknown> {
+    openModelSource(bytes: Uint8Array, config: ModelSourceConfig, signal?: AbortSignal, transfer?: readonly Transferable[]): Promise<OpenedModelSource<TArchive>>;
+}
+export interface ModelSourceModuleDescriptor {
+    readonly protocol: typeof MODEL_SOURCE_MODULE_PROTOCOL;
+    readonly target: ModelSourceTarget;
+    readonly moduleUrl: string;
+    readonly config: ModelSourceConfig;
+}
+export type ModelSourceTarget = 'docx' | 'xlsx' | 'pptx';
 export interface NoFill {
     fillType: 'none';
 }
@@ -1965,6 +1989,11 @@ export interface OoxmlResourceViolation {
     readonly observed: number;
     readonly configurable: boolean;
     readonly usage: OoxmlResourceUsageSnapshot;
+}
+export interface OpenedModelSource<TArchive> {
+    readonly archive: TArchive;
+    readonly viewDefaults?: Readonly<Record<string, boolean>>;
+    close(): void;
 }
 export function openExternalHyperlink(url: string, allowed?: readonly string[], win?: Pick<Window, 'open'> | undefined): boolean;
 export interface PageBorderEdge {

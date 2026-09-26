@@ -14,11 +14,21 @@ export { DocumentPullWorker, type DocxDocumentCursorArchive } from '../document-
 export { createLayoutServices } from '../layout-runtime.js';
 export { retainRenderWorkerDocumentLayout } from '../render-worker-layout.js';
 export { renderLayoutSourceToCanvas } from '../renderer.js';
+export { normalizeLayoutOptions } from '../layout/options.js';
+export {
+  validateDocxModelSourceArchive,
+  validateDocxModelSourceViewDefaults,
+  type DocxModelSourceArchive,
+  type DocxModelSourceViewDefaults,
+} from './worker-document-source.js';
 export {
   acquireDocxNodeDocument,
+  acquireDocxSessionFromArchive,
   type AcquiredDocxNodeDocument,
   type DocxNodeAcquisitionOptions,
   type DocxNodeArchive,
+  type DocxNodeSessionArchive,
+  type DocxOwnedArchiveSource,
   type DocxNodePullIdentity,
   type DocxNodePullOptions,
   type DocxNodePullTransport,

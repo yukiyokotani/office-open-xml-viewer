@@ -103,8 +103,25 @@ export type RenderWorkerRequest =
   // flags: hiding deletions changes line breaking, and DATE/TIME field text
   // changes measured widths, so each combination is a genuinely different
   // pagination with its own page count. Omitted means the document's default
-  // view, which is what every load selected before these existed.
-  | { type: 'parse'; id: number; data: ArrayBuffer; resourcePolicy: NormalizedOoxmlResourcePolicy; useGoogleFonts?: boolean; cjkFallback?: import('@silurus/ooxml-core').CjkLang; defaultCurrentDateMs: number; currentDateMs?: number; showTrackedChanges?: boolean; renderers?: WorkerRendererDescriptors; progressiveLayout?: boolean }
+  // view. `showTrackedChanges` is tri-state: it is sent only when the caller
+  // chose a view, so the worker can otherwise apply the model source's view
+  // default before its first pagination.
+  | {
+      type: 'parse';
+      id: number;
+      data: ArrayBuffer;
+      resourcePolicy: NormalizedOoxmlResourcePolicy;
+      /** Application-selected model source (LoadOptions.modelSources). */
+      source?: import('@silurus/ooxml-core').ModelSourceModuleDescriptor;
+      sourceTransfer?: readonly Transferable[];
+      useGoogleFonts?: boolean;
+      cjkFallback?: import('@silurus/ooxml-core').CjkLang;
+      defaultCurrentDateMs: number;
+      currentDateMs?: number;
+      showTrackedChanges?: boolean;
+      renderers?: WorkerRendererDescriptors;
+      progressiveLayout?: boolean;
+    }
   | { type: 'selectLayoutView'; id: number; currentDateMs: number; showTrackedChanges: boolean }
   | { type: 'renderPage'; id: number; pageIndex: number; opts: WireRenderPageOptions }
   // IX6 — collect a page's text-run geometry WITHOUT transferring a bitmap. The
@@ -134,6 +151,8 @@ export type RenderWorkerResponse =
       id: number;
       meta: DocumentMeta;
       usage?: OoxmlResourceUsageSnapshot;
+      /** The tracked-change view the worker paginated (the effective view). */
+      showTrackedChanges?: boolean;
     }
   | { type: 'layoutViewSelected'; id: number; meta: DocumentLayoutMeta }
   // OffscreenCanvas cannot select/probe the OpenType `vert` feature. A render
@@ -144,6 +163,8 @@ export type RenderWorkerResponse =
       type: 'mainThreadVerticalFallback';
       id: number;
       usage?: OoxmlResourceUsageSnapshot;
+      /** The model source's own view preferences, validated in the worker. */
+      viewDefaults?: { showTrackedChanges?: boolean };
     } & PullSessionIdentity<number>)
   // The worker projects structured-clone-safe run geometry from the same
   // retained layout variant it paints and ships it beside the bitmap.
@@ -157,7 +178,7 @@ export type RenderWorkerResponse =
   // parse early and the authoritative metadata would arrive with nowhere to go.
   // An uncorrelated message is routed to the bridge's `onUnsolicited` hook
   // instead, which is exactly the push channel this needs.
-  | { type: 'layoutPartial'; forId: number; partial: DocumentLayoutPartial }
+  | { type: 'layoutPartial'; forId: number; partial: DocumentLayoutPartial; showTrackedChanges?: boolean }
   // Throttled liveness + progress heartbeat during a progressive parse. Also
   // load-bearing for safety: a document that never publishes a preview (one
   // short enough that previewing is pointless, or whose preview attempt threw)

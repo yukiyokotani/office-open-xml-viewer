@@ -1634,7 +1634,15 @@ export interface CellBorders {
 
 export type WorkerRequest =
   | { type: 'init'; wasmUrl: string }
-  | { type: 'parse'; id: number; data: ArrayBuffer; resourcePolicy: NormalizedOoxmlResourcePolicy }
+  | {
+      type: 'parse';
+      id: number;
+      data: ArrayBuffer;
+      resourcePolicy: NormalizedOoxmlResourcePolicy;
+      /** Application-selected model source (LoadOptions.modelSources). */
+      source?: import('@silurus/ooxml-core').ModelSourceModuleDescriptor;
+      sourceTransfer?: readonly Transferable[];
+    }
   | { type: 'extractImage'; id: number; path: string }
   | { type: 'resourceUsage'; id: number }
   // Project the retained archive to GitHub-flavoured markdown (`DocxArchive.to_markdown`,
@@ -1643,9 +1651,15 @@ export type WorkerRequest =
   | { type: 'toMarkdown'; id: number };
 
 export type WorkerResponse =
-  | ({ type: 'documentSessionOpened'; id: number } & PullSessionIdentity<number>)
+  | ({
+      type: 'documentSessionOpened';
+      id: number;
+      /** The model source's own view preferences, validated in the worker. */
+      viewDefaults?: { showTrackedChanges?: boolean };
+    } & PullSessionIdentity<number>)
   | { type: 'imageExtracted'; id: number; bytes: ArrayBuffer }
-  | { type: 'resourceUsage'; id: number; usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot }
+  // `usage` is absent when the loaded model source has no ZIP accounting.
+  | { type: 'resourceUsage'; id: number; usage?: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot }
   | { type: 'markdownRendered'; id: number; markdown: string }
   | ({
       type: 'error';
