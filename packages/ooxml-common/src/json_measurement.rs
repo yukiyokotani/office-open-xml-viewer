@@ -8,10 +8,13 @@
 use serde::Serialize;
 use std::io::{self, Write};
 
+use crate::package_session::PackageLimitReporter;
+use crate::resource::HardResourceLimitKind;
+
 /// A serialization failure distinct from crossing a parser's JSON byte ceiling.
 #[derive(Debug)]
-pub enum LimitedJsonError {
-    LimitExceeded { observed: u64, limit: u64 },
+enum LimitedJsonError {
+    LimitExceeded { observed: u64 },
     Serialize(String),
 }
 
@@ -61,7 +64,7 @@ impl Write for LimitedJsonWriter {
 /// Serialize directly into a byte-capped buffer, aborting on the first crossing.
 /// The reported observation is the first rejected write's cumulative size; it
 /// can be less than the complete JSON size, while retaining the exact ceiling.
-pub fn serialize_json_limited<T: Serialize>(
+fn serialize_json_limited<T: Serialize>(
     value: &T,
     limit: u64,
 ) -> Result<Vec<u8>, LimitedJsonError> {
@@ -72,11 +75,37 @@ pub fn serialize_json_limited<T: Serialize>(
     };
     if let Err(error) = serde_json::to_writer(&mut writer, value) {
         if let Some(observed) = writer.exceeded {
-            return Err(LimitedJsonError::LimitExceeded { observed, limit });
+            return Err(LimitedJsonError::LimitExceeded { observed });
         }
         return Err(LimitedJsonError::Serialize(error.to_string()));
     }
     Ok(writer.bytes)
+}
+
+/// Serialize one emitted JSON unit and observe its hard ceiling from the same
+/// pass. The prefix is used only when no reporter rejects a limit crossing.
+pub fn serialize_json_with_limit<T: Serialize>(
+    value: &T,
+    reporter: Option<&PackageLimitReporter>,
+    kind: HardResourceLimitKind,
+    part: Option<&str>,
+    limit: u64,
+    limit_error_prefix: &str,
+) -> Result<Vec<u8>, String> {
+    let bytes = match serialize_json_limited(value, limit) {
+        Ok(bytes) => bytes,
+        Err(LimitedJsonError::LimitExceeded { observed }) => {
+            if let Some(reporter) = reporter {
+                reporter.observe_hard_limit(kind, part, limit, observed)?;
+            }
+            return Err(format!("{limit_error_prefix}: {observed} > {limit}"));
+        }
+        Err(LimitedJsonError::Serialize(error)) => return Err(format!("serialize error: {error}")),
+    };
+    if let Some(reporter) = reporter {
+        reporter.observe_hard_limit(kind, part, limit, bytes.len() as u64)?;
+    }
+    Ok(bytes)
 }
 
 /// Exact resource measurements for a serde JSON serialization.
@@ -275,13 +304,53 @@ mod tests {
             serialize_json_limited(&value, expected.len() as u64).unwrap(),
             expected
         );
-        match serialize_json_limited(&value, expected.len() as u64 - 1).unwrap_err() {
-            LimitedJsonError::LimitExceeded { observed, limit } => {
+        let limit = expected.len() as u64 - 1;
+        match serialize_json_limited(&value, limit).unwrap_err() {
+            LimitedJsonError::LimitExceeded { observed } => {
                 assert!(observed > limit);
-                assert_eq!(limit, expected.len() as u64 - 1);
             }
             other => panic!("expected a byte limit error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn reported_serialization_keeps_limit_and_serde_error_formats() {
+        let value = serde_json::json!({"text": "é😀"});
+        let limit = serde_json::to_vec(&value).unwrap().len() as u64 - 1;
+        let error = serialize_json_with_limit(
+            &value,
+            None,
+            HardResourceLimitKind::WorksheetJsonBytes,
+            Some("xl/worksheets/sheet1.xml"),
+            limit,
+            "worksheet JSON exceeds its hard ceiling",
+        )
+        .unwrap_err();
+        let observed = error
+            .strip_prefix("worksheet JSON exceeds its hard ceiling: ")
+            .and_then(|rest| rest.strip_suffix(&format!(" > {limit}")))
+            .and_then(|rest| rest.parse::<u64>().ok())
+            .expect("limit error retains the observed/limit format");
+        assert!(observed > limit);
+
+        struct FailingValue;
+        impl Serialize for FailingValue {
+            fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("failed value"))
+            }
+        }
+        assert_eq!(
+            serialize_json_with_limit(
+                &FailingValue,
+                None,
+                HardResourceLimitKind::WorksheetJsonBytes,
+                None,
+                1,
+                "worksheet JSON exceeds its hard ceiling",
+            )
+            .unwrap_err(),
+            "serialize error: failed value"
+        );
     }
 
     #[test]
