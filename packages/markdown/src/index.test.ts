@@ -1,9 +1,10 @@
 import { runInNewContext } from 'node:vm';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const mocks = vi.hoisted(() => ({
-  docxToMarkdown: vi.fn((bytes: Uint8Array) => [...bytes].join(',')),
-}));
+const mocks = vi.hoisted(() => {
+  const joinBytes = (bytes: Uint8Array) => [...bytes].join(',');
+  return { joinBytes, docxToMarkdown: vi.fn(joinBytes) };
+});
 
 vi.mock('@silurus/ooxml-pptx/wasm', () => ({ initSync: vi.fn() }));
 vi.mock('@silurus/ooxml-xlsx/wasm', () => ({ initSync: vi.fn() }));
@@ -17,7 +18,7 @@ import { docxToMarkdown, initDocxFromBytes } from './index.js';
 
 describe('markdown byte normalization', () => {
   beforeEach(() => {
-    mocks.docxToMarkdown.mockClear();
+    mocks.docxToMarkdown.mockReset().mockImplementation(mocks.joinBytes);
     initDocxFromBytes(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]));
   });
 
@@ -77,6 +78,12 @@ describe('markdown projection errors', () => {
   it('rethrows any other failure unchanged', () => {
     const failure = new RangeError('unrelated');
     mocks.docxToMarkdown.mockImplementation(() => { throw failure; });
-    expect(() => docxToMarkdown(new Uint8Array([1]))).toThrow(failure);
+    let error: unknown;
+    try {
+      docxToMarkdown(new Uint8Array([1]));
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBe(failure);
   });
 });
