@@ -7,7 +7,7 @@ import {
 } from './workbook.js';
 import type { LoadOptions } from './workbook.js';
 import type { Cell, Hyperlink, Row, ViewportRange, Worksheet, XlsxChromeColors, XlsxComment } from './types.js';
-import type { FindHighlightColors, HyperlinkTarget, FindMatch, FindMatchesOptions, OoxmlResourceMetrics, ViewerContextMenuEvent, ZoomableViewer } from '@silurus/ooxml-core';
+import type { FindHighlightColors, HyperlinkTarget, FindMatch, FindMatchesOptions, FindQuery, OoxmlResourceMetrics, ViewerContextMenuEvent, ZoomableViewer } from '@silurus/ooxml-core';
 import { nextVisibleIndex, resolveVisibleIndex, countVisible, zoomStepScale, anchoredZoomOffset, openExternalHyperlink, nextZoomStep, prevZoomStep, fitScale } from '@silurus/ooxml-core';
 import {
   CallerCanvasMount,
@@ -608,13 +608,16 @@ let selectionMaskSequence = 0;
 const DEFAULT_FIND_HIGHLIGHT = 'color-mix(in srgb, #ffb300 8%, transparent)';
 const DEFAULT_FIND_ACTIVE_HIGHLIGHT = 'color-mix(in srgb, #fb8c00 8%, transparent)';
 
-/** Resolve an XLSX find box without altering a caller-provided CSS background. */
+/** Resolve an XLSX find box without altering a caller-provided CSS background.
+ *  `termColor` is the colour a match's term asked for; it replaces the match
+ *  colour, but never the active one. */
 export function findHighlightOverlayStyle(
   active: boolean,
   colors: FindHighlightColors = {},
+  termColor?: string,
 ): { border: string; background: string } {
   const accent = active ? '#fb8c00' : '#ffb300';
-  const custom = active ? colors.active : colors.match;
+  const custom = active ? colors.active : termColor ?? colors.match;
   const background = custom ?? (active ? DEFAULT_FIND_ACTIVE_HIGHLIGHT : DEFAULT_FIND_HIGHLIGHT);
   return { border: `2px solid ${custom ?? accent}`, background };
 }
@@ -3276,8 +3279,8 @@ class XlsxViewerEngine implements ZoomableViewer {
     // A match accent: same single-color → border + translucent fill derivation
     // the selection overlay uses. The active match uses a warm accent so it is
     // distinguishable from other hits and from the (blue) selection box.
-    const other = findHighlightOverlayStyle(false, this.opts.findHighlightColors);
-    const active = findHighlightOverlayStyle(true, this.opts.findHighlightColors);
+    const colors = this.opts.findHighlightColors;
+    const active = findHighlightOverlayStyle(true, colors);
 
     for (const hl of this._find.sheetHighlights(this.currentSheet)) {
       const rect = this._cellRect(hl.row, hl.col);
@@ -3292,7 +3295,7 @@ class XlsxViewerEngine implements ZoomableViewer {
       if (hl.row > freezeRows && y < frozenBoundY) { h -= frozenBoundY - y; y = frozenBoundY; }
       if (w <= 0 || h <= 0) continue;
       const screenLeft = this.screenX(x, w);
-      const { border, background } = hl.active ? active : other;
+      const { border, background } = hl.active ? active : findHighlightOverlayStyle(false, colors, hl.color);
       const box = this.hostDocument.createElement('div');
       box.style.cssText =
         `position:absolute;` +
@@ -3313,7 +3316,7 @@ class XlsxViewerEngine implements ZoomableViewer {
    * clears the find.
    */
   async findText(
-    query: string,
+    query: FindQuery,
     opts: FindMatchesOptions = {},
   ): Promise<FindMatch<XlsxMatchLocation>[]> {
     if (!this.wb) return [];
@@ -5372,7 +5375,7 @@ export class XlsxSheetViewer implements ZoomableViewer {
   }
 
   async findText(
-    query: string,
+    query: FindQuery,
     options?: FindMatchesOptions,
   ): Promise<FindMatch<XlsxMatchLocation>[]> {
     this.assertOpen();

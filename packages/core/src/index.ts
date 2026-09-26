@@ -742,11 +742,15 @@ export { fontAdvanceBiasEm } from './text/font-advance-metrics';
 export {
   buildTextIndex,
   findMatches,
+  normalizeFindQuery,
+  withFindColor,
   type SearchRun,
   type TextIndex,
   type MatchRunSlice,
   type TextMatch,
   type FindMatchesOptions,
+  type FindQuery,
+  type FindTerm,
 } from './search/text-index';
 export { sliceHorizontalExtent, overlayPercent } from './search/highlight-rect';
 export { nextActive, prevActive, clampActive } from './search/find-cursor';

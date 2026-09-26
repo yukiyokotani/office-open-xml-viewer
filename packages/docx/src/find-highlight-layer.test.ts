@@ -103,6 +103,18 @@ describe('buildDocxHighlightLayer', () => {
     expect(layer.children[0].style.background).toBe(DEFAULT_FIND_ACTIVE_HIGHLIGHT);
   });
 
+  it("paints a match in its term's colour, but the active match in the active colour", () => {
+    vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
+    const layer = makeEl('div');
+    const runs = [run({ text: 'abc def' })];
+    const matches: DocxHighlightMatch[] = [
+      { slices: [{ runIndex: 0, start: 0, end: 3 }], active: false, color: 'rgba(255, 0, 0, 0.4)' },
+      { slices: [{ runIndex: 0, start: 4, end: 7 }], active: true, color: 'rgba(255, 0, 0, 0.4)' },
+    ];
+    buildDocxHighlightLayer(layer as unknown as HTMLDivElement, runs, matches, 1, 1, measureForFont);
+    expect(layer.children.map((box) => box.style.background)).toEqual(['rgba(255, 0, 0, 0.4)', DEFAULT_FIND_ACTIVE_HIGHLIGHT]);
+  });
+
   it('draws a box per run for a cross-run match', () => {
     vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
     const layer = makeEl('div');

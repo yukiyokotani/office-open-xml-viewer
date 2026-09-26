@@ -18,10 +18,13 @@
 import {
   buildTextIndex,
   findMatches,
+  normalizeFindQuery,
   nextActive,
   prevActive,
   type FindMatch,
   type FindMatchesOptions,
+  type FindQuery,
+  withFindColor,
 } from '@silurus/ooxml-core';
 import { formatA1 } from './a1.js';
 
@@ -52,6 +55,8 @@ interface XlsxResolvedMatch {
   row: number;
   col: number;
   text: string;
+  /** The colour of the term that found it, when that term set one. */
+  color?: string;
 }
 
 export class XlsxFindController {
@@ -74,11 +79,11 @@ export class XlsxFindController {
   }
 
   /** Matched cells on a sheet, each tagged active — the highlight overlay input. */
-  sheetHighlights(sheet: number): { row: number; col: number; active: boolean }[] {
-    const out: { row: number; col: number; active: boolean }[] = [];
+  sheetHighlights(sheet: number): { row: number; col: number; active: boolean; color?: string }[] {
+    const out: { row: number; col: number; active: boolean; color?: string }[] = [];
     for (let i = 0; i < this._matches.length; i++) {
       const m = this._matches[i];
-      if (m.sheet === sheet) out.push({ row: m.row, col: m.col, active: i === this._active });
+      if (m.sheet === sheet) out.push(withFindColor({ row: m.row, col: m.col, active: i === this._active }, m.color));
     }
     return out;
   }
@@ -104,16 +109,16 @@ export class XlsxFindController {
   matches(): FindMatch<XlsxMatchLocation>[] {
     return this._matches.map((m, i) => {
       const loc = this._locationAt(i) as XlsxMatchLocation;
-      return { matchIndex: i, text: m.text, location: loc };
+      return withFindColor({ matchIndex: i, text: m.text, location: loc }, m.color);
     });
   }
 
   /** Run a fresh query across every sheet, resetting the cursor. Matches are in
    *  document order: sheet ascending, then a sheet's cells in the order
    *  `collectSheetCells` returns them (row-major from the parser). */
-  async find(query: string, opts: FindMatchesOptions = {}): Promise<FindMatch<XlsxMatchLocation>[]> {
+  async find(query: FindQuery, opts: FindMatchesOptions = {}): Promise<FindMatch<XlsxMatchLocation>[]> {
     const generation = ++this._generation;
-    if (query.length === 0) {
+    if (normalizeFindQuery(query).length === 0) {
       this._matches = [];
       this._active = -1;
       return [];
@@ -139,7 +144,7 @@ export class XlsxFindController {
         for (const tm of hits) {
           const slice = tm.slices[0];
           const text = cell.text.slice(slice.start, slice.end);
-          matches.push({ sheet, sheetName, row: cell.row, col: cell.col, text });
+          matches.push(withFindColor({ sheet, sheetName, row: cell.row, col: cell.col, text }, tm.color));
         }
       }
     }
@@ -162,6 +167,7 @@ export class XlsxFindController {
   private _activePublic(): FindMatch<XlsxMatchLocation> | null {
     const loc = this._locationAt(this._active);
     if (!loc) return null;
-    return { matchIndex: this._active, text: this._matches[this._active].text, location: loc };
+    const m = this._matches[this._active];
+    return withFindColor({ matchIndex: this._active, text: m.text, location: loc }, m.color);
   }
 }

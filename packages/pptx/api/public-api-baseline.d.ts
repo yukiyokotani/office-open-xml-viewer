@@ -1025,9 +1025,16 @@ export interface FindMatch<Loc = unknown> {
     matchIndex: number;
     text: string;
     location: Loc;
+    color?: string;
 }
 export interface FindMatchesOptions {
     caseSensitive?: boolean;
+    wholeWord?: boolean;
+}
+export type FindQuery = string | readonly (string | FindTerm)[];
+export interface FindTerm {
+    text: string;
+    color?: string;
 }
 export interface Glow {
     color: string;
@@ -1539,6 +1546,7 @@ export type PptxHighlightColors = FindHighlightColors;
 export interface PptxHighlightMatch {
     slices: MatchRunSlice[];
     active: boolean;
+    color?: string;
 }
 export interface PptxMatchLocation {
     slide: number;
@@ -1592,7 +1600,7 @@ export class PptxScrollViewer implements ZoomableViewer {
     goToComment(slideIndex: number, commentIndex: number, opts?: {
         behavior?: 'auto' | 'smooth';
     }): Promise<boolean>;
-    findText(query: string, opts?: FindMatchesOptions): Promise<FindMatch<PptxMatchLocation>[]>;
+    findText(query: FindQuery, opts?: FindMatchesOptions): Promise<FindMatch<PptxMatchLocation>[]>;
     findNext(): Promise<FindMatch<PptxMatchLocation> | null>;
     findPrev(): Promise<FindMatch<PptxMatchLocation> | null>;
     clearFind(): void;
@@ -1705,7 +1713,7 @@ export class PptxViewer implements ZoomableViewer {
     zoomOut(): Promise<void>;
     fitWidth(): Promise<void>;
     fitPage(): Promise<void>;
-    findText(query: string, opts?: FindMatchesOptions): Promise<FindMatch<PptxMatchLocation>[]>;
+    findText(query: FindQuery, opts?: FindMatchesOptions): Promise<FindMatch<PptxMatchLocation>[]>;
     findNext(): Promise<FindMatch<PptxMatchLocation> | null>;
     findPrev(): Promise<FindMatch<PptxMatchLocation> | null>;
     clearFind(): void;

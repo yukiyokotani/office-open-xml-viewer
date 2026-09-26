@@ -124,14 +124,14 @@ export type {
   ZoomableViewer,
 } from '@silurus/ooxml-core';
 // IX2 find-in-document: the highlight overlay builder + the pptx match-location
-// shape. `FindMatch` / `FindMatchesOptions` come from core (shared across formats).
+// shape. `FindMatch` / `FindMatchesOptions` / `FindQuery` come from core (shared across formats).
 export {
   buildPptxHighlightLayer,
   type PptxHighlightMatch,
   type PptxHighlightColors,
 } from './find-highlight-layer';
 export type { PptxMatchLocation } from './find';
-export type { FindHighlightColors, FindMatch, FindMatchesOptions } from '@silurus/ooxml-core';
+export type { FindHighlightColors, FindMatch, FindMatchesOptions, FindQuery, FindTerm } from '@silurus/ooxml-core';
 export type { PresentationHandle } from './presentation-handle';
 export { autoResize, type AutoResizeOptions } from '@silurus/ooxml-core';
 // IX1 — the shared hyperlink target shape surfaced by `PptxViewerOptions.
