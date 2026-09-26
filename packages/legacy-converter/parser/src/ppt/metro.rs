@@ -121,7 +121,8 @@ fn theme_part(package: &[u8]) -> Option<String> {
         return None;
     }
     let mut read = |name: &str| -> Option<String> {
-        let entry = archive.by_name(name).ok()?;
+        let index = crate::opc_part::entry_index(&archive, name)?;
+        let entry = archive.by_index(index).ok()?;
         if entry.size() > MAX_THEME_BYTES || entry.encrypted() {
             return None;
         }
@@ -133,24 +134,32 @@ fn theme_part(package: &[u8]) -> Option<String> {
         (text.len() as u64 <= MAX_THEME_BYTES).then_some(text)
     };
     // Follow the package relationships: root -> theme manager -> theme.
-    let target = |rels: &str, kind: &str| -> Option<String> {
+    let target = |rels: &str, source: &str, kind: &str| -> Option<String> {
         let doc = roxmltree::Document::parse(rels).ok()?;
         let mut found = doc.root_element().children().filter(|n| {
             n.is_element()
                 && n.tag_name().name() == "Relationship"
                 && n.attribute("Type").is_some_and(|t| t.ends_with(kind))
         });
-        let first = found.next()?.attribute("Target")?.to_owned();
-        found.next().is_none().then_some(first)
+        let first = found.next()?;
+        if first
+            .attribute("TargetMode")
+            .is_some_and(|mode| mode != "Internal")
+            || found.next().is_some()
+        {
+            return None;
+        }
+        ooxml_common::rels::resolve_part_name(source, first.attribute("Target")?)
     };
-    let manager = target(&read("_rels/.rels")?, "/officeDocument")?;
-    let manager = manager.trim_start_matches('/').to_owned();
-    let (dir, name) = manager.rsplit_once('/')?;
-    let theme = target(&read(&format!("{dir}/_rels/{name}.rels"))?, "/theme")?;
-    if theme.contains("..") || theme.starts_with('/') {
-        return None;
-    }
-    read(&format!("{dir}/{theme}"))
+    let manager = target(&read("_rels/.rels")?, "", "/officeDocument")?;
+    let (dir, name) = manager.rsplit_once('/').unwrap_or(("", &manager));
+    let rels = if dir.is_empty() {
+        format!("_rels/{name}.rels")
+    } else {
+        format!("{dir}/_rels/{name}.rels")
+    };
+    let theme = target(&read(&rels)?, &manager, "/theme")?;
+    read(&theme)
 }
 
 /// What the binary shape records, for comparison with its alternative.
@@ -235,7 +244,8 @@ fn alternative_part(blob: &[u8]) -> Result<Option<(String, String)>, String> {
     use std::io::Read;
     let unreadable = || unsupported("unreadable PowerPoint alternative shape XML package");
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(blob)).map_err(|_| unreadable())?;
-    let entry = archive.by_name("_rels/.rels").map_err(|_| unreadable())?;
+    let index = crate::opc_part::entry_index(&archive, "_rels/.rels").ok_or_else(unreadable)?;
+    let entry = archive.by_index(index).map_err(|_| unreadable())?;
     if entry.size() > MAX_PART_BYTES || entry.encrypted() {
         return Err(unreadable());
     }
@@ -255,18 +265,15 @@ fn alternative_part(blob: &[u8]) -> Result<Option<(String, String)>, String> {
         if kind == "downRev" {
             continue;
         }
-        let target = node.attribute("Target").ok_or_else(unreadable)?;
-        let target = target.strip_prefix('/').unwrap_or(target);
+        let target = ooxml_common::rels::resolve_part_name(
+            "",
+            node.attribute("Target").ok_or_else(unreadable)?,
+        )
+        .ok_or_else(|| unverifiable("package relationship"))?;
         if node
             .attribute("TargetMode")
             .is_some_and(|mode| mode != "Internal")
-            || target.is_empty()
-            || target
-                .split('/')
-                .any(|segment| segment.is_empty() || segment == "..")
-            || found
-                .replace((kind.to_owned(), target.to_owned()))
-                .is_some()
+            || found.replace((kind.to_owned(), target)).is_some()
         {
             return Err(unverifiable("package relationship"));
         }
@@ -474,7 +481,8 @@ fn placeholder_locals(blob: &[u8], part: &str) -> Result<PlaceholderLocals, Stri
     use std::io::Read;
     let unreadable = || unsupported("unreadable PowerPoint alternative shape XML placeholder");
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(blob)).map_err(|_| unreadable())?;
-    let entry = archive.by_name(part).map_err(|_| unreadable())?;
+    let index = crate::opc_part::entry_index(&archive, part).ok_or_else(unreadable)?;
+    let entry = archive.by_index(index).map_err(|_| unreadable())?;
     if entry.size() > MAX_PART_BYTES || entry.encrypted() {
         return Err(unreadable());
     }
@@ -1467,6 +1475,14 @@ mod tests {
         const SHAPE_XML: &str = r#"<p:sp xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:nvSpPr><p:cNvPr id="9" name="Shape"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1587500" cy="793750"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></p:spPr></p:sp>"#;
 
         fn package(parts: &[(&str, &str)], relationships: &[(&str, &str)]) -> Vec<u8> {
+            package_named_rels("_rels/.rels", parts, relationships)
+        }
+
+        fn package_named_rels(
+            rels_name: &str,
+            parts: &[(&str, &str)],
+            relationships: &[(&str, &str)],
+        ) -> Vec<u8> {
             let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
             let options = zip::write::SimpleFileOptions::default()
                 .compression_method(zip::CompressionMethod::Stored);
@@ -1480,7 +1496,7 @@ mod tests {
             let rels = format!(
                 r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{rels}</Relationships>"#
             );
-            for (name, body) in [("_rels/.rels", rels.as_str())].iter().chain(parts) {
+            for (name, body) in [(rels_name, rels.as_str())].iter().chain(parts) {
                 writer.start_file(*name, options).unwrap();
                 writer.write_all(body.as_bytes()).unwrap();
             }
@@ -1495,6 +1511,20 @@ mod tests {
                     ("shapeXml", "drs/shapexml.xml"),
                 ],
             )
+        }
+
+        #[test]
+        fn alternative_relationship_uses_opc_resolution_and_equivalent_part_lookup() {
+            let package = package_named_rels(
+                "_RELS/%2Erels",
+                &[("drs/ShapeXML.xml", SHAPE_XML)],
+                &[("shapeXml", "DRS/%73hapeXML.xml#shape")],
+            );
+            assert_eq!(
+                alternative_part(&package).unwrap(),
+                Some(("shapeXml".into(), "DRS/shapeXML.xml".into()))
+            );
+            assert!(placeholder_locals(&package, "DRS/shapeXML.xml").is_ok());
         }
 
         fn theme() -> Theme {

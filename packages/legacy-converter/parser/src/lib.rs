@@ -16,6 +16,8 @@ pub mod fuzzing;
 #[cfg(feature = "direct-ppt")]
 mod officeart;
 #[cfg(feature = "direct-ppt")]
+mod opc_part;
+#[cfg(feature = "direct-ppt")]
 mod ppt;
 #[cfg(feature = "direct-ppt")]
 mod ppt_wasm;
