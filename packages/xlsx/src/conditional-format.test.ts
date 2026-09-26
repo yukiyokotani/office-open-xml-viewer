@@ -520,6 +520,13 @@ describe('stopIfTrue needs an established match', () => {
   // Review reproducer: `0+10` used to be read as the literal 0, so 5 > 0
   // matched and the stop removed the lower rule's red text. Formulas are
   // not evaluated: only literals and single-cell references are decoded.
+  it('cellIs with a missing operand is no match and does not stop', () => {
+    const empty: CfRule = { type: 'cellIs', operator: 'greaterThan', formulas: [], dxfId: null, priority: 1, stopIfTrue: true };
+    expect(evalAt([empty, lowerRed]).fontColor).toBe('#FF0000');
+    const between: CfRule = { type: 'cellIs', operator: 'between', formulas: ['1'], dxfId: null, priority: 1, stopIfTrue: true };
+    expect(evalAt([between, lowerRed]).fontColor).toBe('#FF0000');
+  });
+
   it('cellIs decodes literals and single-cell references, nothing else', () => {
     expect(evalAt([cellIs('greaterThan', '0+10'), lowerRed]).fontColor).toBe('#FF0000');
     expect(evalAt([cellIs('greaterThan', '0+1'), lowerRed]).fontColor).toBe('#FF0000');

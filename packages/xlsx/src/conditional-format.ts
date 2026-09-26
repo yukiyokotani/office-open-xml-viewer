@@ -373,7 +373,13 @@ export function evaluateCf(cell: Cell | undefined, row: number, col: number, cfC
         });
       });
       const textVal = cellTextValue(cell);
-      if (numVal != null && operands.every(a => typeof a === 'number')) {
+      // §18.3.1.10: between/notBetween take two formulas, every other
+      // operator one. A rule missing an operand is no match, so it neither
+      // formats nor stops.
+      const arity = rule.operator === 'between' || rule.operator === 'notBetween' ? 2 : 1;
+      if (operands.length < arity) {
+        // no match
+      } else if (numVal != null && operands.every(a => typeof a === 'number')) {
         matched = cellIsMatch(numVal, rule.operator, operands as number[]);
       } else if (textVal != null && operands.every(a => typeof a === 'string')) {
         matched = cellIsTextMatch(textVal, rule.operator, operands as string[]);
