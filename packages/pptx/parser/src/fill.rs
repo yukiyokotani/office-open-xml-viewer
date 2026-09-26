@@ -228,14 +228,17 @@ pub(crate) fn parse_style_matrix_fill(
 /// part); the mime is derived from that path. The renderer fetches the bytes
 /// lazily by path rather than from an inlined data URL.
 ///
-/// Both fill-modes are honoured and mutually exclusive:
-/// - `stretch` (§20.1.8.56): the `fillRect` (§20.1.8.30) is captured so the
-///   renderer can place the (possibly overscanned) image into the box.
+/// Both fill-modes are recorded as authored:
+/// - `stretch` (§20.1.8.56): presence is kept in `stretch`, and the `fillRect`
+///   (§20.1.8.30) is captured so the renderer can place the (possibly
+///   overscanned) image into the box.
 /// - `tile` (§20.1.8.58): the tile offset/scale/flip/align descriptor is
 ///   captured so the renderer can repeat the blip at its native (scaled) size.
 ///
-/// When neither child is present the blip defaults to full-box placement
-/// (stretch with no fillRect).
+/// The parser does not invent a mode when neither child is present, and does
+/// not resolve a schema-invalid tile+stretch pair; each renderer surface
+/// decides. The slide-background painter keeps its established tile-first,
+/// otherwise full-box placement; ordinary shape fills fail closed.
 ///
 /// `theme` resolves the `<a:duotone>` (§20.1.8.23) endpoint colours through the
 /// slide palette (PowerPoint linear tint), so a picture FILL recolours exactly
@@ -283,8 +286,13 @@ fn parse_blip_fill_with_color_resolver<
         color_resolver,
         ooxml_common::color::TintMode::PowerPointLinear,
     );
-    // §20.1.8.58 tile takes precedence when present (stretch/tile are an
-    // either-or choice in CT_BlipFillProperties).
+    // EG_FillModeProperties (§20.1.8.14) is an optional choice of `tile`
+    // (§20.1.8.58) or `stretch` (§20.1.8.56) with no schema default. Record
+    // both authored facts as-is: `stretch` is the presence of `<a:stretch>`
+    // even beside `<a:tile>`, so a schema-invalid pair stays visible to the
+    // renderer, which owns the per-surface decision (ordinary shapes fail
+    // closed on a missing or conflicting mode; see `shapeImageFillModeIsPaintable`).
+    let stretch = child(blip_fill, "stretch").is_some();
     if let Some(tile_node) = child(blip_fill, "tile") {
         return Some(Fill::Image {
             image_path,
@@ -294,7 +302,7 @@ fn parse_blip_fill_with_color_resolver<
             rot_with_shape,
             src_rect: parse_src_rect(blip_fill),
             fill_rect: None,
-            stretch: false,
+            stretch,
             tile: Some(parse_tile(tile_node)),
             alpha,
             duotone,
@@ -302,7 +310,6 @@ fn parse_blip_fill_with_color_resolver<
         });
     }
     let fill_rect = child(blip_fill, "stretch").and_then(parse_fill_rect);
-    let stretch = child(blip_fill, "stretch").is_some();
     Some(Fill::Image {
         image_path,
         mime_type,

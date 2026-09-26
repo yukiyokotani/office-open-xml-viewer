@@ -490,7 +490,9 @@ async function planSlideImages(
         }
       }
     } else if (element.type === 'shape') {
-      const fill = element.fill?.fillType === 'image' ? element.fill : null;
+      const fill = element.fill?.fillType === 'image' && shapeImageFillModeIsPaintable(element.fill)
+        ? element.fill
+        : null;
       if (fill && !fill.tile && !pixelTransform(fill)) {
         const fr = fill.fillRect ?? {};
         const width = emuToPx(element.width, scale) * (1 - (fr.l ?? 0) - (fr.r ?? 0));
@@ -2427,8 +2429,28 @@ interface PreparedShapeFill {
   intrinsicSize?: Readonly<{ width: number; height: number }>;
 }
 
+/** Key of one prepared (decoded + pixel-transformed) shape blip. The decode
+ * applies the CT_Blip effects (§20.1.8.13) in document order, so the key must
+ * carry the complete ordered transform, not only the source path: two shapes
+ * that share a PNG but differ in grayscl/biLevel/clrChange/lum/duotone need
+ * distinct prepared images. `imagePlanKey` is the same path + ordered-effect
+ * key the decode cache uses. */
 function shapeFillKey(fill: ImageFill): string {
-  return chartImageFillKey(fill);
+  return JSON.stringify([
+    fill.svgImagePath ?? null,
+    imagePlanKey(fill.imagePath, pixelTransform(fill)),
+  ]);
+}
+
+/** EG_FillModeProperties (§20.1.8.14) is an optional choice of `tile` or
+ * `stretch` with no schema default, and the two are mutually exclusive. An
+ * ordinary shape paints a blip only when exactly one mode is authored: an
+ * omitted mode has no specified placement and no Office evidence here, and a
+ * tile+stretch pair is schema-invalid, so both fail closed (nothing is
+ * painted, as before shape image fills were supported). This is the same rule
+ * as the core chart picture-fill path. */
+function shapeImageFillModeIsPaintable(fill: ImageFill): boolean {
+  return (fill.tile != null) !== (fill.stretch === true);
 }
 
 /** Paint a predecoded shape blip into the current geometry path. */
@@ -2441,9 +2463,7 @@ export function paintPreparedShapeImageFill(
   evenOdd = false,
 ): boolean {
   if (!prepared || !(bounds.w > 0) || !(bounds.h > 0)) return false;
-  // PPTX shapes historically treat an omitted fill-mode choice as full-box
-  // stretch; retain that compatibility while rejecting a conflicting pair.
-  if (fill.tile && fill.stretch === true) return false;
+  if (!shapeImageFillModeIsPaintable(fill)) return false;
   const { x, y, w, h } = bounds;
   ctx.save();
   try {
@@ -3760,15 +3780,13 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
 
   const geom = el.geometry.toLowerCase();
   const fillStyle = resolveShapeFill(el.fill, ctx, x, y, w, h, el.rotation);
-  const imageFill = el.fill?.fillType === 'image' ? el.fill : null;
+  const imageFill = el.fill?.fillType === 'image' && shapeImageFillModeIsPaintable(el.fill)
+    ? el.fill
+    : null;
   const preparedImageFill = imageFill
     ? rc.shapeFillImages?.get(shapeFillKey(imageFill))
     : undefined;
-  const hasPreparedImageFill = Boolean(
-    imageFill
-    && preparedImageFill
-    && !(imageFill.tile && imageFill.stretch === true),
-  );
+  const hasPreparedImageFill = Boolean(imageFill && preparedImageFill);
 
   // The Canvas API exposes a single shadow slot, so when both an outer shadow
   // and a glow are configured we let the outer shadow win (visually dominant)
@@ -7662,6 +7680,7 @@ async function renderSlideLeased(
     }>();
     for (const element of slide.elements) {
       const fill = element.type === 'shape' && element.fill?.fillType === 'image'
+        && shapeImageFillModeIsPaintable(element.fill)
         ? element.fill
         : null;
       if (!fill || !(element.width > 0) || !(element.height > 0)) continue;

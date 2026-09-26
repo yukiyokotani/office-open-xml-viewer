@@ -98,12 +98,73 @@ describe('PPTX ordinary-shape image fills', () => {
     expect(state.globalAlpha).toBe(1);
   });
 
-  it('preserves the established full-box stretch when fill mode is absent', () => {
-    const { ctx, calls } = recordingCanvas();
-    expect(paintPreparedShapeImageFill(ctx, {
-      fillType: 'image', imagePath: 'ppt/media/mode-absent.png', mimeType: 'image/png',
-    }, { image: mocks.image }, { x: 10, y: 20, w: 100, h: 50 }, 1)).toBe(true);
-    expect(calls).toContainEqual(['drawImage', mocks.image, 10, 20, 100, 50]);
+  // §20.1.8.14 EG_FillModeProperties: an omitted mode has no default and a
+  // tile+stretch pair is schema-invalid; neither paints (nor decodes) a blip.
+  it.each([
+    ['omitted', {}],
+    ['conflicting', { stretch: true, tile: { algn: 'tl', tx: 0, ty: 0, sx: 1, sy: 1, flip: 'none' } }],
+  ])('fails closed when the fill mode is %s', async (_label, mode) => {
+    const fill = {
+      fillType: 'image', imagePath: 'ppt/media/mode.png', mimeType: 'image/png', dpi: 96, ...mode,
+    } as const;
+    const direct = recordingCanvas();
+    expect(paintPreparedShapeImageFill(
+      direct.ctx, fill, { image: mocks.image }, { x: 10, y: 20, w: 100, h: 50 }, 1,
+    )).toBe(false);
+    expect(direct.calls.some(([name]) => name === 'drawImage')).toBe(false);
+
+    const { canvas, calls } = recordingCanvas();
+    await renderSlide(canvas, {
+      index: 0, slideNumber: 1, background: null,
+      elements: [{ ...shape('ppt/media/mode.png'), fill }],
+    } as unknown as Slide, 9_144_000, 6_858_000, {
+      width: 960, dpr: 1,
+      fetchImage: vi.fn(async () => new Blob([pngHeader(2, 1) as BlobPart], { type: 'image/png' })),
+    });
+    expect(mocks.decode).not.toHaveBeenCalled();
+    expect(calls.some(([name]) => name === 'drawImage')).toBe(false);
+    expect(calls.some(([name]) => name === 'stroke')).toBe(true);
+  });
+
+  // Two shapes sharing one PNG with different CT_Blip pixel effects must each
+  // paint their own transformed decode, whichever comes first on the slide.
+  it.each([false, true])('keeps per-shape blip effects for a shared source (reversed=%s)', async (reversed) => {
+    const plain = { kind: 'plain', width: 2, height: 1, close() {} };
+    const gray = { kind: 'gray', width: 2, height: 1, close() {} };
+    const threshold = { kind: 'threshold', width: 2, height: 1, close() {} };
+    mocks.decode.mockImplementation(async (_path: string, _mime: string, transform?: {
+      effects?: Array<{ type: string }>;
+    }) => {
+      const kinds = transform?.effects?.map((effect) => effect.type).join(',');
+      if (kinds === 'grayscale') return gray;
+      if (kinds === 'biLevel,grayscale') return threshold;
+      return plain;
+    });
+    const shared = 'ppt/media/shared-effects.png';
+    const withEffects = (x: number, blipEffects?: unknown[]) => ({
+      ...shape(shared, x),
+      fill: { ...shape(shared).fill, alpha: undefined, ...(blipEffects ? { blipEffects } : {}) },
+    });
+    const elements = [
+      withEffects(0),
+      withEffects(1_000_000, [{ type: 'grayscale' }]),
+      withEffects(2_000_000, [{ type: 'biLevel', thresh: 0.5 }, { type: 'grayscale' }]),
+    ];
+    if (reversed) elements.reverse();
+    const { canvas, calls } = recordingCanvas();
+    await renderSlide(canvas, {
+      index: 0, slideNumber: 1, background: null, elements,
+    } as unknown as Slide, 9_144_000, 6_858_000, {
+      width: 960, dpr: 1,
+      fetchImage: vi.fn(async () => new Blob([pngHeader(2, 1) as BlobPart], { type: 'image/png' })),
+    });
+
+    const painted = calls
+      .filter(([name]) => name === 'drawImage')
+      .map(([, image]) => (image as { kind: string }).kind);
+    const expected = ['plain', 'gray', 'threshold'];
+    expect(painted).toEqual(reversed ? expected.reverse() : expected);
+    expect(mocks.decode).toHaveBeenCalledTimes(3);
   });
 
   it('prepares a shared resource once, then paints each owning shape before its stroke', async () => {

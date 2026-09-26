@@ -4837,6 +4837,34 @@ mod tests {
         }
     }
 
+    /// ECMA-376 §20.1.8.14: EG_FillModeProperties is an optional choice with
+    /// no default. The parser records each authored mode as-is, so an omitted
+    /// mode stays distinct from `<a:stretch/>` and a schema-invalid
+    /// tile+stretch pair keeps both facts for the renderer to reject.
+    #[test]
+    fn test_parse_blip_fill_records_authored_fill_modes() {
+        let parse = |modes: &str| {
+            let xml = format!(
+                r#"<a:blipFill xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+                               xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+                    <a:blip r:embed="rId2"/>{modes}</a:blipFill>"#
+            );
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            let mut resolve = |_rid: &str| Some("ppt/media/image1.png".to_owned());
+            match parse_blip_fill(doc.root_element(), &HashMap::new(), &mut resolve) {
+                Some(Fill::Image { stretch, tile, .. }) => (stretch, tile.is_some()),
+                other => panic!("expected Fill::Image, got {other:?}"),
+            }
+        };
+        assert_eq!(parse(""), (false, false));
+        assert_eq!(parse("<a:stretch/>"), (true, false));
+        assert_eq!(parse(r#"<a:tile sx="100000" sy="100000"/>"#), (false, true));
+        assert_eq!(
+            parse(r#"<a:tile sx="100000" sy="100000"/><a:stretch/>"#),
+            (true, true)
+        );
+    }
+
     /// ECMA-376 Part 1 §19.3.1.3: bgRef values 1001 and above index the
     /// theme's bgFillStyleLst (1001 = first entry). The referenced fill keeps
     /// its gradient geometry while each phClr is substituted with the bgRef

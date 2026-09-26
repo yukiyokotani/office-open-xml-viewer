@@ -308,6 +308,34 @@ describe('sniffCfb — robustness (malicious / corrupt input)', () => {
     expect(sniffCfb(cfb)).toBe('cfb-unknown');
   });
 
+  // [MS-CFB] §2.5: DIFAT index n is the (n+1)th FAT sector. Slots below the
+  // header's FAT count must be distinct regular sectors; slots at or beyond it
+  // are unused and must not name a regular sector.
+  it.each([
+    ['a duplicate in an unused header slot', (view: DataView) => {
+      view.setUint32(0x50, 0, true);
+    }],
+    ['an uncounted regular sector in an unused header slot', (view: DataView) => {
+      view.setUint32(0x4c + 108 * 4, 1, true);
+    }],
+    ['a special value inside the counted range', (view: DataView) => {
+      view.setUint32(0x2c, 2, true);
+      view.setUint32(0x4c, FREESECT, true);
+      view.setUint32(0x50, 0, true);
+    }],
+  ])('rejects %s', (_label, corrupt) => {
+    const cfb = encryptedCfb();
+    expect(sniffCfb(cfb)).toBe('encrypted');
+    corrupt(new DataView(cfb.buffer));
+    expect(sniffCfb(cfb)).toBe('cfb-unknown');
+  });
+
+  it('rejects a regular sector in an unused extension-DIFAT slot', () => {
+    const cfb = extendedDifatCfb('WordDocument');
+    new DataView(cfb.buffer).setUint32(HEADER + 110 * SECTOR + 4, 3, true);
+    expect(sniffCfb(cfb)).toBe('cfb-unknown');
+  });
+
   it('does not hang on a cyclic FAT directory chain (returns a value)', () => {
     // Build a normal encrypted CFB, then corrupt the FAT so sector 1 -> 1.
     const cfb = encryptedCfb();

@@ -746,9 +746,10 @@ pub(crate) enum Fill {
     /// Image fill — ECMA-376 §20.1.8.14 `a:blipFill`. The referenced blip is
     /// resolved to its embedded zip path + mime at parse time; the renderer
     /// fetches the bytes lazily by path (see `extract_image`) instead of
-    /// inlining base64. Both fill-modes are modelled and mutually exclusive:
-    /// `stretch` (§20.1.8.56) carries a `fill_rect`; `tile` (§20.1.8.58)
-    /// carries a `tile` descriptor (see `parse_blip_fill`).
+    /// inlining base64. Both fill-modes are modelled as authored: `stretch`
+    /// (§20.1.8.56) records `<a:stretch>` presence and its `fill_rect`; `tile`
+    /// (§20.1.8.58) carries a `tile` descriptor. A schema-invalid pair keeps
+    /// both (see `parse_blip_fill`).
     #[serde(rename_all = "camelCase")]
     Image {
         /// Embedded zip path of the blip (e.g. "ppt/media/image1.png").
@@ -771,10 +772,12 @@ pub(crate) enum Fill {
         /// the fill-mode is `tile`.
         #[serde(skip_serializing_if = "Option::is_none")]
         fill_rect: Option<FillRect>,
+        /// Presence of `<a:stretch>`. False for an omitted fill mode, which
+        /// has no schema default; true beside `tile` for a conflicting pair.
         #[serde(skip_serializing_if = "std::ops::Not::not")]
         stretch: bool,
         /// `<a:tile>` (§20.1.8.58). `Some` only when the blipFill is tiled;
-        /// mutually exclusive with `fill_rect`.
+        /// `fill_rect` is then `None`.
         #[serde(skip_serializing_if = "Option::is_none")]
         tile: Option<TileInfo>,
         /// `a:blip > a:alphaModFix@amt` as a fraction (0.0–1.0). None = opaque.

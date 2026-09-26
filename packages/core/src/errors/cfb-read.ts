@@ -9,7 +9,7 @@
  * regular FAT). This module reads a named stream in full, implementing the
  * parts of [MS-CFB] the sniffer skipped:
  *
- *   - §2.5.1 DIFAT: the in-header DIFAT holds the first 109 FAT-sector
+ *   - §2.5 DIFAT: the in-header DIFAT holds the first 109 FAT-sector
  *     locations; further FAT sectors are chained through DIFAT sectors. Both
  *     are followed here (the sniffer only needed the first 109).
  *   - §2.4 mini FAT / mini stream: streams smaller than the header's
@@ -133,7 +133,7 @@ function isRegularSector(sector: number): boolean {
 /**
  * Collect the ordered list of FAT-sector locations: the 109 in-header DIFAT
  * entries (@0x4C) followed by any entries stored in chained DIFAT sectors
- * (§2.5.1). Each DIFAT sector holds (sectorSize/4 - 1) FAT locations plus a
+ * (§2.5). Each DIFAT sector holds (sectorSize/4 - 1) FAT locations plus a
  * trailing pointer to the next DIFAT sector.
  */
 export function collectCfbFatSectors(
@@ -150,10 +150,26 @@ export function collectCfbFatSectors(
     || header.numDifatSectors > physicalSectorCount
     || header.numDifatSectors > MAX_DIFAT_SECTORS
   ) return null;
+  // [MS-CFB] §2.5: DIFAT index n holds the sector number of the (n+1)th FAT
+  // sector, and §2.2 fixes how many FAT sectors exist. Every DIFAT slot is
+  // therefore classified by its position in the combined header + extension
+  // array, not by its value:
+  //   - n <  numFatSectors: MUST name a distinct in-file regular sector. A
+  //     special value here would leave a gap and shift every later FAT sector
+  //     to the wrong index; a duplicate would alias two FAT ranges.
+  //   - n >= numFatSectors: an unused slot. It may hold any special value
+  //     (writers use FREESECT), but a regular sector number would claim a FAT
+  //     sector the header does not count, so it is rejected like a count
+  //     mismatch rather than silently ignored.
+  let difatIndex = 0;
   const addFatSector = (location: number): boolean => {
-    if (!isRegularSector(location)) return true;
-    if (fatSectors.length >= header.numFatSectors) return true;
-    if (location >= physicalSectorCount || seenFatSectors.has(location)) return false;
+    const index = difatIndex++;
+    if (index >= header.numFatSectors) return !isRegularSector(location);
+    if (
+      !isRegularSector(location)
+      || location >= physicalSectorCount
+      || seenFatSectors.has(location)
+    ) return false;
     seenFatSectors.add(location);
     fatSectors.push(location);
     return true;

@@ -12,7 +12,7 @@
  *
  *   - §2.2 header: signature, sector shift (2^SectorShift @ 0x1E), first
  *     directory sector location (@ 0x30), and DIFAT locations.
- *   - §2.3 FAT / §2.5.1 DIFAT: walk the directory-stream sector chain via the
+ *   - §2.3 FAT / §2.5 DIFAT: walk the directory-stream sector chain via the
  *     FAT, including DIFAT-sector extensions used by larger compound files. The
  *     mini FAT is irrelevant because the directory is a regular FAT stream.
  *   - §2.6 directory entries: 128 bytes each, name is UTF-16LE @ 0x00..0x40
