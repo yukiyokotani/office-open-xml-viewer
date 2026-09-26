@@ -643,13 +643,8 @@ fn resolve_section_refs(
 }
 
 /// Open a docx ZIP container, tagging a failure with the container part name.
-///
-/// RB7 (MAJOR): a truncated / corrupt ZIP is the MOST COMMON way a docx is broken
-/// (an incomplete download, a byte-mangled attachment). `ZipArchive::new` maps
-/// that to an opaque `zip::result::ZipError` that, if propagated, throws with no
-/// indication that the CONTAINER (not some inner part) is the problem. Naming the
-/// failure lets the caller build a `degraded_document` tagged with the container,
-/// symmetric with how a corrupt `word/document.xml` is tagged inside [`parse`].
+/// Internal and test helper only: public entry points admit input through
+/// [`open_document_package`], which also enforces the OPC shape.
 #[cfg(test)]
 pub(crate) fn open_zip(data: Vec<u8>) -> Result<Zip, String> {
     open_zip_with_limits(data, None, None)
@@ -688,12 +683,52 @@ pub(crate) fn open_zip_with_policy(
     .map_err(ooxml_common::zip::tag_container_error)
 }
 
-/// A placeholder [`Document`] for a docx whose ZIP CONTAINER could not be opened
-/// (truncated / corrupt / not a zip). No parts are readable, so there is no theme
-/// to derive fonts from — fall back to the theme defaults. Mirrors the per-part
-/// [`degraded_document`] used inside [`parse`], but for the whole-container case.
-pub(crate) fn degraded_container_document(parse_error: String) -> Document {
-    degraded_document(&ThemeColors::default(), parse_error)
+/// Test fixtures build packages through the public admission boundary, so each
+/// synthetic ZIP must carry the OPC Media Types stream.
+#[cfg(test)]
+pub(crate) fn write_test_content_types<W: std::io::Write + std::io::Seek>(
+    writer: &mut zip::ZipWriter<W>,
+) {
+    use std::io::Write;
+    writer
+        .start_file(
+            ooxml_common::opc::CONTENT_TYPES_ITEM,
+            zip::write::SimpleFileOptions::default(),
+        )
+        .expect("test fixture writes to an in-memory ZIP");
+    writer
+        .write_all(
+            br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>"#,
+        )
+        .expect("test fixture writes to an in-memory ZIP");
+}
+
+/// Admit a public-boundary input as a WordprocessingML package.
+///
+/// Fails closed with the `ooxml_common::opc` not-OOXML envelope when the bytes
+/// are not a readable ZIP, the ZIP is not an OPC package, or the package lacks
+/// `word/document.xml`. None of these is a damaged document that Word would
+/// partially display, so no placeholder [`Document`] (which would carry a 0x0
+/// section) is produced. Damage inside an admitted package — for example a
+/// malformed `word/document.xml` — still degrades per part inside [`parse`].
+pub(crate) fn open_document_package(
+    data: Vec<u8>,
+    max_archive_entry_bytes: Option<u64>,
+    max_total_inflated_bytes: Option<u64>,
+    max_archive_entries: Option<u64>,
+) -> Result<Zip, String> {
+    let zip = open_zip_with_policy(
+        data,
+        max_archive_entry_bytes,
+        max_total_inflated_bytes,
+        max_archive_entries,
+    )
+    .map_err(ooxml_common::opc::container_open_error)?;
+    ooxml_common::opc::require_ooxml_package(
+        &zip.session,
+        ooxml_common::resource::OoxmlFormat::Docx,
+    )?;
+    Ok(zip)
 }
 
 /// Parse a docx from raw archive bytes. Thin wrapper that opens a fresh
@@ -702,9 +737,8 @@ pub(crate) fn degraded_container_document(parse_error: String) -> Document {
 /// keep their `&[u8]` signature; the stateful `DocxArchive` handle calls
 /// [`parse`] directly on its retained archive to avoid re-opening it per call.
 ///
-/// RB7 (MAJOR): a corrupt / truncated CONTAINER degrades to a placeholder
-/// (`degraded_container_document`) rather than erroring, consistent with a corrupt
-/// inner part — the viewer shows a "could not display" page instead of nothing.
+/// Input that is not a WordprocessingML package is rejected by
+/// [`open_document_package`].
 #[cfg(any(test, not(target_arch = "wasm32")))]
 pub fn parse_from_bytes(data: &[u8]) -> Result<Document, String> {
     parse_from_bytes_with_limits(data, None, None, "parse")
@@ -717,15 +751,12 @@ pub(crate) fn parse_from_bytes_with_limits(
     max_total_inflated_bytes: Option<u64>,
     operation: &str,
 ) -> Result<Document, String> {
-    let mut zip = match open_zip_with_limits(
+    let mut zip = open_document_package(
         data.to_vec(),
         max_archive_entry_bytes,
         max_total_inflated_bytes,
-    ) {
-        Ok(zip) => zip,
-        Err(e) if e.starts_with("OOXML_RESOURCE_LIMIT:") => return Err(e),
-        Err(e) => return Ok(degraded_container_document(e)),
-    };
+        None,
+    )?;
     zip.run_operation(operation, parse)
 }
 
@@ -735,15 +766,12 @@ pub(crate) fn parse_from_bytes_streamed_with_limits(
     max_total_inflated_bytes: Option<u64>,
     operation: &str,
 ) -> Result<Document, String> {
-    let mut zip = match open_zip_with_limits(
+    let mut zip = open_document_package(
         data.to_vec(),
         max_archive_entry_bytes,
         max_total_inflated_bytes,
-    ) {
-        Ok(zip) => zip,
-        Err(error) if error.starts_with("OOXML_RESOURCE_LIMIT:") => return Err(error),
-        Err(error) => return Ok(degraded_container_document(error)),
-    };
+        None,
+    )?;
     zip.run_operation(operation, parse_streamed_compatible)
 }
 
@@ -2895,6 +2923,7 @@ mod document_typography_settings_tests {
         let mut bytes = Vec::new();
         {
             let mut archive = zip::ZipWriter::new(std::io::Cursor::new(&mut bytes));
+            crate::parser::write_test_content_types(&mut archive);
             let options = SimpleFileOptions::default();
             archive.start_file("word/document.xml", options).unwrap();
             archive.write_all(document_xml.as_bytes()).unwrap();
@@ -17803,6 +17832,7 @@ mod theme_package_presence_tests {
         let mut bytes = Vec::new();
         {
             let mut writer = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            crate::parser::write_test_content_types(&mut writer);
             let options = zip::write::SimpleFileOptions::default();
             writer
                 .start_file("word/_rels/document.xml.rels", options)
@@ -19443,6 +19473,7 @@ mod svg_blip_tests {
         let mut buf = Vec::new();
         {
             let mut zw = zip::ZipWriter::new(Cursor::new(&mut buf));
+            crate::parser::write_test_content_types(&mut zw);
             let opts = SimpleFileOptions::default();
             let mut put = |name: &str, bytes: &[u8]| {
                 use std::io::Write;
@@ -19696,6 +19727,7 @@ mod svg_blip_tests {
         let mut buf = Vec::new();
         {
             let mut zw = zip::ZipWriter::new(Cursor::new(&mut buf));
+            crate::parser::write_test_content_types(&mut zw);
             let opts = SimpleFileOptions::default();
             let mut put = |name: &str, bytes: &[u8]| {
                 use std::io::Write;
@@ -19761,6 +19793,7 @@ mod svg_blip_tests {
         let mut buf = Vec::new();
         {
             let mut zw = zip::ZipWriter::new(Cursor::new(&mut buf));
+            crate::parser::write_test_content_types(&mut zw);
             let opts = SimpleFileOptions::default();
             let mut put = |name: &str, bytes: &[u8]| {
                 use std::io::Write;
@@ -20235,6 +20268,7 @@ mod anchor_image_relative_from_tests {
         let mut buf = Vec::new();
         {
             let mut zw = zip::ZipWriter::new(Cursor::new(&mut buf));
+            crate::parser::write_test_content_types(&mut zw);
             let opts = SimpleFileOptions::default();
             let mut put = |name: &str, bytes: &[u8]| {
                 use std::io::Write;
@@ -20261,6 +20295,7 @@ mod anchor_image_relative_from_tests {
         let mut buf = Vec::new();
         {
             let mut zw = zip::ZipWriter::new(Cursor::new(&mut buf));
+            crate::parser::write_test_content_types(&mut zw);
             let opts = SimpleFileOptions::default();
             let mut put = |name: &str, bytes: &[u8]| {
                 use std::io::Write;
@@ -21193,6 +21228,7 @@ mod anchor_image_relative_from_tests {
         let mut bytes = Vec::new();
         {
             let mut writer = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            crate::parser::write_test_content_types(&mut writer);
             let options = SimpleFileOptions::default();
             for (path, xml) in [
                 ("word/document.xml", document_xml),
@@ -21273,6 +21309,7 @@ mod anchor_image_relative_from_tests {
         let mut bytes = Vec::new();
         {
             let mut writer = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            crate::parser::write_test_content_types(&mut writer);
             writer
                 .start_file(
                     "word/charts/_rels/chart9.xml.rels",
@@ -21303,6 +21340,7 @@ mod anchor_image_relative_from_tests {
         let mut bytes = Vec::new();
         {
             let mut writer = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            crate::parser::write_test_content_types(&mut writer);
             let options = SimpleFileOptions::default();
             for (path, xml) in [
                 ("word/document.xml", document_xml),
@@ -21358,6 +21396,7 @@ mod anchor_image_relative_from_tests {
         let mut bytes = Vec::new();
         {
             let mut writer = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            crate::parser::write_test_content_types(&mut writer);
             let options = SimpleFileOptions::default();
             for (path, content) in [
                 ("word/document.xml", document_xml.as_bytes()),
@@ -29199,6 +29238,7 @@ mod embedded_font_tests {
         let mut buf = Vec::new();
         {
             let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            crate::parser::write_test_content_types(&mut zw);
             let opts = SimpleFileOptions::default();
             use std::io::Write;
             zw.start_file("word/document.xml", opts).unwrap();
@@ -29260,76 +29300,6 @@ mod embedded_font_tests {
         );
         assert!(doc.body.is_empty());
     }
-
-    /// An entirely missing `word/document.xml` part degrades rather than aborting.
-    #[test]
-    fn rb7_missing_document_part_degrades() {
-        use zip::write::SimpleFileOptions;
-        // A zip with NO word/document.xml at all.
-        let mut buf = Vec::new();
-        {
-            let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
-            let opts = SimpleFileOptions::default();
-            use std::io::Write;
-            zw.start_file("word/_rels/document.xml.rels", opts).unwrap();
-            zw.write_all(b"<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"></Relationships>").unwrap();
-            zw.finish().unwrap();
-        }
-        let doc = parse_from_bytes(&buf).expect("missing document.xml must open as a placeholder");
-        let err = doc.parse_error.as_deref().expect("carries a parse_error");
-        assert!(
-            err.starts_with("word/document.xml:"),
-            "error names the missing part; got {err:?}"
-        );
-    }
-
-    /// RB7 MAJOR: a truncated / corrupt ZIP CONTAINER — the most common way a docx
-    /// is broken — degrades to a placeholder tagged with the container, rather than
-    /// throwing an opaque `ZipArchive::new` error before any part is read.
-    #[test]
-    fn rb7_corrupt_zip_container_degrades_to_placeholder() {
-        // Truncated container: a valid docx cut off partway is not a readable zip.
-        let full = build_docx_with_raw_document(
-            br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>hi</w:t></w:r></w:p></w:body></w:document>"#,
-        );
-        let truncated = &full[..full.len() / 2];
-        let doc = parse_from_bytes(truncated)
-            .expect("a corrupt container must open as a placeholder, not error out");
-        let err = doc
-            .parse_error
-            .as_deref()
-            .expect("degraded container doc carries a parse_error");
-        assert!(
-            err.starts_with("(zip container): "),
-            "error is tagged with the container exactly once; got {err:?}"
-        );
-        assert_eq!(
-            err.matches("zip container").count(),
-            1,
-            "the container tag must not be doubled; got {err:?}"
-        );
-        assert!(
-            doc.body.is_empty(),
-            "placeholder document has an empty body"
-        );
-
-        // Not-a-zip-at-all also degrades (no local file header).
-        let garbage = parse_from_bytes(b"this is definitely not a zip file")
-            .expect("non-zip bytes must open as a placeholder");
-        let garbage_err = garbage
-            .parse_error
-            .as_deref()
-            .expect("non-zip degrades with a container-tagged error");
-        assert!(
-            garbage_err.starts_with("(zip container): "),
-            "error is tagged with the container exactly once; got {garbage_err:?}"
-        );
-        assert_eq!(
-            garbage_err.matches("zip container").count(),
-            1,
-            "the container tag must not be doubled; got {garbage_err:?}"
-        );
-    }
 }
 
 #[cfg(test)]
@@ -29349,6 +29319,7 @@ mod streamed_body_equivalence_tests {
         let mut bytes = Vec::new();
         {
             let mut archive = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            crate::parser::write_test_content_types(&mut archive);
             let options = SimpleFileOptions::default();
             for (path, content) in [
                 ("word/document.xml", document_xml),
@@ -29425,6 +29396,7 @@ mod tracked_change_move_tests {
         let mut bytes = Vec::new();
         {
             let mut archive = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            crate::parser::write_test_content_types(&mut archive);
             let options = SimpleFileOptions::default();
             archive.start_file("word/document.xml", options).unwrap();
             archive.write_all(document_xml.as_bytes()).unwrap();
@@ -29755,6 +29727,7 @@ mod comment_anchor_tests {
         let mut bytes = Vec::new();
         {
             let mut archive = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            crate::parser::write_test_content_types(&mut archive);
             let options = SimpleFileOptions::default();
             for (path, content) in parts {
                 archive.start_file(*path, options).unwrap();
@@ -30267,6 +30240,7 @@ mod lvl_pstyle_backlink_tests {
         let mut buf = Vec::new();
         {
             let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            crate::parser::write_test_content_types(&mut zw);
             let opts = SimpleFileOptions::default();
             zw.start_file("word/document.xml", opts).unwrap();
             zw.write_all(document.as_bytes()).unwrap();
@@ -30429,6 +30403,7 @@ mod lvl_override_full_lvl_tests {
         let mut buf = Vec::new();
         {
             let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            crate::parser::write_test_content_types(&mut zw);
             let opts = SimpleFileOptions::default();
             zw.start_file("word/document.xml", opts).unwrap();
             zw.write_all(document.as_bytes()).unwrap();

@@ -6,7 +6,8 @@ import {
   materializePptxPresentation,
   openPptxPresentation,
 } from './pptx.ts';
-import { OoxmlDecodedImageLimitError } from '@silurus/ooxml-core';
+import { OoxmlDecodedImageLimitError, OoxmlError } from '@silurus/ooxml-core';
+import { nonOoxmlInputs } from '@silurus/ooxml-core/testing';
 import type { NodeCanvasFactory, NodeCanvasLike } from './render.ts';
 
 let bytes: Buffer;
@@ -25,6 +26,17 @@ describe('Node bounded PPTX presentation session', () => {
       expect(parse).not.toHaveBeenCalled();
     } finally {
       parse.mockRestore();
+    }
+  });
+
+  it.each(nonOoxmlInputs('pptx'))('rejects %s with OoxmlError not-ooxml', async (_name, input) => {
+    for (const open of [() => openPptxPresentation(input), () => materializePptxPresentation(input)]) {
+      const error = await open().then(
+        () => { throw new Error('resolved a non-OOXML presentation'); },
+        (rejection: unknown) => rejection,
+      );
+      expect(error).toBeInstanceOf(OoxmlError);
+      expect(error).toMatchObject({ code: 'not-ooxml' });
     }
   });
 

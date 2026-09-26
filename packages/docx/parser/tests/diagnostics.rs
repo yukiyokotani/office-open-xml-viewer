@@ -47,6 +47,12 @@ fn build_docx_with_parts(body: &str, styles: Option<&str>, footnotes: Option<&st
     let mut bytes = Vec::new();
     {
         let mut zip = zip::ZipWriter::new(Cursor::new(&mut bytes));
+        zip.start_file("[Content_Types].xml", SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(
+            br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>"#,
+        )
+        .unwrap();
         zip.start_file("word/document.xml", SimpleFileOptions::default())
             .expect("document entry");
         zip.write_all(document.as_bytes()).expect("document XML");

@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+</head>
+<body>
+  <script type="module">
+    import { DocxDocument } from '/src/index.ts';
+    import { OoxmlError } from '@silurus/ooxml-core';
+    // The testing barrel also exports Node-only helpers; import the fixture module.
+    import { nonOoxmlInputs } from '../../../core/src/testing/non-ooxml-fixture.ts';
+
+    // Load every non-OOXML input through both browser load modes and record
+    // how each settled. A resolved load is a failure: it means a placeholder
+    // document was materialized instead of failing closed.
+    const results = [];
+    for (const mode of ['main', 'worker']) {
+      for (const [name, bytes] of nonOoxmlInputs('docx')) {
+        try {
+          const doc = await DocxDocument.load(bytes.buffer, { mode });
+          results.push({ mode, name, resolved: true, pageCount: doc.pageCount });
+          doc.destroy();
+        } catch (error) {
+          results.push({
+            mode,
+            name,
+            resolved: false,
+            ooxmlError: error instanceof OoxmlError,
+            code: error?.code,
+          });
+        }
+      }
+    }
+    window.__nonOoxmlResults = results;
+    document.body.dataset.status = 'ready';
+  </script>
+</body>
+</html>

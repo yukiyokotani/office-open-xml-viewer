@@ -24,48 +24,73 @@ import { loadWasmModule, resolveWasm } from './wasm-loader.ts';
  * direct transfer unsafe / throw) fails here loudly.
  */
 
-// Minimal one-entry STORED zip, same builder shape as source-buffer-image.test.
+const MAIN_PART: Record<string, string> = {
+  ppt: 'ppt/presentation.xml',
+  word: 'word/document.xml',
+  xl: 'xl/workbook.xml',
+};
+
+// Minimal STORED OPC package: the archive constructors admit only a ZIP with
+// `[Content_Types].xml` and the format's main part, so those two placeholder
+// entries precede the entry under test.
 function makeZipWithEntry(name: string, data: Uint8Array): Uint8Array {
   const enc = new TextEncoder();
-  const nameBytes = enc.encode(name);
-  const crc = crc32(Buffer.from(data)) >>> 0;
-  const size = data.length;
+  const entries: Array<[string, Uint8Array]> = [
+    ['[Content_Types].xml', enc.encode('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>')],
+    [MAIN_PART[name.split('/')[0]], enc.encode('<root/>')],
+    [name, data],
+  ];
+  const locals: Uint8Array[] = [];
+  const centrals: Uint8Array[] = [];
+  let offset = 0;
+  for (const [entryName, body] of entries) {
+    const nameBytes = enc.encode(entryName);
+    const crc = crc32(Buffer.from(body)) >>> 0;
+    const size = body.length;
 
-  const local = new Uint8Array(30 + nameBytes.length + size);
-  const lv = new DataView(local.buffer);
-  lv.setUint32(0, 0x04034b50, true);
-  lv.setUint16(4, 20, true);
-  lv.setUint16(8, 0, true); // stored
-  lv.setUint32(14, crc, true);
-  lv.setUint32(18, size, true);
-  lv.setUint32(22, size, true);
-  lv.setUint16(26, nameBytes.length, true);
-  local.set(nameBytes, 30);
-  local.set(data, 30 + nameBytes.length);
+    const local = new Uint8Array(30 + nameBytes.length + size);
+    const lv = new DataView(local.buffer);
+    lv.setUint32(0, 0x04034b50, true);
+    lv.setUint16(4, 20, true);
+    lv.setUint16(8, 0, true); // stored
+    lv.setUint32(14, crc, true);
+    lv.setUint32(18, size, true);
+    lv.setUint32(22, size, true);
+    lv.setUint16(26, nameBytes.length, true);
+    local.set(nameBytes, 30);
+    local.set(body, 30 + nameBytes.length);
 
-  const central = new Uint8Array(46 + nameBytes.length);
-  const cv = new DataView(central.buffer);
-  cv.setUint32(0, 0x02014b50, true);
-  cv.setUint16(4, 20, true);
-  cv.setUint16(6, 20, true);
-  cv.setUint32(16, crc, true);
-  cv.setUint32(20, size, true);
-  cv.setUint32(24, size, true);
-  cv.setUint16(28, nameBytes.length, true);
-  central.set(nameBytes, 46);
+    const central = new Uint8Array(46 + nameBytes.length);
+    const cv = new DataView(central.buffer);
+    cv.setUint32(0, 0x02014b50, true);
+    cv.setUint16(4, 20, true);
+    cv.setUint16(6, 20, true);
+    cv.setUint32(16, crc, true);
+    cv.setUint32(20, size, true);
+    cv.setUint32(24, size, true);
+    cv.setUint16(28, nameBytes.length, true);
+    cv.setUint32(42, offset, true);
+    central.set(nameBytes, 46);
 
+    locals.push(local);
+    centrals.push(central);
+    offset += local.length;
+  }
+  const centralLength = centrals.reduce((sum, part) => sum + part.length, 0);
   const eocd = new Uint8Array(22);
   const ev = new DataView(eocd.buffer);
   ev.setUint32(0, 0x06054b50, true);
-  ev.setUint16(8, 1, true);
-  ev.setUint16(10, 1, true);
-  ev.setUint32(12, central.length, true);
-  ev.setUint32(16, local.length, true);
+  ev.setUint16(8, entries.length, true);
+  ev.setUint16(10, entries.length, true);
+  ev.setUint32(12, centralLength, true);
+  ev.setUint32(16, offset, true);
 
-  const out = new Uint8Array(local.length + central.length + eocd.length);
-  out.set(local, 0);
-  out.set(central, local.length);
-  out.set(eocd, local.length + central.length);
+  const out = new Uint8Array(offset + centralLength + eocd.length);
+  let cursor = 0;
+  for (const part of [...locals, ...centrals, eocd]) {
+    out.set(part, cursor);
+    cursor += part.length;
+  }
   return out;
 }
 
@@ -124,7 +149,7 @@ describe.skipIf(!wasmReady)('SC18 extract_* returns a transfer-safe buffer', () 
   it('pptx: extract_image + extract_media are independent full-span copies', () => {
     const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 4, 5, 6]);
     const mp4 = new Uint8Array([0, 0, 0, 0x18, 0x66, 0x74, 0x79, 0x70]);
-    // Each path lives in its own one-entry zip (the builder is single-entry).
+    // Each path lives in its own package (the builder carries one entry under test).
     const zip = makeZipWithEntry('ppt/media/image1.png', png);
     const Handle = (pptxWasm as unknown as { PptxArchive: new (b: Uint8Array) => PptxHandle })
       .PptxArchive;

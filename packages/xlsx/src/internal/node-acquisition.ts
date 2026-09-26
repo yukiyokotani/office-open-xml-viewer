@@ -2,7 +2,7 @@ import type { OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
 import {
   normalizeLoadResourceOptions,
   OoxmlResourceMetricsSession,
-  parseResourceLimitError,
+  parseTypedParserError,
   resourcePolicyForWasm,
 } from '@silurus/ooxml-core/worker';
 import {
@@ -116,7 +116,7 @@ export async function acquireXlsxNodeSession(
     };
   } catch (error) {
     try { handle?.close((archive: XlsxNodeArchive) => archive.free()); } catch {}
-    const normalized = parseResourceLimitError(error) ?? error;
+    const normalized = parseTypedParserError(error) ?? error;
     metrics.fail(normalized);
     throw normalized;
   }

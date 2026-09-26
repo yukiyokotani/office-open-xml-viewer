@@ -15,7 +15,10 @@
  *     cannot decrypt (PD8 implements Agile only).
  *   - `'legacy-binary-format'`  — a raw .doc / .xls / .ppt (not OOXML).
  *   - `'not-ooxml'`             — a CFB of an unrecognised kind, or otherwise
- *     not an OOXML ZIP.
+ *     not an OOXML package: unreadable as ZIP (including empty input), a ZIP
+ *     without the OPC `[Content_Types].xml` stream, or an OPC package without
+ *     the format's main part. Raised by the parser at package admission and
+ *     reconstructed across the worker boundary.
  */
 export type OoxmlErrorCode =
   | 'encrypted'
