@@ -120,6 +120,11 @@ pub fn parse_rels(xml: &str) -> BTreeMap<String, RelTarget> {
 /// normalized name with no relative components — so `word/charts` +
 /// `../media/x.png` becomes `word/media/x.png`, never the unresolved
 /// `word/charts/../media/x.png`.
+///
+/// This directory-based form does not reject targets that name no package
+/// part (a scheme, an authority, a query, or an invalid part name). Prefer
+/// [`resolve_part_name`], which applies the complete OPC procedure against the
+/// source part; DOCX and the shared chart-image index use it.
 pub fn resolve_target(base_dir: &str, target: &str) -> String {
     let mut parts: Vec<&str> = if target.starts_with('/') {
         // Root-absolute part name: ignore base_dir entirely.
@@ -137,6 +142,314 @@ pub fn resolve_target(base_dir: &str, target: &str) -> String {
         }
     }
     parts.join("/")
+}
+
+/// Resolve an Internal relationship `Target` against its source part, returning
+/// the ZIP part name it identifies, or `None` when the reference does not
+/// identify a part of this package.
+///
+/// This is the normative OPC procedure rather than directory concatenation:
+///
+/// - ECMA-376 Part 2 §6.5.2.3 (and §6.5.2.2 for `/_rels/.rels`): for an
+///   Internal relationship the base IRI is the pack IRI of the *source part*
+///   (`source_part`, a ZIP-style name without the leading `/`; pass `""` for
+///   package relationships, whose base is the package root).
+/// - §6.4.1: the reference is resolved with RFC 3986 §5 unchanged. So
+///   §5.2.2/§5.2.3 merge a relative path with the base path minus its last
+///   segment, an absolute-path reference (`/word/x.xml`) replaces it, an empty
+///   reference is the base itself, and §5.2.4 `remove_dot_segments` removes
+///   `.`/`..` segments. A `..` above the root is dropped by that algorithm
+///   (`/a/../../b` becomes `/b`), so a path reference always stays inside the
+///   package.
+/// - A reference with a scheme (RFC 3986 §3.1) or an authority (`//host`)
+///   replaces the pack IRI's scheme/authority and therefore names a resource
+///   outside this package. §6.5.3.4 requires an Internal target to be a
+///   relative reference *to a part*, so such a target identifies no part.
+/// - RFC 3986 §5.2.1 applies normalization only *after* reference resolution,
+///   so merge and `remove_dot_segments` run on the reference exactly as
+///   authored: in `%2E%2E/../header.xml` the literal `..` removes the
+///   preceding `%2E%2E` segment, giving `word/header.xml`.
+/// - Then RFC 3986 §6.2.2 normalization (which RFC 3987 §5.3.2.3 extends to
+///   IRIs): a percent-encoded unreserved ASCII character (`ALPHA / DIGIT /
+///   "-" / "." / "_" / "~"`) is equivalent to the character itself, so it is
+///   decoded; any other triplet keeps its octet with uppercase hex (§6.2.2.1);
+///   and §6.2.2.3 path-segment normalization applies `remove_dot_segments`
+///   again to the decoded path, so a lone `%2E%2E` segment acts as `..` (it
+///   still cannot leave the package root). Part 2 §6.2.2.2 forbids *producers*
+///   from writing encoded unreserved characters, but a consumer applies the RFC
+///   equivalence.
+/// - §6.3.3(f): the result must be a valid part name. §6.2.2.2 is
+///   `1*( "/" isegment-nz )` with `isegment-nz = 1*ipchar` (RFC 3987 §2.2):
+///   `iunreserved / pct-encoded / sub-delims / ":" / "@"`, where non-ASCII
+///   `iunreserved` is `ucschar` (private-use `iprivate` is not allowed in a
+///   path). So a space, `\`, `[`, `]`, `"`, `<`, `>`, `^`, `` ` ``, `{`,
+///   `|`, `}` or a non-`ucschar` character is not a part name, nor is an empty
+///   segment, a segment ending in `.`, or a percent-encoded `/` or `\`. A
+///   malformed `%` triplet is not an IRI. In particular the Media Types
+///   stream `[Content_Types].xml` (a ZIP item, §7.3.7) is never a part name.
+///   A relative-path reference whose first segment contains `:` is not an IRI
+///   reference either (RFC 3986 §4.2). A query component is not part of the
+///   grammar. Each case yields `None`. A fragment identifies a location inside
+///   the resource and is removed before the part is named.
+/// - §7.3.4: the ZIP item name is the part name without its leading `/`, with
+///   every non-ASCII character percent-encoded (as UTF-8, uppercase hex).
+///
+/// ASCII case is kept as authored: part names are equivalent under ASCII
+/// case-insensitive matching (§6.2.2.3), which the package lookup applies
+/// through [`part_name_equivalence_key`]. The returned name may therefore
+/// differ in case from the stored ZIP item name while naming the same part.
+///
+/// Library policy: `None` means "this relationship names no readable part".
+/// Callers treat it exactly as a relationship whose target part is absent.
+pub fn resolve_part_name(source_part: &str, target: &str) -> Option<String> {
+    let reference = target.split_once('#').map_or(target, |(before, _)| before);
+    if has_uri_scheme(reference) || reference.starts_with("//") || reference.contains('?') {
+        return None;
+    }
+    let base = format!("/{}", source_part.trim_start_matches('/'));
+    let merged = if reference.starts_with('/') {
+        reference.to_owned()
+    } else if reference.is_empty() {
+        base
+    } else {
+        let directory_end = base.rfind('/').map_or(0, |index| index + 1);
+        format!("{}{}", &base[..directory_end], reference)
+    };
+    if !reference.starts_with('/')
+        && reference
+            .split('/')
+            .next()
+            .is_some_and(|first| first.contains(':'))
+    {
+        return None;
+    }
+    // The reference itself must be an IRI reference: every character is an
+    // `ipchar`, a `/` separator or the `%` of a `pct-encoded` triplet, checked
+    // over the whole reference before dot removal or decoding, so segments
+    // that dot removal later drops are validated too.
+    if !has_valid_percent_triplets(reference) {
+        return None;
+    }
+    if !reference.chars().all(|ch| {
+        if ch.is_ascii() {
+            u8::try_from(ch).is_ok_and(|byte| byte == b'/' || byte == b'%' || is_ipchar_ascii(byte))
+        } else {
+            is_ucschar(ch)
+        }
+    }) {
+        return None;
+    }
+    // RFC 3986 §5.2.4 on the reference as authored, then §6.2.2 normalization.
+    let resolved = remove_dot_segments(&merged);
+    let path = remove_dot_segments(&normalize_percent_encoding(&resolved)?);
+    let name = path.strip_prefix('/')?.to_owned();
+    if name.is_empty() || !name.split('/').all(is_part_name_segment) {
+        return None;
+    }
+    Some(name)
+}
+
+/// One normalized part-name segment (see [`resolve_part_name`]): non-empty,
+/// only ASCII `ipchar` (non-ASCII is already percent-encoded), no trailing
+/// `.`, and no percent-encoded `/` or `\`.
+fn is_part_name_segment(segment: &str) -> bool {
+    let bytes = segment.as_bytes();
+    if bytes.is_empty() || segment.ends_with('.') {
+        return false;
+    }
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'%' {
+            let decoded = bytes
+                .get(index + 1)
+                .and_then(|high| hex_value(*high))
+                .zip(bytes.get(index + 2).and_then(|low| hex_value(*low)))
+                .map(|(high, low)| high * 16 + low);
+            match decoded {
+                Some(b'/' | b'\\') | None => return false,
+                Some(_) => index += 3,
+            }
+        } else if is_ipchar_ascii(byte) {
+            index += 1;
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
+/// ASCII `ipchar` other than `pct-encoded` (RFC 3987 §2.2): `iunreserved`,
+/// `sub-delims`, `:` and `@`.
+fn is_ipchar_ascii(byte: u8) -> bool {
+    is_unreserved_ascii(byte)
+        || matches!(
+            byte,
+            b'!' | b'$'
+                | b'&'
+                | b'\''
+                | b'('
+                | b')'
+                | b'*'
+                | b'+'
+                | b','
+                | b';'
+                | b'='
+                | b':'
+                | b'@'
+        )
+}
+
+/// Every `%` starts a `pct-encoded` triplet: `"%" HEXDIG HEXDIG` (RFC 3986
+/// §2.1, used by RFC 3987 §2.2).
+fn has_valid_percent_triplets(reference: &str) -> bool {
+    let bytes = reference.as_bytes();
+    bytes.iter().enumerate().all(|(index, byte)| {
+        *byte != b'%'
+            || (bytes
+                .get(index + 1)
+                .and_then(|high| hex_value(*high))
+                .is_some()
+                && bytes
+                    .get(index + 2)
+                    .and_then(|low| hex_value(*low))
+                    .is_some())
+    })
+}
+
+/// RFC 3987 §2.2 `ucschar`.
+fn is_ucschar(ch: char) -> bool {
+    let code = u32::from(ch);
+    matches!(code, 0xA0..=0xD7FF | 0xF900..=0xFDCF | 0xFDF0..=0xFFEF)
+        || (0x10000..=0xEFFFD).contains(&code)
+            && (code & 0xFFFF) <= 0xFFFD
+            && !(0xE0000..=0xE0FFF).contains(&code)
+}
+
+/// ASCII unreserved characters of RFC 3986 §2.3.
+fn is_unreserved_ascii(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~')
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Percent-encoding normalization of one part name (see
+/// [`resolve_part_name`]): decode percent-encoded unreserved ASCII, uppercase
+/// the hex of every other triplet, percent-encode non-ASCII characters
+/// (§7.3.4). `None` for a malformed `%` triplet.
+fn normalize_percent_encoding(name: &str) -> Option<String> {
+    let bytes = name.as_bytes();
+    let mut out = String::with_capacity(name.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'%' {
+            let high = hex_value(*bytes.get(index + 1)?)?;
+            let low = hex_value(*bytes.get(index + 2)?)?;
+            let decoded = high * 16 + low;
+            if is_unreserved_ascii(decoded) {
+                out.push(char::from(decoded));
+            } else {
+                out.push_str(&format!("%{decoded:02X}"));
+            }
+            index += 3;
+        } else if byte.is_ascii() {
+            out.push(char::from(byte));
+            index += 1;
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+            index += 1;
+        }
+    }
+    Some(out)
+}
+
+/// Equivalence key of a part name or ZIP item name (ECMA-376 Part 2 §6.2.2.3
+/// with the RFC 3986 §6.2.2 percent-encoding equivalence): two names name the
+/// same part exactly when their keys are equal.
+///
+/// The key decodes percent-encoded unreserved ASCII, percent-encodes non-ASCII
+/// (§7.3.4 ZIP mapping), and folds ASCII case — which also makes the hex of
+/// the remaining triplets case-insensitive, as RFC 3986 §6.2.2.1 requires. A
+/// malformed `%` is kept literally, since a stored ZIP item name must still
+/// have a key. Package validation rejects two items with the same key, so a
+/// key lookup is unambiguous.
+pub fn part_name_equivalence_key(name: &str) -> String {
+    let bytes = name.as_bytes();
+    let mut key = String::with_capacity(name.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        let triplet = (byte == b'%')
+            .then(|| {
+                Some(hex_value(*bytes.get(index + 1)?)? * 16 + hex_value(*bytes.get(index + 2)?)?)
+            })
+            .flatten();
+        match triplet {
+            Some(decoded) if is_unreserved_ascii(decoded) => {
+                key.push(char::from(decoded.to_ascii_lowercase()));
+                index += 3;
+            }
+            Some(decoded) => {
+                key.push_str(&format!("%{decoded:02x}"));
+                index += 3;
+            }
+            None if byte.is_ascii() => {
+                key.push(char::from(byte.to_ascii_lowercase()));
+                index += 1;
+            }
+            None => {
+                key.push_str(&format!("%{byte:02x}"));
+                index += 1;
+            }
+        }
+    }
+    key
+}
+
+/// RFC 3986 §3.1 `scheme ":"` prefix: `ALPHA *( ALPHA / DIGIT / "+" / "-" /
+/// "." )` before the first `:`, with no `/`, `?` or `#` in front of it. A
+/// relative-path reference cannot carry a colon in its first segment (§4.2),
+/// so a Windows drive path such as `C:\x` also parses as a scheme.
+fn has_uri_scheme(reference: &str) -> bool {
+    let Some(colon) = reference.find(':') else {
+        return false;
+    };
+    let scheme = &reference[..colon];
+    let mut bytes = scheme.bytes();
+    bytes
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic())
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
+}
+
+/// RFC 3986 §5.2.4 `remove_dot_segments` for an absolute path.
+fn remove_dot_segments(path: &str) -> String {
+    let mut output: Vec<&str> = Vec::new();
+    let segments: Vec<&str> = path.split('/').skip(1).collect();
+    let last = segments.len().saturating_sub(1);
+    for (index, segment) in segments.iter().enumerate() {
+        match *segment {
+            "." | ".." => {
+                if *segment == ".." {
+                    output.pop();
+                }
+                // A final `.`/`..` leaves the path ending in `/`.
+                if index == last {
+                    output.push("");
+                }
+            }
+            other => output.push(other),
+        }
+    }
+    format!("/{}", output.join("/"))
 }
 
 /// Derive the relationship part name belonging to an OPC source part.
@@ -158,6 +471,16 @@ pub fn relationship_part_path(source_part_path: &str) -> String {
 }
 
 impl RelTarget {
+    /// Resolve this relationship to the package part it names, per
+    /// [`resolve_part_name`]. External relationships never name a part
+    /// (ECMA-376 Part 2 §6.5.3.4) and yield `None`.
+    pub fn resolve_part(&self, source_part: &str) -> Option<String> {
+        match self.mode {
+            TargetMode::Internal => resolve_part_name(source_part, &self.target),
+            TargetMode::External => None,
+        }
+    }
+
     /// Resolve this relationship's target against `base_dir`, honoring
     /// [`TargetMode`]: Internal targets are normalized to a part name via
     /// [`resolve_target`]; External targets (URLs) are returned verbatim.
@@ -290,6 +613,175 @@ mod tests {
             resolve_target("word/", "../media/footnote.png"),
             "media/footnote.png"
         );
+    }
+
+    #[test]
+    fn resolve_part_name_follows_rfc3986_against_the_source_part() {
+        let cases = [
+            // Plain, `./`, `../` and absolute-path references from the main part.
+            (
+                "word/document.xml",
+                "footnotes.xml",
+                Some("word/footnotes.xml"),
+            ),
+            (
+                "word/document.xml",
+                "./footnotes.xml",
+                Some("word/footnotes.xml"),
+            ),
+            (
+                "word/document.xml",
+                "../word/footnotes.xml",
+                Some("word/footnotes.xml"),
+            ),
+            (
+                "word/document.xml",
+                "/word/footnotes.xml",
+                Some("word/footnotes.xml"),
+            ),
+            (
+                "word/document.xml",
+                "notes/./a/../footnotes.xml",
+                Some("word/notes/footnotes.xml"),
+            ),
+            // The base is the source PART: its last segment is replaced.
+            (
+                "word/charts/chart1.xml",
+                "../media/i.png",
+                Some("word/media/i.png"),
+            ),
+            ("document.xml", "./media/i.png", Some("media/i.png")),
+            ("", "word/document.xml", Some("word/document.xml")),
+            // §5.2.4 drops `..` above the root; it cannot leave the package.
+            ("word/document.xml", "../../../x.xml", Some("x.xml")),
+            // Empty reference is the base; a fragment is not part of the name.
+            ("word/document.xml", "", Some("word/document.xml")),
+            (
+                "word/document.xml",
+                "footnotes.xml#n1",
+                Some("word/footnotes.xml"),
+            ),
+            // Not a part of this package, or not a valid part name.
+            ("word/document.xml", "https://example.com/x.xml", None),
+            ("word/document.xml", "pack://x/word/a.xml", None),
+            ("word/document.xml", "C:\\x.xml", None),
+            ("word/document.xml", "//host/word/a.xml", None),
+            ("word/document.xml", "a.xml?x=1", None),
+            ("word/document.xml", "./", None),
+            ("word/document.xml", "..", None),
+            ("word/document.xml", "a//b.xml", None),
+            ("word/document.xml", "name.", None),
+            // RFC 3986 §6.2.2 percent-encoding normalization and §7.3.4.
+            (
+                "word/document.xml",
+                "%66ootnotes.xml",
+                Some("word/footnotes.xml"),
+            ),
+            ("word/document.xml", "%2e/%41.xml", Some("word/A.xml")),
+            ("word/document.xml", "a%20b.xml", Some("word/a%20b.xml")),
+            ("word/document.xml", "a%3cb.xml", Some("word/a%3Cb.xml")),
+            (
+                "word/document.xml",
+                "caf\u{e9}.xml",
+                Some("word/caf%C3%A9.xml"),
+            ),
+            ("word/document.xml", "%2E%2E/x.xml", Some("x.xml")),
+            // RFC 3986 §5.2.1: resolve (literal dot segments) before §6.2.2.
+            (
+                "word/document.xml",
+                "%2E%2E/../header.xml",
+                Some("word/header.xml"),
+            ),
+            (
+                "word/document.xml",
+                "a/%2e%2E/../b.xml",
+                Some("word/a/b.xml"),
+            ),
+            ("word/document.xml", "%2E/../x.xml", Some("word/x.xml")),
+            ("word/document.xml", "../%2E%2E/x.xml", Some("x.xml")),
+            (
+                "word/charts/chart1.xml",
+                "%2E%2E/../../x.xml",
+                Some("word/x.xml"),
+            ),
+            // RFC 3987 §2.2 isegment-nz grammar.
+            ("word/document.xml", "a b.xml", None),
+            // Invalid characters in a segment that dot removal would drop.
+            ("word/document.xml", "a b/../footnotes.xml", None),
+            ("word/document.xml", "x[1]/../footnotes.xml", None),
+            ("word/document.xml", "a\\b.xml", None),
+            ("word/document.xml", "a[b].xml", None),
+            ("word/document.xml", "a{b}.xml", None),
+            ("word/document.xml", "a|b.xml", None),
+            ("word/document.xml", "a\"b.xml", None),
+            ("word/document.xml", "a<b>.xml", None),
+            ("word/document.xml", "a^b.xml", None),
+            ("word/document.xml", "a`b.xml", None),
+            ("word/document.xml", "a\u{7f}b.xml", None),
+            ("word/document.xml", "a\u{e000}b.xml", None),
+            ("word/document.xml", "a\u{fffe}b.xml", None),
+            ("word/document.xml", "../[Content_Types].xml", None),
+            ("", "[Content_Types].xml", None),
+            ("word/document.xml", "/[Content_Types].xml", None),
+            ("word/document.xml", "1:x.xml", None),
+            ("word/document.xml", "./1:x.xml", Some("word/1:x.xml")),
+            (
+                "word/document.xml",
+                "a!$&'()*+,;=@~_-.x",
+                Some("word/a!$&'()*+,;=@~_-.x"),
+            ),
+            (
+                "word/document.xml",
+                "\u{1f600}.png",
+                Some("word/%F0%9F%98%80.png"),
+            ),
+            ("word/document.xml", "a%2Fb.xml", None),
+            ("word/document.xml", "a%5cb.xml", None),
+            ("word/document.xml", "a%zzb.xml", None),
+            // Malformed triplets in a segment that dot removal would drop.
+            ("word/document.xml", "%GG/../header.xml", None),
+            ("word/document.xml", "%/../header.xml", None),
+            ("word/document.xml", "%2/../header.xml", None),
+            ("word/document.xml", "a%4", None),
+            // Case is kept; the package lookup folds it (§6.2.2.3).
+            (
+                "word/document.xml",
+                "../WORD/Footnotes.XML",
+                Some("WORD/Footnotes.XML"),
+            ),
+        ];
+        for (source, target, expected) in cases {
+            assert_eq!(
+                resolve_part_name(source, target).as_deref(),
+                expected,
+                "{source} + {target}"
+            );
+        }
+    }
+
+    #[test]
+    fn equivalence_key_folds_case_and_unreserved_percent_encoding() {
+        let key = part_name_equivalence_key;
+        assert_eq!(key("word/Footnotes.XML"), key("WORD/footnotes.xml"));
+        assert_eq!(key("word/%41.xml"), key("word/a.xml"));
+        assert_eq!(key("word/%7e%5F.xml"), key("word/~_.xml"));
+        assert_eq!(key("word/a%3Cb.xml"), key("word/a%3cb.xml"));
+        assert_eq!(key("word/caf\u{e9}.xml"), key("word/caf%C3%A9.xml"));
+        assert_ne!(key("word/a%20b.xml"), key("word/a b.xml"));
+        assert_ne!(key("word/a%2Fb.xml"), key("word/a/b.xml"));
+        assert_ne!(key("word/a.xml"), key("word/b.xml"));
+        // A malformed triplet still has a (literal) key.
+        assert_eq!(key("word/%zz"), "word/%zz");
+    }
+
+    #[test]
+    fn resolve_part_never_resolves_external_targets() {
+        let external = RelTarget {
+            target: "footnotes.xml".to_string(),
+            relationship_type: None,
+            mode: TargetMode::External,
+        };
+        assert_eq!(external.resolve_part("word/document.xml"), None);
     }
 
     #[test]

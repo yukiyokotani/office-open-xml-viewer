@@ -2930,9 +2930,6 @@ impl ChartImageRelationships {
         source_part_path: &str,
         relationships: &BTreeMap<String, crate::rels::RelTarget>,
     ) {
-        let base_dir = source_part_path
-            .rsplit_once('/')
-            .map_or("", |(directory, _)| directory);
         let target = match source {
             ChartImageSource::Chart => &mut self.chart,
             ChartImageSource::Style => &mut self.style,
@@ -2952,7 +2949,11 @@ impl ChartImageRelationships {
             {
                 continue;
             }
-            let path = crate::rels::resolve_target(base_dir, &relationship.target);
+            // ECMA-376 Part 2 §6.5.2.3: resolve against the source part; a
+            // target naming no package part is treated as an absent image.
+            let Some(path) = relationship.resolve_part(source_part_path) else {
+                continue;
+            };
             let mime = crate::blip::mime_from_ext(&path).to_owned();
             target.insert(relationship_id.clone(), (path, mime));
         }

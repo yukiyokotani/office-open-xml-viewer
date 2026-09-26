@@ -8,7 +8,6 @@ use crate::resource::{
     HARD_MAX_ARCHIVE_ENTRY_BYTES, HARD_MAX_CENTRAL_DIRECTORY_BYTES,
 };
 use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
 
 /// Cap eager allocation based on attacker-controlled ZIP declarations. Large
 /// legitimate entries grow incrementally while reads remain resource-bounded.
@@ -129,26 +128,6 @@ struct CentralDirectory {
     entry_count: u64,
     archive_base: u64,
     footer_metadata_bytes: u64,
-}
-
-#[derive(Clone, Copy)]
-struct AsciiFoldedName<'a>(&'a [u8]);
-
-impl PartialEq for AsciiFoldedName<'_> {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.eq_ignore_ascii_case(other.0)
-    }
-}
-
-impl Eq for AsciiFoldedName<'_> {}
-
-impl Hash for AsciiFoldedName<'_> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.0.len().hash(state);
-        for byte in self.0 {
-            byte.to_ascii_lowercase().hash(state);
-        }
-    }
 }
 
 enum CandidateError {
@@ -751,7 +730,10 @@ fn inspect_central_directory(
     let capacity = usize::try_from(directory.entry_count).map_err(|_| CandidateError::Malformed)?;
     let mut entries = Vec::with_capacity(capacity);
     let mut exact_names = HashSet::<&[u8]>::with_capacity(capacity);
-    let mut folded_names = HashMap::<AsciiFoldedName<'_>, NameRange>::with_capacity(capacity);
+    // ECMA-376 Part 2 §6.2.2.3: part names are equivalent under ASCII case
+    // folding, and (RFC 3986 §6.2.2) a percent-encoded unreserved character
+    // equals the character. Keys follow `rels::part_name_equivalence_key`.
+    let mut folded_names = HashMap::<String, NameRange>::with_capacity(capacity);
     walk_central_directory(data, directory, |entry| {
         let range = entry.name;
         let name = &data[range.start..range.start + range.len];
@@ -769,10 +751,11 @@ fn inspect_central_directory(
         }
         let represents_file = !name.ends_with(b"/") && !name.ends_with(b"\\");
         if represents_file {
-            if let Some(previous) = folded_names.insert(AsciiFoldedName(name), range) {
+            let key = crate::rels::part_name_equivalence_key(&String::from_utf8_lossy(name));
+            if let Some(previous) = folded_names.insert(key, range) {
                 let previous_name = &data[previous.start..previous.start + previous.len];
                 return Err(CandidateError::Rejected(format!(
-                    "OOXML part names must be unique ignoring ASCII case: {} and {}",
+                    "OOXML part names must be unique under part-name equivalence: {} and {}",
                     String::from_utf8_lossy(previous_name),
                     String::from_utf8_lossy(name)
                 )));
@@ -807,7 +790,8 @@ fn inspect_central_directory(
             .enumerate()
             .filter_map(|(index, byte)| (*byte == b'/').then_some(index))
         {
-            if folded_names.contains_key(&AsciiFoldedName(&entry.name[..slash])) {
+            let prefix = String::from_utf8_lossy(&entry.name[..slash]);
+            if folded_names.contains_key(&crate::rels::part_name_equivalence_key(&prefix)) {
                 return Err(CandidateError::Rejected(format!(
                     "OOXML part name must not be derivable from another part name: {}",
                     String::from_utf8_lossy(&entry.name)
@@ -1024,14 +1008,31 @@ pub fn extract_zip_entry(
     read_zip_bytes(&mut archive, path)
 }
 
+/// Index of the entry naming the same part as `path`: the exact ZIP item name
+/// first, else the item equivalent under ECMA-376 Part 2 §6.2.2.3 (see
+/// [`crate::rels::part_name_equivalence_key`]). Validation rejects two items
+/// with one key, so the match is unique. This linear fallback serves the
+/// one-shot archive helpers; retained package sessions keep a key index.
+fn equivalent_entry_index<R: std::io::Read + std::io::Seek>(
+    archive: &zip::ZipArchive<R>,
+    path: &str,
+) -> Option<usize> {
+    archive.index_for_name(path).or_else(|| {
+        let key = crate::rels::part_name_equivalence_key(path);
+        archive
+            .file_names()
+            .find(|name| crate::rels::part_name_equivalence_key(name) == key)
+            .and_then(|name| archive.index_for_name(name))
+    })
+}
+
 pub fn read_zip_bytes<R: std::io::Read + std::io::Seek>(
     archive: &mut zip::ZipArchive<R>,
     path: &str,
 ) -> Result<Vec<u8>, String> {
     resource::assert_healthy()?;
-    let part_id = archive
-        .index_for_name(path)
-        .ok_or_else(|| format!("entry not found: {path}"))?;
+    let part_id =
+        equivalent_entry_index(archive, path).ok_or_else(|| format!("entry not found: {path}"))?;
     let mut entry = archive
         .by_index(part_id)
         .map_err(|e| format!("entry not found: {path}: {e}"))?;
@@ -1054,9 +1055,8 @@ pub fn read_zip_string_head<R: std::io::Read + std::io::Seek>(
     max_bytes: usize,
 ) -> Result<String, String> {
     resource::assert_healthy()?;
-    let part_id = archive
-        .index_for_name(path)
-        .ok_or_else(|| format!("entry not found: {path}"))?;
+    let part_id =
+        equivalent_entry_index(archive, path).ok_or_else(|| format!("entry not found: {path}"))?;
     let mut entry = archive
         .by_index(part_id)
         .map_err(|e| format!("entry not found: {path}: {e}"))?;
@@ -1874,10 +1874,36 @@ mod tests {
         }
         let mut case_archive = zip::ZipArchive::new(Cursor::new(case_bytes.as_slice())).unwrap();
         let preflight_case_error = preflight_archive_limits(&case_bytes).unwrap_err();
-        assert!(preflight_case_error.contains("unique ignoring ASCII case"));
+        assert!(preflight_case_error.contains("unique under part-name equivalence"));
         let case_error = validate_archive_item_names(&case_bytes, &mut case_archive).unwrap_err();
-        assert!(case_error.contains("unique ignoring ASCII case"));
+        assert!(case_error.contains("unique under part-name equivalence"));
         assert!(!case_error.starts_with("OOXML_RESOURCE_LIMIT:"));
+
+        // RFC 3986 §6.2.2.2: `%41` names the same part as `A`.
+        let mut percent_bytes = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(Cursor::new(&mut percent_bytes));
+            let options = zip::write::SimpleFileOptions::default();
+            writer.start_file("word/a.xml", options).unwrap();
+            writer.write_all(b"plain").unwrap();
+            writer.start_file("word/%41.xml", options).unwrap();
+            writer.write_all(b"encoded").unwrap();
+            writer.finish().unwrap();
+        }
+        let percent_error = preflight_archive_limits(&percent_bytes).unwrap_err();
+        assert!(percent_error.contains("unique under part-name equivalence"));
+        // Other percent-encodings stay distinct octets.
+        let mut distinct = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(Cursor::new(&mut distinct));
+            let options = zip::write::SimpleFileOptions::default();
+            writer.start_file("word/a b.xml", options).unwrap();
+            writer.write_all(b"space").unwrap();
+            writer.start_file("word/a%20b.xml", options).unwrap();
+            writer.write_all(b"encoded").unwrap();
+            writer.finish().unwrap();
+        }
+        assert!(preflight_archive_limits(&distinct).is_ok());
     }
 
     #[test]

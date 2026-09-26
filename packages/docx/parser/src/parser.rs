@@ -9,7 +9,9 @@ use ooxml_common::ns::{attr_ns, is_w_ns, is_wp_ns, math, relationships, wordproc
 use ooxml_common::package_session::{
     PackageEntryStream, PackageOperation, PackageSessionHandle, RetainedPackageOperation,
 };
-use ooxml_common::rels::{parse_rels as parse_opc_rels, resolve_target, TargetMode};
+use ooxml_common::rels::{
+    parse_rels as parse_opc_rels, relationship_part_path, resolve_part_name, RelTarget, TargetMode,
+};
 use ooxml_common::resource::ResourceUsage;
 // Production parses go through `ooxml_common::depth::parse_guarded` (depth-guarded
 // before roxmltree's recursive tree builder). The `XmlDoc` alias survives only for
@@ -36,6 +38,9 @@ use crate::styles::{
 use crate::types::*;
 use crate::xml_util::*;
 
+#[cfg(test)]
+#[path = "parser/relationship_target_tests.rs"]
+mod relationship_target_tests;
 #[cfg(test)]
 #[path = "parser/word_ilvl_integration_tests.rs"]
 mod word_ilvl_integration_tests;
@@ -98,8 +103,11 @@ impl Zip {
         self.session.assert_healthy()
     }
 
-    fn index_for_name(&self, path: &str) -> Option<()> {
-        self.session.contains_entry(path).then_some(())
+    /// Stored ZIP item name of the part equivalent to `path` (ECMA-376 Part 2
+    /// §6.2.2.3: ASCII case folding and percent-encoded unreserved
+    /// characters). Consults only the central directory; nothing is inflated.
+    fn entry_name(&self, path: &str) -> Option<String> {
+        self.session.entry_name(path)
     }
 }
 
@@ -124,7 +132,9 @@ pub(crate) fn read_zip_bytes(zip: &mut Zip, path: &str) -> Result<Vec<u8>, Strin
 }
 
 /// Section-level header/footer references collected from sectPr.
-/// Maps reference type ("default" | "first" | "even") to the target xml path (e.g. "header1.xml").
+/// Maps reference type ("default" | "first" | "even") to the `r:id` of the
+/// document relationship naming the header/footer part. The part is resolved
+/// from that relationship (TargetMode and all) when the story is loaded.
 #[derive(Default, Clone)]
 struct SectionRefs {
     headers: HashMap<String, String>,
@@ -786,6 +796,9 @@ pub(crate) fn parse_from_bytes_streamed_with_limits(
 struct DocumentParseEnvironment {
     rels_xml: String,
     rel_map: HashMap<String, String>,
+    /// `word/_rels/document.xml.rels` with TargetMode retained, for resolving
+    /// the parts the main document part references.
+    relationships: BTreeMap<String, RelTarget>,
     style_map: StyleMap,
     num_map: NumberingMap,
     theme: ThemeColors,
@@ -844,7 +857,9 @@ fn validate_referenced_story_ilvls(zip: &mut Zip, rels_xml: &str) -> Option<Stri
         {
             continue;
         }
-        let path = resolve_target("word/", &rel.target);
+        let Some(path) = rel.resolve_part(DOCUMENT_PART) else {
+            continue;
+        };
         if !visited.insert(path.clone()) {
             continue;
         }
@@ -872,54 +887,29 @@ fn validate_referenced_story_ilvls(zip: &mut Zip, rels_xml: &str) -> Option<Stri
 fn load_document_parse_environment(zip: &mut Zip) -> DocumentParseEnvironment {
     let rels_xml = read_zip_string(zip, "word/_rels/document.xml.rels").unwrap_or_default();
     let rel_map = parse_rels(&rels_xml);
+    let relationships = parse_opc_rels(&rels_xml);
 
     // Styles are referenced from the document relationships (Target may be
     // "styles.xml" or "styles2.xml"). Fall back to "word/styles.xml" for old files.
-    let styles_path = find_rel_target(&rels_xml, "styles")
-        .map(|t| {
-            if t.starts_with('/') {
-                t.trim_start_matches('/').to_string()
-            } else {
-                format!("word/{}", t)
-            }
-        })
-        .unwrap_or_else(|| "word/styles.xml".to_string());
-    let styles_xml = read_zip_string(zip, &styles_path).unwrap_or_default();
+    let styles_path =
+        find_rel_part(&rels_xml, "styles").unwrap_or_else(|| Some("word/styles.xml".to_string()));
+    let styles_xml = read_part_string(zip, styles_path.as_deref()).unwrap_or_default();
     let mut word_ilvl_error = parse_guarded(&styles_xml)
         .ok()
         .and_then(|document| validate_paragraph_ilvls(document.root_element()).err());
     let mut style_map = StyleMap::parse(&styles_xml);
 
-    let numbering_path = find_rel_target(&rels_xml, "numbering")
-        .map(|t| {
-            if t.starts_with('/') {
-                t.trim_start_matches('/').to_string()
-            } else {
-                format!("word/{}", t)
-            }
-        })
-        .unwrap_or_else(|| "word/numbering.xml".to_string());
-    // The numbering part has its OWN relationships (`<part>.xml.rels`), needed to
+    let numbering_path = find_rel_part(&rels_xml, "numbering")
+        .unwrap_or_else(|| Some("word/numbering.xml".to_string()));
+    // The numbering part has its OWN relationships (Part 2 §6.5.2.3), needed to
     // resolve `<w:numPicBullet>` image r:ids (§17.9.26). Resolve them the same
-    // way headers/footers do their per-part media (parse_rels + load_media_map),
-    // derived from the numbering part's stem so a non-default numbering target
-    // (e.g. "numbering2.xml") still finds its sibling rels.
-    let numbering_media_map = {
-        let stem = numbering_path
-            .rsplit('/')
-            .next()
-            .unwrap_or(&numbering_path)
-            .trim_end_matches(".xml");
-        let dir = numbering_path
-            .rsplit_once('/')
-            .map(|(d, _)| d)
-            .unwrap_or("word");
-        let rels_path = format!("{}/_rels/{}.xml.rels", dir, stem);
-        let rels_xml = read_zip_string(zip, &rels_path).unwrap_or_default();
-        let rel_map = parse_rels(&rels_xml);
-        load_media_map(zip, &rel_map, &format!("{}/", dir))
-    };
-    let numbering_xml = read_zip_string(zip, &numbering_path).unwrap_or_default();
+    // way headers/footers do their per-part media, so a non-default numbering
+    // target (e.g. "numbering2.xml") still finds its sibling rels.
+    let numbering_media_map = numbering_path
+        .as_deref()
+        .map(|path| load_part_media_map(zip, path))
+        .unwrap_or_default();
+    let numbering_xml = read_part_string(zip, numbering_path.as_deref()).unwrap_or_default();
     if word_ilvl_error.is_none() {
         word_ilvl_error = parse_guarded(&numbering_xml).ok().and_then(|document| {
             validate_level_definitions(document.root_element())
@@ -936,16 +926,10 @@ fn load_document_parse_environment(zip: &mut Zip) -> DocumentParseEnvironment {
     style_map.resolve_numbering_level_backlinks(&num_map);
 
     // Theme is referenced by a relationship with Type ending in "/theme" — resolve
-    // to word/<target> and parse the clrScheme.
-    let theme_path = find_rel_target(&rels_xml, "theme").map(|target| {
-        if target.starts_with('/') {
-            target.trim_start_matches('/').to_string()
-        } else {
-            format!("word/{target}")
-        }
-    });
-    let mut theme = match theme_path.as_deref() {
-        Some(path) => read_zip_string(zip, path)
+    // it against the main part and parse the clrScheme.
+    let theme_relationship = find_rel_part(&rels_xml, "theme");
+    let mut theme = match &theme_relationship {
+        Some(path) => read_part_string(zip, path.as_deref())
             .map(|xml| ThemeColors::parse(&xml))
             .unwrap_or_else(|_| ThemeColors {
                 format_scheme_present: true,
@@ -953,8 +937,8 @@ fn load_document_parse_environment(zip: &mut Zip) -> DocumentParseEnvironment {
             }),
         None => ThemeColors::default(),
     };
-    if let Some(theme_path) = theme_path.as_deref() {
-        let rels_path = ooxml_common::rels::relationship_part_path(theme_path);
+    if let Some(Some(theme_path)) = theme_relationship.as_ref() {
+        let rels_path = relationship_part_path(theme_path);
         if let Ok(theme_rels_xml) = read_zip_string(zip, &rels_path) {
             theme.chart_images.insert_part_relationships(
                 ooxml_common::chart::ChartImageSource::Theme,
@@ -966,22 +950,15 @@ fn load_document_parse_environment(zip: &mut Zip) -> DocumentParseEnvironment {
 
     // §17.15.1.88 w:themeFontLang — when the theme leaves a cs typeface empty,
     // the settings' bidi language decides the actual complex-script face.
-    let settings_path = find_rel_target(&rels_xml, "settings")
-        .map(|t| {
-            if t.starts_with('/') {
-                t.trim_start_matches('/').to_string()
-            } else {
-                format!("word/{}", t)
-            }
-        })
-        .unwrap_or_else(|| "word/settings.xml".to_string());
+    let settings_path = find_rel_part(&rels_xml, "settings")
+        .unwrap_or_else(|| Some("word/settings.xml".to_string()));
     let mut document_settings: Option<crate::types::DocumentSettings> = None;
     let mut page_layout_settings: Option<crate::types::PageLayoutSettingsWire> = None;
     let mut note_layout_settings: Option<crate::types::NoteLayoutSettingsWire> = None;
     // §17.10.1 even/odd headers is a settings.xml flag (not a sectPr property), so
     // capture it here and stamp it onto the section below.
     let mut even_and_odd_headers = false;
-    if let Ok(settings_xml) = read_zip_string(zip, &settings_path) {
+    if let Ok(settings_xml) = read_part_string(zip, settings_path.as_deref()) {
         if let Some(langs) = parse_theme_font_langs(&settings_xml) {
             theme.apply_theme_font_langs(&langs);
         }
@@ -1002,18 +979,19 @@ fn load_document_parse_environment(zip: &mut Zip) -> DocumentParseEnvironment {
     }
     let theme = theme;
 
-    let media_map = load_media_map(zip, &rel_map, "word/");
+    let media_map = load_media_map(zip, &relationships, DOCUMENT_PART);
 
     // ECMA-376 §21.2 — pre-resolve every chart part referenced from the document
     // relationships into the shared `ChartModel`, keyed by the SAME rId a
     // `<c:chart r:id>` in a `<w:drawing>` uses. Mirrors `load_media_map`: the
     // model is resolved here (needs `zip` + the theme, neither of which is
     // threaded through the run walk) and looked up by rId during drawing parse.
-    let chart_map = load_chart_map(zip, &rel_map, &theme);
+    let chart_map = load_chart_map(zip, &relationships, DOCUMENT_PART, &theme);
 
     DocumentParseEnvironment {
         rels_xml,
         rel_map,
+        relationships,
         style_map,
         num_map,
         theme,
@@ -1178,6 +1156,7 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
         return Err(error);
     }
     let rel_map = &environment.rel_map;
+    let relationships = &environment.relationships;
     let style_map = &environment.style_map;
     let num_map = &mut environment.num_map;
     let theme = &environment.theme;
@@ -1250,8 +1229,24 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
     let mut body_headers = HeadersFooters::default();
     let mut body_footers = HeadersFooters::default();
     for (node_id, refs, title_page) in &section_snapshots {
-        let headers = load_header_footer_set(zip, &refs.headers, "hdr", style_map, num_map, theme);
-        let footers = load_header_footer_set(zip, &refs.footers, "ftr", style_map, num_map, theme);
+        let headers = load_header_footer_set(
+            zip,
+            relationships,
+            &refs.headers,
+            "hdr",
+            style_map,
+            num_map,
+            theme,
+        );
+        let footers = load_header_footer_set(
+            zip,
+            relationships,
+            &refs.footers,
+            "ftr",
+            style_map,
+            num_map,
+            theme,
+        );
         if Some(*node_id) == body_level_sect_id {
             body_headers = headers;
             body_footers = footers;
@@ -1388,6 +1383,7 @@ impl DocxBodyCursor {
         for (index, fact) in preflight.sections.iter().enumerate() {
             let headers = load_header_footer_set(
                 zip,
+                &environment.relationships,
                 &fact.refs.headers,
                 "hdr",
                 &environment.style_map,
@@ -1396,6 +1392,7 @@ impl DocxBodyCursor {
             );
             let footers = load_header_footer_set(
                 zip,
+                &environment.relationships,
                 &fact.refs.footers,
                 "ftr",
                 &environment.style_map,
@@ -1666,38 +1663,37 @@ fn finish_document(
     // ECMA-376 §17.8.3.10: font family classification from fontTable.xml.
     // Resolve via relationship (Type ending in "/fontTable"); fall back to
     // "word/fontTable.xml" for documents that omit the relationship.
-    let font_table_path = find_rel_target(&environment.rels_xml, "fontTable")
-        .map(|target| {
-            if target.starts_with('/') {
-                target.trim_start_matches('/').to_string()
-            } else {
-                format!("word/{target}")
-            }
-        })
-        .unwrap_or_else(|| "word/fontTable.xml".to_string());
-    let font_table_xml = read_zip_string(zip, &font_table_path).unwrap_or_default();
+    let font_table_path = find_rel_part(&environment.rels_xml, "fontTable")
+        .unwrap_or_else(|| Some("word/fontTable.xml".to_string()));
+    let font_table_xml = read_part_string(zip, font_table_path.as_deref()).unwrap_or_default();
     let (font_family_classes, font_family_pitches, font_family_charsets) =
         parse_font_table(&font_table_xml);
     // ECMA-376 §17.8.3.3-.6 — embedded fonts. The `<w:embed*>` r:ids resolve
-    // through the fontTable part's OWN relationships.
-    let embedded_fonts = {
-        let stem = font_table_path
-            .rsplit('/')
-            .next()
-            .unwrap_or(&font_table_path);
-        let dir = font_table_path
-            .rsplit_once('/')
-            .map(|(directory, _)| directory)
-            .unwrap_or("word");
-        let font_rels_path = format!("{dir}/_rels/{stem}.rels");
-        let font_rels_xml = read_zip_string(zip, &font_rels_path).unwrap_or_default();
-        let font_rels = parse_rels(&font_rels_xml);
-        parse_embedded_fonts(&font_table_xml, &font_rels, &format!("{dir}/"))
-    };
+    // through the fontTable part's OWN relationships (Part 2 §6.5.2.3).
+    let embedded_fonts = font_table_path
+        .as_deref()
+        .map(|path| {
+            let font_rels_xml =
+                read_zip_string(zip, &relationship_part_path(path)).unwrap_or_default();
+            let mut fonts =
+                parse_embedded_fonts(&font_table_xml, &parse_opc_rels(&font_rels_xml), path);
+            // Like `load_media_map`, publish only parts that exist (under their
+            // stored ZIP item name), so a target naming no package part and a
+            // missing part yield the same model.
+            fonts.retain_mut(|font| match zip.entry_name(&font.part_path) {
+                Some(stored) => {
+                    font.part_path = stored;
+                    true
+                }
+                None => false,
+            });
+            fonts
+        })
+        .unwrap_or_default();
 
     let comments =
         find_internal_rel_target_by_types(&environment.rels_xml, COMMENTS_RELATIONSHIP_TYPES)
-            .map(|target| ooxml_common::rels::resolve_target("word/", &target))
+            .and_then(|target| resolve_part_name(DOCUMENT_PART, &target))
             .and_then(|p| read_zip_string(zip, &p).ok())
             .map(|xml| {
                 // [MS-DOCX] §2.5.3.1 — reply threading and resolved state live in
@@ -1709,7 +1705,7 @@ fn finish_document(
                     &environment.rels_xml,
                     COMMENTS_EXTENDED_RELATIONSHIP_TYPES,
                 )
-                .map(|target| ooxml_common::rels::resolve_target("word/", &target))
+                .and_then(|target| resolve_part_name(DOCUMENT_PART, &target))
                 .and_then(|p| read_zip_string(zip, &p).ok())
                 .map(|extended_xml| parse_comments_extended(&extended_xml))
                 .unwrap_or_default();
@@ -1717,15 +1713,8 @@ fn finish_document(
             })
             .unwrap_or_default();
     let footnotes_path =
-        find_internal_rel_target_by_types(&environment.rels_xml, FOOTNOTES_RELATIONSHIP_TYPES).map(
-            |target| {
-                if target.starts_with('/') {
-                    target.trim_start_matches('/').to_string()
-                } else {
-                    format!("word/{target}")
-                }
-            },
-        );
+        find_internal_rel_target_by_types(&environment.rels_xml, FOOTNOTES_RELATIONSHIP_TYPES)
+            .and_then(|target| resolve_part_name(DOCUMENT_PART, &target));
     let footnotes = footnotes_path
         .map(|path| {
             parse_notes(
@@ -1739,15 +1728,8 @@ fn finish_document(
         })
         .unwrap_or_default();
     let endnotes_path =
-        find_internal_rel_target_by_types(&environment.rels_xml, ENDNOTES_RELATIONSHIP_TYPES).map(
-            |target| {
-                if target.starts_with('/') {
-                    target.trim_start_matches('/').to_string()
-                } else {
-                    format!("word/{target}")
-                }
-            },
-        );
+        find_internal_rel_target_by_types(&environment.rels_xml, ENDNOTES_RELATIONSHIP_TYPES)
+            .and_then(|target| resolve_part_name(DOCUMENT_PART, &target));
     let endnotes = endnotes_path
         .map(|path| {
             parse_notes(
@@ -2072,22 +2054,13 @@ fn parse_notes(
     };
 
     // Per-part rels for media (e.g. an image inside a footnote). The part lives
-    // at e.g. word/footnotes.xml, so its rels are word/_rels/footnotes.xml.rels.
-    let (dir, file) = path.rsplit_once('/').unwrap_or(("", path));
-    let rels_path = if dir.is_empty() {
-        format!("_rels/{}.rels", file)
-    } else {
-        format!("{}/_rels/{}.rels", dir, file)
-    };
-    let base_dir = if dir.is_empty() {
-        String::new()
-    } else {
-        format!("{}/", dir)
-    };
-    let rels_xml = read_zip_string(zip, &rels_path).unwrap_or_default();
+    // at e.g. word/footnotes.xml, so its rels are word/_rels/footnotes.xml.rels
+    // and their targets resolve against the note part (Part 2 §6.5.2.3).
+    let rels_xml = read_zip_string(zip, &relationship_part_path(path)).unwrap_or_default();
     let local_rel_map = parse_rels(&rels_xml);
-    let local_media_map = load_media_map(zip, &local_rel_map, &base_dir);
-    let local_chart_map = load_chart_map(zip, &local_rel_map, theme);
+    let local_relationships = parse_opc_rels(&rels_xml);
+    let local_media_map = load_media_map(zip, &local_relationships, path);
+    let local_chart_map = load_chart_map(zip, &local_relationships, path, theme);
 
     let Ok(doc) = parse_guarded(&xml) else {
         return Vec::new();
@@ -2707,23 +2680,46 @@ fn parse_document_settings(settings_xml: &str) -> Option<crate::types::DocumentS
     })
 }
 
-fn find_rel_target(rels_xml: &str, type_suffix: &str) -> Option<String> {
+/// Find the first main-document relationship whose Type ends in
+/// `/<type_suffix>` and resolve it to the part it names.
+///
+/// - `None`: there is no such relationship (callers may apply their
+///   conventional-part fallback).
+/// - `Some(None)`: the relationship exists but names no package part — it is
+///   External (Part 2 §6.5.3.4) or its target does not resolve to a part name
+///   (see [`resolve_part_name`]). Callers treat this exactly like a
+///   relationship whose target part is missing.
+/// - `Some(Some(path))`: the resolved ZIP part name.
+fn find_rel_part(rels_xml: &str, type_suffix: &str) -> Option<Option<String>> {
     if rels_xml.is_empty() {
         return None;
     }
     let doc = parse_guarded(rels_xml).ok()?;
-    for rel in doc
-        .root_element()
+    let suffix = format!("/{type_suffix}");
+    doc.root_element()
         .children()
         .filter(|n| n.tag_name().name() == "Relationship")
-    {
-        if let (Some(ty), Some(target)) = (rel.attribute("Type"), rel.attribute("Target")) {
-            if ty.ends_with(&format!("/{}", type_suffix)) {
-                return Some(target.to_string());
-            }
-        }
+        .find_map(|rel| {
+            let target = rel.attribute("Target")?;
+            rel.attribute("Type")?.ends_with(&suffix).then_some(())?;
+            let external = rel
+                .attribute("TargetMode")
+                .is_some_and(|mode| mode.eq_ignore_ascii_case("External"));
+            Some(
+                (!external)
+                    .then(|| resolve_part_name(DOCUMENT_PART, target))
+                    .flatten(),
+            )
+        })
+}
+
+/// Read a part located by [`find_rel_part`]; an unresolvable relationship
+/// reads exactly like an absent part.
+fn read_part_string(zip: &mut Zip, path: Option<&str>) -> Result<String, String> {
+    match path {
+        Some(path) => read_zip_string(zip, path),
+        None => Err("relationship names no package part".to_string()),
     }
-    None
 }
 
 const COMMENTS_RELATIONSHIP_TYPES: &[&str] = &[
@@ -3087,8 +3083,8 @@ mod document_typography_settings_tests {
 /// cannot be registered without both the part and its key.
 fn parse_embedded_fonts(
     font_table_xml: &str,
-    rels: &HashMap<String, String>,
-    base_dir: &str,
+    rels: &BTreeMap<String, RelTarget>,
+    font_table_part: &str,
 ) -> Vec<crate::types::EmbeddedFont> {
     let mut out = Vec::new();
     let Ok(doc) = parse_guarded(font_table_xml) else {
@@ -3129,10 +3125,12 @@ fn parse_embedded_fonts(
             ) else {
                 continue;
             };
-            let Some(target) = rels.get(rid) else {
+            let Some(part_path) = rels
+                .get(rid)
+                .and_then(|relationship| relationship.resolve_part(font_table_part))
+            else {
                 continue;
             };
-            let part_path = ooxml_common::rels::resolve_target(base_dir, target);
             out.push(crate::types::EmbeddedFont {
                 font_name: name.to_string(),
                 style: style.to_string(),
@@ -4417,6 +4415,13 @@ fn section_break_element(
     }
 }
 
+/// Media map for a part's OWN relationships (`<dir>/_rels/<name>.rels`,
+/// ECMA-376 Part 2 §6.5.2.3), resolved against that part.
+fn load_part_media_map(zip: &mut Zip, source_part: &str) -> HashMap<String, String> {
+    let rels_xml = read_zip_string(zip, &relationship_part_path(source_part)).unwrap_or_default();
+    load_media_map(zip, &parse_opc_rels(&rels_xml), source_part)
+}
+
 /// Build a map of rId → embedded **zip path** (e.g. `word/media/image1.png`) for
 /// every relationship targeting a media/image part. The bytes are NOT read here:
 /// images are fetched lazily by path at render time (via the `extract_image`
@@ -4425,27 +4430,32 @@ fn section_break_element(
 /// previous "drop unresolvable blips" behavior.
 fn load_media_map(
     zip: &mut Zip,
-    rel_map: &HashMap<String, String>,
-    base_dir: &str,
+    relationships: &BTreeMap<String, RelTarget>,
+    source_part: &str,
 ) -> HashMap<String, String> {
     let mut media_map: HashMap<String, String> = HashMap::new();
-    for (rid, target) in rel_map {
+    for (rid, relationship) in relationships {
+        // The media filter compares the Target's part-name equivalence key, so
+        // `Media/Image1.png` and `%6Dedia/...` spell the same kind of target.
+        let target = ooxml_common::rels::part_name_equivalence_key(&relationship.target);
         if target.contains("media/") || target.contains("image") {
-            // Resolve the Target against the source part's directory via the
-            // shared OPC resolver (ECMA-376 Part 2 §9.3): this handles
-            // root-absolute Targets (`/word/media/...`) AND normalizes `..`
-            // segments, so a chart/footnote media ref like
-            // `../media/image.png` (base_dir `word/charts/`) resolves to
-            // `word/media/image.png` instead of the unresolved
-            // `word/charts/../media/image.png` the old `format!` left behind.
-            let path = ooxml_common::rels::resolve_target(base_dir, target);
+            // Resolve the Target against the source part via the shared OPC
+            // resolver (ECMA-376 Part 2 §6.4/§6.5.2.3, RFC 3986 §5): this
+            // handles root-absolute (`/word/media/...`), `./` and `../`
+            // Targets, so a chart/footnote media ref like `../media/image.png`
+            // (source `word/charts/chart1.xml`) resolves to
+            // `word/media/image.png`. External targets and references that
+            // name no package part are dropped like a missing part.
+            let Some(path) = relationship.resolve_part(source_part) else {
+                continue;
+            };
             // Confirm the part exists before mapping the rId (keeps the lazy
-            // pipeline honest: a path in the map is always extractable).
-            // `index_for_name` consults only the central directory — no inflate,
-            // unlike the former `read_zip_bytes` which decompressed the whole
-            // entry just to throw the bytes away.
-            if zip.index_for_name(&path).is_some() {
-                media_map.insert(rid.clone(), path);
+            // pipeline honest: a path in the map is always extractable), and
+            // publish its stored ZIP item name so equivalent spellings of one
+            // part share one model path. `entry_name` consults only the
+            // central directory — no inflate.
+            if let Some(stored) = zip.entry_name(&path) {
+                media_map.insert(rid.clone(), stored);
             }
         }
     }
@@ -4463,7 +4473,8 @@ fn load_media_map(
 /// renders nothing, matching the "drop unresolvable blip" behaviour).
 fn load_chart_map(
     zip: &mut Zip,
-    rel_map: &HashMap<String, String>,
+    relationships: &BTreeMap<String, RelTarget>,
+    source_part: &str,
     theme: &ThemeColors,
 ) -> HashMap<String, ooxml_common::chart::ChartModel> {
     // Resolve the rId's Type via the raw rels: `rel_map` only carries Targets,
@@ -4473,9 +4484,17 @@ fn load_chart_map(
     // `None` for a colors/style sidecar, so a stray non-chart `.xml` there is
     // harmless.
     let mut chart_map: HashMap<String, ooxml_common::chart::ChartModel> = HashMap::new();
-    for (rid, target) in rel_map {
-        let path = ooxml_common::rels::resolve_target("word/", target);
-        if !(path.contains("charts/") && path.ends_with(".xml")) {
+    for (rid, relationship) in relationships {
+        // Use the stored ZIP item name (§6.2.2.3 equivalence); an absent part
+        // is dropped exactly like an unreadable one.
+        let Some(path) = relationship
+            .resolve_part(source_part)
+            .and_then(|path| zip.entry_name(&path))
+        else {
+            continue;
+        };
+        let key = ooxml_common::rels::part_name_equivalence_key(&path);
+        if !(key.contains("charts/") && key.ends_with(".xml")) {
             continue;
         }
         let Ok(xml) = read_zip_string(zip, &path) else {
@@ -4538,7 +4557,7 @@ fn load_chart_related_parts(zip: &mut Zip, chart_path: &str) -> ChartRelatedPart
         color_style_xml: None,
         image_relationships: Default::default(),
     };
-    let rels_path = ooxml_common::rels::relationship_part_path(chart_path);
+    let rels_path = relationship_part_path(chart_path);
     let Ok(rels_xml) = read_zip_string(zip, &rels_path) else {
         return result;
     };
@@ -4548,7 +4567,6 @@ fn load_chart_related_parts(zip: &mut Zip, chart_path: &str) -> ChartRelatedPart
         chart_path,
         &relationships,
     );
-    let base_dir = chart_path.rsplit_once('/').map_or("", |(dir, _)| dir);
     let internal_target = |suffix: &str| {
         relationships.values().find(|relationship| {
             relationship.mode == ooxml_common::rels::TargetMode::Internal
@@ -4566,25 +4584,27 @@ fn load_chart_related_parts(zip: &mut Zip, chart_path: &str) -> ChartRelatedPart
                 .is_some_and(ooxml_common::chart::is_chart_style_relationship_type)
     });
     if let Some(style_relationship) = style_relationship {
-        let style_path = ooxml_common::rels::resolve_target(base_dir, &style_relationship.target);
+        // A target naming no part reads like a missing chartStyle part.
+        let style_path = style_relationship.resolve_part(chart_path);
         result.style_xml =
-            Some(read_zip_string(zip, &style_path).unwrap_or_else(|_| "\0".to_owned()));
-        let style_rels_path = ooxml_common::rels::relationship_part_path(&style_path);
-        if let Ok(style_rels_xml) = read_zip_string(zip, &style_rels_path) {
-            let style_relationships = ooxml_common::rels::parse_rels(&style_rels_xml);
-            result.image_relationships.insert_parsed_relationships(
-                ooxml_common::chart::ChartImageSource::Style,
-                &style_path,
-                &style_relationships,
-            );
+            Some(read_part_string(zip, style_path.as_deref()).unwrap_or_else(|_| "\0".to_owned()));
+        if let Some(style_path) = style_path.as_deref() {
+            if let Ok(style_rels_xml) = read_zip_string(zip, &relationship_part_path(style_path)) {
+                let style_relationships = ooxml_common::rels::parse_rels(&style_rels_xml);
+                result.image_relationships.insert_parsed_relationships(
+                    ooxml_common::chart::ChartImageSource::Style,
+                    style_path,
+                    &style_relationships,
+                );
+            }
         }
     }
     if let Some(color_relationship) =
         internal_target(ooxml_common::chart::CHART_COLOR_STYLE_REL_TYPE_SUFFIX)
     {
-        let color_path = ooxml_common::rels::resolve_target(base_dir, &color_relationship.target);
+        let color_path = color_relationship.resolve_part(chart_path);
         result.color_style_xml =
-            Some(read_zip_string(zip, &color_path).unwrap_or_else(|_| "\0".to_owned()));
+            Some(read_part_string(zip, color_path.as_deref()).unwrap_or_else(|_| "\0".to_owned()));
     }
     result
 }
@@ -4603,40 +4623,45 @@ fn load_chart_user_shapes_xml(zip: &mut Zip, chart_path: &str, chart_xml: &str) 
                     .is_some_and(|namespace| namespace.ends_with("/relationships"))
         })?
         .value();
-    let (dir, file) = chart_path.rsplit_once('/').unwrap_or(("", chart_path));
-    let rels_path = format!("{}/_rels/{}.rels", dir, file);
-    let rels_xml = read_zip_string(zip, &rels_path).ok()?;
-    let target = ooxml_common::rels::parse_rels(&rels_xml)
+    let rels_xml = read_zip_string(zip, &relationship_part_path(chart_path)).ok()?;
+    let user_shapes_path = parse_opc_rels(&rels_xml)
         .get(rid)?
-        .target
-        .clone();
-    let user_shapes_path = ooxml_common::rels::resolve_target(&format!("{}/", dir), &target);
+        .resolve_part(chart_path)?;
     read_zip_string(zip, &user_shapes_path).ok()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn load_header_footer_set(
     zip: &mut Zip,
-    type_to_target: &HashMap<String, String>,
+    relationships: &BTreeMap<String, RelTarget>,
+    type_to_rid: &HashMap<String, String>,
     root_tag: &str,
     style_map: &StyleMap,
     num_map: &mut NumberingMap,
     theme: &ThemeColors,
 ) -> HeadersFooters {
     let mut out = HeadersFooters::default();
-    for (kind, target) in type_to_target {
-        let path = format!("word/{}", target);
+    for (kind, rid) in type_to_rid {
+        // ECMA-376 Part 2 §6.5.2.3: the header/footer part is the document
+        // relationship's target resolved against `word/document.xml`. A
+        // relationship naming no package part is skipped like a missing part.
+        let Some(path) = relationships
+            .get(rid)
+            .and_then(|relationship| relationship.resolve_part(DOCUMENT_PART))
+        else {
+            continue;
+        };
         let xml = match read_zip_string(zip, &path) {
             Ok(s) => s,
             Err(_) => continue,
         };
 
-        // Per-file rels for image resolution
-        let stem = target.trim_end_matches(".xml");
-        let rels_path = format!("word/_rels/{}.xml.rels", stem);
-        let rels_xml = read_zip_string(zip, &rels_path).unwrap_or_default();
+        // Per-part rels for image/chart resolution, resolved against this part.
+        let rels_xml = read_zip_string(zip, &relationship_part_path(&path)).unwrap_or_default();
         let local_rel_map = parse_rels(&rels_xml);
-        let local_media_map = load_media_map(zip, &local_rel_map, "word/");
-        let local_chart_map = load_chart_map(zip, &local_rel_map, theme);
+        let local_relationships = parse_opc_rels(&rels_xml);
+        let local_media_map = load_media_map(zip, &local_relationships, &path);
+        let local_chart_map = load_chart_map(zip, &local_relationships, &path, theme);
 
         let xml_doc = match parse_guarded(&xml) {
             Ok(d) => d,
@@ -4902,14 +4927,13 @@ fn merge_section_refs(
         )
         .map(|s| s.to_string());
         let Some(rid) = rid else { continue };
-        let Some(target) = rel_map.get(&rid) else {
+        if !rel_map.contains_key(&rid) {
             continue;
-        };
-        let target = target.trim_start_matches('/').to_string();
+        }
         if local == "headerReference" {
-            refs.headers.insert(kind, target);
+            refs.headers.insert(kind, rid);
         } else {
-            refs.footers.insert(kind, target);
+            refs.footers.insert(kind, rid);
         }
     }
 }
@@ -19913,9 +19937,12 @@ mod svg_blip_tests {
         let mut zip = Zip::new(Cursor::new(buf)).unwrap();
 
         // A part at word/charts/chart1.xml references the media one directory up.
-        let mut rel_map: HashMap<String, String> = HashMap::new();
-        rel_map.insert("rIdImg".to_string(), "../media/footnote.png".to_string());
-        let media_map = load_media_map(&mut zip, &rel_map, "word/charts/");
+        let relationships = parse_opc_rels(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+                 <Relationship Id="rIdImg" Target="../media/footnote.png"/>
+               </Relationships>"#,
+        );
+        let media_map = load_media_map(&mut zip, &relationships, "word/charts/chart1.xml");
 
         assert_eq!(
             media_map.get("rIdImg").map(String::as_str),
@@ -22573,14 +22600,8 @@ mod column_tests {
         }
         // The first section's default header/footer survive the body sectPr that
         // declares none.
-        assert_eq!(
-            refs.headers.get("default").map(String::as_str),
-            Some("header1.xml")
-        );
-        assert_eq!(
-            refs.footers.get("default").map(String::as_str),
-            Some("footer1.xml")
-        );
+        assert_eq!(refs.headers.get("default").map(String::as_str), Some("rH"));
+        assert_eq!(refs.footers.get("default").map(String::as_str), Some("rF"));
     }
 
     /// ECMA-376 §17.6.5 `<w:docGrid w:charSpace>` surfaces on SectionProps as a
@@ -23339,13 +23360,10 @@ mod column_tests {
         // Section 0 snapshot: first=footerA, default=footerD, titlePg=true.
         let (_id0, refs0, tp0) = &snaps[0];
         assert!(tp0, "section 0 declares <w:titlePg>");
-        assert_eq!(
-            refs0.footers.get("first").map(String::as_str),
-            Some("footerA.xml")
-        );
+        assert_eq!(refs0.footers.get("first").map(String::as_str), Some("ridA"));
         assert_eq!(
             refs0.footers.get("default").map(String::as_str),
-            Some("footerD.xml")
+            Some("ridD")
         );
 
         // Section 1 (body-level) snapshot: first OVERWRITTEN to footerB; default
@@ -23354,19 +23372,19 @@ mod column_tests {
         assert!(!tp1, "section 1 has no <w:titlePg> — not inherited");
         assert_eq!(
             refs1.footers.get("first").map(String::as_str),
-            Some("footerB.xml"),
+            Some("ridB"),
             "section 1's own first reference wins"
         );
         assert_eq!(
             refs1.footers.get("default").map(String::as_str),
-            Some("footerD.xml"),
+            Some("ridD"),
             "section 1 inherits section 0's default footer (§17.10.1)"
         );
 
         // Inheritance must not retroactively mutate section 0's snapshot.
         assert_eq!(
             refs0.footers.get("first").map(String::as_str),
-            Some("footerA.xml"),
+            Some("ridA"),
             "section 0 keeps its own first footer (snapshot is independent)"
         );
     }
@@ -29222,6 +29240,14 @@ mod embedded_font_tests {
         )
     }
 
+    fn internal_rel(target: &str) -> RelTarget {
+        RelTarget {
+            target: target.to_string(),
+            relationship_type: None,
+            mode: TargetMode::Internal,
+        }
+    }
+
     /// A font declaring both `<w:embedRegular>` and `<w:embedBold>` yields two
     /// `EmbeddedFont` entries, each carrying the family name, the style slot, the
     /// resolved part path (Target resolved against `word/`), and the fontKey.
@@ -29233,11 +29259,11 @@ mod embedded_font_tests {
                  <w:embedBold r:id="rId2" w:fontKey="{KEY-BOLD}"/>
                </w:font>"#,
         );
-        let mut rels = HashMap::new();
-        rels.insert("rId1".to_string(), "fonts/font1.odttf".to_string());
-        rels.insert("rId2".to_string(), "fonts/font2.odttf".to_string());
+        let mut rels = BTreeMap::new();
+        rels.insert("rId1".to_string(), internal_rel("fonts/font1.odttf"));
+        rels.insert("rId2".to_string(), internal_rel("fonts/font2.odttf"));
 
-        let fonts = parse_embedded_fonts(&xml, &rels, "word/");
+        let fonts = parse_embedded_fonts(&xml, &rels, "word/fontTable.xml");
         assert_eq!(fonts.len(), 2, "two embed slots ⇒ two entries");
 
         let reg = fonts.iter().find(|f| f.style == "regular").unwrap();
@@ -29262,11 +29288,14 @@ mod embedded_font_tests {
                  <w:embedBoldItalic r:id="rId4" w:fontKey="{K4}"/>
                </w:font>"#,
         );
-        let mut rels = HashMap::new();
+        let mut rels = BTreeMap::new();
         for n in 1..=4 {
-            rels.insert(format!("rId{n}"), format!("fonts/font{n}.odttf"));
+            rels.insert(
+                format!("rId{n}"),
+                internal_rel(&format!("fonts/font{n}.odttf")),
+            );
         }
-        let fonts = parse_embedded_fonts(&xml, &rels, "word/");
+        let fonts = parse_embedded_fonts(&xml, &rels, "word/fontTable.xml");
         let mut styles: Vec<&str> = fonts.iter().map(|f| f.style.as_str()).collect();
         styles.sort_unstable();
         assert_eq!(styles, ["bold", "boldItalic", "italic", "regular"]);
@@ -29282,11 +29311,11 @@ mod embedded_font_tests {
                  <w:embedBold r:id="rIdMissing" w:fontKey="{K2}"/>
                </w:font>"#,
         );
-        let mut rels = HashMap::new();
-        rels.insert("rId1".to_string(), "fonts/font1.odttf".to_string());
+        let mut rels = BTreeMap::new();
+        rels.insert("rId1".to_string(), internal_rel("fonts/font1.odttf"));
         // rIdMissing deliberately absent.
 
-        let fonts = parse_embedded_fonts(&xml, &rels, "word/");
+        let fonts = parse_embedded_fonts(&xml, &rels, "word/fontTable.xml");
         assert_eq!(fonts.len(), 1, "only the resolvable slot survives");
         assert_eq!(fonts[0].style, "regular");
     }
@@ -29300,10 +29329,10 @@ mod embedded_font_tests {
                  <w:embedRegular r:id="rId1"/>
                </w:font>"#,
         );
-        let mut rels = HashMap::new();
-        rels.insert("rId1".to_string(), "fonts/font1.odttf".to_string());
+        let mut rels = BTreeMap::new();
+        rels.insert("rId1".to_string(), internal_rel("fonts/font1.odttf"));
 
-        let fonts = parse_embedded_fonts(&xml, &rels, "word/");
+        let fonts = parse_embedded_fonts(&xml, &rels, "word/fontTable.xml");
         assert!(fonts.is_empty(), "no fontKey ⇒ slot dropped");
     }
 
@@ -29312,7 +29341,7 @@ mod embedded_font_tests {
     #[test]
     fn font_without_embeds_yields_nothing() {
         let xml = font_table(r#"<w:font w:name="Calibri"><w:family w:val="swiss"/></w:font>"#);
-        let fonts = parse_embedded_fonts(&xml, &HashMap::new(), "word/");
+        let fonts = parse_embedded_fonts(&xml, &BTreeMap::new(), "word/fontTable.xml");
         assert!(fonts.is_empty(), "no <w:embed*> ⇒ no embedded fonts");
     }
 
@@ -29325,10 +29354,10 @@ mod embedded_font_tests {
                  <w:embedRegular r:id="rId1" w:fontKey="{K1}"/>
                </w:font>"#,
         );
-        let mut rels = HashMap::new();
-        rels.insert("rId1".to_string(), "/word/fonts/font1.odttf".to_string());
+        let mut rels = BTreeMap::new();
+        rels.insert("rId1".to_string(), internal_rel("/word/fonts/font1.odttf"));
 
-        let fonts = parse_embedded_fonts(&xml, &rels, "word/");
+        let fonts = parse_embedded_fonts(&xml, &rels, "word/fontTable.xml");
         assert_eq!(fonts.len(), 1);
         assert_eq!(fonts[0].part_path, "word/fonts/font1.odttf");
     }

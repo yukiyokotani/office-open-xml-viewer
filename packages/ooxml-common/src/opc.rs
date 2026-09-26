@@ -19,8 +19,10 @@
 //! Library policy: the main part is checked at the conventional part name the
 //! format parser reads. Resolving a non-conventional `officeDocument` target
 //! from `/_rels/.rels` is not implemented by any format parser, so such a
-//! package is rejected here instead of producing an empty document. Names are
-//! matched exactly, as every parser reads them; the interleaved Media Types
+//! package is rejected here instead of producing an empty document. The main
+//! part is matched under part-name equivalence (§6.2.2.3), as every part read
+//! is; the Media Types stream is a ZIP item, not a part, so it is matched by
+//! its exact §7.3.7 item name. The interleaved Media Types
 //! form (`[Content_Types].xml/[n].piece`, §7.3.7) is not readable by any
 //! parser and is likewise rejected.
 //!
@@ -74,7 +76,7 @@ pub fn require_ooxml_package(
     package: &PackageSessionHandle,
     format: OoxmlFormat,
 ) -> Result<(), String> {
-    if !package.contains_entry(CONTENT_TYPES_ITEM) {
+    if !package.contains_exact_entry(CONTENT_TYPES_ITEM) {
         return Err(not_ooxml(format!(
             "the ZIP archive is not an OPC package (missing {CONTENT_TYPES_ITEM})"
         )));
@@ -122,6 +124,23 @@ mod tests {
             assert!(is_not_ooxml_error(&not_opc), "{not_opc}");
             assert!(not_opc.contains(CONTENT_TYPES_ITEM), "{not_opc}");
         }
+    }
+
+    #[test]
+    fn main_part_uses_part_name_equivalence_but_media_types_stream_is_exact() {
+        assert_eq!(
+            admit(
+                &[CONTENT_TYPES_ITEM, "Word/Document.XML"],
+                OoxmlFormat::Docx
+            ),
+            Ok(())
+        );
+        let lowercase_types = admit(
+            &["[content_types].xml", "word/document.xml"],
+            OoxmlFormat::Docx,
+        )
+        .unwrap_err();
+        assert!(is_not_ooxml_error(&lowercase_types), "{lowercase_types}");
     }
 
     #[test]

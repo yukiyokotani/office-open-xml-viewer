@@ -61,14 +61,14 @@ pub fn svg_blip_rid(blip: Node<'_, '_>) -> Option<String> {
 /// and video parts OOXML blips reference. Unknown extensions fall back to
 /// `application/octet-stream`. This is the single source of truth for all three
 /// parsers — notably it is the only place `svg` ⇒ `image/svg+xml` is decided.
+///
+/// The extension is read from the part name's equivalence key
+/// ([`crate::rels::part_name_equivalence_key`], ECMA-376 Part 2 §6.2.2.3 with
+/// RFC 3986 §6.2.2), so a stored item name such as `image1.%73vg` or
+/// `IMAGE1.SVG` infers the same type as `image1.svg`.
 pub fn mime_from_ext(path: &str) -> &'static str {
-    match path
-        .rsplit('.')
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase()
-        .as_str()
-    {
+    let key = crate::rels::part_name_equivalence_key(path);
+    match key.rsplit('.').next().unwrap_or("") {
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
         "gif" => "image/gif",
@@ -490,6 +490,12 @@ mod tests {
     fn mime_table_covers_svg_and_common_rasters() {
         assert_eq!(mime_from_ext("../media/image2.svg"), "image/svg+xml");
         assert_eq!(mime_from_ext("a/b/image1.PNG"), "image/png");
+        // Equivalent spellings of a stored part name (§6.2.2.3).
+        assert_eq!(mime_from_ext("word/media/image1.%73vg"), "image/svg+xml");
+        assert_eq!(
+            mime_from_ext("word/media/image1.%53%56%47"),
+            "image/svg+xml"
+        );
         assert_eq!(mime_from_ext("x.jpeg"), "image/jpeg");
         assert_eq!(mime_from_ext("x.webp"), "image/webp");
         assert_eq!(mime_from_ext("x.tif"), "image/tiff");
