@@ -39,6 +39,9 @@ enum Form {
     /// `a b/../footnotes.xml`: not an IRI reference (RFC 3987 §2.2), even
     /// though dot removal would drop the offending segment.
     InvalidCharacter,
+    /// `%GG/../footnotes.xml` and similar: a malformed `pct-encoded` triplet
+    /// (RFC 3987 §2.2) in a segment that dot removal would drop.
+    MalformedPercent(&'static str),
     /// `https://example.com/word/footnotes.xml` (Internal, names no part)
     Scheme,
     /// `//example.com/word/footnotes.xml` (Internal, names no part)
@@ -82,6 +85,7 @@ fn spell(form: Form, source_dir: &str, part: &str) -> (String, &'static str) {
         Form::EncodedSlash => (format!("x%2F{relative}"), "Internal"),
         Form::EncodedDotDotThenDotDot => (format!("%2E%2E/../{relative}"), "Internal"),
         Form::InvalidCharacter => (format!("a b/../{relative}"), "Internal"),
+        Form::MalformedPercent(segment) => (format!("{segment}/../{relative}"), "Internal"),
         Form::Scheme => (format!("https://example.com/{part}"), "Internal"),
         Form::Authority => (format!("//example.com/{part}"), "Internal"),
         Form::External => (relative.to_string(), "External"),
@@ -375,6 +379,9 @@ fn targets_naming_no_package_part_behave_like_missing_parts() {
         Form::External,
         Form::EncodedSlash,
         Form::InvalidCharacter,
+        Form::MalformedPercent("%GG"),
+        Form::MalformedPercent("%"),
+        Form::MalformedPercent("%2"),
     ] {
         assert_eq!(native(form), missing_native, "native {form:?}");
         assert_eq!(streamed(form), missing_streamed, "streamed {form:?}");

@@ -224,8 +224,12 @@ pub fn resolve_part_name(source_part: &str, target: &str) -> Option<String> {
         return None;
     }
     // The reference itself must be an IRI reference: every character is an
-    // `ipchar`, a `/` separator or the `%` of a triplet (checked when
-    // normalized), including in segments that dot removal later drops.
+    // `ipchar`, a `/` separator or the `%` of a `pct-encoded` triplet, checked
+    // over the whole reference before dot removal or decoding, so segments
+    // that dot removal later drops are validated too.
+    if !has_valid_percent_triplets(reference) {
+        return None;
+    }
     if !reference.chars().all(|ch| {
         if ch.is_ascii() {
             u8::try_from(ch).is_ok_and(|byte| byte == b'/' || byte == b'%' || is_ipchar_ascii(byte))
@@ -294,6 +298,23 @@ fn is_ipchar_ascii(byte: u8) -> bool {
                 | b':'
                 | b'@'
         )
+}
+
+/// Every `%` starts a `pct-encoded` triplet: `"%" HEXDIG HEXDIG` (RFC 3986
+/// §2.1, used by RFC 3987 §2.2).
+fn has_valid_percent_triplets(reference: &str) -> bool {
+    let bytes = reference.as_bytes();
+    bytes.iter().enumerate().all(|(index, byte)| {
+        *byte != b'%'
+            || (bytes
+                .get(index + 1)
+                .and_then(|high| hex_value(*high))
+                .is_some()
+                && bytes
+                    .get(index + 2)
+                    .and_then(|low| hex_value(*low))
+                    .is_some())
+    })
 }
 
 /// RFC 3987 §2.2 `ucschar`.
@@ -717,6 +738,10 @@ mod tests {
             ("word/document.xml", "a%2Fb.xml", None),
             ("word/document.xml", "a%5cb.xml", None),
             ("word/document.xml", "a%zzb.xml", None),
+            // Malformed triplets in a segment that dot removal would drop.
+            ("word/document.xml", "%GG/../header.xml", None),
+            ("word/document.xml", "%/../header.xml", None),
+            ("word/document.xml", "%2/../header.xml", None),
             ("word/document.xml", "a%4", None),
             // Case is kept; the package lookup folds it (§6.2.2.3).
             (
