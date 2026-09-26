@@ -518,34 +518,32 @@ describe('stopIfTrue needs an established match', () => {
   });
 
   // Review reproducer: `0+10` used to be read as the literal 0, so 5 > 0
-  // matched and the stop removed the lower rule's red text.
-  it('cellIs evaluates a formula operand instead of truncating it to a literal', () => {
+  // matched and the stop removed the lower rule's red text. Formulas are
+  // not evaluated: only literals and single-cell references are decoded.
+  it('cellIs decodes literals and single-cell references, nothing else', () => {
     expect(evalAt([cellIs('greaterThan', '0+10'), lowerRed]).fontColor).toBe('#FF0000');
-    expect(evalAt([cellIs('greaterThan', '0+1'), lowerRed]).fontColor).toBeUndefined();
-    // A cell reference operand resolves (Excel: 5 > $B$1 = 3 matches).
+    expect(evalAt([cellIs('greaterThan', '0+1'), lowerRed]).fontColor).toBe('#FF0000');
+    expect(evalAt([cellIs('greaterThan', '4'), lowerRed]).fontColor).toBeUndefined();
+    // A cell reference reads the cached value (Excel: 5 > $B$1 = 3 matches).
     expect(evalAt([cellIs('greaterThan', '$B$1'), lowerRed], [numCell(1, 2, 3)]).fontColor).toBeUndefined();
-    // Outside the exactly evaluated grammar: no match, no stop.
-    expect(evalAt([cellIs('greaterThan', 'UNSUPPORTED(1)'), lowerRed]).fontColor).toBe('#FF0000');
-    expect(evalAt([cellIs('greaterThan', '2^2'), lowerRed]).fontColor).toBe('#FF0000');
-    // A blank operand is not converted to 0.
+    expect(evalAt([cellIs('greaterThan', '$B$1'), lowerRed], [numCell(1, 2, 9)]).fontColor).toBe('#FF0000');
+    // A blank or logical referenced value is not converted.
     expect(evalAt([cellIs('greaterThan', '$B$1'), lowerRed]).fontColor).toBe('#FF0000');
-  });
-
-  // Round-3 review reproducers: each operand used to be mis-evaluated to a
-  // value that matched, and the stop removed the lower rule's red text.
-  it('functions, blank selection and overflow are unevaluable, not guessed', () => {
-    // OR over a referenced "TRUE" string (Excel ignores text in references)
-    // and OR short-circuiting past a type error.
+    const bool: Cell = { row: 1, col: 2, value: { type: 'bool', bool: false }, styleIndex: 0 };
+    expect(evalAt([cellIs('greaterThan', '$B$1'), lowerRed], [bool]).fontColor).toBe('#FF0000');
+    // Functions, arithmetic and ranges are not decodable (round-3 review
+    // reproducers included): no match, no stop.
     const textTrue: Cell = { row: 1, col: 2, value: { type: 'text', text: 'TRUE' }, styleIndex: 0 };
-    expect(evalAt([cellIs('greaterThan', 'IF(OR(0,B1),0,10)'), lowerRed], [textTrue]).fontColor).toBe('#FF0000');
-    expect(evalAt([cellIs('greaterThan', 'IF(OR(1,"invalid"),0,10)'), lowerRed]).fontColor).toBe('#FF0000');
-    // IF selecting a blank cell (was replaced by TRUE).
-    expect(evalAt([cellIs('lessThan', 'IF(1,B1,0)+1'), lowerRed], [], 1.5).fontColor).toBe('#FF0000');
-    expect(evalAt([icons('IF(1,B1,0)'), lowerRed]).fontColor).toBe('#FF0000');
-    // An overflowing product is #NUM!, not Infinity.
-    const huge = numCell(1, 2, 1e200);
-    expect(evalAt([cellIs('lessThan', 'B1*B1'), lowerRed], [huge]).fontColor).toBe('#FF0000');
-    expect(evalAt([icons('B1*B1'), lowerRed], [huge]).fontColor).toBe('#FF0000');
+    for (const [operator, formula, extra, value] of [
+      ['greaterThan', 'IF(OR(0,B1),0,10)', [textTrue], 5],
+      ['greaterThan', 'IF(OR(1,"invalid"),0,10)', [], 5],
+      ['lessThan', 'IF(1,B1,0)+1', [], 1.5],
+      ['lessThan', 'B1*B1', [numCell(1, 2, 1e200)], 5],
+      ['greaterThan', 'UNSUPPORTED(1)', [], 5],
+      ['greaterThan', 'B1:B2', [numCell(1, 2, 1)], 5],
+    ] as Array<[string, string, Cell[], number]>) {
+      expect(evalAt([cellIs(operator, formula), lowerRed], extra, value).fontColor, formula).toBe('#FF0000');
+    }
   });
 
   // Review reproducer: an x14 icon set with activePresent="1" and xm:f 0
@@ -559,20 +557,23 @@ describe('stopIfTrue needs an established match', () => {
     expect(active.iconSet).toBeDefined();
     expect(evalAt([icons(), lowerRed]).fontColor).toBeUndefined();
     // Relative references anchor at the rule range's top-left: over B2:B3
-    // (B2 = 5, B3 = 1), `B2-5` is 0 at B2 and -4 at B3.
+    // (B2 = 5, B3 = 0), `B2` reads B2 at B2 and B3 at B3.
     const relative = (formula: string, row: number) => {
       const ws = sheetFromColumn([], [{ sqref: [{ top: 2, left: 2, bottom: 3, right: 2 }], rules: [icons(formula), lowerRed] }]);
-      ws.rows = [{ index: 2, height: null, cells: [numCell(2, 2, 5)] }, { index: 3, height: null, cells: [numCell(3, 2, 1)] }];
+      ws.rows = [{ index: 2, height: null, cells: [numCell(2, 2, 5)] }, { index: 3, height: null, cells: [numCell(3, 2, 0)] }];
       return evaluateCf(ws.rows[row - 2].cells[0], row, 2, compileCf(ws), [RED]).fontColor;
     };
-    expect(relative('B2-5', 2)).toBe('#FF0000');
-    expect(relative('B2-5', 3)).toBeUndefined();
+    expect(relative('B2', 2)).toBeUndefined();
+    expect(relative('B2', 3)).toBe('#FF0000');
+    expect(relative('$B$2', 3)).toBeUndefined();
     // A logical result is not read as zero / nonzero.
     expect(evalAt([icons('B1'), lowerRed], [{ row: 1, col: 2, value: { type: 'bool', bool: true }, styleIndex: 0 }]).fontColor).toBe('#FF0000');
-    // Unevaluable: inactive rather than guessed.
-    const unknown = evalAt([icons('UNSUPPORTED(A1)'), lowerRed]);
-    expect(unknown.fontColor).toBe('#FF0000');
-    expect(unknown.iconSet).toBeUndefined();
+    // Not decodable (a function, arithmetic): inactive rather than guessed.
+    for (const formula of ['UNSUPPORTED(A1)', 'IF(1,B1,0)', 'B1*B1', '1+0']) {
+      const unknown = evalAt([icons(formula), lowerRed], [numCell(1, 2, 1e200)]);
+      expect(unknown.fontColor, formula).toBe('#FF0000');
+      expect(unknown.iconSet, formula).toBeUndefined();
+    }
     const scale: CfRule = { type: 'colorScale', stops: [{ kind: 'min', value: null, color: '#FFFF00' }, { kind: 'max', value: null, color: '#00B0F0' }], priority: 1, stopIfTrue: true, activeFormula: '0' };
     const offScale = evalAt([scale, lowerRed]);
     expect(offScale.fill).toBeUndefined();

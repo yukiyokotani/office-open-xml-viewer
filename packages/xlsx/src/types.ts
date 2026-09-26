@@ -833,7 +833,10 @@ export interface ConditionalFormat {
  * it (`expression` always; the others only when set, so an absent value means
  * false), including `colorScale` / `dataBar` / `iconSet`, which match every
  * numeric cell they format while their optional `activeFormula` (the rule's
- * own formula, [MS-XLSX] 2.6.27) evaluates to nonzero.
+ * own formula, [MS-XLSX] 2.6.27) is nonzero. Formulas are not evaluated: an
+ * activity formula or `cellIs` operand is used only when it is a literal or
+ * a single-cell reference to a cached value, and otherwise the rule does not
+ * match.
  */
 export type CfRule =
   | { type: 'cellIs'; operator: string; formulas: string[]; dxfId: number | null; priority: number; stopIfTrue?: boolean }

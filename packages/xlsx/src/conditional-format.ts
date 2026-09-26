@@ -1,6 +1,6 @@
 import type { Worksheet, Cell, WorksheetCellRange, CfStop, CfValue, Dxf, CfRule, CellFill, Border, DefinedName } from './types.js';
 import { dxfFontToggle } from './dxf-font.js';
-import { evalCfExact, type CfExactValue } from './cf-exact-formula.js';
+import { decodeCfLiteral, decodeCfOperand, type CfOperandValue } from './cf-operand.js';
 import { evalFormulaToBool } from './formula.js';
 import { buildCellCoordinateIndex } from './renderer-coordinate-index.js';
 
@@ -200,20 +200,15 @@ function cellIsMatch(num: number, operator: string, args: number[]): boolean {
   }
 }
 
-const NUMERIC_LITERAL = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
-const STRING_LITERAL = /^"(?:[^"]|"")*"$/;
-
 /** One `cellIs` operand ([MS-XLSX] 2.6.27: a formula, number or cell
- *  reference). A plain numeric or string literal is decoded once; anything
- *  else is a formula evaluated per cell by `evalCfExact`, never
- *  reinterpreted as a literal (`0+10` is 10, not 0). */
-type CellIsOperand = { literal: CfExactValue } | { formula: string };
+ *  reference). A literal is decoded once per rule; anything else is looked
+ *  up per cell by `decodeCfOperand` (a single-cell reference to a cached
+ *  value) and is otherwise not decodable. `0+10` is never read as 0. */
+type CellIsOperand = { literal: CfOperandValue } | { formula: string };
 
 function cellIsOperand(f: string): CellIsOperand {
-  const t = f.trim();
-  if (STRING_LITERAL.test(t)) return { literal: t.slice(1, -1).replace(/""/g, '"') };
-  if (NUMERIC_LITERAL.test(t)) return { literal: Number(t) };
-  return { formula: t };
+  const literal = decodeCfLiteral(f);
+  return literal !== undefined ? { literal } : { formula: f };
 }
 
 function cellIsTextMatch(text: string, operator: string, args: string[]): boolean {
@@ -310,9 +305,10 @@ function applyDxfToResult(result: CfResult, dxf: Dxf | null | undefined): void {
  * nonzero value, or is not present, conditional formatting is displayed").
  * Excel reads the SpreadsheetML `<formula>` of these types the same way (see
  * `CfRule`). Relative references anchor at the top-left of the rule's range,
- * as for `expression`. A condition outside `evalCfExact`'s grammar, or one
- * that yields a non-numeric value, leaves the rule inactive: it then neither
- * formats the cell nor stops lower rules.
+ * as for `expression`. Formulas are not evaluated: only a literal or a
+ * single-cell reference to a cached value is decoded (`decodeCfOperand`). A
+ * condition that is not decodable, or that is not a number, leaves the rule
+ * inactive: it then neither formats the cell nor stops lower rules.
  */
 function scaleRuleActive(
   formula: string | undefined,
@@ -324,7 +320,7 @@ function scaleRuleActive(
   if (formula == null) return true;
   const anchor = entry.sqref[0];
   if (!anchor) return false;
-  const v = evalCfExact(formula, {
+  const v = decodeCfOperand(formula, {
     row, col,
     anchorRow: anchor.top, anchorCol: anchor.left,
     cellIndex: cfCtx.cellIndex,
@@ -362,15 +358,15 @@ export function evaluateCf(cell: Cell | undefined, row: number, col: number, cfC
       });
       if (matched) applyDxfToResult(result, rule.dxfId != null ? dxfs[rule.dxfId] : null);
     } else if (rule.type === 'cellIs') {
-      // Compare only with operands established exactly: an unevaluable
-      // operand, or one whose type differs from the cell's (including a
-      // blank or logical operand), is no match, so the rule neither formats
-      // nor stops.
+      // Compare only with decoded operands: an operand that is not
+      // decodable, or whose type differs from the cell's (including a blank
+      // or logical operand), is no match, so the rule neither formats nor
+      // stops.
       const anchor = entry.sqref[0];
       const operands = (entry.cellIsOperands ?? []).map((operand) => {
         if ('literal' in operand) return operand.literal;
         if (!anchor) return undefined;
-        return evalCfExact(operand.formula, {
+        return decodeCfOperand(operand.formula, {
           row, col,
           anchorRow: anchor.top, anchorCol: anchor.left,
           cellIndex: cfCtx.cellIndex,
