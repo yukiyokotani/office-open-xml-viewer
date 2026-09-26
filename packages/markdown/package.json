@@ -44,17 +44,19 @@
     "bin"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
-    "build:ci": "tsc -p tsconfig.build.json",
+    "build": "rolldown -c rolldown.config.mjs && tsc -p tsconfig.build.json --emitDeclarationOnly",
+    "build:ci": "rolldown -c rolldown.config.mjs && tsc -p tsconfig.build.json --emitDeclarationOnly",
     "typecheck": "tsc --noEmit -p tsconfig.typecheck.json"
   },
   "dependencies": {
+    "@silurus/ooxml-core": "workspace:*",
     "@silurus/ooxml-docx": "workspace:*",
     "@silurus/ooxml-pptx": "workspace:*",
     "@silurus/ooxml-xlsx": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
+    "rolldown": "^1.2.0",
     "typescript": "^7.0.2"
   }
 }
