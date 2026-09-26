@@ -1,0 +1,43 @@
+[package]
+name = "legacy-office-converter"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Passive Office 97-2003 readers projecting into the OOXML renderer models"
+repository = "https://github.com/yukiyokotani/office-open-xml-viewer"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+fuzzing = []
+direct-ppt = ["dep:js-sys", "dep:serde_json", "dep:pptx-parser"]
+inspection = ["direct-ppt"]
+
+[[example]]
+name = "inspect_ppt_direct"
+required-features = ["inspection"]
+
+[dependencies]
+console_error_panic_hook = { workspace = true }
+flate2 = { workspace = true }
+js-sys = { version = "0.3", optional = true }
+wasm-bindgen = { workspace = true }
+zip = { workspace = true }
+quick-xml = { workspace = true }
+roxmltree = { workspace = true }
+pptx-model = { workspace = true }
+# Direct PPT parses alternative shape XML with the ordinary PPTX shape parser,
+# without its WASM entry points.
+pptx-parser = { path = "../../pptx/parser", default-features = false, optional = true }
+ooxml-common = { workspace = true }
+serde_json = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-Oz"]
+
+[package.metadata.wasm-pack.profile.release.wasm-bindgen]
+omit-default-module-path = true

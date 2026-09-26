@@ -1,0 +1,219 @@
+//! OfficeArt line-end and join/cap properties (MS-ODRAW 2.3.8.15/20-27,
+//! 2.4.16-20) mapped to DrawingML (ECMA-376 20.1.8.9/38/43/52/57,
+//! 20.1.10.31-34). No geometry, colors, or renderer-specific policy.
+use super::unsupported;
+
+/// MS-ODRAW 2.3.8.17 / 2.4.15 and ECMA-376 20.1.10.49 give the same
+/// repeating bit patterns for these names. Custom lineDashStyle is separate.
+pub(crate) fn preset_dash(value: u32) -> Option<&'static str> {
+    [
+        "solid",
+        "sysDash",
+        "sysDot",
+        "sysDashDot",
+        "sysDashDotDot",
+        "dot",
+        "dash",
+        "lgDash",
+        "dashDot",
+        "lgDashDot",
+        "lgDashDotDot",
+    ]
+    .get(value as usize)
+    .copied()
+}
+
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Details {
+    // Property order: start/end kind, start width/length, end width/length,
+    // join, cap. Preserve absent versus explicit zero through inheritance.
+    values: [Option<u8>; 8],
+    miter: Option<u32>,
+}
+
+/// A resolved arrowhead for the direct-model projections.
+#[cfg(any(test, feature = "direct-ppt"))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct LineEnd<'a> {
+    pub kind: &'a str,
+    pub width: &'a str,
+    pub length: &'a str,
+}
+
+impl Details {
+    pub fn property(&mut self, id: u16, value: u32) -> Result<(), String> {
+        match id {
+            0x1cc => {
+                // A DrawingML miter limit is an integer percentage (ECMA-376
+                // 20.1.8.43, ST_PositivePercentage over xsd:int). Reject a
+                // limit it cannot state rather than clamp it.
+                if value > i32::MAX as u32 || miter_percentage(value) > i32::MAX as u64 {
+                    return Err(unsupported(
+                        "OfficeArt line miter limit outside output range",
+                    ));
+                }
+                self.miter = Some(value);
+            }
+            // MSOLINEEND's chevron values MUST be ignored, not mapped to
+            // another arrow or mistaken for an explicit no-end override.
+            0x1d0 | 0x1d1 if matches!(value, 6 | 7) => {}
+            0x1d0..=0x1d7 => {
+                let maximum = if id <= 0x1d1 { 5 } else { 2 };
+                if value > maximum {
+                    return Err(unsupported("invalid OfficeArt line decoration"));
+                }
+                self.values[usize::from(id - 0x1d0)] = Some(value as u8);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    #[cfg(any(test, feature = "direct-ppt"))]
+    pub fn inherit(&self, parent: &Self) -> Self {
+        Self {
+            values: std::array::from_fn(|i| self.values[i].or(parent.values[i])),
+            miter: self.miter.or(parent.miter),
+        }
+    }
+    #[cfg(any(test, feature = "direct-ppt"))]
+    pub fn specified(&self) -> bool {
+        self.miter.is_some() || self.values.iter().any(Option::is_some)
+    }
+    pub fn cap(&self) -> &'static str {
+        // MS-ODRAW defaults: flat cap and round join.
+        ["rnd", "sq", "flat"][usize::from(self.values[7].unwrap_or(2))]
+    }
+    #[cfg(any(test, feature = "direct-ppt"))]
+    pub fn canvas_cap(&self) -> &'static str {
+        match self.cap() {
+            "rnd" => "round",
+            "sq" => "square",
+            _ => "butt",
+        }
+    }
+    #[cfg(any(test, feature = "direct-ppt"))]
+    pub fn join(&self) -> (&'static str, Option<f64>) {
+        match self.values[6].unwrap_or(2) {
+            0 => ("bevel", None),
+            1 => (
+                "miter",
+                Some(f64::from(self.miter.unwrap_or(0x80000)) / 65536.0),
+            ),
+            _ => ("round", None),
+        }
+    }
+    #[cfg(any(test, feature = "direct-ppt"))]
+    pub fn line_end(&self, index: usize) -> Option<LineEnd<'static>> {
+        if index > 1 {
+            return None;
+        }
+        let kind = ["none", "triangle", "stealth", "diamond", "oval", "arrow"]
+            [usize::from(self.values[index].unwrap_or(0))];
+        (kind != "none").then(|| {
+            let sizes = ["sm", "med", "lg"];
+            LineEnd {
+                kind,
+                width: sizes[usize::from(self.values[2 + index * 2].unwrap_or(1))],
+                length: sizes[usize::from(self.values[3 + index * 2].unwrap_or(1))],
+            }
+        })
+    }
+}
+
+fn miter_percentage(value: u32) -> u64 {
+    (u64::from(value) * 100000 + 32768) / 65536
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn invalid_dash_enums_cannot_become_a_solid_line() {
+        assert_eq!(preset_dash(0), Some("solid"));
+        assert_eq!(preset_dash(10), Some("lgDashDotDot"));
+        assert_eq!(preset_dash(11), None);
+        assert_eq!(preset_dash(u32::MAX), None);
+    }
+    #[test]
+    fn maps_all_supported_ends_and_dimensions() {
+        for (kind, name) in ["none", "triangle", "stealth", "diamond", "oval", "arrow"]
+            .iter()
+            .enumerate()
+        {
+            for (width, w) in ["sm", "med", "lg"].iter().enumerate() {
+                for (length, len) in ["sm", "med", "lg"].iter().enumerate() {
+                    let mut d = Details::default();
+                    for (id, value) in [
+                        (0x1d0, kind),
+                        (0x1d1, kind),
+                        (0x1d2, width),
+                        (0x1d3, length),
+                        (0x1d4, width),
+                        (0x1d5, length),
+                    ] {
+                        d.property(id, value as u32).unwrap();
+                    }
+                    for index in 0..2 {
+                        let expected = (*name != "none").then_some(LineEnd {
+                            kind: name,
+                            width: w,
+                            length: len,
+                        });
+                        assert_eq!(d.line_end(index), expected);
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn validates_enums_without_turning_ignored_values_into_overrides() {
+        let mut parent = Details::default();
+        parent.property(0x1d0, 1).unwrap();
+        for ignored in [6, 7] {
+            let mut child = Details::default();
+            child.property(0x1d0, ignored).unwrap();
+            assert!(!child.specified());
+            assert_eq!(child.inherit(&parent).line_end(0).unwrap().kind, "triangle");
+        }
+        for id in 0x1d0..=0x1d7 {
+            let invalid = if id <= 0x1d1 { 8 } else { 3 };
+            assert!(Details::default().property(id, invalid).is_err());
+        }
+        assert!(Details::default().property(0x1cc, u32::MAX).is_err());
+        let mut child = Details::default();
+        child.property(0x1d0, 0).unwrap();
+        assert_eq!(child.inherit(&parent).line_end(0), None);
+    }
+    #[test]
+    fn retains_cap_join_and_fixed_point_miter_values_independently() {
+        for (cap, name) in ["rnd", "sq", "flat"].iter().enumerate() {
+            for (join, expected) in [("bevel", None), ("miter", Some(1.5)), ("round", None)]
+                .into_iter()
+                .enumerate()
+            {
+                let mut d = Details::default();
+                d.property(0x1d7, cap as u32).unwrap();
+                d.property(0x1d6, join as u32).unwrap();
+                d.property(0x1cc, 0x18000).unwrap();
+                assert_eq!(d.cap(), *name);
+                assert_eq!(d.join(), expected);
+            }
+        }
+        let d = Details::default();
+        assert_eq!(d.cap(), "flat");
+        assert_eq!(d.join(), ("round", None));
+    }
+
+    #[test]
+    fn miter_limit_stays_within_the_integer_percentage_range() {
+        // Include values that round to, rather than exceed, xsd:int::MAX.
+        let maximum = ((i32::MAX as u64 * 65536 + 32767) / 100000) as u32;
+        let mut d = Details::default();
+        d.property(0x1d6, 1).unwrap();
+        d.property(0x1cc, maximum).unwrap();
+        assert_eq!(d.join(), ("miter", Some(f64::from(maximum) / 65536.0)));
+        assert!(d.property(0x1cc, maximum + 1).is_err());
+        d.property(0x1cc, 0).unwrap();
+        assert_eq!(d.join(), ("miter", Some(0.0)));
+    }
+}

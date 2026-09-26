@@ -14,6 +14,12 @@ pptx-parser = { path = "../packages/pptx/parser" }
 xlsx-parser = { path = "../packages/xlsx/parser" }
 ooxml-common = { path = "../packages/ooxml-common" }
 zip = { version = "2", default-features = false, features = ["deflate-miniz"] }
+# The direct features build the native drivers of the PPT direct source
+# (`legacy_office_converter::fuzzing`).
+legacy-office-converter = { path = "../packages/legacy-converter/parser", features = [
+    "fuzzing",
+    "direct-ppt",
+] }
 
 # Use independent workspace for fuzzers so `cargo fuzz` doesn't pull the whole
 # monorepo workspace (with its wasm32 cdylib targets) into the fuzz build.
@@ -94,8 +100,22 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_legacy_direct_ppt"
+path = "fuzz_targets/fuzz_legacy_direct_ppt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_numbering_template"
 path = "fuzz_targets/fuzz_numbering_template.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_legacy_ppt_alternative"
+path = "fuzz_targets/fuzz_legacy_ppt_alternative.rs"
 test = false
 doc = false
 bench = false

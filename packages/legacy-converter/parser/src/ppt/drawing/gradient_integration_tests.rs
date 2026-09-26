@@ -1,0 +1,407 @@
+//! Synthetic end-to-end coverage for retained classic OfficeArt gradients.
+
+use super::*;
+use pptx_model::{Fill, SlideElement};
+use std::rc::Rc;
+
+fn record(options: u16, kind: u16, payload: &[u8]) -> Vec<u8> {
+    [
+        options.to_le_bytes().as_slice(),
+        kind.to_le_bytes().as_slice(),
+        (payload.len() as u32).to_le_bytes().as_slice(),
+        payload,
+    ]
+    .concat()
+}
+
+fn shade_array() -> Vec<u8> {
+    [
+        2u16.to_le_bytes().as_slice(),
+        2u16.to_le_bytes().as_slice(),
+        8u16.to_le_bytes().as_slice(),
+        0x0000_00ffu32.to_le_bytes().as_slice(),
+        0u32.to_le_bytes().as_slice(),
+        0x00ff_0000u32.to_le_bytes().as_slice(),
+        65_536u32.to_le_bytes().as_slice(),
+    ]
+    .concat()
+}
+
+fn gradient_properties(extra: &[(u16, u32)], gradient_scalar: Option<u32>) -> Vec<u8> {
+    let shade = shade_array();
+    let mut values = vec![
+        (0x180u16, 4u32),
+        (0x181, 0x0000_00ff),
+        (0x183, 0x00ff_0000),
+        (0x18b, 0),
+        (0x18c, 100),
+    ];
+    values.extend_from_slice(extra);
+    let gradient = match gradient_scalar {
+        Some(value) => (0x0197u16, value, false),
+        None => (0x8197u16, shade.len() as u32, true),
+    };
+    let mut entries: Vec<_> = values
+        .iter()
+        .copied()
+        .map(|(id, value)| (id, value, false))
+        .chain(std::iter::once(gradient))
+        .collect();
+    entries.sort_unstable_by_key(|(id, _, _)| id & 0x3fff);
+    let mut body = Vec::new();
+    for (id, value, _) in entries.iter().copied() {
+        body.extend(id.to_le_bytes());
+        body.extend(value.to_le_bytes());
+    }
+    if entries.iter().any(|(_, _, complex)| *complex) {
+        body.extend(shade);
+    }
+    record(((entries.len() as u16) << 4) | 3, 0xf00b, &body)
+}
+
+fn scalar_properties(values: &[(u16, u32)]) -> Vec<u8> {
+    let mut body = Vec::new();
+    for (id, value) in values.iter().copied() {
+        body.extend(id.to_le_bytes());
+        body.extend(value.to_le_bytes());
+    }
+    record(((values.len() as u16) << 4) | 3, 0xf00b, &body)
+}
+
+fn shape(flags: u32, properties: Vec<u8>) -> Vec<u8> {
+    record(
+        15,
+        0xf004,
+        &[
+            record(
+                (1 << 4) | 2,
+                0xf00a,
+                &[42u32.to_le_bytes(), flags.to_le_bytes()].concat(),
+            ),
+            record(
+                0,
+                0xf010,
+                &[0i16, 0, 576, 576]
+                    .into_iter()
+                    .flat_map(i16::to_le_bytes)
+                    .collect::<Vec<_>>(),
+            ),
+            properties,
+        ]
+        .concat(),
+    )
+}
+
+fn nested_shape(properties: Vec<u8>) -> Vec<u8> {
+    record(
+        15,
+        0xf004,
+        &[
+            record(
+                (1 << 4) | 2,
+                0xf00a,
+                &[43u32.to_le_bytes(), 0xa00u32.to_le_bytes()].concat(),
+            ),
+            record(
+                0,
+                0xf00f,
+                &[0i32, 0, 288, 288]
+                    .into_iter()
+                    .flat_map(i32::to_le_bytes)
+                    .collect::<Vec<_>>(),
+            ),
+            properties,
+        ]
+        .concat(),
+    )
+}
+
+fn group(group_flags: u32, rotation: Option<u32>, child: Vec<u8>) -> Vec<u8> {
+    let mut head = vec![
+        record(
+            2,
+            0xf00a,
+            &[44u32.to_le_bytes(), (1 | group_flags).to_le_bytes()].concat(),
+        ),
+        record(
+            0,
+            0xf010,
+            &[0i32, 0, 576, 576]
+                .into_iter()
+                .flat_map(i32::to_le_bytes)
+                .collect::<Vec<_>>(),
+        ),
+        record(
+            1,
+            0xf009,
+            &[0i32, 0, 288, 288]
+                .into_iter()
+                .flat_map(i32::to_le_bytes)
+                .collect::<Vec<_>>(),
+        ),
+    ];
+    if let Some(rotation) = rotation {
+        head.push(scalar_properties(&[(4, rotation)]));
+    }
+    record(
+        15,
+        0xf003,
+        &[record(15, 0xf004, &head.concat()), child].concat(),
+    )
+}
+
+fn drawing(shapes: &[Vec<u8>]) -> Vec<u8> {
+    record(15, 1036, &record(15, 0xf002, &shapes.concat()))
+}
+
+fn slide_container(drawing: &[u8]) -> Vec<u8> {
+    record(15, SLIDE_CONTAINER, drawing)
+}
+
+fn presentation(span: RecordSpan) -> persist::OwnedPresentation {
+    persist::PresentationStorage {
+        shape_masters: shape_master::Resolver::default(),
+        slides: vec![(span, Vec::new())],
+        outline_styles: vec![Vec::new()],
+        outline_types: vec![Vec::new()],
+        outline_slide_numbers: vec![Vec::new()],
+        first_slide_number: 1,
+        text_masters: vec![None],
+        metro_themes: vec![None],
+        document_text_axes: None,
+        fonts: Vec::new(),
+        schemes: vec![None],
+        image_entries: Vec::new(),
+        ole_objects: media::OleCatalog::default(),
+        backgrounds: vec![None],
+        object_masters: vec![Rc::from([])],
+        size: (720, 540),
+    }
+}
+
+fn native(
+    backing: &[u8],
+    presentation: persist::OwnedPresentation,
+) -> Result<pptx_model::Slide, String> {
+    native_with_budgets(backing, presentation, 10_000, 1_000_000)
+}
+
+fn native_with_budgets(
+    backing: &[u8],
+    presentation: persist::OwnedPresentation,
+    mut work: usize,
+    mut model: usize,
+) -> Result<pptx_model::Slide, String> {
+    let mut media = media::SpanStore::new(Vec::new());
+    direct_model::slide(
+        0,
+        &presentation,
+        backing,
+        None,
+        &mut media,
+        &mut work,
+        &mut 10_000,
+        &mut model,
+    )
+}
+
+/// The single-slide presentation of one slide drawing.
+fn single_slide(tree: &[u8]) -> (Vec<u8>, persist::OwnedPresentation) {
+    let document = slide_container(tree);
+    let span = record_span_with_end(&document, 0, &mut 100, "gradient slide")
+        .unwrap()
+        .0;
+    (document, presentation(span))
+}
+
+fn assert_gradient(fill: &Option<Fill>) {
+    let Some(Fill::Gradient {
+        stops,
+        angle,
+        grad_type,
+        rot_with_shape,
+        ..
+    }) = fill
+    else {
+        panic!("expected linear gradient")
+    };
+    assert_eq!(grad_type, "linear");
+    assert_eq!(*angle, 90.0);
+    assert_eq!(*rot_with_shape, Some(false));
+    assert_eq!(stops.len(), 2);
+    assert_eq!(
+        (stops[0].position, stops[0].color.as_str()),
+        (0.0, "FF0000")
+    );
+    assert_eq!(
+        (stops[1].position, stops[1].color.as_str()),
+        (1.0, "0000FF")
+    );
+}
+
+#[test]
+fn foreground_native_keeps_quantized_stops_for_all_leaf_flips() {
+    for flip in [0, 0x40, 0x80, 0xc0] {
+        let tree = drawing(&[shape(0xa00 | flip, gradient_properties(&[], None))]);
+        let document = slide_container(&tree);
+        let span = record_span_with_end(&document, 0, &mut 100, "gradient slide")
+            .unwrap()
+            .0;
+        let model = native(&document, presentation(span)).unwrap();
+        let SlideElement::Shape(shape) = &model.elements[0] else {
+            panic!("expected shape")
+        };
+        assert_eq!(
+            (shape.flip_h, shape.flip_v),
+            (flip & 0x40 != 0, flip & 0x80 != 0)
+        );
+        assert_gradient(&shape.fill);
+    }
+}
+
+#[test]
+fn master_gradient_inherits_but_local_scalar_zero_resets_its_shade_colours() {
+    for reset in [false, true] {
+        let local_properties = if reset {
+            gradient_properties(&[(0x301, 1)], Some(0))
+        } else {
+            scalar_properties(&[(0x301, 1)])
+        };
+        let local = drawing(&[shape(0xa20, local_properties)]);
+        let document = slide_container(&local);
+        let span = record_span_with_end(&document, 0, &mut 100, "gradient slide")
+            .unwrap()
+            .0;
+        let mut p = presentation(span);
+        let shade = shade_array();
+        let shade_span = ByteSpan::new(0..shade.len(), shade.len(), "master gradient").unwrap();
+        let mut paint = paint::Paint::default();
+        for (id, value) in [
+            (0x180, 4),
+            (0x181, 0x0000_00ff),
+            (0x183, 0x00ff_0000),
+            (0x18b, 0),
+            (0x18c, 100),
+        ] {
+            paint.property(id, value).unwrap();
+        }
+        let mut gradient = crate::officeart::gradient::Spanned::default();
+        gradient.set(shade_span);
+        p.shape_masters
+            .insert(shape_master::Node {
+                id: 1,
+                parent: None,
+                text_type: None,
+                direct: Vec::new(),
+                base: None,
+                paint,
+                geometry: crate::officeart::geometry::SpannedGeometry::default(),
+                gradient,
+            })
+            .unwrap();
+        p.shape_masters.finish(&mut 100).unwrap();
+
+        // The master shade span deliberately points at a separately owned
+        // backing, so combine it with the slide and rebuild the absolute span.
+        let combined = [shade, document].concat();
+        let slide_span =
+            record_span_with_end(&combined, shade_array().len(), &mut 100, "gradient slide")
+                .unwrap()
+                .0;
+        p.slides[0].0 = slide_span;
+        let model = native(&combined, p);
+        if reset {
+            // A scalar-zero fillShadeColors removes the inherited array; the
+            // inherited shade remains, now between fillColor and fillBackColor.
+            let model = model.unwrap();
+            let SlideElement::Shape(shape) = &model.elements[0] else {
+                panic!("shape")
+            };
+            let Some(Fill::Gradient { stops, .. }) = &shape.fill else {
+                panic!("expected two-colour gradient")
+            };
+            let colors: Vec<_> = stops.iter().map(|stop| stop.color.as_str()).collect();
+            assert_eq!(colors, ["FF0000", "0000FF"]);
+        } else {
+            let model = model.unwrap();
+            let SlideElement::Shape(shape) = &model.elements[0] else {
+                panic!("shape")
+            };
+            assert_gradient(&shape.fill);
+        }
+    }
+}
+
+#[test]
+fn native_background_uses_the_retained_gradient_span() {
+    let shade = shade_array();
+    let tree = drawing(&[]);
+    let document = slide_container(&tree);
+    let combined = [shade.clone(), document].concat();
+    let span = record_span_with_end(&combined, shade.len(), &mut 100, "gradient slide")
+        .unwrap()
+        .0;
+    let mut p = presentation(span);
+    let mut paint = paint::Paint::default();
+    for (id, value) in [
+        (0x180, 4),
+        (0x181, 0x0000_00ff),
+        (0x183, 0x00ff_0000),
+        (0x18b, 0),
+        (0x18c, 100),
+    ] {
+        paint.property(id, value).unwrap();
+    }
+    let mut gradient = crate::officeart::gradient::Spanned::default();
+    gradient.set(ByteSpan::new(0..shade.len(), combined.len(), "background gradient").unwrap());
+    p.backgrounds[0] = Some(SpannedBackground { paint, gradient });
+    let model = native(&combined, p).unwrap();
+    assert_gradient(&model.background);
+}
+
+#[test]
+fn leaf_rotation_keeps_the_direct_gradient() {
+    let tree = drawing(&[shape(0xa00, gradient_properties(&[(4, 45 << 16)], None))]);
+    let (document, presentation) = single_slide(&tree);
+    let model = native(&document, presentation).unwrap();
+    let SlideElement::Shape(shape) = &model.elements[0] else {
+        panic!("shape")
+    };
+    assert!(matches!(shape.fill, Some(Fill::Gradient { .. })));
+}
+
+#[test]
+fn rotated_or_reflected_ancestors_keep_direct_gradients() {
+    for (group_flags, rotation) in [(0, None), (0, Some(45 << 16)), (0x40, None), (0x80, None)] {
+        let grouped = group(
+            group_flags,
+            rotation,
+            nested_shape(gradient_properties(&[], None)),
+        );
+        let (document, presentation) = single_slide(&drawing(&[grouped]));
+        let model = native(&document, presentation).unwrap();
+        let SlideElement::Shape(shape) = &model.elements[0] else {
+            panic!("shape")
+        };
+        // The direct model keeps the shade under rotated or reflected groups,
+        // as PowerPoint's own DrawingML for such shapes does.
+        assert!(matches!(shape.fill, Some(Fill::Gradient { .. })));
+    }
+}
+
+#[test]
+fn malformed_gradient_and_outer_short_budgets_fail_without_partial_admission() {
+    let malformed = gradient_properties(&[], None);
+    let mut truncated = malformed.clone();
+    truncated.pop();
+    let (document, presentation) = single_slide(&drawing(&[shape(0xa00, truncated)]));
+    assert!(native(&document, presentation).is_err());
+
+    let tree = drawing(&[shape(0xa00, gradient_properties(&[], None))]);
+    let (document, presentation) = single_slide(&tree);
+    assert!(native_with_budgets(&document, presentation, 1, 1_000_000).is_err());
+    let (document, presentation) = single_slide(&tree);
+    assert!(native_with_budgets(&document, presentation, 10_000, 1).is_err());
+    let (document, presentation) = single_slide(&tree);
+    assert!(native_with_budgets(&document, presentation, 10_000, 1_000_000).is_ok());
+}
