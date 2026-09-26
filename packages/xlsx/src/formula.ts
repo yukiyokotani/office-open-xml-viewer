@@ -594,20 +594,20 @@ function makeCriteriaPredicate(criteria: EvalValue): (v: EvalScalar) => boolean 
 // which had no leap-bug correction (serials < 60 read the wrong calendar day)
 // and no 1904 support.
 //
-// The formula engine always operates in the 1900 date system: its serials are
-// consumed by the number-format layer, whose volatile-recompute path formats
-// TODAY()/NOW() against the 1900 epoch regardless of `<workbookPr date1904>`
-// (see number-format.ts). So every core call below passes date1904=false.
-// Threading the workbook's date system into the formula engine is a separate
-// track; this change is purely about retiring the duplicate serial math.
+// This evaluator exists only for conditional-formatting formulas (see
+// conditional-format.ts); cell values are never recalculated and are rendered
+// from their cached `<v>` (number-format.ts). It always operates in the 1900
+// date system, so TODAY()/NOW() inside a CF formula yield 1900-system serials
+// and every core call below passes date1904=false. Threading the workbook's
+// date system into CF evaluation is part of completing that evaluator (#1547).
 
-export function todaySerial(): number {
+function todaySerial(): number {
   const d = new Date();
   const utcMid = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
   return utcDateToExcelSerial(utcMid, false);
 }
 
-export function nowSerial(): number {
+function nowSerial(): number {
   return utcDateToExcelSerial(new Date(Date.now()), false);
 }
 

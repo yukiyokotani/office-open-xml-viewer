@@ -901,10 +901,9 @@ export interface Cell {
    *  its column's `<col style>` in the parser; absent here means Normal (0).
    *  Explicit `c/@s="0"` remains distinct while inheritance is resolved. */
   styleIndex?: number;
-  /** Raw `<f>` formula text (ECMA-376 §18.3.1.40), when present. The renderer
-   *  uses this to recompute volatile functions (TODAY, NOW) at display time
-   *  so the cached `<v>` — frozen when the file was last saved — doesn't
-   *  show a stale date. */
+  /** Raw `<f>` formula text (ECMA-376 §18.3.1.40), when present. It is
+   *  informational only (for example selection context): formulas are never
+   *  calculated, and the cell always renders its cached `value`. */
   formula?: string;
   /** Whether this cell displays its phonetic hint (furigana). The parser
    *  resolves it as `cell/@ph ?? row/@ph ?? false` — the per-cell `<c ph>`

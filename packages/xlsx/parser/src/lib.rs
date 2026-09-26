@@ -3388,8 +3388,8 @@ fn parse_row_cells(
         // Inline string: <c t="inlineStr"><is>...</is></c>
         let is_node = c_node.children().find(|n| n.tag_name().name() == "is");
 
-        // Formula text, if any (<f>…</f>). Kept so the renderer can
-        // recompute volatile builtins (TODAY, NOW) at display time.
+        // Formula text, if any (<f>…</f>). Carried as information only; the
+        // renderer never calculates it and always shows the cached <v>.
         let formula: Option<String> = c_node
             .children()
             .find(|n| n.tag_name().name() == "f")

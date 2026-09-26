@@ -7,6 +7,12 @@ the corresponding minor release.
 
 ## Unreleased
 
+- **cached Excel values only:** cells with `TODAY()` or `NOW()` formulas now
+  show the value saved with the workbook instead of the current date and time.
+  Formulas are never recalculated, so these cells stay consistent with every
+  cell derived from them. No migration is required; affected workbooks render
+  their saved dates.
+
 ## 0.88.0 — 2026-09-21
 
 Compatible minor release improving classic chart fidelity across Word, Excel and

@@ -1597,10 +1597,9 @@ pub struct Cell {
     /// `Some(0)` is intentionally distinct and resets to the Normal XF.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub style_index: Option<u32>,
-    /// Raw `<f>` formula text (ECMA-376 §18.3.1.40), when present. The
-    /// renderer uses this to recompute volatile functions like TODAY() /
-    /// NOW() at display time so the cached `<v>` (frozen when the file was
-    /// last saved) doesn't show a stale date.
+    /// Raw `<f>` formula text (ECMA-376 §18.3.1.40), when present. It is
+    /// informational only: formulas are never calculated, and the renderer
+    /// always shows the cached `<v>` in `value`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub formula: Option<String>,
     /// ECMA-376 §18.3.1.4 `<c ph="1">` — whether this cell should display its

@@ -22,7 +22,6 @@ import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAux
 import { isMacDesktop } from './internal/platform.js';
 import { officeRequestKey, shapeOfficeNaturalLineRatio, shapeOfficeRouteKey, singleNaturalShapeRun } from './shape-office-line.js';
 import { XLSX_GOOGLE_FONTS } from './google-fonts.js';
-import { evalFormulaToBool, todaySerial, nowSerial } from './formula.js';
 import { formatCellValueWithColor } from './number-format.js';
 import { type CfContext, type CfResult, compileCf, evaluateCf } from './conditional-format.js';
 import { computeLineVisualOrder, cellBaseRtl, resolveCellBidi } from './bidi-line.js';
