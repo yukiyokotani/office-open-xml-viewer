@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { assertNotCfbContainer } from './cfb-guard';
+import { Buffer } from 'node:buffer';
+import { assertNotCfbContainer, toArrayBuffer } from './cfb-guard';
 import { OoxmlError } from './ooxml-error';
 import { buildCfbFixture } from '../testing/cfb-fixture';
 
@@ -60,5 +61,17 @@ describe('assertNotCfbContainer', () => {
     const ab = new ArrayBuffer(cfb.byteLength);
     new Uint8Array(ab).set(cfb);
     expect(() => assertNotCfbContainer(ab)).toThrow(OoxmlError);
+  });
+});
+
+describe('toArrayBuffer', () => {
+  it('copies exactly a Node Buffer subview instead of exposing its pooled backing store', () => {
+    const source = Buffer.from([9, 1, 2, 3, 9]);
+    const view = source.subarray(1, 4);
+
+    const result = toArrayBuffer(view);
+
+    expect(result.byteLength).toBe(3);
+    expect(new Uint8Array(result)).toEqual(new Uint8Array([1, 2, 3]));
   });
 });

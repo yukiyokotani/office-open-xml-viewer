@@ -3,9 +3,7 @@
 // Browsers cannot decode WMF/EMF via `createImageBitmap`, so the renderer falls
 // back to this player for metafile blips. It is a *minimal* WMF interpreter:
 // just enough to rasterize the vector-graphics metafiles that Office embeds for
-// charts and diagrams (e.g. sample-10.docx `word/media/image1.emf`, which —
-// despite the `.emf` extension — is a standard non-placeable WMF whose labels
-// are POLYPOLYGON glyph outlines, not text-out records).
+// charts and diagrams.
 //
 // Format reference: ECMA-376 references WMF/EMF; the byte layout below follows
 // the [MS-WMF] Windows Metafile Format spec.
@@ -19,9 +17,11 @@
 // Implemented records: SETWINDOWORG, SETWINDOWEXT, SETPOLYFILLMODE,
 // SETTEXTCOLOR, SETTEXTALIGN, CREATEPENINDIRECT, CREATEBRUSHINDIRECT,
 // CREATEFONTINDIRECT, SELECTOBJECT, DELETEOBJECT, POLYLINE, POLYGON,
-// POLYPOLYGON, RECTANGLE, TEXTOUT, STRETCHDIBITS (embedded raster DIB via the
+// POLYPOLYGON, RECTANGLE, MOVETO, LINETO, TEXTOUT, a bounded ANSI
+// EXTTEXTOUT subset,
+// STRETCHDIBITS (embedded raster DIB via the
 // shared decoder in ./dib.ts), EOF.
-// Ignored (no-op, skipped by size): ESCAPE, SETROP2, SETBKMODE,
+// Ignored (no-op, skipped by size): SETROP2,
 // SETSTRETCHBLTMODE, SETMAPMODE, DIBBITBLT/DIBSTRETCHBLT (their exact param
 // layout is not decoded here — skipped rather than mis-parsed), and any
 // unrecognized record.
@@ -44,6 +44,7 @@ import { createAuxCanvas } from '../canvas/aux-canvas.js';
 const META = {
   EOF: 0x0000,
   SETBKMODE: 0x0102,
+  SETBKCOLOR: 0x0201,
   SETTEXTALIGN: 0x012e,
   SETTEXTCOLOR: 0x0209,
   SETPOLYFILLMODE: 0x0106,
@@ -51,7 +52,11 @@ const META = {
   SETWINDOWEXT: 0x020c,
   SELECTOBJECT: 0x012d,
   DELETEOBJECT: 0x01f0,
+  LINETO: 0x0213,
+  MOVETO: 0x0214,
   TEXTOUT: 0x0521,
+  EXTTEXTOUT: 0x0a32,
+  ESCAPE: 0x0626,
   POLYGON: 0x0324,
   POLYLINE: 0x0325,
   POLYPOLYGON: 0x0538,
@@ -133,6 +138,8 @@ interface Pen {
   kind: 'pen';
   stroke: string | null; // null = PS_NULL (no stroke)
   width: number; // device-independent logical width; mapped to ≥1 device px
+  lineWidth: number;
+  lineEligible: boolean;
 }
 interface Brush {
   kind: 'brush';
@@ -141,9 +148,18 @@ interface Brush {
 interface Font {
   kind: 'font';
   height: number; // |lfHeight|, logical units
+  signedHeight: number;
+  width: number;
+  escapement: number;
+  orientation: number;
   weight: number; // lfWeight (400 normal, 700 bold)
   italic: boolean;
+  underline: boolean;
+  strikeout: boolean;
+  charset: number;
   face: string;
+  ansiFace: string;
+  validForExt: boolean;
 }
 type WmfObject = Pen | Brush | Font;
 
@@ -228,6 +244,13 @@ interface PlayState {
   textColor: string;
   textAlign: number;
   fillRule: CanvasFillRule; // from SETPOLYFILLMODE
+  bkMode: number;
+  extTextSafe: boolean;
+  extTextMappingSafe: boolean;
+  currentX: number;
+  currentY: number;
+  currentPositionKnown: boolean;
+  lineStateSafe: boolean;
   drew: boolean;
   // When true, strokes whose edge lies on the window/device boundary are
   // suppressed (docx cosmetic-frame heuristic; see deviceInteriorEdges). When
@@ -372,6 +395,51 @@ function strokePolyline(s: PlayState, pts: Array<[number, number]>): void {
   strokeEdges(s, pts, false);
 }
 
+/** MS-WMF 2.3.3.10: stroke from the playback DC drawing position and then
+ * update it to the destination. The specified endpoint is excluded by GDI;
+ * Canvas has no equivalent endpoint-exclusion primitive, so the geometric
+ * segment is emitted without an arbitrary device-pixel correction. */
+function strokeLineTo(s: PlayState, x: number, y: number): void {
+  const fromX = s.currentX;
+  const fromY = s.currentY;
+  const known = s.currentPositionKnown;
+  s.currentX = x;
+  s.currentY = y;
+  s.currentPositionKnown = true;
+  if (
+    !known ||
+    !s.lineStateSafe ||
+    !s.haveExt ||
+    !s.extTextMappingSafe ||
+    ![s.extX, s.extY, s.W, s.H].every(Number.isFinite) ||
+    !(s.W > 0 && s.H > 0) ||
+    !s.curPen ||
+    !s.curPen.lineEligible ||
+    s.curPen.stroke == null
+  ) return;
+
+  const { ctx } = s;
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(mapX(s, fromX), mapY(s, fromY));
+  ctx.lineTo(mapX(s, x), mapY(s, y));
+  ctx.strokeStyle = s.curPen.stroke;
+  // A zero-width cosmetic pen is one device pixel. Positive logical widths use
+  // the window mapping directly; unlike the legacy polygon path, this does not
+  // empirically clamp positive subpixel widths to one pixel.
+  ctx.lineWidth = s.curPen.lineWidth === 0
+    ? 1
+    : s.curPen.lineWidth * (s.W / s.extX);
+  // This bounded path supports the normative PS_SOLID default combination:
+  // cosmetic pen, round end caps, and round joins (MS-WMF 2.1.1.23).
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.setLineDash([]);
+  ctx.stroke();
+  ctx.restore();
+  s.drew = true;
+}
+
 /** Fill (current brush) + stroke (current pen) a single closed polygon. The
  *  stroke routes through {@link strokeEdges}, which applies the
  *  window/device-boundary suppression heuristic only when
@@ -436,6 +504,7 @@ function fillStrokePolyPolygon(s: PlayState, c: Cursor): void {
 }
 
 function createPen(c: Cursor): Pen {
+  const validLength = c.remaining === 10;
   const style = c.u16();
   const widthX = c.i16();
   c.i16(); // widthY (unused — WMF pens are isotropic in practice)
@@ -444,7 +513,11 @@ function createPen(c: Cursor): Pen {
   // PS_NULL (5) → no stroke. Dash/dot styles (1..4) are rendered solid (we do
   // not synthesize a dash pattern); see module note.
   const stroke = lowStyle === 5 ? null : colorRefToCss(color);
-  return { kind: 'pen', stroke, width: Math.abs(widthX) };
+  // Existing polygon/polyline playback retains its historical solid fallback.
+  // LINETO is stricter: only complete PS_SOLID or PS_NULL records with the
+  // default cosmetic/round-cap/round-join combination are eligible.
+  const lineEligible = validLength && widthX >= 0 && (style === 0 || style === 5);
+  return { kind: 'pen', stroke, width: Math.abs(widthX), lineWidth: widthX, lineEligible };
 }
 
 function createBrush(c: Cursor): Brush {
@@ -467,22 +540,99 @@ function decodeSingleByteText(bytes: Uint8Array): string {
   }
 }
 
+// WHATWG Encoding §9.1, index-windows-1252.txt (identifier e56d49d9,
+// 2024-09-18). Decode directly so WMF ANSI text is deterministic even on
+// hosts whose TextDecoder delegates this label to an ISO-8859-1 codec.
+const WINDOWS_1252_C1 = [
+  0x20ac, 0x0081, 0x201a, 0x0192, 0x201e, 0x2026, 0x2020, 0x2021,
+  0x02c6, 0x2030, 0x0160, 0x2039, 0x0152, 0x008d, 0x017d, 0x008f,
+  0x0090, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014,
+  0x02dc, 0x2122, 0x0161, 0x203a, 0x0153, 0x009d, 0x017e, 0x0178,
+] as const;
+
+function decodeWindows1252(bytes: Uint8Array): string {
+  return Array.from(bytes, (byte) =>
+    String.fromCharCode(byte >= 0x80 && byte <= 0x9f ? WINDOWS_1252_C1[byte - 0x80] : byte),
+  ).join('');
+}
+
 function createFont(c: Cursor): Font {
-  const height = Math.abs(c.i16());
-  c.i16(); // lfWidth
-  c.i16(); // lfEscapement (rotation is not replayed by the WMF player yet)
-  c.i16(); // lfOrientation
+  const validLength = c.remaining === 50;
+  const signedHeight = c.i16();
+  const height = Math.abs(signedHeight);
+  const width = c.i16();
+  const escapement = c.i16();
+  const orientation = c.i16();
   const weight = c.i16();
   const italic = c.u8() !== 0;
-  c.u8(); // lfUnderline
-  c.u8(); // lfStrikeOut
-  c.u8(); // lfCharSet
+  const underline = c.u8() !== 0;
+  const strikeout = c.u8() !== 0;
+  const charset = c.u8();
   c.u8(); // lfOutPrecision
   c.u8(); // lfClipPrecision
   c.u8(); // lfQuality
   c.u8(); // lfPitchAndFamily
-  const face = decodeSingleByteText(c.bytes(Math.min(32, c.remaining)));
-  return { kind: 'font', height, weight, italic, face };
+  const faceBytes = c.bytes(Math.min(32, c.remaining));
+  const face = decodeSingleByteText(faceBytes);
+  const nul = faceBytes.indexOf(0);
+  const ansiFace = String.fromCharCode(...faceBytes.subarray(0, nul < 0 ? faceBytes.length : nul));
+  return { kind: 'font', height, signedHeight, width, escapement, orientation, weight, italic, underline, strikeout, charset, face, ansiFace, validForExt: validLength && nul >= 0 };
+}
+
+/** MS-WMF 2.3.3.5, 2.2.1.2 and 2.1.2.3. This implementation intentionally
+ * omits valid variants outside the measured ANSI/transparent/baseline subset;
+ * omission is implementation policy, not a claim that those records are invalid. */
+function drawExtTextOut(s: PlayState, c: Cursor): void {
+  if (c.remaining < 8) return;
+  const y = c.i16();
+  const x = c.i16();
+  const length = c.i16();
+  const options = c.u16();
+  if (length < 0) return;
+  if (options !== 0) return; // Rectangle-bearing/clipped/opaque variants are outside this subset.
+  const padded = length + (length & 1);
+  if (c.remaining !== padded) return; // Reject truncation and any optional Dx array.
+  const raw = c.bytes(length);
+  if (length & 1) c.skip(1);
+  const font = s.curFont;
+  const horizontal = s.textAlign & 0x6;
+  const unsupportedAlignment = (s.textAlign & ~0x1e) !== 0 || (s.textAlign & 0x18) !== 0x18 || ![0, 2, 6].includes(horizontal);
+  if (
+    !s.extTextSafe ||
+    !s.extTextMappingSafe ||
+    s.bkMode !== 1 ||
+    unsupportedAlignment ||
+    !s.haveExt ||
+    !(s.extX > 0 && s.extY > 0 && s.W > 0 && s.H > 0) ||
+    ![s.extX, s.extY, s.W, s.H].every(Number.isFinite) ||
+    !font ||
+    font.charset !== 0 ||
+    font.signedHeight >= 0 ||
+    font.width !== 0 ||
+    font.escapement !== 0 ||
+    font.orientation !== 0 ||
+    font.underline ||
+    font.strikeout ||
+    !font.ansiFace ||
+    /[\x00-\x1f\x7f]/.test(font.ansiFace) ||
+    !font.validForExt ||
+    font.weight < 1 ||
+    font.weight > 1000
+  ) return;
+  const text = decodeWindows1252(raw);
+  if (!text.length) return;
+  const px = font.height * (s.H / s.extY);
+  if (!Number.isFinite(px) || px <= 0) return;
+  try {
+    s.ctx.fillStyle = s.textColor;
+    const family = `"${font.ansiFace.replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`;
+    s.ctx.font = `${font.italic ? 'italic ' : ''}${font.weight} ${px}px ${family}`;
+    const horiz = s.textAlign & 0x6;
+    s.ctx.textAlign = horiz === 2 ? 'right' : horiz === 6 ? 'center' : 'left';
+    s.ctx.textBaseline = 'alphabetic';
+    s.ctx.fillText(text, mapX(s, x), mapY(s, y));
+    s.drew = true;
+  } catch { /* Context may not implement text. */ }
 }
 
 function drawTextOut(s: PlayState, text: string, x: number, y: number): void {
@@ -555,6 +705,15 @@ export function playWmf(
     textColor: '#000000',
     textAlign: 0,
     fillRule: 'nonzero',
+    bkMode: 2,
+    extTextSafe: true,
+    extTextMappingSafe: false,
+    currentX: 0,
+    currentY: 0,
+    // MS-WMF 3.1.5 makes initial playback-DC state device-dependent. Do not
+    // invent an initial drawing position; wait for META_MOVETO.
+    currentPositionKnown: false,
+    lineStateSafe: true,
     drew: false,
     suppressBoundaryFrame,
   };
@@ -577,14 +736,26 @@ export function playWmf(
     switch (fn) {
       case META.SETWINDOWORG: {
         // params: i16 yOrg, i16 xOrg (Y FIRST)
-        s.orgY = c.i16();
-        s.orgX = c.i16();
+        if (c.remaining !== 4) {
+          s.extTextSafe = false;
+          s.currentPositionKnown = false;
+          s.lineStateSafe = false;
+          break;
+        }
+        s.orgY = c.i16(); s.orgX = c.i16();
         break;
       }
       case META.SETWINDOWEXT: {
         // params: i16 yExt, i16 xExt (Y FIRST)
+        if (c.remaining !== 4) {
+          s.extTextSafe = false;
+          s.currentPositionKnown = false;
+          s.lineStateSafe = false;
+          break;
+        }
         const yExt = c.i16();
         const xExt = c.i16();
+        s.extTextMappingSafe = xExt > 0 && yExt > 0;
         s.extY = yExt || 1;
         s.extX = xExt || 1;
         s.haveExt = true;
@@ -596,34 +767,74 @@ export function playWmf(
         break;
       }
       case META.SETTEXTCOLOR: {
+        if (c.remaining !== 4) { s.extTextSafe = false; break; }
         s.textColor = colorRefToCss(c.u32());
         break;
       }
       case META.SETTEXTALIGN: {
+        if (c.remaining !== 2 && c.remaining !== 4) {
+          s.extTextSafe = false;
+          s.lineStateSafe = false;
+          break;
+        }
         s.textAlign = c.u16();
+        if (c.remaining === 2) c.u16(); // Optional Reserved; MUST be ignored.
+        break;
+      }
+      case META.SETBKMODE: {
+        if (c.remaining !== 2 && c.remaining !== 4) { s.extTextSafe = false; break; }
+        s.bkMode = c.u16();
+        if (c.remaining === 2) c.u16(); // Optional Reserved; MUST be ignored.
+        break;
+      }
+      case META.SETBKCOLOR: {
+        // Background color cannot affect this supported transparent-text subset.
+        if (c.remaining !== 4) s.extTextSafe = false;
         break;
       }
       case META.CREATEPENINDIRECT: {
+        if (c.remaining !== 10) s.lineStateSafe = false;
         insertObject(s.objects, createPen(c));
         break;
       }
       case META.CREATEBRUSHINDIRECT: {
+        if (c.remaining !== 8) s.lineStateSafe = false;
         insertObject(s.objects, createBrush(c));
         break;
       }
       case META.CREATEFONTINDIRECT: {
+        if (c.remaining < 18) {
+          s.extTextSafe = false;
+          s.lineStateSafe = false;
+          break;
+        }
+        if (c.remaining !== 50) s.lineStateSafe = false;
         insertObject(s.objects, createFont(c));
         break;
       }
       case META.SELECTOBJECT: {
+        if (c.remaining !== 2) {
+          s.extTextSafe = false;
+          s.lineStateSafe = false;
+          break;
+        }
         const idx = c.u16();
         const obj = s.objects[idx];
         if (obj?.kind === 'pen') s.curPen = obj;
         else if (obj?.kind === 'brush') s.curBrush = obj;
         else if (obj?.kind === 'font') s.curFont = obj;
+        else {
+          s.extTextSafe = false;
+          s.lineStateSafe = false;
+        }
         break;
       }
       case META.DELETEOBJECT: {
+        if (c.remaining !== 2) {
+          s.extTextSafe = false;
+          s.lineStateSafe = false;
+          break;
+        }
         const idx = c.u16();
         const obj = s.objects[idx];
         if (obj) {
@@ -662,6 +873,30 @@ export function playWmf(
         ]);
         break;
       }
+      case META.MOVETO: {
+        // MS-WMF 2.3.5.4: params are i16 Y followed by i16 X.
+        if (c.remaining !== 4) {
+          s.extTextSafe = false;
+          s.currentPositionKnown = false;
+          break;
+        }
+        s.currentY = c.i16();
+        s.currentX = c.i16();
+        s.currentPositionKnown = true;
+        break;
+      }
+      case META.LINETO: {
+        // MS-WMF 2.3.3.10: params are i16 Y followed by i16 X.
+        if (c.remaining !== 4) {
+          s.extTextSafe = false;
+          s.currentPositionKnown = false;
+          break;
+        }
+        const y = c.i16();
+        const x = c.i16();
+        strokeLineTo(s, x, y);
+        break;
+      }
       case META.TEXTOUT: {
         // META_TEXTOUT params: u16 StringLength, String bytes padded to a WORD
         // boundary, then i16 yStart and i16 xStart.
@@ -671,6 +906,34 @@ export function playWmf(
         const y = c.i16();
         const x = c.i16();
         drawTextOut(s, text, x, y);
+        if ((s.textAlign & 0x1) !== 0) s.currentPositionKnown = false;
+        break;
+      }
+      case META.EXTTEXTOUT: {
+        drawExtTextOut(s, c);
+        if ((s.textAlign & 0x1) !== 0) s.currentPositionKnown = false;
+        break;
+      }
+      case META.ESCAPE: {
+        const escape = c.remaining >= 4 ? c.u16() : -1;
+        const count = c.remaining >= 2 ? c.u16() : -1;
+        if (escape !== 15 || count < 0 || c.remaining !== count + (count & 1)) {
+          s.extTextSafe = false;
+          s.currentPositionKnown = false;
+          s.lineStateSafe = false;
+          break;
+        }
+        const data = c.bytes(count);
+        if (count & 1) c.skip(1);
+        // META_ESCAPE_ENHANCED_METAFILE begins with the little-endian WMFC
+        // CommentIdentifier (MS-WMF 2.3.6.25); nested graphics state is outside
+        // this player. Historical Microsoft SDK Q81497 documents non-WMFC
+        // private comments as ignored during ordinary playback (no DC change).
+        if (data.length >= 4 && new DataView(data.buffer, data.byteOffset, data.byteLength).getUint32(0, true) === 0x43464d57) {
+          s.extTextSafe = false;
+          s.currentPositionKnown = false;
+          s.lineStateSafe = false;
+        }
         break;
       }
       case META.STRETCHDIBITS: {
@@ -707,7 +970,6 @@ export function playWmf(
       }
       case META.DIBSTRETCHBLT:
       case META.DIBBITBLT:
-      case META.SETBKMODE:
         // META_DIBBITBLT / META_DIBSTRETCHBLT ([MS-WMF] 2.3.1.2 / 2.3.1.3) also
         // carry a packed DIB, but with a different (raster-op-dependent) preamble
         // whose exact layout we do not decode here. Skipping is safer than
@@ -715,8 +977,12 @@ export function playWmf(
         // common embedded-raster case.
         break;
       default:
-        // ESCAPE, SETROP2, SETBKMODE, SETTEXTALIGN, SETSTRETCHBLTMODE,
-        // SETMAPMODE, and anything unrecognized: skip by record size.
+        // Unsupported graphics-state changes make later EXTTEXTOUT unsafe for
+        // this bounded player, although established geometry handlers remain
+        // unaffected and the record is still skipped by its declared size.
+        s.extTextSafe = false;
+        s.currentPositionKnown = false;
+        s.lineStateSafe = false;
         break;
     }
 

@@ -3816,8 +3816,12 @@ mod tests {
         let fill = Fill::Image {
             image_path: "ppt/media/image2.jpeg".to_owned(),
             mime_type: "image/jpeg".to_owned(),
+            svg_image_path: None,
+            dpi: None,
+            rot_with_shape: None,
             src_rect: None,
             fill_rect: None,
+            stretch: true,
             tile: None,
             alpha: None,
             duotone: None,
@@ -4815,8 +4819,7 @@ mod tests {
                 fill_rect,
                 tile,
                 alpha,
-                duotone: _,
-                blip_effects: _,
+                ..
             } => {
                 assert_eq!(image_path, "ppt/media/image1.jpeg");
                 assert_eq!(mime_type, "image/jpeg");
@@ -4832,6 +4835,34 @@ mod tests {
             }
             other => panic!("expected Fill::Image, got {other:?}"),
         }
+    }
+
+    /// ECMA-376 §20.1.8.14: EG_FillModeProperties is an optional choice with
+    /// no default. The parser records each authored mode as-is, so an omitted
+    /// mode stays distinct from `<a:stretch/>` and a schema-invalid
+    /// tile+stretch pair keeps both facts for the renderer to reject.
+    #[test]
+    fn test_parse_blip_fill_records_authored_fill_modes() {
+        let parse = |modes: &str| {
+            let xml = format!(
+                r#"<a:blipFill xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+                               xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+                    <a:blip r:embed="rId2"/>{modes}</a:blipFill>"#
+            );
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            let mut resolve = |_rid: &str| Some("ppt/media/image1.png".to_owned());
+            match parse_blip_fill(doc.root_element(), &HashMap::new(), &mut resolve) {
+                Some(Fill::Image { stretch, tile, .. }) => (stretch, tile.is_some()),
+                other => panic!("expected Fill::Image, got {other:?}"),
+            }
+        };
+        assert_eq!(parse(""), (false, false));
+        assert_eq!(parse("<a:stretch/>"), (true, false));
+        assert_eq!(parse(r#"<a:tile sx="100000" sy="100000"/>"#), (false, true));
+        assert_eq!(
+            parse(r#"<a:tile sx="100000" sy="100000"/><a:stretch/>"#),
+            (true, true)
+        );
     }
 
     /// ECMA-376 Part 1 §19.3.1.3: bgRef values 1001 and above index the

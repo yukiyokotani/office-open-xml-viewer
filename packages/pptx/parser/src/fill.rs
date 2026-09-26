@@ -228,14 +228,17 @@ pub(crate) fn parse_style_matrix_fill(
 /// part); the mime is derived from that path. The renderer fetches the bytes
 /// lazily by path rather than from an inlined data URL.
 ///
-/// Both fill-modes are honoured and mutually exclusive:
-/// - `stretch` (§20.1.8.56): the `fillRect` (§20.1.8.30) is captured so the
-///   renderer can place the (possibly overscanned) image into the box.
+/// Both fill-modes are recorded as authored:
+/// - `stretch` (§20.1.8.56): presence is kept in `stretch`, and the `fillRect`
+///   (§20.1.8.30) is captured so the renderer can place the (possibly
+///   overscanned) image into the box.
 /// - `tile` (§20.1.8.58): the tile offset/scale/flip/align descriptor is
 ///   captured so the renderer can repeat the blip at its native (scaled) size.
 ///
-/// When neither child is present the blip defaults to full-box placement
-/// (stretch with no fillRect).
+/// The parser does not invent a mode when neither child is present, and does
+/// not resolve a schema-invalid tile+stretch pair; each renderer surface
+/// decides. The slide-background painter keeps its established tile-first,
+/// otherwise full-box placement; ordinary shape fills fail closed.
 ///
 /// `theme` resolves the `<a:duotone>` (§20.1.8.23) endpoint colours through the
 /// slide palette (PowerPoint linear tint), so a picture FILL recolours exactly
@@ -259,6 +262,16 @@ fn parse_blip_fill_with_color_resolver<
     let r_id = child(blip_fill, "blip").and_then(|b| attr_r(&b, "embed"))?;
     let image_path = resolve_blip(&r_id)?;
     let mime_type = mime_from_ext(&image_path).to_owned();
+    let svg_image_path = child(blip_fill, "blip")
+        .and_then(|blip| {
+            blip.descendants()
+                .find(|node| node.is_element() && node.tag_name().name() == "svgBlip")
+        })
+        .and_then(|node| attr_r(&node, "embed"))
+        .and_then(|rid| resolve_blip(&rid));
+    let dpi = attr(&blip_fill, "dpi").and_then(|value| value.parse().ok());
+    let rot_with_shape = attr(&blip_fill, "rotWithShape")
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"));
     let alpha = parse_blip_alpha(blip_fill);
     // §20.1.8.23 duotone recolour, resolved through the theme with PowerPoint's
     // linear tint (same call the `<p:pic>` paths use). `None` ⇒ no effect.
@@ -273,14 +286,23 @@ fn parse_blip_fill_with_color_resolver<
         color_resolver,
         ooxml_common::color::TintMode::PowerPointLinear,
     );
-    // §20.1.8.58 tile takes precedence when present (stretch/tile are an
-    // either-or choice in CT_BlipFillProperties).
+    // EG_FillModeProperties (§20.1.8.14) is an optional choice of `tile`
+    // (§20.1.8.58) or `stretch` (§20.1.8.56) with no schema default. Record
+    // both authored facts as-is: `stretch` is the presence of `<a:stretch>`
+    // even beside `<a:tile>`, so a schema-invalid pair stays visible to the
+    // renderer, which owns the per-surface decision (ordinary shapes fail
+    // closed on a missing or conflicting mode; see `shapeImageFillModeIsPaintable`).
+    let stretch = child(blip_fill, "stretch").is_some();
     if let Some(tile_node) = child(blip_fill, "tile") {
         return Some(Fill::Image {
             image_path,
             mime_type,
+            svg_image_path,
+            dpi,
+            rot_with_shape,
             src_rect: parse_src_rect(blip_fill),
             fill_rect: None,
+            stretch,
             tile: Some(parse_tile(tile_node)),
             alpha,
             duotone,
@@ -291,8 +313,12 @@ fn parse_blip_fill_with_color_resolver<
     Some(Fill::Image {
         image_path,
         mime_type,
+        svg_image_path,
+        dpi,
+        rot_with_shape,
         src_rect: parse_src_rect(blip_fill),
         fill_rect,
+        stretch,
         tile: None,
         alpha,
         duotone,
