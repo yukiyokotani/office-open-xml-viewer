@@ -9179,6 +9179,16 @@ describe('ChartEx flat layouts dispatch to semantic renderers', () => {
     expect(rec.texts.map(text => text.text)).toEqual(['Unsupported chart']);
   });
 
+  it('treats inherited object names as unsupported chart types', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'toString',
+      series: [series({ values: [1] })],
+    }), RECT, 1);
+
+    expect(rec.texts.map(text => text.text)).toEqual(['Unsupported chart']);
+  });
+
   it('measures the same semantic ChartEx column legend that it paints', () => {
     const renderPlot = (extraSeries: ChartSeries[]): RectCall => {
       const rec = recordingCtx();

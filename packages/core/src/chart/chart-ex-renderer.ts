@@ -1,6 +1,7 @@
 // Optional Microsoft ChartEx family renderer. Classic DrawingML chart
-// families remain in renderer.ts so format entry bundles do not pull this
-// module unless the caller imports @silurus/ooxml/chart-ex.
+// families are dispatched by renderer.ts through the classic family modules,
+// so format entry bundles do not pull this module unless the caller imports
+// @silurus/ooxml/chart-ex.
 
 import type {
   ChartDataPointOverride,
