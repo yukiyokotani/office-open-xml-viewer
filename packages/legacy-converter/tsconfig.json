@@ -1,0 +1,46 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "types": [
+      "node",
+      "vite/client"
+    ],
+    "paths": {
+      "@silurus/ooxml-core": [
+        "../core/src/index.ts"
+      ],
+      "@silurus/ooxml-core/*": [
+        "../core/src/*"
+      ],
+      "@silurus/ooxml-pptx": [
+        "../pptx/src/types.ts"
+      ],
+      "@silurus/ooxml-pptx/internal/session": [
+        "../pptx/src/internal/session.ts"
+      ],
+      "@silurus/ooxml-docx": [
+        "../node/typecheck/docx-public-types.ts"
+      ],
+      "@silurus/ooxml-docx/internal/session": [
+        "../docx/src/internal/session.ts"
+      ],
+      "@silurus/ooxml-xlsx": [
+        "../xlsx/src/types.ts"
+      ],
+      "@silurus/ooxml-xlsx/internal/session": [
+        "../xlsx/src/internal/session.ts"
+      ],
+      "@silurus/ooxml-xlsx/internal/host-layout-measure": [
+        "../xlsx/src/internal/host-layout-measure.ts"
+      ]
+    },
+    "composite": false
+  },
+  "include": [
+    "src",
+    "../node/typecheck/docx-public-types.ts",
+    "../core/src/vite-env.d.ts"
+  ]
+}

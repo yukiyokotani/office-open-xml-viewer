@@ -9,7 +9,7 @@ const require = createRequire(new URL('../package.json', import.meta.url));
 const ts = require('typescript-compiler-api');
 const typesDir = path.resolve(process.cwd(), 'dist/types');
 const formats = ['docx', 'pptx', 'xlsx'];
-const files = ['index', ...formats, 'math', 'three-d', 'region-map', 'chart-ex', 'tiff']
+const files = ['index', ...formats, 'math', 'three-d', 'region-map', 'chart-ex', 'tiff', 'legacy-ppt']
   .map((entry) => path.join(typesDir, `${entry}.d.ts`));
 
 const program = ts.createProgram(files, {
@@ -88,12 +88,23 @@ for (const name of sharedOoxmlTypes) {
   }
 }
 
-const tiffExports = moduleExports(files.at(-1));
+const tiffExports = moduleExports(path.join(typesDir, 'tiff.d.ts'));
 assert.deepEqual(
   [...tiffExports.keys()].sort(),
   ['TiffDecodeError', 'TiffRenderOptions', 'TiffRenderer', 'isTiffDecodeError', 'tiff'],
   'The ./tiff declaration entry must expose the runtime codec and its shared contract.',
 );
+
+for (const [entry, factory, options] of [
+  ['legacy-ppt', 'legacyPptSource', 'LegacyPptSourceOptions'],
+]) {
+  const exports = moduleExports(path.join(typesDir, `${entry}.d.ts`));
+  assert.deepEqual(
+    [...exports.keys()].sort(),
+    [options, factory].sort(),
+    `The ./${entry} declaration entry must expose only its model source factory and options.`,
+  );
+}
 
 process.stdout.write(
   'Published declaration entries compile; root namespace exports and shared OOXML contracts match.\n',

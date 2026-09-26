@@ -1,0 +1,79 @@
+import { describe, expect, it, vi } from 'vitest';
+
+// The source modules keep their real engines and direct runtime; only the
+// generated glue is replaced by a native fake, so native close/free calls are
+// observable and admission failures can be shown to happen before any load.
+const fake = vi.hoisted(() => {
+  class Native {
+    closes = 0;
+    frees = 0;
+    constructor(readonly bytes: Uint8Array) { fake.opened.push(this); }
+    free() { this.frees += 1; }
+    close_presentation_session() { this.closes += 1; }
+  }
+  const glue = {
+    default: async () => undefined,
+    LegacyPptPresentation: Native,
+  };
+  return {
+    Native,
+    glue,
+    loads: [] as string[],
+    resolved: [] as string[],
+    opened: [] as InstanceType<typeof Native>[],
+  };
+});
+
+function engineMock(create: string) {
+  return async (importOriginal: () => Promise<Record<string, unknown>>) => {
+    const original = await importOriginal();
+    const real = original[create] as (load: () => Promise<unknown>, resolve: (url: string) => Promise<unknown>) => unknown;
+    return {
+      ...original,
+      [create]: () => real(
+        async () => { fake.loads.push(create); return fake.glue; },
+        async (url: string) => { fake.resolved.push(url); return new Uint8Array(); },
+      ),
+    };
+  };
+}
+vi.mock('./direct-ppt-engine.js', engineMock('createLegacyPptSourceEngine'));
+
+import { openModelSource as openPpt } from './legacy-ppt-source-module.js';
+import { MAX_LEGACY_SOURCE_BYTES } from './legacy-source.js';
+
+const WASM = 'https://cdn.example.test/legacy.wasm';
+const modules = [
+  { family: 'PPT', open: openPpt },
+] as const;
+
+describe.each(modules)('legacy $family source module lifecycle', ({ open }) => {
+  it('fails closed on invalid config and oversize input before loading the runtime', async () => {
+    const loads = fake.loads.length;
+    const bytes = new Uint8Array(8);
+    for (const config of [null, 'config', { wasmUrl: WASM, extra: 1 }, {}, { wasmUrl: 42 }]) {
+      await expect(open(bytes, config)).rejects.toThrow(TypeError);
+    }
+    for (const maxInputBytes of [0, 1.5, '8', MAX_LEGACY_SOURCE_BYTES + 1]) {
+      await expect(open(bytes, { wasmUrl: WASM, maxInputBytes })).rejects.toThrow(RangeError);
+    }
+    await expect(open(bytes, { wasmUrl: './relative.wasm' })).rejects.toThrow(TypeError);
+    await expect(open(bytes, { wasmUrl: WASM, maxInputBytes: 7 })).rejects.toThrow(RangeError);
+    const aborted = AbortSignal.abort();
+    await expect(open(bytes, { wasmUrl: WASM }, aborted)).rejects.toMatchObject({ name: 'AbortError' });
+    expect(fake.loads.length).toBe(loads);
+  });
+
+  it('opens with the configured WASM URL and closes the native archive exactly once', async () => {
+    const bytes = new Uint8Array([1, 2, 3]);
+    const opened = await open(bytes, { wasmUrl: WASM, maxInputBytes: 3 });
+    const native = fake.opened.at(-1)!;
+    expect(native.bytes).toBe(bytes);
+    expect(fake.resolved).toContain(WASM);
+    expect(Object.isFrozen(opened)).toBe(true);
+    opened.close();
+    opened.close();
+    expect([native.closes, native.frees]).toEqual([1, 1]);
+    expect(() => (opened.archive as unknown as { free(): void }).free()).toThrow(/closed/);
+  });
+});
