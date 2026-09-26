@@ -91,6 +91,10 @@ pub fn parse_standalone_shape_part(
 }
 
 fn theme_style_has_relationship(root: roxmltree::Node<'_, '_>, theme: &PptxTheme) -> bool {
+    // A shape may repeat the same style reference in extension markup. Parse
+    // each selected entry at most once so work scales with the shape XML plus
+    // the selected theme entries, rather than their product.
+    let mut inspected = std::collections::HashMap::new();
     root.descendants().any(|node| {
         if !node.is_element() {
             return false;
@@ -98,19 +102,24 @@ fn theme_style_has_relationship(root: roxmltree::Node<'_, '_>, theme: &PptxTheme
         let Some(index) = node.attribute("idx").and_then(|value| value.parse().ok()) else {
             return false;
         };
-        let selected = match node.tag_name().name() {
-            "fillRef" => theme.format_scheme.lookup_fill_ref(index),
-            "lnRef" => theme.format_scheme.lookup_line_ref(index),
-            "effectRef" => theme.format_scheme.lookup_effect_ref(index),
+        let (kind, selected) = match node.tag_name().name() {
+            "fillRef" => (0, theme.format_scheme.lookup_fill_ref(index)),
+            "lnRef" => (1, theme.format_scheme.lookup_line_ref(index)),
+            "effectRef" => (2, theme.format_scheme.lookup_effect_ref(index)),
             _ => return false,
         };
+        if let Some(&has_relationship) = inspected.get(&(kind, index)) {
+            return has_relationship;
+        }
         let StyleMatrixLookup::Entry(entry) = selected else {
             return false;
         };
-        roxmltree::Document::parse(&entry.to_xml()).is_ok_and(|doc| {
+        let has_relationship = roxmltree::Document::parse(&entry.to_xml()).is_ok_and(|doc| {
             doc.descendants()
                 .any(|n| n.attributes().any(|a| is_r_ns(a.namespace())))
-        })
+        });
+        inspected.insert((kind, index), has_relationship);
+        has_relationship
     })
 }
 
