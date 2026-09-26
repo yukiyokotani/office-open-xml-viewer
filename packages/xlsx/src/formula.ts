@@ -27,7 +27,7 @@ interface EvalCtx {
   depth: number;
 }
 
-export type EvalScalar = number | boolean | string | null;
+type EvalScalar = number | boolean | string | null;
 type EvalValue = EvalScalar | EvalScalar[];
 
 /** Flatten nested scalars and arrays to a flat list of scalars. */
@@ -53,71 +53,19 @@ export function evalFormulaToBool(formula: string, ctx: EvalCtx): boolean {
   }
 }
 
-// Exact evaluation for places where a wrong value must not be guessed: the
-// operands of a `cellIs` rule and the activity condition of a scale rule,
-// both of which can stop lower-priority rules (§18.3.1.10 stopIfTrue).
-// The lenient evaluator above approximates (an unknown function or name is
-// 0, a non-numeric string coerces through parseFloat, x/0 is 0, unknown
-// characters are skipped). In strict mode each of those is instead
-// "unevaluable", and the caller treats the rule as not matching: literals,
-// cell references, defined names, + - * / & comparisons and a small set of
-// functions whose implementation here is exact are the supported subset.
-let strict = false;
-
-// Date functions are excluded: the context does not carry the workbook's
-// date system (date1904), and DATE's 0-1899 year offset is not modelled.
-const STRICT_FUNCTIONS = new Set(['AND', 'OR', 'NOT', 'IF', 'TRUE', 'FALSE', 'ABS', 'INT']);
-
-class Unevaluable extends Error {}
-
-/** The formula's scalar value, or `undefined` when the formula falls
- *  outside the exactly evaluated subset or yields an Excel error. */
-export function evalFormulaStrict(formula: string, ctx: EvalCtx): EvalScalar | undefined {
-  const previous = strict;
-  strict = true;
-  try {
-    const v = evalFormula(formula, ctx);
-    if (Array.isArray(v)) return undefined;
-    return v;
-  } catch {
-    return undefined;
-  } finally {
-    strict = previous;
-  }
-}
-
-function unevaluable(what: string): never {
-  throw new Unevaluable(what);
-}
-
 function toBool(v: EvalValue): boolean {
-  if (strict && Array.isArray(v)) unevaluable('array as scalar');
   const s = toScalar(v);
   if (typeof s === 'boolean') return s;
   if (typeof s === 'number') return s !== 0;
-  if (strict && typeof s === 'string') {
-    // Excel: only "TRUE"/"FALSE" convert to a logical; other text is #VALUE!.
-    const up = s.toUpperCase();
-    if (up === 'TRUE' || up === 'FALSE') return up === 'TRUE';
-    unevaluable('text as logical');
-  }
   if (typeof s === 'string') return s.length > 0 && s.toUpperCase() !== 'FALSE';
   return false;
 }
 
 function toNum(v: EvalValue): number {
-  if (strict && Array.isArray(v)) unevaluable('array as scalar');
   const s = toScalar(v);
   if (typeof s === 'number') return s;
   if (typeof s === 'boolean') return s ? 1 : 0;
   if (s == null) return 0;
-  if (strict) {
-    // Excel converts numeric text in arithmetic; other text is #VALUE!.
-    const t = String(s).trim();
-    const n = t === '' ? NaN : Number(t);
-    if (!Number.isFinite(n)) unevaluable('text as number');
-    return n;
-  }
   const n = parseFloat(String(s));
   return isNaN(n) ? 0 : n;
 }
@@ -173,12 +121,7 @@ function tokenize(formula: string): Tok[] {
     if (c >= '0' && c <= '9') {
       let j = i;
       while (j < s.length && ((s[j] >= '0' && s[j] <= '9') || s[j] === '.')) j++;
-      const text = s.slice(i, j);
-      // Exponents and repeated points are not tokenized here.
-      if (strict && (text.split('.').length > 2 || /[eE]/.test(s[j] ?? ''))) {
-        unevaluable('number literal');
-      }
-      toks.push({ kind: 'num', text });
+      toks.push({ kind: 'num', text: s.slice(i, j) });
       i = j;
       continue;
     }
@@ -211,8 +154,7 @@ function tokenize(formula: string): Tok[] {
       }
       continue;
     }
-    // Unknown character — skip (strict: e.g. `!`, `{`, `[` change meaning).
-    if (strict) unevaluable(`character ${c}`);
+    // Unknown character — skip.
     i++;
   }
   return toks;
@@ -259,11 +201,7 @@ interface Parser {
 function evalFormula(formula: string, ctx: EvalCtx): EvalValue {
   const toks = tokenize(formula);
   const p: Parser = { toks, pos: 0 };
-  if (strict && toks.length === 0) unevaluable('empty formula');
   const v = parseExpr(p, ctx);
-  // Unconsumed tokens (`%`, `^`, a missing operator) mean a construct this
-  // evaluator does not model.
-  if (strict && p.pos !== toks.length) unevaluable('trailing tokens');
   return v;
 }
 
@@ -280,7 +218,7 @@ function parseCmp(p: Parser, ctx: EvalCtx): EvalValue {
   if (t && t.kind === 'op' && (t.text === '<' || t.text === '>' || t.text === '<=' || t.text === '>=' || t.text === '=' || t.text === '<>')) {
     consume(p);
     const right = parseConcat(p, ctx);
-    return strict ? applyCmpStrict(t.text, left, right) : applyCmp(t.text, left, right);
+    return applyCmp(t.text, left, right);
   }
   return left;
 }
@@ -292,13 +230,6 @@ function parseConcat(p: Parser, ctx: EvalCtx): EvalValue {
     if (!t || t.kind !== 'op' || t.text !== '&') break;
     consume(p);
     const right = parseAdd(p, ctx);
-    if (strict) {
-      // A non-integer number's text form follows Excel's General format,
-      // which String() does not reproduce.
-      for (const v of [left, right]) {
-        if (Array.isArray(v) || (typeof v === 'number' && !Number.isSafeInteger(v))) unevaluable('& operand');
-      }
-    }
     left = toStr(left) + toStr(right);
   }
   return left;
@@ -332,39 +263,6 @@ function applyCmp(op: string, a: EvalValue, b: EvalValue): boolean {
   return false;
 }
 
-/** Excel's comparison: text compares case-insensitively, and values of
- *  different types order number < text < logical. An empty cell compares
- *  as 0 against a number, "" against text and FALSE against a logical. */
-function applyCmpStrict(op: string, a: EvalValue, b: EvalValue): boolean {
-  if (Array.isArray(a) || Array.isArray(b)) unevaluable('array comparison');
-  const rank = (v: EvalScalar) => (typeof v === 'number' ? 0 : typeof v === 'string' ? 1 : 2);
-  const fill = (v: EvalScalar, other: EvalScalar): EvalScalar => {
-    if (v != null) return v;
-    if (typeof other === 'string') return '';
-    if (typeof other === 'boolean') return false;
-    return 0;
-  };
-  const x = fill(a, b);
-  const y = fill(b, a);
-  let c: number;
-  if (rank(x) !== rank(y)) c = rank(x) - rank(y);
-  else if (typeof x === 'string') {
-    const xs = x.toLowerCase(), ys = (y as string).toLowerCase();
-    c = xs < ys ? -1 : xs > ys ? 1 : 0;
-  } else {
-    const xn = Number(x), yn = Number(y);
-    c = xn < yn ? -1 : xn > yn ? 1 : 0;
-  }
-  switch (op) {
-    case '<':  return c < 0;
-    case '>':  return c > 0;
-    case '<=': return c <= 0;
-    case '>=': return c >= 0;
-    case '=':  return c === 0;
-    default:   return c !== 0;
-  }
-}
-
 function parseAdd(p: Parser, ctx: EvalCtx): EvalValue {
   let left = parseMul(p, ctx);
   while (true) {
@@ -387,7 +285,6 @@ function parseMul(p: Parser, ctx: EvalCtx): EvalValue {
     if (t.text === '*') left = toNum(left) * toNum(right);
     else {
       const rn = toNum(right);
-      if (strict && rn === 0) unevaluable('#DIV/0!');
       left = rn === 0 ? 0 : toNum(left) / rn;
     }
   }
@@ -403,10 +300,7 @@ function parseUnary(p: Parser, ctx: EvalCtx): EvalValue {
 
 function parsePrimary(p: Parser, ctx: EvalCtx): EvalValue {
   const t = consume(p);
-  if (!t) {
-    if (strict) unevaluable('missing operand');
-    return 0;
-  }
+  if (!t) return 0;
   if (t.kind === 'num') return parseFloat(t.text);
   if (t.kind === 'str') return t.text;
   if (t.kind === 'bool') return t.text === 'TRUE';
@@ -446,9 +340,7 @@ function parsePrimary(p: Parser, ctx: EvalCtx): EvalValue {
       if (!next || next.kind !== 'rparen') throw new Error('missing )');
       return callFunc(t.text, args, ctx);
     }
-    // Defined-name reference: substitute and evaluate. Strict mode does not:
-    // the substitution ignores the name's sheet prefix and scope.
-    if (strict) unevaluable(`name ${t.text}`);
+    // Defined-name reference: substitute and evaluate.
     const dn = ctx.definedNames.get(t.text);
     if (dn && ctx.depth < MAX_DEFINED_NAME_DEPTH) {
       // Strip `SheetName!` prefix if present; keep just the ref body.
@@ -464,7 +356,6 @@ function parsePrimary(p: Parser, ctx: EvalCtx): EvalValue {
     }
     return 0;
   }
-  if (strict) unevaluable(`token ${t.text}`);
   return 0;
 }
 
@@ -482,9 +373,7 @@ function resolveRef(
 ): EvalScalar {
   const col = ref.colAbs ? ref.col : ref.col + (ctx.col - ctx.anchorCol);
   const row = ref.rowAbs ? ref.row : ref.row + (ctx.row - ctx.anchorRow);
-  if (strict && (row < 1 || col < 1 || row > 1_048_576 || col > 16_384)) unevaluable('#REF!');
   const cell = ctx.cellIndex.get(`${row}:${col}`);
-  if (strict && cell?.value.type === 'error') unevaluable('error cell');
   return cellValueToEval(cell);
 }
 
@@ -531,10 +420,6 @@ function cellValueToEval(cell: Cell | undefined): EvalScalar {
 
 function callFunc(nameRaw: string, args: EvalValue[], ctx: EvalCtx): EvalValue {
   const name = nameRaw.toUpperCase();
-  if (strict && (!STRICT_FUNCTIONS.has(name) || args.some(Array.isArray)
-    || (name === 'IF' && (args.length < 2 || args.length > 3)))) {
-    unevaluable(`function ${name}`);
-  }
   switch (name) {
     // ── Logic ───────────────────────────────────────────────────────────────
     case 'AND':        return args.flatMap(flatten).every(a => toBool(a));

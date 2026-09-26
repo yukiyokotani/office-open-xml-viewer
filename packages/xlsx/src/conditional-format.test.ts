@@ -503,33 +503,54 @@ describe('stopIfTrue — a matching rule stops lower-priority rules (ECMA-376 §
 describe('stopIfTrue needs an established match', () => {
   const lowerRed: CfRule = { type: 'expression', formula: 'TRUE', dxfId: 0, priority: 2, stopIfTrue: false };
   const RED: Dxf = { font: { ...FONT_BLUE.font!, color: '#FF0000' }, fill: null, border: null };
-  const evalAt = (rules: CfRule[], extra: Cell[] = []) => {
-    const ws = sheetFromColumn([5], [{ sqref: [fullColumnSqref(1)], rules }]);
-    ws.rows[0].cells.push(...extra);
+  // The evaluated cell holds `value`; `extra` cells sit in sheet row 1
+  // (so `B1` refers to `extra` column 2).
+  const evalAt = (rules: CfRule[], extra: Cell[] = [], value = 5) => {
+    const ws = sheetFromColumn([value], [{ sqref: [fullColumnSqref(1)], rules }]);
+    ws.rows.push({ index: 1, height: null, cells: extra });
     return evaluateCf(ws.rows[0].cells[0], 0, 0, compileCf(ws), [RED]);
   };
+  const cellIs = (operator: string, formula: string): CfRule =>
+    ({ type: 'cellIs', operator, formulas: [formula], dxfId: null, priority: 1, stopIfTrue: true });
+  const icons = (activeFormula?: string): CfRule => ({
+    type: 'iconSet', iconSet: '3Arrows', reverse: false, priority: 1, stopIfTrue: true, activeFormula,
+    cfvos: [{ kind: 'num', value: '0' }, { kind: 'num', value: '3' }, { kind: 'num', value: '7' }],
+  });
 
   // Review reproducer: `0+10` used to be read as the literal 0, so 5 > 0
   // matched and the stop removed the lower rule's red text.
   it('cellIs evaluates a formula operand instead of truncating it to a literal', () => {
-    const cellIs = (formula: string): CfRule =>
-      ({ type: 'cellIs', operator: 'greaterThan', formulas: [formula], dxfId: null, priority: 1, stopIfTrue: true });
-    expect(evalAt([cellIs('0+10'), lowerRed]).fontColor).toBe('#FF0000');
-    expect(evalAt([cellIs('0+1'), lowerRed]).fontColor).toBeUndefined();
+    expect(evalAt([cellIs('greaterThan', '0+10'), lowerRed]).fontColor).toBe('#FF0000');
+    expect(evalAt([cellIs('greaterThan', '0+1'), lowerRed]).fontColor).toBeUndefined();
     // A cell reference operand resolves (Excel: 5 > $B$1 = 3 matches).
-    expect(evalAt([cellIs('$B$1'), lowerRed], [numCell(0, 1, 3)]).fontColor).toBeUndefined();
-    // Outside the exactly evaluated subset: no match, no stop.
-    expect(evalAt([cellIs('UNSUPPORTED(1)'), lowerRed]).fontColor).toBe('#FF0000');
-    expect(evalAt([cellIs('2^2'), lowerRed]).fontColor).toBe('#FF0000');
+    expect(evalAt([cellIs('greaterThan', '$B$1'), lowerRed], [numCell(1, 2, 3)]).fontColor).toBeUndefined();
+    // Outside the exactly evaluated grammar: no match, no stop.
+    expect(evalAt([cellIs('greaterThan', 'UNSUPPORTED(1)'), lowerRed]).fontColor).toBe('#FF0000');
+    expect(evalAt([cellIs('greaterThan', '2^2'), lowerRed]).fontColor).toBe('#FF0000');
+    // A blank operand is not converted to 0.
+    expect(evalAt([cellIs('greaterThan', '$B$1'), lowerRed]).fontColor).toBe('#FF0000');
+  });
+
+  // Round-3 review reproducers: each operand used to be mis-evaluated to a
+  // value that matched, and the stop removed the lower rule's red text.
+  it('functions, blank selection and overflow are unevaluable, not guessed', () => {
+    // OR over a referenced "TRUE" string (Excel ignores text in references)
+    // and OR short-circuiting past a type error.
+    const textTrue: Cell = { row: 1, col: 2, value: { type: 'text', text: 'TRUE' }, styleIndex: 0 };
+    expect(evalAt([cellIs('greaterThan', 'IF(OR(0,B1),0,10)'), lowerRed], [textTrue]).fontColor).toBe('#FF0000');
+    expect(evalAt([cellIs('greaterThan', 'IF(OR(1,"invalid"),0,10)'), lowerRed]).fontColor).toBe('#FF0000');
+    // IF selecting a blank cell (was replaced by TRUE).
+    expect(evalAt([cellIs('lessThan', 'IF(1,B1,0)+1'), lowerRed], [], 1.5).fontColor).toBe('#FF0000');
+    expect(evalAt([icons('IF(1,B1,0)'), lowerRed]).fontColor).toBe('#FF0000');
+    // An overflowing product is #NUM!, not Infinity.
+    const huge = numCell(1, 2, 1e200);
+    expect(evalAt([cellIs('lessThan', 'B1*B1'), lowerRed], [huge]).fontColor).toBe('#FF0000');
+    expect(evalAt([icons('B1*B1'), lowerRed], [huge]).fontColor).toBe('#FF0000');
   });
 
   // Review reproducer: an x14 icon set with activePresent="1" and xm:f 0
   // is not displayed ([MS-XLSX] 2.6.27), so it must not stop the red text.
   it('a scale rule applies and stops only while its activity formula is nonzero', () => {
-    const icons = (activeFormula?: string): CfRule => ({
-      type: 'iconSet', iconSet: '3Arrows', reverse: false, priority: 1, stopIfTrue: true, activeFormula,
-      cfvos: [{ kind: 'num', value: '0' }, { kind: 'num', value: '3' }, { kind: 'num', value: '7' }],
-    });
     const inactive = evalAt([icons('0'), lowerRed]);
     expect(inactive.fontColor).toBe('#FF0000');
     expect(inactive.iconSet).toBeUndefined();
@@ -538,14 +559,16 @@ describe('stopIfTrue needs an established match', () => {
     expect(active.iconSet).toBeDefined();
     expect(evalAt([icons(), lowerRed]).fontColor).toBeUndefined();
     // Relative references anchor at the rule range's top-left: over B2:B3
-    // (B2 = 5, B3 = 1), `B2>3` is checked as B2>3 and B3>3.
+    // (B2 = 5, B3 = 1), `B2-5` is 0 at B2 and -4 at B3.
     const relative = (formula: string, row: number) => {
       const ws = sheetFromColumn([], [{ sqref: [{ top: 2, left: 2, bottom: 3, right: 2 }], rules: [icons(formula), lowerRed] }]);
       ws.rows = [{ index: 2, height: null, cells: [numCell(2, 2, 5)] }, { index: 3, height: null, cells: [numCell(3, 2, 1)] }];
       return evaluateCf(ws.rows[row - 2].cells[0], row, 2, compileCf(ws), [RED]).fontColor;
     };
-    expect(relative('B2>3', 2)).toBeUndefined();
-    expect(relative('B2>3', 3)).toBe('#FF0000');
+    expect(relative('B2-5', 2)).toBe('#FF0000');
+    expect(relative('B2-5', 3)).toBeUndefined();
+    // A logical result is not read as zero / nonzero.
+    expect(evalAt([icons('B1'), lowerRed], [{ row: 1, col: 2, value: { type: 'bool', bool: true }, styleIndex: 0 }]).fontColor).toBe('#FF0000');
     // Unevaluable: inactive rather than guessed.
     const unknown = evalAt([icons('UNSUPPORTED(A1)'), lowerRed]);
     expect(unknown.fontColor).toBe('#FF0000');
