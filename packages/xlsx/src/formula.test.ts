@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { evalFormulaToBool } from './formula.js';
+import { evalFormulaStrict, evalFormulaToBool } from './formula.js';
 import type { Cell } from './types.js';
 
 function numCell(row: number, col: number, n: number): Cell {
@@ -174,5 +174,40 @@ describe('evalFormulaToBool — error literals', () => {
     expect(evalFormulaToBool('MONTH(#REF!)<>MONTH(B1)', c)).toBe(false);
     expect(evalFormulaToBool('#N/A=1', c)).toBe(false);
     expect(evalFormulaToBool('MONTH(B1)=6', c)).toBe(true);
+  });
+});
+
+describe('evalFormulaStrict — exact values or unevaluable', () => {
+  const strict = (f: string, c = ctx()) => evalFormulaStrict(f, c);
+
+  it('evaluates the exactly modelled subset', () => {
+    expect(strict('0+10')).toBe(10);
+    expect(strict('-2*3+1')).toBe(-5);
+    expect(strict('"a"&"b"')).toBe('ab');
+    expect(strict('$B$1', ctx({ cells: [numCell(1, 2, 3)] }))).toBe(3);
+    expect(strict('B1')).toBeNull();
+    expect(strict('IF(1>0,4,5)')).toBe(4);
+    // Excel's comparison: case-insensitive text, number < text < logical.
+    expect(strict('"A"="a"')).toBe(true);
+    expect(strict('1<"0"')).toBe(true);
+    expect(strict('"z"<TRUE')).toBe(true);
+  });
+
+  it('returns undefined where the lenient evaluator would guess', () => {
+    for (const f of [
+      'UNSUPPORTED(1)', // unknown function (lenient: 0)
+      'SomeName', // defined or unknown name
+      '1/0', // #DIV/0! (lenient: 0)
+      '"abc"+1', // #VALUE! (lenient: parseFloat → 0)
+      '2^2', '50%', // operators not modelled
+      '1E3', // exponent literal not tokenized
+      'Sheet2!A1', // unknown character
+      'A1:A3', // range as a value
+      'TODAY()', // date system not in the context
+      '0.1&"x"', // General number format not reproduced
+      '',
+    ]) {
+      expect(strict(f), f).toBeUndefined();
+    }
   });
 });

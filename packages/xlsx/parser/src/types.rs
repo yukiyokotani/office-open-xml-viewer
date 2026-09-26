@@ -1371,6 +1371,16 @@ pub struct ConditionalFormat {
 /// SpreadsheetML even though its rule editor does not offer it; the renderer
 /// records the evidence beside its evaluation) and the not-yet-evaluated
 /// `Other` kinds such as `timePeriod`, `duplicateValues` and `uniqueValues`.
+///
+/// A rule stops evaluation only where it is established to match. For
+/// `colorScale` / `dataBar` / `iconSet` an optional formula is an activity
+/// condition: [MS-XLSX] 2.6.27 CT_CfRule "When the formula returns zero,
+/// conditional formatting is not displayed. When the formula returns a
+/// nonzero value, or is not present, conditional formatting is displayed."
+/// Excel applies the same reading to the SpreadsheetML `<formula>` child of
+/// those rule types (observed in a PDF export: a colorScale or dataBar with
+/// formula `0` drew nothing and did not stop a lower rule; formula `1` drew
+/// the scale and stopped it).
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum CfRule {
@@ -1395,6 +1405,12 @@ pub enum CfRule {
     ColorScale {
         stops: Vec<CfStop>,
         priority: i32,
+        /// Activity condition: the rule's own formula (`<formula>`, or `xm:f`
+        /// in the x14 extension). When present, the rule formats a cell (and
+        /// can stop lower rules) only where it evaluates to nonzero; see
+        /// `CfRule`. Absent means always active.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        active_formula: Option<String>,
         /// §18.3.1.10 `stopIfTrue`; see `CfRule`. Serialized only when set.
         #[serde(skip_serializing_if = "std::ops::Not::not")]
         stop_if_true: bool,
@@ -1406,6 +1422,12 @@ pub enum CfRule {
         max: CfValue,
         priority: i32,
         gradient: bool,
+        /// Activity condition: the rule's own formula (`<formula>`, or `xm:f`
+        /// in the x14 extension). When present, the rule formats a cell (and
+        /// can stop lower rules) only where it evaluates to nonzero; see
+        /// `CfRule`. Absent means always active.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        active_formula: Option<String>,
         /// §18.3.1.10 `stopIfTrue`; see `CfRule`. Serialized only when set.
         #[serde(skip_serializing_if = "std::ops::Not::not")]
         stop_if_true: bool,
@@ -1447,6 +1469,12 @@ pub enum CfRule {
         priority: i32,
         #[serde(skip_serializing_if = "Option::is_none")]
         custom_icons: Option<Vec<CfIcon>>,
+        /// Activity condition: the rule's own formula (`<formula>`, or `xm:f`
+        /// in the x14 extension). When present, the rule formats a cell (and
+        /// can stop lower rules) only where it evaluates to nonzero; see
+        /// `CfRule`. Absent means always active.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        active_formula: Option<String>,
         /// §18.3.1.10 `stopIfTrue`; see `CfRule`. Serialized only when set.
         #[serde(skip_serializing_if = "std::ops::Not::not")]
         stop_if_true: bool,

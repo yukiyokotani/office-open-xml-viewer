@@ -832,16 +832,17 @@ export interface ConditionalFormat {
  * a cell, no lower-priority rule applies to that cell. Every rule type carries
  * it (`expression` always; the others only when set, so an absent value means
  * false), including `colorScale` / `dataBar` / `iconSet`, which match every
- * numeric cell they format.
+ * numeric cell they format while their optional `activeFormula` (the rule's
+ * own formula, [MS-XLSX] 2.6.27) evaluates to nonzero.
  */
 export type CfRule =
   | { type: 'cellIs'; operator: string; formulas: string[]; dxfId: number | null; priority: number; stopIfTrue?: boolean }
   | { type: 'expression'; formula: string; dxfId: number | null; priority: number; stopIfTrue: boolean }
-  | { type: 'colorScale'; stops: CfStop[]; priority: number; stopIfTrue?: boolean }
-  | { type: 'dataBar'; color: string; min: CfValue; max: CfValue; priority: number; gradient: boolean; stopIfTrue?: boolean }
+  | { type: 'colorScale'; stops: CfStop[]; priority: number; activeFormula?: string; stopIfTrue?: boolean }
+  | { type: 'dataBar'; color: string; min: CfValue; max: CfValue; priority: number; gradient: boolean; activeFormula?: string; stopIfTrue?: boolean }
   | { type: 'top10'; top: boolean; percent: boolean; rank: number; dxfId: number | null; priority: number; stopIfTrue?: boolean }
   | { type: 'aboveAverage'; aboveAverage: boolean; equalAverage?: boolean; stdDev?: number; dxfId: number | null; priority: number; stopIfTrue?: boolean }
-  | { type: 'iconSet'; iconSet: string; cfvos: CfValue[]; reverse: boolean; priority: number; customIcons?: CfIcon[]; stopIfTrue?: boolean }
+  | { type: 'iconSet'; iconSet: string; cfvos: CfValue[]; reverse: boolean; priority: number; customIcons?: CfIcon[]; activeFormula?: string; stopIfTrue?: boolean }
   | { type: 'other'; kind: string; priority: number; stopIfTrue?: boolean };
 
 export interface CfIcon {

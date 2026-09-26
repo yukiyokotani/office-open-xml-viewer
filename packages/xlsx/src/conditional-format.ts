@@ -1,6 +1,6 @@
 import type { Worksheet, Cell, WorksheetCellRange, CfStop, CfValue, Dxf, CfRule, CellFill, Border, DefinedName } from './types.js';
 import { dxfFontToggle } from './dxf-font.js';
-import { evalFormulaToBool } from './formula.js';
+import { evalFormulaStrict, evalFormulaToBool, type EvalScalar } from './formula.js';
 import { buildCellCoordinateIndex } from './renderer-coordinate-index.js';
 
 // ────────────────────────────────────────────────────────────────
@@ -22,6 +22,7 @@ export interface CompiledCfRule {
    *  aboveAverage rule carries a `stdDev` attribute (ECMA-376 §18.3.1.10). */
   avgStdDev?: number;
   iconThresholds?: number[];
+  cellIsOperands?: CellIsOperand[];
 }
 
 export interface CfContext {
@@ -158,6 +159,8 @@ export function compileCf(
         }
       } else if (rule.type === 'iconSet') {
         entry.iconThresholds = rule.cfvos.map(cfv => resolveCfvoValue(cfv, samples));
+      } else if (rule.type === 'cellIs') {
+        entry.cellIsOperands = rule.formulas.map(cellIsOperand);
       }
       compiled.push(entry);
     }
@@ -196,14 +199,20 @@ function cellIsMatch(num: number, operator: string, args: number[]): boolean {
   }
 }
 
-function parseCellIsFormula(f: string): { text?: string; num?: number } {
+const NUMERIC_LITERAL = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
+const STRING_LITERAL = /^"(?:[^"]|"")*"$/;
+
+/** One `cellIs` operand ([MS-XLSX] 2.6.27: a formula, number or cell
+ *  reference). A plain numeric or string literal is decoded once; anything
+ *  else is a formula evaluated per cell by the strict evaluator, never
+ *  reinterpreted as a literal (`0+10` is 10, not 0). */
+type CellIsOperand = { literal: EvalScalar } | { formula: string };
+
+function cellIsOperand(f: string): CellIsOperand {
   const t = f.trim();
-  if (t.length >= 2 && t.startsWith('"') && t.endsWith('"')) {
-    return { text: t.slice(1, -1).replace(/""/g, '"') };
-  }
-  const n = parseFloat(t);
-  if (!isNaN(n)) return { num: n };
-  return { text: t };
+  if (STRING_LITERAL.test(t)) return { literal: t.slice(1, -1).replace(/""/g, '"') };
+  if (NUMERIC_LITERAL.test(t)) return { literal: Number(t) };
+  return { formula: t };
 }
 
 function cellIsTextMatch(text: string, operator: string, args: string[]): boolean {
@@ -293,6 +302,39 @@ function applyDxfToResult(result: CfResult, dxf: Dxf | null | undefined): void {
   }
 }
 
+/**
+ * The activity condition of a colorScale / dataBar / iconSet rule: its
+ * optional formula ([MS-XLSX] 2.6.27 CT_CfRule: "When the formula returns
+ * zero, conditional formatting is not displayed. When the formula returns a
+ * nonzero value, or is not present, conditional formatting is displayed").
+ * Excel reads the SpreadsheetML `<formula>` of these types the same way (see
+ * `CfRule`). Relative references anchor at the top-left of the rule's range,
+ * as for `expression`. A condition that cannot be evaluated exactly, or that
+ * yields a non-numeric value, leaves the rule inactive: it then neither
+ * formats the cell nor stops lower rules.
+ */
+function scaleRuleActive(
+  formula: string | undefined,
+  entry: CompiledCfRule,
+  row: number,
+  col: number,
+  cfCtx: CfContext,
+): boolean {
+  if (formula == null) return true;
+  const anchor = entry.sqref[0];
+  if (!anchor) return false;
+  const v = evalFormulaStrict(formula, {
+    row, col,
+    anchorRow: anchor.top, anchorCol: anchor.left,
+    cellIndex: cfCtx.cellIndex,
+    definedNames: cfCtx.definedNames,
+    depth: 0,
+  });
+  if (typeof v === 'number') return v !== 0;
+  if (typeof v === 'boolean') return v;
+  return false;
+}
+
 export function evaluateCf(cell: Cell | undefined, row: number, col: number, cfCtx: CfContext, dxfs: Dxf[]): CfResult {
   const result: CfResult = {};
   if (!cfCtx.compiled.length) return result;
@@ -321,12 +363,27 @@ export function evaluateCf(cell: Cell | undefined, row: number, col: number, cfC
       });
       if (matched) applyDxfToResult(result, rule.dxfId != null ? dxfs[rule.dxfId] : null);
     } else if (rule.type === 'cellIs') {
-      const parsedArgs = rule.formulas.map(parseCellIsFormula);
+      // Compare only with operands established exactly: an unevaluable
+      // operand, or an operand whose type differs from the cell's, is no
+      // match, so the rule neither formats nor stops.
+      const anchor = entry.sqref[0];
+      const operands = (entry.cellIsOperands ?? []).map((operand) => {
+        if ('literal' in operand) return operand.literal;
+        if (!anchor) return undefined;
+        return evalFormulaStrict(operand.formula, {
+          row, col,
+          anchorRow: anchor.top, anchorCol: anchor.left,
+          cellIndex: cfCtx.cellIndex,
+          definedNames: cfCtx.definedNames,
+          depth: 0,
+        });
+      });
       const textVal = cellTextValue(cell);
-      if (numVal != null && parsedArgs.every(a => a.num != null)) {
-        matched = cellIsMatch(numVal, rule.operator, parsedArgs.map(a => a.num!));
-      } else if (textVal != null && parsedArgs.every(a => a.text != null)) {
-        matched = cellIsTextMatch(textVal, rule.operator, parsedArgs.map(a => a.text!));
+      // An empty referenced cell compares as 0 / "" (Excel's comparison).
+      if (numVal != null && operands.every(a => typeof a === 'number' || a === null)) {
+        matched = cellIsMatch(numVal, rule.operator, operands.map(a => (a as number | null) ?? 0));
+      } else if (textVal != null && operands.every(a => typeof a === 'string' || a === null)) {
+        matched = cellIsTextMatch(textVal, rule.operator, operands.map(a => (a as string | null) ?? ''));
       }
       if (matched) applyDxfToResult(result, rule.dxfId != null ? dxfs[rule.dxfId] : null);
     } else if (rule.type === 'top10') {
@@ -346,8 +403,10 @@ export function evaluateCf(cell: Cell | undefined, row: number, col: number, cfC
         : (eq ? numVal <= threshold : numVal < threshold);
       if (matched) applyDxfToResult(result, rule.dxfId != null ? dxfs[rule.dxfId] : null);
     } else if (rule.type === 'iconSet') {
-      // A scale rule "evaluates to true" for every numeric cell it formats.
+      // A scale rule "evaluates to true" for every numeric cell it formats
+      // while its activity condition holds (scaleRuleActive).
       if (numVal == null || !entry.iconThresholds?.length) continue;
+      if (!scaleRuleActive(rule.activeFormula, entry, row, col, cfCtx)) continue;
       matched = true;
       const thresholds = entry.iconThresholds;
       const n = thresholds.length;
@@ -367,6 +426,7 @@ export function evaluateCf(cell: Cell | undefined, row: number, col: number, cfC
       }
     } else if (rule.type === 'colorScale') {
       if (numVal == null || !entry.scaleStops) continue;
+      if (!scaleRuleActive(rule.activeFormula, entry, row, col, cfCtx)) continue;
       matched = true;
       if (!result.fill) {
         const color = colorScaleAt(numVal, rule.stops, entry.scaleStops);
@@ -374,6 +434,7 @@ export function evaluateCf(cell: Cell | undefined, row: number, col: number, cfC
       }
     } else if (rule.type === 'dataBar') {
       if (numVal == null || entry.barMin == null || entry.barMax == null) continue;
+      if (!scaleRuleActive(rule.activeFormula, entry, row, col, cfCtx)) continue;
       matched = true;
       if (!result.dataBar) {
         const range = entry.barMax - entry.barMin;

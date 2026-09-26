@@ -498,3 +498,61 @@ describe('stopIfTrue — a matching rule stops lower-priority rules (ECMA-376 §
     expect(res.fontItalic).toBeUndefined();
   });
 });
+
+// ─── A rule stops only where its match is established ────────────
+describe('stopIfTrue needs an established match', () => {
+  const lowerRed: CfRule = { type: 'expression', formula: 'TRUE', dxfId: 0, priority: 2, stopIfTrue: false };
+  const RED: Dxf = { font: { ...FONT_BLUE.font!, color: '#FF0000' }, fill: null, border: null };
+  const evalAt = (rules: CfRule[], extra: Cell[] = []) => {
+    const ws = sheetFromColumn([5], [{ sqref: [fullColumnSqref(1)], rules }]);
+    ws.rows[0].cells.push(...extra);
+    return evaluateCf(ws.rows[0].cells[0], 0, 0, compileCf(ws), [RED]);
+  };
+
+  // Review reproducer: `0+10` used to be read as the literal 0, so 5 > 0
+  // matched and the stop removed the lower rule's red text.
+  it('cellIs evaluates a formula operand instead of truncating it to a literal', () => {
+    const cellIs = (formula: string): CfRule =>
+      ({ type: 'cellIs', operator: 'greaterThan', formulas: [formula], dxfId: null, priority: 1, stopIfTrue: true });
+    expect(evalAt([cellIs('0+10'), lowerRed]).fontColor).toBe('#FF0000');
+    expect(evalAt([cellIs('0+1'), lowerRed]).fontColor).toBeUndefined();
+    // A cell reference operand resolves (Excel: 5 > $B$1 = 3 matches).
+    expect(evalAt([cellIs('$B$1'), lowerRed], [numCell(0, 1, 3)]).fontColor).toBeUndefined();
+    // Outside the exactly evaluated subset: no match, no stop.
+    expect(evalAt([cellIs('UNSUPPORTED(1)'), lowerRed]).fontColor).toBe('#FF0000');
+    expect(evalAt([cellIs('2^2'), lowerRed]).fontColor).toBe('#FF0000');
+  });
+
+  // Review reproducer: an x14 icon set with activePresent="1" and xm:f 0
+  // is not displayed ([MS-XLSX] 2.6.27), so it must not stop the red text.
+  it('a scale rule applies and stops only while its activity formula is nonzero', () => {
+    const icons = (activeFormula?: string): CfRule => ({
+      type: 'iconSet', iconSet: '3Arrows', reverse: false, priority: 1, stopIfTrue: true, activeFormula,
+      cfvos: [{ kind: 'num', value: '0' }, { kind: 'num', value: '3' }, { kind: 'num', value: '7' }],
+    });
+    const inactive = evalAt([icons('0'), lowerRed]);
+    expect(inactive.fontColor).toBe('#FF0000');
+    expect(inactive.iconSet).toBeUndefined();
+    const active = evalAt([icons('1'), lowerRed]);
+    expect(active.fontColor).toBeUndefined();
+    expect(active.iconSet).toBeDefined();
+    expect(evalAt([icons(), lowerRed]).fontColor).toBeUndefined();
+    // Relative references anchor at the rule range's top-left: over B2:B3
+    // (B2 = 5, B3 = 1), `B2>3` is checked as B2>3 and B3>3.
+    const relative = (formula: string, row: number) => {
+      const ws = sheetFromColumn([], [{ sqref: [{ top: 2, left: 2, bottom: 3, right: 2 }], rules: [icons(formula), lowerRed] }]);
+      ws.rows = [{ index: 2, height: null, cells: [numCell(2, 2, 5)] }, { index: 3, height: null, cells: [numCell(3, 2, 1)] }];
+      return evaluateCf(ws.rows[row - 2].cells[0], row, 2, compileCf(ws), [RED]).fontColor;
+    };
+    expect(relative('B2>3', 2)).toBeUndefined();
+    expect(relative('B2>3', 3)).toBe('#FF0000');
+    // Unevaluable: inactive rather than guessed.
+    const unknown = evalAt([icons('UNSUPPORTED(A1)'), lowerRed]);
+    expect(unknown.fontColor).toBe('#FF0000');
+    expect(unknown.iconSet).toBeUndefined();
+    const scale: CfRule = { type: 'colorScale', stops: [{ kind: 'min', value: null, color: '#FFFF00' }, { kind: 'max', value: null, color: '#00B0F0' }], priority: 1, stopIfTrue: true, activeFormula: '0' };
+    const offScale = evalAt([scale, lowerRed]);
+    expect(offScale.fill).toBeUndefined();
+    expect(offScale.fontColor).toBe('#FF0000');
+  });
+});

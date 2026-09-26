@@ -132,6 +132,7 @@ export type CfRule = {
     type: 'colorScale';
     stops: CfStop[];
     priority: number;
+    activeFormula?: string;
     stopIfTrue?: boolean;
 } | {
     type: 'dataBar';
@@ -140,6 +141,7 @@ export type CfRule = {
     max: CfValue;
     priority: number;
     gradient: boolean;
+    activeFormula?: string;
     stopIfTrue?: boolean;
 } | {
     type: 'top10';
@@ -164,6 +166,7 @@ export type CfRule = {
     reverse: boolean;
     priority: number;
     customIcons?: CfIcon[];
+    activeFormula?: string;
     stopIfTrue?: boolean;
 } | {
     type: 'other';

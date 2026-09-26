@@ -1782,6 +1782,13 @@ fn parse_projected_worksheet(
                 reverse,
                 priority,
                 custom_icons: if custom { Some(custom_icons) } else { None },
+                // [MS-XLSX] 2.6.27: the rule's own `xm:f` child (flagged by
+                // `activePresent`) is its activity condition.
+                active_formula: x14_rule
+                    .children()
+                    .find(|n| n.tag_name().name() == "f")
+                    .and_then(|n| n.text())
+                    .map(|s| s.to_string()),
                 // [MS-XLSX] x14:cfRule carries the same `stopIfTrue`.
                 stop_if_true: x14_rule
                     .attribute("stopIfTrue")
@@ -2039,6 +2046,13 @@ fn parse_projected_worksheet(
                         .attribute("stopIfTrue")
                         .map(|v| v == "1" || v == "true")
                         .unwrap_or(false);
+                    // colorScale / dataBar / iconSet: an optional `<formula>`
+                    // is the rule's activity condition (see `CfRule`).
+                    let active_formula = cf
+                        .children()
+                        .find(|n| n.tag_name().name() == "formula")
+                        .and_then(|n| n.text())
+                        .map(|s| s.to_string());
                     match kind.as_str() {
                         "cellIs" => {
                             let operator = cf.attribute("operator").unwrap_or("equal").to_string();
@@ -2116,6 +2130,7 @@ fn parse_projected_worksheet(
                             rules.push(CfRule::ColorScale {
                                 stops,
                                 priority,
+                                active_formula,
                                 stop_if_true,
                             });
                         }
@@ -2206,6 +2221,7 @@ fn parse_projected_worksheet(
                                 max,
                                 priority,
                                 gradient,
+                                active_formula,
                                 stop_if_true,
                             });
                         }
@@ -2287,6 +2303,7 @@ fn parse_projected_worksheet(
                                 reverse,
                                 priority,
                                 custom_icons: None,
+                                active_formula,
                                 stop_if_true,
                             });
                         }
@@ -5048,6 +5065,34 @@ mod conditional_format_tests {
         for (i, kind) in expected_on.iter().enumerate() {
             assert_eq!(flags[i], (kind.to_string(), Some(true)), "rule {i}");
         }
+    }
+
+    /// The activity formula of a scale rule is kept from the SpreadsheetML
+    /// `<formula>` child and from the x14 rule's own `xm:f` (not the cfvo
+    /// `xm:f`s), and is absent when the rule has none.
+    #[test]
+    fn scale_rule_activity_formula() {
+        let x14 = r#"<extLst><ext uri="{78C0D931-6437-407D-A8EE-F0AAD7539E65}"><x14:conditionalFormattings><x14:conditionalFormatting><x14:cfRule type="iconSet" priority="1" stopIfTrue="1" activePresent="1"><xm:f>0</xm:f><x14:iconSet iconSet="3Arrows"><x14:cfvo type="num"><xm:f>0</xm:f></x14:cfvo><x14:cfvo type="num"><xm:f>3</xm:f></x14:cfvo><x14:cfvo type="num"><xm:f>7</xm:f></x14:cfvo></x14:iconSet></x14:cfRule><xm:sqref>A1</xm:sqref></x14:conditionalFormatting></x14:conditionalFormattings></ext></extLst>"#;
+        let xml = format!(
+            r#"<worksheet xmlns="{NS}" xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main" xmlns:xm="http://schemas.microsoft.com/office/excel/2006/main"><sheetData/><conditionalFormatting sqref="A2"><cfRule type="colorScale" priority="2"><formula>$B$1&gt;0</formula><colorScale><cfvo type="min"/><cfvo type="max"/><color rgb="FF000000"/><color rgb="FFFFFFFF"/></colorScale></cfRule><cfRule type="dataBar" priority="3"><dataBar><cfvo type="min"/><cfvo type="max"/><color rgb="FF638EC6"/></dataBar></cfRule></conditionalFormatting>{x14}</worksheet>"#
+        );
+        let (ws, _) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("worksheet parses");
+        let json = serde_json::to_value(&ws.conditional_formats).expect("serialize");
+        let formulas: Vec<(String, Option<String>)> = json
+            .as_array()
+            .expect("array")
+            .iter()
+            .flat_map(|cf| cf["rules"].as_array().expect("rules").clone())
+            .map(|r| {
+                (
+                    r["type"].as_str().unwrap_or("").to_string(),
+                    r["activeFormula"].as_str().map(str::to_string),
+                )
+            })
+            .collect();
+        assert!(formulas.contains(&("colorScale".into(), Some("$B$1>0".into()))));
+        assert!(formulas.contains(&("dataBar".into(), None)));
+        assert!(formulas.contains(&("iconSet".into(), Some("0".into()))));
     }
 
     /// An absent or false `stopIfTrue` is omitted from the wire on the
