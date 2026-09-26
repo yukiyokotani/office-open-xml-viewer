@@ -333,10 +333,12 @@ pub(in crate::ppt) fn adopt(
             ))
         })?
         .ok_or_else(|| unverifiable("part"))?;
-    // Relationship references (pictures, links) name parts this projection
-    // does not compare. A PowerPoint 16 control changes the rendered crop
-    // through an XML-only picture-fill edit, so keeping the binary here would
-    // silently discard visible information.
+    // Relationship references in the alternative part or a selected theme
+    // style name parts this projection does not compare. A PowerPoint 16
+    // control changes the rendered crop through an XML-only picture-fill
+    // edit, so keeping the binary here would silently discard visible
+    // information. A theme blip is likewise unverifiable without its owning
+    // package relationships, even when the shape XML has no r: attribute.
     if parsed.relationship_references {
         return Err(unverifiable("relationship"));
     }
@@ -1756,6 +1758,38 @@ mod tests {
                 preset: "pct5".into(),
             });
             unsupported(run_adopt(&patterned, &blob(&gradient), &theme(), AMPLE));
+        }
+
+        #[test]
+        fn non_presentation_root_and_theme_image_dependency_fail_closed() {
+            let element = element("FF0000");
+            for root in [
+                SHAPE_XML.replace(
+                    "http://schemas.openxmlformats.org/presentationml/2006/main",
+                    "urn:foreign",
+                ),
+                SHAPE_XML.replace("p:sp", "sp"),
+            ] {
+                let error = run_adopt(&element, &blob(&root), &theme(), AMPLE)
+                    .0
+                    .expect_err("foreign root cannot be adopted");
+                assert!(error.starts_with("UNSUPPORTED:"), "{error}");
+            }
+
+            let xml = SHAPE_XML
+                .replace("<a:solidFill><a:srgbClr val=\"FF0000\"/></a:solidFill>", "")
+                .replace(
+                    "</p:sp>",
+                    "<p:style><a:fillRef idx=\"1\"/></p:style></p:sp>",
+                );
+            let theme = Theme::Readable {
+                theme_xml: r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><a:themeElements><a:fmtScheme name="x"><a:fillStyleLst><a:blipFill><a:blip r:embed="rIdImage"/></a:blipFill></a:fillStyleLst></a:fmtScheme></a:themeElements></a:theme>"#.into(),
+                clr_map: None,
+            };
+            let error = run_adopt(&element, &blob(&xml), &theme, AMPLE)
+                .0
+                .expect_err("theme image relationship cannot be verified");
+            assert!(error.contains("relationship"), "{error}");
         }
     }
 
