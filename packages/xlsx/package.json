@@ -27,7 +27,8 @@
     },
     "./wasm": "./src/wasm/xlsx_parser.js",
     "./wasm-binary": "./src/wasm/xlsx_parser_bg.wasm",
-    "./internal/session": "./src/internal/session.ts"
+    "./internal/session": "./src/internal/session.ts",
+    "./internal/host-layout-measure": "./src/internal/host-layout-measure.ts"
   },
   "files": [
     "dist",

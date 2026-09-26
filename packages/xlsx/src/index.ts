@@ -132,6 +132,18 @@ export { type HyperlinkTarget, openExternalHyperlink } from '@silurus/ooxml-core
 // (ECMA-376 §18.4.8). Exported so headless callers that parse a Worksheet
 // directly (for example a bounded Node worksheet session) can concretize cell text.
 export { resolveSharedStrings } from './shared-strings.js';
+// Application-supplied model sources (LoadOptions.modelSources): the
+// format-generic contract for opening input that is not an OOXML package.
+export type {
+  ModelSource,
+  ModelSourceConfig,
+  ModelSourceConfigValue,
+  ModelSourceLoad,
+  ModelSourceModule,
+  ModelSourceModuleDescriptor,
+  ModelSourceTarget,
+  OpenedModelSource,
+} from '@silurus/ooxml-core';
 // Typed load-time error surfaced by XlsxWorkbook.load (e.g. a password-protected
 // or legacy-binary .xls file). Re-exported so `@silurus/ooxml/xlsx` consumers can
 // narrow on `err.code`.

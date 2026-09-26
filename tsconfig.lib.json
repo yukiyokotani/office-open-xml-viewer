@@ -21,7 +21,8 @@
       "@silurus/ooxml-docx": ["./packages/node/typecheck/docx-public-types.ts"],
       "@silurus/ooxml-docx/internal/session": ["./packages/docx/src/internal/session.ts"],
       "@silurus/ooxml-xlsx": ["./packages/xlsx/src/types.ts"],
-      "@silurus/ooxml-xlsx/internal/session": ["./packages/xlsx/src/internal/session.ts"]
+      "@silurus/ooxml-xlsx/internal/session": ["./packages/xlsx/src/internal/session.ts"],
+      "@silurus/ooxml-xlsx/internal/host-layout-measure": ["./packages/xlsx/src/internal/host-layout-measure.ts"]
     }
   }
 }

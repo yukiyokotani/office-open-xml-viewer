@@ -16,6 +16,9 @@ import {
   dropSvgImageCache,
   resolveOoxmlContainer,
   toArrayBuffer,
+  beginModelSourceLoad,
+  selectModelSource,
+  type AdmittedModelSourceLoad,
   type LoadOptions as CoreLoadOptions,
   type MathRenderer,
   type ChartThreeDRenderer,
@@ -77,7 +80,8 @@ import {
   isXlsxWorksheetPullResponse,
   XlsxWorksheetPullClient,
 } from './worksheet-pull-client.js';
-import { applyAutoRowHeights, bindXlsxOfficeFontRoutes, bindXlsxWorksheetOfficeFontRoutes, inheritSheetRenderCache, getGridGeometryForWorksheet } from './renderer.js';
+import { applyAutoRowHeights, bindXlsxOfficeFontRoutes, bindXlsxWorksheetOfficeFontRoutes, computeMdw, inheritSheetRenderCache, getGridGeometryForWorksheet, pinXlsxGridGeometry } from './renderer.js';
+import { respondToHostLayoutRequest } from './internal/host-layout.js';
 import {
   assertDelimitedTextSourceBytes,
   resolveDelimitedTextOptions,
@@ -115,6 +119,16 @@ interface RetainedFontSet {
 /** Options for {@link XlsxWorkbook.load}. Extends the shared load-options type
  *  from `@silurus/ooxml-core` (`useGoogleFonts`, `resourceLimits`, the
  *  deprecated `maxZipEntryBytes` alias, and `math`) with worker rendering. */
+/** Parse-request fields for an application-selected model source. */
+function modelSourceFields(
+  load: AdmittedModelSourceLoad | undefined,
+): { source?: AdmittedModelSourceLoad['module']; sourceTransfer?: readonly Transferable[] } {
+  if (!load) return {};
+  return load.transfer.length > 0
+    ? { source: load.module, sourceTransfer: load.transfer }
+    : { source: load.module };
+}
+
 export interface LoadOptions extends CoreLoadOptions {
   /**
    * 'main' (default): parse in a worker, render on the main thread (current
@@ -218,6 +232,20 @@ export class XlsxWorkbook {
       toError: (res) =>
         'type' in res && res.type === 'error' ? deserializeWorkerError(res) : undefined,
       onUnsolicited: (res) => {
+        // A model source's parse worker asks the page, which owns the
+        // renderer in this mode, to measure its Normal font (host-layout.ts).
+        if (respondToHostLayoutRequest(
+          (message) => worker.postMessage(message),
+          res,
+          (font) => computeMdw(
+            font.family,
+            font.sizePt,
+            undefined,
+            this.googleSubstitutes,
+            font.bold ? 700 : 400,
+            font.italic ? 'italic' : 'normal',
+          ),
+        )) return;
         respondToWorkerSvgDecodeRequest(
           (message, transfer) => (
             worker.postMessage as (value: unknown, transfer?: Transferable[]) => void
@@ -365,7 +393,16 @@ export class XlsxWorkbook {
     } else {
       buffer = source;
     }
-    buffer = toArrayBuffer(await resolveOoxmlContainer(buffer, opts.password));
+    // An application-supplied model source claims its input from the raw bytes
+    // before OOXML container resolution; without `modelSources` nothing here
+    // runs and the OOXML path is unchanged.
+    let sourceLoad: AdmittedModelSourceLoad | undefined;
+    if (opts.modelSources !== undefined) {
+      const selected = selectModelSource(opts.modelSources, 'xlsx', new Uint8Array(buffer));
+      if (selected) sourceLoad = beginModelSourceLoad(selected, 'xlsx');
+    }
+    try {
+    if (!sourceLoad) buffer = toArrayBuffer(await resolveOoxmlContainer(buffer, opts.password));
     const preserveCallerBuffer = buffer === callerBuffer;
     metrics.setSourceBytes(buffer.byteLength);
     metrics.checkpoint('container ready');
@@ -377,7 +414,7 @@ export class XlsxWorkbook {
         : new InlineWorker();
     let wb: XlsxWorkbook | undefined;
     try {
-      wb = new XlsxWorkbook(worker, mode, opts.wasmUrl);
+      wb = new XlsxWorkbook(worker, mode, opts.wasmUrl, sourceLoad === undefined);
       wb.metrics = metrics;
       await wb._load(
         buffer,
@@ -385,6 +422,7 @@ export class XlsxWorkbook {
         resourceOptions.policy,
         (usage) => metrics.observeUsage(usage),
         preserveCallerBuffer,
+        sourceLoad,
       );
       metrics.checkpoint('workbook index ready');
       metrics.succeed({ sheets: wb.sheetCount });
@@ -393,6 +431,9 @@ export class XlsxWorkbook {
       const rejectedWorkbook = wb;
       disposeRejectedLoad(worker, rejectedWorkbook ? () => rejectedWorkbook.destroy() : undefined);
       throw error;
+    }
+    } finally {
+      sourceLoad?.release();
     }
     } catch (error) {
       metrics.fail(error);
@@ -410,6 +451,7 @@ export class XlsxWorkbook {
     resourcePolicy: NormalizedOoxmlResourcePolicy = normalizeResourcePolicy(opts),
     onUsage?: (usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => void,
     preserveCallerBuffer = false,
+    sourceLoad?: AdmittedModelSourceLoad,
   ): Promise<void> {
     const bridge = this.requireBridge();
     this.resourceFailure = null;
@@ -473,14 +515,16 @@ export class XlsxWorkbook {
               useGoogleFonts: !!opts.useGoogleFonts,
               cjkFallback: this.cjkFallback,
               renderers: rendererDescriptors,
+              ...modelSourceFields(sourceLoad),
             } satisfies RenderWorkerRequest)
           : ({
               type: 'parse',
               id,
               data: workerData,
               resourcePolicy,
+              ...modelSourceFields(sourceLoad),
             } satisfies WorkerRequest),
-      [workerData],
+      [workerData, ...(sourceLoad?.transfer ?? [])],
       { timeoutMs: opts.workerTimeoutMs },
     );
     // Both modes carry the light, workbook-level ParsedWorkbook back, so
@@ -491,11 +535,13 @@ export class XlsxWorkbook {
       this.parsedWorkbook = response.workbook;
       if (response.usage) onUsage?.(response.usage);
     } else {
-      const { workbookJson, usage } = parsed as Extract<WorkerResponse, { type: 'parsed' }>;
+      const { workbookJson, usage, layoutMetrics } = parsed as Extract<WorkerResponse, { type: 'parsed' }>;
       if (usage) onUsage?.(usage);
-      this.parsedWorkbook = JSON.parse(
+      const decoded = JSON.parse(
         new TextDecoder().decode(new Uint8Array(workbookJson)),
       ) as ParsedWorkbook;
+      if (layoutMetrics) decoded.layoutMetrics = { maximumDigitWidth: layoutMetrics.maximumDigitWidth };
+      this.parsedWorkbook = decoded;
     }
     const parsedWorkbook = this.parsedWorkbook;
     if (!parsedWorkbook) throw new Error('XLSX worker returned no workbook metadata');
@@ -831,6 +877,11 @@ export class XlsxWorkbook {
       const mainOffice = typeof document !== 'undefined'
         ? this.retainedFontSets.get(document.fonts)?.loaded?.office : undefined;
       bindXlsxWorksheetOfficeFontRoutes(terminal, mainOffice?.routes, this.googleSubstitutes);
+      // A model source's host layout fixed the Normal-font width before
+      // parsing; pin it after the font-route bind, which may invalidate
+      // geometry, so the grid keeps the width its anchors were resolved with.
+      const hostLayoutMdw = this.parsedWorkbook?.layoutMetrics?.maximumDigitWidth;
+      if (hostLayoutMdw !== undefined) pinXlsxGridGeometry(terminal, hostLayoutMdw);
       return terminal;
     } catch (error) {
       if (error instanceof OoxmlResourceLimitError) this.resourceFailure ??= error;
@@ -1060,7 +1111,8 @@ export class XlsxWorkbook {
         // withWorksheetArchiveOperation, avoiding a nested FIFO acquisition.
         {
           ...renderOpts,
-          authoritativeMdw: extracted.layoutMetrics?.maximumDigitWidth,
+          authoritativeMdw: extracted.layoutMetrics?.maximumDigitWidth
+            ?? this.parsedWorkbook?.layoutMetrics?.maximumDigitWidth,
           officeFontRoutes: targetFontSet
             ? this.retainedFontSets.get(targetFontSet)?.loaded?.office.routes
             : undefined,
@@ -1107,7 +1159,8 @@ export class XlsxWorkbook {
             sheetIndex,
             viewport,
             opts: wireOpts,
-            layoutMetrics: extracted.layoutMetrics,
+            layoutMetrics: extracted.layoutMetrics
+              ?? this.parsedWorkbook?.layoutMetrics,
             viewProjection: extracted.projection,
           }) satisfies RenderWorkerRequest,
         ));
