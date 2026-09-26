@@ -66,6 +66,67 @@ impl ooxml_common::chart::ColorResolver for PptxColorResolver<'_> {
     }
 }
 
+// Keep the package sidecars explicit: this adapter is the shared call site for
+// classic and chartEx parts, and grouping them adds code to the WASM binary.
+#[allow(clippy::too_many_arguments)]
+fn parse_chart_with_images(
+    xml: &str,
+    style_xml: Option<&str>,
+    color_style_xml: Option<&str>,
+    user_shapes_xml: Option<&str>,
+    theme: &HashMap<String, String>,
+    theme_format_scheme: Option<&ooxml_common::theme::ThemeFormatScheme>,
+    image_resolver: &dyn ooxml_common::chart::ChartImageResolver,
+    is_chartex: bool,
+) -> Option<ChartElement> {
+    let doc = parse_preflighted_pptx_xml(xml).ok()?;
+    let root = doc.root_element();
+    let resolver = PptxColorResolver {
+        theme,
+        theme_format_scheme,
+    };
+    let context = ooxml_common::chart::ChartParseContext {
+        color_resolver: Some(&resolver),
+        style_xml,
+        color_style_xml,
+        images: Some(image_resolver),
+        references: std::cell::Cell::new(None),
+    };
+    let mut chart = if is_chartex {
+        ooxml_common::chart::parse_chartex_part(root, &context)?
+    } else {
+        ooxml_common::chart::parse_chart_part(root, &context)?
+    };
+    if is_chartex {
+        apply_powerpoint_chartex_chart_space_frame(root, &mut chart);
+    } else {
+        apply_powerpoint_classic_chart_space_frame(&mut chart);
+        if let Some(user_shapes_xml) = user_shapes_xml {
+            if let Ok(user_shapes_doc) = parse_preflighted_pptx_xml(user_shapes_xml) {
+                let text_boxes = ooxml_common::chart::parse_chart_user_shapes_for_chart(
+                    root,
+                    user_shapes_doc.root_element(),
+                    &resolver,
+                );
+                if !text_boxes.is_empty() {
+                    chart.chart_text_boxes = Some(text_boxes);
+                }
+            }
+        }
+    }
+    Some(ChartElement {
+        id: None,
+        x: 0,
+        y: 0,
+        width: 0,
+        height: 0,
+        rotation: 0.0,
+        flip_h: false,
+        flip_v: false,
+        chart,
+    })
+}
+
 /// Parse a legacy OOXML chart (`c:` namespace) — barChart / lineChart etc.
 ///
 /// Thin pptx adapter over the shared
@@ -121,43 +182,16 @@ pub(crate) fn parse_legacy_chart_with_style_parts_and_images(
     theme_format_scheme: Option<&ooxml_common::theme::ThemeFormatScheme>,
     image_resolver: &dyn ooxml_common::chart::ChartImageResolver,
 ) -> Option<ChartElement> {
-    let doc = parse_preflighted_pptx_xml(xml).ok()?;
-    let root = doc.root_element();
-    let resolver = PptxColorResolver {
-        theme,
-        theme_format_scheme,
-    };
-    let mut chart = ooxml_common::chart::parse_chart_part_with_style_parts_and_images(
-        root,
-        &resolver,
+    parse_chart_with_images(
+        xml,
         style_xml,
         color_style_xml,
+        user_shapes_xml,
+        theme,
+        theme_format_scheme,
         image_resolver,
-    )?;
-    apply_powerpoint_classic_chart_space_frame(&mut chart);
-    if let Some(user_shapes_xml) = user_shapes_xml {
-        if let Ok(user_shapes_doc) = parse_preflighted_pptx_xml(user_shapes_xml) {
-            let text_boxes = ooxml_common::chart::parse_chart_user_shapes_for_chart(
-                root,
-                user_shapes_doc.root_element(),
-                &resolver,
-            );
-            if !text_boxes.is_empty() {
-                chart.chart_text_boxes = Some(text_boxes);
-            }
-        }
-    }
-    Some(ChartElement {
-        id: None,
-        x: 0,
-        y: 0,
-        width: 0,
-        height: 0,
-        rotation: 0.0,
-        flip_h: false,
-        flip_v: false,
-        chart,
-    })
+        false,
+    )
 }
 
 /// Parse a modern chartEx (cx: namespace) — waterfall, treemap, etc.
@@ -195,36 +229,17 @@ pub(crate) fn parse_chartex_with_images(
     theme_format_scheme: Option<&ooxml_common::theme::ThemeFormatScheme>,
     image_resolver: &dyn ooxml_common::chart::ChartImageResolver,
 ) -> Option<ChartElement> {
-    let doc = parse_preflighted_pptx_xml(xml).ok()?;
-    let root = doc.root_element();
-    let resolver = PptxColorResolver {
-        theme,
-        theme_format_scheme,
-    };
-    // The shared chart grammar reparses the optional style XML. Admit it
-    // through the PPTX-local node ceiling first so the second parse only ever
-    // sees an already bounded document.
-    // chartEx (waterfall/boxWhisker/…) reads its title font size from the
-    // associated chartStyle part when the `<cx:title>` itself carries none.
-    let mut chart = ooxml_common::chart::parse_chartex_part_with_style_parts_and_images(
-        root,
-        &resolver,
+    // The shared chart grammar reparses optional style XML after this entry.
+    parse_chart_with_images(
+        xml,
         style_xml,
         color_style_xml,
+        None,
+        theme,
+        theme_format_scheme,
         image_resolver,
-    )?;
-    apply_powerpoint_chartex_chart_space_frame(root, &mut chart);
-    Some(ChartElement {
-        id: None,
-        x: 0,
-        y: 0,
-        width: 0,
-        height: 0,
-        rotation: 0.0,
-        flip_h: false,
-        flip_v: false,
-        chart,
-    })
+        true,
+    )
 }
 
 #[cfg(test)]

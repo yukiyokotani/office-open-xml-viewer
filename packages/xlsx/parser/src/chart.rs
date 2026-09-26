@@ -737,55 +737,38 @@ pub(crate) fn load_sheet_charts_with_theme_images(
                     theme_minor_font_latin: theme_fonts.1,
                     theme_format_scheme,
                 };
-                let chart_opt = if let Some(context) = reference_context.as_mut() {
-                    let mut references = XlsxChartReferenceResolver {
-                        archive,
-                        materialized_rows: context.materialized_rows,
-                        materialized_col_hidden: context.materialized_col_hidden,
-                        sheet_name: context.sheet_name,
-                        sheets: context.sheets,
-                        workbook_rels: context.workbook_rels,
-                        shared_strings: context.shared_strings,
-                        defined_names: context.defined_names,
-                        number_formats: context.number_formats,
-                        session: context.session,
-                        visibility_cache: HashMap::new(),
-                    };
-                    if is_chartex {
-                        ooxml_common::chart::parse_chartex_part_with_references_style_parts_and_images(
-                            chart_doc.root_element(),
-                            &resolver,
-                            related_parts.style_xml.as_deref(),
-                            related_parts.color_style_xml.as_deref(),
-                            &mut references,
-                            &image_resolver,
-                        )
-                    } else {
-                        ooxml_common::chart::parse_chart_part_with_references_style_parts_and_images(
-                            chart_doc.root_element(),
-                            &resolver,
-                            related_parts.style_xml.as_deref(),
-                            related_parts.color_style_xml.as_deref(),
-                            &mut references,
-                            &image_resolver,
-                        )
-                    }
-                } else if is_chartex {
-                    ooxml_common::chart::parse_chartex_part_with_style_parts_and_images(
+                let mut references =
+                    reference_context
+                        .as_mut()
+                        .map(|context| XlsxChartReferenceResolver {
+                            archive,
+                            materialized_rows: context.materialized_rows,
+                            materialized_col_hidden: context.materialized_col_hidden,
+                            sheet_name: context.sheet_name,
+                            sheets: context.sheets,
+                            workbook_rels: context.workbook_rels,
+                            shared_strings: context.shared_strings,
+                            defined_names: context.defined_names,
+                            number_formats: context.number_formats,
+                            session: context.session,
+                            visibility_cache: HashMap::new(),
+                        });
+                let chart_context = ooxml_common::chart::ChartParseContext::new(
+                    &resolver,
+                    related_parts.style_xml.as_deref(),
+                    related_parts.color_style_xml.as_deref(),
+                    Some(&image_resolver),
+                    references.as_mut().map(|resolver| {
+                        resolver as &mut dyn ooxml_common::chart::ChartReferenceResolver
+                    }),
+                );
+                let chart_opt = if is_chartex {
+                    ooxml_common::chart::parse_chartex_part(
                         chart_doc.root_element(),
-                        &resolver,
-                        related_parts.style_xml.as_deref(),
-                        related_parts.color_style_xml.as_deref(),
-                        &image_resolver,
+                        &chart_context,
                     )
                 } else {
-                    ooxml_common::chart::parse_chart_part_with_style_parts_and_images(
-                        chart_doc.root_element(),
-                        &resolver,
-                        related_parts.style_xml.as_deref(),
-                        related_parts.color_style_xml.as_deref(),
-                        &image_resolver,
-                    )
+                    ooxml_common::chart::parse_chart_part(chart_doc.root_element(), &chart_context)
                 };
                 let Some(mut chart) = chart_opt else {
                     continue;
@@ -1057,8 +1040,14 @@ mod solid_fill_color_tests {
             );
             {
                 let document = Document::parse(&xml).expect("chart XML");
-                ooxml_common::chart::parse_chart_part(document.root_element(), &resolver)
-                    .expect("Excel chart")
+                ooxml_common::chart::parse_chart_part(
+                    document.root_element(),
+                    &ooxml_common::chart::ChartParseContext {
+                        color_resolver: Some(&resolver),
+                        ..Default::default()
+                    },
+                )
+                .expect("Excel chart")
             }
         };
         let chart = parse(2);
@@ -1142,7 +1131,14 @@ mod solid_fill_color_tests {
             theme_minor_font_latin: None,
             theme_format_scheme: None,
         };
-        let chart = ooxml_common::chart::parse_chart_part(doc.root_element(), &resolver).unwrap();
+        let chart = ooxml_common::chart::parse_chart_part(
+            doc.root_element(),
+            &ooxml_common::chart::ChartParseContext {
+                color_resolver: Some(&resolver),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!(chart.series[0].color.as_deref(), Some("A6A6A6"));
     }
 
@@ -1173,8 +1169,14 @@ mod solid_fill_color_tests {
         };
         let doc = Document::parse(&xml).expect("chartSpace fixture");
 
-        let chart = ooxml_common::chart::parse_chart_part(doc.root_element(), &resolver)
-            .expect("chart should parse");
+        let chart = ooxml_common::chart::parse_chart_part(
+            doc.root_element(),
+            &ooxml_common::chart::ChartParseContext {
+                color_resolver: Some(&resolver),
+                ..Default::default()
+            },
+        )
+        .expect("chart should parse");
 
         assert_eq!(chart.series[0].color.as_deref(), Some("00AA00"));
     }
@@ -1199,8 +1201,14 @@ mod solid_fill_color_tests {
             theme_format_scheme: None,
         };
         let doc = Document::parse(&xml).expect("chartSpace fixture");
-        let chart = ooxml_common::chart::parse_chart_part(doc.root_element(), &resolver)
-            .expect("chart should parse");
+        let chart = ooxml_common::chart::parse_chart_part(
+            doc.root_element(),
+            &ooxml_common::chart::ChartParseContext {
+                color_resolver: Some(&resolver),
+                ..Default::default()
+            },
+        )
+        .expect("chart should parse");
         let series = &chart.series[0];
         assert_eq!(series.invert_if_negative, None);
         assert_eq!(series.automatic_negative_style, Some(true));
