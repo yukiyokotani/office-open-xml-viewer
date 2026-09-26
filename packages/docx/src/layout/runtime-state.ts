@@ -1,6 +1,6 @@
 import type { LayoutServices } from './types.js';
 import type { PaintResourceRegistry } from './types.js';
-import type { NumberFormat } from '@silurus/ooxml-core';
+import type { KinsokuRules, NumberFormat } from '@silurus/ooxml-core';
 import type { BodyLayoutKernel } from './body-layout-kernel.js';
 import type { LayoutVariantStore } from './variant-store.js';
 import type { VerticalGlyphMeasurementService } from './measurement-capabilities.js';
@@ -87,8 +87,11 @@ const layoutVariantStores = new WeakMap<LayoutServices, LayoutVariantStore>();
  * handle through createLayoutServicesRuntimeView. */
 export interface ParagraphAcquisitionRuntimeCache {
   objectIdentity(value: object): number;
+  kinsokuKey(rules: KinsokuRules): readonly [boolean, readonly number[], readonly number[]];
   get(input: object, key: string): unknown;
   set(input: object, key: string, value: unknown): void;
+  getLineBreaking(input: object, key: string): unknown;
+  setLineBreaking(input: object, key: string, value: unknown): void;
   noteMiss(): void;
 }
 
@@ -109,6 +112,8 @@ const paragraphAcquisitionCaches = new WeakMap<
 function createParagraphAcquisitionRuntimeCache(): ParagraphAcquisitionRuntimeCache {
   const identities = new WeakMap<object, number>();
   const results = new WeakMap<object, Map<string, unknown>>();
+  const lineBreaks = new WeakMap<object, Map<string, unknown>>();
+  const kinsokuKeys = new WeakMap<KinsokuRules, readonly [boolean, readonly number[], readonly number[]]>();
   let nextIdentity = 1;
   let missCount = 0;
   return Object.freeze({
@@ -120,6 +125,21 @@ function createParagraphAcquisitionRuntimeCache(): ParagraphAcquisitionRuntimeCa
         identities.set(value, retained);
       }
       return retained;
+    },
+    kinsokuKey(rules: KinsokuRules) {
+      let key = kinsokuKeys.get(rules);
+      if (!key) {
+        // Document layout settings own this §17.3.1.16 / §17.15.1.58-.59
+        // rule set for the whole pagination session. Its values are settled
+        // before any paragraph context is made.
+        key = [
+          rules.enabled,
+          [...rules.lineStartForbidden].sort((left, right) => left - right),
+          [...rules.lineEndForbidden].sort((left, right) => left - right),
+        ];
+        kinsokuKeys.set(rules, key);
+      }
+      return key;
     },
     get(input: object, key: string): unknown {
       const byKey = results.get(input);
@@ -146,6 +166,25 @@ function createParagraphAcquisitionRuntimeCache(): ParagraphAcquisitionRuntimeCa
       while (byKey.size > 2) {
         byKey.delete(byKey.keys().next().value!);
       }
+    },
+    getLineBreaking(input: object, key: string): unknown {
+      const byKey = lineBreaks.get(input);
+      if (!byKey?.has(key)) return undefined;
+      const value = byKey.get(key);
+      byKey.delete(key);
+      byKey.set(key, value);
+      return value;
+    },
+    setLineBreaking(input: object, key: string, value: unknown): void {
+      let byKey = lineBreaks.get(input);
+      if (!byKey) {
+        byKey = new Map();
+        lineBreaks.set(input, byKey);
+      }
+      byKey.set(key, value);
+      // Context/field variants can produce distinct line partitions for one
+      // paragraph. Bound them separately from its two retained placements.
+      while (byKey.size > 2) byKey.delete(byKey.keys().next().value!);
     },
     noteMiss(): void {
       missCount += 1;

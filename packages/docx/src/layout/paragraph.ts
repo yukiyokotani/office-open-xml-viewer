@@ -4081,17 +4081,30 @@ function mergeAnchorCollisions(
   ]);
 }
 
-export function paragraphAcquisitionCacheKey(
+/**
+ * The line key keeps the weak-map paragraph identity (runs, paragraph mark,
+ * numbering) plus every input read by measureParagraph/buildSegments/layoutLines:
+ * width/X, paragraph context, measurer, text/math services, vertical glyphs,
+ * document compatibility settings, continuation, and field/note values only
+ * for runs that consume them. Page/flow IDs, source, border/shading/trailing
+ * extent, anchor frames/collisions, source-range rebasing, and page writing
+ * frame are consumed by retained placement, so only the exact v1 key owns them.
+ * startYPt, maximumYPt, and suppressed space-before are also exact-placement
+ * inputs. Active line grids and wrap authorities are gated below before line
+ * reuse; the exact key still includes all of their original facts.
+ */
+function paragraphAcquisitionKey(
   cache: ParagraphAcquisitionRuntimeCache,
   paragraph: ParagraphAcquisitionInput,
   options: ParagraphAcquisitionOptions,
   continuation?: Parameters<typeof measureParagraph>[5],
+  lineOnly = false,
 ): string {
   const layoutServices = options.environment.layoutServices;
   const verticalGlyphMeasurement = options.environment.verticalGlyphMeasurement;
   const anchorFrames = options.anchorFrames;
-  const hasAnchoredPayload = paragraph.runs.some(anchoredPayloadRun);
-  const hasCompleteTextBox = paragraph.runs.some((run) =>
+  const hasAnchoredPayload = !lineOnly && paragraph.runs.some(anchoredPayloadRun);
+  const hasCompleteTextBox = !lineOnly && paragraph.runs.some((run) =>
     run.type === 'shape' && run.textBoxInput?.kind === 'complete');
   const {
     wrap,
@@ -4099,22 +4112,27 @@ export function paragraphAcquisitionCacheKey(
   } = options.placement;
   const context = options.context;
   const environment = options.environment;
+  const hasFieldRun = lineOnly && paragraph.runs.some((run) => run.type === 'field');
+  const hasNoteReference = lineOnly && paragraph.runs.some((run) =>
+    run.type === 'text' && run.noteRef !== undefined);
   // Fixed-order tuples avoid the recursive generic fingerprint cost on this hot
   // path. A different property insertion order may conservatively miss for the
   // explicitly JSON-valued geometry below, but can never alias different facts.
-  return `paragraph-acquisition-v1:${JSON.stringify([
-    options.id,
-    [options.source.story, options.source.storyInstance, options.source.path],
-    options.flowDomainId,
-    options.ordinaryFlow,
-    [
-      plainPlacement.startYPt,
-      plainPlacement.paragraphXPt,
-      plainPlacement.availableWidthPt,
-      plainPlacement.maximumYPt,
-      plainPlacement.suppressSpaceBefore,
-      wrap ? cache.objectIdentity(wrap) : null,
-    ],
+  return `${lineOnly ? 'paragraph-line-breaking-v1' : 'paragraph-acquisition-v1'}:${JSON.stringify([
+    lineOnly ? null : options.id,
+    lineOnly ? null : [options.source.story, options.source.storyInstance, options.source.path],
+    lineOnly ? null : options.flowDomainId,
+    lineOnly ? null : options.ordinaryFlow,
+    lineOnly
+      ? [plainPlacement.paragraphXPt, plainPlacement.availableWidthPt]
+      : [
+          plainPlacement.startYPt,
+          plainPlacement.paragraphXPt,
+          plainPlacement.availableWidthPt,
+          plainPlacement.maximumYPt,
+          plainPlacement.suppressSpaceBefore,
+          wrap ? cache.objectIdentity(wrap) : null,
+        ],
     [
       context.lineGrid.active,
       context.lineGrid.pitchPt,
@@ -4141,34 +4159,31 @@ export function paragraphAcquisitionCacheKey(
       context.tabStops.map((stop) => [stop.pos, stop.alignment, stop.leader]),
       context.hasRuby,
       context.hasEastAsianText,
-      [
-        context.kinsoku.enabled,
-        [...context.kinsoku.lineStartForbidden].sort((left, right) => left - right),
-        [...context.kinsoku.lineEndForbidden].sort((left, right) => left - right),
-      ],
+      cache.kinsokuKey(context.kinsoku),
       context.defaultTabPt,
       context.overflowPunct !== false,
       context.numberingMarkerGeometry
         ? JSON.stringify(context.numberingMarkerGeometry)
         : null,
       context.mathDefJc ?? null,
+      ...(lineOnly ? [context.characterGrid.pitchPt] : []),
     ],
     [
       cache.objectIdentity(options.measurer.context),
       cache.objectIdentity(options.measurer.fontFamilyClasses),
     ],
     [
-      environment.pageIndex,
-      environment.totalPages,
-      environment.displayPageNumber ?? null,
-      environment.pageNumberFormat ?? null,
-      environment.currentDateMs ?? null,
-      environment.noteNumbers
-        ? [...environment.noteNumbers.entries()]
-          .sort(([left], [right]) => left.localeCompare(right))
-        : null,
-      environment.noteReferenceNumber ?? null,
-      environment.noteNumbering
+      lineOnly && !hasFieldRun ? null : environment.pageIndex,
+      lineOnly && !hasFieldRun ? null : environment.totalPages,
+      lineOnly && !hasFieldRun ? null : environment.displayPageNumber ?? null,
+      lineOnly && !hasFieldRun ? null : environment.pageNumberFormat ?? null,
+      lineOnly && !hasFieldRun ? null : environment.currentDateMs ?? null,
+      (lineOnly && !hasNoteReference) || !environment.noteNumbers
+        ? null
+        : [...environment.noteNumbers.entries()]
+          .sort(([left], [right]) => left.localeCompare(right)),
+      lineOnly && !hasNoteReference ? null : environment.noteReferenceNumber ?? null,
+      lineOnly && !hasNoteReference ? null : environment.noteNumbering
         ? [
           environment.noteNumbering.footnote.format,
           environment.noteNumbering.footnote.start,
@@ -4176,9 +4191,9 @@ export function paragraphAcquisitionCacheKey(
           environment.noteNumbering.endnote.start,
         ]
         : null,
-      environment.pageWritingMode,
+      lineOnly ? null : environment.pageWritingMode,
       environment.verticalCJK ?? null,
-      environment.verticalPageFrame ?? null,
+      lineOnly ? null : environment.verticalPageFrame ?? null,
       environment.documentHasEastAsianText,
       environment.useFeLayout ?? null,
       environment.balanceSingleByteDoubleByteWidth ?? null,
@@ -4192,18 +4207,25 @@ export function paragraphAcquisitionCacheKey(
       layoutServices?.math.fingerprint ?? null,
       layoutServices?.verticalGlyphFingerprint ?? null,
       verticalGlyphMeasurement?.fingerprint ?? null,
+      ...(lineOnly ? [
+        environment.showTrackedChanges === true,
+        environment.revisionAuthorColor
+          ? cache.objectIdentity(environment.revisionAuthorColor) : null,
+        environment.enableOpenTypeFeatures === true,
+        environment.positionExtendsLineBox !== false,
+      ] : []),
     ],
-    JSON.stringify(options.exclusions),
-    hasAnchoredPayload ? JSON.stringify(options.anchorCollisions ?? []) : null,
+    lineOnly ? null : JSON.stringify(options.exclusions),
+    lineOnly || !hasAnchoredPayload ? null : JSON.stringify(options.anchorCollisions ?? []),
     continuation ? JSON.stringify(continuation) : null,
-    options.paragraphBorderEdges
+    lineOnly ? null : options.paragraphBorderEdges
       ? [options.paragraphBorderEdges.top, options.paragraphBorderEdges.bottom]
       : null,
-    options.trailingExtentPt ?? null,
-    options.containerShading ?? null,
+    lineOnly ? null : options.trailingExtentPt ?? null,
+    lineOnly ? null : options.containerShading ?? null,
     options.continuesFromPrevious ?? null,
-    options.sourceRangeStart ?? null,
-    anchorFrames ? [
+    lineOnly ? null : options.sourceRangeStart ?? null,
+    lineOnly ? null : anchorFrames ? [
       anchorFrames.page
         ? [
             anchorFrames.page.xPt,
@@ -4230,11 +4252,62 @@ export function paragraphAcquisitionCacheKey(
         : null,
       anchorFrames.pageParity,
     ] : null,
-    hasAnchoredPayload ? JSON.stringify(options.anchorCellBounds ?? null) : null,
-    hasCompleteTextBox && options.acquireCompleteStory
-      ? cache.objectIdentity(options.acquireCompleteStory)
-      : null,
+    lineOnly || !hasAnchoredPayload ? null : JSON.stringify(options.anchorCellBounds ?? null),
+    lineOnly || !hasCompleteTextBox || !options.acquireCompleteStory
+      ? null : cache.objectIdentity(options.acquireCompleteStory),
   ])}`;
+}
+
+export function paragraphAcquisitionCacheKey(
+  cache: ParagraphAcquisitionRuntimeCache,
+  paragraph: ParagraphAcquisitionInput,
+  options: ParagraphAcquisitionOptions,
+  continuation?: Parameters<typeof measureParagraph>[5],
+): string {
+  return paragraphAcquisitionKey(cache, paragraph, options, continuation);
+}
+
+/**
+ * Position-sensitive line breaking is limited to float/wrap exclusions and
+ * self-owned anchor exclusions, which feed absolute line windows and pageH to
+ * layoutLines. Line grids remain on the exact-position path conservatively,
+ * since section/page-relative snapping must not inherit a partition measured
+ * at another origin.
+ * With none of these, measureParagraph uses startYPt and suppressed space-before
+ * only to place its already-broken lines. maximumYPt/page-bottom fitting is
+ * consumed by pagination after acquisition; it cannot alter this line partition.
+ * The line key above retains the remaining measurement inputs; the exact
+ * acquisition key retains the placement-only inputs as well.
+ */
+function lineBreakingDependsOnPosition(
+  paragraph: ParagraphAcquisitionInput,
+  options: ParagraphAcquisitionOptions,
+): boolean {
+  return options.placement.wrap !== undefined
+    || options.exclusions.length > 0
+    || options.context.lineGrid.active
+    || paragraph.runs.some(anchoredPayloadRun);
+}
+
+/** Reapply the same cursor arithmetic as measureParagraph to immutable lines. */
+function placeCachedLineBreaking(
+  template: MeasuredParagraph,
+  placement: MeasurementPlacement,
+): MeasuredParagraph {
+  let cursorPt = placement.startYPt
+    + (placement.suppressSpaceBefore ? 0 : template.requestedSpaceBeforePt);
+  const lines = template.lines.map((line) => {
+    const placed = Object.freeze({ ...line, topYPt: cursorPt });
+    cursorPt += line.advancePt;
+    return placed;
+  });
+  return Object.freeze({
+    ...template,
+    lines: Object.freeze(lines),
+    contentStartYPt: lines[0]!.topYPt,
+    contentEndYPt: cursorPt,
+    placement: Object.freeze({ ...placement }),
+  });
 }
 
 type MeasuredLayoutSegment = LayoutLine['segments'][number];
@@ -4325,6 +4398,13 @@ export function acquireParagraphResult(
     : cache!.get(paragraph, cacheKey) as AcquiredParagraphResult | undefined;
   if (cached) return cached;
   cache?.noteMiss();
+  const reusableLineKey = !lineBreakingDependsOnPosition(paragraph, options)
+    && cache
+    ? paragraphAcquisitionKey(cache, paragraph, options, continuation, true)
+    : undefined;
+  const lineTemplate = reusableLineKey === undefined
+    ? undefined
+    : cache!.getLineBreaking(paragraph, reusableLineKey) as MeasuredParagraph | undefined;
   const externallyOwnedOccurrenceIds = externalExclusionOccurrenceIds(options.exclusions);
   const occurrenceIds = new Set(paragraph.runs.flatMap((run) =>
     anchoredPayloadRun(run) ? [run.anchorAcquisitionInput!.occurrenceId] : []));
@@ -4354,7 +4434,9 @@ export function acquireParagraphResult(
           options.exclusions,
           previous?.ownedExclusions ?? initialOwnedExclusions,
         );
-        const measured = measureParagraph(
+        const measured = lineTemplate
+          ? placeCachedLineBreaking(lineTemplate, options.placement)
+          : measureParagraph(
           paragraph,
           acquisitionOptions.context,
           measurementPlacement(options, effectiveExclusions),
@@ -4370,7 +4452,7 @@ export function acquireParagraphResult(
             } : {}),
           },
           continuation,
-        );
+          );
         const layout = paragraphLayoutFromMeasurement(paragraph, acquisitionOptions, measured);
         const ownedExclusions = canonicalOwnedExclusions(layout, occurrenceIds);
         const nextEffectiveExclusions = mergeParagraphExclusions(
@@ -4392,13 +4474,18 @@ export function acquireParagraphResult(
     // A cache hit may cross convergence passes. Retain an immutable measurement
     // envelope without recursively freezing caller-owned capabilities such as
     // the wrap oracle referenced by placement.
-    const immutableMeasured: MeasuredParagraph = Object.freeze({
-      ...result.measured,
-      lines: Object.freeze(result.measured.lines.map(immutableMeasuredLine)),
-      placement: Object.freeze({ ...result.measured.placement }),
-    });
+    const immutableMeasured: MeasuredParagraph = lineTemplate
+      ? result.measured
+      : Object.freeze({
+          ...result.measured,
+          lines: Object.freeze(result.measured.lines.map(immutableMeasuredLine)),
+          placement: Object.freeze({ ...result.measured.placement }),
+        });
     const acquired = Object.freeze({ measured: immutableMeasured, layout: result.layout });
     if (cacheKey !== undefined) cache!.set(paragraph, cacheKey, acquired);
+    if (reusableLineKey !== undefined && !lineTemplate && !immutableMeasured.markOnly) {
+      cache!.setLineBreaking(paragraph, reusableLineKey, immutableMeasured);
+    }
     return acquired;
   } catch (error) {
     if (error instanceof ExactConvergenceError) {

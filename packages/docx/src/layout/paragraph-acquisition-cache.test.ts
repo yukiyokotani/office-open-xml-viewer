@@ -255,6 +255,103 @@ describe('paragraph acquisition cache', () => {
     expect(at(73)).not.toBe(second);
   });
 
+  it('reuses line breaking after a vertical move but remeasures position-sensitive lines', () => {
+    const services = scopedServices();
+    const input = paragraphAcquisitionInput(textParagraph('a paragraph long enough to wrap across lines'), source);
+    const base = options(services, {
+      context: { ...context, spaceBeforePt: 6 },
+      placement: { ...options(services).placement, availableWidthPt: 80 },
+    });
+    const at = (startYPt: number, overrides: Partial<ParagraphAcquisitionOptions> = {}) =>
+      acquireParagraphResult(input, {
+        ...base,
+        placement: { ...base.placement, startYPt },
+        ...overrides,
+      });
+
+    const first = at(72);
+    const moved = at(92);
+    expect(moved.measured.lines[0]!.layout).toBe(first.measured.lines[0]!.layout);
+    expect(moved.measured.lines.map((line) => line.layout))
+      .toEqual(first.measured.lines.map((line) => line.layout));
+    expect(moved.layout.flowBounds.yPt).toBe(92);
+    const withoutCache = acquireParagraphResult(
+      paragraphAcquisitionInput(textParagraph('a paragraph long enough to wrap across lines'), source),
+      { ...base, placement: { ...base.placement, startYPt: 92 } },
+    );
+    expect(moved.measured).toEqual(withoutCache.measured);
+    expect(moved.layout).toEqual(withoutCache.layout);
+
+    const suppressed = at(112, {
+      placement: {
+        ...base.placement, startYPt: 112, maximumYPt: 300, suppressSpaceBefore: true,
+      },
+    });
+    const suppressedFresh = acquireParagraphResult(
+      paragraphAcquisitionInput(textParagraph('a paragraph long enough to wrap across lines'), source),
+      {
+        ...base,
+        placement: {
+          ...base.placement, startYPt: 112, maximumYPt: 300, suppressSpaceBefore: true,
+        },
+      },
+    );
+    expect(suppressed.measured.lines[0]!.layout).toBe(first.measured.lines[0]!.layout);
+    expect(suppressed.measured).toEqual(suppressedFresh.measured);
+    expect(suppressed.layout).toEqual(suppressedFresh.layout);
+
+    const nextPage = at(92, {
+      flowDomainId: 'body:page:1:column:0',
+      environment: { ...base.environment, pageIndex: 1, displayPageNumber: 2 },
+    });
+    expect(nextPage.measured.lines[0]!.layout).toBe(first.measured.lines[0]!.layout);
+    expect(nextPage.layout.flowDomainId).toBe('body:page:1:column:0');
+
+    const wrap = {
+      skipTopAndBottomBands: ({ yPt }: { yPt: number }) => yPt,
+      lineWindow: ({ topYPt, maximumWidthPt }: { topYPt: number; maximumWidthPt: number }) => ({
+        topYPt,
+        xOffsetPt: 0,
+        maximumWidthPt: topYPt < 80 ? 30 : maximumWidthPt,
+      }),
+    };
+    const wrapped = (startYPt: number) => at(startYPt, {
+      placement: { ...base.placement, startYPt, wrap },
+    });
+    const high = wrapped(72);
+    const low = wrapped(92);
+    expect(high.measured.lines.length).toBeGreaterThan(low.measured.lines.length);
+    expect(low.measured.lines[0]!.layout).not.toBe(high.measured.lines[0]!.layout);
+  });
+
+  it('keeps page-field text in the line-breaking identity', () => {
+    const services = scopedServices();
+    const field = {
+      ...textParagraph().runs[0],
+      type: 'field', fieldType: 'page', instruction: 'PAGE', fallbackText: '1',
+    } as DocRun;
+    const input = paragraphAcquisitionInput({
+      ...textParagraph(), runs: [field],
+    } as DocParagraph, source);
+    const base = options(services);
+    const atPage = (pageIndex: number) => acquireParagraphResult(input, {
+      ...base,
+      environment: {
+        ...base.environment,
+        pageIndex,
+        displayPageNumber: pageIndex + 1,
+      },
+    });
+    const first = atPage(0);
+    const second = atPage(1);
+    const text = (result: typeof first) => result.measured.lines.flatMap((line) =>
+      line.layout.segments.flatMap((segment) => 'text' in segment ? [segment.text] : [])).join('');
+
+    expect(text(first)).toBe('1');
+    expect(text(second)).toBe('2');
+    expect(second.measured.lines[0]!.layout).not.toBe(first.measured.lines[0]!.layout);
+  });
+
   it('keys every value that can change acquisition output', () => {
     const services = scopedServices();
     const cache = paragraphAcquisitionCacheOf(services);
