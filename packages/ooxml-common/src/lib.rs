@@ -24,6 +24,7 @@ pub mod mce;
 pub mod ns;
 #[doc(hidden)]
 pub mod numbering;
+pub mod opc;
 pub mod package_session;
 pub mod pull;
 pub mod rels;

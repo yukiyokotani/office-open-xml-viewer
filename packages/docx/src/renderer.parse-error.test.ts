@@ -4,9 +4,8 @@ import { renderDocumentToCanvas } from './renderer.js';
 import type { DocxDocumentModel, SectionProps } from './types';
 
 /**
- * RB7: a document carrying `parseError` (a degraded `word/document.xml`, or —
- * since the MAJOR fix — a corrupt ZIP container) renders a visible placeholder
- * page instead of a blank white sheet. This drives {@link renderDocumentToCanvas}
+ * RB7: a document carrying `parseError` (a degraded `word/document.xml`) renders
+ * a visible placeholder page instead of a blank white sheet. This drives {@link renderDocumentToCanvas}
  * against a recording 2D context and asserts the placeholder is painted (the
  * heading + the part-tagged message reach `fillText`), and that a healthy
  * document never takes that branch. pptx has the twin of this test
@@ -114,20 +113,6 @@ describe('RB7 renderDocumentToCanvas placeholder', () => {
     // A filled page + framed card were drawn.
     expect(calls.some((c) => c.op === 'fillRect')).toBe(true);
     expect(calls.some((c) => c.op === 'strokeRect')).toBe(true);
-  });
-
-  it('surfaces a corrupt-CONTAINER parseError (RB7 MAJOR) in the placeholder', async () => {
-    const { ctx, calls } = recordingCtx(true);
-    const canvas = stubCanvas(ctx);
-    const doc = degradedDoc('(zip container): invalid Zip archive: Could not find EOCD');
-    await renderDocumentToCanvas(
-      doc,
-      canvas,
-      0,
-      { width: 816, dpr: 1 },
-    );
-    const texts = calls.filter((c) => c.op === 'fillText').map((c) => String(c.args[0]));
-    expect(texts.join(' ')).toContain('zip container');
   });
 
   it('a healthy document (no parseError) does NOT draw the placeholder heading', async () => {

@@ -163,7 +163,7 @@ try {
         <div><code>invalid-password</code><span>The supplied password did not decrypt the file.</span><strong>Ask the user to check it and retry.</strong></div>
         <div><code>unsupported-encryption</code><span>The file uses an encryption scheme the library cannot decrypt.</span><strong>Request an unencrypted or supported copy.</strong></div>
         <div><code>legacy-binary-format</code><span>The input is <code>.doc</code>, <code>.xls</code> or <code>.ppt</code>, not OOXML.</span><strong>Request conversion to the corresponding modern format.</strong></div>
-        <div><code>not-ooxml</code><span>The bytes are not a recognized OOXML package.</span><strong>Reject the file as unsupported or invalid.</strong></div>
+        <div><code>not-ooxml</code><span>The bytes are not a recognized OOXML package: not a readable ZIP (including empty input), a ZIP without <code>[Content_Types].xml</code>, or a package without the main document part.</span><strong>Reject the file as unsupported or invalid.</strong></div>
       </div>
     </section>
 

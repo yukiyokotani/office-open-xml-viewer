@@ -11,7 +11,7 @@ import { initSync, XlsxArchive } from '../../../xlsx/src/wasm/xlsx_parser.js';
 
 const REQUIRED = [
   'open_sheet_cursor', 'pull_sheet_cursor', 'sheet_cursor_pull_finished',
-  'sheet_cursor_resource_usage', 'acknowledge_sheet_cursor_terminal', 'cancel_sheet_cursor',
+  'acknowledge_sheet_cursor_terminal', 'cancel_sheet_cursor',
   'close_sheet_cursor', 'assert_healthy', 'parse', 'extract_image',
 ];
 

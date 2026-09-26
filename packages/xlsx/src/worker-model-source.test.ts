@@ -75,7 +75,6 @@ function sourceArchive(font: typeof CALIBRI_11 | undefined) {
     open_sheet_cursor: vi.fn(),
     pull_sheet_cursor: vi.fn(() => new Uint8Array()),
     sheet_cursor_pull_finished: vi.fn(() => false),
-    sheet_cursor_resource_usage: vi.fn(() => { throw new Error('worksheet cursor usage is unavailable'); }),
     acknowledge_sheet_cursor_terminal: vi.fn(),
     cancel_sheet_cursor: vi.fn(),
     close_sheet_cursor: vi.fn(),

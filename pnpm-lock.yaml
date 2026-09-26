@@ -157,6 +157,9 @@ importers:
 
   packages/markdown:
     dependencies:
+      '@silurus/ooxml-core':
+        specifier: workspace:*
+        version: link:../core
       '@silurus/ooxml-docx':
         specifier: workspace:*
         version: link:../docx
@@ -170,6 +173,9 @@ importers:
       '@types/node':
         specifier: ^25.6.0
         version: 25.6.0
+      rolldown:
+        specifier: ^1.2.0
+        version: 1.2.0
       typescript:
         specifier: ^7.0.2
         version: 7.0.2

@@ -2,7 +2,7 @@ import type { OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
 import {
   normalizeLoadResourceOptions,
   OoxmlResourceMetricsSession,
-  parseResourceLimitError,
+  parseTypedParserError,
   resourcePolicyForWasm,
   type PullSessionCommand,
   type PullSessionResponse,
@@ -151,7 +151,7 @@ export async function acquireDocxNodeDocument<TResult>(
   } catch (error) {
     if (admissionOwnsFailure) throw error;
     try { handle?.close((archive: DocxNodeArchive) => archive.free()); } catch {}
-    const normalized = parseResourceLimitError(error) ?? error;
+    const normalized = parseTypedParserError(error) ?? error;
     metrics.fail(normalized);
     throw normalized;
   }
@@ -198,7 +198,7 @@ export async function acquireDocxSessionFromArchive<TResult>(
     metrics.checkpoint('container ready');
   } catch (error) {
     try { closeArchive(); } catch {}
-    const normalized = parseResourceLimitError(error) ?? error;
+    const normalized = parseTypedParserError(error) ?? error;
     metrics?.fail(normalized);
     throw normalized;
   }
@@ -244,7 +244,7 @@ async function consumeDocxArchive<TResult>(
     await pull?.reset().catch(() => undefined);
     transport?.terminate();
     try { closeArchive(); } catch {}
-    const normalized = parseResourceLimitError(error) ?? error;
+    const normalized = parseTypedParserError(error) ?? error;
     metrics.fail(normalized);
     throw normalized;
   }

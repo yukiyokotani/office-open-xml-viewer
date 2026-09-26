@@ -2,7 +2,7 @@ import type { OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
 import {
   normalizeLoadResourceOptions,
   OoxmlResourceMetricsSession,
-  parseResourceLimitError,
+  parseTypedParserError,
   resourcePolicyForWasm,
 } from '@silurus/ooxml-core/worker';
 import {
@@ -73,9 +73,11 @@ export interface XlsxNodeAcquisition {
  * The archive a Node XLSX session reads after acquisition: the XLSX parser
  * archive, or a model-source archive whose ZIP accounting is optional.
  */
-export interface XlsxNodeSessionArchive extends Omit<XlsxNodeArchive, 'free' | 'resource_usage'> {
+export interface XlsxNodeSessionArchive
+  extends Omit<XlsxNodeArchive, 'free' | 'resource_usage' | 'sheet_cursor_resource_usage'> {
   /** Absent when the source has no ZIP accounting; absence is not zero usage. */
   resource_usage?(): Uint8Array;
+  sheet_cursor_resource_usage?(): Uint8Array;
 }
 
 /** An already-opened archive admitted into the Node XLSX session. */
@@ -122,7 +124,7 @@ export function acquireXlsxSessionFromArchive(
     return { archive, workbookIndex, usage, metrics, closeArchive: () => owned.closeArchive() };
   } catch (error) {
     try { owned.closeArchive(); } catch {}
-    const normalized = parseResourceLimitError(error) ?? error;
+    const normalized = parseTypedParserError(error) ?? error;
     metrics?.fail(normalized);
     throw normalized;
   }
@@ -175,7 +177,7 @@ export async function acquireXlsxNodeSession(
     };
   } catch (error) {
     try { handle?.close((archive: XlsxNodeArchive) => archive.free()); } catch {}
-    const normalized = parseResourceLimitError(error) ?? error;
+    const normalized = parseTypedParserError(error) ?? error;
     metrics.fail(normalized);
     throw normalized;
   }

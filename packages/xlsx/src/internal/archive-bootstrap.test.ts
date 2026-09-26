@@ -10,25 +10,6 @@ const usageBytes = new TextEncoder().encode(JSON.stringify({
 }));
 
 describe('readXlsxArchiveBootstrap', () => {
-  it('preserves a parsed degraded workbook when archive usage is unavailable', () => {
-    const workbook = { workbook: { parseError: '(zip container): invalid archive' } };
-    const calls: string[] = [];
-
-    const result = readXlsxArchiveBootstrap(
-      () => {
-        calls.push('parse');
-        return workbook;
-      },
-      () => {
-        calls.push('usage');
-        throw 'xlsx resource usage is unavailable';
-      },
-    );
-
-    expect(result).toEqual({ workbook, usage: undefined });
-    expect(calls).toEqual(['parse', 'usage']);
-  });
-
   it('returns decoded usage for a healthy archive', () => {
     const workbook = new Uint8Array([1, 2, 3]);
 

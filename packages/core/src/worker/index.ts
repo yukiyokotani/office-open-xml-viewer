@@ -22,6 +22,7 @@ export {
   decodeOoxmlResourceUsage,
   deserializeWorkerError,
   parseResourceLimitError,
+  parseTypedParserError,
   serializeWorkerError,
   type WorkerErrorPayload,
 } from './error-wire.js';

@@ -108,11 +108,6 @@ impl LegacyXlsWorkbook {
     pub fn assert_healthy(&self) -> Result<(), JsValue> {
         self.wire.assert_healthy().map_err(string_error)
     }
-
-    pub fn sheet_cursor_resource_usage(&self) -> Result<Vec<u8>, JsValue> {
-        self.wire.assert_healthy().map_err(string_error)?;
-        Err(js_error("worksheet cursor usage is unavailable"))
-    }
 }
 
 fn string_error(error: String) -> JsValue {

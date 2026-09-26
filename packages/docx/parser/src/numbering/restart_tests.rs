@@ -115,7 +115,13 @@ fn restart_text_reaches_both_document_parse_routes() {
     );
     let numbering = numbering_xml(TRANSITIONAL, 2, Some("0"), "");
     let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    // ECMA-376 Part 2 §7.2.3.1: an OPC package carries `[Content_Types].xml`.
     for (name, content) in [
+        (
+            "[Content_Types].xml",
+            "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"/>"
+                .to_string(),
+        ),
         ("word/document.xml", document),
         ("word/numbering.xml", numbering),
     ] {

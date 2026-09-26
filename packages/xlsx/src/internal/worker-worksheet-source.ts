@@ -24,7 +24,8 @@ export interface WorkerWorksheetArchive extends WorksheetCursorArchive {
 /**
  * The workbook archive an XLSX model source supplies: the XLSX parser
  * archive's workbook bootstrap, worksheet cursor and image reads. Optional
- * capabilities: without `resource_usage` metrics carry no usage snapshot,
+ * capabilities: without `resource_usage` / `sheet_cursor_resource_usage`
+ * metrics and worksheet pulls carry no usage snapshot,
  * without `to_markdown` `toMarkdown()` rejects, and `host_layout_request` /
  * `configure_host_layout` ask the host for the Normal font's maximum digit
  * width (see host-layout.ts).
@@ -37,6 +38,7 @@ export interface XlsxModelSourceArchive extends WorkerWorksheetArchive, HostLayo
 export interface OoxmlWorksheetArchive extends WorkerWorksheetArchive {
   free(): void;
   resource_usage(): Uint8Array;
+  sheet_cursor_resource_usage(): Uint8Array;
   to_markdown(): string;
 }
 
@@ -44,7 +46,6 @@ const REQUIRED_ARCHIVE_METHODS = [
   'open_sheet_cursor',
   'pull_sheet_cursor',
   'sheet_cursor_pull_finished',
-  'sheet_cursor_resource_usage',
   'acknowledge_sheet_cursor_terminal',
   'cancel_sheet_cursor',
   'close_sheet_cursor',

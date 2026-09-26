@@ -69,7 +69,7 @@ const identity: PullSessionIdentity<number> = {
 };
 
 describe('DOCX document pull integration', () => {
-  it('allows only the typed degraded-container missing usage checkpoint', () => {
+  it('accepts only a typed usage absence, never a thrown error', () => {
     const unavailable = {
       document_cursor_resource_usage: () => undefined,
     } as unknown as DocxDocumentCursorArchive;

@@ -24,7 +24,6 @@ class FakeArchive implements LegacyXlsNativeArchive {
   open_sheet_cursor(): void {} pull_sheet_cursor(): Uint8Array { return new Uint8Array(); }
   sheet_cursor_pull_finished(): boolean { return false; }
   acknowledge_sheet_cursor_terminal(): void {} cancel_sheet_cursor(): void {} close_sheet_cursor(): void {}
-  sheet_cursor_resource_usage(): Uint8Array { throw new Error('unavailable'); }
   extract_image(): Uint8Array { return new Uint8Array(); }
   assert_healthy(): void {}
 }

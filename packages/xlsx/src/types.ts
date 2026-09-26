@@ -31,8 +31,8 @@ export interface Workbook {
    *  break it can't be attributed to one placeholder sheet. Tagged with the
    *  offending part (e.g. `"xl/sharedStrings.xml: <detail>"`) so the loss is
    *  surfaced instead of silent, while every sheet still renders its non-string
-   *  content. Absent (`undefined`) when every shared part read cleanly. Also set
-   *  (`"(zip container): <detail>"`) for a whole-container degradation (#774). */
+   *  content. Absent (`undefined`) when every shared part read cleanly. Input that
+   *  is not a SpreadsheetML package is rejected with `OoxmlError('not-ooxml')`. */
   parseError?: string;
 }
 

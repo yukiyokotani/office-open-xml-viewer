@@ -1103,6 +1103,15 @@ mod tests {
         let mut bytes = Vec::new();
         {
             let mut archive = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            // ECMA-376 Part 2 §7.2.3.1: an OPC package carries `[Content_Types].xml`.
+            archive
+                .start_file("[Content_Types].xml", SimpleFileOptions::default())
+                .unwrap();
+            archive
+                .write_all(
+                    br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>"#,
+                )
+                .unwrap();
             archive
                 .start_file("word/document.xml", SimpleFileOptions::default())
                 .unwrap();

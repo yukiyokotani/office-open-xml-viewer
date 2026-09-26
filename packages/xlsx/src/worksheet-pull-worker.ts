@@ -29,7 +29,9 @@ export interface WorksheetCursorArchive {
   open_sheet_cursor(sheetIndex: number, name: string): void;
   pull_sheet_cursor(rowCredit: number): Uint8Array;
   sheet_cursor_pull_finished(): boolean;
-  sheet_cursor_resource_usage(): Uint8Array;
+  /** Per-cursor PackageOperation ledger. Every XLSX parser archive has one;
+   *  a model-source archive without ZIP accounting omits the method. */
+  sheet_cursor_resource_usage?(): Uint8Array;
   acknowledge_sheet_cursor_terminal(): void;
   cancel_sheet_cursor(): void;
   close_sheet_cursor(): void;
@@ -388,18 +390,13 @@ export class WorksheetPullWorker {
     }
   }
 
+  // Every opened XLSX parser cursor owns a PackageOperation ledger (the archive
+  // admits only OPC packages), so any checkpoint failure is a real error. Only
+  // an archive that does not implement the checkpoint at all (a model source
+  // without ZIP accounting) reports no usage.
   private readResourceUsage(): OoxmlResourceUsageSnapshot | undefined {
-    try {
-      return decodeOoxmlResourceUsage(
-        this.executeArchive((archive) => archive.sheet_cursor_resource_usage()),
-      );
-    } catch (error) {
-      // A corrupt container is deliberately represented by a deferred terminal
-      // placeholder and has no PackageOperation ledger. That one legacy state
-      // has no checkpoint; every real resource/worker error must still escape.
-      if (String(error).includes('worksheet cursor usage is unavailable')) return undefined;
-      throw error;
-    }
+    const bytes = this.executeArchive((archive) => archive.sheet_cursor_resource_usage?.());
+    return bytes === undefined ? undefined : decodeOoxmlResourceUsage(bytes);
   }
 }
 

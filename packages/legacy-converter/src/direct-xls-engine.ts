@@ -24,7 +24,6 @@ export interface LegacyXlsNativeArchive {
   acknowledge_sheet_cursor_terminal(): void;
   cancel_sheet_cursor(): void;
   close_sheet_cursor(): void;
-  sheet_cursor_resource_usage(): Uint8Array;
   extract_image(key: string): Uint8Array;
   close_workbook_session(): void;
   assert_healthy(): void;
