@@ -165,8 +165,8 @@ export function compileCf(
   // Excel evaluates CF rules in ascending priority (lowest number = highest
   // priority first). For each property (fill/fontColor/border/…) the first
   // matching rule wins, and `stopIfTrue` on a matching rule skips all later
-  // rules. Match that here by iterating asc and only setting properties that
-  // are still unset.
+  // rules for that cell (evaluateCf). Match that here by
+  // iterating asc and only setting properties that are still unset.
   compiled.sort((a, b) => {
     const pa = (a.rule as { priority: number }).priority ?? 0;
     const pb = (b.rule as { priority: number }).priority ?? 0;
@@ -301,39 +301,38 @@ export function evaluateCf(cell: Cell | undefined, row: number, col: number, cfC
     const rule = entry.rule;
     const numVal = cellNumericValue(cell);
 
+    // Each evaluated rule decides whether it matched this cell; a matched
+    // rule applies its formatting and then honours `stopIfTrue` (§18.3.1.10:
+    // "no rules with lower priority shall be applied over this rule, when
+    // this rule evaluates to true"). The stop is per cell and does not
+    // depend on whether the matched rule and the skipped ones touch the same
+    // properties, so a lower-priority rule's explicit font-toggle off cannot
+    // erase formatting beneath a stopping rule that sets only a colour.
+    let matched = false;
     if (rule.type === 'expression') {
       const anchor = entry.sqref[0];
       if (!anchor) continue;
-      const matched = evalFormulaToBool(rule.formula, {
+      matched = evalFormulaToBool(rule.formula, {
         row, col,
         anchorRow: anchor.top, anchorCol: anchor.left,
         cellIndex: cfCtx.cellIndex,
         definedNames: cfCtx.definedNames,
         depth: 0,
       });
-      if (matched) {
-        applyDxfToResult(result, rule.dxfId != null ? dxfs[rule.dxfId] : null);
-        if (rule.stopIfTrue) break;
-      }
-      continue;
-    }
-
-    if (rule.type === 'cellIs') {
+      if (matched) applyDxfToResult(result, rule.dxfId != null ? dxfs[rule.dxfId] : null);
+    } else if (rule.type === 'cellIs') {
       const parsedArgs = rule.formulas.map(parseCellIsFormula);
       const textVal = cellTextValue(cell);
-      let matched = false;
       if (numVal != null && parsedArgs.every(a => a.num != null)) {
         matched = cellIsMatch(numVal, rule.operator, parsedArgs.map(a => a.num!));
       } else if (textVal != null && parsedArgs.every(a => a.text != null)) {
         matched = cellIsTextMatch(textVal, rule.operator, parsedArgs.map(a => a.text!));
       }
-      if (matched) {
-        applyDxfToResult(result, rule.dxfId != null ? dxfs[rule.dxfId] : null);
-      }
+      if (matched) applyDxfToResult(result, rule.dxfId != null ? dxfs[rule.dxfId] : null);
     } else if (rule.type === 'top10') {
       if (numVal == null || entry.top10Threshold == null) continue;
-      const matches = entry.top10IsTop ? numVal >= entry.top10Threshold : numVal <= entry.top10Threshold;
-      if (matches) applyDxfToResult(result, rule.dxfId != null ? dxfs[rule.dxfId] : null);
+      matched = entry.top10IsTop ? numVal >= entry.top10Threshold : numVal <= entry.top10Threshold;
+      if (matched) applyDxfToResult(result, rule.dxfId != null ? dxfs[rule.dxfId] : null);
     } else if (rule.type === 'aboveAverage') {
       if (numVal == null || entry.avgValue == null) continue;
       // ECMA-376 §18.3.1.10: with `stdDev=N` the threshold is mean ± N·σ
@@ -342,12 +341,14 @@ export function evaluateCf(cell: Cell | undefined, row: number, col: number, cfC
       const band = entry.avgStdDev != null ? entry.avgStdDev * (rule.stdDev ?? 1) : 0;
       const threshold = entry.avgIsAbove ? entry.avgValue + band : entry.avgValue - band;
       const eq = rule.equalAverage === true;
-      const matches = entry.avgIsAbove
+      matched = entry.avgIsAbove
         ? (eq ? numVal >= threshold : numVal > threshold)
         : (eq ? numVal <= threshold : numVal < threshold);
-      if (matches) applyDxfToResult(result, rule.dxfId != null ? dxfs[rule.dxfId] : null);
+      if (matched) applyDxfToResult(result, rule.dxfId != null ? dxfs[rule.dxfId] : null);
     } else if (rule.type === 'iconSet') {
+      // A scale rule "evaluates to true" for every numeric cell it formats.
       if (numVal == null || !entry.iconThresholds?.length) continue;
+      matched = true;
       const thresholds = entry.iconThresholds;
       const n = thresholds.length;
       let iconIdx = 0;
@@ -366,16 +367,34 @@ export function evaluateCf(cell: Cell | undefined, row: number, col: number, cfC
       }
     } else if (rule.type === 'colorScale') {
       if (numVal == null || !entry.scaleStops) continue;
-      if (result.fill) continue;
-      const color = colorScaleAt(numVal, rule.stops, entry.scaleStops);
-      result.fill = { patternType: 'solid', fgColor: color, bgColor: color };
+      matched = true;
+      if (!result.fill) {
+        const color = colorScaleAt(numVal, rule.stops, entry.scaleStops);
+        result.fill = { patternType: 'solid', fgColor: color, bgColor: color };
+      }
     } else if (rule.type === 'dataBar') {
       if (numVal == null || entry.barMin == null || entry.barMax == null) continue;
-      if (result.dataBar) continue;
-      const range = entry.barMax - entry.barMin;
-      const ratio = range === 0 ? 0 : Math.max(0, Math.min(1, (numVal - entry.barMin) / range));
-      result.dataBar = { color: rule.color, ratio, gradient: rule.gradient };
+      matched = true;
+      if (!result.dataBar) {
+        const range = entry.barMax - entry.barMin;
+        const ratio = range === 0 ? 0 : Math.max(0, Math.min(1, (numVal - entry.barMin) / range));
+        result.dataBar = { color: rule.color, ratio, gradient: rule.gradient };
+      }
     }
+    // `other` kinds (timePeriod, duplicateValues, uniqueValues, …) are not
+    // evaluated yet: an unevaluated rule never matches, so it neither
+    // formats the cell nor stops the rules after it.
+    //
+    // The stop applies to colorScale / dataBar / iconSet too. Excel's rule
+    // editor does not offer the flag for them and Office's binary storage
+    // requires it to be 0 ([MS-XLSB] 2.4.23 BrtBeginCFRule `fStopTrue`,
+    // [MS-XLS] 2.4.43 CF12), but ECMA-376 places no type restriction on it,
+    // and Excel for Mac's PDF export of a control workbook honours a set
+    // flag in SpreadsheetML: a colorScale, dataBar or iconSet rule with
+    // stopIfTrue="1" kept a lower-priority bold+underline `expression` rule
+    // off every numeric cell it formatted, and the same rules without the
+    // flag let it apply. Non-numeric cells in a scale range were not tested.
+    if (matched && rule.stopIfTrue) break;
   }
   return result;
 }

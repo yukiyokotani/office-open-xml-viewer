@@ -827,15 +827,22 @@ export interface ConditionalFormat {
   rules: CfRule[];
 }
 
+/**
+ * One `<cfRule>` (ECMA-376 §18.3.1.10). `stopIfTrue`: once this rule matches
+ * a cell, no lower-priority rule applies to that cell. Every rule type carries
+ * it (`expression` always; the others only when set, so an absent value means
+ * false), including `colorScale` / `dataBar` / `iconSet`, which match every
+ * numeric cell they format.
+ */
 export type CfRule =
-  | { type: 'cellIs'; operator: string; formulas: string[]; dxfId: number | null; priority: number }
+  | { type: 'cellIs'; operator: string; formulas: string[]; dxfId: number | null; priority: number; stopIfTrue?: boolean }
   | { type: 'expression'; formula: string; dxfId: number | null; priority: number; stopIfTrue: boolean }
-  | { type: 'colorScale'; stops: CfStop[]; priority: number }
-  | { type: 'dataBar'; color: string; min: CfValue; max: CfValue; priority: number; gradient: boolean }
-  | { type: 'top10'; top: boolean; percent: boolean; rank: number; dxfId: number | null; priority: number }
-  | { type: 'aboveAverage'; aboveAverage: boolean; equalAverage?: boolean; stdDev?: number; dxfId: number | null; priority: number }
-  | { type: 'iconSet'; iconSet: string; cfvos: CfValue[]; reverse: boolean; priority: number; customIcons?: CfIcon[] }
-  | { type: 'other'; kind: string; priority: number };
+  | { type: 'colorScale'; stops: CfStop[]; priority: number; stopIfTrue?: boolean }
+  | { type: 'dataBar'; color: string; min: CfValue; max: CfValue; priority: number; gradient: boolean; stopIfTrue?: boolean }
+  | { type: 'top10'; top: boolean; percent: boolean; rank: number; dxfId: number | null; priority: number; stopIfTrue?: boolean }
+  | { type: 'aboveAverage'; aboveAverage: boolean; equalAverage?: boolean; stdDev?: number; dxfId: number | null; priority: number; stopIfTrue?: boolean }
+  | { type: 'iconSet'; iconSet: string; cfvos: CfValue[]; reverse: boolean; priority: number; customIcons?: CfIcon[]; stopIfTrue?: boolean }
+  | { type: 'other'; kind: string; priority: number; stopIfTrue?: boolean };
 
 export interface CfIcon {
   iconSet: string;

@@ -415,3 +415,86 @@ describe('font toggles — explicit off is a set property (ECMA-376 §18.8.2)', 
     expect(res).toMatchObject({ fontBold: false, fontItalic: false, fontUnderline: false, fontStrike: false });
   });
 });
+
+// ─── stopIfTrue ──────────────────────────────────────────────────
+describe('stopIfTrue — a matching rule stops lower-priority rules (ECMA-376 §18.3.1.10)', () => {
+  // Column [1, 5]; the cell under test holds 5, which each stopping rule
+  // below matches (5 > 0, TRUE, top 1, above the mean 3).
+  const stoppers: Array<[string, CfRule]> = [
+    ['cellIs', { type: 'cellIs', operator: 'greaterThan', formulas: ['0'], dxfId: 1, priority: 1, stopIfTrue: true }],
+    ['expression', { type: 'expression', formula: 'TRUE', dxfId: 1, priority: 1, stopIfTrue: true }],
+    ['top10', { type: 'top10', top: true, percent: false, rank: 1, dxfId: 1, priority: 1, stopIfTrue: true }],
+    ['aboveAverage', { type: 'aboveAverage', aboveAverage: true, dxfId: 1, priority: 1, stopIfTrue: true }],
+  ];
+  // Lower-priority rules that would otherwise all apply to 5: a dxf fill,
+  // an icon set and a data bar.
+  const lower: CfRule[] = [
+    { type: 'expression', formula: 'TRUE', dxfId: 0, priority: 2, stopIfTrue: false },
+    { type: 'iconSet', iconSet: '3Arrows', cfvos: [{ kind: 'percent', value: '0' }, { kind: 'percent', value: '33' }, { kind: 'percent', value: '67' }], reverse: false, priority: 3 },
+    { type: 'dataBar', color: '#638EC6', min: { kind: 'min', value: null }, max: { kind: 'max', value: null }, priority: 4, gradient: true },
+  ];
+  const evalWith = (stopper: CfRule) => {
+    const ws = sheetFromColumn([1, 5], [{ sqref: [fullColumnSqref(2)], rules: [...lower, stopper] }]);
+    return evaluateCf(numCell(1, 0, 5), 1, 0, compileCf(ws), [FILL_RED, FONT_BLUE]);
+  };
+
+  it.each(stoppers)('%s: applies its own dxf and skips every lower-priority rule', (_, stopper) => {
+    const res = evalWith(stopper);
+    expect(res.fontColor).toBe('#0000FF');
+    expect(res.fill).toBeUndefined();
+    expect(res.iconSet).toBeUndefined();
+    expect(res.dataBar).toBeUndefined();
+  });
+
+  it('does not stop when the rule does not match, or when the flag is off', () => {
+    const miss = evalWith({ type: 'cellIs', operator: 'greaterThan', formulas: ['10'], dxfId: 1, priority: 1, stopIfTrue: true });
+    expect(miss.fontColor).toBeUndefined();
+    expect(miss.fill?.fgColor).toBe('#FF0000');
+    const noFlag = evalWith({ type: 'cellIs', operator: 'greaterThan', formulas: ['0'], dxfId: 1, priority: 1 });
+    expect(noFlag.fontColor).toBe('#0000FF');
+    expect(noFlag.fill?.fgColor).toBe('#FF0000');
+    expect(noFlag.iconSet).toBeDefined();
+    expect(noFlag.dataBar).toBeDefined();
+  });
+
+  // Excel for Mac honours a set flag on scale rules in SpreadsheetML (see
+  // evaluateCf): a lower bold rule stays off every numeric cell they format.
+  const scales: Array<[string, CfRule]> = [
+    ['colorScale', { type: 'colorScale', stops: [{ kind: 'min', value: null, color: '#FFFF00' }, { kind: 'max', value: null, color: '#00B0F0' }], priority: 1 }],
+    ['dataBar', { type: 'dataBar', color: '#638EC6', min: { kind: 'min', value: null }, max: { kind: 'max', value: null }, priority: 1, gradient: true }],
+    ['iconSet', { type: 'iconSet', iconSet: '3Arrows', cfvos: [{ kind: 'percent', value: '0' }, { kind: 'percent', value: '33' }, { kind: 'percent', value: '67' }], reverse: false, priority: 1 }],
+  ];
+  it.each(scales)('%s: stops lower-priority rules only when stopIfTrue is set', (_, scale) => {
+    const bold: Dxf = {
+      font: { bold: true, italic: false, underline: false, strike: false, size: 11, color: null, name: null },
+      fill: null, border: null, fontToggles: { bold: true },
+    };
+    const evalScale = (stopIfTrue: boolean) => {
+      const rules: CfRule[] = [
+        { ...scale, stopIfTrue } as CfRule,
+        { type: 'expression', formula: 'TRUE', dxfId: 0, priority: 2, stopIfTrue: false },
+      ];
+      const ws = sheetFromColumn([1, 9], [{ sqref: [fullColumnSqref(2)], rules }]);
+      return evaluateCf(numCell(1, 0, 9), 1, 0, compileCf(ws), [bold]);
+    };
+    expect(evalScale(true).fontBold).toBeUndefined();
+    expect(evalScale(false).fontBold).toBe(true);
+  });
+
+  it('a stopping colour-only rule keeps a lower-priority explicit font-toggle off from applying', () => {
+    const font = { bold: false, italic: false, underline: false, strike: false, size: 11, color: null, name: null };
+    const off: Dxf = { font, fill: null, border: null, fontToggles: { bold: false, italic: false } };
+    const colour: Dxf = { font: { ...font, color: '#FF0000' }, fill: null, border: null, fontToggles: {} };
+    const ws = sheetFromColumn([5], [{
+      sqref: [fullColumnSqref(1)],
+      rules: [
+        { type: 'cellIs', operator: 'greaterThan', formulas: ['0'], dxfId: 0, priority: 1, stopIfTrue: true },
+        { type: 'expression', formula: 'TRUE', dxfId: 1, priority: 2, stopIfTrue: false },
+      ],
+    }]);
+    const res = evaluateCf(numCell(0, 0, 5), 0, 0, compileCf(ws), [colour, off]);
+    expect(res.fontColor).toBe('#FF0000');
+    expect(res.fontBold).toBeUndefined();
+    expect(res.fontItalic).toBeUndefined();
+  });
+});

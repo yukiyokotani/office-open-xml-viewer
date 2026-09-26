@@ -1362,6 +1362,15 @@ pub struct ConditionalFormat {
     pub rules: Vec<CfRule>,
 }
 
+/// One `<cfRule>` (ECMA-376 §18.3.1.10).
+///
+/// `stopIfTrue`: "If this flag is 1, no rules with lower priority shall be
+/// applied over this rule, when this rule evaluates to true." The schema
+/// allows it on every `CT_CfRule`, so every variant keeps it, including
+/// `colorScale` / `dataBar` / `iconSet` (Excel honours a set flag on those in
+/// SpreadsheetML even though its rule editor does not offer it; the renderer
+/// records the evidence beside its evaluation) and the not-yet-evaluated
+/// `Other` kinds such as `timePeriod`, `duplicateValues` and `uniqueValues`.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum CfRule {
@@ -1371,6 +1380,9 @@ pub enum CfRule {
         formulas: Vec<String>,
         dxf_id: Option<u32>,
         priority: i32,
+        /// §18.3.1.10 `stopIfTrue`; see `CfRule`. Serialized only when set.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        stop_if_true: bool,
     },
     #[serde(rename_all = "camelCase")]
     Expression {
@@ -1380,7 +1392,13 @@ pub enum CfRule {
         stop_if_true: bool,
     },
     #[serde(rename_all = "camelCase")]
-    ColorScale { stops: Vec<CfStop>, priority: i32 },
+    ColorScale {
+        stops: Vec<CfStop>,
+        priority: i32,
+        /// §18.3.1.10 `stopIfTrue`; see `CfRule`. Serialized only when set.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        stop_if_true: bool,
+    },
     #[serde(rename_all = "camelCase")]
     DataBar {
         color: String,
@@ -1388,6 +1406,9 @@ pub enum CfRule {
         max: CfValue,
         priority: i32,
         gradient: bool,
+        /// §18.3.1.10 `stopIfTrue`; see `CfRule`. Serialized only when set.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        stop_if_true: bool,
     },
     #[serde(rename_all = "camelCase")]
     Top10 {
@@ -1396,6 +1417,9 @@ pub enum CfRule {
         rank: u32,
         dxf_id: Option<u32>,
         priority: i32,
+        /// §18.3.1.10 `stopIfTrue`; see `CfRule`. Serialized only when set.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        stop_if_true: bool,
     },
     #[serde(rename_all = "camelCase")]
     AboveAverage {
@@ -1411,6 +1435,9 @@ pub enum CfRule {
         std_dev: Option<u32>,
         dxf_id: Option<u32>,
         priority: i32,
+        /// §18.3.1.10 `stopIfTrue`; see `CfRule`. Serialized only when set.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        stop_if_true: bool,
     },
     #[serde(rename_all = "camelCase")]
     IconSet {
@@ -1420,9 +1447,18 @@ pub enum CfRule {
         priority: i32,
         #[serde(skip_serializing_if = "Option::is_none")]
         custom_icons: Option<Vec<CfIcon>>,
+        /// §18.3.1.10 `stopIfTrue`; see `CfRule`. Serialized only when set.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        stop_if_true: bool,
     },
     #[serde(rename_all = "camelCase")]
-    Other { kind: String, priority: i32 },
+    Other {
+        kind: String,
+        priority: i32,
+        /// §18.3.1.10 `stopIfTrue`; see `CfRule`. Serialized only when set.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        stop_if_true: bool,
+    },
 }
 
 #[derive(Debug, Serialize)]
