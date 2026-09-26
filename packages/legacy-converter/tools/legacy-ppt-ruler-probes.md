@@ -1,0 +1,290 @@
+# Controlled PowerPoint ruler experiments
+
+These source conditions investigate how PowerPoint serializes paragraph tabbing
+into `TextRulerAtom` and `StyleTextPropAtom`. They do not encode a converter rule
+or an expected Office result.
+
+```sh
+node --test packages/legacy-converter/tools/legacy-ppt-ruler-probes.test.mjs
+node packages/legacy-converter/tools/legacy-ppt-ruler-probes.mjs
+```
+
+The second command prints a JSON manifest only. It does not generate a deck or
+launch Office. Use the manifest to author a macro-free OOXML control presentation
+with one slide per condition. Keep generated decks, manifests and all inspection
+reports local; do not commit them.
+
+## Source design
+
+Each condition has two paragraphs containing the same literal tab-separated
+text. The first always retains the baseline. The second changes one paragraph
+property, except for the baseline and unchanged repeat. Keep font, text-box
+position, width and text insets fixed. Use the same no-bullet paragraph format
+for both paragraphs. Put the condition ID outside the text box under test.
+
+The 29 conditions cover signed/zero default intervals, intervals around a binary
+master-unit boundary, nonzero left margins, signed first-line offsets, custom
+tab positions, all four tab alignments, an empty tab list, two tab stops, indent
+level and paragraph direction. A master unit is 1/576 inch, or 1587.5 EMU. The
+authored integer-EMU values deliberately straddle some half-EMU boundaries;
+they are not assertions about PowerPoint's rounding rule.
+
+This is not an exhaustive factorial design. It does not yet cover absent versus
+explicit values, conflicting master defaults, all indent levels, RTL scripts,
+or arbitrary combinations of these parameters. Do not generalize an observed
+precedence rule beyond tested conditions. In particular, a source `a:tabLst`
+does not prove that PowerPoint retained distinct per-paragraph binary tab lists.
+
+## Required Office and converter sequence
+
+1. Validate the authored OOXML, freeze its hash and record the Office version.
+   Verify no macros, action links, external relationships or embedded active
+   content exist. Do not relax the ordinary corpus export safety checks for
+   arbitrary user files based on these synthetic inputs.
+2. Open a disposable authored copy in local PowerPoint and save it as PPT.
+   Close it, then reopen the saved PPT. Do not inspect only the in-memory state
+   before binary serialization. Record any repair or compatibility messages.
+3. Export the reopened PPT directly to PDF. Separately save a PPTX copy for the
+   binary-to-OOXML mapping evidence. Preserve the authored source unchanged.
+4. Resolve the binary current edit and live persist references. Record each
+   shape's text ruler and each paragraph's direct and inherited properties.
+   Include default intervals, tab arrays, indent level and coordinate origin.
+   Distinguish no tab array from an explicitly empty array. Physical record
+   order alone is not proof that an object is live. Inspect the shape's tertiary
+   OfficeArt properties and alternative XML as described below; the classic
+   text records are not necessarily the only retained representation.
+5. Determine which source conditions survived as distinct binary conditions.
+   If PowerPoint merges two source cases, they cannot establish the behavior
+   of the distinction that was lost. Any binary counterfactual must preserve
+   container/record validity and be labeled separately from Office-authored
+   binary output.
+6. Compare the direct-binary PDF, Office-reconverted OOXML, converter output and
+   previous converter output. Check text alignment and tab placement as well as
+   package structure. Keep Office-fidelity evaluation separate from renderer
+   self-VRT. A structural pass is not visual-fidelity approval.
+
+The relevant definitions are MS-PPT 2.2.29, 2.9.20, 2.9.23-24, 2.9.28-30,
+2.9.41 and 2.13.32, and ECMA-376 21.1.2.2.7 and 21.1.2.2.13-14. A tab offset's
+binary origin depends on whether it belongs to a ruler or a paragraph
+exception. Do not add a margin correction or choose conflicting property
+precedence solely to improve a private sample.
+
+### Container constraints
+
+Read the constraints of the containing record as well as `TextPFException`.
+MS-PPT 2.9.45 requires `leftMargin`, `indent`, `defaultTabSize` and `tabStops`
+to be absent in a `TextPFRun` inside `StyleTextPropAtom`. A synthetic direct
+paragraph run containing these fields is not a conforming serialization oracle,
+even if the converter's shared exception reader accepts it. The master-level
+exception in 2.9.35-36 does not have that restriction; placeholder inheritance
+from the main master is specified in 2.9.44.
+
+Inspect ruler records and master-level exceptions separately. An observation of
+zero direct-run tab arrays is not evidence that the document has no custom tabs.
+If Office produces an exception to a container constraint, record that separately
+as observed Office behavior before using it to justify compatibility code.
+
+## Verification status
+
+The first paired source presentation has completed a local PowerPoint roundtrip:
+save as PPT, close, reopen the saved PPT, export a local print-quality PDF, and
+save a separate OOXML copy. All 29 PDF pages were inspected. This establishes
+the reference route, not converter fidelity.
+
+In the initial same-text-body arrangement, varying the second paragraph's tab
+position, alignment, empty/list state or default interval did not produce a
+distinct PDF placement from the baseline in the tested cases. For selected tab
+cases, the reconverted OOXML retains the baseline stop in the text body's
+`a:lstStyle`, not the direct `a:pPr`. Do not mistake an absent direct tab list
+for an absent effective tab list, or infer that the converter should ignore
+those properties. The observation does not isolate OOXML import from PPT
+serialization as the point where the distinction was lost.
+
+Before inferring the behavior of these lost distinctions, repeat the affected
+conditions with control and treatment in separate text bodies, retaining the
+original same-body experiment and its reference artifacts. Verify which values
+actually survive in the binary. No ruler precedence rule or new production
+converter behavior follows from the first roundtrip alone.
+
+### Separate-body and text-slot source conditions
+
+```sh
+node --test packages/legacy-converter/tools/legacy-ppt-text-probes.test.mjs
+node packages/legacy-converter/tools/legacy-ppt-text-probes.mjs
+```
+
+The second manifest preserves all 29 ruler conditions as `S001` through `S029`,
+with `sourceCondition` linking each to its unchanged original `T` condition.
+Put control and treatment in separate text bodies with identical widths and
+insets. Each ruler body has one paragraph. Keep their positions fixed across
+conditions, and materialize all paragraph properties explicitly. This isolates
+the text-body ownership variable that the first experiment did not separate.
+
+The additional 16 `M` conditions keep paragraph properties fixed and vary text
+structure: equal UTF-16 length with different content, spaces, underscores,
+tabs, combining sequences, supplementary characters, CJK, empty paragraphs,
+unequal/reversed paragraph lengths, styled runs, explicit line breaks and empty
+runs. Keep these as native runs/paragraphs, not pictures or normalized strings.
+The unchanged repeat is a control for repeatability, not an expected result.
+Both generators produce source descriptions only; neither launches Office nor
+asserts binary-text correspondence.
+
+A local 45-slide authored source has been checked against transitional PML and
+the exact manifest text/properties, including empty runs and paragraphs. It has
+now completed a PowerPoint for Mac 16.112.3 roundtrip: save as PPT, close, reopen
+the saved PPT, export its PDF, and save a separate OOXML copy. The authored
+source hash remained unchanged. The PDF contains 45 pages and each condition ID
+occurs once; all pages have received an initial visual inspection.
+
+Unlike the first same-body experiment, separate-body treatments now produce
+visible differences in tab spacing, margins, first-line offsets, tab alignment
+and paragraph direction. Live-persist inspection of `S001` through `S029`
+finds the treatment facts in classic `TextRulerAtom` records. Alternative shape
+XML on these slides belongs to the probe titles, not the control or treatment
+bodies. The reconverted OOXML reflects the ruler facts in each body's list style.
+
+Serialization does not preserve every authored distinction. Tiny signed
+margins/first-line offsets become absent, tiny default intervals become explicit
+zero, negative and zero tab positions converge to zero, and an explicit empty
+tab list becomes absent. Larger margins, first-line offsets, representable tab
+positions, all four tested alignments and the two-tab condition survive. A
+changed left margin moves the first word while subsequent explicit ruler tab
+positions remain fixed in the direct-binary PDF.
+
+These are observations from the specified source conditions and Office version,
+not a general rounding algorithm or a conflicting-source precedence rule. The
+experiment does not contain conflicting master values or competing treatment
+alternatives.
+
+The `M` text-slot audit now compares live classic text with the exact authored
+manifest and Office-reconverted paragraph/run structure. Counts use UTF-16 code
+units plus the implicit final paragraph mark specified by MS-PPT 2.9.41.
+Leading and trailing CR delimiters preserve empty paragraphs even when one
+paragraph-format run covers the entire body. U+000B survives as an explicit
+line break within a paragraph, and supplementary characters retain valid
+two-unit spans. A single body ruler remains shared across CR-delimited
+paragraphs. These facts have focused direct-model regression tests with
+explicitly supplied paragraph origins; they do not admit unresolved origins.
+
+An authored empty run loses its separate identity in classic storage, and the
+Office OOXML copy can add run boundaries without a corresponding classic style
+change. Consequently, exact run counts are not a text-equivalence oracle. This
+audit establishes neither alternative-text substitution nor master precedence.
+
+Non-Office previews are not an oracle:
+some tab conditions can fail to display even when the source XML retains every
+authored character. Do not remove those conditions or tune the source to make
+an unrelated renderer pass.
+
+After saving and reopening the binary, record the owning live shape, each
+binary text block, paragraph boundaries and each alternative XML run. Compare
+the authored source, Office-reconverted XML and direct-binary PDF independently.
+Report which distinctions survived serialization. Equal code-unit counts, a
+matching shape name or a blank persistence checksum alone do not prove a valid
+slot correspondence. Empty paragraphs, explicit breaks and surrogate pairs are
+required counterexamples before adopting any substitution algorithm. No runtime
+compatibility rule is established by preparing these source experiments.
+
+### Alternative shape XML is a separate evidence source
+
+MS-ODRAW 2.3.4.41-42 defines `metroBlob` (property `0x03A9`) as an OPC package
+containing alternative shape XML. `OfficeArtTertiaryFOPT` (2.2.11, `0xF122`)
+can carry this property. The general definition says it SHOULD be ignored,
+but implementation note 32 explicitly states that Office 2007 and Office 2010
+do not ignore it. Do not describe choosing this alternative as mandatory binary
+semantics, or infer its exact precedence in a newer Office version from that
+older implementation note alone.
+
+The converter currently ignores these alternative packages. Its previous
+fallback output must remain a regression baseline while this capability is
+developed. Before implementing a projection:
+
+- Correlate each alternative with its owning live shape, text and paragraph
+  sequence. Distinguish absent metadata, valid alternatives, stale/conflicting
+  alternatives and malformed packages. Do not match only by file or slide name.
+- Read only explicitly supported typed properties and validate namespaces,
+  ranges and ownership. Do not copy arbitrary XML or relationships into output,
+  fetch external targets, execute actions, or unpack embedded objects.
+- Bound archive metadata, compressed and expanded bytes, XML depth/node count
+  and total work across shapes. Do not assume a small compressed blob is cheap.
+- Keep plain binary-only inputs supported and test them independently. A
+  modern-Office-authored PPT corpus can contain alternative OOXML throughout,
+  so it cannot alone prove coverage of older files lacking those packages.
+- Compare the binary fallback, projected OOXML, Office-reconverted OOXML and
+  direct-PPT PDF under the same fonts. Test negative offsets and conflicts as
+  counterexamples; do not tune offsets or weaken visual thresholds to pass.
+
+This finding changes the next investigation target, not the acceptance gate:
+full alternative-content conversion and its safety/fidelity checks are pending.
+
+### Typed reader development
+
+The native-only inspection example reads an already-extracted alternative shape
+XML file. It does not unpack PPT/ZIP inputs or apply properties to binary text:
+
+```sh
+cargo test -p legacy-office-converter --test metro_text
+cargo run -p legacy-office-converter --example inspect_metro_text -- shape.xml
+```
+
+It retains direct paragraph margins, signed indentation, default tab interval,
+level and literal XML text as separate typed evidence. It does not normalize
+text placeholders, infer correspondence from equal character counts or copy
+XML markup into output. The parser is currently compiled only by the example
+and integration tests; neither the converter WASM nor its dependencies change.
+ZIP admission and binary-text correspondence remain prerequisites for runtime
+wiring. This reader is a typed inspection subset, not a complete schema validator.
+
+The 1 MiB part limit, depth/attribute ceilings and caller-retained byte/event/
+paragraph counters are resource policy, not Office format restrictions. DTDs,
+processing instructions, undefined entities, invalid numeric ranges and
+unsupported text structures are rejected or have no projection. XML archive
+metadata and expansion must be bounded independently before calling it.
+
+An empty `textCheckSum` is not an identity check. The
+[DrawingML persistence specification](https://learn.microsoft.com/en-us/openspecs/office_standards/ms-oi29500/28f2957d-a978-40c8-bc85-5a32ed0ae8e1)
+states that Office writes an empty value and ignores that attribute. This is
+not a specification of binary-PPT text-slot correspondence.
+
+### Direct-model paragraph origin evidence
+
+The direct PPT path retains local ruler axes by indent level (MS-PPT 2.9.30)
+and a separate snapshot of document type-4 level-0 axes. Document fallback is
+limited to ordinary, unlinked, non-placeholder, non-outline level-0 text.
+Missing fields remain distinct from explicit zero. The byte-conversion path
+and shared renderer are unchanged.
+
+PowerPoint 16.112.3 rendered paired same-length binary counterfactuals with
+document `(margin, indent)` values `(0, 0)` and `(180, 90)` master units.
+Five text bodies used identical-token VT continuations: no local axes,
+indent-only `-144`, indent-only `144`, both axes `288`, and margin-only `144`.
+The margin-only case also has an explicit default tab interval of `144` to
+preserve record length; its text contains no tabs. These are Office-rendered
+binary counterfactuals, not Office-authored variants. Their record framing,
+text lengths, style spans and non-target bytes were verified unchanged.
+
+The no-local control responds to both document fields. Indent-only bodies
+retain their first-line origin while the continuation follows document margin.
+The margin-only body retains its continuation origin while its first line
+follows document indent. The both-present control does not follow either
+document field. A repeated unchanged input produces identical raster output
+on all five tested slides. This supports independent field inheritance in the
+bounded context above, not higher-level or placeholder inheritance.
+
+Negative first-line display remains unresolved: the binary Office PDF retains
+all glyphs at the text inset in the tested negative-indent case, while the
+direct model preserves the signed origin and the renderer paints farther left.
+No clamp or sample-specific correction is added. These observations do not
+establish exact Office display parity or a general negative-indent layout rule.
+
+The direct model also retains an explicit local ruler default tab interval
+(MS-PPT 2.2.29 and 2.9.30), overriding an inherited paragraph interval without
+changing custom stops or inventing a document default. Absence, explicit zero,
+and signed master-unit values remain distinct. The binary Office probes include
+zero and intervals of 288, 574, 577 and 1152 master units. The two-inch interval
+now advances past the last custom stop at the Office-observed position.
+
+Zero-interval display is still a limitation: the shared renderer degrades an
+unreachable tab to a space, whereas the tested Office binary output has no gap.
+The local-ruler projection does not change that renderer policy. Signed-range
+unit tests prove lossless model retention, not Office fidelity for every value.
