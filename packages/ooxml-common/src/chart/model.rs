@@ -2541,7 +2541,7 @@ pub struct ChartLegendEntryOverride {
 /// is ECMA-376 §21.2.3.4 `ST_BarDir`: `"bar"` = horizontal, `"col"` (or any
 /// other value) = vertical. `grouping` is §21.2.3.17 `ST_Grouping`. Non-bar /
 /// non-line / non-area families are returned unchanged.
-pub(super) fn canonical_chart_type(chart_type: &str, bar_dir: &str, grouping: &str) -> String {
+pub fn canonical_chart_type(chart_type: &str, bar_dir: &str, grouping: &str) -> String {
     let canonical = match chart_type {
         "bar" => {
             let is_h = bar_dir == "bar";
