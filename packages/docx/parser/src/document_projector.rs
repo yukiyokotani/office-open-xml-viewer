@@ -886,7 +886,7 @@ impl<R: BufRead> DocumentBodyProjector<R> {
     }
 }
 
-fn docx_understands_namespace(namespace: &str) -> bool {
+pub(crate) fn docx_understands_namespace(namespace: &str) -> bool {
     use ooxml_common::ns::{is_a_ns, is_c_ns, is_m_ns, is_pic_ns, is_r_ns, is_wp_ns};
 
     is_w_ns(Some(namespace))
@@ -899,7 +899,7 @@ fn docx_understands_namespace(namespace: &str) -> bool {
         || crate::parser::docx_understands_drawing_ns(namespace)
 }
 
-fn docx_is_application_defined_extension_element(
+pub(crate) fn docx_is_application_defined_extension_element(
     namespace: Option<&str>,
     local_name: &str,
 ) -> bool {

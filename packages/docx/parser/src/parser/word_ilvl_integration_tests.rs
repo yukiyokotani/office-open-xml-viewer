@@ -147,6 +147,53 @@ fn focused_counter_package(value: &str, level: usize) -> Vec<u8> {
     output
 }
 
+fn package_with_parts(parts: &[(&str, String)]) -> Vec<u8> {
+    let source = package(Some("0"), false, 9, false, false);
+    let mut input = zip::ZipArchive::new(Cursor::new(source)).expect("test source archive");
+    let mut entries = std::collections::BTreeMap::new();
+    for index in 0..input.len() {
+        let mut part = input.by_index(index).expect("test source part");
+        let mut text = String::new();
+        part.read_to_string(&mut text).expect("test XML part");
+        entries.insert(part.name().to_string(), text);
+    }
+    for (name, xml) in parts {
+        entries.insert((*name).to_string(), xml.clone());
+    }
+    let mut output = Vec::new();
+    {
+        let mut zip = ZipWriter::new(Cursor::new(&mut output));
+        for (name, text) in entries {
+            zip.start_file(name, SimpleFileOptions::default())
+                .expect("test output part");
+            zip.write_all(text.as_bytes()).expect("test output XML");
+        }
+        zip.finish().expect("test output archive");
+    }
+    output
+}
+
+fn assert_both_paths_reject_ilvl(bytes: &[u8], label: &str) {
+    for (path, result) in [
+        ("native", parse_from_bytes(bytes)),
+        (
+            "streamed",
+            parse_from_bytes_streamed_with_limits(bytes, None, None, "ilvl-test"),
+        ),
+    ] {
+        assert_eq!(
+            result.unwrap_err(),
+            "OOXML_DOCX_ILVL:cannot-open:non-decimal",
+            "{label} {path}"
+        );
+    }
+    assert_eq!(
+        crate::to_markdown_native(bytes).unwrap_err(),
+        "OOXML_DOCX_ILVL:cannot-open:non-decimal",
+        "{label} markdown"
+    );
+}
+
 #[test]
 fn malformed_levels_18_to_23_advance_the_corresponding_counter() {
     for (value, level, next_marker) in [
@@ -472,5 +519,113 @@ fn invalid_word_levels_reject_the_document_instead_of_degrading_it() {
     assert_eq!(
         repair.unwrap_err(),
         "OOXML_DOCX_ILVL:repair-required:level-definition"
+    );
+}
+
+#[test]
+fn markup_compatibility_selection_precedes_ilvl_validation_in_both_apis() {
+    let mc = "http://schemas.openxmlformats.org/markup-compatibility/2006";
+    let bad = r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="abc"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>bad</w:t></w:r></w:p>"#;
+    let good = r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>good</w:t></w:r></w:p>"#;
+    let body = format!(
+        r#"<w:document xmlns:w="{NS}" xmlns:mc="{mc}" xmlns:u="urn:unsupported" mc:Ignorable="u"><w:body><mc:AlternateContent><mc:Choice Requires="u">{bad}</mc:Choice><mc:Fallback>{good}</mc:Fallback></mc:AlternateContent></w:body></w:document>"#
+    );
+    let valid = package_with_parts(&[("word/document.xml", body)]);
+    assert!(crate::to_markdown_native(&valid).is_ok());
+    for (path, result) in [
+        ("native", parse_from_bytes(&valid)),
+        (
+            "streamed",
+            parse_from_bytes_streamed_with_limits(&valid, None, None, "ilvl-test"),
+        ),
+    ] {
+        let doc = result.expect("inactive Choice cannot reject the fallback");
+        if path == "streamed" {
+            let marker = doc.body.iter().find_map(|element| match element {
+                BodyElement::Paragraph(paragraph) => paragraph.numbering.as_ref(),
+                _ => None,
+            });
+            assert_eq!(
+                marker.map(|numbering| numbering.text.as_str()),
+                Some("L0-1.")
+            );
+        }
+    }
+
+    let selected_bad = format!(
+        r#"<w:document xmlns:w="{NS}" xmlns:mc="{mc}"><w:body><mc:AlternateContent><mc:Choice Requires="w">{bad}</mc:Choice><mc:Fallback>{good}</mc:Fallback></mc:AlternateContent></w:body></w:document>"#
+    );
+    assert_both_paths_reject_ilvl(
+        &package_with_parts(&[("word/document.xml", selected_bad)]),
+        "selected body Choice",
+    );
+
+    let style = |value: &str| {
+        format!(
+            r#"<w:style w:type="paragraph" w:styleId="Probe"><w:pPr><w:numPr><w:ilvl w:val="{value}"/><w:numId w:val="1"/></w:numPr></w:pPr></w:style>"#
+        )
+    };
+    let inactive_style = format!(
+        r#"<w:styles xmlns:w="{NS}" xmlns:mc="{mc}" xmlns:u="urn:unsupported"><mc:AlternateContent><mc:Choice Requires="u">{}</mc:Choice><mc:Fallback>{}</mc:Fallback></mc:AlternateContent></w:styles>"#,
+        style("abc"),
+        style("0")
+    );
+    let bytes = package_with_parts(&[("word/styles.xml", inactive_style)]);
+    assert!(parse_from_bytes(&bytes).is_ok());
+    assert!(parse_from_bytes_streamed_with_limits(&bytes, None, None, "ilvl-test").is_ok());
+    let selected_bad_style = format!(
+        r#"<w:styles xmlns:w="{NS}" xmlns:mc="{mc}"><mc:AlternateContent><mc:Choice Requires="w">{}</mc:Choice><mc:Fallback>{}</mc:Fallback></mc:AlternateContent></w:styles>"#,
+        style("abc"),
+        style("0")
+    );
+    assert_both_paths_reject_ilvl(
+        &package_with_parts(&[("word/styles.xml", selected_bad_style)]),
+        "selected style Choice",
+    );
+}
+
+#[test]
+fn every_referenced_story_propagates_invalid_ilvl_in_both_apis() {
+    let bad = r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="abc"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>story</w:t></w:r></w:p>"#;
+    for (kind, part, root) in [
+        ("header", "header1.xml", "hdr"),
+        ("footer", "footer1.xml", "ftr"),
+        ("footnotes", "footnotes.xml", "footnotes"),
+        ("endnotes", "endnotes.xml", "endnotes"),
+        ("comments", "comments.xml", "comments"),
+    ] {
+        let content = match kind {
+            "footnotes" => format!(
+                r#"<w:footnotes xmlns:w="{NS}"><w:footnote w:id="1">{bad}</w:footnote></w:footnotes>"#
+            ),
+            "endnotes" => format!(
+                r#"<w:endnotes xmlns:w="{NS}"><w:endnote w:id="1">{bad}</w:endnote></w:endnotes>"#
+            ),
+            "comments" => format!(
+                r#"<w:comments xmlns:w="{NS}"><w:comment w:id="0">{bad}</w:comment></w:comments>"#
+            ),
+            _ => format!(r#"<w:{root} xmlns:w="{NS}">{bad}</w:{root}>"#),
+        };
+        let rels = format!(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdStory" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/{kind}" Target="{part}"/></Relationships>"#
+        );
+        let path = format!("word/{part}");
+        let bytes = package_with_parts(&[("word/_rels/document.xml.rels", rels), (&path, content)]);
+        assert_both_paths_reject_ilvl(&bytes, kind);
+    }
+
+    let textbox = format!(
+        r#"<w:document xmlns:w="{NS}"><w:body><w:p><w:r><w:txbxContent>{bad}</w:txbxContent></w:r></w:p></w:body></w:document>"#
+    );
+    assert_both_paths_reject_ilvl(
+        &package_with_parts(&[("word/document.xml", textbox)]),
+        "textbox in body",
+    );
+    let numbering = format!(
+        r#"<w:numbering xmlns:w="{NS}"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:pPr><w:numPr><w:ilvl w:val="abc"/></w:numPr></w:pPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#
+    );
+    assert_both_paths_reject_ilvl(
+        &package_with_parts(&[("word/numbering.xml", numbering)]),
+        "numbering part",
     );
 }

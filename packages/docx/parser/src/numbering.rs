@@ -1,9 +1,15 @@
+use crate::document_projector::{
+    docx_is_application_defined_extension_element, docx_understands_namespace,
+};
 use crate::styles::{parse_run_fmt, RunFmt};
 use crate::xml_util::*;
 use ooxml_common::blip::mime_from_ext;
+use ooxml_common::bounded_xml::MCE_NS;
 use ooxml_common::depth::parse_guarded;
+use ooxml_common::mce::select_alternate_content;
 use ooxml_common::ns::{attr_ns, is_w_ns, relationships};
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 #[cfg(test)]
 #[path = "numbering/restart_tests.rs"]
@@ -112,16 +118,86 @@ pub(crate) const WORD_ILVL_ERROR_PREFIX: &str = "OOXML_DOCX_ILVL:";
 /// as an unstable opening observation, not a universal input rule. Reject other
 /// whitespace/non-decimal lexical forms as a deterministic library policy; no
 /// normal-open control establishes their marker or counter behavior.
+#[derive(Clone, Default)]
+struct IlvlMceScope {
+    ignorable: HashSet<String>,
+    process_content: HashSet<(String, String)>,
+}
+
+/// ECMA-376 Part 3 §9.3: inspect only the branch this DOCX consumer selects.
+/// `mc:Ignorable` suppresses unknown subtrees unless `mc:ProcessContent`
+/// requests their children, and application-defined extension lists are opaque.
+/// The same visitor guards native and streamed loading, including other stories.
+fn visit_effective_word_nodes(
+    root: roxmltree::Node,
+    mut visit: impl FnMut(roxmltree::Node) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut stack = vec![(root, Rc::new(IlvlMceScope::default()))];
+    while let Some((node, inherited)) = stack.pop() {
+        if !node.is_element() {
+            continue;
+        }
+        let mut scope = inherited;
+        let ignorable = node.attribute((MCE_NS, "Ignorable"));
+        let process_content = node.attribute((MCE_NS, "ProcessContent"));
+        if ignorable.is_some() || process_content.is_some() {
+            let mut next = (*scope).clone();
+            for prefix in ignorable.unwrap_or_default().split_whitespace() {
+                if let Some(uri) = node.lookup_namespace_uri(Some(prefix)) {
+                    next.ignorable.insert(uri.to_string());
+                }
+            }
+            for qname in process_content.unwrap_or_default().split_whitespace() {
+                if let Some((prefix, local)) = qname.split_once(':') {
+                    if let Some(uri) = node.lookup_namespace_uri(Some(prefix)) {
+                        next.process_content
+                            .insert((uri.to_string(), local.to_string()));
+                    }
+                }
+            }
+            scope = Rc::new(next);
+        }
+        let namespace = node.tag_name().namespace();
+        let local = node.tag_name().name();
+        if namespace == Some(MCE_NS) && local == "AlternateContent" {
+            if let Some(selected) = select_alternate_content(node, &docx_understands_namespace) {
+                stack.push((selected, scope));
+            }
+            continue;
+        }
+        if docx_is_application_defined_extension_element(namespace, local) {
+            continue;
+        }
+        if let Some(uri) = namespace {
+            if scope.ignorable.contains(uri)
+                && !docx_understands_namespace(uri)
+                && !scope
+                    .process_content
+                    .contains(&(uri.to_string(), local.to_string()))
+                && !scope
+                    .process_content
+                    .contains(&(uri.to_string(), "*".to_string()))
+            {
+                continue;
+            }
+        }
+        visit(node)?;
+        for child in node.children().rev() {
+            stack.push((child, Rc::clone(&scope)));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_paragraph_ilvls(root: roxmltree::Node) -> Result<(), String> {
-    for node in root.descendants().filter(|node| {
-        node.is_element()
-            && is_w_ns(node.tag_name().namespace())
-            && node.tag_name().name() == "ilvl"
-    }) {
+    visit_effective_word_nodes(root, |node| {
+        if !is_w_ns(node.tag_name().namespace()) || node.tag_name().name() != "ilvl" {
+            return Ok(());
+        }
         let Some(raw) = attr_w(node, "val") else {
             // A present ilvl without its required val was not a measured class;
             // retain the parser's pre-existing level-0 fallback for this case.
-            continue;
+            return Ok(());
         };
         if let Err(reason) = parse_word_ilvl(&raw) {
             let kind = match reason {
@@ -130,8 +206,8 @@ pub(crate) fn validate_paragraph_ilvls(root: roxmltree::Node) -> Result<(), Stri
             };
             return Err(format!("{WORD_ILVL_ERROR_PREFIX}cannot-open:{kind}"));
         }
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 pub(crate) fn validate_level_definitions(root: roxmltree::Node) -> Result<(), String> {
@@ -139,9 +215,10 @@ pub(crate) fn validate_level_definitions(root: roxmltree::Node) -> Result<(), St
     // with ilvl outside 0..8. A lvlOverride may contain a complete w:lvl, so
     // check both abstract definitions and instance replacements. The measured
     // level-9 replacement invokes Word's Open and Repair prompt.
-    for node in root.descendants().filter(|node| {
-        node.is_element() && is_w_ns(node.tag_name().namespace()) && node.tag_name().name() == "lvl"
-    }) {
+    visit_effective_word_nodes(root, |node| {
+        if !is_w_ns(node.tag_name().namespace()) || node.tag_name().name() != "lvl" {
+            return Ok(());
+        }
         if let Some(raw) = attr_w(node, "ilvl") {
             if !raw.parse::<u8>().is_ok_and(|level| level <= 8) {
                 return Err(format!(
@@ -149,8 +226,8 @@ pub(crate) fn validate_level_definitions(root: roxmltree::Node) -> Result<(), St
                 ));
             }
         }
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 /// Parse a single VML CSS length (e.g. `width:9pt`) from a `style` attribute
@@ -778,10 +855,9 @@ impl NumberingMap {
 
     /// Word's malformed paragraph reference can display level 8 with a
     /// synthetic zero while advancing another level. This is a display-only
-    /// value, not a live counter. In the measured decimalZero definition Word
-    /// prints `00`; in the upperRoman override it prints no numeral. The
-    /// controls used a single `%9` placeholder; other placeholders retain the
-    /// ordinary resolver's counter values as a library policy.
+    /// value, not a live counter. Every supported format and `%1`..`%9` in
+    /// level-8 text were measured with Word 16.113; a reset placeholder also
+    /// displays its format's synthetic zero until its counter becomes live.
     pub(crate) fn resolve_text_word_zero(&self, num_id: u32, level: u32) -> String {
         self.resolve_text_with_zero_mode(num_id, level, 0, true)
     }
@@ -804,14 +880,12 @@ impl NumberingMap {
         // belt-and-braces — but cheap).
         let mut highest = Some(level);
         while let Some(k) = highest.and_then(|hi| deepest_placeholder(&text, hi)) {
-            let val = if k == level {
-                counter
+            let live = if k == level {
+                Some(counter)
             } else {
-                self.counters
-                    .get(&key)
-                    .and_then(|m| m.get(k))
-                    .unwrap_or_else(|| self.get_start(num_id, k))
+                self.counters.get(&key).and_then(|m| m.get(k))
             };
+            let val = live.unwrap_or_else(|| self.get_start(num_id, k));
             // 17.9.4 applies to this marker's entire displayed level text,
             // including its own placeholder. Keep authored formats intact so
             // other markers continue to use their own definitions. MS-OE376
@@ -824,12 +898,12 @@ impl NumberingMap {
                     .map(|l| l.format.as_str())
                     .unwrap_or(lvl.format.as_str())
             };
-            let rendered = if word_zero && k == level {
-                match fmt {
-                    "decimalZero" => "00".to_string(),
-                    "upperRoman" | "lowerRoman" | "upperLetter" | "lowerLetter" => String::new(),
-                    _ => format_counter(0, fmt),
-                }
+            let rendered = if fmt == "bullet" {
+                // A bullet uses literal lvlText; Word suppresses a numeric
+                // placeholder even when the level text contains one.
+                String::new()
+            } else if word_zero && (k == level || live.is_none()) {
+                format_word_synthetic_zero(fmt)
             } else {
                 format_counter(val, fmt)
             };
@@ -837,6 +911,36 @@ impl NumberingMap {
             highest = k.checked_sub(1);
         }
         text
+    }
+}
+
+/// Word 16.113's display of a counter reset by an ilvl byte in 16..255.
+/// Forty-three supported number formats were measured with level-8 `%9` and
+/// `ilvl=16`; multi-placeholder controls checked zero formatting on `%1`..`%8`.
+/// The ordinary format_counter(0) intentionally keeps its existing library
+/// semantics for unrelated start=0 documents.
+fn format_word_synthetic_zero(format: &str) -> String {
+    match format {
+        "lowerRoman" | "upperRoman" | "lowerLetter" | "upperLetter" | "arabicAlpha"
+        | "arabicAbjad" | "russianLower" | "russianUpper" | "thaiLetters" | "hindiVowels"
+        | "hindiConsonants" | "hebrew1" | "hebrew2" | "none" | "bullet" => String::new(),
+        "decimalZero" => "00".to_string(),
+        "numberInDash" => "- 0 -".to_string(),
+        "decimalFullWidth" => "０".to_string(),
+        "thaiNumbers" => "๐".to_string(),
+        "hindiNumbers" => "०".to_string(),
+        "ideographDigital"
+        | "japaneseDigitalTenThousand"
+        | "japaneseCounting"
+        | "chineseCountingThousand"
+        | "japaneseLegal" => "〇".to_string(),
+        "koreanDigital" | "koreanCounting" => "영".to_string(),
+        "koreanDigital2" => "零".to_string(),
+        "taiwaneseDigital" | "chineseCounting" | "taiwaneseCounting" => "○".to_string(),
+        "taiwaneseCountingThousand" | "chineseLegalSimplified" | "ideographLegalTraditional" => {
+            "零".to_string()
+        }
+        _ => format_counter(0, format),
     }
 }
 

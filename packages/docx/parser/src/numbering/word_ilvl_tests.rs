@@ -87,3 +87,155 @@ fn maximal_start_override_does_not_overflow_the_counter() {
     assert_eq!(map.advance(1, 0), u32::MAX);
     assert_eq!(map.advance(1, 0), u32::MAX);
 }
+
+#[test]
+fn every_supported_number_format_uses_the_word_measured_synthetic_zero() {
+    // Each pair is an independent Word PDF with a level-8 `%9` and ilvl=16.
+    for (format, zero) in [
+        ("decimal", "0"),
+        ("decimalHalfWidth", "0"),
+        ("lowerRoman", ""),
+        ("upperRoman", ""),
+        ("lowerLetter", ""),
+        ("upperLetter", ""),
+        ("arabicAlpha", ""),
+        ("arabicAbjad", ""),
+        ("russianLower", ""),
+        ("russianUpper", ""),
+        ("thaiLetters", ""),
+        ("chosung", "0"),
+        ("ganada", "0"),
+        ("hindiVowels", ""),
+        ("hindiConsonants", ""),
+        ("aiueoFullWidth", "0"),
+        ("aiueo", "0"),
+        ("decimalEnclosedCircle", "0"),
+        ("hebrew1", ""),
+        ("hebrew2", ""),
+        ("hex", "0"),
+        ("numberInDash", "- 0 -"),
+        ("decimalZero", "00"),
+        ("decimalFullWidth", "０"),
+        ("thaiNumbers", "๐"),
+        ("hindiNumbers", "०"),
+        ("ideographDigital", "〇"),
+        ("japaneseDigitalTenThousand", "〇"),
+        ("koreanDigital", "영"),
+        ("koreanDigital2", "零"),
+        ("taiwaneseDigital", "○"),
+        ("chineseCounting", "○"),
+        ("taiwaneseCounting", "○"),
+        ("japaneseCounting", "〇"),
+        ("chineseCountingThousand", "〇"),
+        ("taiwaneseCountingThousand", "零"),
+        ("chineseLegalSimplified", "零"),
+        ("ideographLegalTraditional", "零"),
+        ("japaneseLegal", "〇"),
+        ("koreanCounting", "영"),
+        ("koreanLegal", "0"),
+        ("none", ""),
+        ("bullet", ""),
+    ] {
+        assert_eq!(format_word_synthetic_zero(format), zero, "{format}");
+        let levels: String = (0..9)
+            .map(|level| {
+                let own_format = if level == 8 { format } else { "decimal" };
+                format!(
+                    r#"<w:lvl w:ilvl="{level}"><w:start w:val="{}"/><w:numFmt w:val="{own_format}"/><w:lvlText w:val="Z-%9."/></w:lvl>"#,
+                    level + 1
+                )
+            })
+            .collect();
+        let xml = format!(
+            r#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:abstractNum w:abstractNumId="0">{levels}</w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#
+        );
+        let mut map = NumberingMap::parse(&xml, &HashMap::new());
+        for level in [0, 1, 8, 8, 0] {
+            map.advance(1, level);
+        }
+        assert_eq!(
+            map.resolve_text_word_zero(1, 8),
+            format!("Z-{zero}."),
+            "{format}"
+        );
+    }
+}
+
+#[test]
+fn reset_placeholders_use_zero_until_their_counter_is_live() {
+    let formats = [
+        "decimal",
+        "upperLetter",
+        "lowerLetter",
+        "upperRoman",
+        "lowerRoman",
+        "decimalZero",
+        "decimal",
+        "upperLetter",
+        "decimalZero",
+    ];
+    let levels: String = formats
+        .iter()
+        .enumerate()
+        .map(|(i, format)| {
+            format!(
+                r#"<w:lvl w:ilvl="{i}"><w:start w:val="{}"/><w:numFmt w:val="{format}"/><w:lvlText w:val="P-%1/%2/%3/%4/%5/%6/%7/%8/%9."/></w:lvl>"#,
+                i + 1
+            )
+        })
+        .collect();
+    let xml = format!(
+        r#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:abstractNum w:abstractNumId="0">{levels}</w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#
+    );
+    for (advancing, expected) in [
+        (0, ["P-2", "", "", "", "", "00", "0", "", "00."]),
+        (1, ["P-1", "C", "", "", "", "00", "0", "", "00."]),
+    ] {
+        let mut map = NumberingMap::parse(&xml, &HashMap::new());
+        for level in [0, 1, 8, 8, advancing] {
+            map.advance(1, level);
+        }
+        let marker = map.resolve_text_word_zero(1, 8);
+        assert_eq!(
+            marker.split('/').collect::<Vec<_>>(),
+            expected,
+            "ilvl={}",
+            advancing + 16
+        );
+    }
+}
+
+#[test]
+fn mc_ignorable_and_process_content_limit_the_validated_xml() {
+    let ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    let mc = "http://schemas.openxmlformats.org/markup-compatibility/2006";
+    let xml = format!(
+        r#"<w:document xmlns:w="{ns}" xmlns:mc="{mc}" xmlns:u="urn:future" mc:Ignorable="u"><w:body><u:opaque><w:ilvl w:val="abc"/></u:opaque><u:wrapper><w:ilvl w:val="0"/></u:wrapper></w:body></w:document>"#
+    );
+    let document = parse_guarded(&xml).expect("test XML");
+    assert_eq!(validate_paragraph_ilvls(document.root_element()), Ok(()));
+
+    let xml = format!(
+        r#"<w:document xmlns:w="{ns}" xmlns:mc="{mc}" xmlns:u="urn:future" mc:Ignorable="u" mc:ProcessContent="u:wrapper"><w:body><u:opaque><w:ilvl w:val="abc"/></u:opaque><u:wrapper><w:ilvl w:val="abc"/></u:wrapper></w:body></w:document>"#
+    );
+    let document = parse_guarded(&xml).expect("test XML");
+    assert_eq!(
+        validate_paragraph_ilvls(document.root_element()),
+        Err("OOXML_DOCX_ILVL:cannot-open:non-decimal".to_string())
+    );
+
+    let xml = format!(
+        r#"<w:document xmlns:w="{ns}" xmlns:mc="{mc}" xmlns:u="urn:future" mc:Ignorable="u" mc:ProcessContent="u:*"><w:body><u:anotherWrapper><w:ilvl w:val="abc"/></u:anotherWrapper></w:body></w:document>"#
+    );
+    let document = parse_guarded(&xml).expect("test XML");
+    assert_eq!(
+        validate_paragraph_ilvls(document.root_element()),
+        Err("OOXML_DOCX_ILVL:cannot-open:non-decimal".to_string())
+    );
+
+    let xml = format!(
+        r#"<w:numbering xmlns:w="{ns}" xmlns:mc="{mc}" xmlns:u="urn:future"><mc:AlternateContent><mc:Choice Requires="u"><w:lvl w:ilvl="9"/></mc:Choice><mc:Fallback><w:lvl w:ilvl="8"/></mc:Fallback></mc:AlternateContent></w:numbering>"#
+    );
+    let document = parse_guarded(&xml).expect("test XML");
+    assert_eq!(validate_level_definitions(document.root_element()), Ok(()));
+}

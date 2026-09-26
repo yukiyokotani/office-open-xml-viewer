@@ -9,6 +9,7 @@ use ooxml_common::ns::{attr_ns, is_w_ns, is_wp_ns, math, relationships, wordproc
 use ooxml_common::package_session::{
     PackageEntryStream, PackageOperation, PackageSessionHandle, RetainedPackageOperation,
 };
+use ooxml_common::rels::{parse_rels as parse_opc_rels, resolve_target, TargetMode};
 use ooxml_common::resource::ResourceUsage;
 // Production parses go through `ooxml_common::depth::parse_guarded` (depth-guarded
 // before roxmltree's recursive tree builder). The `XmlDoc` alias survives only for
@@ -797,6 +798,43 @@ struct DocumentParseEnvironment {
     word_ilvl_error: Option<String>,
 }
 
+/// Every referenced story uses the same paragraph number parser. Validate its
+/// selected MC content before any story loader can turn a bad lexical value
+/// into the level-0 fallback. Main-document relationships identify headers,
+/// footers, notes and comments; a textbox is nested inside one of those parts.
+fn validate_referenced_story_ilvls(zip: &mut Zip, rels_xml: &str) -> Option<String> {
+    let mut visited = HashSet::new();
+    for rel in parse_opc_rels(rels_xml).into_values() {
+        if rel.mode != TargetMode::Internal
+            || !rel.relationship_type.as_deref().is_some_and(|kind| {
+                ["/header", "/footer", "/footnotes", "/endnotes", "/comments"]
+                    .iter()
+                    .any(|suffix| kind.ends_with(suffix))
+            })
+        {
+            continue;
+        }
+        let path = resolve_target("word/", &rel.target);
+        if !visited.insert(path.clone()) {
+            continue;
+        }
+        let Ok(xml) = read_zip_string(zip, &path) else {
+            continue;
+        };
+        if !xml.contains("ilvl") {
+            continue;
+        }
+        let Some(error) = parse_guarded(&xml)
+            .ok()
+            .and_then(|document| validate_paragraph_ilvls(document.root_element()).err())
+        else {
+            continue;
+        };
+        return Some(error);
+    }
+    None
+}
+
 /// Load document-wide package dependencies once. Both the compatibility
 /// materializer and the bounded body cursor consume this exact environment, so
 /// styles, numbering, theme, relationships, and settings cannot drift between
@@ -853,9 +891,14 @@ fn load_document_parse_environment(zip: &mut Zip) -> DocumentParseEnvironment {
     };
     let numbering_xml = read_zip_string(zip, &numbering_path).unwrap_or_default();
     if word_ilvl_error.is_none() {
-        word_ilvl_error = parse_guarded(&numbering_xml)
-            .ok()
-            .and_then(|document| validate_level_definitions(document.root_element()).err());
+        word_ilvl_error = parse_guarded(&numbering_xml).ok().and_then(|document| {
+            validate_level_definitions(document.root_element())
+                .and_then(|()| validate_paragraph_ilvls(document.root_element()))
+                .err()
+        });
+    }
+    if word_ilvl_error.is_none() {
+        word_ilvl_error = validate_referenced_story_ilvls(zip, &rels_xml);
     }
     let num_map = NumberingMap::parse(&numbering_xml, &numbering_media_map);
     // §17.9.23 — fold each `<w:lvl><w:pStyle>` backlink into its style's
