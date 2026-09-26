@@ -19,13 +19,16 @@
  *     without the OPC `[Content_Types].xml` stream, or an OPC package without
  *     the format's main part. Raised by the parser at package admission and
  *     reconstructed across the worker boundary.
+ *   - `'invalid-numbering'`     — a DOCX numbering level that Word cannot open
+ *     normally (invalid paragraph ilvl or an out-of-range level definition).
  */
 export type OoxmlErrorCode =
   | 'encrypted'
   | 'invalid-password'
   | 'unsupported-encryption'
   | 'legacy-binary-format'
-  | 'not-ooxml';
+  | 'not-ooxml'
+  | 'invalid-numbering';
 
 export type OoxmlErrorStage =
   | 'container'

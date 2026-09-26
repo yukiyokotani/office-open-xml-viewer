@@ -1292,7 +1292,7 @@ export class OoxmlError extends Error {
     readonly code: OoxmlErrorCode;
     constructor(code: OoxmlErrorCode, message: string);
 }
-export type OoxmlErrorCode = 'encrypted' | 'invalid-password' | 'unsupported-encryption' | 'legacy-binary-format' | 'not-ooxml';
+export type OoxmlErrorCode = 'encrypted' | 'invalid-password' | 'unsupported-encryption' | 'legacy-binary-format' | 'not-ooxml' | 'invalid-numbering';
 export type OoxmlErrorStage = 'container' | 'decompression' | 'parsing' | 'serialization' | 'layout' | 'rendering' | 'worker';
 export type OoxmlFormat = 'docx' | 'xlsx' | 'pptx';
 export type OoxmlResourceLimit = number | null;

@@ -9,6 +9,7 @@ use ooxml_common::ns::{attr_ns, is_w_ns, is_wp_ns, math, relationships, wordproc
 use ooxml_common::package_session::{
     PackageEntryStream, PackageOperation, PackageSessionHandle, RetainedPackageOperation,
 };
+use ooxml_common::rels::{parse_rels as parse_opc_rels, resolve_target, TargetMode};
 use ooxml_common::resource::ResourceUsage;
 // Production parses go through `ooxml_common::depth::parse_guarded` (depth-guarded
 // before roxmltree's recursive tree builder). The `XmlDoc` alias survives only for
@@ -21,7 +22,10 @@ use std::io::BufReader;
 use crate::chart_compatibility::apply_word_classic_chart_space_frame;
 use crate::document_projector::{DocumentBodyPlan, DocumentBodyProjector};
 use crate::drawing_compatibility::apply_word_direct_group_rect;
-use crate::numbering::{LevelDef, NumberingMap};
+use crate::numbering::{
+    validate_level_definitions, validate_paragraph_ilvls, word_level_use, LevelDef, NumberingMap,
+    WORD_ILVL_ERROR_PREFIX,
+};
 use crate::ref_bookmark_flow::{
     apply_matching_leading_break, LeadingBreakCollector, RefInstructionCollector,
 };
@@ -31,6 +35,10 @@ use crate::styles::{
 };
 use crate::types::*;
 use crate::xml_util::*;
+
+#[cfg(test)]
+#[path = "parser/word_ilvl_integration_tests.rs"]
+mod word_ilvl_integration_tests;
 
 const DEFAULT_FONT_SIZE: f64 = 10.0; // pt fallback
 
@@ -787,6 +795,74 @@ struct DocumentParseEnvironment {
     page_layout_settings: Option<crate::types::PageLayoutSettingsWire>,
     note_layout_settings: Option<crate::types::NoteLayoutSettingsWire>,
     even_and_odd_headers: bool,
+    word_ilvl_error: Option<String>,
+}
+
+/// ECMA-376 Part 2 §9.3 relationship types identify actual DOCX stories.
+/// Matching the complete URI matters: a vendor relationship ending in
+/// `/comments` is not a Word comments part and must not reject the package.
+const HEADER_RELATIONSHIP_TYPES: &[&str] = &[
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/header",
+    "http://purl.oclc.org/ooxml/officeDocument/relationships/header",
+];
+const FOOTER_RELATIONSHIP_TYPES: &[&str] = &[
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer",
+    "http://purl.oclc.org/ooxml/officeDocument/relationships/footer",
+];
+const FOOTNOTES_RELATIONSHIP_TYPES: &[&str] = &[
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes",
+    "http://purl.oclc.org/ooxml/officeDocument/relationships/footnotes",
+];
+const ENDNOTES_RELATIONSHIP_TYPES: &[&str] = &[
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/endnotes",
+    "http://purl.oclc.org/ooxml/officeDocument/relationships/endnotes",
+];
+
+fn is_story_relationship_type(kind: &str) -> bool {
+    [
+        HEADER_RELATIONSHIP_TYPES,
+        FOOTER_RELATIONSHIP_TYPES,
+        FOOTNOTES_RELATIONSHIP_TYPES,
+        ENDNOTES_RELATIONSHIP_TYPES,
+        COMMENTS_RELATIONSHIP_TYPES,
+    ]
+    .iter()
+    .any(|types| types.contains(&kind))
+}
+
+/// Every referenced story uses the same paragraph number parser. Validate its
+/// selected MC content before any story loader can turn a bad lexical value
+/// into the level-0 fallback. A textbox is nested inside one of those parts.
+fn validate_referenced_story_ilvls(zip: &mut Zip, rels_xml: &str) -> Option<String> {
+    let mut visited = HashSet::new();
+    for rel in parse_opc_rels(rels_xml).into_values() {
+        if rel.mode != TargetMode::Internal
+            || !rel
+                .relationship_type
+                .as_deref()
+                .is_some_and(is_story_relationship_type)
+        {
+            continue;
+        }
+        let path = resolve_target("word/", &rel.target);
+        if !visited.insert(path.clone()) {
+            continue;
+        }
+        let Ok(xml) = read_zip_string(zip, &path) else {
+            continue;
+        };
+        if !xml.contains("ilvl") {
+            continue;
+        }
+        let Some(error) = parse_guarded(&xml)
+            .ok()
+            .and_then(|document| validate_paragraph_ilvls(document.root_element()).err())
+        else {
+            continue;
+        };
+        return Some(error);
+    }
+    None
 }
 
 /// Load document-wide package dependencies once. Both the compatibility
@@ -808,9 +884,11 @@ fn load_document_parse_environment(zip: &mut Zip) -> DocumentParseEnvironment {
             }
         })
         .unwrap_or_else(|| "word/styles.xml".to_string());
-    let mut style_map = read_zip_string(zip, &styles_path)
-        .map(|s| StyleMap::parse(&s))
-        .unwrap_or_else(|_| StyleMap::parse(""));
+    let styles_xml = read_zip_string(zip, &styles_path).unwrap_or_default();
+    let mut word_ilvl_error = parse_guarded(&styles_xml)
+        .ok()
+        .and_then(|document| validate_paragraph_ilvls(document.root_element()).err());
+    let mut style_map = StyleMap::parse(&styles_xml);
 
     let numbering_path = find_rel_target(&rels_xml, "numbering")
         .map(|t| {
@@ -841,9 +919,18 @@ fn load_document_parse_environment(zip: &mut Zip) -> DocumentParseEnvironment {
         let rel_map = parse_rels(&rels_xml);
         load_media_map(zip, &rel_map, &format!("{}/", dir))
     };
-    let num_map = read_zip_string(zip, &numbering_path)
-        .map(|s| NumberingMap::parse(&s, &numbering_media_map))
-        .unwrap_or_default();
+    let numbering_xml = read_zip_string(zip, &numbering_path).unwrap_or_default();
+    if word_ilvl_error.is_none() {
+        word_ilvl_error = parse_guarded(&numbering_xml).ok().and_then(|document| {
+            validate_level_definitions(document.root_element())
+                .and_then(|()| validate_paragraph_ilvls(document.root_element()))
+                .err()
+        });
+    }
+    if word_ilvl_error.is_none() {
+        word_ilvl_error = validate_referenced_story_ilvls(zip, &rels_xml);
+    }
+    let num_map = NumberingMap::parse(&numbering_xml, &numbering_media_map);
     // §17.9.23 — fold each `<w:lvl><w:pStyle>` backlink into its style's
     // numbering level, now that both parts exist (see the method doc).
     style_map.resolve_numbering_level_backlinks(&num_map);
@@ -936,6 +1023,7 @@ fn load_document_parse_environment(zip: &mut Zip) -> DocumentParseEnvironment {
         page_layout_settings,
         note_layout_settings,
         even_and_odd_headers,
+        word_ilvl_error,
     }
 }
 
@@ -976,6 +1064,7 @@ fn preflight_document_body(
         let document = parse_guarded(xml)
             .map_err(|error| format!("{DOCUMENT_PART}: projected block: {error}"))?;
         let root = document.root_element();
+        validate_paragraph_ilvls(root)?;
         // The local names are independent of the namespace prefix. Reuse the
         // existing sectPr descendant walk, and skip field checks entirely for
         // the common no-field block. A begin and its instrText may occur in
@@ -1085,6 +1174,9 @@ fn preflight_document_body(
 
 pub fn parse(zip: &mut Zip) -> Result<Document, String> {
     let mut environment = load_document_parse_environment(zip);
+    if let Some(error) = environment.word_ilvl_error.take() {
+        return Err(error);
+    }
     let rel_map = &environment.rel_map;
     let style_map = &environment.style_map;
     let num_map = &mut environment.num_map;
@@ -1113,6 +1205,7 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
         Ok(doc) => doc,
         Err(e) => return Ok(degraded_document(theme, format!("word/document.xml: {e}"))),
     };
+    validate_paragraph_ilvls(xml_doc.root_element())?;
 
     let body_node = match xml_doc
         .root_element()
@@ -1249,6 +1342,12 @@ pub(crate) struct DocumentCursorFailure {
 }
 
 impl DocumentCursorFailure {
+    pub(crate) fn word_ilvl_error(&self) -> Option<&str> {
+        self.error
+            .starts_with(WORD_ILVL_ERROR_PREFIX)
+            .then_some(&self.error)
+    }
+
     #[cfg(test)]
     pub(crate) fn into_error(self) -> String {
         self.error
@@ -1267,6 +1366,12 @@ impl DocumentCursorFailure {
 impl DocxBodyCursor {
     pub(crate) fn start(zip: &mut Zip) -> Result<Self, DocumentCursorFailure> {
         let mut environment = load_document_parse_environment(zip);
+        if let Some(error) = environment.word_ilvl_error.take() {
+            return Err(DocumentCursorFailure {
+                error,
+                theme: Box::new(environment.theme.clone()),
+            });
+        }
         let preflight =
             preflight_document_body(zip, &environment).map_err(|error| DocumentCursorFailure {
                 error,
@@ -1529,6 +1634,7 @@ pub(crate) fn parse_streamed_compatible(zip: &mut Zip) -> Result<Document, Strin
         Ok(document) => Ok(document),
         Err(failure) => match zip.assert_healthy() {
             Err(resource_error) => Err(resource_error),
+            Ok(()) if failure.error.starts_with(WORD_ILVL_ERROR_PREFIX) => Err(failure.error),
             Ok(()) => Ok(failure.into_degraded_document()),
         },
     }
@@ -1610,13 +1716,16 @@ fn finish_document(
                 parse_comments_with_extended(&xml, &extended)
             })
             .unwrap_or_default();
-    let footnotes_path = find_rel_target(&environment.rels_xml, "footnotes").map(|target| {
-        if target.starts_with('/') {
-            target.trim_start_matches('/').to_string()
-        } else {
-            format!("word/{target}")
-        }
-    });
+    let footnotes_path =
+        find_internal_rel_target_by_types(&environment.rels_xml, FOOTNOTES_RELATIONSHIP_TYPES).map(
+            |target| {
+                if target.starts_with('/') {
+                    target.trim_start_matches('/').to_string()
+                } else {
+                    format!("word/{target}")
+                }
+            },
+        );
     let footnotes = footnotes_path
         .map(|path| {
             parse_notes(
@@ -1629,13 +1738,16 @@ fn finish_document(
             )
         })
         .unwrap_or_default();
-    let endnotes_path = find_rel_target(&environment.rels_xml, "endnotes").map(|target| {
-        if target.starts_with('/') {
-            target.trim_start_matches('/').to_string()
-        } else {
-            format!("word/{target}")
-        }
-    });
+    let endnotes_path =
+        find_internal_rel_target_by_types(&environment.rels_xml, ENDNOTES_RELATIONSHIP_TYPES).map(
+            |target| {
+                if target.starts_with('/') {
+                    target.trim_start_matches('/').to_string()
+                } else {
+                    format!("word/{target}")
+                }
+            },
+        );
     let endnotes = endnotes_path
         .map(|path| {
             parse_notes(
@@ -4969,7 +5081,16 @@ fn resolve_numbering_marker(
     num_level: u32,
     paragraph_mark_run: &RunFmt,
     theme: &ThemeColors,
-) -> NumberingInfo {
+) -> Option<NumberingInfo> {
+    let ilvl_byte = u8::try_from(num_level).unwrap_or((num_level % 256) as u8);
+    let action = word_level_use(ilvl_byte);
+    // Counter mutation is independent of marker availability. A two-level
+    // definition still advances its level-0 counter for ilvl=16 while showing
+    // no marker, because no level-8 definition supplies the fallback paint.
+    let running_counter = action
+        .counter_level
+        .map(|level| num_map.advance(num_id, level));
+    let marker_level = action.marker_level?;
     let (
         format,
         indent_left,
@@ -4982,42 +5103,29 @@ fn resolve_numbering_marker(
         color,
         color_auto,
         picture_bullet,
-    ) = num_map
-        .get_level(num_id, num_level)
-        .map(|level| {
-            let mut marker_run = paragraph_mark_run.clone();
-            apply_direct_run(&mut marker_run, &level.rpr);
-            (
-                level.format.clone(),
-                level.indent_left,
-                level.tab,
-                level.suff.clone(),
-                level.lvl_jc.clone(),
-                theme.resolve_font_ref(marker_run.font_family_ascii.clone()),
-                theme.resolve_font_ref(marker_run.font_family_east_asia.clone()),
-                Some(resolved_run_font_facts(&marker_run, theme)),
-                level.rpr.color.clone(),
-                level.rpr.color_auto,
-                level.pic_bullet.clone(),
-            )
-        })
-        .unwrap_or_else(|| {
-            (
-                "decimal".to_string(),
-                36.0,
-                18.0,
-                "tab".to_string(),
-                "left".to_string(),
-                theme.resolve_font_ref(paragraph_mark_run.font_family_ascii.clone()),
-                theme.resolve_font_ref(paragraph_mark_run.font_family_east_asia.clone()),
-                Some(resolved_run_font_facts(paragraph_mark_run, theme)),
-                None,
-                false,
-                None,
-            )
-        });
-    let counter = num_map.advance(num_id, num_level);
-    let text = num_map.resolve_text(num_id, num_level, counter);
+    ) = num_map.get_level(num_id, marker_level).map(|level| {
+        let mut marker_run = paragraph_mark_run.clone();
+        apply_direct_run(&mut marker_run, &level.rpr);
+        (
+            level.format.clone(),
+            level.indent_left,
+            level.tab,
+            level.suff.clone(),
+            level.lvl_jc.clone(),
+            theme.resolve_font_ref(marker_run.font_family_ascii.clone()),
+            theme.resolve_font_ref(marker_run.font_family_east_asia.clone()),
+            Some(resolved_run_font_facts(&marker_run, theme)),
+            level.rpr.color.clone(),
+            level.rpr.color_auto,
+            level.pic_bullet.clone(),
+        )
+    })?;
+    let counter = action.fixed_counter.or(running_counter).unwrap_or(0);
+    let text = if action.fixed_counter == Some(0) {
+        num_map.resolve_text_word_zero(num_id, marker_level)
+    } else {
+        num_map.resolve_text(num_id, marker_level, counter)
+    };
     let (pic_bullet_image_path, pic_bullet_mime_type, pic_bullet_width_pt, pic_bullet_height_pt) =
         match picture_bullet {
             // §17.9.20 defines no default size; absence stays absent so layout can
@@ -5031,9 +5139,9 @@ fn resolve_numbering_marker(
             None => (None, None, None, None),
         };
 
-    NumberingInfo {
+    Some(NumberingInfo {
         num_id,
-        level: num_level,
+        level: marker_level,
         format,
         text,
         indent_left,
@@ -5049,7 +5157,7 @@ fn resolve_numbering_marker(
         pic_bullet_mime_type,
         pic_bullet_width_pt,
         pic_bullet_height_pt,
-    }
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5146,9 +5254,7 @@ fn parse_paragraph_cond_at_depth_with_diagnostics(
     let numbering = if let (Some(num_id), Some(num_level)) = (base_para.num_id, base_para.num_level)
     {
         if num_id != 0 {
-            Some(Box::new(resolve_numbering_marker(
-                num_map, num_id, num_level, &mark_run, theme,
-            )))
+            resolve_numbering_marker(num_map, num_id, num_level, &mark_run, theme).map(Box::new)
         } else {
             None
         }
@@ -10482,9 +10588,7 @@ fn extract_simple_paragraph_text(
             return None;
         }
         let num_level = direct_ind.num_level.or(style_para.num_level).unwrap_or(0);
-        Some(Box::new(resolve_numbering_marker(
-            num_map, num_id, num_level, &mark_run, theme,
-        )))
+        resolve_numbering_marker(num_map, num_id, num_level, &mark_run, theme).map(Box::new)
     });
     let level = numbering
         .as_ref()
