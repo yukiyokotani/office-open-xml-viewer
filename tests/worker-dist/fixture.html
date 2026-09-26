@@ -20,6 +20,7 @@
     import { threeD } from '/dist/three-d.mjs';
     import { regionMap } from '/dist/region-map.mjs';
     import { chartEx } from '/dist/chart-ex.mjs';
+    import { runModelSourceStages } from '/tests/worker-dist/model-source-stages.mjs';
 
     const renderers = { math, threeD, regionMap, chartEx };
     const paint = (id, bitmap) => {
@@ -129,6 +130,12 @@
       );
       paint('pptx-chart-ex', await chartExPptx.renderSlideToBitmap(0, { width: 640, dpr: 1 }));
       chartExPptx.destroy();
+
+      await runModelSourceStages({
+        DocxDocument,
+        XlsxWorkbook,
+        bytes,
+      });
 
       document.body.dataset.status = 'ready';
     } catch (error) {

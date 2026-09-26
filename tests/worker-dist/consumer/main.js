@@ -5,6 +5,7 @@ import { math } from '@silurus/ooxml/math';
 import { threeD } from '@silurus/ooxml/three-d';
 import { regionMap } from '@silurus/ooxml/region-map';
 import { chartEx } from '@silurus/ooxml/chart-ex';
+import { runModelSourceStages } from '../model-source-stages.mjs';
 
 const renderers = { math, threeD, regionMap, chartEx };
 const paint = (id, bitmap) => {
@@ -114,6 +115,12 @@ try {
   );
   paint('pptx-chart-ex', await chartExPptx.renderSlideToBitmap(0, { width: 640, dpr: 1 }));
   chartExPptx.destroy();
+
+  await runModelSourceStages({
+    DocxDocument,
+    XlsxWorkbook,
+    bytes,
+  });
 
   document.body.dataset.status = 'ready';
 } catch (error) {

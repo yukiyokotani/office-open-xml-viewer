@@ -41,6 +41,8 @@ async function expectWorkerBitmaps(page: import('@playwright/test').Page, url: s
     expect(ink, `${id} worker bitmap should contain ink`).toBeGreaterThan(100);
   }
 
+  await expect(page.locator('body')).toHaveAttribute('data-model-sources', 'ready');
+
   const pptxTextRuns = await page.evaluate(() => (
     window as typeof window & { pptxTextRuns?: Array<Record<string, unknown>> }
   ).pptxTextRuns);

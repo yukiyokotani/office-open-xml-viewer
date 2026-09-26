@@ -131,7 +131,8 @@
     "check:viewer-api-symmetry": "node scripts/check-viewer-api-symmetry.mjs",
     "check:public-type-exports": "node scripts/check-public-type-exports.mjs",
     "check:docx-compatibility": "node scripts/check-docx-compatibility-evidence.mjs",
-    "test:docx-package-build": "node --test scripts/check-docx-package-build.test.mjs"
+    "test:docx-package-build": "node --test scripts/check-docx-package-build.test.mjs",
+    "check:core-legacy-boundary": "node scripts/check-core-legacy-boundary.mjs"
   },
   "devDependencies": {
     "@ast-grep/cli": "^0.43.0",

@@ -144,6 +144,11 @@ jobs:
           node scripts/check-docx-layout-boundaries.mjs --final
           pnpm check:docx-compatibility
 
+      - name: Core legacy boundary
+        run: |
+          node --test scripts/check-core-legacy-boundary.test.mjs
+          pnpm check:core-legacy-boundary
+
       # The WASM parsers are git-ignored build output; the TypeScript packages
       # import their generated .d.ts/.js, so typecheck requires building them first.
       - name: Build WASM

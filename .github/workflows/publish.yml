@@ -114,6 +114,10 @@ jobs:
       - name: Verify optional TIFF bundle boundary
         run: pnpm check:optional-tiff
 
+      - name: Verify per-format legacy Office model source boundaries
+        run: |
+          pnpm check:core-legacy-boundary
+
       # ── Verify the package that is about to be published ──────────────────────
       # publint checks packaging correctness (exports ordering, file presence,
       # module/type field sanity). attw checks that every entrypoint resolves to
