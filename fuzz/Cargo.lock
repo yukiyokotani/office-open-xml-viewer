@@ -234,6 +234,7 @@ dependencies = [
  "ooxml-common",
  "pptx-parser",
  "xlsx-parser",
+ "zip",
 ]
 
 [[package]]

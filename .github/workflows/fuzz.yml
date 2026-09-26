@@ -1,14 +1,12 @@
 name: Fuzz
 
 # Long-running libFuzzer campaigns for the parser workspace, moved off local
-# machines onto Actions runners (QA6). Each of the 5 targets
-# (fuzz_docx_parse / fuzz_pptx_parse / fuzz_xlsx_parse / fuzz_zip_handle /
-# fuzz_rels — see fuzz/fuzz_targets/) gets its own matrix job so a hang or
+# machines onto Actions runners (QA6). Each target
+# (see fuzz/fuzz_targets/) gets its own matrix job so a hang or
 # crash in one target never blocks the others.
 #
-# Seed corpus lives only in fuzz/corpus/ (copied from the committable
-# packages/*/public/demo/sample-1.* fixtures — never the redistribution-
-# prohibited private/ samples, since this workflow runs on a public repo).
+# Seed corpus lives only in fuzz/corpus/ and is generated from tracked public
+# demo fixtures (never private samples).
 on:
   schedule:
     # 03:00 UTC daily — off-peak, well clear of any interactive CI traffic.
@@ -27,6 +25,10 @@ on:
           - fuzz_xlsx_parse
           - fuzz_zip_handle
           - fuzz_rels
+          - fuzz_docx_part
+          - fuzz_xlsx_part
+          - fuzz_pptx_part
+          - fuzz_chart_part
       duration_minutes:
         description: 'Fuzz duration per target, in minutes'
         required: true
@@ -58,6 +60,10 @@ jobs:
           - fuzz_xlsx_parse
           - fuzz_zip_handle
           - fuzz_rels
+          - fuzz_docx_part
+          - fuzz_xlsx_part
+          - fuzz_pptx_part
+          - fuzz_chart_part
     steps:
       - uses: actions/checkout@v5
 
@@ -86,13 +92,10 @@ jobs:
         if: steps.gate.outputs.run == 'true'
         run: cargo install cargo-fuzz --locked
 
-      - name: Seed corpus sanity check
+      - name: Seed corpus
         if: steps.gate.outputs.run == 'true'
-        # The corpus dirs are gitignored (fuzz artifacts are never committed —
-        # see fuzz/.gitignore) so a fresh checkout starts empty; libFuzzer is
-        # fine with an empty corpus dir (it just starts from its own random
-        # inputs), but the demo fixtures make a much better starting point
-        # when they're present. This step never fails the job either way.
+        # Corpus dirs are gitignored. Generate part seeds from tracked public
+        # demos and retain the existing whole-package seeds for legacy targets.
         run: |
           mkdir -p "fuzz/corpus/${{ matrix.target }}"
           case "${{ matrix.target }}" in
@@ -101,6 +104,7 @@ jobs:
             fuzz_xlsx_parse) cp packages/xlsx/public/demo/sample-1.xlsx "fuzz/corpus/${{ matrix.target }}/" || true ;;
             fuzz_zip_handle) cp packages/xlsx/public/demo/sample-1.xlsx "fuzz/corpus/${{ matrix.target }}/" || true ;;
           esac
+          python3 fuzz/generate-part-corpus.py
 
       - name: Compute time budget
         if: steps.gate.outputs.run == 'true'
@@ -120,6 +124,7 @@ jobs:
           set -o pipefail
           mkdir -p logs
           cargo fuzz run "${{ matrix.target }}" -- \
+            -dict=dicts/ooxml.dict \
             -max_total_time=${{ steps.budget.outputs.seconds }} \
             -rss_limit_mb=4096 \
             -workers=1 \
