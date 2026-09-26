@@ -305,12 +305,12 @@ pub(crate) fn write_test_content_types<W: std::io::Write + std::io::Seek>(
             ooxml_common::opc::CONTENT_TYPES_ITEM,
             zip::write::SimpleFileOptions::default(),
         )
-        .unwrap();
+        .expect("test fixture writes to an in-memory ZIP");
     writer
         .write_all(
             br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>"#,
         )
-        .unwrap();
+        .expect("test fixture writes to an in-memory ZIP");
 }
 
 // Excel built-in indexed color palette (indices 0-63)
