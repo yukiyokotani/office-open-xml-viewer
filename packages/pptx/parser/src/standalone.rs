@@ -8,6 +8,7 @@
 //! caller decides whether a partially inherited shape is usable.
 use super::*;
 use crate::theme::{apply_clr_map, parse_clr_map_node, PptxTheme};
+use ooxml_common::ns::is_a_ns;
 use ooxml_common::theme::StyleMatrixLookup;
 
 /// A parsed standalone shape and the facts a caller needs to judge whether it
@@ -46,7 +47,11 @@ pub fn parse_standalone_shape_part(
         if let Some(map_xml) = clr_map_xml {
             let map_doc = parse_preflighted_pptx_xml(map_xml).map_err(|e| e.to_string())?;
             let node = map_doc.root_element();
-            if node.tag_name().name() != "clrMap" || !is_p_ns(node.tag_name().namespace()) {
+            // Slide masters carry p:clrMap (ECMA-376 §19.3.1.6), while
+            // [MS-PPT] §2.11.9 round-trip color mappings use a:clrMap.
+            if node.tag_name().name() != "clrMap"
+                || !(is_p_ns(node.tag_name().namespace()) || is_a_ns(node.tag_name().namespace()))
+            {
                 return Err("color map part has no clrMap root".to_owned());
             }
             apply_clr_map(&mut theme, Some(&parse_clr_map_node(node)));
@@ -118,6 +123,7 @@ mod tests {
     const P: &str = "http://schemas.openxmlformats.org/presentationml/2006/main";
     const STRICT_P: &str = "http://purl.oclc.org/ooxml/presentationml/main";
     const A: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
+    const STRICT_A: &str = "http://purl.oclc.org/ooxml/drawingml/main";
     const R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 
     fn package(xml: &str) -> Vec<u8> {
@@ -161,13 +167,17 @@ mod tests {
     }
 
     #[test]
-    fn color_map_requires_presentationml_namespace() {
+    fn color_map_requires_presentationml_or_drawingml_namespace() {
         let xml = shape(Some(P), "sp", "");
         for map in ["<clrMap/>", "<x:clrMap xmlns:x=\"urn:foreign\"/>"] {
             assert!(parse(&xml, "", Some(map)).is_err());
         }
         for namespace in [P, STRICT_P] {
             let map = format!("<p:clrMap xmlns:p=\"{namespace}\"/>");
+            assert!(parse(&xml, "", Some(&map)).unwrap().is_some());
+        }
+        for namespace in [A, STRICT_A] {
+            let map = format!("<a:clrMap xmlns:a=\"{namespace}\"/>");
             assert!(parse(&xml, "", Some(&map)).unwrap().is_some());
         }
     }
