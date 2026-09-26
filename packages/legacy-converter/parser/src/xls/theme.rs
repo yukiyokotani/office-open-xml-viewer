@@ -138,8 +138,10 @@ impl Colors {
                 || entry.size() > MAX_PART_BYTES as u64
                 || entry.encrypted()
                 || entry.is_symlink()
-                || !names.insert(entry.name().to_owned())
-                || normalize("", entry.name())? != entry.name()
+                || !names.insert(ooxml_common::rels::part_name_equivalence_key(entry.name()))
+                || (entry.name() != "[Content_Types].xml"
+                    && ooxml_common::rels::part_name_equivalence_key(&normalize("", entry.name())?)
+                        != ooxml_common::rels::part_name_equivalence_key(entry.name()))
             {
                 return Err(unsupported("unsafe or oversized BIFF theme ZIP entry"));
             }
@@ -218,8 +220,14 @@ impl Colors {
 }
 
 fn part(archive: &mut zip::ZipArchive<Cursor<&[u8]>>, name: &str) -> Result<Vec<u8>, String> {
+    let index = if name == "[Content_Types].xml" {
+        archive.index_for_name(name)
+    } else {
+        crate::opc_part::entry_index(archive, name)
+    }
+    .ok_or_else(|| unsupported("missing BIFF theme part"))?;
     let entry = archive
-        .by_name(name)
+        .by_index(index)
         .map_err(|_| unsupported("missing BIFF theme part"))?;
     let declared = entry.size();
     if declared > MAX_PART_BYTES as u64 {
@@ -276,38 +284,10 @@ fn relationship(root: &xml::Node, source: &str, kind: &str) -> Result<String, St
 }
 
 fn normalize(source: &str, target: &str) -> Result<String, String> {
-    // These are OPC names only; no filesystem or network operation is performed.
-    if target.is_empty()
-        || target.starts_with("//")
-        || target.contains(['\\', ':', '?', '#', '%'])
-        || target.chars().any(|c| c.is_control() || c.is_whitespace())
-    {
-        return Err(unsupported("unsupported BIFF theme part URI"));
-    }
-    let mut components: Vec<&str> = if target.starts_with('/') {
-        vec![]
-    } else {
-        source
-            .rsplit_once('/')
-            .map(|(p, _)| p.split('/').collect())
-            .unwrap_or_default()
-    };
-    for component in target.trim_start_matches('/').split('/') {
-        match component {
-            "" => return Err(unsupported("invalid BIFF theme part URI")),
-            "." => {}
-            ".." => {
-                components
-                    .pop()
-                    .ok_or_else(|| unsupported("BIFF theme target escapes package"))?;
-            }
-            _ => components.push(component),
-        }
-    }
-    if components.is_empty() {
-        return Err(unsupported("empty BIFF theme part URI"));
-    }
-    Ok(components.join("/"))
+    // Embedded Theme records are OPC packages (MS-XLS 2.4.326). Apply the
+    // same source-part resolution as ordinary OOXML relationships.
+    ooxml_common::rels::resolve_part_name(source, target)
+        .ok_or_else(|| unsupported("unsupported BIFF theme part URI"))
 }
 
 fn preflight(bytes: &[u8]) -> Result<usize, String> {
@@ -522,17 +502,23 @@ mod tests {
     }
 
     #[test]
-    fn relationship_resolution_rejects_external_ambiguous_and_escaping_targets() {
+    fn relationship_resolution_uses_opc_rules_and_rejects_external_targets() {
         for target in [
             "https://example.invalid/theme.xml",
             "//example.invalid/x",
-            "../../escape.xml",
             "a%2fb.xml",
-            "x.xml#fragment",
             "x\\y.xml",
         ] {
             assert!(normalize("folder/manager.xml", target).is_err());
         }
+        assert_eq!(
+            normalize("folder/manager.xml", "../../escape.xml").unwrap(),
+            "escape.xml"
+        );
+        assert_eq!(
+            normalize("folder/manager.xml", "x.xml#fragment").unwrap(),
+            "folder/x.xml"
+        );
         assert_eq!(
             normalize("folder/manager.xml", "../colors/a.xml").unwrap(),
             "colors/a.xml"
@@ -549,6 +535,21 @@ mod tests {
             let source = format!("<Relationships xmlns=\"{R}\"><Relationship Id=\"a\" Type=\"{REL}/theme\" Target=\"a.xml\"/><Relationship Id=\"{second}\" Type=\"{REL}/theme\" Target=\"b.xml\"/></Relationships>");
             assert!(relationship(&xml::parse(source.as_bytes()).unwrap(), "", "theme").is_err());
         }
+    }
+
+    #[test]
+    fn embedded_theme_uses_equivalent_part_names() {
+        let theme = document("<a:dk1><a:srgbClr val=\"123456\"/></a:dk1>");
+        let package = test_zip(&[
+            ("_rels/.rels", format!("<Relationships xmlns=\"{R}\"><Relationship Id=\"main\" Type=\"{REL}/officeDocument\" Target=\"STYLES/%4danager.xml\"/></Relationships>")),
+            ("styles/Manager.xml", format!("<a:themeManager xmlns:a=\"{A}\"/>")),
+            ("styles/_rels/Manager.xml.rels", format!("<Relationships xmlns=\"{R}\"><Relationship Id=\"theme\" Type=\"{REL}/theme\" Target=\"../COLORS/custom.xml#theme\"/></Relationships>")),
+            ("colors/Custom.xml", theme),
+        ]);
+        assert_eq!(
+            Colors::package(&package).unwrap().0[0],
+            Some([0x12, 0x34, 0x56])
+        );
     }
 
     #[test]

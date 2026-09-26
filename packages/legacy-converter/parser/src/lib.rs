@@ -22,7 +22,7 @@ mod cfb;
 pub mod fuzzing;
 #[cfg(any(feature = "direct-xls", feature = "direct-ppt"))]
 mod officeart;
-#[cfg(feature = "direct-ppt")]
+#[cfg(any(feature = "direct-ppt", feature = "direct-xls"))]
 mod opc_part;
 #[cfg(feature = "direct-ppt")]
 mod ppt;
