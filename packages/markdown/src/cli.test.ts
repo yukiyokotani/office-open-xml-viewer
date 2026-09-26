@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 /**
@@ -27,6 +29,32 @@ describe('ooxml-md CLI', () => {
     const out = execFileSync('node', [bin, sample], { encoding: 'utf8' });
     expect(out.length).toBeGreaterThan(0);
     expect(out).toContain('CANOPY');
+  });
+
+  const parsersReady = ['docx', 'xlsx', 'pptx'].every((format) =>
+    existsSync(fileURLToPath(new URL(`packages/${format}/src/wasm/${format}_parser_bg.wasm`, root))));
+
+  it.skipIf(!parsersReady)('exits 3 with a readable message for non-OOXML input', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ooxml-md-'));
+    try {
+      for (const extension of ['docx', 'xlsx', 'pptx']) {
+        const file = join(directory, `garbage.${extension}`);
+        writeFileSync(file, new Uint8Array([1, 2, 3]));
+        let code = 0;
+        let stderr = '';
+        try {
+          execFileSync('node', [bin, file], { encoding: 'utf8', stdio: 'pipe' });
+        } catch (err) {
+          const e = err as { status: number; stderr: string };
+          code = e.status;
+          stderr = e.stderr;
+        }
+        expect(code, extension).toBe(3);
+        expect(stderr, extension).toContain('is not an Office Open XML document');
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it('prints usage and exits non-zero with no arguments', () => {
