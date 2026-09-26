@@ -31,6 +31,7 @@
 //! `Requires`), and xlsx always took the Choice (never the Fallback), so an
 //! un-understood Choice with a renderable Fallback silently dropped content.
 
+use crate::bounded_xml::MCE_NS;
 use roxmltree::Node;
 
 /// Namespace support result for one prefix named by `Choice/@Requires`.
@@ -110,10 +111,13 @@ pub fn select_alternate_content<'a, 'i>(
     ac: Node<'a, 'i>,
     understood: &dyn Fn(&str) -> bool,
 ) -> Option<Node<'a, 'i>> {
-    for choice in ac
-        .children()
-        .filter(|n| n.is_element() && n.tag_name().name() == "Choice")
-    {
+    // Part 3 Annex A.1.7 permits ignorable foreign children here. A foreign
+    // `Choice` or `Fallback` cannot pre-empt the actual mc branch.
+    for choice in ac.children().filter(|n| {
+        n.is_element()
+            && n.tag_name().namespace() == Some(MCE_NS)
+            && n.tag_name().name() == "Choice"
+    }) {
         let classification = classify_choice_requires(choice.attribute("Requires"), |prefix| {
             match choice.lookup_namespace_uri(Some(prefix)) {
                 None => RequiredNamespaceSupport::Unresolved,
@@ -127,8 +131,11 @@ pub fn select_alternate_content<'a, 'i>(
         }
     }
     // §9.3: no Choice selected → the Fallback (if any) is selected.
-    ac.children()
-        .find(|n| n.is_element() && n.tag_name().name() == "Fallback")
+    ac.children().find(|n| {
+        n.is_element()
+            && n.tag_name().namespace() == Some(MCE_NS)
+            && n.tag_name().name() == "Fallback"
+    })
 }
 
 #[cfg(test)]
@@ -205,6 +212,29 @@ mod tests {
                </mc:AlternateContent>"#
         );
         assert_eq!(select_id(&xml, &["urn:known:one"]).as_deref(), Some("c2"));
+    }
+
+    #[test]
+    fn foreign_namesakes_do_not_select_choice_or_fallback() {
+        let choice = format!(
+            r#"<mc:AlternateContent {NS} mc:Ignorable="u1">
+                 <u1:Choice id="foreign" Requires="k1"/>
+                 <mc:Choice id="effective" Requires="k1"/>
+                 <mc:Fallback id="fallback"/>
+               </mc:AlternateContent>"#
+        );
+        assert_eq!(
+            select_id(&choice, &["urn:known:one"]).as_deref(),
+            Some("effective")
+        );
+        let fallback = format!(
+            r#"<mc:AlternateContent {NS} mc:Ignorable="u1">
+                 <mc:Choice id="unsupported" Requires="u1"/>
+                 <u1:Fallback id="foreign"/>
+                 <mc:Fallback id="effective"/>
+               </mc:AlternateContent>"#
+        );
+        assert_eq!(select_id(&fallback, &[]).as_deref(), Some("effective"));
     }
 
     #[test]

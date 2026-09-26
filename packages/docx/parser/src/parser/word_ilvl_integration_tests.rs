@@ -194,6 +194,15 @@ fn assert_both_paths_reject_ilvl(bytes: &[u8], label: &str) {
     );
 }
 
+fn assert_all_paths_accept_ilvl(bytes: &[u8], label: &str) {
+    assert!(parse_from_bytes(bytes).is_ok(), "{label} native");
+    assert!(
+        parse_from_bytes_streamed_with_limits(bytes, None, None, "ilvl-test").is_ok(),
+        "{label} streamed"
+    );
+    assert!(crate::to_markdown_native(bytes).is_ok(), "{label} markdown");
+}
+
 #[test]
 fn malformed_levels_18_to_23_advance_the_corresponding_counter() {
     for (value, level, next_marker) in [
@@ -628,4 +637,102 @@ fn every_referenced_story_propagates_invalid_ilvl_in_both_apis() {
         &package_with_parts(&[("word/numbering.xml", numbering)]),
         "numbering part",
     );
+}
+
+#[test]
+fn foreign_mce_namesakes_cannot_hide_the_effective_invalid_level() {
+    let mc = "http://schemas.openxmlformats.org/markup-compatibility/2006";
+    let bad =
+        r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="abc"/><w:numId w:val="1"/></w:numPr></w:pPr></w:p>"#;
+    let good =
+        r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr></w:p>"#;
+    let fake_choice = format!(
+        r#"<mc:AlternateContent><u:Choice Requires="w"/><mc:Choice Requires="w">{bad}</mc:Choice><mc:Fallback>{good}</mc:Fallback></mc:AlternateContent>"#
+    );
+    let fake_fallback = format!(
+        r#"<mc:AlternateContent><mc:Choice Requires="u">{good}</mc:Choice><u:Fallback/><mc:Fallback>{bad}</mc:Fallback></mc:AlternateContent>"#
+    );
+    for (label, content) in [
+        ("foreign Choice in body", &fake_choice),
+        ("foreign Fallback in body", &fake_fallback),
+    ] {
+        let xml = format!(
+            r#"<w:document xmlns:w="{NS}" xmlns:mc="{mc}" xmlns:u="urn:future" mc:Ignorable="u"><w:body>{content}</w:body></w:document>"#
+        );
+        assert_both_paths_reject_ilvl(&package_with_parts(&[("word/document.xml", xml)]), label);
+    }
+
+    for (kind, part, root) in [
+        ("header", "header1.xml", "hdr"),
+        ("footer", "footer1.xml", "ftr"),
+        ("footnotes", "footnotes.xml", "footnotes"),
+        ("endnotes", "endnotes.xml", "endnotes"),
+        ("comments", "comments.xml", "comments"),
+    ] {
+        let content = match kind {
+            "footnotes" => format!("<w:footnote w:id=\"1\">{fake_choice}</w:footnote>"),
+            "endnotes" => format!("<w:endnote w:id=\"1\">{fake_choice}</w:endnote>"),
+            "comments" => format!("<w:comment w:id=\"1\">{fake_choice}</w:comment>"),
+            _ => fake_choice.clone(),
+        };
+        let story = format!(
+            r#"<w:{root} xmlns:w="{NS}" xmlns:mc="{mc}" xmlns:u="urn:future" mc:Ignorable="u">{content}</w:{root}>"#
+        );
+        let rels = format!(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdStory" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/{kind}" Target="{part}"/></Relationships>"#
+        );
+        let path = format!("word/{part}");
+        assert_both_paths_reject_ilvl(
+            &package_with_parts(&[("word/_rels/document.xml.rels", rels), (&path, story)]),
+            kind,
+        );
+    }
+}
+
+#[test]
+fn unrelated_relationships_do_not_validate_foreign_xml_as_a_story() {
+    let foreign = format!(
+        r#"<u:payload xmlns:u="urn:vendor" xmlns:w="{NS}"><w:p><w:pPr><w:numPr><w:ilvl w:val="abc"/><w:numId w:val="1"/></w:numPr></w:pPr></w:p></u:payload>"#
+    );
+    for (label, kind) in [
+        ("foreign comments", "urn:vendor/comments"),
+        ("foreign header", "urn:vendor/header"),
+        ("foreign footnotes", "urn:vendor/footnotes"),
+    ] {
+        let rels = format!(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="foreign" Type="{kind}" Target="vendor.xml"/></Relationships>"#
+        );
+        assert_all_paths_accept_ilvl(
+            &package_with_parts(&[
+                ("word/_rels/document.xml.rels", rels),
+                ("word/vendor.xml", foreign.clone()),
+            ]),
+            label,
+        );
+    }
+}
+
+#[test]
+fn strict_story_relationship_types_are_validated_too() {
+    let bad =
+        r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="abc"/><w:numId w:val="1"/></w:numPr></w:pPr></w:p>"#;
+    for (kind, root) in [
+        ("header", "hdr"),
+        ("footer", "ftr"),
+        ("footnotes", "footnotes"),
+        ("endnotes", "endnotes"),
+        ("comments", "comments"),
+    ] {
+        let story = format!(r#"<w:{root} xmlns:w="{NS}">{bad}</w:{root}>"#);
+        let rels = format!(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="strictStory" Type="http://purl.oclc.org/ooxml/officeDocument/relationships/{kind}" Target="strict-story.xml"/></Relationships>"#
+        );
+        assert_both_paths_reject_ilvl(
+            &package_with_parts(&[
+                ("word/_rels/document.xml.rels", rels),
+                ("word/strict-story.xml", story),
+            ]),
+            kind,
+        );
+    }
 }

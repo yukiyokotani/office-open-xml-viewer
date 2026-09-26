@@ -798,19 +798,49 @@ struct DocumentParseEnvironment {
     word_ilvl_error: Option<String>,
 }
 
+/// ECMA-376 Part 2 §9.3 relationship types identify actual DOCX stories.
+/// Matching the complete URI matters: a vendor relationship ending in
+/// `/comments` is not a Word comments part and must not reject the package.
+const HEADER_RELATIONSHIP_TYPES: &[&str] = &[
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/header",
+    "http://purl.oclc.org/ooxml/officeDocument/relationships/header",
+];
+const FOOTER_RELATIONSHIP_TYPES: &[&str] = &[
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer",
+    "http://purl.oclc.org/ooxml/officeDocument/relationships/footer",
+];
+const FOOTNOTES_RELATIONSHIP_TYPES: &[&str] = &[
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes",
+    "http://purl.oclc.org/ooxml/officeDocument/relationships/footnotes",
+];
+const ENDNOTES_RELATIONSHIP_TYPES: &[&str] = &[
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/endnotes",
+    "http://purl.oclc.org/ooxml/officeDocument/relationships/endnotes",
+];
+
+fn is_story_relationship_type(kind: &str) -> bool {
+    [
+        HEADER_RELATIONSHIP_TYPES,
+        FOOTER_RELATIONSHIP_TYPES,
+        FOOTNOTES_RELATIONSHIP_TYPES,
+        ENDNOTES_RELATIONSHIP_TYPES,
+        COMMENTS_RELATIONSHIP_TYPES,
+    ]
+    .iter()
+    .any(|types| types.contains(&kind))
+}
+
 /// Every referenced story uses the same paragraph number parser. Validate its
 /// selected MC content before any story loader can turn a bad lexical value
-/// into the level-0 fallback. Main-document relationships identify headers,
-/// footers, notes and comments; a textbox is nested inside one of those parts.
+/// into the level-0 fallback. A textbox is nested inside one of those parts.
 fn validate_referenced_story_ilvls(zip: &mut Zip, rels_xml: &str) -> Option<String> {
     let mut visited = HashSet::new();
     for rel in parse_opc_rels(rels_xml).into_values() {
         if rel.mode != TargetMode::Internal
-            || !rel.relationship_type.as_deref().is_some_and(|kind| {
-                ["/header", "/footer", "/footnotes", "/endnotes", "/comments"]
-                    .iter()
-                    .any(|suffix| kind.ends_with(suffix))
-            })
+            || !rel
+                .relationship_type
+                .as_deref()
+                .is_some_and(is_story_relationship_type)
         {
             continue;
         }
@@ -1686,13 +1716,16 @@ fn finish_document(
                 parse_comments_with_extended(&xml, &extended)
             })
             .unwrap_or_default();
-    let footnotes_path = find_rel_target(&environment.rels_xml, "footnotes").map(|target| {
-        if target.starts_with('/') {
-            target.trim_start_matches('/').to_string()
-        } else {
-            format!("word/{target}")
-        }
-    });
+    let footnotes_path =
+        find_internal_rel_target_by_types(&environment.rels_xml, FOOTNOTES_RELATIONSHIP_TYPES).map(
+            |target| {
+                if target.starts_with('/') {
+                    target.trim_start_matches('/').to_string()
+                } else {
+                    format!("word/{target}")
+                }
+            },
+        );
     let footnotes = footnotes_path
         .map(|path| {
             parse_notes(
@@ -1705,13 +1738,16 @@ fn finish_document(
             )
         })
         .unwrap_or_default();
-    let endnotes_path = find_rel_target(&environment.rels_xml, "endnotes").map(|target| {
-        if target.starts_with('/') {
-            target.trim_start_matches('/').to_string()
-        } else {
-            format!("word/{target}")
-        }
-    });
+    let endnotes_path =
+        find_internal_rel_target_by_types(&environment.rels_xml, ENDNOTES_RELATIONSHIP_TYPES).map(
+            |target| {
+                if target.starts_with('/') {
+                    target.trim_start_matches('/').to_string()
+                } else {
+                    format!("word/{target}")
+                }
+            },
+        );
     let endnotes = endnotes_path
         .map(|path| {
             parse_notes(
