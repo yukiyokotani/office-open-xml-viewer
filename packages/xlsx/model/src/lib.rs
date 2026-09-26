@@ -104,7 +104,7 @@ pub struct Worksheet {
     #[serde(skip_serializing_if = "std::ops::Not::not", default)]
     pub is_chart_sheet: bool,
     /// `true` for an `xl/dialogsheets/*.xml` part (ECMA-376 Part 1 §12.3.7).
-    /// Dialog sheets are legacy custom-dialog definitions, not cell grids;
+    /// Dialog sheets define custom dialogs, not cell grids;
     /// callers render a non-error informational surface instead of attempting
     /// to interpret the part as a worksheet.
     #[serde(skip_serializing_if = "std::ops::Not::not", default)]
@@ -325,7 +325,7 @@ impl Worksheet {
         worksheet
     }
 
-    /// A healthy row-free legacy dialog sheet. ECMA-376 §18.3.1.34 gives
+    /// A healthy row-free dialog sheet. ECMA-376 §18.3.1.34 gives
     /// this part its own `dialogsheet` root and no worksheet `sheetData` grid.
     pub fn dialog_sheet(name: &str) -> Self {
         let mut worksheet = Self::empty(name);

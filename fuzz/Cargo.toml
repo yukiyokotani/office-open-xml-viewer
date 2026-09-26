@@ -66,6 +66,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_standalone_shape"
+path = "fuzz_targets/fuzz_standalone_shape.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_xlsx_part"
 path = "fuzz_targets/fuzz_xlsx_part.rs"
 test = false
@@ -82,6 +89,13 @@ bench = false
 [[bin]]
 name = "fuzz_chart_part"
 path = "fuzz_targets/fuzz_chart_part.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_numbering_template"
+path = "fuzz_targets/fuzz_numbering_template.rs"
 test = false
 doc = false
 bench = false

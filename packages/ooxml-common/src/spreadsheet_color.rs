@@ -1,5 +1,5 @@
-//! SpreadsheetML color resolution shared by archive parsers and direct legacy
-//! spreadsheet projection. ECMA-376 Part 1 §§18.8.3, 18.8.19, 18.8.27.
+//! SpreadsheetML color resolution shared by archive parsers and non-XML
+//! producers. ECMA-376 Part 1 §§18.8.3, 18.8.19, 18.8.27.
 
 use std::borrow::Cow;
 

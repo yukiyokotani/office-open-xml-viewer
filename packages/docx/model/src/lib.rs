@@ -2699,7 +2699,7 @@ pub struct ShapeText {
     /// markers in text boxes use the same Word-observed fallback as body lists.
     /// This field intentionally serializes `None` as null: null means resolution
     /// selected automatic/default ink, while an absent field remains available
-    /// to legacy hand-built `ShapeText` values as "paragraph mark unknown".
+    /// to non-XML-produced `ShapeText` values as "paragraph mark unknown".
     pub paragraph_mark_color: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub font_family: Option<String>,
@@ -2922,7 +2922,7 @@ pub struct ImageRun {
     /// renderer routes this to `xContainer` / `yContainer` so e.g.
     /// `relativeFrom="margin"` + `align="top"` pins the image to the top
     /// content margin instead of the page top. `None` for inline images and
-    /// for anchors that didn't carry a positionH/V (preserve the legacy
+    /// for anchors that didn't carry a positionH/V (preserve the existing
     /// boolean hints `anchor_x_from_margin` / `anchor_y_from_para`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anchor_x_relative_from: Option<String>,
@@ -3051,7 +3051,7 @@ pub struct ChartRun {
     /// "insideMargin", "outsideMargin", "column", "character"). Mirrors
     /// `ImageRun::anchor_x_relative_from` / `anchor_y_relative_from`. `None`
     /// for inline charts and for anchors that didn't carry a positionH/V
-    /// (preserve the legacy boolean hints `anchor_x_from_margin` /
+    /// (preserve the existing boolean hints `anchor_x_from_margin` /
     /// `anchor_y_from_para`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anchor_x_relative_from: Option<String>,
