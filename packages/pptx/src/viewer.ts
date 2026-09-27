@@ -15,6 +15,7 @@ import {
   type FindHighlightColors,
   type FindMatch,
   type FindMatchesOptions,
+  type FindQuery,
   type OoxmlResourceMetrics,
   type ViewerContextMenuEvent,
   type ZoomableViewer,
@@ -24,6 +25,7 @@ import {
   prevZoomStep,
   clampScale,
   fitScale,
+  normalizeFindQuery,
 } from '@silurus/ooxml-core';
 import {
   CallerCanvasMount,
@@ -869,13 +871,14 @@ export class PptxViewer implements ZoomableViewer {
    * code path. An empty query clears the find.
    */
   async findText(
-    query: string,
+    query: FindQuery,
     opts: FindMatchesOptions = {},
   ): Promise<FindMatch<PptxMatchLocation>[]> {
+    const terms = normalizeFindQuery(query);
     const engine = this.engine;
     if (!engine) return [];
     const generation = ++this._findGeneration;
-    if (query.length === 0) {
+    if (terms.length === 0) {
       this._find.invalidate();
       this._redrawHighlights();
       return [];

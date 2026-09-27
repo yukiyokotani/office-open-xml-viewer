@@ -380,7 +380,10 @@ transparent, selectable text layer per page/slide for native copy. It works in
 both `mode: 'main'` and `mode: 'worker'`; worker rendering returns the retained
 text-run geometry beside each bitmap. `findText()`, `findNext()`, `findPrev()`,
 and `clearFind()` search the complete document, including virtualized pages or
-slides outside the mounted window. Set `findHighlightColors: { match, active }`
+slides outside the mounted window. `findText()` also accepts several terms and
+highlights them together, and `{ wholeWord: true }` skips hits inside a longer
+word. A term given as `{ text, color }` is highlighted in its own colour, so one
+search can show different kinds of hit apart. Set `findHighlightColors: { match, active }`
 on any viewer to override the two overlay backgrounds with CSS colors; use an
 alpha color when the canvas text should remain visible through the highlight.
 

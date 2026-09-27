@@ -108,6 +108,19 @@ describe('buildPptxHighlightLayer', () => {
     expect(shapeDiv.children[0].style.background).toBe(DEFAULT_FIND_ACTIVE_HIGHLIGHT);
   });
 
+  it("paints a match in its term's colour, but the active match in the active colour", () => {
+    vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
+    const layer = makeEl('div');
+    const runs = [run({ text: 'abc def' })];
+    const matches: PptxHighlightMatch[] = [
+      { slices: [{ runIndex: 0, start: 0, end: 3 }], active: false, color: 'rgba(255, 0, 0, 0.4)' },
+      { slices: [{ runIndex: 0, start: 4, end: 7 }], active: true, color: 'rgba(255, 0, 0, 0.4)' },
+    ];
+    buildPptxHighlightLayer(layer as unknown as HTMLDivElement, runs, matches, 100, 100, measureForFont);
+    const boxes = layer.children[0].children;
+    expect(boxes.map((box) => box.style.background)).toEqual(['rgba(255, 0, 0, 0.4)', DEFAULT_FIND_ACTIVE_HIGHLIGHT]);
+  });
+
   it('composes frame flips with shape and text-body rotation', () => {
     vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
     const layer = makeEl('div');

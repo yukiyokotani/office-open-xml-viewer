@@ -220,7 +220,7 @@ const zoomMethods = (asyncSet: boolean): ApiMethod[] => [
 // Shared find methods (IX2) — identical shape across all three viewers; only the
 // match location type differs (docx page / pptx slide / xlsx sheet+cell).
 const findMethods = (loc: string): ApiMethod[] => [
-  { sig: `findText(query: string, opts?: { caseSensitive?: boolean }): Promise<FindMatch<${loc}>[]>`, desc: 'Full-text search across the whole document; highlights every hit and returns them in document order. Each match carries `matchIndex`, the matched `text`, and its `location`. Case-insensitive by default.' },
+  { sig: `findText(query: string | readonly (string | { text: string; color?: string })[], opts?: { caseSensitive?: boolean; wholeWord?: boolean }): Promise<FindMatch<${loc}>[]>`, desc: 'Full-text search across the whole document; highlights every hit and returns them in document order. Each match carries `matchIndex`, the matched `text`, and its `location`. Pass several terms to highlight them all at once (where two overlap, the longer match wins); a `{ text, color }` term is highlighted in its own colour, and its matches carry that `color`. Case-insensitive by default; `wholeWord` skips hits inside a longer word.' },
   { sig: `findNext(): Promise<FindMatch<${loc}> | null>`, desc: 'Move to the next match (wrap-around), navigate to it if needed, and draw it in the active-match colour. Returns the now-active match, or null when there are none. Call findText first.' },
   { sig: `findPrev(): Promise<FindMatch<${loc}> | null>`, desc: 'Move to the previous match (wrap-around from first to last).' },
   { sig: 'clearFind(): void', desc: 'Clear all highlights and reset the find state.' },

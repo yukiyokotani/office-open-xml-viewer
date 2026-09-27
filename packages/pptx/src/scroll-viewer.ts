@@ -1,4 +1,4 @@
-import { EMU_PER_PX, zoomStepScale, anchoredZoomOffset, nextZoomStep, prevZoomStep, fitScale, type FindHighlightColors, type FindMatch, type FindMatchesOptions, type HyperlinkTarget, type OoxmlResourceMetrics, type ViewerContextMenuEvent, type ZoomableViewer, openExternalHyperlink } from '@silurus/ooxml-core';
+import { EMU_PER_PX, zoomStepScale, anchoredZoomOffset, nextZoomStep, prevZoomStep, fitScale, type FindHighlightColors, type FindMatch, type FindMatchesOptions, type FindQuery, type HyperlinkTarget, type OoxmlResourceMetrics, type ViewerContextMenuEvent, type ZoomableViewer, openExternalHyperlink, normalizeFindQuery } from '@silurus/ooxml-core';
 import {
   computeUniformVisibleWindow,
   resolveItemStartScrollTop,
@@ -2497,14 +2497,15 @@ export class PptxScrollViewer implements ZoomableViewer {
   /** Search the complete presentation, including slides outside the
    * virtualized mounted window. Matching is case-insensitive by default. */
   async findText(
-    query: string,
+    query: FindQuery,
     opts: FindMatchesOptions = {},
   ): Promise<FindMatch<PptxMatchLocation>[]> {
+    const terms = normalizeFindQuery(query);
     const presentation = this._pres;
     if (!presentation) return [];
     const generation = ++this._findGeneration;
-    this._findActive = query.length > 0;
-    if (query.length === 0) {
+    this._findActive = terms.length > 0;
+    if (terms.length === 0) {
       this._find.invalidate();
       this._redrawHighlights();
       return [];

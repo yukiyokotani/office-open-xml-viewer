@@ -33,6 +33,23 @@ function controllerFor(slides: PptxTextRunInfo[][]): PptxFindController {
 }
 
 describe('PptxFindController.find', () => {
+  it('searches several terms at once, and treats an all-empty list as a clear', async () => {
+    const c = controllerFor([[run('the cat sat')], [run('a concatenated dog')]]);
+    const matches = await c.find(['dog', 'cat'], { wholeWord: true });
+    expect(matches.map((m) => [m.location.slide, m.text])).toEqual([[0, 'cat'], [1, 'dog']]);
+    expect(await c.find([''])).toEqual([]);
+    expect(c.matches()).toEqual([]);
+  });
+
+  it("carries each term's colour into the matches and the highlights", async () => {
+    const c = controllerFor([[run('the cat and the dog')]]);
+    const matches = await c.find([{ text: 'dog', color: 'red' }, 'cat']);
+    expect(matches.map((m) => [m.text, m.color])).toEqual([['cat', undefined], ['dog', 'red']]);
+    expect(c.slideHighlights(0).map((h) => h.color)).toEqual([undefined, 'red']);
+    expect(c.next()?.color).toBeUndefined();
+    expect(c.next()?.color).toBe('red');
+  });
+
   it('finds matches across slides tagged with their slide index', async () => {
     const c = controllerFor([[run('hello world')], [run('a world here')]]);
     const matches = await c.find('world');
