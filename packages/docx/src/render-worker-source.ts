@@ -21,6 +21,7 @@ import {
 } from '@silurus/ooxml-core';
 import { BoundedRawPartCache } from '@silurus/ooxml-core/internal/bounded-raw-part-cache';
 import type { OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
+import { loadBundledCalibri, unloadBundledOfficeFonts } from './bundled-office-fonts.js';
 import {
   decodeOoxmlResourceUsage,
   HARD_MAX_RAW_PART_CACHE_BYTES,
@@ -119,14 +120,18 @@ let renderers: LoadedWorkerRenderers = {};
 let googleFontFaces: FontFace[] = [];
 let embeddedFontFaces: FontFace[] = [];
 let officeFontFaces: FontFace[] = [];
+let bundledOfficeFontFaces: FontFace[] = [];
 function releaseRetainedFonts(): void {
   const office = officeFontFaces;
+  const bundled = bundledOfficeFontFaces;
   const google = googleFontFaces;
   const embedded = embeddedFontFaces;
   officeFontFaces = [];
+  bundledOfficeFontFaces = [];
   googleFontFaces = [];
   embeddedFontFaces = [];
   try { unloadOfficeFontFallbacks(office); } catch {}
+  try { unloadBundledOfficeFonts(bundled); } catch {}
   try { unloadGoogleFonts(google); } catch {}
   try { unregisterEmbeddedFonts(embedded); } catch {}
 }
@@ -299,6 +304,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
       let googleFaces: FontFace[] = [];
       let embeddedFonts: Awaited<ReturnType<typeof loadEmbeddedFonts>> = { faces: [], metrics: {}, routes: [] };
       let officeFaces: FontFace[] = [];
+      let bundledFaces: FontFace[] = [];
       let fontsTransferred = false;
       try {
       // ECMA-376 §17.8.1 / §17.8.3 — register embedded fonts into the worker's
@@ -313,16 +319,25 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
         });
         if (requestedGeneration !== parseGeneration) throw new Error('render-worker parse was superseded');
       }
-      const officeFonts = await loadOfficeFontFallbacks(docxOfficeFontFallbackRequests(model).filter((request) =>
+      const officeRequests = docxOfficeFontFallbackRequests(model);
+      const officeFonts = await loadOfficeFontFallbacks(officeRequests.filter((request) =>
         !embeddedFonts.routes.some((route) => route.requestedFamily.toLowerCase() === request.family.toLowerCase()
           && route.weight === (request.weight ?? 400) && route.style === (request.style ?? 'normal'))));
       officeFaces = officeFonts.faces;
+      const bundledFonts = req.useBundledOfficeFonts ? await loadBundledCalibri(officeRequests, new Set([
+        ...embeddedFonts.routes.map((route) =>
+          `${route.requestedFamily.toLowerCase()}:${route.weight}:${route.style}`),
+        ...Object.values(officeFonts.routes).map((route) =>
+          `${route.requestedFamily.toLowerCase()}:${route.weight}:${route.style}`),
+      ])) : { faces: [], routes: [] };
+      bundledFaces = [...bundledFonts.faces];
       if (requestedGeneration !== parseGeneration) throw new Error('render-worker parse was superseded');
       if (req.useGoogleFonts) {
         // Pagination measures text, so each admitted face must be available
         // before canonical layout in both worker and main mode.
         const names = docxFontPreloadNames(model, req.cjkFallback).filter((name) =>
-          name?.toLowerCase() !== 'calibri' || !officeFonts.routes.calibri);
+          name?.toLowerCase() !== 'calibri'
+            || (!officeFonts.routes.calibri && bundledFonts.routes.length === 0));
         googleFaces = await preloadGoogleFonts(names, DOCX_GOOGLE_FONTS);
         if (requestedGeneration !== parseGeneration) throw new Error('render-worker parse was superseded');
       }
@@ -336,7 +351,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
         useGoogleFonts: !!req.useGoogleFonts,
         cjkFallback: req.cjkFallback,
         embeddedRoutes: embeddedFonts.routes,
-        officeRoutes: Object.values(officeFonts.routes),
+        officeRoutes: [...Object.values(officeFonts.routes), ...bundledFonts.routes],
         googleFaces,
         mathResources: preparedMath?.records,
         mathDrawables: preparedMath?.drawables,
@@ -348,6 +363,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
       );
       if (requestedGeneration !== parseGeneration) throw new Error('render-worker parse was superseded');
       officeFontFaces = officeFaces;
+      bundledOfficeFontFaces = bundledFaces;
       googleFontFaces = googleFaces;
       embeddedFontFaces = embeddedFonts.faces;
       fontsTransferred = true;
@@ -356,6 +372,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
       } finally {
         if (!fontsTransferred) {
           try { unloadOfficeFontFallbacks(officeFaces); } catch {}
+          try { unloadBundledOfficeFonts(bundledFaces); } catch {}
           try { unloadGoogleFonts(googleFaces); } catch {}
           try { unregisterEmbeddedFonts(embeddedFonts.faces); } catch {}
         }

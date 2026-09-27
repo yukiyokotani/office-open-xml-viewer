@@ -47,6 +47,7 @@ import { createLayoutServices } from './layout-runtime.js';
 import { buildBookmarkPageMap } from './bookmark-nav';
 import { DOCX_GOOGLE_FONTS, docxFontPreloadNames, docxOfficeFontFallbackRequests } from './google-fonts';
 import { loadEmbeddedFonts } from './embedded-fonts';
+import { loadBundledCalibri, unloadBundledOfficeFonts } from './bundled-office-fonts';
 import {
   attachDocumentLayoutRuntime,
   documentLayoutRuntimeOf,
@@ -108,6 +109,9 @@ import {
  *  must not require an application font catalog or device-font permission.
  *  Embedded fonts and the existing optional web-font preload remain supported. */
 export interface LoadOptions extends CoreLoadOptions {
+  /** Load the packaged, offline Carlito substitute for unresolved Calibri
+   * tuples. The default is false; embedded and exact local faces always win. */
+  useBundledOfficeFonts?: boolean;
   /**
    * Opt-in OMML equation engine. Import it from the separate `@silurus/ooxml/math`
    * entry and pass it in: `import { math } from '@silurus/ooxml/math'`. When
@@ -392,6 +396,7 @@ export class DocxDocument {
   private _embeddedFontFaces: FontFace[] = [];
   /** Library-owned exact-local or pinned substitute faces in main mode. */
   private _officeFontFaces: FontFace[] = [];
+  private _bundledOfficeFontFaces: FontFace[] = [];
   /** Google-Fonts `FontFace` objects this document preloaded into `document.fonts`
    *  (main mode only — in worker mode the worker owns them and terminates with its
    *  own FontFaceSet). Released in {@link destroy} so they do not leak into the
@@ -541,6 +546,7 @@ export class DocxDocument {
         buffer,
         resourceOptions.policy,
         mode === 'worker' ? !!opts.useGoogleFonts : false,
+        mode === 'worker' ? !!opts.useBundledOfficeFonts : false,
         opts.workerTimeoutMs,
         (usage) => metrics.observeUsage(usage),
         rendererDescriptors,
@@ -615,8 +621,10 @@ export class DocxDocument {
         embeddedMetrics = loadedEmbedded.metrics;
         embeddedRoutes = loadedEmbedded.routes;
       }
+      const officeRequests = doc._mode === 'main' && doc._document
+        ? docxOfficeFontFallbackRequests(doc._document) : [];
       const officeFonts = doc._mode === 'main' && doc._document
-        ? await loadOfficeFontFallbacks(docxOfficeFontFallbackRequests(doc._document).filter((request) =>
+        ? await loadOfficeFontFallbacks(officeRequests.filter((request) =>
             !embeddedRoutes?.some((route) => route.requestedFamily.toLowerCase() === request.family.toLowerCase()
               && route.weight === (request.weight ?? 400) && route.style === (request.style ?? 'normal'))))
         : { faces: [], routes: {} };
@@ -625,11 +633,26 @@ export class DocxDocument {
         throw new PaginationAbortError();
       }
       doc._officeFontFaces = officeFonts.faces;
+      const resolvedOfficeTuples = new Set([
+        ...(embeddedRoutes ?? []).map((route) =>
+          `${route.requestedFamily.toLowerCase()}:${route.weight}:${route.style}`),
+        ...Object.values(officeFonts.routes).map((route) =>
+          `${route.requestedFamily.toLowerCase()}:${route.weight}:${route.style}`),
+      ]);
+      const bundledFonts = doc._mode === 'main' && opts.useBundledOfficeFonts
+        ? await loadBundledCalibri(officeRequests, resolvedOfficeTuples)
+        : { faces: [], routes: [] };
+      if (signal?.aborted) {
+        unloadBundledOfficeFonts(bundledFonts.faces);
+        throw new PaginationAbortError();
+      }
+      doc._bundledOfficeFontFaces = [...bundledFonts.faces];
       if (doc._mode === 'main' && opts.useGoogleFonts && doc._document) {
         // A proven local Calibri face already resolves this authored family;
         // avoid the optional Google Fonts substitution for the same request.
         const names = docxFontPreloadNames(doc._document, cjkFallback).filter((name) =>
-          name?.toLowerCase() !== 'calibri' || !('calibri' in officeFonts.routes));
+          name?.toLowerCase() !== 'calibri' || (!('calibri' in officeFonts.routes)
+            && bundledFonts.routes.length === 0));
         const googleFaces = await preloadGoogleFonts(names, DOCX_GOOGLE_FONTS);
         if (signal?.aborted) {
           unloadGoogleFonts(googleFaces);
@@ -654,7 +677,7 @@ export class DocxDocument {
           useGoogleFonts: !!opts.useGoogleFonts,
           cjkFallback,
           embeddedRoutes,
-          officeRoutes: Object.values(officeFonts.routes),
+          officeRoutes: [...Object.values(officeFonts.routes), ...bundledFonts.routes],
           googleFaces: doc._googleFontFaces,
           mathResources: preparedMath?.records,
           mathDrawables: preparedMath?.drawables,
@@ -897,6 +920,7 @@ export class DocxDocument {
     buffer: ArrayBuffer,
     resourcePolicy: NormalizedOoxmlResourcePolicy,
     useGoogleFonts = false,
+    useBundledOfficeFonts = false,
     timeoutMs?: number,
     onUsage?: (usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => void,
     renderers?: WorkerRendererDescriptors,
@@ -907,6 +931,7 @@ export class DocxDocument {
         buffer,
         resourcePolicy,
         useGoogleFonts,
+        useBundledOfficeFonts,
         timeoutMs,
         onUsage,
         renderers,
@@ -917,7 +942,7 @@ export class DocxDocument {
     const res = await this._bridge.request(
       (id) =>
         this._mode === 'worker'
-          ? ({ type: 'parse', id, data: buffer, resourcePolicy, useGoogleFonts, cjkFallback: this._cjkFallback, defaultCurrentDateMs: documentLayoutRuntimeOf(this).defaultCurrentDateMs, ...this._parseViewFields(), renderers } satisfies RenderWorkerRequest)
+          ? ({ type: 'parse', id, data: buffer, resourcePolicy, useGoogleFonts, useBundledOfficeFonts, cjkFallback: this._cjkFallback, defaultCurrentDateMs: documentLayoutRuntimeOf(this).defaultCurrentDateMs, ...this._parseViewFields(), renderers } satisfies RenderWorkerRequest)
           : ({ type: 'parse', id, data: buffer, resourcePolicy } satisfies WorkerRequest),
       [buffer],
       { timeoutMs },
@@ -1202,6 +1227,7 @@ export class DocxDocument {
     buffer: ArrayBuffer,
     resourcePolicy: NormalizedOoxmlResourcePolicy,
     useGoogleFonts: boolean,
+    useBundledOfficeFonts: boolean,
     timeoutMs: number | undefined,
     onUsage: ((usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => void) | undefined,
     renderers: WorkerRendererDescriptors | undefined,
@@ -1219,6 +1245,7 @@ export class DocxDocument {
           data: buffer,
           resourcePolicy,
           useGoogleFonts,
+          useBundledOfficeFonts,
           cjkFallback: this._cjkFallback,
           defaultCurrentDateMs: documentLayoutRuntimeOf(this).defaultCurrentDateMs,
           ...this._parseViewFields(),
@@ -1324,6 +1351,10 @@ export class DocxDocument {
     if (this._officeFontFaces.length > 0) {
       unloadOfficeFontFallbacks(this._officeFontFaces);
       this._officeFontFaces = [];
+    }
+    if (this._bundledOfficeFontFaces.length > 0) {
+      unloadBundledOfficeFonts(this._bundledOfficeFontFaces);
+      this._bundledOfficeFontFaces = [];
     }
     // Release the Google-Fonts substitutes this document preloaded into the
     // shared FontFaceSet (main mode). Same refcount contract as the embedded

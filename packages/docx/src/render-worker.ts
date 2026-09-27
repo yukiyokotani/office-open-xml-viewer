@@ -21,6 +21,7 @@ import {
 } from '@silurus/ooxml-core';
 import { BoundedRawPartCache } from '@silurus/ooxml-core/internal/bounded-raw-part-cache';
 import type { OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
+import { loadBundledCalibri, unloadBundledOfficeFonts } from './bundled-office-fonts.js';
 import {
   decodeOoxmlResourceUsage,
   HARD_MAX_RAW_PART_CACHE_BYTES,
@@ -107,6 +108,7 @@ let renderers: LoadedWorkerRenderers = {};
 let googleFontFaces: FontFace[] = [];
 let embeddedFontFaces: FontFace[] = [];
 let officeFontFaces: FontFace[] = [];
+let bundledOfficeFontFaces: FontFace[] = [];
 const rawParts = new BoundedRawPartCache({
   maxEntries: HARD_MAX_RAW_PART_CACHE_ENTRIES,
   maxBytes: HARD_MAX_RAW_PART_CACHE_BYTES,
@@ -189,6 +191,10 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
         unloadOfficeFontFallbacks(officeFontFaces);
         officeFontFaces = [];
       }
+      if (bundledOfficeFontFaces.length > 0) {
+        unloadBundledOfficeFonts(bundledOfficeFontFaces);
+        bundledOfficeFontFaces = [];
+      }
       // Cached blobs belong to the previous document; serving them after a
       // re-parse would silently return the wrong file's image.
       rawParts.clear();
@@ -268,16 +274,25 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
         });
       }
       embeddedFontFaces = embeddedFonts.faces;
-      const officeFonts = await loadOfficeFontFallbacks(docxOfficeFontFallbackRequests(model).filter((request) =>
+      const officeRequests = docxOfficeFontFallbackRequests(model);
+      const officeFonts = await loadOfficeFontFallbacks(officeRequests.filter((request) =>
         !embeddedFonts.routes.some((route) => route.requestedFamily.toLowerCase() === request.family.toLowerCase()
           && route.weight === (request.weight ?? 400) && route.style === (request.style ?? 'normal'))));
       officeFontFaces = officeFonts.faces;
+      const bundledFonts = req.useBundledOfficeFonts ? await loadBundledCalibri(officeRequests, new Set([
+        ...embeddedFonts.routes.map((route) =>
+          `${route.requestedFamily.toLowerCase()}:${route.weight}:${route.style}`),
+        ...Object.values(officeFonts.routes).map((route) =>
+          `${route.requestedFamily.toLowerCase()}:${route.weight}:${route.style}`),
+      ])) : { faces: [], routes: [] };
+      bundledOfficeFontFaces = [...bundledFonts.faces];
       let googleFaces: FontFace[] = [];
       if (req.useGoogleFonts) {
         // Pagination measures text, so each admitted face must be available
         // before canonical layout in both worker and main mode.
         const names = docxFontPreloadNames(model, req.cjkFallback).filter((name) =>
-          name?.toLowerCase() !== 'calibri' || !officeFonts.routes.calibri);
+          name?.toLowerCase() !== 'calibri'
+            || (!officeFonts.routes.calibri && bundledFonts.routes.length === 0));
         googleFaces = await preloadGoogleFonts(names, DOCX_GOOGLE_FONTS);
       }
       googleFontFaces = googleFaces;
@@ -289,7 +304,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
         useGoogleFonts: !!req.useGoogleFonts,
         cjkFallback: req.cjkFallback,
         embeddedRoutes: embeddedFonts.routes,
-        officeRoutes: Object.values(officeFonts.routes),
+        officeRoutes: [...Object.values(officeFonts.routes), ...bundledFonts.routes],
         googleFaces,
         mathResources: preparedMath?.records,
         mathDrawables: preparedMath?.drawables,
