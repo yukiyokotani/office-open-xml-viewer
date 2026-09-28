@@ -1716,6 +1716,7 @@ export interface LineSpacing {
     explicit?: boolean;
 }
 export interface LoadOptions extends LoadOptions__emitterCollision1 {
+    useBundledOfficeFonts?: boolean;
     math?: MathRenderer;
     mode?: 'main' | 'worker';
     sliceLayout?: boolean;
