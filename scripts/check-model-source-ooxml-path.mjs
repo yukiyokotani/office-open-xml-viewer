@@ -96,7 +96,8 @@ function ooxmlAwaits(node, code) {
       const test = code.slice(current.test.start, current.test.end).replace(/\s+/g, '');
       // This font acquisition runs only when a caller explicitly opts in.
       // The default OOXML path still has the exact await sequence from main.
-      if (test === "doc._mode==='main'&&opts.useBundledOfficeFonts") {
+      if (test === "doc._mode==='main'&&opts.useBundledOfficeFonts"
+        || test === 'opts.useBundledOfficeFonts') {
         walk(current.alternate);
         return;
       }

@@ -74,6 +74,7 @@ function fullMeta(pageCount: number): DocumentMeta {
  */
 function progressiveDocument(opts: {
   timeoutMs?: number;
+  bundledUrls?: { regular: string; bold: string; italic: string; boldItalic: string };
   view?: { currentDateMs?: number; showTrackedChanges?: boolean };
   onPartial?: (p: { availableUnits: number; exact: boolean }) => void;
   onComplete?: (error?: unknown) => void;
@@ -99,6 +100,7 @@ function progressiveDocument(opts: {
     _embeddedFontFaces: [],
     _officeFontFaces: [],
     _bundledOfficeFontFaces: [],
+    _bundledOfficeFontUrls: opts.bundledUrls,
     _googleFontFaces: [],
     _bridge: {
       request: (factory: (id: number) => RenderWorkerRequest) => {
@@ -149,7 +151,7 @@ function progressiveDocument(opts: {
       renderers: unknown,
       progressive: unknown,
     ): Promise<void>;
-  })._parse(new ArrayBuffer(1), undefined, false, false, opts.timeoutMs, undefined, undefined, progressive);
+  })._parse(new ArrayBuffer(1), undefined, false, !!opts.bundledUrls, opts.timeoutMs, undefined, undefined, progressive);
 
   const push = (res: RenderWorkerResponse): void => {
     (document as unknown as {
@@ -169,6 +171,17 @@ function progressiveDocument(opts: {
 }
 
 describe('worker-mode progressive load', () => {
+  it('sends host-resolved optional font URLs to the opaque worker', async () => {
+    const urls = { regular: '/regular.ttf', bold: '/bold.ttf',
+      italic: '/italic.ttf', boldItalic: '/bold-italic.ttf' };
+    const harness = progressiveDocument({ bundledUrls: urls });
+    expect(harness.requests[0]).toMatchObject({
+      type: 'parse', useBundledOfficeFonts: true, bundledOfficeFontUrls: urls,
+    });
+    harness.push({ type: 'layoutPartial', forId: 11, partial: partial(1) });
+    await harness.parsed;
+  });
+
   it('asks the worker for progressive layout and resolves on the first publication', async () => {
     const partials: { availableUnits: number; exact: boolean }[] = [];
     const harness = progressiveDocument({ onPartial: (p) => partials.push(p) });

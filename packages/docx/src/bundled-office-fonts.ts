@@ -12,6 +12,7 @@ const FAMILY = '__ooxml_docx_bundled_carlito';
 const MAX_FONT_BYTES = 4 * 1024 * 1024;
 
 type Slot = 'regular' | 'bold' | 'italic' | 'boldItalic';
+export type BundledCalibriUrls = Readonly<Record<Slot, string>>;
 const SLOT = {
   regular: { weight: 400, style: 'normal' },
   bold: { weight: 700, style: 'normal' },
@@ -32,7 +33,9 @@ export interface LoadedBundledOfficeFonts {
 export async function loadBundledCalibri(
   requests: readonly OfficeFontFallbackRequest[],
   resolvedTuples: ReadonlySet<string>,
+  urls: BundledCalibriUrls | undefined,
 ): Promise<LoadedBundledOfficeFonts> {
+  if (!urls) return { faces: [], routes: [] };
   const slots = new Set<Slot>();
   for (const request of requests) {
     if (request.family.trim().toLowerCase() !== 'calibri') continue;
@@ -44,13 +47,12 @@ export async function loadBundledCalibri(
       : (style === 'italic' ? 'italic' : 'regular'));
   }
   if (slots.size === 0) return { faces: [], routes: [] };
-  const { CARLITO_URLS } = await import('./assets/carlito/urls.js');
   const prepared: Array<{ slot: Slot; bytes: Uint8Array; metric: ResolvedFontMetric }> = [];
   // Four fixed assets form the complete budget. Sequential fetch bounds retained
   // decode memory without making document startup depend on a network service.
   for (const slot of slots) {
     try {
-      const response = await fetch(CARLITO_URLS[slot]);
+      const response = await fetch(urls[slot]);
       if (!response.ok) continue;
       const bytes = new Uint8Array(await response.arrayBuffer());
       if (bytes.length === 0 || bytes.length > MAX_FONT_BYTES) continue;

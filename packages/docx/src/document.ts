@@ -47,7 +47,7 @@ import { createLayoutServices } from './layout-runtime.js';
 import { buildBookmarkPageMap } from './bookmark-nav';
 import { DOCX_GOOGLE_FONTS, docxFontPreloadNames, docxOfficeFontFallbackRequests } from './google-fonts';
 import { loadEmbeddedFonts } from './embedded-fonts';
-import { loadBundledCalibri, unloadBundledOfficeFonts } from './bundled-office-fonts';
+import { loadBundledCalibri, unloadBundledOfficeFonts, type BundledCalibriUrls } from './bundled-office-fonts';
 import {
   attachDocumentLayoutRuntime,
   documentLayoutRuntimeOf,
@@ -397,6 +397,9 @@ export class DocxDocument {
   /** Library-owned exact-local or pinned substitute faces in main mode. */
   private _officeFontFaces: FontFace[] = [];
   private _bundledOfficeFontFaces: FontFace[] = [];
+  /** Resolved on the host only when requested. Workers receive URL strings,
+   * so their opaque classic-script asset never embeds `import.meta`. */
+  private _bundledOfficeFontUrls: BundledCalibriUrls | undefined;
   /** Google-Fonts `FontFace` objects this document preloaded into `document.fonts`
    *  (main mode only — in worker mode the worker owns them and terminates with its
    *  own FontFaceSet). Released in {@link destroy} so they do not leak into the
@@ -525,6 +528,9 @@ export class DocxDocument {
       checkAbort();
       doc._metrics = metrics;
       doc._cjkFallback = cjkFallback;
+      doc._bundledOfficeFontUrls = opts.useBundledOfficeFonts
+        ? (await import('./assets/carlito/urls.js').catch(() => undefined))?.CARLITO_URLS
+        : undefined;
       // The variant the caller will actually render, recorded for BOTH render
       // modes and recorded BEFORE the parse: geometry accessors and the
       // per-call option fill-in (`_withActiveView`) read it, the wire options
@@ -640,7 +646,7 @@ export class DocxDocument {
           `${route.requestedFamily.toLowerCase()}:${route.weight}:${route.style}`),
       ]);
       const bundledFonts = doc._mode === 'main' && opts.useBundledOfficeFonts
-        ? await loadBundledCalibri(officeRequests, resolvedOfficeTuples)
+        ? await loadBundledCalibri(officeRequests, resolvedOfficeTuples, doc._bundledOfficeFontUrls)
         : { faces: [], routes: [] };
       if (signal?.aborted) {
         unloadBundledOfficeFonts(bundledFonts.faces);
@@ -942,7 +948,7 @@ export class DocxDocument {
     const res = await this._bridge.request(
       (id) =>
         this._mode === 'worker'
-          ? ({ type: 'parse', id, data: buffer, resourcePolicy, useGoogleFonts, useBundledOfficeFonts, cjkFallback: this._cjkFallback, defaultCurrentDateMs: documentLayoutRuntimeOf(this).defaultCurrentDateMs, ...this._parseViewFields(), renderers } satisfies RenderWorkerRequest)
+          ? ({ type: 'parse', id, data: buffer, resourcePolicy, useGoogleFonts, useBundledOfficeFonts, bundledOfficeFontUrls: this._bundledOfficeFontUrls, cjkFallback: this._cjkFallback, defaultCurrentDateMs: documentLayoutRuntimeOf(this).defaultCurrentDateMs, ...this._parseViewFields(), renderers } satisfies RenderWorkerRequest)
           : ({ type: 'parse', id, data: buffer, resourcePolicy } satisfies WorkerRequest),
       [buffer],
       { timeoutMs },
@@ -1246,6 +1252,7 @@ export class DocxDocument {
           resourcePolicy,
           useGoogleFonts,
           useBundledOfficeFonts,
+          bundledOfficeFontUrls: this._bundledOfficeFontUrls,
           cjkFallback: this._cjkFallback,
           defaultCurrentDateMs: documentLayoutRuntimeOf(this).defaultCurrentDateMs,
           ...this._parseViewFields(),

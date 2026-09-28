@@ -9,12 +9,10 @@ vi.mock('@silurus/ooxml-core', async (importOriginal) => ({
   unregisterEmbeddedFonts: unregister,
   parseOpenTypeResourceMetrics: () => null,
 }));
-vi.mock('./assets/carlito/urls.js', () => ({
-  CARLITO_URLS: { regular: '/regular.ttf', bold: '/bold.ttf',
-    italic: '/italic.ttf', boldItalic: '/bold-italic.ttf' },
-}));
-
 import { loadBundledCalibri, unloadBundledOfficeFonts } from './bundled-office-fonts.js';
+
+const urls = { regular: '/regular.ttf', bold: '/bold.ttf',
+  italic: '/italic.ttf', boldItalic: '/bold-italic.ttf' };
 
 describe('offline DOCX font fallback', () => {
   beforeEach(() => {
@@ -29,7 +27,7 @@ describe('offline DOCX font fallback', () => {
       { family: 'Calibri', weight: 400 },
       { family: 'Calibri', weight: 700, style: 'italic' },
       { family: 'Arial', weight: 400 },
-    ], new Set(['calibri:400:normal']));
+    ], new Set(['calibri:400:normal']), urls);
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(fetch).toHaveBeenCalledWith('/bold-italic.ttf');
     expect(loaded.routes).toMatchObject([{
@@ -43,7 +41,7 @@ describe('offline DOCX font fallback', () => {
 
   it('leaves an embedded or exact local tuple untouched', async () => {
     const loaded = await loadBundledCalibri(
-      [{ family: 'Calibri', weight: 400 }], new Set(['calibri:400:normal']),
+      [{ family: 'Calibri', weight: 400 }], new Set(['calibri:400:normal']), urls,
     );
     expect(loaded).toEqual({ faces: [], routes: [] });
     expect(fetch).not.toHaveBeenCalled();

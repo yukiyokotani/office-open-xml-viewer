@@ -329,7 +329,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
           `${route.requestedFamily.toLowerCase()}:${route.weight}:${route.style}`),
         ...Object.values(officeFonts.routes).map((route) =>
           `${route.requestedFamily.toLowerCase()}:${route.weight}:${route.style}`),
-      ])) : { faces: [], routes: [] };
+      ]), req.bundledOfficeFontUrls) : { faces: [], routes: [] };
       bundledFaces = [...bundledFonts.faces];
       if (requestedGeneration !== parseGeneration) throw new Error('render-worker parse was superseded');
       if (req.useGoogleFonts) {

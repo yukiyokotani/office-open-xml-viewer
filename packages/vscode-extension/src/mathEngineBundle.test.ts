@@ -3,6 +3,7 @@ import { build } from 'esbuild';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { mainThreadOnlyWorkerStubs } from '../esbuild-worker-stub.mjs';
+import { optionalDocxFontStub } from '../esbuild-optional-font-stub.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const EXTENSION_ROOT = resolve(HERE, '..');
@@ -45,7 +46,7 @@ describe('VS Code webview math engine bundle', () => {
       external: ['*.wasm'],
       loader: { '.wasm': 'file', '.ttf': 'file' },
       assetNames: 'assets/[name]-[hash]',
-      plugins: [mainThreadOnlyWorkerStubs],
+      plugins: [mainThreadOnlyWorkerStubs, optionalDocxFontStub],
     });
 
     // The optional model-source sidecars use import.meta.url only when a
@@ -61,6 +62,7 @@ describe('VS Code webview math engine bundle', () => {
     expect(bundle).toContain('renderSimpleThreeDChart');
     expect(bundle).not.toContain('Failed to load math engine from');
     expect(bundle).not.toContain('ooxml-worker-renderer-module');
+    expect(bundle).not.toContain('data:font/ttf;base64');
     expect(result.outputFiles.filter((file) => /\.(?:ttf|otf|woff2?)$/.test(file.path))).toEqual([]);
   });
 });

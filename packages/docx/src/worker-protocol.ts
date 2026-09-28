@@ -12,6 +12,7 @@ import type {
 import type { OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
 import type { DocxElementContextOptions } from './element-context';
 import type { DocxElementContext, DocxPagePoint } from './selection-context';
+import type { BundledCalibriUrls } from './bundled-office-fonts';
 
 /** Lightweight summary returned by the render worker's `parse` — everything
  *  the main-thread proxy needs for its synchronous getters. The full model
@@ -117,6 +118,7 @@ export type RenderWorkerRequest =
       sourceOwnerUrl?: string;
       useGoogleFonts?: boolean;
       useBundledOfficeFonts?: boolean;
+      bundledOfficeFontUrls?: BundledCalibriUrls;
       cjkFallback?: import('@silurus/ooxml-core').CjkLang;
       defaultCurrentDateMs: number;
       currentDateMs?: number;

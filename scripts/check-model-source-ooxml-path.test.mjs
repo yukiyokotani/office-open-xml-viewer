@@ -18,6 +18,8 @@ test('only the explicit bundled-font opt-in may add a DOCX load await', () => {
   const previous = "async function load() { await parse(); }";
   const optional = "async function load() { const doc = { _mode: 'main' }; const opts = { useBundledOfficeFonts: true }; const fonts = doc._mode === 'main' && opts.useBundledOfficeFonts ? await loadBundledCalibri() : []; await parse(); }";
   assert.equal(auditAwaitCase('sample.ts', 'load', previous, optional), 1);
+  const hostUrls = "async function load() { const urls = opts.useBundledOfficeFonts ? (await import('./urls.js')).CARLITO_URLS : undefined; await parse(); }";
+  assert.equal(auditAwaitCase('sample.ts', 'load', previous, hostUrls), 1);
   const ungated = "async function load() { await loadBundledCalibri(); await parse(); }";
   assert.throws(() => auditAwaitCase('sample.ts', 'load', previous, ungated), /OOXML awaits changed/);
   const inverted = "async function load() { const fonts = !opts.useBundledOfficeFonts ? await loadBundledCalibri() : []; await parse(); }";

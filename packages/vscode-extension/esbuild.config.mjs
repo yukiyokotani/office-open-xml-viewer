@@ -2,6 +2,7 @@ import * as esbuild from 'esbuild';
 import { mkdir, readdir, rm } from 'node:fs/promises';
 import { mainThreadOnlyWorkerStubs } from './esbuild-worker-stub.mjs';
 import { bundledAssetSidecars } from './esbuild-asset-sidecars.mjs';
+import { optionalDocxFontStub } from './esbuild-optional-font-stub.mjs';
 
 const production = process.argv.includes('--production');
 const watch = process.argv.includes('--watch');
@@ -37,7 +38,7 @@ const webviewConfig = {
     '.wasm': 'file',
     '.ttf': 'file',
   },
-  plugins: [mainThreadOnlyWorkerStubs, bundledAssetSidecars],
+  plugins: [mainThreadOnlyWorkerStubs, optionalDocxFontStub, bundledAssetSidecars],
 };
 
 async function build() {

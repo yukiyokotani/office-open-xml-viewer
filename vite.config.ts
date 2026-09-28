@@ -49,6 +49,22 @@ export function wasmAssetUrl(): Plugin {
     // the file directly (the pre-E4 behavior) — intercepting there returned an
     // unresolvable reference and broke every WASM load (caught by CI smoke).
     apply: 'build',
+    async transform(code, id) {
+      // DOCX's opt-in font URL module must keep four short file URLs. Vite
+      // library mode otherwise inlines `new URL('./font.ttf', import.meta.url)`
+      // as multi-megabyte data URLs. The module is loaded on the host only
+      // when requested, and the opaque worker receives just these URL strings.
+      if (!id.replaceAll('\\', '/').endsWith('/packages/docx/src/assets/carlito/urls.ts')) return null;
+      let result = code;
+      const assetUrls = [...code.matchAll(/new URL\((['"])(\.\/Carlito-(?:Regular|Bold|Italic|BoldItalic)\.ttf)\1,\s*import\.meta\.url\)\.href/g)];
+      if (assetUrls.length !== 4) throw new Error('Expected four static Carlito font URLs');
+      for (const match of assetUrls) {
+        const filePath = resolve(dirname(id), match[2]);
+        const referenceId = this.emitFile({ type: 'asset', name: basename(filePath), source: await readFile(filePath) });
+        result = result.replace(match[0], `import.meta.ROLLUP_FILE_URL_${referenceId}`);
+      }
+      return { code: result, map: null };
+    },
     async load(id) {
       if (!id.endsWith(SUFFIX)) return null;
       const filePath = id.slice(0, -SUFFIX.length);

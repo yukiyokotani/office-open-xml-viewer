@@ -284,7 +284,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
           `${route.requestedFamily.toLowerCase()}:${route.weight}:${route.style}`),
         ...Object.values(officeFonts.routes).map((route) =>
           `${route.requestedFamily.toLowerCase()}:${route.weight}:${route.style}`),
-      ])) : { faces: [], routes: [] };
+      ]), req.bundledOfficeFontUrls) : { faces: [], routes: [] };
       bundledOfficeFontFaces = [...bundledFonts.faces];
       let googleFaces: FontFace[] = [];
       if (req.useGoogleFonts) {
