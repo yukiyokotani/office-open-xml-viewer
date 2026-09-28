@@ -136,6 +136,7 @@ describe('DocxDocument.destroy() — rejects in-flight worker requests', () => {
     instance._rawParts = new BoundedRawPartCache({ maxEntries: 4, maxBytes: 1024 });
     instance._embeddedFontFaces = [];
     instance._officeFontFaces = [];
+    instance._bundledOfficeFontFaces = [];
     instance._googleFontFaces = [];
     instance._fetchImage = () => Promise.resolve(new Blob());
     return { doc: instance as unknown as DestroyProbe, bridge, worker };
@@ -261,6 +262,23 @@ describe('DocxDocument.destroy() — rejects in-flight worker requests', () => {
     // left the FontFaceSet, and the held array was cleared.
     expect(added).toHaveLength(0);
     expect((doc as unknown as { _embeddedFontFaces: FontFace[] })._embeddedFontFaces).toHaveLength(0);
+  });
+
+  it('destroy() releases the document’s bundled substitute faces', async () => {
+    const { added } = installFontFaceSet();
+    const held = await registerEmbeddedFonts([
+      { family: 'DocxBundledSubstitute', bytes: validHeader(), odttf: false,
+        weight: 'normal', style: 'normal' },
+    ]);
+    expect(added).toHaveLength(1);
+
+    const { doc } = makeDocument();
+    (doc as unknown as { _bundledOfficeFontFaces: FontFace[] })._bundledOfficeFontFaces = held;
+    doc.destroy();
+
+    expect(added).toHaveLength(0);
+    expect((doc as unknown as { _bundledOfficeFontFaces: FontFace[] })._bundledOfficeFontFaces)
+      .toHaveLength(0);
   });
 
   // Wiring guard: destroy() must actually release the Google-Fonts substitutes
