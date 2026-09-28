@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Compare the ordinary OOXML await path with the merge base using the AST.
-// Source-only branches are excluded; every remaining await must keep its
-// original order and callee. The XLSX render worker also retains one host.run
+// Source-only branches and the explicitly opted-in DOCX bundled-font load are
+// excluded; every remaining await must keep its original order and callee.
+// The XLSX render worker also retains one host.run
 // around archive construction and parse, as in the previous renderer.
 // This regression check covers accidental edits, not intentionally hostile code.
 import { execFileSync } from 'node:child_process';
@@ -93,6 +94,12 @@ function ooxmlAwaits(node, code) {
     }
     if (current.type === 'ConditionalExpression') {
       const test = code.slice(current.test.start, current.test.end).replace(/\s+/g, '');
+      // This font acquisition runs only when a caller explicitly opts in.
+      // The default OOXML path still has the exact await sequence from main.
+      if (test === "doc._mode==='main'&&opts.useBundledOfficeFonts") {
+        walk(current.alternate);
+        return;
+      }
       if (test === 'options.modelSources===undefined') {
         walk(current.consequent);
         return;
