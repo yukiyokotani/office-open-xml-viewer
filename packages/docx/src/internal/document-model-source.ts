@@ -46,6 +46,7 @@ import { createLayoutServices } from '../layout-runtime.js';
 import { buildBookmarkPageMap } from '../bookmark-nav';
 import { DOCX_GOOGLE_FONTS, docxFontPreloadNames, docxOfficeFontFallbackRequests } from '../google-fonts';
 import { loadEmbeddedFonts } from '../embedded-fonts';
+import { loadBundledCalibri, unloadBundledOfficeFonts } from '../bundled-office-fonts.js';
 import {
   attachDocumentLayoutRuntime,
   documentLayoutRuntimeOf,
@@ -129,6 +130,7 @@ function deferred<T>(): Deferred<T> {
 type SourceDocxFriend = Pick<DocxDocument, keyof DocxDocument> & Record<
   '_metrics' | '_cjkFallback' | '_parse' | '_mode' | '_threeD' | '_regionMap' |
   '_chartEx' | '_tiff' | '_document' | '_embeddedFontFaces' | '_officeFontFaces' |
+  '_bundledOfficeFontFaces' | '_bundledOfficeFontUrls' |
   '_googleFontFaces' | '_source' | '_layoutObservers' | '_layoutAbort' |
   '_replaceMainLayoutPublication' | '_isLayoutViewActive' | '_layoutLifecycle' |
   '_layoutCompletion' | '_resourceUsage' | '_progressive',
@@ -231,6 +233,9 @@ export async function loadDocxModelSource(
         opts.showTrackedChanges === true,
       );
       loadRuntime.activeLayoutOptions = initialLayoutOptions;
+      doc._bundledOfficeFontUrls = opts.useBundledOfficeFonts
+        ? (await import('../assets/carlito/urls.js').catch(() => undefined))?.CARLITO_URLS
+        : undefined;
       // In worker mode the worker preloads fonts before paginating (pagination
       // measures text), so the flag is forwarded; in main mode fonts are loaded
       // here after parse, before the lazy first pagination.
@@ -238,6 +243,7 @@ export async function loadDocxModelSource(
         buffer,
         resourceOptions.policy,
         mode === 'worker' ? !!opts.useGoogleFonts : false,
+        mode === 'worker' ? !!opts.useBundledOfficeFonts : false,
         opts.workerTimeoutMs,
         (usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => metrics.observeUsage(usage),
         rendererDescriptors,
@@ -321,11 +327,28 @@ export async function loadDocxModelSource(
         throw new PaginationAbortError();
       }
       doc._officeFontFaces = officeFonts.faces;
+      const officeRequests = doc._mode === 'main' && doc._document
+        ? docxOfficeFontFallbackRequests(doc._document) : [];
+      const resolvedOfficeTuples = new Set([
+        ...(embeddedRoutes ?? []).map((route) =>
+          `${route.requestedFamily.toLowerCase()}:${route.weight}:${route.style}`),
+        ...Object.values(officeFonts.routes).map((route) =>
+          `${route.requestedFamily.toLowerCase()}:${route.weight}:${route.style}`),
+      ]);
+      const bundledFonts = doc._mode === 'main' && opts.useBundledOfficeFonts
+        ? await loadBundledCalibri(officeRequests, resolvedOfficeTuples, doc._bundledOfficeFontUrls)
+        : { faces: [], routes: [] };
+      if (signal?.aborted) {
+        unloadBundledOfficeFonts(bundledFonts.faces);
+        throw new PaginationAbortError();
+      }
+      doc._bundledOfficeFontFaces = [...bundledFonts.faces];
       if (doc._mode === 'main' && opts.useGoogleFonts && doc._document) {
         // A proven local Calibri face already resolves this authored family;
         // avoid the optional Google Fonts substitution for the same request.
         const names = docxFontPreloadNames(doc._document, cjkFallback).filter((name) =>
-          name?.toLowerCase() !== 'calibri' || !('calibri' in officeFonts.routes));
+          name?.toLowerCase() !== 'calibri' || (!('calibri' in officeFonts.routes)
+            && bundledFonts.routes.length === 0));
         const googleFaces = await preloadGoogleFonts(names, DOCX_GOOGLE_FONTS);
         if (signal?.aborted) {
           unloadGoogleFonts(googleFaces);
@@ -350,7 +373,7 @@ export async function loadDocxModelSource(
           useGoogleFonts: !!opts.useGoogleFonts,
           cjkFallback,
           embeddedRoutes,
-          officeRoutes: Object.values(officeFonts.routes),
+          officeRoutes: [...Object.values(officeFonts.routes), ...bundledFonts.routes],
           googleFaces: doc._googleFontFaces,
           mathResources: preparedMath?.records,
           mathDrawables: preparedMath?.drawables,

@@ -156,11 +156,34 @@ function install(script: Script): void {
 }
 
 describe('DocxDocument.load with model sources', () => {
+  it('forwards host-resolved bundled font URLs to a selected source worker', async () => {
+    install(renderWorkerScript(undefined));
+    const { source } = fakeSource();
+    const document = await DocxDocument.load(cfbBytes(), {
+      mode: 'worker', modelSources: [source], useBundledOfficeFonts: true,
+    });
+    const [parse] = ProtocolWorker.instances[0]!.parseRequests();
+    expect(parse).toMatchObject({
+      useBundledOfficeFonts: true,
+      bundledOfficeFontUrls: {
+        regular: expect.stringContaining('Carlito-Regular.ttf'),
+        bold: expect.stringContaining('Carlito-Bold.ttf'),
+      },
+    });
+    document.destroy();
+  });
+
   it.each([
     { mode: 'worker' as const, progressiveLayout: false },
     { mode: 'worker' as const, progressiveLayout: true },
   ])('forwards a claimed load to the worker parse ($mode, progressive=$progressiveLayout)', async (options) => {
-    install(renderWorkerScript(undefined));
+    const script = renderWorkerScript(undefined);
+    install(async (worker, message) => {
+      // A real worker may take more than one turn to reply. This also catches
+      // a callback accidentally shifted into the parse timeout argument.
+      if (message.type === 'parse') await new Promise((resolve) => setTimeout(resolve, 10));
+      await script(worker, message);
+    });
     const transfer = new ArrayBuffer(4);
     const { source, beginLoad, release } = fakeSource({ transfer: [transfer] });
     const document = await DocxDocument.load(cfbBytes(), { ...options, modelSources: [source] });
@@ -168,6 +191,7 @@ describe('DocxDocument.load with model sources', () => {
     const [parse, ...others] = ProtocolWorker.instances[0]!.parseRequests();
     expect(others).toEqual([]);
     expect(parse).toMatchObject({ source: descriptor, sourceTransfer: [transfer] });
+    expect(parse?.useBundledOfficeFonts).toBe(false);
     const parseIndex = ProtocolWorker.instances[0]!.messages.indexOf(parse!);
     expect(ProtocolWorker.instances[0]!.transfers[parseIndex]).toContain(transfer);
     expect(beginLoad).toHaveBeenCalledOnce();
