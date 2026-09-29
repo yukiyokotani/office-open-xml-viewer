@@ -798,7 +798,27 @@ function acquireBodyStoryLayout(
         yPt: startYPt + result.layout.advancePt,
       };
       candidate.y = nextCursor.yPt;
-      return { layout: result.layout, nextCursor };
+      // Ordinary-flow paragraphs own only their content interval, exactly like
+      // body placement: trailing space-after is allocation, not occupied flow.
+      // Otherwise a contextualSpacing fold (which starts the next paragraph
+      // inside the previous space-after) reports a false FLOW_OVERLAP between
+      // adjacent story paragraphs.
+      const contentOwned = result.layout.ordinaryFlow
+        ? Object.freeze({
+            ...result.layout,
+            flowBounds: Object.freeze({
+              ...result.layout.flowBounds,
+              yPt: startYPt + result.layout.spacing.beforePt,
+              heightPt: Math.max(
+                0,
+                result.layout.advancePt
+                  - result.layout.spacing.beforePt
+                  - result.layout.spacing.afterPt,
+              ),
+            }),
+          })
+        : result.layout;
+      return { layout: contentOwned, nextCursor };
     },
     layoutTable(block, placement) {
       previousParagraph = null;
