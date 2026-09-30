@@ -40,7 +40,7 @@ function para(text: string, over: Partial<DocParagraph>): DocParagraph {
   } as unknown as DocParagraph;
 }
 
-function doc(footer: DocParagraph[]): DocxDocumentModel {
+function doc(footer: DocParagraph[], header: DocParagraph[] = []): DocxDocumentModel {
   const section = {
     pageWidth: 400, pageHeight: 400,
     marginTop: 40, marginRight: 10, marginBottom: 40, marginLeft: 10,
@@ -50,7 +50,7 @@ function doc(footer: DocParagraph[]): DocxDocumentModel {
   return {
     section,
     body: [para('Body', {})] as unknown as BodyElement[],
-    headers: { default: null, first: null, even: null },
+    headers: { default: header.length ? { body: header } : null, first: null, even: null },
     footers: { default: { body: footer }, first: null, even: null },
     fontFamilyClasses: { 'Times New Roman': 'roman' },
     footnotes: [],
@@ -72,5 +72,17 @@ describe('footer contextualSpacing (issue #1650)', () => {
       para('F2', { contextualSpacing: true, styleId: 'Other' }),
     ]);
     expect(() => layoutDocument(model)).not.toThrow();
+  });
+
+  it('keeps header/footer leading spaceBefore in story positioning', () => {
+    const baselineOf = (spaceBefore: number, where: 'header' | 'footer'): number => {
+      const p = [para('X', { spaceBefore })];
+      const layout = layoutDocument(where === 'header' ? doc([], p) : doc(p));
+      const nodes = (layout.pages[0] as any).layers[where] as any[];
+      return nodes[0].lines[0].baselinePt;
+    };
+    expect(baselineOf(20, 'header') - baselineOf(0, 'header')).toBeCloseTo(20, 5);
+    // The footer is bottom-anchored: the extra leading space grows it upward.
+    expect(baselineOf(0, 'footer') - baselineOf(20, 'footer')).toBeCloseTo(0, 5);
   });
 });
