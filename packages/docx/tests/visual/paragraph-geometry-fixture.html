@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en"><body><script type="module">
+import { DocxDocument } from '/src/index.ts';
+try {
+  const response = await fetch('/paragraph-geometry.docx');
+  if (!response.ok) throw new Error('Fixture unavailable');
+  const bytes = await response.arrayBuffer();
+  const read = async mode => {
+    const doc = await DocxDocument.load(bytes.slice(0), { mode, useGoogleFonts: false });
+    try {
+      const pages = [];
+      for (let pageIndex = 0; pageIndex < doc.pageCount; pageIndex++) {
+        pages.push(await doc.collectPageParagraphs(pageIndex, { width: 816 }));
+      }
+      return pages;
+    } finally { doc.destroy(); }
+  };
+  const main = await read('main');
+  const worker = await read('worker');
+  document.body.dataset.main = JSON.stringify(main);
+  document.body.dataset.worker = JSON.stringify(worker);
+  const paragraphs = main.flat();
+  const empty = paragraphs.filter(paragraph => paragraph.lines.some(line => line.markOnly));
+  if (empty.length !== 4) throw new Error(`Expected four empty paragraphs, found ${empty.length}`);
+  for (const paragraph of empty) {
+    const line = paragraph.lines.find(line => line.markOnly);
+    if (line.range.start !== 0 || line.range.end !== 0 || Math.hypot(line.bounds.width, line.bounds.height) <= 0
+      || line.baseline.y < line.bounds.y || line.baseline.y > line.bounds.y + line.bounds.height
+      || line.baseline.x < line.bounds.x || line.baseline.x > line.bounds.x + line.bounds.width)
+      throw new Error('Invalid native empty-line caret geometry');
+  }
+  if (!empty.some(paragraph => paragraph.source.path.length >= 3))
+    throw new Error('Missing empty table paragraph source');
+  const right = paragraphs.find(paragraph => paragraph.paragraphId === 'AA000001');
+  if (!right || right.lines[0].baseline.x < 600) throw new Error('Empty right alignment lost');
+  const next = paragraphs.find(paragraph => paragraph.paragraphId === 'AA000003');
+  if (!next || next.pageIndex !== 1) throw new Error('Page-break empty line lost');
+  const rotated = paragraphs.find(paragraph => paragraph.paragraphId === 'AA000004');
+  const rotatedLine = rotated?.lines.find(line => line.markOnly);
+  if (!rotatedLine || !rotated.clips.length) throw new Error('Rotated empty cell geometry or clipping missing');
+  // A zero-width vertical caret rotated by a quarter turn becomes horizontal.
+  // This expectation follows rotation math, independently of renderer transforms.
+  const [topLeft, topRight, bottomRight, bottomLeft] = rotatedLine.corners;
+  const epsilon = 1e-7;
+  const equal = (a, b) => Math.abs(a.x - b.x) < epsilon && Math.abs(a.y - b.y) < epsilon;
+  if (!equal(topLeft, topRight) || !equal(bottomLeft, bottomRight)
+    || Math.abs(topLeft.y - bottomLeft.y) > epsilon
+    || Math.abs(topLeft.x - bottomLeft.x) <= epsilon)
+    throw new Error('Rotated empty caret corners are not a horizontal segment');
+  const baseline = rotatedLine.baseline;
+  if (Math.abs(baseline.y - topLeft.y) > epsilon
+    || baseline.x < Math.min(topLeft.x, bottomLeft.x) - epsilon
+    || baseline.x > Math.max(topLeft.x, bottomLeft.x) + epsilon)
+    throw new Error('Rotated empty baseline does not lie on its native caret segment');
+  for (const clip of rotated.clips) {
+    if (clip.length !== 4 || clip.some(point => !Number.isFinite(point.x) || !Number.isFinite(point.y)))
+      throw new Error('Rotated empty caret has invalid ancestor clip corners');
+    const crosses = clip.map((a, index) => {
+      const b = clip[(index + 1) % clip.length];
+      return (b.x - a.x) * (baseline.y - a.y) - (b.y - a.y) * (baseline.x - a.x);
+    });
+    if (crosses.some(cross => cross < -epsilon) && crosses.some(cross => cross > epsilon))
+      throw new Error('Rotated empty caret baseline lies outside its ancestor clip');
+  }
+  const continuations = paragraphs.filter(paragraph => paragraph.paragraphId === 'AA000005');
+  if (new Set(continuations.map(paragraph => paragraph.pageIndex)).size < 2)
+    throw new Error('Source paragraph did not paginate across pages');
+  const ranges = continuations.flatMap(paragraph => paragraph.lines.map(line => line.range));
+  // Each authored line is five UTF-16 units (including a surrogate pair),
+  // followed by one explicit break except the final line.
+  if (ranges.length !== 80 || ranges.some((range, index) => range.start !== index * 6
+    || range.end !== index * 6 + 5))
+    throw new Error(`Paragraph continuation source offsets changed: ${JSON.stringify(ranges)}`);
+  document.body.dataset.status = 'ready';
+} catch (error) {
+  document.body.dataset.status = 'error';
+  document.body.dataset.error = error instanceof Error ? error.message : String(error);
+}
+</script></body></html>

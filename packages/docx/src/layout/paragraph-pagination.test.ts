@@ -340,6 +340,26 @@ describe('paragraph page-local reserve selection', () => {
     expect(selected.additionalReservePt).toBe(0);
   });
 
+  it('keeps the explicit line break source gap when continuing onto another page', () => {
+    const original = paragraph();
+    const withBreak: ParagraphLayout = {
+      ...original,
+      lines: original.lines.map((line, index) => ({
+        ...line,
+        range: { start: index * 2, end: index * 2 + 1 },
+      })),
+    };
+    const selected = selectParagraphFragment(
+      withBreak, { boundary: null }, splittable([
+        { segIndex: 1, charOffset: 0 },
+        { segIndex: 3, charOffset: 0 },
+        { segIndex: 4, charOffset: 1 },
+      ]), 15, 40, false, { keepLines: false, widowControl: false },
+    );
+    expect(selected.fragment?.lines[0]?.range).toEqual({ start: 0, end: 1 });
+    expect(selected.nextCursor?.sourceRangeStart).toBe(2);
+  });
+
   it('carries the uniform ruby advance into the exact next source cursor', () => {
     const selected = selectParagraphFragment(
       paragraph(), { boundary: null }, splittable([

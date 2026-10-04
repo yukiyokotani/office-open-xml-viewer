@@ -2,6 +2,7 @@ import type { DocComment, DocNote, DocRevision, RenderPageOptions, WorkerRespons
 import type { CommentAnchorRange } from './comments';
 import type { RevisionAnchorRange } from './revisions';
 import type { DocxTextRunInfo } from './renderer';
+import type { DocxPageParagraphInfo } from './paragraph-projection.js';
 import type {
   NormalizedOoxmlResourcePolicy,
   PullSessionCommand,
@@ -131,6 +132,7 @@ export type RenderWorkerRequest =
   // find controller scans every page for its runs; a bitmap per page would be
   // wasted work + transfer for pages the user never looks at.
   | { type: 'collectRuns'; id: number; pageIndex: number; opts: WireRenderPageOptions }
+  | { type: 'collectParagraphs'; id: number; pageIndex: number; opts: WireRenderPageOptions }
   | {
       type: 'hitTestElement';
       id: number;
@@ -176,6 +178,7 @@ export type RenderWorkerResponse =
   // retained layout variant it paints and ships it beside the bitmap.
   | { type: 'pageRendered'; id: number; bitmap: ImageBitmap; runs: DocxTextRunInfo[] }
   | { type: 'runsCollected'; id: number; runs: DocxTextRunInfo[] }
+  | { type: 'paragraphsCollected'; id: number; paragraphs: readonly DocxPageParagraphInfo[] }
   // Progressive layout in worker mode: the worker publishes its provisional
   // prefixes as they are primed, then answers the original `parse` with the
   // authoritative `parsedMeta`. Keyed by `forId` rather than `id` ON PURPOSE —

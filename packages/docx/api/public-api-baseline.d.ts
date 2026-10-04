@@ -1265,6 +1265,7 @@ export class DocxDocument {
     renderPage(target: HTMLCanvasElement | OffscreenCanvas, pageIndex: number, opts?: RenderPageOptions): Promise<void>;
     renderPageToBitmap(pageIndex: number, opts?: RenderPageToBitmapOptions): Promise<ImageBitmap>;
     collectPageRuns(pageIndex: number, opts?: CollectPageRunsOptions): Promise<DocxTextRunInfo[]>;
+    collectPageParagraphs(pageIndex: number, opts?: CollectPageRunsOptions): Promise<readonly DocxPageParagraphInfo[]>;
     getCommentThreads(pageIndex: number, options?: DocxPageCommentThreadsOptions): Promise<readonly Readonly<ResolvedDocxCommentThread>[]>;
     getElementContextAt(pageIndex: number, point: DocxPagePoint, opts?: DocxElementContextOptions): Promise<DocxElementContext | null>;
     private __privatePresence;
@@ -1317,14 +1318,41 @@ export interface DocxHighlightMatch {
     slices: MatchRunSlice[];
     active: boolean;
 }
+export interface DocxLayoutPoint {
+    readonly x: number;
+    readonly y: number;
+}
+export interface DocxLayoutRect {
+    readonly x: number;
+    readonly y: number;
+    readonly width: number;
+    readonly height: number;
+}
 export interface DocxMatchLocation {
     page: number;
 }
 export interface DocxPageCommentThreadsOptions extends CollectPageRunsOptions, ResolveDocxCommentThreadsOptions {
 }
+export interface DocxPageParagraphInfo {
+    readonly source: Readonly<DocxStorySource>;
+    readonly paragraphId?: string;
+    readonly pageIndex: number;
+    readonly lines: readonly DocxParagraphLineInfo[];
+    readonly clips: readonly (readonly DocxLayoutPoint[])[];
+}
 export interface DocxPagePoint {
     readonly xPt: number;
     readonly yPt: number;
+}
+export interface DocxParagraphLineInfo {
+    readonly range: Readonly<{
+        start: number;
+        end: number;
+    }>;
+    readonly bounds: DocxLayoutRect;
+    readonly corners: readonly DocxLayoutPoint[];
+    readonly baseline: DocxLayoutPoint;
+    readonly markOnly: boolean;
 }
 export interface DocxRunBorder {
     style: string;

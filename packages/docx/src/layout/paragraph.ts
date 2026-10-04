@@ -5443,6 +5443,12 @@ export function paragraphLayoutFromMeasurement(
       ...(measured.markWrapBounds ? { wrapBounds: measured.markWrapBounds } : {}),
       hidden: paragraph.markVanish === true,
       bounds: { xPt: paragraphXPt, yPt: measured.contentStartYPt, widthPt: 0, heightPt: contentHeightPt },
+      // Reuse the measured zero-range line's alignment and baseline. The mark's
+      // flow bounds above remain pagination authority, not caret positioning.
+      line: (() => {
+        const line = numberingMarkerHostLine(measured, paragraph, paragraphXPt, availableWidthPt, planningContext);
+        return { range: line.range, bounds: line.bounds, baselinePt: line.baselinePt };
+      })(),
     } : undefined,
   });
 }
@@ -5684,6 +5690,11 @@ export function sliceParagraphLayout(
         ? { paragraphMark: {
             ...acquired.paragraphMark,
             bounds: translateRectY(acquired.paragraphMark.bounds, deltaYPt),
+            ...(acquired.paragraphMark.line ? { line: {
+              ...acquired.paragraphMark.line,
+              bounds: translateRectY(acquired.paragraphMark.line.bounds, deltaYPt),
+              baselinePt: acquired.paragraphMark.line.baselinePt + deltaYPt,
+            } } : {}),
             ...(acquired.paragraphMark.wrapBounds ? { wrapBounds: translateRectY(acquired.paragraphMark.wrapBounds, deltaYPt) } : {}),
           } }
         : {}),

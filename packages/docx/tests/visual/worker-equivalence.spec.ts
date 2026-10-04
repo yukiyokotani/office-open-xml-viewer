@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 import { PNG } from 'pngjs';
 import pixelmatch from 'pixelmatch';
 // @ts-ignore - shared plain-JS test fixture builder.
-import { chartExDocxBytes } from '../../../../tests/fixtures/chart-ex-packages.mjs';
+import { chartExDocxBytes, storedZip } from '../../../../tests/fixtures/chart-ex-packages.mjs';
 
 // Worker mode must produce (near-)identical pixels to main mode: same
 // renderer, same pagination, same fonts, different thread. The only expected
@@ -12,6 +12,29 @@ import { chartExDocxBytes } from '../../../../tests/fixtures/chart-ex-packages.m
 // that even a single dropped text element fails the diff.
 const PAGES = [0, 1];
 const MAX_DIFF_PCT = [0.2, 0.2];
+
+test('public paragraph geometry preserves empty caret alignment, table sources and page breaks in both modes', async ({ page }) => {
+  const continuationText = Array.from({ length: 80 }, (_, index) => `L🙂${String(index).padStart(2, '0')}`);
+  const bytes = storedZip([
+    ['[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'],
+    ['_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="r1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'],
+    ['word/document.xml', `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body>
+      <w:p w14:paraId="AA000001"><w:pPr><w:jc w:val="right"/></w:pPr></w:p>
+      <w:tbl><w:tblPr><w:tblW w:w="3000" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="3000"/><w:gridCol w:w="3000"/></w:tblGrid><w:tr><w:trPr><w:trHeight w:val="1440" w:hRule="exact"/></w:trPr><w:tc><w:tcPr><w:tcW w:w="3000" w:type="dxa"/></w:tcPr><w:p w14:paraId="AA000002"/></w:tc><w:tc><w:tcPr><w:tcW w:w="3000" w:type="dxa"/><w:textDirection w:val="tbRl"/></w:tcPr><w:p w14:paraId="AA000004"/></w:tc></w:tr></w:tbl>
+      <w:p w14:paraId="AA000003"><w:pPr><w:pageBreakBefore/></w:pPr></w:p>
+      <w:p><w:r><w:t>After empty paragraphs</w:t></w:r></w:p>
+      <w:p w14:paraId="AA000005"><w:pPr><w:spacing w:line="240" w:lineRule="exact"/></w:pPr><w:r>${continuationText.map(text => `<w:t>${text}</w:t>`).join("<w:br/>")}</w:r></w:p>
+      <w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>
+      </w:body></w:document>`],
+  ]);
+  await page.route('**/paragraph-geometry.docx', route => route.fulfill({ body: bytes,
+    contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' }));
+  await page.goto('/tests/visual/paragraph-geometry-fixture.html');
+  await page.waitForFunction(() => ['ready', 'error'].includes(document.body.dataset.status ?? ''));
+  const result = await page.evaluate(() => ({ ...document.body.dataset }));
+  expect(result.status, result.error).toBe('ready');
+  expect(result.main).toBe(result.worker);
+});
 
 for (const pageIndex of PAGES) {
   test(`worker mode matches main mode › demo/sample-1 page ${pageIndex + 1}`, async ({ page }) => {

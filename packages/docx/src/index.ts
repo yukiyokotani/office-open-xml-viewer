@@ -5,6 +5,9 @@ export {
   type LoadOptions,
   type RenderPageToBitmapOptions,
 } from './document';
+export type {
+  DocxLayoutPoint, DocxLayoutRect, DocxParagraphLineInfo, DocxPageParagraphInfo,
+} from './paragraph-projection.js';
 export { DocxViewer, type DocxViewerOptions } from './viewer';
 export { DocxScrollViewer, type DocxScrollViewerOptions } from './scroll-viewer';
 export type { DocxCommentsOptions } from './comment-margin';

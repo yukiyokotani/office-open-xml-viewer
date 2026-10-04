@@ -26,6 +26,7 @@ import {
 import { stableFingerprint } from './layout/fingerprint.js';
 import { buildBookmarkPageMap } from './bookmark-nav.js';
 import { textRunsForSelectedPage } from './text-run-projection.js';
+import { paragraphsForSelectedPage } from './paragraph-projection.js';
 import { DEFAULT_OOXML_RESOURCE_LIMITS } from '@silurus/ooxml-core/worker';
 import { layoutSourceStore } from './layout-source-model-adapter.js';
 import {
@@ -184,6 +185,34 @@ function metadataForDefaultLayout(
 }
 
 describe('render worker canonical layout parity', () => {
+  it.each(['center', 'right'] as const)('retains native %s empty-line alignment and baseline equally in main and worker layouts', alignment => {
+    const model = syntheticDocxModel('plain', { paragraphs: 3 });
+    const empty = model.body[0];
+    if (!empty || empty.type !== 'paragraph') throw new Error('Missing fixture paragraph');
+    empty.runs = [];
+    empty.paragraphId = 'AA000001';
+    empty.alignment = alignment;
+    const source = layoutSourceStore(model);
+    const main = createLayoutServices(source, { measureContext: measureContext() });
+    const worker = createLayoutServices(source, { measureContext: measureContext() });
+    attachDocumentLayoutVariants({ source, services: main, defaultCurrentDateMs: 0,
+      buildLayout: options => layoutDocument(model, main, options) });
+    retainRenderWorkerDocumentLayout(source, worker, 0);
+    const options = { defaultCurrentDateMs: 0, width: 816 };
+    const projected = paragraphsForSelectedPage(main, 0, options);
+    expect(paragraphsForSelectedPage(worker, 0, options)).toEqual(projected);
+    const paragraph = projected.find(paragraph => paragraph.paragraphId === empty.paragraphId);
+    expect(paragraph?.lines).toHaveLength(1);
+    const line = paragraph?.lines[0];
+    expect(line?.range).toEqual({ start: 0, end: 0 });
+    expect(line?.markOnly).toBe(true);
+    expect(line?.bounds.width).toBe(0);
+    expect(line?.bounds.height).toBeGreaterThan(0);
+    expect(line?.baseline.y).toBeGreaterThan(line?.bounds.y ?? Infinity);
+    expect(line?.baseline.x).toBeCloseTo(alignment === 'center' ? 408 : 720);
+    expect(textRunsForSelectedPage(main, 0, options).some(run => run.paragraphId === empty.paragraphId)).toBe(false);
+  });
+
   it('does not traverse page geometry when a publication has no review data', () => {
     const layout = {
       pages: [{

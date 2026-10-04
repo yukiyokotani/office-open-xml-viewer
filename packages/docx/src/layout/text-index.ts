@@ -32,6 +32,13 @@ export interface TextRunGeometry {
   readonly paragraphId?: string;
 }
 
+/** Retained paragraph occurrence in the same transformed reading order as text. */
+export interface ParagraphGeometry {
+  readonly paragraph: ParagraphLayout;
+  readonly pointToPage: Matrix2DData;
+  readonly clips: readonly ElementClipGeometry[];
+}
+
 /** Retained rectangular Canvas clip in the coordinate space where it is applied. */
 export interface ElementClipGeometry {
   readonly bounds: LayoutRect;
@@ -67,6 +74,8 @@ export interface InlineResourceGeometry {
 export type ElementGeometry = DrawingGeometry | InlineResourceGeometry;
 
 interface ProjectionContext {
+  readonly collectParagraphs: boolean;
+  readonly paragraphs: ParagraphGeometry[];
   readonly collectTextRuns: boolean;
   readonly collectTextRunSources: boolean;
   readonly collectCompletedParagraphSources: boolean;
@@ -373,6 +382,11 @@ function visitParagraph(
   context: ProjectionContext,
 ): void {
   const paragraphProjection = withClip(projection, paragraph.clipBounds);
+  if (context.collectParagraphs) context.paragraphs.push({
+    paragraph,
+    pointToPage: paragraphProjection.pointToPage,
+    clips: paragraphProjection.clips,
+  });
   if (
     context.collectCompletedParagraphSources
     && paragraph.continuation?.continuesOnNext !== true
@@ -579,6 +593,7 @@ function pageGeometryIndex(
   layout: DocumentLayout,
   pageIndex: number,
   options: Readonly<{
+    collectParagraphs?: boolean;
     collectTextRuns: boolean;
     collectTextRunSources: boolean;
     collectCompletedParagraphSources?: boolean;
@@ -604,6 +619,8 @@ function pageGeometryIndex(
   }
   const context: ProjectionContext = {
     ...options,
+    collectParagraphs: options.collectParagraphs === true,
+    paragraphs: [],
     collectCompletedParagraphSources: options.collectCompletedParagraphSources === true,
     collectRasterPaintOccurrences: options.collectRasterPaintOccurrences === true,
     drawingEntries,
@@ -638,6 +655,15 @@ function pageGeometryIndex(
     }, context);
   }
   return context;
+}
+
+export function paragraphGeometryForPage(layout: DocumentLayout, pageIndex: number): ParagraphGeometry[] {
+  return pageGeometryIndex(layout, pageIndex, {
+    collectParagraphs: true,
+    collectTextRuns: false,
+    collectTextRunSources: false,
+    collectDrawings: false,
+  }).paragraphs;
 }
 
 export function textRunGeometryForPage(
