@@ -4,7 +4,7 @@
   "sources": [
     {
       "id": "office-mac",
-      "version": "16.113.2 (16.113.26092012)"
+      "version": "16.113.3 (16.113.26092714)"
     },
     {
       "id": "macos-system",
@@ -16525,7 +16525,7 @@
           6383,
           5045
         ],
-        "useTypoMetrics": false
+        "useTypoMetrics": true
       },
       "rawOs2CodePageRange1": 536871327
     },

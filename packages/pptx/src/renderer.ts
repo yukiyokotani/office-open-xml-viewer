@@ -1,4 +1,8 @@
+import { emptyEastAsianDrawingFace } from './east-asian-drawing-face.js';
+import type { PptxEmbeddedFontMetrics } from './embedded-fonts.js';
 import { pptxSlideCjkFallback } from './google-fonts.js';
+import { openTypeResourceCoversCodePoint } from '@silurus/ooxml-core';
+import { canonicalFontClusterText, analyzeFontResourceSupport, type ResourceSupport } from '@silurus/ooxml-core/internal/font-cluster-coverage';
 import type { CjkLang } from '@silurus/ooxml-core';
 import { containsHanScript } from '@silurus/ooxml-core/internal/script-preload-accumulator';
 import type {
@@ -26,6 +30,7 @@ import type {
 } from './types';
 import { asBullet } from './types';
 import {
+  graphemeClusterOffsets,
   usesPathShade,
   trackPaintPath,
   currentStrokeBounds,
@@ -84,14 +89,12 @@ import {
   NON_CJK_SERIF_FALLBACKS,
   DEFAULT_KINSOKU_RULES,
   isCjkBreakChar,
-  isComplexScriptCodePoint,
   isUax14NoBreakPair,
   lineBreakClass,
   containsSeaScript,
   isGraphemeFillText,
   seaMixedBreakOffsets,
   fitSeaWordPrefix,
-  graphemeClusterOffsets,
   getCachedSvgImageByPath,
   getCachedBitmapByPath,
   getCachedDuotoneBitmapByPath,
@@ -166,16 +169,19 @@ import { isSmartArtFallbackShape, smartArtFallbackTextColor } from './smartart-f
 import { resolveTabWidths, type TabItem, type TabStopPx } from './tab-layout.js';
 import {
   powerPointCompatOffNaturalLine, powerPointExactLinePoints, powerPointFaceMetrics,
-  powerPointNaturalLine, type PowerPointFaceMetrics,
+  powerPointNaturalLine, powerPointSymbolCoverage, powerPointCatalogueSupport, powerPointCjkCoverage, type PowerPointFaceMetrics,
   POWERPOINT_FONT_ALGN_UNIT_PT, powerPointFontAlgnOffset, powerPointFontAlgnReference,
 } from './powerpoint-line-metrics.js';
 import { drawEaVertRun } from './vertical-text.js';
 import { renderStackedText, type StackedParagraphInput } from './stacked-text.js';
 import {
   COMPLEX_SCRIPT_DEFAULT_FACES, complexScriptDefaultFace, eastAsianDefaultFaces,
+  emptyEastAsianSlotFaces,
 } from './east-asian-default.js';
+import { powerPointDisplayCluster, powerPointFontRouting } from './font-slot-compatibility.js';
 import {
   breakDrawingMlText,
+  drawingMlSegmentSourceRanges,
   measureDrawingMlAdvance,
   drawingMlLineHeight,
   drawingMlSpacedLineBox,
@@ -200,6 +206,9 @@ export interface RenderContext {
   /** Isolated FontFace alias → lower-cased authored family for fallback policy. */
   embeddedFontAuthoredFamilies?: ReadonlyMap<string, string>;
   embeddedFontTuples?: ReadonlySet<string>;
+  /** Registered embedded resources per authored family:weight:style tuple,
+   * in insertion order, each with its own OS/2 tables and bounded cmap. */
+  embeddedFontMetrics?: PptxEmbeddedFontMetrics;
   /** Theme hyperlink colour as a 6-char hex (no leading #), or null. */
   themeHlinkColor?: string | null;
   /**
@@ -775,17 +784,34 @@ type LayoutSegment = {
   font: string;
   /** Inline DrawingML TAB, classified UAX#9 S during visual ordering (#916). */
   isTab?: true;
-  /** PowerPoint's line metrics for this segment's face (see
-   * powerPointFaceMetrics); undefined when the face is not resolvable. */
+  /** PowerPoint's line metrics for this segment's drawing face (see
+   * powerPointFaceMetrics); undefined when that face or its resource is not
+   * known, including a glyph left to the platform's glyph fallback (#1689).
+   * Such a segment adds no face to its line's metric model. */
   lineMetric?: PowerPointFaceMetrics;
   /** Metrics of the run's latin face. PowerPoint sizes a line by the run's
    * latin face even when an East Asian segment draws none of its glyphs
    * (#1610 powerpoint-line-supplement-3); null when unresolved. */
   lineMetricLatin?: PowerPointFaceMetrics | null;
+  /** Line-local contributions survive visual coalescing through core source
+   * ranges. They size the line without dividing its Canvas shaping span. */
+  metricContributors?: readonly { style: LayoutSegment; text: string }[];
+  /** Identity-bearing attribution follows the immutable measure/wrap/paint
+   * segment. Safe certificates quantify over all GSUB context; unresolved
+   * contextual fonts remain unknown even when spans coalesce or split. */
+  resourceIdentity?: string;
+  resourceIdentityLatin?: string;
+  resourceSupport?: ResourceSupport;
+  /** Original CSS span context, before metric-based grouping. */
+  resourceContext?: { family: string; bold: boolean; italic: boolean };
+  resourceContextLatin?: { family: string; bold: boolean; italic: boolean };
   /** The authored face that draws this segment's glyphs (latin, ea, cs or
    * symbol slot after theme resolution). Stacked vertical text looks its
    * cell and vertical glyphs up by face (`stacked-faces.ts`). */
   faceFamily?: string;
+  /** Established installed named-slot route, admitted over the whole original
+   * CSS span. Embedded resource ownership and metrics never supply this key. */
+  selectedNamedFaceFamily?: string;
   /** The run's latin face: it sizes a stacked column even where an East Asian
    * segment draws none of its glyphs, as it sizes a horizontal line (#1610). */
   faceFamilyLatin?: string;
@@ -1233,19 +1259,77 @@ export function buildFont(
 
 /**
  * The PowerPoint line metrics of a resolved family (see
- * powerPointFaceMetrics). A document-embedded face has its own bytes, which
- * the reference catalog does not describe, so it has none, and neither does
- * a CSS generic family.
+ * powerPointFaceMetrics): the selected resource's own OS/2 metrics. A
+ * document-embedded face is described by its own font part (#1689), parsed
+ * when it was registered; an installed face by the reference catalogue. A
+ * missing cut of an embedded family follows CSS style-then-weight matching;
+ * synthetic slant or emboldening keeps the selected resource's vertical metrics.
+ * Installed-face compatibility remains in powerPointFaceMetrics. A CSS generic
+ * family has no known resource.
  */
 function lineMetricFor(
   family: string,
   bold: boolean,
   italic: boolean,
   rc: RenderContext,
+  cluster?: string,
 ): PowerPointFaceMetrics | undefined {
   if (CSS_GENERIC_FAMILIES.has(family)) return undefined;
-  if (rc.embeddedFontAuthoredFamilies?.has(family)) return undefined;
+  if (rc.embeddedFontAuthoredFamilies?.has(family)) {
+    return embeddedResourceFor(family, bold, italic, rc, cluster).metrics;
+  }
+  // Installed named slots retain the established catalogue line model. Their
+  // catalogue records OS/2 metrics, not a complete Unicode/sequence repertoire;
+  // resource inference through the empty-ea fallback chain is separately
+  // coverage-gated below (decisions B/c). Do not fragment a shaping run merely
+  // because the partial symbol/CJK catalogue cannot describe its marks.
   return powerPointFaceMetrics(family, bold, italic);
+}
+
+/** Resolve the actual composite resource before lending its metrics. CSS
+ * Fonts §5.2 matches style before weight, then tests a same-slot composite
+ * face's complete-cluster coverage in reverse insertion order (§4.6 / §5.3);
+ * Font Loading §4.2 puts
+ * non-CSS-connected faces after CSS faces in their insertion order. A repeated
+ * registry retain does not reinsert a face. Unknown tables/cmap stop ownership
+ * inference, just as for a single part; never union distinct resources' cmaps
+ * and attach one part's metrics to that union. Library policy: without a
+ * cluster (a mark or unused Latin slot), a composite has no unique resource
+ * authority, so keep it unresolved. No glyph-result cache is kept.
+ */
+function embeddedResourceFor(
+  family: string,
+  bold: boolean,
+  italic: boolean,
+  rc: RenderContext,
+  cluster?: string,
+): { metrics: PowerPointFaceMetrics | undefined; coverage: boolean | undefined; identity?: string; support?: ResourceSupport } {
+  const authored = rc.embeddedFontAuthoredFamilies?.get(family);
+  const metrics = rc.embeddedFontMetrics;
+  const unknown = { metrics: undefined, coverage: undefined };
+  if (authored === undefined || !metrics) return unknown;
+  const weight = bold ? 700 : 400;
+  const otherWeight = bold ? 400 : 700;
+  const style = italic ? 'italic' : 'normal';
+  const otherStyle = italic ? 'normal' : 'italic';
+  for (const [w, st] of [[weight, style], [otherWeight, style], [weight, otherStyle], [otherWeight, otherStyle]]) {
+    const key = `${authored}:${w}:${st}`;
+    if (!rc.embeddedFontTuples?.has(key) && !metrics.has(key)) continue;
+    const resources = metrics.get(key);
+    if (!resources) return unknown;
+    if (cluster === undefined && resources.length !== 1) return unknown;
+    for (let index = resources.length - 1; index >= 0; index--) {
+      const entry = resources[index];
+      if (cluster === undefined) return { metrics: entry?.metrics, coverage: undefined, identity: entry?.identity };
+      const support = analyzeFontResourceSupport(cluster, (cp) => openTypeResourceCoversCodePoint(entry?.tables, cp), entry?.support);
+      if (support.kind === 'complete') return { metrics: entry?.metrics, coverage: true, identity: entry?.identity, support };
+      if (support.kind !== 'absent') return { metrics: undefined, coverage: undefined, support };
+    }
+    // Glyph absence in the matched style slot moves to the next CSS family,
+    // not a different style slot of this family (CSS Fonts §5.2, step 5).
+    return { metrics: undefined, coverage: false };
+  }
+  return unknown;
 }
 
 /**
@@ -1317,9 +1401,6 @@ function firstLineIndentPxFor(hasBullet: boolean, indentPx: number): number {
  * hyphen; it does not erase a break opportunity supplied by an authored hyphen.
  */
 const LATIN_SCALAR_RE = /^\p{Script_Extensions=Latin}$/u;
-// The core predicate covers the RTL cs axis. DrawingML also routes Indic and
-// Southeast Asian shaping scripts through a:cs when that font slot is present.
-const INDIC_CS_GLYPH_RE = /[\p{Script=Devanagari}\p{Script=Thai}\p{Script=Bengali}\p{Script=Tamil}\p{Script=Telugu}\p{Script=Kannada}\p{Script=Malayalam}\p{Script=Gujarati}\p{Script=Gurmukhi}\p{Script=Oriya}\p{Script=Sinhala}\p{Script=Khmer}\p{Script=Lao}\p{Script=Myanmar}\p{Script=Tibetan}]/u;
 const LETTER_SCALAR_RE = /^\p{L}$/u;
 const ASCII_SCALARS_RE = /^[\u0000-\u007f]*$/u;
 
@@ -1415,29 +1496,30 @@ export function naturalWidthExceedsBbox(
     const firstLineIndent = firstLineIndentPxFor(paragraphHasBullet(para), indentPx);
     const textMaxW = bw - lPad - rPad - marLPx - marRPx - firstLineIndent;
     let lineW = 0;
-    for (const run of para.runs) {
-      if (run.type !== 'text') continue;
-      const sizePx = run.fontSize != null
-        ? run.fontSize * PT_TO_EMU * scale
-        : (para.defFontSize != null
-            ? para.defFontSize * PT_TO_EMU * scale
-            : bodyDefaultFontPx);
-      const family = normalizeFontFamily(run.fontFamily ?? para.defFontFamily ?? null, rc);
-      const isBold = run.bold ?? para.defBold ?? body.defaultBold ?? false;
-      const isItalic = run.italic ?? para.defItalic ?? body.defaultItalic ?? false;
-      ctx.font = buildFont(
-        isBold,
-        isItalic,
-        baselineDrawSizePx(sizePx, run.baseline ?? undefined),
-        family,
-        rc,
-        run.text,
-        hasNamedFontFamily(run.fontFamily ?? para.defFontFamily),
-      );
-      const letterSpacingPx = (run.letterSpacing ?? 0) * PT_TO_EMU * scale;
-      lineW += measureTextAdvance(ctx, run.text, letterSpacingPx);
+    // Use the same slot/glyph adapter as wrap and paint. Measuring the authored
+    // run in its Latin face misses wide ea/cs characters and ja-JP's yen glyph.
+    const { input, sameStyle } = paragraphInputRuns(para,
+      para.defFontSize != null ? para.defFontSize * PT_TO_EMU * scale : bodyDefaultFontPx,
+      '#000000', scale, body.defaultBold ?? false, body.defaultItalic ?? false, 1, undefined, rc);
+    // Resource fragments must not turn spAutoFit into a sum of isolated
+    // advances; measure the same contextual visual spans as wrap and paint.
+    let previous: LayoutSegment | undefined;
+    let pendingStyle: LayoutSegment | undefined, pendingText = '';
+    const flush = () => {
+      if (!pendingStyle) return;
+      ctx.font = pendingStyle.font;
+      lineW += measureTextAdvance(ctx, pendingText, pendingStyle.letterSpacingPx ?? 0);
+      if (previous && previous.sourceRunId === pendingStyle.sourceRunId) lineW += pendingStyle.letterSpacingPx ?? 0;
+      previous = pendingStyle; pendingStyle = undefined; pendingText = '';
+    };
+    for (const item of input) {
+      if (item.type !== 'text') { flush(); previous = undefined; continue; }
+      if (pendingStyle && !sameStyle(pendingStyle, item.style)) flush();
+      pendingStyle ??= item.style; pendingText += item.text;
       if (lineW > textMaxW) return true;
     }
+    flush();
+    if (lineW > textMaxW) return true;
   }
   return false;
 }
@@ -1452,10 +1534,8 @@ function tokenHasCjk(s: string): boolean {
 }
 
 /** Number of Unicode code points in `s` (NOT UTF-16 code units). Used only by
- *  text paths that deliberately paint per code point (WordArt / vertical text)
- *  and by the fallback for Canvas implementations without native
- *  `letterSpacing`. Native horizontal text uses {@link measureTextAdvance} so
- *  the browser's shaping-cluster boundaries remain authoritative. */
+ *  scalar-indexed justification metadata and native letter-spacing detection.
+ *  Actual paint units remain complete graphemes; see graphemeTexts. */
 function codePointCount(s: string): number {
   let n = 0;
   for (const _ of s) n++;
@@ -1494,13 +1574,20 @@ function hasNativeLetterSpacing(ctx: CanvasRenderingContext2D): boolean {
   return supported;
 }
 
-/** Measure the Canvas advance with the tracking derived from DrawingML
- * `rPr@spc`. Native `measureText()` uses the same shaping clusters as paint,
- * which matters for combining sequences, emoji ZWJ runs, flags, and Indic
- * conjuncts. Canvas includes one trailing spacing unit in its reported width;
- * DrawingML spacing is only between characters in the run, so remove that
- * terminal unit. Older/inert implementations use the same n-1 code-point
- * approximation as the manual paint fallback. */
+/** Paint units for paths that transform or manually space individual glyphs.
+ * Use the core's grapheme boundaries so splitting cannot change the resource
+ * selected for a base + modifiers (CSS Fonts §5.3). */
+function graphemeTexts(text: string): string[] {
+  if (!text) return [];
+  const starts = [0, ...graphemeClusterOffsets(text)];
+  return starts.map((start, i) => text.slice(start, starts[i + 1] ?? text.length));
+}
+
+/** Measure with the same tracking state and paint units used by drawWithFont.
+ * Native Canvas shapes the entire string; DrawingML omits the trailing spacing
+ * unit. Older/inert Canvas measures and paints complete graphemes individually,
+ * preserving cluster ownership even though inter-cluster shaping is unavailable.
+ */
 function measureTextAdvance(
   ctx: CanvasRenderingContext2D,
   text: string,
@@ -1519,8 +1606,10 @@ function measureTextAdvance(
       try { spacingCtx.letterSpacing = previous; } catch { /* inert implementation */ }
     }
   }
-  const internalBoundaries = Math.max(0, codePointCount(text) - 1);
-  return ctx.measureText(text).width + letterSpacingPx * internalBoundaries;
+  if (letterSpacingPx === 0) return ctx.measureText(text).width;
+  const clusters = graphemeTexts(text);
+  return clusters.reduce((advance, cluster) => advance + ctx.measureText(cluster).width, 0)
+    + letterSpacingPx * Math.max(0, clusters.length - 1);
 }
 
 /**
@@ -1542,6 +1631,7 @@ export function paragraphInputRuns(
 ): {
   input: DrawingMlInputRun<LayoutSegment>[];
   sameStyle: (a: LayoutSegment, b: LayoutSegment) => boolean;
+  stackedSameStyle: (a: LayoutSegment, b: LayoutSegment) => boolean;
   /** Line-metric mark of each a:br, keyed by its input index. */
   breakMarks: Map<number, LayoutSegment>;
 } {
@@ -1549,8 +1639,7 @@ export function paragraphInputRuns(
   // Grapheme clusters are segmented once over the paragraph's text, not per
   // run, so an extender (combining mark, variation selector, ZWJ, trailing
   // jamo) that opens a run joins its base in the previous run's last segment.
-  // A cluster is one glyph and can carry only one format, so the carried
-  // extenders take the base run's formatting (font slot, colour, link,
+  // Carried extenders take the base run's formatting (font slot, colour, link,
   // spacing). A line break or equation (an LF in the joined text) ends a
   // cluster. The boundary list is walked with one forward pointer, so the
   // phase stays linear in the paragraph length however the runs are cut.
@@ -1559,27 +1648,24 @@ export function paragraphInputRuns(
     const text = run.fieldType === 'slidenum' && slideNumber !== undefined ? String(slideNumber) : run.text;
     return run.caps === 'all' || run.caps === 'small' ? text.toUpperCase() : text;
   });
-  const runStarts: number[] = [];
-  let joinedText = '';
-  for (const text of runTexts) {
-    runStarts.push(joinedText.length);
-    joinedText += text ?? '\n';
-  }
-  const clusterBounds = graphemeClusterOffsets(joinedText);
-  clusterBounds.push(joinedText.length);
+  const { starts: runStarts, text: joinedText, units: fontUnits, graphemeEnds: clusterBounds,
+    eastAsianText: eaRunTexts } = powerPointFontRouting(
+    para.runs.map((run, i) => ({ text: runTexts[i], lang: run.type === 'text' ? run.lang : undefined })),
+  );
   let boundIndex = 0;
+  let fontUnitIndex = 0;
   /** The first cluster boundary at or after `pos`; the pointer only moves forward. */
   const boundaryFrom = (pos: number): number => {
     while (boundIndex < clusterBounds.length && clusterBounds[boundIndex] < pos) boundIndex++;
     return boundIndex < clusterBounds.length ? clusterBounds[boundIndex] : joinedText.length;
   };
-  // The previous text run's last emitted segment, the base of a carried cluster.
-  let seam: { text: string } | null = null;
+  // Whether preceding text owns a unit extending across this run seam.
+  let hasSeam = false;
   // The line-metric mark of every a:br, keyed by its input index (see
   // `followingMark` in layoutParagraph).
   const breakMarks = new Map<number, LayoutSegment>();
   for (const [sourceRunId, run] of para.runs.entries()) {
-    if (run.type !== 'text') seam = null;
+    if (run.type !== 'text') hasSeam = false;
     if (run.type === 'break') {
       const sizePx = run.fontSize != null
         ? run.fontSize * PT_TO_EMU * scale * fontScale : defaultFontSizePx;
@@ -1633,28 +1719,36 @@ export function paragraphInputRuns(
     const italic = run.italic ?? para.defItalic ?? defaultItalic;
     let rawText = runTexts[sourceRunId] ?? '';
     // The parser resolves the ea/cs faces, theme script fonts included. An
-    // empty slot takes PowerPoint's application default, never the Latin
-    // face (issue #1627). The default tier is chosen from the run's whole
-    // East Asian text, before any leading cluster joins the previous seam.
-    const eaDefaults = run.fontFamilyEa ? [] : eastAsianDefaultFaces(
-      run.fontFamily ?? para.defFontFamily ?? rc.themeMinorFont ?? null,
-      [...rawText].filter((ch) => isCjkBreakChar(ch.codePointAt(0) ?? 0)).join(''),
-    );
-    const familyEa = run.fontFamilyEa ? normalizeFontFamily(run.fontFamilyEa, rc) : eaDefaults[0];
+    // empty ea slot (none in the chain, typeface="", or a token naming an
+    // empty theme slot) selects S: the run's named cs face, else its Latin
+    // face (issue #1689, see east-asian-default.ts). S draws every East
+    // Asian-slot glyph it covers; the stack after it carries Office's
+    // measured symbol and CJK fallbacks. The CJK tier is chosen from the
+    // run's whole East Asian text, before any leading cluster joins the
+    // previous seam (issue #1627).
     const familyCs = run.fontFamilyCs ? normalizeFontFamily(run.fontFamilyCs, rc) : null;
+    const selectedEaSource = run.fontFamilyEa ? null
+      : run.fontFamilyCs ?? run.fontFamily ?? para.defFontFamily ?? rc.themeMinorFont ?? null;
+    const eaCjkDefaults = run.fontFamilyEa ? []
+      : eastAsianDefaultFaces(selectedEaSource, eaRunTexts[sourceRunId]);
+    const eaStack = run.fontFamilyEa ? []
+      : emptyEastAsianSlotFaces(selectedEaSource, eaRunTexts[sourceRunId]);
+    const familyEa = run.fontFamilyEa ? normalizeFontFamily(run.fontFamilyEa, rc)
+      : normalizeFontFamily(eaStack[0] ?? null, rc);
     // Offset of rawText's first code unit in the joined paragraph text.
     let runOffset = runStarts[sourceRunId];
     const runEnd = runOffset + rawText.length;
-    if (seam && rawText) {
+    if (hasSeam && rawText) {
       const firstEnd = Math.min(boundaryFrom(runOffset), runEnd);
       if (firstEnd > runOffset) {
-        seam.text += rawText.slice(0, firstEnd - runOffset);
+        // The base run already resolved and emitted this entire font unit
+        // from joinedText, including modifiers authored in later runs. Only
+        // skip those code units here; appending them after metric selection
+        // would give the base-only resource authority across a run seam.
         rawText = rawText.slice(firstEnd - runOffset);
         runOffset = firstEnd;
       }
     }
-    const eaFont = buildFont(bold, italic, drawSizePx, familyEa, rc, rawText, true,
-      eaDefaults.slice(1));
     // Font stacks whose visual substitute is script-scoped must be resolved
     // from the grapheme cluster they paint, not the whole source run. A mixed
     // Arabic/Latin DrawingML run is still one authored run, but Noto Arabic is
@@ -1679,6 +1773,32 @@ export function paragraphInputRuns(
     // application default; the defaults also follow an authored cs face.
     const csFontFor = (face: string, text: string) =>
       stackFontFor(face, text, true, COMPLEX_SCRIPT_DEFAULT_FACES);
+    // Embedded aliases precede every application fallback in the paint stack.
+    // Use that concrete cut's retained cmap, including the synthetic-style
+    // resource selected by lineMetricFor. Unknown coverage must stop the
+    // search: an earlier embedded face might paint the glyph. Never borrow
+    // an installed same-name resource's cmap (ECMA-376 §19.2.1.9 / §15.2.13).
+    let resolvingDisplay = '';
+    const unitResources = new Map<string, ReturnType<typeof embeddedResourceFor>>();
+    const resourceFor = (f: string, text: string) => {
+      if (resolvingDisplay !== text) { unitResources.clear(); resolvingDisplay = text; }
+      let value = unitResources.get(f);
+      if (!value) { value = embeddedResourceFor(f, bold, italic, rc, text); unitResources.set(f, value); }
+      return value;
+    };
+    const resourceCoverage = (catalogue: typeof powerPointSymbolCoverage, cluster: string): typeof powerPointSymbolCoverage =>
+      (face, b, i, _cp) => {
+        if (!rc.embeddedFontAliases?.has(face.trim().toLowerCase())) {
+          const support = powerPointCatalogueSupport(face, b, i, cluster, catalogue);
+          return support.kind === 'complete' ? true : support.kind === 'absent' ? false : undefined;
+        }
+        return resourceFor(normalizeFontFamily(face, rc), cluster).coverage;
+      };
+    const emptyEastAsianFaceFor = (cluster: string): string | null => {
+      const drawing = emptyEastAsianDrawingFace(selectedEaSource, eaCjkDefaults, cluster, bold, italic,
+        resourceCoverage(powerPointSymbolCoverage, cluster), resourceCoverage(powerPointCjkCoverage, cluster));
+      return drawing === null ? null : normalizeFontFamily(drawing, rc);
+    };
     const letterSpacingPx = (run.letterSpacing ?? 0) * PT_TO_EMU * scale;
     const color = run.color ? hexToRgba(run.color)
       : run.hyperlink && rc.themeHlinkColor ? hexToRgba(rc.themeHlinkColor) : defaultColor;
@@ -1711,62 +1831,123 @@ export function paragraphInputRuns(
     let group = '';
     let groupFont = '';
     let groupShare: PowerPointFaceMetrics | undefined;
-    let groupFamily = family;
+    let groupFamily: string | undefined = family;
+    let groupIdentity: string | undefined;
+    let groupLatinIdentity: string | undefined;
+    let groupSupport: ResourceSupport | undefined;
     const latinShare = lineMetricFor(family, bold, italic, rc) ?? null;
+    let groupLatinShare: PowerPointFaceMetrics | null = latinShare;
     const emitGroup = () => {
       if (group) {
+        const primarySpan = groupFamily && rc.embeddedFontAuthoredFamilies?.has(groupFamily)
+          ? embeddedResourceFor(groupFamily, bold, italic, rc, group) : undefined;
+        const latinSpan = rc.embeddedFontAuthoredFamilies?.has(family)
+          ? groupFamily === family ? primarySpan : embeddedResourceFor(family, bold, italic, rc, group) : undefined;
+        // Metadata describes the measured/painted string, never just its last
+        // unit. A mixed multi-owner span has no sole resource identity.
+        groupIdentity = primarySpan?.identity;
+        groupLatinIdentity = latinSpan?.identity;
+        groupSupport = primarySpan?.support;
         input.push({ type: 'text', text: group,
           style: { ...baseStyle, font: groupFont, lineMetric: groupShare,
-            lineMetricLatin: latinShare, faceFamily: groupFamily, faceFamilyLatin: family } });
+            // When Latin itself paints this glyph, its concrete resource owns
+            // both contributions. A composite family's unused Latin slot has
+            // no single resource; latinShare stays unresolved in that case.
+            lineMetricLatin: groupFamily === family ? groupShare ?? null : groupLatinShare,
+            faceFamily: groupFamily, faceFamilyLatin: family,
+            resourceIdentity: groupIdentity, resourceIdentityLatin: groupLatinIdentity,
+            resourceSupport: groupSupport,
+            resourceContext: groupFamily && rc.embeddedFontAuthoredFamilies?.has(groupFamily)
+              ? { family: groupFamily, bold, italic } : undefined,
+            resourceContextLatin: rc.embeddedFontAuthoredFamilies?.has(family)
+              ? { family, bold, italic } : undefined } });
       }
       group = '';
     };
-    // Slots are chosen per grapheme cluster from its base character, so a
-    // combining mark, variation selector, ZWJ or other extender stays in its
-    // base's font segment and a cluster never straddles two segments (one
-    // stacked cell, one shaped horizontal glyph). An empty ea/cs slot draws
-    // in PowerPoint's application default (issue #1627).
+    // Library Canvas capability policy: a slot boundary inside one original
+    // grapheme cannot preserve cross-font mark attachment with separate fillText
+    // calls. Keep its base style for the complete cluster, including run seams,
+    // as for ordinary extenders. Routing retains the measured scalar slots for
+    // preloading/attribution; this does not reclassify the mark as CS or claim
+    // Office's cross-resource shaping. Separate-grapheme spacing marks retain
+    // their existing routing; no broader script-syllable inference is made.
+    // Measurement, wrapping and all paint modes consume the same whole cluster.
     let clusterStart = 0;
     let emitted = false;
     while (clusterStart < rawText.length) {
       const clusterEnd = Math.min(boundaryFrom(runOffset + clusterStart + 1), runEnd) - runOffset;
-      const cluster = rawText.slice(clusterStart, clusterEnd);
+      // Resolve the complete unit before borrowing metrics, even when an
+      // extender starts a subsequent authored run. It takes the base style;
+      // the next run skips it above.
+      const cluster = joinedText.slice(runOffset + clusterStart, boundaryFrom(runOffset + clusterStart + 1));
+      const unitOffset = runOffset + clusterStart;
+      while (fontUnitIndex + 1 < fontUnits.length && fontUnits[fontUnitIndex].end <= unitOffset) fontUnitIndex++;
       clusterStart = clusterEnd;
       emitted = true;
       const ch = String.fromCodePoint(cluster.codePointAt(0) ?? 0);
-      let glyph = cluster;
-      const eaGlyph = isCjkBreakChar(ch.codePointAt(0) ?? 0);
-      const csGlyph = isComplexScriptCodePoint(ch.codePointAt(0) ?? 0)
-        || INDIC_CS_GLYPH_RE.test(ch);
+      // Slot choice precedes measurement, wrapping and every paint flow. It
+      // is independent of core's CJK line-break predicate (issue #1653).
+      // Canonical display units enter the one shared layout/paint pipeline.
+      // Measuring, line breaking, stacked/vertical painting and both workers
+      // therefore use the same spelling as the resource-ownership decision.
+      let glyph = canonicalFontClusterText(powerPointDisplayCluster(cluster, run.lang));
+      const slot = fontUnits[fontUnitIndex].slot;
+      const eaGlyph = slot === 'ea';
+      const csGlyph = slot === 'cs';
       const csFace = csGlyph ? familyCs ?? complexScriptDefaultFace(ch) : family;
-      let font = eaGlyph ? eaFont : csGlyph ? csFontFor(csFace, cluster) : stackFontFor(
-        family, cluster, hasNamedFontFamily(run.fontFamily ?? para.defFontFamily),
+      let font = eaGlyph ? stackFontFor(familyEa, glyph, true, eaStack.slice(1))
+        : csGlyph ? csFontFor(csFace, glyph) : stackFontFor(
+        family, glyph, hasNamedFontFamily(run.fontFamily ?? para.defFontFamily),
       );
-      let face = eaGlyph ? familyEa : csFace;
-      let share = lineMetricFor(face, bold, italic, rc);
-      if (/[\uf020-\uf0ff]/u.test(ch) && (familySym != null || isSymbolFontFamily(family))) {
+      // The face that draws the glyph owns its line metric. For an empty ea
+      // slot that is S, a CJK fallback face with a recorded repertoire, or
+      // nobody the renderer can know: a glyph left to the platform's glyph
+      // fallback (#1689 owner decisions (B) and (c)) has an unknown drawing
+      // face, so it adds no face to its line's metric model.
+      let face: string | null = eaGlyph
+        ? run.fontFamilyEa ? familyEa
+          : emptyEastAsianFaceFor(glyph)
+        : csFace;
+      // One identity-bearing resolution per family/unit is shared by primary
+      // and secondary contributions. Full-context definedness/isolation facts
+      // make the proof stable under subsequent safe span coalescing/wrapping.
+      const resolve = (f: string) => resourceFor(f, glyph);
+      let owner = face !== null && rc.embeddedFontAuthoredFamilies?.has(face) ? resolve(face) : undefined;
+      let share = face === null ? undefined : owner ? owner.metrics : lineMetricFor(face, bold, italic, rc, glyph);
+      if (slot === 'sym' && (familySym != null || isSymbolFontFamily(family))) {
         const symbolFamily = familySym ?? family;
         const mapped = symbolFontToUnicode(ch, symbolFamily);
         glyph = mapped + cluster.slice(ch.length);
         font = buildFont(bold, italic, drawSizePx,
           mapped === ch ? symbolFamily : 'sans-serif', rc, glyph);
         share = undefined;
+        owner = undefined;
         face = mapped === ch ? symbolFamily : 'sans-serif';
       }
-      if (group && (font !== groupFont || share !== groupShare)) emitGroup();
+      // Embedded Latin contributions use the same cluster resolver, even for
+      // canonically composed singletons. Otherwise a decomposed spelling can
+      // gain a secondary resource contribution that its NFC spelling lacks.
+      const latinOwner = rc.embeddedFontAuthoredFamilies?.has(family) ? resolve(family) : undefined;
+      const clusterLatinShare = latinOwner ? latinOwner.metrics ?? null : latinShare;
+      if (group && (font !== groupFont || share !== groupShare || clusterLatinShare !== groupLatinShare
+        || (face ?? undefined) !== groupFamily)) emitGroup();
       group += glyph;
       groupFont = font;
       groupShare = share;
-      groupFamily = face;
+      groupLatinShare = clusterLatinShare;
+      groupFamily = face ?? undefined;
+      groupIdentity = owner?.identity;
+      groupLatinIdentity = latinOwner?.identity;
+      groupSupport = owner?.support;
     }
     emitGroup();
     if (emitted) {
       const last = input[input.length - 1];
-      seam = last?.type === 'text' ? last : null;
+      hasSeam = last?.type === 'text';
     }
   }
 
-  const sameStyle = (a: LayoutSegment, b: LayoutSegment): boolean =>
+  const sameVisualStyle = (a: LayoutSegment, b: LayoutSegment): boolean =>
     a.font === b.font && a.color === b.color && a.patternFill === b.patternFill
     && a.noFill === b.noFill && a.sizePx === b.sizePx
     && a.drawSizePx === b.drawSizePx && a.underline === b.underline
@@ -1780,14 +1961,85 @@ export function paragraphInputRuns(
     && a.shadow === b.shadow && a.reflection === b.reflection
     && a.outline === b.outline && a.highlight === b.highlight
     && hyperlinkKey(a.hyperlink) === hyperlinkKey(b.hyperlink)
-    && (!a.letterSpacingPx || a.sourceRunId === b.sourceRunId)
-    // Every face that sizes the PowerPoint line box is part of the key: two
-    // runs drawn in the same face but carrying different latin slots must
-    // stay apart, or the merged segment would drop one slot's share and a
-    // purely visual difference (colour) would decide the line height.
+    && (!a.letterSpacingPx || a.sourceRunId === b.sourceRunId);
+  // A resource metric is not a shaping boundary: safe GSUB can inspect a missing neighbour
+  // and change a defined glyph without changing its owner. Source ranges carry
+  // every contributor separately to the final line box. Stacked modes already
+  // measure/paint one grapheme per cell, so retain each cell's metric/face style.
+  const sameStyle = (a: LayoutSegment, b: LayoutSegment): boolean => sameVisualStyle(a, b)
+    && a.selectedNamedFaceFamily === b.selectedNamedFaceFamily;
+  const stackedSameStyle = (a: LayoutSegment, b: LayoutSegment): boolean => sameVisualStyle(a, b)
+    && a.faceFamily === b.faceFamily && a.faceFamilyLatin === b.faceFamilyLatin
     && a.lineMetric === b.lineMetric
     && a.lineMetricLatin === b.lineMetricLatin;
-  return { input, sameStyle, breakMarks };
+  // GSUB definedness may hold while missing isolation does not. A mapped A
+  // then cannot authorize a metric in AB when B is missing and class-zero/skip
+  // rules can involve it. Unsupported script repair or erasure-risk inputs also
+  // invalidate the actual span. Revalidate the original CSS paint/measurement span,
+  // before any metric grouping. Unknown spans use the existing point-size
+  // policy; they are not split into singleton fillText calls to hide context.
+  for (let start = 0; start < input.length;) {
+    const first = input[start];
+    if (first.type !== 'text') { start++; continue; }
+    let end = start + 1, display = first.text;
+    while (end < input.length) {
+      const next = input[end];
+      if (next.type !== 'text' || !sameVisualStyle(first.style, next.style)) break;
+      display += next.text; end++;
+    }
+    // Preserve the existing PPTX installed-slot routing boundary (the empty-ea
+    // symbol/CJK tiers in east-asian-default.ts). Independent Office controls
+    // show distinct named-family transitions can change advances even with one
+    // composite CSS stack. This is bounded compatibility policy, not a CSS or
+    // ECMA mandate. It is independent of metric availability and resource proof.
+    // "Installed" means the established named-slot compatibility route, not
+    // proven host installation or a complete cmap. Direct named slots and
+    // unrecorded symbols retain that policy, without a catalogue-presence gate.
+    // Admission is span-wide: generic/unresolved routes or any participating
+    // embedded alias disable every key, avoiding a nontransitive known/unknown
+    // comparator and preserving embedded contextual strings. buildFont quotes
+    // every named family, including generated ASCII document aliases; inspect that actual stack
+    // rather than an unrelated embedded family elsewhere in the document.
+    const embeddedInStack = [...first.style.font.matchAll(/"([^"]*)"/gu)]
+      .some(match => rc.embeddedFontAuthoredFamilies?.has(match[1]));
+    let installedSpan = !embeddedInStack;
+    for (let at = start; installedSpan && at < end; at++) {
+      const item = input[at];
+      installedSpan = item.type === 'text' && item.style.faceFamily !== undefined
+        && !CSS_GENERIC_FAMILIES.has(item.style.faceFamily)
+        && !rc.embeddedFontAuthoredFamilies?.has(item.style.faceFamily);
+    }
+    const validate = (context: LayoutSegment['resourceContext']) => {
+      if (!context) return undefined;
+      return embeddedResourceFor(context.family, context.bold, context.italic, rc, display);
+    };
+    const contexts = new Map<string, ReturnType<typeof validate>>();
+    const inContext = (context: LayoutSegment['resourceContext']) => {
+      if (!context) return undefined;
+      const key = `${context.family}:${context.bold}:${context.italic}`;
+      if (!contexts.has(key)) contexts.set(key, validate(context));
+      return contexts.get(key);
+    };
+    for (let at = start; at < end; at++) {
+      const item = input[at];
+      if (item.type !== 'text') continue;
+      if (installedSpan) item.style = { ...item.style, selectedNamedFaceFamily: item.style.faceFamily };
+      const primary = inContext(item.style.resourceContext), latin = inContext(item.style.resourceContextLatin);
+      if (primary?.support && primary.support.kind !== 'complete') item.style = { ...item.style, resourceIdentity: undefined, resourceSupport: primary.support };
+      if (latin?.support && latin.support.kind !== 'complete') item.style = { ...item.style, resourceIdentityLatin: undefined };
+      if (primary?.support?.kind === 'unknown') {
+        item.style = { ...item.style, lineMetric: undefined, resourceIdentity: undefined, resourceSupport: primary.support };
+        if (item.style.resourceContext?.family === item.style.resourceContextLatin?.family) {
+          item.style.lineMetricLatin = null; item.style.resourceIdentityLatin = undefined;
+        }
+      }
+      if (latin?.support?.kind === 'unknown') {
+        item.style = { ...item.style, lineMetricLatin: null, resourceIdentityLatin: undefined };
+      }
+    }
+    start = end;
+  }
+  return { input, sameStyle, stackedSameStyle, breakMarks };
 }
 
 /**
@@ -1895,7 +2147,20 @@ export function layoutParagraph(
         const leadingLetterSpacingPx = previous?.type === 'text'
           && previous.style.sourceRunId === part.style.sourceRunId
           ? part.style.letterSpacingPx : undefined;
-        return { ...part.style, text: part.text, leadingLetterSpacingPx };
+        const metricContributors = drawingMlSegmentSourceRanges(part).flatMap(range => {
+          const source = input[range.run];
+          return source?.type === 'text' ? [{ style: source.style, text: source.text.slice(range.start, range.end) }] : [];
+        });
+        const first = metricContributors[0]?.style ?? part.style;
+        // First-style paint survives core coalescing, but a multi-owner span
+        // must not inherit its first fragment's metrics/identity as sole owner.
+        const agrees = (key: 'lineMetric' | 'lineMetricLatin' | 'resourceIdentity' | 'resourceIdentityLatin') =>
+          metricContributors.every(fragment => fragment.style[key] === first[key]);
+        return { ...part.style, text: part.text, leadingLetterSpacingPx, metricContributors,
+          lineMetric: agrees('lineMetric') ? first.lineMetric : undefined,
+          lineMetricLatin: agrees('lineMetricLatin') ? first.lineMetricLatin : null,
+          resourceIdentity: agrees('resourceIdentity') ? first.resourceIdentity : undefined,
+          resourceIdentityLatin: agrees('resourceIdentityLatin') ? first.resourceIdentityLatin : undefined };
       }
       if (part.type === 'tab') return { ...part.style, text: '', isTab: true, tabWidthPx: part.width };
       return { ...part.style, text: '' };
@@ -3029,7 +3294,9 @@ function renderWarpedText(
         : undefined;
       const outlineWidth = outline ? Math.max(0.5, emuToPx(outline.width, scale)) : 0;
       const ls = seg.letterSpacingPx ?? 0;
-      const chars = [...seg.text];
+      // Keep the complete cluster in each warped transform/strip stack;
+      // scalar painting would reselect a base-only subset after attribution.
+      const chars = graphemeTexts(seg.text);
       for (const ch of chars) {
         const chW = ctx.measureText(ch).width + ls;
         if (seg.noFill && !outlinePaint) { penW += chW; continue; }
@@ -4360,7 +4627,7 @@ function renderStackedTextBody(
     const color = para.defColor ? hexToRgba(para.defColor) : bodyDefaultColor;
     const built = paragraphInputRuns(para, sizePx, color, scale, bodyDefaultBold, bodyDefaultItalic, fontScale,
       slideNumber, rc);
-    sameStyle ??= built.sameStyle;
+    sameStyle ??= built.stackedSameStyle;
     const firstText = built.input.find((item) => item.type === 'text');
     const family = normalizeFontFamily(para.defFontFamily ?? null, rc);
     const bold = para.defBold ?? bodyDefaultBold;
@@ -4609,8 +4876,9 @@ export function renderTextBody(
     /** This spAutoFit line replaces an authored-font design floor with metrics
      * from the font Canvas actually resolved. */
     useResolvedFontMetrics: boolean;
-    /** PowerPoint's metric ascent of the spaced line (px), when every run of
-     * the body has a known face; undefined for the ordinary 0.8 × line model. */
+    /** PowerPoint's metric ascent of the spaced line (px), when the body is on
+     * the metric model and the line has a known face (#1689: line scope);
+     * undefined for the ordinary 0.8 × line model. */
     metricAscent?: number;
     /** The line's natural (unspaced) descent in the metric model. */
     metricNaturalDescent?: number;
@@ -4631,9 +4899,10 @@ export function renderTextBody(
   // enough to contain the last line, but must not silently become the pitch of
   // every preceding line when a:lnSpc is omitted (#1473).
   let requiredHeight = 0;
-  // Every line must resolve PowerPoint's metric split (see
-  // powerpoint-line-metrics.ts) for the body to use it; one body never mixes
-  // the two line models.
+  // Structural cases outside the #1610 controls (an equation, a marker taller
+  // than the text, compatLnSpc="0" without Excel tables, an unresolved
+  // fontAlgn offset) still take the whole body to the ordinary model. A face
+  // without known metrics does not: its scope is its own line (#1689).
   let metricOk = metric;
 
   // AutoNum counters per list level
@@ -4814,6 +5083,16 @@ export function renderTextBody(
       // spAutoFit, but PowerPoint does not repeat that box as the implicit
       // baseline pitch when `<a:lnSpc>` is omitted.
       let resolvedFontLine = 0;
+      // A glyph whose drawing face has no known metrics (a generic or
+      // unparsed embedded family, a symbol-font mapping, or a glyph left to
+      // the platform's glyph fallback: #1689 owner decisions (B)/(c)) adds no
+      // face to the line; the line keeps the metric model of its known faces.
+      // PowerPoint's own fallback scope is the line (fallback.win.pdf: an
+      // unmodelled face moves only its own line's baseline). Only a line with
+      // glyphs but no known face at all keeps the ordinary model, and only
+      // that line does.
+      let lineHasGlyphs = false;
+      let lineHasUnknownFace = false;
       for (const seg of line.segments) {
         // For an equation, the line must be at least as tall as its own font
         // size (so a short label like "y"/"p"/"z" gets the normal font-ascent
@@ -4826,15 +5105,20 @@ export function renderTextBody(
         if (effSize > maxSizePx) maxSizePx = effSize;
         if (seg.math) metricOk = false;
         else if (!seg.isTab) {
-          if (seg.lineMetric === undefined) metricOk = false;
-          else metricRuns.push({ sizePx: seg.sizePx, face: seg.lineMetric });
-          // A run's latin face sizes its line even where an East Asian or
-          // symbol segment draws no latin glyph; an unused ea or cs face does
-          // not (#1610 supplements 2 and 3).
-          if (seg.lineMetricLatin === null) metricOk = false;
-          else if (seg.lineMetricLatin !== undefined
-            && seg.lineMetricLatin !== seg.lineMetric) {
-            metricRuns.push({ sizePx: seg.sizePx, face: seg.lineMetricLatin });
+          for (const contribution of seg.metricContributors ?? [{ style: seg, text: seg.text }]) {
+            const owner = contribution.style;
+            if (contribution.text) {
+              lineHasGlyphs = true;
+              if (owner.lineMetric === undefined) lineHasUnknownFace = true;
+            }
+            if (owner.lineMetric !== undefined) metricRuns.push({ sizePx: owner.sizePx, face: owner.lineMetric });
+            // A run's latin face sizes its line even where an East Asian or
+            // symbol segment draws no latin glyph; an unused ea or cs face does
+            // not (#1610 supplements 2 and 3).
+            if (owner.lineMetricLatin != null
+              && owner.lineMetricLatin !== owner.lineMetric) {
+              metricRuns.push({ sizePx: owner.sizePx, face: owner.lineMetricLatin });
+            }
           }
         }
         if (!seg.math) {
@@ -4848,6 +5132,7 @@ export function renderTextBody(
           }
         }
       }
+      const lineFacesUnknown = lineHasGlyphs && metricRuns.length === 0;
       // Break / end-of-paragraph marks after text: their face at the size of
       // the run they follow (layoutParagraph `followingMark`). A mark whose
       // face has no reference metrics (a generic or embedded family) draws
@@ -4940,9 +5225,13 @@ export function renderTextBody(
       // #1610 one (the run's own face and its latin face). A line with no
       // glyph run has no measured box in that model, and neither has a face
       // without Excel tables; either keeps the ordinary model for the body.
+      // This structural rejection also applies to unknown glyphs among known
+      // runs, and unknown-only lines. The line-local unknown-face policy above
+      // is restricted to the ordinary baseline model; equations, tall markers,
+      // compatLnSpc=0 and unresolvable fontAlgn retain their whole-body gates.
       const compatOff = body.compatLnSpc === false;
       if (metric && metricOk && compatOff
-        && (metricRuns.length === 0 || metricRuns.some((r) => r.face.excel === undefined))) {
+        && (lineHasUnknownFace || metricRuns.length === 0 || metricRuns.some((r) => r.face.excel === undefined))) {
         metricOk = false;
       }
       // pPr@fontAlgn t / ctr / b (powerPointFontAlgnReference): the line box
@@ -4951,15 +5240,25 @@ export function renderTextBody(
       // rule.
       const fontAlgn = para.fontAlgn;
       let alignedLine: { ascent: number; descent: number } | undefined;
-      if (metric && metricOk && fontAlgn && metricRuns.length > 0) {
+      if (metric && metricOk && fontAlgn && (lineHasGlyphs || metricRuns.length > 0)) {
         const unitPx = POWERPOINT_FONT_ALGN_UNIT_PT * PT_TO_EMU * scale;
         alignedLine = powerPointFontAlgnReference(fontAlgn, metricRuns, compatOff, unitPx);
         if (!alignedLine) metricOk = false;
         for (const seg of line.segments) {
           if (!alignedLine) break;
           if (seg.isTab || !seg.text) continue;
-          const offset = seg.lineMetric
-            && powerPointFontAlgnOffset(fontAlgn, { sizePx: seg.sizePx, face: seg.lineMetric }, compatOff, unitPx);
+          let offset: number | undefined;
+          // A single contextual paint cannot give its fragments different
+          // baselines. Keep the existing unresolvable-fontAlgn whole-body
+          // fallback if a source owner is unknown or offsets disagree; never
+          // split the shaping span or align it using only its first owner.
+          for (const contribution of seg.metricContributors ?? [{ style: seg, text: seg.text }]) {
+            const owner = contribution.style;
+            const next = owner.lineMetric && powerPointFontAlgnOffset(fontAlgn,
+              { sizePx: owner.sizePx, face: owner.lineMetric }, compatOff, unitPx);
+            if (next === undefined || offset !== undefined && offset !== next) { offset = undefined; break; }
+            offset = next;
+          }
           if (offset === undefined) {
             metricOk = false;
             break;
@@ -4967,11 +5266,12 @@ export function renderTextBody(
           seg.fontAlgnOffsetPx = offset;
         }
       }
-      if (metric && metricOk && !(measureOnly && !isSpAutoFit && !measureNaturalLineSpacing && !para.spaceLine)) {
+      if (metric && metricOk && !lineFacesUnknown
+        && !(measureOnly && !isSpAutoFit && !measureNaturalLineSpacing && !para.spaceLine)) {
         const natural = alignedLine ?? (compatOff
           ? powerPointCompatOffNaturalLine(metricRuns.map((r) => ({ sizePx: r.sizePx, box: r.face.excel! })))
           : metricRuns.length > 0
-            ? powerPointNaturalLine(metricRuns.map((r) => ({ sizePx: r.sizePx, share: r.face.share })))
+            ? powerPointNaturalLine(metricRuns.map((r) => ({ sizePx: r.sizePx, share: r.face.share })), maxSizePx)
             : { ascent: naturalSingle * 0.8, descent: naturalSingle * 0.2 });
         if (compatOff) pctSpacingUnit = natural.ascent + natural.descent;
         const spacing = para.spaceLine?.type === 'pts'
@@ -5057,8 +5357,9 @@ export function renderTextBody(
   return { allLines, totalHeight, requiredHeight, metricOk };
   }; // end buildLayout
 
-  // Try PowerPoint's metric line model first; a body with any face outside
-  // it is laid out again with the ordinary model.
+  // Try PowerPoint's metric line model first; a body with a structural case
+  // outside it (see `metricOk`) is laid out again with the ordinary model. An
+  // unknown face only keeps its own line on the ordinary model.
   let useMetricLines = true;
   const layoutAt = (fontScale: number) => {
     let layout = buildLayout(fontScale, useMetricLines);
@@ -5573,11 +5874,11 @@ export function renderTextBody(
             paint(text, atX, segBaseline);
             try { lctx.letterSpacing = prev; } catch { /* inert implementation */ }
           } else {
-            // Pre-letterSpacing Canvas fallback. It cannot preserve contextual
-            // shaping across the split, but its manual advance matches the
-            // code-point approximation in measureTextAdvance.
+            // Pre-letterSpacing Canvas fallback shares complete paint clusters
+            // and measured advances with measureTextAdvance. Contextual shaping
+            // across clusters is unavailable; cluster resource ownership remains.
             let x = atX;
-            const cps = [...text];
+            const cps = graphemeTexts(text);
             for (let index = 0; index < cps.length; index++) {
               const ch = cps[index];
               paint(ch, x, segBaseline);
@@ -5648,13 +5949,14 @@ export function renderTextBody(
             paint(seg.text, penX, segBaseline);
             try { lctx.letterSpacing = prev; } catch { /* inert implementation */ }
           } else {
-            // Old/inert Canvas: use the same code-point pitch approximation as
-            // measureTextAdvance so distributed layout and paint stay aligned.
+            // Old/inert Canvas: space whole clusters, matching the fallback
+            // measurement without changing the painting resource of a modifier.
             let x = penX;
-            for (let index = 0; index < cps.length; index++) {
-              const ch = cps[index];
+            const clusters = graphemeTexts(seg.text);
+            for (let index = 0; index < clusters.length; index++) {
+              const ch = clusters[index];
               paint(ch, x, segBaseline);
-              if (index < cps.length - 1) x += target.measureText(ch).width + pitch;
+              if (index < clusters.length - 1) x += target.measureText(ch).width + pitch;
             }
           }
         } else if (pieces) {
@@ -7613,6 +7915,7 @@ type InternalSlideRenderOptions = SlideRenderOptions & {
   embeddedFontAliases?: ReadonlyMap<string, string>;
   embeddedFontAuthoredFamilies?: ReadonlyMap<string, string>;
   embeddedFontTuples?: ReadonlySet<string>;
+  embeddedFontMetrics?: PptxEmbeddedFontMetrics;
   svgDecoder?: SvgBlobDecoder;
 };
 
@@ -7857,6 +8160,7 @@ async function renderSlideLeased(
     embeddedFontAliases: opts.embeddedFontAliases,
     embeddedFontAuthoredFamilies: opts.embeddedFontAuthoredFamilies,
     embeddedFontTuples: opts.embeddedFontTuples,
+    embeddedFontMetrics: opts.embeddedFontMetrics,
     officeFontRoutes: opts.officeFontRoutes,
     googleSubstitutes: opts.googleSubstitutes,
     // The backing store may have been clamped below `canvasSize × dpr`; downstream

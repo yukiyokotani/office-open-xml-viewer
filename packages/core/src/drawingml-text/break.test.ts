@@ -1,10 +1,41 @@
 import { describe, expect, it } from 'vitest';
-import { breakDrawingMlText, type DrawingMlInputRun } from './index.js';
+import { breakDrawingMlText, drawingMlSegmentSourceRanges, type DrawingMlInputRun } from './index.js';
 
 // Synthetic advances keep the test independent of the host Canvas fonts. The
 // assertions are the line choices in the matched Office wrap controls (C00–C11).
 const measure = (value: string): number =>
   [...value].reduce((width, ch) => width + (/\p{Script=Han}/u.test(ch) || ch === '、' ? 20 : 10), 0);
+
+it('keeps nonpaint source metadata line-local without changing contextual measurement', () => {
+  const runs = ['A', 'B'].map((text, metric) => ({ type: 'text' as const, text, style: { font: 'same', metric } }));
+  const result = breakDrawingMlText(runs, { maxWidth: 12,
+    measureText: text => text === 'AB' ? 16 : 5, sameStyle: (a, b) => a.font === b.font });
+  expect(result.map(line => line.segments.map(seg => seg.type === 'text' ? seg.text : ''))).toEqual([['A'], ['B']]);
+  expect(result.map(line => line.segments[0].style.metric)).toEqual([0, 1]);
+  for (const line of result) for (const segment of line.segments) {
+    if (segment.type !== 'text') continue;
+    expect(drawingMlSegmentSourceRanges(segment).map(range => runs[range.run].text.slice(range.start, range.end)).join('')).toBe(segment.text);
+  }
+  const wide = breakDrawingMlText(runs, { maxWidth: 20, measureText: text => text === 'AB' ? 16 : 5,
+    sameStyle: (a, b) => a.font === b.font });
+  expect(wide[0].width).toBe(16);
+  expect(drawingMlSegmentSourceRanges(wide[0].segments[0])).toEqual([{run: 0, start: 0, end: 1}, {run: 1, start: 0, end: 1}]);
+});
+
+it('retains exact display slices through grapheme seams, hard breaks and terminal trimming', () => {
+  const runs: DrawingMlInputRun<number>[] = [{ type: 'text', text: 'A', style: 0 },
+    { type: 'text', text: '\u0301B', style: 1 }, { type: 'break' }, { type: 'text', text: 'C ', style: 2 }];
+  const result = breakDrawingMlText(runs, { maxWidth: 10, measureText: text => [...text.replace('\u0301', '')].length * 10,
+    sameStyle: () => true });
+  expect(result.map(line => line.segments.map(seg => seg.type === 'text' ? seg.text : '').join(''))).toEqual(['Á', 'B', 'C']);
+  for (const line of result) for (const segment of line.segments) {
+    if (segment.type !== 'text') continue;
+    const slices = drawingMlSegmentSourceRanges(segment).map(range => {
+      const source = runs[range.run]; return source.type === 'text' ? source.text.slice(range.start, range.end) : '';
+    });
+    expect(slices.join('')).toBe(segment.text);
+  }
+});
 
 function lines(parts: readonly string[], width: number, defaultTabSize = 72): string[] {
   const runs: DrawingMlInputRun<string>[] = parts.map((text) => ({ type: 'text', text, style: 'same' }));
@@ -57,6 +88,41 @@ describe('matched PowerPoint and Excel DrawingML wrap controls', () => {
 
   it('breaks an overwide word at grapheme boundaries (C09)', () => {
     expect(lines(['supercalifragilistic'], 80)).toEqual(['supercal', 'ifragili', 'stic']);
+  });
+
+  it('keeps grapheme boundaries across paint styles during emergency wrapping', () => {
+    for (const nonMonotoneMeasure of [false, true]) {
+      for (const [mark, expected] of [['\ua9e5', ['\u1000\ua9e5']], ['\uaa7c', ['\u1000\uaa7c']],
+        ['\uaa7b', ['\u1000', '\uaa7b']], ['\uaa7d', ['\u1000', '\uaa7d']]] as const) {
+        const result = breakDrawingMlText([
+          { type: 'text', text: '\u1000', style: 'base' },
+          { type: 'text', text: mark, style: 'mark' },
+        ], { maxWidth: 10, nonMonotoneMeasure,
+          measureText: (text) => [...text].reduce((sum, ch) => sum + (ch === '\u1000' ? 20 : 0), 0) });
+        expect(result.map((line) => line.segments.map((segment) => segment.type === 'text' ? segment.text : '').join('')))
+          .toEqual(expected);
+        expect(result.flatMap((line) => line.segments).map((segment) => segment.style)).toEqual(['base', 'mark']);
+      }
+    }
+  });
+
+  it('fits complete cross-style graphemes and keeps a space-attached mark when wrapping', () => {
+    const wrapped = (base: string, width: number) => breakDrawingMlText([
+      { type: 'text', text: `A${base}`, style: 'base' },
+      { type: 'text', text: '\u0301B', style: 'mark' },
+    ], { maxWidth: width, measureText: (text) => [...text].reduce((sum, ch) => sum + (ch === '\u0301' ? 0 : 20), 0) })
+      .map((line) => line.segments.map((segment) => segment.type === 'text' ? segment.text : '').join(''));
+    expect(wrapped('', 20)).toEqual(['A\u0301', 'B']);
+    expect(wrapped(' ', 20)).toEqual(['A', ' \u0301', 'B']);
+  });
+
+  it('recovers grapheme boundaries shifted inside a styled run by regional-indicator pairing', () => {
+    const result = breakDrawingMlText([
+      { type: 'text', text: '🇦', style: 'first' },
+      { type: 'text', text: '🇧🇨🇩', style: 'rest' },
+    ], { maxWidth: 40, measureText: (text) => [...text].length * 20 });
+    expect(result.map((line) => line.segments.map((segment) => segment.type === 'text' ? segment.text : '').join('')))
+      .toEqual(['🇦🇧', '🇨🇩']);
   });
 
   it('carries an overflowing tab to the next line and seats one glyph after its stop (C11)', () => {

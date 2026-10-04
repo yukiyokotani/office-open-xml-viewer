@@ -1,6 +1,8 @@
 import type { CjkLang } from '@silurus/ooxml-core';
 import {
   classifyCjkFont,
+  classifyFontGeneric,
+  cjkFallbackChain,
   cjkFallbackForText,
   scriptPreloadNamesForText,
   GOOGLE_FONT_SUBSTITUTES,
@@ -11,6 +13,8 @@ import {
 } from '@silurus/ooxml-core';
 import { ScriptPreloadAccumulator } from '@silurus/ooxml-core/internal/script-preload-accumulator';
 import type { Presentation, Slide, SlideElement } from './types';
+import { eastAsianDefaultFaces } from './east-asian-default.js';
+import { powerPointFontRouting } from './font-slot-compatibility.js';
 
 /** Theme-referenced typefaces commonly used by PPTX templates. Keys are
  *  lower-cased family names.
@@ -39,15 +43,36 @@ function* textBodyRuns(body: TextBody | null | undefined): Generator<string> {
   }
 }
 
-/** Yield every explicitly resolved family carried by one rendered text body. */
-function* textBodyFontFamilies(body: TextBody | null | undefined): Generator<string> {
+/** Yield authored families and the primary fallback of each selected EA face. */
+function* textBodyFontFamilies(body: TextBody | null | undefined, minorFont: string | null): Generator<string> {
   for (const paragraph of body?.paragraphs ?? []) {
     if (paragraph.defFontFamily) yield paragraph.defFontFamily;
-    for (const run of paragraph.runs) {
+    const { eastAsianText } = powerPointFontRouting(paragraph.runs.map((run) => ({
+      text: run.type === 'text' ? (run.caps === 'all' || run.caps === 'small' ? run.text.toUpperCase() : run.text) : null,
+      lang: run.type === 'text' ? run.lang : undefined,
+    })));
+    for (const [index, run] of paragraph.runs.entries()) {
       if (run.type !== 'text') continue;
       if (run.fontFamily) yield run.fontFamily;
       if (run.fontFamilyEa) yield run.fontFamilyEa;
+      if (run.fontFamilyCs) yield run.fontFamilyCs;
       if (run.fontFamilySym) yield run.fontFamilySym;
+      // Slot selection can request a CJK face for punctuation with no CJK
+      // letters. Text-script preloading alone then misses its CSS fallback.
+      // Resolve the same default tier as measurement; load only its primary
+      // Noto fallback rather than every regional tail in the CSS safety net.
+      const eaText = eastAsianText[index];
+      if (eaText) {
+        // An empty ea slot selects the named cs face, else the Latin face
+        // (#1689); its CJK fallback follows that selected face.
+        const eaFace = run.fontFamilyEa ?? eastAsianDefaultFaces(
+          run.fontFamilyCs ?? run.fontFamily ?? paragraph.defFontFamily ?? minorFont, eaText,
+        )[0];
+        const lang = classifyCjkFont(eaFace);
+        const variant = classifyFontGeneric(eaFace) === 'serif' ? 'serif' : 'sans';
+        const fallback = lang && cjkFallbackChain(lang, variant)[0];
+        if (fallback) yield fallback;
+      }
     }
   }
 }
@@ -101,11 +126,11 @@ export class PptxFontPreloadAccumulator {
     }
     for (const el of slide.elements as SlideElement[]) {
       if (el.type === 'shape') {
-        for (const family of textBodyFontFamilies(el.textBody)) this.families.add(family);
+        for (const family of textBodyFontFamilies(el.textBody, this.minorFont)) this.families.add(family);
       } else if (el.type === 'table') {
         for (const row of el.rows) {
           for (const cell of row.cells) {
-            for (const family of textBodyFontFamilies(cell.textBody)) this.families.add(family);
+            for (const family of textBodyFontFamilies(cell.textBody, this.minorFont)) this.families.add(family);
           }
         }
       }
@@ -131,12 +156,11 @@ export class PptxFontPreloadAccumulator {
 }
 
 /**
- * The font-family names to preload for a presentation: the theme major/minor
- * fonts, plus only the script-fallback Noto faces whose script the slide TEXT
- * actually contains ({@link PptxFontPreloadAccumulator}). The renderer's canvas
- * font stack still ends with the full Noto set, but eagerly fetching the
- * multi-MB CJK families for a deck with no CJK glyphs would block first paint
- * for nothing; an un-preloaded face loads lazily if it ever proves needed.
+ * Preload the theme/authored families, text-script fallbacks, and the primary
+ * fallback of the selected EA face ({@link PptxFontPreloadAccumulator}). An EA
+ * face can be selected for punctuation alone. The remaining regional tails in
+ * the renderer's canvas stack stay lazy to avoid fetching every multi-MB CJK
+ * family before first paint.
  *
  * Single source of truth shared by the main-thread `load()` and the render
  * worker. Both derive the set from the SAME parsed {@link Presentation}, so both
@@ -189,6 +213,7 @@ export function pptxSlideOfficeFontRequests(
         const italic = run.italic ?? paragraph.defItalic ?? textBody?.defaultItalic ?? false;
         add(run.fontFamily ?? paragraph.defFontFamily, bold, italic);
         if (run.fontFamilyEa) add(run.fontFamilyEa, bold, italic);
+        if (run.fontFamilyCs) add(run.fontFamilyCs, bold, italic);
         if (run.fontFamilySym) add(run.fontFamilySym, bold, italic);
       }
       if (paragraph.bullet.type === 'char' || paragraph.bullet.type === 'autoNum') {

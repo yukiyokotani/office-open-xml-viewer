@@ -27,8 +27,16 @@ from fontTools.ttLib import TTCollection, TTFont
 
 DFONTS = Path("/Applications/Microsoft PowerPoint.app/Contents/Resources/DFonts")
 OUTPUT = Path("packages/pptx/src/east-asian-default-coverage.ts")
-# The renderer's East Asian slot (core isCjkBreakChar).
-RANGES = ((0x3000, 0x9FFF), (0xAC00, 0xD7A3), (0xF900, 0xFAFF), (0xFF00, 0xFFEF))
+# Repertoire lookup domain, including the language-dependent punctuation and
+# symbol slots of issue #1653. This is a coverage superset, NOT a slot classifier:
+# font-slot-compatibility.ts decides which of these characters actually uses ea.
+RANGES = (
+    (0x00A7, 0x00A8), (0x00B0, 0x00B1), (0x00B4, 0x00B4),
+    (0x00D7, 0x00D7), (0x00F7, 0x00F7), (0x1100, 0x11FF),
+    (0x2018, 0x201F), (0x2047, 0x2049), (0x2460, 0x27BF),
+    (0x3000, 0x9FFF), (0xAC00, 0xD7A3), (0xF900, 0xFAFF),
+    (0xFE30, 0xFE4F), (0xFF00, 0xFFEF),
+)
 
 
 def cmap(path: Path, index: int) -> set[int]:

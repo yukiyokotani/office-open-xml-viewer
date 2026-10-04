@@ -53,6 +53,14 @@ export default defineConfig({
         '@silurus/ooxml-core/internal/office-auto-line': fileURLToPath(
           new URL('../packages/core/src/fonts/office-auto-line.ts', import.meta.url),
         ),
+        // These private font exports live under fonts, so resolve them before
+        // the generic internal-directory alias used by source-backed demos.
+        '@silurus/ooxml-core/internal/reference-font-metrics': fileURLToPath(
+          new URL('../packages/core/src/fonts/reference-font-metrics.ts', import.meta.url),
+        ),
+        '@silurus/ooxml-core/internal/reference-font-identity': fileURLToPath(
+          new URL('../packages/core/src/fonts/reference-font-identity.ts', import.meta.url),
+        ),
         '@silurus/ooxml-core/internal/bounded-async-lru-cache': fileURLToPath(
           new URL('../packages/core/src/internal/bounded-async-lru-cache.ts', import.meta.url),
         ),

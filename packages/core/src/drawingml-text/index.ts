@@ -1,5 +1,5 @@
 export { drawingMlCodePointCount, measureDrawingMlAdvance } from './measure.js';
-export { breakDrawingMlText } from './break.js';
+export { breakDrawingMlText, drawingMlSegmentSourceRanges } from './break.js';
 export type {
   DrawingMlInputRun,
   DrawingMlLineSegment,

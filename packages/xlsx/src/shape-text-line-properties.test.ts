@@ -40,6 +40,22 @@ async function prepare(text: ShapeText): Promise<void> {
 const PT = 96 / 72;
 
 describe('xlsx shape text line properties (parity with the pre-shared renderer)', () => {
+  it('keeps a grapheme across authored font styles on one overwide line', () => {
+    const text: ShapeText = {
+      anchor: 't', wrap: 'square', lIns: 0, tIns: 0, rIns: 0, bIns: 0,
+      paragraphs: [{ align: 'l', runs: [
+        { type: 'text', text: '\u1000', bold: false, italic: false, size: 20 },
+        { type: 'text', text: '\uaa7c', bold: true, italic: false, size: 20 },
+      ] }],
+    } as ShapeText;
+    const { ctx, texts } = recordingContext();
+    ctx.measureText = (value) => ({ width: [...value].reduce((sum, ch) => sum + (ch === '\u1000' ? 20 : 0), 0),
+      actualBoundingBoxAscent: 8 }) as TextMetrics;
+    drawShapeText(ctx, text, 10, 100, 1);
+    expect(texts.map(([value]) => value)).toEqual(['\u1000', '\uaa7c']);
+    expect(texts[0][1]).toBe(texts[1][1]);
+  });
+
   it('keeps the first-line indent on an inline equation when a later equation is display math', async () => {
     const inline = equation();
     const display = equation();

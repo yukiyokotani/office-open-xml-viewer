@@ -181,6 +181,12 @@ function span(glyphs: Array<{ x: number }>): number {
 }
 
 describe('WordArt Follow Path — single-edge span (issue #846)', () => {
+  it('keeps a base and its combining mark in one warped painting resource', () => {
+    const { ctx, glyphs } = trackingCtx();
+    renderTextBody(ctx, warpBody('textArchUp', 'A\u0301B'), 0, 0, BOX_W, BOX_H, SCALE);
+    expect(glyphs.map((glyph) => glyph.ch)).toEqual(['Á', 'B']);
+  });
+
   it('textArchUp centres a centred word within its natural-width arc segment', () => {
     const { ctx, glyphs } = trackingCtx();
     renderTextBody(ctx, warpBody('textArchUp', 'Arch Up'), 0, 0, BOX_W, BOX_H, SCALE);

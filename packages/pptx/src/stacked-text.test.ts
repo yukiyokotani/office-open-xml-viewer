@@ -117,7 +117,7 @@ describe('pptx stacked vertical text (wordArtVert / wordArtVertRtl)', () => {
   it('stacks a grapheme cluster in one cell', () => {
     const { ctx, calls } = mockCtx();
     renderTextBody(ctx, body('e\u0301B', 'wordArtVert'), 0, 0, 60, 470, SCALE);
-    expect(calls.map((c) => c.text)).toEqual(['e\u0301', 'B']);
+    expect(calls.map((c) => c.text)).toEqual(['é', 'B']);
     expect(calls[1].y - calls[0].y).toBeCloseTo(CELL, 6);
   });
 
@@ -166,7 +166,7 @@ describe('font slots keep grapheme clusters whole', () => {
     const para = body(`葛${IVS}B e\u0301`, 'horz', 'Yu Gothic').paragraphs[0];
     const [line] = layoutParagraph(ctx, para, 10_000, 24, '#000', SCALE, 0);
     const segs = line.segments.filter((g) => g.text);
-    expect(segs.map((g) => g.text)).toEqual([`葛${IVS}`, 'B e\u0301']);
+    expect(segs.map((g) => g.text)).toEqual([`葛${IVS}`, 'B é']);
     expect(segs[0].font).toContain('Yu Gothic');
     expect(segs[1].font).not.toContain('Yu Gothic');
   });
@@ -176,26 +176,27 @@ describe('font slots keep grapheme clusters whole', () => {
 // segmented over the paragraph text, and the carried extender takes the base
 // run's formatting (the second run here is bold).
 describe('grapheme clusters across run seams', () => {
-  const SEAMS: [string, string][] = [['葛', '\u{E0100}'], ['「', '\uFE0F'], ['가', '\u11A8']];
+  const SEAMS: [string, string, string][] = [['葛', '\u{E0100}', '葛\u{E0100}'],
+    ['「', '\uFE0F', '「\uFE0F'], ['가', '\u11A8', '각']];
   const split = (vert: string, base: string, ext: string): TextBody => {
     const b = body(`${base}${ext}B`, vert, 'Yu Gothic');
     const r = b.paragraphs[0].runs[0] as TextRunData;
     b.paragraphs[0].runs = [{ ...r, text: base }, { ...r, text: `${ext}B`, bold: true }];
     return b;
   };
-  for (const [base, ext] of SEAMS) {
+  for (const [base, ext, display] of SEAMS) {
     it(`stacked: ${JSON.stringify(base + ext)} split across runs stays one cell`, () => {
       for (const vert of ['wordArtVert', 'wordArtVertRtl']) {
         const { ctx, calls } = mockCtx();
         renderTextBody(ctx, split(vert, base, ext), 0, 0, 100, 470, SCALE);
-        expect(calls.map((c) => c.text)).toEqual([base + ext, 'B']);
+        expect(calls.map((c) => c.text)).toEqual([display, 'B']);
       }
     });
     it(`horizontal: ${JSON.stringify(base + ext)} split across runs stays in the base segment`, () => {
       const { ctx } = mockCtx();
       const [line] = layoutParagraph(ctx, split('horz', base, ext).paragraphs[0], 10_000, 24, '#000', SCALE, 0);
       const segs = line.segments.filter((g) => g.text);
-      expect(segs.map((g) => g.text)).toEqual([base + ext, 'B']);
+      expect(segs.map((g) => g.text)).toEqual([display, 'B']);
       expect(segs[0].font).toContain('Yu Gothic');
       expect(segs[0].font).not.toContain('bold');
       expect(segs[1].font).toContain('bold');
@@ -217,10 +218,10 @@ describe('cluster segmentation cost', () => {
     expect(lines).toHaveLength(1);
     const [line] = lines;
     const segs = line.segments.filter((g) => g.text);
-    expect(segs.map((g) => g.text).join('')).toBe(`a${'\u0301'.repeat(80_000)}B`);
+    expect(segs.map((g) => g.text).join('')).toBe(`á${'\u0301'.repeat(79_999)}B`);
     const { ctx, calls } = mockCtx();
     renderTextBody(ctx, b, 0, 0, 100, 470, SCALE);
-    expect(calls.map((c) => c.text.length)).toEqual([80_001, 1]);
+    expect(calls.map((c) => c.text.length)).toEqual([80_000, 1]);
     expect(performance.now() - start).toBeLessThan(5_000);
   }, 60_000);
 });

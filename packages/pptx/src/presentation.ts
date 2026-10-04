@@ -70,7 +70,9 @@ import {
   type PresentationPreflight,
 } from './presentation-preflight';
 import { PptxSlideRepository } from './slide-repository';
-import { excludeEmbeddedFontFamilies, loadEmbeddedFonts, uncoveredOfficeFontRequests } from './embedded-fonts';
+import {
+  excludeEmbeddedFontFamilies, loadEmbeddedFonts, uncoveredOfficeFontRequests, type LoadedPptxEmbeddedFonts,
+} from './embedded-fonts';
 import {
   isPptxSlidePullResponse,
   PptxSlidePullClient,
@@ -274,6 +276,7 @@ export class PptxPresentation {
   private _embeddedFontAliases: ReadonlyMap<string, string> = new Map();
   private _embeddedFontAuthoredFamilies: ReadonlyMap<string, string> = new Map();
   private _embeddedFontTuples: ReadonlySet<string> = new Set();
+  private _embeddedFontMetrics: LoadedPptxEmbeddedFonts['metrics'] = new Map();
   private _destroyed = false;
   /** One stable closure per instance: the decoded-bitmap and SVG caches key on
    *  this identity to scope decodes per deck (so two open decks never swap
@@ -519,6 +522,7 @@ export class PptxPresentation {
         this._embeddedFontAliases = loaded.aliases;
         this._embeddedFontAuthoredFamilies = loaded.authoredFamilies;
         this._embeddedFontTuples = loaded.tuples;
+        this._embeddedFontMetrics = loaded.metrics;
       }
     });
     this._slidePullClient = new PptxSlidePullClient({
@@ -606,6 +610,7 @@ export class PptxPresentation {
         this._embeddedFontAliases = loaded.aliases;
         this._embeddedFontAuthoredFamilies = loaded.authoredFamilies;
         this._embeddedFontTuples = loaded.tuples;
+        this._embeddedFontMetrics = loaded.metrics;
       }
     });
     this._slidePullClient = this._createSlidePullClient(bootstrap.slideCount, timeoutMs, onUsage);
@@ -1113,6 +1118,7 @@ export class PptxPresentation {
             embeddedFontAliases: this._embeddedFontAliases,
             embeddedFontAuthoredFamilies: this._embeddedFontAuthoredFamilies,
             embeddedFontTuples: this._embeddedFontTuples,
+            embeddedFontMetrics: this._embeddedFontMetrics,
             officeFontRoutes,
             googleSubstitutes: this._googleSubstitutes,
             fetchMedia: this._fetchMedia,
@@ -1510,6 +1516,7 @@ export class PptxPresentation {
     this._embeddedFontAliases = new Map();
     this._embeddedFontAuthoredFamilies = new Map();
     this._embeddedFontTuples = new Set();
+    this._embeddedFontMetrics = new Map();
     // Release this deck's decoded raster bitmaps (GPU-backed), duotone-recoloured
     // rasters, and SVG object URLs promptly; all three caches are keyed by
     // `_fetchImage`.

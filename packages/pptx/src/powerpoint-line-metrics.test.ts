@@ -213,9 +213,46 @@ describe('PowerPoint text-box line metrics (#1610)', () => {
     expect(units(n.map((y) => y - 3.6))).toEqual([43, 97, 151, 205]);
   });
 
-  it('keeps the ordinary line model when any run has an unresolved face', () => {
+  it('sizes a line by its known faces when one run has an unresolved face (#1689)', () => {
+    // An unresolved face adds no face to its line; the line keeps the metric
+    // model of its known faces (Arial's usWin share), not the 0.8 split.
     const ys = baselines([paragraph([{ text: 'H', font: 'Arial', size: 20 }, { text: 'g', font: 'Avenir', size: 20 }])]);
-    expect(ys[0]).toBeCloseTo(20 * 1.2 * 0.8, 5);
+    expect(ys[0]).toBeCloseTo(20 * 1.2 * (1854 / (1854 + 434)), 5);
+  });
+
+  it('preserves a larger unknown run size without inventing an ascent share (#1689)', () => {
+    for (const spaceLine of [null, { type: 'pct' as const, val: 150000 }]) {
+      const ys = baselines([
+        paragraph([{ text: 'A', font: 'Arial', size: 20 }], { spaceLine }),
+        paragraph([{ text: 'B', font: 'Arial', size: 20 }, { text: 'D', font: 'Avenir', size: 72 }], { spaceLine }),
+        paragraph([{ text: 'C', font: 'Arial', size: 20 }], { spaceLine }),
+      ]);
+      const spacing = spaceLine ? 1.5 : 1;
+      const share = 1854 / 2288;
+      const spacedShare = spaceLine ? 0.75 : share;
+      expect(ys[0]).toBeCloseTo(24 * spacing * spacedShare, 9);
+      expect(ys[1]).toBeCloseTo((24 + 86.4 * spacedShare) * spacing, 9);
+      expect(ys[2]).toBeCloseTo((24 + 86.4 + 24 * spacedShare) * spacing, 9);
+    }
+  });
+
+  it('keeps only a line with no known face on the ordinary model (#1689 line scope)', () => {
+    // fallback.win.pdf: an unmodelled face moves only its own line. A body
+    // whose middle line has no known face keeps the metric baselines of the
+    // other lines exactly.
+    const known = baselines([
+      paragraph([{ text: 'A', font: 'Arial', size: 20 }]),
+      paragraph([{ text: 'B', font: 'Arial', size: 20 }]),
+      paragraph([{ text: 'C', font: 'Arial', size: 20 }]),
+    ]);
+    const mixed = baselines([
+      paragraph([{ text: 'A', font: 'Arial', size: 20 }]),
+      paragraph([{ text: 'B', font: 'Avenir', size: 20 }]),
+      paragraph([{ text: 'C', font: 'Arial', size: 20 }]),
+    ]);
+    expect(mixed[0]).toBeCloseTo(known[0], 9);
+    expect(mixed[2]).toBeCloseTo(known[2], 9);
+    expect(mixed[1] - known[0] - (known[1] - known[0])).toBeCloseTo(20 * 1.2 * (0.8 - 1854 / 2288), 5);
   });
 });
 
@@ -232,6 +269,26 @@ describe('bodyPr compatLnSpc (#1619)', () => {
     expect(ys).toHaveLength(exported.length);
     ys.forEach((y, i) => expect(Math.abs(y / U - exported[i])).toBeLessThanOrEqual(0.5));
   };
+
+  it('retains the whole-body fallback for unknown glyph faces under compatLnSpc=0', () => {
+    for (const middle of [
+      [{ text: 'B', font: 'Avenir', size: 20 }],
+      [{ text: 'B', font: 'Avenir', size: 20 }, { text: 'D', font: 'Arial', size: 20 }],
+    ]) {
+      const p = [paragraph([{ text: 'A', font: 'Arial', size: 20 }]),
+        paragraph(middle), paragraph([{ text: 'C', font: 'Arial', size: 20 }])];
+      const ys = baselines(p, off);
+      [19.2, 43.2, 67.2].forEach((y, i) => expect(ys[i]).toBeCloseTo(y, 10));
+    }
+  });
+
+  it('retains the whole-body fontAlgn fallback for an unknown-only line', () => {
+    const p = [paragraph([{ text: 'A', font: 'Arial', size: 20 }]),
+      paragraph([{ text: 'B', font: 'Avenir', size: 20 }], { fontAlgn: 't' }),
+      paragraph([{ text: 'C', font: 'Arial', size: 20 }])];
+    const ys = baselines(p);
+    [19.2, 43.2, 67.2].forEach((y, i) => expect(ys[i]).toBeCloseTo(y, 10));
+  });
 
   it('keeps the #1610 model for compatLnSpc="1" exactly as when it is omitted', () => {
     for (const [p, exported] of [

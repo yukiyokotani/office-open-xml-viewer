@@ -83,11 +83,14 @@ describe('layoutParagraph East Asian / complex-script faces', () => {
   const fonts = (runs: TextRunData[]) => layoutParagraph(measuringContext(), paragraph(runs), 2000, 20, '000000', 1, 0)
     .flatMap((line) => line.segments.map((s) => [s.text, s.font] as const));
 
-  it('draws an empty East Asian slot in the application default, not the Latin face', () => {
+  it('offers an empty East Asian slot to the selected face, then the application defaults', () => {
+    // #1689: with no cs face the Latin face is selected and draws what it
+    // covers; Corbel maps no CJK, so the glyphs pass the symbol fallback
+    // (which maps no CJK either) to the #1627 sans tier.
     const [latin, ea] = fonts([run('Hxg 日本語')]);
     expect(latin[1]).toMatch(/^\d+px "Corbel"/u);
     expect(ea[0]).toBe('日本語');
-    expect(ea[1]).toMatch(/^\d+px "MS Gothic", "Microsoft JhengHei", "Malgun Gothic"/u);
+    expect(ea[1]).toMatch(/^\d+px "Corbel", "Calibri", "Cambria Math", "MS Gothic", "Microsoft JhengHei", "Malgun Gothic"/u);
   });
 
   it('keeps a resolved East Asian face and splits complex scripts by script default', () => {

@@ -1,5 +1,15 @@
+import { withGlyphDomain } from '../test-fixtures/sfnt-table.js';
 import { describe, expect, it } from 'vitest';
-import { parseOpenTypeLineMetrics, parseOpenTypeResourceMetrics } from './open-type-metrics.js';
+import { parseOpenTypeLineMetrics, parseOpenTypeResourceMetrics as parseResourceMetrics, openTypeResourceCoversCodePoint } from './open-type-metrics.js';
+import { fontSupportFacts } from '../internal/font-support-facts.js';
+
+function parseOpenTypeResourceMetrics(bytes: Uint8Array) { return parseResourceMetrics(withGlyphDomain(bytes)); }
+
+it('keeps metric-only resource parsing independent of shaping certificates', () => {
+  const parsed = parseOpenTypeResourceMetrics(syntheticSfntWithCmapFormat(12));
+  expect(openTypeResourceCoversCodePoint(parsed ?? undefined, 0x56fd)).toBe(true);
+  expect(fontSupportFacts(parsed ?? undefined)).toBeUndefined();
+});
 
 function syntheticSfnt(baseOffset = 0, eastAsianCmap = false): Uint8Array {
   const tableCount = eastAsianCmap ? 4 : 3;
@@ -244,7 +254,7 @@ function syntheticSfntWithRepeatedCmapRecords(recordCount: number, distinctTable
     view.setUint16(subtable + 16, 0xffff);
     view.setUint16(subtable + 20, 0x0000);
     view.setUint16(subtable + 22, 0xffff);
-    view.setInt16(subtable + 24, 1);
+    view.setInt16(subtable + 24, 0);
     view.setInt16(subtable + 26, 1);
   }
   return bytes;
@@ -252,6 +262,16 @@ function syntheticSfntWithRepeatedCmapRecords(recordCount: number, distinctTable
 
 
 describe('opt-in OpenType resource coverage', () => {
+  it('proves glyph coverage from the parsed resource and preserves unsupported coverage as unknown', () => {
+    const metrics = parseOpenTypeResourceMetrics(syntheticSfntWithCmapFormat(12));
+    expect(openTypeResourceCoversCodePoint(metrics ?? undefined, 0x56fd)).toBe(true);
+    expect(openTypeResourceCoversCodePoint(metrics ?? undefined, 0xd55c)).toBe(false);
+    const unsupported = syntheticSfntWithCmapFormat(12);
+    new DataView(unsupported.buffer).setUint16(12 + 4 * 16 + 54 + 36 + 78 + 12, 6);
+    expect(openTypeResourceCoversCodePoint(parseOpenTypeResourceMetrics(unsupported) ?? undefined, 0x56fd))
+      .toBeUndefined();
+  });
+
   it('reads nonzero glyph coverage from the supported cmap encodings', () => {
     for (const bytes of [syntheticSfnt(0, true), syntheticSfntWithCmapFormat(4),
       syntheticSfntWithCmapFormat(13)]) {
@@ -307,6 +327,20 @@ describe('opt-in OpenType resource coverage', () => {
       view.setInt16(subtable + 24, index === 0 ? -64 : -65);
     }
     expect(parseOpenTypeResourceMetrics(bytes)?.unicodeRanges).toEqual([[0x42, 0x42]]);
+    const metrics = parseOpenTypeResourceMetrics(bytes) ?? undefined;
+    expect(openTypeResourceCoversCodePoint(metrics, 0x42)).toBe(true);
+    expect(openTypeResourceCoversCodePoint(metrics, 0x41)).toBeUndefined();
+    expect(openTypeResourceCoversCodePoint(metrics, 0x43)).toBe(false);
+    // Disjoint maps still prove absence outside their union. An empty positive
+    // proof must not discard the distinction between disagreement and absence.
+    view.setUint16(cmapOffset + 20 + 14, 0x41);
+    view.setUint16(cmapOffset + 20 + 32 + 20, 0x42);
+    view.setInt16(cmapOffset + 20 + 24, -64);
+    view.setInt16(cmapOffset + 20 + 32 + 24, -64);
+    const disjoint = parseOpenTypeResourceMetrics(bytes) ?? undefined;
+    expect(openTypeResourceCoversCodePoint(disjoint, 0x41)).toBeUndefined();
+    expect(openTypeResourceCoversCodePoint(disjoint, 0x42)).toBeUndefined();
+    expect(openTypeResourceCoversCodePoint(disjoint, 0x43)).toBe(false);
     // An unreadable eligible base map cannot simply be omitted from the proof.
     view.setUint16(cmapOffset + 20 + 32, 6);
     expect(parseOpenTypeResourceMetrics(bytes)?.unicodeRanges).toEqual([]);
@@ -314,15 +348,22 @@ describe('opt-in OpenType resource coverage', () => {
 
   it('caps cumulative coverage work across distinct broad subtables', () => {
     expect(parseOpenTypeResourceMetrics(syntheticSfntWithRepeatedCmapRecords(4, 4))?.unicodeRanges)
-      .toEqual([[0x0000, 0xfffe]]);
+      .toEqual([[0x0001, 0xfffe]]);
     expect(parseOpenTypeResourceMetrics(syntheticSfntWithRepeatedCmapRecords(5, 5))?.unicodeRanges)
       .toEqual([]);
   });
 
   it('bounds cmap alias fan-out at the accepted encoding-record boundary', () => {
     expect(parseOpenTypeResourceMetrics(syntheticSfntWithRepeatedCmapRecords(4096))?.unicodeRanges)
-      .toEqual([[0x0000, 0xfffe]]);
+      .toEqual([[0x0001, 0xfffe]]);
     expect(parseOpenTypeResourceMetrics(syntheticSfntWithRepeatedCmapRecords(4097))?.unicodeRanges)
       .toEqual([]);
   });
+});
+
+it('does not grant cmap presence outside the valid maxp glyph domain', () => {
+  const resource = syntheticSfntWithCmapFormat(12);
+  expect(openTypeResourceCoversCodePoint(parseResourceMetrics(resource) ?? undefined, 0x56fd)).toBeUndefined();
+  expect(openTypeResourceCoversCodePoint(parseResourceMetrics(withGlyphDomain(resource, 1)) ?? undefined, 0x56fd)).toBeUndefined();
+  expect(openTypeResourceCoversCodePoint(parseResourceMetrics(withGlyphDomain(resource, 2)) ?? undefined, 0x56fd)).toBe(true);
 });

@@ -1,3 +1,4 @@
+import { normalizeReferenceFamily } from './reference-font-identity.js';
 import referenceData from './reference-font-metrics-data.json';
 import { OPEN_FONT_REFERENCE_PROFILES } from './reference-font-metrics-open.js';
 
@@ -17,7 +18,8 @@ export interface ReferenceFontMetricProfile {
    * OS/2 table; undefined means this source did not record the field. */
   readonly win?: readonly [ascent: number, descent: number] | null;
   /** OS/2 [sTypoAscender, sTypoDescender, sTypoLineGap], present only when the
-   * face sets fsSelection USE_TYPO_METRICS (OS/2 v4+). */
+   * face sets fsSelection USE_TYPO_METRICS, including older tables that set
+   * the bit in practice (same rule as the resource parser). */
   readonly typoMetrics?: readonly [ascender: number, descender: number, lineGap: number];
   /** Derived OS/2 code-page class. Null means this source did not provide the
    * code-page field needed to classify Word's auto-line allocation. */
@@ -33,9 +35,14 @@ export interface FindReferenceFontMetricsOptions {
   readonly style?: ReferenceFontStyle;
 }
 
+// Generated row identity is private and never inferred from equal metrics or
+// family/style names. PPTX's companion sidecar uses this exact ordinal; base
+// metadata lookup imports no repertoire, certificate or format-owned data.
+const ordinals = new WeakMap<ReferenceFontMetricProfile, number>();
+export const REFERENCE_METRIC_GENERATION = referenceData.generation;
+export function referenceFontMetricOrdinal(profile: ReferenceFontMetricProfile): number | undefined { return ordinals.get(profile); }
 function freezeProfile(profile: ReferenceFontMetricProfile): ReferenceFontMetricProfile {
-  Object.freeze(profile.aliases);
-  Object.freeze(profile.hhea);
+  Object.freeze(profile.aliases); Object.freeze(profile.hhea);
   if (profile.win) Object.freeze(profile.win);
   if (profile.typoMetrics) Object.freeze(profile.typoMetrics);
   if (profile.panose) Object.freeze(profile.panose);
@@ -50,18 +57,18 @@ function getProfiles(): readonly ReferenceFontMetricProfile[] {
   // The JSON payload is statically imported and parsed with the module. Only
   // profile freezing and the alias index are deferred until the first lookup.
   return profiles ??= Object.freeze(
-    [...referenceData.profiles as unknown as ReferenceFontMetricProfile[],
-      ...OPEN_FONT_REFERENCE_PROFILES].map(freezeProfile),
+    [...referenceData.profiles.map((profile, index) => {
+      // Generated JSON has validated fixed tuples/style enums; TypeScript
+      // widens JSON arrays/strings, as in the existing catalogue bridge.
+      const metric = profile as unknown as ReferenceFontMetricProfile;
+      ordinals.set(metric, index); return metric;
+    }), ...OPEN_FONT_REFERENCE_PROFILES].map(freezeProfile),
   );
 }
 
 type OptionBuckets = ReadonlyMap<string, readonly ReferenceFontMetricProfile[]>;
 let aliasIndex: ReadonlyMap<string, OptionBuckets> | undefined;
 const EMPTY_RESULTS = Object.freeze([]) as readonly ReferenceFontMetricProfile[];
-
-function normalizeFamilyName(value: string): string {
-  return value.normalize('NFKC').trim().replace(/\s+/gu, ' ').toLocaleLowerCase('en-US');
-}
 
 function optionKey(options: FindReferenceFontMetricsOptions): string {
   return `${options.source ?? '*'}|${options.weight ?? '*'}|${options.style ?? '*'}`;
@@ -72,7 +79,7 @@ function getAliasIndex(): ReadonlyMap<string, OptionBuckets> {
 
   const mutable = new Map<string, Map<string, ReferenceFontMetricProfile[]>>();
   for (const profile of getProfiles()) {
-    const keys = new Set(profile.aliases.map(normalizeFamilyName));
+    const keys = new Set(profile.aliases.map(normalizeReferenceFamily));
     const optionKeys = new Set<string>();
     for (const source of [undefined, profile.source] as const) {
       for (const weight of [undefined, profile.weight] as const) {
@@ -112,7 +119,7 @@ export function findReferenceFontMetrics(
   familyOrAlias: string,
   options: FindReferenceFontMetricsOptions = {},
 ): readonly ReferenceFontMetricProfile[] {
-  const query = normalizeFamilyName(familyOrAlias);
+  const query = normalizeReferenceFamily(familyOrAlias);
   if (!query) return EMPTY_RESULTS;
   return getAliasIndex().get(query)?.get(optionKey(options)) ?? EMPTY_RESULTS;
 }

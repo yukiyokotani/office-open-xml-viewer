@@ -39,6 +39,7 @@
     "./internal/in-process-pull-transport": "./src/internal/in-process-pull-transport.ts",
     "./internal/owned-session": "./src/internal/owned-session.ts",
     "./internal/office-auto-line": "./src/fonts/office-auto-line.ts",
+    "./internal/font-cluster-coverage": "./src/internal/font-cluster-coverage.ts",
     "./internal/progressive-layout-lifecycle": "./src/internal/progressive-layout-lifecycle.ts",
     "./internal/progressive-layout-observers": "./src/internal/progressive-layout-observers.ts",
     "./internal/resource-measurement": "./src/internal/resource-measurement.ts",
@@ -68,6 +69,11 @@
     "./internal/scroll-load-controller": "./src/internal/scroll-load-controller.ts",
     "./internal/script-preload-accumulator": "./src/internal/script-preload-accumulator.ts",
     "./internal/wasm-runtime-generation": "./src/internal/wasm-runtime-generation.ts",
+    "./internal/font-support-registry": "./src/internal/font-support-registry.ts",
+    "./internal/open-type-resource-support": "./src/internal/open-type-resource-support.ts",
+    "./internal/reference-font-metrics": "./src/fonts/reference-font-metrics.ts",
+    "./internal/reference-font-identity": "./src/fonts/reference-font-identity.ts",
+    "./internal/font-data-codec": "./src/internal/font-data-codec.ts",
     "./mathjax-stix2": "./assets/mathjax-stix2.js"
   },
   "scripts": {

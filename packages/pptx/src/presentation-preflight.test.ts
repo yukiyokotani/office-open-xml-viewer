@@ -156,7 +156,9 @@ describe('PresentationPreflightBuilder', () => {
         hidden: false,
         mediaElements: [],
       }],
-      fontPreloadNames: ['SimSun', 'Aptos', 'Noto Sans SC', 'Noto Serif SC'],
+      // The empty ea slot selects MS Gothic; its primary Noto JP fallback is
+      // requested as well as the script-derived SC faces.
+      fontPreloadNames: ['SimSun', 'Aptos', 'Noto Sans JP', 'Noto Sans SC', 'Noto Serif SC'],
     };
     expect(builder.projectedBytes).toBe(
       new TextEncoder().encode(JSON.stringify(buildingState)).byteLength,

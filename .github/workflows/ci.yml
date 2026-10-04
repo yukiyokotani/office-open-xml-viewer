@@ -269,6 +269,9 @@ jobs:
       - name: Smoke tests
         run: pnpm smoke
 
+      - name: PPTX combining-mark Canvas regression
+        run: pnpm exec playwright test --config tests/patterns/playwright.config.ts pptx-font-clusters.spec.ts
+
       - name: Build public site
         run: pnpm --filter @silurus/ooxml-site build
 

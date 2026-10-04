@@ -87,6 +87,10 @@ describe('Excel shape-text line box from font metrics (#1604)', () => {
     // system Palatino and Helvetica their hhea box (1.100 and 1.000 em).
     expect(sum(shapeRunLineRatios(run('Hg', 'Baskerville Old Face', 24), route('Baskerville Old Face')))).toBeCloseTo(1.1406, 4);
     expect(sum(shapeRunLineRatios(run('Hg', 'Gabriola', 24), route('Gabriola')))).toBeCloseTo(1.7, 3);
+    // This installed OS/2 v3 resource declares USE_TYPO_METRICS. The shared
+    // catalogue must pass its declared typo+gap box through XLSX as well.
+    expect(sum(shapeRunLineRatios(run('■', 'Cambria Math', 24), route('Cambria Math'))))
+      .toBeCloseTo(2401 / 2048, 12);
     expect(sum(shapeRunLineRatios(run('Hg', 'Palatino', 24), route('Palatino')))).toBeCloseTo(1.1001, 4);
     expect(sum(shapeRunLineRatios(run('Hg', 'Helvetica', 24), route('Helvetica')))).toBeCloseTo(1.0, 4);
     // Unverified resources and distinct East Asian faces stay undefined.

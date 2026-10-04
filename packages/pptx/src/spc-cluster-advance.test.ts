@@ -176,10 +176,10 @@ describe('pptx rPr@spc uses Canvas shaping-cluster advances', () => {
     }
   });
 
-  for (const [name, text] of [
-    ['combining sequence', 'e\u0301'],
-    ['emoji ZWJ sequence', '👨‍👩‍👧‍👦'],
-    ['regional-indicator flag', '🇯🇵'],
+  for (const [name, text, display] of [
+    ['combining sequence', 'e\u0301', 'é'],
+    ['emoji ZWJ sequence', '👨‍👩‍👧‍👦', '👨‍👩‍👧‍👦'],
+    ['regional-indicator flag', '🇯🇵', '🇯🇵'],
   ] as const) {
     it(`keeps ${name} layout and paint aligned for positive and negative spacing`, () => {
       for (const spacing of [4, -4]) {
@@ -193,9 +193,9 @@ describe('pptx rPr@spc uses Canvas shaping-cluster advances', () => {
           (info) => seen.push({ text: info.text, x: info.inShapeX, w: info.w }),
         );
 
-        const tracked = seen.find((info) => info.text === text)!;
+        const tracked = seen.find((info) => info.text === display)!;
         const following = seen.find((info) => info.text === 'X')!;
-        const trackedPaint = fills.find((call) => call.text === text)!;
+        const trackedPaint = fills.find((call) => call.text === display)!;
         const followingPaint = fills.find((call) => call.text === 'X')!;
         // Each case is one browser shaping cluster, so DrawingML has no
         // internal character boundary at which to apply spacing.
@@ -204,7 +204,6 @@ describe('pptx rPr@spc uses Canvas shaping-cluster advances', () => {
         expect(tracked.w).toBeCloseTo(expectedAdvance, 6);
         expect(following.x).toBeCloseTo(tracked.x + expectedAdvance, 6);
         expect(followingPaint.x).toBeCloseTo(trackedPaint.x + expectedAdvance, 6);
-        expect(trackedPaint.letterSpacing).toBe(`${spacing}px`);
       }
     });
   }
@@ -232,6 +231,19 @@ describe('pptx rPr@spc uses Canvas shaping-cluster advances', () => {
       expect(b.x).toBeCloseTo(a.x + 14, 6);
       expect(following.x).toBeCloseTo(tracked.x + 24, 6);
       expect(x.x).toBeCloseTo(a.x + 24, 6);
+    });
+
+    it(`preserves cluster font ownership in manual tracking when Canvas letterSpacing is ${mode}`, () => {
+      const { ctx, fills } = mockCtx(mode);
+      const text = 'A\u0301B';
+      const seen: Array<{ text: string; x: number; w: number }> = [];
+      renderTextBody(ctx, body([run(text, 4, '000000'), run('X', 0, 'FF0000')]),
+        0, 0, 400, 100, SCALE, null, 0, false, false, '#000000', undefined, RC,
+        (info) => seen.push({ text: info.text, x: info.inShapeX, w: info.w }));
+      expect(fills.map((call) => call.text)).toEqual(['Á', 'B', 'X']);
+      expect(fills[1].x - fills[0].x).toBeCloseTo(14, 6);
+      expect(fills[2].x - fills[0].x).toBeCloseTo(24, 6);
+      expect(seen.find((info) => info.text === 'ÁB')?.w).toBeCloseTo(24, 6);
     });
 
     it(`manually paints fully-distributed glyph positions when Canvas letterSpacing is ${mode}`, () => {

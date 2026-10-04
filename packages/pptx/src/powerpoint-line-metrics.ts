@@ -1,4 +1,6 @@
-import { findReferenceFontMetrics } from '@silurus/ooxml-core';
+import { referenceFontCoversSymbol, referenceFontCoversCjk, referenceFontSupportFacts } from './font-resource-catalogue.js';
+import { analyzeFontResourceSupport, type ResourceSupport } from '@silurus/ooxml-core/internal/font-cluster-coverage';
+import { findReferenceFontMetrics, type OpenTypeLineMetrics } from '@silurus/ooxml-core';
 import { excelDrawingMlLineRatios } from '@silurus/ooxml-core/internal/office-auto-line';
 
 /**
@@ -76,7 +78,7 @@ export function powerPointAscentShare(
 type Profile = ReturnType<typeof findReferenceFontMetrics>[number];
 
 /** The profiles of the copy PowerPoint lays the face out with (see above). */
-function chosenProfiles(family: string, bold: boolean, italic: boolean): Profile[] {
+function chosenProfiles(family: string, bold: boolean, italic: boolean, repertoire = false): Profile[] {
   const trimmed = family.trim();
   if (!trimmed) return [];
   const name = OBSERVED_SUBSTITUTES[trimmed.toLocaleLowerCase('en-US')] ?? trimmed;
@@ -91,8 +93,70 @@ function chosenProfiles(family: string, bold: boolean, italic: boolean): Profile
     const named = findReferenceFontMetrics(name, { style });
     if (named.length > 0 && named.every((p) => p.weight === named[0].weight)) profiles = named;
   }
+  // A catalogued family with no italic face at any weight is drawn by
+  // PowerPoint as its upright face with a synthetic slant (#1689: MS Gothic,
+  // Tahoma and Microsoft Sans Serif italics embed the regular resource under a
+  // [1 0 0.3333 1] text matrix). A shear leaves the vertical OS/2 metrics
+  // intact, so the upright resource's metrics apply. The catalogue lists every
+  // installed static face, so a missing italic profile is a missing resource,
+  // not a gap in the data. Painting keeps the browser's own oblique for the
+  // missing style: an accepted platform difference (owner decision (c) for
+  // #1689), not an emulated 0.3333 shear.
+  if (profiles.length === 0 && italic && findReferenceFontMetrics(name, { style: 'italic' }).length === 0) {
+    return chosenProfiles(family, bold, false, repertoire);
+  }
+  // Empty-slot repertoire evidence is from Office's resources (#1689), as
+  // is the existing CJK coverage catalogue. Prefer that source for cmap facts;
+  // same-name system copies can omit symbols despite identical line tables.
+  // Metric source precedence remains the independently measured #1610 rule.
+  if (repertoire) {
+    const office = profiles.filter((p) => p.source === 'office-mac');
+    if (office.length > 0) return office;
+  }
   const supplemental = profiles.filter((p) => p.source === 'macos-supplemental');
   return supplemental.length > 0 ? supplemental : profiles.filter((p) => p.source === 'office-mac');
+}
+
+/** Symbol presence in the Office repertoire's real/synthetic cut (see source
+ * precedence above). Conflicting profiles and unrecorded faces stay unknown;
+ * unioning cuts would wrongly attribute a missing italic glyph to its regular. */
+export function powerPointSymbolCoverage(
+  family: string, bold: boolean, italic: boolean, codePoint: number,
+): boolean | undefined {
+  const chosen = chosenProfiles(family, bold, italic, true);
+  if (chosen.length === 0) return undefined;
+  const first = referenceFontCoversSymbol(chosen[0], codePoint);
+  return first !== undefined && chosen.every((p) => referenceFontCoversSymbol(p, codePoint) === first)
+    ? first : undefined;
+}
+
+/** Empty-EA attribution uses the same bounded parsed certificates as
+ * embedded resources. Named installed slots retain the established catalogue
+ * metric policy; this is not detection of a runtime installed FontFace. */
+export function powerPointCatalogueSupport(
+  family: string, bold: boolean, italic: boolean, display: string,
+  coverage: typeof powerPointSymbolCoverage,
+): ResourceSupport {
+  const profiles = chosenProfiles(family, bold, italic, true);
+  if (!profiles.length) return { kind: 'unknown', reason: 'font-transform' };
+  let result: ResourceSupport | undefined;
+  for (const profile of profiles) {
+    const support = analyzeFontResourceSupport(display, (cp) => coverage(family, bold, italic, cp), referenceFontSupportFacts(profile));
+    if (support.kind === 'unknown' || (result && result.kind !== support.kind)) return { kind: 'unknown', reason: 'font-transform' };
+    result = support;
+  }
+  return result as ResourceSupport;
+}
+
+/** CJK presence in the same real/synthetic resource cut used for metrics. */
+export function powerPointCjkCoverage(
+  family: string, bold: boolean, italic: boolean, codePoint: number,
+): boolean | undefined {
+  const chosen = chosenProfiles(family, bold, italic, true);
+  if (chosen.length === 0) return undefined;
+  const first = referenceFontCoversCjk(chosen[0], codePoint);
+  return first !== undefined && chosen.every((p) => referenceFontCoversCjk(p, codePoint) === first)
+    ? first : undefined;
 }
 
 function resolveShare(family: string, bold: boolean, italic: boolean): number | undefined {
@@ -183,9 +247,10 @@ export interface ExcelLineBox {
 }
 
 /**
- * Everything PowerPoint's two line models need from one face. Instances are
- * interned per face/weight/style, so two segments compare equal exactly when
- * they size a line with the same face.
+ * Everything PowerPoint's two line models need from one resource. Installed
+ * instances are interned per family/weight/style. Embedded instances belong
+ * to one registered FontFace, so same-tuple subsets cannot lend one another
+ * their metrics or be merged as the same line contribution.
  */
 export interface PowerPointFaceMetrics {
   /** #1610 ascent share of the 1.2 × size line box. */
@@ -195,14 +260,19 @@ export interface PowerPointFaceMetrics {
   readonly glyph: ExcelLineBox | undefined;
   /** #1604 natural box, used under an explicit compatLnSpc="0". */
   readonly excel: ExcelLineBox | undefined;
+  /** Proven scalar coverage of a registered embedded resource. Parsed once,
+   * bounded by core's cmap budgets; no font bytes or glyph-query cache retained. */
+  readonly unicodeRanges?: OpenTypeLineMetrics['unicodeRanges'];
+  readonly unicodePossibleRanges?: OpenTypeLineMetrics['unicodePossibleRanges'];
 }
 
 const faceCache = new Map<string, PowerPointFaceMetrics | null>();
 
 /**
  * The line metrics of a face, or undefined when its share is unresolvable
- * (the caller then keeps the ordinary line model for the whole body). Bounded
- * LRU like the share cache.
+ * (the face then adds nothing to its line's metric model; a line with no
+ * known face keeps the ordinary model, #1689). Bounded LRU like the share
+ * cache.
  */
 export function powerPointFaceMetrics(
   family: string,
@@ -229,6 +299,34 @@ export function powerPointFaceMetrics(
   return metrics ?? undefined;
 }
 
+/**
+ * Line metrics of a concrete font resource from its own OS/2 tables (#1689:
+ * PowerPoint sizes a line by the embedded resource's usWinAscent /
+ * usWinDescent, or its typo metrics plus line gap under USE_TYPO_METRICS),
+ * the same rule as the reference catalogue. Used for a deck-embedded face,
+ * whose tables and cmap the loader retains. The #1604 compatLnSpc="0" box needs the
+ * face's installation source, which an embedded part does not have, so it
+ * stays undefined and that body keeps the ordinary model, as before.
+ */
+export function powerPointResourceFaceMetrics(metrics: OpenTypeLineMetrics): PowerPointFaceMetrics | undefined {
+  const upm = metrics.unitsPerEm;
+  if (!(upm > 0)) return undefined;
+  let ascent: number | undefined;
+  let descent: number | undefined;
+  if (metrics.useTypoMetrics && metrics.typoAscent !== undefined && metrics.typoDescent !== undefined) {
+    ascent = metrics.typoAscent + Math.max(0, metrics.typoLineGap ?? 0);
+    descent = -metrics.typoDescent;
+  } else if (metrics.winAscent !== undefined && metrics.winDescent !== undefined) {
+    ascent = metrics.winAscent;
+    descent = metrics.winDescent;
+  }
+  if (ascent === undefined || descent === undefined) return undefined;
+  const share = ascent / (ascent + descent);
+  if (!Number.isFinite(share) || share <= 0 || share >= 1) return undefined;
+  return Object.freeze({ share, glyph: { ascent: ascent / upm, descent: descent / upm }, excel: undefined,
+    unicodeRanges: metrics.unicodeRanges, unicodePossibleRanges: metrics.unicodePossibleRanges });
+}
+
 /** One run's contribution to a line: its authored size and ascent share. */
 export interface PowerPointLineRun {
   sizePx: number;
@@ -245,8 +343,13 @@ export interface PowerPointLineRun {
  * Taking the largest descent instead is off by up to 5 px (1/100 in), and the
  * largest ascent by 13 px.
  */
-export function powerPointNaturalLine(runs: readonly PowerPointLineRun[]): { ascent: number; descent: number } {
-  let maxSize = 0;
+export function powerPointNaturalLine(
+  runs: readonly PowerPointLineRun[],
+  largestSizePx = 0,
+): { ascent: number; descent: number } {
+  // ECMA-376 §21.1.2.2.5/.11: even an unresolved face contributes its authored
+  // size. Known faces alone determine the split; never invent an unknown share.
+  let maxSize = largestSizePx;
   let ascent = 0;
   let descent = 0;
   for (const run of runs) {

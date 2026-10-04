@@ -136,7 +136,8 @@
     "check:core-legacy-boundary": "node scripts/check-core-legacy-boundary.mjs",
     "check:model-source-lazy-graph": "node scripts/check-model-source-lazy-graph.mjs",
     "check:model-source-lazy-runtime": "node scripts/check-model-source-lazy-runtime.mjs",
-    "check:model-source-ooxml-path": "node scripts/check-model-source-ooxml-path.mjs"
+    "check:model-source-ooxml-path": "node scripts/check-model-source-ooxml-path.mjs",
+    "check:font-analysis-boundary": "node scripts/check-font-analysis-boundary.mjs"
   },
   "devDependencies": {
     "@ast-grep/cli": "^0.43.0",

@@ -42,7 +42,9 @@ import type {
   RenderWorkerResponse,
 } from './worker-protocol';
 import { findPptxElementBoundsByIds, hitTestPptxSlideContext } from './element-selection';
-import { excludeEmbeddedFontFamilies, loadEmbeddedFonts, uncoveredOfficeFontRequests } from './embedded-fonts';
+import {
+  excludeEmbeddedFontFamilies, loadEmbeddedFonts, uncoveredOfficeFontRequests, type LoadedPptxEmbeddedFonts,
+} from './embedded-fonts';
 import { ProgressivePreflightGate } from './progressive-preflight-gate';
 
 const host = new WasmParserHost<PptxArchive>(init, {
@@ -102,6 +104,7 @@ function releaseOfficeFonts(): void {
 let embeddedFontAliases: ReadonlyMap<string, string> = new Map();
 let embeddedFontAuthoredFamilies: ReadonlyMap<string, string> = new Map();
 let embeddedFontTuples: ReadonlySet<string> = new Set();
+let embeddedFontMetrics: LoadedPptxEmbeddedFonts['metrics'] = new Map();
 let resourceUsage: OoxmlResourceUsageSnapshot | undefined;
 let renderers: LoadedWorkerRenderers = {};
 const rawParts = new BoundedRawPartCache({
@@ -197,6 +200,7 @@ async function openPresentation(request: Extract<RenderWorkerRequest, { kind: 'p
   embeddedFontAliases = new Map();
   embeddedFontAuthoredFamilies = new Map();
   embeddedFontTuples = new Set();
+  embeddedFontMetrics = new Map();
   resourceUsage = undefined;
   renderers = await loadWorkerRenderers(request.renderers);
 
@@ -227,6 +231,7 @@ async function openPresentation(request: Extract<RenderWorkerRequest, { kind: 'p
       embeddedFontAliases = embedded.aliases;
       embeddedFontAuthoredFamilies = embedded.authoredFamilies;
       embeddedFontTuples = embedded.tuples;
+      embeddedFontMetrics = embedded.metrics;
       if (!request.useGoogleFonts) return;
       const requested = excludeEmbeddedFontFamilies(
         preflightBuilder!.currentFontPreloadNames,
@@ -272,6 +277,7 @@ async function openPresentation(request: Extract<RenderWorkerRequest, { kind: 'p
       embeddedFontAliases = embedded.aliases;
       embeddedFontAuthoredFamilies = embedded.authoredFamilies;
       embeddedFontTuples = embedded.tuples;
+      embeddedFontMetrics = embedded.metrics;
       if (!request.useGoogleFonts) return embedded.faces;
       const substitutes = await preloadGoogleFonts(
         excludeEmbeddedFontFamilies(preflight.fontPreloadNames, embedded.aliases),
@@ -381,6 +387,7 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest | WorkerSvgDecod
           embeddedFontAliases,
           embeddedFontAuthoredFamilies,
           embeddedFontTuples,
+          embeddedFontMetrics,
           officeFontRoutes,
           googleSubstitutes,
           fetchMedia: getMedia,
@@ -420,6 +427,7 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest | WorkerSvgDecod
           embeddedFontAliases,
           embeddedFontAuthoredFamilies,
           embeddedFontTuples,
+          embeddedFontMetrics,
           officeFontRoutes,
           googleSubstitutes,
           fetchMedia: getMedia,

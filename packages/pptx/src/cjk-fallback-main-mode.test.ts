@@ -126,7 +126,7 @@ afterEach(() => {
 });
 
 describe('PPTX main-mode cjkFallback', () => {
-  it('preloads the region the parse request carried, not the jp default', async () => {
+  it('preserves the requested script region alongside the selected ea face fallback', async () => {
     const worker = await startWorker();
     send(worker, { kind: 'init', wasmUrl: 'x' });
     send(worker, { kind: 'parse', id: 1, buffer: new ArrayBuffer(4), resourcePolicy, cjkFallback: 'sc' });
@@ -146,6 +146,6 @@ describe('PPTX main-mode cjkFallback', () => {
       worker,
       'presentationPreflightReady',
     );
-    expect(ready.preflight.fontPreloadNames).toEqual(['Noto Sans SC', 'Noto Serif SC']);
+    expect(ready.preflight.fontPreloadNames).toEqual(['Noto Sans JP', 'Noto Sans SC', 'Noto Serif SC']);
   });
 });

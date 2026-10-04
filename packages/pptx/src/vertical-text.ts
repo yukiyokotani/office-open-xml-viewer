@@ -37,6 +37,7 @@
 // helper; only the classifier is shared across the three formats.
 
 import {
+  graphemeClusterOffsets,
   verticalOrientation,
   verticalFormSubstitute,
   verticalBracketFormSubstitute,
@@ -60,6 +61,10 @@ const NO_VERT_CAPABILITY: VertCapability = () => false;
  * the font metric keeps upright and sideways glyphs sharing one centreline.
  *
  * Falls back to `0.38 × fontPx` when the Canvas does not report `fontBoundingBox*`.
+ * Canvas can report the first available face's font box even when another
+ * composite subset paints the cluster. This existing platform-box centring
+ * limitation is separate from the cluster owner's PowerPoint line metrics;
+ * actual ink boxes do not supply a replacement em-box centre.
  */
 function emBoxCenterAboveBaselinePx(ctx: Ctx2D, sample: string, fontPx: number): number {
   const prevBaseline = ctx.textBaseline;
@@ -107,7 +112,7 @@ function inkCenterAboveMiddlePx(ctx: Ctx2D, drawStr: string): number {
  * the total advance equals the run's measured width (measure == draw). The glyph
  * is stood upright / substituted / rotated / left sideways per its UAX#50 class.
  *
- * Glyphs are painted one code point at a time (as in docx's `drawVerticalRun`):
+ * Glyphs are painted one grapheme cluster at a time:
  * each upright cell needs its own counter-rotation, and a uniform per-glyph
  * advance keeps measure==draw at the segment boundary. Contextual shaping of a
  * consecutive SIDEWAYS (Latin) run — kerning / ligatures — is therefore not
@@ -146,10 +151,19 @@ export function drawEaVertRunWithCapability(
   const emBoxCenterPx = emBoxCenterAboveBaselinePx(ctx, text, fontPx);
   const crossCenterY = baseline - emBoxCenterPx;
   let ax = 0; // cumulative advance from the run's left (logical +x)
-  for (const ch of text) {
+  let start = 0;
+  const ends = graphemeClusterOffsets(text);
+  ends.push(text.length);
+  for (const end of ends) {
+    const ch = text.slice(start, end);
+    start = end;
+    if (!ch) continue;
     const cp = ch.codePointAt(0) ?? 0;
     const vo = verticalOrientation(cp);
-    // Advance/width uses the ORIGINAL code point (measure == draw; the text model,
+    // Measure and paint the same complete cluster; scalar paint would let a
+    // base-only subset steal ownership from the font selected for its marks.
+    // Presentation forms apply only to lone scalars, preserving all modifiers.
+    // Advance/width uses the ORIGINAL cluster (measure == draw; the text model,
     // selection and find keep the original character — substitution is glyph-only).
     const adv = ctx.measureText(ch).width + letterSpacingPx;
     // A vo=Tr code point with a Unicode vertical presentation form — brackets （「」…
@@ -159,7 +173,8 @@ export function drawEaVertRunWithCapability(
     // semicolon ；(FF1B), UPRIGHT (its FE14 form is upright dot-over-comma, not a
     // rotation). The colon/semicolon FE13/FE14 substitution was dropped in core —
     // those forms are absent from most render fonts (issue #969 follow-up).
-    const bracketCp = vo === 'Tr' ? verticalBracketFormSubstitute(cp) : null;
+    const single = ch === String.fromCodePoint(cp);
+    const bracketCp = single && vo === 'Tr' ? verticalBracketFormSubstitute(cp) : null;
     const uprightFallback = vo === 'Tr' && bracketCp === null && verticalTrUprightFallback(cp);
     const upright = vo === 'U' || vo === 'Tu' || bracketCp !== null || uprightFallback;
     const vertGlyphSupported = verticalTrLongMark(cp) && vertCapability(cp);
@@ -178,7 +193,7 @@ export function drawEaVertRunWithCapability(
       // stands upright. Corner-hanging Tu punctuation (、。， → U+FE10–FE12) and Tr
       // brackets (（）「」… → U+FE35–FE44) are drawn as their vertical form so the
       // font supplies the vertical shape; ！？ and small kana draw upright unchanged.
-      const puncCp = bracketCp !== null ? null : (vo === 'Tu' ? verticalFormSubstitute(cp) : null);
+      const puncCp = bracketCp !== null ? null : (single && vo === 'Tu' ? verticalFormSubstitute(cp) : null);
       const drawCp = bracketCp !== null ? bracketCp : puncCp;
       const drawStr = drawCp !== null ? String.fromCodePoint(drawCp) : ch;
       const cx = x + ax + adv / 2;

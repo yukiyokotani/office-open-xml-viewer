@@ -323,6 +323,13 @@ describe('drawEaVertRun — per-glyph orientation helper', () => {
     drawEaVertRun(ctx, text, 0, 100, FONT_PX, 0, 'fill');
     return calls;
   }
+  it('measures and paints complete modifier clusters as single vertical cells', () => {
+    const { ctx, calls } = mockCtx();
+    const text = 'A\u0301§\ufe0f👩\u200d💻\u1100\u1161\u11a8、\u0301（\ufe0f';
+    drawEaVertRun(ctx, text, 0, 100, FONT_PX, 0);
+    expect(calls.map((call) => call.text)).toEqual(['A\u0301', '§\ufe0f', '👩\u200d💻', '\u1100\u1161\u11a8', '、\u0301', '（\ufe0f']);
+  });
+
   it('uses vert only for long marks and keeps other glyphs on manual paths', () => {
     const { ctx, calls } = mockCtx();
     drawEaVertRunWithCapability(

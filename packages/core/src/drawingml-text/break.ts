@@ -68,9 +68,19 @@ export interface DrawingMlBreakOptions<T> {
 }
 
 type Atom<T> =
-  | { type: 'text'; text: string; style: T; run: number }
+  | { type: 'text'; text: string; style: T; run: number; start: number; end: number }
   | { type: 'tab'; style: T; run: number }
   | { type: 'object'; style: T; run: number; width: number; payload?: unknown };
+
+/** Internal source provenance for format-specific line metrics. It never
+ * participates in measurement or visual coalescing. Only emitted segments
+ * retain ranges; prefix-fit probes allocate no provenance. Offsets are UTF-16
+ * within the input run's display text, before trimming and wrapping. */
+export type DrawingMlSourceRange = Readonly<{ run: number; start: number; end: number }>;
+const sourceRanges = new WeakMap<object, readonly DrawingMlSourceRange[]>();
+export function drawingMlSegmentSourceRanges(segment: object): readonly DrawingMlSourceRange[] {
+  return sourceRanges.get(segment) ?? [];
+}
 
 const latin = /^\p{Script_Extensions=Latin}$/u;
 const isSpace = <T>(atom: Atom<T>): boolean => atom.type === 'text' && atom.text === ' ';
@@ -138,7 +148,7 @@ export function breakDrawingMlText<T>(
         regionLineFeedRun.push(runIndex);
       }
       else if (text === '\t') regions.at(-1)!.push({ type: 'tab', style: run.style, run: runIndex });
-      else if (text !== '\r') regions.at(-1)!.push({ type: 'text', text, style: run.style, run: runIndex });
+      else if (text !== '\r') regions.at(-1)!.push({ type: 'text', text, style: run.style, run: runIndex, start: offsets[i], end: offsets[i + 1] });
     }
     runIndex++;
   }
@@ -148,7 +158,7 @@ export function breakDrawingMlText<T>(
   const regionAtomLine: Int32Array[] = [];
   const emitted = new Uint8Array(runs.length);
   for (let regionIndex = 0; regionIndex < regions.length; regionIndex++) {
-    const atoms = regions[regionIndex];
+    let atoms = regions[regionIndex];
     regionFirstLine.push(lines.length);
     // Office C05/C06: paragraph-terminal U+0020 spaces do not create a
     // continuation line, even across authored runs. An authored <a:br> is a
@@ -160,7 +170,53 @@ export function breakDrawingMlText<T>(
       while (atoms.length > 0 && isSpace(atoms.at(-1)!)) atoms.pop();
     }
 
+    // Font/paint units and authored style seams may divide one Unicode
+    // grapheme. Recover boundaries from contiguous text, retaining each unit's
+    // measurement/paint metadata. Regional-indicator pairing can also move a
+    // boundary into an existing run-local atom: split that atom at the recovered
+    // boundary rather than keeping several paragraph graphemes inseparable.
+    // This is the library's grapheme-safe emergency-wrap contract, not an
+    // additional Office font-slot rule. Tabs, objects and authored breaks
+    // interrupt text. Work/storage stay linear; regions without adjacent
+    // text-run seams need no second segmentation.
+    let paragraphBounds: number[] | undefined;
+    if (atoms.some((atom, i) => i > 0 && atom.type === 'text'
+      && atoms[i - 1].type === 'text' && atom.run !== atoms[i - 1].run)) {
+      const text = atoms.map((atom) => atom.type === 'text' ? atom.text : '\n').join('');
+      paragraphBounds = graphemeClusterOffsets(text);
+      paragraphBounds.push(text.length);
+      const splitAtoms: Atom<T>[] = [];
+      let offset = 0;
+      let bound = 0;
+      for (const atom of atoms) {
+        const stop = offset + (atom.type === 'text' ? atom.text.length : 1);
+        while (paragraphBounds[bound] <= offset) bound++;
+        let from = offset;
+        while (paragraphBounds[bound] < stop) {
+          const to = paragraphBounds[bound++];
+          if (atom.type === 'text') splitAtoms.push({ ...atom, text: atom.text.slice(from - offset, to - offset), start: atom.start + from - offset, end: atom.start + to - offset });
+          from = to;
+        }
+        splitAtoms.push(atom.type === 'text' && from > offset
+          ? { ...atom, text: atom.text.slice(from - offset), start: atom.start + from - offset } : atom);
+        offset = stop;
+      }
+      atoms = regions[regionIndex] = splitAtoms;
+    }
     const end = atoms.length;
+    const graphemeBoundary = new Uint8Array(end + 1).fill(1);
+    if (paragraphBounds) {
+      let offset = 0;
+      let bound = 0;
+      for (let i = 1; i <= end; i++) {
+        const atom = atoms[i - 1];
+        offset += atom.type === 'text' ? atom.text.length : 1;
+        while (paragraphBounds[bound] < offset) bound++;
+        graphemeBoundary[i] = paragraphBounds[bound] === offset ? 1 : 0;
+      }
+    }
+    const graphemeStops = [0];
+    for (let i = 1; i <= end; i++) if (graphemeBoundary[i]) graphemeStops.push(i);
     const seaBreaks = new Set<number>();
     if (atoms.some((atom) => atom.type === 'text' && containsSeaScript(atom.text))) {
       let full = '';
@@ -178,7 +234,7 @@ export function breakDrawingMlText<T>(
     const gluedCodePoint = (cp: number): boolean => cp === 0xa0 || cp === 0x202f || cp === 0x2060 || cp === 0xfeff;
 
     const mayBreakAt = (index: number): boolean => {
-      if (index <= 0 || index >= end) return false;
+      if (index <= 0 || index >= end || !graphemeBoundary[index]) return false;
       const prev = atoms[index - 1];
       const next = atoms[index];
       // A tab is a break-before opportunity, not break-after: C11 carries
@@ -327,14 +383,33 @@ export function breakDrawingMlText<T>(
       return segments.reduce((sum, seg) => sum + seg.width, 0);
     };
 
-    const makeSegments = (start: number, stop: number, lineIndex: number): DrawingMlBrokenLine<T> => {
+    const makeSegments = (start: number, stop: number, lineIndex: number, retainSources = false): DrawingMlBrokenLine<T> => {
+      const retain = (segments: DrawingMlLineSegment<T>[]) => {
+        if (!retainSources) return;
+        let segmentIndex = 0, length = 0;
+        let ranges: DrawingMlSourceRange[] = [];
+        for (let i = start; i < stop; i++) {
+          const atom = atoms[i], segment = segments[segmentIndex];
+          if (atom.type !== 'text') { segmentIndex++; continue; }
+          const previous = ranges.at(-1);
+          if (previous?.run === atom.run && previous.end === atom.start) ranges[ranges.length - 1] = { ...previous, end: atom.end };
+          else ranges.push({ run: atom.run, start: atom.start, end: atom.end });
+          length += atom.text.length;
+          if (segment.type === 'text' && length === segment.text.length) {
+            sourceRanges.set(segment, ranges); ranges = []; length = 0; segmentIndex++;
+          }
+        }
+      };
       if (plainText !== null && plainOffsets && plainStyle !== undefined) {
         const text = plainText.slice(plainOffsets[start], plainOffsets[stop]);
         const width = options.measureText(text, plainStyle);
-        return { segments: [{ type: 'text', text, style: plainStyle, width }], width };
+        const segments: DrawingMlLineSegment<T>[] = [{ type: 'text', text, style: atoms[start].style, width }];
+        retain(segments);
+        return { segments, width };
       }
       const segments: DrawingMlLineSegment<T>[] = [];
       for (let i = start; i < stop; i++) appendAtom(segments, atoms[i]);
+      retain(segments);
       return { segments, width: measureSegments(segments, lineIndex) };
     };
 
@@ -487,7 +562,7 @@ export function breakDrawingMlText<T>(
           i = lo - 1;
           continue;
         }
-        if (offset + values[i] <= budget) return i;
+        if (graphemeBoundary[i] && offset + values[i] <= budget) return i;
         i--;
       }
       return -1;
@@ -530,7 +605,7 @@ export function breakDrawingMlText<T>(
           firstWidth + seam - m.natural[firstEnd], firstEnd, end, budget);
         if (found >= 0) return found;
       }
-      if (firstWidth <= budget) return firstEnd;
+      if (graphemeBoundary[firstEnd] && firstWidth <= budget) return firstEnd;
       if (first.type !== 'text') return lineStart;
       const headStop = lineStart + SHAPING_CONTEXT + 1;
       if (firstEnd - 1 > headStop) {
@@ -539,7 +614,7 @@ export function breakDrawingMlText<T>(
         if (found >= 0) return found;
       }
       for (let i = Math.min(firstEnd - 1, headStop); i > lineStart; i--) {
-        if (firstSegmentWidth(m, lineStart, i) <= budget) return i;
+        if (graphemeBoundary[i] && firstSegmentWidth(m, lineStart, i) <= budget) return i;
       }
       return lineStart;
     };
@@ -667,7 +742,7 @@ export function breakDrawingMlText<T>(
           }
           width = closed[lastGap] + tabWidth + followingWidth;
         }
-        if (width <= budget) {
+        if (graphemeBoundary[i] && width <= budget) {
           if (i === end) return end;
           fit = i;
         }
@@ -700,7 +775,9 @@ export function breakDrawingMlText<T>(
       });
       continue;
     }
+    let stopIndex = 0;
     while (start < end) {
+      while (graphemeStops[stopIndex] < start) stopIndex++;
       const lineIndex = lines.length;
       const budget = options.maxWidth - (lineIndex === 0 ? options.firstLineIndent ?? 0 : 0);
       const widthAt = (stop: number): number =>
@@ -718,14 +795,14 @@ export function breakDrawingMlText<T>(
         // In a one-grapheme box this avoids measuring the whole remaining word
         // on every visual line. The existing binary search still chooses the
         // greatest fitting prefix when advances are monotone.
-        let lo = start;
-        let hi = end;
+        let lo = stopIndex;
+        let hi = graphemeStops.length - 1;
         let step = 1;
-        while (lo < end) {
-          const probe = Math.min(end, start + step);
-          if (widthAt(probe) <= budget) {
+        while (lo < graphemeStops.length - 1) {
+          const probe = Math.min(graphemeStops.length - 1, stopIndex + step);
+          if (widthAt(graphemeStops[probe]) <= budget) {
             lo = probe;
-            if (probe === end) break;
+            if (probe === graphemeStops.length - 1) break;
             step *= 2;
           } else {
             hi = probe - 1;
@@ -734,13 +811,13 @@ export function breakDrawingMlText<T>(
         }
         while (lo < hi) {
           const mid = Math.ceil((lo + hi) / 2);
-          if (widthAt(mid) <= budget) lo = mid;
+          if (widthAt(graphemeStops[mid]) <= budget) lo = mid;
           else hi = mid - 1;
         }
-        fit = lo;
+        fit = graphemeStops[lo];
       }
       if (fit >= end) {
-        const line = makeSegments(start, end, lineIndex);
+        const line = makeSegments(start, end, lineIndex, true);
         if (regionIndex + 1 < regions.length) line.endsWithBreak = true;
         lines.push(line);
         markLine(start, end);
@@ -777,9 +854,11 @@ export function breakDrawingMlText<T>(
           // Overwide word: grapheme-safe emergency break. PowerPoint control
           // E06 also splits a Latin word that spans a font seam (C01 splits
           // one with identical styles), so no style seam keeps it whole.
-          split = Math.max(start + 1, fit);
+          split = Math.max(graphemeStops[stopIndex + 1], fit);
         }
       }
+
+      while (split < end && !graphemeBoundary[split]) split++;
 
       // Kinsoku (§17.15.1.58–.60) adjusts an in-run CJK boundary. The Office
       // C08 control is a counterexample at an authored run seam, so leave that
@@ -792,18 +871,26 @@ export function breakDrawingMlText<T>(
         const codeSplit = offsets[split - kinsokuTextStart];
         if (codeSplit - codeStart > 1 && codeSplit < chars.length) {
           const adjusted = kinsokuAdjustedSplit(chars, codeSplit, DEFAULT_KINSOKU_RULES, codeStart + 1);
-          const retract = codeSplit - adjusted;
-          if (retract > 0 && split - retract > start) split -= retract;
+          if (adjusted < codeSplit) {
+            // Kinsoku returns a code-point position; atoms may hold a whole
+            // grapheme or a styled piece. Map back before enforcing the
+            // paragraph grapheme boundary, keeping the cached suffix linear.
+            let candidate = split;
+            while (candidate > start && offsets[candidate - kinsokuTextStart] > adjusted) candidate--;
+            while (candidate > start && !graphemeBoundary[candidate]) candidate--;
+            if (candidate > start) split = candidate;
+          }
+
         }
       }
 
       // Keep authored spaces on the closed line. The controlled PDFs establish
       // the visible word break, but cannot identify the advance of invisible
       // trailing spaces; retaining them preserves that unresolved paint detail.
-      lines.push(makeSegments(start, split, lineIndex));
+      lines.push(makeSegments(start, split, lineIndex, true));
       markLine(start, split);
       start = split;
-      while (start < end && isSpace(atoms[start])) start++;
+      while (start < end && isSpace(atoms[start]) && graphemeBoundary[start + 1]) start++;
     }
   }
 

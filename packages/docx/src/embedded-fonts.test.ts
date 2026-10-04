@@ -82,12 +82,15 @@ const validHeader = () =>
   ]);
 
 function metricSfnt(codePageRange1 = 1 << 17): Uint8Array {
-  const tableCount = 4;
+  const tableCount = 5;
   const headOffset = 12 + tableCount * 16;
   const hheaOffset = headOffset + 54;
   const os2Offset = hheaOffset + 36;
   const cmapOffset = os2Offset + 86;
-  const bytes = new Uint8Array(cmapOffset + 40);
+  const maxpOffset = cmapOffset + 40;
+  // Registration is mocked; this metadata fixture still declares the glyph
+  // domain required by resource cmap attribution (A–Z uses glyphs 1–26).
+  const bytes = new Uint8Array(maxpOffset + 6);
   const view = new DataView(bytes.buffer);
   view.setUint32(0, 0x00010000);
   view.setUint16(4, tableCount);
@@ -101,6 +104,9 @@ function metricSfnt(codePageRange1 = 1 << 17): Uint8Array {
   record(1, 'hhea', hheaOffset, 36);
   record(2, 'OS/2', os2Offset, 86);
   record(3, 'cmap', cmapOffset, 40);
+  record(4, 'maxp', maxpOffset, 6);
+  view.setUint32(maxpOffset, 0x00005000);
+  view.setUint16(maxpOffset + 4, 27);
   view.setUint16(headOffset + 18, 2048);
   view.setInt16(hheaOffset + 4, 1802);
   view.setInt16(hheaOffset + 6, -455);
@@ -141,7 +147,7 @@ describe('loadEmbeddedFonts (ECMA-376 §17.8.1 / §17.8.3)', () => {
     }];
     const firstBytes = metricSfnt();
     const secondBytes = metricSfnt();
-    new DataView(secondBytes.buffer).setInt16(12 + 4 * 16 + 54 + 4, 1600);
+    new DataView(secondBytes.buffer).setInt16(12 + 5 * 16 + 54 + 4, 1600);
     const first = await loadEmbeddedFonts(modelWith(refs), async () => firstBytes);
     const second = await loadEmbeddedFonts(modelWith(refs), async () => secondBytes);
     expect(added).toHaveLength(2);
@@ -204,7 +210,7 @@ describe('loadEmbeddedFonts (ECMA-376 §17.8.1 / §17.8.3)', () => {
     installFontFaceSet();
     const latinOnly = metricSfnt();
     const view = new DataView(latinOnly.buffer);
-    const cmapOffset = 12 + 4 * 16 + 54 + 36 + 86;
+    const cmapOffset = 12 + 5 * 16 + 54 + 36 + 86;
     view.setUint32(cmapOffset + 28, 0x41);
     view.setUint32(cmapOffset + 32, 0x5a);
     const loaded = await loadEmbeddedFonts(modelWith([{
@@ -280,7 +286,7 @@ describe('loadEmbeddedFonts (ECMA-376 §17.8.1 / §17.8.3)', () => {
   it('does not mix resources when a malformed document repeats one CSS face tuple', async () => {
     const added = installFontFaceSet();
     const latinOnly = metricSfnt();
-    const cmapOffset = 12 + 4 * 16 + 54 + 36 + 86;
+    const cmapOffset = 12 + 5 * 16 + 54 + 36 + 86;
     new DataView(latinOnly.buffer).setUint32(cmapOffset + 28, 0x41);
     new DataView(latinOnly.buffer).setUint32(cmapOffset + 32, 0x5a);
     const cjk = metricSfnt();
