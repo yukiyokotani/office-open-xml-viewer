@@ -3,6 +3,7 @@ import type { CanvasFontRoute } from '@silurus/ooxml-core';
 import { buildPageLayers } from './layout/page-layers.js';
 import { textRunGeometryForPage } from './layout/text-index.js';
 import { textRunsForPage } from './text-run-projection.js';
+import { paragraphsForPage } from './paragraph-projection.js';
 import type {
   DocumentLayout,
   DrawingLayout,
@@ -380,6 +381,29 @@ function documentLayout(layoutPage: LayoutPage): DocumentLayout {
 }
 
 describe('textRunsForPage', () => {
+  it('projects an empty paragraph mark line with its native alignment, baseline and source', () => {
+    const empty: ParagraphLayout = {
+      ...paragraph('empty', 'body', [], { paragraphId: 'AABBCCDD' }),
+      lines: [],
+      paragraphMark: {
+        hidden: false,
+        bounds: rect(10, 20, 0, 12),
+        line: { range: { start: 0, end: 0 }, bounds: rect(85, 20, 0, 12), baselinePt: 29 },
+      },
+    };
+    const layers = buildPageLayers([{ layer: 'body', node: empty, coordinateSpace: 'section-logical' }]);
+    const layout = documentLayout(page(layers, [empty.id]));
+    expect(textRunsForPage(layout, 0, { scale: 2 })).toEqual([]);
+    expect(paragraphsForPage(layout, 0, { scale: 2 })).toEqual([{
+      source: { story: 'body', storyInstance: 'body:test', path: [0] },
+      paragraphId: 'AABBCCDD', pageIndex: 0,
+      lines: [{ range: { start: 0, end: 0 }, bounds: { x: 170, y: 40, width: 0, height: 24 },
+        corners: [{ x: 170, y: 40 }, { x: 170, y: 40 }, { x: 170, y: 64 }, { x: 170, y: 64 }],
+        baseline: { x: 170, y: 58 }, markOnly: true }],
+      clips: [],
+    }]);
+  });
+
   it('projects retained terminal-space compression into CSS pixels', () => {
     const compressed = paragraph('compressed', 'body', [
       placement('A ', 0, 0, { trailingSpaceCompressionPt: 2 }),

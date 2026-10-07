@@ -43,6 +43,7 @@ import { ProgressiveLayoutLifecycle } from '@silurus/ooxml-core/internal/progres
 import { ProgressiveLayoutObserverNotifier } from '@silurus/ooxml-core/internal/progressive-layout-observers';
 import type { DocxDocumentModel, RenderPageOptions, WorkerRequest, WorkerResponse, DocComment, DocNote, DocRevision } from './types';
 import { renderLayoutSourceToCanvas, documentHasMath, prepareMathRuns, type DocxTextRunInfo } from './renderer';
+import { paragraphsForSelectedPage, type DocxPageParagraphInfo } from './paragraph-projection.js';
 import { createLayoutServices } from './layout-runtime.js';
 import { buildBookmarkPageMap } from './bookmark-nav';
 import { DOCX_GOOGLE_FONTS, docxGoogleFontPlan, docxOfficeFontFallbackRequests } from './google-fonts';
@@ -1872,6 +1873,31 @@ export class DocxDocument {
       defaultCurrentDateMs: runtime.defaultCurrentDateMs,
       width: wireOpts.width,
       showTrackedChanges: wireOpts.showTrackedChanges,
+    });
+  }
+
+  /** Read actual paragraph line/empty-mark geometry from the layout used by paint.
+   * Coordinates use the requested CSS width; no canvas or bitmap is allocated.
+   * Repeated stories and paragraph continuations remain separate page occurrences.
+   */
+  async collectPageParagraphs(
+    pageIndex: number,
+    opts: CollectPageRunsOptions = {},
+  ): Promise<readonly DocxPageParagraphInfo[]> {
+    const wireOpts: WireRenderPageOptions = { ...this._withActiveView(opts) };
+    if (this._mode === 'worker') {
+      const response = await this._bridge.request(
+        id => ({ type: 'collectParagraphs', id, pageIndex, opts: wireOpts }) satisfies RenderWorkerRequest,
+      );
+      if (!('type' in response) || response.type !== 'paragraphsCollected')
+        throw new Error('Unexpected paragraph geometry response');
+      return response.paragraphs;
+    }
+    const runtime = documentLayoutRuntimeOf(this);
+    if (!runtime.services) throw new Error('Document layout services are not initialized');
+    return paragraphsForSelectedPage(runtime.services, pageIndex, {
+      currentDate: wireOpts.currentDate, defaultCurrentDateMs: runtime.defaultCurrentDateMs,
+      width: wireOpts.width, showTrackedChanges: wireOpts.showTrackedChanges,
     });
   }
 

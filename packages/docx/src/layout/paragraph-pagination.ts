@@ -226,13 +226,22 @@ export function selectParagraphFragment(
   ) {
     throw new Error('Paragraph continuation source boundary did not advance');
   }
+  let nextCursor: ParagraphFragmentCursor | null = null;
+  if (nextBoundary !== null) {
+    const nextLine = acquired.lines[end];
+    if (!nextLine) throw new Error('Paragraph continuation boundary has no retained next line');
+    nextCursor = Object.freeze({
+      boundary: nextBoundary,
+      // A line's visible range excludes its explicit break. The next acquired
+      // line owns the authoritative UTF-16 start after that source gap; the
+      // last visible glyph end would lose a break when the page remeasures it.
+      sourceRangeStart: nextLine.range.start,
+      ...(uniformRubyAdvancePt === undefined ? {} : { uniformRubyAdvancePt }),
+    });
+  }
   return {
     fragment,
-    nextCursor: nextBoundary === null ? null : Object.freeze({
-      boundary: nextBoundary,
-      sourceRangeStart: fragment.lines.at(-1)!.range.end,
-      ...(uniformRubyAdvancePt === undefined ? {} : { uniformRubyAdvancePt }),
-    }),
+    nextCursor,
     requiresFreshFlowRegion: false,
     additionalReservePt: reserveFor(fragment),
     admittedBlockExtentPt: Math.min(fragment.advancePt, availableBlockExtentPt),

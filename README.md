@@ -316,6 +316,14 @@ an internal `OffscreenCanvas` — so you can write mode-agnostic code.
 
 Notes:
 
+- `DocxDocument.collectPageParagraphs(pageIndex, { width, currentDate, showTrackedChanges })`
+  reads paragraph line geometry from the same selected layout as painting in
+  main and worker modes. It returns source locators, optional authored paragraph
+  IDs, UTF-16 line ranges, page coordinates, baselines and clip quadrilaterals.
+  Empty visible paragraph marks have zero-length lines with native alignment
+  and line height. Coordinates are CSS pixels at `width`; DPR does not alter
+  them. This read does not paint or transfer a bitmap.
+
 - The returned `ImageBitmap` is owned by the caller: `transferFromImageBitmap`
   consumes it, or call `bitmap.close()` when done.
 - The canvas-target methods (`renderSlide(canvas)`, `renderPage(canvas)`,

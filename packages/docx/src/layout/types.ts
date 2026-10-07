@@ -626,6 +626,8 @@ export interface ParagraphMarkLayout {
   readonly hidden: boolean;
   readonly wrapBounds?: LayoutRect;
   readonly bounds: LayoutRect;
+  /** Empty-line caret geometry retained by the same alignment/measurement owner as text. */
+  readonly line?: Pick<LineLayout, 'range' | 'bounds' | 'baselinePt'>;
 }
 
 export interface LineNumberPaintOperation {

@@ -295,6 +295,11 @@ function translateParagraphWithContext(
       translateAnchorFrame(frame, delta)) } : {}),
     ...(paragraph.paragraphMark ? { paragraphMark: {
       ...paragraph.paragraphMark, bounds: translateRect(paragraph.paragraphMark.bounds, delta),
+      ...(paragraph.paragraphMark.line ? { line: {
+        ...paragraph.paragraphMark.line,
+        bounds: translateRect(paragraph.paragraphMark.line.bounds, delta),
+        baselinePt: paragraph.paragraphMark.line.baselinePt + delta.yPt,
+      } } : {}),
       ...(paragraph.paragraphMark.wrapBounds ? { wrapBounds: translateRect(paragraph.paragraphMark.wrapBounds, delta) } : {}),
     } } : {}),
     ...(paragraph.lineNumbers ? { lineNumbers: paragraph.lineNumbers.map((lineNumber) => ({

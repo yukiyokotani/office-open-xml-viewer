@@ -56,6 +56,7 @@ import { paginateRenderWorkerDocumentProgressively } from './render-worker-progr
 import { PaginationAbortError } from './layout/pagination-scheduler.js';
 import { normalizeLayoutOptions } from './layout/options.js';
 import { textRunsForSelectedPage } from './text-run-projection.js';
+import { paragraphsForSelectedPage } from './paragraph-projection.js';
 import { hitTestSelectedDocxElementContext } from './element-context.js';
 import { documentRequiresDomVerticalGlyphLayout } from './vertical-render-capability.js';
 import {
@@ -485,6 +486,14 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
         defaultCurrentDateMs: doc.defaultCurrentDateMs,
       });
       post({ type: 'runsCollected', id, runs });
+      return;
+    }
+    if (req.type === 'collectParagraphs') {
+      if (!doc) throw new Error('Document not loaded');
+      const paragraphs = paragraphsForSelectedPage(doc.layoutServices, req.pageIndex, {
+        ...req.opts, defaultCurrentDateMs: doc.defaultCurrentDateMs,
+      });
+      post({ type: 'paragraphsCollected', id, paragraphs });
       return;
     }
     if (req.type === 'hitTestElement') {
