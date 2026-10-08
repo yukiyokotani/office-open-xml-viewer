@@ -508,8 +508,8 @@ impl<'a> Table<'a> {
                     // decorations (MS-ODRAW 2.3.8.20-21) must follow that
                     // reversal, including their width/length. Word's paired
                     // DOC/DOCX saves confirm start triangle -> tailEnd over
-                    // ten leaders with tips above/below and left/right of
-                    // their boxes. Flips/rotation transform the whole path;
+                    // ten leaders extending up/down and left/right from the
+                    // attachment. Flips/rotation transform the whole path;
                     // they do not exchange its logical endpoints. Other
                     // supported presets keep their path order.
                     ends.swap(0, 1);
