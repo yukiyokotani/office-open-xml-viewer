@@ -3,7 +3,9 @@
 use super::{payload, ModelBudget};
 use crate::doc::{
     table::{cell_text_flow, Color, PreferredIndent, PreferredWidth, Properties},
-    table_structure::{Assembler, Event, FrameKey, LogicalTable, Payload, PlannedRow},
+    table_structure::{
+        self, Assembler, FrameKey, LogicalTable, Payload, PlannedRow, RawEvent, RawTable,
+    },
     unsupported,
 };
 use docx_model::{
@@ -87,12 +89,13 @@ impl<'a> Writer<'a> {
         let remaining = std::cell::Cell::new(budget.remaining_bytes);
         let sequence = &mut *self.sequence;
         let positioned_tables = self.positioned_tables;
-        self.structure.push(
+        self.structure.push_raw(
             props,
             mark,
             paragraph,
+            None,
             first_frame,
-            |Event(plans)| project_tables(plans, sequence, positioned_tables, &remaining),
+            |raw, admit| project_tables(raw, sequence, positioned_tables, &remaining, admit),
             &mut |bytes| charge_cell(&remaining, bytes),
         )?;
         budget.remaining_bytes = remaining.get();
@@ -102,8 +105,8 @@ impl<'a> Writer<'a> {
     pub(super) fn finish(self, budget: &mut ModelBudget) -> Result<Blocks, String> {
         let remaining = std::cell::Cell::new(budget.remaining_bytes);
         let positioned_tables = self.positioned_tables;
-        let blocks = self.structure.finish(
-            |Event(plans)| project_tables(plans, self.sequence, positioned_tables, &remaining),
+        let blocks = self.structure.finish_raw(
+            |raw, admit| project_tables(raw, self.sequence, positioned_tables, &remaining, admit),
             &mut |bytes| charge_cell(&remaining, bytes),
         )?;
         budget.remaining_bytes = remaining.get();
@@ -111,15 +114,22 @@ impl<'a> Writer<'a> {
     }
 }
 
-fn project_tables(
-    plans: Vec<LogicalTable<Blocks>>,
+fn project_tables<A: FnMut(usize) -> Result<(), String>>(
+    RawEvent(raw_tables): RawEvent<Blocks>,
     sequence: &mut usize,
     positioned_tables: bool,
     remaining: &std::cell::Cell<usize>,
+    admit: &mut A,
 ) -> Result<Blocks, String> {
     let mut output = Blocks::default();
-    for plan in plans {
-        let table = project_table(plan, *sequence, positioned_tables, remaining)?;
+    for raw in raw_tables {
+        let cell_frame = if positioned_tables {
+            homogeneous_cell_frame(&raw)
+        } else {
+            None
+        };
+        let plan = table_structure::plan(raw, admit)?;
+        let table = project_table(plan, cell_frame, *sequence, positioned_tables, remaining)?;
         *sequence = sequence.checked_add(1).ok_or("OUTPUT_TOO_LARGE")?;
         reserve(&mut output.0, 1, &mut |n| charge_cell(remaining, n))?;
         output.0.push(Block::Table(Box::new(table)));
@@ -129,6 +139,7 @@ fn project_tables(
 
 fn project_table(
     plan: LogicalTable<Blocks>,
+    cell_frame: Option<Box<docx_model::FramePr>>,
     sequence: usize,
     positioned_tables: bool,
     remaining: &std::cell::Cell<usize>,
@@ -143,8 +154,8 @@ fn project_table(
     // [MS-DOC] 2.6.3/2.7.13: nondefault position or wrapping properties make
     // the table absolutely positioned; the shared model lays such a table
     // out of the ordinary flow (ECMA-376 Part 1 17.4.57).
-    let ordinary_flow = tblp_pr.is_none();
-    if !ordinary_flow {
+    let tap_positioned = tblp_pr.is_some();
+    if tap_positioned {
         if !positioned_tables {
             return Err(unsupported(
                 "direct DOC model cannot position a table outside the main story",
@@ -152,6 +163,8 @@ fn project_table(
         }
         first.position.check_direct_floating()?;
     }
+    let cell_frame = if tap_positioned { None } else { cell_frame };
+    let ordinary_flow = !tap_positioned && cell_frame.is_none();
     let (alignment, physical) = first.alignment;
     let first_bidi = first.bidi;
     let first_autofit = first.autofit;
@@ -268,10 +281,19 @@ fn project_table(
                 charge_cell(remaining, std::mem::size_of::<DocParagraph>())?;
                 content.push(CellElement::Paragraph(Box::default()));
             } else {
-                for block in cell.content.0 {
+                for (block_index, block) in cell.content.0.into_iter().enumerate() {
                     content.push(match block {
                         Block::Paragraph(value) => CellElement::Paragraph(value),
-                        Block::Table(value) => CellElement::Table(value),
+                        Block::Table(mut value) => {
+                            // The observed native grid-frame owner starts the
+                            // host cell. Later insertion/preceding-paragraph
+                            // precedence has not been established; retain its
+                            // paragraph facts and the existing limitation.
+                            if block_index != 0 && value.table_layout.cell_frame.take().is_some() {
+                                value.table_layout.ordinary_flow = value.tblp_pr.is_none();
+                            }
+                            CellElement::Table(value)
+                        }
                         Block::PageBreak { .. } | Block::ColumnBreak => {
                             return Err(unsupported("table cell promoted a paragraph break"))
                         }
@@ -433,6 +455,7 @@ fn project_table(
         overlap,
         table_layout: TableLayoutAcquisitionWire {
             effective_style_id: None,
+            cell_frame,
             ordinary_flow,
             logical_sequence_id: format!("legacy-doc/table/{sequence}"),
             logical_row_offset: 0,
@@ -455,6 +478,61 @@ fn project_table(
         std::mem::size_of::<DocTable>() + payload::table(&table)?,
     )?;
     Ok(table)
+}
+
+/// [MS-DOC] 2.4.3 supplies row identity, not a general nested-frame election
+/// rule. Native Word import controls with homogeneous margin/text, auto-size,
+/// around-wrapped cell paragraphs move the complete grid, borders and fills
+/// together for left/center/right/absolute X and nonzero Y. This bounded owner
+/// requires every physical paragraph (including later discarded continuations)
+/// to agree with the source first-cell frame. Mixed frames, recursive children,
+/// TAP mirrors and later host-cell insertion do not acquire this owner. The
+/// observed class is fixed-layout, horizontal and LTR. Other grid policies
+/// retain their paragraph facts and residual warning. The original shared
+/// column solver determines the acquired grid extent.
+fn homogeneous_cell_frame(raw: &RawTable<Blocks>) -> Option<Box<docx_model::FramePr>> {
+    if raw.depth != 2 {
+        return None;
+    }
+    let key = raw.rows.first()?.first.frame;
+    let frame = crate::doc::paragraph::table_row_frame(key)?;
+    if frame.drop_cap != "none"
+        || frame.h_anchor != "margin"
+        || frame.v_anchor != "text"
+        || frame.wrap != "around"
+        || frame.w.is_some()
+        || frame.h.is_some()
+        || frame.h_rule != "auto"
+    {
+        return None;
+    }
+    let mut any = false;
+    for row in &raw.rows {
+        if row.source.position.specifies_nondefault_placement()
+            || row.first.frame != key
+            || row.source.autofit
+            || row.source.bidi
+            || row
+                .source
+                .cells
+                .iter()
+                .any(|cell| cell_text_flow(cell.flags) != 0)
+        {
+            return None;
+        }
+        for cell in &row.cells {
+            for block in &cell.0 {
+                let Block::Paragraph(paragraph) = block else {
+                    return None;
+                };
+                if paragraph.frame_pr.as_deref() != Some(&frame) {
+                    return None;
+                }
+                any = true;
+            }
+        }
+    }
+    any.then(|| Box::new(frame))
 }
 
 /// A bounded acquired-geometry projection for whole-frame centered RTL tables.

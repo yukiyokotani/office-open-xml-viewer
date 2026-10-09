@@ -34,6 +34,7 @@ import {
   wordDefersCellOwnedAnchorPastPageBand,
   wordRelocatesAuthoredHeightRowAtPageBoundary,
   wordRelocatesParallelParagraphRowCut,
+  wordGridFramePreservesEmptyCarrierReference,
 } from './table-compatibility.js';
 import type {
   FlowBlockPlacement,
@@ -136,6 +137,7 @@ export interface PageDependentTableBlockRequest {
    * table's page placement for a cell paragraph whose text boxes hold
    * page-placed content. */
   readonly hostFlowPageTranslationPt?: Readonly<{ xPt: number; yPt: number }>;
+  readonly paragraphAnchorReferenceDeltaPt?: number;
 }
 
 export interface TableFragmentContext {
@@ -154,6 +156,8 @@ export interface TableFragmentContext {
   }>;
   readonly floatingTableRegistry?: FloatRegistrySnapshotPt;
   readonly finalPlacementTranslationPt?: Readonly<{ xPt: number; yPt: number }>;
+  /** Initial ordinary body fragment only; never inherited by nested tables. */
+  readonly paragraphAnchorReferenceDeltaPt?: number;
   /** Reacquire only content whose destination page can change its geometry. */
   readonly reacquirePageDependentBlock?: (
     request: PageDependentTableBlockRequest,
@@ -180,6 +184,38 @@ export interface TableFragmentResult {
   readonly requiresFreshPage: boolean;
   readonly floatingTablePlacements?: readonly ResolvedFloatingTablePlacementLayout[];
   readonly floatingTableRegistryDelta?: FloatRegistryDeltaPt;
+}
+
+
+/** An optional anchor refinement may replace only a pagination-equivalent result. */
+export function acceptTableAnchorReferenceRefinement(
+  original: TableFragmentResult,
+  adjusted: TableFragmentResult,
+): TableFragmentResult {
+  if (!original.fragment || original.requiresFreshPage) {
+    throw new LayoutInvariantError('INVALID_GEOMETRY', 'An anchor refinement requires an admitted table fragment');
+  }
+  if (adjusted.fragment && !adjusted.requiresFreshPage
+    && adjusted.fragment.advancePt === original.fragment.advancePt
+    && JSON.stringify(adjusted.fragment.flowBounds) === JSON.stringify(original.fragment.flowBounds)
+    && JSON.stringify(adjusted.nextCursor) === JSON.stringify(original.nextCursor)) return adjusted;
+  // Keep the complete original transaction, including registry lineage. This
+  // does not catch acquisition errors or relax any geometry validation.
+  return Object.freeze({
+    ...original,
+    fragment: Object.freeze({
+      ...original.fragment,
+      diagnostics: Object.freeze([
+        ...(original.fragment.diagnostics ?? []),
+        Object.freeze({
+          code: 'UNSUPPORTED_FEATURE' as const,
+          severity: 'warning' as const,
+          source: original.fragment.source,
+          message: 'A cell-grid anchor refinement was skipped because it changed table flow; its drawing retains the actual-flow paragraph reference',
+        }),
+      ]),
+    }),
+  });
 }
 
 interface SelectedCell {
@@ -556,6 +592,7 @@ function nestedWholeContext(
   const bounds = Object.freeze({ xPt: 0, yPt: 0, widthPt, heightPt: 1 });
   return Object.freeze({
     ...context,
+    paragraphAnchorReferenceDeltaPt: undefined,
     placement: Object.freeze({
       container: Object.freeze({ id: nested.input.flowDomainId, kind: 'tableCell' as const, bounds }),
       cursor: Object.freeze({ xPt: 0, yPt: 0 }),
@@ -834,7 +871,15 @@ function rowPagePlacement(
   placedWholeLayouts: PlacedWholeLayouts,
   cursor?: TableFragmentCursor,
 ): RowPagePlacement | null {
-  if (!rowNeedsPageOrigins(source, row)) return null;
+  const keepsInsertionReference = (cellIndex: number, blockIndex: number): boolean => (
+    context.paragraphAnchorReferenceDeltaPt !== undefined
+    && ownership === 'source'
+    && (!cursor || (cursor.rowIndex === 0 && cursor.rowFragmentIndex === 0 && cursor.cells.length === 0))
+    && row.logicalRowIndex === 0 && !row.repeatedHeader
+    && cellIndex === 0 && blockIndex === 0
+    && wordGridFramePreservesEmptyCarrierReference(row.cells[cellIndex]!)
+  );
+  if (!rowNeedsPageOrigins(source, row) && !keepsInsertionReference(0, 0)) return null;
   const owner = context.pagePlacement;
   if (!owner) return null;
   const translation = owner.translationPt;
@@ -852,7 +897,7 @@ function rowPagePlacement(
       const laidOutCell = laidOutRow.cells[cellIndex];
       const start = firstBlock(cellIndex);
       if (!laidOutCell || !cell.blocks.slice(start).some((block) => (
-        blockNeedsPageOrigin(source, block)
+        blockNeedsPageOrigin(source, block) || keepsInsertionReference(cellIndex, start)
       ))) return UNPLACED_CELL;
       const placedAt = (blockIndex: number) => laidOutCell.blocks[blockIndex - start];
       const cellTopPt = translation.yPt + laidOutCell.flowBounds.yPt;
@@ -862,7 +907,8 @@ function rowPagePlacement(
       for (let blockIndex = start; blockIndex < cell.blocks.length; blockIndex += 1) {
         const block = cell.blocks[blockIndex]!;
         const placed = placedAt(blockIndex);
-        if (!placed || !blockNeedsPageOrigin(source, block)) continue;
+        if (!placed || (!blockNeedsPageOrigin(source, block)
+          && !keepsInsertionReference(cellIndex, blockIndex))) continue;
         const placedTopPt = cellTopPt + placed.offsetPt;
         if (block.layout.kind === 'table') {
           // A nested table's local origin is placed at its cell content x and
@@ -937,6 +983,9 @@ function rowPagePlacement(
               page: context.page,
               acquired: block.layout,
               hostFlowPageTranslationPt: hostFlow,
+              ...(keepsInsertionReference(logicalCellIndex, blockIndex) ? {
+                paragraphAnchorReferenceDeltaPt: context.paragraphAnchorReferenceDeltaPt,
+              } : {}),
             }),
           };
         }),
@@ -1868,6 +1917,8 @@ function materializeFragment(
         physicalPageIndex: context.page.physicalPageIndex,
         displayPageNumber: context.page.displayPageNumber,
         ...occurrence,
+        ...(occurrence.positioning.widthBasis === 'host-cell-content'
+          ? { columnBounds: Object.freeze({ ...laidOutCell.contentBounds }) } : {}),
         anchorBounds,
         child,
       })];

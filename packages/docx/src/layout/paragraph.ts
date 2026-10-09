@@ -1325,6 +1325,9 @@ export interface ParagraphAcquisitionOptions {
   /** WORD_LATER_ANCHOR_EARLIER_LINE_WRAP: carried first-placement object
    * frames keyed by anchor occurrence. */
   readonly frozenAnchorFrames?: ReadonlyMap<string, LayoutRect>;
+  /** Cell-grid wrap preserves an empty carrier's insertion reference while
+   * its paragraph flow is admitted below the grid. Paragraph-local points. */
+  readonly paragraphAnchorReferenceDeltaPt?: number;
 }
 
 function runSource(source: SourceRef, runIndex: number): SourceRef {
@@ -3311,7 +3314,14 @@ function acquireAnchorOccurrence(
         : null,
       paragraph: {
         xPt: options.placement.paragraphXPt,
-        yPt: options.placement.startYPt,
+        yPt: options.placement.startYPt + (
+          outer.run.anchorAcquisitionInput.vertical.relativeFrom === 'paragraph'
+          && outer.run.anchorAcquisitionInput.wrap.kind === 'none'
+          && behavior.allowOverlap === true
+          && behavior.layoutInCell === true && options.anchorCellBounds !== undefined
+          && options.environment.pageWritingMode === 'horizontal-tb'
+            ? options.paragraphAnchorReferenceDeltaPt ?? 0 : 0
+        ),
         widthPt: options.placement.availableWidthPt,
         heightPt: Math.max(0, paragraphHeightPt),
       },
@@ -4691,6 +4701,7 @@ function paragraphAcquisitionKey(
     ],
     lineOnly ? null : JSON.stringify(options.exclusions),
     lineOnly || !hasAnchoredPayload ? null : JSON.stringify(options.anchorCollisions ?? []),
+    lineOnly || !hasAnchoredPayload ? null : options.paragraphAnchorReferenceDeltaPt ?? null,
     lineOnly || !hasAnchoredPayload || !options.frozenAnchorFrames?.size
       ? null
       : JSON.stringify([...options.frozenAnchorFrames].sort(([left], [right]) => left.localeCompare(right))),

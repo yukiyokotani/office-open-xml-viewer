@@ -12,6 +12,13 @@ pub(in crate::doc) use frame::TableParagraphFrame;
 pub(in crate::doc) use frame::{FrameOrigin, FrameOrigins, FrameProperty, NativeFrameFacts};
 pub(super) use shading::{fill as shading_fill, ShadingFill};
 
+#[cfg(feature = "direct-doc")]
+pub(in crate::doc) fn table_row_frame(
+    key: super::table_structure::FrameKey,
+) -> Option<docx_model::FramePr> {
+    frame::Frame::from_row_key(key).direct().ok().flatten()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct AlignmentPatch {
     code: u16,

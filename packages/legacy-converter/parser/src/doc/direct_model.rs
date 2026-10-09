@@ -289,9 +289,9 @@ pub(super) fn build(
 }
 
 /// Report the bounded native-cell projection from `story::project`, not a
-/// native Word positioning rule. The shared cell-flow consumer's evidence is
-/// DOCX-only; native nested-cell frames retain their facts without applying
-/// that placement. Mirror frames are already consumed by table positioning,
+/// native Word positioning rule. Homogeneous first-block grids with an acquired
+/// cell frame now have a placement consumer; other retained nested-cell frames
+/// still lack established ownership. Mirror frames are consumed by TAP positioning,
 /// and all other unsupported owners have failed before this final-body pass.
 ///
 /// Scan only retained main-story tables after merge-continuation replacement:
@@ -333,7 +333,9 @@ fn report_nested_cell_frame_flow(
                     for block in &cell.content {
                         match block {
                             CellElement::Paragraph(paragraph)
-                                if nested && paragraph.frame_pr.is_some() =>
+                                if nested
+                                    && table.table_layout.cell_frame.is_none()
+                                    && paragraph.frame_pr.is_some() =>
                             {
                                 has_frame = true;
                                 break 'walk;

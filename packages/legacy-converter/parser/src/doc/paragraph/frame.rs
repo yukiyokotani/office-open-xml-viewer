@@ -135,6 +135,24 @@ impl Frame {
 }
 
 impl Frame {
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) fn from_row_key(key: crate::doc::table_structure::FrameKey) -> Self {
+        Self {
+            applied: key.anchors.is_some(),
+            dxa_abs: key.x,
+            dya_abs: key.y,
+            width: key.width,
+            height: key.height,
+            position_code: key.anchors,
+            wrap: key.wrap,
+            dxa_from_text: key.horizontal_space,
+            dya_from_text: key.vertical_space,
+            locked: key.locked,
+            no_allow_overlap: key.no_overlap,
+            drop_cap: key.drop_cap,
+            text_flow: (key.text_flow != 0).then_some(key.text_flow),
+        }
+    }
     /// The effective [MS-DOC] 2.4.3 row-identity frame operands. A paragraph
     /// without frame SPRMs has every documented default, so a default-valued
     /// write is equal to omission (except sprmPPc, which has no default).

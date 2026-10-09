@@ -94,10 +94,12 @@ function resolvedPlacement(
   const heightPt = placement.child.advancePt;
   const positioning = placement.positioning;
   const bounds = Object.freeze({ xPt, yPt, widthPt, heightPt });
+  // Reuse the alignment-frame band for exclusion under the bounded acquired
+  // grid-frame policy in table-compatibility; fixed grid ink remains separate.
   const exclusionBounds = Object.freeze({
     xPt: xPt - positioning.leftFromTextPt,
     yPt: yPt - positioning.topFromTextPt,
-    widthPt: widthPt + positioning.leftFromTextPt + positioning.rightFromTextPt,
+    widthPt: placementFrameWidthPt(placement) + positioning.leftFromTextPt + positioning.rightFromTextPt,
     heightPt: heightPt + positioning.topFromTextPt + positioning.bottomFromTextPt,
   });
   return Object.freeze({
@@ -113,20 +115,33 @@ function resolvedPlacement(
   });
 }
 
+function placementFrameWidthPt(placement: FloatingTablePlacementLayout): number {
+  if (placement.positioning.widthBasis === 'host-cell-content') {
+    if (!placement.columnBounds) throw new Error('Cell-owned grid frame lacks its content band');
+    return placement.columnBounds.widthPt;
+  }
+  return placement.child.columnWidthsPt.reduce((sum, width) => sum + width, 0);
+}
+
 export function resolveFloatingTablePlacement(
   placement: FloatingTablePlacementLayout,
   frames: FloatingTableReferenceFramesPt,
 ): ResolvedFloatingTablePlacementLayout {
-  const widthPt = placement.child.columnWidthsPt.reduce((sum, width) => sum + width, 0);
   const heightPt = placement.child.advancePt;
-  const raw = resolveFloatingTableBoxPt(placement.positioning, frames, widthPt, heightPt);
+  // Cell-start frame ownership is distinct from the following paragraph's
+  // page selection and wrap re-acquisition. Its before-spacing must not move
+  // the acquired grid frame (table-compatibility).
+  const references = placement.positioning.textAnchor === 'cell-start' && placement.columnBounds
+    ? { ...frames, text: { ...frames.text, yPt: placement.columnBounds.yPt } }
+    : frames;
+  const raw = resolveFloatingTableBoxPt(placement.positioning, references, placementFrameWidthPt(placement), heightPt);
   const followsHost = floatingTableAxesFollowHostFlow(placement.positioning);
   return resolvedPlacement(
     placement,
     followsHost.x && placement.acquiredTextOffsetPt
-      ? frames.text.xPt + placement.acquiredTextOffsetPt.xPt : raw.x,
+      ? references.text.xPt + placement.acquiredTextOffsetPt.xPt : raw.x,
     followsHost.y && placement.acquiredTextOffsetPt
-      ? frames.text.yPt + placement.acquiredTextOffsetPt.yPt : raw.y,
+      ? references.text.yPt + placement.acquiredTextOffsetPt.yPt : raw.y,
   );
 }
 
@@ -248,6 +263,10 @@ export function resolveFloatingTablePlacementInTransaction(
     paragraphId: transaction.nextParagraphId,
     bounds: finalPlacement.bounds,
     exclusionBounds: finalPlacement.exclusionBounds,
+    ...(placement.positioning.textAnchor === 'cell-start'
+      && placement.positioning.widthBasis === 'host-cell-content'
+      ? { paragraphAnchorReference: 'unwrapped-empty-carrier' as const }
+      : {}),
   });
   return Object.freeze({
     placement: finalPlacement,

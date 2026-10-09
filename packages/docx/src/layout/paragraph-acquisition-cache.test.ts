@@ -229,6 +229,61 @@ describe('paragraph acquisition cache', () => {
     expect(afterSecond).not.toBe(afterFirst);
   });
 
+  it('separates nominal carrier references in cache without moving paragraph flow', () => {
+    const services = scopedServices();
+    const missingEdges = {
+      topPt: null, topStatus: 'missing', rightPt: null, rightStatus: 'missing',
+      bottomPt: null, bottomStatus: 'missing', leftPt: null, leftStatus: 'missing',
+    };
+    const input = paragraphAcquisitionInput({ ...textParagraph(), runs: [
+      { type: 'anchorHost', fontSize: 10, __anchorOccurrenceId: 'box' },
+      { type: 'shape', widthPt: 20, heightPt: 8, presetGeometry: 'rect', subpaths: [],
+        fill: { fillType: 'solid', color: 'FFFFFF' }, stroke: null,
+        __anchorAcquisition: {
+          occurrenceId: 'box',
+          simplePosition: { enabled: false, status: 'valid', xPt: 0, xStatus: 'valid', yPt: 0, yStatus: 'valid' },
+          horizontal: { relativeFrom: 'column', relativeFromStatus: 'valid', choice: { kind: 'offset', valuePt: 60 } },
+          vertical: { relativeFrom: 'paragraph', relativeFromStatus: 'valid', choice: { kind: 'offset', valuePt: 4 } },
+          extent: { widthPt: 20, widthStatus: 'valid', heightPt: 8, heightStatus: 'valid' },
+          parentEffectExtent: missingEdges, anchorDistances: missingEdges,
+          relativeSize: { horizontal: null, vertical: null },
+          wrap: { kind: 'none', authoredKinds: ['wrapNone'], side: 'bothSides', distances: missingEdges, effectExtent: null, polygon: null },
+          behavior: { behindDoc: false, behindDocStatus: 'valid', relativeHeight: 0, relativeHeightStatus: 'valid',
+            locked: false, lockedStatus: 'valid', allowOverlap: true, allowOverlapStatus: 'valid',
+            layoutInCell: true, layoutInCellStatus: 'valid' },
+          group: null,
+        },
+      },
+    ] } as unknown as DocParagraph, source);
+    const anchorFrames = {
+      page: { xPt: 0, yPt: 0, widthPt: 612, heightPt: 792 },
+      margin: { xPt: 72, yPt: 72, widthPt: 468, heightPt: 648 },
+      column: { xPt: 72, yPt: 72, widthPt: 468, heightPt: 648 },
+      pageParity: 'odd' as const,
+    };
+    const plain = options(services, { anchorFrames,
+      anchorCellBounds: { xPt: 0, yPt: 0, widthPt: 468, heightPt: 648 },
+    });
+    const nominal = { ...plain, paragraphAnchorReferenceDeltaPt: -35 };
+    const first = acquireParagraphResult(input, nominal);
+    const second = acquireParagraphResult(input, plain);
+    const third = acquireParagraphResult(input, nominal);
+    expect(first.layout.drawings[0]!.inkBounds.yPt).toBe(41);
+    expect(second.layout.drawings[0]!.inkBounds.yPt).toBe(76);
+    const flowLines = (layout: typeof first.layout) => layout.lines.map((line) => ({
+      ...line, placements: line.placements.filter((placement) => placement.kind !== 'drawing'),
+    }));
+    expect(flowLines(first.layout)).toEqual(flowLines(second.layout));
+    expect(first.layout.flowBounds).toEqual(second.layout.flowBounds);
+    expect(second).not.toBe(first);
+    expect(third).toBe(first);
+    const frame = first.layout.anchorFrames![0]!;
+    if (frame.status !== 'resolved') throw new Error('expected resolved nominal frame');
+    expect(frame.geometry.objectFrame.yPt).toBe(41);
+    if (frame.axes.vertical.status !== 'resolved') throw new Error('expected paragraph reference');
+    expect(frame.axes.vertical.baseStartPt).toBe(37);
+  });
+
   it('does not reuse public anchored drawings across distinct supplied frames', () => {
     const services = scopedServices();
     const input = paragraphAcquisitionInput({

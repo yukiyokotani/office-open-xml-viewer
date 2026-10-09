@@ -91,6 +91,10 @@ export type BodyTableContinuationCursor =
 export interface BodyTableAcquisitionInput {
   readonly input: Readonly<{ kind: 'table'; source: SourceRef }> | BodyAdjacentTableGroupInput;
   readonly location: BodyAcquisitionLocation;
+  /** Initial insertion reference of this fragment in this flow region.
+   * Same-region wrap retries advance location without moving an empty
+   * paragraph's nominal anchor. New regions/fragments acquire a new reference. */
+  readonly unwrappedLocation?: BodyAcquisitionLocation;
   readonly availableInlineExtentPt: number;
   readonly availableBlockExtentPt: number;
   readonly freshPageBlockExtentPt: number;

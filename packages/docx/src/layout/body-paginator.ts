@@ -2345,12 +2345,20 @@ function* paginateBodyPassSteps(
         ? Object.freeze({ ...next, ownerSegmentEntry: 'fresh-region' as const })
         : next;
       let complete = false;
+      let unwrappedLocation: BodyAcquisitionLocation | undefined;
       while (!complete) {
         const fragmentStartKey = tableFragmentStartKey(cursor);
         const location = acquisitionLocation(state);
+        if (!unwrappedLocation || unwrappedLocation.flowDomainId !== location.flowDomainId
+          || unwrappedLocation.pageIndex !== location.pageIndex
+          || unwrappedLocation.columnIndex !== location.columnIndex) {
+          unwrappedLocation = location;
+        }
+        const initialLocation = unwrappedLocation;
         const requestAt = (availableBlockExtentPt: number) => session.measureTable({
             input: block,
             location,
+            unwrappedLocation: initialLocation,
             availableInlineExtentPt: location.availableBounds.widthPt,
             availableBlockExtentPt,
             freshPageBlockExtentPt: freshPageExtent(state),
@@ -2509,6 +2517,7 @@ function* paginateBodyPassSteps(
           ));
         }
         cursor = acquired.nextCursor ?? undefined;
+        unwrappedLocation = undefined;
         complete = cursor === undefined;
         // WORD_OVER_PAGE_CELL_BREAK_OCCUPANCY:
         // clipped cell content counts a physical continuation page before a
