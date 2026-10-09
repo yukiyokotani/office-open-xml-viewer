@@ -1,5 +1,6 @@
 import { FLOAT_OVERLAP_EPS } from '../float-layout.js';
 import { resolveFloatingTableBoxPt } from '../float-table-geometry.js';
+import { wordGridFramePreservesEmptyCarrierReference } from './table-compatibility.js';
 import { frameWrapExclusionMode } from '../frame-geometry.js';
 import type { FramePr } from '../types.js';
 import type {
@@ -38,6 +39,7 @@ import { type RetainedTableAcquisition } from './table-acquisition.js';
 import { combineAdjacentTableLayoutInputs } from './adjacent-table-layout-input.js';
 import { layoutTable as layoutRetainedTableInput } from './table.js';
 import {
+  acceptTableAnchorReferenceRefinement,
   startTableFragmentCursor,
   takeTableFragment,
   type PageDependentTableBlockRequest,
@@ -440,7 +442,7 @@ function takeInFlowTableFragment(
 ): InFlowTableFragment {
   const { dependencies, services, state, sessionState } = context;
   const pageHeightPt = state.pageH;
-  const result = takeTableFragment(retained, cursor, {
+  const fragmentContext: TableFragmentContext = {
     availableHeightPt: request.availableBlockExtentPt,
     freshPageHeightPt: request.freshPageBlockExtentPt,
     placement: {
@@ -490,7 +492,8 @@ function takeInFlowTableFragment(
       xPt: request.location.availableBounds.xPt,
       yPt: request.location.cursorPt.yPt,
     }),
-  });
+  };
+  let result = takeTableFragment(retained, cursor, fragmentContext);
   const tableInlineStartPt = request.location.availableBounds.xPt + retained.layout.flowBounds.xPt;
   const tableInlineEndPt = tableInlineStartPt + retained.layout.flowBounds.widthPt;
   const remainingTableExtentPt = result.fragment?.advancePt ?? 0;
@@ -510,7 +513,36 @@ function takeInFlowTableFragment(
   if (!result.fragment || result.requiresFreshPage) {
     return Object.freeze({ kind: 'fresh-flow-region' as const });
   }
-  return Object.freeze({ kind: 'fragment' as const, result, fragment: result.fragment });
+  const initial = request.unwrappedLocation;
+  if (initial && initial.flowDomainId === request.location.flowDomainId
+    && initial.pageIndex === request.location.pageIndex && initial.columnIndex === request.location.columnIndex
+    && state.verticalPhys === undefined && !retained.input.bidiVisual
+    && retained.input.source.story === 'body'
+    && retained.input.rows[0]?.cells[0] !== undefined
+    && wordGridFramePreservesEmptyCarrierReference(retained.input.rows[0].cells[0])
+    && initial.cursorPt.yPt < request.location.cursorPt.yPt
+    && cursor.rowIndex === 0 && cursor.rowFragmentIndex === 0 && cursor.cells.length === 0) {
+    // Preserve ordinary blockers. Only the cell-start grid-frame admission
+    // class separates an empty carrier's reference from actual table flow.
+    const nominalBlockStartPt = resolveBlockFlowAdmission({
+      inlineStartPt: tableInlineStartPt, inlineEndPt: tableInlineEndPt,
+      flowBandStartPt: request.location.availableBounds.xPt,
+      flowBandEndPt: request.location.availableBounds.xPt + request.location.availableBounds.widthPt,
+      blockStartPt: initial.cursorPt.yPt, blockExtentPt: remainingTableExtentPt,
+      blockers: sessionState.floatRegistry.entries.filter((entry) => (
+        entry.paragraphAnchorReference !== 'unwrapped-empty-carrier'
+      )).map(floatRegistryParticipant),
+      overlapEpsilonPt: FLOAT_OVERLAP_EPS,
+    }).blockStartPt;
+    if (nominalBlockStartPt < request.location.cursorPt.yPt) {
+      const adjusted = takeTableFragment(retained, cursor, {
+        ...fragmentContext,
+        paragraphAnchorReferenceDeltaPt: nominalBlockStartPt - request.location.cursorPt.yPt,
+      });
+      result = acceptTableAnchorReferenceRefinement(result, adjusted);
+    }
+  }
+  return Object.freeze({ kind: 'fragment' as const, result, fragment: result.fragment! });
 }
 
 function inFlowFragmentCharge(

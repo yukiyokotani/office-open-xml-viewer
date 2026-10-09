@@ -263,6 +263,10 @@ export function resolveFloatingTablePlacementInTransaction(
     paragraphId: transaction.nextParagraphId,
     bounds: finalPlacement.bounds,
     exclusionBounds: finalPlacement.exclusionBounds,
+    ...(placement.positioning.textAnchor === 'cell-start'
+      && placement.positioning.widthBasis === 'host-cell-content'
+      ? { paragraphAnchorReference: 'unwrapped-empty-carrier' as const }
+      : {}),
   });
   return Object.freeze({
     placement: finalPlacement,

@@ -822,6 +822,9 @@ export interface FloatingTableReferenceFramesPt {
 }
 
 interface FloatRegistryEntryCorePt {
+  /** Cell-start grid frame: its wrap moves flow, not an empty carrier's
+   * paragraph-relative drawing insertion reference. */
+  readonly paragraphAnchorReference?: 'unwrapped-empty-carrier';
   readonly occurrenceId: string;
   readonly paragraphId: number;
   readonly bounds: LayoutRect;

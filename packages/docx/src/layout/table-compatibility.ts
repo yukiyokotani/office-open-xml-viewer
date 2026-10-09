@@ -1,9 +1,9 @@
 import type { FramePr } from '../types.js';
 import { defineCompatibilityRule } from './compatibility.js';
 import { stableFingerprint } from './fingerprint.js';
-import type { ParagraphLayoutSource } from './text.js';
+import type { ParagraphLayoutSource, ParagraphAcquisitionInput } from './text.js';
 import type { TableLayoutSource } from './table-source-acquisition.js';
-import type { TableColumnLayoutInput, LayoutRect, SourceRef, FloatingTablePositionInput } from './types.js';
+import type { TableColumnLayoutInput, LayoutRect, SourceRef, FloatingTablePositionInput, TableCellLayoutInput } from './types.js';
 
 export const WORD_CELL_OWNED_GRID_FRAME = defineCompatibilityRule({
   id: 'word-cell-owned-grid-frame',
@@ -14,7 +14,7 @@ export const WORD_CELL_OWNED_GRID_FRAME = defineCompatibilityRule({
     version: '16.113.3',
     platform: 'macOS 27.0',
   },
-  description: 'Native DOC import controls move six homogeneous fixed-layout horizontal LTR nested grids, including their borders and fills, together for left/center/right/absolute horizontal placement and nonzero text-relative vertical offsets. The producer elects only a first host-cell block at depth two, with every physical cell paragraph agreeing with its first-cell frame before continuation payloads are discarded, and no nondefault TAP positioning. Unpositioned anchors and no-wrap are admission counterexamples; mixed frames, later insertion, recursive child content, AutoFit, bidi and rotated cells retain residual diagnostics. The frame uses margin/text anchors, around wrap and automatic dimensions. [MS-DOC] 2.4.3 establishes row identity and 2.6.2 supplies the coordinates; neither establishes a universal nested-grid placement or AUTO-width rule. In the observed equal host bands, different fixed grid widths have the same aligned displacement, consistent with host content width as the alignment frame. Retain fixed grid ink unchanged, including overhang. Reusing that band for exclusion is a bounded library policy: varied host widths, general wrapping and paragraph-relative shape anchors are unproved. The following paragraph selects the page and wrap acquisition, but its before-spacing does not replace the cell insertion cursor as the vertical frame origin.',
+  description: 'Native DOC import controls move six homogeneous fixed-layout horizontal LTR nested grids, including their borders and fills, together for left/center/right/absolute horizontal placement and nonzero text-relative vertical offsets. The producer elects only a first host-cell block at depth two, with every physical cell paragraph agreeing with its first-cell frame before continuation payloads are discarded, and no nondefault TAP positioning. Unpositioned anchors and no-wrap are admission counterexamples; mixed frames, later insertion, recursive child content, AutoFit, bidi and rotated cells retain residual diagnostics. The frame uses margin/text anchors, around wrap and automatic dimensions. [MS-DOC] 2.4.3 establishes row identity and 2.6.2 supplies the coordinates; neither establishes a universal nested-grid placement or AUTO-width rule. In the observed equal host bands, different fixed grid widths have the same aligned displacement, consistent with host content width as the alignment frame. Retain fixed grid ink unchanged, including overhang. Reusing that band for exclusion is a bounded library policy: varied host widths and general wrapping are unproved. Original and vertical-offset controls additionally distinguish the initial, top-aligned empty carrier from a carrier containing authored whitespace: only the former keeps its paragraph-relative wrapNone drawing at its pre-grid-admission insertion reference. Table and text flow still clear the complete grid frame. Other references, collision-constrained drawings, continuations and nonempty carriers retain actual flow ownership. The following paragraph selects the page and wrap acquisition, but its before-spacing does not replace the cell insertion cursor as the vertical frame origin.',
 });
 
 export function cellOwnedGridFramePosition(frame: Readonly<FramePr>): FloatingTablePositionInput {
@@ -27,6 +27,42 @@ export function cellOwnedGridFramePosition(frame: Readonly<FramePr>): FloatingTa
     ...(frame.xAlign == null ? {} : { xAlign: frame.xAlign }),
     ...(frame.yAlign == null ? {} : { yAlign: frame.yAlign }),
   };
+}
+
+/** Bounded Word import observation: grid-wrap admission moves the table's
+ * flow, but an empty, top-aligned carrier retains its paragraph insertion
+ * reference. ECMA-376 §20.4.3.5 names the paragraph reference; it does not
+ * prescribe this import behavior. Whitespace and other inline content own
+ * real flow and are deliberate counterexamples. */
+export function wordGridFramePreservesEmptyCarrierReference(cell: TableCellLayoutInput): boolean {
+  const paragraph = cell.blocks[0]?.layout;
+  if (cell.columnStart !== 0 || cell.vAlign !== 'top' || cell.verticalMerge !== 'none' || cell.verticalText
+    || paragraph?.kind !== 'paragraph' || paragraph.clipBounds
+    || paragraph.cellContainmentBounds || paragraph.lines.length !== 1
+    || paragraph.resources.length !== 0 || paragraph.textBoxes.length !== 0
+    || paragraph.events.length !== 0 || paragraph.exclusions.length !== 0
+    || paragraph.drawings.length !== 1 || paragraph.anchorFrames?.length !== 1) return false;
+  const frame = paragraph.anchorFrames[0]!;
+  return frame.status === 'resolved' && frame.axes.vertical.relativeFrom === 'paragraph'
+    && frame.geometry.wrap.kind === 'none'
+    && paragraph.lines[0]!.placements.every((placement) => (
+      (placement.kind === 'anchor-host' && placement.anchorOccurrenceId === frame.occurrenceId)
+      || (placement.kind === 'drawing' && placement.advancePt === 0)
+    ));
+}
+
+/** Source emptiness is independent of whether a whitespace/hidden run was
+ * suppressed during line acquisition. Only the drawing's own metric host
+ * and one parser-owned overlapping cell anchor may elect this reference. */
+export function wordGridFrameCarrierSourceOwnsNoFlow(paragraph: Pick<ParagraphAcquisitionInput, 'runs' | 'numbering'>): boolean {
+  const shapes = paragraph.runs.filter((run) => run.type === 'shape');
+  const anchor = shapes.length === 1 ? shapes[0]?.anchorAcquisitionInput : undefined;
+  return paragraph.numbering == null && anchor !== undefined
+    && anchor.vertical.relativeFrom === 'paragraph' && anchor.wrap.kind === 'none'
+    && anchor.behavior.allowOverlap === true && anchor.behavior.layoutInCell === true
+    && paragraph.runs.every((run) => (
+      run.type === 'shape' || (run.type === 'anchorHost' && run.anchorOccurrenceId === anchor.occurrenceId)
+    ));
 }
 
 export const WORD_ROTATED_CELL_AUTO_ROW_WRAP = defineCompatibilityRule({
