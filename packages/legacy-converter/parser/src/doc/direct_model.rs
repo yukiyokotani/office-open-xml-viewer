@@ -1291,7 +1291,7 @@ mod tests {
     /// A textbox (msosptTextBox) or rectangle anchored in the main or header
     /// document. The textbox story follows the header story; its FTXBXS and
     /// Tbkd tables name the shape (MS-DOC 2.3.6-2.3.7, 2.9.106, 2.9.312).
-    fn drawing_shape_source(textbox: Option<&str>, header: bool) -> Vec<u8> {
+    pub(super) fn drawing_shape_source(textbox: Option<&str>, header: bool) -> Vec<u8> {
         drawing_source(textbox, header, false, [0, 0])
     }
 
