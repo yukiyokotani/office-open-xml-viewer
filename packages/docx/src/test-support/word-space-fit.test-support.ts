@@ -6,10 +6,10 @@ import { DEFAULT_KINSOKU_RULES } from '@silurus/ooxml-core';
 import { createLayoutServices } from '../layout-runtime.js';
 import type { ParagraphLayoutContext } from '../layout-context.js';
 import { createFontResolver } from '../layout/font-service.js';
-import { paragraphLayoutFromMeasurement } from '../layout/paragraph.js';
+import { acquireParagraphLayout } from '../layout/paragraph.js';
 import { createTextLayoutService, type ResolvedFontMetric } from '../layout/text.js';
 import { buildSegments, layoutLines, type LayoutTextSeg, type LineLayoutEnvironment } from '../line-layout.js';
-import { measureParagraph } from '../paragraph-measure.js';
+import { paragraphAcquisitionInput } from '../parser-model.js';
 import type { DocParagraph, DocRun, DocxDocumentModel } from '../types.js';
 
 export interface Variant {
@@ -218,12 +218,13 @@ export function retainStubParagraph(paragraph: StubParagraph) {
     pageWritingMode: 'horizontal-tb' as const, layoutServices: cachedServices(families),
     autoSpaceDE: false, autoSpaceDN: false, ...paragraph.environment,
   };
-  const measured = measureParagraph(docParagraph, context, placement, measurer, environment);
-  return paragraphLayoutFromMeasurement(docParagraph, {
-    id: 'word-space-fit', source: { story: 'body', storyInstance: 'body', path: [0] },
+  const source = { story: 'body' as const, storyInstance: 'body', path: [0] };
+  const input = paragraphAcquisitionInput(docParagraph, source);
+  return acquireParagraphLayout(input, {
+    id: 'word-space-fit', source,
     flowDomainId: 'body', ordinaryFlow: true, context, placement, measurer, environment,
     exclusions: [],
-  } as unknown as Parameters<typeof paragraphLayoutFromMeasurement>[1], measured);
+  });
 }
 
 /** Production buildSegments + layoutLines over the fixture faces; returns each
