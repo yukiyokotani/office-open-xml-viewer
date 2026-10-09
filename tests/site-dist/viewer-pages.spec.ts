@@ -70,6 +70,118 @@ test('Try Yours XLSX chrome follows the site theme without recoloring cells', as
   await expect.poll(async () => (await readCanvas()).corner).toEqual(dark.corner);
 });
 
+test('Try Yours XLSX scroll buttons open a native sheet list on right-click', async ({ page }) => {
+  // Font-network completion is unrelated to footer navigation.
+  await page.route('https://fonts.googleapis.com/**', (route) => route.abort());
+  await page.route('https://fonts.gstatic.com/**', (route) => route.abort());
+  const pageErrors: string[] = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+  const status = page.locator('#status');
+  const strip = page.locator('#stage .xlsx-tab-strip');
+  const prev = page.locator('#stage [data-xlsx-tab-nav="prev"]');
+  const next = page.locator('#stage [data-xlsx-tab-nav="next"]');
+  const list = page.locator('#stage [data-xlsx-sheet-list]');
+  const items = list.getByRole('button');
+  const current = list.locator('[aria-current="true"]');
+  const tab = (name: string) => strip.getByRole('button', { name, exact: true });
+  const loadSample = async () => {
+    await page.locator('#file').setInputFiles(xlsxSample);
+    await expect(status).toContainText('rendered in', { timeout: 60_000 });
+  };
+  // A disabled scroll button (strip start/end, or no overflow) ignores pointer
+  // events, so `force` right-clicks its position as a user would.
+  const rightClick = (button: typeof prev) => button.click({ button: 'right', force: true });
+
+  await page.goto('/try/');
+  await loadSample();
+  const names = await strip.locator('button').evaluateAll((tabs) => tabs
+    .filter((element) => getComputedStyle(element).display !== 'none')
+    .map((element) => element.textContent ?? ''));
+  expect(names.length).toBeGreaterThan(1);
+  await expect(list).toHaveCount(1);
+  await expect(list).toBeHidden();
+
+  // Start of the strip: the previous button is disabled.
+  await prev.scrollIntoViewIfNeeded();
+  await expect(prev).toHaveCSS('pointer-events', 'none');
+  await rightClick(prev);
+  await expect(list).toBeVisible();
+  await expect(items).toHaveText(names);
+  await expect(current).toHaveCount(1);
+  await page.screenshot({ path: test.info().outputPath('sheet-list.png') });
+  const [box, footer] = await Promise.all([list.boundingBox(), prev.boundingBox()]);
+  const viewport = page.viewportSize() as { width: number; height: number };
+  if (!box || !footer) throw new Error('sheet list or footer has no layout box');
+  expect(box.y).toBeGreaterThanOrEqual(0);
+  expect(box.y + box.height).toBeLessThanOrEqual(viewport.height);
+  expect(box.y + box.height <= footer.y + 1 || box.y >= footer.y + footer.height - 1).toBe(true);
+
+  const choice = list.locator('button:not([aria-current])').last();
+  const chosen = (await choice.textContent()) ?? '';
+  await choice.click();
+  await expect(list).toBeHidden();
+  await expect(tab(chosen)).toHaveCSS('font-weight', '600');
+
+  // Normal clicks keep scrolling the strip and do not open the list.
+  await strip.evaluate((element: HTMLElement) => {
+    element.style.flex = '0 0 40px';
+    element.scrollLeft = 0;
+    element.dispatchEvent(new Event('scroll'));
+  });
+  await expect(next).toHaveCSS('pointer-events', 'auto');
+  await next.click();
+  await expect.poll(() => strip.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0);
+  await expect(list).toBeHidden();
+
+  // End of the strip: the next button is disabled.
+  await strip.evaluate((element: HTMLElement) => {
+    element.scrollLeft = element.scrollWidth;
+    element.dispatchEvent(new Event('scroll'));
+  });
+  await expect(next).toHaveCSS('pointer-events', 'none');
+  await rightClick(next);
+  await expect(list).toBeVisible();
+  await expect(current).toHaveText(chosen);
+  await page.keyboard.press('Escape');
+  await expect(list).toBeHidden();
+  await expect(next).toBeFocused();
+
+  // Keyboard flow. The platform context-menu key is not portable across
+  // headless platforms, so dispatch the contextmenu event it produces.
+  await next.evaluate((button: HTMLElement) => {
+    button.focus();
+    button.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+  });
+  await expect(current).toBeFocused();
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('Enter');
+  await expect(list).toBeHidden();
+  await expect(next).toBeFocused();
+  await expect(tab(names[(names.indexOf(chosen) + 1) % names.length])).toHaveCSS('font-weight', '600');
+
+  // Light dismissal.
+  await rightClick(prev);
+  await expect(list).toBeVisible();
+  await status.click();
+  await expect(list).toBeHidden();
+
+  // Replacing the file while the list is open tears it down with the viewer.
+  await rightClick(prev);
+  await expect(list).toBeVisible();
+  await loadSample();
+  await expect(list).toBeHidden();
+  await expect(list).toHaveCount(1);
+
+  await page.reload();
+  await loadSample();
+  await expect(list).toHaveCount(1);
+  await rightClick(prev);
+  await expect(items).toHaveText(names);
+  await page.keyboard.press('Escape');
+  await expect(list).toBeHidden();
+  expect(pageErrors).toEqual([]);
+});
+
 const dispatchPersistedPagehide = (page: Page) => page.evaluate(() => {
   window.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: true }));
 });
