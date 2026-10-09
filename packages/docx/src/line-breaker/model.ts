@@ -34,6 +34,10 @@ export interface LayoutSegSource {
 export interface LayoutTextSeg extends LayoutSegSource {
   text: string;
   semanticSlotSpans?: import('../layout/text.js').TextShapeSpan['semanticSlotSpans'];
+  /** Shared immutable slot source plus this slice's window. Emergency suffixes
+   * must not copy all remaining slots on every break. Retained placements
+   * materialize only their overlapping slots, rebased to their own text. */
+  semanticSlotRange?: Readonly<{ start: number; end: number }>;
   /** Authored family and selected source survive local FontFace aliases.
    * Compatibility metadata may distinguish an installed authored face from a
    * substitute without inspecting the CSS alias or changing its paint route. */

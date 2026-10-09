@@ -37,7 +37,7 @@ import {
 } from '../line-layout.js';
 import {
   calcEffectiveFontPx, EAST_ASIAN_RE, independentTextShapeRequest,
-  replaceTextShapeRequest, sliceTextShapeRequest, shapeRunToDocRun,
+  replaceTextShapeRequest, sliceTextShapeRequest, sliceSemanticSlotSpans, shapeRunToDocRun,
 } from './text.js';
 import { eastAsianUprightPaintOps } from './vertical-glyph-orientation.js';
 import { wordTrackChangeDecoration } from './paint-compatibility.js';
@@ -1516,7 +1516,10 @@ function textPlacement(
   return {
     kind: 'text',
     text: segment.text,
-    ...(segment.semanticSlotSpans ? { semanticSlotSpans: segment.semanticSlotSpans } : {}),
+    ...(segment.semanticSlotSpans ? { semanticSlotSpans: segment.semanticSlotRange
+      ? sliceSemanticSlotSpans(segment.semanticSlotSpans,
+        segment.semanticSlotRange.start, segment.semanticSlotRange.end)
+      : segment.semanticSlotSpans } : {}),
     ...(runIndex === undefined ? {} : { sourceRunIndex: runIndex }),
     ...(run?.type === 'field' ? { role: 'field-result' as const, dependency: fieldDependency(run) } : {}),
     ...(run?.type === 'text'

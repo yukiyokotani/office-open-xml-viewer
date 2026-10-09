@@ -367,7 +367,7 @@ export interface RetainedRunTypographyFacts {
 export interface TextPlacement {
   readonly kind: 'text';
   readonly text: string;
-  /** Semantic rFonts ranges relative to this physical grapheme's text. */
+  /** Semantic rFonts ranges relative to this physical shape unit's text. */
   readonly semanticSlotSpans?: import('./text.js').TextShapeSpan['semanticSlotSpans'];
   /** Parsed run occurrence retained for destination-page field convergence. */
   readonly sourceRunIndex?: number;
