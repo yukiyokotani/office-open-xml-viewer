@@ -104,19 +104,19 @@ it('reproves retained fragments and clears independent or transformed admission'
   expect(service.shape(replaceTextShapeRequest(request, 'Té')).spans).toHaveLength(2);
 });
 it('keeps admitted and ordinary shapes under distinct cache provenance', () => {
-  const service = fixture();
-  const admitted = segments('Té', environment(service))[0].textShapeRequest!;
+  // Build the request separately: segment construction may itself populate
+  // the service cache, so each ordering needs its own cold service below.
+  const admitted = segments('Té', environment(fixture()))[0].textShapeRequest!;
   expect(admitted.joinRegisteredLatinSlots).toBe(true);
   // All request facts stay identical except the admission proof flag, so
   // removing that flag from the cache key would alias these two shapes.
   const ordinary = { ...admitted, joinRegisteredLatinSlots: undefined };
-  expect(service.shape(ordinary).spans).toHaveLength(2);
-  expect(service.shape(admitted).spans).toHaveLength(1);
-  const fresh = fixture();
-  // A fresh service starts with the admitted request, so the ordinary
-  // request must also stay independent when the cache is populated in reverse.
-  expect(fresh.shape(admitted).spans).toHaveLength(1);
-  expect(fresh.shape(ordinary).spans).toHaveLength(2);
+  const ordinaryFirst = fixture();
+  expect(ordinaryFirst.shape(ordinary).spans).toHaveLength(2);
+  expect(ordinaryFirst.shape(admitted).spans).toHaveLength(1);
+  const admittedFirst = fixture();
+  expect(admittedFirst.shape(admitted).spans).toHaveLength(1);
+  expect(admittedFirst.shape(ordinary).spans).toHaveLength(2);
 });
 
 function document(runs: DocRun[], alignment: DocParagraph['alignment'] = 'left'): DocxDocumentModel {
