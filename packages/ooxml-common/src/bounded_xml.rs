@@ -646,7 +646,30 @@ pub fn strip_processed_mce_attributes<R>(
         }
     }
     let mut processed = BytesStart::new(name);
-    for attribute in retained {
+    for mut attribute in retained {
+        // XML 1.0 §2.3 permits a literal double quote inside a single-quoted
+        // attribute. quick-xml's Attribute retains the raw value but
+        // push_attribute always writes double-quoted delimiters. Escape only
+        // that newly conflicting delimiter: decoding/re-escaping the value
+        // would alter existing entities and character-reference whitespace.
+        // Existing element/context and projection gates charge the expanded
+        // bytes; their limits remain authoritative.
+        let quote_count = attribute.value.iter().filter(|&&byte| byte == b'"').count();
+        if quote_count != 0 {
+            let escaped_len = quote_count
+                .checked_mul(5)
+                .and_then(|extra| attribute.value.len().checked_add(extra))
+                .ok_or_else(|| format!("{label} XML attribute escaped length overflow"))?;
+            let mut value = Vec::with_capacity(escaped_len);
+            for &byte in attribute.value.as_ref() {
+                if byte == b'"' {
+                    value.extend_from_slice(b"&quot;");
+                } else {
+                    value.push(byte);
+                }
+            }
+            attribute.value = std::borrow::Cow::Owned(value);
+        }
         processed.push_attribute(attribute);
     }
     *element = processed;
@@ -1109,6 +1132,50 @@ mod tests {
             validate_mce_must_understand(&attributes.must_understand, &|_| false, "test")
                 .unwrap_err()
                 .contains("MustUnderstand")
+        );
+    }
+
+    #[test]
+    fn processed_attributes_preserve_quoted_infoset() {
+        let xml = format!(
+            "<r xmlns:mc=\"{MCE_NS}\" xmlns:f=\"urn:future\" mc:Ignorable=\"f\" f:drop=\"removed\" name='A \"quote\" &quot; &amp; &#x9;\tline\nend'/>"
+        );
+        let mut reader = NsReader::from_str(&xml);
+        let mut buffer = Vec::new();
+        let (_, event) = reader.read_resolved_event_into(&mut buffer).unwrap();
+        let Event::Empty(element) = event else {
+            panic!("fixture root is an empty element")
+        };
+        let context =
+            NamespaceContext::derive(&element, &NamespaceContext::root(), 1024, "test").unwrap();
+        let attributes =
+            derive_mce_attributes(&reader, &element, &MceScope::root(), &context, 1024, "test")
+                .unwrap();
+        let mut element = element.into_owned();
+        strip_processed_mce_attributes(
+            &reader,
+            &mut element,
+            &attributes.scope,
+            &|_| false,
+            "test",
+        )
+        .unwrap();
+
+        let event = Event::Empty(element);
+        let mut serialized = Vec::new();
+        append_projected_event(&mut serialized, &event, 0, 1024, "test").unwrap();
+        let projected = std::str::from_utf8(&serialized).unwrap();
+        let doc = roxmltree::Document::parse(projected).unwrap();
+        let root = doc.root_element();
+        assert_eq!(root.attribute("name"), Some("A \"quote\" \" & \t line end"));
+        assert_eq!(root.attribute((MCE_NS, "Ignorable")), None);
+        assert_eq!(root.attribute(("urn:future", "drop")), None);
+        assert_eq!(
+            root.namespaces()
+                .find(|ns| ns.name() == Some("f"))
+                .unwrap()
+                .uri(),
+            "urn:future"
         );
     }
 

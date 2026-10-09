@@ -848,6 +848,147 @@ fn capability_2015_is_local_to_single_chartex_drawing_choices() {
 }
 
 #[test]
+fn unselected_2015_picture_descendants_do_not_activate_must_understand() {
+    // ECMA-376 Part 3 §§9.3–9.4: the 2015 token is understood only for
+    // this library's exact ChartEx choice shape. Descendant MustUnderstand
+    // directives on an ordinary picture remain inactive when it is discarded.
+    // Exercise deferral before shape classification and absorption after the
+    // ordinary graphicData discards the still-open provisional branch.
+    let primary = picture_with_rid("rPrimary")
+        .replace("<w:drawing>", "<w:drawing mc:MustUnderstand=\"u\">")
+        .replace(
+            "</wp:inline>",
+            "<wp:docPr id=\"1\" name=\"late\" mc:MustUnderstand=\"u\"/></wp:inline>",
+        );
+    let data = compatibility_package(
+        &ac_requires("cap", &primary, &picture_with_rid("rFallback")),
+        "",
+    );
+    for streaming in [false, true] {
+        let parsed = outcome(&data, streaming);
+        assert!(parsed["model"].get("parseError").is_none(), "{parsed}");
+        assert_eq!(
+            parsed["model"]["body"][0]["runs"][0]["imagePath"],
+            "word/media/fallback.png"
+        );
+    }
+
+    // Deferral must not suppress a mismatch in an actually selected chart.
+    let selected_chart = package(
+        &ac_requires(
+            "cx1",
+            &live("c").replace("<w:drawing>", "<w:drawing mc:MustUnderstand=\"u\">"),
+            &picture(),
+        ),
+        "clusteredColumn",
+    );
+    assert!(outcome(&selected_chart, true)["model"]["parseError"]
+        .as_str()
+        .is_some_and(|error| error.contains("MustUnderstand")));
+}
+
+#[test]
+fn selected_chartex_choice_must_understand_follows_the_effective_mce_path() {
+    // ECMA-376 Part 3 §§9.3–9.4: once a ChartEx Choice is selected, its own and
+    // its effective descendants' MustUnderstand namespaces are processed on
+    // both paths, through the 2015-local and the parent-understood selection.
+    // The unrenderable "pie" part is checked before its picture substitution.
+    for (run, layout) in [
+        (
+            ac_requires(
+                "cx1",
+                &live("c").replace("<w:drawing>", "<w:drawing mc:MustUnderstand=\"u\">"),
+                &picture(),
+            ),
+            "clusteredColumn",
+        ),
+        (
+            ac(&live("c"), &picture()).replace(
+                "Requires=\"cx\">",
+                "Requires=\"cx\" mc:MustUnderstand=\"u\">",
+            ),
+            "pie",
+        ),
+    ] {
+        let data = package(&run, layout);
+        for streaming in [false, true] {
+            let parsed = outcome(&data, streaming);
+            assert!(
+                parsed["model"]["parseError"]
+                    .as_str()
+                    .is_some_and(|error| error.contains("MustUnderstand")),
+                "{parsed}"
+            );
+            assert_eq!(parsed["model"]["body"], serde_json::json!([]));
+            assert!(parsed.get("error").is_none(), "{parsed}");
+            assert_eq!(parsed["healthy"], true);
+        }
+    }
+
+    // Each directive is outside that path for a distinct reason: payload made
+    // ignorable by the enclosing AlternateContent, an opaque extension list,
+    // and an unselected nested Choice. The chart remains live on both paths.
+    let inactive = concat!(
+        r#"<wp:docPr id="1" name="chart"><a:extLst><a:ext uri="urn:x" mc:MustUnderstand="u"/></a:extLst></wp:docPr>"#,
+        r#"<mc:AlternateContent><mc:Choice Requires="u"><wp:cNvGraphicFramePr mc:MustUnderstand="u"/></mc:Choice></mc:AlternateContent>"#,
+        r#"<u:payload><wp:cNvGraphicFramePr mc:MustUnderstand="u"/></u:payload>"#,
+    );
+    let run = ac_requires(
+        "cx1",
+        &live("c").replace("<a:graphic>", &format!("{inactive}<a:graphic>")),
+        &picture(),
+    )
+    .replacen(
+        "<mc:AlternateContent>",
+        "<mc:AlternateContent mc:Ignorable=\"u\">",
+        1,
+    );
+    let data = package(&run, "clusteredColumn");
+    for streaming in [false, true] {
+        let parsed = outcome(&data, streaming);
+        assert!(parsed["model"].get("parseError").is_none(), "{parsed}");
+        assert_eq!(first_type(&parsed), Some("chart"), "{parsed}");
+    }
+}
+
+#[test]
+fn selected_chartex_preflight_checks_resource_fallbacks_and_target_container() {
+    // Selected ChartEx processing also visits an authored resource fallback
+    // chosen by a nested AC. Its drawing's MU cannot disappear just because
+    // the nested chart relationship is unrenderable. The enclosing target AC
+    // itself is processed before its selected branch (Part 3 §§9.1, 9.3–9.4).
+    let nested = ac_requires(
+        "cx1",
+        &live("c").replace("r:id=\"chart\"", "r:id=\"missing\""),
+        &picture().replace("<w:drawing>", "<w:drawing mc:MustUnderstand=\"u\">"),
+    );
+    let nested_run = ac_requires(
+        "cx1",
+        &live("c").replace("</wp:inline>", &format!("{nested}</wp:inline>")),
+        &picture(),
+    );
+    let container_run = ac_requires("cx1", &live("c"), &picture()).replacen(
+        "<mc:AlternateContent>",
+        "<mc:AlternateContent mc:MustUnderstand=\"u\">",
+        1,
+    );
+    for run in [nested_run, container_run] {
+        let data = package(&run, "clusteredColumn");
+        for streaming in [false, true] {
+            let parsed = outcome(&data, streaming);
+            assert!(
+                parsed["model"]["parseError"]
+                    .as_str()
+                    .is_some_and(|error| error.contains("MustUnderstand")),
+                "{parsed}"
+            );
+            assert_eq!(parsed["model"]["body"], serde_json::json!([]));
+            assert_eq!(parsed["healthy"], true);
+        }
+    }
+}
+
+#[test]
 fn large_non_chartex_2015_choice_stays_unselected_and_healthy() {
     let large = format!("<w:t>{}</w:t>", "x".repeat(64 * 1024)).repeat(544);
     let incomplete_drawing = format!("<w:drawing><wp:inline>{large}</wp:inline></w:drawing>");

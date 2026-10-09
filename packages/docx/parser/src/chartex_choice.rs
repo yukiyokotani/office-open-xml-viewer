@@ -8,9 +8,14 @@
 //! not added to the document's general MCE application configuration. The
 //! resource verdict still rejects an unrenderable ChartEx part and substitutes
 //! its authored fallback.
+use crate::document_projector::{
+    docx_is_application_defined_extension_element, docx_understands_namespace,
+};
 use ooxml_common::ns::{is_a_ns, is_c_ns, is_w_ns, is_wp_ns};
 use ooxml_common::{bounded_xml::MCE_NS, mce::ChoiceRequiresClassification};
+use std::collections::hash_map::{Entry, HashMap};
 use std::collections::HashSet;
+use std::hash::Hash;
 
 // [MS-ODRAWXML] §§2.1.5, 2.24.1.1 and 2.24.3.76 identify the
 // ChartEx part family, chart element and its relationship-id attribute.
@@ -155,7 +160,8 @@ pub(crate) fn select_native_alternate_content<'a, 'i>(
 
 /// A resource override must not newly select a Fallback that the MCE processor
 /// would reject. In that case retaining the parent's selected Choice preserves
-/// native/streaming parity and the parent's fail-closed drawing result.
+/// native/streaming parity and the parent's fail-closed drawing result. The
+/// selected-ChartEx preflight below applies the same per-element predicate.
 pub(crate) fn native_branch_must_understand(
     branch: roxmltree::Node,
     understood: &dyn Fn(&str) -> bool,
@@ -169,4 +175,199 @@ pub(crate) fn native_branch_must_understand(
                     .is_some_and(understood)
             })
         })
+}
+
+/// Native body preflight for an already selected run-level ChartEx Choice.
+///
+/// ECMA-376 Part 3 §9.3 selects the branch and §9.4 processes it; §9.1 and the
+/// Annex A.2.5 example require a MustUnderstand mismatch on that processed path
+/// to be signaled (§9.4 item 5 alone does not spell out that substep). The
+/// selected Choice and every effective descendant are checked before the
+/// resource override, so an unrenderable part cannot hide the mismatch behind
+/// its picture fallback. Inherited `mc:Ignorable`/`mc:ProcessContent`,
+/// selected nested branches (including their authored resource substitutions)
+/// and opaque extension lists follow the streamed projector, so ignored,
+/// unselected and opaque payload is never checked. Run-level selections retain
+/// the native drawing arm's namespace configuration, including for a nested
+/// run; this is not a general native/streaming MCE configuration unification.
+///
+/// Scope is library policy: only a run-level AlternateContent selected with the
+/// parser arm's configuration into the exact ChartEx shape is a target. Other
+/// native MCE MustUnderstand processing and the header/footer/note stories are
+/// unchanged. The caller owns how the mismatch is reported.
+///
+/// One borrowed depth-first pass over the parsed part: the frame stack is
+/// bounded by the depth already enforced by `parse_guarded`, and the counted
+/// directive maps hold only `&str` slices for the active path.
+pub(crate) fn validate_selected_chartex_must_understand(
+    root: roxmltree::Node,
+    rids: &HashSet<String>,
+) -> Result<(), String> {
+    let mut directives = ActiveMceDirectives::default();
+    let mut frames = Vec::new();
+    let mut next = Some((root, false));
+    while let Some((node, validate)) = next.take() {
+        if let Some(frame) = enter_effective_element(node, validate, rids, &mut directives)? {
+            frames.push(frame);
+        }
+        while let Some(frame) = frames.last_mut() {
+            if let Some(child) = frame.next {
+                frame.next = if frame.siblings {
+                    child.next_sibling()
+                } else {
+                    frame.resource_fallback.take()
+                };
+                next = Some((child, frame.validate));
+                break;
+            }
+            let element = frame.element;
+            frames.pop();
+            directives.update(element, false);
+        }
+    }
+    Ok(())
+}
+
+struct EffectiveFrame<'a, 'input> {
+    element: roxmltree::Node<'a, 'input>,
+    next: Option<roxmltree::Node<'a, 'input>>,
+    /// False for AlternateContent, whose only effective child is the selection.
+    siblings: bool,
+    // The selected Choice must be validated first, before substitution can
+    // visit the authored fallback actually processed by the stream projector.
+    resource_fallback: Option<roxmltree::Node<'a, 'input>>,
+    validate: bool,
+}
+
+fn enter_effective_element<'a, 'input>(
+    node: roxmltree::Node<'a, 'input>,
+    validate: bool,
+    rids: &HashSet<String>,
+    directives: &mut ActiveMceDirectives<'a>,
+) -> Result<Option<EffectiveFrame<'a, 'input>>, String> {
+    if !node.is_element() {
+        return Ok(None);
+    }
+    let namespace = node.tag_name().namespace();
+    let local = node.tag_name().name();
+    // §§8 and 9.1: application-defined extension payload is opaque, including
+    // any MCE attributes it carries.
+    if docx_is_application_defined_extension_element(namespace, local) {
+        return Ok(None);
+    }
+    directives.update(node, true);
+    if namespace.is_some_and(|namespace| {
+        !docx_understands_namespace(namespace) && directives.ignores(namespace, local)
+    }) {
+        directives.update(node, false);
+        return Ok(None);
+    }
+    if validate && !native_branch_must_understand(node, &docx_understands_namespace) {
+        // Matches the streamed projector's selected-ChartEx diagnostic.
+        return Err(
+            "document MCE MustUnderstand namespace is not understood in selected ChartEx Choice"
+                .to_string(),
+        );
+    }
+    if namespace != Some(MCE_NS) || local != "AlternateContent" {
+        return Ok(Some(EffectiveFrame {
+            element: node,
+            next: node.first_child(),
+            siblings: true,
+            resource_fallback: None,
+            validate,
+        }));
+    }
+    let run_level = node.parent_element().is_some_and(|parent| {
+        is_w_ns(parent.tag_name().namespace()) && parent.tag_name().name() == "r"
+    });
+    // A run-level AC uses the parser arm's exact selection; elsewhere the
+    // document configuration matches the streamed projector's selection.
+    let understood: fn(&str) -> bool = if run_level {
+        crate::parser::docx_understands_drawing_ns
+    } else {
+        docx_understands_namespace
+    };
+    let selected =
+        select_native_alternate_content(node, rids, &understood, &docx_understands_namespace);
+    let target = run_level
+        && selected.is_some_and(|branch| {
+            branch.tag_name().name() == "Choice" && native_verdict(branch, rids) != Verdict::Parent
+        });
+    // The target container itself is on the processed path. Earlier frames
+    // outside this bounded ChartEx seam retain the native parser's policy.
+    if target && !validate && !native_branch_must_understand(node, &docx_understands_namespace) {
+        return Err(
+            "document MCE MustUnderstand namespace is not understood in selected ChartEx Choice"
+                .to_string(),
+        );
+    }
+    let resource_fallback = selected
+        .filter(|branch| {
+            branch.tag_name().name() == "Choice"
+                && native_verdict(*branch, rids) == Verdict::Unrenderable
+        })
+        .and_then(|_| {
+            node.children().find(|branch| {
+                branch.is_element()
+                    && branch.tag_name().namespace() == Some(MCE_NS)
+                    && branch.tag_name().name() == "Fallback"
+                    && native_branch_must_understand(*branch, &docx_understands_namespace)
+            })
+        });
+    Ok(Some(EffectiveFrame {
+        element: node,
+        next: selected,
+        siblings: false,
+        resource_fallback,
+        validate: validate || target,
+    }))
+}
+
+/// Ignorable/ProcessContent declarations active on the traversal path. Counts
+/// let leaving an element remove exactly what entering it added, so lookups
+/// stay constant-time without per-scope set copies or ancestor rescans.
+#[derive(Default)]
+struct ActiveMceDirectives<'a> {
+    ignorable: HashMap<&'a str, usize>,
+    process_content: HashMap<(&'a str, &'a str), usize>,
+}
+
+impl<'a> ActiveMceDirectives<'a> {
+    fn update(&mut self, node: roxmltree::Node<'a, '_>, enter: bool) {
+        let tokens = |name: &str| {
+            node.attribute((MCE_NS, name))
+                .unwrap_or_default()
+                .split_whitespace()
+        };
+        for prefix in tokens("Ignorable") {
+            if let Some(namespace) = node.lookup_namespace_uri(Some(prefix)) {
+                count_directive(&mut self.ignorable, namespace, enter);
+            }
+        }
+        for name in tokens("ProcessContent") {
+            if let Some((prefix, local)) = name.split_once(':') {
+                if let Some(namespace) = node.lookup_namespace_uri(Some(prefix)) {
+                    count_directive(&mut self.process_content, (namespace, local), enter);
+                }
+            }
+        }
+    }
+
+    fn ignores(&self, namespace: &'a str, local: &'a str) -> bool {
+        self.ignorable.contains_key(namespace)
+            && !self.process_content.contains_key(&(namespace, local))
+            && !self.process_content.contains_key(&(namespace, "*"))
+    }
+}
+
+fn count_directive<K: Eq + Hash>(counts: &mut HashMap<K, usize>, key: K, enter: bool) {
+    if enter {
+        *counts.entry(key).or_default() += 1;
+    } else if let Entry::Occupied(mut entry) = counts.entry(key) {
+        *entry.get_mut() -= 1;
+        if *entry.get() == 0 {
+            entry.remove();
+        }
+    }
 }
