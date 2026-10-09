@@ -174,6 +174,21 @@ export class SheetViewEdits {
     entry.wire = undefined;
   }
 
+  /** Check the cumulative manual resize fan-out before capture/mutation. The
+   * selection-input budget bounds one gesture; this check prevents successive
+   * disjoint gestures from accumulating a million retained per-band overrides.
+   * Re-editing an existing band costs no new slot. Existing outline edits count
+   * in this channel too; derived automatic row heights have their own lifecycle. */
+  assertResizeBudget(sheetIndex: number, axis: OutlineAxis, indices: readonly number[], limit: number): void {
+    const entry = this.sizeOverrideStore.get(sheetIndex);
+    const target = axis === 'row' ? entry?.rows : entry?.cols;
+    let count = target?.size ?? 0;
+    for (const index of indices) if (!target?.has(index)) count++;
+    if (count > limit) {
+      throw new RangeError(`A resize projection may retain at most ${limit} manually edited bands per axis.`);
+    }
+  }
+
   /** A sheet's override store serialized for the wire, or undefined when
    *  nothing has been mutated (keeps the request payload unchanged). */
   wireSizeOverrides(sheetIndex: number): Readonly<{

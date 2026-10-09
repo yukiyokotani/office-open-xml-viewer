@@ -26,6 +26,17 @@ import type { ValidationPanel } from './validation-panel.js';
 const RESIZE_GRAB_PX = 4;
 const RESIZE_MIN_PX = 5;
 
+// View-only gesture resource policy, not an Excel/OOXML selection limit. The
+// current edit/wire format stores one entry per changed band (plus CSS intent
+// for columns). Permit a complete 16,384-column worksheet, and give row batches
+// the same maximum fan-out: a 1,048,576-row drag would create 64 times that work
+// on every pointer event. Union/count before materialization, reject larger
+// gestures without mutation, and report the limit through the host error path.
+// The host checks cumulative manual overrides too, so repeated gestures cannot
+// grow the resize wire indefinitely. Supporting larger row batches efficiently
+// requires an interval-based edit/wire representation.
+const MAX_RESIZE_BANDS = 16_384;
+
 /**
  * Pure hit predicate for drag-to-resize (issue #567): given a pointer
  * coordinate `pt` (in the header-strip's CSS-px axis — already RTL-un-mirrored
@@ -104,6 +115,7 @@ export interface SelectionInputHost {
   /** `columnCssPx`: logical CSS px captured by a column drag (view-only
    * canonical width that survives MDW changes). Omitted for other edits. */
   recordSizeOverride(axis: OutlineAxis, index: number, columnCssPx?: number): void;
+  assertResizeBudget(axis: OutlineAxis, indices: readonly number[], limit: number): void;
   updateSpacerSize(ws: Worksheet): void;
   refitAutoRowsAfterColumnResize(): void;
   reportError(error: unknown): void;
@@ -141,7 +153,8 @@ export class SelectionInput {
   // conversion is stable across the drag. A resize is a *view-only* adjustment:
   // it mutates the in-memory worksheet's colWidths/rowHeights, never the file.
   resizeDrag:
-    | { kind: 'col' | 'row'; index: number; originScaled: number; mdw: number; pointerId: number }
+    | { kind: 'col' | 'row'; index: number; originScaled: number; mdw: number; pointerId: number;
+        indices: readonly number[]; worksheet: Worksheet }
     | null = null;
   /** Last captured drag-selection pointer, retained while edge scrolling runs. */
   private selectionAutoScrollPointer:
@@ -187,9 +200,13 @@ export class SelectionInput {
     this.pendingElementClick = null;
   }
 
-  /** Forget a pending object click (the displayed sheet changed). */
-  clearPendingElementClick(): void {
+  /** Navigation/reload installs a different sheet projection: discard deferred
+   * clicks and end resize capture without refitting the newly displayed sheet. */
+  clearSheetGestures(): void {
+    this.pendingTap = null;
+    this.pendingClick = null;
     this.pendingElementClick = null;
+    if (this.resizeDrag) this.finishResize(this.resizeDrag.pointerId, false);
   }
 
   /** Claim drag-selection ownership and discard deferred gestures from any
@@ -265,7 +282,9 @@ export class SelectionInput {
     const ptY = clientY - rect.top;
     const headerW = Math.round(HEADER_W * cs);
     const headerH = Math.round(HEADER_H * cs);
-    const mdw = getGridGeometryForWorksheet(ws).maximumDigitWidth;
+    const geometry = getGridGeometryForWorksheet(ws);
+    const mdw = geometry.maximumDigitWidth;
+    const axes = geometry.axesAtScale(cs);
 
     // Column borders live in the column-header strip, right of the corner.
     if (ptY <= headerH && ptX > headerW) {
@@ -273,7 +292,10 @@ export class SelectionInput {
       if (hit?.kind !== 'col') return null;
       const origins = new Map<number, number>(); // index -> fixed LTR origin edge
       const edges: { index: number; edge: number }[] = [];
-      for (const c of [hit.col - 1, hit.col]) {
+      // Zero-width runs share the preceding visible band's trailing edge.
+      // Locate that owner by offset instead of walking hidden ordinals.
+      const previous = axes.col.indexAt(axes.col.offsetOf(hit.col) - 1).index;
+      for (const c of [previous, hit.col]) {
         if (c < 1) continue;
         const r = this.host.cellRect(1, c); // x is independent of the row
         if (!r) continue;
@@ -291,7 +313,8 @@ export class SelectionInput {
       if (hit?.kind !== 'row') return null;
       const origins = new Map<number, number>(); // index -> fixed LTR origin edge
       const edges: { index: number; edge: number }[] = [];
-      for (const rIdx of [hit.row - 1, hit.row]) {
+      const previous = axes.row.indexAt(axes.row.offsetOf(hit.row) - 1).index;
+      for (const rIdx of [previous, hit.row]) {
         if (rIdx < 1) continue;
         const r = this.host.cellRect(rIdx, 1); // y is independent of the column
         if (!r) continue;
@@ -306,6 +329,68 @@ export class SelectionInput {
     return null;
   }
 
+  /** Snapshot same-axis full-band areas only when the grabbed visible owner
+   * belongs to one. API/keyboard-created selections also participate in the
+   * next pointer drag; cells, sheet selection and outside boundaries stay single.
+   * Union discontiguous/overlapping areas, preserve zero-size hidden bands, and
+   * treat frozen bands by logical index. Selection/active cell are unchanged,
+   * and later selection changes do not redirect this drag. Not an auto-fit API. */
+  private resizeIndices(kind: 'col' | 'row', index: number): number[] {
+    const ws = this.host.worksheet();
+    const ranges = (this.host.selectionState()?.areas ?? []).flatMap((area) =>
+      kind === 'col' && area.kind === 'columns' ? [[area.firstColumn, area.lastColumn]]
+        : kind === 'row' && area.kind === 'rows' ? [[area.firstRow, area.lastRow]] : []);
+    if (!ws || !ranges.some(([first, last]) => index >= first && index <= last)) return [index];
+    ranges.sort((a, b) => a[0] - b[0]);
+    const union: number[][] = [];
+    for (const range of ranges) {
+      const previous = union.at(-1);
+      if (previous && range[0] <= previous[1] + 1) previous[1] = Math.max(previous[1], range[1]);
+      else union.push([...range]);
+    }
+    const count = union.reduce((total, [first, last]) => total + last - first + 1, 0);
+    if (count > MAX_RESIZE_BANDS) {
+      throw new RangeError(`A resize gesture may affect at most ${MAX_RESIZE_BANDS} selected bands.`);
+    }
+    const geometry = getGridGeometryForWorksheet(ws);
+    // Geometry also resolves range-encoded column widths and zero defaults;
+    // checking only the explicit size dictionary would unhide those bands.
+    const axis = kind === 'col' ? geometry.col : geometry.row;
+    const indices: number[] = [];
+    for (const [first, last] of union) {
+      for (let band = first; band <= last; band++) {
+        if (axis.sizeOf(band) > 0) indices.push(band);
+      }
+    }
+    return indices;
+  }
+
+  /** End input ownership before release/refit, which can fail. Like the existing
+   * single-band live resize, pointercancel retains the last completed live size;
+   * it does not undo an edit. No subsequent move from that pointer can resize.
+   * Render failures happen after the whole batch's model/wire edit is recorded:
+   * they report an error and may leave the prior bitmap, never a partial batch. */
+  private finishResize(pointerId: number, refit = true): void {
+    const drag = this.resizeDrag;
+    if (!drag || drag.pointerId !== pointerId) return;
+    this.resizeDrag = null;
+    try {
+      // The UA may already have released capture for pointercancel/lost capture.
+      if (this.host.scrollHost.hasPointerCapture?.(pointerId) !== false) {
+        this.host.scrollHost.releasePointerCapture(pointerId);
+      }
+    } catch (error) {
+      this.host.reportError(error);
+    }
+    try {
+      if (refit && drag.kind === 'col' && drag.worksheet === this.host.worksheet()) {
+        this.host.refitAutoRowsAfterColumnResize();
+      }
+    } catch (error) {
+      this.host.reportError(error);
+    }
+  }
+
   /**
    * Apply a live resize drag: size the band from its fixed origin edge to the
    * current pointer, clamp to {@link RESIZE_MIN_PX}, and write the result back
@@ -317,22 +402,34 @@ export class SelectionInput {
   applyResize(clientX: number, clientY: number): void {
     const drag = this.resizeDrag;
     const ws = this.host.worksheet();
-    if (!drag || !ws) return;
+    if (!drag) return;
+    // A delayed move must never edit a replacement projection after navigation
+    // or reload. Normally clearSheetGestures releases ownership at installation.
+    if (!ws || drag.worksheet !== ws) {
+      this.finishResize(drag.pointerId, false);
+      return;
+    }
     const cs = this.host.scale();
     const rect = this.host.canvasArea.getBoundingClientRect();
 
     if (drag.kind === 'col') {
       const ptX = this.host.screenX(clientX - rect.left, 0);
       const sizePx = Math.max(RESIZE_MIN_PX, Math.round((ptX - drag.originScaled) / cs));
-      ws.colWidths[drag.index] = pxToColWidth(sizePx, drag.mdw);
-      // The drag's intent is this logical CSS size; pass it so a later MDW
-      // change does not re-decode the stored width to a different size.
-      this.host.recordSizeOverride('col', drag.index, sizePx);
+      const width = pxToColWidth(sizePx, drag.mdw);
+      for (const index of drag.indices) {
+        ws.colWidths[index] = width;
+        // Every target retains the same drag CSS intent through MDW rebind,
+        // auto-height clones and worker projections; authored widths stay raw.
+        this.host.recordSizeOverride('col', index, sizePx);
+      }
     } else {
       const ptY = clientY - rect.top;
       const sizePx = Math.max(RESIZE_MIN_PX, Math.round((ptY - drag.originScaled) / cs));
-      ws.rowHeights[drag.index] = pxToRowHeight(sizePx);
-      this.host.recordSizeOverride('row', drag.index);
+      const height = pxToRowHeight(sizePx);
+      for (const index of drag.indices) {
+        ws.rowHeights[index] = height;
+        this.host.recordSizeOverride('row', index);
+      }
     }
 
     GridGeometry.invalidate(ws); // sizes changed → rebuild the cumulative-offset axes
@@ -623,6 +720,7 @@ export class SelectionInput {
     this.on('pointerdown', (e: PointerEvent) => {
       this.host.scrollHost.focus?.({ preventScroll: true });
       if (e.button !== 0) return;
+      if (this.resizeDrag) return; // another pointer cannot steal a live resize
       if (this.isSelecting && e.pointerId !== this.selectionPointerId) return;
 
       // Drag-to-resize a column/row from its header border (issue #567). Checked
@@ -634,8 +732,17 @@ export class SelectionInput {
         : null;
       if (resize) {
         e.preventDefault();
-        this.resizeDrag = { ...resize, pointerId: e.pointerId };
-        this.host.scrollHost.setPointerCapture(e.pointerId);
+        try {
+          const worksheet = this.host.worksheet()!;
+          const indices = this.resizeIndices(resize.kind, resize.index);
+          this.host.assertResizeBudget(resize.kind, indices, MAX_RESIZE_BANDS);
+          // A failed capture must not leave a partially started resize alive.
+          this.host.scrollHost.setPointerCapture(e.pointerId);
+          this.resizeDrag = { ...resize, indices, worksheet, pointerId: e.pointerId };
+        } catch (error) {
+          this.host.reportError(error);
+          return;
+        }
         this.host.hideCommentPopup();
         return;
       }
@@ -797,9 +904,7 @@ export class SelectionInput {
 
     this.on('pointerup', (e: PointerEvent) => {
       if (this.resizeDrag && this.resizeDrag.pointerId === e.pointerId) {
-        if (this.resizeDrag.kind === 'col') this.host.refitAutoRowsAfterColumnResize();
-        this.host.scrollHost.releasePointerCapture(e.pointerId);
-        this.resizeDrag = null;
+        this.finishResize(e.pointerId);
         return;
       }
       if (this.pendingElementClick?.pointerId === e.pointerId) {
@@ -871,8 +976,7 @@ export class SelectionInput {
 
     this.on('pointercancel', (e: PointerEvent) => {
       if (this.resizeDrag && this.resizeDrag.pointerId === e.pointerId) {
-        if (this.resizeDrag.kind === 'col') this.host.refitAutoRowsAfterColumnResize();
-        this.resizeDrag = null;
+        this.finishResize(e.pointerId);
       }
       if (this.pendingTap && this.pendingTap.pointerId === e.pointerId) {
         this.pendingTap = null;

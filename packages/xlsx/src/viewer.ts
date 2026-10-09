@@ -853,6 +853,8 @@ class XlsxViewerEngine implements ZoomableViewer {
       hideValidationPanel: () => this.hideValidationPanel(),
       recordSizeOverride: (axis, index, columnCssPx) =>
         this.recordSizeOverride(axis, index, columnCssPx),
+      assertResizeBudget: (axis, indices, limit) =>
+        this.viewEdits.assertResizeBudget(this.currentSheet, axis, indices, limit),
       updateSpacerSize: (ws) => this.updateSpacerSize(ws),
       refitAutoRowsAfterColumnResize: () => this.refitAutoRowsAfterColumnResize(),
       reportError: (error) => this._reportRenderError(error),
@@ -1291,7 +1293,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     }
     this.sourceCommentMap = createCommentMap(this.currentSourceComments);
     this.setElementContext(null);
-    this.selectionInput.clearPendingElementClick();
+    this.selectionInput.clearSheetGestures();
     this.updateFooterDirection();
     this.viewportTop = 0;
     this.selectionController.reset();
