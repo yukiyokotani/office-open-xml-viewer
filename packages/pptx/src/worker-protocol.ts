@@ -125,8 +125,12 @@ export type RenderWorkerRequest =
       imageResources?: import('@silurus/ooxml-core').ImageResourceOptions;
       skipMediaControls?: boolean;
       dim?: DimOptions;
+      /** Contextless caller-realm surface, transferred so worker text uses the
+       *  caller's inherited canvas language. Absent: the worker creates one. */
+      canvas?: OffscreenCanvas;
     }
-  | { kind: 'collectRuns'; id: number; slideIndex: number; width: number }
+  // Collection paints to observe runs, so it takes the same surface.
+  | { kind: 'collectRuns'; id: number; slideIndex: number; width: number; canvas?: OffscreenCanvas }
   | {
       kind: 'hitTestElement';
       id: number;

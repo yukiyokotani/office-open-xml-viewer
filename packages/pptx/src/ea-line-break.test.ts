@@ -118,6 +118,29 @@ describe('pptx kinsoku across run seams (issue #1653 controls K00–K23)', () =>
     expect(lines([lang('漢', 'en-US'), lang('“漢漢', 'en-US')], 20, true)).toEqual(['漢“', '漢漢']);
   });
 
+  it('decides by language, not by whether the Latin and East Asian faces coincide', () => {
+    // The controls' own setup: Arial in every slot, the quote inside one run.
+    const arial = (text: string, value: string): TextRunData => ({ ...lang(text, value), fontFamilyEa: 'Arial' });
+    expect(lines([arial('漢漢”漢', 'en-US')], 20, true)).toEqual(['漢漢', '”漢']);
+    expect(lines([arial('漢“漢漢', 'en-US')], 20, true)).toEqual(['漢“', '漢漢']);
+    expect(lines([arial('漢漢”漢', 'ja-JP')], 20, true)).toEqual(['漢', '漢”', '漢']);
+    expect(lines([arial('漢“漢漢', 'ja-JP')], 20, true)).toEqual(['漢', '“漢', '漢']);
+    // The seam is a break boundary only; one face still paints as one segment.
+    const laid = layoutParagraph(measuringContext(), paragraph([arial('漢漢”漢', 'ja-JP')], true), 20, 20,
+      '000000', 1, 0);
+    expect(laid[1].segments.map((segment) => segment.text)).toEqual(['漢”']);
+  });
+
+  it('adds the one-face slot seam only for the measured en-US and ja-JP runs', () => {
+    const arial = (text: string, value?: string): TextRunData =>
+      ({ ...run(text), fontFamilyEa: 'Arial', ...(value ? { lang: value } : {}) });
+    expect(lines([arial('漢漢”漢', 'EN-us')], 20, true)).toEqual(['漢漢', '”漢']);
+    // Unmeasured languages, including other en/ja tags, keep one segment.
+    for (const value of [undefined, 'ko-KR', 'zh-CN', 'fr-FR', 'en-GB']) {
+      expect(lines([arial('漢漢”漢', value)], 20, true)).toEqual(['漢', '漢”', '漢']);
+    }
+  });
+
   it('keeps unobserved punctuation and mixed-language seams outside the new rule', () => {
     expect(lines([lang('漢漢', 'ja-JP'), lang('、漢', 'ja-JP')], 20, true)).toEqual(['漢漢', '、漢']);
     expect(lines([lang('漢“', 'en-US'), lang('）', 'ja-JP'), lang('”漢', 'ja-JP')], 30, true))

@@ -1305,6 +1305,20 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
         Err(e) => return Ok(degraded_document(theme, format!("word/document.xml: {e}"))),
     };
     validate_paragraph_ilvls(xml_doc.root_element())?;
+    // ECMA-376 Part 3 §9.1 requires a MustUnderstand mismatch to be signaled
+    // but does not mandate the mechanism. Library policy, not an Office
+    // observation: like the streamed facade, report it as this required part's
+    // degraded document rather than substituting a picture or dropping the run.
+    // `run_operation` still lets a poisoned resource session win.
+    if let Err(error) = chartex_choice::validate_selected_chartex_must_understand(
+        xml_doc.root_element(),
+        &chart_map.renderable_chartex_rids,
+    ) {
+        return Ok(degraded_document(
+            theme,
+            format!("word/document.xml: {error}"),
+        ));
+    }
 
     let body_node = match xml_doc
         .root_element()

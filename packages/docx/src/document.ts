@@ -1842,8 +1842,14 @@ export class DocxDocument {
     if (this._mode === 'worker') {
       // The selected date variant may have a different page count than default
       // metadata, so the worker validates against the layout it actually paints.
+      // WHATWG HTML: an OffscreenCanvas constructed here snapshots this
+      // document's language and direction, while one constructed in the Worker
+      // has unknown language. Transferring it before any getContext() carries
+      // those inherited values, matching the main-mode surface below.
+      const canvas = new OffscreenCanvas(1, 1);
       const res = await this._bridge.request(
-        (id) => ({ type: 'renderPage', id, pageIndex, opts: wireOpts }) satisfies RenderWorkerRequest,
+        (id) => ({ type: 'renderPage', id, pageIndex, opts: wireOpts, canvas }) satisfies RenderWorkerRequest,
+        [canvas],
       );
       const rendered = res as Extract<RenderWorkerResponse, { type: 'pageRendered' }>;
       try {

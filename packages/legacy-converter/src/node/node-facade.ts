@@ -14,6 +14,7 @@ export type { NodeCanvasFactory, NodeCanvasLike } from '../../../node/src/render
 export { installImageBitmapShim, installOffscreenCanvasShim } from '../../../node/src/render.ts';
 export { renderWorksheetViewport } from '../../../xlsx/src/render-orchestrator.ts';
 export { GridGeometry } from '../../../xlsx/src/internal/grid-geometry.ts';
+export { compileCf, evaluateCf } from '../../../xlsx/src/conditional-format.ts';
 import type { NodeCanvasFactory } from '../../../node/src/render.ts';
 import { loadSkiaForTests } from '../../../node/src/test-imports.ts';
 

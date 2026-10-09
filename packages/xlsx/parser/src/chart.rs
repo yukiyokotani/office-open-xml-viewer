@@ -184,10 +184,14 @@ impl XlsxChartReferenceResolver<'_, '_, '_, '_> {
         Some((expanded, resolved))
     }
 
+    /// The last match wins: the worksheet parser orders this sheet's local
+    /// names after workbook names, so a local name shadows its global twin,
+    /// as in CF formulas and internal hyperlinks.
     fn expand_defined_name(&self, formula: &str) -> String {
         let trimmed = formula.trim();
         self.defined_names
             .iter()
+            .rev()
             .find(|defined| defined.name.eq_ignore_ascii_case(trimmed))
             .map(|defined| defined.formula.clone())
             .unwrap_or_else(|| trimmed.to_string())
@@ -1793,6 +1797,44 @@ mod worksheet_reference_tests {
                 Some(id),
             );
         }
+    }
+
+    #[test]
+    fn chart_reference_names_prefer_current_sheet_local_over_workbook_name() {
+        // `Rate` is global before its local twin, `Tax` after it; the other
+        // sheet's `RATE` is out of scope even though it comes last.
+        let workbook = r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><definedNames><definedName name="Rate">'التقرير'!$D$2:$D$4</definedName><definedName name="rate" localSheetId="0">'التقرير'!$C$2:$C$4</definedName><definedName name="Tax" localSheetId="0">'التقرير'!$E$2:$E$4</definedName><definedName name="Tax">'التقرير'!$D$2:$D$4</definedName><definedName name="RATE" localSheetId="1">'التقرير'!$E$2:$E$4</definedName></definedNames></workbook>"#;
+        let workbook = roxmltree::Document::parse(workbook).unwrap();
+        let defined_names = crate::parse_defined_names_for_sheet(&workbook, 0);
+        let mut archive = archive_with_chart_and_data(&chart_xml(false));
+        let rels = parse_guarded(workbook_rels_xml()).unwrap();
+        let sheet_metas = sheets();
+        let mut session = WorksheetReferenceSession::default();
+        let theme = vec!["#4472C4".into(); 12];
+        let styles = crate::styles::parse_styles(&mut archive, &theme).expect("styles");
+        let number_formats = ChartNumberFormatCache::from_styles(&styles.styles);
+        session.seed_current_sheet("Dashboard", None);
+        let mut resolver = XlsxChartReferenceResolver {
+            archive: &mut archive,
+            materialized_rows: None,
+            materialized_col_hidden: None,
+            sheet_name: "Dashboard",
+            sheets: &sheet_metas,
+            workbook_rels: &rels,
+            shared_strings: &[],
+            defined_names: &defined_names,
+            number_formats: &number_formats,
+            session: &mut session,
+            visibility_cache: HashMap::new(),
+        };
+        let mut numbers = |name: &str| {
+            ooxml_common::chart::ChartReferenceResolver::resolve_numbers(&mut resolver, name)
+        };
+        assert_eq!(
+            numbers("Rate"),
+            Some(vec![Some(5000.0), Some(6200.0), Some(7500.0)])
+        );
+        assert_eq!(numbers("TAX"), Some(vec![Some(3.0), Some(5.0), Some(7.0)]));
     }
 
     #[test]

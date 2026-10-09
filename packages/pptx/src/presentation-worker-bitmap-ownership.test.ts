@@ -8,6 +8,8 @@ function ownedBitmap(close = vi.fn()) {
 }
 
 function workerPresentation(bitmap: ImageBitmap, runs: PptxTextRunInfo[]): PptxPresentation {
+  // Worker mode requires OffscreenCanvas; the caller creates the render surface.
+  vi.stubGlobal('OffscreenCanvas', class { constructor(readonly width: number, readonly height: number) {} });
   const instance = Object.create(PptxPresentation.prototype) as Record<string, unknown>;
   const slideWidth = 9_144_000;
   const slideHeight = 6_858_000;

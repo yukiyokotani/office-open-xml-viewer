@@ -753,6 +753,18 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
       registeredMetrics.set(metricTupleKey(metric.sourceIdentity, metric.family, metric.weight, metric.style), metric);
     }
   }
+  // Metric resources represented in this immutable snapshot, grouped by the
+  // case-insensitive Canvas family/weight/style tuple. This does not enumerate
+  // registrations outside the snapshot in an external FontFaceSet.
+  const canvasFaceKey = (family: string, weight: number, style: FontStyle) =>
+    JSON.stringify([normalizeFontMetricFamily(family), weight, style]);
+  const metricsByCanvasFace = new Map<string, Readonly<ResolvedFontMetric>[]>();
+  for (const metric of Object.values(fontMetrics)) {
+    const key = canvasFaceKey(metric.family, metric.weight ?? 400, metric.style ?? 'normal');
+    const peers = metricsByCanvasFace.get(key);
+    if (peers) peers.push(metric);
+    else metricsByCanvasFace.set(key, [metric]);
+  }
   const genericFamilies = Object.freeze(Object.fromEntries(
     Object.entries(input.genericFamilies ?? {})
       .map(([family, generic]) => [family.trim().toLocaleLowerCase('en-US'), generic])
@@ -1139,9 +1151,8 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
         const metric = face.resourceIdentity ? registeredMetrics.get(metricTupleKey(
           face.resourceIdentity, face.resolvedFamily, face.weight, face.style,
         )) : undefined;
-        const ranges = metric?.unicodeRanges;
-        const covered = ranges !== undefined && [...request.text].every(scalar => {
-          const cp = scalar.codePointAt(0)!;
+        const scalars = Array.from(request.text, scalar => scalar.codePointAt(0)!);
+        const coveredCount = (ranges: readonly (readonly [number, number])[]) => scalars.filter(cp => {
           let low = 0;
           let high = ranges.length;
           while (low < high) {
@@ -1150,7 +1161,16 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
             else high = middle;
           }
           return low < ranges.length && ranges[low]![0] <= cp;
-        });
+        }).length;
+        const ranges = metric?.unicodeRanges;
+        // This join guard is stricter than selected line-metric admission:
+        // every snapshot peer must explicitly cover all or none of the
+        // grapheme. Unknown or partial cmap coverage declines joining;
+        // geometry selection remains the separate line-metric policy.
+        const covered = ranges !== undefined && coveredCount(ranges) === scalars.length
+          && (metricsByCanvasFace.get(canvasFaceKey(face.resolvedFamily, face.weight, face.style)) ?? [])
+            .every(peer => peer === metric || (peer.unicodeRanges !== undefined
+              && [0, scalars.length].includes(coveredCount(peer.unicodeRanges))));
         if ((face.source === 'embedded' || face.source === 'local') && face.resourceIdentity
           && covered && merged.every(group => !group.substituteScript
             && (group.script === 'ascii' || group.script === 'highAnsi')

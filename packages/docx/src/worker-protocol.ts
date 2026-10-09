@@ -127,7 +127,15 @@ export type RenderWorkerRequest =
       progressiveLayout?: boolean;
     }
   | { type: 'selectLayoutView'; id: number; currentDateMs: number; showTrackedChanges: boolean }
-  | { type: 'renderPage'; id: number; pageIndex: number; opts: WireRenderPageOptions }
+  | {
+      type: 'renderPage';
+      id: number;
+      pageIndex: number;
+      opts: WireRenderPageOptions;
+      /** Contextless caller-realm surface, transferred so worker text uses the
+       *  caller's inherited canvas language. Absent: the worker creates one. */
+      canvas?: OffscreenCanvas;
+    }
   // IX6 — collect a page's text-run geometry WITHOUT transferring a bitmap. The
   // find controller scans every page for its runs; a bitmap per page would be
   // wasted work + transfer for pages the user never looks at.

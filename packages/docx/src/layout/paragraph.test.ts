@@ -917,6 +917,32 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
     expect(node.drawings[0]?.flowBounds.yPt).toBe(7);
   });
 
+  it('keeps an aligned first-line picture in its own line on a grid', () => {
+    const occurrenceId = 'anchor:aligned-grid-line';
+    const seed = retainedAnchor(occurrenceId);
+    const anchored = { ...seed, vertical: { ...seed.vertical, relativeFrom: 'line',
+      choice: { kind: 'align', value: 'bottom' } } };
+    const anchorParagraph = { ...paragraph, runs: [
+      { type: 'anchorHost', fontSize: 10, anchorOccurrenceId: occurrenceId },
+      { type: 'image', imagePath: 'word/media/anchor.png', mimeType: 'image/png',
+        widthPt: 20, heightPt: 10, anchor: true, anchorAcquisitionInput: anchored },
+    ] } as unknown as DocParagraph;
+    const host = { text: '', metricOnly: true, sourceRunIndex: 0, measuredWidth: 0,
+      fontSize: 10, fontFamily: 'Test Sans', fontRoute } as unknown as LayoutTextSeg;
+    const node = projectMeasuredSegment(anchorParagraph, host, {
+      ...acquisitionContext, spaceBeforePt: 6, lineGrid: { active: true, pitchPt: 20 },
+    }, undefined, {
+      page: { xPt: 0, yPt: 0, widthPt: 200, heightPt: 300 },
+      margin: { xPt: 10, yPt: 20, widthPt: 180, heightPt: 260 },
+      column: { xPt: 10, yPt: 20, widthPt: 90, heightPt: 260 }, pageParity: 'odd',
+    });
+    // §20.4.2.2 / §20.4.3.2: bottom alignment holds the object against the line's bottom.
+    // The grid origin observation measured posOffset only; it moves no edge.
+    const line = node.lines[0]!.bounds;
+    const drawing = node.drawings[0]!.flowBounds;
+    expect(drawing.yPt + drawing.heightPt).toBe(line.yPt + line.heightPt);
+  });
+
   it('uses physical host identity when later picture lines have the same numeric top', () => {
     const occurrenceId = 'anchor:later-grid-line';
     const seed = retainedAnchor(occurrenceId);
@@ -1485,7 +1511,7 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
   });
 
   it('keeps a bottom/centre aligned spAutoFit box aligned at its fitted height', () => {
-    // ECMA-376 §20.4.3.1 wp:align + §21.1.2.1.3 spAutoFit: the aligned edge
+    // ECMA-376 §20.4.2.2 wp:align / §20.4.3.2 ST_AlignV + §21.1.2.1.3 spAutoFit: the aligned edge
     // belongs to the drawn (fitted) extent, not to the authored extent.
     const services = createLayoutServices({
       section: {

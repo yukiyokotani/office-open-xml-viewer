@@ -1,5 +1,9 @@
 import { excelSerialToUtcDate, utcDateToExcelSerial } from '@silurus/ooxml-core';
 import type { Cell, DefinedName } from './types.js';
+// OOXML's fixed address grammar bounds belong to lexical reference parsing,
+// independently of renderer geometry and its shared layout runtime.
+const MAX_WORKSHEET_ROW = 1_048_576;
+const MAX_WORKSHEET_COL = 16_384;
 
 // ────────────────────────────────────────────────────────────────
 // Formula evaluator (conditional-formatting `expression` rules)
@@ -23,7 +27,8 @@ interface EvalCtx {
   anchorRow: number;
   anchorCol: number;
   cellIndex: ReadonlyMap<string, Cell>;
-  definedNames: Map<string, DefinedName>;
+  /** In-scope names keyed by spelling; see `lookupDefinedName`. */
+  definedNames: ReadonlyMap<string, DefinedName>;
   /** Recursion guard for nested defined-name resolution. */
   depth: number;
 }
@@ -244,13 +249,16 @@ function tokenize(formula: string): Tok[] {
     }
     // Reference or identifier: may start with $, letters, or letters+digits.
     // Defined names allow letters, digits, '_', '.'; cell refs are
-    // `$?[A-Z]+\$?[0-9]+` (case-insensitive).
+    // `$?[A-Z]+\$?[0-9]+` (case-insensitive) inside the worksheet grid. A
+    // name cannot be spelled as a cell reference (§18.2.5, §18.17.5.1), so a
+    // spelling inside the grid is a cell and one outside it may be a name.
+    // A cell-like spelling directly before '(' is a function name (LOG10).
     if (c === '$' || isIdentStart(c)) {
       let j = i;
       while (j < s.length && (s[j] === '$' || isIdentPart(s[j]))) j++;
       const text = s.slice(i, j);
       i = j;
-      const ref = tryParseCellRef(text);
+      const ref = s[i] === '(' ? null : tryParseCellRef(text);
       if (ref) {
         toks.push({ kind: 'ref', text, ref });
       } else {
@@ -297,6 +305,11 @@ function tryParseCellRef(s: string): { colAbs: boolean; col: number; rowAbs: boo
   for (let k = 0; k < colLetters.length; k++) {
     col = col * 26 + (colLetters.charCodeAt(k) - 64);
   }
+  // The worksheet grid (MAX_WORKSHEET_ROW x MAX_WORKSHEET_COL) bounds cell
+  // references. Outside it the spelling is not a cell (§18.2.5, §18.17.5.1),
+  // so `Limit1` resolves as a defined name instead of reading a blank that
+  // comparisons would treat as 0.
+  if (rowNum < 1 || rowNum > MAX_WORKSHEET_ROW || col > MAX_WORKSHEET_COL) return null;
   return { colAbs, col, rowAbs, row: rowNum };
 }
 
@@ -323,8 +336,40 @@ interface Parser {
   toks: Tok[];
   pos: number;
   budget: ParseBudget;
-  names: Map<string, DefinedName>;
+  names: ReadonlyMap<string, DefinedName>;
   nameDepth: number;
+}
+
+// §18.17.2.5: defined names are case-insensitive. The caller keys its map by
+// the stored spelling, so resolve through ASCII-folded keys. Folding only
+// ASCII is library policy: formula tokens are ASCII here, and Unicode case
+// equivalence (e.g. KELVIN SIGN vs "k") is not established. A later case
+// variant wins, as an exact duplicate already does in the caller's map and
+// in internal-hyperlink name resolution (the existing shadowing policy).
+//
+// The index is built once per caller-owned map, not per evaluated cell. The
+// map is treated as fixed after construction; a size change rebuilds the
+// index, and a stale key whose definition was removed fails closed.
+interface FoldedNameIndex {
+  size: number;
+  keys: Map<string, string>;
+}
+const foldedNameIndexes = new WeakMap<ReadonlyMap<string, DefinedName>, FoldedNameIndex>();
+
+function asciiFold(name: string): string {
+  return name.replace(/[A-Z]+/gu, (letters) => letters.toLowerCase());
+}
+
+function lookupDefinedName(names: ReadonlyMap<string, DefinedName>, spelling: string): DefinedName | undefined {
+  let index = foldedNameIndexes.get(names);
+  if (!index || index.size !== names.size) {
+    const keys = new Map<string, string>();
+    for (const key of names.keys()) keys.set(asciiFold(key), key);
+    index = { size: names.size, keys };
+    foldedNameIndexes.set(names, index);
+  }
+  const key = index.keys.get(asciiFold(spelling));
+  return key === undefined ? undefined : names.get(key);
 }
 
 function evalFormula(formula: string, ctx: EvalCtx): EvalValue {
@@ -334,7 +379,7 @@ function evalFormula(formula: string, ctx: EvalCtx): EvalValue {
 
 function parseFormula(
   formula: string,
-  names: Map<string, DefinedName>,
+  names: ReadonlyMap<string, DefinedName>,
   nameDepth: number,
   budget: ParseBudget,
 ): FormulaNode {
@@ -508,7 +553,7 @@ function parsePrimary(p: Parser): FormulaNode {
     // Library admission is whole-expression, independently of IF's lazy
     // value evaluation: an unsupported name/body cannot be hidden in the
     // branch not taken and then incorrectly suppress another CF rule.
-    const dn = p.names.get(t.text);
+    const dn = lookupDefinedName(p.names, t.text);
     if (!dn || p.nameDepth >= MAX_DEFINED_NAME_DEPTH) throw new FormulaFailure('unsupported');
     if (dn.formula.length > p.budget.remainingNameSourceUnits) throw new FormulaFailure('unsupported');
     p.budget.remainingNameSourceUnits -= dn.formula.length;
@@ -619,11 +664,19 @@ function resolveRef(ref: CellRef, ctx: EvalCtx): EvalScalar {
 // because a partial range silently changes COUNTIF/SUM/... results.
 const MAX_RANGE_CELLS = 4096;
 
-function resolveRange(a: CellRef, b: CellRef, ctx: EvalCtx): EvalScalar[] {
+interface CellRect { r1: number; c1: number; r2: number; c2: number }
+
+function rangeRect(a: CellRef, b: CellRef, ctx: EvalCtx): CellRect {
   const pa = refCoord(a, ctx);
   const pb = refCoord(b, ctx);
-  const c1 = Math.min(pa.col, pb.col), c2 = Math.max(pa.col, pb.col);
-  const r1 = Math.min(pa.row, pb.row), r2 = Math.max(pa.row, pb.row);
+  return {
+    r1: Math.min(pa.row, pb.row), c1: Math.min(pa.col, pb.col),
+    r2: Math.max(pa.row, pb.row), c2: Math.max(pa.col, pb.col),
+  };
+}
+
+/** Cached values of `rect` in row-major order. */
+function readRect({ r1, c1, r2, c2 }: CellRect, ctx: EvalCtx): EvalScalar[] {
   if ((r2 - r1 + 1) * (c2 - c1 + 1) > MAX_RANGE_CELLS) throw new FormulaFailure('unsupported');
   const out: EvalScalar[] = [];
   for (let r = r1; r <= r2; r++) {
@@ -632,6 +685,45 @@ function resolveRange(a: CellRef, b: CellRef, ctx: EvalCtx): EvalScalar[] {
     }
   }
   return out;
+}
+
+function resolveRange(a: CellRef, b: CellRef, ctx: EvalCtx): EvalScalar[] {
+  return readRect(rangeRect(a, b, ctx), ctx);
+}
+
+/** The cell rectangle a reference node denotes at `ctx`, or null for any
+ *  other expression. A defined name's body anchors at A1, as in `evaluate`. */
+function referenceRect(n: FormulaNode, ctx: EvalCtx): CellRect | null {
+  switch (n.t) {
+    case 'ref': { const { row, col } = refCoord(n.ref, ctx); return { r1: row, c1: col, r2: row, c2: col }; }
+    case 'range': return rangeRect(n.a, n.b, ctx);
+    case 'name': return referenceRect(n.body, { ...ctx, anchorRow: 1, anchorCol: 1 });
+    default: return null;
+  }
+}
+
+/** SUMIF sum_range / AVERAGEIF average_range. Microsoft's SUMIF and
+ * AVERAGEIF documentation: the supplied range need not match `range` in size
+ * or shape; the cells used start at its top-left cell and take `range`'s
+ * dimensions (A1:B4 with C1:C2 reads C1:D4). Only that rectangle is read.
+ * https://support.microsoft.com/en-us/excel/functions/sumif-function
+ * https://support.microsoft.com/en-us/excel/functions/averageif-function
+ * Only direct references (including reference-valued defined names) retain
+ * rectangle provenance here. Computed expressions keep their existing
+ * evaluate/flatten pairing; this preserves IF/IFS/IFERROR selection and lazy
+ * branch behavior without re-evaluating a condition to infer a rectangle.
+ * Library policy, without Excel evidence: a resized rectangle outside the
+ * worksheet grid is unsupported. */
+function resizedTargetValues(rangeNode: FormulaNode, targetNode: FormulaNode, ctx: EvalCtx): EvalScalar[] | null {
+  const range = referenceRect(rangeNode, ctx);
+  const target = referenceRect(targetNode, ctx);
+  if (!range || !target) return null;
+  const r2 = target.r1 + (range.r2 - range.r1);
+  const c2 = target.c1 + (range.c2 - range.c1);
+  if (target.r1 < 1 || target.c1 < 1 || r2 > MAX_WORKSHEET_ROW || c2 > MAX_WORKSHEET_COL) {
+    throw new FormulaFailure('unsupported');
+  }
+  return readRect({ r1: target.r1, c1: target.c1, r2, c2 }, ctx);
 }
 
 function cellValueToEval(cell: Cell | undefined): EvalScalar {
@@ -683,6 +775,16 @@ function callFunc(name: string, argNodes: FormulaNode[], ctx: EvalCtx): EvalValu
       const at = node === undefined ? ctx : node.t === 'ref' ? refCoord(node.ref, ctx) : null;
       if (!at) throw new FormulaFailure('unsupported');
       return name === 'ROW' ? at.row : at.col;
+    }
+    // Direct target references are resized; computed targets retain evaluation.
+    case 'SUMIF':
+    case 'AVERAGEIF': {
+      const source = flatten(arg(0));
+      const criteria = arg(1);
+      const target = argNodes.length > 2
+        ? resizedTargetValues(argNodes[0], argNodes[2], ctx) ?? flatten(arg(2))
+        : null;
+      return name === 'SUMIF' ? sumIf(source, criteria, target) : averageIf(source, criteria, target);
     }
   }
   const args = argNodes.map(n => evaluate(n, ctx));
@@ -744,13 +846,6 @@ function callFunc(name: string, argNodes: FormulaNode[], ctx: EvalCtx): EvalValu
     case 'COUNTA':     return args.flatMap(flatten).filter(v => v != null && v !== '').length;
     case 'COUNTBLANK': return args.flatMap(flatten).filter(v => v == null || v === '').length;
     case 'COUNTIF':    return countIf(flatten(args[0]), args[1]);
-    case 'SUMIF':      return sumIf(flatten(args[0]), args[1], args[2] !== undefined ? flatten(args[2]) : null);
-    case 'AVERAGEIF':  {
-      const src = flatten(args[0]);
-      const sum = sumIf(src, args[1], args[2] !== undefined ? flatten(args[2]) : null);
-      const count = countIf(src, args[1]);
-      return count === 0 ? formulaError('#DIV/0!') : sum / count;
-    }
     // ── Text ────────────────────────────────────────────────────────────────
     case 'LEN':        return toStr(args[0]).length;
     case 'LEFT':       return toStr(args[0]).slice(0, Math.max(0, toNum(args[1] ?? 1)));
@@ -838,6 +933,31 @@ function sumIf(source: EvalScalar[], criteria: EvalValue, sumRange: EvalScalar[]
     }
   }
   return sum;
+}
+
+// Microsoft AVERAGEIF documentation: an empty average_range cell is excluded,
+// so a matched blank (null) is not in the denominator while a matched 0 is,
+// and no remaining matched cell is #DIV/0!.
+// https://support.microsoft.com/en-us/excel/functions/averageif-function
+// A direct-reference average_range is resized to `source`'s dimensions;
+// computed expressions retain prior index pairing (see `resizedTargetValues`).
+// Unresolved, kept as before without Excel evidence: an index past a shorter
+// computed target is counted instead of treated as a blank. A matched text,
+// boolean or error target adds nothing to the SUMIF-style numerator but counts.
+function averageIf(source: EvalScalar[], criteria: EvalValue, averageRange: EvalScalar[] | null): EvalScalar {
+  const pred = makeCriteriaPredicate(criteria);
+  const target = averageRange ?? source;
+  let sum = 0;
+  let count = 0;
+  for (let i = 0; i < source.length; i++) {
+    if (pred(source[i])) {
+      const t = target[i];
+      if (t === null) continue;
+      if (typeof t === 'number') sum += t;
+      count++;
+    }
+  }
+  return count === 0 ? formulaError('#DIV/0!') : sum / count;
 }
 
 /** Build a predicate matching Excel's COUNTIF/SUMIF criteria syntax:

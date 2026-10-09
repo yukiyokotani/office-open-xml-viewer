@@ -394,7 +394,10 @@ self.onmessage = async (e: MessageEvent<
       if (req.viewProjection?.autoRowHeightsPrepared) {
         markAutoRowHeightsPrepared(renderWorksheet);
       }
-      const canvas = new OffscreenCanvas(1, 1); // orchestrator resizes it
+      // The orchestrator resizes it. A caller-transferred surface keeps the
+      // caller's inherited canvas language; a request without one keeps a
+      // local surface.
+      const canvas = req.canvas ?? new OffscreenCanvas(1, 1);
       await renderWorksheetViewport(
         { ...workerRenderDeps(renderWorksheet, workbook.styles, renderers), cjkFallback },
         canvas,
