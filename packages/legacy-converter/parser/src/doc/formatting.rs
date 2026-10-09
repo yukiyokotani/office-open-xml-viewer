@@ -441,6 +441,10 @@ impl<'a> Formatting<'a> {
                 level.chpx,
                 bullet_origin,
             )?;
+            // The linked sparse patch and LVL CHPX follow the paragraph mark.
+            // Check the final marker owner too: it is projected separately
+            // by numbering and must not silently lose custom word breaking.
+            self.unsupported_character_properties |= marker.word_breaking_requires_consumer();
             return Ok(ResolvedParagraph {
                 properties: props,
                 numbering: Some((reference, marker)),
@@ -805,7 +809,7 @@ impl<'a> Formatting<'a> {
                     props.stamp_picture_bullet(code, character::BulletOrigin::Style(id));
                     continue;
                 }
-                if !props.apply(code, operand, &baseline)? {
+                if !props.apply(code, operand, &baseline)? && code != 0x484e {
                     self.unsupported_character_properties = true;
                 }
             }
@@ -893,6 +897,11 @@ impl<'a> Formatting<'a> {
         } else if prm != 0 && paragraph::prm0(prm).is_none() && table::prm0(prm).is_none() {
             self.unsupported_piece_properties = true;
         }
+        // MS-DOC 2.4.6/2.4.6.2/2.4.6.6: later valid properties own the
+        // effective run, including appended PRM and resets. Retain only Hresi
+        // through this cascade; a winning custom method has no consumer.
+        // Other unsupported families and earlier winning runs stay sticky.
+        self.unsupported_character_properties |= props.word_breaking_requires_consumer();
         if props.picture_bullet().style_enabled() {
             // A style-placed (MS-DOC 2.9.336) enabled picture bullet that no
             // legal layer replaced keeps the atomic unsupported refusal.
@@ -924,11 +933,17 @@ impl<'a> Formatting<'a> {
                     *style = character_style;
                 }
                 0x2a33 => {
+                    // MS-DOC 2.6.1 sprmCPlain requires a zero operand. Reset
+                    // to the actual paragraph baseline, not a fabricated
+                    // normal Hresi, and never let malformed input clear it.
+                    if operand != [0] {
+                        return Err(unsupported("invalid Word plain-character reset operand"));
+                    }
                     props.reset_to(paragraph, false);
                     *style = paragraph.clone();
                 }
                 _ => {
-                    if !props.apply(code, operand, style)? {
+                    if !props.apply(code, operand, style)? && code != 0x484e {
                         self.unsupported_character_properties = true;
                     }
                     props.stamp_picture_bullet(code, origin);
@@ -5306,5 +5321,166 @@ mod tests {
                 .unwrap();
         }
         assert!(!f.unsupported_piece_properties && !f.unsupported_character_properties);
+    }
+
+    #[test]
+    fn hresi_winning_run_stays_unsupported_across_later_normal_run() {
+        let mut f = empty();
+        f.direct_text_run(0, None, 0, 1, &[&[0x4e, 0x48, 2, b'q']], "quartz".into())
+            .unwrap();
+        f.direct_text_run(0, None, 0, 1, &[&[0x4e, 0x48, 1, 0]], "quartz".into())
+            .unwrap();
+        // A separate run's normal value cannot remove a prior run's refusal.
+        assert!(f.unsupported_character_properties);
+    }
+
+    #[test]
+    fn hresi_style_reset_and_cache_hits_keep_the_actual_paragraph_owner() {
+        let custom = &[0x4e, 0x48, 2, b'q'][..];
+        let normal = &[0x4e, 0x48, 1, 0][..];
+        let make_style = |kind, chpx: &'static [u8]| Style {
+            kind,
+            base: 0xfff,
+            chpx,
+            papx: &[],
+            table: None,
+            language_compatibility: StyleLanguageCompatibility::default(),
+        };
+        let mut overridden = empty();
+        overridden.styles = vec![Some(make_style(1, custom))];
+        for _ in 0..2 {
+            // second resolution uses the real paragraph cache
+            overridden
+                .direct_text_run(0, None, 0, 1, &[normal], "quartz".into())
+                .unwrap();
+            assert!(!overridden.unsupported_character_properties);
+        }
+        // CPlain restores the paragraph baseline, not an unconditional normal value.
+        let mut inherited = empty();
+        inherited.styles = vec![Some(make_style(1, custom))];
+        inherited
+            .direct_text_run(
+                0,
+                None,
+                0,
+                1,
+                &[&[0x4e, 0x48, 1, 0, 0x33, 0x2a, 0]],
+                "quartz".into(),
+            )
+            .unwrap();
+        assert!(inherited.unsupported_character_properties);
+        // Selecting a character style replaces the direct Hresi with that style's
+        // resolved paragraph-based properties. Check both actual final owners.
+        for (selected, expected_unsupported) in [(normal, false), (custom, true)] {
+            let mut f = empty();
+            f.styles = vec![Some(make_style(1, &[])), Some(make_style(2, selected))];
+            f.direct_text_run(
+                0,
+                None,
+                0,
+                1,
+                &[&[0x4e, 0x48, 2, b'q', 0x30, 0x4a, 1, 0]],
+                "quartz".into(),
+            )
+            .unwrap();
+            assert_eq!(f.unsupported_character_properties, expected_unsupported);
+        }
+    }
+
+    #[test]
+    fn hresi_change_does_not_open_unimplemented_table_style_consumers() {
+        for chpx in [
+            &[0x4e, 0x48, 1, 0][..],
+            leaked(ccnf(
+                table_style_condition::FIRST_COLUMN,
+                &[0x4e, 0x48, 1, 0],
+            )),
+        ] {
+            let mut f = observed_table_style_formatting();
+            f.styles[0].as_mut().unwrap().table.as_mut().unwrap().chpx = chpx;
+            f.apply_table_character_style(
+                &mut Properties::default(),
+                Some(TableFormattingKey::unconditional(0)),
+            )
+            .unwrap();
+            assert!(f.unsupported_character_properties);
+        }
+    }
+
+    #[test]
+    fn hresi_ancillary_normal_font_query_keeps_its_conservative_gate() {
+        let mut f = empty();
+        f.styles = vec![Some(Style {
+            kind: 1,
+            base: 0xfff,
+            chpx: &[0x4e, 0x48, 2, b'q'],
+            papx: &[],
+            table: None,
+            language_compatibility: StyleLanguageCompatibility::default(),
+        })];
+        let _ = f.direct_normal_style_font_size_pt().unwrap();
+        assert!(f.unsupported_character_properties);
+    }
+
+    #[test]
+    fn hresi_linked_sparse_marker_overlay_and_cache_respect_final_owner() {
+        let normal = &[0x4e, 0x48, 1, 0][..];
+        let custom = &[0x4e, 0x48, 2, b'q'][..];
+        let custom_then_normal = &[0x4e, 0x48, 2, b'q', 0x4e, 0x48, 1, 0][..];
+        let style = |base, chpx: &'static [u8]| Style {
+            kind: 1,
+            base,
+            chpx,
+            papx: &[],
+            table: None,
+            language_compatibility: StyleLanguageCompatibility::default(),
+        };
+        let resolve_twice = |linked_chpx: &'static [u8], linked_base, level_chpx: &'static [u8]| {
+            let mut f = empty();
+            // Body paragraph remains normal. Custom properties belong only to the
+            // linked marker chain, avoiding a separate winning-custom paragraph mark.
+            f.styles = vec![
+                Some(style(0xfff, normal)),
+                Some(style(linked_base, linked_chpx)),
+                Some(style(0xfff, custom)),
+            ];
+            f.numbering = one_level_list(1, level_chpx);
+            let mut projections = Vec::new();
+            for _ in 0..2 {
+                // real linked-marker cache hit on the second resolution
+                let (_, marker) = f
+                    .direct_paragraph(0, None, 0, 1, &[&list_piece(1)])
+                    .unwrap()
+                    .numbering
+                    .expect("resolved numbering");
+                projections.push((
+                    serde_json::to_value(
+                        marker
+                            .direct_text_run("quartz".into(), &[])
+                            .unwrap()
+                            .unwrap(),
+                    )
+                    .unwrap(),
+                    serde_json::to_value(marker.direct_font_facts(&[]).unwrap()).unwrap(),
+                ));
+            }
+            (projections, f.unsupported_character_properties)
+        };
+        let expected = resolve_twice(normal, 0, normal);
+        assert!(!expected.1);
+        // Explicit normal within the linked patch, later level normal, and a sparse
+        // patch inheriting custom each exercise a distinct authored-owner boundary.
+        for (linked, base, level) in [
+            (custom_then_normal, 0, &[][..]),
+            (custom, 0, normal),
+            (&[][..], 2, normal),
+        ] {
+            let actual = resolve_twice(linked, base, level);
+            assert_eq!(actual.0, expected.0);
+            assert!(!actual.1);
+        }
+        for (linked, base) in [(custom, 0), (&[][..], 2)] {
+            assert!(resolve_twice(linked, base, &[]).1);
+        }
     }
 }

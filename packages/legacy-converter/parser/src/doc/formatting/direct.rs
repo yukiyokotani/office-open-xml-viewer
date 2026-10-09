@@ -89,7 +89,12 @@ impl Formatting<'_> {
     pub(in crate::doc) fn direct_normal_style_font_size_pt(&mut self) -> Result<f64, String> {
         // MS-DOC 2.6.4 sprmSDxtCharSpace is relative to the Normal style,
         // not the paragraph mark or any visible body run's direct formatting.
-        self.paragraph_base(0)?.direct_font_size_pt()
+        let normal = self.paragraph_base(0)?;
+        // This ancillary Normal-style query has no later run cascade. Keep
+        // its conservative unsupported gate when the style's final Hresi
+        // would require a word-breaking consumer.
+        self.unsupported_character_properties |= normal.word_breaking_requires_consumer();
+        normal.direct_font_size_pt()
     }
 
     pub(in crate::doc) fn direct_paragraph(

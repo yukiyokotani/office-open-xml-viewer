@@ -2192,6 +2192,87 @@ mod tests {
     }
 
     #[test]
+    fn hresi_final_direct_owner_admits_complete_document_and_retains_invalid_refusal() {
+        let project = |chpx: &[u8]| {
+            let bytes = source_with_direct_chpx("quartz\r", chpx);
+            super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024)
+                .map(|result| serde_json::to_value(result.document).unwrap())
+        };
+        let expected = project(&[0x4e, 0x48, 1, 0]).unwrap();
+        assert_eq!(body_outline(&expected["body"]), ["p[t:quartz]"]);
+        for chpx in [
+            &[0x4e, 0x48, 2, b'q', 0x4e, 0x48, 1, 0][..],
+            &[0x4e, 0x48, 2, b'q', 0x33, 0x2a, 0][..],
+        ] {
+            assert_eq!(project(chpx).unwrap(), expected);
+        }
+        for chpx in [
+            &[0x4e, 0x48, 2, b'q'][..],
+            &[0x4e, 0x48, 1, 0, 0x4e, 0x48, 2, b'q'][..],
+            &[0x86, 0x2a, 2, 0x4e, 0x48, 2, b'q', 0x4e, 0x48, 1, 0][..],
+        ] {
+            assert!(project(chpx)
+                .unwrap_err()
+                .contains("unsupported formatting"));
+        }
+        for chpx in [
+            &[0x4e, 0x48, 0, b'Z', 0x4e, 0x48, 1, 0][..],
+            &[0x4e, 0x48, 7, b'Z', 0x4e, 0x48, 1, 0][..],
+            &[0x4e, 0x48, 2][..],
+        ] {
+            assert!(project(chpx).is_err());
+        }
+        for chpx in [
+            &[0x33, 0x2a, 1, 0x4e, 0x48, 1, 0][..],
+            &[0x4e, 0x48, 1, 0, 0x33, 0x2a, 1][..],
+        ] {
+            assert!(project(chpx).is_err());
+        }
+
+        // MS-DOC 2.4.6.2: PRM1 character properties follow physical CHPX.
+        let project_piece = |direct: &[u8], piece: &[u8]| {
+            let bytes = source_with_direct_chpx("quartz\r", direct);
+            let bytes = super::table_tests::with_piece_prc(&bytes, piece, &[]);
+            super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024)
+                .map(|result| serde_json::to_value(result.document).unwrap())
+        };
+        assert_eq!(
+            project_piece(&[0x4e, 0x48, 2, b'q'], &[0x4e, 0x48, 1, 0]).unwrap(),
+            expected
+        );
+        assert_eq!(
+            project_piece(&[], &[0x4e, 0x48, 2, b'q', 0x4e, 0x48, 1, 0]).unwrap(),
+            expected
+        );
+        assert!(project_piece(&[0x4e, 0x48, 1, 0], &[0x4e, 0x48, 2, b'q'])
+            .unwrap_err()
+            .contains("unsupported formatting"));
+        assert!(project_piece(&[0x4e, 0x48, 0, b'Z'], &[0x4e, 0x48, 1, 0]).is_err());
+    }
+
+    #[test]
+    fn hresi_final_level_marker_owner_controls_complete_document_admission() {
+        let project = |chpx: &[u8]| {
+            let bytes = with_numbering_level_chpx(&source("quartz\r"), chpx);
+            super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024)
+                .map(|result| serde_json::to_value(result.document).unwrap())
+        };
+        let expected = project(&[0x4e, 0x48, 1, 0]).unwrap();
+        assert_eq!(
+            project(&[0x4e, 0x48, 2, b'q', 0x4e, 0x48, 1, 0]).unwrap(),
+            expected
+        );
+        for chpx in [
+            &[0x4e, 0x48, 2, b'q'][..],
+            &[0x4e, 0x48, 1, 0, 0x4e, 0x48, 2, b'q'][..],
+        ] {
+            assert!(project(chpx)
+                .unwrap_err()
+                .contains("unsupported formatting"));
+        }
+    }
+
+    #[test]
     fn default_font_fixup_chpx_reaches_the_native_document_without_losing_text() {
         let project = |chpx: &[u8]| {
             let bytes = source_with_direct_chpx("عربي x\r", chpx);

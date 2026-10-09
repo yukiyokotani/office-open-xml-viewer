@@ -108,7 +108,7 @@ fn body_table_source(text: &str) -> Vec<u8> {
     )
 }
 
-fn with_piece_prc(source: &[u8], prc: &[u8], data: &[u8]) -> Vec<u8> {
+pub(super) fn with_piece_prc(source: &[u8], prc: &[u8], data: &[u8]) -> Vec<u8> {
     with_piece_prc_and_prm(source, prc, data, 1)
 }
 
