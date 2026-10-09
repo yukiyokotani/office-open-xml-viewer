@@ -2192,6 +2192,56 @@ mod tests {
     }
 
     #[test]
+    fn documented_word97_base_aliases_preserve_complete_document_projection() {
+        let bytes = source("quartz\r");
+        let cfb = CompoundFile::open(&bytes).unwrap();
+        let original_word = cfb.stream("WordDocument").unwrap();
+        let table = cfb.stream("0Table").unwrap();
+        assert_eq!(&original_word[2..4], &0x00c1u16.to_le_bytes());
+        let project = |word: Vec<u8>| {
+            // Mutate the named stream, not an assumed physical CFB sector.
+            let bytes = build_scoped_cfb(&[("WordDocument", word), ("0Table", table.clone())]);
+            super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024)
+                .map(|result| serde_json::to_value(result.document).unwrap())
+        };
+        let expected = project(original_word.clone()).unwrap();
+        assert_eq!(body_outline(&expected["body"]), ["p[t:quartz]"]);
+        for base in [0x00c0u16, 0x00c2] {
+            let mut word = original_word.clone();
+            word[2..4].copy_from_slice(&base.to_le_bytes());
+            assert_eq!(project(word).unwrap(), expected);
+        }
+        // An aliasable base cannot override the authoritative first extension
+        // word, including when that word names another base-only alias.
+        for extension in [0x00c0u16, 0x00c1, 0x00c2, 0x0120] {
+            let mut word = original_word.clone();
+            word[2..4].copy_from_slice(&0x00c0u16.to_le_bytes());
+            word[0x382..0x384].copy_from_slice(&2u16.to_le_bytes());
+            word[0x384..0x386].copy_from_slice(&extension.to_le_bytes());
+            assert!(project(word)
+                .unwrap_err()
+                .contains("unsupported Word FIB version"));
+        }
+        let mut word = original_word.clone();
+        word[2..4].copy_from_slice(&0x00c0u16.to_le_bytes());
+        word[0x382..0x384].copy_from_slice(&u16::MAX.to_le_bytes());
+        assert!(project(word)
+            .unwrap_err()
+            .contains("truncated Word FIB extension"));
+        let mut word = original_word.clone();
+        word[2..4].copy_from_slice(&0x00c0u16.to_le_bytes());
+        word[32..34].copy_from_slice(&15u16.to_le_bytes());
+        assert!(project(word)
+            .unwrap_err()
+            .contains("noncanonical Word FIB fixed prefix"));
+        let mut word = original_word;
+        word[2..4].copy_from_slice(&0x0120u16.to_le_bytes());
+        assert!(project(word)
+            .unwrap_err()
+            .contains("unsupported Word FIB version"));
+    }
+
+    #[test]
     fn hresi_final_direct_owner_admits_complete_document_and_retains_invalid_refusal() {
         let project = |chpx: &[u8]| {
             let bytes = source_with_direct_chpx("quartz\r", chpx);

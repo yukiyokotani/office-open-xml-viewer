@@ -66,7 +66,13 @@ pub(super) fn effective_version(word: &[u8]) -> Result<u16, String> {
         .filter(|end| *end <= word.len())
         .ok_or_else(|| unsupported("truncated Word FIB extension"))?;
     let version = if count == 0 {
-        u16_at(word, 2)?
+        // MS-DOC 2.5.2 product behavior note 11 assigns these legacy
+        // FibBase selectors Word 97 semantics. A present nFibNew remains
+        // authoritative (2.5.14); this alias never applies to the extension.
+        match u16_at(word, 2)? {
+            0x00c0 | 0x00c2 => 0x00c1,
+            base => base,
+        }
     } else {
         u16_at(&word[start..end], 0)?
     };
@@ -121,6 +127,36 @@ mod tests {
     }
 
     #[test]
+    fn documented_word97_base_aliases_have_word97_semantics() {
+        // MS-DOC 2.5.2 product behavior note 11 explicitly assigns these
+        // FibBase selectors the semantics of Word 97; it is not a numeric range.
+        for base in [0x00c0, 0x00c2] {
+            let bytes = fib(base, None, [14, 22, 0x5d]);
+            validate_fixed_prefix(&bytes).unwrap();
+            assert_eq!(effective_version(&bytes).unwrap(), 0x00c1);
+            for end in 0..bytes.len() {
+                assert!(
+                    effective_version(&bytes[..end]).is_err(),
+                    "base {base:x}, prefix {end}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn base_aliases_cannot_override_or_become_extension_selectors() {
+        for base in [0x00c0, 0x00c2] {
+            let known = fib(base, Some(0x0101), [14, 22, 0x88]);
+            assert_eq!(effective_version(&known).unwrap(), 0x0101);
+            for extension in [0x00c0, 0x00c1, 0x00c2, 0x0120] {
+                assert!(effective_version(&fib(base, Some(extension), [14, 22, 0x88])).is_err());
+            }
+            assert!(effective_version(&known[..known.len() - 1]).is_err());
+            assert!(validate_fixed_prefix(&fib(base, None, [15, 22, 0x5d])).is_err());
+        }
+    }
+
+    #[test]
     fn fixed_prefix_requires_canonical_word97_offsets_and_all_fc_lcb_values() {
         for count in [0x005d, 0x006c, 0x0088, 0x00a4, 0x00b7] {
             assert!(validate_fixed_prefix(&fib(0xc1, None, [14, 22, count])).is_ok());
@@ -156,7 +192,7 @@ mod tests {
                 assert!(effective_version(&bytes[..end]).is_err(), "prefix {end}");
             }
         }
-        for version in [0, 0xa5, 0xc0, 0xc2, 0x113, 0xffff] {
+        for version in [0, 0xa5, 0x113, 0xffff] {
             assert!(effective_version(&fib(version, None, [14, 22, 0x5d])).is_err());
             assert!(effective_version(&fib(0xc1, Some(version), [14, 22, 0x5d])).is_err());
         }
