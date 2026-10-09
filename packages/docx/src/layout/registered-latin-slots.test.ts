@@ -1,7 +1,7 @@
 import { expect, it } from 'vitest';
 import { createFontResolver } from './font-service.js';
 import { createTextLayoutService, independentTextShapeRequest, replaceTextShapeRequest,
-  sliceTextShapeRequest, sliceSemanticSlotSpans, type TextShapeRequest } from './text.js';
+  sliceTextShapeRequest, sliceSemanticSlotSpans } from './text.js';
 import { buildSegments, layoutLines, type LineLayoutEnvironment, type LayoutTextSeg } from '../line-layout.js';
 import { LineMeasurementAdapter } from '../line-breaker/measurement-adapter.js';
 import { slicedTextMetadata } from '../line-breaker/advance.js';
@@ -76,7 +76,10 @@ it.each([null, [[0x54, 0x54]] as const])('declines an unknown or partial peer %j
 it.each([{ charSpacing: 1 }, { charScale: 0.8 }, { smallCaps: true },
   { rtl: true }, { vertAlign: 'super' }, { fontFamilyHighAnsi: 'Different Face' }])(
   'keeps real allocation or font boundaries %j', extra => {
-    expect(segments('Té', environment(), extra).every(s => s.semanticSlotSpans === undefined)).toBe(true);
+    const s = segments('Té', environment(), extra);
+    expect(s.length).toBeGreaterThan(0);
+    expect(s.every(v => v.semanticSlotSpans === undefined
+      && v.textShapeRequest?.joinRegisteredLatinSlots !== true)).toBe(true);
   });
 it('keeps an authored paint seam while absorbing an identical-format source seam', () => {
   const acquire = (right: DocRun) => buildSegments([run('T'), right], environment())
@@ -100,14 +103,18 @@ it('reproves retained fragments and clears independent or transformed admission'
   expect(service.shape(independentTextShapeRequest(request, 'Té')).spans).toHaveLength(2);
   expect(service.shape(replaceTextShapeRequest(request, 'Té')).spans).toHaveLength(2);
 });
-it('does not let an admitted shape replace the ordinary per-slot cached result', () => {
+it('keeps admitted and ordinary shapes under distinct cache provenance', () => {
   const service = fixture();
-  const plain: TextShapeRequest = { text: 'Té', fontSizePt: 10,
-    fonts: { ascii: 'Test Face', highAnsi: 'Test Face' }, kerning: true };
-  expect(service.shape(plain).spans).toHaveLength(2);
-  const joined = segments('Té', environment(service));
-  expect(joined).toHaveLength(1);
-  expect(service.shape(plain).spans).toHaveLength(2);
+  const admitted = segments('Té', environment(service))[0].textShapeRequest!;
+  expect(admitted.joinRegisteredLatinSlots).toBe(true);
+  // All request facts stay identical except the admission proof flag, so
+  // removing that flag from the cache key would alias these two shapes.
+  const ordinary = { ...admitted, joinRegisteredLatinSlots: undefined };
+  expect(service.shape(ordinary).spans).toHaveLength(2);
+  expect(service.shape(admitted).spans).toHaveLength(1);
+  const fresh = fixture();
+  expect(fresh.shape(ordinary).spans).toHaveLength(2);
+  expect(fresh.shape(admitted).spans).toHaveLength(1);
 });
 
 function document(runs: DocRun[], alignment: DocParagraph['alignment'] = 'left'): DocxDocumentModel {
@@ -135,6 +142,22 @@ function textPlacements(doc: DocxDocumentModel): TextPlacement[] {
   walk(layoutDocument(doc, services, { currentDateMs: 0 }).pages);
   return result;
 }
+it('materializes retained slot windows on sliced placements', () => {
+  const text = 'é' + 'T'.repeat(200);
+  const placements = textPlacements(document([run(text)]));
+  expect(placements.length).toBeGreaterThan(1);
+  expect(placements.map(p => p.text).join('')).toBe(text);
+  for (const p of placements) {
+    const slots = p.semanticSlotSpans!;
+    expect(slots[0].start).toBe(0);
+    expect(slots.at(-1)!.end).toBe(p.text.length);
+    expect(slots.every((v, i) => i === 0 || slots[i - 1].end === v.start)).toBe(true);
+    expect(sourceOwnedTextPlacements(p).map(o => o.text).join('')).toBe(p.text);
+  }
+  expect(placements[0].semanticSlotSpans!.map(v => v.script)).toEqual(['highAnsi', 'ascii']);
+  expect(placements.slice(1).every(p => p.semanticSlotSpans!.length === 1
+    && p.semanticSlotSpans![0].script === 'ascii')).toBe(true);
+});
 it('paints a contextual substitution as one string and projects original owners separately', () => {
   const placements = textPlacements(document([run('ff'), run('í')]));
   expect(placements).toHaveLength(1);
@@ -168,6 +191,7 @@ it('preserves known all-or-none peers and keeps paragraph grid admission closed'
   for (const state of [true, undefined])
     expect(segments('Té', environment(fixture(), { characterGridActive: state })))
       .toHaveLength(2);
+  expect(segments('Té', environment(fixture(), { paragraphRtl: true }))).toHaveLength(2);
 });
 it('acquires native max-content context while retaining its separate word units', () => {
   const doc = document([run('a Té')], 'both');
@@ -184,6 +208,15 @@ it('acquires native max-content context while retaining its separate word units'
   expect(intrinsic.maxWidthPt).toBe(nativeAdvance('a Té'));
   const placements = textPlacements(doc);
   expect(placements.map(p => p.paintOps.map(op => op.text))).toEqual([['a '], ['Té']]);
+});
+it('commits separator context on the intrinsic pass without a soft wrap', () => {
+  const lines = layoutLines(context, segments('a Té'), 1, 0, 1, [], undefined,
+    {}, 0, undefined, undefined, undefined, undefined, false, false, false,
+    undefined, 'intrinsic');
+  expect(lines).toHaveLength(1);
+  const text = lines[0].segments.filter((s): s is LayoutTextSeg => 'text' in s);
+  expect(text.map(s => s.text)).toEqual(['a ', 'Té']);
+  expect(text.reduce((n, s) => n + s.measuredWidth, 0)).toBe(nativeAdvance('a Té'));
 });
 
 it('keeps the internal slot-window projection bounded for resolved alternating metadata', () => {
