@@ -41,10 +41,31 @@ export function rowResizeRanges(ws: Worksheet): readonly RowResizeRange[] {
   return sizes.get(ws)?.rows ?? emptyRows;
 }
 
-/** Called only after the row override owner validates and freezes its runs. */
-export function installValidatedRowResizeRanges(ws: Worksheet, rows: readonly RowResizeRange[]): void {
+// View-only resource policy: bound interval fragmentation, not selected row
+// count. One interval can resize all 1,048,576 worksheet rows. Hidden rows are
+// excluded at gesture start; subsequent size-0 point edits still win in geometry.
+export const MAX_ROW_RESIZE_INTERVALS = 16_384;
+
+/** Validate the private wire channel before any projection mutation. */
+export function validateRowResizeRanges(ranges: readonly RowResizeRange[]): void {
+  if (ranges.length > MAX_ROW_RESIZE_INTERVALS) throw new RangeError('Too many row resize intervals.');
+  let previous = 0;
+  for (const range of ranges) {
+    if (!Number.isInteger(range.first) || !Number.isInteger(range.last)
+      || range.first <= previous || range.last < range.first || range.last > 1_048_576
+      || !Number.isFinite(range.height) || range.height <= 0) {
+      throw new RangeError('Invalid row resize interval.');
+    }
+    previous = range.last;
+  }
+}
+
+/** The immutable ranges are projection metadata, never parser/model facts. */
+export function setRowResizeRanges(ws: Worksheet, ranges: readonly RowResizeRange[]): void {
+  validateRowResizeRanges(ranges);
   const context = { ...sizes.get(ws) };
-  if (rows.length) context.rows = rows;
+  if (ranges.length) context.rows = Object.isFrozen(ranges) && ranges.every(Object.isFrozen)
+    ? ranges : Object.freeze(ranges.map(r => Object.freeze({ ...r })));
   else delete context.rows;
   retain(ws, context);
 }

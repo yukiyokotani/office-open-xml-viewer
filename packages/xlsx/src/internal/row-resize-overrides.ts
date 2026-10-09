@@ -1,15 +1,10 @@
-import type { Worksheet } from '../types.js';
-
-import { rowResizeRanges, installValidatedRowResizeRanges,
+import { MAX_ROW_RESIZE_INTERVALS, validateRowResizeRanges,
   type RowResizeRange } from './worksheet-size-context.js';
-export { rowResizeRanges, type RowResizeRange } from './worksheet-size-context.js';
+export { rowResizeRanges, setRowResizeRanges, MAX_ROW_RESIZE_INTERVALS,
+  type RowResizeRange } from './worksheet-size-context.js';
 export type RowBandRange = Readonly<{ first: number; last: number }>;
 export type RowResizePreview = Readonly<{ apply(height: number): void; rollback(): void }>;
 
-// View-only resource policy: bound interval fragmentation, not selected row
-// count. One interval can resize all 1,048,576 worksheet rows. Hidden rows are
-// excluded at gesture start; subsequent size-0 point edits still win in geometry.
-export const MAX_ROW_RESIZE_INTERVALS = 16_384;
 export function rowResizeContains(ranges: readonly RowBandRange[], index: number): boolean {
   let low = 0, high = ranges.length;
   while (low < high) {
@@ -18,32 +13,6 @@ export function rowResizeContains(ranges: readonly RowBandRange[], index: number
     else high = middle;
   }
   return low > 0 && ranges[low - 1].last >= index;
-}
-
-/** Validate the private wire channel before any projection mutation. */
-export function validateRowResizeRanges(ranges: readonly RowResizeRange[]): void {
-  if (ranges.length > MAX_ROW_RESIZE_INTERVALS) throw new RangeError('Too many row resize intervals.');
-  let previous = 0;
-  for (const range of ranges) {
-    if (!Number.isInteger(range.first) || !Number.isInteger(range.last)
-      || range.first <= previous || range.last < range.first || range.last > 1_048_576
-      || !Number.isFinite(range.height) || range.height <= 0) {
-      throw new RangeError('Invalid row resize interval.');
-    }
-    previous = range.last;
-  }
-}
-
-/** The immutable ranges are projection metadata, never parser/model facts. */
-export function setRowResizeRanges(ws: Worksheet, ranges: readonly RowResizeRange[]): void {
-  validateRowResizeRanges(ranges);
-  installValidatedRowResizeRanges(ws, Object.isFrozen(ranges) && ranges.every(Object.isFrozen)
-    ? ranges : Object.freeze(ranges.map(r => Object.freeze({ ...r }))));
-}
-
-export function inheritRowResizeRanges(source: Worksheet, target: Worksheet): void {
-  const ranges = rowResizeRanges(source);
-  if (ranges.length) installValidatedRowResizeRanges(target, ranges);
 }
 
 /** Overlay a uniform gesture on a canonical prior set. Sweep boundaries rather

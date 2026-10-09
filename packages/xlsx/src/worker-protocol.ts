@@ -10,9 +10,8 @@ import type { NormalizedOoxmlResourcePolicy } from '@silurus/ooxml-core/worker';
 import type { PullSessionIdentity } from '@silurus/ooxml-core/worker';
 import { GridGeometry } from './internal/grid-geometry.js';
 import { setColumnCssWidth } from './internal/column-css-overrides.js';
-import { inheritWorksheetSizeContext } from './internal/worksheet-size-context.js';
-import { setRowResizeRanges,
-  type RowResizeRange } from './internal/row-resize-overrides.js';
+import { inheritWorksheetSizeContext, setRowResizeRanges,
+  type RowResizeRange } from './internal/worksheet-size-context.js';
 import {
   bindInitialAnchorSizes,
   sameInitialAnchorSizeReference,
