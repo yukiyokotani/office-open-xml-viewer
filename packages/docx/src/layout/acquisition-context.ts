@@ -138,6 +138,7 @@ export interface BodyAcquisitionState extends AnchorFloatRegistrationState {
    * text boxes hold page-placed content): the page translation its host flow
    * receives there (ParagraphAcquisitionOptions.hostFlowPageTranslationPt). */
   cellHostFlowPageTranslationPt?: Readonly<{ xPt: number; yPt: number }>;
+  cellParagraphAnchorReferenceDeltaPt?: number;
   /** A text box story and its tables: the page frames its page-owned anchor
    * axes keep and the translation its flow receives to reach them
    * (story-page-frames.ts storyAnchorPageFrames); null when its box carries

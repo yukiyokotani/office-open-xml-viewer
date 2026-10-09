@@ -1496,6 +1496,15 @@ fn nested_frame_cell(frame: Vec<u8>) -> Vec<u8> {
 }
 
 fn nested_frame_source(first: Vec<u8>, second: Vec<u8>) -> Vec<u8> {
+    nested_frame_source_with_rows(first, second, nested_row(500), nested_row(500))
+}
+
+fn nested_frame_source_with_rows(
+    first: Vec<u8>,
+    second: Vec<u8>,
+    first_row: Vec<u8>,
+    second_row: Vec<u8>,
+) -> Vec<u8> {
     let text = "n\r\rm\r\rx\u{7}\u{7}\r";
     let units = text.encode_utf16().count();
     let source = source_with_typography(
@@ -1510,9 +1519,9 @@ fn nested_frame_source(first: Vec<u8>, second: Vec<u8>) -> Vec<u8> {
         &source,
         &[
             (0, 2, nested_frame_cell(first)),
-            (2, 3, nested_row(500)),
+            (2, 3, first_row),
             (3, 5, nested_frame_cell(second)),
-            (5, 6, nested_row(500)),
+            (5, 6, second_row),
             (6, 8, cell()),
             (8, 9, row(1000)),
             (9, units, Vec::new()),
@@ -1522,6 +1531,108 @@ fn nested_frame_source(first: Vec<u8>, second: Vec<u8>) -> Vec<u8> {
 
 fn nested_owner_frame(x: i16) -> Vec<u8> {
     [padded_frame(0x60, x), sprm(0x2423, &[2], false)].concat()
+}
+
+#[test]
+fn nested_cell_frame_leaves_unproved_grid_policies_in_flow_with_warning() {
+    for extra in [
+        sprm(0x3615, &[1], false),
+        sprm(0x560b, &1u16.to_le_bytes(), false),
+        sprm(0x7629, &[0, 1, 1, 0], false),
+    ] {
+        let mut row = [nested_row(500), extra].concat();
+        if row.len() % 2 == 0 {
+            row.extend(sprm(0x2416, &[1], false));
+        }
+        let bytes = nested_frame_source_with_rows(
+            nested_owner_frame(-4),
+            nested_owner_frame(-4),
+            row.clone(),
+            row,
+        );
+        let result = super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1_000_000)
+            .expect("previously admitted nested grid policy");
+        let BodyElement::Table(outer) = &result.document.body[0] else {
+            panic!("outer")
+        };
+        let CellElement::Table(nested) = &outer.rows[0].cells[0].content[0] else {
+            panic!("nested")
+        };
+        let wire = serde_json::to_value(nested).unwrap();
+        assert!(wire["__tableLayout"]["cellFrame"].is_null());
+        assert_eq!(wire["__tableLayout"]["ordinaryFlow"], true);
+        assert!(!result.document.diagnostics.is_empty());
+    }
+}
+
+#[test]
+fn nested_cell_frame_does_not_override_nondefault_tap_without_active_anchors() {
+    for tap in [sprm(0x360d, &[0xf0], false), sprm(0x3465, &[1], false)] {
+        let source = nested_frame_source(nested_owner_frame(-4), nested_owner_frame(-4));
+        let text_units = "n\r\rm\r\rx\u{7}\u{7}\r".encode_utf16().count();
+        let positioned_row = |extra: &[u8]| {
+            let mut properties = [nested_row(500), extra.to_vec()].concat();
+            if properties.len() % 2 == 0 {
+                properties.extend(sprm(0x2416, &[1], false));
+            }
+            properties
+        };
+        for row_index in [0, 1] {
+            let bytes = with_papx(
+                &source,
+                &[
+                    (0, 2, nested_frame_cell(nested_owner_frame(-4))),
+                    (
+                        2,
+                        3,
+                        positioned_row(if row_index == 0 { &tap } else { &[] }),
+                    ),
+                    (3, 5, nested_frame_cell(nested_owner_frame(-4))),
+                    (
+                        5,
+                        6,
+                        positioned_row(if row_index == 1 { &tap } else { &[] }),
+                    ),
+                    (6, 8, cell()),
+                    (8, 9, row(1000)),
+                    (9, text_units, Vec::new()),
+                ],
+            );
+            let model = super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1_000_000)
+                .expect("existing bounded native admission");
+            let BodyElement::Table(outer) = &model.document.body[0] else {
+                panic!("outer table")
+            };
+            // TAP row identity can split the normal first row from a later
+            // positioned row. Check the group owning the authored TAP, not
+            // the independently valid preceding group.
+            let wanted = if row_index == 0 { "n" } else { "m" };
+            let nested = outer.rows[0].cells[0]
+                .content
+                .iter()
+                .find_map(|block| {
+                    let CellElement::Table(table) = block else {
+                        return None;
+                    };
+                    table
+                        .rows
+                        .iter()
+                        .flat_map(|row| &row.cells)
+                        .flat_map(|cell| &cell.content)
+                        .any(|block| {
+                            matches!(block, CellElement::Paragraph(p) if p.runs.iter()
+                        .any(|run| matches!(run, DocRun::Text(t) if t.text == wanted)))
+                        })
+                        .then_some(table)
+                })
+                .expect("group owning the TAP row");
+            assert!(nested.tblp_pr.is_none());
+            assert!(
+                serde_json::to_value(nested).unwrap()["__tableLayout"]["cellFrame"].is_null(),
+                "nondefault TAP remains authoritative even without an active placement: {tap:?}, row {row_index}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -1546,6 +1657,21 @@ fn nested_cell_frames_keep_source_facts_and_native_row_identity() {
             nested.iter().map(|t| t.rows.len()).collect::<Vec<_>>(),
             expected_rows
         );
+        for (index, table) in nested.iter().enumerate() {
+            let wire = serde_json::to_value(table).unwrap();
+            if index != 0 {
+                assert!(wire["__tableLayout"]["cellFrame"].is_null());
+                assert_eq!(wire["__tableLayout"]["ordinaryFlow"], true);
+                continue;
+            }
+            assert_eq!(wire["__tableLayout"]["cellFrame"]["hAnchor"], "margin");
+            assert_eq!(wire["__tableLayout"]["cellFrame"]["y"], 12.0);
+            assert_eq!(wire["__tableLayout"]["ordinaryFlow"], false);
+            assert!(
+                table.tblp_pr.is_none(),
+                "paragraph frames are not authored TAP positioning"
+            );
+        }
         let paragraphs: Vec<_> = nested
             .iter()
             .flat_map(|table| table.rows.iter())
@@ -1655,14 +1781,21 @@ fn nested_cell_frame_flow_warning_names_each_root_body_element_once() {
     let diagnostics =
         |json: &serde_json::Value| json.get("diagnostics").cloned().unwrap_or_default();
 
-    // Two framed paragraphs under one root, as one nested table of equal row
-    // identity or as two one-row nested tables: one fact for that root.
+    // A homogeneous first grid acquires placement. A later grid with a
+    // different row identity remains a residual frame warning for the root.
     for second in [-4, 1441] {
         let (_, json) = model(&nested_frame_source(
             nested_owner_frame(-4),
             nested_owner_frame(second),
         ));
-        assert_eq!(diagnostics(&json), serde_json::json!([warning(0)]));
+        assert_eq!(
+            diagnostics(&json),
+            if second == -4 {
+                serde_json::Value::Null
+            } else {
+                serde_json::json!([warning(0)])
+            }
+        );
     }
 
     // Each root table is named by its own final body index.
@@ -1679,15 +1812,15 @@ fn nested_cell_frame_flow_warning_names_each_root_body_element_once() {
             ..
         ]
     ));
-    assert_eq!(
-        diagnostics(&json),
-        serde_json::json!([warning(0), warning(2)])
+    assert!(
+        json.get("diagnostics").is_none(),
+        "both homogeneous grids have placement owners"
     );
     let (_, json) = model(&two_root_nested_frame_source(
         Vec::new(),
         nested_owner_frame(-4),
     ));
-    assert_eq!(diagnostics(&json), serde_json::json!([warning(2)]));
+    assert!(json.get("diagnostics").is_none());
 
     // Unframed nested tables emit nothing and keep the serialized model free
     // of the private diagnostics member.
@@ -1749,7 +1882,7 @@ fn nested_cell_frame_flow_warning_names_each_root_body_element_once() {
 
 #[test]
 fn nested_cell_frame_flow_warning_does_not_silently_skip_exhausted_allocations() {
-    let bytes = nested_frame_source(nested_owner_frame(-4), nested_owner_frame(-4));
+    let bytes = nested_frame_source(nested_owner_frame(-4), nested_owner_frame(1441));
     let result = super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1_000_000)
         .expect("public framed-container fixture");
     // Exercise the new allocation boundary with an already retained public

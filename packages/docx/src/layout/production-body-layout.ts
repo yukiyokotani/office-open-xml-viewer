@@ -137,6 +137,7 @@ import { paragraphGapAdjustment } from './paragraph-spacing.js';
 import { bottomBorderExtentPt, resolveParagraphBorderEdges, topBorderExtentPt, type ParagraphBorderEdges } from './paragraph-border-adjacency.js';
 import { acquireParagraphResult, acquireRetainedFrameGroup, bodyFrameGroupFor, bodyParagraphBorderEdgesFor, projectPhysicalAnchorResult, retainedFrameMaximumBaselineLoweringPt, type BodyFrameGroup } from './paragraph.js';
 import { wordLoweredDropCapAnchorLeadingPt } from './body-pagination-compatibility.js';
+import { wordGridFrameCarrierSourceOwnsNoFlow } from './table-compatibility.js';
 import type { CompleteTextBoxStoryAcquirer } from './paragraph.js';
 import type { AnchorFloatRegistrationState, BodyAcquisitionState, BodyMeasurementContext, CompleteTextBoxStoryOwner, PhysicalAnchorFrame, RetainedTableRecord } from './acquisition-context.js';
 import { ownedParagraphAnchorCollisions, inheritedParagraphAuthorityForReacquisition, TRANSIENT_TABLE_FINAL_FRAME_EXCLUSION_PREFIX } from './paragraph-wrap-registry.js';
@@ -360,6 +361,9 @@ function buildMeasureState(
               ? { hostFlowPageTranslationPt: cellState.cellHostFlowPageTranslationPt }
               : {}),
             ...textBoxStoryHostOptions(cellState, cellState.cellHostFlowPageTranslationPt),
+            ...(cellState.cellParagraphAnchorReferenceDeltaPt === undefined ? {} : {
+              paragraphAnchorReferenceDeltaPt: cellState.cellParagraphAnchorReferenceDeltaPt,
+            }),
           },
           inheritedAuthority,
         ).layout;
@@ -2602,6 +2606,11 @@ function reacquireBodyTableBlock(
   if (source.type !== 'paragraph') {
     throw new Error('Table paragraph re-acquisition source kind mismatch');
   }
+  const referenceDelta = request.paragraphAnchorReferenceDeltaPt !== undefined
+    && wordGridFrameCarrierSourceOwnsNoFlow(
+      state.acquisitionInputs.paragraphAcquisitionInput(source, request.acquired.source),
+    )
+    ? request.paragraphAnchorReferenceDeltaPt : undefined;
   const candidate: BodyAcquisitionState = {
     ...withTableCellStory(tableCellOwnerState(state)),
     contentX: 0,
@@ -2632,6 +2641,7 @@ function reacquireBodyTableBlock(
     floatParaSeq: request.floatingTableExclusions?.length ?? 0,
     pageAnchorPrescanned: new Set<ParagraphLayoutSource>(),
     cellHostFlowPageTranslationPt: request.hostFlowPageTranslationPt,
+    cellParagraphAnchorReferenceDeltaPt: referenceDelta,
   };
   const inheritedAuthority = inheritedParagraphAuthorityForReacquisition(request.acquired);
   const tableAcquisition = state.retainedTableAcquisition;

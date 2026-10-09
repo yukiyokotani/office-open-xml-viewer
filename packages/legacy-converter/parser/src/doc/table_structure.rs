@@ -102,6 +102,7 @@ pub(super) struct Assembler<P, R = Row> {
     rows: usize,
 }
 
+#[cfg(test)]
 pub(super) struct Event<P>(pub(super) Vec<LogicalTable<P>>);
 
 /// Grammar-complete logical tables before union-grid planning and merge
@@ -295,6 +296,7 @@ impl<P: Payload, R: Borrow<Row>> Assembler<P, R> {
     }
 }
 
+#[cfg(test)]
 impl<P: Payload> Assembler<P> {
     pub(super) fn push<F, K, A>(
         &mut self,
@@ -351,6 +353,7 @@ fn same_table<P, R: Borrow<Row>>(
     previous.first.frame.continues(&next.first.frame)
 }
 
+#[cfg(test)]
 fn plan_event<P: Default, A: FnMut(usize) -> Result<(), String>>(
     RawEvent(raw_tables): RawEvent<P>,
     admit: &mut A,
@@ -363,7 +366,7 @@ fn plan_event<P: Default, A: FnMut(usize) -> Result<(), String>>(
     Ok(Event(tables))
 }
 
-fn plan<P: Default, A: FnMut(usize) -> Result<(), String>>(
+pub(super) fn plan<P: Default, A: FnMut(usize) -> Result<(), String>>(
     raw: RawTable<P>,
     admit: &mut A,
 ) -> Result<LogicalTable<P>, String> {
@@ -1201,7 +1204,10 @@ mod tests {
                             '\u{7}',
                             vec![],
                             &mut unframed,
-                            |Event(_)| Ok(vec![]),
+                            |Event(tables)| {
+                                drop(tables);
+                                Ok(vec![])
+                            },
                             &mut admit,
                         )?;
                     }
@@ -1224,7 +1230,10 @@ mod tests {
                         '\u{7}',
                         vec![],
                         &mut unframed,
-                        |Event(_)| Ok(vec![]),
+                        |Event(tables)| {
+                            drop(tables);
+                            Ok(vec![])
+                        },
                         &mut admit,
                     )?;
                 }
@@ -1240,7 +1249,13 @@ mod tests {
                     &mut admit,
                 )
             } else {
-                assembler.finish(|Event(_)| Ok(vec![]), &mut admit)
+                assembler.finish(
+                    |Event(tables)| {
+                        drop(tables);
+                        Ok(vec![])
+                    },
+                    &mut admit,
+                )
             }
         }
 

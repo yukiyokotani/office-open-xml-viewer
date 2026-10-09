@@ -829,6 +829,12 @@ describe('retained floating table placement (§17.4.57)', () => {
     expect(resolved.yPt).toBe(688);
   });
 
+  it('refuses a cell-owned alignment frame without an acquired host content band', () => {
+    const placement = retainedFloatingPlacement({ widthBasis: 'host-cell-content', textAnchor: 'cell-start' });
+    expect(() => resolveFloatingTablePlacement(placement, retainedReferenceFrames))
+      .toThrow('Cell-owned grid frame lacks its content band');
+  });
+
   it('uses the text frame when horizontal positioning was omitted', () => {
     const placement = retainedFloatingPlacement({
       horzAnchor: 'page',

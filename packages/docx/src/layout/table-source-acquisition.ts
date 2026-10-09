@@ -11,7 +11,7 @@ import {
   exactLengthKeyToNumber,
   multiplyExactLengthKeys,
 } from './exact-length.js';
-import type { DocTable } from '../types.js';
+import type { DocTable, FramePr } from '../types.js';
 import type { DeepReadonly } from './types.js';
 
 export type TableLayoutSource = DeepReadonly<DocTable>;
@@ -38,6 +38,7 @@ export interface TableMarginAcquisitionWire {
 
 export interface TableLayoutAcquisitionWire {
   readonly effectiveStyleId: string | null;
+  readonly cellFrame?: DeepReadonly<FramePr> | null;
   readonly ordinaryFlow: boolean;
   readonly logicalSequenceId?: string | null;
   readonly logicalRowOffset?: number;

@@ -1421,7 +1421,7 @@ pub struct LineSpacing {
 ///   lines    → 1          h/w/x/y → 0
 /// `x`/`y` are ignored when `xAlign`/`yAlign` are set; for a drop cap, `y`/
 /// `yAlign` are ignored entirely and `lines` drives the height.
-#[derive(Serialize, Debug, Clone, Default)]
+#[derive(Serialize, Debug, Clone, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct FramePr {
     /// ECMA-376 §17.3.1.11 `anchorLock`. This is retained only for effective
@@ -3516,6 +3516,12 @@ pub struct TableMarginAcquisitionWire {
 #[serde(rename_all = "camelCase")]
 pub struct TableLayoutAcquisitionWire {
     pub effective_style_id: Option<String>,
+    /// A homogeneous cell-owned grid frame, distinct from authored tblpPr.
+    /// Its text anchor is the insertion cursor at the beginning of its host
+    /// cell, not the following paragraph's top. OOXML does not elect this
+    /// owner from nested paragraph frames; producers must establish ownership.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cell_frame: Option<Box<FramePr>>,
     /// Whether Word treats this table as part of ordinary body flow after its
     /// tblpPr compatibility exceptions have been applied. This is retained
     /// separately from `DocTable::tblp_pr`: that public field preserves the

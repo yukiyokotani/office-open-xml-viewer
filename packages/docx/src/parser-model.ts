@@ -94,6 +94,7 @@ import type { BodyAcquisitionInputProjections } from './layout/acquisition-input
 import type { DocumentTypographySettingsInput } from './layout-context.js';
 import { isInklessParagraph } from './layout/paragraph-visibility.js';
 import {
+  cellOwnedGridFramePosition,
   wordTableCellSpacingValuePt,
   wordTableMarginValuePt,
   wordTableRowHeightRule,
@@ -871,6 +872,7 @@ export function tableFormatInput(table: TableLayoutSource): TableFormatInput {
   if (cached) return cached;
   const acquisition = tableAcquisitionInput(table);
   const ordinaryFlow = acquisition.table?.ordinaryFlow ?? table.tblpPr == null;
+  const cellFrame = acquisition.table?.cellFrame;
   const rows = table.rows.map((row, rowIndex) => {
     const rowWire = acquisition.rows[rowIndex]?.row ?? null;
     const exception = rowWire?.exception ?? null;
@@ -902,9 +904,11 @@ export function tableFormatInput(table: TableLayoutSource): TableFormatInput {
     logicalSequenceId: acquisition.table?.logicalSequenceId ?? null,
     logicalRowOffset: acquisition.table?.logicalRowOffset ?? 0,
     logicalTotalRows: acquisition.table?.logicalTotalRows ?? 0,
-    positioning: ordinaryFlow || table.tblpPr == null
-      ? null
-      : floatingTablePositionInput(table.tblpPr),
+    // Only the producer elects a grid owner; individual paragraph frame facts
+    // never elect a nested OOXML table. Preserve authored TAP presence and
+    // acquire bounded grid-frame policy at the table compatibility boundary.
+    positioning: ordinaryFlow ? null : cellFrame ? cellOwnedGridFramePosition(cellFrame)
+      : table.tblpPr == null ? null : floatingTablePositionInput(table.tblpPr),
     rows,
     // `word-first-row-table-exception-scope` applies these selected facts
     // table-wide.
