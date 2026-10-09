@@ -113,8 +113,10 @@ it('keeps admitted and ordinary shapes under distinct cache provenance', () => {
   expect(service.shape(ordinary).spans).toHaveLength(2);
   expect(service.shape(admitted).spans).toHaveLength(1);
   const fresh = fixture();
-  expect(fresh.shape(ordinary).spans).toHaveLength(2);
+  // A fresh service starts with the admitted request, so the ordinary
+  // request must also stay independent when the cache is populated in reverse.
   expect(fresh.shape(admitted).spans).toHaveLength(1);
+  expect(fresh.shape(ordinary).spans).toHaveLength(2);
 });
 
 function document(runs: DocRun[], alignment: DocParagraph['alignment'] = 'left'): DocxDocumentModel {
