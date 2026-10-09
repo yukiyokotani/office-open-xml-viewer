@@ -35,6 +35,7 @@ import {
 import { XLSX_GOOGLE_FONTS } from './google-fonts.js';
 import { formatCellValueWithColor } from './number-format.js';
 import { type CfContext, type CfResult, compileCf, evaluateCf } from './conditional-format.js';
+import type { CfDiagnosticCollector } from './cf-diagnostics.js';
 import { computeLineVisualOrder, cellBaseRtl, resolveCellBidi } from './bidi-line.js';
 import { formatA1, parseA1 } from './a1.js';
 import { drawStackedVerticalChar } from './vertical-text.js';
@@ -1611,6 +1612,11 @@ interface RenderContext {
   canvasW: number;
   threeD?: ChartThreeDRenderer;
   regionMap?: ChartRegionMapRenderer;
+  /** Operation-local CF diagnostics of this render (#1547). Passed only to
+   *  the visible-frame evaluations in renderQuadrant; the overflow probe and
+   *  auto row-height precomputation are off-screen and deliberately do not
+   *  report. */
+  cfDiagnostics?: CfDiagnosticCollector;
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -2043,7 +2049,7 @@ function renderQuadrant(
     const { font, fill, border, xf } = resolveXf(
       styles, effectiveCellStyleIndex(rc.worksheet, cell, aCol),
     );
-    const cf = evaluateCf(cell, aRow, aCol, cfContext, styles.dxfs ?? []);
+    const cf = evaluateCf(cell, aRow, aCol, cfContext, styles.dxfs ?? [], rc.cfDiagnostics);
     const effectiveFill = cf.fill ?? fill;
     // Same layers as the main path's merged anchor: PivotTable style fill
     // under the cell's own fill, and table / PivotTable font beneath CF.
@@ -2261,7 +2267,7 @@ function renderQuadrant(
       const cell = cellMap.get(key);
       const styleIndex = effectiveCellStyleIndex(rc.worksheet, cell, colIndex);
       const { font, fill, border, xf } = resolveXf(styles, styleIndex);
-      const cf = evaluateCf(cell, rowIndex, colIndex, cfContext, styles.dxfs ?? []);
+      const cf = evaluateCf(cell, rowIndex, colIndex, cfContext, styles.dxfs ?? [], rc.cfDiagnostics);
       const effectiveFill = cf.fill ?? fill;
       const tableStyle = rc.tableStyleMap.get(key);
       // Custom `<tableStyle>` dxfs (ECMA-376 §18.8.83). When present, they
@@ -3935,6 +3941,7 @@ export function renderViewport(
     rtl: worksheet.rightToLeft === true,
     canvasW,
     threeD: opts.threeD,
+    cfDiagnostics: opts.cfDiagnostics,
   };
 
   // Canvas areas for each quadrant

@@ -3,6 +3,13 @@ export {
   type LoadOptions,
   type RenderViewportToBitmapOptions,
 } from './workbook.js';
+// Conditional-formatting evaluation boundary (#1547).
+export type {
+  CfDiagnosticKind,
+  CfDiagnosticPhase,
+  CfRuleDiagnostic,
+  XlsxConditionalFormattingReport,
+} from './cf-diagnostics.js';
 export { XlsxViewer, XlsxSheetViewer } from './viewer.js';
 // Resolved list-validation values (reachable via XlsxWorkbook.resolveValidationList).
 export type { ResolvedList } from './validation-list.js';

@@ -112,6 +112,8 @@ export interface CellXf {
     readingOrder?: number;
     ownFontColor?: boolean;
 }
+export type CfDiagnosticKind = 'unsupported' | 'invalid';
+export type CfDiagnosticPhase = 'expression' | 'cellIs' | 'activity' | 'threshold';
 export interface CfIcon {
     iconSet: string;
     iconId: number;
@@ -143,6 +145,7 @@ export type CfRule = {
     priority: number;
     gradient: boolean;
     activeFormula?: string;
+    extThresholdFormula?: boolean;
     stopIfTrue?: boolean;
 } | {
     type: 'top10';
@@ -173,8 +176,17 @@ export type CfRule = {
     type: 'other';
     kind: string;
     priority: number;
+    unsupportedFormulaPhases?: number;
     stopIfTrue?: boolean;
 };
+export interface CfRuleDiagnostic {
+    readonly kind: CfDiagnosticKind;
+    readonly phase: CfDiagnosticPhase;
+    readonly blockIndex: number;
+    readonly ruleIndex: number;
+    readonly row: number;
+    readonly col: number;
+}
 export interface CfStop {
     kind: string;
     value: string | null;
@@ -2271,6 +2283,11 @@ export interface XlsxCommentReply {
 }
 export interface XlsxCommentsOptions extends ViewerCommentsOptions {
 }
+export interface XlsxConditionalFormattingReport {
+    readonly sheetIndex: number;
+    readonly viewport: Readonly<ViewportRange>;
+    readonly diagnostics: readonly CfRuleDiagnostic[];
+}
 export type XlsxCopyResult = Readonly<{
     status: 'copied';
     cellCount: number;
@@ -2567,6 +2584,7 @@ export class XlsxWorkbook {
     cellText(ws: Worksheet, cell: Cell): string;
     renderViewport(target: HTMLCanvasElement | OffscreenCanvas, sheetIndex: number, viewport: ViewportRange, opts?: XlsxRenderViewportOptions): Promise<void>;
     renderViewportToBitmap(sheetIndex: number, viewport: ViewportRange, opts: RenderViewportToBitmapOptions): Promise<ImageBitmap>;
+    getLastConditionalFormattingDiagnostics(): XlsxConditionalFormattingReport | null;
     destroy(): void;
     private __privatePresence;
     private static __staticPrivatePresence;

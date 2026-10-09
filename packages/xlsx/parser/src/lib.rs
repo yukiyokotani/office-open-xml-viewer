@@ -1459,6 +1459,123 @@ fn mark_rows_run_colors(rows: &mut [Row], normal: Option<&Option<String>>) {
 /// A `<hyperlink>` may carry `rid`, `location`, or both, so both are optional.
 type HyperlinkRids = Vec<(u32, u32, Option<String>, Option<String>, Option<String>)>;
 
+const X14_CF_NS: &str = "http://schemas.microsoft.com/office/spreadsheetml/2009/9/main";
+const XM_CF_NS: &str = "http://schemas.microsoft.com/office/excel/2006/main";
+
+fn cf_ns_element(node: roxmltree::Node<'_, '_>, ns: &str, name: &str) -> bool {
+    node.is_element() && node.tag_name().namespace() == Some(ns) && node.tag_name().name() == name
+}
+
+/// MS-XLSX 2.6.27: no-priority dataBar extensions link by GUID; a priority
+/// rule is standalone and its id is ignored. A malformed/duplicate GUID never
+/// selects arbitrary extension decoration (bounded fail-closed library policy).
+fn cf_guid(text: &str) -> Option<String> {
+    let text = text.trim();
+    let bytes = text.as_bytes();
+    if bytes.len() != 38 || bytes[0] != b'{' || bytes[37] != b'}' {
+        return None;
+    }
+    for (i, &ch) in bytes[1..37].iter().enumerate() {
+        if [8, 13, 18, 23].contains(&i) {
+            if ch != b'-' {
+                return None;
+            }
+        } else if !ch.is_ascii_hexdigit() {
+            return None;
+        }
+    }
+    Some(text.to_ascii_lowercase())
+}
+
+/// Return at most two actual standard-rule link identities; retaining any
+/// larger list is unnecessary because multiple links are already ambiguous.
+fn standard_cf_link(rule: roxmltree::Node<'_, '_>) -> (Option<String>, bool) {
+    let mut ids = rule
+        .children()
+        .filter(|n| {
+            n.is_element() && is_x_ns(n.tag_name().namespace()) && n.tag_name().name() == "extLst"
+        })
+        .flat_map(|n| {
+            n.children().filter(|e| {
+                e.is_element() && is_x_ns(e.tag_name().namespace()) && e.tag_name().name() == "ext"
+            })
+        })
+        .flat_map(|n| n.children().filter(|e| cf_ns_element(*e, X14_CF_NS, "id")));
+    // Count actual QName elements BEFORE GUID decoding. Filtering invalid
+    // text first would turn valid+invalid into a single link, or invalid-only
+    // into absent linkage and silently apply stale standard thresholds.
+    // Refusal is library admission policy, not an Office linkage rule.
+    let first = ids.next();
+    let multiple = ids.next().is_some();
+    let link = first.and_then(|n| n.text().and_then(cf_guid));
+    let refused = multiple || (first.is_some() && link.is_none());
+    (link, refused)
+}
+
+/// Only the worksheet extension container owns x14 CF facts; an unrelated
+/// namespace or same-named nested element is not another formula ingress.
+fn x14_cf_containers<'a, 'input>(
+    root: roxmltree::Node<'a, 'input>,
+) -> Vec<roxmltree::Node<'a, 'input>> {
+    root.children()
+        .filter(|n| {
+            n.is_element() && is_x_ns(n.tag_name().namespace()) && n.tag_name().name() == "extLst"
+        })
+        .flat_map(|n| {
+            n.children().filter(|e| {
+                e.is_element() && is_x_ns(e.tag_name().namespace()) && e.tag_name().name() == "ext"
+            })
+        })
+        .flat_map(|n| {
+            n.children()
+                .filter(|e| cf_ns_element(*e, X14_CF_NS, "conditionalFormattings"))
+        })
+        .flat_map(|n| {
+            n.children()
+                .filter(|e| cf_ns_element(*e, X14_CF_NS, "conditionalFormatting"))
+        })
+        .collect()
+}
+
+struct X14DataBarFacts {
+    gradient: Option<bool>,
+    activity_formula: Option<String>,
+    cfvos: Vec<(String, Option<String>)>,
+    malformed: bool,
+}
+
+fn x14_formula_phases(rule: roxmltree::Node<'_, '_>, kind: &str) -> u8 {
+    let direct_formula = rule.children().any(|n| cf_ns_element(n, XM_CF_NS, "f"));
+    let threshold = rule
+        .children()
+        .filter(|n| {
+            cf_ns_element(*n, X14_CF_NS, "dataBar")
+                || cf_ns_element(*n, X14_CF_NS, "colorScale")
+                || cf_ns_element(*n, X14_CF_NS, "iconSet")
+        })
+        .flat_map(|n| {
+            n.children()
+                .filter(|v| cf_ns_element(*v, X14_CF_NS, "cfvo"))
+        })
+        .any(|v| {
+            v.attribute("type") == Some("formula")
+                || v.children().any(|f| cf_ns_element(f, XM_CF_NS, "f"))
+        });
+    let direct = if direct_formula {
+        match kind {
+            "expression" => 1,
+            "cellIs" => 2,
+            "colorScale" | "dataBar" | "iconSet" => 4,
+            // Location provenance only: a direct formula of another
+            // unimplemented non-scale kind is reported, never evaluated.
+            _ => 1,
+        }
+    } else {
+        0
+    };
+    direct | if threshold { 8 } else { 0 }
+}
+
 /// Incrementally inflate and project one worksheet through the active package
 /// operation. Rows are kept private and provisional until the projector emits
 /// `Finished`; any XML, callback, or decoder failure drops the partial vector.
@@ -1631,27 +1748,111 @@ fn parse_projected_worksheet(
     // row's number + 1 (the first row is 1), and an explicit `@r` re-anchors
     // this counter. `prev_row_idx == 0` means "no row yet", so the first
     // implicit row lands at index 1.
-    // Pre-scan worksheet-level extLst for x14:dataBar extension attributes.
-    // Excel 2010+ stores the `gradient` flag on `<x14:dataBar>` inside
-    // `<extLst>/<ext>/<x14:conditionalFormattings>/<x14:conditionalFormatting>
-    // /<x14:cfRule id="{GUID}">`, linked to the SpreadsheetML cfRule via a
-    // matching `<x14:id>{GUID}</x14:id>` inside the cfRule's own extLst
-    // (§2.6.3). Build a GUID → gradient map so cfRule parsing can look up
-    // the override.
-    let mut x14_databar_gradient: HashMap<String, bool> = HashMap::new();
-    for x14_rule in doc
-        .descendants()
-        .filter(|n| n.tag_name().name() == "cfRule" && n.attribute("type") == Some("dataBar"))
+    // MS-XLSX 2.6.27/2.6.30: only no-priority dataBar extensions link to
+    // standard rules, whose cfvos SHOULD be ignored in favour of the linked
+    // extension. Retain effective kinds/text, not equality-based precedence.
+    // Library admission policy, not an Office uniqueness rule: multiple
+    // standard rules referencing one extension would multiply its retained
+    // body. Mark those links unsupported instead; work/storage stays linear
+    // in the admitted XML and no shared formula body is copied per reference.
+    let mut repeated_standard_links: HashMap<String, bool> = HashMap::new();
+    for rule in doc
+        .root_element()
+        .children()
+        .filter(|n| {
+            n.is_element()
+                && is_x_ns(n.tag_name().namespace())
+                && n.tag_name().name() == "conditionalFormatting"
+        })
+        .flat_map(|n| {
+            n.children().filter(|r| {
+                r.is_element()
+                    && is_x_ns(r.tag_name().namespace())
+                    && r.tag_name().name() == "cfRule"
+                    && r.attribute("type") == Some("dataBar")
+            })
+        })
     {
-        let Some(id) = x14_rule.attribute("id") else {
+        if let (Some(id), _) = standard_cf_link(rule) {
+            repeated_standard_links
+                .entry(id)
+                .and_modify(|repeated| *repeated = true)
+                .or_insert(false);
+        }
+    }
+    let x14_containers = x14_cf_containers(doc.root_element());
+    let mut x14_data_bar_facts: HashMap<String, Option<X14DataBarFacts>> = HashMap::new();
+    for x14_rule in x14_containers
+        .iter()
+        .flat_map(|n| n.children())
+        .filter(|n| {
+            cf_ns_element(*n, X14_CF_NS, "cfRule")
+                && n.attribute("type") == Some("dataBar")
+                && n.attribute("priority").is_none()
+        })
+    {
+        let Some(id) = x14_rule.attribute("id").and_then(cf_guid) else {
             continue;
         };
+        let mut facts = X14DataBarFacts {
+            gradient: None,
+            activity_formula: None,
+            cfvos: Vec::new(),
+            malformed: false,
+        };
+        let mut activity_count = 0;
+        for formula in x14_rule
+            .children()
+            .filter(|n| cf_ns_element(*n, XM_CF_NS, "f"))
+        {
+            activity_count += 1;
+            if activity_count == 1 {
+                facts.activity_formula = Some(formula.text().unwrap_or("").to_string());
+            }
+        }
+        let mut bar_count = 0;
         for bar in x14_rule
             .children()
-            .filter(|n| n.tag_name().name() == "dataBar")
+            .filter(|n| cf_ns_element(*n, X14_CF_NS, "dataBar"))
         {
-            if let Some(g) = bar.attribute("gradient") {
-                x14_databar_gradient.insert(id.to_string(), !(g == "0" || g == "false"));
+            bar_count += 1;
+            facts.gradient = bar
+                .attribute("gradient")
+                .map(|g| !(g == "0" || g == "false"));
+            for cfvo in bar
+                .children()
+                .filter(|n| cf_ns_element(*n, X14_CF_NS, "cfvo"))
+            {
+                // The schema has exactly two cfvos. Do not copy unbounded
+                // malformed extras; preserve rejection instead of truncating.
+                if facts.cfvos.len() == 2 {
+                    facts.malformed = true;
+                    continue;
+                }
+                let mut formulas = cfvo.children().filter(|n| cf_ns_element(*n, XM_CF_NS, "f"));
+                let kind = cfvo.attribute("type").unwrap_or("").to_string();
+                let first_formula = formulas.next();
+                // Formula thresholds are unsupported independently of their
+                // text (MS-XLSX 2.7.9); retain kind/marker, never copy the body.
+                let value = if kind == "formula" {
+                    None
+                } else {
+                    first_formula.map(|f| f.text().unwrap_or("").to_string())
+                };
+                if formulas.next().is_some() {
+                    facts.malformed = true;
+                }
+                facts.cfvos.push((kind, value));
+            }
+        }
+        facts.malformed |= bar_count != 1 || activity_count > 1 || facts.cfvos.len() != 2;
+        use std::collections::hash_map::Entry;
+        match x14_data_bar_facts.entry(id) {
+            Entry::Vacant(e) => {
+                e.insert(Some(facts));
+            }
+            Entry::Occupied(mut e) => {
+                e.insert(None);
             }
         }
     }
@@ -1661,17 +1862,11 @@ fn parse_projected_worksheet(
     // with per-threshold `<x14:cfIcon iconSet="X" iconId="N"/>` overrides,
     // and cfvo values inside `<xm:f>` children instead of `val` attributes.
     // The sqref for x14 CF rules lives in a `<xm:sqref>` sibling.
-    let mut x14_icon_formats: Vec<ConditionalFormat> = Vec::new();
-    for x14_cf in doc.descendants().filter(|n| {
-        n.tag_name().name() == "conditionalFormatting"
-            && n.tag_name()
-                .namespace()
-                .map(|u| u.contains("/spreadsheetml/2009/9"))
-                .unwrap_or(false)
-    }) {
+    let mut x14_formats: Vec<ConditionalFormat> = Vec::new();
+    for x14_cf in &x14_containers {
         let sqref: Vec<CellRange> = x14_cf
             .children()
-            .find(|n| n.tag_name().name() == "sqref")
+            .find(|n| cf_ns_element(*n, XM_CF_NS, "sqref"))
             .and_then(|n| n.text())
             .map(parse_sqref)
             .unwrap_or_default();
@@ -1681,18 +1876,54 @@ fn parse_projected_worksheet(
         let mut rules: Vec<CfRule> = Vec::new();
         for x14_rule in x14_cf
             .children()
-            .filter(|n| n.tag_name().name() == "cfRule" && n.attribute("type") == Some("iconSet"))
+            .filter(|n| cf_ns_element(*n, X14_CF_NS, "cfRule"))
         {
-            let priority: i32 = x14_rule
+            // Present positive priority identifies a standalone rule; absent
+            // priority extension records are represented only through a link.
+            let Some(priority) = x14_rule
                 .attribute("priority")
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0);
-            let Some(icon_node) = x14_rule
-                .children()
-                .find(|n| n.tag_name().name() == "iconSet")
+                .and_then(|s| s.parse::<i32>().ok())
+                .filter(|p| *p > 0)
             else {
                 continue;
             };
+            let kind = x14_rule.attribute("type").unwrap_or("");
+            let stop_if_true = x14_rule
+                .attribute("stopIfTrue")
+                .map(|v| v == "1" || v == "true")
+                .unwrap_or(false);
+            let phases = x14_formula_phases(x14_rule, kind);
+            let icon_node = x14_rule
+                .children()
+                .find(|n| cf_ns_element(*n, X14_CF_NS, "iconSet"));
+            // Standalone expression/cellIs and inline-DXF scales are not
+            // implemented. Preserve only bounded formula provenance; no raw
+            // formula/DXF copy, guessed formatting or false stopIfTrue.
+            // x14 formula thresholds have special MS-XLSX 2.7.9 semantics:
+            // even a numeric literal is not a standard formula threshold.
+            let unsupported_icon_threshold = icon_node.is_some_and(|icon| {
+                icon.children()
+                    .filter(|v| cf_ns_element(*v, X14_CF_NS, "cfvo"))
+                    .any(|v| {
+                        !matches!(
+                            v.attribute("type"),
+                            Some("min" | "max" | "num" | "percent" | "percentile")
+                        )
+                    })
+            });
+            if kind != "iconSet" || unsupported_icon_threshold || icon_node.is_none() {
+                if phases != 0 || unsupported_icon_threshold {
+                    rules.push(CfRule::Other {
+                        kind: kind.to_string(),
+                        priority,
+                        stop_if_true,
+                        unsupported_formula_phases: phases
+                            | if unsupported_icon_threshold { 8 } else { 0 },
+                    });
+                }
+                continue;
+            }
+            let icon_node = icon_node.expect("admitted iconSet child");
             let custom = icon_node
                 .attribute("custom")
                 .map(|v| v == "1" || v == "true")
@@ -1707,14 +1938,17 @@ fn parse_projected_worksheet(
                 .unwrap_or(false);
             let mut cfvos: Vec<CfValue> = Vec::new();
             let mut custom_icons: Vec<CfIcon> = Vec::new();
-            for ch in icon_node.children().filter(|n| n.is_element()) {
+            for ch in icon_node
+                .children()
+                .filter(|n| n.is_element() && n.tag_name().namespace() == Some(X14_CF_NS))
+            {
                 match ch.tag_name().name() {
                     "cfvo" => {
-                        let kind = ch.attribute("type").unwrap_or("percent").to_string();
+                        let kind = ch.attribute("type").unwrap_or("").to_string();
                         // x14:cfvo stores the value in `<xm:f>` child; attribute val fallback.
                         let value = ch
                             .children()
-                            .find(|n| n.tag_name().name() == "f")
+                            .find(|n| cf_ns_element(*n, XM_CF_NS, "f"))
                             .and_then(|n| n.text())
                             .map(|s| s.to_string())
                             .or_else(|| ch.attribute("val").map(|s| s.to_string()));
@@ -1744,18 +1978,15 @@ fn parse_projected_worksheet(
                 // `activePresent`) is its activity condition.
                 active_formula: x14_rule
                     .children()
-                    .find(|n| n.tag_name().name() == "f")
+                    .find(|n| cf_ns_element(*n, XM_CF_NS, "f"))
                     .and_then(|n| n.text())
                     .map(|s| s.to_string()),
                 // [MS-XLSX] x14:cfRule carries the same `stopIfTrue`.
-                stop_if_true: x14_rule
-                    .attribute("stopIfTrue")
-                    .map(|v| v == "1" || v == "true")
-                    .unwrap_or(false),
+                stop_if_true,
             });
         }
         if !rules.is_empty() {
-            x14_icon_formats.push(ConditionalFormat { sqref, rules });
+            x14_formats.push(ConditionalFormat { sqref, rules });
         }
     }
 
@@ -1997,11 +2228,17 @@ fn parse_projected_worksheet(
                     }
                 }
             }
-            "conditionalFormatting" if is_x_ns(node.tag_name().namespace()) => {
+            "conditionalFormatting"
+                if is_x_ns(node.tag_name().namespace())
+                    && node.parent() == Some(doc.root_element()) =>
+            {
                 let sqref = node.attribute("sqref").map(parse_sqref).unwrap_or_default();
                 let mut rules: Vec<CfRule> = Vec::new();
                 for cf in node.children() {
-                    if cf.tag_name().name() != "cfRule" {
+                    if !cf.is_element()
+                        || !is_x_ns(cf.tag_name().namespace())
+                        || cf.tag_name().name() != "cfRule"
+                    {
                         continue;
                     }
                     let kind = cf.attribute("type").unwrap_or("").to_string();
@@ -2018,9 +2255,13 @@ fn parse_projected_worksheet(
                         .unwrap_or(false);
                     // colorScale / dataBar / iconSet: an optional `<formula>`
                     // is the rule's activity condition (see `CfRule`).
-                    let active_formula = cf
+                    let mut active_formula = cf
                         .children()
-                        .find(|n| n.tag_name().name() == "formula")
+                        .find(|n| {
+                            n.is_element()
+                                && is_x_ns(n.tag_name().namespace())
+                                && n.tag_name().name() == "formula"
+                        })
                         .and_then(|n| n.text())
                         .map(|s| s.to_string());
                     match kind.as_str() {
@@ -2028,7 +2269,11 @@ fn parse_projected_worksheet(
                             let operator = cf.attribute("operator").unwrap_or("equal").to_string();
                             let formulas: Vec<String> = cf
                                 .children()
-                                .filter(|n| n.tag_name().name() == "formula")
+                                .filter(|n| {
+                                    n.is_element()
+                                        && is_x_ns(n.tag_name().namespace())
+                                        && n.tag_name().name() == "formula"
+                                })
                                 .filter_map(|n| n.text().map(|s| s.to_string()))
                                 .collect();
                             rules.push(CfRule::CellIs {
@@ -2048,7 +2293,11 @@ fn parse_projected_worksheet(
                             // (ECMA-376 §18.3.1.10). Evaluate as an expression rule.
                             let formula = cf
                                 .children()
-                                .find(|n| n.tag_name().name() == "formula")
+                                .find(|n| {
+                                    n.is_element()
+                                        && is_x_ns(n.tag_name().namespace())
+                                        && n.tag_name().name() == "formula"
+                                })
                                 .and_then(|n| n.text())
                                 .unwrap_or("")
                                 .to_string();
@@ -2060,11 +2309,18 @@ fn parse_projected_worksheet(
                             });
                         }
                         "colorScale" => {
-                            let scale = cf.children().find(|n| n.tag_name().name() == "colorScale");
+                            let scale = cf.children().find(|n| {
+                                n.is_element()
+                                    && is_x_ns(n.tag_name().namespace())
+                                    && n.tag_name().name() == "colorScale"
+                            });
                             let mut stop_values: Vec<(String, Option<String>)> = Vec::new();
                             let mut stop_colors: Vec<String> = Vec::new();
                             if let Some(scale_node) = scale {
-                                for child in scale_node.children() {
+                                for child in scale_node
+                                    .children()
+                                    .filter(|n| n.is_element() && is_x_ns(n.tag_name().namespace()))
+                                {
                                     match child.tag_name().name() {
                                         "cfvo" => {
                                             stop_values.push((
@@ -2105,11 +2361,18 @@ fn parse_projected_worksheet(
                             });
                         }
                         "dataBar" => {
-                            let bar = cf.children().find(|n| n.tag_name().name() == "dataBar");
+                            let bar = cf.children().find(|n| {
+                                n.is_element()
+                                    && is_x_ns(n.tag_name().namespace())
+                                    && n.tag_name().name() == "dataBar"
+                            });
                             let mut cfvos: Vec<(String, Option<String>)> = Vec::new();
                             let mut color = "#638EC6".to_string();
                             if let Some(bar_node) = bar {
-                                for child in bar_node.children() {
+                                for child in bar_node
+                                    .children()
+                                    .filter(|n| n.is_element() && is_x_ns(n.tag_name().namespace()))
+                                {
                                     match child.tag_name().name() {
                                         "cfvo" => {
                                             cfvos.push((
@@ -2129,42 +2392,43 @@ fn parse_projected_worksheet(
                                     }
                                 }
                             }
-                            // Excel 2010+ x14:dataBar extension may override the
-                            // gradient flag (§2.6.3, default="1"). "0" → solid
-                            // fill. The override lives in a separate
-                            // worksheet-level extLst and is linked via the
-                            // `<x14:id>{GUID}</x14:id>` contained in this
-                            // cfRule's own extLst.
                             let mut gradient = true;
-                            'gradient_lookup: for ext_list in
-                                cf.children().filter(|n| n.tag_name().name() == "extLst")
-                            {
-                                for ext in
-                                    ext_list.children().filter(|n| n.tag_name().name() == "ext")
-                                {
-                                    for id_node in
-                                        ext.descendants().filter(|n| n.tag_name().name() == "id")
-                                    {
-                                        if let Some(guid) = id_node.text() {
-                                            if let Some(&g) = x14_databar_gradient.get(guid) {
-                                                gradient = g;
-                                                break 'gradient_lookup;
-                                            }
-                                        }
-                                    }
-                                    // Fallback: some files embed <x14:dataBar>
-                                    // directly in the cfRule's extLst.
-                                    for x14_bar in ext
-                                        .descendants()
-                                        .filter(|n| n.tag_name().name() == "dataBar")
-                                    {
-                                        if let Some(g) = x14_bar.attribute("gradient") {
-                                            gradient = !(g == "0" || g == "false");
-                                            break 'gradient_lookup;
-                                        }
-                                    }
-                                }
+                            let (link, multiple_ids) = standard_cf_link(cf);
+                            let ambiguous_link = multiple_ids
+                                || link.as_ref().is_some_and(|id| {
+                                    repeated_standard_links.get(id) == Some(&true)
+                                });
+                            let linked_facts =
+                                link.as_ref().and_then(|id| x14_data_bar_facts.get(id));
+                            let mut ext_threshold_formula =
+                                ambiguous_link || matches!(linked_facts, Some(None));
+                            if let Some(Some(facts)) = linked_facts.filter(|_| !ambiguous_link) {
+                                gradient = facts.gradient.unwrap_or(true);
+                                // Effective extension facts, MS-XLSX 2.6.30;
+                                // never fall back to a stale standard threshold.
+                                cfvos.clone_from(&facts.cfvos);
+                                active_formula.clone_from(&facts.activity_formula);
+                                ext_threshold_formula |= facts.malformed
+                                    || facts.cfvos.iter().any(|(kind, _)| kind == "formula");
                             }
+                            if ambiguous_link
+                                || matches!(linked_facts, Some(None))
+                                || linked_facts
+                                    .is_some_and(|f| f.as_ref().is_some_and(|v| v.malformed))
+                            {
+                                // Ambiguous/malformed facts cannot prove the
+                                // standard activity inactive. Preserve a reached
+                                // unsupported boundary, without selecting one.
+                                rules.push(CfRule::Other {
+                                    kind: "dataBar".into(),
+                                    priority,
+                                    stop_if_true,
+                                    unsupported_formula_phases: 8,
+                                });
+                                continue;
+                            }
+                            // Unsupported autoMin/autoMax retain their distinct
+                            // kinds; renderer does not guess the required zero clamp.
                             let min = cfvos
                                 .first()
                                 .map(|(k, v)| CfValue {
@@ -2192,6 +2456,7 @@ fn parse_projected_worksheet(
                                 priority,
                                 gradient,
                                 active_formula,
+                                ext_threshold_formula,
                                 stop_if_true,
                             });
                         }
@@ -2243,8 +2508,11 @@ fn parse_projected_worksheet(
                             });
                         }
                         "iconSet" => {
-                            let icon_set_node =
-                                cf.children().find(|n| n.tag_name().name() == "iconSet");
+                            let icon_set_node = cf.children().find(|n| {
+                                n.is_element()
+                                    && is_x_ns(n.tag_name().namespace())
+                                    && n.tag_name().name() == "iconSet"
+                            });
                             let icon_set = icon_set_node
                                 .and_then(|n| n.attribute("iconSet"))
                                 .unwrap_or("3TrafficLights1")
@@ -2280,6 +2548,14 @@ fn parse_projected_worksheet(
                         other => {
                             rules.push(CfRule::Other {
                                 kind: other.to_string(),
+                                // Provenance, not new rule semantics: report a
+                                // directly authored formula of an unimplemented
+                                // non-scale kind; no formula body copy.
+                                unsupported_formula_phases: u8::from(cf.children().any(|n| {
+                                    n.is_element()
+                                        && is_x_ns(n.tag_name().namespace())
+                                        && n.tag_name().name() == "formula"
+                                })),
                                 priority,
                                 stop_if_true,
                             });
@@ -2348,7 +2624,7 @@ fn parse_projected_worksheet(
         }
     }
 
-    conditional_formats.extend(x14_icon_formats);
+    conditional_formats.extend(x14_formats);
 
     if rows_hidden_by_default {
         // ECMA-376 §18.3.1.81 `zeroHeight` hides only *unspecified* rows. An
@@ -5494,6 +5770,163 @@ mod conditional_format_tests {
         let json = serde_json::to_value(&rules).expect("rules serialize");
         assert!(json[0].get("stopIfTrue").is_none());
         assert!(json[1].get("stopIfTrue").is_none());
+    }
+
+    const X14_NS: &str = "http://schemas.microsoft.com/office/spreadsheetml/2009/9/main";
+    const XM_NS: &str = "http://schemas.microsoft.com/office/excel/2006/main";
+
+    const LINK_GUID: &str = "{12345678-1234-1234-1234-123456789ABC}";
+
+    fn extension_rules(xml_body: &str) -> serde_json::Value {
+        let xml = format!(
+            r#"<worksheet xmlns="{NS}" xmlns:x14="{X14_NS}" xmlns:xm="{XM_NS}" xmlns:bad="urn:not-x14"><sheetData/>{xml_body}</worksheet>"#
+        );
+        let (ws, _) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("worksheet parses");
+        serde_json::to_value(&ws.conditional_formats).expect("serialize")
+    }
+
+    fn linked_data_bar(x14_rule_body: &str) -> serde_json::Value {
+        let body = format!(
+            r#"<conditionalFormatting sqref="A1:A3"><cfRule type="dataBar" priority="1"><dataBar><cfvo type="min"/><cfvo type="max"/><color rgb="FF638EC6"/></dataBar><extLst><ext uri="link"><x14:id>{LINK_GUID}</x14:id></ext></extLst></cfRule></conditionalFormatting><extLst><ext uri="x14"><x14:conditionalFormattings><x14:conditionalFormatting><x14:cfRule type="dataBar" id="{LINK_GUID}">{x14_rule_body}</x14:cfRule><xm:sqref>A1:A3</xm:sqref></x14:conditionalFormatting></x14:conditionalFormattings></ext></extLst>"#
+        );
+        extension_rules(&body)[0]["rules"][0].clone()
+    }
+
+    #[test]
+    fn linked_x14_thresholds_are_effective_not_string_comparisons() {
+        let control = linked_data_bar(
+            r#"<x14:dataBar><x14:cfvo type="num"><xm:f>4</xm:f></x14:cfvo><x14:cfvo type="num"><xm:f>10</xm:f></x14:cfvo></x14:dataBar>"#,
+        );
+        assert_eq!(control["min"]["kind"], "num");
+        assert_eq!(control["min"]["value"], "4");
+        assert_eq!(control["max"]["value"], "10");
+        assert!(control.get("extThresholdFormula").is_none());
+        let automatic = linked_data_bar(
+            r#"<x14:dataBar><x14:cfvo type="autoMin"/><x14:cfvo type="autoMax"/></x14:dataBar>"#,
+        );
+        assert_eq!(automatic["min"]["kind"], "autoMin");
+        assert_eq!(automatic["max"]["kind"], "autoMax");
+        let formula = linked_data_bar(
+            r#"<xm:f>$B$1&gt;0</xm:f><x14:dataBar gradient="0"><x14:cfvo type="formula"><xm:f>4</xm:f></x14:cfvo><x14:cfvo type="num"><xm:f>10</xm:f></x14:cfvo></x14:dataBar>"#,
+        );
+        assert_eq!(formula["extThresholdFormula"], true);
+        assert_eq!(formula["min"]["kind"], "formula");
+        assert!(formula["min"]["value"].is_null());
+        assert_eq!(formula["activeFormula"], "$B$1>0");
+        assert_eq!(formula["gradient"], false);
+    }
+
+    #[test]
+    fn standalone_x14_formula_provenance_preserves_order_priority_and_no_raw_payload() {
+        let json = extension_rules(
+            r#"<extLst><ext uri="x14"><x14:conditionalFormattings><x14:conditionalFormatting><x14:cfRule type="expression" priority="8" stopIfTrue="1"><xm:f>SUMPRODUCT(A1:A3)</xm:f></x14:cfRule><x14:cfRule type="cellIs" priority="2"><xm:f>1</xm:f></x14:cfRule><x14:cfRule type="dataBar" priority="3"><xm:f>1</xm:f><x14:dataBar><x14:cfvo type="formula"><xm:f>A1</xm:f></x14:cfvo><x14:cfvo type="max"/></x14:dataBar></x14:cfRule><x14:cfRule type="timePeriod" priority="4"/><x14:cfRule type="timePeriod" priority="5"><xm:f>TODAY()</xm:f></x14:cfRule><xm:sqref>A1:A3</xm:sqref></x14:conditionalFormatting></x14:conditionalFormattings></ext></extLst>"#,
+        );
+        let rules = json[0]["rules"].as_array().unwrap();
+        assert_eq!(rules.len(), 4);
+        assert_eq!(rules[3]["unsupportedFormulaPhases"], 1);
+        assert_eq!(rules[0]["priority"], 8);
+        assert_eq!(rules[0]["stopIfTrue"], true);
+        assert_eq!(rules[0]["unsupportedFormulaPhases"], 1);
+        assert_eq!(rules[1]["unsupportedFormulaPhases"], 2);
+        assert_eq!(rules[2]["unsupportedFormulaPhases"], 12);
+        assert_eq!(json[0]["sqref"][0]["bottom"], 3);
+        assert!(rules.iter().all(|r| r.get("formula").is_none()));
+    }
+
+    #[test]
+    fn x14_namespace_container_sqref_and_positive_priority_bound_the_inlet() {
+        let json = extension_rules(
+            r#"<bad:conditionalFormatting><bad:cfRule type="expression" priority="1"><xm:f>1</xm:f></bad:cfRule><xm:sqref>A1</xm:sqref></bad:conditionalFormatting><x14:conditionalFormatting><x14:cfRule type="expression" priority="1"><xm:f>1</xm:f></x14:cfRule><xm:sqref>A1</xm:sqref></x14:conditionalFormatting><extLst><ext uri="x14"><x14:conditionalFormattings><x14:conditionalFormatting><x14:cfRule type="expression" priority="0"><xm:f>1</xm:f></x14:cfRule><x14:cfRule type="expression" priority="-1"><xm:f>1</xm:f></x14:cfRule><x14:cfRule type="expression"><xm:f>1</xm:f></x14:cfRule><bad:cfRule type="expression" priority="1"><xm:f>1</xm:f></bad:cfRule><xm:sqref>A1</xm:sqref></x14:conditionalFormatting><x14:conditionalFormatting><x14:cfRule type="expression" priority="1"><xm:f>1</xm:f></x14:cfRule></x14:conditionalFormatting></x14:conditionalFormattings></ext></extLst>"#,
+        );
+        assert_eq!(json, serde_json::json!([]));
+    }
+
+    #[test]
+    fn x14_icon_numeric_values_survive_but_formula_literals_do_not_masquerade_as_numeric() {
+        let json = extension_rules(
+            r#"<extLst><ext uri="x14"><x14:conditionalFormattings><x14:conditionalFormatting><x14:cfRule type="iconSet" priority="1" id="ignored"><x14:iconSet iconSet="3Arrows"><x14:cfvo type="percent"><xm:f>0</xm:f></x14:cfvo><x14:cfvo type="num"><xm:f>4</xm:f></x14:cfvo><x14:cfvo type="num"><xm:f>9</xm:f></x14:cfvo></x14:iconSet></x14:cfRule><x14:cfRule type="iconSet" priority="2"><x14:iconSet><x14:cfvo type="formula"><xm:f>4</xm:f></x14:cfvo></x14:iconSet></x14:cfRule><xm:sqref>A1:A3</xm:sqref></x14:conditionalFormatting></x14:conditionalFormattings></ext></extLst>"#,
+        );
+        assert_eq!(json[0]["rules"][0]["type"], "iconSet");
+        assert_eq!(json[0]["rules"][0]["cfvos"][1]["value"], "4");
+        assert_eq!(json[0]["rules"][1]["type"], "other");
+        assert_eq!(json[0]["rules"][1]["unsupportedFormulaPhases"], 8);
+    }
+
+    #[test]
+    fn malformed_actual_id_elements_refuse_instead_of_becoming_absent_links() {
+        for ids in [
+            "<x14:id>not-a-guid</x14:id>".to_string(),
+            "<x14:id/>".to_string(),
+            format!("<x14:id>{LINK_GUID}</x14:id><x14:id>not-a-guid</x14:id>"),
+            format!("<x14:id>{LINK_GUID}</x14:id><x14:id/>"),
+            format!("<x14:id>{LINK_GUID}</x14:id><x14:id>{LINK_GUID}</x14:id>"),
+        ] {
+            let xml = format!(
+                r#"<conditionalFormatting sqref="A1"><cfRule type="dataBar" priority="1"><dataBar><cfvo type="min"/><cfvo type="max"/></dataBar><extLst><ext uri="link">{ids}</ext></extLst></cfRule></conditionalFormatting>"#
+            );
+            let json = extension_rules(&xml);
+            assert_eq!(json[0]["rules"][0]["type"], "other", "{ids}");
+            assert_eq!(json[0]["rules"][0]["unsupportedFormulaPhases"], 8);
+        }
+        // Foreign ids and unmatched extension records are not owned links;
+        // this malformed-standard policy must not warn on ignored extensions.
+        let json = extension_rules(
+            r#"<conditionalFormatting sqref="A1"><cfRule type="dataBar" priority="1"><dataBar><cfvo type="min"/><cfvo type="max"/></dataBar><extLst><ext uri="link"><bad:id>not-a-guid</bad:id></ext></extLst></cfRule></conditionalFormatting><extLst><ext uri="x14"><x14:conditionalFormattings><x14:conditionalFormatting><x14:cfRule type="dataBar" id="not-a-guid"><xm:f>1</xm:f><x14:dataBar/></x14:cfRule><xm:sqref>A1</xm:sqref></x14:conditionalFormatting></x14:conditionalFormattings></ext></extLst>"#,
+        );
+        assert_eq!(json.as_array().unwrap().len(), 1);
+        assert_eq!(json[0]["rules"][0]["type"], "dataBar");
+        assert!(json[0]["rules"][0]
+            .get("unsupportedFormulaPhases")
+            .is_none());
+    }
+
+    #[test]
+    fn repeated_standard_links_do_not_multiply_extension_payload() {
+        let rule = format!(
+            r#"<cfRule type="dataBar" priority="1"><dataBar><cfvo type="min"/><cfvo type="max"/></dataBar><extLst><ext uri="link"><x14:id>{LINK_GUID}</x14:id></ext></extLst></cfRule>"#
+        );
+        let xml = format!(
+            r#"<conditionalFormatting sqref="A1:A3">{rule}{rule}</conditionalFormatting><extLst><ext uri="x14"><x14:conditionalFormattings><x14:conditionalFormatting><x14:cfRule type="dataBar" id="{LINK_GUID}"><xm:f>$B$1</xm:f><x14:dataBar><x14:cfvo type="num"><xm:f>4</xm:f></x14:cfvo><x14:cfvo type="num"><xm:f>10</xm:f></x14:cfvo></x14:dataBar></x14:cfRule><xm:sqref>A1:A3</xm:sqref></x14:conditionalFormatting></x14:conditionalFormattings></ext></extLst>"#
+        );
+        let json = extension_rules(&xml);
+        for rule in json[0]["rules"].as_array().unwrap() {
+            assert_eq!(rule["type"], "other");
+            assert_eq!(rule["unsupportedFormulaPhases"], 8);
+            assert!(rule.get("activeFormula").is_none());
+            assert!(rule.get("min").is_none());
+        }
+        let standard = parse_cf_rules(
+            r#"<conditionalFormatting sqref="A1"><cfRule type="timePeriod" priority="1"><formula>TODAY()</formula></cfRule><cfRule type="timePeriod" priority="2"/></conditionalFormatting>"#,
+        );
+        let rules = serde_json::to_value(standard).unwrap();
+        assert_eq!(rules[0]["unsupportedFormulaPhases"], 1);
+        assert!(rules[1].get("unsupportedFormulaPhases").is_none());
+    }
+
+    #[test]
+    fn duplicate_link_guid_and_malformed_thresholds_fail_closed() {
+        let json = linked_data_bar(
+            r#"<x14:dataBar><x14:cfvo type="num"/><x14:cfvo type="num"/><x14:cfvo type="num"/></x14:dataBar>"#,
+        );
+        assert_eq!(json["type"], "other");
+        assert_eq!(json["unsupportedFormulaPhases"], 8);
+        let standard = format!(
+            r#"<conditionalFormatting sqref="A1"><cfRule type="dataBar" priority="1"><dataBar><cfvo type="min"/><cfvo type="max"/><color rgb="FF638EC6"/></dataBar><extLst><ext uri="link"><x14:id>{LINK_GUID}</x14:id></ext></extLst></cfRule></conditionalFormatting>"#
+        );
+        let bar = r#"<x14:dataBar gradient="0"><x14:cfvo type="num"><xm:f>4</xm:f></x14:cfvo><x14:cfvo type="num"><xm:f>10</xm:f></x14:cfvo></x14:dataBar>"#;
+        let duplicate = format!(
+            r#"{standard}<extLst><ext uri="x14"><x14:conditionalFormattings><x14:conditionalFormatting><x14:cfRule type="dataBar" id="{LINK_GUID}">{bar}</x14:cfRule><x14:cfRule type="dataBar" id="{LINK_GUID}">{bar}</x14:cfRule><xm:sqref>A1</xm:sqref></x14:conditionalFormatting></x14:conditionalFormattings></ext></extLst>"#
+        );
+        let json = extension_rules(&duplicate);
+        assert_eq!(json[0]["rules"][0]["type"], "other");
+        assert_eq!(json[0]["rules"][0]["unsupportedFormulaPhases"], 8);
+        let standalone = format!(
+            r#"{standard}<extLst><ext uri="x14"><x14:conditionalFormattings><x14:conditionalFormatting><x14:cfRule type="dataBar" priority="2" id="{LINK_GUID}">{bar}</x14:cfRule><xm:sqref>A1</xm:sqref></x14:conditionalFormatting></x14:conditionalFormattings></ext></extLst>"#
+        );
+        assert_eq!(
+            extension_rules(&standalone)[0]["rules"][0]["min"]["kind"],
+            "min"
+        );
     }
 }
 
