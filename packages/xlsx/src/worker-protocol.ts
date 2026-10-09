@@ -52,6 +52,20 @@ export interface WireSizeOverrides {
   columnCssWidths?: Record<number, number | null>;
 }
 
+/** Rows retain native points and columns retain stored widths. Their point
+ * maps share null-removal/change detection; CSS widths and compact row runs
+ * stay in the private projection context instead of this authored-map path. */
+function applyBandPointOverrides(target: Record<number, number>, values: Record<number, number | null>): boolean {
+  let changed = false;
+  for (const [key, value] of Object.entries(values)) {
+    const index = Number(key);
+    if (value === null) {
+      if (Object.hasOwn(target, index)) { delete target[index]; changed = true; }
+    } else if (target[index] !== value) { target[index] = value; changed = true; }
+  }
+  return changed;
+}
+
 /**
  * Apply {@link WireSizeOverrides} to a worksheet's size maps (mutates `ws`).
  * Shared render paths call this only on a shallow render-local projection.
@@ -65,34 +79,8 @@ export function applySizeOverrides(ws: Worksheet, overrides: WireSizeOverrides |
     setRowResizeRanges(ws, overrides.rowHeightRanges);
     changed = true;
   }
-  if (overrides.rows) {
-    for (const [k, v] of Object.entries(overrides.rows)) {
-      const idx = Number(k);
-      if (v === null) {
-        if (Object.hasOwn(ws.rowHeights, idx)) {
-          delete ws.rowHeights[idx];
-          changed = true;
-        }
-      } else if (ws.rowHeights[idx] !== v) {
-        ws.rowHeights[idx] = v;
-        changed = true;
-      }
-    }
-  }
-  if (overrides.cols) {
-    for (const [k, v] of Object.entries(overrides.cols)) {
-      const idx = Number(k);
-      if (v === null) {
-        if (Object.hasOwn(ws.colWidths, idx)) {
-          delete ws.colWidths[idx];
-          changed = true;
-        }
-      } else if (ws.colWidths[idx] !== v) {
-        ws.colWidths[idx] = v;
-        changed = true;
-      }
-    }
-  }
+  if (overrides.rows) changed = applyBandPointOverrides(ws.rowHeights, overrides.rows) || changed;
+  if (overrides.cols) changed = applyBandPointOverrides(ws.colWidths, overrides.cols) || changed;
   if (overrides.columnCssWidths) {
     for (const [k, v] of Object.entries(overrides.columnCssWidths)) {
       if (setColumnCssWidth(ws, Number(k), v)) changed = true;

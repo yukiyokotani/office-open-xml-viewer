@@ -63,7 +63,9 @@ export function validateRowResizeRanges(ranges: readonly RowResizeRange[]): void
 /** The immutable ranges are projection metadata, never parser/model facts. */
 export function setRowResizeRanges(ws: Worksheet, ranges: readonly RowResizeRange[]): void {
   validateRowResizeRanges(ranges);
-  const context = { ...sizes.get(ws) };
+  // Contexts are owned by one projection; cloning occurs at inheritance.
+  // Validate/freeze the incoming value before its assignment can mutate it.
+  const context = sizes.get(ws) ?? {};
   if (ranges.length) context.rows = Object.isFrozen(ranges) && ranges.every(Object.isFrozen)
     ? ranges : Object.freeze(ranges.map(r => Object.freeze({ ...r })));
   else delete context.rows;
