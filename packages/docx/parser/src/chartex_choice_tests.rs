@@ -989,6 +989,29 @@ fn selected_chartex_preflight_checks_resource_fallbacks_and_target_container() {
 }
 
 #[test]
+fn chartex_resource_fallback_does_not_process_filtered_children() {
+    // A resource substitution retains only direct w:drawing/w:pict children.
+    // The text payload is excluded before MU processing; the image is kept.
+    let nested = ac_requires(
+        "cx1",
+        &live("c").replace("r:id=\"chart\"", "r:id=\"missing\""),
+        &format!("<w:t mc:MustUnderstand=\"u\">filtered</w:t>{}", picture()),
+    );
+    let run = ac_requires(
+        "cx1",
+        &live("c").replace("</wp:inline>", &format!("{nested}</wp:inline>")),
+        &picture(),
+    );
+    let data = package(&run, "clusteredColumn");
+    for streaming in [false, true] {
+        let parsed = outcome(&data, streaming);
+        assert!(parsed["model"].get("parseError").is_none(), "{parsed}");
+        assert_eq!(first_type(&parsed), Some("chart"), "{parsed}");
+        assert_eq!(parsed["healthy"], true);
+    }
+}
+
+#[test]
 fn large_non_chartex_2015_choice_stays_unselected_and_healthy() {
     let large = format!("<w:t>{}</w:t>", "x".repeat(64 * 1024)).repeat(544);
     let incomplete_drawing = format!("<w:drawing><wp:inline>{large}</wp:inline></w:drawing>");

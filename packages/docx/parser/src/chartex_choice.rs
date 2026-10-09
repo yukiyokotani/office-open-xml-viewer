@@ -205,19 +205,22 @@ pub(crate) fn validate_selected_chartex_must_understand(
 ) -> Result<(), String> {
     let mut directives = ActiveMceDirectives::default();
     let mut frames = Vec::new();
-    let mut next = Some((root, false));
-    while let Some((node, validate)) = next.take() {
-        if let Some(frame) = enter_effective_element(node, validate, rids, &mut directives)? {
+    let mut next = Some((root, false, false));
+    while let Some((node, validate, resource_override)) = next.take() {
+        if let Some(frame) =
+            enter_effective_element(node, validate, resource_override, rids, &mut directives)?
+        {
             frames.push(frame);
         }
         while let Some(frame) = frames.last_mut() {
-            if let Some(child) = frame.next {
+            if let Some((child, resource_override)) = frame.next {
                 frame.next = if frame.siblings {
-                    child.next_sibling()
+                    effective_child(child.next_sibling(), frame.resource_children_only)
+                        .map(|child| (child, false))
                 } else {
-                    frame.resource_fallback.take()
+                    frame.resource_fallback.take().map(|branch| (branch, true))
                 };
-                next = Some((child, frame.validate));
+                next = Some((child, frame.validate, resource_override));
                 break;
             }
             let element = frame.element;
@@ -230,9 +233,10 @@ pub(crate) fn validate_selected_chartex_must_understand(
 
 struct EffectiveFrame<'a, 'input> {
     element: roxmltree::Node<'a, 'input>,
-    next: Option<roxmltree::Node<'a, 'input>>,
+    next: Option<(roxmltree::Node<'a, 'input>, bool)>,
     /// False for AlternateContent, whose only effective child is the selection.
     siblings: bool,
+    resource_children_only: bool,
     // The selected Choice must be validated first, before substitution can
     // visit the authored fallback actually processed by the stream projector.
     resource_fallback: Option<roxmltree::Node<'a, 'input>>,
@@ -242,6 +246,7 @@ struct EffectiveFrame<'a, 'input> {
 fn enter_effective_element<'a, 'input>(
     node: roxmltree::Node<'a, 'input>,
     validate: bool,
+    resource_override: bool,
     rids: &HashSet<String>,
     directives: &mut ActiveMceDirectives<'a>,
 ) -> Result<Option<EffectiveFrame<'a, 'input>>, String> {
@@ -272,8 +277,10 @@ fn enter_effective_element<'a, 'input>(
     if namespace != Some(MCE_NS) || local != "AlternateContent" {
         return Ok(Some(EffectiveFrame {
             element: node,
-            next: node.first_child(),
+            next: effective_child(node.first_child(), resource_override)
+                .map(|child| (child, false)),
             siblings: true,
+            resource_children_only: resource_override,
             resource_fallback: None,
             validate,
         }));
@@ -317,11 +324,32 @@ fn enter_effective_element<'a, 'input>(
         });
     Ok(Some(EffectiveFrame {
         element: node,
-        next: selected,
+        next: selected.map(|branch| (branch, false)),
         siblings: false,
+        resource_children_only: false,
         resource_fallback,
         validate: validate || target,
     }))
+}
+
+/// The authored resource substitute is a drawing/pict seam, not a general
+/// Fallback interpretation. Match parser run dispatch and the streamed
+/// projector's direct-child filter before processing any child directives.
+fn effective_child<'a, 'input>(
+    mut child: Option<roxmltree::Node<'a, 'input>>,
+    resource_only: bool,
+) -> Option<roxmltree::Node<'a, 'input>> {
+    while let Some(node) = child {
+        if !resource_only
+            || (node.is_element()
+                && is_w_ns(node.tag_name().namespace())
+                && matches!(node.tag_name().name(), "drawing" | "pict"))
+        {
+            return Some(node);
+        }
+        child = node.next_sibling();
+    }
+    None
 }
 
 /// Ignorable/ProcessContent declarations active on the traversal path. Counts
