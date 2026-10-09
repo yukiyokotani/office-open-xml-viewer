@@ -546,6 +546,8 @@ export interface TableRow {
 
 export interface TableCell {
   textBody: TextBody | null;
+  /** ECMA-376 §21.1.3.17: cell-owned horizontal overflow; omitted means clip. */
+  horzOverflow?: 'clip' | 'overflow';
   fill: Fill | null;
   /** Default run text colour inherited from the table style (`<a:tcTxStyle>`); hex, no `#`. */
   textColor?: string;

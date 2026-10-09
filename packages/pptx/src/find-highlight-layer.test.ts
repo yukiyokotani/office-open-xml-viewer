@@ -157,3 +157,33 @@ describe('buildPptxHighlightLayer', () => {
     expect(layer.children).toHaveLength(0);
   });
 });
+
+
+describe('physical table-cell horizontal clipping in find highlights', () => {
+  it('clips the cell x axis inside the frame transform and preserves vertical overflow', () => {
+    vi.stubGlobal('document', { createElement: makeEl });
+    const layer = makeEl('div');
+    const runs = [run({ text: 'AAAAAAAA', shapeW: 60, shapeH: 80,
+      cellHorzOverflow: 'clip', rotation: 30, shapeFlipH: true })];
+    buildPptxHighlightLayer(layer as unknown as HTMLDivElement, runs,
+      [{ slices: [{ runIndex: 0, start: 0, end: 8 }], active: true }],
+      720, 540, measureForFont);
+    const frame = layer.children[0];
+    expect(frame.style.overflowX).toBe('clip');
+    expect(frame.style.overflowY).toBe('visible');
+    expect(frame.style.transform).toBe('rotate(30deg) scale(-1, 1)');
+    expect(frame.children[0].style.width).toBe(`${56 / 60 * 100}%`);
+  });
+
+  it('separates clip and overflow cells even when their frame geometry matches', () => {
+    vi.stubGlobal('document', { createElement: makeEl });
+    const layer = makeEl('div');
+    const runs = [run({ cellHorzOverflow: 'clip' }), run({ cellHorzOverflow: 'overflow' })];
+    buildPptxHighlightLayer(layer as unknown as HTMLDivElement, runs,
+      [{ slices: [{ runIndex: 0, start: 0, end: 1 }, { runIndex: 1, start: 0, end: 1 }], active: false }],
+      720, 540, measureForFont);
+    expect(layer.children).toHaveLength(2);
+    expect(layer.children[0].style.overflowX).toBe('clip');
+    expect(layer.children[1].style.overflow).toBe('visible');
+  });
+});

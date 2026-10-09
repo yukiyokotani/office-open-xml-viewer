@@ -273,6 +273,10 @@ pub struct TableRow {
 #[serde(rename_all = "camelCase")]
 pub struct TableCell {
     pub text_body: Option<TextBody>,
+    /// ECMA-376 §21.1.3.17/§20.1.10.69: cell-owned horizontal clipping.
+    /// The schema default is clip; keep the cell choice separate from bodyPr.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub horz_overflow: Option<String>,
     pub fill: Option<Fill>,
     /// Whether `tcPr` authored a fill choice, including explicit `noFill`.
     /// Kept parser-internal so table styles cannot overwrite direct formatting.

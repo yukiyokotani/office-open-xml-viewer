@@ -393,7 +393,9 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
     }
     if (req.type === 'renderPage') {
       if (!doc) throw new Error('Document not loaded');
-      const canvas = new OffscreenCanvas(1, 1); // renderer resizes it
+      // The renderer resizes it. A caller-transferred surface keeps the caller's
+      // inherited canvas language; a request without one keeps a local surface.
+      const canvas = req.canvas ?? new OffscreenCanvas(1, 1);
       const source = layoutSourceStoreOf(doc.layoutServices);
       if (!source) throw new Error('Document layout source is not initialized');
       await renderLayoutSourceToCanvas(source, canvas, req.pageIndex, {

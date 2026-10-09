@@ -24,5 +24,5 @@ export function pptxRunFrameTransform(run: PptxTextRunInfo): string {
 /** Stable grouping key shared by selection and find-highlight overlays. */
 export function pptxRunFrameKey(run: PptxTextRunInfo, transform: string): string {
   return `${run.shapeX},${run.shapeY},${run.shapeW},${run.shapeH},` +
-    transform;
+    `${run.cellHorzOverflow ?? 'shape'},${transform}`;
 }

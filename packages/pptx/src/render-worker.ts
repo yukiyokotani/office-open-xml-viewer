@@ -217,7 +217,11 @@ async function openPresentation(request: Extract<RenderWorkerRequest, { kind: 'p
   const embeddedFontsLoaded = loadEmbeddedFonts(bootstrap.embeddedFonts, getFontBytes);
   cjkFallback = request.cjkFallback;
   googleSubstitutes = request.useGoogleFonts === true;
-  preflightBuilder = new PresentationPreflightBuilder(bootstrap, { cjkFallback, collectFontDemand: request.useGoogleFonts === true && !request.renderers ? await loadFontDemandCollector(true) : undefined });
+  // Optional Google subset loading is library policy keyed to the slide model
+  // alone, as in main mode. Registering an optional renderer does not widen it:
+  // the text those renderers draw (math runs, charts) already yields 'all', and
+  // TIFF decoding draws no text.
+  preflightBuilder = new PresentationPreflightBuilder(bootstrap, { cjkFallback, collectFontDemand: await loadFontDemandCollector(request.useGoogleFonts === true) });
   slides = new PptxSlideRepository({
     slideCount: bootstrap.slideCount,
     maxCachedSlides: HARD_MAX_PPTX_CACHED_SLIDES,
@@ -369,7 +373,9 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest | WorkerSvgDecod
       const { bitmap, runs } = await requireSlides().withSlide(request.slideIndex, async (slide) => {
         await slidePull.run(() => executeArchive((archive) => archive.assert_healthy()));
         const { renderSlideWithEmbeddedFonts } = await rendererModule;
-        const canvas = new OffscreenCanvas(1, 1);
+        // A caller-transferred surface keeps the caller's inherited canvas
+        // language; a request without one keeps a local surface.
+        const canvas = request.canvas ?? new OffscreenCanvas(1, 1);
         const runs: PptxTextRunInfo[] = [];
         await renderSlideWithEmbeddedFonts(canvas, slide, compact.slideWidth, compact.slideHeight, {
           width: request.width,
@@ -410,7 +416,7 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest | WorkerSvgDecod
       const runs = await requireSlides().withSlide(request.slideIndex, async (slide) => {
         await slidePull.run(() => executeArchive((archive) => archive.assert_healthy()));
         const { renderSlideWithEmbeddedFonts } = await rendererModule;
-        const canvas = new OffscreenCanvas(1, 1);
+        const canvas = request.canvas ?? new OffscreenCanvas(1, 1);
         const runs: PptxTextRunInfo[] = [];
         await renderSlideWithEmbeddedFonts(canvas, slide, compact.slideWidth, compact.slideHeight, {
           width: request.width,

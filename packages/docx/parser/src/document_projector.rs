@@ -101,6 +101,7 @@ struct ChoiceObserver {
     rid: Option<String>,
     capability_provisional: bool,
     discarded: bool,
+    deferred_must_understand: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -335,7 +336,7 @@ impl<R: BufRead> DocumentBodyProjector<R> {
                     }
                 }
                 Event::End(end) => {
-                    self.observe_choice_end();
+                    self.observe_choice_end()?;
                     if let Some(capture) = self.capture.as_ref() {
                         let closes_capture = self.depth == capture.root_depth;
                         let retained = self.discarded_provisional_choices == 0
@@ -538,7 +539,7 @@ impl<R: BufRead> DocumentBodyProjector<R> {
         }
     }
 
-    fn observe_choice_end(&mut self) {
+    fn observe_choice_end(&mut self) -> Result<(), String> {
         for k in 1..=PATH.len().min(self.frames.len().saturating_sub(1)) {
             let index = self.frames.len() - k - 1;
             if let ProcessedElementKind::AlternateBranch {
@@ -551,7 +552,7 @@ impl<R: BufRead> DocumentBodyProjector<R> {
                 }
             }
         }
-        let Some((capability_provisional, discarded, verdict, checkpoint)) = self
+        let Some((capability_provisional, discarded, verdict, checkpoint, deferred_error)) = self
             .frames
             .last_mut()
             .and_then(|frame| match &mut frame.kind {
@@ -573,12 +574,13 @@ impl<R: BufRead> DocumentBodyProjector<R> {
                         observer.discarded,
                         verdict,
                         observer.capture_checkpoint,
+                        observer.deferred_must_understand,
                     ))
                 }
                 _ => None,
             })
         else {
-            return;
+            return Ok(());
         };
         if discarded {
             self.discarded_provisional_choices =
@@ -615,6 +617,63 @@ impl<R: BufRead> DocumentBodyProjector<R> {
                 *choice_end_len = end_len;
             }
         }
+        // ECMA-376 Part 3 §§9.3–9.4: process MustUnderstand only after
+        // Choice selection. A 2015-only Choice is provisional until its exact
+        // ChartEx shape is known; a discarded ordinary drawing must not reject
+        // the document. Selected ChartEx branches keep the existing mismatch.
+        if deferred_error
+            && !(capability_provisional && verdict == Verdict::Parent)
+            && !Self::defer_must_understand_mismatch(self.frames.iter_mut().rev().skip(1))
+        {
+            // The diagnostic intentionally omits the namespace text: retaining
+            // one authored namespace string per pending Choice could multiply
+            // the bounded namespace-context budget by nesting depth.
+            return Err(
+                "document MCE MustUnderstand namespace is not understood in selected ChartEx Choice"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    fn validate_processed_must_understand(&mut self, namespaces: &[String]) -> Result<(), String> {
+        if namespaces
+            .iter()
+            .any(|namespace| !docx_understands_namespace(namespace))
+            && Self::defer_must_understand_mismatch(self.frames.iter_mut().rev())
+        {
+            return Ok(());
+        }
+        bounded_xml::validate_mce_must_understand(
+            namespaces,
+            &docx_understands_namespace,
+            "document",
+        )
+    }
+
+    fn defer_must_understand_mismatch<'a>(
+        frames: impl Iterator<Item = &'a mut ElementFrame>,
+    ) -> bool {
+        for frame in frames {
+            if let ProcessedElementKind::AlternateBranch {
+                observer: Some(observer),
+                ..
+            } = &mut frame.kind
+            {
+                if observer.capability_provisional {
+                    // A discarded Choice is already unselected even while its
+                    // descendant frames remain open. Absorb their mismatches
+                    // here rather than validating them or deferring outward.
+                    if !observer.discarded {
+                        // One bit per depth-bounded observer; retain neither
+                        // descendant payload nor authored namespace text.
+                        observer.deferred_must_understand = true;
+                    }
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     pub(crate) fn plan(&self) -> Result<DocumentBodyPlan, String> {
@@ -822,11 +881,7 @@ impl<R: BufRead> DocumentBodyProjector<R> {
             };
             if selected {
                 *selected_branch = true;
-                bounded_xml::validate_mce_must_understand(
-                    &attributes.must_understand,
-                    &docx_understands_namespace,
-                    "document",
-                )?;
+                self.validate_processed_must_understand(&attributes.must_understand)?;
             }
             return Ok((
                 ProcessedElementKind::AlternateBranch {
@@ -844,6 +899,7 @@ impl<R: BufRead> DocumentBodyProjector<R> {
                                     .expect("selected Choice has a classification")
                                     .capability_provisional,
                                 discarded: false,
+                                deferred_must_understand: false,
                             })
                         })
                         .flatten(),
@@ -854,11 +910,7 @@ impl<R: BufRead> DocumentBodyProjector<R> {
         }
 
         if is_mc && local_name == "AlternateContent" {
-            bounded_xml::validate_mce_must_understand(
-                &attributes.must_understand,
-                &docx_understands_namespace,
-                "document",
-            )?;
+            self.validate_processed_must_understand(&attributes.must_understand)?;
             return Ok((
                 ProcessedElementKind::AlternateContent {
                     selected_branch: false,
@@ -880,21 +932,13 @@ impl<R: BufRead> DocumentBodyProjector<R> {
                     element,
                     "document",
                 )?;
-                bounded_xml::validate_mce_must_understand(
-                    &attributes.must_understand,
-                    &docx_understands_namespace,
-                    "document",
-                )?;
+                self.validate_processed_must_understand(&attributes.must_understand)?;
                 return Ok((ProcessedElementKind::Unwrapped, attributes.scope));
             }
             return Ok((ProcessedElementKind::Ignored, attributes.scope));
         }
 
-        bounded_xml::validate_mce_must_understand(
-            &attributes.must_understand,
-            &docx_understands_namespace,
-            "document",
-        )?;
+        self.validate_processed_must_understand(&attributes.must_understand)?;
         Ok((
             ProcessedElementKind::Retained {
                 namespace: namespace.map(str::to_string),

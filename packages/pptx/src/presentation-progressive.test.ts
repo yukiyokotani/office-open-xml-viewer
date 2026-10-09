@@ -159,9 +159,15 @@ describe('PptxPresentation progressive layout lifecycle', () => {
       fontPreloadNames: [],
     });
     await parsing;
-    await presentation.renderSlideToBitmap(0, {
-      imageResources: { decodedByteBudget: 64 * 1024 * 1024, strategy: 'strict' },
-    });
+    // Worker mode requires OffscreenCanvas; the caller creates the render surface.
+    vi.stubGlobal('OffscreenCanvas', class { constructor(readonly width: number, readonly height: number) {} });
+    try {
+      await presentation.renderSlideToBitmap(0, {
+        imageResources: { decodedByteBudget: 64 * 1024 * 1024, strategy: 'strict' },
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
     expect(renderRequest?.imageResources).toEqual({
       decodedByteBudget: 64 * 1024 * 1024,
       strategy: 'strict',

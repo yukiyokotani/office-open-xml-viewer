@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DocxDocument } from './document.js';
 import { attachDocumentLayoutRuntime } from './layout/runtime-state.js';
 import type { DocxTextRunInfo } from './renderer.js';
@@ -9,6 +9,8 @@ function ownedBitmap(close = vi.fn()) {
 }
 
 function workerDocument(bitmap: ImageBitmap, runs: DocxTextRunInfo[]): DocxDocument {
+  // Worker mode requires OffscreenCanvas; the caller creates the render surface.
+  vi.stubGlobal('OffscreenCanvas', class { constructor(readonly width: number, readonly height: number) {} });
   const instance = Object.create(DocxDocument.prototype) as Record<string, unknown>;
   Object.assign(instance, {
     _mode: 'worker',
@@ -20,6 +22,10 @@ function workerDocument(bitmap: ImageBitmap, runs: DocxTextRunInfo[]): DocxDocum
   attachDocumentLayoutRuntime(document, 0);
   return document;
 }
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe('DocxDocument worker bitmap callback ownership', () => {
   it('releases the received bitmap once and preserves the callback failure', async () => {

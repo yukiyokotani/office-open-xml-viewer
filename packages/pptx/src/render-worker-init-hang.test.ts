@@ -375,4 +375,41 @@ describe('Google subset readiness in progressive render owners', () => {
     fake.onmessage?.({ data: { kind: 'continuePresentationPreflight', forId: 71, availableSlides: 2 } } as MessageEvent);
     await vi.waitFor(() => expect(fake.posted).toContainEqual(expect.objectContaining({ kind: 'presentationReady', id: 71 })));
   });
+
+  // Main mode never forwards renderer descriptors; the worker must load the
+  // same subset for the same text-only slide when one is registered.
+  it.each(['default', 'source'] as const)('a registered but unpainted renderer does not widen text-only subset loading (%s)', async (variant) => {
+    subsetSlides = ['A'];
+    initMock.mockResolvedValue(undefined);
+    fontMocks.requests.mockReturnValue([]);
+    fontMocks.render.mockResolvedValue(undefined);
+    if (variant === 'source') openSourceMock.mockResolvedValue({ archive: new FakePptxArchive(new Uint8Array()), viewDefaults: {}, close: vi.fn() });
+    const faces: Array<{ source: string; status: string }> = [];
+    class SubsetFace {
+      status = 'unloaded';
+      constructor(public family: string, public source: string) {}
+      load() { this.status = 'loaded'; return Promise.resolve(this); }
+    }
+    vi.stubGlobal('FontFace', SubsetFace);
+    vi.stubGlobal('OffscreenCanvas', class { constructor(_width: number, _height: number) {} });
+    // Same stylesheet as above: core caches it per URL across module resets.
+    // Demand for 'A' plus the ii/M/space sentinels excludes only U+0042.
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, text: async () => `
+      @font-face { font-family: Carlito; src: url(b.woff2); unicode-range: U+0042; }
+      @font-face { font-family: Carlito; src: url(a.woff2); unicode-range: U+0041; }
+    ` })));
+    const fake = await loadRenderWorker(variant);
+    fake.fonts = { add: (f: FontFace) => faces.push(f as unknown as typeof faces[number]), delete: () => true } as unknown as FontFaceSet;
+    const send = (data: unknown) => fake.onmessage?.({ data } as MessageEvent);
+    send({ kind: 'init', wasmUrl: 'x' });
+    send({ kind: 'parse', id: 90, buffer: new ArrayBuffer(4), resourcePolicy, useGoogleFonts: true,
+      renderers: { chartEx: { protocol: 'ooxml-worker-renderer-module/v1', builtin: 'chartEx' } },
+      ...(variant === 'source' ? { source: modelSource, sourceOwnerUrl: './internal/worker-presentation-source.js' } : {}),
+    });
+    await vi.waitFor(() => expect(fake.posted).toContainEqual(expect.objectContaining({ kind: 'presentationReady', id: 90 })));
+    // collectRuns awaits the worker's settled Google preload.
+    send({ kind: 'collectRuns', id: 91, slideIndex: 0, width: 100 });
+    await vi.waitFor(() => expect(fake.posted).toContainEqual(expect.objectContaining({ kind: 'runsCollected', id: 91 })));
+    expect(faces.filter((f) => f.status === 'loaded').map((f) => f.source)).toEqual([expect.stringContaining('/a.woff2')]);
+  });
 });
