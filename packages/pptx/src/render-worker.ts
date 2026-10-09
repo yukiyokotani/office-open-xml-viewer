@@ -217,7 +217,11 @@ async function openPresentation(request: Extract<RenderWorkerRequest, { kind: 'p
   const embeddedFontsLoaded = loadEmbeddedFonts(bootstrap.embeddedFonts, getFontBytes);
   cjkFallback = request.cjkFallback;
   googleSubstitutes = request.useGoogleFonts === true;
-  preflightBuilder = new PresentationPreflightBuilder(bootstrap, { cjkFallback, collectFontDemand: request.useGoogleFonts === true && !request.renderers ? await loadFontDemandCollector(true) : undefined });
+  // Optional Google subset loading is library policy keyed to the slide model
+  // alone, as in main mode. Registering an optional renderer does not widen it:
+  // the text those renderers draw (math runs, charts) already yields 'all', and
+  // TIFF decoding draws no text.
+  preflightBuilder = new PresentationPreflightBuilder(bootstrap, { cjkFallback, collectFontDemand: await loadFontDemandCollector(request.useGoogleFonts === true) });
   slides = new PptxSlideRepository({
     slideCount: bootstrap.slideCount,
     maxCachedSlides: HARD_MAX_PPTX_CACHED_SLIDES,
