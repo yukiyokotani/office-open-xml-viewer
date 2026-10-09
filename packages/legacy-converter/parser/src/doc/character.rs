@@ -62,6 +62,9 @@ pub struct Properties {
     picture_bullet: PictureBullet,
     /// Properties projected only by the direct model (see `DirectOnly`).
     direct_only: DirectOnly,
+    /// Validated MS-DOC 2.9.118 HresiOperand. An absent sparse patch must not
+    /// erase an inherited custom method; an authored hresNormal must do so.
+    word_breaking: Option<HresiOperand>,
     /// MS-DOC 2.6.1 sprmCSymbol / 2.9.47 CSymbolOperand (ftc, xchar).
     /// Both sprmCPlain and sprmCIstd preserve it.
     symbol: Option<(u16, u16)>,
@@ -72,6 +75,12 @@ pub struct Properties {
     /// and sprmCDttmRMark. All three survive sprmCPlain and sprmCIstd.
     insertion: InsertionMark,
 }
+
+/// The exact two-byte word-breaking method and character, retained without a
+/// renderer approximation. MS-DOC 2.4.6 gives the last applied Prl ownership;
+/// 2.6.1 does not preserve Hresi across sprmCPlain or sprmCIstd resets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HresiOperand([u8; 2]);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct InsertionMark {
@@ -204,6 +213,7 @@ impl Default for Properties {
             picture: Picture::default(),
             picture_bullet: PictureBullet::default(),
             direct_only: DirectOnly::default(),
+            word_breaking: None,
             symbol: None,
             field_vanish: None,
             insertion: InsertionMark::default(),
@@ -212,6 +222,10 @@ impl Default for Properties {
 }
 
 impl Properties {
+    pub(super) fn word_breaking_requires_consumer(&self) -> bool {
+        self.word_breaking.is_some_and(|value| value.0[0] != 1)
+    }
+
     /// A resolved style patch, without injecting the document's default size.
     /// Used when list-linked styles are layered onto a paragraph mark.
     pub fn sparse() -> Self {
@@ -228,6 +242,7 @@ impl Properties {
             picture: Picture::default(),
             picture_bullet: PictureBullet::default(),
             direct_only: DirectOnly::default(),
+            word_breaking: None,
             symbol: None,
             field_vanish: None,
             insertion: InsertionMark::default(),
@@ -276,6 +291,9 @@ impl Properties {
             }
         }
         self.direct_only.overlay(&patch.direct_only);
+        if patch.word_breaking.is_some() {
+            self.word_breaking = patch.word_breaking;
+        }
         if patch.insertion.inserted.is_some() {
             self.insertion.inserted = patch.insertion.inserted;
         }
@@ -416,11 +434,10 @@ impl Properties {
                 };
             }
             0x484e => {
-                // MS-DOC 2.9.118 HresiOperand: hresNormal (1) with ChHres
-                // zero is the default word-breaking method. It adds no
-                // character substitution to the renderer's default policy.
-                // Other valid methods require a word-break consumer; refuse
-                // them rather than silently dropping the changed characters.
+                // MS-DOC 2.9.118: hresNormal (1) requires ChHres zero; custom
+                // methods retain the existing conservative ASCII subset.
+                // Validate every applied operand before retaining it: a later
+                // normal value cannot forgive malformed or undefined input.
                 if operand.len() != 2
                     || !(1..=6).contains(&operand[0])
                     || (operand[0] == 1 && operand[1] != 0)
@@ -428,6 +445,10 @@ impl Properties {
                 {
                     return Err(unsupported("invalid Word word-breaking method"));
                 }
+                self.word_breaking = Some(HresiOperand([operand[0], operand[1]]));
+                // A custom value still reports unsupported to callers without
+                // effective-owner resolution. Formatting defers only this
+                // property's refusal until its final run/marker cascade.
                 return Ok(operand[0] == 1);
             }
             0x485f => {
@@ -1206,7 +1227,12 @@ mod tests {
         let base = Properties::default();
         let mut normal = base.clone();
         assert!(normal.apply(0x484e, &[1, 0], &base).unwrap());
-        assert_eq!(normal, base);
+        // Explicit normal is an authored override for sparse style patches,
+        // while its projected default word-breaking behavior stays unchanged.
+        assert_eq!(
+            serde_json::to_value(normal.direct_text_run("quartz".into(), &[]).unwrap()).unwrap(),
+            serde_json::to_value(base.direct_text_run("quartz".into(), &[]).unwrap()).unwrap()
+        );
         // A valid custom method changes characters at a break and needs a
         // consumer. It must not be treated as the default method.
         for method in 2..=6 {
