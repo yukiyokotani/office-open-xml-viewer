@@ -79,6 +79,7 @@ impl RetainedBytes for CfRule {
                 priority,
                 gradient,
                 active_formula,
+                ext_threshold_formula,
                 stop_if_true,
             } => 0u64
                 .saturating_add(color.heap_bytes())
@@ -87,6 +88,7 @@ impl RetainedBytes for CfRule {
                 .saturating_add(priority.heap_bytes())
                 .saturating_add(gradient.heap_bytes())
                 .saturating_add(active_formula.heap_bytes())
+                .saturating_add(ext_threshold_formula.heap_bytes())
                 .saturating_add(stop_if_true.heap_bytes()),
             Self::Top10 {
                 top,
@@ -135,10 +137,12 @@ impl RetainedBytes for CfRule {
             Self::Other {
                 kind,
                 priority,
+                unsupported_formula_phases,
                 stop_if_true,
             } => 0u64
                 .saturating_add(kind.heap_bytes())
                 .saturating_add(priority.heap_bytes())
+                .saturating_add(unsupported_formula_phases.heap_bytes())
                 .saturating_add(stop_if_true.heap_bytes()),
         }
     }

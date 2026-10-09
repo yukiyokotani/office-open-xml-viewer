@@ -1516,6 +1516,12 @@ pub enum CfRule {
         /// `CfRule`. Absent means always active.
         #[serde(skip_serializing_if = "Option::is_none")]
         active_formula: Option<String>,
+        /// The linked extension has an x14 formula threshold.
+        /// MS-XLSX 2.6.30 makes its cfvos effective; 2.7.9 gives x14 formula
+        /// thresholds special semantics. The renderer reports an unsupported
+        /// boundary rather than substituting a standard threshold or guessing.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        ext_threshold_formula: bool,
         /// §18.3.1.10 `stopIfTrue`; see `CfRule`. Serialized only when set.
         #[serde(skip_serializing_if = "std::ops::Not::not")]
         stop_if_true: bool,
@@ -1571,6 +1577,11 @@ pub enum CfRule {
     Other {
         kind: String,
         priority: i32,
+        /// Unsupported formula inlet provenance, without retaining formula/DXF
+        /// text. Fixed bits: expression=1, cellIs=2, activity=4, threshold=8.
+        /// Zero is omitted; unknown bits do not acquire new renderer meanings.
+        #[serde(skip_serializing_if = "is_zero_u8")]
+        unsupported_formula_phases: u8,
         /// §18.3.1.10 `stopIfTrue`; see `CfRule`. Serialized only when set.
         #[serde(skip_serializing_if = "std::ops::Not::not")]
         stop_if_true: bool,

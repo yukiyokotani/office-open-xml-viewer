@@ -16,6 +16,7 @@ import type {
   PullSessionIdentity,
   WorkerErrorPayload,
 } from '@silurus/ooxml-core/worker';
+import type { CfDiagnosticCollector } from './cf-diagnostics.js';
 
 export interface Workbook {
   sheets: SheetMeta[];
@@ -883,17 +884,22 @@ export interface ConditionalFormat {
  * own formula, [MS-XLSX] 2.6.27) is nonzero. Formulas are not evaluated: an
  * activity formula or `cellIs` operand is used only when it is a literal or
  * a single-cell reference to a cached value, and otherwise the rule does not
- * match.
+ * match. A rule the evaluator cannot evaluate is reported by
+ * `XlsxWorkbook.getLastConditionalFormattingDiagnostics()` (#1547).
+ * `extThresholdFormula` marks an effective linked x14 threshold that cannot
+ * be admitted. Ambiguous extension IDs use an `other` marker. Its provenance
+ * uses fixed bits expression=1, cellIs=2, activity=4, threshold=8; unknown bits
+ * have no diagnostic meaning. No raw formulas are exposed in render reports.
  */
 export type CfRule =
   | { type: 'cellIs'; operator: string; formulas: string[]; dxfId: number | null; priority: number; stopIfTrue?: boolean }
   | { type: 'expression'; formula: string; dxfId: number | null; priority: number; stopIfTrue: boolean }
   | { type: 'colorScale'; stops: CfStop[]; priority: number; activeFormula?: string; stopIfTrue?: boolean }
-  | { type: 'dataBar'; color: string; min: CfValue; max: CfValue; priority: number; gradient: boolean; activeFormula?: string; stopIfTrue?: boolean }
+  | { type: 'dataBar'; color: string; min: CfValue; max: CfValue; priority: number; gradient: boolean; activeFormula?: string; extThresholdFormula?: boolean; stopIfTrue?: boolean }
   | { type: 'top10'; top: boolean; percent: boolean; rank: number; dxfId: number | null; priority: number; stopIfTrue?: boolean }
   | { type: 'aboveAverage'; aboveAverage: boolean; equalAverage?: boolean; stdDev?: number; dxfId: number | null; priority: number; stopIfTrue?: boolean }
   | { type: 'iconSet'; iconSet: string; cfvos: CfValue[]; reverse: boolean; priority: number; customIcons?: CfIcon[]; activeFormula?: string; stopIfTrue?: boolean }
-  | { type: 'other'; kind: string; priority: number; stopIfTrue?: boolean };
+  | { type: 'other'; kind: string; priority: number; unsupportedFormulaPhases?: number; stopIfTrue?: boolean };
 
 export interface CfIcon {
   iconSet: string;
@@ -1286,6 +1292,10 @@ export interface RenderViewportOptions extends XlsxRenderViewportOptions {
   regionMap?: ChartRegionMapRenderer;
   /** @internal Optional Microsoft ChartEx renderer. */
   chartEx?: ChartExRenderer;
+  /** @internal Operation-local CF diagnostics for ONE render invocation.
+   *  Never cached on a worksheet or CfContext and never posted to a worker
+   *  (excluded from WireRenderViewportOptions). */
+  cfDiagnostics?: CfDiagnosticCollector;
 }
 
 export type WorkerRequest =

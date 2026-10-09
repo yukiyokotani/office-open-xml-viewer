@@ -889,6 +889,11 @@ async function renderWorksheetViewportLeased(
   // canvas after that lifecycle generation is stale.
   if ((opts as GuardedRenderViewportOptions)[XLSX_RENDER_COMMIT_GUARD]?.() === false) return;
 
+  // From here the frame paints synchronously. Only a painted frame owns a
+  // conditional-formatting report; a guarded-out frame never claims one, and
+  // a paint that throws rejects before its caller can commit the report.
+  opts.cfDiagnostics?.markPainted();
+
   // ── Step 2: Resize + draw, all synchronous from here.
   // Resize only when the backing store dimensions actually change. Assigning
   // canvas.width/height re-allocates (and clears) the GPU backing store, so on a
