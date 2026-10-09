@@ -320,7 +320,7 @@ describe('XlsxWorkbook.getWorksheet compatibility materializer', () => {
         }
         if (message.type === 'renderViewport') {
           events.push(`render:${message.sheetIndex}`);
-          return { type: 'viewportRendered', id: message.id, bitmap };
+          return { type: 'viewportRendered', id: message.id, bitmap, conditionalFormatting: [] };
         }
         throw new Error('unexpected worker request');
       }
@@ -609,7 +609,7 @@ describe('XlsxWorkbook.getWorksheet compatibility materializer', () => {
     const { workbook } = makeWorkbook('worker', async (message) => {
       order.push('type' in message ? message.type : `${message.kind}:${'sequence' in message ? message.sequence : ''}`);
       if ('type' in message && message.type === 'renderViewport') {
-        return { type: 'viewportRendered', id: message.id, bitmap };
+        return { type: 'viewportRendered', id: message.id, bitmap, conditionalFormatting: [] };
       }
       if ('type' in message && message.type === 'toMarkdown') {
         return { type: 'markdownRendered', id: message.id, markdown: 'after' };
