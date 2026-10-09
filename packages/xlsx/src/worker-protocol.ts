@@ -9,7 +9,9 @@ import type { OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
 import type { NormalizedOoxmlResourcePolicy } from '@silurus/ooxml-core/worker';
 import type { PullSessionIdentity } from '@silurus/ooxml-core/worker';
 import { GridGeometry } from './internal/grid-geometry.js';
-import { inheritColumnCssWidths, setColumnCssWidth } from './internal/column-css-overrides.js';
+import { setColumnCssWidth } from './internal/column-css-overrides.js';
+import { inheritWorksheetSizeContext, setRowResizeRanges,
+  type RowResizeRange } from './internal/worksheet-size-context.js';
 import {
   bindInitialAnchorSizes,
   sameInitialAnchorSizeReference,
@@ -22,7 +24,7 @@ import type {
 } from './delimited-text-protocol.js';
 
 /**
- * View-only per-band size overrides for one sheet, carried with every worker
+ * View-only point and compact row-interval overrides for one sheet, carried with every worker
  * `renderViewport` request. The render worker draws from its own worker-local
  * parsed-sheet cache, so main-thread Worksheet mutations (outline
  * collapse/expand via the size-0 hidden encoding, drag-to-resize #567) never
@@ -38,12 +40,30 @@ import type {
  */
 export interface WireSizeOverrides {
   rows?: Record<number, number | null>;
+  /** Private view-only point-height intervals. Positive heights override source
+   * positive points; explicit hidden zero points win. Empty resets intervals.
+   * Carries full million-row edits without million-key row records. */
+  rowHeightRanges?: readonly RowResizeRange[];
   cols?: Record<number, number | null>;
   /** @internal Private view-only channel: canonical logical CSS px of user
    * column resizes, which win over decoding `cols` at the current MDW. `null`
    * removes the CSS override (fall back to the stored width); 0 is hidden.
    * Absent when no column was user-resized. */
   columnCssWidths?: Record<number, number | null>;
+}
+
+/** Rows retain native points and columns retain stored widths. Their point
+ * maps share null-removal/change detection; CSS widths and compact row runs
+ * stay in the private projection context instead of this authored-map path. */
+function applyBandPointOverrides(target: Record<number, number>, values: Record<number, number | null>): boolean {
+  let changed = false;
+  for (const [key, value] of Object.entries(values)) {
+    const index = Number(key);
+    if (value === null) {
+      if (Object.hasOwn(target, index)) { delete target[index]; changed = true; }
+    } else if (target[index] !== value) { target[index] = value; changed = true; }
+  }
+  return changed;
 }
 
 /**
@@ -53,34 +73,14 @@ export interface WireSizeOverrides {
 export function applySizeOverrides(ws: Worksheet, overrides: WireSizeOverrides | undefined): void {
   if (!overrides) return;
   let changed = false;
-  if (overrides.rows) {
-    for (const [k, v] of Object.entries(overrides.rows)) {
-      const idx = Number(k);
-      if (v === null) {
-        if (Object.hasOwn(ws.rowHeights, idx)) {
-          delete ws.rowHeights[idx];
-          changed = true;
-        }
-      } else if (ws.rowHeights[idx] !== v) {
-        ws.rowHeights[idx] = v;
-        changed = true;
-      }
-    }
+  if (overrides.rowHeightRanges) {
+    // The setter validates the complete range set before installing metadata,
+    // and runs before any point mutation. Avoid scanning every interval twice.
+    setRowResizeRanges(ws, overrides.rowHeightRanges);
+    changed = true;
   }
-  if (overrides.cols) {
-    for (const [k, v] of Object.entries(overrides.cols)) {
-      const idx = Number(k);
-      if (v === null) {
-        if (Object.hasOwn(ws.colWidths, idx)) {
-          delete ws.colWidths[idx];
-          changed = true;
-        }
-      } else if (ws.colWidths[idx] !== v) {
-        ws.colWidths[idx] = v;
-        changed = true;
-      }
-    }
-  }
+  if (overrides.rows) changed = applyBandPointOverrides(ws.rowHeights, overrides.rows) || changed;
+  if (overrides.cols) changed = applyBandPointOverrides(ws.colWidths, overrides.cols) || changed;
   if (overrides.columnCssWidths) {
     for (const [k, v] of Object.entries(overrides.columnCssWidths)) {
       if (setColumnCssWidth(ws, Number(k), v)) changed = true;
@@ -117,7 +117,7 @@ function createInitialSizeProjection(
     view.colWidths = { ...source.colWidths };
   }
   inheritWorksheetPolicy(source, view);
-  inheritColumnCssWidths(source, view);
+  inheritWorksheetSizeContext(source, view);
   applySizeOverrides(view, overrides);
   return view;
 }

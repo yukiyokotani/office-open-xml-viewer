@@ -42,7 +42,7 @@ interface ViewerPriv {
       { overrides: WireSizeOverrides; revision: number } | undefined;
   };
   selectionInput: {
-    resizeDrag: { kind: 'col' | 'row'; index: number; originScaled: number; mdw: number } | null;
+    resizeDrag: { kind: 'col' | 'row'; index: number; originScaled: number; mdw: number; indices: readonly number[]; worksheet: Worksheet } | null;
     applyResize(clientX: number, clientY: number): void;
   };
   buildOutline(ws: Worksheet): void;
@@ -94,7 +94,7 @@ describe('SelectionInput resize across a retained-font MDW rebind', () => {
 
     const left = (priv.canvasArea as unknown as { getBoundingClientRect(): DOMRect })
       .getBoundingClientRect().left;
-    priv.selectionInput.resizeDrag = { kind: 'col', index: 1, originScaled: 0, mdw: 7 };
+    priv.selectionInput.resizeDrag = { kind: 'col', index: 1, originScaled: 0, mdw: 7, indices: [1], worksheet: priv.currentWorksheet };
     priv.selectionInput.applyResize(left + 84, 0);
     expect(ws.colWidths[1]).toBe(12);
     expect(ws.colWidths[2]).toBe(12);

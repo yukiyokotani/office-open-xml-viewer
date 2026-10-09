@@ -1,7 +1,7 @@
 import type { Worksheet } from '../types.js';
 import { inheritWorksheetPreviewBounds } from './worksheet-content-bounds.js';
 import { inheritWorksheetPolicy } from '../worksheet-policy-context.js';
-import { inheritColumnCssWidths } from './column-css-overrides.js';
+import { inheritWorksheetSizeContext } from './worksheet-size-context.js';
 import type { XlsxWorkbook } from '../workbook.js';
 import type { CellAddress, XlsxSelectionArea, XlsxSelectionState } from '../selection.js';
 import { areaContainsCell, MAX_SELECTION_AREAS, normalizeSelectionState } from '../selection.js';
@@ -49,7 +49,7 @@ export function createSheetViewModel(source: Worksheet): Worksheet {
   if (source.colCollapsed) view.colCollapsed = { ...source.colCollapsed };
   inheritWorksheetPreviewBounds(source, view);
   inheritWorksheetPolicy(source, view);
-  inheritColumnCssWidths(source, view);
+  inheritWorksheetSizeContext(source, view);
   return view;
 }
 

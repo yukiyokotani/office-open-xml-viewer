@@ -3,6 +3,7 @@ import { baseColWidthToPx, colWidthToPx, rowHeightToPx, uiColWidthToPx } from '.
 import { isMacDesktop } from './platform.js';
 import { GridAxisGeometry } from './grid-axis-geometry.js';
 import { columnCssWidths } from './column-css-overrides.js';
+import { rowResizeRanges, rowResizeContains } from './worksheet-size-context.js';
 
 export { GridAxisGeometry } from './grid-axis-geometry.js';
 
@@ -152,11 +153,21 @@ export class GridGeometry {
       MAX_WORKSHEET_COL,
       columnPixels,
     );
+    const rowRanges = rowResizeRanges(worksheet);
+    // A resize range overrides authored/derived positive point heights without
+    // expanding missing rows. Hidden points remain authoritative after outline
+    // edits. The source worksheet map remains sparse and unchanged by a range.
+    const rowPoints = rowRanges.length
+      ? Object.fromEntries(Object.entries(worksheet.rowHeights).filter(([index, height]) =>
+        height === 0 || !rowResizeContains(rowRanges, Number(index))))
+      : worksheet.rowHeights;
     this.row = new GridAxisGeometry(
-      worksheet.rowHeights,
+      rowPoints,
       rowHeightToPx(worksheet.defaultRowHeight),
       rowHeightToPx,
       MAX_WORKSHEET_ROW,
+      undefined,
+      rowRanges.map(r => ({ first: r.first, last: r.last, px: rowHeightToPx(r.height) })),
     );
   }
 

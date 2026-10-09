@@ -13,36 +13,11 @@ import {
 import { beginModelSourceLoad, selectModelSource } from '@silurus/ooxml-core/internal/model-source';
 import { computeMdw, pinXlsxGridGeometry } from '../renderer.js';
 import { respondToHostLayoutRequest } from './host-layout.js';
-import { XlsxWorkbook, type LoadOptions } from '../workbook.js';
+import type { XlsxWorkbook, LoadOptions } from '../workbook.js';
 import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions } from '../types.js';
 import { extractViewerRenderContext, withViewerRenderContext } from '../worker-protocol.js';
 
 type WorkbookConstructor = new (worker: Worker, mode: 'main' | 'worker', wasmUrl?: string | URL) => XlsxWorkbook;
-const BaseWorkbook = XlsxWorkbook as unknown as WorkbookConstructor;
-
-/** Source-only behavior lives in this subclass, outside the ordinary entry. */
-class SourceWorkbook extends BaseWorkbook {
-  sourceMdw: number | undefined;
-
-  override async getWorksheet(sheetIndex: number): Promise<Worksheet> {
-    const worksheet = await super.getWorksheet(sheetIndex);
-    if (this.sourceMdw !== undefined) pinXlsxGridGeometry(worksheet, this.sourceMdw);
-    return worksheet;
-  }
-
-  override async renderViewport(
-    target: HTMLCanvasElement | OffscreenCanvas,
-    sheetIndex: number,
-    viewport: ViewportRange,
-    options: RenderViewportOptions = {},
-  ): Promise<void> {
-    const resolved = this.sourceMdw !== undefined
-      && !extractViewerRenderContext(options).layoutMetrics
-      ? withViewerRenderContext(options, this.sourceMdw)
-      : options;
-    return super.renderViewport(target, sheetIndex, viewport, resolved);
-  }
-}
 
 type MutableWorkbook = {
   metrics: OoxmlResourceMetricsSession;
@@ -60,6 +35,7 @@ type MutableWorkbook = {
 export async function loadXlsxModelSource(
   input: string | ArrayBuffer,
   opts: LoadOptions,
+  workbookType: typeof import('../workbook.js')['XlsxWorkbook'],
 ): Promise<XlsxWorkbook> {
   const worksheetPolicy = normalizeXlsxWorksheetPolicy(opts);
   opts = { ...opts, xlsxWorksheetLimits: worksheetPolicy.worksheet };
@@ -84,7 +60,34 @@ export async function loadXlsxModelSource(
       buffer = input;
     }
     const selected = selectModelSource(opts.modelSources, 'xlsx', new Uint8Array(buffer));
-    if (!selected) return XlsxWorkbook.load(buffer, { ...opts, modelSources: undefined });
+    if (!selected) return workbookType.load(buffer, { ...opts, modelSources: undefined });
+    // The caller already owns this public constructor. Passing it avoids a
+    // static source-only back-edge that splits the ordinary workbook graph;
+    // source overrides remain confined to this admitted source's subclass.
+    const BaseWorkbook = workbookType as unknown as WorkbookConstructor;
+    /** Source-only behavior lives in this subclass, outside the ordinary entry. */
+    class SourceWorkbook extends BaseWorkbook {
+      sourceMdw: number | undefined;
+
+      override async getWorksheet(sheetIndex: number): Promise<Worksheet> {
+        const worksheet = await super.getWorksheet(sheetIndex);
+        if (this.sourceMdw !== undefined) pinXlsxGridGeometry(worksheet, this.sourceMdw);
+        return worksheet;
+      }
+
+      override async renderViewport(
+        target: HTMLCanvasElement | OffscreenCanvas,
+        sheetIndex: number,
+        viewport: ViewportRange,
+        options: RenderViewportOptions = {},
+      ): Promise<void> {
+        const resolved = this.sourceMdw !== undefined
+          && !extractViewerRenderContext(options).layoutMetrics
+          ? withViewerRenderContext(options, this.sourceMdw)
+          : options;
+        return super.renderViewport(target, sheetIndex, viewport, resolved);
+      }
+    }
     const load = beginModelSourceLoad(selected, 'xlsx');
     try {
       metrics.setSourceBytes(buffer.byteLength);
