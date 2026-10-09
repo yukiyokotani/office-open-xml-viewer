@@ -851,7 +851,8 @@ class XlsxViewerEngine implements ZoomableViewer {
       emitViewportChange: () => this.emitViewportChange(),
       hideCommentPopup: () => this.hideCommentPopup(),
       hideValidationPanel: () => this.hideValidationPanel(),
-      recordSizeOverride: (axis, index) => this.recordSizeOverride(axis, index),
+      recordSizeOverride: (axis, index, columnCssPx) =>
+        this.recordSizeOverride(axis, index, columnCssPx),
       updateSpacerSize: (ws) => this.updateSpacerSize(ws),
       refitAutoRowsAfterColumnResize: () => this.refitAutoRowsAfterColumnResize(),
       reportError: (error) => this._reportRenderError(error),
@@ -1424,9 +1425,9 @@ class XlsxViewerEngine implements ZoomableViewer {
     if (ws) this.viewEdits.setBandHidden(ws, this.currentSheet, axis, index, hidden);
   }
 
-  private recordSizeOverride(axis: OutlineAxis, index: number): void {
+  private recordSizeOverride(axis: OutlineAxis, index: number, columnCssPx?: number): void {
     const ws = this.currentWorksheet;
-    if (ws) this.viewEdits.recordSizeOverride(ws, this.currentSheet, axis, index);
+    if (ws) this.viewEdits.recordSizeOverride(ws, this.currentSheet, axis, index, columnCssPx);
   }
 
   private wireSizeOverrides(): ReturnType<SheetViewEdits['wireSizeOverrides']> {

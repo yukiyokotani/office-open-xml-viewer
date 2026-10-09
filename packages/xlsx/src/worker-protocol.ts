@@ -9,6 +9,7 @@ import type { OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
 import type { NormalizedOoxmlResourcePolicy } from '@silurus/ooxml-core/worker';
 import type { PullSessionIdentity } from '@silurus/ooxml-core/worker';
 import { GridGeometry } from './internal/grid-geometry.js';
+import { inheritColumnCssWidths, setColumnCssWidth } from './internal/column-css-overrides.js';
 import {
   bindInitialAnchorSizes,
   sameInitialAnchorSizeReference,
@@ -38,6 +39,11 @@ import type {
 export interface WireSizeOverrides {
   rows?: Record<number, number | null>;
   cols?: Record<number, number | null>;
+  /** @internal Private view-only channel: canonical logical CSS px of user
+   * column resizes, which win over decoding `cols` at the current MDW. `null`
+   * removes the CSS override (fall back to the stored width); 0 is hidden.
+   * Absent when no column was user-resized. */
+  columnCssWidths?: Record<number, number | null>;
 }
 
 /**
@@ -75,6 +81,11 @@ export function applySizeOverrides(ws: Worksheet, overrides: WireSizeOverrides |
       }
     }
   }
+  if (overrides.columnCssWidths) {
+    for (const [k, v] of Object.entries(overrides.columnCssWidths)) {
+      if (setColumnCssWidth(ws, Number(k), v)) changed = true;
+    }
+  }
   if (changed) GridGeometry.invalidate(ws);
 }
 
@@ -84,15 +95,7 @@ export function createSizeOverriddenWorksheet(
   source: Worksheet,
   overrides: WireSizeOverrides | undefined,
 ): Worksheet {
-  if (!overrides) return source;
-  const view = {
-    ...source,
-    rowHeights: { ...source.rowHeights },
-    colWidths: { ...source.colWidths },
-  };
-  inheritWorksheetPolicy(source, view);
-  applySizeOverrides(view, overrides);
-  return view;
+  return overrides ? createInitialSizeProjection(source, overrides) : source;
 }
 
 /** Render-local projection for a prepared-initial anchor reference. With
@@ -103,12 +106,19 @@ function createInitialSizeProjection(
   source: Worksheet,
   overrides: WireSizeOverrides | undefined,
 ): Worksheet {
-  if (overrides) return createSizeOverriddenWorksheet(source, overrides);
   // A new identity loses the WeakMap policy binding; the admitted policy (and
   // the renderer budgets derived from it) stays owned by the source, and the
   // cache's policy-identity check depends on this projection carrying it.
   const view = { ...source };
+  // Only an overridden projection mutates size maps. A prepared-anchor-only
+  // projection shares them read-only; both inherit context before any edits.
+  if (overrides) {
+    view.rowHeights = { ...source.rowHeights };
+    view.colWidths = { ...source.colWidths };
+  }
   inheritWorksheetPolicy(source, view);
+  inheritColumnCssWidths(source, view);
+  applySizeOverrides(view, overrides);
   return view;
 }
 

@@ -82,7 +82,7 @@ describe('XlsxViewer sheet acquisition generation', () => {
     const sizes = (engine.viewEdits as { sizeOverrideStore: Map<number, unknown> }).sizeOverrideStore;
     sizes.set(0, {
       rows: new Map(Array.from({ length: 200 }, (_, i) => [i + 1, 0])),
-      automaticRows: new Map(), cols: new Map(), revision: 1,
+      automaticRows: new Map(), cols: new Map(), colCss: new Map(), revision: 1,
     });
     const area = engine.canvasArea as { clientWidth: number; clientHeight: number };
     area.clientWidth = 800;

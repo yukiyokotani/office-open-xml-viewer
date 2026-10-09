@@ -101,7 +101,9 @@ export interface SelectionInputHost {
   emitViewportChange(): void;
   hideCommentPopup(): void;
   hideValidationPanel(): void;
-  recordSizeOverride(axis: OutlineAxis, index: number): void;
+  /** `columnCssPx`: logical CSS px captured by a column drag (view-only
+   * canonical width that survives MDW changes). Omitted for other edits. */
+  recordSizeOverride(axis: OutlineAxis, index: number, columnCssPx?: number): void;
   updateSpacerSize(ws: Worksheet): void;
   refitAutoRowsAfterColumnResize(): void;
   reportError(error: unknown): void;
@@ -323,7 +325,9 @@ export class SelectionInput {
       const ptX = this.host.screenX(clientX - rect.left, 0);
       const sizePx = Math.max(RESIZE_MIN_PX, Math.round((ptX - drag.originScaled) / cs));
       ws.colWidths[drag.index] = pxToColWidth(sizePx, drag.mdw);
-      this.host.recordSizeOverride('col', drag.index);
+      // The drag's intent is this logical CSS size; pass it so a later MDW
+      // change does not re-decode the stored width to a different size.
+      this.host.recordSizeOverride('col', drag.index, sizePx);
     } else {
       const ptY = clientY - rect.top;
       const sizePx = Math.max(RESIZE_MIN_PX, Math.round((ptY - drag.originScaled) / cs));
