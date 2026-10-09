@@ -2400,3 +2400,102 @@ fn cell_border_superseded_nested_owner_resolves_before_table_projection() {
         );
     }
 }
+
+#[test]
+fn cell_border_superseded_definition_cannot_discharge_unresolved_owner() {
+    let ff = cell_border_assignment(1, [0, 0, 0, 0, 8, 0xff, 0, 0]);
+    let drawn = cell_border_assignment(1, [0, 0, 0xff, 0, 24, 1, 0, 0]);
+    let definition = sprm(0xd608, &[6, 0, 1, 0, 0, 0xe8, 3], false);
+    let control = cell_border_document(
+        [row(1000), drawn.clone(), definition.clone()].concat(),
+        false,
+    )
+    .unwrap();
+    let error = cell_border_document([row(1000), ff.clone(), definition.clone()].concat(), false)
+        .expect_err("a new table definition is not established to reset unresolved FF");
+    assert!(
+        error.contains("unresolved Word cell border before topology change"),
+        "{error}"
+    );
+    let replaced = cell_border_document(
+        [row(1000), ff.clone(), drawn, definition.clone()].concat(),
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(replaced).unwrap(),
+        serde_json::to_value(control).unwrap()
+    );
+    let reset = sprm(0x563a, &1u16.to_le_bytes(), false);
+    let control = cell_border_document(
+        [row(1000), reset.clone(), definition.clone()].concat(),
+        true,
+    )
+    .unwrap();
+    let reset = cell_border_document([row(1000), ff, reset, definition].concat(), true).unwrap();
+    assert_eq!(
+        serde_json::to_value(reset).unwrap(),
+        serde_json::to_value(control).unwrap()
+    );
+}
+
+#[test]
+fn cell_border_superseded_deletion_cannot_discharge_unresolved_owner() {
+    let ff = cell_border_assignment(1, [0, 0, 0, 0, 8, 0xff, 0, 0]);
+    let drawn = cell_border_assignment(1, [0, 0, 0xff, 0, 24, 1, 0, 0]);
+    let insert = sprm(0x7621, &[1, 1, 0xe8, 3], false);
+    let delete = sprm(0x5622, &[0, 1], false);
+    let control = cell_border_document(
+        [row(1000), drawn.clone(), insert.clone(), delete.clone()].concat(),
+        false,
+    )
+    .unwrap();
+    let error = cell_border_document(
+        [row(1000), ff.clone(), insert.clone(), delete.clone()].concat(),
+        false,
+    )
+    .expect_err("deleting an owner does not establish the meaning of its unresolved FF");
+    assert!(
+        error.contains("unresolved Word cell border before topology change"),
+        "{error}"
+    );
+    let replaced = cell_border_document(
+        [row(1000), ff.clone(), drawn.clone(), insert, delete.clone()].concat(),
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(replaced).unwrap(),
+        serde_json::to_value(control).unwrap()
+    );
+
+    // Inserting a fresh cell moves the old owner intact. Deleting only the
+    // fresh cell must not discard the FF debt of the retained original cell.
+    let insert_before = sprm(0x7621, &[0, 1, 0xe8, 3], false);
+    let error = cell_border_document(
+        [row(1000), ff.clone(), insert_before.clone(), delete.clone()].concat(),
+        false,
+    )
+    .expect_err("unrelated deletion leaves the retained FF owner unresolved");
+    assert!(
+        error.contains("unsupported Word border type 0xFF ignore semantics"),
+        "{error}"
+    );
+    let mut shifted = vec![11, 1, 2, 1];
+    shifted.extend([0, 0, 0xff, 0, 24, 1, 0, 0]);
+    let shifted = sprm(0xd62f, &shifted, false);
+    let control = cell_border_document(
+        [row(1000), drawn, insert_before.clone(), delete.clone()].concat(),
+        false,
+    )
+    .unwrap();
+    let replaced = cell_border_document(
+        [row(1000), ff, insert_before, shifted, delete].concat(),
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(replaced).unwrap(),
+        serde_json::to_value(control).unwrap()
+    );
+}

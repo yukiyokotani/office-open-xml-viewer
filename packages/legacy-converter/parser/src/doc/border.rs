@@ -139,8 +139,9 @@ impl Border {
             // unsupported. Modern native cell assignments can retain a
             // validated FF until a complete later owner or reset replaces it;
             // their surviving active row-mark-owned value still errors in
-            // PreparedBorder::decode. The exact Nil sentinel was handled before
-            // interpreting these fields.
+            // PreparedBorder::decode or is refused by an existing table gate.
+            // A structural discard of unresolved FF is also refused. The exact
+            // Nil sentinel was handled before interpreting these fields.
             0xff => {
                 return Err(unsupported(
                     "unsupported Word border type 0xFF ignore semantics",

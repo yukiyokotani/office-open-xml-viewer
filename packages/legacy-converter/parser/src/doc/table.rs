@@ -79,11 +79,12 @@ impl PreparedBorder {
     // replaces this prepared owner, and the established TIstd reset removes
     // this direct layer. Deferring FF permits those cases without deciding
     // whether its winning operation ignores the type or the whole Brc. Any
-    // surviving final row-mark-owned value fails decode before atomic admission.
-    // Story projection resolves every active row before emitting model data;
-    // non-TTP paragraph row copies are not effective owners (MS-DOC 2.4.3).
-    // Existing cell edits move slots with their cells; deletion or redefinition
-    // removes the old owner rather than interpreting its FF operation.
+    // surviving final row-mark-owned value fails decode or an existing table
+    // gate before atomic admission. Story projection resolves every active row
+    // before emitting model data; non-TTP paragraph row copies are not effective
+    // owners (MS-DOC 2.4.3). Insertion moves existing cells with their owners.
+    // Rebuilding or deleting cells cannot discharge unresolved FF: geometry
+    // persistence/reset evidence does not establish a border reset contract.
     // Generic readers, TC80, row arrays and old assignments stay conservative.
     // [MS-DOC] 2.9.20 distinguishes exact Nil from ordinary Brc before
     // interpreting fields. Only modern native direct cell assignments defer
@@ -158,6 +159,14 @@ pub struct Cell {
     pub(in crate::doc) no_wrap: bool,
     /// [MS-DOC] 2.9.26 bArg from sprmTCellFHideMark (native acquisition).
     pub(in crate::doc) hide_mark: bool,
+}
+
+impl Cell {
+    fn has_unresolved_border(&self) -> bool {
+        self.prepared_borders
+            .iter()
+            .any(|value| matches!(value, Some(PreparedBorder::DeferredCellIgnore(_))))
+    }
 }
 
 pub struct Properties<R = Row> {
@@ -949,6 +958,14 @@ impl Row {
                     }
                     cells.push(cell);
                 }
+                // A TDefTable rebuild has no established border-specific FF
+                // reset contract. Validate its complete replacement first,
+                // then refuse to silently discard an unresolved old operation.
+                if self.cells.iter().any(Cell::has_unresolved_border) {
+                    return Err(unsupported(
+                        "unresolved Word cell border before topology change",
+                    ));
+                }
                 self.cells = cells;
             }
             0xf614 => self.preferred_width = PreferredWidth::table(b)?,
@@ -986,6 +1003,16 @@ impl Row {
                 let r = range(b, self.cells.len())?;
                 if r.len() == self.cells.len() {
                     return Err(unsupported("Word row cannot delete every cell"));
+                }
+                // Deleting an owner likewise does not establish FF semantics.
+                // Unrelated deletion must leave retained cell owners intact.
+                if self.cells[r.clone()]
+                    .iter()
+                    .any(Cell::has_unresolved_border)
+                {
+                    return Err(unsupported(
+                        "unresolved Word cell border before topology change",
+                    ));
                 }
                 self.cells.drain(r);
             }
