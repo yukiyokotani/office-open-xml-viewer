@@ -11,42 +11,13 @@ import {
   type NormalizedOoxmlResourcePolicy,
 } from '@silurus/ooxml-core/worker';
 import { beginModelSourceLoad, selectModelSource } from '@silurus/ooxml-core/internal/model-source';
+import { computeMdw, pinXlsxGridGeometry } from '../renderer.js';
 import { respondToHostLayoutRequest } from './host-layout.js';
-import { XlsxWorkbook, type LoadOptions } from '../workbook.js';
+import type { XlsxWorkbook, LoadOptions } from '../workbook.js';
 import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions } from '../types.js';
 import { extractViewerRenderContext, withViewerRenderContext } from '../worker-protocol.js';
 
 type WorkbookConstructor = new (worker: Worker, mode: 'main' | 'worker', wasmUrl?: string | URL) => XlsxWorkbook;
-const BaseWorkbook = XlsxWorkbook as unknown as WorkbookConstructor;
-
-/** Source-only behavior lives in this subclass, outside the ordinary entry. */
-class SourceWorkbook extends BaseWorkbook {
-  sourceMdw: number | undefined;
-
-  constructor(worker: Worker, mode: 'main' | 'worker', wasmUrl: string | URL | undefined,
-    private readonly pinGeometry: typeof import('../renderer.js')['pinXlsxGridGeometry']) {
-    super(worker, mode, wasmUrl);
-  }
-
-  override async getWorksheet(sheetIndex: number): Promise<Worksheet> {
-    const worksheet = await super.getWorksheet(sheetIndex);
-    if (this.sourceMdw !== undefined) this.pinGeometry(worksheet, this.sourceMdw);
-    return worksheet;
-  }
-
-  override async renderViewport(
-    target: HTMLCanvasElement | OffscreenCanvas,
-    sheetIndex: number,
-    viewport: ViewportRange,
-    options: RenderViewportOptions = {},
-  ): Promise<void> {
-    const resolved = this.sourceMdw !== undefined
-      && !extractViewerRenderContext(options).layoutMetrics
-      ? withViewerRenderContext(options, this.sourceMdw)
-      : options;
-    return super.renderViewport(target, sheetIndex, viewport, resolved);
-  }
-}
 
 type MutableWorkbook = {
   metrics: OoxmlResourceMetricsSession;
@@ -64,6 +35,7 @@ type MutableWorkbook = {
 export async function loadXlsxModelSource(
   input: string | ArrayBuffer,
   opts: LoadOptions,
+  workbookType: typeof import('../workbook.js')['XlsxWorkbook'],
 ): Promise<XlsxWorkbook> {
   const worksheetPolicy = normalizeXlsxWorksheetPolicy(opts);
   opts = { ...opts, xlsxWorksheetLimits: worksheetPolicy.worksheet };
@@ -88,25 +60,45 @@ export async function loadXlsxModelSource(
       buffer = input;
     }
     const selected = selectModelSource(opts.modelSources, 'xlsx', new Uint8Array(buffer));
-    if (!selected) return XlsxWorkbook.load(buffer, { ...opts, modelSources: undefined });
+    if (!selected) return workbookType.load(buffer, { ...opts, modelSources: undefined });
+    // The caller already owns this public constructor. Passing it avoids a
+    // static source-only back-edge that splits the ordinary workbook graph;
+    // source overrides remain confined to this admitted source's subclass.
+    const BaseWorkbook = workbookType as unknown as WorkbookConstructor;
+    /** Source-only behavior lives in this subclass, outside the ordinary entry. */
+    class SourceWorkbook extends BaseWorkbook {
+      sourceMdw: number | undefined;
+
+      override async getWorksheet(sheetIndex: number): Promise<Worksheet> {
+        const worksheet = await super.getWorksheet(sheetIndex);
+        if (this.sourceMdw !== undefined) pinXlsxGridGeometry(worksheet, this.sourceMdw);
+        return worksheet;
+      }
+
+      override async renderViewport(
+        target: HTMLCanvasElement | OffscreenCanvas,
+        sheetIndex: number,
+        viewport: ViewportRange,
+        options: RenderViewportOptions = {},
+      ): Promise<void> {
+        const resolved = this.sourceMdw !== undefined
+          && !extractViewerRenderContext(options).layoutMetrics
+          ? withViewerRenderContext(options, this.sourceMdw)
+          : options;
+        return super.renderViewport(target, sheetIndex, viewport, resolved);
+      }
+    }
     const load = beginModelSourceLoad(selected, 'xlsx');
     try {
-      // A source-only consumer must not statically split the ordinary
-      // renderer graph. Resolve the existing renderer after source admission;
-      // its measurement/pinning functions remain the single implementations.
-      // Import failures still release the admitted source in this try/finally.
-      // Keep the imported namespace from escaping: only these two existing
-      // functions are needed, not a retained table of every renderer export.
-      const { computeMdw, pinXlsxGridGeometry } = await import('../renderer.js');
       metrics.setSourceBytes(buffer.byteLength);
       metrics.checkpoint('container ready');
       const worker = mode === 'worker'
         ? (await import('../render-worker-source-host.js')).createRenderWorker()
         : new (await import('../worker-source.ts?worker&inline')).default();
       let workbook: SourceWorkbook | undefined;
-      const wiredWorker = sourceWorker(worker, load, opts, computeMdw, (mdw) => { if (workbook) workbook.sourceMdw = mdw; });
+      const wiredWorker = sourceWorker(worker, load, opts, (mdw) => { if (workbook) workbook.sourceMdw = mdw; });
       try {
-        workbook = new SourceWorkbook(wiredWorker, mode, opts.wasmUrl, pinXlsxGridGeometry);
+        workbook = new SourceWorkbook(wiredWorker, mode, opts.wasmUrl);
         const state = workbook as unknown as MutableWorkbook;
         state.metrics = metrics;
         await state._load(buffer, opts, resourceOptions.policy, (usage) => metrics.observeUsage(usage), true);
@@ -135,7 +127,6 @@ function sourceWorker(
   worker: Worker,
   load: AdmittedModelSourceLoad,
   opts: LoadOptions,
-  measureMdw: typeof import('../renderer.js')['computeMdw'],
   onMdw: (value: number) => void,
 ): Worker {
   const sourceOwnerUrl = new URL(
@@ -166,7 +157,7 @@ function sourceWorker(
           }
           if (type === 'message') respondToHostLayoutRequest(
             (reply) => target.postMessage(reply), event.data,
-            (font) => measureMdw(font.family, font.sizePt, undefined, !!opts.useGoogleFonts,
+            (font) => computeMdw(font.family, font.sizePt, undefined, !!opts.useGoogleFonts,
               font.bold ? 700 : 400, font.italic ? 'italic' : 'normal'),
           );
           listener(event);
