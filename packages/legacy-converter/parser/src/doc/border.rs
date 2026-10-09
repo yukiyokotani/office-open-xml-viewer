@@ -135,8 +135,12 @@ impl Border {
             // MS-DOC 2.9.22 lists 0xFF as "MUST be ignored". It is not
             // an undefined type or a no-border style. This projection cannot
             // preserve an ignored assignment separately from an authored
-            // clear while resolving inherited edges, so retain the unsupported
-            // gate until that carrier-aware behavior is implemented. The exact
+            // clear while resolving inherited edges, so winning FF stays
+            // unsupported. Modern native cell assignments can retain a
+            // validated FF until a complete later owner or reset replaces it;
+            // their surviving active row-mark-owned value still errors in
+            // PreparedBorder::decode or is refused by an existing table gate.
+            // A structural discard of unresolved FF is also refused. The exact
             // Nil sentinel was handled before interpreting these fields.
             0xff => {
                 return Err(unsupported(

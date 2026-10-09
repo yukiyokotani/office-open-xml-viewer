@@ -46,13 +46,16 @@ pub(in crate::doc) enum StyleAwareShadingApply {
     HandledUnsupported,
 }
 
-/// A validated border operand retained without decoded `String` payload until
+/// A border operand retained without decoded `String` payload until
 /// the native table-style cascade is known. Keeping this separate from
 /// `Cell::borders` preserves the TC80 definition layer across sprmTIstd.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::doc) enum PreparedBorder {
     Old([u8; 4]),
     Modern([u8; 8]),
+    /// Validated modern native cell assignment with unresolved FF semantics.
+    /// It remains authored and present; it is neither NoChange nor Nil.
+    DeferredCellIgnore([u8; 8]),
 }
 
 impl PreparedBorder {
@@ -71,10 +74,51 @@ impl PreparedBorder {
         })
     }
 
+    // MS-DOC 2.4.6 applies property modifications in order; 2.9.305 assigns
+    // the complete Brc to each selected cell edge. A later complete assignment
+    // replaces this prepared owner, and the established TIstd reset removes
+    // this direct layer. Deferring FF permits those cases without deciding
+    // whether its winning operation ignores the type or the whole Brc. Any
+    // surviving final row-mark-owned value fails decode or an existing table
+    // gate before atomic admission. Story projection resolves every active row
+    // before emitting model data; non-TTP paragraph row copies are not effective
+    // owners (MS-DOC 2.4.3). Insertion moves existing cells with their owners.
+    // Rebuilding or deleting cells cannot discharge unresolved FF: geometry
+    // persistence/reset evidence does not establish a border reset contract.
+    // Generic readers, TC80, row arrays and old assignments stay conservative.
+    // [MS-DOC] 2.9.20 distinguishes exact Nil from ordinary Brc before
+    // interpreting fields. Only modern native direct cell assignments defer
+    // the unresolved FF operation. 2.9.16 still requires its COLORREF and
+    // width domain to be valid (COLORREF: 2.9.43); reserved bits are ignored.
+    fn read_cell_assignment(bytes: &[u8], old: bool) -> Result<Self, String> {
+        if old {
+            return Self::read(bytes, true);
+        }
+        let bytes: [u8; 8] = bytes
+            .get(..8)
+            .ok_or_else(|| unsupported("short Word prepared border"))?
+            .try_into()
+            .expect("eight-byte slice");
+        if bytes[4..] != [0xff; 4] && bytes[5] == 0xff {
+            let _ = super::colorref::read(&bytes[..4])?;
+            if bytes[4] >= 32 {
+                return Err(unsupported("invalid Word ignored border width"));
+            }
+            return Ok(Self::DeferredCellIgnore(bytes));
+        }
+        Self::read(&bytes, false)
+    }
+
     pub(in crate::doc) fn decode(self) -> Result<Border, String> {
         match self {
             Self::Old(bytes) => Border::read(&bytes, true),
             Self::Modern(bytes) => Border::read(&bytes, false),
+            Self::DeferredCellIgnore(bytes) => {
+                debug_assert_eq!(bytes[5], 0xff);
+                Err(unsupported(
+                    "unsupported Word border type 0xFF ignore semantics",
+                ))
+            }
         }
     }
 
@@ -86,6 +130,7 @@ impl PreparedBorder {
         match self {
             Self::Old(bytes) => bytes == [0xff; 4],
             Self::Modern(bytes) => bytes[4..] == [0xff; 4],
+            Self::DeferredCellIgnore(_) => false,
         }
     }
 }
@@ -114,6 +159,14 @@ pub struct Cell {
     pub(in crate::doc) no_wrap: bool,
     /// [MS-DOC] 2.9.26 bArg from sprmTCellFHideMark (native acquisition).
     pub(in crate::doc) hide_mark: bool,
+}
+
+impl Cell {
+    fn has_unresolved_border(&self) -> bool {
+        self.prepared_borders
+            .iter()
+            .any(|value| matches!(value, Some(PreparedBorder::DeferredCellIgnore(_))))
+    }
 }
 
 pub struct Properties<R = Row> {
@@ -555,7 +608,7 @@ impl Row {
                 return Ok(StyleAwareBorderApply::HandledUnsupported);
             }
             let cells = range(&bytes[1..], self.cells.len())?;
-            let value = PreparedBorder::read(&bytes[4..], old)?;
+            let value = PreparedBorder::read_cell_assignment(&bytes[4..], old)?;
             for cell in &mut self.cells[cells] {
                 for side in 0..6 {
                     if sides & (1 << side) != 0 {
@@ -905,6 +958,14 @@ impl Row {
                     }
                     cells.push(cell);
                 }
+                // A TDefTable rebuild has no established border-specific FF
+                // reset contract. Validate its complete replacement first,
+                // then refuse to silently discard an unresolved old operation.
+                if self.cells.iter().any(Cell::has_unresolved_border) {
+                    return Err(unsupported(
+                        "unresolved Word cell border before topology change",
+                    ));
+                }
                 self.cells = cells;
             }
             0xf614 => self.preferred_width = PreferredWidth::table(b)?,
@@ -942,6 +1003,16 @@ impl Row {
                 let r = range(b, self.cells.len())?;
                 if r.len() == self.cells.len() {
                     return Err(unsupported("Word row cannot delete every cell"));
+                }
+                // Deleting an owner likewise does not establish FF semantics.
+                // Unrelated deletion must leave retained cell owners intact.
+                if self.cells[r.clone()]
+                    .iter()
+                    .any(Cell::has_unresolved_border)
+                {
+                    return Err(unsupported(
+                        "unresolved Word cell border before topology change",
+                    ));
                 }
                 self.cells.drain(r);
             }
