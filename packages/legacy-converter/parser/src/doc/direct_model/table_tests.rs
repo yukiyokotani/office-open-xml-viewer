@@ -838,21 +838,35 @@ fn cell_border_superseded_does_not_excuse_invalid_earlier_operands() {
     let mut width = valid.clone();
     width[8] = 32;
     let later = cell_border_assignment(1, [0xff, 0, 0, 0, 8, 1, 0, 0]);
-    for operand in [
-        range,
-        reversed,
-        sides,
-        cb,
-        color,
-        kind,
-        width,
-        valid[..10].to_vec(),
+    cell_border_document([row(1000), later.clone()].concat(), false).unwrap();
+    for (operand, reason) in [
+        (range, "cell range outside row"),
+        (reversed, "cell range outside row"),
+        (sides, "unsupported formatting"),
+        (cb.clone(), "truncated Word integer"),
+        (color, "invalid Word COLORREF"),
+        (kind, "undefined Word border type 0x02"),
+        (width, "invalid Word ignored border width"),
     ] {
-        assert!(cell_border_document(
-            [row(1000), sprm(0xd62f, &operand, false), later.clone(),].concat(),
-            false
+        let error = cell_border_document(
+            [row(1000), sprm(0xd62f, &operand, false), later.clone()].concat(),
+            false,
         )
-        .is_err());
+        .expect_err("invalid earlier assignment must refuse");
+        assert!(error.contains(reason), "{reason}: {error}");
+    }
+    // A truncated operand needs its own acquisition boundary: concatenating
+    // another Prl could supply its missing bytes from that Prl's opcode.
+    let mut direct = crate::doc::table::Row::default();
+    direct.apply(0x7621, &[0, 1, 0xe8, 3]).unwrap();
+    for operand in [&valid[..10], cb.as_slice()] {
+        let error = direct
+            .apply_style_aware_borders(0xd62f, operand)
+            .unwrap_err();
+        assert!(
+            error.contains("invalid Word cell border operand length"),
+            "{error}"
+        );
     }
     // Exact Nil is independently valid, not an ordinary FF with invalid
     // COLORREF. The full-container Nil replacement positive above exercises it.
@@ -866,12 +880,31 @@ fn cell_border_superseded_keeps_row_old_tc80_and_style_carriers_gated() {
         array.extend(ff);
     }
     let later = cell_border_assignment(0x0f, [0xff, 0, 0, 0, 8, 1, 0, 0]);
-    for earlier in [
-        [row(1000), sprm(0xd613, &array, false)].concat(),
-        cell_border_tc80_row([8, 0xff, 6, 0]),
-        [row(1000), sprm(0xd620, &[7, 0, 1, 1, 8, 0xff, 6, 0], false)].concat(),
+    let mut valid_array = vec![48];
+    for _ in 0..6 {
+        valid_array.extend([0xff, 0, 0, 0, 8, 1, 0, 0]);
+    }
+    for (control, earlier) in [
+        (
+            [row(1000), sprm(0xd613, &valid_array, false)].concat(),
+            [row(1000), sprm(0xd613, &array, false)].concat(),
+        ),
+        (
+            cell_border_tc80_row([8, 1, 6, 0]),
+            cell_border_tc80_row([8, 0xff, 6, 0]),
+        ),
+        (
+            [row(1000), sprm(0xd620, &[7, 0, 1, 1, 8, 1, 6, 0], false)].concat(),
+            [row(1000), sprm(0xd620, &[7, 0, 1, 1, 8, 0xff, 6, 0], false)].concat(),
+        ),
     ] {
-        assert!(cell_border_document([earlier, later.clone()].concat(), false).is_err());
+        cell_border_document([control, later.clone()].concat(), false).unwrap();
+        let error = cell_border_document([earlier, later.clone()].concat(), false)
+            .expect_err("unsupported carrier must refuse");
+        assert!(
+            error.contains("unsupported Word border type 0xFF"),
+            "{error}"
+        );
     }
     // A later row border belongs to a different layer from direct cell FF.
     let mut red_array = vec![48];
@@ -892,8 +925,15 @@ fn cell_border_superseded_keeps_row_old_tc80_and_style_carriers_gated() {
         [row(1000), sprm(0x563a, &1u16.to_le_bytes(), false), later].concat(),
         false,
     );
+    let control = with_cell_border_style_border(&source, [0xff, 0, 0, 0, 8, 1, 0, 0]);
+    super::super::direct_model(&CompoundFile::open(&control).unwrap(), 1_000_000).unwrap();
     let source = with_cell_border_style_border(&source, ff);
-    assert!(super::super::direct_model(&CompoundFile::open(&source).unwrap(), 1_000_000).is_err());
+    let error = super::super::direct_model(&CompoundFile::open(&source).unwrap(), 1_000_000)
+        .expect_err("table-style FF must refuse");
+    assert!(
+        error.contains("unsupported Word border type 0xFF"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -2295,5 +2335,68 @@ fn nested_cell_frame_flow_warning_does_not_silently_skip_exhausted_allocations()
             "OUTPUT_TOO_LARGE"
         );
         assert!(document.diagnostics.is_empty());
+    }
+}
+
+#[test]
+fn cell_border_superseded_nested_owner_resolves_before_table_projection() {
+    // The inner row uses CR + sprmPFInnerTtp at depth two, rather than the
+    // depth-one cell/row U+0007 marks. Its active TTP must remain in the context
+    // index and reach border resolution before nested-table output planning.
+    let text = "n\r\r\u{7}\u{7}\r";
+    let source = source_with_typography(
+        text,
+        &[(text.encode_utf16().count(), 2, 12240, 15840, 1, 720)],
+        None,
+        None,
+        None,
+        None,
+    );
+    let project = |inner_borders: Vec<u8>| {
+        let bytes = with_papx(
+            &source,
+            &[
+                (0, 2, nested_cell()),
+                (2, 3, [nested_row(500), inner_borders].concat()),
+                (3, 4, cell()),
+                (4, 5, row(1000)),
+                (5, 6, Vec::new()),
+            ],
+        );
+        super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1_000_000)
+            .map(|result| result.document)
+    };
+    let blue = cell_border_assignment(0x0f, [0, 0, 0xff, 0, 24, 1, 0, 0]);
+    let unresolved = cell_border_assignment(0x0f, [0, 0, 0, 0, 8, 0xff, 0, 0]);
+    let control = project(blue.clone()).unwrap();
+    let BodyElement::Table(outer) = &control.body[0] else {
+        panic!("outer table")
+    };
+    let inner = outer.rows[0].cells[0]
+        .content
+        .iter()
+        .find_map(|block| match block {
+            CellElement::Table(table) => Some(table),
+            _ => None,
+        })
+        .expect("nested table");
+    let top = inner.rows[0].cells[0]
+        .borders
+        .top
+        .as_ref()
+        .expect("inner top border");
+    assert_eq!(top.style, "single");
+    assert_eq!(top.color.as_deref(), Some("0000ff"));
+    let actual = project([unresolved.clone(), blue.clone()].concat()).unwrap();
+    assert_eq!(
+        serde_json::to_value(actual).unwrap(),
+        serde_json::to_value(control).unwrap()
+    );
+    for borders in [unresolved.clone(), [blue, unresolved].concat()] {
+        let error = project(borders).expect_err("winning nested FF must refuse");
+        assert!(
+            error.contains("unsupported Word border type 0xFF ignore semantics"),
+            "{error}"
+        );
     }
 }

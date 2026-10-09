@@ -79,7 +79,11 @@ impl PreparedBorder {
     // replaces this prepared owner, and the established TIstd reset removes
     // this direct layer. Deferring FF permits those cases without deciding
     // whether its winning operation ignores the type or the whole Brc. Any
-    // surviving value still fails decode before atomic document admission.
+    // surviving final row-mark-owned value fails decode before atomic admission.
+    // Story projection resolves every active row before emitting model data;
+    // non-TTP paragraph row copies are not effective owners (MS-DOC 2.4.3).
+    // Existing cell edits move slots with their cells; deletion or redefinition
+    // removes the old owner rather than interpreting its FF operation.
     // Generic readers, TC80, row arrays and old assignments stay conservative.
     // [MS-DOC] 2.9.20 distinguishes exact Nil from ordinary Brc before
     // interpreting fields. Only modern native direct cell assignments defer
