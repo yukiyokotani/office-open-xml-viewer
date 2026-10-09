@@ -2672,17 +2672,19 @@ fn parse_table_cell_with_chain(
         // CT_TableCellProperties@horzOverflow defaults to clip. Keep authored
         // choices on the cell rather than borrowing shape bodyPr overflow.
         // An invalid token cannot enable overflow: the omitted/default path clips.
-        horz_overflow: tc_pr.and_then(|n| attr(&n, "horzOverflow")).and_then(|value| {
-            // ST_TextHorzOverflowType derives from xsd:token. For these
-            // single-word enum values, XML whitespace collapse reduces to
-            // trimming U+0020, TAB, LF and CR. Internal whitespace cannot
-            // match either value; Unicode whitespace is not XML whitespace.
-            match value.trim_matches(&[' ', '\t', '\n', '\r'][..]) {
-                "clip" => Some("clip".to_owned()),
-                "overflow" => Some("overflow".to_owned()),
-                _ => None,
-            }
-        }),
+        horz_overflow: tc_pr
+            .and_then(|n| attr(&n, "horzOverflow"))
+            .and_then(|value| {
+                // ST_TextHorzOverflowType derives from xsd:token. For these
+                // single-word enum values, XML whitespace collapse reduces to
+                // trimming U+0020, TAB, LF and CR. Internal whitespace cannot
+                // match either value; Unicode whitespace is not XML whitespace.
+                match value.trim_matches(&[' ', '\t', '\n', '\r'][..]) {
+                    "clip" => Some("clip".to_owned()),
+                    "overflow" => Some("overflow".to_owned()),
+                    _ => None,
+                }
+            }),
         fill,
         has_direct_fill,
         text_color: None,
@@ -4238,16 +4240,25 @@ mod style_ref_tests {
             (r#"horzOverflow="invalid""#, None),
             (r#"horzOverflow=" overflow ""#, Some("overflow")),
             (r#"horzOverflow="&#x9;clip&#xA;&#xD;""#, Some("clip")),
-            (r#"horzOverflow="&#x9;&#xA;&#xD;overflow&#x20;""#, Some("overflow")),
+            (
+                r#"horzOverflow="&#x9;&#xA;&#xD;overflow&#x20;""#,
+                Some("overflow"),
+            ),
             (r#"horzOverflow="&#xA0;overflow&#xA0;""#, None),
             (r#"horzOverflow="over&#x9;flow""#, None),
         ] {
-            let xml = format!(r#"<a:tc xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:tcPr {attribute}/></a:tc>"#);
+            let xml = format!(
+                r#"<a:tc xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:tcPr {attribute}/></a:tc>"#
+            );
             let doc = roxmltree::Document::parse(&xml).unwrap();
             let mut zip = empty_zip();
             let cell = parse_table_cell(
-                doc.root_element(), &HashMap::new(), &HashMap::new(),
-                "ppt/slides/slide1.xml", &crate::master::TableTextLevels::default(), &mut zip,
+                doc.root_element(),
+                &HashMap::new(),
+                &HashMap::new(),
+                "ppt/slides/slide1.xml",
+                &crate::master::TableTextLevels::default(),
+                &mut zip,
             );
             assert_eq!(cell.horz_overflow.as_deref(), expected, "{attribute}");
         }
