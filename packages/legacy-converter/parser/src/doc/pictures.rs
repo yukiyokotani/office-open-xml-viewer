@@ -11,6 +11,10 @@ pub(super) struct Store<'a> {
     data: &'a [u8],
     cache: BTreeMap<usize, Option<Picture<'a>>>,
     part_offsets: BTreeSet<usize>,
+    /// Picture-bullet occurrences selected for the direct document. Kept
+    /// separate from inline frames: their shape admission and resource keys
+    /// differ, even when both use the same PICF offset.
+    bullet_offsets: BTreeSet<usize>,
     /// PICF offsets holding the empty placeholder of a pseudo-inline shape.
     placeholders: BTreeSet<usize>,
     /// Whether PNG BLIPs holding TIFF data are admitted (direct model only).
@@ -22,7 +26,7 @@ pub(super) struct Store<'a> {
     /// The hidden `_PictureBullets` document, when the source has one.
     bullet_document: Option<super::picture_bullets::Document<'a>>,
     /// Acquired picture-bullet frames by PICF offset. Retained as source
-    /// facts for this store only: never selected as direct model resources.
+    /// facts; acquiring a frame alone does not select a model resource.
     bullets: BTreeMap<usize, BulletPicture<'a>>,
 }
 impl<'a> Store<'a> {
@@ -31,6 +35,7 @@ impl<'a> Store<'a> {
             data,
             cache: BTreeMap::new(),
             part_offsets: BTreeSet::new(),
+            bullet_offsets: BTreeSet::new(),
             placeholders: BTreeSet::new(),
             raster: crate::officeart::raster::Raster::Advertised,
             budget: 1_000_000,
@@ -135,6 +140,9 @@ impl<'a> Store<'a> {
                     shape: frame.shape,
                     goal: frame.goal,
                     scale: frame.scale,
+                    crop: frame.props.crop,
+                    flip: frame.props.flip,
+                    rotation: frame.props.rotation,
                     image,
                 },
             );
@@ -144,7 +152,7 @@ impl<'a> Store<'a> {
 
     fn load(&mut self, offset: usize) -> Result<(), String> {
         if !self.cache.contains_key(&offset) {
-            if self.cache.len() >= 100_000 {
+            if self.cache.len() + self.bullets.len() >= 100_000 {
                 return Err(unsupported("Word picture cache budget exceeded"));
             }
             let mut placeholder = false;
@@ -183,6 +191,12 @@ pub(in crate::doc) struct BulletPicture<'a> {
     pub(in crate::doc) shape: Option<u16>,
     pub(in crate::doc) goal: [i16; 2],
     pub(in crate::doc) scale: [u16; 2],
+    /// MS-ODRAW 2.3.23: stored crop in 100000ths (top, bottom, left, right).
+    pub(in crate::doc) crop: [i64; 4],
+    /// MS-ODRAW 2.2.40 fFlipH/fFlipV.
+    pub(in crate::doc) flip: [bool; 2],
+    /// MS-ODRAW 2.3.1.2, converted to 60000ths of a degree.
+    pub(in crate::doc) rotation: i64,
     pub(in crate::doc) image: Image<'a>,
 }
 
@@ -585,6 +599,54 @@ mod tests {
             .unwrap();
         assert_eq!(resources.len(), 1);
         assert_eq!(resources[0].key, "legacy-doc/image/0");
+    }
+
+    #[test]
+    fn direct_bullet_finalization_requires_a_selected_canonical_carrier() {
+        let retained_store = || {
+            let mut store = Store::new(&[]);
+            store.bullets.insert(
+                7,
+                BulletPicture {
+                    offset: 7,
+                    shape: Some(100),
+                    goal: [1440, 720],
+                    scale: [500, 2000],
+                    crop: [0; 4],
+                    flip: [false; 2],
+                    rotation: 0,
+                    image: Image {
+                        bytes: std::borrow::Cow::Owned(png()),
+                        extension: "png",
+                    },
+                },
+            );
+            store
+        };
+        // Acquisition alone cannot authorize a final model reference.
+        assert!(retained_store()
+            .finish_referenced_direct_resources(&["legacy-doc/bullet/7"], &mut 4096,)
+            .unwrap_err()
+            .contains("dangling"));
+        for key in [
+            "legacy-doc/bullet/07",
+            "legacy-doc/bullet/8",
+            "legacy-doc/bullet/-7",
+        ] {
+            let mut store = retained_store();
+            store.bullet_offsets.insert(7);
+            assert!(store
+                .finish_referenced_direct_resources(&[key], &mut 4096)
+                .is_err());
+        }
+        let mut store = retained_store();
+        store.bullet_offsets.insert(7);
+        assert_eq!(
+            store
+                .finish_referenced_direct_resources(&["legacy-doc/bullet/7"], &mut 0,)
+                .unwrap_err(),
+            "OUTPUT_TOO_LARGE"
+        );
     }
 
     #[test]

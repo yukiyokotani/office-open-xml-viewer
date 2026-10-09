@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ChartExRenderer, ChartModel } from '@silurus/ooxml-core';
+import type { DocxDocumentModel } from '../types.js';
+import { layoutSourceStore } from '../layout-source-model-adapter.js';
+import { imageResourceKey } from '../layout/source-key.js';
 import {
   createPaintResourceRegistry,
 } from '../layout/paint-resources.js';
@@ -68,6 +71,55 @@ function painter(
 }
 
 describe('canonical Canvas paint resource handlers', () => {
+  it('paints a cropped reflected picture bullet from its retained model descriptor', () => {
+    const partPath = 'word/media/invented-bullet.png';
+    const doc: DocxDocumentModel = {
+      section: {
+        pageWidth: 612, pageHeight: 792,
+        marginTop: 72, marginRight: 72, marginBottom: 72, marginLeft: 72,
+        headerDistance: 36, footerDistance: 36,
+        titlePage: false, evenAndOddHeaders: false,
+      },
+      headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+      body: [{
+        type: 'paragraph', alignment: 'left',
+        indentLeft: 0, indentRight: 0, indentFirst: 0,
+        spaceBefore: 0, spaceAfter: 0, lineSpacing: null, tabStops: [], runs: [],
+        numbering: {
+          numId: 1, level: 0, format: 'bullet', text: '',
+          indentLeft: 0, tab: 18, suff: 'tab',
+          picBulletImagePath: partPath, picBulletMimeType: 'image/png',
+          picBulletWidthPt: 6, picBulletHeightPt: 7,
+          picBulletTransform: {
+            srcRect: { l: .25, t: .125, r: 0, b: .25 },
+            rotation: 90, flipH: true, flipV: false,
+          },
+        },
+      }],
+    };
+    const registry = layoutSourceStore(doc).paintResources;
+    const resourceKey = imageResourceKey(
+      { story: 'body', storyInstance: 'body', path: [0] }, partPath,
+    );
+    const image = { width: 100, height: 80 } as CanvasImageSource;
+    const paint = createCanvasPaintResourcePainter(
+      createPaintResourceSession(registry, [{ kind: 'picture-bullet', resourceKey, handle: image }]),
+      canonicalCanvasPaintResourceHandlers,
+    );
+    const { ctx, operations } = recordingContext();
+
+    paint.paint(resourceKey, 'picture-bullet', { xPt: 10, yPt: 20, widthPt: 6, heightPt: 7 }, ctx);
+
+    expect(operations).toEqual(expect.arrayContaining([
+      { name: 'translate', args: [13, 23.5] },
+      { name: 'rotate', args: [Math.PI / 2] },
+      { name: 'scale', args: [-1, 1] },
+      { name: 'drawImage', alpha: .8, args: [image, 25, 10, 75, 50, -3, -3.5, 6, 7] },
+    ]));
+    expect(ctx.globalAlpha).toBe(.8);
+  });
+
   it('paints cropped images in point-space with DrawingML alpha', () => {
     const resourceKey = 'image:body:0';
     const image = { width: 100, height: 80 } as CanvasImageSource;
@@ -86,24 +138,26 @@ describe('canonical Canvas paint resource handlers', () => {
     });
   });
 
-  it('composes image rotation and reflection around the retained bounds center', () => {
-    const resourceKey = 'image:rotated';
-    const image = { width: 20, height: 10 } as CanvasImageSource;
-    const paint = painter([{
-      kind: 'image', resourceKey, partPath: 'word/media/image.png', mimeType: 'image/png',
-      intrinsicSize: { widthPt: 40, heightPt: 30 }, rotation: 90, flipH: true, flipV: false,
-    }], [{ kind: 'image', resourceKey, handle: image }]);
-    const { ctx, operations } = recordingContext();
+  it.each(['image', 'picture-bullet'] as const)(
+    'composes %s rotation and reflection around the retained bounds center', (kind) => {
+      const resourceKey = 'image:rotated';
+      const image = { width: 20, height: 10 } as CanvasImageSource;
+      const paint = painter([{
+        kind, resourceKey, partPath: 'word/media/image.png', mimeType: 'image/png',
+        intrinsicSize: { widthPt: 40, heightPt: 30 }, rotation: 90, flipH: true, flipV: false,
+      }], [{ kind, resourceKey, handle: image }]);
+      const { ctx, operations } = recordingContext();
 
-    paint.paint(resourceKey, 'image', { xPt: 10, yPt: 20, widthPt: 40, heightPt: 30 }, ctx);
+      paint.paint(resourceKey, kind, { xPt: 10, yPt: 20, widthPt: 40, heightPt: 30 }, ctx);
 
-    expect(operations).toEqual(expect.arrayContaining([
-      { name: 'translate', args: [30, 35] },
-      { name: 'rotate', args: [Math.PI / 2] },
-      { name: 'scale', args: [-1, 1] },
-      { name: 'drawImage', alpha: .8, args: [image, -20, -15, 40, 30] },
-    ]));
-  });
+      expect(operations).toEqual(expect.arrayContaining([
+        { name: 'translate', args: [30, 35] },
+        { name: 'rotate', args: [Math.PI / 2] },
+        { name: 'scale', args: [-1, 1] },
+        { name: 'drawImage', alpha: .8, args: [image, -20, -15, 40, 30] },
+      ]));
+    },
+  );
 
   it.each(['math', 'picture-bullet'] as const)(
     'draws %s handles into the retained point-space bounds',

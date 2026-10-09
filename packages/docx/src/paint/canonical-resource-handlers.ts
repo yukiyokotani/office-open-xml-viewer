@@ -89,7 +89,7 @@ export function paintImageResource(
 }
 
 function paintDrawableResource(
-  resource: ResolvedPaintResource<'math'> | ResolvedPaintResource<'picture-bullet'>,
+  resource: ResolvedPaintResource<'math'>,
   bounds: LayoutRect,
   ctx: PaintCanvas2D,
 ): void {
@@ -144,7 +144,9 @@ export function createCanonicalCanvasPaintResourceHandlers(
     paintDrawableResource(resource, bounds, ctx);
   },
   'picture-bullet'(resource, bounds, ctx) {
-    paintDrawableResource(resource, bounds, ctx);
+    // Picture bullets retain image crop/rotation/reflection. The marker box
+    // is already resolved; use the same image painter without resizing it.
+    paintImageResource(resource, bounds, ctx);
   },
   });
 }

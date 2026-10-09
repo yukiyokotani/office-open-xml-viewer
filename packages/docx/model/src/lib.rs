@@ -1538,6 +1538,20 @@ pub struct NumberingInfo {
     /// Picture-bullet marker height in pt (from the `<v:shape style="height">`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pic_bullet_height_pt: Option<f64>,
+    /// Carrier image transforms. They affect paint within the resolved marker
+    /// box; they do not select its size or the font governing native AUTO.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pic_bullet_transform: Option<PictureBulletTransform>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PictureBulletTransform {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub src_rect: Option<SrcRect>,
+    pub rotation: f64,
+    pub flip_h: bool,
+    pub flip_v: bool,
 }
 
 #[derive(Serialize, Debug, Clone)]
