@@ -203,9 +203,47 @@ describe('evalFormulaToBool — conditional aggregates', () => {
     // Every matched cell is blank: no qualifying value is #DIV/0!, not 0.
     expect(evaluateFormula('AVERAGEIF(A1:A4,1,C1:C4)', c)).toEqual({ kind: 'error' });
     expect(evalFormulaToBool('AVERAGEIF(A1:A4,1,C1:C4)=0', c)).toBe(false);
-    // Preserved library policy, not Excel evidence: indexes past a shorter
-    // average_range are not actual blank cells, so they keep counting.
-    expect(evaluateFormula('AVERAGEIF(A1:A4,1,B1:B1)', c)).toEqual({ kind: 'value', value: 4 / 3 });
+    // A shorter average_range is resized from B1 to B1:B4, so B2 is a real
+    // blank and is excluded rather than counted.
+    expect(evaluateFormula('AVERAGEIF(A1:A4,1,B1:B1)', c)).toEqual({ kind: 'value', value: 2 });
+  });
+
+  it('preserves computed range evaluation for conditional aggregates', () => {
+    const c = ctx({ cells: [numCell(1, 1, 1), numCell(2, 1, 1),
+      numCell(1, 2, 10), numCell(2, 2, 20), numCell(1, 3, 100)] });
+    for (const target of ['IF(TRUE,B1:B2,C1:C2)', 'IFS(TRUE,B1:B2)',
+      'IFERROR(#REF!,B1:B2)', 'IF(TRUE,B1:B2,C1:C5000)']) {
+      expect(evaluateFormula(`SUMIF(A1:A2,1,${target})`, c), target).toEqual({ kind: 'value', value: 30 });
+      expect(evaluateFormula(`AVERAGEIF(A1:A2,1,${target})`, c), target).toEqual({ kind: 'value', value: 15 });
+    }
+    expect(evaluateFormula('SUMIF(IF(TRUE,A1:A2,C1:C2),1,B1:B2)', c)).toEqual({ kind: 'value', value: 30 });
+    expect(evaluateFormula('AVERAGEIF(IF(TRUE,A1:A2,C1:C2),1,B1:B2)', c)).toEqual({ kind: 'value', value: 15 });
+    c.definedNames.set('Pick', { name: 'Pick', formula: 'IF(TRUE,$B$1:$B$2,$C$1:$C$2)' });
+    expect(evaluateFormula('SUMIF(A1:A2,1,Pick)', c)).toEqual({ kind: 'value', value: 30 });
+  });
+
+  it('rejects a resized target whose top-left is outside the worksheet grid', () => {
+    const c = { ...ctx({ cells: [numCell(1, 1, 1), numCell(2, 1, 1), numCell(1, 2, 10)] }), anchorRow: 2 };
+    expect(evaluateFormula('SUMIF($A$1:$A$2,1,$B1)', c)).toEqual({ kind: 'unsupported' });
+    const left = { ...c, anchorRow: 1, anchorCol: 2 };
+    expect(evaluateFormula('SUMIF($A$1:$A$2,1,A$1)', left)).toEqual({ kind: 'unsupported' });
+  });
+
+  it('SUMIF resizes sum_range from its top-left cell to the criteria range dimensions', () => {
+    // Criteria A1:B2 = [1, 2; 2, 1]; D1:E2 = [10, 20; 30, 40] ; D3 = 1000.
+    const cells = [
+      numCell(1, 1, 1), numCell(1, 2, 2), numCell(2, 1, 2), numCell(2, 2, 1),
+      numCell(1, 4, 10), numCell(1, 5, 20), numCell(2, 4, 30), numCell(2, 5, 40),
+      numCell(3, 4, 1000),
+    ];
+    const c = ctx({ cells });
+    // D1 and D1:D5000 both start at D1 and are read as D1:E2 (A1 and B2 match).
+    expect(evaluateFormula('SUMIF(A1:B2,1,D1)', c)).toEqual({ kind: 'value', value: 50 });
+    expect(evaluateFormula('SUMIF(A1:B2,1,D1:D5000)', c)).toEqual({ kind: 'value', value: 50 });
+    c.definedNames.set('Crit', { name: 'Crit', formula: 'Sheet1!$A$1:$B$2' });
+    expect(evaluateFormula('SUMIF(Crit,1,D1)', c)).toEqual({ kind: 'value', value: 50 });
+    // The resized rectangle would extend past column XFD.
+    expect(evaluateFormula('SUMIF(A1:B2,1,XFD1)', c)).toEqual({ kind: 'unsupported' });
   });
 });
 

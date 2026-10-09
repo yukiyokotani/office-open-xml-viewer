@@ -664,11 +664,19 @@ function resolveRef(ref: CellRef, ctx: EvalCtx): EvalScalar {
 // because a partial range silently changes COUNTIF/SUM/... results.
 const MAX_RANGE_CELLS = 4096;
 
-function resolveRange(a: CellRef, b: CellRef, ctx: EvalCtx): EvalScalar[] {
+interface CellRect { r1: number; c1: number; r2: number; c2: number }
+
+function rangeRect(a: CellRef, b: CellRef, ctx: EvalCtx): CellRect {
   const pa = refCoord(a, ctx);
   const pb = refCoord(b, ctx);
-  const c1 = Math.min(pa.col, pb.col), c2 = Math.max(pa.col, pb.col);
-  const r1 = Math.min(pa.row, pb.row), r2 = Math.max(pa.row, pb.row);
+  return {
+    r1: Math.min(pa.row, pb.row), c1: Math.min(pa.col, pb.col),
+    r2: Math.max(pa.row, pb.row), c2: Math.max(pa.col, pb.col),
+  };
+}
+
+/** Cached values of `rect` in row-major order. */
+function readRect({ r1, c1, r2, c2 }: CellRect, ctx: EvalCtx): EvalScalar[] {
   if ((r2 - r1 + 1) * (c2 - c1 + 1) > MAX_RANGE_CELLS) throw new FormulaFailure('unsupported');
   const out: EvalScalar[] = [];
   for (let r = r1; r <= r2; r++) {
@@ -677,6 +685,45 @@ function resolveRange(a: CellRef, b: CellRef, ctx: EvalCtx): EvalScalar[] {
     }
   }
   return out;
+}
+
+function resolveRange(a: CellRef, b: CellRef, ctx: EvalCtx): EvalScalar[] {
+  return readRect(rangeRect(a, b, ctx), ctx);
+}
+
+/** The cell rectangle a reference node denotes at `ctx`, or null for any
+ *  other expression. A defined name's body anchors at A1, as in `evaluate`. */
+function referenceRect(n: FormulaNode, ctx: EvalCtx): CellRect | null {
+  switch (n.t) {
+    case 'ref': { const { row, col } = refCoord(n.ref, ctx); return { r1: row, c1: col, r2: row, c2: col }; }
+    case 'range': return rangeRect(n.a, n.b, ctx);
+    case 'name': return referenceRect(n.body, { ...ctx, anchorRow: 1, anchorCol: 1 });
+    default: return null;
+  }
+}
+
+/** SUMIF sum_range / AVERAGEIF average_range. Microsoft's SUMIF and
+ * AVERAGEIF documentation: the supplied range need not match `range` in size
+ * or shape; the cells used start at its top-left cell and take `range`'s
+ * dimensions (A1:B4 with C1:C2 reads C1:D4). Only that rectangle is read.
+ * https://support.microsoft.com/en-us/excel/functions/sumif-function
+ * https://support.microsoft.com/en-us/excel/functions/averageif-function
+ * Only direct references (including reference-valued defined names) retain
+ * rectangle provenance here. Computed expressions keep their existing
+ * evaluate/flatten pairing; this preserves IF/IFS/IFERROR selection and lazy
+ * branch behavior without re-evaluating a condition to infer a rectangle.
+ * Library policy, without Excel evidence: a resized rectangle outside the
+ * worksheet grid is unsupported. */
+function resizedTargetValues(rangeNode: FormulaNode, targetNode: FormulaNode, ctx: EvalCtx): EvalScalar[] | null {
+  const range = referenceRect(rangeNode, ctx);
+  const target = referenceRect(targetNode, ctx);
+  if (!range || !target) return null;
+  const r2 = target.r1 + (range.r2 - range.r1);
+  const c2 = target.c1 + (range.c2 - range.c1);
+  if (target.r1 < 1 || target.c1 < 1 || r2 > MAX_WORKSHEET_ROW || c2 > MAX_WORKSHEET_COL) {
+    throw new FormulaFailure('unsupported');
+  }
+  return readRect({ r1: target.r1, c1: target.c1, r2, c2 }, ctx);
 }
 
 function cellValueToEval(cell: Cell | undefined): EvalScalar {
@@ -728,6 +775,16 @@ function callFunc(name: string, argNodes: FormulaNode[], ctx: EvalCtx): EvalValu
       const at = node === undefined ? ctx : node.t === 'ref' ? refCoord(node.ref, ctx) : null;
       if (!at) throw new FormulaFailure('unsupported');
       return name === 'ROW' ? at.row : at.col;
+    }
+    // Direct target references are resized; computed targets retain evaluation.
+    case 'SUMIF':
+    case 'AVERAGEIF': {
+      const source = flatten(arg(0));
+      const criteria = arg(1);
+      const target = argNodes.length > 2
+        ? resizedTargetValues(argNodes[0], argNodes[2], ctx) ?? flatten(arg(2))
+        : null;
+      return name === 'SUMIF' ? sumIf(source, criteria, target) : averageIf(source, criteria, target);
     }
   }
   const args = argNodes.map(n => evaluate(n, ctx));
@@ -789,8 +846,6 @@ function callFunc(name: string, argNodes: FormulaNode[], ctx: EvalCtx): EvalValu
     case 'COUNTA':     return args.flatMap(flatten).filter(v => v != null && v !== '').length;
     case 'COUNTBLANK': return args.flatMap(flatten).filter(v => v == null || v === '').length;
     case 'COUNTIF':    return countIf(flatten(args[0]), args[1]);
-    case 'SUMIF':      return sumIf(flatten(args[0]), args[1], args[2] !== undefined ? flatten(args[2]) : null);
-    case 'AVERAGEIF':  return averageIf(flatten(args[0]), args[1], args[2] !== undefined ? flatten(args[2]) : null);
     // ── Text ────────────────────────────────────────────────────────────────
     case 'LEN':        return toStr(args[0]).length;
     case 'LEFT':       return toStr(args[0]).slice(0, Math.max(0, toNum(args[1] ?? 1)));
@@ -884,11 +939,11 @@ function sumIf(source: EvalScalar[], criteria: EvalValue, sumRange: EvalScalar[]
 // so a matched blank (null) is not in the denominator while a matched 0 is,
 // and no remaining matched cell is #DIV/0!.
 // https://support.microsoft.com/en-us/excel/functions/averageif-function
-// Unresolved, kept as before without Excel evidence: a matched text, boolean
-// or error target adds nothing to the SUMIF-style numerator but still counts,
-// and an average_range shorter than range (index past its end, undefined) is
-// counted, not read as blank; Excel's resizing of average_range from its
-// top-left cell is not modeled.
+// A direct-reference average_range is resized to `source`'s dimensions;
+// computed expressions retain prior index pairing (see `resizedTargetValues`).
+// Unresolved, kept as before without Excel evidence: an index past a shorter
+// computed target is counted instead of treated as a blank. A matched text,
+// boolean or error target adds nothing to the SUMIF-style numerator but counts.
 function averageIf(source: EvalScalar[], criteria: EvalValue, averageRange: EvalScalar[] | null): EvalScalar {
   const pred = makeCriteriaPredicate(criteria);
   const target = averageRange ?? source;
