@@ -11,7 +11,6 @@ import {
   type NormalizedOoxmlResourcePolicy,
 } from '@silurus/ooxml-core/worker';
 import { beginModelSourceLoad, selectModelSource } from '@silurus/ooxml-core/internal/model-source';
-import { computeMdw, pinXlsxGridGeometry } from '../renderer.js';
 import { respondToHostLayoutRequest } from './host-layout.js';
 import { XlsxWorkbook, type LoadOptions } from '../workbook.js';
 import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions } from '../types.js';
@@ -24,9 +23,14 @@ const BaseWorkbook = XlsxWorkbook as unknown as WorkbookConstructor;
 class SourceWorkbook extends BaseWorkbook {
   sourceMdw: number | undefined;
 
+  constructor(worker: Worker, mode: 'main' | 'worker', wasmUrl: string | URL | undefined,
+    private readonly sourceRenderer: typeof import('../renderer.js')) {
+    super(worker, mode, wasmUrl);
+  }
+
   override async getWorksheet(sheetIndex: number): Promise<Worksheet> {
     const worksheet = await super.getWorksheet(sheetIndex);
-    if (this.sourceMdw !== undefined) pinXlsxGridGeometry(worksheet, this.sourceMdw);
+    if (this.sourceMdw !== undefined) this.sourceRenderer.pinXlsxGridGeometry(worksheet, this.sourceMdw);
     return worksheet;
   }
 
@@ -87,15 +91,20 @@ export async function loadXlsxModelSource(
     if (!selected) return XlsxWorkbook.load(buffer, { ...opts, modelSources: undefined });
     const load = beginModelSourceLoad(selected, 'xlsx');
     try {
+      // A source-only consumer must not statically split the ordinary
+      // renderer graph. Resolve the existing renderer after source admission;
+      // its measurement/pinning functions remain the single implementations.
+      // Import failures still release the admitted source in this try/finally.
+      const renderer = await import('../renderer.js');
       metrics.setSourceBytes(buffer.byteLength);
       metrics.checkpoint('container ready');
       const worker = mode === 'worker'
         ? (await import('../render-worker-source-host.js')).createRenderWorker()
         : new (await import('../worker-source.ts?worker&inline')).default();
       let workbook: SourceWorkbook | undefined;
-      const wiredWorker = sourceWorker(worker, load, opts, (mdw) => { if (workbook) workbook.sourceMdw = mdw; });
+      const wiredWorker = sourceWorker(worker, load, opts, renderer, (mdw) => { if (workbook) workbook.sourceMdw = mdw; });
       try {
-        workbook = new SourceWorkbook(wiredWorker, mode, opts.wasmUrl);
+        workbook = new SourceWorkbook(wiredWorker, mode, opts.wasmUrl, renderer);
         const state = workbook as unknown as MutableWorkbook;
         state.metrics = metrics;
         await state._load(buffer, opts, resourceOptions.policy, (usage) => metrics.observeUsage(usage), true);
@@ -124,6 +133,7 @@ function sourceWorker(
   worker: Worker,
   load: AdmittedModelSourceLoad,
   opts: LoadOptions,
+  renderer: typeof import('../renderer.js'),
   onMdw: (value: number) => void,
 ): Worker {
   const sourceOwnerUrl = new URL(
@@ -154,7 +164,7 @@ function sourceWorker(
           }
           if (type === 'message') respondToHostLayoutRequest(
             (reply) => target.postMessage(reply), event.data,
-            (font) => computeMdw(font.family, font.sizePt, undefined, !!opts.useGoogleFonts,
+            (font) => renderer.computeMdw(font.family, font.sizePt, undefined, !!opts.useGoogleFonts,
               font.bold ? 700 : 400, font.italic ? 'italic' : 'normal'),
           );
           listener(event);

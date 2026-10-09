@@ -3,7 +3,8 @@ import type { ModelSource, ModelSourceModuleDescriptor } from '@silurus/ooxml-co
 import { buildCfbFixture } from '@silurus/ooxml-core/testing';
 import { XlsxWorkbook } from './workbook.js';
 import { XLSX_HOST_LAYOUT_REQUEST, XLSX_HOST_LAYOUT_RESULT } from './internal/host-layout.js';
-import type { ParsedWorkbook } from './types.js';
+import type { ParsedWorkbook, Worksheet } from './types.js';
+import { GridGeometry } from './internal/grid-geometry.js';
 
 const mocks = vi.hoisted(() => ({ computeMdw: vi.fn(() => 8) }));
 vi.mock('./renderer.js', async (load) => ({
@@ -88,6 +89,7 @@ function fakeSource(claim = true) {
 }
 
 afterEach(() => {
+  vi.restoreAllMocks();
   globals.Worker = originals.Worker;
   globals.location = originals.location;
   ProtocolWorker.instances = [];
@@ -103,6 +105,10 @@ function install(script: Script): void {
 describe('XlsxWorkbook.load with model sources', () => {
   it('forwards a claimed load and answers its host layout request with the renderer measurement', async () => {
     install(parseWorkerScript());
+    const sheet = { name: 'Sheet1', rows: [], colWidths: {}, rowHeights: {},
+      defaultColWidth: 8.43, defaultRowHeight: 15, mergeCells: [],
+      freezeRows: 0, freezeCols: 0, conditionalFormats: [], images: [], charts: [] } as Worksheet;
+    vi.spyOn(XlsxWorkbook.prototype, 'getWorksheet').mockResolvedValue(sheet);
     const { source, release } = fakeSource();
     const workbook = await XlsxWorkbook.load(cfbBytes(), { modelSources: [source] });
 
@@ -118,6 +124,10 @@ describe('XlsxWorkbook.load with model sources', () => {
     expect((workbook as unknown as { parsedWorkbook: ParsedWorkbook }).parsedWorkbook.layoutMetrics)
       .toEqual({ maximumDigitWidth: 8 });
     expect(workbook.sheetNames).toEqual(['Sheet1']);
+    // The source subclass must keep the measured host scalar after resolving
+    // its renderer dependency; a later realm measurement must not replace it.
+    const projected = await workbook.getWorksheet(0);
+    expect(GridGeometry.forWorksheetMeasured(projected, () => 20).col.sizeOf(1)).toBe(67);
     expect(release).toHaveBeenCalledOnce();
     await expect(workbook.toMarkdown()).rejects.toThrow('Markdown conversion is unsupported for this source');
     workbook.destroy();
