@@ -172,6 +172,8 @@ export class SelectionOverlay {
           { first: effective.rows + 1, last: MAX_WORKSHEET_ROW, start: Math.min(height, headerH + frozenH), end: height },
         ]
       : [{ first: 1, last: MAX_WORKSHEET_ROW, start: headerH, end: height }];
+    const visibleXPanes = xPanes.filter((pane) => pane.end > pane.start);
+    const visibleYPanes = yPanes.filter((pane) => pane.end > pane.start);
     const selectionColor = this.host.selectionColor() ?? DEFAULT_SELECTION_COLOR;
     const { background } = selectionOverlayStyle(selectionColor);
     const seenFragments = new Set<string>();
@@ -191,8 +193,7 @@ export class SelectionOverlay {
             : { top: 1, bottom: MAX_WORKSHEET_ROW, left: 1, right: MAX_WORKSHEET_COL,
                 topEdge: false, bottomEdge: false, leftEdge: false, rightEdge: false };
 
-      for (const yp of yPanes) for (const xp of xPanes) {
-        if (xp.end <= xp.start || yp.end <= yp.start) continue;
+      for (const yp of visibleYPanes) for (const xp of visibleXPanes) {
         const top = Math.max(bounds.top, yp.first);
         const bottom = Math.min(bounds.bottom, yp.last);
         const left = Math.max(bounds.left, xp.first);
@@ -213,12 +214,17 @@ export class SelectionOverlay {
         const fragmentH = y2 - y;
         if (fragmentW <= 0 || fragmentH <= 0) continue;
 
-        // Only paint a border where the logical selection itself ends. Pane and
-        // viewport clips are not selection edges and must not create fake lines.
-        const topBorder = bounds.topEdge && top === bounds.top && rawTop >= yp.start;
-        const bottomBorder = bounds.bottomEdge && bottom === bounds.bottom && rawBottom <= yp.end;
-        const leftBorder = bounds.leftEdge && left === bounds.left && rawLeft >= xp.start;
-        const rightBorder = bounds.rightEdge && right === bounds.right && rawRight <= xp.end;
+        // Whole rows/columns use the outer visible grid along their unbounded
+        // axis. Only outer nonempty panes receive caps; frozen seams and clipped
+        // ordinary cell ranges remain open. This is viewer selection chrome.
+        const topCap = area.kind === 'columns' && yp === visibleYPanes[0];
+        const bottomCap = area.kind === 'columns' && yp === visibleYPanes.at(-1);
+        const leftCap = area.kind === 'rows' && xp === visibleXPanes[0];
+        const rightCap = area.kind === 'rows' && xp === visibleXPanes.at(-1);
+        const topBorder = topCap || (bounds.topEdge && top === bounds.top && rawTop >= yp.start);
+        const bottomBorder = bottomCap || (bounds.bottomEdge && bottom === bounds.bottom && rawBottom <= yp.end);
+        const leftBorder = leftCap || (bounds.leftEdge && left === bounds.left && rawLeft >= xp.start);
+        const rightBorder = rightCap || (bounds.rightEdge && right === bounds.right && rawRight <= xp.end);
         const screenLeft = this.host.screenX(x, fragmentW);
         const physicalLeftBorder = this.host.isRtl() ? rightBorder : leftBorder;
         const physicalRightBorder = this.host.isRtl() ? leftBorder : rightBorder;
@@ -234,11 +240,20 @@ export class SelectionOverlay {
         fillSubpaths.push(
           `M${screenLeft} ${y}h${fragmentW}v${fragmentH}h${-fragmentW}Z`,
         );
+        // Inset only the new caps by half the centered 2 CSS-pixel stroke so
+        // clipping keeps the whole stroke, including the physical RTL left edge.
+        // Fill and authored geometry remain unchanged.
+        const insetX = Math.min(1, fragmentW / 2);
+        const insetY = Math.min(1, fragmentH / 2);
+        const outlineLeft = screenLeft + ((this.host.isRtl() ? rightCap : leftCap) ? insetX : 0);
+        const outlineRight = screenLeft + fragmentW - ((this.host.isRtl() ? leftCap : rightCap) ? insetX : 0);
+        const outlineTop = y + (topCap ? insetY : 0);
+        const outlineBottom = y2 - (bottomCap ? insetY : 0);
         overlayRects.push({
-          x: screenLeft,
-          y,
-          width: fragmentW,
-          height: fragmentH,
+          x: outlineLeft,
+          y: outlineTop,
+          width: outlineRight - outlineLeft,
+          height: outlineBottom - outlineTop,
           top: topBorder,
           right: physicalRightBorder,
           bottom: bottomBorder,
