@@ -655,6 +655,8 @@ describe('XlsxSheetViewer canvas mount', () => {
       canvasArea: FakeEl;
       scrollHost: FakeEl;
       viewportTop: number;
+      viewport: { setViewportSize(width: number, height: number): void; setExtent(width: number, height: number): void };
+      setViewportLeft(left: number): void;
       overlayHost: { selection: FakeEl };
     } }).engine;
     engine.currentWorksheet = { ...worksheet('Whole bands'), defaultColWidth: 8.43, freezeRows, freezeCols, rightToLeft: rtl };
@@ -662,9 +664,15 @@ describe('XlsxSheetViewer canvas mount', () => {
     engine.canvasArea.clientHeight = 600;
     engine.scrollHost.clientWidth = 800;
     engine.scrollHost.clientHeight = 600;
-    engine.scrollHost.scrollLeft = scrollX;
-    engine.scrollHost.scrollTop = scrollY;
+    // Model a loaded sheet with scrollable content; without an extent the
+    // viewport can clamp the supplied scroll offset back to zero.
+    engine.viewport.setViewportSize(800, 600);
+    engine.viewport.setExtent(3000, 4000);
+    engine.setViewportLeft(scrollX);
     engine.viewportTop = scrollY;
+    if (freezeRows === 0 && scrollY > 0) {
+      expect(viewer.getCellViewportRect('A1')?.y).toBeLessThan(0);
+    }
     viewer.setSelection(range);
     const boundary = descendants(engine.overlayHost.selection).find(
       (element) => element.getAttribute('data-xlsx-selection-border') !== null,

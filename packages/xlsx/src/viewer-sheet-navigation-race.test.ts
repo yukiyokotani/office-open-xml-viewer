@@ -3,7 +3,7 @@ import { XlsxViewer } from './viewer.js';
 import { XlsxWorkbook } from './workbook.js';
 import { WorksheetPreview } from './internal/worksheet-preview.js';
 import type { Worksheet } from './types.js';
-import { installDom, makeContainer } from './viewer-destroy-test-dom.js';
+import { installDom, makeContainer, type FakeEl } from './viewer-destroy-test-dom.js';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -372,12 +372,16 @@ describe('XlsxViewer sheet acquisition generation', () => {
     requests[1].resolve(worksheet('B'));
     await engine.showSheet(0);
     engine.scheduleRender = vi.fn();
-    const input = engine.selectionInput as {
-      resizeDrag: unknown;
-      applyResize(x: number, y: number): void;
-    };
-    input.resizeDrag = { kind: 'row', index: 1, originScaled: 0, mdw: 7 };
-    input.applyResize(0, 120);
+    const area = engine.canvasArea as { clientWidth: number; clientHeight: number };
+    area.clientWidth = 800; area.clientHeight = 600;
+    const input = engine.scrollHost as FakeEl;
+    input.clientWidth = 800; input.clientHeight = 600;
+    const cell = viewer.getCellViewportRect('A1')!;
+    const pointer = (y: number) => ({ button: 0, pointerId: 1, pointerType: 'mouse',
+      clientX: 5, clientY: y, preventDefault() {}, shiftKey: false, ctrlKey: false, metaKey: false });
+    input.dispatch('pointerdown', pointer(cell.y + cell.height + 0.5));
+    input.dispatch('pointermove', pointer(cell.y + 120));
+    input.dispatch('pointerup', pointer(cell.y + 120));
     const resized = (engine.currentWorksheet as Worksheet).rowHeights[1];
     expect(resized).toBeGreaterThan(20);
 
@@ -391,16 +395,21 @@ describe('XlsxViewer sheet acquisition generation', () => {
 
   it('retains resized column geometry across A → B → A', async () => {
     const { viewer, engine, requests } = buildViewer();
-    requests[0].resolve(worksheet('A'));
+    requests[0].resolve({ ...worksheet('A'), defaultColWidth: 8.43 });
     requests[1].resolve(worksheet('B'));
     await engine.showSheet(0);
     engine.scheduleRender = vi.fn();
-    const input = engine.selectionInput as {
-      resizeDrag: unknown;
-      applyResize(x: number, y: number): void;
-    };
-    input.resizeDrag = { kind: 'col', index: 2, originScaled: 0, mdw: 7 };
-    input.applyResize(120, 0);
+    const area = engine.canvasArea as { clientWidth: number; clientHeight: number };
+    area.clientWidth = 800; area.clientHeight = 600;
+    const input = engine.scrollHost as FakeEl;
+    input.clientWidth = 800; input.clientHeight = 600;
+    const cell = viewer.getCellViewportRect('B1')!;
+    expect(cell.x + cell.width).toBeLessThan(800);
+    const pointer = (x: number) => ({ button: 0, pointerId: 1, pointerType: 'mouse',
+      clientX: x, clientY: 5, preventDefault() {}, shiftKey: false, ctrlKey: false, metaKey: false });
+    input.dispatch('pointerdown', pointer(cell.x + cell.width + 0.5));
+    input.dispatch('pointermove', pointer(cell.x + 120));
+    input.dispatch('pointerup', pointer(cell.x + 120));
     const resized = (engine.currentWorksheet as Worksheet).colWidths[2];
     expect(resized).toBeGreaterThan(0);
 
