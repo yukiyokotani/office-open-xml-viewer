@@ -3,7 +3,31 @@ import { defineCompatibilityRule } from './compatibility.js';
 import { stableFingerprint } from './fingerprint.js';
 import type { ParagraphLayoutSource } from './text.js';
 import type { TableLayoutSource } from './table-source-acquisition.js';
-import type { TableColumnLayoutInput, LayoutRect, SourceRef } from './types.js';
+import type { TableColumnLayoutInput, LayoutRect, SourceRef, FloatingTablePositionInput } from './types.js';
+
+export const WORD_CELL_OWNED_GRID_FRAME = defineCompatibilityRule({
+  id: 'word-cell-owned-grid-frame',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'native-cell-grid-frame-position-controls',
+    application: 'Microsoft Word',
+    version: '16.113.3',
+    platform: 'macOS 27.0',
+  },
+  description: 'Native DOC import controls move six homogeneous fixed-layout horizontal LTR nested grids, including their borders and fills, together for left/center/right/absolute horizontal placement and nonzero text-relative vertical offsets. The producer elects only a first host-cell block at depth two, with every physical cell paragraph agreeing with its first-cell frame before continuation payloads are discarded, and no nondefault TAP positioning. Unpositioned anchors and no-wrap are admission counterexamples; mixed frames, later insertion, recursive child content, AutoFit, bidi and rotated cells retain residual diagnostics. The frame uses margin/text anchors, around wrap and automatic dimensions. [MS-DOC] 2.4.3 establishes row identity and 2.6.2 supplies the coordinates; neither establishes a universal nested-grid placement or AUTO-width rule. In the observed equal host bands, different fixed grid widths have the same aligned displacement, consistent with host content width as the alignment frame. Retain fixed grid ink unchanged, including overhang. Reusing that band for exclusion is a bounded library policy: varied host widths, general wrapping and paragraph-relative shape anchors are unproved. The following paragraph selects the page and wrap acquisition, but its before-spacing does not replace the cell insertion cursor as the vertical frame origin.',
+});
+
+export function cellOwnedGridFramePosition(frame: Readonly<FramePr>): FloatingTablePositionInput {
+  return {
+    textAnchor: 'cell-start', widthBasis: 'host-cell-content',
+    leftFromTextPt: frame.hSpace, rightFromTextPt: frame.hSpace,
+    topFromTextPt: frame.vSpace, bottomFromTextPt: frame.vSpace,
+    horzAnchor: frame.hAnchor, horzSpecified: true, vertAnchor: frame.vAnchor,
+    xPt: frame.x ?? 0, yPt: frame.y ?? 0,
+    ...(frame.xAlign == null ? {} : { xAlign: frame.xAlign }),
+    ...(frame.yAlign == null ? {} : { yAlign: frame.yAlign }),
+  };
+}
 
 export const WORD_ROTATED_CELL_AUTO_ROW_WRAP = defineCompatibilityRule({
   id: 'word-rotated-cell-auto-row-wrap',

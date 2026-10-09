@@ -169,18 +169,12 @@ pub(super) fn project(
                     })
                 {
                     // MS-DOC 2.4.3 frame identity still segments native rows.
-                    // Preserve that identity and the representable framePr;
-                    // the shared consumer keeps cell-owned tables as ordinary
-                    // cell content. That consumer rule
-                    // (WORD_CELL_OWNER_ROW_CONTEXT, docx/layout/
-                    // table-compatibility.ts) was observed only for WML/DOCX
-                    // sources, where Word dropped such frames. Word's
-                    // placement of a native DOC nested-cell frame is not
-                    // established, so ordinary cell flow here is a bounded
-                    // library projection: it synthesizes no tblpPr and claims
-                    // no native Word positioning rule. The final retained
-                    // body reports this limitation once per owning root
-                    // table, after discarded continuation content is gone.
+                    // Retain representable facts until the raw table owner
+                    // is known. tables.rs acquires a whole-grid cell frame
+                    // only for the observed homogeneous first-block class,
+                    // before merge continuations are discarded. WML nested
+                    // frames do not imply that owner. Residual classes retain
+                    // the existing limitation once per final owning root.
                 } else {
                     // Any other framed table paragraph has no consumer that
                     // places it as Word does: a root cell frame that does not

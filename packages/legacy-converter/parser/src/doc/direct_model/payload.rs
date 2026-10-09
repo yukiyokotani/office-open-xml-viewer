@@ -19,6 +19,9 @@ pub(super) fn table(value: &docx_model::DocTable) -> Result<usize, String> {
     total.option_string(&value.layout)?;
     total.option_string(&value.overlap)?;
     total.option_string(&value.table_layout.effective_style_id)?;
+    if let Some(frame) = &value.table_layout.cell_frame {
+        total.frame(frame)?;
+    }
     if let Some(position) = &value.tblp_pr {
         total.string(&position.horz_anchor)?;
         total.string(&position.vert_anchor)?;
@@ -267,18 +270,7 @@ pub(super) fn paragraph_metadata(value: &DocParagraph) -> Result<usize, String> 
         total.paragraph_typography(wire)?;
     }
     if let Some(frame) = &value.frame_pr {
-        total.add(std::mem::size_of::<docx_model::FramePr>())?;
-        for string in [
-            &frame.drop_cap,
-            &frame.wrap,
-            &frame.h_anchor,
-            &frame.v_anchor,
-            &frame.h_rule,
-        ] {
-            total.string(string)?;
-        }
-        total.option_string(&frame.x_align)?;
-        total.option_string(&frame.y_align)?;
+        total.frame(frame)?;
     }
     Ok(total.0)
 }
@@ -344,6 +336,20 @@ pub(super) fn ending_section(
 struct Total(usize);
 
 impl Total {
+    fn frame(&mut self, frame: &docx_model::FramePr) -> Result<(), String> {
+        self.add(std::mem::size_of::<docx_model::FramePr>())?;
+        for string in [
+            &frame.drop_cap,
+            &frame.wrap,
+            &frame.h_anchor,
+            &frame.v_anchor,
+            &frame.h_rule,
+        ] {
+            self.string(string)?;
+        }
+        self.option_string(&frame.x_align)?;
+        self.option_string(&frame.y_align)
+    }
     fn add(&mut self, bytes: usize) -> Result<(), String> {
         self.0 = self.0.checked_add(bytes).ok_or("OUTPUT_TOO_LARGE")?;
         Ok(())

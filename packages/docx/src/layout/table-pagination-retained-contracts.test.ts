@@ -141,6 +141,35 @@ function expectDeeplyFrozen(value: unknown, seen = new WeakSet<object>()): void 
 }
 
 describe('retained table pagination contracts', () => {
+  it('places a cell-owned grid frame in the page margin band at the cell insertion cursor', () => {
+    for (const childWidth of [160, 260]) {
+      const nested = table([row([textCell('grid')], { rowHeight: 20, rowHeightRule: 'exact' })],
+        [childWidth], { widthPt: childWidth });
+      Object.assign(nested, { __tableLayout: {
+        effectiveStyleId: null, ordinaryFlow: false,
+        grid: { authored: true, columns: [{ width: String(childWidth * 20) }], requiredColumnCount: 1 },
+        preferredWidth: { kind: 'dxa', value: String(childWidth * 20) },
+        layout: { kind: 'fixed' }, cellSpacing: null,
+        cellFrame: { dropCap: 'none', lines: 1, wrap: 'around', hAnchor: 'margin',
+          vAnchor: 'text', hRule: 'auto', hSpace: 9, vSpace: 0, xAlign: 'center', y: 12 },
+      } });
+      const following = { ...paragraph(''), spaceBefore: 35 };
+      const host = table([row([cell([nested as CellElement, following as CellElement])],
+        { rowHeight: 70, rowHeightRule: 'exact' })], [100]);
+      const [fragment] = retainedTopLevelTables(layoutDocument(documentModel([host as BodyElement], 120)));
+      const placements = fragment?.resolvedFloatingTables ?? [];
+      expect(placements).toHaveLength(1);
+      const placed = placements[0]!;
+      const acquiredWidth = placed.child.columnWidthsPt.reduce((a, b) => a + b, 0);
+      expect(acquiredWidth).toBe(childWidth);
+      expect(placed.xPt).toBeCloseTo(50, 10);
+      expect(placed.exclusionBounds.widthPt).toBe(118);
+      expect(placed.yPt).toBeCloseTo(22, 10);
+      expect(fragment?.rows[0]?.cells[0]?.blocks.some((block) => block.layout.kind === 'table')).toBe(false);
+      expect(placed.child.rows[0]?.cells[0]?.blocks[0]?.layout.kind).toBe('paragraph');
+      expect(nested.tblpPr).toBeUndefined();
+    }
+  });
   it('retains nested page-split geometry as clone-safe immutable parser-independent data', () => {
     const nested = table(
       Array.from({ length: 4 }, (_unused, index) => row(

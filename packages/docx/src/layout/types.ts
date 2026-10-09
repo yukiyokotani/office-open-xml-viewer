@@ -1415,8 +1415,15 @@ export interface TableFormatInput {
   readonly firstRowException: TableRowExceptionInput | null;
 }
 
-/** Parser-independent positioning facts retained from §17.4.57 `<w:tblpPr>`. */
+/** Parser-independent positioning facts from §17.4.57 `<w:tblpPr>` or an
+ * acquired homogeneous cell-owned grid frame. */
 export interface FloatingTablePositionInput {
+  /** A grid frame at its host cell's insertion cursor. The following paragraph
+   * may select its page, but its before-spacing is not this vertical anchor. */
+  readonly textAnchor?: 'cell-start';
+  /** Bounded acquired grid-frame policy: the host content band determines
+   * alignment independently of fixed grid ink. Not a general AUTO-width rule. */
+  readonly widthBasis?: 'host-cell-content';
   readonly leftFromTextPt: number;
   readonly rightFromTextPt: number;
   readonly topFromTextPt: number;

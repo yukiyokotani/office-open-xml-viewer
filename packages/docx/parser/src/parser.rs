@@ -14438,6 +14438,7 @@ fn parse_table_with_diagnostics(
         .max(grid_columns.len() as u32);
     let table_layout = TableLayoutAcquisitionWire {
         effective_style_id: effective_table_style_id,
+        cell_frame: None,
         ordinary_flow: table_is_ordinary_flow(
             tbl_pr.and_then(|p| child_w(p, "tblpPr")),
             table_positioning_context,

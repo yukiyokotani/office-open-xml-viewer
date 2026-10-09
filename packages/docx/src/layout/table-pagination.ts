@@ -1868,6 +1868,8 @@ function materializeFragment(
         physicalPageIndex: context.page.physicalPageIndex,
         displayPageNumber: context.page.displayPageNumber,
         ...occurrence,
+        ...(occurrence.positioning.widthBasis === 'host-cell-content'
+          ? { columnBounds: Object.freeze({ ...laidOutCell.contentBounds }) } : {}),
         anchorBounds,
         child,
       })];
