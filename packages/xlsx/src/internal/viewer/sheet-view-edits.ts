@@ -2,18 +2,23 @@ import type { Worksheet } from '../../types.js';
 import type { WireSizeOverrides } from '../../worker-protocol.js';
 import { derivedAutoRowHeights } from '../../renderer.js';
 import type { OutlineAxis } from '../../outline.js';
+import { getColumnCssWidth, setColumnCssWidth } from '../column-css-overrides.js';
 
 type OutlineState = {
   rowCollapsed: Map<number, boolean>;
   colCollapsed: Map<number, boolean>;
   stashedRowHeights: Map<number, number | undefined>;
   stashedColWidths: Map<number, number | undefined>;
+  /** Paired CSS pixel intent; `undefined` stashes CSS absence. */
+  stashedColCssWidths: Map<number, number | undefined>;
 };
 
 type SizeOverrides = {
   rows: Map<number, number | null>;
   automaticRows: Map<number, number>;
   cols: Map<number, number | null>;
+  /** Canonical logical CSS px of user column resizes; `null` = removed. */
+  colCss: Map<number, number | null>;
   revision: number;
   wire?: WireSizeOverrides;
 };
@@ -30,6 +35,7 @@ export class SheetViewEdits {
    * maps belong to {@link outlineStateStore} and survive projection eviction. */
   private stashedRowHeights = new Map<number, number | undefined>();
   private stashedColWidths = new Map<number, number | undefined>();
+  private stashedColCssWidths = new Map<number, number | undefined>();
   /** Only user-mutated outline flags and pre-collapse sizes survive a sheet
    * switch. The parser's filters and frozen panes are read-only here; selection
    * and scroll are viewer viewport state, reset by navigation as before. */
@@ -59,11 +65,13 @@ export class SheetViewEdits {
       state = {
         rowCollapsed: new Map(), colCollapsed: new Map(),
         stashedRowHeights: new Map(), stashedColWidths: new Map(),
+        stashedColCssWidths: new Map(),
       };
       this.outlineStateStore.set(sheetIndex, state);
     }
     this.stashedRowHeights = state.stashedRowHeights;
     this.stashedColWidths = state.stashedColWidths;
+    this.stashedColCssWidths = state.stashedColCssWidths;
   }
 
   /** Set a row/column hidden by mapping to the size-0 encoding the axis/renderer
@@ -97,16 +105,23 @@ export class SheetViewEdits {
       if (hidden) {
         if (!this.stashedColWidths.has(index)) {
           this.stashedColWidths.set(index, ws.colWidths[index]);
+          this.stashedColCssWidths.set(index, getColumnCssWidth(ws, index));
         }
         ws.colWidths[index] = 0;
+        // Hidden is size 0; a stale CSS override must not keep the band visible.
+        setColumnCssWidth(ws, index, null);
       } else {
         if (this.stashedColWidths.has(index)) {
           const orig = this.stashedColWidths.get(index);
           if (orig === undefined) delete ws.colWidths[index];
           else ws.colWidths[index] = orig;
+          // Restore the pixel intent, including its original absence.
+          setColumnCssWidth(ws, index, this.stashedColCssWidths.get(index) ?? null);
           this.stashedColWidths.delete(index);
+          this.stashedColCssWidths.delete(index);
         } else if (ws.colWidths[index] === 0) {
           delete ws.colWidths[index];
+          setColumnCssWidth(ws, index, null);
         }
       }
     }
@@ -118,18 +133,43 @@ export class SheetViewEdits {
 
   /** Record band `index`'s CURRENT model size (or `null` = no entry) in the
    *  per-sheet override store. Called after every view-only size mutation so
-   *  both render modes receive this viewer's independent projection. */
-  recordSizeOverride(ws: Worksheet, sheetIndex: number, axis: OutlineAxis, index: number): void {
+   *  both render modes receive this viewer's independent projection.
+   *  `columnCssPx` is the logical CSS px a user column drag captured: it is
+   *  stored as the column's canonical view-only width so a later MDW change
+   *  keeps the drag's pixel size. Without it, the worksheet's current CSS
+   *  override (possibly none) is mirrored. CSS metadata changes bump the
+   *  revision even when the raw `colWidths` number is unchanged. */
+  recordSizeOverride(
+    ws: Worksheet,
+    sheetIndex: number,
+    axis: OutlineAxis,
+    index: number,
+    columnCssPx?: number,
+  ): void {
     let entry = this.sizeOverrideStore.get(sheetIndex);
     if (!entry) {
-      entry = { rows: new Map(), automaticRows: new Map(), cols: new Map(), revision: 0 };
+      entry = {
+        rows: new Map(), automaticRows: new Map(), cols: new Map(), colCss: new Map(), revision: 0,
+      };
       this.sizeOverrideStore.set(sheetIndex, entry);
     }
     const target = axis === 'row' ? entry.rows : entry.cols;
     if (axis === 'row') entry.automaticRows.delete(index);
     const value = axis === 'row' ? ws.rowHeights[index] ?? null : ws.colWidths[index] ?? null;
-    if (target.get(index) === value && target.has(index)) return;
-    target.set(index, value);
+    let changed = false;
+    if (!(target.get(index) === value && target.has(index))) {
+      target.set(index, value);
+      changed = true;
+    }
+    if (axis === 'col') {
+      if (columnCssPx !== undefined) setColumnCssWidth(ws, index, columnCssPx);
+      const css = getColumnCssWidth(ws, index) ?? null;
+      if (entry.colCss.has(index) ? entry.colCss.get(index) !== css : css !== null) {
+        entry.colCss.set(index, css);
+        changed = true;
+      }
+    }
+    if (!changed) return;
     entry.revision++;
     entry.wire = undefined;
   }
@@ -150,6 +190,7 @@ export class SheetViewEdits {
         wire.rows = Object.fromEntries([...entry.automaticRows, ...entry.rows]);
       }
       if (entry.cols.size > 0) wire.cols = Object.fromEntries(entry.cols);
+      if (entry.colCss.size > 0) wire.columnCssWidths = Object.fromEntries(entry.colCss);
       entry.wire = wire;
     }
     return { overrides: entry.wire, revision: entry.revision };
@@ -185,7 +226,9 @@ export class SheetViewEdits {
     let entry = this.sizeOverrideStore.get(sheetIndex);
     if (!entry && next.size === 0) return;
     if (!entry) {
-      entry = { rows: new Map(), automaticRows: new Map(), cols: new Map(), revision: 0 };
+      entry = {
+        rows: new Map(), automaticRows: new Map(), cols: new Map(), colCss: new Map(), revision: 0,
+      };
       this.sizeOverrideStore.set(sheetIndex, entry);
     }
     entry.automaticRows = next;
@@ -227,6 +270,7 @@ export class SheetViewEdits {
         if (size === null) delete worksheet.colWidths[index];
         else worksheet.colWidths[index] = size;
       }
+      for (const [index, css] of sizes.colCss) setColumnCssWidth(worksheet, index, css);
     }
     const outline = this.outlineStateStore.get(sheetIndex);
     if (!outline) return;
@@ -250,6 +294,7 @@ export class SheetViewEdits {
     this.outlineStateStore.clear();
     this.stashedRowHeights.clear();
     this.stashedColWidths.clear();
+    this.stashedColCssWidths.clear();
     this.sizeOverrideStore.clear();
   }
 }

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { OfficeFontFallbackRoute } from '@silurus/ooxml-core';
 import { renderWorksheetViewport } from './render-orchestrator.js';
 import { colWidthToPx } from './internal/grid-metrics.js';
+import { createSizeOverriddenWorksheet } from './worker-protocol.js';
 import type { RenderViewportOptions, Styles, Worksheet, XlsxTextRunInfo } from './types.js';
 
 const STYLES = {
@@ -45,6 +46,28 @@ function target(fallbackDigitWidth = 9): { canvas: OffscreenCanvas; paintedFonts
 }
 
 describe('XLSX render font and geometry authority', () => {
+  it('paints the resized CSS width and authored stored width through the shared render path', async () => {
+    const source = worksheet();
+    source.colWidths = { 1: 12, 2: 12 };
+    source.rows[0].cells.unshift({ row: 1, col: 1, styleIndex: 0,
+      value: { type: 'text', text: 'Resized' } });
+    const projected = createSizeOverriddenWorksheet(source, {
+      cols: { 1: 12 }, columnCssWidths: { 1: 84 },
+    });
+    for (const cellScale of [1, 1.25]) {
+      const { canvas } = target();
+      const textRuns: XlsxTextRunInfo[] = [];
+      await renderWorksheetViewport({ ws: projected, styles: STYLES }, canvas,
+        { row: 1, col: 1, rows: 1, cols: 2 }, {
+          authoritativeMdw: 8, cellScale,
+          onTextRun: (run) => textRuns.push(run),
+        } as RenderViewportOptions & { authoritativeMdw: number });
+      expect(textRuns.find((run) => run.cellRef === 'A1')?.width).toBe(84 * cellScale);
+      expect(textRuns.find((run) => run.cellRef === 'B1')?.width).toBe(96 * cellScale);
+    }
+    expect(source.colWidths).toEqual({ 1: 12, 2: 12 });
+  });
+
   it('keeps a viewer-supplied MDW through the worker render and auto-height projection', async () => {
     const ws = worksheet();
     for (const fallbackDigitWidth of [9, 11]) {
