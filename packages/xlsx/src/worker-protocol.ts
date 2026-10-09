@@ -306,6 +306,9 @@ export type RenderWorkerRequest =
       /** Viewer-local projection cache identity. The worker rebuilds its shallow
        * worksheet projection only when the revision changes. */
       viewProjection?: WireViewProjection;
+      /** Contextless caller-realm surface, transferred so worker text uses the
+       *  caller's inherited canvas language. Absent: the worker creates one. */
+      canvas?: OffscreenCanvas;
     }
   | { type: 'releaseViewProjection'; projectionId: number }
   | { type: 'evictWorksheets'; id: number; sheetIndices: number[] }

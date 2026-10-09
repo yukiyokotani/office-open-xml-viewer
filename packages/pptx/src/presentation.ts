@@ -1159,6 +1159,11 @@ export class PptxPresentation {
       const width = opts.width ?? 960;
       const dpr = opts.dpr ?? defaultDpr();
       if (this._mode === 'worker') {
+        // WHATWG HTML: an OffscreenCanvas constructed here snapshots this
+        // document's language and direction, while one constructed in the
+        // Worker has unknown language. Transferring it before any getContext()
+        // carries those inherited values, matching the main-mode surface below.
+        const canvas = new OffscreenCanvas(1, 1);
         const res = await this._bridge.request(
           (id) => ({
             kind: 'renderSlide',
@@ -1169,7 +1174,9 @@ export class PptxPresentation {
             imageResources: opts.imageResources,
             skipMediaControls: opts.skipMediaControls,
             dim: opts.dim,
+            canvas,
           }) satisfies RenderWorkerRequest,
+          [canvas],
         );
         const rendered = res as Extract<RenderWorkerResponse, { kind: 'slideRendered' }>;
         // IX6 — replay the worker's run geometry to the caller's collector so the
@@ -1212,8 +1219,12 @@ export class PptxPresentation {
       this._assertSlideIndex(slideIndex);
       await this._waitForSlide(slideIndex);
       if (this._mode === 'worker') {
+        // Collection paints, so it transfers a caller-realm surface for the
+        // same inherited canvas language as renderSlideToBitmap.
+        const canvas = new OffscreenCanvas(1, 1);
         const res = await this._bridge.request(
-          (id) => ({ kind: 'collectRuns', id, slideIndex, width }) satisfies RenderWorkerRequest,
+          (id) => ({ kind: 'collectRuns', id, slideIndex, width, canvas }) satisfies RenderWorkerRequest,
+          [canvas],
         );
         return (res as Extract<RenderWorkerResponse, { kind: 'runsCollected' }>).runs;
       }

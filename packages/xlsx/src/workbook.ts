@@ -1362,7 +1362,14 @@ export class XlsxWorkbook {
       if (!Number.isInteger(sheetIndex) || sheetIndex < 0 || sheetIndex >= this.sheetCount) {
         throw new Error(`Sheet index ${sheetIndex} out of range (count: ${this.sheetCount})`);
       }
-      const request = () => this.requireBridge().request(
+      // WHATWG HTML: an OffscreenCanvas constructed here snapshots this
+      // document's language and direction, while one constructed in the Worker
+      // has unknown language. Transferring it before any getContext() carries
+      // those inherited values, matching the main-mode surface below. Each
+      // send constructs its own surface because transfer detaches it.
+      const request = () => {
+        const canvas = new OffscreenCanvas(1, 1);
+        return this.requireBridge().request(
           (id) => ({
             type: 'renderViewport',
             id,
@@ -1371,8 +1378,11 @@ export class XlsxWorkbook {
             opts: wireOpts,
             layoutMetrics: extracted.layoutMetrics,
             viewProjection: extracted.projection,
+            canvas,
           }) satisfies RenderWorkerRequest,
+          [canvas],
         );
+      };
       const preview = this.sheetPreviews?.get(sheetIndex);
       let res;
       if (preview?.worksheet && extracted.worksheet) {

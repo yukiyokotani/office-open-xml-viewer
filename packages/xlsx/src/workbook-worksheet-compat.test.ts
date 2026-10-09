@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { XlsxWorkbook, acquireXlsxWorksheet } from './workbook.js';
 import { OoxmlResourceLimitError } from '@silurus/ooxml-core';
 import type { PullSessionCommand } from '@silurus/ooxml-core/worker';
@@ -47,6 +47,10 @@ function makeWorkbook(
   ) => Promise<Record<string, unknown>>,
   workerTimeoutMs?: number,
 ) {
+  // Worker mode requires OffscreenCanvas; the caller creates the render surface.
+  if (mode === 'worker') {
+    vi.stubGlobal('OffscreenCanvas', class { constructor(readonly width: number, readonly height: number) {} });
+  }
   let nextId = 1;
   const request = vi.fn(
     (
@@ -101,6 +105,10 @@ function streamResponse(
   }
   return { ...message, kind: 'accepted', command: message.kind };
 }
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe('XlsxWorkbook.getWorksheet compatibility materializer', () => {
   it('decodes main-mode bytes once, resolves shared strings, and preserves cache identity', async () => {

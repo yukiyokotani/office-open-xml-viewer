@@ -532,7 +532,13 @@ describe('render worker canonical layout parity', () => {
     // it); the active-view fill-in reads it on every render/collect call.
     attachDocumentLayoutRuntime(document, 0);
 
-    await expect(document.renderPageToBitmap(1, { currentDate: 20 })).resolves.toBe(bitmap);
+    // Worker mode requires OffscreenCanvas; the caller creates the render surface.
+    vi.stubGlobal('OffscreenCanvas', class { constructor(readonly width: number, readonly height: number) {} });
+    try {
+      await expect(document.renderPageToBitmap(1, { currentDate: 20 })).resolves.toBe(bitmap);
+    } finally {
+      vi.unstubAllGlobals();
+    }
     await expect(document.collectPageRuns(1, { currentDate: 20 })).resolves.toEqual([]);
     expect(requests.map(({ type }) => type)).toEqual(['renderPage', 'collectRuns']);
     expect(requests.map((request) => 'pageIndex' in request ? request.pageIndex : null))
