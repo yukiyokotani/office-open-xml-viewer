@@ -1804,6 +1804,284 @@ mod tests {
         cnf(0xca85, condition, properties)
     }
 
+    #[test]
+    fn table_style_literal_toggle_first_row_wins_in_doc_order_and_direct_override() {
+        let mut formatting = observed_table_style_formatting();
+        formatting.configure_table_styles(0x0112, true);
+        formatting.fonts = vec!["Arial".into(), "Courier New".into()];
+        let mut chpx = vec![0x4f, 0x4a, 0, 0, 0x51, 0x4a, 0, 0];
+        // Serialize FIRST_ROW before FIRST_COLUMN. The production DOC key
+        // applies column then row, so row wins all four independent axes.
+        chpx.extend(ccnf(
+            table_style_condition::FIRST_ROW,
+            &[0x35, 0x08, 1, 0x36, 0x08, 0, 0x5c, 0x08, 0, 0x5d, 0x08, 1],
+        ));
+        chpx.extend(ccnf(
+            table_style_condition::FIRST_COLUMN,
+            &[0x35, 0x08, 0, 0x36, 0x08, 1, 0x5c, 0x08, 1, 0x5d, 0x08, 0],
+        ));
+        formatting.styles[0]
+            .as_mut()
+            .unwrap()
+            .table
+            .as_mut()
+            .unwrap()
+            .chpx = leaked(chpx);
+        let key = formatting
+            .table_formatting_key(
+                Some(0),
+                Some((1 << 5) | (1 << 7)),
+                [
+                    None,
+                    None,
+                    Some(table_style_condition::FIRST_COLUMN),
+                    Some(table_style_condition::FIRST_ROW),
+                    None,
+                ],
+            )
+            .unwrap();
+        let run = formatting
+            .direct_text_run(7, key, 0, 0, &[], "Latin العربية".into())
+            .unwrap()
+            .unwrap();
+        assert!(
+            run.bold,
+            "selected FIRST_ROW literal bold must reach the typed run"
+        );
+        assert!(!run.italic);
+        assert_eq!(run.bold_cs, Some(false));
+        assert_eq!(run.italic_cs, Some(true));
+        assert_eq!(run.font_family.as_deref(), Some("Arial"));
+        assert_eq!(run.font_family_high_ansi.as_deref(), Some("Arial"));
+
+        let unselected = formatting
+            .direct_text_run(7, table_key(0), 0, 0, &[], "x".into())
+            .unwrap()
+            .unwrap();
+        assert!(!unselected.bold && !unselected.italic);
+        assert_eq!((unselected.bold_cs, unselected.italic_cs), (None, None));
+
+        let direct = [
+            0x35, 0x08, 0, 0x36, 0x08, 1, 0x5c, 0x08, 1, 0x5d, 0x08, 0, 0x4f, 0x4a, 1, 0, 0x51,
+            0x4a, 1, 0,
+        ];
+        let overridden = formatting
+            .direct_text_run(7, key, 0, 1, &[&direct], "x".into())
+            .unwrap()
+            .unwrap();
+        assert!(!overridden.bold && overridden.italic);
+        assert_eq!(
+            (overridden.bold_cs, overridden.italic_cs),
+            (Some(true), Some(false))
+        );
+        assert_eq!(overridden.font_family.as_deref(), Some("Courier New"));
+        assert!(!formatting.unsupported_character_properties);
+    }
+
+    #[test]
+    fn table_style_literal_toggle_child_zero_clears_true_and_empty_child_inherits() {
+        let mut formatting = observed_table_style_formatting();
+        formatting.configure_table_styles(0x0112, true);
+        formatting.styles[0]
+            .as_mut()
+            .unwrap()
+            .table
+            .as_mut()
+            .unwrap()
+            .chpx = leaked(ccnf(
+            table_style_condition::FIRST_ROW,
+            &[0x35, 0x08, 1, 0x36, 0x08, 1, 0x5c, 0x08, 1, 0x5d, 0x08, 1],
+        ));
+        formatting.styles[1]
+            .as_mut()
+            .unwrap()
+            .table
+            .as_mut()
+            .unwrap()
+            .chpx = leaked(ccnf(
+            table_style_condition::FIRST_ROW,
+            &[0x35, 0x08, 0, 0x36, 0x08, 0, 0x5c, 0x08, 0, 0x5d, 0x08, 0],
+        ));
+        for (style, expected) in [(0, true), (1, false), (2, true)] {
+            let key = formatting
+                .table_formatting_key(
+                    Some(style),
+                    Some(1 << 5),
+                    [
+                        None,
+                        None,
+                        None,
+                        Some(table_style_condition::FIRST_ROW),
+                        None,
+                    ],
+                )
+                .unwrap();
+            let run = formatting
+                .direct_text_run(7, key, 0, 0, &[], "x".into())
+                .unwrap()
+                .unwrap();
+            assert_eq!(run.bold, expected, "literal b, selected style {style}");
+            assert_eq!(run.italic, expected, "literal i, selected style {style}");
+            assert_eq!(
+                run.bold_cs,
+                Some(expected),
+                "literal bCs, selected style {style}"
+            );
+            assert_eq!(
+                run.italic_cs,
+                Some(expected),
+                "literal iCs, selected style {style}"
+            );
+        }
+        assert!(!formatting.unsupported_character_properties);
+    }
+
+    #[test]
+    fn table_style_literal_toggle_relative_baseline_remains_unsupported() {
+        // Existing ordinary character decoding can resolve 80/81, but a
+        // table conditional patch has no established current-style baseline.
+        // Preserve rejection even while an independent supported color wins.
+        for relative in [[0x35, 0x08, 0x80], [0x5d, 0x08, 0x81]] {
+            let mut formatting = observed_table_style_formatting();
+            formatting.configure_table_styles(0x0112, true);
+            let mut nested = relative.to_vec();
+            nested.extend([0x70, 0x68, 0x12, 0x34, 0x56, 0]);
+            formatting.styles[0]
+                .as_mut()
+                .unwrap()
+                .table
+                .as_mut()
+                .unwrap()
+                .chpx = leaked(ccnf(table_style_condition::FIRST_ROW, &nested));
+            let key = formatting
+                .table_formatting_key(
+                    Some(0),
+                    Some(1 << 5),
+                    [
+                        None,
+                        None,
+                        None,
+                        Some(table_style_condition::FIRST_ROW),
+                        None,
+                    ],
+                )
+                .unwrap();
+            let run = formatting
+                .direct_text_run(7, key, 0, 0, &[], "x".into())
+                .unwrap()
+                .unwrap();
+            assert_eq!(run.color.as_deref(), Some("123456"));
+            assert!(!run.bold);
+            assert_eq!(run.italic_cs, None);
+            assert!(
+                formatting.unsupported_character_properties,
+                "relative toggle must retain the direct-model admission gate"
+            );
+        }
+    }
+
+    #[test]
+    fn table_style_literal_toggle_zero_presence_selects_first_row_before_band() {
+        let mut formatting = observed_table_style_formatting();
+        formatting.configure_table_styles(0x0112, true);
+        let mut chpx = ccnf(table_style_condition::FIRST_ROW, &[0x35, 0x08, 0]);
+        chpx.extend(ccnf(
+            table_style_condition::HORIZONTAL_ODD,
+            &[0x35, 0x08, 1],
+        ));
+        let sets = formatting.styles[0]
+            .as_mut()
+            .unwrap()
+            .table
+            .as_mut()
+            .unwrap();
+        sets.chpx = leaked(chpx);
+        sets.tapx = &[0x88, 0x34, 1];
+        let (horizontal, vertical, presence) =
+            formatting.table_style_selector_profile(Some(0)).unwrap();
+        let options =
+            table_style_condition::Options::new(1 << 5, horizontal, vertical, presence).unwrap();
+
+        // Acquire an actual two-row, one-cell table context. Literal zero is
+        // authored presence: it selects FIRST_ROW and excludes that row from
+        // horizontal banding, even though its projected bold value is false.
+        let mut paragraphs = Vec::new();
+        for _ in 0..2 {
+            for row_end in [false, true] {
+                let mut properties = table::Properties::default();
+                properties.apply(0x6649, &1u32.to_le_bytes()).unwrap();
+                properties.row_end = row_end;
+                if row_end {
+                    properties.row.cells = vec![table::Cell {
+                        width: 10,
+                        ..Default::default()
+                    }];
+                }
+                paragraphs.push((properties, '\u{7}'));
+            }
+        }
+        let index =
+            crate::doc::table_context::Index::build(paragraphs.len(), paragraphs, &mut |_| Ok(()))
+                .unwrap();
+        for (row, expected_condition, expected_bold) in [
+            (0, table_style_condition::FIRST_ROW, false),
+            (1, table_style_condition::HORIZONTAL_ODD, true),
+        ] {
+            let matches = table_style_condition::select(
+                &index,
+                0,
+                row,
+                table_style_condition::LogicalColumn {
+                    ordinal: 0,
+                    count: 1,
+                },
+                options,
+            )
+            .unwrap();
+            assert_eq!(
+                matches.into_iter().flatten().collect::<Vec<_>>(),
+                [expected_condition]
+            );
+            let key = formatting
+                .table_formatting_key(Some(0), Some(1 << 5), matches)
+                .unwrap();
+            let run = formatting
+                .direct_text_run(7, key, 0, 0, &[], "x".into())
+                .unwrap()
+                .unwrap();
+            assert_eq!(run.bold, expected_bold, "table row {row}");
+        }
+        assert!(!formatting.unsupported_character_properties);
+    }
+
+    #[test]
+    fn table_style_literal_toggle_nonliteral_and_truncated_ccnf_remain_rejected() {
+        let mut nonliteral = observed_table_style_formatting();
+        nonliteral.configure_table_styles(0x0112, true);
+        nonliteral.styles[0]
+            .as_mut()
+            .unwrap()
+            .table
+            .as_mut()
+            .unwrap()
+            .chpx = leaked(ccnf(table_style_condition::FIRST_ROW, &[0x35, 0x08, 2]));
+        let (_, _, presence) = nonliteral.table_style_selector_profile(Some(0)).unwrap();
+        assert_eq!(presence, 0);
+        assert!(nonliteral.unsupported_character_properties);
+
+        let mut truncated = observed_table_style_formatting();
+        truncated.configure_table_styles(0x0112, true);
+        // Outer CNF framing is valid; the nested bold SPRM lacks its operand.
+        truncated.styles[0]
+            .as_mut()
+            .unwrap()
+            .table
+            .as_mut()
+            .unwrap()
+            .chpx = leaked(ccnf(table_style_condition::FIRST_ROW, &[0x35, 0x08]));
+        assert!(truncated.table_style_selector_profile(Some(0)).is_err());
+    }
+
     fn table_style_shading(background: [u8; 3], pattern: u16) -> Vec<u8> {
         let mut bytes = vec![0x87, 0xd6, 10, 0, 0, 0, 255];
         bytes.extend(background);

@@ -743,7 +743,14 @@ fn parse_conditional(
     let mut has_supported_character = false;
     let mut nested = Sprms::new(operand.grpprl);
     while let Some((code, value)) = nested.next(budget)? {
-        if matches!(code, 0x2a42 | 0x4a43 | 0x6870) {
+        // [MS-DOC] 2.6.1 and 2.9.327: literal 00/01 sets the named
+        // Latin or complex-script Boolean axis. Preserve authored false in
+        // the sparse patch so a child or later selected condition can clear
+        // inherited true. Relative 80/81 needs the current text-style
+        // baseline, not this evolving conditional patch, and remains gated.
+        let literal_toggle =
+            matches!(code, 0x0835 | 0x0836 | 0x085c | 0x085d) && matches!(value, [0] | [1]);
+        if matches!(code, 0x2a42 | 0x4a43 | 0x6870) || literal_toggle {
             let baseline = patch.clone();
             patch.apply(code, value, &baseline)?;
             has_supported_character = true;
@@ -765,9 +772,10 @@ fn parse_conditional(
         }
     }
     if has_supported_character {
-        // Office 16.112.4 controls show that an empty CCnf has no conditional
-        // presence, while a supported color or absolute-size property does.
-        // Unsupported property families remain gated and do not broaden it.
+        // [MS-DOC] 2.4.6.6 applies authored literal Boolean modifications
+        // in matching CCnf scopes, including false. Office 16.112.4 controls
+        // separately establish empty CCnf versus supported color/size
+        // presence. Unsupported families remain gated and do not broaden it.
         profile.condition_presence |= condition;
         profile.conditional.insert(condition, patch);
     }
