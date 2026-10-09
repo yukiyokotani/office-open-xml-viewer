@@ -1,6 +1,7 @@
 import { overlayPercent, type HyperlinkTarget } from '@silurus/ooxml-core';
 import type { PptxTextRunInfo } from './renderer';
 import { pptxRunFrameKey, pptxRunFrameTransform } from './run-frame-transform.js';
+import { createPptxRunFrame } from './run-frame-dom.js';
 
 function setSelectionData(element: HTMLElement, key: string, value?: string): void {
   if (element.dataset) {
@@ -68,27 +69,10 @@ export function buildPptxTextLayer(
     const key = pptxRunFrameKey(run, transform);
     let shape = shapeMap.get(key);
     if (!shape) {
-      const div = ownerDocument.createElement('div');
-      // The shape frame is placed as a % of the slide box so it tracks the
-      // canvas's actual rendered size; its width/height are % too, so the child
-      // spans (positioned as % of THIS box) scale with it. rotate() is applied to
-      // the %-sized box unchanged — the rotation centre is within the box, so it
-      // composes with the outer scale.
-      div.style.cssText =
-        `position:absolute;` +
-        `left:${overlayPercent(run.shapeX, cssWidth)};top:${overlayPercent(run.shapeY, cssHeight)};` +
-        `width:${overlayPercent(run.shapeW, cssWidth)};height:${overlayPercent(run.shapeH, cssHeight)};` +
-        // DrawingML text may paint beyond its shape rectangle when the body does
-        // not autofit. Match the canvas renderer by keeping those runs selectable;
-        // the outer slide text layer still clips anything past the slide edge.
-        `pointer-events:all;overflow:visible;`;
-      if (transform) {
-        div.style.transformOrigin = 'center center';
-        div.style.transform = transform;
-      }
-      shape = { div, w: run.shapeW, h: run.shapeH };
+      const entry = createPptxRunFrame(ownerDocument, run, cssWidth, cssHeight, 'all', 'visible');
+      shape = entry;
       shapeMap.set(key, shape);
-      layer.appendChild(div);
+      layer.appendChild(entry.div);
     }
 
     const span = ownerDocument.createElement('span');

@@ -22,6 +22,7 @@ import {
 } from '@silurus/ooxml-core';
 import type { PptxTextRunInfo } from './renderer';
 import { pptxRunFrameKey, pptxRunFrameTransform } from './run-frame-transform.js';
+import { createPptxRunFrame } from './run-frame-dom.js';
 
 export interface PptxHighlightMatch {
   slices: MatchRunSlice[];
@@ -72,25 +73,17 @@ export function buildPptxHighlightLayer(
   // The frame is placed as a % of the slide box (so it tracks the scaled canvas)
   // with % width/height too, so the boxes inside (positioned as % of THIS frame)
   // scale with it under the shape's rotate().
+  const ownerDocument = layer.ownerDocument ?? document;
   const shapeMap = new Map<string, { div: HTMLDivElement; w: number; h: number }>();
   const shapeDiv = (run: PptxTextRunInfo): { div: HTMLDivElement; w: number; h: number } => {
     const transform = pptxRunFrameTransform(run);
     const key = pptxRunFrameKey(run, transform);
     let entry = shapeMap.get(key);
     if (!entry) {
-      const div = document.createElement('div');
-      div.style.cssText =
-        `position:absolute;` +
-        `left:${overlayPercent(run.shapeX, cssWidth)};top:${overlayPercent(run.shapeY, cssHeight)};` +
-        `width:${overlayPercent(run.shapeW, cssWidth)};height:${overlayPercent(run.shapeH, cssHeight)};` +
-        `pointer-events:none;overflow:hidden;`;
-      if (transform) {
-        div.style.transformOrigin = 'center center';
-        div.style.transform = transform;
-      }
-      entry = { div, w: run.shapeW, h: run.shapeH };
+      const frame = createPptxRunFrame(ownerDocument, run, cssWidth, cssHeight, 'none', 'hidden');
+      entry = frame;
       shapeMap.set(key, entry);
-      layer.appendChild(div);
+      layer.appendChild(frame.div);
     }
     return entry;
   };
@@ -104,7 +97,7 @@ export function buildPptxHighlightLayer(
       const { x, width } = sliceHorizontalExtent(run.text, slice.start, slice.end, measure);
       if (width <= 0) continue;
       const shape = shapeDiv(run);
-      const box = document.createElement('div');
+      const box = ownerDocument.createElement('div');
       // Placed as a % of the shape frame (shapeW/shapeH), so the box scales with
       // the frame when the whole overlay is scaled down by external CSS.
       box.style.cssText =

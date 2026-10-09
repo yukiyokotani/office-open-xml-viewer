@@ -29,6 +29,7 @@
     "./testing": "./src/testing/index.ts",
     "./internal/bounded-async-lru-cache": "./src/internal/bounded-async-lru-cache.ts",
     "./internal/bounded-raw-part-cache": "./src/internal/bounded-raw-part-cache.ts",
+    "./internal/canvas-clip": "./src/internal/canvas-clip.ts",
     "./internal/canvas-viewer-mechanics": "./src/internal/canvas-viewer-mechanics.ts",
     "./internal/chart-context": "./src/internal/chart-context.ts",
     "./internal/chart-ex-renderer": "./src/chart/chart-ex-renderer.ts",

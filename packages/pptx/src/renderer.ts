@@ -1,3 +1,4 @@
+import { clipCanvasHorizontally } from '@silurus/ooxml-core/internal/canvas-clip';
 import { FONT_TRACKING_SENTINEL, FONT_BASELINE_SENTINEL, FONT_SPACE_SENTINEL } from '@silurus/ooxml-core/internal/font-measurement-sentinels';
 import { preparedPowerPointText } from './font-display-text.js';
 import { pptxSlideCjkFallback } from './google-fonts.js';
@@ -279,6 +280,14 @@ export interface PptxTextRunInfo {
    * selection, search, or serialization.
    */
   tableCell?: Readonly<{ row: number; column: number }>;
+  /** Cell-owned physical x-axis overflow, normalized so an omitted
+   * `horzOverflow` is `clip`. Present only for table-cell runs of an effective
+   * horizontal body (so never with textBodyRotation); its absence never implies
+   * clipping, even with tableCell. shapeX/Y/W/H describe the same cell paint
+   * frame. Logical text remains complete, so worker/search consumers clip
+   * visible geometry without losing it.
+   */
+  cellHorzOverflow?: 'clip' | 'overflow';
   /**
    * Additional rotation from a vertical text body (`vert="vert"` → 90,
    * `vert="vert270"` → -90). The CSS overlay must add this to `rotation`.
@@ -7294,6 +7303,7 @@ export function renderTable(
   // paint-only renders avoid frame trigonometry. A single callback reads the
   // current synchronous cell state, avoiding one closure allocation per cell.
   let tableTextRun: TextRunCallback | undefined;
+  let cellHorzOverflow: 'clip' | 'overflow' | undefined;
   let textRunCell: Readonly<{ row: number; column: number }> = { row: 0, column: 0 };
   if (onTextRun) {
     // The canvas rotates/flips the complete graphic frame around the authored
@@ -7325,6 +7335,7 @@ export function renderTable(
         ...(el.flipH ? { shapeFlipH: true } : {}),
         ...(el.flipV ? { shapeFlipV: true } : {}),
         tableCell: textRunCell,
+        ...(cellHorzOverflow === undefined ? {} : { cellHorzOverflow }),
       });
     };
   }
@@ -7413,23 +7424,40 @@ export function renderTable(
         textRunCell = { row: ri, column: ci };
       }
       const cellDefaultColor = cell.textColor ? hexToRgba(cell.textColor) : null;
-      renderTextBody(
-        ctx,
-        tableTextBody(cell.textBody),
-        colX,
-        rowY,
-        cellW,
-        cellH,
-        scale,
-        cellDefaultColor,
-        0,
-        false,
-        false,
-        '#000000',
-        slideNumber,
-        rc,
-        tableTextRun,
-      );
+      // ECMA-376 §21.1.3.17/§20.1.10.69 and the schema default: cells clip
+      // horizontal overflow unless explicitly enabled. The interval belongs to
+      // the physical merged-cell frame, inside the graphic-frame transform. Keep
+      // the existing vertical overflow, row measurements and shape text policy.
+      // Library policy: admit only an effective horizontal body (tcPr@vert,
+      // already folded into body.vert, omitted or `horz`). How the physical x
+      // interval maps onto rotated, stacked or unknown directions is not settled
+      // here, so those bodies keep their previous unclipped paint and overlays.
+      const vert: string | undefined = cell.textBody.vert;
+      cellHorzOverflow = vert !== undefined && vert !== 'horz' ? undefined
+        : cell.horzOverflow === 'overflow' ? 'overflow' : 'clip';
+      ctx.save();
+      try {
+        if (cellHorzOverflow === 'clip') clipCanvasHorizontally(ctx, colX, cellW);
+        renderTextBody(
+          ctx,
+          tableTextBody(cell.textBody),
+          colX,
+          rowY,
+          cellW,
+          cellH,
+          scale,
+          cellDefaultColor,
+          0,
+          false,
+          false,
+          '#000000',
+          slideNumber,
+          rc,
+          tableTextRun,
+        );
+      } finally {
+        ctx.restore();
+      }
     }
   }
 

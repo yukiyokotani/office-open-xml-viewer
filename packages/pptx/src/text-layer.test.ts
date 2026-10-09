@@ -188,3 +188,39 @@ describe('buildPptxTextLayer (extracted from PptxViewer._buildTextLayer)', () =>
     expect(shapeDiv.style.transform ?? '').toBe('');
   });
 });
+
+describe('physical table-cell horizontal clip in overlays', () => {
+  it('clips the cell x axis inside the frame transform and retains vertical overflow', () => {
+    vi.stubGlobal('document', { createElement: makeEl });
+    const layer = makeEl('div');
+    const clipped = run({ text: 'partially clipped', cellHorzOverflow: 'clip',
+      tableCell: { row: 0, column: 0 }, shapeW: 60, shapeH: 80, rotation: 30, shapeFlipH: true });
+    buildPptxTextLayer(layer as unknown as HTMLDivElement, [clipped], 720, 540);
+    const frame = layer.children[0];
+    expect(frame.style.overflowX).toBe('clip');
+    expect(frame.style.overflowY).toBe('visible');
+    expect(frame.style.transform).toBe('rotate(30deg) scale(-1, 1)');
+    expect(frame.children[0].textContent).toBe('partially clipped');
+  });
+
+  it('keeps the shape-frame overlay for a vertical table-cell run without cell overflow', () => {
+    vi.stubGlobal('document', { createElement: makeEl });
+    const layer = makeEl('div');
+    buildPptxTextLayer(layer as unknown as HTMLDivElement, [run({ text: 'V',
+      tableCell: { row: 0, column: 0 }, rotation: 30, textBodyRotation: 90 })], 720, 540);
+    const frame = layer.children[0];
+    expect(frame.style.overflow).toBe('visible');
+    expect(frame.style.overflowX).toBeUndefined();
+    expect(frame.style.transform).toBe('rotate(120deg)');
+    expect(frame.children[0].textContent).toBe('V');
+  });
+
+  it('does not constrain an explicitly overflowing cell overlay', () => {
+    vi.stubGlobal('document', { createElement: makeEl });
+    const layer = makeEl('div');
+    buildPptxTextLayer(layer as unknown as HTMLDivElement,
+      [run({ cellHorzOverflow: 'overflow' })], 720, 540);
+    expect(layer.children[0].style.overflow).toBe('visible');
+    expect(layer.children[0].style.overflowX).not.toBe('clip');
+  });
+});
