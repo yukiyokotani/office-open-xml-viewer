@@ -10,7 +10,7 @@ import type { NormalizedOoxmlResourcePolicy } from '@silurus/ooxml-core/worker';
 import type { PullSessionIdentity } from '@silurus/ooxml-core/worker';
 import { GridGeometry } from './internal/grid-geometry.js';
 import { inheritColumnCssWidths, setColumnCssWidth } from './internal/column-css-overrides.js';
-import { inheritRowResizeRanges, setRowResizeRanges, validateRowResizeRanges,
+import { inheritRowResizeRanges, setRowResizeRanges,
   type RowResizeRange } from './internal/row-resize-overrides.js';
 import {
   bindInitialAnchorSizes,
@@ -58,9 +58,10 @@ export interface WireSizeOverrides {
  */
 export function applySizeOverrides(ws: Worksheet, overrides: WireSizeOverrides | undefined): void {
   if (!overrides) return;
-  if (overrides.rowHeightRanges) validateRowResizeRanges(overrides.rowHeightRanges);
   let changed = false;
   if (overrides.rowHeightRanges) {
+    // The setter validates the complete range set before installing metadata,
+    // and runs before any point mutation. Avoid scanning every interval twice.
     setRowResizeRanges(ws, overrides.rowHeightRanges);
     changed = true;
   }
