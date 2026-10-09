@@ -3,7 +3,7 @@ import { baseColWidthToPx, colWidthToPx, rowHeightToPx, uiColWidthToPx } from '.
 import { isMacDesktop } from './platform.js';
 import { GridAxisGeometry } from './grid-axis-geometry.js';
 import { columnCssWidths } from './column-css-overrides.js';
-import { rowResizeRanges, rowResizeContains } from './row-resize-overrides.js';
+import { rowResizeRanges, rowResizeContains } from './worksheet-size-context.js';
 
 export { GridAxisGeometry } from './grid-axis-geometry.js';
 

@@ -41,6 +41,19 @@ export function rowResizeRanges(ws: Worksheet): readonly RowResizeRange[] {
   return sizes.get(ws)?.rows ?? emptyRows;
 }
 
+/** Read-side interval membership is shared by geometry and automatic heights.
+ * It lives with projection metadata, keeping renderers independent of the
+ * viewer gesture sweep algorithm. */
+export function rowResizeContains(ranges: readonly Readonly<{ first: number; last: number }>[], index: number): boolean {
+  let low = 0, high = ranges.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (ranges[middle].first <= index) low = middle + 1;
+    else high = middle;
+  }
+  return low > 0 && ranges[low - 1].last >= index;
+}
+
 // View-only resource policy: bound interval fragmentation, not selected row
 // count. One interval can resize all 1,048,576 worksheet rows. Hidden rows are
 // excluded at gesture start; subsequent size-0 point edits still win in geometry.

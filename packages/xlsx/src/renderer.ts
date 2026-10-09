@@ -46,7 +46,7 @@ import {
   type CoordinateIndexIdentity,
 } from './renderer-coordinate-index.js';
 import { GridGeometry, MAX_WORKSHEET_COL } from './internal/grid-geometry.js';
-import { rowResizeRanges, rowResizeContains } from './internal/row-resize-overrides.js';
+import { rowResizeRanges, rowResizeContains } from './internal/worksheet-size-context.js';
 import type { GridAxisGeometry } from './internal/grid-axis-geometry.js';
 import { resolveWorksheetAnchorRect } from './internal/initial-anchor-sizes.js';
 import { isOptionalImageUnavailable } from './internal/optional-image-fallback.js';

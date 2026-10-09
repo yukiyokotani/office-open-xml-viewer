@@ -5,16 +5,6 @@ export { rowResizeRanges, setRowResizeRanges, MAX_ROW_RESIZE_INTERVALS,
 export type RowBandRange = Readonly<{ first: number; last: number }>;
 export type RowResizePreview = Readonly<{ apply(height: number): void; rollback(): void }>;
 
-export function rowResizeContains(ranges: readonly RowBandRange[], index: number): boolean {
-  let low = 0, high = ranges.length;
-  while (low < high) {
-    const middle = (low + high) >>> 1;
-    if (ranges[middle].first <= index) low = middle + 1;
-    else high = middle;
-  }
-  return low > 0 && ranges[low - 1].last >= index;
-}
-
 /** Overlay a uniform gesture on a canonical prior set. Sweep boundaries rather
  * than row ordinals; later overlapping edits win and equal neighbours coalesce.
  * Build and validate the complete candidate before installing any state. */
