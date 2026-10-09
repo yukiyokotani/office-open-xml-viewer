@@ -301,6 +301,7 @@ impl Store {
             pic_bullet_mime_type: None,
             pic_bullet_width_pt: None,
             pic_bullet_height_pt: None,
+            pic_bullet_transform: None,
         })
     }
 }

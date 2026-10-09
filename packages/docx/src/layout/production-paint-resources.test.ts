@@ -82,6 +82,29 @@ function documentModel(): DocxDocumentModel {
 }
 
 describe('production paint resources', () => {
+  it('preserves picture-bullet carrier transforms without changing its explicit box', () => {
+    const owner = paragraph([]);
+    const transform = {
+      srcRect: { l: .25, t: .125, r: 0, b: .25 },
+      rotation: 90, flipH: true, flipV: false,
+    };
+    owner.numbering!.picBulletTransform = transform;
+    const doc = { section, headers: {}, footers: {}, body: [owner] } as DocxDocumentModel;
+    const registry = layoutSourceStore(doc).paintResources;
+    const key = imageResourceKey(
+      { story: 'body', storyInstance: 'body', path: [0] }, 'word/media/bullet.gif',
+    );
+    expect(registry.resolve(key, 'picture-bullet')).toMatchObject({
+      intrinsicSize: { widthPt: 6, heightPt: 7 },
+      srcRect: { l: .25, t: .125, r: 0, b: .25 },
+      rotation: 90, flipH: true, flipV: false,
+    });
+    transform.srcRect.l = .5;
+    expect(registry.resolve(key, 'picture-bullet')).toMatchObject({
+      srcRect: { l: .25 },
+    });
+  });
+
   it('builds clone-safe descriptors with the same structural keys as retained layout', () => {
     const registry = layoutSourceStore(documentModel()).paintResources;
     const body = { story: 'body' as const, storyInstance: 'body', path: [0] };

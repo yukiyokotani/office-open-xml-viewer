@@ -15,6 +15,63 @@ pub(in crate::doc) struct DirectInlinePicture {
     pub flip_v: bool,
 }
 
+/// Occurrence geometry is distinct from the shared carrier. PbiGrf chooses
+/// whether a consumer resizes to following text; it does not specify that
+/// metric. Neither AUTO nor FIXED is inferred from PICMID goal/scale here.
+#[derive(Debug, PartialEq)]
+#[allow(
+    dead_code,
+    reason = "native marker sizing consumer remains unsupported"
+)]
+pub(in crate::doc) struct DirectPictureBullet {
+    pub picture: DirectInlinePicture,
+    pub no_auto_size: bool,
+}
+
+impl DirectPictureBullet {
+    /// Attach a resolved occurrence to the shared model without modifying the
+    /// numbering cascade's font facts. Layout and paint then use the same box.
+    #[allow(
+        dead_code,
+        reason = "native marker sizing consumer remains unsupported"
+    )]
+    pub(in crate::doc) fn install(
+        self,
+        numbering: &mut docx_model::NumberingInfo,
+        remaining_bytes: &mut usize,
+    ) -> Result<(), String> {
+        if numbering.pic_bullet_image_path.is_some()
+            || numbering.pic_bullet_mime_type.is_some()
+            || numbering.pic_bullet_width_pt.is_some()
+            || numbering.pic_bullet_height_pt.is_some()
+            || numbering.pic_bullet_transform.is_some()
+        {
+            return Err(unsupported(
+                "Word picture bullet model is already populated",
+            ));
+        }
+        let mime_type = self.picture.mime_type.to_string();
+        // Check capacity before handing over the retained strings, but leave
+        // their single charge to payload::paragraph_metadata alongside the
+        // NumberingInfo allocation. The projection is a temporary stack value.
+        remaining_bytes
+            .checked_sub(self.picture.resource_key.capacity())
+            .and_then(|remaining| remaining.checked_sub(mime_type.capacity()))
+            .ok_or("OUTPUT_TOO_LARGE")?;
+        numbering.pic_bullet_image_path = Some(self.picture.resource_key);
+        numbering.pic_bullet_mime_type = Some(mime_type);
+        numbering.pic_bullet_width_pt = Some(self.picture.width_pt);
+        numbering.pic_bullet_height_pt = Some(self.picture.height_pt);
+        numbering.pic_bullet_transform = Some(docx_model::PictureBulletTransform {
+            src_rect: self.picture.crop,
+            rotation: self.picture.rotation,
+            flip_h: self.picture.flip_h,
+            flip_v: self.picture.flip_v,
+        });
+        Ok(())
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct DirectPictureResource {
     pub key: String,
@@ -24,7 +81,75 @@ pub(crate) struct DirectPictureResource {
 
 impl Store<'_> {
     pub(in crate::doc) fn has_selected_direct_resources(&self) -> bool {
-        !self.part_offsets.is_empty()
+        !self.part_offsets.is_empty() || !self.bullet_offsets.is_empty()
+    }
+
+    /// Project an acquired carrier using an explicitly resolved occurrence
+    /// box. This boundary preserves OfficeArt transforms and selects media;
+    /// it cannot establish the native AUTO metric or a FIXED display size.
+    /// The story consumer must retain its atomic refusal until it can supply
+    /// a source-justified box, rather than passing stored or nominal-font size.
+    #[allow(
+        dead_code,
+        reason = "native marker sizing consumer remains unsupported"
+    )]
+    pub(in crate::doc) fn direct_picture_bullet(
+        &mut self,
+        formatting: &mut super::super::formatting::Formatting<'_>,
+        bullet: super::super::character::EnabledPictureBullet,
+        display_box: [f64; 2],
+        remaining_bytes: &mut usize,
+    ) -> Result<DirectPictureBullet, String> {
+        if !display_box
+            .iter()
+            .all(|value| value.is_finite() && *value > 0.0)
+        {
+            return Err(unsupported("invalid Word picture bullet display box"));
+        }
+        if self.occurrences >= 1_000_000 {
+            return Err(unsupported("Word picture occurrence budget exceeded"));
+        }
+        let picture = self.acquire_picture_bullet(formatting, bullet)?;
+        if picture.crop[0] + picture.crop[1] >= 100_000
+            || picture.crop[2] + picture.crop[3] >= 100_000
+        {
+            return Err(unsupported("empty Word picture bullet crop"));
+        }
+        let offset = picture.offset;
+        let resource_key = bullet_key(offset);
+        let mime_type = mime(picture.image.extension)?;
+        let required = resource_key
+            .capacity()
+            .checked_add(mime_type.len())
+            .ok_or("OUTPUT_TOO_LARGE")?;
+        remaining_bytes
+            .checked_sub(required)
+            .ok_or("OUTPUT_TOO_LARGE")?;
+        let [top, bottom, left, right] = picture.crop;
+        let crop = (picture.crop != [0; 4]).then_some(ooxml_common::blip::SrcRect {
+            l: left as f64 / 100_000.0,
+            t: top as f64 / 100_000.0,
+            r: right as f64 / 100_000.0,
+            b: bottom as f64 / 100_000.0,
+        });
+        let result = DirectPictureBullet {
+            picture: DirectInlinePicture {
+                resource_key,
+                mime_type,
+                width_pt: display_box[0],
+                height_pt: display_box[1],
+                crop,
+                rotation: picture.rotation as f64 / 60_000.0,
+                flip_h: picture.flip[0],
+                flip_v: picture.flip[1],
+            },
+            no_auto_size: bullet.flags.no_auto_size,
+        };
+        // The shared paragraph payload owns and charges retained key/MIME
+        // strings. Do not charge them a second time during projection.
+        self.occurrences += 1;
+        self.bullet_offsets.insert(offset);
+        Ok(result)
     }
 
     /// Select an occurrence for one direct document result. Direct production
@@ -78,11 +203,23 @@ impl Store<'_> {
     }
 
     pub(in crate::doc) fn finish_referenced_direct_resources(
-        self,
+        mut self,
         references: &[&str],
         remaining_bytes: &mut usize,
     ) -> Result<Vec<DirectPictureResource>, String> {
         for reference in references {
+            if let Some(suffix) = reference.strip_prefix("legacy-doc/bullet/") {
+                let offset = suffix
+                    .parse::<usize>()
+                    .map_err(|_| unsupported("invalid direct DOC picture bullet resource key"))?;
+                if bullet_key(offset) != *reference
+                    || !self.bullet_offsets.contains(&offset)
+                    || !self.bullets.contains_key(&offset)
+                {
+                    return Err(unsupported("dangling direct DOC picture bullet resource"));
+                }
+                continue;
+            }
             let Some(suffix) = reference.strip_prefix("legacy-doc/image/") else {
                 continue;
             };
@@ -96,13 +233,64 @@ impl Store<'_> {
                 return Err(unsupported("dangling direct DOC inline picture resource"));
             }
         }
-        self.finish_direct_resources_with(
+        let bullets = std::mem::take(&mut self.bullets);
+        let mut resources = self.finish_direct_resources_with(
             |offset| {
                 let value = key(offset);
                 references.binary_search(&value.as_str()).is_ok()
             },
             remaining_bytes,
-        )
+        )?;
+        for (offset, picture) in bullets {
+            let key = bullet_key(offset);
+            if references.binary_search(&key.as_str()).is_err() {
+                continue;
+            }
+            let mime_type = mime(picture.image.extension)?;
+            let image_bytes = match &picture.image.bytes {
+                std::borrow::Cow::Borrowed(bytes) => bytes.len(),
+                std::borrow::Cow::Owned(bytes) => bytes.capacity(),
+            };
+            let required = key
+                .capacity()
+                .checked_add(image_bytes)
+                .ok_or("OUTPUT_TOO_LARGE")?;
+            *remaining_bytes = remaining_bytes
+                .checked_sub(required)
+                .ok_or("OUTPUT_TOO_LARGE")?;
+            let capacity = resources.capacity();
+            resources
+                .try_reserve_exact(1)
+                .map_err(|_| "OUTPUT_TOO_LARGE".to_string())?;
+            let excess = resources
+                .capacity()
+                .saturating_sub(capacity)
+                .checked_mul(std::mem::size_of::<DirectPictureResource>())
+                .ok_or("OUTPUT_TOO_LARGE")?;
+            *remaining_bytes = remaining_bytes
+                .checked_sub(excess)
+                .ok_or("OUTPUT_TOO_LARGE")?;
+            let bytes = match picture.image.bytes {
+                std::borrow::Cow::Owned(bytes) => bytes,
+                std::borrow::Cow::Borrowed(source) => {
+                    let mut bytes = Vec::new();
+                    bytes
+                        .try_reserve_exact(source.len())
+                        .map_err(|_| "OUTPUT_TOO_LARGE".to_string())?;
+                    *remaining_bytes = remaining_bytes
+                        .checked_sub(bytes.capacity().saturating_sub(source.len()))
+                        .ok_or("OUTPUT_TOO_LARGE")?;
+                    bytes.extend_from_slice(source);
+                    bytes
+                }
+            };
+            resources.push(DirectPictureResource {
+                key,
+                mime_type,
+                bytes,
+            });
+        }
+        Ok(resources)
     }
 
     #[cfg(test)]
@@ -190,6 +378,10 @@ impl Store<'_> {
 
 fn key(offset: usize) -> String {
     format!("legacy-doc/image/{offset}")
+}
+
+fn bullet_key(offset: usize) -> String {
+    format!("legacy-doc/bullet/{offset}")
 }
 
 /// The passive BLIP reader admits PNG/JPEG rasters and validated EMF/WMF

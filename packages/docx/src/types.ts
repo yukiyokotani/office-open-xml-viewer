@@ -737,6 +737,9 @@ export interface NumberingInfo {
   picBulletWidthPt?: number;
   /** Picture-bullet marker height in pt (from the `<v:shape style="height">`). */
   picBulletHeightPt?: number;
+  /** Carrier transforms painted within the resolved marker box. They do not
+   *  determine its size or the font governing native AUTO sizing. */
+  picBulletTransform?: Pick<ImageRun, 'srcRect' | 'rotation' | 'flipH' | 'flipV'>;
 }
 
 type DocRunContent =

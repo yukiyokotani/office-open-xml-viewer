@@ -166,6 +166,7 @@ function collectDescriptorCandidates(
       addImage(
         'picture-bullet', source, numbering.picBulletImagePath,
         numbering.picBulletMimeType, widthPt, heightPt,
+        numbering.picBulletTransform,
       );
     }
     const acquiredRuns = acquisitionInputs?.paragraphAcquisitionInput(paragraph, source).runs

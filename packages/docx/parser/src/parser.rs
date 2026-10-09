@@ -5943,6 +5943,7 @@ fn resolve_numbering_marker(
         pic_bullet_mime_type,
         pic_bullet_width_pt,
         pic_bullet_height_pt,
+        pic_bullet_transform: None,
     })
 }
 
