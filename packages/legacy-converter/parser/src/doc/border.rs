@@ -132,10 +132,21 @@ impl Border {
             25 => "threeDEngrave",
             26 => "outset",
             27 => "inset",
+            // MS-DOC 2.9.22 lists 0xFF as "MUST be ignored". It is not
+            // an undefined type or a no-border style. This projection cannot
+            // preserve an ignored assignment separately from an authored
+            // clear while resolving inherited edges, so retain the unsupported
+            // gate until that carrier-aware behavior is implemented. The exact
+            // Nil sentinel was handled before interpreting these fields.
+            0xff => {
+                return Err(unsupported(
+                    "unsupported Word border type 0xFF ignore semantics",
+                ))
+            }
             // MS-DOC 2.9.22: image (art) borders 0x40..=0xE3 are valid only
-            // for page borders; 0x02, 0x04 and every other value is undefined.
+            // for page borders; 0x02, 0x04 and other unlisted values are undefined.
             // A Brc is a NilBrc only when its last four bytes are 0xFFFFFFFF
-            // (2.9.20), so an all-0xFF type with other flag bytes stays here.
+            // (2.9.20); masking reserved bits cannot expand that sentinel.
             0x40..=0xe3 => {
                 return Err(unsupported(format!(
                     "Word image border type 0x{kind:02X} outside a page border"
@@ -340,13 +351,17 @@ mod tests {
         }
     }
     #[test]
-    fn undefined_and_page_only_border_types_are_rejected_precisely() {
-        // A near-Nil Brc: cv and type 0xFF but flag bytes that are not the
-        // NilBrc sentinel. brcType 0xFF is not a BrcType.
-        let error = Border::read(&[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xe0, 0xff], false)
+    fn unsupported_ignored_and_undefined_border_types_are_distinguished() {
+        // An invented Brc with one reserved bit cleared from the exact Nil
+        // discriminator. Reserved-bit masking must not turn it into Nil;
+        // its recognized ignored-type marker is not an undefined BrcType.
+        let error = Border::read(&[0x12, 0x34, 0x56, 0, 0xff, 0xff, 0xff, 0x7f], false)
             .err()
             .unwrap();
-        assert!(error.contains("undefined Word border type 0xFF"), "{error}");
+        assert!(
+            error.contains("unsupported Word border type 0xFF ignore semantics"),
+            "{error}"
+        );
         for (kind, expected) in [
             (0x02, "undefined Word border type 0x02"),
             (0x04, "undefined Word border type 0x04"),
