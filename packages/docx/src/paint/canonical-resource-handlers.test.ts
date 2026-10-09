@@ -78,6 +78,7 @@ describe('canonical Canvas paint resource handlers', () => {
         pageWidth: 612, pageHeight: 792,
         marginTop: 72, marginRight: 72, marginBottom: 72, marginLeft: 72,
         headerDistance: 36, footerDistance: 36,
+        titlePage: false, evenAndOddHeaders: false,
       },
       headers: {}, footers: {},
       body: [{
