@@ -1407,6 +1407,7 @@ export function naturalWidthExceedsBbox(
   rPad: number,
   scale: number,
   rc: RenderContext,
+  slideNumber?: number,
 ): boolean {
   const bodyDefaultFontPx = (body.defaultFontSize ?? 18) * PT_TO_EMU * scale;
   for (const para of body.paragraphs) {
@@ -1418,28 +1419,27 @@ export function naturalWidthExceedsBbox(
     // passes use, so the measurement can't disagree with what actually renders.
     const firstLineIndent = firstLineIndentPxFor(paragraphHasBullet(para), indentPx);
     const textMaxW = bw - lPad - rPad - marLPx - marRPx - firstLineIndent;
+    // Measure the input runs that layoutParagraph breaks and paint draws, so
+    // each character is measured in its own font slot (ea/cs/sym faces and
+    // their application defaults), not in the run's Latin face.
+    const { input } = paragraphInputRuns(
+      para,
+      para.defFontSize != null ? para.defFontSize * PT_TO_EMU * scale : bodyDefaultFontPx,
+      '', scale, body.defaultBold ?? false, body.defaultItalic ?? false, 1, slideNumber, rc,
+    );
     let lineW = 0;
-    for (const run of para.runs) {
-      if (run.type !== 'text') continue;
-      const sizePx = run.fontSize != null
-        ? run.fontSize * PT_TO_EMU * scale
-        : (para.defFontSize != null
-            ? para.defFontSize * PT_TO_EMU * scale
-            : bodyDefaultFontPx);
-      const family = normalizeFontFamily(run.fontFamily ?? para.defFontFamily ?? null, rc);
-      const isBold = run.bold ?? para.defBold ?? body.defaultBold ?? false;
-      const isItalic = run.italic ?? para.defItalic ?? body.defaultItalic ?? false;
-      ctx.font = buildFont(
-        isBold,
-        isItalic,
-        baselineDrawSizePx(sizePx, run.baseline ?? undefined),
-        family,
-        rc,
-        run.text,
-        hasNamedFontFamily(run.fontFamily ?? para.defFontFamily),
-      );
-      const letterSpacingPx = (run.letterSpacing ?? 0) * PT_TO_EMU * scale;
-      lineW += measureTextAdvance(ctx, run.text, letterSpacingPx);
+    let previous: LayoutSegment | undefined;
+    for (const item of input) {
+      if (item.type !== 'text') {
+        previous = undefined;
+        continue;
+      }
+      ctx.font = item.style.font;
+      const letterSpacingPx = item.style.letterSpacingPx ?? 0;
+      lineW += measureTextAdvance(ctx, item.text, letterSpacingPx);
+      // A run split at a font-slot seam keeps the spacing between its parts.
+      if (previous?.sourceRunId === item.style.sourceRunId) lineW += letterSpacingPx;
+      previous = item.style;
       if (lineW > textMaxW) return true;
     }
   }
@@ -1543,6 +1543,8 @@ export function paragraphInputRuns(
   fontScale: number,
   slideNumber: number | undefined,
   rc: RenderContext,
+  /** Horizontal layout only: see {@link powerPointKinsokuAcrossRuns}. */
+  quoteSeams = false,
 ): {
   input: DrawingMlInputRun<LayoutSegment>[];
   sameStyle: (a: LayoutSegment, b: LayoutSegment) => boolean;
@@ -1732,6 +1734,8 @@ export function paragraphInputRuns(
     // in PowerPoint's application default (issue #1627).
     let clusterStart = 0;
     let emitted = false;
+    let lastCluster = '';
+    const runQuoteSeams = quoteSeams && QUOTE_SEAM_LANG_RE.test(run.lang ?? '');
     while (clusterStart < rawText.length) {
       const clusterEnd = Math.min(boundaryFrom(runOffset + clusterStart + 1), runEnd) - runOffset;
       const cluster = rawText.slice(clusterStart, clusterEnd);
@@ -1757,11 +1761,19 @@ export function paragraphInputRuns(
         share = undefined;
         face = mapped === ch ? symbolFamily : 'sans-serif';
       }
-      if (group && (font !== groupFont || share !== groupShare)) emitGroup();
+      // A Latin-slot curly quote next to an ideograph is a slot seam even when
+      // both slots resolve to this font, in the measured en-US/ja-JP runs only
+      // (see QUOTE_SEAM_LANG_RE). The pieces keep one style, so measure and
+      // paint coalesce them; only the break phase sees the seam.
+      const quoteSeam = runQuoteSeams && (
+        (isKinsokuQuote(cluster) && isKinsokuIdeograph(lastCluster))
+        || (isKinsokuQuote(lastCluster) && isKinsokuIdeograph(cluster)));
+      if (group && (font !== groupFont || share !== groupShare || quoteSeam)) emitGroup();
       group += glyph;
       groupFont = font;
       groupShare = share;
       groupFamily = face;
+      lastCluster = cluster;
     }
     emitGroup();
     if (emitted) {
@@ -1804,22 +1816,33 @@ export function paragraphInputRuns(
  * two-run case breaks like its one-run twin. Under ja-JP, an opening quote
  * never ends a line and a closing quote never starts one, even at the seam.
  * Under en-US, neither rule applies to the quotes. Our curly quotes paint in
- * the Latin slot, so they sit behind a slot seam in both languages.
- * Limits: only the observed curly-quote/ideograph seams where both runs are
- * Japanese join; other punctuation keeps its old boundary. Retraction never
- * crosses another seam unless that seam meets this same rule. Other East
- * Asian languages, mixed-language seams, and
- * runs without lang keep the seam boundary, as C08 observed. Vertical
- * (stacked) text and XLSX shapes have no such controls and are not wired.
+ * the Latin slot, so they sit behind a slot seam in both languages; the
+ * horizontal input adapter keeps that seam even when the Latin and East Asian
+ * faces resolve to one font, so the language alone decides it. Limits: only
+ * the observed curly-quote/ideograph seams where both runs are Japanese join;
+ * other punctuation keeps its old boundary. Retraction never crosses another
+ * seam unless that seam meets this same rule. Other East Asian languages,
+ * mixed-language seams, and runs without lang keep the seam boundary, as C08
+ * observed. Vertical (stacked) text and XLSX shapes have no such controls and
+ * are not wired.
  */
 const JAPANESE_LANG_RE = /^ja(?:[-_]|$)/i;
+/** The one-face quote seam is added only for the two run languages the
+ * controls measured, compared case-insensitively. Any other or absent lang
+ * keeps one segment, so its quotes keep the in-run kinsoku they had before. */
+const QUOTE_SEAM_LANG_RE = /^(?:en-US|ja-JP)$/i;
+function isKinsokuQuote(text: string): boolean {
+  return text === '“' || text === '”';
+}
+function isKinsokuIdeograph(text: string): boolean {
+  return /^\p{Script=Han}/u.test(text);
+}
 function powerPointKinsokuAcrossRuns(
   left: LayoutSegment, right: LayoutSegment, leftText: string, rightText: string,
 ): boolean {
-  const quote = (text: string) => text === '“' || text === '”';
-  const ideograph = (text: string) => /^\p{Script=Han}/u.test(text);
   return JAPANESE_LANG_RE.test(left.lang ?? '') && JAPANESE_LANG_RE.test(right.lang ?? '')
-    && ((quote(leftText) && ideograph(rightText)) || (ideograph(leftText) && quote(rightText)));
+    && ((isKinsokuQuote(leftText) && isKinsokuIdeograph(rightText))
+      || (isKinsokuIdeograph(leftText) && isKinsokuQuote(rightText)));
 }
 
 /**
@@ -1844,7 +1867,7 @@ export function layoutParagraph(
   firstLineIndentPx: number = 0,
 ): LayoutLine[] {
   const { input, sameStyle, breakMarks } = paragraphInputRuns(
-    para, defaultFontSizePx, defaultColor, scale, defaultBold, defaultItalic, fontScale, slideNumber, rc,
+    para, defaultFontSizePx, defaultColor, scale, defaultBold, defaultItalic, fontScale, slideNumber, rc, true,
   );
   const marRPx = emuToPx(para.marR, scale);
   const broken = breakDrawingMlText(input, {
@@ -4605,7 +4628,7 @@ export function renderTextBody(
   const baseDoWrap = body.wrap !== 'none';
   const isSpAutoFit = body.autoFit === 'sp';
   const doWrap = isSpAutoFit
-    ? (baseDoWrap && naturalWidthExceedsBbox(ctx, body, bw, lPad, rPad, scale, rc))
+    ? (baseDoWrap && naturalWidthExceedsBbox(ctx, body, bw, lPad, rPad, scale, rc, slideNumber))
     : baseDoWrap;
   // ECMA-376 §20.1.10.34 numCol — distribute paragraphs across N text columns.
   const numCol = Math.max(1, body.numCol ?? 1);

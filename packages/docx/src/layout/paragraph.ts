@@ -2057,14 +2057,28 @@ function textPlanSegment(
     };
   });
   if (segment.latinSpaceCompressionPx && segment.text.endsWith(' ') && clusters.length > 0) {
-    // The fit projection removes only the final invisible U+0020 advance.
-    // Keep retained cluster geometry inside the same shortened segment box;
+    // The fit projections remove only the segment's trailing invisible U+0020
+    // advances, shrinking each by the same share: one space under
+    // WORD_LATIN_INTERWORD_XAVG_FLOOR, possibly several consecutive ones under
+    // WORD_COMPRESSED_SPACE_LINE_FIT. Take each share from the cluster owning
+    // that space and move later clusters with it, so retained clusters and
+    // source-owned fragments stay inside the same shortened segment box;
     // Canvas paint operations still draw the preceding visible glyph naturally.
-    const last = clusters.length - 1;
-    clusters[last] = {
-      ...clusters[last],
-      advancePt: Math.max(0, clusters[last].advancePt - segment.latinSpaceCompressionPx),
-    };
+    const spacesStart = sourceOffset + segment.text.replace(/ +$/u, '').length;
+    const perSpacePt = segment.latinSpaceCompressionPx
+      / (sourceOffset + segment.text.length - spacesStart);
+    let removedPt = 0;
+    clusters = clusters.map((cluster) => {
+      const spaces = Math.max(0, cluster.range.end - Math.max(cluster.range.start, spacesStart));
+      if (spaces === 0 && removedPt === 0) return cluster;
+      const placed = {
+        ...cluster,
+        offset: { ...cluster.offset, xPt: cluster.offset.xPt - removedPt },
+        advancePt: Math.max(0, cluster.advancePt - spaces * perSpacePt),
+      };
+      removedPt += spaces * perSpacePt;
+      return placed;
+    });
   }
   const snapLeadingPadPt = segment.snapGridLeadingPadPx ?? 0;
   let decorationTerminalAdvancePt = segment.measuredWidth
@@ -3329,7 +3343,10 @@ function acquireAnchorOccurrence(
       // reference frame; paragraph ownership already precedes before-spacing.
       // The retained host index owns first-line policy. Distinct physical
       // lines can share a numeric top; equal coordinates do not transfer it.
+      // Only posOffset was measured: translating the frame for wp:align would
+      // also move the line's center/bottom edge, so alignment keeps the line.
       line: hostLineIndex === 0 && options.context.lineGrid.active && outer.run.type === 'image'
+        && outer.run.anchorAcquisitionInput.vertical.choice.kind === 'offset'
         ? { ...line.bounds, yPt: wordGridPictureLineOriginPt(
             line.bounds.yPt, options.placement.startYPt, contentStartYPt,
           ) }
@@ -3985,7 +4002,7 @@ function translateTextBoxStory(
 /**
  * Translation that keeps an aligned anchor's `wp:align` values when spAutoFit
  * gives a text box a fitted extent different from its authored one
- * (ECMA-376 §20.4.3.1 wp:align, §21.1.2.1.3 spAutoFit): the aligned edge
+ * (ECMA-376 §20.4.2.2 wp:align / §20.4.3.2 ST_AlignV, §21.1.2.1.3 spAutoFit): the aligned edge
  * belongs to the drawn extent. A trailing value (`right`/`bottom`, or
  * `inside`/`outside` by page parity) keeps the fitted box's trailing edge on
  * the authored one and `center` keeps the centre. Offsets, percentages and

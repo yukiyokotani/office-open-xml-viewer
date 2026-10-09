@@ -127,6 +127,20 @@ describe('pptx spAutoFit measurement includes DrawingML rPr@spc (§21.1.2.3.9)',
   });
 });
 
+describe('pptx spAutoFit measurement uses the font slot that paints each character', () => {
+  it('measures East Asian text in the run’s a:ea face, as layout and paint do', () => {
+    // Glyphs whose primary face is Meiryo advance 20 px; every other face 10 px.
+    let font = '';
+    const ctx = {
+      get font() { return font; }, set font(v: string) { font = v; },
+      measureText: (s: string) => ({ width: [...s].length * (/px "Meiryo"/.test(font) ? 20 : 10) }),
+    } as unknown as CanvasRenderingContext2D;
+    // Twelve kana paint 240 px in Meiryo, beyond the 185.6 px text width.
+    const para = makePara({ runs: [{ ...run('あ'.repeat(12)), fontFamilyEa: 'Meiryo' }] });
+    expect(naturalWidthExceedsBbox(ctx, makeBody(para), 200, 7.2, 7.2, SCALE, RC)).toBe(true);
+  });
+});
+
 describe('pptx first-line indent: the draw path matches the wrap path for a negative indent (§21.1.2.2.7)', () => {
   it('draws a negative non-bullet first-line indent left of marL', () => {
     // Short single-line text, wrap disabled so only the draw offset is in play.

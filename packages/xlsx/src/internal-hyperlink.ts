@@ -74,8 +74,9 @@ function directCellDestination(
  * A location can be a direct cell/range reference or a defined name. Defined
  * names can themselves refer to another in-scope name (§18.2.5), so resolution
  * is finite and cycle-safe. The worksheet parser supplies workbook-global plus
- * current-sheet-local definitions; later definitions win, matching Excel's
- * local-name shadowing and the existing formula/conditional-format maps.
+ * current-sheet-local definitions, locals last; later definitions win, so a
+ * local name shadows its global twin as in the formula/conditional-format
+ * maps and chart references.
  */
 export function resolveXlsxInternalHyperlink(
   location: string,

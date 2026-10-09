@@ -1182,8 +1182,20 @@ fn parse_workbook_sheets(doc: &roxmltree::Document) -> Vec<SheetMeta> {
 /// Collect `<definedName>` entries from `workbook.xml`. `sheet_index` selects
 /// which names are in scope: workbook-global (no `localSheetId`) plus any
 /// whose `localSheetId` matches the given sheet position.
+///
+/// Office resolves an unqualified name to the worksheet-scoped definition
+/// before the workbook-scoped one, whatever their XML order (Microsoft
+/// support, "Names in formulas": scope,
+/// https://support.microsoft.com/en-us/excel/names-in-formulas).
+/// The model carries no scope, so
+/// workbook names come first and this sheet's local names last, each scope
+/// in XML order; unqualified-name consumers (chart references, CF formulas,
+/// internal hyperlinks) take the last match. A shadowed global is kept: it
+/// belongs to the sheet's name inventory, and a workbook-qualified reference
+/// still names it (qualified-name resolution is not implemented here).
 fn parse_defined_names_for_sheet(doc: &roxmltree::Document, sheet_index: u32) -> Vec<DefinedName> {
-    let mut names = Vec::new();
+    let mut globals = Vec::new();
+    let mut locals = Vec::new();
     for node in doc.descendants() {
         if node.tag_name().name() != "definedName" || !is_x_ns(node.tag_name().namespace()) {
             continue;
@@ -1199,9 +1211,15 @@ fn parse_defined_names_for_sheet(doc: &roxmltree::Document, sheet_index: u32) ->
             None => continue,
         };
         let formula = node.text().unwrap_or("").to_string();
-        names.push(DefinedName { name, formula });
+        let definition = DefinedName { name, formula };
+        if local.is_some() {
+            locals.push(definition);
+        } else {
+            globals.push(definition);
+        }
     }
-    names
+    globals.append(&mut locals);
+    globals
 }
 
 pub(crate) fn resolve_sheet_path(doc: &roxmltree::Document, r_id: &str) -> Option<String> {
@@ -5951,6 +5969,47 @@ mod sheet_visibility_tests {
         assert_eq!(sheets[1].visibility, SheetVisibility::Hidden);
         assert_eq!(sheets[2].visibility, SheetVisibility::VeryHidden);
         assert_eq!(sheets[3].visibility, SheetVisibility::Visible);
+    }
+}
+
+#[cfg(test)]
+mod defined_name_scope_tests {
+    use super::*;
+
+    fn projected(doc: &roxmltree::Document, sheet_index: u32) -> Vec<(String, String)> {
+        parse_defined_names_for_sheet(doc, sheet_index)
+            .into_iter()
+            .map(|dn| (dn.name, dn.formula))
+            .collect()
+    }
+
+    #[test]
+    fn sheet_names_keep_workbook_globals_and_order_current_sheet_locals_last() {
+        // `Rate` is global before its local twin, `Tax` after it. Both
+        // globals stay in the sheet's inventory; the locals follow them.
+        let xml = r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><definedNames><definedName name="Rate">Sheet1!$A$1</definedName><definedName name="rate" localSheetId="0">Sheet1!$B$1</definedName><definedName name="Tax" localSheetId="0">Sheet1!$C$1</definedName><definedName name="Tax">Sheet1!$D$1</definedName><definedName name="Other" localSheetId="1">Sheet2!$A$1</definedName><definedName name="Base">Sheet1!$E$1</definedName></definedNames></workbook>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let pair = |name: &str, formula: &str| (name.to_string(), formula.to_string());
+        assert_eq!(
+            projected(&doc, 0),
+            vec![
+                pair("Rate", "Sheet1!$A$1"),
+                pair("Tax", "Sheet1!$D$1"),
+                pair("Base", "Sheet1!$E$1"),
+                pair("rate", "Sheet1!$B$1"),
+                pair("Tax", "Sheet1!$C$1"),
+            ]
+        );
+        // Another sheet's local names are out of scope; its own come last.
+        assert_eq!(
+            projected(&doc, 1),
+            vec![
+                pair("Rate", "Sheet1!$A$1"),
+                pair("Tax", "Sheet1!$D$1"),
+                pair("Base", "Sheet1!$E$1"),
+                pair("Other", "Sheet2!$A$1"),
+            ]
+        );
     }
 }
 

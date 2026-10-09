@@ -221,6 +221,24 @@ it.each([{ sourceIdentity: undefined }, { sourceIdentity: 'embedded:other-resour
   'rejects a metric without the exact selected resource tuple %j', metric => {
     expect(fixture(undefined, metric).shape(request).spans).toHaveLength(2);
   });
+it('requires every resource sharing the selected Canvas face to cover all or none of the grapheme', () => {
+  const spans = (peer: Partial<ResolvedFontMetric>) => createTextLayoutService({
+    fonts: createFontResolver([{ requestedFamily: 'Alias A', resolvedFamily: 'Shared Face',
+      source: 'local', resourceIdentity: 'provided-sfnt:a', weight: 400, style: 'normal' }]),
+    fontMetrics: {
+      'alias a': { family: 'Shared Face', requestedFamily: 'Alias A', sourceIdentity: 'provided-sfnt:a',
+        weight: 400, style: 'normal', unicodeRanges: [[0x54, 0x54], [0x301, 0x301]] },
+      // CSS family names match case-insensitively; weight/style default to 400/normal.
+      'alias b': { family: 'shared face', requestedFamily: 'Alias B', sourceIdentity: 'provided-sfnt:b', ...peer },
+    },
+    measurer: { fingerprint: 'shared-face', measure: () => ({ advancePt: 6, ascentPt: 9, descentPt: 0 }) },
+  }).shape({ ...request, fonts: { ascii: 'Alias A', highAnsi: 'Alias A' } }).spans.length;
+  // Canvas may select either face, painting the base and mark from different resources.
+  expect(spans({ unicodeRanges: [[0x54, 0x54]] })).toBe(2);
+  expect(spans({})).toBe(2);
+  expect(spans({ unicodeRanges: [[0x54, 0x54], [0x301, 0x301]] })).toBe(1);
+  expect(spans({ unicodeRanges: [[0x41, 0x41]] })).toBe(1);
+});
 it('requires nonmissing resource identity on registered faces', () => {
   expect(fixture(undefined, {}, { resourceIdentity: undefined }).shape(request).spans).toHaveLength(2);
 });

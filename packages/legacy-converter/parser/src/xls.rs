@@ -1279,7 +1279,7 @@ fn parse_sheet(
                     .ok_or_else(|| unsupported("truncated BOOLERR record"))?
                     != 0;
                 let value = if is_error {
-                    CellValue::Error(error_text(value).into())
+                    CellValue::Error(bes_error_text(value).into())
                 } else {
                     CellValue::Bool(value != 0)
                 };
@@ -1452,7 +1452,7 @@ fn formula_cached_value(data: &[u8]) -> Result<FormulaResult, String> {
         return Ok(match raw[0] {
             0 => FormulaResult::String,
             1 => FormulaResult::Value(CellValue::Bool(raw[2] != 0)),
-            2 => FormulaResult::Value(CellValue::Error(error_text(raw[2]).into())),
+            2 => FormulaResult::Value(CellValue::Error(berr_text(raw[2]).into())),
             3 => FormulaResult::Empty,
             _ => return Err(unsupported("invalid FORMULA cached result type")),
         });
@@ -1483,7 +1483,18 @@ fn decode_rk(raw: u32) -> f64 {
     value
 }
 
-fn error_text(code: u8) -> &'static str {
+/// BOOLERR error text: the [MS-XLS] 2.5.10 Bes error table, which is the
+/// BErr table plus 0x2B #GETTING_DATA.
+fn bes_error_text(code: u8) -> &'static str {
+    match code {
+        0x2b => "#GETTING_DATA",
+        code => berr_text(code),
+    }
+}
+
+/// Cached FORMULA error text: [MS-XLS] 2.5.133 FormulaValue byte3 is a BErr
+/// (2.5.198.2), whose table has no 0x2B, unlike Bes.
+fn berr_text(code: u8) -> &'static str {
     match code {
         0x00 => "#NULL!",
         0x07 => "#DIV/0!",
@@ -1492,6 +1503,8 @@ fn error_text(code: u8) -> &'static str {
         0x1d => "#NAME?",
         0x24 => "#NUM!",
         0x2a => "#N/A",
+        // Library policy, not specified behavior: a code outside the table
+        // is invalid and is still shown as #VALUE!.
         _ => "#VALUE!",
     }
 }
@@ -1624,6 +1637,53 @@ mod tests {
             record(EOF, 80, &[]),
         ];
         assert!(parse_sheet(&records, &bound, &[]).is_err());
+    }
+
+    #[test]
+    fn boolerr_bes_and_formula_berr_cached_errors_keep_their_text() {
+        use super::*;
+        let bof = [0, 6, 0x10, 0];
+        // BOOLERR: row, column, XF 15, bBoolErr, fError.
+        let getting_data = [0, 0, 0, 0, 15, 0, 0x2b, 1];
+        let num = [0, 0, 1, 0, 15, 0, 0x24, 1];
+        let boolean = [0, 0, 2, 0, 15, 0, 1, 0];
+        // FORMULA whose rgce is the constant PtgInt 5, but whose cached
+        // FormulaValue is the BErr #DIV/0!: the cached result is kept, not
+        // recalculated.
+        let mut formula = vec![0, 0, 3, 0, 15, 0, 2, 0, 0x07, 0, 0, 0, 0xff, 0xff];
+        formula.extend([0, 0, 0, 0, 0, 0, 3, 0, 0x1e, 5, 0]);
+        // 0x2B is valid Bes but invalid BErr. Preserve the existing library
+        // fallback for this malformed FORMULA rather than widening its table.
+        let mut invalid_formula = formula.clone();
+        invalid_formula[2] = 4;
+        invalid_formula[8] = 0x2b;
+        let record = |kind, offset, data| Record { kind, offset, data };
+        let records = [
+            record(BOF, 0, &bof[..]),
+            record(BOOLERR, 10, &getting_data[..]),
+            record(BOOLERR, 20, &num[..]),
+            record(BOOLERR, 30, &boolean[..]),
+            record(FORMULA, 40, &formula),
+            record(FORMULA, 70, &invalid_formula),
+            record(EOF, 100, &[]),
+        ];
+        let bound = BoundSheet {
+            offset: 0,
+            name: "A".into(),
+            sheet_type: 0,
+            visibility: SheetVisibility::Visible,
+        };
+        let sheet = parse_sheet(&records, &bound, &[]).unwrap();
+        let row = sheet.rows.get(&0).unwrap();
+        let error = |column: u16| match row.get(&column) {
+            Some(CellValue::Error(text)) => text.as_str(),
+            other => panic!("expected a cached error, got {other:?}"),
+        };
+        assert_eq!(error(0), "#GETTING_DATA");
+        assert_eq!(error(1), "#NUM!");
+        assert!(matches!(row.get(&2), Some(CellValue::Bool(true))));
+        assert_eq!(error(3), "#DIV/0!");
+        assert_eq!(error(4), "#VALUE!");
     }
 
     #[test]

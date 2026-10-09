@@ -59,6 +59,38 @@ describe('CF formula evaluation boundary', () => {
     expect(ev('1' + '+1'.repeat(100_000) + '=100001', c)).toBe(true);
   });
 
+  it('reads cell-like spellings outside the grid or before "(" as names, not cells', () => {
+    const c = ctx({ cells: [numCell(1, 1, 5)] });
+    c.definedNames.set('Limit1', { name: 'Limit1', formula: '10' });
+    // LIMIT is past column XFD, so Limit1 is the name, not a blank cell.
+    expect(ev('A1<Limit1', c)).toBe(true);
+    expect(ev('A1>Limit1', c)).toBe(false);
+    expect(ev('ISBLANK(XFD1048576)', c)).toBe(true);
+    for (const f of ['ISBLANK(XFE1)', 'ISBLANK(A1048577)', 'ISBLANK(A0)']) {
+      expect(evaluateFormula(f, c), f).toEqual({ kind: 'unsupported' });
+    }
+    // LOG is a column in the grid; followed by "(" it is a function name.
+    expect(evaluateFormula('LOG10(100)', c)).toEqual({ kind: 'value', value: 2 });
+  });
+
+  it('resolves defined names ASCII case-insensitively, later case variants shadowing', () => {
+    const c = ctx();
+    c.definedNames.set('Limit', { name: 'Limit', formula: '3' });
+    expect(ev('LIMIT=3', c)).toBe(true);
+    expect(ev('limit=3', c)).toBe(true);
+    // A case variant is the same name, so it shadows like an exact duplicate.
+    const shadowed = ctx();
+    shadowed.definedNames.set('Rate', { name: 'Rate', formula: '1' });
+    shadowed.definedNames.set('RATE', { name: 'RATE', formula: '2' });
+    expect(ev('Rate=2', shadowed)).toBe(true);
+    // Only ASCII letters fold: KELVIN SIGN lowercases to "k" under Unicode
+    // rules, but it is not the name "k" here.
+    const kelvinSign = String.fromCodePoint(0x212a);
+    const kelvin = ctx();
+    kelvin.definedNames.set(kelvinSign, { name: kelvinSign, formula: '1' });
+    expect(evaluateFormula('k', kelvin)).toEqual({ kind: 'unsupported' });
+  });
+
   it('bounds retained expansion of branching defined names', () => {
     const c = ctx();
     c.definedNames.set('Layer_0', { name: 'Layer_0', formula: '1' });
@@ -156,6 +188,24 @@ describe('evalFormulaToBool — conditional aggregates', () => {
     const cells = [numCell(1, 1, 90), numCell(2, 1, 50), numCell(3, 1, 95)];
     const c = ctx({ cells, row: 1, col: 1 });
     expect(evalFormulaToBool('COUNTIF(A1:A3,">=90")=2', c)).toBe(true);
+  });
+
+  it('AVERAGEIF averages matched numeric cells, ignoring matched blanks', () => {
+    // A1:A4 = 1, 1, 1, 2 ; B1 = 4, B2 blank, B3 = 0, B4 = 100 ; C1:C4 blank
+    const cells = [
+      numCell(1, 1, 1), numCell(2, 1, 1), numCell(3, 1, 1), numCell(4, 1, 2),
+      numCell(1, 2, 4), numCell(3, 2, 0), numCell(4, 2, 100),
+    ];
+    const c = ctx({ cells });
+    // The matched 0 counts; the matched blank and the unmatched 100 do not.
+    expect(evaluateFormula('AVERAGEIF(A1:A4,1,B1:B4)', c)).toEqual({ kind: 'value', value: 2 });
+    expect(evalFormulaToBool('AVERAGEIF(A1:A4,1,B1:B4)=2', c)).toBe(true);
+    // Every matched cell is blank: no qualifying value is #DIV/0!, not 0.
+    expect(evaluateFormula('AVERAGEIF(A1:A4,1,C1:C4)', c)).toEqual({ kind: 'error' });
+    expect(evalFormulaToBool('AVERAGEIF(A1:A4,1,C1:C4)=0', c)).toBe(false);
+    // Preserved library policy, not Excel evidence: indexes past a shorter
+    // average_range are not actual blank cells, so they keep counting.
+    expect(evaluateFormula('AVERAGEIF(A1:A4,1,B1:B1)', c)).toEqual({ kind: 'value', value: 4 / 3 });
   });
 });
 

@@ -2,11 +2,15 @@
 // fixture's embedded-face hmtx advances, glyf ink bounds and OS/2
 // xAvgCharWidth, routed through the production text service.
 import { readFileSync } from 'node:fs';
+import { DEFAULT_KINSOKU_RULES } from '@silurus/ooxml-core';
 import { createLayoutServices } from '../layout-runtime.js';
+import type { ParagraphLayoutContext } from '../layout-context.js';
 import { createFontResolver } from '../layout/font-service.js';
+import { paragraphLayoutFromMeasurement } from '../layout/paragraph.js';
 import { createTextLayoutService, type ResolvedFontMetric } from '../layout/text.js';
 import { buildSegments, layoutLines, type LayoutTextSeg, type LineLayoutEnvironment } from '../line-layout.js';
-import type { DocRun, DocxDocumentModel } from '../types.js';
+import { measureParagraph } from '../paragraph-measure.js';
+import type { DocParagraph, DocRun, DocxDocumentModel } from '../types.js';
 
 export interface Variant {
   readonly stage: string;
@@ -176,16 +180,57 @@ export interface StubParagraph {
   readonly freshServices?: boolean;
 }
 
-/** Production buildSegments + layoutLines over the fixture faces; returns each
- * line's segment texts and measured widths. */
-export function layoutStubParagraph(paragraph: StubParagraph) {
-  const families = [...new Set(paragraph.runs.flatMap((run) => [run.ascii, run.eastAsia]))];
-  const runs = paragraph.runs.map((run) => ({
+function stubRuns(paragraph: StubParagraph): DocRun[] {
+  return paragraph.runs.map((run) => ({
     type: 'text', text: run.text, fontFamily: run.ascii, fontFamilyHighAnsi: run.ascii,
     fontFamilyEastAsia: run.eastAsia, fontSize: run.sizePt, bold: run.bold,
     italic: false, underline: false, strikethrough: false, kerning: run.kerning,
     lang: 'en-US', langEastAsia: 'ja-JP',
   })) as unknown as DocRun[];
+}
+
+/** Production measurement and retained left-aligned paragraph layout over the
+ * fixture faces, for checks on placed cluster and source-owner geometry. */
+export function retainStubParagraph(paragraph: StubParagraph) {
+  const families = [...new Set(paragraph.runs.flatMap((run) => [run.ascii, run.eastAsia]))];
+  const docParagraph = {
+    alignment: paragraph.justification, indentLeft: 0, indentRight: 0, indentFirst: 0,
+    spaceBefore: 0, spaceAfter: 0, lineSpacing: null, numbering: null, tabStops: [],
+    runs: stubRuns(paragraph),
+  } as unknown as DocParagraph;
+  const context: ParagraphLayoutContext = {
+    lineGrid: { active: false, pitchPt: null },
+    characterGrid: { active: false, kind: null, pitchPt: null, deltaPt: 0 },
+    rightIndentGrid: { pitchPt: null, paragraphAllowsAdjustment: true },
+    physicalIndentLeftPt: 0, physicalIndentRightPt: 0, firstIndentPt: 0,
+    lineSpacing: null, spaceBeforePt: 0, spaceAfterPt: 0,
+    baseRtl: false, isJustified: false, stretchLastLine: false,
+    tabStops: [], hasRuby: false, hasEastAsianText: true,
+    kinsoku: DEFAULT_KINSOKU_RULES, defaultTabPt: 36,
+  };
+  const placement = {
+    startYPt: 0, paragraphXPt: 0, availableWidthPt: paragraph.bandPt, maximumYPt: 1e7,
+    suppressSpaceBefore: false,
+  };
+  const measurer = { context: canvas, fontFamilyClasses: {} };
+  const environment = {
+    pageIndex: 0, totalPages: 1, documentHasEastAsianText: true,
+    pageWritingMode: 'horizontal-tb' as const, layoutServices: cachedServices(families),
+    autoSpaceDE: false, autoSpaceDN: false, ...paragraph.environment,
+  };
+  const measured = measureParagraph(docParagraph, context, placement, measurer, environment);
+  return paragraphLayoutFromMeasurement(docParagraph, {
+    id: 'word-space-fit', source: { story: 'body', storyInstance: 'body', path: [0] },
+    flowDomainId: 'body', ordinaryFlow: true, context, placement, measurer, environment,
+    exclusions: [],
+  } as unknown as Parameters<typeof paragraphLayoutFromMeasurement>[1], measured);
+}
+
+/** Production buildSegments + layoutLines over the fixture faces; returns each
+ * line's segment texts and measured widths. */
+export function layoutStubParagraph(paragraph: StubParagraph) {
+  const families = [...new Set(paragraph.runs.flatMap((run) => [run.ascii, run.eastAsia]))];
+  const runs = stubRuns(paragraph);
   const segments = buildSegments(runs, {
     pageIndex: 0, totalPages: 1, layoutServices: paragraph.freshServices ? services(families) : cachedServices(families),
     // The Word controls author both automatic-spacing flags off; stub

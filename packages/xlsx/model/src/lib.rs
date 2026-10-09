@@ -204,8 +204,9 @@ pub struct Worksheet {
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub data_validations: Vec<DataValidation>,
     /// Defined names in scope for this sheet. Includes workbook-global names and
-    /// any names whose `localSheetId` matches this sheet's position in the
-    /// workbook. Used by conditional-formatting `expression` rules that call
+    /// then any names whose `localSheetId` matches this sheet's position in the
+    /// workbook, so the last match for an unqualified name is the local one.
+    /// Used by conditional-formatting `expression` rules that call
     /// named ranges like `task_start`, `today`, etc. (ECMA-376 §18.2.5).
     pub defined_names: Vec<DefinedName>,
     /// Excel Tables defined for this sheet (ECMA-376 §18.5). Rendered with a

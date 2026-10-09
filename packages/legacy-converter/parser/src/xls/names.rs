@@ -97,16 +97,25 @@ impl Names {
         Ok(Self(names))
     }
 
-    /// Names visible on the zero-based sheet `index`.
+    /// Names visible on the zero-based BoundSheet8 `index`: workbook names,
+    /// then names local to that sheet, each in Lbl order.
+    ///
+    /// Scope is normative: 2.4.150 Lbl `itab` 0 is the workbook, and nonzero
+    /// is the one-based BoundSheet8 index. Precedence is documented Office
+    /// resolution (Microsoft Support, "Names in formulas",
+    /// https://support.microsoft.com/en-us/excel/names-in-formulas): an unqualified
+    /// name defined in both scopes resolves to the worksheet-local one. Lbl
+    /// order does not encode that, and the renderer's conditional-formatting
+    /// and hyperlink lookups let a later definition win, so locals go last.
     pub(super) fn for_sheet(
         &self,
         index: usize,
         budget: &mut usize,
     ) -> Result<Vec<xlsx_model::DefinedName>, String> {
         let visible = || {
-            self.0
-                .iter()
-                .filter(|(scope, _, _)| scope.is_none_or(|scope| scope == index))
+            let globals = self.0.iter().filter(|(scope, _, _)| scope.is_none());
+            let locals = self.0.iter().filter(|(scope, _, _)| *scope == Some(index));
+            globals.chain(locals)
         };
         let bytes = visible()
             .try_fold(0usize, |total, (_, name, formula)| {
@@ -193,6 +202,58 @@ mod tests {
             .into_iter()
             .map(|n| n.name)
             .collect();
-        assert_eq!(second, vec!["_xlnm._FilterDatabase", "Rate"]);
+        assert_eq!(second, vec!["Rate", "_xlnm._FilterDatabase"]);
+    }
+
+    #[test]
+    fn current_sheet_locals_follow_globals_so_a_same_name_local_wins_last() {
+        // Lbl (cch, cce = 3, itab, one-byte name) with a PtgInt formula.
+        fn lbl(itab: u8, name: &[u8], value: u8) -> Vec<u8> {
+            let mut data = vec![0; 15];
+            data[3] = u8::try_from(name.len()).unwrap();
+            data[4] = 3;
+            data[8] = itab;
+            data.extend_from_slice(name);
+            data.extend_from_slice(&[0x1e, value, 0]);
+            data
+        }
+        // A local recorded before the same-name global, a later local, and
+        // another sheet's local that is out of scope.
+        let data = [
+            lbl(2, b"Rate", 1),
+            lbl(0, b"Rate", 2),
+            lbl(0, b"Tax", 3),
+            lbl(2, b"Fee", 4),
+            lbl(1, b"Rate", 5),
+        ];
+        let records: Vec<_> = data
+            .iter()
+            .enumerate()
+            .map(|(offset, data)| Record {
+                kind: 0x0018,
+                offset,
+                data: data.as_slice(),
+            })
+            .collect();
+        let names = Names::parse(&records, &Externs::default()).unwrap();
+        let expected = [("Rate", "2"), ("Tax", "3"), ("Rate", "1"), ("Fee", "4")];
+        // The reordered copy is charged exactly once, in full.
+        let mut budget: usize = expected
+            .iter()
+            .map(|(name, formula)| {
+                std::mem::size_of::<xlsx_model::DefinedName>() + name.len() + formula.len()
+            })
+            .sum();
+        let visible: Vec<_> = names
+            .for_sheet(1, &mut budget)
+            .unwrap()
+            .into_iter()
+            .map(|n| (n.name, n.formula))
+            .collect();
+        assert_eq!(budget, 0);
+        assert_eq!(
+            visible,
+            expected.map(|(name, formula)| (name.to_string(), formula.to_string()))
+        );
     }
 }
