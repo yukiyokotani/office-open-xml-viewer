@@ -19,6 +19,8 @@ import { selectionAutoScrollVelocity } from '../../selection-auto-scroll.js';
 import type { CommentPopup } from './comment-popup.js';
 import type { HyperlinkDispatcher } from './hyperlink-dispatcher.js';
 import type { ValidationPanel } from './validation-panel.js';
+import { rowResizeRanges, MAX_ROW_RESIZE_INTERVALS,
+  type RowBandRange, type RowResizePreview } from '../row-resize-overrides.js';
 
 /** Half-width (CSS px) of the grab zone around a header border for
  *  drag-to-resize (issue #567), and the minimum size a column/row can be
@@ -26,15 +28,13 @@ import type { ValidationPanel } from './validation-panel.js';
 const RESIZE_GRAB_PX = 4;
 const RESIZE_MIN_PX = 5;
 
-// View-only gesture resource policy, not an Excel/OOXML selection limit. The
-// current edit/wire format stores one entry per changed band (plus CSS intent
-// for columns). Permit a complete 16,384-column worksheet, and give row batches
-// the same maximum fan-out: a 1,048,576-row drag would create 64 times that work
-// on every pointer event. Union/count before materialization, reject larger
-// gestures without mutation, and report the limit through the host error path.
-// The host checks cumulative manual overrides too, so repeated gestures cannot
-// grow the resize wire indefinitely. Supporting larger row batches efficiently
-// requires an interval-based edit/wire representation.
+// View-only resource policy, not an Excel/OOXML selection limit. Bound the
+// per-band point path (plus CSS intent for columns) to a complete 16,384-column
+// worksheet. Union/count before point materialization. Row selections exceeding
+// that point fan-out, or cumulative row point edits reaching its budget, use
+// compact intervals through geometry/edit/wire. They have no selected-row count
+// ceiling: interval fragmentation is bounded instead. Existing small point
+// resize compatibility remains; no silent truncation or million-row expansion.
 const MAX_RESIZE_BANDS = 16_384;
 
 /**
@@ -116,6 +116,7 @@ export interface SelectionInputHost {
    * canonical width that survives MDW changes). Omitted for other edits. */
   recordSizeOverride(axis: OutlineAxis, index: number, columnCssPx?: number): void;
   assertResizeBudget(axis: OutlineAxis, indices: readonly number[], limit: number): void;
+  beginRowResizePreview(targets: readonly RowBandRange[]): RowResizePreview;
   updateSpacerSize(ws: Worksheet): void;
   refitAutoRowsAfterColumnResize(): void;
   reportError(error: unknown): void;
@@ -154,7 +155,7 @@ export class SelectionInput {
   // it mutates the in-memory worksheet's colWidths/rowHeights, never the file.
   resizeDrag:
     | { kind: 'col' | 'row'; index: number; originScaled: number; mdw: number; pointerId: number;
-        indices: readonly number[]; worksheet: Worksheet }
+        indices: readonly number[]; worksheet: Worksheet; rowPreview?: RowResizePreview }
     | null = null;
   /** Last captured drag-selection pointer, retained while edge scrolling runs. */
   private selectionAutoScrollPointer:
@@ -206,7 +207,15 @@ export class SelectionInput {
     this.pendingTap = null;
     this.pendingClick = null;
     this.pendingElementClick = null;
-    if (this.resizeDrag) this.finishResize(this.resizeDrag.pointerId, false);
+    if (this.resizeDrag) this.finishResize(this.resizeDrag.pointerId, false, true);
+  }
+
+  get rowResizePreview(): RowResizePreview | undefined { return this.resizeDrag?.rowPreview; }
+
+  /** Abort only the preview that owned a failing frame. An older asynchronous
+   * frame must never roll back a later gesture or a pointerup-committed edit. */
+  abortRowResizePreview(preview: RowResizePreview): void {
+    if (this.resizeDrag?.rowPreview === preview) this.finishResize(this.resizeDrag.pointerId, false, true);
   }
 
   /** Claim drag-selection ownership and discard deferred gestures from any
@@ -365,15 +374,60 @@ export class SelectionInput {
     return indices;
   }
 
-  /** End input ownership before release/refit, which can fail. Like the existing
-   * single-band live resize, pointercancel retains the last completed live size;
-   * it does not undo an edit. No subsequent move from that pointer can resize.
+  /** Capture selected visible row intervals from sparse geometry. The absence
+   * of a million point dictionary is meaningful: blank default-sized rows must
+   * still resize. Zero-default sheets contribute only their positive point/run
+   * rows. Hidden runs are excluded without walking their row ordinals. */
+  private compactRowTargets(index: number, force = false): readonly RowBandRange[] | undefined {
+    const ws = this.host.worksheet();
+    if (!ws) return undefined;
+    let selected = (this.host.selectionState()?.areas ?? []).flatMap(area =>
+      area.kind === 'rows' ? [{ first: area.firstRow, last: area.lastRow }] : []);
+    if (!selected.some(r => r.first <= index && r.last >= index)) selected = [{ first: index, last: index }];
+    selected.sort((a, b) => a.first - b.first);
+    const union: Array<{ first: number; last: number }> = [];
+    for (const range of selected) {
+      const previous = union.at(-1);
+      if (previous && range.first <= previous.last + 1) previous.last = Math.max(previous.last, range.last);
+      else union.push({ ...range });
+    }
+    if (!force && !rowResizeRanges(ws).length
+      && union.reduce((n, r) => n + r.last - r.first + 1, 0) <= MAX_RESIZE_BANDS) return undefined;
+    const targets: RowBandRange[] = [];
+    let selectedIndex = 0;
+    for (const positive of getGridGeometryForWorksheet(ws).row.positiveRanges()) {
+      while (selectedIndex < union.length && union[selectedIndex].last < positive.first) selectedIndex++;
+      for (let i = selectedIndex; i < union.length && union[i].first <= positive.last; i++) {
+        const first = Math.max(positive.first, union[i].first), last = Math.min(positive.last, union[i].last);
+        if (first <= last) {
+          if (targets.length === MAX_ROW_RESIZE_INTERVALS) throw new RangeError('Too many row resize intervals.');
+          targets.push(Object.freeze({ first, last }));
+        }
+      }
+    }
+    return Object.freeze(targets);
+  }
+
+  /** End input ownership before release/refit, which can fail. The legacy point
+   * path keeps its last completed live size on cancel. Compact row previews
+   * restore their starting intervals on cancel, navigation, lost capture or
+   * teardown; pointerup commits. No subsequent move from that pointer can resize.
    * Render failures happen after the whole batch's model/wire edit is recorded:
    * they report an error and may leave the prior bitmap, never a partial batch. */
-  private finishResize(pointerId: number, refit = true): void {
+  private finishResize(pointerId: number, refit = true, cancel = false): void {
     const drag = this.resizeDrag;
     if (!drag || drag.pointerId !== pointerId) return;
     this.resizeDrag = null;
+    if (cancel && drag.rowPreview) {
+      try {
+        drag.rowPreview.rollback();
+        if (!this.host.isDestroyed() && drag.worksheet === this.host.worksheet()) {
+          this.host.updateSpacerSize(drag.worksheet);
+          this.host.updateSelectionOverlay();
+          this.host.scheduleRender();
+        }
+      } catch (error) { this.host.reportError(error); }
+    }
     try {
       // The UA may already have released capture for pointercancel/lost capture.
       if (this.host.scrollHost.hasPointerCapture?.(pointerId) !== false) {
@@ -406,7 +460,7 @@ export class SelectionInput {
     // A delayed move must never edit a replacement projection after navigation
     // or reload. Normally clearSheetGestures releases ownership at installation.
     if (!ws || drag.worksheet !== ws) {
-      this.finishResize(drag.pointerId, false);
+      this.finishResize(drag.pointerId, false, true);
       return;
     }
     const cs = this.host.scale();
@@ -422,6 +476,21 @@ export class SelectionInput {
         // auto-height clones and worker projections; authored widths stay raw.
         this.host.recordSizeOverride('col', index, sizePx);
       }
+    } else if (drag.rowPreview) {
+      const ptY = clientY - rect.top;
+      const sizePx = Math.max(RESIZE_MIN_PX, Math.round((ptY - drag.originScaled) / cs));
+      try {
+        drag.rowPreview.apply(pxToRowHeight(sizePx));
+        this.host.updateSpacerSize(ws);
+        this.host.updateSelectionOverlay();
+        this.host.scheduleRender();
+      } catch (error) {
+        // A synchronous update failure aborts the whole compact preview. Model
+        // and wire return to the gesture start before another frame can paint.
+        this.finishResize(drag.pointerId, false, true);
+        this.host.reportError(error);
+      }
+      return;
     } else {
       const ptY = clientY - rect.top;
       const sizePx = Math.max(RESIZE_MIN_PX, Math.round((ptY - drag.originScaled) / cs));
@@ -734,11 +803,23 @@ export class SelectionInput {
         e.preventDefault();
         try {
           const worksheet = this.host.worksheet()!;
-          const indices = this.resizeIndices(resize.kind, resize.index);
-          this.host.assertResizeBudget(resize.kind, indices, MAX_RESIZE_BANDS);
+          let targets = resize.kind === 'row' ? this.compactRowTargets(resize.index) : undefined;
+          let indices = targets ? [] : this.resizeIndices(resize.kind, resize.index);
+          if (!targets) {
+            try { this.host.assertResizeBudget(resize.kind, indices, MAX_RESIZE_BANDS); }
+            catch (error) {
+              // Accumulated row points can also reach their budget through
+              // disjoint small gestures. Continue via intervals, never silently
+              // truncate or raise the point-allocation ceiling.
+              if (resize.kind !== 'row' || !(error instanceof RangeError)) throw error;
+              targets = this.compactRowTargets(resize.index, true);
+              indices = [];
+            }
+          }
+          const rowPreview = targets ? this.host.beginRowResizePreview(targets) : undefined;
           // A failed capture must not leave a partially started resize alive.
           this.host.scrollHost.setPointerCapture(e.pointerId);
-          this.resizeDrag = { ...resize, indices, worksheet, pointerId: e.pointerId };
+          this.resizeDrag = { ...resize, indices, worksheet, rowPreview, pointerId: e.pointerId };
         } catch (error) {
           this.host.reportError(error);
           return;
@@ -976,7 +1057,7 @@ export class SelectionInput {
 
     this.on('pointercancel', (e: PointerEvent) => {
       if (this.resizeDrag && this.resizeDrag.pointerId === e.pointerId) {
-        this.finishResize(e.pointerId);
+        this.finishResize(e.pointerId, true, true);
       }
       if (this.pendingTap && this.pendingTap.pointerId === e.pointerId) {
         this.pendingTap = null;
@@ -991,6 +1072,10 @@ export class SelectionInput {
         this.stopSelectionAutoScroll();
         this.host.selection.endDrag(e.pointerId);
       }
+    });
+
+    this.on('lostpointercapture', (e: PointerEvent) => {
+      if (this.resizeDrag?.pointerId === e.pointerId) this.finishResize(e.pointerId, true, true);
     });
 
     // Ctrl/⌘ + mouse wheel (and trackpad pinch, which the browser reports as a
@@ -1087,6 +1172,9 @@ export class SelectionInput {
         this.host.updateSelectionOverlay();
         this.host.updateFindOverlay();
         this.host.emitViewportChange();
+      } else if (e.key === 'Escape' && this.resizeDrag?.rowPreview) {
+        e.preventDefault();
+        this.finishResize(this.resizeDrag.pointerId, false, true);
       } else if (e.key === 'Escape' && this.host.validation.isOpen()) {
         this.host.hideValidationPanel();
       } else if (e.key === 'Escape' && this.host.comments.isOpen()) {
@@ -1110,6 +1198,7 @@ export class SelectionInput {
   /** Teardown: stop edge scrolling, drop pending gestures and detach every
    *  viewport listener this input installed. */
   destroy(): void {
+    if (this.resizeDrag) this.finishResize(this.resizeDrag.pointerId, false, true);
     this.stopSelectionAutoScroll();
     this.pendingTap = null;
     this.pendingClick = null;

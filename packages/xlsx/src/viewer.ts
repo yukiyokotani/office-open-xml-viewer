@@ -855,6 +855,11 @@ class XlsxViewerEngine implements ZoomableViewer {
         this.recordSizeOverride(axis, index, columnCssPx),
       assertResizeBudget: (axis, indices, limit) =>
         this.viewEdits.assertResizeBudget(this.currentSheet, axis, indices, limit),
+      beginRowResizePreview: targets => {
+        const ws = this.currentWorksheet;
+        if (!ws) throw new Error('Cannot resize an unavailable worksheet.');
+        return this.viewEdits.beginRowResizePreview(ws, this.currentSheet, targets);
+      },
       updateSpacerSize: (ws) => this.updateSpacerSize(ws),
       refitAutoRowsAfterColumnResize: () => this.refitAutoRowsAfterColumnResize(),
       reportError: (error) => this._reportRenderError(error),
@@ -988,6 +993,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     if (this._destroyed || this.wb !== workbook) return false;
     if (this.preparedWorkbook === workbook) return true;
     this.finder.invalidate();
+    this.selectionInput.clearSheetGestures();
     this.viewEdits.clear();
     this.releaseInitialAnchorReferences();
     this.sheetViews.clear();
@@ -1016,6 +1022,10 @@ class XlsxViewerEngine implements ZoomableViewer {
   }
 
   private async showSheet(index: number): Promise<void> {
+    // End a live compact preview before reading/replaying the per-sheet ledger,
+    // including same-sheet reloads. It must not become the new projection's
+    // committed state merely because an asynchronous navigation interrupted it.
+    this.selectionInput.clearSheetGestures();
     const generation = ++this.sheetRequestGeneration;
     this.previewFallbackReason = null;
     const workbook = this.workbook;
@@ -1193,6 +1203,10 @@ class XlsxViewerEngine implements ZoomableViewer {
       if (pendingReference) releaseInitialAnchorSizeReference(pendingReference);
       return;
     }
+    // Another row preview may have begun while acquisition awaited. Reconcile
+    // after cancelling it, before the prepared snapshot becomes reachable.
+    this.selectionInput.clearSheetGestures();
+    this.viewEdits.restoreRowResizeRanges(index, worksheet);
     // #1713: install synchronously after the generation check, before the
     // projection is stored, painted or reachable by manual edit input.
     if (pendingReference !== undefined) {
@@ -1223,6 +1237,7 @@ class XlsxViewerEngine implements ZoomableViewer {
         // A degraded parser placeholder is decided before any binding: it is
         // a different graph, so the known reference is never forced onto it.
         const degraded = Boolean(completed.parseError);
+        this.selectionInput.clearSheetGestures();
         const finalized = this.createVisibleSheetView(completed);
         // #1713: a non-degraded terminal projection reuses this request's
         // reference, bound before manual state is replayed; never recaptured.
@@ -1269,6 +1284,7 @@ class XlsxViewerEngine implements ZoomableViewer {
         this.previewCompletion = null;
         this.firstPreviewRender = false;
         this.previewPreparedViewport = null;
+        this.selectionInput.clearSheetGestures();
         this.currentWorksheet = null;
         this.releaseCurrentWorksheet?.();
         this.releaseCurrentWorksheet = null;
@@ -2334,10 +2350,12 @@ class XlsxViewerEngine implements ZoomableViewer {
 
   private async renderCurrentSheet(): Promise<void> {
     const generation = this.renderDispatcher.begin();
+    const rowPreview = this.selectionInput.rowResizePreview;
     try {
       await this._renderCurrentSheet(generation);
     } catch (err) {
       if (!this.renderDispatcher.isCurrent(generation)) return;
+      if (rowPreview) this.selectionInput.abortRowResizePreview(rowPreview);
       throw err;
     }
   }

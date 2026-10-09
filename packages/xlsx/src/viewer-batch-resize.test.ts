@@ -17,6 +17,7 @@ function fixture(selection: XlsxSelectionInput, rtl = false) {
     currentWorksheet: Worksheet; canvasArea: FakeEl; scrollHost: FakeEl;
     viewEdits: { wireSizeOverrides(index: number): { overrides: WireSizeOverrides; revision: number } | undefined };
     _cellRect(row: number, col: number): { x: number; y: number; w: number; h: number };
+    updateSelectionOverlay(): void;
   } }).engine;
   engine.currentWorksheet = {
     name: 'Synthetic resize', rows: [], colWidths: { 1: 10, 2: 11, 3: 0, 4: 13 },
@@ -27,7 +28,8 @@ function fixture(selection: XlsxSelectionInput, rtl = false) {
   engine.canvasArea.clientWidth = engine.scrollHost.clientWidth = 900;
   engine.canvasArea.clientHeight = engine.scrollHost.clientHeight = 600;
   viewer.setSelection(selection);
-  const drag = (axis: 'col' | 'row', index: number, pixels: number, during?: () => void, cancel = false) => {
+  const drag = (axis: 'col' | 'row', index: number, pixels: number, during?: () => void, cancel = false,
+    afterMove?: () => void) => {
     const cell = engine._cellRect(axis === 'row' ? index : 1, axis === 'col' ? index : 1);
     const logicalX = cell.x + cell.w + 0.5;
     const x = rtl ? 900 - logicalX : logicalX;
@@ -38,6 +40,7 @@ function fixture(selection: XlsxSelectionInput, rtl = false) {
     const endX = cell.x + pixels * 1.25;
     const end = event(axis === 'col' ? (rtl ? 900 - endX : endX) : (rtl ? 895 : 5), axis === 'row' ? cell.y + pixels * 1.25 : 5);
     engine.scrollHost.dispatch('pointermove', end);
+    afterMove?.();
     engine.scrollHost.dispatch(cancel ? 'pointercancel' : 'pointerup', end);
   };
   return { viewer, engine, drag, onError };
@@ -104,12 +107,95 @@ describe('selected whole-band drag resizing', () => {
     viewer.destroy();
   });
 
-  it('rejects a million-row batch before mutation or allocation, reporting the resource limit', () => {
+  it('resizes a million rows with a compact wire, preserving hidden rows and the authored sparse map', () => {
     const { viewer, engine, drag, onError } = fixture('1:1048576');
     const before = { ...engine.currentWorksheet.rowHeights };
     drag('row', 2, 84);
-    expect(onError).toHaveBeenCalledExactlyOnceWith(expect.any(RangeError));
+    expect(onError).not.toHaveBeenCalled();
+    const row = getGridGeometryForWorksheet(engine.currentWorksheet).row;
+    expect([1, 2, 1048576].map(index => row.sizeOf(index))).toEqual([84, 84, 84]);
+    expect(row.sizeOf(3)).toBe(0);
+    expect(row.offsetOf(1048577)).toBe(1048575 * 84);
+    expect(engine._cellRect(1048576, 1).h).toBe(105);
     expect(engine.currentWorksheet.rowHeights).toEqual(before);
+    const wire = structuredClone(engine.viewEdits.wireSizeOverrides(0)!.overrides);
+    expect(JSON.stringify(wire).length).toBeLessThan(1024);
+    const source = { ...engine.currentWorksheet, rowHeights: before };
+    const cache = new WorksheetViewProjectionCache();
+    const worker = cache.resolve(source, 0, { id: 1, revision: 1 }, wire).worksheet;
+    expect(getGridGeometryForWorksheet(worker).row.sizeOf(1048576)).toBe(84);
+    expect(getGridGeometryForWorksheet(worker).row.sizeOf(3)).toBe(0);
+    viewer.destroy();
+  });
+
+  it('rolls a cancelled huge-row preview back to the complete previous interval projection', () => {
+    const { viewer, engine, drag, onError } = fixture('1:1048576');
+    drag('row', 2, 84);
+    const beforeWire = structuredClone(engine.viewEdits.wireSizeOverrides(0)!.overrides);
+    const beforeRows = { ...engine.currentWorksheet.rowHeights };
+    drag('row', 2, 120, undefined, true);
+    expect(onError).not.toHaveBeenCalled();
+    expect(engine.currentWorksheet.rowHeights).toEqual(beforeRows);
+    expect(engine.viewEdits.wireSizeOverrides(0)!.overrides).toEqual(beforeWire);
+    expect(getGridGeometryForWorksheet(engine.currentWorksheet).row.sizeOf(1048576)).toBe(84);
+    drag('row', 2, 90);
+    expect(getGridGeometryForWorksheet(engine.currentWorksheet).row.sizeOf(1048576)).toBe(90);
+    viewer.destroy();
+  });
+
+  it('keeps blank zero-default rows hidden while resizing only sparse positive rows', () => {
+    const { viewer, engine, drag, onError } = fixture('1:1048576');
+    engine.currentWorksheet.defaultRowHeight = 0;
+    GridGeometry.invalidate(engine.currentWorksheet);
+    drag('row', 2, 84);
+    expect(onError).not.toHaveBeenCalled();
+    const row = getGridGeometryForWorksheet(engine.currentWorksheet).row;
+    expect([1, 2, 4].map(index => row.sizeOf(index))).toEqual([84, 84, 84]);
+    expect([3, 5, 1048576].map(index => row.sizeOf(index))).toEqual([0, 0, 0]);
+    expect(row.offsetOf(1048577)).toBe(252);
+    viewer.destroy();
+  });
+
+  it('overlays discontiguous row ranges without altering earlier outside dimensions', () => {
+    const { viewer, engine, drag } = fixture('1:1048576');
+    drag('row', 2, 84);
+    viewer.setSelection({ areas: [{ kind: 'rows', firstRow: 1, lastRow: 2 },
+      { kind: 'rows', firstRow: 100000, lastRow: 200000 }], activeAreaIndex: 0,
+      activeCell: { row: 2, col: 1 }, extensionAnchor: { row: 2, col: 1 } });
+    drag('row', 2, 90);
+    const row = getGridGeometryForWorksheet(engine.currentWorksheet).row;
+    expect([1, 2, 100000, 200000].map(index => row.sizeOf(index))).toEqual([90, 90, 90, 90]);
+    expect([4, 99999, 200001, 1048576].map(index => row.sizeOf(index))).toEqual([84, 84, 84, 84]);
+    expect(row.sizeOf(3)).toBe(0);
+    viewer.destroy();
+  });
+
+  it.each(['lostpointercapture', 'Escape', 'destroy'])('restores compact preview dimensions on %s', action => {
+    const { viewer, engine, drag } = fixture('1:1048576');
+    const ws = engine.currentWorksheet;
+    const before = getGridGeometryForWorksheet(ws).row.offsetOf(1048577);
+    drag('row', 2, 84, undefined, false, () => {
+      expect(getGridGeometryForWorksheet(ws).row.sizeOf(1048576)).toBe(84);
+      if (action === 'destroy') viewer.destroy();
+      else if (action === 'Escape') engine.scrollHost.dispatch('keydown', { key: 'Escape', preventDefault() {} });
+      else engine.scrollHost.dispatch(action, { pointerId: 1 });
+    });
+    expect(getGridGeometryForWorksheet(ws).row.offsetOf(1048577)).toBe(before);
+    viewer.destroy();
+  });
+
+  it('rolls back a complete preview when a later UI update fails, then permits a fresh gesture', () => {
+    const { viewer, engine, drag, onError } = fixture('1:1048576');
+    const before = getGridGeometryForWorksheet(engine.currentWorksheet).row.offsetOf(1048577);
+    const original = engine.updateSelectionOverlay.bind(engine);
+    engine.updateSelectionOverlay = vi.fn().mockImplementationOnce(() => { throw new Error('overlay unavailable'); })
+      .mockImplementation(original);
+    drag('row', 2, 84);
+    expect(onError).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ message: 'overlay unavailable' }));
+    expect(getGridGeometryForWorksheet(engine.currentWorksheet).row.offsetOf(1048577)).toBe(before);
+    expect(engine.viewEdits.wireSizeOverrides(0)).toBeUndefined();
+    drag('row', 2, 90);
+    expect(getGridGeometryForWorksheet(engine.currentWorksheet).row.sizeOf(1048576)).toBe(90);
     viewer.destroy();
   });
 
@@ -201,19 +287,20 @@ describe('selected whole-band drag resizing', () => {
     viewer.destroy();
   });
 
-  it('bounds cumulative row edits across separate gestures and permits re-editing existing bands', () => {
+  it('continues cumulative row edits through compact intervals and permits later overlapping edits', () => {
     const { viewer, engine, drag, onError } = fixture('1:16384');
     drag('row', 2, 84);
     viewer.setSelection('16385:16385');drag('row', 16_385, 84);
     const before = engine.viewEdits.wireSizeOverrides(0)!;
     expect(Object.keys(before.overrides.rows!)).toHaveLength(16_384);
     viewer.setSelection('16386:16386');drag('row', 16_386, 90);
-    expect(onError).toHaveBeenCalledExactlyOnceWith(expect.any(RangeError));
+    expect(onError).not.toHaveBeenCalled();
     expect(engine.currentWorksheet.rowHeights[16_386]).toBeUndefined();
-    expect(engine.viewEdits.wireSizeOverrides(0)!.revision).toBe(before.revision);
+    expect(getGridGeometryForWorksheet(engine.currentWorksheet).row.sizeOf(16_386)).toBe(90);
+    expect(Object.keys(engine.viewEdits.wireSizeOverrides(0)!.overrides.rows!)).toHaveLength(16_384);
     viewer.setSelection('2:4');drag('row', 2, 90);
-    expect(rowHeightToPx(engine.currentWorksheet.rowHeights[4])).toBe(90);
-    expect(onError).toHaveBeenCalledTimes(1);
+    expect(getGridGeometryForWorksheet(engine.currentWorksheet).row.sizeOf(4)).toBe(90);
+    expect(onError).not.toHaveBeenCalled();
     viewer.destroy();
   });
 });

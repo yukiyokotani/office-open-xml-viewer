@@ -10,6 +10,7 @@ import {
 } from './renderer.js';
 import { worksheetWithAutoRowHeights } from './render-orchestrator.js';
 import { GridGeometry } from './internal/grid-geometry.js';
+import { setRowResizeRanges } from './internal/row-resize-overrides.js';
 import type { CellFont, CellXf, Styles, Worksheet } from './types.js';
 
 function measurementContext(): CanvasRenderingContext2D {
@@ -136,6 +137,20 @@ function worksheet(): Worksheet {
 }
 
 describe('XLSX automatic row height (ECMA-376 §18.3.1.73 / Office auto-fit)', () => {
+  it('preserves compact manual row dimensions through auto-height clones and column refits', () => {
+    const ws = worksheet();
+    setRowResizeRanges(ws, [{ first: 1, last: 1048576, height: 63 }]);
+    const projection = worksheetWithAutoRowHeights(measurementContext(), ws, styles);
+    expect(getGridGeometryForWorksheet(projection).row.sizeOf(1)).toBe(84);
+    expect(getGridGeometryForWorksheet(projection).row.sizeOf(1048576)).toBe(84);
+    expect(ws.rowHeights).toEqual({ 2: 15 });
+    invalidateAutoRowHeights(projection);
+    projection.colWidths[1] = 30;
+    GridGeometry.invalidate(projection);
+    applyAutoRowHeights(measurementContext(), projection, styles);
+    expect(getGridGeometryForWorksheet(projection).row.sizeOf(1)).toBe(84);
+    expect(projection.rowHeights).toEqual({ 2: 15 });
+  });
   it('fits wrapped, rich, large, and rotated text while preserving explicit and merged rows', () => {
     const ws = worksheet();
     expect(applyAutoRowHeights(measurementContext(), ws, styles)).toBe(true);

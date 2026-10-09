@@ -3,6 +3,9 @@ import type { WireSizeOverrides } from '../../worker-protocol.js';
 import { derivedAutoRowHeights } from '../../renderer.js';
 import type { OutlineAxis } from '../../outline.js';
 import { getColumnCssWidth, setColumnCssWidth } from '../column-css-overrides.js';
+import { GridGeometry } from '../grid-geometry.js';
+import { replaceRowResizeRanges, rowResizeRanges, setRowResizeRanges,
+  type RowResizeRange, type RowBandRange, type RowResizePreview } from '../row-resize-overrides.js';
 
 type OutlineState = {
   rowCollapsed: Map<number, boolean>;
@@ -15,6 +18,7 @@ type OutlineState = {
 
 type SizeOverrides = {
   rows: Map<number, number | null>;
+  rowHeightRanges?: readonly RowResizeRange[];
   automaticRows: Map<number, number>;
   cols: Map<number, number | null>;
   /** Canonical logical CSS px of user column resizes; `null` = removed. */
@@ -189,6 +193,55 @@ export class SheetViewEdits {
     }
   }
 
+  /** Compact live preview, based on the gesture's immutable starting ranges.
+   * Candidate interval construction can fail without touching the projection.
+   * Cancel/navigation/teardown restores only this gesture's ranges, preserving
+   * independently derived heights and outline edits. No row ordinal expansion. */
+  beginRowResizePreview(ws: Worksheet, sheetIndex: number, targets: readonly RowBandRange[]): RowResizePreview {
+    const prior = rowResizeRanges(ws);
+    let applied = false;
+    const install = (ranges: readonly RowResizeRange[]) => {
+      let entry = this.sizeOverrideStore.get(sheetIndex);
+      if (!entry && ranges.length) {
+        entry = { rows: new Map(), automaticRows: new Map(), cols: new Map(), colCss: new Map(), revision: 0 };
+        this.sizeOverrideStore.set(sheetIndex, entry);
+      }
+      setRowResizeRanges(ws, ranges);
+      if (entry) {
+        entry.rowHeightRanges = ranges;
+        entry.revision++;
+        entry.wire = undefined;
+        // Keep the empty ledger's monotonic revision after cancellation. A new
+        // preview must not reuse an old worker cache revision if rollback paint
+        // was overtaken. wireSizeOverrides still omits empty payloads.
+      }
+      GridGeometry.invalidate(ws);
+    };
+    return {
+      apply: height => {
+        const candidate = replaceRowResizeRanges(prior, targets, height);
+        install(candidate);
+        applied = true;
+      },
+      rollback: () => {
+        if (applied) install(prior);
+        applied = false;
+      },
+    };
+  }
+
+  /** Reconcile compact metadata at installation too: while sheet acquisition
+   * awaited, a gesture on the still-visible sheet may have begun or cancelled.
+   * A prepared projection must not retain an earlier preview snapshot. */
+  restoreRowResizeRanges(sheetIndex: number, worksheet: Worksheet): void {
+    const ranges = this.sizeOverrideStore.get(sheetIndex)?.rowHeightRanges ?? [];
+    const current = rowResizeRanges(worksheet);
+    if ((ranges.length || current.length) && ranges !== current) {
+      setRowResizeRanges(worksheet, ranges);
+      GridGeometry.invalidate(worksheet);
+    }
+  }
+
   /** A sheet's override store serialized for the wire, or undefined when
    *  nothing has been mutated (keeps the request payload unchanged). */
   wireSizeOverrides(sheetIndex: number): Readonly<{
@@ -196,11 +249,13 @@ export class SheetViewEdits {
     revision: number;
   }> | undefined {
     const entry = this.sizeOverrideStore.get(sheetIndex);
-    if (!entry || (entry.rows.size === 0 && entry.automaticRows.size === 0 && entry.cols.size === 0)) {
+    if (!entry || (entry.rows.size === 0 && entry.automaticRows.size === 0 && entry.cols.size === 0
+      && !entry.rowHeightRanges?.length)) {
       return undefined;
     }
     if (!entry.wire) {
       const wire: WireSizeOverrides = {};
+      if (entry.rowHeightRanges?.length) wire.rowHeightRanges = entry.rowHeightRanges;
       if (entry.rows.size > 0 || entry.automaticRows.size > 0) {
         wire.rows = Object.fromEntries([...entry.automaticRows, ...entry.rows]);
       }
@@ -222,7 +277,7 @@ export class SheetViewEdits {
    * capturing a prepared-initial anchor reference from an edited projection. */
   hasViewEdits(sheetIndex: number): boolean {
     const sizes = this.sizeOverrideStore.get(sheetIndex);
-    if (sizes && (sizes.rows.size > 0 || sizes.cols.size > 0)) return true;
+    if (sizes && (sizes.rows.size > 0 || sizes.cols.size > 0 || sizes.rowHeightRanges?.length)) return true;
     const outline = this.outlineStateStore.get(sheetIndex);
     return outline !== undefined && (outline.rowCollapsed.size > 0 || outline.colCollapsed.size > 0);
   }
@@ -275,6 +330,7 @@ export class SheetViewEdits {
   /** Rebuild only the mutable projection fields. The large row/cell graph is
    * reacquired from the workbook cache and may have been evicted meanwhile. */
   restoreSheetViewState(sheetIndex: number, worksheet: Worksheet): void {
+    this.restoreRowResizeRanges(sheetIndex, worksheet);
     const sizes = this.sizeOverrideStore.get(sheetIndex);
     if (sizes) {
       for (const [index, size] of sizes.rows) {

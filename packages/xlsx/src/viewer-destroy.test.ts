@@ -161,7 +161,7 @@ describe('XlsxViewer.destroy() — subtree + listeners + style', () => {
     expect(listenedTypes((element) => element.hasAttribute('data-xlsx-viewport-input')))
       .toEqual(new Set([
         'scroll', 'contextmenu', 'pointerdown', 'pointermove', 'pointerup',
-        'pointercancel', 'wheel', 'pointerleave', 'focus', 'keydown',
+        'pointercancel', 'lostpointercapture', 'wheel', 'pointerleave', 'focus', 'keydown',
       ]));
     expect(listenedTypes((element) => element.hasAttribute('data-xlsx-outline')))
       .toEqual(new Set(['pointerdown']));

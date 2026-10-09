@@ -393,6 +393,60 @@ describe('XlsxViewer sheet acquisition generation', () => {
     viewer.destroy();
   });
 
+  it('cancels an interrupted compact row preview before replay, then retains committed ranges', async () => {
+    const { viewer, engine, requests } = buildViewer();
+    requests[0].resolve(worksheet('A')); requests[1].resolve(worksheet('B'));
+    await engine.showSheet(0);
+    engine.scheduleRender = vi.fn();
+    const area = engine.canvasArea as { clientWidth: number; clientHeight: number };
+    area.clientWidth = 800; area.clientHeight = 600;
+    const input = engine.scrollHost as FakeEl;
+    input.clientWidth = 800; input.clientHeight = 600;
+    const start = () => {
+      viewer.setSelection('1:1048576');
+      const cell = viewer.getCellViewportRect('A2')!;
+      const event = (y: number) => ({ button: 0, pointerId: 1, pointerType: 'mouse', clientX: 5,
+        clientY: y, preventDefault() {}, shiftKey: false, ctrlKey: false, metaKey: false });
+      input.dispatch('pointerdown', event(cell.y + cell.height + 0.5));
+      input.dispatch('pointermove', event(cell.y + 84));
+      return event(cell.y + 84);
+    };
+    const original = viewer.getCellViewportRect('A2')!.height;
+    start();
+    expect(viewer.getCellViewportRect('A2')!.height).toBe(84);
+    await engine.showSheet(1); await engine.showSheet(0);
+    expect(viewer.getCellViewportRect('A2')!.height).toBe(original);
+    const end = start(); input.dispatch('pointerup', end);
+    await engine.showSheet(1); await engine.showSheet(0);
+    expect(viewer.getCellViewportRect('A2')!.height).toBe(84);
+    viewer.destroy();
+  });
+
+  it('cancels a compact preview started while replacement worksheet acquisition is awaiting', async () => {
+    const { viewer, engine, requests } = buildViewer();
+    requests[0].resolve(worksheet('A'));
+    await engine.showSheet(0);
+    engine.scheduleRender = vi.fn();
+    const area = engine.canvasArea as { clientWidth: number; clientHeight: number };
+    area.clientWidth = 800; area.clientHeight = 600;
+    const input = engine.scrollHost as FakeEl;
+    input.clientWidth = 800; input.clientHeight = 600;
+    const original = viewer.getCellViewportRect('A2')!.height;
+    const switchPromise = engine.showSheet(1);
+    await Promise.resolve();
+    viewer.setSelection('1:1048576');
+    const cell = viewer.getCellViewportRect('A2')!;
+    const event = (y: number) => ({ button: 0, pointerId: 1, pointerType: 'mouse', clientX: 5,
+      clientY: y, preventDefault() {}, shiftKey: false, ctrlKey: false, metaKey: false });
+    input.dispatch('pointerdown', event(cell.y + cell.height + 0.5));
+    input.dispatch('pointermove', event(cell.y + 84));
+    expect(viewer.getCellViewportRect('A2')!.height).toBe(84);
+    requests[1].resolve(worksheet('B'));
+    await switchPromise; await engine.showSheet(0);
+    expect(viewer.getCellViewportRect('A2')!.height).toBe(original);
+    viewer.destroy();
+  });
+
   it('retains resized column geometry across A → B → A', async () => {
     const { viewer, engine, requests } = buildViewer();
     requests[0].resolve({ ...worksheet('A'), defaultColWidth: 8.43 });

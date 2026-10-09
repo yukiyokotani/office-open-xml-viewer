@@ -46,6 +46,7 @@ import {
   type CoordinateIndexIdentity,
 } from './renderer-coordinate-index.js';
 import { GridGeometry, MAX_WORKSHEET_COL } from './internal/grid-geometry.js';
+import { rowResizeRanges, rowResizeContains } from './internal/row-resize-overrides.js';
 import type { GridAxisGeometry } from './internal/grid-axis-geometry.js';
 import { resolveWorksheetAnchorRect } from './internal/initial-anchor-sizes.js';
 import { isOptionalImageUnavailable } from './internal/optional-image-fallback.js';
@@ -3424,6 +3425,7 @@ export function applyAutoRowHeights(
         row.hidden ||
         row.customHeight === true ||
         row.height !== null ||
+        rowResizeContains(rowResizeRanges(worksheet), row.index) ||
         Object.hasOwn(worksheet.rowHeights, row.index)
       ) continue;
       let requiredPx = defaultHeightPx;
@@ -3562,6 +3564,7 @@ export function invalidateAutoRowHeights(
   const preserved = new Set(preserveRows);
   let changed = false;
   for (const [row, derived] of state.derived) {
+    if (rowResizeContains(rowResizeRanges(worksheet), row)) continue;
     if (preserved.has(row)) continue;
     if (worksheet.rowHeights[row] !== derived) continue;
     delete worksheet.rowHeights[row];
