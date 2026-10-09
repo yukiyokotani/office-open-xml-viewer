@@ -22,7 +22,7 @@ import type {
   TextShapeRequest,
   TextShapeSpan,
 } from '../layout/text.js';
-import { calcEffectiveFontPx, EAST_ASIAN_RE, assertTextShapeRunContext, independentTextShapeRequest, sliceTextShapeRequest, registeredLatinMarkGraphemeCandidate } from '../layout/text.js';
+import { calcEffectiveFontPx, EAST_ASIAN_RE, assertTextShapeRunContext, independentTextShapeRequest, sliceTextShapeRequest, registeredLatinMarkGraphemeCandidate, registeredLatinSlotRunCandidate, registeredLatinSingleSeamCandidate } from '../layout/text.js';
 import {
   referenceFontAverageWidthRatio,
   referenceFontLineMetrics,
@@ -1307,12 +1307,15 @@ function emitResolvedTextSegment(
   } = frame;
   let textShapeRequest = initialTextShapeRequest;
   let shaped = initialShape;
-  // A single physical grapheme may retain several semantic rFonts slots.
+  // One physical grapheme or single-seam Latin word piece retains semantic slots.
   // Both ordinary slots use the same allocation policy only in the explicit
   // absence of character grid, spacing/scaling and atomic/transformed units.
   // The text service separately proves exact registered face and cmap cover.
-  if (!authoritativeSpan && shaped && shaped.spans.length > 1
-    && registeredLatinMarkGraphemeCandidate(text)
+  const hasSlotSeam = !authoritativeSpan && shaped !== undefined && shaped.spans.length > 1;
+  const joinGrapheme = hasSlotSeam && registeredLatinMarkGraphemeCandidate(text);
+  const joinLatin = hasSlotSeam && registeredLatinSingleSeamCandidate(shaped!.spans)
+    && textShapeRequest.kerning === true && registeredLatinSlotRunCandidate(text);
+  if (!authoritativeSpan && shaped && shaped.spans.length > 1 && (joinGrapheme || joinLatin)
     && environment.characterGridActive === false && environment.verticalCJK !== true
     && environment.paragraphRtl === false
     && !rtl && !ruby && fitTextRegionIndex === undefined
@@ -1321,7 +1324,13 @@ function emitResolvedTextSegment(
     && (effectiveCharacterScale == null || effectiveCharacterScale === 1)
     && !mappedSymbolUnicode && !compressCharacterWhitespace
     && (r.fontHint == null || r.fontHint === 'default')) {
-    const compoundRequest = Object.freeze({ ...textShapeRequest, joinRegisteredGrapheme: true });
+    // `text` is one splitTextForLayout piece, including its pure trailing
+    // U+0020 sequence. That separator is not a second WORD slot seam; the full
+    // piece still shares the uniform allocation/face/cmap proof. This is never
+    // a new run/line merge. Authored paint/atomic and differing policies split.
+    const compoundRequest = Object.freeze({ ...textShapeRequest,
+      ...(joinGrapheme ? { joinRegisteredGrapheme: true } : { joinRegisteredLatinSlots: true }),
+    });
     const compound = environment.layoutServices?.text.shape(compoundRequest);
     if (compound?.spans.length === 1 && compound.spans[0]?.semanticSlotSpans) {
       shaped = compound;

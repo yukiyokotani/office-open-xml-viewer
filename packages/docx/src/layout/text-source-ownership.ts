@@ -1,3 +1,4 @@
+import { sliceSemanticSlotSpans } from './text.js';
 import type { TextPlacement } from './types.js';
 
 /** Project original ownership from retained clusters; never reshape or repaint
@@ -45,12 +46,8 @@ export function sourceOwnedTextPlacements(placement: TextPlacement): readonly So
       dependency: owner.dependency,
       range: owner.range,
       text: placement.text.slice(offset, offset + owner.range.end - owner.range.start),
-      ...(placement.semanticSlotSpans ? { semanticSlotSpans: Object.freeze(
-        placement.semanticSlotSpans.flatMap(slot => {
-          const start = Math.max(slot.start, offset);
-          const end = Math.min(slot.end, offset + owner.range.end - owner.range.start);
-          return start < end ? [Object.freeze({ ...slot, start: start - offset, end: end - offset })] : [];
-        }),
+      ...(placement.semanticSlotSpans ? { semanticSlotSpans: sliceSemanticSlotSpans(
+        placement.semanticSlotSpans, offset, offset + owner.range.end - owner.range.start,
       ) } : {}),
       origin: whole ? placement.origin : { ...placement.origin, xPt: placement.origin.xPt + from },
       bounds: whole ? placement.bounds : { ...placement.bounds, xPt: placement.bounds.xPt + from, widthPt: to - from },

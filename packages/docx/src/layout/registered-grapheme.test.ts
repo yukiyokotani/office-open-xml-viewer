@@ -150,7 +150,7 @@ it('retains one paint operation and shared cluster geometry across source owners
   expect(owners[0].bounds).toEqual(owners[1].bounds);
   expect(structuredClone(placement)).toEqual(placement);
 });
-it('paints a justified compound grapheme at its own shape origin, not a split joined probe', () => {
+it('retains justified separator context without splitting the compound grapheme', () => {
   // Synthetic shaper: letters 6pt, an attached mark 0pt, a detached (string-
   // initial) mark 2pt, and kerning removes 1pt only from the " T" pair.
   const paintedOrigins = (text: string, markCovered: boolean) => {
@@ -185,10 +185,10 @@ it('paints a justified compound grapheme at its own shape origin, not a split jo
     const x = (p: TextPlacement) => p.origin.xPt + p.paintOps[0].offset.xPt;
     return placements.map(p => [p.text, x(p) - x(placements[0]), Boolean(p.semanticSlotSpans)]);
   };
-  // The compound paints as one shape; the joined probe "a T́" cannot
-  // carry its single-grapheme proof and would charge the detached 2pt mark
-  // (net +1) to the boundary. No estimated pair value replaces it.
-  expect(paintedOrigins('a T́', true)).toEqual([['a ', 0, false], ['T́', 12, true]]);
+  // The compound remains one paint shape. The bounded registered Latin
+  // probe revalidates the whole pair as one face, preserving the -1pt context
+  // without introducing the detached mark's 2pt advance.
+  expect(paintedOrigins('a T́', true)).toEqual([['a ', 0, false], ['T́', 11, true]]);
   // Ordinary pairs keep the native repair, including when the proof is
   // withheld and the same text keeps its per-slot spans.
   expect(paintedOrigins('a T', true)).toEqual([['a ', 0, false], ['T', 11, false]]);

@@ -1,6 +1,6 @@
 import { sliceTextBreakWindow } from './text-break-window.js';
 import { graphemeClusterOffsets } from '@silurus/ooxml-core';
-import { EAST_ASIAN_RE, sliceTextShapeRequest } from '../layout/text.js';
+import { EAST_ASIAN_RE, sliceTextShapeRequest, semanticSlotStartIndex } from '../layout/text.js';
 import { wordBalancedSpaceCellAdjustmentApplies } from '../layout/line-compatibility.js';
 import { type DocGridCtx, type LayoutSeg, type LayoutTextSeg } from './model.js';
 
@@ -212,9 +212,16 @@ export function slicedTextMetadata(
   start: number,
   end: number,
 ): Pick<LayoutTextSeg,
-  'punctuationCompressions' | 'noBreakRanges' | 'explicitBreaks' | 'textShapeRequest' | 'sourceTextOffset'
+  'punctuationCompressions' | 'noBreakRanges' | 'explicitBreaks' | 'textShapeRequest' | 'sourceTextOffset' | 'semanticSlotSpans' | 'semanticSlotRange' | 'script'
 > {
+  const slots = seg.semanticSlotSpans;
+  const slotStart = (seg.semanticSlotRange?.start ?? 0) + start;
+  const slotEnd = (seg.semanticSlotRange?.start ?? 0) + end;
   return {
+    ...(slots ? { semanticSlotSpans: slots,
+      semanticSlotRange: Object.freeze({ start: slotStart, end: slotEnd }),
+      script: slots[semanticSlotStartIndex(slots, slotStart)]?.script ?? seg.script,
+    } : {}),
     ...(seg.sourceTextOffset === undefined ? {} : { sourceTextOffset: seg.sourceTextOffset + start }),
     ...(seg.textShapeRequest
       ? { textShapeRequest: sliceTextShapeRequest(seg.textShapeRequest, start, end) }
