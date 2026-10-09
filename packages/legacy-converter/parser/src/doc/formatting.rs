@@ -5391,10 +5391,10 @@ mod tests {
     fn hresi_change_does_not_open_unimplemented_table_style_consumers() {
         for chpx in [
             &[0x4e, 0x48, 1, 0][..],
-            &leaked(ccnf(
+            leaked(ccnf(
                 table_style_condition::FIRST_COLUMN,
                 &[0x4e, 0x48, 1, 0],
-            ))[..],
+            )),
         ] {
             let mut f = observed_table_style_formatting();
             f.styles[0].as_mut().unwrap().table.as_mut().unwrap().chpx = chpx;
