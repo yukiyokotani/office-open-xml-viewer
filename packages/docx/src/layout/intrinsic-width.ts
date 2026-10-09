@@ -1,4 +1,6 @@
 import { textBreakWindow, textBreakOffsets } from '../line-breaker/text-break-window.js';
+import { LineMeasurementAdapter } from '../line-breaker/measurement-adapter.js';
+import { slicedTextMetadata } from '../line-breaker/advance.js';
 import { graphemeClusterOffsets } from '@silurus/ooxml-core';
 import type { DocTableCell } from '../types.js';
 import type { ParagraphLayoutContext } from '../layout-context.js';
@@ -264,6 +266,10 @@ function measureTextRange(
   characterGrid: DocGridCtx | undefined,
 ): number {
   let widthPt = 0;
+  // Keep physical word units intact; the same bounded boundary oracle used by
+  // justified line layout preserves registered compound/Latin context here.
+  let boundaryAdapter: LineMeasurementAdapter | undefined;
+  let previousCandidate: LayoutTextSeg | undefined;
   let pendingSnapBlock: Readonly<{
     kind: 'latin' | 'complexScript';
     naturalWidthPt: number;
@@ -303,14 +309,21 @@ function measureTextRange(
     const candidate = {
       ...piece.segment,
       text,
-      ...(piece.segment.textShapeRequest
-        ? { textShapeRequest: sliceTextShapeRequest(piece.segment.textShapeRequest, localStart, localEnd) } : {}),
+      ...slicedTextMetadata(piece.segment, localStart, localEnd),
       punctuationCompressions: slicedPunctuationCompressions(
         piece.segment,
         localStart,
         localEnd,
       ),
     };
+    if (previousCandidate && (previousCandidate.semanticSlotSpans || candidate.semanticSlotSpans)) {
+      boundaryAdapter ??= new LineMeasurementAdapter(measurer.context, 1, s => buildFont(
+        s.bold, s.italic, calcEffectiveFontPx(s, 1), s.fontFamily,
+        measurer.fontFamilyClasses as Record<string, string>, s.fontRoute,
+      ));
+      widthPt += boundaryAdapter.wordBoundaryAdvance(previousCandidate, candidate);
+    }
+    previousCandidate = candidate;
     const measureCandidate = (measured: LayoutTextSeg): number => {
       if (measured.textLayoutService && measured.textShapeRequest) {
         const shaped = measured.textLayoutService.shape({

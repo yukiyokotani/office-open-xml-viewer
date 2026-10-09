@@ -1,9 +1,21 @@
 import { wordKerningApplies } from '../layout/line-compatibility.js';
 import type { LayoutTextSeg } from '../line-layout.js';
 import type { MeasurementTextContext, VerticalGlyphMeasurementService } from '../layout/measurement-capabilities.js';
-import { calcEffectiveFontPx } from '../layout/text.js';
+import { calcEffectiveFontPx, semanticSlotStartIndex } from '../layout/text.js';
 import { charScaleFactor } from './advance.js';
 import { verticalRunInkExtra } from './vertical-text.js';
+
+/** Ownership retains the source's slots even after emergency slicing. Only
+ * overlapping slots describe the current physical seam; an all-ASCII suffix
+ * must keep the ordinary boundary contract despite its original mixed owner. */
+function hasLiveSlotSeam(segment: LayoutTextSeg | undefined): boolean {
+  const slots = segment?.semanticSlotSpans;
+  if (!segment || !slots) return false;
+  const start = segment.semanticSlotRange?.start ?? 0;
+  const end = segment.semanticSlotRange?.end ?? segment.text.length;
+  const first = slots[semanticSlotStartIndex(slots, start)];
+  return first !== undefined && first.end < end;
+}
 
 /** Owns the Canvas state used by one line-breaking pass. The state recorded here
  * describes only assignments made by this adapter; a future advance cache must
@@ -116,27 +128,29 @@ export class LineMeasurementAdapter {
    * a line-prefix cache. This does not promise arbitrary multi-token contextual
    * GSUB equivalence; RTL/complex and authored atomic units retain their own
    * shaping/placement contracts. Callers commit the result only on that line.
-   * Library policy: a registered compound grapheme (semanticSlotSpans) is one
-   * physical shape only as a single-grapheme request, so the joined probe
-   * re-splits its §17.3.2.26 slots and would charge the detached mark's
-   * advance to this boundary. Decline the repair there (no estimated pair
-   * value), as the intrinsic-width merge does. A compound never ends with a
-   * space, so only the right token can carry it. Unproven: whether native
-   * one-string shaping kerns across such a boundary.
+   * Registered physical units retain their ordinary slot metadata. A joined
+   * boundary probe may carry the same uniform-allocation proof, but the service
+   * must again select ONE exact registered face with all-or-none peer cmap.
+   * Otherwise decline rather than charging a detached mark or estimating a
+   * pair. Latin probes re-prove one ordinary WORD slot seam plus an optional
+   * pure trailing U+0020 span; two individually admitted tokens can still
+   * have too many joined word seams. All spaces retain full face/cmap proof.
+   * This bounded two-token probe does not merge retained paint units.
    */
   wordBoundaryAdvance(left: LayoutTextSeg | undefined, right: LayoutTextSeg): number {
     const l = left?.textShapeRequest;
     const r = right.textShapeRequest;
     const service = right.textLayoutService;
+    const physicalUnit = hasLiveSlotSeam(left) || hasLiveSlotSeam(right);
     if (!left || !l || !r || !service || service !== left.textLayoutService
       || !left.text.endsWith(' ') || right.text.startsWith(' ') || !right.text
-      || right.semanticSlotSpans
       || left.metricOnly || right.metricOnly || left.ruby || right.ruby
       || left.fitTextRegionIndex !== undefined || right.fitTextRegionIndex !== undefined
       || left.verticalRun || right.verticalRun || left.rtl || right.rtl
       || l.complexScript || r.complexScript || l.kerning !== true
       || (left.script !== 'ascii' && left.script !== 'highAnsi')
-      || left.script !== right.script
+      || (right.script !== 'ascii' && right.script !== 'highAnsi')
+      || (!physicalUnit && left.script !== right.script)
       || left.fontRoute?.fingerprint !== right.fontRoute?.fingerprint
       || calcEffectiveFontPx(left, this.scale) !== calcEffectiveFontPx(right, this.scale)
       || l.weight !== r.weight || l.style !== r.style || l.kerning !== r.kerning
@@ -147,9 +161,12 @@ export class LineMeasurementAdapter {
     const rc = r.substituteContext;
     if (!lc || !rc || lc.text !== rc.text || lc.offset + left.text.length !== rc.offset) return 0;
     const measure = (request: typeof r) => service.shape({ ...request,
-      fontSizePt: calcEffectiveFontPx(right, this.scale), measure: true, clusterGeometry: false }).advancePt;
-    const joined = { ...l, text: left.text + right.text };
-    return (measure(joined) - measure(l) - measure(r)) * charScaleFactor(right);
+      fontSizePt: calcEffectiveFontPx(right, this.scale), measure: true, clusterGeometry: false });
+    const joined = measure({ ...l, text: left.text + right.text,
+      ...(physicalUnit ? { joinRegisteredLatinSlots: true } : {}),
+    });
+    if (physicalUnit && !(joined.spans.length === 1 && joined.spans[0]?.semanticSlotSpans)) return 0;
+    return (joined.advancePt - measure(l).advancePt - measure(r).advancePt) * charScaleFactor(right);
   }
 
   measureRunText(segment: LayoutTextSeg, text: string): TextMetrics {

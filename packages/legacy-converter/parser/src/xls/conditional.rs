@@ -770,6 +770,8 @@ fn databar(
             // its 2007 gradient (observed in the same PDF).
             gradient: true,
             active_formula: None,
+            // BIFF has no linked x14 extension facts.
+            ext_threshold_formula: false,
             stop_if_true: false,
         },
         end,

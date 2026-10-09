@@ -22,6 +22,7 @@ import type {
   DelimitedTextParseRequest,
   DelimitedTextParseResponse,
 } from './delimited-text-protocol.js';
+import type { CfRuleDiagnostic } from './cf-diagnostics.js';
 
 /**
  * View-only point and compact row-interval overrides for one sheet, carried with every worker
@@ -223,7 +224,7 @@ export class WorksheetViewProjectionCache {
  *  render-local sheet projection; absent when nothing changed. */
 export type WireRenderViewportOptions = Omit<
   RenderViewportOptions,
-  'onTextRun' | 'loadedImages' | 'fetchImage'
+  'onTextRun' | 'loadedImages' | 'fetchImage' | 'cfDiagnostics'
 > & {
   sizeOverrides?: WireSizeOverrides;
 };
@@ -335,6 +336,13 @@ export type RenderWorkerResponse =
       usage?: OoxmlResourceUsageSnapshot;
     }
   | DelimitedTextParseResponse
-  | { type: 'viewportRendered'; id: number; bitmap: ImageBitmap }
+  | {
+      type: 'viewportRendered';
+      id: number;
+      bitmap: ImageBitmap;
+      /** Conditional-formatting diagnostics of THIS frame only (#1547); a
+       *  per-response batch, never a lifetime cursor. */
+      conditionalFormatting: readonly CfRuleDiagnostic[];
+    }
   | { type: 'worksheetsEvicted'; id: number }
   | ({ type: 'sheetSessionOpened'; id: number } & PullSessionIdentity<number>);

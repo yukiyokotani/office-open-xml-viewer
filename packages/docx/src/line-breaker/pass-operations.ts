@@ -1404,13 +1404,25 @@ export function performTextSegmentBox(
   const measured = justifiedCompressionApplies(operationState) && s.text.includes(' ') && !s.ruby
     ? measurement.measureSegment(s, 'spaces')
     : measureText(s, snapToCharsClass(s, characterGrid) === 'eastAsia');
-  const width = segAdvanceWidth(
+  let width = segAdvanceWidth(
     s,
     measured.width + verticalInkExtra(s, s.text),
     characterGrid,
     scale,
   );
   s.snapGridNaturalWidthPx = width;
+  // Max-content uses the unbroken native context, as its ordinary intrinsic
+  // text merge already does. Registered physical units must stay intact;
+  // acquire only their separator pair through the shared boundary oracle.
+  // This is not the bounded-line Word justification/compression policy.
+  if (operationState.widthPolicy === 'intrinsic') {
+    const previous = operationState.breakerState.currentLine.at(-1);
+    if (previous && 'text' in previous && (previous.semanticSlotSpans || s.semanticSlotSpans)) {
+      const boundary = measurement.wordBoundaryAdvance(previous, s);
+      s.leadingWordBoundaryPx = boundary;
+      width += boundary;
+    }
+  }
 
   const fullPx = s.fontSize * scale;
   let metricMeasurement = measured;

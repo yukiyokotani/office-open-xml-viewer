@@ -91,6 +91,15 @@ import { readDelimitedTextResponse } from './delimited-text-source.js';
 import { WorksheetPreview } from './internal/worksheet-preview.js';
 import { setWorksheetPreviewBounds } from './internal/worksheet-content-bounds.js';
 import { bindWorksheetPolicy } from './worksheet-policy-context.js';
+import {
+  CfDiagnosticCollector,
+  createCfReport,
+  decodeCfDiagnosticsWire,
+  takeCfReportSink,
+  type CfReportSink,
+  type CfRuleDiagnostic,
+  type XlsxConditionalFormattingReport,
+} from './cf-diagnostics.js';
 import type {
   DelimitedTextParseRequest,
   DelimitedTextParseResponse,
@@ -208,6 +217,8 @@ export class XlsxWorkbook {
    * on main, so this latch is the document-level poison boundary for every
    * later public operation on the same workbook instance. */
   private resourceFailure: OoxmlResourceLimitError | null = null;
+  /** Report of the most recently completed successful render (#1547). */
+  private lastCfReport: XlsxConditionalFormattingReport | null = null;
 
   private constructor(
     worker: Worker | null,
@@ -1245,7 +1256,8 @@ export class XlsxWorkbook {
   }
 
   /** Render a sheet viewport into `target`. Image bytes and decoded-image cache
-   * ownership stay with this workbook instance. */
+   * ownership stay with this workbook instance. A successfully painted frame
+   * commits its report; see {@link getLastConditionalFormattingDiagnostics}. */
   async renderViewport(
     target: HTMLCanvasElement | OffscreenCanvas,
     sheetIndex: number,
@@ -1258,6 +1270,24 @@ export class XlsxWorkbook {
     viewport: ViewportRange,
     opts: RenderViewportOptions = {},
   ): Promise<void> {
+    const { options, sink } = takeCfReportSink(opts);
+    // This invocation owns its viewport identity across resource awaits and
+    // caller callbacks; a later edit to the caller's object is another frame.
+    viewport = { row: viewport.row, col: viewport.col, rows: viewport.rows, cols: viewport.cols };
+    const generation = this.generation;
+    const diagnostics = await this.paintViewport(target, sheetIndex, viewport, options);
+    if (diagnostics) this.commitCfReport(generation, sheetIndex, viewport, diagnostics, sink);
+  }
+
+  /** Paint one viewport. Resolves with this invocation's CF diagnostics when
+   *  the frame painted, or null when a render commit guard stopped it before
+   *  painting. Never commits a report itself. */
+  private async paintViewport(
+    target: HTMLCanvasElement | OffscreenCanvas,
+    sheetIndex: number,
+    viewport: ViewportRange,
+    opts: RenderViewportOptions,
+  ): Promise<readonly CfRuleDiagnostic[] | null> {
     this.assertResourceHealthy();
     if (this._mode === 'worker') {
       throw new Error(
@@ -1268,6 +1298,8 @@ export class XlsxWorkbook {
     const styles = this.parsedWorkbook.styles;
     const extracted = extractViewerRenderContext(opts as WireRenderViewportOptions);
     const { sizeOverrides, ...renderOpts } = extracted.opts;
+    // One transient collector per paint invocation; never cached.
+    const cfDiagnostics = new CfDiagnosticCollector();
     const targetFontSet = isHTMLCanvas(target)
       ? target.ownerDocument.fonts
       : (typeof document !== 'undefined' ? document.fonts : null);
@@ -1297,11 +1329,12 @@ export class XlsxWorkbook {
             : undefined,
           googleSubstitutes: this.googleSubstitutes,
           fetchImage: this._fetchImage,
+          cfDiagnostics,
         },
       );
-      return;
+      return cfDiagnostics.painted ? cfDiagnostics.snapshot() : null;
     }
-    return this.withWorksheetArchiveOperation(sheetIndex, (source) => {
+    await this.withWorksheetArchiveOperation(sheetIndex, (source) => {
       const ws = extracted.worksheet ?? createSizeOverriddenWorksheet(source, sizeOverrides);
       if (ws !== source) inheritSheetRenderCache(source, ws);
       // The render bind may invalidate a geometry snapshot made in another
@@ -1329,9 +1362,11 @@ export class XlsxWorkbook {
             : undefined,
           googleSubstitutes: this.googleSubstitutes,
           fetchImage: this._fetchImage,
+          cfDiagnostics,
         },
       );
     });
+    return cfDiagnostics.painted ? cfDiagnostics.snapshot() : null;
   }
 
   /**
@@ -1356,8 +1391,11 @@ export class XlsxWorkbook {
     opts: WireRenderViewportOptions & { width: number; height: number },
   ): Promise<ImageBitmap> {
     this.assertResourceHealthy();
-    const extracted = extractViewerRenderContext(opts);
-    const wireOpts = { ...extracted.opts, dpr: opts.dpr ?? defaultDpr() };
+    const { options, sink } = takeCfReportSink(opts);
+    viewport = { row: viewport.row, col: viewport.col, rows: viewport.rows, cols: viewport.cols };
+    const generation = this.generation;
+    const extracted = extractViewerRenderContext(options);
+    const wireOpts = { ...extracted.opts, dpr: options.dpr ?? defaultDpr() };
     if (this._mode === 'worker') {
       if (!Number.isInteger(sheetIndex) || sheetIndex < 0 || sheetIndex >= this.sheetCount) {
         throw new Error(`Sheet index ${sheetIndex} out of range (count: ${this.sheetCount})`);
@@ -1395,11 +1433,69 @@ export class XlsxWorkbook {
       } else {
         res = await this.withWorksheetArchiveOperation(sheetIndex, request);
       }
-      return (res as Extract<RenderWorkerResponse, { type: 'viewportRendered' }>).bitmap;
+      const rendered = res as Extract<RenderWorkerResponse, { type: 'viewportRendered' }>;
+      const bitmap = rendered.bitmap;
+      try {
+        const diagnostics = decodeCfDiagnosticsWire(rendered.conditionalFormatting);
+        this.commitCfReport(generation, sheetIndex, viewport, diagnostics, sink);
+      } catch (error) {
+        // Ownership has not passed to the caller yet: release the surface.
+        bitmap.close();
+        throw error;
+      }
+      return bitmap;
     }
     const off = new OffscreenCanvas(1, 1);
-    await this.renderViewport(off, sheetIndex, viewport, wireOpts);
-    return off.transferToImageBitmap();
+    const diagnostics = await this.paintViewport(off, sheetIndex, viewport, wireOpts);
+    const bitmap = off.transferToImageBitmap();
+    if (diagnostics) {
+      try {
+        this.commitCfReport(generation, sheetIndex, viewport, diagnostics, sink);
+      } catch (error) {
+        bitmap.close();
+        throw error;
+      }
+    }
+    return bitmap;
+  }
+
+  /**
+   * The conditional-formatting evaluation boundary of the render that most
+   * recently COMPLETED successfully on this workbook (`renderViewport` or
+   * `renderViewportToBitmap`), or `null` before any render completes and
+   * after `destroy()`. Available by default; no callback is required.
+   *
+   * Library policy (#1547), not an Office behaviour:
+   * - Each record names a rule (`blockIndex`/`ruleIndex` into
+   *   `Worksheet.conditionalFormats`) that the frame reached but could not
+   *   evaluate; such a rule neither formatted nor stopped lower rules.
+   * - A successful frame without such rules replaces an older warning with
+   *   an empty `diagnostics` array. Failed renders and frames stopped before
+   *   painting never replace the report.
+   * - Concurrency: this is last-completion, not last-request, state, and it
+   *   is shared by every viewer of this workbook. It covers only cells that
+   *   frame evaluated; an empty array does not certify the whole sheet.
+   *
+   * The returned object is a frozen snapshot detached from renderer state.
+   */
+  getLastConditionalFormattingDiagnostics(): XlsxConditionalFormattingReport | null {
+    return this.lastCfReport;
+  }
+
+  private commitCfReport(
+    generation: number,
+    sheetIndex: number,
+    viewport: ViewportRange,
+    diagnostics: readonly CfRuleDiagnostic[],
+    sink: CfReportSink | undefined,
+  ): void {
+    // A render completing after destroy/reload belongs to a dead generation.
+    if (generation !== this.generation) return;
+    const report = createCfReport(sheetIndex, viewport, diagnostics);
+    sink?.(report);
+    // Sink failures propagate to the caller; they must not turn a rejected
+    // operation into the publicly visible last successful render.
+    this.lastCfReport = report;
   }
 
   /** @internal Drop projections owned by a destroyed viewer. */
@@ -1481,6 +1577,7 @@ export class XlsxWorkbook {
 
   destroy(): void {
     this.generation = (this.generation ?? 1) + 1;
+    this.lastCfReport = null;
     void this.worksheetPullClient?.cancelAll('closed').catch(() => undefined);
     this.worksheetPullClient = null;
     this.bridge?.terminate();
