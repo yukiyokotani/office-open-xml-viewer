@@ -31,8 +31,7 @@ export function getColumnCssWidth(ws: Worksheet, index: number): number | undefi
 export function setColumnCssWidth(ws: Worksheet, index: number, cssPx: number | null): boolean {
   const map = cssWidthsByWorksheet.get(ws);
   if (cssPx === null || !Number.isFinite(cssPx) || cssPx < 0) {
-    if (!map?.has(index)) return false;
-    map.delete(index);
+    if (!map?.delete(index)) return false;
     if (map.size === 0) cssWidthsByWorksheet.delete(ws);
     return true;
   }

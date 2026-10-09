@@ -157,7 +157,7 @@ export class SheetViewEdits {
     if (axis === 'row') entry.automaticRows.delete(index);
     const value = axis === 'row' ? ws.rowHeights[index] ?? null : ws.colWidths[index] ?? null;
     let changed = false;
-    if (!(target.get(index) === value && target.has(index))) {
+    if (target.get(index) !== value) {
       target.set(index, value);
       changed = true;
     }

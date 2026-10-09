@@ -95,16 +95,7 @@ export function createSizeOverriddenWorksheet(
   source: Worksheet,
   overrides: WireSizeOverrides | undefined,
 ): Worksheet {
-  if (!overrides) return source;
-  const view = {
-    ...source,
-    rowHeights: { ...source.rowHeights },
-    colWidths: { ...source.colWidths },
-  };
-  inheritWorksheetPolicy(source, view);
-  inheritColumnCssWidths(source, view);
-  applySizeOverrides(view, overrides);
-  return view;
+  return overrides ? createInitialSizeProjection(source, overrides) : source;
 }
 
 /** Render-local projection for a prepared-initial anchor reference. With
@@ -115,13 +106,19 @@ function createInitialSizeProjection(
   source: Worksheet,
   overrides: WireSizeOverrides | undefined,
 ): Worksheet {
-  if (overrides) return createSizeOverriddenWorksheet(source, overrides);
   // A new identity loses the WeakMap policy binding; the admitted policy (and
   // the renderer budgets derived from it) stays owned by the source, and the
   // cache's policy-identity check depends on this projection carrying it.
   const view = { ...source };
+  // Only an overridden projection mutates size maps. A prepared-anchor-only
+  // projection shares them read-only; both inherit context before any edits.
+  if (overrides) {
+    view.rowHeights = { ...source.rowHeights };
+    view.colWidths = { ...source.colWidths };
+  }
   inheritWorksheetPolicy(source, view);
   inheritColumnCssWidths(source, view);
+  applySizeOverrides(view, overrides);
   return view;
 }
 
