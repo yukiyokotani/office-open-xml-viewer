@@ -1928,6 +1928,7 @@ export interface NumberingInfo {
     picBulletMimeType?: string;
     picBulletWidthPt?: number;
     picBulletHeightPt?: number;
+    picBulletTransform?: Pick<ImageRun, 'srcRect' | 'rotation' | 'flipH' | 'flipV'>;
 }
 export class OoxmlDecodedImageLimitError extends RangeError {
     readonly metric: OoxmlDecodedImageLimitMetric;
