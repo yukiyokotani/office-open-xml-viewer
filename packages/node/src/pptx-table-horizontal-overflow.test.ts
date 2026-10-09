@@ -72,6 +72,40 @@ describe.skipIf(!skia)('PPTX cell horizontal overflow on actual Canvas', () => {
     expect(result.bounds.bottom).toBeGreaterThan(52);
   });
 
+  it('admits XML-token horizontal whitespace without accepting Unicode or internal whitespace', () => {
+    // DrawingML ST_TextVerticalType restricts xsd:token: U+0020/TAB/LF/CR
+    // surrounding the single-word enum are legal. NBSP is not XML whitespace.
+    const padded = ' \t horz\r\n';
+    const clippedTable = table();
+    clippedTable.rows[0].cells[0].textBody!.vert = padded;
+    const clipped = paint(clippedTable);
+    expect(clipped.bounds.right).toBeLessThan(100);
+    expect(clipped.runs.map(run => run.text).join('')).toBe('AAAAAAAA');
+    expect(clipped.runs.every(run => run.cellHorzOverflow === 'clip')).toBe(true);
+    // Admission must not rewrite the body or expand the existing paint policy.
+    expect(clippedTable.rows[0].cells[0].textBody!.vert).toBe(padded);
+
+    const overflowingTable = table('overflow');
+    overflowingTable.rows[0].cells[0].textBody!.vert = padded;
+    const overflowing = paint(overflowingTable);
+    expect(overflowing.bounds.right).toBeGreaterThan(100);
+    expect(overflowing.runs.map(run => run.text).join('')).toBe('AAAAAAAA');
+    expect(overflowing.runs.every(run => run.cellHorzOverflow === 'overflow')).toBe(true);
+
+    const missingTable = table();
+    delete (missingTable.rows[0].cells[0].textBody as Partial<TextBody>).vert;
+    expect(paint(missingTable).bounds.right).toBeLessThan(100);
+    for (const vert of ['\u00a0horz\u00a0', 'hor\tz', '', ' \tvert\r\n', 'unknown']) {
+      const input = table();
+      input.rows[0].cells[0].textBody!.vert = vert;
+      const result = paint(input);
+      expect(result.bounds.right, vert).toBeGreaterThan(100);
+      expect(result.runs.map(run => run.text).join(''), vert).toBe('AAAAAAAA');
+      expect(result.runs.every(run => !Object.hasOwn(run, 'cellHorzOverflow')), vert).toBe(true);
+      expect(input.rows[0].cells[0].textBody!.vert, vert).toBe(vert);
+    }
+  });
+
   it('leaves rotated and stacked vertical cell bodies on their unclipped path', () => {
     // The physical-x clip is admitted only for horizontal bodies. A 140px glyph
     // line is wider than the 60px cell in both modes, so a clip would hold ink
