@@ -73,14 +73,15 @@ function painter(
 describe('canonical Canvas paint resource handlers', () => {
   it('paints a cropped reflected picture bullet from its retained model descriptor', () => {
     const partPath = 'word/media/invented-bullet.png';
-    const doc = {
+    const doc: DocxDocumentModel = {
       section: {
         pageWidth: 612, pageHeight: 792,
         marginTop: 72, marginRight: 72, marginBottom: 72, marginLeft: 72,
         headerDistance: 36, footerDistance: 36,
         titlePage: false, evenAndOddHeaders: false,
       },
-      headers: {}, footers: {},
+      headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
       body: [{
         type: 'paragraph', alignment: 'left',
         indentLeft: 0, indentRight: 0, indentFirst: 0,
@@ -96,7 +97,7 @@ describe('canonical Canvas paint resource handlers', () => {
           },
         },
       }],
-    } as DocxDocumentModel;
+    };
     const registry = layoutSourceStore(doc).paintResources;
     const resourceKey = imageResourceKey(
       { story: 'body', storyInstance: 'body', path: [0] }, partPath,
