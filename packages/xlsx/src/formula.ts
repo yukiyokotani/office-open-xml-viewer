@@ -1,6 +1,9 @@
 import { excelSerialToUtcDate, utcDateToExcelSerial } from '@silurus/ooxml-core';
 import type { Cell, DefinedName } from './types.js';
-import { MAX_WORKSHEET_COL, MAX_WORKSHEET_ROW } from './internal/grid-geometry.js';
+// OOXML's fixed address grammar bounds belong to lexical reference parsing,
+// independently of renderer geometry and its shared layout runtime.
+const MAX_WORKSHEET_ROW = 1_048_576;
+const MAX_WORKSHEET_COL = 16_384;
 
 // ────────────────────────────────────────────────────────────────
 // Formula evaluator (conditional-formatting `expression` rules)
