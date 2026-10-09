@@ -1,6 +1,8 @@
 import type { Worksheet } from '../types.js';
 
-export type RowResizeRange = Readonly<{ first: number; last: number; height: number }>;
+import { rowResizeRanges, installValidatedRowResizeRanges,
+  type RowResizeRange } from './worksheet-size-context.js';
+export { rowResizeRanges, type RowResizeRange } from './worksheet-size-context.js';
 export type RowBandRange = Readonly<{ first: number; last: number }>;
 export type RowResizePreview = Readonly<{ apply(height: number): void; rollback(): void }>;
 
@@ -8,12 +10,6 @@ export type RowResizePreview = Readonly<{ apply(height: number): void; rollback(
 // count. One interval can resize all 1,048,576 worksheet rows. Hidden rows are
 // excluded at gesture start; subsequent size-0 point edits still win in geometry.
 export const MAX_ROW_RESIZE_INTERVALS = 16_384;
-const rows = new WeakMap<Worksheet, readonly RowResizeRange[]>();
-
-export function rowResizeRanges(ws: Worksheet): readonly RowResizeRange[] {
-  return rows.get(ws) ?? [];
-}
-
 export function rowResizeContains(ranges: readonly RowBandRange[], index: number): boolean {
   let low = 0, high = ranges.length;
   while (low < high) {
@@ -41,14 +37,13 @@ export function validateRowResizeRanges(ranges: readonly RowResizeRange[]): void
 /** The immutable ranges are projection metadata, never parser/model facts. */
 export function setRowResizeRanges(ws: Worksheet, ranges: readonly RowResizeRange[]): void {
   validateRowResizeRanges(ranges);
-  if (ranges.length) rows.set(ws, Object.isFrozen(ranges) && ranges.every(Object.isFrozen)
+  installValidatedRowResizeRanges(ws, Object.isFrozen(ranges) && ranges.every(Object.isFrozen)
     ? ranges : Object.freeze(ranges.map(r => Object.freeze({ ...r }))));
-  else rows.delete(ws);
 }
 
 export function inheritRowResizeRanges(source: Worksheet, target: Worksheet): void {
-  const ranges = rows.get(source);
-  if (ranges) rows.set(target, ranges);
+  const ranges = rowResizeRanges(source);
+  if (ranges.length) installValidatedRowResizeRanges(target, ranges);
 }
 
 /** Overlay a uniform gesture on a canonical prior set. Sweep boundaries rather

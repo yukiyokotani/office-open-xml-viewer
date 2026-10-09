@@ -75,4 +75,27 @@ describe('compact row resize projections', () => {
     expect(ws.rowHeights).toEqual(before);
     expect(GridGeometry.forWorksheet(ws, 7).row.sizeOf(2)).toBe(20);
   });
+
+  it('keeps row runs and CSS widths independent when a derived projection edits or removes either', () => {
+    const untouched = worksheet();
+    const source = createSizeOverriddenWorksheet(untouched, {
+      rowHeightRanges: [{ first: 1, last: 1048576, height: 63 }],
+      columnCssWidths: { 2: 84 },
+    });
+    // A later column-only projection must inherit the existing compact rows,
+    // while giving its mutable column map independent ownership.
+    const derived = createSizeOverriddenWorksheet(source, { columnCssWidths: { 2: 96 } });
+    expect(GridGeometry.forWorksheet(derived, 7).row.sizeOf(500000)).toBe(84);
+    expect(GridGeometry.forWorksheet(derived, 7).col.sizeOf(2)).toBe(96);
+    expect(GridGeometry.forWorksheet(source, 7).col.sizeOf(2)).toBe(84);
+    applySizeOverrides(derived, { columnCssWidths: { 2: null } });
+    expect(GridGeometry.forWorksheet(derived, 7).row.sizeOf(500000)).toBe(84);
+    expect(GridGeometry.forWorksheet(derived, 7).col.sizeOf(2))
+      .toBe(GridGeometry.forWorksheet(untouched, 7).col.sizeOf(2));
+    applySizeOverrides(derived, { columnCssWidths: { 2: 96 }, rowHeightRanges: [] });
+    expect(GridGeometry.forWorksheet(derived, 7).col.sizeOf(2)).toBe(96);
+    expect(GridGeometry.forWorksheet(derived, 7).row.sizeOf(500000)).toBe(40);
+    expect(GridGeometry.forWorksheet(source, 7).row.sizeOf(500000)).toBe(84);
+    expect(GridGeometry.forWorksheet(source, 7).row.sizeOf(3)).toBe(0);
+  });
 });

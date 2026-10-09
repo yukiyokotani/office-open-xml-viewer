@@ -9,8 +9,9 @@ import type { OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
 import type { NormalizedOoxmlResourcePolicy } from '@silurus/ooxml-core/worker';
 import type { PullSessionIdentity } from '@silurus/ooxml-core/worker';
 import { GridGeometry } from './internal/grid-geometry.js';
-import { inheritColumnCssWidths, setColumnCssWidth } from './internal/column-css-overrides.js';
-import { inheritRowResizeRanges, setRowResizeRanges,
+import { setColumnCssWidth } from './internal/column-css-overrides.js';
+import { inheritWorksheetSizeContext } from './internal/worksheet-size-context.js';
+import { setRowResizeRanges,
   type RowResizeRange } from './internal/row-resize-overrides.js';
 import {
   bindInitialAnchorSizes,
@@ -129,8 +130,7 @@ function createInitialSizeProjection(
     view.colWidths = { ...source.colWidths };
   }
   inheritWorksheetPolicy(source, view);
-  inheritColumnCssWidths(source, view);
-  inheritRowResizeRanges(source, view);
+  inheritWorksheetSizeContext(source, view);
   applySizeOverrides(view, overrides);
   return view;
 }

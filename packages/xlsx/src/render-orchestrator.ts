@@ -52,8 +52,7 @@ import {
   HEADER_H,
 } from './renderer.js';
 import { GridGeometry } from './internal/grid-geometry.js';
-import { inheritColumnCssWidths } from './internal/column-css-overrides.js';
-import { inheritRowResizeRanges } from './internal/row-resize-overrides.js';
+import { inheritWorksheetSizeContext } from './internal/worksheet-size-context.js';
 import type { CellAnchorSizeFacts } from './internal/cell-anchor-geometry.js';
 import { resolveWorksheetAnchorRect } from './internal/initial-anchor-sizes.js';
 import { rotatedImageBounds } from './internal/image-anchor-transform.js';
@@ -770,8 +769,7 @@ export function worksheetWithAutoRowHeights(
   // This is a fresh row-height projection: preserve view-only column pixel
   // intent before geometry/wrapping. Render-cache inheritance also runs after
   // worker size overrides, so it must never overwrite their CSS channel.
-  inheritColumnCssWidths(source, projection);
-  inheritRowResizeRanges(source, projection);
+  inheritWorksheetSizeContext(source, projection);
   inheritSheetRenderCache(source, projection);
   // The viewer/main realm supplies the authoritative Normal-font MDW used by
   // hit-testing and spacer geometry. Preserve it across the render-local clone
