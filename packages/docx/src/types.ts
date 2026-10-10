@@ -1727,6 +1727,10 @@ export interface DocxTextRunInfo {
   sourceRunIndex?: number;
   /** Resolved direction of this rendered text segment. */
   direction?: 'ltr' | 'rtl';
+  /** Selected authored discretionary ink keeps its original empty logical
+   * text owner. Its painted '-' is retained by the Canvas layout, not copied
+   * into the selection or the find index. Literal hyphens omit this flag. */
+  optionalHyphenGlyph?: true;
   text: string;
   /** Left edge in canvas CSS px. */
   x: number;

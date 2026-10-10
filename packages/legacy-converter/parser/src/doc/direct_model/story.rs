@@ -253,6 +253,23 @@ pub(super) fn project(
                         budget,
                     )?;
                 }
+                Token::OptionalHyphen => {
+                    // Native U+001F is a conditional glyph, not ignorable
+                    // text. Resolve its own CP→FC and physical CHPX/piece PRM
+                    // cascade before visibility filtering. This validates
+                    // Hresi even on a standalone or vanished marker; invalid
+                    // operands cannot borrow a neighboring text run's owner.
+                    // The common §17.3.3.29 consumer chooses this run's styled
+                    // U+002D only at an actual authored discretionary break.
+                    let (_, fc, piece) = story.position(cp)
+                        .ok_or_else(|| unsupported("Word optional hyphen outside piece table"))?;
+                    if let Some(mut run) = linked_text_run(
+                        formatting, style, table_style, fc, piece.prm, &story.prcs, link,
+                    )? {
+                        run.optional_hyphen = true;
+                        budget.text(&mut paragraph.runs, &mut run, "")?;
+                    }
+                }
                 Token::LineBreak => {
                     let (_, fc, piece) = story
                         .position(cp)

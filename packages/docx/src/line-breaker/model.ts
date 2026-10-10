@@ -33,6 +33,21 @@ export interface LayoutSegSource {
 
 export interface LayoutTextSeg extends LayoutSegSource {
   text: string;
+  /** An authored zero-advance discretionary boundary. The retained glyph
+   * has this source marker's own shaping/paint route; only a selected break
+   * materializes it. The empty marker itself never paints or sizes a line. */
+  optionalHyphen?: Readonly<LayoutTextSeg>;
+  /** Styled authored opportunities inside uninterrupted, contextually shaped
+   * text. Offsets are UTF-16 boundaries; the marker's source run owns the glyph. */
+  // Acquisition, compatible merging and slicing preserve nondecreasing
+  // source offsets (equal offsets retain consecutive owners). Endpoint
+  // ownership is therefore decided by the final offset in constant time.
+  optionalHyphenBreaks?: readonly Readonly<{ offset: number; glyph: Readonly<LayoutTextSeg> }>[];
+  /** This joined word contains an authored discretionary marker. */
+  optionalHyphenWord?: true;
+  /** A selected authored marker owns visible '-' ink but no logical text.
+   * This typed identity survives placement for source-based copy/find. */
+  optionalHyphenGlyph?: true;
   semanticSlotSpans?: import('../layout/text.js').TextShapeSpan['semanticSlotSpans'];
   /** Shared immutable slot source plus this slice's window. Emergency suffixes
    * must not copy all remaining slots on every break. Retained placements

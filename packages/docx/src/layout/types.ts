@@ -366,6 +366,9 @@ export interface RetainedRunTypographyFacts {
 
 export interface TextPlacement {
   readonly kind: 'text';
+  /** Authored discretionary '-' ink has an empty logical source owner.
+   * Paint still consumes text/paintOps; copy and find consume the typed owner. */
+  readonly optionalHyphenGlyph?: true;
   readonly text: string;
   /** Semantic rFonts ranges relative to this physical shape unit's text. */
   readonly semanticSlotSpans?: import('./text.js').TextShapeSpan['semanticSlotSpans'];

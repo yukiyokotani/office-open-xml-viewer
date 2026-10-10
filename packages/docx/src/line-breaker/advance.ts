@@ -212,7 +212,7 @@ export function slicedTextMetadata(
   start: number,
   end: number,
 ): Pick<LayoutTextSeg,
-  'punctuationCompressions' | 'noBreakRanges' | 'explicitBreaks' | 'textShapeRequest' | 'sourceTextOffset' | 'semanticSlotSpans' | 'semanticSlotRange' | 'script'
+  'punctuationCompressions' | 'noBreakRanges' | 'explicitBreaks' | 'textShapeRequest' | 'sourceTextOffset' | 'semanticSlotSpans' | 'semanticSlotRange' | 'script' | 'optionalHyphenBreaks'
 > {
   const slots = seg.semanticSlotSpans;
   const slotStart = (seg.semanticSlotRange?.start ?? 0) + start;
@@ -229,6 +229,8 @@ export function slicedTextMetadata(
     punctuationCompressions: slicedPunctuationCompressions(seg, start, end),
     noBreakRanges: slicedNoBreakRanges(seg, start, end),
     explicitBreaks: sliceTextBreakWindow(seg.explicitBreaks, start, end),
+    optionalHyphenBreaks: seg.optionalHyphenBreaks?.filter(marker => marker.offset > start && marker.offset <= end)
+      .map(marker => Object.freeze({ ...marker, offset: marker.offset - start })),
   };
 }
 

@@ -776,6 +776,38 @@ export function finalizeBuiltSegments(
     }
   }
 
+  // A formatting seam on either side of an authored optional marker is not
+  // an ordinary break. Keep the word joined; the discretionary consumer
+  // decides both the opportunity and the conditional glyph's measured cost.
+  for (let index = 0; index < segs.length; index += 1) {
+    const marker = segs[index];
+    if (!('text' in marker)) continue;
+    const inlineEndpoint = marker.optionalHyphenBreaks?.at(-1)?.offset === marker.text.length;
+    if (!marker.optionalHyphen && !inlineEndpoint) continue;
+    const previous = segs[index - 1];
+    const next = segs[index + 1];
+    if (marker.optionalHyphen && previous && 'text' in previous && !/\s$/u.test(previous.text)) marker.joinPrev = true;
+    if (next && 'text' in next && !/^\s/u.test(next.text)) next.joinPrev = true;
+  }
+  // Mark each complete joined word once, avoiding a lookahead scan for every
+  // ordinary word or formatting seam in the paragraph.
+  for (let start = 0; start < segs.length;) {
+    const first = segs[start];
+    if (!('text' in first)) { start++; continue; }
+    let end = start + 1;
+    let optional = first.optionalHyphen !== undefined || Boolean(first.optionalHyphenBreaks?.length);
+    while (end < segs.length) {
+      const next = segs[end];
+      if (!('text' in next) || !next.joinPrev) break;
+      optional ||= next.optionalHyphen !== undefined || Boolean(next.optionalHyphenBreaks?.length);
+      end++;
+    }
+    if (optional) for (let index = start; index < end; index++) {
+      (segs[index] as LayoutTextSeg).optionalHyphenWord = true;
+    }
+    start = end;
+  }
+
   retainHorizontalPunctuationInkClearance(segs);
 }
 
@@ -1633,6 +1665,22 @@ function appendRunsToSegments(
     const emittedStart = segs.length;
     if (run.type === 'text') {
       const t = run as unknown as DocxTextRun & { type: 'text' };
+      if ((run as ParagraphTextBearingRun).optionalHyphen === true) {
+        // §17.3.3.29: acquire the conditional hyphen through the ordinary
+        // font/shape/paint route, retaining its own run rather than borrowing
+        // either neighbor. Its empty source marker contributes no geometry
+        // unless the breaker chooses this authored boundary.
+        appendTextPiece(segmentBuildContext, '-', t, t.vertAlign ?? null, runIndex,
+          { text: '-', offset: 0 });
+        for (let index = emittedStart; index < segs.length; index += 1) {
+          const glyph = segs[index];
+          if (!('text' in glyph)) throw new Error('An optional hyphen lost its text authority');
+          segs[index] = { ...glyph, text: '', metricOnly: true,
+            optionalHyphen: Object.freeze({ ...glyph }), measuredWidth: 0,
+            sourceRunIndex: runIndex };
+        }
+        continue;
+      }
       if ((run as ParagraphTextBearingRun).noteSeparatorCharacter !== undefined) {
         // MS-DOC 2.3.3 reserved separator character: the U+0003/U+0004 rule
         // control or its story's content paragraph mark. Neither has a glyph
@@ -1971,14 +2019,39 @@ function appendRunsToSegments(
         snapToCharacterGrid: false,
       });
     }
+    let sequenceOffset = 0;
+    let markerIndex = 0;
     for (let index = emittedStart; index < segs.length; index += 1) {
       const segment = segs[index];
       segment.sourceRunIndex = runIndex;
       if (sequence) {
         segment.sourceTextSequence = sequence.sources;
-        segment.sourceTextOffset = 'text' in segment
-          ? segment.textShapeRequest?.substituteContext?.offset ?? 0
+        // Authored optional controls need the displayed source sweep even
+        // when no shaping service is installed. Sequences without controls
+        // retain their existing anchor projection unchanged.
+        segment.sourceTextOffset = sequence.optionalHyphens.length > 0 ? sequenceOffset
+          : 'text' in segment ? segment.textShapeRequest?.substituteContext?.offset ?? 0
           : segment.sourceTextOffset ?? 0;
+        const end = sequenceOffset + ('text' in segment ? segment.text.length : 'isTab' in segment ? 1 : 0);
+        if ('text' in segment) {
+          const opportunities: NonNullable<LayoutTextSeg['optionalHyphenBreaks']>[number][] = [];
+          while (markerIndex < sequence.optionalHyphens.length
+            && sequence.optionalHyphens[markerIndex]!.offset <= end) {
+            const marker = sequence.optionalHyphens[markerIndex++]!;
+            const glyphs: LayoutSeg[] = [];
+            appendTextPiece({ ...segmentBuildContext, segs: glyphs }, '-', marker.run,
+              marker.run.vertAlign ?? null, marker.runIndex, { text: '-', offset: 0 });
+            if (glyphs.length !== 1 || !('text' in glyphs[0]!)) {
+              throw new Error('An optional hyphen lost its single conditional glyph');
+            }
+            const glyph = glyphs[0] as LayoutTextSeg;
+            glyph.sourceRunIndex = marker.runIndex;
+            opportunities.push(Object.freeze({ offset: marker.offset - sequenceOffset,
+              glyph: Object.freeze(glyph) }));
+          }
+          if (opportunities.length) segment.optionalHyphenBreaks = Object.freeze(opportunities);
+        }
+        sequenceOffset = end;
       }
     }
   }

@@ -18,7 +18,12 @@ import { canvasPaintFrame } from './deferred-paint-frame.js';
 import { applyCanvasTransform } from './canvas-transform.js';
 
 function validateTextSlices(placement: import('../layout/types.js').TextPlacement): void {
-  if (placement.text.length !== placement.range.end - placement.range.start) {
+  const optionalGlyph = placement.optionalHyphenGlyph === true;
+  if (optionalGlyph && (placement.text !== '-' || placement.clusters.length !== 1
+    || placement.paintOps.length !== 1 || placement.paintOps[0]?.text !== '-')) {
+    throw new Error('Invalid retained optional hyphen glyph');
+  }
+  if ((optionalGlyph ? 0 : placement.text.length) !== placement.range.end - placement.range.start) {
     throw new Error('UTF-16 text range is inconsistent');
   }
   if (placement.clusters.length === 0) {
@@ -30,7 +35,7 @@ function validateTextSlices(placement: import('../layout/types.js').TextPlacemen
     if (
       !Number.isFinite(advancePt)
       || !Number.isFinite(offset.xPt) || !Number.isFinite(offset.yPt)
-      || range.start !== cursor || range.end <= range.start
+      || range.start !== cursor || (optionalGlyph ? range.end !== range.start : range.end <= range.start)
       || range.end > placement.range.end
     ) {
       throw new Error(
@@ -47,7 +52,7 @@ function validateTextSlices(placement: import('../layout/types.js').TextPlacemen
   }
   let previousEnd = placement.range.start;
   for (const op of placement.paintOps) {
-    const invalidTextMapping = op.sourceMapping !== 'kashida'
+    const invalidTextMapping = !optionalGlyph && op.sourceMapping !== 'kashida'
       && op.text.length !== op.range.end - op.range.start;
     const invalidGeometry = !Number.isFinite(op.offset.xPt) || !Number.isFinite(op.offset.yPt)
       || (op.glyphOffsetPt !== undefined
@@ -59,7 +64,8 @@ function validateTextSlices(placement: import('../layout/types.js').TextPlacemen
       || !Number.isFinite(op.letterSpacingPt)
       || !Number.isFinite(op.scaleX) || op.scaleX <= 0
       || (op.scaleY !== undefined && (!Number.isFinite(op.scaleY) || op.scaleY <= 0));
-    const invalidRange = op.range.start !== previousEnd || op.range.end <= op.range.start
+    const invalidRange = op.range.start !== previousEnd
+      || (optionalGlyph ? op.range.end !== op.range.start : op.range.end <= op.range.start)
       || op.range.end > placement.range.end;
     if (invalidTextMapping || invalidGeometry || invalidRange) {
       throw new Error(
@@ -68,7 +74,7 @@ function validateTextSlices(placement: import('../layout/types.js').TextPlacemen
     }
     previousEnd = op.range.end;
   }
-  const trailing = placement.text.slice(previousEnd - placement.range.start);
+  const trailing = optionalGlyph ? '' : placement.text.slice(previousEnd - placement.range.start);
   if (trailing !== '' && !/^\s+$/u.test(trailing)) {
     throw new Error(`Retained glyph slices are incomplete (paint end ${previousEnd}/${placement.range.end})`);
   }

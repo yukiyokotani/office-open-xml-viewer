@@ -7363,7 +7363,9 @@ fn has_mergeformat_switch(instr: &str) -> bool {
 /// contents — merging text into (or out of) such a run would be wrong even
 /// if the annotation happened to match.
 fn text_runs_mergeable(a: &TextRun, b: &TextRun) -> bool {
-    a.ruby.is_none()
+    !a.optional_hyphen
+        && !b.optional_hyphen
+        && a.ruby.is_none()
         && b.ruby.is_none()
         && a.revision.is_none()
         && b.revision.is_none()
@@ -7670,6 +7672,7 @@ fn parse_run_inner(
                         no_break_before: false,
                         no_break_after: false,
                         no_break_hyphen_offsets: Vec::new(),
+                    optional_hyphen: false,
                         bold,
                         italic,
                         underline,
@@ -7772,6 +7775,7 @@ fn parse_run_inner(
                         no_break_before: false,
                         no_break_after: false,
                         no_break_hyphen_offsets: Vec::new(),
+                    optional_hyphen: false,
                         bold,
                         italic,
                         underline,
@@ -7835,6 +7839,7 @@ fn parse_run_inner(
                     no_break_before: false,
                     no_break_after: false,
                     no_break_hyphen_offsets: Vec::new(),
+                    optional_hyphen: false,
                     bold,
                     italic,
                     underline,
@@ -7907,7 +7912,7 @@ fn parse_run_inner(
                     break_type: BreakType::Line,
                 });
             }
-            "noBreakHyphen" => {
+            "noBreakHyphen" | "softHyphen" => {
                 // ECMA-376 §17.3.3.18 <w:noBreakHyphen> — a non-breaking hyphen.
                 // The spec: "display using the same glyph as the hyphen-minus
                 // character (U+002D) … without that hyphen being a line breaking
@@ -7933,14 +7938,16 @@ fn parse_run_inner(
                 // `<w:t>` immediately following this element merges the same way
                 // (see the "t" | "delText" arm above), so the whole spec example
                 // collapses to one run and the boundary vanishes entirely.
+                let optional = child.tag_name().name() == "softHyphen";
                 let this = TextRun {
-                    text: "-".to_string(),
+                    text: if optional { String::new() } else { "-".to_string() },
+                    optional_hyphen: optional,
                     // If the hyphen cannot merge with the previous text run,
                     // this provenance closes the otherwise breakable run
                     // boundary for every formatting/revision/comment reason.
-                    no_break_before: true,
-                    no_break_after: true,
-                    no_break_hyphen_offsets: vec![1],
+                    no_break_before: !optional,
+                    no_break_after: !optional,
+                    no_break_hyphen_offsets: if optional { Vec::new() } else { vec![1] },
                     bold,
                     italic,
                     underline,
@@ -7990,6 +7997,16 @@ fn parse_run_inner(
                     note_ref: None,
                     typography_acquisition: typography_acquisition.clone(),
                 };
+                if optional {
+                    // §17.3.3.29: the authored opportunity survives with its
+                    // own formatting, although its unselected glyph has zero
+                    // width. It can be chosen without automatic dictionary
+                    // hyphenation. Never coalesce away this conditional owner.
+                    runs.push(DocRun::Text(Box::new(this)));
+                    merge_into_prev_text = false;
+                    preserve_next_comment_boundary = false;
+                    continue;
+                }
                 match runs.last_mut() {
                     Some(DocRun::Text(prev))
                         if !preserve_next_comment_boundary && text_runs_mergeable(prev, &this) =>
@@ -8010,23 +8027,6 @@ fn parse_run_inner(
                 // (the exact shape of the spec example's 2nd/3rd runs) should
                 // merge into the run we just pushed/extended above.
                 merge_into_prev_text = true;
-            }
-            "softHyphen" => {
-                // ECMA-376 §17.3.3.29 <w:softHyphen> — an OPTIONAL hyphen. The spec
-                // gives it two states: (a) when it is NOT the character used to
-                // break the line it "shall have zero width" and "shall not change
-                // the normal display of text"; (b) only when it IS the break point
-                // does it display a U+002D hyphen-minus. This renderer performs no
-                // automatic hyphenation, so a soft hyphen is never chosen as a break
-                // point — state (a) always applies. The minimal spec-correct
-                // behaviour is therefore to emit NOTHING: no glyph and no added
-                // break opportunity. (Always drawing a '-' would be wrong — Word
-                // shows it only at an actual line break.)
-                //
-                // TODO: when automatic hyphenation (§17.15.1.x autoHyphenation) is
-                // implemented, a soft hyphen at a chosen break must render a trailing
-                // '-' on the broken line; wire this element into that break-point
-                // logic then. Until then, dropping it is the correct display.
             }
             "ptab" => {
                 // ECMA-376 §17.3.3.23 <w:ptab> — an absolute-position tab. It reads
@@ -8180,6 +8180,7 @@ fn parse_run_inner(
                     no_break_before: false,
                     no_break_after: false,
                     no_break_hyphen_offsets: Vec::new(),
+                    optional_hyphen: false,
                     bold,
                     italic,
                     underline,
@@ -17033,13 +17034,13 @@ mod tests {
         assert_eq!(text.no_break_hyphen_offsets, vec![4]);
     }
 
-    // §17.3.3.29 <w:softHyphen> — zero width and no glyph when not a break point.
-    // With no automatic hyphenation, a soft hyphen is never a break point.
+    // §17.3.3.29: retain the conditional glyph's own run, even when automatic
+    // hyphenation is absent. Layout decides whether its authored break is used.
     #[test]
-    fn soft_hyphen_is_invisible() {
+    fn soft_hyphen_retains_its_styled_conditional_owner() {
         let base = RunFmt::default();
         let runs = parse_para(
-            r#"<w:r><w:t>br</w:t><w:softHyphen/><w:t>eaking</w:t></w:r>"#,
+            r#"<w:r><w:t>br</w:t></w:r><w:r><w:rPr><w:color w:val="FF0000"/><w:sz w:val="28"/></w:rPr><w:softHyphen/></w:r><w:r><w:t>eaking</w:t></w:r>"#,
             &base,
             &StyleMap::parse(""),
         );
@@ -17055,6 +17056,13 @@ mod tests {
         assert!(!joined.contains('-'));
         // And it does NOT create a break run.
         assert!(!runs.iter().any(|r| matches!(r, DocRun::Break { .. })));
+        let [DocRun::Text(before), DocRun::Text(marker), DocRun::Text(after)] = runs.as_slice() else {
+            panic!("optional marker must retain its own styled run");
+        };
+        assert_eq!((&before.text[..], &marker.text[..], &after.text[..]), ("br", "", "eaking"));
+        assert_eq!(serde_json::to_value(marker).unwrap()["__optionalHyphen"], true);
+        assert_eq!(marker.color.as_deref(), Some("ff0000"));
+        assert_eq!(marker.font_size, 14.0);
     }
 
     // §17.3.3.23 <w:ptab> — an absolute-position tab surfaces as a PTab run

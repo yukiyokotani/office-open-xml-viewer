@@ -1461,6 +1461,7 @@ export interface DocxTextRunInfo {
     paragraphId?: string;
     sourceRunIndex?: number;
     direction?: 'ltr' | 'rtl';
+    optionalHyphenGlyph?: true;
     text: string;
     x: number;
     y: number;
