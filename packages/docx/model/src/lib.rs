@@ -2107,6 +2107,9 @@ pub struct ShapeRun {
     /// carried verbatim for the host-specific retained text-box layout.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_vert: Option<String>,
+    /// DrawingML bodyPr@upright: keep text independent of the shape rotation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_upright: Option<bool>,
     /// Body-pr text insets in pt (left/top/right/bottom). Default 0 each.
     #[serde(skip_serializing_if = "is_zero_f64")]
     pub text_inset_l: f64,

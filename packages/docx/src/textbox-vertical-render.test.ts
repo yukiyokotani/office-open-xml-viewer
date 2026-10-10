@@ -19,6 +19,9 @@ import {
   acquireAndPaintShapeTextBox,
   acquireShapeTextBoxForTest,
 } from './retained-shape-textbox.test-support.js';
+import { createPageLayers } from './layout/page-graph.js';
+import { textRunGeometryForPage } from './layout/text-index.js';
+import type { DocumentLayout } from './layout/types.js';
 import type { ShapeRun, ShapeText, ShapeTextRun } from './types';
 
 // ECMA-376 §20.1.10.83 ST_TextVerticalType — a DrawingML text-box body direction
@@ -185,6 +188,50 @@ describe('§20.1.10.83 textbox <wps:bodyPr vert> — vertical text-box rendering
     const drawn = glyphs.filter((g) => g.text.includes(CJK) || g.text.includes(LAT) || /経|A/.test(g.text));
     expect(drawn.length).toBeGreaterThan(0);
     for (const g of drawn) expect(NEAR(norm(g.angleDeg), 0)).toBe(true);
+  });
+
+  it.each([
+    [-90, false, null, -90], [30, false, null, 30],
+    [-90, true, null, 0], [-90, false, 'vert', 0],
+    [90, false, 'vert270', 0],
+  ])('composes shape rotation=%s upright=%s vert=%s once', (rotation, textUpright, textVert, angle) => {
+    const { ctx, glyphs } = makeMatrixCtx();
+    const shape = { ...richTextbox([run('A')], textVert), rotation, textUpright };
+    acquireAndPaintShapeTextBox(shape, 10, 20, 200, 100, ctx, 1, {});
+    expect(norm(glyphs.find((g) => g.text === 'A')!.angleDeg)).toBeCloseTo(angle);
+  });
+
+  it('rotates ordinary text around its shape center without mirroring readable glyphs', () => {
+    const original = makeMatrixCtx();
+    const rotated = makeMatrixCtx();
+    const shape = richTextbox([run('A')]);
+    acquireAndPaintShapeTextBox(shape, 10, 20, 200, 100, original.ctx, 1, {});
+    acquireAndPaintShapeTextBox({ ...shape, rotation: -90, flipH: true, flipV: true },
+      10, 20, 200, 100, rotated.ctx, 1, {});
+    const before = original.glyphs.find((g) => g.text === 'A')!;
+    const after = rotated.glyphs.find((g) => g.text === 'A')!;
+    expect(after.devX).toBeCloseTo(110 + before.devY - 70);
+    expect(after.devY).toBeCloseTo(70 - before.devX + 110);
+    expect(norm(after.angleDeg)).toBeCloseTo(-90);
+  });
+
+  it('projects selectable text through the retained shape rotation', () => {
+    const { ctx } = makeMatrixCtx();
+    const shape = { ...richTextbox([run('A')]), rotation: -90 };
+    const textBox = acquireShapeTextBoxForTest(shape, 10, 20, 200, 100, ctx, 1, {});
+    expect(textBox).toBeDefined();
+    const layers = createPageLayers([{
+      layer: 'body', node: textBox!, coordinateSpace: 'upright-physical',
+    }]);
+    const layout = { pages: [{
+      pageIndex: 0, flowDomains: [], readingOrder: [textBox!.id], sectionRegions: [], layers,
+    }] } as unknown as DocumentLayout;
+    const [geometry] = textRunGeometryForPage(layout, 0);
+
+    expect(geometry?.placement.text).toBe('A');
+    expect(geometry?.pointToPage).toMatchObject({
+      a: 0, b: -1, c: 1, d: 0, e: 40, f: 180,
+    });
   });
 
   it('vert: every glyph rotated +90° CW (all-rotate; CJK included)', () => {

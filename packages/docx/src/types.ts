@@ -982,6 +982,8 @@ export interface ShapeRun {
    *  left-to-right column layout (both wordArtVert and wordArtVertRtl).
    *  Other unrecognised values fall back to horizontal. */
   textVert?: string | null;
+  /** DrawingML bodyPr@upright: keep text independent of the shape rotation. */
+  textUpright?: boolean | null;
   /** ECMA-376 Part 4 §19.1.2.23 `<v:textpath>` — WordArt text laid on the
    *  shape path (a text watermark). When set the renderer draws this string,
    *  scaled to fill the box (`fitshape`), rotated by {@link ShapeRun.rotation},

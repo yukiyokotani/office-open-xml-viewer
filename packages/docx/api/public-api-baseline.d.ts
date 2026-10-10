@@ -2367,6 +2367,8 @@ export interface ShapeRun {
     textInsetR?: number;
     textInsetB?: number;
     textVert?: string | null;
+    /** DrawingML bodyPr@upright: keep text independent of the shape rotation. */
+    textUpright?: boolean | null;
     textPath?: TextPath | null;
     fillOpacity?: number | null;
 }
