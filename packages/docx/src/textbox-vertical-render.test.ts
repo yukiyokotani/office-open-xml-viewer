@@ -215,6 +215,16 @@ describe('§20.1.10.83 textbox <wps:bodyPr vert> — vertical text-box rendering
     expect(norm(after.angleDeg)).toBeCloseTo(-90);
   });
 
+  it('keeps upright stacked text independent of the shape rotation and vertical flip', () => {
+    const reference = makeMatrixCtx();
+    const transformed = makeMatrixCtx();
+    const shape = { ...richTextbox([run('A')], 'wordArtVert'), textUpright: true };
+    acquireAndPaintShapeTextBox(shape, 10, 20, 200, 100, reference.ctx, 1, {});
+    acquireAndPaintShapeTextBox({ ...shape, rotation: 30, flipV: true },
+      10, 20, 200, 100, transformed.ctx, 1, {});
+    expect(transformed.glyphs).toEqual(reference.glyphs);
+  });
+
   it('projects selectable text through the retained shape rotation', () => {
     const { ctx } = makeMatrixCtx();
     const shape = { ...richTextbox([run('A')]), rotation: -90 };

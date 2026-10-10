@@ -4289,8 +4289,10 @@ export function acquireShapeTextBoxLayout(
     // Issue #1668 Word controls: 0/30/90 degree shape rotations carry the
     // WordArt text frame; flipH keeps it readable, flipV turns it 180 degrees.
     // Retain the composed transform here so paint/indexing use the same frame.
-    const textRotationDeg = (shape.textUpright ? 0 : shape.rotation ?? 0)
-      + (stackedWordArt && shape.flipV ? 180 : 0);
+    // ECMA-376 §20.4.2.22 bodyPr@upright opts out of the accompanying
+    // shape transform, including WordArt's vertical-flip rotation.
+    const textRotationDeg = shape.textUpright ? 0
+      : (shape.rotation ?? 0) + (stackedWordArt && shape.flipV ? 180 : 0);
     // Exact data for quarter turns: Math.cos(π/2) is not 0, and a quarter
     // turn must stay one (axis-aligned) for its story's page frames.
     const quarterTurns = Number.isInteger(textRotationDeg / 90)

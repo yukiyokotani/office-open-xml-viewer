@@ -9,7 +9,7 @@ import { renderDocumentToCanvas, type DocxTextRunInfo } from './renderer.js';
 const encoder = new TextEncoder();
 const EMU = 12_700;
 const PNG = Uint8Array.from(Buffer.from(
-  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQI12P4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==',
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==',
   'base64',
 ));
 

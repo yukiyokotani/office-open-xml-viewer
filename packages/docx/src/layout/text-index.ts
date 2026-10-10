@@ -386,6 +386,9 @@ function visitParagraph(
   context: ProjectionContext,
 ): void {
   const paragraphProjection = withClip(projection, paragraph.clipBounds);
+  const textBoxesById = new Map(
+    paragraph.textBoxes.map((textBox) => [textBox.id, textBox]),
+  );
   if (
     context.collectCompletedParagraphSources
     && paragraph.continuation?.continuesOnNext !== true
@@ -393,8 +396,18 @@ function visitParagraph(
     context.completedParagraphSources.add(sourceKey(paragraph.source));
   }
   if (context.collectTextRuns || context.collectTextRunSources) {
+    const inlineTextDrawings = new Map(paragraph.drawings
+      .filter((drawing) => !drawing.anchorLayer && (drawing.textBoxIds?.length ?? 0) > 0)
+      .map((drawing) => [drawing.id, drawing]));
     for (const line of paragraph.lines) {
       for (const retained of line.placements) {
+        // ECMA-376 §20.4.2.8: an inline drawing occupies its run's place in
+        // paragraph flow. Library selection policy includes nested text there
+        // for copy; floating stories keep their separate reading-order policy.
+        if (retained.kind === 'drawing') {
+          const drawing = inlineTextDrawings.get(retained.drawingId);
+          if (drawing) visitDrawing(textBoxesById, drawing, paragraphProjection, context);
+        }
         if (retained.kind === 'text') for (const placement of sourceOwnedTextPlacements(retained)) {
           if (context.collectTextRuns) {
             context.runs.push(Object.freeze({
@@ -439,9 +452,6 @@ function visitParagraph(
     }
   }
 
-  const textBoxesById = new Map(
-    paragraph.textBoxes.map((textBox) => [textBox.id, textBox]),
-  );
   const ownedTextBoxIds = new Set<string>();
   const drawingsInSourceOrder = paragraph.drawings
     .map((drawing, index) => {

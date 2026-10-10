@@ -8731,11 +8731,33 @@ fn parse_inline_drawing_impl(
                 }
             }
         }
-        // Keep an inline WPG as one flow object. Its positioned children reuse
-        // the retained textbox story, rather than each advancing the line pen.
+        // ECMA-376 §20.4.2.8 wp:inline retains one flow object. [MS-ODRAWXML]
+        // §2.16.3.2 CT_WordprocessingGroup allows interleaved WPS shapes,
+        // pictures and nested groups; their positioned children reuse one
+        // retained story rather than each advancing the line pen. graphicFrame
+        // and contentPart group children are not yet supported by these readers.
         if let Some(wgp) = container
-            .descendants()
-            .find(|n| n.tag_name().name() == "wgp")
+            .children()
+            .find(|n| n.is_element() && n.tag_name().name() == "graphic")
+            .and_then(|graphic| {
+                graphic
+                    .children()
+                    .find(|n| n.is_element() && n.tag_name().name() == "graphicData")
+            })
+            .filter(|data| {
+                data.attribute("uri")
+                    == Some("http://schemas.microsoft.com/office/word/2010/wordprocessingGroup")
+            })
+            .and_then(|data| {
+                data.children().find(|n| {
+                    n.is_element()
+                        && n.tag_name().name() == "wgp"
+                        && n.tag_name().namespace()
+                            == Some(
+                                "http://schemas.microsoft.com/office/word/2010/wordprocessingGroup",
+                            )
+                })
+            })
         {
             if let Some((width_pt, height_pt)) = drawing_extent_points(container) {
                 let metadata = anchor_group_metadata_index(wgp);
@@ -8820,18 +8842,19 @@ fn parse_inline_drawing_impl(
                         }
                         _ => unreachable!("WPG walkers emit shapes and images"),
                     };
-                    let rect = apply_word_direct_group_rect(
-                        frame,
-                        DrawingRect {
-                            x: *x,
-                            y: *y,
-                            width: *w,
-                            height: *h,
-                            rotation_degrees: *rotation,
-                            flip_h: *flip_h,
-                            flip_v: *flip_v,
-                        },
-                    );
+                    // Walkers already applied the authored group hierarchy and
+                    // its bounded direct-leaf Word compatibility rule. This
+                    // wp:extent frame is only a coordinate-space adapter, not
+                    // another authored group (Annex L §L.4.7.4).
+                    let rect = frame.apply_rect(DrawingRect {
+                        x: *x,
+                        y: *y,
+                        width: *w,
+                        height: *h,
+                        rotation_degrees: *rotation,
+                        flip_h: *flip_h,
+                        flip_v: *flip_v,
+                    });
                     *x = rect.x;
                     *y = rect.y;
                     *w = rect.width;
@@ -27282,6 +27305,68 @@ mod inline_wps_shape_tests {
             })
             .collect();
         assert_eq!(children, vec![("ALPHA", 40.0, 20.0), ("BETA", 100.0, 20.0)]);
+
+        // A nested leaf stays on Annex L's authored-axis scale path. The
+        // wp:extent adapter must not turn it into a directly grouped leaf.
+        let nested_xml = xml
+            .replace("<wp:extent cx=\"2540000\" cy=\"635000\"/>", "<wp:extent cx=\"2540000\" cy=\"317500\"/>")
+            .replace("<wps:wsp>", "<wpg:grpSp><wpg:grpSpPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"1270000\" cy=\"317500\"/><a:chOff x=\"0\" y=\"0\"/><a:chExt cx=\"1270000\" cy=\"317500\"/></a:xfrm></wpg:grpSpPr><wps:wsp>")
+            .replace("</wps:wsp>", "</wps:wsp></wpg:grpSp>");
+        let nested_doc = roxmltree::Document::parse(&nested_xml).unwrap();
+        let nested_runs = parse_inline_drawing_impl(
+            &StyleMap::default(),
+            &mut NumberingMap::default(),
+            nested_doc.root_element(),
+            &HashMap::from([("rIdOverlay".into(), "word/media/overlay.png".into())]),
+            &ChartMap::default(),
+            &HashMap::new(),
+            &ThemeColors::default(),
+            DepthGuard::root(),
+        );
+        let [DocRun::Shape(nested_group)] = nested_runs.as_slice() else {
+            panic!("group missing")
+        };
+        let TextBoxBlockWire::Body(BodyElement::Paragraph(nested_paragraph)) =
+            &nested_group.text_box_content[0]
+        else {
+            panic!("story missing")
+        };
+        let DocRun::Shape(nested_leaf) = &nested_paragraph.runs[0] else {
+            panic!("leaf missing")
+        };
+        assert_eq!((nested_leaf.width_pt, nested_leaf.height_pt), (40.0, 10.0));
+
+        let outer_xml = format!(
+            r#"<w:drawing
+          xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+          xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+          xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+          xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
+          <wp:inline><wp:extent cx="3810000" cy="1270000"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
+          <wps:wsp><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="3810000" cy="1270000"/></a:xfrm><a:prstGeom prst="rect"/></wps:spPr>
+          <wps:txbx><w:txbxContent><w:p><w:r><w:t>OUTER</w:t></w:r><w:r>{xml}</w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr/>
+          </wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing>"#
+        );
+        let outer_doc = roxmltree::Document::parse(&outer_xml).unwrap();
+        let outer_runs = parse_inline_drawing_impl(
+            &StyleMap::default(),
+            &mut NumberingMap::default(),
+            outer_doc.root_element(),
+            &HashMap::new(),
+            &ChartMap::default(),
+            &HashMap::new(),
+            &ThemeColors::default(),
+            DepthGuard::root(),
+        );
+        let [DocRun::Shape(outer)] = outer_runs.as_slice() else {
+            panic!("outer shape missing")
+        };
+        assert_eq!(
+            (outer.width_pt, outer.height_pt),
+            (300.0, 100.0),
+            "a nested drawing cannot replace its containing inline shape"
+        );
+        assert!(outer.text_blocks[0].text.starts_with("OUTER"));
     }
 }
 
