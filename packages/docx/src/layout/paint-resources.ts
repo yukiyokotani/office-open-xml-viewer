@@ -4,7 +4,7 @@ import type {
   PaintResourceDescriptorKind,
   PaintResourceRegistry,
 } from './types.js';
-import { snapshotPlainData } from './plain-data.js';
+import { isDeepFrozenPlainDataRoot, sealPlainData, snapshotPlainData } from './plain-data.js';
 
 function assertNonEmptyString(value: string, path: string): void {
   if (typeof value !== 'string' || value.trim().length === 0) {
@@ -125,6 +125,12 @@ export function indexSealedPaintResourceDescriptors(
     validateDescriptor(descriptor);
     if (!Object.isFrozen(descriptor)) {
       throw new TypeError(`Owned paint descriptor must be sealed: ${descriptor.resourceKey}`);
+    }
+    if ((descriptor.kind === 'image' || descriptor.kind === 'picture-bullet') && !isDeepFrozenPlainDataRoot(descriptor)) {
+      // This immutable graph may have arrived under a cloned/array root.
+      // Re-establish descriptor-root authority with the existing full walk;
+      // shallow freezing is not a replacement ownership proof.
+      sealPlainData(descriptor, `owned image descriptor ${descriptor.resourceKey}`);
     }
     if (previousKey !== null && descriptor.resourceKey.localeCompare(previousKey) <= 0) {
       throw new Error(`Owned paint descriptors must have unique sorted keys: ${descriptor.resourceKey}`);

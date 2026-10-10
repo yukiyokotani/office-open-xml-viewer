@@ -1,3 +1,4 @@
+import { hasNativeReadingRequests } from '../native-reading-notice.js';
 import { resolveCjkFallback, type CjkLang } from '@silurus/ooxml-core';
 import {
   preloadGoogleFonts,
@@ -391,7 +392,7 @@ export async function loadDocxModelSource(
             )
             : undefined,
         };
-        if (deferrable && opts.progressiveLayout) {
+        if (deferrable && opts.progressiveLayout && !hasNativeReadingRequests(doc._source)) {
           const store = retained.layoutVariants;
           // Narrowed once: the closures below outlive this block's control flow.
           const progressiveDocument = doc;

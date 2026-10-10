@@ -1,3 +1,4 @@
+import type { GeometryPathSink } from './path-data';
 import type { PathCmd } from '../types/common';
 
 export interface CustomGeometryBounds {
@@ -94,8 +95,8 @@ export function getCustomGeometryBounds(
  * from the current pen point and `stAng`.
  */
 export function buildCustomPath(
-  ctx: CanvasRenderingContext2D,
-  subpaths: PathCmd[][],
+  ctx: GeometryPathSink,
+  subpaths: readonly (readonly PathCmd[])[],
   x: number,
   y: number,
   w: number,

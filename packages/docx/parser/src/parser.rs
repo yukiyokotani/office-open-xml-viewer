@@ -5926,6 +5926,7 @@ fn resolve_numbering_marker(
         };
 
     Some(NumberingInfo {
+        native_reading_word_breaking: None,
         num_id,
         level: marker_level,
         format,
@@ -5944,6 +5945,7 @@ fn resolve_numbering_marker(
         pic_bullet_width_pt,
         pic_bullet_height_pt,
         pic_bullet_transform: None,
+        native_reading_picture_bullet: None,
     })
 }
 
@@ -7276,6 +7278,7 @@ fn make_field_run(
 ) -> DocRun {
     let field_type = classify_field(instr);
     DocRun::Field(Box::new(FieldRun {
+        native_reading_word_breaking: None,
         field_type,
         instruction: instr.trim().to_string(),
         fallback_text: fallback.to_string(),
@@ -7668,6 +7671,7 @@ fn parse_run_inner(
                 let text = child.text().unwrap_or("").to_string();
                 if !text.is_empty() {
                     let this = TextRun {
+                        native_reading_word_breaking: None,
                         text,
                         no_break_before: false,
                         no_break_after: false,
@@ -7771,6 +7775,7 @@ fn parse_run_inner(
                         .resolve_font_ref(attr_w(child, "font"))
                         .or_else(|| font_family.clone());
                     runs.push(DocRun::Text(Box::new(TextRun {
+                        native_reading_word_breaking: None,
                         text: c.to_string(),
                         no_break_before: false,
                         no_break_after: false,
@@ -7835,6 +7840,7 @@ fn parse_run_inner(
             "tab" => {
                 // w:tab emits a horizontal tab character; layout handles tab stop alignment.
                 runs.push(DocRun::Text(Box::new(TextRun {
+                    native_reading_word_breaking: None,
                     text: "\t".to_string(),
                     no_break_before: false,
                     no_break_after: false,
@@ -7946,6 +7952,7 @@ fn parse_run_inner(
                         "-".to_string()
                     },
                     optional_hyphen: optional,
+                    native_reading_word_breaking: None,
                     // If the hyphen cannot merge with the previous text run,
                     // this provenance closes the otherwise breakable run
                     // boundary for every formatting/revision/comment reason.
@@ -8180,6 +8187,7 @@ fn parse_run_inner(
                 };
                 let id_str = attr_w(child, "id").unwrap_or_default();
                 runs.push(DocRun::Text(Box::new(TextRun {
+                    native_reading_word_breaking: None,
                     text: id_str.clone(),
                     no_break_before: false,
                     no_break_after: false,
@@ -9815,6 +9823,8 @@ fn parse_anchor_acquisition_wire(container: &roxmltree::Node) -> AnchorAcquisiti
             layout_in_cell_status: anchor_value_status(layout_in_cell_raw, layout_in_cell),
         },
         group: None,
+        native_reading_relocation: None,
+        native_picture_metadata: None,
     }
 }
 

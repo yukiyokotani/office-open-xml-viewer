@@ -77,6 +77,7 @@ impl Properties {
 
         let mut run = TextRun {
             text,
+            native_reading_word_breaking: self.native_reading_word_breaking(),
             bold: self.bool_value("b").unwrap_or(false),
             italic: self.bool_value("i").unwrap_or(false),
             underline,

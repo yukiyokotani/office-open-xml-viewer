@@ -1317,6 +1317,22 @@ mod tests {
         build_scoped_cfb(&[("WordDocument", word), ("0Table", table)])
     }
 
+    /// Memory-only mutation of self-authored two-stream controls, not samples.
+    fn reading_contour_control(bytes: &[u8], wrapping: u16, textbox_count: u32) -> Vec<u8> {
+        let cfb = CompoundFile::open(bytes).unwrap();
+        let word = cfb.stream("WordDocument").unwrap();
+        let mut table = cfb.stream("0Table").unwrap();
+        let offset = u32::from_le_bytes(word[0x1da..0x1de].try_into().unwrap()) as usize;
+        // One PlcSpa record: two CPs, then Spa.flags at byte 20, cTxbx at 22.
+        let flags_offset = offset + 8 + 20;
+        let flags = u16::from_le_bytes(table[flags_offset..flags_offset + 2].try_into().unwrap());
+        // [MS-DOC] Spa: wr occupies bits 5..8; retain the authored wrk side in bits 9..12.
+        let flags = (flags & !(0xf << 5)) | (wrapping << 5);
+        table[flags_offset..flags_offset + 2].copy_from_slice(&flags.to_le_bytes());
+        table[flags_offset + 2..flags_offset + 6].copy_from_slice(&textbox_count.to_le_bytes());
+        build_scoped_cfb(&[("WordDocument", word), ("0Table", table)])
+    }
+
     /// A textbox (msosptTextBox) or rectangle anchored in the main or header
     /// document. The textbox story follows the header story; its FTXBXS and
     /// Tbkd tables name the shape (MS-DOC 2.3.6-2.3.7, 2.9.106, 2.9.312).
@@ -1335,6 +1351,16 @@ mod tests {
         header: bool,
         grouped: bool,
         turns: [u32; 2],
+    ) -> Vec<u8> {
+        drawing_source_with_nested_textbox(textbox, header, grouped, turns, false)
+    }
+
+    fn drawing_source_with_nested_textbox(
+        textbox: Option<&str>,
+        header: bool,
+        grouped: bool,
+        turns: [u32; 2],
+        nested_textbox: bool,
     ) -> Vec<u8> {
         let main = if header { "B\r" } else { "B\u{8}\r" };
         let main_units = main.encode_utf16().count();
@@ -1459,6 +1485,11 @@ mod tests {
                             picture_record(0xf009, 1, &rect([-10, -10, 10, 10])),
                             fsp(0, 2053, 0x203),
                             picture_record(0xf00f, 0, &rect([500, 250, 1000, 500])),
+                            if nested_textbox {
+                                picture_record(0xf00d, 0, &1u32.to_le_bytes())
+                            } else {
+                                Vec::new()
+                            },
                         ]
                         .concat(),
                     ),
@@ -2101,6 +2132,133 @@ mod tests {
     const FLOATING_IMAGE_RUN: &str = r#"{"__anchorAcquisition":{"anchorDistances":{"bottomPt":4.0,"bottomStatus":"valid","leftPt":1.0,"leftStatus":"valid","rightPt":3.0,"rightStatus":"valid","topPt":2.0,"topStatus":"valid"},"behavior":{"allowOverlap":false,"allowOverlapStatus":"valid","behindDoc":false,"behindDocStatus":"valid","layoutInCell":false,"layoutInCellStatus":"valid","locked":true,"lockedStatus":"valid","relativeHeight":77,"relativeHeightStatus":"valid"},"extent":{"heightPt":15.0,"heightStatus":"valid","widthPt":20.0,"widthStatus":"valid"},"group":null,"horizontal":{"choice":{"kind":"offset","valuePt":-5.0},"relativeFrom":"page","relativeFromStatus":"valid"},"occurrenceId":"legacy-doc-float-1","parentEffectExtent":{"bottomPt":null,"bottomStatus":"missing","leftPt":null,"leftStatus":"missing","rightPt":null,"rightStatus":"missing","topPt":null,"topStatus":"missing"},"relativeSize":{"horizontal":null,"vertical":null},"simplePosition":{"enabled":false,"status":"valid","xPt":0.0,"xStatus":"valid","yPt":0.0,"yStatus":"valid"},"vertical":{"choice":{"kind":"offset","valuePt":10.0},"relativeFrom":"paragraph","relativeFromStatus":"valid"},"wrap":{"authoredKinds":["wrapSquare"],"distances":{"bottomPt":null,"bottomStatus":"missing","leftPt":null,"leftStatus":"missing","rightPt":null,"rightStatus":"missing","topPt":null,"topStatus":"missing"},"effectExtent":null,"kind":"square","polygon":null,"side":"right"}},"allowOverlap":false,"anchor":true,"anchorXFromMargin":false,"anchorXPt":-5.0,"anchorXRelativeFrom":"page","anchorYFromPara":true,"anchorYPt":10.0,"anchorYRelativeFrom":"paragraph","colorReplaceFrom":null,"distBottom":4.0,"distLeft":1.0,"distRight":3.0,"distTop":2.0,"flipH":true,"flipV":true,"heightPt":15.0,"imagePath":"legacy-doc/float/0","mimeType":"image/png","srcRect":{"b":0.25,"l":0.375,"r":0.5,"t":0.125},"type":"image","widthPt":20.0,"wrapMode":"square","wrapSide":"right"}"#;
 
     #[test]
+    fn explicit_reading_picture_retains_authored_contour_host_crop_and_resource_while_strict_refuses(
+    ) {
+        for (wrapping, kind, authored) in [(4, "tight", "wrapTight"), (5, "through", "wrapThrough")]
+        {
+            let bytes =
+                reading_contour_control(&floating_picture_source("B\u{8}\r", false), wrapping, 0);
+            let cfb = CompoundFile::open(&bytes).unwrap();
+            let strict_error = super::super::direct_model(&cfb, 1024 * 1024).unwrap_err();
+            assert!(
+                strict_error.contains("direct DOC model encountered omitted drawing content"),
+                "{strict_error}"
+            );
+            let reading =
+                super::super::direct_model_with_reading_policy(&cfb, 1024 * 1024, true).unwrap();
+            assert_eq!(reading.resources.len(), 1);
+            let BodyElement::Paragraph(paragraph) = &reading.document.body[0] else {
+                panic!("paragraph")
+            };
+            let [DocRun::Text(text), DocRun::AnchorHost(host), DocRun::Image(image)] =
+                paragraph.runs.as_slice()
+            else {
+                panic!("complete source")
+            };
+            assert_eq!(text.text, "B");
+            let acquisition = image.anchor_acquisition.as_ref().unwrap();
+            assert_eq!(
+                host.anchor_occurrence_id.as_deref(),
+                Some(acquisition.occurrence_id.as_str())
+            );
+            assert_eq!(image.wrap_mode.as_deref(), Some(kind));
+            assert_eq!(acquisition.wrap.authored_kinds, [authored]);
+            assert!(acquisition.wrap.polygon.is_none());
+            assert_eq!(
+                serde_json::to_value(acquisition).unwrap()["nativeReadingRelocation"],
+                "completeScene"
+            );
+            assert_eq!(image.image_path, reading.resources[0].key);
+            assert_eq!((image.width_pt, image.height_pt), (20.0, 15.0));
+            assert!(image.flip_h && image.flip_v && image.src_rect.is_some());
+            assert_eq!(
+                super::super::direct_model_with_reading_policy(&cfb, 1, true).unwrap_err(),
+                "OUTPUT_TOO_LARGE"
+            );
+        }
+    }
+
+    #[test]
+    fn reading_group_retains_every_resolved_vector_and_refuses_unacquired_owned_story() {
+        let bytes = reading_contour_control(&drawing_source(None, false, true, [0, 0]), 5, 0);
+        let cfb = CompoundFile::open(&bytes).unwrap();
+        let strict_error = super::super::direct_model(&cfb, 1024 * 1024).unwrap_err();
+        assert!(
+            strict_error.contains("Word drawing group uses an unsupported wrap contour"),
+            "{strict_error}"
+        );
+        let reading =
+            super::super::direct_model_with_reading_policy(&cfb, 1024 * 1024, true).unwrap();
+        let shapes: Vec<_> = reading
+            .document
+            .body
+            .iter()
+            .filter_map(|element| match element {
+                BodyElement::Paragraph(paragraph) => Some(paragraph.runs.iter()),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|run| match run {
+                DocRun::Shape(shape) => Some(shape),
+                _ => None,
+            })
+            .collect();
+        assert!(!shapes.is_empty());
+        let first = shapes[0]
+            .anchor_acquisition
+            .as_ref()
+            .unwrap()
+            .group
+            .as_ref()
+            .unwrap();
+        assert_eq!(first.source_count, shapes.len());
+        for (index, shape) in shapes.iter().enumerate() {
+            let acquisition = shape.anchor_acquisition.as_ref().unwrap();
+            assert_eq!(acquisition.wrap.authored_kinds, ["wrapThrough"]);
+            assert_eq!(acquisition.group.as_ref().unwrap().source_index, index);
+            assert_eq!(
+                serde_json::to_value(acquisition).unwrap()["nativeReadingRelocation"],
+                "completeScene"
+            );
+        }
+        // Outer SPA ownership is independent of a picture's owned story and
+        // of a nested group-head record. A partial group is never a reading scene.
+        let outer_owned = reading_contour_control(&drawing_source(None, false, true, [0, 0]), 5, 1);
+        let error = super::super::direct_model_with_reading_policy(
+            &CompoundFile::open(&outer_owned).unwrap(),
+            1024 * 1024,
+            true,
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("reading group has unacquired outer textbox content"),
+            "{error}"
+        );
+        let owned = reading_contour_control(&floating_picture_source("B\u{8}\r", false), 5, 1);
+        let error = super::super::direct_model_with_reading_policy(
+            &CompoundFile::open(&owned).unwrap(),
+            1024 * 1024,
+            true,
+        )
+        .unwrap_err();
+        assert!(error.contains("unacquired owned textbox"));
+        // The outer SPA cTxbx remains zero: nested group-head ownership must
+        // be checked independently, before a complete reading scene is emitted.
+        let nested = reading_contour_control(
+            &drawing_source_with_nested_textbox(None, false, true, [0, 0], true),
+            5,
+            0,
+        );
+        let error = super::super::direct_model_with_reading_policy(
+            &CompoundFile::open(&nested).unwrap(),
+            1024 * 1024,
+            true,
+        )
+        .unwrap_err();
+        assert!(error.contains("unacquired nested textbox"), "{error}");
+    }
+
+    #[test]
     fn floating_picture_projects_anchor_host_sidecar_and_owned_resource() {
         let bytes = floating_picture_source("B\u{8}\r", false);
         let result = {
@@ -2309,6 +2467,64 @@ mod tests {
         let hidden = project(&[0x3c, 0x08, 1, 0x4e, 0x48, 1, 0]).unwrap();
         let hidden = serde_json::to_value(hidden.document).unwrap();
         assert_eq!(body_outline(&hidden["body"]), ["p[t:A😀,t:B]"]);
+    }
+
+    #[test]
+    fn explicit_word_breaking_reading_preserves_logical_text_and_raw_owner() {
+        // Fully invented ordinary content spans a surrogate pair, combining
+        // character, literal hyphen and suffix. Hresi changes break rendering,
+        // never the native source's UTF-16 content or its source order.
+        let text = "A😀e\u{301} literal-hyphen tail\r";
+        let bytes = source_with_direct_chpx(text, &[0x4e, 0x48, 0, 1]);
+        let cfb = CompoundFile::open(&bytes).unwrap();
+        assert!(super::super::direct_model(&cfb, 1024 * 1024)
+            .unwrap_err()
+            .contains("invalid Word word-breaking method"));
+        let result =
+            super::super::direct_model_with_word_breaking_reading(&cfb, 1024 * 1024, true).unwrap();
+        let model = serde_json::to_value(result.document).unwrap();
+        assert_eq!(
+            body_outline(&model["body"]),
+            ["p[t:A😀e\u{301} literal-hyphen tail]"]
+        );
+        let run = &model["body"][0]["runs"][0];
+        assert_eq!(
+            run["text"].as_str().unwrap().encode_utf16().count(),
+            text.trim_end_matches('\r').encode_utf16().count()
+        );
+        assert_eq!(
+            run["__nativeReadingWordBreaking"],
+            serde_json::json!({"rawHres": 0, "rawChHres": 1})
+        );
+        // The reading capability never invents a replacement dictionary or
+        // changes a literal hyphen into a discretionary display glyph.
+        assert_eq!(run["text"], "A😀e\u{301} literal-hyphen tail");
+    }
+
+    #[test]
+    fn word_breaking_reading_keeps_structural_and_other_property_refusals_atomic() {
+        for chpx in [
+            &[0x4e, 0x48, 0][..],                   // fixed-width operand is truncated
+            &[0x4e, 0x48, 0, 1, 0x33, 0x2a, 1][..], // invalid CPlain operand
+        ] {
+            let bytes = source_with_direct_chpx("invented\r", chpx);
+            let cfb = CompoundFile::open(&bytes).unwrap();
+            assert!(
+                super::super::direct_model_with_word_breaking_reading(&cfb, 1024 * 1024, true,)
+                    .is_err()
+            );
+        }
+        let bytes = source_with_direct_chpx("invented\r", &[0x4e, 0x48, 0, 1]);
+        let cfb = CompoundFile::open(&bytes).unwrap();
+        assert_eq!(
+            super::super::direct_model_with_word_breaking_reading(&cfb, 0, true).unwrap_err(),
+            "OUTPUT_TOO_LARGE"
+        );
+        assert!(
+            super::super::direct_model_with_word_breaking_reading(&cfb, 1024 * 1024, false,)
+                .unwrap_err()
+                .contains("invalid Word word-breaking method")
+        );
     }
 
     #[test]
@@ -2570,6 +2786,62 @@ mod tests {
     }
 
     #[test]
+    fn reading_evaluated_field_retains_raw_word_breaking_owner() {
+        let bytes = source_with_direct_chpx("\u{13}PAGE\u{14}7\u{15}\r", &[0x4e, 0x48, 0, 1]);
+        let cfb = CompoundFile::open(&bytes).unwrap();
+        assert!(super::super::direct_model(&cfb, 1024 * 1024)
+            .unwrap_err()
+            .contains("invalid Word word-breaking method"));
+        let model = super::super::direct_model_with_word_breaking_reading(&cfb, 1024 * 1024, true)
+            .unwrap()
+            .document;
+        let value = serde_json::to_value(model).unwrap();
+        let field = value["body"][0]["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|run| run["type"] == "field")
+            .expect("fully invented PAGE field");
+        assert_eq!(field["fieldType"], "page");
+        assert_eq!(field["fallbackText"], "7");
+        assert_eq!(
+            field["__nativeReadingWordBreaking"],
+            serde_json::json!({"rawHres": 0, "rawChHres": 1})
+        );
+    }
+
+    #[test]
+    fn reading_evaluated_field_rejects_disagreeing_raw_word_breaking_owner() {
+        let bytes = source_with_direct_chpx("\u{13}PAGE\u{14}7\u{15}\r", &[0x4e, 0x48, 0, 1]);
+        let cfb = CompoundFile::open(&bytes).unwrap();
+        let mut word = cfb.stream("WordDocument").unwrap();
+        let table = cfb.stream("0Table").unwrap();
+        let bte = u32::from_le_bytes(word[0xfa..0xfe].try_into().unwrap()) as usize;
+        let pn = u32::from_le_bytes(table[bte + 8..bte + 12].try_into().unwrap()) as usize;
+        let page = &mut word[pn * 512..(pn + 1) * 512];
+        let first = u32::from_le_bytes(page[0..4].try_into().unwrap());
+        let last = u32::from_le_bytes(page[4..8].try_into().unwrap());
+        // Fully invented PAGE result begins at CP6, UTF-16 physical width2.
+        page[4..8].copy_from_slice(&(first + 12).to_le_bytes());
+        page[8..12].copy_from_slice(&last.to_le_bytes());
+        page[12] = 32;
+        page[13] = 48;
+        page[511] = 2;
+        page[64] = 4;
+        page[65..69].copy_from_slice(&[0x4e, 0x48, 0, 1]);
+        page[96] = 4;
+        page[97..101].copy_from_slice(&[0x4e, 0x48, 2, b'x']);
+        let bytes = build_scoped_cfb(&[("WordDocument", word), ("0Table", table)]);
+        let cfb = CompoundFile::open(&bytes).unwrap();
+        let error = super::super::direct_model_with_word_breaking_reading(&cfb, 1024 * 1024, true)
+            .unwrap_err();
+        assert!(
+            error.contains("evaluated field result formatting differs from its instruction"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn header_page_fields_project_renderer_evaluated_field_runs() {
         let sections = [(5, 2, 12_240, 15_840, 1, 720)];
         let slots = [
@@ -2782,8 +3054,9 @@ mod tests {
     fn incomplete_acquisition_never_returns_a_successful_partial_document() {
         let bytes = source("Visible\r");
         let cfb = CompoundFile::open(&bytes).unwrap();
-        for case in 0..8 {
+        for (case, reading) in (0..8).flat_map(|case| [(case, false), (case, true)]) {
             let result = super::super::with_acquired_doc(&cfb, |mut facts| {
+                facts.floating.set_reading_relocation(reading);
                 match case {
                     0 => facts.sections.clear(),
                     1 => facts
@@ -3080,6 +3353,495 @@ mod tests {
         super::super::direct_model(&CompoundFile::open(bytes).unwrap(), 1024 * 1024)
     }
 
+    fn reading_picture_bullet_result(
+        bytes: &[u8],
+        budget: usize,
+    ) -> Result<DirectDocResult, String> {
+        super::super::direct_model_with_picture_bullet_reading(
+            &CompoundFile::open(bytes).unwrap(),
+            budget,
+            true,
+        )
+    }
+
+    fn reading_picture_bullet_source(flags: u16) -> Vec<u8> {
+        let mut chpx = picture_bullet_level(0, flags as u8);
+        *chpx.last_mut().unwrap() = (flags >> 8) as u8;
+        let source = picture_bullet_source(&chpx, &[("_PictureBullets", 0, 1)], 75);
+        let cfb = CompoundFile::open(&source).unwrap();
+        let data = cfb.stream("Data").unwrap();
+        // Invented source: six existing FOPT entries, plus a raw pibFlags
+        // property and a bounded opaque ClientAnchor belonging to this PICF.
+        let mut shape = data[76..136].to_vec();
+        shape[16..18].copy_from_slice(&((7u16 << 4) | 3).to_le_bytes());
+        shape[20..24].copy_from_slice(&42u32.to_le_bytes());
+        shape.extend(0x0106u16.to_le_bytes());
+        shape.extend(0u32.to_le_bytes());
+        shape.extend(picture_record(0xf010, 0, &0x8005_0607u32.to_le_bytes()));
+        let mut changed = data[..68].to_vec();
+        changed.extend(picture_record(0xf004, 15, &shape));
+        changed.extend_from_slice(&data[136..]);
+        let size = changed.len() as u32;
+        changed[..4].copy_from_slice(&size.to_le_bytes());
+        build_scoped_cfb(&[
+            ("WordDocument", cfb.stream("WordDocument").unwrap()),
+            ("0Table", cfb.stream("0Table").unwrap()),
+            ("Data", changed),
+        ])
+    }
+
+    #[test]
+    fn composed_reading_policies_require_each_source_owner_capability() {
+        let picture = reading_picture_bullet_source(0xa5fd);
+        let mut level = picture_bullet_level(0, 0xfd);
+        *level.last_mut().unwrap() = 0xa5;
+        level.extend([0x4e, 0x48, 0, 1]);
+        let bytes = with_numbering_level_chpx(&picture, &level);
+        let cfb = CompoundFile::open(&bytes).unwrap();
+        for policies in [
+            super::super::ReadingPolicies::default(),
+            super::super::ReadingPolicies {
+                simplify_word_breaking: true,
+                ..Default::default()
+            },
+            super::super::ReadingPolicies {
+                stored_picture_bullets: true,
+                ..Default::default()
+            },
+            super::super::ReadingPolicies {
+                relocate_drawings: true,
+                ..Default::default()
+            },
+        ] {
+            assert!(super::super::direct_model_with_policies(&cfb, 1024 * 1024, policies).is_err());
+        }
+        let policies = super::super::ReadingPolicies {
+            simplify_word_breaking: true,
+            stored_picture_bullets: true,
+            ..Default::default()
+        };
+        let result = super::super::direct_model_with_policies(&cfb, 1024 * 1024, policies).unwrap();
+        let value = serde_json::to_value(&result.document).unwrap();
+        let numbering = &value["body"][0]["numbering"];
+        assert_eq!(numbering["picBulletWidthPt"], 36.0);
+        assert_eq!(numbering["picBulletHeightPt"], 72.0);
+        assert_eq!(
+            numbering["__nativeReadingPictureBullet"]["rawPbiFlags"],
+            0xa5fd
+        );
+        assert_eq!(
+            numbering["__nativeReadingWordBreaking"],
+            serde_json::json!({"rawHres": 0, "rawChHres": 1})
+        );
+        assert_eq!(result.resources.len(), 1);
+        assert_eq!(result.resources[0].key, "legacy-doc/bullet/0");
+        assert_eq!(
+            super::super::direct_model_with_policies(&cfb, 0, policies).unwrap_err(),
+            "OUTPUT_TOO_LARGE"
+        );
+    }
+
+    #[test]
+    fn picture_bullet_reading_uses_stored_box_and_preserves_raw_source_owners() {
+        for flags in [0xa5fdu16, 0xa5ff] {
+            let bytes = reading_picture_bullet_source(flags);
+            assert!(
+                picture_bullet_result(&bytes).is_err(),
+                "strict must remain refused"
+            );
+            let result = reading_picture_bullet_result(&bytes, 1024 * 1024).unwrap();
+            let value = serde_json::to_value(&result.document).unwrap();
+            let numbering = &value["body"][0]["numbering"];
+            assert_eq!(numbering["picBulletWidthPt"], 36.0);
+            assert_eq!(numbering["picBulletHeightPt"], 72.0);
+            let facts = &numbering["__nativeReadingPictureBullet"];
+            assert_eq!(facts["rawPbiFlags"], flags);
+            assert_eq!(facts["relativeCp"], 0);
+            assert_eq!(facts["picfOffset"], 0);
+            assert_eq!(facts["resourceKey"], numbering["picBulletImagePath"]);
+            assert_eq!(facts["resourceKey"], result.resources[0].key);
+            assert_eq!(facts["goalTwips"], serde_json::json!([1440, 720]));
+            assert_eq!(facts["scalePerMille"], serde_json::json!([500, 2000]));
+            assert_eq!(facts["pibFlags"]["key"], 0x0106);
+            assert_eq!(facts["pibFlags"]["value"], 0);
+            assert_eq!(facts["clientAnchor"], serde_json::json!([7, 6, 5, 128]));
+            assert_eq!(facts["flagsOrigin"]["kind"], "listLevel");
+            assert_eq!(facts["indexOrigin"]["kind"], "listLevel");
+            assert_eq!(numbering["picBulletTransform"]["rotation"], 90.0);
+            assert_eq!(numbering["picBulletTransform"]["flipH"], true);
+            assert_eq!(numbering["picBulletTransform"]["flipV"], true);
+            assert_eq!(result.resources.len(), 1);
+            assert_eq!(result.resources[0].key, "legacy-doc/bullet/0");
+            assert_eq!(result.resources[0].mime_type, "image/png");
+            assert!(result.resources[0].bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+        }
+    }
+
+    #[test]
+    fn picture_bullet_reading_distinguishes_pib_flags_from_malformed_name_or_flags() {
+        let source = reading_picture_bullet_source(1);
+        let cfb = CompoundFile::open(&source).unwrap();
+        let data = cfb.stream("Data").unwrap();
+        assert_eq!(
+            u16::from_le_bytes(data[136..138].try_into().unwrap()),
+            0x0106
+        );
+        for key in [0x0105u16, 0x4105, 0x4106, 0x8106, 0xc106] {
+            let mut invalid = data.clone();
+            invalid[136..138].copy_from_slice(&key.to_le_bytes());
+            // A scalar name may only encode the empty default. Other keys
+            // use op=0 so framing cannot hide the malformed flag owner.
+            let value = if key & 0x3fff == 0x0105 { 2u32 } else { 0 };
+            invalid[138..142].copy_from_slice(&value.to_le_bytes());
+            let source = build_scoped_cfb(&[
+                ("WordDocument", cfb.stream("WordDocument").unwrap()),
+                ("0Table", cfb.stream("0Table").unwrap()),
+                ("Data", invalid),
+            ]);
+            let error = reading_picture_bullet_result(&source, 1024 * 1024).unwrap_err();
+            assert!(
+                error.contains("ambiguous source geometry"),
+                "{key:04x}: {error}"
+            );
+        }
+        // A later valid flag entry cannot erase a malformed earlier FOPTE.
+        let mut replaced = data[..142].to_vec();
+        replaced[136..138].copy_from_slice(&0x4106u16.to_le_bytes());
+        replaced[138..142].copy_from_slice(&0u32.to_le_bytes());
+        replaced[92..94].copy_from_slice(&((8u16 << 4) | 3).to_le_bytes());
+        replaced[96..100].copy_from_slice(&48u32.to_le_bytes());
+        replaced.extend(0x0106u16.to_le_bytes());
+        replaced.extend(0u32.to_le_bytes());
+        replaced.extend_from_slice(&data[142..]);
+        let container_size = u32::from_le_bytes(data[72..76].try_into().unwrap()) + 6;
+        replaced[72..76].copy_from_slice(&container_size.to_le_bytes());
+        let size = replaced.len() as u32;
+        replaced[..4].copy_from_slice(&size.to_le_bytes());
+        let replaced_source = build_scoped_cfb(&[
+            ("WordDocument", cfb.stream("WordDocument").unwrap()),
+            ("0Table", cfb.stream("0Table").unwrap()),
+            ("Data", replaced),
+        ]);
+        assert!(reading_picture_bullet_result(&replaced_source, 1024 * 1024)
+            .unwrap_err()
+            .contains("ambiguous source geometry"));
+
+        // MS-ODRAW 2.2.8/2.3.23.7: pibName ignores fBid. A scalar
+        // op=0 is the empty default; a complex Comment0 name is metadata,
+        // not an external resource request. Both producer encodings retain
+        // the absent-name marker box, transforms, fonts and resource bytes.
+        let named_data = |key: u16| {
+            let name: &[u8] = if key & 0x8000 == 0 {
+                &[]
+            } else {
+                &[b'n', 0, b'm', 0, 0, 0]
+            };
+            let mut named = data[..142].to_vec();
+            named[92..94].copy_from_slice(&((8u16 << 4) | 3).to_le_bytes());
+            named[96..100].copy_from_slice(&(48u32 + name.len() as u32).to_le_bytes());
+            named.extend(key.to_le_bytes());
+            named.extend((name.len() as u32).to_le_bytes());
+            named.extend(name);
+            named.extend_from_slice(&data[142..]);
+            let container_size =
+                u32::from_le_bytes(data[72..76].try_into().unwrap()) + 6 + name.len() as u32;
+            named[72..76].copy_from_slice(&container_size.to_le_bytes());
+            let size = named.len() as u32;
+            named[..4].copy_from_slice(&size.to_le_bytes());
+            named
+        };
+        let named_source = |named: Vec<u8>| {
+            build_scoped_cfb(&[
+                ("WordDocument", cfb.stream("WordDocument").unwrap()),
+                ("0Table", cfb.stream("0Table").unwrap()),
+                ("Data", named),
+            ])
+        };
+        let baseline = reading_picture_bullet_result(&source, 1024 * 1024).unwrap();
+        let baseline_value = serde_json::to_value(&baseline.document).unwrap();
+        for key in [0x0105u16, 0x4105, 0x8105, 0xc105] {
+            let named_source_bytes = named_source(named_data(key));
+            assert!(
+                picture_bullet_result(&named_source_bytes).is_err(),
+                "strict remains refused"
+            );
+            let result = reading_picture_bullet_result(&named_source_bytes, 1024 * 1024).unwrap();
+            assert_eq!(
+                serde_json::to_value(&result.document).unwrap(),
+                baseline_value
+            );
+            assert_eq!(result.resources.len(), 1);
+            assert_eq!(result.resources[0].key, baseline.resources[0].key);
+            assert_eq!(
+                result.resources[0].mime_type,
+                baseline.resources[0].mime_type
+            );
+            assert_eq!(result.resources[0].bytes, baseline.resources[0].bytes);
+
+            if key & 0x8000 != 0 {
+                // Ignoring fBid never licenses a complex slice outside its FOPT.
+                let mut truncated = named_data(key);
+                truncated[144..148].copy_from_slice(&7u32.to_le_bytes());
+                assert!(
+                    reading_picture_bullet_result(&named_source(truncated), 1024 * 1024)
+                        .unwrap_err()
+                        .contains("truncated Word picture complex option")
+                );
+            }
+            for flags in [1u32, 0x40] {
+                let mut active = named_data(key);
+                active[138..142].copy_from_slice(&flags.to_le_bytes());
+                let error =
+                    reading_picture_bullet_result(&named_source(active), 1024 * 1024).unwrap_err();
+                assert!(error.contains(if flags == 1 {
+                    "no stored-size reading consumer"
+                } else {
+                    "invalid Word picture bullet MSOBLIPFLAGS"
+                }));
+            }
+        }
+
+        // The exact scalar 0106 property retains every flag bit; no fBid or
+        // fComplex reinterpretation and no source value masking is permitted.
+        let result = reading_picture_bullet_result(&source, 1024 * 1024).unwrap();
+        let value = serde_json::to_value(&result.document).unwrap();
+        assert_eq!(
+            value["body"][0]["numbering"]["__nativeReadingPictureBullet"]["pibFlags"],
+            serde_json::json!({ "key": 0x0106, "value": 0 })
+        );
+    }
+
+    #[test]
+    fn picture_bullet_reading_validates_msoblipflags_then_bounded_passive_domain() {
+        let source = reading_picture_bullet_source(1);
+        let cfb = CompoundFile::open(&source).unwrap();
+        let data = cfb.stream("Data").unwrap();
+        for value in [
+            3u32,
+            4,
+            5,
+            6,
+            7,
+            8,
+            11,
+            12,
+            15,
+            16,
+            0x40,
+            u32::MAX,
+            1,
+            2,
+            9,
+            10,
+            13,
+            14,
+        ] {
+            let mut changed = data.clone();
+            changed[138..142].copy_from_slice(&value.to_le_bytes());
+            let changed = build_scoped_cfb(&[
+                ("WordDocument", cfb.stream("WordDocument").unwrap()),
+                ("0Table", cfb.stream("0Table").unwrap()),
+                ("Data", changed),
+            ]);
+            let error = reading_picture_bullet_result(&changed, 1024 * 1024).unwrap_err();
+            if matches!(value, 1 | 2 | 9 | 10 | 13 | 14) {
+                assert!(
+                    error.contains("no stored-size reading consumer"),
+                    "{value}: {error}"
+                );
+            } else {
+                assert!(error.contains("MSOBLIPFLAGS"), "{value}: {error}");
+            }
+        }
+        let no_flags = picture_bullet_source(
+            &picture_bullet_level(0, 1),
+            &[("_PictureBullets", 0, 1)],
+            75,
+        );
+        let result = reading_picture_bullet_result(&no_flags, 1024 * 1024).unwrap();
+        let value = serde_json::to_value(&result.document).unwrap();
+        assert!(
+            value["body"][0]["numbering"]["__nativeReadingPictureBullet"]["pibFlags"].is_null()
+        );
+        assert_eq!(result.resources.len(), 1);
+    }
+
+    #[test]
+    fn picture_bullet_reading_disabled_and_structural_refusals_remain_distinct() {
+        let disabled = picture_bullet_source(&picture_bullet_level(0, 2), &[], 75);
+        let strict = picture_bullet_result(&disabled).unwrap();
+        let reading = reading_picture_bullet_result(&disabled, 1024 * 1024).unwrap();
+        assert_eq!(
+            serde_json::to_value(&strict.document).unwrap(),
+            serde_json::to_value(&reading.document).unwrap()
+        );
+        assert!(reading.resources.is_empty());
+        for (bookmarks, cp) in [(&[][..], 0), (&[("_PictureBullets", 0, 1)][..], 1)] {
+            let bytes = picture_bullet_source(&picture_bullet_level(cp, 1), bookmarks, 75);
+            assert!(reading_picture_bullet_result(&bytes, 1024 * 1024).is_err());
+        }
+        let valid = reading_picture_bullet_source(1);
+        assert_eq!(
+            reading_picture_bullet_result(&valid, 0).unwrap_err(),
+            "OUTPUT_TOO_LARGE"
+        );
+        assert!(reading_picture_bullet_result(&valid, 1).is_err());
+    }
+
+    #[test]
+    fn picture_bullet_reading_preserves_other_unsupported_character_failures() {
+        let mut level = picture_bullet_level(0, 1);
+        level.extend([0x88, 0x2a, 1]); // unrelated unimplemented character SPRM
+        let source = picture_bullet_source(&level, &[("_PictureBullets", 0, 1)], 75);
+        assert!(reading_picture_bullet_result(&source, 1024 * 1024).is_err());
+    }
+
+    #[test]
+    fn picture_bullet_reading_rejects_active_owner_without_a_numbered_paragraph() {
+        let source = source_with_direct_chpx("literal\r", &picture_bullet_level(0, 1));
+        let error = reading_picture_bullet_result(&source, 1024 * 1024).unwrap_err();
+        assert!(error.contains("no numbered paragraph owner"));
+        assert!(picture_bullet_result(&source).is_err());
+    }
+
+    #[test]
+    fn picture_bullet_reading_rejects_non_marker_control_owners() {
+        for control in ["\u{b}", "\u{c}", "\u{e}", "\u{1}"] {
+            let source =
+                source_with_direct_chpx(&format!("{control}\r"), &picture_bullet_level(0, 1));
+            let cfb = CompoundFile::open(&source).unwrap();
+            let mut word = cfb.stream("WordDocument").unwrap();
+            let table = cfb.stream("0Table").unwrap();
+            let bte = u32::from_le_bytes(word[0xfa..0xfe].try_into().unwrap()) as usize;
+            let page_number =
+                u32::from_le_bytes(table[bte + 8..bte + 12].try_into().unwrap()) as usize;
+            let page = &mut word[page_number * 512..(page_number + 1) * 512];
+            let end = u32::from_le_bytes(page[4..8].try_into().unwrap());
+            // Only the control has active picture-bullet properties. Its
+            // independent paragraph mark is plain, so it cannot own a marker.
+            page[4..8].copy_from_slice(&0x402u32.to_le_bytes());
+            page[8..12].copy_from_slice(&end.to_le_bytes());
+            page[12] = 32;
+            page[13] = 0;
+            page[511] = 2;
+            let source = build_scoped_cfb(&[("WordDocument", word), ("0Table", table)]);
+            let error = reading_picture_bullet_result(&source, 1024 * 1024).unwrap_err();
+            assert!(
+                error.contains("non-marker character"),
+                "{control:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn picture_bullet_reading_keeps_two_literal_paragraphs_and_one_owned_image() {
+        let raw = reading_picture_bullet_source(1);
+        let raw_cfb = CompoundFile::open(&raw).unwrap();
+        let text = "\u{1}\rFirst literal\rSecond literal\r";
+        let source = picture_source(text, true);
+        let cfb = CompoundFile::open(&source).unwrap();
+        let mut word = cfb.stream("WordDocument").unwrap();
+        let table = cfb.stream("0Table").unwrap();
+        let bte = u32::from_le_bytes(word[0xfa..0xfe].try_into().unwrap()) as usize;
+        let page_number = u32::from_le_bytes(table[bte + 8..bte + 12].try_into().unwrap()) as usize;
+        let page = &mut word[page_number * 512..(page_number + 1) * 512];
+        let end = u32::from_le_bytes(page[4..8].try_into().unwrap());
+        // Only the carrier is hidden/special; literal following paragraphs
+        // retain an independent empty CHPX owner and their source order.
+        page[4..8].copy_from_slice(&0x402u32.to_le_bytes());
+        page[8..12].copy_from_slice(&end.to_le_bytes());
+        page[12] = 32;
+        page[13] = 0;
+        page[511] = 2;
+        let source = build_scoped_cfb(&[
+            ("WordDocument", word),
+            ("0Table", table),
+            ("Data", raw_cfb.stream("Data").unwrap()),
+        ]);
+        let source = with_bookmarks(
+            &with_numbering_level_chpx(&source, &picture_bullet_level(0, 1)),
+            &[("_PictureBullets", 0, 1)],
+        );
+        let result = reading_picture_bullet_result(&source, 1024 * 1024).unwrap();
+        let value = serde_json::to_value(&result.document).unwrap();
+        let text: Vec<String> = value["body"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|paragraph| {
+                paragraph["runs"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|run| run["text"].as_str())
+                    .collect::<String>()
+            })
+            .collect();
+        assert_eq!(text, ["", "First literal", "Second literal"]);
+        for paragraph in value["body"].as_array().unwrap() {
+            assert_eq!(
+                paragraph["numbering"]["picBulletImagePath"],
+                "legacy-doc/bullet/0"
+            );
+            assert_eq!(paragraph["numbering"]["picBulletWidthPt"], 36.0);
+            assert_eq!(
+                paragraph["numbering"]["__nativeReadingPictureBullet"]["rawPbiFlags"],
+                1
+            );
+        }
+        assert_eq!(result.resources.len(), 1);
+        // The byte owner is the selected BLIP payload, not its OfficeArt header.
+        let carrier = reading_picture_bullet_result(&raw, 1024 * 1024).unwrap();
+        assert_eq!(result.resources[0].bytes, carrier.resources[0].bytes);
+    }
+
+    #[test]
+    fn picture_bullet_reading_keeps_marker_fonts_independent_of_stored_size() {
+        for size in [18u16, 48] {
+            let source = reading_picture_bullet_source(1);
+            let mut level = picture_bullet_level(0, 1);
+            level.extend(0x4a43u16.to_le_bytes());
+            level.extend(size.to_le_bytes());
+            let source = with_numbering_level_chpx(&source, &level);
+            let result = reading_picture_bullet_result(&source, 1024 * 1024).unwrap();
+            let value = serde_json::to_value(result.document).unwrap();
+            let numbering = &value["body"][0]["numbering"];
+            assert_eq!(numbering["fontFacts"]["fontSize"], f64::from(size) / 2.0);
+            assert_eq!(numbering["picBulletWidthPt"], 36.0);
+            assert_eq!(numbering["picBulletHeightPt"], 72.0);
+        }
+    }
+
+    #[test]
+    fn picture_bullet_reading_rejects_invalid_stored_extent_and_duplicate_anchor() {
+        let source = reading_picture_bullet_source(1);
+        let cfb = CompoundFile::open(&source).unwrap();
+        let data = cfb.stream("Data").unwrap();
+        for field in [28, 30, 32, 34] {
+            let mut invalid = data.clone();
+            invalid[field..field + 2].fill(0);
+            let source = build_scoped_cfb(&[
+                ("WordDocument", cfb.stream("WordDocument").unwrap()),
+                ("0Table", cfb.stream("0Table").unwrap()),
+                ("Data", invalid),
+            ]);
+            assert!(reading_picture_bullet_result(&source, 1024 * 1024).is_err());
+        }
+        let shape_length = u32::from_le_bytes(data[72..76].try_into().unwrap()) as usize;
+        let mut invalid = data[..76 + shape_length].to_vec();
+        invalid.extend(picture_record(0xf010, 0, &[0; 4]));
+        invalid.extend_from_slice(&data[76 + shape_length..]);
+        invalid[72..76].copy_from_slice(&((shape_length + 12) as u32).to_le_bytes());
+        let size = invalid.len() as u32;
+        invalid[..4].copy_from_slice(&size.to_le_bytes());
+        let source = build_scoped_cfb(&[
+            ("WordDocument", cfb.stream("WordDocument").unwrap()),
+            ("0Table", cfb.stream("0Table").unwrap()),
+            ("Data", invalid),
+        ]);
+        assert!(reading_picture_bullet_result(&source, 1024 * 1024).is_err());
+    }
+
     #[test]
     fn disabled_picture_bullets_keep_the_text_bullet_without_resolving_the_bookmark() {
         // Disabled flags never resolve the Bullet Pictures document, even when
@@ -3189,6 +3951,7 @@ mod tests {
                     assert_eq!(key, projected.picture.resource_key);
                 }
                 let mut numbering = docx_model::NumberingInfo {
+                    native_reading_word_breaking: None,
                     num_id: 1,
                     level: 0,
                     format: "bullet".into(),
@@ -3207,6 +3970,7 @@ mod tests {
                     pic_bullet_width_pt: None,
                     pic_bullet_height_pt: None,
                     pic_bullet_transform: None,
+                    native_reading_picture_bullet: None,
                 };
                 projected.install(&mut numbering, &mut model_budget.remaining_bytes)?;
                 assert_eq!(

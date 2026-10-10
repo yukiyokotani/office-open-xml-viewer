@@ -12,6 +12,7 @@ import type {
   CanvasFontRoute,
   ChartModel,
   DrawingMLShapePaintPlan,
+  ImagePaintProjection,
   Duotone,
   Fill,
   HyperlinkTarget,
@@ -115,12 +116,12 @@ export type DrawingPaintCommand =
     }>
   | Readonly<{
       kind: 'drawingml-shape';
-      plan: DeepReadonly<DrawingMLShapePaintPlan>;
+      plan: DeepReadonly<DrawingMLShapePaintPlan & { readonly resolvedGeometry: NonNullable<DrawingMLShapePaintPlan['resolvedGeometry']> }>;
     }>
   | Readonly<{
       /** A retained image resource clipped to the authored DrawingML shape. */
       kind: 'drawingml-image-fill';
-      plan: DeepReadonly<DrawingMLShapePaintPlan>;
+      plan: DeepReadonly<DrawingMLShapePaintPlan & { readonly resolvedGeometry: NonNullable<DrawingMLShapePaintPlan['resolvedGeometry']> }>;
       resourceKey: string;
       fillRect?: Readonly<{ l: number; t: number; r: number; b: number }>;
     }>
@@ -176,6 +177,8 @@ export type DrawingPaintCommand =
       /** Keep a non-text graphic upright after the enclosing section-logical
        * frame is rotated into a vertical physical page. */
       orientation?: UprightResourceOrientation;
+      /** Clone-safe, layout-acquired full-frame reading image projection. */
+      nativeImagePlan?: NativeReadingImagePlan;
     }>;
 
 /** Closed local counter-turn that keeps a non-text graphic upright in its
@@ -500,6 +503,22 @@ export type ImagePaintResourceDescriptor = Readonly<{
   duotone?: DeepReadonly<Duotone>;
 }>;
 
+/** Exact accepted source facts, including decode-order/intrinsic ownership.
+ * Null preserves absent scalar options; unsupported substitutions never enter
+ * this source class. Bitmap handles are strictly realm-owned session data. */
+export interface NativeReadingImageSourceBinding {
+  readonly resourceKey: string; readonly partPath: string; readonly mimeType: string;
+  readonly documentOrder: number | null;
+  readonly intrinsicSize: Readonly<{ widthPt: number; heightPt: number }>;
+  readonly srcRect: Readonly<{ l: number; t: number; r: number; b: number }> | null;
+  readonly rotation: number | null; readonly flipH: boolean | null; readonly flipV: boolean | null;
+  readonly alpha: number | null;
+}
+export interface NativeReadingImagePlan {
+  readonly source: NativeReadingImageSourceBinding;
+  readonly projection: DeepReadonly<ImagePaintProjection>;
+}
+
 export type ChartPaintResourceDescriptor = Readonly<{
   kind: 'chart';
   resourceKey: string;
@@ -681,6 +700,8 @@ export interface ParagraphSpacingLayout {
 }
 
 export interface ParagraphLayout extends LayoutNodeBase {
+  /** Internal capability for this visible stored-size marker, not authored WML. */
+  readonly nativeReadingPictureBullet?: true;
   readonly kind: 'paragraph';
   /** Source `w14:paraId`; identity only, never interpreted by layout or paint. */
   readonly paragraphId?: string;
@@ -706,6 +727,9 @@ export interface ParagraphLayout extends LayoutNodeBase {
   /** @internal */
   readonly anchorCollisions?: readonly DrawingMLCollisionEntryPt[];
   readonly anchorFrames?: readonly AnchorFrameResult[];
+  /** @internal Actual complete scenes relocated by this retained paragraph. */
+  readonly nativeReadingRelocations?: readonly string[];
+  readonly nativeReadingInactivePictureData?: boolean;
   readonly paragraphMark?: ParagraphMarkLayout;
   readonly lineNumbers?: readonly LineNumberLayout[];
   readonly continuation?: Readonly<{
@@ -1253,6 +1277,7 @@ export interface ParagraphLayoutInput {
 }
 
 export interface AcquiredParagraphLayoutInput {
+  readonly nativeReadingPictureBullet?: true;
   readonly kind: 'paragraph';
   readonly id: LayoutNodeId;
   readonly source: SourceRef;
@@ -1280,6 +1305,9 @@ export interface AcquiredParagraphLayoutInput {
   /** @internal */
   readonly anchorCollisions?: readonly DrawingMLCollisionEntryPt[];
   readonly anchorFrames?: readonly AnchorFrameResult[];
+  /** @internal Actual complete scenes relocated by this retained paragraph. */
+  readonly nativeReadingRelocations?: readonly string[];
+  readonly nativeReadingInactivePictureData?: boolean;
   readonly paragraphMark?: ParagraphMarkLayout;
   readonly continuation?: Readonly<{
     lineStart: number;

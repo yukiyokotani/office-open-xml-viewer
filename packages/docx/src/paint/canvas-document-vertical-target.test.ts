@@ -1,3 +1,6 @@
+import { createPaintResourceRegistry } from '../layout/paint-resources.js';
+import { acquireNativeReadingImagePlan } from '../layout/native-reading-image-frame.js';
+import type { ParagraphLayout } from '../layout/types.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildPageLayers } from '../layout/page-graph.js';
 import { rasterPaintOccurrencesForPage } from '../layout/text-index.js';
@@ -730,12 +733,13 @@ describe('vertical OpenType paint target projection', () => {
     expect(target.context.operations).not.toContain('drawImage');
   });
 
-  it('removes the hidden attached surface when target projection fails', async () => {
+  it('removes the hidden attached surface when its internal context acquisition fails', async () => {
     const created: ElementCanvas[] = [];
     vi.stubGlobal('HTMLCanvasElement', ElementCanvas);
     vi.stubGlobal('document', {
       createElement() {
         const canvas = new ElementCanvas();
+        Object.defineProperty(canvas, 'getContext', { value: () => null });
         created.push(canvas);
         return canvas;
       },
@@ -749,7 +753,7 @@ describe('vertical OpenType paint target projection', () => {
     const target = {
       width: 1,
       height: 1,
-      getContext() { return null; },
+      getContext() { return new RecordingContext(); },
     };
 
     await expect(renderSelectedDocumentPage(
@@ -757,7 +761,7 @@ describe('vertical OpenType paint target projection', () => {
       page,
       target as unknown as OffscreenCanvas,
       { dpr: 1, parseError: false, registry, rasterPaintOccurrences: [], textRuns: [] },
-    )).rejects.toThrow('2D canvas is unavailable for DOCX paint projection');
+    )).rejects.toThrow('2D canvas is unavailable for internally acquired DOCX paint surface');
 
     expect(created).toHaveLength(1);
     expect(created[0]!.isConnected).toBe(false);
@@ -823,5 +827,65 @@ describe('vertical OpenType paint target projection', () => {
 
     expect(target.context.operations).toContain('clearRect');
     expect(target.context.operations).not.toContain('drawImage');
+  });
+  it('checks current publication after asynchronous acquisition before resizing or painting a target', async () => {
+    vi.stubGlobal('HTMLCanvasElement', undefined);
+    vi.stubGlobal('document', undefined);
+    const target = new WorkerCanvas();
+    const selected = { ...page, layers: buildPageLayers([]) };
+    let current = true;
+    const error = new Error('reading publication was revoked during acquisition');
+    const pending = renderSelectedDocumentPage(
+      { pages: [selected], diagnostics: [] }, selected,
+      target as unknown as OffscreenCanvas,
+      { dpr: 1, parseError: false, registry, rasterPaintOccurrences: [], textRuns: [],
+        assertPublicationCurrent: () => { if (!current) throw error; } },
+    );
+    current = false;
+    await expect(pending).rejects.toBe(error);
+    expect([target.width, target.height]).toEqual([1, 1]);
+    expect(target.context.operations).toEqual([]);
+  });
+
+  it('stops main text replay when the first callback revokes its publication', async () => {
+    vi.stubGlobal('HTMLCanvasElement', undefined);
+    vi.stubGlobal('document', undefined);
+    const target = new WorkerCanvas(), selected = { ...page, layers: buildPageLayers([]) };
+    let current = true;
+    const error = new Error('callback replaced the reading publication');
+    const onTextRun = vi.fn(() => { current = false; });
+    await expect(renderSelectedDocumentPage(
+      { pages: [selected], diagnostics: [] }, selected, target as unknown as OffscreenCanvas,
+      { dpr: 1, parseError: false, registry, rasterPaintOccurrences: [], textRuns: ['first', 'stale second'], onTextRun,
+        assertPublicationCurrent: () => { if (!current) throw error; } },
+    )).rejects.toBe(error);
+    expect(onTextRun).toHaveBeenCalledTimes(1); expect(onTextRun).toHaveBeenCalledWith('first');
+  });
+
+});
+
+describe('reading image preclear admission', () => {
+  it('rejects an optional-codec placeholder before changing an already painted target', async () => {
+    const resourceKey = 'image:invented-reading-tiff';
+    const frame = { xPt: 20, yPt: 10, widthPt: 80, heightPt: 40 };
+    const imageRegistry = createPaintResourceRegistry([{ kind: 'image', resourceKey, partPath: 'word/media/reading.tiff', mimeType: 'image/tiff', intrinsicSize: { widthPt: 80, heightPt: 40 } }]);
+    const nativeImagePlan = acquireNativeReadingImagePlan(imageRegistry.resolve(resourceKey, 'image'), 80, 40);
+    const drawing = { kind: 'drawing' as const, id: 'reading-image', source: { story: 'body' as const, storyInstance: 'body', path: [0] }, flowDomainId: 'body:domain',
+      flowBounds: frame, inkBounds: frame, advancePt: 40, ordinaryFlow: true,
+      commands: [{ kind: 'resource' as const, resourceKind: 'image' as const, resourceKey, rect: frame, nativeImagePlan }] };
+    const paragraph = { kind: 'paragraph', id: 'reading-paragraph', source: drawing.source, flowDomainId: drawing.flowDomainId,
+      flowBounds: frame, inkBounds: frame, advancePt: 40, ordinaryFlow: true,
+      spacing: { beforePt: 0, afterPt: 0 }, contextualSpacing: false,
+      lines: [], borders: [], resources: [], drawings: [drawing], textBoxes: [], events: [], exclusions: [], nativeReadingRelocations: [drawing.id],
+    } as ParagraphLayout;
+    const selected = { ...page, layers: buildPageLayers([{ layer: 'body', node: paragraph }]) };
+    const selectedLayout = { pages: [selected], diagnostics: [] };
+    const target = new WorkerCanvas(); target.width = 87; target.height = 43;
+    const fetchImage = vi.fn(async () => new Blob([tiffDimensions(80, 40) as BlobPart], { type: 'image/tiff' }));
+    await expect(renderSelectedDocumentPage(selectedLayout, selected, target as unknown as OffscreenCanvas,
+      { dpr: 1, parseError: false, registry: imageRegistry, rasterPaintOccurrences: rasterPaintOccurrencesForPage(selectedLayout, 0), textRuns: [], fetchImage },
+    )).rejects.toThrow(/available immutable decoded ImageBitmap/);
+    expect([target.width, target.height]).toEqual([87, 43]);
+    expect(target.context.operations).toEqual([]);
   });
 });

@@ -187,18 +187,30 @@ pub(super) fn project(
             _ => {}
         }
         if let Some((reference, marker)) = direct.numbering {
-            if let Some(bullet) = marker.picture_bullet().enabled()? {
-                // Validate and retain the source picture (Bullet Pictures
-                // bookmark, PICF and BLIP) as store-owned facts. Picture-bullet
-                // display, fixed or automatic size, is not implemented: the
-                // model stays atomically unsupported and never falls back to
-                // the text bullet or selects the image as a resource.
-                pictures.acquire_picture_bullet(formatting, bullet)?;
-                formatting.unsupported_character_properties = true;
+            // Retain the strict acquisition order and its source errors. Only
+            // the explicit reading policy selects a stored-size projection.
+            let reading_projection = if let Some(bullet) = marker.picture_bullet().enabled()? {
+                if formatting.picture_bullet_reading {
+                    Some(pictures.direct_reading_picture_bullet(
+                        formatting,
+                        marker.picture_bullet(),
+                        &mut budget.remaining_bytes,
+                    )?)
+                } else {
+                    pictures.acquire_picture_bullet(formatting, bullet)?;
+                    formatting.unsupported_character_properties = true;
+                    None
+                }
+            } else {
+                None
+            };
+            let mut projected_numbering =
+                formatting.direct_numbering(numbering, reference, &marker, &paragraph)?;
+            if let Some((projection, source_facts)) = reading_projection {
+                projection.install(&mut projected_numbering, &mut budget.remaining_bytes)?;
+                projected_numbering.native_reading_picture_bullet = Some(source_facts);
             }
-            paragraph.numbering = Some(Box::new(
-                formatting.direct_numbering(numbering, reference, &marker, &paragraph)?,
-            ));
+            paragraph.numbering = Some(Box::new(projected_numbering));
         }
         budget.paragraph(&paragraph)?;
 
@@ -955,6 +967,7 @@ fn evaluated_field_run(
             )?
             .ok_or_else(|| unsupported("hidden Word evaluated field is not supported"))?;
         Ok(docx_model::FieldRun {
+            native_reading_word_breaking: run.native_reading_word_breaking,
             field_type: field.field_type.to_string(),
             instruction: field.instruction.clone(),
             fallback_text: field.cached_result.clone(),

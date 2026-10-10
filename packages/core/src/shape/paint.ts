@@ -1,6 +1,6 @@
 import type { Fill, GradientFill, PatternFill, Stroke } from '../types/common';
 import { buildPatternBitmap } from './pattern-bitmaps';
-import { drawingmlLineDashArray, shapeStrokeDashArray } from '../draw/dash';
+import { resolveStrokeGeometry, type ResolvedStrokeGeometry } from './stroke-geometry';
 import { createAuxCanvasForContext } from '../canvas/aux-canvas';
 import { resolvePathShade, type FillOutline, type ShadeBox } from './path-gradient';
 import { hostStrokeBounds, paintPathSource } from './paint-bounds';
@@ -487,37 +487,17 @@ function resolvePatternFill(
  * shared resolver also accepts VML's numeric relative grammar. Both scale by
  * the pixel line width and return `[]` for solid / unknown styles.
  */
+export function applyResolvedStroke(ctx: CanvasRenderingContext2D, geometry: ResolvedStrokeGeometry): void {
+  ctx.lineWidth = geometry.lineWidth;
+  ctx.lineCap = geometry.lineCap;
+  ctx.lineJoin = geometry.lineJoin;
+  ctx.miterLimit = geometry.miterLimit;
+  ctx.setLineDash([...geometry.dash]);
+}
+
 export function applyStroke(
-  ctx: CanvasRenderingContext2D,
-  stroke: Stroke | null,
-  emuPerPx: number,
+  ctx: CanvasRenderingContext2D, stroke: Stroke | null, emuPerPx: number,
 ): void {
-  if (!stroke) {
-    ctx.strokeStyle = 'transparent';
-    ctx.lineWidth = 0;
-    ctx.setLineDash([]);
-    ctx.lineCap = 'butt';
-    ctx.lineJoin = 'miter';
-    ctx.miterLimit = 10;
-    return;
-  }
-  ctx.strokeStyle = hexToRgba(stroke.color);
-  const lw = Math.max(0.5, stroke.width * emuPerPx);
-  ctx.lineWidth = lw;
-  const dash = stroke.customDash != null
-    ? drawingmlLineDashArray(stroke.customDash, null, lw)
-    : stroke.dashStyle
-      ? shapeStrokeDashArray(stroke.dashStyle, lw)
-      : [];
-  const requestedCap = stroke.lineCap ?? 'butt';
-  // ECMA-376 Part 4 §19.1.2.21: a zero in VML's numeric dash grammar is a
-  // visible fourfold-symmetric dot, even though VML's default endcap is flat.
-  // Canvas drops a zero-length dash under its equivalent `butt` cap. A square
-  // cap is the exact centered, fourfold-symmetric fallback for that one case;
-  // explicit round/square caps keep their authored shape.
-  const hasZeroDash = dash.some((length, index) => index % 2 === 0 && length === 0);
-  ctx.lineCap = requestedCap === 'butt' && hasZeroDash ? 'square' : requestedCap;
-  ctx.lineJoin = stroke.lineJoin ?? 'miter';
-  ctx.miterLimit = stroke.miterLimit ?? 10;
-  ctx.setLineDash(dash);
+  ctx.strokeStyle = stroke ? hexToRgba(stroke.color) : 'transparent';
+  applyResolvedStroke(ctx, resolveStrokeGeometry(stroke, emuPerPx));
 }

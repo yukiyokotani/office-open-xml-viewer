@@ -41,7 +41,8 @@ vi.mock('@silurus/ooxml-core/internal/model-source', async importOriginal => ({
 vi.mock('./wasm/docx_parser.js', () => ({
   default: workerMocks.parserInit, reinit: vi.fn(), DocxArchive: class {},
 }));
-vi.mock('./google-fonts.js', () => ({
+vi.mock('./google-fonts.js', async importOriginal => ({
+  ...await importOriginal<typeof import('./google-fonts.js')>(),
   DOCX_GOOGLE_FONTS: {}, docxFontPreloadNames: () => [], docxOfficeFontFallbackRequests: () => [],
 }));
 vi.mock('./embedded-fonts.js', () => ({
@@ -50,11 +51,6 @@ vi.mock('./embedded-fonts.js', () => ({
 vi.mock('./renderer.js', () => ({ prepareMathRuns: vi.fn(), renderLayoutSourceToCanvas: vi.fn() }));
 vi.mock('./vertical-render-capability.js', () => ({
   documentRequiresDomVerticalGlyphLayout: workerMocks.verticalFallback,
-}));
-vi.mock('./layout-source-model-adapter.js', () => ({
-  layoutSourceModelAdapterFromOwnedModel: (document: DocxDocumentModel) => ({
-    document, source: { fatalParse: null, mathOccurrences: [] },
-  }),
 }));
 vi.mock('./layout-runtime.js', () => ({ createLayoutServices: () => ({}) }));
 vi.mock('./render-worker-layout.js', () => ({

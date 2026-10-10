@@ -1,3 +1,4 @@
+import type { GeometryPathSink } from '../path-data';
 /**
  * Executes a single ECMA-376 `<path>` element against a Canvas 2D context.
  *
@@ -6,6 +7,8 @@
  * center is back-solved from the pen position so multiple arcs chain
  * continuously.
  */
+
+export type PresetGeometryPathSink = Pick<GeometryPathSink, 'moveTo' | 'lineTo' | 'quadraticCurveTo' | 'bezierCurveTo' | 'ellipse' | 'closePath'>;
 
 import type { Evaluator } from './evaluator';
 
@@ -29,7 +32,7 @@ export interface PresetPath {
  * pixels because `<arcTo>` back-computes the ellipse centre from it.
  */
 export function applyPresetPath(
-  ctx: CanvasRenderingContext2D,
+  ctx: PresetGeometryPathSink,
   path: PresetPath,
   evaluator: Evaluator,
   shapeX: number,

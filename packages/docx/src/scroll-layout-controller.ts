@@ -57,6 +57,7 @@ export class DocxScrollLayoutController {
   private onPublication(doc: DocxDocument, publication: DocxLayoutPublication): void {
     if (this.hooks.destroyed() || doc !== this.hooks.current()) return;
     if (publication.error !== undefined) {
+      if (publication.pageCount === 0) this.prefix = 0;
       this.hooks.reportBackground(publication.error);
       return;
     }

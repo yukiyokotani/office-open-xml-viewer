@@ -1,3 +1,4 @@
+import type { GeometryPathSink } from './path-data';
 // Pre-set shape paths and helpers for OOXML <a:prstGeom>.
 //
 // Originally lived inline in the pptx renderer (see commit history of
@@ -69,11 +70,11 @@
 
 /* eslint-disable */
 
-import { buildPresetGeometryPath } from './preset-geometry';
+import { buildPresetGeometryPath } from './preset-geometry/geometry';
 
 // ── Star helper ──────────────────────────────────────────────────────────────
 export function drawStar(
-  ctx: CanvasRenderingContext2D,
+  ctx: GeometryPathSink,
   cx: number, cy: number,
   rx: number, ry: number,
   points: number,
@@ -94,7 +95,7 @@ export function drawStar(
 
 // ── Regular polygon helper ───────────────────────────────────────────────────
 export function drawPolygon(
-  ctx: CanvasRenderingContext2D,
+  ctx: GeometryPathSink,
   cx: number, cy: number,
   rx: number, ry: number,
   sides: number,
@@ -128,7 +129,7 @@ export function drawPolygon(
  * Returns the arc's geometric end point, so the caller can chain.
  */
 export function ooxmlArcTo(
-  ctx: CanvasRenderingContext2D,
+  ctx: GeometryPathSink,
   curX: number, curY: number,
   wR: number, hR: number,
   stAng: number, swAng: number,
@@ -298,7 +299,7 @@ export const SPEC_MIGRATED_SPEC_CORRECT_PRESETS: ReadonlySet<string> = new Set([
  *             shapes like trapezoid.
  */
 export function buildShapePath(
-  ctx: CanvasRenderingContext2D,
+  ctx: GeometryPathSink,
   geom: string,
   x: number,
   y: number,

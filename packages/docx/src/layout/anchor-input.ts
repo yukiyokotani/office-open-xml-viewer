@@ -33,8 +33,27 @@ export interface AnchorRawTransformInput {
   readonly flipV: boolean | null;
 }
 
+/** Source-owned passive data; never used as a filesystem, network or paint input. */
+export interface NativePicturePropertyInput {
+  readonly scope: 'documentDefault' | 'shape';
+  readonly opid: number; readonly value: number;
+  readonly text: string | null; readonly rawBytes: readonly number[];
+  readonly retention: 'passiveName' | 'inactiveOpaqueNotDecoded' | 'inactiveIndexNotResolved' | 'ignoredZeroIndex';
+}
+export interface NativePictureMetadataInput {
+  readonly blipName: NativePicturePropertyInput | null;
+  readonly shapeName: NativePicturePropertyInput | null;
+  readonly description: NativePicturePropertyInput | null;
+  readonly inactiveFillCarrier: NativePicturePropertyInput | null;
+  readonly inactiveLineCarrier: NativePicturePropertyInput | null;
+}
+
 export interface AnchorAcquisitionInput {
   readonly occurrenceId: string;
+  /** Native DOC's explicit changed-placement request. This is neither an
+   * authored wrap mode nor a completeness/paint/placement proof. */
+  readonly nativeReadingRelocation?: 'completeScene';
+  readonly nativePictureMetadata?: NativePictureMetadataInput;
   readonly simplePosition: {
     readonly enabled: boolean | null; readonly status: AnchorValueStatus;
     readonly xPt: number | null; readonly xStatus: AnchorValueStatus;

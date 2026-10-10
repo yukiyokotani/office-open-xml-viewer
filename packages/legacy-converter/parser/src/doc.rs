@@ -98,15 +98,95 @@ enum Token {
     Linked(Box<direct_model::fields::Linked>),
 }
 
+#[derive(Clone, Copy, Default)]
+pub(crate) struct ReadingPolicies {
+    pub(crate) relocate_drawings: bool,
+    pub(crate) simplify_word_breaking: bool,
+    pub(crate) stored_picture_bullets: bool,
+}
+
+#[allow(dead_code)]
 pub(crate) fn direct_model(
     cfb: &CompoundFile<'_>,
     max_model_bytes: usize,
 ) -> Result<direct_model::DirectDocResult, String> {
-    with_acquired_doc(cfb, |facts| direct_model::build(facts, max_model_bytes))
+    direct_model_with_policies(cfb, max_model_bytes, ReadingPolicies::default())
 }
 
+/// Explicit library reading policies; strict remains the default. Every source,
+/// framing, resource and unrelated property guard completes before publication.
+pub(crate) fn direct_model_with_policies(
+    cfb: &CompoundFile<'_>,
+    max_model_bytes: usize,
+    policies: ReadingPolicies,
+) -> Result<direct_model::DirectDocResult, String> {
+    with_acquired_doc_with_policies(cfb, policies, |mut facts| {
+        facts
+            .floating
+            .set_reading_relocation(policies.relocate_drawings);
+        direct_model::build(facts, max_model_bytes)
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn direct_model_with_reading_policy(
+    cfb: &CompoundFile<'_>,
+    max_model_bytes: usize,
+    reading_relocation: bool,
+) -> Result<direct_model::DirectDocResult, String> {
+    direct_model_with_policies(
+        cfb,
+        max_model_bytes,
+        ReadingPolicies {
+            relocate_drawings: reading_relocation,
+            ..ReadingPolicies::default()
+        },
+    )
+}
+
+#[allow(dead_code)]
+pub(crate) fn direct_model_with_word_breaking_reading(
+    cfb: &CompoundFile<'_>,
+    max_model_bytes: usize,
+    word_breaking_reading: bool,
+) -> Result<direct_model::DirectDocResult, String> {
+    direct_model_with_policies(
+        cfb,
+        max_model_bytes,
+        ReadingPolicies {
+            simplify_word_breaking: word_breaking_reading,
+            ..ReadingPolicies::default()
+        },
+    )
+}
+
+#[allow(dead_code)]
+pub(crate) fn direct_model_with_picture_bullet_reading(
+    cfb: &CompoundFile<'_>,
+    max_model_bytes: usize,
+    stored_size_for_reading: bool,
+) -> Result<direct_model::DirectDocResult, String> {
+    direct_model_with_policies(
+        cfb,
+        max_model_bytes,
+        ReadingPolicies {
+            stored_picture_bullets: stored_size_for_reading,
+            ..ReadingPolicies::default()
+        },
+    )
+}
+
+#[cfg(test)]
 fn with_acquired_doc<T>(
     cfb: &CompoundFile<'_>,
+    visit: impl FnOnce(AcquiredDoc<'_>) -> Result<T, String>,
+) -> Result<T, String> {
+    with_acquired_doc_with_policies(cfb, ReadingPolicies::default(), visit)
+}
+
+fn with_acquired_doc_with_policies<T>(
+    cfb: &CompoundFile<'_>,
+    policies: ReadingPolicies,
     visit: impl FnOnce(AcquiredDoc<'_>) -> Result<T, String>,
 ) -> Result<T, String> {
     // MS-DOC 2.1: the WordDocument, table and Data streams are children of
@@ -171,6 +251,8 @@ fn with_acquired_doc<T>(
         .map_err(unsupported)?
         .unwrap_or_default();
     let mut formatting = formatting::Formatting::read(&word, &table, &data)?;
+    formatting.configure_word_breaking_reading(policies.simplify_word_breaking);
+    formatting.picture_bullet_reading = policies.stored_picture_bullets;
     formatting.configure_table_styles(effective_nfib, true);
     let note_references = notes::References::read(&note_stories, &story, &mut formatting)?;
     let mut pictures = pictures::Store::new(&data);

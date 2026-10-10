@@ -152,6 +152,109 @@ impl Store<'_> {
         Ok(result)
     }
 
+    /// Explicit library reading policy, not MS-DOC 2.9.176 AUTO sizing.
+    /// MS-DOC 2.9.193 supplies stored PICMID extents; using those as the
+    /// display box is disclosed to the reader. Source font facts are untouched.
+    pub(in crate::doc) fn direct_reading_picture_bullet(
+        &mut self,
+        formatting: &mut super::super::formatting::Formatting<'_>,
+        marker: &super::super::character::PictureBullet,
+        remaining_bytes: &mut usize,
+    ) -> Result<
+        (
+            DirectPictureBullet,
+            Box<docx_model::NativeReadingPictureBullet>,
+        ),
+        String,
+    > {
+        let bullet = marker
+            .enabled()?
+            .ok_or_else(|| unsupported("disabled reading picture bullet"))?;
+        let (raw_pbi_flags, flags_origin, index_origin) = marker.reading_source_owners()?;
+        let picture = self.acquire_picture_bullet(formatting, bullet)?;
+        if picture.shape != Some(75)
+            || picture.client_anchor_count > 1
+            || picture.pib_flags.is_some_and(|value| value.key != 0x0106)
+            || picture.malformed_pib_name
+            || picture.malformed_pib_flags
+        {
+            return Err(unsupported(
+                "Word reading picture bullet has ambiguous source geometry",
+            ));
+        }
+        if let Some(flags) = picture.pib_flags {
+            // MS-ODRAW 2.4.8: Comment/File/URL are exclusive; DoNotSave
+            // requires LinkToFile, which itself requires File or URL.
+            let value = flags.value;
+            if value & !0x0f != 0
+                || value & 3 == 3
+                || (value & 4 != 0 && value & 8 == 0)
+                || (value & 8 != 0 && value & 3 == 0)
+            {
+                return Err(unsupported("invalid Word picture bullet MSOBLIPFLAGS"));
+            }
+            // This bounded consumer owns embedded passive data. Named or
+            // linked display semantics need a separate source/name consumer.
+            // Omitted pibFlags uses the normative Comment default; retain
+            // the absence rather than synthesizing an encoded zero operand.
+            if value != 0 {
+                return Err(unsupported(
+                    "named or linked Word picture bullet has no stored-size reading consumer",
+                ));
+            }
+        }
+        let needed = std::mem::size_of::<docx_model::NativeReadingPictureBullet>()
+            .checked_add(picture.client_anchor.map_or(0, <[u8]>::len))
+            .ok_or("OUTPUT_TOO_LARGE")?;
+        remaining_bytes
+            .checked_sub(needed)
+            .ok_or("OUTPUT_TOO_LARGE")?;
+        let client_anchor = picture
+            .client_anchor
+            .map(|source| {
+                let mut bytes = Vec::new();
+                bytes
+                    .try_reserve_exact(source.len())
+                    .map_err(|_| "OUTPUT_TOO_LARGE")?;
+                bytes.extend_from_slice(source);
+                Ok::<_, &str>(bytes)
+            })
+            .transpose()?;
+        let mut facts = Box::new(docx_model::NativeReadingPictureBullet {
+            resource_key: String::new(),
+            raw_pbi_flags,
+            flags_origin,
+            index_origin,
+            relative_cp: bullet.relative_cp,
+            picf_offset: picture.offset,
+            shape: 75,
+            raw_shape_flags: picture.raw_shape_flags,
+            goal_twips: picture.goal,
+            scale_per_mille: picture.scale,
+            pib_flags: picture.pib_flags,
+            client_anchor,
+            client_anchor_options: picture.client_anchor_options,
+        });
+        // Existing Frame.extent validates range and performs exact stored
+        // twip/per-mille scaling. 12700 EMU/pt is a unit conversion, not a
+        // fitted Word marker scale. Never derive points from raster pixels.
+        let display_box = picture.extent.map(|emu| emu as f64 / 12700.0);
+        let projected =
+            self.direct_picture_bullet(formatting, bullet, display_box, remaining_bytes)?;
+        // Clone the selected resource identity, not an independently reconstructed
+        // DOC path. Admission preflight precedes the owned copy; paragraph_metadata
+        // charges its retained capacity once with the marker facts.
+        remaining_bytes
+            .checked_sub(projected.picture.resource_key.len())
+            .ok_or("OUTPUT_TOO_LARGE")?;
+        facts
+            .resource_key
+            .try_reserve_exact(projected.picture.resource_key.len())
+            .map_err(|_| "OUTPUT_TOO_LARGE")?;
+        facts.resource_key.push_str(&projected.picture.resource_key);
+        Ok((projected, facts))
+    }
+
     /// Select an occurrence for one direct document result. Direct production
     /// must not call the OOXML part-scoping `begin_part`, which clears the
     /// selected-offset set used by `finish_direct_resources`.

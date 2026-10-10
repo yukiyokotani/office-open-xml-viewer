@@ -1,6 +1,6 @@
 import { loadPreviousPainters, type PreviousPainters } from '../../../tests/helpers/previous-painters';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { paintDrawingMLShape, type GradientFill } from '@silurus/ooxml-core';
+import { paintDrawingMLShape, resolveDrawingMLGeometry, type GradientFill } from '@silurus/ooxml-core';
 import { paintDrawingLayout } from '../../docx/src/paint/canvas-drawing';
 import type { DrawingLayout } from '../../docx/src/layout/types';
 import { renderSlide } from '../../pptx/src/renderer';
@@ -55,13 +55,16 @@ describe.skipIf(!skia)('tiled path gradients retain main pixels in every format'
         };
         if (format === 'docx') {
           const bounds = { xPt: 0, yPt: 0, widthPt: 200, heightPt: 120 };
+          const plan = {
+            rect: { x: 0, y: 0, w: 200, h: 120 },
+            geometry: { kind: 'preset' as const, name: preset, adjustments: [] },
+            fill, stroke: null, transform: { rotationDeg: 0, flipH: false, flipV: false },
+          };
           const drawing: DrawingLayout = {
             kind: 'drawing', id: 'tiled-shape', source: { story: 'body', storyInstance: 'body', path: [0] },
             flowDomainId: 'body', flowBounds: bounds, inkBounds: bounds, advancePt: 120, ordinaryFlow: false,
             commands: [{ kind: 'drawingml-shape', plan: {
-              rect: { x: 0, y: 0, w: 200, h: 120 },
-              geometry: { kind: 'preset', name: preset, adjustments: [] },
-              fill, stroke: null, transform: { rotationDeg: 0, flipH: false, flipV: false },
+              ...plan, resolvedGeometry: resolveDrawingMLGeometry(plan, 1),
             } }],
           };
           painters.paintDrawingLayout(drawing, { ctx, scale: 1, dpr: 1,
