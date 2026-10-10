@@ -1,3 +1,4 @@
+import { resolveDrawingMLGeometry } from '@silurus/ooxml-core';
 import type { ArrowEnd, DrawingMLShapePaintPlan, Stroke } from '@silurus/ooxml-core';
 import type { ShapeRun } from '../types.js';
 import type {
@@ -95,6 +96,7 @@ export function planShapeDrawing(
   text?: TextLayoutService,
   textPath?: Readonly<VmlTextPathAcquisitionInput>,
   imageFillResourceKey?: string,
+  maximumGeometryWork?: number,
 ): ShapeDrawingPlanResult {
   const parserControlled = textPath !== undefined && (
     textPath.textPathOk !== undefined
@@ -239,6 +241,7 @@ export function planShapeDrawing(
       flipV: shape.flipV ?? false,
     },
   };
+  const retainedPlan = { ...plan, resolvedGeometry: resolveDrawingMLGeometry(plan, 1, maximumGeometryWork) };
   if (shape.fill?.fillType === 'image') {
     if (shape.fill.tile !== undefined) {
       return Object.freeze({
@@ -258,7 +261,7 @@ export function planShapeDrawing(
       status: 'planned',
       command: snapshotPlainData({
         kind: 'drawingml-image-fill' as const,
-        plan,
+        plan: retainedPlan,
         resourceKey: imageFillResourceKey,
         ...(shape.fill.fillRect === undefined ? {} : {
           fillRect: {
@@ -274,7 +277,7 @@ export function planShapeDrawing(
   return Object.freeze({
     status: 'planned',
     command: snapshotPlainData(
-      { kind: 'drawingml-shape', plan } as const,
+      { kind: 'drawingml-shape', plan: retainedPlan } as const,
       'DrawingML shape command',
     ),
   });

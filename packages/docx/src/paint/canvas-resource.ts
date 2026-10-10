@@ -1,4 +1,4 @@
-import type { LayoutRect, PaintResourceKind, UprightResourceOrientation } from '../layout/types.js';
+import type { LayoutRect, NativeReadingImagePlan, PaintResourceKind, UprightResourceOrientation } from '../layout/types.js';
 import type { CanvasPaintContext } from './types.js';
 
 /** Paint one retained non-text resource using the orientation selected during
@@ -12,9 +12,14 @@ export function paintRetainedResource(
   bounds: LayoutRect,
   orientation: UprightResourceOrientation | undefined,
   context: CanvasPaintContext,
+  nativeImagePlan?: NativeReadingImagePlan,
 ): void {
+  // Counter-turning the command itself exchanges its destination axes. A
+  // retained reading plan must be acquired in that frame, not silently rebuilt
+  // here. Current reading producers use the drawing-local transform instead.
+  if (nativeImagePlan && orientation !== undefined) throw new Error('Reading image command orientation is not acquired');
   if (orientation === undefined) {
-    context.resources.paint(resourceKey, resourceKind, bounds, context.ctx);
+    context.resources.paint(resourceKey, resourceKind, bounds, context.ctx, nativeImagePlan);
     return;
   }
   const { ctx } = context;

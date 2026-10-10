@@ -144,6 +144,14 @@ impl<'a> Store<'a> {
                     flip: frame.props.flip,
                     rotation: frame.props.rotation,
                     image,
+                    extent: frame.extent,
+                    raw_shape_flags: frame.props.raw_shape_flags,
+                    pib_flags: frame.props.pib_flags,
+                    malformed_pib_name: frame.props.malformed_pib_name,
+                    malformed_pib_flags: frame.props.malformed_pib_flags,
+                    client_anchor: frame.client_anchor,
+                    client_anchor_options: frame.client_anchor_options,
+                    client_anchor_count: frame.client_anchor_count,
                 },
             );
         }
@@ -198,6 +206,14 @@ pub(in crate::doc) struct BulletPicture<'a> {
     /// MS-ODRAW 2.3.1.2, converted to 60000ths of a degree.
     pub(in crate::doc) rotation: i64,
     pub(in crate::doc) image: Image<'a>,
+    pub(in crate::doc) extent: [i64; 2],
+    pub(in crate::doc) raw_shape_flags: u32,
+    pub(in crate::doc) pib_flags: Option<docx_model::NativePictureBulletProperty>,
+    pub(in crate::doc) malformed_pib_name: bool,
+    pub(in crate::doc) malformed_pib_flags: bool,
+    pub(in crate::doc) client_anchor: Option<&'a [u8]>,
+    pub(in crate::doc) client_anchor_options: Option<u16>,
+    pub(in crate::doc) client_anchor_count: usize,
 }
 
 pub(super) struct Picture<'a> {
@@ -275,6 +291,9 @@ struct Frame<'a> {
     shape: Option<u16>,
     props: Options,
     image: Option<Image<'a>>,
+    client_anchor: Option<&'a [u8]>,
+    client_anchor_options: Option<u16>,
+    client_anchor_count: usize,
 }
 
 fn read_frame<'a>(
@@ -317,6 +336,9 @@ fn read_frame<'a>(
         return Err(unsupported("invalid Word inline shape container"));
     }
     let mut props = Options::default();
+    let mut client_anchor = None;
+    let mut client_anchor_options = None;
+    let mut client_anchor_count = 0usize;
     let mut child = 0;
     while child < shape.payload.len() {
         let (record, end) = record_with_end(shape.payload, child, budget, "Word inline shape")?;
@@ -329,8 +351,16 @@ fn read_frame<'a>(
                 }
                 props.shape = Some(record.instance);
                 let flags = u32_at(record.payload, 4)?;
+                props.raw_shape_flags = flags;
                 props.passive_picture = flags & 0x11d == 0;
                 props.flip = [flags & 0x40 != 0, flags & 0x80 != 0];
+            }
+            0xf010 => {
+                // Preserve this bounded record as opaque source metadata.
+                // Reading placement does not interpret or clear its bits.
+                client_anchor_count += 1;
+                client_anchor = Some(record.payload);
+                client_anchor_options = Some((record.instance << 4) | u16::from(record.version));
             }
             _ => {} // No client data, OLE, script, or external resources executed.
         }
@@ -344,6 +374,9 @@ fn read_frame<'a>(
             shape,
             props,
             image: None,
+            client_anchor,
+            client_anchor_options,
+            client_anchor_count,
         }));
     }
     let mut selected = None;
@@ -370,6 +403,9 @@ fn read_frame<'a>(
         shape,
         props,
         image: selected,
+        client_anchor,
+        client_anchor_options,
+        client_anchor_count,
     }))
 }
 
@@ -393,6 +429,10 @@ pub(super) struct Options {
     flip: [bool; 2],
     pub rotation: i64,
     pseudo_inline: bool,
+    raw_shape_flags: u32,
+    pib_flags: Option<docx_model::NativePictureBulletProperty>,
+    malformed_pib_name: bool,
+    malformed_pib_flags: bool,
 }
 impl Options {
     fn apply(&mut self, record: Record<'_>, budget: &mut usize) -> Result<(), String> {
@@ -422,6 +462,19 @@ impl Options {
             let key = u16_at(entry, 0)?;
             let id = key & 0x3fff;
             let value = u32_at(entry, 2)?;
+            // MS-ODRAW 2.3.23.9: pibFlags is property 0x0106 with
+            // fBid=0 and fComplex=0. Retain the encoded key so the explicit
+            // reading owner refuses either incorrect flag, even for op=0.
+            if id == 0x106 {
+                self.pib_flags = Some(docx_model::NativePictureBulletProperty { key, value });
+                self.malformed_pib_flags |= key != 0x0106;
+            }
+            // MS-ODRAW 2.2.8/2.3.23.7: pibName ignores fBid. Complex
+            // names use the bounded payload checked below; scalar op=0 is
+            // the empty default. Do not mask the encoded key/source bytes.
+            if id == 0x105 && key & 0x8000 == 0 && value != 0 {
+                self.malformed_pib_name = true;
+            }
             // MS-ODRAW 2.2.15: all BLIP-valued properties consume a slot,
             // regardless of fBid/fComplex/op. The visible picture is pib.
             if inline
@@ -615,6 +668,14 @@ mod tests {
                     crop: [0; 4],
                     flip: [false; 2],
                     rotation: 0,
+                    extent: [457_200, 914_400],
+                    raw_shape_flags: 0,
+                    pib_flags: None,
+                    malformed_pib_name: false,
+                    malformed_pib_flags: false,
+                    client_anchor: None,
+                    client_anchor_options: None,
+                    client_anchor_count: 0,
                     image: Image {
                         bytes: std::borrow::Cow::Owned(png()),
                         extension: "png",

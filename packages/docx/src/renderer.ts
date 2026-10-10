@@ -1,3 +1,4 @@
+import { DocxCallerInputError } from './layout/caller-input-error.js';
 import type { DocxDocumentModel, BodyElement, DocxTextRunInfo } from './types';
 import type { LayoutServices, MathRenderer } from './layout/types.js';
 import type { ChartThreeDRenderer, ChartRegionMapRenderer, ChartExRenderer, ImageResourceOptions, TiffRenderer, SvgBlobDecoder } from '@silurus/ooxml-core';
@@ -8,7 +9,7 @@ import { selectDocumentLayoutPage } from './layout/document-layout-variants.js';
 import { rasterPaintOccurrencesForPage } from './layout/text-index.js';
 import { textRunsForPage } from './text-run-projection.js';
 import { dropBrowserImageCache } from './paint/browser-images.js';
-import { canvasPageScale, renderSelectedDocumentPage } from './paint/canvas-document.js';
+import { canvasPageScale, renderSelectedDocumentPage, acquireDocumentCanvasTargetContext } from './paint/canvas-document.js';
 import { ensureDocumentLayoutVariants } from './layout/document.js';
 import { prepareMathResources } from './paint/math-resources.js';
 import { createLayoutServices } from './layout-runtime.js';
@@ -90,12 +91,17 @@ function normalizeRenderOptions(
   source: LayoutSourceStore,
   canvas: HTMLCanvasElement | OffscreenCanvas,
   pageIndex: number,
-  options: RenderDocumentOptions,
+  options: RenderDocumentOptions & { readonly assertPublicationCurrent?: () => void; readonly callerOwnedCanvasTarget?: boolean },
 ) {
+  if (canvas === null || typeof canvas !== 'object' || typeof canvas.getContext !== 'function') {
+    if (options.callerOwnedCanvasTarget === false) throw new Error('Internally acquired DOCX paint target is invalid');
+    throw new DocxCallerInputError('DOCX paint requires a canvas target');
+  }
+  const validatedTargetContext = acquireDocumentCanvasTargetContext(canvas, options.callerOwnedCanvasTarget !== false);
   const services = options.layoutServices ?? createLayoutServices(
     source,
     source.fatalParse === null ? {
-      measureContext: canvas.getContext('2d') as
+      measureContext: validatedTargetContext as
         | CanvasRenderingContext2D
         | OffscreenCanvasRenderingContext2D
         | null,
@@ -133,6 +139,11 @@ function normalizeRenderOptions(
         ? textRunsForPage(selection.layout, pageIndex, { scale })
         : [],
       onTextRun: options.onTextRun,
+      // Internal publication ownership follows normalized paint options; the
+      // final renderer adapter performs no policy or option reconstruction.
+      assertPublicationCurrent: options.assertPublicationCurrent,
+      callerOwnedCanvasTarget: options.callerOwnedCanvasTarget,
+      validatedTargetContext,
       threeD: options.threeD,
       regionMap: options.regionMap,
       chartEx: options.chartEx,
@@ -147,7 +158,7 @@ export async function renderLayoutSourceToCanvas(
   source: LayoutSourceStore,
   canvas: HTMLCanvasElement | OffscreenCanvas,
   pageIndex: number,
-  opts: RenderDocumentOptions = {},
+  opts: RenderDocumentOptions & { readonly assertPublicationCurrent?: () => void; readonly callerOwnedCanvasTarget?: boolean } = {},
 ): Promise<void> {
   const normalized = normalizeRenderOptions(source, canvas, pageIndex, opts);
   return renderSelectedDocumentPage(

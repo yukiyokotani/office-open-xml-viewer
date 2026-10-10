@@ -1472,6 +1472,12 @@ pub struct FramePr {
 #[derive(Serialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct NumberingInfo {
+    /// Native reading owner of the resolved marker, separate from body runs.
+    #[serde(
+        rename = "__nativeReadingWordBreaking",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub native_reading_word_breaking: Option<NativeReadingWordBreakingWire>,
     pub num_id: u32,
     pub level: u32,
     /// "decimal" | "bullet" | "lowerLetter" | "upperLetter" | "lowerRoman" | "upperRoman"
@@ -1542,6 +1548,57 @@ pub struct NumberingInfo {
     /// box; they do not select its size or the font governing native AUTO.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pic_bullet_transform: Option<PictureBulletTransform>,
+    /// Native DOC-only explicit reading source facts. This is not authored
+    /// Word display geometry; ordinary DOCX and strict DOC omit the wire.
+    #[serde(
+        rename = "__nativeReadingPictureBullet",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub native_reading_picture_bullet: Option<Box<NativeReadingPictureBullet>>,
+}
+
+/// Winning MS-DOC picture-SPRM source layer, not an inferred sizing owner.
+#[derive(Serialize, Debug, Clone)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum NativePictureBulletOrigin {
+    Direct {
+        fc: usize,
+    },
+    Piece {
+        fc: usize,
+        prm: u16,
+    },
+    ListLevel {
+        instance: usize,
+        list: usize,
+        level: u8,
+    },
+}
+#[derive(Serialize, Debug, Clone, Copy)]
+pub struct NativePictureBulletProperty {
+    pub key: u16,
+    pub value: u32,
+}
+/// Raw source/provenance for a marker projected by storedSizeForReading.
+/// PICMID goal/scale are retained, while NumberingInfo owns the sole chosen
+/// display box. The native AUTO font metric is intentionally unresolved.
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeReadingPictureBullet {
+    /// Exact selected embedded resource identity; consumers do not derive DOC paths.
+    pub resource_key: String,
+    pub raw_pbi_flags: u16,
+    pub flags_origin: NativePictureBulletOrigin,
+    pub index_origin: NativePictureBulletOrigin,
+    pub relative_cp: u32,
+    pub picf_offset: usize,
+    pub shape: u16,
+    pub raw_shape_flags: u32,
+    pub goal_twips: [i16; 2],
+    pub scale_per_mille: [u16; 2],
+    pub pib_flags: Option<NativePictureBulletProperty>,
+    pub client_anchor: Option<Vec<u8>>,
+    pub client_anchor_options: Option<u16>,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -1902,6 +1959,52 @@ pub struct AnchorGroupWire {
     pub resolved_child_frame: AnchorResolvedChildFrameWire,
 }
 
+/// Parser-private request emitted only by explicit native DOC reading policy.
+/// It records a changed placement request, not a recovered authored contour or
+/// permission to omit members. Retained scene and publication owners must still
+/// prove complete acquisition, fit, decoded resources and visible disclosure.
+#[derive(Serialize, Debug, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+pub enum NativeReadingRelocationWire {
+    CompleteScene,
+}
+
+/// Passive source metadata from the explicit native DOC reading policy. These
+/// fields are never resource paths or permission to interpret latent payloads.
+#[derive(Serialize, Debug, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+pub enum NativePicturePropertyScopeWire {
+    DocumentDefault,
+    Shape,
+}
+#[derive(Serialize, Debug, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+pub enum NativePicturePropertyRetentionWire {
+    PassiveName,
+    InactiveOpaqueNotDecoded,
+    InactiveIndexNotResolved,
+    IgnoredZeroIndex,
+}
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct NativePicturePropertyWire {
+    pub scope: NativePicturePropertyScopeWire,
+    pub opid: u16,
+    pub value: u32,
+    pub text: Option<String>,
+    pub raw_bytes: Vec<u8>,
+    pub retention: NativePicturePropertyRetentionWire,
+}
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct NativePictureMetadataWire {
+    pub blip_name: Option<NativePicturePropertyWire>,
+    pub shape_name: Option<NativePicturePropertyWire>,
+    pub description: Option<NativePicturePropertyWire>,
+    pub inactive_fill_carrier: Option<NativePicturePropertyWire>,
+    pub inactive_line_carrier: Option<NativePicturePropertyWire>,
+}
+
 #[derive(Serialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct AnchorAcquisitionWire {
@@ -1916,6 +2019,10 @@ pub struct AnchorAcquisitionWire {
     pub wrap: AnchorWrapWire,
     pub behavior: AnchorBehaviorWire,
     pub group: Option<AnchorGroupWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_reading_relocation: Option<NativeReadingRelocationWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_picture_metadata: Option<Box<NativePictureMetadataWire>>,
 }
 
 /// A drawn shape (wps:wsp inside wp:anchor). Positioned like an anchor image
@@ -2586,6 +2693,14 @@ pub struct ParagraphTypographyWire {
 #[derive(Serialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct FieldRun {
+    /// The evaluated field retains its exact final native character owner.
+    /// This fact participates in stored-result/instruction agreement; native
+    /// reading never silently merges two unresolved word-breaking owners.
+    #[serde(
+        rename = "__nativeReadingWordBreaking",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub native_reading_word_breaking: Option<NativeReadingWordBreakingWire>,
     /// "page" | "numPages" | "other"
     pub field_type: String,
     /// original instruction text (e.g. "PAGE \\* MERGEFORMAT")
@@ -2648,6 +2763,16 @@ pub struct FieldRun {
     pub typography_acquisition: Option<RunTypographyWire>,
 }
 
+/// Parser-private unsupported native word-breaking owner retained only by an
+/// explicitly selected reading capability. These bytes are not a valid Word
+/// enum and never authorize dictionary or character substitutions in layout.
+#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeReadingWordBreakingWire {
+    pub raw_hres: u8,
+    pub raw_ch_hres: u8,
+}
+
 #[derive(Serialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct TextRun {
@@ -2663,6 +2788,11 @@ pub struct TextRun {
         skip_serializing_if = "std::ops::Not::not"
     )]
     pub optional_hyphen: bool,
+    #[serde(
+        rename = "__nativeReadingWordBreaking",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub native_reading_word_breaking: Option<NativeReadingWordBreakingWire>,
     /// The authored run begins with `<w:noBreakHyphen/>` but could not be
     /// coalesced with its predecessor because a zero-width semantic boundary
     /// (such as a comment anchor) must remain addressable. Layout keeps this

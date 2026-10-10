@@ -390,6 +390,8 @@ export {
 // math, the full-frame raster size for a cropped metafile, and the draw wrapper.
 export {
   cropSourceRect,
+  imagePaintProjection,
+  type ImagePaintProjection,
   drawImageCropped,
   imageNaturalSize,
   metafileRasterSize,
@@ -809,3 +811,6 @@ export { sliceHorizontalExtent, overlayPercent } from './search/highlight-rect';
 export { nextActive, prevActive, clampActive } from './search/find-cursor';
 export type { FindMatch } from './search/find-match';
 export type { FindHighlightColors } from './search/find-highlight';
+
+export { resolveDrawingMLGeometry, requireResolvedDrawingMLGeometry, drawingMLGeometryBounds, type ResolvedDrawingMLGeometry } from './shape/drawingml-geometry';
+export { GeometryWorkBudgetError, type GeometryPath, type GeometryPathCommand } from './shape/path-data';

@@ -171,10 +171,12 @@ impl Facts {
         };
         // MS-ODRAW 2.2.40 FSP flags: group members, patriarchs, deleted,
         // OLE and master-linked shapes need facts this projection lacks.
-        // fConnector is accepted only for the straight connector preset,
-        // whose static path is kept without endpoint rerouting.
+        // fConnector also identifies msosptLine (2.4.24); it does not change
+        // the authored line geometry. The owning Store additionally verifies
+        // that this newly admitted class discards no endpoint binding. The
+        // established straight connector preset keeps its existing policy.
         let membership = if child { 0x2 } else { 0 };
-        if flags & 0x43f != membership || (flags & 0x100 != 0 && kind != 32) {
+        if flags & 0x43f != membership || (flags & 0x100 != 0 && !matches!(kind, 20 | 32)) {
             return Err(unsupported(
                 "Word drawing shape has unsupported shape flags",
             ));
@@ -1098,6 +1100,18 @@ mod tests {
         assert_eq!(facts.preset, Some("line"));
         assert!(facts.fill.is_none());
         assert_eq!(facts.line.unwrap().ends[1].unwrap().kind, "triangle");
+        // A line remains the authored straight path when fConnector marks it:
+        // the enclosing drawing separately rejects live endpoint bindings.
+        let facts = read(20, 0xb80, &bytes, [9000, 0]).unwrap();
+        assert_eq!(facts.preset, Some("line"));
+        assert!(facts.fill.is_none());
+        assert_eq!(facts.line.unwrap().ends[1].unwrap().kind, "triangle");
+        let (child, _) = crate::officeart::record_with_end(&bytes, 0, &mut 1000, "test").unwrap();
+        let facts = Facts::read(20, 0xb82, true, child, [0, 9000], &mut 1000).unwrap();
+        assert_eq!(facts.preset, Some("line"));
+        assert!(facts.fill.is_none() && facts.line.is_some());
+        assert!(read(1, 0xb00, &container(&[], &[], &[]), [9, 9]).is_err());
+        assert!(read(20, 0xb20, &bytes, [9000, 0]).is_err());
         let facts = read(32, 0xb00, &container(&[], &[], &[]), [0, 900]).unwrap();
         assert_eq!(facts.preset, Some("straightConnector1"));
         assert!(read(20, 0xa00, &container(&[(0x1ff, 0x80000)], &[], &[]), [9, 0]).is_err());

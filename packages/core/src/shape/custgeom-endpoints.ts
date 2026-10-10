@@ -192,7 +192,7 @@ function endForwardTangent(
 }
 
 /** Track the pen position across one sub-path to find its final terminal point. */
-function terminalPoint(cmds: PathCmd[]): { x: number; y: number } | null {
+function terminalPoint(cmds: readonly PathCmd[]): { x: number; y: number } | null {
   let px = 0;
   let py = 0;
   let started = false;
@@ -204,7 +204,7 @@ function terminalPoint(cmds: PathCmd[]): { x: number; y: number } | null {
 }
 
 /** Does this sub-path form a closed loop (explicit `close` or terminal ≈ start)? */
-function isClosed(cmds: PathCmd[]): boolean {
+function isClosed(cmds: readonly PathCmd[]): boolean {
   if (cmds.some((c) => c.cmd === 'close')) return true;
   const first = cmds.find((c) => c.cmd === 'moveTo') as
     | Extract<PathCmd, { cmd: 'moveTo' }>
@@ -248,7 +248,7 @@ function isClosed(cmds: PathCmd[]): boolean {
  *
  * @param subpaths Normalised (`[0,1]`) custGeom sub-paths.
  */
-export function getCustGeomEndpoints(subpaths: PathCmd[][]): CustGeomEndpoints {
+export function getCustGeomEndpoints(subpaths: readonly (readonly PathCmd[])[]): CustGeomEndpoints {
   const result: CustGeomEndpoints = { start: null, end: null };
   if (!subpaths || subpaths.length === 0) return result;
 

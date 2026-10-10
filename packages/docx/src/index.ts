@@ -277,3 +277,5 @@ export type {
   LineEnd,
 } from './types';
 export type { DocxTextRunInfo } from './renderer';
+
+export type { DocxReadingNotice } from './native-reading-notice.js';

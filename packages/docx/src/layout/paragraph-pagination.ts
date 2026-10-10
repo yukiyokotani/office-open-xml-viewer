@@ -1,3 +1,4 @@
+import { nativeReadingRequiresFreshColumn } from './native-reading-admission.js';
 import { adjustForWidowOrphan, selectLargestFittingEnd } from '../line-fit-policy.js';
 import type { LineBoundary } from '../line-layout.js';
 import {
@@ -141,6 +142,11 @@ export function selectParagraphFragment(
   if (fragmentation.kind === 'indivisible') {
     const completeReserve = reserveFor(acquired);
     const completeExtentPt = admissionExtent(acquired, true);
+    if (acquired.nativeReadingRelocations?.length && nativeReadingRequiresFreshColumn(
+      completeExtentPt + completeReserve, availableBlockExtentPt, freshFlowRegionBlockExtentPt,
+      canRelocate, reserveFits(completeReserve),
+    )) return { fragment: null, nextCursor: cursor, requiresFreshFlowRegion: true,
+      additionalReservePt: 0, admittedBlockExtentPt: 0, admissionExtentPt: 0 };
     if (canRelocate && lineEndLimit !== undefined) {
       return {
         fragment: null, nextCursor: cursor,

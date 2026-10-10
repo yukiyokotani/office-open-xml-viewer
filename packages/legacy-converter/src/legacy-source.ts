@@ -13,6 +13,7 @@ import { cfbDirectoryNames } from '@silurus/ooxml-core/internal/cfb-directory-na
 import { MODEL_SOURCE_MODULE_PROTOCOL } from '@silurus/ooxml-core/internal/model-source';
 
 import { MAX_LEGACY_SOURCE_BYTES } from './legacy-source-limits.js';
+import { readNativeDocReadingPolicies, type NativeDocReadingPolicies } from './source-module-config.js';
 
 export type LegacyFamily = 'doc' | 'xls' | 'ppt';
 export { MAX_LEGACY_SOURCE_BYTES };
@@ -59,8 +60,13 @@ export function createLegacySource<T extends ModelSourceTarget>(
   family: LegacyFamily,
   options: LegacySourceOptions,
   defaults: Readonly<{ wasmUrl: string; moduleUrl: string }>,
+  docConfig?: NativeDocReadingPolicies,
 ): ModelSource<T> {
   const label = `legacy ${family.toUpperCase()} source`;
+  if (docConfig !== undefined) {
+    if (family !== 'doc') throw new TypeError('Native reading policies belong only to the DOC source');
+    readNativeDocReadingPolicies(docConfig);
+  }
   if (typeof options !== 'object' || options === null) {
     throw new TypeError(`${label} options must be an object`);
   }
@@ -79,7 +85,7 @@ export function createLegacySource<T extends ModelSourceTarget>(
     protocol: MODEL_SOURCE_MODULE_PROTOCOL,
     target,
     moduleUrl,
-    config: Object.freeze({ wasmUrl, maxInputBytes }),
+    config: Object.freeze({ wasmUrl, maxInputBytes, ...docConfig }),
   });
   return Object.freeze({
     target,

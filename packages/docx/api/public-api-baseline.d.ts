@@ -1242,6 +1242,7 @@ export class DocxDocument {
     getFontBytes(partPath: string): Promise<Uint8Array>;
     getResourceMetrics(): Promise<OoxmlResourceMetrics>;
     toMarkdown(): Promise<string>;
+    get readingNotices(): readonly DocxReadingNotice[];
     get pageCount(): number;
     get layoutComplete(): boolean;
     waitUntilLayoutComplete(): Promise<void>;
@@ -1325,6 +1326,10 @@ export interface DocxPageCommentThreadsOptions extends CollectPageRunsOptions, R
 export interface DocxPagePoint {
     readonly xPt: number;
     readonly yPt: number;
+}
+export interface DocxReadingNotice {
+    readonly code: 'DRAWINGS_RELOCATED_FOR_READING' | 'INACTIVE_PICTURE_DATA_RETAINED' | 'WORD_BREAKING_SIMPLIFIED_FOR_READING' | 'PICTURE_BULLETS_SIZED_FOR_READING';
+    readonly message: string;
 }
 export interface DocxRunBorder {
     style: string;

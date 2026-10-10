@@ -1,3 +1,4 @@
+import { resolveDrawingMLGeometry } from '@silurus/ooxml-core';
 import { describe, expect, it } from 'vitest';
 import { buildPageLayers } from './page-layers.js';
 import { rasterPaintOccurrencesForPage } from './text-index.js';
@@ -192,7 +193,7 @@ function imageFillPlan(
   rectValue: Readonly<{ x: number; y: number; w: number; h: number }>,
   rotationDeg = 0,
 ) {
-  return Object.freeze({
+  const plan = Object.freeze({
     rect: Object.freeze(rectValue),
     geometry: Object.freeze({
       kind: 'preset' as const,
@@ -203,6 +204,7 @@ function imageFillPlan(
     stroke: null,
     transform: Object.freeze({ rotationDeg, flipH: true, flipV: false }),
   });
+  return Object.freeze({ ...plan, resolvedGeometry: resolveDrawingMLGeometry(plan, 1) });
 }
 
 describe('rasterPaintOccurrencesForPage', () => {

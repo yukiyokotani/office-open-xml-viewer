@@ -265,6 +265,11 @@ export function projectBodyOccurrence<T extends ParagraphLayout | TableLayout>(
         ...line, placements: line.placements.map(projectPlacement),
       })),
       drawings: paragraph.drawings.map((drawing) => projectDrawing(drawing, domain)),
+      // Completeness references use the same occurrence-local drawing owners.
+      // Keep the acquired source graph intact for other page occurrences.
+      ...(paragraph.nativeReadingRelocations ? {
+        nativeReadingRelocations: paragraph.nativeReadingRelocations.map(nodeId),
+      } : {}),
       textBoxes: paragraph.textBoxes.map(projectTextBox),
       exclusions: paragraph.exclusions.map((exclusion) => ({
         ...exclusion,

@@ -30,6 +30,34 @@ pub(in crate::doc) struct DirectRuleControlFacts {
 }
 
 impl Formatting<'_> {
+    /// Picture-bullet SPRMs belong to a paragraph/cell/section mark or list
+    /// level, not an ordinary character or control (MS-DOC 2.6.1). The
+    /// reading policy defers only a legal marker's sizing limitation.
+    pub(in crate::doc) fn reject_non_marker_picture_bullet(
+        &self,
+        properties: &Properties,
+    ) -> Result<(), String> {
+        if self.picture_bullet_reading && properties.picture_bullet().enabled()?.is_some() {
+            return Err(super::super::unsupported(
+                "Word picture bullet is placed on a non-marker character",
+            ));
+        }
+        Ok(())
+    }
+
+    fn direct_non_marker_properties(
+        &mut self,
+        paragraph_style: usize,
+        table_style: Option<TableFormattingKey>,
+        fc: usize,
+        prm: u16,
+        prcs: &[&[u8]],
+    ) -> Result<Properties, String> {
+        let properties =
+            self.run_properties_with_table(paragraph_style, table_style, fc, prm, prcs)?;
+        self.reject_non_marker_picture_bullet(&properties)?;
+        Ok(properties)
+    }
     pub(in crate::doc) fn direct_rule_control(
         &mut self,
         paragraph_style: usize,
@@ -37,7 +65,7 @@ impl Formatting<'_> {
         prm: u16,
         prcs: &[&[u8]],
     ) -> Result<DirectRuleControlFacts, String> {
-        let properties = self.run_properties_with_table(paragraph_style, None, fc, prm, prcs)?;
+        let properties = self.direct_non_marker_properties(paragraph_style, None, fc, prm, prcs)?;
         Ok(DirectRuleControlFacts {
             picture: properties.picture,
             run: properties.direct_text_run(String::new(), &self.fonts)?,
@@ -64,7 +92,7 @@ impl Formatting<'_> {
         prcs: &[&[u8]],
     ) -> Result<Option<AnchorHostMetrics>, String> {
         let properties =
-            self.run_properties_with_table(paragraph_style, table_style, fc, prm, prcs)?;
+            self.direct_non_marker_properties(paragraph_style, table_style, fc, prm, prcs)?;
         if !properties.picture.passive_special() {
             return Err(super::super::unsupported(
                 "floating picture character is not passive-special",
@@ -112,6 +140,14 @@ impl Formatting<'_> {
             Some(mark) => mark,
             None => self.run_properties_with_table(style, table_style, fc, prm, prcs)?,
         };
+        if self.picture_bullet_reading
+            && resolved.numbering.is_none()
+            && mark.picture_bullet().enabled()?.is_some()
+        {
+            return Err(super::super::unsupported(
+                "Word picture bullet has no numbered paragraph owner",
+            ));
+        }
         let mut paragraph = resolved.properties.direct_paragraph();
         paragraph.outline_level = resolved.properties.direct_outline_level(style);
         // ECMA-376 17.3.1.9 compares paragraph styles; the DOCX renderer does
@@ -155,7 +191,7 @@ impl Formatting<'_> {
         text: String,
     ) -> Result<Option<TextRun>, String> {
         let properties =
-            self.run_properties_with_table(paragraph_style, table_style, fc, prm, prcs)?;
+            self.direct_non_marker_properties(paragraph_style, table_style, fc, prm, prcs)?;
         let Some(mut run) = properties.direct_text_run(text, &self.fonts)? else {
             return Ok(None);
         };
@@ -191,7 +227,7 @@ impl Formatting<'_> {
             return Ok(None);
         };
         let languages = self
-            .run_properties_with_table(paragraph_style, table_style, fc, prm, prcs)?
+            .direct_non_marker_properties(paragraph_style, table_style, fc, prm, prcs)?
             .resolved_languages()?;
         Ok(Some((run, languages.default)))
     }
@@ -234,7 +270,7 @@ impl Formatting<'_> {
         prcs: &[&[u8]],
     ) -> Result<bool, String> {
         Ok(self
-            .run_properties_with_table(paragraph_style, table_style, fc, prm, prcs)?
+            .direct_non_marker_properties(paragraph_style, table_style, fc, prm, prcs)?
             .direct_line_break_clears())
     }
 
@@ -253,7 +289,7 @@ impl Formatting<'_> {
         prm: u16,
         prcs: &[&[u8]],
     ) -> Result<(), String> {
-        self.run_properties_with_table(paragraph_style, table_style, fc, prm, prcs)?;
+        self.direct_non_marker_properties(paragraph_style, table_style, fc, prm, prcs)?;
         Ok(())
     }
 
@@ -269,7 +305,7 @@ impl Formatting<'_> {
         prcs: &[&[u8]],
     ) -> Result<DirectInlinePictureFacts, String> {
         let properties =
-            self.run_properties_with_table(paragraph_style, table_style, fc, prm, prcs)?;
+            self.direct_non_marker_properties(paragraph_style, table_style, fc, prm, prcs)?;
         Ok(DirectInlinePictureFacts {
             location: properties.picture.inline_location()?,
             vanish: properties.direct_vanish(),
@@ -291,7 +327,7 @@ impl<'a> Formatting<'a> {
         in_toc: bool,
     ) -> Result<Option<TextRun>, String> {
         let mut properties =
-            self.run_properties_with_table(paragraph_style, table_style, fc, prm, prcs)?;
+            self.direct_non_marker_properties(paragraph_style, table_style, fc, prm, prcs)?;
         if in_toc {
             let base = self.paragraph_base_with_table(paragraph_style, table_style)?;
             properties.take_link_display_from(&base);
@@ -312,7 +348,7 @@ impl<'a> Formatting<'a> {
     ) -> Result<&'a [u8], String> {
         let invalid = || super::super::unsupported("invalid Word binary-data character");
         let picture = self
-            .run_properties_with_table(paragraph_style, table_style, fc, prm, prcs)?
+            .direct_non_marker_properties(paragraph_style, table_style, fc, prm, prcs)?
             .picture;
         if !picture.special || !picture.data || picture.ole || picture.object {
             return Err(invalid());

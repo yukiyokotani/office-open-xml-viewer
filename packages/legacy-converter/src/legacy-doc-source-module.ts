@@ -11,7 +11,7 @@ import {
   type LegacyDocGlue,
   type LegacyDocNativeDocument,
 } from './direct-doc-engine.js';
-import { readLegacySourceModuleConfig } from './source-module-config.js';
+import { readLegacyDocSourceModuleConfig } from './source-module-config.js';
 
 const engine = createLegacyDocSourceEngine(
   () => import('./wasm-direct-doc/legacy_doc_direct.js') as Promise<LegacyDocGlue>,
@@ -27,11 +27,11 @@ export async function openModelSource(
   viewDefaults: Readonly<{ showTrackedChanges?: boolean }>;
   close(): void;
 }>> {
-  const { wasmUrl, maxInputBytes } = readLegacySourceModuleConfig(config, 'legacy DOC');
+  const { wasmUrl, maxInputBytes, ...policies } = readLegacyDocSourceModuleConfig(config);
   if (bytes.byteLength > maxInputBytes) {
     throw new RangeError('legacy DOC input exceeds the configured size limit');
   }
-  const owned = await engine.open(bytes, wasmUrl, signal);
+  const owned = await engine.open(bytes, wasmUrl, signal, policies);
   try {
     return Object.freeze({
       archive: owned.archive,
