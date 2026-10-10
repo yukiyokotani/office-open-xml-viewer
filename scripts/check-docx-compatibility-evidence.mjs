@@ -74,6 +74,29 @@ function property(object, name) {
       || (ts.isStringLiteral(entry.name) && entry.name.text === name)));
 }
 
+// property() validates the first matching literal entry, but spreads,
+// duplicate names, computed or shorthand names, methods and accessors can make
+// the runtime object expose a different value. Reject them before any lookup.
+function verifyLiteralMembers(object, file) {
+  const names = new Set();
+  for (const entry of object.properties) {
+    if (!ts.isPropertyAssignment(entry)
+      || !(ts.isIdentifier(entry.name) || ts.isStringLiteral(entry.name))) {
+      fail(
+        'COMPATIBILITY_LITERAL_SCHEMA',
+        `${file} requires ordinary literal-named object members`,
+      );
+    }
+    if (names.has(entry.name.text)) {
+      fail(
+        'COMPATIBILITY_LITERAL_SCHEMA',
+        `${file} has duplicate object member ${entry.name.text}`,
+      );
+    }
+    names.add(entry.name.text);
+  }
+}
+
 function stringValue(object, name, file) {
   const entry = property(object, name);
   if (!entry || !ts.isStringLiteralLike(entry.initializer)) {
@@ -90,6 +113,7 @@ function objectValue(object, name, file) {
   if (!entry || !ts.isObjectLiteralExpression(entry.initializer)) {
     fail('COMPATIBILITY_LITERAL_SCHEMA', `${file} requires object ${name}`);
   }
+  verifyLiteralMembers(entry.initializer, file);
   return entry.initializer;
 }
 
@@ -369,6 +393,7 @@ function inspectSource(root, absolute, rules, microsoftCatalog) {
     if (!/^[A-Z][A-Z0-9_]+$/.test(name)) {
       fail('COMPATIBILITY_EXPORT_NAME', `${file} exports invalid rule name ${name}`);
     }
+    verifyLiteralMembers(object, file);
     const id = stringValue(object, 'id', file);
     stringValue(object, 'description', file);
     verifyEvidence(

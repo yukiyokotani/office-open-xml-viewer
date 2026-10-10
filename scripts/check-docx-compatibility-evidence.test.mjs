@@ -309,3 +309,74 @@ test('rejects the removed transitional observation inventory argument', () => {
   assert.equal(result.status, 1);
   assert.match(result.stderr, /UNKNOWN_ARGUMENT: --print-observations/);
 });
+
+// The AST gate must validate the same fields that the runtime object exposes.
+// Later entries can replace an otherwise valid id or evidence reference.
+test('rejects rule entries that can override validated literal fields', () => {
+  for (const override of [
+    "'id': 'overridden-rule',",
+    "...{ id: 'overridden-rule' },",
+    "['id']: 'overridden-rule',",
+    "get id() { return 'overridden-rule'; },",
+  ]) {
+    const root = fixture();
+    write(root, 'packages/docx/src/layout/table-compatibility.ts', `
+      import { defineCompatibilityRule } from './compatibility.js';
+      export const WORD_OVERRIDE = defineCompatibilityRule({
+        id: 'word-literal-override',
+        evidence: { kind: 'microsoft-note', reference: '[MS-OI29500] §2.1.120' },
+        description: 'Literal override regression',
+        ${override}
+      });
+    `);
+    const result = run(root);
+    assert.equal(result.status, 1, `accepted rule override: ${override}`);
+    assert.match(result.stderr, /COMPATIBILITY_LITERAL_SCHEMA/);
+  }
+});
+
+test('rejects evidence entries that can override validated literal fields', () => {
+  for (const override of [
+    "reference: 'unverified reference',",
+    "...{ reference: 'unverified reference' },",
+    "['reference']: 'unverified reference',",
+    "reference() { return 'unverified reference'; },",
+  ]) {
+    const root = fixture();
+    write(root, 'packages/docx/src/layout/table-compatibility.ts', `
+      import { defineCompatibilityRule } from './compatibility.js';
+      export const WORD_OVERRIDE = defineCompatibilityRule({
+        id: 'word-literal-override',
+        evidence: {
+          kind: 'microsoft-note',
+          reference: '[MS-OI29500] §2.1.120',
+          ${override}
+        },
+        description: 'Literal override regression',
+      });
+    `);
+    const result = run(root);
+    assert.equal(result.status, 1, `accepted evidence override: ${override}`);
+    assert.match(result.stderr, /COMPATIBILITY_LITERAL_SCHEMA/);
+  }
+});
+
+test('accepts quoted literal keys and extra static metadata', () => {
+  const root = fixture();
+  write(root, 'packages/docx/src/layout/table-compatibility.ts', `
+    import { defineCompatibilityRule } from './compatibility.js';
+    export const WORD_QUOTED = defineCompatibilityRule({
+      'id': 'word-quoted-literal',
+      'evidence': {
+        'kind': 'microsoft-note',
+        'reference': '[MS-OI29500] §2.1.120',
+        'metadata': 'Static evidence metadata',
+      },
+      'description': 'Quoted literal regression',
+      'metadata': 'Static rule metadata',
+    });
+  `);
+  const result = run(root);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /verified \(6 rules\)/);
+});
