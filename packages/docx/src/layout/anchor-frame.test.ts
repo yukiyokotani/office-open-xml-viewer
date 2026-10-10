@@ -329,6 +329,18 @@ describe('retained anchor frame geometry', () => {
     });
   });
 
+  it('reports a valid zero outer extent as unsupported on either anchor axis', () => {
+    for (const axis of ['horizontal', 'vertical'] as const) {
+      const acquisition = anchor();
+      acquisition.extent[axis === 'horizontal' ? 'widthPt' : 'heightPt'] = 0;
+      const result = resolveAnchorFrame(input(acquisition));
+      expect(result.status).toBe('unsupported');
+      expect(result.axes[axis]).toMatchObject({
+        status: 'unsupported', issueCode: 'invalid-size',
+      });
+    }
+  });
+
   it('requires authored axis facts instead of falling back to page or zero', () => {
     const missingBase = resolveAnchorFrame(input(anchor({
       horizontal: {

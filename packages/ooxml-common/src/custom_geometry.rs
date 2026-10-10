@@ -140,7 +140,11 @@ fn guide_environment(
             .children()
             .find(|node| node.is_element() && node.tag_name().name() == "path")
     });
-    let width = if shape_width > 0.0 {
+    // ECMA-376 §20.1.9.11 / §20.1.10.56: built-in guides describe the shape extent,
+    // including zero (ST_PositiveCoordinate). The path coordinate system is
+    // an independent normalization denominator; do not substitute it for a
+    // valid zero shape axis or ss/hc/vc will move degenerate stroked paths.
+    let width = if shape_width.is_finite() && shape_width >= 0.0 {
         shape_width
     } else {
         first_path
@@ -148,7 +152,7 @@ fn guide_environment(
             .unwrap_or(1.0)
             .max(1.0)
     };
-    let height = if shape_height > 0.0 {
+    let height = if shape_height.is_finite() && shape_height >= 0.0 {
         shape_height
     } else {
         first_path

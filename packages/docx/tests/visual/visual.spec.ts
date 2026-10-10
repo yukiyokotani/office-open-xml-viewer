@@ -237,6 +237,7 @@ function describeSelfRegression(title: string, corpus: SelfVrtCorpus, files: str
           );
           await page.waitForFunction(
             () => document.body.dataset.status === 'ready' || document.body.dataset.status === 'error',
+            undefined,
             { timeout: 120_000 },
           );
           const status = await page.evaluate(() => document.body.dataset.status);

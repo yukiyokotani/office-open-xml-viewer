@@ -10505,9 +10505,11 @@ fn parse_wsp_shape(
     // `line`, `straightConnector1`, `bent*Connector*`, `curved*Connector*`)
     // legitimately have a degenerate bounding box: an axis-aligned connector
     // has cx==0 (vertical) or cy==0 (horizontal). Such a shape must NOT be
-    // discarded — it is the line itself. Custom paths also encode table rules
-    // with one zero axis. Keep those paths; empty custom boxes, other zero-area
-    // geometries (rect, ellipse, …), and negative extents are still rejected.
+    // discarded — it is the line itself. ECMA-376 §20.1.7.3 ext uses
+    // ST_PositiveCoordinate (minInclusive=0), and §20.1.9.15 path has a separate
+    // coordinate space. Custom strokes remain visible with one zero axis.
+    // Rejecting both-zero custom boxes and zero-area non-line presets remains
+    // library policy, not a prohibition imposed by the extent schema.
     let prst_lower = sp_pr
         .children()
         .find(|n| n.is_element() && n.tag_name().name() == "prstGeom")
@@ -27069,9 +27071,13 @@ mod inline_wps_shape_tests {
 
     #[test]
     fn parse_wsp_shape_retains_zero_axis_custom_paths_only_with_valid_extent() {
-        let parse_shape = |cx: &str, cy: &str| {
+        let parse_shape = |cx: &str, cy: &str, guide: bool| {
             let path_x = if cx == "0" { 0 } else { 381000 };
-            let path_y = if cy == "0" { 0 } else { 381000 };
+            let path_y = if guide {
+                "ss".to_string()
+            } else {
+                (if cy == "0" { 0 } else { 381000 }).to_string()
+            };
             let xml = format!(
                 r#"<wps:wsp
                      xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
@@ -27108,7 +27114,7 @@ mod inline_wps_shape_tests {
         };
 
         for (cx, cy, endpoint) in [("381000", "0", (1.0, 0.0)), ("0", "381000", (0.0, 1.0))] {
-            let shape = parse_shape(cx, cy).expect("single zero-axis custom path parses");
+            let shape = parse_shape(cx, cy, false).expect("single zero-axis custom path parses");
             assert_eq!(
                 (shape.width_pt, shape.height_pt),
                 (
@@ -27124,19 +27130,24 @@ mod inline_wps_shape_tests {
             assert_eq!((x, y), endpoint);
         }
         assert!(
-            parse_shape("0", "0").is_none(),
+            parse_shape("0", "0", false).is_none(),
             "both-zero custom extent remains rejected"
         );
         assert!(
-            parse_shape("-381000", "381000").is_none(),
+            parse_shape("-381000", "381000", false).is_none(),
             "negative extent remains rejected"
         );
         for (cx, cy) in [("NaN", "0"), ("inf", "0"), ("0", "NaN"), ("0", "inf")] {
             assert!(
-                parse_shape(cx, cy).is_none(),
+                parse_shape(cx, cy, false).is_none(),
                 "non-finite extent is rejected"
             );
         }
+        let guided = parse_shape("0", "381000", true).expect("zero-axis guided path parses");
+        assert!(
+            matches!(guided.subpaths[0][1], PathCmd::LineTo { x: 0.0, y: 0.0 }),
+            "ss is min(shape width, shape height), including a zero shape axis"
+        );
     }
 
     #[test]
