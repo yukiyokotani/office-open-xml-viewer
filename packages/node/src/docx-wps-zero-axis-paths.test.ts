@@ -40,26 +40,45 @@ const DOCUMENT = `<?xml version="1.0" encoding="UTF-8"?>
     w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>
 </w:body></w:document>`;
 
-describe('inline WPS custom paths with zero transform axes', () => {
-  it('paints stroked paths when either transform extent is zero', async () => {
-    const session = await openDocxDocument(minimalDocx(DOCUMENT), { factory });
-    const rendered = await session.renderPage(0, { dpr: 1, width: 612 })
-      .finally(() => session.close());
-    const canvas = rendered as unknown as Canvas;
-
-    const { data } = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height);
-    const rows = new Uint16Array(canvas.height);
-    const columns = new Uint16Array(canvas.width);
-    for (let y = 0; y < canvas.height; y += 1) {
-      for (let x = 0; x < canvas.width; x += 1) {
-        const index = (y * canvas.width + x) * 4;
-        if (data[index] < 80 && data[index + 1] < 80 && data[index + 2] < 80) {
-          rows[y] += 1;
-          columns[x] += 1;
-        }
+async function expectBothStrokeAxes(documentXml: string): Promise<void> {
+  const session = await openDocxDocument(minimalDocx(documentXml), { factory });
+  const rendered = await session.renderPage(0, { dpr: 1, width: 612 })
+    .finally(() => session.close());
+  const canvas = rendered as unknown as Canvas;
+  const { data } = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height);
+  const rows = new Uint16Array(canvas.height);
+  const columns = new Uint16Array(canvas.width);
+  for (let y = 0; y < canvas.height; y += 1) {
+    for (let x = 0; x < canvas.width; x += 1) {
+      const index = (y * canvas.width + x) * 4;
+      if (data[index] < 80 && data[index + 1] < 80 && data[index + 2] < 80) {
+        rows[y] += 1;
+        columns[x] += 1;
       }
     }
-    expect(Math.max(...rows), 'horizontal custom stroke pixels in one row').toBeGreaterThan(80);
-    expect(Math.max(...columns), 'vertical custom stroke pixels in one column').toBeGreaterThan(15);
+  }
+  expect(Math.max(...rows), 'horizontal custom stroke pixels in one row').toBeGreaterThan(80);
+  expect(Math.max(...columns), 'vertical custom stroke pixels in one column').toBeGreaterThan(15);
+}
+
+describe('inline WPS custom paths with zero transform axes', () => {
+  it('paints stroked paths when either transform extent is zero', async () => {
+    await expectBothStrokeAxes(DOCUMENT);
+  }, 120_000);
+
+  it('paints both zero-axis strokes as children of one inline group', async () => {
+    const wpg = 'http://schemas.microsoft.com/office/word/2010/wordprocessingGroup';
+    const shape = (zeroWidth: boolean) => line(1, zeroWidth).match(/<wps:wsp>[\s\S]*?<\/wps:wsp>/)?.[0];
+    const children = [shape(true), shape(false)];
+    if (children.some(child => !child)) throw new Error('Fixture shapes missing');
+    const group = `<w:p><w:r><w:drawing><wp:inline><wp:extent cx="1270000" cy="508000"/>
+      <wp:docPr id="3" name="grouped strokes"/><a:graphic><a:graphicData uri="${wpg}">
+      <wpg:wgp><wpg:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1270000" cy="508000"/>
+      <a:chOff x="0" y="0"/><a:chExt cx="1270000" cy="508000"/></a:xfrm></wpg:grpSpPr>
+      ${children.join('')}</wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>`;
+    const documentXml = DOCUMENT
+      .replace(`xmlns:wps="${WPS}"`, `xmlns:wps="${WPS}" xmlns:wpg="${wpg}"`)
+      .replace(`${line(1, true)}${line(2, false)}`, group);
+    await expectBothStrokeAxes(documentXml);
   }, 120_000);
 });
