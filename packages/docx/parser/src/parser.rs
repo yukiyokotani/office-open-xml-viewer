@@ -10520,7 +10520,7 @@ fn parse_wsp_shape(
             || p.starts_with("bentconnector")
             || p.starts_with("curvedconnector")
     );
-    if cx < 0.0 || cy < 0.0 {
+    if !cx.is_finite() || !cy.is_finite() || cx < 0.0 || cy < 0.0 {
         return None;
     }
     if !is_line_geom
@@ -27069,9 +27069,9 @@ mod inline_wps_shape_tests {
 
     #[test]
     fn parse_wsp_shape_retains_zero_axis_custom_paths_only_with_valid_extent() {
-        let parse_shape = |cx: i64, cy: i64| {
-            let path_x = if cx == 0 { 0 } else { 381000 };
-            let path_y = if cy == 0 { 0 } else { 381000 };
+        let parse_shape = |cx: &str, cy: &str| {
+            let path_x = if cx == "0" { 0 } else { 381000 };
+            let path_y = if cy == "0" { 0 } else { 381000 };
             let xml = format!(
                 r#"<wps:wsp
                      xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
@@ -27107,11 +27107,14 @@ mod inline_wps_shape_tests {
             )
         };
 
-        for (cx, cy, endpoint) in [(381000, 0, (1.0, 0.0)), (0, 381000, (0.0, 1.0))] {
+        for (cx, cy, endpoint) in [("381000", "0", (1.0, 0.0)), ("0", "381000", (0.0, 1.0))] {
             let shape = parse_shape(cx, cy).expect("single zero-axis custom path parses");
             assert_eq!(
                 (shape.width_pt, shape.height_pt),
-                (cx as f64 / 12700.0, cy as f64 / 12700.0)
+                (
+                    cx.parse::<f64>().unwrap() / 12700.0,
+                    cy.parse::<f64>().unwrap() / 12700.0
+                )
             );
             assert_eq!(shape.stroke_width, 1.0);
             let PathCmd::LineTo { x, y } = shape.subpaths[0][1] else {
@@ -27121,13 +27124,19 @@ mod inline_wps_shape_tests {
             assert_eq!((x, y), endpoint);
         }
         assert!(
-            parse_shape(0, 0).is_none(),
+            parse_shape("0", "0").is_none(),
             "both-zero custom extent remains rejected"
         );
         assert!(
-            parse_shape(-381000, 381000).is_none(),
+            parse_shape("-381000", "381000").is_none(),
             "negative extent remains rejected"
         );
+        for (cx, cy) in [("NaN", "0"), ("inf", "0"), ("0", "NaN"), ("0", "inf")] {
+            assert!(
+                parse_shape(cx, cy).is_none(),
+                "non-finite extent is rejected"
+            );
+        }
     }
 
     #[test]
