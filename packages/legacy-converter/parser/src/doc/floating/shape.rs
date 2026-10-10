@@ -67,6 +67,7 @@ pub(in crate::doc) struct Line {
     pub cap: &'static str,
     pub join: &'static str,
     pub miter: Option<f64>,
+    /// Start/end of the projected DrawingML path, not the binary path.
     pub ends: [Option<LineEnd<'static>>; 2],
 }
 
@@ -499,6 +500,20 @@ impl<'a> Table<'a> {
         let line = match paint.solid_line_or_default(path_paint.1) {
             Some((color, alpha)) => {
                 let (join, miter) = paint.details.join();
+                let mut ends = [paint.details.line_end(0), paint.details.line_end(1)];
+                if kind == 51 {
+                    // The callout adjustment projection above reverses the
+                    // OfficeArt leader's vertex order: tip -> box becomes
+                    // box -> tip in ECMA-376 accentBorderCallout2. Start/end
+                    // decorations (MS-ODRAW 2.3.8.20-21) must follow that
+                    // reversal, including their width/length. Word's paired
+                    // DOC/DOCX saves confirm start triangle -> tailEnd over
+                    // ten leaders extending up/down and left/right from the
+                    // attachment. Flips/rotation transform the whole path;
+                    // they do not exchange its logical endpoints. Other
+                    // supported presets keep their path order.
+                    ends.swap(0, 1);
+                }
                 Some(Line {
                     color: rgb(color, alpha)?,
                     width_emu: paint.width.unwrap_or(9525),
@@ -509,7 +524,7 @@ impl<'a> Table<'a> {
                     cap: paint.details.canvas_cap(),
                     join,
                     miter,
-                    ends: [paint.details.line_end(0), paint.details.line_end(1)],
+                    ends,
                 })
             }
             None => {
@@ -923,6 +938,57 @@ mod tests {
             [9, 9]
         )
         .is_err());
+    }
+
+    #[test]
+    fn callout_line_ends_follow_the_projected_leader_order() {
+        // Distinct end types and sizes make swapping just the kinds insufficient.
+        let bytes = container(
+            &[
+                (0x1d0, 1),
+                (0x1d1, 5),
+                (0x1d2, 0),
+                (0x1d3, 2),
+                (0x1d4, 2),
+                (0x1d5, 0),
+            ],
+            &[],
+            &[],
+        );
+        let start = LineEnd {
+            kind: "triangle",
+            width: "sm",
+            length: "lg",
+        };
+        let end = LineEnd {
+            kind: "arrow",
+            width: "lg",
+            length: "sm",
+        };
+        for flags in [0xa00, 0xa40, 0xa80, 0xac0] {
+            let callout = read(51, flags, &bytes, [9000, 3000]).unwrap();
+            assert_eq!(callout.line.unwrap().ends, [Some(end), Some(start)]);
+            for kind in [20, 32, 38] {
+                let connector = read(kind, flags, &bytes, [9000, 3000]).unwrap();
+                assert_eq!(connector.line.unwrap().ends, [Some(start), Some(end)]);
+            }
+        }
+        let bytes = container(&[(0x1d0, 1)], &[], &[]);
+        assert_eq!(
+            read(51, 0xa00, &bytes, [9000, 3000])
+                .unwrap()
+                .line
+                .unwrap()
+                .ends,
+            [
+                None,
+                Some(LineEnd {
+                    kind: "triangle",
+                    width: "med",
+                    length: "med"
+                })
+            ]
+        );
     }
 
     #[test]
