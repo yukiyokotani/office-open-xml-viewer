@@ -331,8 +331,12 @@ describe('retained anchor frame geometry', () => {
 
   it('reports a valid zero outer extent as unsupported on either anchor axis', () => {
     for (const axis of ['horizontal', 'vertical'] as const) {
-      const acquisition = anchor();
-      acquisition.extent[axis === 'horizontal' ? 'widthPt' : 'heightPt'] = 0;
+      const acquisition = anchor({
+        extent: {
+          ...anchor().extent,
+          [axis === 'horizontal' ? 'widthPt' : 'heightPt']: 0,
+        },
+      });
       const result = resolveAnchorFrame(input(acquisition));
       expect(result.status).toBe('unsupported');
       expect(result.axes[axis]).toMatchObject({
