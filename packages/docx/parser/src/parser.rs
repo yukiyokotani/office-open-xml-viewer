@@ -7672,7 +7672,7 @@ fn parse_run_inner(
                         no_break_before: false,
                         no_break_after: false,
                         no_break_hyphen_offsets: Vec::new(),
-                    optional_hyphen: false,
+                        optional_hyphen: false,
                         bold,
                         italic,
                         underline,
@@ -7775,7 +7775,7 @@ fn parse_run_inner(
                         no_break_before: false,
                         no_break_after: false,
                         no_break_hyphen_offsets: Vec::new(),
-                    optional_hyphen: false,
+                        optional_hyphen: false,
                         bold,
                         italic,
                         underline,
@@ -7940,7 +7940,11 @@ fn parse_run_inner(
                 // collapses to one run and the boundary vanishes entirely.
                 let optional = child.tag_name().name() == "softHyphen";
                 let this = TextRun {
-                    text: if optional { String::new() } else { "-".to_string() },
+                    text: if optional {
+                        String::new()
+                    } else {
+                        "-".to_string()
+                    },
                     optional_hyphen: optional,
                     // If the hyphen cannot merge with the previous text run,
                     // this provenance closes the otherwise breakable run
@@ -17056,11 +17060,18 @@ mod tests {
         assert!(!joined.contains('-'));
         // And it does NOT create a break run.
         assert!(!runs.iter().any(|r| matches!(r, DocRun::Break { .. })));
-        let [DocRun::Text(before), DocRun::Text(marker), DocRun::Text(after)] = runs.as_slice() else {
+        let [DocRun::Text(before), DocRun::Text(marker), DocRun::Text(after)] = runs.as_slice()
+        else {
             panic!("optional marker must retain its own styled run");
         };
-        assert_eq!((&before.text[..], &marker.text[..], &after.text[..]), ("br", "", "eaking"));
-        assert_eq!(serde_json::to_value(marker).unwrap()["__optionalHyphen"], true);
+        assert_eq!(
+            (&before.text[..], &marker.text[..], &after.text[..]),
+            ("br", "", "eaking")
+        );
+        assert_eq!(
+            serde_json::to_value(marker).unwrap()["__optionalHyphen"],
+            true
+        );
         assert_eq!(marker.color.as_deref(), Some("ff0000"));
         assert_eq!(marker.font_size, 14.0);
     }

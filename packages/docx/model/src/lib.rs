@@ -2658,7 +2658,10 @@ pub struct TextRun {
     /// Native DOC U+001F uses the same consumer; this is independent of
     /// automatic dictionary hyphenation. Keep it separate from ordinary text
     /// and from a nonbreaking hyphen's always-visible glyph.
-    #[serde(rename = "__optionalHyphen", skip_serializing_if = "std::ops::Not::not")]
+    #[serde(
+        rename = "__optionalHyphen",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
     pub optional_hyphen: bool,
     /// The authored run begins with `<w:noBreakHyphen/>` but could not be
     /// coalesced with its predecessor because a zero-width semantic boundary
