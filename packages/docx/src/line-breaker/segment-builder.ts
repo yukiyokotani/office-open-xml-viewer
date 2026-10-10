@@ -1347,15 +1347,16 @@ function emitResolvedTextSegment(
   const joinGrapheme = hasSlotSeam && registeredLatinMarkGraphemeCandidate(text);
   const joinLatin = hasSlotSeam && registeredLatinSingleSeamCandidate(shaped!.spans)
     && textShapeRequest.kerning === true && registeredLatinSlotRunCandidate(text);
-  if (!authoritativeSpan && shaped && shaped.spans.length > 1 && (joinGrapheme || joinLatin)
-    && environment.characterGridActive === false && environment.verticalCJK !== true
+  const uniformAllocation = environment.characterGridActive === false && environment.verticalCJK !== true
     && environment.paragraphRtl === false
     && !rtl && !ruby && fitTextRegionIndex === undefined
     && !base.smallCaps && !base.allCaps && !effectiveVertAlign
     && (effectiveCharacterSpacing == null || effectiveCharacterSpacing === 0)
     && (effectiveCharacterScale == null || effectiveCharacterScale === 1)
     && !mappedSymbolUnicode && !compressCharacterWhitespace
-    && (r.fontHint == null || r.fontHint === 'default')) {
+    && (r.fontHint == null || r.fontHint === 'default');
+  if (!authoritativeSpan && shaped && shaped.spans.length > 1 && (joinGrapheme || joinLatin)
+    && uniformAllocation) {
     // `text` is one splitTextForLayout piece, including its pure trailing
     // U+0020 sequence. That separator is not a second WORD slot seam; the full
     // piece still shares the uniform allocation/face/cmap proof. This is never
@@ -1367,6 +1368,42 @@ function emitResolvedTextSegment(
     if (compound?.spans.length === 1 && compound.spans[0]?.semanticSlotSpans) {
       shaped = compound;
       textShapeRequest = compoundRequest;
+    }
+  }
+  // ASCII Latin base + marks followed only by U+0020, when the whole piece was
+  // not adopted above (kerning off, or a peer covering the body but not the
+  // separator). Prove the body alone through the existing joinRegisteredGrapheme
+  // gate; the separator stays its own span. The initial push already consumed
+  // this piece's scope range, so: the body is emitted directly (pushSegmentPiece
+  // would rebuild its request and drop admission); the tail is pushed exactly
+  // as the multi-span loop below would push it (context given, no cursor move).
+  // Cross-word pair probes still require their own whole face/cmap proof.
+  // Any decline falls through to that unchanged loop with the original shape.
+  const markBody = !authoritativeSpan && uniformAllocation && !cs && shaped && shaped.spans.length > 1
+    ? /^([A-Za-z]\p{M}+)( +)$/u.exec(text) : null;
+  const tailSpan = markBody ? shaped!.spans[shaped!.spans.length - 1] : undefined;
+  if (markBody && tailSpan && registeredLatinMarkGraphemeCandidate(markBody[1]!)
+    && tailSpan.text === markBody[2] && tailSpan.start === markBody[1]!.length
+    && tailSpan.end === text.length
+    && (tailSpan.script === 'ascii' || tailSpan.script === 'highAnsi')) {
+    const body = markBody[1]!;
+    const bodyRequest: TextShapeRequest = Object.freeze({
+      ...sliceTextShapeRequest(textShapeRequest, 0, body.length),
+      joinRegisteredGrapheme: true,
+      joinRegisteredLatinSlots: undefined,
+    });
+    const bodyShape = environment.layoutServices?.text.shape(bodyRequest);
+    if (bodyShape?.spans.length === 1 && bodyShape.spans[0]?.semanticSlotSpans) {
+      emitResolvedTextSegment(emissionState, {
+        ...frame, text: body, textShapeRequest: bodyRequest, shaped: bodyShape,
+      });
+      pushSegmentPiece(
+        emissionState, tailSpan.text, false,
+        tailSpan.script === 'highAnsi' ? highAnsiFontFamily : base.fontFamily,
+        tailSpan, false, mappedSymbolUnicode,
+        sliceTextShapeRequest(textShapeRequest, tailSpan.start, tailSpan.end).substituteContext,
+      );
+      return;
     }
   }
   const resolvedAxisDiffers =

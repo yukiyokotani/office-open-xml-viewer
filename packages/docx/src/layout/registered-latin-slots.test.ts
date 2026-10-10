@@ -70,6 +70,29 @@ it('retains compound context at the ordinary word separator', () => {
     + adapter.wordBoundaryAdvance(s[i - 1], v), 0);
   expect(width).toBe(nativeAdvance('a T\u0301'));
 });
+it.each([[null, ' '], [20, '  ']] as const)(
+  'keeps a registered combining body intact before trailing spaces with kerning %s', (kerning, tail) => {
+    const text = 'T\u0301' + tail;
+    const s = segments(text, environment(), { kerning });
+    const lines = layoutLines(context, s, 100, 0, 1);
+    const retained = lines[0].segments.filter((v): v is LayoutTextSeg => 'text' in v);
+    // Independent provider charges two points for a detached string-initial
+    // mark. The separator must not undo the body's existing grapheme shaping.
+    expect(retained.reduce((width, v) => width + v.measuredWidth, 0)).toBe(nativeAdvance(text, false));
+    expect(retained.map(v => v.text)).toEqual(['T\u0301', tail]);
+    expect(retained[0].semanticSlotSpans?.map(v => [v.start, v.end, v.script])).toEqual([
+      [0, 1, 'ascii'], [1, 2, 'highAnsi'],
+    ]);
+  },
+);
+it('preserves the combining body when a peer covers its grapheme but not the trailing space', () => {
+  const service = fixture([[0x54, 0x54], [0x301, 0x301]]);
+  const s = segments('T\u0301 ', environment(service));
+  const lines = layoutLines(context, s, 100, 0, 1);
+  const retained = lines[0].segments.filter((v): v is LayoutTextSeg => 'text' in v);
+  expect(retained.reduce((width, v) => width + v.measuredWidth, 0)).toBe(12);
+  expect(retained.map(v => v.text)).toEqual(['T\u0301', ' ']);
+});
 it.each([null, 20])('keeps the established slot split when kerning threshold is %s', kerning => {
   expect(segments('Té', environment(), { kerning })).toHaveLength(2);
 });
@@ -132,8 +155,8 @@ function document(runs: DocRun[], alignment: DocParagraph['alignment'] = 'left')
     footers: { default: null, first: null, even: null },
   } as unknown as DocxDocumentModel;
 }
-function textPlacements(doc: DocxDocumentModel): TextPlacement[] {
-  const services = Object.freeze({ ...createLayoutServices(doc, { measureContext: context }), text: fixture() });
+function textPlacements(doc: DocxDocumentModel, text = fixture()): TextPlacement[] {
+  const services = Object.freeze({ ...createLayoutServices(doc, { measureContext: context }), text });
   const result: TextPlacement[] = [];
   const seen = new WeakSet<object>();
   function walk(value: unknown): void {
@@ -402,4 +425,144 @@ it('keeps ordinary separator context after a joined emergency suffix becomes one
   expect(second.map(v => v.text)).toEqual(['TT ', 'T']);
   expect(second.reduce((n, v) => n + v.measuredWidth, 0)).toBe(23);
   expect(second.at(-1)!.leadingWordBoundaryPx).toBe(-1);
+});
+
+const bodyPeer = [[0x54, 0x54], [0x301, 0x301]] as const;
+const slotView = (s: LayoutTextSeg[]) => s.map(v => [v.text,
+  v.semanticSlotSpans?.map(x => [x.start, x.end, x.script]),
+  v.textShapeRequest?.joinRegisteredGrapheme === true,
+  v.textShapeRequest?.joinRegisteredLatinSlots === true]);
+const whole = [['T\u0301 ', [[0, 1, 'ascii'], [1, 2, 'highAnsi'], [2, 3, 'ascii']], false, true]];
+const baseline = [['T', undefined, false, false], ['\u0301', undefined, false, false],
+  [' ', undefined, false, false]];
+it.each([
+  ['whole piece (no peer)', undefined, whole, 12],
+  ['whole piece (none-covering peer)', [], whole, 12],
+  ['full-body peer', bodyPeer, [['T\u0301', [[0, 1, 'ascii'], [1, 2, 'highAnsi']], true, false],
+    [' ', undefined, false, false]], 12],
+  ['partial-body peer', [[0x54, 0x54]], baseline, 14],
+  ['unknown peer', null, baseline, 14],
+] as const)('separates only the trailing space for a mark body: %s', (_, peer, view, width) => {
+  const s = segments('T\u0301 ', environment(fixture(peer)));
+  expect(slotView(s)).toEqual(view);
+  const lines = layoutLines(context, s, 100, 0, 1);
+  expect(lines[0].segments.filter((v): v is LayoutTextSeg => 'text' in v)
+    .reduce((n, v) => n + v.measuredWidth, 0)).toBe(width);
+});
+it('keeps baseline offsets and break/join facts on the separated body and tail', () => {
+  const text = 'a T\u0301 b';
+  const base = segments(text, environment(fixture([[0x54, 0x54]])));
+  const split = segments(text, environment(fixture(bodyPeer)));
+  expect(base.map(v => v.text)).toEqual(['a ', 'T', '\u0301', ' ', 'b']);
+  expect(split.map(v => v.text)).toEqual(['a ', 'T\u0301', ' ', 'b']);
+  const facts = (v: LayoutTextSeg) => [v.breakBefore, v.joinPrev, v.hardJoinPrev,
+    v.textShapeRequest?.substituteContext?.text, v.textShapeRequest?.substituteContext?.offset];
+  expect(split.map(facts)).toEqual([base[0], base[1], base[3], base[4]].map(facts));
+  expect(split.map(v => v.textShapeRequest?.substituteContext?.offset)).toEqual([0, 2, 4, 5]);
+});
+it('projects source owners across a separated body and tail', () => {
+  const doc = document([run('T'), run('\u0301 ')]);
+  const placements = textPlacements(doc, fixture(bodyPeer));
+  expect(placements.map(p => p.paintOps.map(op => op.text))).toEqual([['T\u0301'], [' ']]);
+  expect(placements[0].bounds.widthPt).toBe(6);
+  expect(placements[0].clusters.map(c => c.range)).toEqual([{ start: 0, end: 2 }]);
+  expect(sourceOwnedTextPlacements(placements[0]).map(o => [o.text,
+    o.semanticSlotSpans?.map(v => [v.start, v.end, v.script])]))
+    .toEqual([['T', [[0, 1, 'ascii']]], ['\u0301', [[0, 1, 'highAnsi']]]]);
+  const services = Object.freeze({ ...createLayoutServices(doc, { measureContext: context }),
+    text: fixture(bodyPeer) });
+  const layout = layoutDocument(doc, services, { currentDateMs: 0 });
+  expect(textRunGeometryForPage(layout, 0).map(g => [g.placement.sourceRunIndex,
+    g.placement.text, g.placement.range])).toEqual([[0, 'T', { start: 0, end: 1 }],
+    [1, '\u0301', { start: 1, end: 2 }], [1, ' ', { start: 2, end: 3 }]]);
+  expect(findMatches(buildTextIndex(textRunsForPage(layout, 0, { scale: 1 })), 'T\u0301'))
+    .toHaveLength(1);
+});
+it('keeps the true whole-piece path and its owners when the full unit is proven', () => {
+  const placements = textPlacements(document([run('T'), run('\u0301 ')]));
+  expect(placements.map(p => p.paintOps.map(op => op.text))).toEqual([['T\u0301 ']]);
+  expect(sourceOwnedTextPlacements(placements[0]).map(o => [o.text,
+    o.semanticSlotSpans?.map(v => [v.start, v.end, v.script])]))
+    .toEqual([['T', [[0, 1, 'ascii']]], ['\u0301 ', [[0, 1, 'highAnsi'], [1, 2, 'ascii']]]]);
+});
+it('uses the separated body in max-content width', () => {
+  const doc = document([run('T\u0301 b')]);
+  const paragraph = doc.body[0] as DocParagraph;
+  const settings = resolveDocumentLayoutSettings(doc);
+  const paragraphContext = resolveParagraphLayoutContext(settings,
+    resolveSectionLayoutContext(settings, doc.section),
+    { story: 'body', containers: [], lineNumberingEligible: true }, paragraph);
+  const services = Object.freeze({ ...createLayoutServices(doc, { measureContext: context }),
+    text: fixture(bodyPeer) });
+  const intrinsic = measureParagraphIntrinsicWidths(paragraph, paragraphContext, 100,
+    { context, fontFamilyClasses: {} }, { pageIndex: 0, totalPages: 1,
+      pageWritingMode: 'horizontal-tb', documentHasEastAsianText: false,
+      compatibilityMode: 15, layoutServices: services });
+  expect(intrinsic.maxWidthPt).toBe(18); // body 6 + space 6 + b 6; baseline mark split gives 20
+});
+
+it.each([1, 6, 12])('never detaches the retained mark body at a narrow line width %s', width => {
+  const lines = layoutLines(context, segments('T\u0301 b', environment(), { kerning: null }), width, 0, 1);
+  const retained = lines.flatMap(line => line.segments).filter((s): s is LayoutTextSeg => 'text' in s);
+  expect(retained.map(s => s.text).join('')).toBe('T\u0301 b');
+  expect(retained.some(s => s.text === 'T\u0301')).toBe(true);
+  expect(retained.some(s => s.text.startsWith('\u0301'))).toBe(false);
+});
+it.each([{ charSpacing: 1 }, { charScale: 0.8 }, { smallCaps: true },
+  { allCaps: true }, { rtl: true }, { vertAlign: 'super' },
+  { fontFamilyHighAnsi: 'Different Face' }, { fontHint: 'eastAsia' },
+  { fitTextVal: 20, fitTextId: 1 }, { ruby: { text: 'ruby', fontSizePt: 5 } }])(
+  'keeps the trailing-mark fallback closed at authored allocation boundaries %j', extra => {
+    const s = segments('T\u0301 ', environment(), { ...extra, kerning: null });
+    expect(s.every(v => v.semanticSlotSpans === undefined
+      && v.textShapeRequest?.joinRegisteredGrapheme !== true)).toBe(true);
+  });
+it.each([{ characterGridActive: true }, { characterGridActive: undefined },
+  { paragraphRtl: true }, { paragraphRtl: undefined }, { verticalCJK: true }])(
+  'keeps the trailing-mark fallback closed at paragraph boundaries %j', extra => {
+    const s = segments('T\u0301 ', environment(fixture(), extra), { kerning: null });
+    expect(s.every(v => v.semanticSlotSpans === undefined)).toBe(true);
+  });
+it.each(['T\u0301\u00a0', 'T \u0301', 'TT\u0301 '])(
+  'does not widen the trailing-mark fallback to %j', text => {
+    expect(segments(text, environment(), { kerning: null })
+      .every(s => s.textShapeRequest?.joinRegisteredGrapheme !== true)).toBe(true);
+  });
+it('keeps a real paint seam before a trailing combining mark', () => {
+  const s = buildSegments([run('T', { kerning: null }), run('\u0301 ', { color: '#ff0000', kerning: null })], environment())
+    .filter((v): v is LayoutTextSeg => 'text' in v);
+  expect(s.map(v => v.text)).toEqual(['T', '\u0301', ' ']);
+});
+
+it('keeps cross-word pair admission closed when a peer proves only the mark body', () => {
+  const s = segments('a T\u0301 b', environment(fixture(bodyPeer)));
+  expect(s.map(v => v.text)).toEqual(['a ', 'T\u0301', ' ', 'b']);
+  const adapter = new LineMeasurementAdapter(context, 1, () => '10px Test Resource');
+  // The body proof does not prove a+space. Existing physical boundary probes
+  // require all-or-none cmap for the entire probe, including its separator.
+  expect(adapter.wordBoundaryAdvance(s[0], s[1])).toBe(0);
+  expect(adapter.measureSegment(s[1]).width).toBe(6);
+  const retained = layoutLines(context, s, 100, 0, 1)[0].segments
+    .filter((v): v is LayoutTextSeg => 'text' in v);
+  expect(retained.reduce((n, v) => n + v.measuredWidth, 0)).toBe(30);
+  const priorBody = segments('a T\u0301', environment(fixture(bodyPeer)));
+  expect(adapter.wordBoundaryAdvance(priorBody[0], priorBody[1])).toBe(0);
+  expect(layoutLines(context, priorBody, 100, 0, 1)[0].segments
+    .filter((v): v is LayoutTextSeg => 'text' in v)
+    .reduce((n, v) => n + v.measuredWidth, 0)).toBe(18);
+  const allOrNone = segments('a T\u0301 b', environment(fixture([])));
+  expect(adapter.wordBoundaryAdvance(allOrNone[0], allOrNone[1])).toBe(-1);
+  // The adapter proves the pair; only the configured line pass commits it.
+  expect(allOrNone.reduce((n, v, i) => n + adapter.measureSegment(v).width
+    + adapter.wordBoundaryAdvance(allOrNone[i - 1], v), 0)).toBe(nativeAdvance('a T\u0301 b'));
+});
+it('retains a real cross-run hard join while shaping the separated body', () => {
+  const acquire = (peer: readonly (readonly [number, number])[]) =>
+    buildSegments([run('a', { bold: true }), run('T\u0301 ')], environment(fixture(peer)))
+      .filter((v): v is LayoutTextSeg => 'text' in v);
+  const baseline = acquire([[0x54, 0x54]]);
+  const candidate = acquire(bodyPeer);
+  expect(candidate.map(v => v.text)).toEqual(['a', 'T\u0301', ' ']);
+  expect(candidate[1].joinPrev).toBe(baseline[1].joinPrev);
+  expect(candidate[1].hardJoinPrev).toBe(baseline[1].hardJoinPrev);
 });
