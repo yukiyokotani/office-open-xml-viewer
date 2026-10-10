@@ -4289,8 +4289,10 @@ export function acquireShapeTextBoxLayout(
     // Issue #1668 Word controls: 0/30/90 degree shape rotations carry the
     // WordArt text frame; flipH keeps it readable, flipV turns it 180 degrees.
     // Retain the composed transform here so paint/indexing use the same frame.
-    const textRotationDeg = stackedWordArt
-      ? (shape.rotation ?? 0) + (shape.flipV ? 180 : 0) : 0;
+    // ECMA-376 §20.4.2.22 bodyPr@upright opts out of the accompanying
+    // shape transform, including WordArt's vertical-flip rotation.
+    const textRotationDeg = shape.textUpright ? 0
+      : (shape.rotation ?? 0) + (stackedWordArt && shape.flipV ? 180 : 0);
     // Exact data for quarter turns: Math.cos(π/2) is not 0, and a quarter
     // turn must stay one (axis-aligned) for its story's page frames.
     const quarterTurns = Number.isInteger(textRotationDeg / 90)
@@ -4300,14 +4302,23 @@ export function acquireShapeTextBoxLayout(
       ? Math.sin(textRotationDeg * Math.PI / 180) : [0, 1, 0, -1][quarterTurns]!;
     const cos = quarterTurns === null
       ? Math.cos(textRotationDeg * Math.PI / 180) : [1, 0, -1, 0][quarterTurns]!;
-    const transform: Matrix2DData = verticalMode ? {
-      a: stackedWordArt ? -sin : 0,
-      b: verticalMode === 'vert270' ? -1 : cos,
-      c: verticalMode === 'vert270' ? 1 : -cos,
-      d: stackedWordArt ? -sin : 0,
+    const orientation: Matrix2DData = verticalMode ? {
+      a: 0,
+      b: verticalMode === 'vert270' ? -1 : 1,
+      c: verticalMode === 'vert270' ? 1 : -1,
+      d: 0,
       e: effectiveRect.xPt + effectiveRect.widthPt / 2,
       f: effectiveRect.yPt + effectiveRect.heightPt / 2,
     } : { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
+    // DrawingML text follows its shape rotation unless bodyPr@upright opts out.
+    // Compose once here so canvas paint and the text index share the same frame.
+    const centerX = effectiveRect.xPt + effectiveRect.widthPt / 2;
+    const centerY = effectiveRect.yPt + effectiveRect.heightPt / 2;
+    const transform = textRotationDeg === 0 ? orientation : composeAffine({
+      a: cos, b: sin, c: -sin, d: cos,
+      e: centerX - cos * centerX + sin * centerY,
+      f: centerY - sin * centerX - cos * centerY,
+    }, orientation);
     const layout: TextBoxLayout = deepFreezePlainData({
       kind: 'textbox', id: options.id, source: normalized[0]?.source ?? storySource,
       flowDomainId: `${options.flowDomainId}:textbox`, flowBounds: effectiveRect, inkBounds: effectiveRect,
