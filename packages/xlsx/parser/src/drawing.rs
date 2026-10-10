@@ -3680,6 +3680,26 @@ mod geom_tests {
                 if (x1 - 50.0).abs() < 1e-9 && (y1 - 100.0).abs() < 1e-9
                     && (x2 - 100.0).abs() < 1e-9 && y2.abs() < 1e-9
         ));
+
+        let xml = format!(
+            r#"<a:spPr {NS}><a:custGeom><a:pathLst><a:path w="100" h="100">
+          <a:moveTo><a:pt x="0" y="ss"/></a:moveTo>
+          <a:lnTo><a:pt x="0" y="h"/></a:lnTo>
+        </a:path></a:pathLst></a:custGeom></a:spPr>"#
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let Some(ShapeGeom::Custom { paths }) = parse_sp_geom(&doc.root_element(), 0.0, 100.0)
+        else {
+            panic!("expected zero-axis custom geometry");
+        };
+        assert!(matches!(
+            paths[0].commands[0],
+            PathCmd::MoveTo { x: 0.0, y: 0.0 }
+        ));
+        assert!(matches!(
+            paths[0].commands[1],
+            PathCmd::LineTo { x: 0.0, y: 100.0 }
+        ));
     }
 
     /// `<a:gd name="adj" fmla="val X"/>` is read into the first adjust slot.

@@ -11660,6 +11660,14 @@ mod tests {
             }
             other => panic!("expected resolved arcTo, got {other:?}"),
         }
+
+        let xml = r#"<custGeom xmlns="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <pathLst><path w="100" h="100"><moveTo><pt x="ss" y="0"/></moveTo>
+          <lnTo><pt x="w" y="0"/></lnTo></path></pathLst></custGeom>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let paths = parse_cust_geom(doc.root_element(), 100.0, 0.0);
+        assert!(matches!(paths[0][0], PathCmd::MoveTo { x: 0.0, y: 0.0 }));
+        assert!(matches!(paths[0][1], PathCmd::LineTo { x: 1.0, y: 0.0 }));
     }
 
     /// ECMA-376 Part 1 §20.1.9.15: an omitted path coordinate-system size

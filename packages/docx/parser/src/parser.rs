@@ -10648,13 +10648,18 @@ fn parse_wsp_shape(
     let cx = ext.attribute("cx").and_then(|v| v.parse::<f64>().ok())?;
     let cy = ext.attribute("cy").and_then(|v| v.parse::<f64>().ok())?;
 
+    let cust_geom = sp_pr
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "custGeom");
     // Line/connector presets (ECMA-376 §20.1.9.18 prstGeom; preset geometries
     // `line`, `straightConnector1`, `bent*Connector*`, `curved*Connector*`)
     // legitimately have a degenerate bounding box: an axis-aligned connector
     // has cx==0 (vertical) or cy==0 (horizontal). Such a shape must NOT be
-    // discarded — it is the line itself. A genuine zero-area box on any other
-    // geometry (rect, ellipse, …) has nothing to draw, and a negative extent
-    // is always invalid, so both are still rejected.
+    // discarded — it is the line itself. ECMA-376 §20.1.7.3 ext uses
+    // ST_PositiveCoordinate (minInclusive=0), and §20.1.9.15 path has a separate
+    // coordinate space. Custom strokes remain visible with one zero axis.
+    // Rejecting both-zero custom boxes and zero-area non-line presets remains
+    // library policy, not a prohibition imposed by the extent schema.
     let prst_lower = sp_pr
         .children()
         .find(|n| n.is_element() && n.tag_name().name() == "prstGeom")
@@ -10667,10 +10672,13 @@ fn parse_wsp_shape(
             || p.starts_with("bentconnector")
             || p.starts_with("curvedconnector")
     );
-    if cx < 0.0 || cy < 0.0 {
+    if !cx.is_finite() || !cy.is_finite() || cx < 0.0 || cy < 0.0 {
         return None;
     }
-    if !is_line_geom && (cx == 0.0 || cy == 0.0) {
+    if !is_line_geom
+        && (cx == 0.0 || cy == 0.0)
+        && (cust_geom.is_none() || (cx == 0.0 && cy == 0.0))
+    {
         return None;
     }
     let rotation = xfrm
@@ -10722,9 +10730,6 @@ fn parse_wsp_shape(
     let anchor_x_pt = anchor_pos_x + local_x_pt;
     let anchor_y_pt = anchor_pos_y + local_y_pt;
 
-    let cust_geom = sp_pr
-        .children()
-        .find(|n| n.is_element() && n.tag_name().name() == "custGeom");
     let (subpaths, subpath_paint, preset_geometry, adj_values) = if let Some(cg) = cust_geom {
         let (subpaths, paint) = parse_custom_geometry_with_paint(cg, cx, cy);
         (subpaths, paint, None, Vec::new())
@@ -27217,6 +27222,87 @@ mod inline_wps_shape_tests {
         assert_eq!(json["tile"]["sy"], 0.75);
         assert_eq!(json["tile"]["flip"], "xy");
         assert_eq!(json["tile"]["algn"], "ctr");
+    }
+
+    #[test]
+    fn parse_wsp_shape_retains_zero_axis_custom_paths_only_with_valid_extent() {
+        let parse_shape = |cx: &str, cy: &str, guide: bool| {
+            let path_x = if cx == "0" { 0 } else { 381000 };
+            let path_y = if guide {
+                "ss".to_string()
+            } else {
+                (if cy == "0" { 0 } else { 381000 }).to_string()
+            };
+            let xml = format!(
+                r#"<wps:wsp
+                     xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+                     xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+                     <wps:spPr>
+                       <a:xfrm><a:off x="0" y="0"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm>
+                       <a:custGeom><a:pathLst><a:path w="381000" h="381000">
+                         <a:moveTo><a:pt x="0" y="0"/></a:moveTo>
+                         <a:lnTo><a:pt x="{path_x}" y="{path_y}"/></a:lnTo>
+                       </a:path></a:pathLst></a:custGeom>
+                       <a:noFill/><a:ln w="12700"><a:solidFill><a:srgbClr val="000000"/></a:solidFill></a:ln>
+                     </wps:spPr>
+                   </wps:wsp>"#,
+            );
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            parse_wsp_shape(
+                &StyleMap::default(),
+                &mut NumberingMap::default(),
+                doc.root_element(),
+                &ThemeColors::default(),
+                &HashMap::new(),
+                &ChartMap::default(),
+                &HashMap::new(),
+                DepthGuard::root(),
+                0.0,
+                true,
+                0.0,
+                true,
+                &AnchorMeta::default(),
+                None,
+                None,
+                0,
+            )
+        };
+
+        for (cx, cy, endpoint) in [("381000", "0", (1.0, 0.0)), ("0", "381000", (0.0, 1.0))] {
+            let shape = parse_shape(cx, cy, false).expect("single zero-axis custom path parses");
+            assert_eq!(
+                (shape.width_pt, shape.height_pt),
+                (
+                    cx.parse::<f64>().unwrap() / 12700.0,
+                    cy.parse::<f64>().unwrap() / 12700.0
+                )
+            );
+            assert_eq!(shape.stroke_width, 1.0);
+            let PathCmd::LineTo { x, y } = shape.subpaths[0][1] else {
+                panic!("expected custom line endpoint")
+            };
+            assert!(x.is_finite() && y.is_finite());
+            assert_eq!((x, y), endpoint);
+        }
+        assert!(
+            parse_shape("0", "0", false).is_none(),
+            "both-zero custom extent remains rejected"
+        );
+        assert!(
+            parse_shape("-381000", "381000", false).is_none(),
+            "negative extent remains rejected"
+        );
+        for (cx, cy) in [("NaN", "0"), ("inf", "0"), ("0", "NaN"), ("0", "inf")] {
+            assert!(
+                parse_shape(cx, cy, false).is_none(),
+                "non-finite extent is rejected"
+            );
+        }
+        let guided = parse_shape("0", "381000", true).expect("zero-axis guided path parses");
+        assert!(
+            matches!(guided.subpaths[0][1], PathCmd::LineTo { x: 0.0, y: 0.0 }),
+            "ss is min(shape width, shape height), including a zero shape axis"
+        );
     }
 
     #[test]

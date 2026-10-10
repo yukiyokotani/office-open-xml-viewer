@@ -394,6 +394,10 @@ function resolveSize(
     if (status === 'missing') {
       return { problem: issue('missing-size', `extent.${axisName}`, `${axisName} is required`) };
     }
+    // Library limitation: anchor layout requires a positive outer
+    // wp:extent even though ST_PositiveCoordinate permits zero. Retaining a
+    // zero shape-local axis inside a positive outer/group frame does not add
+    // support for a zero outer extent; that case stays explicitly unsupported.
     if (status !== 'valid' || !finite(value) || value <= 0) {
       return {
         problem: issue(
