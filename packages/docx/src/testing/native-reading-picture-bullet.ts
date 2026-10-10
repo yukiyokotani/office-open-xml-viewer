@@ -4,7 +4,7 @@ import type { NativeReadingPictureBullet } from '../native-reading-picture-bulle
 /** Invented control. No private source, Word measurement or fitted scale. */
 export function inventedReadingPictureBulletFacts(): NativeReadingPictureBullet {
   return {
-    resourceKey: 'legacy-doc/bullet/7', rawPbiFlags: 0xa5fd,
+    resourceKey: 'media/bullet/7', rawPbiFlags: 0xa5fd,
     flagsOrigin: { kind: 'listLevel', instance: 0, list: 0, level: 0 },
     indexOrigin: { kind: 'piece', fc: 1026, prm: 1 },
     relativeCp: 0, picfOffset: 7, shape: 75, rawShapeFlags: 0xc0,
@@ -16,7 +16,7 @@ export function inventedReadingPictureBulletNumbering(): InternalNumberingInfo {
   return {
     numId: 1, level: 0, format: 'bullet', text: '•', indentLeft: 48, tab: 12, suff: 'tab',
     fontFamily: 'Symbol', fontFacts: { fontFamily: 'Symbol', fontSize: 24 },
-    picBulletImagePath: 'legacy-doc/bullet/7', picBulletMimeType: 'image/png',
+    picBulletImagePath: 'media/bullet/7', picBulletMimeType: 'image/png',
     picBulletWidthPt: 36, picBulletHeightPt: 72,
     picBulletTransform: { srcRect: { l: 0.125, t: 0.1, r: 0.2, b: 0.25 }, rotation: 90, flipH: true, flipV: true },
     __nativeReadingPictureBullet: inventedReadingPictureBulletFacts(),

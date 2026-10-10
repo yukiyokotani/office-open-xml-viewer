@@ -39,7 +39,7 @@ describe('stored-size picture-bullet publication', () => {
     expect(new Set(keys).size).toBe(2);
     const descriptors = keys.map(key => source.paintResources.resolve(key, 'picture-bullet') as ImagePaintResourceDescriptor);
     expect(descriptors.map(descriptor => descriptor.partPath)).toEqual([
-      'legacy-doc/bullet/7', 'legacy-doc/bullet/7',
+      'media/bullet/7', 'media/bullet/7',
     ]);
     expect(nativeReadingNotices(layout, { contour: false, wordBreaking: false, pictureBullets: true }).map(notice => notice.code)).toEqual(['PICTURE_BULLETS_SIZED_FOR_READING']);
     expect(nativeReadingNotices({ ...layout, pages: [] }, { contour: false, wordBreaking: false, pictureBullets: true })).toEqual([]);
