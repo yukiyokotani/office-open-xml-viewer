@@ -17,7 +17,8 @@ function assertSolidPlan(plan: DrawingMLShapePaintPlan): void {
 }
 
 /** Conservative library enclosure of the retained shared numeric geometry.
- * This is not [MS-DOC] Spa tight/through contour behavior. No painter runs. */
+ * Library reading policy uses this enclosure instead of evaluating authored
+ * tight/through contours. The source wrap facts stay intact. No painter runs. */
 export function deriveNativeWrapPaintExtent(drawing: DrawingLayout, maximumOperations: number): NativeWrapPaintExtent {
   if (!Number.isSafeInteger(maximumOperations) || maximumOperations < 1) throw new NativeWrapPaintBudgetError('Invalid native wrap paint budget');
   if (!isDeepFrozenPlainDataRoot(drawing)) throw new Error('Native wrap drawing must be internally sealed');

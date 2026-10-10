@@ -3531,7 +3531,11 @@ mod tests {
         // not an external resource request. Both producer encodings retain
         // the absent-name marker box, transforms, fonts and resource bytes.
         let named_data = |key: u16| {
-            let name: &[u8] = if key & 0x8000 == 0 { &[] } else { &[b'n', 0, b'm', 0, 0, 0] };
+            let name: &[u8] = if key & 0x8000 == 0 {
+                &[]
+            } else {
+                &[b'n', 0, b'm', 0, 0, 0]
+            };
             let mut named = data[..142].to_vec();
             named[92..94].copy_from_slice(&((8u16 << 4) | 3).to_le_bytes());
             named[96..100].copy_from_slice(&(48u32 + name.len() as u32).to_le_bytes());
@@ -3539,40 +3543,56 @@ mod tests {
             named.extend((name.len() as u32).to_le_bytes());
             named.extend(name);
             named.extend_from_slice(&data[142..]);
-            let container_size = u32::from_le_bytes(data[72..76].try_into().unwrap()) + 6 + name.len() as u32;
+            let container_size =
+                u32::from_le_bytes(data[72..76].try_into().unwrap()) + 6 + name.len() as u32;
             named[72..76].copy_from_slice(&container_size.to_le_bytes());
             let size = named.len() as u32;
             named[..4].copy_from_slice(&size.to_le_bytes());
             named
         };
-        let named_source = |named: Vec<u8>| build_scoped_cfb(&[
-            ("WordDocument", cfb.stream("WordDocument").unwrap()),
-            ("0Table", cfb.stream("0Table").unwrap()),
-            ("Data", named),
-        ]);
+        let named_source = |named: Vec<u8>| {
+            build_scoped_cfb(&[
+                ("WordDocument", cfb.stream("WordDocument").unwrap()),
+                ("0Table", cfb.stream("0Table").unwrap()),
+                ("Data", named),
+            ])
+        };
         let baseline = reading_picture_bullet_result(&source, 1024 * 1024).unwrap();
         let baseline_value = serde_json::to_value(&baseline.document).unwrap();
         for key in [0x0105u16, 0x4105, 0x8105, 0xc105] {
             let named_source_bytes = named_source(named_data(key));
-            assert!(picture_bullet_result(&named_source_bytes).is_err(), "strict remains refused");
+            assert!(
+                picture_bullet_result(&named_source_bytes).is_err(),
+                "strict remains refused"
+            );
             let result = reading_picture_bullet_result(&named_source_bytes, 1024 * 1024).unwrap();
-            assert_eq!(serde_json::to_value(&result.document).unwrap(), baseline_value);
+            assert_eq!(
+                serde_json::to_value(&result.document).unwrap(),
+                baseline_value
+            );
             assert_eq!(result.resources.len(), 1);
             assert_eq!(result.resources[0].key, baseline.resources[0].key);
-            assert_eq!(result.resources[0].mime_type, baseline.resources[0].mime_type);
+            assert_eq!(
+                result.resources[0].mime_type,
+                baseline.resources[0].mime_type
+            );
             assert_eq!(result.resources[0].bytes, baseline.resources[0].bytes);
 
             if key & 0x8000 != 0 {
                 // Ignoring fBid never licenses a complex slice outside its FOPT.
                 let mut truncated = named_data(key);
                 truncated[144..148].copy_from_slice(&7u32.to_le_bytes());
-                assert!(reading_picture_bullet_result(&named_source(truncated), 1024 * 1024)
-                    .unwrap_err().contains("truncated Word picture complex option"));
+                assert!(
+                    reading_picture_bullet_result(&named_source(truncated), 1024 * 1024)
+                        .unwrap_err()
+                        .contains("truncated Word picture complex option")
+                );
             }
             for flags in [1u32, 0x40] {
                 let mut active = named_data(key);
                 active[138..142].copy_from_slice(&flags.to_le_bytes());
-                let error = reading_picture_bullet_result(&named_source(active), 1024 * 1024).unwrap_err();
+                let error =
+                    reading_picture_bullet_result(&named_source(active), 1024 * 1024).unwrap_err();
                 assert!(error.contains(if flags == 1 {
                     "no stored-size reading consumer"
                 } else {

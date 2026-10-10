@@ -50,7 +50,8 @@ export interface NativeReadingBlockScene {
   readonly observedPaintOperations: number;
 }
 
-/** Library reading policy, deliberately not [MS-DOC] §2.9.253 contour behavior.
+/** Library reading policy: relocate the complete group into body flow.
+ * Authored tight/through contours remain source facts and are not evaluated.
  * Acquire one complete vector group from the retained paragraph. Every declared
  * source member must occur exactly once, in source order; unsupported content
  * aborts the whole scene. The original paragraph and authored wrap facts stay
