@@ -240,6 +240,16 @@ pub(super) fn paragraph_metadata(value: &DocParagraph) -> Result<usize, String> 
         if let Some(facts) = &numbering.font_facts {
             total.font_facts(facts)?;
         }
+        if let Some(facts) = &numbering.native_reading_picture_bullet {
+            total.string(&facts.resource_key)?;
+            // The NumberingInfo outer allocation is charged separately.
+            // This box and its raw-anchor capacity are retained only in the
+            // explicit reading model, once per marker occurrence.
+            total.add(std::mem::size_of::<docx_model::NativeReadingPictureBullet>())?;
+            if let Some(anchor) = &facts.client_anchor {
+                total.add(anchor.capacity())?;
+            }
+        }
     }
     for string in [
         &value.paragraph_id,

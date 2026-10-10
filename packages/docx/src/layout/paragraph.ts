@@ -21,6 +21,9 @@ import {
 import { createFloatWrapOracle } from './float-wrap-oracle.js';
 import { firstFreeGapLeftPt, polygonMeetsRect, type FloatRect } from './float-wrap.js';
 import type { AnchorAcquisitionInput } from './anchor-input.js';
+import { retainedAnchorChildFrame } from './retained-anchor-child-frame.js';
+import { planRetainedAnchorShape, NativeReadingSceneError } from './native-reading-block-scene.js';
+import { appendNativeReadingScenes, nativeReadingOccurrenceIds } from './native-reading-paragraph.js';
 import type {
   LayoutImageSeg,
   LayoutLine,
@@ -111,6 +114,7 @@ import {
   createParagraphWrapRegistry,
 } from './paragraph-wrap-registry.js';
 import {
+  paintResourceRegistryOf,
   paragraphAcquisitionCacheOf,
   type ParagraphAcquisitionRuntimeCache,
 } from './runtime-state.js';
@@ -1231,6 +1235,9 @@ function finalizeParagraphLayout(input: AcquiredParagraphLayoutInput, frozenSour
     kind: 'paragraph',
     id: input.id,
     source: input.source,
+    ...(input.nativeReadingPictureBullet && lines.some(line => line.placements.some(
+      placement => placement.kind === 'resource' && placement.resourceKind === 'picture-bullet',
+    )) ? { nativeReadingPictureBullet: true as const } : {}),
     ...(input.paragraphId !== undefined ? { paragraphId: input.paragraphId } : {}),
     flowDomainId: input.flowDomainId,
     ordinaryFlow: input.ordinaryFlow,
@@ -1252,6 +1259,8 @@ function finalizeParagraphLayout(input: AcquiredParagraphLayoutInput, frozenSour
     textBoxes: input.textBoxes,
     events: input.events,
     exclusions: input.exclusions,
+    ...(input.nativeReadingRelocations?.length ? { nativeReadingRelocations: input.nativeReadingRelocations } : {}),
+    ...(input.nativeReadingInactivePictureData ? { nativeReadingInactivePictureData: true } : {}),
     ...(input.cellContainmentBounds
       ? { cellContainmentBounds: input.cellContainmentBounds }
       : {}),
@@ -3201,43 +3210,6 @@ function resizeResolvedAnchorGeometry(
   };
 }
 
-function retainedAnchorChildFrame(
-  acquisition: NonNullable<AnchoredPayloadRun['anchorAcquisitionInput']>,
-  outerFrame: LayoutRect,
-  coordinateSpace?: Readonly<{
-    physicalToLogical: Matrix2DData;
-    logicalToPhysical: Matrix2DData;
-  }>,
-): LayoutRect {
-  const child = acquisition.group?.resolvedChildFrame;
-  if (!child) return outerFrame;
-  const authoredWidthPt = acquisition.extent.widthPt;
-  const authoredHeightPt = acquisition.extent.heightPt;
-  if (
-    acquisition.extent.widthStatus !== 'valid'
-    || acquisition.extent.heightStatus !== 'valid'
-    || authoredWidthPt === null
-    || authoredHeightPt === null
-    || authoredWidthPt <= 0
-    || authoredHeightPt <= 0
-  ) {
-    throw new Error('resolved grouped anchor requires its authored wp:extent');
-  }
-  const physicalOuter = coordinateSpace === undefined
-    ? outerFrame
-    : transformRect(coordinateSpace.logicalToPhysical, outerFrame);
-  const scaleX = physicalOuter.widthPt / authoredWidthPt;
-  const scaleY = physicalOuter.heightPt / authoredHeightPt;
-  const physicalChild = {
-    xPt: physicalOuter.xPt + child.offsetXPt * scaleX,
-    yPt: physicalOuter.yPt + child.offsetYPt * scaleY,
-    widthPt: child.widthPt * scaleX,
-    heightPt: child.heightPt * scaleY,
-  };
-  return coordinateSpace === undefined
-    ? physicalChild
-    : transformRect(coordinateSpace.physicalToLogical, physicalChild);
-}
 
 function anchorAxisOwnership(
   result: Extract<AnchorFrameResult, { status: 'resolved' }>,
@@ -3642,18 +3614,11 @@ function acquireAnchorOccurrence(
       commands.push({ kind: 'noop' });
       diagnostics.push(unavailableDrawingDiagnostic(run.resourceKind, source));
     } else {
-      const childTransform = acquisition.group?.resolvedChildFrame;
-      const plannedRun = childTransform ? {
-        ...run,
-        rotation: childTransform.rotationDeg,
-        flipH: childTransform.flipH,
-        flipV: childTransform.flipV,
-      } : run;
-      const plan = planShapeDrawing(
-        plannedRun,
+      const plan = planRetainedAnchorShape(
+        run,
+        acquisition,
         paintRect,
         options.environment.layoutServices?.text,
-        run.vmlTextPathInput,
         run.fill?.fillType === 'image'
           ? imageResourceKey(source, run.fill.imagePath)
           : undefined,
@@ -4923,6 +4888,9 @@ export function acquireParagraphResult(
   options: ParagraphAcquisitionOptions,
   continuation?: Parameters<typeof measureParagraph>[5],
 ): AcquiredParagraphResult {
+  const readingOccurrences = nativeReadingOccurrenceIds(paragraph);
+  if (readingOccurrences.length && (continuation || options.continuesFromPrevious || options.anchorCellBounds || options.environment.verticalPageFrame))
+    throw new NativeReadingSceneError('placement', 'reading blocks require complete horizontal body paragraphs');
   const cache = options.environment.layoutServices
     ? paragraphAcquisitionCacheOf(options.environment.layoutServices)
     : undefined;
@@ -5388,6 +5356,7 @@ export function paragraphLayoutFromMeasurement(
   });
   const paragraphOccurrenceIds: ReadonlySet<string> = new Set(payloadsByOccurrence.keys());
   for (const [occurrenceId, payloads] of payloadsByOccurrence) {
+    if (payloads[0]?.run.anchorAcquisitionInput?.nativeReadingRelocation === 'completeScene') continue;
     const acquired = acquireAnchorOccurrence(
       occurrenceId,
       payloads,
@@ -5657,8 +5626,11 @@ export function paragraphLayoutFromMeasurement(
     : [];
   const trailingExtentPt = options.trailingExtentPt ?? measured.requestedSpaceAfterPt;
   const cellContainmentBounds = unionLayoutRects(cellContainmentRects);
-  return layoutParagraph({
+  const retainedInput: AcquiredParagraphLayoutInput = {
     kind: 'paragraph', id: options.id, source: options.source,
+    ...(paragraph.nativeReadingPictureBullet && !options.continuesFromPrevious
+      && lines.some(line => line.placements.some(placement => placement.kind === 'resource'
+        && placement.resourceKind === 'picture-bullet')) ? { nativeReadingPictureBullet: true as const } : {}),
     ...(paragraph.paragraphId !== undefined ? { paragraphId: paragraph.paragraphId } : {}),
     flowDomainId: options.flowDomainId, ordinaryFlow: options.ordinaryFlow,
     ...(paragraph.styleId !== undefined ? { styleId: paragraph.styleId } : {}),
@@ -5700,7 +5672,13 @@ export function paragraphLayoutFromMeasurement(
       hidden: paragraph.markVanish === true,
       bounds: { xPt: paragraphXPt, yPt: measured.contentStartYPt, widthPt: 0, heightPt: contentHeightPt },
     } : undefined,
-  });
+  };
+  if (nativeReadingOccurrenceIds(paragraph).length === 0) return layoutParagraph(retainedInput);
+  const frame = options.anchorFrames?.column;
+  if (!frame) throw new NativeReadingSceneError('placement', 'reading paragraph has no resolved column');
+  const readingImage = paragraph.runs.some(run => run.type === 'image' && run.anchorAcquisitionInput?.nativeReadingRelocation === 'completeScene');
+  const registry = readingImage && options.environment.layoutServices ? paintResourceRegistryOf(options.environment.layoutServices) : undefined;
+  return layoutParagraph(appendNativeReadingScenes(paragraph, retainedInput, frame, registry));
 }
 
 const translatePointY = (point: PointPt, yPt: number): PointPt =>

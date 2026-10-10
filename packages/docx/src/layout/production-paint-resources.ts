@@ -42,7 +42,9 @@ function imageCandidate(
     ...(run.flipH === undefined ? {} : { flipH: run.flipH }),
     ...(run.flipV === undefined ? {} : { flipV: run.flipV }),
     ...(run.alpha === undefined ? {} : { alpha: run.alpha }),
-    ...(run.colorReplaceFrom === undefined ? {} : { colorReplaceFrom: run.colorReplaceFrom }),
+    // Rust ImageRun's absent color replacement is serialized null. Preserve
+    // every authored string; only None/omission has no decoded effect owner.
+    ...(run.colorReplaceFrom == null ? {} : { colorReplaceFrom: run.colorReplaceFrom }),
     ...(run.duotone === undefined ? {} : { duotone: { ...run.duotone } }),
   };
 }

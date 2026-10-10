@@ -283,6 +283,7 @@ impl Store {
         }
         self.lists.insert(selection.list.id, state);
         Ok(NumberingInfo {
+            native_reading_word_breaking: marker.native_reading_word_breaking(),
             num_id: u32::try_from(reference.index + 1)
                 .map_err(|_| unsupported("Word list instance identifier overflow"))?,
             level: u32::from(reference.level),
@@ -302,6 +303,7 @@ impl Store {
             pic_bullet_width_pt: None,
             pic_bullet_height_pt: None,
             pic_bullet_transform: None,
+            native_reading_picture_bullet: None,
         })
     }
 }

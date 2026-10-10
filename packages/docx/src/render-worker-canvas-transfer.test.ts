@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { WorkerBridge, type WorkerLike } from '@silurus/ooxml-core/worker';
+import { WorkerBridge, deserializeWorkerError, type WorkerLike } from '@silurus/ooxml-core/worker';
+import { ProgressiveLayoutLifecycle } from '@silurus/ooxml-core/internal/progressive-layout-lifecycle';
+import { acquireDocumentCanvasTargetContext } from './paint/canvas-document.js';
 import { DocxDocument } from './document.js';
 import { attachDocumentLayoutRuntime } from './layout/runtime-state.js';
 import type { RenderWorkerResponse } from './worker-protocol.js';
@@ -143,6 +145,7 @@ async function loadWorker(entry: 'render-worker' | 'render-worker-source') {
   });
   const bridge = new WorkerBridge<RenderWorkerResponse>(worker, {
     correlate: (response) => ('id' in response ? response.id : undefined),
+    toError: (response) => 'type' in response && response.type === 'error' ? deserializeWorkerError(response) : undefined,
   });
   const document = Object.create(DocxDocument.prototype) as DocxDocument;
   Object.assign(document, { _mode: 'worker', _bridge: bridge });
@@ -152,7 +155,7 @@ async function loadWorker(entry: 'render-worker' | 'render-worker-source') {
 
 afterEach(() => {
   vi.unstubAllGlobals();
-  mocks.render.mockClear();
+  mocks.render.mockReset();
   FakeOffscreenCanvas.created = [];
 });
 
@@ -173,6 +176,35 @@ describe.each(['render-worker', 'render-worker-source'] as const)('DOCX %s bitma
     expect(bitmap).toBe(canvas!.bitmap);
   });
 
+  it('revokes reading publication when its transferred bitmap target cannot acquire a context', async () => {
+    const { document } = await loadWorker(entry);
+    Object.assign(document, { _layoutLifecycle: new ProgressiveLayoutLifecycle(), _layoutViewGeneration: 0,
+      _meta: { pageCount: 1, pageSizes: [], bookmarkPages: [], nativeReadingRequested: true, readingNotices: [] } });
+    mocks.render.mockImplementation(async (_source, canvas, _page, options) => {
+      acquireDocumentCanvasTargetContext(canvas as OffscreenCanvas,
+        (options as { callerOwnedCanvasTarget?: boolean }).callerOwnedCanvasTarget !== false);
+    });
+    await expect(document.renderPageToBitmap(0)).rejects.toThrow('internally acquired');
+    expect(document.pageCount).toBe(0); expect(document.readingNotices).toEqual([]);
+    expect(FakeOffscreenCanvas.created[0]!.width).toBe(1);
+    expect(FakeOffscreenCanvas.created[0]!.height).toBe(1);
+  });
+  it('keeps a worker-created context failure terminal on the ordinary worker error wire', async () => {
+    const { worker, dispatch } = await loadWorker(entry);
+    mocks.render.mockImplementation(async (_source, canvas, _page, options) => {
+      acquireDocumentCanvasTargetContext(canvas as OffscreenCanvas,
+        (options as { callerOwnedCanvasTarget?: boolean }).callerOwnedCanvasTarget !== false);
+    });
+    await dispatch({ type: 'renderPage', id: 17, pageIndex: 0, opts: { dpr: 1 } });
+    const failure = worker.received.find((value) => typeof value === 'object' && value !== null
+      && 'type' in value && value.type === 'error' && 'id' in value && value.id === 17);
+    expect(failure).toBeDefined();
+    expect(failure).toHaveProperty('message', '2D canvas is unavailable for internally acquired DOCX paint surface');
+    expect(failure).not.toHaveProperty('code', 'docx-caller-input');
+    expect(worker.received).not.toContainEqual(expect.objectContaining({ type: 'pageRendered', id: 17 }));
+    expect(FakeOffscreenCanvas.created[0]!.width).toBe(1);
+    expect(FakeOffscreenCanvas.created[0]!.height).toBe(1);
+  });
   it('keeps a worker-local surface for a request that carries no canvas', async () => {
     const { worker, dispatch } = await loadWorker(entry);
 

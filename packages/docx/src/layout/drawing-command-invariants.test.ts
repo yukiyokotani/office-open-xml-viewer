@@ -1,3 +1,6 @@
+import { resolveDrawingMLGeometry, type DrawingMLShapePaintPlan as GeometryFixtureInput } from '@silurus/ooxml-core';
+import { createPaintResourceRegistry } from './paint-resources.js';
+import { acquireNativeReadingImagePlan } from './native-reading-image-frame.js';
 import { describe, expect, it } from 'vitest';
 import type { DocumentLayout, DrawingLayout } from './types.js';
 import { assertDocumentLayout } from './invariants.js';
@@ -64,7 +67,7 @@ function layoutWith(command: DrawingLayout['commands'][number]): DocumentLayout 
 
 const validShape = {
   kind: 'drawingml-shape' as const,
-  plan: {
+  plan: retainedGeometryFixture({
     rect: { x: 72, y: 72, w: 100, h: 50 },
     geometry: {
       kind: 'preset' as const,
@@ -74,7 +77,7 @@ const validShape = {
     fill: { fillType: 'solid' as const, color: 'FFFFFF' },
     stroke: { color: '000000', width: 1 },
     transform: { rotationDeg: 0, flipH: false, flipV: false },
-  },
+  }),
 };
 
 describe('drawing-command invariants', () => {
@@ -113,3 +116,29 @@ describe('drawing-command invariants', () => {
     expect(() => assertDocumentLayout(layoutWith(degenerate))).toThrow(/INVALID_GEOMETRY/);
   });
 });
+
+describe('retained reading image command invariants', () => {
+  it('validates cloned plans in drawing-local upright frames and rejects mismatched orientation/dimensions', () => {
+    const key = 'image:invented-upright';
+    const descriptor = createPaintResourceRegistry([{ kind: 'image', resourceKey: key, partPath: 'invented.png', mimeType: 'image/png', intrinsicSize: { widthPt: 100, heightPt: 50 } }]).resolve(key, 'image');
+    const plan = acquireNativeReadingImagePlan(descriptor, 100, 50);
+    const layout = layoutWith({ kind: 'resource', resourceKind: 'image', resourceKey: key,
+      rect: { xPt: 0, yPt: 0, widthPt: 100, heightPt: 50 }, nativeImagePlan: plan });
+    const node = layout.pages[0].layers.front[0] as DrawingLayout;
+    Object.assign(node, { orientation: 'upright-physical', transform: { a: 0, b: 1, c: -1, d: 0, e: 122, f: 72 },
+      flowBounds: { xPt: 72, yPt: 72, widthPt: 50, heightPt: 100 }, inkBounds: { xPt: 72, yPt: 72, widthPt: 50, heightPt: 100 } });
+    expect(() => assertDocumentLayout(structuredClone(layout))).not.toThrow();
+    const wrongDimensions = structuredClone(layout), changed = wrongDimensions.pages[0].layers.front[0] as DrawingLayout;
+    const command = changed.commands[0];
+    if (command.kind !== 'resource') throw new Error('invalid fixture');
+    Object.assign(command, { rect: { ...command.rect, widthPt: 101 } });
+    expect(() => assertDocumentLayout(wrongDimensions)).toThrow(/projection mismatch/);
+    const wrongOrientation = structuredClone(layout), oriented = wrongOrientation.pages[0].layers.front[0] as DrawingLayout;
+    Object.assign(oriented.commands[0], { orientation: 'upright-physical' });
+    expect(() => assertDocumentLayout(wrongOrientation)).toThrow(/unacquired image orientation/);
+  });
+});
+
+function retainedGeometryFixture<T extends GeometryFixtureInput>(plan: T) {
+  return { ...plan, resolvedGeometry: resolveDrawingMLGeometry(plan, 1) };
+}

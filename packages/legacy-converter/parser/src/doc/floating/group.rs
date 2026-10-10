@@ -29,7 +29,9 @@
 //! path; endpoint rerouting is not reconstructed.
 
 use super::super::{u32_at, unsupported};
-use super::{direct_alignment, records, shape, Anchor, Content, Placement, ResolvedDrawing, Store};
+use super::{
+    direct_alignment, records, shape, Anchor, Content, Part, Placement, ResolvedDrawing, Store,
+};
 use crate::doc::pictures::Options as PictureOptions;
 use crate::officeart::{properties, Record};
 
@@ -107,6 +109,7 @@ struct Header<'a> {
     placement: Placement,
     picture: PictureOptions,
     record: Record<'a>,
+    nested_solver: bool,
 }
 
 fn header<'a>(shape: Record<'a>, budget: &mut usize) -> Result<Header<'a>, String> {
@@ -122,6 +125,7 @@ fn header<'a>(shape: Record<'a>, budget: &mut usize) -> Result<Header<'a>, Strin
         placement: Placement::default(),
         picture: PictureOptions::default(),
         record: shape,
+        nested_solver: false,
     };
     let mut seen = false;
     for record in records(shape.payload, budget)? {
@@ -141,6 +145,7 @@ fn header<'a>(shape: Record<'a>, budget: &mut usize) -> Result<Header<'a>, Strin
                 result.picture.apply_indexed(record, budget)?;
                 result.placement.apply(record, budget)?;
             }
+            0xf005 => result.nested_solver = true,
             _ => {}
         }
     }
@@ -203,9 +208,18 @@ fn check_group_flags(flags: u32, nested: bool) -> Result<(), String> {
     Ok(())
 }
 
+struct GroupRead {
+    part: Part,
+    reading_contour: bool,
+    nested_solver: bool,
+    line_connector: bool,
+    group_ids: Vec<u32>,
+}
+
 impl Store<'_> {
     pub(super) fn resolve_group(
         &mut self,
+        part: Part,
         anchor: &Anchor,
         order: u32,
         group: Record<'_>,
@@ -232,13 +246,56 @@ impl Store<'_> {
             .ok_or_else(|| unsupported("Word drawing group lacks its coordinate system"))?;
         let map = Map::new(system, [0.0, 0.0, extent[0] as f64, extent[1] as f64])?;
         let align = direct_alignment(anchor, &head.placement)?;
-        if matches!(anchor.wrapping, 0 | 4 | 5) {
+        if matches!(anchor.wrapping, 0 | 4 | 5) && !self.allows_reading_contour(anchor.wrapping) {
             return Err(unsupported(
                 "Word drawing group uses an unsupported wrap contour",
             ));
         }
+        if self.allows_reading_contour(anchor.wrapping)
+            && (anchor.textbox_count != 0
+                || records(head.record.payload, &mut self.budget)?
+                    .iter()
+                    .any(|record| record.kind == 0xf00d))
+        {
+            return Err(unsupported(
+                "reading group has unacquired outer textbox content",
+            ));
+        }
+        let mut context = GroupRead {
+            part,
+            reading_contour: self.allows_reading_contour(anchor.wrapping),
+            nested_solver: head.nested_solver,
+            line_connector: false,
+            group_ids: vec![head.spid],
+        };
         let mut members = Vec::new();
-        self.group_members(&children[1..], map, 0, &mut members)?;
+        self.group_members(&children[1..], map, 0, &mut members, &mut context)?;
+        if context.line_connector {
+            let mut ids = std::collections::BTreeSet::new();
+            if context.nested_solver
+                || context
+                    .group_ids
+                    .iter()
+                    .any(|spid| *spid == 0 || !ids.insert(*spid))
+                || members
+                    .iter()
+                    .any(|member| member.spid == 0 || !ids.insert(member.spid))
+            {
+                return Err(unsupported(
+                    "invalid Word line connector group ownership or solver scope",
+                ));
+            }
+        }
+        self.bind_group_ids(
+            part,
+            anchor.shape_id,
+            context
+                .group_ids
+                .iter()
+                .copied()
+                .chain(members.iter().map(|member| member.spid)),
+            context.line_connector,
+        )?;
         if members.is_empty() {
             return Ok(None);
         }
@@ -290,6 +347,7 @@ impl Store<'_> {
         map: Map,
         depth: usize,
         members: &mut Vec<Member>,
+        context: &mut GroupRead,
     ) -> Result<(), String> {
         if depth > MAX_DEPTH {
             return Err(unsupported("Word drawing groups are nested too deeply"));
@@ -313,6 +371,17 @@ impl Store<'_> {
                     if head.placement.hidden {
                         continue;
                     }
+                    context.nested_solver |= head.nested_solver;
+                    context.group_ids.push(head.spid);
+                    if context.reading_contour
+                        && records(head.record.payload, &mut self.budget)?
+                            .iter()
+                            .any(|record| record.kind == 0xf00d)
+                    {
+                        return Err(unsupported(
+                            "reading group has unacquired nested textbox content",
+                        ));
+                    }
                     if group_properties(head.record, &mut self.budget)? != 0.0 {
                         return Err(unsupported(
                             "rotated nested Word drawing groups are not supported",
@@ -324,10 +393,16 @@ impl Store<'_> {
                     let system = head.group_system.ok_or_else(|| {
                         unsupported("Word drawing group lacks its coordinate system")
                     })?;
-                    self.group_members(&nested[1..], Map::new(system, frame)?, depth + 1, members)?;
+                    self.group_members(
+                        &nested[1..],
+                        Map::new(system, frame)?,
+                        depth + 1,
+                        members,
+                        context,
+                    )?;
                 }
                 0xf004 => {
-                    if let Some(member) = self.group_member(*child, map)? {
+                    if let Some(member) = self.group_member(*child, map, context)? {
                         members.push(member);
                     }
                 }
@@ -337,7 +412,12 @@ impl Store<'_> {
         Ok(())
     }
 
-    fn group_member(&mut self, child: Record<'_>, map: Map) -> Result<Option<Member>, String> {
+    fn group_member(
+        &mut self,
+        child: Record<'_>,
+        map: Map,
+        context: &mut GroupRead,
+    ) -> Result<Option<Member>, String> {
         let head = header(child, &mut self.budget)?;
         if head.placement.script {
             self.omitted = true;
@@ -352,6 +432,8 @@ impl Store<'_> {
             })?)?;
         let extent = [frame[2].round() as i64, frame[3].round() as i64];
         let flip = [head.flags & 0x40 != 0, head.flags & 0x80 != 0];
+        // A picture header belongs to the same acquired group scope as a shape.
+        context.nested_solver |= head.nested_solver;
         let content = if head.kind == 75 {
             // A passive picture frame member (MS-ODRAW 2.2.40 fChild only).
             if head.flags & 0x13d != 0 || head.flags & 0x2 == 0 {
@@ -393,6 +475,14 @@ impl Store<'_> {
                 extent,
                 &mut self.budget,
             )?;
+            self.check_line_connector(
+                context.part,
+                head.kind,
+                head.flags,
+                head.spid,
+                head.nested_solver,
+            )?;
+            context.line_connector |= head.kind == 20 && head.flags & 0x100 != 0;
             if !self.load_fill_picture(&facts)? {
                 self.omitted = true;
                 return Ok(None);

@@ -342,23 +342,32 @@ describe('render worker canonical layout parity', () => {
     }
   });
 
-  it('does not traverse page geometry when a publication has no review data', () => {
+  it('does not traverse page layers when a publication has no review or reading requests', () => {
+    const source = layoutSourceStore(syntheticDocxModel('plain', { paragraphs: 1 }));
     const layout = {
       pages: [{
         pageIndex: 0,
         geometry: { widthPt: 612, heightPt: 792 },
         bookmarkStarts: [],
+        get layers(): never {
+          throw new Error('Unrequested page layers must not be traversed');
+        },
       }],
       diagnostics: [],
     } as unknown as DocumentLayout;
     const meta = projectRenderWorkerLayoutMeta(
       layout,
-      {} as ReturnType<typeof layoutSourceStore>,
+      source,
       { comments: [], revisions: [] },
       { provisional: true },
     );
+    expect(meta.pageCount).toBe(1);
+    expect(meta.pageSizes).toEqual([{ widthPt: 612, heightPt: 792 }]);
+    expect(meta.bookmarkPages).toEqual([]);
     expect(meta.commentAnchorRanges).toEqual([]);
     expect(meta.revisionAnchorRanges).toEqual([]);
+    expect(meta.nativeReadingRequested).toBeUndefined();
+    expect(meta.readingNotices).toBeUndefined();
   });
 
   it('withholds future review anchors inside a split paragraph until its final fragment', () => {

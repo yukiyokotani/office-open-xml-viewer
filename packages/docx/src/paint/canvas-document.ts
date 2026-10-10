@@ -1,3 +1,5 @@
+import { assertNativeReadingImageAvailable } from './native-reading-image-availability.js';
+import { readingPictureBulletKeys } from './reading-picture-bullets.js';
 import {
   withBitmapCacheLease,
   clampCanvasSize,
@@ -43,6 +45,7 @@ import {
 import {
   createProductionPaintResourceSession,
   unavailablePaintResourceHandle,
+  isUnavailablePaintResourceHandle,
 } from './resource-session.js';
 import type { PaintCanvas2D } from './types.js';
 
@@ -52,6 +55,13 @@ interface PrivatePaintResourceLookup {
 }
 
 export interface CanvasDocumentPaintOptions<TTextRun> {
+  /** Internal document ownership check after every async acquisition, before
+   * the first clear/paint. It is not serialized or exposed as authored facts. */
+  readonly assertPublicationCurrent?: () => void;
+  /** Internal provenance: bitmap/worker surfaces belong to the document, not a caller target. */
+  readonly callerOwnedCanvasTarget?: boolean;
+  /** The renderer validates this context before layout and paint retain the same instance. */
+  readonly validatedTargetContext?: PaintCanvas2D;
   readonly width?: number;
   readonly dpr?: number;
   readonly defaultTextColor?: string;
@@ -404,6 +414,48 @@ async function resolveChartImages<TTextRun>(
   return chartImages;
 }
 
+/** Validate only the target operation, before dimensions/ink change. Null caller
+ * contexts and a browser InvalidStateError on a caller-owned (e.g. transferred)
+ * surface are input errors. OOM/resource failures and all internal surfaces remain
+ * terminal acquisition errors. No paint-to-layout runtime dependency is needed. */
+export function acquireDocumentCanvasTargetContext(
+  canvas: HTMLCanvasElement | OffscreenCanvas,
+  callerOwned: boolean = true,
+): PaintCanvas2D {
+  let context: PaintCanvas2D | null;
+  try { context = canvas.getContext('2d') as PaintCanvas2D | null; }
+  catch (error) {
+    let callerInvalidState = false;
+    if (callerOwned) {
+      try {
+        let provenDOMException = typeof DOMException !== 'undefined' && error instanceof DOMException;
+        if (!provenDOMException) {
+          const ownerView = htmlCanvasOwnerDocument(canvas)?.defaultView;
+          const ownerDOMException = ownerView && 'DOMException' in ownerView ? ownerView.DOMException : undefined;
+          provenDOMException = typeof ownerDOMException === 'function' && error instanceof ownerDOMException;
+        }
+        callerInvalidState = provenDOMException && typeof error === 'object' && error !== null
+          && 'name' in error && error.name === 'InvalidStateError';
+      } catch {
+        // Failed owner, prototype or name inspection cannot replace the exact
+        // original target failure or establish a caller exemption.
+        throw error;
+      }
+    }
+    if (callerInvalidState) {
+      throw Object.assign(new RangeError('Invalid state of caller DOCX canvas target'), {
+        code: 'docx-caller-input', cause: error,
+      });
+    }
+    throw error;
+  }
+  if (!context) {
+    if (callerOwned) throw Object.assign(new RangeError('2D canvas is unavailable for DOCX paint projection'), { code: 'docx-caller-input' });
+    throw new Error('2D canvas is unavailable for internally acquired DOCX paint surface');
+  }
+  return context;
+}
+
 async function renderSelectedDocumentPageLeased<TTextRun>(
   layout: DocumentLayout,
   page: LayoutPage,
@@ -414,6 +466,7 @@ async function renderSelectedDocumentPageLeased<TTextRun>(
 ): Promise<void> {
   let releasePaintSurface: (() => void) | undefined;
   try {
+    const destination = options.validatedTargetContext ?? acquireDocumentCanvasTargetContext(canvas, options.callerOwnedCanvasTarget !== false);
     const dpr = options.dpr ?? defaultDpr();
     const paintSurface = acquireElementBackedVerticalPaintSurface(
       canvas,
@@ -421,8 +474,7 @@ async function renderSelectedDocumentPageLeased<TTextRun>(
     );
     const paintCanvas = paintSurface.canvas;
     releasePaintSurface = paintSurface.release;
-    const context = paintCanvas.getContext('2d') as PaintCanvas2D | null;
-    if (!context) throw new Error('2D canvas is unavailable for DOCX paint');
+    const context = paintCanvas === canvas ? destination : acquireDocumentCanvasTargetContext(paintCanvas, false);
     const scale = canvasPageScale(page, options.width);
     const cssWidth = page.geometry.widthPt * scale;
     const cssHeight = page.geometry.heightPt * scale;
@@ -431,6 +483,7 @@ async function renderSelectedDocumentPageLeased<TTextRun>(
 
     // Clearing the target (by resizing it) starts the page paint.
     const clearPage = (): void => {
+      options.assertPublicationCurrent?.();
       canvas.width = clamped.width;
       canvas.height = clamped.height;
       if (paintCanvas !== canvas) {
@@ -468,12 +521,12 @@ async function renderSelectedDocumentPageLeased<TTextRun>(
       return;
     }
 
-    // Paint: from the clear to the last draw call there is no await, so the
-    // whole page is recorded and flushed within one task.
-    clearPage();
-    // Decode and budget failures surface where the old incremental paint
-    // raised them: after the page background, before any content.
-    if (outcome.kind === 'failed') throw outcome.error;
+    // Changed resource owners must all be validated before clearing. Strict
+    // pages retain their established background-before-error behavior.
+    const readingBulletKeys = readingPictureBulletKeys(page);
+    const readingPage = readingBulletKeys.length !== 0 || page.layers.body.some(node =>
+      node.kind === 'paragraph' && (node.nativeReadingRelocations?.length ?? 0) > 0);
+    if (outcome.kind === 'failed') { if (!readingPage) clearPage(); throw outcome.error; }
     const { images, chartImages } = outcome.images;
 
     const session = createProductionPaintResourceSession(options.registry, (descriptor) => {
@@ -502,6 +555,32 @@ async function renderSelectedDocumentPageLeased<TTextRun>(
       }
       return undefined;
     });
+    for (const node of page.layers.body) {
+      if (node.kind !== 'paragraph' || !node.nativeReadingRelocations?.length) continue;
+      for (const id of node.nativeReadingRelocations) {
+        const drawing = node.drawings.find(candidate => candidate.id === id);
+        if (!drawing) throw new Error('Reading page lost a complete drawing');
+        for (const command of drawing.commands) {
+          if (command.kind !== 'resource') continue;
+          if (command.resourceKind !== 'image') throw new Error('Reading scene changed its resource class');
+          if (!command.nativeImagePlan || command.nativeImagePlan.source.resourceKey !== command.resourceKey
+            || command.orientation !== undefined) throw new Error('Reading image lost its acquired projection');
+          assertNativeReadingImageAvailable(session, command.nativeImagePlan, command.rect);
+        }
+      }
+    }
+    // Reading publication cannot replace a missing owned image with an
+    // optional-codec placeholder or silently paint nothing. Verify every
+    // selected marker before clearing the caller's existing surface.
+    for (const key of readingBulletKeys) {
+      const resource = session.resolve(key, 'picture-bullet');
+      if (isUnavailablePaintResourceHandle(resource.handle)) {
+        throw new Error('Reading picture bullet has no decoded owned image');
+      }
+    }
+    // From this single clear through completed painting there is no await.
+    clearPage();
+
     const resources = createCanvasPaintResourcePainter(
       session,
       options.threeD || options.regionMap || options.chartEx || chartImages.size > 0
@@ -529,12 +608,10 @@ async function renderSelectedDocumentPageLeased<TTextRun>(
     }
     if (paintCanvas !== canvas) {
       if (superseded()) return;
-      const destination = canvas.getContext('2d') as PaintCanvas2D | null;
-      if (!destination) throw new Error('2D canvas is unavailable for DOCX paint projection');
       destination.drawImage(paintCanvas, 0, 0);
     }
     if (options.onTextRun) {
-      for (const run of options.textRuns) options.onTextRun(run);
+      for (const run of options.textRuns) { options.assertPublicationCurrent?.(); options.onTextRun(run); }
     }
   } finally {
     releasePaintSurface?.();

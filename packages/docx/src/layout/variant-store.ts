@@ -1,3 +1,4 @@
+import { DocxCallerInputError } from './caller-input-error.js';
 import { deepFreezeDocumentLayout } from './invariants.js';
 import { createLayoutOptionsKeyer, type LayoutOptions } from './options.js';
 import type { DeepReadonly, DocumentLayout, LayoutPage, LayoutServices } from './types.js';
@@ -17,7 +18,7 @@ export function requireLayoutPage(
   pageIndex: number,
 ): DeepReadonly<LayoutPage> {
   if (!Number.isInteger(pageIndex) || pageIndex < 0 || pageIndex >= layout.pages.length) {
-    throw new RangeError(`Page index ${pageIndex} out of range (count: ${layout.pages.length})`);
+    throw new DocxCallerInputError(`Page index ${pageIndex} out of range (count: ${layout.pages.length})`);
   }
   return layout.pages[pageIndex] as DeepReadonly<LayoutPage>;
 }

@@ -4,6 +4,7 @@ import {
   paintDrawingMLShape,
   type DrawingMLShapePaintPlan,
 } from './drawingml-shape.js';
+import { resolveDrawingMLGeometry } from './drawingml-geometry.js';
 
 function recordingContext() {
   const operations: Array<{ name: string; args: unknown[] }> = [];
@@ -63,6 +64,24 @@ function recordingContext() {
 }
 
 describe('shared DrawingML shape painter', () => {
+  it('keeps the authored fallback stroke brush when replaying retained geometry', () => {
+    const plan: DrawingMLShapePaintPlan = {
+      rect: { x: 10, y: 20, w: 30, h: 40 },
+      geometry: { kind: 'preset', name: 'rect', adjustments: [] },
+      fill: { fillType: 'solid', color: '0000FF' },
+      stroke: { color: 'FF0000', width: 2 },
+      transform: { rotationDeg: 0, flipH: false, flipV: false },
+    };
+    const { ctx, operations } = recordingContext();
+    paintDrawingMLShape(ctx, { ...plan, resolvedGeometry: resolveDrawingMLGeometry(plan, 1) }, 1);
+    expect(operations.filter(op => op.name === 'strokeStyle')).toEqual([
+      { name: 'strokeStyle', args: ['rgba(255,0,0,1)'] },
+    ]);
+    expect(operations.filter(op => op.name === 'rect')).toEqual([
+      { name: 'rect', args: [10, 20, 30, 40] },
+    ]);
+    expect(operations.filter(op => op.name === 'stroke')).toHaveLength(1);
+  });
   it('keeps a DOCX point-space pattern on the page-origin 8 pt grid', () => {
     const previous = globalThis.OffscreenCanvas;
     class TileCanvas {

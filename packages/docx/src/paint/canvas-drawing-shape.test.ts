@@ -1,3 +1,4 @@
+import { resolveDrawingMLGeometry, type DrawingMLShapePaintPlan as GeometryFixtureInput } from '@silurus/ooxml-core';
 import { describe, expect, it } from 'vitest';
 import type { DrawingLayout, TextBoxLayout } from '../layout/types.js';
 import { paintDrawingLayout } from './canvas-drawing.js';
@@ -17,13 +18,13 @@ function shapeDrawing(): DrawingLayout {
     ordinaryFlow: false,
     commands: [{
       kind: 'drawingml-shape',
-      plan: {
+      plan: retainedGeometryFixture({
         rect: { x: 10, y: 20, w: 100, h: 50 },
         geometry: { kind: 'preset', name: 'rect', adjustments: [] },
         fill: { fillType: 'solid', color: 'FF0000' },
         stroke: { color: '000000', width: 2 },
         transform: { rotationDeg: 0, flipH: false, flipV: false },
-      },
+      }),
     }],
   };
 }
@@ -66,6 +67,17 @@ function recordingContext(): { context: CanvasPaintContext; operations: string[]
 }
 
 describe('retained DrawingML shape painting', () => {
+  it('rejects an unresolved DrawingML command before beginning paint', () => {
+    const { context, operations } = recordingContext();
+    const resolved = shapeDrawing();
+    const command = resolved.commands[0];
+    if (command.kind !== 'drawingml-shape') throw new Error('fixture lost shape');
+    const { resolvedGeometry: _geometry, ...plan } = command.plan;
+    const unresolved = { ...resolved, commands: [{ kind: 'drawingml-shape', plan }] } as unknown as DrawingLayout;
+    expect(() => paintDrawingLayout(unresolved, context)).toThrow(/Missing retained/);
+    expect(operations).toEqual([]);
+  });
+
   it('clips a retained image resource to the DrawingML geometry and applies fillRect overscan', () => {
     const { context, operations } = recordingContext();
     const painted: unknown[] = [];
@@ -84,12 +96,12 @@ describe('retained DrawingML shape painting', () => {
       commands: [{
         kind: 'drawingml-image-fill', resourceKey: 'image:overlay',
         fillRect: { l: 0.1, t: 0, r: -0.05, b: 0.2 },
-        plan: {
+        plan: retainedGeometryFixture({
           rect: { x: 10, y: 20, w: 100, h: 50 },
           geometry: { kind: 'preset', name: 'rect', adjustments: [] },
           fill: null, stroke: { color: '000000', width: 1 },
           transform: { rotationDeg: 0, flipH: false, flipV: false },
-        },
+        }),
       }],
     };
 
@@ -118,13 +130,13 @@ describe('retained DrawingML shape painting', () => {
       transform: { a: 0, b: -1, c: 1, d: 0, e: 65, f: 120 },
       commands: [{
         kind: 'drawingml-shape',
-        plan: {
+        plan: retainedGeometryFixture({
           rect: { x: -40, y: -15, w: 80, h: 30 },
           geometry: { kind: 'preset', name: 'rightArrow', adjustments: [] },
           fill: { fillType: 'solid', color: 'FF0000' },
           stroke: null,
           transform: { rotationDeg: 0, flipH: false, flipV: false },
-        },
+        }),
       }],
       textBoxIds: ['vertical-right-arrow-text'],
     };
@@ -292,3 +304,7 @@ describe('retained DrawingML shape painting', () => {
     expect(operations).toEqual([]);
   });
 });
+
+function retainedGeometryFixture<T extends GeometryFixtureInput>(plan: T) {
+  return { ...plan, resolvedGeometry: resolveDrawingMLGeometry(plan, 1) };
+}

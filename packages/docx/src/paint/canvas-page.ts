@@ -2,6 +2,7 @@ import type {
   DocumentLayout,
   LayoutPage,
   LayoutRect,
+  NativeReadingImagePlan,
   PagePaintDrawingEntry,
   PagePaintEntry,
   PagePaintFrame,
@@ -47,10 +48,12 @@ export function createCanvasPaintResourcePainter(
       kind: PaintResourceKind,
       bounds: LayoutRect,
       ctx: PaintCanvas2D,
+      nativeImagePlan?: NativeReadingImagePlan,
     ): void {
+      if (nativeImagePlan && kind !== 'image') throw new Error('Reading image plan/resource kind mismatch');
       switch (kind) {
         case 'image':
-          handlers.image(session.resolve(resourceKey, kind), bounds, ctx);
+          handlers.image(session.resolve(resourceKey, kind), bounds, ctx, nativeImagePlan);
           return;
         case 'chart':
           handlers.chart(session.resolve(resourceKey, kind), bounds, ctx);

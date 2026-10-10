@@ -15,6 +15,7 @@ function paintPageAlignedDrawingMLShape(
   context: CanvasPaintContext,
 ): void {
   const ctx = context.ctx as CanvasRenderingContext2D;
+  if (!plan.resolvedGeometry) throw new Error('Missing retained DrawingML geometry');
   const paint = () => paintDrawingMLShape(ctx, plan, 1);
   if (context.patternPageToDevice) {
     withPatternCoordinateSpace(ctx, context.patternPageToDevice, paint);
@@ -33,6 +34,7 @@ export function paintDrawingLayout(node: DrawingLayout, context: CanvasPaintCont
       continue;
     }
     if (command.kind === 'drawingml-image-fill') {
+      if (!command.plan.resolvedGeometry) throw new Error('Missing retained DrawingML geometry');
       if (!context.resources) throw new Error(`Missing retained resource painter for ${command.resourceKey}`);
       const { x, y, w, h } = command.plan.rect;
       const fillRect = command.fillRect ?? { l: 0, t: 0, r: 0, b: 0 };
@@ -74,6 +76,7 @@ export function paintDrawingLayout(node: DrawingLayout, context: CanvasPaintCont
         command.rect,
         command.orientation,
         context,
+        command.nativeImagePlan,
       );
       continue;
     }

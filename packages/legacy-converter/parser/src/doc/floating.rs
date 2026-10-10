@@ -6,10 +6,11 @@ use crate::officeart::{
     raster::{read_store_entry_as, Image, Raster},
     record_with_end, Record,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 mod direct;
 mod group;
+mod reading_picture;
 mod shape;
 pub(in crate::doc) mod textbox;
 pub(in crate::doc) use direct::DirectRun;
@@ -45,6 +46,12 @@ struct Drawings<'a> {
     anchors: Vec<Anchor>,
     /// spid -> registered shape.
     shapes: BTreeMap<u32, ContainerShape<'a>>,
+    container: Option<Record<'a>>,
+    nested_solver: bool,
+    line_rules: Option<BTreeMap<u32, [u32; 2]>>,
+    acquired_ids: BTreeMap<u32, Option<u32>>,
+    new_line_acquired: bool,
+    ambiguous_ids: bool,
 }
 
 pub(super) struct Store<'a> {
@@ -56,6 +63,10 @@ pub(super) struct Store<'a> {
     /// The CLX that maps textbox stories; empty when none was supplied.
     clx: &'a [u8],
     group_read: bool,
+    /// Default-strict library policy. Only the direct DOC constructor may opt
+    /// in; full native formatting/story/resource/omission gates remain intact.
+    reading_relocation: bool,
+    reading_picture_defaults: reading_picture::Defaults<'a>,
     header_container: Option<Record<'a>>,
     textboxes: [Option<textbox::Textboxes<'a>>; 2],
     images: BTreeMap<usize, Option<Image<'a>>>,
@@ -69,6 +80,14 @@ pub(super) struct Store<'a> {
 }
 
 impl<'a> Store<'a> {
+    pub(in crate::doc) fn set_reading_relocation(&mut self, enabled: bool) {
+        self.reading_relocation = enabled;
+    }
+
+    fn allows_reading_contour(&self, wrapping: u8) -> bool {
+        self.reading_relocation && matches!(wrapping, 4 | 5)
+    }
+
     /// Read the main document's drawing part. Header drawings are loaded only
     /// on request, so this subset never assigns them to the main story.
     #[cfg(test)]
@@ -89,7 +108,7 @@ impl<'a> Store<'a> {
             parts: [
                 Drawings {
                     anchors,
-                    shapes: BTreeMap::new(),
+                    ..Drawings::default()
                 },
                 Drawings::default(),
             ],
@@ -98,6 +117,8 @@ impl<'a> Store<'a> {
             table,
             clx,
             group_read: false,
+            reading_relocation: false,
+            reading_picture_defaults: reading_picture::Defaults::default(),
             header_container: None,
             textboxes: [None, None],
             images: BTreeMap::new(),
@@ -125,7 +146,12 @@ impl<'a> Store<'a> {
         self.parts[1].anchors = anchors;
         self.read_group()?;
         if let Some(container) = self.header_container {
-            self.parts[1].shapes = container_shapes(container, &mut self.budget)?;
+            self.parts[1].shapes = container_shapes(
+                container,
+                &mut self.budget,
+                &mut self.parts[1].nested_solver,
+            )?;
+            self.parts[1].container = Some(container);
         } else if !self.omitted {
             return Err(unsupported("Word header anchors lack their drawing"));
         }
@@ -172,6 +198,7 @@ impl<'a> Store<'a> {
         }
         let mut store_seen = false;
         for child in records(group.payload, &mut self.budget)? {
+            self.reading_picture_defaults.register(child);
             if child.kind != 0xf001 {
                 continue;
             }
@@ -198,12 +225,135 @@ impl<'a> Store<'a> {
             }
             seen[usize::from(label)] = true;
             if label == Part::Main.label() {
-                self.parts[0].shapes = container_shapes(drawing, &mut self.budget)?;
+                self.parts[0].shapes =
+                    container_shapes(drawing, &mut self.budget, &mut self.parts[0].nested_solver)?;
+                self.parts[0].container = Some(drawing);
             } else {
                 // Never leak header drawings into the body; they are
                 // resolved only against header anchors.
                 self.header_container = Some(drawing);
             }
+        }
+        Ok(())
+    }
+
+    /// Associate IDs encountered during ordinary group acquisition with their
+    /// owning anchor. No discovery traversal is added. Historical-only parts
+    /// retain their permissive treatment of unused identity collisions; once
+    /// the new line class uses solver targets, its whole acquired part must
+    /// have unambiguous identities, including top-level anchor IDs.
+    fn bind_group_ids(
+        &mut self,
+        part: Part,
+        owner: u32,
+        ids: impl Iterator<Item = u32>,
+        new_line: bool,
+    ) -> Result<(), String> {
+        let drawing = &mut self.parts[part as usize];
+        let mut local_ids = BTreeSet::new();
+        for id in ids {
+            let binding = drawing.acquired_ids.entry(id).or_insert(Some(owner));
+            if !local_ids.insert(id)
+                || *binding != Some(owner)
+                || (id != owner && drawing.shapes.contains_key(&id))
+            {
+                *binding = None;
+                drawing.ambiguous_ids = true;
+            }
+            drawing.ambiguous_ids |= id == 0;
+        }
+        drawing.new_line_acquired |= new_line;
+        if drawing.new_line_acquired && drawing.ambiguous_ids {
+            return Err(unsupported("ambiguous Word line connector shape ownership"));
+        }
+        Ok(())
+    }
+
+    /// Retain the authored static line; do not reconstruct endpoint routing.
+    /// MS-ODRAW 2.2.36 permits consumers to ignore connector rules and ignores
+    /// cptiA/B when spidA/B is zero. Our narrower policy admits new msosptLine
+    /// connectors only when no endpoint binding is discarded. Established
+    /// connector presets keep their existing contract. Parse the solver once,
+    /// lazily, so scenes without an acquired new line retain their old budget
+    /// and treatment of unregistered shapes. Solvers found in the patriarch or
+    /// acquired line/group headers are rejected outside their Dg solver scope;
+    /// this does not recursively validate unacquired shape contents.
+    fn check_line_connector(
+        &mut self,
+        part: Part,
+        kind: u16,
+        flags: u32,
+        spid: u32,
+        nested_solver: bool,
+    ) -> Result<(), String> {
+        if kind != 20 || flags & 0x100 == 0 {
+            return Ok(());
+        }
+        let drawing = &mut self.parts[part as usize];
+        if drawing
+            .acquired_ids
+            .get(&spid)
+            .is_some_and(|owner| owner.is_none())
+        {
+            return Err(unsupported("ambiguous Word line connector shape ownership"));
+        }
+        if spid == 0 || nested_solver || drawing.nested_solver {
+            return Err(unsupported(
+                "invalid Word line connector ownership or solver scope",
+            ));
+        }
+        if drawing.line_rules.is_none() {
+            let container = drawing
+                .container
+                .ok_or_else(|| unsupported("line connector lacks its drawing"))?;
+            let mut rules = BTreeMap::new();
+            let mut ids = BTreeSet::new();
+            // MS-ODRAW 2.2.13 provides solvers1/solvers2; 2.2.18 declares
+            // recInstance as the contained file-block count, not a zero instance.
+            let mut solver_count = 0;
+            for solver in records(container.payload, &mut self.budget)? {
+                if solver.kind != 0xf005 {
+                    continue;
+                }
+                solver_count += 1;
+                if solver_count > 2 || solver.version != 15 {
+                    return Err(unsupported("invalid Word line connector solver"));
+                }
+                let children = records(solver.payload, &mut self.budget)?;
+                if usize::from(solver.instance) != children.len() {
+                    return Err(unsupported("Word line connector solver count mismatch"));
+                }
+                for rule in children {
+                    if rule.kind != 0xf012
+                        || rule.version != 1
+                        || rule.instance != 0
+                        || rule.payload.len() != 24
+                    {
+                        return Err(unsupported("unsupported Word line connector solver rule"));
+                    }
+                    let id = u32_at(rule.payload, 0)?;
+                    let target = u32_at(rule.payload, 12)?;
+                    if target == 0
+                        || !ids.insert(id)
+                        || rules
+                            .insert(target, [u32_at(rule.payload, 4)?, u32_at(rule.payload, 8)?])
+                            .is_some()
+                    {
+                        return Err(unsupported(
+                            "duplicate line connector rule or invalid target",
+                        ));
+                    }
+                }
+            }
+            drawing.line_rules = Some(rules);
+        }
+        if drawing
+            .line_rules
+            .as_ref()
+            .and_then(|rules| rules.get(&spid))
+            .is_some_and(|endpoints| *endpoints != [0, 0])
+        {
+            return Err(unsupported("line connector has bound endpoints"));
         }
         Ok(())
     }
@@ -225,12 +375,13 @@ impl<'a> Store<'a> {
         }
         if shape.kind == 0xf003 {
             // A top-level OfficeArt group, resolved in `group`.
-            return self.resolve_group(anchor, order, shape);
+            return self.resolve_group(part, anchor, order, shape);
         }
         let mut picture = PictureOptions::default();
         let mut placement = Placement::default();
         let mut flags = None;
         let mut kind = None;
+        let mut nested_solver = false;
         for property in records(shape.payload, &mut self.budget)? {
             match property.kind {
                 0xf00a => {
@@ -244,6 +395,7 @@ impl<'a> Store<'a> {
                     picture.apply_indexed(property, &mut self.budget)?;
                     placement.apply(property, &mut self.budget)?;
                 }
+                0xf005 => nested_solver = true,
                 _ => {}
             }
         }
@@ -271,6 +423,15 @@ impl<'a> Store<'a> {
                 extent,
                 &mut self.budget,
             )?;
+            self.check_line_connector(part, kind.unwrap(), flags, anchor.shape_id, nested_solver)?;
+            if kind == Some(20) && flags & 0x100 != 0 {
+                self.bind_group_ids(
+                    part,
+                    anchor.shape_id,
+                    std::iter::once(anchor.shape_id),
+                    true,
+                )?;
+            }
             // No Word evidence yet shows whether a rotated top-level shape's
             // SPA rectangle holds its rotated bounds (see `group`).
             if facts.rotation.rem_euclid(360.0) != 0.0 {
@@ -356,10 +517,19 @@ impl<'a> Store<'a> {
             // SPA provides an explicit, host-defined coordinate origin; aligned
             // positions are accepted only through `direct_alignment`.
             || (align.is_none() && (placement.horizontal != 0 || placement.vertical != 0))
-            || matches!(anchor.wrapping, 0 | 4 | 5)
+            || (matches!(anchor.wrapping, 0 | 4 | 5)
+                && !self.allows_reading_contour(anchor.wrapping))
         {
             self.omitted = true;
             return Ok(None);
+        }
+        if self.allows_reading_contour(anchor.wrapping) {
+            if anchor.textbox_count != 0 {
+                return Err(unsupported(
+                    "reading picture has unacquired owned textbox content",
+                ));
+            }
+            reading_picture::acquire(shape, &self.reading_picture_defaults, &mut self.budget)?;
         }
         let Some(image_index) = picture.pib else {
             self.omitted = true;
@@ -391,7 +561,12 @@ impl<'a> Store<'a> {
             align.unwrap_or([None; 2]),
             content,
         )
-        .map(Some)
+        .map(|mut drawing| {
+            if self.allows_reading_contour(anchor.wrapping) {
+                drawing.reading_picture_source = Some((part, anchor.shape_id));
+            }
+            Some(drawing)
+        })
     }
 
     /// Load a shape's picture fill BLIP; `false` when it is not a supported
@@ -452,6 +627,7 @@ impl<'a> Store<'a> {
         self.occurrences += 1;
         Ok(ResolvedDrawing {
             content,
+            reading_picture_source: None,
             inline: false,
             shape_id: anchor.shape_id,
             extent,
@@ -487,6 +663,7 @@ enum Content {
 
 struct ResolvedDrawing {
     content: Content,
+    reading_picture_source: Option<(Part, u32)>,
     /// Projected in paragraph flow instead of anchored (pseudo-inline).
     inline: bool,
     shape_id: u32,
@@ -531,6 +708,7 @@ type ContainerShape<'a> = (usize, u32, Record<'a>);
 fn container_shapes<'a>(
     drawing: Record<'a>,
     budget: &mut usize,
+    nested_solver: &mut bool,
 ) -> Result<BTreeMap<u32, ContainerShape<'a>>, String> {
     let mut shapes = BTreeMap::new();
     for child in records(drawing.payload, budget)? {
@@ -541,6 +719,9 @@ fn container_shapes<'a>(
             return Err(unsupported("invalid Word shape group"));
         }
         for shape in records(child.payload, budget)? {
+            if shape.kind == 0xf005 {
+                *nested_solver = true;
+            }
             // A nested OfficeArtSpgrContainer is an anchored group: its first
             // OfficeArtSpContainer carries the group's FSP and client anchor
             // (MS-ODRAW 2.2.16). It is registered as a whole and resolved
@@ -586,6 +767,17 @@ fn container_shapes<'a>(
         }
     }
     Ok(shapes)
+}
+
+/// Narrow automatic-picture class for explicit block relocation. Keep all
+/// existing picture parsing/budget gates; unlike the historical passive image
+/// projection, this route additionally classifies every property occurrence.
+/// [MS-ODRAW] picture crop/pib and group-shape positioning are represented by
+/// the retained image/anchor model. Stored contours and unrepresented effects
+/// cannot be relabelled automatic or silently lost.
+#[cfg(test)]
+fn verify_reading_picture_properties(shape: Record<'_>, budget: &mut usize) -> Result<(), String> {
+    reading_picture::acquire(shape, &reading_picture::Defaults::default(), budget).map(|_| ())
 }
 
 struct Placement {
@@ -734,6 +926,8 @@ fn direct_alignment(
 pub(super) struct Anchor {
     pub cp: usize,
     pub shape_id: u32,
+    /// [MS-DOC] Spa cTxbx: group-owned textbox content must not disappear.
+    pub textbox_count: i32,
     pub rect: [i32; 4],
     pub horizontal: &'static str,
     pub vertical: &'static str,
@@ -822,6 +1016,7 @@ fn anchors_in(
         result.push(Anchor {
             cp,
             shape_id,
+            textbox_count: u32_at(record, 22)? as i32,
             rect: [
                 u32_at(record, 4)? as i32,
                 u32_at(record, 8)? as i32,
@@ -852,6 +1047,323 @@ mod tests {
         ]
         .concat()
     }
+    #[test]
+    fn line_connectors_require_unbound_unique_solver_rules() {
+        fn drawing(
+            kind: u16,
+            endpoints: [u32; 2],
+            duplicate: bool,
+            nested: bool,
+            ignored_shape: bool,
+        ) -> Vec<u8> {
+            let line = record(
+                0xf004,
+                15,
+                &[
+                    record(
+                        0xf00a,
+                        (kind << 4) | 2,
+                        &[7u32.to_le_bytes(), 0xb00u32.to_le_bytes()].concat(),
+                    ),
+                    record(0xf010, 0, &0u32.to_le_bytes()),
+                ]
+                .concat(),
+            );
+            // Unavailable endpoint shapes have ignored site indexes
+            // (MS-ODRAW 2.2.36); a sentinel is not required.
+            let rule = record(
+                0xf012,
+                1,
+                &[
+                    3u32.to_le_bytes(),
+                    endpoints[0].to_le_bytes(),
+                    endpoints[1].to_le_bytes(),
+                    7u32.to_le_bytes(),
+                    4u32.to_le_bytes(),
+                    9u32.to_le_bytes(),
+                ]
+                .concat(),
+            );
+            let mut other = rule.clone();
+            other[8..12].copy_from_slice(&4u32.to_le_bytes()); // ruid
+            other[12..20].fill(0); // unavailable endpoints
+            other[20..24].copy_from_slice(&8u32.to_le_bytes()); // spidC
+                                                                // MS-ODRAW 2.2.18 recInstance counts file blocks, not zero.
+            let solver = record(
+                0xf005,
+                (2 << 4) | 15,
+                &[rule.clone(), if duplicate { rule } else { other }].concat(),
+            );
+            let other_shape = record(
+                0xf004,
+                15,
+                &record(
+                    0xf00a,
+                    (32 << 4) | 2,
+                    &[8u32.to_le_bytes(), 0xb00u32.to_le_bytes()].concat(),
+                ),
+            );
+            let ignored = if ignored_shape {
+                record(0xf004, 15, &record(0xf00a, (1 << 4) | 2, &[0; 4]))
+            } else {
+                Vec::new()
+            };
+            record(
+                0xf002,
+                15,
+                &[
+                    record(
+                        0xf003,
+                        15,
+                        &[
+                            line,
+                            other_shape,
+                            ignored,
+                            if nested { solver.clone() } else { Vec::new() },
+                        ]
+                        .concat(),
+                    ),
+                    if nested { Vec::new() } else { solver },
+                ]
+                .concat(),
+            )
+        }
+        fn resolve(bytes: Vec<u8>) -> Result<ResolvedDrawing, String> {
+            let (mut word, mut table) = input((1 << 1) | (2 << 3) | (3 << 5));
+            table[8..12].copy_from_slice(&7u32.to_le_bytes());
+            // A horizontal authored line: a zero height must remain valid.
+            table[24..28].copy_from_slice(&200i32.to_le_bytes());
+            let art = [record(0xf000, 15, &[]), vec![0], bytes].concat();
+            word[0x22a..0x22e].copy_from_slice(&(table.len() as u32).to_le_bytes());
+            word[0x22e..0x232].copy_from_slice(&(art.len() as u32).to_le_bytes());
+            table.extend(art);
+            Store::read(&word, &table, 20)?
+                .resolve(Part::Main, 12)?
+                .ok_or_else(|| "line was omitted".into())
+        }
+        fn add_empty_solvers(bytes: Vec<u8>, count: usize) -> Vec<u8> {
+            let (drawing, _) = record_with_end(&bytes, 0, &mut 1000, "test").unwrap();
+            let mut payload = drawing.payload.to_vec();
+            for _ in 0..count {
+                payload.extend(record(0xf005, 15, &[]));
+            }
+            record(0xf002, 15, &payload)
+        }
+        let line = resolve(drawing(20, [0, 0], false, false, false)).unwrap();
+        assert_eq!(line.extent, [254000, 0]);
+        let Content::Shape(facts) = line.content else {
+            panic!("line shape was not retained")
+        };
+        assert_eq!(facts.preset, Some("line"));
+        assert!(facts.fill.is_none());
+        assert!(facts.line.is_some());
+        let mut wrong_count = drawing(20, [0, 0], false, false, false);
+        let position = wrong_count
+            .windows(8)
+            .position(|header| header == [0x2f, 0, 0x05, 0xf0, 64, 0, 0, 0])
+            .unwrap();
+        wrong_count[position..position + 2].copy_from_slice(&15u16.to_le_bytes());
+        assert!(resolve(wrong_count)
+            .err()
+            .unwrap()
+            .contains("solver count mismatch"));
+        // DgContainer provides solvers1 and solvers2 (MS-ODRAW 2.2.13).
+        assert!(resolve(add_empty_solvers(
+            drawing(20, [0, 0], false, false, false),
+            1
+        ))
+        .is_ok());
+        assert!(resolve(add_empty_solvers(
+            drawing(20, [0, 0], false, false, false),
+            2
+        ))
+        .err()
+        .unwrap()
+        .contains("invalid Word line connector solver"));
+
+        assert!(resolve(drawing(20, [8, 0], false, false, false))
+            .err()
+            .unwrap()
+            .contains("line connector has bound endpoints"));
+        assert!(resolve(drawing(20, [0, 0], true, false, false))
+            .err()
+            .unwrap()
+            .contains("duplicate line connector rule"));
+        assert!(resolve(drawing(20, [0, 0], false, true, false))
+            .err()
+            .unwrap()
+            .contains("solver scope"));
+        // Established kind32 never invokes the new line solver policy or
+        // reparses formerly ignored malformed, unanchored FSP contents.
+        assert!(resolve(drawing(32, [8, 0], true, true, true)).is_ok());
+
+        // Distinct anchored groups must not acquire the same child identity:
+        // otherwise a cached solver target could describe two different lines.
+        fn group(id: u32, anchor_index: u32) -> Vec<u8> {
+            let head = record(
+                0xf004,
+                15,
+                &[
+                    record(
+                        0xf00a,
+                        2,
+                        &[id.to_le_bytes(), 0x201u32.to_le_bytes()].concat(),
+                    ),
+                    record(
+                        0xf009,
+                        1,
+                        &[0i32, 0, 100, 100]
+                            .into_iter()
+                            .flat_map(i32::to_le_bytes)
+                            .collect::<Vec<_>>(),
+                    ),
+                    record(0xf010, 0, &anchor_index.to_le_bytes()),
+                ]
+                .concat(),
+            );
+            let line = record(
+                0xf004,
+                15,
+                &[
+                    record(
+                        0xf00a,
+                        (20 << 4) | 2,
+                        &[7u32.to_le_bytes(), 0xb02u32.to_le_bytes()].concat(),
+                    ),
+                    record(
+                        0xf00f,
+                        0,
+                        &[0i32, 0, 100, 0]
+                            .into_iter()
+                            .flat_map(i32::to_le_bytes)
+                            .collect::<Vec<_>>(),
+                    ),
+                ]
+                .concat(),
+            );
+            record(0xf003, 15, &[head, line].concat())
+        }
+        // Every acquired member contributes to a new line group's scope,
+        // including a valid picture whose header is outside the Dg solver.
+        fn mixed_picture_group(nested_solver: bool) -> Result<ResolvedDrawing, String> {
+            let (mut word, mut table) = drawing_input(0xa00, 0);
+            let start = u32_at(&word, 0x22a)? as usize;
+            let (_, end) = record_with_end(&table[start..], 0, &mut 1000, "test")?;
+            let dgg = table[start..start + end].to_vec();
+            let picture = record(
+                0xf004,
+                15,
+                &[
+                    record(
+                        0xf00a,
+                        (75 << 4) | 2,
+                        &[9u32.to_le_bytes(), 0xa02u32.to_le_bytes()].concat(),
+                    ),
+                    record(
+                        0xf00b,
+                        (1 << 4) | 3,
+                        &[0x4104u16.to_le_bytes().as_slice(), &1u32.to_le_bytes()].concat(),
+                    ),
+                    record(
+                        0xf00f,
+                        0,
+                        &[0i32, 0, 20, 20]
+                            .into_iter()
+                            .flat_map(i32::to_le_bytes)
+                            .collect::<Vec<_>>(),
+                    ),
+                    if nested_solver {
+                        record(
+                            0xf005,
+                            (1 << 4) | 15,
+                            &record(
+                                0xf012,
+                                1,
+                                &[77u32, 8, 0, 7, 0, 0]
+                                    .into_iter()
+                                    .flat_map(u32::to_le_bytes)
+                                    .collect::<Vec<_>>(),
+                            ),
+                        )
+                    } else {
+                        Vec::new()
+                    },
+                ]
+                .concat(),
+            );
+            let source_group = group(40, 0);
+            let (source_group, _) = record_with_end(&source_group, 0, &mut 1000, "test")?;
+            let mixed = record(0xf003, 15, &[source_group.payload, &picture].concat());
+            let art = [
+                dgg,
+                vec![0],
+                record(0xf002, 15, &record(0xf003, 15, &mixed)),
+            ]
+            .concat();
+            table.truncate(start);
+            table[8..12].copy_from_slice(&40u32.to_le_bytes());
+            word[0x22e..0x232].copy_from_slice(&(art.len() as u32).to_le_bytes());
+            table.extend(art);
+            Store::read(&word, &table, 20)?
+                .resolve(Part::Main, 12)?
+                .ok_or_else(|| "mixed group was omitted".into())
+        }
+        let positive = mixed_picture_group(false).unwrap();
+        let Content::Group(members) = positive.content else {
+            panic!("mixed group was not retained")
+        };
+        assert_eq!(
+            members.iter().map(|member| member.spid).collect::<Vec<_>>(),
+            [7, 9]
+        );
+        assert!(
+            matches!(&members[0].content, Content::Shape(facts) if facts.preset == Some("line"))
+        );
+        assert!(matches!(
+            &members[1].content,
+            Content::Picture { image_index: 0, .. }
+        ));
+        assert!(mixed_picture_group(true)
+            .err()
+            .expect("picture member solver scope must reject the complete group")
+            .contains("solver scope"));
+
+        let (mut word, one_anchor) = input((1 << 1) | (2 << 3) | (3 << 5));
+        let mut a = one_anchor[8..].to_vec();
+        a[..4].copy_from_slice(&40u32.to_le_bytes());
+        let mut b = a.clone();
+        b[..4].copy_from_slice(&41u32.to_le_bytes());
+        let mut table = [
+            12u32.to_le_bytes(),
+            14u32.to_le_bytes(),
+            30u32.to_le_bytes(),
+        ]
+        .concat();
+        table.extend(a);
+        table.extend(b);
+        word[0x1de..0x1e2].copy_from_slice(&(table.len() as u32).to_le_bytes());
+        let art = [
+            record(0xf000, 15, &[]),
+            vec![0],
+            record(
+                0xf002,
+                15,
+                &record(0xf003, 15, &[group(40, 0), group(41, 1)].concat()),
+            ),
+        ]
+        .concat();
+        word[0x22a..0x22e].copy_from_slice(&(table.len() as u32).to_le_bytes());
+        word[0x22e..0x232].copy_from_slice(&(art.len() as u32).to_le_bytes());
+        table.extend(art);
+        let mut store = Store::read(&word, &table, 20).unwrap();
+        assert!(store.resolve(Part::Main, 12).unwrap().is_some());
+        assert!(store
+            .resolve(Part::Main, 14)
+            .err()
+            .unwrap()
+            .contains("ambiguous Word line connector shape ownership"));
+    }
+
     fn drawing_input(shape_flags: u32, group_flags: u32) -> (Vec<u8>, Vec<u8>) {
         drawing_with_options(shape_flags, group_flags, &[])
     }
@@ -940,6 +1452,652 @@ mod tests {
             .append_direct_resources(&mut resources, &mut usize::MAX.clone())
             .unwrap();
         resources
+    }
+
+    fn reading_picture_with_options(options: &[(u16, u32)]) -> (Vec<u8>, Vec<u8>) {
+        let (word, mut table) = drawing_with_options(0xa00, 0, options);
+        // The fixture's PlcfSpa begins at table offset zero: CP array (8),
+        // spid/rectangle (20), then SPA flags. Select wrapTight so the strict
+        // reading-picture property gate is exercised before BLIP selection.
+        let flags = (1u16 << 1) | (1 << 3) | (4 << 5);
+        table[28..30].copy_from_slice(&flags.to_le_bytes());
+        (word, table)
+    }
+
+    #[test]
+    fn reading_picture_edit_locks_preserve_projection_and_resources() {
+        let project = |options: &[(u16, u32)]| {
+            let (word, table) = reading_picture_with_options(options);
+            let mut store = Store::read(&word, &table, 20).unwrap();
+            store.set_reading_relocation(true);
+            let picture = picture(&mut store).unwrap().unwrap();
+            assert_eq!(
+                picture
+                    .image
+                    .anchor_acquisition
+                    .as_ref()
+                    .unwrap()
+                    .wrap
+                    .authored_kinds,
+                ["wrapTight"]
+            );
+            assert!(!store.omitted);
+            (
+                serde_json::to_value(picture.image).unwrap(),
+                picture.occurrence_id,
+                resources(store),
+            )
+        };
+        let control = project(&[]);
+        // MS-ODRAW 2.3.20.1: zero, explicit editing locks, and all bits set
+        // (including ignored unused bits) cannot change the painted picture.
+        for value in [0, 0x01ff_01ff, u32::MAX] {
+            assert_eq!(project(&[(0x007f, value)]), control);
+        }
+    }
+
+    #[test]
+    fn reading_picture_edit_locks_do_not_admit_nonordinary_or_painting_properties() {
+        for property in [
+            (0x407f, 0), // fBid is forbidden for Protection Boolean Properties.
+            (0x807f, 0), // Even an empty complex payload is not this structure.
+            (0x007e, 0), // No neighboring protection-property range admission.
+            (0x0200, 1), // A shadow/effect is still outside the reading subset.
+            (0x01bf, 1), // Non-default fill painting remains unsupported.
+        ] {
+            let (word, table) = reading_picture_with_options(&[property]);
+            let mut store = Store::read(&word, &table, 20).unwrap();
+            store.set_reading_relocation(true);
+            assert!(picture(&mut store).is_err(), "property {property:?}");
+            assert!(
+                store.images.is_empty(),
+                "refusal must precede BLIP acquisition"
+            );
+            assert!(resources(store).is_empty());
+        }
+    }
+
+    #[test]
+    fn reading_picture_edit_locks_keep_table_and_budget_validation() {
+        let entry = [0x007fu16.to_le_bytes().as_slice(), &0u32.to_le_bytes()].concat();
+        for kind in [0xf00b, 0xf122] {
+            let verify = |options, body: &[u8], budget: &mut usize| {
+                let property_table = record(kind, options, body);
+                verify_reading_picture_properties(
+                    Record {
+                        version: 15,
+                        instance: 0,
+                        kind: 0xf004,
+                        payload: &property_table,
+                    },
+                    budget,
+                )
+            };
+            assert!(verify(0x13, &entry[..5], &mut 10)
+                .unwrap_err()
+                .contains("truncated OfficeArt properties"));
+            // Zero first exhausts the enclosing record walker. One permits
+            // the property table record and then exhausts its property visit.
+            assert!(verify(0x13, &entry, &mut 0)
+                .unwrap_err()
+                .contains("too many Word OfficeArt records"));
+            assert!(verify(0x13, &entry, &mut 1)
+                .unwrap_err()
+                .contains("OfficeArt property work budget exceeded"));
+            assert!(verify(0x12, &entry, &mut 10)
+                .unwrap_err()
+                .contains("invalid OfficeArt property table"));
+            let complex = [0x807fu16.to_le_bytes().as_slice(), &1u32.to_le_bytes()].concat();
+            assert!(verify(0x13, &complex, &mut 10)
+                .unwrap_err()
+                .contains("truncated OfficeArt complex shape property"));
+            let extra_tail = [entry.as_slice(), &[0]].concat();
+            assert!(verify(0x13, &extra_tail, &mut 10)
+                .unwrap_err()
+                .contains("unexpected OfficeArt property data"));
+        }
+        let (word, table) = reading_picture_with_options(&[(0x007f, 0)]);
+        let mut store = Store::read(&word, &table, 20).unwrap();
+        store.set_reading_relocation(true);
+        assert_eq!(
+            store.direct_picture(12, &mut 0).unwrap_err(),
+            "OUTPUT_TOO_LARGE"
+        );
+    }
+    // Independently authored FOPT entries. Values remain explicit so malformed
+    // length controls exercise the production property-table walker.
+    fn reading_metadata_fopt(entries: &[(u16, u32, &[u8])], kind: u16) -> Vec<u8> {
+        let mut entries = entries.to_vec();
+        entries.sort_by_key(|entry| entry.0 & 0x3fff);
+        let mut body = Vec::new();
+        for (opid, value, _) in &entries {
+            body.extend(opid.to_le_bytes());
+            body.extend(value.to_le_bytes());
+        }
+        for (opid, _, bytes) in &entries {
+            if opid & 0x8000 != 0 {
+                body.extend(*bytes);
+            }
+        }
+        record(kind, ((entries.len() as u16) << 4) | 3, &body)
+    }
+
+    fn reading_picture_with_metadata(
+        local: &[(u16, u32, &[u8])],
+        document: &[(u16, u32, &[u8])],
+        tertiary: &[(u16, u32, &[u8])],
+    ) -> (Vec<u8>, Vec<u8>) {
+        let (mut word, mut table) = reading_picture_with_options(&[]);
+        let art_start = u32::from_le_bytes(word[0x22a..0x22e].try_into().unwrap()) as usize;
+        let art = &table[art_start..];
+        let group_size = 8 + u32::from_le_bytes(art[4..8].try_into().unwrap()) as usize;
+        let group = records(&art[..group_size], &mut 1000).unwrap()[0];
+        let drawing = records(&art[group_size + 1..], &mut 1000).unwrap()[0];
+        let shape_group = records(drawing.payload, &mut 1000).unwrap()[0];
+        let shape = records(shape_group.payload, &mut 1000).unwrap()[0];
+        let mut entries = vec![(0x4104, 1, &[][..]), (0x03bf, 0, &[][..])];
+        entries.extend_from_slice(local);
+        let shape_body = records(shape.payload, &mut 1000)
+            .unwrap()
+            .into_iter()
+            .map(|child| {
+                if child.kind == 0xf00b {
+                    reading_metadata_fopt(&entries, 0xf00b)
+                } else {
+                    record(
+                        child.kind,
+                        (child.instance << 4) | u16::from(child.version),
+                        child.payload,
+                    )
+                }
+            })
+            .collect::<Vec<_>>()
+            .concat();
+        let mut group_body = group.payload.to_vec();
+        if !document.is_empty() {
+            group_body.extend(reading_metadata_fopt(document, 0xf00b));
+        }
+        if !tertiary.is_empty() {
+            group_body.extend(reading_metadata_fopt(tertiary, 0xf122));
+        }
+        let next_art = [
+            record(0xf000, 15, &group_body),
+            vec![0],
+            record(
+                0xf002,
+                15,
+                &record(0xf003, 15, &record(0xf004, 15, &shape_body)),
+            ),
+        ]
+        .concat();
+        word[0x22e..0x232].copy_from_slice(&(next_art.len() as u32).to_le_bytes());
+        table.truncate(art_start);
+        table.extend(next_art);
+        (word, table)
+    }
+
+    fn project_reading_metadata(
+        local: &[(u16, u32, &[u8])],
+        document: &[(u16, u32, &[u8])],
+        tertiary: &[(u16, u32, &[u8])],
+    ) -> (
+        serde_json::Value,
+        String,
+        Vec<super::super::pictures::DirectPictureResource>,
+    ) {
+        let (word, table) = reading_picture_with_metadata(local, document, tertiary);
+        let mut store = Store::read(&word, &table, 20).unwrap();
+        store.set_reading_relocation(true);
+        let projected = picture(&mut store).unwrap().unwrap();
+        assert!(!store.omitted);
+        (
+            serde_json::to_value(projected.image).unwrap(),
+            projected.occurrence_id,
+            resources(store),
+        )
+    }
+
+    fn assert_reading_metadata_refused(
+        local: &[(u16, u32, &[u8])],
+        document: &[(u16, u32, &[u8])],
+        tertiary: &[(u16, u32, &[u8])],
+    ) {
+        let (word, table) = reading_picture_with_metadata(local, document, tertiary);
+        let mut store = Store::read(&word, &table, 20).unwrap();
+        store.set_reading_relocation(true);
+        assert!(picture(&mut store).is_err());
+        assert!(
+            store.images.is_empty(),
+            "property refusal precedes required BLIP acquisition"
+        );
+        assert!(resources(store).is_empty());
+    }
+
+    fn without_reading_metadata(mut image: serde_json::Value) -> serde_json::Value {
+        image["__anchorAcquisition"]
+            .as_object_mut()
+            .unwrap()
+            .remove("nativePictureMetadata");
+        image
+    }
+
+    #[test]
+    fn reading_picture_metadata_retains_passive_names_without_changing_image_or_resources() {
+        let label = [b'L', 0, 0, 0];
+        let description = [b'D', 0, 0, 0];
+        let old = [b'O', 0, 0, 0];
+        let control = project_reading_metadata(&[], &[], &[]);
+        let projected = project_reading_metadata(
+            &[
+                (0xc105, 4, &label),
+                (0x0106, 0, &[]),
+                (0x8380, 4, &label),
+                (0xc381, 4, &description),
+            ],
+            &[(0x8380, 4, &old)],
+            &[],
+        );
+        let metadata = &projected.0["__anchorAcquisition"]["nativePictureMetadata"];
+        assert_eq!(metadata["blipName"]["text"], "L");
+        assert_eq!(metadata["shapeName"]["text"], "L");
+        assert_eq!(metadata["description"]["text"], "D");
+        assert_eq!(metadata["shapeName"]["scope"], "shape");
+        assert_eq!(
+            metadata["description"]["rawBytes"],
+            serde_json::json!([68, 0, 0, 0])
+        );
+        assert_eq!(without_reading_metadata(projected.0), control.0);
+        assert_eq!(projected.1, control.1);
+        assert_eq!(projected.2, control.2);
+        let empty_names = project_reading_metadata(
+            &[(0x0105, 0, &[]), (0x4380, 0, &[]), (0x0381, 0, &[])],
+            &[],
+            &[],
+        );
+        assert_eq!(
+            empty_names.0["__anchorAcquisition"]["nativePictureMetadata"]["shapeName"]["text"],
+            ""
+        );
+        assert_eq!(without_reading_metadata(empty_names.0), control.0);
+        assert_eq!(empty_names.2, control.2);
+    }
+
+    #[test]
+    fn reading_picture_metadata_resolves_document_boolean_members_before_accepting_picture() {
+        let control = project_reading_metadata(&[], &[], &[]);
+        // Raw unused local gray=true does not defeat the default-false contract.
+        assert_eq!(
+            project_reading_metadata(&[(0x013f, 4, &[])], &[], &[]),
+            control
+        );
+        // An authored local gray=false overrides an authored document gray=true.
+        assert_eq!(
+            project_reading_metadata(
+                &[(0x013f, 0x0004_0000, &[])],
+                &[(0x013f, 0x0004_0004, &[])],
+                &[]
+            ),
+            control
+        );
+        // Unused local bits do not override an active document owner.
+        assert_reading_metadata_refused(&[(0x013f, 0, &[])], &[(0x013f, 0x0004_0004, &[])], &[]);
+        // Primary and tertiary document properties are not guessed chronological owners.
+        assert_reading_metadata_refused(
+            &[],
+            &[(0x013f, 0x0004_0004, &[])],
+            &[(0x013f, 0x0004_0000, &[])],
+        );
+        // A local whole-property false cannot erase a different active member.
+        assert_reading_metadata_refused(
+            &[(0x013f, 0x0004_0000, &[])],
+            &[(0x013f, 0x0006_0006, &[])],
+            &[],
+        );
+        assert_reading_metadata_refused(&[(0x413f, 0, &[])], &[], &[]);
+        assert_reading_metadata_refused(&[(0x813f, 0, &[])], &[], &[]);
+    }
+
+    #[test]
+    fn reading_picture_metadata_retains_only_proved_inactive_opaque_or_index_carriers() {
+        let control = project_reading_metadata(&[], &[], &[]);
+        // Complete empty complex tails remain complex carriers, not zero indices.
+        for document in [false, true] {
+            let carriers = [(0x8186, 0, &[][..]), (0x81c5, 2, &[0x41, 0x42][..])];
+            let owners = [
+                (0x01bf, 0x0010_0000, &[][..]),
+                (0x01ff, 0x0008_0000, &[][..]),
+            ];
+            let all = [carriers.as_slice(), owners.as_slice()].concat();
+            let projected = if document {
+                project_reading_metadata(&owners, &carriers, &[])
+            } else {
+                project_reading_metadata(&all, &[], &[])
+            };
+            let metadata = &projected.0["__anchorAcquisition"]["nativePictureMetadata"];
+            assert_eq!(
+                metadata["inactiveFillCarrier"]["retention"],
+                "inactiveOpaqueNotDecoded"
+            );
+            assert_eq!(
+                metadata["inactiveLineCarrier"]["rawBytes"],
+                serde_json::json!([65, 66])
+            );
+            assert_eq!(
+                metadata["inactiveLineCarrier"]["scope"],
+                if document { "documentDefault" } else { "shape" }
+            );
+            assert_eq!(without_reading_metadata(projected.0), control.0);
+            assert_eq!(projected.1, control.1);
+            assert_eq!(projected.2, control.2);
+        }
+        let ignored = project_reading_metadata(&[(0x4186, 0, &[]), (0x41c5, 0, &[])], &[], &[]);
+        assert_eq!(
+            ignored.0["__anchorAcquisition"]["nativePictureMetadata"]["inactiveFillCarrier"]
+                ["retention"],
+            "ignoredZeroIndex"
+        );
+        let unresolved =
+            project_reading_metadata(&[(0x4186, 17, &[]), (0x01bf, 0x0010_0000, &[])], &[], &[]);
+        assert_eq!(
+            unresolved.0["__anchorAcquisition"]["nativePictureMetadata"]["inactiveFillCarrier"]
+                ["retention"],
+            "inactiveIndexNotResolved"
+        );
+        assert_eq!(without_reading_metadata(unresolved.0), control.0);
+        assert_eq!(unresolved.2, control.2);
+    }
+
+    #[test]
+    fn reading_picture_metadata_does_not_guess_inactive_paint_or_skip_other_effects() {
+        let empty = [(0x8186, 0, &[][..]), (0x81c5, 0, &[][..])];
+        assert_reading_metadata_refused(&[], &empty, &[]);
+        assert_reading_metadata_refused(&[(0x01bf, 0, &[]), (0x01ff, 0, &[])], &empty, &[]);
+        let inactive = [
+            (0x01bf, 0x0010_0000, &[][..]),
+            (0x01ff, 0x0008_0000, &[][..]),
+        ];
+        // Active document defaults are overridden only by the corresponding authored bits.
+        let active = [
+            (0x01bf, 0x0010_0010, &[][..]),
+            (0x01ff, 0x0008_0008, &[][..]),
+        ];
+        let defaults = [empty.as_slice(), active.as_slice()].concat();
+        assert!(
+            project_reading_metadata(&inactive, &defaults, &[]).0["__anchorAcquisition"]
+                ["nativePictureMetadata"]
+                .is_object()
+        );
+        assert_reading_metadata_refused(&[(0x01bf, 0x0010_0000, &[])], &defaults, &[]);
+        let dashed = [
+            empty.as_slice(),
+            &[
+                (0x01bf, 0x0010_0000, &[][..]),
+                (0x01ff, 0x0009_0001, &[][..]),
+            ],
+        ]
+        .concat();
+        assert_reading_metadata_refused(&dashed, &[], &[]);
+        let inherited_dash = [empty.as_slice(), &[(0x01ff, 0x0001_0001, &[][..])]].concat();
+        assert_reading_metadata_refused(&inactive, &inherited_dash, &[]);
+        let explicit_no_dash = [
+            (0x01bf, 0x0010_0000, &[][..]),
+            (0x01ff, 0x0009_0000, &[][..]),
+        ];
+        assert!(
+            project_reading_metadata(&explicit_no_dash, &inherited_dash, &[]).0
+                ["__anchorAcquisition"]["nativePictureMetadata"]
+                .is_object()
+        );
+        let reserved = [
+            empty.as_slice(),
+            &[
+                (0x01bf, 0x0010_0000, &[][..]),
+                (0x01ff, 0x0008_0080, &[][..]),
+            ],
+        ]
+        .concat();
+        assert_reading_metadata_refused(&reserved, &[], &[]);
+        for effect in [
+            (0x0180, 3, &[][..]),
+            (0x01c4, 1, &[][..]),
+            (0x0200, 1, &[][..]),
+            (0x0107, 1, &[][..]),
+            (0xc186, 1, &[0x41][..]),
+            (0x0186, 0, &[][..]),
+        ] {
+            let props = [empty.as_slice(), inactive.as_slice(), &[effect]].concat();
+            assert_reading_metadata_refused(&props, &[], &[]);
+        }
+    }
+
+    #[test]
+    fn reading_picture_metadata_rejects_links_invalid_names_and_late_tail_errors_atomically() {
+        for (opid, value, bytes) in [
+            (0x0106, 1, &[][..]),
+            (0x0106, 2, &[][..]),
+            (0x0106, 3, &[][..]),
+            (0x0106, 4, &[][..]),
+            (0x0106, 8, &[][..]),
+            (0x0106, 9, &[][..]),
+            (0x0105, 1, &[][..]),
+            (0x8380, 1, &[0][..]),
+            (0x8381, 2, &[0x41, 0][..]),
+            (0x8381, 4, &[0x00, 0xd8, 0, 0][..]),
+            (0x8381, 4, &[0, 0, 0, 0][..]),
+            (0x8381, 4, &[0, 0][..]),
+        ] {
+            assert_reading_metadata_refused(&[(opid, value, bytes)], &[], &[]);
+        }
+        assert_reading_metadata_refused(
+            &[(0x8380, 4, &[b'A', 0, 0, 0]), (0x8380, 4, &[b'B', 0, 0, 0])],
+            &[],
+            &[],
+        );
+        // A valid local picture cannot hide a malformed document-default tail.
+        assert_reading_metadata_refused(&[], &[(0x8186, 2, &[])], &[]);
+        assert_reading_metadata_refused(&[], &[(0x8380, 4, &[0, 0])], &[]);
+        assert_reading_metadata_refused(&[], &[(0x0200, 0, &[])], &[]);
+        // Duplicate Dgg primary tables are ambiguous even when their scalar
+        // values agree; exercise actual registration, not an injected flag.
+        let (mut word, mut table) = reading_picture_with_metadata(&[], &[], &[]);
+        let start = u32::from_le_bytes(word[0x22a..0x22e].try_into().unwrap()) as usize;
+        let art = &table[start..];
+        let group_size = 8 + u32::from_le_bytes(art[4..8].try_into().unwrap()) as usize;
+        let group = records(&art[..group_size], &mut 100).unwrap()[0];
+        let option = reading_metadata_fopt(&[(0x013f, 0, &[])], 0xf00b);
+        let next_art = [
+            record(0xf000, 15, &[group.payload, &option, &option].concat()),
+            art[group_size..].to_vec(),
+        ]
+        .concat();
+        word[0x22e..0x232].copy_from_slice(&(next_art.len() as u32).to_le_bytes());
+        table.truncate(start);
+        table.extend(next_art);
+        let mut store = Store::read(&word, &table, 20).unwrap();
+        store.set_reading_relocation(true);
+        assert!(picture(&mut store).is_err());
+        assert!(store.images.is_empty());
+        assert!(resources(store).is_empty());
+    }
+
+    #[test]
+    fn reading_picture_metadata_owned_projection_respects_output_budget_and_strict_policy() {
+        let name = [b'L', 0, 0, 0];
+        let props = [
+            (0x8380, 4, &name[..]),
+            (0x8186, 0, &[][..]),
+            (0x01bf, 0x0010_0000, &[][..]),
+        ];
+        let (word, table) = reading_picture_with_metadata(&props, &[], &[]);
+        let mut reading = Store::read(&word, &table, 20).unwrap();
+        reading.set_reading_relocation(true);
+        assert_eq!(
+            reading.direct_picture(12, &mut 0).unwrap_err(),
+            "OUTPUT_TOO_LARGE"
+        );
+        let mut strict = Store::read(&word, &table, 20).unwrap();
+        assert!(
+            picture(&mut strict).unwrap().is_none(),
+            "metadata does not authorize missing-contour strict projection"
+        );
+        assert!(strict.omitted);
+    }
+
+    #[test]
+    fn reading_picture_complex_bid_retains_raw_flag_without_changing_visible_projection() {
+        let control = project_reading_metadata(&[], &[], &[]);
+        let owners = [
+            (0x01bf, 0x0010_0000, &[][..]),
+            (0x01ff, 0x0008_0000, &[][..]),
+        ];
+        // MS-ODRAW 2.2.8: fBid is ignored when fComplex is set; op remains a length.
+        // Keep the authored flag in the sidecar, rather than rewriting the input.
+        for (id, field) in [
+            (0x0186, "inactiveFillCarrier"),
+            (0x01c5, "inactiveLineCarrier"),
+        ] {
+            for bytes in [&[][..], &[0x41, 0x42, 0x43][..]] {
+                for document in [false, true] {
+                    for bid in [0, 0x4000] {
+                        let opid = id | 0x8000 | bid;
+                        let carrier = [(opid, bytes.len() as u32, bytes)];
+                        let local = [owners.as_slice(), carrier.as_slice()].concat();
+                        let projected = if document {
+                            project_reading_metadata(&owners, &carrier, &[])
+                        } else {
+                            project_reading_metadata(&local, &[], &[])
+                        };
+                        let metadata =
+                            &projected.0["__anchorAcquisition"]["nativePictureMetadata"][field];
+                        assert_eq!(metadata["opid"], opid);
+                        assert_eq!(metadata["value"], bytes.len() as u32);
+                        assert_eq!(metadata["rawBytes"], serde_json::json!(bytes));
+                        assert_eq!(metadata["retention"], "inactiveOpaqueNotDecoded");
+                        assert_eq!(
+                            metadata["scope"],
+                            if document { "documentDefault" } else { "shape" }
+                        );
+                        assert_eq!(without_reading_metadata(projected.0), control.0);
+                        assert_eq!(projected.1, control.1);
+                        assert_eq!(projected.2, control.2);
+                    }
+                }
+            }
+        }
+        // Equivalent duplicates do not conflict merely because the ignored bit
+        // differs. Metadata preserves the last agreeing encoded representative.
+        for (id, field) in [
+            (0x0186, "inactiveFillCarrier"),
+            (0x01c5, "inactiveLineCarrier"),
+        ] {
+            for bytes in [&[][..], &[0x41, 0x42][..]] {
+                for flags in [[0, 0x4000], [0x4000, 0]] {
+                    let repeated = [
+                        (id | 0x8000 | flags[0], bytes.len() as u32, bytes),
+                        (id | 0x8000 | flags[1], bytes.len() as u32, bytes),
+                    ];
+                    let local = [owners.as_slice(), repeated.as_slice()].concat();
+                    let projected = project_reading_metadata(&local, &[], &[]);
+                    let metadata =
+                        &projected.0["__anchorAcquisition"]["nativePictureMetadata"][field];
+                    assert_eq!(metadata["opid"], id | 0x8000 | flags[1]);
+                    assert_eq!(metadata["rawBytes"], serde_json::json!(bytes));
+                    assert_eq!(metadata["retention"], "inactiveOpaqueNotDecoded");
+                    assert_eq!(without_reading_metadata(projected.0), control.0);
+                    assert_eq!(projected.1, control.1);
+                    assert_eq!(projected.2, control.2);
+                    let conflict = [(id | 0x8000, 1, &[0x58][..]), (id | 0xc000, 1, &[0x59][..])];
+                    assert_reading_metadata_refused(
+                        &[owners.as_slice(), conflict.as_slice()].concat(),
+                        &[],
+                        &[],
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reading_picture_complex_bid_keeps_inactive_owner_and_scalar_index_guards() {
+        let control = project_reading_metadata(&[], &[], &[]);
+        for (id, owner, disabled, enabled, field) in [
+            (
+                0x0186,
+                0x01bf,
+                0x0010_0000,
+                0x0010_0010,
+                "inactiveFillCarrier",
+            ),
+            (
+                0x01c5,
+                0x01ff,
+                0x0008_0000,
+                0x0008_0008,
+                "inactiveLineCarrier",
+            ),
+        ] {
+            for bid in [0, 0x4000] {
+                let carrier = (id | 0x8000 | bid, 2, &[0x41, 0x42][..]);
+                assert_reading_metadata_refused(&[carrier], &[], &[]);
+                assert_reading_metadata_refused(&[carrier, (owner, enabled, &[])], &[], &[]);
+                assert_reading_metadata_refused(
+                    &[carrier, (owner, 0, &[])],
+                    &[(owner, enabled, &[])],
+                    &[],
+                );
+            }
+            // A scalar BLIP index still requires fBid; zero does not waive that rule.
+            for index in [0, 17] {
+                assert_reading_metadata_refused(
+                    &[(id, index, &[]), (owner, disabled, &[])],
+                    &[],
+                    &[],
+                );
+                let projected = project_reading_metadata(
+                    &[(id | 0x4000, index, &[]), (owner, disabled, &[])],
+                    &[],
+                    &[],
+                );
+                let metadata = &projected.0["__anchorAcquisition"]["nativePictureMetadata"][field];
+                assert_eq!(metadata["opid"], id | 0x4000);
+                assert_eq!(
+                    metadata["retention"],
+                    if index == 0 {
+                        "ignoredZeroIndex"
+                    } else {
+                        "inactiveIndexNotResolved"
+                    }
+                );
+                assert_eq!(without_reading_metadata(projected.0), control.0);
+                assert_eq!(projected.2, control.2);
+            }
+        }
+    }
+
+    #[test]
+    fn reading_picture_complex_bid_keeps_complete_tail_and_owned_output_budget() {
+        for (id, owner, disabled) in [(0x0186, 0x01bf, 0x0010_0000), (0x01c5, 0x01ff, 0x0008_0000)]
+        {
+            for bid in [0, 0x4000] {
+                let opid = id | 0x8000 | bid;
+                // Declared complex length is authoritative even though fBid is ignored.
+                assert_reading_metadata_refused(
+                    &[(opid, 3, &[0x41, 0x42]), (owner, disabled, &[])],
+                    &[],
+                    &[],
+                );
+                for bytes in [&[][..], &[0x41, 0x42, 0x43][..]] {
+                    let props = [(opid, bytes.len() as u32, bytes), (owner, disabled, &[])];
+                    let (word, table) = reading_picture_with_metadata(&props, &[], &[]);
+                    let mut store = Store::read(&word, &table, 20).unwrap();
+                    store.set_reading_relocation(true);
+                    assert_eq!(
+                        store.direct_picture(12, &mut 0).unwrap_err(),
+                        "OUTPUT_TOO_LARGE"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

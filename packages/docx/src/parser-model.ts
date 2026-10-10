@@ -1,3 +1,5 @@
+import { acquireNativeReadingWordBreaking } from './native-reading-word-breaking.js';
+import { acquireNativeReadingPictureBullet, type NativeReadingPictureBulletWire } from './native-reading-picture-bullet.js';
 import { resolveAutomaticParagraphMarginsPt } from './layout/paragraph-spacing.js';
 import type {
   NativeNoteSeparatorsInput,
@@ -144,6 +146,7 @@ export interface InternalRunSlotMetadata {
 
 interface InternalNoBreakHyphenWire {
   readonly __optionalHyphen?: boolean;
+  readonly __nativeReadingWordBreaking?: unknown;
   readonly __noBreakBefore?: boolean;
   readonly __noBreakAfter?: boolean;
   /** UTF-16 offsets immediately after the injected U+002D glyph. */
@@ -160,7 +163,7 @@ export interface InternalRunFontFacts extends InternalRunSlotMetadata {
   kerning?: number;
 }
 
-export interface InternalNumberingInfo extends NumberingInfo {
+export interface InternalNumberingInfo extends NumberingInfo, NativeReadingPictureBulletWire {
   fontFacts?: InternalRunFontFacts;
 }
 
@@ -1642,9 +1645,11 @@ export function paragraphAcquisitionInput(
       ? {}
       : { hyperlinkAnchor: boundary.hyperlinkAnchor }),
   }));
-  const numbering = semanticParagraph.numbering as (NumberingInfo & { fontFacts?: InternalRunFontFacts }) | null;
+  const numbering = semanticParagraph.numbering as (InternalNumberingInfo) | null;
+  const nativeReadingPictureBullet = acquireNativeReadingPictureBullet(numbering);
   const canonicalNumbering = numbering == null ? null : (({
     fontFacts: _privateNumberingFontFacts,
+    __nativeReadingPictureBullet: _privatePictureBulletSource,
     ...retainedNumbering
   }) => retainedNumbering)(numbering);
   const snapshot = structuredClone({
@@ -1774,6 +1779,7 @@ export function paragraphAcquisitionInput(
       const runTypographyInput = runTypographyAcquisitionInput(originalTextRun);
       const {
         __typographyAcquisition: _privateRunTypography,
+        __nativeReadingWordBreaking: nativeReadingWordBreakingWire,
         __noBreakBefore: noBreakBefore,
         __noBreakAfter: noBreakAfter,
         __noBreakHyphenOffsets: noBreakHyphenOffsets,
@@ -1782,6 +1788,7 @@ export function paragraphAcquisitionInput(
       } = run as typeof run & InternalNoBreakHyphenWire & {
         __typographyAcquisition?: InternalRunTypographyWire;
       };
+      const nativeReadingWordBreaking = acquireNativeReadingWordBreaking(nativeReadingWordBreakingWire);
       const noBreakRanges = run.type === 'text'
         ? noBreakHyphenOffsets
           ?.filter((end) => Number.isInteger(end) && end > 0 && end <= run.text.length)
@@ -1790,6 +1797,7 @@ export function paragraphAcquisitionInput(
       return Object.freeze({
         ...structuredClone(publicRun),
         ...(optionalHyphen === true && run.type === 'text' ? { optionalHyphen: true } : {}),
+        ...(nativeReadingWordBreaking === undefined ? {} : { nativeReadingWordBreaking }),
         ...(noBreakBefore === true ? { noBreakBefore: true } : {}),
         ...(noBreakAfter === true ? { noBreakAfter: true } : {}),
         ...(noBreakRanges?.length ? { noBreakRanges: Object.freeze(noBreakRanges) } : {}),
@@ -1798,8 +1806,15 @@ export function paragraphAcquisitionInput(
     }
     return Object.freeze(structuredClone(run)) as ParagraphAcquisitionRun;
   });
+  const markerReading = acquireNativeReadingWordBreaking(
+    (paragraph.numbering as (typeof paragraph.numbering & InternalNoBreakHyphenWire))?.__nativeReadingWordBreaking,
+  );
+  const { __nativeReadingWordBreaking: _markerReadingWire, ...retainedNumbering } =
+    (snapshot.numbering ?? {}) as NonNullable<typeof snapshot.numbering> & InternalNoBreakHyphenWire;
   return deepFreezePlainData({
     ...snapshot,
+    ...(snapshot.numbering ? { numbering: retainedNumbering } : {}),
+    ...(markerReading === undefined ? {} : { nativeReadingNumberingWordBreaking: markerReading }),
     runs: runs as readonly ParagraphAcquisitionRun[],
     ...(complexFieldBoundaries?.length
       ? { complexFieldBoundaries }
@@ -1814,6 +1829,7 @@ export function paragraphAcquisitionInput(
         )
       : undefined,
     paragraphMarkShapeInput: paragraphMarkShapeInput(paragraph),
+    ...(nativeReadingPictureBullet === undefined ? {} : { nativeReadingPictureBullet }),
     ...(typographyInput === undefined ? {} : { typographyInput }),
   }) as unknown as ParagraphAcquisitionInput;
 }

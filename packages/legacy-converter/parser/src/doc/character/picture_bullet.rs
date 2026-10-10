@@ -10,9 +10,10 @@
 //! and sprmCIstd do not list them among their preserved properties, so either
 //! reset returns them to the paragraph (or character) style value.
 //!
-//! These are acquisition facts only. Picture-bullet display is not
-//! implemented: an enabled fPicBullet keeps the existing atomic unsupported
-//! model refusal, and no size is derived from fNoAutoSize.
+//! Strict display keeps the atomic unsupported refusal: no Word size is
+//! derived from fNoAutoSize. An explicit stored-size reading consumer may
+//! retain the raw operands and legal source owners independently of that
+//! unresolved Word metric.
 
 use super::super::{u32_at, unsupported};
 
@@ -60,6 +61,7 @@ pub(in crate::doc) struct EnabledPictureBullet {
 pub(in crate::doc) struct PictureBullet {
     index: Option<(u32, BulletOrigin)>,
     flags: Option<(PbiGrf, BulletOrigin)>,
+    raw_flags: u16,
 }
 
 impl PictureBullet {
@@ -84,11 +86,55 @@ impl PictureBullet {
                     picture: operand[0] & 1 != 0,
                     no_auto_size: operand[0] & 2 != 0,
                 };
+                self.raw_flags = u16::from_le_bytes([operand[0], operand[1]]);
                 self.flags = Some((flags, BulletOrigin::Decoded));
                 Ok(Some(!flags.picture))
             }
             _ => Ok(None),
         }
+    }
+
+    pub(in crate::doc) fn reading_source_owners(
+        &self,
+    ) -> Result<
+        (
+            u16,
+            docx_model::NativePictureBulletOrigin,
+            docx_model::NativePictureBulletOrigin,
+        ),
+        String,
+    > {
+        fn owner(origin: BulletOrigin) -> Result<docx_model::NativePictureBulletOrigin, String> {
+            Ok(match origin {
+                BulletOrigin::Direct { fc } => docx_model::NativePictureBulletOrigin::Direct { fc },
+                BulletOrigin::Piece { fc, prm } => {
+                    docx_model::NativePictureBulletOrigin::Piece { fc, prm }
+                }
+                BulletOrigin::ListLevel {
+                    instance,
+                    list,
+                    level,
+                } => docx_model::NativePictureBulletOrigin::ListLevel {
+                    instance,
+                    list,
+                    level,
+                },
+                _ => {
+                    return Err(unsupported(
+                        "Word picture bullet lacks a legal source owner",
+                    ))
+                }
+            })
+        }
+        self.enabled()?
+            .ok_or_else(|| unsupported("disabled Word reading picture bullet"))?;
+        let flags = self
+            .flags
+            .ok_or_else(|| unsupported("Word picture bullet lacks flags"))?;
+        let index = self
+            .index
+            .ok_or_else(|| unsupported("Word picture bullet lacks position"))?;
+        Ok((self.raw_flags, owner(flags.1)?, owner(index.1)?))
     }
 
     /// Attribute the operand `code` just applied to its cascade layer.

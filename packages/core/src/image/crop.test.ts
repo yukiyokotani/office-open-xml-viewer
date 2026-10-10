@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
   cropSourceRect,
+  imagePaintProjection,
   drawImageCropped,
   imageNaturalSize,
   metafileRasterSize,
@@ -160,5 +161,27 @@ describe('sourceRasterTargetSize', () => {
       900,
       { l: 1 - Number.EPSILON, t: 0, r: 0, b: 0 },
     )).toBeNull();
+  });
+});
+
+describe('retained image paint projection', () => {
+  it('rejects strict intermediate overflow while preserving ordinary invalid/empty crop behavior', () => {
+    const negative = { l: -1e308, t: 0, r: -1e308, b: 0 };
+    const positive = { l: 1e308, t: 0, r: 1e308, b: 0 };
+    expect(() => imagePaintProjection(40, 20, negative)).toThrow(/intermediate overflow/);
+    expect(() => imagePaintProjection(40, 20, positive)).toThrow(/intermediate overflow/);
+    expect(() => imagePaintProjection(40, 20, null, { rotation: 1e308 })).toThrow(/overflowed transform/);
+    expect(() => imagePaintProjection(40, 20, { l: NaN, t: 0, r: 0, b: 0 })).toThrow(/finite fractions/);
+    const { ctx, drawImage } = spyCtx();
+    drawImageCropped(ctx, fakeImg(100, 80), negative, 0, 0, 40, 20);
+    drawImageCropped(ctx, fakeImg(100, 80), positive, 0, 0, 40, 20);
+    expect(drawImage).not.toHaveBeenCalled();
+    drawImageCropped(ctx, fakeImg(100, 80), { l: NaN, t: 0, r: 0, b: 0 }, 0, 0, 40, 20);
+    expect(drawImage).toHaveBeenCalledExactlyOnceWith(expect.anything(), 0, 0, 40, 20);
+    const empty = imagePaintProjection(40, 20, { l: 2, t: 0, r: 0, b: 0 });
+    drawImage.mockClear();
+    drawImageCropped(ctx, fakeImg(100, 80), undefined, 0, 0, 40, 20, { projection: empty });
+    expect(drawImage).not.toHaveBeenCalled();
+    expect(empty.destination).toEqual({ x: 0, y: 0, width: 40, height: 20 });
   });
 });

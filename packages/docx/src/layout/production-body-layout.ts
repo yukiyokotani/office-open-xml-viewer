@@ -1,3 +1,4 @@
+import { acquireRequestedNativeReadingScenes } from './native-reading-paragraph.js';
 import { MAX_BODY_LAYOUT_PAGES } from './resource-budgets.js';
 import { deepFreezePlainData, deepFreezePlainDataWithFrozenAliases } from './plain-data.js';
 import { quarterTurnMathMetadataService } from './resources.js';
@@ -59,6 +60,7 @@ import {
   createLayoutServicesRuntimeView,
   fieldAcquisitionContextOf,
   footnoteAcquisitionWorkBudgetOf,
+  paintResourceRegistryOf,
   paragraphAcquisitionCacheOf,
   verticalGlyphMeasurementServiceOf,
 } from './runtime-state.js';
@@ -1538,7 +1540,7 @@ function measureBodyParagraphEntry(
   return Object.freeze({
     layout,
     blockExtentPt: layout.advancePt,
-    fragmentation: measured.markOnly
+    fragmentation: measured.markOnly || (layout.nativeReadingRelocations?.length ?? 0) > 0
       ? Object.freeze({ kind: 'indivisible' as const })
       : Object.freeze({
           kind: 'splittable' as const,
@@ -2182,6 +2184,14 @@ function prescanBodyPageAnchors(
       throw new Error(
         `Page-anchor prescan occurrence acquisition mismatch: ${anchor.occurrenceId}`,
       );
+    }
+    if (payloads[0]!.run.anchorAcquisitionInput.nativeReadingRelocation === 'completeScene') {
+      // No page-owned exclusion is claimed for changed placement. Defer only
+      // after the same complete scene/resource owner validates all members.
+      const scenes = acquireRequestedNativeReadingScenes(acquired, anchor.paragraphSource,
+        `prescan:${anchor.occurrenceId}`, pageRegistryFlowDomainId(request.location.pageIndex), paintResourceRegistryOf(services));
+      if (!scenes.some(scene => scene.occurrenceId === anchor.occurrenceId)) throw new Error('Reading prescan omitted its complete scene');
+      return [];
     }
     const result = resolveAnchorFrame({
       acquisition: payloads[0]!.run.anchorAcquisitionInput,

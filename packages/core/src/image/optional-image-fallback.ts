@@ -1,3 +1,4 @@
+import { imagePaintProjection, withImagePaintProjection, type ImagePaintProjectionOptions } from './crop';
 /** Optional image codecs that can be omitted from the base viewer bundle. */
 export type OptionalImageCodec = 'tiff';
 
@@ -55,23 +56,20 @@ export function paintOptionalImagePlaceholder(
   ctx: CanvasRenderingContext2D,
   codec: OptionalImageCodec | 'pict',
   bounds: OptionalImagePlaceholderBounds,
+  options?: Readonly<ImagePaintProjectionOptions>,
 ): void {
   if (![bounds.x, bounds.y, bounds.width, bounds.height].every(Number.isFinite)
     || bounds.width <= 0 || bounds.height <= 0) return;
-  ctx.save();
-  try {
-    ctx.fillStyle = '#888';
-    ctx.font = '11px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    const label = OPTIONAL_IMAGE_LABELS[codec];
-    ctx.fillText(
-      label,
-      bounds.x + bounds.width / 2,
-      bounds.y + bounds.height / 2,
-      bounds.width,
-    );
-  } finally {
-    ctx.restore();
-  }
+  const paint = (x: number, y: number, width: number, height: number) => {
+    ctx.save();
+    try {
+      ctx.fillStyle = '#888'; ctx.font = '11px sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(OPTIONAL_IMAGE_LABELS[codec], x + width / 2, y + height / 2, width);
+    } finally { ctx.restore(); }
+  };
+  if (!options) { paint(bounds.x, bounds.y, bounds.width, bounds.height); return; }
+  const plan = options.projection ?? imagePaintProjection(bounds.width, bounds.height, null, options.transform, false);
+  if (plan.width !== bounds.width || plan.height !== bounds.height) throw new RangeError('Image placeholder projection destination mismatch');
+  withImagePaintProjection(ctx, bounds.x, bounds.y, plan, paint);
 }

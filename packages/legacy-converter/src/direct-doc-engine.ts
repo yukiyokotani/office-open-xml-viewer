@@ -1,8 +1,16 @@
+import { readNativePictureBulletPolicy, type NativePictureBulletPolicy } from './doc-picture-bullet-policy.js';
 import {
   createDirectSourceRuntime,
   resolveDirectWasmInput,
   type OwnedDirectSource,
 } from './direct-source-runtime.js';
+
+import type { NativeWordBreakingPolicy } from './legacy-doc.js';
+import { readNativeDocReadingPolicies, type NativeDocReadingPolicies } from './source-module-config.js';
+
+/** Single-capability strings remain accepted at this internal engine boundary.
+ * Clone-safe source descriptors pass independent policies together. */
+type LegacyDocReadingRequest = NativeDocReadingPolicies | NativeWordBreakingPolicy | 'relocateForReading';
 
 import { MAX_LEGACY_SOURCE_BYTES as MAX_LEGACY_DOC_SOURCE_BYTES } from './legacy-source-limits.js';
 
@@ -31,13 +39,15 @@ export interface LegacyDocNativeDocument {
   revision_markup_on_screen?(): boolean;
   /** Whether the projected model carries any revision mark. */
   has_revision_marks?(): boolean;
+  native_picture_bullet_reading_requested?(): boolean;
 }
 
 export type OwnedLegacyDocSource = OwnedDirectSource<LegacyDocNativeDocument>;
 
 export interface LegacyDocGlue {
   default(input: { module_or_path: unknown }): Promise<unknown>;
-  LegacyDocDocument: new (bytes: Uint8Array, modelBudget?: number) => LegacyDocNativeDocument;
+  LegacyDocDocument: new (bytes: Uint8Array, modelBudget?: number, relocateForReading?: boolean,
+    simplifyWordBreakingForReading?: boolean, storedPictureBulletsForReading?: boolean) => LegacyDocNativeDocument;
 }
 
 /** Internal injectable engine; generated glue is wired only after its facade is accepted. */
@@ -45,21 +55,41 @@ export function createLegacyDocSourceEngine(
   loadGlue: () => Promise<LegacyDocGlue>,
   resolveWasm: (wasmUrl: string) => Promise<unknown>,
   modelBudget?: number,
+  pictureBulletPolicy?: NativePictureBulletPolicy,
 ): Readonly<{
-  open(bytes: Uint8Array, wasmUrl: string, signal?: AbortSignal): Promise<OwnedLegacyDocSource>;
+  open(bytes: Uint8Array, wasmUrl: string, signal?: AbortSignal, request?: LegacyDocReadingRequest): Promise<OwnedLegacyDocSource>;
 }> {
+  const picturePolicy = readNativePictureBulletPolicy(pictureBulletPolicy);
   if (modelBudget !== undefined && (
     !Number.isSafeInteger(modelBudget) || modelBudget <= 0
     || modelBudget > MAX_LEGACY_DOC_SOURCE_BYTES
   )) {
     throw new RangeError('legacy DOC model budget is invalid');
   }
-  return createDirectSourceRuntime({
+  return createDirectSourceRuntime<LegacyDocGlue, LegacyDocNativeDocument, LegacyDocReadingRequest>({
     label: 'legacy DOC',
     maximumSourceBytes: MAX_LEGACY_DOC_SOURCE_BYTES,
     loadGlue,
     resolveWasm,
-    construct: (glue, bytes) => new glue.LegacyDocDocument(bytes, modelBudget),
+    construct: (glue, bytes, request) => {
+      let selected: NativeDocReadingPolicies;
+      if (request === undefined || request === 'strict') selected = {};
+      else if (request === 'relocateForReading') selected = { nativeContourPolicy: request };
+      else if (request === 'simplifyForReading') selected = { nativeWordBreakingPolicy: request };
+      else if (typeof request === 'object' && request !== null && !Array.isArray(request)) selected = request;
+      else throw new TypeError('Invalid native DOC reading policy');
+      const policies = readNativeDocReadingPolicies({ ...selected,
+        nativePictureBulletPolicy: selected.nativePictureBulletPolicy === undefined
+          ? picturePolicy : selected.nativePictureBulletPolicy });
+      const contour = policies.nativeContourPolicy === 'relocateForReading';
+      const wordBreaking = policies.nativeWordBreakingPolicy === 'simplifyForReading';
+      const pictureBullets = policies.nativePictureBulletPolicy === 'storedSizeForReading';
+      // Native ABI slots are contour=3, word breaking=4, picture bullets=5.
+      // The all-strict path preserves the default native constructor behavior.
+      return contour || wordBreaking || pictureBullets
+        ? new glue.LegacyDocDocument(bytes, modelBudget, contour, wordBreaking, pictureBullets)
+        : new glue.LegacyDocDocument(bytes, modelBudget);
+    },
     // Closing ends the pull cursor. free()/Drop owns the retained image resources.
     closeNative: (document) => document.close_document_session(),
   });

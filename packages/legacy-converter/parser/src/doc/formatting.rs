@@ -99,6 +99,7 @@ impl DirectParagraphProperties {
 
 pub struct Formatting<'a> {
     pub characters: Index<'a>,
+    word_breaking_reading: bool,
     paragraphs: Index<'a>,
     fonts: Vec<String>,
     defaults: Properties,
@@ -113,6 +114,9 @@ pub struct Formatting<'a> {
     data: &'a [u8],
     budget: Budget,
     numbering: numbering::Tables<'a>,
+    /// Explicit DOC-only reading capability. Other unsupported property
+    /// families remain sticky; this never clears the aggregate refusal flag.
+    pub(in crate::doc) picture_bullet_reading: bool,
     pub unsupported_character_properties: bool,
     pub unsupported_paragraph_properties: bool,
     pub unsupported_piece_properties: bool,
@@ -152,6 +156,7 @@ impl<'a> Formatting<'a> {
             characters.is_empty() || paragraphs.is_empty() || styles.is_empty() || fonts.is_empty();
         Ok(Self {
             characters,
+            word_breaking_reading: false,
             paragraphs,
             fonts,
             defaults,
@@ -165,6 +170,7 @@ impl<'a> Formatting<'a> {
             data,
             budget: Budget::default(),
             numbering: numbering::Tables::read(word, table)?,
+            picture_bullet_reading: false,
             unsupported_character_properties: false,
             unsupported_paragraph_properties: false,
             unsupported_piece_properties: false,
@@ -173,6 +179,12 @@ impl<'a> Formatting<'a> {
             // FibRgFcLcb97 entry 51 (0x9A + 51 * 8).
             revision_authors: fkp::table_part(word, table, 0x232).ok(),
         })
+    }
+
+    pub(in crate::doc) fn configure_word_breaking_reading(&mut self, reading: bool) {
+        // Configured before any style/run is resolved; cache ownership never
+        // changes under already-acquired character properties.
+        self.word_breaking_reading = reading;
     }
 
     pub fn paragraph_style(&self, end_fc: usize) -> Result<usize, String> {
@@ -444,6 +456,8 @@ impl<'a> Formatting<'a> {
             // The linked sparse patch and LVL CHPX follow the paragraph mark.
             // Check the final marker owner too: it is projected separately
             // by numbering and must not silently lose custom word breaking.
+            // Reading retains the final marker owner separately in NumberingInfo;
+            // strict mode still requires the faithful custom-breaking consumer.
             self.unsupported_character_properties |= marker.word_breaking_requires_consumer();
             return Ok(ResolvedParagraph {
                 properties: props,
@@ -805,11 +819,22 @@ impl<'a> Formatting<'a> {
                     // text bullet, a legal later layer replaces it, and only
                     // an enabled one still winning after the run's cascade is
                     // refused (see `run_properties_with_table`).
-                    props.apply(code, operand, &baseline)?;
+                    props.apply_with_word_breaking_reading(
+                        code,
+                        operand,
+                        &baseline,
+                        self.word_breaking_reading,
+                    )?;
                     props.stamp_picture_bullet(code, character::BulletOrigin::Style(id));
                     continue;
                 }
-                if !props.apply(code, operand, &baseline)? && code != 0x484e {
+                if !props.apply_with_word_breaking_reading(
+                    code,
+                    operand,
+                    &baseline,
+                    self.word_breaking_reading,
+                )? && code != 0x484e
+                {
                     self.unsupported_character_properties = true;
                 }
             }
@@ -847,10 +872,9 @@ impl<'a> Formatting<'a> {
         prm: u16,
         prcs: &[&[u8]],
     ) -> Result<bool, String> {
-        Ok(self
-            .run_properties(style, fc, prm, prcs)?
-            .picture
-            .passive_special())
+        let properties = self.run_properties(style, fc, prm, prcs)?;
+        self.reject_non_marker_picture_bullet(&properties)?;
+        Ok(properties.picture.passive_special())
     }
 
     fn run_properties(
@@ -943,7 +967,17 @@ impl<'a> Formatting<'a> {
                     *style = paragraph.clone();
                 }
                 _ => {
-                    if !props.apply(code, operand, style)? && code != 0x484e {
+                    let displayable = props.apply_with_word_breaking_reading(
+                        code,
+                        operand,
+                        style,
+                        self.word_breaking_reading,
+                    )?;
+                    // Each explicit policy defers only its acquired property family.
+                    if !displayable
+                        && code != 0x484e
+                        && !(self.picture_bullet_reading && matches!(code, 0x6887 | 0x4888))
+                    {
                         self.unsupported_character_properties = true;
                     }
                     props.stamp_picture_bullet(code, origin);
@@ -1119,6 +1153,7 @@ mod tests {
 
     fn empty() -> Formatting<'static> {
         Formatting {
+            word_breaking_reading: false,
             characters: Index::default(),
             paragraphs: Index::default(),
             fonts: vec![],
@@ -1133,6 +1168,7 @@ mod tests {
             data: &[],
             budget: Budget::default(),
             numbering: numbering::Tables::default(),
+            picture_bullet_reading: false,
             unsupported_character_properties: false,
             unsupported_paragraph_properties: false,
             unsupported_piece_properties: false,
@@ -3552,6 +3588,36 @@ mod tests {
     }
 
     #[test]
+    fn reading_list_marker_retains_raw_owner_and_strict_invalid_refusal() {
+        let piece = list_piece(1);
+        let build = |reading| {
+            let mut formatting = empty();
+            formatting.configure_word_breaking_reading(reading);
+            formatting.numbering = level_bidi_formatting(0);
+            formatting.numbering.lists[0].levels[0].chpx = &[0x4e, 0x48, 0, 1];
+            formatting
+        };
+        assert!(build(false)
+            .direct_paragraph(0, None, 0, 1, &[&piece])
+            .is_err());
+        let mut formatting = build(true);
+        let direct = formatting
+            .direct_paragraph(0, None, 0, 1, &[&piece])
+            .unwrap();
+        let (reference, marker) = direct.numbering.expect("resolved numbering");
+        assert!(!formatting.unsupported_character_properties);
+        let mut store = numbering::direct::Store::default();
+        let numbering = formatting
+            .direct_numbering(&mut store, reference, &marker, &direct.paragraph)
+            .unwrap();
+        assert_eq!(numbering.text, "1.");
+        let owner = numbering
+            .native_reading_word_breaking
+            .expect("raw marker owner");
+        assert_eq!([owner.raw_hres, owner.raw_ch_hres], [0, 1]);
+    }
+
+    #[test]
     fn marker_font_validation_happens_at_direct_numbering_activation() {
         let piece = list_piece(1);
         let mut formatting = empty();
@@ -5332,6 +5398,70 @@ mod tests {
             .unwrap();
         // A separate run's normal value cannot remove a prior run's refusal.
         assert!(f.unsupported_character_properties);
+    }
+
+    #[test]
+    fn reading_word_breaking_style_piece_and_cached_resets_retain_winning_owner() {
+        let raw = &[0x4e, 0x48, 0, 1][..];
+        let normal = &[0x4e, 0x48, 1, 0][..];
+        let style = |kind, chpx: &'static [u8]| Style {
+            kind,
+            base: 0xfff,
+            chpx,
+            papx: &[],
+            table: None,
+            language_compatibility: StyleLanguageCompatibility::default(),
+        };
+        let mut f = empty();
+        f.configure_word_breaking_reading(true);
+        f.styles = vec![
+            Some(style(1, raw)),
+            Some(style(2, normal)),
+            Some(style(2, raw)),
+        ];
+        for _ in 0..2 {
+            // Real style-cache hit, followed by CPlain restoring the raw base.
+            let run = f
+                .direct_text_run(
+                    0,
+                    None,
+                    0,
+                    1,
+                    &[&[0x4e, 0x48, 1, 0, 0x33, 0x2a, 0]],
+                    "literal-hyphen".into(),
+                )
+                .unwrap()
+                .unwrap();
+            let owner = run.native_reading_word_breaking.unwrap();
+            assert_eq!([owner.raw_hres, owner.raw_ch_hres], [0, 1]);
+            assert_eq!(run.text, "literal-hyphen");
+        }
+        // CIstd restores the selected character-style owner, not the previous
+        // direct value. PRM1 takes its actual place after physical CHPX.
+        for (selected, expected) in [(1, None), (2, Some([0, 1]))] {
+            let run = f
+                .direct_text_run(
+                    0,
+                    None,
+                    0,
+                    1,
+                    &[&[0x30, 0x4a, selected, 0]],
+                    "suffix".into(),
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                run.native_reading_word_breaking
+                    .map(|v| [v.raw_hres, v.raw_ch_hres]),
+                expected
+            );
+        }
+        let run = f
+            .direct_text_run(0, None, 0, 1, &[normal], "suffix".into())
+            .unwrap()
+            .unwrap();
+        assert!(run.native_reading_word_breaking.is_none());
+        assert!(!f.unsupported_character_properties && !f.unsupported_piece_properties);
     }
 
     #[test]
