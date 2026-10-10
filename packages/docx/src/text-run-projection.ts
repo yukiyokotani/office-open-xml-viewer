@@ -50,7 +50,11 @@ function projectTextRun(
       ? { sourceRunIndex: placement.sourceRunIndex }
       : {}),
     direction: placement.direction,
-    text: placement.text,
+    // ECMA-376 §17.3.3.29: the conditional glyph is a layout opportunity,
+    // not an added source character. Preserve its owner/geometry for callers
+    // while copy/find receive logical text. Ordinary '-' remains unchanged.
+    ...(placement.optionalHyphenGlyph ? { optionalHyphenGlyph: true as const } : {}),
+    text: placement.optionalHyphenGlyph ? '' : placement.text,
     x: origin.xPt,
     y: origin.yPt,
     w: placement.bounds.widthPt * inlineScale,

@@ -1513,9 +1513,11 @@ function textPlacement(
       })
     : [];
   const baselineOffsetPt = retainedBaselineOffsetPt(segment);
+  const sourceEnd = sourceOffset + logicalTextSegmentLength(segment);
   return {
     kind: 'text',
     text: segment.text,
+    ...(segment.optionalHyphenGlyph ? { optionalHyphenGlyph: true as const } : {}),
     ...(segment.semanticSlotSpans ? { semanticSlotSpans: segment.semanticSlotRange
       ? sliceSemanticSlotSpans(segment.semanticSlotSpans,
         segment.semanticSlotRange.start, segment.semanticSlotRange.end)
@@ -1526,12 +1528,12 @@ function textPlacement(
       && (run.noteRef?.kind === 'footnote' || run.noteRef?.kind === 'endnote')
       ? { noteReference: { kind: run.noteRef.kind, id: run.noteRef.id } }
       : {}),
-    range: { start: sourceOffset, end: sourceOffset + segment.text.length },
+    range: { start: sourceOffset, end: sourceEnd },
     origin: { xPt, yPt: baselinePt + baselineOffsetPt },
     bounds: { xPt, yPt: topPt, widthPt: segment.measuredWidth, heightPt },
     advancePt: segment.measuredWidth,
     clusters: [{
-      range: { start: sourceOffset, end: sourceOffset + segment.text.length },
+      range: { start: sourceOffset, end: sourceEnd },
       offset: { xPt: 0, yPt: 0 },
       advancePt: segment.measuredWidth,
     }],
@@ -1618,7 +1620,7 @@ function textPlacement(
     decorations: [],
     paintOps: [{
       text: segment.text,
-      range: { start: sourceOffset, end: sourceOffset + segment.text.length },
+      range: { start: sourceOffset, end: sourceEnd },
       offset: { xPt: 0, yPt: baselineOffsetPt },
       letterSpacingPt: effectiveCharacterSpacingPt(segment),
       scaleX: segment.charScale ?? 1,
@@ -2298,9 +2300,14 @@ function textPlanSegment(
     ...(segment.latinSpaceCompressionPx ? {
       trailingSpaceCompressionPt: segment.latinSpaceCompressionPx,
     } : {}),
-    clusters,
+    // A discretionary glyph has real ink and advance, but no source UTF-16
+    // units. Keep its shaped geometry at the authored zero-length boundary.
+    clusters: segment.optionalHyphenGlyph ? clusters.map(cluster => ({
+      ...cluster, range: { start: sourceOffset, end: sourceOffset },
+    })) : clusters,
     basePaintOps: basePaintOps.map((operation) => ({
       ...operation,
+      ...(segment.optionalHyphenGlyph ? { range: { start: sourceOffset, end: sourceOffset } } : {}),
       offset: { ...operation.offset,
         xPt: operation.offset.xPt + (segment.leadingWordBoundaryPx ?? 0) },
       // Measurement resolves w:spacing, docGrid character pitch, and w:fitText
@@ -2376,7 +2383,7 @@ function logicalOccurrenceMap(
       const runIndex = sourceRunIndex(segment);
       if (runIndex === undefined) continue;
       const length = 'text' in segment
-        ? (segment.metricOnly ? 0 : segment.text.length)
+        ? logicalTextSegmentLength(segment)
         : 'math' in segment ? segment.fallbackText.length
           : 'isTab' in segment || 'imagePath' in segment ? 1 : 0;
       measuredLengths.set(runIndex, (measuredLengths.get(runIndex) ?? 0) + length);
@@ -2404,8 +2411,12 @@ function logicalOccurrenceMap(
   return { runStarts, runLengths };
 }
 
+function logicalTextSegmentLength(segment: LayoutTextSeg): number {
+  return segment.metricOnly || segment.optionalHyphenGlyph ? 0 : segment.text.length;
+}
+
 function segmentOccurrenceLength(segment: LayoutTextSeg | LayoutTabSeg | LayoutImageSeg | LayoutMathSeg): number {
-  if ('text' in segment) return segment.metricOnly ? 0 : segment.text.length;
+  if ('text' in segment) return logicalTextSegmentLength(segment);
   if ('math' in segment) return segment.fallbackText.length;
   return 1;
 }

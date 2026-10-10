@@ -1,6 +1,14 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import type { KinsokuRules } from '@silurus/ooxml-core';
+import { buildTextIndex, findMatches, createCanvasFontRoute } from '@silurus/ooxml-core';
 import { renderDocumentToCanvas } from './renderer.js';
+import { layoutDocument } from './document-layout.js';
+import { createLayoutServices } from './layout-runtime.js';
+import { textRunGeometryForPage } from './layout/text-index.js';
+import { eastAsianUprightPaintOps } from './layout/vertical-glyph-orientation.js';
+import { hitTestDocxElementContext } from './element-context.js';
+import { buildPageLayers } from './layout/page-layers.js';
+import { createPaintResourceRegistry } from './layout/paint-resources.js';
 import {
   splitTextForLayout,
   layoutLines,
@@ -9,12 +17,14 @@ import {
   type LineLayoutEnvironment,
 } from './line-layout.js';
 import type { DocParagraph, DocxDocumentModel, SectionProps, DocRun } from './types.js';
+import type { ParagraphLayoutContext } from './layout-context.js';
+import { measureParagraphIntrinsicWidths } from './layout/intrinsic-width.js';
 
 // ECMA-376 §17.3.3 run-content elements that were previously dropped by the
 // parser's `_ => {}` arm and thus never reached the renderer:
 //   §17.3.3.23 <w:ptab>        — absolute-position tab
 //   §17.3.3.18 <w:noBreakHyphen> — non-breaking hyphen glyph
-//   §17.3.3.29 <w:softHyphen>  — optional hyphen (invisible without hyphenation)
+//   §17.3.3.29 <w:softHyphen>  — optional hyphen (visible only at a selected break)
 // These end-to-end tests record fillText() calls to pin the layout geometry the
 // parser + line-layout now produce. Scale is 1 px/pt (canvas width == pageWidth)
 // and every glyph is FS px wide in the recording canvas.
@@ -24,7 +34,7 @@ interface FillCall {
   x: number;
 }
 
-function makeRecordingCanvas(): { canvas: HTMLCanvasElement; fills: FillCall[] } {
+function makeRecordingCanvas(widthOf?: (text: string, fontSize: number) => number): { canvas: HTMLCanvasElement; fills: FillCall[] } {
   let font = '10px serif';
   const px = () => parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? '10');
   const fills: FillCall[] = [];
@@ -39,7 +49,7 @@ function makeRecordingCanvas(): { canvas: HTMLCanvasElement; fills: FillCall[] }
     measureText: (s: string) => {
       const p = px();
       return {
-        width: [...s].length * p,
+        width: widthOf ? widthOf(s, p) : [...s].length * p,
         fontBoundingBoxAscent: p * 0.8,
         fontBoundingBoxDescent: p * 0.2,
         actualBoundingBoxAscent: p * 0.8,
@@ -63,13 +73,13 @@ function makeRecordingCanvas(): { canvas: HTMLCanvasElement; fills: FillCall[] }
   return { canvas: canvas as unknown as HTMLCanvasElement, fills };
 }
 
-function textRun(text: string): DocRun {
+function textRun(text: string): Extract<DocRun, { type: 'text' }> {
   return {
     type: 'text', text,
     bold: false, italic: false, underline: false, strikethrough: false,
     fontSize: 10, color: null, fontFamily: 'Times New Roman', fontFamilyEastAsia: 'Times New Roman',
     isLink: false, background: null, vertAlign: null, hyperlink: null,
-  } as unknown as DocRun;
+  } as Extract<DocRun, { type: 'text' }>;
 }
 
 function para(runs: DocRun[], indent: { left?: number; right?: number } = {}): DocParagraph {
@@ -454,24 +464,322 @@ describe('noBreakHyphen (§17.3.3.18) and softHyphen (§17.3.3.29)', () => {
     expect(resumed?.hardJoinPrev).toBeUndefined();
   });
 
-  // §17.3.3.29: a soft hyphen "shall have zero width" and "shall not change
-  // the normal display of text" unless it is the chosen break point; since
-  // this renderer performs no automatic hyphenation (§17.15.1.x), it is never
-  // chosen, so state (a) always applies. The parser reflects this by emitting
-  // NOTHING for <w:softHyphen/> (`soft_hyphen_is_invisible`, parser.rs) — this
-  // test exercises the RENDERER side of that same contract: given the exact
-  // shape the parser produces for "br"+softHyphen+"eaking" (two adjacent text
-  // runs, nothing in between), the renderer must draw a contiguous "breaking"
-  // with no synthesized hyphen and no extra gap between the pieces.
-  it('softHyphen contributes no glyph and no gap, given the shape the parser actually emits', async () => {
-    // This is what parse_run_inner produces for
-    // <w:r><w:t>br</w:t><w:softHyphen/><w:t>eaking</w:t></w:r>: the
-    // <w:softHyphen/> arm pushes nothing, so exactly two DocRun::Text survive.
-    const fills = await render([para([textRun('br'), textRun('eaking')])]);
+  it('an unselected optional hyphen contributes no glyph or gap through parser acquisition', async () => {
+    const marker = { ...textRun(''), __optionalHyphen: true } as DocRun;
+    const fills = await render([para([textRun('br'), marker, textRun('eaking')])]);
     const drawn = fills.map((c) => c.text).join('');
     expect(drawn).not.toContain('-');
     expect(drawn.replace(/[^a-z]/g, '')).toBe('breaking');
     const whole = await render([para([textRun('breaking')])]);
-    expect(fills).toEqual(whole);
+    expect(fills.at(-1)!.x + fills.at(-1)!.text.length * 10)
+      .toBe(whole.at(-1)!.x + whole.at(-1)!.text.length * 10);
+  });
+
+  it('selects an authored optional break with its own styled and measured hyphen', () => {
+    const marker = { ...textRun(''), optionalHyphen: true, color: 'ff0000', fontSize: 14 } as DocRun;
+    const segs = buildSegments([textRun('br'), marker, textRun('eaking')], {} as LineLayoutEnvironment);
+    const { canvas } = makeRecordingCanvas();
+    const ctx = canvas.getContext('2d') as unknown as CanvasRenderingContext2D;
+    const lines = layoutLines(ctx, segs, 70, 0, 1);
+    expect(lines.map(line => line.segments.filter(segment => 'text' in segment && segment.text)
+      .map(segment => (segment as LayoutTextSeg).text))).toEqual([['br', '-'], ['eaking']]);
+    const hyphen = lines[0].segments.find(segment => 'text' in segment && segment.text === '-') as LayoutTextSeg;
+    expect([hyphen.fontSize, hyphen.color, hyphen.measuredWidth, hyphen.sourceRunIndex])
+      .toEqual([14, 'ff0000', 14, 1]);
+  });
+
+  it('an unselected styled marker does not interrupt contextual shaping of the word', () => {
+    const marker = { ...textRun(''), optionalHyphen: true, color: 'ff0000' } as DocRun;
+    const segs = buildSegments([textRun('A'), marker, textRun('V')], {} as LineLayoutEnvironment);
+    // A font can kern the pair to fourteen units while separate glyph probes
+    // return ten each. Zero-width source formatting must not change that
+    // uninterrupted shape or introduce a false overflow at width fifteen.
+    const { canvas } = makeRecordingCanvas((text, size) => text === 'AV' ? 14 : [...text].length * size);
+    const ctx = canvas.getContext('2d') as unknown as CanvasRenderingContext2D;
+    const lines = layoutLines(ctx, segs, 15, 0, 1);
+    expect(lines[0].segments.reduce((sum, segment) => sum + segment.measuredWidth, 0)).toBe(14);
+    expect(lines.map(line => line.segments.filter(segment => 'text' in segment && segment.text)
+      .map(segment => (segment as LayoutTextSeg).text).join(''))).toEqual(['AV']);
+  });
+
+  it('does not select an optional glyph that exceeds the remaining line width', () => {
+    const marker = { ...textRun(''), optionalHyphen: true, fontSize: 40 } as DocRun;
+    const segs = buildSegments([textRun('lead br'), marker, textRun('eaking')], {} as LineLayoutEnvironment);
+    const { canvas } = makeRecordingCanvas();
+    const ctx = canvas.getContext('2d') as unknown as CanvasRenderingContext2D;
+    const lines = layoutLines(ctx, segs, 80, 0, 1);
+    const text = lines.map(line => line.segments.filter(segment => 'text' in segment && segment.text)
+      .map(segment => (segment as LayoutTextSeg).text));
+    expect(text.map(parts => parts.join(''))).toEqual(['lead ', 'breaking']);
+  });
+
+  it('selects the last fitting optional owner and resumes after that marker', () => {
+    const first = { ...textRun(''), optionalHyphen: true, color: 'ff0000', fontSize: 14 } as DocRun;
+    const last = { ...textRun(''), optionalHyphen: true, color: '0000ff' } as DocRun;
+    const segs = buildSegments([textRun('ab'), first, textRun('cd'), last, textRun('efgh')], {} as LineLayoutEnvironment);
+    const { canvas } = makeRecordingCanvas();
+    const ctx = canvas.getContext('2d') as unknown as CanvasRenderingContext2D;
+    const lines = layoutLines(ctx, segs, 65, 0, 1);
+    expect(lines.map(line => line.segments.filter(segment => 'text' in segment && segment.text)
+      .map(segment => (segment as LayoutTextSeg).text).join(''))).toEqual(['abcd-', 'efgh']);
+    const glyph = lines[0].segments.find(segment => 'text' in segment && segment.text === '-') as LayoutTextSeg;
+    expect([glyph.color, glyph.measuredWidth, glyph.sourceRunIndex]).toEqual(['0000ff', 10, 3]);
+  });
+
+  it('bounds dense authored-marker prefix shaping with the production pass quota', () => {
+    // The unbroken word fits. Its 5,800 authored opportunities still request
+    // over 16 Mi UTF-16 units of prefix work, so the shared pass quota must
+    // abort rather than allow an uncharged quadratic scan or partial layout.
+    // Supply the compact segment representation directly so this regression
+    // isolates the production line-breaking quota from run acquisition work.
+    const segs = buildSegments([textRun('x'.repeat(5801))], {} as LineLayoutEnvironment);
+    const owner = buildSegments([textRun('x'), { ...textRun(''), optionalHyphen: true } as DocRun,
+      textRun('x')], {} as LineLayoutEnvironment)[0] as LayoutTextSeg;
+    const word = segs[0] as LayoutTextSeg;
+    word.optionalHyphenWord = true;
+    word.optionalHyphenBreaks = Array.from({ length: 5800 }, (_, index) => ({
+      offset: index + 1, glyph: owner.optionalHyphenBreaks![0].glyph,
+    }));
+    const { canvas } = makeRecordingCanvas(text => text.length);
+    const ctx = canvas.getContext('2d') as unknown as CanvasRenderingContext2D;
+    expect(() => layoutLines(ctx, segs, 6000, 0, 1))
+      .toThrow('DOCX line-break prefix search exceeded its UTF-16 work quota');
+  });
+
+  function intrinsicWidths(runs: DocRun[], kinsoku: KinsokuRules) {
+    const { canvas } = makeRecordingCanvas();
+    const context = {
+      lineGrid: { active: false, pitchPt: null },
+      characterGrid: { active: false, kind: null, pitchPt: null, deltaPt: 0 },
+      rightIndentGrid: { pitchPt: null, paragraphAllowsAdjustment: true },
+      physicalIndentLeftPt: 0, physicalIndentRightPt: 0, firstIndentPt: 0,
+      lineSpacing: null, spaceBeforePt: 0, spaceAfterPt: 0,
+      baseRtl: false, isJustified: false, stretchLastLine: false,
+      tabStops: [], hasRuby: false, hasEastAsianText: false, kinsoku, defaultTabPt: 36,
+    } as ParagraphLayoutContext;
+    return measureParagraphIntrinsicWidths(para(runs), context, 100000,
+      { context: canvas.getContext('2d') as unknown as CanvasRenderingContext2D, fontFamilyClasses: {} },
+      { pageIndex: 0, totalPages: 1, pageWritingMode: 'horizontal-tb', documentHasEastAsianText: false });
+  }
+
+  const optionalRules: KinsokuRules = { enabled: true, lineStartForbidden: new Set([41]), lineEndForbidden: new Set() };
+
+  it('intrinsic optional breaks respect the following authored hard seam', () => {
+    const runs = [textRun('ab'), { ...textRun(''), optionalHyphen: true } as DocRun,
+      { ...textRun('-cd'), noBreakBefore: true, noBreakRanges: [{ start: 0, end: 1 }] } as DocRun];
+    expect(intrinsicWidths(runs, optionalRules)).toEqual({ minWidthPt: 50, maxWidthPt: 50 });
+  });
+
+  it('intrinsic optional breaks respect a forbidden continuation line start', () => {
+    const runs = [textRun('abcd'), { ...textRun(''), optionalHyphen: true } as DocRun, textRun(')efgh')];
+    expect(intrinsicWidths(runs, optionalRules)).toEqual({ minWidthPt: 90, maxWidthPt: 90 });
+  });
+
+  it('intrinsic token traversal does not rescan all authored marker offsets', () => {
+    const runs: DocRun[] = [];
+    for (let index = 0; index < 200; index += 1)
+      runs.push(textRun('ab'), { ...textRun(''), optionalHyphen: true } as DocRun, textRun('cd '));
+    // Count actual full-map visits rather than using an elapsed-time heuristic.
+    // This word/space model executes the public intrinsic entry point; 200
+    // tokens must not enumerate their complete 200-marker map 200 times.
+    const keys = Map.prototype.keys;
+    let markerVisits = 0;
+    let mergedMarkerCopies = 0;
+    const arrayIterator = Array.prototype[Symbol.iterator];
+    // A plain override avoids spy bookkeeping recursively iterating arrays.
+    Array.prototype[Symbol.iterator] = function (this: unknown[]) {
+      const iterator = arrayIterator.call(this);
+      return (function* () {
+        for (const value of iterator) {
+          if (value && typeof value === 'object' && 'offset' in value && 'glyph' in value) mergedMarkerCopies += 1;
+          yield value;
+        }
+      })() as ArrayIterator<unknown>;
+    };
+    const spy = vi.spyOn(Map.prototype, 'keys').mockImplementation(function (this: Map<unknown, unknown>) {
+      const iterator = keys.call(this);
+      return (function* () {
+        for (const key of iterator) {
+          if (typeof key === 'number' && key > 0) markerVisits += 1;
+          yield key;
+        }
+      })() as MapIterator<unknown>;
+    });
+    try {
+      expect(intrinsicWidths(runs, optionalRules).minWidthPt).toBe(30);
+      expect(markerVisits).toBeLessThanOrEqual(400);
+      expect(mergedMarkerCopies).toBeLessThanOrEqual(1200);
+    } finally { Array.prototype[Symbol.iterator] = arrayIterator; spy.mockRestore(); }
+  });
+
+  it('selects the authored marker at a real font and script seam', () => {
+    const runs = [{ ...textRun('ab'), fontSize: 20 } as DocRun,
+      { ...textRun(''), optionalHyphen: true, color: 'ff0000' } as DocRun,
+      { ...textRun('日本'), fontFamily: 'Other Face', fontSize: 20 } as DocRun];
+    const { canvas } = makeRecordingCanvas();
+    const lines = layoutLines(canvas.getContext('2d') as unknown as CanvasRenderingContext2D,
+      buildSegments(runs, {} as LineLayoutEnvironment), 50, 0, 1);
+    expect(lines.map(line => line.segments.filter(s => 'text' in s && s.text)
+      .map(s => (s as LayoutTextSeg).text).join(''))).toEqual(['ab-', '日本']);
+  });
+
+  it('clears consumed standalone-marker joins on the continuation line', () => {
+    const runs = [{ ...textRun('ab'), fitTextVal: 400, fitTextId: '1' } as DocRun,
+      { ...textRun(''), optionalHyphen: true, color: 'ff0000' } as DocRun,
+      { ...textRun(''), optionalHyphen: true, color: '0000ff' } as DocRun, textRun('cd')];
+    const { canvas } = makeRecordingCanvas();
+    const lines = layoutLines(canvas.getContext('2d') as unknown as CanvasRenderingContext2D,
+      buildSegments(runs, {} as LineLayoutEnvironment), 35, 0, 1);
+    expect(lines.map(line => line.segments.filter(s => 'text' in s && s.text)
+      .map(s => (s as LayoutTextSeg).text).join(''))).toEqual(['ab-', 'cd']);
+    const continuation = lines[1].segments.find(s => 'text' in s) as LayoutTextSeg;
+    expect(continuation.joinPrev).toBeUndefined();
+    expect(continuation.hardJoinPrev).toBeUndefined();
+  });
+
+  it('an unselected large optional owner leaves ordinary and standalone line metrics unchanged', () => {
+    const { canvas } = makeRecordingCanvas();
+    const ctx = canvas.getContext('2d') as unknown as CanvasRenderingContext2D;
+    const marker = { ...textRun(''), optionalHyphen: true, fontSize: 80 } as DocRun;
+    const measure = (runs: DocRun[]) => layoutLines(ctx,
+      buildSegments(runs, {} as LineLayoutEnvironment), 200, 0, 1)
+      .map(line => [line.height, line.ascent, line.descent]);
+    expect(measure([textRun('br'), marker, textRun('eaking')])).toEqual(measure([textRun('breaking')]));
+    const fixed = { ...textRun('ab'), fitTextVal: 400, fitTextId: '1' } as DocRun;
+    expect(measure([fixed, marker, textRun('cd')])).toEqual(measure([fixed, textRun('cd')]));
+  });
+
+  it('an unselected optional owner retains the existing registered-face space fit', () => {
+    const route = createCanvasFontRoute('Synthetic Latin', 'registered');
+    const word = (text: string): LayoutTextSeg => {
+      const parsed = textRun(text);
+      return {
+        text: parsed.text, bold: parsed.bold, italic: parsed.italic,
+        underline: parsed.underline, strikethrough: parsed.strikethrough,
+        fontSize: parsed.fontSize, color: parsed.color, vertAlign: parsed.vertAlign,
+        fontFamily: 'Synthetic Latin', fontRoute: route, measuredWidth: 0,
+        latinSpaceAverageWidthRatio: 0.4, latinSpaceCompressionEligible: true,
+      };
+    };
+    const { canvas } = makeRecordingCanvas(text => [...text].reduce((sum, c) => sum + (c === ' ' ? 4 : 2), 0));
+    const ctx = canvas.getContext('2d') as unknown as CanvasRenderingContext2D;
+    const plain = layoutLines(ctx, [word('A '), word('BC')], 8, 0, 1);
+    expect(plain.map(line => line.segments.map(s => s.measuredWidth))).toEqual([[4, 4]]);
+    const authored = { ...word('BC'), optionalHyphenWord: true as const,
+      optionalHyphenBreaks: [{ offset: 1, glyph: word('-') }] };
+    const withMarker = layoutLines(ctx, [word('A '), authored], 8, 0, 1);
+    expect(withMarker.map(line => line.segments.map(s => s.measuredWidth))).toEqual([[4, 4]]);
+  });
+});
+
+
+describe('authored optional glyph logical text boundary', () => {
+  function selectedDefaultMarkerLayout() {
+    const marker = { ...textRun(''), __optionalHyphen: true } as DocRun;
+    const model = doc([para([textRun('br'), marker, textRun('eaking-keep')], { right: 230 })]);
+    const { canvas } = makeRecordingCanvas();
+    const layout = layoutDocument(model, createLayoutServices(model, {
+      measureContext: canvas.getContext('2d') as CanvasRenderingContext2D,
+    }), { currentDateMs: 0 });
+    const paragraph = layout.pages[0]!.layers.body.find(node => node.kind === 'paragraph');
+    if (!paragraph || paragraph.kind !== 'paragraph') throw new Error('Expected acquired paragraph');
+    return { layout, paragraph };
+  }
+
+  it('retains selected optional ink when upright-frame paint operations are projected from logical ranges', () => {
+    const { paragraph } = selectedDefaultMarkerLayout();
+    const glyph = paragraph.lines.flatMap(line => line.placements)
+      .find(placement => placement.kind === 'text' && placement.optionalHyphenGlyph);
+    if (!glyph || glyph.kind !== 'text') throw new Error('Expected selected glyph');
+    const operations = eastAsianUprightPaintOps(glyph);
+    expect(operations).toMatchObject([{ text: '-', range: { start: 2, end: 2 }, glyphOrientation: 'sideways' }]);
+    expect(operations[0]?.offset).toEqual(glyph.clusters[0]?.offset);
+    expect(glyph.advancePt).toBe(10);
+  });
+
+  it('omits selected optional ink from shape element context while retaining literal hyphens', () => {
+    const { layout, paragraph } = selectedDefaultMarkerLayout();
+    const bounds = { xPt: 0, yPt: 0, widthPt: 70, heightPt: 200 };
+    const box: import('./layout/types.js').TextBoxLayout = {
+      kind: 'textbox', id: 'optional-box', source: { story: 'textbox', storyInstance: 'optional-box', path: [] },
+      flowDomainId: 'optional-box', flowBounds: bounds, inkBounds: bounds, advancePt: paragraph.advancePt,
+      transform: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+      ordinaryFlow: false, writingMode: 'horizontal-tb', insets: { topPt: 0, rightPt: 0, bottomPt: 0, leftPt: 0 },
+      story: { story: 'textbox', flowBounds: bounds, inkBounds: bounds, blocks: [paragraph],
+        advancePt: paragraph.advancePt, diagnostics: [] },
+    };
+    const drawing: import('./layout/types.js').DrawingLayout = {
+      kind: 'drawing', id: 'optional-shape', source: paragraph.source, flowDomainId: paragraph.flowDomainId,
+      flowBounds: bounds, inkBounds: bounds, advancePt: 0, ordinaryFlow: false,
+      commands: [{ kind: 'fill-rect', rect: bounds, fill: '#ffffff' }], textBoxIds: [box.id],
+    };
+    const host = { ...paragraph, lines: [], drawings: [drawing], textBoxes: [box] };
+    const retained = { ...layout, pages: [{ ...layout.pages[0]!,
+      layers: buildPageLayers([{ layer: 'body', node: host }]) }] };
+    const context = hitTestDocxElementContext(retained, 0, { xPt: 1, yPt: 1 }, createPaintResourceRegistry([]));
+    expect(context?.elementType).toBe('shape');
+    expect(context?.text).toBe('br\neaking-\nkeep');
+  });
+  it.each([{ name: 'same-format', color: null, fontSize: 12 },
+    { name: 'real-format', color: 'ff0000', fontSize: 14 }])(
+    'retains zero logical ranges and complete $name source ownership at a selected optional glyph', async style => {
+    const run = (text: string): Extract<DocRun, { type: 'text' }> => ({ ...textRun(text), fontSize: 12 });
+    const marker = { ...run(''), ...style, __optionalHyphen: true };
+    const model = doc([para([run('br'), marker, run('eaking-keep')], { right: 216 })]);
+    const { canvas, fills } = makeRecordingCanvas();
+    const ctx = canvas.getContext('2d') as CanvasRenderingContext2D;
+    const services = createLayoutServices(model, { measureContext: ctx });
+    const layout = layoutDocument(model, services, { currentDateMs: 0 });
+    const owned = textRunGeometryForPage(layout, 0).map(item => item.placement);
+    const glyph = owned.find(placement => placement.optionalHyphenGlyph);
+    expect(glyph).toMatchObject({ text: '-', sourceRunIndex: 1,
+      range: { start: 2, end: 2 }, advancePt: style.fontSize });
+    expect(glyph?.clusters).toMatchObject([{ range: { start: 2, end: 2 }, advancePt: style.fontSize }]);
+    expect(owned.filter(placement => placement.sourceRunIndex === 0).map(placement => placement.text).join('')).toBe('br');
+    const suffix = owned.filter(placement => placement.sourceRunIndex === 2);
+    expect(suffix.map(placement => placement.text).join('')).toBe('eaking-keep');
+    expect(suffix[0]?.range.start).toBe(2);
+    expect(suffix.at(-1)?.range.end).toBe(13);
+    const wideModel = doc([para([run('br'), marker, run('eaking-keep')])]);
+    const wide = layoutDocument(wideModel, createLayoutServices(wideModel, { measureContext: ctx }), { currentDateMs: 0 });
+    const wideOwned = textRunGeometryForPage(wide, 0).map(item => item.placement);
+    expect(wideOwned.find(placement => placement.sourceRunIndex === 1)).toMatchObject({
+      text: '', range: { start: 2, end: 2 }, advancePt: 0 });
+    expect(wideOwned.find(placement => placement.sourceRunIndex === 2)).toMatchObject({
+      text: 'eaking-keep', range: { start: 2, end: 13 } });
+    const bodyParagraph = layout.pages[0]!.layers.body.find(node => node.kind === 'paragraph');
+    expect(bodyParagraph?.kind).toBe('paragraph');
+    if (bodyParagraph?.kind === 'paragraph') {
+      expect(bodyParagraph.lines[0]?.range).toEqual({ start: 0, end: 2 });
+      expect(bodyParagraph.lines.at(-1)?.range.end).toBe(13);
+    }
+    // Every suffix cluster retains its original UTF-16 interval across wrap.
+    expect(suffix.flatMap(placement => placement.clusters.map(cluster => cluster.range)))
+      .toEqual(wideOwned.filter(placement => placement.sourceRunIndex === 2)
+        .flatMap(placement => placement.clusters.map(cluster => cluster.range)));
+    const projected: import('./types.js').DocxTextRunInfo[] = [];
+    await renderDocumentToCanvas(model, canvas, 0,
+      { dpr: 1, width: PAGE_W, layoutServices: services, currentDate: 0, onTextRun: item => projected.push(item) });
+    expect(fills.map(call => call.text).join('')).toBe('br-eaking-keep');
+    const index = buildTextIndex(projected);
+    expect(index.text).toBe('breaking-keep');
+    expect(findMatches(index, 'breaking')).toHaveLength(1);
+    expect(findMatches(index, '-keep')).toHaveLength(1);
+  });
+  it('keeps selected optional glyph ink out of logical copy and word find while retaining literal hyphens', async () => {
+    const marker = { ...textRun(''), __optionalHyphen: true, color: 'ff0000', fontSize: 14 } as DocRun;
+    const { canvas, fills } = makeRecordingCanvas();
+    const projected: import('./types.js').DocxTextRunInfo[] = [];
+    await renderDocumentToCanvas(doc([para([textRun('br'), marker, textRun('eaking-keep')], { right: 230 })]),
+      canvas, 0, { dpr: 1, width: PAGE_W, onTextRun: run => projected.push(run) });
+    expect(fills.map(call => call.text).join('')).toBe('br-eaking-keep');
+    expect(projected.map(run => run.text).join('')).toBe('breaking-keep');
+    const index = buildTextIndex(projected);
+    expect(index.text).toBe('breaking-keep');
+    expect(findMatches(index, 'breaking')).toHaveLength(1);
+    expect(findMatches(index, 'br-eaking')).toHaveLength(0);
+    expect(findMatches(index, '-keep')).toHaveLength(1);
+    expect(projected.find(run => run.sourceRunIndex === 1)).toMatchObject({ text: '', optionalHyphenGlyph: true });
+    expect(projected.filter(run => run.sourceRunIndex === 2).map(run => run.text).join('')).toBe('eaking-keep');
   });
 });

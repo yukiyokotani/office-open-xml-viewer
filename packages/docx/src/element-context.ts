@@ -80,7 +80,7 @@ function* nodeText(node: DeepReadonly<PaintNode>): Iterable<string> {
   if (node.kind === 'paragraph') {
     for (const line of node.lines) {
       const text = line.placements.flatMap((placement) =>
-        placement.kind === 'text' ? [placement.text] : []).join('');
+        placement.kind === 'text' && !placement.optionalHyphenGlyph ? [placement.text] : []).join('');
       if (text) yield text;
     }
     return;

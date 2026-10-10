@@ -78,6 +78,9 @@ struct AcquiredDoc<'a> {
 enum Token {
     Text(String),
     Tab,
+    /// Native U+001F: an authored discretionary break whose conditional glyph
+    /// retains this character's own CP and character-formatting owner.
+    OptionalHyphen,
     LineBreak,
     PageBreak,
     ColumnBreak,
@@ -456,6 +459,7 @@ fn tokenize_with_fields(
                 });
             }
             '\t' => paragraph.tokens.push((Token::Tab, cp)),
+            '\u{1f}' => paragraph.tokens.push((Token::OptionalHyphen, cp)),
             '\u{0b}' => paragraph.tokens.push((Token::LineBreak, cp)),
             '\u{0c}' => paragraph.tokens.push((Token::PageBreak, cp)),
             '\u{0e}' => paragraph.tokens.push((Token::ColumnBreak, cp)),

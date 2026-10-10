@@ -12,6 +12,9 @@ import { sourceOwnedTextPlacements } from './text-source-ownership.js';
 import type { TextPlacement } from './types.js';
 import { measureParagraphIntrinsicWidths } from './intrinsic-width.js';
 import { resolveDocumentLayoutSettings, resolveParagraphLayoutContext, resolveSectionLayoutContext } from '../layout-context.js';
+import { textRunGeometryForPage } from './text-index.js';
+import { textRunsForPage } from '../text-run-projection.js';
+import { buildTextIndex, findMatches } from '@silurus/ooxml-core';
 
 // Independent glyph-provider response: six-point ordinary glyphs, attached
 // marks zero, detached marks two; one kern pair and contextual ligatures.
@@ -144,6 +147,56 @@ function textPlacements(doc: DocxDocumentModel): TextPlacement[] {
   walk(layoutDocument(doc, services, { currentDateMs: 0 }).pages);
   return result;
 }
+it('keeps registered contextual Latin shaping across an unselected same-format optional owner', () => {
+  const doc = document([run('ff'), run('', { __optionalHyphen: true }), run('í')]);
+  const services = Object.freeze({ ...createLayoutServices(doc, { measureContext: context }), text: fixture() });
+  const layout = layoutDocument(doc, services, { currentDateMs: 0 });
+  const paragraph = layout.pages[0]!.layers.body.find(node => node.kind === 'paragraph');
+  if (!paragraph || paragraph.kind !== 'paragraph') throw new Error('Expected acquired paragraph');
+  const placements = paragraph.lines.flatMap(line => line.placements)
+    .filter((p): p is TextPlacement => p.kind === 'text');
+  // The independent provider substitutes ffí as one physical unit (18−7).
+  // An empty authored source owner must not split that contextual operation.
+  expect(placements).toHaveLength(1);
+  expect(placements[0].paintOps.map(op => op.text)).toEqual(['ffí']);
+  expect(placements[0].advancePt).toBe(11);
+  expect(placements[0].semanticSlotSpans?.map(s => [s.start, s.end, s.script]))
+    .toEqual([[0, 2, 'ascii'], [2, 3, 'highAnsi']]);
+  const owned = textRunGeometryForPage(layout, 0).map(g => g.placement);
+  expect(owned.map(p => [p.sourceRunIndex, p.text, p.range]))
+    .toEqual([[0, 'ff', { start: 0, end: 2 }], [1, '', { start: 2, end: 2 }],
+      [2, 'í', { start: 2, end: 3 }]]);
+  expect(owned[1].advancePt).toBe(0);
+  const index = buildTextIndex(textRunsForPage(layout, 0, { scale: 1 }));
+  expect(index.text).toBe('ffí');
+  expect(findMatches(index, 'ffí')).toHaveLength(1);
+});
+it('retains registered slot windows and zero logical length when an optional glyph is selected', () => {
+  const doc = document([run('TTé'), run('', { __optionalHyphen: true }), run('éé')]);
+  doc.section.marginRight = 612 - 72 - 23;
+  const services = Object.freeze({ ...createLayoutServices(doc, { measureContext: context }), text: fixture() });
+  const layout = layoutDocument(doc, services, { currentDateMs: 0 });
+  const paragraph = layout.pages[0]!.layers.body.find(node => node.kind === 'paragraph');
+  if (!paragraph || paragraph.kind !== 'paragraph') throw new Error('Expected acquired paragraph');
+  const owned = textRunGeometryForPage(layout, 0).map(g => g.placement);
+  // Whole word is 29 points; contextual TTé is 17 and the owned glyph is 6.
+  expect(paragraph.lines).toHaveLength(2);
+  expect(owned.map(p => p.text)).toEqual(['TTé', '-', 'éé']);
+  expect(owned.map(p => p.advancePt)).toEqual([17, 6, 12]);
+  expect(owned[0].semanticSlotSpans?.map(s => [s.start, s.end, s.script]))
+    .toEqual([[0, 2, 'ascii'], [2, 3, 'highAnsi']]);
+  expect(owned[1]).toMatchObject({ optionalHyphenGlyph: true, sourceRunIndex: 1,
+    range: { start: 3, end: 3 }, clusters: [{ range: { start: 3, end: 3 }, advancePt: 6 }] });
+  expect(owned[2]).toMatchObject({ sourceRunIndex: 2, range: { start: 3, end: 5 } });
+  expect(owned[2].semanticSlotSpans?.map(s => [s.start, s.end, s.script]))
+    .toEqual([[0, 2, 'highAnsi']]);
+  expect(paragraph.lines.map(line => line.range)).toEqual([{ start: 0, end: 3 }, { start: 3, end: 5 }]);
+  expect(owned[2].clusters.map(c => c.range)).toEqual([{ start: 3, end: 4 }, { start: 4, end: 5 }]);
+  const index = buildTextIndex(textRunsForPage(layout, 0, { scale: 1 }));
+  expect(index.text).toBe('TTééé');
+  expect(findMatches(index, 'TTééé')).toHaveLength(1);
+  expect(findMatches(index, 'TTé-éé')).toHaveLength(0);
+});
 it('materializes retained slot windows on sliced placements', () => {
   const text = 'é' + 'T'.repeat(200);
   const placements = textPlacements(document([run(text)]));

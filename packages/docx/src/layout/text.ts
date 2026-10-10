@@ -135,6 +135,9 @@ export function shapeRunToDocRun(
 /** Plain parser-boundary snapshot used by retained line acquisition. Private
  * parser extensions are copied into named immutable fields exactly once. */
 type ParagraphTextFacts = Readonly<{
+  /** Authored discretionary opportunity with its own conditional glyph style.
+   * Its source run is otherwise empty, independent of dictionary hyphenation. */
+  optionalHyphen?: boolean;
   /** Parser-projected CT_R boundary constraint around an authored
    * `<w:noBreakHyphen/>`. These names are layout facts, not parser wire keys. */
   noBreakBefore?: boolean;

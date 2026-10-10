@@ -14,6 +14,11 @@ export interface TextSequenceSource {
 export interface TextSequence {
   readonly run: Extract<ParagraphTextBearingRun, { type: 'text' }>;
   readonly sources: readonly TextSequenceSource[];
+  readonly optionalHyphens: readonly Readonly<{
+    offset: number;
+    runIndex: number;
+    run: Extract<ParagraphTextBearingRun, { type: 'text' }>;
+  }>[];
 }
 
 function visibleTextRun(run: ParagraphLayoutRun, environment: LineLayoutEnvironment) {
@@ -21,7 +26,7 @@ function visibleTextRun(run: ParagraphLayoutRun, environment: LineLayoutEnvironm
   const r: ParagraphTextBearingRun = run;
   // These are authored units, rather than formatting-only seams: a ruby base,
   // note marker, fitText unit, noBreakHyphen owner or upright tate-chu-yoko cell.
-  if (r.ruby || r.noteRef || r.fitTextVal != null || r.noBreakRanges?.length
+  if (r.optionalHyphen || r.ruby || r.noteRef || r.fitTextVal != null || r.noBreakRanges?.length
     || r.noBreakBefore || r.noBreakAfter || r.eastAsianVert) return undefined;
   const text = run.type === 'text' ? run.text : resolveFieldText(run as FieldRun, environment);
   const { type: _type, ...properties } = run;
@@ -113,6 +118,7 @@ export function acquireTextSequences(
   let first: SequenceRun | undefined;
   let texts: string[] = [];
   let sources: TextSequenceSource[] = [];
+  let optionalHyphens: TextSequence['optionalHyphens'][number][] = [];
   let offset = 0;
   const finish = () => {
     if (first && sources.length > 1) {
@@ -124,12 +130,14 @@ export function acquireTextSequences(
           }) } : {}),
         }),
         sources: Object.freeze(sources),
+        optionalHyphens: Object.freeze(optionalHyphens),
       });
     }
     start = -1;
     first = undefined;
     texts = [];
     sources = [];
+    optionalHyphens = [];
     offset = 0;
   };
   for (const [runIndex, run] of runs.entries()) {
@@ -138,6 +146,14 @@ export function acquireTextSequences(
     // markup view retains its own revision formatting and source ownership.
     const revisionKind = (run as { revision?: { kind?: string } }).revision?.kind;
     if (revisionIsOmitted(revisionKind, environment.showTrackedChanges)) continue;
+    if (first && run.type === 'text' && 'optionalHyphen' in run && run.optionalHyphen) {
+      // The unselected marker has no glyph and no shaping seam, even when
+      // its conditional glyph uses a different font or paint style. Preserve
+      // its source/format owner separately from the uninterrupted sequence.
+      optionalHyphens.push(Object.freeze({ offset, runIndex, run }));
+      sources.push(Object.freeze({ runIndex, start: offset, end: offset }));
+      continue;
+    }
     const visible = visibleTextRun(run, environment);
     const scopeKey = visible ? environment.layoutServices?.text.sourceScopeKey?.({
       text: displayText(visible.text, visible), fontSizePt: visible.fontSize,

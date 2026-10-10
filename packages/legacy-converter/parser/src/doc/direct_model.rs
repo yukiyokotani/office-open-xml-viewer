@@ -1142,6 +1142,32 @@ mod tests {
         build_scoped_cfb(&[("WordDocument", word), ("0Table", table)])
     }
 
+    /// Isolate a one-CP control's CHPX from both neighboring Unicode text
+    /// spans. This prevents a text run or paragraph mark from validating the
+    /// control's operand on its behalf.
+    fn source_with_control_chpx(text: &str, cp: usize, chpx: &[u8]) -> Vec<u8> {
+        let source = source(text);
+        let cfb = CompoundFile::open(&source).unwrap();
+        let mut word = cfb.stream("WordDocument").unwrap();
+        let table = cfb.stream("0Table").unwrap();
+        let bte = u32::from_le_bytes(word[0xfa..0xfe].try_into().unwrap()) as usize;
+        let page_number = u32::from_le_bytes(table[bte + 8..bte + 12].try_into().unwrap()) as usize;
+        let page = &mut word[page_number * 512..(page_number + 1) * 512];
+        page.fill(0);
+        for (index, boundary) in [0, cp, cp + 1, text.encode_utf16().count()]
+            .into_iter()
+            .enumerate()
+        {
+            page[index * 4..index * 4 + 4]
+                .copy_from_slice(&((0x400 + boundary * 2) as u32).to_le_bytes());
+        }
+        page[17] = 32;
+        page[64] = chpx.len() as u8;
+        page[65..65 + chpx.len()].copy_from_slice(chpx);
+        page[511] = 3;
+        build_scoped_cfb(&[("WordDocument", word), ("0Table", table)])
+    }
+
     pub(super) fn with_picture_data(source: &[u8], vanish: bool) -> Vec<u8> {
         let cfb = CompoundFile::open(source).unwrap();
         let mut word = cfb.stream("WordDocument").unwrap();
@@ -2245,6 +2271,47 @@ mod tests {
     }
 
     #[test]
+    fn optional_hyphen_preserves_its_own_style_and_validates_its_hresi() {
+        // The astral character places the isolated marker at UTF-16 CP 3,
+        // rather than scalar index 2. Its formatting is absent from A/emoji/B
+        // and the paragraph mark, so only marker-owner acquisition can refuse
+        // a malformed Hresi operand.
+        let project = |chpx: &[u8]| {
+            let chpx = [&[0x42, 0x2a, 6, 0x43, 0x4a, 28, 0][..], chpx].concat();
+            let bytes = source_with_control_chpx("A\u{1f600}\u{1f}B\r", 3, &chpx);
+            super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024)
+        };
+        for chpx in [&[][..], &[0x4e, 0x48, 1, 0][..]] {
+            let document = serde_json::to_value(project(chpx).unwrap().document).unwrap();
+            let runs = document["body"][0]["runs"].as_array().unwrap();
+            assert_eq!(runs.len(), 3);
+            assert_eq!(runs[0]["text"], "A😀");
+            assert_eq!(runs[1]["text"], "");
+            assert_eq!(runs[1]["__optionalHyphen"], true);
+            assert_eq!(runs[1]["color"], "ff0000");
+            assert_eq!(runs[1]["fontSize"], 14.0);
+            assert_eq!(runs[2]["text"], "B");
+        }
+        for chpx in [
+            &[0x4e, 0x48, 0, 0][..],
+            &[0x4e, 0x48, 0, 1, 0x4e, 0x48, 1, 0][..],
+            &[0x3c, 0x08, 1, 0x4e, 0x48, 0, 1][..],
+        ] {
+            assert!(project(chpx)
+                .unwrap_err()
+                .contains("invalid Word word-breaking method"));
+        }
+        assert!(project(&[0x4e, 0x48, 2, b'q'])
+            .unwrap_err()
+            .contains("unsupported formatting"));
+        // A vanished marker contributes neither a conditional glyph nor a
+        // break opportunity, after its properties have been validated.
+        let hidden = project(&[0x3c, 0x08, 1, 0x4e, 0x48, 1, 0]).unwrap();
+        let hidden = serde_json::to_value(hidden.document).unwrap();
+        assert_eq!(body_outline(&hidden["body"]), ["p[t:A😀,t:B]"]);
+    }
+
+    #[test]
     fn hresi_final_direct_owner_admits_complete_document_and_retains_invalid_refusal() {
         let project = |chpx: &[u8]| {
             let bytes = source_with_direct_chpx("quartz\r", chpx);
@@ -2269,6 +2336,8 @@ mod tests {
                 .contains("unsupported formatting"));
         }
         for chpx in [
+            &[0x4e, 0x48, 0, 0][..],
+            &[0x4e, 0x48, 0, 1][..],
             &[0x4e, 0x48, 0, b'Z', 0x4e, 0x48, 1, 0][..],
             &[0x4e, 0x48, 7, b'Z', 0x4e, 0x48, 1, 0][..],
             &[0x4e, 0x48, 2][..],

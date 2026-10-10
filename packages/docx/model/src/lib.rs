@@ -2652,6 +2652,17 @@ pub struct FieldRun {
 #[serde(rename_all = "camelCase")]
 pub struct TextRun {
     pub text: String,
+    /// An authored discretionary hyphen owns this otherwise empty run's
+    /// formatting. ECMA-376 §17.3.3.29: it has zero advance and no glyph until
+    /// its break is selected, when the run displays a U+002D hyphen-minus.
+    /// Native DOC U+001F uses the same consumer; this is independent of
+    /// automatic dictionary hyphenation. Keep it separate from ordinary text
+    /// and from a nonbreaking hyphen's always-visible glyph.
+    #[serde(
+        rename = "__optionalHyphen",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub optional_hyphen: bool,
     /// The authored run begins with `<w:noBreakHyphen/>` but could not be
     /// coalesced with its predecessor because a zero-width semantic boundary
     /// (such as a comment anchor) must remain addressable. Layout keeps this

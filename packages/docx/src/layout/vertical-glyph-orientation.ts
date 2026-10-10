@@ -18,7 +18,7 @@ export function eastAsianUprightPaintOps(
   wordArtEmoji = false,
 ): TextPlacement['paintOps'] {
   return placement.clusters.map((cluster) => {
-    const text = placement.text.slice(
+    const text = placement.optionalHyphenGlyph ? placement.text : placement.text.slice(
       cluster.range.start - placement.range.start,
       cluster.range.end - placement.range.start,
     );

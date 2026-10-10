@@ -1,4 +1,5 @@
 import { measureFitTextUnit, measureJoinedTextUnit } from './atomic-units.js';
+import { placeOptionalHyphenPrefix } from './optional-hyphens.js';
 import {
   kinsokuAdjustedSplit,
   isGraphemeFillText,
@@ -216,6 +217,16 @@ function processQueuedSegment(
   }
 
   // ── Text segment ─────────────────────────────────────
+  if ('text' in seg) {
+    // A fixed cell returns before ordinary text admission. An authored
+    // marker after that complete cell still owns its external word seam;
+    // the selector excludes every opportunity inside the cell itself.
+    if (seg.fitTextRegionIndex !== undefined && placeOptionalHyphenPrefix(context, seg)) return;
+    if (seg.optionalHyphen) {
+      context.addToLine(seg, 0, 0, 0, 0);
+      return;
+    }
+  }
   processTextSegment(context, seg as LayoutTextSeg);
 }
 
@@ -408,6 +419,9 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
   // joined-unit preflight, so a style/source seam cannot bypass compression.
   s.measuredWidth = w;
   if (!prefersWholeWordAtScriptBoundary(context, s) && fitJustifiedCompression(context, s)) return;
+  // The authored opportunity follows the existing whole-unit justified fit;
+  // it must not introduce a wrap before a word admitted by that policy.
+  if (placeOptionalHyphenPrefix(context, s)) return;
   if (prepareAtomicTextFit(context, { s, w, trailingSpaceW, sDictSea, fitWidthFor })) return;
 
   // §17.3.1.21 permits one eligible punctuation character past the text

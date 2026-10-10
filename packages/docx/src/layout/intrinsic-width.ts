@@ -1,6 +1,7 @@
 import { textBreakWindow, textBreakOffsets } from '../line-breaker/text-break-window.js';
 import { LineMeasurementAdapter } from '../line-breaker/measurement-adapter.js';
 import { slicedTextMetadata } from '../line-breaker/advance.js';
+import { optionalHyphenBreakAllowed } from '../line-breaker/optional-hyphens.js';
 import { graphemeClusterOffsets } from '@silurus/ooxml-core';
 import type { DocTableCell } from '../types.js';
 import type { ParagraphLayoutContext } from '../layout-context.js';
@@ -192,12 +193,17 @@ function compatibleText(left: LayoutTextSeg, right: LayoutTextSeg): boolean {
 function mergeCompatibleTextSegments(segments: readonly LayoutSeg[]): LayoutSeg[] {
   const merged: LayoutSeg[] = [];
   let activeBreakOffsets: number[] | undefined;
+  let activeOptionalBreaks: NonNullable<LayoutTextSeg['optionalHyphenBreaks']>[number][] | undefined;
   for (const segment of segments) {
     const previous = merged.at(-1);
     if (
       previous
       && 'text' in previous
       && 'text' in segment
+      && !previous.optionalHyphen && !segment.optionalHyphen
+      // Keep a conditional endpoint's following protected seam addressable
+      // for the same eligibility predicate consumed by actual line breaking.
+      && !(segment.hardJoinPrev && previous.optionalHyphenBreaks?.at(-1)?.offset === previous.text.length)
       // A compound grapheme owns one shape/paint unit; extending it here
       // would lose that proof when the shaper rejects a multi-grapheme probe.
       && !previous.semanticSlotSpans && !segment.semanticSlotSpans
@@ -223,6 +229,11 @@ function mergeCompatibleTextSegments(segments: readonly LayoutSeg[]): LayoutSeg[
         for (const offset of textBreakOffsets(segment.explicitBreaks))
           activeBreakOffsets.push(previousTextLength + offset);
       }
+      if (segment.optionalHyphenBreaks) {
+        activeOptionalBreaks ??= [];
+        for (const marker of segment.optionalHyphenBreaks)
+          activeOptionalBreaks.push({ ...marker, offset: previousTextLength + marker.offset });
+      }
       const punctuationCompressions = [
         ...(previous.punctuationCompressions ?? []),
         ...(segment.punctuationCompressions ?? []).map((compression) => ({
@@ -237,6 +248,9 @@ function mergeCompatibleTextSegments(segments: readonly LayoutSeg[]): LayoutSeg[
         // measurement-only join so AutoFit minima use the same text atoms as
         // actual wrapping, without splitting the maximum-width shaping probe.
         explicitBreaks: activeBreakOffsets ? textBreakWindow(activeBreakOffsets) : undefined,
+        // As with ordinary offsets, append each authored opportunity once
+        // instead of copying all previous markers at every compatible seam.
+        optionalHyphenBreaks: activeOptionalBreaks,
         punctuationCompressions: punctuationCompressions.length > 0
           ? punctuationCompressions
           : undefined,
@@ -249,11 +263,16 @@ function mergeCompatibleTextSegments(segments: readonly LayoutSeg[]): LayoutSeg[
       continue;
     }
     if (activeBreakOffsets) Object.freeze(activeBreakOffsets);
-    merged.push({ ...segment });
+    if (activeOptionalBreaks) Object.freeze(activeOptionalBreaks);
+    activeOptionalBreaks = 'text' in segment && segment.optionalHyphenBreaks
+      ? [...segment.optionalHyphenBreaks] : undefined;
+    merged.push({ ...segment, ...('text' in segment && activeOptionalBreaks
+      ? { optionalHyphenBreaks: activeOptionalBreaks } : {}) });
     activeBreakOffsets = 'text' in segment && segment.explicitBreaks
       ? [...textBreakOffsets(segment.explicitBreaks)] : undefined;
   }
   if (activeBreakOffsets) Object.freeze(activeBreakOffsets);
+  if (activeOptionalBreaks) Object.freeze(activeOptionalBreaks);
   return merged;
 }
 
@@ -264,6 +283,7 @@ function measureTextRange(
   end: number,
   measurer: TextMeasurer,
   characterGrid: DocGridCtx | undefined,
+  endingGlyph?: Readonly<LayoutTextSeg>,
 ): number {
   let widthPt = 0;
   // Keep physical word units intact; the same bounded boundary oracle used by
@@ -298,12 +318,16 @@ function measureTextRange(
     if (pieces[middle]!.end <= start) first = middle + 1;
     else stop = middle;
   }
-  for (let index = first; index < pieces.length && pieces[index]!.start < end; index++) {
-    const piece = pieces[index]!;
+  function* contributors() {
+    for (let index = first; index < pieces.length && pieces[index]!.start < end; index++) yield pieces[index]!;
+    if (endingGlyph) yield { segment: endingGlyph, start: end, end: end + endingGlyph.text.length };
+  }
+  for (const piece of contributors()) {
+    const conditional = piece.segment === endingGlyph;
     const overlapStart = Math.max(start, piece.start);
-    const overlapEnd = Math.min(end, piece.end);
+    const overlapEnd = conditional ? piece.end : Math.min(end, piece.end);
     if (overlapStart >= overlapEnd) continue;
-    const text = joinedText.slice(overlapStart, overlapEnd);
+    const text = conditional ? endingGlyph!.text : joinedText.slice(overlapStart, overlapEnd);
     const localStart = overlapStart - piece.start;
     const localEnd = overlapEnd - piece.start;
     const candidate = {
@@ -470,6 +494,20 @@ function minimumTextAtomWidthPt(
 
     const explicitBreaks = pieces.flatMap(piece => [...textBreakOffsets(piece.segment.explicitBreaks)]
       .map(offset => piece.start + offset));
+    const firstVisible = joinedText.search(/\S/u);
+    const optionalBreaks = new Map(pieces.flatMap((piece, index) => {
+      const markers = piece.segment.optionalHyphen
+        ? [{ offset: 0, glyph: piece.segment.optionalHyphen }]
+        : piece.segment.optionalHyphenBreaks ?? [];
+      return markers.filter(marker => optionalHyphenBreakAllowed(piece.segment, marker.offset,
+        pieces[index + 1]?.segment, firstVisible >= 0 && piece.start + marker.offset > firstVisible,
+        context.kinsoku)).map(marker => [piece.start + marker.offset, marker.glyph] as const);
+    }));
+    // Source-order offsets are sorted once, then each is visited at most
+    // once across token intervals. Re-enumerating the complete marker map
+    // per token makes ordinary many-word text quadratic.
+    const optionalOffsets = [...optionalBreaks.keys()].sort((left, right) => left - right);
+    let optionalIndex = 0;
     let breakIndex = 0;
     let tokenStart = 0;
     for (const token of splitTextForLayout(joinedText)) {
@@ -484,11 +522,16 @@ function minimumTextAtomWidthPt(
           breakIndex += 1;
         while (breakIndex < explicitBreaks.length && explicitBreaks[breakIndex] < trimmedEnd)
           ends.push(explicitBreaks[breakIndex++]);
+        while (optionalIndex < optionalOffsets.length && optionalOffsets[optionalIndex]! <= trimmedStart)
+          optionalIndex += 1;
+        while (optionalIndex < optionalOffsets.length && optionalOffsets[optionalIndex]! < trimmedEnd)
+          ends.push(optionalOffsets[optionalIndex++]!);
         ends.push(trimmedEnd);
+        ends.sort((left, right) => left - right);
         let atomStart = trimmedStart;
-        for (const atomEnd of ends) {
+        for (const atomEnd of new Set(ends)) {
           maximumPt = Math.max(maximumPt, measureTextRange(
-            pieces, joinedText, atomStart, atomEnd, measurer, characterGrid));
+            pieces, joinedText, atomStart, atomEnd, measurer, characterGrid, optionalBreaks.get(atomEnd)));
           atomStart = atomEnd;
         }
         continue;

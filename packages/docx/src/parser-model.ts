@@ -143,6 +143,7 @@ export interface InternalRunSlotMetadata {
 }
 
 interface InternalNoBreakHyphenWire {
+  readonly __optionalHyphen?: boolean;
   readonly __noBreakBefore?: boolean;
   readonly __noBreakAfter?: boolean;
   /** UTF-16 offsets immediately after the injected U+002D glyph. */
@@ -1776,6 +1777,7 @@ export function paragraphAcquisitionInput(
         __noBreakBefore: noBreakBefore,
         __noBreakAfter: noBreakAfter,
         __noBreakHyphenOffsets: noBreakHyphenOffsets,
+        __optionalHyphen: optionalHyphen,
         ...publicRun
       } = run as typeof run & InternalNoBreakHyphenWire & {
         __typographyAcquisition?: InternalRunTypographyWire;
@@ -1787,6 +1789,7 @@ export function paragraphAcquisitionInput(
         : undefined;
       return Object.freeze({
         ...structuredClone(publicRun),
+        ...(optionalHyphen === true && run.type === 'text' ? { optionalHyphen: true } : {}),
         ...(noBreakBefore === true ? { noBreakBefore: true } : {}),
         ...(noBreakAfter === true ? { noBreakAfter: true } : {}),
         ...(noBreakRanges?.length ? { noBreakRanges: Object.freeze(noBreakRanges) } : {}),
