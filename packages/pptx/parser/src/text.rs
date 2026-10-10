@@ -741,7 +741,14 @@ fn underline_fill_choice<'a, 'input>(
 /// for an explicit `textNoShape` (no warp), `Some(Some(_))` for a warp preset.
 fn parse_text_warp(body_pr: roxmltree::Node<'_, '_>) -> Option<Option<TextWarp>> {
     let warp = child(body_pr, "prstTxWarp")?;
-    let preset = attr(&warp, "prst").unwrap_or_default();
+    // ST_TextShapeType derives from xsd:token (whiteSpace="collapse"), so the
+    // surrounding XML whitespace (#x20 #x9 #xD #xA) is not part of the value.
+    // Strip only that: no Unicode-whitespace trim, no internal collapse, no
+    // case folding: every other codepoint and spelling stays as authored.
+    let raw = attr(&warp, "prst").unwrap_or_default();
+    let preset = raw
+        .trim_matches(|c: char| matches!(c, ' ' | '\t' | '\r' | '\n'))
+        .to_string();
     if preset.is_empty() || preset == "textNoShape" {
         return Some(None);
     }
@@ -760,6 +767,43 @@ fn parse_text_warp(body_pr: roxmltree::Node<'_, '_>) -> Option<Option<TextWarp>>
         })
         .unwrap_or_default();
     Some(Some(TextWarp { preset, adj }))
+}
+
+#[cfg(test)]
+mod prst_tx_warp_token_tests {
+    use super::parse_text_warp;
+
+    /// `None` = no prstTxWarp (inherit), `Some(None)` = explicit no warp
+    /// (overrides an inherited warp), `Some(Some(p))` = warp preset `p`.
+    fn warp_of(inner: &str) -> Option<Option<String>> {
+        let xml = format!(
+            r#"<bodyPr xmlns="http://schemas.openxmlformats.org/drawingml/2006/main">{inner}</bodyPr>"#
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let body_pr = doc.root_element();
+        parse_text_warp(body_pr).map(|w| w.map(|w| w.preset))
+    }
+
+    #[test]
+    fn padded_no_shape_stays_an_explicit_override_not_absence() {
+        assert_eq!(warp_of(""), None);
+        assert_eq!(warp_of(r#"<prstTxWarp prst="textNoShape"/>"#), Some(None));
+        assert_eq!(
+            warp_of(r#"<prstTxWarp prst=" textNoShape&#9;"/>"#),
+            Some(None)
+        );
+        assert_eq!(
+            warp_of(r#"<prstTxWarp prst="&#13;&#10;textNoShape "/>"#),
+            Some(None)
+        );
+        // Whitespace-only collapses to the empty token, handled like prst="".
+        assert_eq!(warp_of(r#"<prstTxWarp prst=" &#9; "/>"#), Some(None));
+        // Non-XML whitespace (NBSP, EM SPACE) is not token padding.
+        assert_eq!(
+            warp_of(r#"<prstTxWarp prst="&#160;textNoShape&#x2003;"/>"#),
+            Some(Some("\u{a0}textNoShape\u{2003}".to_string()))
+        );
+    }
 }
 
 /// Stored autofit child (`<a:spAutoFit>` / `<a:normAutofit>` / `<a:noAutofit>`).
