@@ -1,18 +1,21 @@
-.DS_Store
-**/.DS_Store
-# Office files are not redistributable
+# Office fixture policy: see docs/sample-files.md.
+# Office files and adjacent PDF references are ignored by default.
 *.pptx
 *.xlsx
 *.docx
-# Reference PDFs (Word-exported, kept locally for layout diffing)
 *.pdf
-# Committable demo samples (free-license files provided by maintainer)
-!packages/pptx/public/demo/
-!packages/pptx/public/demo/*.pptx
-!packages/xlsx/public/demo/
-!packages/xlsx/public/demo/*.xlsx
-!packages/docx/public/demo/
-!packages/docx/public/demo/*.docx
+
+# Redistributable website demos (`sample-N`) and public tests (`test-N`).
+# The directory exception covers Office files, adjacent PDFs, and documentation.
+!packages/*/public/demo/
+!packages/*/public/demo/**
+
+# Non-redistributable fixtures and their PDFs stay local.
+packages/*/public/private/
+
+# OS metadata stays ignored even inside public fixture directories.
+.DS_Store
+**/.DS_Store
 # Office Open XML spec documents
 /spec
 spec/
