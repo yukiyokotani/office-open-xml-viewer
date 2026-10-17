@@ -1290,6 +1290,8 @@ export interface RenderViewportOptions extends XlsxRenderViewportOptions {
   googleSubstitutes?: boolean;
   /** @internal Viewer chrome only; never applied to authored worksheet content. */
   chromeColors?: XlsxChromeColors;
+  /** @internal Prepared-model facade must not silently omit failed media. */
+  strictImages?: boolean;
   loadedImages?: Map<string, CanvasImageSource | null>;
   fetchImage?: (path: string, mimeType: string) => Promise<Blob>;
   /** @internal Optional synchronous 3-D chart renderer retained by the workbook. */

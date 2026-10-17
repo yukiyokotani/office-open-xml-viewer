@@ -38,6 +38,7 @@ export interface XlsxNodeArchive {
     maxJsonBytes: bigint,
   ): void;
   parse(): Uint8Array;
+  extract_image(path: string): Uint8Array;
   resource_usage(): Uint8Array;
   open_sheet_cursor(sheetIndex: number, name: string): void;
   pull_sheet_cursor(rowCredit: number): Uint8Array;

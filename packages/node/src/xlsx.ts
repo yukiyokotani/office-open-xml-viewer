@@ -88,6 +88,10 @@ export interface XlsxWorkbookSession {
   readonly sheetNames: ReadonlyArray<string>;
   readonly resourceUsage: OoxmlResourceUsageSnapshot | undefined;
   worksheetRows(sheetIndex: number): AsyncGenerator<XlsxWorksheetRowChunk, void, void>;
+  /** Read one bounded embedded image after the row stream terminal ACK. */
+  getImage(path: string, mimeType: string): Promise<Blob>;
+  /** Bounded raw OOXML part for trusted relationship/content inventory. */
+  readPart(path: string): Promise<Uint8Array>;
   close(): Promise<void>;
 }
 
@@ -194,6 +198,35 @@ export class XlsxWorkbookSessionImpl implements XlsxWorkbookSession {
       // Keep the last valid diagnostic after a trapped or closing archive.
     }
     return this.lastUsage;
+  }
+
+  async getImage(path: string, mimeType: string): Promise<Blob> {
+    const bytes = await this.readPart(path);
+    if (bytes.byteLength === 0) throw new Error('XLSX image extraction returned no bytes');
+    return new Blob([bytes as BlobPart], { type: mimeType });
+  }
+
+  async readPart(path: string): Promise<Uint8Array> {
+    if (this.closed) throw new Error('XLSX workbook session is closed');
+    if (this.active) throw new Error('finish the XLSX worksheet row stream before reading images');
+    if (this.signal?.aborted) {
+      await this.close();
+      const error = new Error('XLSX workbook session was aborted');
+      error.name = 'AbortError';
+      throw error;
+    }
+    try {
+      // Reuse the retained, quota-enforced archive; no second ZIP or raw cache.
+      const bytes = this.archive.extract_image(path);
+      this.lastUsage = decodeUsage(this.archive.resource_usage());
+      this.metrics.observeUsage(this.lastUsage);
+      return bytes;
+    } catch (error) {
+      const normalized = parseResourceLimitError(error) ?? error;
+      this.metrics.fail(normalized);
+      await this.close().catch(() => undefined);
+      throw normalized;
+    }
   }
 
   /**

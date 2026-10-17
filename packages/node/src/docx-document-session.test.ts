@@ -27,6 +27,27 @@ beforeAll(async () => {
 });
 
 describe('Node bounded DOCX document session', () => {
+  it('reads source parts and rejects reads after close', async () => {
+    const session = await openDocxDocument(bytes, { factory });
+    try {
+      const part = await session.readPart('word/document.xml');
+      expect(new TextDecoder().decode(part)).toContain('<w:document');
+    } finally { await session.close(); }
+    await expect(session.readPart('word/document.xml')).rejects.toThrow(/closed/);
+  });
+
+  it('rejects a rendered page when an embedded image cannot be extracted', async () => {
+    const session = await openDocxDocument(bytes, { factory });
+    const extract = vi.spyOn(archivePrototype(), 'extract_image')
+      .mockImplementation(() => { throw new Error('missing image'); });
+    try {
+      await expect(session.renderPage(0)).rejects.toThrow('missing image');
+    } finally {
+      extract.mockRestore();
+      await session.close();
+    }
+  });
+
   it('materializes the compatibility model through the bounded document producer', async () => {
     const parse = vi.spyOn(docxWasm, 'parse_docx');
     try {

@@ -1776,6 +1776,18 @@ export interface PivotTableStyleElement {
     size: number;
     dxf: Dxf;
 }
+export interface PreparedWorksheetViewportOptions {
+    readonly width: number;
+    readonly height: number;
+    readonly dpr?: number;
+    readonly scale?: number;
+    readonly scrollX?: number;
+    readonly scrollY?: number;
+    readonly fetchImage?: (path: string, mimeType: string) => Promise<Blob>;
+    readonly imageResources?: ImageResourceOptions;
+    readonly maxVisibleCells?: number;
+    readonly onTextRun?: (info: XlsxTextRunInfo) => void;
+}
 export interface Reflection {
     blur: number;
     dist: number;
@@ -1787,6 +1799,8 @@ export interface Reflection {
     sx: number;
     sy: number;
 }
+export function releaseWorksheetViewportResources(fetchImage: (path: string, mimeType: string) => Promise<Blob>): void;
+export function renderPreparedWorksheetViewport(target: HTMLCanvasElement | OffscreenCanvas, ws: Worksheet, styles: Styles, options: PreparedWorksheetViewportOptions): Promise<WorksheetViewportFrame>;
 export type RenderViewportToBitmapOptions = Omit<XlsxRenderViewportOptions, 'onTextRun'> & {
     width: number;
     height: number;
@@ -2260,6 +2274,29 @@ export interface WorksheetCellRange {
     left: number;
     bottom: number;
     right: number;
+}
+export interface WorksheetMediaReference {
+    readonly imagePath: string;
+    readonly mimeType: string;
+}
+export function worksheetMediaReferences(ws: Worksheet): readonly WorksheetMediaReference[];
+export interface WorksheetViewportFrame {
+    readonly width: number;
+    readonly height: number;
+    readonly dpr: number;
+    readonly maximumDigitWidth: number;
+    readonly projectedRowHeights: Readonly<Record<number, number>>;
+    readonly range: ViewportRange;
+    cellAt(x: number, y: number): {
+        row: number;
+        col: number;
+    } | null;
+    cellRect(row: number, col: number): {
+        x: number;
+        y: number;
+        w: number;
+        h: number;
+    } | null;
 }
 export interface XlsxCellViewportRect {
     readonly x: number;

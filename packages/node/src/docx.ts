@@ -81,6 +81,8 @@ export interface DocxDocumentSession extends AsyncIterable<DocxRenderedPage> {
   readonly resourceUsage: OoxmlResourceUsageSnapshot | undefined;
   pageSize(pageIndex: number): Readonly<{ widthPt: number; heightPt: number }>;
   renderPage(pageIndex: number, options?: DocxPageRenderOptions): Promise<NodeCanvasLike>;
+  /** Read a bounded raw OOXML part for trusted source-content inventory, without decoding images. */
+  readPart(path: string): Promise<Uint8Array>;
   pages(options?: DocxPageRenderOptions): AsyncGenerator<DocxRenderedPage, void, void>;
   close(): Promise<void>;
 }
@@ -216,9 +218,19 @@ export class DocxDocumentSessionImpl implements DocxDocumentSession {
   private closed = false;
   private closePromise: Promise<void> | undefined;
   private resourceFailure: OoxmlResourceLimitError | null = null;
+  private imageFailure: Error | null = null;
   private readonly fetchImage = async (path: string, mimeType: string): Promise<Blob> => {
-    const bytes = this.archive.extract_image(path);
-    return new Blob([bytes as BlobPart], { type: mimeType });
+    try {
+      const bytes = this.archive.extract_image(path);
+      if (bytes.byteLength === 0) throw new Error('DOCX image extraction returned no bytes');
+      return new Blob([bytes as BlobPart], { type: mimeType });
+    } catch (error: unknown) {
+      const normalized = parseResourceLimitError(error) ?? error;
+      this.imageFailure ??= normalized instanceof Error
+        ? normalized
+        : new Error('DOCX image extraction failed');
+      throw normalized;
+    }
   };
 
   constructor(
@@ -268,9 +280,26 @@ export class DocxDocumentSessionImpl implements DocxDocumentSession {
     return this.pages();
   }
 
+  readPart(path: string): Promise<Uint8Array> {
+    if (this.closed) return Promise.reject(new Error('DOCX document session is closed'));
+    return this.enqueueRender(async () => {
+      throwIfAborted(this.signal);
+      this.requireState();
+      const bytes = this.archive.extract_image(path);
+      this.refreshResourceUsage();
+      return bytes;
+    }).catch((error: unknown) => {
+      const normalized = parseResourceLimitError(error) ?? error;
+      if (normalized instanceof OoxmlResourceLimitError) this.resourceFailure ??= normalized;
+      this.metrics.fail(normalized);
+      throw normalized;
+    });
+  }
+
   renderPage(pageIndex: number, options: DocxPageRenderOptions = {}): Promise<NodeCanvasLike> {
     if (this.closed) return Promise.reject(new Error('DOCX document session is closed'));
     if (this.resourceFailure) return Promise.reject(this.resourceFailure);
+    if (this.imageFailure) return Promise.reject(this.imageFailure);
     this.pageSize(pageIndex);
     return this.enqueueRender(async () => {
       throwIfAborted(this.signal);
@@ -289,6 +318,9 @@ export class DocxDocumentSessionImpl implements DocxDocumentSession {
         },
       ));
       throwIfAborted(this.signal);
+      // The rendering layer may tolerate missing images. A Node page result must
+      // still report a failed extraction rather than publish incomplete content.
+      if (this.imageFailure) throw this.imageFailure;
       return canvas;
     }).catch((error: unknown) => {
       const normalized = parseResourceLimitError(error) ?? error;

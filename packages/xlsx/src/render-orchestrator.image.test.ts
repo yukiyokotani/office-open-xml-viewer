@@ -182,6 +182,20 @@ function worksheetWithImages(): Worksheet {
 }
 
 describe('render-orchestrator image decode (lazy bytes)', () => {
+  it('propagates strict media failures after all pending decodes settle', async () => {
+    const ws = worksheetWithImages();
+    let settled = false;
+    const failure = new Error('missing image');
+    const fetch = async (path: string): Promise<Blob> => {
+      if (path === ws.images[0].imagePath) throw failure;
+      await new Promise(resolve => setTimeout(resolve, 10));
+      settled = true;
+      throw new Error('second missing image');
+    };
+    await expect(prefetchImages(ws, new Map(), fetch, { strictImages: true })).rejects.toBe(failure);
+    expect(settled).toBe(true);
+  });
+
   afterEach(() => vi.unstubAllGlobals());
 
   it('does not fetch a tagged oneCell picture whose anchor-level extent is missing', async () => {

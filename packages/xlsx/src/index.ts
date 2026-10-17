@@ -286,3 +286,12 @@ export type {
   ChartManualLayout,
   LegendManualLayout,
 } from './types.js';
+
+export {
+  renderPreparedWorksheetViewport,
+  worksheetMediaReferences,
+  releaseWorksheetViewportResources,
+  type PreparedWorksheetViewportOptions,
+  type WorksheetViewportFrame,
+  type WorksheetMediaReference,
+} from './prepared-viewport.js';

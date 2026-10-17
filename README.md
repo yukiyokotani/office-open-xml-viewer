@@ -1013,6 +1013,43 @@ file without uploading it.
 
 ---
 
+## Rendering a prepared worksheet
+
+If your host already owns a `Worksheet` and `Styles` model, render it without
+opening the XLSX archive again:
+
+```ts
+import { renderPreparedWorksheetViewport } from '@silurus/ooxml/xlsx';
+
+const frame = await renderPreparedWorksheetViewport(canvas, worksheet, styles, {
+  width: 800,
+  height: 600,
+  scrollY: 200,
+  maxVisibleCells: 10_000,
+  fetchImage,
+});
+const cell = frame.cellAt(pointerX, pointerY); // CSS pixels, 1-based cell indexes
+```
+
+The returned geometry uses the same automatic row heights, merged cells and
+frozen panes as the painted frame. `maxVisibleCells` includes frozen bands and
+rejects before painting; omit it to leave that budget unset. Register fonts
+before the first render and use a new worksheet model after changing fonts.
+This entry point supports PNG, JPEG, GIF and WebP media and the built-in bar,
+line and pie charts. It rejects content that needs an optional renderer and
+propagates visible image failures instead of silently omitting images.
+
+For Node-owned archives, DOCX and XLSX sessions expose `readPart(path)`, and
+XLSX also exposes `getImage(path, mimeType)`. These reads reuse the session's
+archive limits. Finish or return the XLSX row iterator before reading parts.
+Use `worksheetMediaReferences(worksheet)` to inventory worksheet images,
+group images and chart fills. When disposing a prepared document, call
+`releaseWorksheetViewportResources(fetchImage)` with its document-scoped
+loader to release decoded media.
+
+Existing viewer calls need no migration. Node DOCX page rendering now rejects
+if an embedded image cannot be extracted.
+
 ## Companion packages
 
 - **[`packages/markdown/`](packages/markdown/)** — internal workspace adapter and `ooxml-md` development CLI for the same GitHub-flavoured Markdown projection exposed by each format model's `toMarkdown()` method.

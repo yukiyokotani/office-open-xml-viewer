@@ -44,7 +44,7 @@ const CHART = {
   subtotalIndices: [],
 } as ChartModel;
 
-function chartFill(viewport: { row: number; col: number }): { x: number; y: number } | undefined {
+function chartFill(viewport: { row: number; col: number }, freeze = 0): { x: number; y: number } | undefined {
   const fills: Array<{ x: number; y: number; color: string }> = [];
   const state: Record<string, unknown> = {
     canvas: { width: 800, height: 400 },
@@ -75,8 +75,8 @@ function chartFill(viewport: { row: number; col: number }): { x: number; y: numb
     defaultColWidth: 8.43,
     defaultRowHeight: 15,
     mergeCells: [],
-    freezeRows: 0,
-    freezeCols: 0,
+    freezeRows: freeze,
+    freezeCols: freeze,
     conditionalFormats: [],
     images: [],
     // Anchored in C2 with a 10 px offset.
@@ -94,11 +94,15 @@ function chartFill(viewport: { row: number; col: number }): { x: number; y: numb
     defaultFontFamily: 'Calibri',
     defaultFontSize: 11,
   } as unknown as Worksheet;
-  renderViewport(ctx, worksheet, STYLES, { ...viewport, rows: 20, cols: 10 });
+  renderViewport(ctx, worksheet, STYLES, { ...viewport, rows: 20, cols: 10 }, { freezeRows: freeze, freezeCols: freeze });
   return fills.find((fill) => fill.color === '#ABCDEF');
 }
 
 describe('viewport origin of anchored drawings', () => {
+  it('keeps drawings in the frozen corner at the same position after scrolling', () => {
+    expect(chartFill({ row: 10, col: 10 }, 10)).toEqual(chartFill({ row: 1, col: 1 }));
+  });
+
   it('registers drawings with the grid when the viewport starts below row/column 1', () => {
     const first = chartFill({ row: 1, col: 1 });
     expect(first).toBeDefined();

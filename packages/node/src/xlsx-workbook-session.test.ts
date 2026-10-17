@@ -25,6 +25,20 @@ afterAll(async () => {
 });
 
 describe('Node bounded XLSX workbook session', () => {
+  it('reads parts from the retained archive only while no row stream is active', async () => {
+    const workbook = await openXlsxWorkbook(bytes);
+    try {
+      const rows = workbook.worksheetRows(0);
+      await rows.next();
+      await expect(workbook.readPart('xl/workbook.xml')).rejects.toThrow(/row stream/);
+      await rows.return();
+      const part = await workbook.readPart('xl/workbook.xml');
+      expect(new TextDecoder().decode(part)).toContain('<workbook');
+      expect(workbook.resourceUsage?.operationInflatedBytes).toBeGreaterThan(0);
+    } finally { await workbook.close(); }
+    await expect(workbook.readPart('xl/workbook.xml')).rejects.toThrow(/closed/);
+  });
+
   it.each(nonOoxmlInputs('xlsx'))('rejects %s with OoxmlError not-ooxml', async (_name, input) => {
     for (const open of [() => openXlsxWorkbook(input), () => materializeXlsxWorkbook(input)]) {
       const error = await open().then(

@@ -4063,6 +4063,17 @@ export function renderViewport(
   }
 
   // ── Anchored DrawingML objects, in authored z-order ───────────
+  // Draw through the same four clips as cells. A drawing in a frozen band
+  // must not disappear merely because the scrollable origin is past it.
+  const paintDrawings = (row: number, col: number, offsetX: number, offsetY: number,
+    x: number, y: number, width: number, height: number): void => renderAnchoredDrawings(
+      ctx, worksheet, colAxis, rowAxis, opts.loadedImages, cs,
+      row, col, offsetX, offsetY, x, y, width, height,
+      worksheet.rightToLeft === true, canvasW, opts.threeD, opts.regionMap, opts.chartEx, cjkFallback,
+    );
+  if (freezeRows > 0 && freezeCols > 0) paintDrawings(1, 1, 0, 0, cellAreaX, cellAreaY, frozenW, frozenH);
+  if (freezeRows > 0) paintDrawings(1, startCol, scrollOffsetX, 0, scrollAreaX, cellAreaY, scrollAreaW, frozenH);
+  if (freezeCols > 0) paintDrawings(startRow, 1, 0, scrollOffsetY, cellAreaX, scrollAreaY, frozenW, scrollAreaH);
   renderAnchoredDrawings(
     ctx, worksheet, colAxis, rowAxis, opts.loadedImages, cs,
     startRow, startCol, scrollOffsetX, scrollOffsetY,

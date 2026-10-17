@@ -408,6 +408,7 @@ export async function prefetchImages(
     effectiveDpr?: number;
     svgDecoder?: SvgBlobDecoder;
     imageResources?: ImageResourceOptions;
+    strictImages?: boolean;
   },
 ): Promise<void> {
   // This map is only the synchronous lookup for the current frame. Never keep
@@ -696,8 +697,7 @@ export async function prefetchImages(
     ref.targetHeightPx = target?.height;
     ref.plannedPixelLimit = target?.maxRetainedPixels;
   }
-  await Promise.all(
-    [...refs.entries()].map(async ([key, ref]) => {
+  const loads = [...refs.entries()].map(async ([key, ref]) => {
       try {
         // The §20.1.8.23 duotone recolour is applied inside the shared decode
         // (getCachedDuotoneBitmapByPath) and cached under a colour-suffixed key,
@@ -723,8 +723,10 @@ export async function prefetchImages(
         );
         // Record the resolved drawable (INCLUDING a null for an unsupported
         // metafile, so the renderer skips a falsy source without a re-fetch).
+        if (opts?.strictImages && !src) throw new Error(`XLSX media could not be decoded: ${ref.imagePath}`);
         imageCache.set(key, src);
       } catch (error) {
+        if (opts?.strictImages) throw error;
         if (isOptionalImageCodecUnavailableError(error, 'tiff') || isTiffDecodeError(error)) {
           imageCache.set(key, null);
           markOptionalImageUnavailable(imageCache, key, 'tiff');
@@ -739,8 +741,15 @@ export async function prefetchImages(
         // skips only a missing/falsy source — it would draw a closed one.
         imageCache.delete(key);
       }
-    }),
-  );
+    });
+  if (opts?.strictImages) {
+    // A rejected prepared frame owns all its outstanding decodes until settled.
+    const results = await Promise.allSettled(loads);
+    const failure = results.find(result => result.status === 'rejected');
+    if (failure?.status === 'rejected') throw failure.reason;
+  } else {
+    await Promise.all(loads);
+  }
 }
 
 export interface RenderDeps {
@@ -885,6 +894,7 @@ async function renderWorksheetViewportLeased(
       effectiveDpr,
       svgDecoder,
       imageResources: opts.imageResources,
+      strictImages: opts.strictImages,
     });
   }
 
