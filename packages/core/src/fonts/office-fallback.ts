@@ -194,8 +194,9 @@ async function loadOfficeFontRoutes(
     unloadLocalFontMetrics(loaded.flatMap((result) => result?.faces ?? []));
     throw failure.reason;
   }
-  const metrics = Object.assign({}, ...loaded.flatMap((result) => result ? [result.metrics] : [])) as Record<string, ResolvedFontMetric>;
-  const routes: Record<string, OfficeFontFallbackRoute> = {};
+  // Null prototype: keys are document font names (e.g. `__proto__`).
+  const metrics = Object.assign(Object.create(null), ...loaded.flatMap((result) => result ? [result.metrics] : [])) as Record<string, ResolvedFontMetric>;
+  const routes = Object.create(null) as Record<string, OfficeFontFallbackRoute>;
   for (const tuple of tuples) {
     const key = routeKey(tuple);
     const metric = metrics[key];

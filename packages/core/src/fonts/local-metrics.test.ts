@@ -84,6 +84,17 @@ describe('loadLocalFontMetrics', () => {
     expect(deleted).toEqual([added[0]]);
   });
 
+  it('keeps a family named like an Object.prototype member as an own entry', async () => {
+    installFontEnvironment();
+    const loaded = await loadLocalFontMetrics([
+      { family: '__proto__', localNames: ['__proto__'] },
+      { family: 'constructor', localNames: ['constructor'] },
+    ]);
+    expect(Object.keys(loaded.metrics).sort()).toEqual(['__proto__', 'constructor']);
+    expect(Object.prototype.hasOwnProperty.call(loaded.metrics, '__proto__')).toBe(true);
+    unloadLocalFontMetrics(loaded.faces);
+  });
+
   it('does not mistake a missing local font for a fallback face', async () => {
     const { added, deleted } = installFontEnvironment();
 
