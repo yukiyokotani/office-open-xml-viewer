@@ -221,3 +221,25 @@ describe('ECMA-376 maximum digit width authority', () => {
   });
 
 });
+
+describe('Normal-font routes for face names that are prototype members', () => {
+  it.each(['__proto__', 'constructor', 'toString', 'hasOwnProperty'])(
+    'measures a Normal font named %s like any family without a loaded route',
+    (name) => {
+      vi.stubGlobal('navigator', { platform: 'MacIntel', userAgent: 'Macintosh' });
+      const fontsFor = (family: string) => {
+        const observed: string[] = [];
+        const ctx = {
+          save() {}, restore() {},
+          set font(value: string) { observed.push(value); },
+          get font() { return observed.at(-1) ?? ''; },
+          measureText: () => ({ width: 7 }),
+        } as unknown as CanvasRenderingContext2D;
+        const worksheet = { defaultFontFamily: family, defaultFontSize: 11 } as Parameters<typeof bindXlsxOfficeFontRoutes>[1];
+        bindXlsxOfficeFontRoutes(ctx, worksheet, {}, false);
+        return observed.map((font) => font.replaceAll(family, '<family>'));
+      };
+      expect(fontsFor(name)).toEqual(fontsFor('Ordinary Face'));
+    },
+  );
+});

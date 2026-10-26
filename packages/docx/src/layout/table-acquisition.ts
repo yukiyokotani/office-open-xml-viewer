@@ -572,6 +572,7 @@ export function acquireRetainedTable<State>(
   const electsOwnerRuns = format.positioning === null && tableRowsElectCarriers(owner);
   const bidiVisual = table.bidiVisual === true;
   const tableIndentPt = member.tableIndentPt;
+  // ast-grep-ignore: no-plain-object-string-map -- keys are library-generated table flow ids.
   const nestedById: Record<string, RetainedTableAcquisition> = {};
   const floatingTables: NestedFloatingTableOccurrence[] = [];
   const rotatedCells: RotatedCellAcquisition[] = [];

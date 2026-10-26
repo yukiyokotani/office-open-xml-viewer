@@ -286,7 +286,7 @@ function bindNormalFontState(
       weight: worksheet.defaultFontBold ? 700 : 400,
       style: worksheet.defaultFontItalic ? 'italic' : 'normal' })
     : null;
-  const route = tupleKey === null ? undefined : routes?.[tupleKey];
+  const route = tupleKey === null || !routes ? undefined : ownValue(routes, tupleKey);
   const hasDeclaredFace = worksheet.defaultFontFamily
     ? hasDeclaredFamilyFace(worksheet.defaultFontFamily, fontSet) : false;
   const canvasMdw = measureCtx && worksheet.defaultFontFamily && worksheet.defaultFontSize
@@ -366,7 +366,10 @@ function officeRoute(
   // still painted with a wider CSS fallback.
   const key = officeRequestKey({ family: name?.trim() || 'Calibri',
     weight: bold ? 700 : 400, style: italic ? 'italic' : 'normal' });
-  return officeRoutesByContext.get(ctx)?.[key];
+  // Route keys are authored face names; read own entries only (routes may
+  // arrive through structured clone as an ordinary object).
+  const routes = officeRoutesByContext.get(ctx);
+  return routes ? ownValue(routes, key) : undefined;
 }
 
 /** Keep a viewer-owned column metric after local font binding. The main realm
@@ -4957,7 +4960,7 @@ export function drawShapeText(
     if (!metricBody) break;
     if (run.type !== 'text') continue;
     const ratios = run.fontFace
-      ? shapeRunLineRatios(run, routes?.[shapeOfficeRouteKey(run)], fontBoxProbe)
+      ? shapeRunLineRatios(run, routes ? ownValue(routes, shapeOfficeRouteKey(run)) : undefined, fontBoxProbe)
       : undefined;
     if (!ratios) metricBody = false;
     else runLineRatios.set(run, ratios);

@@ -33,6 +33,7 @@ import type {
   VmlTextPathAcquisitionInput,
 } from './types.js';
 import { containsHanScript } from '@silurus/ooxml-core/internal/script-preload-accumulator';
+import { ownValue } from '@silurus/ooxml-core/internal/own-key';
 import type { TextBoxAcquisitionInput } from './textbox-input.js';
 import type { AnchorAcquisitionInput } from './anchor-input.js';
 import type { InternalParagraphTypographyWire } from './typography-input.js';
@@ -602,10 +603,11 @@ export function classifyDocxFontGeneric(
   fontFamilyPitches: Readonly<Record<string, string>> = {},
 ): 'serif' | 'sans-serif' | 'monospace' {
   if (!family) return 'sans-serif';
-  const tableClass = fontFamilyClasses[family];
+  // fontTable maps are keyed by document face names: read own entries only.
+  const tableClass = ownValue(fontFamilyClasses, family);
   if (tableClass === 'roman') return 'serif';
   if (tableClass === 'swiss') return 'sans-serif';
-  if (tableClass === 'modern' && fontFamilyPitches[family] === 'fixed') return 'monospace';
+  if (tableClass === 'modern' && ownValue(fontFamilyPitches, family) === 'fixed') return 'monospace';
   const inferred = classifyFontGeneric(family);
   return inferred === 'mono' ? 'monospace' : inferred === 'serif' ? 'serif' : 'sans-serif';
 }
@@ -880,9 +882,9 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
     if (peers) peers.push(metric);
     else metricsByCanvasFace.set(key, [metric]);
   }
-  const genericFamilies = Object.freeze(Object.fromEntries(
+  const genericFamilies: Readonly<Record<string, 'serif' | 'sans-serif' | 'monospace'>> = Object.freeze(Object.fromEntries(
     Object.entries(input.genericFamilies ?? {})
-      .map(([family, generic]) => [family.trim().toLowerCase(), generic])
+      .map(([family, generic]) => [family.trim().toLowerCase(), generic] as const)
       .sort(([a], [b]) => a.localeCompare(b)),
   ));
   const eastAsiaFontCharsets = Object.freeze(Object.fromEntries(
@@ -905,7 +907,7 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
   const resolve = (request: Readonly<TextFontResolveRequest>): FontResolution => {
     const authoredFamily = requestedFamily(request, request.slot);
     const genericFamily = authoredFamily
-      ? genericFamilies[authoredFamily.trim().toLowerCase()]
+      ? ownValue(genericFamilies, authoredFamily.trim().toLowerCase())
         ?? request.genericFamily
         ?? 'sans-serif'
       // ECMA-376 §17.3.2.26 deliberately leaves the consumer's supported
@@ -1085,7 +1087,7 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
       const eastAsiaFamily = requestedFamily(request, 'eastAsia');
       const eastAsiaCharset = request.eastAsiaFontCharset
         ?? (eastAsiaFamily
-          ? eastAsiaFontCharsets[eastAsiaFamily.trim().toLowerCase()]
+          ? ownValue(eastAsiaFontCharsets, eastAsiaFamily.trim().toLowerCase())
           : undefined);
       // ECMA-376 §17.3.2.26 (and the MS-OI29500 table) selects the rFonts slot
       // per code point, including rFonts@hint. General text keeps that exactly.

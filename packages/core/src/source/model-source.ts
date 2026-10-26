@@ -336,6 +336,7 @@ function validateConfig(value: unknown): ModelSourceConfig {
   if (keys.length > MAX_CONFIG_ENTRIES) {
     throw new RangeError(`model source config accepts at most ${MAX_CONFIG_ENTRIES} entries`);
   }
+  // ast-grep-ignore: no-plain-object-string-map -- CONFIG_KEY admits only identifiers starting with a letter (never `__proto__`); the config is handed to caller modules as an ordinary object.
   const config: Record<string, ModelSourceConfigValue> = {};
   for (const key of keys) {
     if (typeof key !== 'string' || !CONFIG_KEY.test(key)) {
@@ -424,6 +425,7 @@ function validateViewDefaults(value: unknown): Readonly<Record<string, boolean>>
   if (keys.length > MAX_VIEW_DEFAULT_ENTRIES) {
     throw new RangeError('model source viewDefaults has too many entries');
   }
+  // ast-grep-ignore: no-plain-object-string-map -- CONFIG_KEY admits only identifiers starting with a letter (never `__proto__`).
   const result: Record<string, boolean> = {};
   for (const key of keys) {
     const field = typeof key === 'string' ? Object.getOwnPropertyDescriptor(value, key) : undefined;

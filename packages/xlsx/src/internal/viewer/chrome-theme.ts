@@ -50,6 +50,7 @@ export class ChromeTheme {
     const getComputedStyle = hostWindow.getComputedStyle?.bind(hostWindow);
     if (!getComputedStyle) return;
     const computed = getComputedStyle(this.host.wrapper);
+    // ast-grep-ignore: no-plain-object-string-map -- keys are the fixed chrome color property list.
     const next: Record<string, string> = {};
     for (const [key, property] of Object.entries(XLSX_CHROME_COLOR_PROPERTIES)) {
       const value = computed.getPropertyValue(property).trim();

@@ -224,6 +224,7 @@ function cloneAndFreezePlainData<T>(value: T, seen: Map<object, unknown>): DeepR
   if (prototype !== Object.prototype && prototype !== null) {
     throw new TypeError('value must be structured-clone-safe plain data');
   }
+  // ast-grep-ignore: no-plain-object-string-map -- mirrors structuredClone (ordinary prototype); `__proto__` is defined as an own property below.
   const copy: Record<string, unknown> = {};
   seen.set(value, copy);
   for (const key in value) {

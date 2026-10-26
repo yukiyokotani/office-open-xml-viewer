@@ -9,6 +9,7 @@ import {
   type OfficeFontFallbackRoute,
   type ResolvedFontMetric,
 } from '@silurus/ooxml-core';
+import { nullRecord } from '@silurus/ooxml-core/internal/own-key';
 
 /** Resource-aware vertical admission, independent of viewer OS and family
  * spelling. ECMA-376 §17.3.1.33 defines spacing in normal lines, not a catalog
@@ -153,7 +154,9 @@ export async function prepareDocxHostFontMetrics(
     }
     return { key, route: { ...route, metric, ...(coverageProbeFamily ? { coverageProbeFamily } : {}) }, probe };
   }));
-  const routes: typeof loaded.routes = {};
+  // Route keys are authored face names; a null-prototype record keeps a face
+  // named `__proto__` as an own entry instead of invoking the setter.
+  const routes: typeof loaded.routes = nullRecord();
   for (const entry of entries) routes[entry.key] = entry.route;
   for (const pending of probes.values()) {
     const probe = await pending;

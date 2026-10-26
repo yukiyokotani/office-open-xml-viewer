@@ -3498,6 +3498,7 @@ function footnoteBandPlan(
 ): Readonly<Record<string, number>> | undefined {
   if (!notes.some((note) => note.story.bandDependent)) return undefined;
   const { topsPt } = footnoteStack(page, notes);
+  // ast-grep-ignore: no-plain-object-string-map -- keys are library-generated note band keys.
   const plan: Record<string, number> = {};
   notes.forEach((note, index) => {
     const key = noteBandKey(note.flowDomainId, note.source.storyInstance);
