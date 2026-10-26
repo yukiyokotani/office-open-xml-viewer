@@ -580,7 +580,8 @@ export function getMdwForWorksheet(ws: Pick<Worksheet,
   const weight = ws.defaultFontBold ? 700 : 400;
   const style = ws.defaultFontItalic ? 'italic' : 'normal';
   const tupleKey = officeRequestKey({ family: ws.defaultFontFamily, weight, style });
-  const route = officeRoutesByWorksheet.get(ws as Worksheet)?.[tupleKey];
+  const worksheetRoutes = officeRoutesByWorksheet.get(ws as Worksheet);
+  const route = worksheetRoutes ? ownValue(worksheetRoutes, tupleKey) : undefined;
   const boundFont = normalFontBindingByWorksheet.get(ws as Worksheet);
   return boundFont?.canvasMdw ?? computeMdw(
     ws.defaultFontFamily, ws.defaultFontSize,

@@ -243,3 +243,20 @@ describe('Normal-font routes for face names that are prototype members', () => {
     },
   );
 });
+describe('worksheet default fonts named like Object.prototype members', () => {
+  it('measures with a structured-cloned empty route map without throwing', () => {
+    vi.stubGlobal('OffscreenCanvas', undefined);
+    vi.stubGlobal('document', { createElement: () => ({ getContext: () => ({
+      font: '', measureText: () => ({ width: 7 }),
+    }) }) });
+    for (const family of ['__proto__', 'constructor', 'toString', 'hasOwnProperty']) {
+      const worksheet = { defaultFontFamily: family, defaultFontSize: 11 };
+      bindXlsxWorksheetOfficeFontRoutes(
+        worksheet as Parameters<typeof bindXlsxWorksheetOfficeFontRoutes>[0],
+        structuredClone({}),
+      );
+      expect(() => getMdwForWorksheet(worksheet)).not.toThrow();
+    }
+  });
+});
+
