@@ -3,6 +3,10 @@
 // Preserves headings (via outlineLevel), bullet / numbered lists, tables,
 // footnote bodies, and rich-text formatting; discards geometry, section
 // properties, font metrics, drawing shapes, page layout.
+//
+// Lives in the model crate so every producer of this model — the OOXML DOCX
+// parser and the legacy binary DOC direct reader alike — projects the same
+// markdown from the same document facts.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Write as _};
@@ -11,7 +15,7 @@ use ooxml_common::markdown::{
     escape_fragment, escape_text, line_start_after_markup, split_lines, TextContext,
 };
 
-use crate::types::{
+use crate::{
     BodyElement, CellElement, DocParagraph, DocRun, DocTable, DocTableCell, Document, TextRun,
 };
 
@@ -19,7 +23,7 @@ use crate::types::{
 /// Public conversion paths report the crossing through the package resource
 /// governor; this writer prevents the oversized projection from being
 /// materialized before that report can be produced.
-pub(crate) struct MarkdownWriter {
+pub struct MarkdownWriter {
     value: String,
     limit: u64,
     observed: u64,
@@ -27,7 +31,7 @@ pub(crate) struct MarkdownWriter {
 }
 
 impl MarkdownWriter {
-    pub(crate) fn new(limit: u64) -> Self {
+    pub fn new(limit: u64) -> Self {
         Self {
             value: String::new(),
             limit,
@@ -36,15 +40,17 @@ impl MarkdownWriter {
         }
     }
 
-    pub(crate) fn observed(&self) -> u64 {
+    pub fn observed(&self) -> u64 {
         self.observed
     }
 
-    fn exceeded(&self) -> bool {
+    /// Whether the ceiling was crossed: retained output stops at the crossing
+    /// while `observed` keeps counting the full projection size.
+    pub fn exceeded(&self) -> bool {
         self.exceeded
     }
 
-    pub(crate) fn into_string(self) -> String {
+    pub fn into_string(self) -> String {
         self.value
     }
 
@@ -79,12 +85,15 @@ impl fmt::Write for MarkdownWriter {
     }
 }
 
-#[cfg(test)]
-pub(crate) fn render_document(doc: &Document) -> String {
+/// Unbounded projection for tests and internal callers that already hold a
+/// bounded model. Production conversion paths must use
+/// [`render_document_with_limit`] and report the crossing through their
+/// resource governor.
+pub fn render_document(doc: &Document) -> String {
     render_document_with_limit(doc, u64::MAX).into_string()
 }
 
-pub(crate) fn render_document_with_limit(doc: &Document, limit: u64) -> MarkdownWriter {
+pub fn render_document_with_limit(doc: &Document, limit: u64) -> MarkdownWriter {
     let mut out = MarkdownWriter::new(limit);
     render_body(&doc.body, &mut out);
 
@@ -114,7 +123,7 @@ pub(crate) fn render_document_with_limit(doc: &Document, limit: u64) -> Markdown
     out
 }
 
-fn render_review_comments(comments: &[crate::types::DocxComment], out: &mut MarkdownWriter) {
+fn render_review_comments(comments: &[crate::DocxComment], out: &mut MarkdownWriter) {
     if comments.is_empty() {
         return;
     }
@@ -150,8 +159,8 @@ fn render_review_comments(comments: &[crate::types::DocxComment], out: &mut Mark
 }
 
 fn render_comment_thread(
-    comment: &crate::types::DocxComment,
-    comments: &[crate::types::DocxComment],
+    comment: &crate::DocxComment,
+    comments: &[crate::DocxComment],
     children: &HashMap<&str, Vec<usize>>,
     emitted: &mut HashSet<String>,
     out: &mut MarkdownWriter,
@@ -340,7 +349,7 @@ impl Piece {
 /// line-start marker the escaping did not see.
 fn render_runs(
     runs: &[DocRun],
-    revisions: &[Option<crate::types::RunRevision>],
+    revisions: &[Option<crate::RunRevision>],
     context: TextContext,
 ) -> String {
     let mut pieces = Vec::new();
@@ -369,7 +378,7 @@ fn render_runs(
                 }
             }
             DocRun::Break { break_type } => {
-                use crate::types::BreakType;
+                use crate::BreakType;
                 pieces.push(Piece::Markup(
                     match (context, break_type) {
                         (TextContext::Heading, _) => " ",
@@ -390,7 +399,7 @@ fn render_runs(
             }
             DocRun::Math { nodes, .. } => {
                 // Surface the equation's literal characters as inline text.
-                let text = crate::math::nodes_to_text(nodes);
+                let text = ooxml_common::math::nodes_to_text(nodes);
                 if !text.is_empty() {
                     pieces.push(Piece::Text(text));
                 }
@@ -565,7 +574,7 @@ fn render_table_cell(cell: &DocTableCell) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::DocxComment;
+    use crate::DocxComment;
 
     #[test]
     fn review_comments_are_separated_quoted_and_threaded() {

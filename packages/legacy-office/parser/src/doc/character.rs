@@ -936,6 +936,15 @@ impl Properties {
             (0x1000, LanguageAxis::Default | LanguageAxis::ComplexScript) => {
                 return LanguageResolution::Absent;
             }
+            // MS-LCID 2.2 reserves 0x007F; Windows names it LOCALE_INVARIANT.
+            // Third-party producers stamp it as the document default language.
+            // Word opens such documents and on DOCX save writes an empty
+            // w:lang w:val="" for the affected style, which the DOCX reader
+            // treats as no language; project the same. Other axes have no
+            // Office evidence and stay rejected.
+            (0x007f, LanguageAxis::Default) => {
+                return LanguageResolution::Absent;
+            }
             _ => {}
         }
         match crate::lcid::resolve(u32::from(lid)) {

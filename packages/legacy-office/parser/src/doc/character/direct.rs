@@ -755,6 +755,22 @@ mod tests {
     }
 
     #[test]
+    fn invariant_default_language_projects_no_language() {
+        // MS-LCID 2.2 reserves 0x007F; Windows names it LOCALE_INVARIANT.
+        // Third-party producers stamp it as the document default language.
+        // Word opens such documents and on DOCX save writes w:lang w:val=""
+        // for the affected style, which the DOCX reader treats as no
+        // language; the direct reader projects the same.
+        let invariant = applied(&[(0x4873, 0x007fu16.to_le_bytes().to_vec())]);
+        assert_eq!(invariant.resolved_languages().unwrap().default, None);
+        assert!(invariant
+            .direct_text_run("x".into(), &[])
+            .unwrap()
+            .is_some());
+        assert!(invariant.direct_font_facts(&[]).is_ok());
+    }
+
+    #[test]
     fn modern_default_and_east_asian_languages_resolve() {
         let properties = applied(&[
             (0x486d, 0x0411u16.to_le_bytes().to_vec()),

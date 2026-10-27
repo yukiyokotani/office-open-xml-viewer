@@ -14,7 +14,6 @@ mod chart_compatibility;
 mod chartex_choice;
 mod document_projector;
 mod drawing_compatibility;
-mod markdown;
 mod math;
 mod numbering;
 mod parser;
@@ -54,7 +53,7 @@ fn docx_markdown_limit() -> u64 {
 fn render_markdown_from_zip(zip: &mut parser::Zip) -> Result<String, String> {
     let doc = parser::parse(zip)?;
     let limit = docx_markdown_limit();
-    let output = markdown::render_document_with_limit(&doc, limit);
+    let output = docx_model::markdown::render_document_with_limit(&doc, limit);
     zip.operation()?.limit_reporter()?.observe_hard_limit(
         HardResourceLimitKind::DocxMarkdownBytes,
         None,

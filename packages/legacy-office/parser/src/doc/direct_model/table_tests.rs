@@ -542,7 +542,13 @@ fn full_cfb_body_table_retains_cell_local_page_and_column_break_runs() {
 }
 
 #[test]
-fn retained_tistd_does_not_bypass_the_existing_style_projection_gate() {
+fn retained_tistd_with_undefined_table_normal_projects_a_plain_table() {
+    // MS-DOC 2.6.3 sprmTIstd: an empty, missing, or wrong-kind selection is
+    // equivalent to istd 0x000B (Table Normal). This fixture's stylesheet
+    // defines no table styles at all, so even the fallback slot is
+    // undefined; Word opens such documents and applies no table style (on
+    // DOCX save the tables carry no w:tblStyle). The document loads and the
+    // table carries no style-driven formatting.
     let text = "x\u{7}\u{7}\r";
     let source = source_with_typography(
         text,
@@ -555,9 +561,20 @@ fn retained_tistd_does_not_bypass_the_existing_style_projection_gate() {
     let mut row = row(1000);
     row.extend(sprm(0x563a, &7u16.to_le_bytes(), false));
     let bytes = with_papx(&source, &[(0, 2, cell()), (2, 3, row), (3, 4, Vec::new())]);
-    let error =
-        super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1_000_000).unwrap_err();
-    assert!(error.contains("unsupported formatting"), "{error}");
+    let document = super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1_000_000)
+        .unwrap()
+        .document;
+    let BodyElement::Table(table) = &document.body[0] else {
+        panic!("table")
+    };
+    let CellElement::Paragraph(paragraph) = &table.rows[0].cells[0].content[0] else {
+        panic!("paragraph")
+    };
+    assert!(matches!(&paragraph.runs[0], DocRun::Text(run) if run.text == "x"));
+    let borders = &table.rows[0].cells[0].borders;
+    assert!(borders.top.is_none() && borders.bottom.is_none());
+    assert!(borders.left.is_none() && borders.right.is_none());
+    assert!(borders.inside_h.is_none() && borders.inside_v.is_none());
 }
 
 fn cell_border_assignment(sides: u8, border: [u8; 8]) -> Vec<u8> {

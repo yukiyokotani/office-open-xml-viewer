@@ -96,7 +96,20 @@ explicit caller option, then the source's view default, then the renderer
 default. Capabilities that a source lacks degrade the same way for every
 format: resource metrics are reported without a ZIP usage snapshot, and
 `toMarkdown()` rejects with an "... is unsupported for this source" error.
-All three legacy readers lack Markdown export and ZIP accounting.
+All three legacy readers lack ZIP accounting, and the legacy XLS and PPT
+readers lack Markdown export.
+
+The legacy DOC reader does offer Markdown export: the direct reader projects
+into the same document model the DOCX parser produces, so `toMarkdown()`
+runs the shared DOCX markdown projection (headings from outline level,
+lists, tables, notes, character formatting; geometry discarded) on that
+model. The projection re-reads the retained source bytes, so it works
+independently of the streaming load cursor, and it shares the DOCX markdown
+byte ceiling. Legacy XLS and PPT keep the rejection: the XLSX markdown
+projection walks OOXML worksheet JSON against the package shared-strings
+table, which the typed BIFF projection does not carry, and the PPTX
+projection consumes a whole presentation including notes and comments,
+which the streaming legacy PPT session does not assemble.
 
 To cancel a load, destroy the document or viewer, or start another load in
 its place. Node sessions keep their `signal` option.
@@ -191,6 +204,25 @@ stored producer installation LCID when the specification lists that LCID.
 Explicit values, including zero, win. Unlisted languages keep the
 unresolved-margin recovery. The host locale and the document's text language
 are not used to guess the producer's settings.
+
+A default character language of 0x007F (reserved in MS-LCID 2.2; Windows
+names it LOCALE_INVARIANT), stamped by some third-party producers, projects
+no language: Word opens such documents and writes an empty `w:lang
+w:val=""` on DOCX save, which the DOCX reader treats as no language. The
+other language axes have no Office evidence for this value and stay
+rejected, as do unlisted LCIDs.
+
+A table whose style selection resolves to istd 0x000B (MS-DOC 2.6.3
+sprmTIstd) in a stylesheet that does not define even that slot gets no
+table style: Word opens such documents and saves the tables without
+`w:tblStyle`. Unsupported content inside a defined table style stays
+rejected.
+
+A table-styled cell whose modern compatibility shading array
+(sprmTDefTableShd and its later segments, MS-DOC 2.6.3) carries the clear
+pattern over automatic colors (ShdAuto, MS-DOC 2.9.247) projects as an
+explicit no-fill value, the same projection the Raw shading arrays already
+give it. Patterned entries remain unsupported.
 
 Fields in the direct DOC source are checked against each story's own field
 table: the main document, headers and footers, footnotes, endnotes and

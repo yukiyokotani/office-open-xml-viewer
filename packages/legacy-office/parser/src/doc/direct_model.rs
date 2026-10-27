@@ -1921,6 +1921,27 @@ mod tests {
         }
     }
 
+    #[test]
+    fn markdown_projection_reprojects_the_same_model_facts() {
+        assert_eq!(
+            super::super::direct_markdown(&source("Alpha\rBeta\r"), 1024 * 1024).unwrap(),
+            "Alpha\n\nBeta\n\n"
+        );
+        // sprmCFBold on the paragraph's CHPX.
+        let bold = source_with_direct_chpx("Bold\r", &[0x35, 0x08, 1]);
+        assert_eq!(
+            super::super::direct_markdown(&bold, 1024 * 1024).unwrap(),
+            "**Bold**\n\n"
+        );
+        assert_eq!(
+            super::super::direct_markdown(&numbered_source("A\rB\r"), 1024 * 1024).unwrap(),
+            "1. A\n1. B\n"
+        );
+        assert!(super::super::direct_markdown(&[0; 16], 1024 * 1024)
+            .unwrap_err()
+            .starts_with("UNSUPPORTED:"));
+    }
+
     /// The first numbered paragraph's marker, as the byte route's DOCX parser
     /// projected it before that route was removed.
     const NUMBERED_MARKER: &str = r#"{"fontFacts":{"fontFamily":"Test Font","fontFamilyEastAsia":"Test Font","fontFamilyHighAnsi":"Test Font","fontSize":10.0,"fontSizeCs":10.0,"fontSlots":{"direct":{"ascii":"Test Font","eastAsia":"Test Font","highAnsi":"Test Font"},"theme":{},"themePresent":{"ascii":false,"complexScript":false,"eastAsia":false,"highAnsi":false}}},"fontFamily":"Test Font","fontFamilyEastAsia":"Test Font","format":"decimal","indentLeft":0.0,"jc":"left","level":0,"numId":1,"suff":"tab","tab":0.0,"text":"1."}"#;

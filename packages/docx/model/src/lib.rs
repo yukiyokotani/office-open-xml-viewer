@@ -11,6 +11,7 @@ use ooxml_common::fill::{FillRect, TileInfo};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
+pub mod markdown;
 pub mod paragraph_breaks;
 
 pub const PARSE_DIAGNOSTIC_CODE_UNSUPPORTED_TEXT_EFFECT: &str = "UNSUPPORTED_TEXT_EFFECT";

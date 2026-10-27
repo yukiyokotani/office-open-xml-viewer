@@ -476,19 +476,9 @@ impl<'a> Formatting<'a> {
             return Ok(false);
         };
         let profile = self.table_style_profile(table_style.selected_style)?;
-        if self
-            .styles
-            .get(table_style.selected_style)
-            .and_then(Option::as_ref)
-            .filter(|style| style.kind == 3)
-            .is_none()
-        {
-            // sprmTIstd falls back to style 0x000B for an invalid selection.
-            // If that slot is itself unavailable, retain the existing table
-            // formatting gate instead of failing before its generic result.
-            self.unsupported_table_properties = true;
-            return Ok(false);
-        }
+        // A missing or wrong-kind slot (including the sprmTIstd fallback
+        // istd 0x000B, MS-DOC 2.6.3) yields an empty profile, so nothing is
+        // applied; the profile build carries the gate for unresolved ids.
         // Apply the table-style base before paragraph styles and direct PAPX;
         // the normal property pipeline preserves authored zero and overrides.
         if let Some(before) = profile.paragraph_before {
@@ -1295,6 +1285,55 @@ mod tests {
         assert_eq!(formatting.resolve_table_style_id(Some(99)), Some(11));
         formatting.styles[11] = None;
         assert_eq!(formatting.resolve_table_style_id(Some(5)), Some(11));
+    }
+
+    #[test]
+    fn missing_table_normal_slot_projects_no_table_style() {
+        // MS-DOC 2.6.3 sprmTIstd: an empty, missing, or wrong-kind selection
+        // is equivalent to istd 0x000B (Table Normal). A third-party
+        // stylesheet may not define even that slot. Word opens such
+        // documents and applies no table style — on DOCX save the tables
+        // carry no w:tblStyle — so the reader projects the same instead of
+        // refusing the document.
+        let mut formatting = empty();
+        assert_eq!(formatting.resolve_table_style_id(Some(0)), Some(0x000b));
+
+        let key = formatting
+            .table_formatting_key(Some(0x000b), None, [None; 5])
+            .unwrap();
+        assert!(key.is_some());
+        let mut props = Properties::default();
+        formatting
+            .apply_table_character_style(&mut props, key)
+            .unwrap();
+        assert_eq!(props, Properties::default());
+        assert_eq!(formatting.table_cell_shading(key).unwrap(), None);
+        assert!(formatting
+            .conditional_table_borders(Some(0x000b))
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            formatting
+                .table_style_selector_profile(Some(0x000b))
+                .unwrap(),
+            (None, None, 0)
+        );
+        let (default_margins, style_margins) = formatting.table_cell_margins_for_key(key).unwrap();
+        assert_eq!(default_margins, table::MarginPatch::default());
+        assert_eq!(style_margins, table::MarginPatch::default());
+        let (indent, before) = formatting.table_row_preferences(Some(0x000b)).unwrap();
+        assert!(indent.is_none());
+        assert!(before.is_none());
+        assert!(formatting
+            .table_borders(Some(0x000b))
+            .unwrap()
+            .iter()
+            .all(Option::is_none));
+        formatting.direct_paragraph(0, key, 0, 0, &[]).unwrap();
+
+        assert!(!formatting.unsupported_table_properties);
+        assert!(!formatting.unsupported_character_properties);
+        assert!(!formatting.unsupported_paragraph_properties);
     }
 
     #[test]

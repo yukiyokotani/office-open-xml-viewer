@@ -646,8 +646,10 @@ impl Row {
     /// that interpret table styles to ignore the compatibility arrays and use
     /// the Raw arrays. Raw ShdNil and omitted entries defer to the style;
     /// ShdAuto is an explicit no-fill value. The bounded current-Word fallback
-    /// retains clear RGB modern arrays as the fallback for explicit Raw ShdNil,
-    /// including when a later compatibility replacement changes that fallback.
+    /// retains clear-pattern modern arrays as the fallback for explicit Raw
+    /// ShdNil — an RGB background is an explicit fill, an automatic background
+    /// the same explicit no fill the Raw arrays give ShdAuto — including when
+    /// a later compatibility replacement changes that fallback.
     pub(in crate::doc) fn apply_style_aware_shading(
         &mut self,
         code: u16,
@@ -703,12 +705,12 @@ impl Row {
                             Some(value) if value.direct_facts().pattern == "nil" => {
                                 // [MS-DOC] 2.6.3 ignores these modern arrays
                                 // when table styles are understood. Nil has no
-                                // RGB fallback under the observed clear-RGB
+                                // RGB fallback under the observed clear-pattern
                                 // exception above: Raw ShdNil still delegates
                                 // to style (2.9.247), never to a guessed fill.
                                 None
                             }
-                            Some(value) if value.is_clear_rgb_background() => {
+                            Some(value) if value.is_clear_pattern() => {
                                 Some(PreparedCellShading::Explicit(value))
                             }
                             Some(_) | None => {
@@ -1946,6 +1948,46 @@ mod tests {
             Some(PreparedCellShading::Explicit(ref shading))
                 if shading.direct_background().as_deref() == Some("123456")
         ));
+    }
+
+    #[test]
+    fn modern_compatibility_clear_auto_shading_projects_explicit_no_fill() {
+        // ShdAuto (clear pattern, cvAuto colors) is an explicit no-fill value
+        // in the Raw arrays; the same value in a modern compatibility array
+        // must project identically instead of failing the whole document.
+        let auto = [0, 0, 0, 255, 0, 0, 0, 255, 0, 0];
+        let nil = [255, 255, 255, 255, 255, 255, 255, 255, 0, 0];
+        for compat in [0xd612, 0xd616, 0xd60c] {
+            let mut row = Row::default();
+            row.apply(0x7621, &[0, 46, 1, 0]).unwrap();
+            row.apply(0x563a, &1u16.to_le_bytes()).unwrap();
+            assert_eq!(
+                row.apply_style_aware_shading(compat, &raw_array(auto, 1), style_aware_policy())
+                    .unwrap(),
+                StyleAwareShadingApply::Handled
+            );
+            let raw = match compat {
+                0xd616 => 0xd671,
+                0xd60c => 0xd672,
+                _ => 0xd670,
+            };
+            assert_eq!(
+                row.apply_style_aware_shading(raw, &raw_array(nil, 1), style_aware_policy())
+                    .unwrap(),
+                StyleAwareShadingApply::Handled
+            );
+            let start = match compat {
+                0xd616 => 22,
+                0xd60c => 44,
+                _ => 0,
+            };
+            assert!(matches!(
+                row.cells[start].prepared_shading,
+                Some(PreparedCellShading::Explicit(ref shading))
+                    if shading.direct_facts().pattern == "clear"
+                        && shading.direct_background().is_none()
+            ));
+        }
     }
 
     #[test]

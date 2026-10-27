@@ -313,8 +313,16 @@ impl Formatting<'_> {
             .filter(|style| style.kind == 3)
             .is_none()
         {
+            // Callers reach here only with ids that resolve_table_style_id
+            // already validated or mapped to istd 0x000B (MS-DOC 2.6.3
+            // sprmTIstd). A stylesheet that does not define even that slot
+            // leaves Table Normal itself undefined: Word opens such
+            // documents and applies no table style (on DOCX save the tables
+            // carry no w:tblStyle), so project an empty profile instead of
+            // refusing the document. An unresolved non-fallback id stays
+            // refused.
             return Ok(Profile {
-                unsupported_table: true,
+                unsupported_table: id != 0x000b,
                 ..Profile::default()
             });
         }

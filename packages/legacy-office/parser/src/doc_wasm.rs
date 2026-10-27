@@ -13,6 +13,13 @@ const MAX_DIRECT_DOC_MODEL_BYTES: usize = 256 * 1024 * 1024;
 #[wasm_bindgen]
 pub struct LegacyDocDocument {
     cursor: DirectCursor,
+    /// Retained source bytes for `to_markdown`: the pull cursor consumes the
+    /// projected model while streaming, so the markdown projection re-parses
+    /// from these bytes, the same way `DocxArchive::to_markdown` re-reads its
+    /// retained package. One copy per open session, already bounded by the CFB
+    /// acquisition limits at construction.
+    bytes: Vec<u8>,
+    max_model_bytes: usize,
 }
 
 #[wasm_bindgen]
@@ -37,6 +44,8 @@ impl LegacyDocDocument {
         let result = doc::direct_model(&cfb, maximum).map_err(|e| error(&e))?;
         Ok(Self {
             cursor: DirectCursor::new(result).map_err(|e| error(&e))?,
+            bytes: data,
+            max_model_bytes: maximum,
         })
     }
     pub fn open_document_cursor(
@@ -108,6 +117,12 @@ impl LegacyDocDocument {
             .resource_mime_type(key)
             .map(str::to_owned)
             .map_err(string_error)
+    }
+    /// GitHub-flavoured markdown projection of the document, independent of
+    /// the pull cursor's streaming state. This is the `to_markdown` model
+    /// source capability the DOCX worker checks for.
+    pub fn to_markdown(&self) -> Result<String, JsValue> {
+        doc::direct_markdown(&self.bytes, self.max_model_bytes).map_err(string_error)
     }
 }
 

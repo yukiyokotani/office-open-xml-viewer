@@ -30,6 +30,9 @@ export interface LegacyDocNativeDocument {
   revision_markup_on_screen?(): boolean;
   /** Whether the projected model carries any revision mark. */
   has_revision_marks?(): boolean;
+  /** GitHub-flavoured markdown projection; the `to_markdown` model source
+   *  capability the DOCX worker checks before Markdown conversion. */
+  to_markdown?(): string;
 }
 
 export type OwnedLegacyDocSource = OwnedDirectSource<LegacyDocNativeDocument>;
