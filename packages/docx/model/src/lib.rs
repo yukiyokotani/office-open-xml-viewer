@@ -11,6 +11,7 @@ use ooxml_common::fill::{FillRect, TileInfo};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
+pub mod markdown;
 #[cfg(feature = "owned-source-cursor")]
 pub mod owned_cursor;
 pub mod paragraph_breaks;

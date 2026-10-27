@@ -35209,7 +35209,7 @@ mod tracked_change_move_tests {
         // move destinations are visible; deletions and move sources are not.
         let doc = moved_doc();
         assert_eq!(
-            crate::markdown::render_document(&doc),
+            docx_model::markdown::render_document(&doc),
             "Keep addedmoved here\n\n",
         );
     }
@@ -35249,7 +35249,7 @@ mod tracked_change_move_tests {
                 None
             ],
         );
-        assert_eq!(crate::markdown::render_document(&doc), "kept\n\n");
+        assert_eq!(docx_model::markdown::render_document(&doc), "kept\n\n");
     }
 
     #[test]
@@ -35644,7 +35644,7 @@ mod comment_anchor_tests {
             .collect();
         let doc = parse_parts(&borrowed);
 
-        let markdown = crate::markdown::render_document(&doc);
+        let markdown = docx_model::markdown::render_document(&doc);
 
         assert!(
             markdown.find("threaded").unwrap() < markdown.find("## Review comments").unwrap(),
