@@ -1,6 +1,6 @@
 {
   "name": "@silurus/ooxml-legacy-office",
-  "version": "0.89.6",
+  "version": "0.89.7",
   "description": "Optional legacy Office (DOC/XLS/PPT) model sources for @silurus/ooxml",
   "license": "MIT",
   "author": "Yuki Yokotani <silurus.dev@gmail.com>",
@@ -70,6 +70,6 @@
     "wasm"
   ],
   "peerDependencies": {
-    "@silurus/ooxml": "0.89.6"
+    "@silurus/ooxml": "0.89.7"
   }
 }
