@@ -411,6 +411,75 @@ export function sliceTextShapeRequest(
   };
 }
 
+/** The request fields a {@link TextLayoutService} shape result is keyed by,
+ * apart from the run-scope descriptor it derives from `substituteContext`.
+ * Equal fields (with an equal run context) shape identically. */
+export function shapeRequestKeyFields(request: Readonly<TextShapeRequest>): unknown[] {
+  return [
+    request.text,
+    request.fontSizePt,
+    [
+      request.fonts.ascii ?? null,
+      request.fonts.highAnsi ?? null,
+      request.fonts.eastAsia ?? null,
+      request.fonts.complexScript ?? null,
+    ],
+    [
+      request.themeFonts?.ascii ?? null,
+      request.themeFonts?.highAnsi ?? null,
+      request.themeFonts?.eastAsia ?? null,
+      request.themeFonts?.complexScript ?? null,
+    ],
+    [
+      request.themeFontPresence?.ascii ?? null,
+      request.themeFontPresence?.highAnsi ?? null,
+      request.themeFontPresence?.eastAsia ?? null,
+      request.themeFontPresence?.complexScript ?? null,
+    ],
+    request.weight ?? null,
+    request.style ?? null,
+    request.complexScript ?? null,
+    request.fontHint ?? null,
+    request.eastAsiaLanguage ?? null,
+    request.eastAsiaFontCharset ?? null,
+    request.genericFamily ?? null,
+    request.letterSpacingPt ?? null,
+    request.kerning ?? null,
+    request.joinRegisteredGrapheme ?? null,
+    request.joinRegisteredLatinSlots ?? null,
+    request.registeredLatinPieceText !== undefined && request.registeredLatinPieceText === request.text,
+    request.measure ?? null,
+    request.clusterGeometry ?? null,
+  ];
+}
+
+const SHAPE_KEY_SLOTS = ['ascii', 'highAnsi', 'eastAsia', 'complexScript'] as const;
+const SHAPE_KEY_SCALARS = [
+  'text', 'fontSizePt', 'weight', 'style', 'complexScript', 'fontHint', 'eastAsiaLanguage',
+  'eastAsiaFontCharset', 'genericFamily', 'letterSpacingPt', 'kerning', 'joinRegisteredGrapheme',
+  'joinRegisteredLatinSlots', 'registeredLatinPieceText', 'measure', 'clusterGeometry',
+] as const;
+
+/** Whether every value {@link shapeRequestKeyFields} reads, and the run
+ * context, is a primitive (so the fields are plain values and the slot
+ * tuples are the only arrays). Never throws on a malformed request. */
+export function shapeRequestKeyFieldsArePrimitive(request: Readonly<TextShapeRequest>): boolean {
+  const primitive = (value: unknown): boolean => value === undefined || value === null
+    || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean';
+  const slots = (value: unknown, required: boolean): boolean => value === undefined
+    ? !required
+    : typeof value === 'object' && value !== null && !Array.isArray(value)
+      && SHAPE_KEY_SLOTS.every((slot) => primitive((value as Record<string, unknown>)[slot]));
+  const context: unknown = request.substituteContext;
+  return SHAPE_KEY_SCALARS.every((field) => primitive(request[field]))
+    && slots(request.fonts, true)
+    && slots(request.themeFonts, false)
+    && slots(request.themeFontPresence, false)
+    && (context === undefined || (typeof context === 'object' && context !== null
+      && typeof (context as { text?: unknown }).text === 'string'
+      && primitive((context as { offset?: unknown }).offset)));
+}
+
 /** A generated probe or ruby guide is independent text, even when its glyphs
  * happen to occur in the base run. It must not inherit that run's Arabic proof. */
 export function independentTextShapeRequest(
@@ -1179,40 +1248,7 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
         ).join('');
       }
       const shapeKey = JSON.stringify([
-        request.text,
-        request.fontSizePt,
-        [
-          request.fonts.ascii ?? null,
-          request.fonts.highAnsi ?? null,
-          request.fonts.eastAsia ?? null,
-          request.fonts.complexScript ?? null,
-        ],
-        [
-          request.themeFonts?.ascii ?? null,
-          request.themeFonts?.highAnsi ?? null,
-          request.themeFonts?.eastAsia ?? null,
-          request.themeFonts?.complexScript ?? null,
-        ],
-        [
-          request.themeFontPresence?.ascii ?? null,
-          request.themeFontPresence?.highAnsi ?? null,
-          request.themeFontPresence?.eastAsia ?? null,
-          request.themeFontPresence?.complexScript ?? null,
-        ],
-        request.weight ?? null,
-        request.style ?? null,
-        request.complexScript ?? null,
-        request.fontHint ?? null,
-        request.eastAsiaLanguage ?? null,
-        request.eastAsiaFontCharset ?? null,
-        request.genericFamily ?? null,
-        request.letterSpacingPt ?? null,
-        request.kerning ?? null,
-        request.joinRegisteredGrapheme ?? null,
-        request.joinRegisteredLatinSlots ?? null,
-        request.registeredLatinPieceText !== undefined && request.registeredLatinPieceText === request.text,
-        request.measure ?? null,
-        request.clusterGeometry ?? null,
+        ...shapeRequestKeyFields(request),
         ...(scopeDescriptor !== undefined ? [scopeDescriptor] : []),
       ]);
       const retainedShape = cached(shapeCache, shapeKey);

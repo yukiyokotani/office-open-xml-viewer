@@ -7,7 +7,15 @@ import {
 export { CONDENSED_CONTEXT_GRAPHEMES, condensedClusterFloorPx };
 import { sliceTextBreakWindow } from './text-break-window.js';
 import { graphemeClusterOffsets } from '@silurus/ooxml-core';
-import { EAST_ASIAN_RE, sliceTextShapeRequest, semanticSlotStartIndex } from '../layout/text.js';
+import {
+  EAST_ASIAN_RE,
+  shapeRequestKeyFields,
+  shapeRequestKeyFieldsArePrimitive,
+  sliceTextShapeRequest,
+  semanticSlotStartIndex,
+  type TextLayoutService,
+  type TextShapeRequest,
+} from '../layout/text.js';
 import { wordBalancedSpaceCellAdjustmentApplies } from '../layout/line-compatibility.js';
 import { type DocGridCtx, type LayoutSeg, type LayoutTextSeg } from './model.js';
 
@@ -641,6 +649,13 @@ export function contextualGraphemeAdvances(
     ...graphemeClusterOffsets(segment.text.slice(start, end)).map((offset) => start + offset),
     end,
   ])].sort((a, b) => a - b);
+  // Context windows overlap within a range and are re-acquired by fresh
+  // segments of the same run (prefix probes, retained geometry, repeated
+  // passes). Each distinct window request is shaped once per service; work is
+  // still charged per window measured.
+  const windows = segment.textLayoutService
+    ? contextualWindowMemo(segment.textLayoutService)
+    : undefined;
   const width = (from: number, to: number): number => {
     if (to <= from) return 0;
     reserveWork(to - from);
@@ -648,12 +663,21 @@ export function contextualGraphemeAdvances(
       if (segment.textShapeRequest.text !== segment.text) {
         throw new Error('Cluster measurement does not match its retained text range context');
       }
-      return segment.textLayoutService.shape({
+      const request = {
         ...sliceTextShapeRequest(segment.textShapeRequest, from, to),
         fontSizePt: fontSizePx,
         measure: true,
         clusterGeometry: false,
-      }).advancePt;
+      };
+      const key = contextualWindowKey(request);
+      const runKey = key === undefined ? undefined : request.substituteContext!.text;
+      const known = key === undefined || runKey === undefined
+        ? undefined
+        : windows!.byRun.get(runKey)?.get(key);
+      if (known !== undefined) return known;
+      const advancePt = segment.textLayoutService.shape(request).advancePt;
+      if (key !== undefined && runKey !== undefined) rememberContextualWindow(windows!, runKey, key, advancePt);
+      return advancePt;
     }
     return measureFallback(segment.text.slice(from, to));
   };
@@ -668,6 +692,86 @@ export function contextualGraphemeAdvances(
     });
   }
   return clusters;
+}
+
+/** Shaped widths of context windows, per service: by the window's run
+ * context text (shared, not copied), then by {@link contextualWindowKey}. */
+interface ContextualWindowMemo {
+  readonly byRun: Map<string, Map<string, number>>;
+  entries: number;
+}
+
+/** Bound of retained window widths per service; reaching it drops them all
+ * (a memoisation miss, never a different width). */
+const CONTEXTUAL_WINDOW_MEMO_ENTRIES = 1 << 16;
+
+const contextualWindowMemos = new WeakMap<TextLayoutService, ContextualWindowMemo>();
+
+function contextualWindowMemo(service: TextLayoutService): ContextualWindowMemo {
+  let memo = contextualWindowMemos.get(service);
+  if (!memo) {
+    memo = { byRun: new Map(), entries: 0 };
+    contextualWindowMemos.set(service, memo);
+  }
+  return memo;
+}
+
+function rememberContextualWindow(
+  memo: ContextualWindowMemo,
+  runKey: string,
+  key: string,
+  advancePt: number,
+): void {
+  if (memo.entries >= CONTEXTUAL_WINDOW_MEMO_ENTRIES) {
+    memo.byRun.clear();
+    memo.entries = 0;
+  }
+  let widths = memo.byRun.get(runKey);
+  if (!widths) {
+    widths = new Map();
+    memo.byRun.set(runKey, widths);
+  }
+  if (!widths.has(key)) memo.entries += 1;
+  widths.set(key, advancePt);
+}
+
+/** Within its run context, the window request's identity: the fields the
+ * service's shape result is keyed by ({@link shapeRequestKeyFields}) and the
+ * context offset its run-scope descriptor is read at. Every value is a
+ * primitive written exactly (NaN, the infinities and -0 stay distinct), so
+ * equal keys are equal shape inputs; anything else is not memoised. */
+function contextualWindowKey(request: Readonly<TextShapeRequest>): string | undefined {
+  // A malformed request, including one whose fields cannot be read, is left
+  // to shape() and its own validation.
+  try {
+    return contextualWindowKeyOf(request);
+  } catch {
+    return undefined;
+  }
+}
+
+function contextualWindowKeyOf(request: Readonly<TextShapeRequest>): string | undefined {
+  if (!shapeRequestKeyFieldsArePrimitive(request)
+    || typeof request.substituteContext?.text !== 'string') return undefined;
+  const parts: string[] = [];
+  const leaf = (value: unknown): void => {
+    if (value === null) parts.push('z');
+    else if (value === undefined) parts.push('u');
+    else if (typeof value === 'boolean') parts.push(value ? 't' : 'f');
+    else if (typeof value === 'number') parts.push(`n${Object.is(value, -0) ? '-0' : String(value)}`);
+    else parts.push(`s${(value as string).length}:${value as string}`);
+  };
+  leaf(request.substituteContext?.offset);
+  // The only arrays are the helper's dense slot tuples of primitives.
+  for (const field of shapeRequestKeyFields(request)) {
+    if (Array.isArray(field)) {
+      parts.push(`a${field.length}`);
+      for (let index = 0; index < field.length; index += 1) leaf(field[index]);
+    } else {
+      leaf(field);
+    }
+  }
+  return parts.join('|');
 }
 
 
