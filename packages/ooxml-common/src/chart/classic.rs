@@ -997,6 +997,37 @@ pub(super) fn parse_classic_impl(
         .as_ref()
         .and_then(ax_id_of)
         .filter(|id| Some(id) != primary_category_axis_id.as_ref());
+    // Two category axes on one side are still told apart by the value axis each
+    // crosses. Office's "columns on the secondary axis" combo lists its deleted
+    // secondary category axis at the bottom beside the primary one; `crossAx` pairs
+    // each with exactly one of the already-distinct primary/secondary value axes.
+    // Only that exact pairing, agreeing with the public slots, lifts the ambiguity.
+    if let (Some(primary_cat), Some(secondary_cat), Some(primary_val), Some(secondary_val)) = (
+        primary_category_axis_id.clone(),
+        secondary_category_axis_id.clone(),
+        val_ax.as_ref().and_then(ax_id_of),
+        secondary_val_ax.as_ref().and_then(ax_id_of),
+    ) {
+        let crossed = |axis_id: &str| {
+            plot_axis_nodes
+                .iter()
+                .find(|axis| ax_id_of(axis).as_deref() == Some(axis_id))
+                .and_then(|axis| child(*axis, "crossAx"))
+                .and_then(|node| attr(&node, "val"))
+                .and_then(|value| parse_chart_axis_id_value(&value))
+        };
+        if primary_val != secondary_val
+            && !ambiguous_axis_ids.contains(&primary_val)
+            && !ambiguous_axis_ids.contains(&secondary_val)
+            && ambiguous_axis_ids.contains(&primary_cat)
+            && ambiguous_axis_ids.contains(&secondary_cat)
+            && crossed(&primary_cat).as_deref() == Some(primary_val.as_str())
+            && crossed(&secondary_cat).as_deref() == Some(secondary_val.as_str())
+        {
+            ambiguous_axis_ids.remove(&primary_cat);
+            ambiguous_axis_ids.remove(&secondary_cat);
+        }
+    }
     let mut primary_value_axis_id = val_ax.as_ref().and_then(ax_id_of);
     let mut secondary_value_axis_id = secondary_val_ax
         .as_ref()

@@ -151,9 +151,14 @@ export function classicPlotDispatch(chart: ChartModel): ClassicPlotDispatch {
     // The retained Office boundary covers the ordinary bar+line pair and the
     // common two-column-group + one-line-group form. Keep larger/unrelated
     // scenes explicit until their z-order and axis ownership are observed.
+    // A secondary category axis that is deleted has no layout of its own: Office
+    // draws its group against the primary categories (the common "columns on the
+    // secondary axis, line on the primary" combo).
+    const onPrimaryCategories = (group: ChartPlotGroup) => group.categoryAxis === 'primary'
+      || (group.categoryAxis === 'secondary' && chart.secondaryCatAxis?.hidden === true);
     if (barGroups.length <= 2 && lineGroups.length === 1 && groups.length <= 3
       && directions.size === 1
-      && groups.every(group => group.categoryAxis === 'primary')) {
+      && groups.every(onPrimaryCategories)) {
       return 'bar-combo';
     }
     return 'unsupported';

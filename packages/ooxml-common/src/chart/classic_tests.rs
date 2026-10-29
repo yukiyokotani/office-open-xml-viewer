@@ -2950,4 +2950,42 @@ mod tests {
             assert_eq!(model.series[0].values, vec![Some(1.0), None, None]);
         }
     }
+
+    #[test]
+    fn two_bottom_category_axes_resolve_by_the_value_axis_each_crosses() {
+        // Office's "columns on the secondary axis, line on the primary" combo lists
+        // both category axes at the bottom and deletes the secondary one. Their side
+        // is shared, but each one crosses exactly one value axis, and that pairing
+        // is what makes one primary and the other secondary.
+        let xml = format!(
+            r#"<c:chartSpace xmlns:c="{C_NS}" xmlns:a="{A_NS}"><c:chart><c:plotArea>
+              <c:barChart><c:barDir val="col"/><c:grouping val="clustered"/>
+                <c:ser><c:idx val="0"/><c:val><c:numLit><c:ptCount val="1"/><c:pt idx="0"><c:v>5</c:v></c:pt></c:numLit></c:val></c:ser>
+                <c:axId val="30"/><c:axId val="40"/></c:barChart>
+              <c:lineChart><c:grouping val="standard"/>
+                <c:ser><c:idx val="1"/><c:val><c:numLit><c:ptCount val="1"/><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val></c:ser>
+                <c:axId val="10"/><c:axId val="20"/></c:lineChart>
+              <c:catAx><c:axId val="10"/><c:axPos val="b"/><c:crossAx val="20"/></c:catAx>
+              <c:valAx><c:axId val="20"/><c:axPos val="l"/><c:crossAx val="10"/></c:valAx>
+              <c:valAx><c:axId val="40"/><c:axPos val="r"/><c:crossAx val="30"/><c:crosses val="max"/></c:valAx>
+              <c:catAx><c:axId val="30"/><c:delete val="1"/><c:axPos val="b"/><c:crossAx val="40"/></c:catAx>
+            </c:plotArea></c:chart></c:chartSpace>"#,
+        );
+        let doc = chart_space_of(&xml);
+        let model = parse_chart_part(
+            doc.root_element(),
+            &ChartParseContext {
+                color_resolver: Some(&FixtureResolver),
+                ..Default::default()
+            },
+        )
+        .expect("combo parses");
+        let groups = model.plot_groups.expect("plot groups");
+
+        assert_eq!(groups[0].category_axis, "secondary");
+        assert_eq!(groups[0].value_axis, "secondary");
+        assert_eq!(groups[1].category_axis, "primary");
+        assert_eq!(groups[1].value_axis, "primary");
+        assert!(model.secondary_cat_axis.expect("secondary category axis").hidden);
+    }
 }
