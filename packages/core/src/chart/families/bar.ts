@@ -1,4 +1,5 @@
 // Classic bar chart family.
+import { smoothCurveExtent } from '../smooth-extent.js';
 import type { ChartDataLabelOverride, ChartLabelBox, ChartModel, ChartRect, ChartSeries, SecondaryValueAxis } from '../../types/chart';
 import type { DataLabelRect } from '../data-label-layout.js';
 import type { RichDataLabelOptions } from '../rich-data-label.js';
@@ -579,12 +580,17 @@ export function renderBarChart(
   // scale, mirrored by the `yOf` split below). `sec` matches the draw-time gate.
   for (const s of [...lineSeries, ...areaSeries]) {
     if (sec && s.useSecondaryAxis === true) continue;
+    const drawn: Array<number | null> = [];
     for (let ci = 0; ci < n; ci++) {
-      if (s.values[ci] == null) continue;
+      if (s.values[ci] == null) { drawn.push(null); continue; }
       const value = overlayValue(s, ci);
+      drawn.push(value);
       dataMax = Math.max(dataMax, value);
       dataMin = Math.min(dataMin, value);
     }
+    // A smoothed line is scaled to the curve it draws, as Excel does.
+    const curve = s.smooth === true ? smoothCurveExtent(drawn) : null;
+    if (curve) { dataMin = Math.min(dataMin, curve[0]); dataMax = Math.max(dataMax, curve[1]); }
   }
 
   // Error bars are part of the plotted value geometry. Their endpoints must
