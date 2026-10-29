@@ -1,4 +1,5 @@
 // Classic line chart family.
+import { smoothCurveExtent } from '../smooth-extent.js';
 import type { ChartModel, ChartRect, ChartSeries } from '../../types/chart';
 
 import { chartStyleEffectOwner, paintChartStyleEffects } from '../style-effects.js';
@@ -176,6 +177,16 @@ export function renderLineChart(
       const v = plotted(si, ci);
       dataMin = Math.min(dataMin, v); dataMax = Math.max(dataMax, v);
     }
+  }
+  // A smoothed line is scaled to the curve it draws, as Excel does: its Bezier
+  // overshoots the points, so a run leaving a flat stretch of zeros dips below zero.
+  for (let si = 0; si < chart.series.length; si++) {
+    const series = chart.series[si];
+    if (isSecondarySeries(series) || stackedBySeries[si] || series.smooth !== true) continue;
+    const curve = smoothCurveExtent(
+      Array.from({ length: n }, (_, ci) => (series.values[ci] == null ? null : plotted(si, ci))),
+    );
+    if (curve) { dataMin = Math.min(dataMin, curve[0]); dataMax = Math.max(dataMax, curve[1]); }
   }
   for (let si = 0; si < chart.series.length; si++) {
     const series = chart.series[si];
