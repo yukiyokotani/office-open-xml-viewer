@@ -19,6 +19,8 @@ export interface OdtFixtureOptions {
   readonly masterContent?: string;
   readonly manifestExtra?: string;
   readonly mediaType?: string;
+  /** Further package files after the required ones. */
+  readonly extraFiles?: ReadonlyArray<readonly [string, string]>;
 }
 
 export function buildOdtFixture(options: OdtFixtureOptions): Uint8Array<ArrayBuffer> {
@@ -39,5 +41,6 @@ export function buildOdtFixture(options: OdtFixtureOptions): Uint8Array<ArrayBuf
     ['META-INF/manifest.xml', manifest],
     ['styles.xml', styles],
     ['content.xml', content],
+    ...(options.extraFiles ?? []),
   ]);
 }

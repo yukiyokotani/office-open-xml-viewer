@@ -54,19 +54,23 @@ export function createOdtSourceEngine(
     mapNativeError: (error) => odfNativeRejection(error, 'odt'),
     loadGlue,
     resolveWasm,
-    // `null` (a caller-removed limit) and an absent context both leave the
-    // reader's hard ceilings as the only bound.
+    // The shared governor's WASM encoding: absent → standard limit, 0 → the
+    // caller removed the limit (hard ceilings still apply).
     construct: (glue, bytes, context) => new glue.OdtDocument(
       bytes,
-      context?.resourcePolicy.maxArchiveEntryBytes ?? undefined,
-      context?.resourcePolicy.maxTotalInflatedBytes ?? undefined,
-      context?.resourcePolicy.maxArchiveEntries ?? undefined,
+      wasmLimit(context?.resourcePolicy.maxArchiveEntryBytes),
+      wasmLimit(context?.resourcePolicy.maxTotalInflatedBytes),
+      wasmLimit(context?.resourcePolicy.maxArchiveEntries),
     ),
     closeNative: (document) => document.close_document_session(),
   });
   return Object.freeze({
     open: (bytes, wasmUrl, context, signal) => runtime.open(bytes, wasmUrl, signal, context),
   });
+}
+
+function wasmLimit(value: number | null | undefined): number | undefined {
+  return value === null ? 0 : value;
 }
 
 export { resolveDirectWasmInput };

@@ -16,7 +16,8 @@ pub struct OdtDocument {
 impl OdtDocument {
     /// Open and fully admit the package. Every rejection happens here, before
     /// the cursor publishes anything. Limits are the caller's normalized ZIP
-    /// policy (`undefined`: no caller limit beyond the hard ceilings).
+    /// policy in the shared governor's encoding (`undefined`: the standard
+    /// limit; `0`: the caller removed the limit, hard ceilings still apply).
     #[wasm_bindgen(constructor)]
     pub fn new(
         data: js_sys::Uint8Array,

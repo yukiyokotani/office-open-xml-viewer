@@ -17,6 +17,10 @@ use ooxml_common::zip::ItemNamePolicy;
 /// attribute or use semantics this reader does not model; they are rejected.
 pub const SUPPORTED_VERSIONS: [&str; 3] = ["1.2", "1.3", "1.4"];
 
+/// Data offset of the leading `mimetype` file: a 30-byte local header and
+/// the 8-byte name, without an extra field (Part 2 §3.3).
+const LEADING_MIMETYPE_DATA_START: usize = 30 + 8;
+
 /// Implementation bound: every media type a reader admits is shorter.
 const MAX_MIMETYPE_BYTES: usize = 128;
 
@@ -85,12 +89,19 @@ impl OdfPackage {
     }
 
     /// The leading local header read before the session opened must be the
-    /// archive's indexed first entry: the central directory lists `mimetype`
-    /// first and its CRC-checked content equals the leading bytes (§3.3).
+    /// archive's indexed first entry (§3.3): the central directory lists
+    /// `mimetype` first, its data starts right after a local header at byte
+    /// 0 (30 fixed bytes, the 8-byte name, no extra field), and its
+    /// CRC-checked content equals the leading bytes.
     fn check_indexed_mimetype(&self) -> Result<(), String> {
         let first = self.session.entry_paths().into_iter().next();
         if first.as_deref() != Some("mimetype") {
             return Err(invalid("the mimetype file is not the first package entry"));
+        }
+        if self.session.entry_data_start("mimetype") != Some(LEADING_MIMETYPE_DATA_START) {
+            return Err(invalid(
+                "the indexed mimetype entry is not the leading file",
+            ));
         }
         let bytes = self.session.run_operation("odf-mimetype", |operation| {
             operation.read_bytes_bounded("mimetype", MAX_MIMETYPE_BYTES)
@@ -315,5 +326,20 @@ pub(crate) mod tests {
             .err()
             .unwrap()
             .contains("not the first package entry"));
+    }
+
+    #[test]
+    fn an_unindexed_leading_record_does_not_stand_in_for_the_mimetype_entry() {
+        let good = package(ODT, &[("META-INF/manifest.xml", &manifest(ODT, ""))]);
+        // Prepend a copy of the leading local record (header, name, data) with
+        // a wrong CRC; the archive's own entries move but stay indexed.
+        let record_length = 30 + 8 + ODT.len();
+        let mut prefix = good[..record_length].to_vec();
+        prefix[14] ^= 0xff;
+        let mut bytes = prefix;
+        bytes.extend_from_slice(&good);
+        assert_eq!(leading_mimetype(&bytes).unwrap(), ODT);
+        let error = open(bytes).err().unwrap();
+        assert!(error.contains("not the leading file"), "{error}");
     }
 }

@@ -53,8 +53,9 @@ const MAX_CONSTRUCTION_BYTES: usize = 256 * 1024 * 1024;
 const MAX_SEARCH_ORDER: usize = 256;
 /// Implementation bound on cascade work, document-wide: every paragraph and
 /// run resolution visits each style of its search order and each attribute
-/// and element of the resolved property group once (one unit each), charged
-/// before the resolution is built.
+/// and element of the resolved property group (one unit each) and may process
+/// each attribute value (one unit per byte), charged before the resolution
+/// is built.
 const MAX_CASCADE_WORK: usize = 16 * 1024 * 1024;
 
 pub fn read(package: &OdfPackage) -> Result<Document, String> {
@@ -152,11 +153,52 @@ pub fn read(package: &OdfPackage) -> Result<Document, String> {
 #[derive(Default)]
 struct FontFaces {
     faces: HashMap<String, Face>,
+    /// Interned property strings (face families, languages) shared by every
+    /// resolution that uses them.
+    atoms: RefCell<HashSet<Rc<str>>>,
+}
+
+/// An interned string: equal atoms are the same allocation, so cached run
+/// properties share them and compare and hash by identity in O(1).
+#[derive(Clone, Debug)]
+struct Atom(Rc<str>);
+
+impl PartialEq for Atom {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for Atom {}
+
+impl std::hash::Hash for Atom {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::ptr::hash(Rc::as_ptr(&self.0) as *const u8, state);
+    }
+}
+
+impl std::ops::Deref for Atom {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FontFaces {
+    fn atom(&self, value: &str) -> Atom {
+        let mut atoms = self.atoms.borrow_mut();
+        if let Some(existing) = atoms.get(value) {
+            return Atom(existing.clone());
+        }
+        let atom: Rc<str> = value.into();
+        atoms.insert(atom.clone());
+        Atom(atom)
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct Face {
-    family: String,
+    family: Atom,
     generic: Option<&'static str>,
     pitch: Option<&'static str>,
     charset: Option<&'static str>,
@@ -193,7 +235,7 @@ impl FontFaces {
                 .attribute((NS_SVG, "font-family"))
                 .ok_or_else(|| invalid("a font face has no family"))?;
             let value = Face {
-                family: unquote_family(family)?,
+                family: self.atom(&unquote_family(family)?),
                 generic: generic_class(face.attribute((NS_STYLE, "font-family-generic")))?,
                 pitch: pitch(face.attribute((NS_STYLE, "font-pitch")))?,
                 charset: charset(face.attribute((NS_STYLE, "font-charset")))?,
@@ -218,7 +260,7 @@ impl FontFaces {
 fn used_font_table(used: &HashSet<Face>) -> Result<HashMap<String, Face>, String> {
     let mut table: HashMap<String, Face> = HashMap::new();
     for face in used {
-        if let Some(existing) = table.insert(face.family.clone(), face.clone()) {
+        if let Some(existing) = table.insert(face.family.to_string(), face.clone()) {
             if existing != *face {
                 return Err(unsupported("font-face-conflict"));
             }
@@ -233,7 +275,7 @@ fn metadata(
 ) -> BTreeMap<String, String> {
     table
         .values()
-        .filter_map(|face| field(face).map(|value| (face.family.clone(), value.to_string())))
+        .filter_map(|face| field(face).map(|value| (face.family.to_string(), value.to_string())))
         .collect()
 }
 
@@ -609,7 +651,8 @@ fn read_page_properties(
             ) => {}
             (NS_STYLE, "writing-mode") if matches!(value, "lr-tb" | "page") => {}
             (NS_STYLE, "layout-grid-mode") if value == "none" => {}
-            (NS_STYLE, name) if name.starts_with("layout-grid-") => {}
+            // Grid parameters are inert while the grid is off (§20.309).
+            (NS_STYLE, name) if name.starts_with("layout-grid-") && name != "layout-grid-mode" => {}
             (NS_LOEXT, "margin-gutter") if length_pt(value)? == 0.0 => {}
             (NS_STYLE, "shadow") if value == "none" => {}
             (NS_FO, "background-color") if value == "transparent" => {}
@@ -814,7 +857,7 @@ impl<'a> Reader<'a> {
         let mark = self.run_properties(&contexts, 0, ScriptClass::Latin)?;
         collected.paragraph.paragraph_mark_font_facts = Some(mark.font_facts());
         collected.paragraph.default_font_size = Some(mark.size);
-        collected.paragraph.default_font_family = Some(mark.family.clone());
+        collected.paragraph.default_font_family = Some(mark.family.to_string());
 
         let mut inline = Inline {
             contexts,
@@ -996,6 +1039,7 @@ impl<'a> Reader<'a> {
         for &token in tokens {
             let (c, context) = match token {
                 Token::LineBreak => {
+                    self.charge_construction(std::mem::size_of::<DocRun>())?;
                     paragraph.runs.push(DocRun::Break {
                         break_type: BreakType::Line,
                     });
@@ -1078,11 +1122,12 @@ impl<'a> Reader<'a> {
 
     fn charge_cascade(&self, styles: &[StyleRef<'a>], group: Group) -> Result<(), String> {
         let work = styles.iter().fold(0usize, |work, style| {
-            work.saturating_add(1).saturating_add(
-                style
-                    .group(group)
-                    .map_or(0, |p| p.attributes.len() + p.elements.len()),
-            )
+            work.saturating_add(1)
+                .saturating_add(style.group(group).map_or(0, |p| {
+                    p.attributes.len()
+                        + p.elements.len()
+                        + p.attributes.values().map(String::len).sum::<usize>()
+                }))
         });
         let total = self
             .cascade_work
@@ -1208,7 +1253,7 @@ fn collapse(tokens: Vec<Token>) -> Vec<Token> {
 /// Effective text properties of one script class.
 #[derive(Clone, PartialEq, Debug)]
 struct RunProperties {
-    family: String,
+    family: Atom,
     size: f64,
     bold: bool,
     italic: bool,
@@ -1222,8 +1267,8 @@ struct RunProperties {
     position: Option<f64>,
     caps: bool,
     kerning: Option<f64>,
-    lang_east_asia: Option<String>,
-    lang_bidi: Option<String>,
+    lang_east_asia: Option<Atom>,
+    lang_bidi: Option<Atom>,
 }
 
 impl RunProperties {
@@ -1373,10 +1418,10 @@ impl RunProperties {
             Some("true") => Some(0.0),
             _ => return Err(unsupported("letter-kerning-off")),
         };
-        let language = |language: &str, country: &str| -> Option<String> {
+        let language = |language: &str, country: &str| -> Option<Atom> {
             let language = cascade.get(NS_STYLE, language).filter(|v| *v != "none")?;
-            Some(
-                match cascade.get(NS_STYLE, country).filter(|v| *v != "none") {
+            Some(fonts.atom(
+                &match cascade.get(NS_STYLE, country).filter(|v| *v != "none") {
                     Some(country) => format!(
                         "{}-{}",
                         language.to_ascii_lowercase(),
@@ -1384,7 +1429,7 @@ impl RunProperties {
                     ),
                     None => language.to_ascii_lowercase(),
                 },
-            )
+            ))
         };
         Ok((
             Self {
@@ -1414,20 +1459,19 @@ impl RunProperties {
     fn retained_estimate(&self) -> usize {
         let strings = 4 * self.family.len()
             + self.underline.map_or(0, str::len)
-            + [
-                &self.color,
-                &self.background,
-                &self.lang_east_asia,
-                &self.lang_bidi,
-            ]
-            .iter()
-            .map(|value| value.as_ref().map_or(0, String::len))
-            .sum::<usize>();
+            + [&self.color, &self.background]
+                .iter()
+                .map(|value| value.as_ref().map_or(0, String::len))
+                .sum::<usize>()
+            + [&self.lang_east_asia, &self.lang_bidi]
+                .iter()
+                .map(|value| value.as_ref().map_or(0, |atom| atom.len()))
+                .sum::<usize>();
         std::mem::size_of::<DocRun>() + std::mem::size_of::<TextRun>() + strings
     }
 
     fn text_run(&self) -> TextRun {
-        let family = Some(self.family.clone());
+        let family = Some(self.family.to_string());
         TextRun {
             bold: self.bold,
             italic: self.italic,
@@ -1456,14 +1500,14 @@ impl RunProperties {
             position: self.position,
             all_caps: self.caps,
             kerning: self.kerning,
-            lang_east_asia: self.lang_east_asia.clone(),
-            lang_bidi: self.lang_bidi.clone(),
+            lang_east_asia: self.lang_east_asia.as_deref().map(str::to_string),
+            lang_bidi: self.lang_bidi.as_deref().map(str::to_string),
             ..TextRun::default()
         }
     }
 
     fn font_facts(&self) -> RunFontFacts {
-        let family = Some(self.family.clone());
+        let family = Some(self.family.to_string());
         RunFontFacts {
             font_family: family.clone(),
             font_family_high_ansi: family.clone(),
@@ -1584,7 +1628,7 @@ fn resolve_family(cascade: &Cascade<'_>, suffix: &str, fonts: &FontFaces) -> Res
                     .get(&(NS_STYLE.to_string(), format!("{name}{suffix}")))
             };
             return Ok(Face {
-                family: unquote_family(family)?,
+                family: fonts.atom(&unquote_family(family)?),
                 generic: generic_class(attribute("font-family-generic").map(String::as_str))?,
                 pitch: pitch(attribute("font-pitch").map(String::as_str))?,
                 charset: charset(attribute("font-charset").map(String::as_str))?,
@@ -1799,6 +1843,8 @@ mod tests {
         default_text: &'a str,
         /// Additional `style:font-face` declarations in styles.xml.
         faces: &'a str,
+        /// Additional `style:page-layout-properties` attributes.
+        page: &'a str,
         styles: &'a str,
         automatic: &'a str,
         master: &'a str,
@@ -1810,6 +1856,7 @@ mod tests {
             Self {
                 default_text: r#"style:font-name="Serif" fo:font-size="12pt" style:font-name-asian="Serif" style:font-size-asian="12pt" style:font-name-complex="Serif" style:font-size-complex="12pt" style:letter-kerning="true""#,
                 faces: "",
+                page: "",
                 styles: "",
                 automatic: "",
                 master: "",
@@ -1820,13 +1867,14 @@ mod tests {
 
     fn read_fixture(fixture: Fixture<'_>) -> Result<Document, String> {
         let styles = format!(
-            r#"<office:document-styles {NS} office:version="1.3">{}<office:styles><style:default-style style:family="paragraph"><style:text-properties {}/></style:default-style><style:default-style style:family="graphic"/>{}</office:styles><office:automatic-styles><style:page-layout style:name="pm1"><style:page-layout-properties fo:page-width="210mm" fo:page-height="297mm" fo:margin-top="20mm" fo:margin-bottom="20mm" fo:margin-left="25mm" fo:margin-right="25mm"/></style:page-layout></office:automatic-styles><office:master-styles><style:master-page style:name="Standard" style:page-layout-name="pm1">{}</style:master-page></office:master-styles></office:document-styles>"#,
+            r#"<office:document-styles {NS} office:version="1.3">{}<office:styles><style:default-style style:family="paragraph"><style:text-properties {}/></style:default-style><style:default-style style:family="graphic"/>{}</office:styles><office:automatic-styles><style:page-layout style:name="pm1"><style:page-layout-properties fo:page-width="210mm" fo:page-height="297mm" fo:margin-top="20mm" fo:margin-bottom="20mm" fo:margin-left="25mm" fo:margin-right="25mm"{}/></style:page-layout></office:automatic-styles><office:master-styles><style:master-page style:name="Standard" style:page-layout-name="pm1">{}</style:master-page></office:master-styles></office:document-styles>"#,
             FACES.replace(
                 "</office:font-face-decls>",
                 &format!("{}</office:font-face-decls>", fixture.faces)
             ),
             fixture.default_text,
             fixture.styles,
+            fixture.page,
             fixture.master
         );
         let content = format!(
@@ -2284,6 +2332,58 @@ mod tests {
         })
         .unwrap_err();
         assert!(error.contains("construction limit"), "{error}");
+    }
+
+    #[test]
+    fn shared_property_strings_and_line_breaks_stay_bounded() {
+        // Many distinct span contexts resolve to one long family: the face's
+        // interned family is shared, and equal properties merge into one run.
+        let family = "F".repeat(100_000);
+        let faces = format!(r#"<style:font-face style:name="Long" svg:font-family="'{family}'"/>"#);
+        let styles: String = (0..2000)
+            .map(|i| format!(r#"<style:style style:name="S{i}" style:family="text"><style:text-properties style:font-name="Long" style:font-name-asian="Long" style:font-name-complex="Long"/></style:style>"#))
+            .collect();
+        let body = format!(
+            "<text:p>{}</text:p>",
+            (0..2000)
+                .map(|i| format!(r#"<text:span text:style-name="S{i}">x</text:span>"#))
+                .collect::<String>()
+        );
+        let document = read_fixture(Fixture {
+            faces: &faces,
+            styles: &styles,
+            body: &body,
+            ..Fixture::default()
+        })
+        .unwrap();
+        assert_eq!(texts(paragraphs(&document)[0]), vec!["x".repeat(2000)]);
+
+        // Every line break is a retained run.
+        let breaks = MAX_CONSTRUCTION_BYTES / std::mem::size_of::<DocRun>() + 1;
+        let paragraph = format!("<text:p>{}</text:p>", "<text:line-break/>".repeat(900_000));
+        let error = read_fixture(Fixture {
+            body: &paragraph.repeat(breaks / 900_000 + 1),
+            ..Fixture::default()
+        })
+        .unwrap_err();
+        assert!(error.contains("construction limit"), "{error}");
+    }
+
+    #[test]
+    fn rejects_an_active_layout_grid() {
+        assert_eq!(
+            read_fixture(Fixture {
+                page: r#" style:layout-grid-mode="line" style:layout-grid-lines="20""#,
+                ..Fixture::default()
+            })
+            .unwrap_err(),
+            unsupported("page-layout-property")
+        );
+        assert!(read_fixture(Fixture {
+            page: r#" style:layout-grid-mode="none" style:layout-grid-lines="20""#,
+            ..Fixture::default()
+        })
+        .is_ok());
     }
 
     #[test]

@@ -47,4 +47,16 @@ describe('ODT through the DOCX Node session', () => {
     await expect(open(encrypted)).rejects.toBeInstanceOf(OoxmlError);
     await expect(open(encrypted)).rejects.toMatchObject({ code: 'unsupported-encryption' });
   });
+
+  it('passes caller-removed ZIP limits through as removed, not as the standard limit', async () => {
+    // One entry above the standard 4,096-entry limit.
+    const extraFiles = Array.from({ length: 4093 }, (_, i) => [`extra/${i}.txt`, ''] as const);
+    const bytes = buildOdtFixture({ body: '<text:p>x</text:p>', extraFiles });
+    await expect(open(bytes)).rejects.toMatchObject({ code: 'ooxml-resource-limit' });
+    const model = (await materializeDocxDocument(bytes, {
+      odt: testOdtSource(),
+      resourceLimits: { maxArchiveEntries: null },
+    })) as unknown as Model;
+    expect(model.body[0]?.runs[0]?.text).toBe('x');
+  });
 });
