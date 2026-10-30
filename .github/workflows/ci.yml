@@ -74,6 +74,13 @@ jobs:
       - name: Model crate opt-in feature tests
         run: cargo test -p docx-model --features owned-source-cursor
 
+      # The OpenDocument readers are feature-gated per format like the legacy
+      # readers; the workspace defaults above build only the shared layer.
+      - name: OpenDocument reader clippy and tests
+        run: |
+          cargo clippy -p opendocument-parser --all-targets --features odt -- -D warnings
+          cargo test -p opendocument-parser --features odt
+
   # RB8 — dependency vulnerability audit. Report-only for now
   # (continue-on-error): one known advisory already exists at introduction —
   # RUSTSEC-2026-0190 (anyhow < 1.0.103 unsound `Error::downcast_mut`), pulled
@@ -341,6 +348,7 @@ jobs:
           # companion too: the browser fixture uses its emitted source modules.
           pnpm build:runtime
           pnpm build:legacy
+          pnpm build:opendocument
           pnpm check:model-source-lazy-graph
           pnpm check:model-source-lazy-runtime
           pnpm check:production-render-workers

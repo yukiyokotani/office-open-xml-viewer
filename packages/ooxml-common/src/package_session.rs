@@ -649,6 +649,12 @@ impl PackageSession {
             .map(|index| self.entries[index].path.clone())
     }
 
+    /// Absolute offset of the entry's data in the package bytes.
+    pub(crate) fn entry_data_start(&self, path: &str) -> Option<usize> {
+        self.entry_index(path)
+            .map(|index| self.entries[index].data_start)
+    }
+
     /// Clone entry paths in deterministic validated-index order without
     /// exposing decoder metadata or borrowing the session internals.
     pub(crate) fn entry_paths(&self) -> Vec<String> {
@@ -944,6 +950,12 @@ impl PackageSessionHandle {
 
     pub fn entry_paths(&self) -> Vec<String> {
         self.inner.borrow().entry_paths()
+    }
+
+    /// Absolute offset of the validated entry's data in the package bytes,
+    /// for formats whose specification fixes an entry's physical position.
+    pub fn entry_data_start(&self, path: &str) -> Option<usize> {
+        self.inner.borrow().entry_data_start(path)
     }
 
     /// Close the shared package. All handle clones, operations, and entry

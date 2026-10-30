@@ -18,13 +18,20 @@ const run = (command, args, cwd = scratch) => execFileSync(command, args, { cwd,
 try {
   run(process.execPath, ['scripts/sync-companion-version.mjs'], root);
   const tarballs = [];
-  for (const directory of [root, join(root, 'packages/legacy-office')]) {
+  for (const directory of [root, join(root, 'packages/legacy-office'), join(root, 'packages/opendocument')]) {
     const packed = JSON.parse(run('npm', ['pack', '--json', '--pack-destination', scratch], directory));
-    const wasm = packed[0].files.map(file => file.path).filter(path => path.endsWith('.wasm')).sort();
-    if (directory !== root) {
+    const files = packed[0].files.map(file => file.path).sort();
+    const wasm = files.filter(path => path.endsWith('.wasm'));
+    if (directory.endsWith('opendocument')) {
+      // Exactly the reader assets: never the local private corpus.
+      assert.deepEqual(files, [
+        'LICENSE', 'README.md', 'THIRD_PARTY_NOTICES.md', 'dist/odt-source-module.mjs', 'dist/odt.mjs',
+        'dist/opendocument_odt_bg.wasm', 'dist/types/odt.d.ts', 'package.json',
+      ]);
+    } else if (directory !== root) {
       assert.deepEqual(wasm, ['doc', 'ppt', 'xls'].map(f => `dist/legacy_${f}_direct_bg.wasm`));
     } else {
-      assert.ok(packed[0].files.every(file => !/^dist\/legacy[-_]/.test(file.path)), 'root tarball contains a legacy reader asset');
+      assert.ok(files.every(path => !/^dist\/(?:legacy[-_]|opendocument|odt[-.])/.test(path)), 'root tarball contains a companion reader asset');
     }
     tarballs.push(join(scratch, packed[0].filename));
   }
@@ -33,7 +40,7 @@ try {
   // Fixture bundling is test setup only; the consumer itself resolves exclusively
   // from its installed packages. Extension aliases support the TS fixture imports.
   const fixtureEntry = join(scratch, 'fixtures.ts');
-  await writeFile(fixtureEntry, `export { buildDocFixture, buildXlsFixture, buildPptFixture } from ${JSON.stringify(join(root, 'packages/legacy-office/src/test-fixtures.ts'))};\nexport { buildPptShapeImageFillFixture } from ${JSON.stringify(join(root, 'packages/legacy-office/src/ppt-shape-image-fill-fixture.ts'))};\nexport { buildCfbFixture } from ${JSON.stringify(join(root, 'packages/core/src/testing/cfb-fixture.ts'))};`);
+  await writeFile(fixtureEntry, `export { buildDocFixture, buildXlsFixture, buildPptFixture } from ${JSON.stringify(join(root, 'packages/legacy-office/src/test-fixtures.ts'))};\nexport { buildPptShapeImageFillFixture } from ${JSON.stringify(join(root, 'packages/legacy-office/src/ppt-shape-image-fill-fixture.ts'))};\nexport { buildCfbFixture } from ${JSON.stringify(join(root, 'packages/core/src/testing/cfb-fixture.ts'))};\nexport { buildOdtFixture } from ${JSON.stringify(join(root, 'packages/opendocument/src/odt-fixture.ts'))};`);
   const fixturesBuild = await rolldown({ input: fixtureEntry, platform: 'node', resolve: { extensionAlias: { '.js': ['.ts', '.js'] } } });
   try { await fixturesBuild.write({ file: join(scratch, 'fixtures.mjs'), format: 'es', codeSplitting: false }); }
   finally { await fixturesBuild.close(); }
@@ -46,6 +53,8 @@ try {
     await writeFile(join(scratch, 'public', `unsupported.${family}`), new Uint8Array(fixtures.buildCfbFixture(['Root Entry', stream])));
   }
   await writeFile(join(scratch, 'public', 'deferred.ppt'), fixtures.buildPptFixture());
+  await writeFile(join(scratch, 'public', 'sample.odt'), fixtures.buildOdtFixture({ body: '<text:p>Hello ODT</text:p>' }));
+  await writeFile(join(scratch, 'public', 'unsupported.odt'), fixtures.buildOdtFixture({ body: '<table:table xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0"/>' }));
   await writeFile(join(scratch, 'node-smoke.mjs'), `
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
@@ -55,10 +64,11 @@ import { PptxViewer } from '@silurus/ooxml/pptx';
 import { legacyDoc, createLegacyDoc } from '@silurus/ooxml-legacy-office/doc';
 import { legacyXls, createLegacyXls } from '@silurus/ooxml-legacy-office/xls';
 import { legacyPpt, createLegacyPpt } from '@silurus/ooxml-legacy-office/ppt';
+import { odt, createOdt } from '@silurus/ooxml-opendocument/odt';
 import { materializeDocxDocument, materializeXlsxWorkbook, materializePptxPresentation, OoxmlError } from '@silurus/ooxml/node';
 import { assertCompanionRuntime, CompanionRuntimeMismatchError } from '@silurus/ooxml/internal/companion';
-for (const value of [DocxViewer, XlsxViewer, PptxViewer, createLegacyDoc, createLegacyXls, createLegacyPpt]) assert.equal(typeof value, 'function');
-for (const [value, target] of [[legacyDoc, 'docx'], [legacyXls, 'xlsx'], [legacyPpt, 'pptx']]) assert.equal(value.target, target);
+for (const value of [DocxViewer, XlsxViewer, PptxViewer, createLegacyDoc, createLegacyXls, createLegacyPpt, createOdt]) assert.equal(typeof value, 'function');
+for (const [value, target] of [[legacyDoc, 'docx'], [legacyXls, 'xlsx'], [legacyPpt, 'pptx'], [odt, 'docx']]) assert.equal(value.target, target);
 for (const [entry, key] of [['chart-ex','chartEx'], ['tiff','tiff']]) assert.equal(typeof (await import('@silurus/ooxml/' + entry))[key].render, 'function');
 assert.equal(typeof globalThis.document, 'undefined');
 assert.throws(() => assertCompanionRuntime('0.0.0', 'stale'), error => error instanceof CompanionRuntimeMismatchError && error.code === 'companion-runtime-mismatch');
@@ -69,17 +79,20 @@ const xls = await materializeXlsxWorkbook(await readFile('public/sample.xls'), {
 assert.equal(xls.worksheets.length, 1);
 const ppt = await materializePptxPresentation(await readFile('public/sample.ppt'), { legacyPpt });
 assert.match(JSON.stringify(ppt), /Picture fill text/);
+const odtDoc = await materializeDocxDocument(await readFile('public/sample.odt'), { odt });
+assert.match(JSON.stringify(odtDoc.body), /Hello ODT/);
 for (const [family, open, options] of [
   ['doc', materializeDocxDocument, { legacyDoc: createLegacyDoc() }],
   ['xls', materializeXlsxWorkbook, { legacyXls: createLegacyXls() }],
   ['ppt', materializePptxPresentation, { legacyPpt: createLegacyPpt() }],
+  ['odt', materializeDocxDocument, { odt: createOdt() }],
 ]) {
   await assert.rejects(async () => open(await readFile('public/unsupported.' + family), options),
     error => error instanceof OoxmlError && error.code === 'unsupported-content' && error.details.format === family && error.details.reason === 'source-subset');
 }
 await assert.rejects(async () => materializePptxPresentation(await readFile('public/deferred.ppt'), { legacyPpt }),
   error => error instanceof OoxmlError && error.code === 'unsupported-content' && error.details.format === 'ppt');
-console.log('Packed Node imports and all three legacy readers passed');
+console.log('Packed Node imports, all three legacy readers and the ODT reader passed');
 `);
   process.stdout.write(run(process.execPath, ['node-smoke.mjs']));
   await writeFile(join(scratch, 'index.html'), '<div id="result">loading</div><script type="module" src="/main.js"></script>');
@@ -90,11 +103,13 @@ import { PptxPresentation, PptxViewer } from '@silurus/ooxml/pptx';
 import { legacyDoc, createLegacyDoc } from '@silurus/ooxml-legacy-office/doc';
 import { legacyXls, createLegacyXls } from '@silurus/ooxml-legacy-office/xls';
 import { legacyPpt, createLegacyPpt } from '@silurus/ooxml-legacy-office/ppt';
+import { odt } from '@silurus/ooxml-opendocument/odt';
 try {
   for (const [family, Loader, Viewer, sourceOptions] of [
     ['doc', DocxDocument, DocxViewer, { legacyDoc }],
     ['xls', XlsxWorkbook, XlsxViewer, { legacyXls }],
     ['ppt', PptxPresentation, PptxViewer, { legacyPpt }],
+    ['odt', DocxDocument, DocxViewer, { odt }],
   ]) {
     for (const mode of ['main', 'worker']) {
       const bytes = await (await fetch('/sample.' + family)).arrayBuffer();
@@ -140,7 +155,7 @@ try {
   await page.waitForFunction(() => window.packedResult !== undefined, undefined, { timeout: 90_000 });
   assert.equal(await page.evaluate(() => window.packedResult), 'passed');
   assert.deepEqual(errors, []);
-  console.log('Packed Vite viewers/loaders: DOC/XLS/PPT main + worker passed');
+  console.log('Packed Vite viewers/loaders: DOC/XLS/PPT/ODT main + worker passed');
 } finally {
   await browser?.close();
   await server?.close();

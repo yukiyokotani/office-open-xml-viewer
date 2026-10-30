@@ -123,6 +123,11 @@ export function legacyBundleBoundary(): Plugin {
             || /@silurus\/ooxml-legacy-office/.test(moduleId)) {
             this.error(`${output.fileName} contains forbidden legacy module ${moduleId}`);
           }
+          // The OpenDocument companion is held to the same boundary.
+          if (/(?:^|[\\/])packages[\\/]opendocument(?:[\\/]|$)/.test(moduleId)
+            || /@silurus\/ooxml-opendocument/.test(moduleId)) {
+            this.error(`${output.fileName} contains forbidden OpenDocument module ${moduleId}`);
+          }
         }
         for (const imported of [...output.imports, ...(output.dynamicImports ?? [])]) {
           const child = bundle[imported];

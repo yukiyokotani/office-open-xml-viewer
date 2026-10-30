@@ -1,0 +1,9 @@
+{
+  "extends": "./packages/opendocument/tsconfig.json",
+  "compilerOptions": { "noEmit": false, "emitDeclarationOnly": true },
+  "include": [
+    "packages/opendocument/src/odt.ts",
+    "packages/opendocument/src/vite-env.d.ts",
+    "packages/core/src/vite-env.d.ts"
+  ]
+}

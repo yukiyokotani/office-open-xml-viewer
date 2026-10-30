@@ -1,0 +1,55 @@
+{
+  "name": "@silurus/ooxml-opendocument",
+  "version": "0.89.4",
+  "description": "Optional OpenDocument (ODT) model sources for @silurus/ooxml",
+  "license": "MIT",
+  "author": "Yuki Yokotani <silurus.dev@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yukiyokotani/office-open-xml-viewer.git",
+    "directory": "packages/opendocument"
+  },
+  "homepage": "https://ooxml.silurus.dev",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    "./odt": {
+      "types": "./dist/types/odt.d.ts",
+      "import": "./dist/odt.mjs",
+      "default": "./dist/odt.mjs"
+    }
+  },
+  "scripts": {
+    "wasm:odt": "cd parser && wasm-pack build --target web --out-dir ../src/wasm-odt --out-name opendocument_odt --features odt && node ../../../scripts/append-wasm-reinit.mjs ../src/wasm-odt/opendocument_odt.js",
+    "typecheck": "tsc --noEmit",
+    "build": "vite build && node ../../scripts/bundle-declarations.mjs odt",
+    "test": "cd ../.. && vitest run packages/opendocument/src"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.0.8",
+    "vitest": "^4.1.4",
+    "@silurus/ooxml-core": "workspace:*",
+    "@silurus/ooxml": "workspace:*"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "keywords": [
+    "ooxml",
+    "opendocument",
+    "odt",
+    "viewer",
+    "wasm"
+  ],
+  "peerDependencies": {
+    "@silurus/ooxml": "0.89.4"
+  }
+}

@@ -588,6 +588,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "opendocument-parser"
+version = "0.1.0"
+dependencies = [
+ "console_error_panic_hook",
+ "docx-model",
+ "js-sys",
+ "ooxml-common",
+ "roxmltree",
+ "wasm-bindgen",
+ "zip",
+]
+
+[[package]]
 name = "parking_lot"
 version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
