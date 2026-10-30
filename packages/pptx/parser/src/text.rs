@@ -1408,33 +1408,21 @@ pub(crate) fn read_level_run_properties_with_rels(
     theme: &HashMap<String, String>,
     rels: &HashMap<String, String>,
 ) -> LevelRunProperties {
-    // CT_TextListStyle.defPPr supplies the run defaults for every level.  A
-    // level's defRPr overlays it one property at a time (§21.1.2.4).
-    // Observed with PowerPoint for Mac PDF export (#1620 controls): a defPPr
-    // Latin face or size had no effect in any tier — shape lstStyle, layout
-    // slot, master placeholder, txStyles and defaultTextStyle — neither alone
-    // nor under an lvlNpPr that omits it; the level fell through as if defPPr
-    // were absent. Its fill behaved the same way (#1989 controls): a defPPr
-    // fill in a text box or autoshape lstStyle (with and without a fontRef
-    // colour), a slide placeholder lstStyle, a layout slot lstStyle, the
-    // master bodyStyle, the defaultTextStyle and a table cell lstStyle never
-    // coloured the text. Other defPPr character properties were not
-    // observable there and keep the §21.1.2.4 base role.
-    let base = child(list_style, "defPPr")
-        .and_then(|p| child(p, "defRPr"))
-        .map(|r| {
-            RunProperties::from_xml(r, theme)
-                .with_relationships(rels)
-                .with_chain_face_and_size(None, None)
-                .without_fill()
-        })
-        .unwrap_or_default();
+    // ECMA-376 §21.1.2.2.2 and §21.1.2.2.6 make CT_TextListStyle.defPPr the
+    // fallback for every level, but PowerPoint ignores the element
+    // ([MS-OE376] 2.1.1304(a), 2.1.1308(a)). Observed with PowerPoint for Mac PDF export (#1620, #1989 and #1992
+    // controls): no defPPr/defRPr character property reached a run, in any
+    // context — text box, autoshape with a fontRef, group child, table cell,
+    // slide/layout placeholder lstStyle, master title/body/other style,
+    // defaultTextStyle and SmartArt — covering size, bold, italic, underline
+    // with uLn/uFill, strike, caps, spacing, kerning, baseline, lang, outline,
+    // shadow, highlight, fill, the latin/ea/cs/sym faces and hlinkClick. The
+    // same properties on lvl1pPr applied. Only lvlNpPr is read.
     std::array::from_fn(|level| {
         child(list_style, &format!("lvl{}pPr", level + 1))
             .and_then(|p| child(p, "defRPr"))
             .map(|r| RunProperties::from_xml(r, theme).with_relationships(rels))
             .unwrap_or_default()
-            .over(&base)
     })
 }
 #[cfg(test)]
