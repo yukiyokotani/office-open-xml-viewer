@@ -35,7 +35,7 @@
 // (git-ignored). A rerun with the same label resumes; --fresh starts over.
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, unlinkSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { parseArgs } from 'node:util';
 import { checkoutRoot, corpusRepo } from './paths.mjs';
@@ -103,6 +103,44 @@ function settingsUnmasked(text) {
  * before returning. Returns the native binary path.
  */
 function patchedBuild(name, patches, wasmOut) {
+  const release = acquirePatchLock();
+  try {
+    return patchedBuildLocked(name, patches, wasmOut);
+  } finally {
+    release();
+  }
+}
+
+/**
+ * Patched builds edit the shared source, so concurrent harness runs in one
+ * checkout take turns: an exclusive lock file names the holder's PID, and a
+ * lock whose holder is gone is taken over.
+ */
+function acquirePatchLock() {
+  mkdirSync(join(checkoutRoot, 'target'), { recursive: true });
+  const lock = join(checkoutRoot, 'target/odf-harness-patch.lock');
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      const fd = openSync(lock, 'wx');
+      writeFileSync(fd, String(process.pid));
+      closeSync(fd);
+      return () => { try { unlinkSync(lock); } catch { /* already gone */ } };
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      const holder = Number(readFileSync(lock, 'utf8'));
+      let alive = false;
+      try { process.kill(holder, 0); alive = true; } catch { /* not running */ }
+      if (!alive) {
+        unlinkSync(lock);
+        continue;
+      }
+      if (attempt % 30 === 0) console.log(`waiting for harness run ${holder} to finish its patched build`);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
+    }
+  }
+}
+
+function patchedBuildLocked(name, patches, wasmOut) {
   const targetDir = join(checkoutRoot, `target/odf-harness-${name}`);
   const original = readFileSync(odtSource, 'utf8');
   const patched = patches.reduce((text, patch) => patch(text), original);

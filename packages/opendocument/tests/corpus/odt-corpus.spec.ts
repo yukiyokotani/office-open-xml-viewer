@@ -4,6 +4,7 @@
 // LibreOffice PDF of the same file. One JSON result per file lands in
 // <run>/results/; report.mjs aggregates them. Start it with run.mjs.
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { test } from '@playwright/test';
@@ -127,7 +128,10 @@ function sideBySide(reference: PNG, actual: PNG, diff: PNG): PNG {
 for (const file of files) {
   test(file.rel, async ({ page }) => {
     const resultPath = join(resultsDir, `${file.id}.json`);
-    if (existsSync(resultPath)) return;
+    // Reuse a result only for byte-identical inputs (run.mjs guards the code).
+    const inputs = createHash('sha256').update(readFileSync(file.odt))
+      .update(existsSync(file.pdf) ? readFileSync(file.pdf) : '').digest('hex');
+    if (existsSync(resultPath) && JSON.parse(readFileSync(resultPath, 'utf8')).inputs === inputs) return;
     const started = Date.now();
 
     const pdfCount = existsSync(file.pdf) ? pdfPageCount(file.pdf) : 0;
@@ -240,6 +244,7 @@ for (const file of files) {
     writeFileSync(resultPath, `${JSON.stringify({
       id: file.id,
       rel: file.rel,
+      inputs,
       status: result.status,
       ...(result.message ? { message: result.message } : {}),
       pdfPageCount: pdfCount,
