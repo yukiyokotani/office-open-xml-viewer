@@ -37,6 +37,13 @@ import type { FontResolverFailures } from './resolver-failures.js';
 import { chargeRetainedBytes, fontSourceId, refundRetainedBytes, SharedTask } from './source-cache.js';
 import type { FontFaceDeclaration, FontResolverSource, FontSourceCredentials } from './source.js';
 
+/**
+ * Abort reason of a deadline (the face-loading ceiling, a bridged call's
+ * timer). Any other abort is a cancellation: the requester is gone, which is
+ * no outcome for its document (see {@link acquireResolverFacesInRealm}).
+ */
+export const FONT_DEADLINE_REASON: unique symbol = Symbol('font deadline');
+
 /** Parallel face downloads per realm (the HTTP/1.1 per-host norm). */
 export const MAX_CONCURRENT_FACE_DOWNLOADS = 6;
 
@@ -215,7 +222,15 @@ async function acquireOne(
   }
   if (entry.settled) { entry.holders.add(holder); return entry.settled; }
   const result = await entry.task.join(signal);
-  if ('data' in result && entries.get(key) === entry) entry.holders.add(holder);
+  if (!('data' in result) || entries.get(key) !== entry) return result;
+  // The requester left (released, cancelled, past its deadline) between the
+  // task settling and this continuation: it takes no hold it could never
+  // return, and the bytes stay only if someone else holds them.
+  if (signal.aborted) {
+    if (entry.holders.size === 0) dropEntry(key, entry);
+    return { reason: 'timed out' };
+  }
+  entry.holders.add(holder);
   return result;
 }
 
@@ -312,8 +327,19 @@ export interface ResolverFaceRequest {
  */
 export type ResolverFaceAcquirer = (
   request: ResolverFaceRequest,
-  context: { readonly signal: AbortSignal; readonly deadline: number; readonly holder: object },
+  context: ResolverFaceAcquireContext,
 ) => Promise<ReadonlyMap<string, FaceAcquisition>>;
+
+export interface ResolverFaceAcquireContext {
+  /** The face-loading ceiling: aborts with {@link FONT_DEADLINE_REASON} at
+   * `deadline`, or as a cancellation when the requester is released. */
+  readonly signal: AbortSignal;
+  /** Aborts only when the requester is released (never at the deadline): a
+   * bridged acquirer waits for the page's verdict until then. */
+  readonly cancel: AbortSignal;
+  readonly deadline: number;
+  readonly holder: object;
+}
 
 /** Document-wide record keys of one acquired URL of one resolver source, in
  * the document's resolver failure record (`resolver-failures.ts`): its
@@ -351,6 +377,12 @@ export async function acquireResolverFacesInRealm(
   context: { readonly signal: AbortSignal; readonly deadline: number; readonly holder: object },
 ): Promise<Map<string, FaceAcquisition>> {
   const credentials = 'same-origin';
+  // Classified when the abort happens, by its reason: a deadline is an
+  // outcome, anything else (a release, a worker cancel) is not.
+  let cancelled = false;
+  const onAbort = () => { cancelled = context.signal.reason !== FONT_DEADLINE_REASON; };
+  if (context.signal.aborted) onAbort();
+  else context.signal.addEventListener('abort', onAbort, { once: true });
   const decided = (url: string): FaceAcquisition | undefined => {
     const reason = failures?.get(faceAcquisitionFailureKey(sourceId, url));
     if (reason !== undefined) return { reason };
@@ -365,8 +397,12 @@ export async function acquireResolverFacesInRealm(
     if (outcome) outcomes.set(url, outcome);
     else pending.push(url);
   }
-  const acquired = await acquireFaceUrls(pending, { credentials, ...context });
-  const cancelled = context.signal.aborted && Date.now() < context.deadline;
+  let acquired: Map<string, FaceAcquisition>;
+  try {
+    acquired = await acquireFaceUrls(pending, { credentials, ...context });
+  } finally {
+    context.signal.removeEventListener('abort', onAbort);
+  }
   for (const [url, outcome] of acquired) {
     const adopted = decided(url);
     if (adopted) { outcomes.set(url, adopted); continue; }

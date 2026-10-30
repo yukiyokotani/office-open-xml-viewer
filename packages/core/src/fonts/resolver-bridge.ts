@@ -49,7 +49,7 @@ import {
   HARD_MAX_FONT_SOURCE_DECLARATIONS,
   HARD_MAX_FONT_SOURCE_FAMILIES,
 } from '../worker/resource-policy.generated.js';
-import type { FaceAcquisition, ResolverFaceRequest } from './face-download.js';
+import type { FaceAcquisition, ResolverFaceAcquireContext, ResolverFaceRequest } from './face-download.js';
 import { bridgedFontSourceLimitError } from './resolver-admission.js';
 import { BridgedFamilyResolutions, type ResolverCallInfo } from './resolver-resolution.js';
 import {
@@ -214,14 +214,15 @@ export class WorkerFontResolverClient {
   }
 
   /**
-   * A `ResolverFaceAcquirer` (`source-session.ts`): main fetches the claimed
-   * URL faces. The session's face-loading ceiling bounds the wait: when its
-   * signal aborts, the call is cancelled on main and every face not yet
-   * answered fails with `'timed out'`.
+   * A `ResolverFaceAcquirer` (`face-download.ts`): main fetches the claimed
+   * URL faces. Main owns the deadline (the worker sends the time left of its
+   * face-loading ceiling) and the document's outcome, so the worker adopts
+   * main's verdict even past its own ceiling; only a release of the
+   * requesting session (`cancel`) abandons the call, cancelling it on main.
    */
   readonly acquire = (
     request: ResolverFaceRequest,
-    { signal, deadline }: { readonly signal: AbortSignal; readonly deadline: number },
+    { cancel: signal, deadline }: ResolverFaceAcquireContext,
   ): Promise<ReadonlyMap<string, FaceAcquisition>> => {
     const urls = [...new Set(request.families.flatMap(({ urls: list }) => list))];
     const timedOut = () => new Map<string, FaceAcquisition>(urls.map((url) => [url, { reason: 'timed out' }]));

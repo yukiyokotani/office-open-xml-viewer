@@ -22,7 +22,12 @@
  */
 import { fontSourceViolationFromWire } from '../errors/font-source-limit.js';
 import { OoxmlError } from '../errors/ooxml-error.js';
-import { acquireResolverFacesInRealm, isDownloadableFace, releaseAcquiredFaces } from './face-download.js';
+import {
+  FONT_DEADLINE_REASON,
+  acquireResolverFacesInRealm,
+  isDownloadableFace,
+  releaseAcquiredFaces,
+} from './face-download.js';
 import { FONT_LOAD_CEILING_MS } from './font-registry.js';
 import {
   copiedForTransfer,
@@ -237,7 +242,7 @@ export class FontResolverBridgeHost {
     const controller = new AbortController();
     const acquisition = { controller, generation: request.generation };
     this.acquisitions.set(key, acquisition);
-    const timer = setTimeout(() => controller.abort(), budget);
+    const timer = setTimeout(() => controller.abort(FONT_DEADLINE_REASON), budget);
     const urls = [...asked].filter((url) => allowed.has(url));
     void acquireResolverFacesInRealm(this.failures, cache.id, urls, {
       signal: controller.signal, deadline: Date.now() + budget, holder: this,

@@ -41,6 +41,7 @@ interface MainRealm extends WorkerRealm {
   readonly acquiredFaceCount: typeof import('./face-download.js').acquiredFaceCount;
   readonly inRealmResolverFaceAcquirer: typeof import('./face-download.js').inRealmResolverFaceAcquirer;
   readonly acquireResolverFacesInRealm: typeof import('./face-download.js').acquireResolverFacesInRealm;
+  readonly FONT_DEADLINE_REASON: symbol;
 }
 const worker1: WorkerRealm = {
   FontSourceSession, WorkerFontResolverClient, assertFontSourceDescriptors, retainedFontSourceBytes, liveSourceCacheCount,
@@ -74,6 +75,7 @@ async function loadRealm() {
     acquiredFaceCount: acquisition.acquiredFaceCount,
     inRealmResolverFaceAcquirer: acquisition.inRealmResolverFaceAcquirer,
     acquireResolverFacesInRealm: acquisition.acquireResolverFacesInRealm,
+    FONT_DEADLINE_REASON: acquisition.FONT_DEADLINE_REASON,
   };
 }
 beforeAll(async () => {
@@ -1017,7 +1019,7 @@ describe('fontResolver bridge: the page fetches resolver URLs', () => {
       { signal: viewerAbort.signal, deadline: Date.now() - 1, holder: viewer.holder });
     const workerPending = main.acquireResolverFacesInRealm(failures, sourceId, [url],
       { signal: new AbortController().signal, deadline: Date.now() + 60_000, holder: worker.holder });
-    viewerAbort.abort();
+    viewerAbort.abort(main.FONT_DEADLINE_REASON);
     expect(await viewerPending).toEqual(new Map([[url, { reason: 'timed out' }]]));
     release();
     // The worker adopts the document's outcome instead of painting bytes the
@@ -1029,6 +1031,65 @@ describe('fontResolver bridge: the page fetches resolver URLs', () => {
     expect(calls).toEqual([url]);
     main.releaseAcquiredFaces(viewer.holder);
     main.releaseAcquiredFaces(worker.holder);
+  });
+
+  it('lets the worker adopt the page\'s acquisition verdict after its own ceiling', async () => {
+    vi.useFakeTimers();
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    G.fetch = vi.fn(async () => { await gate; return { ok: true, status: 200, arrayBuffer: async () => new Uint8Array(16).buffer }; });
+    const failures = new Map<string, string>();
+    const source = fontResolver(() => URL_FACES().slice(0, 1));
+    const link = bridge([source], { failures });
+    const { session, set } = link.session();
+    const pending = session.ensure(demand(['Private Face']));
+    await vi.waitFor(() => expect(kinds(link.toMain)).toContain('ooxmlAcquireFonts'));
+    // The page acquires in time, but its reply reaches a busy worker only
+    // after the worker's own face-loading ceiling.
+    link.pause();
+    release();
+    await vi.waitFor(() => expect(kinds(link.toWorker)).toContain('ooxmlFontsAcquired'));
+    await vi.advanceTimersByTimeAsync(20_000);
+    link.resume();
+    await vi.advanceTimersByTimeAsync(0);
+    const loaded = await pending;
+    expect(loaded.faces).toHaveLength(1);
+    expect(set.faces.map((face) => face.bytes)).toEqual([16]);
+    // An XLSX viewer realm of the same document paints the same face.
+    const viewer = new main.FontSourceSession({
+      sources: [source], fontSet: asSet(fakeSet()), resolverFailures: failures,
+      acquireResolverFaces: main.inRealmResolverFaceAcquirer(failures),
+    });
+    sessions.push(viewer);
+    expect((await viewer.ensure(demand(['Private Face']))).faces).toHaveLength(1);
+    session.release();
+    viewer.release();
+    link.host.dispose();
+  });
+
+  it('never records a cancelled request as the document\'s outcome', async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    G.fetch = vi.fn(async () => { await gate; return { ok: true, status: 200, arrayBuffer: async () => new Uint8Array(16).buffer }; });
+    const failures = new Map<string, string>();
+    const source = fontResolver(() => URL_FACES().slice(0, 1));
+    const url = 'https://fonts.app.example/private-400.woff2';
+    const sourceId = (await import('./source-cache.js')).fontSourceId(source);
+    const closing = new AbortController();
+    const live = {};
+    // Cancelled (its session released) before its deadline; it resumes only
+    // after that deadline has passed.
+    const cancelled = main.acquireResolverFacesInRealm(failures, sourceId, [url],
+      { signal: closing.signal, deadline: Date.now() + 5, holder: {} });
+    const other = main.acquireResolverFacesInRealm(failures, sourceId, [url],
+      { signal: new AbortController().signal, deadline: Date.now() + 60_000, holder: live });
+    closing.abort();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await cancelled;
+    release();
+    expect('data' in ((await other).get(url) ?? {})).toBe(true);
+    expect([...failures.keys()].some((key) => key.includes('\u0000acquire\u0000'))).toBe(false);
+    main.releaseAcquiredFaces(live);
   });
 
   it('adopts bytes another requester of the document received', async () => {
@@ -1190,6 +1251,31 @@ describe('face acquisition', () => {
     expect(main.retainedFontSourceBytes()).toBe(16);
     main.releaseAcquiredFaces(holder);
     expect(main.retainedFontSourceBytes()).toBe(0);
+  });
+
+  it('takes no hold for a requester released while its completed join resumes', async () => {
+    // The release lands somewhere between the download settling and the
+    // join's continuation: whichever microtask it is, nothing stays held.
+    for (let delay = 0; delay < 12; delay++) {
+      const controller = new AbortController();
+      const holder = {};
+      G.fetch = vi.fn(async () => ({
+        ok: true, status: 200,
+        arrayBuffer: async () => {
+          let step: Promise<void> = Promise.resolve();
+          for (let index = 0; index < delay; index++) step = step.then(() => undefined);
+          // As FontSourceSession.release(): abort, then return every hold.
+          void step.then(() => { controller.abort(); main.releaseAcquiredFaces(holder); });
+          return new Uint8Array(16).buffer;
+        },
+      }));
+      await main.acquireFaceUrls([`https://fonts.app.example/race-${delay}.woff2`],
+        { credentials: 'omit', signal: controller.signal, deadline: Date.now() + 60_000, holder });
+      // The release above was the holder's last: nothing may hold it again.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(main.acquiredFaceCount(), `delay ${delay}`).toBe(0);
+      expect(main.retainedFontSourceBytes(), `delay ${delay}`).toBe(0);
+    }
   });
 
   it('fails a body that completes after the deadline, whatever the timers did', async () => {

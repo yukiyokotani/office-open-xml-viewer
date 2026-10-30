@@ -54,6 +54,7 @@ import {
 } from '../worker/resource-policy.generated.js';
 import { parseUnicodeRange, resolveCssSource } from './css-source.js';
 import {
+  FONT_DEADLINE_REASON,
   acquireFaceUrls,
   isDownloadableFace,
   releaseAcquiredFaces,
@@ -271,7 +272,7 @@ function ceilingSignal(parent: AbortSignal, ms: number): {
   const deadline = Date.now() + ms;
   const onAbort = () => controller.abort();
   parent.addEventListener('abort', onAbort, { once: true });
-  const timer = setTimeout(() => { expired = true; controller.abort(); }, ms);
+  const timer = setTimeout(() => { expired = true; controller.abort(FONT_DEADLINE_REASON); }, ms);
   if (parent.aborted) controller.abort();
   return {
     signal: controller.signal,
@@ -560,7 +561,7 @@ export class FontSourceSession {
     }
     if (!omitted.length && !bridged.size) return;
     const deadline = Date.now() + ceiling.remaining();
-    const context = { signal: ceiling.signal, deadline, holder: this };
+    const context = { signal: ceiling.signal, cancel: this.controller.signal, deadline, holder: this };
     const urlsOf = (state: Claimed) => state.declarations.filter(isDownloadableFace).map(({ url }) => url as string);
     const batches: Promise<[readonly [string, Claimed][], ReadonlyMap<string, FaceAcquisition>]>[] = [];
     if (omitted.length) {
