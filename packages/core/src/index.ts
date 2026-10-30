@@ -119,6 +119,8 @@ export {
   type OoxmlResourceUsageSnapshot,
   type OoxmlResourceViolation,
 } from './errors/ooxml-error';
+// Replacement text for the library's own part-failure placeholder (#1974).
+export type { ErrorPlaceholderOption, ErrorPlaceholderText } from './internal/part-failures';
 // CFB (OLE2) container sniffer: the `load()` factories call this on the raw
 // bytes before touching the parser worker, so a password-protected or legacy
 // .doc/.xls/.ppt file becomes a typed OoxmlError instead of an opaque zip error.

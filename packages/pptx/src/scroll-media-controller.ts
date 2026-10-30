@@ -27,6 +27,7 @@ interface MediaHooks<Slot extends MediaSlot> {
   width(): number;
   height(): number;
   imageResources(): NonNullable<Parameters<PptxPresentation['presentSlide']>[2]>['imageResources'];
+  errorPlaceholder?(): NonNullable<Parameters<PptxPresentation['presentSlide']>[2]>['errorPlaceholder'];
   textSelection(): boolean;
   findActive(): boolean;
   mediaEnabled(): boolean;
@@ -58,6 +59,7 @@ export class PptxScrollMediaController<Slot extends MediaSlot> {
     const wantRuns = wantOverlay || this.hooks.findActive();
     return presentation.presentSlide(slot.canvas, i, {
       width, dpr, imageResources: this.hooks.imageResources(),
+      ...this.errorPlaceholderOption(),
       onTextRun: wantRuns ? (run) => runs.push(run) : undefined,
       onError: (error) => {
         if (generation === slot.presentationGeneration) this.hooks.reportError(error);
@@ -115,6 +117,7 @@ export class PptxScrollMediaController<Slot extends MediaSlot> {
     const wantRuns = wantOverlay || this.hooks.findActive();
     void presentation.presentSlide(spare, i, {
       width, dpr,
+      ...this.errorPlaceholderOption(),
       onTextRun: wantRuns ? (run) => runs.push(run) : undefined,
       onError: (error) => {
         if (generation === slot.presentationGeneration) this.hooks.reportError(error);
@@ -153,6 +156,11 @@ export class PptxScrollMediaController<Slot extends MediaSlot> {
     return generation === slot.presentationGeneration && slot.mediaInteractive &&
       epoch === this.hooks.epoch() && this.hooks.slots().get(i) === slot &&
       slot.renderedSlide === i;
+  }
+
+  private errorPlaceholderOption() {
+    const errorPlaceholder = this.hooks.errorPlaceholder?.();
+    return errorPlaceholder === undefined ? {} : { errorPlaceholder };
   }
 
   destroy(): void {

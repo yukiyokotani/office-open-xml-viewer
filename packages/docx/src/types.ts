@@ -96,7 +96,8 @@ export interface DocxDocumentModel {
    *  carried — so the viewer shows a visible placeholder page instead of
    *  throwing. Absent (`undefined`) for every healthy document. Input that is not
    *  a WordprocessingML package (not a ZIP, no `[Content_Types].xml`, or no
-   *  `word/document.xml`) is rejected with `OoxmlError('not-ooxml')` instead. */
+   *  `word/document.xml`) is rejected with `OoxmlError('not-ooxml')` instead.
+   *  Also listed by `DocxDocument.partFailures` (#1974). */
   parseError?: string;
 }
 
@@ -1857,4 +1858,9 @@ export interface RenderPageOptions {
    *  to changed lines. Selects layout geometry (hiding deletions changes line
    *  breaking), so each value is a separate cached layout variant. */
   showTrackedChanges?: boolean;
+  /** Replacement text for the "This document could not be displayed"
+   *  placeholder page shown when the document's main part failed to parse
+   *  (see {@link DocxDocument.partFailures}). Static text, or a function of the
+   *  failure evaluated on the main thread. Ignored for a healthy document. */
+  errorPlaceholder?: import('@silurus/ooxml-core').ErrorPlaceholderOption<import('./part-failures').DocxPartFailure>;
 }

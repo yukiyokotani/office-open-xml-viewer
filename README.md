@@ -1210,6 +1210,74 @@ try {
 }
 ```
 
+### Partially unreadable files
+
+When one package part fails to parse, the rest of the file still loads.
+`load()` resolves, and the broken part is replaced by a placeholder card:
+
+- **DOCX:** a "This document could not be displayed" page replaces a broken
+  `word/document.xml`.
+- **PPTX:** a "Slide N could not be displayed" card replaces each broken slide.
+  The other slides render normally.
+- **XLSX:** a `Sheet "…" could not be displayed` card replaces each broken
+  worksheet, chartsheet or dialogsheet part. A broken shared part such as
+  `xl/sharedStrings.xml` still opens the workbook but paints no placeholder.
+
+These partial failures never reach `onError` and never reject a Promise. To
+find them, read `partFailures` on the engine or the viewer, or pass
+`onPartFailure`, which is called once per failed part:
+
+```ts
+const viewer = new XlsxViewer(container, {
+  onPartFailure(failure) {
+    // failure.kind is 'sheet' (with sheetIndex and sheetName) or 'workbook'.
+    statusLine.textContent = `Part could not be read: ${failure.message}`;
+  },
+});
+await viewer.load(file);
+console.log(viewer.partFailures);
+```
+
+When each failure becomes known:
+
+- **DOCX:** before `load()` resolves.
+- **PPTX:** before `load()` resolves. With `progressiveLayout`, a slide's
+  failure is known before it becomes available, and the list is complete after
+  `waitUntilLayoutComplete()`.
+- **XLSX:** a broken shared part is known before `load()` resolves. Worksheets
+  are parsed lazily, so a broken sheet is reported when its model is first
+  loaded: when a viewer shows it, or when you call `getWorksheet(i)`. In the
+  `'skip'` hidden-sheet mode, a hidden sheet is reported only if it is opened
+  explicitly with `goToSheet(i)`.
+
+`errorPlaceholder` replaces the placeholder's title and detail text. It is
+accepted by the viewers and by the engines' render options. It never changes
+the warning glyph, the colours, the card or the page, slide or sheet size.
+
+- Pass an object `{ title?, detail? }`. Omitting a field keeps the built-in
+  text, and `detail: null` hides the detail line.
+- Or pass a function of the failure that returns that object, or `undefined`
+  for the built-in text. The function always runs on the main thread, also in
+  `mode: 'worker'`; only its text is sent to the worker. It runs only for
+  failed parts, and it may run on every repaint, so keep it cheap and side
+  effect free. If it throws or returns an invalid value, that render rejects.
+
+```ts
+const viewer = new PptxViewer(canvas, {
+  errorPlaceholder: (failure) => ({
+    title: `スライド ${failure.slideNumber} を表示できません`,
+    detail: null,
+  }),
+});
+```
+
+`message` is the parser's part-tagged diagnostic, such as
+`ppt/slides/slide3.xml: …`, clamped to 1 KiB in the failure record. Each
+engine keeps at most 1 MiB of these messages; past that, a record keeps its
+index and name with an empty `message`. `message` and XLSX `sheetName` come
+from the file, so treat them as untrusted text: put them in the DOM with
+`textContent`, never `innerHTML`. The library draws them only as canvas text.
+
 ## Security & Privacy
 
 - **Canvas-only rendering.** Documents are decoded and drawn to an `HTMLCanvasElement`. No script, link, form, or other active content from the source file is executed or injected into the DOM.

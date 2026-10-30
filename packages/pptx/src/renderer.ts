@@ -14,6 +14,19 @@ import { formatAutoNum } from './autonum-label.js';
 import { fontFamilyKey } from '@silurus/ooxml-core/internal/font-sources';
 import { chartFontSubstitutions, withChartFontSubstitutions } from '@silurus/ooxml-core/internal/chart-font-sources';
 import type { CjkLang } from '@silurus/ooxml-core';
+import {
+  clampPartFailureMessage,
+  errorPlaceholderDetail,
+  errorPlaceholderTitle,
+  prepareErrorPlaceholder,
+  resolvedFromWire,
+  resolveErrorPlaceholderFor,
+  wireErrorPlaceholder,
+  type ErrorPlaceholderOption,
+  type ResolvedErrorPlaceholder,
+  type WireErrorPlaceholder,
+} from '@silurus/ooxml-core/internal/part-failures';
+import type { PptxPartFailure } from './part-failures.js';
 import { normalizeLocalFontMetricFamily } from '@silurus/ooxml-core';
 import { containsHanScript } from '@silurus/ooxml-core/internal/script-preload-accumulator';
 import type {
@@ -8117,6 +8130,13 @@ export type SlideRenderOptions = RenderOptions & {
   chartEx?: ChartExRenderer;
   tiff?: TiffRenderer;
   dim?: DimOptions;
+  /**
+   * Replacement text for the "Slide N could not be displayed" placeholder of a
+   * slide whose part failed to parse (`slide.parseError`, #1974). Static text,
+   * or a function of the failure, evaluated in this realm. Ignored for a
+   * healthy slide.
+   */
+  errorPlaceholder?: ErrorPlaceholderOption<PptxPartFailure>;
 };
 
 /** Presentation-owned font aliases are intentionally kept out of the public
@@ -8133,6 +8153,9 @@ type InternalSlideRenderOptions = SlideRenderOptions & {
   embeddedFontAuthoredFamilies?: ReadonlyMap<string, string>;
   embeddedFontTuples?: ReadonlySet<string>;
   svgDecoder?: SvgBlobDecoder;
+  /** Placeholder text already resolved on the main thread. Takes precedence
+   * over {@link SlideRenderOptions.errorPlaceholder}. */
+  errorPlaceholderText?: WireErrorPlaceholder;
 };
 
 /**
@@ -8165,6 +8188,7 @@ function drawParseErrorPlaceholder(
   heightPx: number,
   slideNumber: number,
   message: string,
+  placeholder: ResolvedErrorPlaceholder | null,
 ): void {
   ctx.save();
   // Neutral card fill + dashed border, inset from the slide edge.
@@ -8190,7 +8214,16 @@ function drawParseErrorPlaceholder(
   const headSize = Math.max(11, Math.min(widthPx, heightPx) * 0.045);
   ctx.fillStyle = '#333333';
   ctx.font = `600 ${headSize}px sans-serif`;
-  ctx.fillText(`Slide ${slideNumber} could not be displayed`, cx, heightPx * 0.52);
+  ctx.fillText(
+    errorPlaceholderTitle(placeholder, `Slide ${slideNumber} could not be displayed`),
+    cx,
+    heightPx * 0.52,
+  );
+  const detail = errorPlaceholderDetail(placeholder, message);
+  if (detail === null) {
+    ctx.restore();
+    return;
+  }
 
   // Error detail (part path + reason), wrapped to the card width and clipped to
   // a few lines so a long message never overflows the frame.
@@ -8198,7 +8231,7 @@ function drawParseErrorPlaceholder(
   ctx.fillStyle = '#666666';
   ctx.font = `${detailSize}px sans-serif`;
   const maxLineWidth = widthPx - pad * 4;
-  const words = message.split(/\s+/);
+  const words = detail.split(/\s+/);
   const lines: string[] = [];
   let line = '';
   for (const word of words) {
@@ -8253,6 +8286,24 @@ export async function renderSlideWithEmbeddedFonts(
   opts: InternalSlideRenderOptions = {},
   onTextRun?: TextRunCallback,
 ): Promise<HTMLCanvasElement | OffscreenCanvas> {
+  if (opts.errorPlaceholder !== undefined) {
+    // In-realm resolution for direct callers: the renderer has the slide, so
+    // the failure needs no presentation-level record.
+    const { errorPlaceholder, ...rest } = opts;
+    const prepared = prepareErrorPlaceholder<PptxPartFailure>(errorPlaceholder);
+    opts = rest;
+    if (slide.parseError && opts.errorPlaceholderText === undefined) {
+      opts = {
+        ...rest,
+        errorPlaceholderText: wireErrorPlaceholder(resolveErrorPlaceholderFor(prepared, Object.freeze({
+          kind: 'slide' as const,
+          slideIndex: slide.index,
+          slideNumber: slide.slideNumber,
+          message: clampPartFailureMessage(slide.parseError),
+        }))),
+      };
+    }
+  }
   // The core document admission queue serializes image-bearing paints for this
   // deck, so concurrent slide renders cannot each consume the full budget. Its
   // render-pass lease also pins decoded bitmaps: LRU eviction removes the cache
@@ -8417,7 +8468,14 @@ async function renderSlideLeased(
   // placeholder — correctly sized so navigation geometry is unchanged — instead
   // of a blank frame, and stop. Healthy slides (no parseError) are unaffected.
   if (slide.parseError) {
-    drawParseErrorPlaceholder(beginPaint(), canvasW, canvasH, slide.slideNumber, slide.parseError);
+    drawParseErrorPlaceholder(
+      beginPaint(),
+      canvasW,
+      canvasH,
+      slide.slideNumber,
+      slide.parseError,
+      resolvedFromWire(opts.errorPlaceholderText),
+    );
     return canvas;
   }
 

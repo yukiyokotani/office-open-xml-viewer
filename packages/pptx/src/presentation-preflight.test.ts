@@ -456,5 +456,44 @@ describe('font-source demand facts (LoadOptions.fonts)', () => {
     builder.addSlide(slide(1, 'B', { elements: [] }));
     expect(builder.finish().fontPreloadFacts?.substituteScripts).toEqual({ 'bullet face': ['arabic'] });
   });
+
+  it('#1974 keeps slide failures outside the measured projection', () => {
+    const healthy = new PresentationPreflightBuilder(bootstrap);
+    const broken = new PresentationPreflightBuilder(bootstrap);
+    const brokenSlide = slide(1, '', { elements: [], parseError: `ppt/slides/slide2.xml: ${'x'.repeat(5000)}` });
+    healthy.addSlide(slide(0, 'a'));
+    broken.addSlide(slide(0, 'a'));
+    expect(broken.latestPartFailure).toBeUndefined();
+    healthy.addSlide(slide(1, '', { elements: [] }));
+    broken.addSlide(brokenSlide);
+    expect(broken.projectedBytes).toBe(healthy.projectedBytes);
+    expect(broken.latestPartFailure).toMatchObject({ kind: 'slide', slideIndex: 1, slideNumber: 2 });
+    expect(new TextEncoder().encode(broken.latestPartFailure!.message).length).toBeLessThanOrEqual(1024);
+    expect(broken.finish()).toEqual(healthy.finish());
+    expect(broken.partFailures).toHaveLength(1);
+  });
+
+  it('#1974 a deck exactly at the projection limit still loads with a broken slide', () => {
+    const probe = new PresentationPreflightBuilder(bootstrap);
+    probe.addSlide(slide(0, 'a'));
+    probe.addSlide(slide(1, '', { elements: [] }));
+    // The prepare-time peak can exceed the final size; find the smallest limit
+    // the healthy deck accepts, then load the broken deck under it.
+    let limit = probe.projectedBytes;
+    for (;;) {
+      try {
+        const candidate = new PresentationPreflightBuilder(bootstrap, { maxProjectionBytes: limit });
+        candidate.addSlide(slide(0, 'a'));
+        candidate.addSlide(slide(1, '', { elements: [] }));
+        break;
+      } catch {
+        limit += 1;
+      }
+    }
+    const broken = new PresentationPreflightBuilder(bootstrap, { maxProjectionBytes: limit });
+    broken.addSlide(slide(0, 'a'));
+    expect(() => broken.addSlide(slide(1, '', { elements: [], parseError: `ppt/slides/slide2.xml: ${'y'.repeat(4096)}` }))).not.toThrow();
+    expect(broken.partFailures.map((f) => f.slideIndex)).toEqual([1]);
+  });
 });
 

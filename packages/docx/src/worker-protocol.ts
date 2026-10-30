@@ -44,6 +44,9 @@ export interface DocumentMeta {
   /** ECMA-376 §17.13.5 revision ranges joined to retained source identities.
    * Deletions carry a deterministic final-state geometry fallback. */
   revisionAnchorRanges?: RevisionAnchorRange[];
+  /** Set when the main part failed to parse (#1974). The message is clamped in
+   *  the worker; the full string stays in the worker's paint model. */
+  partFailure?: { readonly message: string };
 }
 
 /** Geometry and layout-derived indexes for one retained worker variant.
@@ -96,8 +99,11 @@ export interface DocumentLayoutPartial {
   review?: Pick<DocumentMeta, 'revisions' | 'comments' | 'footnotes' | 'endnotes' | 'resourceDiagnostics'>;
 }
 
-/** Serializable subset of RenderPageOptions (callbacks cannot cross the wire). */
-export type WireRenderPageOptions = Omit<RenderPageOptions, 'onTextRun'>;
+/** Serializable subset of RenderPageOptions (callbacks cannot cross the wire).
+ * `errorPlaceholder` is resolved on the main thread and sent only as text. */
+export type WireRenderPageOptions = Omit<RenderPageOptions, 'onTextRun' | 'errorPlaceholder'> & {
+  errorPlaceholderText?: import('@silurus/ooxml-core/internal/part-failures').WireErrorPlaceholder;
+};
 
 // The base `parse` arm from types.ts is intentionally NOT reused: the render
 // worker's `parse` carries the font-source descriptors, and two `parse`

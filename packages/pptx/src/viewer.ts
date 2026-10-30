@@ -49,6 +49,8 @@ import {
   MAX_ELEMENT_TEXT_CHARACTERS,
 } from './element-selection';
 import { renderPptxFocusedSlide } from './focused-view-runtime';
+import { PartFailureDelivery, prepareErrorPlaceholder } from '@silurus/ooxml-core/internal/part-failures';
+import { pptxPartFailureLog, type PptxPartFailure } from './part-failures';
 import {
   subscribePptxLayout,
   type PptxLayoutPublication,
@@ -83,6 +85,21 @@ export interface PptxViewerOptions extends Pick<RenderOptions, 'width' | 'dpr' |
    * trap, not a reliably classified OOM.
    */
   onError?: (err: Error) => void;
+  /**
+   * Replacement text for the "Slide N could not be displayed" placeholder of a
+   * slide whose part failed to parse (#1974). Static text, or a function of
+   * the failure evaluated on the main thread (also in worker mode). `detail:
+   * null` hides the detail line. Ignored for healthy slides.
+   */
+  errorPlaceholder?: import('@silurus/ooxml-core').ErrorPlaceholderOption<import('./part-failures').PptxPartFailure>;
+  /**
+   * Called once per loaded presentation for each slide whose part failed to
+   * parse (#1974). Failures known at load are delivered before `load()`
+   * resolves; with `progressiveLayout`, later ones when the slide is reached.
+   * Never routed to `onError`; `load()` still resolves. The same records are
+   * available from `partFailures`.
+   */
+  onPartFailure?: (failure: Readonly<import('./part-failures').PptxPartFailure>) => void;
   /** IX9 zoom contract ({@link ZoomableViewer}) — the clamp range for
    *  {@link PptxViewer.setScale} / `zoomIn` / `zoomOut` / `fitWidth` / `fitPage`,
    *  as user-facing zoom factors (`1` = 100% = the slide at its natural
@@ -206,6 +223,7 @@ export class PptxViewer implements ZoomableViewer {
   private readonly renderDispatcher: StaticCanvasRenderDispatcher;
   private readonly errorRouter: CanvasViewerErrorRouter;
   private destroyed = false;
+  private readonly _partFailureDelivery: PartFailureDelivery<PptxPartFailure>;
   private selectionChangeListener: (() => void) | null = null;
   private selectionContextKey = 'null';
   private elementClickListener: ((event: MouseEvent) => void) | null = null;
@@ -273,6 +291,8 @@ export class PptxViewer implements ZoomableViewer {
       this._mode === 'worker' && !opts.enableMediaPlayback,
     );
     this.errorRouter = new CanvasViewerErrorRouter('PptxViewer', opts.onError);
+    prepareErrorPlaceholder(opts.errorPlaceholder);
+    this._partFailureDelivery = new PartFailureDelivery('PptxViewer', opts.onPartFailure, (failure) => failure.slideIndex);
     const overlays = new CanvasOverlayHost(
       this.wrapper,
       opts.enableTextSelection === true,
@@ -313,6 +333,18 @@ export class PptxViewer implements ZoomableViewer {
    * awaitable method result, so one failure is never delivered twice.
    */
   async load(source: string | ArrayBuffer): Promise<void> {
+    // #1974: a reload stops delivering the committed engine's part failures at
+    // once; the engine committed when it settles is delivered again.
+    const failureLoad = this._partFailureDelivery.beginLoad();
+    try {
+      await this._loadSource(source);
+    } finally {
+      const committed = this.destroyed ? null : this.engine;
+      this._partFailureDelivery.endLoad(failureLoad, committed ? pptxPartFailureLog(committed) : null);
+    }
+  }
+
+  private async _loadSource(source: string | ArrayBuffer): Promise<void> {
     if (this.destroyed) throw new Error('PptxViewer is destroyed');
     if (this.borrowed) {
       throw new Error(
@@ -370,6 +402,8 @@ export class PptxViewer implements ZoomableViewer {
       // Discard the stale slide's media handle before swapping engines so its RAF
       // loop / object URLs don't outlive the replaced presentation.
       this._bindLayoutPresentation(engine);
+      if (this.destroyed) throw new Error('PptxViewer is destroyed');
+      if (engine !== this.engine) return;
       const navigationGeneration = this._beginNavigation();
       this.currentSlide = await this._initialSlide(navigationGeneration);
       if (navigationGeneration !== this._navigationGeneration || engine !== this.engine) return;
@@ -495,6 +529,12 @@ export class PptxViewer implements ZoomableViewer {
 
   get slideIndex(): number { return this.currentSlide; }
   get slideCount(): number { return this.engine?.slideCount ?? 0; }
+
+  /** Slides of the loaded presentation whose part failed to parse (#1974);
+   *  `[]` before load and after destroy. */
+  get partFailures(): readonly PptxPartFailure[] {
+    return this.destroyed ? [] : this.engine?.partFailures ?? [];
+  }
   /** Number of opening slides currently paintable under progressive layout. */
   get availableSlideCount(): number { return this.engine?.availableSlideCount ?? this.slideCount; }
   /** Whether all slides are paintable. */
@@ -663,6 +703,7 @@ export class PptxViewer implements ZoomableViewer {
           imageResources: this.opts.imageResources,
           dim,
           onTextRun,
+          ...(this.opts.errorPlaceholder === undefined ? {} : { errorPlaceholder: this.opts.errorPlaceholder }),
           onError: (error) => {
             if (this.renderDispatcher.isCurrent(generation)) this._reportRenderError(error);
           },
@@ -678,7 +719,10 @@ export class PptxViewer implements ZoomableViewer {
           this.canvas,
           slide,
           'worker',
-          { width: targetWidth, dpr, imageResources: this.opts.imageResources, dim, onTextRun },
+          {
+            width: targetWidth, dpr, imageResources: this.opts.imageResources, dim, onTextRun,
+            ...(this.opts.errorPlaceholder === undefined ? {} : { errorPlaceholder: this.opts.errorPlaceholder }),
+          },
         );
         if (!this.renderDispatcher.commitBitmap(generation, bmp)) return;
       } else {
@@ -687,7 +731,10 @@ export class PptxViewer implements ZoomableViewer {
           this.canvas,
           slide,
           'main',
-          { width: targetWidth, dpr, imageResources: this.opts.imageResources, onTextRun, dim },
+          {
+            width: targetWidth, dpr, imageResources: this.opts.imageResources, onTextRun, dim,
+            ...(this.opts.errorPlaceholder === undefined ? {} : { errorPlaceholder: this.opts.errorPlaceholder }),
+          },
         );
         if (!this.renderDispatcher.isCurrent(generation)) return;
       }
@@ -733,9 +780,12 @@ export class PptxViewer implements ZoomableViewer {
       },
       (error) => this._reportRenderError(error),
     );
+    // Engine commit: replay this presentation's part failures (#1974).
+    this._partFailureDelivery.attach(pptxPartFailureLog(presentation));
   }
 
   private _unbindLayoutPresentation(): void {
+    this._partFailureDelivery.attach(null);
     this._layoutUnsubscribe?.();
     this._layoutUnsubscribe = null;
     this._layoutFailed = false;
@@ -1162,6 +1212,7 @@ export class PptxViewer implements ZoomableViewer {
     // too so a load() still in flight is treated as superseded and its engine is
     // cleaned up rather than installed onto a torn-down viewer.
     this.errorRouter.close();
+    this._partFailureDelivery.close();
     this.renderDispatcher.destroy();
     invalidatePptxRenderTarget(this.canvas);
     this.handle?.destroy();

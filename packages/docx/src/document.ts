@@ -107,6 +107,14 @@ import {
   publishDocxLayoutView,
 } from './document-layout-view.js';
 import { deferred, type Deferred } from '@silurus/ooxml-core/internal/deferred';
+import {
+  prepareErrorPlaceholder,
+  resolveErrorPlaceholderFor,
+  wireErrorPlaceholder,
+  type PartFailureLog,
+  type WireErrorPlaceholder,
+} from '@silurus/ooxml-core/internal/part-failures';
+import { docxPartFailureLog, type DocxPartFailure } from './part-failures.js';
 
 /** Options for {@link DocxDocument.load}. Extends the shared load-options type
  *  from `@silurus/ooxml-core` (`fonts`, `resourceLimits`, and the deprecated
@@ -346,6 +354,35 @@ export class DocxDocument {
       ...(this._meta?.resourceDiagnostics ?? []),
       ...resourceDiagnosticsOf(this),
     ], 'DOCX diagnostics') as readonly DocxDiagnostic[];
+  }
+
+  /**
+   * Package parts that failed to parse (#1974): one `document` entry when the
+   * main part could not be read and the placeholder page is shown instead.
+   * Known before `load()` resolves, in both render modes. Never routed to
+   * `onError`; `load()` still resolves.
+   */
+  get partFailures(): readonly DocxPartFailure[] {
+    return this._partFailureLog.list;
+  }
+
+  /** The failure is part of the loaded state, so the log is filled on read. */
+  private get _partFailureLog(): PartFailureLog<DocxPartFailure> {
+    const log = docxPartFailureLog(this);
+    const message = this._source?.fatalParse?.message ?? this._meta?.partFailure?.message;
+    if (message !== undefined && log.size === 0) log.add({ kind: 'document', message });
+    return log;
+  }
+
+  /** Resolve `errorPlaceholder` on the main thread. `undefined` = built-in text
+   * (absent option, healthy document, or a resolver returning nothing). */
+  private _errorPlaceholderText(option: RenderPageOptions['errorPlaceholder']): WireErrorPlaceholder | undefined {
+    const prepared = prepareErrorPlaceholder<DocxPartFailure>(option);
+    if (prepared.kind === 'none') return undefined;
+    const failure = this._partFailureLog.get('document');
+    if (!failure) return undefined;
+    const resolved = resolveErrorPlaceholderFor(prepared, failure);
+    return resolved === null ? undefined : wireErrorPlaceholder(resolved);
   }
 
   private _metrics: OoxmlResourceMetricsSession | null = null;
@@ -1469,6 +1506,7 @@ export class DocxDocument {
     this._document = null;
     this._source = null;
     this._meta = null;
+    docxPartFailureLog(this).close();
     this._review = EMPTY_REVIEW_SNAPSHOT;
     documentLayoutRuntimeOf(this).services = null;
     this._bookmarkPages = null;
@@ -1937,13 +1975,29 @@ export class DocxDocument {
     pageIndex: number,
     opts: RenderPageOptions = {},
   ): Promise<void> {
+    if (this._mode !== 'worker' && 'errorPlaceholder' in opts) {
+      const { errorPlaceholder, ...rest } = opts;
+      let errorPlaceholderText: WireErrorPlaceholder | undefined;
+      // A throwing or invalid option rejects, like every other render failure.
+      try {
+        errorPlaceholderText = this._errorPlaceholderText(errorPlaceholder);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      return this._renderPageWithTargetOwnership(
+        target,
+        pageIndex,
+        errorPlaceholderText === undefined ? rest : { ...rest, errorPlaceholderText },
+        true,
+      );
+    }
     return this._renderPageWithTargetOwnership(target, pageIndex, opts, true);
   }
 
   private _renderPageWithTargetOwnership(
     target: HTMLCanvasElement | OffscreenCanvas,
     pageIndex: number,
-    opts: RenderPageOptions,
+    opts: Omit<RenderPageOptions, 'errorPlaceholder'> & { errorPlaceholderText?: WireErrorPlaceholder },
     callerOwnedCanvasTarget: boolean,
   ): Promise<void> {
     if (this._mode === 'worker') {
@@ -1988,10 +2042,12 @@ export class DocxDocument {
     pageIndex: number,
     opts: RenderPageToBitmapOptions = {},
   ): Promise<ImageBitmap> {
-    const { onTextRun, ...wire } = opts;
+    const { onTextRun, errorPlaceholder, ...wire } = opts;
+    const errorPlaceholderText = this._errorPlaceholderText(errorPlaceholder);
     const wireOpts: WireRenderPageOptions = {
       ...this._withActiveView(wire),
       dpr: wire.dpr ?? defaultDpr(),
+      ...(errorPlaceholderText === undefined ? {} : { errorPlaceholderText }),
     };
     if (this._mode === 'worker') {
       // The selected date variant may have a different page count than default
@@ -2031,7 +2087,13 @@ export class DocxDocument {
     pageIndex: number,
     opts: CollectPageRunsOptions = {},
   ): Promise<DocxTextRunInfo[]> {
-    const wireOpts: WireRenderPageOptions = { ...this._withActiveView(opts) };
+    // Explicit fields only: a caller may reuse render options, and a function
+    // such as `errorPlaceholder` must never reach postMessage (#1974).
+    const wireOpts: WireRenderPageOptions = this._withActiveView({
+      ...(opts.width === undefined ? {} : { width: opts.width }),
+      ...(opts.currentDate === undefined ? {} : { currentDate: opts.currentDate }),
+      ...(opts.showTrackedChanges === undefined ? {} : { showTrackedChanges: opts.showTrackedChanges }),
+    });
     if (this._mode === 'worker') {
       // Keep collection validation on the same selected worker layout as paint.
       const res = await this._bridge.request(
@@ -2082,7 +2144,13 @@ export class DocxDocument {
     point: DocxPagePoint,
     opts: DocxElementContextOptions = {},
   ): Promise<DocxElementContext | null> {
-    const viewOpts = this._withActiveView(opts);
+    // Explicit fields only: a reused render-options object must not post a
+    // function such as `errorPlaceholder` (#1974).
+    const viewOpts = this._withActiveView({
+      ...(opts.maxTextCharacters === undefined ? {} : { maxTextCharacters: opts.maxTextCharacters }),
+      ...(opts.currentDate === undefined ? {} : { currentDate: opts.currentDate }),
+      ...(opts.showTrackedChanges === undefined ? {} : { showTrackedChanges: opts.showTrackedChanges }),
+    });
     if (this._mode === 'worker') {
       const res = await this._bridge.request(
         (id) => ({ type: 'hitTestElement', id, pageIndex, point, opts: viewOpts }) satisfies RenderWorkerRequest,

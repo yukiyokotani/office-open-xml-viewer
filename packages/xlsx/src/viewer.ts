@@ -93,6 +93,8 @@ import {
 } from './internal/sheet-viewer-runtime.js';
 import { CanvasSurface, SheetOverlayHost } from './internal/sheet-surface.js';
 import { withXlsxRenderCommitGuard } from './render-orchestrator.js';
+import { PartFailureDelivery, prepareErrorPlaceholder } from '@silurus/ooxml-core/internal/part-failures';
+import { xlsxPartFailureLog, type XlsxPartFailure, type XlsxSheetPartFailure } from './part-failures.js';
 import {
   DEFAULT_WORKSHEET_CONTENT_MINIMUMS,
   worksheetContentBounds,
@@ -233,6 +235,22 @@ export interface XlsxSheetViewerOptions extends LoadOptions {
    * trap, not a reliably classified OOM.
    */
   onError?: (err: Error) => void;
+  /**
+   * Replacement text for the `Sheet "…" could not be displayed` placeholder of
+   * a sheet whose part failed to parse (#1974). Static text, or a function of
+   * the failure evaluated on the main thread (also in worker mode; it may run
+   * on every repaint of that sheet). `detail: null` hides the detail line.
+   * Ignored for healthy sheets and the neutral dialogsheet notice.
+   */
+  errorPlaceholder?: import('@silurus/ooxml-core').ErrorPlaceholderOption<XlsxSheetPartFailure>;
+  /**
+   * Called once per loaded workbook for each failed package part (#1974): a
+   * broken shared part before `load()` resolves, and a broken sheet when its
+   * model is first loaded (sheets are parsed lazily, on display). Never routed
+   * to `onError`; `load()` still resolves. The same records are available from
+   * `partFailures`.
+   */
+  onPartFailure?: (failure: Readonly<XlsxPartFailure>) => void;
   /** Called with the canonical selection state whenever it actually changes. */
   onSelectionStateChange?: (selection: XlsxSelectionState | null) => void;
   /**
@@ -443,6 +461,7 @@ class XlsxViewerEngine implements ZoomableViewer {
   private readonly hostDocument: Document;
   private readonly hostWindow: Window & typeof globalThis;
   private readonly acquisition = new SheetAcquisition();
+  private readonly partFailureDelivery: PartFailureDelivery<XlsxPartFailure>;
   private readonly viewport: ViewportState;
   private readonly renderDispatcher: SheetRenderDispatcher;
   /** The single subtree root the constructor appended to the caller's
@@ -628,6 +647,12 @@ class XlsxViewerEngine implements ZoomableViewer {
       ? mount.mode
       : resolveCanvasViewerMode('XlsxViewer', opts.mode, borrowedWorkbook);
     this._hiddenSheetMode = opts.hiddenSheetMode ?? 'show';
+    prepareErrorPlaceholder(opts.errorPlaceholder);
+    this.partFailureDelivery = new PartFailureDelivery(
+      mount.kind === 'sheet' ? 'XlsxSheetViewer' : 'XlsxViewer',
+      opts.onPartFailure,
+      (failure) => failure.kind === 'workbook' ? 'workbook' : failure.sheetIndex,
+    );
     this.viewport = new ViewportState(opts.cellScale ?? 1);
 
     this.wrapper = this.hostDocument.createElement('div');
@@ -934,6 +959,8 @@ class XlsxViewerEngine implements ZoomableViewer {
 
     if (borrowedWorkbook) {
       this.acquisition.install(borrowedWorkbook, false);
+      // A borrowed engine is committed now, even before a sheet is shown.
+      this.partFailureDelivery.attach(xlsxPartFailureLog(borrowedWorkbook));
       if (this._mountKind === 'composite') {
         this.activateWorkbook(borrowedWorkbook).catch((error) => this._reportRenderError(error));
       }
@@ -951,6 +978,21 @@ class XlsxViewerEngine implements ZoomableViewer {
   async [loadXlsxViewerSource](
     source: string | ArrayBuffer,
     sourceOptions: XlsxSheetLoadOptions = {},
+  ): Promise<void> {
+    // #1974: a reload stops delivering the committed engine's part failures at
+    // once; the engine committed when it settles is delivered again.
+    const failureLoad = this.partFailureDelivery.beginLoad();
+    try {
+      await this.loadViewerSource(source, sourceOptions);
+    } finally {
+      const committed = this._destroyed ? null : this.wb;
+      this.partFailureDelivery.endLoad(failureLoad, committed ? xlsxPartFailureLog(committed) : null);
+    }
+  }
+
+  private async loadViewerSource(
+    source: string | ArrayBuffer,
+    sourceOptions: XlsxSheetLoadOptions,
   ): Promise<void> {
     this.assertOpen();
     if (this._borrowed) {
@@ -975,6 +1017,7 @@ class XlsxViewerEngine implements ZoomableViewer {
           // workbook. Rejections caused by its worker termination are stale
           // completion, not errors belonging to the new workbook.
           this.sheetRequestGeneration++;
+          this.partFailureDelivery.attach(null);
           this.renderDispatcher.begin();
           this.finder.invalidate();
           this.hideValidationPanel();
@@ -1037,6 +1080,10 @@ class XlsxViewerEngine implements ZoomableViewer {
     this.sheetViews.clear();
     this.buildTabs();
     this.preparedWorkbook = workbook;
+    // Engine commit: replay this workbook's part failures (#1974); later
+    // sheet failures arrive as their terminal models are admitted.
+    this.partFailureDelivery.attach(xlsxPartFailureLog(workbook));
+    if (this._destroyed || this.wb !== workbook) return false;
     this.opts.onReady?.(workbook.sheetNames);
     return true;
   }
@@ -1631,6 +1678,12 @@ class XlsxViewerEngine implements ZoomableViewer {
   /** Total number of sheets in the loaded workbook. */
   get sheetCount(): number {
     return this.wb?.sheetCount ?? 0;
+  }
+
+  /** Failed package parts of the loaded workbook known so far (#1974); `[]`
+   *  before load and after destroy. Sheets are listed once loaded. */
+  get partFailures(): readonly XlsxPartFailure[] {
+    return this._destroyed ? [] : this.wb?.partFailures ?? [];
   }
 
   /**
@@ -2503,6 +2556,7 @@ class XlsxViewerEngine implements ZoomableViewer {
       selectedRowRange,
       selectedColRange,
       chromeColors: this.chromeColors,
+      ...(this.opts.errorPlaceholder === undefined ? {} : { errorPlaceholder: this.opts.errorPlaceholder }),
     };
 
     const sizeProjection = this.wireSizeOverrides();
@@ -2536,7 +2590,9 @@ class XlsxViewerEngine implements ZoomableViewer {
       const bmp = await this.workbook.renderViewportToBitmap(
         this.currentSheet,
         viewport,
-        viewerRenderOpts,
+        withXlsxRenderCommitGuard(viewerRenderOpts, () =>
+          !this._destroyed && this.renderDispatcher.isCurrent(seq),
+        ) as typeof viewerRenderOpts,
       );
       if (!this.renderDispatcher.commitBitmap(seq, bmp, w, h)) return;
       this.displayedViewport = { worksheet: ws, x: scrollX, y: scrollY, scale: cs, width: w, height: h };
@@ -2612,6 +2668,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     // viewer (checked at the top of _reportRenderError). The acquisition owner
     // invalidates any load still in flight below.
     this._destroyed = true;
+    this.partFailureDelivery.close();
     this.notifier.destroy();
     this.selectionInput.destroy();
     this.sheetRequestGeneration++;
@@ -2786,6 +2843,9 @@ export class XlsxSheetViewer implements ZoomableViewer {
 
   get sheetIndex(): number { return this.destroyed ? this.snapshot.sheetIndex : this.engine.sheetIndex; }
   get sheetCount(): number { return this.destroyed ? this.snapshot.sheetCount : this.engine.sheetCount; }
+  /** Failed package parts of the loaded workbook known so far (#1974); `[]`
+   *  before load and after destroy. */
+  get partFailures(): readonly XlsxPartFailure[] { return this.destroyed ? [] : this.engine.partFailures; }
   get sheetNames(): string[] {
     return this.destroyed ? [...this.snapshot.sheetNames] : [...this.engine.sheetNames];
   }

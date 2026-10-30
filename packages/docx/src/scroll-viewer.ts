@@ -55,6 +55,8 @@ import type { DocxCommentsOptions } from './comment-margin';
 import type { DocxScrollViewerOptions } from './scroll-viewer-options';
 import { DocxScrollCommentNavigation } from './scroll-comment-navigation';
 import { renderDocxFocusedPage } from './focused-view-runtime';
+import { PartFailureDelivery, prepareErrorPlaceholder } from '@silurus/ooxml-core/internal/part-failures';
+import { syncedDocxPartFailureLog, type DocxPartFailure } from './part-failures.js';
 import { DocxScrollLayoutController } from './scroll-layout-controller';
 
 const COMMENT_MARGIN_GAP_PX = 12;
@@ -203,6 +205,7 @@ export class DocxScrollViewer implements ZoomableViewer {
         currentDate: this._currentDate,
         ...(this._showTrackedChanges ? { showTrackedChanges: true } : {}),
         onTextRun,
+        ...(this._opts.errorPlaceholder === undefined ? {} : { errorPlaceholder: this._opts.errorPlaceholder }),
       }),
     commitBitmap: (page, slot, dispatcher, generation, bitmap, width) =>
       dispatcher.commitBitmap(generation, bitmap, {
@@ -221,6 +224,7 @@ export class DocxScrollViewer implements ZoomableViewer {
         currentDate: this._currentDate,
         ...(this._showTrackedChanges ? { showTrackedChanges: true } : {}),
         onTextRun,
+        ...(this._opts.errorPlaceholder === undefined ? {} : { errorPlaceholder: this._opts.errorPlaceholder }),
       }),
     commitRuns: (page, slot, runs, canvas, _width, wantedRuns, settled) =>
       this._commitRenderedRuns(page, slot, runs, canvas, wantedRuns, settled),
@@ -369,6 +373,7 @@ export class DocxScrollViewer implements ZoomableViewer {
       this._activeCommentId = null;
       this._activeCommentPage = null;
       this._commentNavigation.reset();
+      this._partFailureDelivery.attach(null);
       this._layout.unbind();
       if (previous) {
         for (const [index, slot] of [...this._slots]) this._recycleSlot(index, slot);
@@ -384,6 +389,7 @@ export class DocxScrollViewer implements ZoomableViewer {
         this._showTrackedChanges = activeDocxLayoutViewOf(doc).showTrackedChanges;
       }
       this._layout.bind(doc);
+      this._partFailureDelivery.attach(syncedDocxPartFailureLog(doc));
       this._find.invalidate();
       this._findActive = false;
       this._activeCommentId = null;
@@ -473,6 +479,7 @@ export class DocxScrollViewer implements ZoomableViewer {
    *  reporting an error so a rejection that lands after teardown is swallowed
    *  rather than surfaced to a `onError` on a dead viewer. */
   private _destroyed = false;
+  private readonly _partFailureDelivery: PartFailureDelivery<DocxPartFailure>;
   /** Throwaway 2D context reused to measure text for the §17.3.2.10 縦中横 overlay
    *  clamp (#836). Lazily created; `null` when canvas metrics are unavailable
    *  (headless), in which case the overlay degrades to the un-clamped span. */
@@ -564,6 +571,8 @@ export class DocxScrollViewer implements ZoomableViewer {
     this._container = container;
     this._opts = opts;
     this._errorRouter = new CanvasViewerErrorRouter('DocxScrollViewer', opts.onError);
+    prepareErrorPlaceholder(opts.errorPlaceholder);
+    this._partFailureDelivery = new PartFailureDelivery('DocxScrollViewer', opts.onPartFailure, () => 'document');
     this._showTrackedChanges = opts.showTrackedChanges === true;
     if (opts.legacyDoc !== undefined) this._requestedShowTrackedChanges = opts.showTrackedChanges;
     this._currentDate = opts.currentDate;
@@ -607,6 +616,7 @@ export class DocxScrollViewer implements ZoomableViewer {
 
     if (this._borrowed) {
       this._layout.bind(borrowedDocument!);
+      this._partFailureDelivery.attach(syncedDocxPartFailureLog(borrowedDocument!));
       // A borrowed engine is already loaded, so lay out + mount the first
       // window immediately. relayout() is idempotent and defers under a
       // zero-width container (the resize path re-runs it once width appears).
@@ -615,11 +625,25 @@ export class DocxScrollViewer implements ZoomableViewer {
   }
 
   async load(source: string | ArrayBuffer): Promise<void> {
-    await this._loader.load(source);
+    // #1974: a reload stops delivering the committed engine's part failures at
+    // once; the engine committed when it settles is delivered again.
+    const failureLoad = this._partFailureDelivery.beginLoad();
+    try {
+      await this._loader.load(source);
+    } finally {
+      const committed = this._destroyed ? null : this._doc;
+      this._partFailureDelivery.endLoad(failureLoad, committed ? syncedDocxPartFailureLog(committed) : null);
+    }
   }
 
   get pageCount(): number {
     return this._doc?.pageCount ?? 0;
+  }
+
+  /** Package parts of the loaded document that failed to parse (#1974);
+   *  `[]` before load and after destroy. */
+  get partFailures(): readonly DocxPartFailure[] {
+    return this._destroyed ? [] : this._doc?.partFailures ?? [];
   }
 
   /**
@@ -1303,6 +1327,7 @@ export class DocxScrollViewer implements ZoomableViewer {
     this._pendingViewChanged = null;
     this._findRequestGeneration++;
     this._errorRouter.close();
+    this._partFailureDelivery.close();
     this._layout.unbind();
     this._layoutViewGeneration++;
     this._commentNavigation.reset();

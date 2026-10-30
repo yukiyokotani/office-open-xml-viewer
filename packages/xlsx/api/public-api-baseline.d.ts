@@ -1306,6 +1306,11 @@ export interface DxfFontToggles {
     strike?: boolean;
     automaticColor?: boolean;
 }
+export type ErrorPlaceholderOption<F> = ErrorPlaceholderText | ((failure: Readonly<F>) => ErrorPlaceholderText | undefined);
+export interface ErrorPlaceholderText {
+    readonly title?: string;
+    readonly detail?: string | null;
+}
 type ExtensibleLiteral<Known extends string> = Known | (string & Record<never, never>);
 type Fill = SolidFill | NoFill | GradientFill | PatternFill | ImageFill;
 export interface FillRect {
@@ -2543,6 +2548,7 @@ export interface XlsxMatchLocation {
     row: number;
     col: number;
 }
+export type XlsxPartFailure = XlsxSheetPartFailure | XlsxWorkbookPartFailure;
 export interface XlsxRangeSelectionContext {
     readonly format: 'xlsx';
     readonly kind: 'range';
@@ -2580,6 +2586,7 @@ export interface XlsxRenderViewportOptions {
         end: number;
         strong: boolean;
     } | null;
+    errorPlaceholder?: ErrorPlaceholderOption<XlsxSheetPartFailure>;
 }
 export interface XlsxScrollToCellOptions {
     readonly align?: 'nearest' | 'start' | 'center' | 'end';
@@ -2634,6 +2641,12 @@ export type XlsxSheetLoadOptions = Readonly<{
     encoding?: string;
     sheetName?: string;
 }>;
+export interface XlsxSheetPartFailure {
+    readonly kind: 'sheet';
+    readonly sheetIndex: number;
+    readonly sheetName: string;
+    readonly message: string;
+}
 export class XlsxSheetViewer implements ZoomableViewer {
     readonly canvasElement: HTMLCanvasElement;
     static fromWorkbook(canvasElement: HTMLCanvasElement, workbook: XlsxWorkbook, options?: Omit<XlsxSheetViewerOptions, keyof LoadOptions>): Omit<XlsxSheetViewer, 'load'>;
@@ -2641,6 +2654,7 @@ export class XlsxSheetViewer implements ZoomableViewer {
     load(source: string | ArrayBuffer, options?: XlsxSheetLoadOptions): Promise<void>;
     get sheetIndex(): number;
     get sheetCount(): number;
+    get partFailures(): readonly XlsxPartFailure[];
     get sheetNames(): string[];
     goToSheet(index: number): Promise<void>;
     nextSheet(): Promise<void>;
@@ -2690,6 +2704,8 @@ export interface XlsxSheetViewerOptions extends LoadOptions {
     onReady?: (sheetNames: string[]) => void;
     onSheetChange?: (index: number, total: number) => void;
     onError?: (err: Error) => void;
+    errorPlaceholder?: ErrorPlaceholderOption<XlsxSheetPartFailure>;
+    onPartFailure?: (failure: Readonly<XlsxPartFailure>) => void;
     onSelectionStateChange?: (selection: XlsxSelectionState | null) => void;
     onSelectionContextChange?: (context: XlsxSelectionContext | null) => void;
     onContextMenu?: (event: ViewerContextMenuEvent<XlsxSelectionContext>) => void;
@@ -2723,6 +2739,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     [loadXlsxViewerSource](source: string | ArrayBuffer, sourceOptions?: XlsxSheetLoadOptions): Promise<void>;
     get sheetIndex(): number;
     get sheetCount(): number;
+    get partFailures(): readonly XlsxPartFailure[];
     goToSheet(index: number): Promise<void>;
     nextSheet(): Promise<void>;
     prevSheet(): Promise<void>;
@@ -2776,6 +2793,7 @@ export class XlsxWorkbook {
     get mode(): 'main' | 'worker';
     static load(source: string | ArrayBuffer, opts?: LoadOptions): Promise<XlsxWorkbook>;
     get sheetNames(): string[];
+    get partFailures(): readonly XlsxPartFailure[];
     get sheetCount(): number;
     get tabColors(): (string | null)[];
     sheetVisibility(sheetIndex: number): SheetVisibility;
@@ -2793,6 +2811,10 @@ export class XlsxWorkbook {
     private __privatePresence;
     private static __staticPrivatePresence;
     private constructor();
+}
+export interface XlsxWorkbookPartFailure {
+    readonly kind: 'workbook';
+    readonly message: string;
 }
 export interface XlsxWorksheetLimits {
     maxRows?: number;

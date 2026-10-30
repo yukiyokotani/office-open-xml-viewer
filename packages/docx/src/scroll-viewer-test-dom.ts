@@ -1,3 +1,4 @@
+import { docxPartFailureLog } from './part-failures.js';
 import { vi } from 'vitest';
 import type { DocxDocument } from './document';
 import type { DocxTextRunInfo } from './renderer';
@@ -359,6 +360,8 @@ export interface RenderCall {
   /** §17.13.5 — the tracked-change view flag the viewer passed (absent =
    *  final view), so the option tests can pin the render-path threading. */
   showTrackedChanges?: boolean;
+  /** #1974 — the `errorPlaceholder` option the viewer forwarded. */
+  errorPlaceholder?: unknown;
   hasTextRunCallback?: boolean;
   /** The canvas element the viewer handed to `renderPage` (main mode). The
    *  flicker-free double-buffer settle renders into a SPARE canvas, so this lets
@@ -374,6 +377,9 @@ export interface RenderCall {
  *  observable. */
 export class FakeDocxEngine {
   destroyed = false;
+  /** #1974 — the engine's failure log, as a real document holds it. */
+  get _partFailureLog() { return docxPartFailureLog(this); }
+  get partFailures() { return this._partFailureLog.list; }
   /** The layout view selected by load()/setLayoutView(). Borrowing viewers must
    *  inherit this instead of silently falling back to their option defaults. */
   get layoutView(): Readonly<{
@@ -539,6 +545,7 @@ export class FakeDocxEngine {
         width: opts?.width,
         currentDate: opts?.currentDate,
         showTrackedChanges: opts?.showTrackedChanges,
+        errorPlaceholder: opts?.errorPlaceholder,
         hasTextRunCallback: typeof opts?.onTextRun === 'function',
         canvas,
         resolve: () => resolve(),

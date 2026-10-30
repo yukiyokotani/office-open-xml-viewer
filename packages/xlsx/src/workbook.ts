@@ -57,7 +57,7 @@ import {
 import { BoundedRawPartCache } from '@silurus/ooxml-core/internal/bounded-raw-part-cache';
 import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions, XlsxRenderViewportOptions, WorkerRequest, WorkerResponse, Cell, SheetVisibility, XlsxComment, Row, XlsxLoadedFontSources } from './types.js';
 import { selectSheetVisibility } from './sheet-visibility.js';
-import { renderWorksheetViewport } from './render-orchestrator.js';
+import { renderWorksheetViewport, xlsxRenderCommitGuardOf } from './render-orchestrator.js';
 import { xlsxOfficeFontRequests, xlsxWorksheetOfficeFontRequests } from './font-requests.js';
 import { officeRequestKey } from './shape-office-line.js';
 import { formatCellValue } from './number-format.js';
@@ -102,6 +102,20 @@ import { readDelimitedTextResponse } from './delimited-text-source.js';
 import { WorksheetPreview } from './internal/worksheet-preview.js';
 import { setWorksheetPreviewBounds } from './internal/worksheet-content-bounds.js';
 import { bindWorksheetPolicy } from './worksheet-policy-context.js';
+import {
+  clampPartFailureMessage,
+  prepareErrorPlaceholder,
+  resolveErrorPlaceholderFor,
+  wireErrorPlaceholder,
+  type PartFailureLog,
+  type PreparedErrorPlaceholder,
+  type WireErrorPlaceholder,
+} from '@silurus/ooxml-core/internal/part-failures';
+import {
+  xlsxPartFailureLog,
+  type XlsxPartFailure,
+  type XlsxSheetPartFailure,
+} from './part-failures.js';
 import type {
   DelimitedTextParseRequest,
   DelimitedTextParseResponse,
@@ -585,6 +599,7 @@ export class XlsxWorkbook {
     const workbookError = parsedWorkbook.workbook.parseError;
     if (workbookError) {
       console.warn(`[ooxml] xlsx opened with a degraded part: ${workbookError}`);
+      this._partFailureLog.add({ kind: 'workbook', message: workbookError });
     }
     this.officeFontRequests = xlsxOfficeFontRequests(parsedWorkbook);
     // The composite viewer computes hit/scroll/overlay geometry on the main
@@ -839,6 +854,62 @@ export class XlsxWorkbook {
 
   get sheetNames(): string[] {
     return this.parsedWorkbook?.workbook.sheets.map((s) => s.name) ?? [];
+  }
+
+  /**
+   * Package parts that failed to parse (#1974): a `workbook` entry for a
+   * broken shared part (known at load) first, then one `sheet` entry per
+   * worksheet/chartsheet/dialogsheet part, ascending by index. Sheets are
+   * parsed lazily, so a sheet is listed once its model has been loaded (a
+   * viewer shows it, or {@link getWorksheet} is called). Never routed to
+   * `onError`.
+   */
+  get partFailures(): readonly XlsxPartFailure[] {
+    return this._partFailureLog.list;
+  }
+
+  private get _partFailureLog(): PartFailureLog<XlsxPartFailure> {
+    return xlsxPartFailureLog(this);
+  }
+
+  /** Main mode: resolve from the worksheet actually painted. */
+  private sheetErrorPlaceholderText(
+    prepared: PreparedErrorPlaceholder<XlsxSheetPartFailure>,
+    sheetIndex: number,
+    worksheet: Worksheet,
+  ): WireErrorPlaceholder | undefined {
+    if (prepared.kind === 'none' || !worksheet.parseError) return undefined;
+    const recorded = this._partFailureLog.get(sheetIndex);
+    const failure: XlsxSheetPartFailure = recorded?.kind === 'sheet' ? recorded : Object.freeze({
+      kind: 'sheet',
+      sheetIndex,
+      sheetName: worksheet.name,
+      message: clampPartFailureMessage(worksheet.parseError),
+    });
+    const resolved = resolveErrorPlaceholderFor(prepared, failure);
+    return resolved === null ? undefined : wireErrorPlaceholder(resolved);
+  }
+
+  /**
+   * Worker mode: main may not know yet whether the worker's model of this
+   * sheet is degraded (a provisional preview here, a terminal there). Then a
+   * function option is sent as `resolve-on-main`, and the worker asks back
+   * once instead of painting. `final` (the retry) never asks again.
+   */
+  private workerErrorPlaceholderText(
+    prepared: PreparedErrorPlaceholder<XlsxSheetPartFailure>,
+    sheetIndex: number,
+    final: boolean,
+  ): WireErrorPlaceholder | undefined {
+    if (prepared.kind === 'none') return undefined;
+    if (prepared.kind === 'static') return prepared.text === null ? undefined : wireErrorPlaceholder(prepared.text);
+    const recorded = this._partFailureLog.get(sheetIndex);
+    if (recorded?.kind === 'sheet') {
+      const resolved = resolveErrorPlaceholderFor(prepared, recorded);
+      return wireErrorPlaceholder(resolved);
+    }
+    if (final || this.sheetCache.has(sheetIndex)) return undefined;
+    return { state: 'resolve-on-main' };
   }
 
   get sheetCount(): number {
@@ -1189,6 +1260,12 @@ export class XlsxWorkbook {
       this.retainedSheetUsage = nextCacheUsage;
       this.sheetCache.set(sheetIndex, terminal);
       this.sheetCacheUsage.set(sheetIndex, terminalUsage);
+      // #1974: a failure is known only once main has accepted the terminal.
+      if (terminal.parseError) {
+        this._partFailureLog.add({
+          kind: 'sheet', sheetIndex, sheetName: terminal.name, message: terminal.parseError,
+        });
+      }
       // Both realms now retain the same model even if an optional font load
       // rejects; a later operation can still acquire the cached worksheet.
       await this.retainWorksheetOfficeFonts(terminal);
@@ -1418,7 +1495,9 @@ export class XlsxWorkbook {
     if (!this.parsedWorkbook) throw new Error('Workbook not loaded');
     const styles = this.parsedWorkbook.styles;
     const extracted = extractViewerRenderContext(opts as WireRenderViewportOptions);
-    const { sizeOverrides, ...renderOpts } = extracted.opts;
+    const { sizeOverrides, errorPlaceholder, ...renderOpts } = extracted.opts as WireRenderViewportOptions
+      & Pick<XlsxRenderViewportOptions, 'errorPlaceholder'>;
+    const preparedPlaceholder = prepareErrorPlaceholder<XlsxSheetPartFailure>(errorPlaceholder);
     const targetFontSet = isHTMLCanvas(target)
       ? target.ownerDocument.fonts
       : (typeof document !== 'undefined' ? document.fonts : null);
@@ -1430,6 +1509,7 @@ export class XlsxWorkbook {
       ));
       this.assertResourceHealthy();
       const ws = extracted.worksheet;
+      const errorPlaceholderText = this.sheetErrorPlaceholderText(preparedPlaceholder, sheetIndex, ws);
       // Visible images may be fetched during the provisional paint. Their
       // requests use the pull owner's image path while the cursor holds the
       // package operation, so the render itself must not queue behind that
@@ -1448,6 +1528,7 @@ export class XlsxWorkbook {
             : undefined,
           fontSources: this.loadedFontSources(targetFontSet),
           fetchImage: this._fetchImage,
+          ...(errorPlaceholderText === undefined ? {} : { errorPlaceholderText }),
         },
       );
       return;
@@ -1455,6 +1536,7 @@ export class XlsxWorkbook {
     return this.withWorksheetArchiveOperation(sheetIndex, (source) => {
       const ws = extracted.worksheet ?? createSizeOverriddenWorksheet(source, sizeOverrides);
       if (ws !== source) inheritSheetRenderCache(source, ws);
+      const errorPlaceholderText = this.sheetErrorPlaceholderText(preparedPlaceholder, sheetIndex, ws);
       // The render bind may invalidate a geometry snapshot made in another
       // font realm. Pin the viewer's MDW inside the renderer after binding.
       return renderWorksheetViewport(
@@ -1480,6 +1562,7 @@ export class XlsxWorkbook {
             : undefined,
           fontSources: this.loadedFontSources(targetFontSet),
           fetchImage: this._fetchImage,
+          ...(errorPlaceholderText === undefined ? {} : { errorPlaceholderText }),
         },
       );
     });
@@ -1511,8 +1594,15 @@ export class XlsxWorkbook {
     // caller callbacks; a later edit to the caller's object is another frame.
     viewport = { row: viewport.row, col: viewport.col, rows: viewport.rows, cols: viewport.cols };
     const extracted = extractViewerRenderContext(opts);
-    const wireOpts = { ...extracted.opts, dpr: opts.dpr ?? defaultDpr() };
+    // The option is extracted before any spread: a function never reaches
+    // postMessage, not even for healthy sheets (#1974).
+    const { errorPlaceholder, ...callerOpts } = extracted.opts as WireRenderViewportOptions
+      & Pick<XlsxRenderViewportOptions, 'errorPlaceholder'>;
+    const wireOpts = { ...callerOpts, dpr: opts.dpr ?? defaultDpr() };
     if (this._mode === 'worker') {
+      const preparedPlaceholder = prepareErrorPlaceholder<XlsxSheetPartFailure>(errorPlaceholder);
+      // A viewer frame's freshness latch: a superseded frame drops the retry.
+      const isCurrent = xlsxRenderCommitGuardOf(opts as RenderViewportOptions);
       if (!Number.isInteger(sheetIndex) || sheetIndex < 0 || sheetIndex >= this.sheetCount) {
         throw new Error(`Sheet index ${sheetIndex} out of range (count: ${this.sheetCount})`);
       }
@@ -1521,7 +1611,11 @@ export class XlsxWorkbook {
       // has unknown language. Transferring it before any getContext() carries
       // those inherited values, matching the main-mode surface below. Each
       // send constructs its own surface because transfer detaches it.
-      const request = () => {
+      const request = (final = false) => {
+        if (final && isCurrent?.() === false) return Promise.resolve(null);
+        // Resolved at dispatch: a pull that ran just before may have admitted
+        // this sheet's terminal on main.
+        const errorPlaceholderText = this.workerErrorPlaceholderText(preparedPlaceholder, sheetIndex, final);
         const canvas = new OffscreenCanvas(1, 1);
         return this.requireBridge().request(
           (id) => ({
@@ -1529,7 +1623,7 @@ export class XlsxWorkbook {
             id,
             sheetIndex,
             viewport,
-            opts: wireOpts,
+            opts: errorPlaceholderText === undefined ? wireOpts : { ...wireOpts, errorPlaceholderText },
             layoutMetrics: extracted.layoutMetrics,
             viewProjection: extracted.projection,
             canvas,
@@ -1547,12 +1641,33 @@ export class XlsxWorkbook {
         this.assertResourceHealthy();
         res = await request();
       } else {
-        res = await this.withWorksheetArchiveOperation(sheetIndex, request);
+        res = await this.withWorksheetArchiveOperation(sheetIndex, () => request());
+      }
+      if ((res as RenderWorkerResponse).type === 'errorPlaceholderRequired') {
+        // Tentative: publish nothing yet. Wait for main's own guarded
+        // admission of this terminal (it records the failure), then retry
+        // once. Admission failure, cancellation or destroy rejects here.
+        await this.getWorksheet(sheetIndex);
+        this.assertResourceHealthy();
+        res = isCurrent?.() === false
+          ? null
+          : await this.withWorksheetArchiveOperation(sheetIndex, () => request(true));
+        // Superseded between the reply and the retry: the frame is discarded
+        // by its owner, so hand back an empty surface without resolving text.
+        if (res === null) return new OffscreenCanvas(1, 1).transferToImageBitmap();
+        if ((res as RenderWorkerResponse).type === 'errorPlaceholderRequired') {
+          throw new Error('XLSX render worker requested placeholder text twice');
+        }
       }
       return (res as Extract<RenderWorkerResponse, { type: 'viewportRendered' }>).bitmap;
     }
     const off = new OffscreenCanvas(1, 1);
-    await this.renderViewport(off, sheetIndex, viewport, wireOpts);
+    await this.renderViewport(
+      off,
+      sheetIndex,
+      viewport,
+      errorPlaceholder === undefined ? wireOpts : { ...wireOpts, errorPlaceholder } as RenderViewportOptions,
+    );
     return off.transferToImageBitmap();
   }
 
@@ -1635,6 +1750,7 @@ export class XlsxWorkbook {
 
   destroy(): void {
     this.generation = (this.generation ?? 1) + 1;
+    this._partFailureLog.close();
     void this.worksheetPullClient?.cancelAll('closed').catch(() => undefined);
     this.worksheetPullClient = null;
     this.bridge?.terminate();

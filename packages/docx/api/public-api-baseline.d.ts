@@ -1372,6 +1372,7 @@ export interface DocxDiagnostic {
 export type DocxDiagnosticCode = 'FLOW_OVERLAP' | 'BOTTOM_MARGIN_INVASION' | 'FLOW_DOMAIN_INVASION' | 'INVALID_REFERENCE' | 'INVALID_GEOMETRY' | 'INVALID_VALUE' | 'MISSING_RESOURCE' | 'NON_CONVERGENCE' | 'UNSUPPORTED_FEATURE';
 export class DocxDocument {
     get diagnostics(): readonly DocxDiagnostic[];
+    get partFailures(): readonly DocxPartFailure[];
     static load(source: string | ArrayBuffer, opts?: LoadOptions): Promise<DocxDocument>;
     destroy(): void;
     getImage(imagePath: string, mimeType: string): Promise<Blob>;
@@ -1462,6 +1463,10 @@ export interface DocxPagePoint {
     readonly xPt: number;
     readonly yPt: number;
 }
+export interface DocxPartFailure {
+    readonly kind: 'document';
+    readonly message: string;
+}
 export interface DocxRunBorder {
     style: string;
     color?: string | null;
@@ -1473,6 +1478,7 @@ export class DocxScrollViewer implements ZoomableViewer {
     constructor(container: HTMLElement, opts?: DocxScrollViewerOptions);
     load(source: string | ArrayBuffer): Promise<void>;
     get pageCount(): number;
+    get partFailures(): readonly DocxPartFailure[];
     get layoutComplete(): boolean;
     waitUntilLayoutComplete(): Promise<void>;
     relayout(): void;
@@ -1527,6 +1533,7 @@ export interface DocxScrollViewerOptions extends Omit<RenderPageOptions, 'onText
     onHyperlinkClick?: (target: HyperlinkTarget) => void;
     enableHyperlinks?: boolean;
     onError?: (err: Error) => void;
+    onPartFailure?: (failure: Readonly<DocxPartFailure>) => void;
 }
 export type DocxSelectionContext = DocxTextSelectionContext | DocxElementContext | DocxCommentSelectionContext;
 export type DocxSelectionContextOptions = TextSelectionContextOptions;
@@ -1635,6 +1642,7 @@ export class DocxViewer implements ZoomableViewer {
     constructor(canvas: HTMLCanvasElement, opts?: DocxViewerOptions);
     load(source: string | ArrayBuffer): Promise<void>;
     get pageCount(): number;
+    get partFailures(): readonly DocxPartFailure[];
     get currentPage(): number;
     get layoutComplete(): boolean;
     waitUntilLayoutComplete(): Promise<void>;
@@ -1672,6 +1680,7 @@ export interface DocxViewerOptions extends Omit<RenderPageOptions, 'onTextRun'>,
     onHyperlinkClick?: (target: HyperlinkTarget) => void;
     enableHyperlinks?: boolean;
     onError?: (err: Error) => void;
+    onPartFailure?: (failure: Readonly<DocxPartFailure>) => void;
 }
 export interface DrawingMLCustomDashSegment {
     dash: number;
@@ -1688,6 +1697,11 @@ export interface EmbeddedFontRef {
     fontKey: string;
 }
 type EmphasisMark = 'dot' | 'comma' | 'circle' | 'underDot';
+export type ErrorPlaceholderOption<F> = ErrorPlaceholderText | ((failure: Readonly<F>) => ErrorPlaceholderText | undefined);
+export interface ErrorPlaceholderText {
+    readonly title?: string;
+    readonly detail?: string | null;
+}
 type ExtensibleLiteral<Known extends string> = Known | (string & Record<never, never>);
 export interface FieldRun {
     fieldType: string;
@@ -2348,6 +2362,7 @@ export interface RenderPageOptions {
     onTextRun?: (run: DocxTextRunInfo) => void;
     currentDate?: Date | number;
     showTrackedChanges?: boolean;
+    errorPlaceholder?: ErrorPlaceholderOption<DocxPartFailure>;
 }
 export type RenderPageToBitmapOptions = Omit<RenderPageOptions, 'onTextRun'> & {
     onTextRun?: (run: DocxTextRunInfo) => void;

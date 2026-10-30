@@ -1,6 +1,13 @@
 import type { SectionLayoutContext } from '../layout-context.js';
 import type { TextLayoutService } from './text.js';
 import { graphemeClusterOffsets } from '@silurus/ooxml-core';
+import {
+  errorPlaceholderDetail,
+  errorPlaceholderTitle,
+  type ResolvedErrorPlaceholder,
+} from '@silurus/ooxml-core/internal/part-failures';
+
+export type { WireErrorPlaceholder } from '@silurus/ooxml-core/internal/part-failures';
 import { createPageLayers } from './page-graph.js';
 import type {
   DocumentLayout,
@@ -100,10 +107,19 @@ function wrapWords(
   return lines;
 }
 
+export const PARSE_ERROR_PAGE_TITLE = 'This document could not be displayed';
+
+/**
+ * Lay out the synthetic page shown for a document whose main part failed to
+ * parse. `placeholder` replaces the library's title/detail text; `null` (the
+ * default) is the built-in text. The text is shaped here, at acquisition, so
+ * paint stays measurement-free.
+ */
 export function layoutParseErrorPage(
   message: string,
   size: ErrorPageSize,
   text: TextLayoutService,
+  placeholder: ResolvedErrorPlaceholder | null = null,
 ): DocumentLayout {
   if (!(size.widthPt > 0 && size.heightPt > 0)) throw new RangeError('Error page size must be positive');
   const padPt = Math.max(18, Math.min(size.widthPt, size.heightPt) * 0.06);
@@ -115,7 +131,8 @@ export function layoutParseErrorPage(
   };
   const detailSizePt = Math.max(8, Math.min(size.widthPt, size.heightPt) * 0.02);
   const fontRoute = text.resolve({ fonts: {}, slot: 'ascii', genericFamily: 'sans-serif' }).route;
-  const detailLines = wrapWords(message, size.widthPt - padPt * 4, detailSizePt, text, 4);
+  const detail = errorPlaceholderDetail(placeholder, message);
+  const detailLines = detail === null ? [] : wrapWords(detail, size.widthPt - padPt * 4, detailSizePt, text, 4);
   const detailLineHeightPt = detailSizePt * 1.4;
   const commands: DrawingPaintCommand[] = [
     { kind: 'fill-rect', rect: { xPt: 0, yPt: 0, widthPt: size.widthPt, heightPt: size.heightPt }, fill: '#ffffff' },
@@ -127,7 +144,7 @@ export function layoutParseErrorPage(
     },
     {
       kind: 'text', rect: { xPt: padPt * 2, yPt: size.heightPt * 0.40, widthPt: size.widthPt - padPt * 4, heightPt: 24 },
-      text: 'This document could not be displayed', fill: '#333333', fontRoute, fontSizePt: 13,
+      text: errorPlaceholderTitle(placeholder, PARSE_ERROR_PAGE_TITLE), fill: '#333333', fontRoute, fontSizePt: 13,
       fontWeight: 600, fontStyle: 'normal', align: 'center', baseline: 'middle',
     },
     ...detailLines.map((line, index): DrawingPaintCommand => ({

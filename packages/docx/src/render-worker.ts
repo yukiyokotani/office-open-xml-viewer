@@ -73,6 +73,7 @@ import {
   type RenderWorkerReviewIndexInput,
 } from './render-worker-metadata.js';
 import { materializeDocumentPullOwnedModelsSession } from './document-pull-client.js';
+import { clampPartFailureMessage } from '@silurus/ooxml-core/internal/part-failures';
 import {
   createLocalDocumentPullTransport,
   DocumentPullWorker,
@@ -545,6 +546,9 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
         footnotes: model.footnotes ?? [],
         endnotes: model.endnotes ?? [],
         ...projectRenderWorkerLayoutMeta(layout, source, reviewIndexInput),
+        ...(source.fatalParse === null
+          ? {}
+          : { partFailure: { message: clampPartFailureMessage(source.fatalParse.message) } }),
       };
       const usageBytes = sourceUsage();
       if (usageBytes) resourceUsage = decodeOoxmlResourceUsage(usageBytes);

@@ -2002,6 +2002,10 @@ fn degraded_document(theme: &ThemeColors, parse_error: String) -> Document {
         major_font: theme.theme_font("major", "latin"),
         minor_font: theme.theme_font("minor", "latin"),
         parse_error: Some(parse_error),
+        // The body (and its sectPr) is unreadable, so the placeholder page uses
+        // the ECMA-376 §17.6.13/§17.6.11 defaults a section without pgSz/pgMar
+        // gets. A derived default is a 0×0 page, which the error page rejects.
+        section: parse_section(None, &HashMap::new()).0,
         ..Document::default()
     }
 }

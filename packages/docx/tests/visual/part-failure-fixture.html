@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+</head>
+<body>
+  <script type="module">
+    import { DocxDocument } from '/src/index.ts';
+    import { brokenDocx } from '../../../core/src/testing/part-failure-packages.ts';
+    const load = (mode) => DocxDocument.load(brokenDocx().buffer, { mode });
+    const render = (doc, opts) => doc.renderPageToBitmap(0, { width: 612, dpr: 1, ...opts });
+    // Render the synthetic broken part in both modes with no option, static
+    // text and a function, and hash the exact pixels (#1974).
+    async function hashBitmap(bitmap) {
+      const canvas = document.createElement('canvas');
+      canvas.width = bitmap.width;
+      canvas.height = bitmap.height;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(bitmap, 0, 0);
+      bitmap.close();
+      const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+      const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', pixels));
+      const hex = [...digest].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+      return { hash: `${hex}:${canvas.width}x${canvas.height}`, png: canvas.toDataURL('image/png') };
+    }
+    const VARIANTS = [
+      ['builtin', undefined],
+      ['static', { title: 'Custom placeholder title', detail: null }],
+      ['function', (failure) => ({ title: `Custom ${failure.kind} title`, detail: 'Custom detail line' })],
+    ];
+    const results = [];
+    try {
+      for (const mode of ['main', 'worker']) {
+        const engine = await load(mode);
+        const calls = [];
+        for (const [variant, option] of VARIANTS) {
+          const errorPlaceholder = typeof option === 'function'
+            ? (failure) => { calls.push(failure); return option(failure); }
+            : option;
+          const bitmap = await render(engine, errorPlaceholder === undefined ? {} : { errorPlaceholder });
+          results.push({ mode, variant, ...(await hashBitmap(bitmap)) });
+        }
+        results.push({ mode, variant: 'records', failures: engine.partFailures ?? null, calls });
+        engine.destroy();
+      }
+      window.__partFailureResults = results;
+    } catch (error) {
+      window.__partFailureError = String(error?.stack ?? error);
+    }
+    document.body.dataset.status = 'ready';
+  </script>
+</body>
+</html>

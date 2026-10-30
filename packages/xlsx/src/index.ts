@@ -144,6 +144,9 @@ export type {
   ModelSourceTarget,
   OpenedModelSource,
 } from '@silurus/ooxml-core';
+// #1974 — failed package parts and the placeholder text option.
+export type { ErrorPlaceholderOption, ErrorPlaceholderText } from '@silurus/ooxml-core';
+export type { XlsxPartFailure, XlsxSheetPartFailure, XlsxWorkbookPartFailure } from './part-failures';
 // Typed load-time error surfaced by XlsxWorkbook.load (e.g. a password-protected
 // or legacy-binary .xls file). Re-exported so `@silurus/ooxml/xlsx` consumers can
 // narrow on `err.code`.

@@ -1,5 +1,12 @@
 import { decodeSvgBlobOnMainThread } from '@silurus/ooxml-core/worker';
 import type { CjkLang } from '@silurus/ooxml-core';
+import {
+  errorPlaceholderDetail,
+  errorPlaceholderTitle,
+  resolvedFromWire,
+  type ResolvedErrorPlaceholder,
+} from '@silurus/ooxml-core/internal/part-failures';
+import { XlsxErrorPlaceholderRequired } from './part-failures.js';
 import { chartFontSubstitutions, withChartFontSubstitutions } from '@silurus/ooxml-core/internal/chart-font-sources';
 import {
   defaultDpr,
@@ -96,6 +103,11 @@ export function withXlsxRenderCommitGuard(
   guard: () => boolean,
 ): RenderViewportOptions {
   return { ...options, [XLSX_RENDER_COMMIT_GUARD]: guard } as RenderViewportOptions;
+}
+
+/** The internal lifecycle latch attached by {@link withXlsxRenderCommitGuard}. */
+export function xlsxRenderCommitGuardOf(options: RenderViewportOptions): (() => boolean) | undefined {
+  return (options as GuardedRenderViewportOptions)[XLSX_RENDER_COMMIT_GUARD];
 }
 
 /** What `prefetchImages` needs to decode one picture: the raster `imagePath`
@@ -962,6 +974,10 @@ async function renderWorksheetViewportLeased(
   svgDecoder?: SvgBlobDecoder,
 ): Promise<void> {
   if ((opts as GuardedRenderViewportOptions)[XLSX_RENDER_COMMIT_GUARD]?.() === false) return;
+  if (deps.ws.parseError && opts.errorPlaceholderText?.state === 'resolve-on-main') {
+    // Only the main thread may run a caller function; paint nothing here.
+    throw new XlsxErrorPlaceholderRequired(-1);
+  }
   const styles = deps.styles;
   const measurementCtx = target.getContext('2d') as CanvasRenderingContext2D | null;
   if (!measurementCtx) throw new Error('XLSX render target does not provide a 2-D canvas context');
@@ -1072,7 +1088,14 @@ async function renderWorksheetViewportLeased(
   // error overlay in place of the grid so the workbook's OTHER sheets stay usable
   // and this tab clearly reads as "broken". Healthy sheets never take this path.
   if (ws.parseError) {
-    drawSheetParseErrorOverlay(ctx, width, height, ws.name, ws.parseError);
+    drawSheetParseErrorOverlay(
+      ctx,
+      width,
+      height,
+      ws.name,
+      ws.parseError,
+      resolvedFromWire(opts.errorPlaceholderText),
+    );
     return;
   }
   if (ws.isDialogSheet) {
@@ -1125,6 +1148,7 @@ function drawSheetParseErrorOverlay(
   heightPx: number,
   sheetName: string,
   message: string,
+  placeholder: ResolvedErrorPlaceholder | null,
 ): void {
   ctx.save();
   ctx.fillStyle = '#f7f7f8';
@@ -1142,13 +1166,22 @@ function drawSheetParseErrorOverlay(
   const headSize = Math.max(13, base * 0.035);
   ctx.fillStyle = '#333333';
   ctx.font = `600 ${headSize}px sans-serif`;
-  ctx.fillText(`Sheet "${sheetName}" could not be displayed`, cx, heightPx * 0.46);
+  ctx.fillText(
+    errorPlaceholderTitle(placeholder, `Sheet "${sheetName}" could not be displayed`),
+    cx,
+    heightPx * 0.46,
+  );
+  const detail = errorPlaceholderDetail(placeholder, message);
+  if (detail === null) {
+    ctx.restore();
+    return;
+  }
 
   const detailSize = Math.max(10, base * 0.022);
   ctx.fillStyle = '#666666';
   ctx.font = `${detailSize}px sans-serif`;
   const maxLineWidth = Math.min(widthPx * 0.8, 640);
-  const words = message.split(/\s+/);
+  const words = detail.split(/\s+/);
   const lines: string[] = [];
   let line = '';
   for (const word of words) {

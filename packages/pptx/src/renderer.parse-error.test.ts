@@ -100,3 +100,56 @@ describe('RB7 renderSlide placeholder', () => {
     expect(texts.some((t) => t.includes('could not be displayed'))).toBe(false);
   });
 });
+
+describe('#1974 errorPlaceholder on the slide placeholder', () => {
+  const fillTexts = (calls: DrawCall[]) => calls.filter((c) => c.op === 'fillText').map((c) => String(c.args[0]));
+
+  async function paint(opts: Parameters<typeof renderSlide>[4] = {}): Promise<string[]> {
+    const { ctx, calls } = recordingCtx();
+    await renderSlide(stubCanvas(ctx), brokenSlide(), 9_144_000, 6_858_000, { width: 960, dpr: 1, ...opts });
+    return fillTexts(calls);
+  }
+
+  it('keeps the built-in text when the option is absent or returns undefined', async () => {
+    const builtin = await paint();
+    expect(builtin).toContain('Slide 3 could not be displayed');
+    expect(await paint({ errorPlaceholder: () => undefined })).toEqual(builtin);
+    expect(await paint({ errorPlaceholder: {} })).toEqual(builtin);
+  });
+
+  it('paints a custom title and hides the detail for detail: null', async () => {
+    const texts = await paint({ errorPlaceholder: { title: 'Unavailable', detail: null } });
+    expect(texts).toContain('Unavailable');
+    expect(texts.join(' ')).not.toContain('slide3.xml');
+  });
+
+  it('resolves a function from the slide in-realm', async () => {
+    const seen: unknown[] = [];
+    const texts = await paint({
+      errorPlaceholder: (failure) => {
+        seen.push(failure);
+        return { title: `Broken slide #${failure.slideNumber}`, detail: 'Ask the author' };
+      },
+    });
+    expect(seen).toEqual([{
+      kind: 'slide', slideIndex: 2, slideNumber: 3, message: 'ppt/slides/slide3.xml: unexpected end of stream',
+    }]);
+    expect(Object.isFrozen(seen[0])).toBe(true);
+    expect(texts).toContain('Broken slide #3');
+    expect(texts).toContain('Ask the author');
+  });
+
+  it('never evaluates the function for a healthy slide', async () => {
+    const { ctx } = recordingCtx();
+    let calls = 0;
+    await renderSlide(stubCanvas(ctx), { index: 0, slideNumber: 1, background: null, elements: [] }, 9_144_000, 6_858_000, {
+      width: 960, dpr: 1, errorPlaceholder: () => { calls += 1; return { title: 'x' }; },
+    });
+    expect(calls).toBe(0);
+  });
+
+  it('rejects for an invalid result', async () => {
+    await expect(paint({ errorPlaceholder: () => ({ title: 1 }) as never })).rejects.toThrow(TypeError);
+  });
+});
+

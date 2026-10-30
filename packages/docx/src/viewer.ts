@@ -36,6 +36,8 @@ import {
   MAX_DOCX_ELEMENT_TEXT_CHARACTERS,
 } from './element-context';
 import { renderDocxFocusedPage } from './focused-view-runtime';
+import { PartFailureDelivery, prepareErrorPlaceholder } from '@silurus/ooxml-core/internal/part-failures';
+import { syncedDocxPartFailureLog, type DocxPartFailure } from './part-failures.js';
 import {
   subscribeDocxLayout,
   type DocxLayoutPublication,
@@ -112,6 +114,13 @@ export interface DocxViewerOptions extends Omit<RenderPageOptions, 'onTextRun'>,
    * trap, not a reliably classified OOM.
    */
   onError?: (err: Error) => void;
+  /**
+   * Called once per loaded document when a package part failed to parse and a
+   * placeholder page is shown instead (#1974). Delivered before `load()`
+   * resolves. Never routed to `onError`; `load()` still resolves. The same
+   * records are available from {@link DocxViewer.partFailures}.
+   */
+  onPartFailure?: (failure: Readonly<DocxPartFailure>) => void;
 }
 
 export class DocxViewer implements ZoomableViewer {
@@ -158,6 +167,7 @@ export class DocxViewer implements ZoomableViewer {
   private readonly _renderDispatcher: StaticCanvasRenderDispatcher;
   private readonly _errorRouter: CanvasViewerErrorRouter;
   private _destroyed = false;
+  private readonly _partFailureDelivery: PartFailureDelivery<DocxPartFailure>;
   private _selectionChangeListener: (() => void) | null = null;
   private _selectionContextKey = 'null';
   private _elementContext: DocxElementContext | null = null;
@@ -220,6 +230,8 @@ export class DocxViewer implements ZoomableViewer {
     this._wrapper = this._canvasMount.wrapper;
     this._renderDispatcher = new StaticCanvasRenderDispatcher(canvas, this._mode === 'worker');
     this._errorRouter = new CanvasViewerErrorRouter('DocxViewer', opts.onError);
+    prepareErrorPlaceholder(opts.errorPlaceholder);
+    this._partFailureDelivery = new PartFailureDelivery('DocxViewer', opts.onPartFailure, () => 'document');
     const overlays = new CanvasOverlayHost(
       this._wrapper,
       opts.enableTextSelection === true,
@@ -263,6 +275,18 @@ export class DocxViewer implements ZoomableViewer {
    * awaitable method result, so one failure is never delivered twice.
    */
   async load(source: string | ArrayBuffer): Promise<void> {
+    // #1974: a reload stops delivering the committed engine's part failures at
+    // once; the engine committed when it settles is delivered again.
+    const failureLoad = this._partFailureDelivery.beginLoad();
+    try {
+      await this._loadSource(source);
+    } finally {
+      const committed = this._destroyed ? null : this._doc;
+      this._partFailureDelivery.endLoad(failureLoad, committed ? syncedDocxPartFailureLog(committed) : null);
+    }
+  }
+
+  private async _loadSource(source: string | ArrayBuffer): Promise<void> {
     if (this._destroyed) throw new Error('DocxViewer is destroyed');
     if (this._borrowed) {
       throw new Error(
@@ -362,6 +386,8 @@ export class DocxViewer implements ZoomableViewer {
       }
       this._currentPage = 0;
       this._bindLayoutDocument(doc);
+      if (this._destroyed) throw new Error('DocxViewer is destroyed');
+      if (this._pendingLoadAbort !== loadAbort) return;
       // A new document invalidates any prior find state (cached runs / matches).
       this._find.invalidate();
       await this._render();
@@ -382,6 +408,12 @@ export class DocxViewer implements ZoomableViewer {
 
   get pageCount(): number {
     return this._doc?.pageCount ?? 0;
+  }
+
+  /** Package parts of the loaded document that failed to parse (#1974);
+   *  `[]` before load and after destroy. */
+  get partFailures(): readonly DocxPartFailure[] {
+    return this._destroyed ? [] : this._doc?.partFailures ?? [];
   }
 
   get currentPage(): number {
@@ -758,6 +790,7 @@ export class DocxViewer implements ZoomableViewer {
     this._pendingViewChanged = null;
     this._findRequestGeneration++;
     this._layoutViewGeneration++;
+    this._partFailureDelivery.close();
     this._unbindLayoutDocument();
     // First line: block any render rejection racing in from surfacing on a dead
     // viewer (checked at the top of _reportRenderError). Bump the load generation
@@ -835,6 +868,7 @@ export class DocxViewer implements ZoomableViewer {
       currentDate: this._opts.currentDate,
       showTrackedChanges: this._opts.showTrackedChanges,
       onTextRun,
+      ...(this._opts.errorPlaceholder === undefined ? {} : { errorPlaceholder: this._opts.errorPlaceholder }),
     };
     if (isWorker) {
       // Only serializable render options may cross to the worker — spreading the
@@ -918,9 +952,12 @@ export class DocxViewer implements ZoomableViewer {
       unsubscribeLayout();
       unsubscribeView();
     };
+    // Engine commit: replay this document's part failures (#1974).
+    this._partFailureDelivery.attach(syncedDocxPartFailureLog(doc));
   }
 
   private _unbindLayoutDocument(): void {
+    this._partFailureDelivery.attach(null);
     this._layoutUnsubscribe?.();
     this._layoutUnsubscribe = null;
     this._layoutFailed = false;

@@ -5,7 +5,8 @@ import type { ChartThreeDRenderer, ChartRegionMapRenderer, ChartExRenderer, Imag
 export type { DocxTextRunInfo } from './types';
 import { bodyMathOccurrences } from './layout/resources.js';
 import { paintResourceRegistryOf, privateResourceLookupOf } from './layout/runtime-state.js';
-import { selectDocumentLayoutPage } from './layout/document-layout-variants.js';
+import { selectDocumentLayoutPage, withErrorPlaceholderPage } from './layout/document-layout-variants.js';
+import type { WireErrorPlaceholder } from './layout/error-page.js';
 import { rasterPaintOccurrencesForPage } from './layout/text-index.js';
 import { textRunsForPage } from './text-run-projection.js';
 import { dropBrowserImageCache } from './paint/browser-images.js';
@@ -83,6 +84,9 @@ export interface RenderDocumentOptions {
   /** Internal: the unscoped substitutions this document's font sources
    * loaded, painted by chart text (`ChartModel.fontSubstitutions`). */
   chartFontSubstitutions?: Readonly<Record<string, string>>;
+  /** Internal: placeholder text already resolved on the main thread (#1974).
+   * Absent means the built-in text. */
+  errorPlaceholderText?: WireErrorPlaceholder;
 }
 
 export function dropColorReplacedCache(
@@ -121,11 +125,11 @@ function normalizeRenderOptions(
     defaultCurrentDateMs,
     () => source,
   );
-  const selection = selectDocumentLayoutPage(services, {
+  const selection = withErrorPlaceholderPage(services, selectDocumentLayoutPage(services, {
     currentDate: options.currentDate,
     defaultCurrentDateMs,
     showTrackedChanges: options.showTrackedChanges,
-  }, pageIndex);
+  }, pageIndex), options.errorPlaceholderText, pageIndex);
   const scale = canvasPageScale(selection.page, options.width);
   return {
     selection,
