@@ -173,8 +173,9 @@ test('browser parser carries all inherited attributes through runs, fields, brea
   expect(parsed.table).toHaveLength(2);
   for (const run of parsed.table) {
     // A defPPr size (#1620 controls) and fill (#1989 controls) have no effect
-    // in PowerPoint; its other character properties still cascade into cell
-    // runs and fields.
+    // in PowerPoint. The parser still cascades its other character properties
+    // into cell runs and fields; PowerPoint ignores those too (#1989 font
+    // controls), which is tracked separately.
     expect(run).toMatchObject({ bold: true, fontSize: null, color: null });
     expect(run.characterAttributes.lang).toBe('ja-JP');
     expect(run.fontFamilyCs).toBe('Amiri');
