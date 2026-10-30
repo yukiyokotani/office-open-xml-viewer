@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 const root = fileURLToPath(new URL('../', import.meta.url));
 execFileSync(process.execPath, ['scripts/sync-companion-version.mjs'], { cwd: root, stdio: 'inherit' });
-for (const directory of ['.', 'packages/legacy-office']) {
+for (const directory of ['.', 'packages/legacy-office', 'packages/opendocument']) {
   const cwd = fileURLToPath(new URL(`${directory}/`, new URL('../', import.meta.url)));
   const { name, version } = JSON.parse(readFileSync(new URL(`${directory}/package.json`, new URL('../', import.meta.url)), 'utf8'));
   const query = spawnSync('npm', ['view', `${name}@${version}`, 'version', '--json'], { encoding: 'utf8' });

@@ -7,6 +7,9 @@ import { companionBundleBoundary, wasmAssetUrl } from '../../vite.config';
 const here = fileURLToPath(new URL('.', import.meta.url));
 export default defineConfig({
   base: './',
+  // public/ holds only the local private corpus; it must never be copied
+  // into the published dist.
+  publicDir: false,
   // Shared structural types live above this package. Keep tsgo's config/root
   // at repository level so every declaration stays inside its temporary tree.
   plugins: [

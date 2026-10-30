@@ -18,13 +18,20 @@ const run = (command, args, cwd = scratch) => execFileSync(command, args, { cwd,
 try {
   run(process.execPath, ['scripts/sync-companion-version.mjs'], root);
   const tarballs = [];
-  for (const directory of [root, join(root, 'packages/legacy-office')]) {
+  for (const directory of [root, join(root, 'packages/legacy-office'), join(root, 'packages/opendocument')]) {
     const packed = JSON.parse(run('npm', ['pack', '--json', '--pack-destination', scratch], directory));
-    const wasm = packed[0].files.map(file => file.path).filter(path => path.endsWith('.wasm')).sort();
-    if (directory !== root) {
+    const files = packed[0].files.map(file => file.path).sort();
+    const wasm = files.filter(path => path.endsWith('.wasm'));
+    if (directory.endsWith('opendocument')) {
+      // Exactly the reader assets: never the local private corpus.
+      assert.deepEqual(files, [
+        'LICENSE', 'THIRD_PARTY_NOTICES.md', 'dist/odt-source-module.mjs', 'dist/odt.mjs',
+        'dist/opendocument_odt_bg.wasm', 'dist/types/odt.d.ts', 'package.json',
+      ]);
+    } else if (directory !== root) {
       assert.deepEqual(wasm, ['doc', 'ppt', 'xls'].map(f => `dist/legacy_${f}_direct_bg.wasm`));
     } else {
-      assert.ok(packed[0].files.every(file => !/^dist\/legacy[-_]/.test(file.path)), 'root tarball contains a legacy reader asset');
+      assert.ok(files.every(path => !/^dist\/(?:legacy[-_]|opendocument|odt[-.])/.test(path)), 'root tarball contains a companion reader asset');
     }
     tarballs.push(join(scratch, packed[0].filename));
   }

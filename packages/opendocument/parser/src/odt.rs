@@ -973,11 +973,12 @@ impl RunProperties {
                 )
             }
         };
-        let caps = match cascade.get(NS_FO, "text-transform") {
-            None | Some("none") => false,
-            Some("uppercase") => true,
-            Some(_) => return Err(unsupported("text-transform")),
-        };
+        // §20.227 follows XSL's language-sensitive case mapping; the DOCX
+        // renderer uppercases locale-independently. Not yet measured.
+        if cascade.get(NS_FO, "text-transform").is_some_and(|v| v != "none") {
+            return Err(unsupported("text-transform"));
+        }
+        let caps = false;
         if cascade
             .get(NS_FO, "font-variant")
             .is_some_and(|v| v != "normal")
