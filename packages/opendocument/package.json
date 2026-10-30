@@ -23,15 +23,21 @@
     "wasm:odt": "cd parser && wasm-pack build --target web --out-dir ../src/wasm-odt --out-name opendocument_odt --features odt && node ../../../scripts/append-wasm-reinit.mjs ../src/wasm-odt/opendocument_odt.js",
     "typecheck": "tsc --noEmit",
     "build": "vite build && node ../../scripts/bundle-declarations.mjs odt",
-    "test": "cd ../.. && vitest run packages/opendocument/src"
+    "test": "cd ../.. && vitest run packages/opendocument/src",
+    "corpus:convert": "node tests/corpus/convert.mjs",
+    "corpus:odt": "node tests/corpus/run.mjs"
   },
   "devDependencies": {
+    "@playwright/test": "^1.64.1",
+    "@silurus/ooxml": "workspace:*",
+    "@silurus/ooxml-core": "workspace:*",
     "@types/node": "^25.6.0",
+    "@types/pngjs": "^6.0.5",
+    "pixelmatch": "^7.1.0",
+    "pngjs": "^7.0.0",
     "typescript": "^7.0.2",
     "vite": "^8.0.8",
-    "vitest": "^4.1.4",
-    "@silurus/ooxml-core": "workspace:*",
-    "@silurus/ooxml": "workspace:*"
+    "vitest": "^4.1.4"
   },
   "files": [
     "dist",
