@@ -30,7 +30,7 @@ const wasmAsset = `legacy_${family}_direct_bg.wasm`;
 const moduleAssetPattern = new RegExp(`^legacy-${family}-source-module(?:-[\\w-]+)?\\.m?js$`);
 const runtimeMarkers = [
   `packages/legacy-office/src/direct-${family}-engine.ts`,
-  'packages/legacy-office/src/direct-source-runtime.ts',
+  'packages/core/src/source/model-source-runtime.ts',
   `wasm-direct-${family}/legacy_${family}_direct.js`,
 ];
 

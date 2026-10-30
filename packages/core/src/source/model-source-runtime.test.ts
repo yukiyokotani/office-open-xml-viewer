@@ -3,7 +3,7 @@ import {
   createDirectSourceRuntime,
   resolveDirectWasmInput,
   validateDirectWasmUrl,
-} from './direct-source-runtime.js';
+} from './model-source-runtime.js';
 
 class Archive {
   free = vi.fn();

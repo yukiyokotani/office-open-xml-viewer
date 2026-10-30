@@ -1,12 +1,12 @@
 import { expect, it, vi } from 'vitest';
 import { parseTypedParserError } from '@silurus/ooxml-core/worker';
-import { createDirectSourceRuntime } from './direct-source-runtime.js';
+import { createDirectSourceRuntime } from '@silurus/ooxml-core/internal/model-source-runtime';
 import { nativeRejection } from './native-rejection.js';
 
 it('maps native constructor and lazy failures, never initialization/network errors', async () => {
   const format = 'xls';
   const create = (construct: () => { free(): void; read(): void }, initialize = async () => {}) => createDirectSourceRuntime({
-    label: 'test', format, loadGlue: async () => ({ default: initialize }),
+    label: 'test', mapNativeError: (error) => nativeRejection(error, format), loadGlue: async () => ({ default: initialize }),
     resolveWasm: async () => new Uint8Array(), construct, closeNative: () => {},
   });
   const check = (error: unknown) => expect(parseTypedParserError(error)).toMatchObject({ code: 'unsupported-content',
