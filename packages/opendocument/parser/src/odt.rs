@@ -9,14 +9,14 @@
 
 use crate::error::{invalid, unsupported};
 use crate::package::{OdfPackage, SUPPORTED_VERSIONS};
-use crate::script::{table_22, ScriptClass};
+use crate::script::{is_weak_unmapped, table_22, ScriptClass};
 use crate::style::{Cascade, Family, Group, Scope, Style, StyleRef, StyleSheet, PARAGRAPH, TEXT};
 use crate::xml::{
     self, NS_DRAW, NS_FO, NS_LOEXT, NS_OFFICE, NS_OFFICEOOO, NS_STYLE, NS_SVG, NS_TEXT, NS_XML,
 };
 use docx_model::{
-    BodyElement, BreakType, DocParagraph, DocRun, Document, DocumentSettings, RunFontFacts,
-    SectionProps, TextRun,
+    BodyElement, BreakType, DocParagraph, DocRun, Document, DocumentSettings, LineSpacing,
+    RunFontFacts, SectionProps, TextRun,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -64,7 +64,31 @@ const MAX_SEARCH_ORDER: usize = 256;
 /// one unit per identifier byte looked up.
 const MAX_CASCADE_WORK: usize = 16 * 1024 * 1024;
 
+/// Observed LibreOffice behaviour where ODF leaves the consumer free or
+/// LibreOffice deviates from the text, adopted only with the user's approval
+/// (AGENTS.md). Each rule is implemented and tested; approval flips its flag.
+#[derive(Clone, Copy, Debug)]
+pub struct CompatRules {
+    /// `fo:line-height` percentages scale the natural line height (DOCX
+    /// "auto" with the same multiple), on text of one face and size.
+    pub proportional_line_height: bool,
+    /// Weak characters outside Table 22 (spaces, punctuation, symbols,
+    /// private use, emoji and zero-width marks) take the preceding
+    /// character's script class, or the following one's at paragraph start.
+    pub weak_script_class: bool,
+}
+
+/// The rules in force: both pending user approval (requested 2026-10-31).
+pub const LIBREOFFICE_RULES: CompatRules = CompatRules {
+    proportional_line_height: false,
+    weak_script_class: false,
+};
+
 pub fn read(package: &OdfPackage) -> Result<Document, String> {
+    read_with(package, LIBREOFFICE_RULES)
+}
+
+fn read_with(package: &OdfPackage, rules: CompatRules) -> Result<Document, String> {
     let styles_text = package.read_text("styles.xml")?;
     let content_text = package.read_text("content.xml")?;
     let styles_doc = xml::parse(&styles_text)?;
@@ -138,6 +162,7 @@ pub fn read(package: &OdfPackage) -> Result<Document, String> {
         retained_text_bytes: 0,
         construction_bytes: 0,
         contextual_spacing_defined,
+        rules,
     };
     reader.walk_blocks(body, 0)?;
     // The font table and its three metadata maps each copy a used family
@@ -631,6 +656,18 @@ impl PageStyle {
         section.page_height = size
             .1
             .ok_or_else(|| invalid("a page layout has no height"))?;
+        // Page dimensions are positive lengths (§20.215, §20.216) and the
+        // margins (§20.204 et al.) must leave a text area.
+        let s = &section;
+        if !(s.page_width > 0.0 && s.page_height > 0.0)
+            || [s.margin_top, s.margin_bottom, s.margin_left, s.margin_right]
+                .iter()
+                .any(|m| *m < 0.0)
+            || s.margin_left + s.margin_right >= s.page_width
+            || s.margin_top + s.margin_bottom >= s.page_height
+        {
+            return Err(invalid("a page layout has no text area"));
+        }
         Ok(Self { name, section })
     }
 }
@@ -709,6 +746,7 @@ struct Collected {
 }
 
 struct Reader<'a> {
+    rules: CompatRules,
     sheet: &'a StyleSheet,
     fonts: &'a FontFaces,
     used_faces: RefCell<HashSet<Face>>,
@@ -874,7 +912,7 @@ impl<'a> Reader<'a> {
         }
 
         check_groups(&chain, &["paragraph-properties", "text-properties"])?;
-        let mut collected = paragraph_properties(&properties)?;
+        let mut collected = paragraph_properties(&properties, self.rules)?;
         if collected.contextual && !self.contextual_spacing_defined {
             return Err(unsupported("contextual-spacing-version"));
         }
@@ -920,6 +958,22 @@ impl<'a> Reader<'a> {
         }
         let tokens = collapse(std::mem::take(&mut inline.tokens));
         self.emit_runs(&tokens, &inline.contexts, &mut collected.paragraph)?;
+        if collected.paragraph.line_spacing.is_some() {
+            // Proportional spacing scales the natural line of uniform text
+            // alike; with mixed faces or sizes LibreOffice does not multiply
+            // the extra height (measured), so such paragraphs reject.
+            let paragraph = &collected.paragraph;
+            let uniform = paragraph.runs.iter().all(|run| match run {
+                DocRun::Text(text) => {
+                    text.font_family == paragraph.default_font_family
+                        && Some(text.font_size) == paragraph.default_font_size
+                }
+                _ => true,
+            });
+            if !uniform {
+                return Err(unsupported("line-height-proportional-mixed"));
+            }
+        }
         self.paragraphs.push(collected);
         Ok(())
     }
@@ -1098,7 +1152,12 @@ impl<'a> Reader<'a> {
         // LibreOffice.
         let mut line_has_glyph = false;
         let mut any_break = false;
-        for &token in tokens {
+        let weak_classes = if self.rules.weak_script_class {
+            weak_classes(tokens)
+        } else {
+            Vec::new()
+        };
+        for (index, &token) in tokens.iter().enumerate() {
             let (c, context) = match token {
                 Token::LineBreak(context) => {
                     // LibreOffice sizes a break's line portion by the break's
@@ -1145,7 +1204,7 @@ impl<'a> Reader<'a> {
             // class (§20.358). LibreOffice was observed to use the preceding
             // character's class; until that rule is approved, such a character
             // is admitted only where every class resolves to the same face.
-            let class = match table_22(c) {
+            let class = match table_22(c).or_else(|| weak_classes.get(index).copied().flatten()) {
                 Some(class) => class,
                 None => match uniform.get(&context) {
                     Some(class) => *class,
@@ -1319,6 +1378,44 @@ impl<'a> Reader<'a> {
     }
 }
 
+/// LibreOffice's class for weak characters outside Table 22 (measured;
+/// `CompatRules::weak_script_class`): the class of the preceding character,
+/// or at paragraph start of the following one. `None` where no rule applies
+/// (other unmapped characters, or a paragraph without a mapped character).
+fn weak_classes(tokens: &[Token]) -> Vec<Option<ScriptClass>> {
+    let character = |token: &Token| match *token {
+        Token::Char(c, _) => Some(c),
+        Token::Space(_) => Some(' '),
+        Token::LineBreak(_) => None,
+    };
+    let mut classes: Vec<Option<ScriptClass>> = Vec::with_capacity(tokens.len());
+    let mut previous: Option<ScriptClass> = None;
+    for token in tokens {
+        let class = match character(token) {
+            Some(c) => match table_22(c) {
+                Some(class) => Some(class),
+                None if is_weak_unmapped(c) => previous,
+                None => None,
+            },
+            None => None,
+        };
+        if class.is_some() {
+            previous = class;
+        }
+        classes.push(class);
+    }
+    // Leading weak characters take the first following class.
+    if let Some(first) = classes.iter().position(Option::is_some) {
+        let following = classes[first];
+        for (index, token) in tokens[..first].iter().enumerate() {
+            if character(token).is_some_and(is_weak_unmapped) {
+                classes[index] = following;
+            }
+        }
+    }
+    classes
+}
+
 /// The properties that set a line's height: face, size and raise/lower.
 fn same_line_metrics(
     a: &RunProperties,
@@ -1416,10 +1513,11 @@ impl RunProperties {
         let size = match scripted("font-size") {
             Some(value) if value.ends_with('%') => return Err(unsupported("relative-font-size")),
             // A positiveLength (§20.190). LibreOffice renders sizes below
-            // 1 pt as 1 pt (measured); that normalization is not adopted, so
-            // they reject.
+            // 1 pt as 1 pt and lays out sizes from about 3,000 pt differently
+            // (measured); neither behaviour is adopted, so the admitted
+            // domain is 1-1,000 pt (measured equal up to 2,800 pt).
             Some(value) => match length_pt(value)? {
-                size if size >= 1.0 && size.is_finite() => size,
+                size if (1.0..=1000.0).contains(&size) => size,
                 _ => return Err(unsupported("font-size-range")),
             },
             // ODF defines no initial font size; LibreOffice's default styles
@@ -1681,8 +1779,12 @@ fn check_text_keys(cascade: &Cascade<'_>) -> Result<(), String> {
                 NS_FO,
                 "font-family" | "font-size" | "font-weight" | "font-style" | "color"
                 | "background-color" | "letter-spacing" | "text-transform" | "font-variant"
-                | "language" | "country" | "script" | "hyphenate",
+                | "script" | "hyphenate",
             ) => true,
+            // §20.202 western language: admitted but not carried (the DOCX
+            // model has no western slot). Language-specific OpenType forms
+            // are not applied, as for DOCX w:lang: #2001.
+            (NS_FO, "language" | "country") => true,
             (
                 NS_STYLE,
                 "use-window-font-color"
@@ -1770,7 +1872,7 @@ fn resolve_family(cascade: &Cascade<'_>, suffix: &str, fonts: &FontFaces) -> Res
 }
 
 /// Paragraph properties: exact mappings, inert values, rejection otherwise.
-fn paragraph_properties(cascade: &Cascade<'_>) -> Result<Collected, String> {
+fn paragraph_properties(cascade: &Cascade<'_>, rules: CompatRules) -> Result<Collected, String> {
     for (ns, name) in cascade.keys() {
         let value = cascade.get(&ns, &name).unwrap_or("");
         let admitted = match (ns.as_str(), name.as_str()) {
@@ -1857,10 +1959,18 @@ fn paragraph_properties(cascade: &Cascade<'_>) -> Result<Collected, String> {
         // height instead — DOCX "auto" with the percentage as the multiple,
         // measured equal at 100% and 150% on uniform text. That is an
         // observed LibreOffice rule awaiting user approval (AGENTS.md), so
-        // every percentage rejects until then.
+        // every percentage rejects until it is enabled. Measured from 50% to
+        // 300%, on text of one face and size (checked per paragraph).
         (Some(value), None) if value.ends_with('%') => {
-            percent(value)?;
-            return Err(unsupported("line-height-proportional"));
+            let multiple = percent(value)?;
+            if !rules.proportional_line_height || !(0.5..=3.0).contains(&multiple) {
+                return Err(unsupported("line-height-proportional"));
+            }
+            Some(LineSpacing {
+                value: multiple,
+                rule: "auto".into(),
+                explicit: true,
+            })
         }
         // Fixed and minimum line heights: LibreOffice places the text at the
         // bottom of a taller line box (all extra space above), measured 7.5pt
@@ -1997,16 +2107,49 @@ mod tests {
         }
     }
 
+    /// The fixture page geometry with `extra` attributes added or replacing
+    /// the defaults (` name="value"` pairs).
+    fn page_properties(extra: &str) -> String {
+        let mut attributes: Vec<(String, String)> = [
+            ("fo:page-width", "210mm"),
+            ("fo:page-height", "297mm"),
+            ("fo:margin-top", "20mm"),
+            ("fo:margin-bottom", "20mm"),
+            ("fo:margin-left", "25mm"),
+            ("fo:margin-right", "25mm"),
+        ]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        for pair in extra.split('"').collect::<Vec<_>>().chunks(2) {
+            if let [name, value] = pair {
+                let name = name.trim().trim_end_matches('=').to_string();
+                match attributes.iter_mut().find(|(k, _)| *k == name) {
+                    Some(entry) => entry.1 = value.to_string(),
+                    None => attributes.push((name, value.to_string())),
+                }
+            }
+        }
+        attributes
+            .iter()
+            .map(|(k, v)| format!(r#" {k}="{v}""#))
+            .collect()
+    }
+
     fn read_fixture(fixture: Fixture<'_>) -> Result<Document, String> {
+        read_fixture_with(fixture, LIBREOFFICE_RULES)
+    }
+
+    fn read_fixture_with(fixture: Fixture<'_>, rules: CompatRules) -> Result<Document, String> {
         let styles = format!(
-            r#"<office:document-styles {NS} office:version="1.3">{}<office:styles><style:default-style style:family="paragraph"><style:paragraph-properties style:tab-stop-distance="1.25cm"/><style:text-properties {}/></style:default-style><style:default-style style:family="graphic"/>{}</office:styles><office:automatic-styles><style:page-layout style:name="pm1"><style:page-layout-properties fo:page-width="210mm" fo:page-height="297mm" fo:margin-top="20mm" fo:margin-bottom="20mm" fo:margin-left="25mm" fo:margin-right="25mm"{}/></style:page-layout></office:automatic-styles><office:master-styles><style:master-page style:name="Standard" style:page-layout-name="pm1">{}</style:master-page></office:master-styles></office:document-styles>"#,
+            r#"<office:document-styles {NS} office:version="1.3">{}<office:styles><style:default-style style:family="paragraph"><style:paragraph-properties style:tab-stop-distance="1.25cm"/><style:text-properties {}/></style:default-style><style:default-style style:family="graphic"/>{}</office:styles><office:automatic-styles><style:page-layout style:name="pm1"><style:page-layout-properties{}/></style:page-layout></office:automatic-styles><office:master-styles><style:master-page style:name="Standard" style:page-layout-name="pm1">{}</style:master-page></office:master-styles></office:document-styles>"#,
             FACES.replace(
                 "</office:font-face-decls>",
                 &format!("{}</office:font-face-decls>", fixture.faces)
             ),
             fixture.default_text,
             fixture.styles,
-            fixture.page,
+            page_properties(fixture.page),
             fixture.master
         );
         let content = format!(
@@ -2027,7 +2170,7 @@ mod tests {
             PackageLimits::default(),
             &MEDIA_TYPES,
         )?;
-        read(&package)
+        read_with(&package, rules)
     }
 
     fn paragraphs(document: &Document) -> Vec<&DocParagraph> {
@@ -2774,6 +2917,101 @@ mod tests {
                 "{size}"
             );
         }
+    }
+
+    #[test]
+    fn rejects_page_layouts_without_a_text_area_and_oversized_fonts() {
+        for page in [
+            r#" fo:page-width="-12pt""#,
+            r#" fo:page-height="0cm""#,
+            r#" fo:margin-left="-1cm""#,
+            r#" fo:margin-left="10cm" fo:margin-right="12cm""#,
+        ] {
+            let error = read_fixture(Fixture {
+                page,
+                ..Fixture::default()
+            })
+            .unwrap_err();
+            assert!(error.contains("no text area"), "{page}: {error}");
+        }
+        for (size, ok) in [("1000pt", true), ("1001pt", false), ("3000pt", false)] {
+            let styles = format!(
+                r#"<style:style style:name="T" style:family="text"><style:text-properties fo:font-size="{size}"/></style:style>"#
+            );
+            let result = read_fixture(Fixture {
+                styles: &styles,
+                body: r#"<text:p>a<text:span text:style-name="T">b</text:span></text:p>"#,
+                ..Fixture::default()
+            });
+            assert_eq!(result.is_ok(), ok, "{size}");
+        }
+    }
+
+    #[test]
+    fn pending_rules_map_once_enabled() {
+        let on = CompatRules {
+            proportional_line_height: true,
+            weak_script_class: true,
+        };
+        // Asian and complex defaults differ from the Latin face, so a weak
+        // character's class matters.
+        let mixed = r#"style:font-name="Serif" fo:font-size="12pt" style:font-name-asian="Mincho" style:font-size-asian="12pt" style:font-name-complex="Sans" style:font-size-complex="12pt" style:letter-kerning="true""#;
+        let read = |body: &str, styles: &str, rules: CompatRules| {
+            read_fixture_with(
+                Fixture {
+                    default_text: mixed,
+                    styles,
+                    body,
+                    ..Fixture::default()
+                },
+                rules,
+            )
+        };
+        for body in [
+            "<text:p>a b\u{2014}c\u{1f600}</text:p>",
+            "<text:p>\u{201c}a\u{201d}</text:p>",
+        ] {
+            assert_eq!(
+                read(body, "", LIBREOFFICE_RULES).unwrap_err(),
+                unsupported("script-unmapped-character"),
+                "{body}"
+            );
+            let document = read(body, "", on).unwrap();
+            assert!(
+                texts(paragraphs(&document)[0]).len() == 1,
+                "weak characters take the Latin class: {body}"
+            );
+        }
+        // An unmapped letter is not weak.
+        assert_eq!(
+            read("<text:p>a\u{0500}</text:p>", "", on).unwrap_err(),
+            unsupported("script-unmapped-character")
+        );
+
+        let style = |height: &str| {
+            format!(
+                r#"<style:style style:name="L" style:family="paragraph"><style:paragraph-properties fo:line-height="{height}"/></style:style><style:style style:name="Big" style:family="text"><style:text-properties fo:font-size="24pt"/></style:style>"#
+            )
+        };
+        let p = r#"<text:p text:style-name="L">x y</text:p>"#;
+        assert_eq!(
+            read(p, &style("115%"), LIBREOFFICE_RULES).unwrap_err(),
+            unsupported("line-height-proportional")
+        );
+        let document = read(p, &style("115%"), on).unwrap();
+        let spacing = paragraphs(&document)[0].line_spacing.clone().unwrap();
+        assert_eq!((spacing.value, spacing.rule.as_str()), (1.15, "auto"));
+        for height in ["40%", "301%"] {
+            assert_eq!(
+                read(p, &style(height), on).unwrap_err(),
+                unsupported("line-height-proportional")
+            );
+        }
+        assert_eq!(
+            read(r#"<text:p text:style-name="L">x <text:span text:style-name="Big">y</text:span></text:p>"#, &style("115%"), on)
+                .unwrap_err(),
+            unsupported("line-height-proportional-mixed")
+        );
     }
 
     #[test]
