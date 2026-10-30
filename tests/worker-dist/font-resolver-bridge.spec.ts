@@ -75,10 +75,14 @@ interface Pixels { readonly width: number; readonly height: number; readonly dat
 interface Rendered {
   readonly png: Pixels;
   /** Resolver calls, the demand each call received (its field names and
-   * families), and whether the answered buffer is still attached on main
-   * after the load. */
+   * both family lists), and whether the answered buffer is still attached
+   * on main after the load. */
   readonly calls: number;
-  readonly demands: readonly { readonly keys: readonly string[]; readonly families: readonly string[] }[];
+  readonly demands: readonly {
+    readonly keys: readonly string[];
+    readonly families: readonly string[];
+    readonly fallbackFamilies: readonly string[];
+  }[];
   readonly answeredBytes: readonly number[];
 }
 
@@ -98,13 +102,15 @@ async function render(browser: Browser, format: Format, mode: 'main' | 'worker',
       const entry = `/dist/${format}.mjs`;
       const api = await import(entry);
       const font = new Uint8Array(fontBytes);
-      const calls: { keys: string[]; families: string[] }[] = [];
+      const calls: { keys: string[]; families: string[]; fallbackFamilies: string[] }[] = [];
       const answered: ArrayBuffer[] = [];
       let fonts: unknown[] | undefined;
       if (source === 'resolver') {
         fonts = [api.fontResolver((demand: { families: string[]; fallbackFamilies: string[] }, context: { signal: AbortSignal }) => {
           if (!(context.signal instanceof AbortSignal)) throw new Error('resolver received no AbortSignal');
-          calls.push({ keys: Object.keys(demand).sort(), families: [...demand.families] });
+          calls.push({
+            keys: Object.keys(demand).sort(), families: [...demand.families], fallbackFamilies: [...demand.fallbackFamilies],
+          });
           if (!demand.families.includes(family)) return [];
           const data = font.slice().buffer;
           answered.push(data);
