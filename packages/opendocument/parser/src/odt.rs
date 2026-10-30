@@ -118,7 +118,13 @@ pub fn read(package: &OdfPackage) -> Result<Document, String> {
         .filter(|n| xml::is(*n, NS_OFFICE, "text"))
         .ok_or_else(|| unsupported("not-a-text-document"))?;
 
+    let default_tab_stop = sheet
+        .default_style(Family::Paragraph)
+        .and_then(|style| Cascade::new(vec![style], PARAGRAPH).get(NS_STYLE, "tab-stop-distance"))
+        .map(length_pt)
+        .transpose()?;
     let mut reader = Reader {
+        default_tab_stop,
         sheet: &sheet,
         fonts: &fonts,
         used_faces: RefCell::new(HashSet::new()),
@@ -144,12 +150,6 @@ pub fn read(package: &OdfPackage) -> Result<Document, String> {
     reader.charge_construction(font_table_bytes)?;
     let used = used_font_table(&reader.used_faces.borrow())?;
     let body = reader.finish()?;
-
-    let default_tab_stop = sheet
-        .default_style(Family::Paragraph)
-        .and_then(|style| Cascade::new(vec![style], PARAGRAPH).get(NS_STYLE, "tab-stop-distance"))
-        .map(length_pt)
-        .transpose()?;
 
     Ok(Document {
         section: page.section,
@@ -719,6 +719,9 @@ struct Reader<'a> {
     retained_text_bytes: usize,
     construction_bytes: usize,
     contextual_spacing_defined: bool,
+    /// The document's default tab interval (the paragraph default style's
+    /// `style:tab-stop-distance`), mapped to the DOCX default tab stop.
+    default_tab_stop: Option<f64>,
 }
 
 /// One formatting context: a span's own style chain followed, through
@@ -896,13 +899,24 @@ impl<'a> Reader<'a> {
             tokens: Vec::new(),
         };
         self.inline(node, 0, &mut inline, 0)?;
-        if inline.tokens.iter().any(|t| matches!(t, Token::Tab(_)))
-            && (collected.paragraph.indent_left != 0.0 || collected.paragraph.indent_first != 0.0)
-        {
-            // LibreOffice measures tab positions from the paragraph indent
-            // unless TabsRelativeToIndent is off; DOCX from the margin. They
-            // coincide only without an indent.
-            return Err(unsupported("tab-with-indent"));
+        if inline.tokens.iter().any(|t| matches!(t, Token::Tab(_))) {
+            if collected.paragraph.indent_left != 0.0 || collected.paragraph.indent_first != 0.0 {
+                // LibreOffice measures tab positions from the paragraph indent
+                // unless TabsRelativeToIndent is off; DOCX from the margin.
+                // They coincide only without an indent.
+                return Err(unsupported("tab-with-indent"));
+            }
+            // DOCX has one document-wide default interval and its own
+            // fallback (36 pt) when none is set; LibreOffice's fallback
+            // differs (measured). Tabs need a positive interval that is the
+            // document default.
+            let interval = properties
+                .get(NS_STYLE, "tab-stop-distance")
+                .map(length_pt)
+                .transpose()?;
+            if !interval.is_some_and(|v| v > 0.0) || interval != self.default_tab_stop {
+                return Err(unsupported("tab-stop-distance"));
+            }
         }
         let tokens = collapse(std::mem::take(&mut inline.tokens));
         self.emit_runs(&tokens, &inline.contexts, &mut collected.paragraph)?;
@@ -1077,6 +1091,11 @@ impl<'a> Reader<'a> {
         let mut current: Option<(u32, ScriptClass)> = None;
         // Breaks since the last text run: each scans back past them.
         let mut breaks_since_text = 0usize;
+        // Whether the current line holds a glyph with font metrics: the DOCX
+        // layout gives tabs (and lines of only white space) synthetic
+        // metrics, unlike LibreOffice.
+        let mut line_has_glyph = false;
+        let mut any_break = false;
         for &token in tokens {
             let (c, context) = match token {
                 Token::LineBreak(context) => {
@@ -1088,13 +1107,16 @@ impl<'a> Reader<'a> {
                     if let std::collections::hash_map::Entry::Vacant(entry) = cache.entry(key) {
                         entry.insert(self.run_properties(contexts, context, key.1)?);
                     }
-                    // A line holding only a break (leading, consecutive or
-                    // trailing breaks) gets synthetic metrics in the DOCX
-                    // layout, unlike LibreOffice's full line (measured), so
-                    // a break needs text on both sides.
-                    if breaks_since_text > 0 {
+                    // A line holding only a break or white space (leading,
+                    // consecutive or trailing breaks) gets synthetic metrics
+                    // in the DOCX layout, unlike LibreOffice's full line
+                    // (measured), so each line a break ends or starts needs a
+                    // visible character.
+                    if !line_has_glyph {
                         return Err(unsupported("line-break-empty-line"));
                     }
+                    line_has_glyph = false;
+                    any_break = true;
                     match current {
                         Some(text) => same_line_metrics(&cache[&key], &cache[&text])?,
                         None => return Err(unsupported("line-break-empty-line")),
@@ -1141,6 +1163,7 @@ impl<'a> Reader<'a> {
                 entry.insert(self.run_properties(contexts, context, class)?);
             }
             breaks_since_text = 0;
+            line_has_glyph |= !c.is_whitespace();
             let continues = match (current, paragraph.runs.last_mut()) {
                 (Some(last_key), Some(DocRun::Text(last))) if cache[&last_key] == cache[&key] => {
                     last.text.push(c);
@@ -1156,7 +1179,7 @@ impl<'a> Reader<'a> {
             }
             current = Some(key);
         }
-        if breaks_since_text > 0 {
+        if any_break && !line_has_glyph {
             return Err(unsupported("line-break-empty-line"));
         }
         Ok(())
@@ -1478,10 +1501,13 @@ impl RunProperties {
                     return Err(unsupported("text-position-default"));
                 }
                 let raise = percent(raise)?;
-                (
-                    (raise != 0.0).then_some(raise * size),
-                    size * percent(relative)?,
-                )
+                // A raised or lowered portion changes the line's height
+                // differently in LibreOffice and the DOCX layout (measured:
+                // 12 pt at -20% 58% puts the next paragraph 4.9 pt apart).
+                if raise != 0.0 {
+                    return Err(unsupported("text-position-raise"));
+                }
+                (None, size * percent(relative)?)
             }
         };
         // §20.227 follows XSL's language-sensitive case mapping; the DOCX
@@ -1955,7 +1981,7 @@ mod tests {
 
     fn read_fixture(fixture: Fixture<'_>) -> Result<Document, String> {
         let styles = format!(
-            r#"<office:document-styles {NS} office:version="1.3">{}<office:styles><style:default-style style:family="paragraph"><style:text-properties {}/></style:default-style><style:default-style style:family="graphic"/>{}</office:styles><office:automatic-styles><style:page-layout style:name="pm1"><style:page-layout-properties fo:page-width="210mm" fo:page-height="297mm" fo:margin-top="20mm" fo:margin-bottom="20mm" fo:margin-left="25mm" fo:margin-right="25mm"{}/></style:page-layout></office:automatic-styles><office:master-styles><style:master-page style:name="Standard" style:page-layout-name="pm1">{}</style:master-page></office:master-styles></office:document-styles>"#,
+            r#"<office:document-styles {NS} office:version="1.3">{}<office:styles><style:default-style style:family="paragraph"><style:paragraph-properties style:tab-stop-distance="1.25cm"/><style:text-properties {}/></style:default-style><style:default-style style:family="graphic"/>{}</office:styles><office:automatic-styles><style:page-layout style:name="pm1"><style:page-layout-properties fo:page-width="210mm" fo:page-height="297mm" fo:margin-top="20mm" fo:margin-bottom="20mm" fo:margin-left="25mm" fo:margin-right="25mm"{}/></style:page-layout></office:automatic-styles><office:master-styles><style:master-page style:name="Standard" style:page-layout-name="pm1">{}</style:master-page></office:master-styles></office:document-styles>"#,
             FACES.replace(
                 "</office:font-face-decls>",
                 &format!("{}</office:font-face-decls>", fixture.faces)
@@ -2590,6 +2616,65 @@ mod tests {
         })
         .unwrap_err();
         assert!(error.contains("construction limit"), "{error}");
+    }
+
+    #[test]
+    fn tabs_need_the_document_interval_and_lines_need_glyphs() {
+        let styles = r#"<style:style style:name="Wide" style:family="paragraph"><style:paragraph-properties style:tab-stop-distance="2cm"/></style:style>"#;
+        let read = |body: &str| {
+            read_fixture(Fixture {
+                styles,
+                body,
+                ..Fixture::default()
+            })
+        };
+        let document = read("<text:p>a<text:tab/>b</text:p>").unwrap();
+        let stop = document
+            .settings
+            .as_ref()
+            .and_then(|s| s.default_tab_stop)
+            .unwrap();
+        assert!((stop - 35.43).abs() < 0.01, "{stop}");
+        assert_eq!(
+            read(r#"<text:p text:style-name="Wide">a<text:tab/>b</text:p>"#).unwrap_err(),
+            unsupported("tab-stop-distance")
+        );
+        // Lines holding only a tab or white space between breaks.
+        for body in [
+            "<text:p>A<text:line-break/><text:tab/><text:line-break/>B</text:p>",
+            "<text:p><text:tab/><text:line-break/>B</text:p>",
+            "<text:p>A<text:line-break/><text:tab/></text:p>",
+            "<text:p>A<text:line-break/><text:s/><text:line-break/>B</text:p>",
+        ] {
+            assert_eq!(
+                read(body).unwrap_err(),
+                unsupported("line-break-empty-line"),
+                "{body}"
+            );
+        }
+        assert!(
+            read("<text:p>A<text:line-break/><text:tab/>x<text:line-break/>B</text:p>").is_ok()
+        );
+    }
+
+    #[test]
+    fn rejects_raised_or_lowered_text() {
+        let styles = r#"<style:style style:name="Sub" style:family="text"><style:text-properties style:text-position="-20% 58%"/></style:style><style:style style:name="Small" style:family="text"><style:text-properties style:text-position="0% 58%"/></style:style>"#;
+        let read = |body: &str| {
+            read_fixture(Fixture {
+                styles,
+                body,
+                ..Fixture::default()
+            })
+        };
+        assert_eq!(
+            read(r#"<text:p>a<text:span text:style-name="Sub">b</text:span></text:p>"#)
+                .unwrap_err(),
+            unsupported("text-position-raise")
+        );
+        assert!(
+            read(r#"<text:p>a<text:span text:style-name="Small">b</text:span></text:p>"#).is_ok()
+        );
     }
 
     #[test]
