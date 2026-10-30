@@ -153,14 +153,20 @@ export function computeSecondaryAxis(
   let explicitMin = valueAxisUnitInRendererSpace(sec.min, percentStacked);
   let explicitMax = valueAxisUnitInRendererSpace(sec.max, percentStacked);
   const isLog = sec.logBase != null && Number.isFinite(sec.logBase) && sec.logBase >= 2;
-  if (percentStacked && !isLog && (extraMin < dMin || extraMax > dMax)) {
-    const lo = Math.min(dMin, extraMin);
-    const hi = Math.max(dMax, extraMax);
+  // Only a curve crossing the normalized bound (0 / 100, or a negative stack)
+  // snaps; within it the numeric plan, zero baseline included, is unchanged.
+  const lowBound = Math.min(dMin, 0);
+  const highBound = Math.max(dMax, 0);
+  const snapLow = percentStacked && !isLog && explicitMin == null && extraMin < lowBound;
+  const snapHigh = percentStacked && !isLog && explicitMax == null && extraMax > highBound;
+  if (snapLow || snapHigh) {
+    const lo = snapLow ? extraMin : lowBound;
+    const hi = snapHigh ? extraMax : highBound;
     const unit = majorUnit != null && Number.isFinite(majorUnit) && majorUnit > 0
       ? majorUnit
       : automaticPercentMajorUnit(lo, hi, 'vertical', plotHeightPt);
-    if (explicitMin == null && extraMin < dMin) explicitMin = Math.floor(lo / unit) * unit;
-    if (explicitMax == null && extraMax > dMax) explicitMax = Math.ceil(hi / unit) * unit;
+    if (snapLow) explicitMin = Math.floor(lo / unit) * unit;
+    if (snapHigh) explicitMax = Math.ceil(hi / unit) * unit;
     majorUnit = unit;
   }
   // An explicit `<c:valAx><c:majorUnit>` on the secondary axis (§21.2.2.103)
