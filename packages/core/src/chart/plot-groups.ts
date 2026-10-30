@@ -1,4 +1,5 @@
 import type { ChartModel, ChartPlotGroup } from '../types/chart.js';
+import { chartCategories } from './category-spacing.js';
 
 export type ClassicPlotDispatch =
   | 'legacy' | 'bar-combo' | 'line-groups' | 'area-groups' | 'scatter-bubble'
@@ -89,12 +90,15 @@ export function classicPlotDispatch(chart: ChartModel): ClassicPlotDispatch {
   //   and moves the secondary value axis (Excel 365); with reversed category
   //   axes a crosses="max" secondary value axis sits on the left (§21.2.3.8),
   //   which the painters do not place, so both must run minMax;
+  // - the deleted axis spreads its own category count across the plot, so
+  //   each of its series must carry exactly the primary category count;
   // - date axes keep their own date scales;
   // - crossBetween (§21.2.2.32) of each value axis places its categories
   //   between or on the tick marks;
   // - the horizontal bar painter has no secondary value axis.
   // A group on a deleted secondary category axis that cannot share is left
   // unsupported on every route.
+  const primaryCategoryCount = chartCategories(chart).length;
   const horizontalBars = groups.some(group => group.kind === 'bar'
     && (group.barDirection ?? (chart.chartType.endsWith('H') ? 'bar' : 'col')) === 'bar');
   const sharesCategories = chart.secondaryCatAxis?.hidden === true
@@ -104,7 +108,11 @@ export function classicPlotDispatch(chart: ChartModel): ClassicPlotDispatch {
     && chart.catAxisIsDate !== true
     && (chart.secondaryValAxis?.crossBetween ?? 'between')
       === (chart.catAxisCrossBetween ?? 'between')
-    && !horizontalBars;
+    && !horizontalBars
+    && groups.every(group => group.categoryAxis !== 'secondary'
+      || chart.series.slice(group.seriesStart, group.seriesStart + group.seriesCount)
+        .every(series => (series.categories?.length
+          ? series.categories.length : series.values.length) === primaryCategoryCount));
   if (chart.secondaryCatAxis?.hidden === true && !sharesCategories
     && groups.some(group => group.categoryAxis === 'secondary'
       && group.kind !== 'scatter' && group.kind !== 'bubble')) return 'unsupported';

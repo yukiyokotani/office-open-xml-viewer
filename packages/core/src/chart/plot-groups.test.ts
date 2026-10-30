@@ -17,7 +17,8 @@ function combo(
   } as ChartPlotGroup);
   return {
     chartType: kinds[0] === 'bar' ? 'clusteredBar' : kinds[0],
-    series: [{}, {}],
+    categories: ['a', 'b', 'c'],
+    series: [{ values: [1, 2, 3] }, { values: [4, 5, 6] }],
     secondaryCatAxis,
     secondaryValAxis: { hidden: false },
     plotGroups: [group(kinds[0], 0, 'primary'), group(kinds[1], 1, 'secondary')],
@@ -62,6 +63,21 @@ test('date axes, crossBetween and horizontal bars keep a deleted secondary categ
   const horizontal = combo(['bar', 'line'], { hidden: true });
   (horizontal.plotGroups as ChartPlotGroup[])[0].barDirection = 'bar';
   expect(classicPlotDispatch(horizontal)).toBe('unsupported');
+});
+
+test('a deleted secondary axis with its own category count stays outside', () => {
+  // Its categories spread across the plot independently; the shared scale
+  // would truncate or misplace them.
+  const longer = combo(['line', 'line'], { hidden: true });
+  longer.series[1] = { ...longer.series[1], categories: ['a', 'b', 'c', 'd', 'e'], values: [1, 2, 3, 4, 5] };
+  expect(classicPlotDispatch(longer)).toBe('unsupported');
+  const shorter = combo(['bar', 'line'], { hidden: true });
+  shorter.series[1] = { ...shorter.series[1], categories: ['a', 'b'], values: [1, 2] };
+  expect(classicPlotDispatch(shorter)).toBe('unsupported');
+  // Blank trailing values over the same categories still share them.
+  const blanks = combo(['bar', 'line'], { hidden: true });
+  blanks.series[1] = { ...blanks.series[1], values: [1, null, null] };
+  expect(classicPlotDispatch(blanks)).toBe('bar-combo');
 });
 
 test('the area painter keeps stacked secondary line groups outside', () => {
