@@ -2065,6 +2065,8 @@ export interface SecondaryValueAxis {
   /** The axis is a `<c:dateAx>` (only when used as `secondaryCatAxis`): its
    *  categories follow its own date scale. */
   dateAxis?: boolean | null;
+  /** `<c:valAx><c:crossBetween>` (§21.2.2.32) of a secondary value axis. */
+  crossBetween?: 'between' | 'midCat' | string | null;
   /** `<c:crosses>` / `<c:crossesAt>` retained for axis placement. */
   crosses?: string | null;
   crossesAt?: number | null;

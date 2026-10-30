@@ -3065,4 +3065,39 @@ mod tests {
             None
         );
     }
+
+    #[test]
+    fn cross_between_comes_from_each_value_axis() {
+        // The secondary value axis is listed first; the primary setting must
+        // still come from the primary (left) value axis.
+        let xml = format!(
+            r#"<c:chartSpace xmlns:c="{C_NS}"><c:chart><c:plotArea>
+              <c:barChart><c:barDir val="col"/><c:ser><c:idx val="0"/><c:val><c:numLit><c:ptCount val="1"/><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val></c:ser>
+                <c:axId val="10"/><c:axId val="20"/></c:barChart>
+              <c:lineChart><c:ser><c:idx val="1"/><c:val><c:numLit><c:ptCount val="1"/><c:pt idx="0"><c:v>2</c:v></c:pt></c:numLit></c:val></c:ser>
+                <c:axId val="30"/><c:axId val="40"/></c:lineChart>
+              <c:valAx><c:axId val="40"/><c:axPos val="r"/><c:crossAx val="30"/><c:crossBetween val="midCat"/></c:valAx>
+              <c:catAx><c:axId val="30"/><c:delete val="1"/><c:axPos val="b"/><c:crossAx val="40"/></c:catAx>
+              <c:catAx><c:axId val="10"/><c:axPos val="b"/><c:crossAx val="20"/></c:catAx>
+              <c:valAx><c:axId val="20"/><c:axPos val="l"/><c:crossAx val="10"/><c:crossBetween val="between"/></c:valAx>
+            </c:plotArea></c:chart></c:chartSpace>"#,
+        );
+        let doc = chart_space_of(&xml);
+        let model = parse_chart_part(
+            doc.root_element(),
+            &ChartParseContext {
+                color_resolver: Some(&FixtureResolver),
+                ..Default::default()
+            },
+        )
+        .expect("combo parses");
+        assert_eq!(model.cat_axis_cross_between, "between");
+        assert_eq!(
+            model
+                .secondary_val_axis
+                .and_then(|axis| axis.cross_between)
+                .as_deref(),
+            Some("midCat")
+        );
+    }
 }

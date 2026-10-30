@@ -92,13 +92,16 @@ export function classicPlotDispatch(chart: ChartModel): ClassicPlotDispatch {
     && groups.some(group => group.categoryAxis === 'secondary'
       && group.kind !== 'scatter' && group.kind !== 'bubble')) return 'unsupported';
   // Sharing also needs one category mapping and a painter with a secondary
-  // value scale: date axes keep their own date scales, and the horizontal bar
-  // painter has no secondary value axis.
+  // value scale: date axes keep their own date scales, crossBetween
+  // (§21.2.2.32) of each value axis places its categories between or on the
+  // ticks, and the horizontal bar painter has no secondary value axis.
   const horizontalBars = groups.some(group => group.kind === 'bar'
     && (group.barDirection ?? (chart.chartType.endsWith('H') ? 'bar' : 'col')) === 'bar');
   const sharesCategories = chart.secondaryCatAxis?.hidden === true
     && chart.secondaryCatAxis.dateAxis !== true
     && chart.catAxisIsDate !== true
+    && (chart.secondaryValAxis?.crossBetween ?? 'between')
+      === (chart.catAxisCrossBetween ?? 'between')
     && !horizontalBars;
   const onPrimaryCategories = (group: ChartPlotGroup): boolean =>
     group.categoryAxis === 'primary'

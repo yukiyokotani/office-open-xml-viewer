@@ -44,10 +44,14 @@ test('a visible or reversed secondary category axis stays outside the shared pai
   expect(classicPlotDispatch(combo(['area', 'line'], reversed))).toBe('unsupported');
 });
 
-test('date axes and horizontal bars keep a deleted secondary category axis outside', () => {
+test('date axes, crossBetween and horizontal bars keep a deleted secondary category axis outside', () => {
   expect(classicPlotDispatch(combo(['line', 'line'], { hidden: true, dateAxis: true }))).toBe('unsupported');
   expect(classicPlotDispatch({ ...combo(['line', 'line'], { hidden: true }), catAxisIsDate: true }))
     .toBe('unsupported');
+  const midCat = combo(['line', 'line'], { hidden: true });
+  (midCat.secondaryValAxis as { crossBetween?: string }).crossBetween = 'midCat';
+  expect(classicPlotDispatch(midCat)).toBe('unsupported');
+  expect(classicPlotDispatch({ ...midCat, catAxisCrossBetween: 'midCat' })).toBe('line-groups');
   const horizontal = combo(['bar', 'line'], { hidden: true });
   (horizontal.plotGroups as ChartPlotGroup[])[0].barDirection = 'bar';
   expect(classicPlotDispatch(horizontal)).toBe('unsupported');

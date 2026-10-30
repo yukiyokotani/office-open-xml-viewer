@@ -2260,9 +2260,14 @@ pub(super) fn parse_classic_impl(
     // ECMA-376 §21.2.2.35: `<c:crossBetween>` lives on the VALUE axis (not cat),
     // and describes whether value gridlines land between or on category ticks.
     // Default is "between" (categories inset by half a step each side).
-    let cat_axis_cross_between = root
-        .descendants()
-        .find(|n| n.is_element() && n.tag_name().name() == "valAx")
+    // crossBetween (§21.2.2.32) belongs to the value axis that crosses the
+    // category axis: read it from the selected primary value axis, not from
+    // whichever c:valAx comes first (a secondary one can be listed first).
+    let cat_axis_cross_between = (if is_scatter_axes { None } else { val_ax })
+        .or_else(|| {
+            root.descendants()
+                .find(|n| n.is_element() && n.tag_name().name() == "valAx")
+        })
         .and_then(|ax| {
             ax.children()
                 .find(|n| n.is_element() && n.tag_name().name() == "crossBetween")
@@ -2554,6 +2559,7 @@ pub(super) fn parse_classic_impl(
                 .and_then(|node| node.attribute("val"))
                 .and_then(|value| value.parse::<u32>().ok())
                 .filter(|value| *value > 0),
+            cross_between: child(ax, "crossBetween").and_then(|node| attr(&node, "val")),
             date_axis: (ax.tag_name().name() == "dateAx").then_some(true),
             crosses,
             crosses_at,
