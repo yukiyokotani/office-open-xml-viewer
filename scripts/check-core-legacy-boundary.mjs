@@ -387,8 +387,11 @@ function isPropertyName(node, parent) {
   return parent.type === 'LabeledStatement' && parent.label === node;
 }
 
-function isLegacyModule(path) {
-  return /ooxml-legacy-office|(?:^|[\\/])legacy-office(?:[\\/]|$)/.test(path);
+/** The boundary rule a module path violates: a companion package's source. */
+function companionModuleRule(path) {
+  if (/ooxml-legacy-office|(?:^|[\\/])legacy-office(?:[\\/]|$)/.test(path)) return 'legacy-package';
+  if (/ooxml-opendocument|(?:^|[\\/])packages[\\/]opendocument(?:[\\/]|$)/.test(path)) return 'odf-package';
+  return undefined;
 }
 
 /** Use the same compiler options and module resolver as TypeScript's program. */
@@ -545,13 +548,15 @@ export function findViolations(files, { resolveModule } = {}) {
             ? nodePath.posix.normalize(nodePath.posix.join(nodePath.posix.dirname(path), specifier))
             : specifier;
           const compilerResolved = resolveModule?.(path, specifier);
-          if (isLegacyModule(resolved) || (compilerResolved && isLegacyModule(compilerResolved))) {
+          const rule = companionModuleRule(resolved)
+            ?? (compilerResolved ? companionModuleRule(compilerResolved) : undefined);
+          if (rule) {
             const line = literal.loc.start.line;
-            if (!violations.some((entry) => entry.path === path && entry.line === line && entry.rule === 'legacy-package')) {
-              violations.push({ path, line, rule: 'legacy-package', text: specifier.slice(0, 160) });
+            if (!violations.some((entry) => entry.path === path && entry.line === line && entry.rule === rule)) {
+              violations.push({ path, line, rule, text: specifier.slice(0, 160) });
             }
           }
-          if (compilerResolved && !isLegacyModule(compilerResolved)
+          if (compilerResolved && !companionModuleRule(compilerResolved)
             && /\.[cm]?[jt]sx?$/.test(compilerResolved)
             && !compilerResolved.includes(`${nodePath.sep}node_modules${nodePath.sep}`)
             && (compilerResolved === root || compilerResolved.startsWith(root + nodePath.sep))) {

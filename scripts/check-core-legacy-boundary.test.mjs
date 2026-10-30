@@ -300,6 +300,29 @@ test('follows a relay outside guarded roots to a dynamic legacy import', () => {
   }
 });
 
+test('relative imports, aliases and relays into the OpenDocument package are rejected', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ooxml-boundary-odf-'));
+  try {
+    mkdirSync(join(root, 'packages/docx/src'), { recursive: true });
+    mkdirSync(join(root, 'packages/opendocument/src'), { recursive: true });
+    mkdirSync(join(root, 'shared'), { recursive: true });
+    writeFileSync(join(root, 'packages/opendocument/src/index.ts'), 'export const reader = 1;');
+    writeFileSync(join(root, 'packages/docx/tsconfig.json'), JSON.stringify({
+      compilerOptions: { baseUrl: '../..', paths: { '@reader': ['packages/opendocument/src/index.ts'] }, moduleResolution: 'bundler', module: 'esnext' },
+    }));
+    writeFileSync(join(root, 'shared/reader.ts'),
+      "export const reader = () => import('../packages/opendocument/src/index.ts');");
+    const resolveModule = createTypeScriptResolver(root);
+    const rulesOf = (text) => findViolations([{ path: 'packages/docx/src/probe.ts', text }], { resolveModule });
+    assert.deepEqual(rulesOf("import { x } from '../../opendocument/src/index.ts';").map((v) => v.rule), ['odf-package']);
+    assert.deepEqual(rulesOf("import { reader } from '@reader';").map((v) => v.rule), ['odf-package']);
+    assert.ok(rulesOf("export { reader } from '../../../shared/reader.ts';")
+      .some((v) => v.rule === 'odf-package' && v.path === 'shared/reader.ts'));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('TypeScript module resolution catches a path alias into the legacy package', () => {
   const root = mkdtempSync(join(tmpdir(), 'ooxml-boundary-'));
   try {
