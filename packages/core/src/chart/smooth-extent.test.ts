@@ -59,9 +59,11 @@ describe('smoothCurveExtent', () => {
     expect(hi).toBeGreaterThan(7);
   });
 
-  it('keeps extrema of tiny magnitudes', () => {
-    const [lo] = smoothCurveExtent([DIP.map(v => v * 1e-15)]) as [number, number];
-    expect(lo).toBeCloseTo(-14 / 27 * 1e-15, 25);
+  it('is scale invariant for tiny and huge magnitudes', () => {
+    for (const factor of [1e-15, 1e-300, 1e160, 1e300]) {
+      const [lo] = smoothCurveExtent([DIP.map(v => v * factor)]) as [number, number];
+      expect(lo / factor).toBeCloseTo(-14 / 27, 9);
+    }
   });
 
   it('ignores straight short runs and evaluates a log axis in log space', () => {

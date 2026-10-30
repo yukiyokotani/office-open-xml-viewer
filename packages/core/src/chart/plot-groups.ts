@@ -83,26 +83,28 @@ export function classicPlotDispatch(chart: ChartModel): ClassicPlotDispatch {
   // A deleted secondary category axis has no layout of its own: Excel draws
   // its group against the shared categories, and writes that axis beside the
   // primary one in every secondary-axis combo (bar, line or area on either
-  // axis). Its scaling still applies: a reversed (maxMin) deleted axis
-  // reverses its bars or line and moves the secondary value axis (Excel 365),
-  // which the single category scale of the category painters cannot draw.
-  const sharedCategoryOrientation = (chart.secondaryCatAxis?.orientation ?? 'minMax')
-    === (chart.catAxisOrientation ?? 'minMax');
-  if (!sharedCategoryOrientation && chart.secondaryCatAxis?.hidden === true
-    && groups.some(group => group.categoryAxis === 'secondary'
-      && group.kind !== 'scatter' && group.kind !== 'bubble')) return 'unsupported';
-  // Sharing also needs one category mapping and a painter with a secondary
-  // value scale: date axes keep their own date scales, crossBetween
-  // (§21.2.2.32) of each value axis places its categories between or on the
-  // ticks, and the horizontal bar painter has no secondary value axis.
+  // axis). Sharing needs one category mapping and a painter with a secondary
+  // value scale:
+  // - orientation: a reversed (maxMin) deleted axis reverses its bars or line
+  //   and moves the secondary value axis (Excel 365);
+  // - date axes keep their own date scales;
+  // - crossBetween (§21.2.2.32) of each value axis places its categories
+  //   between or on the tick marks;
+  // - the horizontal bar painter has no secondary value axis.
+  // A group on a deleted secondary category axis that cannot share is left
+  // unsupported on every route.
   const horizontalBars = groups.some(group => group.kind === 'bar'
     && (group.barDirection ?? (chart.chartType.endsWith('H') ? 'bar' : 'col')) === 'bar');
   const sharesCategories = chart.secondaryCatAxis?.hidden === true
+    && (chart.secondaryCatAxis.orientation ?? 'minMax') === (chart.catAxisOrientation ?? 'minMax')
     && chart.secondaryCatAxis.dateAxis !== true
     && chart.catAxisIsDate !== true
     && (chart.secondaryValAxis?.crossBetween ?? 'between')
       === (chart.catAxisCrossBetween ?? 'between')
     && !horizontalBars;
+  if (chart.secondaryCatAxis?.hidden === true && !sharesCategories
+    && groups.some(group => group.categoryAxis === 'secondary'
+      && group.kind !== 'scatter' && group.kind !== 'bubble')) return 'unsupported';
   const onPrimaryCategories = (group: ChartPlotGroup): boolean =>
     group.categoryAxis === 'primary'
     || (group.categoryAxis === 'secondary' && sharesCategories);
