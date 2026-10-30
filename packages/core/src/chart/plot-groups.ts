@@ -80,6 +80,18 @@ export function classicPlotDispatch(chart: ChartModel): ClassicPlotDispatch {
     (group.categoryAxis === 'secondary' && chart.secondaryCatAxis == null)
     || (group.valueAxis === 'secondary' && chart.secondaryValAxis == null)
   )) return 'unsupported';
+  // A deleted secondary category axis has no layout of its own: Excel draws
+  // its group against the shared categories, and writes that axis beside the
+  // primary one in every secondary-axis combo (bar, line or area on either
+  // axis). Its scaling still applies: a reversed (maxMin) deleted axis
+  // reverses its series and moves the secondary value axis, which the single
+  // category scale of these painters cannot draw, so orientation must agree.
+  const onPrimaryCategories = (group: ChartPlotGroup): boolean =>
+    group.categoryAxis === 'primary'
+    || (group.categoryAxis === 'secondary'
+      && chart.secondaryCatAxis?.hidden === true
+      && (chart.secondaryCatAxis.orientation ?? 'minMax')
+        === (chart.catAxisOrientation ?? 'minMax'));
   const kinds = new Set(groups.map(group => group.kind));
   if (groups.some(group => THREE_D_GROUPS.has(group.kind))) return 'unsupported';
   if (groups.length === 2 && groups[0].kind === 'bar' && groups[1].kind === 'scatter') {
@@ -117,7 +129,7 @@ export function classicPlotDispatch(chart: ChartModel): ClassicPlotDispatch {
       // but a distinct top category axis needs its own measured layout pass.
       // Keep that unobserved boundary explicit instead of silently painting it
       // through the bottom axis.
-      if (groups.some(group => group.categoryAxis !== 'primary')) return 'unsupported';
+      if (!groups.every(onPrimaryCategories)) return 'unsupported';
       return kind === 'line' ? 'line-groups' : 'area-groups';
     }
     if (kind === 'scatter' || kind === 'bubble') return 'scatter-bubble';
@@ -133,12 +145,12 @@ export function classicPlotDispatch(chart: ChartModel): ClassicPlotDispatch {
   }
   if (groups.length === 2 && kinds.has('bar') && kinds.has('area')) {
     const overlay = groups.find(group => group.kind === 'line' || group.kind === 'area');
-    if (overlay?.categoryAxis !== 'primary') return 'unsupported';
+    if (overlay == null || !onPrimaryCategories(overlay)) return 'unsupported';
     return 'bar-combo';
   }
+  // The area painter maps each group through its own value axis.
   if (groups.length === 2 && groups[0].kind === 'area' && groups[1].kind === 'line'
-    && groups.every(group => group.categoryAxis === 'primary'
-      && group.valueAxis === 'primary')) {
+    && groups.every(onPrimaryCategories)) {
     return 'area-groups';
   }
   if (kinds.size === 2 && kinds.has('bar') && kinds.has('line')) {
@@ -151,11 +163,6 @@ export function classicPlotDispatch(chart: ChartModel): ClassicPlotDispatch {
     // The retained Office boundary covers the ordinary bar+line pair and the
     // common two-column-group + one-line-group form. Keep larger/unrelated
     // scenes explicit until their z-order and axis ownership are observed.
-    // A secondary category axis that is deleted has no layout of its own: Office
-    // draws its group against the primary categories (the common "columns on the
-    // secondary axis, line on the primary" combo).
-    const onPrimaryCategories = (group: ChartPlotGroup) => group.categoryAxis === 'primary'
-      || (group.categoryAxis === 'secondary' && chart.secondaryCatAxis?.hidden === true);
     if (barGroups.length <= 2 && lineGroups.length === 1 && groups.length <= 3
       && directions.size === 1
       && groups.every(onPrimaryCategories)) {
