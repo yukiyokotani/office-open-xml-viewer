@@ -15,8 +15,8 @@ use crate::xml::{
     self, NS_DRAW, NS_FO, NS_LOEXT, NS_OFFICE, NS_OFFICEOOO, NS_STYLE, NS_SVG, NS_TEXT, NS_XML,
 };
 use docx_model::{
-    BodyElement, BreakType, DocParagraph, DocRun, Document, DocumentSettings, LineSpacing,
-    RunFontFacts, SectionProps, TextRun,
+    BodyElement, BreakType, DocParagraph, DocRun, Document, DocumentSettings, RunFontFacts,
+    SectionProps, TextRun,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
@@ -731,7 +731,6 @@ impl<'a> Reader<'a> {
         }
         let tokens = collapse(std::mem::take(&mut inline.tokens));
         self.emit_runs(&tokens, &inline.contexts, &mut collected.paragraph)?;
-        check_line_scale(&collected.paragraph)?;
         self.paragraphs.push(collected);
         Ok(())
     }
@@ -984,30 +983,6 @@ impl<'a> Reader<'a> {
             previous = Some(collected);
         }
         Ok(out)
-    }
-}
-
-/// A proportional line height above 100% is admitted only where the measured
-/// equivalence holds: every run has the paragraph mark's face and size, and no
-/// text is raised or lowered.
-fn check_line_scale(paragraph: &DocParagraph) -> Result<(), String> {
-    if paragraph.line_spacing.is_none() {
-        return Ok(());
-    }
-    let mark = paragraph.paragraph_mark_font_facts.as_ref();
-    let uniform = paragraph.runs.iter().all(|run| match run {
-        DocRun::Text(text) => {
-            text.position.is_none()
-                && mark.is_some_and(|m| {
-                    m.font_size == Some(text.font_size) && m.font_family == text.font_family
-                })
-        }
-        _ => true,
-    });
-    if uniform {
-        Ok(())
-    } else {
-        Err(unsupported("line-height-mixed-text"))
     }
 }
 
@@ -1502,23 +1477,15 @@ fn paragraph_properties(cascade: &Cascade<'_>) -> Result<Collected, String> {
         cascade.get(NS_STYLE, "line-height-at-least"),
     ) {
         (Some("normal"), _) | (None, None) => None,
-        // Proportional spacing. ODF 1.4 §20.204 defines the percentage on
-        // the font size; LibreOffice (which writes 1.4) scales the natural
-        // line height instead, which is DOCX "auto" (a multiple of the single
-        // line). Measured equal for 100% and 150% on uniform-size text; below
-        // 100% LibreOffice protects content from overflow and is not measured.
-        // Mixed faces/sizes are checked per paragraph (`check_line_scale`).
-        // Observed LibreOffice rule, pending user approval.
+        // Proportional spacing. ODF 1.4 §20.204 defines the percentage on the
+        // font size; LibreOffice (which writes 1.4) scales the natural line
+        // height instead — DOCX "auto" with the percentage as the multiple,
+        // measured equal at 100% and 150% on uniform text. That is an
+        // observed LibreOffice rule awaiting user approval (AGENTS.md), so
+        // every percentage rejects until then.
         (Some(value), None) if value.ends_with('%') => {
-            let scale = percent(value)?;
-            if scale < 1.0 {
-                return Err(unsupported("line-height-below-single"));
-            }
-            (scale > 1.0).then(|| LineSpacing {
-                value: scale,
-                rule: "auto".into(),
-                explicit: true,
-            })
+            percent(value)?;
+            return Err(unsupported("line-height-proportional"));
         }
         // Fixed and minimum line heights: LibreOffice places the text at the
         // bottom of a taller line box (all extra space above), measured 7.5pt
@@ -1781,13 +1748,8 @@ mod tests {
             })
         };
         assert_eq!(
-            spacing(r#"fo:line-height="115%""#).unwrap(),
-            Some((1.15, "auto".into()))
-        );
-        assert_eq!(spacing(r#"fo:line-height="100%""#).unwrap(), None);
-        assert_eq!(
-            spacing(r#"fo:line-height="80%""#).unwrap_err(),
-            unsupported("line-height-below-single")
+            spacing(r#"fo:line-height="115%""#).unwrap_err(),
+            unsupported("line-height-proportional")
         );
         assert_eq!(
             spacing(r#"fo:line-height="20pt""#).unwrap_err(),
@@ -1913,18 +1875,6 @@ mod tests {
             }),
             unsupported("font-face-conflict")
         );
-    }
-
-    #[test]
-    fn proportional_line_height_requires_uniform_text() {
-        let error = read_fixture(Fixture {
-            styles: r#"<style:style style:name="L" style:family="paragraph"><style:paragraph-properties fo:line-height="150%"/></style:style>"#,
-            automatic: r#"<style:style style:name="T" style:family="text"><style:text-properties fo:font-size="20pt"/></style:style>"#,
-            body: r#"<text:p text:style-name="L">a<text:span text:style-name="T">b</text:span></text:p>"#,
-            ..Fixture::default()
-        })
-        .unwrap_err();
-        assert_eq!(error, unsupported("line-height-mixed-text"));
     }
 
     #[test]

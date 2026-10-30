@@ -18,7 +18,7 @@ describe('ODT through the DOCX Node session', () => {
   it('maps paragraphs, spans, collapsed white space and page geometry', async () => {
     const model = await open(buildOdtFixture({
       styles: '<style:style style:name="Body" style:family="paragraph"><style:paragraph-properties fo:margin-top="6pt" fo:margin-bottom="10pt"/></style:style>'
-        + '<style:style style:name="Tall" style:family="paragraph"><style:paragraph-properties fo:margin-top="6pt" fo:margin-bottom="10pt" fo:line-height="150%"/></style:style>',
+        + '<style:style style:name="Tall" style:family="paragraph"><style:paragraph-properties fo:margin-top="6pt" fo:margin-bottom="10pt"/></style:style>',
       automaticStyles: '<style:style style:name="T1" style:family="text"><style:text-properties fo:font-weight="bold" fo:font-size="14pt"/></style:style>',
       body: '<text:p text:style-name="Body">  Hello\n   <text:span text:style-name="T1">bold</text:span><text:s text:c="2"/>end  </text:p>'
         + '<text:p text:style-name="Tall">second</text:p>',
@@ -28,7 +28,6 @@ describe('ODT through the DOCX Node session', () => {
     const [first, second] = model.body;
     expect(first?.runs.map(r => r.text)).toEqual(['Hello ', 'bold', '  end']);
     expect(first?.runs[1]).toMatchObject({ bold: true, fontSize: 14, fontFamily: 'Liberation Serif' });
-    expect(second?.lineSpacing).toMatchObject({ value: 1.5, rule: 'auto' });
     // Adjacent margins add (10 + 6) and are carried by the next paragraph.
     expect(first).toMatchObject({ spaceBefore: 6, spaceAfter: 0 });
     expect(second).toMatchObject({ spaceBefore: 16, spaceAfter: 0 });
