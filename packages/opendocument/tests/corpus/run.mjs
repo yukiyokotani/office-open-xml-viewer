@@ -72,6 +72,9 @@ if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(label)) throw new Error(`invalid --lab
 const runDir = join(corpus, 'harness', label);
 if (args.fresh) rmSync(runDir, { recursive: true, force: true });
 mkdirSync(runDir, { recursive: true });
+// Recorded before any result exists, so report.mjs keeps the run's mode even
+// for an interrupted run.
+writeFileSync(join(runDir, 'meta.json'), `${JSON.stringify({ sha, dirty, rules: args.rules, unmaskSettings: args['unmask-settings'], label }, null, 2)}\n`);
 
 // ---- builds ----------------------------------------------------------------
 const docxWasm = join(checkoutRoot, 'packages/docx/src/wasm/docx_parser_bg.wasm');
@@ -279,5 +282,4 @@ if (!args['skip-browser']) {
   if (browser.status !== 0) console.warn(`playwright exited with ${browser.status}`);
 }
 
-writeFileSync(join(runDir, 'meta.json'), `${JSON.stringify({ sha, dirty, rules: args.rules, unmaskSettings: args['unmask-settings'], label }, null, 2)}\n`);
 run('node', [join(checkoutRoot, 'packages/opendocument/tests/corpus/report.mjs'), runDir, '--worst', args.worst]);

@@ -157,7 +157,8 @@ const started = Date.now();
 async function worker(index) {
   const base = join(tmpdir(), `odf-corpus-${process.pid}-${index}`);
   const profile = join(base, 'profile');
-  const staging = join(base, 'staging');
+  // Staged next to the outputs (same filesystem) so promotion is a rename.
+  const staging = join(outRoot, `.staging-${process.pid}-${index}`);
   mkdirSync(profile, { recursive: true });
   try {
     while (cursor < limited.length) {
@@ -194,6 +195,7 @@ async function worker(index) {
     }
   } finally {
     rmSync(base, { recursive: true, force: true });
+    rmSync(staging, { recursive: true, force: true });
   }
 }
 
