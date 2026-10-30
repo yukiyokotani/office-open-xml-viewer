@@ -58,6 +58,11 @@ describe('smoothCurveExtent', () => {
     expect(hi).toBeGreaterThan(7);
   });
 
+  it('keeps extrema of tiny magnitudes', () => {
+    const [lo] = smoothCurveExtent([DIP.map(v => v * 1e-15)]) as [number, number];
+    expect(lo).toBeCloseTo(-14 / 27 * 1e-15, 25);
+  });
+
   it('ignores straight short runs and evaluates a log axis in log space', () => {
     expect(smoothCurveExtent([[0, 5], [9]])).toBeNull();
     const [lo] = smoothCurveExtent([[1000, 1, 1, 1000]], 10) as [number, number];
@@ -82,6 +87,32 @@ describe('automatic value axes cover a drawn smoothed curve', () => {
   it('line: smoothed widens below zero, straight does not', () => {
     expect(paintedLabels(chart({ series: [series({ values: DIP, smooth: true })] }))).toContain('-1');
     expect(paintedLabels(chart({ series: [series({ values: DIP })] }))).not.toContain('-1');
+  });
+
+  it('line: hiding only point segments still widens; removing the series line does not', () => {
+    const hiddenSegments = [2, 3, 4, 5].map(idx => ({ idx, lineHidden: true }));
+    expect(paintedLabels(chart({
+      series: [series({ values: DIP, smooth: true, dataPointOverrides: hiddenSegments })],
+    }))).toContain('-1');
+    expect(paintedLabels(chart({
+      series: [series({ values: DIP, smooth: true, lineHidden: true })],
+    }))).not.toContain('-1');
+  });
+
+  it('percentStacked line snaps to the percent unit of the widened range', () => {
+    const labels = paintedLabels(chart({
+      chartType: 'stackedLinePct',
+      series: [
+        series({ values: [1, 1, 0, 1, 1, 1, 1], smooth: true }),
+        series({ values: [0, 0, 1, 0, 0, 0, 0], smooth: true }),
+      ],
+      plotGroups: [{
+        kind: 'line', seriesStart: 0, seriesCount: 2, grouping: 'percentStacked',
+        categoryAxis: 'primary', valueAxis: 'primary', seriesAxis: 'none',
+      }],
+    }));
+    expect(labels).toContain('120%');
+    expect(labels).not.toContain('110%');
   });
 
   it('stacked line', () => {

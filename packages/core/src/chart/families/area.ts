@@ -228,15 +228,14 @@ export function renderAreaChart(
   const phEst = h - padT - padB;
 
   // A smoothed line group's automatic axis covers the curve it draws (see
-  // smoothCurveExtent). A percentStacked group is left out: its axis keeps the
-  // exact normalized extent.
+  // smoothCurveExtent). On a percentStacked axis the curve goes to
+  // planValueAxis, which snaps it to the percent unit.
   const lineCurveExtent = (
     series: ChartSeries,
     chartIndex: number,
     logBase: number | null | undefined,
   ): [number, number] | null => {
-    if (plotGroupBySeries[chartIndex]?.grouping === 'percentStacked'
-      || !seriesPaintsSmoothedLine(chart, series, chartExSeriesFormatIndex(series, chartIndex))) {
+    if (!seriesPaintsSmoothedLine(chart, series, chartExSeriesFormatIndex(series, chartIndex))) {
       return null;
     }
     return smoothCurveExtent(
@@ -337,8 +336,22 @@ export function renderAreaChart(
     for (const { series, chartIndex } of lineSeries) {
       if (isSecondarySeries(series)) continue;
       forEachErrorBarEndpoint(series, 'y', index => series.values[index] ?? null, includeEndpoint);
-      const curve = lineCurveExtent(series, chartIndex, chart.valAxisLogBase);
-      if (curve) { includeEndpoint(curve[0]); includeEndpoint(curve[1]); }
+    }
+  }
+  let percentCurve: [number, number] | null = null;
+  for (const { series, chartIndex } of lineSeries) {
+    if (isSecondarySeries(series)) continue;
+    const curve = lineCurveExtent(series, chartIndex, chart.valAxisLogBase);
+    if (!curve) continue;
+    if (axisIsPercent) {
+      percentCurve = percentCurve
+        ? [Math.min(percentCurve[0], curve[0]), Math.max(percentCurve[1], curve[1])]
+        : curve;
+    } else {
+      areaExtent = {
+        min: Math.min(areaExtent.min, curve[0]),
+        max: Math.max(areaExtent.max, curve[1]),
+      };
     }
   }
   const provisionalScale = planValueAxis(
@@ -347,6 +360,8 @@ export function renderAreaChart(
     areaExtent.max,
     phEst / ptToPx,
     axisIsPercent,
+    'vertical',
+    percentCurve,
   );
   const manualValTickFontPx = chart.valAxisFontSizeHpt != null
     ? valAxFontPx
@@ -475,7 +490,7 @@ export function renderAreaChart(
   // Value axis is vertical → length = plot height (axis-length-aware auto major unit). An
   // explicit `<c:valAx><c:majorUnit>` (§21.2.2.103) overrides the auto step.
   const areaPlan = planValueAxis(
-    chart, areaExtent.min, areaExtent.max, ph / ptToPx, axisIsPercent,
+    chart, areaExtent.min, areaExtent.max, ph / ptToPx, axisIsPercent, 'vertical', percentCurve,
   );
 
   // crossBetween="between" (Office's default; ECMA-376 §21.2.2.32 leaves the

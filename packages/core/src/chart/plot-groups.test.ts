@@ -40,5 +40,13 @@ test('a visible or reversed secondary category axis stays outside the shared pai
   expect(classicPlotDispatch(combo(['line', 'line'], { hidden: false }))).toBe('unsupported');
   const reversed = { hidden: true, orientation: 'maxMin' };
   expect(classicPlotDispatch(combo(['bar', 'line'], reversed))).toBe('unsupported');
+  expect(classicPlotDispatch(combo(['bar', 'bar'], reversed))).toBe('unsupported');
   expect(classicPlotDispatch(combo(['area', 'line'], reversed))).toBe('unsupported');
+});
+
+test('the area painter keeps stacked secondary line groups outside', () => {
+  // It draws line groups from raw values, so a stacked line would lose its sum.
+  const model = combo(['area', 'line'], { hidden: true });
+  (model.plotGroups as ChartPlotGroup[])[1].grouping = 'stacked';
+  expect(classicPlotDispatch(model)).toBe('unsupported');
 });

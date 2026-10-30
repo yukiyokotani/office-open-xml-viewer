@@ -571,14 +571,13 @@ export function renderBarChart(
     }
   }
   // A smoothed overlay line's automatic axis covers the curve it draws (see
-  // smoothCurveExtent), on whichever value axis it rides. A percentStacked
-  // overlay is left out: its axis keeps the exact normalized extent.
+  // smoothCurveExtent), on whichever value axis it rides. On a percentStacked
+  // axis the curve goes to planValueAxis, which snaps it to the percent unit.
   const overlayCurveExtent = (
     series: ChartSeries,
     logBase: number | null | undefined,
   ): [number, number] | null => {
     if (series.seriesType !== 'line'
-      || plotGroupBySeries.get(series)?.grouping === 'percentStacked'
       || !seriesPaintsSmoothedLine(
         chart, series, chartExSeriesFormatIndex(series, sourceSeriesIndices.get(series) ?? 0),
       )) return null;
@@ -596,6 +595,7 @@ export function renderBarChart(
   // sizing to the bars alone would clip the line. The line is an unstacked overlay, so each raw datum widens the range
   // directly. Secondary-axis line series are excluded (they own an independent
   // scale, mirrored by the `yOf` split below). `sec` matches the draw-time gate.
+  let percentCurve: [number, number] | null = null;
   for (const s of [...lineSeries, ...areaSeries]) {
     if (sec && s.useSecondaryAxis === true) continue;
     for (let ci = 0; ci < n; ci++) {
@@ -605,7 +605,14 @@ export function renderBarChart(
       dataMin = Math.min(dataMin, value);
     }
     const curve = overlayCurveExtent(s, chart.valAxisLogBase);
-    if (curve) { dataMin = Math.min(dataMin, curve[0]); dataMax = Math.max(dataMax, curve[1]); }
+    if (!curve) continue;
+    if (primaryPercentAxis) {
+      percentCurve = percentCurve
+        ? [Math.min(percentCurve[0], curve[0]), Math.max(percentCurve[1], curve[1])]
+        : curve;
+    } else {
+      dataMin = Math.min(dataMin, curve[0]); dataMax = Math.max(dataMax, curve[1]);
+    }
   }
 
   // Error bars are part of the plotted value geometry. Their endpoints must
@@ -666,6 +673,7 @@ export function renderBarChart(
       valAxisLenPt,
       primaryPercentAxis,
       isH ? 'horizontal' : 'vertical',
+      percentCurve,
     );
   const { step } = plan;
 

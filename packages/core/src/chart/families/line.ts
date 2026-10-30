@@ -179,13 +179,11 @@ export function renderLineChart(
     }
   }
   // A smoothed line's automatic axis covers the curve it draws (see
-  // smoothCurveExtent), stacked series included. A percentStacked axis keeps
-  // its exact normalized 0..100 extent (planValueAxis): Excel widened only its
-  // minimum to the next major unit there, a rule not modelled, so the curve is
-  // left out of that axis rather than producing a fractional bound.
+  // smoothCurveExtent), stacked series included. On a percentStacked axis the
+  // curve goes to planValueAxis, which snaps it to the percent unit.
   const smoothedCurveExtent = (si: number, logBase: number | null | undefined) => {
     const series = chart.series[si];
-    if (percentBySeries[si] || !seriesPaintsSmoothedLine(chart, series, chartExSeriesFormatIndex(series, si))) {
+    if (!seriesPaintsSmoothedLine(chart, series, chartExSeriesFormatIndex(series, si))) {
       return null;
     }
     return smoothCurveExtent(
@@ -194,10 +192,18 @@ export function renderLineChart(
       logBase,
     );
   };
+  let percentCurve: [number, number] | null = null;
   for (let si = 0; si < chart.series.length; si++) {
     if (isSecondarySeries(chart.series[si])) continue;
     const curve = smoothedCurveExtent(si, chart.valAxisLogBase);
-    if (curve) { dataMin = Math.min(dataMin, curve[0]); dataMax = Math.max(dataMax, curve[1]); }
+    if (!curve) continue;
+    if (axisIsPercent) {
+      percentCurve = percentCurve
+        ? [Math.min(percentCurve[0], curve[0]), Math.max(percentCurve[1], curve[1])]
+        : curve;
+    } else {
+      dataMin = Math.min(dataMin, curve[0]); dataMax = Math.max(dataMax, curve[1]);
+    }
   }
   const secondaryCurveValues: number[] = [];
   for (let si = 0; si < chart.series.length; si++) {
@@ -314,7 +320,9 @@ export function renderLineChart(
   );
   const titleRightBandW = legRightW + w * 0.05 + secLabelBandW + secTitleBandW;
 
-  const provisionalPlan = planValueAxis(chart, dataMin, dataMax, phEst / ptToPx, axisIsPercent);
+  const provisionalPlan = planValueAxis(
+    chart, dataMin, dataMax, phEst / ptToPx, axisIsPercent, 'vertical', percentCurve,
+  );
   let primaryLabelWidth = 0;
   if (
     !chart.valAxisHidden
@@ -476,7 +484,9 @@ export function renderLineChart(
   // auto major unit, same model as the bar/column renderer). `planValueAxis`
   // folds in the CH6 major unit / logBase / orientation; with none set it is
   // byte-identical to the old `valueAxisScale` + linear `toY`.
-  const plan = planValueAxis(chart, dataMin, dataMax, ph / ptToPx, axisIsPercent);
+  const plan = planValueAxis(
+    chart, dataMin, dataMax, ph / ptToPx, axisIsPercent, 'vertical', percentCurve,
+  );
   if (plan.max - plan.min === 0) return;
 
   const toY = (v: number) => py0 + ph - plan.frac(v) * ph;

@@ -3023,6 +3023,11 @@ mod tests {
         // category axis with both value axes, stay ambiguous.
         let visible = excel_order.replace(r#"<c:delete val="1"/>"#, "");
         assert_eq!(parse(&visible, line_ids).0[0].0, "unresolved");
+        // Two same-side date axes keep independent date scales.
+        let dates = excel_order
+            .replace("<c:catAx>", "<c:dateAx>")
+            .replace("</c:catAx>", "</c:dateAx>");
+        assert_eq!(parse(&dates, line_ids).0[0].0, "unresolved");
         let conflicting = parse(&excel_order, r#"<c:axId val="30"/><c:axId val="20"/>"#).0;
         assert_eq!(conflicting[0].0, "unresolved");
         assert_eq!(conflicting[1].0, "unresolved");
