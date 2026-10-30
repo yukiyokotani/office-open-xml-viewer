@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { createLayoutServices } from './layout-runtime.js';
 import { renderDocumentToCanvas, renderLayoutSourceToCanvas } from './renderer.js';
 import { layoutSourceStore } from './layout-source-model-adapter.js';
-import { selectDocumentLayoutPage } from './layout/document-layout-variants.js';
+import { selectDocumentLayoutPage, withErrorPlaceholderPage } from './layout/document-layout-variants.js';
 import { ensureDocumentLayoutVariants } from './layout/document.js';
 import type { DocxDocumentModel, SectionProps } from './types';
 import type { WireErrorPlaceholder } from '@silurus/ooxml-core/internal/part-failures';
@@ -189,18 +189,9 @@ describe('#1974 errorPlaceholder text on the DOCX error page', () => {
     const services = createLayoutServices(source);
     ensureDocumentLayoutVariants(services, 0, () => source);
     const builtin = selectDocumentLayoutPage(services, { defaultCurrentDateMs: 0 }, 0);
-    const first = selectDocumentLayoutPage(services, {
-      defaultCurrentDateMs: 0,
-      errorPlaceholderText: { state: 'resolved', title: 'A', detail: null },
-    }, 0);
-    const again = selectDocumentLayoutPage(services, {
-      defaultCurrentDateMs: 0,
-      errorPlaceholderText: { state: 'resolved', title: 'A', detail: null },
-    }, 0);
-    const other = selectDocumentLayoutPage(services, {
-      defaultCurrentDateMs: 0,
-      errorPlaceholderText: { state: 'resolved', title: 'B', detail: null },
-    }, 0);
+    const first = withErrorPlaceholderPage(services, selectDocumentLayoutPage(services, { defaultCurrentDateMs: 0 }, 0), { state: 'resolved', title: 'A', detail: null }, 0);
+    const again = withErrorPlaceholderPage(services, selectDocumentLayoutPage(services, { defaultCurrentDateMs: 0 }, 0), { state: 'resolved', title: 'A', detail: null }, 0);
+    const other = withErrorPlaceholderPage(services, selectDocumentLayoutPage(services, { defaultCurrentDateMs: 0 }, 0), { state: 'resolved', title: 'B', detail: null }, 0);
     expect(again.layout).toBe(first.layout);
     expect(other.layout).not.toBe(first.layout);
     expect(selectDocumentLayoutPage(services, { defaultCurrentDateMs: 0 }, 0).layout).toBe(builtin.layout);

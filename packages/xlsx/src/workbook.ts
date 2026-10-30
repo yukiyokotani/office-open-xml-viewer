@@ -880,12 +880,12 @@ export class XlsxWorkbook {
   ): WireErrorPlaceholder | undefined {
     if (prepared.kind === 'none' || !worksheet.parseError) return undefined;
     const recorded = this._partFailureLog.get(sheetIndex);
-    const failure: XlsxSheetPartFailure = recorded?.kind === 'sheet' ? recorded : {
+    const failure: XlsxSheetPartFailure = recorded?.kind === 'sheet' ? recorded : Object.freeze({
       kind: 'sheet',
       sheetIndex,
       sheetName: worksheet.name,
       message: clampPartFailureMessage(worksheet.parseError),
-    };
+    });
     const resolved = resolveErrorPlaceholderFor(prepared, failure);
     return resolved === null ? undefined : wireErrorPlaceholder(resolved);
   }

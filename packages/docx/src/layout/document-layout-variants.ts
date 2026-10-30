@@ -92,11 +92,7 @@ export function attachDocumentLayoutVariants(
 
 export function selectDocumentLayoutPage(
   services: LayoutServices,
-  input: LayoutRenderSelectionInput & {
-    /** Caller text for a fatally unparseable document's error page, already
-     * resolved on the main thread. Absent means the built-in text. */
-    readonly errorPlaceholderText?: WireErrorPlaceholder;
-  },
+  input: LayoutRenderSelectionInput,
   pageIndex: number,
 ): Readonly<{
   key: string;
@@ -106,13 +102,33 @@ export function selectDocumentLayoutPage(
 }> {
   const store = layoutVariantStoreOf(services);
   if (!store) throw new Error('Document layout variant store is not attached to the supplied services');
-  const selection = store.selectPage(layoutOptionsForRender(input), pageIndex);
-  const custom = input.errorPlaceholderText ? customErrorPages.get(services) : undefined;
+  return store.selectPage(layoutOptionsForRender(input), pageIndex);
+}
+
+/**
+ * Swap a fatally unparseable document's selected error page for the one laid
+ * out with caller text (#1974), acquired here before paint. Any other
+ * selection, and the built-in text, are returned unchanged.
+ */
+export function withErrorPlaceholderPage<
+  Selection extends Readonly<{
+    key: string;
+    options: LayoutOptions;
+    layout: DeepReadonly<DocumentLayout>;
+    page: DeepReadonly<LayoutPage>;
+  }>,
+>(
+  services: LayoutServices,
+  selection: Selection,
+  errorPlaceholderText: WireErrorPlaceholder | undefined,
+  pageIndex: number,
+): Selection {
+  const custom = errorPlaceholderText ? customErrorPages.get(services) : undefined;
   if (!custom) return selection;
-  const placeholder = resolvedFromWire(input.errorPlaceholderText);
+  const placeholder = resolvedFromWire(errorPlaceholderText);
   if (placeholder === null) return selection;
   const layout = custom.layoutFor(placeholder);
   const page = layout.pages[pageIndex];
   if (!page) return selection;
-  return Object.freeze({ key: `${selection.key}#error-placeholder`, options: selection.options, layout, page });
+  return Object.freeze({ ...selection, key: `${selection.key}#error-placeholder`, layout, page });
 }

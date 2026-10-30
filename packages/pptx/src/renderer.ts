@@ -8295,12 +8295,12 @@ export async function renderSlideWithEmbeddedFonts(
     if (slide.parseError && opts.errorPlaceholderText === undefined) {
       opts = {
         ...rest,
-        errorPlaceholderText: wireErrorPlaceholder(resolveErrorPlaceholderFor(prepared, {
-          kind: 'slide',
+        errorPlaceholderText: wireErrorPlaceholder(resolveErrorPlaceholderFor(prepared, Object.freeze({
+          kind: 'slide' as const,
           slideIndex: slide.index,
           slideNumber: slide.slideNumber,
           message: clampPartFailureMessage(slide.parseError),
-        })),
+        }))),
       };
     }
   }

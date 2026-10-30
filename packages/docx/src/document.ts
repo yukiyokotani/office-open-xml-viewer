@@ -1977,7 +1977,13 @@ export class DocxDocument {
   ): Promise<void> {
     if (this._mode !== 'worker' && 'errorPlaceholder' in opts) {
       const { errorPlaceholder, ...rest } = opts;
-      const errorPlaceholderText = this._errorPlaceholderText(errorPlaceholder);
+      let errorPlaceholderText: WireErrorPlaceholder | undefined;
+      // A throwing or invalid option rejects, like every other render failure.
+      try {
+        errorPlaceholderText = this._errorPlaceholderText(errorPlaceholder);
+      } catch (error) {
+        return Promise.reject(error);
+      }
       return this._renderPageWithTargetOwnership(
         target,
         pageIndex,
@@ -2138,7 +2144,13 @@ export class DocxDocument {
     point: DocxPagePoint,
     opts: DocxElementContextOptions = {},
   ): Promise<DocxElementContext | null> {
-    const viewOpts = this._withActiveView(opts);
+    // Explicit fields only: a reused render-options object must not post a
+    // function such as `errorPlaceholder` (#1974).
+    const viewOpts = this._withActiveView({
+      ...(opts.maxTextCharacters === undefined ? {} : { maxTextCharacters: opts.maxTextCharacters }),
+      ...(opts.currentDate === undefined ? {} : { currentDate: opts.currentDate }),
+      ...(opts.showTrackedChanges === undefined ? {} : { showTrackedChanges: opts.showTrackedChanges }),
+    });
     if (this._mode === 'worker') {
       const res = await this._bridge.request(
         (id) => ({ type: 'hitTestElement', id, pageIndex, point, opts: viewOpts }) satisfies RenderWorkerRequest,

@@ -134,6 +134,7 @@ describe('#1974 errorPlaceholder on the slide placeholder', () => {
     expect(seen).toEqual([{
       kind: 'slide', slideIndex: 2, slideNumber: 3, message: 'ppt/slides/slide3.xml: unexpected end of stream',
     }]);
+    expect(Object.isFrozen(seen[0])).toBe(true);
     expect(texts).toContain('Broken slide #3');
     expect(texts).toContain('Ask the author');
   });

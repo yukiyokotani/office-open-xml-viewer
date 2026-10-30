@@ -202,5 +202,19 @@ describe('PartFailureDelivery', () => {
     delivery.endLoad(first, log);
     expect(seen).toEqual([]);
   });
+
+  it('isolates an async observer rejection', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const log = newLog();
+    log.add(failure(0));
+    const delivery = new PartFailureDelivery<Failure>(
+      'Viewer',
+      (async () => { throw new Error('async boom'); }) as unknown as (f: Failure) => void,
+      (f) => f.slideIndex,
+    );
+    delivery.attach(log);
+    await vi.waitFor(() => expect(error).toHaveBeenCalledTimes(1));
+    error.mockRestore();
+  });
 });
 

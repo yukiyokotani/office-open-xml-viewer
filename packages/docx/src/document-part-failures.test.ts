@@ -87,5 +87,23 @@ describe('DocxDocument part failures (#1974)', () => {
     expect(opts).toEqual({ width: 600 });
     expect(() => structuredClone(opts)).not.toThrow();
   });
+
+  it('never posts the option through getElementContextAt', async () => {
+    const { document, request } = workerDocument(meta);
+    request.mockImplementation(async () => ({ type: 'elementHit', id: 1, context: null }) as never);
+    await document.getElementContextAt(0, { xPt: 1, yPt: 1 } as never, { currentDate: 0, errorPlaceholder: () => ({}) } as never);
+    expect(sentOptions(request)).toEqual({ currentDate: 0 });
+  });
+
+  it('rejects instead of throwing for a throwing resolver in main mode', () => {
+    const instance = Object.create(DocxDocument.prototype) as Record<string, unknown>;
+    Object.assign(instance, { _mode: 'main', _meta: meta });
+    const document = instance as unknown as DocxDocument;
+    attachDocumentLayoutRuntime(document, 0);
+    const failure = new Error('resolver failed');
+    let result: Promise<void> | undefined;
+    expect(() => { result = document.renderPage({} as never, 0, { errorPlaceholder: () => { throw failure; } }); }).not.toThrow();
+    return expect(result).rejects.toBe(failure);
+  });
 });
 

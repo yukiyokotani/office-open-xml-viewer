@@ -376,10 +376,17 @@ export class PartFailureDelivery<F extends { readonly message: string }> {
         }
         if (delivered.has(entry.key)) continue;
         delivered.add(entry.key);
-        try {
-          this.callback!(entry.failure);
-        } catch (error) {
+        const report = (error: unknown) => {
           console.error(`[ooxml] ${this.viewerName} onPartFailure callback failed:`, error);
+        };
+        try {
+          // An async observer's rejection is isolated the same way.
+          const result: unknown = (this.callback as (failure: Readonly<F>) => unknown)(entry.failure);
+          if (result && typeof (result as PromiseLike<unknown>).then === 'function') {
+            Promise.resolve(result).catch(report);
+          }
+        } catch (error) {
+          report(error);
         }
       }
     } finally {
