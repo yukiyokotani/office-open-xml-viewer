@@ -90,8 +90,10 @@ export function classicPlotDispatch(chart: ChartModel): ClassicPlotDispatch {
   //   and moves the secondary value axis (Excel 365); with reversed category
   //   axes a crosses="max" secondary value axis sits on the left (§21.2.3.8),
   //   which the painters do not place, so both must run minMax;
-  // - the deleted axis spreads its own category count across the plot, so
-  //   each of its series must carry exactly the primary category count;
+  // - the deleted axis spreads its own category count across the plot, and
+  //   the shared painters take one count for every group, so every category
+  //   series must carry the same count (group order does not matter: the
+  //   model's categories come from the first series, whichever axis it uses);
   // - date axes keep their own date scales;
   // - crossBetween (§21.2.2.32) of each value axis places its categories
   //   between or on the tick marks;
@@ -109,7 +111,7 @@ export function classicPlotDispatch(chart: ChartModel): ClassicPlotDispatch {
     && (chart.secondaryValAxis?.crossBetween ?? 'between')
       === (chart.catAxisCrossBetween ?? 'between')
     && !horizontalBars
-    && groups.every(group => group.categoryAxis !== 'secondary'
+    && groups.every(group => group.kind === 'scatter' || group.kind === 'bubble'
       || chart.series.slice(group.seriesStart, group.seriesStart + group.seriesCount)
         .every(series => (series.categories?.length
           ? series.categories.length : series.values.length) === primaryCategoryCount));
