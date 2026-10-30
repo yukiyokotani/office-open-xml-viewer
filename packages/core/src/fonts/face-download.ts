@@ -133,11 +133,20 @@ async function readBoundedBytes(response: FaceResponse, charge: (bytes: number) 
   return bytes.buffer;
 }
 
+/**
+ * Ownership is by lease. A join takes a lease for its holder when it starts,
+ * so an entry another join still waits on is never dropped; a join that
+ * fails or whose requester left returns its lease, and a successful one
+ * keeps it as the holder's hold. A holder is released once, for good
+ * ({@link releaseAcquiredFaces}): its leases are returned and it can never
+ * take another, so no continuation that resumes later can hold bytes for it.
+ */
+const releasedHolders = new WeakSet<object>();
+
 class Entry {
   readonly task: SharedTask<FaceAcquisition>;
-  /** Holders that keep the completed bytes (added once a join completes, so
-   * a holder's abandoned join never drops another join's hold). */
-  readonly holders = new Set<object>();
+  /** Live leases per holder (in-flight joins and kept holds). */
+  readonly leases = new Map<object, number>();
   /** Retained bytes charged for this entry (while downloading and kept). */
   charged = 0;
   settled?: FaceAcquisition;
@@ -196,10 +205,23 @@ async function download(
     return result;
   }
   entry.settled = result;
-  // Every live join holds the bytes once it resumes; a result no join took
-  // (all left as it settled) is not kept.
-  setTimeout(() => { if (entry.holders.size === 0) dropEntry(key, entry); }, 0);
+  // Settled after every lease was returned (its last joins left as it
+  // finished): nobody keeps it.
+  if (entry.leases.size === 0) dropEntry(key, entry);
   return result;
+}
+
+function takeLease(entry: Entry, holder: object): void {
+  entry.leases.set(holder, (entry.leases.get(holder) ?? 0) + 1);
+}
+
+/** Return one lease of `holder`; drops a settled entry nobody leases. */
+function returnLease(key: string, entry: Entry, holder: object): void {
+  const count = entry.leases.get(holder);
+  if (count === undefined) return;
+  if (count > 1) entry.leases.set(holder, count - 1);
+  else entry.leases.delete(holder);
+  if (entry.leases.size === 0 && entry.settled) dropEntry(key, entry);
 }
 
 /** One URL for `holder`, joined with any acquisition of it in this realm. */
@@ -210,7 +232,7 @@ async function acquireOne(
   holder: object,
 ): Promise<FaceAcquisition> {
   // A requester that already left starts nothing and takes no hold.
-  if (signal.aborted) return { reason: 'timed out' };
+  if (signal.aborted || releasedHolders.has(holder)) return { reason: 'timed out' };
   const key = `${credentials}\u0000${url}`;
   let entry = entries.get(key);
   if (!entry) {
@@ -222,26 +244,33 @@ async function acquireOne(
     );
     entries.set(key, entry);
   }
-  if (entry.settled) { entry.holders.add(holder); return entry.settled; }
-  const result = await entry.task.join(signal);
-  if (!('data' in result) || entries.get(key) !== entry) return result;
-  // The requester left (released, cancelled, past its deadline) between the
-  // task settling and this continuation: it takes no hold it could never
-  // return, and the bytes stay only if someone else holds them.
-  if (signal.aborted) {
-    if (entry.holders.size === 0) dropEntry(key, entry);
-    return { reason: 'timed out' };
+  takeLease(entry, holder);
+  if (entry.settled) return entry.settled;
+  let result: FaceAcquisition;
+  try {
+    result = await entry.task.join(signal);
+  } catch (error) {
+    returnLease(key, entry, holder);
+    throw error;
   }
-  entry.holders.add(holder);
+  // Released meanwhile: its leases are gone already, and it gets nothing.
+  if (releasedHolders.has(holder)) return { reason: 'timed out' };
+  // A failure, or a requester that left between the task settling and this
+  // continuation: the lease goes back (other leases keep the bytes).
+  if (!('data' in result) || signal.aborted) {
+    returnLease(key, entry, holder);
+    return 'data' in result ? { reason: 'timed out' } : result;
+  }
   return result;
 }
 
 /** The bytes of a completed acquisition this realm keeps, held for `holder`
  * from now on; undefined when none is kept. */
 function keptAcquisition(url: string, credentials: FontSourceCredentials, holder: object): ArrayBuffer | undefined {
+  if (releasedHolders.has(holder)) return undefined;
   const entry = entries.get(`${credentials}\u0000${url}`);
   if (!entry?.settled || !('data' in entry.settled)) return undefined;
-  entry.holders.add(holder);
+  takeLease(entry, holder);
   return entry.settled.data;
 }
 
@@ -286,9 +315,10 @@ export async function acquireFaceUrls(
 
 /** Return every acquisition `holder` keeps; idempotent. */
 export function releaseAcquiredFaces(holder: object): void {
+  releasedHolders.add(holder);
   for (const [key, entry] of [...entries]) {
-    if (!entry.holders.delete(holder)) continue;
-    if (entry.holders.size === 0 && entry.settled) dropEntry(key, entry);
+    if (!entry.leases.delete(holder)) continue;
+    if (entry.leases.size === 0 && entry.settled) dropEntry(key, entry);
   }
 }
 

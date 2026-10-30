@@ -1314,6 +1314,87 @@ describe('face acquisition', () => {
     }
   });
 
+  it('keeps the bytes a live join receives when another join is cancelled, in either order', async () => {
+    // The cancellation lands somewhere between the shared download settling
+    // and the joins resuming, with the cancelled join first or second.
+    for (const cancelFirst of [true, false]) {
+      for (let delay = 0; delay < 12; delay++) {
+        const url = `https://fonts.app.example/order-${cancelFirst}-${delay}.woff2`;
+        const leaving = new AbortController();
+        let requests = 0;
+        G.fetch = vi.fn(async () => {
+          requests++;
+          // A single-use URL: only the first request succeeds.
+          if (requests > 1) return { ok: false, status: 410, arrayBuffer: async () => new ArrayBuffer(0) };
+          return {
+            ok: true, status: 200,
+            arrayBuffer: async () => {
+              let step: Promise<void> = Promise.resolve();
+              for (let index = 0; index < delay; index++) step = step.then(() => undefined);
+              void step.then(() => leaving.abort());
+              return new Uint8Array(16).buffer;
+            },
+          };
+        });
+        const gone = {};
+        const live = {};
+        const options = (signal: AbortSignal, holder: object) =>
+          ({ credentials: 'omit' as const, signal, deadline: Date.now() + 60_000, holder });
+        const cancelled = () => main.acquireFaceUrls([url], options(leaving.signal, gone));
+        const kept = () => main.acquireFaceUrls([url], options(new AbortController().signal, live));
+        const [one, two] = cancelFirst ? [cancelled(), kept()] : [kept(), cancelled()];
+        const keptResult = await (cancelFirst ? two : one);
+        await (cancelFirst ? one : two);
+        const at = `cancelFirst ${cancelFirst}, delay ${delay}`;
+        expect('data' in (keptResult.get(url) ?? {}), at).toBe(true);
+        // The live holder keeps (and is charged for) the bytes: a later
+        // request is answered from the cache, not by a second fetch.
+        expect(main.acquiredFaceCount(), at).toBe(1);
+        expect(main.retainedFontSourceBytes(), at).toBe(16);
+        const again = await main.acquireFaceUrls([url], options(new AbortController().signal, live));
+        expect('data' in (again.get(url) ?? {}), at).toBe(true);
+        expect(requests, at).toBe(1);
+        main.releaseAcquiredFaces(live);
+        main.releaseAcquiredFaces(gone);
+        expect(main.acquiredFaceCount(), at).toBe(0);
+        expect(main.retainedFontSourceBytes(), at).toBe(0);
+      }
+    }
+  });
+
+  it('never holds for a released requester, even one whose deadline passed first', async () => {
+    // A requester's deadline fires and its session is released somewhere
+    // between the shared download settling and its adoption of the success
+    // another requester of the document recorded.
+    for (let delay = 0; delay < 16; delay++) {
+      const failures = new Map<string, string>();
+      const url = `https://fonts.app.example/deadline-then-release-${delay}.woff2`;
+      const late = new AbortController();
+      const gone = {};
+      const live = {};
+      G.fetch = vi.fn(async () => ({
+        ok: true, status: 200,
+        arrayBuffer: async () => {
+          let step: Promise<void> = Promise.resolve();
+          for (let index = 0; index < delay; index++) step = step.then(() => undefined);
+          void step.then(() => { late.abort(main.FONT_DEADLINE_REASON); main.releaseAcquiredFaces(gone); });
+          return new Uint8Array(16).buffer;
+        },
+      }));
+      // The surviving requester runs ahead, so its success is recorded first.
+      const keeping = main.acquireResolverFacesInRealm(failures, 'source', [url],
+        { signal: new AbortController().signal, deadline: Date.now() + 60_000, holder: live });
+      const expiring = main.acquireResolverFacesInRealm(failures, 'source', [url],
+        { signal: late.signal, deadline: Date.now() + 60_000, holder: gone });
+      await Promise.all([keeping, expiring]);
+      // Let the injected expiry and release run, wherever they landed.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      main.releaseAcquiredFaces(live);
+      expect(main.acquiredFaceCount(), `delay ${delay}`).toBe(0);
+      expect(main.retainedFontSourceBytes(), `delay ${delay}`).toBe(0);
+    }
+  });
+
   it('fails a body that completes after the deadline, whatever the timers did', async () => {
     vi.useFakeTimers();
     const start = Date.now();
