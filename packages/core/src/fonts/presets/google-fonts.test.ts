@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { assertFontSourceDescriptors, cssApiRequests, type CssApiSource } from '../source.js';
-import { GOOGLE_FONTS_CATALOG, googleFonts } from './google-fonts.js';
+import { assertFontSourceDescriptors, fontCssApiRequests, type FontCssApiSource } from '../source.js';
+import { GOOGLE_FONTS_CATALOG, GOOGLE_FONTS_SUBSTITUTIONS, GOOGLE_NOTO_CJK_NAMING, googleFonts } from './google-fonts.js';
+import { OFFICE_FONT_SUBSTITUTIONS } from '../substitutions.js';
 import { cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS } from '../scripts.js';
 import { arabicFallbackFamilies } from '../font-stack.js';
 
@@ -64,8 +65,8 @@ const legacyUrl = (family: string, origin = 'https://fonts.googleapis.com') =>
   `${origin}/css2?family=${family}&display=swap`;
 
 /** The single request the preset issues for one authored family. */
-function onlyRequest(source: CssApiSource, family: string) {
-  const requests = cssApiRequests(source, family);
+function onlyRequest(source: FontCssApiSource, family: string) {
+  const requests = fontCssApiRequests(source, family);
   expect(requests, family).toHaveLength(1);
   return requests[0];
 }
@@ -87,7 +88,7 @@ describe('googleFonts() preset', () => {
     const source = googleFonts();
     const answered = new Set([
       ...Object.keys(GOOGLE_FONTS_CATALOG),
-      ...(source.substitutes ?? []).filter((entry) => cssApiRequests(source, entry.for).length > 0)
+      ...(source.substitutes ?? []).filter((entry) => fontCssApiRequests(source, entry.for).length > 0)
         .map((entry) => entry.for),
     ].map((family) => family.toLowerCase()));
     // The one deliberate widening: a document that authors a served
@@ -97,7 +98,7 @@ describe('googleFonts() preset', () => {
       'carlito', 'caladea', 'libre franklin']));
     // Distinct Office faces without a compatible substitute stay unanswered.
     for (const family of ['Calibri Light', 'Cambria Math', 'Noto Serif CJK HK', 'Noto Serif HK']) {
-      expect(cssApiRequests(source, family), family).toEqual([]);
+      expect(fontCssApiRequests(source, family), family).toEqual([]);
     }
   });
 
@@ -131,5 +132,25 @@ describe('googleFonts() preset', () => {
       expect(() => googleFonts({ cssOrigin } as { cssOrigin: string }), String(cssOrigin)).toThrow(TypeError);
     }
     expect(() => googleFonts({ origin: 'https://fonts.example' } as never)).toThrow(TypeError);
+  });
+
+  it('uses the exported default substitutes, which substitutes replaces entirely', () => {
+    expect(GOOGLE_FONTS_SUBSTITUTIONS).toEqual([...OFFICE_FONT_SUBSTITUTIONS, ...GOOGLE_NOTO_CJK_NAMING]);
+    expect(Object.isFrozen(GOOGLE_FONTS_SUBSTITUTIONS)).toBe(true);
+    expect(googleFonts().substitutes).toEqual(GOOGLE_FONTS_SUBSTITUTIONS);
+    expect(googleFonts({ substitutes: GOOGLE_FONTS_SUBSTITUTIONS })).toEqual(googleFonts());
+
+    const own = googleFonts({ substitutes: [{ for: 'Corporate Sans', use: 'Open Sans' }] });
+    expect(own.substitutes).toEqual([{ for: 'Corporate Sans', use: 'Open Sans' }]);
+    expect(fontCssApiRequests(own, 'Corporate Sans').map((request) => request.family)).toEqual(['Open Sans']);
+    // Replaced, not merged: Calibri now asks Google for Calibri only, which
+    // the catalog does not list, so nothing is requested.
+    expect(fontCssApiRequests(own, 'Calibri')).toEqual([]);
+
+    const extended = googleFonts({ substitutes: [...GOOGLE_FONTS_SUBSTITUTIONS, { for: 'Corporate Sans', use: 'Lato' }] });
+    expect(fontCssApiRequests(extended, 'Calibri').map((request) => request.family)).toEqual(['Carlito']);
+    expect(fontCssApiRequests(extended, 'Corporate Sans').map((request) => request.family)).toEqual(['Lato']);
+    expect(googleFonts({ substitutes: [] }).substitutes).toEqual([]);
+    expect(() => googleFonts({ substitutes: [{ for: 'A' }] } as never)).toThrow(TypeError);
   });
 });

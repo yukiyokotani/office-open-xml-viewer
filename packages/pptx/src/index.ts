@@ -258,16 +258,17 @@ export type {
 } from './types';
 // Font sources for `LoadOptions.fonts` (structured-clone-safe descriptors).
 export {
-  cssApi,
-  fontFaceCss,
+  fontCssApi,
+  fontCss,
   fontFiles,
   fontResolver,
   googleFonts,
+  GOOGLE_FONTS_SUBSTITUTIONS as googleFontsSubstitutions,
   OFFICE_FONT_SUBSTITUTIONS as officeFontSubstitutions,
-  type CssApiOptions,
-  type CssApiSource,
-  type FontFaceCssOptions,
-  type FontFaceCssSource,
+  type FontCssApiOptions,
+  type FontCssApiSource,
+  type FontCssOptions,
+  type FontCssSource,
   type FontDemand,
   type FontFaceDeclaration,
   type FontFilesOptions,

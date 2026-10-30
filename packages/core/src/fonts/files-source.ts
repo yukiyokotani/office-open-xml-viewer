@@ -6,7 +6,7 @@
  * fetched later by `FontFace.load()` in the painting realm, only when their
  * `unicode-range` intersects the demanded scalars, and `data` faces are
  * registered from the owned bytes. The same index matching answers a
- * `font-face-css` stylesheet once it is parsed (`css-source.ts`).
+ * `font-css` stylesheet once it is parsed (`css-source.ts`).
  *
  * Matching is the single rule of `substitutions.ts`: declarations of the
  * demanded family itself win; otherwise the first of the source's declared

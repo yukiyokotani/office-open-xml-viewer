@@ -101,18 +101,18 @@ export function fontSourceId(source: FontSource): string {
   if (cached) return cached;
   const hash = new IdentityHash().text(source.protocol).text(source.kind);
   switch (source.kind) {
-    case 'css-api': {
+    case 'font-css-api': {
       hash.text(source.urlTemplate).text(source.query).text(source.credentials ?? 'same-origin');
       const families = source.families ? Object.entries(source.families) : undefined;
       hash.text(families === undefined ? undefined : String(families.length));
       for (const [family, value] of families ?? []) hash.text(family).text(value === true ? undefined : value);
       break;
     }
-    case 'font-face-css':
+    case 'font-css':
       hash.text(source.url).text(source.credentials ?? 'same-origin');
       break;
     case 'font-files':
-      hash.text(String(source.faces.length));
+      hash.text(source.credentials ?? 'same-origin').text(String(source.faces.length));
       for (const face of source.faces) hashDeclaration(hash, face);
       break;
     case 'font-resolver':

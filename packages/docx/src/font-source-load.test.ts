@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cssApi, fontFiles, OFFICE_FONT_SUBSTITUTIONS } from '@silurus/ooxml-core/internal/font-sources';
+import { fontCssApi, fontFiles, OFFICE_FONT_SUBSTITUTIONS } from '@silurus/ooxml-core/internal/font-sources';
 import { docxFontFamilyPlan } from './font-plan.js';
 import { formatOrdinalNumber } from '@silurus/ooxml-core';
 import { ASCII_NUMBER_FORMATS, docxFontDemandScalars, loadDocxFontSources } from './font-source-load.js';
@@ -120,7 +120,7 @@ afterEach(() => {
   G.fetch = ORIGINAL.fetch;
 });
 
-const SOURCE = cssApi({
+const SOURCE = fontCssApi({
   urlTemplate: 'https://fonts.example/css?family={family}',
   families: { 'Noto Sans JP': true, Carlito: true },
   query: 'x',
@@ -176,7 +176,7 @@ describe('loadDocxFontSources', () => {
     const { set, fetched } = install();
     const doc = docWith([text('Latin only', { fontFamily: 'Sakkal Majalla' })]);
     const own = fontFiles({ faces: [{ family: 'Sakkal Majalla', data: new Uint8Array([0, 1, 0, 0]).buffer }] });
-    const naskh = cssApi({
+    const naskh = fontCssApi({
       urlTemplate: 'https://fonts.example/css?family={family}',
       families: { 'Noto Naskh Arabic': true },
       query: 'x',

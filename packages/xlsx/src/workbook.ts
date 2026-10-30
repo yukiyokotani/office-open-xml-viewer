@@ -11,7 +11,7 @@ import wasmAssetUrl from './wasm/xlsx_parser_bg.wasm?url';
 import {
   FontResolverBridgeHost,
   normalizeFontOptions,
-  type FontDemand,
+  type FontSessionDemand,
   type FontResolverFailures,
   type FontSource,
   type FontSourceSession,
@@ -238,7 +238,7 @@ export class XlsxWorkbook {
   private installedFamilies: InstalledFamilyExclusion | null = null;
   private fontSessionType: typeof FontSourceSession | null = null;
   /** Every demand delta so far, replayed into each newly retained set. */
-  private fontDeltas: Promise<FontDemand>[] = [];
+  private fontDeltas: Promise<FontSessionDemand>[] = [];
   private officeFontRequests: OfficeFontFallbackRequest[] = [];
   private readonly retainedFontSets = new Map<FontFaceSet, RetainedFontSet>();
   /** Worker mode: runs this workbook's `fontResolver` functions for the
@@ -715,7 +715,7 @@ export class XlsxWorkbook {
   }
 
   /** Queue one (installed-excluded) delta on a retained set's session. */
-  private enqueueFontDelta(retained: RetainedFontSet, delta: Promise<FontDemand>): Promise<void> {
+  private enqueueFontDelta(retained: RetainedFontSet, delta: Promise<FontSessionDemand>): Promise<void> {
     const task = retained.fontQueue.then(async () => {
       const demand = await delta;
       if (retained.session && !this.fontsDestroyed) await retained.session.ensure(demand);
@@ -726,7 +726,7 @@ export class XlsxWorkbook {
 
   /** Record a demand delta and ensure it in every retained set. A ceiling
    * breach (`font-source-limit`) rejects; a failed face only warns. */
-  private async pushFontDelta(delta: FontDemand | null): Promise<void> {
+  private async pushFontDelta(delta: FontSessionDemand | null): Promise<void> {
     if (!delta || !this.installedFamilies || this.fontsDestroyed) return;
     const excluded = this.installedFamilies.exclude(delta);
     this.fontDeltas.push(excluded);

@@ -36,8 +36,6 @@ describe('XLSX font-source demand', () => {
       sharedStrings: [{ text: 'ab', runs: [{ text: 'ab', font: { name: 'Roboto', bold: true, italic: false } }] }] as never,
     }), 'jp', OFFICE_FONT_SUBSTITUTIONS).take();
     expect(demand?.families).toEqual(['Lato Regular', 'Lato', 'Calibri', 'Cambria', 'Roboto']);
-    expect(demand?.tuples).toContainEqual({ family: 'Calibri', weight: 700, style: 'normal' });
-    expect(demand?.tuples).toContainEqual({ family: 'Cambria', weight: 400, style: 'italic' });
     expect(demand?.fallbackFamilies).toEqual([]);
   });
 

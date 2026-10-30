@@ -12,7 +12,6 @@ import { ScriptPreloadAccumulator } from '@silurus/ooxml-core/internal/script-pr
 import {
   FONT_SUBSTITUTE_SCRIPTS,
   fontFamilyKey,
-  type FontDemand,
 } from '@silurus/ooxml-core/internal/font-sources';
 import { chartFontFamilies } from '@silurus/ooxml-core/internal/chart-font-sources';
 import type { Slide, SlideElement, TextBody } from './types';
@@ -34,10 +33,8 @@ export interface PptxFontDemandFacts {
    * major/minor and every run, paragraph-default and slot family); the rest
    * are library script fallbacks. */
   readonly familyCount: number;
-  /** Exact authored face tuples ({@link pptxSlideOfficeFontRequests}). */
-  readonly tuples: FontDemand['tuples'];
   /** Lower-cased authored family → the scoped-substitute scripts its painted
-   * text proves (`FontDemand.substituteScripts`). Families absent here prove
+   * text proves (`FontSessionDemand.substituteScripts`). Families absent here prove
    * none, so a script-scoped substitute is never requested for them. */
   readonly substituteScripts: Readonly<Record<string, readonly FontSubstituteScript[]>>;
 }
@@ -108,13 +105,11 @@ export function* pptxSlideTextRuns(slide: Slide): Generator<string> {
 /** Mutable font-source demand facts of an accumulator (see
  * {@link PptxFontDemandFacts}). */
 interface DemandFactState {
-  readonly tuples: Map<string, FontDemand['tuples'][number]>;
   readonly scripts: Map<string, Set<FontSubstituteScript>>;
 }
 
 function cloneDemandFacts(state: DemandFactState): DemandFactState {
   return {
-    tuples: new Map(state.tuples),
     scripts: new Map([...state.scripts].map(([key, scripts]) => [key, new Set(scripts)])),
   };
 }
@@ -138,7 +133,7 @@ export class PptxFontPreloadAccumulator {
     const cjkLang = classifyCjkFont(majorFont) ?? classifyCjkFont(minorFont) ?? fallback ?? null;
     this.scripts = scripts ?? new ScriptPreloadAccumulator(cjkLang);
     this.families = families ?? new Set();
-    this.demand = demand === false ? null : demand === true ? { tuples: new Map(), scripts: new Map() } : demand;
+    this.demand = demand === false ? null : demand === true ? { scripts: new Map() } : demand;
     if (majorFont) this.addThemeFamily(majorFont);
     if (minorFont) this.addThemeFamily(minorFont);
   }
@@ -183,13 +178,6 @@ export class PptxFontPreloadAccumulator {
         // end-of-paragraph properties, and theme tokens resolved to the
         // slide's theme fonts.
         this.families.add(request.family);
-        if (request.presenceOnly) continue;
-        const tuple = Object.freeze({
-          family: request.family,
-          weight: request.weight ?? 400,
-          style: request.style ?? 'normal',
-        });
-        this.demand.tuples.set(`${fontFamilyKey(tuple.family)}:${tuple.weight}:${tuple.style}`, tuple);
       }
       for (const el of slide.elements) {
         if (el.type === 'chart') for (const family of chartFontFamilies(el.chart)) this.families.add(family);
@@ -258,7 +246,6 @@ export class PptxFontPreloadAccumulator {
     return Object.freeze({
       // names() lists the distinct families first, so they are its prefix.
       familyCount: this.families.size,
-      tuples: Object.freeze([...this.demand.tuples.values()]),
       substituteScripts: Object.freeze(substituteScripts),
     });
   }

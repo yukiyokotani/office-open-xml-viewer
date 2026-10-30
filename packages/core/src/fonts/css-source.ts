@@ -1,6 +1,6 @@
 /**
- * CSS font sources: `css-api` (one stylesheet per served family) and
- * `font-face-css` (one stylesheet describing many families), plus the
+ * CSS font sources: `font-css-api` (one stylesheet per served family) and
+ * `font-css` (one stylesheet describing many families), plus the
  * hardened `@font-face` parser and bounded stylesheet fetch they share.
  *
  * Stylesheets are untrusted input (a third-party CDN, a mirror, an internal
@@ -60,10 +60,10 @@ import {
 import { claimFromIndex, indexFontDeclarations } from './files-source.js';
 import type { FamilyResolution, FontSourceFailure, FontStylesheet, SourceCache } from './source-cache.js';
 import {
-  cssApiRequests,
+  fontCssApiRequests,
   validateFontFaceDeclaration,
-  type CssApiSource,
-  type FontFaceCssSource,
+  type FontCssApiSource,
+  type FontCssSource,
   type FontFaceDeclaration,
   type FontSourceCredentials,
 } from './source.js';
@@ -996,21 +996,21 @@ const stylesheetIndexes = new WeakMap<FontStylesheet, ReadonlyMap<string, readon
 // ---- adapters -----------------------------------------------------------------------
 
 /**
- * `css-api`: one request per served family (the demanded family, then each
+ * `font-css-api`: one request per served family (the demanded family, then each
  * declared substitute's `use`, filtered by the allow-list), issued in
  * parallel. The best-precedence request that yields rules of its served family
  * claims the demanded family; when every request fails the family is final
  * (failed); when the allow-list admits no candidate the family is absent.
  */
 async function resolveCssApiFamily(
-  source: CssApiSource,
+  source: FontCssApiSource,
   cache: SourceCache,
   family: string,
   signal: AbortSignal,
   holder: object,
   scripts: FontSubstituteScripts,
 ): Promise<FamilyResolution> {
-  const requests = cssApiRequests(source, family, scripts);
+  const requests = fontCssApiRequests(source, family, scripts);
   if (requests.length === 0) return { kind: 'absent' };
   const sheets = await Promise.all(requests.map((request) =>
     joinStylesheet(cache, request.url, source.credentials, signal, holder)));
@@ -1033,11 +1033,11 @@ async function resolveCssApiFamily(
   return { kind: 'failed', reason: reasons.join('; ') };
 }
 
-/** `font-face-css`: fetch the stylesheet once per source identity, then answer
+/** `font-css`: fetch the stylesheet once per source identity, then answer
  * every family from its index. A failed stylesheet fails every family asked of
  * it (no other source is consulted). */
 async function resolveFontFaceCssFamily(
-  source: FontFaceCssSource,
+  source: FontCssSource,
   cache: SourceCache,
   family: string,
   signal: AbortSignal,
@@ -1055,7 +1055,7 @@ async function resolveFontFaceCssFamily(
  * resolution cache (one in-flight resolution per source identity × family),
  * held by `cache` (the requesting session's handle) until it releases. */
 export async function resolveCssSource(
-  source: CssApiSource | FontFaceCssSource,
+  source: FontCssApiSource | FontCssSource,
   cache: SourceCache,
   families: readonly string[],
   signal: AbortSignal,
@@ -1064,7 +1064,7 @@ export async function resolveCssSource(
   const entries = await Promise.all(families.map(async (family) => {
     const key = fontFamilyKey(family);
     const scripts = scriptsOf(family);
-    const resolution = await cache.families.join(scopedFamilyKey(family, scripts), (taskSignal, task) => source.kind === 'css-api'
+    const resolution = await cache.families.join(scopedFamilyKey(family, scripts), (taskSignal, task) => source.kind === 'font-css-api'
       ? resolveCssApiFamily(source, cache, family, taskSignal, task, scripts)
       : resolveFontFaceCssFamily(source, cache, family, taskSignal, task, scripts), signal, cache);
     return [key, resolution] as const;

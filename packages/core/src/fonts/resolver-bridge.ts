@@ -12,10 +12,15 @@
  * (`ooxmlFontsResolved`) with a copy of every `data` buffer in the transfer
  * list (`resolver-bridge-responder.ts`). Main resolves through its own realm
  * resolution cache, so the function runs once per family however many
- * realms ask (`resolver-resolution.ts`), and answers per family. The worker
- * session then admits and claims each family's declarations exactly as it
- * admits a direct answer, so a document resolves, registers, charges and
- * loads the same faces in both modes.
+ * realms ask (`resolver-resolution.ts`), and answers per family with the
+ * family's candidate faces. Before posting, main downloads every http(s) /
+ * blob: `url` face of the reply and sends the bytes instead
+ * (`resolver-bridge-host.ts`), so the worker fetches no resolver URL and
+ * cookies, authentication and Referer checks see the page in both modes. The
+ * request carries only the demanded family names (`FontDemand`): painted
+ * scalars and substitute scopes stay in the worker, whose session admits each
+ * family's candidates and claims from them under its own scope, exactly as it
+ * claims a direct answer.
  *
  * Correlation follows the host-font measurement requests of the DOCX render
  * worker: each request carries the client's generation and a request id. A
@@ -67,7 +72,8 @@ export interface WorkerFontResolveCancel {
 
 /** Main's answer for one demanded family (lower-cased `family`). */
 export type BridgedFamilyAnswer =
-  /** The declarations that claim it; every `data` buffer is in the transfer list. */
+  /** Its candidate declarations (`resolverCandidates`); every `data` buffer
+   * is in the transfer list, and no declaration is an http(s) or blob: URL. */
   | { readonly family: string; readonly kind: 'claimed'; readonly declarations: readonly FontFaceDeclaration[] }
   | { readonly family: string; readonly kind: 'failed'; readonly reason: string }
   | { readonly family: string; readonly kind: 'absent' };

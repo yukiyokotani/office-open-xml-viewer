@@ -81,8 +81,8 @@ describe('XlsxWorkbook.load font options', () => {
     const messages = captureRequests();
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     await expect(XlsxWorkbook.load(zip(), { useGoogleFonts: true, fonts: [] })).rejects.toThrow(TypeError);
-    await expect(XlsxWorkbook.load(zip(), { fonts: [{ kind: 'css-api' }] as never })).rejects.toThrow(TypeError);
-    await expect(XlsxWorkbook[loadXlsxSheetSource](csv(), { fonts: [{ kind: 'css-api' }] as never }, { format: 'csv' }))
+    await expect(XlsxWorkbook.load(zip(), { fonts: [{ kind: 'font-css-api' }] as never })).rejects.toThrow(TypeError);
+    await expect(XlsxWorkbook[loadXlsxSheetSource](csv(), { fonts: [{ kind: 'font-css-api' }] as never }, { format: 'csv' }))
       .rejects.toThrow(TypeError);
     expect(messages).toEqual([]);
   });

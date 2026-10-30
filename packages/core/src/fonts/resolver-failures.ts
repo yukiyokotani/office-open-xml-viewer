@@ -8,8 +8,9 @@
  * the faces its worker paints. Every terminal non-success of a family within
  * the document (a failed answer, a malformed answer, a ceiling breach, the
  * font ceiling, a bridge that cannot answer) is recorded here, through
- * {@link recordFontResolverFailures}, keyed by source identity and scoped
- * family; every requester consults it before and after resolving.
+ * {@link recordFontResolverFailures}, keyed by source identity and family
+ * (a resolver never sees substitution scopes, so its outcome for a family is
+ * one outcome); every requester consults it before and after resolving.
  *
  * Light on purpose: the main-thread bridge host records a bootstrap failure
  * without loading the responder.
@@ -21,15 +22,19 @@
 import type { BridgedFamilyAnswer, FontResolveOutcome } from './resolver-bridge.js';
 import type { FamilyResolution, SourceCache } from './source-cache.js';
 import type { FontResolverSource, FontSource } from './source.js';
-import type { FontSubstituteScript } from './substitute-script.js';
-import { fontFamilyKey, scopedFamilyKey, type FontSubstituteScripts } from './substitutions.js';
+import { fontFamilyKey } from './substitutions.js';
 
 /** Failure reason by {@link fontResolverFailureKey}. */
 export type FontResolverFailures = Map<string, string>;
 
-/** Key of one scoped family of one source identity (`fontSourceId`). */
-export function fontResolverFailureKey(sourceId: string, name: string, scripts: FontSubstituteScripts): string {
-  return `${sourceId}\u0000${scopedFamilyKey(name, scripts)}`;
+/** One demanded family of a resolver call. */
+export interface ResolverFamily {
+  readonly name: string;
+}
+
+/** Key of one family of one source identity (`fontSourceId`). */
+export function fontResolverFailureKey(sourceId: string, name: string): string {
+  return `${sourceId}\u0000${fontFamilyKey(name)}`;
 }
 
 /** Record `reason` for `families` of `sourceId`. Private: every write goes
@@ -37,19 +42,19 @@ export function fontResolverFailureKey(sourceId: string, name: string, scripts: 
 function recordFontResolverFailures(
   failures: FontResolverFailures | undefined,
   sourceId: string,
-  families: readonly { readonly name: string; readonly scripts: FontSubstituteScripts }[],
+  families: readonly ResolverFamily[],
   reason: string,
 ): void {
   if (!failures) return;
-  for (const { name, scripts } of families) {
-    const key = fontResolverFailureKey(sourceId, name, scripts);
+  for (const { name } of families) {
+    const key = fontResolverFailureKey(sourceId, name);
     if (!failures.has(key)) failures.set(key, reason);
   }
 }
 
 /**
- * The outcome this document already reached for one scoped family of
- * `cache`'s source: a recorded failure, or a resolution (claimed or absent)
+ * The outcome this document already reached for one family of `cache`'s
+ * source: a recorded failure, or a resolution (candidates or absent)
  * the realm cache keeps, which `holder` then holds (see
  * `SharedTaskMap.holdKept`). Undefined while undecided.
  */
@@ -57,12 +62,11 @@ export function decidedFamilyOutcome(
   failures: FontResolverFailures | undefined,
   cache: SourceCache,
   name: string,
-  scripts: FontSubstituteScripts,
   holder: object,
 ): FamilyResolution | undefined {
-  const reason = failures?.get(fontResolverFailureKey(cache.id, name, scripts));
+  const reason = failures?.get(fontResolverFailureKey(cache.id, name));
   if (reason !== undefined) return { kind: 'failed', reason };
-  return cache.families.holdKept(scopedFamilyKey(name, scripts), holder);
+  return cache.families.holdKept(fontFamilyKey(name), holder);
 }
 
 /**
@@ -77,44 +81,31 @@ export function decidedFamilyOutcome(
 export function concludeFamilies(
   failures: FontResolverFailures | undefined,
   cache: SourceCache,
-  families: readonly { readonly name: string; readonly scripts: FontSubstituteScripts }[],
+  families: readonly ResolverFamily[],
   reason: string,
   holder: object,
 ): Map<string, FamilyResolution> {
   const outcomes = new Map<string, FamilyResolution>();
-  for (const { name, scripts } of families) {
-    const decided = decidedFamilyOutcome(failures, cache, name, scripts, holder);
+  for (const { name } of families) {
+    const decided = decidedFamilyOutcome(failures, cache, name, holder);
     if (decided) { outcomes.set(fontFamilyKey(name), decided); continue; }
-    recordFontResolverFailures(failures, cache.id, [{ name, scripts }], reason);
+    recordFontResolverFailures(failures, cache.id, [{ name }], reason);
     outcomes.set(fontFamilyKey(name), { kind: 'failed', reason });
   }
   return outcomes;
 }
 
 /**
- * The scoped families a bridged request names, read leniently (the request
- * may be malformed): authored and fallback names with the substitution scope
- * the demand proves, as the responder derives them. Empty when nothing
- * readable is named.
+ * The families a bridged request names, read leniently (the request may be
+ * malformed): authored then fallback names. Empty when nothing readable is
+ * named.
  */
-export function bridgedRequestFamilies(
-  demand: unknown,
-): { readonly name: string; readonly scripts: FontSubstituteScripts }[] {
+export function bridgedRequestFamilies(demand: unknown): ResolverFamily[] {
   if (demand === null || typeof demand !== 'object') return [];
-  const fields = demand as { families?: unknown; fallbackFamilies?: unknown; substituteScripts?: unknown };
-  const names = [fields.families, fields.fallbackFamilies]
-    .flatMap((list) => (Array.isArray(list) ? list.filter((name): name is string => typeof name === 'string') : []));
-  const record = fields.substituteScripts;
-  const scoped = record !== null && typeof record === 'object' && !Array.isArray(record)
-    ? new Map(Object.entries(record).map(([family, list]) =>
-      [fontFamilyKey(family), Array.isArray(list)
-        ? [...new Set(list.filter((script): script is FontSubstituteScript => typeof script === 'string'))].sort()
-        : []]))
-    : undefined;
-  return names.map((name) => ({
-    name,
-    scripts: scoped ? Object.freeze(scoped.get(fontFamilyKey(name)) ?? []) : 'all',
-  }));
+  const fields = demand as { families?: unknown; fallbackFamilies?: unknown };
+  return [fields.families, fields.fallbackFamilies]
+    .flatMap((list) => (Array.isArray(list) ? list.filter((name): name is string => typeof name === 'string') : []))
+    .map((name) => ({ name }));
 }
 
 /** A bridged request's families split by whether this document already
@@ -125,7 +116,7 @@ export interface SettledBridgedRequest {
    * requester of the document (the XLSX viewer session). */
   readonly settled: readonly BridgedFamilyAnswer[];
   /** Families no requester has decided yet. */
-  readonly unsettled: readonly { readonly name: string; readonly scripts: FontSubstituteScripts }[];
+  readonly unsettled: readonly ResolverFamily[];
   /** The document's handle on the source's cache (holder of `settled`). */
   readonly cache: SourceCache;
 }
@@ -165,11 +156,11 @@ export function settledBridgedRequest(
   if (source?.kind !== 'font-resolver' || source.id !== resolverId) return undefined;
   const cache = cacheFor(sourceIndex, source);
   const settled: BridgedFamilyAnswer[] = [];
-  const unsettled: { name: string; scripts: FontSubstituteScripts }[] = [];
-  for (const { name, scripts } of bridgedRequestFamilies(request.demand)) {
-    const decided = decidedFamilyOutcome(failures, cache, name, scripts, cache);
+  const unsettled: ResolverFamily[] = [];
+  for (const { name } of bridgedRequestFamilies(request.demand)) {
+    const decided = decidedFamilyOutcome(failures, cache, name, cache);
     if (decided) settled.push(bridgedAnswer(fontFamilyKey(name), decided));
-    else unsettled.push({ name, scripts });
+    else unsettled.push({ name });
   }
   return { settled, unsettled, cache };
 }

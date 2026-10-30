@@ -15,7 +15,7 @@ import {
 } from '@silurus/ooxml-core/internal/font-scalar-demand';
 import {
   FontSourceSession,
-  type FontDemand,
+  type FontSessionDemand,
   type FontResolverRunner,
   type FontSource,
   type LoadedFontSources,
@@ -158,10 +158,9 @@ export function docxFontDemandScalars(doc: DocxDocumentModel): FontDemandScalars
 }
 
 /** One document's demand: the family plan plus its scalars. */
-export function docxFontDemand(doc: DocxDocumentModel, plan: DocxFontFamilyPlan): FontDemand {
+export function docxFontDemand(doc: DocxDocumentModel, plan: DocxFontFamilyPlan): FontSessionDemand {
   return Object.freeze({
     families: plan.families,
-    tuples: plan.tuples,
     fallbackFamilies: plan.fallbackFamilies,
     scalars: docxFontDemandScalars(doc),
     substituteScripts: plan.substituteScripts,
