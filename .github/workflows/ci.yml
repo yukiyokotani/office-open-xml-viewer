@@ -47,6 +47,10 @@ jobs:
           done
           cargo clippy -p legacy-office-parser --all-targets --all-features -- -D warnings
 
+      # Model-crate capabilities that only companion sources enable.
+      - name: Model crate opt-in feature clippy
+        run: cargo clippy -p docx-model --all-targets --features owned-source-cursor -- -D warnings
+
       # The cargo-fuzz harness is an intentionally independent workspace, so
       # the root workspace checks above do not format, lint, or compile it.
       - name: Fuzz target format check
@@ -66,6 +70,9 @@ jobs:
             cargo test -p legacy-office-parser --features "$features"
           done
           cargo test -p legacy-office-parser --all-features
+
+      - name: Model crate opt-in feature tests
+        run: cargo test -p docx-model --features owned-source-cursor
 
   # RB8 — dependency vulnerability audit. Report-only for now
   # (continue-on-error): one known advisory already exists at introduction —

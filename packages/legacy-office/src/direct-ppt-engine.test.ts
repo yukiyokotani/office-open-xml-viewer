@@ -1,7 +1,7 @@
 // PPT wiring of the shared direct-source runtime: the generated glue's
 // LegacyPptPresentation, its native close, and
 // initialization/abort/cleanup ownership rules. URL validation, pinning and
-// trap containment are tested once in direct-source-runtime.test.ts.
+// trap containment are tested once in core model-source-runtime.test.ts.
 import { describe, expect, it, vi } from 'vitest';
 import {
   createLegacyPptSourceEngine,

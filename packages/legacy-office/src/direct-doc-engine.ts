@@ -2,7 +2,8 @@ import {
   createDirectSourceRuntime,
   resolveDirectWasmInput,
   type OwnedDirectSource,
-} from './direct-source-runtime.js';
+} from '@silurus/ooxml-core/internal/model-source-runtime';
+import { nativeRejection } from './native-rejection.js';
 
 /** Retained DOC model policy, independent of source file size. */
 export const MAX_LEGACY_DOC_MODEL_BYTES = 256 * 1024 * 1024;
@@ -55,7 +56,7 @@ export function createLegacyDocSourceEngine(
   }
   return createDirectSourceRuntime({
     label: 'legacy DOC',
-    format: 'doc',
+    mapNativeError: (error) => nativeRejection(error, 'doc'),
     loadGlue,
     resolveWasm,
     construct: (glue, bytes) => new glue.LegacyDocDocument(bytes, modelBudget),
