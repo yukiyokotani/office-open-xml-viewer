@@ -23,6 +23,7 @@ use crate::text::{
     text_property_color, InheritedBodyPr, LevelAlignments, LevelBullets, LevelColors, LevelFaces,
     LevelFontSizes, LevelIndent, LevelIndents, LevelRunProperties, LevelSpacing,
     SharedLevelRunProperties, DEFAULT_TEXT_STYLE_MAR_L, HARD_DEFAULT_FONT_SIZE,
+    HARD_DEFAULT_TEXT_COLOR,
 };
 use crate::theme::{
     bake_clr_map, parse_theme_part, PptxSchemeResolver, PptxTheme, PptxThemeSource,
@@ -1928,8 +1929,45 @@ pub(crate) struct DefaultTextLevels {
     /// defaultTextStyle level set no marL started at the inset at levels 2
     /// and 3).
     pub(crate) mar_l: [i64; 9],
+    /// The text colour per level, complete at every level
+    /// (`default_text_level_colors`). Empty only outside a presentation
+    /// (standalone shapes, SmartArt drawings), where no defaultTextStyle applies.
+    pub(crate) colors: LevelColors,
     /// The list style table-cell text inherits (`parse_table_text_levels`).
     pub(crate) table: TableTextLevels,
+}
+
+/// The text colour each defaultTextStyle level gives ordinary text, resolved
+/// against `theme`, the slide's effective colour map (§19.3.1.6 clrMap, then
+/// the layout's and slide's §19.3.1.7 clrMapOvr).
+///
+/// Observed (issue #1989, PowerPoint PDF export of synthetic decks whose
+/// master swaps the map to bg1=dk1 tx1=lt1 bg2=dk2 tx2=lt2, with distinctive
+/// dk1/lt1/dk2/lt2 values and every source in a distinct colour):
+/// * Text boxes, autoshapes without a fontRef colour, grouped text boxes and
+///   the non-placeholder text of layouts and masters took their level's fill
+///   through the effective map: lvl1 tx1 rendered lt1, lvl2 tx2 rendered lt2;
+///   a slide or layout overrideClrMapping flipped them back to dk1/dk2.
+/// * A level without a fill, under a defaultTextStyle that exists, rendered
+///   000000 at every level and under both maps; not dk1 (a 1F3F5F dk1), not
+///   tx1, not the defPPr fill and not the master otherStyle fill.
+/// * A presentation without a defaultTextStyle rendered tx1 at every level.
+/// * The master otherStyle fills never applied to this text.
+pub(crate) fn default_text_level_colors(
+    default_text_style: Option<roxmltree::Node<'_, '_>>,
+    theme: &HashMap<String, String>,
+) -> LevelColors {
+    match default_text_style {
+        Some(node) => read_level_colors(node, theme)
+            .map(|color| Some(color.unwrap_or_else(|| HARD_DEFAULT_TEXT_COLOR.to_owned()))),
+        None => {
+            let tx1 = theme
+                .get("tx1")
+                .cloned()
+                .unwrap_or_else(|| HARD_DEFAULT_TEXT_COLOR.to_owned());
+            std::array::from_fn(|_| Some(tx1.clone()))
+        }
+    }
 }
 
 /// The list-level properties table-cell text inherits: the slide master's
@@ -2011,6 +2049,7 @@ pub(crate) fn parse_default_text_levels(
                 complex_script: read_level_defrpr_values(node, Some("cs"), "typeface"),
                 lang: read_level_defrpr_values(node, None, "lang"),
                 alt_lang: read_level_defrpr_values(node, None, "altLang"),
+                colors: default_text_level_colors(Some(node), theme),
                 table: TableTextLevels::default(),
             }
         }
@@ -2018,6 +2057,7 @@ pub(crate) fn parse_default_text_levels(
             faces: std::array::from_fn(|_| resolve_latin_face("+mn-lt", theme)),
             sizes: [Some(HARD_DEFAULT_FONT_SIZE); 9],
             mar_l: DEFAULT_TEXT_STYLE_MAR_L,
+            colors: default_text_level_colors(None, theme),
             table: TableTextLevels::default(),
             ..Default::default()
         },
@@ -2799,6 +2839,9 @@ pub(crate) struct EffectiveMaster {
     pub(crate) master_level_bullets: HashMap<String, LevelBullets>,
     /// txStyles-only tier re-resolved against `theme`.
     pub(crate) master_styles: MasterStyleTier,
+    /// Presentation defaultTextStyle levels with their colours re-resolved
+    /// against `theme` (`default_text_level_colors`).
+    pub(crate) default_text: DefaultTextLevels,
 }
 
 /// Build a `ParsedMaster` for the master at `master_path` (a ZIP path such as

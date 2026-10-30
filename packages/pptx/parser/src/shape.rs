@@ -1118,6 +1118,12 @@ pub(crate) fn parse_shape(
             .is_none()
     {
         lph.lookup_level_colors(&ph_type, ph_idx)
+    } else if ph_node.is_none() && default_text_color.is_none() {
+        // Ordinary text takes its defaultTextStyle level colour (resolved
+        // against the slide's effective colour map) below its own lstStyle
+        // and paragraph defRPr. A p:style fontRef colour replaces it at every
+        // level; a fontRef without a colour leaves it (issue #1989 controls).
+        lph.default_text.colors.clone()
     } else {
         std::array::from_fn(|_| None)
     };
