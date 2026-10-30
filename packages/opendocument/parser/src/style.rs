@@ -12,6 +12,12 @@ use std::collections::{HashMap, HashSet};
 /// Implementation bound on a parent chain; ODF requires none, a cycle is a
 /// container error.
 const MAX_PARENT_DEPTH: usize = 64;
+/// Implementation bound on stored style data: every owned string (expanded
+/// attribute and element names included) plus a fixed per-entry overhead,
+/// charged before the style is read. Expanded names repeat a namespace URI
+/// declared once, so storage is not linear in the XML size without it.
+const MAX_STYLE_BYTES: usize = 64 * 1024 * 1024;
+const STORED_ENTRY_OVERHEAD: usize = 64;
 
 /// The style families readers look up (§19.480 `style:family`). Styles of
 /// every family are stored under their declared family name.
@@ -78,6 +84,7 @@ pub enum Scope {
 
 #[derive(Debug, Default)]
 pub struct StyleSheet {
+    stored_bytes: usize,
     common: HashMap<(String, String), Style>,
     defaults: HashMap<String, Style>,
     automatic: HashMap<(Scope, String, String), Style>,
@@ -92,6 +99,7 @@ pub struct StyleRef<'a> {
 impl StyleSheet {
     pub fn add_common(&mut self, parent: roxmltree::Node<'_, '_>) -> Result<(), String> {
         for node in parent.children().filter(|n| xml::is(*n, NS_STYLE, "style")) {
+            self.charge(node)?;
             let style = read_style(node)?;
             let key = (style.family.clone(), style.name.clone());
             if self.common.insert(key, style).is_some() {
@@ -102,6 +110,7 @@ impl StyleSheet {
             .children()
             .filter(|n| xml::is(*n, NS_STYLE, "default-style"))
         {
+            self.charge(node)?;
             let mut style = read_style_body(node, String::new())?;
             style.parent = None;
             if self.defaults.insert(style.family.clone(), style).is_some() {
@@ -117,6 +126,7 @@ impl StyleSheet {
         parent: roxmltree::Node<'_, '_>,
     ) -> Result<(), String> {
         for node in parent.children().filter(|n| xml::is(*n, NS_STYLE, "style")) {
+            self.charge(node)?;
             let mut style = read_style(node)?;
             style.automatic = true;
             let key = (scope, style.family.clone(), style.name.clone());
@@ -124,6 +134,35 @@ impl StyleSheet {
                 return Err(invalid("two automatic styles share a name and family"));
             }
         }
+        Ok(())
+    }
+
+    /// Charge the storage a style element's subtree will take before it is
+    /// read (borrowed XML only; nothing is allocated here).
+    fn charge(&mut self, node: roxmltree::Node<'_, '_>) -> Result<(), String> {
+        let bytes = node
+            .descendants()
+            .filter(|n| n.is_element())
+            .fold(0usize, |bytes, element| {
+                let name = element.tag_name();
+                let attributes = element.attributes().fold(0usize, |sum, attribute| {
+                    sum.saturating_add(
+                        attribute.namespace().map_or(0, str::len)
+                            + attribute.name().len()
+                            + attribute.value().len()
+                            + STORED_ENTRY_OVERHEAD,
+                    )
+                });
+                bytes
+                    .saturating_add(name.namespace().map_or(0, str::len) + name.name().len())
+                    .saturating_add(STORED_ENTRY_OVERHEAD)
+                    .saturating_add(attributes)
+            });
+        self.stored_bytes = self
+            .stored_bytes
+            .checked_add(bytes)
+            .filter(|total| *total <= MAX_STYLE_BYTES)
+            .ok_or_else(|| "OpenDocument styles exceed the style storage limit".to_string())?;
         Ok(())
     }
 
@@ -144,13 +183,20 @@ impl StyleSheet {
     }
 
     /// The style and its parent chain (common styles), nearest first.
-    pub fn chain<'s>(&'s self, start: StyleRef<'s>) -> Result<Vec<StyleRef<'s>>, String> {
+    /// `charge` is called with each lookup's identifier bytes before the
+    /// lookup.
+    pub fn chain<'s>(
+        &'s self,
+        start: StyleRef<'s>,
+        mut charge: impl FnMut(usize) -> Result<(), String>,
+    ) -> Result<Vec<StyleRef<'s>>, String> {
         let mut chain = vec![start];
         let mut current = start.style;
         while let Some(parent) = current.parent.as_deref() {
             if chain.len() > MAX_PARENT_DEPTH {
                 return Err(invalid("a style parent chain is cyclic or too deep"));
             }
+            charge(1 + current.family.len() + parent.len())?;
             let next = self
                 .common
                 .get(&(current.family.clone(), parent.to_string()))

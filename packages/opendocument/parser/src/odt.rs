@@ -54,8 +54,9 @@ const MAX_SEARCH_ORDER: usize = 256;
 /// Implementation bound on cascade work, document-wide: every paragraph and
 /// run resolution visits each style of its search order and each attribute
 /// and element of the resolved property group (one unit each) and may process
-/// each attribute value (one unit per byte), charged before the resolution
-/// is built.
+/// each attribute's expanded name and value (one unit per byte), charged
+/// before the resolution is built. Building a style's parent chain charges
+/// one unit per identifier byte looked up.
 const MAX_CASCADE_WORK: usize = 16 * 1024 * 1024;
 
 pub fn read(package: &OdfPackage) -> Result<Document, String> {
@@ -116,6 +117,7 @@ pub fn read(package: &OdfPackage) -> Result<Document, String> {
         sheet: &sheet,
         fonts: &fonts,
         used_faces: RefCell::new(HashSet::new()),
+        chains: HashMap::new(),
         text_chains: HashMap::new(),
         cascade_work: Cell::new(0),
         page_master: page.name.as_str(),
@@ -681,8 +683,9 @@ struct Collected {
     top: f64,
     bottom: f64,
     contextual: bool,
-    /// The named (common) style compared by contextual spacing.
-    named_style: Option<String>,
+    /// The named (common) style compared by contextual spacing, by identity
+    /// (common styles are unique per family and name).
+    named_style: Option<*const Style>,
     page_break_after: bool,
 }
 
@@ -690,6 +693,8 @@ struct Reader<'a> {
     sheet: &'a StyleSheet,
     fonts: &'a FontFaces,
     used_faces: RefCell<HashSet<Face>>,
+    /// Each applied style's parent chain, by style identity.
+    chains: HashMap<*const Style, Rc<[StyleRef<'a>]>>,
     /// Each applied text style's checked parent chain, by style identity.
     text_chains: HashMap<*const Style, Rc<[StyleRef<'a>]>>,
     cascade_work: Cell<usize>,
@@ -801,17 +806,19 @@ impl<'a> Reader<'a> {
             }
         }
         let mut chain: Vec<StyleRef<'a>> = match node.attribute((NS_TEXT, "style-name")) {
-            Some(name) => self.sheet.chain(
-                self.sheet
+            Some(name) => {
+                let style = self
+                    .sheet
                     .find(Scope::Content, Family::Paragraph, name)
-                    .ok_or_else(|| invalid("a paragraph names a missing style"))?,
-            )?,
+                    .ok_or_else(|| invalid("a paragraph names a missing style"))?;
+                self.style_chain(style)?.to_vec()
+            }
             None => Vec::new(),
         };
         let named_style = chain
             .iter()
             .find(|s| !s.style().automatic)
-            .map(|s| s.style().name.clone());
+            .map(|s| s.style() as *const Style);
         if let Some(default) = self.sheet.default_style(Family::Paragraph) {
             chain.push(default);
         }
@@ -827,6 +834,7 @@ impl<'a> Reader<'a> {
         });
         let mut page_break_before = false;
         if let Some(master) = master.filter(|name| !name.is_empty()) {
+            self.charge_work(master.len())?;
             if master != self.page_master {
                 return Err(unsupported("master-page-change"));
             }
@@ -878,8 +886,7 @@ impl<'a> Reader<'a> {
         self.charge_construction(
             std::mem::size_of::<Collected>()
                 + std::mem::size_of::<BodyElement>()
-                + 6 * mark.family.len()
-                + collected.named_style.as_ref().map_or(0, String::len),
+                + 6 * mark.family.len(),
         )?;
         self.paragraphs.push(collected);
         Ok(())
@@ -988,10 +995,24 @@ impl<'a> Reader<'a> {
         if let Some(chain) = self.text_chains.get(&key) {
             return Ok(chain.clone());
         }
-        let chain = self.sheet.chain(style)?;
+        let chain = self.style_chain(style)?;
         check_groups(&chain, &["text-properties"])?;
-        let chain: Rc<[StyleRef<'a>]> = chain.into();
         self.text_chains.insert(key, chain.clone());
+        Ok(chain)
+    }
+
+    /// A style's parent chain, built once per style and charged to the
+    /// cascade work budget.
+    fn style_chain(&mut self, style: StyleRef<'a>) -> Result<Rc<[StyleRef<'a>]>, String> {
+        let key: *const Style = style.style();
+        if let Some(chain) = self.chains.get(&key) {
+            return Ok(chain.clone());
+        }
+        let chain: Rc<[StyleRef<'a>]> = self
+            .sheet
+            .chain(style, |work| self.charge_work(work))?
+            .into();
+        self.chains.insert(key, chain.clone());
         Ok(chain)
     }
 
@@ -1124,11 +1145,19 @@ impl<'a> Reader<'a> {
         let work = styles.iter().fold(0usize, |work, style| {
             work.saturating_add(1)
                 .saturating_add(style.group(group).map_or(0, |p| {
-                    p.attributes.len()
-                        + p.elements.len()
-                        + p.attributes.values().map(String::len).sum::<usize>()
+                    p.elements.len()
+                        + p.attributes
+                            .iter()
+                            .map(|((namespace, name), value)| {
+                                1 + namespace.len() + name.len() + value.len()
+                            })
+                            .sum::<usize>()
                 }))
         });
+        self.charge_work(work)
+    }
+
+    fn charge_work(&self, work: usize) -> Result<(), String> {
         let total = self
             .cascade_work
             .get()
@@ -2384,6 +2413,36 @@ mod tests {
             ..Fixture::default()
         })
         .is_ok());
+    }
+
+    #[test]
+    fn style_identifiers_and_expanded_names_are_charged() {
+        // A namespace URI declared once but expanded into every stored
+        // attribute key of many unused styles.
+        let namespace = format!("urn:x:{}", "n".repeat(64 * 1024));
+        let unused: String = (0..1100)
+            .map(|i| format!(r#"<style:style style:name="U{i}" style:family="paragraph" xmlns:x="{namespace}" x:a="1"/>"#))
+            .collect();
+        let error = read_fixture(Fixture {
+            styles: &unused,
+            ..Fixture::default()
+        })
+        .unwrap_err();
+        assert!(error.contains("style storage limit"), "{error}");
+
+        // A long parent name is looked up once per style, not per paragraph.
+        let parent = "P".repeat(1_000_000);
+        let styles = format!(
+            r#"<style:style style:name="{parent}" style:family="paragraph"/><style:style style:name="C" style:family="paragraph" style:parent-style-name="{parent}"/>"#
+        );
+        let body = r#"<text:p text:style-name="C">x</text:p>"#.repeat(3000);
+        let document = read_fixture(Fixture {
+            styles: &styles,
+            body: &body,
+            ..Fixture::default()
+        })
+        .unwrap();
+        assert_eq!(paragraphs(&document).len(), 3000);
     }
 
     #[test]
