@@ -694,6 +694,21 @@ export function renderBarChart(
     .filter(series => !allBarSeriesSet.has(series) || renderedBarSeries.has(series))
     .map(series => {
       if (series.useSecondaryAxis !== true) return series;
+      if (overlayPlottedValues.has(series)) {
+        // Plan from the values the overlay paints: stacked and percentStacked
+        // groups are cumulative/normalized there, not raw.
+        return {
+          ...series,
+          values: series.values.map((value, index) => value == null
+            ? value
+            : overlayValue(series, index)),
+          errBars: !secondaryPercentAxis ? series.errBars : (series.errBars ?? []).map(errorBars => ({
+            ...errorBars,
+            plus: errorBars.plus.map(value => value == null ? value : value * 100),
+            minus: errorBars.minus.map(value => value == null ? value : value * 100),
+          })),
+        };
+      }
       if (renderedBarSeries.has(series)) {
         const seriesIndex = barSeries.indexOf(series);
         return {

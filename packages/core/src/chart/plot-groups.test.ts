@@ -74,6 +74,10 @@ test('a deleted secondary axis with its own category count stays outside', () =>
   const shorter = combo(['bar', 'line'], { hidden: true });
   shorter.series[1] = { ...shorter.series[1], categories: ['a', 'b'], values: [1, 2] };
   expect(classicPlotDispatch(shorter)).toBe('unsupported');
+  // A longer primary group behind a secondary group listed first.
+  const primaryLonger = combo(['line', 'line'], { hidden: true });
+  primaryLonger.series[0] = { ...primaryLonger.series[0], categories: ['a', 'b', 'c', 'd', 'e'], values: [1, 2, 3, 400, 500] };
+  expect(classicPlotDispatch(primaryLonger)).toBe('unsupported');
   // Blank trailing values over the same categories still share them.
   const blanks = combo(['bar', 'line'], { hidden: true });
   blanks.series[1] = { ...blanks.series[1], values: [1, null, null] };

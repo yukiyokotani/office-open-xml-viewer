@@ -180,3 +180,25 @@ describe('automatic value axes cover a drawn smoothed curve', () => {
     expect(paintedLabels(scatter(true))).not.toContain('-1');
   });
 });
+
+describe('secondary overlay axes', () => {
+  it('a stacked secondary line over columns scales to its painted sums', () => {
+    const labels = paintedLabels(chart({
+      chartType: 'clusteredBar',
+      categories: ['a', 'b', 'c'],
+      series: [
+        series({ values: [1, 1, 1] }),
+        series({ values: [10, 10, 10], seriesType: 'line', useSecondaryAxis: true }),
+        series({ values: [20, 20, 20], seriesType: 'line', useSecondaryAxis: true }),
+      ],
+      secondaryValAxis: { hidden: false } as ChartModel['secondaryValAxis'],
+      plotGroups: [
+        { kind: 'bar', seriesStart: 0, seriesCount: 1, barDirection: 'col', grouping: 'clustered',
+          categoryAxis: 'primary', valueAxis: 'primary', seriesAxis: 'none' },
+        { kind: 'line', seriesStart: 1, seriesCount: 2, grouping: 'stacked',
+          categoryAxis: 'primary', valueAxis: 'secondary', seriesAxis: 'none' },
+      ],
+    }));
+    expect(labels.some(label => Number(label) >= 30)).toBe(true);
+  });
+});
