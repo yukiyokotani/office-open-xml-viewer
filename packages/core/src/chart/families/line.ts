@@ -1,5 +1,5 @@
 // Classic line chart family.
-import { smoothCurveExtent } from '../smooth-extent.js';
+import { classicLineRunIndices, seriesPaintsSmoothedLine, smoothCurveExtent } from '../smooth-extent.js';
 import type { ChartModel, ChartRect, ChartSeries } from '../../types/chart';
 
 import { chartStyleEffectOwner, paintChartStyleEffects } from '../style-effects.js';
@@ -178,15 +178,32 @@ export function renderLineChart(
       dataMin = Math.min(dataMin, v); dataMax = Math.max(dataMax, v);
     }
   }
-  // A smoothed line is scaled to the curve it draws, as Excel does: its Bezier
-  // overshoots the points, so a run leaving a flat stretch of zeros dips below zero.
-  for (let si = 0; si < chart.series.length; si++) {
+  // A smoothed line's automatic axis covers the curve it draws (see
+  // smoothCurveExtent), stacked series included. A percentStacked axis keeps
+  // its exact normalized 0..100 extent (planValueAxis): Excel widened only its
+  // minimum to the next major unit there, a rule not modelled, so the curve is
+  // left out of that axis rather than producing a fractional bound.
+  const smoothedCurveExtent = (si: number, logBase: number | null | undefined) => {
     const series = chart.series[si];
-    if (isSecondarySeries(series) || stackedBySeries[si] || series.smooth !== true) continue;
-    const curve = smoothCurveExtent(
-      Array.from({ length: n }, (_, ci) => (series.values[ci] == null ? null : plotted(si, ci))),
+    if (percentBySeries[si] || !seriesPaintsSmoothedLine(chart, series, chartExSeriesFormatIndex(series, si))) {
+      return null;
+    }
+    return smoothCurveExtent(
+      classicLineRunIndices(series, n, dispBlanks, stackedBySeries[si])
+        .map(run => run.map(ci => plotted(si, ci))),
+      logBase,
     );
+  };
+  for (let si = 0; si < chart.series.length; si++) {
+    if (isSecondarySeries(chart.series[si])) continue;
+    const curve = smoothedCurveExtent(si, chart.valAxisLogBase);
     if (curve) { dataMin = Math.min(dataMin, curve[0]); dataMax = Math.max(dataMax, curve[1]); }
+  }
+  const secondaryCurveValues: number[] = [];
+  for (let si = 0; si < chart.series.length; si++) {
+    if (!isSecondarySeries(chart.series[si])) continue;
+    const curve = smoothedCurveExtent(si, sec?.logBase);
+    if (curve) secondaryCurveValues.push(...curve);
   }
   for (let si = 0; si < chart.series.length; si++) {
     const series = chart.series[si];
@@ -261,6 +278,7 @@ export function renderLineChart(
     (series, pointIndex, seriesIndex) => !stackedBySeries[seriesIndex]
       && series.values[pointIndex] == null
       ? null : plotted(seriesIndex, pointIndex),
+    secondaryCurveValues,
   );
   // Right-edge gutter for the secondary tick labels + rotated title. Measured
   // with the SAME font/format the axis is drawn with so the reserve matches the
@@ -621,24 +639,8 @@ export function renderLineChart(
     // series when there is no secondary axis) map through the primary `toY`.
     const yOf = yMapFor(s);
     const smooth = s.smooth === true;
-    const runs: IndexedLinePoint[][] = [];
-    let run: IndexedLinePoint[] = [];
-    const flushRun = (): void => {
-      if (run.length > 0) runs.push(run);
-      run = [];
-    };
-    for (let ci = 0; ci < n; ci++) {
-      if (s.sourceHidden?.[ci] === true) {
-        flushRun();
-        continue;
-      }
-      if (!seriesStacked && s.values[ci] == null) {
-        if (dispBlanks === 'gap') { flushRun(); continue; }
-        if (dispBlanks === 'span') continue;
-      }
-      run.push({ x: toX(ci), y: yOf(plotted(si, ci)), index: ci });
-    }
-    flushRun();
+    const runs: IndexedLinePoint[][] = classicLineRunIndices(s, n, dispBlanks, seriesStacked)
+      .map(run => run.map(ci => ({ x: toX(ci), y: yOf(plotted(si, ci)), index: ci })));
     const lineBounds = { x: px0, y: py0, w: pw, h: ph };
     if (chartSeriesVariesByPoint(chart, si)) {
       paintClassicVaryingLineSegments(

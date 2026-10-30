@@ -19,6 +19,54 @@ import { drawChartMarker } from './markers.js';
 import { dataLabelWithinAxisMaximum, drawSeriesDataLabels } from './data-labels.js';
 import { chartFontFamily } from './fonts.js';
 import { drawSeriesTrendlines } from './trendline.js';
+import { seriesPaintsSmoothedLine, smoothCurveExtent } from '../smooth-extent.js';
+
+
+/** Whether {@link drawScatterSeriesLayer} draws a series' connecting line as
+ * a smoothed curve under the group's `scatterStyle`. */
+export function scatterSeriesDrawsSmoothLine(
+  series: ChartSeries,
+  style: string,
+  isBubble: boolean,
+): boolean {
+  const groupDrawsSmooth = style === 'smooth'
+    || style === 'smoothMarker'
+    || style === 'smoothNoMarker';
+  const automaticPointStyle = style === 'marker'
+    && hasFilteredScatterAutomaticPointStyle(series);
+  return (!automaticPointStyle && style === 'marker' && !isBubble) || groupDrawsSmooth;
+}
+
+/** X and Y extents of the smoothed curve a scatter series draws (see
+ * smoothCurveExtent); null when it draws no visible smoothed line. The curve
+ * is one run through every point that has both coordinates, as painted. */
+export function scatterSmoothCurveExtent(
+  chart: ChartModel,
+  series: ChartSeries,
+  seriesIndex: number,
+  cats: string[],
+  useIndexX: boolean,
+  style: string,
+  isBubble: boolean,
+  xLogBase: number | null | undefined,
+  yLogBase: number | null | undefined,
+): { x: [number, number] | null; y: [number, number] | null } | null {
+  if (!seriesPaintsSmoothedLine(
+    chart, series, chartExSeriesFormatIndex(series, seriesIndex),
+    scatterSeriesDrawsSmoothLine(series, style, isBubble),
+  )) return null;
+  const xs: number[] = [];
+  const ys: number[] = [];
+  for (let index = 0; index < series.values.length; index++) {
+    const yValue = series.values[index];
+    if (yValue == null) continue;
+    const xValue = scatterXValue(cats, index, useIndexX);
+    if (xValue == null) continue;
+    xs.push(xValue);
+    ys.push(yValue);
+  }
+  return { x: smoothCurveExtent([xs], xLogBase), y: smoothCurveExtent([ys], yLogBase) };
+}
 
 
 export type ScatterSeriesLayer = {
@@ -107,9 +155,6 @@ export function drawScatterSeriesLayer(
   bubbleSettings?: BubbleGroupSettings,
 ): void {
   const groupDrawsLines = style === 'line' || style === 'lineMarker' || style === 'lineNoMarker';
-  const groupDrawsSmooth = style === 'smooth'
-    || style === 'smoothMarker'
-    || style === 'smoothNoMarker';
   const hideMarkersByStyle = markersSuppressedByChartStyle(
     'scatter', chart.chartType, style, chart.radarStyle,
   );
@@ -138,8 +183,7 @@ export function drawScatterSeriesLayer(
     const automaticPointStyle = style === 'marker'
       && hasFilteredScatterAutomaticPointStyle(s);
     const drawLines = automaticPointStyle || groupDrawsLines;
-    const drawSmooth = (!automaticPointStyle && style === 'marker' && !isBubble)
-      || groupDrawsSmooth;
+    const drawSmooth = scatterSeriesDrawsSmoothLine(s, style, isBubble);
     if (drawLines || drawSmooth) {
       const pts: IndexedLinePoint[] = [];
       for (let ci = 0; ci < s.values.length; ci++) {

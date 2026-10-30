@@ -91,7 +91,8 @@ export function forEachErrorBarEndpoint(
  *
  *  `plotHeightPt` is the estimated plot height in points (the axis is the
  *  vertical right edge, so its length drives the auto major unit). `getValues`
- *  yields each opted-in series' raw values.
+ *  yields each opted-in series' raw values. `extraValues` are further plotted
+ *  extents on this axis (a smoothed curve's overshoot).
  *
  *  Empty secondary data keeps the neutral 0..1 fallback. */
 export function computeSecondaryAxis(
@@ -105,6 +106,7 @@ export function computeSecondaryAxis(
     series.useSecondaryAxis === true,
   valueAt: (series: ChartSeries, pointIndex: number, seriesIndex: number) => number | null =
     () => null,
+  extraValues: Iterable<number> = [],
 ): SecondaryAxisScale | null {
   if (!sec) return null;
   let dMin = Infinity;
@@ -129,6 +131,8 @@ export function computeSecondaryAxis(
       include,
     );
   }
+  // Plotted geometry beyond the points, e.g. a smoothed curve's overshoot.
+  for (const value of extraValues) include(value);
   if (!Number.isFinite(dMin) || !Number.isFinite(dMax)) {
     dMin = 0;
     dMax = 1;

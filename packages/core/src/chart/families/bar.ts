@@ -1,5 +1,5 @@
 // Classic bar chart family.
-import { smoothCurveExtent } from '../smooth-extent.js';
+import { classicLineRunIndices, seriesPaintsSmoothedLine, smoothCurveExtent } from '../smooth-extent.js';
 import type { ChartDataLabelOverride, ChartLabelBox, ChartModel, ChartRect, ChartSeries, SecondaryValueAxis } from '../../types/chart';
 import type { DataLabelRect } from '../data-label-layout.js';
 import type { RichDataLabelOptions } from '../rich-data-label.js';
@@ -89,7 +89,7 @@ import { chartCategories } from '../category-spacing.js';
 import { applyDecorationLineStyle, chartStyleRoleLine, chartStyleRoleErrorBar } from '../shared/style-roles.js';
 import { drawLineGroupDecorations, categoryAxisCrossingValue } from '../shared/line-decorations.js';
 import { scatterXValue } from '../shared/scatter-geometry.js';
-import { drawScatterSeriesLayer } from '../shared/scatter-paint.js';
+import { drawScatterSeriesLayer, scatterSmoothCurveExtent } from '../shared/scatter-paint.js';
 import { drawChartMarker, seriesHasResolvedMarkerDetail } from '../shared/markers.js';
 import { clamp, appendCurve, dashPatternForPreset } from '../shared/geometry.js';
 
@@ -570,6 +570,24 @@ export function renderBarChart(
       }
     }
   }
+  // A smoothed overlay line's automatic axis covers the curve it draws (see
+  // smoothCurveExtent), on whichever value axis it rides. A percentStacked
+  // overlay is left out: its axis keeps the exact normalized extent.
+  const overlayCurveExtent = (
+    series: ChartSeries,
+    logBase: number | null | undefined,
+  ): [number, number] | null => {
+    if (series.seriesType !== 'line'
+      || plotGroupBySeries.get(series)?.grouping === 'percentStacked'
+      || !seriesPaintsSmoothedLine(
+        chart, series, chartExSeriesFormatIndex(series, sourceSeriesIndices.get(series) ?? 0),
+      )) return null;
+    return smoothCurveExtent(
+      classicLineRunIndices(series, n, chart.dispBlanksAs)
+        .map(run => run.map(ci => overlayValue(series, ci))),
+      logBase,
+    );
+  };
   // Combo line series plotted on the PRIMARY value axis (a bar+line chart whose
   // line rides the same `<c:valAx>` as the bars — no secondary axis, or one the
   // line doesn't opt into) must expand the primary axis extent just like the
@@ -580,16 +598,13 @@ export function renderBarChart(
   // scale, mirrored by the `yOf` split below). `sec` matches the draw-time gate.
   for (const s of [...lineSeries, ...areaSeries]) {
     if (sec && s.useSecondaryAxis === true) continue;
-    const drawn: Array<number | null> = [];
     for (let ci = 0; ci < n; ci++) {
-      if (s.values[ci] == null) { drawn.push(null); continue; }
+      if (s.values[ci] == null) continue;
       const value = overlayValue(s, ci);
-      drawn.push(value);
       dataMax = Math.max(dataMax, value);
       dataMin = Math.min(dataMin, value);
     }
-    // A smoothed line is scaled to the curve it draws, as Excel does.
-    const curve = s.smooth === true ? smoothCurveExtent(drawn) : null;
+    const curve = overlayCurveExtent(s, chart.valAxisLogBase);
     if (curve) { dataMin = Math.min(dataMin, curve[0]); dataMax = Math.max(dataMax, curve[1]); }
   }
 
@@ -704,6 +719,14 @@ export function renderBarChart(
       errBars: [],
     });
   }
+  const secondaryCurveValues: number[] = [];
+  if (sec) {
+    for (const series of lineSeries) {
+      if (series.useSecondaryAxis !== true) continue;
+      const curve = overlayCurveExtent(series, sec.logBase);
+      if (curve) secondaryCurveValues.push(...curve);
+    }
+  }
   const secScale = computeSecondaryAxis(
     sec,
     secondaryScaleSeries,
@@ -711,6 +734,9 @@ export function renderBarChart(
     isH ? 'x' : 'y',
     secondaryPercentAxis,
     secondaryBarSeries.length > 0,
+    undefined,
+    undefined,
+    secondaryCurveValues,
   );
 
   const secTickFontPx = Math.max(8, Math.min(11, h / 20));
@@ -2200,28 +2226,8 @@ export function renderBarChart(
         || s.lineWidthEmu != null
         || chart.chartexDataPointLineStyle != null;
       const smooth = s.smooth === true;
-      const dispBlanks = chart.dispBlanksAs ?? 'gap';
-      const runs: IndexedLinePoint[][] = [];
-      let run: IndexedLinePoint[] = [];
-      const flushRun = (): void => {
-        if (run.length === 0) return;
-        runs.push(run);
-        run = [];
-      };
-      for (let ci = 0; ci < n; ci++) {
-        const v = s.values[ci];
-        if (s.sourceHidden?.[ci] === true) {
-          flushRun();
-          continue;
-        }
-        if (v == null) {
-          if (dispBlanks === 'gap') flushRun();
-          if (dispBlanks !== 'zero') continue;
-        }
-        const lx = categoryCenterX(ci);
-        run.push({ x: lx, y: yOf(overlayValue(s, ci)), index: ci });
-      }
-      flushRun();
+      const runs: IndexedLinePoint[][] = classicLineRunIndices(s, n, chart.dispBlanksAs)
+        .map(run => run.map(ci => ({ x: categoryCenterX(ci), y: yOf(overlayValue(s, ci)), index: ci })));
       if (varyingLinePaint) {
         paintClassicVaryingLineSegments(
           ctx, chart, s, runs, smooth, false, color,
@@ -2357,6 +2363,14 @@ export function renderBarChart(
         allX.push(xv);
         allY.push(yv);
       }
+      // A smoothed scatter line's axes cover the curve it draws.
+      const curve = scatterSmoothCurveExtent(
+        chart, s, sourceSeriesIndices.get(s) ?? 0, s.categories ?? chart.categories, false,
+        chart.scatterStyle ?? 'marker', false,
+        chart.secondaryCatAxis?.logBase, chart.secondaryValAxis?.logBase,
+      );
+      if (curve?.x) allX.push(...curve.x);
+      if (curve?.y) allY.push(...curve.y);
     }
     if (allX.length && allY.length) {
       const xAxis = chart.secondaryCatAxis;

@@ -48,6 +48,7 @@ import { applyDecorationLineStyle, chartStyleRoleLine, chartStyleRoleBarPaint, d
 import { drawUpDownBars } from '../shared/line-decorations.js';
 import { drawChartMarker } from '../shared/markers.js';
 import { appendCurve } from '../shared/geometry.js';
+import { seriesPaintsSmoothedLine, smoothCurveExtent } from '../smooth-extent.js';
 import { drawCategoryErrorBars } from '../shared/error-bars.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -143,7 +144,34 @@ export function renderStockChart(
     + catTitleH + legBottomH;
 
   const phEst = h - padT - padB;
-  const secScale = computeSecondaryAxis(sec, scaleSeries, phEst / ptToPx);
+  // A smoothed overlay line's automatic axis covers the curve it draws (see
+  // smoothCurveExtent). The overlay is drawn in runs broken at blank values.
+  const overlayCurveExtent = (
+    lineSeries: ChartSeries,
+    logBase: number | null | undefined,
+  ): [number, number] | null => {
+    if (!seriesPaintsSmoothedLine(
+      chart, lineSeries,
+      chartExSeriesFormatIndex(lineSeries, sourceSeriesIndices.get(lineSeries) ?? 0),
+    )) return null;
+    const runs: number[][] = [[]];
+    for (let categoryIndex = 0; categoryIndex < n; categoryIndex++) {
+      const value = lineSeries.values[categoryIndex];
+      if (value == null) runs.push([]);
+      else runs[runs.length - 1].push(value);
+    }
+    return smoothCurveExtent(runs, logBase);
+  };
+  const secondaryCurveValues: number[] = [];
+  for (const lineSeries of lineOverlaySeries) {
+    if (!isSecondarySeries(lineSeries)) continue;
+    const curve = overlayCurveExtent(lineSeries, sec?.logBase);
+    if (curve) secondaryCurveValues.push(...curve);
+  }
+  const secScale = computeSecondaryAxis(
+    sec, scaleSeries, phEst / ptToPx, 'y', false, false, undefined, undefined,
+    secondaryCurveValues,
+  );
   const secTickFontPx = Math.max(8, Math.min(11, h / 20));
   const secFontPx = chartTextFontSizePx(sec?.fontSizeHpt, ptToPx) ?? secTickFontPx;
   let secLabelBandW = 0;
@@ -193,6 +221,11 @@ export function renderStockChart(
         dataMax = Math.max(dataMax, value);
       },
     );
+  }
+  for (const lineSeries of lineOverlaySeries) {
+    if (isSecondarySeries(lineSeries)) continue;
+    const curve = overlayCurveExtent(lineSeries, chart.valAxisLogBase);
+    if (curve) { dataMin = Math.min(dataMin, curve[0]); dataMax = Math.max(dataMax, curve[1]); }
   }
   if (!isFinite(dataMin)) { dataMin = 0; dataMax = 1; }
   if (chart.valMin != null) dataMin = chart.valMin;

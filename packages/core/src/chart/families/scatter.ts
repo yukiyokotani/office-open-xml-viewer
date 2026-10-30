@@ -26,7 +26,7 @@ import type { SecondaryAxisScale } from '../shared/secondary-axis.js';
 import { measuredCartesianTitleBand, drawChartTitleForLayout } from '../shared/title.js';
 import { scatterXValue } from '../shared/scatter-geometry.js';
 import type { BubbleGroupSettings } from '../shared/scatter-geometry.js';
-import { drawScatterSeriesLayer } from '../shared/scatter-paint.js';
+import { drawScatterSeriesLayer, scatterSmoothCurveExtent } from '../shared/scatter-paint.js';
 import { clamp } from '../shared/geometry.js';
 import { authoredExtraLinesHeight, axisLabelLineHeightPx, fillAuthoredText, measureAuthoredTextWidth } from '../chart-text-lines.js';
 
@@ -72,13 +72,36 @@ export function renderScatterChart(
     && entries[0].series.bubbleXSourceIsString === true
     ? entries[0].series.values.length + 1
     : null;
+  // The group scatterStyle the painter applies to a series (drawNumericEntries).
+  const scatterStyleFor = (index: number): { style: string; isBubble: boolean } => {
+    if (chart.plotGroups == null) {
+      const isBubble = chart.chartType === 'bubble';
+      return { isBubble, style: isBubble ? 'marker' : (chart.scatterStyle ?? 'marker') };
+    }
+    const group = plotGroupBySeries[index];
+    const isBubble = group?.kind === 'bubble';
+    return {
+      isBubble,
+      style: isBubble ? 'marker' : (group?.scatterStyle ?? chart.scatterStyle ?? 'marker'),
+    };
+  };
+  // A smoothed series' automatic axes cover the curve it draws in both
+  // coordinates (see smoothCurveExtent), in each axis's own log/linear space.
   const pairedExtents = (
     entries: Array<{ series: ChartSeries; index: number }>,
+    xLogBase: number | null | undefined,
+    yLogBase: number | null | undefined,
   ): { x: { min: number; max: number }; y: { min: number; max: number } } => {
     const xs: number[] = [];
     const ys: number[] = [];
-    for (const { series } of entries) {
+    for (const { series, index: seriesIndex } of entries) {
       const cats = series.categories ?? chart.categories;
+      const { style, isBubble } = scatterStyleFor(seriesIndex);
+      const curve = scatterSmoothCurveExtent(
+        chart, series, seriesIndex, cats, useIndexX, style, isBubble, xLogBase, yLogBase,
+      );
+      if (curve?.x) xs.push(...curve.x);
+      if (curve?.y) ys.push(...curve.y);
       for (let index = 0; index < series.values.length; index++) {
         const yValue = series.values[index];
         if (yValue == null) continue;
@@ -111,12 +134,18 @@ export function renderScatterChart(
     return { x: finiteDataExtent(xs), y: finiteDataExtent(ys) };
   };
   const primaryExtent = {
-    x: pairedExtents(primaryXEntries.length > 0 ? primaryXEntries : secondaryXEntries).x,
-    y: pairedExtents(primaryYEntries.length > 0 ? primaryYEntries : secondaryYEntries).y,
+    x: pairedExtents(
+      primaryXEntries.length > 0 ? primaryXEntries : secondaryXEntries,
+      chart.catAxisLogBase, chart.valAxisLogBase,
+    ).x,
+    y: pairedExtents(
+      primaryYEntries.length > 0 ? primaryYEntries : secondaryYEntries,
+      chart.catAxisLogBase, chart.valAxisLogBase,
+    ).y,
   };
   const secondaryExtent = {
-    x: pairedExtents(secondaryXEntries).x,
-    y: pairedExtents(secondaryYEntries).y,
+    x: pairedExtents(secondaryXEntries, secondaryX?.logBase, secondaryY?.logBase).x,
+    y: pairedExtents(secondaryYEntries, secondaryX?.logBase, secondaryY?.logBase).y,
   };
   // Shared frame bands. Title + bottom axis-label bands follow PowerPoint's
   // chart auto-layout (font-proportional, pinned to the demo slide-5 line-chart
