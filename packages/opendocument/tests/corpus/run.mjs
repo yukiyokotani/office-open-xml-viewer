@@ -38,7 +38,7 @@ import { createHash } from 'node:crypto';
 import { cpSync, existsSync, mkdirSync, unlinkSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { parseArgs } from 'node:util';
-import { checkoutRoot, corpusRepo } from './paths.mjs';
+import { checkoutRoot, corpusRepo, inputsHash } from './paths.mjs';
 
 const { values: args } = parseArgs({
   options: {
@@ -159,6 +159,9 @@ const sha256 = (data) => createHash('sha256').update(data).digest('hex');
 const fingerprint = sha256(JSON.stringify({
   head: git('rev-parse', 'HEAD'),
   diff: sha256(execFileSync('git', ['diff', 'HEAD'], { cwd: checkoutRoot, maxBuffer: 256 << 20 })),
+  // Untracked, non-ignored files (new helpers) by path and content.
+  untracked: sha256(JSON.stringify(git('ls-files', '--others', '--exclude-standard', '-z').split('\0').filter(Boolean).sort()
+    .map((path) => [path, sha256(readFileSync(join(checkoutRoot, path)))]))),
   docxWasm: sha256(readFileSync(docxWasm)),
   odtWasm: sha256(readFileSync(customWasm ?? odtWasm)),
   native: sha256(readFileSync(nativeBinary)),
@@ -243,8 +246,6 @@ writeFileSync(join(runDir, 'settings-flags.json'), `${JSON.stringify(settingsFla
 
 // Drop cached results whose ODT or PDF changed since they were written, so a
 // failed retry cannot leave an old score standing (the spec does the same).
-const inputsHash = (file) => createHash('sha256').update(readFileSync(file.odt))
-  .update(existsSync(file.pdf) ? readFileSync(file.pdf) : '').digest('hex');
 const resultsDir = join(runDir, 'results');
 if (existsSync(resultsDir)) {
   const byId = new Map(files.map((file) => [file.id, file]));
@@ -278,5 +279,5 @@ if (!args['skip-browser']) {
   if (browser.status !== 0) console.warn(`playwright exited with ${browser.status}`);
 }
 
-run('node', [join(checkoutRoot, 'packages/opendocument/tests/corpus/report.mjs'), runDir, '--worst', args.worst,
-  '--meta', JSON.stringify({ sha, dirty, rules: args.rules, unmaskSettings: args['unmask-settings'], label })]);
+writeFileSync(join(runDir, 'meta.json'), `${JSON.stringify({ sha, dirty, rules: args.rules, unmaskSettings: args['unmask-settings'], label }, null, 2)}\n`);
+run('node', [join(checkoutRoot, 'packages/opendocument/tests/corpus/report.mjs'), runDir, '--worst', args.worst]);

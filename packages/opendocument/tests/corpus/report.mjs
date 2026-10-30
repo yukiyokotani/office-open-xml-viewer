@@ -7,15 +7,17 @@
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { parseArgs } from 'node:util';
+import { inputsHash } from './paths.mjs';
 
 const { values: args, positionals } = parseArgs({
   allowPositionals: true,
-  options: { worst: { type: 'string', default: '40' }, meta: { type: 'string', default: '{}' } },
+  options: { worst: { type: 'string', default: '40' } },
 });
 const runDir = positionals[0];
 if (!runDir) throw new Error('usage: report.mjs <run dir>');
 const worstN = Number(args.worst);
-const meta = JSON.parse(args.meta);
+// run.mjs records the run's mode, so a standalone regeneration keeps it.
+const meta = existsSync(join(runDir, 'meta.json')) ? JSON.parse(readFileSync(join(runDir, 'meta.json'), 'utf8')) : {};
 
 const files = JSON.parse(readFileSync(join(runDir, 'files.json'), 'utf8'));
 const native = existsSync(join(runDir, 'native.json')) ? JSON.parse(readFileSync(join(runDir, 'native.json'), 'utf8')) : {};
@@ -29,6 +31,11 @@ if (existsSync(resultsDir)) {
     const result = JSON.parse(readFileSync(join(resultsDir, name), 'utf8'));
     results.set(result.id, result);
   }
+}
+// A result counts only for the bytes it was computed from.
+for (const file of files) {
+  const result = results.get(file.id);
+  if (result && (!existsSync(file.odt) || result.inputs !== inputsHash(file))) results.delete(file.id);
 }
 
 /** The reader's reason for a rejection, from the native classification. */

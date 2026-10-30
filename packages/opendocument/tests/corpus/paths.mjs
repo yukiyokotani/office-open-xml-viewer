@@ -1,6 +1,8 @@
 // The private corpora live in the main checkout, not in worktrees: resolve it
 // from git's common directory unless ODF_CORPUS_REPO overrides it.
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -16,4 +18,10 @@ export function corpusRepo() {
     cwd: checkoutRoot, encoding: 'utf8',
   }).trim();
   return dirname(common);
+}
+
+/** Hash of a corpus file's ODT and PDF bytes; cached results are bound to it. */
+export function inputsHash(file) {
+  return createHash('sha256').update(readFileSync(file.odt))
+    .update(existsSync(file.pdf) ? readFileSync(file.pdf) : '').digest('hex');
 }

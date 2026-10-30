@@ -4,12 +4,13 @@
 // LibreOffice PDF of the same file. One JSON result per file lands in
 // <run>/results/; report.mjs aggregates them. Start it with run.mjs.
 import { execFileSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { test } from '@playwright/test';
 import pixelmatch from 'pixelmatch';
 import { PNG } from 'pngjs';
+// @ts-expect-error -- untyped local helper module
+import { inputsHash } from './paths.mjs';
 
 interface CorpusFile {
   readonly id: string;
@@ -129,8 +130,7 @@ for (const file of files) {
   test(file.rel, async ({ page }) => {
     const resultPath = join(resultsDir, `${file.id}.json`);
     // Reuse a result only for byte-identical inputs (run.mjs guards the code).
-    const inputs = createHash('sha256').update(readFileSync(file.odt))
-      .update(existsSync(file.pdf) ? readFileSync(file.pdf) : '').digest('hex');
+    const inputs: string = inputsHash(file);
     if (existsSync(resultPath)) {
       if (JSON.parse(readFileSync(resultPath, 'utf8')).inputs === inputs) return;
       // Stale: remove it first so a failed retry leaves no result at all.
