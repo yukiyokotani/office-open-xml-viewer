@@ -16,7 +16,7 @@ import {
 import {
   FontSourceSession,
   type FontSessionDemand,
-  type FontResolverRunner,
+  type FontSourceSessionOptions,
   type FontSource,
   type LoadedFontSources,
 } from '@silurus/ooxml-core/internal/font-sources';
@@ -187,21 +187,12 @@ export async function loadDocxFontSources(
   doc: DocxDocumentModel,
   plan: DocxFontFamilyPlan,
   sources: readonly FontSource[],
-  options: Readonly<{
-    fontSet?: FontFaceSet | null;
-    signal?: AbortSignal;
-    runResolver?: FontResolverRunner;
-    resolverCeilingOwnedByRunner?: boolean;
-  }> = {},
+  // Worker mode passes the bridge's session options: `fontResolver`
+  // functions run on main, and main fetches their claimed URL faces (core
+  // resolver-bridge.ts).
+  options: Omit<FontSourceSessionOptions, 'sources' | 'resolverFailures'> = {},
 ): Promise<DocxLoadedFontSources> {
-  const session = new FontSourceSession({
-    sources,
-    ...(options.fontSet === undefined ? {} : { fontSet: options.fontSet }),
-    ...(options.signal ? { signal: options.signal } : {}),
-    // Worker mode: `fontResolver` functions run on main (core resolver-bridge.ts).
-    ...(options.runResolver ? { runResolver: options.runResolver } : {}),
-    ...(options.resolverCeilingOwnedByRunner ? { resolverCeilingOwnedByRunner: true } : {}),
-  });
+  const session = new FontSourceSession({ ...options, sources });
   try {
     const loaded = await session.ensure(docxFontDemand(doc, plan));
     return { session, names: Object.freeze([...plan.families, ...plan.fallbackFamilies]), loaded };

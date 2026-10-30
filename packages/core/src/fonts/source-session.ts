@@ -141,6 +141,11 @@ export interface FontSourceSessionOptions {
   /** Fetch the claimed http(s) / blob: faces of resolver sources through
    * this acquirer instead of `FontFace.load()` (see {@link ResolverFaceAcquirer}). */
   readonly acquireResolverFaces?: ResolverFaceAcquirer;
+  /** The acquirer hands over fresh buffers this session alone keeps (the
+   * worker bridge's transferred copies), so the session charges each one
+   * against the realm ceiling while it keeps it. Otherwise the realm's
+   * acquisition cache owns and charges them. */
+  readonly acquiredFacesOwnedBySession?: boolean;
 }
 
 
@@ -369,6 +374,11 @@ export class FontSourceSession {
   private runResolver: FontResolverRunner;
   private resolverFailures: FontResolverFailures | undefined;
   private acquireResolverFaces: ResolverFaceAcquirer | undefined;
+  private readonly ownsAcquiredFaces: boolean;
+  /** Resolver faces this session acquired, by `sourceIndex\0url`: a later
+   * delta claiming the same face reuses the bytes instead of asking again. */
+  private readonly acquiredFaces = new Map<string, ArrayBuffer>();
+  private acquiredFaceBytes = 0;
   private readonly runnerOwnsCeiling: boolean;
   private readonly controller = new AbortController();
   private detachSignal: () => void = () => undefined;
@@ -390,6 +400,7 @@ export class FontSourceSession {
     this.resolverFailures = options.resolverFailures;
     this.runnerOwnsCeiling = options.resolverCeilingOwnedByRunner === true;
     this.acquireResolverFaces = options.acquireResolverFaces;
+    this.ownsAcquiredFaces = options.acquiredFacesOwnedBySession === true;
     this.caches = this.sources.map(acquireSourceCache);
     const signal = options.signal;
     if (signal) {
@@ -437,6 +448,9 @@ export class FontSourceSession {
     this.points.clear();
     for (const cache of this.caches) cache.release();
     releaseAcquiredFaces(this);
+    this.acquiredFaces.clear();
+    refundRetainedBytes(this.acquiredFaceBytes);
+    this.acquiredFaceBytes = 0;
     // A released session object the application still references must not
     // keep the caches (and what they index) reachable.
     this.caches = [];
@@ -556,12 +570,30 @@ export class FontSourceSession {
     const acquire = this.acquireResolverFaces;
     for (const [sourceIndex, claimed] of bridged) {
       if (!acquire) break;
-      const request: ResolverFaceRequest = {
-        source: this.sources[sourceIndex] as FontResolverSource,
-        sourceIndex,
-        families: claimed.map(([, state]) => ({ family: state.name, urls: urlsOf(state) })),
-      };
-      batches.push(acquire(request, context).then((outcomes) => [claimed, outcomes]));
+      const kept = new Map<string, FaceAcquisition>();
+      const families = claimed.flatMap(([, state]) => {
+        const urls = urlsOf(state).filter((url) => {
+          const data = this.acquiredFaces.get(`${sourceIndex}\u0000${url}`);
+          if (data) kept.set(url, { data });
+          return !data;
+        });
+        return urls.length ? [{ family: state.name, urls }] : [];
+      });
+      if (!families.length) { batches.push(Promise.resolve([claimed, kept])); continue; }
+      const request: ResolverFaceRequest = { source: this.sources[sourceIndex] as FontResolverSource, sourceIndex, families };
+      batches.push(acquire(request, context).then((outcomes) => {
+        for (const [url, outcome] of outcomes) {
+          if (!('data' in outcome)) continue;
+          const key = `${sourceIndex}\u0000${url}`;
+          if (this.closed || this.acquiredFaces.has(key)) continue;
+          if (this.ownsAcquiredFaces) {
+            chargeRetainedBytes(outcome.data.byteLength);
+            this.acquiredFaceBytes += outcome.data.byteLength;
+          }
+          this.acquiredFaces.set(key, outcome.data);
+        }
+        return [claimed, new Map([...kept, ...outcomes])];
+      }));
     }
     const settled = await Promise.all(batches);
     if (this.closed) throw createAbortError('Font source session released');

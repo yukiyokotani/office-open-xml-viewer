@@ -40,6 +40,7 @@ interface MainRealm extends WorkerRealm {
   readonly releaseAcquiredFaces: typeof import('./face-download.js').releaseAcquiredFaces;
   readonly acquiredFaceCount: typeof import('./face-download.js').acquiredFaceCount;
   readonly inRealmResolverFaceAcquirer: typeof import('./face-download.js').inRealmResolverFaceAcquirer;
+  readonly acquireResolverFacesInRealm: typeof import('./face-download.js').acquireResolverFacesInRealm;
 }
 const worker1: WorkerRealm = {
   FontSourceSession, WorkerFontResolverClient, assertFontSourceDescriptors, retainedFontSourceBytes, liveSourceCacheCount,
@@ -72,6 +73,7 @@ async function loadRealm() {
     releaseAcquiredFaces: acquisition.releaseAcquiredFaces,
     acquiredFaceCount: acquisition.acquiredFaceCount,
     inRealmResolverFaceAcquirer: acquisition.inRealmResolverFaceAcquirer,
+    acquireResolverFacesInRealm: acquisition.acquireResolverFacesInRealm,
   };
 }
 beforeAll(async () => {
@@ -931,9 +933,10 @@ describe('fontResolver bridge: the page fetches resolver URLs', () => {
       ['https://fonts.app.example/private-400.woff2', 'same-origin', 'cors'],
       ['https://fonts.app.example/private-700.woff2', 'same-origin', 'cors'],
     ]);
-    // The worker charges what it keeps: its cached answer (the data: URL)
-    // and the registrations; main the acquired bodies it keeps for the document.
-    expect(retainedFontSourceBytes()).toBe(3 + 113);
+    // The worker charges what it keeps: its cached answer (the data: URL),
+    // the transferred bodies and the registrations; main the acquired
+    // bodies it keeps for the document.
+    expect(retainedFontSourceBytes()).toBe(3 + 110 + 113);
     expect(main.retainedFontSourceBytes()).toBe(3 + 110);
     session.release();
     link.host.dispose();
@@ -989,6 +992,79 @@ describe('fontResolver bridge: the page fetches resolver URLs', () => {
     expect(set.faces.map((face) => face.bytes)).toEqual([40]);
     session.release();
     viewer.release();
+    link.host.dispose();
+  });
+
+  it('gives overlapping requesters of one document one outcome per URL', async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const calls: string[] = [];
+    G.fetch = vi.fn(async (url: string) => {
+      calls.push(url);
+      await gate;
+      return { ok: true, status: 200, arrayBuffer: async () => new Uint8Array(16).buffer };
+    });
+    const failures = new Map<string, string>();
+    const source = fontResolver(() => URL_FACES().slice(0, 1));
+    const url = 'https://fonts.app.example/private-400.woff2';
+    const sourceId = (await import('./source-cache.js')).fontSourceId(source);
+    const viewer = { holder: {} };
+    const worker = { holder: {} };
+    // The viewer realm's request reaches its deadline first; the worker's
+    // request for the same URL is still waiting on the shared download.
+    const viewerAbort = new AbortController();
+    const viewerPending = main.acquireResolverFacesInRealm(failures, sourceId, [url],
+      { signal: viewerAbort.signal, deadline: Date.now() - 1, holder: viewer.holder });
+    const workerPending = main.acquireResolverFacesInRealm(failures, sourceId, [url],
+      { signal: new AbortController().signal, deadline: Date.now() + 60_000, holder: worker.holder });
+    viewerAbort.abort();
+    expect(await viewerPending).toEqual(new Map([[url, { reason: 'timed out' }]]));
+    release();
+    // The worker adopts the document's outcome instead of painting bytes the
+    // viewer never measured with.
+    expect(await workerPending).toEqual(new Map([[url, { reason: 'timed out' }]]));
+    const later = await main.acquireResolverFacesInRealm(failures, sourceId, [url],
+      { signal: new AbortController().signal, deadline: Date.now() + 60_000, holder: worker.holder });
+    expect(later).toEqual(new Map([[url, { reason: 'timed out' }]]));
+    expect(calls).toEqual([url]);
+    main.releaseAcquiredFaces(viewer.holder);
+    main.releaseAcquiredFaces(worker.holder);
+  });
+
+  it('adopts bytes another requester of the document received', async () => {
+    installFetch({ 'https://fonts.app.example/private-400.woff2': { bytes: 16 } });
+    const failures = new Map<string, string>();
+    const source = fontResolver(() => URL_FACES().slice(0, 1));
+    const url = 'https://fonts.app.example/private-400.woff2';
+    const sourceId = (await import('./source-cache.js')).fontSourceId(source);
+    const first = {};
+    const second = {};
+    const got = await main.acquireResolverFacesInRealm(failures, sourceId, [url],
+      { signal: new AbortController().signal, deadline: Date.now() + 60_000, holder: first });
+    // A requester whose own deadline already passed still paints the
+    // document's bytes, without another request.
+    const adopted = await main.acquireResolverFacesInRealm(failures, sourceId, [url],
+      { signal: new AbortController().signal, deadline: Date.now() - 1, holder: second });
+    expect((adopted.get(url) as { data: ArrayBuffer }).data).toBe((got.get(url) as { data: ArrayBuffer }).data);
+    main.releaseAcquiredFaces(first);
+    expect(main.acquiredFaceCount()).toBe(1);
+    main.releaseAcquiredFaces(second);
+  });
+
+  it('reuses the bytes of a face a later delta claims again, charging the copy once', async () => {
+    const calls = installFetch({ 'https://fonts.app.example/sub.woff2': { bytes: 32 } });
+    const source = fontResolver((request) => request.families.map((family) => ({ family, url: 'https://fonts.app.example/sub.woff2' })));
+    const link = bridge([source]);
+    const { session } = link.session();
+    await session.ensure(demand(['First']));
+    const afterFirst = retainedFontSourceBytes();
+    await session.ensure(demand(['Second']));
+    expect(kinds(link.toMain).filter((kind) => kind === 'ooxmlAcquireFonts')).toHaveLength(1);
+    expect(calls).toHaveLength(1);
+    // The second family registers its own face (another CSS family); the
+    // transferred body is kept and charged once.
+    expect(retainedFontSourceBytes()).toBe(afterFirst + 32);
+    session.release();
     link.host.dispose();
   });
 
@@ -1094,6 +1170,26 @@ describe('face acquisition', () => {
     expect([...outcomes.values()].every((outcome) => 'reason' in outcome && outcome.reason === 'timed out')).toBe(true);
     main.releaseAcquiredFaces(holder);
     expect(main.acquiredFaceCount()).toBe(0);
+  });
+
+  it('keeps a holder\'s bytes when one of its overlapping joins is cancelled', async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    G.fetch = vi.fn(async () => { await gate; return { ok: true, status: 200, arrayBuffer: async () => new Uint8Array(16).buffer }; });
+    const holder = {};
+    const url = 'https://fonts.app.example/twice.woff2';
+    const cancelled = new AbortController();
+    const one = main.acquireFaceUrls([url], { credentials: 'omit', signal: cancelled.signal, deadline: Date.now() + 60_000, holder });
+    const two = main.acquireFaceUrls([url], { credentials: 'omit', signal: new AbortController().signal, deadline: Date.now() + 60_000, holder });
+    cancelled.abort();
+    await one;
+    release();
+    expect('data' in ((await two).get(url) ?? {})).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(main.acquiredFaceCount()).toBe(1);
+    expect(main.retainedFontSourceBytes()).toBe(16);
+    main.releaseAcquiredFaces(holder);
+    expect(main.retainedFontSourceBytes()).toBe(0);
   });
 
   it('fails a body that completes after the deadline, whatever the timers did', async () => {

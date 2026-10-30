@@ -667,7 +667,9 @@ each format entry.
   text are loaded, and installed faces with the authored name are never
   replaced.
 - **Deployment:** cross-origin font URLs need CORS. Stylesheet origins need
-  `connect-src` and font file origins need `font-src` in your CSP. Optionally
+  `connect-src` and font file origins need `font-src` in your CSP; font files
+  the library fetches itself (`fontResolver` URLs in worker mode, sources with
+  `credentials: 'omit'`) also need `connect-src`. Optionally
   add `<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>` for
   Google Fonts. Source limits fail closed with
   `OoxmlError('font-source-limit')`.

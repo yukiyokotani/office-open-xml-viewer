@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { fontCssApi, fontFiles, OFFICE_FONT_SUBSTITUTIONS } from '@silurus/ooxml-core/internal/font-sources';
+import { fontCssApi, fontFiles, fontResolver, OFFICE_FONT_SUBSTITUTIONS } from '@silurus/ooxml-core/internal/font-sources';
 import { docxFontFamilyPlan } from './font-plan.js';
 import { formatOrdinalNumber } from '@silurus/ooxml-core';
 import { ASCII_NUMBER_FORMATS, docxFontDemandScalars, loadDocxFontSources } from './font-source-load.js';
@@ -159,6 +159,24 @@ describe('loadDocxFontSources', () => {
     const second = await loadDocxFontSources(mixed, mixedPlan, [SOURCE], { fontSet: set });
     expect(faces.filter((face) => face.family === 'Noto Sans JP').every((face) => face.status === 'loaded')).toBe(true);
     second.session.release();
+  });
+
+  it('forwards the worker bridge options: claimed resolver URL faces go through the acquirer', async () => {
+    const { faces, set, fetched } = install();
+    const url = 'https://fonts.app.example/brand.woff2';
+    const source = fontResolver((request) => request.families.map((family) => ({ family, url })));
+    const bytes = new Uint8Array(12).buffer;
+    const acquireResolverFaces = vi.fn(async (_request: { readonly sourceIndex: number }) => new Map([[url, { data: bytes }]]));
+    const doc = docWith([text('Hello', { fontFamily: 'Brand' })]);
+    const plan = { ...docxFontFamilyPlan(doc, [source], undefined, { routes: {} }), families: ['Brand'] };
+    const loaded = await loadDocxFontSources(doc, plan, [source], {
+      fontSet: set, acquireResolverFaces, acquiredFacesOwnedBySession: true,
+    });
+    expect(acquireResolverFaces).toHaveBeenCalledTimes(1);
+    expect(acquireResolverFaces.mock.calls[0][0]).toMatchObject({ sourceIndex: 0, families: [{ family: 'Brand', urls: [url] }] });
+    expect(faces.filter((face) => face.family === 'Brand').map((face) => face.source)).toEqual([bytes]);
+    expect(fetched).toEqual([]);
+    loaded.session.release();
   });
 
   it('never demands an installed authored family', async () => {

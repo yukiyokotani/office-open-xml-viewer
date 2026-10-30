@@ -205,8 +205,12 @@ export class WorkerFontResolverClient {
     readonly runResolver: WorkerFontResolverClient['run'];
     readonly resolverCeilingOwnedByRunner: true;
     readonly acquireResolverFaces: WorkerFontResolverClient['acquire'];
+    readonly acquiredFacesOwnedBySession: true;
   } {
-    return { runResolver: this.run, resolverCeilingOwnedByRunner: true, acquireResolverFaces: this.acquire };
+    return {
+      runResolver: this.run, resolverCeilingOwnedByRunner: true,
+      acquireResolverFaces: this.acquire, acquiredFacesOwnedBySession: true,
+    };
   }
 
   /**

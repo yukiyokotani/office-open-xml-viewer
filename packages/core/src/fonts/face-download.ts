@@ -128,6 +128,8 @@ async function readBoundedBytes(response: FaceResponse, charge: (bytes: number) 
 
 class Entry {
   readonly task: SharedTask<FaceAcquisition>;
+  /** Holders that keep the completed bytes (added once a join completes, so
+   * a holder's abandoned join never drops another join's hold). */
   readonly holders = new Set<object>();
   /** Retained bytes charged for this entry (while downloading and kept). */
   charged = 0;
@@ -181,10 +183,15 @@ async function download(
   } finally {
     free();
   }
-  // Failures are not kept (a later document retries); a result nobody holds
-  // any more is not kept either.
-  if ('reason' in result || entry.holders.size === 0 || entries.get(key) !== entry) dropEntry(key, entry);
-  else entry.settled = result;
+  // Failures are not kept (a later document retries).
+  if ('reason' in result || entries.get(key) !== entry) {
+    dropEntry(key, entry);
+    return result;
+  }
+  entry.settled = result;
+  // Every live join holds the bytes once it resumes; a result no join took
+  // (all left as it settled) is not kept.
+  setTimeout(() => { if (entry.holders.size === 0) dropEntry(key, entry); }, 0);
   return result;
 }
 
@@ -207,15 +214,18 @@ async function acquireOne(
     entries.set(key, entry);
   }
   if (entry.settled) { entry.holders.add(holder); return entry.settled; }
+  const result = await entry.task.join(signal);
+  if ('data' in result && entries.get(key) === entry) entry.holders.add(holder);
+  return result;
+}
+
+/** The bytes of a completed acquisition this realm keeps, held for `holder`
+ * from now on; undefined when none is kept. */
+function keptAcquisition(url: string, credentials: FontSourceCredentials, holder: object): ArrayBuffer | undefined {
+  const entry = entries.get(`${credentials}\u0000${url}`);
+  if (!entry?.settled || !('data' in entry.settled)) return undefined;
   entry.holders.add(holder);
-  try {
-    const result = await entry.task.join(signal);
-    if ('reason' in result) entry.holders.delete(holder);
-    return result;
-  } catch (error) {
-    entry.holders.delete(holder);
-    throw error;
-  }
+  return entry.settled.data;
 }
 
 /**
@@ -305,10 +315,14 @@ export type ResolverFaceAcquirer = (
   context: { readonly signal: AbortSignal; readonly deadline: number; readonly holder: object },
 ) => Promise<ReadonlyMap<string, FaceAcquisition>>;
 
-/** Document-wide record key of one acquired URL of one resolver source, in
- * the document's resolver failure record (`resolver-failures.ts`). */
+/** Document-wide record keys of one acquired URL of one resolver source, in
+ * the document's resolver failure record (`resolver-failures.ts`): its
+ * failure reason, or the marker that it succeeded. */
 export function faceAcquisitionFailureKey(sourceId: string, url: string): string {
   return `${sourceId}\u0000acquire\u0000${url}`;
+}
+function faceAcquisitionSuccessKey(sourceId: string, url: string): string {
+  return `${sourceId}\u0000acquired\u0000${url}`;
 }
 
 /** The {@link ResolverFaceAcquirer} of a page-realm session that shares a
@@ -320,11 +334,15 @@ export function inRealmResolverFaceAcquirer(failures: FontResolverFailures | und
 }
 
 /**
- * Acquire a resolver's claimed URL faces in this (the page) realm, sharing
- * the document's outcome: a URL that already failed for the document fails
- * again without a request, and a new failure is recorded for every requester
- * of the document (the worker bridge and the XLSX viewer realm), so both
- * realms paint the same faces.
+ * Acquire a resolver's claimed URL faces in this (the page) realm, with one
+ * outcome per URL for the whole document: the first terminal outcome any
+ * requester of the document reaches (the worker bridge, the XLSX viewer
+ * realm) is recorded, and every requester adopts it, including one whose own
+ * request was still in flight or ended differently (a later timeout adopts
+ * the bytes another requester already received and the cache keeps; a
+ * success after a recorded failure adopts the failure). A cancellation (the
+ * signal aborts before the deadline: the requester is gone) is no outcome
+ * and is not recorded.
  */
 export async function acquireResolverFacesInRealm(
   failures: FontResolverFailures | undefined,
@@ -332,19 +350,33 @@ export async function acquireResolverFacesInRealm(
   urls: readonly string[],
   context: { readonly signal: AbortSignal; readonly deadline: number; readonly holder: object },
 ): Promise<Map<string, FaceAcquisition>> {
+  const credentials = 'same-origin';
+  const decided = (url: string): FaceAcquisition | undefined => {
+    const reason = failures?.get(faceAcquisitionFailureKey(sourceId, url));
+    if (reason !== undefined) return { reason };
+    if (!failures?.has(faceAcquisitionSuccessKey(sourceId, url))) return undefined;
+    const data = keptAcquisition(url, credentials, context.holder);
+    return data ? { data } : undefined;
+  };
   const outcomes = new Map<string, FaceAcquisition>();
   const pending: string[] = [];
   for (const url of new Set(urls)) {
-    const reason = failures?.get(faceAcquisitionFailureKey(sourceId, url));
-    if (reason !== undefined) outcomes.set(url, { reason });
+    const outcome = decided(url);
+    if (outcome) outcomes.set(url, outcome);
     else pending.push(url);
   }
-  const acquired = await acquireFaceUrls(pending, { credentials: 'same-origin', ...context });
+  const acquired = await acquireFaceUrls(pending, { credentials, ...context });
+  const cancelled = context.signal.aborted && Date.now() < context.deadline;
   for (const [url, outcome] of acquired) {
+    const adopted = decided(url);
+    if (adopted) { outcomes.set(url, adopted); continue; }
     outcomes.set(url, outcome);
-    if ('reason' in outcome && failures) {
-      const key = faceAcquisitionFailureKey(sourceId, url);
-      if (!failures.has(key)) failures.set(key, outcome.reason);
+    if (!failures || cancelled) continue;
+    if ('data' in outcome) failures.set(faceAcquisitionSuccessKey(sourceId, url), '');
+    // A success another requester recorded stands (its bytes were released
+    // since): this requester's failure is its own, not the document's.
+    else if (!failures.has(faceAcquisitionSuccessKey(sourceId, url))) {
+      failures.set(faceAcquisitionFailureKey(sourceId, url), outcome.reason);
     }
   }
   return outcomes;
