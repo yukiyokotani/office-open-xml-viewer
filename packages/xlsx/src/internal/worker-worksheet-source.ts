@@ -6,6 +6,7 @@ import {
   requireModelSourceArchiveMethods,
   unsupportedModelSourceCapability,
   type ModelSourceModuleDescriptor,
+  type ModelSourceOpenContext,
   type OpenedModelSourceModule,
 } from '@silurus/ooxml-core/internal/model-source';
 import {
@@ -75,10 +76,11 @@ type OpenModelSource = (
   descriptor: ModelSourceModuleDescriptor,
   bytes: Uint8Array,
   transfer: readonly Transferable[],
+  context?: ModelSourceOpenContext,
 ) => Promise<OpenedModelSourceModule<XlsxModelSourceArchive>>;
 
-const openXlsxModelSource: OpenModelSource = (descriptor, bytes, transfer) =>
-  openModelSourceModule(descriptor, bytes, validateXlsxModelSourceArchive, undefined, transfer);
+const openXlsxModelSource: OpenModelSource = (descriptor, bytes, transfer, context) =>
+  openModelSourceModule(descriptor, bytes, validateXlsxModelSourceArchive, undefined, transfer, context);
 
 interface OwnedModelSource {
   readonly archive: XlsxModelSourceArchive;
@@ -128,9 +130,10 @@ export class WorkerWorksheetSourceOwner<TArchive extends OoxmlWorksheetArchive> 
     descriptor: ModelSourceModuleDescriptor,
     measure: (font: HostLayoutFont) => number | undefined | Promise<number | undefined>,
     transfer: readonly Transferable[] = [],
+    context?: ModelSourceOpenContext,
   ): Promise<void> {
     if (this.modelSource || this.ooxmlHost.archive) throw new Error('Workbook source already loaded');
-    const opened = await this.openSource(descriptor, bytes, transfer);
+    const opened = await this.openSource(descriptor, bytes, transfer, context);
     try {
       validateXlsxModelSourceViewDefaults(opened.viewDefaults);
       if (this.modelSource || this.ooxmlHost.archive) {

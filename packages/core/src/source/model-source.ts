@@ -98,7 +98,43 @@ export interface ModelSourceModule<TArchive = unknown> {
     config: ModelSourceConfig,
     signal?: AbortSignal,
     transfer?: readonly Transferable[],
+    context?: ModelSourceOpenContext,
   ): Promise<OpenedModelSource<TArchive>>;
+}
+
+/**
+ * The loader's normalized ZIP resource policy (`resourceLimits`): the same
+ * limits the OOXML path applies to its archive. `null` means the caller
+ * removed that limit; a source's own hard ceilings still apply.
+ */
+export interface ModelSourceResourcePolicy {
+  readonly maxArchiveEntryBytes: number | null;
+  readonly maxTotalInflatedBytes: number | null;
+  readonly maxArchiveEntries: number | null;
+}
+
+/** One resolved worksheet counter set of the XLSX worksheet policy. */
+export interface ModelSourceWorksheetLimits {
+  readonly maxRows: number;
+  readonly maxCells: number;
+  readonly maxOwnedUtf8Bytes: number;
+  readonly maxJsonBytes: number;
+}
+
+/**
+ * Caller policy a source module receives as `openModelSource()`'s fifth
+ * argument, so a source reading a ZIP container or worksheets applies the
+ * limits the caller configured for the ordinary OOXML path. It carries only
+ * scalar limits, never document data, and is frozen.
+ */
+export interface ModelSourceOpenContext {
+  readonly resourcePolicy: ModelSourceResourcePolicy;
+  /** XLSX loads only: the normalized worksheet policy (`worksheetLimits`). */
+  readonly worksheetPolicy?: Readonly<{
+    worksheet: ModelSourceWorksheetLimits;
+    cache: ModelSourceWorksheetLimits;
+    maxCoordinateIndexEntries: number;
+  }>;
 }
 
 const TARGETS: ReadonlySet<string> = new Set<ModelSourceTarget>(['docx', 'xlsx', 'pptx']);
@@ -148,6 +184,18 @@ export function selectModelSource<T extends ModelSourceTarget>(
     if (claimed) return candidate as ModelSource<T>;
   }
   return undefined;
+}
+
+/**
+ * The configured sources of one load, in a format's fixed claim order (its
+ * named source options, each holding at most one source). `undefined` when
+ * none is set. Each entry is validated by {@link selectModelSource}.
+ */
+export function effectiveModelSources<T extends ModelSourceTarget>(
+  ...named: readonly (ModelSource<T> | undefined)[]
+): readonly ModelSource<T>[] | undefined {
+  const sources = named.filter((source): source is ModelSource<T> => source !== undefined);
+  return sources.length === 0 ? undefined : sources;
 }
 
 /** Validated, detached result of {@link ModelSource.beginLoad}. */
@@ -379,6 +427,7 @@ export async function openModelSourceModule<TArchive>(
   validateArchive: (archive: unknown) => TArchive,
   signal?: AbortSignal,
   transfer: readonly Transferable[] = [],
+  context?: ModelSourceOpenContext,
 ): Promise<OpenedModelSourceModule<TArchive>> {
   const sourceModule = validateModelSourceModuleDescriptor(descriptor);
   throwIfAborted(signal, ABORT_MESSAGE);
@@ -390,7 +439,13 @@ export async function openModelSourceModule<TArchive>(
     throw new TypeError('model source module must export openModelSource()');
   }
   throwIfAborted(signal, ABORT_MESSAGE);
-  const opened: unknown = await open(bytes, sourceModule.config, signal, transfer);
+  const opened: unknown = await open(
+    bytes,
+    sourceModule.config,
+    signal,
+    transfer,
+    context === undefined ? undefined : freezeModelSourceOpenContext(context),
+  );
   if (typeof opened !== 'object' || opened === null) {
     throw new TypeError('openModelSource() must return an object');
   }
@@ -414,6 +469,45 @@ export async function openModelSourceModule<TArchive>(
     try { closeOnce(); } catch {}
     throw error;
   }
+}
+
+function limit(value: unknown, nullable: boolean): number | null {
+  if (nullable && value === null) return null;
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+    throw new TypeError('model source context limits must be non-negative safe integers');
+  }
+  return value;
+}
+
+function worksheetLimits(value: unknown): ModelSourceWorksheetLimits {
+  const record = (typeof value === 'object' && value !== null ? value : {}) as Record<string, unknown>;
+  return Object.freeze({
+    maxRows: limit(record.maxRows, false) as number,
+    maxCells: limit(record.maxCells, false) as number,
+    maxOwnedUtf8Bytes: limit(record.maxOwnedUtf8Bytes, false) as number,
+    maxJsonBytes: limit(record.maxJsonBytes, false) as number,
+  });
+}
+
+/** Detached, frozen copy holding only the documented scalar fields. */
+export function freezeModelSourceOpenContext(context: ModelSourceOpenContext): ModelSourceOpenContext {
+  const policy = context.resourcePolicy;
+  const resourcePolicy = Object.freeze({
+    maxArchiveEntryBytes: limit(policy?.maxArchiveEntryBytes, true),
+    maxTotalInflatedBytes: limit(policy?.maxTotalInflatedBytes, true),
+    maxArchiveEntries: limit(policy?.maxArchiveEntries, true),
+  });
+  const worksheet = context.worksheetPolicy;
+  return Object.freeze(worksheet === undefined
+    ? { resourcePolicy }
+    : {
+      resourcePolicy,
+      worksheetPolicy: Object.freeze({
+        worksheet: worksheetLimits(worksheet.worksheet),
+        cache: worksheetLimits(worksheet.cache),
+        maxCoordinateIndexEntries: limit(worksheet.maxCoordinateIndexEntries, false) as number,
+      }),
+    });
 }
 
 function validateViewDefaults(value: unknown): Readonly<Record<string, boolean>> {

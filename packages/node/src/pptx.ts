@@ -49,6 +49,15 @@ export type OpenPptxPresentationOptions = OoxmlNodeSessionOptions & {
    * in this realm; otherwise the ordinary OOXML path runs unchanged.
    */
   legacyPpt?: ModelSource<'pptx'>;
+  /**
+   * Opt-in model source for OpenDocument presentation input (a `ModelSource<'pptx'>`, such as the
+   * one an OpenDocument companion package exports). It is asked after
+   * `legacyPpt`; when its `claim()` accepts the raw bytes it opens them through its
+   * own module, otherwise the ordinary OOXML path runs unchanged. A source for
+   * another format is a `TypeError`. Omitting this option imports and runs
+   * nothing extra.
+   */
+  odp?: ModelSource<'pptx'>;
 };
 
 export interface PptxSessionRenderOptions {
@@ -97,7 +106,7 @@ async function openPptxPresentationImpl(
   buffer: ArrayBuffer | Uint8Array,
   options: OpenPptxPresentationOptions = {},
 ): Promise<PptxPresentationSessionImpl> {
-  if (__OOXML_MODEL_SOURCES__ && options.legacyPpt !== undefined) {
+  if (__OOXML_MODEL_SOURCES__ && (options.legacyPpt !== undefined || options.odp !== undefined)) {
     const { openPptxSource } = await import('./pptx-model-source.ts');
     return openPptxSource(buffer, options, getPptxWasmModule);
   }

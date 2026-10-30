@@ -159,6 +159,21 @@ test('admits only each surface\'s own opt-in source option key', () => {
   assert.deepEqual(at('packages/core/src/x.ts', 'interface O { legacyDoc?: unknown; }'), ['legacy-format-name']);
 });
 
+test('admits only each surface\'s own OpenDocument option key and no ODF vocabulary', () => {
+  const at = (path, text) => findViolations([{ path, text }]).map((v) => v.rule);
+  assert.deepEqual(at('packages/docx/src/x.ts', "interface O { odt?: ModelSource<'docx'>; }"), []);
+  assert.deepEqual(at('packages/xlsx/src/x.ts', 'if (opts.ods !== undefined) {}'), []);
+  assert.deepEqual(at('packages/pptx/src/x.ts', 'load(bytes, { odp });'), []);
+  assert.deepEqual(at('packages/node/src/x.ts', 'const { odt, ods, odp } = options;'), []);
+  assert.deepEqual(at('packages/docx/src/x.ts', 'load(bytes, { ods });'), ['odf-format-name']);
+  assert.deepEqual(at('packages/core/src/x.ts', 'interface O { odt?: unknown; }'), ['odf-format-name']);
+  // The surface's own key spelling is admitted; the companion import is not.
+  assert.deepEqual(at('packages/xlsx/src/x.ts', "import { ods } from '@silurus/ooxml-opendocument/ods';"),
+    ['odf-package']);
+  assert.deepEqual(at('packages/ooxml-common/src/x.rs', 'const NS: &str = "urn:oasis:names:tc:opendocument:xmlns:office:1.0";'),
+    ['odf-vocabulary']);
+});
+
 test('decodes escaped static, dynamic, require and re-export module specifiers', () => {
   for (const code of [
     "import x from '@silurus/ooxml-\\u006cegacy-office';",

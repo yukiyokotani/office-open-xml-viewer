@@ -70,6 +70,12 @@ export const RULES = [
     id: 'legacy-binary-structure',
     pattern: /\bsprm[A-Z]\w*|\b(?:PAPX|CHPX|SEPX|MSOTXFL|PlcfHdd)\b|\bWordDocument\b|PowerPoint Document/,
   },
+  // The OpenDocument companion (packages/opendocument) plugs in the same way:
+  // the OOXML packages carry no ODF package, reader, namespace or element
+  // vocabulary, and name only each surface's own opt-in option key.
+  { id: 'odf-package', pattern: /ooxml-opendocument|opendocument[-_]parser|packages\/opendocument/ },
+  { id: 'odf-format-name', pattern: /\bod[tsp]\b/i },
+  { id: 'odf-vocabulary', pattern: /urn:oasis:names:tc:opendocument|vnd\.oasis\.opendocument/i },
 ];
 
 /** A path matcher for exactly the listed files. */
@@ -118,6 +124,11 @@ export const ALLOWED_TOKENS = [
   { rule: 'legacy-format-name', path: /^packages\/pptx\//, token: /^legacyPpt$/ },
   // The Node facade carries all three format sessions.
   { rule: 'legacy-format-name', path: /^packages\/node\//, token: /^legacy(?:Doc|Xls|Ppt)$/ },
+  // The OpenDocument option keys follow the same per-surface rule.
+  { rule: 'odf-format-name', path: /^packages\/docx\//, token: /^odt$/ },
+  { rule: 'odf-format-name', path: /^packages\/xlsx\//, token: /^ods$/ },
+  { rule: 'odf-format-name', path: /^packages\/pptx\//, token: /^odp$/ },
+  { rule: 'odf-format-name', path: /^packages\/node\//, token: /^od[tsp]$/ },
   // XLSX may cite the Excel binary specifications as Excel-behaviour
   // evidence for SpreadsheetML semantics.
   { rule: 'legacy-binary-spec', path: /^packages\/xlsx\//, token: /^MS-XLSB?$/, commentOnly: true },

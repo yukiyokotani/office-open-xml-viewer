@@ -272,7 +272,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
         if (!req.sourceOwnerUrl) throw new TypeError('DOCX source owner URL is missing');
         const { WorkerDocumentSourceOwner } = await import(/* @vite-ignore */ req.sourceOwnerUrl) as typeof import('./internal/worker-document-source.js');
         sourceOwner = new WorkerDocumentSourceOwner(host);
-        viewDefaults = await sourceOwner.openModelSource(bytes, req.source, req.sourceTransfer);
+        viewDefaults = await sourceOwner.openModelSource(bytes, req.source, req.sourceTransfer, { resourcePolicy: req.resourcePolicy });
         if (requestedGeneration !== parseGeneration) {
           throw new Error('render-worker parse was superseded');
         }

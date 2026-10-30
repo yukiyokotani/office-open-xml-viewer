@@ -59,7 +59,7 @@ describe('WorkerWorksheetSourceOwner', () => {
     const transfer = [new ArrayBuffer(1)];
 
     await sources.openModelSource(new Uint8Array([1, 2, 3]), descriptor, measure, transfer);
-    expect(open).toHaveBeenCalledExactlyOnceWith(descriptor, new Uint8Array([1, 2, 3]), transfer);
+    expect(open).toHaveBeenCalledExactlyOnceWith(descriptor, new Uint8Array([1, 2, 3]), transfer, undefined);
     expect(measure).toHaveBeenCalledExactlyOnceWith(CALIBRI_11);
     expect(archive.configure_host_layout).toHaveBeenCalledExactlyOnceWith(7);
     expect(archive.parse).not.toHaveBeenCalled();

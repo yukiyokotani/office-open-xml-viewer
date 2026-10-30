@@ -6,6 +6,7 @@ import {
   requireModelSourceArchiveMethods,
   unsupportedModelSourceCapability,
   type ModelSourceModuleDescriptor,
+  type ModelSourceOpenContext,
   type OpenedModelSourceModule,
 } from '@silurus/ooxml-core/internal/model-source';
 import {
@@ -68,10 +69,11 @@ type OpenModelSource = (
   descriptor: ModelSourceModuleDescriptor,
   bytes: Uint8Array,
   transfer: readonly Transferable[],
+  context?: ModelSourceOpenContext,
 ) => Promise<OpenedModelSourceModule<PptxModelSourceArchive>>;
 
-const openPptxModelSource: OpenModelSource = (descriptor, bytes, transfer) =>
-  openModelSourceModule(descriptor, bytes, validatePptxModelSourceArchive, undefined, transfer);
+const openPptxModelSource: OpenModelSource = (descriptor, bytes, transfer, context) =>
+  openModelSourceModule(descriptor, bytes, validatePptxModelSourceArchive, undefined, transfer, context);
 
 interface OwnedModelSource {
   readonly archive: PptxModelSourceArchive;
@@ -104,9 +106,10 @@ export class WorkerPresentationSourceOwner<TArchive extends OoxmlWorkerArchive> 
     bytes: Uint8Array,
     descriptor: ModelSourceModuleDescriptor,
     transfer: readonly Transferable[] = [],
+    context?: ModelSourceOpenContext,
   ): Promise<PptxModelSourceArchive> {
     if (this.modelSource || this.ooxmlHost.archive) throw new Error('Presentation source already loaded');
-    const opened = await this.openSource(descriptor, bytes, transfer);
+    const opened = await this.openSource(descriptor, bytes, transfer, context);
     try {
       validatePptxModelSourceViewDefaults(opened.viewDefaults);
       if (this.modelSource || this.ooxmlHost.archive) {

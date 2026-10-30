@@ -50,7 +50,7 @@ class SourceXlsxWorkbookSession extends XlsxWorkbookSessionImpl {
 /** Selected-source XLSX acquisition and renderer-owned Normal-font layout. */
 export async function acquireXlsxInput(
   buffer: ArrayBuffer | Uint8Array,
-  options: OoxmlNodeSessionOptions & Pick<OpenXlsxWorkbookOptions, 'factory' | 'legacyXls'>,
+  options: OoxmlNodeSessionOptions & Pick<OpenXlsxWorkbookOptions, 'factory' | 'legacyXls' | 'ods'>,
   wasmModule: () => WebAssembly.Module,
 ): Promise<XlsxNodeAcquisition> {
   const worksheetPolicy = normalizeXlsxWorksheetPolicy(options);
@@ -62,7 +62,7 @@ export async function acquireXlsxInput(
     validateXlsxModelSourceViewDefaults,
   } = await import('@silurus/ooxml-xlsx/internal/model-source-session');
   const input = await resolveNodeSessionInput(
-    buffer, 'xlsx', { ...snapshot, source: snapshot.legacyXls }, validateXlsxModelSourceArchive,
+    buffer, 'xlsx', { ...snapshot, sources: [snapshot.legacyXls, snapshot.ods], worksheetPolicy }, validateXlsxModelSourceArchive,
   );
   if (input.kind === 'ooxml') {
     return acquireXlsxNodeSession(input.bytes, wasmModule(), snapshot);

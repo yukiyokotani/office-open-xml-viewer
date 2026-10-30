@@ -13,7 +13,7 @@ import {
   type NormalizedOoxmlResourcePolicy,
   type WorkerRendererDescriptors,
 } from '@silurus/ooxml-core/worker';
-import { selectModelSource, beginModelSourceLoad, modelSourceWorker } from '@silurus/ooxml-core/internal/model-source';
+import { selectModelSource, beginModelSourceLoad, effectiveModelSources, modelSourceWorker } from '@silurus/ooxml-core/internal/model-source';
 import type { FontSource } from '@silurus/ooxml-core/internal/font-sources';
 import type { PptxFontDemandFacts } from '../font-requests.js';
 import { PptxPresentation, type LoadOptions } from '../presentation.js';
@@ -74,8 +74,10 @@ export async function loadPptxModelSource(
     } else {
       buffer = input;
     }
-    const selected = selectModelSource(opts.legacyPpt === undefined ? undefined : [opts.legacyPpt], 'pptx', new Uint8Array(buffer));
-    if (!selected) return PptxPresentation.load(buffer, { ...opts, legacyPpt: undefined });
+    // Selection happens once: an unclaimed input continues on the OOXML path
+    // with every source option cleared, so it is never offered again.
+    const selected = selectModelSource(effectiveModelSources(opts.legacyPpt, opts.odp), 'pptx', new Uint8Array(buffer));
+    if (!selected) return PptxPresentation.load(buffer, { ...opts, legacyPpt: undefined, odp: undefined });
     const load = beginModelSourceLoad(selected, 'pptx');
     try {
       metrics.setSourceBytes(buffer.byteLength);
