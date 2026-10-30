@@ -78,6 +78,12 @@ pub fn read(package: &OdfPackage) -> Result<Document, String> {
         }
     }
     check_document_wide_configuration(styles_root)?;
+    if package.contains("settings.xml") {
+        check_settings(&package.read_text("settings.xml")?)?;
+    }
+    // ODF 1.3 introduced style:contextual-spacing (§20.255); a declared 1.2
+    // document does not define it.
+    let contextual_spacing_defined = version != Some("1.2");
     let page = PageStyle::read(styles_root)?;
 
     let body = content_root
@@ -94,6 +100,7 @@ pub fn read(package: &OdfPackage) -> Result<Document, String> {
         page_master: page.name.as_str(),
         paragraphs: Vec::new(),
         retained_text_bytes: 0,
+        contextual_spacing_defined,
     };
     reader.walk_blocks(body, 0)?;
     let used = used_font_table(&reader.used_faces.borrow())?;
@@ -149,6 +156,20 @@ impl FontFaces {
             if face.children().any(|n| n.is_element()) {
                 // svg:font-face-src: embedded font files.
                 return Err(unsupported("embedded-font"));
+            }
+            // Descriptors that select a face variant (§16.23: svg:font-style,
+            // font-weight, font-variant, font-stretch, adornments, …) are not
+            // mapped; only naming and font-table metadata are admitted.
+            for attribute in face.attributes() {
+                match (attribute.namespace(), attribute.name()) {
+                    (
+                        Some(NS_STYLE),
+                        "name" | "font-family-generic" | "font-pitch" | "font-charset",
+                    ) => {}
+                    (Some(NS_SVG), "font-family") => {}
+                    (Some(NS_STYLE), "font-adornments") if attribute.value().is_empty() => {}
+                    _ => return Err(unsupported("font-face-descriptor")),
+                }
             }
             let name = face
                 .attribute((NS_STYLE, "name"))
@@ -250,6 +271,78 @@ fn unquote_family(value: &str) -> Result<String, String> {
     Ok(name.to_string())
 }
 
+/// Applied styles may carry only the property groups the reader resolves;
+/// conditional styles (`style:map`, §16.3) and any other child reject.
+fn check_groups(chain: &[StyleRef<'_>], allowed: &[&str]) -> Result<(), String> {
+    for style in chain {
+        for group in style.style().groups.keys() {
+            if !allowed.contains(&group.as_str()) {
+                return Err(unsupported(if group == "map" {
+                    "conditional-style"
+                } else {
+                    "style-group"
+                }));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// LibreOffice configuration items (`settings.xml`, not standardised by ODF)
+/// that change text layout, pinned to the values LibreOffice uses for new ODF
+/// documents — the conditions under which this reader's measurements hold.
+/// A document setting any of them otherwise is rejected; items not listed are
+/// view, print or editing settings.
+const LAYOUT_SETTINGS: [(&str, &str); 26] = [
+    ("ParaSpaceMax", "false"),
+    ("ParaSpaceMaxAtPages", "false"),
+    ("AddExternalLeading", "true"),
+    ("UseFormerLineSpacing", "false"),
+    ("PropLineSpacingShrinksFirstLine", "true"),
+    ("UnxForceZeroExtLeading", "false"),
+    ("UseOldPrinterMetrics", "false"),
+    ("PrinterIndependentLayout", "high-resolution"),
+    ("TabsRelativeToIndent", "true"),
+    ("TabOverMargin", "false"),
+    ("TabOverflow", "true"),
+    ("TabOverSpacing", "false"),
+    ("AlignTabStopPosition", "true"),
+    ("IgnoreTabsAndBlanksForLineCalculation", "false"),
+    ("IgnoreHiddenCharsForLineCalculation", "true"),
+    ("MsWordCompTrailingBlanks", "false"),
+    ("MsWordCompGridMetrics", "false"),
+    ("MsWordUlTrailSpace", "false"),
+    ("BalanceSpacesAndIdeographicSpaces", "false"),
+    ("JustifyLinesWithShrinking", "false"),
+    ("UseVariableWidthNBSP", "false"),
+    ("DoNotJustifyLinesWithManualBreak", "false"),
+    (
+        "ApplyParagraphMarkFormatToEmptyLineAtEndOfParagraph",
+        "false",
+    ),
+    ("ApplyTextAttrToEmptyLineAtEndOfParagraph", "false"),
+    ("SmallCapsPercentage66", "false"),
+    ("CharacterCompressionType", "0"),
+];
+
+fn check_settings(text: &str) -> Result<(), String> {
+    let document = xml::parse(text)?;
+    for item in document
+        .descendants()
+        .filter(|n| xml::is(*n, xml::NS_CONFIG, "config-item"))
+    {
+        let Some(name) = item.attribute((xml::NS_CONFIG, "name")) else {
+            continue;
+        };
+        if let Some((_, expected)) = LAYOUT_SETTINGS.iter().find(|(key, _)| *key == name) {
+            if item.text().unwrap_or("").trim() != *expected {
+                return Err(unsupported("compatibility-setting"));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Document-wide configuration in `office:styles` that changes rendering.
 fn check_document_wide_configuration(styles_root: roxmltree::Node<'_, '_>) -> Result<(), String> {
     let Some(common) = styles_root
@@ -259,10 +352,21 @@ fn check_document_wide_configuration(styles_root: roxmltree::Node<'_, '_>) -> Re
         return Ok(());
     };
     for node in common.children().filter(|n| n.is_element()) {
+        // §19.845: text:number-lines defaults to true.
         if xml::is(node, NS_TEXT, "linenumbering-configuration")
-            && node.attribute((NS_TEXT, "number-lines")) == Some("true")
+            && node.attribute((NS_TEXT, "number-lines")) != Some("false")
         {
             return Err(unsupported("line-numbering"));
+        }
+        // §16.2 ends a text style's search at the text-family default style.
+        // LibreOffice keeps text defaults in the paragraph default style and
+        // writes no text-family default; one would change the cascade order
+        // the reader implements, so it rejects.
+        if xml::is(node, NS_STYLE, "default-style")
+            && node.attribute((NS_STYLE, "family")) == Some("text")
+            && node.children().any(|n| n.is_element())
+        {
+            return Err(unsupported("text-default-style"));
         }
         if xml::is(node, NS_TEXT, "outline-style") {
             // Headings are numbered by the outline style (§16.34); admitted
@@ -337,11 +441,32 @@ impl PageStyle {
             return Err(unsupported("page-usage"));
         }
         let mut section = SectionProps::default();
+        let mut size = (None, None);
+        // §16.8: properties a page layout leaves unspecified come from the
+        // default page layout.
+        if let Some(default) = styles_root
+            .children()
+            .find(|n| xml::is(*n, NS_OFFICE, "styles"))
+            .and_then(|s| {
+                s.children()
+                    .find(|n| xml::is(*n, NS_STYLE, "default-page-layout"))
+            })
+        {
+            for child in default.children().filter(|n| n.is_element()) {
+                match (child.tag_name().namespace(), child.tag_name().name()) {
+                    (Some(NS_STYLE), "page-layout-properties") => {
+                        read_page_properties(child, &mut section, &mut size)?
+                    }
+                    (Some(NS_STYLE), "header-style" | "footer-style") => {}
+                    _ => return Err(unsupported("page-layout-child")),
+                }
+            }
+        }
         let mut saw_properties = false;
         for child in layout.children().filter(|n| n.is_element()) {
             match (child.tag_name().namespace(), child.tag_name().name()) {
                 (Some(NS_STYLE), "page-layout-properties") => {
-                    read_page_properties(child, &mut section)?;
+                    read_page_properties(child, &mut section, &mut size)?;
                     saw_properties = true;
                 }
                 // Area styles of header/footer regions, which are not displayed.
@@ -352,6 +477,12 @@ impl PageStyle {
         if !saw_properties {
             return Err(invalid("a page layout has no properties"));
         }
+        section.page_width = size
+            .0
+            .ok_or_else(|| invalid("a page layout has no width"))?;
+        section.page_height = size
+            .1
+            .ok_or_else(|| invalid("a page layout has no height"))?;
         Ok(Self { name, section })
     }
 }
@@ -359,14 +490,14 @@ impl PageStyle {
 fn read_page_properties(
     node: roxmltree::Node<'_, '_>,
     section: &mut SectionProps,
+    size: &mut (Option<f64>, Option<f64>),
 ) -> Result<(), String> {
-    let mut width = None;
-    let mut height = None;
+    let (width, height) = size;
     for attribute in node.attributes() {
         let value = attribute.value();
         match (attribute.namespace().unwrap_or(""), attribute.name()) {
-            (NS_FO, "page-width") => width = Some(length_pt(value)?),
-            (NS_FO, "page-height") => height = Some(length_pt(value)?),
+            (NS_FO, "page-width") => *width = Some(length_pt(value)?),
+            (NS_FO, "page-height") => *height = Some(length_pt(value)?),
             (NS_FO, "margin-top") => section.margin_top = length_pt(value)?,
             (NS_FO, "margin-bottom") => section.margin_bottom = length_pt(value)?,
             (NS_FO, "margin-left") => section.margin_left = length_pt(value)?,
@@ -410,8 +541,6 @@ fn read_page_properties(
             _ => return Err(unsupported("page-layout-property")),
         }
     }
-    section.page_width = width.ok_or_else(|| invalid("a page layout has no width"))?;
-    section.page_height = height.ok_or_else(|| invalid("a page layout has no height"))?;
     Ok(())
 }
 
@@ -433,6 +562,7 @@ struct Reader<'a> {
     page_master: &'a str,
     paragraphs: Vec<Collected>,
     retained_text_bytes: usize,
+    contextual_spacing_defined: bool,
 }
 
 #[derive(Clone)]
@@ -569,7 +699,11 @@ impl<'a> Reader<'a> {
             }
         }
 
+        check_groups(&chain, &["paragraph-properties", "text-properties"])?;
         let mut collected = paragraph_properties(&properties)?;
+        if collected.contextual && !self.contextual_spacing_defined {
+            return Err(unsupported("contextual-spacing-version"));
+        }
         collected.named_style = named_style;
         collected.paragraph.page_break_before |= page_break_before;
         collected.paragraph.outline_level = outline_level.map(|level| level.saturating_sub(1));
@@ -643,6 +777,7 @@ impl<'a> Reader<'a> {
                                 .find(Scope::Content, Family::Text, name)
                                 .ok_or_else(|| invalid("a span names a missing style"))?;
                             let mut styles = self.sheet.chain(style)?;
+                            check_groups(&styles, &["text-properties"])?;
                             styles.extend(inline.contexts[context as usize].styles.iter().copied());
                             if inline.contexts.len() >= MAX_PARAGRAPH_CONTEXTS {
                                 return Err(unsupported("span-count"));
@@ -712,12 +847,7 @@ impl<'a> Reader<'a> {
         Ok(())
     }
 
-    /// Script classes (§20.358 Table 22). A character Table 22 does not map
-    /// takes the class of the preceding character — observed LibreOffice
-    /// behaviour for U+0020, U+00A0, U+2014 and U+1F600 between and after
-    /// Latin and Asian text (see the measurement notes in the design; pending
-    /// user approval as a compatibility rule). With no preceding character the
-    /// class is admitted only when every class resolves to the same face.
+    /// Script classes (§20.358 Table 22) and run emission.
     fn emit_runs(
         &mut self,
         tokens: &[Token],
@@ -727,8 +857,8 @@ impl<'a> Reader<'a> {
         // Properties are resolved once per (context, class); a run continues
         // while they are equal, so merging is linear in the text.
         let mut cache: HashMap<(u32, ScriptClass), RunProperties> = HashMap::new();
+        let mut uniform: HashMap<u32, ScriptClass> = HashMap::new();
         let mut current: Option<(u32, ScriptClass)> = None;
-        let mut previous: Option<ScriptClass> = None;
         for &token in tokens {
             let (c, context) = match token {
                 Token::LineBreak => {
@@ -741,11 +871,19 @@ impl<'a> Reader<'a> {
                 Token::Space(context) => (' ', context),
                 Token::Tab(context) => ('\t', context),
             };
+            // A character Table 22 does not map has an implementation-dependent
+            // class (§20.358). LibreOffice was observed to use the preceding
+            // character's class; until that rule is approved, such a character
+            // is admitted only where every class resolves to the same face.
             let class = match table_22(c) {
                 Some(class) => class,
-                None => match previous {
-                    Some(class) => class,
-                    None => self.uniform_class(&contexts[context as usize])?,
+                None => match uniform.get(&context) {
+                    Some(class) => *class,
+                    None => {
+                        let class = self.uniform_class(&contexts[context as usize])?;
+                        uniform.insert(context, class);
+                        class
+                    }
                 },
             };
             if class != ScriptClass::Latin {
@@ -753,7 +891,6 @@ impl<'a> Reader<'a> {
                 // and shaping rules) is not yet measured against LibreOffice.
                 return Err(unsupported("script-class"));
             }
-            previous = Some(class);
             let key = (context, class);
             if let std::collections::hash_map::Entry::Vacant(entry) = cache.entry(key) {
                 entry.insert(self.run_properties(&contexts[context as usize], class)?);
@@ -782,7 +919,7 @@ impl<'a> Reader<'a> {
         if latin == asian && latin == complex {
             Ok(ScriptClass::Latin)
         } else {
-            Err(unsupported("script-initial-weak-character"))
+            Err(unsupported("script-unmapped-character"))
         }
     }
 
@@ -1185,7 +1322,7 @@ fn check_text_keys(cascade: &Cascade<'_>) -> Result<(), String> {
                     || n.starts_with("font-family")
                     || n.starts_with("font-pitch")
                     || n.starts_with("font-charset")
-                    || n.starts_with("font-size")
+                    || (n.starts_with("font-size") && !n.starts_with("font-size-rel"))
                     || n.starts_with("font-weight")
                     || (n.starts_with("font-style") && !n.starts_with("font-style-name")) =>
             {
@@ -1765,7 +1902,7 @@ mod tests {
                 body: "<text:p>\u{2014}x</text:p>",
                 ..Fixture::default()
             }),
-            unsupported("script-initial-weak-character")
+            unsupported("script-unmapped-character")
         );
         // Two used faces of one family with different metadata.
         assert_eq!(
@@ -1815,13 +1952,56 @@ mod tests {
     }
 
     #[test]
-    fn weak_characters_follow_the_preceding_class() {
+    fn characters_outside_table_22_need_class_independent_properties() {
         let document = read_fixture(Fixture {
-            default_text: r#"style:font-name="Serif" fo:font-size="12pt" style:font-name-asian="Mincho" style:font-size-asian="30pt" style:font-name-complex="Serif" style:font-size-complex="12pt" style:letter-kerning="true""#,
             body: "<text:p>a\u{2014}b c</text:p>",
             ..Fixture::default()
         })
         .unwrap();
         assert_eq!(texts(paragraphs(&document)[0]), ["a\u{2014}b c"]);
+        let error = read_fixture(Fixture {
+            default_text: r#"style:font-name="Serif" fo:font-size="12pt" style:font-name-asian="Mincho" style:font-size-asian="30pt" style:font-name-complex="Serif" style:font-size-complex="12pt" style:letter-kerning="true""#,
+            body: "<text:p>a b</text:p>",
+            ..Fixture::default()
+        })
+        .unwrap_err();
+        assert_eq!(error, unsupported("script-unmapped-character"));
+    }
+
+    #[test]
+    fn rejects_rendering_configuration_the_reader_does_not_apply() {
+        let reject = |fixture: Fixture<'_>| read_fixture(fixture).unwrap_err();
+        assert_eq!(
+            reject(Fixture {
+                styles: "<text:linenumbering-configuration/>",
+                ..Fixture::default()
+            }),
+            unsupported("line-numbering")
+        );
+        assert_eq!(
+            reject(Fixture {
+                styles: r#"<style:default-style style:family="text"><style:text-properties fo:font-style="italic"/></style:default-style>"#,
+                ..Fixture::default()
+            }),
+            unsupported("text-default-style")
+        );
+        assert_eq!(
+            reject(Fixture {
+                styles: r#"<style:style style:name="H" style:family="paragraph"><style:map style:condition="outline-level()=1" style:apply-style-name="Standard"/></style:style>"#,
+                body: r#"<text:p text:style-name="H">x</text:p>"#,
+                ..Fixture::default()
+            }),
+            unsupported("conditional-style")
+        );
+        assert_eq!(
+            reject(Fixture {
+                styles: r#"<style:style style:name="R" style:family="paragraph"><style:text-properties style:font-size-rel="8pt"/></style:style>"#,
+                body: r#"<text:p text:style-name="R">x</text:p>"#,
+                ..Fixture::default()
+            }),
+            unsupported("text-property")
+        );
+        assert!(check_settings(r#"<office:document-settings xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:config="urn:oasis:names:tc:opendocument:xmlns:config:1.0"><config:config-item config:name="ParaSpaceMax" config:type="boolean">true</config:config-item></office:document-settings>"#).is_err());
+        assert!(check_settings(r#"<office:document-settings xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:config="urn:oasis:names:tc:opendocument:xmlns:config:1.0"><config:config-item config:name="ParaSpaceMax" config:type="boolean">false</config:config-item></office:document-settings>"#).is_ok());
     }
 }

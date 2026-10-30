@@ -25,7 +25,7 @@ export function buildOdtFixture(options: OdtFixtureOptions): Uint8Array<ArrayBuf
   const mediaType = options.mediaType ?? ODT_MEDIA_TYPE;
   const fonts = '<office:font-face-decls><style:font-face style:name="Liberation Serif" svg:font-family="&apos;Liberation Serif&apos;" style:font-family-generic="roman" style:font-pitch="variable"/></office:font-face-decls>';
   const styles = `<?xml version="1.0" encoding="UTF-8"?><office:document-styles ${NS} office:version="1.3">${fonts}`
-    + '<office:styles><style:default-style style:family="paragraph"><style:text-properties style:font-name="Liberation Serif" fo:font-size="12pt" style:letter-kerning="true"/></style:default-style>'
+    + '<office:styles><style:default-style style:family="paragraph"><style:text-properties style:font-name="Liberation Serif" fo:font-size="12pt" style:font-name-asian="Liberation Serif" style:font-size-asian="12pt" style:font-name-complex="Liberation Serif" style:font-size-complex="12pt" style:letter-kerning="true"/></style:default-style>'
     + `<style:style style:name="Standard" style:family="paragraph"/>${options.styles ?? ''}</office:styles>`
     + '<office:automatic-styles><style:page-layout style:name="pm1"><style:page-layout-properties fo:page-width="21cm" fo:page-height="29.7cm" fo:margin-top="2cm" fo:margin-bottom="2cm" fo:margin-left="2cm" fo:margin-right="2cm"/></style:page-layout></office:automatic-styles>'
     + `<office:master-styles><style:master-page style:name="Standard" style:page-layout-name="pm1">${options.masterContent ?? ''}</style:master-page></office:master-styles></office:document-styles>`;

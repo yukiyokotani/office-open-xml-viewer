@@ -348,6 +348,7 @@ jobs:
           # companion too: the browser fixture uses its emitted source modules.
           pnpm build:runtime
           pnpm build:legacy
+          pnpm build:opendocument
           pnpm check:model-source-lazy-graph
           pnpm check:model-source-lazy-runtime
           pnpm check:production-render-workers

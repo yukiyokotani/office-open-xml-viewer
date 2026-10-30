@@ -25,7 +25,7 @@ try {
     if (directory.endsWith('opendocument')) {
       // Exactly the reader assets: never the local private corpus.
       assert.deepEqual(files, [
-        'LICENSE', 'THIRD_PARTY_NOTICES.md', 'dist/odt-source-module.mjs', 'dist/odt.mjs',
+        'LICENSE', 'README.md', 'THIRD_PARTY_NOTICES.md', 'dist/odt-source-module.mjs', 'dist/odt.mjs',
         'dist/opendocument_odt_bg.wasm', 'dist/types/odt.d.ts', 'package.json',
       ]);
     } else if (directory !== root) {
