@@ -77,4 +77,15 @@ describe('DocxDocument part failures (#1974)', () => {
     try { document.destroy(); } catch { /* off-prototype teardown of unrelated resources */ }
     expect(document.partFailures).toEqual([]);
   });
+
+  it('never posts the option through collectPageRuns', async () => {
+    const { document, request } = workerDocument(meta);
+    request.mockImplementation(async () => ({ type: 'runsCollected', id: 1, runs: [] }) as never);
+    const reused = { width: 600, errorPlaceholder: () => ({ title: 'x' }) };
+    await document.collectPageRuns(0, reused as never);
+    const opts = sentOptions(request);
+    expect(opts).toEqual({ width: 600 });
+    expect(() => structuredClone(opts)).not.toThrow();
+  });
 });
+

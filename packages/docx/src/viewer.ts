@@ -275,6 +275,18 @@ export class DocxViewer implements ZoomableViewer {
    * awaitable method result, so one failure is never delivered twice.
    */
   async load(source: string | ArrayBuffer): Promise<void> {
+    // #1974: a reload stops delivering the committed engine's part failures at
+    // once; the engine committed when it settles is delivered again.
+    const failureLoad = this._partFailureDelivery.beginLoad();
+    try {
+      await this._loadSource(source);
+    } finally {
+      const committed = this._destroyed ? null : this._doc;
+      this._partFailureDelivery.endLoad(failureLoad, committed ? syncedDocxPartFailureLog(committed) : null);
+    }
+  }
+
+  private async _loadSource(source: string | ArrayBuffer): Promise<void> {
     if (this._destroyed) throw new Error('DocxViewer is destroyed');
     if (this._borrowed) {
       throw new Error(

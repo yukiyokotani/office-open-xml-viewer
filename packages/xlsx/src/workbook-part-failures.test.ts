@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { PullSessionCommand } from '@silurus/ooxml-core/worker';
 import { XlsxWorkbook } from './workbook.js';
 import { withViewerRenderContext, type RenderWorkerRequest } from './worker-protocol.js';
+import { withXlsxRenderCommitGuard } from './render-orchestrator.js';
 import type { ParsedWorkbook, Worksheet, WorkerRequest } from './types.js';
 
 /**
@@ -167,6 +168,23 @@ describe('XlsxWorkbook part failures (#1974)', () => {
       .rejects.toThrow('terminal ACK reply lost');
     expect(renders).toHaveLength(1);
     expect(workbook.partFailures).toEqual([]);
+  });
+
+  it('drops the retry of a frame superseded during admission', async () => {
+    const { workbook, renders, opts } = previewWorkbook();
+    vi.stubGlobal('OffscreenCanvas', class {
+      constructor(readonly width: number, readonly height: number) {}
+      transferToImageBitmap() { return { superseded: true } as unknown as ImageBitmap; }
+    });
+    let current = true;
+    const resolver = vi.fn(() => ({ title: 't' }));
+    const guarded = withXlsxRenderCommitGuard({ ...opts, errorPlaceholder: resolver } as never, () => current);
+    const pending = workbook.renderViewportToBitmap(0, viewport, guarded as never);
+    current = false;
+    await expect(pending).resolves.toEqual({ superseded: true });
+    expect(renders).toHaveLength(1);
+    expect(resolver).not.toHaveBeenCalled();
+    expect(workbook.partFailures).toEqual([failure]);
   });
 
   it('sends static text without a round trip', async () => {

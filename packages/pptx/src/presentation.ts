@@ -818,6 +818,8 @@ export class PptxPresentation {
       response.forId !== this._parseRequestId ||
       !this._progressive
     ) return;
+    // Part-failure observers run synchronously and may destroy or reload.
+    const progressive = this._progressive;
     try {
       this._rearmProgressiveWatchdog();
       if (response.usage) this._metrics?.observeUsage(response.usage);
@@ -834,6 +836,7 @@ export class PptxPresentation {
           throw new Error('PPTX progressive worker published a failure for another slide');
         }
         this._partFailureLog.add(failure);
+        if (this._destroyed || this._progressive !== progressive) return;
       }
       this._applyProgressivePrefix(
         normalizePresentationPreflightPrefix({
@@ -841,7 +844,7 @@ export class PptxPresentation {
           slides: [...prior, response.slide],
           fontPreloadNames: response.fontPreloadNames,
         }),
-        this._progressive,
+        progressive,
       );
       // Acknowledge only after Window crosses a task boundary. load() promise
       // continuations can enqueue the opening-slide render first; Worker message
@@ -860,7 +863,8 @@ export class PptxPresentation {
         this._bridge.terminate();
       });
     } catch (error) {
-      this._failProgressiveLayout(error, this._progressive);
+      if (this._destroyed || this._progressive !== progressive) return;
+      this._failProgressiveLayout(error, progressive);
       // The worker is blocked on this publication's acknowledgement. A
       // malformed prefix cannot be acknowledged safely, so terminate the
       // bridge to reject the pending parse request and settle `_layoutCompletion`.

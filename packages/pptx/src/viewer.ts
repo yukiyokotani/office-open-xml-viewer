@@ -333,6 +333,18 @@ export class PptxViewer implements ZoomableViewer {
    * awaitable method result, so one failure is never delivered twice.
    */
   async load(source: string | ArrayBuffer): Promise<void> {
+    // #1974: a reload stops delivering the committed engine's part failures at
+    // once; the engine committed when it settles is delivered again.
+    const failureLoad = this._partFailureDelivery.beginLoad();
+    try {
+      await this._loadSource(source);
+    } finally {
+      const committed = this.destroyed ? null : this.engine;
+      this._partFailureDelivery.endLoad(failureLoad, committed ? pptxPartFailureLog(committed) : null);
+    }
+  }
+
+  private async _loadSource(source: string | ArrayBuffer): Promise<void> {
     if (this.destroyed) throw new Error('PptxViewer is destroyed');
     if (this.borrowed) {
       throw new Error(

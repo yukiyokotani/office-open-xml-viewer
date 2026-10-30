@@ -127,6 +127,23 @@ describe('PptxPresentation part failures (#1974)', () => {
     expect(renderRequests[2]!.errorPlaceholderText).toEqual({ state: 'resolved', title: 'Static', detail: undefined });
   });
 
+  it('survives a callback that destroys the presentation during a progressive delta', async () => {
+    vi.useFakeTimers();
+    const { presentation, internals, parsing } = workerPresentation();
+    await Promise.resolve();
+    internals._onWorkerLayoutPush({
+      kind: 'presentationLayoutPartial', forId: 41, bootstrap, availableSlides: 1,
+      slide: slideFacts[0], fontPreloadNames: [],
+    });
+    await parsing;
+    pptxPartFailureLog(presentation).subscribe(() => presentation.destroy());
+    expect(() => internals._onWorkerLayoutPush({
+      kind: 'presentationLayoutPartial', forId: 41, availableSlides: 2,
+      slide: slideFacts[1], fontPreloadNames: [], partFailure: failure,
+    })).not.toThrow();
+    expect(presentation.partFailures).toEqual([]);
+  });
+
   it('rejects a delta that names another slide', async () => {
     vi.useFakeTimers();
     vi.spyOn(console, 'error').mockImplementation(() => undefined);

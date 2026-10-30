@@ -57,7 +57,7 @@ import {
 import { BoundedRawPartCache } from '@silurus/ooxml-core/internal/bounded-raw-part-cache';
 import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions, XlsxRenderViewportOptions, WorkerRequest, WorkerResponse, Cell, SheetVisibility, XlsxComment, Row, XlsxLoadedFontSources } from './types.js';
 import { selectSheetVisibility } from './sheet-visibility.js';
-import { renderWorksheetViewport } from './render-orchestrator.js';
+import { renderWorksheetViewport, xlsxRenderCommitGuardOf } from './render-orchestrator.js';
 import { xlsxOfficeFontRequests, xlsxWorksheetOfficeFontRequests } from './font-requests.js';
 import { officeRequestKey } from './shape-office-line.js';
 import { formatCellValue } from './number-format.js';
@@ -1601,6 +1601,8 @@ export class XlsxWorkbook {
     const wireOpts = { ...callerOpts, dpr: opts.dpr ?? defaultDpr() };
     if (this._mode === 'worker') {
       const preparedPlaceholder = prepareErrorPlaceholder<XlsxSheetPartFailure>(errorPlaceholder);
+      // A viewer frame's freshness latch: a superseded frame drops the retry.
+      const isCurrent = xlsxRenderCommitGuardOf(opts as RenderViewportOptions);
       if (!Number.isInteger(sheetIndex) || sheetIndex < 0 || sheetIndex >= this.sheetCount) {
         throw new Error(`Sheet index ${sheetIndex} out of range (count: ${this.sheetCount})`);
       }
@@ -1610,6 +1612,7 @@ export class XlsxWorkbook {
       // those inherited values, matching the main-mode surface below. Each
       // send constructs its own surface because transfer detaches it.
       const request = (final = false) => {
+        if (final && isCurrent?.() === false) return Promise.resolve(null);
         // Resolved at dispatch: a pull that ran just before may have admitted
         // this sheet's terminal on main.
         const errorPlaceholderText = this.workerErrorPlaceholderText(preparedPlaceholder, sheetIndex, final);
@@ -1646,7 +1649,12 @@ export class XlsxWorkbook {
         // once. Admission failure, cancellation or destroy rejects here.
         await this.getWorksheet(sheetIndex);
         this.assertResourceHealthy();
-        res = await this.withWorksheetArchiveOperation(sheetIndex, () => request(true));
+        res = isCurrent?.() === false
+          ? null
+          : await this.withWorksheetArchiveOperation(sheetIndex, () => request(true));
+        // Superseded between the reply and the retry: the frame is discarded
+        // by its owner, so hand back an empty surface without resolving text.
+        if (res === null) return new OffscreenCanvas(1, 1).transferToImageBitmap();
         if ((res as RenderWorkerResponse).type === 'errorPlaceholderRequired') {
           throw new Error('XLSX render worker requested placeholder text twice');
         }

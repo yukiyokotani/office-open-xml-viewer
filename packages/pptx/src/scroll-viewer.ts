@@ -557,7 +557,15 @@ export class PptxScrollViewer implements ZoomableViewer {
   }
 
   async load(source: string | ArrayBuffer): Promise<void> {
-    await this._loader.load(source);
+    // #1974: a reload stops delivering the committed engine's part failures at
+    // once; the engine committed when it settles is delivered again.
+    const failureLoad = this._partFailureDelivery.beginLoad();
+    try {
+      await this._loader.load(source);
+    } finally {
+      const committed = this._destroyed ? null : this._pres;
+      this._partFailureDelivery.endLoad(failureLoad, committed ? pptxPartFailureLog(committed) : null);
+    }
   }
 
   get slideCount(): number {

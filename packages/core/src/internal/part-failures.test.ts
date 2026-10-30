@@ -172,4 +172,35 @@ describe('PartFailureDelivery', () => {
     expect(error).toHaveBeenCalledTimes(2);
     error.mockRestore();
   });
+
+  it('a reload started from a callback drops the rest of the replay', () => {
+    const log = newLog();
+    log.add(failure(0));
+    log.add(failure(1));
+    const seen: number[] = [];
+    let epoch = 0;
+    const delivery: PartFailureDelivery<Failure> = new PartFailureDelivery<Failure>('Viewer', (f) => {
+      seen.push(f.slideIndex);
+      if (f.slideIndex === 0) epoch = delivery.beginLoad();
+    }, (f) => f.slideIndex);
+    delivery.attach(log);
+    expect(seen).toEqual([0]);
+    log.add(failure(2));
+    expect(seen).toEqual([0]);
+    // The reload failed before commit: the retained engine resumes, without repeats.
+    delivery.endLoad(epoch, log);
+    expect(seen).toEqual([0, 1, 2]);
+  });
+
+  it('ignores a superseded load when it settles', () => {
+    const log = newLog();
+    log.add(failure(0));
+    const seen: number[] = [];
+    const delivery = new PartFailureDelivery<Failure>('Viewer', (f) => seen.push(f.slideIndex), (f) => f.slideIndex);
+    const first = delivery.beginLoad();
+    delivery.beginLoad();
+    delivery.endLoad(first, log);
+    expect(seen).toEqual([]);
+  });
 });
+

@@ -105,6 +105,11 @@ export function withXlsxRenderCommitGuard(
   return { ...options, [XLSX_RENDER_COMMIT_GUARD]: guard } as RenderViewportOptions;
 }
 
+/** The internal lifecycle latch attached by {@link withXlsxRenderCommitGuard}. */
+export function xlsxRenderCommitGuardOf(options: RenderViewportOptions): (() => boolean) | undefined {
+  return (options as GuardedRenderViewportOptions)[XLSX_RENDER_COMMIT_GUARD];
+}
+
 /** What `prefetchImages` needs to decode one picture: the raster `imagePath`
  *  (also the cache key), its `mimeType`, the optional svgBlip vector path, and
  *  the picture's intended draw size in points (sizes a metafile raster; 0 ⇒

@@ -979,6 +979,21 @@ class XlsxViewerEngine implements ZoomableViewer {
     source: string | ArrayBuffer,
     sourceOptions: XlsxSheetLoadOptions = {},
   ): Promise<void> {
+    // #1974: a reload stops delivering the committed engine's part failures at
+    // once; the engine committed when it settles is delivered again.
+    const failureLoad = this.partFailureDelivery.beginLoad();
+    try {
+      await this.loadViewerSource(source, sourceOptions);
+    } finally {
+      const committed = this._destroyed ? null : this.wb;
+      this.partFailureDelivery.endLoad(failureLoad, committed ? xlsxPartFailureLog(committed) : null);
+    }
+  }
+
+  private async loadViewerSource(
+    source: string | ArrayBuffer,
+    sourceOptions: XlsxSheetLoadOptions,
+  ): Promise<void> {
     this.assertOpen();
     if (this._borrowed) {
       throw new Error(
@@ -2575,7 +2590,9 @@ class XlsxViewerEngine implements ZoomableViewer {
       const bmp = await this.workbook.renderViewportToBitmap(
         this.currentSheet,
         viewport,
-        viewerRenderOpts,
+        withXlsxRenderCommitGuard(viewerRenderOpts, () =>
+          !this._destroyed && this.renderDispatcher.isCurrent(seq),
+        ) as typeof viewerRenderOpts,
       );
       if (!this.renderDispatcher.commitBitmap(seq, bmp, w, h)) return;
       this.displayedViewport = { worksheet: ws, x: scrollX, y: scrollY, scale: cs, width: w, height: h };

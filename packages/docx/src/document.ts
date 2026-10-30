@@ -2081,7 +2081,13 @@ export class DocxDocument {
     pageIndex: number,
     opts: CollectPageRunsOptions = {},
   ): Promise<DocxTextRunInfo[]> {
-    const wireOpts: WireRenderPageOptions = { ...this._withActiveView(opts) };
+    // Explicit fields only: a caller may reuse render options, and a function
+    // such as `errorPlaceholder` must never reach postMessage (#1974).
+    const wireOpts: WireRenderPageOptions = this._withActiveView({
+      ...(opts.width === undefined ? {} : { width: opts.width }),
+      ...(opts.currentDate === undefined ? {} : { currentDate: opts.currentDate }),
+      ...(opts.showTrackedChanges === undefined ? {} : { showTrackedChanges: opts.showTrackedChanges }),
+    });
     if (this._mode === 'worker') {
       // Keep collection validation on the same selected worker layout as paint.
       const res = await this._bridge.request(

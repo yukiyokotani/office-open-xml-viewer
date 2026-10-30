@@ -309,6 +309,7 @@ export class PartFailureDelivery<F extends { readonly message: string }> {
   #unsubscribe: (() => void) | null = null;
   #closed = false;
   #draining = false;
+  #loadEpoch = 0;
   readonly #queue: QueuedPartFailure<F>[] = [];
   readonly #delivered = new WeakMap<object, Set<string | number>>();
 
@@ -328,6 +329,26 @@ export class PartFailureDelivery<F extends { readonly message: string }> {
       this.#enqueue(generation, log, failure);
     });
     for (const failure of log.list) this.#enqueue(generation, log, failure);
+  }
+
+  /**
+   * A viewer `load()` began: stop delivering the committed engine's failures
+   * now (also those already queued for replay), so a callback that starts a
+   * reload discards the rest. Pair with {@link endLoad}.
+   */
+  beginLoad(): number {
+    this.attach(null);
+    return ++this.#loadEpoch;
+  }
+
+  /**
+   * The load settled. If no newer load began, deliver for the engine that is
+   * committed now: the new one on success, the retained one on failure.
+   * Already-delivered failures are not repeated.
+   */
+  endLoad(epoch: number, committed: PartFailureLog<F> | null): void {
+    if (this.#closed || epoch !== this.#loadEpoch) return;
+    this.attach(committed);
   }
 
   close(): void {

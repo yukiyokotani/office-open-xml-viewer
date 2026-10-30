@@ -35,7 +35,11 @@ class CustomErrorPageSlot {
   ) {}
 
   layoutFor(placeholder: ResolvedErrorPlaceholder): DeepReadonly<DocumentLayout> {
-    const key = JSON.stringify([placeholder.title, placeholder.detail ?? 0]);
+    // Omitted (built-in) and hidden (`null`) detail are different pages.
+    const key = JSON.stringify([
+      placeholder.title,
+      placeholder.detail === undefined ? 'builtin' : placeholder.detail === null ? 'hidden' : ['text', placeholder.detail],
+    ]);
     if (this.#key !== key || this.#layout === null) {
       this.#layout = deepFreezeDocumentLayout(layoutParseErrorPage(
         this.fatalParse.message,

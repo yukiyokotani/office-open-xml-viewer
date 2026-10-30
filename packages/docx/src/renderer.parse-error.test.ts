@@ -227,4 +227,22 @@ describe('#1974 errorPlaceholder text on the DOCX error page', () => {
     }, stubCanvas(ctx), 0, { width: 816, dpr: 1, errorPlaceholderText: { state: 'resolved', title: 'X', detail: null } });
     expect(fillTexts(calls)).not.toContain('X');
   });
+
+  it('keeps omitted and hidden detail as different pages in both orders', async () => {
+    const source = layoutSourceStore(degradedDoc(MESSAGE));
+    const services = createLayoutServices(source);
+    ensureDocumentLayoutVariants(services, 0, () => source);
+    const texts = async (detail: string | null | undefined) => {
+      const { ctx, calls } = recordingCtx(true);
+      await renderLayoutSourceToCanvas(source, stubCanvas(ctx), 0, {
+        width: 816, dpr: 1, layoutServices: services, defaultCurrentDateMs: 0,
+        errorPlaceholderText: { state: 'resolved', title: 'A', detail },
+      });
+      return fillTexts(calls).join(' ');
+    };
+    expect(await texts(undefined)).toContain('document.xml');
+    expect(await texts(null)).not.toContain('document.xml');
+    expect(await texts(undefined)).toContain('document.xml');
+  });
 });
+
