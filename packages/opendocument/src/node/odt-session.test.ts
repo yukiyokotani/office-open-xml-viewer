@@ -27,7 +27,7 @@ describe('ODT through the DOCX Node session', () => {
     const [first, second] = model.body;
     expect(first?.runs.map(r => r.text)).toEqual(['Hello ', 'bold', '  end']);
     expect(first?.runs[1]).toMatchObject({ bold: true, fontSize: 14, fontFamily: 'Liberation Serif' });
-    expect(first?.lineSpacing).toMatchObject({ value: 360, rule: 'auto' });
+    expect(first?.lineSpacing).toMatchObject({ value: 1.5, rule: 'auto' });
     // Adjacent margins add (10 + 6) and are carried by the next paragraph.
     expect(first).toMatchObject({ spaceBefore: 6, spaceAfter: 0 });
     expect(second).toMatchObject({ spaceBefore: 16, spaceAfter: 0 });

@@ -757,8 +757,16 @@ impl<'a> Reader<'a> {
         let mut break_pending = false;
         for collected in &self.paragraphs {
             let mut paragraph = collected.paragraph.clone();
+            paragraph.page_break_before |= break_pending;
             paragraph.space_before = match previous {
+                // Measured: after a hard page break (break-before, break-after
+                // or a page style named on the paragraph) LibreOffice applies
+                // the new paragraph's top margin alone; the previous bottom
+                // margin is not carried. At an automatic page break both
+                // vanish, as the DOCX layout drops space before at the top of
+                // a page it reached by pagination.
                 None => collected.top,
+                Some(_) if paragraph.page_break_before => collected.top,
                 Some(prev) => {
                     let same =
                         prev.named_style.is_some() && prev.named_style == collected.named_style;
@@ -774,7 +782,6 @@ impl<'a> Reader<'a> {
             };
             paragraph.space_after = 0.0;
             paragraph.contextual_spacing = false;
-            paragraph.page_break_before |= break_pending;
             break_pending = collected.page_break_after;
             out.push(BodyElement::Paragraph(Box::new(paragraph)));
             previous = Some(collected);
@@ -1277,21 +1284,19 @@ fn paragraph_properties(cascade: &Cascade<'_>) -> Result<Collected, String> {
         cascade.get(NS_STYLE, "line-height-at-least"),
     ) {
         (Some("normal"), _) | (None, None) => None,
+        // DOCX "auto" spacing carries the multiple of the single line height.
         (Some(value), None) if value.ends_with('%') => Some(LineSpacing {
-            value: percent(value)? * 240.0,
+            value: percent(value)?,
             rule: "auto".into(),
             explicit: true,
         }),
-        (Some(value), None) => Some(LineSpacing {
-            value: length_pt(value)?,
-            rule: "exact".into(),
-            explicit: true,
-        }),
-        (None, Some(value)) => Some(LineSpacing {
-            value: length_pt(value)?,
-            rule: "atLeast".into(),
-            explicit: true,
-        }),
+        // Fixed and minimum line heights: LibreOffice places the text at the
+        // bottom of a taller line box (all extra space above), measured 7.5pt
+        // lower than the DOCX layout for a 30pt minimum on 12pt text and
+        // 1.5pt lower for a fixed 20pt line. DOCX has no control for that
+        // placement, so both are rejected until a model capability exists.
+        (Some(_), None) => return Err(unsupported("line-height-fixed")),
+        (None, Some(_)) => return Err(unsupported("line-height-at-least")),
         (Some(_), Some(_)) => return Err(unsupported("line-height-combination")),
     };
     let count = |name: &str| -> Result<u32, String> {
@@ -1488,15 +1493,28 @@ mod tests {
     }
 
     #[test]
+    fn a_hard_page_break_carries_only_the_new_top_margin() {
+        let document = read_fixture(Fixture {
+            styles: r#"<style:style style:name="A" style:family="paragraph"><style:paragraph-properties fo:margin-top="6pt" fo:margin-bottom="10pt"/></style:style>"#,
+            automatic: r#"<style:style style:name="Before" style:family="paragraph" style:parent-style-name="A"><style:paragraph-properties fo:break-before="page"/></style:style><style:style style:name="After" style:family="paragraph" style:parent-style-name="A"><style:paragraph-properties fo:break-after="page"/></style:style>"#,
+            body: r#"<text:p text:style-name="A">1</text:p><text:p text:style-name="Before">2</text:p><text:p text:style-name="After">3</text:p><text:p text:style-name="A">4</text:p><text:p text:style-name="A">5</text:p>"#,
+            ..Fixture::default()
+        })
+        .unwrap();
+        let spacing: Vec<(f64, bool)> = paragraphs(&document).iter().map(|p| (p.space_before, p.page_break_before)).collect();
+        assert_eq!(spacing, [(6.0, false), (6.0, true), (16.0, false), (6.0, true), (16.0, false)]);
+    }
+
+    #[test]
     fn maps_line_height_controls_and_rejects_their_combination() {
         let style = |props: &str| format!(r#"<style:style style:name="L" style:family="paragraph"><style:paragraph-properties {props}/></style:style>"#);
         let spacing = |props: &str| {
             read_fixture(Fixture { styles: &style(props), body: r#"<text:p text:style-name="L">x</text:p>"#, ..Fixture::default() })
                 .map(|d| paragraphs(&d)[0].line_spacing.as_ref().map(|s| (s.value, s.rule.clone())))
         };
-        assert_eq!(spacing(r#"fo:line-height="115%""#).unwrap(), Some((276.0, "auto".into())));
-        assert_eq!(spacing(r#"fo:line-height="20pt""#).unwrap(), Some((20.0, "exact".into())));
-        assert_eq!(spacing(r#"style:line-height-at-least="30pt""#).unwrap(), Some((30.0, "atLeast".into())));
+        assert_eq!(spacing(r#"fo:line-height="115%""#).unwrap(), Some((1.15, "auto".into())));
+        assert_eq!(spacing(r#"fo:line-height="20pt""#).unwrap_err(), unsupported("line-height-fixed"));
+        assert_eq!(spacing(r#"style:line-height-at-least="30pt""#).unwrap_err(), unsupported("line-height-at-least"));
         assert_eq!(spacing(r#"fo:line-height="normal" style:line-height-at-least="30pt""#).unwrap(), None);
         assert_eq!(
             spacing(r#"fo:line-height="20pt" style:line-height-at-least="30pt""#).unwrap_err(),
