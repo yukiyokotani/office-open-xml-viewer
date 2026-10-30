@@ -2554,6 +2554,7 @@ pub(super) fn parse_classic_impl(
                 .and_then(|node| node.attribute("val"))
                 .and_then(|value| value.parse::<u32>().ok())
                 .filter(|value| *value > 0),
+            date_axis: (ax.tag_name().name() == "dateAx").then_some(true),
             crosses,
             crosses_at,
             title_font_size_hpt: title_size,

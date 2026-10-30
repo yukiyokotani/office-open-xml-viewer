@@ -2062,6 +2062,9 @@ export interface SecondaryValueAxis {
   tickLabelSkip?: number | null;
   /** `<c:catAx><c:tickMarkSkip>` when used as `secondaryCatAxis`. */
   tickMarkSkip?: number | null;
+  /** The axis is a `<c:dateAx>` (only when used as `secondaryCatAxis`): its
+   *  categories follow its own date scale. */
+  dateAxis?: boolean | null;
   /** `<c:crosses>` / `<c:crossesAt>` retained for axis placement. */
   crosses?: string | null;
   crossesAt?: number | null;

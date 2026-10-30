@@ -69,7 +69,9 @@ export function seriesPaintsSmoothedLine(
  * placed in pixel space, which is linear in the value for a linear axis and in
  * log(value) for a logarithmic one (`logBase`): the curve is evaluated in that
  * space. A log-axis run holding a non-positive value has no finite pixel
- * position and contributes no curve. Runs of fewer than three points are
+ * position and contributes no curve (the painter clamps such a point to the
+ * smallest positive number, whose control points are not a meaningful axis
+ * extent). Runs of fewer than three points are
  * drawn straight and add nothing beyond their points, which the caller's
  * point extent already covers. Exact cubic extrema are used. */
 export function smoothCurveExtent(

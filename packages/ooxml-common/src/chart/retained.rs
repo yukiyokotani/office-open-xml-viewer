@@ -1297,6 +1297,7 @@ impl_retained_struct!(SecondaryValueAxis {
     label_offset_percent,
     tick_label_skip,
     tick_mark_skip,
+    date_axis,
     crosses,
     crosses_at,
     title_font_size_hpt,

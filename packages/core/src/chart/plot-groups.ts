@@ -91,9 +91,18 @@ export function classicPlotDispatch(chart: ChartModel): ClassicPlotDispatch {
   if (!sharedCategoryOrientation && chart.secondaryCatAxis?.hidden === true
     && groups.some(group => group.categoryAxis === 'secondary'
       && group.kind !== 'scatter' && group.kind !== 'bubble')) return 'unsupported';
+  // Sharing also needs one category mapping and a painter with a secondary
+  // value scale: date axes keep their own date scales, and the horizontal bar
+  // painter has no secondary value axis.
+  const horizontalBars = groups.some(group => group.kind === 'bar'
+    && (group.barDirection ?? (chart.chartType.endsWith('H') ? 'bar' : 'col')) === 'bar');
+  const sharesCategories = chart.secondaryCatAxis?.hidden === true
+    && chart.secondaryCatAxis.dateAxis !== true
+    && chart.catAxisIsDate !== true
+    && !horizontalBars;
   const onPrimaryCategories = (group: ChartPlotGroup): boolean =>
     group.categoryAxis === 'primary'
-    || (group.categoryAxis === 'secondary' && chart.secondaryCatAxis?.hidden === true);
+    || (group.categoryAxis === 'secondary' && sharesCategories);
   const kinds = new Set(groups.map(group => group.kind));
   if (groups.some(group => THREE_D_GROUPS.has(group.kind))) return 'unsupported';
   if (groups.length === 2 && groups[0].kind === 'bar' && groups[1].kind === 'scatter') {
