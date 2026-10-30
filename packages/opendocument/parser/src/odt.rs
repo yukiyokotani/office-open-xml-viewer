@@ -76,12 +76,20 @@ pub struct CompatRules {
     /// private use, emoji and zero-width marks) take the preceding
     /// character's script class, or the following one's at paragraph start.
     pub weak_script_class: bool,
+    /// The nearest style that sets `fo:color` or
+    /// `style:use-window-font-color="true"` decides the font colour
+    /// (LibreOffice keeps one colour property). ODF inherits the two
+    /// attributes separately (§16.2), and §20.395 makes an inherited
+    /// automatic flag apply, so cascades where the two readings differ
+    /// reject while this is off.
+    pub nearest_font_color: bool,
 }
 
 /// The rules in force: both pending user approval (requested 2026-10-31).
 pub const LIBREOFFICE_RULES: CompatRules = CompatRules {
     proportional_line_height: false,
     weak_script_class: false,
+    nearest_font_color: false,
 };
 
 pub fn read(package: &OdfPackage) -> Result<Document, String> {
@@ -1157,6 +1165,9 @@ impl<'a> Reader<'a> {
         } else {
             Vec::new()
         };
+        // The last text run, independent of run merging (`current`, which a
+        // soft hyphen's own run interrupts).
+        let mut last_text: Option<(u32, ScriptClass)> = None;
         // Soft hyphens before any text, checked against the first text run.
         let mut pending_hyphens: Vec<(u32, ScriptClass)> = Vec::new();
         for (index, &token) in tokens.iter().enumerate() {
@@ -1180,7 +1191,7 @@ impl<'a> Reader<'a> {
                     }
                     line_has_glyph = false;
                     any_break = true;
-                    match current {
+                    match last_text {
                         Some(text) => {
                             same_line_metrics(&cache[&key], &cache[&text], "line-break-formatting")?
                         }
@@ -1233,7 +1244,7 @@ impl<'a> Reader<'a> {
                 // (measured), as the DOCX optional hyphen run does. Its
                 // formatting does not size LibreOffice's line but does size
                 // the DOCX one, so it must share the adjacent text's metrics.
-                match current {
+                match last_text {
                     Some(text) => {
                         same_line_metrics(&cache[&key], &cache[&text], "soft-hyphen-formatting")?
                     }
@@ -1264,6 +1275,7 @@ impl<'a> Reader<'a> {
                 paragraph.runs.push(DocRun::Text(Box::new(run)));
             }
             current = Some(key);
+            last_text = Some(key);
         }
         if any_break && !line_has_glyph {
             return Err(unsupported("line-break-empty-line"));
@@ -1298,7 +1310,7 @@ impl<'a> Reader<'a> {
         let styles = self.search_order(contexts, context)?;
         self.charge_cascade(&styles, TEXT)?;
         let cascade = Cascade::new(styles, TEXT);
-        let (properties, face) = RunProperties::resolve(&cascade, class, self.fonts)?;
+        let (properties, face) = RunProperties::resolve(&cascade, class, self.fonts, self.rules)?;
         self.used_faces.borrow_mut().insert(face);
         Ok(properties)
     }
@@ -1443,11 +1455,19 @@ fn weak_classes(tokens: &[Token]) -> Vec<Option<ScriptClass>> {
     classes
 }
 
-/// The effective font colour: `(automatic, explicit colour)`, decided by the
-/// nearest style that sets one (see `RunProperties::resolve`).
-fn font_color(cascade: &Cascade<'_>) -> Result<(bool, Option<String>), String> {
+/// The effective font colour: `(automatic, explicit colour)`.
+///
+/// ODF inherits `fo:color` and `style:use-window-font-color` separately
+/// (§16.2) and an applying automatic flag wins (§20.395). LibreOffice instead
+/// lets the nearest style that sets either decide (measured: an explicit span
+/// colour over the automatic default paints; an automatic span over a
+/// coloured parent is automatic). That reading is
+/// `CompatRules::nearest_font_color`; without it, cascades where the two
+/// readings differ reject.
+fn font_color(cascade: &Cascade<'_>, rules: CompatRules) -> Result<(bool, Option<String>), String> {
     let key = |ns: &str, name: &str| (ns.to_string(), name.to_string());
     let (window, explicit) = (key(NS_STYLE, "use-window-font-color"), key(NS_FO, "color"));
+    let mut nearest: Option<(bool, Option<String>)> = None;
     for style in &cascade.styles {
         let Some(properties) = style.group(cascade.group) else {
             continue;
@@ -1455,12 +1475,32 @@ fn font_color(cascade: &Cascade<'_>) -> Result<(bool, Option<String>), String> {
         let automatic = properties.attributes.get(&window).map(String::as_str) == Some("true");
         match (automatic, properties.attributes.get(&explicit)) {
             (true, Some(_)) => return Err(unsupported("font-color-ambiguous")),
-            (true, None) => return Ok((true, None)),
-            (false, Some(color)) => return Ok((false, Some(hex_color(color)?))),
+            (true, None) => {
+                nearest = Some((true, None));
+                break;
+            }
+            (false, Some(color)) => {
+                nearest = Some((false, Some(hex_color(color)?)));
+                break;
+            }
             (false, None) => {}
         }
     }
-    Ok((false, None))
+    let nearest = nearest.unwrap_or((false, None));
+    // Per-property inheritance: an automatic flag set anywhere applies.
+    let per_property = if cascade.get(NS_STYLE, "use-window-font-color") == Some("true") {
+        (true, None)
+    } else {
+        (
+            false,
+            cascade.get(NS_FO, "color").map(hex_color).transpose()?,
+        )
+    };
+    if nearest == per_property || rules.nearest_font_color {
+        Ok(nearest)
+    } else {
+        Err(unsupported("font-color-cascade"))
+    }
 }
 
 /// The properties that set a line's height: face, size and raise/lower.
@@ -1539,6 +1579,7 @@ impl RunProperties {
         cascade: &Cascade<'_>,
         class: ScriptClass,
         fonts: &FontFaces,
+        rules: CompatRules,
     ) -> Result<(Self, Face), String> {
         check_text_keys(cascade)?;
         let suffix = match class {
@@ -1628,11 +1669,16 @@ impl RunProperties {
         // §20.395 automatic colour is chosen against the background. With no
         // background it is the dark default on a white page, as is DOCX
         // automatic colour; other backgrounds are not yet measured.
-        // LibreOffice keeps one font colour per style: the nearest style that
-        // sets `fo:color` or `style:use-window-font-color="true"` decides
-        // (measured: an explicit span colour over the automatic default
-        // paints, and an automatic span over a coloured parent is automatic).
-        let (color_auto, color) = font_color(cascade)?;
+        let (color_auto, color) = font_color(cascade, rules)?;
+        // Character opacity of the font colour (LibreOffice extension):
+        // LibreOffice writes 100% with an explicit colour and 0% with the
+        // automatic colour, where it has no effect (measured); only those
+        // pairs are inert.
+        match cascade.get(NS_LOEXT, "opacity") {
+            None | Some("100%") => {}
+            Some("0%") if color_auto => {}
+            Some(_) => return Err(unsupported("text-opacity")),
+        }
         if color_auto && background.is_some() {
             return Err(unsupported("automatic-font-color"));
         }
@@ -1866,15 +1912,8 @@ fn check_text_keys(cascade: &Cascade<'_>) -> Result<(), String> {
             (NS_STYLE, "text-combine") => value == "none",
             (NS_STYLE, "text-rotation-angle") => value == "0" || value == "0deg",
             (NS_STYLE, "text-blinking") => value == "false",
-            // Character opacity of the font colour (LibreOffice extension):
-            // opaque is inert. LibreOffice writes 0% with the automatic
-            // window colour, where it has no effect (measured: such text
-            // paints normally); with an explicit colour only 100% is inert.
-            (NS_LOEXT, "opacity") => {
-                value == "100%"
-                    || (value == "0%"
-                        && cascade.get(NS_STYLE, "use-window-font-color") == Some("true"))
-            }
+            // Validated against the resolved colour in `RunProperties::resolve`.
+            (NS_LOEXT, "opacity") => true,
             (NS_LOEXT, "font-optical-sizing") => value == "auto",
             (NS_OFFICEOOO, "rsid" | "paragraph-rsid") => true,
             _ => false,
@@ -3006,6 +3045,7 @@ mod tests {
         let on = CompatRules {
             proportional_line_height: true,
             weak_script_class: true,
+            nearest_font_color: false,
         };
         // Asian and complex defaults differ from the Latin face, so a weak
         // character's class matters.
@@ -3104,21 +3144,48 @@ mod tests {
                 ("gh".into(), false, 12.0),
             ]
         );
+        for body in [
+            "<text:p>abc\u{ad}<text:line-break/>def</text:p>",
+            "<text:p>abc\u{ad}\u{ad}</text:p>",
+        ] {
+            assert!(
+                read_fixture(Fixture {
+                    body,
+                    ..Fixture::default()
+                })
+                .is_ok(),
+                "{body}"
+            );
+        }
     }
 
     #[test]
-    fn the_nearest_style_decides_the_font_color() {
+    fn font_color_cascade_follows_the_spec_until_the_rule_is_approved() {
         let auto = r#"style:font-name="Serif" fo:font-size="12pt" style:font-name-asian="Serif" style:font-size-asian="12pt" style:font-name-complex="Serif" style:font-size-complex="12pt" style:letter-kerning="true" style:use-window-font-color="true" loext:opacity="0%""#;
-        let styles = r##"<style:style style:name="R" style:family="text"><style:text-properties fo:color="#ff0000" loext:opacity="100%"/></style:style><style:style style:name="A" style:family="text" style:parent-style-name="R"><style:text-properties style:use-window-font-color="true"/></style:style><style:style style:name="T" style:family="text"><style:text-properties fo:color="#ff0000" loext:opacity="50%"/></style:style>"##;
-        let read = |body: &str| {
-            read_fixture(Fixture {
-                default_text: auto,
-                styles,
-                body,
-                ..Fixture::default()
-            })
+        let styles = r##"<style:style style:name="R" style:family="text"><style:text-properties fo:color="#ff0000" loext:opacity="100%"/></style:style><style:style style:name="A" style:family="text" style:parent-style-name="R"><style:text-properties style:use-window-font-color="true"/></style:style><style:style style:name="Z" style:family="text"><style:text-properties fo:color="#ff0000" loext:opacity="0%"/></style:style><style:style style:name="H" style:family="text"><style:text-properties fo:color="#ff0000" loext:opacity="50%"/></style:style>"##;
+        let read = |body: &str, rules: CompatRules| {
+            read_fixture_with(
+                Fixture {
+                    default_text: auto,
+                    styles,
+                    body,
+                    ..Fixture::default()
+                },
+                rules,
+            )
         };
-        let document = read(r#"<text:p>a<text:span text:style-name="R">b</text:span><text:span text:style-name="A">c</text:span></text:p>"#).unwrap();
+        let nearest = CompatRules {
+            nearest_font_color: true,
+            ..LIBREOFFICE_RULES
+        };
+        let body = r#"<text:p>a<text:span text:style-name="R">b</text:span><text:span text:style-name="A">c</text:span></text:p>"#;
+        // An explicit span colour under an inherited automatic flag: the
+        // readings differ, so it rejects until the rule is enabled.
+        assert_eq!(
+            read(body, LIBREOFFICE_RULES).unwrap_err(),
+            unsupported("font-color-cascade")
+        );
+        let document = read(body, nearest).unwrap();
         let colors: Vec<(Option<String>, bool)> = paragraphs(&document)[0]
             .runs
             .iter()
@@ -3131,11 +3198,22 @@ mod tests {
             colors,
             [(None, true), (Some("ff0000".into()), false), (None, true)]
         );
-        // Partial opacity is not inert.
-        assert_eq!(
-            read(r#"<text:p><text:span text:style-name="T">b</text:span></text:p>"#).unwrap_err(),
-            unsupported("text-property")
-        );
+        // Automatic text alone agrees in both readings.
+        assert!(read("<text:p>plain</text:p>", LIBREOFFICE_RULES).is_ok());
+        // Opacity follows the resolved colour: 0% only with automatic colour.
+        for style in ["Z", "H"] {
+            assert_eq!(
+                read(
+                    &format!(
+                        r#"<text:p><text:span text:style-name="{style}">b</text:span></text:p>"#
+                    ),
+                    nearest
+                )
+                .unwrap_err(),
+                unsupported("text-opacity"),
+                "{style}"
+            );
+        }
     }
 
     #[test]
