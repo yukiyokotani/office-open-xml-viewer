@@ -42,6 +42,10 @@ is removed in 0.91.0. See the [0.89 to 0.90 migration guide](docs/migration-0.90
   line) or a function of the failure. The function runs on the main thread,
   including in worker mode. Without the option the placeholder is unchanged.
   This is additive, so no migration is needed (#1974).
+- **Fixed:** a DOCX whose `word/document.xml` cannot be parsed now opens with
+  the "This document could not be displayed" page. Before, `load()` rejected
+  with a `RangeError` because the placeholder page had a 0×0 size. The page
+  now uses the ECMA-376 default page size, US Letter (#1974).
 - **Deprecated:** `useGoogleFonts` is an alias of `fonts: [googleFonts()]` and
   warns once per JavaScript realm. Combining `useGoogleFonts: true` with
   `fonts` throws a `TypeError`. The VS Code extension keeps its
