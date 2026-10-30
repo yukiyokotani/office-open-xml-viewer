@@ -156,6 +156,26 @@ describe('openModelSourceModule', () => {
     expect(opened.viewDefaults).toEqual({ showTrackedChanges: true });
   });
 
+  it('hands the module a detached, frozen copy of the caller policy context', async () => {
+    const url = moduleUrl('context', `
+      export async function openModelSource(_bytes, _config, _signal, _transfer, context) {
+        return { archive: { kind: 'x', context, frozen: Object.isFrozen(context) && Object.isFrozen(context.resourcePolicy) }, close() {} };
+      }`);
+    const resourcePolicy = { maxArchiveEntryBytes: 10, maxTotalInflatedBytes: null, maxArchiveEntries: 3, extra: 'dropped' };
+    const opened = await openModelSourceModule(
+      descriptor(url, {}), new Uint8Array(), (value) => value as { context: unknown; frozen: boolean },
+      undefined, [], { resourcePolicy },
+    );
+    expect(opened.archive.frozen).toBe(true);
+    expect(opened.archive.context).toEqual({
+      resourcePolicy: { maxArchiveEntryBytes: 10, maxTotalInflatedBytes: null, maxArchiveEntries: 3 },
+    });
+    await expect(openModelSourceModule(
+      descriptor(url, {}), new Uint8Array(), (value) => value,
+      undefined, [], { resourcePolicy: { ...resourcePolicy, maxArchiveEntries: -1 } },
+    )).rejects.toThrow(TypeError);
+  });
+
   it('closes what the module opened when the archive or view defaults are invalid', async () => {
     const url = moduleUrl('invalid', `
       export let closed = 0;

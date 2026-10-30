@@ -4417,17 +4417,20 @@ mod tests {
 
     #[test]
     fn run_attributes_flow_through_master_layout_placeholder_shape_paragraph_and_run() {
-        let master = r#"<p:txStyles><p:bodyStyle><a:defPPr><a:defRPr
+        // Every tier uses lvl1pPr: PowerPoint ignores defPPr (#1992 controls),
+        // so the slide's defPPr underline reaches neither run.
+        let master = r#"<p:txStyles><p:bodyStyle><a:lvl1pPr><a:defRPr
           lang="en-US" altLang="ja-JP" kern="1200" spc="80" cap="all">
-          <a:cs typeface="Amiri"/></a:defRPr></a:defPPr></p:bodyStyle></p:txStyles>"#;
+          <a:cs typeface="Amiri"/></a:defRPr></a:lvl1pPr></p:bodyStyle></p:txStyles>"#;
         let layout = r#"<p:sp><p:nvSpPr><p:cNvPr id="7" name="Body 2"/>
           <p:cNvSpPr/><p:nvPr><p:ph type="body" idx="2"/></p:nvPr></p:nvSpPr>
-          <p:spPr/><p:txBody><a:bodyPr/><a:lstStyle><a:defPPr>
-          <a:defRPr lang="fr-FR" i="1"/></a:defPPr></a:lstStyle><a:p/></p:txBody></p:sp>"#;
+          <p:spPr/><p:txBody><a:bodyPr/><a:lstStyle><a:lvl1pPr>
+          <a:defRPr lang="fr-FR" i="1"/></a:lvl1pPr></a:lstStyle><a:p/></p:txBody></p:sp>"#;
         let slide = r#"<p:sp><p:nvSpPr><p:cNvPr id="8" name="Body 2"/>
           <p:cNvSpPr/><p:nvPr><p:ph type="body" idx="2"/></p:nvPr></p:nvSpPr>
           <p:spPr/><p:txBody><a:bodyPr/><a:lstStyle><a:defPPr>
-          <a:defRPr kern="1800"/></a:defPPr></a:lstStyle>
+          <a:defRPr u="sng"/></a:defPPr><a:lvl1pPr>
+          <a:defRPr kern="1800"/></a:lvl1pPr></a:lstStyle>
           <a:p><a:pPr><a:defRPr b="1"/></a:pPr>
             <a:r><a:rPr cap="none"/><a:t>Run</a:t></a:r>
             <a:fld id="{0FBB9679-570D-4509-9600-E07789CF24BB}" type="datetime">
@@ -4445,6 +4448,8 @@ mod tests {
             assert_eq!(attrs["i"], "1");
             assert_eq!(attrs["b"], "1");
             assert_eq!(run["fontFamilyCs"], "Amiri");
+            assert!(attrs.get("u").is_none());
+            assert_eq!(run["underline"], false);
         }
         assert_eq!(runs[0]["caps"], "none");
         assert_eq!(runs[1]["caps"], "all");
@@ -5496,30 +5501,77 @@ mod tests {
     }
 
     #[test]
+    fn def_ppr_contributes_no_run_property_at_any_level() {
+        // [MS-OE376] 2.1.1304(a): PowerPoint ignores defPPr. #1992 controls
+        // put this whole set on defPPr in every text context and PowerPoint
+        // applied none of it; on lvl1pPr it applied all of it.
+        let xml = r#"<lstStyle xmlns="http://schemas.openxmlformats.org/drawingml/2006/main"
+          xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+          <defPPr><defRPr sz="2400" b="1" i="1" u="dbl" strike="sngStrike" kern="100"
+            cap="small" spc="500" baseline="25000" lang="ja-JP" altLang="en-US" kumimoji="1">
+            <ln w="12700"><solidFill><srgbClr val="0070C0"/></solidFill></ln>
+            <solidFill><srgbClr val="FF00FF"/></solidFill>
+            <effectLst><outerShdw dist="38100"><srgbClr val="FF0000"/></outerShdw></effectLst>
+            <highlight><srgbClr val="FFFF00"/></highlight>
+            <uLn w="19050"><solidFill><srgbClr val="00B050"/></solidFill></uLn>
+            <uFill><solidFill><srgbClr val="7030A0"/></solidFill></uFill>
+            <latin typeface="Courier New"/><ea typeface="MS Mincho"/>
+            <cs typeface="Courier New"/><sym typeface="Wingdings"/>
+            <hlinkClick r:id="rId9"/><hlinkMouseOver r:id="rId9"/>
+          </defRPr></defPPr>
+          <lvl2pPr><defRPr i="1"/></lvl2pPr>
+        </lstStyle>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let rels = HashMap::from([("rId9".to_owned(), "https://example.test/".to_owned())]);
+        let levels = crate::text::read_level_run_properties_with_rels(
+            doc.root_element(),
+            &HashMap::new(),
+            &rels,
+        );
+        let own_level2 = roxmltree::Document::parse(
+            r#"<defRPr xmlns="http://schemas.openxmlformats.org/drawingml/2006/main" i="1"/>"#,
+        )
+        .unwrap();
+        let own_level2 =
+            crate::text::RunProperties::from_xml(own_level2.root_element(), &HashMap::new());
+        for (i, level) in levels.iter().enumerate() {
+            if i == 1 {
+                assert_eq!(
+                    serde_json::to_value(level).unwrap(),
+                    serde_json::to_value(&own_level2).unwrap()
+                );
+            } else {
+                assert!(level.is_empty(), "level {} inherited defPPr", i + 1);
+            }
+        }
+    }
+
+    #[test]
     fn character_property_cascade_covers_attributes_children_break_and_insertion_state() {
         // ECMA-376 §21.1.2.3.9, §21.1.2.2.2, §21.1.2.4: each authored
-        // attribute overrides only itself.  CT_TextListStyle.defPPr is the
-        // common base of all levels; a:br has its own rPr; endParaRPr is an
-        // insertion state and cannot recolour either existing run.
+        // attribute overrides only itself.  a:br has its own rPr; endParaRPr
+        // is an insertion state and cannot recolour either existing run.
+        // CT_TextListStyle.defPPr is inert in PowerPoint (#1992 controls):
+        // its shadow and symbol face reach neither run.
         let xml = r#"<txBody xmlns="http://schemas.openxmlformats.org/drawingml/2006/main"
           xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-          <lstStyle><defPPr><defRPr kumimoji="1" lang="ja-JP" kern="1200"
-            normalizeH="1" noProof="1" smtClean="0" smtId="17" bmk="mark"
-            dirty="1" err="1" spc="80" baseline="12000" u="sng" strike="sngStrike">
-            <ln w="12700"><solidFill><srgbClr val="00AA00"/></solidFill></ln>
-            <uLn w="6350"><solidFill><srgbClr val="112233"/></solidFill></uLn>
-            <latin typeface="Arial" panose="020B0604020202020204" pitchFamily="34" charset="1"/>
-            <ea typeface="Yu Gothic"/><cs typeface="Noto Naskh Arabic"/>
-            <sym typeface="Symbol"/>
-            <hlinkClick r:id="rId9" tooltip="default" history="0"/>
-            <hlinkMouseOver r:id="rId10" tooltip="hover"/>
+          <lstStyle><defPPr><defRPr lang="de-DE">
+            <effectLst><outerShdw dist="38100"><srgbClr val="FF0000"/></outerShdw></effectLst>
+            <sym typeface="Wingdings"/>
           </defRPr></defPPr>
-          <lvl1pPr><defRPr altLang="en-US" sz="3200" i="1" cap="all">
+          <lvl1pPr><defRPr kumimoji="1" lang="ja-JP" altLang="en-US" sz="3200" i="1"
+            kern="1200" cap="all" normalizeH="1" noProof="1" smtClean="0" smtId="17"
+            bmk="mark" dirty="1" err="1" spc="80" baseline="12000" u="sng" strike="sngStrike">
+            <ln w="12700"><solidFill><srgbClr val="00AA00"/></solidFill></ln>
             <solidFill><srgbClr val="D21D54"/></solidFill>
             <highlight><srgbClr val="FFE800"/></highlight>
+            <uLn w="6350"><solidFill><srgbClr val="112233"/></solidFill></uLn>
             <uFill><pattFill prst="pct50"><fgClr><srgbClr val="0022EE"/></fgClr>
               <bgClr><srgbClr val="FFDD00"/></bgClr></pattFill></uFill>
-            <latin typeface="Aptos"/>
+            <latin typeface="Aptos" panose="020B0604020202020204" pitchFamily="34" charset="1"/>
+            <ea typeface="Yu Gothic"/><cs typeface="Noto Naskh Arabic"/>
+            <hlinkClick r:id="rId9" tooltip="default" history="0"/>
+            <hlinkMouseOver r:id="rId10" tooltip="hover"/>
           </defRPr></lvl1pPr></lstStyle>
           <p><pPr><defRPr b="1" cap="small">
             <ln w="25400"/><uLn w="12700"/>
@@ -5621,6 +5673,8 @@ mod tests {
             assert!(matches!(item.underline_fill, Some(Fill::Pattern { .. })));
             assert_eq!(item.highlight.as_deref(), Some("FFE800"));
             assert!(item.strikethrough);
+            assert_eq!(item.font_family_sym, None);
+            assert!(item.shadow.is_none());
         }
         assert_eq!(run.character_attributes["lang"], "fr-FR");
         assert_eq!(run.caps.as_deref(), Some("none"));
@@ -5639,7 +5693,7 @@ mod tests {
     }
 
     #[test]
-    fn table_cell_text_uses_the_same_defppr_and_paragraph_character_cascade() {
+    fn table_cell_text_ignores_defppr_and_keeps_the_level_and_paragraph_cascade() {
         let xml = r#"<a:tc xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
           <a:txBody><a:bodyPr/><a:lstStyle>
             <a:defPPr><a:defRPr lang="ja-JP" sz="2200"><a:solidFill>
@@ -5668,12 +5722,12 @@ mod tests {
             };
             assert_eq!(run.bold, Some(true));
             assert_eq!(run.italic, Some(true));
-            // A defPPr size has no effect in PowerPoint (#1620 controls).
+            // PowerPoint ignores every defPPr character property
+            // (#1620, #1989 and #1992 controls).
             assert_eq!(run.font_size, None);
-            // Nor does a defPPr fill (#1989 controls).
             assert_eq!(run.color, None);
-            assert_eq!(run.font_family_cs.as_deref(), Some("Amiri"));
-            assert_eq!(run.character_attributes["lang"], "ja-JP");
+            assert_eq!(run.font_family_cs, None);
+            assert!(!run.character_attributes.contains_key("lang"));
         }
     }
 

@@ -1,7 +1,7 @@
 // XLS wiring of the shared direct-source runtime: the generated glue's
 // LegacyXlsWorkbook, its native close, and
 // initialization/abort ownership rules. URL validation and trap containment
-// are tested once in direct-source-runtime.test.ts; the Normal-font host
+// are tested once in core model-source-runtime.test.ts; the Normal-font host
 // layout is the XLSX host's (packages/xlsx host-layout.ts), not the engine's.
 import { describe, expect, it, vi } from 'vitest';
 import {

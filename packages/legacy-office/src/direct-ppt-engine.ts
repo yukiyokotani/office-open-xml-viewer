@@ -2,7 +2,8 @@ import {
   createDirectSourceRuntime,
   resolveDirectWasmInput,
   type OwnedDirectSource,
-} from './direct-source-runtime.js';
+} from '@silurus/ooxml-core/internal/model-source-runtime';
+import { nativeRejection } from './native-rejection.js';
 
 export interface LegacyPptNativeArchive {
   free(): void;
@@ -32,7 +33,7 @@ export function createLegacyPptSourceEngine(
 }> {
   return createDirectSourceRuntime({
     label: 'legacy PPT',
-    format: 'ppt',
+    mapNativeError: (error) => nativeRejection(error, 'ppt'),
     loadGlue,
     resolveWasm,
     construct: (glue, bytes) => new glue.LegacyPptPresentation(bytes),

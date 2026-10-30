@@ -11,6 +11,8 @@ use ooxml_common::fill::{FillRect, TileInfo};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
+#[cfg(feature = "owned-source-cursor")]
+pub mod owned_cursor;
 pub mod paragraph_breaks;
 
 pub const PARSE_DIAGNOSTIC_CODE_UNSUPPORTED_TEXT_EFFECT: &str = "UNSUPPORTED_TEXT_EFFECT";

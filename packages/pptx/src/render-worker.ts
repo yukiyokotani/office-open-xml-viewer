@@ -330,7 +330,9 @@ function executeArchiveFromNew(
       if (!request.sourceOwnerUrl) throw new TypeError('PPTX source owner URL is missing');
       const { WorkerPresentationSourceOwner } = await import(/* @vite-ignore */ request.sourceOwnerUrl) as typeof import('./internal/worker-presentation-source.js');
       source = new WorkerPresentationSourceOwner(host);
-      await source.openModelSource(new Uint8Array(request.buffer), descriptor, request.sourceTransfer);
+      await source.openModelSource(new Uint8Array(request.buffer), descriptor, request.sourceTransfer, {
+        resourcePolicy: request.resourcePolicy,
+      });
       return JSON.parse(new TextDecoder().decode(
         source.execute((archive) => archive.presentation_bootstrap()),
       )) as PresentationBootstrap;

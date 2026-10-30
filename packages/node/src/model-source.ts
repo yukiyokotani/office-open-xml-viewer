@@ -1,13 +1,15 @@
-import { parseTypedParserError } from '@silurus/ooxml-core/worker';
+import { normalizeLoadResourceOptions, parseTypedParserError } from '@silurus/ooxml-core/worker';
 import {
   beginModelSourceLoad,
+  effectiveModelSources,
   openModelSourceModule,
   selectModelSource,
   type ModelSource,
+  type ModelSourceOpenContext,
   type ModelSourceTarget,
   type OpenedModelSourceModule,
 } from '@silurus/ooxml-core/internal/model-source';
-import { resolveOoxmlContainer } from '@silurus/ooxml-core';
+import { resolveOoxmlContainer, type OoxmlResourceLimits } from '@silurus/ooxml-core';
 
 /** One Node input: an opened model-source archive, or resolved OOXML bytes. */
 export type NodeSessionInput<TArchive> =
@@ -15,26 +17,28 @@ export type NodeSessionInput<TArchive> =
   | Readonly<{ kind: 'ooxml'; bytes: Uint8Array }>;
 
 /**
- * Resolve a Node session input. The configured model source, when it claims
- * the raw bytes, opens them in this realm; otherwise the bytes are resolved as
- * an OOXML container (decrypting an Agile-encrypted package with `password`).
- * Without `source` nothing is imported and the OOXML path is unchanged.
+ * Resolve a Node session input. The first configured model source (the
+ * format's named source options, in its fixed order) that claims the raw bytes opens
+ * them in this realm, receiving the session's normalized resource policy;
+ * otherwise the bytes are resolved as an OOXML container (decrypting an
+ * Agile-encrypted package with `password`). Selection happens once.
  */
 export async function resolveNodeSessionInput<TArchive>(
   buffer: ArrayBuffer | Uint8Array,
   target: ModelSourceTarget,
   options: Readonly<{
-    source?: ModelSource;
+    sources?: readonly (ModelSource | undefined)[];
     password?: string;
     signal?: AbortSignal;
+    resourceLimits?: OoxmlResourceLimits;
+    maxZipEntryBytes?: number;
+    worksheetPolicy?: ModelSourceOpenContext['worksheetPolicy'];
   }>,
   validateArchive: (archive: unknown) => TArchive,
   normalizeError: (error: unknown) => unknown = error => parseTypedParserError(error) ?? error,
 ): Promise<NodeSessionInput<TArchive>> {
   const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
-  const selected = options.source === undefined
-    ? undefined
-    : selectModelSource([options.source], target, bytes);
+  const selected = selectModelSource(effectiveModelSources(...(options.sources ?? [])), target, bytes);
   if (!selected) {
     return { kind: 'ooxml', bytes: await resolveOoxmlContainer(bytes, options.password) };
   }
@@ -46,6 +50,10 @@ export async function resolveNodeSessionInput<TArchive>(
       validateArchive,
       options.signal,
       load.transfer,
+      {
+        resourcePolicy: normalizeLoadResourceOptions(options).policy,
+        ...(options.worksheetPolicy === undefined ? {} : { worksheetPolicy: options.worksheetPolicy }),
+      },
     );
     try {
       load.release();

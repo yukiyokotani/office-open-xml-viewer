@@ -108,7 +108,7 @@ self.onmessage = async (e: MessageEvent<WorkerRequest | PullSessionCommand<numbe
         if (!req.sourceOwnerUrl) throw new TypeError('DOCX source owner URL is missing');
         const { WorkerDocumentSourceOwner } = await import(/* @vite-ignore */ req.sourceOwnerUrl) as typeof import('./internal/worker-document-source.js');
         source ??= new WorkerDocumentSourceOwner(host);
-        viewDefaults = await source.openModelSource(bytes, req.source, req.sourceTransfer);
+        viewDefaults = await source.openModelSource(bytes, req.source, req.sourceTransfer, { resourcePolicy: req.resourcePolicy });
         if (requestedGeneration !== parseGeneration) {
           throw supersededParseError();
         }

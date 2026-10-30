@@ -111,7 +111,9 @@ for (const name of sharedOoxmlTypes) {
 }
 
 const nodeExports = moduleExports(path.join(typesDir, 'node.d.ts'));
-for (const name of ['OoxmlError', 'OoxmlErrorCode', 'OoxmlUnsupportedContentDetails']) {
+for (const name of ['OoxmlError', 'OoxmlErrorCode', 'OoxmlUnsupportedContentDetails',
+  // The open context a model source module receives.
+  'ModelSourceOpenContext', 'ModelSourceResourcePolicy', 'ModelSourceWorksheetLimits']) {
   const nodeType = declaredType(nodeExports, name, 'Node');
   const formatType = declaredType(formatExports[0], name, 'DOCX');
   assert.ok(checker.isTypeAssignableTo(nodeType, formatType) && checker.isTypeAssignableTo(formatType, nodeType),

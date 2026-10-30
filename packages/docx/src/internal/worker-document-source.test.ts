@@ -28,9 +28,10 @@ describe('WorkerDocumentSourceOwner', () => {
     const host = hostFor(null);
     const owner = new WorkerDocumentSourceOwner(host.value, open);
 
-    await expect(owner.openModelSource(new Uint8Array([1, 2, 3]), descriptor, transfer))
+    const context = { resourcePolicy: { maxArchiveEntryBytes: 1, maxTotalInflatedBytes: 2, maxArchiveEntries: 3 } };
+    await expect(owner.openModelSource(new Uint8Array([1, 2, 3]), descriptor, transfer, context))
       .resolves.toEqual({});
-    expect(open).toHaveBeenCalledExactlyOnceWith(descriptor, new Uint8Array([1, 2, 3]), transfer);
+    expect(open).toHaveBeenCalledExactlyOnceWith(descriptor, new Uint8Array([1, 2, 3]), transfer, context);
     expect(owner.kind).toBe('model-source');
     owner.execute((current) => current.close_document_session());
     expect(owner.execute((current) => current.extract_image('media/1'))).toEqual(new Uint8Array([9]));

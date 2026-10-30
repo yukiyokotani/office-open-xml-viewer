@@ -1340,6 +1340,7 @@ export interface LineBreak {
 }
 export type LoadOptions = LoadOptions__emitterCollision1 & {
     legacyPpt?: ModelSource<'pptx'>;
+    odp?: ModelSource<'pptx'>;
     mode?: 'main' | 'worker';
     progressiveLayout?: boolean;
     onLayoutProgress?: (progress: Readonly<ProgressiveLayoutProgress>) => void;
@@ -1513,7 +1514,7 @@ export interface ModelSourceLoad {
     release(): void;
 }
 export interface ModelSourceModule<TArchive = unknown> {
-    openModelSource(bytes: Uint8Array, config: ModelSourceConfig, signal?: AbortSignal, transfer?: readonly Transferable[]): Promise<OpenedModelSource<TArchive>>;
+    openModelSource(bytes: Uint8Array, config: ModelSourceConfig, signal?: AbortSignal, transfer?: readonly Transferable[], context?: ModelSourceOpenContext): Promise<OpenedModelSource<TArchive>>;
 }
 export interface ModelSourceModuleDescriptor {
     readonly protocol: typeof MODEL_SOURCE_MODULE_PROTOCOL;
@@ -1521,7 +1522,26 @@ export interface ModelSourceModuleDescriptor {
     readonly moduleUrl: string;
     readonly config: ModelSourceConfig;
 }
+export interface ModelSourceOpenContext {
+    readonly resourcePolicy: ModelSourceResourcePolicy;
+    readonly worksheetPolicy?: Readonly<{
+        worksheet: ModelSourceWorksheetLimits;
+        cache: ModelSourceWorksheetLimits;
+        maxCoordinateIndexEntries: number;
+    }>;
+}
+export interface ModelSourceResourcePolicy {
+    readonly maxArchiveEntryBytes: number | null;
+    readonly maxTotalInflatedBytes: number | null;
+    readonly maxArchiveEntries: number | null;
+}
 export type ModelSourceTarget = 'docx' | 'xlsx' | 'pptx';
+export interface ModelSourceWorksheetLimits {
+    readonly maxRows: number;
+    readonly maxCells: number;
+    readonly maxOwnedUtf8Bytes: number;
+    readonly maxJsonBytes: number;
+}
 export interface NoFill {
     fillType: 'none';
 }

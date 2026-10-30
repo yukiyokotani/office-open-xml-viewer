@@ -2,7 +2,8 @@ import {
   createDirectSourceRuntime,
   resolveDirectWasmInput,
   type OwnedDirectSource,
-} from './direct-source-runtime.js';
+} from '@silurus/ooxml-core/internal/model-source-runtime';
+import { nativeRejection } from './native-rejection.js';
 
 /**
  * The direct XLS workbook archive. `host_layout_request` / `configure_host_layout`
@@ -40,7 +41,7 @@ export function createLegacyXlsSourceEngine(
 }> {
   return createDirectSourceRuntime({
     label: 'legacy XLS',
-    format: 'xls',
+    mapNativeError: (error) => nativeRejection(error, 'xls'),
     loadGlue,
     resolveWasm,
     construct: (glue, bytes) => new glue.LegacyXlsWorkbook(bytes),

@@ -1,10 +1,11 @@
-import { nativeRejection } from './native-rejection.js';
-import type { LegacyFamily } from './legacy-source.js';
-import {
-  detachWasmBindgenResource,
-  isWasmTrap,
-  WasmTrapError,
-} from '@silurus/ooxml-core/worker';
+/**
+ * Owning-realm runtime for model sources backed by a wasm-bindgen reader:
+ * pins one realm-global glue generation to one WASM URL, wraps every native
+ * archive in a guarded proxy, and poisons the whole trap domain after a WASM
+ * trap so no later call re-enters a broken instance. Companion source modules
+ * bundle it; nothing in the ordinary OOXML entries imports it.
+ */
+import { detachWasmBindgenResource, isWasmTrap, WasmTrapError } from '../worker/wasm-guard.js';
 
 interface RuntimeHandle { invalidate(): void }
 interface TrapDomain { failure?: WasmTrapError; live: Set<RuntimeHandle> }
@@ -46,7 +47,13 @@ export interface DirectSourceGlue {
 export function createDirectSourceRuntime<G extends DirectSourceGlue, A extends DirectSourceArchive>(
   config: Readonly<{
     label: string;
-    format?: LegacyFamily;
+    /**
+     * Decode a native (Rust `Result`) failure into the model-source error
+     * vocabulary, for example the v2 `MODEL_SOURCE_UNSUPPORTED` signal. Only
+     * native construction and archive-method failures pass through it, never
+     * initialization or network errors. Omitted: failures pass unchanged.
+     */
+    mapNativeError?(error: unknown): unknown;
     loadGlue(): Promise<G>;
     resolveWasm(wasmUrl: string): Promise<unknown>;
     construct(glue: G, bytes: Uint8Array): A;
@@ -71,7 +78,7 @@ export function createDirectSourceRuntime<G extends DirectSourceGlue, A extends 
   const runNative = <T>(operation: () => T): T => {
     const poisoned = failure();
     if (poisoned) throw poisoned;
-    try { return operation(); } catch (error) { return failTrap(config.format ? nativeRejection(error, config.format) : error); }
+    try { return operation(); } catch (error) { return failTrap(config.mapNativeError ? config.mapNativeError(error) : error); }
   };
   const initialize = (wasmUrl: string): Promise<G> => {
     if (initialized) {

@@ -143,7 +143,7 @@ export { autoResize, type AutoResizeOptions } from '@silurus/ooxml-core';
 // onHyperlinkClick`, `PptxTextRunInfo.hyperlink`, and the 5th arg of
 // `buildPptxTextLayer`, plus the default "open in a new tab, sanitised" helper.
 export { type HyperlinkTarget, openExternalHyperlink } from '@silurus/ooxml-core';
-// Application-supplied model sources (LoadOptions.legacyPpt): the
+// Application-supplied model sources (LoadOptions.legacyPpt or odp): the
 // format-generic contract for opening input that is not an OOXML package.
 export type {
   ModelSource,
@@ -152,7 +152,10 @@ export type {
   ModelSourceLoad,
   ModelSourceModule,
   ModelSourceModuleDescriptor,
+  ModelSourceOpenContext,
+  ModelSourceResourcePolicy,
   ModelSourceTarget,
+  ModelSourceWorksheetLimits,
   OpenedModelSource,
 } from '@silurus/ooxml-core';
 // #1974 — failed package parts and the placeholder text option.

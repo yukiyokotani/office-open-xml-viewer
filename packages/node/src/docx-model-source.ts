@@ -88,7 +88,7 @@ export async function openDocxSource(
 
 export async function materializeDocxSource(
   buffer: ArrayBuffer | Uint8Array,
-  options: OoxmlNodeSessionOptions & Pick<OpenDocxDocumentOptions, 'legacyDoc'>,
+  options: OoxmlNodeSessionOptions & Pick<OpenDocxDocumentOptions, 'legacyDoc' | 'odt'>,
   wasmModule: () => WebAssembly.Module,
 ): Promise<DocxDocumentModel> {
   return usingOwnedSession(
@@ -131,10 +131,10 @@ function normalizeCurrentDate(value: Date | number | undefined): number {
   return current;
 }
 
-/** Selected-source DOCX acquisition, loaded only after legacyDoc dispatch. */
+/** Selected-source DOCX acquisition, loaded only after source-option dispatch. */
 export async function acquireDocxInput<TResult>(
   buffer: ArrayBuffer | Uint8Array,
-  options: OoxmlNodeSessionOptions & DocxNodeAcquisitionOptions & Pick<OpenDocxDocumentOptions, 'legacyDoc'>,
+  options: OoxmlNodeSessionOptions & DocxNodeAcquisitionOptions & Pick<OpenDocxDocumentOptions, 'legacyDoc' | 'odt'>,
   wasmModule: () => WebAssembly.Module,
   consume: (
     transport: DocxNodePullTransport,
@@ -151,7 +151,7 @@ export async function acquireDocxInput<TResult>(
     validateDocxModelSourceViewDefaults,
   } = await import('@silurus/ooxml-docx/internal/model-source-session');
   const input = await resolveNodeSessionInput(
-    buffer, 'docx', { ...options, source: options.legacyDoc }, validateDocxModelSourceArchive,
+    buffer, 'docx', { ...options, sources: [options.legacyDoc, options.odt] }, validateDocxModelSourceArchive,
     error => parseTypedParserError(error) ?? normalizeDocxParserError(error),
   );
   if (input.kind === 'ooxml') {

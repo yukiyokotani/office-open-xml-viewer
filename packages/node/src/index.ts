@@ -47,7 +47,10 @@ export type {
   ModelSourceLoad,
   ModelSourceModule,
   ModelSourceModuleDescriptor,
+  ModelSourceOpenContext,
+  ModelSourceResourcePolicy,
   ModelSourceTarget,
+  ModelSourceWorksheetLimits,
   OpenedModelSource,
 } from '@silurus/ooxml-core';
 export {

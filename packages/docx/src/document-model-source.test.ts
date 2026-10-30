@@ -376,6 +376,25 @@ describe('DocxDocument.load with model sources', () => {
     document.destroy();
   });
 
+  it('asks legacyDoc before odt, selects once and clears both on fallback', async () => {
+    install(renderWorkerScript(true));
+    const order: string[] = [];
+    const first = fakeSource({ claim: () => { order.push('legacyDoc'); return false; } });
+    const second = fakeSource({ claim: () => { order.push('odt'); return false; } });
+    const load = vi.spyOn(DocxDocument, 'load');
+    const document = await DocxDocument.load(new ArrayBuffer(4), { mode: 'worker', legacyDoc: first.source, odt: second.source });
+    expect(order).toEqual(['legacyDoc', 'odt']);
+    // The OOXML continuation carries neither option, so it is not re-offered.
+    expect(load.mock.calls[1]?.[1]).toMatchObject({ legacyDoc: undefined, odt: undefined });
+    expect(load).toHaveBeenCalledTimes(2);
+    document.destroy();
+    load.mockRestore();
+
+    const claimed = fakeSource({ claim: () => true });
+    await DocxDocument.load(new ArrayBuffer(4), { mode: 'worker', odt: claimed.source }).then((doc) => doc.destroy());
+    expect(claimed.beginLoad).toHaveBeenCalledOnce();
+  });
+
   it('fails closed on a throwing claim and on a source for another target', async () => {
     install(renderWorkerScript(undefined));
     const failure = new Error('claim failed');

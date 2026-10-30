@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+[features]
+# Owned document cursor for model sources that build a complete Document up
+# front (companion packages). The OOXML parser does not enable it.
+owned-source-cursor = []
+
 [dependencies]
 serde = { workspace = true }
 ooxml-common = { workspace = true }

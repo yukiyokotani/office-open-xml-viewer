@@ -158,6 +158,11 @@ describe('XLSX workers with a model source', () => {
     await dispatch({ data: { type: 'parse', id: 30, data: new ArrayBuffer(3), resourcePolicy, source: descriptor, sourceOwnerUrl: './internal/worker-worksheet-source.js' } } as MessageEvent);
     const parsed = ofType(posted, 'parsed')[0]!;
     expect(new TextDecoder().decode(parsed.workbookJson as ArrayBuffer)).toBe(JSON.stringify(bootstrap));
+    // The module receives the parse request's ZIP policy and the worksheet policy.
+    expect(state.openSource.mock.lastCall?.[5]).toEqual({
+      resourcePolicy,
+      worksheetPolicy: expect.objectContaining({ worksheet: expect.any(Object), cache: expect.any(Object) }),
+    });
     await dispatch({ data: { type: 'extractImage', id: 31, path: 'image' } } as MessageEvent);
     const image = ofType(posted, 'imageExtracted')[0]!;
     expect(Array.from(new Uint8Array(image.bytes as ArrayBuffer))).toEqual([5]);

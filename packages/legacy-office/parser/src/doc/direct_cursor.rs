@@ -1,76 +1,41 @@
-//! Owning pull/acknowledge boundary for a direct legacy Word document.
+//! Owning pull/acknowledge boundary for a direct legacy Word document: the
+//! shared DOCX owned cursor plus the DOC's own revision-markup settings.
 
-use super::{direct_model::DirectDocResult, pictures::DirectPictureResource};
-use docx_model::{BodyElement, Document, StreamedDocumentUnit};
-use ooxml_common::{
-    json_measurement::serialize_json_with_limit,
-    pull::insufficient_credit_error,
-    resource::{
-        HardResourceLimitKind, HARD_MAX_DOCX_BODY_CHUNK_JSON_BYTES,
-        HARD_MAX_DOCX_BOOTSTRAP_JSON_BYTES, HARD_MAX_DOCX_RETAINED_MODEL_JSON_BYTES,
-    },
-};
+use super::direct_model::DirectDocResult;
+use docx_model::owned_cursor::{OwnedDocumentCursor, OwnedDocumentResource};
 
-struct Active {
-    operation_id: u32,
-    generation: u32,
-    next_sequence: u32,
-    accepted_json_bytes: u64,
-    body: std::vec::IntoIter<BodyElement>,
-    metadata: Option<Document>,
-}
-
-struct Prepared {
-    operation_id: u32,
-    generation: u32,
-    sequence: u32,
-    bytes: Option<Vec<u8>>,
-    byte_length: usize,
-    done: bool,
-    accepted_json_bytes_after: u64,
+/// The shared cursor's resource errors in this reader's established wording.
+fn legacy_message(error: String) -> String {
+    match error.as_str() {
+        "duplicate document source resource key" => "duplicate DOC direct resource key".into(),
+        "document source resource allocation failed" => {
+            "DOC direct resource allocation failed".into()
+        }
+        "document source cursor is closed" => "DOC direct cursor is closed".into(),
+        "unknown document source resource key" => "unknown DOC direct resource key".into(),
+        _ => error,
+    }
 }
 
 pub(crate) struct DirectCursor {
     revision_markup: crate::doc::settings::RevisionMarkup,
-    pending: Option<Document>,
-    active: Option<Active>,
-    prepared: Option<Prepared>,
-    resources: Option<Vec<DirectPictureResource>>,
-    opened: bool,
-    limits: JsonLimits,
-    failure: Option<String>,
-}
-
-#[derive(Clone, Copy)]
-struct JsonLimits {
-    body: u64,
-    bootstrap: u64,
-    retained: u64,
+    inner: OwnedDocumentCursor,
 }
 
 impl DirectCursor {
-    pub(crate) fn new(mut result: DirectDocResult) -> Result<Self, String> {
-        result.resources.sort_unstable_by(|a, b| a.key.cmp(&b.key));
-        if result
+    pub(crate) fn new(result: DirectDocResult) -> Result<Self, String> {
+        let resources = result
             .resources
-            .windows(2)
-            .any(|pair| pair[0].key == pair[1].key)
-        {
-            return Err("duplicate DOC direct resource key".into());
-        }
+            .into_iter()
+            .map(|resource| OwnedDocumentResource {
+                key: resource.key,
+                mime_type: resource.mime_type.to_owned(),
+                bytes: resource.bytes,
+            })
+            .collect();
         Ok(Self {
             revision_markup: result.revision_markup,
-            pending: Some(result.document),
-            active: None,
-            prepared: None,
-            resources: Some(result.resources),
-            opened: false,
-            limits: JsonLimits {
-                body: HARD_MAX_DOCX_BODY_CHUNK_JSON_BYTES,
-                bootstrap: HARD_MAX_DOCX_BOOTSTRAP_JSON_BYTES,
-                retained: HARD_MAX_DOCX_RETAINED_MODEL_JSON_BYTES,
-            },
-            failure: None,
+            inner: OwnedDocumentCursor::new(result.document, resources).map_err(legacy_message)?,
         })
     }
 
@@ -95,25 +60,7 @@ impl DirectCursor {
         operation_id: u32,
         generation: u32,
     ) -> Result<(), String> {
-        self.healthy()?;
-        if operation_id == 0 || generation == 0 {
-            return Err("operation id and generation must be positive".into());
-        }
-        if self.opened {
-            return Err("document cursor cannot be reopened".into());
-        }
-        let mut document = self.pending.take().ok_or("document model is unavailable")?;
-        let body = std::mem::take(&mut document.body).into_iter();
-        self.active = Some(Active {
-            operation_id,
-            generation,
-            next_sequence: 0,
-            accepted_json_bytes: 0,
-            body,
-            metadata: Some(document),
-        });
-        self.opened = true;
-        Ok(())
+        self.inner.open_document_cursor(operation_id, generation)
     }
 
     pub(crate) fn pull_document_chunk(
@@ -123,51 +70,12 @@ impl DirectCursor {
         generation: u32,
         byte_credit: usize,
     ) -> Result<Vec<u8>, String> {
-        self.healthy()?;
-        if operation_id == 0 || generation == 0 || byte_credit == 0 {
-            return Err("operation id, generation, and byte credit must be positive".into());
-        }
-        if self.prepared.is_none() {
-            let identity = self
-                .active
-                .as_ref()
-                .map(|active| (active.next_sequence, active.operation_id, active.generation))
-                .ok_or("document cursor is not active")?;
-            if identity != (sequence, operation_id, generation) {
-                return Err("document cursor identity or sequence is stale".into());
-            }
-            match self.prepare(sequence, operation_id, generation) {
-                Ok(prepared) => self.prepared = Some(prepared),
-                Err(error) => {
-                    self.active.take();
-                    self.failure = Some(error.clone());
-                    return Err(error);
-                }
-            }
-        }
-        let prepared = self.prepared.as_mut().expect("prepared above");
-        if (
-            prepared.sequence,
-            prepared.operation_id,
-            prepared.generation,
-        ) != (sequence, operation_id, generation)
-        {
-            return Err("another document unit is awaiting acknowledgement".into());
-        }
-        if prepared.bytes.is_none() {
-            return Err("document unit must be acknowledged before another pull".into());
-        }
-        if prepared.byte_length > byte_credit {
-            return Err(insufficient_credit_error(prepared.byte_length, byte_credit));
-        }
-        Ok(prepared.bytes.take().expect("prepared bytes checked"))
+        self.inner
+            .pull_document_chunk(sequence, operation_id, generation, byte_credit)
     }
 
     pub(crate) fn document_chunk_done(&self) -> Result<bool, String> {
-        self.prepared
-            .as_ref()
-            .map(|p| p.done)
-            .ok_or_else(|| "no document unit is awaiting acknowledgement".into())
+        self.inner.document_chunk_done()
     }
 
     pub(crate) fn acknowledge_document_chunk(
@@ -176,175 +84,43 @@ impl DirectCursor {
         operation_id: u32,
         generation: u32,
     ) -> Result<(), String> {
-        self.healthy()?;
-        let p = self
-            .prepared
-            .as_ref()
-            .ok_or("no document unit is awaiting acknowledgement")?;
-        if (p.sequence, p.operation_id, p.generation) != (sequence, operation_id, generation) {
-            return Err("document acknowledgement identity is stale or invalid".into());
-        }
-        if p.bytes.is_some() {
-            return Err("document unit cannot be acknowledged before delivery".into());
-        }
-        let done = p.done;
-        let accepted = p.accepted_json_bytes_after;
-        self.prepared.take();
-        if done {
-            self.active.take();
-        } else if let Some(active) = self.active.as_mut() {
-            active.next_sequence = active
-                .next_sequence
-                .checked_add(1)
-                .ok_or("document sequence overflow")?;
-            active.accepted_json_bytes = accepted;
-        }
-        Ok(())
+        self.inner
+            .acknowledge_document_chunk(sequence, operation_id, generation)
     }
 
     pub(crate) fn cancel_document_cursor(&mut self) -> Result<(), String> {
-        self.healthy()?;
-        self.prepared.take();
-        self.active.take();
-        self.pending.take();
-        self.opened = true;
-        Ok(())
+        self.inner.cancel_document_cursor()
     }
 
     pub(crate) fn close_document_session(&mut self) {
-        // Matches DocxArchive: close the destructive document operation while
-        // retaining admitted media for the viewer's later lazy image reads.
-        self.prepared.take();
-        self.active.take();
-        self.pending.take();
-        self.opened = true;
+        self.inner.close_document_session()
     }
 
     pub(crate) fn assert_healthy(&self) -> Result<(), String> {
-        self.healthy()
+        self.inner.assert_healthy()
     }
 
     pub(crate) fn extract_image(&self, key: &str) -> Result<Vec<u8>, String> {
-        let source = &self.resource(key)?.bytes;
-        let mut bytes = Vec::new();
-        bytes
-            .try_reserve_exact(source.len())
-            .map_err(|_| "DOC direct resource allocation failed".to_string())?;
-        bytes.extend_from_slice(source);
-        Ok(bytes)
+        self.inner.extract_image(key).map_err(legacy_message)
     }
 
-    pub(crate) fn resource_mime_type(&self, key: &str) -> Result<&'static str, String> {
-        Ok(self.resource(key)?.mime_type)
-    }
-
-    fn resource(&self, key: &str) -> Result<&DirectPictureResource, String> {
-        self.healthy()?;
-        let resources = self
-            .resources
-            .as_ref()
-            .ok_or("DOC direct cursor is closed")?;
-        resources
-            .binary_search_by(|r| r.key.as_str().cmp(key))
-            .ok()
-            .map(|index| &resources[index])
-            .ok_or_else(|| "unknown DOC direct resource key".into())
-    }
-
-    fn healthy(&self) -> Result<(), String> {
-        self.failure.clone().map_or(Ok(()), Err)
-    }
-
-    fn prepare(
-        &mut self,
-        sequence: u32,
-        operation_id: u32,
-        generation: u32,
-    ) -> Result<Prepared, String> {
-        let active = self
-            .active
-            .as_mut()
-            .expect("active identity checked by caller");
-        let unit = if let Some(element) = active.body.next() {
-            StreamedDocumentUnit::Body {
-                body: vec![element],
-            }
-        } else {
-            StreamedDocumentUnit::Complete {
-                document: Box::new(
-                    active
-                        .metadata
-                        .take()
-                        .ok_or("document terminal is unavailable")?,
-                ),
-            }
-        };
-        let done = matches!(unit, StreamedDocumentUnit::Complete { .. });
-        let unit_limit = if done {
-            self.limits.bootstrap
-        } else {
-            self.limits.body
-        };
-        let remaining = self
-            .limits
-            .retained
-            .checked_sub(active.accepted_json_bytes)
-            .ok_or("document retained model JSON size overflow")?;
-        let (kind, prefix) = if remaining < unit_limit {
-            (
-                HardResourceLimitKind::DocxRetainedModelJsonBytes,
-                "document retained model JSON exceeds its hard ceiling",
-            )
-        } else if done {
-            (
-                HardResourceLimitKind::DocxBootstrapJsonBytes,
-                "document cursor JSON exceeds its hard ceiling",
-            )
-        } else {
-            (
-                HardResourceLimitKind::DocxBodyChunkJsonBytes,
-                "document cursor JSON exceeds its hard ceiling",
-            )
-        };
-        // Resource policy shared with ordinary OOXML and the other sources:
-        // cap the unit and remaining retained bytes while serializing once.
-        // Credit retries keep this one prepared buffer until delivery/ack.
-        let bytes =
-            serialize_json_with_limit(&unit, None, kind, None, unit_limit.min(remaining), prefix)?;
-        let accepted = active
-            .accepted_json_bytes
-            .checked_add(bytes.len() as u64)
-            .ok_or("document retained model JSON size overflow")?;
-        Ok(Prepared {
-            operation_id,
-            generation,
-            sequence,
-            byte_length: bytes.len(),
-            bytes: Some(bytes),
-            done,
-            accepted_json_bytes_after: accepted,
-        })
+    pub(crate) fn resource_mime_type(&self, key: &str) -> Result<&str, String> {
+        self.inner.resource_mime_type(key).map_err(legacy_message)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use docx_model::{HeaderFooter, HeadersFooters};
+    use docx_model::{BodyElement, Document};
 
-    #[allow(clippy::field_reassign_with_default)]
-    fn result(body: Vec<BodyElement>) -> DirectDocResult {
-        let mut document = Document::default();
-        document.body = body;
-        document.headers = HeadersFooters {
-            default: Some(HeaderFooter {
-                body: vec![BodyElement::Paragraph(Box::default())],
-            }),
-            ..HeadersFooters::default()
-        };
+    fn result() -> DirectDocResult {
         DirectDocResult {
-            document,
-            resources: vec![DirectPictureResource {
+            document: Document {
+                body: vec![BodyElement::Paragraph(Box::default())],
+                ..Document::default()
+            },
+            resources: vec![super::super::pictures::DirectPictureResource {
                 key: "legacy-doc/image/7".into(),
                 mime_type: "image/png",
                 bytes: vec![1, 2, 3],
@@ -355,10 +131,10 @@ mod tests {
 
     #[test]
     fn revision_markup_settings_are_exposed_beside_the_model() {
-        let cursor = DirectCursor::new(result(Vec::new())).unwrap();
+        let cursor = DirectCursor::new(result()).unwrap();
         assert!(!cursor.revision_markup_in_print());
         assert!(!cursor.revision_markup_on_screen());
-        let mut value = result(Vec::new());
+        let mut value = result();
         value.revision_markup = crate::doc::settings::RevisionMarkup {
             on_screen: true,
             in_print: false,
@@ -370,173 +146,41 @@ mod tests {
         assert!(cursor.has_revision_marks());
     }
 
-    fn pull(cursor: &mut DirectCursor, sequence: u32, credit: usize) -> Vec<u8> {
-        cursor.pull_document_chunk(sequence, 7, 9, credit).unwrap()
-    }
-
     #[test]
-    fn streams_one_owned_body_element_then_bodyless_metadata() {
-        let mut cursor = DirectCursor::new(result(vec![
-            BodyElement::Table(Box::default()),
-            BodyElement::Paragraph(Box::default()),
-        ]))
-        .unwrap();
-        cursor.open_document_cursor(7, 9).unwrap();
-        for sequence in 0..2 {
-            let value: serde_json::Value =
-                serde_json::from_slice(&pull(&mut cursor, sequence, usize::MAX)).unwrap();
-            assert_eq!(value["kind"], "body");
-            assert_eq!(value["body"].as_array().unwrap().len(), 1);
-            cursor.acknowledge_document_chunk(sequence, 7, 9).unwrap();
-        }
-        let value: serde_json::Value =
-            serde_json::from_slice(&pull(&mut cursor, 2, usize::MAX)).unwrap();
-        assert_eq!(value["kind"], "complete");
-        assert_eq!(value["document"]["body"], serde_json::json!([]));
-        assert!(value["document"]["headers"]["default"].is_object());
-        assert!(cursor.document_chunk_done().unwrap());
-        cursor.acknowledge_document_chunk(2, 7, 9).unwrap();
-    }
-
-    #[test]
-    fn validates_identity_credit_delivery_and_destructive_lifecycle() {
-        let mut cursor =
-            DirectCursor::new(result(vec![BodyElement::Paragraph(Box::default())])).unwrap();
-        assert!(cursor.open_document_cursor(0, 1).is_err());
-        cursor.open_document_cursor(7, 9).unwrap();
-        assert!(cursor.pull_document_chunk(1, 7, 9, 1).is_err());
-        let error = cursor.pull_document_chunk(0, 7, 9, 1).unwrap_err();
-        assert!(error.starts_with("OOXML_INSUFFICIENT_CREDIT:"));
-        assert!(cursor.acknowledge_document_chunk(0, 7, 9).is_err());
-        let envelope: serde_json::Value =
-            serde_json::from_str(error.split_once(':').unwrap().1).unwrap();
-        let exact = envelope["requiredBytes"].as_u64().unwrap() as usize;
-        let bytes = pull(&mut cursor, 0, exact);
-        assert_eq!(bytes.len(), exact);
-        assert!(cursor.pull_document_chunk(0, 7, 9, exact).is_err());
-        assert!(cursor.acknowledge_document_chunk(0, 7, 8).is_err());
-        cursor.acknowledge_document_chunk(0, 7, 9).unwrap();
-        cursor.cancel_document_cursor().unwrap();
-        assert!(cursor.open_document_cursor(8, 10).is_err());
-    }
-
-    #[test]
-    fn empty_document_and_retained_json_ceiling_are_enforced() {
-        let mut empty = DirectCursor::new(result(vec![])).unwrap();
-        empty.open_document_cursor(7, 9).unwrap();
-        let value: serde_json::Value =
-            serde_json::from_slice(&pull(&mut empty, 0, usize::MAX)).unwrap();
-        assert_eq!(value["kind"], "complete");
-
-        let mut limited =
-            DirectCursor::new(result(vec![BodyElement::Paragraph(Box::default())])).unwrap();
-        limited.limits.retained = 1;
-        limited.open_document_cursor(7, 9).unwrap();
-        assert!(limited
-            .pull_document_chunk(0, 7, 9, usize::MAX)
-            .unwrap_err()
-            .contains("retained model JSON"));
-        let fatal = limited.assert_healthy().unwrap_err();
-        assert_eq!(
-            limited
-                .pull_document_chunk(0, 7, 9, usize::MAX)
-                .unwrap_err(),
-            fatal
-        );
-    }
-
-    #[test]
-    fn retained_json_credit_includes_acknowledged_body_and_terminal_metadata() {
-        let mut reference =
-            DirectCursor::new(result(vec![BodyElement::Paragraph(Box::default())])).unwrap();
-        reference.open_document_cursor(7, 9).unwrap();
-        let body_bytes = pull(&mut reference, 0, usize::MAX).len() as u64;
-        reference.acknowledge_document_chunk(0, 7, 9).unwrap();
-        let terminal_bytes = pull(&mut reference, 1, usize::MAX).len() as u64;
-        for (limit, admitted) in [
-            (body_bytes + terminal_bytes, true),
-            (body_bytes + terminal_bytes - 1, false),
-        ] {
-            let mut cursor =
-                DirectCursor::new(result(vec![BodyElement::Paragraph(Box::default())])).unwrap();
-            cursor.limits.retained = limit;
-            cursor.open_document_cursor(7, 9).unwrap();
-            pull(&mut cursor, 0, usize::MAX);
-            cursor.acknowledge_document_chunk(0, 7, 9).unwrap();
-            let terminal = cursor.pull_document_chunk(1, 7, 9, usize::MAX);
-            if admitted {
-                assert_eq!(terminal.unwrap().len() as u64, terminal_bytes);
-                cursor.acknowledge_document_chunk(1, 7, 9).unwrap();
-                cursor.assert_healthy().unwrap();
-            } else {
-                let error = terminal.unwrap_err();
-                assert!(error.contains("retained model JSON"));
-                assert_eq!(cursor.assert_healthy().unwrap_err(), error);
-            }
-        }
-    }
-
-    #[test]
-    fn body_and_terminal_ceiling_failures_are_fatal_without_skipping() {
-        let mut body = DirectCursor::new(result(vec![
-            BodyElement::Paragraph(Box::default()),
-            BodyElement::Table(Box::default()),
-        ]))
-        .unwrap();
-        body.limits.body = 1;
-        body.open_document_cursor(7, 9).unwrap();
-        let error = body.pull_document_chunk(0, 7, 9, usize::MAX).unwrap_err();
-        assert!(error.contains("JSON exceeds"));
-        assert_eq!(
-            body.pull_document_chunk(0, 7, 9, usize::MAX).unwrap_err(),
-            error
-        );
-        assert!(body.active.is_none());
-        assert!(body.prepared.is_none());
-
-        let mut terminal = DirectCursor::new(result(vec![])).unwrap();
-        terminal.limits.bootstrap = 1;
-        terminal.open_document_cursor(7, 9).unwrap();
-        let error = terminal
-            .pull_document_chunk(0, 7, 9, usize::MAX)
-            .unwrap_err();
-        assert!(error.contains("JSON exceeds"));
-        assert_eq!(terminal.assert_healthy().unwrap_err(), error);
-        terminal.close_document_session();
-        assert_eq!(terminal.assert_healthy().unwrap_err(), error);
-    }
-
-    #[test]
-    fn resources_survive_ack_cancel_and_document_close() {
-        let mut cursor = DirectCursor::new(result(vec![])).unwrap();
+    fn picture_resources_keep_their_keys_and_media_types() {
+        let mut cursor = DirectCursor::new(result()).unwrap();
         assert_eq!(
             cursor.resource_mime_type("legacy-doc/image/7").unwrap(),
             "image/png"
         );
-        cursor.open_document_cursor(7, 9).unwrap();
-        pull(&mut cursor, 0, usize::MAX);
-        cursor.acknowledge_document_chunk(0, 7, 9).unwrap();
-        cursor.close_document_session();
         cursor.close_document_session();
         assert_eq!(
             cursor.extract_image("legacy-doc/image/7").unwrap(),
             [1, 2, 3]
         );
-        assert!(cursor.extract_image("legacy-doc/image/8").is_err());
-        assert!(cursor.open_document_cursor(7, 9).is_err());
+        assert_eq!(
+            cursor.extract_image("legacy-doc/image/8").unwrap_err(),
+            "unknown DOC direct resource key"
+        );
+        assert_eq!(
+            cursor.resource_mime_type("legacy-doc/image/8").unwrap_err(),
+            "unknown DOC direct resource key"
+        );
     }
 
     #[test]
-    fn duplicate_resource_keys_are_rejected() {
-        let mut value = result(vec![]);
-        value.resources.push(DirectPictureResource {
-            key: "legacy-doc/image/7".into(),
-            mime_type: "image/jpeg",
-            bytes: vec![],
-        });
-        assert!(DirectCursor::new(value)
-            .err()
-            .unwrap()
-            .contains("duplicate"));
+    fn duplicate_resource_keys_keep_the_doc_message() {
+        let mut value = result();
+        value
+            .resources
+            .push(super::super::pictures::DirectPictureResource {
+                key: "legacy-doc/image/7".into(),
+                mime_type: "image/jpeg",
+                bytes: vec![],
+            });
+        assert_eq!(
+            DirectCursor::new(value).err().unwrap(),
+            "duplicate DOC direct resource key"
+        );
     }
 }

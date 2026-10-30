@@ -36,10 +36,17 @@ describe.each([
   it('forwards legacyPpt to PptxPresentation.load only when configured', async () => {
     const load = vi.spyOn(PptxPresentation, 'load')
       .mockImplementation(async () => new FakePptxEngine(1, 9144000, 6858000).asPres());
-    for (const [options, expected] of [[{ legacyPpt: source }, source], [{}, undefined]] as const) {
+    const odp = { ...source } as typeof source;
+    for (const [options, legacyPpt, expectedOdp] of [
+      [{ legacyPpt: source }, source, undefined],
+      [{ odp }, undefined, odp],
+      [{ legacyPpt: source, odp }, source, odp],
+      [{}, undefined, undefined],
+    ] as const) {
       const viewer = create(options);
       await viewer.load(new ArrayBuffer(1));
-      expect(load.mock.lastCall?.[1]?.legacyPpt).toEqual(expected);
+      expect(load.mock.lastCall?.[1]?.legacyPpt).toEqual(legacyPpt);
+      expect(load.mock.lastCall?.[1]?.odp).toEqual(expectedOdp);
       viewer.destroy();
     }
   });

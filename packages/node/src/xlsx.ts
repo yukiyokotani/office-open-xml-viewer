@@ -61,6 +61,15 @@ export type OpenXlsxWorkbookOptions = OoxmlNodeSessionOptions & {
    * in this realm; otherwise the ordinary OOXML path runs unchanged.
    */
   readonly legacyXls?: ModelSource<'xlsx'>;
+  /**
+   * Opt-in model source for OpenDocument spreadsheet input (a `ModelSource<'xlsx'>`, such as the
+   * one an OpenDocument companion package exports). It is asked after
+   * `legacyXls`; when its `claim()` accepts the raw bytes it opens them through its
+   * own module, otherwise the ordinary OOXML path runs unchanged. A source for
+   * another format is a `TypeError`. Omitting this option imports and runs
+   * nothing extra.
+   */
+  readonly ods?: ModelSource<'xlsx'>;
   /** Canvas for a selected model source's Normal-font measurement. */
   readonly factory?: import('./render.ts').NodeCanvasFactory;
 };
@@ -112,7 +121,7 @@ export async function openXlsxWorkbook(
   // `options.legacyXls !== undefined` branch shape recognized by the
   // source-boundary gate.
   options = { ...options, xlsxWorksheetLimits: policy.worksheet };
-  if (__OOXML_MODEL_SOURCES__ && options.legacyXls !== undefined) {
+  if (__OOXML_MODEL_SOURCES__ && (options.legacyXls !== undefined || options.ods !== undefined)) {
     const { openXlsxSource } = await import('./xlsx-model-source.ts');
     return openXlsxSource(buffer, options, getXlsxWasmModule);
   }

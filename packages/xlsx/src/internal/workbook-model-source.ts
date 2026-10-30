@@ -11,7 +11,7 @@ import {
   OoxmlResourceMetricsSession,
   type NormalizedOoxmlResourcePolicy,
 } from '@silurus/ooxml-core/worker';
-import { beginModelSourceLoad, modelSourceWorker, selectModelSource } from '@silurus/ooxml-core/internal/model-source';
+import { beginModelSourceLoad, effectiveModelSources, modelSourceWorker, selectModelSource } from '@silurus/ooxml-core/internal/model-source';
 import { computeMdw, pinXlsxGridGeometry } from '../renderer.js';
 import { respondToHostLayoutRequest } from './host-layout.js';
 import type { XlsxWorkbook, LoadOptions } from '../workbook.js';
@@ -60,8 +60,10 @@ export async function loadXlsxModelSource(
     } else {
       buffer = input;
     }
-    const selected = selectModelSource(opts.legacyXls === undefined ? undefined : [opts.legacyXls], 'xlsx', new Uint8Array(buffer));
-    if (!selected) return workbookType.load(buffer, { ...opts, legacyXls: undefined });
+    // Selection happens once: an unclaimed input continues on the OOXML path
+    // with every source option cleared, so it is never offered again.
+    const selected = selectModelSource(effectiveModelSources(opts.legacyXls, opts.ods), 'xlsx', new Uint8Array(buffer));
+    if (!selected) return workbookType.load(buffer, { ...opts, legacyXls: undefined, ods: undefined });
     // The caller already owns this public constructor. Passing it avoids a
     // static source-only back-edge that splits the ordinary workbook graph;
     // source overrides remain confined to this admitted source's subclass.

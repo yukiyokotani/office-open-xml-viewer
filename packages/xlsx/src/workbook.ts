@@ -170,7 +170,17 @@ export interface LoadOptions extends CoreLoadOptions {
    * `TypeError`. Omitting this option imports and runs nothing extra.
    */
   legacyXls?: ModelSource<'xlsx'>;
+  /**
+   * Opt-in model source for OpenDocument spreadsheet input (a `ModelSource<'xlsx'>`, such as the
+   * one an OpenDocument companion package exports). It is asked after
+   * `legacyXls`; when its `claim()` accepts the raw bytes it opens them through its
+   * own module, otherwise the ordinary OOXML path runs unchanged. A source for
+   * another format is a `TypeError`. Omitting this option imports and runs
+   * nothing extra.
+   */
+  ods?: ModelSource<'xlsx'>;
 }
+
 
 type WorkbookBridge = WorkerBridge<
   WorkerResponse | RenderWorkerResponse | DelimitedTextParseResponse |
@@ -413,7 +423,7 @@ export class XlsxWorkbook {
     opts = normalizeFontOptions(opts);
     const worksheetPolicy = normalizeXlsxWorksheetPolicy(opts);
     opts = { ...opts, xlsxWorksheetLimits: worksheetPolicy.worksheet };
-    if (__OOXML_MODEL_SOURCES__ && opts.legacyXls !== undefined) {
+    if (__OOXML_MODEL_SOURCES__ && (opts.legacyXls !== undefined || opts.ods !== undefined)) {
       return (await import('./internal/workbook-model-source.js')).loadXlsxModelSource(source, opts, XlsxWorkbook);
     }
     opts = { ...opts, cjkFallback: resolveCjkFallback(opts.cjkFallback) };

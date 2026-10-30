@@ -142,6 +142,8 @@ describe('DOCX render worker with a model source', () => {
     await dispatch({ data: { ...parseRequest(11), sourceTransfer: transfer } } as MessageEvent);
     expect(open).toHaveBeenCalledExactlyOnceWith(
       descriptor, new Uint8Array(1), expect.any(Function), undefined, transfer,
+      // The parse request's resource policy reaches the source module.
+      { resourcePolicy: parseRequest(11).resourcePolicy },
     );
     expect(posted(posts, 'parsedMeta', 11)).toEqual([
       expect.objectContaining({ usage: undefined, showTrackedChanges: true }),
