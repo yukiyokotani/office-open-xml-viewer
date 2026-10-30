@@ -29,3 +29,7 @@ wasm-opt = ["-Oz"]
 
 [package.metadata.wasm-pack.profile.release.wasm-bindgen]
 omit-default-module-path = true
+
+[[example]]
+name = "inspect_odt"
+required-features = ["odt"]

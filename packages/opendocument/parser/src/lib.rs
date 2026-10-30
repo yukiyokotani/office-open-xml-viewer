@@ -5,4 +5,10 @@ pub mod error;
 pub mod iri;
 pub mod package;
 pub mod script;
+pub mod style;
 pub mod xml;
+
+#[cfg(feature = "odt")]
+pub mod odt;
+#[cfg(feature = "odt")]
+mod odt_wasm;
