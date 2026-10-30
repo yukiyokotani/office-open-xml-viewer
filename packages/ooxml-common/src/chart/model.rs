@@ -2234,6 +2234,10 @@ pub struct SecondaryValueAxis {
     /// axis): its categories follow its own date scale.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub date_axis: Option<bool>,
+    /// `<c:valAx><c:crossBetween>` (§21.2.2.32) of a secondary value axis:
+    /// whether the categories it crosses sit between or on its tick marks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cross_between: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crosses: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
