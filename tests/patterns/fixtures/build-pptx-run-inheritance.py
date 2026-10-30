@@ -88,9 +88,9 @@ def table_cell():
             '<a:solidFill><a:srgbClr val="D21D54"/></a:solidFill>'
             '<a:cs typeface="Amiri"/></a:defRPr></a:defPPr></a:lstStyle>'
             '<a:p><a:pPr><a:defRPr b="1"/></a:pPr>'
-            '<a:r><a:rPr/><a:t>CELL INHERITS RED</a:t></a:r>'
+            '<a:r><a:rPr/><a:t>CELL TEXT</a:t></a:r>'
             '<a:fld id="{0FBB9679-570D-4509-9600-E07789CF24BB}" type="datetime">'
-            '<a:rPr/><a:t> FIELD RED</a:t></a:fld></a:p></a:txBody><a:tcPr/>'
+            '<a:rPr/><a:t> FIELD TEXT</a:t></a:fld></a:p></a:txBody><a:tcPr/>'
             '</a:tc></a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame>')
 
 break_table_slide = make_slide(break_shape(2, 600000, 2400)

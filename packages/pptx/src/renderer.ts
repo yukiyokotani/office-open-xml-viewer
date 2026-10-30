@@ -245,8 +245,8 @@ export interface RenderContext {
   /**
    * Contrast-aware default text colour for THIS slide's synthetic SmartArt
    * fallback shape (issue #805), pre-derived by `renderSlide` from the
-   * slide-background luminance via {@link smartArtFallbackTextColor}. Null /
-   * absent = keep the ordinary theme default. Consumed only by
+   * slide-background luminance via {@link smartArtFallbackTextColor}, else the
+   * theme default text colour. Null / absent = the hard default. Consumed only by
    * {@link shapeDefaultTextColor} for shapes matching
    * {@link isSmartArtFallbackShape}; every other shape ignores it.
    */
@@ -1860,8 +1860,11 @@ export function paragraphInputRuns(
     const csFontFor = (face: string, text: string) =>
       stackFontFor(face, text, true, COMPLEX_SCRIPT_DEFAULT_FACES);
     const letterSpacingPx = (run.letterSpacing ?? 0) * PT_TO_EMU * scale;
+    // [MS-ODRAWXML] a14:hlinkClr val="tx": the hyperlink keeps the text colour
+    // its run inherits instead of the theme hlink colour.
     const color = run.color ? hexToRgba(run.color)
-      : run.hyperlink && rc.themeHlinkColor ? hexToRgba(rc.themeHlinkColor) : defaultColor;
+      : run.hyperlink && !run.hyperlinkUsesTextFill && rc.themeHlinkColor
+        ? hexToRgba(rc.themeHlinkColor) : defaultColor;
     const baseStyle: LayoutSegment = {
       // `emitGroup` installs the cluster-scoped resolved font.
       text: '', font: '', sizePx, drawSizePx, color,
@@ -8477,6 +8480,11 @@ async function renderSlideLeased(
   const themeDefaultColor = defaultTextColor
     ? `#${defaultTextColor}`
     : '#000000';
+  // A run whose whole chain authors no fill paints PowerPoint's hard default,
+  // literal black, not the theme dk1 (issue #1989; `HARD_DEFAULT_TEXT_COLOR` in
+  // the parser records the controls). The theme colour above only colours the
+  // synthetic SmartArt fallback shape, which has no PowerPoint counterpart.
+  const hardDefaultTextColor = '#000000';
 
   const pictureBulletImages = new Map<string, SvgImageSource | null>();
   const shapeFillImages = new Map<string, PreparedShapeFill | null>();
@@ -8496,7 +8504,8 @@ async function renderSlideLeased(
     dpr: effectiveDpr,
     // Issue #805 — legible default for the synthetic SmartArt fallback shape's
     // null-colour runs, derived once per slide from the background luminance.
-    smartArtFallbackTextColor: smartArtFallbackTextColor(slide.background, themeDefaultColor),
+    smartArtFallbackTextColor: smartArtFallbackTextColor(slide.background, themeDefaultColor)
+      ?? themeDefaultColor,
     pictureBulletImages,
     shapeFillImages,
   };
@@ -9020,7 +9029,7 @@ async function renderSlideLeased(
       : undefined;
     if (el.type === 'shape') {
       withPatternCoordinateSpace(ctx, slidePatternFrame, () =>
-        renderShape(ctx, el, scale, themeDefaultColor, slideNumber, rc, elementTextRun, opts.fetchImage));
+        renderShape(ctx, el, scale, hardDefaultTextColor, slideNumber, rc, elementTextRun, opts.fetchImage));
     } else if (el.type === 'picture' || el.type === 'media') {
       const step = elementSteps[elementIndex];
       if (step) {
