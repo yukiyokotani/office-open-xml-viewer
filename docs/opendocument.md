@@ -68,14 +68,26 @@ Currently admitted:
   font (not in justified paragraphs);
 - page size and margins of a single page style without displayed headers or
   footers;
-- paragraph indents, alignment, page breaks, keep-with-next /
+- paragraph indents, alignment, proportional line height from 100% to 300%
+  on text of one font and size, page breaks, keep-with-next /
   keep-together, widow/orphan control of two lines, and paragraph spacing
   including contextual spacing;
 - character fonts, sizes, bold, italic, single/double underline and
   strike-through, colours and background colour;
-- text in the Latin script class of ODF Part 3 Table 22.
+- text in the Latin script class of ODF Part 3 Table 22, including the
+  spaces, punctuation, symbols and emoji the table leaves unassigned.
 
-Tabs, letter spacing, horizontal scaling, raised/lowered text, line-height
-settings, lists, tables, frames and images, notes, fields, comments, tracked
+Three behaviours follow LibreOffice where ODF leaves the choice to the
+consumer or LibreOffice reads the specification differently; each applies
+only within its measured scope:
+
+- proportional line height scales the font's natural line height;
+- spaces, punctuation, symbols and emoji outside Table 22 take the script
+  class of the preceding character (the following one at paragraph start);
+- the nearest style that sets a font colour or the automatic colour decides
+  the colour.
+
+Tabs, letter spacing, horizontal scaling, raised/lowered text, fixed and
+minimum line heights, proportional line heights below 100%, lists, tables, frames and images, notes, fields, comments, tracked
 changes, headers and footers, Asian and complex scripts, and other formatting
 reject for now. The subset grows release by release.

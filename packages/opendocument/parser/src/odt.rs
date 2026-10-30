@@ -65,31 +65,39 @@ const MAX_SEARCH_ORDER: usize = 256;
 const MAX_CASCADE_WORK: usize = 16 * 1024 * 1024;
 
 /// Observed LibreOffice behaviour where ODF leaves the consumer free or
-/// LibreOffice deviates from the text, adopted only with the user's approval
-/// (AGENTS.md). Each rule is implemented and tested; approval flips its flag.
+/// LibreOffice deviates from the text. Each is a user-approved LibreOffice
+/// compatibility rule (2026-10-31, AGENTS.md) applied only within its
+/// measured scope; outside it the reader rejects. Tests also run the reader
+/// with a rule off to pin the spec-only behaviour.
 #[derive(Clone, Copy, Debug)]
 pub struct CompatRules {
     /// `fo:line-height` percentages scale the natural line height (DOCX
-    /// "auto" with the same multiple), on text of one face and size.
+    /// "auto" with the same multiple). Admitted 100-300% on paragraphs whose
+    /// text is one face and one size and not raised (glyph placement differs
+    /// below 100%); other paragraphs and percentages reject.
     pub proportional_line_height: bool,
-    /// Weak characters outside Table 22 (spaces, punctuation, symbols,
-    /// private use, emoji and zero-width marks) take the preceding
-    /// character's script class, or the following one's at paragraph start.
+    /// Weak characters outside Table 22 (general categories Z*, P*, S*, Co
+    /// and emoji-sequence components) take the preceding character's script
+    /// class, or the following one's at paragraph start. Unmapped letters,
+    /// numbers and other marks keep rejecting; digits after complex text
+    /// (which LibreOffice sets in the complex font) are unreachable while
+    /// complex text rejects.
     pub weak_script_class: bool,
     /// The nearest style that sets `fo:color` or
     /// `style:use-window-font-color="true"` decides the font colour
     /// (LibreOffice keeps one colour property). ODF inherits the two
     /// attributes separately (§16.2), and §20.395 makes an inherited
     /// automatic flag apply, so cascades where the two readings differ
-    /// reject while this is off.
+    /// reject while this is off. A style setting both rejects.
     pub nearest_font_color: bool,
 }
 
-/// The rules in force: both pending user approval (requested 2026-10-31).
+/// The rules in force: all three user-approved LibreOffice compatibility
+/// rules (2026-10-31).
 pub const LIBREOFFICE_RULES: CompatRules = CompatRules {
-    proportional_line_height: false,
-    weak_script_class: false,
-    nearest_font_color: false,
+    proportional_line_height: true,
+    weak_script_class: true,
+    nearest_font_color: true,
 };
 
 pub fn read(package: &OdfPackage) -> Result<Document, String> {
@@ -2051,12 +2059,15 @@ fn paragraph_properties(cascade: &Cascade<'_>, rules: CompatRules) -> Result<Col
         // font size; LibreOffice (which writes 1.4) scales the natural line
         // height instead — DOCX "auto" with the percentage as the multiple,
         // measured equal at 100% and 150% on uniform text. That is an
-        // observed LibreOffice rule awaiting user approval (AGENTS.md), so
-        // every percentage rejects until it is enabled. Measured from 50% to
-        // 300%, on text of one face and size (checked per paragraph).
+        // user-approved LibreOffice compatibility rule (2026-10-31) on text
+        // of one face and size (checked per paragraph). Line pitch matches
+        // from 50% to 300%, but below 100% LibreOffice shrinks the line from
+        // the top, setting the glyphs higher than the DOCX layout (measured:
+        // 3 pt at 50%, 1.5 pt at 75%); the admitted scope is 100-300% and
+        // everything else rejects.
         (Some(value), None) if value.ends_with('%') => {
             let multiple = percent(value)?;
-            if !rules.proportional_line_height || !(0.5..=3.0).contains(&multiple) {
+            if !rules.proportional_line_height || !(1.0..=3.0).contains(&multiple) {
                 return Err(unsupported("line-height-proportional"));
             }
             Some(LineSpacing {
@@ -2233,6 +2244,14 @@ mod tests {
         read_fixture_with(fixture, LIBREOFFICE_RULES)
     }
 
+    /// The reader without the LibreOffice compatibility rules: the spec-only
+    /// behaviour each rule replaces.
+    const SPEC_ONLY: CompatRules = CompatRules {
+        proportional_line_height: false,
+        weak_script_class: false,
+        nearest_font_color: false,
+    };
+
     fn read_fixture_with(fixture: Fixture<'_>, rules: CompatRules) -> Result<Document, String> {
         let styles = format!(
             r#"<office:document-styles {NS} office:version="1.3">{}<office:styles><style:default-style style:family="paragraph"><style:paragraph-properties style:tab-stop-distance="1.25cm"/><style:text-properties {}/></style:default-style><style:default-style style:family="graphic"/>{}</office:styles><office:automatic-styles><style:page-layout style:name="pm1"><style:page-layout-properties{}/></style:page-layout></office:automatic-styles><office:master-styles><style:master-page style:name="Standard" style:page-layout-name="pm1">{}</style:master-page></office:master-styles></office:document-styles>"#,
@@ -2372,10 +2391,22 @@ mod tests {
                     .map(|s| (s.value, s.rule.clone()))
             })
         };
-        assert_eq!(
-            spacing(r#"fo:line-height="115%""#).unwrap_err(),
-            unsupported("line-height-proportional")
-        );
+        // User-approved LibreOffice compatibility rule (2026-10-31): the
+        // admitted 100-300% scope maps to DOCX auto; outside it rejects.
+        for (height, multiple) in [("115%", 1.15), ("100%", 1.0), ("300%", 3.0)] {
+            assert_eq!(
+                spacing(&format!(r#"fo:line-height="{height}""#)).unwrap(),
+                Some((multiple, "auto".to_string())),
+                "{height}"
+            );
+        }
+        for height in ["50%", "99.9%", "300.1%"] {
+            assert_eq!(
+                spacing(&format!(r#"fo:line-height="{height}""#)).unwrap_err(),
+                unsupported("line-height-proportional"),
+                "{height}"
+            );
+        }
         assert_eq!(
             spacing(r#"fo:line-height="20pt""#).unwrap_err(),
             unsupported("line-height-fixed")
@@ -2486,7 +2517,7 @@ mod tests {
         assert_eq!(
             reject(Fixture {
                 default_text: r#"style:font-name="Serif" fo:font-size="12pt" style:font-name-asian="Mincho" style:font-size-asian="12pt" style:font-name-complex="Serif" style:font-size-complex="12pt" style:letter-kerning="true""#,
-                body: "<text:p>\u{2014}x</text:p>",
+                body: "<text:p>\u{0500}x</text:p>",
                 ..Fixture::default()
             }),
             unsupported("script-unmapped-character")
@@ -2536,7 +2567,7 @@ mod tests {
         assert_eq!(texts(paragraphs(&document)[0]), ["a\u{2014}b c"]);
         let error = read_fixture(Fixture {
             default_text: r#"style:font-name="Serif" fo:font-size="12pt" style:font-name-asian="Mincho" style:font-size-asian="30pt" style:font-name-complex="Serif" style:font-size-complex="12pt" style:letter-kerning="true""#,
-            body: "<text:p>a b</text:p>",
+            body: "<text:p>a\u{0500}b</text:p>",
             ..Fixture::default()
         })
         .unwrap_err();
@@ -3041,12 +3072,8 @@ mod tests {
     }
 
     #[test]
-    fn pending_rules_map_once_enabled() {
-        let on = CompatRules {
-            proportional_line_height: true,
-            weak_script_class: true,
-            nearest_font_color: false,
-        };
+    fn compatibility_rules_apply_within_their_measured_scope() {
+        let on = LIBREOFFICE_RULES;
         // Asian and complex defaults differ from the Latin face, so a weak
         // character's class matters.
         let mixed = r#"style:font-name="Serif" fo:font-size="12pt" style:font-name-asian="Mincho" style:font-size-asian="12pt" style:font-name-complex="Sans" style:font-size-complex="12pt" style:letter-kerning="true""#;
@@ -3066,7 +3093,7 @@ mod tests {
             "<text:p>\u{201c}a\u{201d}</text:p>",
         ] {
             assert_eq!(
-                read(body, "", LIBREOFFICE_RULES).unwrap_err(),
+                read(body, "", SPEC_ONLY).unwrap_err(),
                 unsupported("script-unmapped-character"),
                 "{body}"
             );
@@ -3074,6 +3101,17 @@ mod tests {
             assert!(
                 texts(paragraphs(&document)[0]).len() == 1,
                 "weak characters take the Latin class: {body}"
+            );
+        }
+        // Emoji-sequence components are weak; other unmapped marks and
+        // format characters (zero-width space, a combining mark outside
+        // Table 22) are not and keep rejecting.
+        assert!(read("<text:p>a\u{2764}\u{fe0f}b</text:p>", "", on).is_ok());
+        for body in ["<text:p>a\u{200b}b</text:p>", "<text:p>a\u{1ab0}b</text:p>"] {
+            assert_eq!(
+                read(body, "", on).unwrap_err(),
+                unsupported("script-unmapped-character"),
+                "{body}"
             );
         }
         // An unmapped letter is not weak.
@@ -3089,7 +3127,7 @@ mod tests {
         };
         let p = r#"<text:p text:style-name="L">x y</text:p>"#;
         assert_eq!(
-            read(p, &style("115%"), LIBREOFFICE_RULES).unwrap_err(),
+            read(p, &style("115%"), SPEC_ONLY).unwrap_err(),
             unsupported("line-height-proportional")
         );
         let document = read(p, &style("115%"), on).unwrap();
@@ -3160,7 +3198,7 @@ mod tests {
     }
 
     #[test]
-    fn font_color_cascade_follows_the_spec_until_the_rule_is_approved() {
+    fn font_color_follows_the_nearest_style_under_the_approved_rule() {
         let auto = r#"style:font-name="Serif" fo:font-size="12pt" style:font-name-asian="Serif" style:font-size-asian="12pt" style:font-name-complex="Serif" style:font-size-complex="12pt" style:letter-kerning="true" style:use-window-font-color="true" loext:opacity="0%""#;
         let styles = r##"<style:style style:name="R" style:family="text"><style:text-properties fo:color="#ff0000" loext:opacity="100%"/></style:style><style:style style:name="A" style:family="text" style:parent-style-name="R"><style:text-properties style:use-window-font-color="true"/></style:style><style:style style:name="Z" style:family="text"><style:text-properties fo:color="#ff0000" loext:opacity="0%"/></style:style><style:style style:name="H" style:family="text"><style:text-properties fo:color="#ff0000" loext:opacity="50%"/></style:style>"##;
         let read = |body: &str, rules: CompatRules| {
@@ -3174,15 +3212,12 @@ mod tests {
                 rules,
             )
         };
-        let nearest = CompatRules {
-            nearest_font_color: true,
-            ..LIBREOFFICE_RULES
-        };
+        let nearest = LIBREOFFICE_RULES;
         let body = r#"<text:p>a<text:span text:style-name="R">b</text:span><text:span text:style-name="A">c</text:span></text:p>"#;
         // An explicit span colour under an inherited automatic flag: the
-        // readings differ, so it rejects until the rule is enabled.
+        // readings differ, so it rejects without the rule.
         assert_eq!(
-            read(body, LIBREOFFICE_RULES).unwrap_err(),
+            read(body, SPEC_ONLY).unwrap_err(),
             unsupported("font-color-cascade")
         );
         let document = read(body, nearest).unwrap();
