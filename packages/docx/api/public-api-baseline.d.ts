@@ -2337,6 +2337,8 @@ export interface SecondaryValueAxis {
     labelOffsetPercent?: number | null;
     tickLabelSkip?: number | null;
     tickMarkSkip?: number | null;
+    dateAxis?: boolean | null;
+    crossBetween?: 'between' | 'midCat' | string | null;
     crosses?: string | null;
     crossesAt?: number | null;
     titleFontSizeHpt?: number | null;
