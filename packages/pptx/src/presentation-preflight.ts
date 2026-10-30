@@ -86,14 +86,9 @@ function normalizeFontDemandFacts(value: unknown, nameCount: number): PptxFontDe
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw invalid();
   const candidate = value as Partial<Record<keyof PptxFontDemandFacts, unknown>>;
   const familyCount = candidate.familyCount;
-  if (typeof familyCount !== 'number' || !Number.isSafeInteger(familyCount) || familyCount < 0 || familyCount > nameCount
-    || !Array.isArray(candidate.tuples)) throw invalid();
-  const tuples = candidate.tuples.map((tuple: unknown) => {
-    const fields = (tuple ?? {}) as Partial<Record<'family' | 'weight' | 'style', unknown>>;
-    if (typeof fields.family !== 'string' || typeof fields.weight !== 'number' || !Number.isFinite(fields.weight)
-      || (fields.style !== 'normal' && fields.style !== 'italic')) throw invalid();
-    return Object.freeze({ family: fields.family, weight: fields.weight, style: fields.style });
-  });
+  if (typeof familyCount !== 'number' || !Number.isSafeInteger(familyCount) || familyCount < 0 || familyCount > nameCount) {
+    throw invalid();
+  }
   const scripts = candidate.substituteScripts;
   if (!scripts || typeof scripts !== 'object' || Array.isArray(scripts)) throw invalid();
   // Null prototype: keys are document font names (e.g. `__proto__`).
@@ -104,7 +99,7 @@ function normalizeFontDemandFacts(value: unknown, nameCount: number): PptxFontDe
     }
     substituteScripts[family] = Object.freeze([...list] as import('@silurus/ooxml-core').FontSubstituteScript[]);
   }
-  return Object.freeze({ familyCount, tuples: Object.freeze(tuples), substituteScripts: Object.freeze(substituteScripts) });
+  return Object.freeze({ familyCount, substituteScripts: Object.freeze(substituteScripts) });
 }
 
 function assertNullableString(value: unknown, field: string): asserts value is string | null {

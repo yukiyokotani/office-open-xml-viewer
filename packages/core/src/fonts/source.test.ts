@@ -8,9 +8,9 @@ import {
 import {
   FONT_SOURCE_PROTOCOL,
   assertFontSourceDescriptors,
-  cssApi,
-  cssApiRequests,
-  fontFaceCss,
+  fontCssApi,
+  fontCssApiRequests,
+  fontCss,
   fontFiles,
   fontResolver,
   dataUrlDecodedByteLength,
@@ -38,15 +38,16 @@ describe('font source descriptors', () => {
     const bytes = new Uint8Array([0, 1, 0, 0]).buffer;
     const resolver = fontResolver(() => []);
     const sources = [
-      cssApi({ urlTemplate: 'https://fonts.example/css?family={family}:{query}', query: '400,700',
+      fontCssApi({ urlTemplate: 'https://fonts.example/css?family={family}:{query}', query: '400,700',
         substitutes: OFFICE_FONT_SUBSTITUTIONS, credentials: 'omit' }),
-      fontFaceCss({ url: 'https://cdn.example/office.css' }),
+      fontCss({ url: 'https://cdn.example/office.css' }),
       fontFiles({ faces: [
         { family: 'Carlito', url: 'https://cdn.example/Carlito.woff2', weight: '400', unicodeRange: 'U+0-FF' },
         { family: 'Meiryo', data: bytes },
-      ] }),
+      ], credentials: 'omit' }),
       resolver,
     ];
+    expect(sources.map((source) => source.kind)).toEqual(['font-css-api', 'font-css', 'font-files', 'font-resolver']);
     for (const source of sources) {
       expect(source.protocol).toBe(FONT_SOURCE_PROTOCOL);
       expect(Object.isFrozen(source)).toBe(true);
@@ -62,7 +63,7 @@ describe('font source descriptors', () => {
 
   it('resolves relative application URLs against the calling realm, never in the receiving realm', () => {
     vi.stubGlobal('document', { baseURI: 'https://app.example/viewer/index.html' });
-    const css = fontFaceCss({ url: '../fonts/office.css' });
+    const css = fontCss({ url: '../fonts/office.css' });
     const files = fontFiles({ faces: [{ family: 'Carlito', url: '/fonts/Carlito.woff2' }] });
     expect(css.url).toBe('https://app.example/fonts/office.css');
     expect(files.faces[0].url).toBe('https://app.example/fonts/Carlito.woff2');
@@ -72,16 +73,17 @@ describe('font source descriptors', () => {
 
   it('rejects malformed descriptors with TypeError before any load', () => {
     const invalid: Array<() => unknown> = [
-      () => cssApi({ urlTemplate: 'https://fonts.example/css' }),
-      () => cssApi({ urlTemplate: 'https://fonts.example/css?family={family}&{subset}' }),
-      () => cssApi({ urlTemplate: 'https://fonts.example/css?family={family}:{query}' }),
-      () => cssApi({ urlTemplate: '/css?family={family}' }),
-      () => cssApi({ urlTemplate: 'ftp://fonts.example/css?family={family}' }),
-      () => cssApi({ urlTemplate: 'https://fonts.example/css?family={family}', families: { Lato: true, lato: true } }),
-      () => cssApi({ urlTemplate: 'https://fonts.example/css?family={family}', credentials: 'include' as 'omit' }),
-      () => fontFaceCss({ url: 'blob:https://app.example/1' }),
-      () => fontFaceCss({ url: 'https://cdn.example/a.css', headers: {} } as never),
+      () => fontCssApi({ urlTemplate: 'https://fonts.example/css' }),
+      () => fontCssApi({ urlTemplate: 'https://fonts.example/css?family={family}&{subset}' }),
+      () => fontCssApi({ urlTemplate: 'https://fonts.example/css?family={family}:{query}' }),
+      () => fontCssApi({ urlTemplate: '/css?family={family}' }),
+      () => fontCssApi({ urlTemplate: 'ftp://fonts.example/css?family={family}' }),
+      () => fontCssApi({ urlTemplate: 'https://fonts.example/css?family={family}', families: { Lato: true, lato: true } }),
+      () => fontCssApi({ urlTemplate: 'https://fonts.example/css?family={family}', credentials: 'include' as 'omit' }),
+      () => fontCss({ url: 'blob:https://app.example/1' }),
+      () => fontCss({ url: 'https://cdn.example/a.css', headers: {} } as never),
       () => fontFiles({ faces: [] }),
+      () => fontFiles({ faces: [{ family: 'A', url: 'https://a.example/a.woff2' }], credentials: 'include' as 'omit' }),
       () => fontFiles({ faces: [{ family: 'A' }] }),
       () => fontFiles({ faces: [{ family: 'A', url: 'https://a.example/a.woff2', data: new ArrayBuffer(4) }] }),
       () => fontFiles({ faces: [{ family: 'A', data: new Uint8Array(4) as unknown as ArrayBuffer }] }),
@@ -104,7 +106,7 @@ describe('font source descriptors', () => {
       .toEqual({ resource: 'font-source', quota: 'face', metric: 'bytes',
         limit: HARD_MAX_FONT_SOURCE_FACE_BYTES, observed: HARD_MAX_FONT_SOURCE_FACE_BYTES + 1 });
     const long = `https://a.example/${'a'.repeat(HARD_MAX_FONT_SOURCE_URL_LENGTH)}`;
-    expect(limitOf(() => fontFaceCss({ url: long }))).toMatchObject({ quota: 'url', metric: 'length' });
+    expect(limitOf(() => fontCss({ url: long }))).toMatchObject({ quota: 'url', metric: 'length' });
     expect(limitOf(() => fontFiles({ faces: Array.from({ length: HARD_MAX_FONT_SOURCE_DECLARATIONS + 1 },
       () => ({ family: 'A', url: 'https://a.example/a.woff2' })) })))
       .toMatchObject({ quota: 'declarations', metric: 'entry-count' });
@@ -169,67 +171,67 @@ describe('font source descriptors', () => {
   });
 });
 
-describe('css-api request composition', () => {
+describe('font-css-api request composition', () => {
   it('requests the authored family first, then declared substitutes, encoding the family only', () => {
-    const source = cssApi({
+    const source = fontCssApi({
       urlTemplate: 'https://fonts.example/css?family={family}:{query}',
       query: '400,700',
       substitutes: OFFICE_FONT_SUBSTITUTIONS,
     });
-    expect(cssApiRequests(source, 'Calibri')).toEqual([
+    expect(fontCssApiRequests(source, 'Calibri')).toEqual([
       { family: 'Calibri', url: 'https://fonts.example/css?family=Calibri:400,700' },
       { family: 'Carlito', url: 'https://fonts.example/css?family=Carlito:400,700',
         substitution: { for: 'Calibri', use: 'Carlito' } },
     ]);
-    expect(cssApiRequests(source, 'Noto Sans & Co')[0].url)
+    expect(fontCssApiRequests(source, 'Noto Sans & Co')[0].url)
       .toBe('https://fonts.example/css?family=Noto+Sans+%26+Co:400,700');
   });
 
   it('restricts requests to the allow-list, using its spelling and per-family query', () => {
-    const source = cssApi({
+    const source = fontCssApi({
       urlTemplate: 'https://fonts.example/css?family={family}:{query}',
       query: 'wght@400',
       families: { 'Open Sans': true, 'Libre Franklin': 'wght@400;600' },
       substitutes: [{ for: 'Franklin Gothic Book', use: 'Libre Franklin' }],
     });
-    expect(cssApiRequests(source, 'OPEN SANS')).toEqual([
+    expect(fontCssApiRequests(source, 'OPEN SANS')).toEqual([
       { family: 'Open Sans', url: 'https://fonts.example/css?family=Open+Sans:wght@400' },
     ]);
-    expect(cssApiRequests(source, 'franklin gothic book')).toEqual([
+    expect(fontCssApiRequests(source, 'franklin gothic book')).toEqual([
       { family: 'Libre Franklin', url: 'https://fonts.example/css?family=Libre+Franklin:wght@400;600',
         substitution: { for: 'Franklin Gothic Book', use: 'Libre Franklin' } },
     ]);
-    expect(cssApiRequests(source, 'Comic Sans MS')).toEqual([]);
+    expect(fontCssApiRequests(source, 'Comic Sans MS')).toEqual([]);
   });
 
   it('keeps allow-list families named after prototype members as own entries', () => {
     // A caller allow-list built from data (JSON, structured clone) carries
     // `__proto__` as an own key; plain-object assignment used to drop it.
-    const source = cssApi({
+    const source = fontCssApi({
       urlTemplate: 'https://fonts.example/css?family={family}',
       families: JSON.parse('{"__proto__": true, "constructor": true}') as Record<string, true>,
     });
     for (const descriptor of [source, structuredClone(source)]) {
-      expect(cssApiRequests(descriptor, '__proto__')).toEqual([
+      expect(fontCssApiRequests(descriptor, '__proto__')).toEqual([
         { family: '__proto__', url: 'https://fonts.example/css?family=__proto__' },
       ]);
-      expect(cssApiRequests(descriptor, 'constructor')).toHaveLength(1);
-      expect(cssApiRequests(descriptor, 'toString')).toEqual([]);
+      expect(fontCssApiRequests(descriptor, 'constructor')).toHaveLength(1);
+      expect(fontCssApiRequests(descriptor, 'toString')).toEqual([]);
     }
   });
 
   it('bounds every completed request URL, including encoding expansion', () => {
     const template = 'https://fonts.example/css?family={family}:{query}';
-    expect(limitOf(() => cssApi({ urlTemplate: template, query: 'q'.repeat(9000) })))
+    expect(limitOf(() => fontCssApi({ urlTemplate: template, query: 'q'.repeat(9000) })))
       .toMatchObject({ quota: 'url', metric: 'length' });
     // The URL parser percent-encodes a non-ASCII query (é → %C3%A9).
-    expect(limitOf(() => cssApi({ urlTemplate: template, query: '\u00e9'.repeat(2100) })))
+    expect(limitOf(() => fontCssApi({ urlTemplate: template, query: '\u00e9'.repeat(2100) })))
       .toMatchObject({ quota: 'url', limit: HARD_MAX_FONT_SOURCE_URL_LENGTH });
-    expect(limitOf(() => cssApi({ urlTemplate: template, families: { [`F${'\u4e00'.repeat(1000)}`]: '400' } })))
+    expect(limitOf(() => fontCssApi({ urlTemplate: template, families: { [`F${'\u4e00'.repeat(1000)}`]: '400' } })))
       .toMatchObject({ quota: 'url' });
     // A document-supplied family is checked when its request is composed.
-    const source = cssApi({ urlTemplate: template, query: '400' });
-    expect(limitOf(() => cssApiRequests(source, '\u4e00'.repeat(1000)))).toMatchObject({ quota: 'url' });
-    expect(cssApiRequests(source, 'A\ud800')[0].url).toBe('https://fonts.example/css?family=A%EF%BF%BD:400');
+    const source = fontCssApi({ urlTemplate: template, query: '400' });
+    expect(limitOf(() => fontCssApiRequests(source, '\u4e00'.repeat(1000)))).toMatchObject({ quota: 'url' });
+    expect(fontCssApiRequests(source, 'A\ud800')[0].url).toBe('https://fonts.example/css?family=A%EF%BF%BD:400');
   });
 });

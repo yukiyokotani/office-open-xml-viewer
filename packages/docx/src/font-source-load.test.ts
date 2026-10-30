@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cssApi, fontFiles, OFFICE_FONT_SUBSTITUTIONS } from '@silurus/ooxml-core/internal/font-sources';
+import { fontCssApi, fontFiles, fontResolver, OFFICE_FONT_SUBSTITUTIONS } from '@silurus/ooxml-core/internal/font-sources';
 import { docxFontFamilyPlan } from './font-plan.js';
 import { formatOrdinalNumber } from '@silurus/ooxml-core';
 import { ASCII_NUMBER_FORMATS, docxFontDemandScalars, loadDocxFontSources } from './font-source-load.js';
@@ -120,7 +120,7 @@ afterEach(() => {
   G.fetch = ORIGINAL.fetch;
 });
 
-const SOURCE = cssApi({
+const SOURCE = fontCssApi({
   urlTemplate: 'https://fonts.example/css?family={family}',
   families: { 'Noto Sans JP': true, Carlito: true },
   query: 'x',
@@ -161,6 +161,24 @@ describe('loadDocxFontSources', () => {
     second.session.release();
   });
 
+  it('forwards the worker bridge options: claimed resolver URL faces go through the acquirer', async () => {
+    const { faces, set, fetched } = install();
+    const url = 'https://fonts.app.example/brand.woff2';
+    const source = fontResolver((request) => request.families.map((family) => ({ family, url })));
+    const bytes = new Uint8Array(12).buffer;
+    const acquireResolverFaces = vi.fn(async (_request: { readonly sourceIndex: number }) => new Map([[url, { data: bytes }]]));
+    const doc = docWith([text('Hello', { fontFamily: 'Brand' })]);
+    const plan = { ...docxFontFamilyPlan(doc, [source], undefined, { routes: {} }), families: ['Brand'] };
+    const loaded = await loadDocxFontSources(doc, plan, [source], {
+      fontSet: set, acquireResolverFaces, acquiredFacesOwnedBySession: true,
+    });
+    expect(acquireResolverFaces).toHaveBeenCalledTimes(1);
+    expect(acquireResolverFaces.mock.calls[0][0]).toMatchObject({ sourceIndex: 0, families: [{ family: 'Brand', urls: [url] }] });
+    expect(faces.filter((face) => face.family === 'Brand').map((face) => face.source)).toEqual([bytes]);
+    expect(fetched).toEqual([]);
+    loaded.session.release();
+  });
+
   it('never demands an installed authored family', async () => {
     const { set, fetched } = install();
     const doc = docWith([text('Hello')]);
@@ -176,7 +194,7 @@ describe('loadDocxFontSources', () => {
     const { set, fetched } = install();
     const doc = docWith([text('Latin only', { fontFamily: 'Sakkal Majalla' })]);
     const own = fontFiles({ faces: [{ family: 'Sakkal Majalla', data: new Uint8Array([0, 1, 0, 0]).buffer }] });
-    const naskh = cssApi({
+    const naskh = fontCssApi({
       urlTemplate: 'https://fonts.example/css?family={family}',
       families: { 'Noto Naskh Arabic': true },
       query: 'x',

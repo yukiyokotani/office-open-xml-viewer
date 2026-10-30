@@ -58,7 +58,7 @@ for (const [index, format] of formats.entries()) {
 
 // The `useGoogleFonts` deprecation message tells callers to import the font
 // source factories from the root entry as well as from the format entries.
-for (const name of ['cssApi', 'fontFaceCss', 'fontFiles', 'fontResolver', 'googleFonts', 'officeFontSubstitutions']) {
+for (const name of ['fontCssApi', 'fontCss', 'fontFiles', 'fontResolver', 'googleFonts', 'googleFontsSubstitutions', 'officeFontSubstitutions']) {
   let root = rootExports.get(name);
   assert.ok(root, `Root declaration does not export font source factory ${name}.`);
   if (root.flags & ts.SymbolFlags.Alias) root = checker.getAliasedSymbol(root);

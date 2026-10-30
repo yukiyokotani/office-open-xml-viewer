@@ -13,7 +13,6 @@ import {
   probeFontFamilyPresence,
   substitutionsFor,
   type FontFamilyPresence,
-  type FontDemand,
   type FontSource,
   type FontSubstitution,
 } from '@silurus/ooxml-core/internal/font-sources';
@@ -74,7 +73,7 @@ export interface DocxFontDemandCandidates {
   readonly fallback: readonly string[];
   /** Per authored family (lower-cased), the scripts of its declared
    * script-scoped substitutes that its rendered text proves
-   * (`FontDemand.substituteScripts`). */
+   * (`FontSessionDemand.substituteScripts`). */
   readonly substituteScripts: Readonly<Record<string, readonly FontSubstituteScript[]>>;
 }
 
@@ -167,8 +166,6 @@ export interface DocxFontFamilyPlan {
   readonly families: readonly string[];
   /** Library script fallback families. */
   readonly fallbackFamilies: readonly string[];
-  /** Exact authored tuples of the demanded families. */
-  readonly tuples: FontDemand['tuples'];
   /** See {@link DocxFontDemandCandidates.substituteScripts}. */
   readonly substituteScripts: Readonly<Record<string, readonly FontSubstituteScript[]>>;
   /** Normalised candidate families with a declared substitute whose own face
@@ -221,21 +218,9 @@ export function docxFontFamilyPlan(
   const installedSubstituteFamilies = [...new Set(candidates.authored
     .filter((family) => installed(family) && substituted(family))
     .map((family) => family.trim().toLowerCase()))].sort();
-  const demanded = new Set(families.map(fontFamilyKey));
-  const tuples = new Map<string, FontDemand['tuples'][number]>();
-  for (const request of docxOfficeFontFallbackRequests(doc, { fontDemand: true, cjkFallback })) {
-    if (request.presenceOnly || !demanded.has(fontFamilyKey(request.family))) continue;
-    const tuple = {
-      family: request.family.trim(),
-      weight: request.weight ?? 400,
-      style: request.style ?? 'normal',
-    } as const;
-    tuples.set(`${fontFamilyKey(tuple.family)}:${tuple.weight}:${tuple.style}`, Object.freeze(tuple));
-  }
   return Object.freeze({
     families: Object.freeze(families),
     fallbackFamilies: Object.freeze([...candidates.fallback]),
-    tuples: Object.freeze([...tuples.values()]),
     installedSubstituteFamilies: Object.freeze(installedSubstituteFamilies),
     substituteScripts: candidates.substituteScripts,
   });

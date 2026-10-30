@@ -15,7 +15,7 @@ import { join, resolve } from 'node:path';
 import { rolldown } from 'rolldown';
 
 const distDir = resolve(process.argv[2] ?? 'dist');
-const FACTORIES = ['cssApi', 'fontFaceCss', 'fontFiles', 'fontResolver', 'googleFonts', 'officeFontSubstitutions'];
+const FACTORIES = ['fontCssApi', 'fontCss', 'fontFiles', 'fontResolver', 'googleFonts', 'googleFontsSubstitutions', 'officeFontSubstitutions'];
 // The factories, their validation and the Google preset data minify to about
 // 12 KiB. The budget leaves room for growth, not for any viewer code.
 const BUDGET_BYTES = 32 * 1024;
@@ -27,7 +27,7 @@ try {
     const consumer = join(work, `consumer-${entry}`);
     writeFileSync(consumer, [
       `import { ${FACTORIES.join(', ')} } from ${JSON.stringify(join(distDir, entry))};`,
-      `console.log(googleFonts(), cssApi, fontFaceCss, fontFiles, fontResolver, officeFontSubstitutions);`,
+      `console.log(googleFonts(), fontCssApi, fontCss, fontFiles, fontResolver, googleFontsSubstitutions, officeFontSubstitutions);`,
       '',
     ].join('\n'));
     const bundle = await rolldown({ input: consumer, logLevel: 'silent' });

@@ -14,7 +14,7 @@ import { googleFonts } from './presets/google-fonts.js';
 import { assertFontSourceDescriptors, type FontSource } from './source.js';
 
 export const USE_GOOGLE_FONTS_DEPRECATION_MESSAGE =
-  '[ooxml] useGoogleFonts is deprecated and will be removed in 0.91.0. Replace it with fonts: [googleFonts()] — import { googleFonts } from \'@silurus/ooxml\' (also exported from the docx/xlsx/pptx entries). A custom CSS origin is googleFonts({ cssOrigin }). See docs/migration-0.90.md.';
+  '[ooxml] useGoogleFonts is deprecated and will be removed in 0.91.0. Replace it with fonts: [googleFonts()] — import { googleFonts } from \'@silurus/ooxml\' (also exported from the docx/xlsx/pptx entries). A custom CSS origin is googleFonts({ cssOrigin }); other sources are fontCssApi(), fontCss(), fontFiles() and fontResolver(). See docs/migration-0.90.md.';
 
 // One realm's module instance (main window, each popup, each worker) warns
 // once, however many documents or viewers pass the deprecated key.

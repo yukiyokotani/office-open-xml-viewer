@@ -138,7 +138,6 @@ it('checks substitute family presence independent of the styles used', () => {
   }
   const absent = docxFontFamilyPlan(doc, GOOGLE, undefined, { routes: {} });
   expect(absent.families).toContain('Franklin Gothic Book');
-  expect(absent.tuples).toContainEqual({ family: 'Franklin Gothic Book', weight: 700, style: 'normal' });
   // An installed family without a declared substitute is not demanded either.
   expect(docxFontFamilyPlan(doc, [], undefined, { routes: {}, installed: ['franklin gothic book'] }).families)
     .toEqual([]);

@@ -651,19 +651,27 @@ new DocxViewer(canvas, {
 });
 ```
 
-The factories are `googleFonts({ cssOrigin? })`, `cssApi({ urlTemplate, … })`,
-`fontFaceCss({ url })`, `fontFiles({ faces })` and, for authenticated or
-private services, `fontResolver(fn)`, which runs on the main thread. They are
-exported from `@silurus/ooxml` and from each format entry.
+The factories are `googleFonts({ cssOrigin?, substitutes? })`,
+`fontCssApi({ urlTemplate, … })`, `fontCss({ url })`, `fontFiles({ faces })`
+and, for authenticated or private services, `fontResolver(fn)`, which runs on
+the main thread (in worker mode the page also fetches the claimed URLs it
+returns).
+Every source takes `substitutes`; `fontCssApi`, `fontCss` and `fontFiles` also
+take `credentials`. They are exported from `@silurus/ooxml` and from
+each format entry.
 
 - **Chaining:** sources are consulted per family, in option order. The first
   source that has a face for the family claims it. A failed stylesheet or face
   keeps the host fallback with a `console.warn`, and no other source is tried.
 - **Lazy subsets:** only the `unicode-range` subsets that intersect the painted
   text are loaded, and installed faces with the authored name are never
-  replaced.
+  replaced. Font files the library fetches itself (`fontResolver` URLs in
+  worker mode, sources with `credentials: 'omit'`) are fetched for every face
+  of a claimed family.
 - **Deployment:** cross-origin font URLs need CORS. Stylesheet origins need
-  `connect-src` and font file origins need `font-src` in your CSP. Optionally
+  `connect-src` and font file origins need `font-src` in your CSP; font files
+  the library fetches itself (`fontResolver` URLs in worker mode, sources with
+  `credentials: 'omit'`) also need `connect-src`. Optionally
   add `<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>` for
   Google Fonts. Source limits fail closed with
   `OoxmlError('font-source-limit')`.
@@ -1351,7 +1359,7 @@ from the file, so treat them as untrusted text: put them in the DOM with
 
   ZIP, input, wire, representation, and copy limits remain independent. Raising these budgets does not promise that a whole 251,000-cell selection can be copied to the clipboard. The budgets are logical counters, not physical memory measurements. Increasing them accepts additional out-of-memory risk; the library does not guarantee that an allocation failure can be caught. With unchanged defaults no migration is needed. The one exception: errors from these adjustable guards now report `configurable: true`, whether the default or an override applied. Hard-ceiling errors remain `configurable: false`.
 
-- **No network by default.** The library does not send telemetry or analytics, and does not contact third-party services unless you ask it to. In particular, theme webfonts, Office font metric substitutes (Carlito/Caladea), and the script fallback fonts are **not** loaded from anywhere unless you pass [`fonts`](#font-sources) to the relevant `Viewer` / `load(...)` options, for example `fonts: [googleFonts()]`. This is supported uniformly by `DocxViewer`, `PptxViewer`, `XlsxViewer`, and `XlsxSheetViewer`. With `googleFonts()`, fonts for non-Latin scripts are supplied on demand from Noto families so text does not fall back to tofu: Arabic (Noto Naskh/Sans Arabic), CJK (Noto Sans/Serif KR · SC · TC · JP, plus Noto Sans HK, picked per document language so shared Han glyphs take the right shapes), Cyrillic (Noto Sans/Serif), Hebrew (Noto Sans/Serif Hebrew, RTL), Thai (Noto Sans Thai) and Devanagari (Noto Sans Devanagari). No font binaries ship in the bundle; your application is responsible for the licences of the fonts it serves (Google Fonts' Carlito, Caladea and Noto families are OFL). A hosted source receives the end user's IP address and User-Agent (`fonts.googleapis.com` and `fonts.gstatic.com` for `googleFonts()`), which may have GDPR implications; `googleFonts({ cssOrigin })`, `fontFaceCss` and `fontFiles` let you serve fonts from your own origin instead (with `cssOrigin`, only the stylesheet requests start there: redirects and the font URLs in the returned CSS are the mirror's to control, and your CSP enforces the allowed hosts).
+- **No network by default.** The library does not send telemetry or analytics, and does not contact third-party services unless you ask it to. In particular, theme webfonts, Office font metric substitutes (Carlito/Caladea), and the script fallback fonts are **not** loaded from anywhere unless you pass [`fonts`](#font-sources) to the relevant `Viewer` / `load(...)` options, for example `fonts: [googleFonts()]`. This is supported uniformly by `DocxViewer`, `PptxViewer`, `XlsxViewer`, and `XlsxSheetViewer`. With `googleFonts()`, fonts for non-Latin scripts are supplied on demand from Noto families so text does not fall back to tofu: Arabic (Noto Naskh/Sans Arabic), CJK (Noto Sans/Serif KR · SC · TC · JP, plus Noto Sans HK, picked per document language so shared Han glyphs take the right shapes), Cyrillic (Noto Sans/Serif), Hebrew (Noto Sans/Serif Hebrew, RTL), Thai (Noto Sans Thai) and Devanagari (Noto Sans Devanagari). No font binaries ship in the bundle; your application is responsible for the licences of the fonts it serves (Google Fonts' Carlito, Caladea and Noto families are OFL). A hosted source receives the end user's IP address and User-Agent (`fonts.googleapis.com` and `fonts.gstatic.com` for `googleFonts()`), which may have GDPR implications; `googleFonts({ cssOrigin })`, `fontCss` and `fontFiles` let you serve fonts from your own origin instead (with `cssOrigin`, only the stylesheet requests start there: redirects and the font URLs in the returned CSS are the mirror's to control, and your CSP enforces the allowed hosts).
 - **XML parsing.** Uses `roxmltree`, which does not resolve external entities (XXE-safe by default).
 - **Encrypted OOXML ([MS-OFFCRYPTO] Agile Encryption).** Password-protected `.docx` / `.xlsx` / `.pptx` files are OLE2/CFB containers, not ZIPs. Pass `password` to `load(...)` and the file is decrypted **client-side** via WebCrypto — no bytes and no password leave the browser:
   ```ts

@@ -5,7 +5,7 @@ import { hasTextWarp } from '../shape/text-warp';
 import { resolveRegionMapFeature } from '../chart/region-map-renderer';
 import { docxBorderDashArray, pptxPresetDashArray } from '../draw/dash';
 import { googleFonts } from '../fonts/presets/google-fonts';
-import { cssApiRequests } from '../fonts/source';
+import { fontCssApiRequests } from '../fonts/source';
 import { officeFaceWebAlias } from '../fonts/font-stack';
 
 // Document strings that name Object.prototype members must miss every lookup
@@ -32,6 +32,6 @@ describe('lookup tables keyed by document strings', () => {
 
   it('never requests a stylesheet for a prototype member font name', () => {
     const source = googleFonts();
-    for (const name of PROTO_NAMES) expect(cssApiRequests(source, name), name).toEqual([]);
+    for (const name of PROTO_NAMES) expect(fontCssApiRequests(source, name), name).toEqual([]);
   });
 });

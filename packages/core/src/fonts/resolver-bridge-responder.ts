@@ -11,12 +11,13 @@
  * requester of this realm already resolved or is resolving (an XLSX viewer
  * realm session, another document sharing the resolver) is joined, not asked
  * again, so the application function runs once per family in both modes. A
- * new call receives a copy of the demand (`demand.scalars` bounded by
- * `HARD_MAX_FONT_DEMAND_SCALARS`, family records without a prototype) and an
+ * new call receives a copy of the demand (family names only) and an
  * `AbortSignal` that the worker's cancellation, document destroy and the 15 s
  * font ceiling abort (a shared call is aborted only when every requester left).
- * The reply carries each family's claiming declarations, failure or absence,
- * or the breached ceiling.
+ * The reply carries each family's candidate declarations (the worker claims
+ * from them under the scope its own text proves), failure or absence, or the
+ * breached ceiling. The host downloads the candidates' URL faces in this
+ * realm before posting (`resolver-bridge-host.ts`).
  *
  * Holding and bytes (design §4.3, §4.4): the bridge holds every entry it
  * joined through the document's cache handle until the document is destroyed,
@@ -36,11 +37,7 @@
  * document was destroyed, is never posted.
  */
 import type { OoxmlError } from '../errors/ooxml-error.js';
-import { nullRecord } from '../internal/own-key.js';
-import {
-  HARD_MAX_FONT_DEMAND_SCALARS,
-  HARD_MAX_FONT_SOURCE_FAMILIES,
-} from '../worker/resource-policy.generated.js';
+import { HARD_MAX_FONT_SOURCE_FAMILIES } from '../worker/resource-policy.generated.js';
 import { FONT_LOAD_CEILING_MS } from './font-registry.js';
 import {
   copiedForTransfer,
@@ -53,9 +50,7 @@ import { concludeBridgedRequest } from './resolver-failures.js';
 import {
   resolveFamiliesThroughCache,
   runResolverInRealm,
-  substituteScriptsOf,
   type FontResolverFailures,
-  type ResolverDemandedName,
 } from './resolver-resolution.js';
 import { acquireSourceCache, type SourceCache } from './source-cache.js';
 import {
@@ -64,7 +59,6 @@ import {
   type FontResolverSource,
   type FontSource,
 } from './source.js';
-import { FONT_SUBSTITUTE_SCRIPTS, type FontSubstituteScript } from './substitute-script.js';
 
 type Post = (message: unknown, transfer?: Transferable[]) => void;
 
@@ -78,8 +72,6 @@ export interface FontResolverResponderOptions {
   readonly resolverFailures?: FontResolverFailures;
 }
 
-const KNOWN_SCRIPTS: ReadonlySet<string> = new Set<string>(FONT_SUBSTITUTE_SCRIPTS);
-
 const isNonNegativeSafeInteger = (value: unknown): value is number =>
   typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 
@@ -90,56 +82,20 @@ function names(value: unknown): readonly string[] | undefined {
 
 /**
  * The application's copy of a bridged demand, or undefined when the worker
- * sent something no library session produces. Record-valued fields are
- * rebuilt without a prototype (keys are document family names); more than
- * `HARD_MAX_FONT_DEMAND_SCALARS` scalars become `'all'`, as in the session.
+ * sent something no library session produces: exactly `families` and
+ * `fallbackFamilies`, string lists within `HARD_MAX_FONT_SOURCE_FAMILIES`
+ * together.
  */
 export function copyBridgedFontDemand(value: unknown): FontDemand | undefined {
   if (value === null || typeof value !== 'object') return undefined;
   const fields = value as Partial<Record<keyof FontDemand, unknown>>;
+  if (Object.keys(fields).some((key) => key !== 'families' && key !== 'fallbackFamilies')) return undefined;
   const families = names(fields.families);
   const fallbackFamilies = names(fields.fallbackFamilies);
   if (!families || !fallbackFamilies || families.length + fallbackFamilies.length > HARD_MAX_FONT_SOURCE_FAMILIES) {
     return undefined;
   }
-  if (!Array.isArray(fields.tuples)) return undefined;
-  const tuples: FontDemand['tuples'][number][] = [];
-  for (const tuple of fields.tuples as unknown[]) {
-    const entry = (tuple ?? {}) as Partial<Record<'family' | 'weight' | 'style', unknown>>;
-    if (typeof entry.family !== 'string' || typeof entry.weight !== 'number' || !Number.isFinite(entry.weight)
-      || (entry.style !== 'normal' && entry.style !== 'italic')) return undefined;
-    tuples.push(Object.freeze({ family: entry.family, weight: entry.weight, style: entry.style }));
-  }
-  let scalars: FontDemand['scalars'];
-  if (fields.scalars === 'all') scalars = 'all';
-  else if (!Array.isArray(fields.scalars)) return undefined;
-  else if (fields.scalars.length > HARD_MAX_FONT_DEMAND_SCALARS) scalars = 'all';
-  else {
-    if (!fields.scalars.every((scalar) => Number.isInteger(scalar) && scalar >= 0 && scalar <= 0x10ffff)) return undefined;
-    scalars = Object.freeze([...fields.scalars as number[]]);
-  }
-  let substituteScripts: Record<string, readonly FontSubstituteScript[]> | undefined;
-  if (fields.substituteScripts !== undefined) {
-    const record = fields.substituteScripts;
-    if (record === null || typeof record !== 'object' || Array.isArray(record)) return undefined;
-    const entries = Object.entries(record);
-    if (entries.length > HARD_MAX_FONT_SOURCE_FAMILIES) return undefined;
-    substituteScripts = nullRecord();
-    for (const [family, list] of entries) {
-      if (!Array.isArray(list) || !list.every((script) => typeof script === 'string' && KNOWN_SCRIPTS.has(script))) {
-        return undefined;
-      }
-      substituteScripts[family] = Object.freeze([...list as FontSubstituteScript[]]);
-    }
-    Object.freeze(substituteScripts);
-  }
-  return Object.freeze({
-    families,
-    fallbackFamilies,
-    tuples: Object.freeze(tuples),
-    scalars,
-    ...(substituteScripts ? { substituteScripts } : {}),
-  });
+  return Object.freeze({ families, fallbackFamilies });
 }
 
 function isFontSourceLimit(error: unknown): error is OoxmlError & { violation: NonNullable<OoxmlError['violation']> } {
@@ -291,17 +247,15 @@ export class FontResolverResponder {
     if (source?.kind !== 'font-resolver' || source.id !== resolverId || !fontResolverFunction(source)) {
       return fail('font resolver function is not available in this realm');
     }
-    const scriptsOf = substituteScriptsOf(demand.substituteScripts);
-    const families: ResolverDemandedName[] = [
-      ...demand.families.map((name) => ({ name, fallback: false, scripts: scriptsOf(name) })),
-      ...demand.fallbackFamilies.map((name) => ({ name, fallback: true, scripts: scriptsOf(name) })),
+    const families = [
+      ...demand.families.map((name) => ({ name, fallback: false })),
+      ...demand.fallbackFamilies.map((name) => ({ name, fallback: true })),
     ];
     const cache = this.cacheOf(sourceIndex, source);
     const started = Date.now();
     try {
       const answers = await resolveFamiliesThroughCache({
-        source, cache, runner: runResolverInRealm, families,
-        tuples: demand.tuples, scalars: demand.scalars, signal,
+        source, cache, runner: runResolverInRealm, families, signal,
         // Held until dispose, like a main-mode session's entries.
         holder: cache, sourceIndex, failures: this.failures,
         remainingMs: () => Math.max(0, (request.remainingMs ?? FONT_LOAD_CEILING_MS) - (Date.now() - started)),

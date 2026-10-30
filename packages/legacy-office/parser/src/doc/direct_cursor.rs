@@ -4,6 +4,19 @@
 use super::direct_model::DirectDocResult;
 use docx_model::owned_cursor::{OwnedDocumentCursor, OwnedDocumentResource};
 
+/// The shared cursor's resource errors in this reader's established wording.
+fn legacy_message(error: String) -> String {
+    match error.as_str() {
+        "duplicate document source resource key" => "duplicate DOC direct resource key".into(),
+        "document source resource allocation failed" => {
+            "DOC direct resource allocation failed".into()
+        }
+        "document source cursor is closed" => "DOC direct cursor is closed".into(),
+        "unknown document source resource key" => "unknown DOC direct resource key".into(),
+        _ => error,
+    }
+}
+
 pub(crate) struct DirectCursor {
     revision_markup: crate::doc::settings::RevisionMarkup,
     inner: OwnedDocumentCursor,
@@ -22,7 +35,7 @@ impl DirectCursor {
             .collect();
         Ok(Self {
             revision_markup: result.revision_markup,
-            inner: OwnedDocumentCursor::new(result.document, resources)?,
+            inner: OwnedDocumentCursor::new(result.document, resources).map_err(legacy_message)?,
         })
     }
 
@@ -88,11 +101,11 @@ impl DirectCursor {
     }
 
     pub(crate) fn extract_image(&self, key: &str) -> Result<Vec<u8>, String> {
-        self.inner.extract_image(key)
+        self.inner.extract_image(key).map_err(legacy_message)
     }
 
     pub(crate) fn resource_mime_type(&self, key: &str) -> Result<&str, String> {
-        self.inner.resource_mime_type(key)
+        self.inner.resource_mime_type(key).map_err(legacy_message)
     }
 }
 
@@ -144,6 +157,30 @@ mod tests {
         assert_eq!(
             cursor.extract_image("legacy-doc/image/7").unwrap(),
             [1, 2, 3]
+        );
+        assert_eq!(
+            cursor.extract_image("legacy-doc/image/8").unwrap_err(),
+            "unknown DOC direct resource key"
+        );
+        assert_eq!(
+            cursor.resource_mime_type("legacy-doc/image/8").unwrap_err(),
+            "unknown DOC direct resource key"
+        );
+    }
+
+    #[test]
+    fn duplicate_resource_keys_keep_the_doc_message() {
+        let mut value = result();
+        value
+            .resources
+            .push(super::super::pictures::DirectPictureResource {
+                key: "legacy-doc/image/7".into(),
+                mime_type: "image/jpeg",
+                bytes: vec![],
+            });
+        assert_eq!(
+            DirectCursor::new(value).err().unwrap(),
+            "duplicate DOC direct resource key"
         );
     }
 }

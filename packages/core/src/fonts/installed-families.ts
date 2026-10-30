@@ -20,7 +20,6 @@
  */
 import { probeFontFamilyPresence, type FontFamilyPresence } from './office-fallback.js';
 import { normalizeLocalFontMetricFamily } from './local-metrics.js';
-import type { FontDemand } from './source.js';
 
 /** Presence of `families` (normalised keys): installed ones, and every one
  * whose probe completed. */
@@ -36,7 +35,7 @@ export class InstalledFamilyExclusion {
   constructor(private readonly probe: InstalledFamilyProbe = probeInstalledFamilies) {}
 
   /** `demand` without the authored families proven installed or unproven. */
-  async exclude(demand: FontDemand): Promise<FontDemand> {
+  async exclude<T extends { readonly families: readonly string[] }>(demand: T): Promise<T> {
     const fresh = [...new Set(demand.families.map(normalizeLocalFontMetricFamily))]
       .filter((key) => !this.installed.has(key));
     if (fresh.length) {

@@ -13,7 +13,7 @@ const mocks = vi.hoisted(() => ({
   legacyXls: vi.fn(() => ({ target: 'xlsx' })),
   legacyPpt: vi.fn(() => ({ target: 'pptx' })),
   math: { loadMathJax: vi.fn(), mathMLToSvg: vi.fn() },
-  googleFontsSource: { kind: 'css-api' },
+  googleFontsSource: { kind: 'font-css-api' },
   threeD: { render: vi.fn() },
   regionMap: { render: vi.fn() },
   chartEx: { render: vi.fn() },

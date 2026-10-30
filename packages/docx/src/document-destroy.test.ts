@@ -268,7 +268,7 @@ describe('DocxDocument.destroy() — rejects in-flight worker requests', () => {
   it('destroy() releases the document’s font-source faces from the FontFaceSet', async () => {
     const { added } = installGoogleFontFaceSet();
     const session = new FontSourceSession({ sources: [googleFonts()] });
-    await session.ensure({ families: ['Calibri'], tuples: [], fallbackFamilies: [], scalars: 'all' });
+    await session.ensure({ families: ['Calibri'], fallbackFamilies: [], scalars: 'all' });
     expect(added).toHaveLength(1); // the source face is in the shared set
 
     const { doc } = makeDocument();

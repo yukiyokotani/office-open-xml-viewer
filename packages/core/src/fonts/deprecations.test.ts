@@ -5,7 +5,7 @@ import {
   resetFontDeprecationWarningsForTests,
 } from './deprecations.js';
 import { googleFonts } from './presets/google-fonts.js';
-import { cssApi } from './source.js';
+import { fontCssApi } from './source.js';
 
 afterEach(() => {
   resetFontDeprecationWarningsForTests();
@@ -30,7 +30,7 @@ describe('normalizeFontOptions (useGoogleFonts alias, design §9.1)', () => {
     normalizeFontOptions({ useGoogleFonts: true });
     expect(warn.mock.calls).toEqual([[USE_GOOGLE_FONTS_DEPRECATION_MESSAGE]]);
     expect(USE_GOOGLE_FONTS_DEPRECATION_MESSAGE).toBe(
-      '[ooxml] useGoogleFonts is deprecated and will be removed in 0.91.0. Replace it with fonts: [googleFonts()] — import { googleFonts } from \'@silurus/ooxml\' (also exported from the docx/xlsx/pptx entries). A custom CSS origin is googleFonts({ cssOrigin }). See docs/migration-0.90.md.',
+      '[ooxml] useGoogleFonts is deprecated and will be removed in 0.91.0. Replace it with fonts: [googleFonts()] — import { googleFonts } from \'@silurus/ooxml\' (also exported from the docx/xlsx/pptx entries). A custom CSS origin is googleFonts({ cssOrigin }); other sources are fontCssApi(), fontCss(), fontFiles() and fontResolver(). See docs/migration-0.90.md.',
     );
     resetFontDeprecationWarningsForTests();
     normalizeFontOptions({ useGoogleFonts: false });
@@ -39,7 +39,7 @@ describe('normalizeFontOptions (useGoogleFonts alias, design §9.1)', () => {
 
   it('rejects useGoogleFonts: true combined with fonts, but lets false accompany fonts', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    const source = cssApi({ urlTemplate: 'https://fonts.example/css?family={family}' });
+    const source = fontCssApi({ urlTemplate: 'https://fonts.example/css?family={family}' });
     expect(() => normalizeFontOptions({ useGoogleFonts: true, fonts: [] })).toThrow(
       new TypeError('useGoogleFonts cannot be combined with fonts; add googleFonts() to fonts instead'),
     );
@@ -48,7 +48,7 @@ describe('normalizeFontOptions (useGoogleFonts alias, design §9.1)', () => {
 
   it('validates fonts and omits an empty list', () => {
     expect(normalizeFontOptions({ fonts: [] })).toEqual({});
-    expect(() => normalizeFontOptions({ fonts: [{ kind: 'css-api' }] as never })).toThrow(TypeError);
+    expect(() => normalizeFontOptions({ fonts: [{ kind: 'font-css-api' }] as never })).toThrow(TypeError);
     expect(() => normalizeFontOptions({ fonts: 'google' as never })).toThrow(TypeError);
   });
 });

@@ -64,7 +64,7 @@ describe('DocxDocument.load font options', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     await expect(DocxDocument.load(new ArrayBuffer(0), { useGoogleFonts: true, fonts: [] }))
       .rejects.toThrow(TypeError);
-    await expect(DocxDocument.load(new ArrayBuffer(0), { fonts: [{ kind: 'css-api' }] as never }))
+    await expect(DocxDocument.load(new ArrayBuffer(0), { fonts: [{ kind: 'font-css-api' }] as never }))
       .rejects.toThrow(TypeError);
     expect(parse).not.toHaveBeenCalled();
   });
