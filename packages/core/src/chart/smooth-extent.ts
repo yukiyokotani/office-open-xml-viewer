@@ -37,9 +37,10 @@ export function classicLineRunIndices(
   return runs;
 }
 
-/** Whether a series paints a smoothed connecting line. Library policy: the
- * axis covers the curve that is actually drawn, so a smoothed series whose
- * line is removed (`a:ln/a:noFill`) widens nothing. */
+/** Whether a smoothed series' curve counts toward its axes. Excel 365 decides
+ * per series: removing the series line (`a:ln/a:noFill`, markers only) keeps
+ * the axis at the points for line and scatter, while hiding only some point
+ * segments (`c:dPt` line `noFill`) still widens it to the whole curve. */
 export function seriesPaintsSmoothedLine(
   chart: ChartModel,
   series: ChartSeries,
@@ -97,13 +98,17 @@ export function smoothCurveExtent(
       const c2 = p2 - (p3 - p1) / 6;
       include(p1);
       include(p2);
-      // B'(t) / 3 = a t² + b t + c for the cubic p1, c1, c2, p2.
+      // B'(t) / 3 = a t² + b t + c for the cubic p1, c1, c2, p2. Degeneracy
+      // is judged relative to the coefficients so tiny magnitudes keep their
+      // extrema.
       const a = -p1 + 3 * c1 - 3 * c2 + p2;
       const b = 2 * (p1 - 2 * c1 + c2);
       const c = c1 - p1;
+      const scale = Math.max(Math.abs(a), Math.abs(b), Math.abs(c));
+      if (scale === 0) continue;
       const roots: number[] = [];
-      if (Math.abs(a) < 1e-12) {
-        if (Math.abs(b) > 1e-12) roots.push(-c / b);
+      if (Math.abs(a) <= scale * 1e-12) {
+        if (Math.abs(b) > scale * 1e-12) roots.push(-c / b);
       } else {
         const disc = b * b - 4 * a * c;
         if (disc >= 0) {

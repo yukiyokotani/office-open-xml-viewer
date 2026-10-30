@@ -84,14 +84,16 @@ export function classicPlotDispatch(chart: ChartModel): ClassicPlotDispatch {
   // its group against the shared categories, and writes that axis beside the
   // primary one in every secondary-axis combo (bar, line or area on either
   // axis). Its scaling still applies: a reversed (maxMin) deleted axis
-  // reverses its series and moves the secondary value axis, which the single
-  // category scale of these painters cannot draw, so orientation must agree.
+  // reverses its bars or line and moves the secondary value axis (Excel 365),
+  // which the single category scale of the category painters cannot draw.
+  const sharedCategoryOrientation = (chart.secondaryCatAxis?.orientation ?? 'minMax')
+    === (chart.catAxisOrientation ?? 'minMax');
+  if (!sharedCategoryOrientation && chart.secondaryCatAxis?.hidden === true
+    && groups.some(group => group.categoryAxis === 'secondary'
+      && group.kind !== 'scatter' && group.kind !== 'bubble')) return 'unsupported';
   const onPrimaryCategories = (group: ChartPlotGroup): boolean =>
     group.categoryAxis === 'primary'
-    || (group.categoryAxis === 'secondary'
-      && chart.secondaryCatAxis?.hidden === true
-      && (chart.secondaryCatAxis.orientation ?? 'minMax')
-        === (chart.catAxisOrientation ?? 'minMax'));
+    || (group.categoryAxis === 'secondary' && chart.secondaryCatAxis?.hidden === true);
   const kinds = new Set(groups.map(group => group.kind));
   if (groups.some(group => THREE_D_GROUPS.has(group.kind))) return 'unsupported';
   if (groups.length === 2 && groups[0].kind === 'bar' && groups[1].kind === 'scatter') {
@@ -148,9 +150,13 @@ export function classicPlotDispatch(chart: ChartModel): ClassicPlotDispatch {
     if (overlay == null || !onPrimaryCategories(overlay)) return 'unsupported';
     return 'bar-combo';
   }
-  // The area painter maps each group through its own value axis.
+  // The area painter maps each group through its own value axis but draws
+  // line groups unstacked, so a stacked line group keeps the original
+  // primary-axes boundary.
   if (groups.length === 2 && groups[0].kind === 'area' && groups[1].kind === 'line'
-    && groups.every(onPrimaryCategories)) {
+    && (groups.every(group => group.categoryAxis === 'primary' && group.valueAxis === 'primary')
+      || (groups.every(onPrimaryCategories)
+        && (groups[1].grouping ?? 'standard') === 'standard'))) {
     return 'area-groups';
   }
   if (kinds.size === 2 && kinds.has('bar') && kinds.has('line')) {

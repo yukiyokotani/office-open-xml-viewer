@@ -821,12 +821,18 @@ pub(super) fn parse_classic_impl(
     // primary category axis, in either XML order of the axes (observed in Excel
     // 365). The pairing is adopted only when every group agrees with it and the
     // secondary category axis is deleted; a visible second axis on the same side
-    // has its own label row, which no painter lays out, so it stays ambiguous.
+    // has its own label row, which no painter lays out, so it stays ambiguous,
+    // as do two same-side date axes.
     let paired_category_axes = (|| {
         if is_scatter_axes || !combo_scatter_axis_ids.is_empty() {
             return None;
         }
         let positional = positional_real_cat_ax?;
+        // Date axes carry their own scale (base unit, bounds), so two of them
+        // are not assumed to share one category mapping.
+        if positional.tag_name().name() != "catAx" {
+            return None;
+        }
         let same_side = |axis: &roxmltree::Node| {
             axis.tag_name().name() == positional.tag_name().name()
                 && ax_pos(axis) == ax_pos(&positional)
