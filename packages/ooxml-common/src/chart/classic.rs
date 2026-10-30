@@ -729,12 +729,12 @@ pub(super) fn parse_classic_impl(
     if real_cat_ax_nodes.len() + val_ax_nodes.len() > MAX_CHART_PLOT_AXES {
         return None;
     }
-    let real_cat_ax = real_cat_ax_nodes
+    let positional_real_cat_ax = real_cat_ax_nodes
         .iter()
         .find(|axis| !matches!(ax_pos(axis).as_deref(), Some("t") | Some("r")))
         .or_else(|| real_cat_ax_nodes.first())
         .copied();
-    let is_scatter_axes = real_cat_ax.is_none() && val_ax_nodes.len() >= 2;
+    let is_scatter_axes = positional_real_cat_ax.is_none() && val_ax_nodes.len() >= 2;
     let scatter_x_val_ax = if is_scatter_axes {
         val_ax_nodes
             .iter()
@@ -743,7 +743,6 @@ pub(super) fn parse_classic_impl(
     } else {
         None
     };
-    let cat_ax = real_cat_ax.or(scatter_x_val_ax);
 
     // Primary value axis. Normally the first value axis that isn't on the right.
     // For scatter it's the VERTICAL (l/r) axis — never the horizontal one, which
@@ -812,10 +811,109 @@ pub(super) fn parse_classic_impl(
                 .copied()
         })
     };
-    let secondary_real_cat_ax = real_cat_ax_nodes
-        .iter()
-        .find(|axis| Some(**axis) != real_cat_ax)
-        .copied();
+    // Two category axes can share a side: Excel writes the deleted secondary
+    // category axis of every secondary-axis combo at axPos="b", beside the
+    // primary one (an authored "t" is rewritten to "b" on save). Position cannot
+    // tell them apart, and Office does not use crossAx either: a file whose
+    // crossAx links are swapped draws the same. Each chart group names its own
+    // category/value pair in its axId list (CT_BarChart etc. axId), and Excel
+    // draws the group whose pair holds the primary (non-right) value axis on the
+    // primary category axis, in either XML order of the axes (observed in Excel
+    // 365). The pairing is adopted only when every group agrees with it and the
+    // secondary category axis is deleted; a visible second axis on the same side
+    // has its own label row, which no painter lays out, so it stays ambiguous,
+    // as do two same-side date axes.
+    let paired_category_axes = (|| {
+        if is_scatter_axes || !combo_scatter_axis_ids.is_empty() {
+            return None;
+        }
+        let positional = positional_real_cat_ax?;
+        // Date axes carry their own scale (base unit, bounds), so two of them
+        // are not assumed to share one category mapping.
+        if positional.tag_name().name() != "catAx" {
+            return None;
+        }
+        let same_side = |axis: &roxmltree::Node| {
+            axis.tag_name().name() == positional.tag_name().name()
+                && ax_pos(axis) == ax_pos(&positional)
+        };
+        if !real_cat_ax_nodes
+            .iter()
+            .any(|axis| *axis != positional && same_side(axis))
+        {
+            return None;
+        }
+        let primary_value_id = val_ax.as_ref().and_then(ax_id_of)?;
+        let secondary_value_id = val_ax_nodes
+            .iter()
+            .find(|node| ax_pos(node).as_deref() == Some("r"))
+            .and_then(ax_id_of)?;
+        if primary_value_id == secondary_value_id {
+            return None;
+        }
+        let group_axis_ids: Vec<Vec<String>> = root
+            .descendants()
+            .filter(|node| node.is_element() && is_classic_group_name(node.tag_name().name()))
+            .take(MAX_CHART_PLOT_GROUPS + 1)
+            .map(|group| {
+                group
+                    .children()
+                    .filter(|node| node.is_element() && node.tag_name().name() == "axId")
+                    .filter_map(|node| attr(&node, "val"))
+                    .filter_map(|value| parse_chart_axis_id_value(&value))
+                    .take(MAX_CHART_GROUP_AXIS_IDS + 1)
+                    .collect()
+            })
+            .collect();
+        // The single category axis paired with `value_id` across all groups.
+        let paired_with = |value_id: &str| {
+            let mut found: Option<roxmltree::Node> = None;
+            for ids in group_axis_ids
+                .iter()
+                .filter(|ids| ids.iter().any(|id| id == value_id))
+            {
+                for axis in real_cat_ax_nodes
+                    .iter()
+                    .filter(|axis| ax_id_of(axis).is_some_and(|id| ids.contains(&id)))
+                {
+                    if found.is_some_and(|known| known != *axis) {
+                        return None;
+                    }
+                    found = Some(*axis);
+                }
+            }
+            found
+        };
+        let primary = paired_with(&primary_value_id)?;
+        let secondary = paired_with(&secondary_value_id)?;
+        (primary != secondary
+            && same_side(&primary)
+            && same_side(&secondary)
+            && [primary, secondary].iter().all(|axis| {
+                let id = ax_id_of(axis);
+                id.is_some()
+                    && real_cat_ax_nodes
+                        .iter()
+                        .chain(val_ax_nodes.iter())
+                        .filter(|other| ax_id_of(other) == id)
+                        .count()
+                        == 1
+            })
+            && axis_is_deleted(secondary))
+        .then_some((primary, secondary))
+    })();
+    let real_cat_ax = paired_category_axes
+        .map(|(primary, _)| primary)
+        .or(positional_real_cat_ax);
+    let cat_ax = real_cat_ax.or(scatter_x_val_ax);
+    let secondary_real_cat_ax = paired_category_axes
+        .map(|(_, secondary)| secondary)
+        .or_else(|| {
+            real_cat_ax_nodes
+                .iter()
+                .find(|axis| Some(**axis) != real_cat_ax)
+                .copied()
+        });
     // A pure scatter chart can contain more than one CT_ScatterChart group,
     // each paired with its own X/Y value axes. The second group's horizontal
     // axis is the top secondary X axis and its vertical axis is the right
@@ -997,6 +1095,13 @@ pub(super) fn parse_classic_impl(
         .as_ref()
         .and_then(ax_id_of)
         .filter(|id| Some(id) != primary_category_axis_id.as_ref());
+    if let Some((primary, secondary)) = paired_category_axes {
+        for axis in [primary, secondary] {
+            if let Some(id) = ax_id_of(&axis) {
+                ambiguous_axis_ids.remove(&id);
+            }
+        }
+    }
     let mut primary_value_axis_id = val_ax.as_ref().and_then(ax_id_of);
     let mut secondary_value_axis_id = secondary_val_ax
         .as_ref()
@@ -2155,9 +2260,14 @@ pub(super) fn parse_classic_impl(
     // ECMA-376 §21.2.2.35: `<c:crossBetween>` lives on the VALUE axis (not cat),
     // and describes whether value gridlines land between or on category ticks.
     // Default is "between" (categories inset by half a step each side).
-    let cat_axis_cross_between = root
-        .descendants()
-        .find(|n| n.is_element() && n.tag_name().name() == "valAx")
+    // crossBetween (§21.2.2.32) belongs to the value axis that crosses the
+    // category axis: read it from the selected primary value axis, not from
+    // whichever c:valAx comes first (a secondary one can be listed first).
+    let cat_axis_cross_between = (if is_scatter_axes { None } else { val_ax })
+        .or_else(|| {
+            root.descendants()
+                .find(|n| n.is_element() && n.tag_name().name() == "valAx")
+        })
         .and_then(|ax| {
             ax.children()
                 .find(|n| n.is_element() && n.tag_name().name() == "crossBetween")
@@ -2449,6 +2559,8 @@ pub(super) fn parse_classic_impl(
                 .and_then(|node| node.attribute("val"))
                 .and_then(|value| value.parse::<u32>().ok())
                 .filter(|value| *value > 0),
+            cross_between: child(ax, "crossBetween").and_then(|node| attr(&node, "val")),
+            date_axis: (ax.tag_name().name() == "dateAx").then_some(true),
             crosses,
             crosses_at,
             title_font_size_hpt: title_size,

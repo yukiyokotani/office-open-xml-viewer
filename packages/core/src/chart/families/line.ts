@@ -1,4 +1,5 @@
 // Classic line chart family.
+import { classicLineRunIndices, seriesPaintsSmoothedLine, smoothCurveExtent } from '../smooth-extent.js';
 import type { ChartModel, ChartRect, ChartSeries } from '../../types/chart';
 
 import { chartStyleEffectOwner, paintChartStyleEffects } from '../style-effects.js';
@@ -177,6 +178,39 @@ export function renderLineChart(
       dataMin = Math.min(dataMin, v); dataMax = Math.max(dataMax, v);
     }
   }
+  // A smoothed line's automatic axis covers the curve it draws (see
+  // smoothCurveExtent), stacked series included. On a percentStacked axis the
+  // curve goes to planValueAxis, which snaps it to the percent unit.
+  const smoothedCurveExtent = (si: number, logBase: number | null | undefined) => {
+    const series = chart.series[si];
+    if (!seriesPaintsSmoothedLine(chart, series, chartExSeriesFormatIndex(series, si))) {
+      return null;
+    }
+    return smoothCurveExtent(
+      classicLineRunIndices(series, n, dispBlanks, stackedBySeries[si])
+        .map(run => run.map(ci => plotted(si, ci))),
+      logBase,
+    );
+  };
+  let percentCurve: [number, number] | null = null;
+  for (let si = 0; si < chart.series.length; si++) {
+    if (isSecondarySeries(chart.series[si])) continue;
+    const curve = smoothedCurveExtent(si, chart.valAxisLogBase);
+    if (!curve) continue;
+    if (axisIsPercent) {
+      percentCurve = percentCurve
+        ? [Math.min(percentCurve[0], curve[0]), Math.max(percentCurve[1], curve[1])]
+        : curve;
+    } else {
+      dataMin = Math.min(dataMin, curve[0]); dataMax = Math.max(dataMax, curve[1]);
+    }
+  }
+  const secondaryCurveValues: number[] = [];
+  for (let si = 0; si < chart.series.length; si++) {
+    if (!isSecondarySeries(chart.series[si])) continue;
+    const curve = smoothedCurveExtent(si, sec?.logBase);
+    if (curve) secondaryCurveValues.push(...curve);
+  }
   for (let si = 0; si < chart.series.length; si++) {
     const series = chart.series[si];
     if (isSecondarySeries(series)) continue;
@@ -250,6 +284,7 @@ export function renderLineChart(
     (series, pointIndex, seriesIndex) => !stackedBySeries[seriesIndex]
       && series.values[pointIndex] == null
       ? null : plotted(seriesIndex, pointIndex),
+    secondaryCurveValues,
   );
   // Right-edge gutter for the secondary tick labels + rotated title. Measured
   // with the SAME font/format the axis is drawn with so the reserve matches the
@@ -285,7 +320,9 @@ export function renderLineChart(
   );
   const titleRightBandW = legRightW + w * 0.05 + secLabelBandW + secTitleBandW;
 
-  const provisionalPlan = planValueAxis(chart, dataMin, dataMax, phEst / ptToPx, axisIsPercent);
+  const provisionalPlan = planValueAxis(
+    chart, dataMin, dataMax, phEst / ptToPx, axisIsPercent, 'vertical', percentCurve,
+  );
   let primaryLabelWidth = 0;
   if (
     !chart.valAxisHidden
@@ -447,7 +484,9 @@ export function renderLineChart(
   // auto major unit, same model as the bar/column renderer). `planValueAxis`
   // folds in the CH6 major unit / logBase / orientation; with none set it is
   // byte-identical to the old `valueAxisScale` + linear `toY`.
-  const plan = planValueAxis(chart, dataMin, dataMax, ph / ptToPx, axisIsPercent);
+  const plan = planValueAxis(
+    chart, dataMin, dataMax, ph / ptToPx, axisIsPercent, 'vertical', percentCurve,
+  );
   if (plan.max - plan.min === 0) return;
 
   const toY = (v: number) => py0 + ph - plan.frac(v) * ph;
@@ -610,24 +649,8 @@ export function renderLineChart(
     // series when there is no secondary axis) map through the primary `toY`.
     const yOf = yMapFor(s);
     const smooth = s.smooth === true;
-    const runs: IndexedLinePoint[][] = [];
-    let run: IndexedLinePoint[] = [];
-    const flushRun = (): void => {
-      if (run.length > 0) runs.push(run);
-      run = [];
-    };
-    for (let ci = 0; ci < n; ci++) {
-      if (s.sourceHidden?.[ci] === true) {
-        flushRun();
-        continue;
-      }
-      if (!seriesStacked && s.values[ci] == null) {
-        if (dispBlanks === 'gap') { flushRun(); continue; }
-        if (dispBlanks === 'span') continue;
-      }
-      run.push({ x: toX(ci), y: yOf(plotted(si, ci)), index: ci });
-    }
-    flushRun();
+    const runs: IndexedLinePoint[][] = classicLineRunIndices(s, n, dispBlanks, seriesStacked)
+      .map(run => run.map(ci => ({ x: toX(ci), y: yOf(plotted(si, ci)), index: ci })));
     const lineBounds = { x: px0, y: py0, w: pw, h: ph };
     if (chartSeriesVariesByPoint(chart, si)) {
       paintClassicVaryingLineSegments(

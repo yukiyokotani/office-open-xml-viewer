@@ -2,7 +2,7 @@
 import type { ChartModel, ChartRect, ChartSeries, SecondaryValueAxis } from '../../types/chart';
 import { planDateCategoryAxis } from '../date-axis.js';
 import { isCrossBetween, resolveAxisLine } from '../axis-style.js';
-import { planNumericValueAxis } from '../axis-scale.js';
+import { automaticPercentMajorUnit, planNumericValueAxis } from '../axis-scale.js';
 import { axisTitleBreakThicknessPx, axisTitleFontPx, categoryTickLabelGapPx, chartTextFontSizePx } from '../layout.js';
 import { rawLinkedChartStyleRole } from '../effective-style.js';
 import { categoryLabelAnchorFraction, categoryLabelOffsetPx } from '../category-spacing.js';
@@ -91,7 +91,8 @@ export function forEachErrorBarEndpoint(
  *
  *  `plotHeightPt` is the estimated plot height in points (the axis is the
  *  vertical right edge, so its length drives the auto major unit). `getValues`
- *  yields each opted-in series' raw values.
+ *  yields each opted-in series' raw values. `extraValues` are further plotted
+ *  extents on this axis (a smoothed curve's overshoot).
  *
  *  Empty secondary data keeps the neutral 0..1 fallback. */
 export function computeSecondaryAxis(
@@ -105,6 +106,7 @@ export function computeSecondaryAxis(
     series.useSecondaryAxis === true,
   valueAt: (series: ChartSeries, pointIndex: number, seriesIndex: number) => number | null =
     () => null,
+  extraValues: Iterable<number> = [],
 ): SecondaryAxisScale | null {
   if (!sec) return null;
   let dMin = Infinity;
@@ -129,20 +131,54 @@ export function computeSecondaryAxis(
       include,
     );
   }
+  let extraMin = Infinity;
+  let extraMax = -Infinity;
+  for (const value of extraValues) {
+    if (!Number.isFinite(value)) continue;
+    extraMin = Math.min(extraMin, value);
+    extraMax = Math.max(extraMax, value);
+  }
+  // Plotted geometry beyond the points, e.g. a smoothed curve's overshoot. A
+  // percentStacked axis snaps a bound the curve crosses outward to the
+  // automatic percent unit of the widened range, as planValueAxis does.
+  if (!percentStacked) {
+    include(extraMin);
+    include(extraMax);
+  }
   if (!Number.isFinite(dMin) || !Number.isFinite(dMax)) {
     dMin = 0;
     dMax = 1;
+  }
+  let majorUnit = valueAxisUnitInRendererSpace(sec.majorUnit, percentStacked);
+  let explicitMin = valueAxisUnitInRendererSpace(sec.min, percentStacked);
+  let explicitMax = valueAxisUnitInRendererSpace(sec.max, percentStacked);
+  const isLog = sec.logBase != null && Number.isFinite(sec.logBase) && sec.logBase >= 2;
+  // Only a curve crossing the normalized bound (0 / 100, or a negative stack)
+  // snaps; within it the numeric plan, zero baseline included, is unchanged.
+  const lowBound = Math.min(dMin, 0);
+  const highBound = Math.max(dMax, 0);
+  const snapLow = percentStacked && !isLog && explicitMin == null && extraMin < lowBound;
+  const snapHigh = percentStacked && !isLog && explicitMax == null && extraMax > highBound;
+  if (snapLow || snapHigh) {
+    const lo = snapLow ? extraMin : lowBound;
+    const hi = snapHigh ? extraMax : highBound;
+    const unit = majorUnit != null && Number.isFinite(majorUnit) && majorUnit > 0
+      ? majorUnit
+      : automaticPercentMajorUnit(lo, hi, 'vertical', plotHeightPt);
+    if (snapLow) explicitMin = Math.floor(lo / unit) * unit;
+    if (snapHigh) explicitMax = Math.ceil(hi / unit) * unit;
+    majorUnit = unit;
   }
   // An explicit `<c:valAx><c:majorUnit>` on the secondary axis (§21.2.2.103)
   // overrides the auto step, mirroring the primary axis. null ⇒ auto.
   const numeric = planNumericValueAxis({
     dataMin: dMin,
     dataMax: dMax,
-    explicitMin: valueAxisUnitInRendererSpace(sec.min, percentStacked),
-    explicitMax: valueAxisUnitInRendererSpace(sec.max, percentStacked),
+    explicitMin,
+    explicitMax,
     axisLenPt: plotHeightPt,
     axisOrientation: 'vertical',
-    majorUnit: valueAxisUnitInRendererSpace(sec.majorUnit, percentStacked),
+    majorUnit,
     minorUnit: valueAxisUnitInRendererSpace(sec.minorUnit, percentStacked),
     needMinor: sec.minorGridlines === true
       || (sec.minorTickMark != null && sec.minorTickMark !== 'none'),
