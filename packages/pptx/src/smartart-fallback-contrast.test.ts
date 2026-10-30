@@ -366,7 +366,9 @@ describe('renderSlide SmartArt fallback contrast (issue #805)', () => {
     );
     const run = calls.find((c) => c.text.includes('Plain box'));
     expect(run).toBeDefined();
-    expect(run!.fillStyle).toBe('#383838');
+    // A run whose chain authors no colour paints PowerPoint's hard default
+    // black, not the theme default text colour (issue #1989).
+    expect(run!.fillStyle).toBe('#000000');
   });
 
   it('leaves explicit run colours alone on the fallback shape', async () => {

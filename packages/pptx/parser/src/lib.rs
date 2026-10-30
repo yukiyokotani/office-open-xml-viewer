@@ -3109,6 +3109,10 @@ fn produce_slide_unit_with_journal<T>(
                     )
                 })
                 .unwrap_or_default();
+            let default_text = DefaultTextLevels {
+                colors: default_text_level_colors(dts, &theme),
+                ..bundle.default_text.clone()
+            };
             EffectiveMaster {
                 theme,
                 master_bg,
@@ -3117,6 +3121,7 @@ fn produce_slide_unit_with_journal<T>(
                 master_level_run_properties,
                 master_level_bullets,
                 master_styles,
+                default_text,
             }
         });
 
@@ -3146,13 +3151,17 @@ fn produce_slide_unit_with_journal<T>(
             .as_ref()
             .map(|e| &e.master_styles)
             .unwrap_or(&bundle.master_styles);
+        let layout_default_text = effective_master
+            .as_ref()
+            .map(|e| &e.default_text)
+            .unwrap_or(&bundle.default_text);
         // Build a `ParsedLayout` from a layout XML string with the resolved
         // theme/bullets and this bundle's remaining (theme-independent) maps.
         let build_parsed_layout = |lx: &str, zip: &mut PptxZip| -> ParsedLayout {
             parse_layout(
                 lx,
                 &bundle.master_level_faces,
-                &bundle.default_text,
+                layout_default_text,
                 layout_master_styles,
                 &bundle.master_level_font_sizes,
                 layout_master_colors,
@@ -3201,7 +3210,7 @@ fn produce_slide_unit_with_journal<T>(
                 None // borrowed from the cache below
             }
             (_, Some(lx), _) => Some(build_parsed_layout(lx, zip)),
-            (_, None, _) => Some(ParsedLayout::without_layout(&bundle.default_text)),
+            (_, None, _) => Some(ParsedLayout::without_layout(layout_default_text)),
         };
         let parsed_layout: &ParsedLayout = match &fresh_layout {
             Some(pl) => pl,
@@ -5661,7 +5670,8 @@ mod tests {
             assert_eq!(run.italic, Some(true));
             // A defPPr size has no effect in PowerPoint (#1620 controls).
             assert_eq!(run.font_size, None);
-            assert_eq!(run.color.as_deref(), Some("AA2200"));
+            // Nor does a defPPr fill (#1989 controls).
+            assert_eq!(run.color, None);
             assert_eq!(run.font_family_cs.as_deref(), Some("Amiri"));
             assert_eq!(run.character_attributes["lang"], "ja-JP");
         }
@@ -11647,6 +11657,253 @@ mod tests {
         );
     }
 
+    /// Issue #1989 deck: the master swaps the map to a dark background
+    /// (bg1=dk1 tx1=lt1 bg2=dk2 tx2=lt2) and carries a decorative text box.
+    /// Theme dk1 1F3F5F / lt1 FFF2CC / dk2 7F3F00 / lt2 D9F2D0 keep the hard
+    /// default (000000) apart from dk1. `dts` is the whole
+    /// `<p:defaultTextStyle>` element, or None for a presentation without one.
+    fn build_ordinary_text_color_pptx(
+        dts: Option<&str>,
+        slide_clr_map_ovr: &str,
+        layout_clr_map_ovr: &str,
+    ) -> Vec<u8> {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+        const NS: &str = r#"xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main""#;
+        const GRP: &str = r#"<p:nvGrpSpPr><p:cNvPr id="1" name="g"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>"#;
+        let rel = |id: &str, kind: &str, target: &str| {
+            format!(
+                r#"<Relationship Id="{id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/{kind}" Target="{target}"/>"#
+            )
+        };
+        let rels = |items: &[String]| {
+            format!(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{}</Relationships>"#,
+                items.concat()
+            )
+        };
+        let sp = |name: &str, tx_box: bool, style: &str, lst: &str, paras: &str| {
+            let c_nv = if tx_box {
+                r#"<p:cNvSpPr txBox="1"/>"#
+            } else {
+                "<p:cNvSpPr/>"
+            };
+            format!(
+                r#"<p:sp><p:nvSpPr><p:cNvPr id="9" name="{name}"/>{c_nv}<p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="100000" cy="100000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>{style}<p:txBody><a:bodyPr/>{lst}{paras}</p:txBody></p:sp>"#
+            )
+        };
+        let para = |lvl: u8, text: &str| {
+            format!(
+                r#"<a:p><a:pPr lvl="{lvl}"/><a:r><a:rPr lang="en-US"/><a:t>{text}</a:t></a:r></a:p>"#
+            )
+        };
+        let levels = format!("{}{}{}", para(0, "lvl1"), para(1, "lvl2"), para(2, "lvl3"));
+        let font_ref = |color: &str| {
+            format!(
+                r#"<p:style><a:lnRef idx="0"/><a:fillRef idx="0"/><a:effectRef idx="0"/><a:fontRef idx="minor">{color}</a:fontRef></p:style>"#
+            )
+        };
+        let def_ppr_fill = r#"<a:lstStyle><a:defPPr><a:defRPr><a:solidFill><a:srgbClr val="FF00FF"/></a:solidFill></a:defRPr></a:defPPr></a:lstStyle>"#;
+        let shapes = [
+            sp("TextBox", true, "", "<a:lstStyle/>", &levels),
+            sp(
+                "FontRefColour",
+                false,
+                &font_ref(r#"<a:schemeClr val="accent1"/>"#),
+                "<a:lstStyle/>",
+                &levels,
+            ),
+            sp(
+                "FontRefNoColour",
+                false,
+                &font_ref(""),
+                "<a:lstStyle/>",
+                &levels,
+            ),
+            sp("DefPPrFill", true, "", def_ppr_fill, &levels),
+        ]
+        .concat();
+        let master_box = sp("MasterBox", true, "", "<a:lstStyle/>", &para(0, "master"));
+        let files: Vec<(&str, String)> = vec![
+            (
+                "ppt/presentation.xml",
+                format!(
+                    r#"<p:presentation {NS}><p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rIdM"/></p:sldMasterIdLst><p:sldIdLst><p:sldId id="256" r:id="rIdS"/></p:sldIdLst><p:sldSz cx="9144000" cy="6858000"/>{}</p:presentation>"#,
+                    dts.unwrap_or_default()
+                ),
+            ),
+            (
+                "ppt/_rels/presentation.xml.rels",
+                rels(&[
+                    rel("rIdM", "slideMaster", "slideMasters/slideMaster1.xml"),
+                    rel("rIdS", "slide", "slides/slide1.xml"),
+                    rel("rIdT", "theme", "theme/theme1.xml"),
+                ]),
+            ),
+            (
+                "ppt/theme/theme1.xml",
+                format!(
+                    r#"<a:theme {NS} name="T"><a:themeElements><a:clrScheme name="C"><a:dk1><a:srgbClr val="1F3F5F"/></a:dk1><a:lt1><a:srgbClr val="FFF2CC"/></a:lt1><a:dk2><a:srgbClr val="7F3F00"/></a:dk2><a:lt2><a:srgbClr val="D9F2D0"/></a:lt2><a:accent1><a:srgbClr val="4472C4"/></a:accent1><a:accent2><a:srgbClr val="ED7D31"/></a:accent2><a:accent3><a:srgbClr val="A5A5A5"/></a:accent3><a:accent4><a:srgbClr val="FFC000"/></a:accent4><a:accent5><a:srgbClr val="5B9BD5"/></a:accent5><a:accent6><a:srgbClr val="70AD47"/></a:accent6><a:hlink><a:srgbClr val="0563C1"/></a:hlink><a:folHlink><a:srgbClr val="954F72"/></a:folHlink></a:clrScheme><a:fontScheme name="F"><a:majorFont><a:latin typeface="Arial"/></a:majorFont><a:minorFont><a:latin typeface="Arial"/></a:minorFont></a:fontScheme><a:fmtScheme name="S"><a:fillStyleLst/><a:lnStyleLst/><a:effectStyleLst/><a:bgFillStyleLst/></a:fmtScheme></a:themeElements></a:theme>"#
+                ),
+            ),
+            // otherStyle names a colour that must never reach ordinary text.
+            (
+                "ppt/slideMasters/slideMaster1.xml",
+                format!(
+                    r#"<p:sldMaster {NS}><p:cSld><p:spTree>{GRP}{master_box}</p:spTree></p:cSld><p:clrMap bg1="dk1" tx1="lt1" bg2="dk2" tx2="lt2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/><p:sldLayoutIdLst><p:sldLayoutId id="2147483650" r:id="rIdL"/></p:sldLayoutIdLst><p:txStyles><p:otherStyle><a:lvl1pPr><a:defRPr><a:solidFill><a:schemeClr val="accent2"/></a:solidFill></a:defRPr></a:lvl1pPr></p:otherStyle></p:txStyles></p:sldMaster>"#
+                ),
+            ),
+            (
+                "ppt/slideMasters/_rels/slideMaster1.xml.rels",
+                rels(&[
+                    rel("rIdL", "slideLayout", "../slideLayouts/slideLayout1.xml"),
+                    rel("rIdT", "theme", "../theme/theme1.xml"),
+                ]),
+            ),
+            (
+                "ppt/slideLayouts/slideLayout1.xml",
+                format!(
+                    r#"<p:sldLayout {NS}><p:cSld><p:spTree>{GRP}</p:spTree></p:cSld>{layout_clr_map_ovr}</p:sldLayout>"#
+                ),
+            ),
+            (
+                "ppt/slideLayouts/_rels/slideLayout1.xml.rels",
+                rels(&[rel(
+                    "rIdM",
+                    "slideMaster",
+                    "../slideMasters/slideMaster1.xml",
+                )]),
+            ),
+            (
+                "ppt/slides/slide1.xml",
+                format!(
+                    r#"<p:sld {NS}><p:cSld><p:spTree>{GRP}{shapes}</p:spTree></p:cSld>{slide_clr_map_ovr}</p:sld>"#
+                ),
+            ),
+            (
+                "ppt/slides/_rels/slide1.xml.rels",
+                rels(&[rel(
+                    "rIdL",
+                    "slideLayout",
+                    "../slideLayouts/slideLayout1.xml",
+                )]),
+            ),
+        ];
+        let mut buf = Vec::new();
+        {
+            let mut zw = zip::ZipWriter::new(Cursor::new(&mut buf));
+            crate::write_test_content_types(&mut zw);
+            for (path, xml) in &files {
+                zw.start_file(*path, SimpleFileOptions::default()).unwrap();
+                zw.write_all(xml.as_bytes()).unwrap();
+            }
+            zw.finish().unwrap();
+        }
+        buf
+    }
+
+    /// The colour each paragraph of the named shape paints: its run colour,
+    /// else its paragraph default (what the renderer falls back to).
+    fn shape_text_colors(slide: &Slide, name: &str) -> Vec<Option<String>> {
+        let shape = slide
+            .elements
+            .iter()
+            .find_map(|e| match e {
+                SlideElement::Shape(s) if s.name.as_deref() == Some(name) => Some(s),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("shape {name}"));
+        shape
+            .text_body
+            .as_ref()
+            .unwrap()
+            .paragraphs
+            .iter()
+            .map(|p| {
+                let run = p.runs.iter().find_map(|r| match r {
+                    TextRun::Text(t) => Some(t),
+                    _ => None,
+                });
+                run.and_then(|r| r.color.clone())
+                    .or_else(|| p.def_color.clone())
+            })
+            .collect()
+    }
+
+    const DTS_TX1_TX2: &str = r#"<p:defaultTextStyle><a:defPPr><a:defRPr><a:solidFill><a:schemeClr val="accent3"/></a:solidFill></a:defRPr></a:defPPr><a:lvl1pPr><a:defRPr><a:solidFill><a:schemeClr val="tx1"/></a:solidFill></a:defRPr></a:lvl1pPr><a:lvl2pPr><a:defRPr><a:solidFill><a:schemeClr val="tx2"/></a:solidFill></a:defRPr></a:lvl2pPr></p:defaultTextStyle>"#;
+    const LIGHT_OVR: &str = r#"<p:clrMapOvr><a:overrideClrMapping bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/></p:clrMapOvr>"#;
+    const MASTER_OVR: &str = "<p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>";
+
+    fn some(colors: &[&str]) -> Vec<Option<String>> {
+        colors.iter().map(|c| Some((*c).to_owned())).collect()
+    }
+
+    /// Issue #1989: ordinary text takes its defaultTextStyle level colour
+    /// through the master's dark clrMap; a level without a fill is black, not
+    /// dk1; a fontRef colour replaces the level colour; defPPr and otherStyle
+    /// fills never apply.
+    #[test]
+    fn ordinary_text_takes_default_text_style_level_colour_through_master_clr_map() {
+        let pres = parse_presentation_from_bytes(&build_ordinary_text_color_pptx(
+            Some(DTS_TX1_TX2),
+            MASTER_OVR,
+            MASTER_OVR,
+        ))
+        .unwrap();
+        let slide = &pres.slides[0];
+        let dark = some(&["FFF2CC", "D9F2D0", "000000"]);
+        assert_eq!(shape_text_colors(slide, "TextBox"), dark);
+        assert_eq!(shape_text_colors(slide, "FontRefNoColour"), dark);
+        assert_eq!(shape_text_colors(slide, "DefPPrFill"), dark);
+        assert_eq!(shape_text_colors(slide, "MasterBox"), some(&["FFF2CC"]));
+        let font_ref = shape_text_colors(slide, "FontRefColour");
+        assert!(font_ref.iter().all(Option::is_none), "{font_ref:?}");
+        let SlideElement::Shape(font_ref_shape) = slide
+            .elements
+            .iter()
+            .find(|e| matches!(e, SlideElement::Shape(s) if s.name.as_deref() == Some("FontRefColour")))
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        assert_eq!(font_ref_shape.default_text_color.as_deref(), Some("4472C4"));
+    }
+
+    /// A slide's, or its layout's, overrideClrMapping re-resolves the level
+    /// colours of the slide's own and the master's ordinary text.
+    #[test]
+    fn ordinary_text_level_colour_follows_slide_and_layout_clr_map_ovr() {
+        let light = some(&["1F3F5F", "7F3F00", "000000"]);
+        for (slide_ovr, layout_ovr) in [
+            (LIGHT_OVR, MASTER_OVR),
+            (MASTER_OVR, LIGHT_OVR),
+            ("", LIGHT_OVR),
+        ] {
+            let pres = parse_presentation_from_bytes(&build_ordinary_text_color_pptx(
+                Some(DTS_TX1_TX2),
+                slide_ovr,
+                layout_ovr,
+            ))
+            .unwrap();
+            let slide = &pres.slides[0];
+            assert_eq!(shape_text_colors(slide, "TextBox"), light);
+            assert_eq!(shape_text_colors(slide, "MasterBox"), some(&["1F3F5F"]));
+        }
+    }
+
+    /// Without a defaultTextStyle, every level of ordinary text is tx1.
+    #[test]
+    fn ordinary_text_without_default_text_style_is_tx1_at_every_level() {
+        let pres = parse_presentation_from_bytes(&build_ordinary_text_color_pptx(
+            None, MASTER_OVR, MASTER_OVR,
+        ))
+        .unwrap();
+        assert_eq!(
+            shape_text_colors(&pres.slides[0], "TextBox"),
+            some(&["FFF2CC", "FFF2CC", "FFF2CC"])
+        );
+    }
+
     /// The slide's resolved background fill colour, if it is a solid fill.
     fn slide_bg_color(slide: &Slide) -> Option<String> {
         match &slide.background {
@@ -12754,7 +13011,7 @@ mod tests {
             retained_ptr,
             "prepared bytes move; they are not cloned"
         );
-        const FIXED_SLIDE_3: &str = r#"{"theme":{"defaultTextColor":"000000","majorFont":"Arial","minorFont":"Arial","hlinkColor":"000000"},"index":2,"slideNumber":3,"partName":"ppt/slides/slide3.xml","background":null,"elements":[{"type":"shape","x":0,"y":0,"width":1000000,"height":1000000,"rotation":0.0,"flipH":false,"flipV":false,"geometry":"rect","fill":null,"stroke":null,"textBody":{"verticalAnchor":"t","paragraphs":[{"alignment":"l","marL":0,"marR":0,"indent":0,"spaceBefore":null,"spaceAfter":null,"spaceLine":null,"lvl":0,"bullet":{"type":"inherit"},"defFontSize":18.0,"defColor":null,"defBold":null,"defItalic":null,"defFontFamily":"Arial","tabStops":[],"eaLnBrk":true,"runs":[{"type":"text","text":"slide 3","bold":null,"italic":null,"underline":false,"strikethrough":false,"fontSize":18.0,"color":null,"fontFamily":"Arial","fieldType":null}]}],"defaultFontSize":18.0,"defaultBold":null,"defaultItalic":null,"lIns":91440,"rIns":91440,"tIns":45720,"bIns":45720,"wrap":"square","vert":"horz","autoFit":"none"},"defaultTextColor":null,"custGeom":null,"adj":null,"adj2":null,"adj3":null,"adj4":null,"adj5":null,"adj6":null,"adj7":null,"adj8":null,"shadow":null,"id":"2","name":"T"}],"elementSources":[{"origin":"slide"}]}"#;
+        const FIXED_SLIDE_3: &str = r#"{"theme":{"defaultTextColor":"000000","majorFont":"Arial","minorFont":"Arial","hlinkColor":"000000"},"index":2,"slideNumber":3,"partName":"ppt/slides/slide3.xml","background":null,"elements":[{"type":"shape","x":0,"y":0,"width":1000000,"height":1000000,"rotation":0.0,"flipH":false,"flipV":false,"geometry":"rect","fill":null,"stroke":null,"textBody":{"verticalAnchor":"t","paragraphs":[{"alignment":"l","marL":0,"marR":0,"indent":0,"spaceBefore":null,"spaceAfter":null,"spaceLine":null,"lvl":0,"bullet":{"type":"inherit"},"defFontSize":18.0,"defColor":"000000","defBold":null,"defItalic":null,"defFontFamily":"Arial","tabStops":[],"eaLnBrk":true,"runs":[{"type":"text","text":"slide 3","bold":null,"italic":null,"underline":false,"strikethrough":false,"fontSize":18.0,"color":null,"fontFamily":"Arial","fieldType":null}]}],"defaultFontSize":18.0,"defaultBold":null,"defaultItalic":null,"lIns":91440,"rIns":91440,"tIns":45720,"bIns":45720,"wrap":"square","vert":"horz","autoFit":"none"},"defaultTextColor":null,"custGeom":null,"adj":null,"adj2":null,"adj3":null,"adj4":null,"adj5":null,"adj6":null,"adj7":null,"adj8":null,"shadow":null,"id":"2","name":"T"}],"elementSources":[{"origin":"slide"}]}"#;
         assert_eq!(bytes, FIXED_SLIDE_3.as_bytes());
         let legacy: serde_json::Value =
             serde_json::from_str(&parse_pptx_native(&legacy_data).unwrap()).unwrap();
