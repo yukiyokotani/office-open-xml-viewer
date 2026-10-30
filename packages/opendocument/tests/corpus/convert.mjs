@@ -114,7 +114,9 @@ async function convertOne(profile, staging, filter, input, output) {
   mkdirSync(staging, { recursive: true });
   const result = await soffice(profile, filter, input, staging);
   const produced = join(staging, basename(output));
-  if (!nonEmpty(produced)) {
+  // Only a clean exit counts: a timed-out or failed export can leave a
+  // partial file that would later look complete.
+  if (result.timedOut || result.code !== 0 || !nonEmpty(produced)) {
     return { ok: false, reason: result.timedOut ? 'timeout' : `exit ${result.code}`, detail: result.output.trim() };
   }
   mkdirSync(dirname(output), { recursive: true });

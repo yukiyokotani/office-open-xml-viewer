@@ -53,7 +53,9 @@ const disagreements = [];
 const errors = [];
 const pages = [];
 let pageCountMatch = 0;
-let pageCountMismatch = [];
+const pageCountMismatch = [];
+const pageFailures = [];
+let truncated = 0;
 for (const file of files) {
   const result = results.get(file.id);
   const reason = nativeReason(file.id);
@@ -72,8 +74,10 @@ for (const file of files) {
   if (result.status === 'opened') {
     if (result.pageCountMatch) pageCountMatch += 1;
     else pageCountMismatch.push({ rel: file.rel, ours: result.pageCount, libreoffice: result.pdfPageCount });
+    if (result.truncated) truncated += 1;
     for (const page of result.pages ?? []) {
       if (page.layoutDiffPct !== undefined) pages.push({ rel: file.rel, ...page });
+      else pageFailures.push({ rel: file.rel, page: page.page, error: page.error });
     }
   }
 }
@@ -132,6 +136,8 @@ const summary = {
   errors,
   disagreements,
   pageCount: { match: pageCountMatch, mismatch: pageCountMismatch },
+  pageFailures,
+  truncatedDocuments: truncated,
   pages: {
     compared: pages.length,
     layoutDiffPct: { ...quantiles('layoutDiffPct'), histogram: histogram('layoutDiffPct') },
@@ -152,7 +158,9 @@ md.push(`- Rejected: ${status.rejected} (${pct(status.rejected)}%)`);
 md.push(`- Load errors (not a subset rejection): ${status.error}`);
 md.push(`- No result (timeout or crash): ${status.missing}`);
 md.push(`- Browser/native disagreements: ${disagreements.length}`);
-md.push(`- Page count matches LibreOffice: ${pageCountMatch}/${status.opened}`, '');
+md.push(`- Page count matches LibreOffice: ${pageCountMatch}/${status.opened}`);
+md.push(`- Pages not compared (render failure or no LibreOffice page): ${pageFailures.length}`);
+md.push(`- Opened documents compared only in part (ODF_HARNESS_MAX_PAGES): ${truncated}`, '');
 md.push('## Rejection reasons (reader code, by file count)', '', '| Code | Files | % of corpus | Example |', '| --- | ---: | ---: | --- |');
 for (const { reason, files: count, examples } of rankedReasons) md.push(`| \`${reason}\` | ${count} | ${pct(count)} | ${examples[0]} |`);
 if (unmaskedRanking.length) {
@@ -181,6 +189,10 @@ worst.forEach((page, i) => md.push(`| ${i + 1} | ${page.rel} | ${page.page} | ${
 if (pageCountMismatch.length) {
   md.push('', '## Page count mismatches', '', '| File | Ours | LibreOffice |', '| --- | ---: | ---: |');
   for (const m of pageCountMismatch) md.push(`| ${m.rel} | ${m.ours} | ${m.libreoffice} |`);
+}
+if (pageFailures.length) {
+  md.push('', '## Pages not compared', '');
+  for (const f of pageFailures) md.push(`- ${f.rel} p${f.page}: ${String(f.error).slice(0, 200)}`);
 }
 if (errors.length) {
   md.push('', '## Load errors', '');

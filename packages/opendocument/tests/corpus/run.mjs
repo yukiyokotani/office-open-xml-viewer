@@ -34,6 +34,7 @@
 // Output: <corpus>/packages/opendocument/public/private/harness/<label>/
 // (git-ignored). A rerun with the same label resumes; --fresh starts over.
 import { execFileSync, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -66,6 +67,8 @@ const sha = git('rev-parse', '--short=10', 'HEAD');
 const dirty = git('status', '--porcelain', '--untracked-files=no').length > 0;
 const label = args.label
   ?? `${sha}${dirty ? '-dirty' : ''}-rules-${args.rules}${args['unmask-settings'] ? '-settings-unmasked' : ''}`;
+// The label names a directory under the ignored harness folder; nothing else.
+if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(label)) throw new Error(`invalid --label ${JSON.stringify(label)}`);
 const runDir = join(corpus, 'harness', label);
 if (args.fresh) rmSync(runDir, { recursive: true, force: true });
 mkdirSync(runDir, { recursive: true });
@@ -103,6 +106,15 @@ function patchedBuild(name, patches, wasmOut) {
   const targetDir = join(checkoutRoot, `target/odf-harness-${name}`);
   const original = readFileSync(odtSource, 'utf8');
   const patched = patches.reduce((text, patch) => patch(text), original);
+  // A signal during the synchronous build would otherwise end the process
+  // before `finally` restores the source; a listener defers it to here.
+  const restoreAndExit = (signal) => {
+    writeFileSync(odtSource, original);
+    process.exit(signal === 'SIGINT' ? 130 : 143);
+  };
+  process.once('SIGINT', restoreAndExit);
+  process.once('SIGTERM', restoreAndExit);
+  process.once('SIGHUP', restoreAndExit);
   writeFileSync(odtSource, patched);
   try {
     const env = { ...process.env, CARGO_TARGET_DIR: targetDir };
@@ -113,6 +125,9 @@ function patchedBuild(name, patches, wasmOut) {
     }
   } finally {
     writeFileSync(odtSource, original);
+    process.off('SIGINT', restoreAndExit);
+    process.off('SIGTERM', restoreAndExit);
+    process.off('SIGHUP', restoreAndExit);
   }
   return join(targetDir, 'release/examples/inspect_odt');
 }
@@ -134,6 +149,29 @@ const unmaskedWasmOut = args['unmask-settings'] ? join(runDir, 'wasm-settings-un
 const unmaskedBinary = patchedBuild(`settings-unmasked-rules-${args.rules}`, [...rulePatches, settingsUnmasked], unmaskedWasmOut);
 if (unmaskedWasmOut) customWasm = join(unmaskedWasmOut, 'opendocument_odt_bg.wasm');
 
+// ---- resume guard ------------------------------------------------------------
+// Results are reused only by a run of the same code: the fingerprint covers
+// HEAD, the uncommitted diff, the WASM the browser loads and the page settings.
+const sha256 = (data) => createHash('sha256').update(data).digest('hex');
+const fingerprint = sha256(JSON.stringify({
+  head: git('rev-parse', 'HEAD'),
+  diff: sha256(execFileSync('git', ['diff', 'HEAD'], { cwd: checkoutRoot, maxBuffer: 256 << 20 })),
+  docxWasm: sha256(readFileSync(docxWasm)),
+  odtWasm: sha256(readFileSync(customWasm ?? odtWasm)),
+  native: sha256(readFileSync(nativeBinary)),
+  rules: args.rules,
+  unmaskSettings: args['unmask-settings'],
+  maxPages: process.env.ODF_HARNESS_MAX_PAGES ?? '0',
+}));
+const fingerprintPath = join(runDir, 'fingerprint.txt');
+if (existsSync(join(runDir, 'results')) && readdirSync(join(runDir, 'results')).length > 0) {
+  const previous = existsSync(fingerprintPath) ? readFileSync(fingerprintPath, 'utf8').trim() : '';
+  if (previous !== fingerprint) {
+    throw new Error(`${runDir} holds results from different code or settings; rerun with --fresh or another --label`);
+  }
+}
+writeFileSync(fingerprintPath, `${fingerprint}\n`);
+
 // ---- file list ---------------------------------------------------------------
 function walk(dir, out = []) {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -147,7 +185,10 @@ if (!existsSync(odtRoot)) throw new Error(`No ODT corpus at ${odtRoot}; run conv
 let files = walk(odtRoot).sort()
   .map((odt) => {
     const rel = relative(odtRoot, odt);
-    return { id: rel.replace(/\.odt$/u, '').replace(/[^A-Za-z0-9._-]+/gu, '__'), rel, odt, pdf: odt.replace(/\.odt$/u, '.pdf') };
+    // Readable prefix plus a hash of the relative path: unique per file.
+    const hash = createHash('sha256').update(rel).digest('hex').slice(0, 12);
+    const readable = rel.replace(/\.odt$/u, '').replace(/[^A-Za-z0-9._-]+/gu, '_').slice(-80);
+    return { id: `${readable}-${hash}`, rel, odt, pdf: odt.replace(/\.odt$/u, '.pdf') };
   })
   .filter((file) => existsSync(file.pdf));
 if (args.filter) files = files.filter((file) => file.rel.includes(args.filter));

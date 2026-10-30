@@ -27,7 +27,8 @@ interface BrowserResult {
 const runDir = resolve(process.env.ODF_HARNESS_RUN_DIR!);
 const checkout = resolve(process.env.ODF_HARNESS_CHECKOUT!);
 const wasmPath = process.env.ODF_HARNESS_WASM;
-const maxPages = Number(process.env.ODF_HARNESS_MAX_PAGES ?? 20);
+/** Pages compared per document; 0 (the default) compares every page. */
+const maxPages = Number(process.env.ODF_HARNESS_MAX_PAGES ?? 0) || Infinity;
 /** Pages at or above this layout diff keep a side-by-side image. */
 const saveMin = Number(process.env.ODF_HARNESS_SAVE_MIN ?? 5);
 const files = JSON.parse(readFileSync(join(runDir, 'files.json'), 'utf8')) as CorpusFile[];
@@ -37,7 +38,8 @@ mkdirSync(resultsDir, { recursive: true });
 mkdirSync(imagesDir, { recursive: true });
 
 function pdfPages(pdf: string, prefix: string): PNG[] {
-  execFileSync('pdftoppm', ['-png', '-r', '72', '-l', String(maxPages), pdf, prefix], { stdio: ['ignore', 'pipe', 'pipe'] });
+  const limit = Number.isFinite(maxPages) ? ['-l', String(maxPages)] : [];
+  execFileSync('pdftoppm', ['-png', '-r', '72', ...limit, pdf, prefix], { stdio: ['ignore', 'pipe', 'pipe'] });
   const dir = resolve(prefix, '..');
   const base = prefix.slice(dir.length + 1);
   return readdirSync(dir)
@@ -194,7 +196,7 @@ for (const file of files) {
         const pageCount = document.pageCount;
         document.destroy();
         return { status: 'opened', pageCount, pages };
-      }, { widths, maxPages }) as BrowserResult;
+      }, { widths, maxPages: Number.isFinite(maxPages) ? maxPages : 1e9 }) as BrowserResult;
     }
 
     const pages = [];
@@ -202,7 +204,7 @@ for (const file of files) {
       const rendered = result.pages![index]!;
       const reference = references[index];
       if (!reference || !rendered.dataUrl) {
-        pages.push({ page: index + 1, error: rendered.error ?? 'no reference page' });
+        pages.push({ page: index + 1, error: rendered.error ?? 'no LibreOffice page' });
         continue;
       }
       const actual = PNG.sync.read(Buffer.from(rendered.dataUrl.replace(/^data:image\/png;base64,/u, ''), 'base64'));
@@ -241,7 +243,12 @@ for (const file of files) {
       status: result.status,
       ...(result.message ? { message: result.message } : {}),
       pdfPageCount: pdfCount,
-      ...(result.pageCount !== undefined ? { pageCount: result.pageCount, pageCountMatch: result.pageCount === pdfCount } : {}),
+      ...(result.pageCount !== undefined ? {
+        pageCount: result.pageCount,
+        pageCountMatch: result.pageCount === pdfCount,
+        // Pages beyond ODF_HARNESS_MAX_PAGES were not compared.
+        truncated: result.pageCount > (result.pages?.length ?? 0),
+      } : {}),
       ...(result.pages ? { pages } : {}),
       ms: Date.now() - started,
     }, null, 2)}\n`);
