@@ -214,6 +214,12 @@ pub(crate) fn merge_level_sizes(
 pub(crate) const HARD_DEFAULT_LATIN_FACE: &str = "Arial";
 /// Size (pt) under the same conditions as [`HARD_DEFAULT_LATIN_FACE`].
 pub(crate) const HARD_DEFAULT_FONT_SIZE: f64 = 18.0;
+/// Text colour when no tier of the chain authors a fill. Observed with
+/// PowerPoint PDF export (issue #1989): a text box under a defaultTextStyle
+/// level without a fill, and a body placeholder whose bodyStyle level had no
+/// fill, both rendered 000000 in decks whose theme dk1 was 1F3F5F, under the
+/// default and a swapped (tx1=lt1) colour map. It is not dk1 or tx1.
+pub(crate) const HARD_DEFAULT_TEXT_COLOR: &str = "000000";
 
 /// Per-list-level Latin typefaces. Index 0..=8 maps to `lvl1pPr`..`lvl9pPr`.
 /// Each level is independent: PowerPoint does not reuse the level-1 face for a
@@ -1408,14 +1414,19 @@ pub(crate) fn read_level_run_properties_with_rels(
     // Latin face or size had no effect in any tier — shape lstStyle, layout
     // slot, master placeholder, txStyles and defaultTextStyle — neither alone
     // nor under an lvlNpPr that omits it; the level fell through as if defPPr
-    // were absent. Other defPPr character properties were not observable
-    // there and keep the §21.1.2.4 base role.
+    // were absent. Its fill behaved the same way (#1989 controls): a defPPr
+    // fill in a text box or autoshape lstStyle (with and without a fontRef
+    // colour), a slide placeholder lstStyle, a layout slot lstStyle, the
+    // master bodyStyle, the defaultTextStyle and a table cell lstStyle never
+    // coloured the text. Other defPPr character properties were not
+    // observable there and keep the §21.1.2.4 base role.
     let base = child(list_style, "defPPr")
         .and_then(|p| child(p, "defRPr"))
         .map(|r| {
             RunProperties::from_xml(r, theme)
                 .with_relationships(rels)
                 .with_chain_face_and_size(None, None)
+                .without_fill()
         })
         .unwrap_or_default();
     std::array::from_fn(|level| {

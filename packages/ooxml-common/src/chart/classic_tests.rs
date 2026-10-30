@@ -2950,4 +2950,154 @@ mod tests {
             assert_eq!(model.series[0].values, vec![Some(1.0), None, None]);
         }
     }
+
+    #[test]
+    fn same_side_category_axes_resolve_by_the_group_axis_pairs() {
+        // Excel writes the deleted secondary category axis of a secondary-axis
+        // combo at the bottom beside the primary one. Each group's axId list
+        // pairs it with one value axis; the pair holding the left value axis is
+        // primary whatever the XML order of the axes or their crossAx links.
+        let parse = |axes: &str, line_ids: &str| {
+            let xml = format!(
+                r#"<c:chartSpace xmlns:c="{C_NS}" xmlns:a="{A_NS}"><c:chart><c:plotArea>
+                  <c:barChart><c:barDir val="col"/><c:grouping val="clustered"/>
+                    <c:ser><c:idx val="0"/><c:val><c:numLit><c:ptCount val="1"/><c:pt idx="0"><c:v>5</c:v></c:pt></c:numLit></c:val></c:ser>
+                    <c:axId val="30"/><c:axId val="40"/></c:barChart>
+                  <c:lineChart><c:grouping val="standard"/>
+                    <c:ser><c:idx val="1"/><c:val><c:numLit><c:ptCount val="1"/><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val></c:ser>
+                    {line_ids}</c:lineChart>
+                  {axes}
+                </c:plotArea></c:chart></c:chartSpace>"#,
+            );
+            let doc = chart_space_of(&xml);
+            let model = parse_chart_part(
+                doc.root_element(),
+                &ChartParseContext {
+                    color_resolver: Some(&FixtureResolver),
+                    ..Default::default()
+                },
+            )
+            .expect("combo parses");
+            let groups = model.plot_groups.clone().expect("plot groups");
+            (
+                groups
+                    .iter()
+                    .map(|group| (group.category_axis.clone(), group.value_axis.clone()))
+                    .collect::<Vec<_>>(),
+                model.cat_axis_hidden,
+                model.secondary_cat_axis.map(|axis| axis.hidden),
+            )
+        };
+        let primary_cat =
+            r#"<c:catAx><c:axId val="10"/><c:axPos val="b"/><c:crossAx val="20"/></c:catAx>"#;
+        let primary_val =
+            r#"<c:valAx><c:axId val="20"/><c:axPos val="l"/><c:crossAx val="10"/></c:valAx>"#;
+        let secondary_val = r#"<c:valAx><c:axId val="40"/><c:axPos val="r"/><c:crossAx val="30"/><c:crosses val="max"/></c:valAx>"#;
+        let secondary_cat = r#"<c:catAx><c:axId val="30"/><c:delete val="1"/><c:axPos val="b"/><c:crossAx val="40"/></c:catAx>"#;
+        let line_ids = r#"<c:axId val="10"/><c:axId val="20"/>"#;
+        let resolved = vec![
+            ("secondary".to_string(), "secondary".to_string()),
+            ("primary".to_string(), "primary".to_string()),
+        ];
+
+        let excel_order = format!("{primary_cat}{primary_val}{secondary_val}{secondary_cat}");
+        assert_eq!(
+            parse(&excel_order, line_ids),
+            (resolved.clone(), false, Some(true))
+        );
+        let secondary_first = format!("{secondary_cat}{secondary_val}{primary_cat}{primary_val}");
+        assert_eq!(
+            parse(&secondary_first, line_ids),
+            (resolved.clone(), false, Some(true))
+        );
+        let swapped_cross = format!(
+            "{}{}{}{}",
+            primary_cat.replace(r#"crossAx val="20""#, r#"crossAx val="40""#),
+            primary_val.replace(r#"crossAx val="10""#, r#"crossAx val="30""#),
+            secondary_val.replace(r#"crossAx val="30""#, r#"crossAx val="10""#),
+            secondary_cat.replace(r#"crossAx val="40""#, r#"crossAx val="20""#),
+        );
+        assert_eq!(parse(&swapped_cross, line_ids).0, resolved);
+
+        // A visible second axis on the same side, or groups that pair one
+        // category axis with both value axes, stay ambiguous.
+        let visible = excel_order.replace(r#"<c:delete val="1"/>"#, "");
+        assert_eq!(parse(&visible, line_ids).0[0].0, "unresolved");
+        // Two same-side date axes keep independent date scales.
+        let dates = excel_order
+            .replace("<c:catAx>", "<c:dateAx>")
+            .replace("</c:catAx>", "</c:dateAx>");
+        assert_eq!(parse(&dates, line_ids).0[0].0, "unresolved");
+        let conflicting = parse(&excel_order, r#"<c:axId val="30"/><c:axId val="20"/>"#).0;
+        assert_eq!(conflicting[0].0, "unresolved");
+        assert_eq!(conflicting[1].0, "unresolved");
+    }
+
+    #[test]
+    fn secondary_category_axis_reports_a_date_axis() {
+        let xml = format!(
+            r#"<c:chartSpace xmlns:c="{C_NS}"><c:chart><c:plotArea>
+              <c:lineChart><c:ser><c:idx val="0"/><c:val><c:numLit><c:ptCount val="1"/><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val></c:ser>
+                <c:axId val="10"/><c:axId val="20"/></c:lineChart>
+              <c:lineChart><c:ser><c:idx val="1"/><c:val><c:numLit><c:ptCount val="1"/><c:pt idx="0"><c:v>2</c:v></c:pt></c:numLit></c:val></c:ser>
+                <c:axId val="30"/><c:axId val="40"/></c:lineChart>
+              <c:dateAx><c:axId val="10"/><c:axPos val="b"/><c:crossAx val="20"/></c:dateAx>
+              <c:valAx><c:axId val="20"/><c:axPos val="l"/><c:crossAx val="10"/></c:valAx>
+              <c:valAx><c:axId val="40"/><c:axPos val="r"/><c:crossAx val="30"/></c:valAx>
+              <c:dateAx><c:axId val="30"/><c:delete val="1"/><c:axPos val="t"/><c:crossAx val="40"/></c:dateAx>
+            </c:plotArea></c:chart></c:chartSpace>"#,
+        );
+        let doc = chart_space_of(&xml);
+        let model = parse_chart_part(
+            doc.root_element(),
+            &ChartParseContext {
+                color_resolver: Some(&FixtureResolver),
+                ..Default::default()
+            },
+        )
+        .expect("date combo parses");
+        assert_eq!(
+            model.secondary_cat_axis.and_then(|axis| axis.date_axis),
+            Some(true)
+        );
+        assert_eq!(
+            model.secondary_val_axis.and_then(|axis| axis.date_axis),
+            None
+        );
+    }
+
+    #[test]
+    fn cross_between_comes_from_each_value_axis() {
+        // The secondary value axis is listed first; the primary setting must
+        // still come from the primary (left) value axis.
+        let xml = format!(
+            r#"<c:chartSpace xmlns:c="{C_NS}"><c:chart><c:plotArea>
+              <c:barChart><c:barDir val="col"/><c:ser><c:idx val="0"/><c:val><c:numLit><c:ptCount val="1"/><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val></c:ser>
+                <c:axId val="10"/><c:axId val="20"/></c:barChart>
+              <c:lineChart><c:ser><c:idx val="1"/><c:val><c:numLit><c:ptCount val="1"/><c:pt idx="0"><c:v>2</c:v></c:pt></c:numLit></c:val></c:ser>
+                <c:axId val="30"/><c:axId val="40"/></c:lineChart>
+              <c:valAx><c:axId val="40"/><c:axPos val="r"/><c:crossAx val="30"/><c:crossBetween val="midCat"/></c:valAx>
+              <c:catAx><c:axId val="30"/><c:delete val="1"/><c:axPos val="b"/><c:crossAx val="40"/></c:catAx>
+              <c:catAx><c:axId val="10"/><c:axPos val="b"/><c:crossAx val="20"/></c:catAx>
+              <c:valAx><c:axId val="20"/><c:axPos val="l"/><c:crossAx val="10"/><c:crossBetween val="between"/></c:valAx>
+            </c:plotArea></c:chart></c:chartSpace>"#,
+        );
+        let doc = chart_space_of(&xml);
+        let model = parse_chart_part(
+            doc.root_element(),
+            &ChartParseContext {
+                color_resolver: Some(&FixtureResolver),
+                ..Default::default()
+            },
+        )
+        .expect("combo parses");
+        assert_eq!(model.cat_axis_cross_between, "between");
+        assert_eq!(
+            model
+                .secondary_val_axis
+                .and_then(|axis| axis.cross_between)
+                .as_deref(),
+            Some("midCat")
+        );
+    }
 }

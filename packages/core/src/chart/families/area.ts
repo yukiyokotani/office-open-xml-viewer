@@ -62,6 +62,7 @@ import { applyDecorationLineStyle, chartStyleRoleLine, chartStyleRoleErrorBar } 
 import { axisCrossingValue, categoryAxisCrossingValue } from '../shared/line-decorations.js';
 import { drawChartMarker, seriesHasResolvedMarkerDetail } from '../shared/markers.js';
 import { appendCurve } from '../shared/geometry.js';
+import { classicLineRunIndices, seriesPaintsSmoothedLine, smoothCurveExtent } from '../smooth-extent.js';
 import { drawCategoryErrorBars } from '../shared/error-bars.js';
 import { paintClassicDataPointPath } from '../shared/chartex-style.js';
 
@@ -226,6 +227,31 @@ export function renderAreaChart(
     + catTitleH + legBottomH;
   const phEst = h - padT - padB;
 
+  // A smoothed line group's automatic axis covers the curve it draws (see
+  // smoothCurveExtent). On a percentStacked axis the curve goes to
+  // planValueAxis, which snaps it to the percent unit.
+  const lineCurveExtent = (
+    series: ChartSeries,
+    chartIndex: number,
+    logBase: number | null | undefined,
+  ): [number, number] | null => {
+    if (!seriesPaintsSmoothedLine(chart, series, chartExSeriesFormatIndex(series, chartIndex))) {
+      return null;
+    }
+    return smoothCurveExtent(
+      classicLineRunIndices(series, n, chart.dispBlanksAs)
+        .map(run => run.map(ci => series.values[ci] ?? 0)),
+      logBase,
+    );
+  };
+  const secondaryCurveValues: number[] = [];
+  if (sec) {
+    for (const { series, chartIndex } of lineSeries) {
+      if (!isSecondarySeries(series)) continue;
+      const curve = lineCurveExtent(series, chartIndex, sec.logBase);
+      if (curve) secondaryCurveValues.push(...curve);
+    }
+  }
   const secScale = computeSecondaryAxis(
     sec,
     chart.series,
@@ -240,6 +266,7 @@ export function renderAreaChart(
       return series.values[pointIndex] == null
         ? null : areaTopValues[areaIndex][pointIndex] ?? null;
     },
+    secondaryCurveValues,
   );
   const secTickFontPx = Math.max(8, Math.min(11, h / 20));
   const secFontPx = chartTextFontSizePx(sec?.fontSizeHpt, ptToPx) ?? secTickFontPx;
@@ -311,12 +338,30 @@ export function renderAreaChart(
       forEachErrorBarEndpoint(series, 'y', index => series.values[index] ?? null, includeEndpoint);
     }
   }
+  let percentCurve: [number, number] | null = null;
+  for (const { series, chartIndex } of lineSeries) {
+    if (isSecondarySeries(series)) continue;
+    const curve = lineCurveExtent(series, chartIndex, chart.valAxisLogBase);
+    if (!curve) continue;
+    if (axisIsPercent) {
+      percentCurve = percentCurve
+        ? [Math.min(percentCurve[0], curve[0]), Math.max(percentCurve[1], curve[1])]
+        : curve;
+    } else {
+      areaExtent = {
+        min: Math.min(areaExtent.min, curve[0]),
+        max: Math.max(areaExtent.max, curve[1]),
+      };
+    }
+  }
   const provisionalScale = planValueAxis(
     chart,
     areaExtent.min,
     areaExtent.max,
     phEst / ptToPx,
     axisIsPercent,
+    'vertical',
+    percentCurve,
   );
   const manualValTickFontPx = chart.valAxisFontSizeHpt != null
     ? valAxFontPx
@@ -445,7 +490,7 @@ export function renderAreaChart(
   // Value axis is vertical → length = plot height (axis-length-aware auto major unit). An
   // explicit `<c:valAx><c:majorUnit>` (§21.2.2.103) overrides the auto step.
   const areaPlan = planValueAxis(
-    chart, areaExtent.min, areaExtent.max, ph / ptToPx, axisIsPercent,
+    chart, areaExtent.min, areaExtent.max, ph / ptToPx, axisIsPercent, 'vertical', percentCurve,
   );
 
   // crossBetween="between" (Office's default; ECMA-376 §21.2.2.32 leaves the
@@ -760,25 +805,8 @@ export function renderAreaChart(
     const styleIndex = chartExSeriesFormatIndex(s, chartIndex);
     const yOf = yMapFor(s);
     const varyingLinePaint = chartSeriesVariesByPoint(chart, chartIndex);
-    const overlayRuns: IndexedLinePoint[][] = [];
-    let overlayRun: IndexedLinePoint[] = [];
-    const flushOverlayRun = (): void => {
-      if (overlayRun.length > 0) overlayRuns.push(overlayRun);
-      overlayRun = [];
-    };
-    for (let ci = 0; ci < n; ci++) {
-      const value = s.values[ci];
-      if (s.sourceHidden?.[ci] === true) {
-        flushOverlayRun();
-        continue;
-      }
-      if (value == null) {
-        if ((chart.dispBlanksAs ?? 'gap') === 'gap') flushOverlayRun();
-        if ((chart.dispBlanksAs ?? 'gap') !== 'zero') continue;
-      }
-      overlayRun.push({ x: toX(ci), y: yOf(value ?? 0), index: ci });
-    }
-    flushOverlayRun();
+    const overlayRuns: IndexedLinePoint[][] = classicLineRunIndices(s, n, chart.dispBlanksAs)
+      .map(run => run.map(ci => ({ x: toX(ci), y: yOf(s.values[ci] ?? 0), index: ci })));
     const paintOverlayLine = (target: CanvasRenderingContext2D): void => {
       if (!applyClassicStyleLine(
         target, chart, 'dataPointLine', s, undefined, styleIndex, color,

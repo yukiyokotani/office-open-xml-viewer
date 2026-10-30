@@ -366,7 +366,9 @@ describe('renderSlide SmartArt fallback contrast (issue #805)', () => {
     );
     const run = calls.find((c) => c.text.includes('Plain box'));
     expect(run).toBeDefined();
-    expect(run!.fillStyle).toBe('#383838');
+    // A run whose chain authors no colour paints PowerPoint's hard default
+    // black, not the theme default text colour (issue #1989).
+    expect(run!.fillStyle).toBe('#000000');
   });
 
   it('leaves explicit run colours alone on the fallback shape', async () => {
@@ -377,5 +379,28 @@ describe('renderSlide SmartArt fallback contrast (issue #805)', () => {
     const run = calls.find((c) => c.text.includes('Orange label'));
     expect(run).toBeDefined();
     expect(run!.fillStyle).not.toBe('#FFFFFF');
+  });
+});
+
+describe('renderSlide hyperlink colour with hlinkClr="tx" (issue #1989)', () => {
+  async function hyperlinkRunFill(usesTextFill: boolean): Promise<string | undefined> {
+    const shape = fallbackShape('Linked text', { name: 'TextBox 2', id: '2' });
+    const para = shape.textBody!.paragraphs[0];
+    para.defColor = 'FFF2CC';
+    const runData = para.runs[0];
+    if (runData.type === 'text') {
+      runData.hyperlink = 'https://example.com/';
+      runData.hyperlinkUsesTextFill = usesTextFill;
+    }
+    const { ctx, fillTexts } = recordingCtx();
+    await renderSlide(stubCanvas(ctx), slideWith(null, [shape]), 9_144_000, 6_858_000, {
+      width: 960, dpr: 1, defaultTextColor: '383838', hlinkColor: '0563C1',
+    });
+    return fillTexts.find((c) => c.text.includes('Linked text'))?.fillStyle;
+  }
+
+  it('paints the inherited text colour, not the theme hlink colour', async () => {
+    expect(await hyperlinkRunFill(true)).toBe('rgba(255,242,204,1)');
+    expect(await hyperlinkRunFill(false)).toBe('rgba(5,99,193,1)');
   });
 });

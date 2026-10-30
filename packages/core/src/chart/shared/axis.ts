@@ -510,33 +510,53 @@ export function planValueAxis(
   axisLenPt?: number,
   percentStacked = false,
   axisOrientation: 'vertical' | 'horizontal' = 'vertical',
+  percentCurveExtent: readonly [number, number] | null = null,
 ): ValueAxisPlan {
   const reversed = valAxisReversed(chart);
   const logBase = chart.valAxisLogBase;
+  const isLog = logBase != null && isFinite(logBase) && logBase >= 2;
+  // A smoothed percentStacked line can leave the normalized extent (see
+  // smoothCurveExtent). Excel 365 then takes the automatic percent unit from
+  // the widened range and snaps the bound outward to it: a curve dipping to
+  // -2% gives -20%..100%, one peaking at 106% gives 0%..120%. Only a curve
+  // crossing the normalized bound (below 0 / above 100, or past a negative
+  // stack) widens it; otherwise the plan is unchanged.
+  const snapLow = percentStacked && percentCurveExtent != null
+    && percentCurveExtent[0] < Math.min(dataMin, 0);
+  const snapHigh = percentStacked && percentCurveExtent != null
+    && percentCurveExtent[1] > Math.max(dataMax, 0);
+  const percentMin = snapLow && percentCurveExtent ? percentCurveExtent[0] : dataMin;
+  const percentMax = snapHigh && percentCurveExtent ? percentCurveExtent[1] : dataMax;
+  const authoredMajorUnit = valueAxisUnitInRendererSpace(
+    chart.valAxisMajorUnit,
+    percentStacked,
+  );
+  const majorUnit = percentStacked
+    && !isLog
+    && !(authoredMajorUnit != null && isFinite(authoredMajorUnit) && authoredMajorUnit > 0)
+      ? automaticPercentMajorUnit(percentMin, percentMax, axisOrientation, axisLenPt)
+      : authoredMajorUnit;
+  const snapUnit = majorUnit != null && isFinite(majorUnit) && majorUnit > 0 && !isLog
+    ? majorUnit : null;
+  const percentLow = snapLow && snapUnit != null
+    ? Math.floor(percentMin / snapUnit) * snapUnit : dataMin;
+  const percentHigh = snapHigh && snapUnit != null
+    ? Math.ceil(percentMax / snapUnit) * snapUnit : dataMax;
   // c:valAx values remain ratios for percentStacked charts, but all plotted
   // geometry in this renderer is expressed as percentage points. Explicit
   // bounds/units therefore cross the same ×100 boundary as the series values.
   // With no explicit bounds, percentStacked uses its exact normalized extent
   // (0..100 or -100..100) instead of adding ordinary numeric-axis headroom.
   const explicitMin = valueAxisUnitInRendererSpace(chart.valMin, percentStacked)
-    ?? (percentStacked ? dataMin : chart.valMin);
+    ?? (percentStacked ? percentLow : chart.valMin);
   const explicitMax = valueAxisUnitInRendererSpace(chart.valMax, percentStacked)
-    ?? (percentStacked ? dataMax : chart.valMax);
-  const authoredMajorUnit = valueAxisUnitInRendererSpace(
-    chart.valAxisMajorUnit,
-    percentStacked,
-  );
-  const majorUnit = percentStacked
-    && !(logBase != null && isFinite(logBase) && logBase >= 2)
-    && !(authoredMajorUnit != null && isFinite(authoredMajorUnit) && authoredMajorUnit > 0)
-      ? automaticPercentMajorUnit(dataMin, dataMax, axisOrientation, axisLenPt)
-      : authoredMajorUnit;
+    ?? (percentStacked ? percentHigh : chart.valMax);
   const needsMinorTicks = chart.valAxisMinorTickMark != null
     && chart.valAxisMinorTickMark !== 'none';
   const mu = valueAxisUnitInRendererSpace(chart.valAxisMinorUnit, percentStacked);
   const numeric = planNumericValueAxis({
-    dataMin,
-    dataMax,
+    dataMin: percentLow,
+    dataMax: percentHigh,
     explicitMin,
     explicitMax,
     axisLenPt,

@@ -1,4 +1,5 @@
 import type { ChartModel, ChartPlotGroup } from '../types/chart.js';
+import { chartCategories } from './category-spacing.js';
 
 export type ClassicPlotDispatch =
   | 'legacy' | 'bar-combo' | 'line-groups' | 'area-groups' | 'scatter-bubble'
@@ -80,6 +81,46 @@ export function classicPlotDispatch(chart: ChartModel): ClassicPlotDispatch {
     (group.categoryAxis === 'secondary' && chart.secondaryCatAxis == null)
     || (group.valueAxis === 'secondary' && chart.secondaryValAxis == null)
   )) return 'unsupported';
+  // A deleted secondary category axis has no layout of its own: Excel draws
+  // its group against the shared categories, and writes that axis beside the
+  // primary one in every secondary-axis combo (bar, line or area on either
+  // axis). Sharing needs one category mapping and a painter with a secondary
+  // value scale:
+  // - orientation: a reversed (maxMin) deleted axis reverses its bars or line
+  //   and moves the secondary value axis (Excel 365); with reversed category
+  //   axes a crosses="max" secondary value axis sits on the left (§21.2.3.8),
+  //   which the painters do not place, so both must run minMax;
+  // - the deleted axis spreads its own category count across the plot, and
+  //   the shared painters take one count for every group, so every category
+  //   series must carry the same count (group order does not matter: the
+  //   model's categories come from the first series, whichever axis it uses);
+  // - date axes keep their own date scales;
+  // - crossBetween (§21.2.2.32) of each value axis places its categories
+  //   between or on the tick marks;
+  // - the horizontal bar painter has no secondary value axis.
+  // A group on a deleted secondary category axis that cannot share is left
+  // unsupported on every route.
+  const primaryCategoryCount = chartCategories(chart).length;
+  const horizontalBars = groups.some(group => group.kind === 'bar'
+    && (group.barDirection ?? (chart.chartType.endsWith('H') ? 'bar' : 'col')) === 'bar');
+  const sharesCategories = chart.secondaryCatAxis?.hidden === true
+    && (chart.secondaryCatAxis.orientation ?? 'minMax') === 'minMax'
+    && (chart.catAxisOrientation ?? 'minMax') === 'minMax'
+    && chart.secondaryCatAxis.dateAxis !== true
+    && chart.catAxisIsDate !== true
+    && (chart.secondaryValAxis?.crossBetween ?? 'between')
+      === (chart.catAxisCrossBetween ?? 'between')
+    && !horizontalBars
+    && groups.every(group => group.kind === 'scatter' || group.kind === 'bubble'
+      || chart.series.slice(group.seriesStart, group.seriesStart + group.seriesCount)
+        .every(series => (series.categories?.length
+          ? series.categories.length : series.values.length) === primaryCategoryCount));
+  if (chart.secondaryCatAxis?.hidden === true && !sharesCategories
+    && groups.some(group => group.categoryAxis === 'secondary'
+      && group.kind !== 'scatter' && group.kind !== 'bubble')) return 'unsupported';
+  const onPrimaryCategories = (group: ChartPlotGroup): boolean =>
+    group.categoryAxis === 'primary'
+    || (group.categoryAxis === 'secondary' && sharesCategories);
   const kinds = new Set(groups.map(group => group.kind));
   if (groups.some(group => THREE_D_GROUPS.has(group.kind))) return 'unsupported';
   if (groups.length === 2 && groups[0].kind === 'bar' && groups[1].kind === 'scatter') {
@@ -117,7 +158,7 @@ export function classicPlotDispatch(chart: ChartModel): ClassicPlotDispatch {
       // but a distinct top category axis needs its own measured layout pass.
       // Keep that unobserved boundary explicit instead of silently painting it
       // through the bottom axis.
-      if (groups.some(group => group.categoryAxis !== 'primary')) return 'unsupported';
+      if (!groups.every(onPrimaryCategories)) return 'unsupported';
       return kind === 'line' ? 'line-groups' : 'area-groups';
     }
     if (kind === 'scatter' || kind === 'bubble') return 'scatter-bubble';
@@ -133,12 +174,16 @@ export function classicPlotDispatch(chart: ChartModel): ClassicPlotDispatch {
   }
   if (groups.length === 2 && kinds.has('bar') && kinds.has('area')) {
     const overlay = groups.find(group => group.kind === 'line' || group.kind === 'area');
-    if (overlay?.categoryAxis !== 'primary') return 'unsupported';
+    if (overlay == null || !onPrimaryCategories(overlay)) return 'unsupported';
     return 'bar-combo';
   }
+  // The area painter maps each group through its own value axis but draws
+  // line groups unstacked, so a stacked line group keeps the original
+  // primary-axes boundary.
   if (groups.length === 2 && groups[0].kind === 'area' && groups[1].kind === 'line'
-    && groups.every(group => group.categoryAxis === 'primary'
-      && group.valueAxis === 'primary')) {
+    && (groups.every(group => group.categoryAxis === 'primary' && group.valueAxis === 'primary')
+      || (groups.every(onPrimaryCategories)
+        && (groups[1].grouping ?? 'standard') === 'standard'))) {
     return 'area-groups';
   }
   if (kinds.size === 2 && kinds.has('bar') && kinds.has('line')) {
@@ -153,7 +198,7 @@ export function classicPlotDispatch(chart: ChartModel): ClassicPlotDispatch {
     // scenes explicit until their z-order and axis ownership are observed.
     if (barGroups.length <= 2 && lineGroups.length === 1 && groups.length <= 3
       && directions.size === 1
-      && groups.every(group => group.categoryAxis === 'primary')) {
+      && groups.every(onPrimaryCategories)) {
       return 'bar-combo';
     }
     return 'unsupported';
