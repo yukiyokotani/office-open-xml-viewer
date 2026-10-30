@@ -48,6 +48,11 @@ const MAX_PARAGRAPH_CONTEXTS: usize = 65_536;
 /// charged before each allocation. The DOCX cursor additionally enforces its
 /// retained JSON ceiling while serializing.
 const MAX_CONSTRUCTION_BYTES: usize = 256 * 1024 * 1024;
+/// Implementation bound on downstream layout work the admitted model causes,
+/// document-wide. The DOCX line breaker sizes each line break by searching
+/// the paragraph's runs for its index and then the nearest text run, so a
+/// break costs about its run index plus the breaks it scans past.
+const MAX_BREAK_LAYOUT_WORK: usize = 64 * 1024 * 1024;
 /// Implementation bound on the §16.2 search order of one span: its own style
 /// chain and those of the enclosing spans and paragraph.
 const MAX_SEARCH_ORDER: usize = 256;
@@ -120,6 +125,7 @@ pub fn read(package: &OdfPackage) -> Result<Document, String> {
         chains: HashMap::new(),
         text_chains: HashMap::new(),
         cascade_work: Cell::new(0),
+        break_layout_work: 0,
         page_master: page.name.as_str(),
         paragraphs: Vec::new(),
         retained_text_bytes: 0,
@@ -698,6 +704,7 @@ struct Reader<'a> {
     /// Each applied text style's checked parent chain, by style identity.
     text_chains: HashMap<*const Style, Rc<[StyleRef<'a>]>>,
     cascade_work: Cell<usize>,
+    break_layout_work: usize,
     page_master: &'a str,
     paragraphs: Vec<Collected>,
     retained_text_bytes: usize,
@@ -1061,6 +1068,8 @@ impl<'a> Reader<'a> {
         let mut current: Option<(u32, ScriptClass)> = None;
         // Line breaks not yet preceded by a text run, checked against the next.
         let mut pending_breaks: Vec<(u32, ScriptClass)> = Vec::new();
+        // Breaks since the last text run: each scans back past them.
+        let mut breaks_since_text = 0usize;
         for &token in tokens {
             let (c, context) = match token {
                 Token::LineBreak(context) => {
@@ -1076,6 +1085,13 @@ impl<'a> Reader<'a> {
                         Some(text) => same_line_metrics(&cache[&key], &cache[&text])?,
                         None => pending_breaks.push(key),
                     }
+                    self.break_layout_work = self
+                        .break_layout_work
+                        .saturating_add(paragraph.runs.len() + breaks_since_text + 1);
+                    if self.break_layout_work > MAX_BREAK_LAYOUT_WORK {
+                        return Err("OpenDocument text exceeds the line break layout limit".into());
+                    }
+                    breaks_since_text += 1;
                     self.charge_construction(std::mem::size_of::<DocRun>())?;
                     paragraph.runs.push(DocRun::Break {
                         break_type: BreakType::Line,
@@ -1113,6 +1129,7 @@ impl<'a> Reader<'a> {
             for pending in pending_breaks.drain(..) {
                 same_line_metrics(&cache[&pending], &cache[&key])?;
             }
+            breaks_since_text = 0;
             let continues = match (current, paragraph.runs.last_mut()) {
                 (Some(last_key), Some(DocRun::Text(last))) if cache[&last_key] == cache[&key] => {
                     last.text.push(c);
@@ -2419,7 +2436,8 @@ mod tests {
         .unwrap();
         assert_eq!(texts(paragraphs(&document)[0]), vec!["x".repeat(2000)]);
 
-        // Every line break is a retained run.
+        // Every line break is a retained run and costs downstream layout work;
+        // either bound stops a break flood.
         let breaks = MAX_CONSTRUCTION_BYTES / std::mem::size_of::<DocRun>() + 1;
         let paragraph = format!("<text:p>x{}</text:p>", "<text:line-break/>".repeat(900_000));
         let error = read_fixture(Fixture {
@@ -2427,7 +2445,10 @@ mod tests {
             ..Fixture::default()
         })
         .unwrap_err();
-        assert!(error.contains("construction limit"), "{error}");
+        assert!(
+            error.contains("construction limit") || error.contains("line break layout limit"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -2506,6 +2527,26 @@ mod tests {
             read(r#"<text:p><text:line-break/></text:p>"#).unwrap_err(),
             unsupported("line-break-without-text")
         );
+    }
+
+    #[test]
+    fn consecutive_line_breaks_are_charged_for_downstream_layout() {
+        // 12,000 consecutive breaks cost ~72M units in the DOCX line breaker.
+        let body = format!("<text:p>x{}</text:p>", "<text:line-break/>".repeat(12_000));
+        let error = read_fixture(Fixture {
+            body: &body,
+            ..Fixture::default()
+        })
+        .unwrap_err();
+        assert!(error.contains("line break layout limit"), "{error}");
+        // Text between breaks still leaves the run-index search, so a
+        // paragraph's break cost grows with its run count.
+        let body = format!("<text:p>x{}</text:p>", "<text:line-break/>x".repeat(3_000));
+        assert!(read_fixture(Fixture {
+            body: &body,
+            ..Fixture::default()
+        })
+        .is_ok());
     }
 
     #[test]
