@@ -333,7 +333,7 @@ export function renderAreaChart(
         includeEndpoint,
       );
     }
-    for (const { series, chartIndex } of lineSeries) {
+    for (const { series } of lineSeries) {
       if (isSecondarySeries(series)) continue;
       forEachErrorBarEndpoint(series, 'y', index => series.values[index] ?? null, includeEndpoint);
     }
