@@ -918,6 +918,17 @@ impl<'a> Reader<'a> {
                 return Err(unsupported("tab-stop-distance"));
             }
         }
+        if collected.paragraph.alignment == "justify"
+            && inline
+                .tokens
+                .iter()
+                .any(|t| matches!(t, Token::LineBreak(_)))
+        {
+            // LibreOffice justifies a line ended by a manual break; the DOCX
+            // layout leaves it unjustified, and stretching it as the last
+            // line would also stretch the paragraph's final line (measured).
+            return Err(unsupported("justify-with-line-break"));
+        }
         let tokens = collapse(std::mem::take(&mut inline.tokens));
         self.emit_runs(&tokens, &inline.contexts, &mut collected.paragraph)?;
         self.paragraphs.push(collected);
@@ -1096,6 +1107,11 @@ impl<'a> Reader<'a> {
         // metrics, unlike LibreOffice.
         let mut line_has_glyph = false;
         let mut any_break = false;
+        // The DOCX layout gives a tab synthetic metrics from its own size,
+        // LibreOffice its font's (measured): a tab must share the line
+        // metrics of the nearest glyph-bearing run, preceding first.
+        let mut last_glyph: Option<(u32, ScriptClass)> = None;
+        let mut pending_tabs: Vec<(u32, ScriptClass)> = Vec::new();
         for &token in tokens {
             let (c, context) = match token {
                 Token::LineBreak(context) => {
@@ -1118,7 +1134,9 @@ impl<'a> Reader<'a> {
                     line_has_glyph = false;
                     any_break = true;
                     match current {
-                        Some(text) => same_line_metrics(&cache[&key], &cache[&text])?,
+                        Some(text) => {
+                            same_line_metrics(&cache[&key], &cache[&text], "line-break-formatting")?
+                        }
                         None => return Err(unsupported("line-break-empty-line")),
                     }
                     self.break_layout_work = self
@@ -1163,6 +1181,19 @@ impl<'a> Reader<'a> {
                 entry.insert(self.run_properties(contexts, context, class)?);
             }
             breaks_since_text = 0;
+            if matches!(token, Token::Tab(_)) {
+                match last_glyph {
+                    Some(glyph) => {
+                        same_line_metrics(&cache[&key], &cache[&glyph], "tab-formatting")?
+                    }
+                    None => pending_tabs.push(key),
+                }
+            } else if !c.is_whitespace() {
+                for tab in pending_tabs.drain(..) {
+                    same_line_metrics(&cache[&tab], &cache[&key], "tab-formatting")?;
+                }
+                last_glyph = Some(key);
+            }
             line_has_glyph |= !c.is_whitespace();
             let continues = match (current, paragraph.runs.last_mut()) {
                 (Some(last_key), Some(DocRun::Text(last))) if cache[&last_key] == cache[&key] => {
@@ -1181,6 +1212,9 @@ impl<'a> Reader<'a> {
         }
         if any_break && !line_has_glyph {
             return Err(unsupported("line-break-empty-line"));
+        }
+        if !pending_tabs.is_empty() {
+            return Err(unsupported("tab-without-text"));
         }
         Ok(())
     }
@@ -1316,11 +1350,15 @@ impl<'a> Reader<'a> {
 }
 
 /// The properties that set a line's height: face, size and raise/lower.
-fn same_line_metrics(a: &RunProperties, b: &RunProperties) -> Result<(), String> {
+fn same_line_metrics(
+    a: &RunProperties,
+    b: &RunProperties,
+    code: &'static str,
+) -> Result<(), String> {
     if a.family == b.family && a.size == b.size && a.position == b.position {
         Ok(())
     } else {
-        Err(unsupported("line-break-formatting"))
+        Err(unsupported(code))
     }
 }
 
@@ -1487,29 +1525,25 @@ impl RunProperties {
             .map(percent)
             .transpose()?
             .filter(|scale| (*scale - 1.0).abs() > 1e-9);
-        let (position, size) = match cascade.get(NS_STYLE, "text-position") {
-            None => (None, size),
-            Some(value) => {
-                let mut parts = value.split_whitespace();
-                let raise = parts.next().ok_or_else(|| invalid("empty text-position"))?;
-                // §20.384 leaves the keyword offsets and an omitted size to
-                // the consumer: not yet measured.
-                let relative = parts
-                    .next()
-                    .ok_or_else(|| unsupported("text-position-default"))?;
-                if !raise.ends_with('%') {
-                    return Err(unsupported("text-position-default"));
+        // §20.384: a raised/lowered or resized portion changes the line
+        // height differently in LibreOffice and the DOCX layout (measured: a
+        // -20% 58% portion and a 0% 0% portion); only the inert value
+        // (no raise, 100% size) is admitted until the geometry is measured.
+        match cascade
+            .get(NS_STYLE, "text-position")
+            .map(str::split_whitespace)
+        {
+            None => {}
+            Some(mut parts) => {
+                // Keywords (`super`, `sub`) are not percentages: rejected too.
+                let raise = parts.next().and_then(|v| percent(v).ok());
+                let relative = parts.next().and_then(|v| percent(v).ok());
+                if raise != Some(0.0) || relative != Some(1.0) || parts.next().is_some() {
+                    return Err(unsupported("text-position"));
                 }
-                let raise = percent(raise)?;
-                // A raised or lowered portion changes the line's height
-                // differently in LibreOffice and the DOCX layout (measured:
-                // 12 pt at -20% 58% puts the next paragraph 4.9 pt apart).
-                if raise != 0.0 {
-                    return Err(unsupported("text-position-raise"));
-                }
-                (None, size * percent(relative)?)
             }
-        };
+        }
+        let position: Option<f64> = None;
         // §20.227 follows XSL's language-sensitive case mapping; the DOCX
         // renderer uppercases locale-independently. Not yet measured.
         if cascade
@@ -2658,8 +2692,27 @@ mod tests {
     }
 
     #[test]
-    fn rejects_raised_or_lowered_text() {
-        let styles = r#"<style:style style:name="Sub" style:family="text"><style:text-properties style:text-position="-20% 58%"/></style:style><style:style style:name="Small" style:family="text"><style:text-properties style:text-position="0% 58%"/></style:style>"#;
+    fn rejects_raised_lowered_or_resized_text() {
+        for value in ["-20% 58%", "0% 58%", "super 58%", "33%"] {
+            let styles = format!(
+                r#"<style:style style:name="P" style:family="text"><style:text-properties style:text-position="{value}"/></style:style>"#
+            );
+            assert_eq!(
+                read_fixture(Fixture {
+                    styles: &styles,
+                    body: r#"<text:p>a<text:span text:style-name="P">b</text:span></text:p>"#,
+                    ..Fixture::default()
+                })
+                .unwrap_err(),
+                unsupported("text-position"),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_tab_formatting_resizing_and_justified_breaks() {
+        let styles = r#"<style:style style:name="Big" style:family="text"><style:text-properties fo:font-size="30pt"/></style:style><style:style style:name="Zero" style:family="text"><style:text-properties style:text-position="0% 0%"/></style:style><style:style style:name="Inert" style:family="text"><style:text-properties style:text-position="0% 100%"/></style:style><style:style style:name="J" style:family="paragraph"><style:paragraph-properties fo:text-align="justify"/></style:style>"#;
         let read = |body: &str| {
             read_fixture(Fixture {
                 styles,
@@ -2668,13 +2721,34 @@ mod tests {
             })
         };
         assert_eq!(
-            read(r#"<text:p>a<text:span text:style-name="Sub">b</text:span></text:p>"#)
+            read(r#"<text:p>a<text:span text:style-name="Big"><text:tab/></text:span>b</text:p>"#)
                 .unwrap_err(),
-            unsupported("text-position-raise")
+            unsupported("tab-formatting")
+        );
+        assert_eq!(
+            read(r#"<text:p><text:span text:style-name="Big"><text:tab/></text:span>b</text:p>"#)
+                .unwrap_err(),
+            unsupported("tab-formatting")
+        );
+        assert_eq!(
+            read("<text:p><text:tab/></text:p>").unwrap_err(),
+            unsupported("tab-without-text")
+        );
+        assert!(read("<text:p><text:tab/>b</text:p>").is_ok());
+        assert_eq!(
+            read(r#"<text:p>a<text:span text:style-name="Zero">b</text:span></text:p>"#)
+                .unwrap_err(),
+            unsupported("text-position")
         );
         assert!(
-            read(r#"<text:p>a<text:span text:style-name="Small">b</text:span></text:p>"#).is_ok()
+            read(r#"<text:p>a<text:span text:style-name="Inert">b</text:span></text:p>"#).is_ok()
         );
+        assert_eq!(
+            read(r#"<text:p text:style-name="J">alpha beta<text:line-break/>gamma delta</text:p>"#)
+                .unwrap_err(),
+            unsupported("justify-with-line-break")
+        );
+        assert!(read(r#"<text:p text:style-name="J">alpha beta gamma delta</text:p>"#).is_ok());
     }
 
     #[test]
