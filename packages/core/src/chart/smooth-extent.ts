@@ -100,17 +100,20 @@ export function smoothCurveExtent(
       const c2 = p2 - (p3 - p1) / 6;
       include(p1);
       include(p2);
-      // B'(t) / 3 = a t² + b t + c for the cubic p1, c1, c2, p2. Degeneracy
-      // is judged relative to the coefficients so tiny magnitudes keep their
-      // extrema.
-      const a = -p1 + 3 * c1 - 3 * c2 + p2;
-      const b = 2 * (p1 - 2 * c1 + c2);
-      const c = c1 - p1;
-      const scale = Math.max(Math.abs(a), Math.abs(b), Math.abs(c));
-      if (scale === 0) continue;
+      // B'(t) / 3 = a t² + b t + c for the cubic p1, c1, c2, p2, normalised
+      // by its largest coefficient so neither huge nor tiny magnitudes
+      // overflow or lose their extrema.
+      const rawA = -p1 + 3 * c1 - 3 * c2 + p2;
+      const rawB = 2 * (p1 - 2 * c1 + c2);
+      const rawC = c1 - p1;
+      const scale = Math.max(Math.abs(rawA), Math.abs(rawB), Math.abs(rawC));
+      if (!(scale > 0) || !Number.isFinite(scale)) continue;
+      const a = rawA / scale;
+      const b = rawB / scale;
+      const c = rawC / scale;
       const roots: number[] = [];
-      if (Math.abs(a) <= scale * 1e-12) {
-        if (Math.abs(b) > scale * 1e-12) roots.push(-c / b);
+      if (Math.abs(a) <= 1e-12) {
+        if (Math.abs(b) > 1e-12) roots.push(-c / b);
       } else {
         const disc = b * b - 4 * a * c;
         if (disc >= 0) {
