@@ -36,6 +36,10 @@ interface MainRealm extends WorkerRealm {
   readonly copyBridgedFontDemand: typeof import('./resolver-bridge-responder.js').copyBridgedFontDemand;
   readonly sourceCacheEntryCount: () => number;
   readonly responderModule: typeof import('./resolver-bridge-responder.js');
+  readonly acquireFaceUrls: typeof import('./face-download.js').acquireFaceUrls;
+  readonly releaseAcquiredFaces: typeof import('./face-download.js').releaseAcquiredFaces;
+  readonly acquiredFaceCount: typeof import('./face-download.js').acquiredFaceCount;
+  readonly inRealmResolverFaceAcquirer: typeof import('./face-download.js').inRealmResolverFaceAcquirer;
 }
 const worker1: WorkerRealm = {
   FontSourceSession, WorkerFontResolverClient, assertFontSourceDescriptors, retainedFontSourceBytes, liveSourceCacheCount,
@@ -45,11 +49,12 @@ let main: MainRealm;
 
 async function loadRealm() {
   vi.resetModules();
-  const [source, session, bridge, host, responder, cache] = await Promise.all([
+  const [source, session, bridge, host, responder, cache, acquisition] = await Promise.all([
     import('./source.js'), import('./source-session.js'), import('./resolver-bridge.js'),
     import('./resolver-bridge-host.js'),
     import('./resolver-bridge-responder.js'),
     import('./source-cache.js'),
+    import('./face-download.js'),
   ]);
   return {
     FontSourceSession: session.FontSourceSession,
@@ -63,6 +68,10 @@ async function loadRealm() {
     copyBridgedFontDemand: responder.copyBridgedFontDemand,
     sourceCacheEntryCount: cache.sourceCacheEntryCount,
     responderModule: responder,
+    acquireFaceUrls: acquisition.acquireFaceUrls,
+    releaseAcquiredFaces: acquisition.releaseAcquiredFaces,
+    acquiredFaceCount: acquisition.acquiredFaceCount,
+    inRealmResolverFaceAcquirer: acquisition.inRealmResolverFaceAcquirer,
   };
 }
 beforeAll(async () => {
@@ -882,14 +891,20 @@ describe('fontResolver bridge: the page fetches resolver URLs', () => {
     });
     return calls;
   }
-  afterEach(() => { G.fetch = ORIGINAL_FETCH; });
+  afterEach(async () => {
+    vi.useRealTimers();
+    G.fetch = ORIGINAL_FETCH;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(main.acquiredFaceCount()).toBe(0);
+  });
 
   const URL_FACES = (family = 'Private Face'): FontFaceDeclaration[] => [
     { family, url: 'https://fonts.app.example/private-400.woff2', weight: '400' },
     { family, url: 'https://fonts.app.example/private-700.woff2', weight: '700' },
   ];
+  const kinds = (messages: unknown[]) => messages.map((message) => (message as { kind: string }).kind);
 
-  it('downloads every URL in the page with page credentials and sends the worker bytes', async () => {
+  it('fetches the claimed URLs in the page with page credentials and sends the worker bytes', async () => {
     const calls = installFetch({
       'https://fonts.app.example/private-400.woff2': { bytes: 40 },
       'https://fonts.app.example/private-700.woff2': { bytes: 70 },
@@ -909,61 +924,107 @@ describe('fontResolver bridge: the page fetches resolver URLs', () => {
     expect(loaded.faces.map(({ weight, style }) => `${weight}/${style}`)).toEqual(['400/normal', '700/normal', 'normal/italic']);
     // http(s) faces arrive as bytes; the inline data: URL stays as it is.
     expect(set.faces.map((face) => face.bytes)).toEqual([40, 70, 0]);
-    const reply = link.toWorker[0] as { outcome: { families: { declarations: FontFaceDeclaration[] }[] } };
-    const sent = reply.outcome.families[0].declarations;
-    expect(sent.map((declaration) => declaration.url ?? `bytes:${declaration.data?.byteLength}`))
-      .toEqual(['bytes:40', 'bytes:70', 'data:font/woff2;base64,AAAA']);
+    expect(kinds(link.toMain)).toEqual(['ooxmlResolveFonts', 'ooxmlAcquireFonts']);
+    expect(kinds(link.toWorker)).toEqual(['ooxmlFontsResolved', 'ooxmlFontsAcquired']);
     // Requested by the page, once per URL, with the CSS font-fetch mode.
     expect(calls.map(({ url, init }) => [url, init?.credentials, init?.mode])).toEqual([
       ['https://fonts.app.example/private-400.woff2', 'same-origin', 'cors'],
       ['https://fonts.app.example/private-700.woff2', 'same-origin', 'cors'],
     ]);
-    // The worker charges the bytes it keeps (cached copy and registration).
-    expect(retainedFontSourceBytes()).toBe(2 * (110 + 3));
+    // The worker charges what it keeps: its cached answer (the data: URL)
+    // and the registrations; main the acquired bodies it keeps for the document.
+    expect(retainedFontSourceBytes()).toBe(3 + 113);
+    expect(main.retainedFontSourceBytes()).toBe(3 + 110);
+    session.release();
+    link.host.dispose();
+    await vi.waitFor(() => expect(main.retainedFontSourceBytes()).toBe(0));
+  });
+
+  it('fetches only URLs the document resolved for the named family', async () => {
+    const calls = installFetch({ 'https://evil.example/x.woff2': { bytes: 4 } });
+    const source = fontResolver(() => URL_FACES().slice(0, 1));
+    const link = bridge([source]);
+    const { session } = link.session();
+    installFetch({ 'https://fonts.app.example/private-400.woff2': { bytes: 40 } });
+    await session.ensure(demand(['Private Face']));
+    const posts: unknown[] = [];
+    const host = new main.FontResolverBridgeHost({ post: (message) => posts.push(message), sources: [source] });
+    hosts.push(host);
+    host.accept({
+      kind: 'ooxmlAcquireFonts', generation: 0, requestId: 9, sourceIndex: 0, resolverId: source.id, remainingMs: 1000,
+      families: [{ family: 'Private Face', urls: ['https://evil.example/x.woff2'] }],
+    });
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+    expect(calls).toHaveLength(0);
+    expect((posts[0] as { outcome: unknown }).outcome).toEqual({
+      status: 'faces', faces: [{ url: 'https://evil.example/x.woff2', reason: 'not a font this document resolved' }],
+    });
     session.release();
     link.host.dispose();
   });
 
-  it('downloads answers the host gives from the document cache too', async () => {
-    const calls = installFetch({
-      'https://fonts.app.example/private-400.woff2': { bytes: 40 },
-      'https://fonts.app.example/private-700.woff2': { bytes: 70 },
-    });
+  it('shares one request and one outcome with the XLSX viewer realm of the document', async () => {
+    const calls = installFetch({ 'https://fonts.app.example/private-400.woff2': { bytes: 40 } });
     const resolve = vi.fn(() => URL_FACES());
     const source = fontResolver(resolve);
     const failures = new Map<string, string>();
-    // An XLSX viewer-realm session of the same document resolves first.
-    const { session: viewer } = mainSession([source], failures);
-    await viewer.ensure(demand(['Private Face']));
+    const viewerSet = fakeSet();
+    const viewer = new main.FontSourceSession({
+      sources: [source], fontSet: asSet(viewerSet), resolverFailures: failures,
+      acquireResolverFaces: main.inRealmResolverFaceAcquirer(failures),
+    });
+    sessions.push(viewer);
+    const viewerLoaded = await viewer.ensure(demand(['Private Face']));
     const link = bridge([source], { failures });
     const { session, set } = link.session();
-    await session.ensure(demand(['Private Face']));
+    const loaded = await session.ensure(demand(['Private Face']));
     expect(resolve).toHaveBeenCalledTimes(1);
-    expect(set.faces.map((face) => face.bytes)).toEqual([40, 70]);
-    expect(calls).toHaveLength(2);
+    // One fetch per URL for both realms, including the failed one.
+    expect(calls.map(({ url }) => url)).toEqual([
+      'https://fonts.app.example/private-400.woff2', 'https://fonts.app.example/private-700.woff2',
+    ]);
+    expect(viewerLoaded.faces.map(({ weight }) => weight)).toEqual(['400']);
+    expect(loaded.faces.map(({ weight }) => weight)).toEqual(['400']);
+    expect(viewerSet.faces.map((face) => face.bytes)).toEqual([40]);
+    expect(set.faces.map((face) => face.bytes)).toEqual([40]);
     session.release();
     viewer.release();
     link.host.dispose();
   });
 
-  it('leaves out faces whose download fails, failing a family left with none', async () => {
-    installFetch({ 'https://fonts.app.example/private-400.woff2': { bytes: 40 } });
-    const source = fontResolver((request) => request.families.flatMap((family) => URL_FACES(family).map((face) =>
-      (family === 'Gone' ? { ...face, url: face.url!.replace('private', 'gone') } : face))));
+  it('keeps claim precedence when a claimed face cannot be fetched', async () => {
+    installFetch({ 'https://fonts.app.example/sub.woff2': { bytes: 8 } });
+    const source = fontResolver(() => [
+      { family: 'Private Face', url: 'https://fonts.app.example/gone.woff2' },
+      { family: 'Sub Face', url: 'https://fonts.app.example/sub.woff2' },
+    ], { substitutes: [{ for: 'Private Face', use: 'Sub Face' }] });
     const link = bridge([source]);
     const { session, set } = link.session();
-    const loaded = await session.ensure(demand(['Private Face', 'Gone']));
-    expect(loaded.faces.map(({ family, weight }) => `${family}/${weight}`)).toEqual(['Private Face/400']);
-    expect(set.faces.map((face) => face.bytes)).toEqual([40]);
-    const warnings: string[] = warn.mock.calls.map((call: unknown[]) => String(call[0]));
-    // The page warns for the partial family, the worker for the failed one.
-    expect(warnings.some((text) => text.includes('Private Face (HTTP 404)'))).toBe(true);
-    expect(warnings.some((text) => text.includes('Gone (HTTP 404)'))).toBe(true);
+    const loaded = await session.ensure(demand(['Private Face']));
+    // As in main mode: the authored face claims the family, fails, and the
+    // family keeps its host fallback; the substitute is never promoted.
+    expect(loaded.faces).toEqual([]);
+    expect(loaded.substitutions.size).toBe(0);
+    expect(set.faces).toHaveLength(0);
+    expect(String(warn.mock.calls.at(-1)?.[0])).toContain('Private Face (HTTP 404)');
     session.release();
     link.host.dispose();
   });
 
-  it('downloads within the call deadline', async () => {
+  it('leaves out faces whose download fails and warns their family', async () => {
+    installFetch({ 'https://fonts.app.example/private-400.woff2': { bytes: 40 } });
+    const source = fontResolver(() => URL_FACES());
+    const link = bridge([source]);
+    const { session, set } = link.session();
+    const loaded = await session.ensure(demand(['Private Face']));
+    expect(loaded.faces.map(({ weight }) => weight)).toEqual(['400']);
+    expect(set.faces.map((face) => face.bytes)).toEqual([40]);
+    expect(String(warn.mock.calls.at(-1)?.[0])).toContain('Private Face (HTTP 404)');
+    session.release();
+    link.host.dispose();
+  });
+
+  it('acquires within the face-loading ceiling', async () => {
     vi.useFakeTimers();
     installFetch({ 'https://fonts.app.example/private-400.woff2': { hang: true } });
     const source = fontResolver(() => URL_FACES().slice(0, 1));
@@ -977,7 +1038,7 @@ describe('fontResolver bridge: the page fetches resolver URLs', () => {
     link.host.dispose();
   });
 
-  it('posts nothing for a request the worker cancels while its faces download', async () => {
+  it('posts nothing for an acquisition the worker cancels, and aborts its requests', async () => {
     const calls = installFetch({ 'https://fonts.app.example/private-400.woff2': { hang: true } });
     const source = fontResolver(() => URL_FACES().slice(0, 1));
     const link = bridge([source]);
@@ -988,19 +1049,67 @@ describe('fontResolver bridge: the page fetches resolver URLs', () => {
     await vi.waitFor(() => expect((calls[0].init?.signal as AbortSignal).aborted).toBe(true));
     await pending.catch(() => undefined);
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(link.toWorker).toEqual([]);
+    expect(kinds(link.toWorker)).toEqual(['ooxmlFontsResolved']);
     session.release();
     link.host.dispose();
   });
 
-  it('rejects the worker load for a downloaded face beyond the face ceiling', async () => {
-    installFetch({ 'https://fonts.app.example/private-400.woff2': { bytes: HARD_MAX_FONT_SOURCE_FACE_BYTES + 1 } });
-    const source = fontResolver(() => URL_FACES().slice(0, 1));
+  it('rejects the worker load for a body beyond the face ceiling and aborts the rest of the batch', async () => {
+    const calls = installFetch({
+      'https://fonts.app.example/private-400.woff2': { bytes: HARD_MAX_FONT_SOURCE_FACE_BYTES + 1 },
+      'https://fonts.app.example/private-700.woff2': { hang: true },
+    });
+    const source = fontResolver(() => URL_FACES());
     const link = bridge([source]);
     const { session } = link.session();
     await expect(session.ensure(demand(['Private Face'])))
       .rejects.toMatchObject({ code: 'font-source-limit', violation: { quota: 'face' } });
+    const sibling = calls.find(({ url }) => url.endsWith('private-700.woff2'));
+    expect((sibling?.init?.signal as AbortSignal).aborted).toBe(true);
+    expect(main.retainedFontSourceBytes()).toBe(0);
     link.host.dispose();
+  });
+});
+
+describe('face acquisition', () => {
+  const ORIGINAL_FETCH = G.fetch;
+  afterEach(() => { G.fetch = ORIGINAL_FETCH; vi.useRealTimers(); });
+
+  it('runs at most six downloads at a time', async () => {
+    const started: string[] = [];
+    G.fetch = vi.fn((url: string, init?: RequestInit) => {
+      started.push(url);
+      return new Promise((_resolve, reject) => init?.signal?.addEventListener('abort',
+        () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' }))));
+    });
+    const controller = new AbortController();
+    const urls = Array.from({ length: 10 }, (_, index) => `https://fonts.app.example/${index}.woff2`);
+    const holder = {};
+    const pending = main.acquireFaceUrls(urls, { credentials: 'omit', signal: controller.signal, deadline: Date.now() + 60_000, holder });
+    await vi.waitFor(() => expect(started).toHaveLength(6));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(started).toHaveLength(6);
+    controller.abort();
+    const outcomes = await pending;
+    expect([...outcomes.values()].every((outcome) => 'reason' in outcome && outcome.reason === 'timed out')).toBe(true);
+    main.releaseAcquiredFaces(holder);
+    expect(main.acquiredFaceCount()).toBe(0);
+  });
+
+  it('fails a body that completes after the deadline, whatever the timers did', async () => {
+    vi.useFakeTimers();
+    const start = Date.now();
+    G.fetch = vi.fn(async () => {
+      vi.setSystemTime(start + 20_000);
+      return { ok: true, status: 200, arrayBuffer: async () => new Uint8Array(4).buffer };
+    });
+    const holder = {};
+    const outcomes = await main.acquireFaceUrls(['https://fonts.app.example/late.woff2'], {
+      credentials: 'same-origin', signal: new AbortController().signal, deadline: start + 10_000, holder,
+    });
+    expect(outcomes.get('https://fonts.app.example/late.woff2')).toEqual({ reason: 'timed out' });
+    main.releaseAcquiredFaces(holder);
+    expect(main.retainedFontSourceBytes()).toBe(0);
   });
 });
 

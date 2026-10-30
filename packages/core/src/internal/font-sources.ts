@@ -57,6 +57,7 @@ export {
   type LoadedSourceFace,
 } from '../fonts/source-session.js';
 export { fetchFontStylesheet, parseFontFaceCss, parseUnicodeRange } from '../fonts/css-source.js';
+export { inRealmResolverFaceAcquirer } from '../fonts/face-download.js';
 export {
   WorkerFontResolverClient,
   isMainFontResolveReply,

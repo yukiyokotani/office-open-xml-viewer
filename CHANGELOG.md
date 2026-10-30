@@ -20,8 +20,8 @@ is removed in 0.91.0. See the [0.89 to 0.90 migration guide](docs/migration-0.90
   `credentials`. The factories are exported from `@silurus/ooxml` and from
   each format entry, along with `officeFontSubstitutions` and
   `googleFontsSubstitutions`. DOCX, XLSX and PPTX behave the same in main and
-  worker mode: in worker mode the page runs a resolver and also downloads the
-  URLs it returns, so cookies and authentication behave as in main mode.
+  worker mode: in worker mode the page runs a resolver and also fetches the
+  claimed URLs it returns, so cookies and authentication behave as in main mode.
   Nothing is requested without a source (#1460, #1497).
 - **Custom Google Fonts origin:** `googleFonts({ cssOrigin })` sends the
   stylesheet requests to a regional mirror or an internal proxy instead of

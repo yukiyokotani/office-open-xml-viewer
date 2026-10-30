@@ -654,7 +654,8 @@ new DocxViewer(canvas, {
 The factories are `googleFonts({ cssOrigin?, substitutes? })`,
 `fontCssApi({ urlTemplate, … })`, `fontCss({ url })`, `fontFiles({ faces })`
 and, for authenticated or private services, `fontResolver(fn)`, which runs on
-the main thread (in worker mode the page also downloads the URLs it returns).
+the main thread (in worker mode the page also fetches the claimed URLs it
+returns).
 Every source takes `substitutes`; `fontCssApi`, `fontCss` and `fontFiles` also
 take `credentials`. They are exported from `@silurus/ooxml` and from
 each format entry.

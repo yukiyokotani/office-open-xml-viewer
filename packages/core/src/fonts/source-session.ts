@@ -17,8 +17,11 @@
  *    deterministic. Only a source that does not serve the family (an
  *    allow-list miss, a family absent from a stylesheet or file list) passes
  *    it on;
- *    A source with `credentials: 'omit'` then downloads the claimed `url`
- *    faces itself (`face-download.ts`), still within the resolution ceiling;
+ *    The claimed `url` faces of a source with `credentials: 'omit'`, and of
+ *    a resolver when the session acquires resolver faces (the worker bridge,
+ *    an XLSX viewer realm of a worker-mode workbook), are then fetched by the
+ *    library (`face-download.ts`) within the face-loading ceiling; a face
+ *    that cannot be fetched fails like a face that cannot load;
  * 2. **admits** the claimed declarations against the generated ceilings
  *    (families per session, declarations per session, retained bytes per
  *    realm). A breach rejects with `OoxmlError('font-source-limit')`, releases
@@ -50,7 +53,15 @@ import {
   HARD_MAX_FONT_SOURCE_FAMILIES,
 } from '../worker/resource-policy.generated.js';
 import { parseUnicodeRange, resolveCssSource } from './css-source.js';
-import { downloadFontFaces, isDownloadableFace } from './face-download.js';
+import {
+  acquireFaceUrls,
+  isDownloadableFace,
+  releaseAcquiredFaces,
+  withAcquiredBytes,
+  type FaceAcquisition,
+  type ResolverFaceAcquirer,
+  type ResolverFaceRequest,
+} from './face-download.js';
 import { resolveFontFiles } from './files-source.js';
 import { concludeFamilies } from './resolver-failures.js';
 import {
@@ -110,7 +121,7 @@ export interface LoadedFontSources {
   readonly regularAliases: ReadonlyMap<string, string>;
 }
 
-export type { FontResolverFailures, FontResolverRunner };
+export type { FontResolverFailures, FontResolverRunner, ResolverFaceAcquirer, ResolverFaceRequest };
 
 export interface FontSourceSessionOptions {
   /** The `fonts` option value; validated here. */
@@ -127,7 +138,11 @@ export interface FontSourceSessionOptions {
    * worker bridge, whose main side times calls out and records the outcome
    * for the whole document), so resolver waits ignore this realm's ceiling. */
   readonly resolverCeilingOwnedByRunner?: boolean;
+  /** Fetch the claimed http(s) / blob: faces of resolver sources through
+   * this acquirer instead of `FontFace.load()` (see {@link ResolverFaceAcquirer}). */
+  readonly acquireResolverFaces?: ResolverFaceAcquirer;
 }
+
 
 const EMPTY_SNAPSHOT: LoadedFontSources = Object.freeze({
   faces: Object.freeze([]),
@@ -326,7 +341,7 @@ type FamilyState =
   | { readonly kind: 'claimed'; readonly name: string; readonly sourceIndex: number; readonly served: string;
     readonly substitution?: FontSubstitution; readonly declarations: readonly FontFaceDeclaration[];
     readonly faces: OwnedFace[];
-    /** A `credentials: 'omit'` face download failed (the family is warned). */
+    /** A library-fetched face of the family failed (the family is warned). */
     readonly downloadFailure?: string }
   | { readonly kind: 'failed'; readonly name: string; readonly reason: string }
   /** No source declared a face for the family under substitution scope
@@ -353,6 +368,7 @@ export class FontSourceSession {
   private fontSet: FontFaceSet | null;
   private runResolver: FontResolverRunner;
   private resolverFailures: FontResolverFailures | undefined;
+  private acquireResolverFaces: ResolverFaceAcquirer | undefined;
   private readonly runnerOwnsCeiling: boolean;
   private readonly controller = new AbortController();
   private detachSignal: () => void = () => undefined;
@@ -373,6 +389,7 @@ export class FontSourceSession {
     this.runResolver = options.runResolver ?? runResolverInRealm;
     this.resolverFailures = options.resolverFailures;
     this.runnerOwnsCeiling = options.resolverCeilingOwnedByRunner === true;
+    this.acquireResolverFaces = options.acquireResolverFaces;
     this.caches = this.sources.map(acquireSourceCache);
     const signal = options.signal;
     if (signal) {
@@ -419,6 +436,7 @@ export class FontSourceSession {
     this.families.clear();
     this.points.clear();
     for (const cache of this.caches) cache.release();
+    releaseAcquiredFaces(this);
     // A released session object the application still references must not
     // keep the caches (and what they index) reachable.
     this.caches = [];
@@ -428,6 +446,7 @@ export class FontSourceSession {
     this.fontSet = null;
     this.runResolver = releasedRunner;
     this.resolverFailures = undefined;
+    this.acquireResolverFaces = undefined;
     this.warned.clear();
     this.snapshot = EMPTY_SNAPSHOT;
   }
@@ -462,28 +481,102 @@ export class FontSourceSession {
       const delta = this.addScalars(demand.scalars);
       const resolved = fresh.length ? await this.resolve(fresh) : new Map<string, FamilyState>();
       if (this.closed) return this.settledState();
-      const registered = new Set<OwnedFace>();
-      const failures = new Map<string, string>();
-      for (const { name, scripts } of fresh) {
-        const key = fontFamilyKey(name);
-        const state = resolved.get(key) ?? { kind: 'absent', name, scripts };
-        this.families.set(key, state);
-        if (state.kind === 'failed') failures.set(name, state.reason);
-        if (state.kind === 'claimed') {
-          if (state.downloadFailure !== undefined) failures.set(name, state.downloadFailure);
-          this.register(state, registered, failures);
-        }
+      // One face-loading ceiling covers acquisition and loading, as the
+      // browser's own fetch inside FontFace.load() would.
+      const ceiling = ceilingSignal(this.controller.signal, FONT_LOAD_CEILING_MS);
+      try {
+        return await this.acquireRegisterLoad(fresh, resolved, delta, ceiling);
+      } finally {
+        ceiling.dispose();
       }
-      await this.load(delta, registered, failures);
-      if (this.closed) return this.settledState();
-      this.warn(failures);
-      this.snapshot = this.takeSnapshot();
-      return this.snapshot;
     } catch (error) {
       if (this.closed) return this.settledState();
       this.failure = error;
       this.release();
       throw error;
+    }
+  }
+
+  private async acquireRegisterLoad(
+    fresh: readonly DemandedName[],
+    resolved: Map<string, FamilyState>,
+    delta: 'all' | readonly number[],
+    ceiling: ReturnType<typeof ceilingSignal>,
+  ): Promise<LoadedFontSources> {
+    await this.acquire(resolved, ceiling);
+    if (this.closed) return this.settledState();
+    const registered = new Set<OwnedFace>();
+    const failures = new Map<string, string>();
+    for (const { name, scripts } of fresh) {
+      const key = fontFamilyKey(name);
+      const state = resolved.get(key) ?? { kind: 'absent', name, scripts };
+      this.families.set(key, state);
+      if (state.kind === 'failed') failures.set(name, state.reason);
+      if (state.kind === 'claimed') {
+        if (state.downloadFailure !== undefined) failures.set(name, state.downloadFailure);
+        this.register(state, registered, failures);
+      }
+    }
+    await this.load(delta, registered, failures, ceiling.signal);
+    if (this.closed) return this.settledState();
+    this.warn(failures);
+    this.snapshot = this.takeSnapshot();
+    return this.snapshot;
+  }
+
+  /**
+   * Acquire the claimed URL faces the library fetches itself (see
+   * `face-download.ts`), replacing each by its bytes. A face that cannot be
+   * fetched is dropped and its family warned; the family stays claimed (a
+   * claimed face that fails never promotes another source or substitute).
+   */
+  private async acquire(resolved: Map<string, FamilyState>, ceiling: ReturnType<typeof ceilingSignal>): Promise<void> {
+    type Claimed = Extract<FamilyState, { kind: 'claimed' }>;
+    const omitted: [string, Claimed][] = [];
+    const bridged = new Map<number, [string, Claimed][]>();
+    for (const entry of resolved) {
+      const state = entry[1];
+      if (state.kind !== 'claimed' || !state.declarations.some(isDownloadableFace)) continue;
+      const source = this.sources[state.sourceIndex];
+      if (source.kind !== 'font-resolver') {
+        if (source.credentials === 'omit') omitted.push([entry[0], state]);
+      } else if (this.acquireResolverFaces) {
+        bridged.set(state.sourceIndex, [...bridged.get(state.sourceIndex) ?? [], [entry[0], state]]);
+      }
+    }
+    if (!omitted.length && !bridged.size) return;
+    const deadline = Date.now() + ceiling.remaining();
+    const context = { signal: ceiling.signal, deadline, holder: this };
+    const urlsOf = (state: Claimed) => state.declarations.filter(isDownloadableFace).map(({ url }) => url as string);
+    const batches: Promise<[readonly [string, Claimed][], ReadonlyMap<string, FaceAcquisition>]>[] = [];
+    if (omitted.length) {
+      batches.push(acquireFaceUrls(omitted.flatMap(([, state]) => urlsOf(state)), { credentials: 'omit', ...context })
+        .then((outcomes) => [omitted, outcomes]));
+    }
+    const acquire = this.acquireResolverFaces;
+    for (const [sourceIndex, claimed] of bridged) {
+      if (!acquire) break;
+      const request: ResolverFaceRequest = {
+        source: this.sources[sourceIndex] as FontResolverSource,
+        sourceIndex,
+        families: claimed.map(([, state]) => ({ family: state.name, urls: urlsOf(state) })),
+      };
+      batches.push(acquire(request, context).then((outcomes) => [claimed, outcomes]));
+    }
+    const settled = await Promise.all(batches);
+    if (this.closed) throw createAbortError('Font source session released');
+    for (const [claimed, outcomes] of settled) {
+      for (const [key, state] of claimed) {
+        let reason: string | undefined;
+        const declarations = state.declarations.flatMap((declaration) => {
+          if (!isDownloadableFace(declaration)) return [declaration];
+          const outcome = outcomes.get(declaration.url as string) ?? { reason: 'font download failed' };
+          if ('data' in outcome) return [withAcquiredBytes(declaration, outcome.data)];
+          reason ??= outcome.reason;
+          return [];
+        });
+        resolved.set(key, { ...state, declarations, ...(reason === undefined ? {} : { downloadFailure: reason }) });
+      }
     }
   }
 
@@ -555,41 +648,10 @@ export class FontSourceSession {
         }
         pending = next;
       }
-      await this.downloadOmitted(result, ceiling.signal);
     } finally {
       ceiling.dispose();
     }
     return result;
-  }
-
-  /**
-   * Download the `url` faces of families claimed by a source with
-   * `credentials: 'omit'` (see `FontSourceCredentials`), replacing them by
-   * their bytes. A face whose download fails is dropped and its family
-   * warned; a family left with no face fails. A body beyond the face ceiling
-   * rejects the ensure, as a `data` face beyond it does.
-   */
-  private async downloadOmitted(result: Map<string, FamilyState>, signal: AbortSignal): Promise<void> {
-    const claimed = [...result].filter((entry): entry is [string, Extract<FamilyState, { kind: 'claimed' }>] => {
-      const [, state] = entry;
-      if (state.kind !== 'claimed') return false;
-      const source = this.sources[state.sourceIndex];
-      return source.kind !== 'font-resolver' && source.credentials === 'omit'
-        && state.declarations.some(isDownloadableFace);
-    });
-    if (!claimed.length) return;
-    const downloads = await downloadFontFaces(claimed.flatMap(([, state]) => state.declarations), 'omit', signal);
-    if (this.closed) throw createAbortError('Font source session released');
-    for (const [key, state] of claimed) {
-      const kept = state.declarations.flatMap((declaration) => downloads.replace(declaration) ?? []);
-      const lost = state.declarations.find((declaration) => downloads.replace(declaration) === undefined);
-      const reason = lost ? downloads.failures.get(lost.url as string) ?? 'font download failed' : undefined;
-      if (!kept.length) {
-        result.set(key, { kind: 'failed', name: state.name, reason: reason ?? 'font download failed' });
-        continue;
-      }
-      result.set(key, { ...state, declarations: kept, ...(reason ? { downloadFailure: reason } : {}) });
-    }
   }
 
   /** A resolver answers with candidates; claim each family under its scope. */
@@ -719,7 +781,12 @@ export class FontSourceSession {
   /** Load faces whose ranges intersect the demand (lease semantics: a face
    * registered now is checked against all scalars demanded so far, an older
    * unloaded face only against the delta). */
-  private async load(delta: 'all' | readonly number[], registered: Set<OwnedFace>, failures: Map<string, string>): Promise<void> {
+  private async load(
+    delta: 'all' | readonly number[],
+    registered: Set<OwnedFace>,
+    failures: Map<string, string>,
+    signal: AbortSignal,
+  ): Promise<void> {
     const becameAll = delta === 'all';
     const deltaIndex = delta === 'all' ? [] : [...delta].sort((a, b) => a - b);
     const cumulative = registered.size && !this.all ? [...this.points].sort((a, b) => a - b) : deltaIndex;
@@ -738,17 +805,12 @@ export class FontSourceSession {
       waits.push(entry);
     }
     if (!waits.length) return;
-    const ceiling = ceilingSignal(this.controller.signal, FONT_LOAD_CEILING_MS);
-    try {
-      await until(Promise.all(waits.map((entry) => entry.readiness)), ceiling.signal);
-      if (this.closed) return;
-      for (const entry of waits) {
-        if (entry.outcome === true) continue;
-        const reason = entry.outcome === false ? 'font load failed' : 'timed out';
-        for (const family of entry.families) if (!failures.has(family)) failures.set(family, reason);
-      }
-    } finally {
-      ceiling.dispose();
+    await until(Promise.all(waits.map((entry) => entry.readiness)), signal);
+    if (this.closed) return;
+    for (const entry of waits) {
+      if (entry.outcome === true) continue;
+      const reason = entry.outcome === false ? 'font load failed' : 'timed out';
+      for (const family of entry.families) if (!failures.has(family)) failures.set(family, reason);
     }
   }
 

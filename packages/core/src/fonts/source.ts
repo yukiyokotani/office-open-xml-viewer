@@ -50,7 +50,8 @@ export const FONT_SOURCE_PROTOCOL = 'ooxml-font-source/v1';
  * - `'omit'` sends no cookies or HTTP authentication at all: the stylesheet
  *   and every `url` face of a claimed family are fetched by the library with
  *   `credentials: 'omit'` (face bytes then count like `data` faces). The
- *   faces are downloaded when the family is claimed, not per `unicode-range`
+ *   faces are fetched when the family is claimed (within the face-loading
+ *   ceiling, shared across the realm's documents), not per `unicode-range`
  *   subset as the browser would.
  */
 export type FontSourceCredentials = 'omit' | 'same-origin';
@@ -633,11 +634,11 @@ let nextResolverId = 1;
  * Application resolution for authenticated, dynamic or in-memory fonts. The
  * function runs on the main thread only; in worker mode the worker asks main
  * to run it (`resolver-bridge.ts`), so credentials and network clients stay in
- * the application, and main also downloads every http(s) / blob: `url` the
- * function returns and sends the bytes, so cookies, HTTP authentication and
- * Referer checks see the page in both modes. The same function always yields
- * the same id, so documents sharing it share resolutions. See
- * {@link FontDemand} for what to answer.
+ * the application, and main also fetches the claimed http(s) / blob: `url`
+ * faces the function returned and sends the bytes, so cookies, HTTP
+ * authentication and Referer checks see the page in both modes. The same
+ * function always yields the same id, so documents sharing it share
+ * resolutions. See {@link FontDemand} for what to answer.
  *
  * Returned `data` buffers are owned by the library from then on (cached and
  * shared across documents of this realm); the application must not modify

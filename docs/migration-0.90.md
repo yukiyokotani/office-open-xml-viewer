@@ -224,10 +224,11 @@ fonts: [privateFonts, googleFonts({ cssOrigin: 'https://fonts.internal.example' 
 
 The function runs in the page that created it. In worker mode, the worker
 asks the page to run it, so tokens and network clients stay in your
-application. The page also downloads every `http(s)` and `blob:` URL the
-function returns and sends the worker the bytes, so cookies, HTTP
-authentication and Referer checks see the page in both modes. In main mode the
-browser loads the URLs, as before.
+application. The worker never fetches the URLs the function returns: once a
+family is claimed, the page fetches its `http(s)` and `blob:` faces and sends
+the worker the bytes, so cookies, HTTP authentication and Referer checks see
+the page in both modes. The page fetches only URLs the function returned for
+that document. In main mode the browser loads the URLs, as before.
 
 The `demand` argument contains:
 
@@ -292,7 +293,8 @@ or failed is final. A family that no source served is asked again, through the
 whole chain, only when later text in the document proves a substitute script
 that its earlier request excluded. For example, a family first seen in Latin
 text and later in Arabic text is requested again with its Arabic-only
-substitutes.
+substitutes. A `fontResolver` is not called again for it: its first answer is
+claimed again under the wider scope.
 
 What paints, highest first:
 
@@ -342,9 +344,10 @@ for the Noto CJK families.
     origin only (the CSS font-loading rules).
   - `'omit'`: no cookies or HTTP authentication are sent at all. The library
     fetches the stylesheet and the font files itself, with
-    `credentials: 'omit'`. It downloads every face of a claimed family when
-    the family is claimed, not only the `unicode-range` subsets the text
-    needs, and the bytes count like `data` faces (see
+    `credentials: 'omit'`. It fetches every face of a claimed family when the
+    family is claimed, not only the `unicode-range` subsets the text needs.
+    Documents in the same realm share each fetched file while any of them is
+    open, and the bytes count like `data` faces (see
     [Resource limits](#resource-limits)).
   - `'include'` and custom headers are not supported.
 - `googleFonts()` takes no `credentials`: its requests go to another origin,
@@ -383,23 +386,24 @@ for the Noto CJK families.
   1. **Resolution** walks the sources in order. One deadline covers the whole
      walk, so a slow first source leaves less time for the next. Families
      still unresolved when it expires fail and keep their host fallback.
-  2. **Face loading** waits for the faces to load (`FontFace.load()`). Faces
-     not loaded when it expires keep their host fallback for that step.
+  2. **Face loading** fetches the faces the library fetches itself (see
+     [Network, CORS and cookies](#network-cors-and-cookies)) and waits for
+     the faces to load (`FontFace.load()`). Faces not loaded when it expires
+     keep their host fallback for that step.
 
   A step can therefore take up to about 30 s, for example 14 s of resolution
   followed by 14 s of face loading.
 - In worker mode the page owns the deadline of a resolver call. The worker
-  sends the time left of its resolution deadline with each request. The
-  page's downloads of the URLs the resolver returned also run within that
-  deadline. A face whose download fails or does not finish in time is left
-  out, with a `console.warn`; a family left with no face keeps its host
-  fallback.
-- A source with `credentials: 'omit'` downloads its font files in the
-  resolution phase too, within its deadline.
+  sends the time left of its resolution deadline with each request.
+- A face file the library fetches itself (a resolver face in worker mode, a
+  source with `credentials: 'omit'`) is fetched in the face-loading phase,
+  within its deadline, at most six at a time. A face that cannot be fetched
+  fails like a face that cannot load: it is left out with a `console.warn`,
+  and the family is not passed to another source or substitute. For XLSX in
+  worker mode, the viewer and the worker share each fetch and its outcome.
 - A resolver is called only for families that no earlier call answered and no
-  live cache entry covers. Within a document that means once per family, except
-  that a family left unanswered is asked again when later text proves a new
-  substitute script (see [Chaining](#chaining)). For XLSX in worker mode, the
+  live cache entry covers. Within a document that means once per family. For
+  XLSX in worker mode, the
   viewer and the worker share the call. Documents open at the same time share
   answers from the same function. A document opened after every earlier one
   was closed calls the function again.

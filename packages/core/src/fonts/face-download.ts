@@ -1,34 +1,84 @@
 /**
- * Library downloads of `url` faces. Library resource policy, not OOXML
+ * Library acquisition of `url` faces. Library resource policy, not OOXML
  * behaviour.
  *
  * Face files are normally left to `FontFace.load()` in the painting realm.
- * The library downloads them itself, and hands the bytes to `FontFace` as a
+ * The library fetches them itself, and hands the bytes to `FontFace` as a
  * `data` face, in two cases only:
  *
  * - a source configured with `credentials: 'omit'` (`fontCssApi`, `fontCss`,
  *   `fontFiles`): CSS font fetching always sends same-origin credentials, so
  *   omitting them needs a request of the library's own, in the painting realm;
- * - a {@link fontResolver} answer bridged to a render worker: the page
- *   downloads every http(s) / blob: URL and transfers the bytes, so cookies,
- *   HTTP authentication and Referer checks see the page exactly as when the
- *   page paints (`resolver-bridge-host.ts`).
+ * - a {@link fontResolver} answer of a worker-mode document: the page fetches
+ *   the claimed faces' http(s) / blob: URLs and the worker receives the bytes
+ *   (`resolver-bridge-host.ts`), so cookies, HTTP authentication and Referer
+ *   checks see the page exactly as when the page paints. The viewer-realm
+ *   sessions of an XLSX worker-mode workbook acquire through the same cache,
+ *   so both realms paint the same bytes from one request.
  *
- * Requests are CORS requests, as CSS font fetching is. A body is bounded by
- * `HARD_MAX_FONT_SOURCE_FACE_BYTES`, the ceiling every `data` face obeys, and
- * a breach rejects with `OoxmlError('font-source-limit')`. A network error or
- * a non-OK status fails that face only (its family keeps its other faces).
- * `data:` URLs are kept as they are: they are inline and fetch nothing.
+ * Acquisition runs after a family is claimed (claim precedence is unchanged:
+ * a claimed face that cannot be fetched fails like a face that cannot load)
+ * and within the painting realm's face-loading ceiling, as the browser's own
+ * fetch would. Requests are CORS requests, as CSS font fetching is, at most
+ * {@link MAX_CONCURRENT_FACE_DOWNLOADS} at a time per realm.
+ *
+ * Bytes are charged to the realm's retained-byte ceiling as they arrive, so
+ * no batch can outgrow it, and each body is bounded by the face ceiling; a
+ * breach rejects with `OoxmlError('font-source-limit')` and aborts the rest of
+ * the batch. A network error, a non-OK status or a missed deadline fails that
+ * face only. A completed download is shared by every holder of the same
+ * (credentials, URL) until the last holder releases it; a failure is not kept.
  */
 import { fontSourceLimitError } from '../errors/font-source-limit.js';
 import { OoxmlError } from '../errors/ooxml-error.js';
+import { createAbortError } from '../internal/abort.js';
 import { HARD_MAX_FONT_SOURCE_FACE_BYTES } from '../worker/resource-policy.generated.js';
-import type { FontFaceDeclaration, FontSourceCredentials } from './source.js';
+import type { FontResolverFailures } from './resolver-failures.js';
+import { chargeRetainedBytes, fontSourceId, refundRetainedBytes, SharedTask } from './source-cache.js';
+import type { FontFaceDeclaration, FontResolverSource, FontSourceCredentials } from './source.js';
 
-/** Whether the library downloads `declaration` (an http(s) or blob: URL). */
+/** Parallel face downloads per realm (the HTTP/1.1 per-host norm). */
+export const MAX_CONCURRENT_FACE_DOWNLOADS = 6;
+
+/** Whether the library acquires `declaration` (an http(s) or blob: URL). */
 export function isDownloadableFace(declaration: FontFaceDeclaration): boolean {
   return declaration.url !== undefined && /^(?:https?|blob):/i.test(declaration.url);
 }
+
+/** One URL's acquisition outcome. */
+export type FaceAcquisition = { readonly data: ArrayBuffer } | { readonly reason: string };
+
+// ---- download slots -------------------------------------------------------------
+
+let active = 0;
+const queued: (() => void)[] = [];
+
+/** Wait for a download slot; the returned function frees it. */
+async function slot(signal: AbortSignal): Promise<() => void> {
+  if (active >= MAX_CONCURRENT_FACE_DOWNLOADS) {
+    await new Promise<void>((resolve, reject) => {
+      const take = () => { signal.removeEventListener('abort', onAbort); resolve(); };
+      const onAbort = () => {
+        const at = queued.indexOf(take);
+        if (at >= 0) queued.splice(at, 1);
+        reject(createAbortError('Font download abandoned'));
+      };
+      if (signal.aborted) { onAbort(); return; }
+      signal.addEventListener('abort', onAbort, { once: true });
+      queued.push(take);
+    });
+  }
+  active++;
+  let freed = false;
+  return () => {
+    if (freed) return;
+    freed = true;
+    active--;
+    queued.shift()?.();
+  };
+}
+
+// ---- one download -----------------------------------------------------------------
 
 interface FaceResponse {
   readonly ok: boolean;
@@ -38,7 +88,9 @@ interface FaceResponse {
   arrayBuffer(): Promise<ArrayBuffer>;
 }
 
-async function readBoundedBytes(response: FaceResponse): Promise<ArrayBuffer> {
+/** Read a body within the face ceiling, charging each chunk through
+ * `charge` as it arrives. */
+async function readBoundedBytes(response: FaceResponse, charge: (bytes: number) => void): Promise<ArrayBuffer> {
   const limit = HARD_MAX_FONT_SOURCE_FACE_BYTES;
   const declared = Number(response.headers?.get('content-length') ?? NaN);
   if (Number.isSafeInteger(declared) && declared > limit) {
@@ -49,20 +101,24 @@ async function readBoundedBytes(response: FaceResponse): Promise<ArrayBuffer> {
   if (!reader) {
     const buffer = await response.arrayBuffer();
     if (buffer.byteLength > limit) throw fontSourceLimitError('face', limit, buffer.byteLength);
+    charge(buffer.byteLength);
     return buffer;
   }
   const chunks: Uint8Array[] = [];
   let size = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (!value) continue;
-    size += value.byteLength;
-    if (size > limit) {
-      reader.cancel().catch(() => undefined);
-      throw fontSourceLimitError('face', limit, size);
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      size += value.byteLength;
+      if (size > limit) throw fontSourceLimitError('face', limit, size);
+      charge(value.byteLength);
+      chunks.push(value);
     }
-    chunks.push(value);
+  } catch (error) {
+    reader.cancel().catch(() => undefined);
+    throw error;
   }
   const bytes = new Uint8Array(size);
   let offset = 0;
@@ -70,83 +126,226 @@ async function readBoundedBytes(response: FaceResponse): Promise<ArrayBuffer> {
   return bytes.buffer;
 }
 
-/** Download one face; a failure reason, or the owned bytes. */
-async function downloadFace(
+class Entry {
+  readonly task: SharedTask<FaceAcquisition>;
+  readonly holders = new Set<object>();
+  /** Retained bytes charged for this entry (while downloading and kept). */
+  charged = 0;
+  settled?: FaceAcquisition;
+
+  constructor(produce: (signal: AbortSignal, entry: Entry) => Promise<FaceAcquisition>, onAbandon: (entry: Entry) => void) {
+    this.task = new SharedTask((signal) => produce(signal, this), () => onAbandon(this));
+  }
+}
+
+/** Kept and in-flight acquisitions, by `credentials\0url`. */
+const entries = new Map<string, Entry>();
+
+function dropEntry(key: string, entry: Entry): void {
+  if (entries.get(key) === entry) entries.delete(key);
+  refundRetainedBytes(entry.charged);
+  entry.charged = 0;
+}
+
+async function download(
+  key: string,
   url: string,
   credentials: FontSourceCredentials,
   signal: AbortSignal,
-): Promise<{ readonly data: ArrayBuffer } | { readonly reason: string }> {
-  if (typeof fetch !== 'function') return { reason: 'fetch is unavailable' };
-  const request = new AbortController();
-  const onAbort = () => request.abort();
-  signal.addEventListener('abort', onAbort, { once: true });
-  if (signal.aborted) request.abort();
-  let complete = false;
+  entry: Entry,
+): Promise<FaceAcquisition> {
+  const charge = (bytes: number) => {
+    chargeRetainedBytes(bytes);
+    entry.charged += bytes;
+  };
+  const free = await slot(signal);
+  let result: FaceAcquisition;
   try {
-    const response = await fetch(url, { mode: 'cors', credentials, signal: request.signal }) as FaceResponse;
-    if (!response.ok) return { reason: `HTTP ${response.status ?? 'error'}` };
-    const data = await readBoundedBytes(response);
-    complete = true;
-    if (data.byteLength === 0) return { reason: 'empty font file' };
-    return { data };
+    if (typeof fetch !== 'function') {
+      result = { reason: 'fetch is unavailable' };
+    } else {
+      const response = await fetch(url, { mode: 'cors', credentials, signal }) as FaceResponse;
+      if (!response.ok) {
+        response.body?.cancel?.().catch(() => undefined);
+        result = { reason: `HTTP ${response.status ?? 'error'}` };
+      } else {
+        const data = await readBoundedBytes(response, charge);
+        result = data.byteLength ? { data } : { reason: 'empty font file' };
+      }
+    }
   } catch (error) {
+    dropEntry(key, entry);
     if (error instanceof OoxmlError) throw error;
-    return { reason: signal.aborted ? 'timed out' : error instanceof Error ? error.message : String(error) };
+    if (signal.aborted) throw createAbortError('Font download abandoned');
+    return { reason: error instanceof Error ? error.message : String(error) };
   } finally {
-    signal.removeEventListener('abort', onAbort);
-    if (!complete) request.abort();
+    free();
   }
+  // Failures are not kept (a later document retries); a result nobody holds
+  // any more is not kept either.
+  if ('reason' in result || entry.holders.size === 0 || entries.get(key) !== entry) dropEntry(key, entry);
+  else entry.settled = result;
+  return result;
 }
 
-/** Downloaded replacements for a set of declarations. */
-export interface FaceDownloads {
-  /** `declaration` with its downloaded bytes in place of the URL; the
-   * declaration itself when it is not downloaded; undefined when its
-   * download failed. */
-  readonly replace: (declaration: FontFaceDeclaration) => FontFaceDeclaration | undefined;
-  /** Failure reason per failed URL. */
-  readonly failures: ReadonlyMap<string, string>;
-  /** Every downloaded buffer (fresh, owned by the caller). */
-  readonly buffers: readonly ArrayBuffer[];
+/** One URL for `holder`, joined with any acquisition of it in this realm. */
+async function acquireOne(
+  url: string,
+  credentials: FontSourceCredentials,
+  signal: AbortSignal,
+  holder: object,
+): Promise<FaceAcquisition> {
+  const key = `${credentials}\u0000${url}`;
+  let entry = entries.get(key);
+  if (!entry) {
+    // Abandoned before it settled (every waiter left): forget it, so the next
+    // request starts afresh; the producer refunds what it charged.
+    entry = new Entry(
+      (taskSignal, created) => download(key, url, credentials, taskSignal, created),
+      (created) => { if (entries.get(key) === created) entries.delete(key); },
+    );
+    entries.set(key, entry);
+  }
+  if (entry.settled) { entry.holders.add(holder); return entry.settled; }
+  entry.holders.add(holder);
+  try {
+    const result = await entry.task.join(signal);
+    if ('reason' in result) entry.holders.delete(holder);
+    return result;
+  } catch (error) {
+    entry.holders.delete(holder);
+    throw error;
+  }
 }
 
 /**
- * Download every downloadable face of `declarations` once per URL, all
- * concurrently, with `credentials`. Rejects with
- * `OoxmlError('font-source-limit')` when a body exceeds the face ceiling;
- * any other failure (network, status, abort) fails only the faces of that URL.
+ * Acquire `urls` for `holder` (which keeps every completed download until
+ * {@link releaseAcquiredFaces}). A face completed after `deadline` (an
+ * absolute `Date.now()` value) fails with `'timed out'`, whatever the timers
+ * did. Rejects with `OoxmlError('font-source-limit')` on a ceiling breach,
+ * after aborting the rest of the batch; an abort of `signal` fails every
+ * unfinished face with `'timed out'`.
  */
-export async function downloadFontFaces(
-  declarations: Iterable<FontFaceDeclaration>,
-  credentials: FontSourceCredentials,
-  signal: AbortSignal,
-): Promise<FaceDownloads> {
-  const urls = new Set<string>();
-  for (const declaration of declarations) if (isDownloadableFace(declaration)) urls.add(declaration.url as string);
-  const results = new Map(await Promise.all([...urls].map(async (url) =>
-    [url, await downloadFace(url, credentials, signal)] as const)));
-  const failures = new Map<string, string>();
-  const buffers: ArrayBuffer[] = [];
-  for (const [url, result] of results) {
-    if ('reason' in result) failures.set(url, result.reason);
-    else buffers.push(result.data);
+export async function acquireFaceUrls(
+  urls: Iterable<string>,
+  options: {
+    readonly credentials: FontSourceCredentials;
+    readonly signal: AbortSignal;
+    readonly deadline: number;
+    readonly holder: object;
+  },
+): Promise<Map<string, FaceAcquisition>> {
+  const { credentials, holder, deadline } = options;
+  const batch = new AbortController();
+  const onAbort = () => batch.abort();
+  options.signal.addEventListener('abort', onAbort, { once: true });
+  if (options.signal.aborted) batch.abort();
+  try {
+    const unique = [...new Set(urls)];
+    const results = await Promise.all(unique.map(async (url): Promise<[string, FaceAcquisition]> => {
+      try {
+        const result = await acquireOne(url, credentials, batch.signal, holder);
+        return [url, Date.now() > deadline ? { reason: 'timed out' } : result];
+      } catch (error) {
+        if (error instanceof OoxmlError) { batch.abort(); throw error; }
+        return [url, { reason: 'timed out' }];
+      }
+    }));
+    return new Map(results);
+  } finally {
+    options.signal.removeEventListener('abort', onAbort);
   }
-  return {
-    failures,
-    buffers,
-    replace: (declaration) => {
-      if (!isDownloadableFace(declaration)) return declaration;
-      const result = results.get(declaration.url as string);
-      if (!result || 'reason' in result) return undefined;
-      const { family, weight, style, stretch, unicodeRange } = declaration;
-      return Object.freeze({
-        family,
-        data: result.data,
-        ...(weight === undefined ? {} : { weight }),
-        ...(style === undefined ? {} : { style }),
-        ...(stretch === undefined ? {} : { stretch }),
-        ...(unicodeRange === undefined ? {} : { unicodeRange }),
-      });
-    },
-  };
+}
+
+/** Return every acquisition `holder` keeps; idempotent. */
+export function releaseAcquiredFaces(holder: object): void {
+  for (const [key, entry] of [...entries]) {
+    if (!entry.holders.delete(holder)) continue;
+    if (entry.holders.size === 0 && entry.settled) dropEntry(key, entry);
+  }
+}
+
+/** Acquisitions this realm keeps or runs (tests, leak checks). */
+export function acquiredFaceCount(): number {
+  return entries.size;
+}
+
+/** `declaration` with its acquired bytes in place of the URL. */
+export function withAcquiredBytes(declaration: FontFaceDeclaration, data: ArrayBuffer): FontFaceDeclaration {
+  const { family, weight, style, stretch, unicodeRange } = declaration;
+  return Object.freeze({
+    family,
+    data,
+    ...(weight === undefined ? {} : { weight }),
+    ...(style === undefined ? {} : { style }),
+    ...(stretch === undefined ? {} : { stretch }),
+    ...(unicodeRange === undefined ? {} : { unicodeRange }),
+  });
+}
+
+// ---- resolver faces of a worker-mode document --------------------------------
+
+/** One resolver source's claimed URL faces to acquire. */
+export interface ResolverFaceRequest {
+  readonly source: FontResolverSource;
+  /** Position of the source in the document's `fonts`. */
+  readonly sourceIndex: number;
+  /** Claimed families and the URLs of their faces. */
+  readonly families: readonly { readonly family: string; readonly urls: readonly string[] }[];
+}
+
+/**
+ * Acquires the claimed URL faces of a resolver in the page realm: the worker
+ * bridge (`resolver-bridge.ts`) or, for a viewer realm sharing a worker-mode
+ * document, {@link acquireResolverFacesInRealm}. Resolves with an outcome per
+ * URL; rejects with `OoxmlError('font-source-limit')` on a ceiling breach.
+ */
+export type ResolverFaceAcquirer = (
+  request: ResolverFaceRequest,
+  context: { readonly signal: AbortSignal; readonly deadline: number; readonly holder: object },
+) => Promise<ReadonlyMap<string, FaceAcquisition>>;
+
+/** Document-wide record key of one acquired URL of one resolver source, in
+ * the document's resolver failure record (`resolver-failures.ts`). */
+export function faceAcquisitionFailureKey(sourceId: string, url: string): string {
+  return `${sourceId}\u0000acquire\u0000${url}`;
+}
+
+/** The {@link ResolverFaceAcquirer} of a page-realm session that shares a
+ * worker-mode document (the XLSX viewer realm): it acquires in this realm,
+ * through the document's failure record, exactly as the worker bridge does. */
+export function inRealmResolverFaceAcquirer(failures: FontResolverFailures | undefined): ResolverFaceAcquirer {
+  return (request, context) => acquireResolverFacesInRealm(failures, fontSourceId(request.source),
+    request.families.flatMap(({ urls }) => urls), context);
+}
+
+/**
+ * Acquire a resolver's claimed URL faces in this (the page) realm, sharing
+ * the document's outcome: a URL that already failed for the document fails
+ * again without a request, and a new failure is recorded for every requester
+ * of the document (the worker bridge and the XLSX viewer realm), so both
+ * realms paint the same faces.
+ */
+export async function acquireResolverFacesInRealm(
+  failures: FontResolverFailures | undefined,
+  sourceId: string,
+  urls: readonly string[],
+  context: { readonly signal: AbortSignal; readonly deadline: number; readonly holder: object },
+): Promise<Map<string, FaceAcquisition>> {
+  const outcomes = new Map<string, FaceAcquisition>();
+  const pending: string[] = [];
+  for (const url of new Set(urls)) {
+    const reason = failures?.get(faceAcquisitionFailureKey(sourceId, url));
+    if (reason !== undefined) outcomes.set(url, { reason });
+    else pending.push(url);
+  }
+  const acquired = await acquireFaceUrls(pending, { credentials: 'same-origin', ...context });
+  for (const [url, outcome] of acquired) {
+    outcomes.set(url, outcome);
+    if ('reason' in outcome && failures) {
+      const key = faceAcquisitionFailureKey(sourceId, url);
+      if (!failures.has(key)) failures.set(key, outcome.reason);
+    }
+  }
+  return outcomes;
 }

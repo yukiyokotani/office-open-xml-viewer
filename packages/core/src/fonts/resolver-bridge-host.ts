@@ -9,39 +9,43 @@
  * against it, as main mode's ceiling would; a request that expires before the
  * responder takes it is failed, recorded and answered here.
  *
- * Every reply that carries faces leaves through {@link FontResolverBridgeHost}
- * `deliver`: the page downloads each http(s) / blob: `url` face the reply
- * names (`face-download.ts`, `credentials: 'same-origin'` as CSS font fetching
- * uses) and the worker receives the bytes, so a resolver's URLs are fetched by
- * the page in both modes and the worker fetches none of them. The downloads
- * run inside the call's deadline. A face whose download fails is left out of
- * the reply and its family warned once per document; a family left with no
- * face fails with the download's reason; a body beyond the face ceiling
- * rejects the worker's load as any `font-source-limit` breach does.
+ * The host also answers the worker's face acquisitions (`ooxmlAcquireFonts`):
+ * after claiming a family, the worker session asks the page to fetch its
+ * claimed http(s) / blob: faces. Only URLs this document's own resolution
+ * returned for the named family are fetched (a request naming anything else
+ * fails that URL), in this realm with `credentials: 'same-origin'` as CSS
+ * font fetching uses, through the realm's shared acquisition cache
+ * (`face-download.ts`) and the document's failure record, so the XLSX viewer
+ * realm and the worker paint the same faces from one request. The worker's
+ * remaining face-loading ceiling is the deadline; the reply carries a copy of
+ * each body, the cache keeping the original until the document is disposed.
  */
 import { fontSourceViolationFromWire } from '../errors/font-source-limit.js';
 import { OoxmlError } from '../errors/ooxml-error.js';
-import { downloadFontFaces, isDownloadableFace } from './face-download.js';
+import { acquireResolverFacesInRealm, isDownloadableFace, releaseAcquiredFaces } from './face-download.js';
 import { FONT_LOAD_CEILING_MS } from './font-registry.js';
 import {
   copiedForTransfer,
   isWorkerFontResolveMessage,
   type BridgedFamilyAnswer,
+  type FontAcquireOutcome,
   type FontResolveOutcome,
+  type MainFontAcquireReply,
   type MainFontResolveReply,
+  type WorkerFontAcquireRequest,
   type WorkerFontResolveMessage,
   type WorkerFontResolveRequest,
 } from './resolver-bridge.js';
 import type { FontResolverResponder } from './resolver-bridge-responder.js';
 import {
   concludeBridgedRequest,
+  decidedFamilyOutcome,
   settledBridgedRequest,
   type DocumentSourceCache,
   type FontResolverFailures,
 } from './resolver-failures.js';
 import { acquireSourceCache, type SourceCache } from './source-cache.js';
 import type { FontSource } from './source.js';
-import { fontFamilyKey } from './substitutions.js';
 
 type Post = (message: unknown, transfer?: Transferable[]) => void;
 
@@ -87,13 +91,8 @@ export class FontResolverBridgeHost {
     readonly deadline: number;
     readonly timer: ReturnType<typeof setTimeout>;
   }>();
-  /** Deadline of every request not yet answered, by `generation:requestId`
-   * (the downloads of its reply end there). */
-  private readonly deadlines = new Map<string, number>();
-  /** Face downloads in flight, by request key (a cancel aborts them). */
-  private readonly downloads = new Map<string, AbortController>();
-  /** Families already warned about a failed face download. */
-  private readonly warned = new Set<string>();
+  /** Face acquisitions in flight, by `generation:requestId`. */
+  private readonly acquisitions = new Map<string, { readonly controller: AbortController; readonly generation: number }>();
 
   constructor(options: FontResolverBridgeHostOptions) {
     // Only a document configured with a resolver ever answers; any other
@@ -121,11 +120,14 @@ export class FontResolverBridgeHost {
       return true;
     }
     const key = `${bridged.generation}:${bridged.requestId}`;
+    if (bridged.kind === 'ooxmlAcquireFonts') {
+      this.acquire(key, bridged, options.sources);
+      return true;
+    }
     if (bridged.kind === 'ooxmlCancelResolveFonts') {
-      // Downloading its reply: the worker no longer waits for it.
-      this.downloads.get(key)?.abort();
-      this.downloads.delete(key);
-      this.deadlines.delete(key);
+      // An acquisition: aborted and never answered.
+      const acquisition = this.acquisitions.get(key);
+      if (acquisition) { acquisition.controller.abort(); this.acquisitions.delete(key); return true; }
       // Not handed to the responder yet: the call ends here, unanswered.
       const waiting = this.waiting.get(key);
       if (waiting) { clearTimeout(waiting.timer); this.waiting.delete(key); return true; }
@@ -139,24 +141,8 @@ export class FontResolverBridgeHost {
           clearTimeout(waiting.timer);
           this.waiting.delete(waitingKey);
         }
-        const older = (entryKey: string) => Number(entryKey.slice(0, entryKey.indexOf(':'))) < bridged.generation;
-        for (const entryKey of [...this.deadlines.keys()]) if (older(entryKey)) this.deadlines.delete(entryKey);
-        for (const [entryKey, controller] of [...this.downloads]) {
-          if (!older(entryKey)) continue;
-          controller.abort();
-          this.downloads.delete(entryKey);
-        }
+        this.abandonAcquisitionsBefore(bridged.generation);
       }
-      // The call's deadline starts on arrival: the worker's remaining ceiling
-      // for its ensure, at most the font ceiling. Loading the responder and
-      // downloading the reply's faces count against it, and on expiry the
-      // call is failed here, recorded for the document and answered, whether
-      // or not the responder has loaded.
-      const { remainingMs } = bridged;
-      const budget = typeof remainingMs === 'number' && Number.isFinite(remainingMs) && remainingMs >= 0
-        ? Math.min(remainingMs, FONT_LOAD_CEILING_MS) : FONT_LOAD_CEILING_MS;
-      const deadline = Date.now() + budget;
-      this.deadlines.set(key, deadline);
       // Families this document already decided are answered now, whatever
       // the responder's state: the worker adopts the viewer realm's outcome.
       const split = settledBridgedRequest(this.failures, options.sources, bridged, this.cacheFor);
@@ -164,6 +150,14 @@ export class FontResolverBridgeHost {
         this.answer(bridged, split.settled);
         return true;
       }
+      // The call's deadline starts on arrival: the worker's remaining ceiling
+      // for its ensure, at most the font ceiling. Loading the responder counts
+      // against it, and on expiry the call is failed here, recorded for the
+      // document and answered, whether or not the responder has loaded.
+      const { remainingMs } = bridged;
+      const budget = typeof remainingMs === 'number' && Number.isFinite(remainingMs) && remainingMs >= 0
+        ? Math.min(remainingMs, FONT_LOAD_CEILING_MS) : FONT_LOAD_CEILING_MS;
+      const deadline = Date.now() + budget;
       const timer = setTimeout(() => {
         if (this.waiting.get(key)?.request !== bridged) return;
         this.waiting.delete(key);
@@ -195,6 +189,82 @@ export class FontResolverBridgeHost {
     return true;
   }
 
+  private abandonAcquisitionsBefore(generation: number): void {
+    for (const [key, acquisition] of [...this.acquisitions]) {
+      if (acquisition.generation >= generation) continue;
+      acquisition.controller.abort();
+      this.acquisitions.delete(key);
+    }
+  }
+
+  /** Answer one face acquisition (see the module comment). */
+  private acquire(key: string, request: WorkerFontAcquireRequest, sources: readonly FontSource[]): void {
+    if (request.generation < this.generation || this.acquisitions.has(key)) return;
+    if (request.generation > this.generation) {
+      this.generation = request.generation;
+      this.abandonAcquisitionsBefore(request.generation);
+    }
+    const reply = (outcome: FontAcquireOutcome, transfer: ArrayBuffer[] = []) => {
+      if (this.disposed) return;
+      try {
+        this.postToWorker({
+          kind: 'ooxmlFontsAcquired', generation: request.generation, requestId: request.requestId, outcome,
+        } satisfies MainFontAcquireReply, transfer);
+      } catch { /* worker terminated */ }
+    };
+    const { sourceIndex, resolverId, remainingMs, families } = request;
+    const source = typeof sourceIndex === 'number' && Number.isSafeInteger(sourceIndex) && sourceIndex >= 0
+      ? sources[sourceIndex] : undefined;
+    if (source?.kind !== 'font-resolver' || source.id !== resolverId || !Array.isArray(families)) {
+      reply({ status: 'failed', reason: 'malformed font acquire request' });
+      return;
+    }
+    // Only URLs of the faces this document's resolution returned for the
+    // named family (its kept candidates), whatever the worker asked for.
+    const cache = this.cacheFor(sourceIndex, source);
+    const allowed = new Set<string>();
+    const asked = new Set<string>();
+    for (const entry of families as unknown[]) {
+      const { family, urls } = (entry ?? {}) as { family?: unknown; urls?: unknown };
+      if (typeof family !== 'string' || !Array.isArray(urls)) continue;
+      for (const url of urls) if (typeof url === 'string') asked.add(url);
+      const decided = decidedFamilyOutcome(this.failures, cache, family, cache);
+      if (decided?.kind !== 'claimed') continue;
+      for (const declaration of decided.declarations) if (isDownloadableFace(declaration)) allowed.add(declaration.url as string);
+    }
+    const budget = typeof remainingMs === 'number' && Number.isFinite(remainingMs) && remainingMs >= 0
+      ? Math.min(remainingMs, FONT_LOAD_CEILING_MS) : FONT_LOAD_CEILING_MS;
+    const controller = new AbortController();
+    const acquisition = { controller, generation: request.generation };
+    this.acquisitions.set(key, acquisition);
+    const timer = setTimeout(() => controller.abort(), budget);
+    const urls = [...asked].filter((url) => allowed.has(url));
+    void acquireResolverFacesInRealm(this.failures, cache.id, urls, {
+      signal: controller.signal, deadline: Date.now() + budget, holder: this,
+    }).then((outcomes): [FontAcquireOutcome, ArrayBuffer[]] => {
+      const transfer: ArrayBuffer[] = [];
+      const faces = [...asked].map((url) => {
+        const outcome = outcomes.get(url) ?? { reason: 'not a font this document resolved' };
+        if ('reason' in outcome) return { url, reason: outcome.reason };
+        // A copy: the realm cache keeps the original for the document.
+        const data = outcome.data.slice(0);
+        transfer.push(data);
+        return { url, data };
+      });
+      return [{ status: 'faces', faces }, transfer];
+    }, (error: unknown): [FontAcquireOutcome, ArrayBuffer[]] => {
+      const violation = error instanceof OoxmlError ? fontSourceViolationFromWire(error.violation) : undefined;
+      return [violation ? { status: 'limit', violation }
+        : { status: 'failed', reason: error instanceof Error ? error.message : String(error) }, []];
+    }).then(([outcome, transfer]) => {
+      clearTimeout(timer);
+      // Cancelled, superseded or disposed meanwhile: nothing waits for it.
+      if (this.acquisitions.get(key) !== acquisition) return;
+      this.acquisitions.delete(key);
+      reply(outcome, transfer);
+    });
+  }
+
   /** Load the responder (once). Started eagerly for a document with a
    * resolver, so the bootstrap window is small; the deadline and settled
    * outcomes above do not depend on it. */
@@ -202,7 +272,7 @@ export class FontResolverBridgeHost {
     this.responder ??= (options.loadResponder ?? (() => import('./resolver-bridge-responder.js')))().then(({ FontResolverResponder: Responder }) => {
       if (this.disposed || !this.options?.sources) return null;
       return new Responder({
-        post: (message, transfer) => this.deliver(message as MainFontResolveReply, transfer as ArrayBuffer[] | undefined),
+        post: options.post,
         sources: options.sources ?? [],
         resolverFailures: this.failures,
       });
@@ -227,90 +297,16 @@ export class FontResolverBridgeHost {
   /** Answer per family; the worker receives copies of held buffers. */
   private answer(request: WorkerFontResolveRequest, families: readonly BridgedFamilyAnswer[]): void {
     const sent = copiedForTransfer(families);
-    this.deliver({
-      kind: 'ooxmlFontsResolved', generation: request.generation, requestId: request.requestId,
-      outcome: { status: 'families', families: sent.answers },
-    }, sent.transfer);
+    this.post(request, { status: 'families', families: sent.answers }, sent.transfer);
   }
 
   private post(request: WorkerFontResolveRequest, outcome: FontResolveOutcome, transfer: ArrayBuffer[] = []): void {
-    this.deliver({
-      kind: 'ooxmlFontsResolved', generation: request.generation, requestId: request.requestId, outcome,
-    }, transfer);
-  }
-
-  /**
-   * The single exit of a reply (the host's own and the responder's). A reply
-   * without URL faces is posted at once; otherwise the page downloads them
-   * first, within the request's deadline, and the reply carries the bytes.
-   * A post that fails (the reply did not clone) fails the request's families
-   * instead of leaving the worker waiting.
-   */
-  private deliver(reply: MainFontResolveReply, transfer: ArrayBuffer[] = []): void {
-    if (this.disposed) return;
-    const key = `${reply.generation}:${reply.requestId}`;
-    const { outcome } = reply;
-    const urls = outcome.status === 'families'
-      && outcome.families.some((answer) => answer.kind === 'claimed' && answer.declarations.some(isDownloadableFace));
-    if (!urls || outcome.status !== 'families') {
-      this.deadlines.delete(key);
-      this.postNow(reply, transfer);
-      return;
-    }
-    const controller = new AbortController();
-    this.downloads.get(key)?.abort();
-    this.downloads.set(key, controller);
-    const deadline = this.deadlines.get(key) ?? Date.now() + FONT_LOAD_CEILING_MS;
-    this.deadlines.delete(key);
-    const timer = setTimeout(() => controller.abort(), Math.max(0, deadline - Date.now()));
-    const faces = outcome.families.flatMap((answer) => (answer.kind === 'claimed' ? answer.declarations : []));
-    void downloadFontFaces(faces, 'same-origin', controller.signal).then((downloads) => {
-      const families = outcome.families.map((answer): BridgedFamilyAnswer => {
-        if (answer.kind !== 'claimed') return answer;
-        const kept = answer.declarations.flatMap((declaration) => downloads.replace(declaration) ?? []);
-        const lost = answer.declarations.filter((declaration) => downloads.replace(declaration) === undefined);
-        if (!lost.length) return { ...answer, declarations: kept };
-        const reason = downloads.failures.get(lost[0].url as string) ?? 'font download failed';
-        if (!kept.length) return { family: answer.family, kind: 'failed', reason };
-        this.warnDownload(lost[0].family, reason);
-        return { ...answer, declarations: kept };
-      });
-      return { outcome: { status: 'families', families } satisfies FontResolveOutcome, buffers: downloads.buffers };
-    }, (error: unknown) => {
-      const violation = error instanceof OoxmlError ? fontSourceViolationFromWire(error.violation) : undefined;
-      const failed: FontResolveOutcome = violation
-        ? { status: 'limit', violation }
-        : { status: 'failed', reason: error instanceof Error ? error.message : String(error) };
-      return { outcome: failed, buffers: [] as ArrayBuffer[] };
-    }).then(({ outcome: sent, buffers }) => {
-      clearTimeout(timer);
-      // Cancelled (or superseded) meanwhile: the worker no longer waits.
-      if (this.downloads.get(key) !== controller) return;
-      this.downloads.delete(key);
-      if (this.disposed) return;
-      this.postNow({ ...reply, outcome: sent }, [...transfer, ...buffers]);
-    });
-  }
-
-  private postNow(reply: MainFontResolveReply, transfer: ArrayBuffer[]): void {
     if (this.disposed) return;
     try {
-      this.postToWorker(reply, transfer);
-    } catch (error) {
-      if (reply.outcome.status !== 'families') return;
-      try {
-        this.postToWorker({
-          ...reply,
-          outcome: { status: 'failed', reason: error instanceof Error ? error.message : String(error) },
-        } satisfies MainFontResolveReply);
-      } catch { /* worker terminated */ }
-    }
-  }
-
-  private warnDownload(family: string, reason: string): void {
-    if (this.warned.has(fontFamilyKey(family))) return;
-    this.warned.add(fontFamilyKey(family));
-    console.warn(`[ooxml] failed to preload web font(s): ${family} (${reason}); falling back to system fonts (text may shift or differ).`);
+      this.postToWorker({
+        kind: 'ooxmlFontsResolved', generation: request.generation, requestId: request.requestId, outcome,
+      } satisfies MainFontResolveReply, transfer);
+    } catch { /* worker terminated */ }
   }
 
   /** The document is destroyed: abort every in-flight resolver call. */
@@ -320,9 +316,9 @@ export class FontResolverBridgeHost {
     this.options = null;
     for (const { timer } of this.waiting.values()) clearTimeout(timer);
     this.waiting.clear();
-    for (const controller of this.downloads.values()) controller.abort();
-    this.downloads.clear();
-    this.deadlines.clear();
+    for (const { controller } of this.acquisitions.values()) controller.abort();
+    this.acquisitions.clear();
+    releaseAcquiredFaces(this);
     // Every entry this document answered from is released with it.
     for (const cache of this.caches.values()) cache.release();
     this.caches.clear();

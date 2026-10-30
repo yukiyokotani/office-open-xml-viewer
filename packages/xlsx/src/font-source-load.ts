@@ -38,7 +38,11 @@ import { numberFormatPaintTexts } from './number-format.js';
 import type { Cell, CellFont, ParsedWorkbook, Row, ShapeInfo, Worksheet } from './types.js';
 import { cellXfAt, effectiveCellStyleIndex } from './internal/cell-style.js';
 
-export { FontSourceSession, InstalledFamilyExclusion } from '@silurus/ooxml-core/internal/font-sources';
+export {
+  FontSourceSession,
+  InstalledFamilyExclusion,
+  inRealmResolverFaceAcquirer,
+} from '@silurus/ooxml-core/internal/font-sources';
 
 /** The substitutions every configured source declares, in option order. */
 export function declaredFontSubstitutions(sources: readonly FontSource[]): readonly FontSubstitution[] {

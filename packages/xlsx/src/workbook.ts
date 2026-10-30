@@ -237,6 +237,7 @@ export class XlsxWorkbook {
   private fontDemand: import('./font-source-load.js').XlsxFontDemand | null = null;
   private installedFamilies: InstalledFamilyExclusion | null = null;
   private fontSessionType: typeof FontSourceSession | null = null;
+  private fontAcquirerFor: typeof import('./font-source-load.js').inRealmResolverFaceAcquirer | null = null;
   /** Every demand delta so far, replayed into each newly retained set. */
   private fontDeltas: Promise<FontSessionDemand>[] = [];
   private officeFontRequests: OfficeFontFallbackRequest[] = [];
@@ -707,6 +708,7 @@ export class XlsxWorkbook {
     if (!fonts?.length) return;
     const fontSourceLoad = await import('./font-source-load.js');
     this.fontSessionType = fontSourceLoad.FontSourceSession;
+    this.fontAcquirerFor = fontSourceLoad.inRealmResolverFaceAcquirer;
     this.fontDemand = new fontSourceLoad.XlsxFontDemand(workbook, this.cjkFallback, fontSourceLoad.declaredFontSubstitutions(fonts));
     // Installed authored faces are probed before any source face of a delta
     // registers, and never demanded (core installed-families.ts).
@@ -755,7 +757,14 @@ export class XlsxWorkbook {
       retained.refs++;
     } else {
       const session = this.fonts?.length && this.fontSessionType
-        ? new this.fontSessionType({ sources: this.fonts, fontSet, resolverFailures: this.fontResolverFailures })
+        ? new this.fontSessionType({
+          sources: this.fonts, fontSet, resolverFailures: this.fontResolverFailures,
+          // Worker mode: the page acquires resolver URL faces for the worker
+          // (core resolver-bridge-host.ts); this realm acquires through the
+          // same cache and failure record, so both realms paint the same bytes.
+          ...(this._mode === 'worker' && this.fontAcquirerFor
+            ? { acquireResolverFaces: this.fontAcquirerFor(this.fontResolverFailures) } : {}),
+        })
         : null;
       const record = {
         refs: 1, loaded: null, session, fontQueue: Promise.resolve() as Promise<unknown>,
@@ -1786,6 +1795,7 @@ export class XlsxWorkbook {
     this.fontDemand = null;
     this.installedFamilies = null;
     this.fontSessionType = null;
+    this.fontAcquirerFor = null;
     this.fontDeltas = [];
     this.officeFontRequests = [];
     // Frame-local lookup maps never escape the renderer; drop the owning core

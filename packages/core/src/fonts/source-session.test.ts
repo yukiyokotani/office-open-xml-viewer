@@ -214,7 +214,21 @@ describe('FontSourceSession: credentials omit', () => {
     expect(set.faces.map((face) => (face.source as ArrayBuffer).byteLength)).toEqual([12, 10, 8]);
     expect(calls).toHaveLength(5);
     for (const call of calls) expect(call.init?.credentials).toBe('omit');
-    expect(retainedFontSourceBytes()).toBe(30);
+    // The acquired bodies (kept for the session) and their registrations.
+    expect(retainedFontSourceBytes()).toBe(2 * 30);
+  });
+
+  it('shares one download across sessions and charges it once', async () => {
+    const { calls } = installFetch({ 'https://app.example/file.woff2': { bytes: 8 } });
+    const source = fontFiles({ faces: [{ family: 'File', url: 'https://app.example/file.woff2' }], credentials: 'omit' });
+    const set = fakeSet();
+    const opened = [open([source], set), open([source], set), open([source], set)];
+    for (const session of opened) await session.ensure(demand(['File']));
+    expect(calls).toHaveLength(1);
+    // One kept body and one registration in the shared set.
+    expect(retainedFontSourceBytes()).toBe(2 * 8);
+    for (const session of opened) session.release();
+    expect(retainedFontSourceBytes()).toBe(0);
   });
 
   it('keeps the default to the browser, and fails only the faces whose download fails', async () => {
