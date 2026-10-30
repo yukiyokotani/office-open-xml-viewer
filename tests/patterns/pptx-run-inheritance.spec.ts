@@ -172,9 +172,10 @@ test('browser parser carries all inherited attributes through runs, fields, brea
   expect(parsed.breaks[1].endRunProperties.fontSize).toBe(96);
   expect(parsed.table).toHaveLength(2);
   for (const run of parsed.table) {
-    // A defPPr size has no effect in PowerPoint (#1620 controls); its other
-    // character properties still cascade into cell runs and fields.
-    expect(run).toMatchObject({ bold: true, fontSize: null, color: 'D21D54' });
+    // A defPPr size (#1620 controls) and fill (#1989 controls) have no effect
+    // in PowerPoint; its other character properties still cascade into cell
+    // runs and fields.
+    expect(run).toMatchObject({ bold: true, fontSize: null, color: null });
     expect(run.characterAttributes.lang).toBe('ja-JP');
     expect(run.fontFamilyCs).toBe('Amiri');
   }
