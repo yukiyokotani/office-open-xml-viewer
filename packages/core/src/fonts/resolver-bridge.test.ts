@@ -1075,6 +1075,37 @@ describe('fontResolver bridge: the page fetches resolver URLs', () => {
     link.host.dispose();
   });
 
+  it('decodes a late verdict that arrives before the overdue ceiling timer runs', async () => {
+    vi.useFakeTimers();
+    G.FontFace = class extends FakeFontFace {
+      override load(): Promise<FakeFontFace> {
+        return new Promise((resolve) => setTimeout(() => { this.status = 'loaded'; resolve(this); }, 500));
+      }
+    };
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    G.fetch = vi.fn(async () => { await gate; return { ok: true, status: 200, arrayBuffer: async () => new Uint8Array(16).buffer }; });
+    const source = fontResolver(() => URL_FACES().slice(0, 1));
+    const link = bridge([source]);
+    const { session } = link.session();
+    const started = Date.now();
+    const pending = session.ensure(demand(['Private Face']));
+    await vi.waitFor(() => expect(kinds(link.toMain)).toContain('ooxmlAcquireFonts'));
+    link.pause();
+    release();
+    await vi.waitFor(() => expect(kinds(link.toWorker)).toContain('ooxmlFontsAcquired'));
+    // A busy worker: just before its ceiling's timer is due, the clock passes
+    // the deadline; the reply is delivered before that overdue timer runs,
+    // which then fires while the face decodes.
+    await vi.advanceTimersByTimeAsync(15_000 - (Date.now() - started) - 100);
+    vi.setSystemTime(Date.now() + 200);
+    link.resume();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect((await pending).faces).toHaveLength(1);
+    session.release();
+    link.host.dispose();
+  });
+
   it('never records a cancelled request as the document\'s outcome', async () => {
     let release: () => void = () => undefined;
     const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -1401,6 +1432,39 @@ describe('face acquisition', () => {
       expect(main.acquiredFaceCount(), `delay ${delay}`).toBe(0);
       expect(main.retainedFontSourceBytes(), `delay ${delay}`).toBe(0);
     }
+  });
+
+  it('never exceeds six downloads while queued downloads resume and new ones arrive', async () => {
+    const waiting: (() => void)[] = [];
+    let inFlight = 0;
+    let peak = 0;
+    G.fetch = vi.fn(async () => {
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      await new Promise<void>((resolve) => waiting.push(resolve));
+      inFlight--;
+      return { ok: true, status: 200, arrayBuffer: async () => new Uint8Array(4).buffer };
+    });
+    const holder = {};
+    const options = { credentials: 'omit' as const, signal: new AbortController().signal, deadline: Date.now() + 60_000, holder };
+    const batches = [main.acquireFaceUrls(Array.from({ length: 60 }, (_, index) => `https://fonts.app.example/q-${index}.woff2`), options)];
+    for (let wave = 0; wave < 12; wave++) {
+      await vi.waitFor(() => expect(waiting.length).toBeGreaterThan(0));
+      // Complete the in-flight wave, and let a new batch arrive during the handoff.
+      for (const resolve of waiting.splice(0)) resolve();
+      // The newcomer arrives at a different point of the handoff each wave.
+      for (let step = 0; step < wave; step++) await Promise.resolve();
+      batches.push(main.acquireFaceUrls(Array.from({ length: 6 }, (_, index) => `https://fonts.app.example/w-${wave}-${index}.woff2`), options));
+    }
+    for (let round = 0; round < 40 && (waiting.length || inFlight); round++) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      for (const resolve of waiting.splice(0)) resolve();
+    }
+    await Promise.all(batches);
+    expect(peak).toBeLessThanOrEqual(6);
+    main.releaseAcquiredFaces(holder);
+    expect(main.acquiredFaceCount()).toBe(0);
+    expect(main.retainedFontSourceBytes()).toBe(0);
   });
 
   it('fails a body that completes after the deadline, whatever the timers did', async () => {

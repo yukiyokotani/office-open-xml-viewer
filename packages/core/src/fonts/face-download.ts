@@ -60,9 +60,13 @@ export type FaceAcquisition = { readonly data: ArrayBuffer } | { readonly reason
 let active = 0;
 const queued: (() => void)[] = [];
 
-/** Wait for a download slot; the returned function frees it. */
+/** Wait for a download slot; the returned function frees it. A freed slot
+ * passes straight to the first queued waiter (it stays counted as taken), so
+ * a newcomer can never take it during the handoff. */
 async function slot(signal: AbortSignal): Promise<() => void> {
-  if (active >= MAX_CONCURRENT_FACE_DOWNLOADS) {
+  if (active < MAX_CONCURRENT_FACE_DOWNLOADS) {
+    active++;
+  } else {
     await new Promise<void>((resolve, reject) => {
       const take = () => { signal.removeEventListener('abort', onAbort); resolve(); };
       const onAbort = () => {
@@ -75,13 +79,13 @@ async function slot(signal: AbortSignal): Promise<() => void> {
       queued.push(take);
     });
   }
-  active++;
   let freed = false;
   return () => {
     if (freed) return;
     freed = true;
-    active--;
-    queued.shift()?.();
+    const next = queued.shift();
+    if (next) next();
+    else active--;
   };
 }
 

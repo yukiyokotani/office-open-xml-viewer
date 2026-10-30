@@ -524,7 +524,9 @@ export class FontSourceSession {
     // after this realm's ceiling (main owns that deadline): the faces it
     // delivered still get a bounded wait for decoding, so this realm paints
     // what the page decided, as another realm of the document does.
-    const loadCeiling = acquired && ceiling.expired()
+    // By the absolute deadline, not the ceiling's timer, which may not have
+    // run yet when a busy realm receives the reply.
+    const loadCeiling = acquired && ceiling.remaining() === 0
       ? ceilingSignal(this.controller.signal, FONT_LOAD_CEILING_MS) : undefined;
     const registered = new Set<OwnedFace>();
     const failures = new Map<string, string>();
