@@ -240,8 +240,11 @@ The `demand` argument contains:
 Return every face you have for each family you answer: all weights, styles
 and `unicode-range` subsets. A family is resolved once per document, so a face
 you leave out is not asked for again. The renderer picks the weight and style
-of each run, and loads only the `unicode-range` subsets of the characters it
-paints. A resolver may answer only some families. With `substitutes`, a
+of each run. In main mode it loads only the `unicode-range` subsets of the
+characters it paints; in worker mode the page fetches every `http(s)` and
+`blob:` face of a claimed family when the family is claimed, as for
+`credentials: 'omit'` sources, so a resolver serving many subsets per family
+costs more there. A resolver may answer only some families. With `substitutes`, a
 family may also be answered with faces of its substitute's `use` family.
 
 The function returns `FontFaceDeclaration` objects with the same fields as

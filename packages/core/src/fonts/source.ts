@@ -124,8 +124,9 @@ export interface FontFaceDeclaration {
  * Contract: answer each family with every face you have for it (all weights,
  * styles and `unicode-range` subsets), or with nothing. A family is resolved
  * once per document, so faces left out are never asked for again; the
- * renderer picks the weight and style per run and loads `unicode-range`
- * subsets only for the characters painted.
+ * renderer picks the weight and style per run. URL faces load per painted
+ * `unicode-range` subset in the painting realm, except in worker mode, where
+ * the page fetches every http(s) / blob: face of a claimed family.
  */
 export interface FontDemand {
   /** Authored family names not proven installed on the host (trimmed, original case). */

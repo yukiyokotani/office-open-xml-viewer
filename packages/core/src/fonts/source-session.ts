@@ -518,8 +518,14 @@ export class FontSourceSession {
     delta: 'all' | readonly number[],
     ceiling: ReturnType<typeof ceilingSignal>,
   ): Promise<LoadedFontSources> {
-    await this.acquire(resolved, ceiling);
+    const acquired = await this.acquire(resolved, ceiling);
     if (this.closed) return this.settledState();
+    // A bridged acquisition answers with the page's verdict, which may arrive
+    // after this realm's ceiling (main owns that deadline): the faces it
+    // delivered still get a bounded wait for decoding, so this realm paints
+    // what the page decided, as another realm of the document does.
+    const loadCeiling = acquired && ceiling.expired()
+      ? ceilingSignal(this.controller.signal, FONT_LOAD_CEILING_MS) : undefined;
     const registered = new Set<OwnedFace>();
     const failures = new Map<string, string>();
     for (const { name, scripts } of fresh) {
@@ -532,7 +538,11 @@ export class FontSourceSession {
         this.register(state, registered, failures);
       }
     }
-    await this.load(delta, registered, failures, ceiling.signal);
+    try {
+      await this.load(delta, registered, failures, (loadCeiling ?? ceiling).signal);
+    } finally {
+      loadCeiling?.dispose();
+    }
     if (this.closed) return this.settledState();
     this.warn(failures);
     this.snapshot = this.takeSnapshot();
@@ -545,7 +555,7 @@ export class FontSourceSession {
    * fetched is dropped and its family warned; the family stays claimed (a
    * claimed face that fails never promotes another source or substitute).
    */
-  private async acquire(resolved: Map<string, FamilyState>, ceiling: ReturnType<typeof ceilingSignal>): Promise<void> {
+  private async acquire(resolved: Map<string, FamilyState>, ceiling: ReturnType<typeof ceilingSignal>): Promise<boolean> {
     type Claimed = Extract<FamilyState, { kind: 'claimed' }>;
     const omitted: [string, Claimed][] = [];
     const bridged = new Map<number, [string, Claimed][]>();
@@ -559,7 +569,7 @@ export class FontSourceSession {
         bridged.set(state.sourceIndex, [...bridged.get(state.sourceIndex) ?? [], [entry[0], state]]);
       }
     }
-    if (!omitted.length && !bridged.size) return;
+    if (!omitted.length && !bridged.size) return false;
     const deadline = Date.now() + ceiling.remaining();
     const context = { signal: ceiling.signal, cancel: this.controller.signal, deadline, holder: this };
     const urlsOf = (state: Claimed) => state.declarations.filter(isDownloadableFace).map(({ url }) => url as string);
@@ -611,6 +621,7 @@ export class FontSourceSession {
         resolved.set(key, { ...state, declarations, ...(reason === undefined ? {} : { downloadFailure: reason }) });
       }
     }
+    return bridged.size > 0;
   }
 
   /** Merge demanded scalars; returns the newly demanded ones, or 'all' when

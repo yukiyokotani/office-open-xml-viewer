@@ -1035,6 +1035,12 @@ describe('fontResolver bridge: the page fetches resolver URLs', () => {
 
   it('lets the worker adopt the page\'s acquisition verdict after its own ceiling', async () => {
     vi.useFakeTimers();
+    // Decoding is asynchronous, as in a browser.
+    G.FontFace = class extends FakeFontFace {
+      override load(): Promise<FakeFontFace> {
+        return new Promise((resolve) => setTimeout(() => { this.status = 'loaded'; resolve(this); }, 50));
+      }
+    };
     let release: () => void = () => undefined;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     G.fetch = vi.fn(async () => { await gate; return { ok: true, status: 200, arrayBuffer: async () => new Uint8Array(16).buffer }; });
@@ -1051,7 +1057,7 @@ describe('fontResolver bridge: the page fetches resolver URLs', () => {
     await vi.waitFor(() => expect(kinds(link.toWorker)).toContain('ooxmlFontsAcquired'));
     await vi.advanceTimersByTimeAsync(20_000);
     link.resume();
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(100);
     const loaded = await pending;
     expect(loaded.faces).toHaveLength(1);
     expect(set.faces.map((face) => face.bytes)).toEqual([16]);
@@ -1061,7 +1067,9 @@ describe('fontResolver bridge: the page fetches resolver URLs', () => {
       acquireResolverFaces: main.inRealmResolverFaceAcquirer(failures),
     });
     sessions.push(viewer);
-    expect((await viewer.ensure(demand(['Private Face']))).faces).toHaveLength(1);
+    const viewerLoad = viewer.ensure(demand(['Private Face']));
+    await vi.advanceTimersByTimeAsync(100);
+    expect((await viewerLoad).faces).toHaveLength(1);
     session.release();
     viewer.release();
     link.host.dispose();
