@@ -730,7 +730,7 @@ enum Token {
     /// `text:s`: one space that is never collapsed.
     Space(u32),
     Tab(u32),
-    LineBreak,
+    LineBreak(u32),
 }
 
 impl<'a> Reader<'a> {
@@ -863,6 +863,13 @@ impl<'a> Reader<'a> {
             parent: None,
         }];
         let mark = self.run_properties(&contexts, 0, ScriptClass::Latin)?;
+        // The paragraph's retained size, charged before its strings (five
+        // copies of the mark family) are allocated.
+        self.charge_construction(
+            std::mem::size_of::<Collected>()
+                + std::mem::size_of::<BodyElement>()
+                + 5 * mark.family.len(),
+        )?;
         collected.paragraph.paragraph_mark_font_facts = Some(mark.font_facts());
         collected.paragraph.default_font_size = Some(mark.size);
         collected.paragraph.default_font_family = Some(mark.family.to_string());
@@ -883,11 +890,6 @@ impl<'a> Reader<'a> {
         }
         let tokens = collapse(std::mem::take(&mut inline.tokens));
         self.emit_runs(&tokens, &inline.contexts, &mut collected.paragraph)?;
-        self.charge_construction(
-            std::mem::size_of::<Collected>()
-                + std::mem::size_of::<BodyElement>()
-                + 6 * mark.family.len(),
-        )?;
         self.paragraphs.push(collected);
         Ok(())
     }
@@ -972,7 +974,7 @@ impl<'a> Reader<'a> {
                 }
                 (Some(NS_TEXT), "line-break") => {
                     self.charge_text(1, 1, inline)?;
-                    inline.tokens.push(Token::LineBreak);
+                    inline.tokens.push(Token::LineBreak(context));
                 }
                 (
                     Some(NS_TEXT),
@@ -1057,9 +1059,23 @@ impl<'a> Reader<'a> {
         let mut cache: HashMap<(u32, ScriptClass), RunProperties> = HashMap::new();
         let mut uniform: HashMap<u32, ScriptClass> = HashMap::new();
         let mut current: Option<(u32, ScriptClass)> = None;
+        // Line breaks not yet preceded by a text run, checked against the next.
+        let mut pending_breaks: Vec<(u32, ScriptClass)> = Vec::new();
         for &token in tokens {
             let (c, context) = match token {
-                Token::LineBreak => {
+                Token::LineBreak(context) => {
+                    // LibreOffice sizes a break's line portion by the break's
+                    // own font (measured); the DOCX layout by the nearest text
+                    // run, preceding first, else following. They agree only
+                    // when those fonts have the same line metrics.
+                    let key = (context, ScriptClass::Latin);
+                    if let std::collections::hash_map::Entry::Vacant(entry) = cache.entry(key) {
+                        entry.insert(self.run_properties(contexts, context, key.1)?);
+                    }
+                    match current {
+                        Some(text) => same_line_metrics(&cache[&key], &cache[&text])?,
+                        None => pending_breaks.push(key),
+                    }
                     self.charge_construction(std::mem::size_of::<DocRun>())?;
                     paragraph.runs.push(DocRun::Break {
                         break_type: BreakType::Line,
@@ -1094,6 +1110,9 @@ impl<'a> Reader<'a> {
             if let std::collections::hash_map::Entry::Vacant(entry) = cache.entry(key) {
                 entry.insert(self.run_properties(contexts, context, class)?);
             }
+            for pending in pending_breaks.drain(..) {
+                same_line_metrics(&cache[&pending], &cache[&key])?;
+            }
             let continues = match (current, paragraph.runs.last_mut()) {
                 (Some(last_key), Some(DocRun::Text(last))) if cache[&last_key] == cache[&key] => {
                     last.text.push(c);
@@ -1108,6 +1127,10 @@ impl<'a> Reader<'a> {
                 paragraph.runs.push(DocRun::Text(Box::new(run)));
             }
             current = Some(key);
+        }
+        if !pending_breaks.is_empty() {
+            // Without text the DOCX layout sizes breaks by a fixed fallback.
+            return Err(unsupported("line-break-without-text"));
         }
         Ok(())
     }
@@ -1145,7 +1168,7 @@ impl<'a> Reader<'a> {
         let work = styles.iter().fold(0usize, |work, style| {
             work.saturating_add(1)
                 .saturating_add(style.group(group).map_or(0, |p| {
-                    p.elements.len()
+                    p.element_nodes
                         + p.attributes
                             .iter()
                             .map(|((namespace, name), value)| {
@@ -1239,6 +1262,15 @@ impl<'a> Reader<'a> {
             previous = Some(collected);
         }
         Ok(out)
+    }
+}
+
+/// The properties that set a line's height: face, size and raise/lower.
+fn same_line_metrics(a: &RunProperties, b: &RunProperties) -> Result<(), String> {
+    if a.family == b.family && a.size == b.size && a.position == b.position {
+        Ok(())
+    } else {
+        Err(unsupported("line-break-formatting"))
     }
 }
 
@@ -2301,7 +2333,7 @@ mod tests {
         // Hyphenation parameters are admitted by prefix (inert while
         // hyphenation is off), so one style can carry many of them; every
         // paragraph resolution is charged for each.
-        let heavy: String = (0..2000)
+        let heavy: String = (0..200)
             .map(|i| format!(r#" fo:hyphenation-x{i}="1""#))
             .collect();
         let styles = format!(
@@ -2389,7 +2421,7 @@ mod tests {
 
         // Every line break is a retained run.
         let breaks = MAX_CONSTRUCTION_BYTES / std::mem::size_of::<DocRun>() + 1;
-        let paragraph = format!("<text:p>{}</text:p>", "<text:line-break/>".repeat(900_000));
+        let paragraph = format!("<text:p>x{}</text:p>", "<text:line-break/>".repeat(900_000));
         let error = read_fixture(Fixture {
             body: &paragraph.repeat(breaks / 900_000 + 1),
             ..Fixture::default()
@@ -2443,6 +2475,51 @@ mod tests {
         })
         .unwrap();
         assert_eq!(paragraphs(&document).len(), 3000);
+    }
+
+    #[test]
+    fn line_breaks_must_share_the_line_metrics_docx_uses() {
+        let styles = r#"<style:style style:name="Big" style:family="text"><style:text-properties fo:font-size="30pt"/></style:style><style:style style:name="Bold" style:family="text"><style:text-properties fo:font-weight="bold"/></style:style>"#;
+        let read = |body: &str| {
+            read_fixture(Fixture {
+                styles,
+                body,
+                ..Fixture::default()
+            })
+        };
+        // Same face and size as the preceding text (boldness is irrelevant).
+        assert!(read(
+            r#"<text:p>A<text:span text:style-name="Bold"><text:line-break/></text:span>B</text:p>"#
+        )
+        .is_ok());
+        // Before any text, the following run decides.
+        assert!(read(r#"<text:p><text:line-break/>B</text:p>"#).is_ok());
+        assert_eq!(
+            read(r#"<text:p>A<text:span text:style-name="Big"><text:line-break/><text:line-break/></text:span>B</text:p>"#).unwrap_err(),
+            unsupported("line-break-formatting")
+        );
+        assert_eq!(
+            read(r#"<text:p><text:span text:style-name="Big"><text:line-break/></text:span>B</text:p>"#).unwrap_err(),
+            unsupported("line-break-formatting")
+        );
+        assert_eq!(
+            read(r#"<text:p><text:line-break/></text:p>"#).unwrap_err(),
+            unsupported("line-break-without-text")
+        );
+    }
+
+    #[test]
+    fn rejects_repeated_element_valued_properties() {
+        let tab_stops = "<style:tab-stops/>".repeat(2);
+        let styles = format!(
+            r#"<style:style style:name="T" style:family="paragraph"><style:paragraph-properties>{tab_stops}</style:paragraph-properties></style:style>"#
+        );
+        assert!(read_fixture(Fixture {
+            styles: &styles,
+            ..Fixture::default()
+        })
+        .unwrap_err()
+        .contains("repeats an element-valued property"));
     }
 
     #[test]

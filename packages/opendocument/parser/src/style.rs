@@ -50,6 +50,9 @@ pub struct Properties {
     /// Child elements of the group (e.g. `style:tab-stops`), by local name,
     /// kept as their serialized children for the readers that admit them.
     pub elements: HashMap<String, Vec<Element>>,
+    /// Captured element nodes and attributes, descendants included: the
+    /// cost of walking `elements`.
+    pub element_nodes: usize,
 }
 
 /// A captured child element: name and attributes, plus its own children.
@@ -59,6 +62,13 @@ pub struct Element {
     pub name: String,
     pub attributes: HashMap<Key, String>,
     pub children: Vec<Element>,
+}
+
+impl Element {
+    /// Element nodes and their attributes, descendants included.
+    fn nodes(&self) -> usize {
+        1 + self.attributes.len() + self.children.iter().map(Element::nodes).sum::<usize>()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -314,11 +324,20 @@ fn read_style_body(node: roxmltree::Node<'_, '_>, name: String) -> Result<Style,
             ..Properties::default()
         };
         for element in child.children().filter(|n| n.is_element()) {
-            properties
+            // Each element-valued property occurs at most once per group.
+            let captured = capture(element, 0)?;
+            properties.element_nodes += captured.nodes();
+            match properties
                 .elements
                 .entry(element.tag_name().name().to_string())
-                .or_default()
-                .push(capture(element, 0)?);
+            {
+                std::collections::hash_map::Entry::Occupied(_) => {
+                    return Err(invalid("a style repeats an element-valued property"));
+                }
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(vec![captured]);
+                }
+            }
         }
         if groups
             .insert(child.tag_name().name().to_string(), properties)
