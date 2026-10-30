@@ -124,7 +124,6 @@ pub fn read(package: &OdfPackage) -> Result<Document, String> {
         .map(length_pt)
         .transpose()?;
     let mut reader = Reader {
-        default_tab_stop,
         sheet: &sheet,
         fonts: &fonts,
         used_faces: RefCell::new(HashSet::new()),
@@ -719,9 +718,6 @@ struct Reader<'a> {
     retained_text_bytes: usize,
     construction_bytes: usize,
     contextual_spacing_defined: bool,
-    /// The document's default tab interval (the paragraph default style's
-    /// `style:tab-stop-distance`), mapped to the DOCX default tab stop.
-    default_tab_stop: Option<f64>,
 }
 
 /// One formatting context: a span's own style chain followed, through
@@ -748,7 +744,6 @@ enum Token {
     Char(char, u32),
     /// `text:s`: one space that is never collapsed.
     Space(u32),
-    Tab(u32),
     LineBreak(u32),
 }
 
@@ -899,25 +894,6 @@ impl<'a> Reader<'a> {
             tokens: Vec::new(),
         };
         self.inline(node, 0, &mut inline, 0)?;
-        if inline.tokens.iter().any(|t| matches!(t, Token::Tab(_))) {
-            if collected.paragraph.indent_left != 0.0 || collected.paragraph.indent_first != 0.0 {
-                // LibreOffice measures tab positions from the paragraph indent
-                // unless TabsRelativeToIndent is off; DOCX from the margin.
-                // They coincide only without an indent.
-                return Err(unsupported("tab-with-indent"));
-            }
-            // DOCX has one document-wide default interval and its own
-            // fallback (36 pt) when none is set; LibreOffice's fallback
-            // differs (measured). Tabs need a positive interval that is the
-            // document default.
-            let interval = properties
-                .get(NS_STYLE, "tab-stop-distance")
-                .map(length_pt)
-                .transpose()?;
-            if !interval.is_some_and(|v| v > 0.0) || interval != self.default_tab_stop {
-                return Err(unsupported("tab-stop-distance"));
-            }
-        }
         if collected.paragraph.alignment == "justify"
             && inline
                 .tokens
@@ -1009,10 +985,12 @@ impl<'a> Reader<'a> {
                         .tokens
                         .extend((0..count).map(|_| Token::Space(context)));
                 }
-                (Some(NS_TEXT), "tab") => {
-                    self.charge_text(1, 1, inline)?;
-                    inline.tokens.push(Token::Tab(context));
-                }
+                // Tab geometry (positions from the indent, the default
+                // interval, synthetic tab metrics, decorations across the gap
+                // and tab-only wrapped lines) differs between LibreOffice and
+                // the DOCX layout in several measured ways; tabs reject until
+                // they are mapped as a whole.
+                (Some(NS_TEXT), "tab") => return Err(unsupported("tab")),
                 (Some(NS_TEXT), "line-break") => {
                     self.charge_text(1, 1, inline)?;
                     inline.tokens.push(Token::LineBreak(context));
@@ -1103,15 +1081,10 @@ impl<'a> Reader<'a> {
         // Breaks since the last text run: each scans back past them.
         let mut breaks_since_text = 0usize;
         // Whether the current line holds a glyph with font metrics: the DOCX
-        // layout gives tabs (and lines of only white space) synthetic
-        // metrics, unlike LibreOffice.
+        // layout gives lines of only white space synthetic metrics, unlike
+        // LibreOffice.
         let mut line_has_glyph = false;
         let mut any_break = false;
-        // The DOCX layout gives a tab synthetic metrics from its own size,
-        // LibreOffice its font's (measured): a tab must share the line
-        // metrics of the nearest glyph-bearing run, preceding first.
-        let mut last_glyph: Option<(u32, ScriptClass)> = None;
-        let mut pending_tabs: Vec<(u32, ScriptClass)> = Vec::new();
         for &token in tokens {
             let (c, context) = match token {
                 Token::LineBreak(context) => {
@@ -1154,7 +1127,6 @@ impl<'a> Reader<'a> {
                 }
                 Token::Char(c, context) => (c, context),
                 Token::Space(context) => (' ', context),
-                Token::Tab(context) => ('\t', context),
             };
             // A character Table 22 does not map has an implementation-dependent
             // class (§20.358). LibreOffice was observed to use the preceding
@@ -1181,19 +1153,6 @@ impl<'a> Reader<'a> {
                 entry.insert(self.run_properties(contexts, context, class)?);
             }
             breaks_since_text = 0;
-            if matches!(token, Token::Tab(_)) {
-                match last_glyph {
-                    Some(glyph) => {
-                        same_line_metrics(&cache[&key], &cache[&glyph], "tab-formatting")?
-                    }
-                    None => pending_tabs.push(key),
-                }
-            } else if !c.is_whitespace() {
-                for tab in pending_tabs.drain(..) {
-                    same_line_metrics(&cache[&tab], &cache[&key], "tab-formatting")?;
-                }
-                last_glyph = Some(key);
-            }
             line_has_glyph |= !c.is_whitespace();
             let continues = match (current, paragraph.runs.last_mut()) {
                 (Some(last_key), Some(DocRun::Text(last))) if cache[&last_key] == cache[&key] => {
@@ -1212,9 +1171,6 @@ impl<'a> Reader<'a> {
         }
         if any_break && !line_has_glyph {
             return Err(unsupported("line-break-empty-line"));
-        }
-        if !pending_tabs.is_empty() {
-            return Err(unsupported("tab-without-text"));
         }
         Ok(())
     }
@@ -1516,15 +1472,22 @@ impl RunProperties {
         } else {
             cascade.get(NS_FO, "color").map(hex_color).transpose()?
         };
-        let letter_spacing = match cascade.get(NS_FO, "letter-spacing") {
+        // Letter spacing: LibreOffice spaces between the characters of a
+        // portion, the DOCX layout after each character with an advance
+        // floor (measured: -1 pt over four letters moves the next word 3 pt
+        // and 4 pt). Rejected until mapped.
+        let letter_spacing: Option<f64> = match cascade.get(NS_FO, "letter-spacing") {
             None | Some("normal") => None,
-            Some(value) => Some(length_pt(value)?),
+            Some(value) if length_pt(value)? == 0.0 => None,
+            Some(_) => return Err(unsupported("letter-spacing")),
         };
-        let scale = cascade
-            .get(NS_STYLE, "text-scale")
-            .map(percent)
-            .transpose()?
-            .filter(|scale| (*scale - 1.0).abs() > 1e-9);
+        // Horizontal scaling is not yet measured against LibreOffice (and
+        // non-positive values break the DOCX layout); only 100% is admitted.
+        let scale: Option<f64> = match cascade.get(NS_STYLE, "text-scale") {
+            None => None,
+            Some(value) if percent(value)? == 1.0 => None,
+            Some(_) => return Err(unsupported("text-scale")),
+        };
         // §20.384: a raised/lowered or resized portion changes the line
         // height differently in LibreOffice and the DOCX layout (measured: a
         // -20% 58% portion and a 0% 0% portion); only the inert value
@@ -2070,13 +2033,13 @@ mod tests {
     }
 
     #[test]
-    fn collapses_white_space_and_keeps_explicit_spaces_tabs_and_breaks() {
+    fn collapses_white_space_and_keeps_explicit_spaces_and_breaks() {
         let document = read_fixture(Fixture {
-            body: "<text:p>\n  a \t b<text:s text:c=\"2\"/>c<text:tab/>d<text:line-break/>  e  </text:p>",
+            body: "<text:p>\n  a \t b<text:s text:c=\"2\"/>cd<text:line-break/>  e  </text:p>",
             ..Fixture::default()
         })
         .unwrap();
-        assert_eq!(texts(paragraphs(&document)[0]), ["a b  c\td", "<br>", " e"]);
+        assert_eq!(texts(paragraphs(&document)[0]), ["a b  cd", "<br>", " e"]);
         assert!((document.section.margin_left - 70.866).abs() < 0.01);
     }
 
@@ -2653,42 +2616,23 @@ mod tests {
     }
 
     #[test]
-    fn tabs_need_the_document_interval_and_lines_need_glyphs() {
-        let styles = r#"<style:style style:name="Wide" style:family="paragraph"><style:paragraph-properties style:tab-stop-distance="2cm"/></style:style>"#;
+    fn tabs_reject_and_lines_around_breaks_need_glyphs() {
         let read = |body: &str| {
             read_fixture(Fixture {
-                styles,
                 body,
                 ..Fixture::default()
             })
         };
-        let document = read("<text:p>a<text:tab/>b</text:p>").unwrap();
-        let stop = document
-            .settings
-            .as_ref()
-            .and_then(|s| s.default_tab_stop)
-            .unwrap();
-        assert!((stop - 35.43).abs() < 0.01, "{stop}");
         assert_eq!(
-            read(r#"<text:p text:style-name="Wide">a<text:tab/>b</text:p>"#).unwrap_err(),
-            unsupported("tab-stop-distance")
+            read("<text:p>a<text:tab/>b</text:p>").unwrap_err(),
+            unsupported("tab")
         );
-        // Lines holding only a tab or white space between breaks.
-        for body in [
-            "<text:p>A<text:line-break/><text:tab/><text:line-break/>B</text:p>",
-            "<text:p><text:tab/><text:line-break/>B</text:p>",
-            "<text:p>A<text:line-break/><text:tab/></text:p>",
-            "<text:p>A<text:line-break/><text:s/><text:line-break/>B</text:p>",
-        ] {
-            assert_eq!(
-                read(body).unwrap_err(),
-                unsupported("line-break-empty-line"),
-                "{body}"
-            );
-        }
-        assert!(
-            read("<text:p>A<text:line-break/><text:tab/>x<text:line-break/>B</text:p>").is_ok()
+        // A line between breaks holding only white space.
+        assert_eq!(
+            read("<text:p>A<text:line-break/><text:s/><text:line-break/>B</text:p>").unwrap_err(),
+            unsupported("line-break-empty-line")
         );
+        assert!(read("<text:p>A<text:line-break/>x<text:line-break/>B</text:p>").is_ok());
     }
 
     #[test]
@@ -2711,8 +2655,8 @@ mod tests {
     }
 
     #[test]
-    fn rejects_tab_formatting_resizing_and_justified_breaks() {
-        let styles = r#"<style:style style:name="Big" style:family="text"><style:text-properties fo:font-size="30pt"/></style:style><style:style style:name="Zero" style:family="text"><style:text-properties style:text-position="0% 0%"/></style:style><style:style style:name="Inert" style:family="text"><style:text-properties style:text-position="0% 100%"/></style:style><style:style style:name="J" style:family="paragraph"><style:paragraph-properties fo:text-align="justify"/></style:style>"#;
+    fn rejects_spacing_scaling_resizing_and_justified_breaks() {
+        let styles = r#"<style:style style:name="Zero" style:family="text"><style:text-properties style:text-position="0% 0%"/></style:style><style:style style:name="Inert" style:family="text"><style:text-properties style:text-position="0% 100%" fo:letter-spacing="0cm" style:text-scale="100%"/></style:style><style:style style:name="Tight" style:family="text"><style:text-properties fo:letter-spacing="-1pt"/></style:style><style:style style:name="Wide" style:family="text"><style:text-properties fo:letter-spacing="1pt"/></style:style><style:style style:name="Flat" style:family="text"><style:text-properties style:text-scale="0%"/></style:style><style:style style:name="Half" style:family="text"><style:text-properties style:text-scale="50%"/></style:style><style:style style:name="J" style:family="paragraph"><style:paragraph-properties fo:text-align="justify"/></style:style>"#;
         let read = |body: &str| {
             read_fixture(Fixture {
                 styles,
@@ -2720,29 +2664,28 @@ mod tests {
                 ..Fixture::default()
             })
         };
+        let span = |style: &str| {
+            format!(r#"<text:p>a<text:span text:style-name="{style}">b</text:span></text:p>"#)
+        };
         assert_eq!(
-            read(r#"<text:p>a<text:span text:style-name="Big"><text:tab/></text:span>b</text:p>"#)
-                .unwrap_err(),
-            unsupported("tab-formatting")
-        );
-        assert_eq!(
-            read(r#"<text:p><text:span text:style-name="Big"><text:tab/></text:span>b</text:p>"#)
-                .unwrap_err(),
-            unsupported("tab-formatting")
-        );
-        assert_eq!(
-            read("<text:p><text:tab/></text:p>").unwrap_err(),
-            unsupported("tab-without-text")
-        );
-        assert!(read("<text:p><text:tab/>b</text:p>").is_ok());
-        assert_eq!(
-            read(r#"<text:p>a<text:span text:style-name="Zero">b</text:span></text:p>"#)
-                .unwrap_err(),
+            read(&span("Zero")).unwrap_err(),
             unsupported("text-position")
         );
-        assert!(
-            read(r#"<text:p>a<text:span text:style-name="Inert">b</text:span></text:p>"#).is_ok()
-        );
+        assert!(read(&span("Inert")).is_ok());
+        for style in ["Tight", "Wide"] {
+            assert_eq!(
+                read(&span(style)).unwrap_err(),
+                unsupported("letter-spacing"),
+                "{style}"
+            );
+        }
+        for style in ["Flat", "Half"] {
+            assert_eq!(
+                read(&span(style)).unwrap_err(),
+                unsupported("text-scale"),
+                "{style}"
+            );
+        }
         assert_eq!(
             read(r#"<text:p text:style-name="J">alpha beta<text:line-break/>gamma delta</text:p>"#)
                 .unwrap_err(),

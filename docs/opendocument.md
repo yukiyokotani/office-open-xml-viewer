@@ -64,18 +64,18 @@ external resources.
 Currently admitted:
 
 - paragraphs, headings (without heading numbering), plain sections, spans,
-  spaces, tabs (in paragraphs without an indent, at the document's default
-  tab interval, in the font of the adjacent text) and line breaks between
-  visible text set in the same font (not in justified paragraphs);
+  spaces, and line breaks between visible text set in the same font (not in
+  justified paragraphs);
 - page size and margins of a single page style without displayed headers or
   footers;
 - paragraph indents, alignment, page breaks, keep-with-next /
   keep-together, widow/orphan control of two lines, and paragraph spacing
   including contextual spacing;
 - character fonts, sizes, bold, italic, single/double underline and
-  strike-through, colours, background colour, letter spacing and scaling;
+  strike-through, colours and background colour;
 - text in the Latin script class of ODF Part 3 Table 22.
 
-Lists, tables, frames and images, notes, fields, comments, tracked changes,
-headers and footers, Asian and complex scripts, and other formatting reject
-for now. The subset grows release by release.
+Tabs, letter spacing, horizontal scaling, raised/lowered text, line-height
+settings, lists, tables, frames and images, notes, fields, comments, tracked
+changes, headers and footers, Asian and complex scripts, and other formatting
+reject for now. The subset grows release by release.
