@@ -665,7 +665,9 @@ each format entry.
   keeps the host fallback with a `console.warn`, and no other source is tried.
 - **Lazy subsets:** only the `unicode-range` subsets that intersect the painted
   text are loaded, and installed faces with the authored name are never
-  replaced.
+  replaced. Font files the library fetches itself (`fontResolver` URLs in
+  worker mode, sources with `credentials: 'omit'`) are fetched for every face
+  of a claimed family.
 - **Deployment:** cross-origin font URLs need CORS. Stylesheet origins need
   `connect-src` and font file origins need `font-src` in your CSP; font files
   the library fetches itself (`fontResolver` URLs in worker mode, sources with
