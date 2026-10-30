@@ -1481,17 +1481,15 @@ fn font_color(cascade: &Cascade<'_>, rules: CompatRules) -> Result<(bool, Option
             continue;
         };
         let automatic = properties.attributes.get(&window).map(String::as_str) == Some("true");
+        // Every applied style is checked for ambiguity, not only those
+        // before the deciding one.
         match (automatic, properties.attributes.get(&explicit)) {
             (true, Some(_)) => return Err(unsupported("font-color-ambiguous")),
-            (true, None) => {
-                nearest = Some((true, None));
-                break;
+            (true, None) if nearest.is_none() => nearest = Some((true, None)),
+            (false, Some(color)) if nearest.is_none() => {
+                nearest = Some((false, Some(hex_color(color)?)))
             }
-            (false, Some(color)) => {
-                nearest = Some((false, Some(hex_color(color)?)));
-                break;
-            }
-            (false, None) => {}
+            _ => {}
         }
     }
     let nearest = nearest.unwrap_or((false, None));
@@ -3233,6 +3231,27 @@ mod tests {
             colors,
             [(None, true), (Some("ff0000".into()), false), (None, true)]
         );
+        // A style setting both attributes rejects wherever it is applied,
+        // also under a nearer style that decides the colour.
+        let ambiguous = r##"<style:style style:name="P" style:family="text"><style:text-properties fo:color="#ff0000" style:use-window-font-color="true"/></style:style><style:style style:name="C" style:family="text" style:parent-style-name="P"><style:text-properties fo:color="#0000ff"/></style:style>"##;
+        for style in ["P", "C"] {
+            assert_eq!(
+                read_fixture_with(
+                    Fixture {
+                        default_text: auto,
+                        styles: ambiguous,
+                        body: &format!(
+                            r#"<text:p><text:span text:style-name="{style}">b</text:span></text:p>"#
+                        ),
+                        ..Fixture::default()
+                    },
+                    nearest,
+                )
+                .unwrap_err(),
+                unsupported("font-color-ambiguous"),
+                "{style}"
+            );
+        }
         // Automatic text alone agrees in both readings.
         assert!(read("<text:p>plain</text:p>", LIBREOFFICE_RULES).is_ok());
         // Opacity follows the resolved colour: 0% only with automatic colour.
