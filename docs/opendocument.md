@@ -68,7 +68,8 @@ Currently admitted:
   font (not in justified paragraphs);
 - page size and margins of a single page style without displayed headers or
   footers;
-- paragraph indents, alignment, page breaks, keep-with-next /
+- paragraph indents, alignment, solid paragraph backgrounds (except two
+  consecutive filled paragraphs with spacing between them), page breaks, keep-with-next /
   keep-together, widow/orphan control of two lines, and paragraph spacing
   including contextual spacing;
 - character fonts, sizes, bold, italic, single/double underline and

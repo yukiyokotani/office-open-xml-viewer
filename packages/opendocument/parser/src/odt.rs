@@ -10,7 +10,9 @@
 use crate::error::{invalid, unsupported};
 use crate::package::{OdfPackage, SUPPORTED_VERSIONS};
 use crate::script::{is_weak_unmapped, table_22, ScriptClass};
-use crate::style::{Cascade, Family, Group, Scope, Style, StyleRef, StyleSheet, PARAGRAPH, TEXT};
+use crate::style::{
+    Cascade, Family, Group, Scope, Style, StyleRef, StyleSheet, LOEXT_GRAPHIC, PARAGRAPH, TEXT,
+};
 use crate::xml::{
     self, NS_DRAW, NS_FO, NS_LOEXT, NS_OFFICE, NS_OFFICEOOO, NS_STYLE, NS_SVG, NS_TEXT, NS_XML,
 };
@@ -919,7 +921,11 @@ impl<'a> Reader<'a> {
             }
         }
 
-        check_groups(&chain, &["paragraph-properties", "text-properties"])?;
+        check_groups(
+            &chain,
+            &["paragraph-properties", "text-properties", LOEXT_GRAPHIC],
+        )?;
+        check_paragraph_fill(&properties, &Cascade::new(chain.clone(), LOEXT_GRAPHIC))?;
         let mut collected = paragraph_properties(&properties, self.rules)?;
         if collected.contextual && !self.contextual_spacing_defined {
             return Err(unsupported("contextual-spacing-version"));
@@ -1380,6 +1386,9 @@ impl<'a> Reader<'a> {
     fn finish(self) -> Result<Vec<BodyElement>, String> {
         let mut out = Vec::with_capacity(self.paragraphs.len());
         let mut previous: Option<Collected> = None;
+        // Whether the previous paragraph has a background (its model has
+        // moved into the output).
+        let mut previous_shaded = false;
         let mut break_pending = false;
         for mut collected in self.paragraphs {
             let mut paragraph = std::mem::take(&mut collected.paragraph);
@@ -1407,6 +1416,20 @@ impl<'a> Reader<'a> {
                     }
                 }
             };
+            if previous.is_some() {
+                // LibreOffice joins the backgrounds of consecutive paragraphs
+                // across the spacing between them (measured: a 24 pt gap
+                // between two filled paragraphs is filled); the DOCX layout
+                // shades each paragraph's lines only. Without a gap both agree.
+                if previous_shaded
+                    && paragraph.shading.is_some()
+                    && !paragraph.page_break_before
+                    && paragraph.space_before > 0.0
+                {
+                    return Err(unsupported("paragraph-fill-gap"));
+                }
+            }
+            previous_shaded = paragraph.shading.is_some();
             paragraph.space_after = 0.0;
             paragraph.contextual_spacing = false;
             break_pending = collected.page_break_after;
@@ -1964,6 +1987,43 @@ fn resolve_family(cascade: &Cascade<'_>, suffix: &str, fonts: &FontFaces) -> Res
     Err(unsupported("font-unresolved"))
 }
 
+/// LibreOffice writes its area fill (`loext:graphic-properties`) beside
+/// `fo:background-color`: `draw:fill="none"` with a transparent background,
+/// or `draw:fill="solid"` repeating the background colour. Those pairs are
+/// the paragraph background (§20.182; `draw:fill` §20.118, `draw:fill-color`
+/// §20.119, `draw:opacity` §20.152); a fill that disagrees, other fill
+/// kinds (gradient, bitmap, hatch) and partial opacity reject.
+fn check_paragraph_fill(paragraph: &Cascade<'_>, fill: &Cascade<'_>) -> Result<(), String> {
+    for (ns, name) in fill.keys() {
+        if !matches!(
+            (ns.as_str(), name.as_str()),
+            (NS_DRAW, "fill" | "fill-color" | "opacity")
+        ) {
+            return Err(unsupported("paragraph-fill"));
+        }
+    }
+    let background = match paragraph.get(NS_FO, "background-color") {
+        None | Some("transparent") => None,
+        Some(value) => Some(hex_color(value)?),
+    };
+    let agrees = match fill.get(NS_DRAW, "fill") {
+        None if fill.keys().is_empty() => true,
+        Some("none") => background.is_none(),
+        Some("solid") => {
+            let color = fill.get(NS_DRAW, "fill-color").map(hex_color).transpose()?;
+            background.is_some()
+                && color == background
+                && matches!(fill.get(NS_DRAW, "opacity"), None | Some("100%"))
+        }
+        _ => false,
+    };
+    if agrees {
+        Ok(())
+    } else {
+        Err(unsupported("paragraph-fill"))
+    }
+}
+
 /// Paragraph properties: exact mappings, inert values, rejection otherwise.
 fn paragraph_properties(cascade: &Cascade<'_>, rules: CompatRules) -> Result<Collected, String> {
     for (ns, name) in cascade.keys() {
@@ -1991,7 +2051,8 @@ fn paragraph_properties(cascade: &Cascade<'_>, rules: CompatRules) -> Result<Col
             (NS_STYLE, "writing-mode") => matches!(value, "lr-tb" | "page"),
             (NS_STYLE, "vertical-align") => matches!(value, "auto" | "baseline"),
             (NS_STYLE, "shadow") => value == "none",
-            (NS_FO, "background-color") => value == "transparent",
+            // A solid colour maps to the DOCX paragraph shading (below).
+            (NS_FO, "background-color") => value == "transparent" || hex_color(value).is_ok(),
             (NS_FO, "border" | "border-top" | "border-bottom" | "border-left" | "border-right") => {
                 value == "none"
             }
@@ -2103,6 +2164,10 @@ fn paragraph_properties(cascade: &Cascade<'_>, rules: CompatRules) -> Result<Col
         keep_lines: cascade.get(NS_FO, "keep-together") == Some("always"),
         widow_control,
         page_break_before: breaking("break-before")?,
+        shading: match cascade.get(NS_FO, "background-color") {
+            None | Some("transparent") => None,
+            Some(value) => Some(hex_color(value)?),
+        },
         ..DocParagraph::default()
     };
     Ok(Collected {
@@ -2171,7 +2236,7 @@ mod tests {
     use crate::package::PackageLimits;
     use ooxml_common::resource::OoxmlFormat;
 
-    const NS: &str = r#"xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0" xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0" xmlns:loext="urn:org:documentfoundation:names:experimental:office:xmlns:loext:1.0""#;
+    const NS: &str = r#"xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0" xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0" xmlns:loext="urn:org:documentfoundation:names:experimental:office:xmlns:loext:1.0" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0""#;
     const FACES: &str = r#"<office:font-face-decls><style:font-face style:name="Serif" svg:font-family="'Liberation Serif'" style:font-family-generic="roman"/><style:font-face style:name="Sans" svg:font-family="'Liberation Sans'" style:font-family-generic="swiss"/><style:font-face style:name="Sans2" svg:font-family="'Liberation Sans'" style:font-family-generic="system"/><style:font-face style:name="Mincho" svg:font-family="'Hiragino Mincho ProN'" style:font-family-generic="system"/></office:font-face-decls>"#;
 
     struct Fixture<'a> {
@@ -3214,6 +3279,81 @@ mod tests {
                 "{style}"
             );
         }
+    }
+
+    #[test]
+    fn paragraph_backgrounds_with_libreoffice_area_fill() {
+        let style = |name: &str, background: &str, fill: &str, margin: &str| {
+            format!(
+                r#"<style:style style:name="{name}" style:family="paragraph"><loext:graphic-properties {fill}/><style:paragraph-properties fo:background-color="{background}" fo:margin-bottom="{margin}"/></style:style>"#
+            )
+        };
+        let read = |styles: &str, body: &str| {
+            read_fixture(Fixture {
+                styles,
+                body,
+                ..Fixture::default()
+            })
+        };
+        let solid = r##"draw:fill="solid" draw:fill-color="#FFFF00" draw:opacity="100%""##;
+        // A transparent background with fill none, and a solid fill that
+        // repeats the background, map to the paragraph shading.
+        let styles = style("N", "transparent", r#"draw:fill="none""#, "0pt")
+            + &style("Y", "#ffff00", solid, "0pt");
+        let document = read(&styles, r#"<text:p text:style-name="N">a</text:p><text:p text:style-name="Y">b</text:p><text:p text:style-name="Y">c</text:p>"#).unwrap();
+        let shading: Vec<Option<String>> = paragraphs(&document)
+            .iter()
+            .map(|p| p.shading.clone())
+            .collect();
+        assert_eq!(
+            shading,
+            [None, Some("ffff00".into()), Some("ffff00".into())]
+        );
+        // Disagreement, other fill kinds and partial opacity reject.
+        for (background, fill) in [
+            (
+                "#ffff00",
+                r##"draw:fill="solid" draw:fill-color="#00ffff""##,
+            ),
+            ("#ffff00", r#"draw:fill="none""#),
+            (
+                "transparent",
+                r##"draw:fill="solid" draw:fill-color="#ffff00""##,
+            ),
+            (
+                "#ffff00",
+                r##"draw:fill="solid" draw:fill-color="#ffff00" draw:opacity="50%""##,
+            ),
+            (
+                "#ffff00",
+                r#"draw:fill="gradient" draw:fill-gradient-name="G""#,
+            ),
+        ] {
+            assert_eq!(
+                read(
+                    &style("X", background, fill, "0pt"),
+                    r#"<text:p text:style-name="X">x</text:p>"#
+                )
+                .unwrap_err(),
+                unsupported("paragraph-fill"),
+                "{background} {fill}"
+            );
+        }
+        // LibreOffice fills the gap between consecutive filled paragraphs;
+        // the DOCX layout does not, so a gap rejects.
+        assert_eq!(
+            read(
+                &style("G", "#ffff00", solid, "6pt"),
+                r#"<text:p text:style-name="G">a</text:p><text:p text:style-name="G">b</text:p>"#
+            )
+            .unwrap_err(),
+            unsupported("paragraph-fill-gap")
+        );
+        assert!(read(
+            &style("G", "#ffff00", solid, "6pt"),
+            r#"<text:p text:style-name="G">a</text:p><text:p>b</text:p>"#
+        )
+        .is_ok());
     }
 
     #[test]

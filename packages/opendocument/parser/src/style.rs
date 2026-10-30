@@ -40,6 +40,8 @@ impl Family {
 pub type Group = &'static str;
 pub const PARAGRAPH: Group = "paragraph-properties";
 pub const TEXT: Group = "text-properties";
+/// LibreOffice's `loext:graphic-properties` (area fill of paragraphs).
+pub const LOEXT_GRAPHIC: Group = "loext:graphic-properties";
 
 /// An attribute key: (namespace URI, local name).
 pub type Key = (String, String);
@@ -316,9 +318,14 @@ fn read_style_body(node: roxmltree::Node<'_, '_>, name: String) -> Result<Style,
         .map(str::to_string);
     let mut groups = HashMap::new();
     for child in node.children().filter(|n| n.is_element()) {
-        if child.tag_name().namespace() != Some(NS_STYLE) {
-            return Err(crate::error::unsupported("style-child"));
-        }
+        // LibreOffice also writes `loext:graphic-properties` (its area fill
+        // model) beside the paragraph properties; it is kept as its own group
+        // and checked by the reader.
+        let group = match (child.tag_name().namespace(), child.tag_name().name()) {
+            (Some(NS_STYLE), name) => name.to_string(),
+            (Some(crate::xml::NS_LOEXT), "graphic-properties") => LOEXT_GRAPHIC.to_string(),
+            _ => return Err(crate::error::unsupported("style-child")),
+        };
         let mut properties = Properties {
             attributes: attributes(child),
             ..Properties::default()
@@ -339,10 +346,7 @@ fn read_style_body(node: roxmltree::Node<'_, '_>, name: String) -> Result<Style,
                 }
             }
         }
-        if groups
-            .insert(child.tag_name().name().to_string(), properties)
-            .is_some()
-        {
+        if groups.insert(group, properties).is_some() {
             return Err(invalid("a style repeats a property group"));
         }
     }
