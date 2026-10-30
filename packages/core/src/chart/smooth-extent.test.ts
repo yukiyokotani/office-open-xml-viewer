@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ChartModel, ChartRect, ChartSeries } from '../types/chart';
 import { renderChart } from './renderer.js';
 import { classicLineRunIndices, smoothCurveExtent } from './smooth-extent.js';
+import { computeSecondaryAxis } from './shared/secondary-axis.js';
 
 function labelRecorder(): { ctx: CanvasRenderingContext2D; labels: string[] } {
   const labels: string[] = [];
@@ -113,6 +114,16 @@ describe('automatic value axes cover a drawn smoothed curve', () => {
     }));
     expect(labels).toContain('120%');
     expect(labels).not.toContain('110%');
+  });
+
+  it('a secondary percentStacked axis snaps a crossed bound to the percent unit', () => {
+    const scale = (extra: number[]) => computeSecondaryAxis(
+      { hidden: false } as NonNullable<ChartModel['secondaryValAxis']>,
+      [series({ values: [0, 100], useSecondaryAxis: true })],
+      300, 'y', true, false, undefined, undefined, extra,
+    );
+    expect(scale([-2.3, 100])?.min).toBe(-20);
+    expect(scale([0, 106])?.max).toBe(120);
   });
 
   it('stacked line', () => {

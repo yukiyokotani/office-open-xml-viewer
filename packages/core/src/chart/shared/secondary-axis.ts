@@ -2,7 +2,7 @@
 import type { ChartModel, ChartRect, ChartSeries, SecondaryValueAxis } from '../../types/chart';
 import { planDateCategoryAxis } from '../date-axis.js';
 import { isCrossBetween, resolveAxisLine } from '../axis-style.js';
-import { planNumericValueAxis } from '../axis-scale.js';
+import { automaticPercentMajorUnit, planNumericValueAxis } from '../axis-scale.js';
 import { axisTitleBreakThicknessPx, axisTitleFontPx, categoryTickLabelGapPx, chartTextFontSizePx } from '../layout.js';
 import { rawLinkedChartStyleRole } from '../effective-style.js';
 import { categoryLabelAnchorFraction, categoryLabelOffsetPx } from '../category-spacing.js';
@@ -131,22 +131,48 @@ export function computeSecondaryAxis(
       include,
     );
   }
-  // Plotted geometry beyond the points, e.g. a smoothed curve's overshoot.
-  for (const value of extraValues) include(value);
+  let extraMin = Infinity;
+  let extraMax = -Infinity;
+  for (const value of extraValues) {
+    if (!Number.isFinite(value)) continue;
+    extraMin = Math.min(extraMin, value);
+    extraMax = Math.max(extraMax, value);
+  }
+  // Plotted geometry beyond the points, e.g. a smoothed curve's overshoot. A
+  // percentStacked axis snaps a bound the curve crosses outward to the
+  // automatic percent unit of the widened range, as planValueAxis does.
+  if (!percentStacked) {
+    include(extraMin);
+    include(extraMax);
+  }
   if (!Number.isFinite(dMin) || !Number.isFinite(dMax)) {
     dMin = 0;
     dMax = 1;
+  }
+  let majorUnit = valueAxisUnitInRendererSpace(sec.majorUnit, percentStacked);
+  let explicitMin = valueAxisUnitInRendererSpace(sec.min, percentStacked);
+  let explicitMax = valueAxisUnitInRendererSpace(sec.max, percentStacked);
+  const isLog = sec.logBase != null && Number.isFinite(sec.logBase) && sec.logBase >= 2;
+  if (percentStacked && !isLog && (extraMin < dMin || extraMax > dMax)) {
+    const lo = Math.min(dMin, extraMin);
+    const hi = Math.max(dMax, extraMax);
+    const unit = majorUnit != null && Number.isFinite(majorUnit) && majorUnit > 0
+      ? majorUnit
+      : automaticPercentMajorUnit(lo, hi, 'vertical', plotHeightPt);
+    if (explicitMin == null && extraMin < dMin) explicitMin = Math.floor(lo / unit) * unit;
+    if (explicitMax == null && extraMax > dMax) explicitMax = Math.ceil(hi / unit) * unit;
+    majorUnit = unit;
   }
   // An explicit `<c:valAx><c:majorUnit>` on the secondary axis (§21.2.2.103)
   // overrides the auto step, mirroring the primary axis. null ⇒ auto.
   const numeric = planNumericValueAxis({
     dataMin: dMin,
     dataMax: dMax,
-    explicitMin: valueAxisUnitInRendererSpace(sec.min, percentStacked),
-    explicitMax: valueAxisUnitInRendererSpace(sec.max, percentStacked),
+    explicitMin,
+    explicitMax,
     axisLenPt: plotHeightPt,
     axisOrientation: 'vertical',
-    majorUnit: valueAxisUnitInRendererSpace(sec.majorUnit, percentStacked),
+    majorUnit,
     minorUnit: valueAxisUnitInRendererSpace(sec.minorUnit, percentStacked),
     needMinor: sec.minorGridlines === true
       || (sec.minorTickMark != null && sec.minorTickMark !== 'none'),

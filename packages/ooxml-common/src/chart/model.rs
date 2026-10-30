@@ -2230,6 +2230,10 @@ pub struct SecondaryValueAxis {
     pub tick_label_skip: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tick_mark_skip: Option<u32>,
+    /// The axis is a `<c:dateAx>` (only when used as the secondary category
+    /// axis): its categories follow its own date scale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub date_axis: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crosses: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

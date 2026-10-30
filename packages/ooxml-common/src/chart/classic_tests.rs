@@ -3032,4 +3032,37 @@ mod tests {
         assert_eq!(conflicting[0].0, "unresolved");
         assert_eq!(conflicting[1].0, "unresolved");
     }
+
+    #[test]
+    fn secondary_category_axis_reports_a_date_axis() {
+        let xml = format!(
+            r#"<c:chartSpace xmlns:c="{C_NS}"><c:chart><c:plotArea>
+              <c:lineChart><c:ser><c:idx val="0"/><c:val><c:numLit><c:ptCount val="1"/><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val></c:ser>
+                <c:axId val="10"/><c:axId val="20"/></c:lineChart>
+              <c:lineChart><c:ser><c:idx val="1"/><c:val><c:numLit><c:ptCount val="1"/><c:pt idx="0"><c:v>2</c:v></c:pt></c:numLit></c:val></c:ser>
+                <c:axId val="30"/><c:axId val="40"/></c:lineChart>
+              <c:dateAx><c:axId val="10"/><c:axPos val="b"/><c:crossAx val="20"/></c:dateAx>
+              <c:valAx><c:axId val="20"/><c:axPos val="l"/><c:crossAx val="10"/></c:valAx>
+              <c:valAx><c:axId val="40"/><c:axPos val="r"/><c:crossAx val="30"/></c:valAx>
+              <c:dateAx><c:axId val="30"/><c:delete val="1"/><c:axPos val="t"/><c:crossAx val="40"/></c:dateAx>
+            </c:plotArea></c:chart></c:chartSpace>"#,
+        );
+        let doc = chart_space_of(&xml);
+        let model = parse_chart_part(
+            doc.root_element(),
+            &ChartParseContext {
+                color_resolver: Some(&FixtureResolver),
+                ..Default::default()
+            },
+        )
+        .expect("date combo parses");
+        assert_eq!(
+            model.secondary_cat_axis.and_then(|axis| axis.date_axis),
+            Some(true)
+        );
+        assert_eq!(
+            model.secondary_val_axis.and_then(|axis| axis.date_axis),
+            None
+        );
+    }
 }
