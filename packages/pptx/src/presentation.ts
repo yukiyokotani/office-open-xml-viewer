@@ -127,6 +127,15 @@ export type LoadOptions = CoreLoadOptions & {
    */
   legacyPpt?: ModelSource<'pptx'>;
   /**
+   * Opt-in model source for OpenDocument presentation input (a `ModelSource<'pptx'>`, such as the
+   * one an OpenDocument companion package exports). It is asked after
+   * `legacyPpt`; when its `claim()` accepts the raw bytes it opens them through its
+   * own module, otherwise the ordinary OOXML path runs unchanged. A source for
+   * another format is a `TypeError`. Omitting this option imports and runs
+   * nothing extra.
+   */
+  odp?: ModelSource<'pptx'>;
+  /**
    * 'main' (default): parse in a worker, render on the main thread (current
    * behaviour). 'worker': parse AND render inside the worker; use
    * {@link PptxPresentation.renderSlideToBitmap} and paint the returned
@@ -376,7 +385,7 @@ export class PptxPresentation {
     // `fonts: [googleFonts()]` (deprecated alias, warned once per realm) and
     // `fonts` is validated. Nothing below reads `useGoogleFonts`.
     opts = normalizeFontOptions(opts);
-    if (__OOXML_MODEL_SOURCES__ && opts.legacyPpt !== undefined) {
+    if (__OOXML_MODEL_SOURCES__ && (opts.legacyPpt !== undefined || opts.odp !== undefined)) {
       const { loadPptxModelSource } = await import('./internal/presentation-model-source.js');
       return loadPptxModelSource(source, opts);
     }

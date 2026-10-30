@@ -144,7 +144,10 @@ export type {
   ModelSourceLoad,
   ModelSourceModule,
   ModelSourceModuleDescriptor,
+  ModelSourceOpenContext,
+  ModelSourceResourcePolicy,
   ModelSourceTarget,
+  ModelSourceWorksheetLimits,
   OpenedModelSource,
   OpenedModelSourceModule,
 } from './source/model-source';

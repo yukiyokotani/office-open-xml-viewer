@@ -6,6 +6,7 @@ import {
   requireModelSourceArchiveMethods,
   unsupportedModelSourceCapability,
   type ModelSourceModuleDescriptor,
+  type ModelSourceOpenContext,
   type OpenedModelSourceModule,
 } from '@silurus/ooxml-core/internal/model-source';
 import {
@@ -76,10 +77,11 @@ type OpenModelSource = (
   descriptor: ModelSourceModuleDescriptor,
   bytes: Uint8Array,
   transfer: readonly Transferable[],
+  context?: ModelSourceOpenContext,
 ) => Promise<OpenedModelSourceModule<DocxModelSourceArchive>>;
 
-const openDocxModelSource: OpenModelSource = (descriptor, bytes, transfer) =>
-  openModelSourceModule(descriptor, bytes, validateDocxModelSourceArchive, undefined, transfer);
+const openDocxModelSource: OpenModelSource = (descriptor, bytes, transfer, context) =>
+  openModelSourceModule(descriptor, bytes, validateDocxModelSourceArchive, undefined, transfer, context);
 
 interface OwnedModelSource {
   readonly archive: DocxModelSourceArchive;
@@ -120,6 +122,7 @@ export class WorkerDocumentSourceOwner<TArchive extends OoxmlWorkerDocumentArchi
     bytes: Uint8Array,
     descriptor: ModelSourceModuleDescriptor,
     transfer: readonly Transferable[] = [],
+    context?: ModelSourceOpenContext,
   ): Promise<DocxModelSourceViewDefaults> {
     if (this.modelSource || this.pending || this.ooxmlHost.archive) {
       throw new Error('Document source already loaded or opening');
@@ -127,7 +130,7 @@ export class WorkerDocumentSourceOwner<TArchive extends OoxmlWorkerDocumentArchi
     const token = {};
     this.pending = token;
     try {
-      const opened = await this.openSource(descriptor, bytes, transfer);
+      const opened = await this.openSource(descriptor, bytes, transfer, context);
       let viewDefaults: DocxModelSourceViewDefaults;
       try {
         viewDefaults = validateDocxModelSourceViewDefaults(opened.viewDefaults);

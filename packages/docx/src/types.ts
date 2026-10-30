@@ -1737,7 +1737,7 @@ export type WorkerRequest =
       id: number;
       data: ArrayBuffer;
       resourcePolicy: NormalizedOoxmlResourcePolicy;
-      /** Application-selected model source (LoadOptions.legacyDoc). */
+      /** Application-selected model source (LoadOptions.legacyDoc or odt). */
       source?: import('@silurus/ooxml-core').ModelSourceModuleDescriptor;
       sourceTransfer?: readonly Transferable[];
       sourceOwnerUrl?: string;

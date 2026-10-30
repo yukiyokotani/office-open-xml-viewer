@@ -337,6 +337,7 @@ export class PptxScrollViewer implements ZoomableViewer {
       tiff: this._opts.tiff,
       mode: this._mode,
       ...(this._opts.legacyPpt === undefined ? undefined : { legacyPpt: this._opts.legacyPpt }),
+      ...(this._opts.odp === undefined ? undefined : { odp: this._opts.odp }),
       progressiveLayout: this._opts.progressiveLayout,
       onLayoutProgress: this._opts.onLayoutProgress,
       onLayoutPartial: this._opts.onLayoutPartial,

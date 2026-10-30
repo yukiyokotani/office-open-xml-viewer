@@ -32,7 +32,7 @@ import { publishDocxLayout } from '../document-layout-events.js';
 
 
 import { DocxDocument, type DocxViewerLoadControl, type LoadOptions } from '../document.js';
-import { selectModelSource, beginModelSourceLoad, modelSourceWorker } from '@silurus/ooxml-core/internal/model-source';
+import { selectModelSource, beginModelSourceLoad, effectiveModelSources, modelSourceWorker } from '@silurus/ooxml-core/internal/model-source';
 import { deferred } from '@silurus/ooxml-core/internal/deferred';
 /** Parse-request fields for an application-selected model source. */
 function modelSourceFields(
@@ -105,10 +105,11 @@ export async function loadDocxModelSource(
     }
     checkAbort();
     // An application-supplied model source claims its input from the raw bytes
-    // before OOXML container resolution; without `legacyDoc` nothing here
-    // runs and the OOXML path below is unchanged.
-    const selected = selectModelSource(opts.legacyDoc === undefined ? undefined : [opts.legacyDoc], 'docx', new Uint8Array(buffer));
-    if (!selected) return DocxDocument.load(buffer, { ...opts, legacyDoc: undefined });
+    // before OOXML container resolution. Selection happens once: an
+    // unclaimed input continues on the OOXML path with every source option
+    // cleared, so it is never offered to the sources again.
+    const selected = selectModelSource(effectiveModelSources(opts.legacyDoc, opts.odt), 'docx', new Uint8Array(buffer));
+    if (!selected) return DocxDocument.load(buffer, { ...opts, legacyDoc: undefined, odt: undefined });
     const sourceLoad = beginModelSourceLoad(selected, 'docx');
     try {
     // Resolve the container on the main thread before spinning up the worker.

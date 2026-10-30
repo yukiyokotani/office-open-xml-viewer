@@ -1350,7 +1350,7 @@ export type WorkerRequest =
       resourcePolicy: NormalizedOoxmlResourcePolicy;
       /** Normalized worksheet admission policy. Optional for older internal requests. */
       readonly worksheetPolicy?: import('./internal/worksheet-policy.js').NormalizedXlsxWorksheetPolicy;
-      /** Application-selected model source (LoadOptions.legacyXls). */
+      /** Application-selected model source (LoadOptions.legacyXls or ods). */
       source?: import('@silurus/ooxml-core').ModelSourceModuleDescriptor;
       sourceTransfer?: readonly Transferable[];
       sourceOwnerUrl?: string;

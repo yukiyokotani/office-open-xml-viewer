@@ -49,6 +49,28 @@ describe.each([
     viewer.destroy();
   });
 
+  it('forwards odt beside legacyDoc and applies the same source view precedence to it', async () => {
+    const engine = new FakeDocxEngine(1, SIZE);
+    engine.layoutView = { showTrackedChanges: true, currentDate: 0 };
+    const load = vi.spyOn(DocxDocument, 'load').mockResolvedValue(engine.asDoc());
+    const odt = { ...source } as typeof source;
+    const viewer = create({ legacyDoc: source, odt });
+    await viewer.load(new ArrayBuffer(1));
+    const options = load.mock.calls[0]![1]!;
+    expect(options.legacyDoc).toBe(source);
+    expect(options.odt).toBe(odt);
+    expect(options).not.toHaveProperty('showTrackedChanges');
+    viewer.destroy();
+
+    const only = create({ odt });
+    await only.load(new ArrayBuffer(1));
+    expect(load.mock.lastCall![1]).toMatchObject({ odt });
+    expect(load.mock.lastCall![1]).not.toHaveProperty('legacyDoc');
+    await vi.waitFor(() => expect(engine.renderCalls.length).toBeGreaterThan(0));
+    expect(new Set(engine.renderCalls.map((call) => call.showTrackedChanges))).toEqual(new Set([renderedView]));
+    only.destroy();
+  });
+
   it('leaves an unchosen view to the document and renders the view it loaded with', async () => {
     const engine = new FakeDocxEngine(1, SIZE);
     // What a model source's markup view default leaves on the loaded document.

@@ -45,6 +45,23 @@ fn le_u64(bytes: &[u8], offset: usize) -> Option<u64> {
     ))
 }
 
+/// How a package's ZIP item names are validated and looked up. Structural
+/// validation and resource accounting are identical under both policies.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ItemNamePolicy {
+    /// OPC naming (ECMA-376 Part 2): ASCII item names (§7.3.3), unique under
+    /// part-name equivalence (§6.2.2.3: ASCII case folding and percent-encoded
+    /// unreserved characters), no part name derivable from another, and
+    /// lookups by equivalent part name.
+    #[default]
+    Opc,
+    /// Exact naming for ZIP containers whose item names are case-sensitive
+    /// strings: every name is valid UTF-8 (a non-ASCII name must also carry the
+    /// APPNOTE 4.4.4 bit-11 UTF-8 flag, since without it a reader decodes the
+    /// bytes as CP437), names are unique octet-for-octet, and lookups never fold.
+    ExactUtf8,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct NameRange {
     start: usize,
@@ -213,6 +230,7 @@ fn classic_directory(data: &[u8], eocd: usize) -> Option<CentralDirectory> {
 
 fn inspect_zip64_candidates(
     data: &[u8],
+    policy: ItemNamePolicy,
     eocd: usize,
     classic_count_on_disk: u16,
     classic_count: u16,
@@ -296,7 +314,7 @@ fn inspect_zip64_candidates(
     let Some((directory, zip64)) = resolved_directory else {
         return Ok(None);
     };
-    match inspect_central_directory(data, directory) {
+    match inspect_central_directory(data, directory, policy) {
         Ok(mut preflight) => {
             preflight.zip64_footer = Some((locator, zip64));
             Ok(Some(preflight))
@@ -306,7 +324,11 @@ fn inspect_zip64_candidates(
     }
 }
 
-fn inspect_eocd_candidate(data: &[u8], eocd: usize) -> Result<Option<ArchivePreflight>, String> {
+fn inspect_eocd_candidate(
+    data: &[u8],
+    eocd: usize,
+    policy: ItemNamePolicy,
+) -> Result<Option<ArchivePreflight>, String> {
     let Some(comment_len) = le_u16(data, eocd + 20) else {
         return Ok(None);
     };
@@ -344,6 +366,7 @@ fn inspect_eocd_candidate(data: &[u8], eocd: usize) -> Result<Option<ArchivePref
     if uses_zip64 || has_zip64_locator {
         let zip64 = inspect_zip64_candidates(
             data,
+            policy,
             eocd,
             classic_count_on_disk,
             classic_count,
@@ -358,7 +381,7 @@ fn inspect_eocd_candidate(data: &[u8], eocd: usize) -> Result<Option<ArchivePref
     let Some(directory) = classic_directory(data, eocd) else {
         return Ok(None);
     };
-    match inspect_central_directory(data, directory) {
+    match inspect_central_directory(data, directory, policy) {
         Ok(preflight) => Ok(Some(preflight)),
         Err(CandidateError::Malformed) => Ok(None),
         Err(CandidateError::Rejected(error)) => Err(error),
@@ -779,6 +802,7 @@ fn validate_central_directory_structure(
 fn inspect_central_directory(
     data: &[u8],
     directory: CentralDirectory,
+    policy: ItemNamePolicy,
 ) -> Result<ArchivePreflight, CandidateError> {
     // Establish semantic coherence before latching a resource error. A shallow
     // EOCD-looking byte sequence inside ordinary data or the real EOCD comment
@@ -825,20 +849,34 @@ fn inspect_central_directory(
     walk_central_directory(data, directory, |entry| {
         let range = entry.name;
         let name = &data[range.start..range.start + range.len];
-        if !name.is_ascii() {
+        if policy == ItemNamePolicy::ExactUtf8 {
+            let flags = le_u16(data, entry.header + 8).ok_or(CandidateError::Malformed)?;
+            if std::str::from_utf8(name).is_err() || (!name.is_ascii() && flags & (1 << 11) == 0) {
+                return Err(CandidateError::Rejected(
+                    "ZIP item names must be UTF-8 and flagged as UTF-8 when not ASCII (APPNOTE 4.4.4)"
+                        .to_string(),
+                ));
+            }
+            if !exact_names.insert(name) {
+                return Err(CandidateError::Rejected(format!(
+                    "ZIP item names must be unique: {}",
+                    String::from_utf8_lossy(name)
+                )));
+            }
+        } else if !name.is_ascii() {
             return Err(CandidateError::Rejected(
                 "OPC ZIP item names must contain only ASCII bytes (ECMA-376 Part 2, 7.3.3)"
                     .to_string(),
             ));
         }
-        if !exact_names.insert(name) {
+        if policy == ItemNamePolicy::Opc && !exact_names.insert(name) {
             return Err(CandidateError::Rejected(format!(
                 "ZIP item names must be unique: {}",
                 String::from_utf8_lossy(name)
             )));
         }
         let represents_file = !name.ends_with(b"/") && !name.ends_with(b"\\");
-        if represents_file {
+        if policy == ItemNamePolicy::Opc && represents_file {
             let key = crate::rels::part_name_equivalence_key(&String::from_utf8_lossy(name));
             if let Some(previous) = folded_names.insert(key, range) {
                 let previous_name = &data[previous.start..previous.start + previous.len];
@@ -869,7 +907,10 @@ fn inspect_central_directory(
     // ZIP item names omit the leading slash, so every internal slash is one
     // possible segment boundary at which a shorter part could end.
     for entry in &entries {
-        if entry.name.ends_with(b"/") || entry.name.ends_with(b"\\") {
+        if policy != ItemNamePolicy::Opc
+            || entry.name.ends_with(b"/")
+            || entry.name.ends_with(b"\\")
+        {
             continue;
         }
         for slash in entry
@@ -1112,15 +1153,33 @@ impl<T: AsRef<[u8]>> std::io::Seek for PackageReader<T> {
     }
 }
 
+/// OPC-policy preflight (tests).
+#[cfg(test)]
+fn preflight_archive_limits(data: &[u8]) -> Result<ArchivePreflight, String> {
+    preflight_archive_with_policy(data, ItemNamePolicy::Opc)
+}
+
 /// Validate the legal EOCD tail and walk its central directory before
 /// `zip::ZipArchive::new` allocates its filename index. Malformed/truncated
 /// metadata is left to the ZIP crate's ordinary corruption path rather than
 /// being mislabeled as a resource violation.
-fn preflight_archive_limits(data: &[u8]) -> Result<ArchivePreflight, String> {
-    inspect_archive(data)?.ok_or_else(|| "ZIP central directory preflight failed".to_string())
+fn preflight_archive_with_policy(
+    data: &[u8],
+    policy: ItemNamePolicy,
+) -> Result<ArchivePreflight, String> {
+    inspect_archive(data, policy)?
+        .ok_or_else(|| "ZIP central directory preflight failed".to_string())
 }
 
-fn inspect_archive(data: &[u8]) -> Result<Option<ArchivePreflight>, String> {
+#[cfg(test)]
+fn inspect_archive_opc(data: &[u8]) -> Result<Option<ArchivePreflight>, String> {
+    inspect_archive(data, ItemNamePolicy::Opc)
+}
+
+fn inspect_archive(
+    data: &[u8],
+    policy: ItemNamePolicy,
+) -> Result<Option<ArchivePreflight>, String> {
     const MAX_EOCD_SEARCH: usize = 22 + u16::MAX as usize;
 
     if data.len() < 22 {
@@ -1142,7 +1201,7 @@ fn inspect_archive(data: &[u8]) -> Result<Option<ArchivePreflight>, String> {
         if comment_end != data.len() {
             continue;
         }
-        if let Some(preflight) = inspect_eocd_candidate(data, eocd)? {
+        if let Some(preflight) = inspect_eocd_candidate(data, eocd, policy)? {
             if resolved.replace((eocd, preflight)).is_some() {
                 return Err("ambiguous ZIP end-of-central-directory records".to_string());
             }
@@ -1185,7 +1244,15 @@ fn validate_archive_item_names<R: std::io::Read + std::io::Seek>(
 pub(crate) fn open_validated_slice(
     data: &[u8],
 ) -> Result<zip::ZipArchive<PackageReader<&[u8]>>, String> {
-    let preflight = preflight_archive_limits(data)?;
+    open_validated_slice_with_policy(data, ItemNamePolicy::Opc)
+}
+
+/// [`open_validated_slice`] under an explicit item-name policy.
+pub(crate) fn open_validated_slice_with_policy(
+    data: &[u8],
+    policy: ItemNamePolicy,
+) -> Result<zip::ZipArchive<PackageReader<&[u8]>>, String> {
+    let preflight = preflight_archive_with_policy(data, policy)?;
     open_preflighted(preflight, data)
 }
 
@@ -2196,7 +2263,7 @@ mod tests {
             }
             let mut archive = zip::ZipArchive::new(Cursor::new(bytes.as_slice())).unwrap();
             validate_archive_item_names(&bytes, &mut archive).unwrap();
-            assert_eq!(inspect_archive(&bytes).unwrap().unwrap().entry_count, 2);
+            assert_eq!(inspect_archive_opc(&bytes).unwrap().unwrap().entry_count, 2);
         }
     }
 
@@ -2730,6 +2797,22 @@ mod tests {
             assert!(!error.starts_with("OOXML_RESOURCE_LIMIT:"));
             assert!(governor.first_error().is_none());
         }
+    }
+
+    #[test]
+    fn exact_name_policy_requires_flagged_utf8_for_non_ascii_names() {
+        // Non-ASCII bytes without the APPNOTE bit-11 flag, and invalid UTF-8.
+        for replacement in [b"\xc3\xa9rd/a.xml".as_slice(), b"\xfford/a.xml".as_slice()] {
+            let mut bytes = zip_bytes(false);
+            replace_raw_name(&mut bytes, replacement);
+            let error =
+                preflight_archive_with_policy(&bytes, ItemNamePolicy::ExactUtf8).unwrap_err();
+            assert!(error.contains("UTF-8"), "{error}");
+            assert!(!error.starts_with("OOXML_RESOURCE_LIMIT:"));
+        }
+        assert!(
+            preflight_archive_with_policy(&zip_bytes(false), ItemNamePolicy::ExactUtf8).is_ok()
+        );
     }
 
     #[test]
