@@ -130,6 +130,8 @@ pub fn read(package: &OdfPackage) -> Result<Document, String> {
         chains: HashMap::new(),
         text_chains: HashMap::new(),
         cascade_work: Cell::new(0),
+        area: 0,
+        next_area: 0,
         break_layout_work: 0,
         page_master: page.name.as_str(),
         paragraphs: Vec::new(),
@@ -700,6 +702,9 @@ struct Collected {
     /// The named (common) style compared by contextual spacing, by identity
     /// (common styles are unique per family and name).
     named_style: Option<*const Style>,
+    /// The content area (body or `text:section`) holding the paragraph:
+    /// §20.255 suppresses spacing only within one content area.
+    area: u32,
     page_break_after: bool,
 }
 
@@ -712,6 +717,9 @@ struct Reader<'a> {
     /// Each applied text style's checked parent chain, by style identity.
     text_chains: HashMap<*const Style, Rc<[StyleRef<'a>]>>,
     cascade_work: Cell<usize>,
+    /// The current content area and the last one assigned.
+    area: u32,
+    next_area: u32,
     break_layout_work: usize,
     page_master: &'a str,
     paragraphs: Vec<Collected>,
@@ -793,7 +801,11 @@ impl<'a> Reader<'a> {
                             _ => return Err(unsupported("section")),
                         }
                     }
-                    self.walk_blocks(node, depth + 1)?
+                    let enclosing = self.area;
+                    self.next_area += 1;
+                    self.area = self.next_area;
+                    self.walk_blocks(node, depth + 1)?;
+                    self.area = enclosing;
                 }
                 _ => return Err(unsupported("body-element")),
             }
@@ -867,6 +879,7 @@ impl<'a> Reader<'a> {
             return Err(unsupported("contextual-spacing-version"));
         }
         collected.named_style = named_style;
+        collected.area = self.area;
         collected.paragraph.page_break_before |= page_break_before;
         collected.paragraph.outline_level = outline_level.map(|level| level.saturating_sub(1));
 
@@ -1283,8 +1296,9 @@ impl<'a> Reader<'a> {
                 None => collected.top,
                 Some(_) if paragraph.page_break_before => collected.top,
                 Some(ref prev) => {
-                    let same =
-                        prev.named_style.is_some() && prev.named_style == collected.named_style;
+                    let same = prev.area == collected.area
+                        && prev.named_style.is_some()
+                        && prev.named_style == collected.named_style;
                     if same && prev.contextual != collected.contextual {
                         return Err(unsupported("contextual-spacing-mixed"));
                     }
@@ -1401,7 +1415,13 @@ impl RunProperties {
         let family = face.family.clone();
         let size = match scripted("font-size") {
             Some(value) if value.ends_with('%') => return Err(unsupported("relative-font-size")),
-            Some(value) => length_pt(value)?,
+            // A positiveLength (§20.190). LibreOffice renders sizes below
+            // 1 pt as 1 pt (measured); that normalization is not adopted, so
+            // they reject.
+            Some(value) => match length_pt(value)? {
+                size if size >= 1.0 && size.is_finite() => size,
+                _ => return Err(unsupported("font-size-range")),
+            },
             // ODF defines no initial font size; LibreOffice's default styles
             // always set one.
             None => return Err(unsupported("font-size-unresolved")),
@@ -1888,6 +1908,7 @@ fn paragraph_properties(cascade: &Cascade<'_>) -> Result<Collected, String> {
         bottom: length("margin-bottom")?,
         contextual: cascade.get(NS_STYLE, "contextual-spacing") == Some("true"),
         named_style: None,
+        area: 0,
         page_break_after: breaking("break-after")?,
     })
 }
@@ -2692,6 +2713,67 @@ mod tests {
             unsupported("justify-with-line-break")
         );
         assert!(read(r#"<text:p text:style-name="J">alpha beta gamma delta</text:p>"#).is_ok());
+    }
+
+    #[test]
+    fn contextual_spacing_stays_within_a_content_area() {
+        let styles = r#"<style:style style:name="C" style:family="paragraph"><style:paragraph-properties fo:margin-top="10pt" fo:margin-bottom="20pt" style:contextual-spacing="true"/></style:style>"#;
+        let gaps = |body: &str| -> Vec<f64> {
+            let document = read_fixture(Fixture {
+                styles,
+                body,
+                ..Fixture::default()
+            })
+            .unwrap();
+            paragraphs(&document)
+                .iter()
+                .map(|p| p.space_before)
+                .collect()
+        };
+        let p = r#"<text:p text:style-name="C">x</text:p>"#;
+        assert_eq!(gaps(&format!("{p}{p}")), [10.0, 0.0]);
+        // Entering, leaving and nested sections are other content areas.
+        assert_eq!(
+            gaps(&format!(
+                "{p}<text:section text:name=\"s\">{p}</text:section>"
+            )),
+            [10.0, 30.0]
+        );
+        assert_eq!(
+            gaps(&format!(
+                "<text:section text:name=\"s\">{p}</text:section>{p}"
+            )),
+            [10.0, 30.0]
+        );
+        assert_eq!(
+            gaps(&format!("<text:section text:name=\"a\">{p}<text:section text:name=\"b\">{p}</text:section>{p}</text:section>")),
+            [10.0, 30.0, 30.0]
+        );
+        assert_eq!(
+            gaps(&format!(
+                "<text:section text:name=\"s\">{p}{p}</text:section>"
+            )),
+            [10.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn rejects_font_sizes_below_one_point() {
+        for size in ["0pt", "-12pt", "0.01pt", "0.99pt"] {
+            let styles = format!(
+                r#"<style:style style:name="T" style:family="text"><style:text-properties fo:font-size="{size}"/></style:style>"#
+            );
+            assert_eq!(
+                read_fixture(Fixture {
+                    styles: &styles,
+                    body: r#"<text:p>a<text:span text:style-name="T">b</text:span></text:p>"#,
+                    ..Fixture::default()
+                })
+                .unwrap_err(),
+                unsupported("font-size-range"),
+                "{size}"
+            );
+        }
     }
 
     #[test]
