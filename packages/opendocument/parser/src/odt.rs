@@ -133,6 +133,15 @@ pub fn read(package: &OdfPackage) -> Result<Document, String> {
         contextual_spacing_defined,
     };
     reader.walk_blocks(body, 0)?;
+    // The font table and its three metadata maps each copy a used family
+    // name; charged before they are built.
+    let font_table_bytes = reader
+        .used_faces
+        .borrow()
+        .iter()
+        .map(|face| 4 * (face.family.len() + 64))
+        .sum::<usize>();
+    reader.charge_construction(font_table_bytes)?;
     let used = used_font_table(&reader.used_faces.borrow())?;
     let body = reader.finish()?;
 
@@ -1066,24 +1075,29 @@ impl<'a> Reader<'a> {
         let mut cache: HashMap<(u32, ScriptClass), RunProperties> = HashMap::new();
         let mut uniform: HashMap<u32, ScriptClass> = HashMap::new();
         let mut current: Option<(u32, ScriptClass)> = None;
-        // Line breaks not yet preceded by a text run, checked against the next.
-        let mut pending_breaks: Vec<(u32, ScriptClass)> = Vec::new();
         // Breaks since the last text run: each scans back past them.
         let mut breaks_since_text = 0usize;
         for &token in tokens {
             let (c, context) = match token {
                 Token::LineBreak(context) => {
                     // LibreOffice sizes a break's line portion by the break's
-                    // own font (measured); the DOCX layout by the nearest text
-                    // run, preceding first, else following. They agree only
-                    // when those fonts have the same line metrics.
+                    // own font (measured); the DOCX layout by the nearest
+                    // preceding text run. They agree only when those fonts
+                    // have the same line metrics.
                     let key = (context, ScriptClass::Latin);
                     if let std::collections::hash_map::Entry::Vacant(entry) = cache.entry(key) {
                         entry.insert(self.run_properties(contexts, context, key.1)?);
                     }
+                    // A line holding only a break (leading, consecutive or
+                    // trailing breaks) gets synthetic metrics in the DOCX
+                    // layout, unlike LibreOffice's full line (measured), so
+                    // a break needs text on both sides.
+                    if breaks_since_text > 0 {
+                        return Err(unsupported("line-break-empty-line"));
+                    }
                     match current {
                         Some(text) => same_line_metrics(&cache[&key], &cache[&text])?,
-                        None => pending_breaks.push(key),
+                        None => return Err(unsupported("line-break-empty-line")),
                     }
                     self.break_layout_work = self
                         .break_layout_work
@@ -1126,9 +1140,6 @@ impl<'a> Reader<'a> {
             if let std::collections::hash_map::Entry::Vacant(entry) = cache.entry(key) {
                 entry.insert(self.run_properties(contexts, context, class)?);
             }
-            for pending in pending_breaks.drain(..) {
-                same_line_metrics(&cache[&pending], &cache[&key])?;
-            }
             breaks_since_text = 0;
             let continues = match (current, paragraph.runs.last_mut()) {
                 (Some(last_key), Some(DocRun::Text(last))) if cache[&last_key] == cache[&key] => {
@@ -1145,9 +1156,8 @@ impl<'a> Reader<'a> {
             }
             current = Some(key);
         }
-        if !pending_breaks.is_empty() {
-            // Without text the DOCX layout sizes breaks by a fixed fallback.
-            return Err(unsupported("line-break-without-text"));
+        if breaks_since_text > 0 {
+            return Err(unsupported("line-break-empty-line"));
         }
         Ok(())
     }
@@ -2439,9 +2449,12 @@ mod tests {
         // Every line break is a retained run and costs downstream layout work;
         // either bound stops a break flood.
         let breaks = MAX_CONSTRUCTION_BYTES / std::mem::size_of::<DocRun>() + 1;
-        let paragraph = format!("<text:p>x{}</text:p>", "<text:line-break/>".repeat(900_000));
+        let paragraph = format!(
+            "<text:p>x{}</text:p>",
+            "<text:line-break/>x".repeat(400_000)
+        );
         let error = read_fixture(Fixture {
-            body: &paragraph.repeat(breaks / 900_000 + 1),
+            body: &paragraph.repeat(breaks / 400_000 + 1),
             ..Fixture::default()
         })
         .unwrap_err();
@@ -2513,40 +2526,70 @@ mod tests {
             r#"<text:p>A<text:span text:style-name="Bold"><text:line-break/></text:span>B</text:p>"#
         )
         .is_ok());
-        // Before any text, the following run decides.
-        assert!(read(r#"<text:p><text:line-break/>B</text:p>"#).is_ok());
         assert_eq!(
-            read(r#"<text:p>A<text:span text:style-name="Big"><text:line-break/><text:line-break/></text:span>B</text:p>"#).unwrap_err(),
+            read(r#"<text:p>A<text:span text:style-name="Big"><text:line-break/></text:span>B</text:p>"#).unwrap_err(),
             unsupported("line-break-formatting")
         );
-        assert_eq!(
-            read(r#"<text:p><text:span text:style-name="Big"><text:line-break/></text:span>B</text:p>"#).unwrap_err(),
-            unsupported("line-break-formatting")
-        );
-        assert_eq!(
-            read(r#"<text:p><text:line-break/></text:p>"#).unwrap_err(),
-            unsupported("line-break-without-text")
-        );
+        // A line holding only a break: leading, consecutive or trailing.
+        for body in [
+            "<text:p><text:line-break/>B</text:p>",
+            "<text:p>A<text:line-break/><text:line-break/>B</text:p>",
+            "<text:p>A<text:line-break/></text:p>",
+            "<text:p><text:line-break/></text:p>",
+        ] {
+            assert_eq!(
+                read(body).unwrap_err(),
+                unsupported("line-break-empty-line"),
+                "{body}"
+            );
+        }
     }
 
     #[test]
     fn consecutive_line_breaks_are_charged_for_downstream_layout() {
-        // 12,000 consecutive breaks cost ~72M units in the DOCX line breaker.
-        let body = format!("<text:p>x{}</text:p>", "<text:line-break/>".repeat(12_000));
+        // 12,000 breaks between text cost ~144M units in the DOCX line
+        // breaker's run-index search.
+        let body = format!("<text:p>x{}</text:p>", "<text:line-break/>x".repeat(12_000));
         let error = read_fixture(Fixture {
             body: &body,
             ..Fixture::default()
         })
         .unwrap_err();
         assert!(error.contains("line break layout limit"), "{error}");
-        // Text between breaks still leaves the run-index search, so a
-        // paragraph's break cost grows with its run count.
         let body = format!("<text:p>x{}</text:p>", "<text:line-break/>x".repeat(3_000));
         assert!(read_fixture(Fixture {
             body: &body,
             ..Fixture::default()
         })
         .is_ok());
+    }
+
+    #[test]
+    fn the_font_table_is_charged_against_the_construction_limit() {
+        // Six 6 MiB families: their runs (four copies each) fit, but the font
+        // table and its metadata maps copy every used family four more times.
+        let families: Vec<String> = (0..6)
+            .map(|i| format!("{i}{}", "F".repeat(6 << 20)))
+            .collect();
+        let faces: String = families
+            .iter()
+            .enumerate()
+            .map(|(i, family)| format!(r#"<style:font-face style:name="L{i}" svg:font-family="'{family}'" style:font-family-generic="roman"/>"#))
+            .collect();
+        let styles: String = (0..6)
+            .map(|i| format!(r#"<style:style style:name="S{i}" style:family="text"><style:text-properties style:font-name="L{i}" style:font-name-asian="L{i}" style:font-name-complex="L{i}"/></style:style>"#))
+            .collect();
+        let body: String = (0..6)
+            .map(|i| format!(r#"<text:p><text:span text:style-name="S{i}">x</text:span></text:p>"#))
+            .collect();
+        let error = read_fixture(Fixture {
+            faces: &faces,
+            styles: &styles,
+            body: &body,
+            ..Fixture::default()
+        })
+        .unwrap_err();
+        assert!(error.contains("construction limit"), "{error}");
     }
 
     #[test]

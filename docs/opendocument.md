@@ -64,7 +64,8 @@ external resources.
 Currently admitted:
 
 - paragraphs, headings (without heading numbering), plain sections, spans,
-  spaces, tabs (in paragraphs without an indent) and line breaks;
+  spaces, tabs (in paragraphs without an indent) and line breaks between
+  text set in the same font;
 - page size and margins of a single page style without displayed headers or
   footers;
 - paragraph indents, alignment, page breaks, keep-with-next /
