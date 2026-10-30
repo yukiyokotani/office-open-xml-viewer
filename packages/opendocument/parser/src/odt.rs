@@ -2470,11 +2470,11 @@ mod tests {
 
     #[test]
     fn style_identifiers_and_expanded_names_are_charged() {
-        // A namespace URI declared once but expanded into every stored
-        // attribute key of many unused styles.
-        let namespace = format!("urn:x:{}", "n".repeat(64 * 1024));
-        let unused: String = (0..1100)
-            .map(|i| format!(r#"<style:style style:name="U{i}" style:family="paragraph" xmlns:x="{namespace}" x:a="1"/>"#))
+        // A namespace URI expanded into every stored attribute key of many
+        // unused styles.
+        let namespace = format!("urn:x:{}", "n".repeat(4000));
+        let unused: String = (0..8000)
+            .map(|i| format!(r#"<style:style style:name="U{i}" style:family="paragraph" xmlns:x="{namespace}" x:a="1" x:b="1"/>"#))
             .collect();
         let error = read_fixture(Fixture {
             styles: &unused,

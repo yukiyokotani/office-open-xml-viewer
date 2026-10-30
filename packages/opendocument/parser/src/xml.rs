@@ -27,11 +27,21 @@ pub const MAX_ATTRIBUTES_PER_ELEMENT: usize = 256;
 pub const MAX_NAMESPACES_IN_SCOPE: usize = 256;
 /// Implementation bound on element nesting.
 pub const MAX_XML_DEPTH: usize = 1024;
+/// Implementation bounds on identifier lengths: a qualified element or
+/// attribute name, and a declared namespace URI. The parser compares these
+/// strings byte by byte, so their lengths weight its work.
+pub const MAX_NAME_BYTES: usize = 1024;
+pub const MAX_NAMESPACE_URI_BYTES: usize = 4096;
 /// Implementation bound on one part's parsing work, in units of the DOM
 /// parser's own costs: every attribute is checked against the element's
 /// other attributes (a² per element), every element and attribute name is
-/// resolved against the namespaces in scope, and character data merged
-/// across adjacent CDATA sections is copied again at each section.
+/// resolved against (and declarations deduplicated with) the namespaces in
+/// scope, and character data merged across adjacent CDATA sections is copied
+/// again at each section. The name and namespace operations compare strings,
+/// so they are weighted by one unit per 64 bytes of the longest qualified
+/// name in the element plus the longest namespace binding declared so far.
+/// An element that declares namespaces also checks each inherited binding
+/// against those in scope ((n + 1)² per such element).
 pub const MAX_XML_WORK: usize = 512 * 1024 * 1024;
 /// Implementation bound on the DOM parser's up-front reservation: it reserves
 /// one node per `<` byte and one attribute per `=` byte of the whole part.
@@ -63,6 +73,8 @@ fn preflight(text: &str) -> Result<(), String> {
     // Namespace declarations per open element, and their running total.
     let mut scopes: Vec<usize> = Vec::new();
     let mut in_scope = 0usize;
+    // The longest namespace binding (prefix and URI) declared so far.
+    let mut binding_max = 0usize;
     // Where the current run of character data (text and CDATA) began.
     let mut text_start = 0usize;
     let mut i = 0usize;
@@ -103,12 +115,30 @@ fn preflight(text: &str) -> Result<(), String> {
                 let mut token: Option<usize> = Some(i);
                 let mut last: (usize, usize) = (i, i);
                 let mut self_closing = false;
+                let mut closed = false;
+                let mut name_max = 0usize;
+                // A declaration's prefix length while its value is pending,
+                // and where its quoted value started.
+                let mut binding: Option<usize> = None;
+                let mut value_start = 0usize;
                 while let Some(&b) = bytes.get(i) {
                     match quote {
-                        Some(q) if b == q => quote = None,
+                        Some(q) if b == q => {
+                            quote = None;
+                            if let Some(prefix) = binding.take() {
+                                let uri = i - value_start;
+                                if uri > MAX_NAMESPACE_URI_BYTES {
+                                    return Err(XML_LIMIT.to_string());
+                                }
+                                binding_max = binding_max.max(prefix + uri);
+                            }
+                        }
                         Some(_) => {}
                         None => match b {
-                            b'"' | b'\'' => quote = Some(b),
+                            b'"' | b'\'' => {
+                                quote = Some(b);
+                                value_start = i + 1;
+                            }
                             b'=' => {
                                 if let Some(start) = token.take() {
                                     last = (start, i);
@@ -117,14 +147,19 @@ fn preflight(text: &str) -> Result<(), String> {
                                 let name = &bytes[last.0..last.1];
                                 if name == b"xmlns" || name.starts_with(b"xmlns:") {
                                     declarations += 1;
+                                    binding = Some(name.len());
                                 }
                                 last = (i, i);
                             }
-                            b'>' => break,
+                            b'>' => {
+                                closed = true;
+                                break;
+                            }
                             b'/' => self_closing = true,
                             b if b.is_ascii_whitespace() => {
                                 if let Some(start) = token.take() {
                                     last = (start, i);
+                                    name_max = name_max.max(i - start);
                                 }
                             }
                             _ => {
@@ -135,7 +170,17 @@ fn preflight(text: &str) -> Result<(), String> {
                             }
                         },
                     }
+                    if let Some(start) = token {
+                        if i + 1 - start > MAX_NAME_BYTES {
+                            return Err(XML_LIMIT.to_string());
+                        }
+                        name_max = name_max.max(i + 1 - start);
+                    }
                     i += 1;
+                }
+                if !closed {
+                    // An unterminated tag: the parser rejects the part.
+                    return Ok(());
                 }
                 i += 1;
                 text_start = i;
@@ -146,7 +191,19 @@ fn preflight(text: &str) -> Result<(), String> {
                 {
                     return Err(XML_LIMIT.to_string());
                 }
-                charge(attributes * attributes + (attributes + 1) * (in_scope + 1))?;
+                let weight = 1 + (name_max + binding_max) / 64;
+                // An element that declares namespaces also copies each
+                // inherited binding after checking it against every binding
+                // in scope (n² prefix comparisons).
+                let inherited = if declarations > 0 {
+                    (in_scope + 1) * (in_scope + 1)
+                } else {
+                    0
+                };
+                charge(
+                    (attributes * attributes + (attributes + 1) * (in_scope + 1) + inherited)
+                        .saturating_mul(weight),
+                )?;
                 if self_closing {
                     in_scope -= declarations;
                 } else {
@@ -231,6 +288,52 @@ mod tests {
         let cdata = format!("<r>{}</r>", "<![CDATA[xxxxxxxx]]>".repeat(40_000));
         assert_eq!(preflight(&cdata).unwrap_err(), XML_LIMIT);
         assert!(preflight(&format!("<r>{}</r>", "<![CDATA[x]]><e/>".repeat(40_000))).is_ok());
+        // Truncated markup is left to the parser and rejects without a panic.
+        for truncated in [
+            "<manifest",
+            "<r a=\"1",
+            "<r a='1' ",
+            "<r><![CDATA[x",
+            "<r><!-- x",
+            "<",
+            "<r/><",
+        ] {
+            assert!(parse(truncated).is_err(), "{truncated}");
+        }
+        // Identifier lengths are bounded and weight the comparisons.
+        let long_name = format!("<r {}=\"1\"/>", "a".repeat(MAX_NAME_BYTES + 1));
+        assert_eq!(parse(&long_name).unwrap_err(), XML_LIMIT);
+        let long_uri = format!(
+            "<r xmlns:p=\"{}\"/>",
+            "u".repeat(MAX_NAMESPACE_URI_BYTES + 1)
+        );
+        assert_eq!(parse(&long_uri).unwrap_err(), XML_LIMIT);
+        let uri = "u".repeat(MAX_NAMESPACE_URI_BYTES);
+        let element = format!(
+            "<e {}/>",
+            (0..64)
+                .map(|i| format!(r#"p:a{i}="1""#))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        let weighted = format!(r#"<r xmlns:p="{uri}">{}</r>"#, element.repeat(2000));
+        assert_eq!(preflight(&weighted).unwrap_err(), XML_LIMIT);
+        let short = format!(r#"<r xmlns:p="urn:p">{}</r>"#, element.repeat(2000));
+        assert!(preflight(&short).is_ok());
+        // Elements redeclaring under many inherited bindings.
+        let bindings: String = (0..128)
+            .map(|i| format!(r#" xmlns:{}{i}="urn:{i}""#, "p".repeat(1000)))
+            .collect();
+        let redeclaring = format!(
+            r#"<r{bindings}>{}</r>"#,
+            r#"<e xmlns:q="urn:q"/>"#.repeat(4000)
+        );
+        assert_eq!(preflight(&redeclaring).unwrap_err(), XML_LIMIT);
+        // No prefix of a document makes the scan panic.
+        let sample = r#"<?xml version="1.0"?><r xmlns:p = 'urn:p' a="x=y>/"><!-- c --><p:e b='1'/><![CDATA[d]]>t</r>"#;
+        for end in 0..=sample.len() {
+            let _ = parse(&sample[..end]);
+        }
         // Siblings release their declarations.
         let siblings: String = (0..1000)
             .map(|i| format!(r#"<e xmlns:p="urn:{i}"/>"#))
