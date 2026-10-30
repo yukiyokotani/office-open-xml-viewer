@@ -209,6 +209,8 @@ async function acquireOne(
   signal: AbortSignal,
   holder: object,
 ): Promise<FaceAcquisition> {
+  // A requester that already left starts nothing and takes no hold.
+  if (signal.aborted) return { reason: 'timed out' };
   const key = `${credentials}\u0000${url}`;
   let entry = entries.get(key);
   if (!entry) {
@@ -387,6 +389,9 @@ export async function acquireResolverFacesInRealm(
     const reason = failures?.get(faceAcquisitionFailureKey(sourceId, url));
     if (reason !== undefined) return { reason };
     if (!failures?.has(faceAcquisitionSuccessKey(sourceId, url))) return undefined;
+    // A requester that is gone (cancelled, released) takes no hold it could
+    // never return; it receives no bytes either.
+    if (cancelled) return { reason: 'timed out' };
     const data = keptAcquisition(url, credentials, context.holder);
     return data ? { data } : undefined;
   };

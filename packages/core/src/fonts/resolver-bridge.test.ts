@@ -1092,6 +1092,42 @@ describe('fontResolver bridge: the page fetches resolver URLs', () => {
     main.releaseAcquiredFaces(live);
   });
 
+  it('takes no hold for a released requester that adopts the document\'s bytes', async () => {
+    // Two XLSX viewer-realm sessions of one document share a download and
+    // the outcome record. The first is released somewhere between the
+    // download settling and its continuation, while the second records the
+    // success the first then finds: whichever microtask the release lands
+    // in, nothing stays held once both sessions are released.
+    for (let delay = 0; delay < 16; delay++) {
+      const failures = new Map<string, string>();
+      const url = `https://fonts.app.example/adopt-${delay}.woff2`;
+      const source = fontResolver(() => [{ family: 'Private Face', url }]);
+      let first: FontSourceSession | undefined;
+      G.fetch = vi.fn(async () => ({
+        ok: true, status: 200,
+        arrayBuffer: async () => {
+          let step: Promise<void> = Promise.resolve();
+          for (let index = 0; index < delay; index++) step = step.then(() => undefined);
+          void step.then(() => first?.release());
+          return new Uint8Array(16).buffer;
+        },
+      }));
+      const [a, b] = [fakeSet(), fakeSet()].map((set) => new main.FontSourceSession({
+        sources: [source], fontSet: asSet(set), resolverFailures: failures,
+        acquireResolverFaces: main.inRealmResolverFaceAcquirer(failures),
+      }));
+      first = a;
+      sessions.push(a, b);
+      // The second session's continuation runs ahead of the first's.
+      const second = b.ensure(demand(['Private Face']));
+      await Promise.all([a.ensure(demand(['Private Face'])).catch(() => undefined), second]);
+      b.release();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(main.acquiredFaceCount(), `delay ${delay}`).toBe(0);
+      expect(main.retainedFontSourceBytes(), `delay ${delay}`).toBe(0);
+    }
+  });
+
   it('adopts bytes another requester of the document received', async () => {
     installFetch({ 'https://fonts.app.example/private-400.woff2': { bytes: 16 } });
     const failures = new Map<string, string>();
