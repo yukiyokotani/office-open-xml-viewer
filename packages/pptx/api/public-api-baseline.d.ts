@@ -1170,6 +1170,11 @@ export interface EquationRun {
     fontSize?: number | null;
     color?: string | null;
 }
+export type ErrorPlaceholderOption<F> = ErrorPlaceholderText | ((failure: Readonly<F>) => ErrorPlaceholderText | undefined);
+export interface ErrorPlaceholderText {
+    readonly title?: string;
+    readonly detail?: string | null;
+}
 type ExtensibleLiteral<Known extends string> = Known | (string & Record<never, never>);
 export type Fill = SolidFill | NoFill | GradientFill | PatternFill | ImageFill;
 export interface FillRect {
@@ -1844,10 +1849,17 @@ export interface PptxHighlightMatch {
 export interface PptxMatchLocation {
     slide: number;
 }
+export interface PptxPartFailure {
+    readonly kind: 'slide';
+    readonly slideIndex: number;
+    readonly slideNumber: number;
+    readonly message: string;
+}
 export class PptxPresentation {
     static load(source: string | ArrayBuffer, opts?: LoadOptions): Promise<PptxPresentation>;
     get slideCount(): number;
     get availableSlideCount(): number;
+    get partFailures(): readonly PptxPartFailure[];
     get layoutComplete(): boolean;
     waitUntilLayoutComplete(): Promise<void>;
     get slideWidth(): number;
@@ -1877,6 +1889,7 @@ export class PptxScrollViewer implements ZoomableViewer {
     constructor(container: HTMLElement, opts?: PptxScrollViewerOptions);
     load(source: string | ArrayBuffer): Promise<void>;
     get slideCount(): number;
+    get partFailures(): readonly PptxPartFailure[];
     get availableSlideCount(): number;
     get layoutComplete(): boolean;
     waitUntilLayoutComplete(): Promise<void>;
@@ -1929,6 +1942,8 @@ export interface PptxScrollViewerOptions extends Pick<RenderSlideOptions, 'width
     onVisibleSlideChange?: (topIndex: number, total: number, layoutComplete: boolean) => void;
     onScaleChange?: (scale: number) => void;
     onError?: (err: Error) => void;
+    errorPlaceholder?: ErrorPlaceholderOption<PptxPartFailure>;
+    onPartFailure?: (failure: Readonly<PptxPartFailure>) => void;
     onHyperlinkClick?: (target: HyperlinkTarget) => void;
     enableHyperlinks?: boolean;
 }
@@ -1997,6 +2012,7 @@ export class PptxViewer implements ZoomableViewer {
     get visibleSlideCount(): number;
     get slideIndex(): number;
     get slideCount(): number;
+    get partFailures(): readonly PptxPartFailure[];
     get availableSlideCount(): number;
     get layoutComplete(): boolean;
     waitUntilLayoutComplete(): Promise<void>;
@@ -2020,6 +2036,8 @@ export class PptxViewer implements ZoomableViewer {
 export interface PptxViewerOptions extends Pick<RenderOptions, 'width' | 'dpr' | 'imageResources'>, LoadOptions {
     onSlideChange?: (index: number, total: number, layoutComplete: boolean) => void;
     onError?: (err: Error) => void;
+    errorPlaceholder?: ErrorPlaceholderOption<PptxPartFailure>;
+    onPartFailure?: (failure: Readonly<PptxPartFailure>) => void;
     zoomMin?: number;
     zoomMax?: number;
     onScaleChange?: (scale: number) => void;
@@ -2093,6 +2111,7 @@ export interface RenderSlideOptions {
     onTextRun?: TextRunCallback;
     skipMediaControls?: boolean;
     dim?: DimOptions;
+    errorPlaceholder?: ErrorPlaceholderOption<PptxPartFailure>;
 }
 export interface RenderSlideToBitmapOptions {
     width?: number;
@@ -2100,6 +2119,7 @@ export interface RenderSlideToBitmapOptions {
     imageResources?: ImageResourceOptions;
     dim?: DimOptions;
     onTextRun?: TextRunCallback;
+    errorPlaceholder?: ErrorPlaceholderOption<PptxPartFailure>;
 }
 export interface Rot3d {
     lat: number;
@@ -2250,6 +2270,7 @@ export type SlideRenderOptions = RenderOptions & {
     chartEx?: ChartExRenderer;
     tiff?: TiffRenderer;
     dim?: DimOptions;
+    errorPlaceholder?: ErrorPlaceholderOption<PptxPartFailure>;
 };
 export interface SoftEdge {
     radius: number;
