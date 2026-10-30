@@ -1,3 +1,4 @@
+import { pptxPartFailureLog } from './part-failures.js';
 import { vi } from 'vitest';
 import type { PptxPresentation, PresentSlideOptions, RenderSlideOptions, RenderSlideToBitmapOptions } from './presentation';
 import type { PresentationHandle } from './presentation-handle';
@@ -384,6 +385,9 @@ export interface PresentationCall extends RenderCall {
  *  observable. */
 export class FakePptxEngine {
   destroyed = false;
+  /** #1974 — the engine's failure log, as a real presentation holds it. */
+  get _partFailureLog() { return pptxPartFailureLog(this); }
+  get partFailures() { return this._partFailureLog.list; }
   renderCalls: RenderCall[] = [];
   bitmapCalls: RenderCall[] = [];
   presentationCalls: PresentationCall[] = [];

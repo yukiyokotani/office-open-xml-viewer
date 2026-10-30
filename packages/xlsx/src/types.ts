@@ -33,7 +33,8 @@ export interface Workbook {
    *  offending part (e.g. `"xl/sharedStrings.xml: <detail>"`) so the loss is
    *  surfaced instead of silent, while every sheet still renders its non-string
    *  content. Absent (`undefined`) when every shared part read cleanly. Input that
-   *  is not a SpreadsheetML package is rejected with `OoxmlError('not-ooxml')`. */
+   *  is not a SpreadsheetML package is rejected with `OoxmlError('not-ooxml')`.
+   *  Also listed by `XlsxWorkbook.partFailures` as `kind: 'workbook'` (#1974). */
   parseError?: string;
 }
 
@@ -199,7 +200,8 @@ export interface Worksheet {
    *  read/parsed. The workbook still opens with the OTHER sheets intact; this one
    *  is an empty placeholder (`rows` empty) whose `parseError` names the offending
    *  part (e.g. `"xl/worksheets/sheet3.xml: <detail>"`). Absent (`undefined`) for
-   *  every healthy sheet. The renderer paints a visible error overlay. */
+   *  every healthy sheet. The renderer paints a visible error overlay. Also
+   *  listed by `XlsxWorkbook.partFailures` once the sheet is loaded (#1974). */
   parseError?: string;
 }
 
@@ -1280,6 +1282,14 @@ export interface XlsxRenderViewportOptions {
   selectedRowRange?: { start: number; end: number; strong: boolean } | null;
   /** Same shape as selectedRowRange, for column headers. */
   selectedColRange?: { start: number; end: number; strong: boolean } | null;
+  /**
+   * Replacement text for the `Sheet "…" could not be displayed` placeholder of
+   * a sheet whose part failed to parse (see {@link XlsxWorkbook.partFailures}).
+   * Static text, or a function of the failure evaluated on the main thread
+   * (also in worker mode; it may run on every repaint of that sheet, so keep
+   * it cheap and pure). Ignored for healthy sheets and dialogsheets.
+   */
+  errorPlaceholder?: import('@silurus/ooxml-core').ErrorPlaceholderOption<import('./part-failures').XlsxSheetPartFailure>;
 }
 
 /** @internal Resolved host CSS colors for Viewer-owned worksheet chrome. */
@@ -1327,6 +1337,8 @@ export interface RenderViewportOptions extends XlsxRenderViewportOptions {
   regionMap?: ChartRegionMapRenderer;
   /** @internal Optional Microsoft ChartEx renderer. */
   chartEx?: ChartExRenderer;
+  /** @internal Placeholder text resolved on the main thread (#1974). */
+  errorPlaceholderText?: import('@silurus/ooxml-core/internal/part-failures').WireErrorPlaceholder;
 }
 
 export type WorkerRequest =

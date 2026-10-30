@@ -155,6 +155,9 @@ export type {
   ModelSourceTarget,
   OpenedModelSource,
 } from '@silurus/ooxml-core';
+// #1974 — failed package parts and the placeholder text option.
+export type { ErrorPlaceholderOption, ErrorPlaceholderText } from '@silurus/ooxml-core';
+export type { PptxPartFailure } from './part-failures';
 // Typed load-time error surfaced by PptxPresentation.load (e.g. a
 // password-protected or legacy-binary .ppt file). Re-exported so
 // `@silurus/ooxml/pptx` consumers can narrow on `err.code`.

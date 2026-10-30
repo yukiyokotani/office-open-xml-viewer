@@ -130,6 +130,41 @@ const VIEWER_ON_ERROR = {
   detailsHref: '/errors#delivery',
   detailsLabel: 'Error reference',
 };
+
+/** #1974 — failed package parts and the placeholder text option. */
+const PART_FAILURE_TYPES = {
+  docx: { failure: 'DocxPartFailure', placeholder: 'DocxPartFailure' },
+  pptx: { failure: 'PptxPartFailure', placeholder: 'PptxPartFailure' },
+  xlsx: { failure: 'XlsxPartFailure', placeholder: 'XlsxSheetPartFailure' },
+} as const;
+type PartFailureFormat = keyof typeof PART_FAILURE_TYPES;
+
+function errorPlaceholderOption(format: PartFailureFormat) {
+  return {
+    name: 'errorPlaceholder',
+    type: `ErrorPlaceholderText | ((failure: ${PART_FAILURE_TYPES[format].placeholder}) => ErrorPlaceholderText | undefined)`,
+    desc: 'Replacement title/detail text for the library\'s "could not be displayed" placeholder of a part that failed to parse. An omitted field keeps the built-in text; detail: null hides the detail line. A function runs on the main thread (also in mode: "worker"), only for failed parts and possibly on every repaint; only its text crosses to the worker. A throwing or invalid result rejects that render. The glyph, colours, card and page/slide/sheet size never change.',
+  };
+}
+
+function onPartFailureOption(format: PartFailureFormat) {
+  return {
+    name: 'onPartFailure',
+    type: `(failure: ${PART_FAILURE_TYPES[format].failure}) => void`,
+    desc: 'Called once per failed package part of the loaded file. Failures known at load are delivered before load() resolves; PPTX progressive and lazy XLSX sheet failures when they become known. Never routed to onError; load() still resolves. Observer errors are logged, not rethrown.',
+  };
+}
+
+function partFailuresGetter(format: PartFailureFormat) {
+  return {
+    sig: `get partFailures(): readonly ${PART_FAILURE_TYPES[format].failure}[]`,
+    desc: format === 'xlsx'
+      ? 'Failed package parts known so far: a broken shared part (workbook) first, then broken sheets in index order, each listed once its model has been loaded. message is the clamped, file-derived parser diagnostic: treat it as untrusted text.'
+      : format === 'pptx'
+        ? 'Slides whose part failed to parse, in index order. Complete when load() resolves, or below availableSlideCount during progressive loading. message is the clamped, file-derived parser diagnostic: treat it as untrusted text.'
+        : 'The failed main document part, if any, known before load() resolves. message is the clamped, file-derived parser diagnostic: treat it as untrusted text.',
+  };
+}
 const DOCX_PROGRESSIVE_LAYOUT: ApiOption = {
   name: 'progressiveLayout',
   type: 'boolean',
@@ -293,6 +328,8 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         ENABLE_HYPERLINKS,
         { name: 'onSlideChange', type: '(index: number, total: number, layoutComplete: boolean) => void', desc: 'Called after a slide finishes rendering and again when progressive availability changes completion state.' },
         VIEWER_ON_ERROR,
+        errorPlaceholderOption('pptx'),
+        onPartFailureOption('pptx'),
       ],
       methods: [
         { sig: 'static fromPresentation(canvas, presentation, options?): Omit<PptxViewer, "load">', desc: 'Synchronously create a Viewer that borrows an already-loaded presentation. Render with goToSlide(); destroy() leaves the presentation open.' },
@@ -313,6 +350,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { sig: 'getNotes(slideIndex: number): string | null', desc: 'Speaker-notes text for a slide (0-based). During progressive loading the answer is authoritative only below availableSlideCount; await waitUntilLayoutComplete() before scanning the whole deck.' },
         { sig: 'get canvasElement(): HTMLCanvasElement', desc: 'The underlying canvas.' },
         { sig: 'getSelectionContext(options?: PptxSelectionContextOptions): PptxSelectionContext | null', desc: 'Return the current bounded, JSON-serializable text or element focus snapshot. Throws after destroy().' },
+        partFailuresGetter('pptx'),
         RESOURCE_METRICS_METHOD,
         { sig: 'destroy(): void', desc: 'Tear down the worker and release resources.' },
       ],
@@ -339,6 +377,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { sig: 'get mode(): "main" | "worker"', desc: 'The render mode this engine was loaded with. A borrowed engine’s mode decides whether slides render via renderSlide (main) or renderSlideToBitmap (worker).' },
         { sig: 'getElementContextAt(slideIndex, point, options?): Promise<PptxElementContext | null>', desc: 'Return compact context for the topmost transformed element frame at a slide-EMU point in either mode (line segments use tolerance). Includes master/layout/slide provenance, never editor tree indexes or mutable elements.' },
         { sig: 'getElementBoundsByIds(slideIndex, elementIds): Promise<readonly PptxElementBounds[]>', desc: 'Resolve authored DrawingML element ids to immutable slide geometry in one lazy slide read. Use this with modern-comment drawing or text anchors; it works in main and worker modes.' },
+        partFailuresGetter('pptx'),
         RESOURCE_METRICS_METHOD,
         { sig: 'destroy(): void', desc: 'Release the worker.' },
       ],
@@ -388,6 +427,8 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         ...PPTX_PROGRESSIVE_OPTIONS,
         { name: 'onVisibleSlideChange', type: '(topIndex: number, total: number, layoutComplete: boolean) => void', desc: 'Fires when the top-most visible slide changes or progressive completion changes while the same slide remains visible.' },
         VIEWER_ON_ERROR,
+        errorPlaceholderOption('pptx'),
+        onPartFailureOption('pptx'),
       ],
       methods: [
         { sig: 'static fromPresentation(container, presentation, options?): Omit<PptxScrollViewer, "load">', desc: 'Synchronously create a Scroll Viewer that borrows one loaded presentation and lays out its initial virtual window.' },
@@ -403,6 +444,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { sig: 'waitUntilLayoutComplete(): Promise<void>', desc: 'Wait until every slide is paintable; rejects if background preflight fails.' },
         { sig: 'get topVisibleSlide(): number', desc: 'Index of the top-most visible slide.' },
         { sig: 'getSelectionContext(options?: PptxSelectionContextOptions): PptxSelectionContext | null', desc: 'Return the current mounted text selection, selected comment thread, or clicked-element context.' },
+        partFailuresGetter('pptx'),
         RESOURCE_METRICS_METHOD,
         { sig: 'destroy(): void', desc: 'Tear down the DOM subtree. Destroys a self-loaded engine; a borrowed one is left intact.' },
       ],
@@ -449,6 +491,8 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         ENABLE_HYPERLINKS,
         { name: 'onPageChange', type: '(index: number, total: number, layoutComplete: boolean) => void', desc: 'Called after a page finishes rendering and again when a progressive page-count publication changes total. While layoutComplete is false, total is the pages available so far rather than the final count.', emphasis: 'While layoutComplete is false, total is the pages available so far rather than the final count.', detailsHref: '/docx#progressive-layout', detailsLabel: 'Progressive layout guide' },
         VIEWER_ON_ERROR,
+        errorPlaceholderOption('docx'),
+        onPartFailureOption('docx'),
       ],
       methods: [
         { sig: 'static fromDocument(canvas, document, options?): Omit<DocxViewer, "load">', desc: 'Synchronously create a Viewer that borrows an already-loaded document. Render with goToPage(); destroy() leaves the document open.' },
@@ -465,6 +509,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { sig: 'waitUntilLayoutComplete(): Promise<void>', desc: 'Wait for the authoritative full layout before operations that require the final page count. Rejects if background pagination fails after load() resolved.' },
         { sig: 'get canvasElement(): HTMLCanvasElement', desc: 'The underlying canvas.' },
         { sig: 'getSelectionContext(options?: DocxSelectionContextOptions): DocxSelectionContext | null', desc: 'Return the current bounded native-text or clicked-element snapshot. Throws after destroy().' },
+        partFailuresGetter('docx'),
         RESOURCE_METRICS_METHOD,
         { sig: 'destroy(): void', desc: 'Tear down the worker and release resources.' },
       ],
@@ -493,6 +538,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { sig: 'renderPage(canvas, index, opts?: { width?, dpr?, onTextRun? }): Promise<void>', desc: 'Render one page into the given canvas. `onTextRun` receives each segment as `DocxTextRunInfo`, including the authored `w14:paraId` as `paragraphId` when present. Unavailable in `mode: "worker"` — use renderPageToBitmap.' },
         { sig: 'renderPageToBitmap(index, opts?: { width?, dpr?, onTextRun? }): Promise<ImageBitmap>', desc: 'Render one page and return it as an ImageBitmap (both modes; in worker mode page paint, equations, ChartEx, 3-D charts and Region Maps run off the main thread and return the same text-run stream beside the bitmap). The bitmap is caller-owned: pass it to `transferFromImageBitmap` (which consumes it) or call `bitmap.close()`.', emphasis: 'The bitmap is caller-owned: pass it to `transferFromImageBitmap` (which consumes it) or call `bitmap.close()`.' },
         { sig: 'getElementContextAt(pageIndex, point, options?): Promise<DocxElementContext | null>', desc: 'Return compact context for the topmost rendered picture, chart, or shape—including inline content—at a physical-page-point coordinate in either mode.' },
+        partFailuresGetter('docx'),
         RESOURCE_METRICS_METHOD,
         { sig: 'destroy(): void', desc: 'Release the worker.' },
       ],
@@ -544,6 +590,8 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         DOCX_LAYOUT_COMPLETE,
         { name: 'onVisiblePageChange', type: '(topIndex: number, total: number, layoutComplete: boolean) => void', desc: 'Fires when the top-most visible page changes and again when a progressive page-count publication changes total, even if the same page remains visible. While layoutComplete is false, total is the pages available so far rather than the final count.', emphasis: 'While layoutComplete is false, total is the pages available so far rather than the final count.', detailsHref: '/docx#progressive-layout', detailsLabel: 'Progressive layout guide' },
         VIEWER_ON_ERROR,
+        errorPlaceholderOption('docx'),
+        onPartFailureOption('docx'),
       ],
       methods: [
         { sig: 'static fromDocument(container, document, options?): Omit<DocxScrollViewer, "load">', desc: 'Synchronously create a Scroll Viewer that borrows one loaded document and lays out its initial virtual window.' },
@@ -559,6 +607,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { sig: 'get layoutComplete(): boolean', desc: 'True only after the authoritative document layout succeeds. It is false while progressive layout is publishing pages and remains false if background pagination fails; waitUntilLayoutComplete() reports that failure.' },
         { sig: 'waitUntilLayoutComplete(): Promise<void>', desc: 'Wait for the authoritative full layout before operations that require the final page count. Rejects if background pagination fails after load() resolved.' },
         { sig: 'getSelectionContext(options?: DocxSelectionContextOptions): DocxSelectionContext | null', desc: 'Return the current mounted text selection, selected comment thread, or clicked-element context.' },
+        partFailuresGetter('docx'),
         RESOURCE_METRICS_METHOD,
         { sig: 'destroy(): void', desc: 'Tear down the DOM subtree. Destroys a self-loaded engine; a borrowed one is left intact.' },
       ],
@@ -609,6 +658,8 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         CONTEXT_MENU('XlsxSelectionContext'),
         { name: 'onViewportChange', type: '(offset: XlsxViewportOffset) => void', desc: 'Called with the clamped logical CSS-pixel offset after the active viewport moves. Horizontal x is measured from column A in both LTR and RTL sheets. In worker mode it also fires once when a lagging frame lands and moves the cell geometry that getCellViewportRect() reports.' },
         VIEWER_ON_ERROR,
+        errorPlaceholderOption('xlsx'),
+        onPartFailureOption('xlsx'),
       ],
       methods: [
         { sig: 'static fromWorkbook(container, workbook, options?): Omit<XlsxViewer, "load">', desc: 'Synchronously create a full Workbook Viewer that borrows one loaded workbook and starts its initial sheet display.' },
@@ -640,6 +691,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { sig: 'setHiddenSheetMode(mode: "show" | "skip" | "dim"): Promise<void>', desc: 'Switch the hidden-sheet mode at runtime: restyle the tabs and re-render. Entering `skip` while on a hidden sheet advances to the nearest visible sheet.' },
         { sig: 'getCellAt(clientX: number, clientY: number): CellAddress | null', desc: 'Hit-test a viewport coordinate to a cell address.' },
         { sig: 'get canvasElement(): HTMLCanvasElement', desc: 'The underlying canvas the grid is drawn on.' },
+        partFailuresGetter('xlsx'),
         RESOURCE_METRICS_METHOD,
         { sig: 'destroy(): void', desc: 'Tear down the DOM subtree. Destroys a self-loaded workbook; a borrowed one remains caller-owned.' },
       ],
@@ -688,6 +740,8 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { name: 'onSelectionContextChange', type: '(context: XlsxSelectionContext | null) => void', desc: 'Receive bounded detached selected-cell content, including attached comments, or element context, coalesced per animation frame. This callback does not enable element hit-testing.' },
         CONTEXT_MENU('XlsxSelectionContext'),
         VIEWER_ON_ERROR,
+        errorPlaceholderOption('xlsx'),
+        onPartFailureOption('xlsx'),
       ],
       methods: [
         { sig: 'static fromWorkbook(canvas, workbook, options?): Omit<XlsxSheetViewer, "load">', desc: 'Synchronously attach a borrowed workbook without materializing a sheet. Await goToSheet(index) to render only the requested sheet.' },
@@ -713,6 +767,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { sig: 'copySelection(): Promise<XlsxCopyResult>', desc: 'Copy bounded TSV and return an observable result.' },
         { sig: 'getCellAt(clientX: number, clientY: number): CellAddress | null', desc: 'Hit-test a viewport coordinate to a cell address.' },
         { sig: 'get canvasElement(): HTMLCanvasElement', desc: 'The caller-owned canvas used by the viewer.' },
+        partFailuresGetter('xlsx'),
         RESOURCE_METRICS_METHOD,
         { sig: 'destroy(): void', desc: 'Permanently close the viewer and restore the caller canvas. A workbook borrowed through fromWorkbook() remains caller-owned and is not destroyed.' },
       ],
@@ -732,6 +787,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { sig: 'renderViewport(canvas, sheetIndex, viewport, opts?: XlsxRenderViewportOptions): Promise<void>', desc: 'Render a row/col window of a sheet into the given canvas. `onTextRun` receives each text cell as `XlsxTextRunInfo` with required `sheetName` and A1 `cellRef` identity. Image bytes and decoded-image caches stay owned by the workbook. Equations in shapes render when a `math` engine was passed to `load`. Unavailable in `mode: "worker"` — use renderViewportToBitmap.' },
         { sig: 'renderViewportToBitmap(sheetIndex, viewport, opts: RenderViewportToBitmapOptions): Promise<ImageBitmap>', desc: 'Render a sheet viewport and return it as an ImageBitmap (both modes; in worker mode viewport paint, equations, ChartEx, 3-D charts and Region Maps run off the main thread). `width` and `height` are required — a worker has no DOM element to measure. The bitmap is caller-owned: pass it to `transferFromImageBitmap` (which consumes it) or call `bitmap.close()`.', emphasis: '`width` and `height` are required — a worker has no DOM element to measure.' },
         { sig: 'resolveValidationList(sheetIndex, formula1): Promise<ResolvedList>', desc: 'Resolve a list-type data-validation `formula1` (ECMA-376 §18.3.1.32) into the allowed values to display — inline quoted list, a range reference (each cell’s display string), or `{ kind: \'formula\' }` for named ranges. Read-only.' },
+        partFailuresGetter('xlsx'),
         RESOURCE_METRICS_METHOD,
         { sig: 'destroy(): void', desc: 'Release the worker.' },
       ],

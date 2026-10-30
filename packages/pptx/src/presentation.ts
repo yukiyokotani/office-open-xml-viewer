@@ -102,6 +102,19 @@ import {
 import { publishPptxLayout } from './presentation-layout-events';
 import { yieldToHostTaskQueue } from './worker-task-scheduler';
 import { deferred, type Deferred } from '@silurus/ooxml-core/internal/deferred';
+import {
+  prepareErrorPlaceholder,
+  resolveErrorPlaceholderFor,
+  wireErrorPlaceholder,
+  type ErrorPlaceholderOption,
+  type PartFailureLog,
+  type WireErrorPlaceholder,
+} from '@silurus/ooxml-core/internal/part-failures';
+import {
+  normalizeWirePptxPartFailure,
+  pptxPartFailureLog,
+  type PptxPartFailure,
+} from './part-failures';
 
 /** Options for {@link PptxPresentation.load}. */
 export type LoadOptions = CoreLoadOptions & {
@@ -180,6 +193,14 @@ export interface RenderSlideToBitmapOptions {
    * path in both modes.
    */
   onTextRun?: TextRunCallback;
+  /**
+   * Replacement text for the "Slide N could not be displayed" placeholder of a
+   * slide whose part failed to parse (see {@link PptxPresentation.partFailures}).
+   * Static text, or a function of the failure evaluated on the main thread
+   * (also in worker mode); only the resulting text crosses to the worker.
+   * Ignored for a healthy slide.
+   */
+  errorPlaceholder?: ErrorPlaceholderOption<PptxPartFailure>;
 }
 
 /** Options for rendering a single slide onto a canvas. */
@@ -200,6 +221,8 @@ export interface RenderSlideOptions {
   skipMediaControls?: boolean;
   /** Translucent overlay drawn over the finished slide (hidden-slide dimming). */
   dim?: DimOptions;
+  /** See {@link RenderSlideToBitmapOptions.errorPlaceholder}. */
+  errorPlaceholder?: ErrorPlaceholderOption<PptxPartFailure>;
 }
 
 /** Options for {@link PptxPresentation.presentSlide}. */
@@ -550,6 +573,7 @@ export class PptxPresentation {
         (response as Extract<RenderWorkerResponse, { kind: 'presentationReady' }>).preflight,
       );
       this._bootstrap = this._preflight;
+      this._admitPartFailures(ready.partFailures, this._preflight.slideCount);
       this._availableSlideCount = this._preflight.slideCount;
       return;
     }
@@ -615,6 +639,7 @@ export class PptxPresentation {
     this._preflight = normalizePresentationPreflight(
       (finished as Extract<PptxWorkerResponse, { kind: 'presentationPreflightReady' }>).preflight,
     );
+    this._admitPartFailures(finished.partFailures, this._preflight.slideCount);
     this._availableSlideCount = this._preflight.slideCount;
     this._slides = new PptxSlideRepository({
       slideCount: this._preflight.slideCount,
@@ -694,6 +719,8 @@ export class PptxPresentation {
           builder.addSlide(slide);
         });
         await ensureFonts();
+        const failure = builder.latestPartFailure;
+        if (failure && !progressive.settled) this._partFailureLog.add(failure);
         this._applyProgressivePrefix(builder.snapshot(), progressive);
         if (slideIndex === 0 && progressive.deferred) {
           // Match the worker-mode acknowledgement gate: once the opening slide
@@ -742,10 +769,9 @@ export class PptxPresentation {
         this._parseRequestId = null;
         const ready = response as Extract<RenderWorkerResponse, { kind: 'presentationReady' }>;
         if (ready.usage) onUsage?.(ready.usage);
-        this._finishProgressiveLayout(
-          normalizePresentationPreflight(ready.preflight),
-          progressive,
-        );
+        const preflight = normalizePresentationPreflight(ready.preflight);
+        if (!progressive.settled && !this._destroyed) this._admitPartFailures(ready.partFailures, preflight.slideCount);
+        this._finishProgressiveLayout(preflight, progressive);
       },
       (error) => {
         this._parseRequestId = null;
@@ -801,6 +827,13 @@ export class PptxPresentation {
       const prior = this._preflight?.slides ?? [];
       if (response.availableSlides !== prior.length + 1 || response.slide.index !== prior.length) {
         throw new Error('PPTX progressive worker published a non-sequential slide');
+      }
+      if (response.partFailure !== undefined) {
+        const failure = normalizeWirePptxPartFailure(response.partFailure, bootstrap.slideCount);
+        if (failure.slideIndex !== response.slide.index) {
+          throw new Error('PPTX progressive worker published a failure for another slide');
+        }
+        this._partFailureLog.add(failure);
       }
       this._applyProgressivePrefix(
         normalizePresentationPreflightPrefix({
@@ -967,6 +1000,44 @@ export class PptxPresentation {
   /** Slides whose compact facts and full model can currently be painted. */
   get availableSlideCount(): number { return this._availableSlideCount; }
 
+  /**
+   * Slides whose part failed to parse (#1974), ascending by index. Each such
+   * slide renders a "could not be displayed" placeholder; the rest of the deck
+   * is unaffected. Complete once `load()` resolves, or — with
+   * `progressiveLayout` — for every slide below {@link availableSlideCount},
+   * and for the whole deck after `waitUntilLayoutComplete()`. Never routed to
+   * `onError`.
+   */
+  get partFailures(): readonly PptxPartFailure[] {
+    return this._partFailureLog.list;
+  }
+
+  private get _partFailureLog(): PartFailureLog<PptxPartFailure> {
+    return pptxPartFailureLog(this);
+  }
+
+  /** Admit worker-reported failures. Always before the slides they describe
+   * become available. */
+  private _admitPartFailures(entries: unknown, slideCount: number): void {
+    if (entries === undefined) return;
+    if (!Array.isArray(entries)) throw new Error('PPTX worker returned invalid part failures');
+    for (const entry of entries) this._partFailureLog.add(normalizeWirePptxPartFailure(entry, slideCount));
+  }
+
+  /** Resolve `errorPlaceholder` for one slide on the main thread. `undefined`
+   * = built-in text (absent option, healthy slide, or nothing returned). */
+  private _errorPlaceholderText(
+    slideIndex: number,
+    option: ErrorPlaceholderOption<PptxPartFailure> | undefined,
+  ): WireErrorPlaceholder | undefined {
+    const prepared = prepareErrorPlaceholder<PptxPartFailure>(option);
+    if (prepared.kind === 'none') return undefined;
+    const failure = this._partFailureLog.get(slideIndex);
+    if (!failure) return undefined;
+    const resolved = resolveErrorPlaceholderFor(prepared, failure);
+    return resolved === null ? undefined : wireErrorPlaceholder(resolved);
+  }
+
   /** True only when every slide is paintable; remains false after background failure. */
   get layoutComplete(): boolean { return this._layoutLifecycle.complete; }
 
@@ -1132,6 +1203,7 @@ export class PptxPresentation {
       const compact = this._preflight;
       const repository = this._slides;
       if (!compact || !repository) throw new Error('Presentation not loaded');
+      const errorPlaceholderText = this._errorPlaceholderText(slideIndex, opts.errorPlaceholder);
       const dpr = opts.dpr ?? defaultDpr();
       const width = opts.width ?? ((isHTMLCanvas(canvas) ? canvas.offsetWidth : 0) || 960);
       const requests = await repository.withSlide(slideIndex, (slide) =>
@@ -1176,6 +1248,7 @@ export class PptxPresentation {
             chartEx: this._chartEx,
             tiff: this._tiff,
             imageResources: opts.imageResources,
+            ...(errorPlaceholderText === undefined ? {} : { errorPlaceholderText }),
           },
           opts.onTextRun,
         );
@@ -1209,6 +1282,7 @@ export class PptxPresentation {
         // document's language and direction, while one constructed in the
         // Worker has unknown language. Transferring it before any getContext()
         // carries those inherited values, matching the main-mode surface below.
+        const errorPlaceholderText = this._errorPlaceholderText(slideIndex, opts.errorPlaceholder);
         const canvas = new OffscreenCanvas(1, 1);
         const res = await this._bridge.request(
           (id) => ({
@@ -1220,6 +1294,7 @@ export class PptxPresentation {
             imageResources: opts.imageResources,
             skipMediaControls: opts.skipMediaControls,
             dim: opts.dim,
+            ...(errorPlaceholderText === undefined ? {} : { errorPlaceholderText }),
             canvas,
           }) satisfies RenderWorkerRequest,
           [canvas],
@@ -1243,6 +1318,7 @@ export class PptxPresentation {
         skipMediaControls: opts.skipMediaControls,
         dim: opts.dim,
         onTextRun: opts.onTextRun,
+        ...(opts.errorPlaceholder === undefined ? {} : { errorPlaceholder: opts.errorPlaceholder }),
       });
       return off.transferToImageBitmap();
     } catch (error) {
@@ -1494,6 +1570,7 @@ export class PptxPresentation {
                 skipMediaControls: true,
                 dim: opts.dim,
                 onTextRun: opts.onTextRun,
+                ...(opts.errorPlaceholder === undefined ? {} : { errorPlaceholder: opts.errorPlaceholder }),
               });
               try {
                 canvas.width = bmp.width;
@@ -1513,6 +1590,7 @@ export class PptxPresentation {
                 skipMediaControls: true,
                 dim: opts.dim,
                 onTextRun: opts.onTextRun,
+                ...(opts.errorPlaceholder === undefined ? {} : { errorPlaceholder: opts.errorPlaceholder }),
               });
 
       const mediaElements = this._preflight.slides[slideIndex]?.mediaElements ?? [];
@@ -1534,6 +1612,7 @@ export class PptxPresentation {
   /** Terminate the worker and release all resources. */
   destroy(): void {
     this._destroyed = true;
+    this._partFailureLog.close();
     this._clearProgressiveWatchdog();
     this._slidePullClient?.cancelAll();
     this._bridge.terminate();

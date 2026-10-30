@@ -141,8 +141,14 @@ self.onmessage = async (
       if (request.kind === 'finishPresentationPreflight') {
         if (!preflightBuilder) throw new Error('PPTX presentation preflight is not active');
         const preflight = preflightBuilder.finish();
+        const partFailures = preflightBuilder.partFailures;
         preflightBuilder = null;
-        post({ kind: 'presentationPreflightReady', id, preflight });
+        post({
+          kind: 'presentationPreflightReady',
+          id,
+          preflight,
+          ...(partFailures.length === 0 ? {} : { partFailures }),
+        });
         return;
       }
 

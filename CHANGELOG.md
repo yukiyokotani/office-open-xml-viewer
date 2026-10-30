@@ -29,6 +29,19 @@ is removed in 0.91.0. See the [0.89 to 0.90 migration guide](docs/migration-0.90
   subsets that the document's text paints, as PPTX already did.
 - **Resource safety:** font sources have fixed limits and fail closed with the
   new `OoxmlError` code `font-source-limit`.
+- **Failed package parts:** a new `partFailures` getter on `DocxDocument`,
+  `PptxPresentation`, `XlsxWorkbook` and every viewer lists the parts that
+  failed to parse, and the new `onPartFailure` viewer option is called once for
+  each. These are the parts whose "could not be displayed" placeholder is
+  painted, plus an XLSX shared part such as `xl/sharedStrings.xml`. They never
+  reach `onError`, and `load()` still resolves. XLSX sheets are reported when
+  their model is first loaded (#1974).
+- **Placeholder text:** the new `errorPlaceholder` option, on viewers and on
+  the engines' render options, replaces the placeholder's title and detail
+  text. It is a `{ title?, detail? }` object (`detail: null` hides the detail
+  line) or a function of the failure. The function runs on the main thread,
+  including in worker mode. Without the option the placeholder is unchanged.
+  This is additive, so no migration is needed (#1974).
 - **Deprecated:** `useGoogleFonts` is an alias of `fonts: [googleFonts()]` and
   warns once per JavaScript realm. Combining `useGoogleFonts: true` with
   `fonts` throws a `TypeError`. The VS Code extension keeps its

@@ -1,6 +1,8 @@
 import type { DimOptions } from './types';
 import type { PptxTextRunInfo } from './renderer';
 import type { PresentationPreflight } from './presentation-preflight';
+import type { PptxPartFailure } from './part-failures';
+import type { WireErrorPlaceholder } from '@silurus/ooxml-core/internal/part-failures';
 import type {
   NormalizedOoxmlResourcePolicy,
   PullSessionIdentity,
@@ -84,7 +86,13 @@ export type PptxWorkerRequest =
 export type PptxWorkerResponse =
   | { kind: 'presentationOpened'; id: number; bootstrap: PresentationBootstrap }
   | ({ kind: 'slideSessionOpened'; id: number } & PullSessionIdentity<number>)
-  | { kind: 'presentationPreflightReady'; id: number; preflight: PresentationPreflight }
+  | {
+      kind: 'presentationPreflightReady';
+      id: number;
+      preflight: PresentationPreflight;
+      /** #1974 — failed slides, clamped in the worker; outside the preflight. */
+      partFailures?: readonly PptxPartFailure[];
+    }
   | { kind: 'mediaExtracted'; id: number; bytes: ArrayBuffer }
   | { kind: 'imageExtracted'; id: number; bytes: ArrayBuffer }
   | { kind: 'fontExtracted'; id: number; bytes: ArrayBuffer }
@@ -132,6 +140,8 @@ export type RenderWorkerRequest =
       imageResources?: import('@silurus/ooxml-core').ImageResourceOptions;
       skipMediaControls?: boolean;
       dim?: DimOptions;
+      /** #1974 — placeholder text resolved on the main thread. */
+      errorPlaceholderText?: WireErrorPlaceholder;
       /** Contextless caller-realm surface, transferred so worker text uses the
        *  caller's inherited canvas language. Absent: the worker creates one. */
       canvas?: OffscreenCanvas;
@@ -161,6 +171,8 @@ export type RenderWorkerResponse =
       kind: 'presentationReady';
       id: number;
       preflight: PresentationPreflight;
+      /** #1974 — the complete bounded failure list, for reconciliation. */
+      partFailures?: readonly PptxPartFailure[];
       usage?: OoxmlResourceUsageSnapshot;
     }
   | {
@@ -170,6 +182,8 @@ export type RenderWorkerResponse =
       availableSlides: number;
       slide: PresentationPreflight['slides'][number];
       fontPreloadNames: PresentationPreflight['fontPreloadNames'];
+      /** #1974 — this publication's slide failure only (a delta). */
+      partFailure?: PptxPartFailure;
       usage?: OoxmlResourceUsageSnapshot;
     }
   | { kind: 'slideRendered'; id: number; bitmap: ImageBitmap; runs: PptxTextRunInfo[] }

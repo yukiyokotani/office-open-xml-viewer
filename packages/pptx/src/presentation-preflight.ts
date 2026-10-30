@@ -10,6 +10,7 @@ import {
 import { HARD_MAX_PPTX_PREFLIGHT_PROJECTION_BYTES } from '@silurus/ooxml-core/worker';
 import { FONT_SUBSTITUTE_SCRIPTS } from '@silurus/ooxml-core/internal/font-sources';
 import { PptxFontPreloadAccumulator, type PptxFontDemandFacts } from './font-requests';
+import { createPptxPartFailureLog, type PptxPartFailure } from './part-failures';
 import type {
   MediaElement,
   PptxComment,
@@ -547,6 +548,8 @@ interface PendingAcceptance {
   readonly demandBytes: number;
   readonly demandMembershipBytes: number;
   readonly demandDeltaBytes: number;
+  /** The slide's parse failure; kept outside the measured projection. */
+  readonly partFailure: PptxPartFailure | null;
 }
 
 /** Injected after opt-in lazy import when font sources are configured; a
@@ -594,6 +597,13 @@ export class PresentationPreflightBuilder {
   private demandDeltaBytes = 0;
   private readonly collectFontDemand?: FontDemandCollector;
   private demandDelta: FontPreloadDemand | undefined;
+  /**
+   * #1974 — failed slide parts, deliberately outside the measured projection
+   * so failure metadata can never turn an accepted load into a rejection. The
+   * log clamps each message and caps their aggregate bytes, never rejecting.
+   */
+  private readonly partFailureLog = createPptxPartFailureLog();
+  private latestPartFailureValue: PptxPartFailure | undefined;
 
 
   constructor(
@@ -696,6 +706,12 @@ export class PresentationPreflightBuilder {
   /** Delta from the last committed admission, never an uncommitted candidate.
    * Progressive owners consume this before publishing that slide. */
   get currentFontPreloadDemandDelta(): FontPreloadDemand | undefined { return this.demandDelta; }
+
+  /** Failed slides committed so far (bounded, frozen). */
+  get partFailures(): readonly PptxPartFailure[] { return this.partFailureLog.list; }
+
+  /** The failure of the most recently committed slide, if it failed. */
+  get latestPartFailure(): PptxPartFailure | undefined { return this.latestPartFailureValue; }
 
   /**
    * Read-only snapshot of the committed prefix while preflight is still open.
@@ -838,6 +854,12 @@ export class PresentationPreflightBuilder {
       demandBytes,
       demandMembershipBytes,
       demandDeltaBytes,
+      partFailure: slide.parseError === undefined ? null : {
+        kind: 'slide',
+        slideIndex: index,
+        slideNumber: index + 1,
+        message: slide.parseError,
+      },
     };
     this.pending = pending;
     return {
@@ -863,6 +885,9 @@ export class PresentationPreflightBuilder {
         this.demandBytes = pending.demandBytes;
         this.demandMembershipBytes = pending.demandMembershipBytes;
         this.demandDeltaBytes = pending.demandDeltaBytes;
+        this.latestPartFailureValue = pending.partFailure === null
+          ? undefined
+          : this.partFailureLog.add(pending.partFailure) ?? this.partFailureLog.get(index);
         pending.state = 'committed';
         this.pending = null;
       },

@@ -201,6 +201,9 @@ export type {
   ModelSourceTarget,
   OpenedModelSource,
 } from '@silurus/ooxml-core';
+// #1974 — failed package parts and the placeholder text option.
+export type { ErrorPlaceholderOption, ErrorPlaceholderText } from '@silurus/ooxml-core';
+export type { DocxPartFailure } from './part-failures';
 // Typed load-time error surfaced by DocxDocument.load (e.g. a password-protected
 // or legacy-binary .doc file). Re-exported so `@silurus/ooxml/docx` consumers can
 // narrow on `err.code`.

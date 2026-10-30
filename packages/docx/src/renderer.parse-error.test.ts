@@ -1,7 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import { createLayoutServices } from './layout-runtime.js';
-import { renderDocumentToCanvas } from './renderer.js';
+import { renderDocumentToCanvas, renderLayoutSourceToCanvas } from './renderer.js';
+import { layoutSourceStore } from './layout-source-model-adapter.js';
+import { selectDocumentLayoutPage } from './layout/document-layout-variants.js';
+import { ensureDocumentLayoutVariants } from './layout/document.js';
 import type { DocxDocumentModel, SectionProps } from './types';
+import type { WireErrorPlaceholder } from '@silurus/ooxml-core/internal/part-failures';
 
 /**
  * RB7: a document carrying `parseError` (a degraded `word/document.xml`) renders
@@ -142,5 +146,85 @@ describe('RB7 renderDocumentToCanvas placeholder', () => {
       .toThrow(/measure failure/);
     expect(ctx.font).toBe('before-font');
     expect(ctx.letterSpacing).toBe('3px');
+  });
+});
+
+describe('#1974 errorPlaceholder text on the DOCX error page', () => {
+  const MESSAGE = 'word/document.xml: unexpected end of stream';
+  const fillTexts = (calls: DrawCall[]) => calls.filter((c) => c.op === 'fillText').map((c) => String(c.args[0]));
+
+  async function paint(errorPlaceholderText?: WireErrorPlaceholder) {
+    const { ctx, calls } = recordingCtx(true);
+    await renderDocumentToCanvas(degradedDoc(MESSAGE), stubCanvas(ctx), 0, {
+      width: 816,
+      dpr: 1,
+      ...(errorPlaceholderText ? { errorPlaceholderText } : {}),
+    });
+    return fillTexts(calls);
+  }
+
+  it('paints a custom title and keeps the built-in detail', async () => {
+    const texts = await paint({ state: 'resolved', title: 'Preview unavailable', detail: undefined });
+    expect(texts).toContain('Preview unavailable');
+    expect(texts.some((t) => t.includes('could not be displayed'))).toBe(false);
+    expect(texts.join(' ')).toContain('document.xml');
+  });
+
+  it('paints no detail line for detail: null and a custom detail otherwise', async () => {
+    const builtin = await paint();
+    const hidden = await paint({ state: 'resolved', title: null, detail: null });
+    expect(hidden).toContain('This document could not be displayed');
+    expect(hidden.join(' ')).not.toContain('document.xml');
+    expect(hidden.length).toBeLessThan(builtin.length);
+    const custom = await paint({ state: 'resolved', title: null, detail: 'Contact support' });
+    expect(custom).toContain('Contact support');
+  });
+
+  it('keeps the built-in page for the builtin state', async () => {
+    expect(await paint({ state: 'builtin' })).toEqual(await paint());
+  });
+
+  it('acquires the custom page as layout, retaining one custom page per document', async () => {
+    const source = layoutSourceStore(degradedDoc(MESSAGE));
+    const services = createLayoutServices(source);
+    ensureDocumentLayoutVariants(services, 0, () => source);
+    const builtin = selectDocumentLayoutPage(services, { defaultCurrentDateMs: 0 }, 0);
+    const first = selectDocumentLayoutPage(services, {
+      defaultCurrentDateMs: 0,
+      errorPlaceholderText: { state: 'resolved', title: 'A', detail: null },
+    }, 0);
+    const again = selectDocumentLayoutPage(services, {
+      defaultCurrentDateMs: 0,
+      errorPlaceholderText: { state: 'resolved', title: 'A', detail: null },
+    }, 0);
+    const other = selectDocumentLayoutPage(services, {
+      defaultCurrentDateMs: 0,
+      errorPlaceholderText: { state: 'resolved', title: 'B', detail: null },
+    }, 0);
+    expect(again.layout).toBe(first.layout);
+    expect(other.layout).not.toBe(first.layout);
+    expect(selectDocumentLayoutPage(services, { defaultCurrentDateMs: 0 }, 0).layout).toBe(builtin.layout);
+    expect(first.page.geometry).toEqual(builtin.page.geometry);
+    // Paint of the custom page never measures text on the target canvas.
+    const { ctx, calls } = recordingCtx(true);
+    await renderLayoutSourceToCanvas(source, stubCanvas(ctx), 0, {
+      width: 816,
+      dpr: 1,
+      layoutServices: services,
+      defaultCurrentDateMs: 0,
+      errorPlaceholderText: { state: 'resolved', title: 'B', detail: null },
+    });
+    expect(fillTexts(calls)).toContain('B');
+  });
+
+  it('ignores the text for a healthy document', async () => {
+    const { ctx, calls } = recordingCtx();
+    await renderDocumentToCanvas({
+      section: LETTER_SECTION,
+      body: [],
+      headers: emptyHeadersFooters(),
+      footers: emptyHeadersFooters(),
+    }, stubCanvas(ctx), 0, { width: 816, dpr: 1, errorPlaceholderText: { state: 'resolved', title: 'X', detail: null } });
+    expect(fillTexts(calls)).not.toContain('X');
   });
 });

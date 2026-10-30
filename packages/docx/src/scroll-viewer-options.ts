@@ -173,4 +173,11 @@ export interface DocxScrollViewerOptions extends Omit<RenderPageOptions, 'onText
    *  remain `Error` values; a `code` of `parser-crashed` identifies a recognized
    *  WASM trap, not a reliably classified OOM. */
   onError?: (err: Error) => void;
+  /**
+   * Called once per loaded document when a package part failed to parse and a
+   * placeholder page is shown instead (#1974). Delivered before `load()`
+   * resolves. Never routed to `onError`; `load()` still resolves. The same
+   * records are available from `DocxScrollViewer.partFailures`.
+   */
+  onPartFailure?: (failure: Readonly<import('./part-failures').DocxPartFailure>) => void;
 }

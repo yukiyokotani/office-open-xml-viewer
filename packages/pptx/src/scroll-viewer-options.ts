@@ -135,6 +135,21 @@ export interface PptxScrollViewerOptions extends Pick<RenderSlideOptions, 'width
    *  classified OOM. */
   onError?: (err: Error) => void;
   /**
+   * Replacement text for the "Slide N could not be displayed" placeholder of a
+   * slide whose part failed to parse (#1974). Static text, or a function of
+   * the failure evaluated on the main thread (also in worker mode). `detail:
+   * null` hides the detail line. Ignored for healthy slides.
+   */
+  errorPlaceholder?: import('@silurus/ooxml-core').ErrorPlaceholderOption<import('./part-failures').PptxPartFailure>;
+  /**
+   * Called once per loaded presentation for each slide whose part failed to
+   * parse (#1974). Failures known at load are delivered before `load()`
+   * resolves; with `progressiveLayout`, later ones when the slide is reached.
+   * Never routed to `onError`; `load()` still resolves. The same records are
+   * available from `partFailures`.
+   */
+  onPartFailure?: (failure: Readonly<import('./part-failures').PptxPartFailure>) => void;
+  /**
    * IX1 (design decision — NOT user-confirmed, integrator may veto). Fires on a
    * hyperlink click in any mounted slide's text overlay (requires
    * {@link enableTextSelection}). Default when omitted: external →

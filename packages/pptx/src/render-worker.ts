@@ -73,6 +73,8 @@ const slidePull = new SlidePullWorker(
 let preflight: PresentationPreflight | null = null;
 let cjkFallback: CjkLang | undefined;
 let preflightBuilder: PresentationPreflightBuilder | null = null;
+/** #1974 — failed slides of the loaded presentation (bounded). */
+let presentationPartFailures: readonly import('./part-failures').PptxPartFailure[] = [];
 /** This presentation's font-source session (LoadOptions.fonts) in self.fonts;
  * reset with every parse and on a failed parse, and gone with the worker. */
 let fontSources: FontSourceSession | null = null;
@@ -198,6 +200,7 @@ async function openPresentation(request: Extract<RenderWorkerRequest, { kind: 'p
   slides = null;
   preflight = null;
   preflightBuilder = null;
+  presentationPartFailures = [];
   availableSlideCount = 0;
   wakeSlideAvailabilityWaiters();
   generation += 1;
@@ -271,11 +274,13 @@ async function openPresentation(request: Extract<RenderWorkerRequest, { kind: 'p
         availableSlides: availableSlideCount,
         slide,
         fontPreloadNames: preflightBuilder.currentFontPreloadNames,
+        ...(preflightBuilder.latestPartFailure ? { partFailure: preflightBuilder.latestPartFailure } : {}),
         usage: resourceUsage,
       });
       await hostAcknowledgement;
     }
     preflight = preflightBuilder.finish();
+    presentationPartFailures = preflightBuilder.partFailures;
     preflightBuilder = null;
     fontsLoaded = Promise.resolve();
   } else {
@@ -283,6 +288,7 @@ async function openPresentation(request: Extract<RenderWorkerRequest, { kind: 'p
       await slides.withSlide(index, () => undefined);
     }
     preflight = preflightBuilder.finish();
+    presentationPartFailures = preflightBuilder.partFailures;
     preflightBuilder = null;
     availableSlideCount = bootstrap.slideCount;
     wakeSlideAvailabilityWaiters();
@@ -369,6 +375,7 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest | WorkerSvgDecod
         kind: 'presentationReady',
         id: request.id,
         preflight: compact,
+        ...(presentationPartFailures.length === 0 ? {} : { partFailures: presentationPartFailures }),
         usage: resourceUsage,
       });
       presentationState = 'ready';
@@ -412,6 +419,7 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest | WorkerSvgDecod
           svgDecoder: svgDecodeClient.decode,
           skipMediaControls: request.skipMediaControls,
           dim: request.dim,
+          ...(request.errorPlaceholderText === undefined ? {} : { errorPlaceholderText: request.errorPlaceholderText }),
           math: renderers.math,
           threeD: renderers.threeD,
           regionMap: renderers.regionMap,
@@ -527,6 +535,7 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest | WorkerSvgDecod
       slides = null;
       preflight = null;
       preflightBuilder = null;
+      presentationPartFailures = [];
     }
     try {
       post({ kind: 'error', id: request.id, ...serializeWorkerError(error) });

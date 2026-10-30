@@ -225,7 +225,7 @@ export class WorksheetViewProjectionCache {
  *  render-local sheet projection; absent when nothing changed. */
 export type WireRenderViewportOptions = Omit<
   RenderViewportOptions,
-  'onTextRun' | 'loadedImages' | 'fetchImage'
+  'onTextRun' | 'loadedImages' | 'fetchImage' | 'errorPlaceholder'
 > & {
   sizeOverrides?: WireSizeOverrides;
 };
@@ -342,5 +342,8 @@ export type RenderWorkerResponse =
       id: number;
       bitmap: ImageBitmap;
     }
+  // #1974: the worker holds a degraded terminal for a sheet whose text was sent
+  // as `resolve-on-main`. Nothing was painted; tentative input only.
+  | { type: 'errorPlaceholderRequired'; id: number; sheetIndex: number }
   | { type: 'worksheetsEvicted'; id: number }
   | ({ type: 'sheetSessionOpened'; id: number } & PullSessionIdentity<number>);

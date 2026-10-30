@@ -47,6 +47,8 @@ import type { PptxCommentsOptions } from './comment-margin';
 import type { PptxScrollViewerOptions } from './scroll-viewer-options';
 import { pptxCommentOccurrenceKey } from './comment-occurrence';
 import { renderPptxFocusedSlide } from './focused-view-runtime';
+import { PartFailureDelivery, prepareErrorPlaceholder } from '@silurus/ooxml-core/internal/part-failures';
+import { pptxPartFailureLog, type PptxPartFailure } from './part-failures';
 import { PptxScrollLayoutController } from './scroll-layout-controller';
 import { createPptxLoadingIndicator } from './loading-indicator';
 import { PptxScrollMediaController } from './scroll-media-controller';
@@ -193,6 +195,7 @@ export class PptxScrollViewer implements ZoomableViewer {
     render: (slide, canvas, width, dpr, onTextRun) =>
       renderPptxFocusedSlide(this._pres!, canvas, slide, 'worker', {
         width, dpr, imageResources: this._opts.imageResources, onTextRun,
+        ...(this._opts.errorPlaceholder === undefined ? {} : { errorPlaceholder: this._opts.errorPlaceholder }),
       }),
     commitBitmap: (_slide, _slot, dispatcher, generation, bitmap, width) => {
       const size = { cssWidth: Math.round(width), cssHeight: Math.round(this._slideHeightPx()) };
@@ -210,6 +213,7 @@ export class PptxScrollViewer implements ZoomableViewer {
         width, dpr,
         ...(settled ? {} : { imageResources: this._opts.imageResources }),
         onTextRun,
+        ...(this._opts.errorPlaceholder === undefined ? {} : { errorPlaceholder: this._opts.errorPlaceholder }),
       }),
     commitRuns: (slide, slot, runs, _canvas, width, wantedRuns, settled) =>
       this._commitRenderedRuns(slide, slot, runs, width, wantedRuns, settled),
@@ -224,6 +228,7 @@ export class PptxScrollViewer implements ZoomableViewer {
     width: () => this._slideWidthPx(),
     height: () => this._slideHeightPx(),
     imageResources: () => this._opts.imageResources,
+    errorPlaceholder: () => this._opts.errorPlaceholder,
     textSelection: () => this._opts.enableTextSelection === true,
     findActive: () => this._findActive,
     mediaEnabled: () => this._opts.enableMediaPlayback === true,
@@ -346,6 +351,7 @@ export class PptxScrollViewer implements ZoomableViewer {
       this._hasComments = false;
       this._commentScanFrontier = 0;
       this._commentNavigation.begin();
+      this._partFailureDelivery.attach(null);
       this._layout.unbind();
       if (previous) {
         for (const [index, slot] of [...this._slots]) this._recycleSlot(index, slot);
@@ -361,6 +367,7 @@ export class PptxScrollViewer implements ZoomableViewer {
       this._commentScanFrontier = 0;
       this._scanAvailableComments(pres, false);
       this._layout.bind(pres);
+      this._partFailureDelivery.attach(pptxPartFailureLog(pres));
     },
     mountOpeningWindow: async () => {
       const initialRenders: Promise<void>[] = [];
@@ -428,6 +435,7 @@ export class PptxScrollViewer implements ZoomableViewer {
    *  reporting an error so a rejection that lands after teardown is swallowed
    *  rather than surfaced to a `onError` on a dead viewer. */
   private _destroyed = false;
+  private readonly _partFailureDelivery: PartFailureDelivery<PptxPartFailure>;
   /** Render generation, bumped on every effective `setScale` (and the resize
    *  re-fit in the zoom controller, which routes through `setScale`). Stamped into each async render
    *  dispatch; a resolution whose captured epoch ≠ this value is STALE — its
@@ -492,6 +500,8 @@ export class PptxScrollViewer implements ZoomableViewer {
     this._container = container;
     this._opts = opts;
     this._errorRouter = new CanvasViewerErrorRouter('PptxScrollViewer', opts.onError);
+    prepareErrorPlaceholder(opts.errorPlaceholder);
+    this._partFailureDelivery = new PartFailureDelivery('PptxScrollViewer', opts.onPartFailure, (failure) => failure.slideIndex);
     const elementHitTolerance = opts.elementHitTolerance ?? 6;
     if (!Number.isFinite(elementHitTolerance) || elementHitTolerance < 0) {
       throw new RangeError('elementHitTolerance must be a finite non-negative number.');
@@ -538,6 +548,7 @@ export class PptxScrollViewer implements ZoomableViewer {
 
     if (this._borrowed) {
       this._layout.bind(borrowedPresentation!);
+      this._partFailureDelivery.attach(pptxPartFailureLog(borrowedPresentation!));
       // A borrowed engine is already loaded, so lay out + mount the first
       // window immediately. relayout() is idempotent and defers under a
       // zero-width container (the resize path re-runs it once width appears).
@@ -551,6 +562,12 @@ export class PptxScrollViewer implements ZoomableViewer {
 
   get slideCount(): number {
     return this._pres?.slideCount ?? 0;
+  }
+
+  /** Slides of the loaded presentation whose part failed to parse (#1974);
+   *  `[]` before load and after destroy. */
+  get partFailures(): readonly PptxPartFailure[] {
+    return this._destroyed ? [] : this._pres?.partFailures ?? [];
   }
 
   /** Number of opening slides currently paintable under progressive layout. */
@@ -1244,6 +1261,7 @@ export class PptxScrollViewer implements ZoomableViewer {
     this._destroyed = true;
     this._commentNavigation.begin();
     this._errorRouter.close();
+    this._partFailureDelivery.close();
     this._invalidateFind();
     this._findActive = false;
     this._layout.unbind();

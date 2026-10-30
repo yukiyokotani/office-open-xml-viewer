@@ -497,6 +497,12 @@ self.onmessage = async (e: MessageEvent<
       // caller's inherited canvas language; a request without one keeps a
       // local surface.
       const canvas = req.canvas ?? new OffscreenCanvas(1, 1);
+      if (renderWorksheet.parseError && req.opts.errorPlaceholderText?.state === 'resolve-on-main') {
+        // #1974: the caller's function runs on the main thread only. Reply
+        // once without painting; main resolves after admitting this terminal.
+        post({ type: 'errorPlaceholderRequired', id, sheetIndex: req.sheetIndex });
+        return;
+      }
       await renderWorksheetViewport(
         { ...workerRenderDeps(renderWorksheet, workbook.styles, renderers), cjkFallback },
         canvas,

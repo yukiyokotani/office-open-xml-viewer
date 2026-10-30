@@ -80,6 +80,7 @@
     "./internal/font-sources": "./src/internal/font-sources.ts",
     "./internal/wasm-runtime-generation": "./src/internal/wasm-runtime-generation.ts",
     "./internal/abort": "./src/internal/abort.ts",
+    "./internal/part-failures": "./src/internal/part-failures.ts",
     "./internal/deferred": "./src/internal/deferred.ts",
     "./internal/utf16-prefix": "./src/internal/utf16-prefix.ts",
     "./internal/selection-data": "./src/internal/selection-data.ts",
