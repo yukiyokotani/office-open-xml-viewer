@@ -172,13 +172,12 @@ test('browser parser carries all inherited attributes through runs, fields, brea
   expect(parsed.breaks[1].endRunProperties.fontSize).toBe(96);
   expect(parsed.table).toHaveLength(2);
   for (const run of parsed.table) {
-    // A defPPr size (#1620 controls) and fill (#1989 controls) have no effect
-    // in PowerPoint. The parser still cascades its other character properties
-    // into cell runs and fields; PowerPoint ignores those too (#1989 font
-    // controls), which is tracked separately.
+    // PowerPoint ignores the cell's defPPr (#1620, #1989 and #1992 controls):
+    // its size, fill, lang and cs face reach neither the run nor the field.
+    // Bold comes from the paragraph's own pPr/defRPr.
     expect(run).toMatchObject({ bold: true, fontSize: null, color: null });
-    expect(run.characterAttributes.lang).toBe('ja-JP');
-    expect(run.fontFamilyCs).toBe('Amiri');
+    expect(run.characterAttributes.lang).toBeUndefined();
+    expect(run.fontFamilyCs ?? null).toBeNull();
   }
 });
 

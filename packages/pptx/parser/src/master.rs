@@ -3641,10 +3641,10 @@ mod placeholder_geometry_tests {
     /// Review regression (#1620 x #1625): only the Latin face and size of
     /// dt/ftr/sldNum switch to defaultTextStyle. Every other character
     /// property of a footer still inherits master otherStyle.
-    /// #1620 controls: a list style's defPPr face and size have no effect at
-    /// any tier; other defPPr character properties keep the §21.1.2.4 base.
+    /// #1620/#1992 controls: a list style's defPPr has no effect at any tier,
+    /// neither its face and size nor its other character properties (bold).
     #[test]
-    fn def_ppr_face_and_size_are_ignored() {
+    fn def_ppr_character_properties_are_ignored() {
         let dts = format!(
             r#"<p:defaultTextStyle {PML_A}><a:defPPr><a:defRPr sz="1900"><a:latin typeface="Perpetua"/></a:defRPr></a:defPPr>
               <a:lvl1pPr><a:defRPr sz="2000"><a:latin typeface="Century Gothic"/></a:defRPr></a:lvl1pPr></p:defaultTextStyle>"#
@@ -3677,8 +3677,8 @@ mod placeholder_geometry_tests {
         assert_eq!(
             runs,
             vec![
-                (Some("Century Gothic".to_owned()), Some(20.0), Some(true)),
-                (Some("Corbel".to_owned()), Some(18.0), Some(true)),
+                (Some("Century Gothic".to_owned()), Some(20.0), None),
+                (Some("Corbel".to_owned()), Some(18.0), None),
             ]
         );
     }
