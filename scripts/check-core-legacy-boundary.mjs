@@ -70,6 +70,12 @@ export const RULES = [
     id: 'legacy-binary-structure',
     pattern: /\bsprm[A-Z]\w*|\b(?:PAPX|CHPX|SEPX|MSOTXFL|PlcfHdd)\b|\bWordDocument\b|PowerPoint Document/,
   },
+  // The OpenDocument companion (packages/opendocument) plugs in the same way:
+  // the OOXML packages carry no ODF package, reader, namespace or element
+  // vocabulary, and name only each surface's own opt-in option key.
+  { id: 'odf-package', pattern: /ooxml-opendocument|opendocument[-_]parser|packages\/opendocument/ },
+  { id: 'odf-format-name', pattern: /\bod[tsp]\b/i },
+  { id: 'odf-vocabulary', pattern: /urn:oasis:names:tc:opendocument|vnd\.oasis\.opendocument/i },
 ];
 
 /** A path matcher for exactly the listed files. */
@@ -118,6 +124,11 @@ export const ALLOWED_TOKENS = [
   { rule: 'legacy-format-name', path: /^packages\/pptx\//, token: /^legacyPpt$/ },
   // The Node facade carries all three format sessions.
   { rule: 'legacy-format-name', path: /^packages\/node\//, token: /^legacy(?:Doc|Xls|Ppt)$/ },
+  // The OpenDocument option keys follow the same per-surface rule.
+  { rule: 'odf-format-name', path: /^packages\/docx\//, token: /^odt$/ },
+  { rule: 'odf-format-name', path: /^packages\/xlsx\//, token: /^ods$/ },
+  { rule: 'odf-format-name', path: /^packages\/pptx\//, token: /^odp$/ },
+  { rule: 'odf-format-name', path: /^packages\/node\//, token: /^od[tsp]$/ },
   // XLSX may cite the Excel binary specifications as Excel-behaviour
   // evidence for SpreadsheetML semantics.
   { rule: 'legacy-binary-spec', path: /^packages\/xlsx\//, token: /^MS-XLSB?$/, commentOnly: true },
@@ -376,8 +387,11 @@ function isPropertyName(node, parent) {
   return parent.type === 'LabeledStatement' && parent.label === node;
 }
 
-function isLegacyModule(path) {
-  return /ooxml-legacy-office|(?:^|[\\/])legacy-office(?:[\\/]|$)/.test(path);
+/** The boundary rule a module path violates: a companion package's source. */
+function companionModuleRule(path) {
+  if (/ooxml-legacy-office|(?:^|[\\/])legacy-office(?:[\\/]|$)/.test(path)) return 'legacy-package';
+  if (/ooxml-opendocument|(?:^|[\\/])packages[\\/]opendocument(?:[\\/]|$)/.test(path)) return 'odf-package';
+  return undefined;
 }
 
 /** Use the same compiler options and module resolver as TypeScript's program. */
@@ -534,13 +548,15 @@ export function findViolations(files, { resolveModule } = {}) {
             ? nodePath.posix.normalize(nodePath.posix.join(nodePath.posix.dirname(path), specifier))
             : specifier;
           const compilerResolved = resolveModule?.(path, specifier);
-          if (isLegacyModule(resolved) || (compilerResolved && isLegacyModule(compilerResolved))) {
+          const rule = companionModuleRule(resolved)
+            ?? (compilerResolved ? companionModuleRule(compilerResolved) : undefined);
+          if (rule) {
             const line = literal.loc.start.line;
-            if (!violations.some((entry) => entry.path === path && entry.line === line && entry.rule === 'legacy-package')) {
-              violations.push({ path, line, rule: 'legacy-package', text: specifier.slice(0, 160) });
+            if (!violations.some((entry) => entry.path === path && entry.line === line && entry.rule === rule)) {
+              violations.push({ path, line, rule, text: specifier.slice(0, 160) });
             }
           }
-          if (compilerResolved && !isLegacyModule(compilerResolved)
+          if (compilerResolved && !companionModuleRule(compilerResolved)
             && /\.[cm]?[jt]sx?$/.test(compilerResolved)
             && !compilerResolved.includes(`${nodePath.sep}node_modules${nodePath.sep}`)
             && (compilerResolved === root || compilerResolved.startsWith(root + nodePath.sep))) {

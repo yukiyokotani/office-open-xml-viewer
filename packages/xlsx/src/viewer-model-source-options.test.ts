@@ -20,12 +20,19 @@ describe('XlsxViewer load options', () => {
       getWorksheet: vi.fn().mockResolvedValue(undefined),
     } as unknown as XlsxWorkbook;
     const load = vi.spyOn(XlsxWorkbook, 'load').mockResolvedValue(workbook);
-    for (const [options, expected] of [[{ legacyXls: source }, source], [{}, undefined]] as const) {
+    const ods = { ...source } as typeof source;
+    for (const [options, legacyXls, expectedOds] of [
+      [{ legacyXls: source }, source, undefined],
+      [{ ods }, undefined, ods],
+      [{ legacyXls: source, ods }, source, ods],
+      [{}, undefined, undefined],
+    ] as const) {
       const viewer = new XlsxViewer(makeContainer() as unknown as HTMLElement, options);
       vi.spyOn(viewer as unknown as { showSheet(index: number): Promise<void> }, 'showSheet')
         .mockResolvedValue(undefined);
       await viewer.load(new ArrayBuffer(1));
-      expect(load.mock.lastCall?.[1]?.legacyXls).toEqual(expected);
+      expect(load.mock.lastCall?.[1]?.legacyXls).toEqual(legacyXls);
+      expect(load.mock.lastCall?.[1]?.ods).toEqual(expectedOds);
       viewer.destroy();
     }
   });

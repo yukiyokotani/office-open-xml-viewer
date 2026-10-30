@@ -159,6 +159,21 @@ test('admits only each surface\'s own opt-in source option key', () => {
   assert.deepEqual(at('packages/core/src/x.ts', 'interface O { legacyDoc?: unknown; }'), ['legacy-format-name']);
 });
 
+test('admits only each surface\'s own OpenDocument option key and no ODF vocabulary', () => {
+  const at = (path, text) => findViolations([{ path, text }]).map((v) => v.rule);
+  assert.deepEqual(at('packages/docx/src/x.ts', "interface O { odt?: ModelSource<'docx'>; }"), []);
+  assert.deepEqual(at('packages/xlsx/src/x.ts', 'if (opts.ods !== undefined) {}'), []);
+  assert.deepEqual(at('packages/pptx/src/x.ts', 'load(bytes, { odp });'), []);
+  assert.deepEqual(at('packages/node/src/x.ts', 'const { odt, ods, odp } = options;'), []);
+  assert.deepEqual(at('packages/docx/src/x.ts', 'load(bytes, { ods });'), ['odf-format-name']);
+  assert.deepEqual(at('packages/core/src/x.ts', 'interface O { odt?: unknown; }'), ['odf-format-name']);
+  // The surface's own key spelling is admitted; the companion import is not.
+  assert.deepEqual(at('packages/xlsx/src/x.ts', "import { ods } from '@silurus/ooxml-opendocument/ods';"),
+    ['odf-package']);
+  assert.deepEqual(at('packages/ooxml-common/src/x.rs', 'const NS: &str = "urn:oasis:names:tc:opendocument:xmlns:office:1.0";'),
+    ['odf-vocabulary']);
+});
+
 test('decodes escaped static, dynamic, require and re-export module specifiers', () => {
   for (const code of [
     "import x from '@silurus/ooxml-\\u006cegacy-office';",
@@ -280,6 +295,29 @@ test('follows a relay outside guarded roots to a dynamic legacy import', () => {
     }], { resolveModule: createTypeScriptResolver(root) });
     assert.ok(violations.some((violation) => violation.rule === 'legacy-package'
       && violation.path === 'shared/reader.ts'));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('relative imports, aliases and relays into the OpenDocument package are rejected', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ooxml-boundary-odf-'));
+  try {
+    mkdirSync(join(root, 'packages/docx/src'), { recursive: true });
+    mkdirSync(join(root, 'packages/opendocument/src'), { recursive: true });
+    mkdirSync(join(root, 'shared'), { recursive: true });
+    writeFileSync(join(root, 'packages/opendocument/src/index.ts'), 'export const reader = 1;');
+    writeFileSync(join(root, 'packages/docx/tsconfig.json'), JSON.stringify({
+      compilerOptions: { baseUrl: '../..', paths: { '@reader': ['packages/opendocument/src/index.ts'] }, moduleResolution: 'bundler', module: 'esnext' },
+    }));
+    writeFileSync(join(root, 'shared/reader.ts'),
+      "export const reader = () => import('../packages/opendocument/src/index.ts');");
+    const resolveModule = createTypeScriptResolver(root);
+    const rulesOf = (text) => findViolations([{ path: 'packages/docx/src/probe.ts', text }], { resolveModule });
+    assert.deepEqual(rulesOf("import { x } from '../../opendocument/src/index.ts';").map((v) => v.rule), ['odf-package']);
+    assert.deepEqual(rulesOf("import { reader } from '@reader';").map((v) => v.rule), ['odf-package']);
+    assert.ok(rulesOf("export { reader } from '../../../shared/reader.ts';")
+      .some((v) => v.rule === 'odf-package' && v.path === 'shared/reader.ts'));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

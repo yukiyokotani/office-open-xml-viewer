@@ -122,6 +122,15 @@ import { docxPartFailureLog, type DocxPartFailure } from './part-failures.js';
  *  Font acquisition stays inside the document/browser paths: ordinary loading
  *  must not require an application font catalog or device-font permission.
  *  Embedded fonts and the optional application font sources remain supported. */
+/** Whether a load configures any model source (`legacyDoc` or `odt`).
+ *  Only configured loads import the model-source path; an empty list still
+ *  counts, so the caller's view-default precedence does not depend on input. */
+export function docxModelSourcesConfigured(
+  opts: Pick<LoadOptions, 'legacyDoc' | 'odt'>,
+): boolean {
+  return opts.legacyDoc !== undefined || opts.odt !== undefined;
+}
+
 export interface LoadOptions extends CoreLoadOptions {
   /** Continue paragraph footnotes across physical pages. Omitted means true:
    * the library's default display policy, chosen to follow Word's page
@@ -138,6 +147,15 @@ export interface LoadOptions extends CoreLoadOptions {
    * `TypeError`. Omitting this option imports and runs nothing extra.
    */
   legacyDoc?: ModelSource<'docx'>;
+  /**
+   * Opt-in model source for OpenDocument text input (a `ModelSource<'docx'>`, such as the
+   * one an OpenDocument companion package exports). It is asked after
+   * `legacyDoc`; when its `claim()` accepts the raw bytes it opens them through its
+   * own module, otherwise the ordinary OOXML path runs unchanged. A source for
+   * another format is a `TypeError`. Omitting this option imports and runs
+   * nothing extra.
+   */
+  odt?: ModelSource<'docx'>;
   /**
    * Opt-in OMML equation engine. Import it from the separate `@silurus/ooxml/math`
    * entry and pass it in: `import { math } from '@silurus/ooxml/math'`. When
@@ -532,7 +550,7 @@ export class DocxDocument {
       if (signal?.aborted) throw new PaginationAbortError();
     };
     checkAbort();
-    if (__OOXML_MODEL_SOURCES__ && opts.legacyDoc !== undefined) {
+    if (__OOXML_MODEL_SOURCES__ && (opts.legacyDoc !== undefined || opts.odt !== undefined)) {
       const { loadDocxModelSource } = await import('./internal/document-model-source.js');
       const modelDocument = await loadDocxModelSource(source, opts, control);
       if (signal?.aborted) {

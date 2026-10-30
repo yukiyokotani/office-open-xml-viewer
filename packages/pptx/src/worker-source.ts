@@ -122,6 +122,7 @@ self.onmessage = async (
             new Uint8Array(request.buffer),
             request.source,
             request.sourceTransfer,
+            { resourcePolicy: request.resourcePolicy },
           );
           bootstrap = JSON.parse(new TextDecoder().decode(
             source.execute((current) => current.presentation_bootstrap()),

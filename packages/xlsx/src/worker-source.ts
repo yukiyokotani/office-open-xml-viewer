@@ -133,6 +133,7 @@ self.onmessage = async (e: MessageEvent<WorkerRequest | PullSessionCommand<numbe
           req.source,
           (font) => owner.requestHostLayoutFromPage(self as unknown as Parameters<typeof owner.requestHostLayoutFromPage>[0], font),
           req.sourceTransfer,
+          { resourcePolicy: req.resourcePolicy, worksheetPolicy },
         );
       } else {
         const [maxEntry, maxTotal, maxEntries] = resourcePolicyForWasm(req.resourcePolicy);

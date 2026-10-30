@@ -403,6 +403,7 @@ self.onmessage = async (e: MessageEvent<
             font.italic ? 'italic' : 'normal',
           ),
           req.sourceTransfer,
+          { resourcePolicy: req.resourcePolicy, worksheetPolicy },
         );
         bootstrap = readXlsxArchiveBootstrap(
           () => JSON.parse(new TextDecoder().decode(

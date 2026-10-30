@@ -12,10 +12,16 @@ import { parse } from '@babel/parser';
 
 const git = (args) => execFileSync('git', args, { encoding: 'utf8' }).trimEnd();
 const base = git(['merge-base', 'HEAD', 'origin/main']);
-// The opt-in source option key, before and after its per-format rename.
-const SOURCE_KEY = '(?:modelSources|legacyDoc|legacyXls|legacyPpt)';
+// The opt-in source option keys: the former list, the legacy readers and the
+// OpenDocument readers.
+const SOURCE_KEY = '(?:modelSources|legacyDoc|legacyXls|legacyPpt|odt|ods|odp)';
 const SOURCE_ABSENT = new RegExp(`^options\\.${SOURCE_KEY}===undefined$`);
-const SOURCE_PRESENT = new RegExp(`^(?:__OOXML_MODEL_SOURCES__&&)?(?:opts|options)\\.${SOURCE_KEY}!==undefined$`);
+// A gate may name several source options of its format together:
+// `(opts.legacyDoc !== undefined || opts.odt !== undefined)`.
+const SOURCE_PRESENT_TERM = `(?:opts|options)\\.${SOURCE_KEY}!==undefined`;
+const SOURCE_PRESENT = new RegExp(
+  `^(?:__OOXML_MODEL_SOURCES__&&)?(?:${SOURCE_PRESENT_TERM}|\\(${SOURCE_PRESENT_TERM}(?:\\|\\|${SOURCE_PRESENT_TERM})+\\))$`,
+);
 const cases = [
   ['packages/docx/src/internal/node-acquisition.ts', 'acquireDocxNodeDocument'],
   ['packages/xlsx/src/internal/node-acquisition.ts', 'acquireXlsxNodeSession'],

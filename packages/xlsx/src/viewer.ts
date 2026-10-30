@@ -347,7 +347,7 @@ export interface XlsxViewerOptions extends XlsxSheetViewerOptions {
  *  load option a type error here until it is forwarded, so the viewer path
  *  cannot silently drop it while the workbook API honours it (#1917). */
 type ForwardedViewerLoadOptions = {
-  [K in Exclude<keyof Required<LoadOptions>, 'legacyXls'>]: LoadOptions[K] | undefined;
+  [K in Exclude<keyof Required<LoadOptions>, 'legacyXls' | 'ods'>]: LoadOptions[K] | undefined;
 };
 
 /** Project viewer options onto the workbook load contract. Validation and
@@ -373,7 +373,11 @@ function viewerLoadOptions(opts: LoadOptions, mode: 'main' | 'worker'): LoadOpti
     tiff: opts.tiff,
     mode,
   };
-  return opts.legacyXls === undefined ? forwarded : { ...forwarded, legacyXls: opts.legacyXls };
+  return {
+    ...forwarded,
+    ...(opts.legacyXls === undefined ? undefined : { legacyXls: opts.legacyXls }),
+    ...(opts.ods === undefined ? undefined : { ods: opts.ods }),
+  };
 }
 
 type InternalXlsxViewerOptions = (XlsxViewerOptions | XlsxSheetViewerOptions) & {
