@@ -1,0 +1,31 @@
+[package]
+name = "opendocument-parser"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "OpenDocument readers projecting into the OOXML renderer models"
+repository = "https://github.com/yukiyokotani/office-open-xml-viewer"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+odt = ["dep:js-sys", "dep:docx-model"]
+
+[dependencies]
+console_error_panic_hook = { workspace = true }
+js-sys = { version = "0.3", optional = true }
+wasm-bindgen = { workspace = true }
+roxmltree = { workspace = true }
+ooxml-common = { workspace = true }
+docx-model = { workspace = true, optional = true, features = ["owned-source-cursor"] }
+
+[dev-dependencies]
+zip = { workspace = true }
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-Oz"]
+
+[package.metadata.wasm-pack.profile.release.wasm-bindgen]
+omit-default-module-path = true

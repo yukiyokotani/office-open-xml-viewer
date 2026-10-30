@@ -3,6 +3,7 @@ resolver = "2"
 members = [
   "packages/ooxml-common",
   "packages/legacy-office/parser",
+  "packages/opendocument/parser",
   "packages/pptx/model",
   "packages/xlsx/model",
   "packages/docx/model",

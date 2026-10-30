@@ -44,7 +44,11 @@ export interface DirectSourceGlue {
   default(input: { module_or_path: unknown }): Promise<unknown>;
 }
 
-export function createDirectSourceRuntime<G extends DirectSourceGlue, A extends DirectSourceArchive>(
+export function createDirectSourceRuntime<
+  G extends DirectSourceGlue,
+  A extends DirectSourceArchive,
+  O = undefined,
+>(
   config: Readonly<{
     label: string;
     /**
@@ -56,10 +60,14 @@ export function createDirectSourceRuntime<G extends DirectSourceGlue, A extends 
     mapNativeError?(error: unknown): unknown;
     loadGlue(): Promise<G>;
     resolveWasm(wasmUrl: string): Promise<unknown>;
-    construct(glue: G, bytes: Uint8Array): A;
+    /** `options` is the per-load value passed to `open()` (for example the
+     *  caller's resource policy); it never outlives the construction call. */
+    construct(glue: G, bytes: Uint8Array, options: O | undefined): A;
     closeNative(archive: A): void;
   }>,
-): Readonly<{ open(bytes: Uint8Array, wasmUrl: string, signal?: AbortSignal): Promise<OwnedDirectSource<A>> }> {
+): Readonly<{
+  open(bytes: Uint8Array, wasmUrl: string, signal?: AbortSignal, options?: O): Promise<OwnedDirectSource<A>>;
+}> {
   let initialized: Promise<G> | undefined;
   let initializedUrl: string | undefined;
   let initializationPoison: WasmTrapError | undefined;
@@ -110,7 +118,7 @@ export function createDirectSourceRuntime<G extends DirectSourceGlue, A extends 
   };
 
   return Object.freeze({
-    async open(bytes, wasmUrl, signal) {
+    async open(bytes, wasmUrl, signal, options) {
       const poisoned = failure();
       if (poisoned) throw poisoned;
       const validatedUrl = validateDirectWasmUrl(wasmUrl, config.label);
@@ -127,7 +135,7 @@ export function createDirectSourceRuntime<G extends DirectSourceGlue, A extends 
       throwIfAborted(signal, config.label);
       let archive: A | undefined;
       try {
-        archive = runNative(() => config.construct(glue, bytes));
+        archive = runNative(() => config.construct(glue, bytes, options));
         throwIfAborted(signal, config.label);
       } catch (error) {
         if (archive) {
