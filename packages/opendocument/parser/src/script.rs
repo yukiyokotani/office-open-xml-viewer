@@ -1,7 +1,7 @@
 //! Script classes for script-dependent text properties (ODF Part 3 §20.358,
 //! Table 22 "Unicode Code Point to Script Type Mapping").
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ScriptClass {
     Latin,
     Asian,

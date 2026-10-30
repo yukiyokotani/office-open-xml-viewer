@@ -36,6 +36,12 @@ const MAX_SECTION_DEPTH: usize = 32;
 const MAX_RETAINED_TEXT_BYTES: usize = 64 * 1024 * 1024;
 /// Implementation bound on paragraphs.
 const MAX_PARAGRAPHS: usize = 1_000_000;
+/// Implementation bound on the characters of one paragraph (after `text:s`
+/// expansion). It bounds the transient token buffer of §6.1.2 normalization
+/// (12 bytes per character) independently of the document-wide text budget.
+const MAX_PARAGRAPH_CHARS: usize = 1_000_000;
+/// Implementation bound on distinct span contexts in one paragraph.
+const MAX_PARAGRAPH_CONTEXTS: usize = 65_536;
 
 pub fn read(package: &OdfPackage) -> Result<Document, String> {
     let styles_text = package.read_text("styles.xml")?;
@@ -434,11 +440,19 @@ struct TextContext<'a> {
     styles: Vec<StyleRef<'a>>,
 }
 
-enum Token<'a> {
-    Char(char, TextContext<'a>),
+/// One paragraph's flattened inline content. Each token refers to its
+/// formatting context by index into `contexts` (one entry per span).
+struct Inline<'a> {
+    contexts: Vec<TextContext<'a>>,
+    tokens: Vec<Token>,
+}
+
+#[derive(Clone, Copy)]
+enum Token {
+    Char(char, u32),
     /// `text:s`: one space that is never collapsed.
-    Space(TextContext<'a>),
-    Tab(TextContext<'a>),
+    Space(u32),
+    Tab(u32),
     LineBreak,
 }
 
@@ -568,9 +582,12 @@ impl<'a> Reader<'a> {
         collected.paragraph.default_font_size = Some(mark.size);
         collected.paragraph.default_font_family = Some(mark.family.clone());
 
-        let mut tokens = Vec::new();
-        self.inline(node, &context, &mut tokens, 0)?;
-        if tokens.iter().any(|t| matches!(t, Token::Tab(_)))
+        let mut inline = Inline {
+            contexts: vec![context],
+            tokens: Vec::new(),
+        };
+        self.inline(node, 0, &mut inline, 0)?;
+        if inline.tokens.iter().any(|t| matches!(t, Token::Tab(_)))
             && (collected.paragraph.indent_left != 0.0 || collected.paragraph.indent_first != 0.0)
         {
             // LibreOffice measures tab positions from the paragraph indent
@@ -578,7 +595,9 @@ impl<'a> Reader<'a> {
             // coincide only without an indent.
             return Err(unsupported("tab-with-indent"));
         }
-        self.emit_runs(collapse(tokens), &mut collected.paragraph)?;
+        let tokens = collapse(std::mem::take(&mut inline.tokens));
+        self.emit_runs(&tokens, &inline.contexts, &mut collected.paragraph)?;
+        check_line_scale(&collected.paragraph)?;
         self.paragraphs.push(collected);
         Ok(())
     }
@@ -588,8 +607,8 @@ impl<'a> Reader<'a> {
     fn inline(
         &mut self,
         node: roxmltree::Node<'_, '_>,
-        context: &TextContext<'a>,
-        tokens: &mut Vec<Token<'a>>,
+        context: u32,
+        inline: &mut Inline<'a>,
         depth: usize,
     ) -> Result<(), String> {
         if depth > MAX_INLINE_DEPTH {
@@ -598,14 +617,10 @@ impl<'a> Reader<'a> {
         for child in node.children() {
             if child.is_text() {
                 let text = child.text().unwrap_or("");
-                self.retained_text_bytes = self
-                    .retained_text_bytes
-                    .checked_add(text.len())
-                    .filter(|total| *total <= MAX_RETAINED_TEXT_BYTES)
-                    .ok_or_else(|| {
-                        "OpenDocument text exceeds the retained text limit".to_string()
-                    })?;
-                tokens.extend(text.chars().map(|c| Token::Char(c, context.clone())));
+                self.charge_text(text.len(), text.chars().count(), inline)?;
+                inline
+                    .tokens
+                    .extend(text.chars().map(|c| Token::Char(c, context)));
                 continue;
             }
             if !child.is_element() {
@@ -628,12 +643,16 @@ impl<'a> Reader<'a> {
                                 .find(Scope::Content, Family::Text, name)
                                 .ok_or_else(|| invalid("a span names a missing style"))?;
                             let mut styles = self.sheet.chain(style)?;
-                            styles.extend(context.styles.iter().copied());
-                            TextContext { styles }
+                            styles.extend(inline.contexts[context as usize].styles.iter().copied());
+                            if inline.contexts.len() >= MAX_PARAGRAPH_CONTEXTS {
+                                return Err(unsupported("span-count"));
+                            }
+                            inline.contexts.push(TextContext { styles });
+                            (inline.contexts.len() - 1) as u32
                         }
-                        None => context.clone(),
+                        None => context,
                     };
-                    self.inline(child, &nested, tokens, depth + 1)?;
+                    self.inline(child, nested, inline, depth + 1)?;
                 }
                 (Some(NS_TEXT), "s") => {
                     let count = child
@@ -641,13 +660,23 @@ impl<'a> Reader<'a> {
                         .map(|v| v.parse::<usize>().map_err(|_| invalid("bad text:s count")))
                         .transpose()?
                         .unwrap_or(1);
-                    if count == 0 || count > 4096 {
+                    if count == 0 {
                         return Err(invalid("text:s count is out of range"));
                     }
-                    tokens.extend((0..count).map(|_| Token::Space(context.clone())));
+                    // Expanded spaces are retained text like character data.
+                    self.charge_text(count, count, inline)?;
+                    inline
+                        .tokens
+                        .extend((0..count).map(|_| Token::Space(context)));
                 }
-                (Some(NS_TEXT), "tab") => tokens.push(Token::Tab(context.clone())),
-                (Some(NS_TEXT), "line-break") => tokens.push(Token::LineBreak),
+                (Some(NS_TEXT), "tab") => {
+                    self.charge_text(1, 1, inline)?;
+                    inline.tokens.push(Token::Tab(context));
+                }
+                (Some(NS_TEXT), "line-break") => {
+                    self.charge_text(1, 1, inline)?;
+                    inline.tokens.push(Token::LineBreak);
+                }
                 (
                     Some(NS_TEXT),
                     "soft-page-break"
@@ -664,6 +693,25 @@ impl<'a> Reader<'a> {
         Ok(())
     }
 
+    /// Charge retained text before the tokens are allocated: the
+    /// document-wide byte budget and the per-paragraph character bound.
+    fn charge_text(
+        &mut self,
+        bytes: usize,
+        chars: usize,
+        inline: &Inline<'a>,
+    ) -> Result<(), String> {
+        self.retained_text_bytes = self
+            .retained_text_bytes
+            .checked_add(bytes)
+            .filter(|total| *total <= MAX_RETAINED_TEXT_BYTES)
+            .ok_or_else(|| "OpenDocument text exceeds the retained text limit".to_string())?;
+        if inline.tokens.len().saturating_add(chars) > MAX_PARAGRAPH_CHARS {
+            return Err("OpenDocument paragraph exceeds the character limit".to_string());
+        }
+        Ok(())
+    }
+
     /// Script classes (§20.358 Table 22). A character Table 22 does not map
     /// takes the class of the preceding character — observed LibreOffice
     /// behaviour for U+0020, U+00A0, U+2014 and U+1F600 between and after
@@ -672,11 +720,16 @@ impl<'a> Reader<'a> {
     /// class is admitted only when every class resolves to the same face.
     fn emit_runs(
         &mut self,
-        tokens: Vec<Token<'a>>,
+        tokens: &[Token],
+        contexts: &[TextContext<'a>],
         paragraph: &mut DocParagraph,
     ) -> Result<(), String> {
+        // Properties are resolved once per (context, class); a run continues
+        // while they are equal, so merging is linear in the text.
+        let mut cache: HashMap<(u32, ScriptClass), RunProperties> = HashMap::new();
+        let mut current: Option<(u32, ScriptClass)> = None;
         let mut previous: Option<ScriptClass> = None;
-        for token in tokens {
+        for &token in tokens {
             let (c, context) = match token {
                 Token::LineBreak => {
                     paragraph.runs.push(DocRun::Break {
@@ -692,7 +745,7 @@ impl<'a> Reader<'a> {
                 Some(class) => class,
                 None => match previous {
                     Some(class) => class,
-                    None => self.uniform_class(&context)?,
+                    None => self.uniform_class(&contexts[context as usize])?,
                 },
             };
             if class != ScriptClass::Latin {
@@ -701,16 +754,23 @@ impl<'a> Reader<'a> {
                 return Err(unsupported("script-class"));
             }
             previous = Some(class);
-            let properties = self.run_properties(&context, class)?;
-            if let Some(DocRun::Text(last)) = paragraph.runs.last_mut() {
-                if properties.continues(last) {
-                    last.text.push(c);
-                    continue;
-                }
+            let key = (context, class);
+            if let std::collections::hash_map::Entry::Vacant(entry) = cache.entry(key) {
+                entry.insert(self.run_properties(&contexts[context as usize], class)?);
             }
-            let mut run = properties.text_run();
-            run.text.push(c);
-            paragraph.runs.push(DocRun::Text(Box::new(run)));
+            let continues = match (current, paragraph.runs.last_mut()) {
+                (Some(last_key), Some(DocRun::Text(last))) if cache[&last_key] == cache[&key] => {
+                    last.text.push(c);
+                    true
+                }
+                _ => false,
+            };
+            if !continues {
+                let mut run = cache[&key].text_run();
+                run.text.push(c);
+                paragraph.runs.push(DocRun::Text(Box::new(run)));
+            }
+            current = Some(key);
         }
         Ok(())
     }
@@ -790,13 +850,37 @@ impl<'a> Reader<'a> {
     }
 }
 
+/// A proportional line height above 100% is admitted only where the measured
+/// equivalence holds: every run has the paragraph mark's face and size, and no
+/// text is raised or lowered.
+fn check_line_scale(paragraph: &DocParagraph) -> Result<(), String> {
+    if paragraph.line_spacing.is_none() {
+        return Ok(());
+    }
+    let mark = paragraph.paragraph_mark_font_facts.as_ref();
+    let uniform = paragraph.runs.iter().all(|run| match run {
+        DocRun::Text(text) => {
+            text.position.is_none()
+                && mark.is_some_and(|m| {
+                    m.font_size == Some(text.font_size) && m.font_family == text.font_family
+                })
+        }
+        _ => true,
+    });
+    if uniform {
+        Ok(())
+    } else {
+        Err(unsupported("line-height-mixed-text"))
+    }
+}
+
 /// §6.1.2 white-space collapsing over a paragraph's character data: tab, CR
 /// and LF become spaces, leading and trailing spaces are removed and runs of
 /// spaces collapse to one. `text:s`, `text:tab` and `text:line-break` keep
 /// the characters they represent and are not collapsed.
-fn collapse(tokens: Vec<Token<'_>>) -> Vec<Token<'_>> {
-    let mut out: Vec<Token<'_>> = Vec::with_capacity(tokens.len());
-    let mut pending: Option<Token<'_>> = None;
+fn collapse(tokens: Vec<Token>) -> Vec<Token> {
+    let mut out: Vec<Token> = Vec::with_capacity(tokens.len());
+    let mut pending: Option<Token> = None;
     let mut started = false;
     for token in tokens {
         match token {
@@ -975,7 +1059,10 @@ impl RunProperties {
         };
         // §20.227 follows XSL's language-sensitive case mapping; the DOCX
         // renderer uppercases locale-independently. Not yet measured.
-        if cascade.get(NS_FO, "text-transform").is_some_and(|v| v != "none") {
+        if cascade
+            .get(NS_FO, "text-transform")
+            .is_some_and(|v| v != "none")
+        {
             return Err(unsupported("text-transform"));
         }
         let caps = false;
@@ -1062,13 +1149,6 @@ impl RunProperties {
             lang_bidi: self.lang_bidi.clone(),
             ..TextRun::default()
         }
-    }
-
-    /// Whether `run` was produced from identical properties.
-    fn continues(&self, run: &TextRun) -> bool {
-        let mut probe = self.text_run();
-        probe.text.clone_from(&run.text);
-        format!("{probe:?}") == format!("{run:?}")
     }
 
     fn font_facts(&self) -> RunFontFacts {
@@ -1285,12 +1365,24 @@ fn paragraph_properties(cascade: &Cascade<'_>) -> Result<Collected, String> {
         cascade.get(NS_STYLE, "line-height-at-least"),
     ) {
         (Some("normal"), _) | (None, None) => None,
-        // DOCX "auto" spacing carries the multiple of the single line height.
-        (Some(value), None) if value.ends_with('%') => Some(LineSpacing {
-            value: percent(value)?,
-            rule: "auto".into(),
-            explicit: true,
-        }),
+        // Proportional spacing. ODF 1.4 §20.204 defines the percentage on
+        // the font size; LibreOffice (which writes 1.4) scales the natural
+        // line height instead, which is DOCX "auto" (a multiple of the single
+        // line). Measured equal for 100% and 150% on uniform-size text; below
+        // 100% LibreOffice protects content from overflow and is not measured.
+        // Mixed faces/sizes are checked per paragraph (`check_line_scale`).
+        // Observed LibreOffice rule, pending user approval.
+        (Some(value), None) if value.ends_with('%') => {
+            let scale = percent(value)?;
+            if scale < 1.0 {
+                return Err(unsupported("line-height-below-single"));
+            }
+            (scale > 1.0).then(|| LineSpacing {
+                value: scale,
+                rule: "auto".into(),
+                explicit: true,
+            })
+        }
         // Fixed and minimum line heights: LibreOffice places the text at the
         // bottom of a taller line box (all extra space above), measured 7.5pt
         // lower than the DOCX layout for a 30pt minimum on 12pt text and
@@ -1428,12 +1520,20 @@ mod tests {
             r#"<office:document-content {NS} office:version="1.3">{FACES}<office:automatic-styles>{}</office:automatic-styles><office:body><office:text>{}</office:text></office:body></office:document-content>"#,
             fixture.automatic, fixture.body
         );
-        let bytes = package(ODT, &[
-            ("META-INF/manifest.xml", &manifest(ODT, "")),
-            ("styles.xml", &styles),
-            ("content.xml", &content),
-        ]);
-        let package = OdfPackage::open(bytes, OoxmlFormat::Docx, PackageLimits::default(), &MEDIA_TYPES)?;
+        let bytes = package(
+            ODT,
+            &[
+                ("META-INF/manifest.xml", &manifest(ODT, "")),
+                ("styles.xml", &styles),
+                ("content.xml", &content),
+            ],
+        );
+        let package = OdfPackage::open(
+            bytes,
+            OoxmlFormat::Docx,
+            PackageLimits::default(),
+            &MEDIA_TYPES,
+        )?;
         read(&package)
     }
 
@@ -1480,9 +1580,14 @@ mod tests {
             ..Fixture::default()
         })
         .unwrap();
-        let gaps: Vec<f64> = paragraphs(&document).iter().map(|p| p.space_before).collect();
+        let gaps: Vec<f64> = paragraphs(&document)
+            .iter()
+            .map(|p| p.space_before)
+            .collect();
         assert_eq!(gaps, [6.0, 16.0, 22.0, 0.0, 18.0]);
-        assert!(paragraphs(&document).iter().all(|p| p.space_after == 0.0 && !p.contextual_spacing));
+        assert!(paragraphs(&document)
+            .iter()
+            .all(|p| p.space_after == 0.0 && !p.contextual_spacing));
 
         let mixed = read_fixture(Fixture {
             styles,
@@ -1502,26 +1607,71 @@ mod tests {
             ..Fixture::default()
         })
         .unwrap();
-        let spacing: Vec<(f64, bool)> = paragraphs(&document).iter().map(|p| (p.space_before, p.page_break_before)).collect();
-        assert_eq!(spacing, [(6.0, false), (6.0, true), (16.0, false), (6.0, true), (16.0, false)]);
+        let spacing: Vec<(f64, bool)> = paragraphs(&document)
+            .iter()
+            .map(|p| (p.space_before, p.page_break_before))
+            .collect();
+        assert_eq!(
+            spacing,
+            [
+                (6.0, false),
+                (6.0, true),
+                (16.0, false),
+                (6.0, true),
+                (16.0, false)
+            ]
+        );
     }
 
     #[test]
     fn maps_line_height_controls_and_rejects_their_combination() {
-        let style = |props: &str| format!(r#"<style:style style:name="L" style:family="paragraph"><style:paragraph-properties {props}/></style:style>"#);
-        let spacing = |props: &str| {
-            read_fixture(Fixture { styles: &style(props), body: r#"<text:p text:style-name="L">x</text:p>"#, ..Fixture::default() })
-                .map(|d| paragraphs(&d)[0].line_spacing.as_ref().map(|s| (s.value, s.rule.clone())))
+        let style = |props: &str| {
+            format!(
+                r#"<style:style style:name="L" style:family="paragraph"><style:paragraph-properties {props}/></style:style>"#
+            )
         };
-        assert_eq!(spacing(r#"fo:line-height="115%""#).unwrap(), Some((1.15, "auto".into())));
-        assert_eq!(spacing(r#"fo:line-height="20pt""#).unwrap_err(), unsupported("line-height-fixed"));
-        assert_eq!(spacing(r#"style:line-height-at-least="30pt""#).unwrap_err(), unsupported("line-height-at-least"));
-        assert_eq!(spacing(r#"fo:line-height="normal" style:line-height-at-least="30pt""#).unwrap(), None);
+        let spacing = |props: &str| {
+            read_fixture(Fixture {
+                styles: &style(props),
+                body: r#"<text:p text:style-name="L">x</text:p>"#,
+                ..Fixture::default()
+            })
+            .map(|d| {
+                paragraphs(&d)[0]
+                    .line_spacing
+                    .as_ref()
+                    .map(|s| (s.value, s.rule.clone()))
+            })
+        };
+        assert_eq!(
+            spacing(r#"fo:line-height="115%""#).unwrap(),
+            Some((1.15, "auto".into()))
+        );
+        assert_eq!(spacing(r#"fo:line-height="100%""#).unwrap(), None);
+        assert_eq!(
+            spacing(r#"fo:line-height="80%""#).unwrap_err(),
+            unsupported("line-height-below-single")
+        );
+        assert_eq!(
+            spacing(r#"fo:line-height="20pt""#).unwrap_err(),
+            unsupported("line-height-fixed")
+        );
+        assert_eq!(
+            spacing(r#"style:line-height-at-least="30pt""#).unwrap_err(),
+            unsupported("line-height-at-least")
+        );
+        assert_eq!(
+            spacing(r#"fo:line-height="normal" style:line-height-at-least="30pt""#).unwrap(),
+            None
+        );
         assert_eq!(
             spacing(r#"fo:line-height="20pt" style:line-height-at-least="30pt""#).unwrap_err(),
             unsupported("line-height-combination")
         );
-        assert_eq!(spacing(r#"style:line-spacing="2pt""#).unwrap_err(), unsupported("paragraph-property"));
+        assert_eq!(
+            spacing(r#"style:line-spacing="2pt""#).unwrap_err(),
+            unsupported("paragraph-property")
+        );
     }
 
     #[test]
@@ -1536,24 +1686,67 @@ mod tests {
         let runs: Vec<&TextRun> = paragraphs(&document)[0]
             .runs
             .iter()
-            .map(|r| match r { DocRun::Text(t) => t.as_ref(), _ => panic!() })
+            .map(|r| match r {
+                DocRun::Text(t) => t.as_ref(),
+                _ => panic!(),
+            })
             .collect();
-        assert_eq!((runs[0].font_size, runs[0].bold, runs[0].font_family.as_deref()), (20.0, false, Some("Liberation Serif")));
-        assert_eq!((runs[1].bold, runs[1].italic, runs[1].font_family.as_deref()), (true, false, Some("Liberation Sans")));
-        assert_eq!((runs[2].bold, runs[2].italic, runs[2].font_size), (true, true, 20.0));
+        assert_eq!(
+            (
+                runs[0].font_size,
+                runs[0].bold,
+                runs[0].font_family.as_deref()
+            ),
+            (20.0, false, Some("Liberation Serif"))
+        );
+        assert_eq!(
+            (runs[1].bold, runs[1].italic, runs[1].font_family.as_deref()),
+            (true, false, Some("Liberation Sans"))
+        );
+        assert_eq!(
+            (runs[2].bold, runs[2].italic, runs[2].font_size),
+            (true, true, 20.0)
+        );
         // Only used faces enter the font table; the unused "Sans2" twin with a
         // different generic class does not conflict.
-        assert_eq!(document.font_family_classes.get("Liberation Sans").map(String::as_str), Some("swiss"));
+        assert_eq!(
+            document
+                .font_family_classes
+                .get("Liberation Sans")
+                .map(String::as_str),
+            Some("swiss")
+        );
     }
 
     #[test]
     fn rejects_unadmitted_content_with_reason_codes() {
         let reject = |fixture: Fixture<'_>| read_fixture(fixture).unwrap_err();
-        assert_eq!(reject(Fixture { body: "<text:list/>", ..Fixture::default() }), unsupported("body-element"));
-        assert_eq!(reject(Fixture { body: "<text:p>日本</text:p>", ..Fixture::default() }), unsupported("script-class"));
-        assert_eq!(reject(Fixture { master: "<style:header><text:p>h</text:p></style:header>", ..Fixture::default() }), unsupported("header-footer"));
         assert_eq!(
-            reject(Fixture { default_text: r#"style:font-name="Serif" fo:font-size="12pt" style:letter-kerning="false""#, ..Fixture::default() }),
+            reject(Fixture {
+                body: "<text:list/>",
+                ..Fixture::default()
+            }),
+            unsupported("body-element")
+        );
+        assert_eq!(
+            reject(Fixture {
+                body: "<text:p>日本</text:p>",
+                ..Fixture::default()
+            }),
+            unsupported("script-class")
+        );
+        assert_eq!(
+            reject(Fixture {
+                master: "<style:header><text:p>h</text:p></style:header>",
+                ..Fixture::default()
+            }),
+            unsupported("header-footer")
+        );
+        assert_eq!(
+            reject(Fixture {
+                default_text: r#"style:font-name="Serif" fo:font-size="12pt" style:letter-kerning="false""#,
+                ..Fixture::default()
+            }),
             unsupported("letter-kerning-off")
         );
         assert_eq!(
@@ -1583,6 +1776,42 @@ mod tests {
             }),
             unsupported("font-face-conflict")
         );
+    }
+
+    #[test]
+    fn proportional_line_height_requires_uniform_text() {
+        let error = read_fixture(Fixture {
+            styles: r#"<style:style style:name="L" style:family="paragraph"><style:paragraph-properties fo:line-height="150%"/></style:style>"#,
+            automatic: r#"<style:style style:name="T" style:family="text"><style:text-properties fo:font-size="20pt"/></style:style>"#,
+            body: r#"<text:p text:style-name="L">a<text:span text:style-name="T">b</text:span></text:p>"#,
+            ..Fixture::default()
+        })
+        .unwrap_err();
+        assert_eq!(error, unsupported("line-height-mixed-text"));
+    }
+
+    #[test]
+    fn long_paragraphs_merge_runs_linearly_and_respect_the_character_bound() {
+        let text = "word ".repeat(200_000);
+        let start = std::time::Instant::now();
+        let document = read_fixture(Fixture {
+            body: &format!("<text:p>{text}</text:p>"),
+            ..Fixture::default()
+        })
+        .unwrap();
+        assert_eq!(paragraphs(&document)[0].runs.len(), 1);
+        // A generous bound that the former quadratic merge exceeded by orders
+        // of magnitude; it only guards against regressions in complexity.
+        assert!(start.elapsed().as_secs() < 20, "{:?}", start.elapsed());
+        let spaces = read_fixture(Fixture {
+            body: &format!(
+                "<text:p>{}</text:p>",
+                r#"<text:s text:c="600000"/>"#.repeat(2)
+            ),
+            ..Fixture::default()
+        })
+        .unwrap_err();
+        assert!(spaces.contains("character limit"));
     }
 
     #[test]
