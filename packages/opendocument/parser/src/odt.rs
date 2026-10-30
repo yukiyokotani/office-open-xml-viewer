@@ -10,7 +10,7 @@
 use crate::error::{invalid, unsupported};
 use crate::package::{OdfPackage, SUPPORTED_VERSIONS};
 use crate::script::{table_22, ScriptClass};
-use crate::style::{Cascade, Family, Scope, StyleRef, StyleSheet, PARAGRAPH, TEXT};
+use crate::style::{Cascade, Family, Group, Scope, Style, StyleRef, StyleSheet, PARAGRAPH, TEXT};
 use crate::xml::{
     self, NS_DRAW, NS_FO, NS_LOEXT, NS_OFFICE, NS_OFFICEOOO, NS_STYLE, NS_SVG, NS_TEXT, NS_XML,
 };
@@ -18,8 +18,9 @@ use docx_model::{
     BodyElement, BreakType, DocParagraph, DocRun, Document, DocumentSettings, RunFontFacts,
     SectionProps, TextRun,
 };
-use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::rc::Rc;
 
 /// Media types an ODT source claims (Part 2 §3.3; templates share the model).
 pub const MEDIA_TYPES: [&str; 2] = [
@@ -42,6 +43,19 @@ const MAX_PARAGRAPHS: usize = 1_000_000;
 const MAX_PARAGRAPH_CHARS: usize = 1_000_000;
 /// Implementation bound on distinct span contexts in one paragraph.
 const MAX_PARAGRAPH_CONTEXTS: usize = 65_536;
+/// ODT-owned construction policy (a library policy, not a format limit):
+/// the estimated native size of the retained model (text, runs, paragraphs),
+/// charged before each allocation. The DOCX cursor additionally enforces its
+/// retained JSON ceiling while serializing.
+const MAX_CONSTRUCTION_BYTES: usize = 256 * 1024 * 1024;
+/// Implementation bound on the §16.2 search order of one span: its own style
+/// chain and those of the enclosing spans and paragraph.
+const MAX_SEARCH_ORDER: usize = 256;
+/// Implementation bound on cascade work, document-wide: every paragraph and
+/// run resolution visits each style of its search order and each attribute
+/// and element of the resolved property group once (one unit each), charged
+/// before the resolution is built.
+const MAX_CASCADE_WORK: usize = 16 * 1024 * 1024;
 
 pub fn read(package: &OdfPackage) -> Result<Document, String> {
     let styles_text = package.read_text("styles.xml")?;
@@ -79,7 +93,11 @@ pub fn read(package: &OdfPackage) -> Result<Document, String> {
     }
     check_document_wide_configuration(styles_root)?;
     if package.contains("settings.xml") {
-        check_settings(&package.read_text("settings.xml")?)?;
+        check_settings(&package.read_text("settings.xml")?, version)?;
+    }
+    if package.contains("meta.xml") {
+        let text = package.read_text("meta.xml")?;
+        check_part_root(&xml::parse(&text)?, "document-meta", version)?;
     }
     // ODF 1.3 introduced style:contextual-spacing (§20.255); a declared 1.2
     // document does not define it.
@@ -96,10 +114,13 @@ pub fn read(package: &OdfPackage) -> Result<Document, String> {
     let mut reader = Reader {
         sheet: &sheet,
         fonts: &fonts,
-        used_faces: RefCell::new(Vec::new()),
+        used_faces: RefCell::new(HashSet::new()),
+        text_chains: HashMap::new(),
+        cascade_work: Cell::new(0),
         page_master: page.name.as_str(),
         paragraphs: Vec::new(),
         retained_text_bytes: 0,
+        construction_bytes: 0,
         contextual_spacing_defined,
     };
     reader.walk_blocks(body, 0)?;
@@ -108,13 +129,7 @@ pub fn read(package: &OdfPackage) -> Result<Document, String> {
 
     let default_tab_stop = sheet
         .default_style(Family::Paragraph)
-        .and_then(|style| {
-            Cascade {
-                styles: vec![style],
-                group: PARAGRAPH,
-            }
-            .get(NS_STYLE, "tab-stop-distance")
-        })
+        .and_then(|style| Cascade::new(vec![style], PARAGRAPH).get(NS_STYLE, "tab-stop-distance"))
         .map(length_pt)
         .transpose()?;
 
@@ -139,7 +154,7 @@ struct FontFaces {
     faces: HashMap<String, Face>,
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 struct Face {
     family: String,
     generic: Option<&'static str>,
@@ -200,7 +215,7 @@ impl FontFaces {
 /// Producers may declare one family under several faces with different
 /// metadata (LibreOffice does for fallback faces); only the faces admitted
 /// text uses must agree.
-fn used_font_table(used: &[Face]) -> Result<HashMap<String, Face>, String> {
+fn used_font_table(used: &HashSet<Face>) -> Result<HashMap<String, Face>, String> {
     let mut table: HashMap<String, Face> = HashMap::new();
     for face in used {
         if let Some(existing) = table.insert(face.family.clone(), face.clone()) {
@@ -325,8 +340,26 @@ const LAYOUT_SETTINGS: [(&str, &str); 26] = [
     ("CharacterCompressionType", "0"),
 ];
 
-fn check_settings(text: &str) -> Result<(), String> {
+/// Part 3 §3.1.3: each package part's root element, carrying the document's
+/// one declared version (§19.388).
+fn check_part_root(
+    document: &roxmltree::Document<'_>,
+    name: &str,
+    version: Option<&str>,
+) -> Result<(), String> {
+    let root = document.root_element();
+    if !xml::is(root, NS_OFFICE, name) {
+        return Err(invalid("a package part has an unexpected root"));
+    }
+    if root.attribute((NS_OFFICE, "version")) != version {
+        return Err(unsupported("odf-version"));
+    }
+    Ok(())
+}
+
+fn check_settings(text: &str, version: Option<&str>) -> Result<(), String> {
     let document = xml::parse(text)?;
+    check_part_root(&document, "document-settings", version)?;
     for item in document
         .descendants()
         .filter(|n| xml::is(*n, xml::NS_CONFIG, "config-item"))
@@ -369,18 +402,73 @@ fn check_document_wide_configuration(styles_root: roxmltree::Node<'_, '_>) -> Re
             return Err(unsupported("text-default-style"));
         }
         if xml::is(node, NS_TEXT, "outline-style") {
-            // Headings are numbered by the outline style (§16.34); admitted
-            // only when no level produces a label.
             for level in node.children().filter(|n| n.is_element()) {
-                let labelled = ["num-format", "num-prefix", "num-suffix"]
-                    .iter()
-                    .any(|name| {
-                        level
-                            .attribute((NS_STYLE, *name))
-                            .is_some_and(|v| !v.is_empty())
-                    });
-                if labelled {
+                check_outline_level(level)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Headings are numbered and indented by the outline style (§16.36,
+/// §16.37). A level is admitted only when it produces no label and its list
+/// level properties (§17.19, §17.20) add no indent or spacing.
+fn check_outline_level(level: roxmltree::Node<'_, '_>) -> Result<(), String> {
+    if !xml::is(level, NS_TEXT, "outline-level-style") {
+        return Err(unsupported("outline-style"));
+    }
+    for attribute in level.attributes() {
+        let admitted = match (attribute.namespace(), attribute.name()) {
+            (Some(NS_TEXT), "level" | "display-levels" | "start-value" | "style-name") => true,
+            (Some(NS_STYLE), "num-letter-sync") => true,
+            (Some(NS_STYLE), "num-format" | "num-prefix" | "num-suffix") => {
+                if !attribute.value().is_empty() {
                     return Err(unsupported("heading-numbering"));
+                }
+                true
+            }
+            _ => false,
+        };
+        if !admitted {
+            return Err(unsupported("outline-style"));
+        }
+    }
+    let zero = |value: &str| length_pt(value).is_ok_and(|v| v == 0.0);
+    for properties in level.children().filter(|n| n.is_element()) {
+        if !xml::is(properties, NS_STYLE, "list-level-properties") {
+            return Err(unsupported("outline-style"));
+        }
+        for attribute in properties.attributes() {
+            let admitted = match (attribute.namespace(), attribute.name()) {
+                (Some(NS_TEXT), "list-level-position-and-space-mode") => matches!(
+                    attribute.value(),
+                    "label-alignment" | "label-width-and-position"
+                ),
+                (Some(NS_TEXT), "space-before" | "min-label-width" | "min-label-distance") => {
+                    zero(attribute.value())
+                }
+                _ => false,
+            };
+            if !admitted {
+                return Err(unsupported("outline-style"));
+            }
+        }
+        for alignment in properties.children().filter(|n| n.is_element()) {
+            if !xml::is(alignment, NS_STYLE, "list-level-label-alignment")
+                || alignment.children().any(|n| n.is_element())
+            {
+                return Err(unsupported("outline-style"));
+            }
+            for attribute in alignment.attributes() {
+                let admitted = match (attribute.namespace(), attribute.name()) {
+                    // What follows the (empty) label; a tab or space after
+                    // an empty label is not measured.
+                    (Some(NS_TEXT), "label-followed-by") => attribute.value() == "nothing",
+                    (Some(NS_FO), "margin-left" | "text-indent") => zero(attribute.value()),
+                    _ => false,
+                };
+                if !admitted {
+                    return Err(unsupported("outline-style"));
                 }
             }
         }
@@ -558,22 +646,33 @@ struct Collected {
 struct Reader<'a> {
     sheet: &'a StyleSheet,
     fonts: &'a FontFaces,
-    used_faces: RefCell<Vec<Face>>,
+    used_faces: RefCell<HashSet<Face>>,
+    /// Each applied text style's checked parent chain, by style identity.
+    text_chains: HashMap<*const Style, Rc<[StyleRef<'a>]>>,
+    cascade_work: Cell<usize>,
     page_master: &'a str,
     paragraphs: Vec<Collected>,
     retained_text_bytes: usize,
+    construction_bytes: usize,
     contextual_spacing_defined: bool,
 }
 
-#[derive(Clone)]
+/// One formatting context: a span's own style chain followed, through
+/// `parent`, by the enclosing contexts (§16.2). Ancestors are shared by
+/// index and each text style's chain is built once per document, so spans
+/// copy no styles.
 struct TextContext<'a> {
-    styles: Vec<StyleRef<'a>>,
+    styles: Rc<[StyleRef<'a>]>,
+    parent: Option<u32>,
 }
 
 /// One paragraph's flattened inline content. Each token refers to its
 /// formatting context by index into `contexts` (one entry per span).
 struct Inline<'a> {
     contexts: Vec<TextContext<'a>>,
+    /// Context index by (enclosing context, span style name): repeated spans
+    /// share one context and so one property resolution.
+    by_span: HashMap<(u32, String), u32>,
     tokens: Vec<Token>,
 }
 
@@ -673,10 +772,8 @@ impl<'a> Reader<'a> {
         if let Some(default) = self.sheet.default_style(Family::Paragraph) {
             chain.push(default);
         }
-        let properties = Cascade {
-            styles: chain.clone(),
-            group: PARAGRAPH,
-        };
+        self.charge_cascade(&chain, PARAGRAPH)?;
+        let properties = Cascade::new(chain.clone(), PARAGRAPH);
 
         // §19.501: naming the page style on a later paragraph starts a page.
         let master = chain.iter().find_map(|s| {
@@ -710,14 +807,18 @@ impl<'a> Reader<'a> {
 
         // The paragraph's own text properties describe its mark (empty
         // paragraph height) and the text outside spans.
-        let context = TextContext { styles: chain };
-        let mark = self.run_properties(&context, ScriptClass::Latin)?;
+        let contexts = vec![TextContext {
+            styles: chain.into(),
+            parent: None,
+        }];
+        let mark = self.run_properties(&contexts, 0, ScriptClass::Latin)?;
         collected.paragraph.paragraph_mark_font_facts = Some(mark.font_facts());
         collected.paragraph.default_font_size = Some(mark.size);
         collected.paragraph.default_font_family = Some(mark.family.clone());
 
         let mut inline = Inline {
-            contexts: vec![context],
+            contexts,
+            by_span: HashMap::new(),
             tokens: Vec::new(),
         };
         self.inline(node, 0, &mut inline, 0)?;
@@ -731,6 +832,12 @@ impl<'a> Reader<'a> {
         }
         let tokens = collapse(std::mem::take(&mut inline.tokens));
         self.emit_runs(&tokens, &inline.contexts, &mut collected.paragraph)?;
+        self.charge_construction(
+            std::mem::size_of::<Collected>()
+                + std::mem::size_of::<BodyElement>()
+                + 6 * mark.family.len()
+                + collected.named_style.as_ref().map_or(0, String::len),
+        )?;
         self.paragraphs.push(collected);
         Ok(())
     }
@@ -770,20 +877,26 @@ impl<'a> Reader<'a> {
                     let nested = match child.attribute((NS_TEXT, "style-name")) {
                         // §16.2: a text style continues in the enclosing text
                         // styles, then the paragraph's style and its default.
-                        Some(name) => {
-                            let style = self
-                                .sheet
-                                .find(Scope::Content, Family::Text, name)
-                                .ok_or_else(|| invalid("a span names a missing style"))?;
-                            let mut styles = self.sheet.chain(style)?;
-                            check_groups(&styles, &["text-properties"])?;
-                            styles.extend(inline.contexts[context as usize].styles.iter().copied());
-                            if inline.contexts.len() >= MAX_PARAGRAPH_CONTEXTS {
-                                return Err(unsupported("span-count"));
+                        Some(name) => match inline.by_span.get(&(context, name.to_string())) {
+                            Some(index) => *index,
+                            None => {
+                                let style = self
+                                    .sheet
+                                    .find(Scope::Content, Family::Text, name)
+                                    .ok_or_else(|| invalid("a span names a missing style"))?;
+                                if inline.contexts.len() >= MAX_PARAGRAPH_CONTEXTS {
+                                    return Err(unsupported("span-count"));
+                                }
+                                let styles = self.text_chain(style)?;
+                                inline.contexts.push(TextContext {
+                                    styles,
+                                    parent: Some(context),
+                                });
+                                let index = (inline.contexts.len() - 1) as u32;
+                                inline.by_span.insert((context, name.to_string()), index);
+                                index
                             }
-                            inline.contexts.push(TextContext { styles });
-                            (inline.contexts.len() - 1) as u32
-                        }
+                        },
                         None => context,
                     };
                     self.inline(child, nested, inline, depth + 1)?;
@@ -827,6 +940,18 @@ impl<'a> Reader<'a> {
         Ok(())
     }
 
+    fn text_chain(&mut self, style: StyleRef<'a>) -> Result<Rc<[StyleRef<'a>]>, String> {
+        let key: *const Style = style.style();
+        if let Some(chain) = self.text_chains.get(&key) {
+            return Ok(chain.clone());
+        }
+        let chain = self.sheet.chain(style)?;
+        check_groups(&chain, &["text-properties"])?;
+        let chain: Rc<[StyleRef<'a>]> = chain.into();
+        self.text_chains.insert(key, chain.clone());
+        Ok(chain)
+    }
+
     /// Charge retained text before the tokens are allocated: the
     /// document-wide byte budget and the per-paragraph character bound.
     fn charge_text(
@@ -840,9 +965,19 @@ impl<'a> Reader<'a> {
             .checked_add(bytes)
             .filter(|total| *total <= MAX_RETAINED_TEXT_BYTES)
             .ok_or_else(|| "OpenDocument text exceeds the retained text limit".to_string())?;
+        self.charge_construction(bytes)?;
         if inline.tokens.len().saturating_add(chars) > MAX_PARAGRAPH_CHARS {
             return Err("OpenDocument paragraph exceeds the character limit".to_string());
         }
+        Ok(())
+    }
+
+    fn charge_construction(&mut self, bytes: usize) -> Result<(), String> {
+        self.construction_bytes = self
+            .construction_bytes
+            .checked_add(bytes)
+            .filter(|total| *total <= MAX_CONSTRUCTION_BYTES)
+            .ok_or_else(|| "OpenDocument text exceeds the construction limit".to_string())?;
         Ok(())
     }
 
@@ -879,7 +1014,7 @@ impl<'a> Reader<'a> {
                 None => match uniform.get(&context) {
                     Some(class) => *class,
                     None => {
-                        let class = self.uniform_class(&contexts[context as usize])?;
+                        let class = self.uniform_class(contexts, context)?;
                         uniform.insert(context, class);
                         class
                     }
@@ -892,7 +1027,7 @@ impl<'a> Reader<'a> {
             }
             let key = (context, class);
             if let std::collections::hash_map::Entry::Vacant(entry) = cache.entry(key) {
-                entry.insert(self.run_properties(&contexts[context as usize], class)?);
+                entry.insert(self.run_properties(contexts, context, class)?);
             }
             let continues = match (current, paragraph.runs.last_mut()) {
                 (Some(last_key), Some(DocRun::Text(last))) if cache[&last_key] == cache[&key] => {
@@ -902,6 +1037,7 @@ impl<'a> Reader<'a> {
                 _ => false,
             };
             if !continues {
+                self.charge_construction(cache[&key].retained_estimate())?;
                 let mut run = cache[&key].text_run();
                 run.text.push(c);
                 paragraph.runs.push(DocRun::Text(Box::new(run)));
@@ -911,10 +1047,14 @@ impl<'a> Reader<'a> {
         Ok(())
     }
 
-    fn uniform_class(&self, context: &TextContext<'a>) -> Result<ScriptClass, String> {
-        let latin = self.run_properties(context, ScriptClass::Latin)?;
-        let asian = self.run_properties(context, ScriptClass::Asian)?;
-        let complex = self.run_properties(context, ScriptClass::Complex)?;
+    fn uniform_class(
+        &self,
+        contexts: &[TextContext<'a>],
+        context: u32,
+    ) -> Result<ScriptClass, String> {
+        let latin = self.run_properties(contexts, context, ScriptClass::Latin)?;
+        let asian = self.run_properties(contexts, context, ScriptClass::Asian)?;
+        let complex = self.run_properties(contexts, context, ScriptClass::Complex)?;
         if latin == asian && latin == complex {
             Ok(ScriptClass::Latin)
         } else {
@@ -924,19 +1064,61 @@ impl<'a> Reader<'a> {
 
     fn run_properties(
         &self,
-        context: &TextContext<'a>,
+        contexts: &[TextContext<'a>],
+        context: u32,
         class: ScriptClass,
     ) -> Result<RunProperties, String> {
-        let cascade = Cascade {
-            styles: context.styles.clone(),
-            group: TEXT,
-        };
+        let styles = self.search_order(contexts, context)?;
+        self.charge_cascade(&styles, TEXT)?;
+        let cascade = Cascade::new(styles, TEXT);
         let (properties, face) = RunProperties::resolve(&cascade, class, self.fonts)?;
-        let mut used = self.used_faces.borrow_mut();
-        if !used.contains(&face) {
-            used.push(face);
-        }
+        self.used_faces.borrow_mut().insert(face);
         Ok(properties)
+    }
+
+    fn charge_cascade(&self, styles: &[StyleRef<'a>], group: Group) -> Result<(), String> {
+        let work = styles.iter().fold(0usize, |work, style| {
+            work.saturating_add(1).saturating_add(
+                style
+                    .group(group)
+                    .map_or(0, |p| p.attributes.len() + p.elements.len()),
+            )
+        });
+        let total = self
+            .cascade_work
+            .get()
+            .checked_add(work)
+            .filter(|total| *total <= MAX_CASCADE_WORK)
+            .ok_or_else(|| "OpenDocument text exceeds the style resolution limit".to_string())?;
+        self.cascade_work.set(total);
+        Ok(())
+    }
+
+    /// The §16.2 search order of one context, nearest style first (at most
+    /// `MAX_SEARCH_ORDER` references).
+    fn search_order(
+        &self,
+        contexts: &[TextContext<'a>],
+        context: u32,
+    ) -> Result<Vec<StyleRef<'a>>, String> {
+        let mut length = 0usize;
+        let mut current = Some(context);
+        while let Some(index) = current {
+            let entry = &contexts[index as usize];
+            length += entry.styles.len();
+            current = entry.parent;
+        }
+        if length > MAX_SEARCH_ORDER {
+            return Err("OpenDocument span nesting exceeds the style search order limit".into());
+        }
+        let mut styles = Vec::with_capacity(length);
+        let mut current = Some(context);
+        while let Some(index) = current {
+            let entry = &contexts[index as usize];
+            styles.extend(entry.styles.iter().copied());
+            current = entry.parent;
+        }
+        Ok(styles)
     }
 
     /// Paragraph gaps (measured against LibreOffice): the previous paragraph's
@@ -949,10 +1131,10 @@ impl<'a> Reader<'a> {
     /// reproduces it.
     fn finish(self) -> Result<Vec<BodyElement>, String> {
         let mut out = Vec::with_capacity(self.paragraphs.len());
-        let mut previous: Option<&Collected> = None;
+        let mut previous: Option<Collected> = None;
         let mut break_pending = false;
-        for collected in &self.paragraphs {
-            let mut paragraph = collected.paragraph.clone();
+        for mut collected in self.paragraphs {
+            let mut paragraph = std::mem::take(&mut collected.paragraph);
             paragraph.page_break_before |= break_pending;
             paragraph.space_before = match previous {
                 // Measured: after a hard page break (break-before, break-after
@@ -963,7 +1145,7 @@ impl<'a> Reader<'a> {
                 // a page it reached by pagination.
                 None => collected.top,
                 Some(_) if paragraph.page_break_before => collected.top,
-                Some(prev) => {
+                Some(ref prev) => {
                     let same =
                         prev.named_style.is_some() && prev.named_style == collected.named_style;
                     if same && prev.contextual != collected.contextual {
@@ -1227,6 +1409,23 @@ impl RunProperties {
         ))
     }
 
+    /// Native size of one emitted run, excluding its text (charged with the
+    /// retained text).
+    fn retained_estimate(&self) -> usize {
+        let strings = 4 * self.family.len()
+            + self.underline.map_or(0, str::len)
+            + [
+                &self.color,
+                &self.background,
+                &self.lang_east_asia,
+                &self.lang_bidi,
+            ]
+            .iter()
+            .map(|value| value.as_ref().map_or(0, String::len))
+            .sum::<usize>();
+        std::mem::size_of::<DocRun>() + std::mem::size_of::<TextRun>() + strings
+    }
+
     fn text_run(&self) -> TextRun {
         let family = Some(self.family.clone());
         TextRun {
@@ -1426,8 +1625,9 @@ fn paragraph_properties(cascade: &Cascade<'_>) -> Result<Collected, String> {
             (NS_FO, "border" | "border-top" | "border-bottom" | "border-left" | "border-right") => {
                 value == "none"
             }
-            // Padding and border joining are inert without borders.
-            (NS_FO, n) if n.starts_with("padding") => true,
+            // Padding insets the text even without a border (§20.217-§20.221).
+            (NS_FO, n) if n.starts_with("padding") => length_pt(value).is_ok_and(|v| v == 0.0),
+            // Border joining is inert without borders.
             (NS_STYLE, "join-border") => true,
             (NS_FO | NS_LOEXT, n) if n.starts_with("hyphenation-") => true,
             // Inert without a layout grid (pages admit grid mode none only).
@@ -1597,6 +1797,8 @@ mod tests {
 
     struct Fixture<'a> {
         default_text: &'a str,
+        /// Additional `style:font-face` declarations in styles.xml.
+        faces: &'a str,
         styles: &'a str,
         automatic: &'a str,
         master: &'a str,
@@ -1607,6 +1809,7 @@ mod tests {
         fn default() -> Self {
             Self {
                 default_text: r#"style:font-name="Serif" fo:font-size="12pt" style:font-name-asian="Serif" style:font-size-asian="12pt" style:font-name-complex="Serif" style:font-size-complex="12pt" style:letter-kerning="true""#,
+                faces: "",
                 styles: "",
                 automatic: "",
                 master: "",
@@ -1617,8 +1820,14 @@ mod tests {
 
     fn read_fixture(fixture: Fixture<'_>) -> Result<Document, String> {
         let styles = format!(
-            r#"<office:document-styles {NS} office:version="1.3">{FACES}<office:styles><style:default-style style:family="paragraph"><style:text-properties {}/></style:default-style><style:default-style style:family="graphic"/>{}</office:styles><office:automatic-styles><style:page-layout style:name="pm1"><style:page-layout-properties fo:page-width="210mm" fo:page-height="297mm" fo:margin-top="20mm" fo:margin-bottom="20mm" fo:margin-left="25mm" fo:margin-right="25mm"/></style:page-layout></office:automatic-styles><office:master-styles><style:master-page style:name="Standard" style:page-layout-name="pm1">{}</style:master-page></office:master-styles></office:document-styles>"#,
-            fixture.default_text, fixture.styles, fixture.master
+            r#"<office:document-styles {NS} office:version="1.3">{}<office:styles><style:default-style style:family="paragraph"><style:text-properties {}/></style:default-style><style:default-style style:family="graphic"/>{}</office:styles><office:automatic-styles><style:page-layout style:name="pm1"><style:page-layout-properties fo:page-width="210mm" fo:page-height="297mm" fo:margin-top="20mm" fo:margin-bottom="20mm" fo:margin-left="25mm" fo:margin-right="25mm"/></style:page-layout></office:automatic-styles><office:master-styles><style:master-page style:name="Standard" style:page-layout-name="pm1">{}</style:master-page></office:master-styles></office:document-styles>"#,
+            FACES.replace(
+                "</office:font-face-decls>",
+                &format!("{}</office:font-face-decls>", fixture.faces)
+            ),
+            fixture.default_text,
+            fixture.styles,
+            fixture.master
         );
         let content = format!(
             r#"<office:document-content {NS} office:version="1.3">{FACES}<office:automatic-styles>{}</office:automatic-styles><office:body><office:text>{}</office:text></office:body></office:document-content>"#,
@@ -1951,7 +2160,197 @@ mod tests {
             }),
             unsupported("text-property")
         );
-        assert!(check_settings(r#"<office:document-settings xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:config="urn:oasis:names:tc:opendocument:xmlns:config:1.0"><config:config-item config:name="ParaSpaceMax" config:type="boolean">true</config:config-item></office:document-settings>"#).is_err());
-        assert!(check_settings(r#"<office:document-settings xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:config="urn:oasis:names:tc:opendocument:xmlns:config:1.0"><config:config-item config:name="ParaSpaceMax" config:type="boolean">false</config:config-item></office:document-settings>"#).is_ok());
+        assert!(check_settings(r#"<office:document-settings xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:config="urn:oasis:names:tc:opendocument:xmlns:config:1.0" office:version="1.3"><config:config-item config:name="ParaSpaceMax" config:type="boolean">true</config:config-item></office:document-settings>"#, Some("1.3")).is_err());
+        assert!(check_settings(r#"<office:document-settings xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:config="urn:oasis:names:tc:opendocument:xmlns:config:1.0" office:version="1.3"><config:config-item config:name="ParaSpaceMax" config:type="boolean">false</config:config-item></office:document-settings>"#, Some("1.3")).is_ok());
+    }
+
+    #[test]
+    fn nested_spans_share_style_chains_and_style_resolution_is_bounded() {
+        // A 64-deep text style chain (five attributes per style) under 100
+        // leaf styles: each span adds a 65-style chain to its §16.2 search
+        // order.
+        let mut styles = String::new();
+        for i in 0..64 {
+            let parent = if i == 0 {
+                String::new()
+            } else {
+                format!(r#" style:parent-style-name="T{}""#, i - 1)
+            };
+            styles.push_str(&format!(
+                r#"<style:style style:name="T{i}" style:family="text"{parent}><style:text-properties fo:font-size="{}pt" fo:hyphenation-remain-char-count="2" fo:hyphenation-push-char-count="2" fo:hyphenation-ladder-count="no-limit" fo:hyphenation-keep="auto"/></style:style>"#,
+                10 + i % 4
+            ));
+        }
+        for i in 0..100 {
+            styles.push_str(&format!(
+                r#"<style:style style:name="A{i}" style:family="text" style:parent-style-name="T63"/>"#
+            ));
+        }
+        let nest = |leaves: &[usize]| {
+            let open: String = leaves
+                .iter()
+                .map(|leaf| format!(r#"<text:span text:style-name="A{leaf}">"#))
+                .collect();
+            format!("{open}x{}", "</text:span>".repeat(leaves.len()))
+        };
+        let read_body = |body: &str| {
+            read_fixture(Fixture {
+                styles: &styles,
+                body,
+                ..Fixture::default()
+            })
+        };
+
+        // Repeated spans under the same parent reuse one context.
+        let repeated = format!("<text:p>{}</text:p>", nest(&[1, 2, 3]).repeat(500));
+        let document = read_body(&repeated).unwrap();
+        assert_eq!(texts(paragraphs(&document)[0]).concat(), "x".repeat(500));
+
+        // A search order beyond the implementation bound.
+        let deep: Vec<usize> = (0..32).collect();
+        assert!(read_body(&format!("<text:p>{}</text:p>", nest(&deep)))
+            .unwrap_err()
+            .contains("style search order limit"));
+
+        // Resolution work is bounded document-wide: each paragraph resolves
+        // its (identical) three-span context again, ~1,170 units each.
+        let paragraph = format!("<text:p>{}</text:p>", nest(&[1, 2, 3]));
+        let error = read_body(&paragraph.repeat(15_000)).unwrap_err();
+        assert!(error.contains("style resolution limit"), "{error}");
+    }
+
+    #[test]
+    fn attribute_heavy_styles_and_many_faces_stay_bounded() {
+        // Hyphenation parameters are admitted by prefix (inert while
+        // hyphenation is off), so one style can carry many of them; every
+        // paragraph resolution is charged for each.
+        let heavy: String = (0..2000)
+            .map(|i| format!(r#" fo:hyphenation-x{i}="1""#))
+            .collect();
+        let styles = format!(
+            r#"<style:style style:name="H" style:family="paragraph"><style:paragraph-properties{heavy}/></style:style>"#
+        );
+        let body = r#"<text:p text:style-name="H">x</text:p>"#.repeat(9000);
+        let error = read_fixture(Fixture {
+            styles: &styles,
+            body: &body,
+            ..Fixture::default()
+        })
+        .unwrap_err();
+        assert!(error.contains("style resolution limit"), "{error}");
+
+        // Many distinct faces, each used by its own span: the used-face table
+        // is a hash set.
+        let faces = 5000;
+        let mut styles = String::new();
+        let mut body = String::from("<text:p>");
+        for i in 0..faces {
+            styles.push_str(&format!(
+                r#"<style:style style:name="F{i}" style:family="text"><style:text-properties style:font-name="Face{i}" style:font-name-asian="Face{i}" style:font-name-complex="Face{i}"/></style:style>"#
+            ));
+            body.push_str(&format!(
+                r#"<text:span text:style-name="F{i}">x</text:span>"#
+            ));
+        }
+        body.push_str("</text:p>");
+        let decls: String = (0..faces)
+            .map(|i| {
+                format!(r#"<style:font-face style:name="Face{i}" svg:font-family="'Face {i}'"/>"#)
+            })
+            .collect();
+        let document = read_fixture(Fixture {
+            faces: &decls,
+            styles: &styles,
+            body: &body,
+            ..Fixture::default()
+        });
+        let document = document.unwrap();
+        assert_eq!(paragraphs(&document)[0].runs.len(), faces);
+    }
+
+    #[test]
+    fn retained_runs_are_charged_against_the_construction_limit() {
+        // Alternating span styles make every character its own run.
+        let styles = r#"<style:style style:name="A" style:family="text"><style:text-properties fo:font-size="11pt"/></style:style><style:style style:name="B" style:family="text"><style:text-properties fo:font-size="13pt"/></style:style>"#;
+        let per_run = std::mem::size_of::<DocRun>() + std::mem::size_of::<TextRun>();
+        let runs = MAX_CONSTRUCTION_BYTES / per_run + 1;
+        let pair = r#"<text:span text:style-name="A">x</text:span><text:span text:style-name="B">x</text:span>"#;
+        let paragraph = format!("<text:p>{}</text:p>", pair.repeat(5000));
+        let body = paragraph.repeat(runs / 10_000 + 1);
+        let error = read_fixture(Fixture {
+            styles,
+            body: &body,
+            ..Fixture::default()
+        })
+        .unwrap_err();
+        assert!(error.contains("construction limit"), "{error}");
+    }
+
+    #[test]
+    fn rejects_padding_and_outline_level_indents() {
+        let reject = |fixture: Fixture<'_>| read_fixture(fixture).unwrap_err();
+        assert_eq!(
+            reject(Fixture {
+                styles: r#"<style:style style:name="P" style:family="paragraph"><style:paragraph-properties fo:padding-left="5pt"/></style:style>"#,
+                body: r#"<text:p text:style-name="P">x</text:p>"#,
+                ..Fixture::default()
+            }),
+            unsupported("paragraph-property")
+        );
+        assert!(read_fixture(Fixture {
+            styles: r#"<style:style style:name="P" style:family="paragraph"><style:paragraph-properties fo:padding="0cm" fo:border="none"/></style:style>"#,
+            body: r#"<text:p text:style-name="P">x</text:p>"#,
+            ..Fixture::default()
+        })
+        .is_ok());
+        let outline = |level: &str| {
+            format!(
+                r#"<text:outline-style style:name="Outline"><text:outline-level-style text:level="1" style:num-format="">{level}</text:outline-level-style></text:outline-style>"#
+            )
+        };
+        let admitted = outline(
+            r#"<style:list-level-properties text:list-level-position-and-space-mode="label-alignment"><style:list-level-label-alignment text:label-followed-by="nothing"/></style:list-level-properties>"#,
+        );
+        assert!(read_fixture(Fixture {
+            styles: &admitted,
+            body: r#"<text:h text:outline-level="1">x</text:h>"#,
+            ..Fixture::default()
+        })
+        .is_ok());
+        for level in [
+            r#"<style:list-level-properties text:space-before="1cm"/>"#,
+            r#"<style:list-level-properties text:list-level-position-and-space-mode="label-alignment"><style:list-level-label-alignment text:label-followed-by="nothing" fo:margin-left="1cm"/></style:list-level-properties>"#,
+            r#"<style:list-level-properties text:list-level-position-and-space-mode="label-alignment"><style:list-level-label-alignment text:label-followed-by="listtab"/></style:list-level-properties>"#,
+            r#"<style:text-properties fo:font-size="20pt"/>"#,
+        ] {
+            assert_eq!(
+                reject(Fixture {
+                    styles: &outline(level),
+                    body: r#"<text:h text:outline-level="1">x</text:h>"#,
+                    ..Fixture::default()
+                }),
+                unsupported("outline-style"),
+                "{level}"
+            );
+        }
+    }
+
+    #[test]
+    fn package_parts_carry_the_document_version() {
+        let settings = |version: &str| {
+            format!(
+                r#"<office:document-settings xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" office:version="{version}"/>"#
+            )
+        };
+        assert!(check_settings(&settings("1.3"), Some("1.3")).is_ok());
+        assert_eq!(
+            check_settings(&settings("1.2"), Some("1.3")).unwrap_err(),
+            unsupported("odf-version")
+        );
+        assert!(check_settings(
+            r#"<office:document-meta xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" office:version="1.3"/>"#,
+            Some("1.3")
+        )
+        .is_err());
     }
 }

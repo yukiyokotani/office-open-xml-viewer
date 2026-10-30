@@ -67,9 +67,9 @@ Currently admitted:
   spaces, tabs (in paragraphs without an indent) and line breaks;
 - page size and margins of a single page style without displayed headers or
   footers;
-- paragraph indents, alignment, proportional line height, page breaks,
-  keep-with-next / keep-together, widow/orphan control of two lines, and
-  paragraph spacing including contextual spacing;
+- paragraph indents, alignment, page breaks, keep-with-next /
+  keep-together, widow/orphan control of two lines, and paragraph spacing
+  including contextual spacing;
 - character fonts, sizes, bold, italic, single/double underline and
   strike-through, colours, background colour, letter spacing, scaling and
   explicit raise/lower;

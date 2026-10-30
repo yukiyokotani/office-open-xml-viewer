@@ -58,6 +58,7 @@ impl OdfPackage {
             session,
             media_type,
         };
+        package.check_indexed_mimetype()?;
         package.check_manifest()?;
         Ok(package)
     }
@@ -81,6 +82,25 @@ impl OdfPackage {
         }
         self.session
             .run_operation("odf-read", |operation| operation.read_string(path))
+    }
+
+    /// The leading local header read before the session opened must be the
+    /// archive's indexed first entry: the central directory lists `mimetype`
+    /// first and its CRC-checked content equals the leading bytes (§3.3).
+    fn check_indexed_mimetype(&self) -> Result<(), String> {
+        let first = self.session.entry_paths().into_iter().next();
+        if first.as_deref() != Some("mimetype") {
+            return Err(invalid("the mimetype file is not the first package entry"));
+        }
+        let bytes = self.session.run_operation("odf-mimetype", |operation| {
+            operation.read_bytes_bounded("mimetype", MAX_MIMETYPE_BYTES)
+        })?;
+        if bytes != self.media_type.as_bytes() {
+            return Err(invalid(
+                "the indexed mimetype entry differs from the leading file",
+            ));
+        }
+        Ok(())
     }
 
     /// Part 2 §4: the manifest lists the package's files. Encrypted entries
@@ -272,5 +292,28 @@ pub(crate) mod tests {
         );
         assert_eq!(open(old).err().unwrap(), unsupported("odf-version"));
         assert!(open(package(ODT, &[])).is_err());
+    }
+
+    #[test]
+    fn the_leading_mimetype_must_be_the_indexed_first_entry() {
+        let mut bytes = package(ODT, &[("META-INF/manifest.xml", &manifest(ODT, ""))]);
+        assert!(open(bytes.clone()).is_ok());
+        // Swap the first two central directory records: the leading local
+        // header is unchanged, but the index lists the manifest first.
+        let eocd = bytes.len() - 22;
+        let u16_at = |b: &[u8], o: usize| u16::from_le_bytes([b[o], b[o + 1]]) as usize;
+        let start = u32::from_le_bytes(bytes[eocd + 16..eocd + 20].try_into().unwrap()) as usize;
+        let record =
+            |b: &[u8], o: usize| 46 + u16_at(b, o + 28) + u16_at(b, o + 30) + u16_at(b, o + 32);
+        let first = record(&bytes, start);
+        let second = record(&bytes, start + first);
+        let mut swapped = bytes[start + first..start + first + second].to_vec();
+        swapped.extend_from_slice(&bytes[start..start + first]);
+        bytes.splice(start..start + first + second, swapped);
+        assert_eq!(leading_mimetype(&bytes).unwrap(), ODT);
+        assert!(open(bytes)
+            .err()
+            .unwrap()
+            .contains("not the first package entry"));
     }
 }

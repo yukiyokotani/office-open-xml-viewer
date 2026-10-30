@@ -7,7 +7,7 @@
 
 use crate::error::invalid;
 use crate::xml::{self, NS_STYLE};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Implementation bound on a parent chain; ODF requires none, a cycle is a
 /// container error.
@@ -172,24 +172,43 @@ impl<'a> StyleRef<'a> {
 }
 
 /// An ordered cascade for one element and property group: the §16.2 search
-/// order flattened into the styles to consult, nearest first.
+/// order flattened into the styles to consult, nearest first. Attribute
+/// values are resolved in one pass over the search order.
 pub struct Cascade<'a> {
     pub styles: Vec<StyleRef<'a>>,
     pub group: Group,
+    /// Nearest value of every attribute set in the search order.
+    values: HashMap<&'a Key, &'a str>,
+    /// The same keys in first-seen order (nearest style first).
+    order: Vec<&'a Key>,
 }
 
 impl<'a> Cascade<'a> {
+    pub fn new(styles: Vec<StyleRef<'a>>, group: Group) -> Self {
+        let mut values: HashMap<&'a Key, &'a str> = HashMap::new();
+        let mut order = Vec::new();
+        for style in &styles {
+            if let Some(properties) = style.group(group) {
+                for (key, value) in &properties.attributes {
+                    if let std::collections::hash_map::Entry::Vacant(entry) = values.entry(key) {
+                        entry.insert(value.as_str());
+                        order.push(key);
+                    }
+                }
+            }
+        }
+        Self {
+            styles,
+            group,
+            values,
+            order,
+        }
+    }
+
     pub fn get(&self, namespace: &str, name: &str) -> Option<&'a str> {
-        self.styles.iter().find_map(|style| {
-            style
-                .group(self.group)
-                .and_then(|properties| {
-                    properties
-                        .attributes
-                        .get(&(namespace.to_string(), name.to_string()))
-                })
-                .map(String::as_str)
-        })
+        self.values
+            .get(&(namespace.to_string(), name.to_string()))
+            .copied()
     }
 
     pub fn element(&self, name: &str) -> Option<&'a [Element]> {
@@ -203,26 +222,17 @@ impl<'a> Cascade<'a> {
 
     /// Every attribute key set anywhere in the cascade (for admission).
     pub fn keys(&self) -> Vec<Key> {
-        let mut keys: Vec<Key> = Vec::new();
-        for style in &self.styles {
-            if let Some(properties) = style.group(self.group) {
-                for key in properties.attributes.keys() {
-                    if !keys.contains(key) {
-                        keys.push(key.clone());
-                    }
-                }
-            }
-        }
-        keys
+        self.order.iter().map(|key| (*key).clone()).collect()
     }
 
     /// Every element-valued property name set anywhere in the cascade.
     pub fn element_names(&self) -> Vec<String> {
+        let mut seen: HashSet<&String> = HashSet::new();
         let mut names: Vec<String> = Vec::new();
         for style in &self.styles {
             if let Some(properties) = style.group(self.group) {
                 for name in properties.elements.keys() {
-                    if !names.contains(name) {
+                    if seen.insert(name) {
                         names.push(name.clone());
                     }
                 }
