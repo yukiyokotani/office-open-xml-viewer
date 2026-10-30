@@ -1157,6 +1157,8 @@ impl<'a> Reader<'a> {
         } else {
             Vec::new()
         };
+        // Soft hyphens before any text, checked against the first text run.
+        let mut pending_hyphens: Vec<(u32, ScriptClass)> = Vec::new();
         for (index, &token) in tokens.iter().enumerate() {
             let (c, context) = match token {
                 Token::LineBreak(context) => {
@@ -1225,6 +1227,28 @@ impl<'a> Reader<'a> {
                 entry.insert(self.run_properties(contexts, context, class)?);
             }
             breaks_since_text = 0;
+            if c == '\u{ad}' {
+                // §6.1.6 soft hyphen: a break opportunity that shows a hyphen
+                // in its own formatting only when the break is taken
+                // (measured), as the DOCX optional hyphen run does. Its
+                // formatting does not size LibreOffice's line but does size
+                // the DOCX one, so it must share the adjacent text's metrics.
+                match current {
+                    Some(text) => {
+                        same_line_metrics(&cache[&key], &cache[&text], "soft-hyphen-formatting")?
+                    }
+                    None => pending_hyphens.push(key),
+                }
+                self.charge_construction(cache[&key].retained_estimate())?;
+                let mut run = cache[&key].text_run();
+                run.optional_hyphen = true;
+                paragraph.runs.push(DocRun::Text(Box::new(run)));
+                current = None;
+                continue;
+            }
+            for hyphen in pending_hyphens.drain(..) {
+                same_line_metrics(&cache[&hyphen], &cache[&key], "soft-hyphen-formatting")?;
+            }
             line_has_glyph |= !c.is_whitespace();
             let continues = match (current, paragraph.runs.last_mut()) {
                 (Some(last_key), Some(DocRun::Text(last))) if cache[&last_key] == cache[&key] => {
@@ -1243,6 +1267,9 @@ impl<'a> Reader<'a> {
         }
         if any_break && !line_has_glyph {
             return Err(unsupported("line-break-empty-line"));
+        }
+        if !pending_hyphens.is_empty() {
+            return Err(unsupported("soft-hyphen-formatting"));
         }
         Ok(())
     }
@@ -1416,6 +1443,26 @@ fn weak_classes(tokens: &[Token]) -> Vec<Option<ScriptClass>> {
     classes
 }
 
+/// The effective font colour: `(automatic, explicit colour)`, decided by the
+/// nearest style that sets one (see `RunProperties::resolve`).
+fn font_color(cascade: &Cascade<'_>) -> Result<(bool, Option<String>), String> {
+    let key = |ns: &str, name: &str| (ns.to_string(), name.to_string());
+    let (window, explicit) = (key(NS_STYLE, "use-window-font-color"), key(NS_FO, "color"));
+    for style in &cascade.styles {
+        let Some(properties) = style.group(cascade.group) else {
+            continue;
+        };
+        let automatic = properties.attributes.get(&window).map(String::as_str) == Some("true");
+        match (automatic, properties.attributes.get(&explicit)) {
+            (true, Some(_)) => return Err(unsupported("font-color-ambiguous")),
+            (true, None) => return Ok((true, None)),
+            (false, Some(color)) => return Ok((false, Some(hex_color(color)?))),
+            (false, None) => {}
+        }
+    }
+    Ok((false, None))
+}
+
 /// The properties that set a line's height: face, size and raise/lower.
 fn same_line_metrics(
     a: &RunProperties,
@@ -1581,15 +1628,14 @@ impl RunProperties {
         // §20.395 automatic colour is chosen against the background. With no
         // background it is the dark default on a white page, as is DOCX
         // automatic colour; other backgrounds are not yet measured.
-        let color_auto = cascade.get(NS_STYLE, "use-window-font-color") == Some("true");
+        // LibreOffice keeps one font colour per style: the nearest style that
+        // sets `fo:color` or `style:use-window-font-color="true"` decides
+        // (measured: an explicit span colour over the automatic default
+        // paints, and an automatic span over a coloured parent is automatic).
+        let (color_auto, color) = font_color(cascade)?;
         if color_auto && background.is_some() {
             return Err(unsupported("automatic-font-color"));
         }
-        let color = if color_auto {
-            None
-        } else {
-            cascade.get(NS_FO, "color").map(hex_color).transpose()?
-        };
         // Letter spacing: LibreOffice spaces between the characters of a
         // portion, the DOCX layout after each character with an advance
         // floor (measured: -1 pt over four letters moves the next word 3 pt
@@ -1820,7 +1866,15 @@ fn check_text_keys(cascade: &Cascade<'_>) -> Result<(), String> {
             (NS_STYLE, "text-combine") => value == "none",
             (NS_STYLE, "text-rotation-angle") => value == "0" || value == "0deg",
             (NS_STYLE, "text-blinking") => value == "false",
-            (NS_LOEXT, "opacity") => value == "0%",
+            // Character opacity of the font colour (LibreOffice extension):
+            // opaque is inert. LibreOffice writes 0% with the automatic
+            // window colour, where it has no effect (measured: such text
+            // paints normally); with an explicit colour only 100% is inert.
+            (NS_LOEXT, "opacity") => {
+                value == "100%"
+                    || (value == "0%"
+                        && cascade.get(NS_STYLE, "use-window-font-color") == Some("true"))
+            }
             (NS_LOEXT, "font-optical-sizing") => value == "auto",
             (NS_OFFICEOOO, "rsid" | "paragraph-rsid") => true,
             _ => false,
@@ -2078,7 +2132,7 @@ mod tests {
     use crate::package::PackageLimits;
     use ooxml_common::resource::OoxmlFormat;
 
-    const NS: &str = r#"xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0" xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0""#;
+    const NS: &str = r#"xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0" xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0" xmlns:loext="urn:org:documentfoundation:names:experimental:office:xmlns:loext:1.0""#;
     const FACES: &str = r#"<office:font-face-decls><style:font-face style:name="Serif" svg:font-family="'Liberation Serif'" style:font-family-generic="roman"/><style:font-face style:name="Sans" svg:font-family="'Liberation Sans'" style:font-family-generic="swiss"/><style:font-face style:name="Sans2" svg:font-family="'Liberation Sans'" style:font-family-generic="system"/><style:font-face style:name="Mincho" svg:font-family="'Hiragino Mincho ProN'" style:font-family-generic="system"/></office:font-face-decls>"#;
 
     struct Fixture<'a> {
@@ -3011,6 +3065,76 @@ mod tests {
             read(r#"<text:p text:style-name="L">x <text:span text:style-name="Big">y</text:span></text:p>"#, &style("115%"), on)
                 .unwrap_err(),
             unsupported("line-height-proportional-mixed")
+        );
+    }
+
+    #[test]
+    fn soft_hyphens_become_optional_hyphen_runs() {
+        let styles = r#"<style:style style:name="R" style:family="text"><style:text-properties fo:font-size="20pt"/></style:style><style:style style:name="B" style:family="text"><style:text-properties fo:font-weight="bold"/></style:style>"#;
+        assert_eq!(
+            read_fixture(Fixture {
+                styles,
+                body: "<text:p>abc<text:span text:style-name=\"R\">\u{ad}</text:span>def</text:p>",
+                ..Fixture::default()
+            })
+            .unwrap_err(),
+            unsupported("soft-hyphen-formatting")
+        );
+        let document = read_fixture(Fixture {
+            styles,
+            body: "<text:p>abc\u{ad}def<text:span text:style-name=\"B\">\u{ad}</text:span>gh</text:p>",
+            ..Fixture::default()
+        })
+        .unwrap();
+        let runs: Vec<(String, bool, f64)> = paragraphs(&document)[0]
+            .runs
+            .iter()
+            .map(|run| match run {
+                DocRun::Text(t) => (t.text.clone(), t.optional_hyphen, t.font_size),
+                _ => panic!("text runs only"),
+            })
+            .collect();
+        assert_eq!(
+            runs,
+            [
+                ("abc".into(), false, 12.0),
+                (String::new(), true, 12.0),
+                ("def".into(), false, 12.0),
+                (String::new(), true, 12.0),
+                ("gh".into(), false, 12.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_nearest_style_decides_the_font_color() {
+        let auto = r#"style:font-name="Serif" fo:font-size="12pt" style:font-name-asian="Serif" style:font-size-asian="12pt" style:font-name-complex="Serif" style:font-size-complex="12pt" style:letter-kerning="true" style:use-window-font-color="true" loext:opacity="0%""#;
+        let styles = r##"<style:style style:name="R" style:family="text"><style:text-properties fo:color="#ff0000" loext:opacity="100%"/></style:style><style:style style:name="A" style:family="text" style:parent-style-name="R"><style:text-properties style:use-window-font-color="true"/></style:style><style:style style:name="T" style:family="text"><style:text-properties fo:color="#ff0000" loext:opacity="50%"/></style:style>"##;
+        let read = |body: &str| {
+            read_fixture(Fixture {
+                default_text: auto,
+                styles,
+                body,
+                ..Fixture::default()
+            })
+        };
+        let document = read(r#"<text:p>a<text:span text:style-name="R">b</text:span><text:span text:style-name="A">c</text:span></text:p>"#).unwrap();
+        let colors: Vec<(Option<String>, bool)> = paragraphs(&document)[0]
+            .runs
+            .iter()
+            .map(|run| match run {
+                DocRun::Text(t) => (t.color.clone(), t.color_auto),
+                _ => panic!(),
+            })
+            .collect();
+        assert_eq!(
+            colors,
+            [(None, true), (Some("ff0000".into()), false), (None, true)]
+        );
+        // Partial opacity is not inert.
+        assert_eq!(
+            read(r#"<text:p><text:span text:style-name="T">b</text:span></text:p>"#).unwrap_err(),
+            unsupported("text-property")
         );
     }
 

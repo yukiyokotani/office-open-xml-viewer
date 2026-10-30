@@ -64,8 +64,8 @@ external resources.
 Currently admitted:
 
 - paragraphs, headings (without heading numbering), plain sections, spans,
-  spaces, and line breaks between visible text set in the same font (not in
-  justified paragraphs);
+  spaces, soft hyphens and line breaks between visible text set in the same
+  font (not in justified paragraphs);
 - page size and margins of a single page style without displayed headers or
   footers;
 - paragraph indents, alignment, page breaks, keep-with-next /
