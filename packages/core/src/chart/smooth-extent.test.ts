@@ -126,6 +126,12 @@ describe('automatic value axes cover a drawn smoothed curve', () => {
     );
     expect(scale([-2.3, 100])?.min).toBe(-20);
     expect(scale([0, 106])?.max).toBe(120);
+    // A dip that stays above zero keeps the plan, zero baseline included.
+    const plan = (extra: number[]) => {
+      const result = scale(extra);
+      return [result?.min, result?.max, result?.step, result?.majorLines];
+    };
+    expect(plan([78.5, 100])).toEqual(plan([]));
   });
 
   it('stacked line', () => {

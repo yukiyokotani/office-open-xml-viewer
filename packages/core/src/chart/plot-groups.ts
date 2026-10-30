@@ -86,7 +86,9 @@ export function classicPlotDispatch(chart: ChartModel): ClassicPlotDispatch {
   // axis). Sharing needs one category mapping and a painter with a secondary
   // value scale:
   // - orientation: a reversed (maxMin) deleted axis reverses its bars or line
-  //   and moves the secondary value axis (Excel 365);
+  //   and moves the secondary value axis (Excel 365); with reversed category
+  //   axes a crosses="max" secondary value axis sits on the left (§21.2.3.8),
+  //   which the painters do not place, so both must run minMax;
   // - date axes keep their own date scales;
   // - crossBetween (§21.2.2.32) of each value axis places its categories
   //   between or on the tick marks;
@@ -96,7 +98,8 @@ export function classicPlotDispatch(chart: ChartModel): ClassicPlotDispatch {
   const horizontalBars = groups.some(group => group.kind === 'bar'
     && (group.barDirection ?? (chart.chartType.endsWith('H') ? 'bar' : 'col')) === 'bar');
   const sharesCategories = chart.secondaryCatAxis?.hidden === true
-    && (chart.secondaryCatAxis.orientation ?? 'minMax') === (chart.catAxisOrientation ?? 'minMax')
+    && (chart.secondaryCatAxis.orientation ?? 'minMax') === 'minMax'
+    && (chart.catAxisOrientation ?? 'minMax') === 'minMax'
     && chart.secondaryCatAxis.dateAxis !== true
     && chart.catAxisIsDate !== true
     && (chart.secondaryValAxis?.crossBetween ?? 'between')

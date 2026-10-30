@@ -518,11 +518,15 @@ export function planValueAxis(
   // A smoothed percentStacked line can leave the normalized extent (see
   // smoothCurveExtent). Excel 365 then takes the automatic percent unit from
   // the widened range and snaps the bound outward to it: a curve dipping to
-  // -2% gives -20%..100%, one peaking at 106% gives 0%..120%.
-  const percentMin = percentStacked && percentCurveExtent
-    ? Math.min(dataMin, percentCurveExtent[0]) : dataMin;
-  const percentMax = percentStacked && percentCurveExtent
-    ? Math.max(dataMax, percentCurveExtent[1]) : dataMax;
+  // -2% gives -20%..100%, one peaking at 106% gives 0%..120%. Only a curve
+  // crossing the normalized bound (below 0 / above 100, or past a negative
+  // stack) widens it; otherwise the plan is unchanged.
+  const snapLow = percentStacked && percentCurveExtent != null
+    && percentCurveExtent[0] < Math.min(dataMin, 0);
+  const snapHigh = percentStacked && percentCurveExtent != null
+    && percentCurveExtent[1] > Math.max(dataMax, 0);
+  const percentMin = snapLow && percentCurveExtent ? percentCurveExtent[0] : dataMin;
+  const percentMax = snapHigh && percentCurveExtent ? percentCurveExtent[1] : dataMax;
   const authoredMajorUnit = valueAxisUnitInRendererSpace(
     chart.valAxisMajorUnit,
     percentStacked,
@@ -534,10 +538,10 @@ export function planValueAxis(
       : authoredMajorUnit;
   const snapUnit = majorUnit != null && isFinite(majorUnit) && majorUnit > 0 && !isLog
     ? majorUnit : null;
-  const percentLow = percentMin < dataMin && snapUnit != null
-    ? Math.floor(percentMin / snapUnit) * snapUnit : percentMin;
-  const percentHigh = percentMax > dataMax && snapUnit != null
-    ? Math.ceil(percentMax / snapUnit) * snapUnit : percentMax;
+  const percentLow = snapLow && snapUnit != null
+    ? Math.floor(percentMin / snapUnit) * snapUnit : dataMin;
+  const percentHigh = snapHigh && snapUnit != null
+    ? Math.ceil(percentMax / snapUnit) * snapUnit : dataMax;
   // c:valAx values remain ratios for percentStacked charts, but all plotted
   // geometry in this renderer is expressed as percentage points. Explicit
   // bounds/units therefore cross the same ×100 boundary as the series values.

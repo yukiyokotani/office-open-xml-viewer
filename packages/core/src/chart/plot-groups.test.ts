@@ -42,6 +42,9 @@ test('a visible or reversed secondary category axis stays outside the shared pai
   expect(classicPlotDispatch(combo(['bar', 'line'], reversed))).toBe('unsupported');
   expect(classicPlotDispatch(combo(['bar', 'bar'], reversed))).toBe('unsupported');
   expect(classicPlotDispatch(combo(['area', 'line'], reversed))).toBe('unsupported');
+  // Both reversed: a crosses="max" secondary value axis would sit on the left.
+  expect(classicPlotDispatch({ ...combo(['line', 'line'], reversed), catAxisOrientation: 'maxMin' }))
+    .toBe('unsupported');
 });
 
 test('date axes, crossBetween and horizontal bars keep a deleted secondary category axis outside', () => {
