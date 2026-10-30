@@ -1860,8 +1860,11 @@ export function paragraphInputRuns(
     const csFontFor = (face: string, text: string) =>
       stackFontFor(face, text, true, COMPLEX_SCRIPT_DEFAULT_FACES);
     const letterSpacingPx = (run.letterSpacing ?? 0) * PT_TO_EMU * scale;
+    // [MS-ODRAWXML] a14:hlinkClr val="tx": the hyperlink keeps the text colour
+    // its run inherits instead of the theme hlink colour.
     const color = run.color ? hexToRgba(run.color)
-      : run.hyperlink && rc.themeHlinkColor ? hexToRgba(rc.themeHlinkColor) : defaultColor;
+      : run.hyperlink && !run.hyperlinkUsesTextFill && rc.themeHlinkColor
+        ? hexToRgba(rc.themeHlinkColor) : defaultColor;
     const baseStyle: LayoutSegment = {
       // `emitGroup` installs the cluster-scoped resolved font.
       text: '', font: '', sizePx, drawSizePx, color,
