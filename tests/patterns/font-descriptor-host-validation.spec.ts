@@ -211,7 +211,7 @@ async function resolverRaceInRealm(): Promise<RaceOutcome> {
     calls++;
     return request.families.map((family) => ({ family, url: 'data:font/woff2;base64,AAAA' }));
   });
-  const demand = { families: ['Shared'], fallbackFamilies: [], tuples: [], scalars: 'all' };
+  const demand = { families: ['Shared'], fallbackFamilies: [], scalars: 'all' };
   const first = new FontSourceSession({ sources: [source] });
   const second = new FontSourceSession({ sources: [source] });
   const released = first.ensure(demand);

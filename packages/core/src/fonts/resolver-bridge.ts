@@ -12,10 +12,19 @@
  * (`ooxmlFontsResolved`) with a copy of every `data` buffer in the transfer
  * list (`resolver-bridge-responder.ts`). Main resolves through its own realm
  * resolution cache, so the function runs once per family however many
- * realms ask (`resolver-resolution.ts`), and answers per family. The worker
- * session then admits and claims each family's declarations exactly as it
- * admits a direct answer, so a document resolves, registers, charges and
- * loads the same faces in both modes.
+ * realms ask (`resolver-resolution.ts`), and answers per family with the
+ * family's candidate faces. The request carries only the demanded family
+ * names (`FontDemand`): painted scalars and substitute scopes stay in the
+ * worker, whose session admits each family's candidates and claims from them
+ * under its own scope, exactly as it claims a direct answer.
+ *
+ * The worker never fetches a resolver URL. Once it has claimed a family, its
+ * session asks main for the claimed faces' http(s) / blob: URLs through
+ * {@link WorkerFontResolverClient.acquire} (`ooxmlAcquireFonts`, within the
+ * worker's face-loading ceiling); main fetches only URLs its own resolution
+ * of this document returned and replies (`ooxmlFontsAcquired`) with a copy of
+ * each body, so cookies, HTTP authentication and Referer checks see the page
+ * in both modes (`resolver-bridge-host.ts`, `face-download.ts`).
  *
  * Correlation follows the host-font measurement requests of the DOCX render
  * worker: each request carries the client's generation and a request id. A
@@ -40,9 +49,16 @@ import {
   HARD_MAX_FONT_SOURCE_DECLARATIONS,
   HARD_MAX_FONT_SOURCE_FAMILIES,
 } from '../worker/resource-policy.generated.js';
+import type { FaceAcquisition, ResolverFaceAcquireContext, ResolverFaceRequest } from './face-download.js';
 import { bridgedFontSourceLimitError } from './resolver-admission.js';
 import { BridgedFamilyResolutions, type ResolverCallInfo } from './resolver-resolution.js';
-import type { FontDemand, FontFaceDeclaration, FontResolveContext, FontResolverSource } from './source.js';
+import {
+  validateFontFaceDeclaration,
+  type FontDemand,
+  type FontFaceDeclaration,
+  type FontResolveContext,
+  type FontResolverSource,
+} from './source.js';
 
 /** Worker → main: run the document's `fonts[sourceIndex]` (a resolver whose
  * id is `resolverId`) for `demand`. */
@@ -58,6 +74,35 @@ export interface WorkerFontResolveRequest {
   readonly demand: FontDemand;
 }
 
+/** Worker → main: fetch the claimed URL faces of the document's
+ * `fonts[sourceIndex]` (requests share the resolve request id space). */
+export interface WorkerFontAcquireRequest {
+  readonly kind: 'ooxmlAcquireFonts';
+  readonly generation: number;
+  readonly requestId: number;
+  readonly sourceIndex: number;
+  readonly resolverId: string;
+  /** Milliseconds left of the worker session's face-loading ceiling. */
+  readonly remainingMs: number;
+  readonly families: readonly { readonly family: string; readonly urls: readonly string[] }[];
+}
+
+/** Main's outcome for one acquire request. */
+export type FontAcquireOutcome =
+  /** Per URL: the body (in the transfer list) or why it failed. */
+  | { readonly status: 'faces'; readonly faces: readonly ({ readonly url: string; readonly data: ArrayBuffer }
+    | { readonly url: string; readonly reason: string })[] }
+  | { readonly status: 'failed'; readonly reason: string }
+  | { readonly status: 'limit'; readonly violation: OoxmlFontSourceViolation };
+
+/** Main → worker. */
+export interface MainFontAcquireReply {
+  readonly kind: 'ooxmlFontsAcquired';
+  readonly generation: number;
+  readonly requestId: number;
+  readonly outcome: FontAcquireOutcome;
+}
+
 /** Worker → main: the worker no longer waits for `requestId`. */
 export interface WorkerFontResolveCancel {
   readonly kind: 'ooxmlCancelResolveFonts';
@@ -67,7 +112,8 @@ export interface WorkerFontResolveCancel {
 
 /** Main's answer for one demanded family (lower-cased `family`). */
 export type BridgedFamilyAnswer =
-  /** The declarations that claim it; every `data` buffer is in the transfer list. */
+  /** Its candidate declarations (`resolverCandidates`); every `data` buffer
+   * is in the transfer list, and no declaration is an http(s) or blob: URL. */
   | { readonly family: string; readonly kind: 'claimed'; readonly declarations: readonly FontFaceDeclaration[] }
   | { readonly family: string; readonly kind: 'failed'; readonly reason: string }
   | { readonly family: string; readonly kind: 'absent' };
@@ -89,7 +135,7 @@ export interface MainFontResolveReply {
   readonly outcome: FontResolveOutcome;
 }
 
-export type WorkerFontResolveMessage = WorkerFontResolveRequest | WorkerFontResolveCancel;
+export type WorkerFontResolveMessage = WorkerFontResolveRequest | WorkerFontAcquireRequest | WorkerFontResolveCancel;
 
 type Post = (message: unknown, transfer?: Transferable[]) => void;
 
@@ -99,12 +145,13 @@ const kindOf = (value: unknown): unknown =>
 /** Whether `value` is a worker → main resolver-bridge message (main side). */
 export function isWorkerFontResolveMessage(value: unknown): value is WorkerFontResolveMessage {
   const kind = kindOf(value);
-  return kind === 'ooxmlResolveFonts' || kind === 'ooxmlCancelResolveFonts';
+  return kind === 'ooxmlResolveFonts' || kind === 'ooxmlAcquireFonts' || kind === 'ooxmlCancelResolveFonts';
 }
 
 /** Whether `value` is a main → worker resolver-bridge reply (worker side). */
-export function isMainFontResolveReply(value: unknown): value is MainFontResolveReply {
-  return kindOf(value) === 'ooxmlFontsResolved';
+export function isMainFontResolveReply(value: unknown): value is MainFontResolveReply | MainFontAcquireReply {
+  const kind = kindOf(value);
+  return kind === 'ooxmlFontsResolved' || kind === 'ooxmlFontsAcquired';
 }
 
 /** The reply's answers with one copy per distinct buffer: the originals are
@@ -132,7 +179,8 @@ export function copiedForTransfer(
 const MAX_REASON_LENGTH = 1024;
 
 interface PendingCall {
-  readonly resolve: (answers: BridgedFamilyResolutions) => void;
+  readonly kind: 'ooxmlFontsResolved' | 'ooxmlFontsAcquired';
+  readonly resolve: (answer: never) => void;
   readonly reject: (error: unknown) => void;
   readonly detach: () => void;
   readonly generation: number;
@@ -153,9 +201,70 @@ export class WorkerFontResolverClient {
    * main owns the deadline of a bridged call (it times the call out and
    * records the outcome for the whole document, so a workbook's viewer realm
    * and worker agree), so the session does not abandon the wait itself. */
-  get sessionOptions(): { readonly runResolver: WorkerFontResolverClient['run']; readonly resolverCeilingOwnedByRunner: true } {
-    return { runResolver: this.run, resolverCeilingOwnedByRunner: true };
+  get sessionOptions(): {
+    readonly runResolver: WorkerFontResolverClient['run'];
+    readonly resolverCeilingOwnedByRunner: true;
+    readonly acquireResolverFaces: WorkerFontResolverClient['acquire'];
+    readonly acquiredFacesOwnedBySession: true;
+  } {
+    return {
+      runResolver: this.run, resolverCeilingOwnedByRunner: true,
+      acquireResolverFaces: this.acquire, acquiredFacesOwnedBySession: true,
+    };
   }
+
+  /**
+   * A `ResolverFaceAcquirer` (`face-download.ts`): main fetches the claimed
+   * URL faces. Main owns the deadline (the worker sends the time left of its
+   * face-loading ceiling) and the document's outcome, so the worker adopts
+   * main's verdict even past its own ceiling; only a release of the
+   * requesting session (`cancel`) abandons the call, cancelling it on main.
+   */
+  readonly acquire = (
+    request: ResolverFaceRequest,
+    { cancel: signal, deadline }: ResolverFaceAcquireContext,
+  ): Promise<ReadonlyMap<string, FaceAcquisition>> => {
+    const urls = [...new Set(request.families.flatMap(({ urls: list }) => list))];
+    const timedOut = () => new Map<string, FaceAcquisition>(urls.map((url) => [url, { reason: 'timed out' }]));
+    if (signal.aborted) return Promise.resolve(timedOut());
+    const generation = this.generation;
+    const requestId = this.nextRequestId++;
+    return new Promise<ReadonlyMap<string, FaceAcquisition>>((resolve, reject) => {
+      const onAbort = () => {
+        if (!this.settle(requestId)) return;
+        resolve(timedOut());
+        this.postQuietly({ kind: 'ooxmlCancelResolveFonts', generation, requestId });
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+      this.pending.set(requestId, {
+        kind: 'ooxmlFontsAcquired',
+        resolve: ((outcome: FontAcquireOutcome) => {
+          if (outcome.status === 'limit') { reject(bridgedFontSourceLimitError(outcome.violation)); return; }
+          const answers = new Map<string, FaceAcquisition>(urls.map((url) => [url, {
+            reason: outcome.status === 'failed' ? outcome.reason : 'font download failed',
+          }]));
+          if (outcome.status === 'faces') {
+            for (const face of outcome.faces) if (answers.has(face.url)) answers.set(face.url, 'data' in face ? { data: face.data } : { reason: face.reason });
+          }
+          resolve(answers);
+        }) as (answer: never) => void,
+        // A reset abandons the document: nothing waits for these faces.
+        reject: () => resolve(timedOut()),
+        generation,
+        detach: () => signal.removeEventListener('abort', onAbort),
+      });
+      try {
+        this.post({
+          kind: 'ooxmlAcquireFonts', generation, requestId, sourceIndex: request.sourceIndex,
+          resolverId: request.source.id, remainingMs: Math.max(0, deadline - Date.now()),
+          families: request.families,
+        } satisfies WorkerFontAcquireRequest);
+      } catch {
+        this.settle(requestId);
+        resolve(timedOut());
+      }
+    });
+  };
 
   /** Pass as `FontSourceSessionOptions.runResolver`. */
   readonly run = (
@@ -182,7 +291,7 @@ export class WorkerFontResolverClient {
       // document lives. Every main-side path ends in a reply, or in the
       // document's destruction, which resets or terminates this worker.
       this.pending.set(requestId, {
-        resolve, reject, generation,
+        kind: 'ooxmlFontsResolved', resolve: resolve as (answer: never) => void, reject, generation,
         detach: () => signal.removeEventListener('abort', onAbort),
       });
       try {
@@ -203,10 +312,15 @@ export class WorkerFontResolverClient {
     const { generation, requestId } = message as Partial<MainFontResolveReply>;
     if (generation !== this.generation || typeof requestId !== 'number') return true;
     const call = this.pending.get(requestId);
-    if (!call || !this.settle(requestId)) return true;
+    if (!call || call.kind !== message.kind || !this.settle(requestId)) return true;
+    if (message.kind === 'ooxmlFontsAcquired') {
+      (call.resolve as (outcome: FontAcquireOutcome) => void)(readAcquireOutcome(message.outcome));
+      return true;
+    }
     const outcome = readOutcome(message.outcome);
     if (outcome.status === 'families') {
-      call.resolve(new BridgedFamilyResolutions(new Map(outcome.families.map((answer) => [answer.family, answer]))));
+      (call.resolve as (answers: BridgedFamilyResolutions) => void)(
+        new BridgedFamilyResolutions(new Map(outcome.families.map((answer) => [answer.family, answer]))));
     }
     else if (outcome.status === 'limit') call.reject(bridgedFontSourceLimitError(outcome.violation));
     else call.reject(new Error(outcome.reason));
@@ -241,6 +355,42 @@ export class WorkerFontResolverClient {
 
   private postQuietly(message: WorkerFontResolveCancel): void {
     try { this.post(message); } catch { /* main is gone; nothing waits there */ }
+  }
+}
+
+/** An acquire reply outcome, validated; anything malformed is a failure.
+ * Each body must be an owned, fixed-length ArrayBuffer within the face
+ * ceiling (registration charges it like any `data` face). */
+function readAcquireOutcome(value: unknown): FontAcquireOutcome {
+  const malformed: FontAcquireOutcome = { status: 'failed', reason: 'malformed font acquire reply' };
+  if (value === null || typeof value !== 'object') return malformed;
+  const fields = value as { status?: unknown; faces?: unknown; reason?: unknown; violation?: unknown };
+  switch (fields.status) {
+    case 'faces': {
+      if (!Array.isArray(fields.faces) || fields.faces.length > HARD_MAX_FONT_SOURCE_DECLARATIONS) return malformed;
+      const faces: ({ url: string; data: ArrayBuffer } | { url: string; reason: string })[] = [];
+      for (const entry of fields.faces as unknown[]) {
+        const face = (entry ?? {}) as { url?: unknown; data?: unknown; reason?: unknown };
+        if (typeof face.url !== 'string') return malformed;
+        if (typeof face.reason === 'string') { faces.push({ url: face.url, reason: face.reason.slice(0, MAX_REASON_LENGTH) }); continue; }
+        try {
+          const checked = validateFontFaceDeclaration({ family: 'acquired', data: face.data });
+          faces.push({ url: face.url, data: checked.data as ArrayBuffer });
+        } catch (error) {
+          if (error instanceof TypeError) return malformed;
+          throw error;
+        }
+      }
+      return { status: 'faces', faces };
+    }
+    case 'failed':
+      return typeof fields.reason === 'string' ? { status: 'failed', reason: fields.reason.slice(0, MAX_REASON_LENGTH) } : malformed;
+    case 'limit': {
+      const violation = fontSourceViolationFromWire(fields.violation);
+      return violation ? { status: 'limit', violation } : malformed;
+    }
+    default:
+      return malformed;
   }
 }
 

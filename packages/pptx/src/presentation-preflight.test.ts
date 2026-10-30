@@ -381,10 +381,6 @@ describe('font-source demand facts (LoadOptions.fonts)', () => {
     expect(full.fontPreloadNames.slice(0, facts.familyCount))
       .toEqual(['SimSun', 'Aptos', 'Sakkal Majalla', 'Traditional Arabic']);
     expect(full.fontPreloadNames.slice(facts.familyCount)).toContain('Noto Naskh Arabic');
-    expect(facts.tuples).toEqual([
-      { family: 'Sakkal Majalla', weight: 400, style: 'normal' },
-      { family: 'Traditional Arabic', weight: 700, style: 'normal' },
-    ]);
     // Arabic text proves Sakkal Majalla; Latin-only Traditional Arabic proves
     // nothing; theme fonts govern inherited runs whatever their text.
     expect(facts.substituteScripts).toEqual({ simsun: ['arabic'], aptos: ['arabic'], 'sakkal majalla': ['arabic'] });
@@ -399,7 +395,6 @@ describe('font-source demand facts (LoadOptions.fonts)', () => {
     const facts = full.fontPreloadFacts!;
     for (const bad of [
       { ...facts, familyCount: full.fontPreloadNames.length + 1 },
-      { ...facts, tuples: [{ family: 'A', weight: 400, style: 'oblique' }] },
       { ...facts, substituteScripts: { a: ['latin'] } },
       [],
     ]) {

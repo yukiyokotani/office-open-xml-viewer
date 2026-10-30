@@ -1247,21 +1247,6 @@ export interface ConditionalFormat {
     sqref: WorksheetCellRange[];
     rules: CfRule[];
 }
-export function cssApi(options: CssApiOptions): CssApiSource;
-export interface CssApiOptions {
-    readonly urlTemplate: string;
-    readonly query?: string;
-    readonly families?: Readonly<Record<string, string | true>>;
-    readonly substitutes?: readonly FontSubstitution[];
-    readonly credentials?: FontSourceCredentials;
-}
-export interface CssApiSource extends FontSourceBase {
-    readonly kind: 'css-api';
-    readonly urlTemplate: string;
-    readonly query?: string;
-    readonly families?: Readonly<Record<string, string | true>>;
-    readonly credentials?: FontSourceCredentials;
-}
 export interface DataValidation {
     sqref: string;
     validationType?: string;
@@ -1332,27 +1317,35 @@ export interface FindMatchesOptions {
     caseSensitive?: boolean;
 }
 const FONT_SOURCE_PROTOCOL = 'ooxml-font-source/v1';
-export interface FontDemand {
-    readonly families: readonly string[];
-    readonly tuples: readonly {
-        readonly family: string;
-        readonly weight: number;
-        readonly style: 'normal' | 'italic';
-    }[];
-    readonly fallbackFamilies: readonly string[];
-    readonly scalars: 'all' | readonly number[];
-    readonly substituteScripts?: Readonly<Record<string, readonly FontSubstituteScript[]>>;
+export function fontCss(options: FontCssOptions): FontCssSource;
+export function fontCssApi(options: FontCssApiOptions): FontCssApiSource;
+export interface FontCssApiOptions {
+    readonly urlTemplate: string;
+    readonly query?: string;
+    readonly families?: Readonly<Record<string, string | true>>;
+    readonly substitutes?: readonly FontSubstitution[];
+    readonly credentials?: FontSourceCredentials;
 }
-export function fontFaceCss(options: FontFaceCssOptions): FontFaceCssSource;
-export interface FontFaceCssOptions {
+export interface FontCssApiSource extends FontSourceBase {
+    readonly kind: 'font-css-api';
+    readonly urlTemplate: string;
+    readonly query?: string;
+    readonly families?: Readonly<Record<string, string | true>>;
+    readonly credentials?: FontSourceCredentials;
+}
+export interface FontCssOptions {
     readonly url: string;
     readonly substitutes?: readonly FontSubstitution[];
     readonly credentials?: FontSourceCredentials;
 }
-export interface FontFaceCssSource extends FontSourceBase {
-    readonly kind: 'font-face-css';
+export interface FontCssSource extends FontSourceBase {
+    readonly kind: 'font-css';
     readonly url: string;
     readonly credentials?: FontSourceCredentials;
+}
+export interface FontDemand {
+    readonly families: readonly string[];
+    readonly fallbackFamilies: readonly string[];
 }
 export interface FontFaceDeclaration {
     readonly family: string;
@@ -1367,10 +1360,12 @@ export function fontFiles(options: FontFilesOptions): FontFilesSource;
 export interface FontFilesOptions {
     readonly faces: readonly FontFaceDeclaration[];
     readonly substitutes?: readonly FontSubstitution[];
+    readonly credentials?: FontSourceCredentials;
 }
 export interface FontFilesSource extends FontSourceBase {
     readonly kind: 'font-files';
     readonly faces: readonly FontFaceDeclaration[];
+    readonly credentials?: FontSourceCredentials;
 }
 export interface FontResolveContext {
     readonly signal: AbortSignal;
@@ -1384,7 +1379,7 @@ export interface FontResolverSource extends FontSourceBase {
     readonly kind: 'font-resolver';
     readonly id: string;
 }
-export type FontSource = CssApiSource | FontFaceCssSource | FontFilesSource | FontResolverSource;
+export type FontSource = FontCssApiSource | FontCssSource | FontFilesSource | FontResolverSource;
 interface FontSourceBase {
     readonly protocol: typeof FONT_SOURCE_PROTOCOL;
     readonly kind: string;
@@ -1402,10 +1397,12 @@ export interface Glow {
     alpha: number;
     radius: number;
 }
-export function googleFonts(options?: GoogleFontsOptions): CssApiSource;
+export function googleFonts(options?: GoogleFontsOptions): FontCssApiSource;
 export interface GoogleFontsOptions {
     readonly cssOrigin?: string;
+    readonly substitutes?: readonly FontSubstitution[];
 }
+export const googleFontsSubstitutions: readonly FontSubstitution[];
 export interface GradientFill {
     fillType: 'gradient';
     stops: GradientStop[];

@@ -74,10 +74,15 @@ interface Pixels { readonly width: number; readonly height: number; readonly dat
 
 interface Rendered {
   readonly png: Pixels;
-  /** Resolver calls, the scalars each call demanded, and whether the
-   * answered buffer is still attached on main after the load. */
+  /** Resolver calls, the demand each call received (its field names and
+   * both family lists), and whether the answered buffer is still attached
+   * on main after the load. */
   readonly calls: number;
-  readonly demandedScalars: readonly (number[] | 'all')[];
+  readonly demands: readonly {
+    readonly keys: readonly string[];
+    readonly families: readonly string[];
+    readonly fallbackFamilies: readonly string[];
+  }[];
   readonly answeredBytes: readonly number[];
 }
 
@@ -97,13 +102,15 @@ async function render(browser: Browser, format: Format, mode: 'main' | 'worker',
       const entry = `/dist/${format}.mjs`;
       const api = await import(entry);
       const font = new Uint8Array(fontBytes);
-      const calls: { scalars: number[] | 'all' }[] = [];
+      const calls: { keys: string[]; families: string[]; fallbackFamilies: string[] }[] = [];
       const answered: ArrayBuffer[] = [];
       let fonts: unknown[] | undefined;
       if (source === 'resolver') {
-        fonts = [api.fontResolver((demand: { families: string[]; scalars: number[] | 'all' }, context: { signal: AbortSignal }) => {
+        fonts = [api.fontResolver((demand: { families: string[]; fallbackFamilies: string[] }, context: { signal: AbortSignal }) => {
           if (!(context.signal instanceof AbortSignal)) throw new Error('resolver received no AbortSignal');
-          calls.push({ scalars: demand.scalars === 'all' ? 'all' : [...demand.scalars] });
+          calls.push({
+            keys: Object.keys(demand).sort(), families: [...demand.families], fallbackFamilies: [...demand.fallbackFamilies],
+          });
           if (!demand.families.includes(family)) return [];
           const data = font.slice().buffer;
           answered.push(data);
@@ -161,14 +168,14 @@ async function render(browser: Browser, format: Format, mode: 'main' | 'worker',
         height: canvas.height,
         rgba: btoa(binary),
         calls: calls.length,
-        demandedScalars: calls.map((call) => call.scalars),
+        demands: calls,
         answeredBytes: answered.map((buffer) => buffer.byteLength),
       };
     }, { format, mode, source, modelSource, documentBytes: [...FIXTURES[format]], fontBytes: [...FONT], family: FAMILY });
     return {
       png: { width: result.width, height: result.height, data: Buffer.from(result.rgba, 'base64') },
       calls: result.calls,
-      demandedScalars: result.demandedScalars,
+      demands: result.demands,
       answeredBytes: result.answeredBytes,
     };
   } finally {
@@ -204,11 +211,13 @@ for (const format of ['docx', 'pptx', 'xlsx'] as const) {
       expect(mainVsWorker).toBeLessThanOrEqual(0.2);
       expect(mainVsNone).toBeGreaterThan(0.5);
       if (source !== 'resolver') continue;
-      // The application function ran on main in both modes, with the painted
-      // scalars ('F' of the fixture text among them).
-      for (const scalars of [...main.demandedScalars, ...worker.demandedScalars]) {
-        expect(scalars === 'all' || scalars.includes(0x46)).toBe(true);
+      // The application function ran on main in both modes and saw the same
+      // demand: family names only (FontDemand), the fixture family among them.
+      for (const demand of [...main.demands, ...worker.demands]) {
+        expect(demand.keys).toEqual(['fallbackFamilies', 'families']);
+        expect(demand.families).toContain(FAMILY);
       }
+      expect(worker.demands).toEqual(main.demands);
       expect(main.calls).toBe(1);
       expect(main.answeredBytes).toEqual([FONT.byteLength]);
       // Once per family in both modes: the worker's request resolves through

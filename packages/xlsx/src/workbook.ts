@@ -11,7 +11,7 @@ import wasmAssetUrl from './wasm/xlsx_parser_bg.wasm?url';
 import {
   FontResolverBridgeHost,
   normalizeFontOptions,
-  type FontDemand,
+  type FontSessionDemand,
   type FontResolverFailures,
   type FontSource,
   type FontSourceSession,
@@ -247,8 +247,9 @@ export class XlsxWorkbook {
   private fontDemand: import('./font-source-load.js').XlsxFontDemand | null = null;
   private installedFamilies: InstalledFamilyExclusion | null = null;
   private fontSessionType: typeof FontSourceSession | null = null;
+  private fontAcquirerFor: typeof import('./font-source-load.js').inRealmResolverFaceAcquirer | null = null;
   /** Every demand delta so far, replayed into each newly retained set. */
-  private fontDeltas: Promise<FontDemand>[] = [];
+  private fontDeltas: Promise<FontSessionDemand>[] = [];
   private officeFontRequests: OfficeFontFallbackRequest[] = [];
   private readonly retainedFontSets = new Map<FontFaceSet, RetainedFontSet>();
   /** Worker mode: runs this workbook's `fontResolver` functions for the
@@ -717,6 +718,7 @@ export class XlsxWorkbook {
     if (!fonts?.length) return;
     const fontSourceLoad = await import('./font-source-load.js');
     this.fontSessionType = fontSourceLoad.FontSourceSession;
+    this.fontAcquirerFor = fontSourceLoad.inRealmResolverFaceAcquirer;
     this.fontDemand = new fontSourceLoad.XlsxFontDemand(workbook, this.cjkFallback, fontSourceLoad.declaredFontSubstitutions(fonts));
     // Installed authored faces are probed before any source face of a delta
     // registers, and never demanded (core installed-families.ts).
@@ -725,7 +727,7 @@ export class XlsxWorkbook {
   }
 
   /** Queue one (installed-excluded) delta on a retained set's session. */
-  private enqueueFontDelta(retained: RetainedFontSet, delta: Promise<FontDemand>): Promise<void> {
+  private enqueueFontDelta(retained: RetainedFontSet, delta: Promise<FontSessionDemand>): Promise<void> {
     const task = retained.fontQueue.then(async () => {
       const demand = await delta;
       if (retained.session && !this.fontsDestroyed) await retained.session.ensure(demand);
@@ -736,7 +738,7 @@ export class XlsxWorkbook {
 
   /** Record a demand delta and ensure it in every retained set. A ceiling
    * breach (`font-source-limit`) rejects; a failed face only warns. */
-  private async pushFontDelta(delta: FontDemand | null): Promise<void> {
+  private async pushFontDelta(delta: FontSessionDemand | null): Promise<void> {
     if (!delta || !this.installedFamilies || this.fontsDestroyed) return;
     const excluded = this.installedFamilies.exclude(delta);
     this.fontDeltas.push(excluded);
@@ -765,7 +767,14 @@ export class XlsxWorkbook {
       retained.refs++;
     } else {
       const session = this.fonts?.length && this.fontSessionType
-        ? new this.fontSessionType({ sources: this.fonts, fontSet, resolverFailures: this.fontResolverFailures })
+        ? new this.fontSessionType({
+          sources: this.fonts, fontSet, resolverFailures: this.fontResolverFailures,
+          // Worker mode: the page acquires resolver URL faces for the worker
+          // (core resolver-bridge-host.ts); this realm acquires through the
+          // same cache and failure record, so both realms paint the same bytes.
+          ...(this._mode === 'worker' && this.fontAcquirerFor
+            ? { acquireResolverFaces: this.fontAcquirerFor(this.fontResolverFailures) } : {}),
+        })
         : null;
       const record = {
         refs: 1, loaded: null, session, fontQueue: Promise.resolve() as Promise<unknown>,
@@ -1796,6 +1805,7 @@ export class XlsxWorkbook {
     this.fontDemand = null;
     this.installedFamilies = null;
     this.fontSessionType = null;
+    this.fontAcquirerFor = null;
     this.fontDeltas = [];
     this.officeFontRequests = [];
     // Frame-local lookup maps never escape the renderer; drop the owning core

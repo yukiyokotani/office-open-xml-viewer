@@ -29,7 +29,7 @@ import { ScriptPreloadAccumulator } from '@silurus/ooxml-core/internal/script-pr
 import {
   chartFontFamilies,
   fontFamilyKey,
-  type FontDemand,
+  type FontSessionDemand,
   type FontSource,
   type FontSubstitution,
 } from '@silurus/ooxml-core/internal/font-sources';
@@ -38,7 +38,11 @@ import { numberFormatPaintTexts } from './number-format.js';
 import type { Cell, CellFont, ParsedWorkbook, Row, ShapeInfo, Worksheet } from './types.js';
 import { cellXfAt, effectiveCellStyleIndex } from './internal/cell-style.js';
 
-export { FontSourceSession, InstalledFamilyExclusion } from '@silurus/ooxml-core/internal/font-sources';
+export {
+  FontSourceSession,
+  InstalledFamilyExclusion,
+  inRealmResolverFaceAcquirer,
+} from '@silurus/ooxml-core/internal/font-sources';
 
 /** The substitutions every configured source declares, in option order. */
 export function declaredFontSubstitutions(sources: readonly FontSource[]): readonly FontSubstitution[] {
@@ -66,8 +70,6 @@ function stylesNeedAllScalars(workbook: ParsedWorkbook): boolean {
   return (workbook.styles?.cellXfs ?? []).some((xf) => xf.textRotation === 255 || xf.readingOrder === 2);
 }
 
-type Tuple = FontDemand['tuples'][number];
-
 /**
  * One workbook's font demand in one realm. {@link take} returns the delta
  * accumulated since the previous call (the workbook delta first), or null when
@@ -80,13 +82,11 @@ export class XlsxFontDemand {
   /** Normalised family key → first spelling, every family demanded so far. */
   private readonly families = new Map<string, string>();
   private readonly fallbacks = new Set<string>();
-  private readonly tuples = new Map<string, Tuple>();
   private readonly proven = new Map<string, Set<FontSubstituteScript>>();
   private readonly committed = new Set<number>();
   private all = false;
   private collector: FontDemandScalarCollector;
   private freshFamilies = new Map<string, string>();
-  private freshTuples: Tuple[] = [];
   private readonly scannedRows = new WeakMap<Row[], number>();
   private readonly scannedParts = new WeakSet<Worksheet>();
 
@@ -117,7 +117,7 @@ export class XlsxFontDemand {
       // A run's own face paints it wherever the string is used; plain shared
       // text is charged to its cell's face when the sheet's rows are scanned.
       for (const run of shared.runs ?? []) {
-        if (run.font?.name) this.addFamily(run.font.name, run.font.bold, run.font.italic);
+        if (run.font?.name) this.addFamily(run.font.name);
         this.addText(run.text, run.font?.name);
       }
       for (const phonetic of shared.phoneticRuns ?? []) this.addText(phonetic.text);
@@ -181,7 +181,7 @@ export class XlsxFontDemand {
     }
   }
 
-  private addFamily(family: string | null | undefined, bold = false, italic = false): void {
+  private addFamily(family: string | null | undefined): void {
     const name = family?.trim();
     if (!name || name.startsWith('+')) return;
     const key = fontFamilyKey(name);
@@ -189,12 +189,6 @@ export class XlsxFontDemand {
     if (!this.families.has(key)) {
       this.families.set(key, name);
       this.freshFamilies.set(key, name);
-    }
-    const tuple: Tuple = Object.freeze({ family: this.families.get(key) as string, weight: bold ? 700 : 400, style: italic ? 'italic' : 'normal' });
-    const tupleKey = `${key}:${tuple.weight}:${tuple.style}`;
-    if (!this.tuples.has(tupleKey)) {
-      this.tuples.set(tupleKey, tuple);
-      this.freshTuples.push(tuple);
     }
   }
 
@@ -204,9 +198,9 @@ export class XlsxFontDemand {
    * a loaded alias (`LoadedFontSources.regularAliases`). */
   private addCellFont(font: Pick<CellFont, 'name' | 'bold' | 'italic'>): void {
     const name = font.name?.trim() || 'Calibri';
-    this.addFamily(name, font.bold, font.italic);
+    this.addFamily(name);
     const regular = /^(.*?)\s+Regular$/i.exec(name);
-    if (regular?.[1]?.trim()) this.addFamily(regular[1].trim(), font.bold, font.italic);
+    if (regular?.[1]?.trim()) this.addFamily(regular[1].trim());
   }
 
   /** The font a cell paints with, through the renderer's effective-style rule
@@ -230,7 +224,7 @@ export class XlsxFontDemand {
       const family = font?.name?.trim() || 'Calibri';
       if (value.runs?.length) {
         for (const run of value.runs) {
-          if (run.font?.name) this.addFamily(run.font.name, run.font.bold, run.font.italic);
+          if (run.font?.name) this.addFamily(run.font.name);
           this.addText(run.text, run.font?.name?.trim() || family);
         }
       } else {
@@ -283,7 +277,7 @@ export class XlsxFontDemand {
       const header = slicer.style?.header;
       const itemStyles = [slicer.style?.selectedItemWithData, slicer.style?.unselectedItemWithData];
       for (const style of [header, ...itemStyles, slicer.style?.whole]) {
-        if (style?.fontFamily) this.addFamily(style.fontFamily, style.fontBold === true);
+        if (style?.fontFamily) this.addFamily(style.fontFamily);
       }
       this.addText(slicer.caption, header?.fontFamily);
       for (const item of slicer.items) {
@@ -315,8 +309,8 @@ export class XlsxFontDemand {
         // slot is not painted by the XLSX shape renderer.
         const family = run.fontFace?.trim() || 'Calibri';
         const eastAsian = run.fontFaceEa?.trim();
-        this.addFamily(family, run.bold, run.italic);
-        if (eastAsian) this.addFamily(eastAsian, run.bold, run.italic);
+        this.addFamily(family);
+        if (eastAsian) this.addFamily(eastAsian);
         this.addText(run.text, family);
         if (eastAsian) this.prove(eastAsian, run.text);
       }
@@ -325,23 +319,21 @@ export class XlsxFontDemand {
 
   /** The demand accumulated since the previous call, or null when it adds
    * no family, no scalar and no scope. */
-  take(): FontDemand | null {
+  take(): FontSessionDemand | null {
     const scalars = this.collector.result();
     const becameAll = scalars === 'all' && !this.all;
     const newScalars = scalars === 'all' ? [] : scalars;
     // Script fallback families follow the text seen so far (cumulative).
     const fallbackFamilies = this.scripts.names().filter((family) => !this.fallbacks.has(family));
     const families = [...this.freshFamilies.values()];
-    if (!becameAll && newScalars.length === 0 && families.length === 0 && fallbackFamilies.length === 0
-      && this.freshTuples.length === 0) return null;
+    if (!becameAll && newScalars.length === 0 && families.length === 0 && fallbackFamilies.length === 0) return null;
     const substituteScripts = Object.create(null) as Record<string, readonly FontSubstituteScript[]>;
     for (const key of this.freshFamilies.keys()) {
       substituteScripts[key] = Object.freeze([...(this.proven.get(key) ?? [])].sort());
     }
-    const demand: FontDemand = Object.freeze({
+    const demand: FontSessionDemand = Object.freeze({
       families: Object.freeze(families),
       fallbackFamilies: Object.freeze(fallbackFamilies),
-      tuples: Object.freeze(this.freshTuples),
       scalars: this.all || becameAll ? 'all' : Object.freeze(newScalars),
       substituteScripts: Object.freeze(substituteScripts),
     });
@@ -349,7 +341,6 @@ export class XlsxFontDemand {
     if (scalars === 'all') this.all = true;
     else for (const scalar of newScalars) this.committed.add(scalar);
     this.freshFamilies = new Map();
-    this.freshTuples = [];
     if (!this.all) this.collector = this.newCollector();
     return demand;
   }

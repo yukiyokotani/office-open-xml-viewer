@@ -2,13 +2,13 @@ import { setFlagsFromString } from 'node:v8';
 import { runInNewContext } from 'node:vm';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { OoxmlError } from '../errors/ooxml-error.js';
-import { HARD_MAX_FONT_SOURCE_FAMILIES } from '../worker/resource-policy.generated.js';
+import { HARD_MAX_FONT_SOURCE_FACE_BYTES, HARD_MAX_FONT_SOURCE_FAMILIES } from '../worker/resource-policy.generated.js';
 import { googleFonts } from './presets/google-fonts.js';
 import { liveSourceCacheCount, sourceCacheEntryCount } from './source-cache.js';
-import { FontSourceSession, retainedFontSourceBytes } from './source-session.js';
+import { FontSourceSession, retainedFontSourceBytes, type FontSessionDemand } from './source-session.js';
 import {
-  cssApi,
-  fontFaceCss,
+  fontCssApi,
+  fontCss,
   fontFiles,
   fontResolver,
   type FontDemand,
@@ -66,6 +66,8 @@ interface Route {
   url?: string;
   /** Resolves when the test lets the response through. */
   gate?: Promise<void>;
+  /** Body size of a font file response. */
+  bytes?: number;
 }
 
 function installFetch(routes: Record<string, Route>) {
@@ -79,8 +81,12 @@ function installFetch(routes: Record<string, Route>) {
         init?.signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
       });
     }
-    if (!route) return { ok: false, status: 404, url, text: async () => '' };
-    return { ok: (route.status ?? 200) < 400, status: route.status ?? 200, url: route.url ?? url, text: async () => route.css ?? '' };
+    if (!route) return { ok: false, status: 404, url, text: async (): Promise<string> => '' };
+    return {
+      ok: (route.status ?? 200) < 400, status: route.status ?? 200, url: route.url ?? url,
+      text: async (): Promise<string> => route.css ?? '',
+      arrayBuffer: async (): Promise<ArrayBuffer> => new Uint8Array(route.bytes ?? 0).fill(7).buffer,
+    };
   });
   G.fetch = fetchMock;
   return { calls, fetchMock };
@@ -93,8 +99,8 @@ const LATIN = 'unicode-range: U+0000-00FF;';
 const KANA = 'unicode-range: U+3000-30FF;';
 const CJK = 'unicode-range: U+4E00-9FFF;';
 
-function demand(families: string[], scalars: FontDemand['scalars'] = 'all', fallbackFamilies: string[] = []): FontDemand {
-  return { families, fallbackFamilies, tuples: [], scalars };
+function demand(families: string[], scalars: FontSessionDemand['scalars'] = 'all', fallbackFamilies: string[] = []): FontSessionDemand {
+  return { families, fallbackFamilies, scalars };
 }
 
 const sessions: FontSourceSession[] = [];
@@ -129,7 +135,7 @@ describe('FontSourceSession: lazy unicode-range loading', () => {
   it('registers every subset in order but loads only those the scalars intersect', async () => {
     installFetch({ [SHEET_URL]: { css: SHEET } });
     const set = fakeSet();
-    const session = open([fontFaceCss({ url: SHEET_URL })], set);
+    const session = open([fontCss({ url: SHEET_URL })], set);
 
     const first = await session.ensure(demand([], [0x4d, 0x41, 0x41], ['Noto Sans JP']));
     expect(set.faces.map(urlOf)).toEqual([
@@ -147,7 +153,7 @@ describe('FontSourceSession: lazy unicode-range loading', () => {
     expect(set.faces.map((face) => face.loadCalls)).toEqual([1, 1, 1]);
   });
 
-  it('applies the same laziness to css-api presets and to font files', async () => {
+  it('applies the same laziness to font-css-api presets and to font files', async () => {
     const preset = googleFonts();
     const carlito = 'https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap';
     installFetch({ [carlito]: { css: rule('Carlito', 'https://fonts.gstatic.example/c-latin.woff2', LATIN)
@@ -178,13 +184,80 @@ describe('FontSourceSession: stylesheet URLs', () => {
       },
     });
     const set = fakeSet();
-    await open([fontFaceCss({ url: 'https://fonts.internal.example:8443/kit.css', credentials: 'omit' })], set)
+    await open([fontCss({ url: 'https://fonts.internal.example:8443/kit.css' })], set)
       .ensure(demand(['Brand', 'Brand Serif']));
     expect(set.faces.map(urlOf)).toEqual([
       'https://cdn.internal.example/v7/files/brand.woff2', 'https://cdn.internal.example/abs/serif.woff2',
     ]);
     expect(calls).toHaveLength(1);
-    expect(calls[0].init?.credentials).toBe('omit');
+    expect(calls[0].init?.credentials).toBe('same-origin');
+  });
+});
+
+describe('FontSourceSession: credentials omit', () => {
+  it('downloads the claimed faces of every source kind without credentials', async () => {
+    const { calls } = installFetch({
+      'https://fonts.internal.example/kit.css': { css: rule('Brand', 'brand.woff2') },
+      'https://fonts.internal.example/brand.woff2': { bytes: 12 },
+      'https://fonts.internal.example/css?family=Api': { css: rule('Api', 'api.woff2') },
+      'https://fonts.internal.example/api.woff2': { bytes: 10 },
+      'https://app.example/file.woff2': { bytes: 8 },
+    });
+    const set = fakeSet();
+    const loaded = await open([
+      fontCss({ url: 'https://fonts.internal.example/kit.css', credentials: 'omit' }),
+      fontCssApi({ urlTemplate: 'https://fonts.internal.example/css?family={family}', families: { Api: true }, credentials: 'omit' }),
+      fontFiles({ faces: [{ family: 'File', url: 'https://app.example/file.woff2' }], credentials: 'omit' }),
+    ], set).ensure(demand(['Brand', 'Api', 'File']));
+    expect(loaded.faces.map((face) => face.family)).toEqual(['Brand', 'Api', 'File']);
+    // Bytes, not URLs: FontFace never fetches with its own credentials.
+    expect(set.faces.map((face) => (face.source as ArrayBuffer).byteLength)).toEqual([12, 10, 8]);
+    expect(calls).toHaveLength(5);
+    for (const call of calls) expect(call.init?.credentials).toBe('omit');
+    // The acquired bodies (kept for the session) and their registrations.
+    expect(retainedFontSourceBytes()).toBe(2 * 30);
+  });
+
+  it('shares one download across sessions and charges it once', async () => {
+    const { calls } = installFetch({ 'https://app.example/file.woff2': { bytes: 8 } });
+    const source = fontFiles({ faces: [{ family: 'File', url: 'https://app.example/file.woff2' }], credentials: 'omit' });
+    const set = fakeSet();
+    const opened = [open([source], set), open([source], set), open([source], set)];
+    for (const session of opened) await session.ensure(demand(['File']));
+    expect(calls).toHaveLength(1);
+    // One kept body and one registration in the shared set.
+    expect(retainedFontSourceBytes()).toBe(2 * 8);
+    for (const session of opened) session.release();
+    expect(retainedFontSourceBytes()).toBe(0);
+  });
+
+  it('keeps the default to the browser, and fails only the faces whose download fails', async () => {
+    const { calls } = installFetch({ 'https://app.example/a.woff2': { bytes: 4 } });
+    const lazy = fakeSet();
+    await open([fontFiles({ faces: [{ family: 'File', url: 'https://app.example/a.woff2' }], credentials: 'same-origin' })], lazy)
+      .ensure(demand(['File']));
+    expect(lazy.faces.map(urlOf)).toEqual(['https://app.example/a.woff2']);
+    expect(calls).toHaveLength(0);
+
+    const set = fakeSet();
+    const loaded = await open([fontFiles({
+      faces: [
+        { family: 'File', url: 'https://app.example/a.woff2' },
+        { family: 'File', url: 'https://app.example/missing.woff2', weight: '700' },
+        { family: 'Gone', url: 'https://app.example/missing.woff2' },
+      ],
+      credentials: 'omit',
+    })], set).ensure(demand(['File', 'Gone']));
+    expect(loaded.faces.map((face) => [face.family, face.weight])).toEqual([['File', 'normal']]);
+    // One request per URL.
+    expect(calls.map((call) => call.url)).toEqual(['https://app.example/a.woff2', 'https://app.example/missing.woff2']);
+    expect(String(warn.mock.calls.at(-1)?.[0])).toContain('File (HTTP 404), Gone (HTTP 404)');
+  });
+
+  it('rejects a downloaded face beyond the face ceiling', async () => {
+    installFetch({ 'https://app.example/huge.woff2': { bytes: HARD_MAX_FONT_SOURCE_FACE_BYTES + 1 } });
+    const session = open([fontFiles({ faces: [{ family: 'Huge', url: 'https://app.example/huge.woff2' }], credentials: 'omit' })], fakeSet());
+    await expect(session.ensure(demand(['Huge']))).rejects.toMatchObject({ code: 'font-source-limit', violation: { quota: 'face' } });
   });
 });
 
@@ -218,8 +291,8 @@ describe('FontSourceSession: isolation and sharing', () => {
     const { fetchMock } = installFetch({ 'https://fonts.example/a.css': { css: rule('Brand', 'brand.woff2') } });
     const set = fakeSet();
     // Equal configurations built separately share one identity.
-    const a = open([fontFaceCss({ url: 'https://fonts.example/a.css' })], set);
-    const b = open([fontFaceCss({ url: 'https://fonts.example/a.css' })], set);
+    const a = open([fontCss({ url: 'https://fonts.example/a.css' })], set);
+    const b = open([fontCss({ url: 'https://fonts.example/a.css' })], set);
     const [loadedA, loadedB] = await Promise.all([a.ensure(demand(['Brand'])), b.ensure(demand(['Brand']))]);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(set.faces).toHaveLength(1);
@@ -236,7 +309,7 @@ describe('FontSourceSession: isolation and sharing', () => {
     installFetch({ 'https://fonts.example/a.css': { css: rule('Brand', 'brand.woff2') } });
     const main = fakeSet();
     const popup = fakeSet();
-    const source = fontFaceCss({ url: 'https://fonts.example/a.css' });
+    const source = fontCss({ url: 'https://fonts.example/a.css' });
     await open([source], main).ensure(demand(['Brand']));
     await open([source], popup).ensure(demand(['Brand']));
     expect(main.faces).toHaveLength(1);
@@ -296,7 +369,7 @@ describe('FontSourceSession: isolation and sharing', () => {
   it('does not cache failures: a later document retries the same source', async () => {
     const routes: Record<string, Route> = { 'https://fonts.example/a.css': { status: 500 } };
     const { fetchMock } = installFetch(routes);
-    const source = fontFaceCss({ url: 'https://fonts.example/a.css' });
+    const source = fontCss({ url: 'https://fonts.example/a.css' });
     const first = open([source], fakeSet());
     expect((await first.ensure(demand(['Brand']))).faces).toEqual([]);
     routes['https://fonts.example/a.css'] = { css: rule('Brand', 'brand.woff2') };
@@ -316,7 +389,7 @@ describe('FontSourceSession: claim-once chaining', () => {
     const set = fakeSet();
     const loaded = await open([
       fontFiles({ faces: [{ family: 'Carlito', url: 'https://app.example/carlito.woff2' }] }),
-      fontFaceCss({ url: 'https://fonts.example/all.css', substitutes: OFFICE_FONT_SUBSTITUTIONS }),
+      fontCss({ url: 'https://fonts.example/all.css', substitutes: OFFICE_FONT_SUBSTITUTIONS }),
     ], set).ensure(demand(['Calibri', 'Carlito', 'Other']));
     // Calibri: neither source serves it directly; the files source has no
     // substitutes, so the stylesheet claims it through Calibri → Carlito.
@@ -331,8 +404,8 @@ describe('FontSourceSession: claim-once chaining', () => {
   it('never consults a later source for a family whose source failed', async () => {
     const { calls } = installFetch({ 'https://fonts.example/b.css': { css: rule('Brand', 'b.woff2') } });
     const loaded = await open([
-      fontFaceCss({ url: 'https://fonts.example/missing.css' }),
-      fontFaceCss({ url: 'https://fonts.example/b.css' }),
+      fontCss({ url: 'https://fonts.example/missing.css' }),
+      fontCss({ url: 'https://fonts.example/b.css' }),
     ], fakeSet()).ensure(demand(['Brand']));
     expect(calls.map((call) => call.url)).toEqual(['https://fonts.example/missing.css']);
     expect(loaded.faces).toEqual([]);
@@ -343,7 +416,7 @@ describe('FontSourceSession: claim-once chaining', () => {
     const { calls } = installFetch({ 'https://fonts.example/b.css': { css: rule('Brand', 'b.woff2') } });
     const session = open([
       fontFiles({ faces: [{ family: 'Brand', url: 'https://app.example/broken.woff2' }] }),
-      fontFaceCss({ url: 'https://fonts.example/b.css' }),
+      fontCss({ url: 'https://fonts.example/b.css' }),
     ], fakeSet());
     const loaded = await session.ensure(demand(['Brand']));
     expect(loaded.faces).toEqual([]);
@@ -371,7 +444,7 @@ describe('FontSourceSession: claim-once chaining', () => {
     const loaded = await open([fontResolver(resolve), googleFonts()], set)
       .ensure(demand(['Private', 'Calibri'], [0x62, 0x61, 0x62], ['Noto Sans JP']));
     expect(seen).toEqual([{
-      families: ['Private', 'Calibri'], fallbackFamilies: ['Noto Sans JP'], tuples: [], scalars: [0x61, 0x62],
+      families: ['Private', 'Calibri'], fallbackFamilies: ['Noto Sans JP'],
     }]);
     expect(loaded.faces.map((face) => face.family)).toEqual(['Private', 'Carlito']);
     // The cached resolution and the registered face are both real copies.
@@ -420,7 +493,7 @@ describe('FontSourceSession: limits fail closed', () => {
 
   it('rejects a stylesheet beyond the byte ceiling', async () => {
     installFetch({ 'https://fonts.example/huge.css': { css: `/*${'x'.repeat(1024 * 1024)}*/` } });
-    const error = await open([fontFaceCss({ url: 'https://fonts.example/huge.css' })], fakeSet())
+    const error = await open([fontCss({ url: 'https://fonts.example/huge.css' })], fakeSet())
       .ensure(demand(['Brand'])).catch((caught: unknown) => caught);
     expectLimit(error, 'stylesheet');
   });
@@ -637,8 +710,8 @@ describe('FontSourceSession: shared resolver work survives a released waiter', (
 
 describe('FontSourceSession: cached resolutions are bounded by live requesters', () => {
   it.each([
-    ['font-face-css', () => fontFaceCss({ url: 'https://fonts.example/kit.css' })],
-    ['css-api allow-list', () => cssApi({ urlTemplate: 'https://fonts.example/css?family={family}', families: { Brand: true } })],
+    ['font-css', () => fontCss({ url: 'https://fonts.example/kit.css' })],
+    ['font-css-api allow-list', () => fontCssApi({ urlTemplate: 'https://fonts.example/css?family={family}', families: { Brand: true } })],
   ] as const)('evicts what released sessions requested while another session holds the source (%s)', async (_kind, make) => {
     installFetch({
       'https://fonts.example/kit.css': { css: rule('Brand', 'brand.woff2') },
@@ -725,7 +798,7 @@ describe('FontSourceSession: released sessions keep no font content', () => {
       const kept: InstanceType<typeof fresh.FontSourceSession>[] = [];
       for (let index = 0; index < 5; index++) {
         const session = new fresh.FontSourceSession({
-          sources: [sourceModule.fontFaceCss({ url: `https://fonts.example/${index}.css` })], fontSet: asSet(fakeSet()),
+          sources: [sourceModule.fontCss({ url: `https://fonts.example/${index}.css` })], fontSet: asSet(fakeSet()),
         });
         await session.ensure(demand(['Inline']));
         session.release();
@@ -750,7 +823,7 @@ describe('FontSourceSession: release balance and cancellation', () => {
   it('accepts an already-aborted signal: inert, cache released, ensures reject', async () => {
     const { fetchMock } = installFetch({});
     const session = new FontSourceSession({
-      sources: [fontFaceCss({ url: 'https://fonts.example/a.css' })], fontSet: asSet(fakeSet()), signal: AbortSignal.abort(),
+      sources: [fontCss({ url: 'https://fonts.example/a.css' })], fontSet: asSet(fakeSet()), signal: AbortSignal.abort(),
     });
     expect(liveSourceCacheCount()).toBe(0);
     await expect(session.ensure(demand(['Brand']))).rejects.toMatchObject({ name: 'AbortError' });
@@ -760,7 +833,7 @@ describe('FontSourceSession: release balance and cancellation', () => {
   it.each([0, 1, 2, 3, 4])('starts no live fetch when released %i microtasks into an ensure', async (ticks) => {
     const { calls } = installFetch({ 'https://fonts.example/a.css': { css: rule('Brand', 'b.woff2') } });
     const set = fakeSet();
-    const session = open([fontFaceCss({ url: 'https://fonts.example/a.css' })], set);
+    const session = open([fontCss({ url: 'https://fonts.example/a.css' })], set);
     const pending = session.ensure(demand(['Brand']));
     for (let tick = 0; tick < ticks; tick++) await Promise.resolve();
     session.release();
@@ -796,7 +869,7 @@ describe('FontSourceSession: release balance and cancellation', () => {
     const gate = new Promise<void>((resolve) => { open_ = resolve; });
     const { calls } = installFetch({ 'https://fonts.example/a.css': { css: rule('Brand', 'b.woff2'), gate } });
     const set = fakeSet();
-    const session = open([fontFaceCss({ url: 'https://fonts.example/a.css' })], set);
+    const session = open([fontCss({ url: 'https://fonts.example/a.css' })], set);
     const pending = session.ensure(demand(['Brand']));
     await vi.waitFor(() => expect(calls).toHaveLength(1));
     session.release();
@@ -813,7 +886,7 @@ describe('FontSourceSession: release balance and cancellation', () => {
     const { calls } = installFetch({ 'https://fonts.example/a.css': { css: rule('Brand', 'b.woff2'), gate } });
     const set = fakeSet();
     const controller = new AbortController();
-    const source = fontFaceCss({ url: 'https://fonts.example/a.css' });
+    const source = fontCss({ url: 'https://fonts.example/a.css' });
     const aborted = open([source], set, controller.signal).ensure(demand(['Brand']));
     const survivor = open([source], set).ensure(demand(['Brand']));
     await vi.waitFor(() => expect(calls).toHaveLength(1));
@@ -828,7 +901,7 @@ describe('FontSourceSession: release balance and cancellation', () => {
   it('gives up after the ceiling, warns, and aborts the abandoned fetch', async () => {
     vi.useFakeTimers();
     const { calls } = installFetch({ 'https://fonts.example/a.css': { gate: new Promise(() => undefined) } });
-    const session = open([fontFaceCss({ url: 'https://fonts.example/a.css' })], fakeSet());
+    const session = open([fontCss({ url: 'https://fonts.example/a.css' })], fakeSet());
     let settled: unknown;
     void session.ensure(demand(['Brand'])).then((value) => { settled = value; });
     await vi.advanceTimersByTimeAsync(14_999);
@@ -869,14 +942,14 @@ describe('FontSourceSession: demand contract', () => {
 
   it('is inert without a FontFaceSet (Node without a shim)', async () => {
     const fetchMock = installFetch({}).fetchMock;
-    const session = new FontSourceSession({ sources: [cssApi({ urlTemplate: 'https://fonts.example/css?family={family}' })], fontSet: null });
+    const session = new FontSourceSession({ sources: [fontCssApi({ urlTemplate: 'https://fonts.example/css?family={family}' })], fontSet: null });
     expect((await session.ensure(demand(['Calibri']))).faces).toEqual([]);
     expect(fetchMock).not.toHaveBeenCalled();
     session.release();
   });
 });
 
-describe('FontSourceSession: script-scoped substitution proof (FontDemand.substituteScripts)', () => {
+describe('FontSourceSession: script-scoped substitution proof (FontSessionDemand.substituteScripts)', () => {
   const NASKH = 'https://fonts.googleapis.com/css2?family=Noto+Naskh+Arabic:wght@400;700&display=swap';
 
   it('consults a scoped substitute only for families whose text proves its script, caching the scopes apart', async () => {

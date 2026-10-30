@@ -11,7 +11,7 @@
  * register and load identical faces.
  */
 import type { FontPreloadDemand } from '@silurus/ooxml-core';
-import type { FontDemand } from '@silurus/ooxml-core/internal/font-sources';
+import type { FontSessionDemand } from '@silurus/ooxml-core/internal/font-sources';
 import { excludeEmbeddedFontFamilies } from './embedded-fonts.js';
 import type { PptxFontDemandFacts } from './font-requests.js';
 
@@ -39,7 +39,6 @@ function demandableFamily(name: string | null): name is string {
  *   library script fallbacks (`fontPreloadNames`, split at
  *   `facts.familyCount`), minus families an embedded font part
  *   (ECMA-376 Part 1 §19.2.1.9 `p:embeddedFont`) already serves;
- * - `tuples`: the exact authored face tuples the slides request;
  * - `scalars`: the collected Unicode scalars (`'all'` when the collector
  *   declined or the preflight omitted them, the conservative answer);
  * - `substituteScripts`: per family, the scoped-substitute scripts its painted
@@ -51,14 +50,13 @@ export function pptxFontDemand(
   facts: PptxFontDemandFacts | undefined,
   scalars: FontPreloadDemand | undefined,
   embeddedAliases: ReadonlyMap<string, string>,
-): FontDemand {
+): FontSessionDemand {
   const familyCount = facts?.familyCount ?? names.length;
   const families = excludeEmbeddedFontFamilies(names.slice(0, familyCount), embeddedAliases).filter(demandableFamily);
   const fallbackFamilies = excludeEmbeddedFontFamilies(names.slice(familyCount), embeddedAliases).filter(demandableFamily);
   return Object.freeze({
     families: Object.freeze(families),
     fallbackFamilies: Object.freeze(fallbackFamilies),
-    tuples: facts?.tuples ?? Object.freeze([]),
     scalars: scalars ?? 'all',
     ...(facts ? { substituteScripts: facts.substituteScripts } : {}),
   });

@@ -9,7 +9,7 @@
   <script type="module">
     // Font-source worker equivalence (font-source-worker-equivalence.spec.ts):
     // one load per page so each mode's font requests are counted on their own.
-    import { DocxDocument, fontFaceCss } from '/src/index.ts';
+    import { DocxDocument, fontCss } from '/src/index.ts';
 
     const params = new URLSearchParams(location.search);
     const mode = params.get('mode') ?? 'main';
@@ -17,7 +17,7 @@
       const resp = await fetch('/generated/font-source.docx');
       if (!resp.ok) throw new Error(`fetch font-source.docx -> ${resp.status}`);
       const buf = await resp.arrayBuffer();
-      const fonts = mode === 'none' ? undefined : [fontFaceCss({ url: '/generated/fixture-fonts.css' })];
+      const fonts = mode === 'none' ? undefined : [fontCss({ url: '/generated/fixture-fonts.css' })];
       const doc = await DocxDocument.load(buf, { ...(mode === 'worker' ? { mode: 'worker' } : {}), ...(fonts ? { fonts } : {}) });
       const bmp = await doc.renderPageToBitmap(0, { width: 816, dpr: 1 });
       const canvas = document.getElementById('canvas');

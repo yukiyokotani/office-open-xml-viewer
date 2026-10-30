@@ -107,7 +107,7 @@ export interface LoadOptions {
    * host and the canvas falls back to locally available fonts.
    *
    * Build the entries with the factories exported next to this type
-   * (`googleFonts()`, `cssApi()`, `fontFaceCss()`, `fontFiles()`). The first
+   * (`googleFonts()`, `fontCssApi()`, `fontCss()`, `fontFiles()`). The first
    * source that declares a face for a family claims it; later sources are not
    * consulted for that family, and a claimed family never retries another
    * source if its faces fail to load (the family then keeps its host fallback

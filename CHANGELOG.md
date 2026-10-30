@@ -13,12 +13,16 @@ with `fonts: [googleFonts()]`. The alias still works in 0.90 with a warning and
 is removed in 0.91.0. See the [0.89 to 0.90 migration guide](docs/migration-0.90.md).
 
 - **Font sources:** the new `fonts` load option takes an ordered list of
-  sources, built with `googleFonts({ cssOrigin? })`, `cssApi()`,
-  `fontFaceCss()`, `fontFiles()` (URLs, `data:` URLs or bytes) and
-  `fontResolver()` for authenticated or private services. The factories are
-  exported from `@silurus/ooxml` and from each format entry, along with
-  `officeFontSubstitutions`. DOCX, XLSX and PPTX behave the same in main and
-  worker mode. Nothing is requested without a source (#1497).
+  sources, built with `googleFonts({ cssOrigin?, substitutes? })`,
+  `fontCssApi()`, `fontCss()`, `fontFiles()` (URLs, `data:` URLs or bytes)
+  and `fontResolver()` for authenticated or private services. Every source
+  takes `substitutes`; `fontCssApi()`, `fontCss()` and `fontFiles()` also take
+  `credentials`. The factories are exported from `@silurus/ooxml` and from
+  each format entry, along with `officeFontSubstitutions` and
+  `googleFontsSubstitutions`. DOCX, XLSX and PPTX behave the same in main and
+  worker mode: in worker mode the page runs a resolver and also fetches the
+  claimed URLs it returns, so cookies and authentication behave as in main mode.
+  Nothing is requested without a source (#1460, #1497).
 - **Custom Google Fonts origin:** `googleFonts({ cssOrigin })` sends the
   stylesheet requests to a regional mirror or an internal proxy instead of
   `fonts.googleapis.com`. Redirects are followed and the font file URLs in the

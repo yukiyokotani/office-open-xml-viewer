@@ -9,7 +9,7 @@
   <script type="module">
     // Font-source worker equivalence (font-source-worker-equivalence.spec.ts):
     // one load per page so each mode's font requests are counted on their own.
-    import { PptxPresentation, fontFaceCss } from '/src/index.ts';
+    import { PptxPresentation, fontCss } from '/src/index.ts';
 
     const params = new URLSearchParams(location.search);
     const mode = params.get('mode') ?? 'main';
@@ -25,7 +25,7 @@
         : params.get('substitute') === 'bullet'
           ? [{ for: 'Absent Bullet Face', use: 'Ooxml Fixture', script: 'arabic' }] : undefined;
       const fonts = mode === 'none' ? undefined
-        : [fontFaceCss({ url: new URL('/generated/fixture-fonts.css', location.href).href, ...(substitutes ? { substitutes } : {}) })];
+        : [fontCss({ url: new URL('/generated/fixture-fonts.css', location.href).href, ...(substitutes ? { substitutes } : {}) })];
       const pres = await PptxPresentation.load(buf, {
         ...(mode === 'worker' ? { mode: 'worker' } : {}),
         ...(params.get('progressive') === '1' ? { progressiveLayout: true } : {}),

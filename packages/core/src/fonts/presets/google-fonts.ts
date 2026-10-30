@@ -1,5 +1,5 @@
 /**
- * Google Fonts as an ordinary font source: a {@link cssApi} descriptor filled
+ * Google Fonts as an ordinary font source: a {@link fontCssApi} descriptor filled
  * with Google-owned data. Nothing outside this module knows about Google.
  *
  * What is Google's here, and only here:
@@ -14,9 +14,12 @@
  *
  * The Office substitutions (Calibri → Carlito, …) are the vendor-neutral
  * {@link OFFICE_FONT_SUBSTITUTIONS}, adopted here like any source may adopt
- * them.
+ * them. Together with the Noto CJK naming they form
+ * {@link GOOGLE_FONTS_SUBSTITUTIONS}, the default `substitutes`; a caller's
+ * `substitutes` replaces that list, exactly as it is every other source's
+ * whole list.
  */
-import { cssApi, type CssApiSource } from '../source.js';
+import { fontCssApi, type FontCssApiSource } from '../source.js';
 import { OFFICE_FONT_SUBSTITUTIONS, type FontSubstitution } from '../substitutions.js';
 
 export const GOOGLE_FONTS_DEFAULT_CSS_ORIGIN = 'https://fonts.googleapis.com';
@@ -79,6 +82,13 @@ export const GOOGLE_NOTO_CJK_NAMING: readonly FontSubstitution[] = Object.freeze
   ['Noto Sans CJK HK', 'Noto Sans HK'],
 ].map(([authored, served]) => Object.freeze({ for: authored, use: served })));
 
+/** The default `googleFonts()` substitutes: the Office stand-ins, then
+ * Google's names for the Noto CJK packages. Spread it to extend it. */
+export const GOOGLE_FONTS_SUBSTITUTIONS: readonly FontSubstitution[] = Object.freeze([
+  ...OFFICE_FONT_SUBSTITUTIONS,
+  ...GOOGLE_NOTO_CJK_NAMING,
+]);
+
 export interface GoogleFontsOptions {
   /**
    * Google-compatible CSS origin (scheme, host and optional port only), for
@@ -87,6 +97,13 @@ export interface GoogleFontsOptions {
    * stylesheet's final URL.
    */
   readonly cssOrigin?: string;
+  /**
+   * Family substitutions, as for every other source. When given, it replaces
+   * the default {@link GOOGLE_FONTS_SUBSTITUTIONS} (Office stand-ins and the
+   * Noto CJK naming) entirely; spread that list to extend it. Only families
+   * in the Google Fonts catalog the preset requests can be served.
+   */
+  readonly substitutes?: readonly FontSubstitution[];
 }
 
 function validatedOrigin(value: unknown): string {
@@ -105,19 +122,19 @@ function validatedOrigin(value: unknown): string {
 }
 
 /** Google Fonts (or a Google-compatible mirror) as a font source. */
-export function googleFonts(options: GoogleFontsOptions = {}): CssApiSource {
+export function googleFonts(options: GoogleFontsOptions = {}): FontCssApiSource {
   if (!options || typeof options !== 'object' || Array.isArray(options)) {
     throw new TypeError('googleFonts() options must be an object');
   }
   for (const key of Object.keys(options)) {
-    if (key !== 'cssOrigin') throw new TypeError(`googleFonts() options has unknown property "${key}"`);
+    if (key !== 'cssOrigin' && key !== 'substitutes') throw new TypeError(`googleFonts() options has unknown property "${key}"`);
   }
   const origin = options.cssOrigin === undefined
     ? GOOGLE_FONTS_DEFAULT_CSS_ORIGIN
     : validatedOrigin(options.cssOrigin);
-  return cssApi({
+  return fontCssApi({
     urlTemplate: `${origin}/css2?family={family}:{query}&display=swap`,
     families: GOOGLE_FONTS_CATALOG,
-    substitutes: [...OFFICE_FONT_SUBSTITUTIONS, ...GOOGLE_NOTO_CJK_NAMING],
+    substitutes: options.substitutes === undefined ? GOOGLE_FONTS_SUBSTITUTIONS : options.substitutes,
   });
 }
