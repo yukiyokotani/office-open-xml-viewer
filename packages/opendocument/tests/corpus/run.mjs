@@ -16,9 +16,9 @@
 //    pages (report.mjs).
 //
 // --rules on is a dry run with the pending LibreOffice compatibility rules
-// (CompatRules) enabled: the harness flips LIBREOFFICE_RULES in a temporary
-// edit of parser/src/odt.rs, builds a separate WASM and native binary from it,
-// and restores the file before anything else runs.
+// (CompatRules) enabled: the harness flips LIBREOFFICE_RULES in an isolated
+// copy of the reader's crates under target/ and builds a separate WASM and
+// native binary from it; the checkout itself is never edited.
 //
 // --unmask-settings renders the browser pass through that diagnostic build too
 // (DIAGNOSTIC: acceptance then is not the shipped reader's). It exercises the
@@ -35,7 +35,7 @@
 // (git-ignored). A rerun with the same label resumes; --fresh starts over.
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { closeSync, existsSync, mkdirSync, openSync, unlinkSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, unlinkSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { parseArgs } from 'node:util';
 import { checkoutRoot, corpusRepo } from './paths.mjs';
@@ -97,77 +97,42 @@ function settingsUnmasked(text) {
   return text.replace(check, 'continue;');
 }
 
+/** Crates the ODT reader builds from; the isolated workspace holds only these. */
+const ISOLATED_CRATES = ['packages/ooxml-common', 'packages/docx/model', 'packages/opendocument/parser'];
+
 /**
- * Build the native classifier (and optionally the WASM) from a temporary edit
- * of parser/src/odt.rs into their own target directory, restoring the source
- * before returning. Returns the native binary path.
+ * Build the native classifier (and optionally the WASM) from a patched COPY
+ * of the reader's crates under target/, never touching the checkout: other
+ * builds and concurrent harness runs always see the real source. Returns the
+ * native binary path.
  */
 function patchedBuild(name, patches, wasmOut) {
-  const release = acquirePatchLock();
+  const workspace = join(checkoutRoot, `target/odf-harness-src/${name}-${process.pid}`);
+  rmSync(workspace, { recursive: true, force: true });
   try {
-    return patchedBuildLocked(name, patches, wasmOut);
-  } finally {
-    release();
-  }
-}
-
-/**
- * Patched builds edit the shared source, so concurrent harness runs in one
- * checkout take turns: an exclusive lock file names the holder's PID, and a
- * lock whose holder is gone is taken over.
- */
-function acquirePatchLock() {
-  mkdirSync(join(checkoutRoot, 'target'), { recursive: true });
-  const lock = join(checkoutRoot, 'target/odf-harness-patch.lock');
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      const fd = openSync(lock, 'wx');
-      writeFileSync(fd, String(process.pid));
-      closeSync(fd);
-      return () => { try { unlinkSync(lock); } catch { /* already gone */ } };
-    } catch (error) {
-      if (error.code !== 'EEXIST') throw error;
-      const holder = Number(readFileSync(lock, 'utf8'));
-      let alive = false;
-      try { process.kill(holder, 0); alive = true; } catch { /* not running */ }
-      if (!alive) {
-        unlinkSync(lock);
-        continue;
-      }
-      if (attempt % 30 === 0) console.log(`waiting for harness run ${holder} to finish its patched build`);
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
+    for (const crate of ISOLATED_CRATES) {
+      cpSync(join(checkoutRoot, crate), join(workspace, crate), {
+        recursive: true,
+        filter: (path) => !/[\\/](target|pkg)$/u.test(path),
+      });
     }
-  }
-}
-
-function patchedBuildLocked(name, patches, wasmOut) {
-  const targetDir = join(checkoutRoot, `target/odf-harness-${name}`);
-  const original = readFileSync(odtSource, 'utf8');
-  const patched = patches.reduce((text, patch) => patch(text), original);
-  // A signal during the synchronous build would otherwise end the process
-  // before `finally` restores the source; a listener defers it to here.
-  const restoreAndExit = (signal) => {
-    writeFileSync(odtSource, original);
-    process.exit(signal === 'SIGINT' ? 130 : 143);
-  };
-  process.once('SIGINT', restoreAndExit);
-  process.once('SIGTERM', restoreAndExit);
-  process.once('SIGHUP', restoreAndExit);
-  writeFileSync(odtSource, patched);
-  try {
-    const env = { ...process.env, CARGO_TARGET_DIR: targetDir };
-    run('cargo', exampleArgs, { cwd: parserDir, env });
+    const manifest = readFileSync(join(checkoutRoot, 'Cargo.toml'), 'utf8')
+      .replace(/members\s*=\s*\[[^\]]*\]/u, `members = ${JSON.stringify(ISOLATED_CRATES)}`);
+    writeFileSync(join(workspace, 'Cargo.toml'), manifest);
+    cpSync(join(checkoutRoot, 'Cargo.lock'), join(workspace, 'Cargo.lock'));
+    const source = join(workspace, 'packages/opendocument/parser/src/odt.rs');
+    writeFileSync(source, patches.reduce((text, patch) => patch(text), readFileSync(source, 'utf8')));
+    const env = { ...process.env, CARGO_TARGET_DIR: join(checkoutRoot, `target/odf-harness-${name}`) };
+    const crateDir = join(workspace, 'packages/opendocument/parser');
+    run('cargo', exampleArgs, { cwd: crateDir, env });
     if (wasmOut) {
       run('wasm-pack', ['build', '--target', 'web', '--out-dir', wasmOut, '--out-name', 'opendocument_odt', '--features', 'odt'],
-        { cwd: parserDir, env });
+        { cwd: crateDir, env });
     }
+    return join(env.CARGO_TARGET_DIR, 'release/examples/inspect_odt');
   } finally {
-    writeFileSync(odtSource, original);
-    process.off('SIGINT', restoreAndExit);
-    process.off('SIGTERM', restoreAndExit);
-    process.off('SIGHUP', restoreAndExit);
+    rmSync(workspace, { recursive: true, force: true });
   }
-  return join(targetDir, 'release/examples/inspect_odt');
 }
 
 const rulePatches = args.rules === 'on' ? [rulesOn] : [];
@@ -275,6 +240,23 @@ for (const file of files) {
     .map(([, name, value]) => `${name}=${value.trim()}`);
 }
 writeFileSync(join(runDir, 'settings-flags.json'), `${JSON.stringify(settingsFlags, null, 2)}\n`);
+
+// Drop cached results whose ODT or PDF changed since they were written, so a
+// failed retry cannot leave an old score standing (the spec does the same).
+const inputsHash = (file) => createHash('sha256').update(readFileSync(file.odt))
+  .update(existsSync(file.pdf) ? readFileSync(file.pdf) : '').digest('hex');
+const resultsDir = join(runDir, 'results');
+if (existsSync(resultsDir)) {
+  const byId = new Map(files.map((file) => [file.id, file]));
+  for (const name of readdirSync(resultsDir)) {
+    const path = join(resultsDir, name);
+    const file = byId.get(name.replace(/\.json$/u, ''));
+    if (!file) continue;
+    let stored;
+    try { stored = JSON.parse(readFileSync(path, 'utf8')).inputs; } catch { /* torn */ }
+    if (stored !== inputsHash(file)) unlinkSync(path);
+  }
+}
 
 // ---- browser pass ---------------------------------------------------------------
 if (!args['skip-browser']) {

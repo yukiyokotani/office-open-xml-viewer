@@ -131,7 +131,11 @@ for (const file of files) {
     // Reuse a result only for byte-identical inputs (run.mjs guards the code).
     const inputs = createHash('sha256').update(readFileSync(file.odt))
       .update(existsSync(file.pdf) ? readFileSync(file.pdf) : '').digest('hex');
-    if (existsSync(resultPath) && JSON.parse(readFileSync(resultPath, 'utf8')).inputs === inputs) return;
+    if (existsSync(resultPath)) {
+      if (JSON.parse(readFileSync(resultPath, 'utf8')).inputs === inputs) return;
+      // Stale: remove it first so a failed retry leaves no result at all.
+      rmSync(resultPath);
+    }
     const started = Date.now();
 
     const pdfCount = existsSync(file.pdf) ? pdfPageCount(file.pdf) : 0;
