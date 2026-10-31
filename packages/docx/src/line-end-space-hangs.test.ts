@@ -174,6 +174,12 @@ describe('WORD_LINE_END_SPACE_HANGS', () => {
         }
       }
     }
+    // A hanging U+3000 keeps its highlight.
+    const [ideographic] = lines(para([textRun('aaaa\u3000', decorated)], 'center'));
+    const ideographicSpace = texts(ideographic!).at(-1)!;
+    expect(ideographicSpace.text.endsWith('\u3000')).toBe(true);
+    const fill = ideographicSpace.highlightFragments![0]!.rect;
+    expect(fill.xPt + fill.widthPt).toBeCloseTo(ideographicSpace.bounds.xPt + ideographicSpace.advancePt, 6);
     // A line-end space in its own decorated run carries none.
     const runs = [textRun('aaaa bbbb cccc dddd eeee ffff gggg'), textRun(' ', decorated), textRun('hhhh')];
     const [first] = lines(para(runs, 'right'));
