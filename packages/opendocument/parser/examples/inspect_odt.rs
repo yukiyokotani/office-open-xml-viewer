@@ -15,7 +15,11 @@ fn main() {
         )
         .and_then(|package| odt::read(&package));
         match result {
-            Ok(document) => println!("{path}: admitted, {} body elements", document.body.len()),
+            Ok((document, images)) => println!(
+                "{path}: admitted, {} body elements, {} images",
+                document.body.len(),
+                images.len()
+            ),
             Err(error) => println!("{path}: {error}"),
         }
     }

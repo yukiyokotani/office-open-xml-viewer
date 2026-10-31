@@ -1697,6 +1697,10 @@ pub struct AnchorHostMetrics {
         skip_serializing_if = "Option::is_none"
     )]
     pub anchor_occurrence_id: Option<String>,
+    /// The metric is a picture list label's font (see `ImageRun::list_label`)
+    /// rather than an anchor's host. DOCX never sets it.
+    #[serde(rename = "__listLabel", skip_serializing_if = "Option::is_none")]
+    pub list_label: Option<&'static str>,
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
@@ -3390,6 +3394,12 @@ pub struct ImageRun {
         skip_serializing_if = "Option::is_none"
     )]
     pub anchor_acquisition: Option<AnchorAcquisitionWire>,
+    /// The picture is a list label (see `TextRun::list_label`), preceded by
+    /// the label font's zero-advance metric (`AnchorHostMetrics::list_label`).
+    /// Its line box is the picture plus 0.5 pt on every side, sized from the
+    /// label font's ascent and centred in the line. DOCX never sets it.
+    #[serde(rename = "__listLabel", skip_serializing_if = "Option::is_none")]
+    pub list_label: Option<&'static str>,
 }
 
 #[derive(Serialize, Debug, Clone, Copy, Eq, PartialEq)]

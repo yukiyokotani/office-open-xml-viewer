@@ -73,7 +73,7 @@ import {
   widthBalanceSpaceAdjustmentForTextPt,
 } from '../line-layout.js';
 import {
-  calcEffectiveFontPx, EAST_ASIAN_RE, independentTextShapeRequest,
+  calcEffectiveFontPx, EAST_ASIAN_RE, independentTextShapeRequest, LIST_LABEL_PICTURE_INSET_PT,
   replaceTextShapeRequest, sliceTextShapeRequest, sliceSemanticSlotSpans, shapeRunToDocRun,
 } from './text.js';
 import { eastAsianUprightPaintOps } from './vertical-glyph-orientation.js';
@@ -345,6 +345,8 @@ export interface MeasuredResourcePlanSegment {
   readonly widthPt: number;
   readonly heightPt: number;
   readonly topOffsetPt: number;
+  /** Relative paint offset from the pen position; the advance is unchanged. */
+  readonly leftOffsetPt?: number;
   readonly orientation?: import('./types.js').UprightResourceOrientation;
 }
 
@@ -1438,7 +1440,7 @@ export function planLine(input: PlanLineInput): LineLayout {
         resourceKey: segment.resourceKey, resourceKind: segment.resourceKind,
         ...(segment.orientation ? { orientation: segment.orientation } : {}),
         bounds: {
-          xPt, yPt: line.baselinePt + segment.topOffsetPt,
+          xPt: xPt + (segment.leftOffsetPt ?? 0), yPt: line.baselinePt + segment.topOffsetPt,
           widthPt: segment.widthPt, heightPt: segment.heightPt,
         },
         advancePt: segment.measuredWidthPt,
@@ -3461,11 +3463,20 @@ function planMeasuredLines(
         const resourceKind = image.chart ? 'chart' : 'image';
         const resourceKey = image.chartResourceKey
           ?? (image.chart ? chartResourceKey(occurrence) : imageResourceKey(occurrence, image.imagePath));
+        // A picture list label's box is centred in the natural line (before
+        // any proportional extra), the picture inset within it.
+        const labelTopPt = image.listLabel === undefined ? undefined
+          : measuredLine.topYPt - baselinePt + LIST_LABEL_PICTURE_INSET_PT + (
+            Math.max(raw.ascent + raw.descent, raw.intendedSingle ?? 0)
+            - image.heightPt - 2 * LIST_LABEL_PICTURE_INSET_PT
+          ) / 2;
         segments.push({
           kind: 'resource', range: { start: segmentOffset, end: segmentOffset + occurrenceLength },
           ...(runIndex === undefined ? {} : { sourceRunIndex: runIndex }),
           resourceKey, resourceKind, measuredWidthPt: image.measuredWidth,
-          widthPt: image.widthPt, heightPt: image.heightPt, topOffsetPt: -image.heightPt,
+          widthPt: image.widthPt, heightPt: image.heightPt,
+          topOffsetPt: labelTopPt ?? -image.heightPt,
+          ...(labelTopPt === undefined ? {} : { leftOffsetPt: LIST_LABEL_PICTURE_INSET_PT }),
           ...(resourceOrientation ? { orientation: resourceOrientation } : {}),
         });
       } else if ('math' in segment) {

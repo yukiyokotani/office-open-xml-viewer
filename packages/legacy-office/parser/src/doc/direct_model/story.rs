@@ -393,6 +393,7 @@ pub(super) fn project(
                                     anchor_x_relative_from: None,
                                     anchor_y_relative_from: None,
                                     anchor_acquisition: None,
+                                    list_label: None,
                                 })),
                             )?;
                         }

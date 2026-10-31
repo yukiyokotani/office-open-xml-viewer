@@ -96,6 +96,7 @@ impl Formatting<'_> {
             bold: facts.bold,
             italic: facts.italic,
             anchor_occurrence_id: None,
+            list_label: None,
         }))
     }
 

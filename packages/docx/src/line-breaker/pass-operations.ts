@@ -1039,7 +1039,7 @@ export function performAddToLine(
   breakerState.currentWidth += committedWidth;
   // An end- or centre-aligned list label starts its width (or half of it)
   // before the label position, so the pen advances only by the rest.
-  if ('text' in s && (s.listLabel === 'end' || s.listLabel === 'center')) {
+  if (('text' in s || 'imagePath' in s) && (s.listLabel === 'end' || s.listLabel === 'center')) {
     const shift = committedWidth * (s.listLabel === 'end' ? 1 : 0.5);
     breakerState.currentWidth -= shift;
     breakerState.lineLabelShiftPx += shift;

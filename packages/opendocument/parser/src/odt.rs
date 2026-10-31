@@ -8,14 +8,17 @@
 //! style. Each widening comes with its own measurements against LibreOffice.
 
 use crate::error::{invalid, unsupported};
+use crate::iri;
 use crate::package::{OdfPackage, SUPPORTED_VERSIONS};
 use crate::script::{is_weak_unmapped, table_22, ScriptClass};
 use crate::style::{
     Cascade, Family, Group, Scope, Style, StyleRef, StyleSheet, LOEXT_GRAPHIC, PARAGRAPH, TEXT,
 };
 use crate::xml::{
-    self, NS_DRAW, NS_FO, NS_LOEXT, NS_OFFICE, NS_OFFICEOOO, NS_STYLE, NS_SVG, NS_TEXT, NS_XML,
+    self, NS_DRAW, NS_FO, NS_LOEXT, NS_OFFICE, NS_OFFICEOOO, NS_STYLE, NS_SVG, NS_TEXT, NS_XLINK,
+    NS_XML,
 };
+use docx_model::owned_cursor::OwnedDocumentResource;
 use docx_model::{
     BodyElement, BreakType, DocParagraph, DocRun, Document, DocumentSettings, LineSpacing,
     RunFontFacts, SectionProps, TextRun,
@@ -102,11 +105,15 @@ pub const LIBREOFFICE_RULES: CompatRules = CompatRules {
     nearest_font_color: true,
 };
 
-pub fn read(package: &OdfPackage) -> Result<Document, String> {
+/// The admitted document and the decoded images its runs reference by key.
+pub fn read(package: &OdfPackage) -> Result<(Document, Vec<OwnedDocumentResource>), String> {
     read_with(package, LIBREOFFICE_RULES)
 }
 
-fn read_with(package: &OdfPackage, rules: CompatRules) -> Result<Document, String> {
+fn read_with(
+    package: &OdfPackage,
+    rules: CompatRules,
+) -> Result<(Document, Vec<OwnedDocumentResource>), String> {
     let styles_text = package.read_text("styles.xml")?;
     let content_text = package.read_text("content.xml")?;
     let styles_doc = xml::parse(&styles_text)?;
@@ -182,6 +189,13 @@ fn read_with(package: &OdfPackage, rules: CompatRules) -> Result<Document, Strin
         .map(length_pt)
         .transpose()?;
     let mut reader = Reader {
+        package,
+        images: Vec::new(),
+        image_types: HashMap::new(),
+        image_pixels: image::MAX_DOCUMENT_PIXELS,
+        text_height: page.section.page_height
+            - page.section.margin_top
+            - page.section.margin_bottom,
         lists: list::Lists::default(),
         list_paragraph: None,
         odf_1_4: version == Some("1.4"),
@@ -215,9 +229,10 @@ fn read_with(package: &OdfPackage, rules: CompatRules) -> Result<Document, Strin
         .sum::<usize>();
     reader.charge_construction(font_table_bytes)?;
     let used = used_font_table(&reader.used_faces.borrow())?;
+    let images = std::mem::take(&mut reader.images);
     let body = reader.finish()?;
 
-    Ok(Document {
+    let document = Document {
         section: page.section,
         body,
         settings: Some(DocumentSettings {
@@ -228,7 +243,8 @@ fn read_with(package: &OdfPackage, rules: CompatRules) -> Result<Document, Strin
         font_family_pitches: metadata(&used, |face| face.pitch),
         font_family_charsets: metadata(&used, |face| face.charset),
         ..Document::default()
-    })
+    };
+    Ok((document, images))
 }
 
 /// `style:font-face` declarations (Part 3 §16.23): the face a style
@@ -909,11 +925,22 @@ struct Collected {
     page_break_after: bool,
 }
 
+#[path = "odt_image.rs"]
+mod image;
 #[path = "odt_list.rs"]
 mod list;
 
 struct Reader<'a> {
     rules: CompatRules,
+    package: &'a OdfPackage,
+    /// Decoded package images, keyed by their package path, and each one's
+    /// media type.
+    images: Vec<OwnedDocumentResource>,
+    image_types: HashMap<String, &'static str>,
+    /// Pixels the document's pictures may still decode.
+    image_pixels: u64,
+    /// The page's text area height (pt).
+    text_height: f64,
     /// List numbering state, and the list paragraph `paragraph` reads next.
     lists: list::Lists,
     list_paragraph: Option<list::ListParagraph<'a>>,
@@ -1363,6 +1390,39 @@ impl<'a> Reader<'a> {
             return Err("OpenDocument paragraph exceeds the character limit".to_string());
         }
         Ok(())
+    }
+
+    /// A picture linked from a style (Part 2 §3.7 from the package root,
+    /// where styles.xml and content.xml sit): its package path, which keys
+    /// the decoded resource, and its media type. A link outside the package
+    /// or to a missing file rejects; each file is decoded once.
+    fn package_image(&mut self, href: &str) -> Result<(String, &'static str), String> {
+        let path = match iri::resolve("content.xml", href) {
+            Some(iri::Target::Package {
+                path,
+                fragment: None,
+            }) if !path.is_empty() && !path.ends_with('/') => path,
+            _ => return Err(unsupported("image-link")),
+        };
+        if let Some(mime_type) = self.image_types.get(&path) {
+            return Ok((path, mime_type));
+        }
+        if !self.package.contains(&path) {
+            return Err(invalid("a linked picture is missing from the package"));
+        }
+        let bytes = self
+            .package
+            .session()
+            .run_operation("odf-image", |operation| operation.read_bytes(&path))?;
+        let mime_type = image::decode(&bytes, &mut self.image_pixels)?;
+        self.charge_construction(bytes.len() + 2 * path.len() + 64)?;
+        self.image_types.insert(path.clone(), mime_type);
+        self.images.push(OwnedDocumentResource {
+            key: path.clone(),
+            mime_type: mime_type.to_string(),
+            bytes,
+        });
+        Ok((path, mime_type))
     }
 
     fn charge_construction(&mut self, bytes: usize) -> Result<(), String> {
@@ -2940,11 +3000,11 @@ fn hex_color(value: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::package::tests::{manifest, package, ODT};
+    use crate::package::tests::{manifest, package_bytes, ODT};
     use crate::package::PackageLimits;
     use ooxml_common::resource::OoxmlFormat;
 
-    const NS: &str = r#"xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0" xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0" xmlns:loext="urn:org:documentfoundation:names:experimental:office:xmlns:loext:1.0" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:officeooo="http://openoffice.org/2009/office""#;
+    const NS: &str = r#"xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0" xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0" xmlns:loext="urn:org:documentfoundation:names:experimental:office:xmlns:loext:1.0" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:officeooo="http://openoffice.org/2009/office" xmlns:xlink="http://www.w3.org/1999/xlink""#;
     const FACES: &str = r#"<office:font-face-decls><style:font-face style:name="Serif" svg:font-family="'Liberation Serif'" style:font-family-generic="roman"/><style:font-face style:name="Sans" svg:font-family="'Liberation Sans'" style:font-family-generic="swiss"/><style:font-face style:name="Sans2" svg:font-family="'Liberation Sans'" style:font-family-generic="system"/><style:font-face style:name="Mincho" svg:font-family="'Hiragino Mincho ProN'" style:font-family-generic="system"/></office:font-face-decls>"#;
 
     struct Fixture<'a> {
@@ -2962,6 +3022,8 @@ mod tests {
         body: &'a str,
         /// `config:config-item` elements for settings.xml (none: no part).
         settings: &'a str,
+        /// Further package files (pictures).
+        files: &'a [(&'a str, &'a [u8])],
     }
 
     impl Default for Fixture<'_> {
@@ -2976,6 +3038,7 @@ mod tests {
                 master: "",
                 body: "<text:p>x</text:p>",
                 settings: "",
+                files: &[],
             }
         }
     }
@@ -3022,6 +3085,13 @@ mod tests {
     };
 
     fn read_fixture_with(fixture: Fixture<'_>, rules: CompatRules) -> Result<Document, String> {
+        read_fixture_resources(fixture, rules).map(|(document, _)| document)
+    }
+
+    fn read_fixture_resources(
+        fixture: Fixture<'_>,
+        rules: CompatRules,
+    ) -> Result<(Document, Vec<OwnedDocumentResource>), String> {
         let styles = format!(
             r#"<office:document-styles {NS} office:version="1.3">{}<office:styles><style:default-style style:family="paragraph"><style:paragraph-properties style:tab-stop-distance="1.25cm"{}/><style:text-properties {}/></style:default-style><style:default-style style:family="graphic"/>{}</office:styles><office:automatic-styles><style:page-layout style:name="pm1"><style:page-layout-properties{}/></style:page-layout></office:automatic-styles><office:master-styles><style:master-page style:name="Standard" style:page-layout-name="pm1">{}</style:master-page></office:master-styles></office:document-styles>"#,
             FACES.replace(
@@ -3050,11 +3120,12 @@ mod tests {
         if !fixture.settings.is_empty() {
             files.push(("settings.xml", settings));
         }
-        let files: Vec<(&str, &str)> = files
+        let mut files: Vec<(&str, &[u8])> = files
             .iter()
-            .map(|(name, body)| (*name, body.as_str()))
+            .map(|(name, body)| (*name, body.as_bytes()))
             .collect();
-        let bytes = package(ODT, &files);
+        files.extend(fixture.files.iter().copied());
+        let bytes = package_bytes(ODT, &files);
         let package = OdfPackage::open(
             bytes,
             OoxmlFormat::Docx,
@@ -5120,6 +5191,184 @@ mod tests {
         assert_eq!(tabs(false), vec![3.0, 3.75, 5.0]);
     }
 
+    /// A picture list level (§16.33) linking `href`, with `properties`
+    /// replacing the measured placement and `extra` level attributes.
+    fn picture_level(
+        level: u32,
+        href: &str,
+        properties: &str,
+        extra: &str,
+        follow: &str,
+    ) -> String {
+        format!(
+            r#"<text:list-level-style-image text:level="{level}" xlink:href="{href}" xlink:type="simple" xlink:show="embed" xlink:actuate="onLoad"{extra}><style:list-level-properties text:list-level-position-and-space-mode="label-alignment" {properties}><style:list-level-label-alignment text:label-followed-by="{follow}" text:list-tab-stop-position="2cm" fo:text-indent="-1cm" fo:margin-left="2cm"/></style:list-level-properties></text:list-level-style-image>"#
+        )
+    }
+
+    const PICTURE_PLACEMENT: &str = r#"fo:width="0.279cm" fo:height="0.279cm" style:vertical-pos="middle" style:vertical-rel="line""#;
+
+    fn read_pictures(
+        styles: &str,
+        body: &str,
+        files: &[(&str, &[u8])],
+    ) -> Result<(Document, Vec<OwnedDocumentResource>), String> {
+        read_fixture_resources(
+            Fixture {
+                styles,
+                body,
+                settings: LIST_SETTINGS,
+                files,
+                ..Fixture::default()
+            },
+            LIBREOFFICE_RULES,
+        )
+    }
+
+    #[test]
+    fn reads_picture_labels_as_libreoffice() {
+        let png = image::tests::png_bytes();
+        let styles = list_styles(
+            &(picture_level(1, "Pictures/a.png", PICTURE_PLACEMENT, "", "listtab")
+                + &list_level(2, "1", r#" text:display-levels="2""#, 3.0, -1.0, 3.0)),
+        );
+        let body = r#"<text:list text:style-name="L"><text:list-item><text:p>a</text:p><text:list><text:list-item><text:p>b</text:p></text:list-item></text:list></text:list-item><text:list-item><text:p>c</text:p></text:list-item></text:list>"#;
+        let (document, resources) =
+            read_pictures(&styles, body, &[("Pictures/a.png", &png)]).unwrap();
+        // One decoded resource for both pictures, keyed by its package path.
+        assert_eq!(resources.len(), 1);
+        assert_eq!(resources[0].key, "Pictures/a.png");
+        assert_eq!(resources[0].mime_type, "image/png");
+        assert_eq!(resources[0].bytes, png);
+        let read = paragraphs(&document);
+        for index in [0, 2] {
+            let runs = &read[index].runs;
+            let DocRun::AnchorHost(metric) = &runs[0] else {
+                panic!("the label font's metric comes first")
+            };
+            assert_eq!(metric.list_label, Some("start"));
+            assert_eq!(metric.font_size, 12.0);
+            assert_eq!(metric.font_family.as_deref(), Some("Liberation Serif"));
+            assert_eq!(metric.anchor_occurrence_id, None);
+            let DocRun::Image(picture) = &runs[1] else {
+                panic!("then the picture")
+            };
+            assert_eq!(picture.list_label, Some("start"));
+            assert_eq!(picture.image_path, "Pictures/a.png");
+            assert_eq!(picture.mime_type, "image/png");
+            assert!(!picture.anchor);
+            assert!((picture.width_pt - 0.279 * 72.0 / 2.54).abs() < 1e-9);
+            assert!((picture.height_pt - 0.279 * 72.0 / 2.54).abs() < 1e-9);
+            let DocRun::Text(tab) = &runs[2] else {
+                panic!("then the separator")
+            };
+            assert_eq!((tab.text.as_str(), tab.list_label), ("\t", Some("start")));
+            assert_eq!(read[index].indent_first, -72.0 / 2.54);
+        }
+        // A picture ancestor contributes an empty component (measured ".1.").
+        assert_eq!(labels(&document)[1].as_deref(), Some(".1."));
+
+        // The metric and the tab follow the first character's formatting
+        // (measured: body text all in 24 pt sizes a 1 cm picture's line from
+        // 24 pt).
+        let big = format!(
+            r#"<style:style style:name="Big" style:family="text"><style:text-properties fo:font-size="24pt"/></style:style>{styles}"#
+        );
+        let (document, _) = read_pictures(
+            &big,
+            r#"<text:list text:style-name="L"><text:list-item><text:p><text:span text:style-name="Big">a</text:span> b</text:p></text:list-item></text:list>"#,
+            &[("Pictures/a.png", &png)],
+        )
+        .unwrap();
+        let runs = &paragraphs(&document)[0].runs;
+        assert!(matches!(&runs[0], DocRun::AnchorHost(m) if m.font_size == 24.0));
+        assert!(matches!(&runs[2], DocRun::Text(t) if t.text == "\t" && t.font_size == 24.0));
+        // An end-aligned picture keeps its alignment on all three runs; a
+        // separator of nothing leaves the picture last.
+        let styles = list_styles(&picture_level(
+            1,
+            "Pictures/a.png",
+            &format!(r#"{PICTURE_PLACEMENT} fo:text-align="end""#),
+            "",
+            "nothing",
+        ));
+        let (document, _) = read_pictures(
+            &styles,
+            r#"<text:list text:style-name="L"><text:list-item><text:p>a</text:p></text:list-item></text:list>"#,
+            &[("Pictures/a.png", &png)],
+        )
+        .unwrap();
+        let runs = &paragraphs(&document)[0].runs;
+        assert!(matches!(&runs[0], DocRun::AnchorHost(m) if m.list_label == Some("end")));
+        assert!(matches!(&runs[1], DocRun::Image(p) if p.list_label == Some("end")));
+        assert!(matches!(&runs[2], DocRun::Text(t) if t.list_label.is_none() && t.text == "a"));
+    }
+
+    #[test]
+    fn rejects_unmodelled_picture_labels() {
+        let png = image::tests::png_bytes();
+        let with_png: &[(&str, &[u8])] = &[("Pictures/a.png", &png)];
+        let truncated: &[(&str, &[u8])] = &[("Pictures/a.png", &png[..png.len() - 20])];
+        let bitmap: &[(&str, &[u8])] = &[("Pictures/a.png", b"BM\x00\x00")];
+        let item = r#"<text:list text:style-name="L"><text:list-item><text:p>a</text:p></text:list-item></text:list>"#;
+        let level = |href: &str, properties: &str, extra: &str, follow: &str| {
+            list_styles(&picture_level(1, href, properties, extra, follow))
+        };
+        let placement = |replace: &str, with: &str| PICTURE_PLACEMENT.replace(replace, with);
+        type Case<'f> = (String, String, &'f [(&'f str, &'f [u8])], String);
+        let cases: Vec<Case<'_>> = vec![
+            // Only the corpus's placement is measured.
+            (level("Pictures/a.png", &placement("middle", "top"), "", "listtab"), item.into(), &[], unsupported("list-image-position")),
+            (level("Pictures/a.png", &placement(r#" style:vertical-rel="line""#, ""), "", "listtab"), item.into(), &[], unsupported("list-image-position")),
+            (level("Pictures/a.png", &placement(r#"fo:height="0.279cm""#, ""), "", "listtab"), item.into(), &[], unsupported("list-image-size")),
+            (level("Pictures/a.png", &placement(r#"fo:width="0.279cm""#, r#"fo:width="0cm""#), "", "listtab"), item.into(), &[], unsupported("list-image-size")),
+            (level("Pictures/a.png", PICTURE_PLACEMENT, r#" text:style-name="T""#, "listtab"), item.into(), &[], unsupported("list-image-style")),
+            (level("Pictures/a.png", PICTURE_PLACEMENT, r#" xlink:show="new""#, "listtab").replace(r#"xlink:show="embed" "#, ""), item.into(), &[], unsupported("list-level-attribute")),
+            (level("Pictures/a.png", PICTURE_PLACEMENT, "", "listtab").replace("</text:list-level-style-image>", "<office:binary-data>AA==</office:binary-data></text:list-level-style-image>"), item.into(), &[], unsupported("list-image-source")),
+            (level("Pictures/a.png", PICTURE_PLACEMENT, "", "listtab").replace("</style:list-level-properties>", r#"</style:list-level-properties><style:text-properties fo:font-size="20pt"/>"#), item.into(), &[], unsupported("list-style-child")),
+            // LibreOffice clips the picture and sizes the line irregularly.
+            (level("Pictures/a.png", PICTURE_PLACEMENT, "", "space"), item.into(), with_png, unsupported("list-image-space")),
+            // A box from M + I past the line end, or before the page edge.
+            (level("Pictures/a.png", &placement(r#"fo:width="0.279cm""#, r#"fo:width="16cm""#), "", "listtab"), item.into(), with_png, unsupported("list-label-extent")),
+            (level("Pictures/a.png", &format!(r#"{PICTURE_PLACEMENT} fo:text-align="end""#), "", "listtab").replace(r#"fo:width="0.279cm""#, r#"fo:width="4cm""#), item.into(), with_png, unsupported("list-label-extent")),
+            // A box taller than the first character's em.
+            (level("Pictures/a.png", &placement(r#"fo:height="0.279cm""#, r#"fo:height="0.5cm""#), "", "listtab"), item.into(), with_png, unsupported("list-image-height")),
+            // A line taller than the text area, which LibreOffice clips.
+            (level("Pictures/a.png", &placement(r#"fo:height="0.279cm""#, r#"fo:height="26cm""#), "", "listtab"), item.into(), with_png, unsupported("list-label-extent")),
+            (level("Pictures/a.png", PICTURE_PLACEMENT, "", "listtab"), r#"<text:list text:style-name="L"><text:list-item><text:p/></text:list-item></text:list>"#.into(), with_png, unsupported("list-empty-label")),
+            // Links outside the package, fragments, missing and undecodable files.
+            (level("http://example.com/a.png", PICTURE_PLACEMENT, "", "listtab"), item.into(), &[], unsupported("image-link")),
+            (level("Pictures/a.png#x", PICTURE_PLACEMENT, "", "listtab"), item.into(), with_png, unsupported("image-link")),
+            (level("Pictures/b.png", PICTURE_PLACEMENT, "", "listtab"), item.into(), with_png, invalid("a linked picture is missing from the package")),
+            (level("Pictures/a.png", PICTURE_PLACEMENT, "", "listtab"), item.into(), truncated, unsupported("image-decode")),
+            (level("Pictures/a.png", PICTURE_PLACEMENT, "", "listtab"), item.into(), bitmap, unsupported("image-format")),
+        ];
+        for (styles, body, files, expected) in cases {
+            let styles = format!(r#"<style:style style:name="T" style:family="text"/>{styles}"#);
+            assert_eq!(
+                read_pictures(&styles, &body, files)
+                    .map(|_| ())
+                    .unwrap_err(),
+                expected,
+                "{styles}"
+            );
+        }
+        // The label font's decoration would extend over the tab gap.
+        let underlined = format!(
+            r#"<style:style style:name="U" style:family="paragraph"><style:text-properties style:text-underline-style="solid" style:text-underline-type="single" style:text-underline-width="auto" style:text-underline-color="font-color"/></style:style>{}"#,
+            level("Pictures/a.png", PICTURE_PLACEMENT, "", "listtab")
+        );
+        assert_eq!(
+            read_pictures(
+                &underlined,
+                r#"<text:list text:style-name="L"><text:list-item><text:p text:style-name="U">a</text:p></text:list-item></text:list>"#,
+                with_png,
+            )
+            .map(|_| ())
+            .unwrap_err(),
+            unsupported("list-label-decoration")
+        );
+    }
+
     #[test]
     fn rejects_unmodelled_lists() {
         let level = list_level(1, "1", "", 2.0, -1.0, 2.0);
@@ -5139,7 +5388,7 @@ mod tests {
             (list_styles(&level.replace(r#"style:num-suffix=".""#, "style:num-suffix=\"\u{a0}\"")), list("<text:list-item><text:p>a</text:p></text:list-item>"), "list-affix"),
             (styles.clone(), list(r#"<text:list-item text:start-value="32768"><text:p>a</text:p></text:list-item>"#), "list-start-value"),
             (list_styles(&level.replace("fo:margin-left=\"2cm\"", "fo:margin-left=\"30cm\"")), list("<text:list-item><text:p>a</text:p></text:list-item>"), "list-geometry"),
-            (list_styles(&level.replace("<text:list-level-style-number", r#"<text:list-level-style-image text:level="1"/><text:list-level-style-number"#).replace(r#"text:level="1" style:num"#, r#"text:level="2" style:num"#)), list("<text:list-item><text:p>a</text:p></text:list-item>"), "list-image"),
+            (list_styles(&level.replace("<text:list-level-style-number", r#"<text:list-level-style-image text:level="1"/><text:list-level-style-number"#).replace(r#"text:level="1" style:num"#, r#"text:level="2" style:num"#)), list("<text:list-item><text:p>a</text:p></text:list-item>"), "list-image-source"),
         ];
         for (styles, body, code) in cases {
             assert_eq!(

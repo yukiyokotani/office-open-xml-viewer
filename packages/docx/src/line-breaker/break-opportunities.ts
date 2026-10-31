@@ -9,7 +9,7 @@ import {
   SYNTHETIC_ASCENT_EM,
   SYNTHETIC_DESCENT_EM,
 } from '@silurus/ooxml-core';
-import { EAST_ASIAN_RE } from '../layout/text.js';
+import { EAST_ASIAN_RE, LIST_LABEL_PICTURE_INSET_PT } from '../layout/text.js';
 import {
   wordIsOverflowPunctuation,
   wordIdeographicSpaceLineEndAllowanceCount,
@@ -562,6 +562,17 @@ function processImageSegment(context: BreakOpportunityIteratorContext, seg: Layo
   if (seg.markerMetric) {
     seg.measuredWidth = 0;
     context.admitLineMetric(seg, seg.heightPt, seg.heightPt * scale);
+    return;
+  }
+  if (seg.listLabel !== undefined) {
+    // A picture label follows its font's zero-advance metric at the start of
+    // the paragraph, so the line's ascent so far is that font's ascent: the
+    // box's top while the line is sized. It extends the descent at most.
+    const inset = 2 * LIST_LABEL_PICTURE_INSET_PT;
+    const w = (seg.widthPt + inset) * scale;
+    const boxPx = (seg.heightPt + inset) * scale;
+    seg.measuredWidth = w;
+    addToLine(seg, w, seg.heightPt + inset, 0, Math.max(0, boxPx - breakerState.lineAscent));
     return;
   }
   const w = seg.widthPt * scale;

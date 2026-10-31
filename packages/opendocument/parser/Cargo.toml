@@ -11,7 +11,15 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [features]
-odt = ["dep:js-sys", "dep:docx-model"]
+odt = [
+    "dep:js-sys",
+    "dep:docx-model",
+    "dep:png",
+    "dep:gif",
+    "dep:zune-jpeg",
+    "dep:zune-core",
+    "dep:crc32fast",
+]
 
 [dependencies]
 console_error_panic_hook = { workspace = true }
@@ -19,10 +27,16 @@ js-sys = { version = "0.3", optional = true }
 wasm-bindgen = { workspace = true }
 roxmltree = { workspace = true }
 ooxml-common = { workspace = true }
+crc32fast = { workspace = true, optional = true }
 docx-model = { workspace = true, optional = true, features = ["owned-source-cursor"] }
+png = { version = "0.18", default-features = false, optional = true }
+gif = { version = "0.14", default-features = false, features = ["std"], optional = true }
+zune-jpeg = { version = "0.5", default-features = false, features = ["std"], optional = true }
+zune-core = { version = "0.5", default-features = false, features = ["std"], optional = true }
 
 [dev-dependencies]
 zip = { workspace = true }
+flate2 = { workspace = true }
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = ["-Oz"]

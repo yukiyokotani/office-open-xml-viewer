@@ -284,6 +284,7 @@ impl Store<'_> {
             anchor_x_relative_from: Some(facts.horizontal.into()),
             anchor_y_relative_from: Some(facts.vertical.into()),
             anchor_acquisition: Some(acquisition),
+            list_label: None,
         };
         let required = image_payload(&image)?;
         *remaining_bytes = remaining_bytes

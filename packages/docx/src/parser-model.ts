@@ -141,6 +141,10 @@ export interface InternalRunSlotMetadata {
   langEastAsia?: string;
 }
 
+function isListLabel(value: unknown): value is 'start' | 'end' | 'center' {
+  return value === 'start' || value === 'end' || value === 'center';
+}
+
 interface InternalNoBreakHyphenWire {
   readonly __optionalHyphen?: boolean;
   /** Explicit advance (pt) of each U+0020, from producers other than DOCX. */
@@ -1736,13 +1740,17 @@ export function paragraphAcquisitionInput(
       });
     }
     if (run.type === 'anchorHost') {
-      const internal = run as typeof run & { __anchorOccurrenceId?: string };
-      const { __anchorOccurrenceId, ...host } = internal;
+      const internal = run as typeof run & {
+        __anchorOccurrenceId?: string;
+        __listLabel?: InternalNoBreakHyphenWire['__listLabel'];
+      };
+      const { __anchorOccurrenceId, __listLabel: listLabel, ...host } = internal;
       return Object.freeze({
         ...host,
         ...(__anchorOccurrenceId === undefined
           ? {}
           : { anchorOccurrenceId: anchorOccurrenceKey(source, __anchorOccurrenceId) }),
+        ...(isListLabel(listLabel) ? { listLabel } : {}),
       }) as ParagraphAcquisitionRun;
     }
     if (run.type === 'shape' || run.type === 'image' || run.type === 'chart') {
@@ -1753,7 +1761,11 @@ export function paragraphAcquisitionInput(
             ...localAnchorInput,
             occurrenceId: anchorOccurrenceKey(source, localAnchorInput.occurrenceId),
           }, 'DOCX scoped anchor acquisition input');
-      const { __anchorAcquisition: _privateAnchor, ...publicRun } = run as typeof run & InternalAnchorRunWire;
+      const {
+        __anchorAcquisition: _privateAnchor,
+        __listLabel: listLabel,
+        ...publicRun
+      } = run as typeof run & InternalAnchorRunWire & Pick<InternalNoBreakHyphenWire, '__listLabel'>;
       if (run.type !== 'shape') {
         const retainedRun = run.type === 'chart'
           ? (({ chart: _chartPayload, ...marker }) => ({
@@ -1764,6 +1776,7 @@ export function paragraphAcquisitionInput(
         return Object.freeze({
           ...structuredClone(retainedRun),
           ...(anchorInput === undefined ? {} : { anchorAcquisitionInput: anchorInput }),
+          ...(run.type === 'image' && isListLabel(listLabel) ? { listLabel } : {}),
         }) as ParagraphAcquisitionRun;
       }
       const originalShape = originalRun as ShapeRun;
@@ -1818,8 +1831,7 @@ export function paragraphAcquisitionInput(
         ...(optionalHyphen === true && run.type === 'text' ? { optionalHyphen: true } : {}),
         ...(run.type === 'text' && typeof spaceAdvancePt === 'number'
           && Number.isFinite(spaceAdvancePt) && spaceAdvancePt >= 0 ? { spaceAdvancePt } : {}),
-        ...(run.type === 'text' && (listLabel === 'start' || listLabel === 'end' || listLabel === 'center')
-          ? { listLabel } : {}),
+        ...(run.type === 'text' && isListLabel(listLabel) ? { listLabel } : {}),
         ...(noBreakBefore === true ? { noBreakBefore: true } : {}),
         ...(noBreakAfter === true ? { noBreakAfter: true } : {}),
         ...(noBreakRanges?.length ? { noBreakRanges: Object.freeze(noBreakRanges) } : {}),

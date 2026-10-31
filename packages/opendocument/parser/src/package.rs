@@ -213,6 +213,14 @@ pub(crate) mod tests {
 
     /// A package with a conforming leading `mimetype` and the given files.
     pub(crate) fn package(mimetype: &str, files: &[(&str, &str)]) -> Vec<u8> {
+        let files: Vec<(&str, &[u8])> = files
+            .iter()
+            .map(|(name, body)| (*name, body.as_bytes()))
+            .collect();
+        package_bytes(mimetype, &files)
+    }
+
+    pub(crate) fn package_bytes(mimetype: &str, files: &[(&str, &[u8])]) -> Vec<u8> {
         let mut bytes = Vec::new();
         {
             let mut writer = zip::ZipWriter::new(Cursor::new(&mut bytes));
@@ -223,7 +231,7 @@ pub(crate) mod tests {
                 SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
             for (name, body) in files {
                 writer.start_file(*name, deflated).unwrap();
-                writer.write_all(body.as_bytes()).unwrap();
+                writer.write_all(body).unwrap();
             }
             writer.finish().unwrap();
         }

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { layoutBodyModel } from './test-support/document-layout.test-support.js';
-import type { LineLayout, TextPlacement } from './layout/types.js';
+import type { LineLayout, ResourcePlacement, TextPlacement } from './layout/types.js';
 import type { BodyElement, DocParagraph, DocSettings, DocxTextRun, SectionProps } from './types';
 
 // List labels emitted as leading runs (`__listLabel`, set by producers other
@@ -152,5 +152,80 @@ describe('list labels emitted as leading runs', () => {
     const [centre] = lines(list([label('ii.', 'center'), label('\t', 'center'), textRun('body')]));
     expect(xOf(centre!, 'ii.')).toBeCloseTo(25, 6);
     expect(xOf(centre!, 'body')).toBeCloseTo(100, 6);
+  });
+});
+
+// A picture label is the label font's zero-advance metric, the picture and
+// its separator, all flagged. LibreOffice gives the picture a box 0.5 pt
+// larger on every side, sizes the line with the box top at the label font's
+// ascent (so the box extends the descent at most), and centres the box in
+// the natural line; proportional spacing adds its extra from the text.
+describe('picture list labels', () => {
+  const metric = (align: Align = 'start') => ({
+    type: 'anchorHost', fontSize: 20, fontFamily: 'NotInMetrics', __listLabel: align,
+  }) as unknown as DocParagraph['runs'][number];
+  const picture = (widthPt: number, heightPt: number, align: Align = 'start') => ({
+    type: 'image', imagePath: 'Pictures/a.png', mimeType: 'image/png',
+    widthPt, heightPt, rotation: 0, flipH: false, flipV: false, anchor: false,
+    anchorXPt: 0, anchorYPt: 0, anchorXFromMargin: false, anchorYFromPara: false,
+    allowOverlap: false, __listLabel: align,
+  }) as unknown as DocParagraph['runs'][number];
+  const pictureList = (widthPt: number, heightPt: number, body: DocParagraph['runs'], extra: Partial<DocParagraph> = {}, align: Align = 'start', tab = true) =>
+    ({ ...list([metric(align), picture(widthPt, heightPt, align), ...(tab ? [label('\t', align)] : []), ...body]), ...extra }) as BodyElement;
+  const image = (line: LineLayout): ResourcePlacement =>
+    line.placements.find((p): p is ResourcePlacement => p.kind === 'resource')!;
+  const [plain] = lines(list([label('1.'), label('\t'), textRun('body')]));
+  const natural = plain!.advancePt;
+  const textTop = (line: LineLayout) => texts(line).find((p) => p.text.startsWith('body'))!.bounds.yPt - line.bounds.yPt;
+
+  it('advances by the box and draws the picture inset within it', () => {
+    const [line] = lines(pictureList(10, 8, [textRun('body')], {}, 'start', false));
+    expect(image(line!).bounds.xPt).toBeCloseTo(40.5, 6);
+    expect(image(line!).bounds.widthPt).toBeCloseTo(10, 6);
+    expect(xOf(line!, 'body')).toBeCloseTo(51, 6);
+    const [tabbed] = lines(pictureList(10, 8, [textRun('body')]));
+    expect(xOf(tabbed!, 'body')).toBeCloseTo(100, 6);
+  });
+
+  it('centres a box shorter than the line without changing the line', () => {
+    const [line] = lines(pictureList(10, 8, [textRun('body')]));
+    expect(line!.advancePt).toBeCloseTo(natural, 6);
+    expect(image(line!).bounds.yPt - line!.bounds.yPt).toBeCloseTo((natural - 9) / 2 + 0.5, 6);
+    expect(textTop(line!)).toBeCloseTo(textTop(plain!), 6);
+  });
+
+  it('extends the line below the label font\'s ascent by a taller box, text kept at the top', () => {
+    // Label font ascent 16 pt: a 31 pt box makes a 16 + 15 pt line.
+    const [line] = lines(pictureList(10, 30, [textRun('body')]));
+    expect(line!.advancePt).toBeCloseTo(31, 6);
+    expect(image(line!).bounds.yPt - line!.bounds.yPt).toBeCloseTo(0.5, 6);
+    expect(textTop(line!)).toBeCloseTo(textTop(plain!), 6);
+  });
+
+  it('sizes from the label font, not a taller run on the line', () => {
+    // A 40 pt word (ascent 32, descent 8) and a 31 pt box below the 20 pt
+    // label font's 16 pt ascent: descent 15, a 47 pt line, the box centred.
+    const [line] = lines(pictureList(10, 30, [textRun('body', { fontSize: 40 })]));
+    expect(line!.advancePt).toBeCloseTo(47, 6);
+    expect(image(line!).bounds.yPt - line!.bounds.yPt).toBeCloseTo((47 - 31) / 2 + 0.5, 6);
+  });
+
+  it('adds proportional spacing from the text line, below the centred box', () => {
+    const spacing = { lineSpacing: { value: 1.5, rule: 'auto', explicit: true } } as Partial<DocParagraph>;
+    const [plainSpaced] = lines({ ...list([label('1.'), label('\t'), textRun('body')]), ...spacing } as BodyElement);
+    const [small] = lines(pictureList(10, 8, [textRun('body')], spacing));
+    expect(small!.advancePt).toBeCloseTo(plainSpaced!.advancePt, 6);
+    expect(image(small!).bounds.yPt - small!.bounds.yPt).toBeCloseTo((natural - 9) / 2 + 0.5, 6);
+    const [tall] = lines(pictureList(10, 30, [textRun('body')], spacing));
+    expect(tall!.advancePt).toBeCloseTo(31 + plainSpaced!.advancePt - natural, 6);
+    expect(image(tall!).bounds.yPt - tall!.bounds.yPt).toBeCloseTo(0.5, 6);
+  });
+
+  it('ends an end-aligned box and centres a centre-aligned one at the label position', () => {
+    const [end] = lines(pictureList(10, 8, [textRun('body')], {}, 'end'));
+    expect(image(end!).bounds.xPt).toBeCloseTo(40 - 11 + 0.5, 6);
+    expect(xOf(end!, 'body')).toBeCloseTo(100, 6);
+    const [centre] = lines(pictureList(10, 8, [textRun('body')], {}, 'center'));
+    expect(image(centre!).bounds.xPt).toBeCloseTo(40 - 5.5 + 0.5, 6);
   });
 });
