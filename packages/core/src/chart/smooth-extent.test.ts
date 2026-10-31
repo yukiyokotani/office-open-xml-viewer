@@ -140,9 +140,22 @@ describe('automatic value axes cover a drawn smoothed curve', () => {
     const labels = paintedLabels(chart({ ...overshoot, ...fixed }));
     expect(labels).not.toContain('120%');
     expect(labels).toEqual(paintedLabels(chart({ ...straight, ...fixed })));
-    // Only the fixed side stays: an automatic minimum still follows a dip.
+    // An authored maximum alone keeps the automatic unit of the fixed side.
     expect(paintedLabels(chart({ ...overshoot, valMax: 1 })))
       .toEqual(paintedLabels(chart({ ...straight, valMax: 1 })));
+    // A dip below 0%: an authored minimum fixes that side the same way, and an
+    // automatic one still widens to the snapped percent unit.
+    const dip = {
+      ...overshoot,
+      series: [
+        series({ values: [0, 0, 1, 0, 0, 0, 0], smooth: true }),
+        series({ values: [1, 1, 0, 1, 1, 1, 1], smooth: true }),
+      ],
+    } as Partial<ChartModel>;
+    const flatDip = { ...dip, series: dip.series!.map(item => ({ ...item, smooth: false })) };
+    expect(paintedLabels(chart({ ...dip, valMin: 0 })))
+      .toEqual(paintedLabels(chart({ ...flatDip, valMin: 0 })));
+    expect(paintedLabels(chart(dip))).toContain('-20%');
   });
 
   it('a secondary percentStacked axis snaps a crossed bound to the percent unit', () => {
