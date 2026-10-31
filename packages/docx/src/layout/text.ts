@@ -65,6 +65,14 @@ export function calcEffectiveFontPx(segment: EffectiveFontSegment, scale: number
   return size;
 }
 
+/** The margin a picture list label (`LayoutSegSource.listLabel`) keeps on
+ * every side, in pt: its box is the picture plus this inset. The label font's
+ * ascent places the box top while the line is sized (the box extends the
+ * line's descent at most), and the box is drawn centred in the natural line.
+ * Measured on LibreOffice 26.8 for `style:vertical-pos="middle"` relative to
+ * the line; producers that emit such labels admit only that placement. */
+export const LIST_LABEL_PICTURE_INSET_PT = 0.5;
+
 /** East Asian content predicate used by both legacy and retained line acquisition. */
 export const EAST_ASIAN_RE =
   /[ᄀ-ᇿ⺀-⿟　-〿぀-ヿ㄰-㆏㐀-䶿一-鿿ꥠ-꥿가-퟿豈-﫿＀-￯]/u;
@@ -200,6 +208,9 @@ export type ParagraphShapeRun = DeepReadonly<Extract<DocRun, { type: 'shape' }> 
 
 export type ParagraphImageRun = DeepReadonly<Extract<DocRun, { type: 'image' }>> & Readonly<{
   anchorAcquisitionInput?: AnchorAcquisitionInput;
+  /** A picture list label (producers other than DOCX): see
+   * `LayoutSegSource.listLabel`. */
+  listLabel?: 'start' | 'end' | 'center';
 }>;
 
 export type ParagraphChartRun = DeepReadonly<Omit<Extract<DocRun, { type: 'chart' }>, 'chart'>> & Readonly<{
@@ -221,6 +232,9 @@ export interface UnavailableDrawingAcquisitionRun {
 
 type ParagraphAnchorHostRun = DeepReadonly<Extract<DocRun, { type: 'anchorHost' }>> & Readonly<{
   anchorOccurrenceId?: string;
+  /** The label font's metric before a picture list label, not an anchor's
+   * host: see `LayoutSegSource.listLabel`. */
+  listLabel?: 'start' | 'end' | 'center';
 }>;
 
 export type ParagraphAcquisitionRun =

@@ -10,9 +10,15 @@
 //! DOCX `NumberingInfo` marker cannot carry this: it keeps the body at or
 //! after the paragraph indent, while LibreOffice starts it at the list tab
 //! stop T even when T is before M.
+//!
+//! A picture label (design addendum rev 10) is the label font's zero-advance
+//! metric followed by the picture, both flagged: LibreOffice gives the
+//! picture a box 0.5 pt larger on every side, whose top it places at the
+//! label font's ascent while it sizes the line and which it then centres in
+//! the line (measured, `style:vertical-pos="middle"` relative to the line).
 
 use super::*;
-use docx_model::TabStop;
+use docx_model::{AnchorHostMetrics, ImageRun, TabStop};
 
 /// Levels a list style defines (§19.834 `text:level`).
 const MAX_LEVELS: u32 = 10;
@@ -20,6 +26,9 @@ const MAX_LEVELS: u32 = 10;
 /// "1.", measured); counting itself was measured to 32768.
 const MAX_AUTHORED_START: u32 = 32767;
 const MAX_COUNTED: u32 = 32768;
+/// LibreOffice's margin around a picture label, on every side (measured:
+/// the box is 1 pt wider and taller than `fo:width` by `fo:height`).
+const IMAGE_LABEL_INSET_PT: f64 = 0.5;
 /// Generated tab stops per paragraph, and the smallest grid interval.
 const MAX_TAB_STOPS: usize = 1024;
 const MIN_TAB_INTERVAL_PT: f64 = 0.1 * 72.0 / 2.54;
@@ -81,6 +90,12 @@ enum Kind {
         letter_sync: bool,
     },
     Bullet(char),
+    /// A picture (§16.33), drawn at `fo:width` by `fo:height` (pt).
+    Image {
+        href: String,
+        width: f64,
+        height: f64,
+    },
 }
 
 /// One level of a list style, in label alignment mode.
@@ -111,6 +126,8 @@ pub(super) struct ListParagraph<'a> {
 
 pub(super) struct Label<'a> {
     pub text: String,
+    /// A picture label's link and size (pt); `text` is then empty.
+    pub image: Option<(String, f64, f64)>,
     pub follow: Follow,
     pub align: Align,
     pub styles: Vec<StyleRef<'a>>,
@@ -417,6 +434,7 @@ impl<'a> Reader<'a> {
     ) -> Result<Label<'a>, String> {
         let text = match &level.kind {
             Kind::Bullet(c) => c.to_string(),
+            Kind::Image { .. } => String::new(),
             Kind::Number {
                 format,
                 prefix,
@@ -431,8 +449,10 @@ impl<'a> Reader<'a> {
                         let component = if l == frame.level {
                             (*format, *letter_sync)
                         } else {
+                            // A bullet or picture ancestor contributes an
+                            // empty component (measured).
                             match self.list_level(&frame.style, l)?.kind {
-                                Kind::Bullet(_) => {
+                                Kind::Bullet(_) | Kind::Image { .. } => {
                                     components.push(String::new());
                                     continue;
                                 }
@@ -458,8 +478,20 @@ impl<'a> Reader<'a> {
             }
         };
         self.charge_construction(text.len())?;
+        let image = match &level.kind {
+            Kind::Image {
+                href,
+                width,
+                height,
+            } => {
+                self.charge_construction(href.len())?;
+                Some((href.clone(), *width, *height))
+            }
+            _ => None,
+        };
         Ok(Label {
             text,
+            image,
             follow: level.follow,
             align: level.align,
             styles: level.styles.clone(),
@@ -546,22 +578,33 @@ impl<'a> Reader<'a> {
                 .get(&(name.0.to_string(), name.1.to_string()))
                 .map(String::as_str)
         };
-        let number = match (definition.namespace.as_str(), definition.name.as_str()) {
-            (NS_TEXT, "list-level-style-number") => true,
-            (NS_TEXT, "list-level-style-bullet") => false,
-            (NS_TEXT, "list-level-style-image") => return Err(unsupported("list-image")),
+        let (number, image) = match (definition.namespace.as_str(), definition.name.as_str()) {
+            (NS_TEXT, "list-level-style-number") => (true, false),
+            (NS_TEXT, "list-level-style-bullet") => (false, false),
+            (NS_TEXT, "list-level-style-image") => (false, true),
             _ => return Err(unsupported("list-style-child")),
         };
         for (key, value) in &definition.attributes {
             let admitted = match (key.0.as_str(), key.1.as_str()) {
-                (NS_TEXT, "level" | "style-name") => true,
-                (NS_STYLE, "num-format" | "num-prefix" | "num-suffix" | "num-letter-sync") => true,
+                (NS_TEXT, "level") => true,
+                // A picture level's character style is not measured (real
+                // corpus: none).
+                (NS_TEXT, "style-name") if image => return Err(unsupported("list-image-style")),
+                (NS_TEXT, "style-name") => true,
+                // A package link (§16.33, XLink "simple", "embed", "onLoad").
+                (NS_XLINK, "href") => image,
+                (NS_XLINK, "type") => image && value == "simple",
+                (NS_XLINK, "show") => image && value == "embed",
+                (NS_XLINK, "actuate") => image && value == "onLoad",
+                (NS_STYLE, "num-format" | "num-prefix" | "num-suffix" | "num-letter-sync") => {
+                    !image
+                }
                 (NS_TEXT, "display-levels" | "start-value") => number,
-                (NS_TEXT, "bullet-char") => !number,
-                (NS_TEXT, "bullet-relative-size") => !number && value == "100%",
+                (NS_TEXT, "bullet-char") => !number && !image,
+                (NS_TEXT, "bullet-relative-size") => !number && !image && value == "100%",
                 // LibreOffice's label template, checked against the
                 // composition below; a bullet draws its character only.
-                (NS_LOEXT, "num-list-format") => true,
+                (NS_LOEXT, "num-list-format") => !image,
                 (NS_LOEXT, "is-legal") => value == "false",
                 _ => false,
             };
@@ -637,6 +680,17 @@ impl<'a> Reader<'a> {
                 display,
                 letter_sync: attribute((NS_STYLE, "num-letter-sync")) == Some("true"),
             }
+        } else if image {
+            // Embedded pictures (`office:binary-data`) are not in the real
+            // corpus.
+            let href = attribute((NS_XLINK, "href"))
+                .ok_or_else(|| unsupported("list-image-source"))?
+                .to_string();
+            Kind::Image {
+                href,
+                width: 0.0,
+                height: 0.0,
+            }
         } else {
             // LibreOffice draws only the bullet; its affixes are ignored
             // (measured).
@@ -658,11 +712,21 @@ impl<'a> Reader<'a> {
         let mut align = Align::Start;
         let (mut margin, mut indent, mut tab) = (0.0, 0.0, None);
         let mut label_alignment = false;
+        let (mut width, mut height) = (None, None);
+        let (mut vertical_pos, mut vertical_rel) = (None, None);
         for child in &definition.children {
             match (child.namespace.as_str(), child.name.as_str()) {
                 (NS_STYLE, "list-level-properties") => {
                     for (key, value) in &child.attributes {
                         match (key.0.as_str(), key.1.as_str()) {
+                            (NS_FO, "width") if image => width = Some(length_pt(value)?),
+                            (NS_FO, "height") if image => height = Some(length_pt(value)?),
+                            (NS_STYLE, "vertical-pos") if image => {
+                                vertical_pos = Some(value.as_str())
+                            }
+                            (NS_STYLE, "vertical-rel") if image => {
+                                vertical_rel = Some(value.as_str())
+                            }
                             (NS_TEXT, "list-level-position-and-space-mode") => {
                                 label_alignment = value == "label-alignment"
                             }
@@ -716,10 +780,35 @@ impl<'a> Reader<'a> {
                         }
                     }
                 }
-                (NS_STYLE, "text-properties") => {}
+                (NS_STYLE, "text-properties") if !image => {}
+                (NS_OFFICE, "binary-data") if image => {
+                    return Err(unsupported("list-image-source"))
+                }
                 _ => return Err(unsupported("list-style-child")),
             }
         }
+        let kind = match kind {
+            Kind::Image { href, .. } => {
+                // The corpus places every picture in the middle of its line
+                // (`style:vertical-pos="middle"`, `style:vertical-rel="line"`),
+                // the measured placement; others are not measured.
+                if (vertical_pos, vertical_rel) != (Some("middle"), Some("line")) {
+                    return Err(unsupported("list-image-position"));
+                }
+                let (Some(width), Some(height)) = (width, height) else {
+                    return Err(unsupported("list-image-size"));
+                };
+                if !(width > 0.0 && height > 0.0 && width.is_finite() && height.is_finite()) {
+                    return Err(unsupported("list-image-size"));
+                }
+                Kind::Image {
+                    href,
+                    width,
+                    height,
+                }
+            }
+            kind => kind,
+        };
         // The legacy label box (the default mode) needs label widths at
         // admission.
         if !label_alignment {
@@ -872,6 +961,9 @@ impl<'a> Reader<'a> {
         if !body {
             return Err(unsupported("list-empty-label"));
         }
+        if label.image.is_some() {
+            return self.list_label_image(label, contexts, paragraph);
+        }
         if label.text.is_empty() {
             return Ok(());
         }
@@ -948,6 +1040,118 @@ impl<'a> Reader<'a> {
             let mut run = properties.text_run();
             run.text = text.to_string();
             run.list_label = Some(label.align.wire());
+            runs.push(DocRun::Text(Box::new(run)));
+        }
+        paragraph.runs.splice(0..0, runs);
+        Ok(())
+    }
+
+    /// A picture label's leading runs: the label font's zero-advance metric,
+    /// the picture and the separator, all flagged. The picture's box (0.5 pt
+    /// more on every side) advances the pen; its size is known, so the label
+    /// is admitted only where it fits as measured.
+    fn list_label_image(
+        &mut self,
+        label: Label<'a>,
+        contexts: &[TextContext<'a>],
+        paragraph: &mut DocParagraph,
+    ) -> Result<(), String> {
+        let (href, width, height) = label.image.expect("a picture label");
+        // With a space separator LibreOffice clips the picture and sizes the
+        // line irregularly (measured: a 0.279 cm picture grows a 13.8 pt line
+        // to 16.25 pt, a 1 cm one leaves it unchanged and is cut at 27.5 pt);
+        // the real corpus separates every picture with a tab.
+        if label.follow == Follow::Space {
+            return Err(unsupported("list-image-space"));
+        }
+        let properties = self.run_properties(contexts, 0, ScriptClass::Latin)?;
+        // A raised or lowered label font moves the box with its ascent (not
+        // measured).
+        if properties.position.is_some() {
+            return Err(unsupported("list-label-position"));
+        }
+        let box_width = width + 2.0 * IMAGE_LABEL_INSET_PT;
+        let start = paragraph.indent_left + paragraph.indent_first;
+        let line_end = self.text_width - paragraph.indent_right;
+        let before = match label.align {
+            Align::Start => 0.0,
+            Align::End => box_width,
+            Align::Center => box_width / 2.0,
+        };
+        let reaches_tab = label.align == Align::Center
+            && label.follow == Follow::Tab
+            && paragraph
+                .tab_stops
+                .first()
+                .is_none_or(|stop| start + box_width / 2.0 >= stop.pos);
+        if start - before + box_width > line_end
+            || start - before < -self.page_left_margin
+            || reaches_tab
+        {
+            return Err(unsupported("list-label-extent"));
+        }
+        // LibreOffice extends the label font's decoration over the tab gap.
+        if properties.underline.is_some()
+            || properties.strike.is_some()
+            || properties.background.is_some()
+        {
+            return Err(unsupported("list-label-decoration"));
+        }
+        let (path, mime_type) = self.package_image(&href)?;
+        let align = label.align.wire();
+        let family = properties.family.to_string();
+        self.charge_construction(
+            std::mem::size_of::<DocRun>() * 3 + family.len() + path.len() + mime_type.len(),
+        )?;
+        let mut runs = vec![
+            DocRun::AnchorHost(AnchorHostMetrics {
+                font_size: properties.size,
+                font_family: Some(family),
+                font_family_east_asia: None,
+                bold: properties.bold,
+                italic: properties.italic,
+                anchor_occurrence_id: None,
+                list_label: Some(align),
+            }),
+            DocRun::Image(Box::new(ImageRun {
+                image_path: path,
+                mime_type: mime_type.to_string(),
+                svg_image_path: None,
+                src_rect: None,
+                width_pt: width,
+                height_pt: height,
+                rotation: 0.0,
+                flip_h: false,
+                flip_v: false,
+                anchor: false,
+                anchor_x_pt: 0.0,
+                anchor_y_pt: 0.0,
+                anchor_x_from_margin: false,
+                anchor_y_from_para: false,
+                color_replace_from: None,
+                duotone: None,
+                blip_effects: Vec::new(),
+                alpha: None,
+                wrap_mode: None,
+                dist_top: 0.0,
+                dist_bottom: 0.0,
+                dist_left: 0.0,
+                dist_right: 0.0,
+                wrap_side: None,
+                allow_overlap: false,
+                anchor_x_align: None,
+                anchor_y_align: None,
+                anchor_x_relative_from: None,
+                anchor_y_relative_from: None,
+                anchor_acquisition: None,
+                list_label: Some(align),
+            })),
+        ];
+        if label.follow == Follow::Tab {
+            self.charge_construction(properties.retained_estimate() + 1)?;
+            let mut run = properties.text_run();
+            run.text = "\t".to_string();
+            run.list_label = Some(align);
             runs.push(DocRun::Text(Box::new(run)));
         }
         paragraph.runs.splice(0..0, runs);

@@ -8080,6 +8080,7 @@ fn parse_run_inner(
         bold,
         italic,
         anchor_occurrence_id: None,
+        list_label: None,
     };
     let attach_anchor_host_metrics = |drawing_runs: &mut Vec<DocRun>| {
         prepend_anchor_host_metrics(drawing_runs, &anchor_host_metrics);
@@ -9666,6 +9667,7 @@ fn parse_drawing_container(
             anchor_x_relative_from: None,
             anchor_y_relative_from: None,
             anchor_acquisition: None,
+            list_label: None,
         }))];
     }
 
@@ -9929,6 +9931,7 @@ fn parse_drawing_container(
         anchor_x_relative_from: rel_h.clone(),
         anchor_y_relative_from: rel_v.clone(),
         anchor_acquisition: Some(anchor_acquisition),
+        list_label: None,
     }))]
 }
 
@@ -11097,6 +11100,7 @@ fn parse_group_pic(
             group: Some(parse_anchor_group_wire(metadata, mapped)),
             ..Default::default()
         }),
+        list_label: None,
     })
 }
 
@@ -14462,6 +14466,7 @@ fn vml_image_run(
         anchor_x_relative_from,
         anchor_y_relative_from,
         anchor_acquisition,
+        list_label: None,
     }
 }
 
@@ -19093,6 +19098,7 @@ mod tests {
             anchor_x_relative_from: None,
             anchor_y_relative_from: None,
             anchor_acquisition: None,
+            list_label: None,
         };
         let cases: Vec<(DocRun, &str)> = vec![
             (DocRun::Text(Box::default()), "text"),
@@ -19104,6 +19110,7 @@ mod tests {
                     bold: false,
                     italic: false,
                     anchor_occurrence_id: None,
+                    list_label: None,
                 }),
                 "anchorHost",
             ),
@@ -22820,6 +22827,7 @@ mod svg_blip_tests {
             anchor_x_relative_from: None,
             anchor_y_relative_from: None,
             anchor_acquisition: None,
+            list_label: None,
         };
         let json = serde_json::to_string(&run).expect("serialize");
         assert!(
@@ -24350,6 +24358,7 @@ mod anchor_image_relative_from_tests {
             bold: false,
             italic: false,
             anchor_occurrence_id: None,
+            list_label: None,
         };
         // A parsed wpg group expands into multiple Shape runs before the host
         // character is attached. The enclosing w:r contributes only once.
@@ -25334,6 +25343,7 @@ mod anchor_image_relative_from_tests {
                 bold: false,
                 italic: false,
                 anchor_occurrence_id: None,
+                list_label: None,
             },
         );
         assert_eq!(runs.len(), 2, "one host plus one anchored chart expected");
@@ -25375,6 +25385,7 @@ mod anchor_image_relative_from_tests {
                 bold: false,
                 italic: false,
                 anchor_occurrence_id: None,
+                list_label: None,
             },
         );
         assert_eq!(unavailable.len(), 2);
@@ -29996,6 +30007,7 @@ mod inline_wps_shape_tests {
             bold: false,
             italic: false,
             anchor_occurrence_id: None,
+            list_label: None,
         };
         for first_floating in [false, true] {
             let first = image(first_floating);

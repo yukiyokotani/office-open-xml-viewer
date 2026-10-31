@@ -1859,6 +1859,7 @@ function appendRunsToSegments(
         alpha: img.alpha,
         srcRect: img.srcRect ?? undefined,
         measuredWidth: 0,
+        ...listLabelOf(img),
       });
     } else if (run.type === 'chart') {
       // ECMA-376 §21.2 chart. Flow it as a picture box of the `<wp:extent>`
@@ -2059,6 +2060,7 @@ function appendRunsToSegments(
           ? familyLineMetric?.eastAsianLineHeightRatio
           : undefined,
         snapToCharacterGrid: false,
+        ...listLabelOf(run),
       });
     }
     let sequenceOffset = 0;
@@ -2160,4 +2162,11 @@ function admittedFaceDecoration(
   const geometry = referenceFontDecorationMetrics(font.requestedFamily, font.weight, font.style)
     ?? (referenceAdmitted ? referenceFontDecorationMetrics(font.requestedFamily, 400, 'normal') : undefined);
   return geometry ? { referenceFontDecoration: geometry } : {};
+}
+
+/** A picture list label and its font's metric carry the label's alignment
+ * (`ParagraphImageRun.listLabel`, projected from the private wire field). */
+function listLabelOf(run: object): { listLabel?: LayoutTextSeg['listLabel'] } {
+  const listLabel = (run as { listLabel?: LayoutTextSeg['listLabel'] }).listLabel;
+  return listLabel === undefined ? {} : { listLabel };
 }

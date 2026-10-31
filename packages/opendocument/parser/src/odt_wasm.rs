@@ -33,10 +33,9 @@ impl OdtDocument {
         };
         let package = OdfPackage::open(data.to_vec(), OoxmlFormat::Docx, limits, &odt::MEDIA_TYPES)
             .map_err(|e| JsValue::from_str(&e))?;
-        let document = odt::read(&package).map_err(|e| JsValue::from_str(&e))?;
-        // The admitted subset references no image resources.
+        let (document, images) = odt::read(&package).map_err(|e| JsValue::from_str(&e))?;
         let cursor =
-            OwnedDocumentCursor::new(document, Vec::new()).map_err(|e| JsValue::from_str(&e))?;
+            OwnedDocumentCursor::new(document, images).map_err(|e| JsValue::from_str(&e))?;
         Ok(Self { cursor })
     }
 
