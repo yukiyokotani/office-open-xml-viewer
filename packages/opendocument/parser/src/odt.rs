@@ -987,16 +987,18 @@ impl<'a> Reader<'a> {
         }
         let tokens = collapse(std::mem::take(&mut inline.tokens));
         self.emit_runs(&tokens, &inline.contexts, &mut collected.paragraph)?;
-        if let Some(shading) = collected.paragraph.shading.as_deref() {
-            // §20.395 automatic colour (also an unset colour) is chosen
-            // against the background. LibreOffice and the DOCX layout agree
-            // only away from their thresholds; between them it rejects. Runs
-            // with their own shading were checked against it.
-            let automatic = collected.paragraph.runs.iter().any(|run| {
-                matches!(run, DocRun::Text(text) if text.color.is_none() && text.background.is_none())
-            });
-            if automatic && !automatic_colors_agree(shading) {
-                return Err(unsupported("automatic-font-color"));
+        if let Some(shading) = collected.paragraph.shading.clone() {
+            // §20.395 automatic colour (also an unset colour) over the
+            // paragraph background, resolved as LibreOffice paints it (runs
+            // with their own shading were resolved against it).
+            let resolved = libreoffice_automatic_color(&shading)?;
+            for run in &mut collected.paragraph.runs {
+                if let DocRun::Text(text) = run {
+                    if text.color.is_none() && text.background.is_none() {
+                        text.color = Some(resolved.to_string());
+                        text.color_auto = false;
+                    }
+                }
             }
         }
         if collected.paragraph.line_spacing.is_some() {
@@ -1721,7 +1723,7 @@ impl RunProperties {
         // §20.395 automatic colour is chosen against the background. With no
         // background it is the dark default on a white page, as is DOCX
         // automatic colour; other backgrounds are not yet measured.
-        let (color_auto, color) = font_color(cascade, rules)?;
+        let (mut color_auto, mut color) = font_color(cascade, rules)?;
         // Character opacity of the font colour (LibreOffice extension):
         // LibreOffice writes 100% with an explicit colour and 0% with the
         // automatic colour, where it has no effect (measured); only those
@@ -1731,14 +1733,11 @@ impl RunProperties {
             Some("0%") if color_auto => {}
             Some(_) => return Err(unsupported("text-opacity")),
         }
-        // §20.395 automatic (or unset) colour over the run's own shading:
-        // admitted only where LibreOffice and the DOCX layout agree.
-        if color.is_none()
-            && background
-                .as_deref()
-                .is_some_and(|bg| !automatic_colors_agree(bg))
-        {
-            return Err(unsupported("automatic-font-color"));
+        // §20.395 automatic (or unset) colour over the run's own shading,
+        // resolved as LibreOffice paints it.
+        if let (None, Some(background)) = (&color, &background) {
+            color = Some(libreoffice_automatic_color(background)?.to_string());
+            color_auto = false;
         }
         // Letter spacing: LibreOffice spaces between the characters of a
         // portion, the DOCX layout after each character with an advance
@@ -2022,43 +2021,41 @@ fn resolve_family(cascade: &Cascade<'_>, suffix: &str, fonts: &FontFaces) -> Res
     Err(unsupported("font-unresolved"))
 }
 
-/// LibreOffice standard palette colours (`palette/standard.soc`, LibreOffice
-/// 26.8) over which LibreOffice and the DOCX layout were measured to pick the
-/// same automatic text colour (112 of its 120; the other 8 differ). Sorted.
-#[rustfmt::skip]
-const AUTOMATIC_COLOR_PALETTE: [&str; 112] = [
-    "000000", "00a933", "069a2e", "111111", "127622", "158466", "168253", "1c1c1c",
-    "1e6a39", "224b12", "28471f", "2a6099", "2e2706", "302709", "333333", "342a06",
-    "3465a4", "355269", "362413", "383d3c", "395511", "3a1a0f", "3b160e", "41190d",
-    "443205", "468a1a", "472702", "481d32", "492300", "4b2204", "4e102d", "50200c",
-    "50938a", "55215b", "55308d", "5983b0", "5b277d", "5eb91e", "611729", "650953",
-    "666666", "6b5e9b", "706e0c", "729fcf", "77bc65", "780373", "784b04", "7b3d00",
-    "800080", "808080", "813709", "81aca6", "81d41a", "861141", "8d1d75", "8d281e",
-    "a1467e", "a7074b", "acb20c", "afd095", "b2b2b2", "b3cac7", "b47804", "b4c7dc",
-    "b7b3ca", "b85c00", "bbe33d", "be480a", "bf0041", "c9211e", "cccccc", "d4ea6b",
-    "d62e4e", "dddddd", "dde8cb", "dedce6", "dee6ef", "dee7e5", "e0c2cd", "e6e905",
-    "e8a202", "e8f2a1", "ec9ba4", "ed4c05", "eeeeee", "f10d0c", "f6f9d4", "f7d1d5",
-    "ff0000", "ff3838", "ff4000", "ff7b59", "ff8000", "ff860d", "ff972f", "ffa6a6",
-    "ffaa95", "ffb66c", "ffbf00", "ffd428", "ffd7d7", "ffd8ce", "ffdbb6", "ffde59",
-    "ffe994", "fff5ce", "ffff00", "ffff38", "ffff6d", "ffffa6", "ffffd7", "ffffff",
-];
-
-/// Whether LibreOffice and the DOCX layout pick the same automatic text
-/// colour over `background` (hex RRGGBB). LibreOffice's choice follows no
-/// single luminance threshold (measured: black on #00c000 and #b0b000, white
-/// on #8080ff and #b8b8b8). Two bands were measured to agree with the DOCX
-/// layout (white below 0.299 R + 0.587 G + 0.114 B = 128): every channel at
-/// least 0xc8 (both black) and every channel at most 0x7f (both white); in
-/// addition, the measured LibreOffice standard palette colours that agree.
-fn automatic_colors_agree(background: &str) -> bool {
-    let channel =
-        |at: usize| u8::from_str_radix(background.get(at..at + 2).unwrap_or("x"), 16).ok();
-    let (Some(r), Some(g), Some(b)) = (channel(0), channel(2), channel(4)) else {
-        return false;
+/// The colour LibreOffice paints automatic text in over an opaque
+/// `background` (hex rrggbb): white when `Color::IsDark()`, else black
+/// (`SwDrawTextInfo::ApplyAutoColor`, sw/source/core/txtnode/fntcache.cxx;
+/// the PDF export takes the same path). `IsDark()`
+/// (tools/source/generic/color.cxx, LibreOffice 25.2 to 26.8): the WCAG
+/// relative luminance scaled to 255 and truncated, at most 87; LibreOffice's
+/// default shape fill #729fcf instead uses the integer luminance
+/// (76 R + 151 G + 29 B) >> 8, at most 62. Measured identical on 953
+/// backgrounds (every grey, the standard palette, channel ramps and random
+/// colours). The DOCX automatic colour uses another threshold, so the
+/// reader writes the resolved colour.
+fn libreoffice_automatic_color(background: &str) -> Result<&'static str, String> {
+    let channel = |at: usize| {
+        background
+            .get(at..at + 2)
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+            .ok_or_else(|| invalid("a colour is not #rrggbb"))
     };
-    [r, g, b].iter().all(|c| *c >= 0xc8)
-        || [r, g, b].iter().all(|c| *c <= 0x7f)
-        || AUTOMATIC_COLOR_PALETTE.binary_search(&background).is_ok()
+    let (r, g, b) = (channel(0)?, channel(2)?, channel(4)?);
+    let dark = if (r, g, b) == (0x72, 0x9f, 0xcf) {
+        (29 * u32::from(b) + 151 * u32::from(g) + 76 * u32::from(r)) >> 8 <= 62
+    } else {
+        let linear = |c: u8| {
+            let v = f64::from(c) / 255.0;
+            if v < 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let luminance = linear(r) * 0.2126 + linear(g) * 0.7152 + linear(b) * 0.0722;
+        // C++ double-to-integer conversion truncates.
+        (luminance * 255.0) as u8 <= 87
+    };
+    Ok(if dark { "ffffff" } else { "000000" })
 }
 
 /// LibreOffice writes its area fill (`loext:graphic-properties`) beside
@@ -3492,11 +3489,21 @@ mod tests {
             read(image, r#"<text:p text:style-name="I">x</text:p>"#).unwrap_err(),
             unsupported("paragraph-fill")
         );
-        // Automatic text over its own run shading is checked against that
-        // shading, not the paragraph's.
+        // Automatic (and unset) text colour is resolved as LibreOffice paints
+        // it: over its own run shading first, else the paragraph background.
+        let colors = |document: &Document| -> Vec<(Option<String>, bool)> {
+            paragraphs(document)
+                .iter()
+                .flat_map(|p| p.runs.iter())
+                .filter_map(|run| match run {
+                    DocRun::Text(text) => Some((text.color.clone(), text.color_auto)),
+                    _ => None,
+                })
+                .collect()
+        };
         let run = |shade: &str| {
             format!(
-                r#"<style:style style:name="R" style:family="text"><style:text-properties fo:background-color="{shade}"/></style:style>"#
+                r##"<style:style style:name="R" style:family="text"><style:text-properties fo:background-color="{shade}"/></style:style><style:style style:name="E" style:family="text"><style:text-properties fo:color="#ff0000"/></style:style>"##
             ) + &style(
                 "Y",
                 "#ffffc8",
@@ -3504,36 +3511,47 @@ mod tests {
                 "0pt",
             )
         };
-        let body =
-            r#"<text:p text:style-name="Y">a<text:span text:style-name="R">b</text:span></text:p>"#;
+        let body = r#"<text:p text:style-name="Y">a<text:span text:style-name="R">b</text:span><text:span text:style-name="E">c</text:span></text:p>"#;
         assert_eq!(
-            read(&run("#999999"), body).unwrap_err(),
-            unsupported("automatic-font-color")
+            colors(&read(&run("#999999"), body).unwrap()),
+            [
+                (Some("000000".into()), false),
+                (Some("ffffff".into()), false),
+                // An explicit colour is kept.
+                (Some("ff0000".into()), false),
+            ]
         );
-        assert!(read(&run("#ffff00"), body).is_ok());
-        // Automatic (and unset) text colour over a background: admitted only
-        // where LibreOffice and the DOCX layout pick the same colour.
-        for (background, ok) in [
-            ("#c8c8c8", true),
-            ("#ffffc8", true),
-            ("#7f7f7f", true),
-            ("#00007f", true),
-            ("#ffff00", true),
-            ("#999999", false),
-            ("#ff6d6d", false),
-            ("#c7c8c8", false),
-            ("#80007f", false),
+        // LibreOffice's IsDark(): truncated WCAG luminance x 255 <= 87, and
+        // the integer luminance <= 62 for #729fcf only.
+        for (background, painted) in [
+            ("#9e9e9e", "ffffff"),
+            ("#9f9f9f", "000000"),
+            ("#00c000", "000000"),
+            ("#b0b000", "000000"),
+            ("#8080ff", "ffffff"),
+            ("#b8b8b8", "000000"),
+            ("#ff6d6d", "ffffff"),
+            ("#729fcf", "000000"),
+            ("#729fce", "ffffff"),
+            ("#000000", "ffffff"),
+            ("#ffffff", "000000"),
         ] {
+            let document = read(
+                &style("A", background, "", "0pt"),
+                r#"<text:p text:style-name="A">x</text:p>"#,
+            )
+            .unwrap();
             assert_eq!(
-                read(
-                    &style("A", background, "", "0pt"),
-                    r#"<text:p text:style-name="A">x</text:p>"#
-                )
-                .is_ok(),
-                ok,
+                colors(&document),
+                [(Some(painted.to_string()), false)],
                 "{background}"
             );
         }
+        // Without a background automatic colour stays automatic.
+        assert_eq!(
+            colors(&read("", "<text:p>x</text:p>").unwrap()),
+            [(None, false)]
+        );
     }
 
     #[test]
