@@ -5129,6 +5129,12 @@ mod tests {
             one(r#"<text:list-style style:name="L"><text:list-level-style-bullet text:level="1" text:bullet-char="&#x2011;"><style:list-level-properties text:list-level-position-and-space-mode="label-alignment"><style:list-level-label-alignment text:label-followed-by="listtab" text:list-tab-stop-position="2cm" fo:text-indent="-1cm" fo:margin-left="2cm"/></style:list-level-properties></text:list-level-style-bullet></text:list-style>"#).unwrap_err(),
             unsupported("list-bullet")
         );
+        // Repeated property groups in a level.
+        assert!(one(&list_styles(&level.replace(
+            "</text:list-level-style-number>",
+            r#"<style:text-properties/><style:text-properties/></text:list-level-style-number>"#,
+        )))
+        .is_err());
         // Repeated level definitions, also spelled differently.
         assert_eq!(
             one(&list_styles(

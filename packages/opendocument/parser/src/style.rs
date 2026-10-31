@@ -363,6 +363,14 @@ fn read_list_style(node: roxmltree::Node<'_, '_>) -> Result<ListStyle, String> {
         if !levels.insert(list_level_number(level)?) {
             return Err(crate::error::unsupported("list-level-duplicate"));
         }
+        // Each property group occurs once per level (LibreOffice applies the
+        // last of repeated ones).
+        let mut groups = HashSet::new();
+        for group in level.children().filter(|n| n.is_element()) {
+            if !groups.insert(group.tag_name().name()) {
+                return Err(invalid("a list level repeats a property group"));
+            }
+        }
     }
     let mut level_text = HashMap::new();
     for level in node.children().filter(|n| n.is_element()) {
