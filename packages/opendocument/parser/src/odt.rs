@@ -5025,6 +5025,28 @@ mod tests {
     }
 
     #[test]
+    fn takes_indents_from_linked_paragraph_styles() {
+        let cm = 72.0 / 2.54;
+        let styles = list_styles(&list_level(1, "1", "", 2.0, -1.0, 2.0))
+            + r#"<style:style style:name="Base" style:family="paragraph" style:list-style-name="L"/><style:style style:name="Child" style:family="paragraph" style:parent-style-name="Base"><style:paragraph-properties fo:margin-left="6cm" fo:text-indent="-2cm"/></style:style><style:style style:name="Plain" style:family="paragraph"><style:paragraph-properties fo:margin-left="6cm" fo:text-indent="-2cm"/></style:style>"#;
+        let indents = |paragraph_style: &str| {
+            let body = format!(
+                r#"<text:list text:style-name="L"><text:list-item><text:p text:style-name="{paragraph_style}">a</text:p></text:list-item></text:list>"#
+            );
+            let document = read_list(&styles, &body).unwrap();
+            let paragraph = paragraphs(&document)[0];
+            (
+                (paragraph.indent_left / cm * 100.0).round() / 100.0,
+                (paragraph.indent_first / cm * 100.0).round() / 100.0,
+            )
+        };
+        // A link inherited from the parent style applies the style's indents;
+        // a style without one is ignored (measured).
+        assert_eq!(indents("Child"), (6.0, -2.0));
+        assert_eq!(indents("Plain"), (2.0, -1.0));
+    }
+
+    #[test]
     fn places_list_paragraphs_as_libreoffice() {
         let styles = list_styles(&list_level(1, "1", "", 2.0, -1.0, 3.0));
         let body = r#"<text:list text:style-name="L"><text:list-item><text:p>a</text:p><text:p>b</text:p></text:list-item></text:list>"#;

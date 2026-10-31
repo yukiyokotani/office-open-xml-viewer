@@ -770,17 +770,22 @@ impl<'a> Reader<'a> {
         let mut indent = list.indent;
         for (name, value) in [("margin-left", &mut margin), ("text-indent", &mut indent)] {
             let key = (NS_FO.to_string(), name.to_string());
-            let Some(setter) = chain.iter().map(StyleRef::style).find(|style| {
+            let Some(index) = chain.iter().position(|style| {
                 style
+                    .style()
                     .groups
                     .get(PARAGRAPH)
                     .is_some_and(|group| group.attributes.contains_key(&key))
             }) else {
                 continue;
             };
-            let linked = setter
-                .attributes
-                .get(&(NS_STYLE.to_string(), "list-style-name".to_string()))
+            let setter = chain[index].style();
+            // The setter's link is inherited from its parents like any
+            // paragraph property (measured by the reviewer).
+            let link = (NS_STYLE.to_string(), "list-style-name".to_string());
+            let linked = chain[index..]
+                .iter()
+                .find_map(|style| style.style().attributes.get(&link))
                 == Some(&list.style_name);
             if setter.automatic || linked {
                 // Not measured on an item's later paragraphs.
