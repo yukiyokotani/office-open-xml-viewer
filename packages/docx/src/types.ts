@@ -154,6 +154,8 @@ export interface DocSettings {
   /** §17.15.3.1 `w:compat/w:adjustLineHeightInTable` — apply the section
    *  document-grid line pitch to text in table cells. */
   adjustLineHeightInTable?: boolean;
+  /** §17.15.3.8 `w:compat/w:ulTrailSpace` — underline trailing spaces. */
+  ulTrailSpace?: boolean;
   /** `w:compat/w:compatSetting[@w:name="compatibilityMode"]` (Word URI) — the
    *  Word version whose layout rules the document uses (for example 14, 15). */
   compatibilityMode?: number;

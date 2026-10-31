@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { layoutBodyModel } from './test-support/document-layout.test-support.js';
 import type { LineLayout, TextPlacement } from './layout/types.js';
-import type { BodyElement, DocParagraph, DocxTextRun, SectionProps } from './types';
+import type { BodyElement, DocParagraph, DocSettings, DocxTextRun, SectionProps } from './types';
 
 // WORD_LINE_END_SPACE_HANGS: the U+0020 that ends a soft-wrapped LTR line
 // stands outside justification and centre/right alignment. Windows Word ends
@@ -54,8 +54,8 @@ function para(runs: DocParagraph['runs'], alignment: DocParagraph['alignment']):
   return { type: 'paragraph', ...p } as BodyElement;
 }
 
-function lines(body: BodyElement): LineLayout[] {
-  const node = layoutBodyModel([body], section, makeCtx()).pages[0]!.layers.body[0]!;
+function lines(body: BodyElement, settings?: DocSettings): LineLayout[] {
+  const node = layoutBodyModel([body], section, makeCtx(), {}, settings).pages[0]!.layers.body[0]!;
   if (node.kind !== 'paragraph') throw new Error('expected a paragraph');
   return [...node.lines];
 }
@@ -107,6 +107,27 @@ describe('WORD_LINE_END_SPACE_HANGS', () => {
     expect(visibleStart(centred!)).toBeCloseTo(30, 6);
     const [justified] = lines(para(runs, 'both'));
     expect(visibleEnd(justified!)).toBeCloseTo(380, 6);
+    // Hosts between trailing space runs are looked through too.
+    const interleaved = [textRun('aaaa bbbb cccc dddd eeee ffff gggg '), host, textRun(' ', { bold: true }), textRun('hhhh')];
+    const [spread] = lines(para(interleaved, 'both'));
+    expect(visibleEnd(spread!)).toBeCloseTo(380, 6);
+  });
+
+  it('leaves right-to-left lines to their previous geometry', () => {
+    // A line with right-to-left text is outside the rule: its line-end space
+    // and a trailing anchor host keep their cells, so seven gaps share the
+    // 10 pt of slack (350 pt natural width) as before the rule.
+    const host = { type: 'anchorHost', fontSize: 20, fontFamily: 'NotInMetrics', bold: false, italic: false } as DocParagraph['runs'][number];
+    const [line] = lines(para([textRun('אאאא bbbb cccc dddd eeee ffff gggg '), host, textRun('hhhh')], 'both'));
+    const last = texts(line!).find((p) => p.text.startsWith('gggg'))!;
+    expect(last.bounds.xPt).toBeCloseTo(20 + 6 * 40 + 6 * (10 + 10 / 7), 6);
+  });
+
+  it('keeps the trailing-space underline under ulTrailSpace', () => {
+    // §17.15.3.8: with ulTrailSpace, trailing spaces are underlined.
+    const [first] = lines(para([textRun(WORDS, { underline: true })], 'right'), { ulTrailSpace: true });
+    const ends = texts(first!).flatMap((p) => p.decorations ?? []).map((d) => d.to.xPt);
+    expect(Math.max(...ends)).toBeCloseTo(390, 6);
   });
 
   it('paints no decoration over the hanging space', () => {

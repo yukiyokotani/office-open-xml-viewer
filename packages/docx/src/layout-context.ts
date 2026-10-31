@@ -44,6 +44,8 @@ export interface DocumentLayoutSettings {
     readonly balanceSingleByteDoubleByteWidth: boolean;
     readonly lineWrapLikeWord6: boolean;
     readonly enableOpenTypeFeatures: boolean;
+    /** §17.15.3.8 ulTrailSpace: underline trailing spaces. */
+    readonly ulTrailSpace: boolean;
     /** compatSetting compatibilityMode; undefined when the document omits it. */
     readonly compatibilityMode?: number;
   };
@@ -203,6 +205,7 @@ export function resolveDocumentLayoutSettings(
         document.settings?.balanceSingleByteDoubleByteWidth ?? false,
       lineWrapLikeWord6: document.settings?.lineWrapLikeWord6 ?? false,
       enableOpenTypeFeatures: document.settings?.enableOpenTypeFeatures ?? false,
+      ulTrailSpace: document.settings?.ulTrailSpace ?? false,
       ...(document.settings?.compatibilityMode !== undefined
         ? { compatibilityMode: document.settings.compatibilityMode }
         : {}),
