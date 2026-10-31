@@ -8480,11 +8480,15 @@ async function renderSlideLeased(
   const themeDefaultColor = defaultTextColor
     ? `#${defaultTextColor}`
     : '#000000';
-  // A run whose whole chain authors no fill paints PowerPoint's hard default,
-  // literal black, not the theme dk1 (issue #1989; `HARD_DEFAULT_TEXT_COLOR` in
-  // the parser records the controls). The theme colour above only colours the
-  // synthetic SmartArt fallback shape, which has no PowerPoint counterpart.
-  const hardDefaultTextColor = '#000000';
+  // A parsed run whose whole chain authors no fill paints PowerPoint's hard
+  // default, literal black, not the theme dk1 (issue #1989;
+  // `HARD_DEFAULT_TEXT_COLOR` in the parser records the controls); the parser
+  // resolves every inherited colour, including the default-template tx1 of a
+  // master without txStyles. A model without a slide theme has no parsed
+  // chain, so it keeps the caller's `defaultTextColor`. The theme colour above
+  // also colours the synthetic SmartArt fallback shape, which has no
+  // PowerPoint counterpart.
+  const hardDefaultTextColor = slide.theme ? '#000000' : themeDefaultColor;
 
   const pictureBulletImages = new Map<string, SvgImageSource | null>();
   const shapeFillImages = new Map<string, PreparedShapeFill | null>();

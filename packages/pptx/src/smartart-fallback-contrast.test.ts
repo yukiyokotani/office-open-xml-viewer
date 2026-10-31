@@ -366,8 +366,19 @@ describe('renderSlide SmartArt fallback contrast (issue #805)', () => {
     );
     const run = calls.find((c) => c.text.includes('Plain box'));
     expect(run).toBeDefined();
-    // A run whose chain authors no colour paints PowerPoint's hard default
-    // black, not the theme default text colour (issue #1989).
+    // A model without a slide theme keeps the caller's defaultTextColor.
+    expect(run!.fillStyle).toBe('#383838');
+  });
+
+  it('paints the hard default black for a parsed slide whose chain authors no colour', async () => {
+    // Issue #1989: with a slide theme the parser has resolved every inherited
+    // colour, so a run still without one paints PowerPoint's 000000, neither
+    // the theme default nor the caller's option.
+    const slide = {
+      ...slideWith(DARK_BG, [fallbackShape('Plain box', { name: 'Rectangle 5', id: '4' })]),
+      theme: { defaultTextColor: '1F3F5F', majorFont: null, minorFont: null, hlinkColor: null },
+    } as Slide;
+    const run = (await renderAndCollect(slide)).find((c) => c.text.includes('Plain box'));
     expect(run!.fillStyle).toBe('#000000');
   });
 
