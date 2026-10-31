@@ -65,15 +65,19 @@ Currently admitted:
 
 - paragraphs, headings (without heading numbering), plain sections, spans,
   spaces, soft hyphens and line breaks between visible text set in the same
-  font (not in justified paragraphs);
+  font;
 - page size and margins of a single page style without displayed headers or
   footers;
-- paragraph indents, alignment, proportional line height from 100% to 300%
-  on text of one font and size, page breaks, keep-with-next /
-  keep-together, widow/orphan control of two lines, and paragraph spacing
-  including contextual spacing;
+- paragraph indents, left/centre/right alignment, proportional line height
+  from 100% to 300% on text of one font and size, page breaks,
+  keep-with-next / keep-together, widow/orphan control of two lines, and
+  paragraph spacing including contextual spacing;
 - character fonts, sizes, bold, italic, single/double underline and
-  strike-through, colours and background colour;
+  strike-through, colours and background colour. Where LibreOffice's
+  settings make a space not size its line, the space must be in the face of
+  the adjacent text on its line and no larger, and decorated spaces that end
+  a paragraph or precede a line break are admitted only under LibreOffice's
+  default trailing-space setting;
 - text in the Latin script class of ODF Part 3 Table 22, including the
   spaces, punctuation, symbols and emoji the table leaves unassigned.
 
@@ -87,7 +91,12 @@ only within its measured scope:
 - the nearest style that sets a font colour or the automatic colour decides
   the colour.
 
-Tabs, letter spacing, horizontal scaling, raised/lowered text, fixed and
-minimum line heights, proportional line heights below 100%, lists, tables, frames and images, notes, fields, comments, tracked
-changes, headers and footers, Asian and complex scripts, and other formatting
-reject for now. The subset grows release by release.
+LibreOffice's layout settings (`settings.xml`) that Word-derived documents
+carry are admitted where they were measured to change nothing the reader
+admits; the others must keep LibreOffice's new-document values.
+
+Justified alignment, tabs, letter spacing, horizontal scaling,
+raised/lowered text, fixed and minimum line heights, proportional line
+heights below 100%, lists, tables, frames and images, notes, fields,
+comments, tracked changes, headers and footers, Asian and complex scripts,
+and other formatting reject for now. The subset grows release by release.
