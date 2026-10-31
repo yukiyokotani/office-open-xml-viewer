@@ -962,7 +962,7 @@ impl<'a> Reader<'a> {
             return Err(unsupported("list-empty-label"));
         }
         if label.image.is_some() {
-            return self.list_label_image(label, contexts, paragraph);
+            return self.list_label_image(label, paragraph);
         }
         if label.text.is_empty() {
             return Ok(());
@@ -1053,7 +1053,6 @@ impl<'a> Reader<'a> {
     fn list_label_image(
         &mut self,
         label: Label<'a>,
-        contexts: &[TextContext<'a>],
         paragraph: &mut DocParagraph,
     ) -> Result<(), String> {
         let (href, width, height) = label.image.expect("a picture label");
@@ -1064,10 +1063,17 @@ impl<'a> Reader<'a> {
         if label.follow == Follow::Space {
             return Err(unsupported("list-image-space"));
         }
-        let properties = self.run_properties(contexts, 0, ScriptClass::Latin)?;
+        // The picture's line geometry follows the formatting of the
+        // paragraph's first character, unlike a text label's (measured: a
+        // 1 cm picture before body text all in 24 pt makes a 29.35 pt line,
+        // one before a 6 pt first word sizes from 6 pt), and so does its tab.
+        let first = match paragraph.runs.first() {
+            Some(DocRun::Text(text)) if !text.text.is_empty() => text.as_ref().clone(),
+            _ => return Err(unsupported("list-label-font")),
+        };
         // A raised or lowered label font moves the box with its ascent (not
         // measured).
-        if properties.position.is_some() {
+        if first.position.is_some() {
             return Err(unsupported("list-label-position"));
         }
         let box_width = width + 2.0 * IMAGE_LABEL_INSET_PT;
@@ -1094,7 +1100,7 @@ impl<'a> Reader<'a> {
                 DocRun::Text(text) => Some(text.font_size),
                 _ => None,
             })
-            .fold(properties.size, f64::max);
+            .fold(0.0, f64::max);
         let box_height = height + 2.0 * IMAGE_LABEL_INSET_PT;
         if start - before + box_width > line_end
             || start - before < -self.page_left_margin
@@ -1104,29 +1110,30 @@ impl<'a> Reader<'a> {
             return Err(unsupported("list-label-extent"));
         }
         // LibreOffice extends the label font's decoration over the tab gap.
-        if properties.underline.is_some()
-            || properties.strike.is_some()
-            || properties.background.is_some()
+        if first.underline
+            || first.strikethrough
+            || first.double_strikethrough
+            || first.background.is_some()
         {
             return Err(unsupported("list-label-decoration"));
         }
         let (path, mime_type) = self.package_image(&href)?;
         let align = label.align.wire();
-        let family = properties.family.to_string();
+        let family = first.font_family.clone();
         self.charge_construction(
             std::mem::size_of::<DocRun>() * 3
                 + std::mem::size_of::<ImageRun>()
-                + family.len()
+                + family.as_ref().map_or(0, String::len)
                 + path.len()
                 + mime_type.len(),
         )?;
         let mut runs = vec![
             DocRun::AnchorHost(AnchorHostMetrics {
-                font_size: properties.size,
-                font_family: Some(family),
+                font_size: first.font_size,
+                font_family: family,
                 font_family_east_asia: None,
-                bold: properties.bold,
-                italic: properties.italic,
+                bold: first.bold,
+                italic: first.italic,
                 anchor_occurrence_id: None,
                 list_label: Some(align),
             }),
@@ -1165,8 +1172,11 @@ impl<'a> Reader<'a> {
             })),
         ];
         if label.follow == Follow::Tab {
-            self.charge_construction(properties.retained_estimate() + 1)?;
-            let mut run = properties.text_run();
+            self.charge_construction(
+                std::mem::size_of::<TextRun>()
+                    + 4 * first.font_family.as_ref().map_or(0, String::len),
+            )?;
+            let mut run = first;
             run.text = "\t".to_string();
             run.list_label = Some(align);
             runs.push(DocRun::Text(Box::new(run)));

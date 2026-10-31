@@ -208,8 +208,10 @@ fn jpeg_structure(bytes: &[u8]) -> Result<(), String> {
     let decode = || unsupported("image-decode");
     let structure = || unsupported("image-structure");
     let mut at = 2;
-    let mut frame = false;
+    let mut frame: Option<&[u8]> = None;
     let mut scanned = false;
+    let mut restart = 0u16;
+    let mut tables: HuffmanTables<'_> = [[None; 2]; 2];
     loop {
         if bytes.get(at) != Some(&0xff) {
             return Err(decode());
@@ -233,10 +235,10 @@ fn jpeg_structure(bytes: &[u8]) -> Result<(), String> {
                 .try_into()
                 .expect("2 bytes"),
         ));
-        let segment = bytes.get(at + 4..at + 2 + length).ok_or_else(decode)?;
         if length < 2 {
             return Err(decode());
         }
+        let segment = bytes.get(at + 4..at + 2 + length).ok_or_else(decode)?;
         match marker {
             0xe2 if segment.starts_with(b"ICC_PROFILE\0") => {
                 return Err(unsupported("image-colour"))
@@ -253,28 +255,200 @@ fn jpeg_structure(bytes: &[u8]) -> Result<(), String> {
                     return Err(unsupported("image-colour"));
                 }
             }
-            0xe0..=0xef | 0xfe | 0xdd => {}
-            0xdb if quantisation_tables_valid(segment) => {}
-            0xc4 if huffman_tables_valid(segment) => {}
-            0xc0 if !frame && frame_header_valid(segment) => frame = true,
-            0xda if frame && scan_header_valid(segment) => {
-                scanned = true;
-                // Entropy-coded data runs to the next marker other than a
-                // stuffed zero or a restart marker.
-                at += 2 + length;
-                loop {
-                    match (bytes.get(at), bytes.get(at + 1)) {
-                        (Some(0xff), Some(0x00 | 0xd0..=0xd7)) => at += 2,
-                        (Some(0xff), Some(_)) => break,
-                        (Some(_), _) => at += 1,
-                        (None, _) => return Err(decode()),
-                    }
+            0xe0..=0xef | 0xfe => {}
+            0xdd if !scanned && segment.len() == 2 => {
+                restart = u16::from_be_bytes([segment[0], segment[1]]);
+            }
+            0xdb if !scanned && quantisation_tables_valid(segment) => {}
+            0xc4 if !scanned && huffman_tables_valid(segment) => {
+                let mut rest = segment;
+                while let Some((&header, tail)) = rest.split_first() {
+                    let total: usize = tail[..16].iter().map(|&c| usize::from(c)).sum();
+                    tables[usize::from(header >> 4)][usize::from(header & 15)] =
+                        Some((&tail[..16], &tail[16..16 + total]));
+                    rest = &tail[16 + total..];
                 }
+            }
+            0xc0 if frame.is_none() && frame_header_valid(segment) => frame = Some(segment),
+            // One scan holding every component: decoders fill a missing
+            // scan or a cut one differently (measured by the reviewer).
+            0xda if !scanned && frame.is_some() && scan_header_valid(segment) => {
+                scanned = true;
+                at = entropy_coded_data(
+                    bytes,
+                    at + 2 + length,
+                    frame.expect("a frame"),
+                    segment,
+                    &tables,
+                    restart,
+                )?;
                 continue;
             }
             _ => return Err(structure()),
         }
         at += 2 + length;
+    }
+}
+
+/// Huffman code tables by class (DC, AC) and id: (counts, symbols).
+type HuffmanTables<'b> = [[Option<(&'b [u8], &'b [u8])>; 2]; 2];
+
+/// Entropy-coded bits of a baseline scan (T.81 F.1.2, F.2.2), read with
+/// byte stuffing and restart markers.
+struct Bits<'b> {
+    bytes: &'b [u8],
+    at: usize,
+    buffer: u32,
+    count: u32,
+}
+
+impl Bits<'_> {
+    fn bit(&mut self) -> Option<u32> {
+        if self.count == 0 {
+            let byte = *self.bytes.get(self.at)?;
+            if byte == 0xff {
+                // A stuffed zero follows a data 0xFF; any other byte is a
+                // marker, which ends the data early.
+                if self.bytes.get(self.at + 1) != Some(&0) {
+                    return None;
+                }
+                self.at += 1;
+            }
+            self.at += 1;
+            self.buffer = u32::from(byte);
+            self.count = 8;
+        }
+        self.count -= 1;
+        Some((self.buffer >> self.count) & 1)
+    }
+
+    fn bits(&mut self, count: u8) -> Option<()> {
+        for _ in 0..count {
+            self.bit()?;
+        }
+        Some(())
+    }
+
+    /// The next symbol of a canonical code (T.81 Annex C, F.2.2.3).
+    fn symbol(&mut self, (counts, symbols): (&[u8], &[u8])) -> Option<u8> {
+        let (mut code, mut first, mut index) = (0u32, 0u32, 0usize);
+        for &count in counts {
+            code = code << 1 | self.bit()?;
+            let count = u32::from(count);
+            if code < first + count {
+                return symbols.get(index + (code - first) as usize).copied();
+            }
+            index += count as usize;
+            first = (first + count) << 1;
+        }
+        None
+    }
+
+    /// Discards the padding of a finished segment: the rest of its byte,
+    /// all ones (F.1.2.3).
+    fn align(&mut self) -> Option<()> {
+        let mask = (1u32 << self.count) - 1;
+        (self.buffer & mask == mask).then(|| self.count = 0)
+    }
+}
+
+/// Walks a baseline scan's entropy-coded data from `start` (T.81 F.1.2):
+/// every MCU of every component decodes with the scan's tables, restart
+/// markers come in sequence after each restart interval, and the data ends
+/// with its padding right before a marker. Returns that marker's offset.
+fn entropy_coded_data(
+    bytes: &[u8],
+    start: usize,
+    frame: &[u8],
+    scan: &[u8],
+    tables: &HuffmanTables<'_>,
+    restart: u16,
+) -> Result<usize, String> {
+    let decode = || unsupported("image-decode");
+    let height = u32::from(u16::from_be_bytes([frame[1], frame[2]]));
+    let width = u32::from(u16::from_be_bytes([frame[3], frame[4]]));
+    let components: Vec<&[u8]> = frame[6..].chunks(3).collect();
+    let selected: Vec<&[u8]> = scan[1..1 + 2 * usize::from(scan[0])].chunks(2).collect();
+    // The scan holds every frame component (one interleaved scan).
+    if selected.len() != components.len()
+        || components
+            .iter()
+            .zip(&selected)
+            .any(|(component, scanned)| component[0] != scanned[0])
+    {
+        return Err(unsupported("image-structure"));
+    }
+    let (h_max, v_max) = components.iter().fold((1, 1), |(h, v), c| {
+        (h.max(u32::from(c[1] >> 4)), v.max(u32::from(c[1] & 15)))
+    });
+    // Blocks per MCU for each component, and the MCU count (A.2).
+    let (blocks, mcus): (Vec<u32>, u32) = if components.len() == 1 {
+        (vec![1], width.div_ceil(8) * height.div_ceil(8))
+    } else {
+        (
+            components
+                .iter()
+                .map(|c| u32::from(c[1] >> 4) * u32::from(c[1] & 15))
+                .collect(),
+            width.div_ceil(8 * h_max) * height.div_ceil(8 * v_max),
+        )
+    };
+    let coding: Vec<_> = selected
+        .iter()
+        .map(|c| {
+            Some((
+                tables[0][usize::from(c[1] >> 4)]?,
+                tables[1][usize::from(c[1] & 15)]?,
+            ))
+        })
+        .collect::<Option<_>>()
+        .ok_or_else(decode)?;
+    let mut bits = Bits {
+        bytes,
+        at: start,
+        buffer: 0,
+        count: 0,
+    };
+    let mut next_restart = 0u8;
+    for mcu in 0..mcus {
+        if restart > 0 && mcu > 0 && mcu % u32::from(restart) == 0 {
+            bits.align().ok_or_else(decode)?;
+            if bytes.get(bits.at..bits.at + 2) != Some(&[0xff, 0xd0 + next_restart]) {
+                return Err(decode());
+            }
+            bits.at += 2;
+            next_restart = (next_restart + 1) % 8;
+        }
+        for (&count, &(dc, ac)) in blocks.iter().zip(&coding) {
+            for _ in 0..count {
+                let category = bits.symbol(dc).ok_or_else(decode)?;
+                bits.bits(category).ok_or_else(decode)?;
+                let mut k = 1;
+                while k < 64 {
+                    let rs = bits.symbol(ac).ok_or_else(decode)?;
+                    let (run, size) = (rs >> 4, rs & 15);
+                    if size == 0 {
+                        if run != 15 {
+                            break;
+                        }
+                        k += 16;
+                    } else {
+                        k += usize::from(run);
+                        bits.bits(size).ok_or_else(decode)?;
+                        k += 1;
+                    }
+                    if k > 64 {
+                        return Err(decode());
+                    }
+                }
+            }
+        }
+    }
+    bits.align().ok_or_else(decode)?;
+    // The marker after the data (no further restart marker or data).
+    match bytes.get(bits.at..bits.at + 2) {
+        Some([0xff, marker]) if !matches!(marker, 0x00 | 0xd0..=0xd7) => Ok(bits.at),
+        _ => Err(decode()),
     }
 }
 
@@ -684,6 +858,9 @@ pub(crate) mod tests {
             dec(&bytes[..bytes.len() - 6]).unwrap_err(),
             unsupported("image-decode")
         );
+        // Entropy-coded data cut short before an intact end-of-image marker.
+        let cut = [&bytes[..bytes.len() - 3], &bytes[bytes.len() - 2..]].concat();
+        assert_eq!(dec(&cut).unwrap_err(), unsupported("image-decode"));
         // A segment inserted after SOI.
         let with = |segment: &[u8]| [&bytes[..2], segment, &bytes[2..]].concat();
         // A colour profile, a rotating EXIF orientation, a non-YCbCr Adobe

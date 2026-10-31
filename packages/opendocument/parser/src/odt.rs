@@ -5267,6 +5267,21 @@ mod tests {
         // A picture ancestor contributes an empty component (measured ".1.").
         assert_eq!(labels(&document)[1].as_deref(), Some(".1."));
 
+        // The metric and the tab follow the first character's formatting
+        // (measured: body text all in 24 pt sizes a 1 cm picture's line from
+        // 24 pt).
+        let big = format!(
+            r#"<style:style style:name="Big" style:family="text"><style:text-properties fo:font-size="24pt"/></style:style>{styles}"#
+        );
+        let (document, _) = read_pictures(
+            &big,
+            r#"<text:list text:style-name="L"><text:list-item><text:p><text:span text:style-name="Big">a</text:span> b</text:p></text:list-item></text:list>"#,
+            &[("Pictures/a.png", &png)],
+        )
+        .unwrap();
+        let runs = &paragraphs(&document)[0].runs;
+        assert!(matches!(&runs[0], DocRun::AnchorHost(m) if m.font_size == 24.0));
+        assert!(matches!(&runs[2], DocRun::Text(t) if t.text == "\t" && t.font_size == 24.0));
         // An end-aligned picture keeps its alignment on all three runs; a
         // separator of nothing leaves the picture last.
         let styles = list_styles(&picture_level(
