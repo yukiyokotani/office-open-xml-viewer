@@ -64,42 +64,81 @@ fn charge(budget: &mut u64, width: u64, height: u64) -> Result<(), String> {
 /// transparency, physical size, text and time (which no decoder paints),
 /// consecutive image data and IEND at the file's end, every CRC correct.
 /// Colour-space chunks (gAMA, cHRM, sRGB, iCCP), EXIF, animation and any
-/// other chunk reject.
+/// other chunk reject. A palette belongs to indexed images only and
+/// transparency samples must be in range (§11.2.3, §11.3.2.1): decoders
+/// treat others differently (measured by the reviewer: an out-of-range grey
+/// sample is transparent in a browser and opaque in LibreOffice).
 fn png_structure(bytes: &[u8]) -> Result<(), String> {
     let decode = || unsupported("image-decode");
+    let structure = || unsupported("image-structure");
     let mut at = 8;
     let mut seen_data = false;
     let mut data_ended = false;
-    let mut first = true;
+    // Colour type and bit depth from IHDR, and the palette's entries.
+    let mut header: Option<(u8, u8)> = None;
+    let mut palette = 0usize;
     while at < bytes.len() {
-        let header = bytes.get(at..at + 8).ok_or_else(decode)?;
-        let length = u32::from_be_bytes(header[..4].try_into().expect("4 bytes")) as usize;
-        let kind: [u8; 4] = header[4..].try_into().expect("4 bytes");
+        let length = u32::from_be_bytes(
+            bytes
+                .get(at..at + 4)
+                .ok_or_else(decode)?
+                .try_into()
+                .expect("4 bytes"),
+        ) as usize;
         let end = (at + 12).checked_add(length).ok_or_else(decode)?;
-        let body = bytes.get(at + 4..end - 4).ok_or_else(decode)?;
-        let crc = u32::from_be_bytes(bytes[end - 4..end].try_into().expect("4 bytes"));
-        if crc32fast::hash(body) != crc {
+        let typed = bytes.get(at + 4..end - 4).ok_or_else(decode)?;
+        let crc = bytes.get(end - 4..end).ok_or_else(decode)?;
+        if crc32fast::hash(typed).to_be_bytes() != crc {
             return Err(decode());
         }
-        match &kind {
-            b"IHDR" if first => {}
-            b"PLTE" | b"tRNS" | b"pHYs" | b"tEXt" | b"zTXt" | b"iTXt" | b"tIME"
-                if !first && !seen_data => {}
-            b"tEXt" | b"zTXt" | b"iTXt" | b"tIME" if !first => {}
-            b"IDAT" if !first && !data_ended => seen_data = true,
-            b"IEND" if seen_data => {
+        let (kind, data) = typed.split_at(4);
+        let in_range = |sample: &[u8], depth: u8| {
+            u32::from(u16::from_be_bytes([sample[0], sample[1]])) < 1u32 << depth
+        };
+        match (kind, header) {
+            (b"IHDR", None) => {
+                if data.len() != 13 {
+                    return Err(decode());
+                }
+                header = Some((data[9], data[8]));
+            }
+            (b"PLTE", Some((3, depth))) if !seen_data && palette == 0 => {
+                palette = data.len() / 3;
+                if data.len() % 3 != 0 || palette == 0 || palette > 1 << depth {
+                    return Err(structure());
+                }
+            }
+            (b"tRNS", Some((colour, depth))) if !seen_data => {
+                let valid = match colour {
+                    0 => data.len() == 2 && in_range(data, depth),
+                    2 => data.len() == 6 && data.chunks(2).all(|sample| in_range(sample, depth)),
+                    3 => palette > 0 && data.len() <= palette,
+                    _ => false,
+                };
+                if !valid {
+                    return Err(structure());
+                }
+            }
+            (b"pHYs", Some(_)) if !seen_data => {}
+            (b"tEXt" | b"zTXt" | b"iTXt" | b"tIME", Some(_)) => {}
+            (b"IDAT", Some((colour, _))) if !data_ended => {
+                if colour == 3 && palette == 0 {
+                    return Err(structure());
+                }
+                seen_data = true;
+            }
+            (b"IEND", Some(_)) if seen_data => {
                 return if end == bytes.len() {
                     Ok(())
                 } else {
                     Err(decode())
-                }
+                };
             }
-            _ => return Err(unsupported("image-structure")),
+            _ => return Err(structure()),
         }
-        if seen_data && &kind != b"IDAT" {
+        if seen_data && kind != b"IDAT" {
             data_ended = true;
         }
-        first = false;
         at = end;
     }
     Err(decode())
@@ -214,14 +253,11 @@ fn jpeg_structure(bytes: &[u8]) -> Result<(), String> {
                     return Err(unsupported("image-colour"));
                 }
             }
-            0xe0..=0xef | 0xfe | 0xdb | 0xc4 | 0xdd => {}
-            0xc0 if !frame => {
-                frame = true;
-                if segment.first() != Some(&8) || !matches!(segment.get(5), Some(1 | 3)) {
-                    return Err(structure());
-                }
-            }
-            0xda if frame => {
+            0xe0..=0xef | 0xfe | 0xdd => {}
+            0xdb if quantisation_tables_valid(segment) => {}
+            0xc4 if huffman_tables_valid(segment) => {}
+            0xc0 if !frame && frame_header_valid(segment) => frame = true,
+            0xda if frame && scan_header_valid(segment) => {
                 scanned = true;
                 // Entropy-coded data runs to the next marker other than a
                 // stuffed zero or a restart marker.
@@ -240,6 +276,83 @@ fn jpeg_structure(bytes: &[u8]) -> Result<(), String> {
         }
         at += 2 + length;
     }
+}
+
+/// DQT (T.81 B.2.4.1): 8-bit tables 0-3 of 64 non-zero values. Decoders
+/// differ on other tables (measured by the reviewer).
+fn quantisation_tables_valid(mut segment: &[u8]) -> bool {
+    while let Some((&header, rest)) = segment.split_first() {
+        if header > 3 || rest.len() < 64 || rest[..64].contains(&0) {
+            return false;
+        }
+        segment = &rest[64..];
+    }
+    true
+}
+
+/// DHT (T.81 B.2.4.2, F.1.2.1.2, F.1.2.2.1, C): baseline DC or AC tables
+/// 0-1 whose
+/// code lengths form a prefix code that leaves the all-ones code unused,
+/// with DC categories up to 11 and AC run/size symbols of sizes 1-10 (or
+/// EOB and ZRL). Decoders differ on other tables (measured by the reviewer).
+fn huffman_tables_valid(mut segment: &[u8]) -> bool {
+    while let Some((&header, rest)) = segment.split_first() {
+        let (class, id) = (header >> 4, header & 15);
+        if class > 1 || id > 1 || rest.len() < 16 {
+            return false;
+        }
+        let counts = &rest[..16];
+        let total: usize = counts.iter().map(|&c| usize::from(c)).sum();
+        let Some(symbols) = rest.get(16..16 + total) else {
+            return false;
+        };
+        // Canonical codes (Annex C): each length's codes must fit, and the
+        // longest length must leave its all-ones code free.
+        let mut code = 0u32;
+        for (length, &count) in counts.iter().enumerate() {
+            code += u32::from(count);
+            if code > 1 << (length + 1) || (code == 1 << (length + 1) && count > 0) {
+                return false;
+            }
+            code <<= 1;
+        }
+        let symbol_valid = |&symbol: &u8| match class {
+            0 => symbol <= 11,
+            _ => matches!(symbol & 15, 1..=10) || symbol == 0x00 || symbol == 0xf0,
+        };
+        if total == 0 || !symbols.iter().all(symbol_valid) {
+            return false;
+        }
+        segment = &rest[16 + total..];
+    }
+    true
+}
+
+/// SOF0 (T.81 B.2.2): 8-bit samples, one or three components with sampling
+/// factors 1-4 and quantisation tables 0-3.
+fn frame_header_valid(segment: &[u8]) -> bool {
+    let count = segment.get(5).copied().unwrap_or(0);
+    segment.first() == Some(&8)
+        && matches!(count, 1 | 3)
+        && segment.len() == 6 + 3 * usize::from(count)
+        && segment[6..].chunks(3).all(|component| {
+            matches!(component[1] >> 4, 1..=4)
+                && matches!(component[1] & 15, 1..=4)
+                && component[2] <= 3
+        })
+}
+
+/// SOS (T.81 B.2.3) for a baseline frame: one to four components with DC
+/// and AC tables 0-1, spectral selection 0-63 and no successive
+/// approximation.
+fn scan_header_valid(segment: &[u8]) -> bool {
+    let count = segment.first().copied().unwrap_or(0);
+    matches!(count, 1..=4)
+        && segment.len() == 4 + 2 * usize::from(count)
+        && segment[1..1 + 2 * usize::from(count)]
+            .chunks(2)
+            .all(|component| component[1] >> 4 <= 1 && component[1] & 15 <= 1)
+        && segment[1 + 2 * usize::from(count)..] == [0, 63, 0]
 }
 
 /// The orientation tag (0x0112) of an EXIF block's first IFD (TIFF 6.0
@@ -455,6 +568,24 @@ pub(crate) mod tests {
             );
             assert_eq!(dec(&extra).unwrap_err(), unsupported("image-structure"));
         }
+        // Transparency samples out of range, a palette in an RGB image.
+        let grey = [0, 0, 0, 1, 0, 0, 0, 1, 8, 0, 0, 0, 0];
+        let out_of_range = png_chunks(&grey, &[(b"tRNS", vec![0xff, 0xff]), idat.clone()]);
+        assert_eq!(
+            dec(&out_of_range).unwrap_err(),
+            unsupported("image-structure")
+        );
+        let in_range = png_chunks(&grey, &[(b"tRNS", vec![0, 0xff]), idat.clone()]);
+        assert_eq!(dec(&in_range).unwrap(), "image/png");
+        let rgb = [0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0];
+        let rgb_palette = png_chunks(
+            &rgb,
+            &[(b"PLTE", vec![255, 0, 0]), (b"IDAT", zlib(&[0, 1, 2, 3]))],
+        );
+        assert_eq!(
+            dec(&rgb_palette).unwrap_err(),
+            unsupported("image-structure")
+        );
         let text = png_chunks(
             &ihdr,
             &[palette.clone(), (b"tEXt", b"a\0b".to_vec()), idat.clone()],
@@ -589,6 +720,25 @@ pub(crate) mod tests {
         assert_eq!(dec(&exif(6)).unwrap_err(), unsupported("image-orientation"));
         let adobe = with(b"\xff\xee\x00\x0eAdobe\x00\x64\x00\x00\x00\x00\x00");
         assert_eq!(dec(&adobe).unwrap_err(), unsupported("image-colour"));
+        // A zero quantiser, a DC category past 11, a code using all ones.
+        let replace = |marker: u8, offset: usize, value: u8| {
+            let at = bytes.windows(2).position(|w| w == [0xff, marker]).unwrap();
+            let mut out = bytes.to_vec();
+            out[at + offset] = value;
+            out
+        };
+        assert_eq!(
+            dec(&replace(0xdb, 5, 0)).unwrap_err(),
+            unsupported("image-structure")
+        );
+        assert_eq!(
+            dec(&replace(0xc4, 21, 12)).unwrap_err(),
+            unsupported("image-structure")
+        );
+        assert_eq!(
+            dec(&replace(0xc4, 5, 2)).unwrap_err(),
+            unsupported("image-structure")
+        );
         // An unknown marker, a second SOI, a progressive frame.
         assert_eq!(
             dec(&with(b"\xff\x60\x00\x02")).unwrap_err(),
