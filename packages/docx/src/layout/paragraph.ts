@@ -29,7 +29,7 @@ import { addExactRational, exactRationalFromNumber, exactRationalToNumberUp } fr
 import { revisionIsOmitted } from './revision-visibility.js';
 import { wordArabicTextKerned, wordEastAsianAutoSpaceJustifiedMaximumPt, wordKerningApplies, wordLineEndSpaceHangs } from './line-compatibility.js';
 import type { LineGapPlan } from '../line-breaker/line-gaps.js';
-import { distributeLineSlack as distributeProportionalSlack } from '@silurus/ooxml-core';
+import { distributeLineSlack as distributeProportionalSlack, type LineGap } from '@silurus/ooxml-core';
 import { specifiedTextLineMetrics, specifiedTextParagraphIsHomogeneous } from './specified-line-spacing.js';
 import { wordTextBoxVerticalMode } from './compatibility.js';
 import {
@@ -998,8 +998,37 @@ function trimTerminalUnderline(
 
 /** UTF-16 length of `text` without the trailing U+0020/U+3000 spaces that
  * hang under WORD_LINE_END_SPACE_HANGS. */
-function hangingSpaceVisibleLength(text: string): number {
-  return text.replace(/[ \u3000]+$/, '').length;
+function hangingSpaceVisibleLength(
+  text: string,
+  hangs: (code: number) => boolean = (code) => code === 0x20 || code === 0x3000,
+): number {
+  // A backward scan: a trailing-anchored regex rescans interior space runs.
+  let end = text.length;
+  while (end > 0 && hangs(text.charCodeAt(end - 1))) end -= 1;
+  return end;
+}
+
+/** `gaps` without the opportunities among a line's hanging line-end spaces
+ * (WORD_LINE_END_SPACE_HANGS): those after the last visible character, with
+ * zero-advance anchor hosts looked through. */
+function withoutHangingSpaceGaps(
+  gaps: readonly LineGap[],
+  segments: readonly MeasuredLinePlanSegment[],
+): LineGap[] {
+  let last = segments.length - 1;
+  let visibleCodePoints = 0;
+  for (; last >= 0; last -= 1) {
+    const segment = segments[last]!;
+    if (segment.kind === 'anchor-host') continue;
+    if (segment.kind !== 'text') break;
+    const visible = hangingSpaceVisibleLength(segment.text);
+    if (visible > 0) {
+      visibleCodePoints = [...segment.text.slice(0, visible)].length;
+      break;
+    }
+  }
+  return gaps.filter((gap) => gap.segIndex < last
+    || (gap.segIndex === last && gap.cpOffset < visibleCodePoints));
 }
 
 /** `placement` without decoration over its text after `visible` UTF-16
@@ -1227,6 +1256,10 @@ export function planLine(input: PlanLineInput): LineLayout {
   const hangingLineEndSpacePt = wordLineEndSpaceHangs(bidi)
     ? trailingAdvancePt(segments, hangingSpaceVisibleLength)
     : 0;
+  // Its U+0020 part, which the mode-15 visible fit also drops.
+  const hangingLatinSpacePt = hangingLineEndSpacePt > 0
+    ? trailingAdvancePt(segments, (text) => hangingSpaceVisibleLength(text, (code) => code === 0x20))
+    : 0;
   const lastDrawnIndex = visual.order.at(-1) ?? -1;
   // `word-justification-leading-indent-exclusion`
   let firstContentIndex = 0;
@@ -1261,11 +1294,14 @@ export function planLine(input: PlanLineInput): LineLayout {
           gapModel: { gaps: model.gaps, state: model.scan },
           proportional: true,
           unweightedExpansion: {
-            gaps: model.expansionGaps,
-            // The fit's visible width already drops a line-end U+0020
-            // (WORD_LINE_END_SPACE_HANGS); the unweighted expansion does too.
+            gaps: hangingLineEndSpacePt > 0
+              ? withoutHangingSpaceGaps(model.expansionGaps, segments)
+              : model.expansionGaps,
+            // The fit's visible width drops a line-end U+0020
+            // (WORD_LINE_END_SPACE_HANGS); the unweighted expansion does too,
+            // looking through zero-advance anchor hosts.
             slack: effectiveAvailableWidthPt - physicalStartOffsetPt - retainedNaturalWidthPt
-              + model.lineEndSeparatorPx - autoSpaceTakenPt,
+              + hangingLatinSpacePt - autoSpaceTakenPt,
           },
         },
       ), segments);
@@ -1555,7 +1591,7 @@ export function planLine(input: PlanLineInput): LineLayout {
     // §17.15.3.8 ulTrailSpace: an underline ending in trailing spaces keeps
     // them, whatever the grid's terminal ink extent.
     if (input.ulTrailSpace === true
-      && hangingSpaceVisibleLength(placement.text) < placement.text.length) continue;
+      && placement.text.trimEnd().length < placement.text.length) continue;
     const next = placements[placementIndex + 1];
     const decorations = placement.decorations.map((decoration) => {
       if (decoration.kind !== 'underline') return decoration;
