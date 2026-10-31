@@ -1,0 +1,38 @@
+id: no-plain-object-string-map
+language: TypeScript
+severity: error
+rule:
+  any:
+    - pattern: "const $NAME: Record<string, $T> = {}"
+    - pattern: "let $NAME: Record<string, $T> = {}"
+    - pattern: "const $NAME: Readonly<Record<string, $T>> = {}"
+    - pattern: "let $NAME: Readonly<Record<string, $T>> = {}"
+    - pattern: "$NAME = {} as Record<string, $T>"
+    - pattern: "Object.assign({}, $$$SOURCES)"
+message: >-
+  A string-keyed map must not start as a plain `{}`. Keys such as font, style,
+  theme or sheet names come from documents: assigning `__proto__` invokes the
+  inherited setter (the entry is dropped, or the prototype replaced), and
+  `Object.assign({}, ...)` does the same for a source's own `__proto__`. Use a
+  `Map`, or `nullRecord()` from `@silurus/ooxml-core/internal/own-key`, and
+  read entries with `ownValue()` / `hasOwnKey()`.
+note: |
+  Readers matter as much as writers: a record that crosses JSON or structured
+  clone arrives with `Object.prototype` again, so `record[name]` answers
+  `constructor` / `toString` with inherited functions. Read document-keyed
+  records through `ownValue()` / `hasOwnKey()`.
+
+  When the keys are provably library-generated (internal layout ids, a fixed
+  key list), suppress with `// ast-grep-ignore: no-plain-object-string-map`
+  on the preceding line and say why.
+files:
+  - "packages/**/src/**/*.ts"
+ignores:
+  - "**/*.test.ts"
+  - "**/*.spec.ts"
+  - "**/*.stories.ts"
+  - "**/*.test-support.ts"
+  - "**/test-support/**"
+  - "**/testing/**"
+  - "**/test-*.ts"
+  - "**/*-test-dom.ts"

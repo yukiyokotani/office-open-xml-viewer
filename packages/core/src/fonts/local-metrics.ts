@@ -96,7 +96,8 @@ export async function loadLocalFontMetrics(
   if (!set || typeof FontFace === 'undefined') return { faces: [], metrics: {} };
 
   const faces: FontFace[] = [];
-  const metrics: Record<string, ResolvedLocalFontMetric> = {};
+  // Null prototype: keys are document font names (e.g. `__proto__`).
+  const metrics = Object.create(null) as Record<string, ResolvedLocalFontMetric>;
   let timedOut = false;
   type PreparedRequest = LocalFontMetricRequest & {
     family: string;

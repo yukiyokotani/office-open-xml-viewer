@@ -3,6 +3,7 @@ import {
   type OfficeFontFallbackRequest,
   type OfficeFontFallbackRoute,
 } from '@silurus/ooxml-core';
+import { nullRecord, ownValue } from '@silurus/ooxml-core/internal/own-key';
 
 type LoadedOfficeFontFallbacks = {
   faces: FontFace[];
@@ -51,11 +52,15 @@ export async function acquireOfficeRoutes(
   }
   const pending = new Set(requests.map((request) => cache.get(requestKey(request))!));
   const loaded = await Promise.all(pending);
-  const available = Object.assign({}, ...loaded.map((entry) => entry.routes)) as Record<string, OfficeFontFallbackRoute>;
+  // Route keys are authored face names (`__proto__`, `constructor`, ...): merge
+  // into and collect from null-prototype records and read own entries only, so
+  // no name is answered by, or rewrites, Object.prototype.
+  const available: Record<string, OfficeFontFallbackRoute> = Object.assign(
+    nullRecord<OfficeFontFallbackRoute>(), ...loaded.map((entry) => entry.routes));
   // A batch may hold routes for tuples another slide requested; return only
   // this call's tuples so what the renderer knows never depends on history.
   const installedAnywhere = new Set(loaded.flatMap((entry) => entry.installed ?? []));
-  const routes: Record<string, OfficeFontFallbackRoute> = {};
+  const routes = nullRecord<OfficeFontFallbackRoute>();
   const installed = new Set<string>();
   for (const request of requests) {
     const family = normalizeLocalFontMetricFamily(request.family);
@@ -64,8 +69,9 @@ export async function acquireOfficeRoutes(
       continue;
     }
     const key = routeKeyFor(request);
-    if (available[key]) {
-      routes[key] = available[key];
+    const route = ownValue(available, key);
+    if (route) {
+      routes[key] = route;
       installed.add(family);
     }
   }

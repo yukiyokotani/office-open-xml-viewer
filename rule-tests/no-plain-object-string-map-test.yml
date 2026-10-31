@@ -1,0 +1,13 @@
+id: no-plain-object-string-map
+valid:
+  - "const routes = nullRecord<Route>();"
+  - "const routes = new Map<string, Route>();"
+  - "const merged = Object.assign(nullRecord<Route>(), ...loaded);"
+  - "const copy: Record<string, string> = Object.fromEntries(entries);"
+  - "const roles: Partial<Record<Role, Style>> = {};"
+invalid:
+  - "const routes: Record<string, Route> = {};"
+  - "let routes: Record<string, Route> = {};"
+  - "const table: Readonly<Record<string, number>> = {};"
+  - "routes = {} as Record<string, Route>;"
+  - "const merged = Object.assign({}, ...loaded.map((entry) => entry.routes));"

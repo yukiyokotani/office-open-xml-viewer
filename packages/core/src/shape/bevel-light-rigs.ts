@@ -1,3 +1,5 @@
+import { nullRecord } from '../internal/own-key';
+
 /** MS-OI29500 §2.1.1274: untransformed directional-light definitions.
  * Keep negative/greater-than-one RGB, per-light scale/offset and contribution
  * flags: clamping individual lights changes brightRoom and colored rigs.
@@ -453,7 +455,7 @@ const MODERN: Readonly<Record<string, RigDefinition>> = {
 };
 
 /** MS-OI29500 §2.1.1324: legacy key is specular+diffuse, fill diffuse only. */
-const LEGACY: Record<string, RigDefinition> = {};
+const LEGACY: Record<string, RigDefinition> = nullRecord();
 for (const [family, key, fill, ambient, fillScale, fillOffset] of [
   ['Flat', 0.58, 0.58, 0.305, 0.5, 0.5],
   ['Normal', 0.671, 0.366, 0.153, 0.5, 0.5],

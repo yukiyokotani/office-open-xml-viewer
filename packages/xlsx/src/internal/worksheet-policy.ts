@@ -93,6 +93,7 @@ export function normalizeXlsxWorksheetPolicy(
   options: { readonly xlsxWorksheetLimits?: XlsxWorksheetLimits } = {},
 ): NormalizedXlsxWorksheetPolicy {
   const raw: unknown = options.xlsxWorksheetLimits;
+  // ast-grep-ignore: no-plain-object-string-map -- read-only empty default, never written.
   let source: Readonly<Record<string, unknown>> = {};
   if (raw !== undefined) {
     if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
