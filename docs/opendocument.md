@@ -75,8 +75,8 @@ Currently admitted:
 - character fonts, sizes, bold, italic, single/double underline and
   strike-through, colours and background colour (spaces in the font of the
   adjacent text on their line and no larger; decorated spaces that end a
-  paragraph or precede a line break only where LibreOffice's trailing-space
-  settings paint them as the renderer does);
+  paragraph or precede a line break only under LibreOffice's default
+  trailing-space setting);
 - text in the Latin script class of ODF Part 3 Table 22, including the
   spaces, punctuation, symbols and emoji the table leaves unassigned.
 

@@ -484,28 +484,47 @@ fn check_part_root(
     Ok(())
 }
 
-/// The settings.xml items that decide how LibreOffice paints decorations over
-/// the spaces that end a paragraph or precede a line break (absent items take
-/// LibreOffice's defaults, false).
+/// The settings.xml item that decides how LibreOffice paints decorations over
+/// the spaces that end a paragraph or precede a line break (absent: false,
+/// LibreOffice's default).
 #[derive(Clone, Copy, Debug, Default)]
 struct TrailingSpaces {
     /// MsWordCompTrailingBlanks.
     blanks: bool,
-    /// MsWordUlTrailSpace.
-    underline: bool,
 }
 
 fn check_settings(text: &str, version: Option<&str>) -> Result<TrailingSpaces, String> {
     let document = xml::parse(text)?;
     check_part_root(&document, "document-settings", version)?;
     let mut trailing = TrailingSpaces::default();
-    for item in document
-        .descendants()
+    // LibreOffice reads its layout items from the top-level
+    // "ooo:configuration-settings" set only; other sets are ignored.
+    let mut sets = document
+        .root_element()
+        .children()
+        .filter(|n| xml::is(*n, NS_OFFICE, "settings"))
+        .flat_map(|settings| settings.children())
+        .filter(|n| {
+            xml::is(*n, xml::NS_CONFIG, "config-item-set")
+                && n.attribute((xml::NS_CONFIG, "name")) == Some("ooo:configuration-settings")
+        });
+    let Some(set) = sets.next() else {
+        return Ok(trailing);
+    };
+    if sets.next().is_some() {
+        return Err(unsupported("compatibility-setting"));
+    }
+    let mut seen = HashSet::new();
+    for item in set
+        .children()
         .filter(|n| xml::is(*n, xml::NS_CONFIG, "config-item"))
     {
         let Some(name) = item.attribute((xml::NS_CONFIG, "name")) else {
             continue;
         };
+        if !seen.insert(name) {
+            return Err(unsupported("compatibility-setting"));
+        }
         let value = item.text().unwrap_or("").trim();
         // §19.30 config:type; a boolean item must declare it.
         let boolean = || match (item.attribute((xml::NS_CONFIG, "type")), value) {
@@ -522,11 +541,9 @@ fn check_settings(text: &str, version: Option<&str>) -> Result<TrailingSpaces, S
                 return Err(unsupported("compatibility-setting"));
             }
         } else if INERT_SETTINGS.contains(&name) {
-            let set = boolean()?;
-            match name {
-                "MsWordCompTrailingBlanks" => trailing.blanks = set,
-                "MsWordUlTrailSpace" => trailing.underline = set,
-                _ => {}
+            let value = boolean()?;
+            if name == "MsWordCompTrailingBlanks" {
+                trailing.blanks = value;
             }
         }
     }
@@ -534,23 +551,18 @@ fn check_settings(text: &str, version: Option<&str>) -> Result<TrailingSpaces, S
 }
 
 /// Decorations over the spaces that end a paragraph or precede a line break
-/// (measured, LibreOffice PDF against the DOCX layout). The DOCX layout paints
-/// background and strike-through over them but not underline. LibreOffice
-/// paints all three by default; with MsWordCompTrailingBlanks it paints none,
-/// except underline and strike-through over one space with MsWordUlTrailSpace
-/// as well. Spaces where the two differ reject.
+/// (measured, LibreOffice PDF against the DOCX layout). Both paint
+/// background, underline and strike-through over them by default. With
+/// MsWordCompTrailingBlanks LibreOffice paints none of them (underline and
+/// strike-through over one space with MsWordUlTrailSpace as well), so
+/// decorated trailing spaces reject.
 fn trailing_space_decoration(
     space: &RunProperties,
     settings: TrailingSpaces,
 ) -> Result<(), String> {
-    let agrees = if settings.blanks {
-        space.background.is_none()
-            && space.strike.is_none()
-            && (space.underline.is_none() || !settings.underline)
-    } else {
-        space.underline.is_none()
-    };
-    if agrees {
+    let decorated =
+        space.background.is_some() || space.strike.is_some() || space.underline.is_some();
+    if !settings.blanks || !decorated {
         Ok(())
     } else {
         Err(unsupported("trailing-space-decoration"))
@@ -1365,13 +1377,13 @@ impl<'a> Reader<'a> {
             for hyphen in pending_hyphens.drain(..) {
                 same_line_metrics(&cache[&hyphen], &cache[&key], "soft-hyphen-formatting")?;
             }
-            if matches!(c, ' ' | '\u{a0}') {
+            if c.is_whitespace() {
                 match last_glyph {
                     Some(glyph) => space_fits_line(&cache[&key], &cache[&glyph])?,
                     None => pending_spaces.push(key),
                 }
                 trailing.push(key);
-            } else if !c.is_whitespace() {
+            } else {
                 trailing.clear();
                 for space in pending_spaces.drain(..) {
                     space_fits_line(&cache[&space], &cache[&key])?;
@@ -2748,7 +2760,7 @@ mod tests {
             }),
             unsupported("text-property")
         );
-        assert!(check_settings(r#"<office:document-settings xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:config="urn:oasis:names:tc:opendocument:xmlns:config:1.0" office:version="1.3"><config:config-item config:name="ParaSpaceMax" config:type="boolean">true</config:config-item></office:document-settings>"#, Some("1.3")).is_err());
+        assert!(check_settings(r#"<office:document-settings xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:config="urn:oasis:names:tc:opendocument:xmlns:config:1.0" office:version="1.3"><office:settings><config:config-item-set config:name="ooo:configuration-settings"><config:config-item config:name="ParaSpaceMax" config:type="boolean">true</config:config-item></config:config-item-set></office:settings></office:document-settings>"#, Some("1.3")).is_err());
         assert!(check_settings(r#"<office:document-settings xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:config="urn:oasis:names:tc:opendocument:xmlns:config:1.0" office:version="1.3"><config:config-item config:name="ParaSpaceMax" config:type="boolean">false</config:config-item></office:document-settings>"#, Some("1.3")).is_ok());
     }
 
@@ -3417,7 +3429,7 @@ mod tests {
     fn admits_libreoffice_layout_settings_inert_for_admitted_content() {
         let settings = |items: &[(&str, &str)]| {
             format!(
-                r#"<office:document-settings xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:config="urn:oasis:names:tc:opendocument:xmlns:config:1.0" office:version="1.3"><config:config-item-set config:name="ooo:configuration-settings">{}</config:config-item-set></office:document-settings>"#,
+                r#"<office:document-settings xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:config="urn:oasis:names:tc:opendocument:xmlns:config:1.0" office:version="1.3"><office:settings><config:config-item-set config:name="ooo:configuration-settings">{}</config:config-item-set></office:settings></office:document-settings>"#,
                 items
                     .iter()
                     .map(|(k, v)| format!(r#"<config:config-item config:name="{k}" config:type="boolean">{v}</config:config-item>"#))
@@ -3495,6 +3507,8 @@ mod tests {
             r#"<text:p>a b<text:span text:style-name="Big"><text:s text:c="3"/></text:span></text:p>"#,
             r#"<text:p><text:span text:style-name="Big"><text:s/></text:span>a</text:p>"#,
             r#"<text:p><text:s text:c="2"/></text:p>"#,
+            // Every white space character, not only U+0020 and U+00A0.
+            "<text:p>a<text:span text:style-name=\"Big\">\u{2003}</text:span>b</text:p>",
             // The comparison text must be on the space's own line.
             r#"<text:p><text:span text:style-name="Big">A<text:line-break/></text:span><text:span text:style-name="Mid"><text:s/></text:span>b</text:p>"#,
         ] {
@@ -3517,9 +3531,9 @@ mod tests {
         // (MsWordCompTrailingBlanks, MsWordUlTrailSpace) → admitted styles of
         // a space ending the paragraph or preceding a break.
         for (blanks, underline, admitted) in [
-            (false, false, ["H", "S"].as_slice()),
-            (false, true, ["H", "S"].as_slice()),
-            (true, false, ["U"].as_slice()),
+            (false, false, ["H", "U", "S"].as_slice()),
+            (false, true, ["H", "U", "S"].as_slice()),
+            (true, false, [].as_slice()),
             (true, true, [].as_slice()),
         ] {
             let settings =
@@ -3563,15 +3577,47 @@ mod tests {
             }
         }
         // Without settings.xml LibreOffice's defaults (false) apply.
+        let body = r#"<text:p><text:span text:style-name="H">a<text:s/></text:span></text:p>"#;
+        assert!(read_fixture(Fixture {
+            styles,
+            body,
+            ..Fixture::default()
+        })
+        .is_ok());
+        // Only the top-level ooo:configuration-settings set counts: an item in
+        // another set does not override it, and repeated sets or items reject.
+        let blanks = item("MsWordCompTrailingBlanks", true);
+        let shadow = format!(
+            r#"{blanks}<config:config-item-set config:name="other">{}</config:config-item-set>"#,
+            item("MsWordCompTrailingBlanks", false)
+        );
         assert_eq!(
             read_fixture(Fixture {
                 styles,
-                body: r#"<text:p><text:span text:style-name="U">a<text:s/></text:span></text:p>"#,
+                body,
+                settings: &shadow,
                 ..Fixture::default()
             })
             .unwrap_err(),
             unsupported("trailing-space-decoration")
         );
+        for settings in [
+            format!("{blanks}{}", item("MsWordCompTrailingBlanks", false)),
+            format!(
+                r#"{blanks}</config:config-item-set><config:config-item-set config:name="ooo:configuration-settings">"#
+            ),
+        ] {
+            assert_eq!(
+                read_fixture(Fixture {
+                    styles,
+                    body,
+                    settings: &settings,
+                    ..Fixture::default()
+                })
+                .unwrap_err(),
+                unsupported("compatibility-setting")
+            );
+        }
     }
 
     #[test]
