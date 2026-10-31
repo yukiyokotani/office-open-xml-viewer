@@ -233,7 +233,25 @@ export async function renderSlideNode(
   canvas: NodeCanvasLike,
   presentation: Presentation,
   slideIndex: number,
-  opts: {
+  opts: RenderSlideNodeOptions = {},
+): Promise<void> {
+  return paintSlideNode(canvas, presentation, slideIndex, opts, false);
+}
+
+/** @internal Parser-backed session entry. A parsed slide without a theme
+ *  already carries its whole master text chain, so its uncoloured text falls
+ *  back to black rather than the presentation's `defaultTextColor`, matching
+ *  the browser presentation and render worker. */
+export async function renderParsedSlideNode(
+  canvas: NodeCanvasLike,
+  presentation: Presentation,
+  slideIndex: number,
+  opts: RenderSlideNodeOptions = {},
+): Promise<void> {
+  return paintSlideNode(canvas, presentation, slideIndex, opts, true);
+}
+
+type RenderSlideNodeOptions = {
     width?: number;
     dpr?: number;
     cjkFallback?: CjkFallback;
@@ -247,14 +265,23 @@ export async function renderSlideNode(
     fetchImage?: (path: string, mimeType: string) => Promise<Blob>;
     /** Lazily resolve embedded media/poster bytes. Defaults to an empty Blob. */
     fetchMedia?: (path: string) => Promise<Blob>;
-  } = {},
+};
+
+async function paintSlideNode(
+  canvas: NodeCanvasLike,
+  presentation: Presentation,
+  slideIndex: number,
+  opts: RenderSlideNodeOptions,
+  parsedTextChain: boolean,
 ): Promise<void> {
   const cjkFallback = resolveCjkFallback(opts.cjkFallback);
   // Direct import of the pure renderer module — avoids `presentation.ts`
   // and `viewer.ts`, both of which pull Vite-specific worker / asset
   // imports that don't resolve under Node.
-  const { renderSlide } = (await import('@silurus/ooxml-pptx/internal/session')) as unknown as {
-    renderSlide: (
+  const { renderSlideWithEmbeddedFonts: renderSlide } = (
+    await import('@silurus/ooxml-pptx/internal/session')
+  ) as unknown as {
+    renderSlideWithEmbeddedFonts: (
       canvas: HTMLCanvasElement,
       slide: Presentation['slides'][number],
       slideWidth: number,
@@ -291,6 +318,7 @@ export async function renderSlideNode(
         // inject another source; text/shape-only rendering uses an empty Blob.
         fetchImage,
         skipMediaControls: true,
+        ...(parsedTextChain ? { parsedTextChain: true } : {}),
       },
     );
   };
