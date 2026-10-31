@@ -148,11 +148,22 @@ describe('WORD_LINE_END_SPACE_HANGS', () => {
     }
   });
 
-  it('keeps the trailing-space underline under ulTrailSpace', () => {
-    // §17.15.3.8: with ulTrailSpace, trailing spaces are underlined.
-    const [first] = lines(para([textRun(WORDS, { underline: true })], 'right'), { ulTrailSpace: true });
-    const ends = texts(first!).flatMap((p) => p.decorations ?? []).map((d) => d.to.xPt);
-    expect(Math.max(...ends)).toBeCloseTo(390, 6);
+  it('keeps hanging spaces decorated within the band under ulTrailSpace', () => {
+    // §17.15.3.8: with ulTrailSpace Windows Word decorates trailing spaces,
+    // clipped at the right edge of the line's band; alignment is unchanged.
+    const decorated = { underline: true, highlight: 'yellow' } as Partial<DocxTextRun>;
+    const end = (line: LineLayout) => Math.max(...texts(line).flatMap((p) => [
+      ...(p.decorations ?? []).map((d) => d.to.xPt),
+      ...(p.highlightFragments ?? []).map((f) => f.rect.xPt + f.rect.widthPt),
+    ]));
+    // Right-aligned: the hanging space lies past the band edge, nothing shows.
+    const [right] = lines(para([textRun(WORDS, decorated)], 'right'), { ulTrailSpace: true });
+    expect(visibleEnd(right!)).toBeCloseTo(380, 6);
+    expect(end(right!)).toBeCloseTo(380, 6);
+    // Centred final line: the space is decorated inside the band.
+    const [centred] = lines(para([textRun('aaaa\u3000 ', decorated)], 'center'), { ulTrailSpace: true });
+    expect(visibleStart(centred!)).toBeCloseTo(20 + (360 - 40) / 2, 6);
+    expect(end(centred!)).toBeCloseTo(20 + (360 - 40) / 2 + 40 + 20, 6);
   });
 
   it('paints no decoration over the hanging space', () => {
@@ -174,12 +185,10 @@ describe('WORD_LINE_END_SPACE_HANGS', () => {
         }
       }
     }
-    // A hanging U+3000 keeps its highlight.
+    // A hanging U+3000 is not decorated either.
     const [ideographic] = lines(para([textRun('aaaa\u3000', decorated)], 'center'));
-    const ideographicSpace = texts(ideographic!).at(-1)!;
-    expect(ideographicSpace.text.endsWith('\u3000')).toBe(true);
-    const fill = ideographicSpace.highlightFragments![0]!.rect;
-    expect(fill.xPt + fill.widthPt).toBeCloseTo(ideographicSpace.bounds.xPt + ideographicSpace.advancePt, 6);
+    const fills = texts(ideographic!).flatMap((p) => p.highlightFragments ?? []);
+    expect(Math.max(...fills.map((f) => f.rect.xPt + f.rect.widthPt))).toBeCloseTo(visibleEnd(ideographic!), 6);
     // A line-end space in its own decorated run carries none.
     const runs = [textRun('aaaa bbbb cccc dddd eeee ffff gggg'), textRun(' ', decorated), textRun('hhhh')];
     const [first] = lines(para(runs, 'right'));

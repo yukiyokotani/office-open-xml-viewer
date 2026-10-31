@@ -1070,6 +1070,27 @@ function withoutHangingSpaceDecoration(
   };
 }
 
+/** `placement` with its decorations and highlight ending at `endPt` at the
+ * latest: ulTrailSpace keeps hanging spaces decorated within the line's band
+ * (WORD_LINE_END_SPACE_HANGS). */
+function withDecorationClippedAt(placement: TextPlacement, endPt: number): TextPlacement {
+  const clipped = (rect: LayoutRect): LayoutRect => rect.xPt + rect.widthPt > endPt
+    ? { ...rect, widthPt: Math.max(0, endPt - rect.xPt) }
+    : rect;
+  return {
+    ...placement,
+    ...(placement.decorations ? {
+      decorations: placement.decorations.map((decoration) => decoration.to.xPt > endPt
+        ? trimTerminalUnderline(decoration, decoration.to.xPt - endPt)
+        : decoration),
+    } : {}),
+    ...(placement.highlightFragments ? {
+      highlightFragments: placement.highlightFragments.map((fragment) => ({ ...fragment, rect: clipped(fragment.rect) })),
+    } : {}),
+    ...(placement.highlightBounds ? { highlightBounds: clipped(placement.highlightBounds) } : {}),
+  };
+}
+
 /** Adjacent underlined source runs form one visual rule. Use a common
  * clearance below every glyph in the contiguous span; acquiring each run in
  * isolation instead creates stepped solid rules and restarts dash/wave phase
@@ -1574,18 +1595,21 @@ export function planLine(input: PlanLineInput): LineLayout {
     if (stretch?.trailingGap) xPt += stretch.trailingDelta ?? perGapPt;
   }
   // WORD_LINE_END_SPACE_HANGS: no decoration over the hanging line-end
-  // space. A snapToChars underline keeps WORD_SNAP_TO_CHARS_TERMINAL_UNDERLINE,
-  // and with ulTrailSpace (§17.15.3.8) trailing spaces keep their underline.
-  const keepUnderline = input.ulTrailSpace === true || segments.some((segment) =>
+  // spaces; with ulTrailSpace (§17.15.3.8) they keep every decoration up to
+  // the line's band edge. A snapToChars underline keeps
+  // WORD_SNAP_TO_CHARS_TERMINAL_UNDERLINE.
+  const keepUnderline = segments.some((segment) =>
     segment.kind === 'text' && segment.decorationTerminalAdvancePt !== undefined);
   if (hangingLineEndSpacePt > 0) {
+    const bandEndPt = lineLeftPt + availableWidthPt;
     for (let index = placements.length - 1; index >= 0; index -= 1) {
       const placement = placements[index];
       if (placement?.kind === 'anchor-host') continue;
       if (placement?.kind !== 'text') break;
-      // A hanging U+3000 keeps its decoration; only U+0020 loses it.
-      const visible = hangingSpaceVisibleLength(placement.text, (code) => code === 0x20);
-      placements[index] = withoutHangingSpaceDecoration(placement, visible, keepUnderline);
+      const visible = hangingSpaceVisibleLength(placement.text);
+      placements[index] = input.ulTrailSpace === true
+        ? withDecorationClippedAt(placement, bandEndPt)
+        : withoutHangingSpaceDecoration(placement, visible, keepUnderline);
       if (visible > 0) break;
     }
   }
