@@ -12,6 +12,8 @@ const mainStreams = JSON.parse(readFileSync(
 // The fixture now declares Arial present (absent faces size lines from their
 // painting fallback), so only the recorded font strings gained the local
 // route's resolved family; every geometry value is unchanged.
+// 'review-justified' was re-recorded when WORD_LINE_END_SPACE_HANGS took the
+// line-end space out of justification slack: only its gap offsets changed.
 // All numeric fields are unrounded doubles, including retained cluster advances
 // and offsets, every transform argument, and every fill's complete paint state.
 describe('unexcluded text keeps main spacing arithmetic bit for bit', () => {

@@ -55,6 +55,8 @@ export interface ParagraphMeasurementEnvironment extends LineLayoutEnvironment {
   readonly verticalPageFrame?: boolean;
   /** `w:compatSetting` compatibilityMode (§17.15.3.4) of the document; absent when not authored. */
   readonly compatibilityMode?: number;
+  /** §17.15.3.8 ulTrailSpace: hanging line-end spaces keep their underline. */
+  readonly ulTrailSpace?: boolean;
 }
 
 export interface TextMeasurer {
