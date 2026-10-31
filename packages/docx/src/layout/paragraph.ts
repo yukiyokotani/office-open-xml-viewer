@@ -27,7 +27,7 @@ import { shadowInkBounds } from './vml-shadow.js';
 import { createParagraphAnchorReferenceWorkBudget } from './resource-budgets.js';
 import { addExactRational, exactRationalFromNumber, exactRationalToNumberUp } from './exact-geometry.js';
 import { revisionIsOmitted } from './revision-visibility.js';
-import { wordArabicTextKerned, wordEastAsianAutoSpaceJustifiedMaximumPt, wordKerningApplies } from './line-compatibility.js';
+import { wordArabicTextKerned, wordEastAsianAutoSpaceJustifiedMaximumPt, wordKerningApplies, wordLineEndSpaceHangs } from './line-compatibility.js';
 import type { LineGapPlan } from '../line-breaker/line-gaps.js';
 import { distributeLineSlack as distributeProportionalSlack } from '@silurus/ooxml-core';
 import { specifiedTextLineMetrics, specifiedTextParagraphIsHomogeneous } from './specified-line-spacing.js';
@@ -1158,6 +1158,11 @@ export function planLine(input: PlanLineInput): LineLayout {
       lineSlackPt = distribution.residualPx;
     }
   }
+  // WORD_LINE_END_SPACE_HANGS: the U+0020 spaces ending a soft-wrapped line
+  // stand outside justification and centre/right alignment.
+  const hangingLineEndSpacePt = wordLineEndSpaceHangs(bidi, endsLogicalLine)
+    ? trailingAdvancePt(segments, (text) => text.replace(/ +$/, '').length)
+    : 0;
   const lastDrawnIndex = visual.order.at(-1) ?? -1;
   // `word-justification-leading-indent-exclusion`
   let firstContentIndex = 0;
@@ -1211,9 +1216,10 @@ export function planLine(input: PlanLineInput): LineLayout {
       }
     }
   } else if (applyJustify) {
-    const autoSpace = justifiedAutoSpaceExpansion(segments, lineSlackPt);
+    const justifySlackPt = lineSlackPt + hangingLineEndSpacePt;
+    const autoSpace = justifiedAutoSpaceExpansion(segments, justifySlackPt);
     const autoSpaceTakenPt = autoSpace?.takenPt ?? 0;
-    const residualSlackPt = lineSlackPt - autoSpaceTakenPt;
+    const residualSlackPt = justifySlackPt - autoSpaceTakenPt;
     const distribution = keepGraphemeSafeCuts(distributeLineSlack(
       distSegments, residualSlackPt, firstContentIndex,
       bidi ? lastDrawnIndex : segments.length,
@@ -1229,19 +1235,11 @@ export function planLine(input: PlanLineInput): LineLayout {
   const drawnWidthPt = naturalWidthPt + distributedWidthPt;
   // WORD_FLOAT_GAP_FLOW aligns the visible word edge, while
   // the trailing separator remains source-owned. Its advance must not shift
-  // centred/right-aligned gap text. Preserve ordinary lines' existing policy.
-  let trailingSeparatorPt = 0;
-  if (line.availableWidthPt < input.availableWidthPt && !bidi) {
-    for (let index = segments.length - 1; index >= 0; index -= 1) {
-      const segment = segments[index];
-      if (segment?.kind !== 'text') break;
-      const visibleLength = segment.text.trimEnd().length;
-      trailingSeparatorPt += segment.clusters.filter(cluster =>
-        cluster.range.start >= segment.range.start + visibleLength)
-        .reduce((sum, cluster) => sum + cluster.advancePt, 0);
-      if (visibleLength > 0) break;
-    }
-  }
+  // centred/right-aligned gap text. Other soft-wrapped lines exclude their
+  // trailing U+0020 (WORD_LINE_END_SPACE_HANGS).
+  const trailingSeparatorPt = line.availableWidthPt < input.availableWidthPt && !bidi
+    ? trailingAdvancePt(segments, (text) => text.trimEnd().length)
+    : hangingLineEndSpacePt;
   const alignmentSlackPt = lineSlackPt - distributedWidthPt + trailingSeparatorPt;
   const naturalAlignmentOffsetPt = edge === 'right'
     ? alignmentSlackPt
@@ -6827,4 +6825,25 @@ export function sliceParagraphLayout(
         : {}),
     continuation,
   }, acquired, rebasedSelected);
+}
+
+
+/** Advance of a line's trailing separator: the clusters after each final text
+ * segment's visible prefix (`visibleLength`), across trailing segments that
+ * hold only separators. */
+function trailingAdvancePt(
+  segments: readonly MeasuredLinePlanSegment[],
+  visibleLength: (text: string) => number,
+): number {
+  let advancePt = 0;
+  for (let index = segments.length - 1; index >= 0; index -= 1) {
+    const segment = segments[index];
+    if (segment?.kind !== 'text') break;
+    const visible = visibleLength(segment.text);
+    advancePt += segment.clusters.filter(cluster =>
+      cluster.range.start >= segment.range.start + visible)
+      .reduce((sum, cluster) => sum + cluster.advancePt, 0);
+    if (visible > 0) break;
+  }
+  return advancePt;
 }

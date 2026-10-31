@@ -124,11 +124,12 @@ describe('jc kashida / thaiDistribute enter the justification path (§17.18.44)'
       const f = await render(jc);
       const bb = findBB(f);
       expect(bb, '"bb" must be drawn').toBeDefined();
-      // Justified: the inter-word space is expanded so the "bb " token ends at the
-      // right margin (PAGE_W). It therefore starts far right of its natural x=30.
+      // Justified: the inter-word space is expanded so the visible "bb" ends at
+      // the right margin (PAGE_W). It therefore starts far right of its natural x=30.
       expect(bb!.x).toBeGreaterThan(3 * FS + 1);
-      // "bb " is 3 glyphs (incl. the trailing space that sits at the margin edge).
-      expect(bb!.x + 3 * FS).toBeCloseTo(PAGE_W, 2);
+      // "bb" is 2 glyphs; the line-end space hangs past the margin
+      // (WORD_LINE_END_SPACE_HANGS).
+      expect(bb!.x + 2 * FS).toBeCloseTo(PAGE_W, 2);
     });
   }
 });

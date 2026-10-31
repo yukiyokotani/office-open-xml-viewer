@@ -155,9 +155,12 @@ describe('#1975 condensed w:spacing larger than the glyph advance', () => {
     expect(line).not.toBe(all.at(-1));
     const placed = texts(line);
     expect(placed.every((p) => p.bounds.widthPt >= 0)).toBe(true);
-    // The justified line still ends on the band edge, as uncondensed lines do.
+    // The justified line's visible text still ends on the band edge, as
+    // uncondensed lines do; its line-end space (10 pt here) hangs past it
+    // (WORD_LINE_END_SPACE_HANGS).
     const last = placed.at(-1)!;
-    expect(last.bounds.xPt + last.advancePt).toBeCloseTo(380, 6);
+    expect(last.text.endsWith(' ')).toBe(true);
+    expect(last.bounds.xPt + last.advancePt).toBeCloseTo(390, 6);
   });
 
   it('draws no underline under a fully floored run', () => {
