@@ -5164,6 +5164,18 @@ mod tests {
             .unwrap_err(),
             unsupported("list-geometry")
         );
+        // Line separators and format characters in an affix.
+        for c in ["&#x2028;", "&#x2029;", "&#x200B;", "&#x2060;"] {
+            assert_eq!(
+                one(&list_styles(&level.replace(
+                    r#"style:num-suffix=".""#,
+                    &format!(r#"style:num-suffix="{c}.""#)
+                )))
+                .unwrap_err(),
+                unsupported("list-affix"),
+                "{c}"
+            );
+        }
         // A list tab stop before the text area.
         assert_eq!(
             one(&list_styles(&level.replace(

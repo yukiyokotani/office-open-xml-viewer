@@ -993,9 +993,27 @@ impl<'a> Reader<'a> {
 /// Label characters LibreOffice does not draw as ordinary text: a line feed
 /// breaks the label, U+2011 is drawn as a gap, U+00AD never breaks it, and
 /// U+00A0 lets body text interleave into a long label (measured by the
-/// reviewer).
+/// reviewer). Line and paragraph separators and the other format characters
+/// (zero-width, joiners, direction controls, invisible operators) lay out
+/// differently in the DOCX layout and are excluded as a class.
 fn special_label_character(c: char) -> bool {
-    c.is_control() || matches!(c, '\u{a0}' | '\u{2011}' | '\u{ad}')
+    c.is_control()
+        || matches!(
+            c,
+            '\u{a0}'
+                | '\u{2011}'
+                | '\u{ad}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{61c}'
+                | '\u{180e}'
+                | '\u{200b}'..='\u{200f}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2060}'..='\u{2064}'
+                | '\u{2066}'..='\u{206f}'
+                | '\u{feff}'
+                | '\u{fff9}'..='\u{fffb}'
+        )
 }
 
 /// The element children of an item or header, without soft page breaks.
