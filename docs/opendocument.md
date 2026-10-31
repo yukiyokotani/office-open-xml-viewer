@@ -90,8 +90,9 @@ Currently admitted:
   aligned at their start, end or centre, the level's character style and
   bullet face, and a tab, space or nothing after the label. Pictures as
   bullets, LibreOffice's other number formats, headings in lists, a second
-  sublist within one item, empty labelled paragraphs, decorated labels and
-  labelled paragraphs that are centred or right-aligned reject for now.
+  sublist within one item, empty labelled paragraphs, decorated labels,
+  labels that could wrap and labelled paragraphs that are centred or
+  right-aligned reject for now.
 
 Four behaviours follow LibreOffice where ODF leaves the choice to the
 consumer or LibreOffice reads the specification differently; each applies
@@ -105,7 +106,7 @@ only within its measured scope:
 - automatic text colour over a character or paragraph background is black
   or white by LibreOffice's `Color::IsDark()` rule.
 
-Three known differences from LibreOffice remain in admitted documents:
+Two known differences from LibreOffice remain in admitted documents:
 
 - LibreOffice spreads a justified line's spare width in whole layout
   units, so its justified lines can end up to about 1.6 pt short of the
@@ -113,8 +114,6 @@ Three known differences from LibreOffice remain in admitted documents:
 - with LibreOffice's default settings, a decorated space at a wrapped
   line's end is underlined or struck through in LibreOffice and left
   undecorated by the viewer.
-- a list label wider than a line that crosses a page break loses its
-  characters after the break in LibreOffice; the viewer keeps them.
 
 LibreOffice's layout settings (`settings.xml`) that Word-derived documents
 carry are admitted where they were measured to change nothing the reader

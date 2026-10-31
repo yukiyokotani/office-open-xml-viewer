@@ -889,18 +889,20 @@ impl<'a> Reader<'a> {
             (contexts.len() - 1) as u32
         };
         let properties = self.run_properties(contexts, context, ScriptClass::Latin)?;
-        // An end- or centre-aligned label that would start before the page
-        // edge, or a centred one reaching T, is laid out irregularly by
-        // LibreOffice (measured: the label is cut at the page edge and the
-        // body moves right; the tab collapses). The label width is bounded by
-        // two ems per ASCII character, so only labels that provably stay
-        // clear of both are admitted.
+        // A label is bounded by two ems per character. One that could wrap
+        // from M + I to the line end breaks at other opportunities in
+        // LibreOffice (spaces, no-break spaces, punctuation; measured by the
+        // reviewer), so it rejects. An end- or centre-aligned label that
+        // would start before the page edge, or a centred one reaching T, is
+        // laid out irregularly too (measured: cut at the page edge with the
+        // body moved, the tab collapsed); its characters must be ASCII.
+        let bound = label.text.chars().count() as f64 * 2.0 * properties.size;
+        let start = paragraph.indent_left + paragraph.indent_first;
+        let width = self.text_width - paragraph.indent_right;
+        if start + bound > width {
+            return Err(unsupported("list-label-extent"));
+        }
         if label.align != Align::Start {
-            if !label.text.is_ascii() {
-                return Err(unsupported("list-label-extent"));
-            }
-            let bound = label.text.len() as f64 * 2.0 * properties.size;
-            let start = paragraph.indent_left + paragraph.indent_first;
             let before = if label.align == Align::End {
                 bound
             } else {
@@ -912,11 +914,7 @@ impl<'a> Reader<'a> {
                     .tab_stops
                     .first()
                     .is_none_or(|stop| start + bound / 2.0 >= stop.pos);
-            // The label is fitted at its full width from M + I before it is
-            // shifted, so it must also fit there: a wrapped aligned label
-            // breaks differently in LibreOffice (measured by the reviewer).
-            let width = self.text_width - paragraph.indent_right;
-            if start - before < -self.page_left_margin || reaches_tab || start + bound > width {
+            if !label.text.is_ascii() || start - before < -self.page_left_margin || reaches_tab {
                 return Err(unsupported("list-label-extent"));
             }
         }

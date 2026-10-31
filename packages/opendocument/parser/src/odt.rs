@@ -5176,6 +5176,18 @@ mod tests {
                 "{c}"
             );
         }
+        // A label that could wrap.
+        assert_eq!(
+            one(&list_styles(&level.replace(
+                r#"style:num-suffix=".""#,
+                &format!(
+                    r#"style:num-prefix="{}" style:num-suffix=".""#,
+                    "X".repeat(30)
+                )
+            )))
+            .unwrap_err(),
+            unsupported("list-label-extent")
+        );
         // A list tab stop before the text area.
         assert_eq!(
             one(&list_styles(&level.replace(
