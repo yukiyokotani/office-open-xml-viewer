@@ -1248,6 +1248,12 @@ impl<'a> Reader<'a> {
                         other = false;
                         continue;
                     }
+                    // The DOCX layout kerns Arabic-script text whatever its
+                    // kerning (WORD_ARABIC_PAIR_KERNING); LibreOffice keeps
+                    // it unkerned (measured by the reviewer, Amiri).
+                    if arabic_block(c) {
+                        return Err(unsupported("letter-kerning-off-arabic"));
+                    }
                     if c.is_ascii() {
                         ascii = true;
                     } else {
@@ -2999,6 +3005,17 @@ fn paragraph_properties(cascade: &Cascade<'_>, rules: CompatRules) -> Result<Col
         area: 0,
         page_break_after: breaking("break-after")?,
     })
+}
+
+/// The Unicode blocks holding the Arabic script (a superset of its
+/// characters: Arabic, Supplement, Extended-A to -C, Presentation Forms-A
+/// and -B, Rumi Numeral Symbols, Arabic Extended-C, Indic Siyaq Numbers,
+/// Ottoman Siyaq Numbers and Arabic Mathematical Alphabetic Symbols).
+fn arabic_block(c: char) -> bool {
+    matches!(u32::from(c),
+        0x0600..=0x06FF | 0x0750..=0x077F | 0x0870..=0x08FF | 0xFB50..=0xFDFF
+        | 0xFE70..=0xFEFF | 0x10E60..=0x10E7F | 0x10EC0..=0x10EFF | 0x1EC70..=0x1ECBF
+        | 0x1ED00..=0x1ED4F | 0x1EE00..=0x1EEFF)
 }
 
 /// ODF lengths (Part 3 §18.3.18): cm, mm, in, pt, pc, px (1/96 in).
@@ -5392,7 +5409,7 @@ mod tests {
         // across spans and with a no-break space; separate words do not.
         let unkerned = |body: &str| {
             read_fixture(Fixture {
-                default_text: r#"style:font-name="Serif" fo:font-size="12pt" style:letter-kerning="false""#,
+                default_text: r#"style:font-name="Serif" fo:font-size="12pt" style:font-name-asian="Serif" style:font-size-asian="12pt" style:font-name-complex="Serif" style:font-size-complex="12pt" style:letter-kerning="false""#,
                 styles: r#"<style:style style:name="B" style:family="text"><style:text-properties fo:font-weight="bold"/></style:style>"#,
                 body,
                 ..Fixture::default()
@@ -5412,6 +5429,11 @@ mod tests {
             );
         }
         assert_eq!(unkerned("<text:p>ff í \u{2019} é</text:p>"), Ok(()));
+        // Arabic-script characters (kerned by the DOCX layout regardless).
+        assert_eq!(
+            unkerned("<text:p>\u{759}\u{762}</text:p>"),
+            Err(unsupported("letter-kerning-off-arabic"))
+        );
     }
 
     #[test]
