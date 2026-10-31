@@ -108,7 +108,14 @@ Two known differences from LibreOffice remain in admitted documents:
 
 LibreOffice's layout settings (`settings.xml`) that Word-derived documents
 carry are admitted where they were measured to change nothing the reader
-admits; the others must keep LibreOffice's new-document values.
+admits; the others must keep LibreOffice's new-document values, except
+`BalanceSpacesAndIdeographicSpaces`, which is applied as LibreOffice applies
+it: a space at the start or end of a text portion (portions end at
+formatting changes, bookmarks, reference marks, soft hyphens and line
+breaks), or next to another space, advances half its Asian font size. A
+justified paragraph with such a space anywhere except where it ends the
+paragraph or precedes a line break rejects,
+because LibreOffice then lays out its lines differently.
 
 Tabs, letter spacing, horizontal scaling,
 raised/lowered text, fixed and minimum line heights, proportional line

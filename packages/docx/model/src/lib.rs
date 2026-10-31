@@ -2790,6 +2790,12 @@ pub struct TextRun {
         skip_serializing_if = "std::ops::Not::not"
     )]
     pub optional_hyphen: bool,
+    /// An explicit advance in points for every U+0020 in this run, replacing
+    /// the space glyph's own advance before horizontal scaling (character
+    /// spacing still applies). DOCX never sets it; other producers set it
+    /// where their format fixes a space's width independently of its glyph.
+    #[serde(rename = "__spaceAdvancePt", skip_serializing_if = "Option::is_none")]
+    pub space_advance_pt: Option<f64>,
     /// The authored run begins with `<w:noBreakHyphen/>` but could not be
     /// coalesced with its predecessor because a zero-width semantic boundary
     /// (such as a comment anchor) must remain addressable. Layout keeps this

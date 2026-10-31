@@ -679,6 +679,26 @@ export function finalizeBuiltSegments(
     flushSequence();
   }
 
+  // A run's explicit U+0020 advance (set by producers other than DOCX)
+  // replaces the natural space advance through the same per-space
+  // adjustment; the adjustment is scaled with the glyphs, so it is taken
+  // before horizontal scaling, and character spacing still applies.
+  for (const segment of segs) {
+    if (!('text' in segment) || segment.spaceAdvancePt === undefined) continue;
+    const service = segment.textLayoutService;
+    const request = segment.textShapeRequest;
+    if (!service || !request) continue;
+    const naturalSpace = service.shape({
+      ...independentTextShapeRequest(request, ' '),
+      fontSizePt: calcEffectiveFontPx(segment, 1),
+      measure: true,
+      clusterGeometry: false,
+    }).advancePt;
+    if (!Number.isFinite(naturalSpace)) continue;
+    segment.widthBalanceSpaceSequence = true;
+    segment.widthBalanceSpaceAdjustmentPt = segment.spaceAdvancePt / charScaleFactor(segment) - naturalSpace;
+  }
+
   // ── UAX#14 LB13 / ECMA-376 §17.15.1.59 (行頭禁則 — line-start-forbidden) ──────
   // A closing / mid-punctuation code point (comma, period, ; : ! ? ) ] } and
   // their CJK forms) carries NO line-break opportunity before it, so it may
@@ -1494,6 +1514,7 @@ function emitResolvedTextSegment(
   segs.push({
     text,
     script: resolvedScript,
+    ...(r.spaceAdvancePt !== undefined ? { spaceAdvancePt: r.spaceAdvancePt } : {}),
     ...(resolvedSpan?.semanticSlotSpans ? { semanticSlotSpans: resolvedSpan.semanticSlotSpans } : {}),
     ...(widthBalanceGridDeltaFactor !== undefined
       ? {

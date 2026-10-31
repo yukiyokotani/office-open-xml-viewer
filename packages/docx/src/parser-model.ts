@@ -143,6 +143,8 @@ export interface InternalRunSlotMetadata {
 
 interface InternalNoBreakHyphenWire {
   readonly __optionalHyphen?: boolean;
+  /** Explicit advance (pt) of each U+0020, from producers other than DOCX. */
+  readonly __spaceAdvancePt?: number;
   readonly __noBreakBefore?: boolean;
   readonly __noBreakAfter?: boolean;
   /** UTF-16 offsets immediately after the injected U+002D glyph. */
@@ -1797,6 +1799,7 @@ export function paragraphAcquisitionInput(
         __noBreakAfter: noBreakAfter,
         __noBreakHyphenOffsets: noBreakHyphenOffsets,
         __optionalHyphen: optionalHyphen,
+        __spaceAdvancePt: spaceAdvancePt,
         ...publicRun
       } = run as typeof run & InternalNoBreakHyphenWire & {
         __typographyAcquisition?: InternalRunTypographyWire;
@@ -1809,6 +1812,8 @@ export function paragraphAcquisitionInput(
       return Object.freeze({
         ...structuredClone(publicRun),
         ...(optionalHyphen === true && run.type === 'text' ? { optionalHyphen: true } : {}),
+        ...(run.type === 'text' && typeof spaceAdvancePt === 'number'
+          && Number.isFinite(spaceAdvancePt) && spaceAdvancePt >= 0 ? { spaceAdvancePt } : {}),
         ...(noBreakBefore === true ? { noBreakBefore: true } : {}),
         ...(noBreakAfter === true ? { noBreakAfter: true } : {}),
         ...(noBreakRanges?.length ? { noBreakRanges: Object.freeze(noBreakRanges) } : {}),

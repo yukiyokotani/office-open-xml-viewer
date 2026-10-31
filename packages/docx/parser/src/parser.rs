@@ -8178,6 +8178,7 @@ fn parse_run_inner(
                         no_break_after: false,
                         no_break_hyphen_offsets: Vec::new(),
                         optional_hyphen: false,
+                        space_advance_pt: None,
                         bold,
                         italic,
                         underline,
@@ -8281,6 +8282,7 @@ fn parse_run_inner(
                         no_break_after: false,
                         no_break_hyphen_offsets: Vec::new(),
                         optional_hyphen: false,
+                        space_advance_pt: None,
                         bold,
                         italic,
                         underline,
@@ -8345,6 +8347,7 @@ fn parse_run_inner(
                     no_break_after: false,
                     no_break_hyphen_offsets: Vec::new(),
                     optional_hyphen: false,
+                    space_advance_pt: None,
                     bold,
                     italic,
                     underline,
@@ -8451,6 +8454,7 @@ fn parse_run_inner(
                         "-".to_string()
                     },
                     optional_hyphen: optional,
+                    space_advance_pt: None,
                     // If the hyphen cannot merge with the previous text run,
                     // this provenance closes the otherwise breakable run
                     // boundary for every formatting/revision/comment reason.
@@ -8690,6 +8694,7 @@ fn parse_run_inner(
                     no_break_after: false,
                     no_break_hyphen_offsets: Vec::new(),
                     optional_hyphen: false,
+                    space_advance_pt: None,
                     bold,
                     italic,
                     underline,

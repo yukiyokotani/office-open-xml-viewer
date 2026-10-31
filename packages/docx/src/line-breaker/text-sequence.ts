@@ -25,9 +25,10 @@ function visibleTextRun(run: ParagraphLayoutRun, environment: LineLayoutEnvironm
   if (run.type !== 'text' && run.type !== 'field') return undefined;
   const r: ParagraphTextBearingRun = run;
   // These are authored units, rather than formatting-only seams: a ruby base,
-  // note marker, fitText unit, noBreakHyphen owner or upright tate-chu-yoko cell.
+  // note marker, fitText unit, noBreakHyphen owner, upright tate-chu-yoko cell
+  // or explicitly advanced space.
   if (r.optionalHyphen || r.ruby || r.noteRef || r.fitTextVal != null || r.noBreakRanges?.length
-    || r.noBreakBefore || r.noBreakAfter || r.eastAsianVert) return undefined;
+    || r.noBreakBefore || r.noBreakAfter || r.eastAsianVert || r.spaceAdvancePt !== undefined) return undefined;
   const text = run.type === 'text' ? run.text : resolveFieldText(run as FieldRun, environment);
   const { type: _type, ...properties } = run;
   const projected = { ...properties, type: 'text' as const, text,
