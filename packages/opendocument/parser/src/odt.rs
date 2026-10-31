@@ -143,6 +143,20 @@ fn read_with(package: &OdfPackage, rules: CompatRules) -> Result<Document, Strin
     // ODF 1.3 introduced style:contextual-spacing (§20.255); a declared 1.2
     // document does not define it.
     let contextual_spacing_defined = version != Some("1.2");
+    // A background on the paragraph default style fills the whole page in
+    // LibreOffice (measured), even under paragraphs that override it.
+    if sheet
+        .default_style(Family::Paragraph)
+        .and_then(|style| style.group(PARAGRAPH))
+        .and_then(|group| {
+            group
+                .attributes
+                .get(&(NS_FO.to_string(), "background-color".to_string()))
+        })
+        .is_some_and(|value| value != "transparent")
+    {
+        return Err(unsupported("default-style-background"));
+    }
     let page = PageStyle::read(styles_root)?;
 
     let body = content_root
@@ -925,6 +939,7 @@ impl<'a> Reader<'a> {
             &chain,
             &["paragraph-properties", "text-properties", LOEXT_GRAPHIC],
         )?;
+        self.charge_cascade(&chain, LOEXT_GRAPHIC)?;
         check_paragraph_fill(&properties, &Cascade::new(chain.clone(), LOEXT_GRAPHIC))?;
         let mut collected = paragraph_properties(&properties, self.rules)?;
         if collected.contextual && !self.contextual_spacing_defined {
@@ -972,33 +987,15 @@ impl<'a> Reader<'a> {
         }
         let tokens = collapse(std::mem::take(&mut inline.tokens));
         self.emit_runs(&tokens, &inline.contexts, &mut collected.paragraph)?;
-        if collected.paragraph.shading.is_some() {
-            // A background on the paragraph default style fills the whole page
-            // in LibreOffice (measured), not the paragraph area.
-            if self
-                .sheet
-                .default_style(Family::Paragraph)
-                .and_then(|style| style.group(PARAGRAPH))
-                .and_then(|group| {
-                    group
-                        .attributes
-                        .get(&(NS_FO.to_string(), "background-color".to_string()))
-                })
-                .is_some_and(|value| value != "transparent")
-            {
-                return Err(unsupported("default-style-background"));
-            }
+        if let Some(shading) = collected.paragraph.shading.as_deref() {
             // §20.395 automatic colour (also an unset colour) is chosen
             // against the background. LibreOffice and the DOCX layout agree
-            // only away from their thresholds; between them it rejects.
-            let automatic = collected
-                .paragraph
-                .runs
-                .iter()
-                .any(|run| matches!(run, DocRun::Text(text) if text.color.is_none()));
-            if automatic
-                && !automatic_colors_agree(collected.paragraph.shading.as_deref().unwrap_or(""))
-            {
+            // only away from their thresholds; between them it rejects. Runs
+            // with their own shading were checked against it.
+            let automatic = collected.paragraph.runs.iter().any(|run| {
+                matches!(run, DocRun::Text(text) if text.color.is_none() && text.background.is_none())
+            });
+            if automatic && !automatic_colors_agree(shading) {
                 return Err(unsupported("automatic-font-color"));
             }
         }
@@ -1734,7 +1731,13 @@ impl RunProperties {
             Some("0%") if color_auto => {}
             Some(_) => return Err(unsupported("text-opacity")),
         }
-        if color_auto && background.is_some() {
+        // §20.395 automatic (or unset) colour over the run's own shading:
+        // admitted only where LibreOffice and the DOCX layout agree.
+        if color.is_none()
+            && background
+                .as_deref()
+                .is_some_and(|bg| !automatic_colors_agree(bg))
+        {
             return Err(unsupported("automatic-font-color"));
         }
         // Letter spacing: LibreOffice spaces between the characters of a
@@ -2065,6 +2068,9 @@ fn automatic_colors_agree(background: &str) -> bool {
 /// §20.119, `draw:opacity` §20.152); a fill that disagrees, other fill
 /// kinds (gradient, bitmap, hatch) and partial opacity reject.
 fn check_paragraph_fill(paragraph: &Cascade<'_>, fill: &Cascade<'_>) -> Result<(), String> {
+    if !fill.element_names().is_empty() {
+        return Err(unsupported("paragraph-fill"));
+    }
     for (ns, name) in fill.keys() {
         if !matches!(
             (ns.as_str(), name.as_str()),
@@ -3468,6 +3474,43 @@ mod tests {
             .unwrap_err(),
             unsupported("default-style-background")
         );
+        // The default-style background rejects even when every paragraph
+        // overrides it.
+        assert_eq!(
+            read_fixture(Fixture {
+                default_paragraph: r##" fo:background-color="#ffffc8""##,
+                styles: r#"<style:style style:name="T" style:family="paragraph"><style:paragraph-properties fo:background-color="transparent"/></style:style>"#,
+                body: r#"<text:p text:style-name="T">x</text:p>"#,
+                ..Fixture::default()
+            })
+            .unwrap_err(),
+            unsupported("default-style-background")
+        );
+        // Children of the area fill (e.g. a background image) reject.
+        let image = r##"<style:style style:name="I" style:family="paragraph"><loext:graphic-properties draw:fill="none"><style:background-image/></loext:graphic-properties></style:style>"##;
+        assert_eq!(
+            read(image, r#"<text:p text:style-name="I">x</text:p>"#).unwrap_err(),
+            unsupported("paragraph-fill")
+        );
+        // Automatic text over its own run shading is checked against that
+        // shading, not the paragraph's.
+        let run = |shade: &str| {
+            format!(
+                r#"<style:style style:name="R" style:family="text"><style:text-properties fo:background-color="{shade}"/></style:style>"#
+            ) + &style(
+                "Y",
+                "#ffffc8",
+                r##"draw:fill="solid" draw:fill-color="#ffffc8""##,
+                "0pt",
+            )
+        };
+        let body =
+            r#"<text:p text:style-name="Y">a<text:span text:style-name="R">b</text:span></text:p>"#;
+        assert_eq!(
+            read(&run("#999999"), body).unwrap_err(),
+            unsupported("automatic-font-color")
+        );
+        assert!(read(&run("#ffff00"), body).is_ok());
         // Automatic (and unset) text colour over a background: admitted only
         // where LibreOffice and the DOCX layout pick the same colour.
         for (background, ok) in [
