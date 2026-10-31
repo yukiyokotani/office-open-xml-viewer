@@ -208,7 +208,7 @@ export class PptxPresentationSessionImpl implements PptxPresentationSession {
     this.assertOpen();
     return this.enqueueRender(async () => {
       throwIfAborted(this.signal, ABORT_MESSAGE);
-      const { renderSlideNode } = await import('./render.ts');
+      const { renderParsedSlideNode } = await import('./render.ts');
       const presentation: Presentation = {
         slideWidth: this.slideWidth,
         slideHeight: this.slideHeight,
@@ -219,7 +219,7 @@ export class PptxPresentationSessionImpl implements PptxPresentationSession {
         ...(this.bootstrap.hlinkColor ? { hlinkColor: this.bootstrap.hlinkColor } : {}),
         ...(this.bootstrap.folHlinkColor ? { folHlinkColor: this.bootstrap.folHlinkColor } : {}),
       };
-      await renderSlideNode(canvas, presentation, 0, {
+      await renderParsedSlideNode(canvas, presentation, 0, {
         ...options,
         cjkFallback: this.cjkFallback,
         fetchImage: this.fetchImage,
