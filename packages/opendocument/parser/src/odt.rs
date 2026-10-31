@@ -5044,6 +5044,19 @@ mod tests {
         // a style without one is ignored (measured).
         assert_eq!(indents("Child"), (6.0, -2.0));
         assert_eq!(indents("Plain"), (2.0, -1.0));
+        // A child repeating the link resets the inherited indents.
+        let styles = styles
+            + r#"<style:style style:name="Relink" style:family="paragraph" style:parent-style-name="Child" style:list-style-name="L"/>"#;
+        let body = r#"<text:list text:style-name="L"><text:list-item><text:p text:style-name="Relink">a</text:p></text:list-item></text:list>"#;
+        let document = read_list(&styles, body).unwrap();
+        let paragraph = paragraphs(&document)[0];
+        assert_eq!(
+            (
+                (paragraph.indent_left / cm * 100.0).round() / 100.0,
+                (paragraph.indent_first / cm * 100.0).round() / 100.0
+            ),
+            (2.0, -1.0)
+        );
     }
 
     #[test]

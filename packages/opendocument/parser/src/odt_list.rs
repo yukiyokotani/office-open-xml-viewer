@@ -794,13 +794,24 @@ impl<'a> Reader<'a> {
                 continue;
             };
             let setter = chain[index].style();
-            // The setter's link is inherited from its parents like any
-            // paragraph property (measured by the reviewer).
+            // The paragraph's nearest list-style link (measured by the
+            // reviewer): a link inherited by the setter from its parents
+            // keeps its indents, a link repeated by a style nearer than the
+            // setter resets them to the list's geometry, and a nearer link
+            // to another list style is not measured.
             let link = (NS_STYLE.to_string(), "list-style-name".to_string());
-            let linked = chain[index..]
+            let nearest = chain
                 .iter()
-                .find_map(|style| style.style().attributes.get(&link))
-                == Some(&list.style_name);
+                .position(|style| style.style().attributes.contains_key(&link));
+            if let Some(nearest) = nearest {
+                if chain[nearest].style().attributes[&link] != list.style_name {
+                    return Err(unsupported("list-paragraph-style"));
+                }
+                if nearest < index {
+                    continue;
+                }
+            }
+            let linked = nearest.is_some();
             if setter.automatic || linked {
                 // Not measured on an item's later paragraphs.
                 if list.label.is_none() {
