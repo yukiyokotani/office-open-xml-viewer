@@ -694,8 +694,14 @@ impl<'a> Reader<'a> {
                                         _ => return Err(unsupported("list-label-followed-by")),
                                     }
                                 }
+                                // A stop before the text area is not modelled
+                                // (measured by the reviewer).
                                 (NS_TEXT, "list-tab-stop-position") => {
-                                    tab = Some(length_pt(value)?)
+                                    let position = length_pt(value)?;
+                                    if position < 0.0 {
+                                        return Err(unsupported("list-tab-position"));
+                                    }
+                                    tab = Some(position);
                                 }
                                 (NS_FO, "margin-left") => margin = length_pt(value)?,
                                 (NS_FO, "text-indent") => indent = length_pt(value)?,
