@@ -3521,6 +3521,7 @@ fn parse_document_settings(settings_xml: &str) -> Option<crate::types::DocumentS
     let use_fe_layout = compat_bool("useFELayout");
     let balance_single_byte_double_byte_width = compat_bool("balanceSingleByteDoubleByteWidth");
     let adjust_line_height_in_table = compat_bool("adjustLineHeightInTable");
+    let ul_trail_space = compat_bool("ulTrailSpace");
     let split_pg_break_and_para_mark = compat_bool("splitPgBreakAndParaMark");
 
     // ECMA-376 §22.1.2.30 `m:mathPr/m:defJc@m:val` — document-wide default math
@@ -3550,6 +3551,7 @@ fn parse_document_settings(settings_xml: &str) -> Option<crate::types::DocumentS
         && balance_single_byte_double_byte_width.is_none()
         && split_pg_break_and_para_mark.is_none()
         && adjust_line_height_in_table.is_none()
+        && ul_trail_space.is_none()
         && compatibility_mode.is_none()
     {
         return None;
@@ -3568,6 +3570,7 @@ fn parse_document_settings(settings_xml: &str) -> Option<crate::types::DocumentS
         use_fe_layout,
         balance_single_byte_double_byte_width,
         adjust_line_height_in_table,
+        ul_trail_space,
         split_pg_break_and_para_mark,
         compatibility_mode,
     })
@@ -20127,6 +20130,29 @@ mod math_jc_tests {
         );
         let enabled = parse_document_settings(&enabled_xml).expect("enabled balance setting");
         assert_eq!(enabled.balance_single_byte_double_byte_width, Some(true));
+    }
+
+    // §17.15.3.8 `w:ulTrailSpace` reaches the renderer: it decides whether a
+    // hanging line-end space keeps its underline.
+    #[test]
+    fn settings_ul_trail_space_surfaces() {
+        let parse = |compat: &str| {
+            parse_document_settings(&format!(
+                r#"<w:settings xmlns:w="{w}"><w:compat>{compat}</w:compat></w:settings>"#,
+                w = W_NS
+            ))
+        };
+        assert_eq!(
+            parse("<w:ulTrailSpace/>").unwrap().ul_trail_space,
+            Some(true)
+        );
+        assert_eq!(
+            parse(r#"<w:ulTrailSpace w:val="0"/>"#)
+                .unwrap()
+                .ul_trail_space,
+            Some(false)
+        );
+        assert!(parse("").is_none());
     }
 
     #[test]

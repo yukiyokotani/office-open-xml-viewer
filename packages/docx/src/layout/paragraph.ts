@@ -410,6 +410,8 @@ export interface PlanLineInput {
   readonly stretchLastLine: boolean;
   /** Exact lines paint run shading through the authored line box. */
   readonly exactLineSpacing?: boolean;
+  /** §17.15.3.8 ulTrailSpace: hanging line-end spaces keep their underline. */
+  readonly ulTrailSpace?: boolean;
   readonly firstLineIndentPt?: number;
   readonly numbering?: Readonly<{
     /** Resolved logical-start offset of the first-line body after the marker. */
@@ -436,19 +438,32 @@ function segmentWidth(segment: MeasuredLinePlanSegment): number {
   return finiteNonNegative(segment.measuredWidthPt, 'segment.measuredWidthPt');
 }
 
-function distributionSegments(segments: readonly MeasuredLinePlanSegment[]): readonly { text?: string }[] {
-  // Zero-advance anchor hosts after a line-end U+0020 are no content cell: the
-  // space stays a line-end space (WORD_LINE_END_SPACE_HANGS). Elsewhere a host
-  // keeps its cell, as the mode-15 gap plan counts it.
-  let trailingHosts = segments.length;
-  while (trailingHosts > 0 && segments[trailingHosts - 1]?.kind === 'anchor-host') trailingHosts -= 1;
-  const beforeHosts = segments[trailingHosts - 1];
-  const hangingHosts = trailingHosts < segments.length
-    && beforeHosts?.kind === 'text'
-    && hangingSpaceVisibleLength(beforeHosts.text) < beforeHosts.text.length;
+function distributionSegments(
+  segments: readonly MeasuredLinePlanSegment[],
+  bidi: boolean,
+): readonly { text?: string }[] {
+  // Zero-advance anchor hosts among the line's trailing hanging spaces are no
+  // content cell: the spaces stay line-end spaces (WORD_LINE_END_SPACE_HANGS).
+  // Elsewhere, and on lines outside the rule, a host keeps its cell, as the
+  // mode-15 gap plan counts it.
+  let suffixStart = segments.length;
+  let hanging = false;
+  while (suffixStart > 0) {
+    const segment = segments[suffixStart - 1];
+    if (segment?.kind === 'anchor-host') {
+      suffixStart -= 1;
+      continue;
+    }
+    if (segment?.kind !== 'text') break;
+    const visible = hangingSpaceVisibleLength(segment.text);
+    if (visible < segment.text.length) hanging = true;
+    if (visible > 0) break;
+    suffixStart -= 1;
+  }
+  const hostsAreHanging = hanging && wordLineEndSpaceHangs(bidi);
   return segments.map((segment, index) => segment.kind === 'text' && !segment.fixedPitch
     ? { text: segment.text }
-    : hangingHosts && index >= trailingHosts ? { text: '' } : {});
+    : hostsAreHanging && index >= suffixStart && segment.kind === 'anchor-host' ? { text: '' } : {});
 }
 
 function kashidaLevel(alignment: string | undefined): KashidaLevel | null {
@@ -989,15 +1004,21 @@ function hangingSpaceVisibleLength(text: string): number {
 
 /** `placement` without decoration over its text after `visible` UTF-16
  * units: the hanging line-end spaces of WORD_LINE_END_SPACE_HANGS. */
-function withoutHangingSpaceDecoration(placement: TextPlacement, visible: number): TextPlacement {
+function withoutHangingSpaceDecoration(
+  placement: TextPlacement,
+  visible: number,
+  keepUnderline: boolean,
+): TextPlacement {
   const trimPt = placement.clusters
     .filter((cluster) => cluster.range.start >= placement.range.start + visible)
     .reduce((sum, cluster) => sum + cluster.advancePt, 0)
     + (placement.ownedTrailingSlackPt ?? 0);
   if (trimPt <= 0) return placement;
+  const kept = (decoration: TextDecorationLayout): boolean =>
+    decoration.kind === 'overline' || (keepUnderline && decoration.kind === 'underline');
   const decorations = visible === 0
-    ? placement.decorations?.filter((decoration) => decoration.kind === 'overline')
-    : placement.decorations?.map((decoration) => decoration.kind === 'overline'
+    ? placement.decorations?.filter(kept)
+    : placement.decorations?.map((decoration) => kept(decoration)
       ? decoration
       : trimTerminalUnderline(decoration, trimPt));
   const narrowed = (rect: LayoutRect): LayoutRect => ({
@@ -1217,7 +1238,7 @@ export function planLine(input: PlanLineInput): LineLayout {
   let stretchByIndex: ReadonlyMap<number, SegStretch> | null = null;
   let perGapPt = 0;
   let distributedWidthPt = 0;
-  const distSegments = distributionSegments(segments);
+  const distSegments = distributionSegments(segments, bidi);
   if (line.justifiedCompressionPt !== undefined) {
     const model = line.gapPlan;
     if (!model) throw new Error('Justified line is missing its retained gap plan');
@@ -1515,15 +1536,16 @@ export function planLine(input: PlanLineInput): LineLayout {
   // highlight or shading over the hanging line-end space. A snapToChars
   // underline keeps its own terminal rule, observed to cover an authored
   // trailing space (WORD_SNAP_TO_CHARS_TERMINAL_UNDERLINE).
-  const snapToCharsTerminal = segments.some((segment) =>
+  // With ulTrailSpace (§17.15.3.8) trailing spaces keep their underline.
+  const keepUnderline = input.ulTrailSpace === true || segments.some((segment) =>
     segment.kind === 'text' && segment.decorationTerminalAdvancePt !== undefined);
-  if (hangingLineEndSpacePt > 0 && !snapToCharsTerminal) {
+  if (hangingLineEndSpacePt > 0) {
     for (let index = placements.length - 1; index >= 0; index -= 1) {
       const placement = placements[index];
       if (placement?.kind === 'anchor-host') continue;
       if (placement?.kind !== 'text') break;
       const visible = hangingSpaceVisibleLength(placement.text);
-      placements[index] = withoutHangingSpaceDecoration(placement, visible);
+      placements[index] = withoutHangingSpaceDecoration(placement, visible, keepUnderline);
       if (visible > 0) break;
     }
   }
@@ -3140,6 +3162,7 @@ function planMeasuredLines(
   paragraphMarkShapeInput?: NumberingMarkerShapeInput,
   /** Owner section's counter-turn for upright inline graphics. */
   resourceOrientation?: import('./types.js').UprightResourceOrientation,
+  ulTrailSpace = false,
 ): readonly LineLayout[] {
   // WORD_GRID_LINE_CONTENT_FIT_ADMISSION covers plain captions only. Decide
   // authored paragraph eligibility before continuation/keep-next slicing removes
@@ -3410,6 +3433,7 @@ function planMeasuredLines(
         === (measured.lines.at(-1)!.layout.physicalLineIndex ?? measured.lines.length - 1),
       stretchLastLine: context.stretchLastLine,
       exactLineSpacing: context.lineSpacing?.rule === 'exact',
+      ...(ulTrailSpace ? { ulTrailSpace } : {}),
       firstLineIndentPt: context.firstIndentPt,
       ...(lineIndex === 0 && numberingPlan
         ? { numbering: { bodyOffsetPt: raw.numberingFirstLine?.lineStartOffsetPx ?? numberingPlan.bodyOffsetPt } }
@@ -6262,6 +6286,7 @@ function projectAcquiredParagraphLines(
       options.environment.verticalPageFrame,
       options.environment.pageWritingMode,
     ),
+    options.environment.ulTrailSpace === true,
   );
   if (options.sourceRangeStart !== undefined) {
     lines = rebaseMeasuredLineRanges(lines, options.sourceRangeStart);
