@@ -2067,6 +2067,11 @@ export interface SecondaryValueAxis {
   dateAxis?: boolean | null;
   /** `<c:valAx><c:crossBetween>` (§21.2.2.32) of a secondary value axis. */
   crossBetween?: 'between' | 'midCat' | string | null;
+  /** The deleted axis shares the primary category axis's position and was
+   *  paired with it through the chart groups' axis IDs (only when used as
+   *  `secondaryCatAxis`): the form Excel writes for a secondary-axis combo.
+   *  Absent when the axis sits on another side and was resolved by position. */
+  pairedBesidePrimary?: boolean | null;
   /** `<c:crosses>` / `<c:crossesAt>` retained for axis placement. */
   crosses?: string | null;
   crossesAt?: number | null;
