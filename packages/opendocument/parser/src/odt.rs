@@ -1214,6 +1214,19 @@ impl<'a> Reader<'a> {
                 }
             }
         }
+        // LibreOffice keeps the pair adjustment between letters of runs that
+        // differ in pair kerning, while the DOCX layout measures each run
+        // apart (measured by the reviewer: "A" then an unkerned "VToAV" at
+        // 30 pt places later text 3.8 pt apart and wraps it differently).
+        let mut kerning = collected.paragraph.runs.iter().filter_map(|run| match run {
+            DocRun::Text(text) => Some(text.kerning.is_some()),
+            _ => None,
+        });
+        if let Some(first) = kerning.next() {
+            if kerning.any(|kerned| kerned != first) {
+                return Err(unsupported("letter-kerning-mixed"));
+            }
+        }
         if collected.paragraph.line_spacing.is_some() {
             // Proportional spacing scales the natural line of uniform text
             // alike; with mixed faces or sizes LibreOffice does not multiply
@@ -5313,12 +5326,11 @@ mod tests {
     #[test]
     fn maps_pair_kerning_on_and_off() {
         // Off is unkerned DOCX text (LibreOffice draws it unkerned,
-        // measured); on kerns every size; an off span inside an on
-        // paragraph is unkerned on its own.
+        // measured); on kerns every size.
         let document = read_fixture(Fixture {
             default_text: r#"style:font-name="Serif" fo:font-size="12pt" style:letter-kerning="false""#,
             styles: r#"<style:style style:name="On" style:family="text"><style:text-properties style:letter-kerning="true"/></style:style><style:style style:name="K" style:family="paragraph"><style:text-properties style:letter-kerning="true"/></style:style><style:style style:name="Off" style:family="text"><style:text-properties style:letter-kerning="false"/></style:style>"#,
-            body: r#"<text:p>AV <text:span text:style-name="On">AV</text:span></text:p><text:p text:style-name="K">AV <text:span text:style-name="Off">AV</text:span></text:p>"#,
+            body: r#"<text:p>AV <text:span text:style-name="Off">AV</text:span></text:p><text:p text:style-name="K">AV <text:span text:style-name="On">AV</text:span></text:p>"#,
             ..Fixture::default()
         })
         .unwrap();
@@ -5335,7 +5347,15 @@ mod tests {
                     .collect()
             })
             .collect();
-        assert_eq!(kerning, vec![vec![None, Some(0.0)], vec![Some(0.0), None]]);
+        assert_eq!(kerning, vec![vec![None], vec![Some(0.0)]]);
+        // A paragraph mixing kerned and unkerned runs rejects.
+        let mixed = read_fixture(Fixture {
+            default_text: r#"style:font-name="Serif" fo:font-size="12pt" style:letter-kerning="true""#,
+            styles: r#"<style:style style:name="Off" style:family="text"><style:text-properties style:letter-kerning="false"/></style:style>"#,
+            body: r#"<text:p>A<text:span text:style-name="Off">V</text:span></text:p>"#,
+            ..Fixture::default()
+        });
+        assert_eq!(mixed.unwrap_err(), unsupported("letter-kerning-mixed"));
     }
 
     #[test]
