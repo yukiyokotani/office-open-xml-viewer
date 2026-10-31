@@ -370,26 +370,35 @@ describe('renderSlide SmartArt fallback contrast (issue #805)', () => {
     expect(run!.fillStyle).toBe('#383838');
   });
 
-  it('paints the hard default black for a parsed slide whose chain authors no colour', async () => {
-    // Issue #1989: with a slide theme the parser has resolved every inherited
-    // colour, so a run still without one paints PowerPoint's 000000, neither
-    // the theme default nor the caller's option.
+  it('keeps a themed caller model on its theme default through the public renderSlide', async () => {
+    // A model passed to the public renderSlide has no proven parsed chain, so
+    // a slide theme keeps its defaultTextColor, as in 0.89.7.
     const slide = {
       ...slideWith(DARK_BG, [fallbackShape('Plain box', { name: 'Rectangle 5', id: '4' })]),
       theme: { defaultTextColor: '1F3F5F', majorFont: null, minorFont: null, hlinkColor: null },
     } as Slide;
     const run = (await renderAndCollect(slide)).find((c) => c.text.includes('Plain box'));
-    expect(run!.fillStyle).toBe('#000000');
-    // The presentation and worker paths render parsed slides, whose chain is
-    // resolved even without a slide theme (an unreadable theme part).
-    const { ctx, fillTexts } = recordingCtx();
-    await renderSlideWithEmbeddedFonts(
-      stubCanvas(ctx),
-      slideWith(DARK_BG, [fallbackShape('Plain box', { name: 'Rectangle 5', id: '4' })]),
-      9_144_000, 6_858_000,
-      { width: 960, dpr: 1, defaultTextColor: '383838', parsedTextChain: true },
-    );
-    expect(fillTexts.find((c) => c.text.includes('Plain box'))!.fillStyle).toBe('#000000');
+    expect(run!.fillStyle).toBe('#1F3F5F');
+  });
+
+  it('paints the hard default black for a parsed slide whose chain authors no colour', async () => {
+    // Issue #1989: the parser has resolved every inherited colour, so a run
+    // still without one paints PowerPoint's 000000, neither the theme default
+    // nor the caller's option. The presentation, render worker and Node
+    // parsed-slide paths say so with the internal parsedTextChain flag, with
+    // or without a slide theme (an unreadable theme part).
+    const themed = {
+      ...slideWith(DARK_BG, [fallbackShape('Plain box', { name: 'Rectangle 5', id: '4' })]),
+      theme: { defaultTextColor: '1F3F5F', majorFont: null, minorFont: null, hlinkColor: null },
+    } as Slide;
+    for (const slide of [themed, slideWith(DARK_BG, [fallbackShape('Plain box', { name: 'Rectangle 5', id: '4' })])]) {
+      const { ctx, fillTexts } = recordingCtx();
+      await renderSlideWithEmbeddedFonts(
+        stubCanvas(ctx), slide, 9_144_000, 6_858_000,
+        { width: 960, dpr: 1, defaultTextColor: '383838', parsedTextChain: true },
+      );
+      expect(fillTexts.find((c) => c.text.includes('Plain box'))!.fillStyle).toBe('#000000');
+    }
   });
 
   it('leaves explicit run colours alone on the fallback shape', async () => {

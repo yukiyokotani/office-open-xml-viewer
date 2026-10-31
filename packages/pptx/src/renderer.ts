@@ -8492,12 +8492,13 @@ async function renderSlideLeased(
   // default, literal black, not the theme dk1 (issue #1989;
   // `HARD_DEFAULT_TEXT_COLOR` in the parser records the controls); the parser
   // resolves every inherited colour, including the default-template tx1 of a
-  // master without txStyles. A caller's own model passed to `renderSlide`
-  // without a slide theme has no parsed chain, so it keeps the caller's
-  // `defaultTextColor`. The theme colour above also colours the synthetic
-  // SmartArt fallback shape, which has no PowerPoint counterpart.
-  const hardDefaultTextColor = slide.theme || opts.parsedTextChain
-    ? '#000000' : themeDefaultColor;
+  // master without txStyles. Only this package's own paths (presentation,
+  // render worker, Node parsed slides) pass `parsedTextChain`. A model passed
+  // to the public `renderSlide` has no proven parsed chain, with or without a
+  // slide theme, so it keeps the theme or caller `defaultTextColor`, as in
+  // 0.89.7. The theme colour above also colours the synthetic SmartArt
+  // fallback shape, which has no PowerPoint counterpart.
+  const hardDefaultTextColor = opts.parsedTextChain ? '#000000' : themeDefaultColor;
 
   const pictureBulletImages = new Map<string, SvgImageSource | null>();
   const shapeFillImages = new Map<string, PreparedShapeFill | null>();
