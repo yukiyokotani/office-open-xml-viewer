@@ -79,7 +79,8 @@ Currently admitted:
   settings make a space not size its line, the space must be in the face of
   the adjacent text on its line and no larger, and decorated spaces that end
   a paragraph or precede a line break are admitted only where LibreOffice
-  leaves them undecorated (its Word-compatible trailing-blank setting);
+  leaves them undecorated (its Word-compatible trailing-blank setting); a
+  trailing no-break or other Unicode space keeps its decoration in both;
 - text in the Latin script class of ODF Part 3 Table 22, including the
   spaces, punctuation, symbols and emoji the table leaves unassigned.
 
@@ -92,6 +93,15 @@ only within its measured scope:
   class of the preceding character (the following one at paragraph start);
 - the nearest style that sets a font colour or the automatic colour decides
   the colour.
+
+Two known differences from LibreOffice remain in admitted documents:
+
+- LibreOffice spreads a justified line's spare width in whole layout
+  units, so its justified lines can end up to about 1.6 pt short of the
+  margin; the viewer ends them at the margin;
+- with LibreOffice's default settings, a decorated space at a wrapped
+  line's end is underlined or struck through in LibreOffice and left
+  undecorated by the viewer.
 
 LibreOffice's layout settings (`settings.xml`) that Word-derived documents
 carry are admitted where they were measured to change nothing the reader

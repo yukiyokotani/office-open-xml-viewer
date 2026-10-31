@@ -1316,9 +1316,9 @@ impl<'a> Reader<'a> {
         // start. A manual break starts a new comparison.
         let mut last_glyph: Option<(u32, ScriptClass)> = None;
         let mut pending_spaces: Vec<(u32, ScriptClass)> = Vec::new();
-        // Spaces since the last visible character, which end the paragraph
-        // or precede a break if nothing visible follows.
-        let mut trailing: Vec<(u32, ScriptClass)> = Vec::new();
+        // White space since the last visible character, which ends the
+        // paragraph or precedes a break if nothing visible follows.
+        let mut trailing: Vec<(u32, ScriptClass, char)> = Vec::new();
         for (index, &token) in tokens.iter().enumerate() {
             let (c, context) = match token {
                 Token::LineBreak(context) => {
@@ -1338,12 +1338,7 @@ impl<'a> Reader<'a> {
                     if !line_has_glyph || !pending_spaces.is_empty() {
                         return Err(unsupported("line-break-empty-line"));
                     }
-                    for space in trailing.drain(..) {
-                        self.trailing_space(
-                            &cache[&space],
-                            last_glyph.map(|glyph| &cache[&glyph]),
-                        )?;
-                    }
+                    self.trailing_spaces(&cache, &std::mem::take(&mut trailing), last_glyph)?;
                     last_glyph = None;
                     line_has_glyph = false;
                     any_break = true;
@@ -1423,7 +1418,7 @@ impl<'a> Reader<'a> {
                         None => pending_spaces.push(key),
                     }
                 }
-                trailing.push(key);
+                trailing.push((key.0, key.1, c));
             } else {
                 trailing.clear();
                 for space in pending_spaces.drain(..) {
@@ -1457,9 +1452,7 @@ impl<'a> Reader<'a> {
         if !pending_spaces.is_empty() {
             return Err(unsupported("space-formatting"));
         }
-        for space in trailing {
-            self.trailing_space(&cache[&space], last_glyph.map(|glyph| &cache[&glyph]))?;
-        }
+        self.trailing_spaces(&cache, &trailing, last_glyph)?;
         // §6.1.2 step 5 removes a trailing collapsed space; LibreOffice keeps
         // it (measured: it sizes the line and carries decorations unless
         // its settings say otherwise), so it must be invisible there too.
@@ -1476,33 +1469,51 @@ impl<'a> Reader<'a> {
                     None => return Err(unsupported("space-formatting")),
                 }
             }
-            // With MsWordCompTrailingBlanks LibreOffice decorates it as the
-            // DOCX layout decorates its absence: not at all.
-            if !settings.blanks && decorated(space) {
-                return Err(unsupported("trailing-space-decoration"));
-            }
+            // A U+0020 after every other trailing character: decorated as
+            // a retained trailing space would be.
+            trailing_space_decoration(space, settings)?;
         }
         Ok(())
     }
 
-    /// A space that ends a paragraph or precedes a line break, after `glyph`
-    /// (the last visible character on its line). With
+    /// The white space that ends a paragraph or precedes a line break, after
+    /// `glyph` (the last visible character on its line). With
     /// MsWordCompTrailingBlanks LibreOffice ignores it for the line height,
     /// so the DOCX layout must too (see `emit_runs`); the IgnoreTabsAndBlanks
-    /// case was already checked as an ordinary space.
-    fn trailing_space(
+    /// case was already checked as an ordinary space. Only the U+0020 suffix
+    /// hangs in the DOCX layout; LibreOffice, like the DOCX layout, decorates
+    /// a trailing no-break or other Unicode space under every setting
+    /// (measured: U+00A0, U+2002, U+2009), so only that suffix meets the
+    /// decoration gate.
+    fn trailing_spaces(
         &self,
-        space: &RunProperties,
-        glyph: Option<&RunProperties>,
+        cache: &HashMap<(u32, ScriptClass), RunProperties>,
+        trailing: &[(u32, ScriptClass, char)],
+        glyph: Option<(u32, ScriptClass)>,
     ) -> Result<(), String> {
+        if trailing.is_empty() {
+            return Ok(());
+        }
         let settings = self.layout_flags;
         // A line of only white space gets synthetic metrics in the DOCX
         // layout (see the line-break gate), whatever the settings.
-        let glyph = glyph.ok_or_else(|| unsupported("space-formatting"))?;
-        if settings.blanks && !settings.ignore {
-            space_fits_line(space, glyph)?;
+        let glyph = &cache[&glyph.ok_or_else(|| unsupported("space-formatting"))?];
+        let hanging = trailing.len()
+            - trailing
+                .iter()
+                .rev()
+                .take_while(|(_, _, c)| *c == ' ')
+                .count();
+        for (index, (context, class, _)) in trailing.iter().enumerate() {
+            let space = &cache[&(*context, *class)];
+            if settings.blanks && !settings.ignore {
+                space_fits_line(space, glyph)?;
+            }
+            if index >= hanging {
+                trailing_space_decoration(space, settings)?;
+            }
         }
-        trailing_space_decoration(space, settings)
+        Ok(())
     }
 
     fn uniform_class(
@@ -3705,6 +3716,14 @@ mod tests {
                     format!(
                         r#"<text:p><text:span text:style-name="{style}">a<text:s text:c="2"/></text:span><text:line-break/>b</text:p>"#
                     ),
+                    // §6.1.2 removes this collapsed space; LibreOffice keeps it.
+                    format!(
+                        r#"<text:p><text:span text:style-name="{style}">a </text:span></text:p>"#
+                    ),
+                    // The U+0020 suffix after a no-break space.
+                    format!(
+                        r#"<text:p><text:span text:style-name="{style}">a&#160;<text:s/></text:span></text:p>"#
+                    ),
                 ] {
                     let result = read_fixture(Fixture {
                         styles,
@@ -3720,6 +3739,25 @@ mod tests {
                             unsupported("trailing-space-decoration"),
                             "{blanks} {underline} {body}"
                         );
+                    }
+                }
+                // Both decorate a trailing no-break or other Unicode space.
+                for space in ["&#160;", "&#8194;", "&#8201;"] {
+                    for body in [
+                        format!(
+                            r#"<text:p><text:span text:style-name="{style}">a{space}{space}</text:span></text:p>"#
+                        ),
+                        format!(
+                            r#"<text:p><text:span text:style-name="{style}">a{space}</text:span><text:line-break/>b</text:p>"#
+                        ),
+                    ] {
+                        let result = read_fixture(Fixture {
+                            styles,
+                            body: &body,
+                            settings: &settings,
+                            ..Fixture::default()
+                        });
+                        assert!(result.is_ok(), "{blanks} {underline} {body} {result:?}");
                     }
                 }
                 // Spaces between visible text are not trailing.
