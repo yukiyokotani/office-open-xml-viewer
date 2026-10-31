@@ -245,7 +245,7 @@ fn jpeg_structure(bytes: &[u8], budget: &mut u64) -> Result<(), String> {
                 return Err(unsupported("image-colour"))
             }
             0xe1 if segment.starts_with(b"Exif\0\0") => {
-                if exif_orientation(&segment[6..]).is_some_and(|o| o != 1) {
+                if !exif_unrotated(&segment[6..]) {
                     return Err(unsupported("image-orientation"));
                 }
             }
@@ -616,13 +616,16 @@ fn scan_header_valid(segment: &[u8]) -> bool {
         && segment[1 + 2 * usize::from(count)..] == [0, 63, 0]
 }
 
-/// The orientation tag (0x0112) of an EXIF block's first IFD (TIFF 6.0
-/// §2), when present and readable.
-fn exif_orientation(tiff: &[u8]) -> Option<u16> {
-    let big = match tiff.get(..2)? {
-        b"MM" => true,
-        b"II" => false,
-        _ => return None,
+/// Whether an EXIF block (TIFF 6.0 §2) is readable and leaves the picture
+/// unrotated: its first IFD's entries are in bounds and every orientation
+/// entry (0x0112) is one SHORT of value 1. Browsers skip a malformed entry
+/// and apply a later one, LibreOffice applies none (measured by the
+/// reviewer), so any other orientation entry rejects.
+fn exif_unrotated(tiff: &[u8]) -> bool {
+    let big = match tiff.get(..2) {
+        Some(b"MM") => true,
+        Some(b"II") => false,
+        _ => return false,
     };
     let u16_at = |at: usize| -> Option<u16> {
         let b: [u8; 2] = tiff.get(at..at + 2)?.try_into().ok()?;
@@ -640,12 +643,17 @@ fn exif_orientation(tiff: &[u8]) -> Option<u16> {
             u32::from_le_bytes(b)
         })
     };
-    let ifd = u32_at(4)? as usize;
-    let count = usize::from(u16_at(ifd)?);
-    (0..count).find_map(|entry| {
-        let at = ifd + 2 + 12 * entry;
-        (u16_at(at)? == 0x0112).then(|| u16_at(at + 8)).flatten()
-    })
+    let check = || -> Option<bool> {
+        let ifd = u32_at(4)? as usize;
+        let count = usize::from(u16_at(ifd)?);
+        tiff.get(ifd + 2..ifd + 2 + 12 * count)?;
+        Some((0..count).all(|entry| {
+            let at = ifd + 2 + 12 * entry;
+            u16_at(at) != Some(0x0112)
+                || (u16_at(at + 2), u32_at(at + 4), u16_at(at + 8)) == (Some(3), Some(1), Some(1))
+        }))
+    };
+    check().unwrap_or(false)
 }
 
 fn png(bytes: &[u8], budget: &mut u64) -> Result<(), String> {
@@ -980,6 +988,22 @@ pub(crate) mod tests {
         };
         assert_eq!(dec(&exif(1)).unwrap(), "image/jpeg");
         assert_eq!(dec(&exif(6)).unwrap_err(), unsupported("image-orientation"));
+        // A malformed orientation entry (count 0) before a rotating one, and
+        // an IFD running past its block.
+        let mut ifd = b"Exif\x00\x00MM\x00\x2a\x00\x00\x00\x08\x00\x02".to_vec();
+        ifd.extend([0x01, 0x12, 0, 3, 0, 0, 0, 0, 0, 1, 0, 0]);
+        ifd.extend([0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, 6, 0, 0]);
+        ifd.extend([0, 0, 0, 0]);
+        let segment = [&[0xff, 0xe1, 0, ifd.len() as u8 + 2][..], &ifd].concat();
+        assert_eq!(
+            dec(&with(&segment)).unwrap_err(),
+            unsupported("image-orientation")
+        );
+        let short = [&[0xff, 0xe1, 0, 20][..], &ifd[..18]].concat();
+        assert_eq!(
+            dec(&with(&short)).unwrap_err(),
+            unsupported("image-orientation")
+        );
         let adobe = with(b"\xff\xee\x00\x0eAdobe\x00\x64\x00\x00\x00\x00\x00");
         assert_eq!(dec(&adobe).unwrap_err(), unsupported("image-colour"));
         // A zero quantiser, a DC category past 11, a code using all ones.
