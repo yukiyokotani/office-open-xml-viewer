@@ -36,11 +36,11 @@ const section: SectionProps = {
   headerDistance: 0, footerDistance: 0, titlePage: false, evenAndOddHeaders: false,
 };
 
-function textRun(text: string): DocParagraph['runs'][number] {
+function textRun(text: string, extra: Partial<DocxTextRun> = {}): DocParagraph['runs'][number] {
   const run: DocxTextRun = {
     text, bold: false, italic: false, underline: false, strikethrough: false,
     fontSize: 20, color: null, fontFamily: 'NotInMetrics', isLink: false, background: null,
-    vertAlign: null, hyperlink: null,
+    vertAlign: null, hyperlink: null, ...extra,
   };
   return { type: 'text', ...run } as DocParagraph['runs'][number];
 }
@@ -71,7 +71,7 @@ const visibleStart = (line: LineLayout): number =>
 /** Right edge of the line's visible text (each character 10 pt). */
 function visibleEnd(line: LineLayout): number {
   const last = texts(line).filter((p) => p.text.trim() !== '').at(-1)!;
-  const trailing = last.text.length - last.text.trimEnd().length;
+  const trailing = last.text.length - last.text.replace(/[ \u3000]+$/, '').length;
   return last.bounds.xPt + last.advancePt - trailing * 10;
 }
 
@@ -98,9 +98,65 @@ describe('WORD_LINE_END_SPACE_HANGS', () => {
     expect(visibleEnd(rightLast!)).toBeCloseTo(380, 6);
   });
 
-  it('keeps the space before a manual break inside the aligned width', () => {
-    // Outside the observation: a line ended by a break keeps its geometry.
-    const [line] = lines(para([textRun('aaaa '), { type: 'break', breakType: 'line' } as DocParagraph['runs'][number], textRun('bbbb')], 'right'));
-    expect(visibleEnd(line!)).toBeCloseTo(370, 6);
+  it('looks through a zero-width anchor host after the line-end space', () => {
+    const host = { type: 'anchorHost', fontSize: 20, fontFamily: 'NotInMetrics', bold: false, italic: false } as DocParagraph['runs'][number];
+    const runs = [textRun('aaaa bbbb cccc dddd eeee ffff gggg '), host, textRun('hhhh')];
+    const [right] = lines(para(runs, 'right'));
+    expect(visibleEnd(right!)).toBeCloseTo(380, 6);
+    const [centred] = lines(para(runs, 'center'));
+    expect(visibleStart(centred!)).toBeCloseTo(30, 6);
+    const [justified] = lines(para(runs, 'both'));
+    expect(visibleEnd(justified!)).toBeCloseTo(380, 6);
+  });
+
+  it('paints no decoration over the hanging space', () => {
+    // Windows Word ends underline, strike-through, highlight and shading at the
+    // visible text of a soft-wrapped line.
+    const decorated = { underline: true, highlight: 'yellow' } as Partial<DocxTextRun>;
+    for (const alignment of ['both', 'right'] as const) {
+      for (const extra of [decorated, { strikethrough: true }] as Partial<DocxTextRun>[]) {
+        const [first] = lines(para([textRun(WORDS, extra)], alignment));
+        const last = texts(first!).at(-1)!;
+        expect(last.text.endsWith(' ')).toBe(true);
+        // Adjacent decorated runs merge into one rule; it ends at the text.
+        const ends = texts(first!).flatMap((p) => p.decorations ?? []).map((d) => d.to.xPt);
+        expect(ends.length).toBeGreaterThan(0);
+        expect(Math.max(...ends)).toBeCloseTo(380, 6);
+        if (extra.highlight) {
+          const fill = last.highlightFragments![0]!.rect;
+          expect(fill.xPt + fill.widthPt).toBeCloseTo(380, 6);
+        }
+      }
+    }
+    // A line-end space in its own decorated run carries none.
+    const runs = [textRun('aaaa bbbb cccc dddd eeee ffff gggg'), textRun(' ', decorated), textRun('hhhh')];
+    const [first] = lines(para(runs, 'right'));
+    const space = texts(first!).at(-1)!;
+    expect(space.text).toBe(' ');
+    expect(space.decorations ?? []).toEqual([]);
+    // An empty list: an absent one would make paint fall back to the bounds.
+    expect(space.highlightFragments).toEqual([]);
+  });
+
+  it('hangs paragraph-final spaces and ideographic spaces too', () => {
+    for (const text of ['aaaa bbbb ', 'aaaa bbbb   ', 'aaaa\u3000bbbb\u3000', 'aaaa bbbb \u3000 ']) {
+      const [right] = lines(para([textRun(text)], 'right'));
+      expect(visibleEnd(right!)).toBeCloseTo(380, 6);
+      const [centred] = lines(para([textRun(text)], 'center'));
+      expect(visibleStart(centred!)).toBeCloseTo(20 + (360 - 90) / 2, 6);
+    }
+    // Ideographic-space separators wrap and hang like U+0020.
+    const [wrapped] = lines(para([textRun(WORDS.replaceAll(' ', '\u3000'))], 'right'));
+    expect(visibleEnd(wrapped!)).toBeCloseTo(380, 6);
+  });
+
+  it('hangs the spaces before a manual break', () => {
+    const br = { type: 'break', breakType: 'line' } as DocParagraph['runs'][number];
+    for (const tail of ['aaaa ', 'aaaa   ', 'aaaa\u3000']) {
+      const [right] = lines(para([textRun(tail), br, textRun('bbbb')], 'right'));
+      expect(visibleEnd(right!)).toBeCloseTo(380, 6);
+      const [centred] = lines(para([textRun(tail), br, textRun('bbbb')], 'center'));
+      expect(visibleStart(centred!)).toBeCloseTo(20 + (360 - 40) / 2, 6);
+    }
   });
 });

@@ -455,12 +455,12 @@ export const WORD_LINE_END_SPACE_HANGS = defineCompatibilityRule({
     version: '16.0.20527.20088',
     platform: 'Windows',
   },
-  description: 'The U+0020 spaces that end a soft-wrapped left-to-right line hang past it: they take no part in justification or in centre/right alignment. Windows Word controls in compatibility modes unset, 11, 12, 14 and 15 (Times New Roman 12pt and Arial 11pt, plain, bold and larger runs) end every justified line flush at the right margin (both, distribute, lowKashida and highKashida within 0.6pt; mediumKashida and thaiDistribute lines also end flush but Word breaks those Latin controls at other words, a separate line-breaking difference), and centre/right-aligned wrapped lines sit half/one line-end space further right than when the space counts. Lines that end the paragraph or a manual break, right-to-left lines, and other white space characters are outside the observation and keep their previous geometry. Mode-15 justified lines already fit their visible width (WORD_JUSTIFIED_INTERWORD_COMPRESSION).',
+  description: 'The U+0020 and U+3000 spaces that end a left-to-right line (soft-wrapped, ended by a manual break, or paragraph-final) hang past it: they take no part in justification or in centre/right alignment, and Word paints no underline, double underline, strike-through, double strike-through, highlight or shading over them. Windows Word controls in compatibility modes unset, 11, 12, 14 and 15 (Times New Roman 12pt and Arial 11pt, plain, bold and larger runs, one or three trailing spaces, ideographic-space separators, a tab earlier on the line, spaces in their own decorated runs, a text box) end every justified line flush at the right margin (both, distribute, lowKashida and highKashida within 0.6pt; mediumKashida and thaiDistribute lines also end flush but Word breaks those Latin controls at other words, a separate line-breaking difference) and place centre/right-aligned lines by their visible text, wrapped, break-ended and final alike (one, three and ideographic trailing spaces before a break: right +3.2/+9.2/+12.1pt, centre half that, before this rule). Mode-15 justified lines already fit their visible width (WORD_JUSTIFIED_INTERWORD_COMPRESSION), which drops a line-end U+0020 only: there Word keeps a line-end U+3000 that fits inside the margin and hangs one that overflows it, a line-fit question outside this rule, so mode-15 justification keeps the fit of the line breaker. Right-to-left lines and other white space characters (NBSP, tab) keep their previous geometry. Underlines under a snapToChars grid keep WORD_SNAP_TO_CHARS_TERMINAL_UNDERLINE, observed on Word for Mac to cover an authored trailing space.',
 });
 
 /** Scope of {@link WORD_LINE_END_SPACE_HANGS}. */
-export function wordLineEndSpaceHangs(bidi: boolean, endsLogicalLine: boolean): boolean {
-  return !bidi && !endsLogicalLine;
+export function wordLineEndSpaceHangs(bidi: boolean): boolean {
+  return !bidi;
 }
 
 /** Visible-prefix projection of {@link WORD_COLLAPSIBLE_LINE_EDGE_VISIBLE_FIT}. */
