@@ -1181,6 +1181,10 @@ pub(crate) fn tx_style_nodes<'a, 'i>(
 ///   U+2022 bullet, marL 0.25" plus 0.5" per level with a 0.25" hanging
 ///   indent.
 ///
+/// * colour: title, subTitle and body text with no fill of its own rendered
+///   the theme tx1 through the slide's colour map (a dk1 of 10263F against
+///   the 000000 hard default), the default template's `schemeClr tx1` fill.
+///
 /// ctrTitle takes the title style and obj / subTitle / typeless the body style
 /// (`class_style_nodes`). These are the values of PowerPoint's default
 /// template. A supplementary control measured levels 6-9 the same way: body
@@ -1193,17 +1197,17 @@ const BUILT_IN_TX_STYLES: &str = concat!(
     r#"xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">"#,
     r#"<p:titleStyle><a:lvl1pPr><a:lnSpc><a:spcPct val="90000"/></a:lnSpc>"#,
     r#"<a:spcBef><a:spcPct val="0"/></a:spcBef><a:buNone/>"#,
-    r#"<a:defRPr sz="4400"><a:latin typeface="+mj-lt"/></a:defRPr></a:lvl1pPr></p:titleStyle>"#,
+    r#"<a:defRPr sz="4400"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill><a:latin typeface="+mj-lt"/></a:defRPr></a:lvl1pPr></p:titleStyle>"#,
     r#"<p:bodyStyle>"#,
-    r#"<a:lvl1pPr marL="228600" indent="-228600"><a:lnSpc><a:spcPct val="90000"/></a:lnSpc><a:spcBef><a:spcPts val="1000"/></a:spcBef><a:buFont typeface="Arial"/><a:buChar char="•"/><a:defRPr sz="2800"><a:latin typeface="+mn-lt"/></a:defRPr></a:lvl1pPr>"#,
-    r#"<a:lvl2pPr marL="685800" indent="-228600"><a:lnSpc><a:spcPct val="90000"/></a:lnSpc><a:spcBef><a:spcPts val="500"/></a:spcBef><a:buFont typeface="Arial"/><a:buChar char="•"/><a:defRPr sz="2400"><a:latin typeface="+mn-lt"/></a:defRPr></a:lvl2pPr>"#,
-    r#"<a:lvl3pPr marL="1143000" indent="-228600"><a:lnSpc><a:spcPct val="90000"/></a:lnSpc><a:spcBef><a:spcPts val="500"/></a:spcBef><a:buFont typeface="Arial"/><a:buChar char="•"/><a:defRPr sz="2000"><a:latin typeface="+mn-lt"/></a:defRPr></a:lvl3pPr>"#,
-    r#"<a:lvl4pPr marL="1600200" indent="-228600"><a:lnSpc><a:spcPct val="90000"/></a:lnSpc><a:spcBef><a:spcPts val="500"/></a:spcBef><a:buFont typeface="Arial"/><a:buChar char="•"/><a:defRPr sz="1800"><a:latin typeface="+mn-lt"/></a:defRPr></a:lvl4pPr>"#,
-    r#"<a:lvl5pPr marL="2057400" indent="-228600"><a:lnSpc><a:spcPct val="90000"/></a:lnSpc><a:spcBef><a:spcPts val="500"/></a:spcBef><a:buFont typeface="Arial"/><a:buChar char="•"/><a:defRPr sz="1800"><a:latin typeface="+mn-lt"/></a:defRPr></a:lvl5pPr>"#,
-    r#"<a:lvl6pPr marL="2514600" indent="-228600"><a:lnSpc><a:spcPct val="90000"/></a:lnSpc><a:spcBef><a:spcPts val="500"/></a:spcBef><a:buFont typeface="Arial"/><a:buChar char="•"/><a:defRPr sz="1800"><a:latin typeface="+mn-lt"/></a:defRPr></a:lvl6pPr>"#,
-    r#"<a:lvl7pPr marL="2971800" indent="-228600"><a:lnSpc><a:spcPct val="90000"/></a:lnSpc><a:spcBef><a:spcPts val="500"/></a:spcBef><a:buFont typeface="Arial"/><a:buChar char="•"/><a:defRPr sz="1800"><a:latin typeface="+mn-lt"/></a:defRPr></a:lvl7pPr>"#,
-    r#"<a:lvl8pPr marL="3429000" indent="-228600"><a:lnSpc><a:spcPct val="90000"/></a:lnSpc><a:spcBef><a:spcPts val="500"/></a:spcBef><a:buFont typeface="Arial"/><a:buChar char="•"/><a:defRPr sz="1800"><a:latin typeface="+mn-lt"/></a:defRPr></a:lvl8pPr>"#,
-    r#"<a:lvl9pPr marL="3886200" indent="-228600"><a:lnSpc><a:spcPct val="90000"/></a:lnSpc><a:spcBef><a:spcPts val="500"/></a:spcBef><a:buFont typeface="Arial"/><a:buChar char="•"/><a:defRPr sz="1800"><a:latin typeface="+mn-lt"/></a:defRPr></a:lvl9pPr>"#,
+    r#"<a:lvl1pPr marL="228600" indent="-228600"><a:lnSpc><a:spcPct val="90000"/></a:lnSpc><a:spcBef><a:spcPts val="1000"/></a:spcBef><a:buFont typeface="Arial"/><a:buChar char="•"/><a:defRPr sz="2800"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill><a:latin typeface="+mn-lt"/></a:defRPr></a:lvl1pPr>"#,
+    r#"<a:lvl2pPr marL="685800" indent="-228600"><a:lnSpc><a:spcPct val="90000"/></a:lnSpc><a:spcBef><a:spcPts val="500"/></a:spcBef><a:buFont typeface="Arial"/><a:buChar char="•"/><a:defRPr sz="2400"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill><a:latin typeface="+mn-lt"/></a:defRPr></a:lvl2pPr>"#,
+    r#"<a:lvl3pPr marL="1143000" indent="-228600"><a:lnSpc><a:spcPct val="90000"/></a:lnSpc><a:spcBef><a:spcPts val="500"/></a:spcBef><a:buFont typeface="Arial"/><a:buChar char="•"/><a:defRPr sz="2000"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill><a:latin typeface="+mn-lt"/></a:defRPr></a:lvl3pPr>"#,
+    r#"<a:lvl4pPr marL="1600200" indent="-228600"><a:lnSpc><a:spcPct val="90000"/></a:lnSpc><a:spcBef><a:spcPts val="500"/></a:spcBef><a:buFont typeface="Arial"/><a:buChar char="•"/><a:defRPr sz="1800"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill><a:latin typeface="+mn-lt"/></a:defRPr></a:lvl4pPr>"#,
+    r#"<a:lvl5pPr marL="2057400" indent="-228600"><a:lnSpc><a:spcPct val="90000"/></a:lnSpc><a:spcBef><a:spcPts val="500"/></a:spcBef><a:buFont typeface="Arial"/><a:buChar char="•"/><a:defRPr sz="1800"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill><a:latin typeface="+mn-lt"/></a:defRPr></a:lvl5pPr>"#,
+    r#"<a:lvl6pPr marL="2514600" indent="-228600"><a:lnSpc><a:spcPct val="90000"/></a:lnSpc><a:spcBef><a:spcPts val="500"/></a:spcBef><a:buFont typeface="Arial"/><a:buChar char="•"/><a:defRPr sz="1800"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill><a:latin typeface="+mn-lt"/></a:defRPr></a:lvl6pPr>"#,
+    r#"<a:lvl7pPr marL="2971800" indent="-228600"><a:lnSpc><a:spcPct val="90000"/></a:lnSpc><a:spcBef><a:spcPts val="500"/></a:spcBef><a:buFont typeface="Arial"/><a:buChar char="•"/><a:defRPr sz="1800"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill><a:latin typeface="+mn-lt"/></a:defRPr></a:lvl7pPr>"#,
+    r#"<a:lvl8pPr marL="3429000" indent="-228600"><a:lnSpc><a:spcPct val="90000"/></a:lnSpc><a:spcBef><a:spcPts val="500"/></a:spcBef><a:buFont typeface="Arial"/><a:buChar char="•"/><a:defRPr sz="1800"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill><a:latin typeface="+mn-lt"/></a:defRPr></a:lvl8pPr>"#,
+    r#"<a:lvl9pPr marL="3886200" indent="-228600"><a:lnSpc><a:spcPct val="90000"/></a:lnSpc><a:spcBef><a:spcPts val="500"/></a:spcBef><a:buFont typeface="Arial"/><a:buChar char="•"/><a:defRPr sz="1800"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill><a:latin typeface="+mn-lt"/></a:defRPr></a:lvl9pPr>"#,
     r#"</p:bodyStyle></p:txStyles>"#,
 );
 
@@ -1776,7 +1780,15 @@ pub(crate) fn parse_master_txstyle_color_tier(
             map.entry(ph_type).or_insert(color);
         }
     }
-    for (style_node, ph_types) in tx_style_nodes(root) {
+    // Authored txStyles only: the built-in template styles of a master
+    // without them colour their own list levels (`parse_master_level_colors`),
+    // and a title's level-1 fill must not become the default of its deeper
+    // levels, which keep the hard default.
+    let authored_tx_styles = child(root, "txStyles").is_some();
+    for (style_node, ph_types) in tx_style_nodes(root)
+        .into_iter()
+        .filter(|_| authored_tx_styles)
+    {
         if let Some(color) = child(style_node, "lvl1pPr")
             .and_then(|lp| child(lp, "defRPr"))
             .and_then(|rp| text_property_color(rp, theme))
@@ -3636,6 +3648,39 @@ mod placeholder_geometry_tests {
             .get("title")
             .is_none_or(|levels| levels[1].mar_l.is_none()));
         assert!(!sizes.contains_key("dt"));
+    }
+
+    /// #1435 control: on a master without txStyles, title, subTitle and body
+    /// text with no fill renders the theme tx1 through the slide's colour map
+    /// (the default template's fill), not the 000000 hard default.
+    #[test]
+    fn master_without_tx_styles_colours_title_and_body_text_tx1() {
+        let xml = r#"<p:sldMaster
+          xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+          xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <p:cSld><p:spTree/></p:cSld>
+        </p:sldMaster>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        // A dark map: tx1 resolves to lt1.
+        let theme = HashMap::from([
+            ("dk1".to_owned(), "10263F".to_owned()),
+            ("lt1".to_owned(), "F9F9F9".to_owned()),
+            ("tx1".to_owned(), "F9F9F9".to_owned()),
+        ]);
+        let colors = parse_master_level_colors(doc.root_element(), &theme);
+        for class in TITLE_CLASS {
+            assert_eq!(colors[*class][0].as_deref(), Some("F9F9F9"), "{class}");
+            // Deeper title levels keep the hard default.
+            assert_eq!(colors[*class][1], None, "{class}");
+        }
+        for class in BODY_CLASS {
+            for (level, color) in colors[*class].iter().enumerate().take(9) {
+                assert_eq!(color.as_deref(), Some("F9F9F9"), "{class} {level}");
+            }
+        }
+        // The level-1 fill stays on its level: it is no shape-wide default,
+        // which would colour the deeper title levels too.
+        assert!(parse_master_txstyle_color(doc.root_element(), &theme).is_empty());
     }
 
     /// Review regression (#1620 x #1625): only the Latin face and size of

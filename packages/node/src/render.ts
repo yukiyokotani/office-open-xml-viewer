@@ -17,6 +17,7 @@ import { resolveCjkFallback, type CjkFallback } from '@silurus/ooxml-core';
  */
 
 import type { Presentation } from '@silurus/ooxml-pptx';
+import { isParsedPptxSlide } from './pptx-parsed-slides.ts';
 
 let nodeCanvasRuntimeTail: Promise<void> = Promise.resolve();
 
@@ -253,8 +254,10 @@ export async function renderSlideNode(
   // Direct import of the pure renderer module — avoids `presentation.ts`
   // and `viewer.ts`, both of which pull Vite-specific worker / asset
   // imports that don't resolve under Node.
-  const { renderSlide } = (await import('@silurus/ooxml-pptx/internal/session')) as unknown as {
-    renderSlide: (
+  const { renderSlideWithEmbeddedFonts: renderSlide } = (
+    await import('@silurus/ooxml-pptx/internal/session')
+  ) as unknown as {
+    renderSlideWithEmbeddedFonts: (
       canvas: HTMLCanvasElement,
       slide: Presentation['slides'][number],
       slideWidth: number,
@@ -291,6 +294,7 @@ export async function renderSlideNode(
         // inject another source; text/shape-only rendering uses an empty Blob.
         fetchImage,
         skipMediaControls: true,
+        ...(isParsedPptxSlide(slide) ? { parsedTextChain: true } : {}),
       },
     );
   };

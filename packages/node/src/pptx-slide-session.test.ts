@@ -9,6 +9,7 @@ import {
 import { OoxmlDecodedImageLimitError, OoxmlError } from '@silurus/ooxml-core';
 import { nonOoxmlInputs } from '@silurus/ooxml-core/testing';
 import type { NodeCanvasFactory, NodeCanvasLike } from './render.ts';
+import { storedZip } from './test-ooxml-package.ts';
 
 let bytes: Buffer;
 
@@ -299,6 +300,102 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+/** A deck whose presentation theme sets dk1 but whose master names a missing
+ * theme part: the parsed slide has no theme and its title text has no colour
+ * of its own. */
+function themeLessMasterDeck(): Uint8Array {
+  const p = 'http://schemas.openxmlformats.org/presentationml/2006/main';
+  const a = 'http://schemas.openxmlformats.org/drawingml/2006/main';
+  const r = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  const ns = `xmlns:p="${p}" xmlns:a="${a}" xmlns:r="${r}"`;
+  const rels = (items: Array<[string, string, string]>): string =>
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+    + items.map(([id, type, target]) =>
+      `<Relationship Id="${id}" Type="${r}/${type}" Target="${target}"/>`).join('')
+    + '</Relationships>';
+  const clrMap = 'bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" '
+    + 'accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" '
+    + 'hlink="hlink" folHlink="folHlink"';
+  const scheme = Object.entries({ dk1: '10263F', lt1: 'F9F9F9', dk2: '111111', lt2: 'EEEEEE' })
+    .map(([name, value]) => `<a:${name}><a:srgbClr val="${value}"/></a:${name}>`).join('');
+  const type = (part: string, kind: string): string =>
+    `<Override PartName="/${part}" ContentType="application/vnd.openxmlformats-officedocument.${kind}+xml"/>`;
+  return storedZip({
+    '[Content_Types].xml': '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+      + '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+      + '<Default Extension="xml" ContentType="application/xml"/>'
+      + type('ppt/presentation.xml', 'presentationml.presentation.main')
+      + type('ppt/slideMasters/slideMaster1.xml', 'presentationml.slideMaster')
+      + type('ppt/slideLayouts/slideLayout1.xml', 'presentationml.slideLayout')
+      + type('ppt/slides/slide1.xml', 'presentationml.slide')
+      + type('ppt/theme/theme1.xml', 'theme')
+      + '</Types>',
+    '_rels/.rels': rels([['pres', 'officeDocument', 'ppt/presentation.xml']]),
+    'ppt/presentation.xml': `<p:presentation ${ns}><p:sldMasterIdLst>`
+      + '<p:sldMasterId id="2147483648" r:id="master"/></p:sldMasterIdLst>'
+      + '<p:sldIdLst><p:sldId id="256" r:id="slide"/></p:sldIdLst>'
+      + '<p:sldSz cx="9144000" cy="6858000"/></p:presentation>',
+    'ppt/_rels/presentation.xml.rels': rels([
+      ['master', 'slideMaster', 'slideMasters/slideMaster1.xml'],
+      ['slide', 'slide', 'slides/slide1.xml'],
+      ['theme', 'theme', 'theme/theme1.xml'],
+    ]),
+    'ppt/theme/theme1.xml': `<a:theme xmlns:a="${a}" name="T"><a:themeElements>`
+      + `<a:clrScheme name="C">${scheme}</a:clrScheme>`
+      + '<a:fontScheme name="F"><a:majorFont><a:latin typeface="Arial"/></a:majorFont>'
+      + '<a:minorFont><a:latin typeface="Arial"/></a:minorFont></a:fontScheme>'
+      + '<a:fmtScheme name="S"><a:fillStyleLst/><a:lnStyleLst/><a:effectStyleLst/>'
+      + '<a:bgFillStyleLst/></a:fmtScheme></a:themeElements></a:theme>',
+    'ppt/slideMasters/slideMaster1.xml': `<p:sldMaster ${ns}><p:cSld><p:spTree/></p:cSld>`
+      + `<p:clrMap ${clrMap}/></p:sldMaster>`,
+    'ppt/slideMasters/_rels/slideMaster1.xml.rels': rels([['theme', 'theme', '../theme/missing.xml']]),
+    'ppt/slideLayouts/slideLayout1.xml': `<p:sldLayout ${ns}><p:cSld><p:spTree/></p:cSld></p:sldLayout>`,
+    'ppt/slideLayouts/_rels/slideLayout1.xml.rels': rels([
+      ['master', 'slideMaster', '../slideMasters/slideMaster1.xml'],
+    ]),
+    'ppt/slides/slide1.xml': `<p:sld ${ns}><p:cSld><p:spTree><p:sp><p:nvSpPr>`
+      + '<p:cNvPr id="2" name="Title"/><p:cNvSpPr/><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr>'
+      + '<p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="4000000" cy="2000000"/></a:xfrm>'
+      + '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>'
+      + '<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:pPr lvl="1"/><a:r><a:rPr/>'
+      + '<a:t>title-1</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>',
+    'ppt/slides/_rels/slide1.xml.rels': rels([
+      ['layout', 'slideLayout', '../slideLayouts/slideLayout1.xml'],
+    ]),
+  });
+}
+
+/** Canvas whose context records the fill style of every painted text run. */
+function textRecordingCanvas(): { canvas: NodeCanvasLike; fills: Map<string, unknown> } {
+  const fills = new Map<string, unknown>();
+  const state: Record<string, unknown> = {
+    font: '10px sans-serif', fillStyle: '#000', strokeStyle: '#000', lineWidth: 1,
+    textAlign: 'start', textBaseline: 'alphabetic', globalAlpha: 1, letterSpacing: '0px',
+  };
+  const canvas = { width: 1, height: 1 } as NodeCanvasLike;
+  const ctx = new Proxy(state, {
+    get(_target, prop: string) {
+      if (prop === 'canvas') return canvas;
+      if (prop in state) return state[prop];
+      if (prop === 'measureText') {
+        return (text: string) => ({
+          width: text.length * 7, actualBoundingBoxAscent: 8, actualBoundingBoxDescent: 2,
+          fontBoundingBoxAscent: 8, fontBoundingBoxDescent: 2,
+        });
+      }
+      if (prop === 'fillText') return (text: string) => { fills.set(text, state.fillStyle); };
+      if (prop === 'getTransform') return () => ({ a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 });
+      if (prop === 'createLinearGradient' || prop === 'createRadialGradient') {
+        return () => ({ addColorStop() {} });
+      }
+      return () => undefined;
+    },
+    set(_target, prop: string, value) { state[prop] = value; return true; },
+  });
+  (canvas as { getContext: unknown }).getContext = () => ctx;
+  return { canvas, fills };
+}
+
 function fakeCanvas(): NodeCanvasLike {
   return { width: 1, height: 1, getContext: vi.fn() as unknown as NodeCanvasLike['getContext'] };
 }
@@ -309,3 +406,34 @@ function fakeFactory(): NodeCanvasFactory {
     loadImage: vi.fn(async () => ({ width: 1, height: 1 })),
   };
 }
+
+describe('Node PPTX parsed-slide text colour', () => {
+  it('paints uncoloured text on a theme-less parsed slide black, not the presentation dk1', async () => {
+    const session = await openPptxPresentation(themeLessMasterDeck());
+    try {
+      expect(session.slideCount).toBe(1);
+      for await (const slide of session) {
+        expect(slide.theme).toBeUndefined();
+        const { canvas, fills } = textRecordingCanvas();
+        await session.renderSlide(canvas, slide, { width: 960, dpr: 1, factory: fakeFactory() });
+        expect(fills.get('title-1')).toBe('#000000');
+      }
+    } finally {
+      await session.close();
+    }
+  });
+
+  it('keeps a materialized slide black and a caller-built copy on defaultTextColor', async () => {
+    const { renderSlideNode } = await import('./render.ts');
+    const presentation = await materializePptxPresentation(themeLessMasterDeck());
+    expect(presentation.defaultTextColor).toBe('10263F');
+    const parsed = textRecordingCanvas();
+    await renderSlideNode(parsed.canvas, presentation, 0, { width: 960, dpr: 1, factory: fakeFactory() });
+    expect(parsed.fills.get('title-1')).toBe('#000000');
+
+    const built = textRecordingCanvas();
+    const copy = { ...presentation, slides: [{ ...presentation.slides[0]! }] };
+    await renderSlideNode(built.canvas, copy, 0, { width: 960, dpr: 1, factory: fakeFactory() });
+    expect(built.fills.get('title-1')).toBe('#10263F');
+  });
+});
