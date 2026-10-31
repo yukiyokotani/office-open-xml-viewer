@@ -1214,6 +1214,57 @@ impl<'a> Reader<'a> {
                 }
             }
         }
+        // LibreOffice keeps the pair adjustment between letters of runs that
+        // differ in pair kerning, while the DOCX layout measures each run
+        // apart (measured by the reviewer: "A" then an unkerned "VToAV" at
+        // 30 pt places later text 3.8 pt apart and wraps it differently).
+        let mut kerning = collected.paragraph.runs.iter().filter_map(|run| match run {
+            DocRun::Text(text) => Some(text.kerning.is_some()),
+            _ => None,
+        });
+        if let Some(first) = kerning.next() {
+            if kerning.any(|kerned| kerned != first) {
+                return Err(unsupported("letter-kerning-mixed"));
+            }
+            // The DOCX layout shapes a word's ASCII and other characters
+            // (its ascii and hAnsi font slots) as one piece only for kerned
+            // text; unkerned, it splits them, and a ligature across the
+            // seam is lost where LibreOffice keeps it (measured by the
+            // reviewer: Carlito "ffí" wraps differently). Words are
+            // separated by U+0020 and tabs only.
+            if !first {
+                let mut ascii = false;
+                let mut other = false;
+                // A run other than text (a break) separates words.
+                for c in collected.paragraph.runs.iter().flat_map(|run| {
+                    match run {
+                        DocRun::Text(text) => text.text.as_str(),
+                        _ => " ",
+                    }
+                    .chars()
+                }) {
+                    if c == ' ' || c == '\t' {
+                        ascii = false;
+                        other = false;
+                        continue;
+                    }
+                    // The DOCX layout kerns Arabic-script text whatever its
+                    // kerning (WORD_ARABIC_PAIR_KERNING); LibreOffice keeps
+                    // it unkerned (measured by the reviewer, Amiri).
+                    if arabic_block(c) {
+                        return Err(unsupported("letter-kerning-off-arabic"));
+                    }
+                    if c.is_ascii() {
+                        ascii = true;
+                    } else {
+                        other = true;
+                    }
+                    if ascii && other {
+                        return Err(unsupported("letter-kerning-off-seam"));
+                    }
+                }
+            }
+        }
         if collected.paragraph.line_spacing.is_some() {
             // Proportional spacing scales the natural line of uniform text
             // alike; with mixed faces or sizes LibreOffice does not multiply
@@ -2475,9 +2526,16 @@ impl RunProperties {
         }
         // §20.315 pair kerning on: DOCX kerning with a 0pt threshold kerns
         // every size (wordKerningApplies, outside compatibility mode 15).
+        // Off: no DOCX kerning, which matches LibreOffice's unkerned text
+        // (measured, Liberation Serif and Sans, 12 and 30 pt, justified).
+        // LibreOffice kerns text whose styles never set the attribute
+        // (measured), against the ODF default of off (§20.315); the corpus
+        // always sets it, so an unset value rejects.
         let kerning = match cascade.get(NS_STYLE, "letter-kerning") {
             Some("true") => Some(0.0),
-            _ => return Err(unsupported("letter-kerning-off")),
+            Some("false") => None,
+            None => return Err(unsupported("letter-kerning-unset")),
+            Some(_) => return Err(invalid("bad letter-kerning")),
         };
         let language = |language: &str, country: &str| -> Option<Atom> {
             let language = cascade.get(NS_STYLE, language).filter(|v| *v != "none")?;
@@ -2949,6 +3007,17 @@ fn paragraph_properties(cascade: &Cascade<'_>, rules: CompatRules) -> Result<Col
     })
 }
 
+/// The Unicode blocks holding the Arabic script (a superset of its
+/// characters: Arabic, Supplement, Extended-A to -C, Presentation Forms-A
+/// and -B, Rumi Numeral Symbols, Arabic Extended-C, Indic Siyaq Numbers,
+/// Ottoman Siyaq Numbers and Arabic Mathematical Alphabetic Symbols).
+fn arabic_block(c: char) -> bool {
+    matches!(u32::from(c),
+        0x0600..=0x06FF | 0x0750..=0x077F | 0x0870..=0x08FF | 0xFB50..=0xFDFF
+        | 0xFE70..=0xFEFF | 0x10E60..=0x10E7F | 0x10EC0..=0x10EFF | 0x1EC70..=0x1ECBF
+        | 0x1ED00..=0x1ED4F | 0x1EE00..=0x1EEFF)
+}
+
 /// ODF lengths (Part 3 §18.3.18): cm, mm, in, pt, pc, px (1/96 in).
 pub fn length_pt(value: &str) -> Result<f64, String> {
     let value = value.trim();
@@ -3349,10 +3418,10 @@ mod tests {
         );
         assert_eq!(
             reject(Fixture {
-                default_text: r#"style:font-name="Serif" fo:font-size="12pt" style:letter-kerning="false""#,
+                default_text: r#"style:font-name="Serif" fo:font-size="12pt""#,
                 ..Fixture::default()
             }),
-            unsupported("letter-kerning-off")
+            unsupported("letter-kerning-unset")
         );
         assert_eq!(
             reject(Fixture {
@@ -5301,6 +5370,70 @@ mod tests {
         assert!(matches!(&runs[0], DocRun::AnchorHost(m) if m.list_label == Some("end")));
         assert!(matches!(&runs[1], DocRun::Image(p) if p.list_label == Some("end")));
         assert!(matches!(&runs[2], DocRun::Text(t) if t.list_label.is_none() && t.text == "a"));
+    }
+
+    #[test]
+    fn maps_pair_kerning_on_and_off() {
+        // Off is unkerned DOCX text (LibreOffice draws it unkerned,
+        // measured); on kerns every size.
+        let document = read_fixture(Fixture {
+            default_text: r#"style:font-name="Serif" fo:font-size="12pt" style:letter-kerning="false""#,
+            styles: r#"<style:style style:name="On" style:family="text"><style:text-properties style:letter-kerning="true"/></style:style><style:style style:name="K" style:family="paragraph"><style:text-properties style:letter-kerning="true"/></style:style><style:style style:name="Off" style:family="text"><style:text-properties style:letter-kerning="false"/></style:style>"#,
+            body: r#"<text:p>AV <text:span text:style-name="Off">AV</text:span></text:p><text:p text:style-name="K">AV <text:span text:style-name="On">AV</text:span></text:p>"#,
+            ..Fixture::default()
+        })
+        .unwrap();
+        let kerning: Vec<Vec<Option<f64>>> = paragraphs(&document)
+            .iter()
+            .map(|paragraph| {
+                paragraph
+                    .runs
+                    .iter()
+                    .filter_map(|run| match run {
+                        DocRun::Text(text) => Some(text.kerning),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .collect();
+        assert_eq!(kerning, vec![vec![None], vec![Some(0.0)]]);
+        // A paragraph mixing kerned and unkerned runs rejects.
+        let mixed = read_fixture(Fixture {
+            default_text: r#"style:font-name="Serif" fo:font-size="12pt" style:letter-kerning="true""#,
+            styles: r#"<style:style style:name="Off" style:family="text"><style:text-properties style:letter-kerning="false"/></style:style>"#,
+            body: r#"<text:p>A<text:span text:style-name="Off">V</text:span></text:p>"#,
+            ..Fixture::default()
+        });
+        assert_eq!(mixed.unwrap_err(), unsupported("letter-kerning-mixed"));
+        // An unkerned word mixing ASCII and other characters rejects, also
+        // across spans and with a no-break space; separate words do not.
+        let unkerned = |body: &str| {
+            read_fixture(Fixture {
+                default_text: r#"style:font-name="Serif" fo:font-size="12pt" style:font-name-asian="Serif" style:font-size-asian="12pt" style:font-name-complex="Serif" style:font-size-complex="12pt" style:letter-kerning="false""#,
+                styles: r#"<style:style style:name="B" style:family="text"><style:text-properties fo:font-weight="bold"/></style:style>"#,
+                body,
+                ..Fixture::default()
+            })
+            .map(|_| ())
+        };
+        for body in [
+            "<text:p>ffí</text:p>",
+            "<text:p>don\u{2019}t</text:p>",
+            r#"<text:p>ff<text:span text:style-name="B">í</text:span></text:p>"#,
+            "<text:p>a\u{a0}b</text:p>",
+        ] {
+            assert_eq!(
+                unkerned(body),
+                Err(unsupported("letter-kerning-off-seam")),
+                "{body}"
+            );
+        }
+        assert_eq!(unkerned("<text:p>ff í \u{2019} é</text:p>"), Ok(()));
+        // Arabic-script characters (kerned by the DOCX layout regardless).
+        assert_eq!(
+            unkerned("<text:p>\u{759}\u{762}</text:p>"),
+            Err(unsupported("letter-kerning-off-arabic"))
+        );
     }
 
     #[test]

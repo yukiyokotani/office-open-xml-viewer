@@ -76,7 +76,8 @@ Currently admitted:
   breaks, keep-with-next / keep-together, widow/orphan control of two lines,
   and paragraph spacing including contextual spacing;
 - character fonts, sizes, bold, italic, single/double underline and
-  strike-through, colours and background colour. Where LibreOffice's
+  strike-through, colours, background colour and pair kerning on or off
+  (where a style sets it; LibreOffice kerns text whose styles never do). Where LibreOffice's
   settings make a space not size its line, the space must be in the face of
   the adjacent text on its line and no larger, and decorated spaces that end
   a paragraph or precede a line break are admitted only where LibreOffice
@@ -109,14 +110,18 @@ only within its measured scope:
 - automatic text colour over a character or paragraph background is black
   or white by LibreOffice's `Color::IsDark()` rule.
 
-Two known differences from LibreOffice remain in admitted documents:
+Three known differences from LibreOffice remain in admitted documents:
 
 - LibreOffice spreads a justified line's spare width in whole layout
   units, so its justified lines can end up to about 1.6 pt short of the
   margin; the viewer ends them at the margin;
 - with LibreOffice's default settings, a decorated space at a wrapped
   line's end is underlined or struck through in LibreOffice and left
-  undecorated by the viewer.
+  undecorated by the viewer;
+- LibreOffice shapes Graphite fonts (such as Linux Libertine G) with their
+  own Graphite rules, which keep pair kerning even where a style turns it
+  off; browsers do not implement Graphite and shape these fonts from their
+  OpenType tables.
 
 LibreOffice's layout settings (`settings.xml`) that Word-derived documents
 carry are admitted where they were measured to change nothing the reader
