@@ -144,6 +144,8 @@ export interface ParagraphLayoutContext {
   readonly defaultTabPt: number;
   /** ECMA-376 §17.3.1.21 — omission on the source paragraph resolves true. */
   readonly overflowPunct?: boolean;
+  /** ECMA-376 §17.3.1.45 wordWrap; present only when disabled. */
+  readonly wordWrap?: false;
   /** Effective marker geometry acquired with the paragraph context and reused
    * by retained layout instead of shaping the marker a second time. */
   readonly numberingMarkerGeometry?: NumberingMarkerGeometry;
@@ -385,6 +387,7 @@ export function resolveParagraphLayoutContext(
     kinsoku: settings.kinsoku,
     defaultTabPt: settings.defaultTabPt,
     overflowPunct: paragraph.overflowPunct !== false,
+    ...(paragraph.wordWrap === false ? { wordWrap: false as const } : {}),
     mathDefJc: settings.mathDefJc,
   };
 }

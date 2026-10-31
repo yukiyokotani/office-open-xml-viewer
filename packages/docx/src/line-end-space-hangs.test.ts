@@ -116,7 +116,12 @@ describe('WORD_LINE_END_SPACE_HANGS', () => {
   it('excludes the hanging space from mode-15 CJK expansion behind an anchor host', () => {
     const host = { type: 'anchorHost', fontSize: 20, fontFamily: 'NotInMetrics', bold: false, italic: false } as DocParagraph['runs'][number];
     const words = 'ああ bbbb cccc dddd eeee ffff gggg ';
-    for (const runs of [[textRun(words), host, textRun('hhhhhhhh')], [textRun(words), textRun('hhhhhhhh')]]) {
+    for (const runs of [
+      [textRun(words), host, textRun('hhhhhhhh')],
+      [textRun(words), textRun('hhhhhhhh')],
+      // A host between the last ideograph and the hanging space.
+      [textRun('ああ bbbb cccc dddd eeee ffff ああ'), host, textRun(' '), textRun('hhhhhhhh')],
+    ]) {
       const [line] = lines(para(runs, 'both'), { compatibilityMode: 15 });
       expect(visibleEnd(line!)).toBeCloseTo(380, 6);
     }
@@ -130,6 +135,17 @@ describe('WORD_LINE_END_SPACE_HANGS', () => {
     const [line] = lines(para([textRun('אאאא bbbb cccc dddd eeee ffff gggg '), host, textRun('hhhh')], 'both'));
     const last = texts(line!).find((p) => p.text.startsWith('gggg'))!;
     expect(last.bounds.xPt).toBeCloseTo(20 + 6 * 40 + 6 * (10 + 10 / 7), 6);
+  });
+
+  it('keeps the line-end spaces of a wordWrap-off paragraph in the line', () => {
+    // §17.3.1.45: with wordWrap off Word counts every trailing space (Windows
+    // Word controls: right-aligned lines end 3, 9 and 12 pt short of the margin
+    // for one space, three spaces and an ideographic space).
+    for (const [tail, widthPt] of [[' ', 10], ['   ', 30], ['\u3000', 10]] as const) {
+      const p = { ...(para([textRun(`aaaa${tail}`)], 'right') as DocParagraph), wordWrap: false } as unknown as BodyElement;
+      const [line] = lines(p);
+      expect(visibleEnd(line!)).toBeCloseTo(380 - widthPt, 6);
+    }
   });
 
   it('keeps the trailing-space underline under ulTrailSpace', () => {

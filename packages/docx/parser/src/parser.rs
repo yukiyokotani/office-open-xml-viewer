@@ -6540,6 +6540,8 @@ fn parse_paragraph_cond_at_depth_with_diagnostics(
         // resolved `false` is carried so default paragraphs serialize unchanged.
         auto_space_de: base_para.auto_space_de.filter(|enabled| !enabled),
         auto_space_dn: base_para.auto_space_dn.filter(|enabled| !enabled),
+        // ECMA-376 §17.3.1.45: omission means wordWrap is on.
+        word_wrap: base_para.word_wrap.filter(|enabled| !enabled),
         // ECMA-376 §17.3.1.1: omission resolves through the paragraph style
         // hierarchy and ultimately defaults to true.
         adjust_right_ind: base_para.adjust_right_ind.unwrap_or(true),

@@ -72,6 +72,7 @@ impl Properties {
             // The shared DOCX model represents that default by absence and
             // retains only an explicit disable for ECMA-376 autoSpaceDE/DN.
             auto_space_de: self.flags.get("autoSpaceDE").copied().filter(|v| !v),
+            word_wrap: self.flags.get("wordWrap").copied().filter(|v| !v),
             auto_space_dn: self.flags.get("autoSpaceDN").copied().filter(|v| !v),
             borders,
             style_id: None,
