@@ -1231,9 +1231,10 @@ impl<'a> Reader<'a> {
                     };
                     let before = inline.tokens.len();
                     self.inline(child, nested, inline, depth + 1)?;
-                    if inline.tokens.len() == before
+                    if self.layout_flags.balance
+                        && inline.tokens.len() == before
                         && nested != context
-                        && !span_chain(&inline.contexts, nested).is_empty()
+                        && span_formats(inline.contexts[nested as usize].styles[0].style())
                     {
                         self.charge_text(1, 1, inline)?;
                         inline.tokens.push(Token::Boundary(false));
@@ -2046,6 +2047,18 @@ fn same_line_metrics(
     }
 }
 
+/// Whether a span's own style gives LibreOffice formatting for it: a
+/// character style, or automatic properties other than a revision id.
+fn span_formats(style: &Style) -> bool {
+    !style.automatic
+        || style.parent.is_some()
+        || style.groups.get(TEXT).is_some_and(|p| {
+            p.attributes
+                .keys()
+                .any(|key| (key.0.as_str(), key.1.as_str()) != (NS_OFFICEOOO, "rsid"))
+        })
+}
+
 fn portion_character(c: char) -> bool {
     matches!(
         c,
@@ -2139,11 +2152,15 @@ fn collapse(tokens: Vec<Token>) -> (Vec<Token>, Option<u32>) {
             continue;
         }
         match token {
-            Token::Char(' ' | '\t' | '\r' | '\n', context) => {
-                if started && pending.is_none() {
-                    pending = Some(Token::Char(' ', context));
+            Token::Char(' ' | '\t' | '\r' | '\n', context) => match pending {
+                None if started => pending = Some(Token::Char(' ', context)),
+                // A space of other formatting merges into the kept one: where
+                // LibreOffice ends its portion there is unknown.
+                Some(Token::Char(_, kept)) if kept != context => {
+                    boundaries.push(Token::Boundary(false));
                 }
-            }
+                _ => {}
+            },
             Token::Char(c, context) => {
                 if let Some(space) = pending.take() {
                     out.push(space);
@@ -4380,6 +4397,8 @@ mod tests {
             format!("{}{}", s("S12", "aa"), s("S12x", " bb")),
             // An empty formatted span, a byte order mark, a direction mark.
             format!("aa{} bb", s("Red", "")),
+            // A formatted space merged into a collapsed space.
+            format!("aa {}bb", s("Red", " ")),
             "aa\u{feff} bb".into(),
             "aa \u{200e}bb".into(),
         ] {
