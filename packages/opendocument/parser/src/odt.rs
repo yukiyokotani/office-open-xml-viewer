@@ -10,7 +10,9 @@
 use crate::error::{invalid, unsupported};
 use crate::package::{OdfPackage, SUPPORTED_VERSIONS};
 use crate::script::{is_weak_unmapped, table_22, ScriptClass};
-use crate::style::{Cascade, Family, Group, Scope, Style, StyleRef, StyleSheet, PARAGRAPH, TEXT};
+use crate::style::{
+    Cascade, Family, Group, Scope, Style, StyleRef, StyleSheet, LOEXT_GRAPHIC, PARAGRAPH, TEXT,
+};
 use crate::xml::{
     self, NS_DRAW, NS_FO, NS_LOEXT, NS_OFFICE, NS_OFFICEOOO, NS_STYLE, NS_SVG, NS_TEXT, NS_XML,
 };
@@ -151,6 +153,20 @@ fn read_with(package: &OdfPackage, rules: CompatRules) -> Result<Document, Strin
     // ODF 1.3 introduced style:contextual-spacing (§20.255); a declared 1.2
     // document does not define it.
     let contextual_spacing_defined = version != Some("1.2");
+    // A background on the paragraph default style fills the whole page in
+    // LibreOffice (measured), even under paragraphs that override it.
+    if sheet
+        .default_style(Family::Paragraph)
+        .and_then(|style| style.group(PARAGRAPH))
+        .and_then(|group| {
+            group
+                .attributes
+                .get(&(NS_FO.to_string(), "background-color".to_string()))
+        })
+        .is_some_and(|value| value != "transparent")
+    {
+        return Err(unsupported("default-style-background"));
+    }
     let page = PageStyle::read(styles_root)?;
 
     let body = content_root
@@ -1044,7 +1060,12 @@ impl<'a> Reader<'a> {
             }
         }
 
-        check_groups(&chain, &["paragraph-properties", "text-properties"])?;
+        check_groups(
+            &chain,
+            &["paragraph-properties", "text-properties", LOEXT_GRAPHIC],
+        )?;
+        self.charge_cascade(&chain, LOEXT_GRAPHIC)?;
+        check_paragraph_fill(&properties, &Cascade::new(chain.clone(), LOEXT_GRAPHIC))?;
         let mut collected = paragraph_properties(&properties, self.rules)?;
         if collected.contextual && !self.contextual_spacing_defined {
             return Err(unsupported("contextual-spacing-version"));
@@ -1099,6 +1120,20 @@ impl<'a> Reader<'a> {
         }
         let (tokens, removed) = collapse(std::mem::take(&mut inline.tokens));
         self.emit_runs(&tokens, removed, &inline.contexts, &mut collected.paragraph)?;
+        if let Some(shading) = collected.paragraph.shading.clone() {
+            // §20.395 automatic colour (also an unset colour) over the
+            // paragraph background, resolved as LibreOffice paints it (runs
+            // with their own shading were resolved against it).
+            let resolved = libreoffice_automatic_color(&shading)?;
+            for run in &mut collected.paragraph.runs {
+                if let DocRun::Text(text) = run {
+                    if text.color.is_none() && text.background.is_none() {
+                        text.color = Some(resolved.to_string());
+                        text.color_auto = false;
+                    }
+                }
+            }
+        }
         if collected.paragraph.line_spacing.is_some() {
             // Proportional spacing scales the natural line of uniform text
             // alike; with mixed faces or sizes LibreOffice does not multiply
@@ -1610,6 +1645,9 @@ impl<'a> Reader<'a> {
     fn finish(self) -> Result<Vec<BodyElement>, String> {
         let mut out = Vec::with_capacity(self.paragraphs.len());
         let mut previous: Option<Collected> = None;
+        // The previous paragraph's background (its model has moved into the
+        // output).
+        let mut previous_shading: Option<String> = None;
         let mut break_pending = false;
         for mut collected in self.paragraphs {
             let mut paragraph = std::mem::take(&mut collected.paragraph);
@@ -1637,6 +1675,22 @@ impl<'a> Reader<'a> {
                     }
                 }
             };
+            if let Some(prev) = previous.as_ref() {
+                // LibreOffice joins the backgrounds of consecutive paragraphs
+                // of the same colour in one content area across the spacing
+                // between them (measured: a 24 pt gap filled). Different
+                // colours, or a section boundary, leave the gap unfilled, as
+                // the DOCX layout does for every gap.
+                if previous_shading.is_some()
+                    && previous_shading == paragraph.shading
+                    && prev.area == collected.area
+                    && !paragraph.page_break_before
+                    && paragraph.space_before > 0.0
+                {
+                    return Err(unsupported("paragraph-fill-gap"));
+                }
+            }
+            previous_shading = paragraph.shading.clone();
             paragraph.space_after = 0.0;
             paragraph.contextual_spacing = false;
             break_pending = collected.page_break_after;
@@ -1917,7 +1971,7 @@ impl RunProperties {
         // §20.395 automatic colour is chosen against the background. With no
         // background it is the dark default on a white page, as is DOCX
         // automatic colour; other backgrounds are not yet measured.
-        let (color_auto, color) = font_color(cascade, rules)?;
+        let (mut color_auto, mut color) = font_color(cascade, rules)?;
         // Character opacity of the font colour (LibreOffice extension):
         // LibreOffice writes 100% with an explicit colour and 0% with the
         // automatic colour, where it has no effect (measured); only those
@@ -1927,8 +1981,11 @@ impl RunProperties {
             Some("0%") if color_auto => {}
             Some(_) => return Err(unsupported("text-opacity")),
         }
-        if color_auto && background.is_some() {
-            return Err(unsupported("automatic-font-color"));
+        // §20.395 automatic (or unset) colour over the run's own shading,
+        // resolved as LibreOffice paints it.
+        if let (None, Some(background)) = (&color, &background) {
+            color = Some(libreoffice_automatic_color(background)?.to_string());
+            color_auto = false;
         }
         // Letter spacing: LibreOffice spaces between the characters of a
         // portion, the DOCX layout after each character with an advance
@@ -2212,6 +2269,86 @@ fn resolve_family(cascade: &Cascade<'_>, suffix: &str, fonts: &FontFaces) -> Res
     Err(unsupported("font-unresolved"))
 }
 
+/// The colour LibreOffice paints automatic text in over an opaque
+/// `background` (hex rrggbb): white when `Color::IsDark()`, else black
+/// (`SwDrawTextInfo::ApplyAutoColor`, sw/source/core/txtnode/fntcache.cxx;
+/// the PDF export takes the same path). `IsDark()`
+/// (tools/source/generic/color.cxx, LibreOffice 25.2 to 26.8): the WCAG
+/// relative luminance scaled to 255 and truncated, at most 87; LibreOffice's
+/// default shape fill #729fcf instead uses the integer luminance
+/// (76 R + 151 G + 29 B) >> 8, at most 62. Measured identical on 953
+/// backgrounds (every grey, the standard palette, channel ramps and random
+/// colours). The DOCX automatic colour uses another threshold, so the
+/// reader writes the resolved colour.
+fn libreoffice_automatic_color(background: &str) -> Result<&'static str, String> {
+    let channel = |at: usize| {
+        background
+            .get(at..at + 2)
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+            .ok_or_else(|| invalid("a colour is not #rrggbb"))
+    };
+    let (r, g, b) = (channel(0)?, channel(2)?, channel(4)?);
+    let dark = if (r, g, b) == (0x72, 0x9f, 0xcf) {
+        (29 * u32::from(b) + 151 * u32::from(g) + 76 * u32::from(r)) >> 8 <= 62
+    } else {
+        let linear = |c: u8| {
+            let v = f64::from(c) / 255.0;
+            if v < 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let luminance = linear(r) * 0.2126 + linear(g) * 0.7152 + linear(b) * 0.0722;
+        // C++ double-to-integer conversion truncates.
+        (luminance * 255.0) as u8 <= 87
+    };
+    Ok(if dark { "ffffff" } else { "000000" })
+}
+
+/// LibreOffice writes its area fill (`loext:graphic-properties`) beside
+/// `fo:background-color`: `draw:fill="none"` with a transparent background,
+/// or `draw:fill="solid"` repeating the background colour. Those pairs are
+/// the paragraph background (§20.182; `draw:fill` §20.118, `draw:fill-color`
+/// §20.119, `draw:opacity` §20.152); a fill that disagrees, other fill
+/// kinds (gradient, bitmap, hatch) and partial opacity reject.
+fn check_paragraph_fill(paragraph: &Cascade<'_>, fill: &Cascade<'_>) -> Result<(), String> {
+    if !fill.element_names().is_empty() {
+        return Err(unsupported("paragraph-fill"));
+    }
+    for (ns, name) in fill.keys() {
+        if !matches!(
+            (ns.as_str(), name.as_str()),
+            (NS_DRAW, "fill" | "fill-color" | "opacity")
+        ) {
+            return Err(unsupported("paragraph-fill"));
+        }
+    }
+    let background = match paragraph.get(NS_FO, "background-color") {
+        None | Some("transparent") => None,
+        Some(value) => Some(hex_color(value)?),
+    };
+    let agrees = match fill.get(NS_DRAW, "fill") {
+        None if fill.keys().is_empty() => true,
+        Some("none") => background.is_none(),
+        Some("solid") => {
+            let color = fill.get(NS_DRAW, "fill-color").map(hex_color).transpose()?;
+            background.is_some()
+                && color == background
+                && match fill.get(NS_DRAW, "opacity") {
+                    None => true,
+                    Some(value) => percent(value)? == 1.0,
+                }
+        }
+        _ => false,
+    };
+    if agrees {
+        Ok(())
+    } else {
+        Err(unsupported("paragraph-fill"))
+    }
+}
+
 /// Paragraph properties: exact mappings, inert values, rejection otherwise.
 fn paragraph_properties(cascade: &Cascade<'_>, rules: CompatRules) -> Result<Collected, String> {
     for (ns, name) in cascade.keys() {
@@ -2244,7 +2381,8 @@ fn paragraph_properties(cascade: &Cascade<'_>, rules: CompatRules) -> Result<Col
             (NS_STYLE, "writing-mode") => matches!(value, "lr-tb" | "page"),
             (NS_STYLE, "vertical-align") => matches!(value, "auto" | "baseline"),
             (NS_STYLE, "shadow") => value == "none",
-            (NS_FO, "background-color") => value == "transparent",
+            // A solid colour maps to the DOCX paragraph shading (below).
+            (NS_FO, "background-color") => value == "transparent" || hex_color(value).is_ok(),
             (NS_FO, "border" | "border-top" | "border-bottom" | "border-left" | "border-right") => {
                 value == "none"
             }
@@ -2359,6 +2497,10 @@ fn paragraph_properties(cascade: &Cascade<'_>, rules: CompatRules) -> Result<Col
         keep_lines: cascade.get(NS_FO, "keep-together") == Some("always"),
         widow_control,
         page_break_before: breaking("break-before")?,
+        shading: match cascade.get(NS_FO, "background-color") {
+            None | Some("transparent") => None,
+            Some(value) => Some(hex_color(value)?),
+        },
         ..DocParagraph::default()
     };
     Ok(Collected {
@@ -2427,7 +2569,7 @@ mod tests {
     use crate::package::PackageLimits;
     use ooxml_common::resource::OoxmlFormat;
 
-    const NS: &str = r#"xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0" xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0" xmlns:loext="urn:org:documentfoundation:names:experimental:office:xmlns:loext:1.0""#;
+    const NS: &str = r#"xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0" xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0" xmlns:loext="urn:org:documentfoundation:names:experimental:office:xmlns:loext:1.0" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0""#;
     const FACES: &str = r#"<office:font-face-decls><style:font-face style:name="Serif" svg:font-family="'Liberation Serif'" style:font-family-generic="roman"/><style:font-face style:name="Sans" svg:font-family="'Liberation Sans'" style:font-family-generic="swiss"/><style:font-face style:name="Sans2" svg:font-family="'Liberation Sans'" style:font-family-generic="system"/><style:font-face style:name="Mincho" svg:font-family="'Hiragino Mincho ProN'" style:font-family-generic="system"/></office:font-face-decls>"#;
 
     struct Fixture<'a> {
@@ -2436,6 +2578,9 @@ mod tests {
         faces: &'a str,
         /// Additional `style:page-layout-properties` attributes.
         page: &'a str,
+        /// Additional default paragraph style `style:paragraph-properties`
+        /// attributes.
+        default_paragraph: &'a str,
         styles: &'a str,
         automatic: &'a str,
         master: &'a str,
@@ -2450,6 +2595,7 @@ mod tests {
                 default_text: r#"style:font-name="Serif" fo:font-size="12pt" style:font-name-asian="Serif" style:font-size-asian="12pt" style:font-name-complex="Serif" style:font-size-complex="12pt" style:letter-kerning="true""#,
                 faces: "",
                 page: "",
+                default_paragraph: "",
                 styles: "",
                 automatic: "",
                 master: "",
@@ -2502,11 +2648,12 @@ mod tests {
 
     fn read_fixture_with(fixture: Fixture<'_>, rules: CompatRules) -> Result<Document, String> {
         let styles = format!(
-            r#"<office:document-styles {NS} office:version="1.3">{}<office:styles><style:default-style style:family="paragraph"><style:paragraph-properties style:tab-stop-distance="1.25cm"/><style:text-properties {}/></style:default-style><style:default-style style:family="graphic"/>{}</office:styles><office:automatic-styles><style:page-layout style:name="pm1"><style:page-layout-properties{}/></style:page-layout></office:automatic-styles><office:master-styles><style:master-page style:name="Standard" style:page-layout-name="pm1">{}</style:master-page></office:master-styles></office:document-styles>"#,
+            r#"<office:document-styles {NS} office:version="1.3">{}<office:styles><style:default-style style:family="paragraph"><style:paragraph-properties style:tab-stop-distance="1.25cm"{}/><style:text-properties {}/></style:default-style><style:default-style style:family="graphic"/>{}</office:styles><office:automatic-styles><style:page-layout style:name="pm1"><style:page-layout-properties{}/></style:page-layout></office:automatic-styles><office:master-styles><style:master-page style:name="Standard" style:page-layout-name="pm1">{}</style:master-page></office:master-styles></office:document-styles>"#,
             FACES.replace(
                 "</office:font-face-decls>",
                 &format!("{}</office:font-face-decls>", fixture.faces)
             ),
+            fixture.default_paragraph,
             fixture.default_text,
             fixture.styles,
             page_properties(fixture.page),
@@ -3531,6 +3678,197 @@ mod tests {
                 "{style}"
             );
         }
+    }
+
+    #[test]
+    fn paragraph_backgrounds_with_libreoffice_area_fill() {
+        let style = |name: &str, background: &str, fill: &str, margin: &str| {
+            format!(
+                r#"<style:style style:name="{name}" style:family="paragraph"><loext:graphic-properties {fill}/><style:paragraph-properties fo:background-color="{background}" fo:margin-bottom="{margin}"/></style:style>"#
+            )
+        };
+        let read = |styles: &str, body: &str| {
+            read_fixture(Fixture {
+                styles,
+                body,
+                ..Fixture::default()
+            })
+        };
+        let solid = r##"draw:fill="solid" draw:fill-color="#FFFFC8" draw:opacity="100%""##;
+        // A transparent background with fill none, and a solid fill that
+        // repeats the background, map to the paragraph shading.
+        let styles = style("N", "transparent", r#"draw:fill="none""#, "0pt")
+            + &style("Y", "#ffffc8", solid, "0pt");
+        let document = read(&styles, r#"<text:p text:style-name="N">a</text:p><text:p text:style-name="Y">b</text:p><text:p text:style-name="Y">c</text:p>"#).unwrap();
+        let shading: Vec<Option<String>> = paragraphs(&document)
+            .iter()
+            .map(|p| p.shading.clone())
+            .collect();
+        assert_eq!(
+            shading,
+            [None, Some("ffffc8".into()), Some("ffffc8".into())]
+        );
+        // Disagreement, other fill kinds and partial opacity reject.
+        for (background, fill) in [
+            (
+                "#ffffc8",
+                r##"draw:fill="solid" draw:fill-color="#c8ffff""##,
+            ),
+            ("#ffffc8", r#"draw:fill="none""#),
+            (
+                "transparent",
+                r##"draw:fill="solid" draw:fill-color="#ffffc8""##,
+            ),
+            (
+                "#ffffc8",
+                r##"draw:fill="solid" draw:fill-color="#ffffc8" draw:opacity="50%""##,
+            ),
+            (
+                "#ffffc8",
+                r#"draw:fill="gradient" draw:fill-gradient-name="G""#,
+            ),
+        ] {
+            assert_eq!(
+                read(
+                    &style("X", background, fill, "0pt"),
+                    r#"<text:p text:style-name="X">x</text:p>"#
+                )
+                .unwrap_err(),
+                unsupported("paragraph-fill"),
+                "{background} {fill}"
+            );
+        }
+        // LibreOffice fills the gap between consecutive filled paragraphs;
+        // the DOCX layout does not, so a gap rejects.
+        assert_eq!(
+            read(
+                &style("G", "#ffffc8", solid, "6pt"),
+                r#"<text:p text:style-name="G">a</text:p><text:p text:style-name="G">b</text:p>"#
+            )
+            .unwrap_err(),
+            unsupported("paragraph-fill-gap")
+        );
+        assert!(read(
+            &style("G", "#ffffc8", solid, "6pt"),
+            r#"<text:p text:style-name="G">a</text:p><text:p>b</text:p>"#
+        )
+        .is_ok());
+        // Different colours, and a section boundary, leave the gap unfilled
+        // in LibreOffice too.
+        let two = style("G", "#ffffc8", solid, "6pt")
+            + &style(
+                "H",
+                "#c8ffff",
+                r##"draw:fill="solid" draw:fill-color="#c8ffff""##,
+                "6pt",
+            );
+        assert!(read(
+            &two,
+            r#"<text:p text:style-name="G">a</text:p><text:p text:style-name="H">b</text:p>"#
+        )
+        .is_ok());
+        assert!(read(&two, r#"<text:p text:style-name="G">a</text:p><text:section text:name="s"><text:p text:style-name="G">b</text:p></text:section>"#).is_ok());
+        // A fully opaque percentage in any spelling repeats the background.
+        assert!(read(
+            &style(
+                "O",
+                "#ffffc8",
+                r##"draw:fill="solid" draw:fill-color="#ffffc8" draw:opacity="100.0%""##,
+                "0pt"
+            ),
+            r#"<text:p text:style-name="O">x</text:p>"#
+        )
+        .is_ok());
+        // A default-style background fills the page in LibreOffice.
+        assert_eq!(
+            read_fixture(Fixture {
+                default_paragraph: r##" fo:background-color="#ffffc8""##,
+                ..Fixture::default()
+            })
+            .unwrap_err(),
+            unsupported("default-style-background")
+        );
+        // The default-style background rejects even when every paragraph
+        // overrides it.
+        assert_eq!(
+            read_fixture(Fixture {
+                default_paragraph: r##" fo:background-color="#ffffc8""##,
+                styles: r#"<style:style style:name="T" style:family="paragraph"><style:paragraph-properties fo:background-color="transparent"/></style:style>"#,
+                body: r#"<text:p text:style-name="T">x</text:p>"#,
+                ..Fixture::default()
+            })
+            .unwrap_err(),
+            unsupported("default-style-background")
+        );
+        // Children of the area fill (e.g. a background image) reject.
+        let image = r##"<style:style style:name="I" style:family="paragraph"><loext:graphic-properties draw:fill="none"><style:background-image/></loext:graphic-properties></style:style>"##;
+        assert_eq!(
+            read(image, r#"<text:p text:style-name="I">x</text:p>"#).unwrap_err(),
+            unsupported("paragraph-fill")
+        );
+        // Automatic (and unset) text colour is resolved as LibreOffice paints
+        // it: over its own run shading first, else the paragraph background.
+        let colors = |document: &Document| -> Vec<(Option<String>, bool)> {
+            paragraphs(document)
+                .iter()
+                .flat_map(|p| p.runs.iter())
+                .filter_map(|run| match run {
+                    DocRun::Text(text) => Some((text.color.clone(), text.color_auto)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let run = |shade: &str| {
+            format!(
+                r##"<style:style style:name="R" style:family="text"><style:text-properties fo:background-color="{shade}"/></style:style><style:style style:name="E" style:family="text"><style:text-properties fo:color="#ff0000"/></style:style>"##
+            ) + &style(
+                "Y",
+                "#ffffc8",
+                r##"draw:fill="solid" draw:fill-color="#ffffc8""##,
+                "0pt",
+            )
+        };
+        let body = r#"<text:p text:style-name="Y">a<text:span text:style-name="R">b</text:span><text:span text:style-name="E">c</text:span></text:p>"#;
+        assert_eq!(
+            colors(&read(&run("#999999"), body).unwrap()),
+            [
+                (Some("000000".into()), false),
+                (Some("ffffff".into()), false),
+                // An explicit colour is kept.
+                (Some("ff0000".into()), false),
+            ]
+        );
+        // LibreOffice's IsDark(): truncated WCAG luminance x 255 <= 87, and
+        // the integer luminance <= 62 for #729fcf only.
+        for (background, painted) in [
+            ("#9e9e9e", "ffffff"),
+            ("#9f9f9f", "000000"),
+            ("#00c000", "000000"),
+            ("#b0b000", "000000"),
+            ("#8080ff", "ffffff"),
+            ("#b8b8b8", "000000"),
+            ("#ff6d6d", "ffffff"),
+            ("#729fcf", "000000"),
+            ("#729fce", "ffffff"),
+            ("#000000", "ffffff"),
+            ("#ffffff", "000000"),
+        ] {
+            let document = read(
+                &style("A", background, "", "0pt"),
+                r#"<text:p text:style-name="A">x</text:p>"#,
+            )
+            .unwrap();
+            assert_eq!(
+                colors(&document),
+                [(Some(painted.to_string()), false)],
+                "{background}"
+            );
+        }
+        // Without a background automatic colour stays automatic.
+        assert_eq!(
+            colors(&read("", "<text:p>x</text:p>").unwrap()),
+            [(None, false)]
+        );
     }
 
     #[test]
