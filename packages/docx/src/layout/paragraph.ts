@@ -1583,7 +1583,8 @@ export function planLine(input: PlanLineInput): LineLayout {
       const placement = placements[index];
       if (placement?.kind === 'anchor-host') continue;
       if (placement?.kind !== 'text') break;
-      const visible = hangingSpaceVisibleLength(placement.text);
+      // A hanging U+3000 keeps its decoration; only U+0020 loses it.
+      const visible = hangingSpaceVisibleLength(placement.text, (code) => code === 0x20);
       placements[index] = withoutHangingSpaceDecoration(placement, visible, keepUnderline);
       if (visible > 0) break;
     }
