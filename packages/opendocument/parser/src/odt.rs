@@ -186,6 +186,7 @@ fn read_with(package: &OdfPackage, rules: CompatRules) -> Result<Document, Strin
         list_paragraph: None,
         odf_1_4: version == Some("1.4"),
         text_width: page.section.page_width - page.section.margin_left - page.section.margin_right,
+        page_left_margin: page.section.margin_left,
         sheet: &sheet,
         fonts: &fonts,
         used_faces: RefCell::new(HashSet::new()),
@@ -918,8 +919,9 @@ struct Reader<'a> {
     list_paragraph: Option<list::ListParagraph<'a>>,
     /// The document declares ODF 1.4 (letter numbering beyond "z").
     odf_1_4: bool,
-    /// The page's text area width (pt).
+    /// The page's text area width and left margin (pt).
     text_width: f64,
+    page_left_margin: f64,
     sheet: &'a StyleSheet,
     fonts: &'a FontFaces,
     used_faces: RefCell<HashSet<Face>>,
@@ -5072,7 +5074,7 @@ mod tests {
                     r#"space-mode="label-alignment""#,
                     r#"space-mode="label-width-and-position""#,
                 )), list("<text:list-item><text:p>a</text:p></text:list-item>"), "list-legacy-mode"),
-            (list_styles(&level.replace(r#"style:num-format="1""#, r#"style:num-format="①, ②, ③, ...""#)), list("<text:list-item><text:p>a</text:p></text:list-item>"), "list-format"),
+            (list_styles(&level.replace(r#"style:num-format="1""#, r#"style:num-format="01, 02, 03, ...""#)), list("<text:list-item><text:p>a</text:p></text:list-item>"), "list-format"),
             (list_styles(&level.replace(r#"style:num-suffix=".""#, "style:num-suffix=\"\u{a0}\"")), list("<text:list-item><text:p>a</text:p></text:list-item>"), "list-affix"),
             (styles.clone(), list(r#"<text:list-item text:start-value="32768"><text:p>a</text:p></text:list-item>"#), "list-start-value"),
             (list_styles(&level.replace("fo:margin-left=\"2cm\"", "fo:margin-left=\"30cm\"")), list("<text:list-item><text:p>a</text:p></text:list-item>"), "list-geometry"),
@@ -5085,6 +5087,53 @@ mod tests {
                 "{body}"
             );
         }
+        let one = |styles: &str| {
+            read_list(
+                styles,
+                &list("<text:list-item><text:p>a</text:p></text:list-item>"),
+            )
+        };
+        // A circled-number label is Asian script, which the reader rejects.
+        assert_eq!(
+            one(&list_styles(&level.replace(
+                r#"style:num-format="1""#,
+                r#"style:num-format="①, ②, ③, ...""#
+            )))
+            .unwrap_err(),
+            unsupported("list-label-script")
+        );
+        // A U+2011 bullet is drawn as a gap by LibreOffice.
+        assert_eq!(
+            one(r#"<text:list-style style:name="L"><text:list-level-style-bullet text:level="1" text:bullet-char="&#x2011;"><style:list-level-properties text:list-level-position-and-space-mode="label-alignment"><style:list-level-label-alignment text:label-followed-by="listtab" text:list-tab-stop-position="2cm" fo:text-indent="-1cm" fo:margin-left="2cm"/></style:list-level-properties></text:list-level-style-bullet></text:list-style>"#).unwrap_err(),
+            unsupported("list-bullet")
+        );
+        // Repeated level definitions.
+        assert_eq!(
+            one(&list_styles(&(level.clone() + &level))).unwrap_err(),
+            unsupported("list-level-duplicate")
+        );
+        // An end-aligned label that could start before the page edge; a short
+        // one is admitted.
+        let end = |prefix: &str| {
+            list_styles(
+                &level
+                    .replace(
+                        r#"space-mode="label-alignment""#,
+                        r#"space-mode="label-alignment" fo:text-align="end""#,
+                    )
+                    .replace(
+                        r#"style:num-suffix=".""#,
+                        &format!(r#"style:num-prefix="{prefix}" style:num-suffix=".""#),
+                    ),
+            )
+        };
+        assert!(one(&end("")).is_ok());
+        assert_eq!(
+            one(&end(&"X".repeat(12))).unwrap_err(),
+            unsupported("list-label-extent")
+        );
+        // `continue-numbering` with nothing to continue restarts.
+        assert!(read_list(&styles, r#"<text:list text:style-name="L" text:continue-numbering="true"><text:list-item><text:p>a</text:p></text:list-item></text:list>"#).is_ok());
         // Continuing a list that counted nothing, or a nested list.
         assert_eq!(
             read_list(&styles, &(list(r#"<text:list-header><text:p>h</text:p></text:list-header>"#) + r#"<text:list text:style-name="L" text:continue-numbering="true"><text:list-item><text:p>a</text:p></text:list-item></text:list>"#)).unwrap_err(),

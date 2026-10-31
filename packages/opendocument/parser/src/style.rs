@@ -356,6 +356,14 @@ fn read_list_style(node: roxmltree::Node<'_, '_>) -> Result<ListStyle, String> {
         .ok_or_else(|| invalid("a list style has no name"))?
         .to_string();
     let element = capture(node, 0)?;
+    // LibreOffice applies the last of repeated level definitions; the reader
+    // takes none.
+    let mut levels = HashSet::new();
+    for level in node.children().filter(|n| n.is_element()) {
+        if !levels.insert(level.attribute((NS_TEXT, "level")).unwrap_or("")) {
+            return Err(crate::error::unsupported("list-level-duplicate"));
+        }
+    }
     let mut level_text = HashMap::new();
     for level in node.children().filter(|n| n.is_element()) {
         let Some(text) = level

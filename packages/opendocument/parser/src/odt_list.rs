@@ -57,9 +57,19 @@ enum Format {
     UpperLetter,
     LowerRoman,
     UpperRoman,
+    /// "①, ②, ③, ..." (measured past 20: ⑲ ⑳ ㉑ ㉒; up to ㊿).
+    Circled,
+    /// "ア, イ, ウ, ..." and its half-width form: the 46 kana of the
+    /// gojūon order, repeating (measured: ヲ ン ア).
+    Katakana,
+    HalfwidthKatakana,
     /// An empty `style:num-format`: no counter component.
     Empty,
 }
+
+const KATAKANA: &str =
+    "アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲン";
+const HALFWIDTH_KATAKANA: &str = "ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜｦﾝ";
 
 #[derive(Clone, Debug)]
 enum Kind {
@@ -188,35 +198,41 @@ impl<'a> Reader<'a> {
                 if continue_numbering && continue_list.is_some() {
                     return Err(unsupported("list-continuation"));
                 }
-                let chain = if let Some(target) = continue_list {
+                let continued = if let Some(target) = continue_list {
                     if self.lists.nested_ids.contains(target) {
                         return Err(unsupported("list-continuation"));
                     }
-                    *self
-                        .lists
-                        .ids
-                        .get(target)
-                        .ok_or_else(|| unsupported("list-continuation"))?
+                    Some(
+                        *self
+                            .lists
+                            .ids
+                            .get(target)
+                            .ok_or_else(|| unsupported("list-continuation"))?,
+                    )
                 } else {
+                    // `continue-numbering` without a preceding list of the
+                    // same style restarts (§19.783).
                     match &self.lists.previous {
                         Some((previous, chain)) if continue_numbering && previous == style => {
-                            *chain
+                            Some(*chain)
                         }
-                        _ => {
-                            self.charge_construction(std::mem::size_of::<Chain>())?;
-                            self.lists.chains.push(Chain::default());
-                            self.lists.chains.len() - 1
-                        }
+                        _ => None,
                     }
                 };
-                // LibreOffice initialises a list without a counted item
-                // differently for an empty and a header-only list (measured
-                // by the reviewer); continuing one rejects.
-                if (continue_numbering || continue_list.is_some())
-                    && !self.lists.chains[chain].counted
-                {
-                    return Err(unsupported("list-continuation"));
-                }
+                let chain = match continued {
+                    // LibreOffice initialises a list without a counted item
+                    // differently for an empty and a header-only list
+                    // (measured by the reviewer); continuing one rejects.
+                    Some(chain) if !self.lists.chains[chain].counted => {
+                        return Err(unsupported("list-continuation"));
+                    }
+                    Some(chain) => chain,
+                    None => {
+                        self.charge_construction(std::mem::size_of::<Chain>())?;
+                        self.lists.chains.push(Chain::default());
+                        self.lists.chains.len() - 1
+                    }
+                };
                 self.charge_construction(style.len())?;
                 self.lists.previous = Some((style.to_string(), chain));
                 if let Some(id) = id {
@@ -459,6 +475,26 @@ impl<'a> Reader<'a> {
             Format::Decimal => value.to_string(),
             Format::Empty => String::new(),
             Format::LowerRoman => roman(value).to_ascii_lowercase(),
+            Format::Circled => match value {
+                1..=20 => char::from_u32(0x2460 + value - 1),
+                21..=35 => char::from_u32(0x3251 + value - 21),
+                36..=50 => char::from_u32(0x32B1 + value - 36),
+                _ => None,
+            }
+            .ok_or_else(|| unsupported("list-format-range"))?
+            .to_string(),
+            Format::Katakana | Format::HalfwidthKatakana => {
+                let table = if format == Format::Katakana {
+                    KATAKANA
+                } else {
+                    HALFWIDTH_KATAKANA
+                };
+                table
+                    .chars()
+                    .nth(((value - 1) % 46) as usize)
+                    .expect("46 kana")
+                    .to_string()
+            }
             Format::UpperRoman => roman(value),
             Format::LowerLetter | Format::UpperLetter => {
                 // ODF 1.4 §19.505 matches LibreOffice beyond "z"; ODF 1.3
@@ -491,6 +527,7 @@ impl<'a> Reader<'a> {
                 _ => return Err(unsupported("list-style-attribute")),
             }
         }
+        self.charge_work(list.element.children.len())?;
         let definition = list
             .element
             .children
@@ -538,6 +575,9 @@ impl<'a> Reader<'a> {
                 "A" => Format::UpperLetter,
                 "i" => Format::LowerRoman,
                 "I" => Format::UpperRoman,
+                "①, ②, ③, ..." => Format::Circled,
+                "ア, イ, ウ, ..." => Format::Katakana,
+                "ｱ, ｲ, ｳ, ..." => Format::HalfwidthKatakana,
                 "" => Format::Empty,
                 _ => return Err(unsupported("list-format")),
             };
@@ -546,11 +586,7 @@ impl<'a> Reader<'a> {
                 // LibreOffice breaks a label at a line feed, draws U+2011 as
                 // a gap, never breaks at U+00AD and interleaves body text into
                 // a long label with U+00A0 (measured by the reviewer).
-                if value.len() > MAX_AFFIX_BYTES
-                    || value
-                        .chars()
-                        .any(|c| c.is_control() || matches!(c, '\u{a0}' | '\u{2011}' | '\u{ad}'))
-                {
+                if value.len() > MAX_AFFIX_BYTES || value.chars().any(special_label_character) {
                     return Err(unsupported("list-affix"));
                 }
                 Ok(value.to_string())
@@ -599,7 +635,7 @@ impl<'a> Reader<'a> {
             // (measured).
             let mut chars = attribute((NS_TEXT, "bullet-char")).unwrap_or("").chars();
             match (chars.next(), chars.next()) {
-                (Some(c), None) if !c.is_control() => Kind::Bullet(c),
+                (Some(c), None) if !special_label_character(c) => Kind::Bullet(c),
                 _ => return Err(unsupported("list-bullet")),
             }
         };
@@ -827,6 +863,33 @@ impl<'a> Reader<'a> {
             (contexts.len() - 1) as u32
         };
         let properties = self.run_properties(contexts, context, ScriptClass::Latin)?;
+        // An end- or centre-aligned label that would start before the page
+        // edge, or a centred one reaching T, is laid out irregularly by
+        // LibreOffice (measured: the label is cut at the page edge and the
+        // body moves right; the tab collapses). The label width is bounded by
+        // two ems per ASCII character, so only labels that provably stay
+        // clear of both are admitted.
+        if label.align != Align::Start {
+            if !label.text.is_ascii() {
+                return Err(unsupported("list-label-extent"));
+            }
+            let bound = label.text.len() as f64 * 2.0 * properties.size;
+            let start = paragraph.indent_left + paragraph.indent_first;
+            let before = if label.align == Align::End {
+                bound
+            } else {
+                bound / 2.0
+            };
+            let reaches_tab = label.align == Align::Center
+                && label.follow == Follow::Tab
+                && paragraph
+                    .tab_stops
+                    .first()
+                    .is_none_or(|stop| start + bound / 2.0 >= stop.pos);
+            if start - before < -self.page_left_margin || reaches_tab {
+                return Err(unsupported("list-label-extent"));
+            }
+        }
         // LibreOffice extends a label's decoration over its tab gap, which a
         // DOCX tab does not paint.
         if properties.underline.is_some()
@@ -901,6 +964,14 @@ impl<'a> Reader<'a> {
         }
         Ok(stops)
     }
+}
+
+/// Label characters LibreOffice does not draw as ordinary text: a line feed
+/// breaks the label, U+2011 is drawn as a gap, U+00AD never breaks it, and
+/// U+00A0 lets body text interleave into a long label (measured by the
+/// reviewer).
+fn special_label_character(c: char) -> bool {
+    c.is_control() || matches!(c, '\u{a0}' | '\u{2011}' | '\u{ad}')
 }
 
 /// The element children of an item or header, without soft page breaks.
