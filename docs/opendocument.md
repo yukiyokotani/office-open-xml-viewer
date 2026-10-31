@@ -110,14 +110,18 @@ only within its measured scope:
 - automatic text colour over a character or paragraph background is black
   or white by LibreOffice's `Color::IsDark()` rule.
 
-Two known differences from LibreOffice remain in admitted documents:
+Three known differences from LibreOffice remain in admitted documents:
 
 - LibreOffice spreads a justified line's spare width in whole layout
   units, so its justified lines can end up to about 1.6 pt short of the
   margin; the viewer ends them at the margin;
 - with LibreOffice's default settings, a decorated space at a wrapped
   line's end is underlined or struck through in LibreOffice and left
-  undecorated by the viewer.
+  undecorated by the viewer;
+- LibreOffice shapes Graphite fonts (such as Linux Libertine G) with their
+  own Graphite rules, which keep pair kerning even where a style turns it
+  off; browsers do not implement Graphite and shape these fonts from their
+  OpenType tables.
 
 LibreOffice's layout settings (`settings.xml`) that Word-derived documents
 carry are admitted where they were measured to change nothing the reader
