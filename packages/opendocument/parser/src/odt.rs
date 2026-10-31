@@ -1226,6 +1226,38 @@ impl<'a> Reader<'a> {
             if kerning.any(|kerned| kerned != first) {
                 return Err(unsupported("letter-kerning-mixed"));
             }
+            // The DOCX layout shapes a word's ASCII and other characters
+            // (its ascii and hAnsi font slots) as one piece only for kerned
+            // text; unkerned, it splits them, and a ligature across the
+            // seam is lost where LibreOffice keeps it (measured by the
+            // reviewer: Carlito "ffí" wraps differently). Words are
+            // separated by U+0020 and tabs only.
+            if !first {
+                let mut ascii = false;
+                let mut other = false;
+                // A run other than text (a break) separates words.
+                for c in collected.paragraph.runs.iter().flat_map(|run| {
+                    match run {
+                        DocRun::Text(text) => text.text.as_str(),
+                        _ => " ",
+                    }
+                    .chars()
+                }) {
+                    if c == ' ' || c == '\t' {
+                        ascii = false;
+                        other = false;
+                        continue;
+                    }
+                    if c.is_ascii() {
+                        ascii = true;
+                    } else {
+                        other = true;
+                    }
+                    if ascii && other {
+                        return Err(unsupported("letter-kerning-off-seam"));
+                    }
+                }
+            }
         }
         if collected.paragraph.line_spacing.is_some() {
             // Proportional spacing scales the natural line of uniform text
@@ -5356,6 +5388,30 @@ mod tests {
             ..Fixture::default()
         });
         assert_eq!(mixed.unwrap_err(), unsupported("letter-kerning-mixed"));
+        // An unkerned word mixing ASCII and other characters rejects, also
+        // across spans and with a no-break space; separate words do not.
+        let unkerned = |body: &str| {
+            read_fixture(Fixture {
+                default_text: r#"style:font-name="Serif" fo:font-size="12pt" style:letter-kerning="false""#,
+                styles: r#"<style:style style:name="B" style:family="text"><style:text-properties fo:font-weight="bold"/></style:style>"#,
+                body,
+                ..Fixture::default()
+            })
+            .map(|_| ())
+        };
+        for body in [
+            "<text:p>ffí</text:p>",
+            "<text:p>don\u{2019}t</text:p>",
+            r#"<text:p>ff<text:span text:style-name="B">í</text:span></text:p>"#,
+            "<text:p>a\u{a0}b</text:p>",
+        ] {
+            assert_eq!(
+                unkerned(body),
+                Err(unsupported("letter-kerning-off-seam")),
+                "{body}"
+            );
+        }
+        assert_eq!(unkerned("<text:p>ff í \u{2019} é</text:p>"), Ok(()));
     }
 
     #[test]
