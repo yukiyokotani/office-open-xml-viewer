@@ -1780,7 +1780,12 @@ pub(crate) fn parse_master_txstyle_color_tier(
             map.entry(ph_type).or_insert(color);
         }
     }
-    for (style_node, ph_types) in tx_style_nodes(root) {
+    // Authored txStyles only: the built-in template styles of a master
+    // without them colour their own list levels (`parse_master_level_colors`),
+    // and a title's level-1 fill must not become the default of its deeper
+    // levels, which keep the hard default.
+    let authored_tx_styles = child(root, "txStyles").is_some();
+    for (style_node, ph_types) in tx_style_nodes(root).into_iter().filter(|_| authored_tx_styles) {
         if let Some(color) = child(style_node, "lvl1pPr")
             .and_then(|lp| child(lp, "defRPr"))
             .and_then(|rp| text_property_color(rp, theme))
@@ -3670,6 +3675,9 @@ mod placeholder_geometry_tests {
                 assert_eq!(colors[*class][level].as_deref(), Some("F9F9F9"), "{class} {level}");
             }
         }
+        // The level-1 fill stays on its level: it is no shape-wide default,
+        // which would colour the deeper title levels too.
+        assert!(parse_master_txstyle_color(doc.root_element(), &theme).is_empty());
     }
 
     /// Review regression (#1620 x #1625): only the Latin face and size of
