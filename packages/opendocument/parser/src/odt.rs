@@ -5576,6 +5576,24 @@ mod tests {
     }
 
     #[test]
+    fn charges_table_style_scans_per_use() {
+        let padded = format!("0.5pt{}solid #000000", " ".repeat(64 * 1024));
+        let styles = format!(
+            r#"<style:style style:name="T" style:family="table"><style:table-properties style:width="10cm" table:align="left"/></style:style><style:style style:name="T.A" style:family="table-column"><style:table-column-properties style:column-width="10cm"/></style:style><style:style style:name="T.A1" style:family="table-cell"><style:table-cell-properties fo:padding="0cm" fo:border="{padded}"/></style:style><style:style style:name="Sp" style:family="paragraph"><style:paragraph-properties fo:margin-top="6pt" fo:margin-bottom="8pt"/></style:style>"#
+        );
+        let rows = |count: usize| {
+            let row = r#"<table:table-row><table:table-cell table:style-name="T.A1"><text:p>x</text:p></table:table-cell></table:table-row>"#;
+            table_body(&format!(
+                r#"<table:table table:name="T" table:style-name="T"><table:table-column table:style-name="T.A"/>{}</table:table>"#,
+                row.repeat(count)
+            ))
+        };
+        read_table(&styles, &rows(2)).unwrap();
+        let error = read_table(&styles, &rows(300)).unwrap_err();
+        assert!(error.contains("style resolution limit"), "{error}");
+    }
+
+    #[test]
     fn requires_the_measured_table_settings() {
         let body = table_body(TABLE);
         let read = |settings: &str| {
@@ -5785,6 +5803,14 @@ mod tests {
                 ),
                 table_body(TABLE),
                 "table-border-conflict",
+            ),
+            (
+                TABLE_STYLES.replace(
+                    r#"style:min-row-height="2cm""#,
+                    r#"style:min-row-height="2cm" style:row-height="1cm""#,
+                ),
+                table_body(TABLE),
+                "table-row-height",
             ),
             // A page break before a table with a top margin.
             (

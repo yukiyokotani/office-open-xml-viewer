@@ -1342,6 +1342,22 @@ describe('retained table pagination', () => {
     expect(take(fitting, 60).requiresFreshPage).toBe(true);
   });
 
+  it('keeps a producer cantSplit row that fits a fresh page off a page holding earlier rows', () => {
+    const kept = (index: number, lines: number[]) => ({ ...row(index, lines.reduce((a, b) => a + b, 0), {
+      cantSplit: true,
+      paragraph: paragraph(`kept-${index}`, lines),
+    }), overPageContinues: true as const });
+    const source = acquisition([kept(0, [10, 10, 10]), kept(1, [20, 20, 20, 20])]);
+
+    const first = take(source, 100);
+    expect(first.fragment?.rows.map((item) => item.logicalRowIndex)).toEqual([0]);
+    expect(first.nextCursor).toMatchObject({ rowIndex: 1, rowFragmentIndex: 0 });
+
+    const second = take(source, 100, first.nextCursor!);
+    expect(second.fragment?.rows.map((item) => item.fragmentIndex)).toEqual([0]);
+    expect(second.nextCursor).toBeNull();
+  });
+
   it('clips an over-page cantSplit row to the fresh Word page band without continuation', () => {
     const source = acquisition([row(0, 120, {
       cantSplit: true,

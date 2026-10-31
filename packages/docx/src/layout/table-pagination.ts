@@ -2304,8 +2304,7 @@ function takeTableFragmentPass(
       }
     }
 
-    const freshHeaderHeightPt = context.availableHeightPt - availablePt;
-    const fitsFreshBand = wholeHeightPt + freshHeaderHeightPt
+    const fitsFreshBand = wholeHeightPt + repeatedHeaderHeightPt
       <= context.freshPageHeightPt + EPSILON_PT;
     // A producer's over-page cantSplit row splits where it starts, as a row
     // without cantSplit does (TableRowFormatInput.overPageContinues).

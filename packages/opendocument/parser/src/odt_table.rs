@@ -78,7 +78,8 @@ fn group<'s>(
 }
 
 impl Reader<'_> {
-    /// `group` of a table-family style, its processing charged.
+    /// `group` of a table-family style, charged by the bytes each use scans
+    /// (a style shared by many cells is scanned once per cell).
     fn table_group(
         &self,
         family: Family,
@@ -86,7 +87,12 @@ impl Reader<'_> {
         group_name: &str,
     ) -> Result<Option<&Attributes>, String> {
         let properties = group(self.sheet, family, name, group_name)?;
-        self.charge_work(1 + properties.map_or(0, |p| p.len()))?;
+        let bytes: usize = properties.map_or(0, |p| {
+            p.iter()
+                .map(|(key, value)| key.0.len() + key.1.len() + value.len())
+                .sum()
+        });
+        self.charge_work(1 + bytes)?;
         Ok(properties)
     }
 }
@@ -144,7 +150,13 @@ impl<'a> Reader<'a> {
         let mut row_keep_default = false;
         if let Some(default) = self.sheet.default_style(Family::Table) {
             for (key, properties) in &default.style().groups {
-                self.charge_work(1 + properties.attributes.len())?;
+                self.charge_work(
+                    1 + properties
+                        .attributes
+                        .iter()
+                        .map(|(key, value)| key.0.len() + key.1.len() + value.len())
+                        .sum::<usize>(),
+                )?;
                 for (attribute, value) in &properties.attributes {
                     match (key.as_str(), attribute.0.as_str(), attribute.1.as_str()) {
                         ("table-properties", NS_TABLE, "border-model") if value == "collapsing" => {
@@ -156,7 +168,13 @@ impl<'a> Reader<'a> {
         }
         if let Some(default) = self.sheet.default_style(Family::TableRow) {
             for (key, properties) in &default.style().groups {
-                self.charge_work(1 + properties.attributes.len())?;
+                self.charge_work(
+                    1 + properties
+                        .attributes
+                        .iter()
+                        .map(|(key, value)| key.0.len() + key.1.len() + value.len())
+                        .sum::<usize>(),
+                )?;
                 for (attribute, value) in &properties.attributes {
                     match (key.as_str(), attribute.0.as_str(), attribute.1.as_str()) {
                         ("table-row-properties", NS_FO, "keep-together") => {
@@ -370,8 +388,14 @@ impl<'a> Reader<'a> {
             .flatten()
             {
                 match (key.0.as_str(), key.1.as_str()) {
-                    (NS_STYLE, "row-height") => height = Some((length_pt(value)?, "exact")),
-                    (NS_STYLE, "min-row-height") => height = Some((length_pt(value)?, "atLeast")),
+                    // Both together resolve in an order that was not
+                    // measured.
+                    (NS_STYLE, "row-height" | "min-row-height") => {
+                        let rule = if key.1 == "row-height" { "exact" } else { "atLeast" };
+                        if height.replace((length_pt(value)?, rule)).is_some() {
+                            return Err(unsupported("table-row-height"));
+                        }
+                    }
                     (NS_FO, "keep-together") => {
                         cant_split = match value.as_str() {
                             "always" => true,
