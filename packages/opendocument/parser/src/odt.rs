@@ -1482,16 +1482,22 @@ impl<'a> Reader<'a> {
                 names
             };
             let ((pa, aa), (pb, ab)) = (&cache.resolved[&a], &cache.resolved[&b]);
-            // The western language is left out: LibreOffice maps locale
-            // aliases (zh/cmn, a country without a language) together, so a
-            // language difference alone stays unknown.
+            // Languages are left out: LibreOffice maps locale aliases (zh and
+            // cmn, a country without a language) together, so a language
+            // difference alone stays unknown.
             if names(&cache.chains[&a]) != names(&cache.chains[&b]) || (aa - ab).abs() >= 0.1 {
                 Seam::Boundary
             } else {
-                // Sizes LibreOffice may round together stay unknown.
+                // Sizes LibreOffice may round together, languages, and family
+                // names differing only in case stay unknown.
                 let mut near = pb.clone();
                 if (pa.size - pb.size).abs() < 0.1 {
                     near.size = pa.size;
+                }
+                near.lang_east_asia = pa.lang_east_asia.clone();
+                near.lang_bidi = pa.lang_bidi.clone();
+                if pa.family.eq_ignore_ascii_case(&near.family) {
+                    near.family = pa.family.clone();
                 }
                 if *pa != near {
                     Seam::Boundary
@@ -4295,7 +4301,7 @@ mod tests {
     #[test]
     fn balanced_spaces_follow_libreoffice_portions() {
         let styles = r##"<style:style style:name="Red" style:family="text"><style:text-properties fo:color="#ff0000"/></style:style><style:style style:name="Empty" style:family="text"/><style:style style:name="J" style:family="paragraph"><style:paragraph-properties fo:text-align="justify"/></style:style><style:style style:name="Red2" style:family="text" style:display-name="Red"><style:text-properties fo:color="#ff0000"/></style:style><style:style style:name="PRed" style:family="paragraph"><style:text-properties fo:color="#ff0000"/></style:style>"##;
-        let automatic = r##"<style:style style:name="T1" style:family="text"><style:text-properties fo:color="#ff0000"/></style:style><style:style style:name="T2" style:family="text"><style:text-properties fo:color="#ff0000"/></style:style><style:style style:name="TE" style:family="text"><style:text-properties/></style:style><style:style style:name="R1" style:family="text"><style:text-properties officeooo:rsid="00111111"/></style:style><style:style style:name="R2" style:family="text"><style:text-properties officeooo:rsid="00222222"/></style:style><style:style style:name="NR" style:family="text" style:parent-style-name="Red"><style:text-properties officeooo:rsid="00333333"/></style:style><style:style style:name="De" style:family="text"><style:text-properties fo:language="de" fo:country="DE"/></style:style><style:style style:name="A10" style:family="text"><style:text-properties style:font-size-asian="10pt"/></style:style><style:style style:name="En" style:family="text"><style:text-properties fo:language="en"/></style:style><style:style style:name="Us" style:family="text"><style:text-properties fo:country="US"/></style:style><style:style style:name="Gb" style:family="text"><style:text-properties fo:country="GB"/></style:style><style:style style:name="EnNone" style:family="text"><style:text-properties fo:language="en" fo:country="none"/></style:style><style:style style:name="A12x" style:family="text"><style:text-properties style:font-size-asian="12.024pt"/></style:style><style:style style:name="TU" style:family="text"><style:text-properties fo:color="#FF0000"/></style:style><style:style style:name="TR" style:family="text" style:parent-style-name="Red"><style:text-properties fo:color="#ff0000"/></style:style><style:style style:name="PA" style:family="paragraph"><style:text-properties fo:color="#ff0000"/></style:style><style:style style:name="S12" style:family="text"><style:text-properties fo:font-size="12pt"/></style:style><style:style style:name="S12x" style:family="text"><style:text-properties fo:font-size="12.001pt"/></style:style>"##;
+        let automatic = r##"<style:style style:name="T1" style:family="text"><style:text-properties fo:color="#ff0000"/></style:style><style:style style:name="T2" style:family="text"><style:text-properties fo:color="#ff0000"/></style:style><style:style style:name="TE" style:family="text"><style:text-properties/></style:style><style:style style:name="R1" style:family="text"><style:text-properties officeooo:rsid="00111111"/></style:style><style:style style:name="R2" style:family="text"><style:text-properties officeooo:rsid="00222222"/></style:style><style:style style:name="NR" style:family="text" style:parent-style-name="Red"><style:text-properties officeooo:rsid="00333333"/></style:style><style:style style:name="De" style:family="text"><style:text-properties fo:language="de" fo:country="DE"/></style:style><style:style style:name="A10" style:family="text"><style:text-properties style:font-size-asian="10pt"/></style:style><style:style style:name="En" style:family="text"><style:text-properties fo:language="en"/></style:style><style:style style:name="Zh" style:family="text"><style:text-properties style:language-asian="zh" style:country-asian="CN"/></style:style><style:style style:name="Cmn" style:family="text"><style:text-properties style:language-asian="cmn" style:country-asian="CN"/></style:style><style:style style:name="Us" style:family="text"><style:text-properties fo:country="US"/></style:style><style:style style:name="Gb" style:family="text"><style:text-properties fo:country="GB"/></style:style><style:style style:name="EnNone" style:family="text"><style:text-properties fo:language="en" fo:country="none"/></style:style><style:style style:name="A12x" style:family="text"><style:text-properties style:font-size-asian="12.024pt"/></style:style><style:style style:name="TU" style:family="text"><style:text-properties fo:color="#FF0000"/></style:style><style:style style:name="TR" style:family="text" style:parent-style-name="Red"><style:text-properties fo:color="#ff0000"/></style:style><style:style style:name="PA" style:family="paragraph"><style:text-properties fo:color="#ff0000"/></style:style><style:style style:name="S12" style:family="text"><style:text-properties fo:font-size="12pt"/></style:style><style:style style:name="S12x" style:family="text"><style:text-properties fo:font-size="12.001pt"/></style:style>"##;
         let read = |balance: bool, body: &str| {
             read_fixture(Fixture {
                 styles,
@@ -4399,6 +4405,8 @@ mod tests {
             format!("{}{} cc", s("En", "aa"), s("EnNone", " bb")),
             // A different language (LibreOffice maps some locales together).
             s("En", &format!("aa{}bb", s("De", " "))),
+            // Asian or complex languages.
+            format!("{}{} cc", s("Zh", "aa"), s("Cmn", " bb")),
             // A country without a language.
             format!("{}{} cc", s("Us", "aa"), s("Gb", " bb")),
             // A formatted space merged into a collapsed space.
