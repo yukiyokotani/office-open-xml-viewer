@@ -80,7 +80,7 @@ describe('explicit space advance', () => {
     expect(xOf(wide!, 'bbbb')).toBeCloseTo(20 + 40 + 25, 6);
   });
 
-  it('applies to every U+0020 in the run, before horizontal scaling', () => {
+  it('applies to every U+0020 in the run, unchanged by horizontal scaling', () => {
     const [line] = lines(para([textRun('aaaa'), textRun('  ', { __spaceAdvancePt: 4, charScale: 2 } as Partial<DocxTextRun>), textRun('bbbb')], 'left'));
     expect(xOf(line!, 'bbbb')).toBeCloseTo(20 + 40 + 8, 6);
   });

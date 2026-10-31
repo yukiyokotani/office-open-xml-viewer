@@ -141,8 +141,8 @@ type ParagraphTextFacts = Readonly<{
    * Its source run is otherwise empty, independent of dictionary hyphenation. */
   optionalHyphen?: boolean;
   /** Explicit advance (pt) of every U+0020 in the run, replacing the space
-   * glyph's advance before horizontal scaling; character spacing still
-   * applies. Producers other than DOCX set it where their format fixes it. */
+   * glyph's advance as a width horizontal scaling does not change; character
+   * spacing still applies. Producers other than DOCX set it where their format fixes it. */
   spaceAdvancePt?: number;
   /** Parser-projected CT_R boundary constraint around an authored
    * `<w:noBreakHyphen/>`. These names are layout facts, not parser wire keys. */

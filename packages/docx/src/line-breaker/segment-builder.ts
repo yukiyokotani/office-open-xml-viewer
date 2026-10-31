@@ -681,8 +681,9 @@ export function finalizeBuiltSegments(
 
   // A run's explicit U+0020 advance (set by producers other than DOCX)
   // replaces the natural space advance through the same per-space
-  // adjustment; the adjustment is scaled with the glyphs, so it is taken
-  // before horizontal scaling, and character spacing still applies.
+  // adjustment. The adjustment is scaled with the glyphs, so it is divided
+  // by the horizontal scale to keep the advance unscaled; character spacing
+  // still applies.
   for (const segment of segs) {
     if (!('text' in segment) || segment.spaceAdvancePt === undefined) continue;
     const service = segment.textLayoutService;

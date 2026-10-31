@@ -946,9 +946,11 @@ enum Token {
     /// `text:s`: one space that is never collapsed.
     Space(u32),
     LineBreak(u32),
-    /// A bookmark or reference mark: no character, but it ends LibreOffice's
-    /// text portion (measured with BalanceSpacesAndIdeographicSpaces).
-    Boundary,
+    /// No character, but where LibreOffice may end its text portion
+    /// (BalanceSpacesAndIdeographicSpaces): `true` for a bookmark or
+    /// reference mark (measured), `false` for an empty formatted span, whose
+    /// formatting LibreOffice may keep as an empty attribute (not measured).
+    Boundary(bool),
 }
 
 impl<'a> Reader<'a> {
@@ -1227,7 +1229,15 @@ impl<'a> Reader<'a> {
                         },
                         None => context,
                     };
+                    let before = inline.tokens.len();
                     self.inline(child, nested, inline, depth + 1)?;
+                    if inline.tokens.len() == before
+                        && nested != context
+                        && !span_chain(&inline.contexts, nested).is_empty()
+                    {
+                        self.charge_text(1, 1, inline)?;
+                        inline.tokens.push(Token::Boundary(false));
+                    }
                 }
                 (Some(NS_TEXT), "s") => {
                     let count = child
@@ -1265,7 +1275,7 @@ impl<'a> Reader<'a> {
                     | "reference-mark-end",
                 ) => {
                     self.charge_text(1, 1, inline)?;
-                    inline.tokens.push(Token::Boundary);
+                    inline.tokens.push(Token::Boundary(true));
                 }
                 _ => return Err(unsupported("inline-element")),
             }
@@ -1331,7 +1341,7 @@ impl<'a> Reader<'a> {
     /// BalanceSpacesAndIdeographicSpaces (LibreOffice `sw::Justify::
     /// BalanceCjkSpaces`, measured): a U+0020 that is the first or last
     /// character of a text portion, or next to another U+0020, advances half
-    /// its Asian font size, before horizontal scaling and with letter spacing
+    /// its Asian font size, unchanged by horizontal scaling and with letter spacing
     /// added. Portions end at the paragraph's ends, line breaks, soft hyphens,
     /// bookmarks and reference marks, and where the span formatting changes
     /// (`Self::seam`). The break search uses the same advances, except in
@@ -1349,7 +1359,7 @@ impl<'a> Reader<'a> {
             |token: Option<&Token>| matches!(token, Some(Token::Char(' ', _) | Token::Space(_)));
         let context = |token: &Token| match *token {
             Token::Char(_, context) | Token::Space(context) => Some(context),
-            Token::LineBreak(_) | Token::Boundary => None,
+            Token::LineBreak(_) | Token::Boundary(_) => None,
         };
         // Whether each token is followed only by U+0020 and portion marks up
         // to the next line break or the paragraph end (one reverse pass).
@@ -1359,7 +1369,7 @@ impl<'a> Reader<'a> {
             hangs[index] = rest_hangs;
             rest_hangs = match token {
                 Token::LineBreak(_) => true,
-                Token::Boundary => rest_hangs,
+                Token::Boundary(_) => rest_hangs,
                 token => rest_hangs && space(Some(token)),
             };
         }
@@ -1380,10 +1390,15 @@ impl<'a> Reader<'a> {
                     break;
                 }
                 match neighbour {
-                    None
-                    | Some(Token::LineBreak(_) | Token::Boundary | Token::Char('\u{ad}', _)) => {
-                        balanced = true;
-                    }
+                    None | Some(Token::LineBreak(_) | Token::Boundary(true)) => balanced = true,
+                    Some(Token::Boundary(false)) => unknown = true,
+                    // Characters LibreOffice sets in portions of their own
+                    // (measured: soft hyphen, no-break space, non-breaking
+                    // hyphen, zero-width space, word joiner) and ones whose
+                    // effect was not reproduced (byte order mark, direction
+                    // controls).
+                    Some(Token::Char(c, _)) if portion_character(*c) => balanced = true,
+                    Some(Token::Char(c, _)) if uncertain_portion_character(*c) => unknown = true,
                     Some(other) => {
                         let other = context(other).expect("a character has a context");
                         match self.seam(&mut seams, contexts, own, other)? {
@@ -1417,16 +1432,14 @@ impl<'a> Reader<'a> {
     }
 
     /// Whether LibreOffice starts a text portion between two span contexts.
-    /// LibreOffice compares the imported formatting items after removing
-    /// span properties that repeat the paragraph's direct (automatic style)
-    /// formatting and after applying nested character styles over enclosing
-    /// automatic properties; that comparison is not reproduced. Instead:
-    /// identical span chains (character style and own properties of each
-    /// enclosing span, without revision ids) are one portion; a difference
-    /// in the resolved formatting, in the character styles, or in which
-    /// properties are set (other than ones the paragraph's automatic style
-    /// also sets) is a boundary (measured); anything else, such as the same
-    /// property spelled differently or repeated in a nested span, is unknown.
+    /// LibreOffice compares the imported formatting items after normalising
+    /// values, removing span properties that repeat the paragraph's direct
+    /// (automatic style) formatting and applying nested character styles
+    /// over enclosing automatic properties; that comparison is not
+    /// reproduced. Instead: identical span chains are one portion; a
+    /// different character style (by display name) or a clearly different
+    /// resolved value (formatting the reader renders, the western language,
+    /// or the Asian size) is a boundary (measured); anything else is unknown.
     fn seam(
         &self,
         cache: &mut SeamCache<'a>,
@@ -1437,51 +1450,63 @@ impl<'a> Reader<'a> {
         if a == b {
             return Ok(Seam::Same);
         }
+        let pair = (a.min(b), a.max(b));
+        if let Some(seam) = cache.seams.get(&pair) {
+            return Ok(*seam);
+        }
         for context in [a, b] {
-            if let std::collections::hash_map::Entry::Vacant(entry) = cache.chains.entry(context) {
-                entry.insert(span_chain(contexts, context));
+            if cache.chains.contains_key(&context) {
+                continue;
             }
-            if let std::collections::hash_map::Entry::Vacant(entry) =
-                cache.properties.entry(context)
+            let chain = span_chain(contexts, context);
+            let work = chain.iter().fold(1usize, |work, (name, properties)| {
+                properties.iter().fold(
+                    work.saturating_add(name.map_or(0, str::len)),
+                    |work, (key, value)| work.saturating_add(key.1.len() + value.len() + 1),
+                )
+            });
+            self.charge_work(work)?;
+            let styles = self.search_order(contexts, context)?;
+            self.charge_cascade(&styles, TEXT)?;
+            let cascade = Cascade::new(styles, TEXT);
+            let language = ["language", "country"]
+                .map(|name| cascade.get(NS_FO, name).map(str::to_ascii_lowercase));
+            let properties = self.run_properties(contexts, context, ScriptClass::Latin)?;
+            let asian = self.balanced_space_advance(contexts, context)? * 2.0;
+            cache.chains.insert(context, chain);
+            cache
+                .resolved
+                .insert(context, (properties, language, asian));
+        }
+        let seam = if cache.chains[&a] == cache.chains[&b] {
+            Seam::Same
+        } else {
+            let names = |chain: &SpanChain<'a>| {
+                let mut names: Vec<&str> = chain.iter().filter_map(|(name, _)| *name).collect();
+                names.sort_unstable();
+                names
+            };
+            let ((pa, la, aa), (pb, lb, ab)) = (&cache.resolved[&a], &cache.resolved[&b]);
+            if names(&cache.chains[&a]) != names(&cache.chains[&b])
+                || la != lb
+                || (aa - ab).abs() >= 0.1
             {
-                entry.insert(self.run_properties(contexts, context, ScriptClass::Latin)?);
+                Seam::Boundary
+            } else {
+                // Sizes LibreOffice may round together stay unknown.
+                let mut near = pb.clone();
+                if (pa.size - pb.size).abs() < 0.1 {
+                    near.size = pa.size;
+                }
+                if *pa != near {
+                    Seam::Boundary
+                } else {
+                    Seam::Unknown
+                }
             }
-        }
-        let (chain_a, chain_b) = (&cache.chains[&a], &cache.chains[&b]);
-        if chain_a == chain_b {
-            return Ok(Seam::Same);
-        }
-        if cache.properties[&a] != cache.properties[&b] {
-            return Ok(Seam::Boundary);
-        }
-        let styles = |chain: &SpanChain<'a>| {
-            let mut names: Vec<&str> = chain.iter().filter_map(|(name, _)| *name).collect();
-            names.sort_unstable();
-            names
         };
-        if styles(chain_a) != styles(chain_b) {
-            return Ok(Seam::Boundary);
-        }
-        let keys = |chain: &SpanChain<'a>| -> HashSet<&'a crate::style::Key> {
-            chain
-                .iter()
-                .flat_map(|(_, properties)| properties.keys().copied())
-                .collect()
-        };
-        let paragraph_keys: HashSet<&crate::style::Key> = contexts[0]
-            .styles
-            .first()
-            .map(|style| style.style())
-            .filter(|style| style.automatic)
-            .and_then(|style| style.groups.get(TEXT))
-            .map_or_else(HashSet::new, |p| p.attributes.keys().collect());
-        if keys(chain_a)
-            .symmetric_difference(&keys(chain_b))
-            .any(|key| !paragraph_keys.contains(key))
-        {
-            return Ok(Seam::Boundary);
-        }
-        Ok(Seam::Unknown)
+        cache.seams.insert(pair, seam);
+        Ok(seam)
     }
 
     /// Half the Asian font size (LibreOffice's "CJK font height × 0.5": the
@@ -1598,7 +1623,7 @@ impl<'a> Reader<'a> {
                     });
                     continue;
                 }
-                Token::Boundary => continue,
+                Token::Boundary(_) => continue,
                 Token::Char(c, context) => (c, context),
                 Token::Space(context) => (' ', context),
             };
@@ -1917,7 +1942,7 @@ fn weak_classes(tokens: &[Token]) -> Vec<Option<ScriptClass>> {
     let character = |token: &Token| match *token {
         Token::Char(c, _) => Some(c),
         Token::Space(_) => Some(' '),
-        Token::LineBreak(_) | Token::Boundary => None,
+        Token::LineBreak(_) | Token::Boundary(_) => None,
     };
     let mut classes: Vec<Option<ScriptClass>> = Vec::with_capacity(tokens.len());
     let mut previous: Option<ScriptClass> = None;
@@ -2021,16 +2046,36 @@ fn same_line_metrics(
     }
 }
 
+fn portion_character(c: char) -> bool {
+    matches!(
+        c,
+        '\u{ad}' | '\u{a0}' | '\u{2011}' | '\u{200b}' | '\u{2060}'
+    )
+}
+
+fn uncertain_portion_character(c: char) -> bool {
+    matches!(c, '\u{feff}' | '\u{61c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+}
+
 /// The spans enclosing a context, outermost first: each span's character
-/// style (an automatic style's parent) and its automatic style's own text
-/// properties without revision ids. Spans that contribute neither are left
-/// out (LibreOffice creates no formatting for them, measured).
+/// style (an automatic style's parent) by display name, and its automatic
+/// style's own text properties without revision ids. Spans that contribute
+/// neither are left out (LibreOffice creates no formatting for them,
+/// measured).
 type SpanChain<'a> = Vec<(Option<&'a str>, BTreeMap<&'a crate::style::Key, &'a str>)>;
 
 fn span_chain<'a>(contexts: &[TextContext<'a>], mut context: u32) -> SpanChain<'a> {
     let mut chain = Vec::new();
     while let Some(parent) = contexts[context as usize].parent {
-        let style = contexts[context as usize].styles[0].style();
+        let styles = &contexts[context as usize].styles;
+        let style = styles[0].style();
+        let display = |style: &'a Style| {
+            style
+                .attributes
+                .get(&(NS_STYLE.to_string(), "display-name".to_string()))
+                .unwrap_or(&style.name)
+                .as_str()
+        };
         let entry = if style.automatic {
             let properties: BTreeMap<&crate::style::Key, &str> = style
                 .groups
@@ -2040,9 +2085,12 @@ fn span_chain<'a>(contexts: &[TextContext<'a>], mut context: u32) -> SpanChain<'
                 .filter(|(key, _)| (key.0.as_str(), key.1.as_str()) != (NS_OFFICEOOO, "rsid"))
                 .map(|(key, value)| (key, value.as_str()))
                 .collect();
-            (style.parent.as_deref(), properties)
+            (
+                styles.get(1).map(|parent| display(parent.style())),
+                properties,
+            )
         } else {
-            (Some(style.name.as_str()), BTreeMap::new())
+            (Some(display(style)), BTreeMap::new())
         };
         if entry.0.is_some() || !entry.1.is_empty() {
             chain.push(entry);
@@ -2063,7 +2111,10 @@ enum Seam {
 #[derive(Default)]
 struct SeamCache<'a> {
     chains: HashMap<u32, SpanChain<'a>>,
-    properties: HashMap<u32, RunProperties>,
+    /// Resolved Latin formatting, western language and country, and Asian
+    /// font size.
+    resolved: HashMap<u32, (RunProperties, [Option<String>; 2], f64)>,
+    seams: HashMap<(u32, u32), Seam>,
 }
 
 /// §6.1.2 white-space collapsing over a paragraph's character data: tab, CR
@@ -2076,12 +2127,12 @@ struct SeamCache<'a> {
 fn collapse(tokens: Vec<Token>) -> (Vec<Token>, Option<u32>) {
     let mut out: Vec<Token> = Vec::with_capacity(tokens.len());
     let mut pending: Option<Token> = None;
-    let mut boundaries = 0usize;
+    let mut boundaries: Vec<Token> = Vec::new();
     let mut started = false;
     for token in tokens {
-        if let Token::Boundary = token {
+        if let Token::Boundary(_) = token {
             if pending.is_some() {
-                boundaries += 1;
+                boundaries.push(token);
             } else {
                 out.push(token);
             }
@@ -2097,7 +2148,7 @@ fn collapse(tokens: Vec<Token>) -> (Vec<Token>, Option<u32>) {
                 if let Some(space) = pending.take() {
                     out.push(space);
                 }
-                out.extend((0..std::mem::take(&mut boundaries)).map(|_| Token::Boundary));
+                out.append(&mut boundaries);
                 started = true;
                 out.push(Token::Char(c, context));
             }
@@ -2107,7 +2158,7 @@ fn collapse(tokens: Vec<Token>) -> (Vec<Token>, Option<u32>) {
                 if let Some(space) = pending.take() {
                     out.push(space);
                 }
-                out.extend((0..std::mem::take(&mut boundaries)).map(|_| Token::Boundary));
+                out.append(&mut boundaries);
                 started = true;
                 out.push(element);
             }
@@ -4227,8 +4278,8 @@ mod tests {
 
     #[test]
     fn balanced_spaces_follow_libreoffice_portions() {
-        let styles = r##"<style:style style:name="Red" style:family="text"><style:text-properties fo:color="#ff0000"/></style:style><style:style style:name="Empty" style:family="text"/><style:style style:name="J" style:family="paragraph"><style:paragraph-properties fo:text-align="justify"/></style:style><style:style style:name="PRed" style:family="paragraph"><style:text-properties fo:color="#ff0000"/></style:style>"##;
-        let automatic = r##"<style:style style:name="T1" style:family="text"><style:text-properties fo:color="#ff0000"/></style:style><style:style style:name="T2" style:family="text"><style:text-properties fo:color="#ff0000"/></style:style><style:style style:name="TE" style:family="text"><style:text-properties/></style:style><style:style style:name="R1" style:family="text"><style:text-properties officeooo:rsid="00111111"/></style:style><style:style style:name="R2" style:family="text"><style:text-properties officeooo:rsid="00222222"/></style:style><style:style style:name="NR" style:family="text" style:parent-style-name="Red"><style:text-properties officeooo:rsid="00333333"/></style:style><style:style style:name="De" style:family="text"><style:text-properties fo:language="de" fo:country="DE"/></style:style><style:style style:name="A10" style:family="text"><style:text-properties style:font-size-asian="10pt"/></style:style><style:style style:name="TU" style:family="text"><style:text-properties fo:color="#FF0000"/></style:style><style:style style:name="TR" style:family="text" style:parent-style-name="Red"><style:text-properties fo:color="#ff0000"/></style:style><style:style style:name="PA" style:family="paragraph"><style:text-properties fo:color="#ff0000"/></style:style>"##;
+        let styles = r##"<style:style style:name="Red" style:family="text"><style:text-properties fo:color="#ff0000"/></style:style><style:style style:name="Empty" style:family="text"/><style:style style:name="J" style:family="paragraph"><style:paragraph-properties fo:text-align="justify"/></style:style><style:style style:name="Red2" style:family="text" style:display-name="Red"><style:text-properties fo:color="#ff0000"/></style:style><style:style style:name="PRed" style:family="paragraph"><style:text-properties fo:color="#ff0000"/></style:style>"##;
+        let automatic = r##"<style:style style:name="T1" style:family="text"><style:text-properties fo:color="#ff0000"/></style:style><style:style style:name="T2" style:family="text"><style:text-properties fo:color="#ff0000"/></style:style><style:style style:name="TE" style:family="text"><style:text-properties/></style:style><style:style style:name="R1" style:family="text"><style:text-properties officeooo:rsid="00111111"/></style:style><style:style style:name="R2" style:family="text"><style:text-properties officeooo:rsid="00222222"/></style:style><style:style style:name="NR" style:family="text" style:parent-style-name="Red"><style:text-properties officeooo:rsid="00333333"/></style:style><style:style style:name="De" style:family="text"><style:text-properties fo:language="de" fo:country="DE"/></style:style><style:style style:name="A10" style:family="text"><style:text-properties style:font-size-asian="10pt"/></style:style><style:style style:name="TU" style:family="text"><style:text-properties fo:color="#FF0000"/></style:style><style:style style:name="TR" style:family="text" style:parent-style-name="Red"><style:text-properties fo:color="#ff0000"/></style:style><style:style style:name="PA" style:family="paragraph"><style:text-properties fo:color="#ff0000"/></style:style><style:style style:name="S12" style:family="text"><style:text-properties fo:font-size="12pt"/></style:style><style:style style:name="S12x" style:family="text"><style:text-properties fo:font-size="12.001pt"/></style:style>"##;
         let read = |balance: bool, body: &str| {
             read_fixture(Fixture {
                 styles,
@@ -4242,7 +4293,7 @@ mod tests {
         };
         // Each U+0020's advance, in order (Asian size 12 pt: 6 pt).
         let advances = |balance: bool, body: &str| -> Vec<Option<f64>> {
-            let document = read(balance, body).unwrap();
+            let document = read(balance, body).unwrap_or_else(|e| panic!("{body}: {e}"));
             paragraphs(&document)[0]
                 .runs
                 .iter()
@@ -4295,9 +4346,18 @@ mod tests {
             ("aa<text:line-break/><text:s/>bb cc".into(), vec![six, None]),
             // The space's own Asian size.
             (format!("aa{}bb", s("A10", " ")), vec![Some(5.0)]),
-            // No-break spaces are not balanced, nor do they make a U+0020
-            // adjacent.
-            ("aa\u{a0} bb".into(), vec![None]),
+            // No-break spaces are not balanced, but they, non-breaking
+            // hyphens, zero-width spaces and word joiners are portions of
+            // their own; other punctuation and spaces are not.
+            ("aa\u{a0}bb".into(), vec![]),
+            ("aa\u{a0} bb".into(), vec![six]),
+            ("aa \u{2011}bb".into(), vec![six]),
+            ("aa\u{200b} bb".into(), vec![six]),
+            ("aa\u{2060} bb".into(), vec![six]),
+            ("aa\u{202f} bb".into(), vec![None]),
+            ("aa- bb".into(), vec![None]),
+            // Styles are compared by display name.
+            (format!("{}{} cc", s("Red", "aa"), s("Red2", " bb")), vec![None, six]),
         ] {
             assert_eq!(advances(true, &format!("<text:p>{body}</text:p>")), expected, "{body}");
             assert!(
@@ -4316,6 +4376,12 @@ mod tests {
                 r#"<text:p text:style-name="PA">aa{}</text:p>"#,
                 s("T1", " bb")
             ),
+            // Sizes LibreOffice may round together.
+            format!("{}{}", s("S12", "aa"), s("S12x", " bb")),
+            // An empty formatted span, a byte order mark, a direction mark.
+            format!("aa{} bb", s("Red", "")),
+            "aa\u{feff} bb".into(),
+            "aa \u{200e}bb".into(),
         ] {
             let body = if body.starts_with("<text:p") {
                 body
@@ -4327,7 +4393,11 @@ mod tests {
                 unsupported("balanced-space-portion"),
                 "{body}"
             );
-            assert!(read(false, &body).is_ok(), "{body}");
+            assert_ne!(
+                read(false, &body).err(),
+                Some(unsupported("balanced-space-portion")),
+                "{body}"
+            );
         }
         // A character style nested in an automatic style is not the same as
         // an automatic style with that parent and the same property.

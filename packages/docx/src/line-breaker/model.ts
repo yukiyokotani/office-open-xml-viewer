@@ -81,7 +81,7 @@ export interface LayoutTextSeg extends LayoutSegSource {
    * its East-Asian ideographic cell. */
   widthBalanceSpaceSequence?: true;
   widthBalanceSpaceAdjustmentPt?: number;
-  /** The source run's explicit U+0020 advance (pt, before horizontal
+  /** The source run's explicit U+0020 advance (pt, unchanged by horizontal
    * scaling), projected onto the same per-space adjustment. */
   spaceAdvancePt?: number;
   /** Internal marker assigned once after queue construction: this segment is
