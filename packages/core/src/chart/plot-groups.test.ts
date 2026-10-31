@@ -41,6 +41,7 @@ test('a visible or reversed secondary category axis stays outside the shared pai
   expect(classicPlotDispatch(combo(['line', 'line'], { hidden: false }))).toBe('unsupported');
   const reversed = { hidden: true, orientation: 'maxMin' };
   expect(classicPlotDispatch(combo(['bar', 'line'], reversed))).toBe('unsupported');
+  expect(classicPlotDispatch(combo(['bar', 'bar'], reversed))).toBe('unsupported');
   expect(classicPlotDispatch(combo(['area', 'line'], reversed))).toBe('unsupported');
   // Both reversed: a crosses="max" secondary value axis would sit on the left.
   expect(classicPlotDispatch({ ...combo(['line', 'line'], reversed), catAxisOrientation: 'maxMin' }))
@@ -51,7 +52,7 @@ test('date axes, crossBetween and horizontal bars keep a deleted secondary categ
   expect(classicPlotDispatch(combo(['line', 'line'], { hidden: true, dateAxis: true }))).toBe('unsupported');
   expect(classicPlotDispatch({ ...combo(['line', 'line'], { hidden: true }), catAxisIsDate: true }))
     .toBe('unsupported');
-  for (const kinds of [['line', 'line'], ['area', 'bar']] as Array<[Kind, Kind]>) {
+  for (const kinds of [['line', 'line'], ['bar', 'line']] as Array<[Kind, Kind]>) {
     const midCat = combo(kinds, { hidden: true });
     (midCat.secondaryValAxis as { crossBetween?: string }).crossBetween = 'midCat';
     expect(classicPlotDispatch(midCat)).toBe('unsupported');
@@ -64,24 +65,37 @@ test('date axes, crossBetween and horizontal bars keep a deleted secondary categ
   expect(classicPlotDispatch(horizontal)).toBe('unsupported');
 });
 
-test('a scene of bar groups keeps the bar route whether or not it shares', () => {
-  // The bar painter drew every all-bar scene before sharing existed; a
-  // placeholder there would lose a chart that drew.
+test('bar routes keep a deleted secondary category axis they drew before sharing', () => {
+  // A bar-only scene and the bar group of a bar + area pair reached their
+  // routes whatever their category axis; a placeholder there would lose a
+  // chart that drew.
   const variants: ChartModel[] = [
-    combo(['bar', 'bar'], { hidden: true, orientation: 'maxMin' }),
     { ...combo(['bar', 'bar'], { hidden: true, orientation: 'maxMin' }), catAxisOrientation: 'maxMin' },
     combo(['bar', 'bar'], { hidden: true, dateAxis: true }),
     { ...combo(['bar', 'bar'], { hidden: true }), catAxisIsDate: true },
+    { ...combo(['area', 'bar'], { hidden: true }), catAxisIsDate: true },
   ];
   const midCat = combo(['bar', 'bar'], { hidden: true });
   (midCat.secondaryValAxis as { crossBetween?: string }).crossBetween = 'midCat';
+  const areaMidCat = combo(['area', 'bar'], { hidden: true });
+  (areaMidCat.secondaryValAxis as { crossBetween?: string }).crossBetween = 'midCat';
   const horizontal = combo(['bar', 'bar'], { hidden: true });
   for (const group of horizontal.plotGroups as ChartPlotGroup[]) group.barDirection = 'bar';
   const longer = combo(['bar', 'bar'], { hidden: true });
   longer.series[1] = { ...longer.series[1], categories: ['a', 'b', 'c', 'd'], values: [1, 2, 3, 4] };
-  for (const model of [...variants, midCat, horizontal, longer]) {
+  for (const model of [...variants, midCat, areaMidCat, horizontal, longer]) {
     expect(classicPlotDispatch(model)).toBe('bar-combo');
   }
+  // Excel reverses only the groups of a reversed deleted axis; the bar
+  // painter maps every group through the primary orientation.
+  expect(classicPlotDispatch(combo(['bar', 'bar'], { hidden: true, orientation: 'maxMin' })))
+    .toBe('unsupported');
+  expect(classicPlotDispatch(combo(['area', 'bar'], { hidden: true, orientation: 'maxMin' })))
+    .toBe('unsupported');
+  // bar + line accepted primary category axes only.
+  const barLineMidCat = combo(['line', 'bar'], { hidden: true });
+  (barLineMidCat.secondaryValAxis as { crossBetween?: string }).crossBetween = 'midCat';
+  expect(classicPlotDispatch(barLineMidCat)).toBe('unsupported');
 });
 
 test('a series without its own categories carries the chart category count', () => {

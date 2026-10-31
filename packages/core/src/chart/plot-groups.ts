@@ -98,14 +98,24 @@ export function classicPlotDispatch(chart: ChartModel): ClassicPlotDispatch {
   // - crossBetween (§21.2.2.32) of each value axis places its categories
   //   between or on the tick marks;
   // - the horizontal bar painter has no secondary value axis.
-  // A line or area group on a deleted secondary category axis that cannot
-  // share is left unsupported: before sharing, those routes accepted primary
-  // category axes only. A scene of bar groups alone keeps the bar painter's
-  // established route whether or not it shares: that route drew every such
-  // scene before sharing existed (date axes, crossBetween, reversed axes and
-  // unequal counts included), and a placeholder would lose a chart it drew.
+  // A group on a deleted secondary category axis that cannot share is left
+  // unsupported, except where the route already drew such a group before
+  // sharing existed: the bar groups of a bar-only scene and the bar group of
+  // a bar + area pair, which those routes paint whatever their category axis
+  // (date axes, crossBetween, unequal counts and horizontal bars included).
+  // A placeholder there would lose a chart that drew. They still need the
+  // two category axes in one orientation: the bar painter maps every group
+  // through the primary orientation, and Excel reverses only the groups of a
+  // reversed deleted axis, so a mixed pair stays unsupported rather than
+  // drawn unreversed.
   const kinds = new Set(groups.map(group => group.kind));
-  const barScene = kinds.size === 1 && kinds.has('bar');
+  const barRoute = (kinds.size === 1 && kinds.has('bar'))
+    || (groups.length === 2 && kinds.has('bar') && kinds.has('area'));
+  const sameOrientation = (chart.secondaryCatAxis?.orientation ?? 'minMax')
+    === (chart.catAxisOrientation ?? 'minMax');
+  const drawsUnshared = (group: ChartPlotGroup): boolean =>
+    group.kind === 'scatter' || group.kind === 'bubble'
+    || (group.kind === 'bar' && barRoute && sameOrientation);
   const primaryCategoryCount = chartCategories(chart).length;
   const horizontalBars = groups.some(group => group.kind === 'bar'
     && (group.barDirection ?? (chart.chartType.endsWith('H') ? 'bar' : 'col')) === 'bar');
@@ -124,9 +134,10 @@ export function classicPlotDispatch(chart: ChartModel): ClassicPlotDispatch {
       || chart.series.slice(group.seriesStart, group.seriesStart + group.seriesCount)
         .every(series => (series.categories?.length
           ? series.categories.length : primaryCategoryCount) === primaryCategoryCount));
-  if (chart.secondaryCatAxis?.hidden === true && !sharesCategories && !barScene
-    && groups.some(group => group.categoryAxis === 'secondary'
-      && group.kind !== 'scatter' && group.kind !== 'bubble')) return 'unsupported';
+  if (chart.secondaryCatAxis?.hidden === true && !sharesCategories
+    && groups.some(group => group.categoryAxis === 'secondary' && !drawsUnshared(group))) {
+    return 'unsupported';
+  }
   const onPrimaryCategories = (group: ChartPlotGroup): boolean =>
     group.categoryAxis === 'primary'
     || (group.categoryAxis === 'secondary' && sharesCategories);
