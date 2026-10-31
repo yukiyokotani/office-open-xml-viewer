@@ -5107,7 +5107,14 @@ mod tests {
             one(r#"<text:list-style style:name="L"><text:list-level-style-bullet text:level="1" text:bullet-char="&#x2011;"><style:list-level-properties text:list-level-position-and-space-mode="label-alignment"><style:list-level-label-alignment text:label-followed-by="listtab" text:list-tab-stop-position="2cm" fo:text-indent="-1cm" fo:margin-left="2cm"/></style:list-level-properties></text:list-level-style-bullet></text:list-style>"#).unwrap_err(),
             unsupported("list-bullet")
         );
-        // Repeated level definitions.
+        // Repeated level definitions, also spelled differently.
+        assert_eq!(
+            one(&list_styles(
+                &(level.clone() + &level.replace(r#"text:level="1""#, r#"text:level="01""#))
+            ))
+            .unwrap_err(),
+            unsupported("list-level-duplicate")
+        );
         assert_eq!(
             one(&list_styles(&(level.clone() + &level))).unwrap_err(),
             unsupported("list-level-duplicate")

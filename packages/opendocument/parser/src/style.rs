@@ -360,7 +360,7 @@ fn read_list_style(node: roxmltree::Node<'_, '_>) -> Result<ListStyle, String> {
     // takes none.
     let mut levels = HashSet::new();
     for level in node.children().filter(|n| n.is_element()) {
-        if !levels.insert(level.attribute((NS_TEXT, "level")).unwrap_or("")) {
+        if !levels.insert(list_level_number(level)?) {
             return Err(crate::error::unsupported("list-level-duplicate"));
         }
     }
@@ -372,10 +372,7 @@ fn read_list_style(node: roxmltree::Node<'_, '_>) -> Result<ListStyle, String> {
         else {
             continue;
         };
-        let key = level
-            .attribute((NS_TEXT, "level"))
-            .unwrap_or("")
-            .to_string();
+        let key = list_level_number(level)?.to_string();
         let style = Style {
             name: String::new(),
             family: "text".to_string(),
@@ -399,6 +396,16 @@ fn read_list_style(node: roxmltree::Node<'_, '_>) -> Result<ListStyle, String> {
         element,
         level_text,
     })
+}
+
+/// A list level's `text:level` (§19.840, a positive integer), compared by
+/// value: "01" is level 1.
+pub fn list_level_number(level: roxmltree::Node<'_, '_>) -> Result<u32, String> {
+    level
+        .attribute((NS_TEXT, "level"))
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|value| (1..=10).contains(value))
+        .ok_or_else(|| crate::error::unsupported("list-level"))
 }
 
 fn read_style(node: roxmltree::Node<'_, '_>) -> Result<Style, String> {
