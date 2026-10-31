@@ -994,34 +994,35 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// Label characters LibreOffice does not draw as ordinary text: a line feed
-/// breaks the label, U+2011 is drawn as a gap, U+00AD never breaks it, and
-/// U+00A0 lets body text interleave into a long label (measured by the
-/// reviewer). Line and paragraph separators and the other format characters
-/// (zero-width, joiners, direction controls, invisible operators) lay out
-/// differently in the DOCX layout and are excluded as a class, as are
-/// combining marks and variation selectors.
+/// Label characters outside the admitted set (an allowlist, so that marks,
+/// format characters, separators and controls are excluded by construction;
+/// measured by the reviewer: a line feed breaks the label, U+2011 is drawn
+/// as a gap, U+00AD never breaks it, U+00A0 and other no-break spaces and
+/// punctuation break a long label differently, isolated combining marks get
+/// an advance in LibreOffice only, and "%n%" is a counter placeholder). The
+/// set covers the corpus's labels: printable ASCII but "%", Latin-1
+/// letters and symbols, dashes, bullets and the reference mark, arrows,
+/// geometric shapes, miscellaneous symbols and dingbats, and private-use
+/// symbol-font bullets.
 fn special_label_character(c: char) -> bool {
-    // Combining marks and variation selectors: LibreOffice gives an isolated
-    // one an advance, the browser none (measured by the reviewer).
-    crate::script::is_combining_mark(c)
-        || c.is_control()
-        || matches!(
-            c,
-            '\u{a0}'
-                | '\u{2011}'
-                | '\u{ad}'
-                | '\u{2028}'
-                | '\u{2029}'
-                | '\u{61c}'
-                | '\u{180e}'
-                | '\u{200b}'..='\u{200f}'
-                | '\u{202a}'..='\u{202e}'
-                | '\u{2060}'..='\u{2064}'
-                | '\u{2066}'..='\u{206f}'
-                | '\u{feff}'
-                | '\u{fff9}'..='\u{fffb}'
-        )
+    let admitted = matches!(
+        c,
+        ' '..='$'
+            | '&'..='~'
+            | '\u{a1}'..='\u{ac}'
+            | '\u{ae}'..='\u{ff}'
+            | '\u{2013}'
+            | '\u{2014}'
+            | '\u{2022}'
+            | '\u{2023}'
+            | '\u{203b}'
+            | '\u{2043}'
+            | '\u{2190}'..='\u{21ff}'
+            | '\u{25a0}'..='\u{25ff}'
+            | '\u{2600}'..='\u{27bf}'
+            | '\u{e000}'..='\u{f8ff}'
+    );
+    !admitted
 }
 
 /// The element children of an item or header, without soft page breaks.
