@@ -99,23 +99,22 @@ export function classicPlotDispatch(chart: ChartModel): ClassicPlotDispatch {
   //   between or on the tick marks;
   // - the horizontal bar painter has no secondary value axis.
   // A group on a deleted secondary category axis that cannot share is left
-  // unsupported, except where the route already drew such a group before
-  // sharing existed: the bar groups of a bar-only scene and the bar group of
-  // a bar + area pair, which those routes paint whatever their category axis
-  // (date axes, crossBetween, unequal counts and horizontal bars included).
-  // A placeholder there would lose a chart that drew. They still need the
-  // two category axes in one orientation: the bar painter maps every group
-  // through the primary orientation, and Excel reverses only the groups of a
-  // reversed deleted axis, so a mixed pair stays unsupported rather than
-  // drawn unreversed.
+  // unsupported where sharing opened the route: a line or area group (those
+  // routes accepted primary category axes only), and any group whose axis
+  // was paired beside the primary one (`pairedBesidePrimary`), a form the
+  // routes could not resolve before. A group on an axis resolved by position,
+  // as before sharing existed, keeps the route that drew it then: the bar
+  // groups of a bar-only scene and the bar group of a bar + area pair reached
+  // the bar painter whatever their category axis (within those routes' own
+  // bar-direction limits), and a placeholder there would lose a chart that
+  // drew.
   const kinds = new Set(groups.map(group => group.kind));
   const barRoute = (kinds.size === 1 && kinds.has('bar'))
     || (groups.length === 2 && kinds.has('bar') && kinds.has('area'));
-  const sameOrientation = (chart.secondaryCatAxis?.orientation ?? 'minMax')
-    === (chart.catAxisOrientation ?? 'minMax');
+  const resolvedByPosition = chart.secondaryCatAxis?.pairedBesidePrimary !== true;
   const drawsUnshared = (group: ChartPlotGroup): boolean =>
     group.kind === 'scatter' || group.kind === 'bubble'
-    || (group.kind === 'bar' && barRoute && sameOrientation);
+    || (group.kind === 'bar' && barRoute && resolvedByPosition);
   const primaryCategoryCount = chartCategories(chart).length;
   const horizontalBars = groups.some(group => group.kind === 'bar'
     && (group.barDirection ?? (chart.chartType.endsWith('H') ? 'bar' : 'col')) === 'bar');

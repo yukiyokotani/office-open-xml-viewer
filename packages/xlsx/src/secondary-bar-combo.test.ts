@@ -51,9 +51,29 @@ function paint(chart: ChartModel): { texts: string[]; rects: number } {
   return { texts, rects };
 }
 
+// Excel writes the deleted secondary category axis beside the primary one
+// (axPos b); the parser pairs them through the groups' axis IDs. An axis on
+// another side is resolved by position, as before that pairing existed.
+it.each([
+  ['b', true],
+  ['t', undefined],
+])('reports a deleted secondary category axis at %s as paired beside the primary: %s', (side, paired) => {
+  const chart = parsedChart(secondaryBarComboXlsxBytes({ deletedAxPos: side }));
+  expect(chart.secondaryCatAxis?.pairedBesidePrimary ?? undefined).toBe(paired);
+});
+
+// Paired beside the primary axis, a combo that cannot share one category
+// scale stays outside the bar painter.
+it.each([
+  ['midCat on the secondary value axis', { midCat: true }],
+  ['reversed category axes', { reversed: true }],
+])('keeps a same-side pairing with %s unsupported', (_name, variant) => {
+  expect(paint(parsedChart(secondaryBarComboXlsxBytes(variant))).texts).toContain('Unsupported chart');
+});
+
 // Two column groups on primary and secondary value axes over a deleted
-// secondary category axis: the bar painter draws them whether or not the
-// groups can share one category scale.
+// secondary category axis resolved by position (or sharing the categories):
+// the bar painter draws them as it did before sharing existed.
 it.each([
   ['shared categories, deleted axis at b', {}],
   ['shared categories, deleted axis at t', { deletedAxPos: 't' }],
