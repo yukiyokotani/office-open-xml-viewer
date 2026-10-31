@@ -1334,7 +1334,7 @@ impl<'a> Reader<'a> {
     /// its Asian font size, before horizontal scaling and with letter spacing
     /// added. Portions end at the paragraph's ends, line breaks, soft hyphens,
     /// bookmarks and reference marks, and where the span formatting changes
-    /// (`portion_key`). The break search uses the same advances, except in
+    /// (`Self::seam`). The break search uses the same advances, except in
     /// justified paragraphs, where LibreOffice measured some of them unbalanced
     /// and then compressed the line; a justified paragraph rejects unless
     /// every balanced space hangs at its line's end. Returns each token's
@@ -1351,7 +1351,19 @@ impl<'a> Reader<'a> {
             Token::Char(_, context) | Token::Space(context) => Some(context),
             Token::LineBreak(_) | Token::Boundary => None,
         };
-        let mut keys: HashMap<u32, PortionKey<'a>> = HashMap::new();
+        // Whether each token is followed only by U+0020 and portion marks up
+        // to the next line break or the paragraph end (one reverse pass).
+        let mut hangs = vec![false; tokens.len()];
+        let mut rest_hangs = true;
+        for (index, token) in tokens.iter().enumerate().rev() {
+            hangs[index] = rest_hangs;
+            rest_hangs = match token {
+                Token::LineBreak(_) => true,
+                Token::Boundary => rest_hangs,
+                token => rest_hangs && space(Some(token)),
+            };
+        }
+        let mut seams = SeamCache::default();
         let mut advances: HashMap<u32, f64> = HashMap::new();
         let mut out = vec![None; tokens.len()];
         for (index, token) in tokens.iter().enumerate() {
@@ -1359,36 +1371,36 @@ impl<'a> Reader<'a> {
                 continue;
             }
             let own = context(token).expect("a space has a context");
-            let mut edge = |neighbour: Option<&Token>| -> bool {
+            let previous = index.checked_sub(1).map(|i| &tokens[i]);
+            let next = tokens.get(index + 1);
+            let mut balanced = space(previous) || space(next);
+            let mut unknown = false;
+            for neighbour in [previous, next] {
+                if balanced {
+                    break;
+                }
                 match neighbour {
                     None
                     | Some(Token::LineBreak(_) | Token::Boundary | Token::Char('\u{ad}', _)) => {
-                        true
+                        balanced = true;
                     }
                     Some(other) => {
                         let other = context(other).expect("a character has a context");
-                        if other == own {
-                            return false;
+                        match self.seam(&mut seams, contexts, own, other)? {
+                            Seam::Same => {}
+                            Seam::Boundary => balanced = true,
+                            Seam::Unknown => unknown = true,
                         }
-                        for context in [own, other] {
-                            keys.entry(context)
-                                .or_insert_with(|| portion_key(contexts, context));
-                        }
-                        keys[&own] != keys[&other]
                     }
                 }
-            };
-            let previous = index.checked_sub(1).map(|i| &tokens[i]);
-            let next = tokens.get(index + 1);
-            if !(space(previous) || space(next) || edge(previous) || edge(next)) {
+            }
+            if !balanced {
+                if unknown {
+                    return Err(unsupported("balanced-space-portion"));
+                }
                 continue;
             }
-            if justified
-                && tokens[index + 1..]
-                    .iter()
-                    .take_while(|t| !matches!(t, Token::LineBreak(_)))
-                    .any(|t| !space(Some(t)) && !matches!(t, Token::Boundary))
-            {
+            if justified && !hangs[index] {
                 return Err(unsupported("justify-balanced-spaces"));
             }
             let advance = match advances.get(&own) {
@@ -1402,6 +1414,74 @@ impl<'a> Reader<'a> {
             out[index] = Some(advance);
         }
         Ok(out)
+    }
+
+    /// Whether LibreOffice starts a text portion between two span contexts.
+    /// LibreOffice compares the imported formatting items after removing
+    /// span properties that repeat the paragraph's direct (automatic style)
+    /// formatting and after applying nested character styles over enclosing
+    /// automatic properties; that comparison is not reproduced. Instead:
+    /// identical span chains (character style and own properties of each
+    /// enclosing span, without revision ids) are one portion; a difference
+    /// in the resolved formatting, in the character styles, or in which
+    /// properties are set (other than ones the paragraph's automatic style
+    /// also sets) is a boundary (measured); anything else, such as the same
+    /// property spelled differently or repeated in a nested span, is unknown.
+    fn seam(
+        &self,
+        cache: &mut SeamCache<'a>,
+        contexts: &[TextContext<'a>],
+        a: u32,
+        b: u32,
+    ) -> Result<Seam, String> {
+        if a == b {
+            return Ok(Seam::Same);
+        }
+        for context in [a, b] {
+            if let std::collections::hash_map::Entry::Vacant(entry) = cache.chains.entry(context) {
+                entry.insert(span_chain(contexts, context));
+            }
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                cache.properties.entry(context)
+            {
+                entry.insert(self.run_properties(contexts, context, ScriptClass::Latin)?);
+            }
+        }
+        let (chain_a, chain_b) = (&cache.chains[&a], &cache.chains[&b]);
+        if chain_a == chain_b {
+            return Ok(Seam::Same);
+        }
+        if cache.properties[&a] != cache.properties[&b] {
+            return Ok(Seam::Boundary);
+        }
+        let styles = |chain: &SpanChain<'a>| {
+            let mut names: Vec<&str> = chain.iter().filter_map(|(name, _)| *name).collect();
+            names.sort_unstable();
+            names
+        };
+        if styles(chain_a) != styles(chain_b) {
+            return Ok(Seam::Boundary);
+        }
+        let keys = |chain: &SpanChain<'a>| -> HashSet<&'a crate::style::Key> {
+            chain
+                .iter()
+                .flat_map(|(_, properties)| properties.keys().copied())
+                .collect()
+        };
+        let paragraph_keys: HashSet<&crate::style::Key> = contexts[0]
+            .styles
+            .first()
+            .map(|style| style.style())
+            .filter(|style| style.automatic)
+            .and_then(|style| style.groups.get(TEXT))
+            .map_or_else(HashSet::new, |p| p.attributes.keys().collect());
+        if keys(chain_a)
+            .symmetric_difference(&keys(chain_b))
+            .any(|key| !paragraph_keys.contains(key))
+        {
+            return Ok(Seam::Boundary);
+        }
+        Ok(Seam::Unknown)
     }
 
     /// Half the Asian font size (LibreOffice's "CJK font height × 0.5": the
@@ -1941,39 +2021,49 @@ fn same_line_metrics(
     }
 }
 
-/// The formatting that delimits LibreOffice's text portions (measured with
-/// BalanceSpacesAndIdeographicSpaces): the character styles of the enclosing
-/// spans, outermost first (an automatic style contributes its parent, and a
-/// nested span its own entry even when it repeats one), and the automatic
-/// styles' own properties merged innermost first, without revision ids.
-/// Adjacent spans with equal keys share a portion; paragraph formatting does
-/// not take part, so a span repeating it still starts a portion.
-type PortionKey<'a> = (Vec<&'a str>, BTreeMap<&'a crate::style::Key, &'a str>);
+/// The spans enclosing a context, outermost first: each span's character
+/// style (an automatic style's parent) and its automatic style's own text
+/// properties without revision ids. Spans that contribute neither are left
+/// out (LibreOffice creates no formatting for them, measured).
+type SpanChain<'a> = Vec<(Option<&'a str>, BTreeMap<&'a crate::style::Key, &'a str>)>;
 
-fn portion_key<'a>(contexts: &[TextContext<'a>], mut context: u32) -> PortionKey<'a> {
-    let mut formats = Vec::new();
-    let mut direct: BTreeMap<&'a crate::style::Key, &'a str> = BTreeMap::new();
+fn span_chain<'a>(contexts: &[TextContext<'a>], mut context: u32) -> SpanChain<'a> {
+    let mut chain = Vec::new();
     while let Some(parent) = contexts[context as usize].parent {
         let style = contexts[context as usize].styles[0].style();
-        if style.automatic {
-            formats.extend(style.parent.as_deref());
-            for (key, value) in style
+        let entry = if style.automatic {
+            let properties: BTreeMap<&crate::style::Key, &str> = style
                 .groups
                 .get(TEXT)
                 .into_iter()
                 .flat_map(|p| &p.attributes)
-            {
-                if (key.0.as_str(), key.1.as_str()) != (NS_OFFICEOOO, "rsid") {
-                    direct.entry(key).or_insert(value.as_str());
-                }
-            }
+                .filter(|(key, _)| (key.0.as_str(), key.1.as_str()) != (NS_OFFICEOOO, "rsid"))
+                .map(|(key, value)| (key, value.as_str()))
+                .collect();
+            (style.parent.as_deref(), properties)
         } else {
-            formats.push(style.name.as_str());
+            (Some(style.name.as_str()), BTreeMap::new())
+        };
+        if entry.0.is_some() || !entry.1.is_empty() {
+            chain.push(entry);
         }
         context = parent;
     }
-    formats.reverse();
-    (formats, direct)
+    chain.reverse();
+    chain
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Seam {
+    Same,
+    Boundary,
+    Unknown,
+}
+
+#[derive(Default)]
+struct SeamCache<'a> {
+    chains: HashMap<u32, SpanChain<'a>>,
+    properties: HashMap<u32, RunProperties>,
 }
 
 /// §6.1.2 white-space collapsing over a paragraph's character data: tab, CR
@@ -4138,7 +4228,7 @@ mod tests {
     #[test]
     fn balanced_spaces_follow_libreoffice_portions() {
         let styles = r##"<style:style style:name="Red" style:family="text"><style:text-properties fo:color="#ff0000"/></style:style><style:style style:name="Empty" style:family="text"/><style:style style:name="J" style:family="paragraph"><style:paragraph-properties fo:text-align="justify"/></style:style><style:style style:name="PRed" style:family="paragraph"><style:text-properties fo:color="#ff0000"/></style:style>"##;
-        let automatic = r##"<style:style style:name="T1" style:family="text"><style:text-properties fo:color="#ff0000"/></style:style><style:style style:name="T2" style:family="text"><style:text-properties fo:color="#ff0000"/></style:style><style:style style:name="TE" style:family="text"><style:text-properties/></style:style><style:style style:name="R1" style:family="text"><style:text-properties officeooo:rsid="00111111"/></style:style><style:style style:name="R2" style:family="text"><style:text-properties officeooo:rsid="00222222"/></style:style><style:style style:name="NR" style:family="text" style:parent-style-name="Red"><style:text-properties officeooo:rsid="00333333"/></style:style><style:style style:name="De" style:family="text"><style:text-properties fo:language="de" fo:country="DE"/></style:style><style:style style:name="A10" style:family="text"><style:text-properties style:font-size-asian="10pt"/></style:style>"##;
+        let automatic = r##"<style:style style:name="T1" style:family="text"><style:text-properties fo:color="#ff0000"/></style:style><style:style style:name="T2" style:family="text"><style:text-properties fo:color="#ff0000"/></style:style><style:style style:name="TE" style:family="text"><style:text-properties/></style:style><style:style style:name="R1" style:family="text"><style:text-properties officeooo:rsid="00111111"/></style:style><style:style style:name="R2" style:family="text"><style:text-properties officeooo:rsid="00222222"/></style:style><style:style style:name="NR" style:family="text" style:parent-style-name="Red"><style:text-properties officeooo:rsid="00333333"/></style:style><style:style style:name="De" style:family="text"><style:text-properties fo:language="de" fo:country="DE"/></style:style><style:style style:name="A10" style:family="text"><style:text-properties style:font-size-asian="10pt"/></style:style><style:style style:name="TU" style:family="text"><style:text-properties fo:color="#FF0000"/></style:style><style:style style:name="TR" style:family="text" style:parent-style-name="Red"><style:text-properties fo:color="#ff0000"/></style:style><style:style style:name="PA" style:family="paragraph"><style:text-properties fo:color="#ff0000"/></style:style>"##;
         let read = |balance: bool, body: &str| {
             read_fixture(Fixture {
                 styles,
@@ -4190,9 +4280,7 @@ mod tests {
             (format!("{}{} cc", s("T1", "aa"), s("T2", " bb")), vec![None, six]),
             (format!("{}{} cc", s("Red", "aa"), s("NR", " bb")), vec![None, six]),
             (format!("{}{} cc", s("Red", "aa"), s("T1", " bb")), vec![six, six]),
-            // Nested spans: an equal automatic style merges, a repeated
-            // character style does not.
-            (s("T1", &format!("aa{} cc", s("T2", " bb"))), vec![None, None]),
+            // A repeated nested character style is a portion of its own.
             (s("Red", &format!("aa{} cc", s("Red", " bb"))), vec![six, six]),
             // Language is formatting too.
             (format!("aa{}bb", s("De", " ")), vec![six]),
@@ -4217,8 +4305,46 @@ mod tests {
                 "{body}"
             );
         }
-        // Paragraph formatting does not take part: a span repeating it is a
-        // portion of its own.
+        // Seams LibreOffice decides by comparing formatting items after
+        // merging (a property repeated by a nested span, spelled differently,
+        // or repeating the paragraph's automatic formatting) reject next to
+        // a space that would otherwise keep its advance.
+        for body in [
+            s("T1", &format!("aa{} cc", s("T2", " bb"))),
+            format!("{}{}", s("T1", "aa"), s("TU", " bb")),
+            format!(
+                r#"<text:p text:style-name="PA">aa{}</text:p>"#,
+                s("T1", " bb")
+            ),
+        ] {
+            let body = if body.starts_with("<text:p") {
+                body
+            } else {
+                format!("<text:p>{body}</text:p>")
+            };
+            assert_eq!(
+                read(true, &body).unwrap_err(),
+                unsupported("balanced-space-portion"),
+                "{body}"
+            );
+            assert!(read(false, &body).is_ok(), "{body}");
+        }
+        // A character style nested in an automatic style is not the same as
+        // an automatic style with that parent and the same property.
+        assert_eq!(
+            read(
+                true,
+                &format!(
+                    "<text:p>{}{}</text:p>",
+                    s("T1", &s("Red", "aa")),
+                    s("TR", " bb")
+                )
+            )
+            .unwrap_err(),
+            unsupported("balanced-space-portion")
+        );
+        // Paragraph formatting does not take part otherwise: a span repeating
+        // a named paragraph style's formatting is a portion of its own.
         assert_eq!(
             advances(
                 true,
