@@ -252,6 +252,9 @@ pub struct ParaFmt {
     /// inherits; the final default (`true`) is applied on the resolved paragraph.
     pub auto_space_de: Option<bool>,
     pub auto_space_dn: Option<bool>,
+    /// ECMA-376 §17.3.1.45 w:wordWrap — omission inherits; the final default
+    /// (`true`) is applied on the resolved paragraph.
+    pub word_wrap: Option<bool>,
     /// ECMA-376 §17.3.1.1 w:adjustRightInd — allow the consumer to adjust the
     /// effective right indent when a document grid is active. Retained as an
     /// Option through the style cascade because omission inherits and the final
@@ -1279,6 +1282,9 @@ pub(crate) fn apply_para(dst: &mut ParaFmt, src: &ParaFmt) {
     if src.auto_space_dn.is_some() {
         dst.auto_space_dn = src.auto_space_dn;
     }
+    if src.word_wrap.is_some() {
+        dst.word_wrap = src.word_wrap;
+    }
     if src.adjust_right_ind.is_some() {
         dst.adjust_right_ind = src.adjust_right_ind;
     }
@@ -1723,6 +1729,9 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
     // autoSpaceDE / autoSpaceDN — ECMA-376 §17.3.1.2-3; same cascade contract.
     fmt.auto_space_de = bool_prop(ppr, "autoSpaceDE");
     fmt.auto_space_dn = bool_prop(ppr, "autoSpaceDN");
+
+    // wordWrap — ECMA-376 §17.3.1.45; same cascade contract.
+    fmt.word_wrap = bool_prop(ppr, "wordWrap");
 
     // adjustRightInd — ECMA-376 §17.3.1.1. The setting participates in the
     // paragraph-style hierarchy and omission ultimately defaults to true.
@@ -2917,6 +2926,22 @@ mod tests {
             (inherited.auto_space_de, inherited.auto_space_dn),
             (Some(true), Some(false))
         );
+    }
+
+    #[test]
+    fn word_wrap_participates_in_paragraph_style_cascade() {
+        let parse = |inner: &str| {
+            let xml = format!(
+                r#"<w:pPr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">{inner}</w:pPr>"#
+            );
+            let document = XmlDoc::parse(&xml).unwrap();
+            parse_para_fmt(document.root_element())
+        };
+        let mut inherited = parse(r#"<w:wordWrap w:val="0"/>"#);
+        apply_para(&mut inherited, &parse("<w:keepNext/>"));
+        assert_eq!(inherited.word_wrap, Some(false));
+        apply_para(&mut inherited, &parse("<w:wordWrap/>"));
+        assert_eq!(inherited.word_wrap, Some(true));
     }
 
     #[test]

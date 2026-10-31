@@ -412,6 +412,8 @@ export interface PlanLineInput {
   readonly exactLineSpacing?: boolean;
   /** §17.15.3.8 ulTrailSpace: hanging line-end spaces keep their underline. */
   readonly ulTrailSpace?: boolean;
+  /** §17.3.1.45 wordWrap off: line-end spaces do not hang. */
+  readonly wordWrap?: false;
   readonly firstLineIndentPt?: number;
   readonly numbering?: Readonly<{
     /** Resolved logical-start offset of the first-line body after the marker. */
@@ -441,6 +443,7 @@ function segmentWidth(segment: MeasuredLinePlanSegment): number {
 function distributionSegments(
   segments: readonly MeasuredLinePlanSegment[],
   bidi: boolean,
+  wordWrap: boolean,
 ): readonly { text?: string }[] {
   // Zero-advance anchor hosts among the line's trailing hanging spaces are no
   // content cell: the spaces stay line-end spaces (WORD_LINE_END_SPACE_HANGS).
@@ -460,7 +463,7 @@ function distributionSegments(
     if (visible > 0) break;
     suffixStart -= 1;
   }
-  const hostsAreHanging = hanging && wordLineEndSpaceHangs(bidi);
+  const hostsAreHanging = hanging && wordLineEndSpaceHangs(bidi, wordWrap);
   return segments.map((segment, index) => segment.kind === 'text' && !segment.fixedPitch
     ? { text: segment.text }
     : hostsAreHanging && index >= suffixStart && segment.kind === 'anchor-host' ? { text: '' } : {});
@@ -1027,8 +1030,10 @@ function withoutHangingSpaceGaps(
       break;
     }
   }
+  // A gap at the last visible character opens only towards the hanging
+  // suffix, the line's end.
   return gaps.filter((gap) => gap.segIndex < last
-    || (gap.segIndex === last && gap.cpOffset < visibleCodePoints));
+    || (gap.segIndex === last && gap.cpOffset < visibleCodePoints - 1));
 }
 
 /** `placement` without decoration over its text after `visible` UTF-16
@@ -1253,7 +1258,7 @@ export function planLine(input: PlanLineInput): LineLayout {
   }
   // WORD_LINE_END_SPACE_HANGS: the spaces ending a line stand outside
   // justification and centre/right alignment.
-  const hangingLineEndSpacePt = wordLineEndSpaceHangs(bidi)
+  const hangingLineEndSpacePt = wordLineEndSpaceHangs(bidi, input.wordWrap !== false)
     ? trailingAdvancePt(segments, hangingSpaceVisibleLength)
     : 0;
   // Its U+0020 part, which the mode-15 visible fit also drops.
@@ -1271,7 +1276,7 @@ export function planLine(input: PlanLineInput): LineLayout {
   let stretchByIndex: ReadonlyMap<number, SegStretch> | null = null;
   let perGapPt = 0;
   let distributedWidthPt = 0;
-  const distSegments = distributionSegments(segments, bidi);
+  const distSegments = distributionSegments(segments, bidi, input.wordWrap !== false);
   if (line.justifiedCompressionPt !== undefined) {
     const model = line.gapPlan;
     if (!model) throw new Error('Justified line is missing its retained gap plan');
@@ -1568,11 +1573,9 @@ export function planLine(input: PlanLineInput): LineLayout {
     xPt += widthPt;
     if (stretch?.trailingGap) xPt += stretch.trailingDelta ?? perGapPt;
   }
-  // WORD_LINE_END_SPACE_HANGS: Word paints no underline, strike-through,
-  // highlight or shading over the hanging line-end space. A snapToChars
-  // underline keeps its own terminal rule, observed to cover an authored
-  // trailing space (WORD_SNAP_TO_CHARS_TERMINAL_UNDERLINE).
-  // With ulTrailSpace (§17.15.3.8) trailing spaces keep their underline.
+  // WORD_LINE_END_SPACE_HANGS: no decoration over the hanging line-end
+  // space. A snapToChars underline keeps WORD_SNAP_TO_CHARS_TERMINAL_UNDERLINE,
+  // and with ulTrailSpace (§17.15.3.8) trailing spaces keep their underline.
   const keepUnderline = input.ulTrailSpace === true || segments.some((segment) =>
     segment.kind === 'text' && segment.decorationTerminalAdvancePt !== undefined);
   if (hangingLineEndSpacePt > 0) {
@@ -3474,6 +3477,7 @@ function planMeasuredLines(
       stretchLastLine: context.stretchLastLine,
       exactLineSpacing: context.lineSpacing?.rule === 'exact',
       ...(ulTrailSpace ? { ulTrailSpace } : {}),
+      ...(context.wordWrap === false ? { wordWrap: false } : {}),
       firstLineIndentPt: context.firstIndentPt,
       ...(lineIndex === 0 && numberingPlan
         ? { numbering: { bodyOffsetPt: raw.numberingFirstLine?.lineStartOffsetPx ?? numberingPlan.bodyOffsetPt } }

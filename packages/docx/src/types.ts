@@ -571,6 +571,9 @@ export interface DocParagraph {
   /** ECMA-376 §17.3.1.21 `<w:overflowPunct>` — permit one trailing
    *  punctuation character beyond paragraph indents/margins. Omission is true. */
   overflowPunct?: boolean;
+  /** ECMA-376 §17.3.1.45 `<w:wordWrap>` after the style cascade; present only
+   *  when disabled (`false`). Omission means the default, on. */
+  wordWrap?: boolean;
   /** ECMA-376 §17.3.1.2 `<w:autoSpaceDE>` after the style cascade; present
    *  only when disabled (`false`). Omission means the spec default, on. */
   autoSpaceDE?: boolean;
