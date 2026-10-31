@@ -137,6 +137,12 @@ fn jpeg(bytes: &[u8], budget: &mut u64) -> Result<(), String> {
     decoder.decode_headers().map_err(|_| decode())?;
     let (width, height) = decoder.dimensions().ok_or_else(decode)?;
     check_size(width as u64, height as u64)?;
+    // The decoder accepts a stream cut before its end-of-image marker, which
+    // a browser refuses; the file must end with that marker (ITU-T T.81
+    // B.2.1), as every corpus JPEG does.
+    if !bytes.ends_with(&[0xff, 0xd9]) {
+        return Err(decode());
+    }
     charge(budget, width as u64, height as u64)?;
     decoder.decode().map_err(|_| decode())?;
     Ok(())
@@ -275,6 +281,15 @@ pub(crate) mod tests {
         // A 1×1 baseline JPEG.
         let bytes: &[u8] = &JPEG_1X1;
         assert_eq!(dec(bytes).unwrap(), "image/jpeg");
+        // Without its end-of-image marker, or with data after it.
+        assert_eq!(
+            dec(&bytes[..bytes.len() - 2]).unwrap_err(),
+            unsupported("image-decode")
+        );
+        assert_eq!(
+            dec(&[bytes, &[0]].concat()).unwrap_err(),
+            unsupported("image-decode")
+        );
         assert_eq!(
             dec(&bytes[..bytes.len() - 6]).unwrap_err(),
             unsupported("image-decode")
