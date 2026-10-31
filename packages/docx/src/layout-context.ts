@@ -398,6 +398,10 @@ export function resolveParagraphLayoutContext(
 export function effectiveParagraphTabStops(
   paragraph: Pick<ParagraphLayoutSource, 'indentLeft' | 'indentFirst' | 'tabStops'>,
 ): readonly TabStop[] {
+  // A producer whose format has no implicit hanging-indent stop (the
+  // OpenDocument reader's list paragraphs) marks the paragraph privately.
+  const noImplicit = (paragraph as { readonly __noHangingIndentTab?: boolean })
+    .__noHangingIndentTab === true;
   const authored = paragraph.tabStops
     .filter((stop) => stop.alignment !== 'clear')
     .map((stop) => ({ ...stop }));
@@ -406,7 +410,7 @@ export function effectiveParagraphTabStops(
     stop.pos === implicitPosition
       && wordAuthoredTabReplacesImplicitHangingStop(stop.alignment)
   ));
-  const effective = paragraph.indentFirst < 0 && !authoredReplacesImplicit
+  const effective = paragraph.indentFirst < 0 && !authoredReplacesImplicit && !noImplicit
     ? [{ pos: implicitPosition, alignment: 'left', leader: 'none' } as TabStop, ...authored]
     : authored;
   return effective.sort((left, right) => left.pos - right.pos);

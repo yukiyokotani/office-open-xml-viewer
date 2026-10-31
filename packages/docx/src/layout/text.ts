@@ -144,6 +144,9 @@ type ParagraphTextFacts = Readonly<{
    * glyph's advance as a width horizontal scaling does not change; character
    * spacing still applies. Producers other than DOCX set it where their format fixes it. */
   spaceAdvancePt?: number;
+  /** A leading list-label run (producers other than DOCX) and its alignment
+   * at the label position: see `LayoutSegSource.listLabel`. */
+  listLabel?: 'start' | 'end' | 'center';
   /** Parser-projected CT_R boundary constraint around an authored
    * `<w:noBreakHyphen/>`. These names are layout facts, not parser wire keys. */
   noBreakBefore?: boolean;

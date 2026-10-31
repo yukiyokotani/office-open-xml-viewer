@@ -247,6 +247,9 @@ export type MeasuredTextPlanSegment = Readonly<
     digitsAsAN?: boolean;
     /** A fixed-pitch fitText region is an atom for paragraph justification. */
     fixedPitch?: boolean;
+    /** A list label emitted as leading runs (`LayoutSegSource.listLabel`):
+     * its spaces take no justification. */
+    listLabel?: true;
     /** Acquisition-only authority used to shape the final contextual kashida string. */
     textLayoutService?: import('./text.js').TextLayoutService;
     textShapeRequest?: import('./text.js').TextShapeRequest;
@@ -406,6 +409,9 @@ export interface PlanLineInput {
   readonly alignment?: string;
   readonly baseRtl: boolean;
   readonly isFirstLine: boolean;
+  /** Width an end- or centre-aligned list label starts before the label
+   * position on this line (LayoutLine.listLabelShiftPx). */
+  readonly listLabelShiftPt?: number;
   readonly isLastLine: boolean;
   readonly stretchLastLine: boolean;
   /** Exact lines paint run shading through the authored line box. */
@@ -464,7 +470,10 @@ function distributionSegments(
     suffixStart -= 1;
   }
   const hostsAreHanging = hanging && wordLineEndSpaceHangs(bidi, wordWrap);
+  // A list label and its separator space keep their natural advance: the
+  // slack goes to the body's opportunities (measured against LibreOffice).
   return segments.map((segment, index) => segment.kind === 'text' && !segment.fixedPitch
+    && !segment.listLabel
     ? { text: segment.text }
     : hostsAreHanging && index >= suffixStart && segment.kind === 'anchor-host' ? { text: '' } : {});
 }
@@ -1216,11 +1225,13 @@ export function planLine(input: PlanLineInput): LineLayout {
   // indent; alignment and justification slack use that same band.
   const availableWidthPt = Math.min(input.availableWidthPt, line.availableWidthPt)
     + (line.marginExtensionPt ?? 0);
-  const logicalStartOffsetPt = !input.isFirstLine
+  const logicalStartOffsetPt = (!input.isFirstLine
     ? 0
     : input.numbering
       ? finiteNonNegative(input.numbering.bodyOffsetPt, 'numbering.bodyOffsetPt')
-      : input.firstLineIndentPt ?? 0;
+      : input.firstLineIndentPt ?? 0)
+    // An end- or centre-aligned list label starts before its position.
+    - (input.listLabelShiftPt ?? 0);
   const physicalStartOffsetPt = input.baseRtl ? 0 : logicalStartOffsetPt;
   const effectiveAvailableWidthPt = input.baseRtl
     ? availableWidthPt - logicalStartOffsetPt
@@ -1462,6 +1473,7 @@ export function planLine(input: PlanLineInput): LineLayout {
         rtl: _rtl,
         digitsAsAN: _digitsAsAN,
         fixedPitch: _fixedPitch,
+        listLabel: _listLabel,
         decorationTerminalAdvancePt,
         textLayoutService: _textLayoutService,
         textShapeRequest: _textShapeRequest,
@@ -3136,6 +3148,7 @@ function textPlanSegment(
     rtl: segment.rtl,
     digitsAsAN: segment.digitsAsAN,
     fixedPitch: segment.fitTextRegionIndex !== undefined || segment.snapGridClass !== undefined,
+    ...(segment.listLabel !== undefined ? { listLabel: true as const } : {}),
     ...(characterGrid?.type === 'snapToChars' && segment.underline
       ? { decorationTerminalAdvancePt: retainedDecorationTerminalAdvancePt }
       : {}),
@@ -3502,7 +3515,10 @@ function planMeasuredLines(
     const planned = planLine({
       paragraphXPt, availableWidthPt, alignment: paragraph.alignment,
       baseRtl: context.baseRtl,
-      isFirstLine: lineIndex === 0,
+      // A list label's lines keep the first-line indent through the body's
+      // first line (LayoutLine.listLabelFirstIndent).
+      isFirstLine: lineIndex === 0 || raw.listLabelFirstIndent === true,
+      ...(raw.listLabelShiftPx !== undefined ? { listLabelShiftPt: raw.listLabelShiftPx } : {}),
       isLastLine: (raw.physicalLineIndex ?? lineIndex)
         === (measured.lines.at(-1)!.layout.physicalLineIndex ?? measured.lines.length - 1),
       stretchLastLine: context.stretchLastLine,

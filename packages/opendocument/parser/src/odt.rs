@@ -182,6 +182,11 @@ fn read_with(package: &OdfPackage, rules: CompatRules) -> Result<Document, Strin
         .map(length_pt)
         .transpose()?;
     let mut reader = Reader {
+        lists: list::Lists::default(),
+        list_paragraph: None,
+        odf_1_4: version == Some("1.4"),
+        text_width: page.section.page_width - page.section.margin_left - page.section.margin_right,
+        page_left_margin: page.section.margin_left,
         sheet: &sheet,
         fonts: &fonts,
         used_faces: RefCell::new(HashSet::new()),
@@ -522,6 +527,10 @@ struct LayoutFlags {
     /// BalanceSpacesAndIdeographicSpaces: a U+0020 at a text portion's edge
     /// or next to another U+0020 advances half its Asian font size.
     balance: bool,
+    /// TabsRelativeToIndent, where the document sets it: list grid stops
+    /// count from the paragraph indent when true, from the text area when
+    /// false (measured); `None` leaves them unknown.
+    tabs_relative: Option<bool>,
 }
 
 fn check_settings(text: &str, version: Option<&str>) -> Result<LayoutFlags, String> {
@@ -583,6 +592,7 @@ fn check_settings(text: &str, version: Option<&str>) -> Result<LayoutFlags, Stri
                 "DoNotJustifyLinesWithManualBreak" => trailing.no_justify_breaks = value,
                 "JustifyLinesWithShrinking" => trailing.shrink = value,
                 "BalanceSpacesAndIdeographicSpaces" => trailing.balance = value,
+                "TabsRelativeToIndent" => trailing.tabs_relative = Some(value),
                 _ => {}
             }
         }
@@ -899,8 +909,19 @@ struct Collected {
     page_break_after: bool,
 }
 
+#[path = "odt_list.rs"]
+mod list;
+
 struct Reader<'a> {
     rules: CompatRules,
+    /// List numbering state, and the list paragraph `paragraph` reads next.
+    lists: list::Lists,
+    list_paragraph: Option<list::ListParagraph<'a>>,
+    /// The document declares ODF 1.4 (letter numbering beyond "z").
+    odf_1_4: bool,
+    /// The page's text area width and left margin (pt).
+    text_width: f64,
+    page_left_margin: f64,
     sheet: &'a StyleSheet,
     fonts: &'a FontFaces,
     used_faces: RefCell<HashSet<Face>>,
@@ -970,6 +991,7 @@ impl<'a> Reader<'a> {
             }
             match (node.tag_name().namespace(), node.tag_name().name()) {
                 (Some(NS_TEXT), "p") => self.paragraph(node, None)?,
+                (Some(NS_TEXT), "list") => self.list(node, None, depth)?,
                 (Some(NS_TEXT), "h") => {
                     let level = node
                         .attribute((NS_TEXT, "outline-level"))
@@ -1018,6 +1040,13 @@ impl<'a> Reader<'a> {
     ) -> Result<(), String> {
         if self.paragraphs.len() >= MAX_PARAGRAPHS {
             return Err("OpenDocument text exceeds the paragraph limit".into());
+        }
+        let list = self.list_paragraph.take();
+        if list.is_some()
+            && (node.attribute((NS_TEXT, "is-list-header")).is_some()
+                || node.attribute((NS_TEXT, "restart-numbering")).is_some())
+        {
+            return Err(unsupported("list-paragraph-attribute"));
         }
         for attribute in node.attributes() {
             match (attribute.namespace(), attribute.name()) {
@@ -1085,6 +1114,9 @@ impl<'a> Reader<'a> {
         collected.area = self.area;
         collected.paragraph.page_break_before |= page_break_before;
         collected.paragraph.outline_level = outline_level.map(|level| level.saturating_sub(1));
+        if let Some(list) = &list {
+            self.list_geometry(list, &chain, &properties, &mut collected.paragraph)?;
+        }
 
         // The paragraph's own text properties describe its mark (empty
         // paragraph height) and the text outside spans.
@@ -1138,6 +1170,9 @@ impl<'a> Reader<'a> {
             justified,
             &mut collected.paragraph,
         )?;
+        if let Some(label) = list.and_then(|list| list.label) {
+            self.list_label(label, &mut inline.contexts, &mut collected.paragraph)?;
+        }
         if let Some(shading) = collected.paragraph.shading.clone() {
             // §20.395 automatic colour (also an unset colour) over the
             // paragraph background, resolved as LibreOffice paints it (runs
@@ -3222,7 +3257,7 @@ mod tests {
         let reject = |fixture: Fixture<'_>| read_fixture(fixture).unwrap_err();
         assert_eq!(
             reject(Fixture {
-                body: "<text:list/>",
+                body: "<text:table-of-content/>",
                 ..Fixture::default()
             }),
             unsupported("body-element")
@@ -4768,5 +4803,491 @@ mod tests {
             Some("1.3")
         )
         .is_err());
+    }
+
+    /// A list level in label alignment mode (M, I and T in cm).
+    fn list_level(level: u32, format: &str, extra: &str, m: f64, i: f64, t: f64) -> String {
+        format!(
+            r#"<text:list-level-style-number text:level="{level}" style:num-format="{format}" style:num-suffix="."{extra}><style:list-level-properties text:list-level-position-and-space-mode="label-alignment"><style:list-level-label-alignment text:label-followed-by="listtab" text:list-tab-stop-position="{t}cm" fo:text-indent="{i}cm" fo:margin-left="{m}cm"/></style:list-level-properties></text:list-level-style-number>"#
+        )
+    }
+
+    fn list_styles(levels: &str) -> String {
+        format!(r#"<text:list-style style:name="L">{levels}</text:list-style>"#)
+    }
+
+    const LIST_SETTINGS: &str = r#"<config:config-item config:name="TabsRelativeToIndent" config:type="boolean">true</config:config-item>"#;
+
+    fn read_list(styles: &str, body: &str) -> Result<Document, String> {
+        read_fixture(Fixture {
+            styles,
+            body,
+            settings: LIST_SETTINGS,
+            ..Fixture::default()
+        })
+    }
+
+    /// Each paragraph's label text (`None` for an unlabelled paragraph).
+    fn labels(document: &Document) -> Vec<Option<String>> {
+        paragraphs(document)
+            .iter()
+            .map(|paragraph| match paragraph.runs.first() {
+                Some(DocRun::Text(text)) if text.list_label.is_some() => Some(text.text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn numbers_lists_as_libreoffice() {
+        // Three levels starting at 5, 3 and 1, each showing all its levels.
+        let styles = list_styles(
+            &(list_level(1, "1", r#" text:start-value="5""#, 2.0, -1.0, 2.0)
+                + &list_level(
+                    2,
+                    "1",
+                    r#" text:start-value="3" text:display-levels="2""#,
+                    3.0,
+                    -1.0,
+                    3.0,
+                )
+                + &list_level(3, "1", r#" text:display-levels="3""#, 4.0, -1.0, 4.0)),
+        );
+        let list = |attributes: &str, items: &str| {
+            format!(r#"<text:list text:style-name="L"{attributes}>{items}</text:list>"#)
+        };
+        let item = |content: &str| format!("<text:list-item>{content}</text:list-item>");
+        let p = |text: &str| format!("<text:p>{text}</text:p>");
+        let nested = |items: &str| format!("<text:list>{items}</text:list>");
+        let wrap = |content: &str| item(&nested(content));
+        let cases = [
+            // Items count on; a later item paragraph is unlabelled.
+            (
+                list("", &(item(&(p("a") + &p("a more"))) + &item(&p("b")))),
+                vec![Some("5."), None, Some("6.")],
+            ),
+            // Word heading numbering: one list per heading, continued, with
+            // wrapper items for the deeper levels (measured 5, 6, 6.3, 6.3.1,
+            // 6.4, 7, 7.3.1).
+            (
+                list("", &item(&p("h1")))
+                    + &list(r#" text:continue-numbering="true""#, &item(&p("h2")))
+                    + &list(
+                        r#" text:continue-numbering="true""#,
+                        &wrap(&item(&p("h21"))),
+                    )
+                    + &list(
+                        r#" text:continue-numbering="true""#,
+                        &wrap(&item(&nested(&item(&p("h211"))))),
+                    )
+                    + &list(
+                        r#" text:continue-numbering="true""#,
+                        &wrap(&item(&p("h22"))),
+                    )
+                    + &list(r#" text:continue-numbering="true""#, &item(&p("h3")))
+                    + &list(
+                        r#" text:continue-numbering="true""#,
+                        &wrap(&item(&nested(&item(&p("h311"))))),
+                    ),
+                vec![
+                    Some("5."),
+                    Some("6."),
+                    Some("6.3."),
+                    Some("6.3.1."),
+                    Some("6.4."),
+                    Some("7."),
+                    Some("7.3.1."),
+                ],
+            ),
+            // A wrapper's start value is ignored; its phantom takes the start.
+            (
+                list(
+                    "",
+                    r#"<text:list-item text:start-value="9"><text:list><text:list-item><text:p>w</text:p></text:list-item></text:list></text:list-item>"#,
+                ),
+                vec![Some("5.3.")],
+            ),
+            // Empty items and headers are not counted; a header's sublist
+            // numbers through a phantom parent.
+            (
+                list(
+                    "",
+                    &(item("")
+                        + "<text:list-header><text:p>h</text:p></text:list-header>"
+                        + &item(&p("x"))),
+                ),
+                vec![None, Some("5.")],
+            ),
+            (
+                list(
+                    "",
+                    &("<text:list-header>".to_string()
+                        + &nested(&item(&p("e1")))
+                        + "</text:list-header>"
+                        + &item(&p("e2"))),
+                ),
+                vec![Some("5.3."), Some("6.")],
+            ),
+            // An item start sets the value; continuation by xml:id shares
+            // the counters across another list.
+            (
+                list(
+                    r#" xml:id="A""#,
+                    r#"<text:list-item text:start-value="7"><text:p>s</text:p></text:list-item>"#,
+                ) + &list("", &item(&p("other")))
+                    + &list(r#" text:continue-list="A""#, &item(&p("t"))),
+                vec![Some("7."), Some("5."), Some("8.")],
+            ),
+        ];
+        for (body, expected) in cases {
+            let document = read_list(&styles, &body).unwrap_or_else(|e| panic!("{body}: {e}"));
+            let expected: Vec<Option<String>> = expected
+                .into_iter()
+                .map(|l| l.map(str::to_string))
+                .collect();
+            assert_eq!(labels(&document), expected, "{body}");
+        }
+    }
+
+    #[test]
+    fn composes_labels_as_libreoffice() {
+        let one = |level1: &str, level2: &str, count: u32| -> String {
+            let styles =
+                format!(r#"<text:list-style style:name="L">{level1}{level2}</text:list-style>"#);
+            let items = (0..count)
+                .map(|_| "<text:list-item><text:p>x</text:p></text:list-item>")
+                .collect::<String>();
+            let body = format!(
+                r#"<text:list text:style-name="L"><text:list-item><text:p>p</text:p><text:list>{items}</text:list></text:list-item></text:list>"#
+            );
+            let document = read_list(&styles, &body).unwrap_or_else(|e| panic!("{styles}: {e}"));
+            labels(&document).last().cloned().flatten().unwrap()
+        };
+        let display2 =
+            |format: &str| list_level(2, format, r#" text:display-levels="2""#, 3.0, -1.0, 3.0);
+        let bullet1 = r#"<text:list-level-style-bullet text:level="1" text:bullet-char="•"><style:list-level-properties text:list-level-position-and-space-mode="label-alignment"><style:list-level-label-alignment text:label-followed-by="listtab" text:list-tab-stop-position="2cm" fo:text-indent="-1cm" fo:margin-left="2cm"/></style:list-level-properties></text:list-level-style-bullet>"#;
+        // An empty-format ancestor is left out; a bullet ancestor leaves an
+        // empty component (measured "1." and ".1.").
+        assert_eq!(
+            one(&list_level(1, "", "", 2.0, -1.0, 2.0), &display2("1"), 1),
+            "1."
+        );
+        assert_eq!(one(bullet1, &display2("1"), 1), ".1.");
+        // An empty own format shows only the affixes.
+        assert_eq!(
+            one(&list_level(1, "1", "", 2.0, -1.0, 2.0), &display2(""), 1),
+            "."
+        );
+        // Formats.
+        assert_eq!(
+            one(&list_level(1, "1", "", 2.0, -1.0, 2.0), &display2("i"), 4),
+            "1.iv."
+        );
+        assert_eq!(
+            one(&list_level(1, "I", "", 2.0, -1.0, 2.0), &display2("A"), 3),
+            "I.C."
+        );
+        // Zero renders "0" in every format, then counting goes on.
+        let zero = |format: &str| list_level(2, format, r#" text:start-value="0""#, 3.0, -1.0, 3.0);
+        assert_eq!(
+            one(&list_level(1, "1", "", 2.0, -1.0, 2.0), &zero("a"), 1),
+            "0."
+        );
+        assert_eq!(
+            one(&list_level(1, "1", "", 2.0, -1.0, 2.0), &zero("i"), 2),
+            "i."
+        );
+        // LibreOffice's label template must be that composition.
+        let templated = |template: &str| {
+            list_level(
+                2,
+                "1",
+                &format!(r#" loext:num-list-format="{template}""#),
+                3.0,
+                -1.0,
+                3.0,
+            )
+        };
+        assert_eq!(
+            one(
+                &list_level(1, "1", "", 2.0, -1.0, 2.0),
+                &templated("%1%.%2%."),
+                1
+            ),
+            "1.1."
+        );
+        let styles =
+            list_styles(&(list_level(1, "1", "", 2.0, -1.0, 2.0) + &templated("%2%-%1%.")));
+        assert_eq!(
+            read_list(&styles, r#"<text:list text:style-name="L"><text:list-item><text:p>p</text:p><text:list><text:list-item><text:p>x</text:p></text:list-item></text:list></text:list-item></text:list>"#).unwrap_err(),
+            unsupported("list-format-template")
+        );
+    }
+
+    #[test]
+    fn takes_indents_from_linked_paragraph_styles() {
+        let cm = 72.0 / 2.54;
+        let styles = list_styles(&list_level(1, "1", "", 2.0, -1.0, 2.0))
+            + r#"<style:style style:name="Base" style:family="paragraph" style:list-style-name="L"/><style:style style:name="Child" style:family="paragraph" style:parent-style-name="Base"><style:paragraph-properties fo:margin-left="6cm" fo:text-indent="-2cm"/></style:style><style:style style:name="Plain" style:family="paragraph"><style:paragraph-properties fo:margin-left="6cm" fo:text-indent="-2cm"/></style:style>"#;
+        let indents = |paragraph_style: &str| {
+            let body = format!(
+                r#"<text:list text:style-name="L"><text:list-item><text:p text:style-name="{paragraph_style}">a</text:p></text:list-item></text:list>"#
+            );
+            let document = read_list(&styles, &body).unwrap();
+            let paragraph = paragraphs(&document)[0];
+            (
+                (paragraph.indent_left / cm * 100.0).round() / 100.0,
+                (paragraph.indent_first / cm * 100.0).round() / 100.0,
+            )
+        };
+        // A link inherited from the parent style applies the style's indents;
+        // a style without one is ignored (measured).
+        assert_eq!(indents("Child"), (6.0, -2.0));
+        assert_eq!(indents("Plain"), (2.0, -1.0));
+        // A child repeating the link resets the inherited indents.
+        let styles = styles
+            + r#"<style:style style:name="Relink" style:family="paragraph" style:parent-style-name="Child" style:list-style-name="L"/>"#;
+        let body = r#"<text:list text:style-name="L"><text:list-item><text:p text:style-name="Relink">a</text:p></text:list-item></text:list>"#;
+        let document = read_list(&styles, body).unwrap();
+        let paragraph = paragraphs(&document)[0];
+        assert_eq!(
+            (
+                (paragraph.indent_left / cm * 100.0).round() / 100.0,
+                (paragraph.indent_first / cm * 100.0).round() / 100.0
+            ),
+            (2.0, -1.0)
+        );
+    }
+
+    #[test]
+    fn resolves_label_styles_in_the_list_style_scope() {
+        // A common list style names a common character style even where a
+        // content automatic text style shares its name.
+        let styles = list_styles(&list_level(
+            1,
+            "1",
+            r#" text:style-name="C""#,
+            2.0,
+            -1.0,
+            2.0,
+        )) + r#"<style:style style:name="C" style:family="text"><style:text-properties fo:font-size="20pt"/></style:style>"#;
+        let document = read_fixture(Fixture {
+            styles: &styles,
+            automatic: r#"<style:style style:name="C" style:family="text"><style:text-properties fo:font-size="6pt"/></style:style>"#,
+            body: r#"<text:list text:style-name="L"><text:list-item><text:p>a</text:p></text:list-item></text:list>"#,
+            settings: LIST_SETTINGS,
+            ..Fixture::default()
+        })
+        .unwrap();
+        let DocRun::Text(label) = &paragraphs(&document)[0].runs[0] else {
+            panic!("label run")
+        };
+        assert_eq!(label.font_size, 20.0);
+    }
+
+    #[test]
+    fn places_list_paragraphs_as_libreoffice() {
+        let styles = list_styles(&list_level(1, "1", "", 2.0, -1.0, 3.0));
+        let body = r#"<text:list text:style-name="L"><text:list-item><text:p>a</text:p><text:p>b</text:p></text:list-item></text:list>"#;
+        let cm = 72.0 / 2.54;
+        let tabs = |relative: bool| {
+            let document = read_fixture(Fixture {
+                styles: &styles,
+                body,
+                settings: &format!(r#"<config:config-item config:name="TabsRelativeToIndent" config:type="boolean">{relative}</config:config-item>"#),
+                ..Fixture::default()
+            })
+            .unwrap();
+            let paragraphs = paragraphs(&document);
+            let labelled = paragraphs[0];
+            assert!((labelled.indent_left - 2.0 * cm).abs() < 1e-9);
+            assert!((labelled.indent_first + cm).abs() < 1e-9);
+            assert!(labelled.no_hanging_indent_tab);
+            assert_eq!(texts(labelled)[..2], ["1.".to_string(), "\t".to_string()]);
+            // A later paragraph of the item sits at M.
+            assert!((paragraphs[1].indent_left - 2.0 * cm).abs() < 1e-9);
+            assert_eq!(paragraphs[1].indent_first, 0.0);
+            labelled
+                .tab_stops
+                .iter()
+                .take(3)
+                .map(|stop| (stop.pos / cm * 100.0).round() / 100.0)
+                .collect::<Vec<_>>()
+        };
+        // T, then the 1.25 cm grid beyond it: from M when tabs are relative to
+        // the indent, from the text area otherwise (measured).
+        assert_eq!(tabs(true), vec![3.0, 3.25, 4.5]);
+        assert_eq!(tabs(false), vec![3.0, 3.75, 5.0]);
+    }
+
+    #[test]
+    fn rejects_unmodelled_lists() {
+        let level = list_level(1, "1", "", 2.0, -1.0, 2.0);
+        let styles = list_styles(&(level.clone() + &list_level(2, "1", "", 3.0, -1.0, 3.0)));
+        let list = |items: &str| format!(r#"<text:list text:style-name="L">{items}</text:list>"#);
+        let cases: Vec<(String, String, &str)> = vec![
+            // A second sublist in one item restarts its level in LibreOffice.
+            (styles.clone(), list("<text:list-item><text:p>a</text:p><text:list><text:list-item><text:p>b</text:p></text:list-item></text:list><text:list><text:list-item><text:p>c</text:p></text:list-item></text:list></text:list-item>"), "list-sublists"),
+            (styles.clone(), list("<text:list-item><text:h>a</text:h></text:list-item>"), "list-heading"),
+            (styles.clone(), list("<text:list-item><text:p/></text:list-item>"), "list-empty-label"),
+            (styles.clone(), r#"<text:list><text:list-item><text:p>a</text:p></text:list-item></text:list>"#.to_string(), "list-style-missing"),
+            (list_styles(&level.replace(
+                    r#"space-mode="label-alignment""#,
+                    r#"space-mode="label-width-and-position""#,
+                )), list("<text:list-item><text:p>a</text:p></text:list-item>"), "list-legacy-mode"),
+            (list_styles(&level.replace(r#"style:num-format="1""#, r#"style:num-format="01, 02, 03, ...""#)), list("<text:list-item><text:p>a</text:p></text:list-item>"), "list-format"),
+            (list_styles(&level.replace(r#"style:num-suffix=".""#, "style:num-suffix=\"\u{a0}\"")), list("<text:list-item><text:p>a</text:p></text:list-item>"), "list-affix"),
+            (styles.clone(), list(r#"<text:list-item text:start-value="32768"><text:p>a</text:p></text:list-item>"#), "list-start-value"),
+            (list_styles(&level.replace("fo:margin-left=\"2cm\"", "fo:margin-left=\"30cm\"")), list("<text:list-item><text:p>a</text:p></text:list-item>"), "list-geometry"),
+            (list_styles(&level.replace("<text:list-level-style-number", r#"<text:list-level-style-image text:level="1"/><text:list-level-style-number"#).replace(r#"text:level="1" style:num"#, r#"text:level="2" style:num"#)), list("<text:list-item><text:p>a</text:p></text:list-item>"), "list-image"),
+        ];
+        for (styles, body, code) in cases {
+            assert_eq!(
+                read_list(&styles, &body).unwrap_err(),
+                unsupported(code),
+                "{body}"
+            );
+        }
+        let one = |styles: &str| {
+            read_list(
+                styles,
+                &list("<text:list-item><text:p>a</text:p></text:list-item>"),
+            )
+        };
+        // A circled-number label is Asian script, which the reader rejects.
+        assert_eq!(
+            one(&list_styles(&level.replace(
+                r#"style:num-format="1""#,
+                r#"style:num-format="①, ②, ③, ...""#
+            )))
+            .unwrap_err(),
+            unsupported("list-label-script")
+        );
+        // A U+2011 bullet is drawn as a gap by LibreOffice.
+        assert_eq!(
+            one(r#"<text:list-style style:name="L"><text:list-level-style-bullet text:level="1" text:bullet-char="&#x2011;"><style:list-level-properties text:list-level-position-and-space-mode="label-alignment"><style:list-level-label-alignment text:label-followed-by="listtab" text:list-tab-stop-position="2cm" fo:text-indent="-1cm" fo:margin-left="2cm"/></style:list-level-properties></text:list-level-style-bullet></text:list-style>"#).unwrap_err(),
+            unsupported("list-bullet")
+        );
+        // A header paragraph beyond the text area.
+        assert_eq!(
+            read_list(
+                &list_styles(&level.replace(r#"fo:margin-left="2cm""#, r#"fo:margin-left="30cm""#)),
+                &list("<text:list-header><text:p>h</text:p></text:list-header>"),
+            )
+            .unwrap_err(),
+            unsupported("list-geometry")
+        );
+        // Line separators and format characters in an affix.
+        for c in [
+            "&#x2028;", "&#x2029;", "&#x200B;", "&#x2060;", "%1%", "&#x301;", "&#xFE0F;",
+            "&#x483;", "&#x489;",
+        ] {
+            assert_eq!(
+                one(&list_styles(&level.replace(
+                    r#"style:num-suffix=".""#,
+                    &format!(r#"style:num-suffix="{c}.""#)
+                )))
+                .unwrap_err(),
+                unsupported("list-affix"),
+                "{c}"
+            );
+        }
+        // A label that could wrap.
+        assert_eq!(
+            one(&list_styles(&level.replace(
+                r#"style:num-suffix=".""#,
+                &format!(
+                    r#"style:num-prefix="{}" style:num-suffix=".""#,
+                    "X".repeat(30)
+                )
+            )))
+            .unwrap_err(),
+            unsupported("list-label-extent")
+        );
+        // A list tab stop before the text area.
+        assert_eq!(
+            one(&list_styles(&level.replace(
+                r#"list-tab-stop-position="2cm""#,
+                r#"list-tab-stop-position="-1cm""#
+            )))
+            .unwrap_err(),
+            unsupported("list-tab-position")
+        );
+        // Repeated property groups in a level.
+        assert!(one(&list_styles(&level.replace(
+            "</text:list-level-style-number>",
+            r#"<style:text-properties/><style:text-properties/></text:list-level-style-number>"#,
+        )))
+        .is_err());
+        // Repeated level definitions, also spelled differently.
+        assert_eq!(
+            one(&list_styles(
+                &(level.clone() + &level.replace(r#"text:level="1""#, r#"text:level="01""#))
+            ))
+            .unwrap_err(),
+            unsupported("list-level-duplicate")
+        );
+        assert_eq!(
+            one(&list_styles(&(level.clone() + &level))).unwrap_err(),
+            unsupported("list-level-duplicate")
+        );
+        // An end-aligned label that could start before the page edge; a short
+        // one is admitted.
+        let end = |prefix: &str| {
+            list_styles(
+                &level
+                    .replace(
+                        r#"space-mode="label-alignment""#,
+                        r#"space-mode="label-alignment" fo:text-align="end""#,
+                    )
+                    .replace(
+                        r#"style:num-suffix=".""#,
+                        &format!(r#"style:num-prefix="{prefix}" style:num-suffix=".""#),
+                    ),
+            )
+        };
+        assert!(one(&end("")).is_ok());
+        assert_eq!(
+            one(&end(&"X".repeat(12))).unwrap_err(),
+            unsupported("list-label-extent")
+        );
+        // ... or that could wrap from M + I to the line end.
+        let far = end("")
+            .replace(r#"fo:margin-left="2cm""#, r#"fo:margin-left="15.5cm""#)
+            .replace(r#"fo:text-indent="-1cm""#, r#"fo:text-indent="0cm""#)
+            .replace(
+                r#"list-tab-stop-position="2cm""#,
+                r#"list-tab-stop-position="15.7cm""#,
+            );
+        assert_eq!(one(&far).unwrap_err(), unsupported("list-label-extent"));
+        // `continue-numbering` with nothing to continue restarts.
+        assert!(read_list(&styles, r#"<text:list text:style-name="L" text:continue-numbering="true"><text:list-item><text:p>a</text:p></text:list-item></text:list>"#).is_ok());
+        // Continuing a list that counted nothing, or a nested list.
+        assert_eq!(
+            read_list(&styles, &(list(r#"<text:list-header><text:p>h</text:p></text:list-header>"#) + r#"<text:list text:style-name="L" text:continue-numbering="true"><text:list-item><text:p>a</text:p></text:list-item></text:list>"#)).unwrap_err(),
+            unsupported("list-continuation")
+        );
+        // Centre-aligned labelled paragraphs.
+        let centred = format!(
+            r#"{styles}<style:style style:name="C" style:family="paragraph"><style:paragraph-properties fo:text-align="center"/></style:style>"#
+        );
+        assert_eq!(
+            read_list(
+                &centred,
+                &list(r#"<text:list-item><text:p text:style-name="C">a</text:p></text:list-item>"#)
+            )
+            .unwrap_err(),
+            unsupported("list-paragraph-alignment")
+        );
+        // Grid stops need TabsRelativeToIndent.
+        assert_eq!(
+            read_fixture(Fixture {
+                styles: &styles,
+                body: &list("<text:list-item><text:p>a</text:p></text:list-item>"),
+                ..Fixture::default()
+            })
+            .unwrap_err(),
+            unsupported("list-tabs-relative-unset")
+        );
     }
 }

@@ -1160,6 +1160,13 @@ pub struct DocParagraph {
     /// `BodyElement`/`CellElement` enums stay balanced (clippy::large_enum_variant).
     /// Serde flattens the Box, so the JSON shape is unchanged.
     pub numbering: Option<Box<NumberingInfo>>,
+    /// The producer's format has no implicit tab stop at a hanging indent
+    /// (ECMA-376 §17.3.1.38 gives DOCX one). DOCX never sets it.
+    #[serde(
+        rename = "__noHangingIndentTab",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub no_hanging_indent_tab: bool,
     /// Explicit tab stops from w:tabs. Empty means use default tab interval.
     pub tab_stops: Vec<TabStop>,
     pub runs: Vec<DocRun>,
@@ -2796,6 +2803,13 @@ pub struct TextRun {
     /// where their format fixes a space's width independently of its glyph.
     #[serde(rename = "__spaceAdvancePt", skip_serializing_if = "Option::is_none")]
     pub space_advance_pt: Option<f64>,
+    /// The run belongs to a list label emitted as the paragraph's leading
+    /// runs (the label and its separator), with the label's alignment at its
+    /// position: "start", "end" or "center". DOCX never sets it (its labels
+    /// are `NumberingInfo` markers); producers whose list labels follow
+    /// other geometry do.
+    #[serde(rename = "__listLabel", skip_serializing_if = "Option::is_none")]
+    pub list_label: Option<&'static str>,
     /// The authored run begins with `<w:noBreakHyphen/>` but could not be
     /// coalesced with its predecessor because a zero-width semantic boundary
     /// (such as a comment anchor) must remain addressable. Layout keeps this

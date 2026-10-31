@@ -84,6 +84,15 @@ Currently admitted:
   trailing no-break or other Unicode space keeps its decoration in both;
 - text in the Latin script class of ODF Part 3 Table 22, including the
   spaces, punctuation, symbols and emoji the table leaves unassigned.
+- lists in label alignment mode, numbered as LibreOffice numbers them
+  (continued lists, items nested without a paragraph of their own, list
+  headers), with decimal, letter and Roman labels or text bullets, labels
+  aligned at their start, end or centre, the level's character style and
+  bullet face, and a tab, space or nothing after the label. Pictures as
+  bullets, LibreOffice's other number formats, headings in lists, a second
+  sublist within one item, empty labelled paragraphs, decorated labels,
+  labels that could wrap and labelled paragraphs that are centred or
+  right-aligned reject for now.
 
 Four behaviours follow LibreOffice where ODF leaves the choice to the
 consumer or LibreOffice reads the specification differently; each applies
@@ -123,6 +132,6 @@ because LibreOffice then lays out its lines differently.
 
 Tabs, letter spacing, horizontal scaling,
 raised/lowered text, fixed and minimum line heights, proportional line
-heights below 100%, lists, tables, frames and images, notes, fields,
+heights below 100%, tables, frames and images, notes, fields,
 comments, tracked changes, headers and footers, Asian and complex scripts,
 and other formatting reject for now. The subset grows release by release.

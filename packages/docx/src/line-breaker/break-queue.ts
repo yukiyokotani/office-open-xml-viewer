@@ -249,6 +249,9 @@ export function createLineBreakerState(maxWidth: number, wrapCtx?: WrapLayoutCtx
     lineMarkerHeight: 0,
     lineMarkerAscent: 0,
     isFirst: true,
+    /** Width an end- or centre-aligned list label starts before its position
+     * on the current line (px). */
+    lineLabelShiftPx: 0,
     lineMaxWidth: maxWidth,
     lineXOffset: 0,
     /** Exclusion-free width past the paragraph's trailing indent, up to the
