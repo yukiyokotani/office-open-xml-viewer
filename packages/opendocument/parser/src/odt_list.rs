@@ -1002,7 +1002,10 @@ impl<'a> Reader<'a> {
 /// differently in the DOCX layout and are excluded as a class, as are
 /// combining marks and variation selectors.
 fn special_label_character(c: char) -> bool {
-    c.is_control()
+    // Combining marks and variation selectors: LibreOffice gives an isolated
+    // one an advance, the browser none (measured by the reviewer).
+    crate::script::is_combining_mark(c)
+        || c.is_control()
         || matches!(
             c,
             '\u{a0}'
@@ -1018,17 +1021,6 @@ fn special_label_character(c: char) -> bool {
                 | '\u{2066}'..='\u{206f}'
                 | '\u{feff}'
                 | '\u{fff9}'..='\u{fffb}'
-                // Combining marks and variation selectors (LibreOffice gives an
-                // isolated one an advance, the browser none; measured by the
-                // reviewer). Other scripts' marks are not Latin and reject
-                // with the script gate.
-                | '\u{300}'..='\u{36f}'
-                | '\u{1ab0}'..='\u{1aff}'
-                | '\u{1dc0}'..='\u{1dff}'
-                | '\u{20d0}'..='\u{20ff}'
-                | '\u{fe00}'..='\u{fe0f}'
-                | '\u{fe20}'..='\u{fe2f}'
-                | '\u{e0100}'..='\u{e01ef}'
         )
 }
 
