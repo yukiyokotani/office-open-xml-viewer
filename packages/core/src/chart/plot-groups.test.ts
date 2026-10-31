@@ -8,7 +8,7 @@ type Kind = 'bar' | 'line' | 'area';
 // second on the secondary value axis and its deleted category axis.
 function combo(
   kinds: [Kind, Kind],
-  secondaryCatAxis: { hidden: boolean; orientation?: string; dateAxis?: boolean },
+  secondaryCatAxis: { hidden: boolean; orientation?: string; dateAxis?: boolean; pairedBesidePrimary?: boolean },
 ): ChartModel {
   const group = (kind: Kind, start: number, axis: 'primary' | 'secondary'): ChartPlotGroup => ({
     kind, seriesStart: start, seriesCount: 1, grouping: kind === 'bar' ? 'clustered' : 'standard',
@@ -41,7 +41,6 @@ test('a visible or reversed secondary category axis stays outside the shared pai
   expect(classicPlotDispatch(combo(['line', 'line'], { hidden: false }))).toBe('unsupported');
   const reversed = { hidden: true, orientation: 'maxMin' };
   expect(classicPlotDispatch(combo(['bar', 'line'], reversed))).toBe('unsupported');
-  expect(classicPlotDispatch(combo(['bar', 'bar'], reversed))).toBe('unsupported');
   expect(classicPlotDispatch(combo(['area', 'line'], reversed))).toBe('unsupported');
   // Both reversed: a crosses="max" secondary value axis would sit on the left.
   expect(classicPlotDispatch({ ...combo(['line', 'line'], reversed), catAxisOrientation: 'maxMin' }))
@@ -86,16 +85,30 @@ test('bar routes keep a deleted secondary category axis they drew before sharing
   for (const model of [...variants, midCat, areaMidCat, horizontal, longer]) {
     expect(classicPlotDispatch(model)).toBe('bar-combo');
   }
-  // Excel reverses only the groups of a reversed deleted axis; the bar
-  // painter maps every group through the primary orientation.
+  // Resolved by position, a reversed deleted axis kept the bar route too.
   expect(classicPlotDispatch(combo(['bar', 'bar'], { hidden: true, orientation: 'maxMin' })))
-    .toBe('unsupported');
+    .toBe('bar-combo');
   expect(classicPlotDispatch(combo(['area', 'bar'], { hidden: true, orientation: 'maxMin' })))
-    .toBe('unsupported');
+    .toBe('bar-combo');
   // bar + line accepted primary category axes only.
   const barLineMidCat = combo(['line', 'bar'], { hidden: true });
   (barLineMidCat.secondaryValAxis as { crossBetween?: string }).crossBetween = 'midCat';
   expect(classicPlotDispatch(barLineMidCat)).toBe('unsupported');
+});
+
+test('an axis paired beside the primary one draws only when it shares', () => {
+  // Sharing opened that form to every route; one that cannot share stays out.
+  const beside = { hidden: true, pairedBesidePrimary: true };
+  expect(classicPlotDispatch(combo(['bar', 'bar'], beside))).toBe('bar-combo');
+  expect(classicPlotDispatch(combo(['area', 'bar'], beside))).toBe('bar-combo');
+  expect(classicPlotDispatch(combo(['bar', 'bar'], { ...beside, orientation: 'maxMin' })))
+    .toBe('unsupported');
+  expect(classicPlotDispatch({
+    ...combo(['bar', 'bar'], { ...beside, orientation: 'maxMin' }), catAxisOrientation: 'maxMin',
+  })).toBe('unsupported');
+  const midCat = combo(['area', 'bar'], beside);
+  (midCat.secondaryValAxis as { crossBetween?: string }).crossBetween = 'midCat';
+  expect(classicPlotDispatch(midCat)).toBe('unsupported');
 });
 
 test('a series without its own categories carries the chart category count', () => {
