@@ -587,7 +587,13 @@ impl<'a> Reader<'a> {
                 // LibreOffice breaks a label at a line feed, draws U+2011 as
                 // a gap, never breaks at U+00AD and interleaves body text into
                 // a long label with U+00A0 (measured by the reviewer).
-                if value.len() > MAX_AFFIX_BYTES || value.chars().any(special_label_character) {
+                // LibreOffice reads `%n%` in an affix as a counter placeholder
+                // (measured by the reviewer); "%" is not admitted.
+                if value.len() > MAX_AFFIX_BYTES
+                    || value
+                        .chars()
+                        .any(|c| c == '%' || special_label_character(c))
+                {
                     return Err(unsupported("list-affix"));
                 }
                 Ok(value.to_string())
