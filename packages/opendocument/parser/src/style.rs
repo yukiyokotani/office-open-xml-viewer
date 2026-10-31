@@ -122,7 +122,10 @@ pub struct StyleRef<'a> {
 
 impl StyleSheet {
     pub fn add_common(&mut self, parent: roxmltree::Node<'_, '_>) -> Result<(), String> {
-        for node in parent.children().filter(|n| xml::is(*n, NS_TEXT, "list-style")) {
+        for node in parent
+            .children()
+            .filter(|n| xml::is(*n, NS_TEXT, "list-style"))
+        {
             self.charge(node)?;
             let list = read_list_style(node)?;
             if self.list_common.insert(list.name.clone(), list).is_some() {
@@ -156,7 +159,10 @@ impl StyleSheet {
         scope: Scope,
         parent: roxmltree::Node<'_, '_>,
     ) -> Result<(), String> {
-        for node in parent.children().filter(|n| xml::is(*n, NS_TEXT, "list-style")) {
+        for node in parent
+            .children()
+            .filter(|n| xml::is(*n, NS_TEXT, "list-style"))
+        {
             self.charge(node)?;
             let list = read_list_style(node)?;
             if self
@@ -358,7 +364,10 @@ fn read_list_style(node: roxmltree::Node<'_, '_>) -> Result<ListStyle, String> {
         else {
             continue;
         };
-        let key = level.attribute((NS_TEXT, "level")).unwrap_or("").to_string();
+        let key = level
+            .attribute((NS_TEXT, "level"))
+            .unwrap_or("")
+            .to_string();
         let style = Style {
             name: String::new(),
             family: "text".to_string(),

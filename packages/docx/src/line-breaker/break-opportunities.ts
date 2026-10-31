@@ -1047,13 +1047,14 @@ function placeOrSplitText(context: BreakOpportunityIteratorContext, inputFrame: 
   } else if (s.seaBreaks !== undefined && s.hardJoinPrev !== true) {
     splitSeaOverflow(context, frame);
   } else if (breakerState.currentLine.length === 0
-    || breakerState.currentLine.every(isListLabelItem)) {
+    || (s.listLabel === undefined && breakerState.currentWidth < availW()
+      && breakerState.currentLine.every(isListLabelItem))) {
     // `word-overlong-token-emergency-break`: for a single non-CJK token wider
     // than a full line, fit the widest character prefix (at least one
     // character), draw it, and re-queue the remainder. Segments are already
     // space-delimited, so this cannot bypass an ordinary space opportunity.
-    // A line holding only a list label is fitted the same way, in the width
-    // the label leaves.
+    // The body's first unit on a line holding only a list label is fitted
+    // the same way, in the width the label leaves.
     const room = availW() - breakerState.currentWidth;
     const semanticSplit = explicitTextSplit(s, room);
     const split = semanticSplit || emergencyTextSplit(s, room);
