@@ -536,7 +536,8 @@ impl<'a> Reader<'a> {
                 child
                     .attributes
                     .get(&(NS_TEXT.to_string(), "level".to_string()))
-                    == Some(&level.to_string())
+                    .and_then(|value| value.parse::<u32>().ok())
+                    == Some(level)
             })
             .ok_or_else(|| unsupported("list-level-missing"))?;
         let attribute = |name: (&str, &str)| {
@@ -886,7 +887,11 @@ impl<'a> Reader<'a> {
                     .tab_stops
                     .first()
                     .is_none_or(|stop| start + bound / 2.0 >= stop.pos);
-            if start - before < -self.page_left_margin || reaches_tab {
+            // The label is fitted at its full width from M + I before it is
+            // shifted, so it must also fit there: a wrapped aligned label
+            // breaks differently in LibreOffice (measured by the reviewer).
+            let width = self.text_width - paragraph.indent_right;
+            if start - before < -self.page_left_margin || reaches_tab || start + bound > width {
                 return Err(unsupported("list-label-extent"));
             }
         }
