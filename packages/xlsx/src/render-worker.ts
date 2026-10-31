@@ -5,6 +5,7 @@ import {
   type NormalizedXlsxWorksheetPolicy,
 } from './internal/worksheet-policy.js';
 import { bindCellFontLanguage } from './internal/cell-font-language.js';
+import { hasOwnKey, nullRecord } from '@silurus/ooxml-core/internal/own-key';
 import type { CjkLang } from '@silurus/ooxml-core';
 import { xlsxCjkFallback } from './google-fonts.js';
 /**
@@ -100,7 +101,9 @@ let renderers: LoadedWorkerRenderers = {};
 let fontsLoaded: Promise<unknown> = Promise.resolve();
 let officeFontFaces: FontFace[] = [];
 let googleFontFaces: FontFace[] = [];
-let officeFontRoutes: Record<string, OfficeFontFallbackRoute> = {};
+// Keyed by authored face names: null prototype, so merging a route for a face
+// named `__proto__` creates an own entry instead of replacing the prototype.
+let officeFontRoutes: Record<string, OfficeFontFallbackRoute> = nullRecord();
 let checkedOfficeTupleSet = new Set<string>();
 let googleSubstitutes = false;
 let officeSheetLoads = new WeakMap<Worksheet, Promise<void>>();
@@ -302,7 +305,7 @@ self.onmessage = async (e: MessageEvent<
       googleFontFaces = [];
       unloadOfficeFontFallbacks(officeFontFaces);
       officeFontFaces = [];
-      officeFontRoutes = {};
+      officeFontRoutes = nullRecord();
       checkedOfficeTupleSet = new Set();
       officeSheetLoads = new WeakMap();
       officeSheetLoadQueue = Promise.resolve();
@@ -417,7 +420,7 @@ self.onmessage = async (e: MessageEvent<
         sheetFonts = officeSheetLoadQueue.then(async () => {
           const extraRequests = xlsxWorksheetOfficeFontRequests(ws).filter((request) => {
             const key = officeRequestKey(request);
-            return !checkedOfficeTupleSet.has(key) && !(key in officeFontRoutes);
+            return !checkedOfficeTupleSet.has(key) && !hasOwnKey(officeFontRoutes, key);
           });
           if (extraRequests.length === 0) return;
           const extra = await loadOfficeFontFallbacks(extraRequests);
@@ -519,7 +522,7 @@ self.onmessage = async (e: MessageEvent<
       try { unloadGoogleFonts(googleFontFaces); } catch {}
       officeFontFaces = [];
       googleFontFaces = [];
-      officeFontRoutes = {};
+      officeFontRoutes = nullRecord();
       checkedOfficeTupleSet.clear();
       fontsLoaded = Promise.resolve();
       workbook = null;

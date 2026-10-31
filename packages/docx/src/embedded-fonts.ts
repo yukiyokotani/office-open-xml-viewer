@@ -258,7 +258,8 @@ export async function loadEmbeddedFonts(
     const style = face.style === 'italic' ? 'italic' : 'normal';
     return `${normalizeFontMetricFamily(family)}:${weight}:${style}`;
   }));
-  const metrics: Record<string, ResolvedFontMetric> = {};
+  // Null prototype: keys are document font names (e.g. `__proto__`).
+  const metrics = Object.create(null) as Record<string, ResolvedFontMetric>;
   const routes: LoadedEmbeddedFontRoute[] = [];
   for (const entry of loadable) {
     const family = normalizeFontMetricFamily(entry.face.family);

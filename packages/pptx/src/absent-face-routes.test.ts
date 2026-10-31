@@ -88,6 +88,20 @@ describe('PPTX exact local() routes for absent-face line metrics', () => {
     expect(Object.keys(later.routes)).toEqual(['arial']);
   });
 
+  it('treats families named after prototype members like any other family', async () => {
+    const names = ['__proto__', 'constructor', 'toString', 'hasOwnProperty'];
+    const requests = names.map((family) => ({ family }));
+    // No loaded route: no name may be marked installed or routed via Object.prototype.
+    const none = await acquireOfficeRoutes(new Map(), requests, async () => ({ faces: [], routes: {} }));
+    expect(none).toEqual({ routes: {}, installed: [] });
+    // A worker delivers loaded routes through structured clone: `__proto__` is an own key there.
+    const route = { family: '__ooxml_local___proto__' } as never;
+    const cloned = structuredClone(JSON.parse('{"__proto__": {"family": "__ooxml_local___proto__"}}'));
+    const loaded = await acquireOfficeRoutes(new Map(), requests, async () => ({ faces: [], routes: cloned }));
+    expect(loaded.installed).toEqual(['__proto__']);
+    expect(Object.entries(loaded.routes)).toEqual([['__proto__', route]]);
+  });
+
   it('probes an installed named cut under its catalogued weight', async () => {
     expect(officeFaceWeight('Calibri Light', false, false)).toBe(300);
     // A bold run synthesizes bold on the Light face, which is still present.

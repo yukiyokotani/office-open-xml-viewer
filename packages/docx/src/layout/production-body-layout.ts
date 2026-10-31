@@ -2009,6 +2009,7 @@ function measureFollowingBodyBlock(
     const combined: RetainedTableAcquisition = {
       input: combinedInput,
       layout,
+      // ast-grep-ignore: no-plain-object-string-map -- keys are library-generated table flow ids.
       nestedById: Object.assign({}, ...records.map((record) => record.nestedById)),
       floatingTables: [],
     };

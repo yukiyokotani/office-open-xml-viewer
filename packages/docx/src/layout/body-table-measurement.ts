@@ -682,6 +682,7 @@ function combinedAdjacentGroupAcquisition(
   const combinedLayout = layoutRetainedTableInput(
     combinedInput, adjacentGroupPlacement(request), services,
   ).layout;
+  // ast-grep-ignore: no-plain-object-string-map -- keys are library-generated table flow ids.
   const nestedById: Record<string, RetainedTableAcquisition> = {};
   records.forEach((record) =>
     Object.entries(record.nestedById).forEach(([id, nested]) => {
