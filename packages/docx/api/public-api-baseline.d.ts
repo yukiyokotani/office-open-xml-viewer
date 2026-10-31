@@ -1210,6 +1210,7 @@ export interface DocParagraph {
     markVanish?: boolean;
     widowControl?: boolean;
     overflowPunct?: boolean;
+    wordWrap?: boolean;
     autoSpaceDE?: boolean;
     autoSpaceDN?: boolean;
     adjustRightInd?: boolean;
@@ -1271,6 +1272,7 @@ export interface DocSettings {
     useFeLayout?: boolean;
     balanceSingleByteDoubleByteWidth?: boolean;
     adjustLineHeightInTable?: boolean;
+    ulTrailSpace?: boolean;
     compatibilityMode?: number;
 }
 export interface DocTable {

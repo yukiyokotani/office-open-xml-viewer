@@ -1242,11 +1242,7 @@ pub struct DocParagraph {
     pub auto_space_dn: Option<bool>,
     /// ECMA-376 §17.3.1.45 `w:wordWrap` resolved through the style cascade:
     /// `Some(false)` when disabled; omitted (`None`) means the default, on.
-    #[serde(
-        rename = "wordWrap",
-        skip_serializing_if = "Option::is_none",
-        default
-    )]
+    #[serde(rename = "wordWrap", skip_serializing_if = "Option::is_none", default)]
     pub word_wrap: Option<bool>,
     /// ECMA-376 §17.3.1.1 `w:adjustRightInd` — permit automatic right-indent
     /// adjustment when a document grid is active. The style-hierarchy default
