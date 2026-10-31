@@ -1084,9 +1084,22 @@ impl<'a> Reader<'a> {
                 .tab_stops
                 .first()
                 .is_none_or(|stop| start + box_width / 2.0 >= stop.pos);
+        // LibreOffice clips a line taller than the text area at its bottom,
+        // which the DOCX layout does not: the box and two ems of the largest
+        // font on the line bound the line's height.
+        let largest = paragraph
+            .runs
+            .iter()
+            .filter_map(|run| match run {
+                DocRun::Text(text) => Some(text.font_size),
+                _ => None,
+            })
+            .fold(properties.size, f64::max);
+        let box_height = height + 2.0 * IMAGE_LABEL_INSET_PT;
         if start - before + box_width > line_end
             || start - before < -self.page_left_margin
             || reaches_tab
+            || box_height + 2.0 * largest > self.text_height
         {
             return Err(unsupported("list-label-extent"));
         }
@@ -1101,7 +1114,11 @@ impl<'a> Reader<'a> {
         let align = label.align.wire();
         let family = properties.family.to_string();
         self.charge_construction(
-            std::mem::size_of::<DocRun>() * 3 + family.len() + path.len() + mime_type.len(),
+            std::mem::size_of::<DocRun>() * 3
+                + std::mem::size_of::<ImageRun>()
+                + family.len()
+                + path.len()
+                + mime_type.len(),
         )?;
         let mut runs = vec![
             DocRun::AnchorHost(AnchorHostMetrics {

@@ -192,6 +192,10 @@ fn read_with(
         package,
         images: Vec::new(),
         image_types: HashMap::new(),
+        image_pixels: image::MAX_DOCUMENT_PIXELS,
+        text_height: page.section.page_height
+            - page.section.margin_top
+            - page.section.margin_bottom,
         lists: list::Lists::default(),
         list_paragraph: None,
         odf_1_4: version == Some("1.4"),
@@ -933,6 +937,10 @@ struct Reader<'a> {
     /// media type.
     images: Vec<OwnedDocumentResource>,
     image_types: HashMap<String, &'static str>,
+    /// Pixels the document's pictures may still decode.
+    image_pixels: u64,
+    /// The page's text area height (pt).
+    text_height: f64,
     /// List numbering state, and the list paragraph `paragraph` reads next.
     lists: list::Lists,
     list_paragraph: Option<list::ListParagraph<'a>>,
@@ -1406,7 +1414,7 @@ impl<'a> Reader<'a> {
             .package
             .session()
             .run_operation("odf-image", |operation| operation.read_bytes(&path))?;
-        let mime_type = image::decode(&bytes)?;
+        let mime_type = image::decode(&bytes, &mut self.image_pixels)?;
         self.charge_construction(bytes.len() + 2 * path.len() + 64)?;
         self.image_types.insert(path.clone(), mime_type);
         self.images.push(OwnedDocumentResource {
@@ -5307,6 +5315,8 @@ mod tests {
             // A box from M + I past the line end, or before the page edge.
             (level("Pictures/a.png", &placement(r#"fo:width="0.279cm""#, r#"fo:width="16cm""#), "", "listtab"), item.into(), with_png, unsupported("list-label-extent")),
             (level("Pictures/a.png", &format!(r#"{PICTURE_PLACEMENT} fo:text-align="end""#), "", "listtab").replace(r#"fo:width="0.279cm""#, r#"fo:width="4cm""#), item.into(), with_png, unsupported("list-label-extent")),
+            // A line taller than the text area, which LibreOffice clips.
+            (level("Pictures/a.png", &placement(r#"fo:height="0.279cm""#, r#"fo:height="26cm""#), "", "listtab"), item.into(), with_png, unsupported("list-label-extent")),
             (level("Pictures/a.png", PICTURE_PLACEMENT, "", "listtab"), r#"<text:list text:style-name="L"><text:list-item><text:p/></text:list-item></text:list>"#.into(), with_png, unsupported("list-empty-label")),
             // Links outside the package, fragments, missing and undecodable files.
             (level("http://example.com/a.png", PICTURE_PLACEMENT, "", "listtab"), item.into(), &[], unsupported("image-link")),

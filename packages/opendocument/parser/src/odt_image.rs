@@ -13,17 +13,21 @@ const MAX_PIXELS: u64 = 40_000_000;
 /// Decoder working memory: the largest admitted image at 8 bytes per pixel
 /// (16-bit RGBA PNG), plus room for the decoders' own state.
 const MAX_DECODE_BYTES: u64 = MAX_PIXELS * 8 + (1 << 20);
+/// Implementation bound on the pixels a document's pictures decode, every
+/// frame counted, charged before each frame is decoded.
+pub(super) const MAX_DOCUMENT_PIXELS: u64 = 64_000_000;
 
-/// The media type of `bytes` once every frame of it has decoded.
-pub(super) fn decode(bytes: &[u8]) -> Result<&'static str, String> {
+/// The media type of `bytes` once every frame of it has decoded, charging
+/// the decoded pixels against `budget` (the document's remaining pixels).
+pub(super) fn decode(bytes: &[u8], budget: &mut u64) -> Result<&'static str, String> {
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        png(bytes)?;
+        png(bytes, budget)?;
         Ok("image/png")
     } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-        gif(bytes)?;
+        gif(bytes, budget)?;
         Ok("image/gif")
     } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
-        jpeg(bytes)?;
+        jpeg(bytes, budget)?;
         Ok("image/jpeg")
     } else {
         Err(unsupported("image-format"))
@@ -42,27 +46,54 @@ fn check_size(width: u64, height: u64) -> Result<(), String> {
     Ok(())
 }
 
-fn png(bytes: &[u8]) -> Result<(), String> {
+fn charge(budget: &mut u64, width: u64, height: u64) -> Result<(), String> {
+    *budget = budget
+        .checked_sub(width * height)
+        .ok_or_else(|| "OpenDocument pictures exceed the decoding limit".to_string())?;
+    Ok(())
+}
+
+fn png(bytes: &[u8], budget: &mut u64) -> Result<(), String> {
     let decode = || unsupported("image-decode");
     let limits = png::Limits {
         bytes: MAX_DECODE_BYTES as usize,
     };
-    let mut reader = png::Decoder::new_with_limits(Cursor::new(bytes), limits)
-        .read_info()
-        .map_err(|_| decode())?;
+    let mut decoder = png::Decoder::new_with_limits(Cursor::new(bytes), limits);
+    // Chunk CRCs and the zlib Adler-32 are verified: LibreOffice rejects
+    // image data with a wrong check value where a browser paints it.
+    decoder.ignore_checksums(false);
+    let mut reader = decoder.read_info().map_err(|_| decode())?;
     let info = reader.info();
-    check_size(u64::from(info.width), u64::from(info.height))?;
+    let (width, height) = (info.width, info.height);
+    check_size(u64::from(width), u64::from(height))?;
     // An animated PNG plays in a browser; LibreOffice is not measured.
     if info.animation_control.is_some() {
         return Err(unsupported("image-animation"));
     }
+    let palette = (info.color_type == png::ColorType::Indexed)
+        .then(|| info.palette.as_ref().map_or(0, |palette| palette.len() / 3));
+    charge(budget, u64::from(width), u64::from(height))?;
     let size = reader.output_buffer_size().ok_or_else(decode)?;
     let mut buffer = vec![0; size];
-    reader.next_frame(&mut buffer).map_err(|_| decode())?;
+    let output = reader.next_frame(&mut buffer).map_err(|_| decode())?;
+    // Indices past the palette paint differently (a browser's choice,
+    // LibreOffice's black), so each one must name an entry.
+    if let Some(entries) = palette {
+        let depth = output.bit_depth as usize;
+        for row in buffer.chunks(output.line_size).take(height as usize) {
+            for x in 0..width as usize {
+                let bit = x * depth;
+                let index = (row[bit / 8] >> (8 - depth - bit % 8)) & ((1u16 << depth) - 1) as u8;
+                if usize::from(index) >= entries {
+                    return Err(unsupported("image-palette"));
+                }
+            }
+        }
+    }
     reader.finish().map_err(|_| decode())
 }
 
-fn gif(bytes: &[u8]) -> Result<(), String> {
+fn gif(bytes: &[u8], budget: &mut u64) -> Result<(), String> {
     let decode = || unsupported("image-decode");
     let mut options = gif::DecodeOptions::new();
     options.set_color_output(gif::ColorOutput::Indexed);
@@ -75,13 +106,20 @@ fn gif(bytes: &[u8]) -> Result<(), String> {
         .map_err(|_| decode())?;
     check_size(u64::from(decoder.width()), u64::from(decoder.height()))?;
     let mut frames = 0usize;
-    while decoder.read_next_frame().map_err(|_| decode())?.is_some() {
-        frames += 1;
-        // Every frame is decoded within the screen's own bounds; their count
-        // is bounded by the file (each frame takes bytes).
-        if frames > bytes.len() {
-            return Err(decode());
+    while let Some(frame) = decoder.next_frame_info().map_err(|_| decode())? {
+        // Every frame lies within the screen; each is charged before it is
+        // decoded.
+        charge(budget, u64::from(frame.width), u64::from(frame.height))?;
+        let mut buffer = vec![0; decoder.buffer_size()];
+        decoder
+            .read_into_buffer(&mut buffer)
+            .map_err(|_| decode())?;
+        // Indices past the colour table paint differently per decoder.
+        let entries = decoder.palette().map_err(|_| decode())?.len() / 3;
+        if buffer.iter().any(|&index| usize::from(index) >= entries) {
+            return Err(unsupported("image-palette"));
         }
+        frames += 1;
     }
     if frames == 0 {
         return Err(decode());
@@ -89,7 +127,7 @@ fn gif(bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-fn jpeg(bytes: &[u8]) -> Result<(), String> {
+fn jpeg(bytes: &[u8], budget: &mut u64) -> Result<(), String> {
     let decode = || unsupported("image-decode");
     let options = zune_core::options::DecoderOptions::default()
         .set_max_width(MAX_SIDE as usize)
@@ -99,6 +137,7 @@ fn jpeg(bytes: &[u8]) -> Result<(), String> {
     decoder.decode_headers().map_err(|_| decode())?;
     let (width, height) = decoder.dimensions().ok_or_else(decode)?;
     check_size(width as u64, height as u64)?;
+    charge(budget, width as u64, height as u64)?;
     decoder.decode().map_err(|_| decode())?;
     Ok(())
 }
@@ -106,6 +145,38 @@ fn jpeg(bytes: &[u8]) -> Result<(), String> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    fn dec(bytes: &[u8]) -> Result<&'static str, String> {
+        decode(bytes, &mut MAX_DOCUMENT_PIXELS.clone())
+    }
+
+    /// A PNG with `chunks` (type, data) after its IHDR, CRCs computed.
+    fn png_chunks(ihdr: &[u8], chunks: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
+        let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+        let mut chunk = |kind: &[u8; 4], data: &[u8]| {
+            out.extend((data.len() as u32).to_be_bytes());
+            let mut crc = crc32fast::Hasher::new();
+            crc.update(kind);
+            crc.update(data);
+            out.extend(kind);
+            out.extend(data);
+            out.extend(crc.finalize().to_be_bytes());
+        };
+        chunk(b"IHDR", ihdr);
+        for (kind, data) in chunks {
+            chunk(kind, data);
+        }
+        chunk(b"IEND", &[]);
+        out
+    }
+
+    fn zlib(raw: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(raw).unwrap();
+        encoder.finish().unwrap()
+    }
 
     /// A 2×1 RGB PNG (one red, one blue pixel).
     pub(crate) fn png_bytes() -> Vec<u8> {
@@ -122,16 +193,43 @@ pub(crate) mod tests {
     #[test]
     fn decodes_png_and_rejects_damage() {
         let bytes = png_bytes();
-        assert_eq!(decode(&bytes).unwrap(), "image/png");
+        assert_eq!(dec(&bytes).unwrap(), "image/png");
         // A truncated stream stops inside the image data.
         assert_eq!(
-            decode(&bytes[..bytes.len() - 20]).unwrap_err(),
+            dec(&bytes[..bytes.len() - 20]).unwrap_err(),
             unsupported("image-decode")
         );
         let mut corrupt = bytes.clone();
         let data = corrupt.len() - 20;
         corrupt[data] ^= 0xff;
-        assert_eq!(decode(&corrupt).unwrap_err(), unsupported("image-decode"));
+        assert_eq!(dec(&corrupt).unwrap_err(), unsupported("image-decode"));
+    }
+
+    #[test]
+    fn verifies_png_checksums_and_palette_indices() {
+        // 1×1 8-bit indexed, one palette entry.
+        let ihdr = [0, 0, 0, 1, 0, 0, 0, 1, 8, 3, 0, 0, 0];
+        let palette = (b"PLTE", vec![255, 0, 0]);
+        let valid = png_chunks(&ihdr, &[palette.clone(), (b"IDAT", zlib(&[0, 0]))]);
+        assert_eq!(dec(&valid).unwrap(), "image/png");
+        // A pixel index past the palette.
+        let outside = png_chunks(&ihdr, &[palette.clone(), (b"IDAT", zlib(&[0, 255]))]);
+        assert_eq!(dec(&outside).unwrap_err(), unsupported("image-palette"));
+        // A wrong zlib Adler-32 under a correct chunk CRC.
+        let mut data = zlib(&[0, 0]);
+        let end = data.len() - 1;
+        data[end] ^= 1;
+        let adler = png_chunks(&ihdr, &[palette, (b"IDAT", data)]);
+        assert_eq!(dec(&adler).unwrap_err(), unsupported("image-decode"));
+    }
+
+    #[test]
+    fn charges_every_decoded_pixel_against_the_document() {
+        let bytes = png_bytes();
+        let mut budget = 3;
+        assert_eq!(decode(&bytes, &mut budget).unwrap(), "image/png");
+        assert_eq!(budget, 1);
+        assert!(decode(&bytes, &mut budget).is_err());
     }
 
     #[test]
@@ -149,9 +247,25 @@ pub(crate) mod tests {
                 encoder.write_frame(&frame).unwrap();
             }
         }
-        assert_eq!(decode(&out).unwrap(), "image/gif");
+        assert_eq!(dec(&out).unwrap(), "image/gif");
+        // Two 2×2 frames: 8 pixels.
+        let mut budget = 7;
+        assert!(decode(&out, &mut budget).is_err());
+        // An index past the two-entry table.
+        let mut outside = Vec::new();
+        {
+            let mut encoder = gif::Encoder::new(&mut outside, 1, 1, &[0, 0, 0, 255, 0, 0]).unwrap();
+            let frame = gif::Frame {
+                width: 1,
+                height: 1,
+                buffer: std::borrow::Cow::Borrowed(&[3]),
+                ..Default::default()
+            };
+            encoder.write_frame(&frame).unwrap();
+        }
+        assert_eq!(dec(&outside).unwrap_err(), unsupported("image-palette"));
         assert_eq!(
-            decode(&out[..out.len() - 8]).unwrap_err(),
+            dec(&out[..out.len() - 8]).unwrap_err(),
             unsupported("image-decode")
         );
     }
@@ -160,18 +274,18 @@ pub(crate) mod tests {
     fn decodes_jpeg_and_rejects_truncation() {
         // A 1×1 baseline JPEG.
         let bytes: &[u8] = &JPEG_1X1;
-        assert_eq!(decode(bytes).unwrap(), "image/jpeg");
+        assert_eq!(dec(bytes).unwrap(), "image/jpeg");
         assert_eq!(
-            decode(&bytes[..bytes.len() - 6]).unwrap_err(),
+            dec(&bytes[..bytes.len() - 6]).unwrap_err(),
             unsupported("image-decode")
         );
     }
 
     #[test]
     fn rejects_other_formats_and_sizes() {
-        assert_eq!(decode(b"BM....").unwrap_err(), unsupported("image-format"));
+        assert_eq!(dec(b"BM....").unwrap_err(), unsupported("image-format"));
         assert_eq!(
-            decode(b"<svg xmlns='http://www.w3.org/2000/svg'/>").unwrap_err(),
+            dec(b"<svg xmlns='http://www.w3.org/2000/svg'/>").unwrap_err(),
             unsupported("image-format")
         );
         assert_eq!(check_size(0, 1).unwrap_err(), unsupported("image-size"));
