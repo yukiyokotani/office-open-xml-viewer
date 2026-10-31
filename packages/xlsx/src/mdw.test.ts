@@ -259,4 +259,3 @@ describe('worksheet default fonts named like Object.prototype members', () => {
     }
   });
 });
-
