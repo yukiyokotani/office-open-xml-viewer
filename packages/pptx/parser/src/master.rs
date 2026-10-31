@@ -1785,7 +1785,10 @@ pub(crate) fn parse_master_txstyle_color_tier(
     // and a title's level-1 fill must not become the default of its deeper
     // levels, which keep the hard default.
     let authored_tx_styles = child(root, "txStyles").is_some();
-    for (style_node, ph_types) in tx_style_nodes(root).into_iter().filter(|_| authored_tx_styles) {
+    for (style_node, ph_types) in tx_style_nodes(root)
+        .into_iter()
+        .filter(|_| authored_tx_styles)
+    {
         if let Some(color) = child(style_node, "lvl1pPr")
             .and_then(|lp| child(lp, "defRPr"))
             .and_then(|rp| text_property_color(rp, theme))
@@ -3671,8 +3674,8 @@ mod placeholder_geometry_tests {
             assert_eq!(colors[*class][1], None, "{class}");
         }
         for class in BODY_CLASS {
-            for level in 0..9 {
-                assert_eq!(colors[*class][level].as_deref(), Some("F9F9F9"), "{class} {level}");
+            for (level, color) in colors[*class].iter().enumerate().take(9) {
+                assert_eq!(color.as_deref(), Some("F9F9F9"), "{class} {level}");
             }
         }
         // The level-1 fill stays on its level: it is no shape-wide default,
