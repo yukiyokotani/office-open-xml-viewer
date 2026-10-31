@@ -2,6 +2,13 @@
 //! reader decodes it completely. PNG, GIF and JPEG, recognised by their
 //! signatures, are decoded here with bounded memory; anything else, and any
 //! file a decoder rejects, rejects the document.
+//!
+//! Decoding alone does not make a browser and LibreOffice paint a file alike
+//! (measured by the reviewer: unknown chunks and markers, damaged ancillary
+//! chunks, gamma and colour profiles, EXIF orientation and partial GIF
+//! frames are each treated differently). Each format's structure is
+//! therefore checked first against the shape the corpus's pictures have:
+//! the parts listed below and nothing after the file's end.
 
 use crate::error::unsupported;
 use std::io::Cursor;
@@ -53,8 +60,223 @@ fn charge(budget: &mut u64, width: u64, height: u64) -> Result<(), String> {
     Ok(())
 }
 
+/// PNG chunks (ISO/IEC 15948 §5): IHDR first, then the palette and
+/// transparency, physical size, text and time (which no decoder paints),
+/// consecutive image data and IEND at the file's end, every CRC correct.
+/// Colour-space chunks (gAMA, cHRM, sRGB, iCCP), EXIF, animation and any
+/// other chunk reject.
+fn png_structure(bytes: &[u8]) -> Result<(), String> {
+    let decode = || unsupported("image-decode");
+    let mut at = 8;
+    let mut seen_data = false;
+    let mut data_ended = false;
+    let mut first = true;
+    while at < bytes.len() {
+        let header = bytes.get(at..at + 8).ok_or_else(decode)?;
+        let length = u32::from_be_bytes(header[..4].try_into().expect("4 bytes")) as usize;
+        let kind: [u8; 4] = header[4..].try_into().expect("4 bytes");
+        let end = (at + 12).checked_add(length).ok_or_else(decode)?;
+        let body = bytes.get(at + 4..end - 4).ok_or_else(decode)?;
+        let crc = u32::from_be_bytes(bytes[end - 4..end].try_into().expect("4 bytes"));
+        if crc32fast::hash(body) != crc {
+            return Err(decode());
+        }
+        match &kind {
+            b"IHDR" if first => {}
+            b"PLTE" | b"tRNS" | b"pHYs" | b"tEXt" | b"zTXt" | b"iTXt" | b"tIME"
+                if !first && !seen_data => {}
+            b"tEXt" | b"zTXt" | b"iTXt" | b"tIME" if !first => {}
+            b"IDAT" if !first && !data_ended => seen_data = true,
+            b"IEND" if seen_data => {
+                return if end == bytes.len() {
+                    Ok(())
+                } else {
+                    Err(decode())
+                }
+            }
+            _ => return Err(unsupported("image-structure")),
+        }
+        if seen_data && &kind != b"IDAT" {
+            data_ended = true;
+        }
+        first = false;
+        at = end;
+    }
+    Err(decode())
+}
+
+/// GIF blocks (GIF89a §15-§27): one image covering the logical screen, with
+/// graphic control, comment and application extensions, and the trailer at
+/// the file's end. Plain text extensions, partial or several frames reject
+/// (a browser and LibreOffice place a partial frame differently, measured
+/// by the reviewer; several frames animate).
+fn gif_structure(bytes: &[u8]) -> Result<(), String> {
+    let decode = || unsupported("image-decode");
+    let byte = |at: usize| bytes.get(at).copied().ok_or_else(decode);
+    let word = |at: usize| -> Result<u16, String> {
+        Ok(u16::from(byte(at)?) | u16::from(byte(at + 1)?) << 8)
+    };
+    let table = |flags: u8| {
+        if flags & 0x80 != 0 {
+            3usize << ((flags & 7) + 1)
+        } else {
+            0
+        }
+    };
+    let sub_blocks = |mut at: usize| -> Result<usize, String> {
+        loop {
+            let size = usize::from(byte(at)?);
+            at += 1 + size;
+            if size == 0 {
+                return Ok(at);
+            }
+        }
+    };
+    let (width, height) = (word(6)?, word(8)?);
+    let mut at = 13 + table(byte(10)?);
+    let mut images = 0;
+    loop {
+        match byte(at)? {
+            0x21 => match byte(at + 1)? {
+                0xf9 | 0xfe | 0xff => at = sub_blocks(at + 2)?,
+                _ => return Err(unsupported("image-structure")),
+            },
+            0x2c => {
+                images += 1;
+                if images > 1 {
+                    return Err(unsupported("image-animation"));
+                }
+                if (word(at + 1)?, word(at + 3)?, word(at + 5)?, word(at + 7)?)
+                    != (0, 0, width, height)
+                {
+                    return Err(unsupported("image-structure"));
+                }
+                at = sub_blocks(at + 10 + table(byte(at + 9)?) + 1)?;
+            }
+            0x3b if images == 1 && at + 1 == bytes.len() => return Ok(()),
+            _ => return Err(decode()),
+        }
+    }
+}
+
+/// JPEG markers (ITU-T T.81 Annex B): SOI, then application segments,
+/// comments, quantisation and Huffman tables, restart intervals, one
+/// baseline 8-bit frame of one or three components, its scans, and EOI at
+/// the file's end. A colour profile (APP2 ICC_PROFILE), an EXIF orientation
+/// other than 1, an Adobe colour transform other than YCbCr, other frame
+/// types and any other marker reject.
+fn jpeg_structure(bytes: &[u8]) -> Result<(), String> {
+    let decode = || unsupported("image-decode");
+    let structure = || unsupported("image-structure");
+    let mut at = 2;
+    let mut frame = false;
+    let mut scanned = false;
+    loop {
+        if bytes.get(at) != Some(&0xff) {
+            return Err(decode());
+        }
+        let marker = *bytes.get(at + 1).ok_or_else(decode)?;
+        // Standalone markers outside a scan (a second SOI, restarts, TEM).
+        if matches!(marker, 0x01 | 0xd0..=0xd8) {
+            return Err(structure());
+        }
+        if marker == 0xd9 {
+            return if scanned && at + 2 == bytes.len() {
+                Ok(())
+            } else {
+                Err(decode())
+            };
+        }
+        let length = usize::from(u16::from_be_bytes(
+            bytes
+                .get(at + 2..at + 4)
+                .ok_or_else(decode)?
+                .try_into()
+                .expect("2 bytes"),
+        ));
+        let segment = bytes.get(at + 4..at + 2 + length).ok_or_else(decode)?;
+        if length < 2 {
+            return Err(decode());
+        }
+        match marker {
+            0xe2 if segment.starts_with(b"ICC_PROFILE\0") => {
+                return Err(unsupported("image-colour"))
+            }
+            0xe1 if segment.starts_with(b"Exif\0\0") => {
+                if exif_orientation(&segment[6..]).is_some_and(|o| o != 1) {
+                    return Err(unsupported("image-orientation"));
+                }
+            }
+            // The Adobe segment's transform flag (DCT Encode filter, Adobe
+            // TN 5116): 1 is YCbCr, the default for three components.
+            0xee if segment.starts_with(b"Adobe") => {
+                if segment.get(11) != Some(&1) {
+                    return Err(unsupported("image-colour"));
+                }
+            }
+            0xe0..=0xef | 0xfe | 0xdb | 0xc4 | 0xdd => {}
+            0xc0 if !frame => {
+                frame = true;
+                if segment.first() != Some(&8) || !matches!(segment.get(5), Some(1 | 3)) {
+                    return Err(structure());
+                }
+            }
+            0xda if frame => {
+                scanned = true;
+                // Entropy-coded data runs to the next marker other than a
+                // stuffed zero or a restart marker.
+                at += 2 + length;
+                loop {
+                    match (bytes.get(at), bytes.get(at + 1)) {
+                        (Some(0xff), Some(0x00 | 0xd0..=0xd7)) => at += 2,
+                        (Some(0xff), Some(_)) => break,
+                        (Some(_), _) => at += 1,
+                        (None, _) => return Err(decode()),
+                    }
+                }
+                continue;
+            }
+            _ => return Err(structure()),
+        }
+        at += 2 + length;
+    }
+}
+
+/// The orientation tag (0x0112) of an EXIF block's first IFD (TIFF 6.0
+/// §2), when present and readable.
+fn exif_orientation(tiff: &[u8]) -> Option<u16> {
+    let big = match tiff.get(..2)? {
+        b"MM" => true,
+        b"II" => false,
+        _ => return None,
+    };
+    let u16_at = |at: usize| -> Option<u16> {
+        let b: [u8; 2] = tiff.get(at..at + 2)?.try_into().ok()?;
+        Some(if big {
+            u16::from_be_bytes(b)
+        } else {
+            u16::from_le_bytes(b)
+        })
+    };
+    let u32_at = |at: usize| -> Option<u32> {
+        let b: [u8; 4] = tiff.get(at..at + 4)?.try_into().ok()?;
+        Some(if big {
+            u32::from_be_bytes(b)
+        } else {
+            u32::from_le_bytes(b)
+        })
+    };
+    let ifd = u32_at(4)? as usize;
+    let count = usize::from(u16_at(ifd)?);
+    (0..count).find_map(|entry| {
+        let at = ifd + 2 + 12 * entry;
+        (u16_at(at)? == 0x0112).then(|| u16_at(at + 8)).flatten()
+    })
+}
+
 fn png(bytes: &[u8], budget: &mut u64) -> Result<(), String> {
     let decode = || unsupported("image-decode");
+    png_structure(bytes)?;
     let limits = png::Limits {
         bytes: MAX_DECODE_BYTES as usize,
     };
@@ -95,6 +317,7 @@ fn png(bytes: &[u8], budget: &mut u64) -> Result<(), String> {
 
 fn gif(bytes: &[u8], budget: &mut u64) -> Result<(), String> {
     let decode = || unsupported("image-decode");
+    gif_structure(bytes)?;
     let mut options = gif::DecodeOptions::new();
     options.set_color_output(gif::ColorOutput::Indexed);
     options.set_memory_limit(gif::MemoryLimit::Bytes(
@@ -129,6 +352,7 @@ fn gif(bytes: &[u8], budget: &mut u64) -> Result<(), String> {
 
 fn jpeg(bytes: &[u8], budget: &mut u64) -> Result<(), String> {
     let decode = || unsupported("image-decode");
+    jpeg_structure(bytes)?;
     let options = zune_core::options::DecoderOptions::default()
         .set_max_width(MAX_SIDE as usize)
         .set_max_height(MAX_SIDE as usize)
@@ -137,12 +361,6 @@ fn jpeg(bytes: &[u8], budget: &mut u64) -> Result<(), String> {
     decoder.decode_headers().map_err(|_| decode())?;
     let (width, height) = decoder.dimensions().ok_or_else(decode)?;
     check_size(width as u64, height as u64)?;
-    // The decoder accepts a stream cut before its end-of-image marker, which
-    // a browser refuses; the file must end with that marker (ITU-T T.81
-    // B.2.1), as every corpus JPEG does.
-    if !bytes.ends_with(&[0xff, 0xd9]) {
-        return Err(decode());
-    }
     charge(budget, width as u64, height as u64)?;
     decoder.decode().map_err(|_| decode())?;
     Ok(())
@@ -225,8 +443,31 @@ pub(crate) mod tests {
         let mut data = zlib(&[0, 0]);
         let end = data.len() - 1;
         data[end] ^= 1;
-        let adler = png_chunks(&ihdr, &[palette, (b"IDAT", data)]);
+        let adler = png_chunks(&ihdr, &[palette.clone(), (b"IDAT", data)]);
         assert_eq!(dec(&adler).unwrap_err(), unsupported("image-decode"));
+        // Colour-space, animation and unknown chunks; a damaged ancillary
+        // chunk; data after IEND.
+        let idat = (b"IDAT", zlib(&[0, 0]));
+        for kind in [b"gAMA", b"iCCP", b"acTL", b"ABCD", b"aaaa"] {
+            let extra = png_chunks(
+                &ihdr,
+                &[palette.clone(), (kind, vec![0, 1, 134, 160]), idat.clone()],
+            );
+            assert_eq!(dec(&extra).unwrap_err(), unsupported("image-structure"));
+        }
+        let text = png_chunks(
+            &ihdr,
+            &[palette.clone(), (b"tEXt", b"a\0b".to_vec()), idat.clone()],
+        );
+        assert_eq!(dec(&text).unwrap(), "image/png");
+        let mut damaged = text.clone();
+        let at = damaged.windows(4).position(|w| w == b"tEXt").unwrap() + 4;
+        damaged[at] ^= 1;
+        assert_eq!(dec(&damaged).unwrap_err(), unsupported("image-decode"));
+        assert_eq!(
+            dec(&[&valid[..], &[0]].concat()).unwrap_err(),
+            unsupported("image-decode")
+        );
     }
 
     #[test]
@@ -238,40 +479,58 @@ pub(crate) mod tests {
         assert!(decode(&bytes, &mut budget).is_err());
     }
 
-    #[test]
-    fn decodes_gif_frames() {
+    /// A GIF of `frames` (left, top, width, height, indices) on a
+    /// `width` × `height` screen with a two-entry table.
+    fn gif_bytes(width: u16, height: u16, frames: &[(u16, u16, u16, u16, &[u8])]) -> Vec<u8> {
         let mut out = Vec::new();
         {
-            let mut encoder = gif::Encoder::new(&mut out, 2, 2, &[0, 0, 0, 255, 0, 0]).unwrap();
-            for _ in 0..2 {
+            let mut encoder =
+                gif::Encoder::new(&mut out, width, height, &[0, 0, 0, 255, 0, 0]).unwrap();
+            for (left, top, w, h, indices) in frames {
                 let frame = gif::Frame {
-                    width: 2,
-                    height: 2,
-                    buffer: std::borrow::Cow::Borrowed(&[0, 1, 1, 0]),
+                    left: *left,
+                    top: *top,
+                    width: *w,
+                    height: *h,
+                    buffer: std::borrow::Cow::Borrowed(indices),
                     ..Default::default()
                 };
                 encoder.write_frame(&frame).unwrap();
             }
         }
-        assert_eq!(dec(&out).unwrap(), "image/gif");
-        // Two 2×2 frames: 8 pixels.
-        let mut budget = 7;
-        assert!(decode(&out, &mut budget).is_err());
+        out
+    }
+
+    #[test]
+    fn decodes_gif_frames() {
+        let one = gif_bytes(2, 2, &[(0, 0, 2, 2, &[0, 1, 1, 0])]);
+        assert_eq!(dec(&one).unwrap(), "image/gif");
+        // One 2×2 frame: 4 pixels.
+        assert!(decode(&one, &mut 3).is_err());
+        // Several frames animate; a partial frame is placed differently.
+        let two = gif_bytes(
+            2,
+            2,
+            &[(0, 0, 2, 2, &[0, 1, 1, 0]), (0, 0, 2, 2, &[1, 1, 1, 1])],
+        );
+        assert_eq!(dec(&two).unwrap_err(), unsupported("image-animation"));
+        let partial = gif_bytes(4, 4, &[(1, 1, 1, 1, &[1])]);
+        assert_eq!(dec(&partial).unwrap_err(), unsupported("image-structure"));
+        // A plain text extension (GIF89a §25) before the image.
+        let mut text = one.clone();
+        let image = text.iter().position(|&b| b == 0x2c).unwrap();
+        text.splice(image..image, [0x21, 0x01, 1, 0, 0]);
+        assert_eq!(dec(&text).unwrap_err(), unsupported("image-structure"));
         // An index past the two-entry table.
-        let mut outside = Vec::new();
-        {
-            let mut encoder = gif::Encoder::new(&mut outside, 1, 1, &[0, 0, 0, 255, 0, 0]).unwrap();
-            let frame = gif::Frame {
-                width: 1,
-                height: 1,
-                buffer: std::borrow::Cow::Borrowed(&[3]),
-                ..Default::default()
-            };
-            encoder.write_frame(&frame).unwrap();
-        }
+        let outside = gif_bytes(1, 1, &[(0, 0, 1, 1, &[3])]);
         assert_eq!(dec(&outside).unwrap_err(), unsupported("image-palette"));
+        // Truncated, or data after the trailer.
         assert_eq!(
-            dec(&out[..out.len() - 8]).unwrap_err(),
+            dec(&one[..one.len() - 3]).unwrap_err(),
+            unsupported("image-decode")
+        );
+        assert_eq!(
+            dec(&[&one[..], &[0]].concat()).unwrap_err(),
             unsupported("image-decode")
         );
     }
@@ -293,6 +552,60 @@ pub(crate) mod tests {
         assert_eq!(
             dec(&bytes[..bytes.len() - 6]).unwrap_err(),
             unsupported("image-decode")
+        );
+        // A segment inserted after SOI.
+        let with = |segment: &[u8]| [&bytes[..2], segment, &bytes[2..]].concat();
+        // A colour profile, a rotating EXIF orientation, a non-YCbCr Adobe
+        // transform.
+        let icc = with(b"\xff\xe2\x00\x10ICC_PROFILE\x00\x01\x01");
+        assert_eq!(dec(&icc).unwrap_err(), unsupported("image-colour"));
+        let exif = |orientation: u8| {
+            with(
+                &[
+                    b"\xff\xe1\x00\x22Exif\x00\x00MM\x00\x2a\x00\x00\x00\x08\x00\x01".as_slice(),
+                    &[
+                        0x01,
+                        0x12,
+                        0x00,
+                        0x03,
+                        0,
+                        0,
+                        0,
+                        1,
+                        0,
+                        orientation,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                    ],
+                ]
+                .concat(),
+            )
+        };
+        assert_eq!(dec(&exif(1)).unwrap(), "image/jpeg");
+        assert_eq!(dec(&exif(6)).unwrap_err(), unsupported("image-orientation"));
+        let adobe = with(b"\xff\xee\x00\x0eAdobe\x00\x64\x00\x00\x00\x00\x00");
+        assert_eq!(dec(&adobe).unwrap_err(), unsupported("image-colour"));
+        // An unknown marker, a second SOI, a progressive frame.
+        assert_eq!(
+            dec(&with(b"\xff\x60\x00\x02")).unwrap_err(),
+            unsupported("image-structure")
+        );
+        assert_eq!(
+            dec(&with(b"\xff\xd8")).unwrap_err(),
+            unsupported("image-structure")
+        );
+        let progressive: Vec<u8> = bytes
+            .windows(2)
+            .position(|w| w == [0xff, 0xc0])
+            .map(|at| [&bytes[..at + 1], &[0xc2], &bytes[at + 2..]].concat())
+            .unwrap();
+        assert_eq!(
+            dec(&progressive).unwrap_err(),
+            unsupported("image-structure")
         );
     }
 
