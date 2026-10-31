@@ -535,7 +535,7 @@ export const WORD_REFERENCE_LINE_FOOTNOTE_ALLOCATION = defineCompatibilityRule({
 export function wordFootnoteLookaheadBoundary(entry: BodyLayoutInput['sequence'][number]): boolean {
   return (entry.kind === 'authored-break' && entry.break !== 'column')
     || (entry.kind === 'begin-section' && entry.section.startType !== 'continuous')
-    || (entry.kind === 'body-block' && entry.block.kind === 'paragraph' && entry.block.pageBreakBefore);
+    || (entry.kind === 'body-block' && entry.block.pageBreakBefore === true);
 }
 
 export const WORD_PER_COLUMN_FOOTNOTE_BANDS = defineCompatibilityRule({

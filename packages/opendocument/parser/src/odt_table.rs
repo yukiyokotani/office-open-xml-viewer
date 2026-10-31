@@ -53,6 +53,14 @@ fn group<'s>(
     if style.parent.is_some() {
         return Err(unsupported("table-style-parent"));
     }
+    // Other style-element attributes (a page style to start, a class) are
+    // not modelled; a display name only names the style in the UI.
+    if style.attributes.keys().any(|key| {
+        key.0 != NS_STYLE || !matches!(key.1.as_str(), "name" | "family" | "display-name")
+    })
+    {
+        return Err(unsupported("table-style-attribute"));
+    }
     for (key, properties) in &style.groups {
         // LibreOffice writes an empty `style:background-image` beside a
         // background colour; it draws nothing.
@@ -67,6 +75,20 @@ fn group<'s>(
         }
     }
     Ok(style.groups.get(group).map(|p| &p.attributes))
+}
+
+impl Reader<'_> {
+    /// `group` of a table-family style, its processing charged.
+    fn table_group(
+        &self,
+        family: Family,
+        name: Option<&str>,
+        group_name: &str,
+    ) -> Result<Option<&Attributes>, String> {
+        let properties = group(self.sheet, family, name, group_name)?;
+        self.charge_work(1 + properties.map_or(0, |p| p.len()))?;
+        Ok(properties)
+    }
 }
 
 fn twips(points: f64) -> String {
@@ -105,6 +127,9 @@ fn border(value: &str) -> Result<Option<BorderSpec>, String> {
 impl<'a> Reader<'a> {
     /// A `table:table` in the body (§9.1.2).
     pub(super) fn table(&mut self, node: roxmltree::Node<'_, '_>) -> Result<(), String> {
+        if !self.layout_flags.table_settings {
+            return Err(unsupported("table-setting"));
+        }
         for attribute in node.attributes() {
             match (attribute.namespace(), attribute.name()) {
                 (Some(NS_TABLE), "name" | "style-name") | (Some(NS_XML), "id") => {}
@@ -112,11 +137,14 @@ impl<'a> Reader<'a> {
             }
         }
         self.charge_construction(std::mem::size_of::<DocTable>())?;
-        // The documented defaults: collapsing borders, and rows that do not
+        // The measured model: collapsing borders (§20.302), which
+        // LibreOffice also reads where no style states a model (it writes
+        // "collapsing" back; the controls state none), and rows that do not
         // split unless their default says so.
         let mut row_keep_default = false;
         if let Some(default) = self.sheet.default_style(Family::Table) {
             for (key, properties) in &default.style().groups {
+                self.charge_work(1 + properties.attributes.len())?;
                 for (attribute, value) in &properties.attributes {
                     match (key.as_str(), attribute.0.as_str(), attribute.1.as_str()) {
                         ("table-properties", NS_TABLE, "border-model") if value == "collapsing" => {
@@ -128,6 +156,7 @@ impl<'a> Reader<'a> {
         }
         if let Some(default) = self.sheet.default_style(Family::TableRow) {
             for (key, properties) in &default.style().groups {
+                self.charge_work(1 + properties.attributes.len())?;
                 for (attribute, value) in &properties.attributes {
                     match (key.as_str(), attribute.0.as_str(), attribute.1.as_str()) {
                         ("table-row-properties", NS_FO, "keep-together") => {
@@ -149,8 +178,7 @@ impl<'a> Reader<'a> {
         }
 
         // Table properties (§17.15).
-        let properties = group(
-            self.sheet,
+        let properties = self.table_group(
             Family::Table,
             node.attribute((NS_TABLE, "style-name")),
             "table-properties",
@@ -185,6 +213,7 @@ impl<'a> Reader<'a> {
                     }
                 }
                 (NS_FO, "break-after") if value == "auto" => {}
+                (NS_TABLE, "border-model") if value == "collapsing" => {}
                 (NS_FO, "background-color") if value == "transparent" => {}
                 _ => return Err(unsupported("table-property")),
             }
@@ -252,8 +281,7 @@ impl<'a> Reader<'a> {
                     }
                     let mut absolute = None;
                     let mut share = None;
-                    for (key, value) in group(
-                        self.sheet,
+                    for (key, value) in self.table_group(
                         Family::TableColumn,
                         child.attribute((NS_TABLE, "style-name")),
                         "table-column-properties",
@@ -321,7 +349,7 @@ impl<'a> Reader<'a> {
         let enclosing_area = self.area;
         let mut doc_rows = Vec::with_capacity(rows.len());
         let row_count = rows.len();
-        for (index, (row, header)) in rows.into_iter().enumerate() {
+        for (row, header) in rows {
             if header && doc_rows.iter().any(|r: &DocTableRow| !r.is_header) {
                 return Err(unsupported("table-header-rows"));
             }
@@ -333,8 +361,7 @@ impl<'a> Reader<'a> {
             }
             let mut height = None;
             let mut cant_split = row_keep_default;
-            for (key, value) in group(
-                self.sheet,
+            for (key, value) in self.table_group(
                 Family::TableRow,
                 row.attribute((NS_TABLE, "style-name")),
                 "table-row-properties",
@@ -374,12 +401,7 @@ impl<'a> Reader<'a> {
                 if column >= col_widths.len() {
                     return Err(unsupported("table-shape"));
                 }
-                let first_cell = index == 0 && column == 0;
-                cells.push(self.table_cell(
-                    cell,
-                    col_widths[column],
-                    break_before && first_cell,
-                )?);
+                cells.push(self.table_cell(cell, col_widths[column])?);
             }
             if cells.len() != col_widths.len() {
                 return Err(unsupported("table-shape"));
@@ -390,6 +412,8 @@ impl<'a> Reader<'a> {
                 row_height_rule: height.map_or("auto", |h| h.1).into(),
                 is_header: header,
                 cant_split,
+                // LibreOffice splits a kept-together row taller than a page.
+                over_page_continues: cant_split,
                 table_row_layout: TableRowLayoutAcquisitionWire {
                     height: height.map(|(value, rule)| TableRowHeightAcquisitionWire {
                         value: Some(twips(value)),
@@ -402,6 +426,29 @@ impl<'a> Reader<'a> {
             });
         }
         self.area = enclosing_area;
+        // Collapsed borders on a shared edge: the wider one is drawn in
+        // LibreOffice and in the DOCX layout alike; two of equal width that
+        // differ in colour resolve by rules that were not compared.
+        let conflict = |a: &Option<BorderSpec>, b: &Option<BorderSpec>| match (a, b) {
+            (Some(a), Some(b)) => a.width == b.width && a.color != b.color,
+            _ => false,
+        };
+        for (index, row) in doc_rows.iter().enumerate() {
+            self.charge_work(row.cells.len())?;
+            let across = row
+                .cells
+                .windows(2)
+                .any(|pair| conflict(&pair[0].borders.right, &pair[1].borders.left));
+            let down = doc_rows.get(index + 1).is_some_and(|next| {
+                row.cells
+                    .iter()
+                    .zip(&next.cells)
+                    .any(|(cell, below)| conflict(&cell.borders.bottom, &below.borders.top))
+            });
+            if across || down {
+                return Err(unsupported("table-border-conflict"));
+            }
+        }
         // LibreOffice counts a row's explicit height (fixed or minimum) from
         // the top of the border above it (measured). The DOCX layout does so
         // for an exact row (WORD_COLLAPSED_BORDER_ROW_TRACK_FOOTPRINT) but adds
@@ -466,6 +513,9 @@ impl<'a> Reader<'a> {
             tbl_ind: (jc == "left").then_some(margin_left),
             layout: Some("fixed".into()),
             width_pt: Some(table_width),
+            // A table that already starts a page breaks no further, as a
+            // paragraph's break does not (measured).
+            page_break_before: break_before,
             table_layout: TableLayoutAcquisitionWire {
                 ordinary_flow: true,
                 outer_edge_indent: true,
@@ -501,7 +551,6 @@ impl<'a> Reader<'a> {
         &mut self,
         node: roxmltree::Node<'_, '_>,
         width: f64,
-        break_before: bool,
     ) -> Result<DocTableCell, String> {
         for attribute in node.attributes() {
             match (attribute.namespace(), attribute.name()) {
@@ -518,8 +567,7 @@ impl<'a> Reader<'a> {
         let mut v_align = "top";
         // Shorthands first: a side set beside them wins (§20.183, §20.217,
         // after XSL's precedence of specific over shorthand properties).
-        let mut entries: Vec<_> = group(
-            self.sheet,
+        let mut entries: Vec<_> = self.table_group(
             Family::TableCell,
             node.attribute((NS_TABLE, "style-name")),
             "table-cell-properties",
@@ -585,13 +633,26 @@ impl<'a> Reader<'a> {
             }
         }
         let blocks = std::mem::replace(&mut self.blocks, saved);
-        let mut content = finish_cell(blocks)?;
+        let mut content = finish_cell(blocks, self.layout_flags)?;
         if content.is_empty() {
             return Err(unsupported("table-cell-empty"));
         }
-        if break_before {
-            if let Some(CellElement::Paragraph(first)) = content.first_mut() {
-                first.page_break_before = true;
+        if let Some(fill) = &background {
+            // §20.395 automatic colour over the cell's background, as over a
+            // paragraph's (cell paragraphs have none of their own).
+            let resolved = libreoffice_automatic_color(fill)?;
+            for element in &mut content {
+                let CellElement::Paragraph(paragraph) = element else {
+                    continue;
+                };
+                for run in &mut paragraph.runs {
+                    if let DocRun::Text(text) = run {
+                        if text.color.is_none() && text.background.is_none() {
+                            text.color = Some(resolved.to_string());
+                            text.color_auto = false;
+                        }
+                    }
+                }
             }
         }
         let margin_wire = TableMarginAcquisitionWire {
@@ -630,9 +691,9 @@ impl<'a> Reader<'a> {
 }
 
 /// A cell's paragraphs with LibreOffice's spacing inside a cell (measured):
-/// the first keeps its space before, consecutive ones add the earlier
-/// bottom and later top margins, and the last keeps its space after.
-fn finish_cell(blocks: Vec<Block>) -> Result<Vec<CellElement>, String> {
+/// the first keeps its space before, consecutive ones are separated as body
+/// paragraphs are (`LayoutFlags::gap`), and the last keeps its space after.
+fn finish_cell(blocks: Vec<Block>, flags: LayoutFlags) -> Result<Vec<CellElement>, String> {
     let mut out = Vec::with_capacity(blocks.len());
     let mut previous: Option<Collected> = None;
     let count = blocks.len();
@@ -643,6 +704,11 @@ fn finish_cell(blocks: Vec<Block>) -> Result<Vec<CellElement>, String> {
         let mut collected = *collected;
         if collected.page_break_after || collected.paragraph.page_break_before {
             return Err(unsupported("table-cell-break"));
+        }
+        // With TableRowKeep a cell paragraph kept with the next keeps its
+        // row with the next one; unmeasured.
+        if collected.paragraph.keep_next {
+            return Err(unsupported("table-cell-keep"));
         }
         let mut paragraph = std::mem::take(&mut collected.paragraph);
         paragraph.space_before = match &previous {
@@ -655,7 +721,7 @@ fn finish_cell(blocks: Vec<Block>) -> Result<Vec<CellElement>, String> {
                 if same && prev.contextual {
                     0.0
                 } else {
-                    prev.bottom + collected.top
+                    flags.gap(prev.bottom, collected.top)
                 }
             }
         };

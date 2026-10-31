@@ -1318,6 +1318,30 @@ describe('retained table pagination', () => {
     expect(result.nextCursor).toMatchObject({ rowIndex: 0, rowFragmentIndex: 1 });
   });
 
+  it('splits a producer over-page cantSplit row where it starts', () => {
+    const overPage = { ...row(0, 120, {
+      cantSplit: true,
+      paragraph: paragraph('producer-over-page', [40, 40, 40]),
+    }), overPageContinues: true as const };
+    const source = acquisition([overPage]);
+
+    const result = take(source, 60);
+
+    expect(result.requiresFreshPage).toBe(false);
+    expect(result.fragment?.unpaintedOverflowPt ?? 0).toBe(0);
+    expect(result.fragment?.rows[0]?.cells[0]?.contentRanges).toEqual([
+      { kind: 'paragraph', blockIndex: 0, lineStart: 0, lineEnd: 1 },
+    ]);
+    expect(result.nextCursor).toMatchObject({ rowIndex: 0, rowFragmentIndex: 1 });
+
+    // A row that fits a fresh page is still kept together.
+    const fitting = acquisition([{ ...row(0, 80, {
+      cantSplit: true,
+      paragraph: paragraph('producer-fitting', [40, 40]),
+    }), overPageContinues: true as const }]);
+    expect(take(fitting, 60).requiresFreshPage).toBe(true);
+  });
+
   it('clips an over-page cantSplit row to the fresh Word page band without continuation', () => {
     const source = acquisition([row(0, 120, {
       cantSplit: true,

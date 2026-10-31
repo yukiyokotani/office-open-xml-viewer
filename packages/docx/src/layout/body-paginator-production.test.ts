@@ -327,6 +327,50 @@ describe('canonical body producer', () => {
       ?.flowBounds.yPt).toBe(10);
   });
 
+  it('starts a page before a table with pageBreakBefore unless it begins an empty page', () => {
+    const services = Object.freeze({
+      text: { fingerprint: 'text' }, images: { fingerprint: 'images' }, math: { fingerprint: 'math' },
+    }) as LayoutServices;
+    attachBodyLayoutKernel(services, {
+      openBodyLayoutSession: () => ({
+        hasPaginationFields: false,
+        measureParagraph: ({ input }) => ({
+          layout: paragraph(`p${input.source.path[0]}`, input.source, 10),
+          blockExtentPt: 10,
+          fragmentation: { kind: 'indivisible' },
+        }),
+        measureTable: ({ input }) => ({
+          layout: table(`t${input.source.path[0]}`, input.source, 20),
+          blockExtentPt: 20,
+        }),
+        measureStoryExtent: () => 0,
+        measureFootnoteReserve: () => 0,
+        measureFollowingBlock: () => ({ fullExtentPt: 10, leadContentExtentPt: 10 }),
+        measureLineNumberGlyph: () => ({ widthPt: 0, ascentPt: 0, descentPt: 0 }),
+        resetPageAcquisition: () => undefined,
+        moveAcquisitionCursor: () => undefined,
+        flowRegistrySnapshot: emptyFlowRegistrySnapshot,
+        commitFlowRegistryDelta: () => undefined,
+      }),
+    });
+    const input = {
+      source: { story: 'body', storyInstance: 'body', path: [] },
+      initialSection: bodyOwner(),
+      sequence: [
+        { kind: 'body-block', block: { kind: 'table', source: source(0), pageBreakBefore: true } },
+        { kind: 'body-block', block: {
+          kind: 'paragraph', source: source(1), pageBreakBefore: false,
+          keepLines: false, keepNext: false, widowControl: true,
+          spaceBeforePt: 0, spaceAfterPt: 0, contextualSpacing: false, styleId: null,
+        } },
+        { kind: 'body-block', block: { kind: 'table', source: source(2), pageBreakBefore: true } },
+      ],
+    } as unknown as BodyLayoutInput;
+    const layout = paginateBody(input, services, { currentDateMs: 0 });
+    expect(layout.pages.map((page) => page.layers.body.map((node) => node.source.path[0])))
+      .toEqual([[0, 1], [2]]);
+  });
+
   it('rejects an over-page table beyond the document page budget before allocating blank pages', () => {
     const services = Object.freeze({
       text: { fingerprint: 'text' }, images: { fingerprint: 'images' }, math: { fingerprint: 'math' },

@@ -157,6 +157,9 @@ export interface BodyTableSourceInput {
   readonly rowCount?: number;
   /** §17.4.57 page/margin-positioned table whose exclusion can affect earlier text. */
   readonly pageOwnedFloatingTable?: boolean;
+  /** The table starts a new page unless it begins an empty one (producers
+   * other than DOCX; see `applyAuthoredBreak('pageBreakBefore')`). */
+  readonly pageBreakBefore?: true;
 }
 
 export interface BodyAdjacentTableGroupInput {

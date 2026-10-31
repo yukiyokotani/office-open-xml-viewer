@@ -1453,6 +1453,10 @@ export interface TableRowFormatInput {
   readonly height: TableRowHeightInput | null;
   /** Effective CT_OnOff values after table-style and direct row resolution. */
   readonly cantSplit: boolean;
+  /** A cantSplit row taller than a page splits from where it starts, as a
+   * row without cantSplit does, instead of moving to a fresh page and being
+   * clipped there (LibreOffice; DOCX never sets it). */
+  readonly overPageContinues?: true;
   readonly repeatedHeader: boolean;
   readonly cellSpacingPt: number;
   readonly justification: string | null;
@@ -1539,6 +1543,8 @@ export interface TableRowLayoutInput {
   readonly source: SourceRef;
   readonly logicalRowIndex: number;
   readonly cantSplit: boolean;
+  /** See {@link TableRowFormatInput.overPageContinues}. */
+  readonly overPageContinues?: true;
   readonly heightPt: number | null;
   readonly heightRule: 'auto' | 'atLeast' | 'exact';
   /** Effective §17.4.43/.44/.45 dxa spacing for this row. */

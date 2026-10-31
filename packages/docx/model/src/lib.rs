@@ -3643,6 +3643,14 @@ pub struct DocTable {
     /// the table is not floating (no `tblp_pr`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub overlap: Option<String>,
+    /// The table starts on a new page unless it already begins an empty one,
+    /// like a paragraph's `pageBreakBefore`. WordprocessingML has no table
+    /// page break, so DOCX never sets it; other producers' tables do.
+    #[serde(
+        rename = "__pageBreakBefore",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub page_break_before: bool,
     /// Parser/layout acquisition facts which must retain authored presence and
     /// lexical OOXML values. Kept off the stable TypeScript `DocTable` surface;
     /// `parser-model.ts` snapshots this serde-only wire before layout.
@@ -3774,6 +3782,15 @@ pub struct DocTableRow {
     /// ECMA-376 §17.4.6 w:cantSplit. When true, this row must not be split
     /// across page boundaries.
     pub cant_split: bool,
+    /// A `cant_split` row taller than a whole page splits from where it
+    /// starts, as a row without `cant_split` does, instead of moving to a
+    /// fresh page where Word clips it. DOCX never sets it; producers whose
+    /// rows split that way (LibreOffice) do.
+    #[serde(
+        rename = "__overPageContinues",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub over_page_continues: bool,
     #[serde(rename = "__tableRowLayout")]
     pub table_row_layout: TableRowLayoutAcquisitionWire,
 }

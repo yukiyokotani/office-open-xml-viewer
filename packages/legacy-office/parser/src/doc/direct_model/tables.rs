@@ -391,6 +391,7 @@ fn project_table(
             .into(),
             is_header: planned.is_header,
             cant_split: planned.source.cant_split,
+            over_page_continues: false,
             table_row_layout: TableRowLayoutAcquisitionWire {
                 height: (height != 0).then(|| TableRowHeightAcquisitionWire {
                     value: Some(height.abs().to_string()),
@@ -453,6 +454,7 @@ fn project_table(
         bidi_visual: Some(first_bidi),
         tblp_pr,
         overlap,
+        page_break_before: false,
         table_layout: TableLayoutAcquisitionWire {
             effective_style_id: None,
             cell_frame,

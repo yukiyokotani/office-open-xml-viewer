@@ -89,7 +89,11 @@ Currently admitted:
   left/centre/right alignment and a left margin (also past the text area),
   cell padding, single solid borders (collapsed as LibreOffice draws them),
   cell backgrounds, vertical alignment, fixed and minimum row heights,
-  rows kept together, repeated header rows and a page break before. Merged
+  rows kept together (a kept row taller than a page splits where it starts,
+  as LibreOffice splits it), repeated header rows, a page break before and
+  automatic text colour over cell backgrounds. Tables need LibreOffice's
+  cell spacing and row keep settings set explicitly, as LibreOffice writes
+  them. Merged
   or repeated cells, nested tables, lists and headings in cells, double or
   dashed borders and vertical cell text reject for now;
 - lists in label alignment mode, numbered as LibreOffice numbers them
@@ -134,7 +138,11 @@ LibreOffice's layout settings (`settings.xml`) that Word-derived documents
 carry are admitted where they were measured to change nothing the reader
 admits; the others must keep LibreOffice's new-document values, except
 `BalanceSpacesAndIdeographicSpaces`, which is applied as LibreOffice applies
-it: a space at the start or end of a text portion (portions end at
+it, and `AddParaTableSpacing`, under which two paragraphs, or a paragraph
+and a table, are separated by the sum of the bottom and top margins
+(otherwise by the larger of them). Under
+`BalanceSpacesAndIdeographicSpaces`, a space at the start or end of a text
+portion (portions end at
 formatting changes, bookmarks, reference marks, soft hyphens, no-break
 spaces and hyphens, zero-width spaces, word joiners and line breaks), or
 next to another space, advances half its Asian font size. Where the reader

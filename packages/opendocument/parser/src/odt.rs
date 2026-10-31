@@ -550,7 +550,40 @@ struct LayoutFlags {
     /// count from the paragraph indent when true, from the text area when
     /// false (measured); `None` leaves them unknown.
     tabs_relative: Option<bool>,
+    /// AddParaTableSpacing false: the space between two paragraphs, or a
+    /// paragraph and a table, is the larger of the bottom and top margins,
+    /// not their sum (measured, in the body and in table cells, whatever the
+    /// line height; absent, LibreOffice sums).
+    para_space_max: bool,
+    /// AddParaSpacingToTableCells, AddParaLineSpacingToTableCells and
+    /// TableRowKeep all set true, the conditions the table measurements hold
+    /// under. LibreOffice reads a missing AddParaSpacingToTableCells as false
+    /// (measured) and TableRowKeep as false, so each must be explicit.
+    table_settings: bool,
 }
+
+impl LayoutFlags {
+    /// The space between a block with bottom margin `bottom` and the next
+    /// with top margin `top` (see `para_space_max`).
+    fn gap(self, bottom: f64, top: f64) -> f64 {
+        if self.para_space_max {
+            bottom.max(top)
+        } else {
+            bottom + top
+        }
+    }
+}
+
+/// Configuration items that place paragraphs and tables (see `LayoutFlags`).
+/// AddParaTableSpacingAtStart false drops the top margin of a page's first
+/// block (measured); missing, it is true.
+const SPACING_SETTINGS: [&str; 5] = [
+    "AddParaTableSpacing",
+    "AddParaTableSpacingAtStart",
+    "AddParaSpacingToTableCells",
+    "AddParaLineSpacingToTableCells",
+    "TableRowKeep",
+];
 
 fn check_settings(text: &str, version: Option<&str>) -> Result<LayoutFlags, String> {
     let document = xml::parse(text)?;
@@ -574,6 +607,7 @@ fn check_settings(text: &str, version: Option<&str>) -> Result<LayoutFlags, Stri
         return Err(unsupported("compatibility-setting"));
     }
     let mut seen = HashSet::new();
+    let mut table_items = 0;
     for item in set
         .children()
         .filter(|n| xml::is(*n, xml::NS_CONFIG, "config-item"))
@@ -599,6 +633,16 @@ fn check_settings(text: &str, version: Option<&str>) -> Result<LayoutFlags, Stri
             if !matches {
                 return Err(unsupported("compatibility-setting"));
             }
+        } else if SPACING_SETTINGS.contains(&name) {
+            let value = boolean()?;
+            match name {
+                "AddParaTableSpacing" => trailing.para_space_max = !value,
+                "AddParaTableSpacingAtStart" if !value => {
+                    return Err(unsupported("compatibility-setting"));
+                }
+                "AddParaTableSpacingAtStart" => {}
+                _ => table_items += usize::from(value),
+            }
         } else if INERT_SETTINGS.contains(&name)
             || JUSTIFICATION_SETTINGS.contains(&name)
             || SPACE_SETTINGS.contains(&name)
@@ -616,6 +660,7 @@ fn check_settings(text: &str, version: Option<&str>) -> Result<LayoutFlags, Stri
             }
         }
     }
+    trailing.table_settings = table_items == 3;
     Ok(trailing)
 }
 
@@ -2058,7 +2103,18 @@ impl<'a> Reader<'a> {
         for block in self.blocks {
             let mut collected = match block {
                 Block::Paragraph(collected) => *collected,
-                Block::Table(table) => {
+                Block::Table(mut table) => {
+                    // A break after the previous paragraph starts the table
+                    // on a new page, as a break before it does. Its top
+                    // margin at the top of that page was not measured, and a
+                    // table directly after another one is laid out with it.
+                    table.table.page_break_before |= break_pending;
+                    break_pending = false;
+                    if table.table.page_break_before
+                        && (table.top != 0.0 || after_table.is_some())
+                    {
+                        return Err(unsupported("table-break"));
+                    }
                     // The previous paragraph's bottom margin and the table's
                     // top margin both separate them (measured); a table
                     // first in the body or after another table is not.
@@ -2066,16 +2122,13 @@ impl<'a> Reader<'a> {
                         (Some(BodyElement::Paragraph(paragraph)), Some(prev))
                             if after_table.is_none() =>
                         {
-                            paragraph.space_after = prev.bottom + table.top;
+                            paragraph.space_after = self.layout_flags.gap(prev.bottom, table.top);
                         }
                         (None, None) if table.top == 0.0 => {}
                         // Adjacent tables stack without a gap (measured).
                         (Some(BodyElement::Table(_)), None)
                             if after_table == Some(0.0) && table.top == 0.0 => {}
                         _ => return Err(unsupported("table-placement")),
-                    }
-                    if break_pending {
-                        return Err(unsupported("table-break"));
                     }
                     out.push(BodyElement::Table(Box::new(table.table)));
                     after_table = Some(table.bottom);
@@ -2087,7 +2140,9 @@ impl<'a> Reader<'a> {
             let mut paragraph = std::mem::take(&mut collected.paragraph);
             paragraph.page_break_before |= break_pending;
             paragraph.space_before = match (after_table.take(), &previous) {
-                (Some(bottom), _) if !paragraph.page_break_before => bottom + collected.top,
+                (Some(bottom), _) if !paragraph.page_break_before => {
+                    self.layout_flags.gap(bottom, collected.top)
+                }
                 (Some(_), _) => collected.top,
                 // Measured: after a hard page break (break-before, break-after
                 // or a page style named on the paragraph) LibreOffice applies
@@ -2107,7 +2162,7 @@ impl<'a> Reader<'a> {
                     if same && prev.contextual {
                         0.0
                     } else {
-                        prev.bottom + collected.top
+                        self.layout_flags.gap(prev.bottom, collected.top)
                     }
                 }
             };
@@ -5435,12 +5490,121 @@ mod tests {
 
     const TABLE: &str = r#"<table:table table:name="T" table:style-name="T"><table:table-column table:style-name="T.A"/><table:table-column table:style-name="T.B"/><table:table-header-rows><table:table-row><table:table-cell table:style-name="T.A1" office:value-type="string"><text:p>h1</text:p></table:table-cell><table:table-cell table:style-name="T.B1"><text:p>h2</text:p></table:table-cell></table:table-row></table:table-header-rows><table:table-row table:style-name="T.1"><table:table-cell table:style-name="T.A1"><text:p text:style-name="Sp">a</text:p><text:p text:style-name="Sp">b</text:p></table:table-cell><table:table-cell table:style-name="T.B1"><text:p>c</text:p></table:table-cell></table:table-row></table:table>"#;
 
+    fn table_settings(spacing: &str) -> String {
+        [
+            ("AddParaTableSpacing", spacing),
+            ("AddParaTableSpacingAtStart", "true"),
+            ("AddParaSpacingToTableCells", "true"),
+            ("AddParaLineSpacingToTableCells", "true"),
+            ("TableRowKeep", "true"),
+        ]
+        .iter()
+        .map(|(name, value)| {
+            format!(r#"<config:config-item config:name="{name}" config:type="boolean">{value}</config:config-item>"#)
+        })
+        .collect()
+    }
+
     fn read_table(automatic: &str, body: &str) -> Result<Document, String> {
         read_fixture(Fixture {
             automatic,
             body,
+            settings: &table_settings("true"),
             ..Fixture::default()
         })
+    }
+
+    #[test]
+    fn separates_blocks_by_the_larger_margin_without_add_para_table_spacing() {
+        let read = |spacing: &str, body: &str| {
+            read_fixture(Fixture {
+                automatic: TABLE_STYLES,
+                body,
+                settings: &table_settings(spacing),
+                ..Fixture::default()
+            })
+            .unwrap()
+        };
+        let document = read("false", &table_body(TABLE));
+        let [BodyElement::Paragraph(before), BodyElement::Table(table), BodyElement::Paragraph(after)] =
+            document.body.as_slice()
+        else {
+            panic!("a paragraph, a table and a paragraph")
+        };
+        assert_eq!(before.space_after, 8.0);
+        assert_eq!(after.space_before, 6.0);
+        let docx_model::CellElement::Paragraph(second) = &table.rows[1].cells[0].content[1] else {
+            panic!()
+        };
+        assert_eq!(second.space_before, 8.0);
+        let paragraphs = r#"<text:p text:style-name="Sp">a</text:p><text:p text:style-name="Sp">b</text:p>"#;
+        for (spacing, gap) in [("false", 8.0), ("true", 14.0)] {
+            let BodyElement::Paragraph(second) = &read(spacing, paragraphs).body[1] else {
+                panic!()
+            };
+            assert_eq!(second.space_before, gap, "{spacing}");
+        }
+    }
+
+    #[test]
+    fn resolves_automatic_colour_over_cell_backgrounds() {
+        for (fill, expected) in [("#ffff00", "000000"), ("#000080", "ffffff")] {
+            let document =
+                read_table(&TABLE_STYLES.replace("#ffff00", fill), &table_body(TABLE)).unwrap();
+            let BodyElement::Table(table) = &document.body[1] else {
+                panic!()
+            };
+            let colours = |cell: &docx_model::DocTableCell| -> Vec<(Option<String>, bool)> {
+                cell.content
+                    .iter()
+                    .flat_map(|element| match element {
+                        docx_model::CellElement::Paragraph(p) => p.runs.iter(),
+                        _ => panic!(),
+                    })
+                    .filter_map(|run| match run {
+                        DocRun::Text(text) => Some((text.color.clone(), text.color_auto)),
+                        _ => None,
+                    })
+                    .collect()
+            };
+            // The filled cell resolves; the unfilled one stays automatic.
+            assert!(colours(&table.rows[1].cells[0])
+                .iter()
+                .all(|c| *c == (Some(expected.into()), false)));
+            assert!(colours(&table.rows[1].cells[1]).iter().all(|c| c.0.is_none()), "{:?}", colours(&table.rows[1].cells[1]));
+        }
+    }
+
+    #[test]
+    fn requires_the_measured_table_settings() {
+        let body = table_body(TABLE);
+        let read = |settings: &str| {
+            read_fixture(Fixture {
+                automatic: TABLE_STYLES,
+                body: &body,
+                settings,
+                ..Fixture::default()
+            })
+        };
+        assert_eq!(read("").unwrap_err(), unsupported("table-setting"));
+        for item in ["AddParaSpacingToTableCells", "AddParaLineSpacingToTableCells", "TableRowKeep"] {
+            let all = table_settings("true");
+            let missing = all.replace(
+                &format!(r#"<config:config-item config:name="{item}" config:type="boolean">true</config:config-item>"#),
+                "",
+            );
+            assert_eq!(read(&missing).unwrap_err(), unsupported("table-setting"), "{item}");
+            let off = all.replace(
+                &format!(r#""{item}" config:type="boolean">true"#),
+                &format!(r#""{item}" config:type="boolean">false"#),
+            );
+            assert_eq!(read(&off).unwrap_err(), unsupported("table-setting"), "{item}");
+        }
+        let at_start = table_settings("true").replace(
+            r#""AddParaTableSpacingAtStart" config:type="boolean">true"#,
+            r#""AddParaTableSpacingAtStart" config:type="boolean">false"#,
+        );
+        assert_eq!(read(&at_start).unwrap_err(), unsupported("compatibility-setting"));
     }
 
     #[test]
@@ -5493,6 +5657,7 @@ mod tests {
                 r#"style:width="10cm""#,
                 r#"style:width="10cm" style:rel-width="100%" fo:break-before="page""#,
             )
+            .replace(r#"fo:margin-top="5pt""#, r#"fo:margin-top="0pt""#)
             .replace(
                 r#"style:column-width="4cm""#,
                 r#"style:rel-column-width="1000*""#,
@@ -5510,10 +5675,11 @@ mod tests {
         let total: f64 = table.col_widths.iter().sum();
         assert!((total - (width - 0.0)).abs() < 1e-6, "{total} {width}");
         assert!((table.col_widths[1] / table.col_widths[0] - 3.0).abs() < 1e-9);
+        assert!(table.page_break_before);
         let docx_model::CellElement::Paragraph(first) = &table.rows[0].cells[0].content[0] else {
             panic!()
         };
-        assert!(first.page_break_before);
+        assert!(!first.page_break_before);
     }
 
     #[test]
@@ -5587,6 +5753,47 @@ mod tests {
                 TABLE_STYLES.replace(r#"fo:margin-left="-0.191cm""#, r#"fo:margin-left="-3cm""#),
                 table_body(TABLE),
                 "table-geometry",
+            ),
+            (
+                TABLE_STYLES.replace(
+                    r#"fo:margin-bottom="8pt""#,
+                    r#"fo:margin-bottom="8pt" fo:keep-with-next="always""#,
+                ),
+                table_body(TABLE),
+                "table-cell-keep",
+            ),
+            (
+                TABLE_STYLES.replace(
+                    r#"style:width="10cm""#,
+                    r#"style:width="10cm" table:border-model="separating""#,
+                ),
+                table_body(TABLE),
+                "table-property",
+            ),
+            (
+                TABLE_STYLES.replace(
+                    r#"style:name="T" style:family="table""#,
+                    r#"style:name="T" style:family="table" style:master-page-name="Standard""#,
+                ),
+                table_body(TABLE),
+                "table-style-attribute",
+            ),
+            (
+                TABLE_STYLES.replace(
+                    r#"fo:border-left="none""#,
+                    r#"fo:border-left="0.5pt solid #ff0000""#,
+                ),
+                table_body(TABLE),
+                "table-border-conflict",
+            ),
+            // A page break before a table with a top margin.
+            (
+                TABLE_STYLES.replace(
+                    r#"style:width="10cm""#,
+                    r#"style:width="10cm" fo:break-before="page""#,
+                ),
+                table_body(TABLE),
+                "table-break",
             ),
             // A table first in the body with a top margin, or after another
             // table with margins between them.

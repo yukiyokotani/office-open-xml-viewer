@@ -16114,6 +16114,7 @@ fn parse_table_with_diagnostics(
         bidi_visual,
         tblp_pr,
         overlap,
+        page_break_before: false,
         table_layout,
     }
 }
@@ -16221,6 +16222,7 @@ fn parse_table_row(
         row_height_rule,
         is_header,
         cant_split,
+        over_page_continues: false,
         table_row_layout,
     }
 }

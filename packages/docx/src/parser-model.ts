@@ -901,6 +901,8 @@ export function tableFormatInput(table: TableLayoutSource): TableFormatInput {
     return {
       height: rowWire?.height ? privateTableRowHeight(rowWire.height) : publicTableRowHeight(row),
       cantSplit: row.cantSplit === true,
+      ...((row as { __overPageContinues?: boolean }).__overPageContinues === true
+        ? { overPageContinues: true as const } : {}),
       repeatedHeader: row.isHeader === true,
       cellSpacingPt: wordTableCellSpacingPt(
         rowWire?.cellSpacing,
@@ -1078,6 +1080,9 @@ function acquiredBodyTable(source: SourceRef, table: TableLayoutSource) {
     source,
     ...(positioning?.vertAnchor === 'page' || positioning?.vertAnchor === 'margin'
       ? { pageOwnedFloatingTable: true }
+      : {}),
+    ...((table as { __pageBreakBefore?: boolean }).__pageBreakBefore === true
+      ? { pageBreakBefore: true as const }
       : {}),
   });
 }
