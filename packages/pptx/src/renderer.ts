@@ -8188,6 +8188,10 @@ type InternalSlideRenderOptions = SlideRenderOptions & {
   embeddedFontAuthoredFamilies?: ReadonlyMap<string, string>;
   embeddedFontTuples?: ReadonlySet<string>;
   svgDecoder?: SvgBlobDecoder;
+  /** The slide comes from this package's parser (presentation and worker
+   *  paths), whose colour chain is resolved even when it carries no slide
+   *  theme (an unreadable theme part). */
+  parsedTextChain?: boolean;
 };
 
 /**
@@ -8484,11 +8488,12 @@ async function renderSlideLeased(
   // default, literal black, not the theme dk1 (issue #1989;
   // `HARD_DEFAULT_TEXT_COLOR` in the parser records the controls); the parser
   // resolves every inherited colour, including the default-template tx1 of a
-  // master without txStyles. A model without a slide theme has no parsed
-  // chain, so it keeps the caller's `defaultTextColor`. The theme colour above
-  // also colours the synthetic SmartArt fallback shape, which has no
-  // PowerPoint counterpart.
-  const hardDefaultTextColor = slide.theme ? '#000000' : themeDefaultColor;
+  // master without txStyles. A caller's own model passed to `renderSlide`
+  // without a slide theme has no parsed chain, so it keeps the caller's
+  // `defaultTextColor`. The theme colour above also colours the synthetic
+  // SmartArt fallback shape, which has no PowerPoint counterpart.
+  const hardDefaultTextColor = slide.theme || opts.parsedTextChain
+    ? '#000000' : themeDefaultColor;
 
   const pictureBulletImages = new Map<string, SvgImageSource | null>();
   const shapeFillImages = new Map<string, PreparedShapeFill | null>();

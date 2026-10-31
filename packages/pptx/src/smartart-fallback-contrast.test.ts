@@ -4,7 +4,7 @@ import {
   isSmartArtFallbackShape,
   smartArtFallbackTextColor,
 } from './smartart-fallback-contrast';
-import { renderSlide, type PptxTextRunInfo } from './renderer';
+import { renderSlide, renderSlideWithEmbeddedFonts, type PptxTextRunInfo } from './renderer';
 import type { Fill } from '@silurus/ooxml-core';
 import type { Paragraph, ShapeElement, Slide, TextBody } from './types';
 
@@ -380,6 +380,16 @@ describe('renderSlide SmartArt fallback contrast (issue #805)', () => {
     } as Slide;
     const run = (await renderAndCollect(slide)).find((c) => c.text.includes('Plain box'));
     expect(run!.fillStyle).toBe('#000000');
+    // The presentation and worker paths render parsed slides, whose chain is
+    // resolved even without a slide theme (an unreadable theme part).
+    const { ctx, fillTexts } = recordingCtx();
+    await renderSlideWithEmbeddedFonts(
+      stubCanvas(ctx),
+      slideWith(DARK_BG, [fallbackShape('Plain box', { name: 'Rectangle 5', id: '4' })]),
+      9_144_000, 6_858_000,
+      { width: 960, dpr: 1, defaultTextColor: '383838', parsedTextChain: true },
+    );
+    expect(fillTexts.find((c) => c.text.includes('Plain box'))!.fillStyle).toBe('#000000');
   });
 
   it('leaves explicit run colours alone on the fallback shape', async () => {
