@@ -139,9 +139,11 @@ fn read_with(package: &OdfPackage, rules: CompatRules) -> Result<Document, Strin
         }
     }
     check_document_wide_configuration(styles_root)?;
-    if package.contains("settings.xml") {
-        check_settings(&package.read_text("settings.xml")?, version)?;
-    }
+    let trailing_spaces = if package.contains("settings.xml") {
+        check_settings(&package.read_text("settings.xml")?, version)?
+    } else {
+        TrailingSpaces::default()
+    };
     if package.contains("meta.xml") {
         let text = package.read_text("meta.xml")?;
         check_part_root(&xml::parse(&text)?, "document-meta", version)?;
@@ -173,6 +175,7 @@ fn read_with(package: &OdfPackage, rules: CompatRules) -> Result<Document, Strin
         area: 0,
         next_area: 0,
         break_layout_work: 0,
+        trailing_spaces,
         page_master: page.name.as_str(),
         paragraphs: Vec::new(),
         retained_text_bytes: 0,
@@ -481,9 +484,21 @@ fn check_part_root(
     Ok(())
 }
 
-fn check_settings(text: &str, version: Option<&str>) -> Result<(), String> {
+/// The settings.xml items that decide how LibreOffice paints decorations over
+/// the spaces that end a paragraph or precede a line break (absent items take
+/// LibreOffice's defaults, false).
+#[derive(Clone, Copy, Debug, Default)]
+struct TrailingSpaces {
+    /// MsWordCompTrailingBlanks.
+    blanks: bool,
+    /// MsWordUlTrailSpace.
+    underline: bool,
+}
+
+fn check_settings(text: &str, version: Option<&str>) -> Result<TrailingSpaces, String> {
     let document = xml::parse(text)?;
     check_part_root(&document, "document-settings", version)?;
+    let mut trailing = TrailingSpaces::default();
     for item in document
         .descendants()
         .filter(|n| xml::is(*n, xml::NS_CONFIG, "config-item"))
@@ -492,20 +507,54 @@ fn check_settings(text: &str, version: Option<&str>) -> Result<(), String> {
             continue;
         };
         let value = item.text().unwrap_or("").trim();
-        let boolean = || match value {
-            "true" => Ok(true),
-            "false" => Ok(false),
+        // §19.30 config:type; a boolean item must declare it.
+        let boolean = || match (item.attribute((xml::NS_CONFIG, "type")), value) {
+            (Some("boolean"), "true") => Ok(true),
+            (Some("boolean"), "false") => Ok(false),
             _ => Err(unsupported("compatibility-setting")),
         };
         if let Some((_, expected)) = LAYOUT_SETTINGS.iter().find(|(key, _)| *key == name) {
-            if value != *expected {
+            let matches = match *expected {
+                "true" | "false" => boolean()? == (*expected == "true"),
+                _ => value == *expected,
+            };
+            if !matches {
                 return Err(unsupported("compatibility-setting"));
             }
         } else if INERT_SETTINGS.contains(&name) {
-            boolean()?;
+            let set = boolean()?;
+            match name {
+                "MsWordCompTrailingBlanks" => trailing.blanks = set,
+                "MsWordUlTrailSpace" => trailing.underline = set,
+                _ => {}
+            }
         }
     }
-    Ok(())
+    Ok(trailing)
+}
+
+/// Decorations over the spaces that end a paragraph or precede a line break
+/// (measured, LibreOffice PDF against the DOCX layout). The DOCX layout paints
+/// background and strike-through over them but not underline. LibreOffice
+/// paints all three by default; with MsWordCompTrailingBlanks it paints none,
+/// except underline and strike-through over one space with MsWordUlTrailSpace
+/// as well. Spaces where the two differ reject.
+fn trailing_space_decoration(
+    space: &RunProperties,
+    settings: TrailingSpaces,
+) -> Result<(), String> {
+    let agrees = if settings.blanks {
+        space.background.is_none()
+            && space.strike.is_none()
+            && (space.underline.is_none() || !settings.underline)
+    } else {
+        space.underline.is_none()
+    };
+    if agrees {
+        Ok(())
+    } else {
+        Err(unsupported("trailing-space-decoration"))
+    }
 }
 
 /// Document-wide configuration in `office:styles` that changes rendering.
@@ -806,6 +855,7 @@ struct Reader<'a> {
     area: u32,
     next_area: u32,
     break_layout_work: usize,
+    trailing_spaces: TrailingSpaces,
     page_master: &'a str,
     paragraphs: Vec<Collected>,
     retained_text_bytes: usize,
@@ -1215,8 +1265,12 @@ impl<'a> Reader<'a> {
         // space may end a wrapped line. A space must be in the face and
         // raise/lower of the nearest visible character (preceding first) and
         // no larger; a smaller space never sizes the line in either.
+        // The gate is per line: a manual break starts a new comparison.
         let mut last_glyph: Option<(u32, ScriptClass)> = None;
         let mut pending_spaces: Vec<(u32, ScriptClass)> = Vec::new();
+        // Spaces since the last visible character, which end the paragraph
+        // or precede a break if nothing visible follows.
+        let mut trailing: Vec<(u32, ScriptClass)> = Vec::new();
         for (index, &token) in tokens.iter().enumerate() {
             let (c, context) = match token {
                 Token::LineBreak(context) => {
@@ -1233,9 +1287,13 @@ impl<'a> Reader<'a> {
                     // in the DOCX layout, unlike LibreOffice's full line
                     // (measured), so each line a break ends or starts needs a
                     // visible character.
-                    if !line_has_glyph {
+                    if !line_has_glyph || !pending_spaces.is_empty() {
                         return Err(unsupported("line-break-empty-line"));
                     }
+                    for space in trailing.drain(..) {
+                        trailing_space_decoration(&cache[&space], self.trailing_spaces)?;
+                    }
+                    last_glyph = None;
                     line_has_glyph = false;
                     any_break = true;
                     match last_text {
@@ -1312,7 +1370,9 @@ impl<'a> Reader<'a> {
                     Some(glyph) => space_fits_line(&cache[&key], &cache[&glyph])?,
                     None => pending_spaces.push(key),
                 }
+                trailing.push(key);
             } else if !c.is_whitespace() {
+                trailing.clear();
                 for space in pending_spaces.drain(..) {
                     space_fits_line(&cache[&space], &cache[&key])?;
                 }
@@ -1343,6 +1403,9 @@ impl<'a> Reader<'a> {
         }
         if !pending_spaces.is_empty() {
             return Err(unsupported("space-formatting"));
+        }
+        for space in trailing {
+            trailing_space_decoration(&cache[&space], self.trailing_spaces)?;
         }
         Ok(())
     }
@@ -2261,6 +2324,8 @@ mod tests {
         automatic: &'a str,
         master: &'a str,
         body: &'a str,
+        /// `config:config-item` elements for settings.xml (none: no part).
+        settings: &'a str,
     }
 
     impl Default for Fixture<'_> {
@@ -2273,6 +2338,7 @@ mod tests {
                 automatic: "",
                 master: "",
                 body: "<text:p>x</text:p>",
+                settings: "",
             }
         }
     }
@@ -2334,11 +2400,18 @@ mod tests {
             r#"<office:document-content {NS} office:version="1.3">{FACES}<office:automatic-styles>{}</office:automatic-styles><office:body><office:text>{}</office:text></office:body></office:document-content>"#,
             fixture.automatic, fixture.body
         );
-        let files = [
+        let settings = format!(
+            r#"<office:document-settings {NS} xmlns:config="urn:oasis:names:tc:opendocument:xmlns:config:1.0" office:version="1.3"><office:settings><config:config-item-set config:name="ooo:configuration-settings">{}</config:config-item-set></office:settings></office:document-settings>"#,
+            fixture.settings
+        );
+        let mut files = vec![
             ("META-INF/manifest.xml", manifest(ODT, "")),
             ("styles.xml", styles),
             ("content.xml", content),
         ];
+        if !fixture.settings.is_empty() {
+            files.push(("settings.xml", settings));
+        }
         let files: Vec<(&str, &str)> = files
             .iter()
             .map(|(name, body)| (*name, body.as_str()))
@@ -3371,6 +3444,22 @@ mod tests {
                 unsupported("compatibility-setting")
             );
         }
+        // Boolean items must declare config:type="boolean" (§19.30).
+        for item in [
+            r#"<config:config-item config:name="MsWordCompTrailingBlanks" config:type="string">true</config:config-item>"#,
+            r#"<config:config-item config:name="MsWordCompTrailingBlanks">true</config:config-item>"#,
+            r#"<config:config-item config:name="ParaSpaceMax" config:type="string">false</config:config-item>"#,
+        ] {
+            let text = settings(&[]).replace(
+                "</config:config-item-set>",
+                &format!("{item}</config:config-item-set>"),
+            );
+            assert_eq!(
+                check_settings(&text, Some("1.3")).unwrap_err(),
+                unsupported("compatibility-setting"),
+                "{item}"
+            );
+        }
         assert!(check_settings(
             &settings(&[("BalanceSpacesAndIdeographicSpaces", "false")]),
             Some("1.3")
@@ -3390,7 +3479,7 @@ mod tests {
 
     #[test]
     fn spaces_share_the_line_metrics_of_their_text() {
-        let styles = r#"<style:style style:name="Big" style:family="text"><style:text-properties fo:font-size="30pt"/></style:style><style:style style:name="Bold" style:family="text"><style:text-properties fo:font-weight="bold"/></style:style>"#;
+        let styles = r#"<style:style style:name="Big" style:family="text"><style:text-properties fo:font-size="30pt"/></style:style><style:style style:name="Mid" style:family="text"><style:text-properties fo:font-size="20pt"/></style:style><style:style style:name="Bold" style:family="text"><style:text-properties fo:font-weight="bold"/></style:style>"#;
         let read = |body: &str| {
             read_fixture(Fixture {
                 styles,
@@ -3406,6 +3495,8 @@ mod tests {
             r#"<text:p>a b<text:span text:style-name="Big"><text:s text:c="3"/></text:span></text:p>"#,
             r#"<text:p><text:span text:style-name="Big"><text:s/></text:span>a</text:p>"#,
             r#"<text:p><text:s text:c="2"/></text:p>"#,
+            // The comparison text must be on the space's own line.
+            r#"<text:p><text:span text:style-name="Big">A<text:line-break/></text:span><text:span text:style-name="Mid"><text:s/></text:span>b</text:p>"#,
         ] {
             assert_eq!(
                 read(body).unwrap_err(),
@@ -3413,6 +3504,74 @@ mod tests {
                 "{body}"
             );
         }
+    }
+
+    #[test]
+    fn trailing_space_decorations_follow_the_trailing_blank_settings() {
+        let styles = r##"<style:style style:name="H" style:family="text"><style:text-properties fo:background-color="#ffff00"/></style:style><style:style style:name="U" style:family="text"><style:text-properties style:text-underline-style="solid" style:text-underline-width="auto" style:text-underline-color="font-color"/></style:style><style:style style:name="S" style:family="text"><style:text-properties style:text-line-through-style="solid"/></style:style>"##;
+        let item = |name: &str, value: bool| {
+            format!(
+                r#"<config:config-item config:name="{name}" config:type="boolean">{value}</config:config-item>"#
+            )
+        };
+        // (MsWordCompTrailingBlanks, MsWordUlTrailSpace) → admitted styles of
+        // a space ending the paragraph or preceding a break.
+        for (blanks, underline, admitted) in [
+            (false, false, ["H", "S"].as_slice()),
+            (false, true, ["H", "S"].as_slice()),
+            (true, false, ["U"].as_slice()),
+            (true, true, [].as_slice()),
+        ] {
+            let settings =
+                item("MsWordCompTrailingBlanks", blanks) + &item("MsWordUlTrailSpace", underline);
+            for style in ["H", "U", "S"] {
+                for body in [
+                    format!(
+                        r#"<text:p><text:span text:style-name="{style}">a<text:s/></text:span></text:p>"#
+                    ),
+                    format!(
+                        r#"<text:p><text:span text:style-name="{style}">a<text:s text:c="2"/></text:span><text:line-break/>b</text:p>"#
+                    ),
+                ] {
+                    let result = read_fixture(Fixture {
+                        styles,
+                        body: &body,
+                        settings: &settings,
+                        ..Fixture::default()
+                    });
+                    if admitted.contains(&style) {
+                        assert!(result.is_ok(), "{blanks} {underline} {body} {result:?}");
+                    } else {
+                        assert_eq!(
+                            result.unwrap_err(),
+                            unsupported("trailing-space-decoration"),
+                            "{blanks} {underline} {body}"
+                        );
+                    }
+                }
+                // Spaces between visible text are not trailing.
+                let body = format!(
+                    r#"<text:p><text:span text:style-name="{style}">a b</text:span><text:line-break/>c</text:p>"#
+                );
+                assert!(read_fixture(Fixture {
+                    styles,
+                    body: &body,
+                    settings: &settings,
+                    ..Fixture::default()
+                })
+                .is_ok());
+            }
+        }
+        // Without settings.xml LibreOffice's defaults (false) apply.
+        assert_eq!(
+            read_fixture(Fixture {
+                styles,
+                body: r#"<text:p><text:span text:style-name="U">a<text:s/></text:span></text:p>"#,
+                ..Fixture::default()
+            })
+            .unwrap_err(),
+            unsupported("trailing-space-decoration")
+        );
     }
 
     #[test]
