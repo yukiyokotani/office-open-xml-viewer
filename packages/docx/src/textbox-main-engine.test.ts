@@ -167,7 +167,8 @@ describe('text-box text on the main line engine (B2/B5)', () => {
     // Under justification it must reach the inner-right edge (INNER_X + W). The
     // last token "BBBB" is 40px wide.
     const last = line1[line1.length - 1];
-    const lastRight = last.x + [...last.text].length * 10; // letterSpacing 0 on this LTR path
+    // The line-end space hangs past the edge (WORD_LINE_END_SPACE_HANGS).
+    const lastRight = last.x + [...last.text.trimEnd()].length * 10; // letterSpacing 0 on this LTR path
     expect(lastRight).toBeCloseTo(INNER_X + W, 0);
     // The last line ("CCCC") is NOT stretched — it starts at the inner-left.
     expect(ls[1][0].x).toBeCloseTo(INNER_X, 5);

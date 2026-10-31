@@ -446,6 +446,23 @@ export const WORD_COLLAPSIBLE_LINE_EDGE_VISIBLE_FIT = defineCompatibilityRule({
   description: 'Library fitting uses the visible prefix, excluding a collapsible U+0020 edge separator. ST_Jc (§17.18.44) defines inter-word justification, not an edge-space admission charge. Word mode-14 mixed-format Latin output retains a naturally fitting prefix when only its edge separator exceeds the band; mode-15 compression controls use the same visible prefix. Canonical joining must not turn formatting-only source seams into different admission decisions. This replaces an unsupported separator-charge policy, without adding compression to older modes. RTL separately retains the complete advance because its right-edge origin can otherwise move visible LTR cells outside the band. Other glyphs and authored fixed-width/atomic units retain their existing fit contracts. Evidence: Word compatibility-mode 14 output in PR #1703, and the #1896 Windows sweep (Arial 10pt, a bold run before the line-end space): a line keeps its last word at 110.25pt and not at 110.0pt, the 110.06pt visible prefix, in mode 14 and in a mode-15 left-aligned line.',
 });
 
+export const WORD_LINE_END_SPACE_HANGS = defineCompatibilityRule({
+  id: 'word-line-end-space-hangs',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'justify-1934',
+    application: 'Microsoft Word',
+    version: '16.0.20527.20088',
+    platform: 'Windows',
+  },
+  description: 'The U+0020 spaces that end a soft-wrapped left-to-right line hang past it: they take no part in justification or in centre/right alignment. Windows Word controls in compatibility modes unset, 11, 12, 14 and 15 (Times New Roman 12pt and Arial 11pt, plain, bold and larger runs) end every justified line flush at the right margin (both, distribute, lowKashida and highKashida within 0.6pt; mediumKashida and thaiDistribute lines also end flush but Word breaks those Latin controls at other words, a separate line-breaking difference), and centre/right-aligned wrapped lines sit half/one line-end space further right than when the space counts. Lines that end the paragraph or a manual break, right-to-left lines, and other white space characters are outside the observation and keep their previous geometry. Mode-15 justified lines already fit their visible width (WORD_JUSTIFIED_INTERWORD_COMPRESSION).',
+});
+
+/** Scope of {@link WORD_LINE_END_SPACE_HANGS}. */
+export function wordLineEndSpaceHangs(bidi: boolean, endsLogicalLine: boolean): boolean {
+  return !bidi && !endsLogicalLine;
+}
+
 /** Visible-prefix projection of {@link WORD_COLLAPSIBLE_LINE_EDGE_VISIBLE_FIT}. */
 export function wordVisiblePrefixFitWidthPx(
   widthPx: number,
