@@ -73,10 +73,11 @@ Currently admitted:
   keep-with-next / keep-together, widow/orphan control of two lines, and
   paragraph spacing including contextual spacing;
 - character fonts, sizes, bold, italic, single/double underline and
-  strike-through, colours and background colour (spaces in the font of the
-  adjacent text on their line and no larger; decorated spaces that end a
-  paragraph or precede a line break only under LibreOffice's default
-  trailing-space setting);
+  strike-through, colours and background colour. Where LibreOffice's
+  settings make a space not size its line, the space must be in the face of
+  the adjacent text on its line and no larger, and decorated spaces that end
+  a paragraph or precede a line break are admitted only under LibreOffice's
+  default trailing-space setting;
 - text in the Latin script class of ODF Part 3 Table 22, including the
   spaces, punctuation, symbols and emoji the table leaves unassigned.
 

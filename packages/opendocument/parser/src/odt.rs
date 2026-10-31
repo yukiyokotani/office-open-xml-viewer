@@ -139,10 +139,10 @@ fn read_with(package: &OdfPackage, rules: CompatRules) -> Result<Document, Strin
         }
     }
     check_document_wide_configuration(styles_root)?;
-    let trailing_spaces = if package.contains("settings.xml") {
+    let space_settings = if package.contains("settings.xml") {
         check_settings(&package.read_text("settings.xml")?, version)?
     } else {
-        TrailingSpaces::default()
+        SpaceSettings::default()
     };
     if package.contains("meta.xml") {
         let text = package.read_text("meta.xml")?;
@@ -175,7 +175,7 @@ fn read_with(package: &OdfPackage, rules: CompatRules) -> Result<Document, Strin
         area: 0,
         next_area: 0,
         break_layout_work: 0,
-        trailing_spaces,
+        space_settings,
         page_master: page.name.as_str(),
         paragraphs: Vec::new(),
         retained_text_bytes: 0,
@@ -484,19 +484,21 @@ fn check_part_root(
     Ok(())
 }
 
-/// The settings.xml item that decides how LibreOffice paints decorations over
-/// the spaces that end a paragraph or precede a line break (absent: false,
-/// LibreOffice's default).
+/// The settings.xml items that decide whether spaces size LibreOffice's
+/// lines and carry decorations (absent: false, LibreOffice's default).
 #[derive(Clone, Copy, Debug, Default)]
-struct TrailingSpaces {
-    /// MsWordCompTrailingBlanks.
+struct SpaceSettings {
+    /// IgnoreTabsAndBlanksForLineCalculation: no space sizes a line.
+    ignore: bool,
+    /// MsWordCompTrailingBlanks: spaces that end a paragraph or precede a
+    /// line break neither size the line nor carry decorations.
     blanks: bool,
 }
 
-fn check_settings(text: &str, version: Option<&str>) -> Result<TrailingSpaces, String> {
+fn check_settings(text: &str, version: Option<&str>) -> Result<SpaceSettings, String> {
     let document = xml::parse(text)?;
     check_part_root(&document, "document-settings", version)?;
-    let mut trailing = TrailingSpaces::default();
+    let mut trailing = SpaceSettings::default();
     // LibreOffice reads its layout items from the top-level
     // "ooo:configuration-settings" set only; other sets are ignored.
     let mut sets = document
@@ -542,8 +544,10 @@ fn check_settings(text: &str, version: Option<&str>) -> Result<TrailingSpaces, S
             }
         } else if INERT_SETTINGS.contains(&name) {
             let value = boolean()?;
-            if name == "MsWordCompTrailingBlanks" {
-                trailing.blanks = value;
+            match name {
+                "IgnoreTabsAndBlanksForLineCalculation" => trailing.ignore = value,
+                "MsWordCompTrailingBlanks" => trailing.blanks = value,
+                _ => {}
             }
         }
     }
@@ -556,17 +560,16 @@ fn check_settings(text: &str, version: Option<&str>) -> Result<TrailingSpaces, S
 /// MsWordCompTrailingBlanks LibreOffice paints none of them (underline and
 /// strike-through over one space with MsWordUlTrailSpace as well), so
 /// decorated trailing spaces reject.
-fn trailing_space_decoration(
-    space: &RunProperties,
-    settings: TrailingSpaces,
-) -> Result<(), String> {
-    let decorated =
-        space.background.is_some() || space.strike.is_some() || space.underline.is_some();
-    if !settings.blanks || !decorated {
-        Ok(())
-    } else {
+fn trailing_space_decoration(space: &RunProperties, settings: SpaceSettings) -> Result<(), String> {
+    if settings.blanks && decorated(space) {
         Err(unsupported("trailing-space-decoration"))
+    } else {
+        Ok(())
     }
+}
+
+fn decorated(space: &RunProperties) -> bool {
+    space.background.is_some() || space.strike.is_some() || space.underline.is_some()
 }
 
 /// Document-wide configuration in `office:styles` that changes rendering.
@@ -867,7 +870,7 @@ struct Reader<'a> {
     area: u32,
     next_area: u32,
     break_layout_work: usize,
-    trailing_spaces: TrailingSpaces,
+    space_settings: SpaceSettings,
     page_master: &'a str,
     paragraphs: Vec<Collected>,
     retained_text_bytes: usize,
@@ -1064,8 +1067,8 @@ impl<'a> Reader<'a> {
             // paragraphs reject until it is mapped.
             return Err(unsupported("justify"));
         }
-        let tokens = collapse(std::mem::take(&mut inline.tokens));
-        self.emit_runs(&tokens, &inline.contexts, &mut collected.paragraph)?;
+        let (tokens, removed) = collapse(std::mem::take(&mut inline.tokens));
+        self.emit_runs(&tokens, removed, &inline.contexts, &mut collected.paragraph)?;
         if collected.paragraph.line_spacing.is_some() {
             // Proportional spacing scales the natural line of uniform text
             // alike; with mixed faces or sizes LibreOffice does not multiply
@@ -1245,6 +1248,7 @@ impl<'a> Reader<'a> {
     fn emit_runs(
         &mut self,
         tokens: &[Token],
+        removed_space: Option<u32>,
         contexts: &[TextContext<'a>],
         paragraph: &mut DocParagraph,
     ) -> Result<(), String> {
@@ -1270,14 +1274,16 @@ impl<'a> Reader<'a> {
         let mut last_text: Option<(u32, ScriptClass)> = None;
         // Soft hyphens before any text, checked against the first text run.
         let mut pending_hyphens: Vec<(u32, ScriptClass)> = Vec::new();
-        // Spaces size a line differently in LibreOffice and the DOCX layout
-        // when they are larger than the text (measured: a larger space at a
-        // line end raises the line in LibreOffice by default, not in the DOCX
-        // layout; several settings.xml items change this further), and any
-        // space may end a wrapped line. A space must be in the face and
-        // raise/lower of the nearest visible character (preceding first) and
-        // no larger; a smaller space never sizes the line in either.
-        // The gate is per line: a manual break starts a new comparison.
+        // The DOCX layout sizes lines by every space, as LibreOffice does by
+        // default (measured mid-line, at a wrap, before a break and at the
+        // paragraph end). Where LibreOffice's settings make a space not size
+        // its line (every space with IgnoreTabsAndBlanksForLineCalculation,
+        // a trailing one with MsWordCompTrailingBlanks) the space must add
+        // nothing to the DOCX line either: it must be in the face (family,
+        // weight, posture) and raise/lower of the nearest visible character
+        // on its line, preceding first, and no larger. Any space may end a
+        // wrapped line, so the following character only stands in at a line
+        // start. A manual break starts a new comparison.
         let mut last_glyph: Option<(u32, ScriptClass)> = None;
         let mut pending_spaces: Vec<(u32, ScriptClass)> = Vec::new();
         // Spaces since the last visible character, which end the paragraph
@@ -1303,7 +1309,10 @@ impl<'a> Reader<'a> {
                         return Err(unsupported("line-break-empty-line"));
                     }
                     for space in trailing.drain(..) {
-                        trailing_space_decoration(&cache[&space], self.trailing_spaces)?;
+                        self.trailing_space(
+                            &cache[&space],
+                            last_glyph.map(|glyph| &cache[&glyph]),
+                        )?;
                     }
                     last_glyph = None;
                     line_has_glyph = false;
@@ -1378,9 +1387,11 @@ impl<'a> Reader<'a> {
                 same_line_metrics(&cache[&hyphen], &cache[&key], "soft-hyphen-formatting")?;
             }
             if c.is_whitespace() {
-                match last_glyph {
-                    Some(glyph) => space_fits_line(&cache[&key], &cache[&glyph])?,
-                    None => pending_spaces.push(key),
+                if self.space_settings.ignore {
+                    match last_glyph {
+                        Some(glyph) => space_fits_line(&cache[&key], &cache[&glyph])?,
+                        None => pending_spaces.push(key),
+                    }
                 }
                 trailing.push(key);
             } else {
@@ -1417,9 +1428,49 @@ impl<'a> Reader<'a> {
             return Err(unsupported("space-formatting"));
         }
         for space in trailing {
-            trailing_space_decoration(&cache[&space], self.trailing_spaces)?;
+            self.trailing_space(&cache[&space], last_glyph.map(|glyph| &cache[&glyph]))?;
+        }
+        // §6.1.2 step 5 removes a trailing collapsed space; LibreOffice keeps
+        // it (measured: it sizes the line and carries decorations unless
+        // its settings say otherwise), so it must be invisible there too.
+        if let Some(context) = removed_space {
+            let key = (context, ScriptClass::Latin);
+            if let std::collections::hash_map::Entry::Vacant(entry) = cache.entry(key) {
+                entry.insert(self.run_properties(contexts, context, key.1)?);
+            }
+            let space = &cache[&key];
+            let settings = self.space_settings;
+            if !settings.ignore && !settings.blanks {
+                match last_glyph {
+                    Some(glyph) => space_fits_line(space, &cache[&glyph])?,
+                    None => return Err(unsupported("space-formatting")),
+                }
+            }
+            if !settings.blanks && decorated(space) {
+                return Err(unsupported("trailing-space-decoration"));
+            }
         }
         Ok(())
+    }
+
+    /// A space that ends a paragraph or precedes a line break, after `glyph`
+    /// (the last visible character on its line). With
+    /// MsWordCompTrailingBlanks LibreOffice ignores it for the line height,
+    /// so the DOCX layout must too (see `emit_runs`); the IgnoreTabsAndBlanks
+    /// case was already checked as an ordinary space.
+    fn trailing_space(
+        &self,
+        space: &RunProperties,
+        glyph: Option<&RunProperties>,
+    ) -> Result<(), String> {
+        let settings = self.space_settings;
+        // A line of only white space gets synthetic metrics in the DOCX
+        // layout (see the line-break gate), whatever the settings.
+        let glyph = glyph.ok_or_else(|| unsupported("space-formatting"))?;
+        if settings.blanks && !settings.ignore {
+            space_fits_line(space, glyph)?;
+        }
+        trailing_space_decoration(space, settings)
     }
 
     fn uniform_class(
@@ -1637,9 +1688,14 @@ fn font_color(cascade: &Cascade<'_>, rules: CompatRules) -> Result<(bool, Option
     }
 }
 
-/// A space no taller than its text (see `emit_runs`).
+/// A space no taller than its text: the same face scaled no larger (see
+/// `emit_runs`).
 fn space_fits_line(space: &RunProperties, glyph: &RunProperties) -> Result<(), String> {
-    if space.family == glyph.family && space.position == glyph.position && space.size <= glyph.size
+    if space.family == glyph.family
+        && space.bold == glyph.bold
+        && space.italic == glyph.italic
+        && space.position == glyph.position
+        && space.size <= glyph.size
     {
         Ok(())
     } else {
@@ -1664,7 +1720,7 @@ fn same_line_metrics(
 /// and LF become spaces, leading and trailing spaces are removed and runs of
 /// spaces collapse to one. `text:s`, `text:tab` and `text:line-break` keep
 /// the characters they represent and are not collapsed.
-fn collapse(tokens: Vec<Token>) -> Vec<Token> {
+fn collapse(tokens: Vec<Token>) -> (Vec<Token>, Option<u32>) {
     let mut out: Vec<Token> = Vec::with_capacity(tokens.len());
     let mut pending: Option<Token> = None;
     let mut started = false;
@@ -1693,8 +1749,13 @@ fn collapse(tokens: Vec<Token>) -> Vec<Token> {
             }
         }
     }
-    // A trailing collapsed space is removed (step 5).
-    out
+    // A trailing collapsed space is removed (step 5); its context is
+    // returned for the LibreOffice comparison in `emit_runs`.
+    let removed = match pending {
+        Some(Token::Char(_, context)) => Some(context),
+        _ => None,
+    };
+    (out, removed)
 }
 
 /// Effective text properties of one script class.
@@ -3490,32 +3551,76 @@ mod tests {
     }
 
     #[test]
-    fn spaces_share_the_line_metrics_of_their_text() {
-        let styles = r#"<style:style style:name="Big" style:family="text"><style:text-properties fo:font-size="30pt"/></style:style><style:style style:name="Mid" style:family="text"><style:text-properties fo:font-size="20pt"/></style:style><style:style style:name="Bold" style:family="text"><style:text-properties fo:font-weight="bold"/></style:style>"#;
-        let read = |body: &str| {
+    fn spaces_size_lines_as_in_libreoffice() {
+        let styles = r#"<style:style style:name="Big" style:family="text"><style:text-properties fo:font-size="30pt"/></style:style><style:style style:name="Mid" style:family="text"><style:text-properties fo:font-size="20pt"/></style:style><style:style style:name="Small" style:family="text"><style:text-properties fo:font-size="10pt"/></style:style><style:style style:name="Bold" style:family="text"><style:text-properties fo:font-weight="bold"/></style:style><style:style style:name="BoldBig" style:family="text"><style:text-properties fo:font-weight="bold" fo:font-size="30pt"/></style:style>"#;
+        let item = |name: &str, value: bool| {
+            format!(
+                r#"<config:config-item config:name="{name}" config:type="boolean">{value}</config:config-item>"#
+            )
+        };
+        let read = |ignore: bool, blanks: bool, body: &str| {
+            let settings = item("IgnoreTabsAndBlanksForLineCalculation", ignore)
+                + &item("MsWordCompTrailingBlanks", blanks);
             read_fixture(Fixture {
                 styles,
                 body,
+                settings: &settings,
                 ..Fixture::default()
             })
         };
-        assert!(
-            read(r#"<text:p>a<text:span text:style-name="Bold"> </text:span>b</text:p>"#).is_ok()
-        );
-        for body in [
+        // A space that is larger than, or in another face than, the preceding
+        // text on its line, in each position.
+        let mid = [
             r#"<text:p>a<text:span text:style-name="Big"> </text:span>b</text:p>"#,
-            r#"<text:p>a b<text:span text:style-name="Big"><text:s text:c="3"/></text:span></text:p>"#,
-            r#"<text:p><text:span text:style-name="Big"><text:s/></text:span>a</text:p>"#,
-            r#"<text:p><text:s text:c="2"/></text:p>"#,
             // Every white space character, not only U+0020 and U+00A0.
             "<text:p>a<text:span text:style-name=\"Big\">\u{2003}</text:span>b</text:p>",
+            // Weight and posture are part of the face.
+            r#"<text:p><text:span text:style-name="BoldBig">A</text:span><text:span text:style-name="Mid"> </text:span>b</text:p>"#,
             // The comparison text must be on the space's own line.
             r#"<text:p><text:span text:style-name="Big">A<text:line-break/></text:span><text:span text:style-name="Mid"><text:s/></text:span>b</text:p>"#,
+            r#"<text:p><text:span text:style-name="Big"><text:s/></text:span>a</text:p>"#,
+        ];
+        let trailing = [
+            r#"<text:p>a b<text:span text:style-name="Big"><text:s text:c="3"/></text:span></text:p>"#,
+            r#"<text:p>a<text:span text:style-name="Bold"><text:s/></text:span></text:p>"#,
+        ];
+        // The spec-removed trailing space, which LibreOffice keeps.
+        let removed = [r#"<text:p>a b<text:span text:style-name="Big"> </text:span></text:p>"#];
+        let fitting = [
+            r#"<text:p>a<text:span text:style-name="Small"> </text:span>b<text:span text:style-name="Small"><text:s/></text:span></text:p>"#,
+            r#"<text:p><text:span text:style-name="Bold">a </text:span>b </text:p>"#,
+        ];
+        // (IgnoreTabsAndBlanks, TrailingBlanks) → which cases reject: where
+        // LibreOffice does not size a line by a space the DOCX layout counts.
+        for (ignore, blanks, mid_rejects, trailing_rejects, removed_rejects) in [
+            (false, false, false, false, true),
+            (false, true, false, true, false),
+            (true, false, true, true, false),
+            (true, true, true, true, false),
         ] {
+            for (bodies, rejects) in [
+                (mid.as_slice(), mid_rejects),
+                (trailing.as_slice(), trailing_rejects),
+                (removed.as_slice(), removed_rejects),
+                (fitting.as_slice(), false),
+            ] {
+                for body in bodies {
+                    let result = read(ignore, blanks, body);
+                    if rejects {
+                        assert_eq!(
+                            result.unwrap_err(),
+                            unsupported("space-formatting"),
+                            "{ignore} {blanks} {body}"
+                        );
+                    } else {
+                        assert!(result.is_ok(), "{ignore} {blanks} {body} {result:?}");
+                    }
+                }
+            }
+            // A line of only white space rejects whatever the settings.
             assert_eq!(
-                read(body).unwrap_err(),
-                unsupported("space-formatting"),
-                "{body}"
+                read(ignore, blanks, r#"<text:p><text:s text:c="2"/></text:p>"#).unwrap_err(),
+                unsupported("space-formatting")
             );
         }
     }
