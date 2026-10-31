@@ -50,6 +50,7 @@ impl Properties {
                 explicit: true,
             }),
             numbering: None,
+            no_hanging_indent_tab: false,
             tab_stops: self.tabs.direct(),
             runs: Vec::new(),
             run_revisions: Vec::new(),
