@@ -160,6 +160,10 @@ describe('WORD_LINE_END_SPACE_HANGS', () => {
     const [right] = lines(para([textRun(WORDS, decorated)], 'right'), { ulTrailSpace: true });
     expect(visibleEnd(right!)).toBeCloseTo(380, 6);
     expect(end(right!)).toBeCloseTo(380, 6);
+    // A space-only run wholly past the edge keeps no decoration at all.
+    const wavy = { underline: true, underlineStyle: 'wave' } as Partial<DocxTextRun>;
+    const [tail] = lines(para([textRun('aaaa '), textRun('\u3000', wavy)], 'right'), { ulTrailSpace: true });
+    expect(texts(tail!).at(-1)!.decorations ?? []).toEqual([]);
     // Centred final line: the space is decorated inside the band.
     const [centred] = lines(para([textRun('aaaa\u3000 ', decorated)], 'center'), { ulTrailSpace: true });
     expect(visibleStart(centred!)).toBeCloseTo(20 + (360 - 40) / 2, 6);
