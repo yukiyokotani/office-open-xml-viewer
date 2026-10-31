@@ -1109,6 +1109,16 @@ impl<'a> Reader<'a> {
         {
             return Err(unsupported("list-label-extent"));
         }
+        // A box taller than the label font's line extends the line below
+        // that font's ascent, and fonts split their line gap between ascent
+        // and descent differently in LibreOffice (all below) and the DOCX
+        // metrics (measured by the reviewer: Hiragino Sans), so the line
+        // and everything after it would move. A box no taller than the
+        // font's em stays within its line in both (the corpus's pictures
+        // are 8.9 pt boxes before 10-24 pt text).
+        if box_height > first.font_size {
+            return Err(unsupported("list-image-height"));
+        }
         // LibreOffice extends the label font's decoration over the tab gap.
         if first.underline
             || first.strikethrough

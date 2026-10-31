@@ -89,9 +89,10 @@ Currently admitted:
   headers), with decimal, letter and Roman labels or text bullets, labels
   aligned at their start, end or centre, the level's character style and
   bullet face, and a tab, space or nothing after the label. Pictures as
-  bullets are admitted when the package holds them as PNG, GIF or JPEG
-  files that decode completely, placed in the middle of their line and
-  followed by a tab or nothing. LibreOffice's other number formats, headings
+  bullets are admitted when the package holds them as PNG, GIF or baseline
+  JPEG files that decode completely, without colour profiles, rotation or
+  animation, placed in the middle of their line, no taller than the font
+  size of the paragraph's first character and followed by a tab or nothing. LibreOffice's other number formats, headings
   in lists, a second sublist within one item, empty labelled paragraphs,
   decorated labels, labels that could wrap and labelled paragraphs that are
   centred or right-aligned reject for now.

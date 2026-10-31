@@ -204,7 +204,7 @@ fn gif_structure(bytes: &[u8]) -> Result<(), String> {
 /// the file's end. A colour profile (APP2 ICC_PROFILE), an EXIF orientation
 /// other than 1, an Adobe colour transform other than YCbCr, other frame
 /// types and any other marker reject.
-fn jpeg_structure(bytes: &[u8]) -> Result<(), String> {
+fn jpeg_structure(bytes: &[u8], budget: &mut u64) -> Result<(), String> {
     let decode = || unsupported("image-decode");
     let structure = || unsupported("image-structure");
     let mut at = 2;
@@ -212,6 +212,7 @@ fn jpeg_structure(bytes: &[u8]) -> Result<(), String> {
     let mut scanned = false;
     let mut restart = 0u16;
     let mut tables: HuffmanTables<'_> = [[None; 2]; 2];
+    let mut quantisers: [Option<&[u8]>; 4] = [None; 4];
     loop {
         if bytes.get(at) != Some(&0xff) {
             return Err(decode());
@@ -259,7 +260,11 @@ fn jpeg_structure(bytes: &[u8]) -> Result<(), String> {
             0xdd if !scanned && segment.len() == 2 => {
                 restart = u16::from_be_bytes([segment[0], segment[1]]);
             }
-            0xdb if !scanned && quantisation_tables_valid(segment) => {}
+            0xdb if !scanned && quantisation_tables_valid(segment) => {
+                for table in segment.chunks(65) {
+                    quantisers[usize::from(table[0])] = Some(&table[1..]);
+                }
+            }
             0xc4 if !scanned && huffman_tables_valid(segment) => {
                 let mut rest = segment;
                 while let Some((&header, tail)) = rest.split_first() {
@@ -269,7 +274,14 @@ fn jpeg_structure(bytes: &[u8]) -> Result<(), String> {
                     rest = &tail[16 + total..];
                 }
             }
-            0xc0 if frame.is_none() && frame_header_valid(segment) => frame = Some(segment),
+            0xc0 if frame.is_none() && frame_header_valid(segment) => {
+                // Size and work are bounded before the scan is walked.
+                let height = u64::from(u16::from_be_bytes([segment[1], segment[2]]));
+                let width = u64::from(u16::from_be_bytes([segment[3], segment[4]]));
+                check_size(width, height)?;
+                charge(budget, width, height)?;
+                frame = Some(segment);
+            }
             // One scan holding every component: decoders fill a missing
             // scan or a cut one differently (measured by the reviewer).
             0xda if !scanned && frame.is_some() && scan_header_valid(segment) => {
@@ -280,6 +292,7 @@ fn jpeg_structure(bytes: &[u8]) -> Result<(), String> {
                     frame.expect("a frame"),
                     segment,
                     &tables,
+                    &quantisers,
                     restart,
                 )?;
                 continue;
@@ -288,6 +301,40 @@ fn jpeg_structure(bytes: &[u8]) -> Result<(), String> {
         }
         at += 2 + length;
     }
+}
+
+/// Natural (row-major) position of each zigzag index (T.81 Figure A.6).
+const ZIGZAG: [usize; 64] = [
+    0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27, 20,
+    13, 6, 7, 14, 21, 28, 35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58, 59,
+    52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
+];
+
+/// Whether the inverse DCT (T.81 A.3.3) of a block of dequantised
+/// coefficients in row-major order keeps every sample within 256 of
+/// mid-grey (a margin over rounding of the separable evaluation).
+fn samples_in_range(block: &[f64; 64]) -> bool {
+    let basis = |x: usize, u: usize| {
+        let c = if u == 0 {
+            std::f64::consts::FRAC_1_SQRT_2
+        } else {
+            1.0
+        };
+        c * (((2 * x + 1) * u) as f64 * std::f64::consts::PI / 16.0).cos() / 2.0
+    };
+    // Rows (over v), then columns (over u).
+    let mut rows = [0f64; 64];
+    for u in 0..8 {
+        for y in 0..8 {
+            rows[u * 8 + y] = (0..8).map(|v| basis(y, v) * block[u * 8 + v]).sum();
+        }
+    }
+    (0..8).all(|x| {
+        (0..8).all(|y| {
+            let sample: f64 = (0..8).map(|u| basis(x, u) * rows[u * 8 + y]).sum();
+            sample.abs() <= 256.0
+        })
+    })
 }
 
 /// Huffman code tables by class (DC, AC) and id: (counts, symbols).
@@ -322,11 +369,17 @@ impl Bits<'_> {
         Some((self.buffer >> self.count) & 1)
     }
 
-    fn bits(&mut self, count: u8) -> Option<()> {
-        for _ in 0..count {
-            self.bit()?;
+    /// A coefficient of `size` bits (F.2.2.1, EXTEND).
+    fn value(&mut self, size: u8) -> Option<i32> {
+        let mut value = 0i32;
+        for _ in 0..size {
+            value = value << 1 | self.bit()? as i32;
         }
-        Some(())
+        Some(if size > 0 && value < 1 << (size - 1) {
+            value - (1 << size) + 1
+        } else {
+            value
+        })
     }
 
     /// The next symbol of a canonical code (T.81 Annex C, F.2.2.3).
@@ -356,12 +409,21 @@ impl Bits<'_> {
 /// every MCU of every component decodes with the scan's tables, restart
 /// markers come in sequence after each restart interval, and the data ends
 /// with its padding right before a marker. Returns that marker's offset.
+///
+/// Each block's samples, the inverse DCT (A.3.3) of its dequantised
+/// coefficients, must stay within 256 of mid-grey before clamping:
+/// decoders saturate or wrap samples far outside the sample range
+/// differently (measured by the reviewer: a DC sum of 6141 at quantiser 255
+/// paints black in a browser and cyan in LibreOffice), while an encoder's
+/// own output overshoots [-128, 127] only by its quantisation error.
+#[allow(clippy::too_many_arguments)]
 fn entropy_coded_data(
     bytes: &[u8],
     start: usize,
     frame: &[u8],
     scan: &[u8],
     tables: &HuffmanTables<'_>,
+    quantisers: &[Option<&[u8]>; 4],
     restart: u16,
 ) -> Result<usize, String> {
     let decode = || unsupported("image-decode");
@@ -395,14 +457,17 @@ fn entropy_coded_data(
     };
     let coding: Vec<_> = selected
         .iter()
-        .map(|c| {
+        .zip(&components)
+        .map(|(c, component)| {
             Some((
                 tables[0][usize::from(c[1] >> 4)]?,
                 tables[1][usize::from(c[1] & 15)]?,
+                quantisers[usize::from(component[2])]?,
             ))
         })
         .collect::<Option<_>>()
         .ok_or_else(decode)?;
+    let mut predictors = vec![0i32; coding.len()];
     let mut bits = Bits {
         bytes,
         at: start,
@@ -418,11 +483,16 @@ fn entropy_coded_data(
             }
             bits.at += 2;
             next_restart = (next_restart + 1) % 8;
+            predictors.iter_mut().for_each(|p| *p = 0);
         }
-        for (&count, &(dc, ac)) in blocks.iter().zip(&coding) {
+        for ((&count, &(dc, ac, quantiser)), predictor) in
+            blocks.iter().zip(&coding).zip(predictors.iter_mut())
+        {
             for _ in 0..count {
                 let category = bits.symbol(dc).ok_or_else(decode)?;
-                bits.bits(category).ok_or_else(decode)?;
+                *predictor += bits.value(category).ok_or_else(decode)?;
+                let mut block = [0f64; 64];
+                block[0] = f64::from(*predictor) * f64::from(quantiser[0]);
                 let mut k = 1;
                 while k < 64 {
                     let rs = bits.symbol(ac).ok_or_else(decode)?;
@@ -434,12 +504,19 @@ fn entropy_coded_data(
                         k += 16;
                     } else {
                         k += usize::from(run);
-                        bits.bits(size).ok_or_else(decode)?;
+                        if k >= 64 {
+                            return Err(decode());
+                        }
+                        let value = bits.value(size).ok_or_else(decode)?;
+                        block[ZIGZAG[k]] = f64::from(value) * f64::from(quantiser[k]);
                         k += 1;
                     }
                     if k > 64 {
                         return Err(decode());
                     }
+                }
+                if !samples_in_range(&block) {
+                    return Err(unsupported("image-range"));
                 }
             }
         }
@@ -502,18 +579,28 @@ fn huffman_tables_valid(mut segment: &[u8]) -> bool {
     true
 }
 
-/// SOF0 (T.81 B.2.2): 8-bit samples, one or three components with sampling
-/// factors 1-4 and quantisation tables 0-3.
+/// SOF0 (T.81 B.2.2): 8-bit samples and quantisation tables 0-3; one
+/// component, or three whose first is sampled 1-2 by 1-2 and the others
+/// 1 by 1 (the 4:4:4, 4:2:2, 4:4:0 and 4:2:0 structures). Browsers refuse
+/// other sampling combinations that LibreOffice paints (measured by the
+/// reviewer).
 fn frame_header_valid(segment: &[u8]) -> bool {
     let count = segment.get(5).copied().unwrap_or(0);
     segment.first() == Some(&8)
         && matches!(count, 1 | 3)
         && segment.len() == 6 + 3 * usize::from(count)
-        && segment[6..].chunks(3).all(|component| {
-            matches!(component[1] >> 4, 1..=4)
-                && matches!(component[1] & 15, 1..=4)
-                && component[2] <= 3
-        })
+        && segment[6..]
+            .chunks(3)
+            .enumerate()
+            .all(|(index, component)| {
+                let (h, v) = (component[1] >> 4, component[1] & 15);
+                let sampling = match (count, index) {
+                    (1, _) => matches!((h, v), (1..=4, 1..=4)),
+                    (_, 0) => matches!((h, v), (1..=2, 1..=2)),
+                    _ => (h, v) == (1, 1),
+                };
+                sampling && component[2] <= 3
+            })
 }
 
 /// SOS (T.81 B.2.3) for a baseline frame: one to four components with DC
@@ -639,16 +726,14 @@ fn gif(bytes: &[u8], budget: &mut u64) -> Result<(), String> {
 
 fn jpeg(bytes: &[u8], budget: &mut u64) -> Result<(), String> {
     let decode = || unsupported("image-decode");
-    jpeg_structure(bytes)?;
+    jpeg_structure(bytes, budget)?;
     let options = zune_core::options::DecoderOptions::default()
         .set_max_width(MAX_SIDE as usize)
         .set_max_height(MAX_SIDE as usize)
         .set_strict_mode(true);
     let mut decoder = zune_jpeg::JpegDecoder::new_with_options(Cursor::new(bytes), options);
     decoder.decode_headers().map_err(|_| decode())?;
-    let (width, height) = decoder.dimensions().ok_or_else(decode)?;
-    check_size(width as u64, height as u64)?;
-    charge(budget, width as u64, height as u64)?;
+    // The structure walk checked and charged the frame's size.
     decoder.decode().map_err(|_| decode())?;
     Ok(())
 }
@@ -934,6 +1019,53 @@ pub(crate) mod tests {
             dec(&progressive).unwrap_err(),
             unsupported("image-structure")
         );
+    }
+
+    /// An 8×8 grey JPEG of one block: quantisers `q`, a DC table whose one
+    /// code (0) is category 11, an AC table whose one code (0) is EOB, and
+    /// the scan `data`.
+    fn jpeg_block(q: u8, data: &[u8]) -> Vec<u8> {
+        let mut out = vec![0xff, 0xd8, 0xff, 0xdb, 0, 67, 0];
+        out.extend([q; 64]);
+        out.extend([0xff, 0xc0, 0, 11, 8, 0, 8, 0, 8, 1, 1, 0x11, 0]);
+        for (class, symbol) in [(0x00, 11), (0x10, 0)] {
+            out.extend([0xff, 0xc4, 0, 20, class, 1]);
+            out.extend([0; 15]);
+            out.push(symbol);
+        }
+        out.extend([0xff, 0xda, 0, 8, 1, 1, 0, 0, 63, 0]);
+        out.extend(data);
+        out.extend([0xff, 0xd9]);
+        out
+    }
+
+    #[test]
+    fn bounds_jpeg_samples_sampling_and_size_before_the_scan() {
+        // DC 1024 (code 0, 10000000000; EOB 0; padding 111).
+        let dc_1024 = [0x40, 0x07];
+        assert_eq!(dec(&jpeg_block(1, &dc_1024)).unwrap(), "image/jpeg");
+        // The same DC at quantiser 255 overflows the sample range.
+        assert_eq!(
+            dec(&jpeg_block(255, &dc_1024)).unwrap_err(),
+            unsupported("image-range")
+        );
+        // Sampling: 4:2:0 and 4:4:4 structures only.
+        let frame = |factors: [u8; 3]| {
+            let mut segment = vec![8, 0, 24, 0, 24, 3];
+            for (id, factor) in factors.iter().enumerate() {
+                segment.extend([id as u8 + 1, *factor, 0]);
+            }
+            segment
+        };
+        assert!(frame_header_valid(&frame([0x22, 0x11, 0x11])));
+        assert!(frame_header_valid(&frame([0x11, 0x11, 0x11])));
+        assert!(!frame_header_valid(&frame([0x11, 0x13, 0x14])));
+        assert!(!frame_header_valid(&frame([0x33, 0x11, 0x11])));
+        // The frame's size rejects before its scan is walked.
+        let mut huge = jpeg_block(1, &dc_1024);
+        let sof = huge.windows(2).position(|w| w == [0xff, 0xc0]).unwrap();
+        huge[sof + 5..sof + 9].copy_from_slice(&[0xff, 0xff, 0xff, 0xff]);
+        assert_eq!(dec(&huge).unwrap_err(), unsupported("image-size"));
     }
 
     #[test]

@@ -5330,6 +5330,8 @@ mod tests {
             // A box from M + I past the line end, or before the page edge.
             (level("Pictures/a.png", &placement(r#"fo:width="0.279cm""#, r#"fo:width="16cm""#), "", "listtab"), item.into(), with_png, unsupported("list-label-extent")),
             (level("Pictures/a.png", &format!(r#"{PICTURE_PLACEMENT} fo:text-align="end""#), "", "listtab").replace(r#"fo:width="0.279cm""#, r#"fo:width="4cm""#), item.into(), with_png, unsupported("list-label-extent")),
+            // A box taller than the first character's em.
+            (level("Pictures/a.png", &placement(r#"fo:height="0.279cm""#, r#"fo:height="0.5cm""#), "", "listtab"), item.into(), with_png, unsupported("list-image-height")),
             // A line taller than the text area, which LibreOffice clips.
             (level("Pictures/a.png", &placement(r#"fo:height="0.279cm""#, r#"fo:height="26cm""#), "", "listtab"), item.into(), with_png, unsupported("list-label-extent")),
             (level("Pictures/a.png", PICTURE_PLACEMENT, "", "listtab"), r#"<text:list text:style-name="L"><text:list-item><text:p/></text:list-item></text:list>"#.into(), with_png, unsupported("list-empty-label")),
