@@ -1080,9 +1080,13 @@ function withDecorationClippedAt(placement: TextPlacement, endPt: number): TextP
   return {
     ...placement,
     ...(placement.decorations ? {
-      decorations: placement.decorations.map((decoration) => decoration.to.xPt > endPt
-        ? trimTerminalUnderline(decoration, decoration.to.xPt - endPt)
-        : decoration),
+      // A decoration wholly past the edge is dropped: a zero-width wave
+      // path would still paint a vertical stroke.
+      decorations: placement.decorations
+        .filter((decoration) => decoration.from.xPt < endPt)
+        .map((decoration) => decoration.to.xPt > endPt
+          ? trimTerminalUnderline(decoration, decoration.to.xPt - endPt)
+          : decoration),
     } : {}),
     ...(placement.highlightFragments ? {
       highlightFragments: placement.highlightFragments.map((fragment) => ({ ...fragment, rect: clipped(fragment.rect) })),
