@@ -1439,8 +1439,9 @@ impl<'a> Reader<'a> {
     /// over enclosing automatic properties; that comparison is not
     /// reproduced. Instead: identical span chains are one portion; a
     /// different character style (by display name) or a clearly different
-    /// resolved value (formatting the reader renders, the western language,
-    /// or the Asian size) is a boundary (measured); anything else is unknown.
+    /// resolved value (formatting the reader renders, or the Asian size) is
+    /// a boundary (measured); anything else, such as a different language,
+    /// is unknown.
     fn seam(
         &self,
         cache: &mut SeamCache<'a>,
@@ -1467,22 +1468,10 @@ impl<'a> Reader<'a> {
                 )
             });
             self.charge_work(work)?;
-            let styles = self.search_order(contexts, context)?;
-            self.charge_cascade(&styles, TEXT)?;
-            let cascade = Cascade::new(styles, TEXT);
-            // §20.202 / §20.172: "none" is no language or country.
-            let language = ["language", "country"].map(|name| {
-                cascade
-                    .get(NS_FO, name)
-                    .map(str::to_ascii_lowercase)
-                    .filter(|value| value != "none")
-            });
             let properties = self.run_properties(contexts, context, ScriptClass::Latin)?;
             let asian = self.balanced_space_advance(contexts, context)? * 2.0;
             cache.chains.insert(context, chain);
-            cache
-                .resolved
-                .insert(context, (properties, language, asian));
+            cache.resolved.insert(context, (properties, asian));
         }
         let seam = if cache.chains[&a] == cache.chains[&b] {
             Seam::Same
@@ -1492,15 +1481,11 @@ impl<'a> Reader<'a> {
                 names.sort_unstable();
                 names
             };
-            let ((pa, la, aa), (pb, lb, ab)) = (&cache.resolved[&a], &cache.resolved[&b]);
-            // A country without a language imports as no locale (verified),
-            // so only two languages that differ with their countries are
-            // known to differ.
-            let languages_differ = la[0].is_some() && lb[0].is_some() && la != lb;
-            if names(&cache.chains[&a]) != names(&cache.chains[&b])
-                || languages_differ
-                || (aa - ab).abs() >= 0.1
-            {
+            let ((pa, aa), (pb, ab)) = (&cache.resolved[&a], &cache.resolved[&b]);
+            // The western language is left out: LibreOffice maps locale
+            // aliases (zh/cmn, a country without a language) together, so a
+            // language difference alone stays unknown.
+            if names(&cache.chains[&a]) != names(&cache.chains[&b]) || (aa - ab).abs() >= 0.1 {
                 Seam::Boundary
             } else {
                 // Sizes LibreOffice may round together stay unknown.
@@ -2139,9 +2124,8 @@ enum Seam {
 #[derive(Default)]
 struct SeamCache<'a> {
     chains: HashMap<u32, SpanChain<'a>>,
-    /// Resolved Latin formatting, western language and country, and Asian
-    /// font size.
-    resolved: HashMap<u32, (RunProperties, [Option<String>; 2], f64)>,
+    /// Resolved Latin formatting and Asian font size.
+    resolved: HashMap<u32, (RunProperties, f64)>,
     seams: HashMap<(u32, u32), Seam>,
 }
 
@@ -4365,8 +4349,6 @@ mod tests {
             (format!("{}{} cc", s("Red", "aa"), s("T1", " bb")), vec![six, six]),
             // A repeated nested character style is a portion of its own.
             (s("Red", &format!("aa{} cc", s("Red", " bb"))), vec![six, six]),
-            // Language is formatting too.
-            (s("En", &format!("aa{}bb", s("De", " "))), vec![six]),
             // Bookmarks and reference marks end portions; soft page breaks
             // do not. A kept collapsed space precedes the bookmark.
             ("aa<text:bookmark text:name=\"b\"/> bb".into(), vec![six]),
@@ -4415,6 +4397,8 @@ mod tests {
             // The same language spelled differently (a country of "none" is
             // no country): not a boundary in itself, and unknown otherwise.
             format!("{}{} cc", s("En", "aa"), s("EnNone", " bb")),
+            // A different language (LibreOffice maps some locales together).
+            s("En", &format!("aa{}bb", s("De", " "))),
             // A country without a language.
             format!("{}{} cc", s("Us", "aa"), s("Gb", " bb")),
             // A formatted space merged into a collapsed space.
