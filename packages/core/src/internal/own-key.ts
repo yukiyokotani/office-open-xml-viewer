@@ -24,3 +24,15 @@ export function ownValue<T>(
 export function hasOwnKey(table: object, key: string | null | undefined): boolean {
   return key != null && Object.hasOwn(table, key);
 }
+
+/**
+ * An empty record without a prototype, for maps whose keys are document- or
+ * caller-supplied. Assigning `__proto__` to a plain `{}` invokes the inherited
+ * setter (the entry is dropped, or the prototype replaced), while here every
+ * key, `__proto__` included, becomes an own entry. Structured clone and JSON
+ * produce an ordinary object on the receiving side, so readers there still go
+ * through {@link ownValue}.
+ */
+export function nullRecord<T>(): Record<string, T> {
+  return Object.create(null) as Record<string, T>;
+}

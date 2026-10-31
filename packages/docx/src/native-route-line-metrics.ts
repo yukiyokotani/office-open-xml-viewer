@@ -7,6 +7,7 @@ import {
   type NativeRouteNormalLine,
   unloadOfficeFontFallbacks,
 } from '@silurus/ooxml-core';
+import { nullRecord } from '@silurus/ooxml-core/internal/own-key';
 import { docxRenderedTextUsages } from './document-content.js';
 import { nativeRouteMetricKey, type NativeRouteLineMetric } from './layout/font-service.js';
 import type { TextLayoutService } from './layout/text.js';
@@ -125,7 +126,8 @@ export function admitDocxNativeRouteLines(
   const measured = lines.filter((line): line is NativeRouteNormalLine => line !== null
     && docxNativeRoutePrimaryAdmitted(line.primaryFamily));
   const verified = verifyNativeRouteNormalLines(measured, fontSet);
-  const metrics: Record<string, NativeRouteLineMetric> = {};
+  // Keys embed authored family lists; keep every key an own entry.
+  const metrics = nullRecord<NativeRouteLineMetric>();
   measured.forEach((line, index) => {
     if (!verified[index]) return;
     const ascent = line.ascentRatio + line.lineGapRatio;

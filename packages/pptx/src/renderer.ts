@@ -1446,7 +1446,11 @@ function selectOfficeFace(normalized: string, bold: boolean, italic: boolean, rc
   const embeddedTuple = `${authoredFamily.toLowerCase()}:${bold || inferredWeight === 700 ? 700 : 400}:${italic ? 'italic' : 'normal'}`;
   const officeRoute = rc.embeddedFontTuples?.has(embeddedTuple)
     ? undefined
-    : rc.officeFontRoutes?.[officeRouteKey(authoredFamily, officeFaceWeight(authoredFamily, bold, italic), italic)];
+    // Own entries only: route keys are authored face names, and the routes
+    // reach render workers through structured clone as ordinary objects.
+    : rc.officeFontRoutes
+      ? ownValue(rc.officeFontRoutes, officeRouteKey(authoredFamily, officeFaceWeight(authoredFamily, bold, italic), italic))
+      : undefined;
   return { authoredFamily, embedded: embeddedAuthored !== undefined, officeRoute };
 }
 

@@ -887,6 +887,9 @@ mod tests {
             .starts_with("word/document.xml:"));
         assert_eq!(terminal["document"]["majorFont"], "Diagnostic Major");
         assert_eq!(terminal["document"]["minorFont"], "Diagnostic Minor");
+        // The placeholder page has the ECMA-376 default page size, not 0×0.
+        assert_eq!(terminal["document"]["section"]["pageWidth"], 612.0);
+        assert_eq!(terminal["document"]["section"]["pageHeight"], 792.0);
         archive.acknowledge_document_chunk_inner(0, 9, 4).unwrap();
 
         let mut compatibility = cursor_archive(&data);

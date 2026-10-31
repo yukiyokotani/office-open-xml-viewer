@@ -196,8 +196,10 @@ export function createFontResolver(
     fallback: CjkLang | undefined,
   ): string | undefined => {
     const region = cjkLangFromLanguage(language) ?? fallback;
-    return (region ? regionalFamilyLists[region]?.[normalizeFamily(family)] : undefined)
-      ?? nativeFamilyLists[normalizeFamily(family)];
+    // Both maps are keyed by authored face names: read own entries only.
+    const regional = region ? regionalFamilyLists[region] : undefined;
+    return (regional ? ownValue(regional, normalizeFamily(family)) : undefined)
+      ?? ownValue(nativeFamilyLists, normalizeFamily(family));
   };
   const scriptScopedFamilies = Object.freeze(Object.fromEntries(
     Object.entries(options.scriptScopedFamilies ?? {})
@@ -216,7 +218,7 @@ export function createFontResolver(
     requestedFamily: string,
     script: FontSubstituteScript | undefined,
   ): string => {
-    const scope = scriptScopedFamilies[normalizeFamily(requestedFamily)];
+    const scope = ownValue(scriptScopedFamilies, normalizeFamily(requestedFamily));
     if (!scope || scope.script === script) return familyList;
     return familyList.split(',').map((entry) => entry.trim())
       .filter((entry) => !scope.substituteFamilies.includes(
@@ -346,7 +348,7 @@ export function createFontResolver(
   return Object.freeze({
     fingerprint,
     configuredSubstituteScript(requestedFamily: string | null | undefined): FontSubstituteScript | undefined {
-      return requestedFamily ? scriptScopedFamilies[normalizeFamily(requestedFamily)]?.script : undefined;
+      return requestedFamily ? ownValue(scriptScopedFamilies, normalizeFamily(requestedFamily))?.script : undefined;
     },
     exactLocalFaces(requestedFamily: string) {
       return (byFamily.get(normalizeFamily(requestedFamily)) ?? [])
@@ -359,7 +361,7 @@ export function createFontResolver(
     scopedSubstituteScript(requestedFamily: string | null | undefined, weight?: number, style?: FontStyle): FontSubstituteScript | undefined {
       const family = requestedFamily?.trim();
       if (!family) return undefined;
-      const script = scriptScopedFamilies[normalizeFamily(family)]?.script;
+      const script = ownValue(scriptScopedFamilies, normalizeFamily(family))?.script;
       if (!script) return undefined;
       // Same priority and tuple selection as resolveUncached: a configured
       // substitute is insufficient when an authored resource outranks it.

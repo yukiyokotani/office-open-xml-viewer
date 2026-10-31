@@ -118,6 +118,46 @@ describe('automatic value axes cover a drawn smoothed curve', () => {
     expect(labels).not.toContain('110%');
   });
 
+  it('authored percentStacked bounds keep their automatic unit past a curve overshoot', () => {
+    const overshoot = {
+      chartType: 'stackedLinePct',
+      series: [
+        series({ values: [1, 1, 0, 1, 1, 1, 1], smooth: true }),
+        series({ values: [0, 0, 1, 0, 0, 0, 0], smooth: true }),
+      ],
+      plotGroups: [{
+        kind: 'line', seriesStart: 0, seriesCount: 2, grouping: 'percentStacked',
+        categoryAxis: 'primary', valueAxis: 'primary', seriesAxis: 'none',
+      }],
+    } as Partial<ChartModel>;
+    const straight = {
+      ...overshoot,
+      series: overshoot.series!.map(item => ({ ...item, smooth: false })),
+    };
+    // Fixed 0..100%: the curve neither widens the bounds nor coarsens the
+    // unit, so the axis matches the same chart drawn without smoothing.
+    const fixed = { valMin: 0, valMax: 1 };
+    const labels = paintedLabels(chart({ ...overshoot, ...fixed }));
+    expect(labels).not.toContain('120%');
+    expect(labels).toEqual(paintedLabels(chart({ ...straight, ...fixed })));
+    // An authored maximum alone keeps the automatic unit of the fixed side.
+    expect(paintedLabels(chart({ ...overshoot, valMax: 1 })))
+      .toEqual(paintedLabels(chart({ ...straight, valMax: 1 })));
+    // A dip below 0%: an authored minimum fixes that side the same way, and an
+    // automatic one still widens to the snapped percent unit.
+    const dip = {
+      ...overshoot,
+      series: [
+        series({ values: [0, 0, 1, 0, 0, 0, 0], smooth: true }),
+        series({ values: [1, 1, 0, 1, 1, 1, 1], smooth: true }),
+      ],
+    } as Partial<ChartModel>;
+    const flatDip = { ...dip, series: dip.series!.map(item => ({ ...item, smooth: false })) };
+    expect(paintedLabels(chart({ ...dip, valMin: 0 })))
+      .toEqual(paintedLabels(chart({ ...flatDip, valMin: 0 })));
+    expect(paintedLabels(chart(dip))).toContain('-20%');
+  });
+
   it('a secondary percentStacked axis snaps a crossed bound to the percent unit', () => {
     const scale = (extra: number[]) => computeSecondaryAxis(
       { hidden: false } as NonNullable<ChartModel['secondaryValAxis']>,
