@@ -1192,8 +1192,16 @@ function prepareAtomicTextFit(
       }
     }
   }
+  // The body's first word on a line holding only a list label is fitted in
+  // the room the label leaves (`LayoutSegSource.listLabel`), across its
+  // formatting seams too.
+  const listLabelOnlyLine = s.listLabel === undefined
+    && breakerState.currentWidth < availW()
+    && breakerState.currentLine.length > 0
+    && breakerState.currentLine.every(isListLabelItem);
   if (
     !s.joinPrev &&
+    !listLabelOnlyLine &&
     breakerState.currentLine.length > 0 &&
     (follower?.joinPrev || preferWholeWord && follower?.explicitBreakBefore) &&
     ((breakerState.queue.peek() as LayoutTextSeg | undefined)?.hardJoinPrev === true ||

@@ -118,6 +118,17 @@ describe('list labels emitted as leading runs', () => {
     expect(texts(second!)[0]!.bounds.xPt).toBeCloseTo(60, 6);
   });
 
+  it('breaks a first body word across formatting seams the same way', () => {
+    const [first, second] = lines(list([
+      label('1.'), label('\t'),
+      textRun('UUUUUUUUUUUUUUU'), textRun('UUUUUUUUUUUUUUU', { color: 'ff0000' }),
+    ]));
+    expect(xOf(first!, 'U')).toBeCloseTo(100, 6);
+    // 28 characters fit the 280 pt after the tab stop.
+    expect(texts(first!).map((p) => p.text).join('').replace(/[^U]/g, '').length).toBe(28);
+    expect(texts(second!)[0]!.bounds.xPt).toBeCloseTo(60, 6);
+  });
+
   it('leaves label spaces out of justification', () => {
     const [line] = lines(list([
       label('A B'), textRun(' aaaa bbbb cccc dddd eeee ffff gggg hhhh'),
