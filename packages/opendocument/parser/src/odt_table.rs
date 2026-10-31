@@ -342,7 +342,14 @@ impl<'a> Reader<'a> {
         if columns.is_empty() || rows.is_empty() || rows.len() > MAX_ROWS {
             return Err(unsupported("table-shape"));
         }
-        let col_widths: Vec<f64> = if relative.is_some() {
+        // LibreOffice sizes columns by their relative weights wherever every
+        // column has one, also beside absolute widths (measured: 4 cm/6 cm
+        // columns weighted 1000*/3000* in a 10 cm table draw 2.5/7.5 cm).
+        let weighted = columns.iter().all(|c| c.1.is_some());
+        if !weighted && columns.iter().any(|c| c.1.is_some()) {
+            return Err(unsupported("table-columns"));
+        }
+        let col_widths: Vec<f64> = if relative.is_some() || weighted {
             let total: f64 = columns
                 .iter()
                 .map(|c| c.1.ok_or_else(|| unsupported("table-columns")))
@@ -599,7 +606,10 @@ impl<'a> Reader<'a> {
         .into_iter()
         .flatten()
         .collect();
-        entries.sort_by_key(|(key, _)| !matches!(key.1.as_str(), "padding" | "border"));
+        entries.sort_by(|(a, _), (b, _)| {
+            let side = |key: &(String, String)| !matches!(key.1.as_str(), "padding" | "border");
+            (side(a), a).cmp(&(side(b), b))
+        });
         for (key, value) in entries {
             match (key.0.as_str(), key.1.as_str()) {
                 (NS_FO, "padding") => margins = [length_pt(value)?; 4],
@@ -660,6 +670,24 @@ impl<'a> Reader<'a> {
         let mut content = finish_cell(blocks, self.layout_flags)?;
         if content.is_empty() {
             return Err(unsupported("table-cell-empty"));
+        }
+        // LibreOffice centres or bottom-aligns a cell's content with the
+        // first paragraph's top and the last one's bottom margin; the DOCX
+        // layout aligns without them (measured: 12 pt above moves centred
+        // text 6 pt, 10 pt below moves bottom-aligned text 10 pt).
+        let outer = |element: Option<&CellElement>, top: bool| match element {
+            Some(CellElement::Paragraph(p)) => {
+                if top {
+                    p.space_before
+                } else {
+                    p.space_after
+                }
+            }
+            _ => 0.0,
+        };
+        if v_align != "top" && (outer(content.first(), true) != 0.0 || outer(content.last(), false) != 0.0)
+        {
+            return Err(unsupported("table-cell-align-spacing"));
         }
         if let Some(fill) = &background {
             // §20.395 automatic colour over the cell's background, as over a
