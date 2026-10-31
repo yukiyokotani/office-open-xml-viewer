@@ -1986,6 +1986,11 @@ fn paragraph_properties(cascade: &Cascade<'_>, rules: CompatRules) -> Result<Col
                 "line-height-at-least" | "contextual-spacing" | "tab-stop-distance" | "page-number",
             ) => true,
             (NS_STYLE, "line-spacing") => length_pt(value).is_ok_and(|v| v == 0.0),
+            // LibreOffice 26 writes these on every default style: greedy
+            // line breaking (as the DOCX layout breaks lines) and no extra
+            // tab distance.
+            (NS_LOEXT, "paragraph-composer") => value == "false",
+            (NS_LOEXT, "tab-stop-distance") => length_pt(value).is_ok_and(|v| v == 0.0),
             (
                 NS_STYLE,
                 "auto-text-indent"
