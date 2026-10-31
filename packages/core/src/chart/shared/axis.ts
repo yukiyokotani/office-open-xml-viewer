@@ -520,10 +520,13 @@ export function planValueAxis(
   // the widened range and snaps the bound outward to it: a curve dipping to
   // -2% gives -20%..100%, one peaking at 106% gives 0%..120%. Only a curve
   // crossing the normalized bound (below 0 / above 100, or past a negative
-  // stack) widens it; otherwise the plan is unchanged.
-  const snapLow = percentStacked && percentCurveExtent != null
+  // stack) widens it; otherwise the plan is unchanged. An authored bound
+  // (`c:scaling` `c:min` / `c:max`) fixes its side: the curve
+  // never widens it, and neither the snap nor the automatic unit reads the
+  // curve beyond it.
+  const snapLow = percentStacked && percentCurveExtent != null && chart.valMin == null
     && percentCurveExtent[0] < Math.min(dataMin, 0);
-  const snapHigh = percentStacked && percentCurveExtent != null
+  const snapHigh = percentStacked && percentCurveExtent != null && chart.valMax == null
     && percentCurveExtent[1] > Math.max(dataMax, 0);
   const percentMin = snapLow && percentCurveExtent ? percentCurveExtent[0] : dataMin;
   const percentMax = snapHigh && percentCurveExtent ? percentCurveExtent[1] : dataMax;
