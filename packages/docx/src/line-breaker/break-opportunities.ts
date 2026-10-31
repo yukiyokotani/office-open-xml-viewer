@@ -48,7 +48,7 @@ import {
   rebaseSeaBreaks,
 } from './text-runs.js';
 import { fitCJKPrefix, hasEastAsianVisiblePredecessor } from './fit-search.js';
-import { LineGapRejection, fitJustifiedCompression, justifiedCompressionApplies, justifiedPrefixCompression, lineEndsWithText, type PassOperationState } from './pass-operations.js';
+import { LineGapRejection, fitJustifiedCompression, isListLabelItem, justifiedCompressionApplies, justifiedPrefixCompression, lineEndsWithText, type PassOperationState } from './pass-operations.js';
 
 /** The iterator reads only its declared slice of the explicit pass state. */
 export type BreakOpportunityIteratorContext = Pick<
@@ -869,7 +869,13 @@ function processTabSegment(
   // containment policy also applies to float-displaced targets. On an empty
   // line an out-of-band tab contributes no gap, so its cell can use the normal
   // fitting path rather than retrying an unreachable target forever.
-  if (breakerState.currentWidth + tabWidth > availW()) {
+  // A list label's separator tab (`LayoutSegSource.listLabel`) has no width
+  // at a line start, and a stop at the line end does not fit it either.
+  const listLabelTab = seg.listLabel !== undefined;
+  if (listLabelTab && breakerState.currentLine.length === 0) {
+    tabWidth = 0;
+  } else if (breakerState.currentWidth + tabWidth > availW()
+    || (listLabelTab && breakerState.currentWidth + tabWidth >= availW())) {
     if (breakerState.currentLine.length > 0) {
       flush(undefined, false, seg.src);
       breakerState.queue.unshift(seg);
@@ -1040,13 +1046,17 @@ function placeOrSplitText(context: BreakOpportunityIteratorContext, inputFrame: 
     splitCjkOverflow(context, frame);
   } else if (s.seaBreaks !== undefined && s.hardJoinPrev !== true) {
     splitSeaOverflow(context, frame);
-  } else if (breakerState.currentLine.length === 0) {
+  } else if (breakerState.currentLine.length === 0
+    || breakerState.currentLine.every(isListLabelItem)) {
     // `word-overlong-token-emergency-break`: for a single non-CJK token wider
     // than a full line, fit the widest character prefix (at least one
     // character), draw it, and re-queue the remainder. Segments are already
     // space-delimited, so this cannot bypass an ordinary space opportunity.
-    const semanticSplit = explicitTextSplit(s, availW());
-    const split = semanticSplit || emergencyTextSplit(s, availW());
+    // A line holding only a list label is fitted the same way, in the width
+    // the label leaves.
+    const room = availW() - breakerState.currentWidth;
+    const semanticSplit = explicitTextSplit(s, room);
+    const split = semanticSplit || emergencyTextSplit(s, room);
     // An explicit hyphen/URL opportunity is a legal break; any other split is forced,
     // and so is a retained prefix (even one whole grapheme) wider than the gap.
     if ((semanticSplit === 0 && split < s.text.length)

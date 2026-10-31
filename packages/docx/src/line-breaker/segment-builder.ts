@@ -1516,6 +1516,7 @@ function emitResolvedTextSegment(
     text,
     script: resolvedScript,
     ...(r.spaceAdvancePt !== undefined ? { spaceAdvancePt: r.spaceAdvancePt } : {}),
+    ...(r.listLabel !== undefined ? { listLabel: r.listLabel } : {}),
     ...(resolvedSpan?.semanticSlotSpans ? { semanticSlotSpans: resolvedSpan.semanticSlotSpans } : {}),
     ...(widthBalanceGridDeltaFactor !== undefined
       ? {
@@ -1807,6 +1808,7 @@ function appendRunsToSegments(
       }
       // Split on tab chars so tab alignment can be resolved during layout.
       const parts = t.text.split('\t');
+      const tabListLabel = (t as { listLabel?: LayoutTextSeg['listLabel'] }).listLabel;
       const fullDisplayText = transformedRunText(t.text, t, environment);
       let displayOffset = 0;
       for (let i = 0; i < parts.length; i++) {
@@ -1832,6 +1834,7 @@ function appendRunsToSegments(
             italic: t.italic,
             sourceRunIndex: runIndex,
             ...(sequence ? { sourceTextOffset: displayOffset - 1 } : {}),
+            ...(tabListLabel !== undefined ? { listLabel: tabListLabel } : {}),
           });
         }
       }

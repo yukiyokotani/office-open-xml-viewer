@@ -6,7 +6,7 @@
 //! as a whole element (§17.7) and are stored with their parent group.
 
 use crate::error::invalid;
-use crate::xml::{self, NS_STYLE};
+use crate::xml::{self, NS_STYLE, NS_TEXT};
 use std::collections::{HashMap, HashSet};
 
 /// Implementation bound on a parent chain; ODF requires none, a cycle is a
@@ -100,6 +100,18 @@ pub struct StyleSheet {
     common: HashMap<(String, String), Style>,
     defaults: HashMap<String, Style>,
     automatic: HashMap<(Scope, String, String), Style>,
+    list_common: HashMap<String, ListStyle>,
+    list_automatic: HashMap<(Scope, String), ListStyle>,
+}
+
+/// A `text:list-style` (§16.30): its captured level definitions, and each
+/// level's own `style:text-properties` as an automatic text style, so that
+/// the label's formatting cascades like a span's.
+#[derive(Debug)]
+pub struct ListStyle {
+    pub name: String,
+    pub element: Element,
+    pub level_text: HashMap<String, Style>,
 }
 
 /// A resolved reference to one stored style.
@@ -110,6 +122,13 @@ pub struct StyleRef<'a> {
 
 impl StyleSheet {
     pub fn add_common(&mut self, parent: roxmltree::Node<'_, '_>) -> Result<(), String> {
+        for node in parent.children().filter(|n| xml::is(*n, NS_TEXT, "list-style")) {
+            self.charge(node)?;
+            let list = read_list_style(node)?;
+            if self.list_common.insert(list.name.clone(), list).is_some() {
+                return Err(invalid("two list styles share a name"));
+            }
+        }
         for node in parent.children().filter(|n| xml::is(*n, NS_STYLE, "style")) {
             self.charge(node)?;
             let style = read_style(node)?;
@@ -137,6 +156,17 @@ impl StyleSheet {
         scope: Scope,
         parent: roxmltree::Node<'_, '_>,
     ) -> Result<(), String> {
+        for node in parent.children().filter(|n| xml::is(*n, NS_TEXT, "list-style")) {
+            self.charge(node)?;
+            let list = read_list_style(node)?;
+            if self
+                .list_automatic
+                .insert((scope, list.name.clone()), list)
+                .is_some()
+            {
+                return Err(invalid("two automatic list styles share a name"));
+            }
+        }
         for node in parent.children().filter(|n| xml::is(*n, NS_STYLE, "style")) {
             self.charge(node)?;
             let mut style = read_style(node)?;
@@ -188,6 +218,14 @@ impl StyleSheet {
             .map(|style| StyleRef { style })
     }
 
+    /// The list style a `text:style-name` names: an automatic list style of
+    /// the scope first, else a common one.
+    pub fn find_list(&self, scope: Scope, name: &str) -> Option<&ListStyle> {
+        self.list_automatic
+            .get(&(scope, name.to_string()))
+            .or_else(|| self.list_common.get(name))
+    }
+
     pub fn default_style(&self, family: Family) -> Option<StyleRef<'_>> {
         self.defaults
             .get(family.name())
@@ -221,6 +259,12 @@ impl StyleSheet {
 }
 
 impl<'a> StyleRef<'a> {
+    /// A reference to a style the sheet owns outside the named families (a
+    /// list level's text properties).
+    pub fn new(style: &'a Style) -> Self {
+        Self { style }
+    }
+
     pub fn style(&self) -> &'a Style {
         self.style
     }
@@ -298,6 +342,46 @@ impl<'a> Cascade<'a> {
         }
         names
     }
+}
+
+fn read_list_style(node: roxmltree::Node<'_, '_>) -> Result<ListStyle, String> {
+    let name = node
+        .attribute((NS_STYLE, "name"))
+        .ok_or_else(|| invalid("a list style has no name"))?
+        .to_string();
+    let element = capture(node, 0)?;
+    let mut level_text = HashMap::new();
+    for level in node.children().filter(|n| n.is_element()) {
+        let Some(text) = level
+            .children()
+            .find(|n| xml::is(*n, NS_STYLE, "text-properties"))
+        else {
+            continue;
+        };
+        let key = level.attribute((NS_TEXT, "level")).unwrap_or("").to_string();
+        let style = Style {
+            name: String::new(),
+            family: "text".to_string(),
+            parent: None,
+            automatic: true,
+            attributes: HashMap::new(),
+            groups: HashMap::from([(
+                TEXT.to_string(),
+                Properties {
+                    attributes: attributes(text),
+                    ..Properties::default()
+                },
+            )]),
+        };
+        if level_text.insert(key, style).is_some() {
+            return Err(invalid("a list style repeats a level"));
+        }
+    }
+    Ok(ListStyle {
+        name,
+        element,
+        level_text,
+    })
 }
 
 fn read_style(node: roxmltree::Node<'_, '_>) -> Result<Style, String> {

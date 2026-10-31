@@ -145,6 +145,9 @@ interface InternalNoBreakHyphenWire {
   readonly __optionalHyphen?: boolean;
   /** Explicit advance (pt) of each U+0020, from producers other than DOCX. */
   readonly __spaceAdvancePt?: number;
+  /** The run belongs to a list label emitted as leading runs by producers
+   * other than DOCX, with the label's alignment at its start position. */
+  readonly __listLabel?: 'start' | 'end' | 'center';
   readonly __noBreakBefore?: boolean;
   readonly __noBreakAfter?: boolean;
   /** UTF-16 offsets immediately after the injected U+002D glyph. */
@@ -1800,6 +1803,7 @@ export function paragraphAcquisitionInput(
         __noBreakHyphenOffsets: noBreakHyphenOffsets,
         __optionalHyphen: optionalHyphen,
         __spaceAdvancePt: spaceAdvancePt,
+        __listLabel: listLabel,
         ...publicRun
       } = run as typeof run & InternalNoBreakHyphenWire & {
         __typographyAcquisition?: InternalRunTypographyWire;
@@ -1814,6 +1818,8 @@ export function paragraphAcquisitionInput(
         ...(optionalHyphen === true && run.type === 'text' ? { optionalHyphen: true } : {}),
         ...(run.type === 'text' && typeof spaceAdvancePt === 'number'
           && Number.isFinite(spaceAdvancePt) && spaceAdvancePt >= 0 ? { spaceAdvancePt } : {}),
+        ...(run.type === 'text' && (listLabel === 'start' || listLabel === 'end' || listLabel === 'center')
+          ? { listLabel } : {}),
         ...(noBreakBefore === true ? { noBreakBefore: true } : {}),
         ...(noBreakAfter === true ? { noBreakAfter: true } : {}),
         ...(noBreakRanges?.length ? { noBreakRanges: Object.freeze(noBreakRanges) } : {}),

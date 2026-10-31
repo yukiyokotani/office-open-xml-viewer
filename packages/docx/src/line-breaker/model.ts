@@ -28,6 +28,14 @@ export interface LayoutSegSource {
   /** Original ownership is independent of the canonical text sequence. */
   sourceTextSequence?: readonly import('./text-sequence.js').TextSequenceSource[];
   sourceTextOffset?: number;
+  /** The segment belongs to a list label that a producer other than DOCX
+   * emits as the paragraph's leading runs (with its separator tab or space),
+   * and the label's alignment at its start position. Label lines keep the
+   * first-line indent, a label tab breaks before a stop at the line end and
+   * has no width at a line start, a label-only line fits the next unit as an
+   * empty line would, label segments take no justification, and an end or
+   * centre label starts its width (or half of it) before that position. */
+  listLabel?: 'start' | 'end' | 'center';
 }
 
 
@@ -501,6 +509,13 @@ export type LayoutSeg = LayoutTextSeg | LayoutImageSeg | LayoutMathSeg | LayoutL
 
 
 export interface LayoutLine {
+  /** A list-label line (`LayoutSegSource.listLabel`) after the paragraph's
+   * first: it still starts at the first-line indent because the body has
+   * not begun on an earlier line. */
+  listLabelFirstIndent?: true;
+  /** Width an end- or centre-aligned list label starts before the label
+   * position on this line (px). */
+  listLabelShiftPx?: number;
   /** Present on a numbered first line whose leading edge a float moved:
    * the marker's logical leading edge and the body start, both logical px
    * from the paragraph's leading indent, and the body start from the line's

@@ -663,6 +663,11 @@ export function performFitsMeasuredWidth(
   return used + (breakerState.isFirst ? firstIndent : 0) <= breakerState.lineMaxWidth;
 }
 
+/** A segment of a list label emitted as leading runs (`LayoutSegSource.listLabel`). */
+export function isListLabelItem(segment: LayoutTextSeg | LayoutImageSeg | LayoutMathSeg | LayoutTabSeg): boolean {
+  return 'listLabel' in segment && segment.listLabel !== undefined;
+}
+
 export function performFlush(
   operationState: PassOperationState,
   forceHeight?: number,
@@ -811,9 +816,17 @@ export function performFlush(
   const justifiedGapPlan = justifiedCompressionApplies(operationState)
     ? lineGapModel(breakerState.currentLine.map(s => gapSegment(operationState, s)))
     : undefined;
+  // A line of list-label segments only leaves the first-line indent to the
+  // next line: label lines keep it through the body's first line.
+  const listLabelOnly = breakerState.currentLine.length > 0
+    && breakerState.currentLine.every(isListLabelItem);
   breakerState.lines.push({
     ...(breakerState.isFirst && breakerState.numberingFirstLine
       ? { numberingFirstLine: breakerState.numberingFirstLine } : {}),
+    ...(breakerState.isFirst && breakerState.lines.length > 0
+      ? { listLabelFirstIndent: true as const } : {}),
+    ...(breakerState.lineLabelShiftPx !== 0
+      ? { listLabelShiftPx: breakerState.lineLabelShiftPx } : {}),
     physicalLineIndex: breakerState.physicalLineIndex,
     ...(justifiedGapPlan
       ? {
@@ -897,7 +910,8 @@ export function performFlush(
   breakerState.latinLineHomogeneous = true;
   breakerState.latinLineGaps = [];
   breakerState.latinUniformGapCapacity = undefined;
-  breakerState.isFirst = false;
+  breakerState.lineLabelShiftPx = 0;
+  breakerState.isFirst = breakerState.isFirst && listLabelOnly;
   startLine(lineHeadRequirement(nextStart));
 }
 
@@ -1023,6 +1037,13 @@ export function performAddToLine(
   }
   commitMixedLineItem(breakerState, s, scale);
   breakerState.currentWidth += committedWidth;
+  // An end- or centre-aligned list label starts its width (or half of it)
+  // before the label position, so the pen advances only by the rest.
+  if ('text' in s && (s.listLabel === 'end' || s.listLabel === 'center')) {
+    const shift = committedWidth * (s.listLabel === 'end' ? 1 : 0.5);
+    breakerState.currentWidth -= shift;
+    breakerState.lineLabelShiftPx += shift;
+  }
   if (justifiedCompressionApplies(operationState)) {
     const previous = breakerState.justifiedGapModel;
     breakerState.justifiedGapModel = previous?.segmentCount === breakerState.currentLine.length - 1
