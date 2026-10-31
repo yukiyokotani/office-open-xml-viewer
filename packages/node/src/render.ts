@@ -17,6 +17,7 @@ import { resolveCjkFallback, type CjkFallback } from '@silurus/ooxml-core';
  */
 
 import type { Presentation } from '@silurus/ooxml-pptx';
+import { isParsedPptxSlide } from './pptx-parsed-slides.ts';
 
 let nodeCanvasRuntimeTail: Promise<void> = Promise.resolve();
 
@@ -233,25 +234,7 @@ export async function renderSlideNode(
   canvas: NodeCanvasLike,
   presentation: Presentation,
   slideIndex: number,
-  opts: RenderSlideNodeOptions = {},
-): Promise<void> {
-  return paintSlideNode(canvas, presentation, slideIndex, opts, false);
-}
-
-/** @internal Parser-backed session entry. A parsed slide without a theme
- *  already carries its whole master text chain, so its uncoloured text falls
- *  back to black rather than the presentation's `defaultTextColor`, matching
- *  the browser presentation and render worker. */
-export async function renderParsedSlideNode(
-  canvas: NodeCanvasLike,
-  presentation: Presentation,
-  slideIndex: number,
-  opts: RenderSlideNodeOptions = {},
-): Promise<void> {
-  return paintSlideNode(canvas, presentation, slideIndex, opts, true);
-}
-
-type RenderSlideNodeOptions = {
+  opts: {
     width?: number;
     dpr?: number;
     cjkFallback?: CjkFallback;
@@ -265,14 +248,7 @@ type RenderSlideNodeOptions = {
     fetchImage?: (path: string, mimeType: string) => Promise<Blob>;
     /** Lazily resolve embedded media/poster bytes. Defaults to an empty Blob. */
     fetchMedia?: (path: string) => Promise<Blob>;
-};
-
-async function paintSlideNode(
-  canvas: NodeCanvasLike,
-  presentation: Presentation,
-  slideIndex: number,
-  opts: RenderSlideNodeOptions,
-  parsedTextChain: boolean,
+  } = {},
 ): Promise<void> {
   const cjkFallback = resolveCjkFallback(opts.cjkFallback);
   // Direct import of the pure renderer module — avoids `presentation.ts`
@@ -318,7 +294,7 @@ async function paintSlideNode(
         // inject another source; text/shape-only rendering uses an empty Blob.
         fetchImage,
         skipMediaControls: true,
-        ...(parsedTextChain ? { parsedTextChain: true } : {}),
+        ...(isParsedPptxSlide(slide) ? { parsedTextChain: true } : {}),
       },
     );
   };
