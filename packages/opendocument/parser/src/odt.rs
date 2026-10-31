@@ -5139,6 +5139,15 @@ mod tests {
             one(&end(&"X".repeat(12))).unwrap_err(),
             unsupported("list-label-extent")
         );
+        // ... or that could wrap from M + I to the line end.
+        let far = end("")
+            .replace(r#"fo:margin-left="2cm""#, r#"fo:margin-left="15.5cm""#)
+            .replace(r#"fo:text-indent="-1cm""#, r#"fo:text-indent="0cm""#)
+            .replace(
+                r#"list-tab-stop-position="2cm""#,
+                r#"list-tab-stop-position="15.7cm""#,
+            );
+        assert_eq!(one(&far).unwrap_err(), unsupported("list-label-extent"));
         // `continue-numbering` with nothing to continue restarts.
         assert!(read_list(&styles, r#"<text:list text:style-name="L" text:continue-numbering="true"><text:list-item><text:p>a</text:p></text:list-item></text:list>"#).is_ok());
         // Continuing a list that counted nothing, or a nested list.
