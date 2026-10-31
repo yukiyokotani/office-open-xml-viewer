@@ -15,8 +15,8 @@ use crate::style::{
     Cascade, Family, Group, Scope, Style, StyleRef, StyleSheet, LOEXT_GRAPHIC, PARAGRAPH, TEXT,
 };
 use crate::xml::{
-    self, NS_DRAW, NS_FO, NS_LOEXT, NS_OFFICE, NS_OFFICEOOO, NS_STYLE, NS_SVG, NS_TEXT, NS_XLINK,
-    NS_XML,
+    self, NS_DRAW, NS_FO, NS_LOEXT, NS_OFFICE, NS_OFFICEOOO, NS_STYLE, NS_SVG, NS_TABLE, NS_TEXT,
+    NS_XLINK, NS_XML,
 };
 use docx_model::owned_cursor::OwnedDocumentResource;
 use docx_model::{
@@ -201,6 +201,7 @@ fn read_with(
         odf_1_4: version == Some("1.4"),
         text_width: page.section.page_width - page.section.margin_left - page.section.margin_right,
         page_left_margin: page.section.margin_left,
+        page_right_margin: page.section.margin_right,
         sheet: &sheet,
         fonts: &fonts,
         used_faces: RefCell::new(HashSet::new()),
@@ -212,7 +213,9 @@ fn read_with(
         break_layout_work: 0,
         layout_flags,
         page_master: page.name.as_str(),
-        paragraphs: Vec::new(),
+        blocks: Vec::new(),
+        paragraph_count: 0,
+        next_table: 0,
         retained_text_bytes: 0,
         construction_bytes: 0,
         contextual_spacing_defined,
@@ -929,6 +932,14 @@ struct Collected {
 mod image;
 #[path = "odt_list.rs"]
 mod list;
+#[path = "odt_table.rs"]
+mod table;
+
+/// A collected body block before spacing is resolved.
+enum Block {
+    Paragraph(Box<Collected>),
+    Table(Box<table::TableBlock>),
+}
 
 struct Reader<'a> {
     rules: CompatRules,
@@ -949,6 +960,7 @@ struct Reader<'a> {
     /// The page's text area width and left margin (pt).
     text_width: f64,
     page_left_margin: f64,
+    page_right_margin: f64,
     sheet: &'a StyleSheet,
     fonts: &'a FontFaces,
     used_faces: RefCell<HashSet<Face>>,
@@ -963,7 +975,10 @@ struct Reader<'a> {
     break_layout_work: usize,
     layout_flags: LayoutFlags,
     page_master: &'a str,
-    paragraphs: Vec<Collected>,
+    blocks: Vec<Block>,
+    /// Paragraphs read so far, in the body and in cells.
+    paragraph_count: usize,
+    next_table: usize,
     retained_text_bytes: usize,
     construction_bytes: usize,
     contextual_spacing_defined: bool,
@@ -1019,6 +1034,7 @@ impl<'a> Reader<'a> {
             match (node.tag_name().namespace(), node.tag_name().name()) {
                 (Some(NS_TEXT), "p") => self.paragraph(node, None)?,
                 (Some(NS_TEXT), "list") => self.list(node, None, depth)?,
+                (Some(NS_TABLE), "table") => self.table(node)?,
                 (Some(NS_TEXT), "h") => {
                     let level = node
                         .attribute((NS_TEXT, "outline-level"))
@@ -1065,7 +1081,7 @@ impl<'a> Reader<'a> {
         node: roxmltree::Node<'_, '_>,
         outline_level: Option<u32>,
     ) -> Result<(), String> {
-        if self.paragraphs.len() >= MAX_PARAGRAPHS {
+        if self.paragraph_count >= MAX_PARAGRAPHS {
             return Err("OpenDocument text exceeds the paragraph limit".into());
         }
         let list = self.list_paragraph.take();
@@ -1118,7 +1134,7 @@ impl<'a> Reader<'a> {
             if master != self.page_master {
                 return Err(unsupported("master-page-change"));
             }
-            page_break_before = !self.paragraphs.is_empty();
+            page_break_before = self.paragraph_count > 0;
             if properties
                 .get(NS_STYLE, "page-number")
                 .is_some_and(|v| v != "auto")
@@ -1281,7 +1297,8 @@ impl<'a> Reader<'a> {
                 return Err(unsupported("line-height-proportional-mixed"));
             }
         }
-        self.paragraphs.push(collected);
+        self.paragraph_count += 1;
+        self.blocks.push(Block::Paragraph(Box::new(collected)));
         Ok(())
     }
 
@@ -2029,25 +2046,58 @@ impl<'a> Reader<'a> {
     /// space before with space after 0, so the DOCX max(after, before) rule
     /// reproduces it.
     fn finish(self) -> Result<Vec<BodyElement>, String> {
-        let mut out = Vec::with_capacity(self.paragraphs.len());
+        let mut out = Vec::with_capacity(self.blocks.len());
         let mut previous: Option<Collected> = None;
+        // The bottom margin of a table just emitted: the next paragraph adds
+        // it to its own top margin (measured).
+        let mut after_table: Option<f64> = None;
         // The previous paragraph's background (its model has moved into the
         // output).
         let mut previous_shading: Option<String> = None;
         let mut break_pending = false;
-        for mut collected in self.paragraphs {
+        for block in self.blocks {
+            let mut collected = match block {
+                Block::Paragraph(collected) => *collected,
+                Block::Table(table) => {
+                    // The previous paragraph's bottom margin and the table's
+                    // top margin both separate them (measured); a table
+                    // first in the body or after another table is not.
+                    match (out.last_mut(), &previous) {
+                        (Some(BodyElement::Paragraph(paragraph)), Some(prev))
+                            if after_table.is_none() =>
+                        {
+                            paragraph.space_after = prev.bottom + table.top;
+                        }
+                        (None, None) if table.top == 0.0 => {}
+                        // Adjacent tables stack without a gap (measured).
+                        (Some(BodyElement::Table(_)), None)
+                            if after_table == Some(0.0) && table.top == 0.0 => {}
+                        _ => return Err(unsupported("table-placement")),
+                    }
+                    if break_pending {
+                        return Err(unsupported("table-break"));
+                    }
+                    out.push(BodyElement::Table(Box::new(table.table)));
+                    after_table = Some(table.bottom);
+                    previous = None;
+                    previous_shading = None;
+                    continue;
+                }
+            };
             let mut paragraph = std::mem::take(&mut collected.paragraph);
             paragraph.page_break_before |= break_pending;
-            paragraph.space_before = match previous {
+            paragraph.space_before = match (after_table.take(), &previous) {
+                (Some(bottom), _) if !paragraph.page_break_before => bottom + collected.top,
+                (Some(_), _) => collected.top,
                 // Measured: after a hard page break (break-before, break-after
                 // or a page style named on the paragraph) LibreOffice applies
                 // the new paragraph's top margin alone; the previous bottom
                 // margin is not carried. At an automatic page break both
                 // vanish, as the DOCX layout drops space before at the top of
                 // a page it reached by pagination.
-                None => collected.top,
-                Some(_) if paragraph.page_break_before => collected.top,
-                Some(ref prev) => {
+                (None, None) => collected.top,
+                (None, Some(_)) if paragraph.page_break_before => collected.top,
+                (None, Some(prev)) => {
                     let same = prev.area == collected.area
                         && prev.named_style.is_some()
                         && prev.named_style == collected.named_style;
@@ -2082,6 +2132,9 @@ impl<'a> Reader<'a> {
             break_pending = collected.page_break_after;
             out.push(BodyElement::Paragraph(Box::new(paragraph)));
             previous = Some(collected);
+        }
+        if after_table.is_some_and(|bottom| bottom != 0.0) {
+            return Err(unsupported("table-placement"));
         }
         Ok(out)
     }
@@ -3073,7 +3126,7 @@ mod tests {
     use crate::package::PackageLimits;
     use ooxml_common::resource::OoxmlFormat;
 
-    const NS: &str = r#"xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0" xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0" xmlns:loext="urn:org:documentfoundation:names:experimental:office:xmlns:loext:1.0" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:officeooo="http://openoffice.org/2009/office" xmlns:xlink="http://www.w3.org/1999/xlink""#;
+    const NS: &str = r#"xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0" xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0" xmlns:loext="urn:org:documentfoundation:names:experimental:office:xmlns:loext:1.0" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:officeooo="http://openoffice.org/2009/office" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0""#;
     const FACES: &str = r#"<office:font-face-decls><style:font-face style:name="Serif" svg:font-family="'Liberation Serif'" style:font-family-generic="roman"/><style:font-face style:name="Sans" svg:font-family="'Liberation Sans'" style:font-family-generic="swiss"/><style:font-face style:name="Sans2" svg:font-family="'Liberation Sans'" style:font-family-generic="system"/><style:font-face style:name="Mincho" svg:font-family="'Hiragino Mincho ProN'" style:font-family-generic="system"/></office:font-face-decls>"#;
 
     struct Fixture<'a> {
@@ -5370,6 +5423,187 @@ mod tests {
         assert!(matches!(&runs[0], DocRun::AnchorHost(m) if m.list_label == Some("end")));
         assert!(matches!(&runs[1], DocRun::Image(p) if p.list_label == Some("end")));
         assert!(matches!(&runs[2], DocRun::Text(t) if t.list_label.is_none() && t.text == "a"));
+    }
+
+    const TABLE_STYLES: &str = r##"<style:style style:name="T" style:family="table"><style:table-properties style:width="10cm" fo:margin-left="-0.191cm" fo:margin-top="5pt" fo:margin-bottom="3pt" table:align="left" style:writing-mode="page"/></style:style><style:style style:name="T.A" style:family="table-column"><style:table-column-properties style:column-width="4cm"/></style:style><style:style style:name="T.B" style:family="table-column"><style:table-column-properties style:column-width="6cm"/></style:style><style:style style:name="T.1" style:family="table-row"><style:table-row-properties style:min-row-height="2cm" fo:keep-together="always"/></style:style><style:style style:name="T.A1" style:family="table-cell"><style:table-cell-properties fo:padding-left="0.191cm" fo:padding-right="0.191cm" fo:padding-top="0cm" fo:padding-bottom="0cm" fo:border="0.5pt solid #000000" style:vertical-align="middle" fo:background-color="#ffff00"><style:background-image/></style:table-cell-properties></style:style><style:style style:name="T.B1" style:family="table-cell"><style:table-cell-properties fo:padding="0cm" fo:border-top="2pt solid #ff0000" fo:border-bottom="none" fo:border-left="none" fo:border-right="none"/></style:style><style:style style:name="Sp" style:family="paragraph"><style:paragraph-properties fo:margin-top="6pt" fo:margin-bottom="8pt"/></style:style>"##;
+
+    fn table_body(table: &str) -> String {
+        format!(
+            r#"<text:p text:style-name="Sp">before</text:p>{table}<text:p text:style-name="Sp">after</text:p>"#
+        )
+    }
+
+    const TABLE: &str = r#"<table:table table:name="T" table:style-name="T"><table:table-column table:style-name="T.A"/><table:table-column table:style-name="T.B"/><table:table-header-rows><table:table-row><table:table-cell table:style-name="T.A1" office:value-type="string"><text:p>h1</text:p></table:table-cell><table:table-cell table:style-name="T.B1"><text:p>h2</text:p></table:table-cell></table:table-row></table:table-header-rows><table:table-row table:style-name="T.1"><table:table-cell table:style-name="T.A1"><text:p text:style-name="Sp">a</text:p><text:p text:style-name="Sp">b</text:p></table:table-cell><table:table-cell table:style-name="T.B1"><text:p>c</text:p></table:table-cell></table:table-row></table:table>"#;
+
+    fn read_table(automatic: &str, body: &str) -> Result<Document, String> {
+        read_fixture(Fixture {
+            automatic,
+            body,
+            ..Fixture::default()
+        })
+    }
+
+    #[test]
+    fn maps_tables_as_libreoffice_lays_them_out() {
+        let document = read_table(TABLE_STYLES, &table_body(TABLE)).unwrap();
+        let [BodyElement::Paragraph(before), BodyElement::Table(table), BodyElement::Paragraph(after)] =
+            document.body.as_slice()
+        else {
+            panic!("a paragraph, a table and a paragraph")
+        };
+        // Spacing around the table adds both margins on each side.
+        assert_eq!(before.space_after, 8.0 + 5.0);
+        assert_eq!(after.space_before, 3.0 + 6.0);
+        let cm = 72.0 / 2.54;
+        assert!((table.col_widths[0] - 4.0 * cm).abs() < 1e-9);
+        assert!((table.col_widths[1] - 6.0 * cm).abs() < 1e-9);
+        assert_eq!(table.jc, "left");
+        assert!((table.tbl_ind.unwrap() + 0.191 * cm).abs() < 1e-9);
+        assert_eq!(table.layout.as_deref(), Some("fixed"));
+        assert!(table.rows[0].is_header && !table.rows[1].is_header);
+        // A minimum height is given net of the border above the row (the
+        // thicker of the shared edge, here the 2 pt rule).
+        let row = &table.rows[1];
+        assert_eq!(row.row_height_rule, "atLeast");
+        assert!((row.row_height.unwrap() - (2.0 * cm - 2.0)).abs() < 1e-9);
+        assert!(row.cant_split);
+        let cell = &row.cells[0];
+        assert_eq!(cell.v_align, "center");
+        assert_eq!(cell.background.as_deref(), Some("ffff00"));
+        assert!((cell.margin_left.unwrap() - 0.191 * cm).abs() < 1e-9);
+        assert_eq!(cell.borders.top.as_ref().map(|b| b.width), Some(0.5));
+        let other = &row.cells[1];
+        assert_eq!(other.borders.top.as_ref().map(|b| b.width), Some(2.0));
+        assert!(other.borders.bottom.is_none() && other.borders.left.is_none());
+        // Cell paragraphs keep their outer spacing and add the inner one.
+        let docx_model::CellElement::Paragraph(first) = &cell.content[0] else {
+            panic!()
+        };
+        let docx_model::CellElement::Paragraph(second) = &cell.content[1] else {
+            panic!()
+        };
+        assert_eq!((first.space_before, first.space_after), (6.0, 0.0));
+        assert_eq!((second.space_before, second.space_after), (8.0 + 6.0, 8.0));
+    }
+
+    #[test]
+    fn maps_relative_widths_and_page_breaks_before_tables() {
+        let styles = TABLE_STYLES
+            .replace(
+                r#"style:width="10cm""#,
+                r#"style:width="10cm" style:rel-width="100%" fo:break-before="page""#,
+            )
+            .replace(
+                r#"style:column-width="4cm""#,
+                r#"style:rel-column-width="1000*""#,
+            )
+            .replace(
+                r#"style:column-width="6cm""#,
+                r#"style:rel-column-width="3000*""#,
+            );
+        let document = read_table(&styles, &table_body(TABLE)).unwrap();
+        let BodyElement::Table(table) = &document.body[1] else {
+            panic!()
+        };
+        let section = &document.section;
+        let width = section.page_width - section.margin_left - section.margin_right;
+        let total: f64 = table.col_widths.iter().sum();
+        assert!((total - (width - 0.0)).abs() < 1e-6, "{total} {width}");
+        assert!((table.col_widths[1] / table.col_widths[0] - 3.0).abs() < 1e-9);
+        let docx_model::CellElement::Paragraph(first) = &table.rows[0].cells[0].content[0] else {
+            panic!()
+        };
+        assert!(first.page_break_before);
+    }
+
+    #[test]
+    fn rejects_unmodelled_tables() {
+        let cell = |extra: &str| {
+            TABLE.replacen("<table:table-cell table:style-name=\"T.A1\" office:value-type=\"string\">", &format!("<table:table-cell table:style-name=\"T.A1\" office:value-type=\"string\"{extra}>"), 1)
+        };
+        let cases: Vec<(String, String, &str)> = vec![
+            (
+                TABLE_STYLES.into(),
+                table_body(&cell(r#" table:number-columns-spanned="2""#)),
+                "table-cell",
+            ),
+            (
+                TABLE_STYLES.into(),
+                table_body(
+                    &TABLE.replace("<text:p>c</text:p>", r#"<table:table table:name="N"/>"#),
+                ),
+                "table-cell-content",
+            ),
+            (
+                TABLE_STYLES.into(),
+                table_body(&TABLE.replace(
+                    "<text:p>c</text:p>",
+                    "<text:list><text:list-item><text:p>c</text:p></text:list-item></text:list>",
+                )),
+                "table-cell-content",
+            ),
+            (
+                TABLE_STYLES.into(),
+                table_body(&TABLE.replace("<text:p>c</text:p>", "")),
+                "table-cell-empty",
+            ),
+            (
+                TABLE_STYLES.replace("0.5pt solid #000000", "0.5pt double #000000"),
+                table_body(TABLE),
+                "table-border",
+            ),
+            (
+                TABLE_STYLES.replace(
+                    r#"style:vertical-align="middle""#,
+                    r#"style:writing-mode="tb-rl""#,
+                ),
+                table_body(TABLE),
+                "table-cell-property",
+            ),
+            (
+                TABLE_STYLES.replace(
+                    r#"style:width="10cm""#,
+                    r#"style:width="10cm" style:rel-width="50%""#,
+                ),
+                table_body(TABLE),
+                "table-rel-width",
+            ),
+            (
+                TABLE_STYLES.replace(r#"style:column-width="6cm""#, r#"style:column-width="5cm""#),
+                table_body(TABLE),
+                "table-columns",
+            ),
+            (
+                TABLE_STYLES
+                    .replace(r#"style:min-row-height="2cm""#, r#"style:row-height="2cm""#)
+                    .replace(
+                        r#"fo:padding="0cm""#,
+                        r#"fo:padding="0cm" fo:padding-bottom="1pt""#,
+                    ),
+                table_body(TABLE),
+                "table-row-padding",
+            ),
+            (
+                TABLE_STYLES.replace(r#"fo:margin-left="-0.191cm""#, r#"fo:margin-left="-3cm""#),
+                table_body(TABLE),
+                "table-geometry",
+            ),
+            // A table first in the body with a top margin, or after another
+            // table with margins between them.
+            (TABLE_STYLES.into(), TABLE.into(), "table-placement"),
+            (
+                TABLE_STYLES.into(),
+                format!("{TABLE}{TABLE}<text:p>x</text:p>"),
+                "table-placement",
+            ),
+        ];
+        for (styles, body, code) in cases {
+            assert_eq!(
+                read_table(&styles, &body).map(|_| ()),
+                Err(unsupported(code)),
+                "{code}"
+            );
+        }
     }
 
     #[test]
