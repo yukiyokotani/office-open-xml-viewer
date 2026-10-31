@@ -1160,11 +1160,14 @@ pub struct DocParagraph {
     /// `BodyElement`/`CellElement` enums stay balanced (clippy::large_enum_variant).
     /// Serde flattens the Box, so the JSON shape is unchanged.
     pub numbering: Option<Box<NumberingInfo>>,
-    /// Explicit tab stops from w:tabs. Empty means use default tab interval.
     /// The producer's format has no implicit tab stop at a hanging indent
     /// (ECMA-376 §17.3.1.38 gives DOCX one). DOCX never sets it.
-    #[serde(rename = "__noHangingIndentTab", skip_serializing_if = "std::ops::Not::not")]
+    #[serde(
+        rename = "__noHangingIndentTab",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
     pub no_hanging_indent_tab: bool,
+    /// Explicit tab stops from w:tabs. Empty means use default tab interval.
     pub tab_stops: Vec<TabStop>,
     pub runs: Vec<DocRun>,
     /// Parser-private revision provenance aligned one-to-one with `runs`.
