@@ -999,7 +999,8 @@ impl<'a> Reader<'a> {
 /// U+00A0 lets body text interleave into a long label (measured by the
 /// reviewer). Line and paragraph separators and the other format characters
 /// (zero-width, joiners, direction controls, invisible operators) lay out
-/// differently in the DOCX layout and are excluded as a class.
+/// differently in the DOCX layout and are excluded as a class, as are
+/// combining marks and variation selectors.
 fn special_label_character(c: char) -> bool {
     c.is_control()
         || matches!(
@@ -1017,6 +1018,17 @@ fn special_label_character(c: char) -> bool {
                 | '\u{2066}'..='\u{206f}'
                 | '\u{feff}'
                 | '\u{fff9}'..='\u{fffb}'
+                // Combining marks and variation selectors (LibreOffice gives an
+                // isolated one an advance, the browser none; measured by the
+                // reviewer). Other scripts' marks are not Latin and reject
+                // with the script gate.
+                | '\u{300}'..='\u{36f}'
+                | '\u{1ab0}'..='\u{1aff}'
+                | '\u{1dc0}'..='\u{1dff}'
+                | '\u{20d0}'..='\u{20ff}'
+                | '\u{fe00}'..='\u{fe0f}'
+                | '\u{fe20}'..='\u{fe2f}'
+                | '\u{e0100}'..='\u{e01ef}'
         )
 }
 
