@@ -113,6 +113,15 @@ describe('WORD_LINE_END_SPACE_HANGS', () => {
     expect(visibleEnd(spread!)).toBeCloseTo(380, 6);
   });
 
+  it('excludes the hanging space from mode-15 CJK expansion behind an anchor host', () => {
+    const host = { type: 'anchorHost', fontSize: 20, fontFamily: 'NotInMetrics', bold: false, italic: false } as DocParagraph['runs'][number];
+    const words = 'ああ bbbb cccc dddd eeee ffff gggg ';
+    for (const runs of [[textRun(words), host, textRun('hhhhhhhh')], [textRun(words), textRun('hhhhhhhh')]]) {
+      const [line] = lines(para(runs, 'both'), { compatibilityMode: 15 });
+      expect(visibleEnd(line!)).toBeCloseTo(380, 6);
+    }
+  });
+
   it('leaves right-to-left lines to their previous geometry', () => {
     // A line with right-to-left text is outside the rule: its line-end space
     // and a trailing anchor host keep their cells, so seven gaps share the

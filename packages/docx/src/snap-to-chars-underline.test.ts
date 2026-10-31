@@ -256,6 +256,10 @@ describe('snap-to-chars-terminal-underline-boundaries', () => {
       .reduce((max, line) => Math.max(max, line.x2), 0);
     expect(end(underlined.strokes)).toBeGreaterThan(end(spaced.strokes));
     expect(end(underlined.strokes)).toBeCloseTo(40, 6);
+    // Every trailing space character, NBSP included.
+    const nbsp = recordingCanvas();
+    await renderDocumentToCanvas(document('あ\u00a0', { ulTrailSpace: true }), nbsp.canvas, 0, { dpr: 1, width: 80 });
+    expect(end(nbsp.strokes)).toBeCloseTo(40, 6);
   });
 
   it('trims each authored hard-break line at its final glyph', async () => {
