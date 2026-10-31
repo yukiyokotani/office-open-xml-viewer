@@ -30,6 +30,7 @@ import { InProcessPullTransport } from '@silurus/ooxml-core/internal/in-process-
 import type { OoxmlNodeSessionOptions } from './session-options.ts';
 import type { NodeCanvasFactory, NodeCanvasLike } from './render.ts';
 import { createLazyWasmModule, resolveWasm } from './wasm-loader.ts';
+import { markParsedPptxSlide } from './pptx-parsed-slides.ts';
 import { throwIfAborted } from '@silurus/ooxml-core/internal/abort';
 
 const ABORT_MESSAGE = 'PPTX presentation session was aborted';
@@ -248,6 +249,7 @@ export class PptxPresentationSessionImpl implements PptxPresentationSession {
         ));
         this.metrics.observeUsage(this.usage);
         this.consumedSlides = index + 1;
+        markParsedPptxSlide(slide);
         yield slide;
       }
     } catch (error) {
