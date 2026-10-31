@@ -2475,9 +2475,16 @@ impl RunProperties {
         }
         // §20.315 pair kerning on: DOCX kerning with a 0pt threshold kerns
         // every size (wordKerningApplies, outside compatibility mode 15).
+        // Off: no DOCX kerning, which matches LibreOffice's unkerned text
+        // (measured, Liberation Serif and Sans, 12 and 30 pt, justified).
+        // LibreOffice kerns text whose styles never set the attribute
+        // (measured), against the ODF default of off (§20.315); the corpus
+        // always sets it, so an unset value rejects.
         let kerning = match cascade.get(NS_STYLE, "letter-kerning") {
             Some("true") => Some(0.0),
-            _ => return Err(unsupported("letter-kerning-off")),
+            Some("false") => None,
+            None => return Err(unsupported("letter-kerning-unset")),
+            Some(_) => return Err(invalid("bad letter-kerning")),
         };
         let language = |language: &str, country: &str| -> Option<Atom> {
             let language = cascade.get(NS_STYLE, language).filter(|v| *v != "none")?;
@@ -3349,10 +3356,10 @@ mod tests {
         );
         assert_eq!(
             reject(Fixture {
-                default_text: r#"style:font-name="Serif" fo:font-size="12pt" style:letter-kerning="false""#,
+                default_text: r#"style:font-name="Serif" fo:font-size="12pt""#,
                 ..Fixture::default()
             }),
-            unsupported("letter-kerning-off")
+            unsupported("letter-kerning-unset")
         );
         assert_eq!(
             reject(Fixture {
@@ -5301,6 +5308,34 @@ mod tests {
         assert!(matches!(&runs[0], DocRun::AnchorHost(m) if m.list_label == Some("end")));
         assert!(matches!(&runs[1], DocRun::Image(p) if p.list_label == Some("end")));
         assert!(matches!(&runs[2], DocRun::Text(t) if t.list_label.is_none() && t.text == "a"));
+    }
+
+    #[test]
+    fn maps_pair_kerning_on_and_off() {
+        // Off is unkerned DOCX text (LibreOffice draws it unkerned,
+        // measured); on kerns every size; an off span inside an on
+        // paragraph is unkerned on its own.
+        let document = read_fixture(Fixture {
+            default_text: r#"style:font-name="Serif" fo:font-size="12pt" style:letter-kerning="false""#,
+            styles: r#"<style:style style:name="On" style:family="text"><style:text-properties style:letter-kerning="true"/></style:style><style:style style:name="K" style:family="paragraph"><style:text-properties style:letter-kerning="true"/></style:style><style:style style:name="Off" style:family="text"><style:text-properties style:letter-kerning="false"/></style:style>"#,
+            body: r#"<text:p>AV <text:span text:style-name="On">AV</text:span></text:p><text:p text:style-name="K">AV <text:span text:style-name="Off">AV</text:span></text:p>"#,
+            ..Fixture::default()
+        })
+        .unwrap();
+        let kerning: Vec<Vec<Option<f64>>> = paragraphs(&document)
+            .iter()
+            .map(|paragraph| {
+                paragraph
+                    .runs
+                    .iter()
+                    .filter_map(|run| match run {
+                        DocRun::Text(text) => Some(text.kerning),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .collect();
+        assert_eq!(kerning, vec![vec![None, Some(0.0)], vec![Some(0.0), None]]);
     }
 
     #[test]

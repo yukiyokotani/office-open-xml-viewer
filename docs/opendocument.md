@@ -76,7 +76,8 @@ Currently admitted:
   breaks, keep-with-next / keep-together, widow/orphan control of two lines,
   and paragraph spacing including contextual spacing;
 - character fonts, sizes, bold, italic, single/double underline and
-  strike-through, colours and background colour. Where LibreOffice's
+  strike-through, colours, background colour and pair kerning on or off
+  (where a style sets it; LibreOffice kerns text whose styles never do). Where LibreOffice's
   settings make a space not size its line, the space must be in the face of
   the adjacent text on its line and no larger, and decorated spaces that end
   a paragraph or precede a line break are admitted only where LibreOffice
