@@ -141,10 +141,10 @@ fn read_with(package: &OdfPackage, rules: CompatRules) -> Result<Document, Strin
         }
     }
     check_document_wide_configuration(styles_root)?;
-    let space_settings = if package.contains("settings.xml") {
+    let layout_flags = if package.contains("settings.xml") {
         check_settings(&package.read_text("settings.xml")?, version)?
     } else {
-        SpaceSettings::default()
+        LayoutFlags::default()
     };
     if package.contains("meta.xml") {
         let text = package.read_text("meta.xml")?;
@@ -191,7 +191,7 @@ fn read_with(package: &OdfPackage, rules: CompatRules) -> Result<Document, Strin
         area: 0,
         next_area: 0,
         break_layout_work: 0,
-        space_settings,
+        layout_flags,
         page_master: page.name.as_str(),
         paragraphs: Vec::new(),
         retained_text_bytes: 0,
@@ -466,9 +466,7 @@ const LAYOUT_SETTINGS: [(&str, &str); 14] = [
 ///   IgnoreTabsAndBlanksForLineCalculation, MsWordCompTrailingBlanks.
 /// - MsWordUlTrailSpace: no measured difference in underlined trailing
 ///   spaces at line and paragraph ends.
-/// - Justification (justified paragraphs reject, `justify`):
-///   DoNotJustifyLinesWithManualBreak, JustifyLinesWithShrinking.
-const INERT_SETTINGS: [&str; 12] = [
+const INERT_SETTINGS: [&str; 10] = [
     "TabsRelativeToIndent",
     "TabOverMargin",
     "TabOverflow",
@@ -479,6 +477,11 @@ const INERT_SETTINGS: [&str; 12] = [
     "IgnoreTabsAndBlanksForLineCalculation",
     "MsWordCompTrailingBlanks",
     "MsWordUlTrailSpace",
+];
+
+/// LibreOffice configuration items that change justification, admitted with
+/// either value and applied to justified paragraphs (see `LayoutFlags`).
+const JUSTIFICATION_SETTINGS: [&str; 2] = [
     "DoNotJustifyLinesWithManualBreak",
     "JustifyLinesWithShrinking",
 ];
@@ -503,18 +506,26 @@ fn check_part_root(
 /// The settings.xml items that decide whether spaces size LibreOffice's
 /// lines and carry decorations (absent: false, LibreOffice's default).
 #[derive(Clone, Copy, Debug, Default)]
-struct SpaceSettings {
+struct LayoutFlags {
     /// IgnoreTabsAndBlanksForLineCalculation: no space sizes a line.
     ignore: bool,
     /// MsWordCompTrailingBlanks: spaces that end a paragraph or precede a
     /// line break neither size the line nor carry decorations.
     blanks: bool,
+    /// MsWordUlTrailSpace: with `blanks`, underline and strike-through still
+    /// cover one such space.
+    underline: bool,
+    /// DoNotJustifyLinesWithManualBreak: a justified line ended by a manual
+    /// break is left unjustified (LibreOffice otherwise stretches it).
+    no_justify_breaks: bool,
+    /// JustifyLinesWithShrinking: justification may also compress spaces.
+    shrink: bool,
 }
 
-fn check_settings(text: &str, version: Option<&str>) -> Result<SpaceSettings, String> {
+fn check_settings(text: &str, version: Option<&str>) -> Result<LayoutFlags, String> {
     let document = xml::parse(text)?;
     check_part_root(&document, "document-settings", version)?;
-    let mut trailing = SpaceSettings::default();
+    let mut trailing = LayoutFlags::default();
     // LibreOffice reads its layout items from the top-level
     // "ooo:configuration-settings" set only; other sets are ignored.
     let mut sets = document
@@ -558,11 +569,14 @@ fn check_settings(text: &str, version: Option<&str>) -> Result<SpaceSettings, St
             if !matches {
                 return Err(unsupported("compatibility-setting"));
             }
-        } else if INERT_SETTINGS.contains(&name) {
+        } else if INERT_SETTINGS.contains(&name) || JUSTIFICATION_SETTINGS.contains(&name) {
             let value = boolean()?;
             match name {
                 "IgnoreTabsAndBlanksForLineCalculation" => trailing.ignore = value,
                 "MsWordCompTrailingBlanks" => trailing.blanks = value,
+                "MsWordUlTrailSpace" => trailing.underline = value,
+                "DoNotJustifyLinesWithManualBreak" => trailing.no_justify_breaks = value,
+                "JustifyLinesWithShrinking" => trailing.shrink = value,
                 _ => {}
             }
         }
@@ -571,13 +585,20 @@ fn check_settings(text: &str, version: Option<&str>) -> Result<SpaceSettings, St
 }
 
 /// Decorations over the spaces that end a paragraph or precede a line break
-/// (measured, LibreOffice PDF against the DOCX layout). Both paint
-/// background, underline and strike-through over them by default. With
-/// MsWordCompTrailingBlanks LibreOffice paints none of them (underline and
-/// strike-through over one space with MsWordUlTrailSpace as well), so
-/// decorated trailing spaces reject.
-fn trailing_space_decoration(space: &RunProperties, settings: SpaceSettings) -> Result<(), String> {
-    if settings.blanks && decorated(space) {
+/// (measured, LibreOffice PDF against the DOCX layout). The DOCX layout paints
+/// none over these hanging spaces (WORD_LINE_END_SPACE_HANGS; the reader sets
+/// no ulTrailSpace). LibreOffice paints background, underline and
+/// strike-through over them by default; with MsWordCompTrailingBlanks it
+/// paints none, except underline and strike-through over one space with
+/// MsWordUlTrailSpace as well. Decorated trailing spaces reject wherever the
+/// two differ.
+fn trailing_space_decoration(space: &RunProperties, settings: LayoutFlags) -> Result<(), String> {
+    let differs = if settings.blanks {
+        settings.underline && (space.underline.is_some() || space.strike.is_some())
+    } else {
+        decorated(space)
+    };
+    if differs {
         Err(unsupported("trailing-space-decoration"))
     } else {
         Ok(())
@@ -886,7 +907,7 @@ struct Reader<'a> {
     area: u32,
     next_area: u32,
     break_layout_work: usize,
-    space_settings: SpaceSettings,
+    layout_flags: LayoutFlags,
     page_master: &'a str,
     paragraphs: Vec<Collected>,
     retained_text_bytes: usize,
@@ -1079,14 +1100,23 @@ impl<'a> Reader<'a> {
         };
         self.inline(node, 0, &mut inline, 0)?;
         if collected.paragraph.alignment == "justify" {
-            // LibreOffice justifies a line flush to both edges with its
-            // line-end space outside the line, without compressing spaces
-            // (unless JustifyLinesWithShrinking). The DOCX layout either keeps
-            // the line-end space inside the justified width (lines end one
-            // space short, measured 3 pt) or, in compatibility mode 15, also
-            // compresses spaces. Neither is LibreOffice's rule, so justified
-            // paragraphs reject until it is mapped.
-            return Err(unsupported("justify"));
+            // Justified lines (DOCX `both`, WORD_LINE_END_SPACE_HANGS) match
+            // LibreOffice's breaks and flush edges (measured; LibreOffice's
+            // whole-unit distribution leaves its lines up to 0.1 pt per space
+            // short). JustifyLinesWithShrinking also compresses spaces, and
+            // LibreOffice stretches a line ended by a manual break unless
+            // DoNotJustifyLinesWithManualBreak; the DOCX layout does neither.
+            if self.layout_flags.shrink {
+                return Err(unsupported("justify-shrinking"));
+            }
+            if !self.layout_flags.no_justify_breaks
+                && inline
+                    .tokens
+                    .iter()
+                    .any(|token| matches!(token, Token::LineBreak(_)))
+            {
+                return Err(unsupported("justify-with-line-break"));
+            }
         }
         let (tokens, removed) = collapse(std::mem::take(&mut inline.tokens));
         self.emit_runs(&tokens, removed, &inline.contexts, &mut collected.paragraph)?;
@@ -1321,9 +1351,9 @@ impl<'a> Reader<'a> {
         // start. A manual break starts a new comparison.
         let mut last_glyph: Option<(u32, ScriptClass)> = None;
         let mut pending_spaces: Vec<(u32, ScriptClass)> = Vec::new();
-        // Spaces since the last visible character, which end the paragraph
-        // or precede a break if nothing visible follows.
-        let mut trailing: Vec<(u32, ScriptClass)> = Vec::new();
+        // White space since the last visible character, which ends the
+        // paragraph or precedes a break if nothing visible follows.
+        let mut trailing: Vec<(u32, ScriptClass, char)> = Vec::new();
         for (index, &token) in tokens.iter().enumerate() {
             let (c, context) = match token {
                 Token::LineBreak(context) => {
@@ -1343,12 +1373,7 @@ impl<'a> Reader<'a> {
                     if !line_has_glyph || !pending_spaces.is_empty() {
                         return Err(unsupported("line-break-empty-line"));
                     }
-                    for space in trailing.drain(..) {
-                        self.trailing_space(
-                            &cache[&space],
-                            last_glyph.map(|glyph| &cache[&glyph]),
-                        )?;
-                    }
+                    self.trailing_spaces(&cache, &std::mem::take(&mut trailing), last_glyph)?;
                     last_glyph = None;
                     line_has_glyph = false;
                     any_break = true;
@@ -1422,13 +1447,13 @@ impl<'a> Reader<'a> {
                 same_line_metrics(&cache[&hyphen], &cache[&key], "soft-hyphen-formatting")?;
             }
             if c.is_whitespace() {
-                if self.space_settings.ignore {
+                if self.layout_flags.ignore {
                     match last_glyph {
                         Some(glyph) => space_fits_line(&cache[&key], &cache[&glyph])?,
                         None => pending_spaces.push(key),
                     }
                 }
-                trailing.push(key);
+                trailing.push((key.0, key.1, c));
             } else {
                 trailing.clear();
                 for space in pending_spaces.drain(..) {
@@ -1462,9 +1487,7 @@ impl<'a> Reader<'a> {
         if !pending_spaces.is_empty() {
             return Err(unsupported("space-formatting"));
         }
-        for space in trailing {
-            self.trailing_space(&cache[&space], last_glyph.map(|glyph| &cache[&glyph]))?;
-        }
+        self.trailing_spaces(&cache, &trailing, last_glyph)?;
         // §6.1.2 step 5 removes a trailing collapsed space; LibreOffice keeps
         // it (measured: it sizes the line and carries decorations unless
         // its settings say otherwise), so it must be invisible there too.
@@ -1474,38 +1497,58 @@ impl<'a> Reader<'a> {
                 entry.insert(self.run_properties(contexts, context, key.1)?);
             }
             let space = &cache[&key];
-            let settings = self.space_settings;
+            let settings = self.layout_flags;
             if !settings.ignore && !settings.blanks {
                 match last_glyph {
                     Some(glyph) => space_fits_line(space, &cache[&glyph])?,
                     None => return Err(unsupported("space-formatting")),
                 }
             }
-            if !settings.blanks && decorated(space) {
-                return Err(unsupported("trailing-space-decoration"));
-            }
+            // A U+0020 after every other trailing character: decorated as
+            // a retained trailing space would be.
+            trailing_space_decoration(space, settings)?;
         }
         Ok(())
     }
 
-    /// A space that ends a paragraph or precedes a line break, after `glyph`
-    /// (the last visible character on its line). With
+    /// The white space that ends a paragraph or precedes a line break, after
+    /// `glyph` (the last visible character on its line). With
     /// MsWordCompTrailingBlanks LibreOffice ignores it for the line height,
     /// so the DOCX layout must too (see `emit_runs`); the IgnoreTabsAndBlanks
-    /// case was already checked as an ordinary space.
-    fn trailing_space(
+    /// case was already checked as an ordinary space. Only the U+0020 suffix
+    /// hangs in the DOCX layout; LibreOffice, like the DOCX layout, decorates
+    /// a trailing no-break or other Unicode space under every setting
+    /// (measured: U+00A0, U+2002, U+2009), so only that suffix meets the
+    /// decoration gate.
+    fn trailing_spaces(
         &self,
-        space: &RunProperties,
-        glyph: Option<&RunProperties>,
+        cache: &HashMap<(u32, ScriptClass), RunProperties>,
+        trailing: &[(u32, ScriptClass, char)],
+        glyph: Option<(u32, ScriptClass)>,
     ) -> Result<(), String> {
-        let settings = self.space_settings;
+        if trailing.is_empty() {
+            return Ok(());
+        }
+        let settings = self.layout_flags;
         // A line of only white space gets synthetic metrics in the DOCX
         // layout (see the line-break gate), whatever the settings.
-        let glyph = glyph.ok_or_else(|| unsupported("space-formatting"))?;
-        if settings.blanks && !settings.ignore {
-            space_fits_line(space, glyph)?;
+        let glyph = &cache[&glyph.ok_or_else(|| unsupported("space-formatting"))?];
+        let hanging = trailing.len()
+            - trailing
+                .iter()
+                .rev()
+                .take_while(|(_, _, c)| *c == ' ')
+                .count();
+        for (index, (context, class, _)) in trailing.iter().enumerate() {
+            let space = &cache[&(*context, *class)];
+            if settings.blanks && !settings.ignore {
+                space_fits_line(space, glyph)?;
+            }
+            if index >= hanging {
+                trailing_space_decoration(space, settings)?;
+            }
         }
-        trailing_space_decoration(space, settings)
+        Ok(())
     }
 
     fn uniform_class(
@@ -3335,12 +3378,16 @@ mod tests {
                 "{style}"
             );
         }
-        for body in [
-            r#"<text:p text:style-name="J">alpha beta<text:line-break/>gamma delta</text:p>"#,
-            r#"<text:p text:style-name="J">alpha beta gamma delta</text:p>"#,
-        ] {
-            assert_eq!(read(body).unwrap_err(), unsupported("justify"), "{body}");
-        }
+        // Justified paragraphs map to DOCX `both`; LibreOffice stretches a
+        // line ended by a manual break, the DOCX layout does not.
+        let justified =
+            read(r#"<text:p text:style-name="J">alpha beta gamma delta</text:p>"#).unwrap();
+        assert_eq!(paragraphs(&justified)[0].alignment, "justify");
+        assert_eq!(
+            read(r#"<text:p text:style-name="J">alpha beta<text:line-break/>gamma delta</text:p>"#)
+                .unwrap_err(),
+            unsupported("justify-with-line-break")
+        );
     }
 
     #[test]
@@ -3876,16 +3923,34 @@ mod tests {
             Some("1.3")
         )
         .is_ok());
-        // Justified paragraphs reject (the DOCX layout justifies differently).
-        assert_eq!(
+        // Justification settings: shrinking rejects justified paragraphs;
+        // DoNotJustifyLinesWithManualBreak admits their manual breaks.
+        let justified = |settings: &str, body: &str| {
+            let settings = format!(
+                r#"<config:config-item config:name="{settings}" config:type="boolean">true</config:config-item>"#
+            );
             read_fixture(Fixture {
                 styles: r#"<style:style style:name="J" style:family="paragraph"><style:paragraph-properties fo:text-align="justify"/></style:style>"#,
-                body: r#"<text:p text:style-name="J">alpha beta</text:p>"#,
+                body,
+                settings: &settings,
                 ..Fixture::default()
             })
+        };
+        assert_eq!(
+            justified(
+                "JustifyLinesWithShrinking",
+                r#"<text:p text:style-name="J">alpha beta</text:p>"#
+            )
             .unwrap_err(),
-            unsupported("justify")
+            unsupported("justify-shrinking")
         );
+        assert!(justified(
+            "DoNotJustifyLinesWithManualBreak",
+            r#"<text:p text:style-name="J">alpha<text:line-break/>beta</text:p>"#
+        )
+        .is_ok());
+        // Left-aligned paragraphs are unaffected by either setting.
+        assert!(justified("JustifyLinesWithShrinking", "<text:p>alpha beta</text:p>").is_ok());
     }
 
     #[test]
@@ -3974,10 +4039,10 @@ mod tests {
         // (MsWordCompTrailingBlanks, MsWordUlTrailSpace) → admitted styles of
         // a space ending the paragraph or preceding a break.
         for (blanks, underline, admitted) in [
-            (false, false, ["H", "U", "S"].as_slice()),
-            (false, true, ["H", "U", "S"].as_slice()),
-            (true, false, [].as_slice()),
-            (true, true, [].as_slice()),
+            (false, false, [].as_slice()),
+            (false, true, [].as_slice()),
+            (true, false, ["H", "U", "S"].as_slice()),
+            (true, true, ["H"].as_slice()),
         ] {
             let settings =
                 item("MsWordCompTrailingBlanks", blanks) + &item("MsWordUlTrailSpace", underline);
@@ -3988,6 +4053,14 @@ mod tests {
                     ),
                     format!(
                         r#"<text:p><text:span text:style-name="{style}">a<text:s text:c="2"/></text:span><text:line-break/>b</text:p>"#
+                    ),
+                    // §6.1.2 removes this collapsed space; LibreOffice keeps it.
+                    format!(
+                        r#"<text:p><text:span text:style-name="{style}">a </text:span></text:p>"#
+                    ),
+                    // The U+0020 suffix after a no-break space.
+                    format!(
+                        r#"<text:p><text:span text:style-name="{style}">a&#160;<text:s/></text:span></text:p>"#
                     ),
                 ] {
                     let result = read_fixture(Fixture {
@@ -4006,6 +4079,25 @@ mod tests {
                         );
                     }
                 }
+                // Both decorate a trailing no-break or other Unicode space.
+                for space in ["&#160;", "&#8194;", "&#8201;"] {
+                    for body in [
+                        format!(
+                            r#"<text:p><text:span text:style-name="{style}">a{space}{space}</text:span></text:p>"#
+                        ),
+                        format!(
+                            r#"<text:p><text:span text:style-name="{style}">a{space}</text:span><text:line-break/>b</text:p>"#
+                        ),
+                    ] {
+                        let result = read_fixture(Fixture {
+                            styles,
+                            body: &body,
+                            settings: &settings,
+                            ..Fixture::default()
+                        });
+                        assert!(result.is_ok(), "{blanks} {underline} {body} {result:?}");
+                    }
+                }
                 // Spaces between visible text are not trailing.
                 let body = format!(
                     r#"<text:p><text:span text:style-name="{style}">a b</text:span><text:line-break/>c</text:p>"#
@@ -4021,18 +4113,21 @@ mod tests {
         }
         // Without settings.xml LibreOffice's defaults (false) apply.
         let body = r#"<text:p><text:span text:style-name="H">a<text:s/></text:span></text:p>"#;
-        assert!(read_fixture(Fixture {
-            styles,
-            body,
-            ..Fixture::default()
-        })
-        .is_ok());
+        assert_eq!(
+            read_fixture(Fixture {
+                styles,
+                body,
+                ..Fixture::default()
+            })
+            .unwrap_err(),
+            unsupported("trailing-space-decoration")
+        );
         // Only the top-level ooo:configuration-settings set counts: an item in
         // another set does not override it, and repeated sets or items reject.
-        let blanks = item("MsWordCompTrailingBlanks", true);
+        let blanks = item("MsWordCompTrailingBlanks", false);
         let shadow = format!(
             r#"{blanks}<config:config-item-set config:name="other">{}</config:config-item-set>"#,
-            item("MsWordCompTrailingBlanks", false)
+            item("MsWordCompTrailingBlanks", true)
         );
         assert_eq!(
             read_fixture(Fixture {

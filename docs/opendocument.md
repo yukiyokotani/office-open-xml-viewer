@@ -68,7 +68,9 @@ Currently admitted:
   font;
 - page size and margins of a single page style without displayed headers or
   footers;
-- paragraph indents, left/centre/right alignment, proportional line height
+- paragraph indents, left/centre/right/justified alignment (a justified
+  paragraph with a line break only where LibreOffice leaves that line
+  unjustified, and not with space shrinking), proportional line height
   from 100% to 300% on text of one font and size, solid paragraph backgrounds
   (except two consecutive filled paragraphs with spacing between them), page
   breaks, keep-with-next / keep-together, widow/orphan control of two lines,
@@ -77,8 +79,9 @@ Currently admitted:
   strike-through, colours and background colour. Where LibreOffice's
   settings make a space not size its line, the space must be in the face of
   the adjacent text on its line and no larger, and decorated spaces that end
-  a paragraph or precede a line break are admitted only under LibreOffice's
-  default trailing-space setting;
+  a paragraph or precede a line break are admitted only where LibreOffice
+  leaves them undecorated (its Word-compatible trailing-blank setting); a
+  trailing no-break or other Unicode space keeps its decoration in both;
 - text in the Latin script class of ODF Part 3 Table 22, including the
   spaces, punctuation, symbols and emoji the table leaves unassigned.
 
@@ -94,11 +97,20 @@ only within its measured scope:
 - automatic text colour over a character or paragraph background is black
   or white by LibreOffice's `Color::IsDark()` rule.
 
+Two known differences from LibreOffice remain in admitted documents:
+
+- LibreOffice spreads a justified line's spare width in whole layout
+  units, so its justified lines can end up to about 1.6 pt short of the
+  margin; the viewer ends them at the margin;
+- with LibreOffice's default settings, a decorated space at a wrapped
+  line's end is underlined or struck through in LibreOffice and left
+  undecorated by the viewer.
+
 LibreOffice's layout settings (`settings.xml`) that Word-derived documents
 carry are admitted where they were measured to change nothing the reader
 admits; the others must keep LibreOffice's new-document values.
 
-Justified alignment, tabs, letter spacing, horizontal scaling,
+Tabs, letter spacing, horizontal scaling,
 raised/lowered text, fixed and minimum line heights, proportional line
 heights below 100%, lists, tables, frames and images, notes, fields,
 comments, tracked changes, headers and footers, Asian and complex scripts,
