@@ -138,7 +138,7 @@ describe('Node bounded PPTX presentation session', () => {
     const started = deferred<void>();
     const resume = deferred<void>();
     const fetchers: unknown[] = [];
-    const render = vi.spyOn(renderModule, 'renderParsedSlideNode').mockImplementation(
+    const render = vi.spyOn(renderModule, 'renderSlideNode').mockImplementation(
       async (_canvas, _presentation, _slideIndex, options) => {
         fetchers.push(options?.fetchImage);
         started.resolve();
@@ -171,7 +171,7 @@ describe('Node bounded PPTX presentation session', () => {
   it('reports render failures as terminal session metrics', async () => {
     const renderModule = await import('./render.ts');
     const failure = new OoxmlDecodedImageLimitError('image-pixels', 10, 11);
-    const render = vi.spyOn(renderModule, 'renderParsedSlideNode').mockRejectedValue(failure);
+    const render = vi.spyOn(renderModule, 'renderSlideNode').mockRejectedValue(failure);
     const onResourceMetrics = vi.fn();
     try {
       const session = await openPptxPresentation(bytes, { onResourceMetrics });
@@ -407,7 +407,7 @@ function fakeFactory(): NodeCanvasFactory {
   };
 }
 
-describe('Node PPTX session text colour', () => {
+describe('Node PPTX parsed-slide text colour', () => {
   it('paints uncoloured text on a theme-less parsed slide black, not the presentation dk1', async () => {
     const session = await openPptxPresentation(themeLessMasterDeck());
     try {
@@ -421,5 +421,19 @@ describe('Node PPTX session text colour', () => {
     } finally {
       await session.close();
     }
+  });
+
+  it('keeps a materialized slide black and a caller-built copy on defaultTextColor', async () => {
+    const { renderSlideNode } = await import('./render.ts');
+    const presentation = await materializePptxPresentation(themeLessMasterDeck());
+    expect(presentation.defaultTextColor).toBe('10263F');
+    const parsed = textRecordingCanvas();
+    await renderSlideNode(parsed.canvas, presentation, 0, { width: 960, dpr: 1, factory: fakeFactory() });
+    expect(parsed.fills.get('title-1')).toBe('#000000');
+
+    const built = textRecordingCanvas();
+    const copy = { ...presentation, slides: [{ ...presentation.slides[0]! }] };
+    await renderSlideNode(built.canvas, copy, 0, { width: 960, dpr: 1, factory: fakeFactory() });
+    expect(built.fills.get('title-1')).toBe('#10263F');
   });
 });

@@ -30,6 +30,7 @@ import { InProcessPullTransport } from '@silurus/ooxml-core/internal/in-process-
 import type { OoxmlNodeSessionOptions } from './session-options.ts';
 import type { NodeCanvasFactory, NodeCanvasLike } from './render.ts';
 import { createLazyWasmModule, resolveWasm } from './wasm-loader.ts';
+import { markParsedPptxSlide } from './pptx-parsed-slides.ts';
 import { throwIfAborted } from '@silurus/ooxml-core/internal/abort';
 
 const ABORT_MESSAGE = 'PPTX presentation session was aborted';
@@ -208,7 +209,7 @@ export class PptxPresentationSessionImpl implements PptxPresentationSession {
     this.assertOpen();
     return this.enqueueRender(async () => {
       throwIfAborted(this.signal, ABORT_MESSAGE);
-      const { renderParsedSlideNode } = await import('./render.ts');
+      const { renderSlideNode } = await import('./render.ts');
       const presentation: Presentation = {
         slideWidth: this.slideWidth,
         slideHeight: this.slideHeight,
@@ -219,7 +220,7 @@ export class PptxPresentationSessionImpl implements PptxPresentationSession {
         ...(this.bootstrap.hlinkColor ? { hlinkColor: this.bootstrap.hlinkColor } : {}),
         ...(this.bootstrap.folHlinkColor ? { folHlinkColor: this.bootstrap.folHlinkColor } : {}),
       };
-      await renderParsedSlideNode(canvas, presentation, 0, {
+      await renderSlideNode(canvas, presentation, 0, {
         ...options,
         cjkFallback: this.cjkFallback,
         fetchImage: this.fetchImage,
@@ -248,6 +249,7 @@ export class PptxPresentationSessionImpl implements PptxPresentationSession {
         ));
         this.metrics.observeUsage(this.usage);
         this.consumedSlides = index + 1;
+        markParsedPptxSlide(slide);
         yield slide;
       }
     } catch (error) {
