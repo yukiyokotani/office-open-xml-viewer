@@ -69,9 +69,10 @@ Currently admitted:
 - page size and margins of a single page style without displayed headers or
   footers;
 - paragraph indents, left/centre/right alignment, proportional line height
-  from 100% to 300% on text of one font and size, page breaks,
-  keep-with-next / keep-together, widow/orphan control of two lines, and
-  paragraph spacing including contextual spacing;
+  from 100% to 300% on text of one font and size, solid paragraph backgrounds
+  (except two consecutive filled paragraphs with spacing between them), page
+  breaks, keep-with-next / keep-together, widow/orphan control of two lines,
+  and paragraph spacing including contextual spacing;
 - character fonts, sizes, bold, italic, single/double underline and
   strike-through, colours and background colour. Where LibreOffice's
   settings make a space not size its line, the space must be in the face of
@@ -81,7 +82,7 @@ Currently admitted:
 - text in the Latin script class of ODF Part 3 Table 22, including the
   spaces, punctuation, symbols and emoji the table leaves unassigned.
 
-Three behaviours follow LibreOffice where ODF leaves the choice to the
+Four behaviours follow LibreOffice where ODF leaves the choice to the
 consumer or LibreOffice reads the specification differently; each applies
 only within its measured scope:
 
@@ -89,7 +90,9 @@ only within its measured scope:
 - spaces, punctuation, symbols and emoji outside Table 22 take the script
   class of the preceding character (the following one at paragraph start);
 - the nearest style that sets a font colour or the automatic colour decides
-  the colour.
+  the colour;
+- automatic text colour over a character or paragraph background is black
+  or white by LibreOffice's `Color::IsDark()` rule.
 
 LibreOffice's layout settings (`settings.xml`) that Word-derived documents
 carry are admitted where they were measured to change nothing the reader
