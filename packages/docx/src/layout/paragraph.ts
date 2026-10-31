@@ -1552,6 +1552,10 @@ export function planLine(input: PlanLineInput): LineLayout {
   for (const [placementIndex, trimPt] of terminalDecorationTrims) {
     const placement = placements[placementIndex];
     if (placement?.kind !== 'text' || !placement.decorations) continue;
+    // §17.15.3.8 ulTrailSpace: an underline ending in trailing spaces keeps
+    // them, whatever the grid's terminal ink extent.
+    if (input.ulTrailSpace === true
+      && hangingSpaceVisibleLength(placement.text) < placement.text.length) continue;
     const next = placements[placementIndex + 1];
     const decorations = placement.decorations.map((decoration) => {
       if (decoration.kind !== 'underline') return decoration;
