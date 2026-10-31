@@ -5047,6 +5047,32 @@ mod tests {
     }
 
     #[test]
+    fn resolves_label_styles_in_the_list_style_scope() {
+        // A common list style names a common character style even where a
+        // content automatic text style shares its name.
+        let styles = list_styles(&list_level(
+            1,
+            "1",
+            r#" text:style-name="C""#,
+            2.0,
+            -1.0,
+            2.0,
+        )) + r#"<style:style style:name="C" style:family="text"><style:text-properties fo:font-size="20pt"/></style:style>"#;
+        let document = read_fixture(Fixture {
+            styles: &styles,
+            automatic: r#"<style:style style:name="C" style:family="text"><style:text-properties fo:font-size="6pt"/></style:style>"#,
+            body: r#"<text:list text:style-name="L"><text:list-item><text:p>a</text:p></text:list-item></text:list>"#,
+            settings: LIST_SETTINGS,
+            ..Fixture::default()
+        })
+        .unwrap();
+        let DocRun::Text(label) = &paragraphs(&document)[0].runs[0] else {
+            panic!("label run")
+        };
+        assert_eq!(label.font_size, 20.0);
+    }
+
+    #[test]
     fn places_list_paragraphs_as_libreoffice() {
         let styles = list_styles(&list_level(1, "1", "", 2.0, -1.0, 3.0));
         let body = r#"<text:list text:style-name="L"><text:list-item><text:p>a</text:p><text:p>b</text:p></text:list-item></text:list>"#;
@@ -5128,6 +5154,15 @@ mod tests {
         assert_eq!(
             one(r#"<text:list-style style:name="L"><text:list-level-style-bullet text:level="1" text:bullet-char="&#x2011;"><style:list-level-properties text:list-level-position-and-space-mode="label-alignment"><style:list-level-label-alignment text:label-followed-by="listtab" text:list-tab-stop-position="2cm" fo:text-indent="-1cm" fo:margin-left="2cm"/></style:list-level-properties></text:list-level-style-bullet></text:list-style>"#).unwrap_err(),
             unsupported("list-bullet")
+        );
+        // A header paragraph beyond the text area.
+        assert_eq!(
+            read_list(
+                &list_styles(&level.replace(r#"fo:margin-left="2cm""#, r#"fo:margin-left="30cm""#)),
+                &list("<text:list-header><text:p>h</text:p></text:list-header>"),
+            )
+            .unwrap_err(),
+            unsupported("list-geometry")
         );
         // A list tab stop before the text area.
         assert_eq!(

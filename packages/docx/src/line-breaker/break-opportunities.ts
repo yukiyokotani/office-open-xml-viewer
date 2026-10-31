@@ -873,7 +873,10 @@ function processTabSegment(
   // at a line start, and a stop at the line end does not fit it either.
   const listLabelTab = seg.listLabel !== undefined;
   if (listLabelTab && breakerState.currentLine.length === 0) {
-    tabWidth = 0;
+    // Collapsed, it adds no metrics to the body's line either.
+    seg.measuredWidth = 0;
+    addToLine(seg, 0, 0, 0, 0);
+    return;
   } else if (breakerState.currentWidth + tabWidth > availW()
     || (listLabelTab && breakerState.currentWidth + tabWidth >= availW())) {
     if (breakerState.currentLine.length > 0) {

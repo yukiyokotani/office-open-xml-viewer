@@ -745,6 +745,8 @@ impl<'a> Reader<'a> {
             let style = self
                 .sheet
                 .find(Scope::Content, Family::Text, name)
+                .filter(|_| !self.sheet.list_is_common(Scope::Content, style))
+                .or_else(|| self.sheet.find_common(Family::Text, name))
                 .ok_or_else(|| invalid("a list level names a missing style"))?;
             styles.extend(self.text_chain(style)?.iter().copied());
         }
@@ -804,6 +806,12 @@ impl<'a> Reader<'a> {
         paragraph.indent_left = margin;
         paragraph.indent_first = if list.label.is_some() { indent } else { 0.0 };
         paragraph.no_hanging_indent_tab = true;
+        // LibreOffice clamps a label or paragraph beyond the text area
+        // (measured by the reviewer); the DOCX layout does not.
+        let width = self.text_width - paragraph.indent_right;
+        if margin >= width {
+            return Err(unsupported("list-geometry"));
+        }
         let Some(label) = &list.label else {
             return Ok(());
         };

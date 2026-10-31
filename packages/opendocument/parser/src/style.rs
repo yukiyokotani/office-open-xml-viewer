@@ -232,6 +232,21 @@ impl StyleSheet {
             .or_else(|| self.list_common.get(name))
     }
 
+    /// Whether `name` names a common list style (not an automatic one of
+    /// `scope`): its references resolve among common styles only.
+    pub fn list_is_common(&self, scope: Scope, name: &str) -> bool {
+        !self.list_automatic.contains_key(&(scope, name.to_string()))
+            && self.list_common.contains_key(name)
+    }
+
+    /// A common style of the family (§16.2: common styles name common
+    /// styles).
+    pub fn find_common(&self, family: Family, name: &str) -> Option<StyleRef<'_>> {
+        self.common
+            .get(&(family.name().to_string(), name.to_string()))
+            .map(|style| StyleRef { style })
+    }
+
     pub fn default_style(&self, family: Family) -> Option<StyleRef<'_>> {
         self.defaults
             .get(family.name())

@@ -110,6 +110,15 @@ describe('list labels emitted as leading runs', () => {
     expect(xOf(second!, 'body')).toBeCloseTo(40, 6);
   });
 
+  it('adds no metrics from a collapsed separator tab to the body line', () => {
+    const big = { fontSize: 40 } as Partial<DocxTextRun>;
+    const runs = [textRun('1.', { ...big, __listLabel: 'start' } as Partial<DocxTextRun>),
+      textRun('\t', { ...big, __listLabel: 'start' } as Partial<DocxTextRun>), textRun('body')];
+    const [, body] = lines(list(runs, 'left', 360));
+    const [plain] = lines(para([textRun('body')], 'left'));
+    expect(body!.advancePt).toBeCloseTo(plain!.advancePt, 6);
+  });
+
   it('breaks the first body word inside the word on a label-only line', () => {
     // 30 characters (300 pt) do not fit the 280 pt after the tab stop.
     const [first, second] = lines(list([label('1.'), label('\t'), textRun('UUUUUUUUUUUUUUUUUUUUUUUUUUUUUU')]));
