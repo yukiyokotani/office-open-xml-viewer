@@ -149,7 +149,18 @@ if (args.rules === 'off') {
 // With --unmask-settings the browser pass also renders through the
 // diagnostic build, so files rejected only for settings.xml flags open.
 const unmaskedWasmOut = args['unmask-settings'] ? join(runDir, 'wasm-settings-unmasked') : undefined;
-const unmaskedBinary = patchedBuild(`settings-unmasked-rules-${args.rules}`, [...rulePatches, settingsUnmasked], unmaskedWasmOut);
+// The diagnostic patch targets one source line of the reader. When the
+// reader's settings check no longer has that shape, the default run skips the
+// diagnostic pass (with a warning) rather than failing; --unmask-settings,
+// which depends on it, still fails.
+let unmaskedBinary;
+try {
+  settingsUnmasked(readFileSync(odtSource, 'utf8'));
+  unmaskedBinary = patchedBuild(`settings-unmasked-rules-${args.rules}`, [...rulePatches, settingsUnmasked], unmaskedWasmOut);
+} catch (error) {
+  if (args['unmask-settings'] || !/compatibility-setting check not found/u.test(String(error))) throw error;
+  console.warn(`skipping the settings-unmasked diagnostic: ${error.message}`);
+}
 if (unmaskedWasmOut) customWasm = join(unmaskedWasmOut, 'opendocument_odt_bg.wasm');
 
 // ---- resume guard ------------------------------------------------------------
@@ -230,17 +241,19 @@ function classifyAll(binary) {
 writeFileSync(join(runDir, 'native.json'), `${JSON.stringify(classifyAll(nativeBinary), null, 2)}\n`);
 // The settings.xml check runs before the content is read, so it masks every
 // later rejection; this pass shows what each file would hit next.
-writeFileSync(join(runDir, 'native-settings-unmasked.json'), `${JSON.stringify(classifyAll(unmaskedBinary), null, 2)}\n`);
+const unmaskedPath = join(runDir, 'native-settings-unmasked.json');
+if (unmaskedBinary) writeFileSync(unmaskedPath, `${JSON.stringify(classifyAll(unmaskedBinary), null, 2)}\n`);
+else rmSync(unmaskedPath, { force: true });
 
 // Which layout flags each `compatibility-setting` rejection carries, against
 // the reader's LAYOUT_SETTINGS table in this checkout.
 const layoutTable = /const LAYOUT_SETTINGS[^=]*=\s*\[([\s\S]*?)\];/u.exec(readFileSync(odtSource, 'utf8'));
-if (!layoutTable) throw new Error('LAYOUT_SETTINGS not found in odt.rs');
-const expected = new Map([...layoutTable[1].matchAll(/\(\s*"([^"]+)",\s*"([^"]*)",?\s*\)/gu)].map((m) => [m[1], m[2]]));
+if (!layoutTable) console.warn('LAYOUT_SETTINGS not found in odt.rs; the report omits the layout-flag breakdown');
+const expected = new Map([...(layoutTable?.[1] ?? '').matchAll(/\(\s*"([^"]+)",\s*"([^"]*)",?\s*\)/gu)].map((m) => [m[1], m[2]]));
 const native = JSON.parse(readFileSync(join(runDir, 'native.json'), 'utf8'));
 const settingsFlags = {};
 for (const file of files) {
-  if (!native[file.id]?.startsWith('ODF_UNSUPPORTED:compatibility-setting')) continue;
+  if (!layoutTable || !native[file.id]?.startsWith('ODF_UNSUPPORTED:compatibility-setting')) continue;
   const xml = spawnSync('unzip', ['-p', file.odt, 'settings.xml'], { encoding: 'utf8', maxBuffer: 64 << 20 }).stdout;
   settingsFlags[file.id] = [...xml.matchAll(/<config:config-item config:name="([^"]+)"[^>]*>([^<]*)<\/config:config-item>/gu)]
     .filter(([, name, value]) => expected.has(name) && expected.get(name) !== value.trim())

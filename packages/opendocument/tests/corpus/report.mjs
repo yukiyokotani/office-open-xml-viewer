@@ -22,6 +22,7 @@ const meta = existsSync(join(runDir, 'meta.json')) ? JSON.parse(readFileSync(joi
 const files = JSON.parse(readFileSync(join(runDir, 'files.json'), 'utf8'));
 const native = existsSync(join(runDir, 'native.json')) ? JSON.parse(readFileSync(join(runDir, 'native.json'), 'utf8')) : {};
 const readJson = (name) => (existsSync(join(runDir, name)) ? JSON.parse(readFileSync(join(runDir, name), 'utf8')) : {});
+const hasUnmasked = existsSync(join(runDir, 'native-settings-unmasked.json'));
 const unmasked = readJson('native-settings-unmasked.json');
 const settingsFlags = readJson('settings-flags.json');
 const resultsDir = join(runDir, 'results');
@@ -125,8 +126,10 @@ const nextReasons = new Map();
 const flagCounts = new Map();
 for (const file of files) {
   if (nativeReason(file.id, native) !== 'compatibility-setting') continue;
-  const next = nativeReason(file.id, unmasked);
-  nextReasons.set(next, [...(nextReasons.get(next) ?? []), file.rel]);
+  if (hasUnmasked) {
+    const next = nativeReason(file.id, unmasked);
+    nextReasons.set(next, [...(nextReasons.get(next) ?? []), file.rel]);
+  }
   for (const flag of settingsFlags[file.id] ?? []) flagCounts.set(flag, [...(flagCounts.get(flag) ?? []), file.rel]);
 }
 const unmaskedRanking = rank(nextReasons);
@@ -171,13 +174,17 @@ md.push(`- Opened documents compared only in part (ODF_HARNESS_MAX_PAGES): ${tru
 md.push('## Rejection reasons (reader code, by file count)', '', '| Code | Files | % of corpus | Example |', '| --- | ---: | ---: | --- |');
 for (const { reason, files: count, examples } of rankedReasons) md.push(`| \`${reason}\` | ${count} | ${pct(count)} | ${examples[0]} |`);
 if (unmaskedRanking.length) {
-  const masked = nextReasons.size ? [...nextReasons.values()].reduce((n, l) => n + l.length, 0) : 0;
+  const masked = [...nextReasons.values()].reduce((n, l) => n + l.length, 0);
   md.push('', `## Behind \`compatibility-setting\` (${masked} files, diagnostic build without the settings.xml check)`, '');
   md.push('First rejection each file hits once its settings.xml layout flags are ignored; `admitted` would open.', '');
   md.push('| Next code | Files | Example |', '| --- | ---: | --- |');
   for (const { key, files: count, examples } of unmaskedRanking) md.push(`| \`${key}\` | ${count} | ${examples[0]} |`);
-  md.push('', 'Layout flags that differ from the reader\'s accepted values (files carrying each):', '');
-  md.push('| Flag | Files |', '| --- | ---: |');
+} else if (!hasUnmasked && status.rejected) {
+  md.push('', '_The settings-unmasked diagnostic did not run (its patch no longer matches the reader)._');
+}
+if (flagRanking.length) {
+  md.push('', '## `compatibility-setting` items', '', 'settings.xml items whose value differs from the reader\'s `LAYOUT_SETTINGS` table (files carrying each):', '');
+  md.push('| Item | Files |', '| --- | ---: |');
   for (const { key, files: count } of flagRanking) md.push(`| \`${key}\` | ${count} |`);
 }
 md.push('', `## Page diff distribution (${pages.length} pages compared)`, '');
