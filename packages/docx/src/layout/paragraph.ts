@@ -1450,19 +1450,24 @@ export function planLine(input: PlanLineInput): LineLayout {
   const rtlVisibleEdge = input.baseRtl === true && edge === 'justify'
     && input.displayMathJustification === undefined
     && wordRtlJustifiedVisibleFitApplies(input.alignment);
-  const rtlHangingSpacePt = rtlVisibleEdge && input.wordWrap !== false
-    ? trailingAdvancePt(segments, (text) => hangingSpaceVisibleLength(text, (code) => code === 0x20))
-    : 0;
-  // The hanging space sits at the right when it ends a left-to-right run that
-  // is drawn rightmost (a Latin line in a right-to-left paragraph), else at
-  // the left; the visible text of a justified line keeps the band either way.
-  // An unjustified (final) line keeps the space inside the band.
+  // The space hangs on the side where it is drawn: the right end of a
+  // left-to-right segment drawn rightmost (a Latin line in a right-to-left
+  // paragraph), the left end of a right-to-left segment drawn leftmost. A
+  // space drawn between other segments cannot hang and stays in the line.
   let lastTextIndex = segments.length - 1;
   while (lastTextIndex >= 0 && !(segments[lastTextIndex]!.kind === 'text'
     && (segments[lastTextIndex] as { text: string }).text !== '')) lastTextIndex -= 1;
-  const lastText = lastTextIndex >= 0 ? segments[lastTextIndex] : undefined;
-  const rtlHangsRight = rtlHangingSpacePt > 0 && lastText?.kind === 'text'
-    && visual.rtl[lastTextIndex] !== true && visual.order.at(-1) === lastTextIndex;
+  const rtlLineEndSpacePt = rtlVisibleEdge && input.wordWrap !== false && lastTextIndex >= 0
+    ? trailingAdvancePt(segments, (text) => hangingSpaceVisibleLength(text, (code) => code === 0x20))
+    : 0;
+  // A segment of spaces alone is drawn wherever the bidi order puts it.
+  const spacesOnly = lastTextIndex >= 0 && segments[lastTextIndex]!.kind === 'text'
+    && !/\S/u.test((segments[lastTextIndex] as { text: string }).text);
+  const rtlHangSide = rtlLineEndSpacePt <= 0 ? null
+    : visual.order.at(-1) === lastTextIndex && (spacesOnly || visual.rtl[lastTextIndex] !== true) ? 'right'
+      : visual.order[0] === lastTextIndex && (spacesOnly || visual.rtl[lastTextIndex] === true) ? 'left'
+        : null;
+  const rtlHangingSpacePt = rtlHangSide === null ? 0 : rtlLineEndSpacePt;
   const kashida = applyJustify ? kashidaLevel(input.alignment) : null;
   if (kashida && lineSlackPt + rtlHangingSpacePt > 0) {
     // Kashida rewrites one contextual paint operation. A segment already split
@@ -1653,7 +1658,12 @@ export function planLine(input: PlanLineInput): LineLayout {
       ? alignmentSlackPt / 2
       : edge === 'justify' && input.baseRtl && (rtlVisibleEdge || !applyJustify
         || ((!softWrapped || softLineSpacesOnly) && distributedWidthPt <= 0))
-        ? alignmentSlackPt + (rtlHangsRight && applyJustify ? rtlHangingSpacePt : 0)
+        ? rtlHangSide === 'right'
+          // A justified line hangs the space past the start edge; an
+          // unjustified one keeps it inside the band while it fits there
+          // (blk-0898-kfit6 final lines) and otherwise starts at the band.
+          ? applyJustify ? alignmentSlackPt + rtlHangingSpacePt : Math.max(alignmentSlackPt, 0)
+          : alignmentSlackPt
         : 0;
   const lineStartPt = lineLeftPt + physicalStartOffsetPt;
   const alignmentOffsetPt = input.decimalAutoTabPt === undefined

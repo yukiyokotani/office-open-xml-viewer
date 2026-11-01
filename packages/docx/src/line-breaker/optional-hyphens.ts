@@ -1,3 +1,4 @@
+import { lineEndSpaceCharged } from './atomic-units.js';
 import type { BreakOpportunityIteratorContext } from './break-opportunities.js';
 import type { LayoutTextSeg } from './model.js';
 import { RESET_SLICED_TEXT_MEASUREMENT, slicedTextMetadata } from './advance.js';
@@ -69,8 +70,9 @@ export function placeOptionalHyphenPrefix(
   }
   const last = members.at(-1)!;
   // A collapsible trailing space does not force an otherwise fitting word
-  // to select an optional hyphen. RTL keeps its ordinary containment policy.
-  if (!context.baseRtl && last.text.endsWith(' ')) {
+  // to select an optional hyphen. RTL keeps its ordinary containment policy
+  // outside WORD_RTL_JUSTIFIED_VISIBLE_FIT.
+  if (!lineEndSpaceCharged(context) && last.text.endsWith(' ')) {
     context.reservePrefixWork(last.text.length);
     width -= context.segAdvance(last) - context.strAdvance(last, last.text.replace(/ +$/u, ''));
   }

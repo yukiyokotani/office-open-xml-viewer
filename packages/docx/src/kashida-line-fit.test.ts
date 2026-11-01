@@ -231,4 +231,48 @@ describe('WORD_RTL_JUSTIFIED_VISIBLE_FIT', () => {
       expect(end(latin!)).toBeCloseTo(380);
     }
   });
+  it('fits a split or hyphenatable right-to-left word by the visible prefix too', () => {
+    // A 345 pt band: 150 pt + space + 180 pt is 340 pt visible (350 pt with
+    // the line-end space) and stays on the first line.
+    const rtl = { bidi: true, indentRight: 15 } as Partial<DocParagraph>;
+    const w1 = '\u05d0'.repeat(15);
+    const half = '\u05d1'.repeat(9);
+    for (const settings of MODES) {
+      const [split] = lines(para([textRun(`${w1} ${half}`), textRun(`${half} `, { color: 'FF0000' }), textRun('\u05d2'.repeat(5))], 'both', rtl), settings);
+      expect(characters(split!)).toHaveLength(33);
+      // The visible text stays in the band at its start edge.
+      expect(start(split!)).toBeGreaterThanOrEqual(35 - 1e-6);
+      expect(end(split!)).toBeCloseTo(380);
+      const soft = textRun('', { optionalHyphen: true } as Partial<DocxTextRun>);
+      const [hyphen] = lines(para([textRun(`${w1} ${half}`), soft, textRun(`${half} `), textRun('\u05d2'.repeat(5))], 'both', rtl), settings);
+      expect(characters(hyphen!).map(({ character }) => character).join('')).not.toContain('-');
+      expect(characters(hyphen!)).toHaveLength(33);
+    }
+  });
+
+  it('keeps a mixed-direction justified line inside the band when its line-end space is drawn inside', () => {
+    // Alternating Latin and Hebrew words; the line ends with a Latin word
+    // drawn leftmost, so its line-end space sits between runs.
+    const rtl = { bidi: true, indentRight: 15 } as Partial<DocParagraph>;
+    const text = Array.from({ length: 20 }, (_, index) => index % 2 === 0 ? 'abcd' : '\u05d0\u05d1\u05d2\u05d3').join(' ');
+    for (const settings of MODES) {
+      const [line] = lines(para([textRun(text)], 'both', rtl), settings);
+      expect(characters(line!)).toHaveLength(28);
+      expect(start(line!)).toBeGreaterThanOrEqual(35 - 1e-6);
+      expect(end(line!)).toBeLessThanOrEqual(380 + 1e-6);
+    }
+  });
+
+  it('keeps a final right-to-left line admitted by its visible width inside the band', () => {
+    // A 340 pt Latin word and its 10 pt space in a 345 pt band, final line.
+    const rtl = { bidi: true, indentRight: 15 } as Partial<DocParagraph>;
+    for (const settings of MODES) {
+      const [final] = lines(para([textRun(`${'a'.repeat(34)} `)], 'both', rtl), settings);
+      expect(start(final!)).toBeCloseTo(35);
+      expect(end(final!)).toBeCloseTo(375);
+      // With room for the space it stays inside the band, as before.
+      const [short] = lines(para([textRun(`${'a'.repeat(20)} `)], 'both', rtl), settings);
+      expect(end(short!)).toBeCloseTo(370);
+    }
+  });
 });

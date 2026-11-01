@@ -1,3 +1,4 @@
+import { lineEndSpaceCharged } from './atomic-units.js';
 import { textBreakOffsetAt, textBreakOffsets } from './text-break-window.js';
 import { candidateUnit, lineGapModel, type GapSegment } from './line-gaps.js';
 import { LineMeasurementAdapter } from './measurement-adapter.js';
@@ -257,7 +258,7 @@ export function performMinimalLegalTextWidth(
   operationState: PassOperationState,
   segment: LayoutTextSeg,
 ): number {
-  const { kinsoku, strAdvance, baseRtl } = operationState;
+  const { kinsoku, strAdvance } = operationState;
   const text = segment.text;
   let end = text.length;
   if (segment.fitTextRegionIndex === undefined && !segment.ruby && !segment.tateChuYoko) {
@@ -283,7 +284,7 @@ export function performMinimalLegalTextWidth(
   }
   const prefix = text.slice(0, end);
   // The fit tests exclude a collapsible U+0020 suffix except in an RTL line.
-  return strAdvance(segment, baseRtl ? prefix : prefix.replace(/ +$/u, ''));
+  return strAdvance(segment, lineEndSpaceCharged(operationState) ? prefix : prefix.replace(/ +$/u, ''));
 }
 
 /** Vertical allocation belongs to the physical line; only a failed gap
@@ -624,8 +625,10 @@ export function performRejectGap(
   const rejected = transaction.window;
   // The unit's advance is measured against the fit width; the window search
   // compares raw band widths (WORD_KASHIDA_LINE_FIT).
+  // The same window kind as the rejected one: its far edge decides whether the
+  // reserve base runs on past it.
   const required = lineBandWidthForFit(operationState, rejection.requiredWidth,
-    breakerState.isFirst ? Math.max(0, firstIndent) : 0);
+    breakerState.isFirst ? Math.max(0, firstIndent) : 0, reserveBaseExtension(operationState, rejected));
   const hangingOffset = breakerState.isFirst ? Math.min(0, firstIndent) : 0;
   // The forced unit did not fit this gap, so its advance exceeds the width
   // the solver admitted. A lower bound that does not (non-monotone advances)
@@ -665,18 +668,32 @@ function lineReserveBaseWidth(operationState: LineFitState): number {
   return (end < maxWidth - 1e-9 ? end : marginRightPx) - start;
 }
 
-/** Window width whose fit width holds `advancePx` after `indentPx` (a
- * narrowed float gap, whose far edge is its own). */
+/** Exact inverse of {@link lineFitWidth}: the window width whose fit width
+ * holds `advancePx` after `indentPx`. `farEdgeExtensionPx` is the distance the
+ * reserve base runs past such a window's far edge (the trailing indent when the
+ * window reaches the band's far edge, else zero). */
 export function lineBandWidthForFit(
   operationState: Pick<PassOperationState, 'lineFit'>,
   advancePx: number,
   indentPx: number,
+  farEdgeExtensionPx: number,
 ): number {
   const fit = operationState.lineFit;
   if (fit === undefined) return advancePx + indentPx;
   return fit.reserveShare > 0
-    ? (advancePx + indentPx) / (1 - fit.reserveShare)
+    ? (advancePx + indentPx + fit.reserveShare * farEdgeExtensionPx) / (1 - fit.reserveShare)
     : advancePx / fit.fraction + indentPx;
+}
+
+/** Distance the reserve base runs past a window's far edge: the trailing
+ * indent when the window reaches the band's far edge. */
+function reserveBaseExtension(
+  operationState: Pick<PassOperationState, 'maxWidth' | 'marginRightPx' | 'tabOriginPx' | 'baseRtl'>,
+  window: Readonly<{ xOffset: number; maxWidth: number }>,
+): number {
+  const { maxWidth, marginRightPx, tabOriginPx, baseRtl } = operationState;
+  if (baseRtl) return window.xOffset > 1e-9 ? 0 : tabOriginPx;
+  return window.xOffset + window.maxWidth < maxWidth - 1e-9 ? 0 : Math.max(0, marginRightPx - maxWidth);
 }
 
 export function performFitsMeasuredWidth(

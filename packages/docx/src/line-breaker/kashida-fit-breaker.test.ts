@@ -25,6 +25,9 @@ function obstacle(left: number, right: number): FloatRect {
     xLeft: left, xRight: right, yTop: 0, yBottom: 60, side: 'bothSides',
     distLeft: 0, distRight: 0, distTop: 0, distBottom: 0, paraId: 0 };
 }
+function band(left: number, right: number, top: number, bottom: number): FloatRect {
+  return { ...obstacle(left, right), imageY: top, imageH: bottom - top, yTop: top, yBottom: bottom };
+}
 function wrap(floats: FloatRect[]): WrapLayoutCtx {
   return { floats, paraX: 0, startPageY: 0, columnXPt: 0, columnWidthPt: 360,
     readingDirection: 'ltr', pageH: 800, lineBoxH: () => 10 };
@@ -103,5 +106,36 @@ describe('WORD_KASHIDA_LINE_FIT line breaker', () => {
       baseRtl: true, tabStops: [{ pos: 300, alignment: 'end', leader: 'none' }], lineFit: fit(0.8, 0),
     });
     expect(rtl!.segments.find((segment) => 'isTab' in segment)!.measuredWidth).toBeCloseTo(245);
+  });
+  it('retries with the exact inverse of a reserve that runs past a far-edge window', () => {
+    // A 300 pt paragraph with a 60 pt trailing indent; floats at the start
+    // side leave 100, 110 and 120 pt windows reaching the far edge on three
+    // 10 pt lines. Before mode 15 each reserves 0.1 × (window + 60): fits of
+    // 84, 93 and 102 pt. A 90 pt word enters the 110 pt window.
+    const floats = wrap([band(0, 200, 0, 10), band(0, 190, 10, 20), band(0, 180, 20, 30)]);
+    const lines = run([token('W'.repeat(18))], {
+      maxWidth: 300, marginRightPx: 360, wrapCtx: floats, lineFit: fit(1, 0.1),
+    });
+    expect(lines.map((line) => [line.topY, line.xOffset])).toEqual([[10, 190]]);
+  });
+
+  it('admits a right-to-left aligned cell against the band during fitting', () => {
+    // A 360 pt highKashida band (fit 288 pt): a 5 pt prefix and a 300 pt cell
+    // ending at a 355 pt end stop stay on one line, the gap 355 - 300 - 5.
+    const lines = run([token('A'), tab(), token('B'.repeat(60))], {
+      baseRtl: true, tabStops: [{ pos: 355, alignment: 'end', leader: 'none' }], lineFit: fit(0.8, 0),
+    });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]!.segments.find((segment) => 'isTab' in segment)!.measuredWidth).toBeCloseTo(50);
+  });
+
+  it('admits a right positional tab and its cell against the band', () => {
+    // A 5 pt prefix, an indent-relative right ptab and a 40 pt cell in a
+    // 360 pt highKashida band: the cell ends at 360 on the same line.
+    const ptab = { isTab: true, fontSize: 10, measuredWidth: 0, bold: false, italic: false,
+      ptab: { alignment: 'right', relativeTo: 'indent' } } as unknown as LayoutSeg;
+    const lines = run([token('A'), ptab, token('B'.repeat(8))], { lineFit: fit(0.8, 0) });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]!.segments.find((segment) => 'isTab' in segment)!.measuredWidth).toBeCloseTo(315);
   });
 });

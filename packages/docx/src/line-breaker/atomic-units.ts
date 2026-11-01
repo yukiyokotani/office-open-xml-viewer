@@ -6,9 +6,17 @@ import { hasCJKBreakOpportunity } from './text-runs.js';
 
 export interface AtomicTextMeasurement {
   readonly baseRtl: boolean;
+  /** WORD_RTL_JUSTIFIED_VISIBLE_FIT: right-to-left lines fit their visible prefix. */
+  readonly lineFit?: Readonly<{ rtlVisiblePrefix: boolean }>;
   readonly reservePrefixWork: (utf16Units: number) => void;
   readonly segAdvance: (segment: LayoutTextSeg) => number;
   readonly strAdvance: (segment: LayoutTextSeg, text: string) => number;
+}
+
+/** Whether line fitting charges a line-end U+0020: right-to-left lines do
+ * (library containment policy) unless WORD_RTL_JUSTIFIED_VISIBLE_FIT applies. */
+export function lineEndSpaceCharged(state: Pick<AtomicTextMeasurement, 'baseRtl' | 'lineFit'>): boolean {
+  return state.baseRtl && state.lineFit?.rtlVisiblePrefix !== true;
 }
 
 /** §17.3.2.14 links contiguous fitText runs into one specified width.
@@ -91,7 +99,7 @@ export function measureJoinedTextUnit(
     const fw = end === f.text.length ? segAdvance(f) : strAdvance(f, prefix);
     groupW += fw;
     const trimmed = prefix.replace(/ +$/, '');
-    const trailing = !fixedCell && !measurement.baseRtl && prefix.endsWith(' ')
+    const trailing = !fixedCell && !lineEndSpaceCharged(measurement) && prefix.endsWith(' ')
       ? fw - strAdvance(f, trimmed) : 0;
     groupTrail = trimmed.length === 0 && groupTrail > 0 ? groupTrail + trailing : trailing;
     if (end < f.text.length || !fixedCell && explicitEnd !== undefined && hardEnd === undefined) break;

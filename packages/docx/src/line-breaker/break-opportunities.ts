@@ -1,4 +1,4 @@
-import { measureFitTextUnit, measureJoinedTextUnit } from './atomic-units.js';
+import { lineEndSpaceCharged, measureFitTextUnit, measureJoinedTextUnit } from './atomic-units.js';
 import { placeOptionalHyphenPrefix } from './optional-hyphens.js';
 import {
   kinsokuAdjustedSplit,
@@ -138,9 +138,10 @@ function placedAdvanceExceeds(
   segment: LayoutTextSeg,
   placedText: string,
 ): boolean {
-  const { breakerState, strAdvance, availW, fitsMeasuredWidth, baseRtl } = context;
+  const { breakerState, strAdvance, availW, fitsMeasuredWidth } = context;
   // A line-end U+3000 run hangs as whitespace (word-ideographic-space hang).
-  const visible = (baseRtl ? placedText : placedText.replace(/ +$/u, '')).replace(/\u3000+$/u, '');
+  const visible = (lineEndSpaceCharged(context) ? placedText : placedText.replace(/ +$/u, ''))
+    .replace(/\u3000+$/u, '');
   return !fitsMeasuredWidth(breakerState.currentWidth + strAdvance(segment, visible), availW());
 }
 
@@ -387,8 +388,7 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
   const fitWidthFor = (
     widthPx: number,
     trailingSpacePx: number,
-  ): number => wordVisiblePrefixFitWidthPx(widthPx, trailingSpacePx,
-    context.baseRtl && context.lineFit?.rtlVisiblePrefix !== true);
+  ): number => wordVisiblePrefixFitWidthPx(widthPx, trailingSpacePx, lineEndSpaceCharged(context));
   const wForFit = fitWidthFor(prospectiveWidth, trailingSpaceW);
   // ECMA-376 §17.3.1.33 does not prescribe a line-breaking tolerance.
   // Word-for-Mac controls with Calibri and Arial, left/center/right aligned
@@ -635,6 +635,12 @@ function alignedTabCellAvailW(context: BreakOpportunityIteratorContext): number 
   return lineBandW(context) + context.breakerState.lineMarginExtension;
 }
 
+/** Whether WORD_KASHIDA_LINE_FIT narrows this paragraph's fit width. */
+function lineFitReduces(context: BreakOpportunityIteratorContext): boolean {
+  const fit = context.lineFit;
+  return fit !== undefined && (fit.fraction !== 1 || fit.reserveShare !== 0);
+}
+
 /** The line's band width, without the WORD_KASHIDA_LINE_FIT reserve: an
  * aligned tab cell may reach its stop anywhere in the band. */
 function lineBandW(context: BreakOpportunityIteratorContext): number {
@@ -743,6 +749,16 @@ function processTabSegment(
     }
     seg.measuredWidth = 0;
     addToLine(seg, 0, seg.fontSize, seg.fontSize * scale * SYNTHETIC_ASCENT_EM, seg.fontSize * scale * SYNTHETIC_DESCENT_EM);
+    // WORD_KASHIDA_LINE_FIT reserves nothing for an aligned cell: an end or
+    // centre stop's cell is admitted against the band, as left-to-right.
+    if (!seg.ptab && lineFitReduces(context)) {
+      const stop = nextLineTabStop(startPen + breakerState.currentWidth,
+        context.bidiCustomStopsPx, context.bidiIntervalPx, frame.leadingShift);
+      if (stop && tabAlignmentRole(stop.alignment) !== 'leading'
+        && context.fitsMeasuredWidth(breakerState.currentWidth + tabFollowingMetrics().totalWidth, lineBandW(context))) {
+        commitAlignedTabCell(context);
+      }
+    }
     return;
   }
 
@@ -792,7 +808,10 @@ function processTabSegment(
       // segment so the line-height reflects the ptab's font.
       tabW = 0;
     }
-    if (breakerState.currentWidth + tabW > availW()) {
+    // WORD_KASHIDA_LINE_FIT reserves nothing for an aligned cell: a right or
+    // centre positional tab and its cell are admitted against the band.
+    const ptabLimit = seg.ptab.alignment !== 'left' ? lineBandW(context) : availW();
+    if (!context.fitsMeasuredWidth(breakerState.currentWidth + tabW, ptabLimit)) {
       if (breakerState.currentLine.length > 0) {
         flush(undefined, false, seg.src);
         breakerState.queue.unshift(seg);
@@ -805,7 +824,8 @@ function processTabSegment(
     // §17.3.3.23 selects the reference target independently of paragraph
     // indents. Library policy limits allocation to the actual paragraph/float
     // band: a fitting cell stays aligned, and all other cells use normal breaks.
-    if (seg.ptab.alignment !== 'left' && breakerState.currentWidth + followW <= availW()) {
+    if (seg.ptab.alignment !== 'left'
+      && context.fitsMeasuredWidth(breakerState.currentWidth + followW, ptabLimit)) {
       commitAlignedTabCell(context);
     }
     return;
