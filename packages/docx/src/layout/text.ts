@@ -129,6 +129,7 @@ export function shapeRunToDocRun(
     vertAlign: null,
     hyperlink: null,
     ruby: run.ruby ?? undefined,
+    ...(run.rtl === undefined ? {} : { rtl: run.rtl }),
     textBoxLineFloor: true,
     textBoxVertical,
   };

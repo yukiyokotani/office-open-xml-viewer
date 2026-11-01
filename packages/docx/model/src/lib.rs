@@ -3117,6 +3117,9 @@ pub struct ShapeTextRun {
     /// the paragraph text.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ruby: Option<RubyAnnotation>,
+    /// ECMA-376 §17.3.2.30 `<w:rtl>`, same semantics as the body run field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rtl: Option<bool>,
 }
 
 /// One paragraph of text rendered inside a shape (`<wps:txbx><w:txbxContent>`).

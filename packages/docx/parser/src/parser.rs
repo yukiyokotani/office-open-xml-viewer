@@ -12098,6 +12098,7 @@ fn extract_simple_paragraph_text(
             bold: fmt.bold.unwrap_or(false),
             italic: fmt.italic.unwrap_or(false),
             ruby,
+            rtl: fmt.rtl,
         });
         if first_run_fmt.is_none() {
             first_run_fmt = Some(fmt);
@@ -21755,6 +21756,37 @@ mod rtl_tests {
         assert_eq!(shape.text_blocks.len(), 1, "one body paragraph");
         assert_eq!(shape.text_blocks[0].text, "مربع نص 2025");
         assert_eq!(shape.text_blocks[0].alignment, "right");
+    }
+
+    /// Issue #2078 — §17.3.2.30 `<w:rtl>` survives on a text-box run
+    /// (`ShapeTextRun.rtl`), mirroring the body run field; an unset run stays `None`.
+    #[test]
+    fn textbox_run_carries_rtl() {
+        let body = body_from(
+            r##"<w:p><w:r><w:pict xmlns:v="urn:schemas-microsoft-com:vml">
+              <v:shape id="tb1" type="#_x0000_t202" style="width:300pt;height:60pt">
+                <v:textbox><w:txbxContent>
+                  <w:p>
+                    <w:r><w:rPr><w:rtl/></w:rPr><w:t>نص</w:t></w:r>
+                    <w:r><w:rPr><w:rtl w:val="0"/></w:rPr><w:t>A</w:t></w:r>
+                    <w:r><w:t>B</w:t></w:r>
+                  </w:p>
+                </w:txbxContent></v:textbox>
+              </v:shape>
+            </w:pict></w:r></w:p>"##,
+        );
+        let shape = body
+            .iter()
+            .find_map(|e| match e {
+                BodyElement::Paragraph(p) => p.runs.iter().find_map(|r| match r {
+                    DocRun::Shape(s) => Some(s),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .expect("VML pict should produce a ShapeRun");
+        let rtl: Vec<_> = shape.text_blocks[0].runs.iter().map(|r| r.rtl).collect();
+        assert_eq!(rtl, vec![Some(true), Some(false), None]);
     }
 
     /// ECMA-376 §17.4.* w:tcBorders with only the logical vertical edges

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { acquireAndPaintShapeTextBox } from './retained-shape-textbox.test-support.js';
 import type { ShapeRun, ShapeText, ShapeTextRun } from './types.js';
+import { shapeRunToDocRun } from './layout/text.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ECMA-376 §17.3.1.6 `<w:bidi>` — inter-word space at a run/segment boundary in
@@ -181,5 +182,39 @@ describe('ECMA-376 §17.3.1.6 RTL inter-word space in shape text (issue #929 / P
     expect(abc.direction).toBe('ltr');
     expect(abc.x).toBeCloseTo(SHAPE_X, 6);
     expect(abc.letterSpacingPx).toBe(0);
+  });
+});
+
+// Issue #2078 — §17.3.2.30 `<w:rtl>` on a text-box run (`ShapeTextRun.rtl`)
+// reaches the same run-direction rule the body uses: `shapeRunToDocRun` maps it
+// onto the body `DocRun.rtl`, so the shared segment builder / UAX#9 pass marks
+// the run RTL even in an LTR paragraph, while unmarked runs stay unchanged.
+describe('ECMA-376 §17.3.2.30 w:rtl on text-box runs (issue #2078)', () => {
+  it('maps ShapeTextRun.rtl onto the body DocRun contract', () => {
+    expect(shapeRunToDocRun({ ...textRun('A'), rtl: true }).rtl).toBe(true);
+    expect(shapeRunToDocRun({ ...textRun('A'), rtl: false }).rtl).toBe(false);
+    expect('rtl' in shapeRunToDocRun(textRun('A'))).toBe(false);
+  });
+
+  // §17.3.2.30: rtl-marked punctuation/symbols are RTL-strong (Word HL1), the
+  // same rule `computeLineVisualOrder` applies to body runs; unmarked ones are not.
+  it('draws rtl-marked punctuation right-to-left inside an LTR text-box paragraph', () => {
+    const marked = render([
+      block('AB !?', [textRun('AB '), { ...textRun('!?'), rtl: true }], false),
+    ]);
+    expect(wordFill(marked, 'AB').direction).toBe('ltr');
+    expect(wordFill(marked, '!?').direction).toBe('rtl');
+
+    const unmarked = render([block('AB !?', [textRun('AB '), textRun('!?')], false)]);
+    expect(unmarked.every((fill) => fill.direction === 'ltr')).toBe(true);
+  });
+
+  it('reorders rtl-marked runs like the body UAX#9 pass', () => {
+    const fills = render([
+      block("!? #", [{ ...textRun('!?'), rtl: true }, textRun(' '), { ...textRun('#'), rtl: true }], false),
+    ]);
+    // Both marked runs are R; the space between them resolves to R (N1), so
+    // the logical sequence `!?` ` ` `#` is one RTL run and `#` paints leftmost.
+    expect(wordFill(fills, '#').x).toBeLessThan(wordFill(fills, '!?').x);
   });
 });
