@@ -15925,16 +15925,16 @@ fn parse_table_with_diagnostics(
     // writes this for a header banner that must reach the physical page edge).
     // The renderer applies it only when the resolved `jc` is left/leading
     // (§17.4.50: "if the resulting justification … is not left … this property
-    // shall be ignored"). An omitted (or ignored) direct value inherits the
+    // shall be ignored"). A direct `nil` or a value without `w:w` is a zero
+    // indent that blocks the style (§17.18.90, §17.4.87). An omitted (or
+    // pct/auto-ignored) direct value inherits the
     // associated table style's tblInd (§17.7.6, including the implicit
     // §17.7.4 default table style); None only when the whole hierarchy omits
     // it. Layout distinguishes an authored indent from an omitted one under
     // `word-table-origin-compatibility`, so the style layer must survive here.
     let tbl_ind = tbl_pr
         .and_then(|p| child_w(p, "tblInd"))
-        .filter(|n| attr_w(*n, "type").map(|t| t == "dxa").unwrap_or(true))
-        .and_then(|n| attr_w(n, "w"))
-        .map(|v| twips_to_pt(&v))
+        .and_then(crate::styles::table_indent_pt)
         .or(tstyle.tbl_ind);
 
     // ECMA-376 §17.4.52 w:tblLayout/@w:type — "fixed" | "autofit". Absent ⇒ None
@@ -18579,6 +18579,40 @@ mod tests {
             Some(-15.0)
         );
         assert_eq!(parse_tbl_with_styles(&body(""), "").tbl_ind, None);
+        // §17.18.90 nil and a §17.4.87 omitted w:w are zero lengths that
+        // block the inherited style indent; pct/auto are ignored (§17.4.50).
+        for direct in [
+            r#"<w:tblInd w:w="720" w:type="nil"/>"#,
+            r#"<w:tblInd w:type="dxa"/>"#,
+            r#"<w:tblInd/>"#,
+        ] {
+            let tbl_pr = format!(r#"<w:tblStyle w:val="Indented"/>{direct}"#);
+            assert_eq!(
+                parse_tbl_with_styles(&body(&tbl_pr), styles).tbl_ind,
+                Some(0.0),
+                "{direct}"
+            );
+        }
+        assert_eq!(
+            parse_tbl_with_styles(
+                &body(r#"<w:tblStyle w:val="Indented"/><w:tblInd w:w="500" w:type="pct"/>"#),
+                styles
+            )
+            .tbl_ind,
+            Some(25.0)
+        );
+        // A derived style's w:w-less or nil tblInd clears the base indent.
+        for child in [r#"<w:tblInd w:type="dxa"/>"#, r#"<w:tblInd w:type="nil"/>"#] {
+            let xml = styles.replace(
+                r#"<w:basedOn w:val="Indented"/>"#,
+                &format!(r#"<w:basedOn w:val="Indented"/><w:tblPr>{child}</w:tblPr>"#),
+            );
+            assert_eq!(
+                parse_tbl_with_styles(&body(r#"<w:tblStyle w:val="Child"/>"#), &xml).tbl_ind,
+                Some(0.0),
+                "{child}"
+            );
+        }
     }
 
     // Regression guard for PR #516: a STANDALONE internal hyperlink OUTSIDE any
