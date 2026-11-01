@@ -613,7 +613,9 @@ export function measureParagraph(
     context.overflowPunct !== false,
     wordJustifiedInterwordCompressionApplies(
       paragraph.alignment, environment.compatibilityMode,
-    ) && environment.verticalCJK !== true,
+    ) && environment.verticalCJK !== true
+      ? { lineEndIdeographicSpaceHangs: paragraph.wordWrap !== false }
+      : false,
   );
   if (lines.length === 0) return measureMarkOnly();
 

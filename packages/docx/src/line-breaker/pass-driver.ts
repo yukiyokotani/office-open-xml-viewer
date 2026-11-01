@@ -89,6 +89,8 @@ export interface LineBreakerPassInput {
   readonly verticalGlyphMeasurement?: VerticalGlyphMeasurementService;
   readonly overflowPunct: boolean;
   readonly justifiedCompression?: boolean;
+  /** A line-end U+3000 hangs from the visible fit (WORD_LINE_END_SPACE_HANGS). */
+  readonly lineEndIdeographicSpaceHangs?: boolean;
   readonly passContext: Readonly<{
     probeHeights: readonly number[] | null;
     /** Monotone per-physical-line exclusion probe heights (≥ probeHeights). */

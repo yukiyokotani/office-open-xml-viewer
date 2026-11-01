@@ -1,7 +1,7 @@
 import { textBreakOffsetAt, textBreakOffsets } from './text-break-window.js';
 import { candidateUnit, lineGapModel, type GapSegment } from './line-gaps.js';
 import { LineMeasurementAdapter } from './measurement-adapter.js';
-import { enumerateGaps, graphemeClusterOffsets, kinsokuAdjustedSplit } from '@silurus/ooxml-core';
+import { enumerateGaps, graphemeClusterOffsets, isCjkBreakChar, kinsokuAdjustedSplit, type LineGap } from '@silurus/ooxml-core';
 import {
   prepareFloatWrap,
   computePreparedLineFloatWindow,
@@ -31,6 +31,7 @@ import {
   type MixedSpaceCandidate,
 } from './mixed-space-fit.js';
 import { applyBidiTabPostPass } from './tabs.js';
+import { segmentsHaveRtl } from '../bidi-line.js';
 import {
   eastAsianGridCountSinglePx,
   measuredLineMetrics,
@@ -847,10 +848,7 @@ export function performFlush(
             ...justifiedGapPlan,
             // CJK/ideographic/SEA expansion has no proportional measurement.
             // Retain its previous opportunities; family selection lives in core.
-            expansionGaps: enumerateGaps(breakerState.currentLine.map(s => ({
-              text: 'text' in s && !s.metricOnly && s.fitTextRegionIndex === undefined && s.snapGridClass === undefined
-                ? s.text : undefined,
-            })), { lastDrawnSi: Infinity }).gaps,
+            expansionGaps: withoutLatinIdeographicSpaceGaps(breakerState.currentLine),
           },
         } : {}),
     segments: breakerState.currentLine,
@@ -1475,15 +1473,81 @@ export function justifiedCompressionApplies(state: Pick<PassOperationState,
     && state.characterGrid?.type !== 'linesAndChars';
 }
 
-function gapSegment(state: Pick<PassOperationState, 'strAdvance' | 'scale' | 'characterGrid'>, segment: LayoutSeg): GapSegment {
+/** The unweighted expansion opportunities of a mode-15 justified line, less
+ * the U+3000 whose nearest non-space cells on both sides are not CJK, as
+ * WORD_JUSTIFIED_INTERWORD_COMPRESSION describes. Lines with right-to-left
+ * text keep every opportunity. */
+function withoutLatinIdeographicSpaceGaps(line: readonly LayoutSeg[]): LineGap[] {
+  // Opaque cells (objects, ruby, fitText, grid-excluded and metric-only
+  // cells) neither join nor classify a neighbour by their underlying text.
+  const projected = line.map((segment) => ({
+    text: 'text' in segment && !segment.metricOnly && segment.fitTextRegionIndex === undefined
+      && segment.snapGridClass === undefined ? segment.text : undefined,
+  }));
+  const gaps = enumerateGaps(projected, { lastDrawnSi: Infinity }).gaps;
+  if (!gaps.some((gap) => gap.codePoint === 0x3000) || segmentsHaveRtl(line)) return gaps;
+  const OPAQUE = 0xfffc;
+  const cells: number[] = [];
+  const cellAt = new Map<string, number>();
+  projected.forEach(({ text }, si) => {
+    if (text === undefined || ('ruby' in line[si]! && line[si]!.ruby)) {
+      cells.push(OPAQUE);
+      return;
+    }
+    let off = 0;
+    for (const character of text) {
+      // A grapheme extender (a variation selector, a combining mark) belongs
+      // to the cell before it: the neighbour is classified by its base.
+      if (!GRAPHEME_EXTENDER.test(character) || cells.length === 0) {
+        cellAt.set(`${si}:${off}`, cells.length);
+        cells.push(character.codePointAt(0)!);
+      }
+      off += 1;
+    }
+  });
+  // Nearest non-space cell on each side, in one pass per direction.
+  const isSpace = (cp: number): boolean => cp === 0x20 || cp === 0x3000;
+  const before: Array<number | undefined> = [];
+  const after: Array<number | undefined> = new Array(cells.length);
+  let nearest: number | undefined;
+  for (let at = 0; at < cells.length; at++) {
+    before.push(nearest);
+    if (!isSpace(cells[at]!)) nearest = cells[at];
+  }
+  nearest = undefined;
+  for (let at = cells.length - 1; at >= 0; at--) {
+    after[at] = nearest;
+    if (!isSpace(cells[at]!)) nearest = cells[at];
+  }
+  return gaps.filter((gap) => {
+    if (gap.codePoint !== 0x3000) return true;
+    const at = cellAt.get(`${gap.segIndex}:${gap.cpOffset}`);
+    if (at === undefined) return true;
+    return isCjkNeighbour(before[at]) || isCjkNeighbour(after[at]);
+  });
+}
+
+const GRAPHEME_EXTENDER = /^[\p{Grapheme_Extend}\u200d]$/u;
+const EAST_ASIAN_SCRIPT = /^[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]$/u;
+
+/** CJK text for {@link withoutLatinIdeographicSpaceGaps}, supplementary
+ * ideographs included. */
+function isCjkNeighbour(cp: number | undefined): boolean {
+  return cp !== undefined && cp !== 0xfffc
+    && (isCjkBreakChar(cp) || EAST_ASIAN_SCRIPT.test(String.fromCodePoint(cp)));
+}
+
+function gapSegment(state: Pick<PassOperationState, 'strAdvance' | 'scale' | 'characterGrid'
+  | 'lineEndIdeographicSpaceHangs'>, segment: LayoutSeg): GapSegment {
   if ('text' in segment) {
     // §17.3.2.14 owns fixed-width fitText geometry and atomic wrapping.
     // Its interaction with proportional justification is unmeasured: keep
     // the cell and adjacent spaces fixed, as for the existing pitch policy.
     if (segment.fitTextRegionIndex !== undefined) {
-      return { widthPx: segment.measuredWidth, spacePx: 0 };
+      return { widthPx: segment.measuredWidth, spacePx: 0, ...(segmentsHaveRtl([segment]) ? { rtl: true } : {}) };
     }
     const spaceWidths = new Map<number, number>();
+    const ideographicSpaceWidths = new Map<number, number>();
     const spaceClusters = segment.shapedSpaceClusters ?? segment.shapedClusters;
     if (spaceClusters && !segment.ruby) {
       const advances = new Map(spaceClusters.map(cluster => [cluster.range.start, cluster.advancePt]));
@@ -1500,6 +1564,18 @@ function gapSegment(state: Pick<PassOperationState, 'strAdvance' | 'scale' | 'ch
         cpOffset += 1;
       }
     }
+    // U+3000 is a text cell for gaps; only the advances of those in the
+    // trailing U+0020/U+3000 run are needed, where a line-end U+3000 hangs.
+    if (state.lineEndIdeographicSpaceHangs === true && segment.text.includes('\u3000') && !segment.ruby) {
+      const characters = [...segment.text];
+      let start = segment.text.length;
+      for (let off = characters.length - 1; off >= 0 && (characters[off] === ' ' || characters[off] === '\u3000'); off--) {
+        start -= 1;
+        if (characters[off] !== '\u3000') continue;
+        ideographicSpaceWidths.set(off, state.strAdvance(
+          { ...segment, text: '\u3000', ...slicedTextMetadata(segment, start, start + 1) }, '\u3000'));
+      }
+    }
     const start = segment.text.indexOf(' ');
     const spacePx = spaceWidths.values().next().value ?? (start >= 0 && !segment.ruby
       ? state.strAdvance({ ...segment, text: ' ', ...slicedTextMetadata(segment, start, start + 1) }, ' ')
@@ -1508,7 +1584,9 @@ function gapSegment(state: Pick<PassOperationState, 'strAdvance' | 'scale' | 'ch
     return {
       text: segment.metricOnly ? '' : segment.ruby ? undefined : segment.text,
       widthPx: segment.measuredWidth, spacePx, spaceWidths,
+      ...(ideographicSpaceWidths.size > 0 ? { ideographicSpaceWidths } : {}),
       ...(leadingGapPx > 0 ? { leadingGapPx } : {}),
+      ...(segmentsHaveRtl([segment]) ? { rtl: true } : {}),
     };
   }
   return { widthPx: segment.measuredWidth, spacePx: 0 };
