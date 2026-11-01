@@ -1101,6 +1101,8 @@ export interface ShapeTextRun {
   italic?: boolean;
   /** ECMA-376 §17.3.3.25 ruby annotation (furigana) for text-box runs. */
   ruby?: RubyAnnotation | null;
+  /** ECMA-376 §17.3.2.30 `<w:rtl>`; same semantics as the body run's `rtl`. */
+  rtl?: boolean;
 }
 
 export interface ShapeText {

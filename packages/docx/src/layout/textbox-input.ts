@@ -40,6 +40,7 @@ export interface NormalizedTextBoxRunInput {
   readonly bold: boolean;
   readonly italic: boolean;
   readonly ruby?: import('../types.js').RubyAnnotation | null;
+  readonly rtl?: boolean;
 }
 
 export interface NormalizedTextBoxParagraphInput {
@@ -132,6 +133,7 @@ export function normalizeTextBoxInput(
         bold: run.bold ?? block.bold ?? false,
         italic: run.italic ?? block.italic ?? false,
         ...(run.ruby ? { ruby: run.ruby } : {}),
+        ...(run.rtl === undefined ? {} : { rtl: run.rtl }),
       })),
       alignment: block.alignment ?? 'left',
       indentLeftPt: block.indentLeft ?? 0,
