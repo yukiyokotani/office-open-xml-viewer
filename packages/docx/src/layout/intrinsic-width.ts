@@ -210,6 +210,11 @@ function mergeCompatibleTextSegments(segments: readonly LayoutSeg[]): LayoutSeg[
       && !previous.semanticSlotSpans && !segment.semanticSlotSpans
       // A WORD_EAST_ASIAN_AUTO_SPACE seam owns its gap.
       && segment.autoSpaceBeforePt === undefined
+      // A kerned font-slot seam beside U+0020 owns its WORD_KERNED_SPACE_PAIRS
+      // pair, which the slot-by-slot shaping of a merged string would drop;
+      // the line breaker acquires it between the separate pieces instead.
+      && !(previous.script !== segment.script && segment.textShapeRequest?.kerning === true
+        && previous.text.endsWith(' ') !== segment.text.startsWith(' '))
       && compatibleText(previous, segment)
       // Included and excluded spans depend on the full run. Losing a Latin
       // base can turn its attached Arabic mark into standalone proof; losing

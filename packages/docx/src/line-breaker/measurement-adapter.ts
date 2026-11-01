@@ -205,7 +205,9 @@ export class LineMeasurementAdapter {
    * pair is measured from that face as two glyphs against their isolated
    * advances, with kerning on. Any other seam has no pair here. */
   kernedSpaceSeamAdvance(left: LayoutTextSeg | undefined, right: LayoutTextSeg): number {
-    if (!left || !left.text || !right.text) return 0;
+    // A tate-chu-yoko cell owns one em along the column whatever its text
+    // (§17.3.2.10); neither side of its seam takes a pair.
+    if (!left || !left.text || !right.text || left.tateChuYoko || right.tateChuYoko) return 0;
     const leftSpace = left.text.endsWith(' ');
     if (leftSpace === right.text.startsWith(' ')) return 0;
     if (leftSpace && (left.script === right.script || hasLiveSlotSeam(left) || hasLiveSlotSeam(right))) {
@@ -228,9 +230,9 @@ export class LineMeasurementAdapter {
       || charScaleFactor(left) !== charScaleFactor(right)
       || left.sourceRunIndex === undefined || left.sourceRunIndex !== right.sourceRunIndex
       || left.sourceTextSequence !== right.sourceTextSequence) return 0;
-    const lc = l.substituteContext;
-    const rc = r.substituteContext;
-    if (!lc || !rc || lc.text !== rc.text || lc.offset + left.text.length !== rc.offset) return 0;
+    // Adjacency is the caller's line order within that one source sequence;
+    // the probe is independent text, so no shaping context is reused (the
+    // intrinsic merge also rebuilds contexts of the pieces it joins).
     const before = left.text.slice(graphemeClusterOffsets(left.text).at(-1) ?? 0);
     const after = right.text.slice(0, graphemeClusterOffsets(right.text)[0] ?? right.text.length);
     const font = this.fontForSegment(left);
