@@ -983,7 +983,7 @@ mod table;
 /// A collected body block before spacing is resolved.
 enum Block {
     Paragraph(Box<Collected>),
-    Table(Box<table::TableBlock>),
+    Table(Box<docx_model::DocTable>),
 }
 
 struct Reader<'a> {
@@ -2093,9 +2093,9 @@ impl<'a> Reader<'a> {
     fn finish(self) -> Result<Vec<BodyElement>, String> {
         let mut out = Vec::with_capacity(self.blocks.len());
         let mut previous: Option<Collected> = None;
-        // The bottom margin of a table just emitted: the next paragraph adds
-        // it to its own top margin (measured).
-        let mut after_table: Option<f64> = None;
+        // A table was just emitted: the next paragraph keeps its own top
+        // margin (tables have no margins; measured).
+        let mut after_table = false;
         // The previous paragraph's background (its model has moved into the
         // output).
         let mut previous_shading: Option<String> = None;
@@ -2105,32 +2105,29 @@ impl<'a> Reader<'a> {
                 Block::Paragraph(collected) => *collected,
                 Block::Table(mut table) => {
                     // A break after the previous paragraph starts the table
-                    // on a new page, as a break before it does. Its top
-                    // margin at the top of that page was not measured, and a
-                    // table directly after another one is laid out with it.
-                    table.table.page_break_before |= break_pending;
+                    // on a new page, as a break before it does; on a table
+                    // directly after another one it was not measured.
+                    table.page_break_before |= break_pending;
                     break_pending = false;
-                    if table.table.page_break_before && (table.top != 0.0 || after_table.is_some())
-                    {
+                    if table.page_break_before && after_table {
                         return Err(unsupported("table-break"));
                     }
-                    // The previous paragraph's bottom margin and the table's
-                    // top margin both separate them (measured); a table
-                    // first in the body or after another table is not.
-                    match (out.last_mut(), &previous) {
-                        (Some(BodyElement::Paragraph(paragraph)), Some(prev))
-                            if after_table.is_none() =>
-                        {
-                            paragraph.space_after = self.layout_flags.gap(prev.bottom, table.top);
-                        }
-                        (None, None) if table.top == 0.0 => {}
-                        // Adjacent tables stack without a gap (measured).
-                        (Some(BodyElement::Table(_)), None)
-                            if after_table == Some(0.0) && table.top == 0.0 => {}
-                        _ => return Err(unsupported("table-placement")),
+                    // A paragraph kept with a table was not measured (with a
+                    // break before the table LibreOffice ends the keep; the
+                    // DOCX layout carries the paragraph along).
+                    if matches!(out.last(), Some(BodyElement::Paragraph(p)) if p.keep_next) {
+                        return Err(unsupported("table-keep"));
                     }
-                    out.push(BodyElement::Table(Box::new(table.table)));
-                    after_table = Some(table.bottom);
+                    // The previous paragraph keeps its bottom margin above
+                    // the table (measured); a table first in the body, or
+                    // directly after another, starts at its top.
+                    if let (Some(BodyElement::Paragraph(paragraph)), Some(prev)) =
+                        (out.last_mut(), &previous)
+                    {
+                        paragraph.space_after = prev.bottom;
+                    }
+                    out.push(BodyElement::Table(table));
+                    after_table = true;
                     previous = None;
                     previous_shading = None;
                     continue;
@@ -2138,20 +2135,17 @@ impl<'a> Reader<'a> {
             };
             let mut paragraph = std::mem::take(&mut collected.paragraph);
             paragraph.page_break_before |= break_pending;
-            paragraph.space_before = match (after_table.take(), &previous) {
-                (Some(bottom), _) if !paragraph.page_break_before => {
-                    self.layout_flags.gap(bottom, collected.top)
-                }
-                (Some(_), _) => collected.top,
+            paragraph.space_before = match (std::mem::take(&mut after_table), &previous) {
+                (true, _) => collected.top,
                 // Measured: after a hard page break (break-before, break-after
                 // or a page style named on the paragraph) LibreOffice applies
                 // the new paragraph's top margin alone; the previous bottom
                 // margin is not carried. At an automatic page break both
                 // vanish, as the DOCX layout drops space before at the top of
                 // a page it reached by pagination.
-                (None, None) => collected.top,
-                (None, Some(_)) if paragraph.page_break_before => collected.top,
-                (None, Some(prev)) => {
+                (false, None) => collected.top,
+                (false, Some(_)) if paragraph.page_break_before => collected.top,
+                (false, Some(prev)) => {
                     let same = prev.area == collected.area
                         && prev.named_style.is_some()
                         && prev.named_style == collected.named_style;
@@ -2186,9 +2180,6 @@ impl<'a> Reader<'a> {
             break_pending = collected.page_break_after;
             out.push(BodyElement::Paragraph(Box::new(paragraph)));
             previous = Some(collected);
-        }
-        if after_table.is_some_and(|bottom| bottom != 0.0) {
-            return Err(unsupported("table-placement"));
         }
         Ok(out)
     }
@@ -5491,7 +5482,7 @@ mod tests {
         assert!(matches!(&runs[2], DocRun::Text(t) if t.list_label.is_none() && t.text == "a"));
     }
 
-    const TABLE_STYLES: &str = r##"<style:style style:name="T" style:family="table"><style:table-properties table:border-model="collapsing" style:width="10cm" fo:margin-left="-0.191cm" fo:margin-top="5pt" fo:margin-bottom="3pt" table:align="left" style:writing-mode="page"/></style:style><style:style style:name="T.A" style:family="table-column"><style:table-column-properties style:column-width="4cm"/></style:style><style:style style:name="T.B" style:family="table-column"><style:table-column-properties style:column-width="6cm"/></style:style><style:style style:name="T.H" style:family="table-row"><style:table-row-properties style:row-height="1cm"/></style:style><style:style style:name="T.1" style:family="table-row"><style:table-row-properties style:min-row-height="2cm"/></style:style><style:style style:name="T.A1" style:family="table-cell"><style:table-cell-properties fo:padding-left="0.191cm" fo:padding-right="0.191cm" fo:padding-top="0cm" fo:padding-bottom="0cm" fo:border="0.5pt solid #000000" style:vertical-align="top" fo:background-color="#ffff00"><style:background-image/></style:table-cell-properties></style:style><style:style style:name="T.B1" style:family="table-cell"><style:table-cell-properties fo:padding="0cm" fo:border-top="2pt solid #ff0000" fo:border-bottom="none" fo:border-left="none" fo:border-right="none"/></style:style><style:style style:name="T.HB" style:family="table-cell"><style:table-cell-properties fo:padding="0cm" fo:border-top="none" fo:border-bottom="2pt solid #ff0000" fo:border-left="none" fo:border-right="none"/></style:style><style:style style:name="Sp" style:family="paragraph"><style:paragraph-properties fo:margin-top="6pt" fo:margin-bottom="8pt"/></style:style>"##;
+    const TABLE_STYLES: &str = r##"<style:style style:name="T" style:family="table"><style:table-properties table:border-model="collapsing" style:width="10cm" fo:margin-left="-0.191cm" fo:margin-top="0pt" fo:margin-bottom="0pt" table:align="left" style:writing-mode="page"/></style:style><style:style style:name="T.A" style:family="table-column"><style:table-column-properties style:column-width="4cm"/></style:style><style:style style:name="T.B" style:family="table-column"><style:table-column-properties style:column-width="6cm"/></style:style><style:style style:name="T.H" style:family="table-row"><style:table-row-properties style:row-height="1cm"/></style:style><style:style style:name="T.1" style:family="table-row"><style:table-row-properties style:min-row-height="2cm"/></style:style><style:style style:name="T.A1" style:family="table-cell"><style:table-cell-properties fo:padding-left="0.191cm" fo:padding-right="0.191cm" fo:padding-top="0cm" fo:padding-bottom="0cm" fo:border="0.5pt solid #000000" style:vertical-align="top" fo:background-color="#ffff00"><style:background-image/></style:table-cell-properties></style:style><style:style style:name="T.B1" style:family="table-cell"><style:table-cell-properties fo:padding="0cm" fo:border-top="2pt solid #ff0000" fo:border-bottom="none" fo:border-left="none" fo:border-right="none"/></style:style><style:style style:name="T.HB" style:family="table-cell"><style:table-cell-properties fo:padding="0cm" fo:border-top="none" fo:border-bottom="2pt solid #ff0000" fo:border-left="none" fo:border-right="none"/></style:style><style:style style:name="Sp" style:family="paragraph"><style:paragraph-properties fo:margin-top="6pt" fo:margin-bottom="8pt"/></style:style>"##;
 
     fn table_body(table: &str) -> String {
         format!(
@@ -5707,9 +5698,9 @@ mod tests {
                 "{margin}"
             );
             let table = TABLE_STYLES
-                .replace(r#"fo:margin-top="5pt""#, r#"fo:margin-top="{top}""#)
+                .replace(r#"fo:margin-top="0pt""#, r#"fo:margin-top="{top}""#)
                 .replace(
-                    r#"fo:margin-bottom="3pt""#,
+                    r#"fo:margin-bottom="0pt""#,
                     r#"fo:margin-bottom="{bottom}""#,
                 )
                 .replace(
@@ -5794,6 +5785,12 @@ mod tests {
             read_table(&styles, &body).unwrap_err(),
             unsupported("table-cell-indent")
         );
+        // A line narrower than an em (165 pt of a 169.85 pt cell).
+        let styles = styles.replace(r#"fo:margin-left="400pt""#, r#"fo:margin-left="165pt""#);
+        assert_eq!(
+            read_table(&styles, &body).unwrap_err(),
+            unsupported("table-cell-indent")
+        );
     }
 
     #[test]
@@ -5874,8 +5871,8 @@ mod tests {
             panic!("a paragraph, a table and a paragraph")
         };
         // Spacing around the table adds both margins on each side.
-        assert_eq!(before.space_after, 8.0 + 5.0);
-        assert_eq!(after.space_before, 3.0 + 6.0);
+        assert_eq!(before.space_after, 8.0);
+        assert_eq!(after.space_before, 6.0);
         let cm = 72.0 / 2.54;
         // 4 cm and 6 cm read as 2268 + 3402 twips against a 5669 twip
         // table: LibreOffice refits them to 2272 and 3397.
@@ -6112,22 +6109,24 @@ mod tests {
                 table_body(TABLE),
                 "table-header-rule",
             ),
-            // A page break before a table with a top margin.
+            // Table margins (with or without a break before).
             (
-                TABLE_STYLES.replace(
-                    r#"style:width="10cm""#,
-                    r#"style:width="10cm" fo:break-before="page""#,
-                ),
+                TABLE_STYLES.replace(r#"fo:margin-top="0pt""#, r#"fo:margin-top="5pt""#),
                 table_body(TABLE),
-                "table-break",
+                "table-margin",
             ),
-            // A table first in the body with a top margin, or after another
-            // table with margins between them.
-            (TABLE_STYLES.into(), TABLE.into(), "table-placement"),
             (
-                TABLE_STYLES.into(),
-                format!("{TABLE}{TABLE}<text:p>x</text:p>"),
-                "table-placement",
+                TABLE_STYLES.replace(r#"fo:margin-bottom="0pt""#, r#"fo:margin-bottom="3pt""#),
+                table_body(TABLE),
+                "table-margin",
+            ),
+            // A paragraph kept with the table after it.
+            (
+                format!(
+                    r#"{TABLE_STYLES}<style:style style:name="Kn" style:family="paragraph"><style:paragraph-properties fo:keep-with-next="always"/></style:style>"#
+                ),
+                format!(r#"<text:p text:style-name="Kn">kept</text:p>{TABLE}"#),
+                "table-keep",
             ),
         ];
         for (styles, body, code) in cases {

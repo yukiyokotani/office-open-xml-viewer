@@ -26,14 +26,6 @@ type Attributes = HashMap<(String, String), String>;
 const MAX_COLUMNS: usize = 64;
 const MAX_ROWS: usize = 10_000;
 
-/// A table collected among the body's paragraphs, with the vertical margins
-/// that join its neighbours' spacing.
-pub(super) struct TableBlock {
-    pub table: DocTable,
-    pub top: f64,
-    pub bottom: f64,
-}
-
 /// The properties of a table-family automatic style (§16.2: automatic
 /// styles carry every property they set; table styles have no parents in
 /// the admitted subset).
@@ -282,8 +274,12 @@ impl<'a> Reader<'a> {
         if jc.is_empty() {
             return Err(unsupported("table-align"));
         }
-        // §20.219: vertical margins are non-negative.
-        if !(top >= 0.0 && bottom >= 0.0) {
+        // A table's top and bottom margins join the neighbouring paragraphs'
+        // spacing (measured), but at page breaks and with keep-with-next
+        // LibreOffice places them where the DOCX layout, carrying them in
+        // those paragraphs, cannot (measured: a 710 pt top margin moves a
+        // kept paragraph a page later). No corpus table has either.
+        if top != 0.0 || bottom != 0.0 {
             return Err(unsupported("table-margin"));
         }
         if jc != "left" && margin_left != 0.0 {
@@ -753,8 +749,7 @@ impl<'a> Reader<'a> {
             ..DocTable::default()
         };
         self.charge_construction(std::mem::size_of::<DocTableRow>() * row_count)?;
-        self.blocks
-            .push(Block::Table(Box::new(TableBlock { table, top, bottom })));
+        self.blocks.push(Block::Table(Box::new(table)));
         Ok(())
     }
 
@@ -908,6 +903,27 @@ impl<'a> Reader<'a> {
         }
         if tallest.partial_cmp(&(self.text_height / 4.0)) != Some(std::cmp::Ordering::Less) {
             return Err(unsupported("table-cell-line"));
+        }
+        // LibreOffice clips a glyph wider than the cell's line; the DOCX
+        // layout paints it whole. Lines at least an em wide hold any glyph
+        // of the admitted (Latin, CJK) text.
+        for element in &content {
+            let CellElement::Paragraph(p) = element else {
+                continue;
+            };
+            let em = p
+                .runs
+                .iter()
+                .filter_map(|run| match run {
+                    DocRun::Text(text) => Some(text.font_size),
+                    _ => None,
+                })
+                .fold(0.0, f64::max);
+            let line =
+                available - p.indent_left.max(p.indent_left + p.indent_first) - p.indent_right;
+            if line < em {
+                return Err(unsupported("table-cell-indent"));
+            }
         }
         if let Some(fill) = &background {
             // §20.395 automatic colour over the cell's background, as over a
