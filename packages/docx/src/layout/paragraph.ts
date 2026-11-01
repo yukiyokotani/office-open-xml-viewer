@@ -29,7 +29,7 @@ import { addExactRational, exactRationalFromNumber, exactRationalToNumberUp } fr
 import { revisionIsOmitted } from './revision-visibility.js';
 import { wordArabicTextKerned, wordEastAsianAutoSpaceJustifiedMaximumPt, wordKerningApplies, wordLineEndSpaceHangs } from './line-compatibility.js';
 import type { LineGapPlan } from '../line-breaker/line-gaps.js';
-import { distributeLineSlack as distributeProportionalSlack, type LineGap } from '@silurus/ooxml-core';
+import { distributeLineSlack as distributeProportionalSlack, enumerateGaps, graphemeClusterOffsets, type LineGap } from '@silurus/ooxml-core';
 import { specifiedTextLineMetrics, specifiedTextParagraphIsHomogeneous } from './specified-line-spacing.js';
 import { wordTextBoxVerticalMode } from './compatibility.js';
 import {
@@ -414,6 +414,13 @@ export interface PlanLineInput {
   readonly ulTrailSpace?: boolean;
   /** §17.3.1.45 wordWrap off: line-end spaces do not hang. */
   readonly wordWrap?: false;
+  /** §17.15.3.5 doNotExpandShiftReturn: a line ended by a manual line break
+   * stays unjustified. */
+  readonly doNotExpandShiftReturn?: boolean;
+  /** compatibilityMode is absent or below 15 (WORD_LINE_END_JUSTIFICATION). */
+  readonly lineEndJustificationBeforeMode15?: boolean;
+  /** The paragraph piece ends at a page or column break (its last line). */
+  readonly endsAtHardBreak?: boolean;
   readonly firstLineIndentPt?: number;
   readonly numbering?: Readonly<{
     /** Resolved logical-start offset of the first-line body after the marker. */
@@ -467,6 +474,202 @@ function distributionSegments(
   return segments.map((segment, index) => segment.kind === 'text' && !segment.fixedPitch
     ? { text: segment.text }
     : hostsAreHanging && index >= suffixStart && segment.kind === 'anchor-host' ? { text: '' } : {});
+}
+
+/** How {@link WORD_LINE_END_JUSTIFICATION} justifies a line of a justified paragraph:
+ * at its gaps ('word'), by an equal advance after every character
+ * ('character'), at its gaps or else centred ('word-or-centre'), or not at all.
+ * Soft-wrapped lines keep the paragraph's ordinary justification. */
+function lineEndJustification(
+  input: Pick<PlanLineInput, 'alignment' | 'isLastLine' | 'stretchLastLine'
+    | 'doNotExpandShiftReturn' | 'lineEndJustificationBeforeMode15' | 'endsAtHardBreak'>,
+  endsWithBreak: boolean,
+): 'word' | 'character' | 'word-or-centre' | null {
+  if (!endsWithBreak && !input.isLastLine) return 'word';
+  // A line ended by a page or column break is justified like a soft-wrapped
+  // line before compatibility mode 15 and like a final line from mode 15;
+  // doNotExpandShiftReturn does not apply to it.
+  const hardBreak = !endsWithBreak && input.endsAtHardBreak === true;
+  if (hardBreak && input.alignment !== 'distribute') {
+    return input.lineEndJustificationBeforeMode15 === true ? 'word' : null;
+  }
+  if (input.alignment === 'distribute' || (input.alignment === undefined && input.stretchLastLine)) {
+    return input.lineEndJustificationBeforeMode15 === true ? 'character' : 'word-or-centre';
+  }
+  if (!endsWithBreak || input.doNotExpandShiftReturn === true) return null;
+  return input.alignment === 'thaiDistribute' && input.lineEndJustificationBeforeMode15 !== true
+    ? 'character'
+    : 'word';
+}
+
+/** Whether a justified line ended by a manual break widens inter-CJK
+ * boundaries: Word leaves a space-free line ragged under the kashida types and
+ * under thaiDistribute before compatibility mode 15. */
+function lineEndOpensCjkGaps(
+  input: Pick<PlanLineInput, 'alignment' | 'lineEndJustificationBeforeMode15'>,
+): boolean {
+  if (kashidaLevel(input.alignment) !== null) return false;
+  return !(input.alignment === 'thaiDistribute' && input.lineEndJustificationBeforeMode15 === true);
+}
+
+/** WORD_LINE_END_JUSTIFICATION character spread: `slackPt` shared equally
+ * after every grapheme cluster of the line's content (spaces included) but the
+ * visually last one. Content starts after the last tab and the leading indent
+ * whitespace; hanging line-end spaces stay outside it. */
+function distributeCharacterSlack(
+  segments: readonly MeasuredLinePlanSegment[],
+  slackPt: number,
+  firstContentIndex: number,
+  visualOrder: readonly number[],
+  spacesHang: boolean,
+): DistributeResult | null {
+  let start = firstContentIndex;
+  segments.forEach((segment, index) => { if (segment.kind === 'tab') start = Math.max(start, index + 1); });
+  // Visible code-point length per text segment, after hanging line-end spaces.
+  const visibleLength = new Map<number, number>();
+  let hangingSuffix = spacesHang;
+  for (let index = segments.length - 1; index >= start; index -= 1) {
+    const segment = segments[index]!;
+    if (segment.kind !== 'text') {
+      if (segment.kind !== 'anchor-host') hangingSuffix = false;
+      continue;
+    }
+    const visible = hangingSuffix ? hangingSpaceVisibleLength(segment.text) : segment.text.length;
+    visibleLength.set(index, visible);
+    if (visible > 0) hangingSuffix = false;
+  }
+  // Split points (code-point indexes of cluster starts) and unit counts.
+  const units = new Map<number, number[]>();
+  let total = 0;
+  for (let index = start; index < segments.length; index += 1) {
+    const segment = segments[index]!;
+    if (segment.kind === 'anchor-host' || segment.kind === 'tab') continue;
+    const visible = segment.kind === 'text' ? visibleLength.get(index) ?? segment.text.length : 1;
+    if (visible === 0) continue;
+    if (segment.kind !== 'text' || segment.fixedPitch) {
+      // Opaque and fixed-pitch cells (fitText, character grid) stay whole.
+      units.set(index, [0]);
+      total += 1;
+      continue;
+    }
+    // Retained cluster starts (UTF-16 offsets) within the visible text.
+    const starts = segment.clusters
+      .map((cluster) => cluster.range.start - segment.range.start)
+      .filter((offset) => offset < visible);
+    if (starts.length === 0) continue;
+    units.set(index, starts);
+    total += starts.length;
+  }
+  if (total < 2 || !(slackPt > 0)) return null;
+  const visuallyLast = [...visualOrder].reverse().find((index) => units.has(index));
+  const indexes = [...units.keys()];
+  const { closed, boundaries } = characterSpreadBoundaries(segments, indexes);
+  // A cut needs a retained cluster start that is also a UAX #29 boundary of
+  // the contiguous text; offsets become code points for the stretch plan.
+  for (const index of indexes) {
+    const segment = segments[index]!;
+    const allowed = boundaries.get(index);
+    if (segment.kind !== 'text' || segment.fixedPitch || !allowed) continue;
+    const codePointAt = new Map<number, number>();
+    let utf16 = 0;
+    [...segment.text].forEach((character, codePoint) => { codePointAt.set(utf16, codePoint); utf16 += character.length; });
+    const [first, ...rest] = units.get(index)!;
+    units.set(index, [first!, ...rest.filter((offset) => allowed.has(offset))].map((offset) => codePointAt.get(offset)!));
+  }
+  const trailingGaps = new Set(indexes.filter((index) => index !== visuallyLast && !closed.has(index)));
+  const gapCount = [...units.values()].reduce((sum, starts) => sum + starts.length - 1, 0) + trailingGaps.size;
+  if (gapCount === 0) return null;
+  const perGap = slackPt / gapCount;
+  const perSeg = new Map<number, SegStretch>();
+  for (const [index, starts] of units) {
+    const splitBefore = starts.slice(1);
+    perSeg.set(index, {
+      splitBefore,
+      internalStretch: perGap * splitBefore.length,
+      trailingGap: trailingGaps.has(index),
+    });
+  }
+  return { perGap, perSeg };
+}
+
+/** Character-spread boundaries of the unit-bearing segments (`indexes`, in
+ * logical order), from UAX #29 over each stretch of contiguous text so they
+ * keep their full context: per text segment, its grapheme boundaries as local
+ * UTF-16 offsets, and the segments whose seam with the next one opens no gap.
+ * A seam is closed inside one fitText region (§17.3.2.14) or where a grapheme
+ * cluster continues across a formatting seam (a base and a combining mark, a
+ * regional-indicator pair or an emoji ZWJ sequence in separate runs). */
+function characterSpreadBoundaries(
+  segments: readonly MeasuredLinePlanSegment[],
+  indexes: readonly number[],
+): { closed: Set<number>; boundaries: Map<number, Set<number>> } {
+  const closed = new Set<number>();
+  const boundaries = new Map<number, Set<number>>();
+  let chain: number[] = [];
+  const flush = (): void => {
+    if (chain.length === 0) return;
+    let text = '';
+    const starts: number[] = [];
+    for (const index of chain) {
+      starts.push(text.length);
+      text += (segments[index] as MeasuredTextPlanSegment).text;
+    }
+    // Sorted offsets, partitioned among the segments with one forward cursor.
+    const offsets = graphemeClusterOffsets(text);
+    let cursor = 0;
+    chain.forEach((index, at) => {
+      const start = starts[at]!;
+      const end = starts[at + 1] ?? text.length;
+      const local = new Set<number>();
+      while (cursor < offsets.length && offsets[cursor]! < end) {
+        if (offsets[cursor]! >= start) local.add(offsets[cursor]! - start);
+        cursor += 1;
+      }
+      boundaries.set(index, local);
+      if (at + 1 < chain.length && offsets[cursor] !== end) closed.add(index);
+    });
+    chain = [];
+  };
+  indexes.forEach((index, at) => {
+    const segment = segments[index]!;
+    const next = indexes[at + 1];
+    const following = next === undefined ? undefined : segments[next];
+    const region = segment.kind === 'text' ? segment.fitText?.regionIndex : undefined;
+    if (region !== undefined && following?.kind === 'text' && following.fitText?.regionIndex === region) {
+      closed.add(index);
+    }
+    if (segment.kind !== 'text' || segment.text === '') {
+      flush();
+      return;
+    }
+    chain.push(index);
+    // Contiguous text: only zero-advance anchor hosts may sit between.
+    const between = next === undefined ? [] : segments.slice(index + 1, next);
+    if (following?.kind !== 'text' || between.some((other) => other.kind !== 'anchor-host')) flush();
+  });
+  flush();
+  return { closed, boundaries };
+}
+
+function lastTabSegmentIndex(segments: readonly MeasuredLinePlanSegment[]): number {
+  for (let index = segments.length - 1; index >= 0; index -= 1) {
+    if (segments[index]!.kind === 'tab') return index;
+  }
+  return -1;
+}
+
+/** Whether a 'word-or-centre' line that received no justification is centred:
+ * it has visible text and no gap. A right-to-left line whose gaps the bidi
+ * kernel leaves closed keeps its logical-start alignment instead. */
+function centresWithoutOpportunity(
+  segments: readonly MeasuredLinePlanSegment[],
+  distSegments: readonly { text?: string }[],
+  bidi: boolean,
+  firstContentIndex: number,
+): boolean {
+  if (!segments.some((segment) => segment.kind === 'text' && /\S/.test(segment.text))) return false;
+  return !bidi
+    || enumerateGaps(distSegments, { firstContentSi: firstContentIndex, lastDrawnSi: Infinity }).gaps.length === 0;
 }
 
 function kashidaLevel(alignment: string | undefined): KashidaLevel | null {
@@ -1152,12 +1355,13 @@ function coalesceAdjacentDecorations(placements: ParagraphPlacement[]): void {
 function justifiedAutoSpaceExpansion(
   segments: readonly MeasuredLinePlanSegment[],
   slackPt: number,
+  fromIndex = 0,
 ): Readonly<{ takenPt: number; trailingByIndex: ReadonlyMap<number, number> }> | undefined {
   if (!(slackPt > 0)) return undefined;
   const rooms: Array<[number, number]> = [];
   let totalRoomPt = 0;
   segments.forEach((segment, index) => {
-    if (index === 0 || segment.kind !== 'text' || !segment.autoSpace) return;
+    if (index <= fromIndex || segment.kind !== 'text' || !segment.autoSpace) return;
     const roomPt = wordEastAsianAutoSpaceJustifiedMaximumPt(segment.autoSpace.naturalPt)
       - segment.autoSpace.appliedPt;
     if (!(roomPt > 0)) return;
@@ -1226,11 +1430,17 @@ export function planLine(input: PlanLineInput): LineLayout {
     ? availableWidthPt - logicalStartOffsetPt
     : availableWidthPt;
   let lineSlackPt = effectiveAvailableWidthPt - physicalStartOffsetPt - naturalWidthPt;
-  const endsLogicalLine = input.isLastLine || line.endsWithBreak;
   const edge = input.displayMathJustification === undefined
     ? resolveAlignEdge(input.alignment, input.baseRtl)
     : displayMathEdge(input.displayMathJustification);
-  const applyJustify = edge === 'justify' && (!endsLogicalLine || input.stretchLastLine);
+  const lineEndRule = edge === 'justify' ? lineEndJustification(input, line.endsWithBreak) : null;
+  // Right-to-left lines keep word justification (WORD_LINE_END_JUSTIFICATION
+  // measured character spreading on left-to-right lines only).
+  const justification = lineEndRule === 'character' && bidi ? 'word' : lineEndRule;
+  const applyJustify = justification !== null;
+  // Lines that are not soft-wrapped are justified only after their last tab.
+  const softWrapped = !line.endsWithBreak && !input.isLastLine;
+  const afterLastTab = softWrapped ? 0 : lastTabSegmentIndex(segments) + 1;
   const kashida = applyJustify ? kashidaLevel(input.alignment) : null;
   if (kashida && lineSlackPt > 0) {
     // Kashida rewrites one contextual paint operation. A segment already split
@@ -1240,6 +1450,7 @@ export function planLine(input: PlanLineInput): LineLayout {
     const excluded = new Set<number>();
     const distribute = () => computeKashidaDistribution(
       segments.map((segment, segmentIndex) => segment.kind === 'text'
+        && segmentIndex >= afterLastTab
         && segment.basePaintOps.length === 1
         && segment.basePaintOps[0]!.naturalAdvancePt === undefined
         && !excluded.has(segmentIndex)
@@ -1302,7 +1513,21 @@ export function planLine(input: PlanLineInput): LineLayout {
   let perGapPt = 0;
   let distributedWidthPt = 0;
   const distSegments = distributionSegments(segments, bidi, input.wordWrap !== false);
-  if (line.justifiedCompressionPt !== undefined) {
+  // WORD_LINE_END_JUSTIFICATION: a word-justified line without any opportunity
+  // is centred instead (mode-15 distribute).
+  let centreUnjustified = false;
+  if (justification === 'character' && !(line.justifiedCompressionPt! > 0)) {
+    const justifySlackPt = lineSlackPt + hangingLineEndSpacePt;
+    // Cuts fall on retained cluster starts and seams on UAX #29 boundaries;
+    // formatting seams that only forbid a line break still open a gap.
+    const distribution = distributeCharacterSlack(
+      segments, justifySlackPt, firstContentIndex, visual.order,
+      wordLineEndSpaceHangs(bidi, input.wordWrap !== false),
+    );
+    perGapPt = distribution?.perGap ?? 0;
+    stretchByIndex = distribution?.perSeg ?? null;
+    distributedWidthPt = distributedDelta(distribution);
+  } else if (line.justifiedCompressionPt !== undefined) {
     const model = line.gapPlan;
     if (!model) throw new Error('Justified line is missing its retained gap plan');
     const retainedNaturalWidthPt = naturalWidthPt;
@@ -1311,7 +1536,7 @@ export function planLine(input: PlanLineInput): LineLayout {
     if (applyJustify || line.justifiedCompressionPt > 0) {
       // Opportunities and measured advances belong to the breaker. No text or
       // width reconstruction may change its accepted line in retained planning.
-      const autoSpace = applyJustify ? justifiedAutoSpaceExpansion(segments, lineSlackPt) : undefined;
+      const autoSpace = applyJustify ? justifiedAutoSpaceExpansion(segments, lineSlackPt, afterLastTab) : undefined;
       const autoSpaceTakenPt = autoSpace?.takenPt ?? 0;
       // A compressed line shrinks by its accepted overflow only; content
       // forced onto it afterwards overflows the band.
@@ -1319,14 +1544,27 @@ export function planLine(input: PlanLineInput): LineLayout {
         && lineSlackPt < -line.justifiedCompressionPt - 1e-6
         ? -line.justifiedCompressionPt
         : lineSlackPt;
+      // A line ended by a manual break, or a final distribute line, is
+      // justified only after its last tab (WORD_LINE_END_JUSTIFICATION).
+      // A compressed line keeps the opportunities its accepted fit used.
+      const afterTab = line.justifiedCompressionPt > 0 ? 0 : afterLastTab;
+      const gaps = afterTab > 0 ? model.gaps.filter((gap) => gap.segIndex >= afterTab) : model.gaps;
+      const expansionGaps = afterTab > 0
+        ? model.expansionGaps.filter((gap) => gap.segIndex >= afterTab)
+        : model.expansionGaps;
       const distribution = keepGraphemeSafeCuts(distributeProportionalSlack(
         [], compressionSlackPt - autoSpaceTakenPt, {
-          gapModel: { gaps: model.gaps, state: model.scan },
+          gapModel: {
+            gaps,
+            state: afterTab > 0
+              ? { ...model.scan, naturalGapSum: gaps.reduce((sum, gap) => sum + gap.naturalPx, 0) }
+              : model.scan,
+          },
           proportional: true,
           unweightedExpansion: {
             gaps: hangingLineEndSpacePt > 0
-              ? withoutHangingSpaceGaps(model.expansionGaps, segments)
-              : model.expansionGaps,
+              ? withoutHangingSpaceGaps(expansionGaps, segments)
+              : expansionGaps,
             // The fit's visible width drops a line-end U+0020
             // (WORD_LINE_END_SPACE_HANGS); the unweighted expansion does too,
             // looking through zero-advance anchor hosts.
@@ -1342,6 +1580,8 @@ export function planLine(input: PlanLineInput): LineLayout {
       perGapPt = distribution?.perGap ?? 0;
       stretchByIndex = withAutoSpaceExpansion(distribution?.perSeg ?? null, perGapPt, autoSpace);
       distributedWidthPt = distributedDelta(distribution) + autoSpaceTakenPt;
+      centreUnjustified = justification === 'word-or-centre' && distributedWidthPt <= 0 && lineSlackPt > 0
+        && centresWithoutOpportunity(segments, distSegments, bidi, firstContentIndex) && afterLastTab === 0;
       if (line.justifiedCompressionPt > 0
         && Math.abs(distributedWidthPt + line.justifiedCompressionPt) > 1e-7) {
         throw new Error(`Justified fit and retained paint disagree: delta=${distributedWidthPt}, C=${line.justifiedCompressionPt}, slack=${lineSlackPt}, visible=${model.visibleWidthPx}, end=${model.lineEndSeparatorPx}`);
@@ -1349,19 +1589,27 @@ export function planLine(input: PlanLineInput): LineLayout {
     }
   } else if (applyJustify) {
     const justifySlackPt = lineSlackPt + hangingLineEndSpacePt;
-    const autoSpace = justifiedAutoSpaceExpansion(segments, justifySlackPt);
+    const autoSpace = justifiedAutoSpaceExpansion(segments, justifySlackPt, afterLastTab);
     const autoSpaceTakenPt = autoSpace?.takenPt ?? 0;
     const residualSlackPt = justifySlackPt - autoSpaceTakenPt;
+    // A line ended by a manual break, or a final distribute line, is justified
+    // only after its last tab (WORD_LINE_END_JUSTIFICATION).
     const distribution = keepGraphemeSafeCuts(distributeLineSlack(
-      distSegments, residualSlackPt, firstContentIndex,
+      distSegments, residualSlackPt, Math.max(firstContentIndex, afterLastTab),
       bidi ? lastDrawnIndex : segments.length,
       -(line.baselinePt - line.topPt) * .25,
-      residualSlackPt > 0,
+      // A justified line ended by a manual break opens only space gaps under
+      // the kashida types and pre-15 thaiDistribute (WORD_LINE_END_JUSTIFICATION).
+      residualSlackPt > 0
+        && !((line.endsWithBreak || (input.isLastLine && input.endsAtHardBreak === true))
+          && !lineEndOpensCjkGaps(input)),
       input.alignment === 'thaiDistribute' && residualSlackPt > 0,
     ), segments);
     perGapPt = distribution?.perGap ?? 0;
     stretchByIndex = withAutoSpaceExpansion(distribution?.perSeg ?? null, perGapPt, autoSpace);
     distributedWidthPt = distributedDelta(distribution) + autoSpaceTakenPt;
+    centreUnjustified = justification === 'word-or-centre' && distributedWidthPt <= 0 && residualSlackPt > 0
+      && centresWithoutOpportunity(segments, distSegments, bidi, firstContentIndex) && afterLastTab === 0;
   }
 
   const drawnWidthPt = naturalWidthPt + distributedWidthPt;
@@ -1375,9 +1623,9 @@ export function planLine(input: PlanLineInput): LineLayout {
   const alignmentSlackPt = lineSlackPt - distributedWidthPt + trailingSeparatorPt;
   const naturalAlignmentOffsetPt = edge === 'right'
     ? alignmentSlackPt
-    : edge === 'center'
+    : edge === 'center' || centreUnjustified
       ? alignmentSlackPt / 2
-      : edge === 'justify' && input.baseRtl && !applyJustify
+      : edge === 'justify' && input.baseRtl && (!applyJustify || (!softWrapped && distributedWidthPt <= 0))
         ? alignmentSlackPt
         : 0;
   const lineStartPt = lineLeftPt + physicalStartOffsetPt;
@@ -3235,6 +3483,7 @@ function planMeasuredLines(
   /** Owner section's counter-turn for upright inline graphics. */
   resourceOrientation?: import('./types.js').UprightResourceOrientation,
   ulTrailSpace = false,
+  doNotExpandShiftReturn = false,
 ): readonly LineLayout[] {
   // WORD_GRID_LINE_CONTENT_FIT_ADMISSION covers plain captions only. Decide
   // authored paragraph eligibility before continuation/keep-next slicing removes
@@ -3506,6 +3755,9 @@ function planMeasuredLines(
       stretchLastLine: context.stretchLastLine,
       exactLineSpacing: context.lineSpacing?.rule === 'exact',
       ...(ulTrailSpace ? { ulTrailSpace } : {}),
+      ...(doNotExpandShiftReturn ? { doNotExpandShiftReturn } : {}),
+      ...(context.endsAtHardBreak ? { endsAtHardBreak: true } : {}),
+      ...(compatibilityMode !== 15 ? { lineEndJustificationBeforeMode15: true } : {}),
       ...(context.wordWrap === false ? { wordWrap: false } : {}),
       firstLineIndentPt: context.firstIndentPt,
       ...(lineIndex === 0 && numberingPlan
@@ -4659,8 +4911,12 @@ function textBoxParagraphContext(
   const hasRuby = paragraph.runs.some((run) => run.type === 'text' && Boolean(run.ruby));
   const hasEastAsianText = paragraph.runs.some((run) =>
     run.type === 'text' && EAST_ASIAN_RE.test(run.text));
+  // Whether the paragraph ends at a page or column break is its own fact,
+  // never the host's (WORD_LINE_END_JUSTIFICATION).
+  const { endsAtHardBreak: _hostEndsAtHardBreak, ...host } = inherited;
   return {
-    ...inherited,
+    ...host,
+    ...(paragraph.endsAtHardBreak === true ? { endsAtHardBreak: true as const } : {}),
     rightIndentGrid: {
       ...inherited.rightIndentGrid,
       paragraphAllowsAdjustment: paragraph.adjustRightInd !== false,
@@ -6360,6 +6616,7 @@ function projectAcquiredParagraphLines(
       options.environment.pageWritingMode,
     ),
     options.environment.ulTrailSpace === true,
+    options.environment.doNotExpandShiftReturn === true,
   );
   if (options.sourceRangeStart !== undefined) {
     lines = rebaseMeasuredLineRanges(lines, options.sourceRangeStart);
