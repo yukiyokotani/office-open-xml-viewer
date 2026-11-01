@@ -108,8 +108,10 @@ export function measureJoinedTextUnit(
   measurement.reservePrefixWork(firstEnd);
   const firstText = s.text.slice(0, firstEnd);
   const pieces: { segment: LayoutTextSeg; text: string }[] = [{ segment: s, text: firstText }];
+  // A leader prefix keeps the leader's leading WORD_KERNED_SPACE_PAIRS seam
+  // pair, which `w` (the whole leader as fitted) already includes.
   if (firstEnd < s.text.length) return {
-    width: strAdvance(s, firstText), trailingSpace: 0, next: s, pieces,
+    width: strAdvance(s, firstText) + (s.leadingWordBoundaryPx ?? 0), trailingSpace: 0, next: s, pieces,
   };
   let groupW = w;
   let groupTrail = s.fitTextRegionIndex === undefined ? trailingSpaceW : 0;

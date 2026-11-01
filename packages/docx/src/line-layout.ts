@@ -17,6 +17,11 @@ export { fitCJKPrefix } from './line-breaker/fit-search.js';
 export { DEFAULT_TAB_PT, resolveDefaultTabPt, type BidiTabItem, type BidiTabResult, layoutBidiTabStops } from './line-breaker/tabs.js';
 export { buildSegments } from './line-breaker/segment-builder.js';
 
+/** WORD_JUSTIFIED_INTERWORD_COMPRESSION for the paragraph; the object form
+ * also says whether a line-end U+3000 hangs from the visible fit
+ * (WORD_LINE_END_SPACE_HANGS: not with wordWrap off). */
+export type JustifiedCompressionOption = boolean | Readonly<{ lineEndIdeographicSpaceHangs: boolean }>;
+
 export function layoutLines(
   ctx: MeasurementTextContext,
   segs: LayoutSeg[],
@@ -38,7 +43,7 @@ export function layoutLines(
   widthPolicy?: 'bounded' | 'intrinsic' | 'unwrapped',
   verticalGlyphMeasurement?: VerticalGlyphMeasurementService,
   overflowPunct?: boolean,
-  justifiedCompression?: boolean,
+  justifiedCompression?: JustifiedCompressionOption,
   lineFit?: LineFitWidth,
 ): LayoutLine[];
 
@@ -89,7 +94,7 @@ export function layoutLines(
   widthPolicy: 'bounded' | 'intrinsic' | 'unwrapped' = 'bounded',
   verticalGlyphMeasurement?: VerticalGlyphMeasurementService,
   overflowPunct = false,
-  justifiedCompression = false,
+  justifiedCompression: JustifiedCompressionOption = false,
   // WORD_KASHIDA_LINE_FIT: the part of each bounded line's width its text may
   // fill; retained paint still justifies to the full width.
   lineFit?: LineFitWidth,
@@ -179,7 +184,11 @@ export function layoutLines(
     ctx, segs, maxWidth, firstIndent, scale, tabStops, wrapCtx,
     fontFamilyClasses, tabOriginPx, kinsoku, characterGrid, defaultTabPt,
     marginRightPx, baseRtl, isJustified, stretchLastLine, startBoundary,
-    widthPolicy, verticalGlyphMeasurement, overflowPunct, justifiedCompression,
+    widthPolicy, verticalGlyphMeasurement, overflowPunct,
+    justifiedCompression: justifiedCompression !== false,
+    lineEndIdeographicSpaceHangs: typeof justifiedCompression === 'object'
+      ? justifiedCompression.lineEndIdeographicSpaceHangs
+      : justifiedCompression,
     ...(lineFit ? { lineFit } : {}), passContext,
   });
 }

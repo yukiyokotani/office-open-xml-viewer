@@ -288,11 +288,12 @@ describe('WD4 run character metrics reach the glyph draw (measure==paint)', () =
     expect(drawOf(changed.fills, ' ').x - drawOf(changed.fills, 'T').x).toBe(FONT_PX);
   });
 
-  it.each([14, undefined, 16, 15])('bounds zero to mode 15 while source splits stay transparent (mode %s)', async (compatibilityMode) => {
+  it.each([14, undefined, 16, 15])('disables a zero threshold while source splits stay transparent (mode %s)', async (compatibilityMode) => {
     const settings = { compatibilityMode, enableOpenTypeFeatures: true };
+    // WORD_KERN_THRESHOLD_AUTHORITY: measured with the mode omitted and 15.
     const zero = await render([textRun('AV', { kerning: 0 })], settings);
-    expect(drawOf(zero.fills, 'AV').fontKerning).toBe(compatibilityMode === 15 ? 'none' : 'normal');
-    expect(zero.runs[0].w).toBe(compatibilityMode === 15 ? 2 * FONT_PX : 2 * FONT_PX - 2);
+    expect(drawOf(zero.fills, 'AV').fontKerning).toBe('none');
+    expect(zero.runs[0].w).toBe(2 * FONT_PX);
     const seam = await render([textRun('T', { kerning: 8 }), textRun(' X', { kerning: 8 })], settings);
     expect(seam.fills).toEqual((await render([textRun('T X', { kerning: 8 })], settings)).fills);
     // Absence and positive size boundaries are normative in every mode.

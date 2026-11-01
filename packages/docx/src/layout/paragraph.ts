@@ -258,6 +258,9 @@ export type MeasuredTextPlanSegment = Readonly<
      * the applied advance (already in `measuredWidthPt`) and its natural
      * quarter em. Justification widens it first (see justifiedAutoSpaceExpansion). */
     autoSpace?: Readonly<{ appliedPt: number; naturalPt: number }>;
+    /** WORD_KERNED_SPACE_PAIRS pair with the preceding piece, already in
+     * `measuredWidthPt` and in the cluster offsets. */
+    leadingSeamPairPt?: number;
   }
 >;
 
@@ -1577,10 +1580,6 @@ export function planLine(input: PlanLineInput): LineLayout {
   const hangingLineEndSpacePt = wordLineEndSpaceHangs(bidi, input.wordWrap !== false)
     ? trailingAdvancePt(segments, hangingSpaceVisibleLength)
     : 0;
-  // Its U+0020 part, which the mode-15 visible fit also drops.
-  const hangingLatinSpacePt = hangingLineEndSpacePt > 0
-    ? trailingAdvancePt(segments, (text) => hangingSpaceVisibleLength(text, (code) => code === 0x20))
-    : 0;
   const lastDrawnIndex = visual.order.at(-1) ?? -1;
   // `word-justification-leading-indent-exclusion`
   let firstContentIndex = 0;
@@ -1638,18 +1637,20 @@ export function planLine(input: PlanLineInput): LineLayout {
             gaps,
             state: afterTab > 0
               ? { ...model.scan, naturalGapSum: gaps.reduce((sum, gap) => sum + gap.naturalPx, 0) }
-              : model.scan,
+              // The fit's sum, without gaps before a hanging U+3000 tail.
+              : { ...model.scan, naturalGapSum: model.S },
           },
           proportional: true,
           unweightedExpansion: {
             gaps: hangingLineEndSpacePt > 0
               ? withoutHangingSpaceGaps(expansionGaps, segments)
               : expansionGaps,
-            // The fit's visible width drops a line-end U+0020
-            // (WORD_LINE_END_SPACE_HANGS); the unweighted expansion does too,
-            // looking through zero-advance anchor hosts.
+            // The fit's visible width drops hanging line-end U+0020 and
+            // U+3000 (WORD_LINE_END_SPACE_HANGS); the unweighted expansion
+            // drops the same part, looking through zero-advance anchor hosts.
+            // A fitted (opaque) U+3000 stays inside the visible width.
             slack: effectiveAvailableWidthPt - physicalStartOffsetPt - retainedNaturalWidthPt
-              + hangingLatinSpacePt - autoSpaceTakenPt,
+              + Math.min(hangingLineEndSpacePt, model.lineEndSeparatorPx) - autoSpaceTakenPt,
           },
         },
       ), segments);
@@ -1833,6 +1834,7 @@ export function planLine(input: PlanLineInput): LineLayout {
         textLayoutService: _textLayoutService,
         textShapeRequest: _textShapeRequest,
         autoSpace: _autoSpace,
+        leadingSeamPairPt: _leadingSeamPairPt,
         selectedFaceFontBox,
         retainedGeometry,
         direction: _direction,
@@ -3450,6 +3452,7 @@ function textPlanSegment(
   return {
     ...style,
     kind: 'text', measuredWidthPt: segment.measuredWidth,
+    ...(segment.leadingWordBoundaryPx ? { leadingSeamPairPt: segment.leadingWordBoundaryPx } : {}),
     characterGridDeltaPt: gridPt,
     ...(segment.latinSpaceCompressionPx ? {
       trailingSpaceCompressionPt: segment.latinSpaceCompressionPx,
@@ -7378,6 +7381,10 @@ function trailingAdvancePt(
       cluster.range.start >= segment.range.start + visible)
       .reduce((sum, cluster) => sum + cluster.advancePt, 0);
     if (visible > 0) break;
+    // WORD_KERNED_SPACE_PAIRS: a separator-only piece shifted by its seam pair
+    // with the glyph before it hangs that pair too, as a piece measured with
+    // its own trailing space does.
+    if (/^ +$/u.test(segment.text)) advancePt += segment.leadingSeamPairPt ?? 0;
   }
   return advancePt;
 }

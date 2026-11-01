@@ -614,7 +614,9 @@ export function measureParagraph(
     context.overflowPunct !== false,
     wordJustifiedInterwordCompressionApplies(
       paragraph.alignment, environment.compatibilityMode,
-    ) && environment.verticalCJK !== true,
+    ) && environment.verticalCJK !== true
+      ? { lineEndIdeographicSpaceHangs: paragraph.wordWrap !== false }
+      : false,
     wordJustifiedLineFit(paragraph.alignment, environment.compatibilityMode, context.baseRtl, context.wordWrap !== false,
       context.baseRtl ? context.physicalIndentLeftPt : context.physicalIndentRightPt + rightGridAdjustmentPt),
   );

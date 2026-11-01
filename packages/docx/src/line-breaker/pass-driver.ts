@@ -99,6 +99,8 @@ export interface LineBreakerPassInput {
   readonly verticalGlyphMeasurement?: VerticalGlyphMeasurementService;
   readonly overflowPunct: boolean;
   readonly justifiedCompression?: boolean;
+  /** A line-end U+3000 hangs from the visible fit (WORD_LINE_END_SPACE_HANGS). */
+  readonly lineEndIdeographicSpaceHangs?: boolean;
   /** WORD_KASHIDA_LINE_FIT: a bounded line's text may fill `fraction` of its
    * available width less its reserve (absent: the whole width; paint still
    * justifies to the full width), and WORD_RTL_JUSTIFIED_VISIBLE_FIT. */
