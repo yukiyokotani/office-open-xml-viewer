@@ -1288,6 +1288,7 @@ export interface DocTable {
     cellMarginRight: number;
     jc: string;
     tblInd?: number;
+    tblIndInherited?: boolean;
     layout?: string;
     widthPt?: number;
     widthPct?: number;
