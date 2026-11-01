@@ -29,7 +29,7 @@ import { addExactRational, exactRationalFromNumber, exactRationalToNumberUp } fr
 import { revisionIsOmitted } from './revision-visibility.js';
 import { wordArabicTextKerned, wordEastAsianAutoSpaceJustifiedMaximumPt, wordKerningApplies, wordLineEndSpaceHangs, wordRtlJustifiedVisibleFitApplies, wordSoftLineJustifiesAtSpacesOnly } from './line-compatibility.js';
 import type { LineGapPlan } from '../line-breaker/line-gaps.js';
-import { distributeLineSlack as distributeProportionalSlack, enumerateGaps, graphemeClusterOffsets, type LineGap } from '@silurus/ooxml-core';
+import { distributeLineSlack as distributeProportionalSlack, enumerateGaps, graphemeClusterOffsets, isSeaGraphemeExtend, type LineGap } from '@silurus/ooxml-core';
 import { specifiedTextLineMetrics, specifiedTextParagraphIsHomogeneous } from './specified-line-spacing.js';
 import { wordTextBoxVerticalMode } from './compatibility.js';
 import {
@@ -430,6 +430,9 @@ export interface PlanLineInput {
   readonly doNotExpandShiftReturn?: boolean;
   /** compatibilityMode is absent or below 15 (WORD_LINE_END_JUSTIFICATION). */
   readonly lineEndJustificationBeforeMode15?: boolean;
+  /** A thaiDistribute paragraph below mode 15 with no character grid
+   *  (WORD_THAI_DISTRIBUTE_PROPORTIONAL_SPREAD). */
+  readonly thaiProportionalSpread?: boolean;
   /** The paragraph piece ends at a page or column break (its last line). */
   readonly endsAtHardBreak?: boolean;
   readonly firstLineIndentPt?: number;
@@ -488,6 +491,70 @@ function distributionSegments(
     && !segment.listLabel
     ? { text: segment.text }
     : hostsAreHanging && index >= suffixStart && segment.kind === 'anchor-host' ? { text: '' } : {});
+}
+
+/** {@link WORD_THAI_DISTRIBUTE_PROPORTIONAL_SPREAD} weights: the advance of
+ * the grapheme cluster ending at a gap's code point (its base and the Thai
+ * marks UAX #29 attaches to it, across formatting seams), or of the space at
+ * the gap. `undefined` keeps the equal per-gap spread: the rule covers only
+ * the measured line class, horizontal left-to-right text runs of Thai and
+ * printable ASCII without character spacing, scaling, fitText or ruby, where
+ * Thai meets other text only at a space, and every cut the gaps make starts
+ * a retained cluster. Advances come from the retained clusters, so no text
+ * is shaped again; work is linear in the line's code points. */
+function thaiProportionalClusterAdvance(
+  segments: readonly MeasuredLinePlanSegment[],
+  bidi: boolean,
+): ((segmentIndex: number, cpOffset: number) => number) | undefined {
+  if (bidi) return undefined;
+  const isThai = (cp: number): boolean => cp >= 0x0e00 && cp <= 0x0e7f;
+  const codePoints: number[] = [];
+  const advances: number[] = [];
+  const segmentStart: number[] = [];
+  let thai = false;
+  for (const segment of segments) {
+    segmentStart.push(codePoints.length);
+    if (segment.kind !== 'text' || segment.fixedPitch || segment.fitText || segment.ruby
+      || segment.direction !== 'ltr' || (segment.writingMode ?? 'horizontal-tb') !== 'horizontal-tb'
+      || (segment.characterSpacingPt ?? 0) !== 0 || (segment.characterScale ?? 1) !== 1
+      || (segment.characterGridDeltaPt ?? 0) !== 0) {
+      return undefined;
+    }
+    const clusterAdvance = new Map(segment.clusters.map((cluster) =>
+      [cluster.range.start - segment.range.start, cluster.advancePt] as const));
+    let utf16 = 0;
+    for (const character of segment.text) {
+      const cp = character.codePointAt(0)!;
+      const previous = codePoints.at(-1);
+      if (!isThai(cp) && (cp < 0x20 || cp > 0x7e)) return undefined;
+      if (previous !== undefined && isThai(cp) !== isThai(previous) && cp !== 0x20 && previous !== 0x20) {
+        return undefined;
+      }
+      // A Thai mark with no base (after a space or at the start) was not
+      // measured; such a line keeps the equal spread.
+      if (isSeaGraphemeExtend(cp) && (previous === undefined || previous === 0x20)) return undefined;
+      // A gap after a Thai cluster or a space cuts before this code point.
+      if (utf16 > 0 && previous !== undefined && (isThai(previous) || previous === 0x20)
+        && !isSeaGraphemeExtend(cp) && !clusterAdvance.has(utf16)) {
+        return undefined;
+      }
+      thai ||= isThai(cp);
+      codePoints.push(cp);
+      advances.push(clusterAdvance.get(utf16) ?? 0);
+      utf16 += character.length;
+    }
+  }
+  if (!thai) return undefined;
+  return (segmentIndex, cpOffset) => {
+    let index = (segmentStart[segmentIndex] ?? 0) + cpOffset;
+    if (codePoints[index] === 0x20) return advances[index] ?? 0;
+    let weight = 0;
+    for (; index >= 0; index -= 1) {
+      weight += advances[index] ?? 0;
+      if (!isSeaGraphemeExtend(codePoints[index] ?? 0)) break;
+    }
+    return weight;
+  };
 }
 
 /** How {@link WORD_LINE_END_JUSTIFICATION} justifies a line of a justified paragraph:
@@ -1702,6 +1769,12 @@ export function planLine(input: PlanLineInput): LineLayout {
           && !lineEndOpensCjkGaps(input))
         && !softLineSpacesOnly,
       input.alignment === 'thaiDistribute' && residualSlackPt > 0,
+      // Only soft-wrapped and manual-break-ended lines were measured; a piece
+      // ended by a page or column break keeps the equal spread.
+      input.thaiProportionalSpread === true
+        && residualSlackPt > 0 && (line.endsWithBreak || !input.isLastLine)
+        ? thaiProportionalClusterAdvance(segments, bidi)
+        : undefined,
     ), segments);
     perGapPt = distribution?.perGap ?? 0;
     stretchByIndex = withAutoSpaceExpansion(distribution?.perSeg ?? null, perGapPt, autoSpace);
@@ -3909,6 +3982,8 @@ function planMeasuredLines(
       ...(doNotExpandShiftReturn ? { doNotExpandShiftReturn } : {}),
       ...(context.endsAtHardBreak ? { endsAtHardBreak: true } : {}),
       ...(compatibilityMode !== 15 ? { lineEndJustificationBeforeMode15: true } : {}),
+      ...(paragraph.alignment === 'thaiDistribute' && (compatibilityMode ?? 0) < 15
+        && !context.characterGrid.active ? { thaiProportionalSpread: true } : {}),
       ...(context.wordWrap === false ? { wordWrap: false } : {}),
       firstLineIndentPt: context.firstIndentPt,
       ...(lineIndex === 0 && numberingPlan
