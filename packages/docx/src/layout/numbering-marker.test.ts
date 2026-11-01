@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { TextLayoutService } from './text.js';
-import { numberingBodyIndentRegimes, resolveNumberingMarkerGeometry } from './numbering-marker.js';
+import { resolveNumberingMarkerGeometry } from './numbering-marker.js';
 import { createTextLayoutService } from './text.js';
 import { createFontResolver } from './font-service.js';
 
@@ -178,50 +178,4 @@ describe('resolveNumberingMarkerGeometry', () => {
       expect(geometryWithSuffix(suffix, -8).bodyOffsetPt).toBe(expectedBodyOffsetPt);
     },
   );
-});
-
-describe('numberingBodyIndentRegimes', () => {
-  it('predicts the body offset and lists every change of regime (randomized)', () => {
-    let seed = 1883;
-    const random = (): number => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
-    const markerInput = {
-      fontSizePt: 10, fonts: { ascii: 'serif', eastAsia: 'serif' }, weight: 400, style: 'normal', complexScript: false,
-    } as const;
-    for (let trial = 0; trial < 60; trial += 1) {
-      const suff = (['tab', 'tab', 'space', 'nothing'] as const)[trial % 4]!;
-      const jc = (['left', 'right', 'center'] as const)[Math.floor(random() * 3)]!;
-      const advance = 2 + Math.round(random() * 20);
-      const physicalIndentLeftPt = Math.round(random() * 60);
-      const defaultTabPt = [0, 12.5, 36, 42.55][Math.floor(random() * 4)]!;
-      const tabStops = Array.from({ length: Math.floor(random() * 4) }, () => ({
-        pos: physicalIndentLeftPt + Math.round(random() * 200) - 20,
-        alignment: (['left', 'num', 'bar', 'right'] as const)[Math.floor(random() * 4)]!,
-        leader: 'none' as const,
-      }));
-      const numbering = { numId: 1, level: 0, format: 'decimal', text: '1.', indentLeft: 0, tab: 36, suff, jc };
-      const input = { physicalIndentLeftPt, tabStops, defaultTabPt };
-      const service = textService(advance);
-      const regimes = numberingBodyIndentRegimes(numbering, markerInput, input, service);
-      const bodyAt = (edge: number): number => resolveNumberingMarkerGeometry(numbering, markerInput,
-        { ...input, authoredFirstIndentPt: edge }, service).bodyOffsetPt;
-      const label = JSON.stringify({ trial, suff, jc, advance, physicalIndentLeftPt, defaultTabPt, tabStops });
-      // Samples on a fine grid plus the list stops' own coincident edges.
-      const extent = jc === 'left' ? advance : jc === 'center' ? advance / 2 : 0;
-      const samples = [...Array.from({ length: 1600 }, (_, index) => -100 + index * 0.25 + 0.0625),
-        ...tabStops.map((stop) => stop.pos - physicalIndentLeftPt - extent)].sort((a, b) => a - b);
-      let previous: { edge: number; key: string } | null = null;
-      for (const edge of samples) {
-        const regime = regimes.regimeAt(edge);
-        const predicted = regime.constantPx ?? edge + regime.offsetPx!;
-        expect(Math.abs(Math.max(0, predicted) - bodyAt(edge)), `${label} at ${edge}`).toBeLessThanOrEqual(1e-9);
-        if (previous && previous.key !== regime.key && previous.edge < edge) {
-          const breaks = regimes.breaksIn(previous.edge - 1e-9, edge + 1e-9, 10_000);
-          expect(breaks?.length ?? 0, `${label} between ${previous.edge} and ${edge}`).toBeGreaterThan(0);
-        }
-        previous = { edge, key: regime.key };
-      }
-      // Too many grid stops in range: the caller falls back.
-      if (suff === 'tab' && defaultTabPt > 0) expect(regimes.breaksIn(-100, 10_000, 4)).toBeNull();
-    }
-  });
 });

@@ -3,7 +3,6 @@ import type { NumberingInfo, TabStop } from '../types.js';
 import { wordNumberingSuffixAcceptsCoincidentListTab } from './line-compatibility.js';
 import { nextTabStop, type TextLayoutService, type TextShapeResult } from './text.js';
 import type { DeepReadonly, NumberingMarkerShapeInput } from './types.js';
-import type { NumberingBodyIndentRegime } from '../line-breaker/model.js';
 import { allowsReferenceFontMetric, indexedFontMetrics, selectResourceMetric, selectedFontLineMetric } from '../line-breaker/font-metrics.js';
 
 export interface NumberingMarkerTextLayout {
@@ -237,73 +236,5 @@ export function resolveNumberingMarkerGeometry(
     markerShiftPt,
     shape: markerShape,
     ...(markerLayout ? { lineBox: markerLayout.lineBox } : {}),
-  };
-}
-
-/** The regimes of {@link resolveNumberingMarkerGeometry}'s body offset over
- * the marker's authored leading edge `e` (the other inputs fixed), for a
- * line breaker that must split a sloped window at each change of form. The
- * marker extent k (shift plus width) is shaped once:
- * - suffix space / nothing: body = e + c (c = k plus the space advance)
- *   while that is positive, else 0;
- * - suffix tab: 0 while e + k <= 0; else the suffix stop (a constant) or,
- *   with no stop, e + k. The stop changes only where the margin e + k crosses
- *   a custom stop, the coincident list-stop tolerance, the last custom stop,
- *   or a default-grid position (nextTabStop's own thresholds). */
-export function numberingBodyIndentRegimes(
-  numbering: DeepReadonly<NumberingInfo>,
-  markerInput: NumberingMarkerShapeInput,
-  input: Readonly<{
-    physicalIndentLeftPt: number;
-    tabStops: readonly TabStop[];
-    defaultTabPt: number;
-  }>,
-  service: TextLayoutService,
-): {
-  regimeAt: (edgePt: number) => NumberingBodyIndentRegime;
-  breaksIn: (lowerPt: number, upperPt: number, limit: number) => readonly number[] | null;
-} {
-  const atZero = resolveNumberingMarkerGeometry(numbering, markerInput, { ...input, authoredFirstIndentPt: 0 }, service);
-  const extent = atZero.markerShiftPt + atZero.markerWidthPt;
-  const { physicalIndentLeftPt: physicalLeft, tabStops, defaultTabPt } = input;
-  if ((numbering.suff || 'tab') !== 'tab') {
-    const offset = atZero.bodyOffsetPt;
-    return {
-      regimeAt: (edge) => edge + offset > 0 ? { key: 'offset', offsetPx: offset } : { key: 'zero', constantPx: 0 },
-      breaksIn: (lower, upper) => -offset > lower && -offset < upper ? [-offset] : [],
-    };
-  }
-  const placing = tabStops.filter((stop) => stop.alignment !== 'bar');
-  const lastCustom = placing.reduce((last, stop) => Math.max(last, stop.pos), 0);
-  // Margins (physical, from physicalLeft) at which the suffix stop may change.
-  const fixedMargins = [lastCustom];
-  for (const stop of placing) {
-    fixedMargins.push(stop.pos);
-    if (stop.alignment === 'num') fixedMargins.push(stop.pos - 1e-6, stop.pos + 1e-6);
-  }
-  const gridEpsilon = 1e-6;
-  return {
-    regimeAt: (edge) => {
-      const markerEnd = edge + atZero.markerShiftPt + atZero.markerWidthPt;
-      if (!(markerEnd > 0)) return { key: 'zero', constantPx: 0 };
-      const stop = numberingSuffixTabStop(physicalLeft + markerEnd, tabStops, defaultTabPt);
-      return stop
-        ? { key: `stop:${stop.pos}`, constantPx: Math.max(0, stop.pos - physicalLeft) }
-        : { key: 'marker', offsetPx: extent };
-    },
-    breaksIn: (lower, upper, limit) => {
-      const toEdge = (margin: number): number => margin - physicalLeft - extent;
-      const edges = [-extent, ...fixedMargins.map(toEdge)];
-      if (defaultTabPt > 0) {
-        const from = Math.max(physicalLeft + lower + extent, lastCustom);
-        const to = physicalLeft + upper + extent;
-        const first = Math.ceil((from + gridEpsilon) / defaultTabPt);
-        const last = Math.floor((to + gridEpsilon) / defaultTabPt);
-        if (last - first + 1 > limit) return null;
-        for (let index = first; index <= last; index += 1) edges.push(toEdge(index * defaultTabPt - gridEpsilon));
-      }
-      const inside = [...new Set(edges.filter((edge) => edge > lower && edge < upper))].sort((a, b) => a - b);
-      return inside.length > limit ? null : inside;
-    },
   };
 }

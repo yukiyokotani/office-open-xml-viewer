@@ -592,13 +592,6 @@ export interface WrapLayoutCtx {
     minimumStartWidthPt: number;
     /** Required atomic start width for a square-constrained gap. */
     squareMinimumStartWidthPt?: number;
-    /** WORD_KASHIDA_LINE_FIT: required width of a window reaching the band's
-     *  far edge, when its fitted width differs from an interior window's. */
-    farEdgeMinimumStartWidthPt?: number;
-    /** WORD_KASHIDA_LINE_FIT: forward admission test of a candidate window. */
-    acceptWindow?: import('../layout/float-wrap.js').LineWindowAcceptance;
-    /** WORD_KASHIDA_LINE_FIT: extra sweep events from the caller's fit. */
-    fitRoots?: import('../layout/float-wrap.js').LineWindowFitRoots;
     probeHeightPt: number;
     paragraphXPt: number;
     maximumWidthPt: number;
@@ -634,23 +627,8 @@ export interface WrapLayoutCtx {
   numberingFirstLine?: Readonly<{
     authoredFirstIndentPx: number;
     bodyIndentAt: (markerLeadingEdgePx: number) => number;
-    /** The regime of `bodyIndentAt` holding a leading edge: within one
-     * regime the body indent is `edge + offsetPx` or `constantPx`. */
-    bodyIndentRegimeAt: (markerLeadingEdgePx: number) => NumberingBodyIndentRegime;
-    /** Leading edges in (lowerPx, upperPx), ascending, at which the regime
-     * may change (computed from the marker extent and the tab stops, not by
-     * probing); null when there are more than `limit`. */
-    bodyIndentBreaks: (lowerPx: number, upperPx: number, limit: number) => readonly number[] | null;
   }>;
 }
-
-/** One regime of a numbered first line's body indent (see
- * WrapLayoutCtx.numberingFirstLine): `key` names it among the regimes of the
- * paragraph (equal keys, equal form). */
-export type NumberingBodyIndentRegime = Readonly<
-  | { key: string; offsetPx: number; constantPx?: undefined }
-  | { key: string; constantPx: number; offsetPx?: undefined }
->;
 
 
 /** Document-grid context passed to line-box computation.  When the section's
