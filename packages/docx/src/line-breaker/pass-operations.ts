@@ -465,13 +465,29 @@ function placeLineWindow(
   const lineQuery = (topY: number, x: number, width: number, height: number) => {
     if (farEdgeShift === 0) return query(topY, x, width, height);
     const shiftedWidth = width - farEdgeShift;
+    // The first window of the real band holding the interior requirement is
+    // admissible when an object ends it. The moved band measures a window an
+    // object edge ends between the moved and the real far edge to the moved
+    // edge (blk-0898-kfit9: the reserve runs to that object edge), so it is
+    // taken when it comes first.
+    const interiorWindow = () => {
+      if (farEdgeShift < 0) return null;
+      const interior = query(topY, x, width, height);
+      const endsAtObject = baseRtl ? interior.xOffset > 1e-9 : interior.xOffset + interior.maxWidth < width - 1e-9;
+      return endsAtObject && interior.maxWidth >= transaction.requirement ? interior : null;
+    };
+    const first = (found: { topY: number; xOffset: number; maxWidth: number }) => {
+      const interior = interiorWindow();
+      return interior && (interior.topY < found.topY || (interior.topY === found.topY
+        && (baseRtl ? interior.xOffset > found.xOffset : interior.xOffset < found.xOffset))) ? interior : found;
+    };
     // Not even the clear band holds the requirement: the full band, as the
     // solver gives a requirement wider than its band.
-    if (!(shiftedWidth >= transaction.requirement)) return query(topY, x, width, height, width);
+    if (!(shiftedWidth >= transaction.requirement)) return first(query(topY, x, width, height, width));
     const shiftedX = baseRtl ? x + farEdgeShift : x;
     const win = query(topY, shiftedX, shiftedWidth, height);
     const reachesFarEdge = baseRtl ? win.xOffset <= 1e-9 : win.xOffset + win.maxWidth >= shiftedWidth - 1e-9;
-    if (!reachesFarEdge) return { ...win, xOffset: win.xOffset + shiftedX - x };
+    if (!reachesFarEdge) return first({ ...win, xOffset: win.xOffset + shiftedX - x });
     // Pulled outward, the far edge is clipped back to the band (no object
     // lies in a window the solver returned).
     if (farEdgeShift < 0) {
@@ -480,7 +496,7 @@ function placeLineWindow(
     // Pulled inward, the real window from the same leading side runs on to
     // the first object or the band edge; earlier gaps, narrower than the
     // requirement, stay refused.
-    return query(win.topY, x, width, height, win.maxWidth);
+    return first(query(win.topY, x, width, height, win.maxWidth));
   };
   // The requirement of a window at absolute [leftPt, leftPt + widthPt].
   const bandFarEdge = baseRtl ? lineBandX : lineBandX + lineBandWidth;

@@ -264,6 +264,18 @@ describe('WORD_KASHIDA_LINE_FIT line breaker', () => {
     expect(lines.map((line) => [line.topY, line.xOffset])).toEqual([[10, 300]]);
   });
 
+  it('takes a window ending at a float close to the band edge after a rejection (kfit9)', () => {
+    // Band [0, 300], text margin 360, mediumKashida. Line 1 leaves [0, 100];
+    // line 2 a float edge at 296, 4 pt inside the band edge, where the
+    // reserve runs to the float edge: 0.9 x 296 = 266.4 holds the 265 pt word
+    // (blk-0898-kfit9 S rows: Word ends the reserve at such an edge). The
+    // clear band below fits only 300 - 0.1 x 360 = 264.
+    const lines = run([token('W'.repeat(53))], {
+      maxWidth: 300, marginRightPx: 360, wrapCtx: wrap([band(100, 300, 0, 10), band(296, 300, 10, 20)]), lineFit: fit(1, 0.1),
+    });
+    expect(lines.map((line) => [line.topY, line.xOffset, line.availWidth])).toEqual([[10, 0, 296]]);
+  });
+
   it('asks the line-window oracle once per rejection with each kind\'s requirement', () => {
     // A numbered first line with a -50 pt authored hanging indent: every top
     // offers a narrowed 390 pt window, too small for the 320 pt word at 0.8

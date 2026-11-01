@@ -89,6 +89,23 @@ const WORDS = Array.from({ length: 20 }, () => 'aaaa').join(' ');
 const wordsOn = (line: LineLayout): number => characters(line).length / 4;
 
 describe('WORD_KASHIDA_LINE_FIT', () => {
+  it('keeps the full width before mode 15 under a negative trailing indent', () => {
+    // blk-0898-kfit9 S014-S016: a highKashida line of a 345.5pt window under a
+    // -40pt right indent holds 316.9pt. A -40pt right indent widens the band
+    // to 400pt: eight words (390 pt) fit, as in a both paragraph.
+    for (const settings of [undefined, { compatibilityMode: 14 }]) {
+      for (const alignment of ['mediumKashida', 'highKashida'] as const) {
+        const [first] = lines(para([textRun(WORDS)], alignment, { indentRight: -40 }), settings);
+        const [plain] = lines(para([textRun(WORDS)], 'both', { indentRight: -40 }), settings);
+        expect(wordsOn(first!), `${alignment} mode ${settings?.compatibilityMode}`).toBe(wordsOn(plain!));
+        expect(wordsOn(first!)).toBe(8);
+      }
+    }
+    // From mode 15 the share of the line's own width stays: 0.8 x 400 = 320 holds 6 words.
+    const [mode15] = lines(para([textRun(WORDS)], 'highKashida', { indentRight: -40 }), MODE_15);
+    expect(wordsOn(mode15!)).toBe(6);
+  });
+
   it('fits medium and high kashida lines into 0.9 and 0.8 of the width', () => {
     for (const settings of MODES) {
       const expected: Array<[DocParagraph['alignment'], number]> = [
