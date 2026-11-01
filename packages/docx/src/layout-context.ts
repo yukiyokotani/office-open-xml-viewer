@@ -94,6 +94,8 @@ export interface StoryContext {
   readonly story: StoryKind;
   readonly containers: readonly ContainerFrame[];
   readonly lineNumberingEligible: boolean;
+  /** The story is laid out in a quarter-turned (vertical bodyPr) text box. */
+  readonly quarterTurned?: boolean;
 }
 
 export function enterTableCellStoryContext(parent: StoryContext): StoryContext {
@@ -101,6 +103,7 @@ export function enterTableCellStoryContext(parent: StoryContext): StoryContext {
     story: parent.story,
     containers: [...parent.containers, { kind: 'tableCell' }],
     lineNumberingEligible: false,
+    ...(parent.quarterTurned ? { quarterTurned: true } : {}),
   };
 }
 
