@@ -1595,6 +1595,7 @@ function emitResolvedTextSegment(
     colorAuto: r.colorAuto ?? false,
     border: r.border ?? null,
     ruby: emissionState.firstSeg ? ruby : undefined,
+    ...(ruby ? { rubyPiece: true as const } : {}),
     revision,
     ...(revision && environment.showTrackedChanges === true
       ? {

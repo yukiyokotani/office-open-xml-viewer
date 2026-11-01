@@ -43,6 +43,7 @@ import {
   segLetterSpacingPx,
   charSpacingDeltaPx,
   condensedSpacingMayFloor,
+  condensedUnitAdvancesPx,
   type CondensedAdvanceUnits,
   protectedNoBreakOffsets,
   hardJoinPrefixEnd,
@@ -1547,7 +1548,7 @@ export function justifiedPrefixCompression(state: Pick<PassOperationState,
 export function fitJustifiedCompression(state: Pick<PassOperationState,
   'justifiedCompression' | 'baseRtl' | 'widthPolicy' | 'characterGrid' | 'breakerState'
   | 'segAdvance' | 'strAdvance' | 'availW' | 'textSegmentBox' | 'addToLine' | 'scale' | 'measurement' | 'flush'
-  | 'measureText'>, first: LayoutTextSeg): boolean {
+  | 'reservePrefixWork'>, first: LayoutTextSeg): boolean {
   if (!justifiedCompressionApplies(state) || first.fitTextRegionIndex !== undefined) return false;
   const { breakerState: breaker } = state;
   if (breaker.justifiedUnitEnd) {
@@ -1607,7 +1608,7 @@ export function fitJustifiedCompression(state: Pick<PassOperationState,
 }
 
 export type SeamPairState = Pick<PassOperationState,
-  'measurement' | 'widthPolicy' | 'characterGrid' | 'measureText' | 'scale'>;
+  'measurement' | 'widthPolicy' | 'characterGrid' | 'scale' | 'reservePrefixWork'>;
 
 /** WORD_KERNED_SPACE_PAIRS: the font's pair adjustment across the seam
  * between `previous` and `s`, which follows it on the same line, when one side
@@ -1620,8 +1621,9 @@ export type SeamPairState = Pick<PassOperationState,
  *
  * The pair adjusts the advance of the seam's first character (the space, or
  * the glyph before a slot-split space). Under
- * WORD_CONDENSED_SPACING_ADVANCE_FLOOR that advance is floored at zero with
- * the pair folded in, so only the floored difference is charged; the charge
+ * WORD_CONDENSED_SPACING_ADVANCE_FLOOR that character's committed contextual
+ * advance (the last floor unit of `previous`) is floored at zero with the pair
+ * folded in, so only the floored difference is charged; the charge
  * never exceeds `widthPx`, the following piece's own advance, so no piece
  * takes a negative width. Intrinsic sizing keeps its registered-unit
  * acquisition (joined physical units) unchanged. */
@@ -1640,13 +1642,12 @@ export function seamPairAdvance(
   let pair = state.measurement.kernedSpaceSeamAdvance(previous, s);
   if (pair === 0) return 0;
   if (condensedSpacingMayFloor(previous, characterGrid, scale)) {
-    const start = graphemeClusterOffsets(previous.text).at(-1) ?? 0;
-    const last: LayoutTextSeg = { ...previous, ...RESET_SLICED_TEXT_MEASUREMENT,
-      text: previous.text.slice(start), ...slicedTextMetadata(previous, start, previous.text.length) };
-    const natural = state.measureText(last).width;
-    const floored = (adjustmentPx: number) => segAdvanceWidth(
-      last, natural + adjustmentPx / charScaleFactor(previous), characterGrid, scale);
-    pair = floored(pair) - floored(0);
+    // The committed contextual advance of the seam's first character (its
+    // pairs inside `previous` included), exactly as segAdvanceWidth floors it.
+    const units = state.measurement.condensedAdvanceUnits(
+      previous, previous.text, 0, characterGrid, state.reservePrefixWork);
+    const last = units ? condensedUnitAdvancesPx(previous, characterGrid, scale, units).at(-1) : undefined;
+    if (last !== undefined) pair = Math.max(0, last + pair) - Math.max(0, last);
   }
   return Math.max(pair, -Math.max(0, widthPx));
 }

@@ -1214,7 +1214,9 @@ function prepareAtomicTextFit(
   if (!preferWholeWord && s.explicitBreaks && follower?.joinPrev) {
     const whole = measureJoinedTextUnit(s, breakerState.queue, context, w, trailingSpaceW, 0, false, 'whole-leader');
     if (breakerState.currentWidth + fitWidthFor(whole.width, whole.trailingSpace, whole.next) > availW()) {
-      const split = context.explicitTextSplit(s, availW() - breakerState.currentWidth);
+      // The prefix keeps the leader's WORD_KERNED_SPACE_PAIRS seam pair.
+      const split = context.explicitTextSplit(s,
+        availW() - breakerState.currentWidth - (s.leadingWordBoundaryPx ?? 0));
       if (split > 0 && split < s.text.length) {
         context.queueEmergencyTail(s, split);
         breakerState.queue.unshift({ ...s, ...RESET_SLICED_TEXT_MEASUREMENT,
