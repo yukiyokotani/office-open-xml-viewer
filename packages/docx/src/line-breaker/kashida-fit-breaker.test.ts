@@ -28,25 +28,25 @@ function obstacle(left: number, right: number): FloatRect {
 function band(left: number, right: number, top: number, bottom: number): FloatRect {
   return { ...obstacle(left, right), imageY: top, imageH: bottom - top, yTop: top, yBottom: bottom };
 }
-function wrap(floats: FloatRect[], columnWidthPt = 360): WrapLayoutCtx {
-  return { floats, paraX: 0, startPageY: 0, columnXPt: 0, columnWidthPt,
-    readingDirection: 'ltr', pageH: 800, lineBoxH: () => 10 };
+function wrap(floats: FloatRect[], columnWidthPt = 360, rtl = false, columnXPt = 0): WrapLayoutCtx {
+  return { floats, paraX: 0, startPageY: 0, columnXPt, columnWidthPt,
+    readingDirection: rtl ? 'rtl' : 'ltr', pageH: 800, lineBoxH: () => 10 };
 }
 const fit = (fraction: number, reserveShare: number): LineFitWidth => ({ fraction, reserveShare, rtlVisiblePrefix: false });
 
 function run(segs: LayoutSeg[], options: {
-  maxWidth?: number; marginRightPx?: number; wrapCtx?: WrapLayoutCtx; baseRtl?: boolean;
+  maxWidth?: number; marginRightPx?: number; wrapCtx?: WrapLayoutCtx; baseRtl?: boolean; firstIndent?: number;
   tabStops?: { pos: number; alignment: 'left' | 'right' | 'start' | 'end'; leader: 'none' }[];
   lineFit?: LineFitWidth;
 }): LayoutLine[] {
   const maxWidth = options.maxWidth ?? 360;
-  return layoutLines(context(), segs, maxWidth, 0, 1, options.tabStops ?? [], options.wrapCtx, {}, 0,
+  return layoutLines(context(), segs, maxWidth, options.firstIndent ?? 0, 1, options.tabStops ?? [], options.wrapCtx, {}, 0,
     undefined, undefined, undefined, options.marginRightPx ?? maxWidth, options.baseRtl ?? false,
     true, false, undefined, 'bounded', undefined, true, false, options.lineFit);
 }
 
 describe('WORD_KASHIDA_LINE_FIT line breaker', () => {
-  it('retries a rejected float gap with the band width the fitted advance needs', () => {
+  it('retries a rejected float gap until a window fits the advance', () => {
     // Gaps of 100 pt ([0, 100]) and 120 pt ([160, 280]) beside two floats.
     const floats = wrap([obstacle(100, 160), obstacle(280, 360)]);
     // A 10% reserve of the gap before mode 15 (blk-0898-kfit7 P1/P2: the
@@ -107,7 +107,7 @@ describe('WORD_KASHIDA_LINE_FIT line breaker', () => {
     });
     expect(rtl!.segments.find((segment) => 'isTab' in segment)!.measuredWidth).toBeCloseTo(245);
   });
-  it('retries with the exact inverse of a reserve that runs past a far-edge window', () => {
+  it('retries past a far-edge window whose reserve runs past its edge', () => {
     // A 300 pt paragraph with a 60 pt trailing indent; floats at the start
     // side leave 100, 110 and 120 pt windows reaching the far edge on three
     // 10 pt lines. Before mode 15 each reserves 0.1 × (window + 60): fits of
@@ -149,7 +149,7 @@ describe('WORD_KASHIDA_LINE_FIT line breaker', () => {
     expect(lines.map((line) => [line.topY, line.xOffset, line.availWidth])).toEqual([[10, 190, 105]]);
   });
 
-  it('inverts a reserve whose base ends before the band (negative trailing indent)', () => {
+  it('tests a reserve whose base ends before the band (negative trailing indent) forward', () => {
     // maxWidth 420 with the text margin at 360: a far-edge window's reserve
     // base is 60 pt shorter than the window. 270 pt fits 249 pt; 308 pt fits
     // 283.2 pt, which holds the 280 pt word.
@@ -171,4 +171,72 @@ describe('WORD_KASHIDA_LINE_FIT line breaker', () => {
     expect(total).toBeLessThanOrEqual(360 + 1e-6);
     expect(total).toBeGreaterThan(300);
   });
+  it('keeps a narrower later window that fits after a far-edge rejection', () => {
+    // 300 pt paragraph, 60 pt trailing indent, 10% reserve: the 100 pt
+    // far-edge window fits 84 pt; the next line's 95 pt window, narrowed at
+    // its far edge, fits 85.5 pt and takes the 85 pt word.
+    const floats = wrap([band(0, 200, 0, 10), band(0, 190, 10, 20), band(285, 300, 10, 20)]);
+    const lines = run([token('W'.repeat(17))], {
+      maxWidth: 300, marginRightPx: 360, wrapCtx: floats, lineFit: fit(1, 0.1),
+    });
+    expect(lines.map((line) => [line.topY, line.xOffset, line.availWidth])).toEqual([[10, 190, 95]]);
+  });
+
+  it('tests a hanging first line forward with its own window', () => {
+    // A -50 pt hanging indent widens the first line to [-50, 300]. Floats
+    // leave 90 pt and then 108 pt there: fits of 86 and 102.2 pt (0.1 of the
+    // 40 and 58 pt windows). The 100 pt word takes the second.
+    const floats = wrap([band(40, 400, 0, 10), band(58, 400, 10, 20)], 450, false, -50);
+    const lines = run([token('W'.repeat(20))], {
+      maxWidth: 300, marginRightPx: 300, firstIndent: -50, wrapCtx: floats, lineFit: fit(1, 0.1),
+    });
+    expect(lines.map((line) => line.topY)).toEqual([10]);
+    expect(lines[0]!.availWidth).toBeCloseTo(58);
+  });
+
+  it('measures a separately formatted line-end space by the visible prefix in a gap', () => {
+    // Right-to-left both: a 90 pt word and its glued 5 pt space fit a 92 pt
+    // gap by the visible prefix; a separately formatted glued space follows.
+    const visible: LineFitWidth = { fraction: 1, reserveShare: 0, rtlVisiblePrefix: true };
+    const lines = run([token('W'.repeat(18)), token(' ', { joinPrev: true }), token(' ', { joinPrev: true, color: 'FF0000' }), token('next')], {
+      baseRtl: true, wrapCtx: wrap([band(0, 268, 0, 10)], 360, true), lineFit: visible,
+    });
+    expect([lines[0]!.topY, lines[0]!.xOffset]).toEqual([0, 268]);
+    expect(lines[0]!.segments.map((segment) => 'text' in segment ? segment.text : '').join('').trim()).toBe('W'.repeat(18));
+  });
+
+  it('finds the same window as a forward scan of every candidate (randomized)', () => {
+    // Four 10 pt lines, each with one float leaving a single window at the
+    // start side (interior: its far edge is the float) or at the far side
+    // (reaching the band's far edge); a fifth free line. The retry must land
+    // on the first window whose forward fit holds the word.
+    let seed = 20081;
+    const random = (): number => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
+    for (let trial = 0; trial < 1200; trial += 1) {
+      const trailing = Math.round(random() * 100) - 40;
+      const indent = [0, 0, 20, 35][Math.floor(random() * 4)]!;
+      const [fraction, share] = [[1, 0.1], [1, 0.2], [0.9, 0], [0.8, 0]][Math.floor(random() * 4)]!;
+      // Window widths cluster around the word so that reserves of either kind
+      // decide, and later windows are often narrower than rejected ones.
+      const word = 5 * (12 + Math.floor(random() * 26));
+      const windows = Array.from({ length: 4 }, () => ({
+        width: Math.min(290, Math.round(word + indent + random() * 0.35 * (word + 60))), farEdge: random() < 0.5,
+      }));
+      const floats = windows.map(({ width, farEdge }, line) => farEdge
+        ? band(0, 300 - width, line * 10, line * 10 + 10)
+        : band(width, 300, line * 10, line * 10 + 10));
+      const lines = run([token('W'.repeat(word / 5))], {
+        maxWidth: 300, marginRightPx: 300 + trailing, firstIndent: indent, wrapCtx: wrap(floats), lineFit: fit(fraction, share),
+      });
+      const expected = windows.findIndex(({ width, farEdge }) =>
+        (width - indent) * fraction - share * (width + (farEdge ? trailing : 0)) >= word - 1e-9);
+      const label = JSON.stringify({ trial, trailing, indent, fraction, share, windows, word });
+      if (expected < 0) {
+        expect(lines[0]!.topY, label).toBe(40);
+      } else {
+        expect([lines[0]!.topY, lines[0]!.xOffset], label)
+          .toEqual([expected * 10, windows[expected]!.farEdge ? 300 - windows[expected]!.width : 0]);
+      }
+    }
+  }, 30_000);
 });

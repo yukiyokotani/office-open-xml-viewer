@@ -171,6 +171,8 @@ export interface GapWindow {
   readonly xOffset: number;
   readonly maxWidth: number;
   readonly solverWidth: number;
+  /** The solver's own window (absolute left, width), as an exclusion key. */
+  readonly solverWindow?: Readonly<{ leftPt: number; widthPt: number }>;
 }
 
 /** WORD_FLOAT_GAP_FLOW admission as a placement transaction (#1670).
@@ -198,6 +200,8 @@ export interface GapTransaction {
   }> | null;
   /** Complete units precede a forced unit: end the fragment before this source. */
   stopBefore: LineBoundary | null;
+  /** Windows a WORD_KASHIDA_LINE_FIT unit did not fit, skipped by the search. */
+  excluded?: Array<{ topY: number; leftPt: number; widthPt: number }>;
 }
 
 export function createLineBreakerState(maxWidth: number, wrapCtx?: WrapLayoutCtx) {

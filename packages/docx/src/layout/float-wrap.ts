@@ -569,6 +569,7 @@ function firstUsableFreeGap(
   polygonRequiredWidth: number,
   squareRequiredWidth: number,
   readingDirection: 'ltr' | 'rtl',
+  accept: (gap: Readonly<{ l: ExactRational; r: ExactRational }>) => boolean = () => true,
 ): Readonly<{
   l: ExactRational;
   r: ExactRational;
@@ -633,7 +634,7 @@ function firstUsableFreeGap(
       MIN_LINE_GAP,
       gap.squareConstrained ? squareRequiredWidth : polygonRequiredWidth,
     );
-    if (compareExactRational(width, unreducedExactFromNumber(requirement)) >= 0) {
+    if (compareExactRational(width, unreducedExactFromNumber(requirement)) >= 0 && accept(gap)) {
       return {
         l: gap.l,
         r: gap.r,
@@ -772,6 +773,7 @@ function lineWindowAtY(
   reference: LineFloatReference,
   polygonRequiredWidth: number,
   squareRequiredWidth: number,
+  excluded: readonly ExcludedLineWindow[] = [],
 ): { topY: number; xOffset: number; maxWidth: number } | null {
   const exactTop = unreducedExactFromNumber(topY);
   const exactBottom = addUnreducedExact(
@@ -800,7 +802,9 @@ function lineWindowAtY(
     if (intervals.length === 0) continue;
     blocked.push(...intervals);
   }
-  if (blocked.length === 0) return { topY, xOffset: 0, maxWidth };
+  if (blocked.length === 0) {
+    return isExcludedLineWindow(excluded, topY, paraXLeft, maxWidth) ? null : { topY, xOffset: 0, maxWidth };
+  }
   const best = firstUsableFreeGap(
     blocked,
     paraXLeft,
@@ -808,8 +812,39 @@ function lineWindowAtY(
     polygonRequiredWidth,
     squareRequiredWidth,
     reference.readingDirection,
+    excluded.length === 0 ? undefined : (gap) => {
+      const window = exactGapWindow(gap, paraXLeft, paraXRight);
+      return !isExcludedLineWindow(excluded, topY, paraXLeft + window.xOffset, window.maxWidth);
+    },
   );
   if (!best) return null;
+  return { topY, ...exactGapWindow(best, paraXLeft, paraXRight) };
+}
+
+/** A line window the breaker rejected, in absolute coordinates: the search
+ * skips exactly that window and keeps every other candidate. */
+export interface ExcludedLineWindow {
+  readonly topY: number;
+  readonly leftPt: number;
+  readonly widthPt: number;
+}
+
+function isExcludedLineWindow(
+  excluded: readonly ExcludedLineWindow[],
+  topY: number,
+  leftPt: number,
+  widthPt: number,
+): boolean {
+  return excluded.some((window) => window.topY === topY && window.leftPt === leftPt && window.widthPt === widthPt);
+}
+
+/** The representable window of a free gap: start rounded up, end rounded
+ * down, both contained in the gap and the paragraph band. */
+function exactGapWindow(
+  best: Readonly<{ l: ExactRational; r: ExactRational }>,
+  paraXLeft: number,
+  paraXRight: number,
+): { xOffset: number; maxWidth: number } {
   const zero: ExactRational = { numerator: 0n, denominator: 1n };
   const xOffsetCandidate = subtractUnreducedExact(
     best.l,
@@ -855,7 +890,6 @@ function lineWindowAtY(
     throw new Error('Exact float window could not represent a contained end');
   }
   return {
-    topY,
     xOffset: xOffsetNumber,
     maxWidth: maxWidthNumber,
   };
@@ -1370,6 +1404,7 @@ function computePreparedLineFloatWindowCore(
   },
   squareRequiredWidth: number = polygonRequiredWidth,
   diagnostics: MutableLineFloatSweepDiagnostics | null = null,
+  excluded: readonly ExcludedLineWindow[] = [],
 ): { topY: number; xOffset: number; maxWidth: number } {
   const paraXLeft = paraX;
   const paraXRight = paraX + maxWidth;
@@ -1389,7 +1424,7 @@ function computePreparedLineFloatWindowCore(
     return lineWindowAtY(
       candidateY, probeH, paraXLeft, paraXRight, maxWidth, prepared,
       columnXLeftPt, columnXRightPt, reference,
-      polygonRequiredWidth, squareRequiredWidth,
+      polygonRequiredWidth, squareRequiredWidth, excluded,
     );
   };
   const current = evaluate(topY);
@@ -1511,10 +1546,12 @@ export function computePreparedLineFloatWindow(
     readingDirection: 'ltr',
   },
   squareRequiredWidth: number = polygonRequiredWidth,
+  /** Windows to skip (a fit rejection); every other candidate stays. */
+  excluded: readonly ExcludedLineWindow[] = [],
 ): { topY: number; xOffset: number; maxWidth: number } {
   return computePreparedLineFloatWindowCore(
     topY, polygonRequiredWidth, probeH, paraX, maxWidth, prepared,
-    columnXLeftPt, columnXRightPt, reference, squareRequiredWidth,
+    columnXLeftPt, columnXRightPt, reference, squareRequiredWidth, null, excluded,
   );
 }
 

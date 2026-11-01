@@ -1,4 +1,4 @@
-import { lineEndSpaceCharged, measureFitTextUnit, measureJoinedTextUnit } from './atomic-units.js';
+import { lineEndSpaceCharged, measureFitTextUnit, measureJoinedTextUnit, trailingSpaceSuffixWidth } from './atomic-units.js';
 import { placeOptionalHyphenPrefix } from './optional-hyphens.js';
 import {
   kinsokuAdjustedSplit,
@@ -48,7 +48,7 @@ import {
   rebaseSeaBreaks,
 } from './text-runs.js';
 import { fitCJKPrefix, hasEastAsianVisiblePredecessor } from './fit-search.js';
-import { LineGapRejection, fitJustifiedCompression, justifiedCompressionApplies, justifiedPrefixCompression, lineEndsWithText, lineFitWidth, type PassOperationState } from './pass-operations.js';
+import { LineGapRejection, fitJustifiedCompression, justifiedCompressionApplies, justifiedPrefixCompression, lineEndsWithText, lineFitReduced, lineFitWidth, type PassOperationState } from './pass-operations.js';
 
 /** The iterator reads only its declared slice of the explicit pass state. */
 export type BreakOpportunityIteratorContext = Pick<
@@ -142,7 +142,17 @@ function placedAdvanceExceeds(
   // A line-end U+3000 run hangs as whitespace (word-ideographic-space hang).
   const visible = (lineEndSpaceCharged(context) ? placedText : placedText.replace(/ +$/u, ''))
     .replace(/\u3000+$/u, '');
-  return !fitsMeasuredWidth(breakerState.currentWidth + strAdvance(segment, visible), availW());
+  return !fitsMeasuredWidth(visibleLineWidth(context, visible) + strAdvance(segment, visible), availW());
+}
+
+/** The current line's advance as the head unit's visible-prefix fit sees it:
+ * when the placed text adds no visible character, the whole U+0020 suffix the
+ * line already ends with (across members) is part of the same line-end run
+ * and is excluded as well, unless the policy charges line-end spaces. */
+function visibleLineWidth(context: BreakOpportunityIteratorContext, placedVisible: string): number {
+  const { breakerState } = context;
+  if (placedVisible !== '' || lineEndSpaceCharged(context)) return breakerState.currentWidth;
+  return breakerState.currentWidth - trailingSpaceSuffixWidth(breakerState.currentLine, context);
 }
 
 function lineAdvanceFrom(line: readonly LayoutSeg[], start: number): number {
@@ -647,11 +657,6 @@ function tabCellIsAligned(
   return resolved !== null && resolved !== undefined && tabAlignmentRole(resolved.alignment) !== 'leading';
 }
 
-/** Whether WORD_KASHIDA_LINE_FIT narrows this paragraph's fit width. */
-function lineFitReduces(context: BreakOpportunityIteratorContext): boolean {
-  const fit = context.lineFit;
-  return fit !== undefined && (fit.fraction !== 1 || fit.reserveShare !== 0);
-}
 
 /** The line's band width, without the WORD_KASHIDA_LINE_FIT reserve: an
  * aligned tab cell may reach its stop anywhere in the band. */
@@ -764,7 +769,7 @@ function processTabSegment(
     // WORD_KASHIDA_LINE_FIT reserves nothing for an aligned cell: an end,
     // centre or decimal stop's cell, or a right or centre positional tab's,
     // is admitted against the band, as left-to-right.
-    if (lineFitReduces(context) && tabCellIsAligned(seg, () => nextLineTabStop(
+    if (lineFitReduced(context) && tabCellIsAligned(seg, () => nextLineTabStop(
       startPen + breakerState.currentWidth, context.bidiCustomStopsPx, context.bidiIntervalPx, frame.leadingShift))
       && context.fitsMeasuredWidth(breakerState.currentWidth + tabFollowingMetrics().totalWidth, lineBandW(context))) {
       commitAlignedTabCell(context);
@@ -1155,8 +1160,13 @@ function placeOrSplitText(context: BreakOpportunityIteratorContext, inputFrame: 
         ? s.text.slice(0, split) : s.text;
       if (split < s.text.length || placedAdvanceExceeds(context, s, retained)) {
         const unitStart = joinedUnitStart(breakerState.currentLine);
+        // The rejection reports the unit's visible advance: a member adding
+        // no visible character leaves the line's whole space suffix out.
+        const minimal = context.minimalLegalTextWidth(s);
+        const suffix = minimal === 0 && !lineEndSpaceCharged(context)
+          ? trailingSpaceSuffixWidth(breakerState.currentLine.slice(unitStart), context) : 0;
         context.forcedPlacement(
-          lineAdvanceFrom(breakerState.currentLine, unitStart) + context.minimalLegalTextWidth(s),
+          lineAdvanceFrom(breakerState.currentLine, unitStart) - suffix + minimal,
           unitStart,
         );
       }

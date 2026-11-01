@@ -1,4 +1,4 @@
-import { lineEndSpaceCharged } from './atomic-units.js';
+import { lineEndSpaceCharged, trailingSpaceSuffixWidth } from './atomic-units.js';
 import type { BreakOpportunityIteratorContext } from './break-opportunities.js';
 import type { LayoutTextSeg } from './model.js';
 import { RESET_SLICED_TEXT_MEASUREMENT, slicedTextMetadata } from './advance.js';
@@ -73,15 +73,8 @@ export function placeOptionalHyphenPrefix(
   // is excluded, across members. RTL keeps its ordinary containment policy
   // outside WORD_RTL_JUSTIFIED_VISIBLE_FIT.
   if (!lineEndSpaceCharged(context)) {
-    for (let index = members.length - 1; index >= 0; index -= 1) {
-      const member = members[index]!;
-      if (member.optionalHyphen) continue;
-      if (!member.text.endsWith(' ')) break;
-      context.reservePrefixWork(member.text.length);
-      const trimmed = member.text.replace(/ +$/u, '');
-      width -= context.segAdvance(member) - context.strAdvance(member, trimmed);
-      if (trimmed.length > 0) break;
-    }
+    for (const member of members) context.reservePrefixWork(member.text.length);
+    width -= trailingSpaceSuffixWidth(members.filter((member) => !member.optionalHyphen), context);
   }
   if (context.fitsMeasuredWidth(width, context.availW())) return false;
   // An unselected owner cannot bypass the existing registered-face space

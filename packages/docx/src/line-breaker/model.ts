@@ -592,6 +592,8 @@ export interface WrapLayoutCtx {
     minimumStartWidthPt: number;
     /** Required atomic start width for a square-constrained gap. */
     squareMinimumStartWidthPt?: number;
+    /** Windows to skip (a WORD_KASHIDA_LINE_FIT rejection), absolute. */
+    excludedWindows?: readonly import('../layout/float-wrap.js').ExcludedLineWindow[];
     probeHeightPt: number;
     paragraphXPt: number;
     maximumWidthPt: number;

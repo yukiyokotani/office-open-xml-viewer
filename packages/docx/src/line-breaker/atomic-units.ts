@@ -19,6 +19,26 @@ export function lineEndSpaceCharged(state: Pick<AtomicTextMeasurement, 'baseRtl'
   return state.baseRtl && state.lineFit?.rtlVisiblePrefix !== true;
 }
 
+/** Advance of the U+0020 suffix that ends `items` across members (a run of
+ * spaces may span separately formatted segments); zero-width markers are
+ * looked through. The single suffix measure of every visible-prefix fit. */
+export function trailingSpaceSuffixWidth(
+  items: readonly LayoutSeg[],
+  measurement: Pick<AtomicTextMeasurement, 'segAdvance' | 'strAdvance'>,
+): number {
+  let width = 0;
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index]!;
+    if (!('text' in item)) break;
+    if (item.text === '') continue;
+    if (!item.text.endsWith(' ')) break;
+    const trimmed = item.text.replace(/ +$/u, '');
+    width += measurement.segAdvance(item) - measurement.strAdvance(item, trimmed);
+    if (trimmed.length > 0) break;
+  }
+  return width;
+}
+
 /** §17.3.2.14 links contiguous fitText runs into one specified width.
  * Internal separators and formatting seams cannot shorten that allocation.
  * Admission and placement consume this same complete resolved region. */
