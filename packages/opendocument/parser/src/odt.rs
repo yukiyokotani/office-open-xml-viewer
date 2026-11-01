@@ -5491,7 +5491,7 @@ mod tests {
         assert!(matches!(&runs[2], DocRun::Text(t) if t.list_label.is_none() && t.text == "a"));
     }
 
-    const TABLE_STYLES: &str = r##"<style:style style:name="T" style:family="table"><style:table-properties table:border-model="collapsing" style:width="10cm" fo:margin-left="-0.191cm" fo:margin-top="5pt" fo:margin-bottom="3pt" table:align="left" style:writing-mode="page"/></style:style><style:style style:name="T.A" style:family="table-column"><style:table-column-properties style:column-width="4cm"/></style:style><style:style style:name="T.B" style:family="table-column"><style:table-column-properties style:column-width="6cm"/></style:style><style:style style:name="T.H" style:family="table-row"><style:table-row-properties style:row-height="1cm"/></style:style><style:style style:name="T.1" style:family="table-row"><style:table-row-properties style:min-row-height="2cm" fo:keep-together="always"/></style:style><style:style style:name="T.A1" style:family="table-cell"><style:table-cell-properties fo:padding-left="0.191cm" fo:padding-right="0.191cm" fo:padding-top="0cm" fo:padding-bottom="0cm" fo:border="0.5pt solid #000000" style:vertical-align="top" fo:background-color="#ffff00"><style:background-image/></style:table-cell-properties></style:style><style:style style:name="T.B1" style:family="table-cell"><style:table-cell-properties fo:padding="0cm" fo:border-top="2pt solid #ff0000" fo:border-bottom="none" fo:border-left="none" fo:border-right="none"/></style:style><style:style style:name="Sp" style:family="paragraph"><style:paragraph-properties fo:margin-top="6pt" fo:margin-bottom="8pt"/></style:style>"##;
+    const TABLE_STYLES: &str = r##"<style:style style:name="T" style:family="table"><style:table-properties table:border-model="collapsing" style:width="10cm" fo:margin-left="-0.191cm" fo:margin-top="5pt" fo:margin-bottom="3pt" table:align="left" style:writing-mode="page"/></style:style><style:style style:name="T.A" style:family="table-column"><style:table-column-properties style:column-width="4cm"/></style:style><style:style style:name="T.B" style:family="table-column"><style:table-column-properties style:column-width="6cm"/></style:style><style:style style:name="T.H" style:family="table-row"><style:table-row-properties style:row-height="1cm"/></style:style><style:style style:name="T.1" style:family="table-row"><style:table-row-properties style:min-row-height="2cm"/></style:style><style:style style:name="T.A1" style:family="table-cell"><style:table-cell-properties fo:padding-left="0.191cm" fo:padding-right="0.191cm" fo:padding-top="0cm" fo:padding-bottom="0cm" fo:border="0.5pt solid #000000" style:vertical-align="top" fo:background-color="#ffff00"><style:background-image/></style:table-cell-properties></style:style><style:style style:name="T.B1" style:family="table-cell"><style:table-cell-properties fo:padding="0cm" fo:border-top="2pt solid #ff0000" fo:border-bottom="none" fo:border-left="none" fo:border-right="none"/></style:style><style:style style:name="Sp" style:family="paragraph"><style:paragraph-properties fo:margin-top="6pt" fo:margin-bottom="8pt"/></style:style>"##;
 
     fn table_body(table: &str) -> String {
         format!(
@@ -5799,6 +5799,28 @@ mod tests {
     }
 
     #[test]
+    fn keeps_rows_together_without_repeated_headers() {
+        let kept = TABLE_STYLES.replace(
+            r#"style:min-row-height="2cm""#,
+            r#"style:min-row-height="2cm" fo:keep-together="always""#,
+        );
+        // Under repeated header rows a kept row is not admitted.
+        assert_eq!(
+            read_table(&kept, &table_body(TABLE)).unwrap_err(),
+            unsupported("table-header-rows")
+        );
+        let plain = TABLE
+            .replace("<table:table-header-rows>", "")
+            .replace("</table:table-header-rows>", "");
+        let document = read_table(&kept, &table_body(&plain)).unwrap();
+        let BodyElement::Table(table) = &document.body[1] else {
+            panic!()
+        };
+        assert!(table.rows[1].cant_split && table.rows[1].cuts_in_place);
+        assert!(!table.rows[0].is_header);
+    }
+
+    #[test]
     fn requires_the_measured_table_settings() {
         let body = table_body(TABLE);
         let read = |settings: &str| {
@@ -5870,7 +5892,7 @@ mod tests {
         let row = &table.rows[1];
         assert_eq!(row.row_height_rule, "atLeast");
         assert!((row.row_height.unwrap() - (2.0 * cm - 2.0)).abs() < 1e-9);
-        assert!(row.cant_split);
+        assert!(!row.cant_split);
         let cell = &row.cells[0];
         assert_eq!(cell.v_align, "top");
         assert_eq!(cell.background.as_deref(), Some("ffff00"));

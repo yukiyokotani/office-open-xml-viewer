@@ -575,6 +575,16 @@ impl<'a> Reader<'a> {
         }) {
             return Err(unsupported("table-cell-padding"));
         }
+        // A kept-together row taller than a page continues under repeated
+        // header rows differently in LibreOffice (measured: a 97-line kept
+        // row under a 60 pt header ends a page earlier); whether a row
+        // outgrows a page is known only at layout, so the two do not mix
+        // (no corpus table has both).
+        if doc_rows.iter().any(|row| row.is_header)
+            && doc_rows.iter().any(|row| !row.is_header && row.cant_split)
+        {
+            return Err(unsupported("table-header-rows"));
+        }
         let mut header_fixed = 0.0;
         for row in &doc_rows {
             let space = fixed(row);
