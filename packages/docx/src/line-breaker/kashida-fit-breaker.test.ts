@@ -3,6 +3,7 @@ import { layoutLines, type LayoutLine, type LayoutSeg, type LayoutTextSeg, type 
 import { computePreparedLineFloatWindow, prepareFloatWrap } from '../layout/float-wrap.js';
 import type { FloatRect } from '../layout/float-wrap.js';
 import type { LineFitWidth } from './pass-driver.js';
+import { KASHIDA_FLOAT_RETRY_STEP_LIMIT } from './pass-operations.js';
 
 // WORD_KASHIDA_LINE_FIT inside the line breaker: the reserve narrows the fit
 // width only, so every other width the breaker compares with a fitted advance
@@ -336,6 +337,28 @@ describe('WORD_KASHIDA_LINE_FIT line breaker', () => {
     // Per layout pass (the paragraph is laid out twice): the smaller and the
     // larger width once, then one query per line-grid top up to y = 200.
     expect(calls).toBeLessThanOrEqual(2 * (2 + 200 / 10));
+  });
+
+  it('falls back to the wider requirement after the retry step limit (sol round 12)', () => {
+    // As the bounded search above, with the left float running to 1e6: every
+    // [30, 300] window holds the interior 262.5 and fails the far-edge 277.5.
+    let calls = 0;
+    const floats = [band(250, 300, 0, 10), band(0, 30, 10, 1e6)];
+    const prepared = prepareFloatWrap(floats);
+    const lineWindow: NonNullable<WrapLayoutCtx['lineWindow']> = (input) => {
+      calls += 1;
+      const window = computePreparedLineFloatWindow(input.topYPt, input.minimumStartWidthPt, input.probeHeightPt,
+        input.paragraphXPt, input.maximumWidthPt, prepared, input.columnXPt, input.columnXPt + input.columnWidthPt,
+        { xLeftPt: input.paragraphXPt, xRightPt: input.paragraphXPt + input.maximumWidthPt, readingDirection: 'ltr' },
+        input.squareMinimumStartWidthPt ?? input.minimumStartWidthPt);
+      return { topYPt: window.topY, xOffsetPt: window.xOffset, maximumWidthPt: window.maxWidth };
+    };
+    const wrapCtx: WrapLayoutCtx = { ...wrap(floats), lineWindow, pageH: 2e6 };
+    const lines = run([token('W'.repeat(42))], { maxWidth: 300, marginRightPx: 360, wrapCtx, lineFit: fit(1, 0.2) });
+    expect(lines[0]!.topY).toBe(1e6);
+    // Per layout pass: the smaller and the larger width, the step limit, and
+    // the line's other queries.
+    expect(calls).toBeLessThanOrEqual(2 * (2 + KASHIDA_FLOAT_RETRY_STEP_LIMIT + 4));
   });
 
   it('asks the line-window oracle once per rejection with each kind\'s requirement', () => {

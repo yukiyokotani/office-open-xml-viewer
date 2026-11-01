@@ -409,6 +409,14 @@ function placeNumberingFirstLine(
   };
 }
 
+/** Resource limit on the line-grid steps one line's WORD_KASHIDA_LINE_FIT
+ * float search takes between the smaller and the larger of its two window
+ * requirements (library policy, not an OOXML rule). Past it the line takes
+ * the window the larger requirement found, which every kind admits, so a long
+ * run of far-edge windows that each fail their own requirement costs a
+ * bounded number of solver queries. */
+export const KASHIDA_FLOAT_RETRY_STEP_LIMIT = 32;
+
 /** Search the first admissible window for the transaction's requirement:
  * a later gap on the continuation baseline, else a new physical line. */
 function placeLineWindow(
@@ -468,6 +476,7 @@ function placeLineWindow(
   // for the larger (every window that wide holds either kind: an upper bound),
   // and in between again for the smaller from the next line-grid top after
   // each refused window, as the retry steps.
+  let retrySteps = KASHIDA_FLOAT_RETRY_STEP_LIMIT;
   const lineQuery = (topY: number, x: number, width: number, height: number) => {
     const far = transaction.farEdgeRequirement;
     if (far === undefined || far === transaction.requirement) return query(topY, x, width, height);
@@ -480,7 +489,8 @@ function placeLineWindow(
     const bound = query(topY, x, width, height, high);
     const pitch = lineSearchPitch(height);
     while (pitch !== null && window.topY < bound.topY && Math.abs(window.topY) <= LINE_SEARCH_Y_LIMIT_PT
-      && Math.abs(topY) <= LINE_SEARCH_Y_LIMIT_PT) {
+      && Math.abs(topY) <= LINE_SEARCH_Y_LIMIT_PT && retrySteps > 0) {
+      retrySteps -= 1;
       window = query(lineGridAfter(topY, pitch, window.topY), x, width, height, low);
       if (window.topY > bound.topY) break;
       if (holds(window)) return window;
