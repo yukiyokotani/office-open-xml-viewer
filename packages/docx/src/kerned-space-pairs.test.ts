@@ -206,6 +206,40 @@ describe('kerned U+0020 pairs (WORD_KERNED_SPACE_PAIRS)', () => {
     const [line] = lines(layout([run('\u6f22 ')], 100, 15, 'right', grid));
     expect(line![0]!.x).toBeCloseTo(80, 6);
   });
+
+  it('folds the pair into the committed contextual advance of the seam space', () => {
+    // 'A ' commits A 6.5 and a space of 3 - 0.75 - 2.5, floored to 0: the
+    // following space+A pair has no advance left to remove.
+    const [line] = lines(layout([run('A A', { kerning: 2, charSpacing: -2.5 })], 400, 15));
+    expect(line!.filter(p => p.text.trim()).map(p => p.x)).toEqual([0, 6.5]);
+  });
+
+  it('admits an early explicit split before a glued slot suffix by its kerned width', () => {
+    const wrapped = lines(layout([run('x A-BC\u2019', { kerning: 2 })], 24.5, 15));
+    expect(wrapped.map(line => line.map(p => p.text).join(''))).toEqual(['x A-', 'BC\u2019']);
+  });
+
+  it('gives max-content the bounded ownership of a floored seam pair', () => {
+    const runs = [run('x \u2019 A', { kerning: 2, charSpacing: -2.5 })];
+    const paragraph = paragraphOf(runs);
+    const doc = modelOf(paragraph, 400, 15);
+    const measure = context();
+    const { maxWidthPt } = measureParagraphIntrinsicWidths(paragraph, INTRINSIC_CONTEXT, 400,
+      { context: measure, fontFamilyClasses: {} }, {
+        pageIndex: 0, totalPages: 1, pageWritingMode: 'horizontal-tb',
+        documentHasEastAsianText: false, compatibilityMode: 15,
+        layoutServices: createLayoutServices(doc, { measureContext: measure }),
+      });
+    const [bounded] = lines(layout(runs, 400, 15));
+    expect(maxWidthPt).toBeCloseTo(bounded!.at(-1)!.x + 9 - 2.5, 6);
+    expect(lines(layout(runs, maxWidthPt, 15))).toHaveLength(1);
+  });
+
+  it('takes no pair in any piece of a ruby run', () => {
+    const [line] = lines(layout([run('x A x A', { kerning: 2, ruby: { text: 'r', fontSizePt: 6 } } as Partial<DocxTextRun>)], 400, 15));
+    // Only the A+space pair measured inside the 'A ' piece applies.
+    expect(lastGlyphX(line!)).toBeCloseTo(30 - 0.75, 6);
+  });
 });
 
 const INTRINSIC_CONTEXT: ParagraphLayoutContext = {

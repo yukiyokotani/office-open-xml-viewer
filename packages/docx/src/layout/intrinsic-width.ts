@@ -1,6 +1,6 @@
 import { textBreakWindow, textBreakOffsets } from '../line-breaker/text-break-window.js';
 import { LineMeasurementAdapter } from '../line-breaker/measurement-adapter.js';
-import { slicedTextMetadata } from '../line-breaker/advance.js';
+import { condensedSpacingMayFloor, slicedTextMetadata } from '../line-breaker/advance.js';
 import { optionalHyphenBreakAllowed } from '../line-breaker/optional-hyphens.js';
 import { graphemeClusterOffsets } from '@silurus/ooxml-core';
 import type { DocTableCell } from '../types.js';
@@ -189,9 +189,21 @@ function compatibleText(left: LayoutTextSeg, right: LayoutTextSeg): boolean {
     && compatibleTextKey(left) === compatibleTextKey(right);
 }
 
+/** Kerned pieces of one run text keep that run's context when joined, so a
+ * later seam (WORD_KERNED_SPACE_PAIRS) still proves adjacency against it. */
+function contiguousContext(previous: LayoutTextSeg, segment: LayoutTextSeg): boolean {
+  const left = previous.textShapeRequest?.substituteContext;
+  const right = segment.textShapeRequest?.substituteContext;
+  return left !== undefined && right !== undefined && left.text === right.text
+    && left.offset + previous.text.length === right.offset;
+}
+
 /** Run boundaries with identical effective metrics are not shaping boundaries.
  * Merge only for the intrinsic probe; retained source/run ownership stays intact. */
-function mergeCompatibleTextSegments(segments: readonly LayoutSeg[]): LayoutSeg[] {
+function mergeCompatibleTextSegments(
+  segments: readonly LayoutSeg[],
+  characterGrid: ReturnType<typeof paragraphCharacterGrid>,
+): LayoutSeg[] {
   const merged: LayoutSeg[] = [];
   let activeBreakOffsets: number[] | undefined;
   let activeOptionalBreaks: NonNullable<LayoutTextSeg['optionalHyphenBreaks']>[number][] | undefined;
@@ -210,11 +222,17 @@ function mergeCompatibleTextSegments(segments: readonly LayoutSeg[]): LayoutSeg[
       && !previous.semanticSlotSpans && !segment.semanticSlotSpans
       // A WORD_EAST_ASIAN_AUTO_SPACE seam owns its gap.
       && segment.autoSpaceBeforePt === undefined
-      // A kerned font-slot seam beside U+0020 owns its WORD_KERNED_SPACE_PAIRS
-      // pair, which the slot-by-slot shaping of a merged string would drop;
-      // the line breaker acquires it between the separate pieces instead.
-      && !(previous.script !== segment.script && segment.textShapeRequest?.kerning === true
-        && previous.text.endsWith(' ') !== segment.text.startsWith(' '))
+      // A kerned seam beside U+0020 keeps the WORD_KERNED_SPACE_PAIRS ownership
+      // of bounded lines, where the line breaker acquires it between pieces:
+      // slot-by-slot shaping of a merged string would drop a font-slot seam
+      // pair, and a merged string's contextual clusters would give the pair
+      // to the second character, which WORD_CONDENSED_SPACING_ADVANCE_FLOOR
+      // floors differently from the seam's first character.
+      && !(segment.textShapeRequest?.kerning === true
+        && previous.text.endsWith(' ') !== segment.text.startsWith(' ')
+        && (previous.script !== segment.script
+          || condensedSpacingMayFloor(previous, characterGrid, 1)
+          || condensedSpacingMayFloor(segment, characterGrid, 1)))
       && compatibleText(previous, segment)
       // Included and excluded spans depend on the full run. Losing a Latin
       // base can turn its attached Arabic mark into standalone proof; losing
@@ -265,6 +283,7 @@ function mergeCompatibleTextSegments(segments: readonly LayoutSeg[]): LayoutSeg[
         textShapeRequest: previous.textShapeRequest
           ? { ...previous.textShapeRequest, text,
               substituteContext: previous.substituteScope !== undefined || segment.substituteScope !== undefined
+                || (previous.textShapeRequest.kerning === true && contiguousContext(previous, segment))
                 ? previous.textShapeRequest.substituteContext : { text, offset: 0 } }
           : undefined,
       };
@@ -640,7 +659,7 @@ export function measureParagraphIntrinsicWidths(
     paragraphRtl: context.baseRtl,
     autoSpaceDE: paragraph.autoSpaceDE,
     autoSpaceDN: paragraph.autoSpaceDN,
-  }));
+  }), paragraphCharacterGrid(context));
   const paragraphWidthPt = Math.max(
     1,
     maximumWidthPt - context.physicalIndentLeftPt - context.physicalIndentRightPt,
