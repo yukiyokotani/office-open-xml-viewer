@@ -361,6 +361,28 @@ describe('WORD_KASHIDA_LINE_FIT line breaker', () => {
     expect(calls).toBeLessThanOrEqual(2 * (2 + KASHIDA_FLOAT_RETRY_STEP_LIMIT + 4));
   });
 
+  it('classifies a hanging first line\'s accepted window in its own band (sol round 13)', () => {
+    // highKashida, a -50 pt hanging first line in [0, 300] (margin 360);
+    // floats [50, 150] and [280, 400] over y = [0, 60]. The 110 pt word plus a
+    // joined 30 pt X fits no gap beside the floats and, as on the base, lands
+    // whole below them, never inside a float.
+    const floats = [band(50, 150, 0, 60), band(280, 400, 0, 60)];
+    const wrapCtx = wrap(floats, 450, false, -50);
+    const lines = run([token('W'.repeat(22)), token('X', { joinPrev: true, charScale: 6 } as Partial<LayoutTextSeg>)],
+      { maxWidth: 300, marginRightPx: 360, firstIndent: -50, wrapCtx, lineFit: fit(1, 0.2) });
+    for (const line of lines) {
+      const left = line.xOffset + (line === lines[0] ? -50 : 0);
+      const right = line.xOffset + line.availWidth;
+      for (const float of floats) {
+        const top = line.topY ?? 0;
+        if (top < float.yBottom && top + 10 > float.yTop) {
+          expect(right <= float.xLeft + 1e-9 || left >= float.xRight - 1e-9, JSON.stringify([top, left, right])).toBe(true);
+        }
+      }
+    }
+    expect(lines[0]!.topY).toBe(60);
+  });
+
   it('asks the line-window oracle once per rejection with each kind\'s requirement', () => {
     // A numbered first line with a -50 pt authored hanging indent: every top
     // offers a narrowed 390 pt window, too small for the 320 pt word at 0.8

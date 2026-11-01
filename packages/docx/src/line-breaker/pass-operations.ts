@@ -463,12 +463,18 @@ function placeLineWindow(
       reference, requiredWidth,
     );
   };
-  // The requirement of a window at absolute [leftPt, leftPt + widthPt].
+  // The requirement of a solver window: `bandX` is the absolute origin of
+  // the band it was queried on (its xOffset is relative to it) and its width
+  // is the solver's (the hanging offset not yet added). Every kind decision
+  // goes through here so the expanded first-line band and the paragraph band
+  // are never mixed.
   const bandFarEdge = baseRtl ? lineBandX : lineBandX + lineBandWidth;
-  const requirementOf = (leftPt: number, widthPt: number): number =>
-    transaction.farEdgeRequirement !== undefined
-      && (baseRtl ? leftPt <= bandFarEdge + 1e-9 : leftPt + widthPt >= bandFarEdge - 1e-9)
+  const requirementOf = (bandX: number, window: Readonly<{ xOffset: number; maxWidth: number }>): number => {
+    const leftPt = bandX + window.xOffset;
+    return transaction.farEdgeRequirement !== undefined
+      && (baseRtl ? leftPt <= bandFarEdge + 1e-9 : leftPt + window.maxWidth >= bandFarEdge - 1e-9)
       ? transaction.farEdgeRequirement : transaction.requirement;
+  };
   // WORD_KASHIDA_LINE_FIT: a window reaching the band's far edge needs
   // `farEdgeRequirement`, an interior one `requirement`. The solver is asked
   // unchanged, on the real band: first for the smaller of the two, accepting
@@ -483,7 +489,7 @@ function placeLineWindow(
     const low = Math.min(far, transaction.requirement);
     const high = Math.max(far, transaction.requirement);
     const holds = (window: { xOffset: number; maxWidth: number }): boolean =>
-      window.maxWidth >= requirementOf(x + window.xOffset, window.maxWidth);
+      window.maxWidth >= requirementOf(x, window);
     let window = query(topY, x, width, height, low);
     if (holds(window)) return window;
     const bound = query(topY, x, width, height, high);
@@ -497,7 +503,8 @@ function placeLineWindow(
     }
     return bound;
   };
-  let accepted: GapWindow & { narrowed: boolean } | null = null;
+  // `solverBandX`: the origin of the band the accepted window was queried on.
+  let accepted: GapWindow & { narrowed: boolean; solverBandX: number; solverXOffset: number } | null = null;
   const cursor = transaction.cursor;
   if (cursor) {
     const probeH = physicalProbeHeight(probeFloors, breakerState.physicalLineIndex);
@@ -505,7 +512,7 @@ function placeLineWindow(
     const right = baseRtl ? cursor.left : lineBandX + lineBandWidth;
     if (probeH !== undefined && right > left) {
       const next = lineQuery(cursor.topY, left, right - left, probeH);
-      if (next.topY === cursor.topY && next.maxWidth >= requirementOf(left + next.xOffset, next.maxWidth)) {
+      if (next.topY === cursor.topY && next.maxWidth >= requirementOf(left, next)) {
         // A strictly smaller unvisited band gives monotonic horizontal
         // progress; the column and largest-side reference never shrink.
         accepted = {
@@ -514,6 +521,8 @@ function placeLineWindow(
           maxWidth: next.maxWidth,
           solverWidth: next.maxWidth,
           narrowed: true,
+          solverBandX: left,
+          solverXOffset: next.xOffset,
         };
       }
     }
@@ -543,6 +552,8 @@ function placeLineWindow(
       maxWidth: win.maxWidth + hangingOffset,
       solverWidth: win.maxWidth,
       narrowed: win.xOffset !== 0 || win.maxWidth !== lineBandWidth,
+      solverBandX: lineBandX,
+      solverXOffset: win.xOffset,
     };
   }
   // After a rejection the requirement exceeds the rejected width. A window
@@ -551,7 +562,8 @@ function placeLineWindow(
   // that does not honor the requirement. Accept it without a transaction:
   // forced placement is then the established behavior, and the search ends.
   if (rejected && accepted.narrowed
-    && accepted.solverWidth < requirementOf(wrapCtx.paraX + accepted.xOffset, accepted.solverWidth)) {
+    && accepted.solverWidth < requirementOf(accepted.solverBandX,
+      { xOffset: accepted.solverXOffset, maxWidth: accepted.solverWidth })) {
     accepted = { ...accepted, narrowed: false };
   }
   breakerState.currentLineTopY = accepted.topY;
@@ -571,7 +583,8 @@ function placeLineWindow(
     breakerState.lineMarginExtension = free.topY === accepted.topY && free.xOffset === 0
       && free.maxWidth >= extension ? extension : 0;
   }
-  transaction.window = accepted;
+  const { solverBandX: _solverBandX, solverXOffset: _solverXOffset, ...window } = accepted;
+  transaction.window = window;
   transaction.narrowed = accepted.narrowed;
   // Absolute line-end edge versus the paragraph band edge, in reading order.
   const windowStart = wrapCtx.paraX + accepted.xOffset;
