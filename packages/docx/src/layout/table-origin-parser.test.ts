@@ -324,6 +324,25 @@ describe('Word table origin and occupied grid', () => {
       .toEqual(single.rows.map((r) => r.cells.map((c) => c.flowBounds)));
     expect(split.rows.map((r) => r.cells[0]?.flowBounds.xPt)).toEqual([108, 108]);
   });
+  it('split centred members share the first logical row\'s authored indent over a style-inherited one', () => {
+    // A style-inherited tblInd is filtered for non-leading rows only when it is
+    // the selected indent; the logical first row's tblPrEx indent is authored.
+    const styles = '<w:style w:type="table" w:styleId="LogicalTable"><w:name w:val="Logical table"/><w:tblPr><w:tblInd w:w="720" w:type="dxa"/></w:tblPr></w:style>';
+    const skipped = `<w:tr><w:trPr><w:gridBefore w:val="1"/></w:trPr>${cell(2160)}${cell(3600)}</w:tr>`;
+    const first = skipped.replace('<w:tr>', '<w:tr><w:tblPrEx><w:tblInd w:type="dxa" w:w="720"/></w:tblPrEx>');
+    const make = (rows: string) => table(rows, '<w:tblStyle w:val="LogicalTable"/><w:jc w:val="center"/>')
+      .replace(margins(), '').replace('<w:tblGrid>', '<w:tblGrid><w:gridCol w:w="720"/>');
+    // WORD_FIXED_UNUSED_LEADING_GRID (modes 11/12/14/15) makes the members one
+    // logical table; no horizontal margins keeps the origin observation off.
+    for (const mode of [11, 14, 15]) {
+      const split = layoutTable(make(first) + make(skipped) + make(skipped), mode, styles);
+      const single = layoutTable(make(first + skipped + skipped), mode, styles);
+      expect(split.rows.map((r) => r.cells[0]?.flowBounds.xPt))
+        .toEqual(single.rows.map((r) => r.cells[0]?.flowBounds.xPt));
+      // Centred 288pt occupied grid in the 468pt band at x=72 (162), plus the shared 36pt.
+      expect(split.rows.map((r) => r.cells[0]?.flowBounds.xPt)).toEqual([198, 198, 198]);
+    }
+  });
   it('first-row exceptions anchor every leading row with the first cell override', () => {
     const rows = `<w:tr><w:tblPrEx><w:tblInd w:type="dxa" w:w="720"/>${margins(240)}</w:tblPrEx>${cell(2160, 540)}${cell(3600)}</w:tr>${row}`;
     expect(layoutTable(table(rows, indent)).rows.map((r) => r.cells[0]?.flowBounds.xPt)).toEqual([81, 81]);

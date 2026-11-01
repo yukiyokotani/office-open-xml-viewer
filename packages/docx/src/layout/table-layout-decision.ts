@@ -41,9 +41,12 @@ function tableOriginContext(
     && format.rows.every((row) => row.cellSpacingPt === 0
       && row.cells[0]?.originLeftMarginPt != null);
   const indentAuthored = firstRowException?.indentAuthored || table.tblInd != null;
+  // Provenance travels with the selected logical indent: a first-row tblPrEx
+  // indent is authored, the table's own value may be style-inherited.
+  const tableIndentInherited = !firstRowException?.indentAuthored && table.tblIndInherited === true;
   const firstLeftMarginPt = format.rows[0]?.cells[0]?.originLeftMarginPt ?? 0;
   const effectiveLayout: 'fixed' | 'autofit' = firstRowException?.layout === 'fixed' || table.layout === 'fixed' ? 'fixed' : 'autofit';
-  return { measuredOrigin, tableIndentPt, indentAuthored, firstLeftMarginPt, effectiveLayout };
+  return { measuredOrigin, tableIndentPt, tableIndentInherited, indentAuthored, firstLeftMarginPt, effectiveLayout };
 }
 
 
@@ -70,24 +73,27 @@ function memberContext(
   // ECMA-376 §17.4.50 judges tblInd by each row's resulting jc. A tblInd
   // inherited from the table style is dropped for a non-leading row in every
   // class; a direct (or tblPrEx) indent keeps its per-class contract below.
-  const inheritedTableIndent = table.tblIndInherited === true;
+  // Each indent is used with the provenance of the value actually selected.
+  const tableIndentInherited = logicalProperties ? origin.tableIndentInherited
+    : !firstRowException?.indentAuthored && table.tblIndInherited === true;
+  const baseIndentInherited = logicalProperties ? origin.tableIndentInherited
+    : table.tblIndInherited === true;
   const leading = (justification: string | null | undefined) =>
     justification == null || justification === 'left' || justification === 'start' || justification === 'both';
-  const rowIndent = (justification: string | null | undefined, indentPt: number, fromTable: boolean) =>
-    fromTable && inheritedTableIndent && !leading(justification) ? 0 : indentPt;
-  const widthIndent = (justification: string | null | undefined, indentPt: number, fromTable = true) =>
+  const rowIndent = (justification: string | null | undefined, indentPt: number, inherited: boolean) =>
+    inherited && !leading(justification) ? 0 : indentPt;
+  const widthIndent = (justification: string | null | undefined, indentPt: number, inherited = baseIndentInherited) =>
     wordTableEffectiveIndentPt({ measured: measuredOrigin, justification,
-      indentPt: rowIndent(justification, indentPt, fromTable) });
-  const tableIndentFromTable = !firstRowException?.indentAuthored;
+      indentPt: rowIndent(justification, indentPt, inherited) });
   const rowIndentPts = format.rows.map((row) => {
     const ownException = !logicalProperties && row.exception?.indentAuthored === true;
     return widthIndent(row.justification ?? table.jc,
       ownException ? (row.exception?.indentPt ?? 0) : baseIndentPt,
-      !ownException && (logicalProperties ? tableIndentFromTable : true));
+      !ownException && baseIndentInherited);
   });
   const rowTranslationsPt = format.rows.map((row) => wordTableOriginTranslationPt({
     mode: state.mode, measured: measuredOrigin, justification: row.justification ?? table.jc,
-    indentPt: rowIndent(row.justification ?? table.jc, tableIndentPt, tableIndentFromTable),
+    indentPt: rowIndent(row.justification ?? table.jc, tableIndentPt, tableIndentInherited),
     indentAuthored: logicalProperties ? origin.indentAuthored : firstRowException?.indentAuthored || table.tblInd != null,
     firstLeftMarginPt: origin.firstLeftMarginPt,
     rowLeftMarginPt: row.cells[0]?.originLeftMarginPt ?? 0,
@@ -328,6 +334,7 @@ export function unmeasuredTableMemberDecision(table: TableLayoutSource, format: 
   const origin: ReturnType<typeof tableOriginContext> = { measuredOrigin: false,
     effectiveLayout: format.firstRowException?.layout === 'fixed' || table.layout === 'fixed' ? 'fixed' : 'autofit',
     tableIndentPt: format.firstRowException?.indentAuthored ? (format.firstRowException.indentPt ?? 0) : (table.tblInd ?? 0),
+    tableIndentInherited: !format.firstRowException?.indentAuthored && table.tblIndInherited === true,
     indentAuthored: format.firstRowException?.indentAuthored || table.tblInd != null,
     firstLeftMarginPt: format.rows[0]?.cells[0]?.originLeftMarginPt ?? 0 };
   return memberContext(table, source, origin, false, 0, { mode: undefined, story: undefined, topLevel: false,
