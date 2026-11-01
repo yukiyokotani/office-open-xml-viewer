@@ -192,13 +192,16 @@ describe('Word table origin and occupied grid', () => {
       }
       expect(x(omitted(indent.replace('108', '720') + '<w:jc w:val="end"/>'), mode)).toBeCloseTo(252, 8);
     }
-    // Outside the measured class the established contract still applies the indent.
+    // WORD_TABLE_NONLEADING_INDENT_SCOPE extends the ignored indent to right,
+    // center, an omitted mode and percentage cells; mode 13 is unmeasured and
+    // keeps the established contract.
     const zero = '<w:tblInd w:type="dxa" w:w="0"/>';
     const shifted = indent.replace('108', '720');
     const pct = row.replaceAll('w:type="dxa"', 'w:type="pct"');
-    for (const [jc, mode, rows] of [['right', 14, row], ['center', 14, row], ['end', 13, row], ['end', null, row], ['end', 14, pct]] as const) {
+    for (const [jc, mode, rows, shift] of [['right', 14, row, 0], ['center', 14, row, 0], ['end', 13, row, 36],
+      ['center', 13, row, 36], ['end', null, row, 0], ['end', 14, pct, 0]] as const) {
       const options = `<w:jc w:val="${jc}"/>`;
-      expect(x(omitted(shifted + options, rows), mode) - x(omitted(zero + options, rows), mode), `${jc} ${mode}`).toBeCloseTo(36, 8);
+      expect(x(omitted(shifted + options, rows), mode) - x(omitted(zero + options, rows), mode), `${jc} ${mode}`).toBeCloseTo(shift, 8);
     }
   });
   it('an authored horizontal margin at any layer keeps end tables out of the omitted-margin class', () => {
@@ -348,12 +351,14 @@ describe('Word table origin and occupied grid', () => {
       .replace('<w:gridCol w:w="2160"/><w:gridCol w:w="3600"/>', '<w:gridCol w:w="4680"/><w:gridCol w:w="4680"/>');
     const single = layoutTable(make(rows.join('')));
     const split = layoutTable(rows.map(make).join(''));
-    // Disabled whole-group eligibility: independently retain main's 540pt
-    // grid and signed center translation in both forms and both row orders.
+    // The origin observation stays disabled for the whole group, but
+    // WORD_TABLE_NONLEADING_INDENT_SCOPE drops the centred -36pt indent
+    // (ECMA-376 §17.4.50) identically in both forms and both row orders, so
+    // the AutoFit grid fits the 468pt band instead of main's 540pt.
     for (const layout of [split, single]) {
-      expect(layout.columnWidthsPt).toEqual([270, 270]);
+      expect(layout.columnWidthsPt).toEqual([234, 234]);
       expect(layout.rows.map((r) => r.cells.map((c) => c.flowBounds))).toEqual(
-        [72, 82].map((yPt) => [0, 270].map((xPt) => ({ xPt, yPt, widthPt: 270, heightPt: 10 }))),
+        [72, 82].map((yPt) => [72, 306].map((xPt) => ({ xPt, yPt, widthPt: 234, heightPt: 10 }))),
       );
     }
   });
@@ -397,8 +402,10 @@ describe('Word table origin and occupied grid', () => {
     expect(layoutTable(table(rows, indent)).rows.map((r) => r.cells[0]?.flowBounds.xPt)).toEqual([81, 81]);
   });
   it('preserves the previous origin for unresolved missing-margin and spaced classes', () => {
+    // A right table with omitted margins drops its indent
+    // (WORD_TABLE_NONLEADING_INDENT_SCOPE) but keeps the unhung origin.
     const missing = table(row, indent + '<w:jc w:val="right"/>').replace(margins(), '');
-    expect(layoutTable(missing).flowBounds.xPt).toBeCloseTo(257.4, 8);
+    expect(layoutTable(missing).flowBounds.xPt).toBeCloseTo(252, 8);
     const logicalOverride = table(`<w:tr>${cell(2160, 540).replace('<w:left ', '<w:start ')}${cell(3600)}</w:tr>`, indent);
     expect(layoutTable(logicalOverride).flowBounds.xPt).toBeCloseTo(77.4, 8);
     const unpreferred = table(row.replaceAll('w:type="dxa"', 'w:type="auto"'), indent);

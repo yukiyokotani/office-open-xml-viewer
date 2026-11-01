@@ -853,6 +853,12 @@ function effectiveTableCellMargins(
     horizontalMarginsOmitted: hasPrivateCellWire
       && [cellMargins, exceptionMargins, tableMargins, styleMargins].every((margins) =>
         margins?.left == null && margins?.right == null && margins?.start == null && margins?.end == null),
+    // Lexical: every layer authors horizontal margins only as dxa legacy
+    // left/right elements, if at all (WORD_TABLE_NONLEADING_INDENT_SCOPE).
+    dxaHorizontalMarginsOnly: hasPrivateCellWire
+      && [cellMargins, exceptionMargins, tableMargins, styleMargins].every((margins) =>
+        margins?.start == null && margins?.end == null
+        && [margins?.left, margins?.right].every((width) => width == null || effectiveTableWidthKind(width) === 'dxa')),
     marginsPt: {
       top: firstMargin('top',
         { width: cellMargins?.top, scope: 'cell' },

@@ -3829,6 +3829,11 @@ pub struct TableRowLayoutAcquisitionWire {
     pub justification: Option<String>,
     pub before_width: Option<TableWidthAcquisitionWire>,
     pub after_width: Option<TableWidthAcquisitionWire>,
+    /// Authored provenance of a positive `w:gridBefore`/`w:gridAfter`
+    /// (§17.4.14/.15). The semantic row counts are normalized against the
+    /// grid, which clears conflicting offsets; this keeps the authored skip.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub grid_skip_authored: bool,
     pub cell_spacing: Option<TableWidthAcquisitionWire>,
     /// Effective whole-table/conditional table-style spacing for this row.
     /// Direct row, exception, and table properties remain separate higher layers.

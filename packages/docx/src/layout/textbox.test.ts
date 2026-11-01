@@ -363,6 +363,50 @@ describe('rich text-box story acquisition', () => {
     expect(layout).not.toHaveProperty('paragraphs');
   });
 
+  it.each([
+    // WORD_TEXT_BOX_PHYSICAL_INSETS: lIns/tIns/rIns/bIns stay on the physical
+    // edges of a quarter-turned story. Lines (logical x) run from tIns to bIns
+    // for vert/eaVert and from bIns up to tIns for vert270; the first column
+    // sits rIns inside the right edge (vert/eaVert) or lIns inside the left.
+    ['vert', { xPt: -23, yPt: -39, widthPt: 44, heightPt: 80 }, [87, 11]],
+    ['eaVert', { xPt: -23, yPt: -39, widthPt: 44, heightPt: 80 }, [87, 11]],
+    ['vert270', { xPt: -21, yPt: -41, widthPt: 44, heightPt: 80 }, [7, 55]],
+  ] as const)('keeps %s text-box insets on their physical edges', (textVert, bounds, [startX, startY]) => {
+    const story: StoryLayout = {
+      story: 'textbox', flowBounds: bounds, inkBounds: bounds, clipBounds: bounds,
+      blocks: [], advancePt: 0, diagnostics: [],
+    };
+    const acquireCompleteStory = vi.fn(() => story);
+    const shape = {
+      type: 'shape', textInsetL: 2, textInsetT: 3, textInsetR: 4, textInsetB: 5,
+      textAutofit: 'none', textVert,
+    } as unknown as ShapeRun;
+    const layout = acquireShapeTextBoxLayout(
+      shape,
+      { xPt: 5, yPt: 8, widthPt: 86, heightPt: 52 },
+      {
+        id: 'shape:v',
+        source: { story: 'textbox', storyInstance: 'shape:v', path: [] },
+        flowDomainId: 'shape-owner',
+        context: paragraphContext,
+        measurer: { context: canvas(), fontFamilyClasses: {} },
+        environment: {
+          pageIndex: 0, totalPages: 1, pageWritingMode: 'horizontal-tb', documentHasEastAsianText: false,
+        },
+        input: { kind: 'complete', source: { story: 'textbox', storyInstance: 'shape:v', path: [] }, blockCount: 1 },
+        acquireCompleteStory,
+      },
+    );
+    expect(acquireCompleteStory).toHaveBeenCalledWith(expect.objectContaining({
+      container: expect.objectContaining({ bounds }),
+    }));
+    if (!layout) throw new Error('expected a text-box layout');
+    const t = layout.transform;
+    // The logical line start of the first column, mapped to the page.
+    expect([t.a * bounds.xPt + t.c * bounds.yPt + t.e, t.b * bounds.xPt + t.d * bounds.yPt + t.f])
+      .toEqual([startX, startY]);
+  });
+
   it('keeps vertical spAutoFit floating-table geometry in the shifted local story frame', () => {
     const rect = (xPt: number, yPt: number, widthPt = 10, heightPt = 10) => ({
       xPt, yPt, widthPt, heightPt,

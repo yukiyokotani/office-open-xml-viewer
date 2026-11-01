@@ -108,6 +108,16 @@ export const WORD_FLOAT_GAP_FLOW = defineCompatibilityRule({
   description: 'Issue #1670 controlled exports in modes 14 and 15 fill successive gaps on one baseline in paragraph reading order, then restart at the leading gap of the next baseline. Two/three-gap square and rectangular tight/through controls, left/right/largest restrictions, 20–100pt gaps, 10/20pt text, alignment, indents, padding, empty marks and Hebrew RTL establish atom-fit admission, including 40pt gaps. An unbroken Latin word too wide for every gap moves below the object. These controls supersede the one-inch inference from issue #676. Geometry remains fail-closed on non-finite input and unavailable polygon contours; emergency splitting is retained in a full paragraph band. Windows Word 16.0 build 16.0.20430 retest is consistent within the tested subset; see the officeObservations entry for this rule in scripts/docx-compatibility-microsoft-evidence.json for values and evidence limits.',
 });
 
+/** ECMA-376 §21.1.2.1.1 names lIns/tIns/rIns/bIns by the edges of the text
+ * rectangle; this rule records that a quarter-turned text body keeps them on
+ * those physical edges. */
+export const WORD_TEXT_BOX_PHYSICAL_INSETS = defineCompatibilityRule({
+  id: 'word-text-box-physical-insets',
+  evidence: { kind: 'office-observation', syntheticFixtureId: 'text-box-vertical-insets',
+    application: 'Microsoft Word', version: '16.0.20527', platform: 'Windows' },
+  description: 'Windows Word 16.0.20527 controls: page-anchored 180x260pt wps text boxes (12pt Latin labels, 30 justified MS Mincho characters, Latin words) with bodyPr vert horz/vert/eaVert/vert270/wordArtVert, insets omitted, explicit 91440/45720, asymmetric l10 t20 r30 b40pt and zero, noAutofit and spAutoFit, compatibility mode omitted and 15, plus inline 200x300pt vert/eaVert/vert270 boxes. Every inset stays on its physical edge: a vert/eaVert line starts tIns below the top and ends bIns above the bottom (asymmetric: 200pt lines, first column rIns inside the right edge); a vert270 line starts bIns above the bottom (first column lIns inside the left edge); wordArtVert columns start lIns inside the left edge with lines from tIns; the inline 300pt boxes set 292.8pt lines. spAutoFit resizes a vertical box across its columns (the width, keeping its left edge) to the columns plus lIns and rIns. mongolianVert and VML-only layout-flow boxes were not measured separately; VML fallbacks carry the same bodyPr semantics.',
+});
+
 /** Word for Mac issue #1668 controls (527 cases including horizontal twins):
  * both stacked WordArt values use continuous clockwise sideways Latin with
  * ordinary horizontal advances, upright East Asian/emoji clusters, and left-to-right

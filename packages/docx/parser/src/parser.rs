@@ -51,6 +51,31 @@ mod relationship_target_tests;
 #[path = "parser/word_ilvl_integration_tests.rs"]
 mod word_ilvl_integration_tests;
 
+/// Whether an `ST_DecimalNumber` (unbounded `xsd:integer`) is positive,
+/// read lexically so values beyond any machine integer still count.
+fn decimal_number_is_positive(value: &str) -> bool {
+    let digits = value.trim();
+    let digits = digits.strip_prefix('+').unwrap_or(digits);
+    !digits.is_empty()
+        && digits.bytes().all(|b| b.is_ascii_digit())
+        && digits.bytes().any(|b| b != b'0')
+}
+
+#[cfg(test)]
+mod decimal_number_tests {
+    use super::decimal_number_is_positive;
+
+    #[test]
+    fn positivity_is_lexical_and_unbounded() {
+        for value in ["1", "+2", " 07 ", "4294967296", "99999999999999999999999"] {
+            assert!(decimal_number_is_positive(value), "{value}");
+        }
+        for value in ["0", "000", "+0", "-1", "-4294967296", "", "+", "1.5", "x"] {
+            assert!(!decimal_number_is_positive(value), "{value}");
+        }
+    }
+}
+
 mod vml_fill;
 #[path = "parser/vml_geometry.rs"]
 mod vml_geometry;
@@ -16184,6 +16209,12 @@ fn parse_table_row(
             .and_then(|n| attr_w(n, "val")),
         before_width: table_width_acquisition(tr_pr.and_then(|p| child_w(p, "wBefore"))),
         after_width: table_width_acquisition(tr_pr.and_then(|p| child_w(p, "wAfter"))),
+        grid_skip_authored: ["gridBefore", "gridAfter"].iter().any(|name| {
+            tr_pr
+                .and_then(|p| child_w(p, name))
+                .and_then(|n| attr_w(n, "val"))
+                .is_some_and(|v| decimal_number_is_positive(&v))
+        }),
         cell_spacing: table_width_acquisition(tr_pr.and_then(|p| child_w(p, "tblCellSpacing"))),
         style_cell_spacing,
         style_cell_margins,

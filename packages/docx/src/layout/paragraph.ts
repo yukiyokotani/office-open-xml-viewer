@@ -5108,6 +5108,21 @@ function textBoxAnchorOffsetPt(
   return 0;
 }
 
+type TextBoxInsets = { topPt: number; rightPt: number; bottomPt: number; leftPt: number };
+
+/** WORD_TEXT_BOX_PHYSICAL_INSETS: the physical lIns/tIns/rIns/bIns of
+ * ECMA-376 §21.1.2.1.1 in the logical frame of a quarter-turned story.
+ * mongolianVert keeps its established unrotated mapping (unmeasured). */
+function textBoxLogicalInsets(physical: Readonly<TextBoxInsets>, mode: RetainedTextBoxVerticalMode | undefined): TextBoxInsets {
+  if (mode === 'vert' || mode === 'eaVert') {
+    return { topPt: physical.rightPt, rightPt: physical.bottomPt, bottomPt: physical.leftPt, leftPt: physical.topPt };
+  }
+  if (mode === 'vert270') {
+    return { topPt: physical.leftPt, rightPt: physical.topPt, bottomPt: physical.rightPt, leftPt: physical.bottomPt };
+  }
+  return { ...physical };
+}
+
 function orientVerticalTextBoxParagraph(
   paragraph: ParagraphLayout,
   mode: RetainedTextBoxVerticalMode,
@@ -5349,16 +5364,19 @@ export function acquireShapeTextBoxLayout(
   const normalized = acquisition.kind === 'compatibility'
     ? acquisition.paragraphs
     : Object.freeze([]);
-  // A clockwise WordArt frame maps inline start/end to physical top/bottom,
-  // and logical block start/end to physical right/left. The LTR-column
-  // projection below mirrors the block axis without swapping authored insets.
-  const insets = stackedWordArt ? {
-    topPt: shape.textInsetR ?? 0, rightPt: shape.textInsetB ?? 0,
-    bottomPt: shape.textInsetL ?? 0, leftPt: shape.textInsetT ?? 0,
-  } : {
+  // lIns/tIns/rIns/bIns are physical shape edges (WORD_TEXT_BOX_PHYSICAL_INSETS);
+  // the story frame below is the rotated logical frame (x along the line,
+  // y along the block axis), so each inset moves to the logical edge that
+  // its physical edge becomes. A clockwise frame (vert, eaVert and the
+  // WordArt projection) maps inline start/end to physical top/bottom and
+  // block start/end to physical right/left; the WordArt LTR-column projection
+  // below then mirrors the block axis without swapping these insets. vert270
+  // runs inline start/end from physical bottom to top, block from left.
+  const physicalInsets = {
     topPt: shape.textInsetT ?? 0, rightPt: shape.textInsetR ?? 0,
     bottomPt: shape.textInsetB ?? 0, leftPt: shape.textInsetL ?? 0,
   };
+  const insets = textBoxLogicalInsets(physicalInsets, stackedWordArt ? 'vert' : verticalMode);
   if (textRect) {
     insets.leftPt += textRect[0]*contentBounds.widthPt;
     insets.topPt += textRect[1]*contentBounds.heightPt;
@@ -5382,6 +5400,7 @@ export function acquireShapeTextBoxLayout(
       kind: 'textbox',
       bounds: innerBounds,
       ...(stackedWordArt ? { quarterTurnMath: true } : {}),
+      ...(verticalMode ? { quarterTurned: true } : {}),
       capacity: 'unbounded',
       ...(stackedWordArt && shape.textWrap === 'none' ? { noWrap: true } : {}),
     },
