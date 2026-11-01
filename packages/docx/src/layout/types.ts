@@ -1462,6 +1462,9 @@ export interface TableRowFormatInput {
     /** Null unless the effective margin comes from an authored/inherited
      * legacy left element. Defaults and logical margins are unmeasured. */
     readonly originLeftMarginPt?: number | null;
+    /** True only when parser provenance shows that no cell, exception, table
+     * or style layer authors a left/right margin. */
+    readonly horizontalMarginsOmitted?: boolean;
   }[];
 }
 

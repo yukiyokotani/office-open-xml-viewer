@@ -839,8 +839,17 @@ function effectiveTableCellMargins(
       { ...tableLeft, scope: 'table' },
       { ...styleLeft, scope: 'style' },
     );
+  const right = firstMargin(cellRight.edge,
+    { ...cellRight, scope: 'cell' },
+  ) ?? publicCellMargin(cell.marginRight) ?? firstMargin(exceptionRight.edge,
+    { ...exceptionRight, scope: 'exception' },
+    { ...tableRight, scope: 'table' },
+    { ...styleRight, scope: 'style' },
+  );
   return {
     originLeftMarginPt: left?.originLeftMarginPt ?? null,
+    // No layer (cell, exception, table, style) authors either horizontal edge.
+    horizontalMarginsOmitted: hasPrivateCellWire && left === null && right === null,
     marginsPt: {
       top: firstMargin('top',
         { width: cellMargins?.top, scope: 'cell' },
@@ -857,13 +866,7 @@ function effectiveTableCellMargins(
         { width: styleMargins?.bottom, scope: 'style' },
       ) ?? table.cellMarginBottom,
       left: left?.value ?? table.cellMarginLeft,
-      right: firstMargin(cellRight.edge,
-        { ...cellRight, scope: 'cell' },
-      ) ?? publicCellMargin(cell.marginRight) ?? firstMargin(exceptionRight.edge,
-        { ...exceptionRight, scope: 'exception' },
-        { ...tableRight, scope: 'table' },
-        { ...styleRight, scope: 'style' },
-      ) ?? table.cellMarginRight,
+      right: right ?? table.cellMarginRight,
     },
   };
 }
