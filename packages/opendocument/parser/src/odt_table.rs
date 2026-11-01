@@ -9,8 +9,8 @@
 //!
 //! Only what the corpus's tables use is modelled. Every other table feature
 //! rejects with a broad rule rather than a precise model: table margins,
-//! breaks and kept paragraphs at tables, repeated header rows, fixed row
-//! heights and rows kept together, cell backgrounds and centred or
+//! breaks and kept paragraphs at tables, repeated header rows, authored
+//! row heights and rows kept together, cell backgrounds and centred or
 //! bottom-aligned cells, merged or repeated cells, nested tables, lists,
 //! headings and pictures in cells, cell text outside ASCII and CJK or above
 //! 24 pt, double or dashed borders and vertical text.
@@ -20,7 +20,7 @@ use docx_model::{
     BorderSpec, CellBorders, CellElement, DocTable, DocTableCell, DocTableRow, TableBorders,
     TableCellLayoutAcquisitionWire, TableGridAcquisitionWire, TableGridColumnAcquisitionWire,
     TableLayoutAcquisitionWire, TableLayoutKindAcquisitionWire, TableMarginAcquisitionWire,
-    TableRowHeightAcquisitionWire, TableRowLayoutAcquisitionWire, TableWidthAcquisitionWire,
+    TableWidthAcquisitionWire,
 };
 
 /// A property group's attributes.
@@ -447,7 +447,6 @@ impl<'a> Reader<'a> {
                     _ => return Err(unsupported("table-row")),
                 }
             }
-            let mut height = None;
             for (key, value) in self
                 .table_group(
                     Family::TableRow,
@@ -458,9 +457,8 @@ impl<'a> Reader<'a> {
                 .flatten()
             {
                 match (key.0.as_str(), key.1.as_str()) {
-                    // A minimum height; fixed heights and rows kept together
-                    // are not in the corpus.
-                    (NS_STYLE, "min-row-height") => height = Some(length_pt(value)?),
+                    // Authored row heights and rows kept together are not
+                    // modelled (a minimum height cut at a page differs).
                     (NS_FO, "keep-together") if value == "auto" => {}
                     (NS_FO, "background-color") if value == "transparent" => {}
                     _ => return Err(unsupported("table-row")),
@@ -491,28 +489,18 @@ impl<'a> Reader<'a> {
             }
             doc_rows.push(DocTableRow {
                 cells,
-                row_height: height,
-                row_height_rule: if height.is_some() { "atLeast" } else { "auto" }.into(),
+                row_height_rule: "auto".into(),
                 // LibreOffice cuts rows at a page its own way (see the flag).
                 cuts_in_place: true,
-                table_row_layout: TableRowLayoutAcquisitionWire {
-                    height: height.map(|value| TableRowHeightAcquisitionWire {
-                        value: Some(twips(value)),
-                        rule: "atLeast".into(),
-                        rule_authored: true,
-                    }),
-                    ..TableRowLayoutAcquisitionWire::default()
-                },
                 ..DocTableRow::default()
             });
         }
         self.area = enclosing_area;
-        // LibreOffice continues rows whose authored heights, vertical
-        // padding or borders run past a page; the DOCX layout cannot split
-        // that fixed space and does not converge. Each row's fixed space
-        // (its authored height or a cell's vertical padding and borders,
-        // whichever is larger) is held to a quarter of the page body, leaving
-        // room for a row's first line (bounded in `table_cell`).
+        // LibreOffice continues rows whose vertical padding or borders run
+        // past a page; the DOCX layout cannot split that fixed space and does
+        // not converge. Each row's fixed space (a cell's vertical padding and
+        // borders) is held to a quarter of the page body, leaving room for a
+        // row's first line (bounded in `table_cell`).
         let bound = self.text_height / 4.0;
         let fixed = |row: &DocTableRow| {
             let rule = |side: &Option<BorderSpec>| side.as_ref().map_or(0.0, |b| b.width);
@@ -524,7 +512,7 @@ impl<'a> Reader<'a> {
                         + rule(&cell.borders.top)
                         + rule(&cell.borders.bottom)
                 })
-                .fold(row.row_height.unwrap_or(0.0), f64::max)
+                .fold(0.0, f64::max)
         };
         // LibreOffice starts the content of every cell in a row below the
         // row's largest top padding (measured: 0 and 20 pt both start 20 pt
@@ -581,40 +569,6 @@ impl<'a> Reader<'a> {
                 if width(&upper.borders.bottom) > width(&lower.borders.top) {
                     lower.borders.top = upper.borders.bottom.clone();
                 }
-            }
-        }
-        // LibreOffice counts a row's minimum height from the top of the
-        // border above it (measured); the DOCX layout adds that border to an
-        // atLeast row (WORD_COLLAPSED_BORDER_ROW_TRACK_FOOTPRINT), so the
-        // minimum is given net of it. The border is drawn once at the thicker
-        // width, which the lower cell now carries.
-        for index in 0..doc_rows.len() {
-            let above = index
-                .checked_sub(1)
-                .map(|i| {
-                    doc_rows[i]
-                        .cells
-                        .iter()
-                        .map(|c| c.borders.bottom.as_ref().map_or(0.0, |b| b.width))
-                        .fold(0.0, f64::max)
-                })
-                .unwrap_or(0.0);
-            let row = &mut doc_rows[index];
-            let Some(minimum) = row.row_height else {
-                continue;
-            };
-            let shared = row
-                .cells
-                .iter()
-                .map(|c| c.borders.top.as_ref().map_or(0.0, |b| b.width))
-                .fold(above, f64::max);
-            let height = minimum - shared;
-            if height <= 0.0 {
-                return Err(unsupported("table-row"));
-            }
-            row.row_height = Some(height);
-            if let Some(wire) = row.table_row_layout.height.as_mut() {
-                wire.value = Some(twips(height));
             }
         }
         self.next_table += 1;

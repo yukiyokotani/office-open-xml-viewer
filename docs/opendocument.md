@@ -89,13 +89,13 @@ Currently admitted:
   absolute (refitted to the table as LibreOffice refits them) or
   full-width relative column widths, explicit left/centre/right alignment
   and a left margin (also past the text area), cell padding (the same top
-  and bottom padding across a row), single solid collapsed borders,
-  minimum row heights and rows splitting at page breaks as LibreOffice
+  and bottom padding across a row), single solid collapsed borders and
+  rows of their content's height splitting at page breaks as LibreOffice
   splits them, with ASCII or CJK text up to 24 pt in cells. Tables need
   LibreOffice's cell spacing and row keep settings set explicitly, as
   LibreOffice writes them. Everything else in tables rejects for now:
   table margins, page breaks and kept paragraphs at tables, repeated
-  header rows, fixed row heights and rows kept together, cell backgrounds
+  header rows, authored row heights and rows kept together, cell backgrounds
   and centred or bottom-aligned cells, cell paragraph margins, merged or
   repeated cells, nested tables, lists, headings and pictures in cells,
   double or dashed borders and vertical cell text;

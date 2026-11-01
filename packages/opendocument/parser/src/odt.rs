@@ -5477,7 +5477,7 @@ mod tests {
         assert!(matches!(&runs[2], DocRun::Text(t) if t.list_label.is_none() && t.text == "a"));
     }
 
-    const TABLE_STYLES: &str = r##"<style:style style:name="T" style:family="table"><style:table-properties table:border-model="collapsing" style:width="10cm" fo:margin-left="-0.191cm" fo:margin-top="0pt" fo:margin-bottom="0pt" table:align="left" style:writing-mode="page"/></style:style><style:style style:name="T.A" style:family="table-column"><style:table-column-properties style:column-width="4cm"/></style:style><style:style style:name="T.B" style:family="table-column"><style:table-column-properties style:column-width="6cm"/></style:style><style:style style:name="T.1" style:family="table-row"><style:table-row-properties style:min-row-height="2cm"/></style:style><style:style style:name="T.A1" style:family="table-cell"><style:table-cell-properties fo:padding-left="0.191cm" fo:padding-right="0.191cm" fo:padding-top="0cm" fo:padding-bottom="0cm" fo:border="0.5pt solid #000000" style:vertical-align="top"/></style:style><style:style style:name="T.B1" style:family="table-cell"><style:table-cell-properties fo:padding="0cm" fo:border-top="2pt solid #ff0000" fo:border-bottom="none" fo:border-left="none" fo:border-right="none"/></style:style><style:style style:name="T.HB" style:family="table-cell"><style:table-cell-properties fo:padding="0cm" fo:border-top="none" fo:border-bottom="2pt solid #ff0000" fo:border-left="none" fo:border-right="none"/></style:style><style:style style:name="Sp" style:family="paragraph"><style:paragraph-properties fo:margin-top="6pt" fo:margin-bottom="8pt"/></style:style>"##;
+    const TABLE_STYLES: &str = r##"<style:style style:name="T" style:family="table"><style:table-properties table:border-model="collapsing" style:width="10cm" fo:margin-left="-0.191cm" fo:margin-top="0pt" fo:margin-bottom="0pt" table:align="left" style:writing-mode="page"/></style:style><style:style style:name="T.A" style:family="table-column"><style:table-column-properties style:column-width="4cm"/></style:style><style:style style:name="T.B" style:family="table-column"><style:table-column-properties style:column-width="6cm"/></style:style><style:style style:name="T.1" style:family="table-row"><style:table-row-properties fo:keep-together="auto"/></style:style><style:style style:name="T.A1" style:family="table-cell"><style:table-cell-properties fo:padding-left="0.191cm" fo:padding-right="0.191cm" fo:padding-top="0cm" fo:padding-bottom="0cm" fo:border="0.5pt solid #000000" style:vertical-align="top"/></style:style><style:style style:name="T.B1" style:family="table-cell"><style:table-cell-properties fo:padding="0cm" fo:border-top="2pt solid #ff0000" fo:border-bottom="none" fo:border-left="none" fo:border-right="none"/></style:style><style:style style:name="T.HB" style:family="table-cell"><style:table-cell-properties fo:padding="0cm" fo:border-top="none" fo:border-bottom="2pt solid #ff0000" fo:border-left="none" fo:border-right="none"/></style:style><style:style style:name="Sp" style:family="paragraph"><style:paragraph-properties fo:margin-top="6pt" fo:margin-bottom="8pt"/></style:style>"##;
 
     fn table_body(table: &str) -> String {
         format!(
@@ -5839,12 +5839,9 @@ mod tests {
         assert!((table.tbl_ind.unwrap() + 0.191 * cm).abs() < 1e-9);
         assert_eq!(table.layout.as_deref(), Some("fixed"));
         assert!(!table.rows[0].is_header && !table.rows[1].is_header);
-        // A minimum height is given net of the border above the row (the
-        // thicker of the shared edge, here the 2 pt rule).
         let row = &table.rows[1];
-        assert_eq!(row.row_height_rule, "atLeast");
-        assert!((row.row_height.unwrap() - (2.0 * cm - 2.0)).abs() < 1e-9);
-        assert!(!row.cant_split);
+        assert_eq!(row.row_height_rule, "auto");
+        assert!(row.row_height.is_none() && !row.cant_split && row.cuts_in_place);
         let cell = &row.cells[0];
         assert_eq!(cell.v_align, "top");
         assert!((cell.margin_left.unwrap() - 0.191 * cm).abs() < 1e-9);
@@ -5950,15 +5947,12 @@ mod tests {
             ),
             // Table features no corpus table uses reject.
             (
-                TABLE_STYLES.replace(r#"style:min-row-height="2cm""#, r#"style:row-height="2cm""#),
+                TABLE_STYLES.replace(r#"fo:keep-together="auto""#, r#"style:row-height="2cm""#),
                 table_body(TABLE),
                 "table-row",
             ),
             (
-                TABLE_STYLES.replace(
-                    r#"style:min-row-height="2cm""#,
-                    r#"style:min-row-height="2cm" fo:keep-together="always""#,
-                ),
+                TABLE_STYLES.replace(r#"fo:keep-together="auto""#, r#"fo:keep-together="always""#),
                 table_body(TABLE),
                 "table-row",
             ),
@@ -6060,11 +6054,11 @@ mod tests {
             // than the page body, and padding taller than it.
             (
                 TABLE_STYLES.replace(
+                    r#"fo:keep-together="auto""#,
                     r#"style:min-row-height="2cm""#,
-                    r#"style:min-row-height="30cm""#,
                 ),
                 table_body(TABLE),
-                "table-row-height",
+                "table-row",
             ),
             (
                 TABLE_STYLES
