@@ -1,7 +1,7 @@
 import type { TableFormatInput } from './types.js';
 import { projectTableColumnLayoutInput, projectEffectiveTablePreferredWidthPt, absoluteTablePreferredWidthPt,
   type TableLayoutSource, type TableSourceAcquisitionInput } from './table-source-acquisition.js';
-import { wordFixedOccupiedGridInput, wordMeasuredTableOriginPlacementMode,
+import { wordFixedOccupiedGridInput, wordMeasuredTableOriginMode, wordMeasuredTableOriginPlacementMode,
   wordTableEffectiveIndentPt, wordTableOriginTranslationPt } from './table-compatibility.js';
 import { isVerticalTextDirection } from './section-orientation.js';
 
@@ -30,7 +30,7 @@ function tableOriginContext(
     : (table.tblInd ?? 0);
   // WORD_TABLE_ORIGIN_COMPATIBILITY: preserve the prior contract for unresolved
   // margins/spacing, nested origins, positioned tables, and unmeasured modes.
-  const measuredOrigin = wordMeasuredTableOriginPlacementMode(mode) && format.ordinaryFlow
+  const measuredStructure = format.ordinaryFlow
     && table.widthPct == null
     && (!firstRowException?.preferredWidthAuthored || firstRowException.preferredWidth?.kind !== 'pct')
     && (firstRowException?.layout === 'fixed' || table.layout === 'fixed'
@@ -38,15 +38,21 @@ function tableOriginContext(
         ? firstRowException.preferredWidth?.kind === 'dxa' && firstRowException.preferredWidth.value > 0
         : table.widthPt != null && table.widthPt > 0))
     && table.rows.every((row) => row.cells.every((cell) => cell.widthPt != null && cell.widthPt > 0 && cell.widthPct == null))
-    && format.rows.every((row) => row.cellSpacingPt === 0
-      && row.cells[0]?.originLeftMarginPt != null);
+    && format.rows.every((row) => row.cellSpacingPt === 0);
+  const measuredOrigin = wordMeasuredTableOriginPlacementMode(mode) && measuredStructure
+    && format.rows.every((row) => row.cells[0]?.originLeftMarginPt != null);
+  // WORD_TABLE_ORIGIN_COMPATIBILITY: the same structure with horizontal
+  // margins omitted at every layer was measured only for end justification.
+  const omittedMarginEndOrigin = wordMeasuredTableOriginMode(mode) && measuredStructure
+    && format.rows.every((row) => row.cells.every((cell) => cell.horizontalMarginsOmitted === true));
   const indentAuthored = firstRowException?.indentAuthored || table.tblInd != null;
   // Provenance travels with the selected logical indent: a first-row tblPrEx
   // indent is authored, the table's own value may be style-inherited.
   const tableIndentInherited = !firstRowException?.indentAuthored && table.tblIndInherited === true;
   const firstLeftMarginPt = format.rows[0]?.cells[0]?.originLeftMarginPt ?? 0;
   const effectiveLayout: 'fixed' | 'autofit' = firstRowException?.layout === 'fixed' || table.layout === 'fixed' ? 'fixed' : 'autofit';
-  return { measuredOrigin, tableIndentPt, tableIndentInherited, indentAuthored, firstLeftMarginPt, effectiveLayout };
+  return { measuredOrigin, omittedMarginEndOrigin, tableIndentPt, tableIndentInherited, indentAuthored,
+    firstLeftMarginPt, effectiveLayout };
 }
 
 
@@ -60,6 +66,7 @@ function memberContext(
   contentWPt: number,
   state: TableDecisionEnvironment,
   logicalProperties = measuredOrigin,
+  omittedMarginEndOrigin = false,
 ) {
   const format = source.format;
   const firstRowException = format.firstRowException;
@@ -82,8 +89,12 @@ function memberContext(
     justification == null || justification === 'left' || justification === 'start' || justification === 'both';
   const rowIndent = (justification: string | null | undefined, indentPt: number, inherited: boolean) =>
     inherited && !leading(justification) ? 0 : indentPt;
+  // A row is inside an origin observation through the explicit-margin class
+  // or, for end justification only, the omitted-margin class.
+  const measuredRow = (justification: string | null | undefined) => measuredOrigin
+    || (omittedMarginEndOrigin && justification === 'end');
   const widthIndent = (justification: string | null | undefined, indentPt: number, inherited = baseIndentInherited) =>
-    wordTableEffectiveIndentPt({ measured: measuredOrigin, justification,
+    wordTableEffectiveIndentPt({ measured: measuredRow(justification), justification,
       indentPt: rowIndent(justification, indentPt, inherited) });
   const rowIndentPts = format.rows.map((row) => {
     const ownException = !logicalProperties && row.exception?.indentAuthored === true;
@@ -92,7 +103,7 @@ function memberContext(
       !ownException && baseIndentInherited);
   });
   const rowTranslationsPt = format.rows.map((row) => wordTableOriginTranslationPt({
-    mode: state.mode, measured: measuredOrigin, justification: row.justification ?? table.jc,
+    mode: state.mode, measured: measuredRow(row.justification ?? table.jc), justification: row.justification ?? table.jc,
     indentPt: rowIndent(row.justification ?? table.jc, tableIndentPt, tableIndentInherited),
     indentAuthored: logicalProperties ? origin.indentAuthored : firstRowException?.indentAuthored || table.tblInd != null,
     firstLeftMarginPt: origin.firstLeftMarginPt,
@@ -307,6 +318,8 @@ export function decideLogicalTable(
   // keeps its unmeasured placement instead.
   const measuredOrigin = commonFrame && commonGrid && topLevelBody && origin.measuredOrigin
     && source.format.outerEdgeIndent !== true;
+  const omittedMarginEndOrigin = commonFrame && commonGrid && topLevelBody && origin.omittedMarginEndOrigin
+    && source.format.outerEdgeIndent !== true;
   const input = projectTableColumnLayoutInput(source, contentWidthPt,
     () => ({ minWidthPt: 0, maxWidthPt: 0 }), contentWidthPt);
   const gridScope = commonFrame && commonGrid && topLevelBody && source.format.ordinaryFlow
@@ -314,10 +327,11 @@ export function decideLogicalTable(
     && source.format.rows.every((row) => row.cellSpacingPt === 0);
   const dropsUnusedLeadingGrid = wordFixedOccupiedGridInput(input, environment.mode, gridScope) !== input;
   const usesLogicalProperties = measuredOrigin || dropsUnusedLeadingGrid;
-  const logical = memberContext(table, source, origin, measuredOrigin, contentWidthPt, environment, usesLogicalProperties);
+  const logical = memberContext(table, source, origin, measuredOrigin, contentWidthPt, environment,
+    usesLogicalProperties, omittedMarginEndOrigin);
   return Object.freeze({ measuredOrigin, usesLogicalProperties, dropsUnusedLeadingGrid, logical,
     members: Object.freeze(members.map((member) => memberContext(member.table, member.source,
-      origin, measuredOrigin, contentWidthPt, environment, usesLogicalProperties))),
+      origin, measuredOrigin, contentWidthPt, environment, usesLogicalProperties, omittedMarginEndOrigin))),
   });
 }
 
@@ -331,7 +345,7 @@ export function unmeasuredTableMemberDecision(table: TableLayoutSource, format: 
     lexical: { table: null, rows: table.rows.map((row) => ({ row: null, cells: row.cells.map(() => null) })) },
     format,
   };
-  const origin: ReturnType<typeof tableOriginContext> = { measuredOrigin: false,
+  const origin: ReturnType<typeof tableOriginContext> = { measuredOrigin: false, omittedMarginEndOrigin: false,
     effectiveLayout: format.firstRowException?.layout === 'fixed' || table.layout === 'fixed' ? 'fixed' : 'autofit',
     tableIndentPt: format.firstRowException?.indentAuthored ? (format.firstRowException.indentPt ?? 0) : (table.tblInd ?? 0),
     tableIndentInherited: !format.firstRowException?.indentAuthored && table.tblIndInherited === true,

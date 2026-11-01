@@ -181,6 +181,26 @@ describe('Word table origin and occupied grid', () => {
       }
     }
   });
+  it('end justification with wholly omitted horizontal margins ignores tblInd in the measured modes only', () => {
+    // WORD_TABLE_ORIGIN_COMPATIBILITY (controls-1664 page 7; ECMA-376 §17.4.50).
+    const omitted = (options: string, rows = row) => table(rows, options).replace(margins(), '');
+    const x = (xml: string, mode: number | null) => layoutTable(xml, mode).flowBounds.xPt;
+    for (const mode of [11, 12, 14, 15]) {
+      for (const rtl of ['', '<w:bidiVisual/>']) {
+        expect(x(omitted(indent.replace('108', '720') + '<w:jc w:val="end"/>' + rtl), mode))
+          .toBeCloseTo(x(omitted('<w:tblInd w:type="dxa" w:w="0"/><w:jc w:val="end"/>' + rtl), mode), 8);
+      }
+      expect(x(omitted(indent.replace('108', '720') + '<w:jc w:val="end"/>'), mode)).toBeCloseTo(252, 8);
+    }
+    // Outside the measured class the established contract still applies the indent.
+    const zero = '<w:tblInd w:type="dxa" w:w="0"/>';
+    const shifted = indent.replace('108', '720');
+    const pct = row.replaceAll('w:type="dxa"', 'w:type="pct"');
+    for (const [jc, mode, rows] of [['right', 14, row], ['center', 14, row], ['end', 13, row], ['end', null, row], ['end', 14, pct]] as const) {
+      const options = `<w:jc w:val="${jc}"/>`;
+      expect(x(omitted(shifted + options, rows), mode) - x(omitted(zero + options, rows), mode), `${jc} ${mode}`).toBeCloseTo(36, 8);
+    }
+  });
   it.each(['center', 'right'])('%s ignores indentation and uses the first cell margin only at the logical end', (jc) => {
     const rows = `<w:tr>${cell(2160, 540)}${cell(3600)}</w:tr><w:tr>${cell(2160, 120)}${cell(3600)}</w:tr>`;
     const options = indent + `<w:jc w:val="${jc}"/>`;
