@@ -7288,6 +7288,10 @@ function trailingAdvancePt(
       cluster.range.start >= segment.range.start + visible)
       .reduce((sum, cluster) => sum + cluster.advancePt, 0);
     if (visible > 0) break;
+    // WORD_KERNED_SPACE_PAIRS: a separator-only piece shifted by its seam pair
+    // with the glyph before it hangs that pair too, as a piece measured with
+    // its own trailing space does.
+    if (/^ +$/u.test(segment.text)) advancePt += segment.clusters[0]?.offset.xPt ?? 0;
   }
   return advancePt;
 }

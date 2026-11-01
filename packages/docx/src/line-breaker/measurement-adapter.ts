@@ -1,4 +1,5 @@
 import { wordArabicTextKerned, wordKerningApplies } from '../layout/line-compatibility.js';
+import { graphemeClusterOffsets } from '@silurus/ooxml-core';
 import type { LayoutTextSeg } from '../line-layout.js';
 import type { MeasurementTextContext, VerticalGlyphMeasurementService } from '../layout/measurement-capabilities.js';
 import { calcEffectiveFontPx, semanticSlotStartIndex } from '../layout/text.js';
@@ -77,8 +78,8 @@ export class LineMeasurementAdapter {
   }
 
   private segmentKerning(segment: LayoutTextSeg): CanvasFontKerning {
-    // The acquisition request owns the mode-scoped decision; retained paint
-    // consumes that same value. Standalone segments have no compatibility mode.
+    // The acquisition request owns the decision; retained paint consumes that
+    // same value. Standalone segments apply the same content-text rule.
     return (segment.textShapeRequest?.kerning ?? wordKerningApplies(segment.fontSize, segment.kerning))
       || wordArabicTextKerned(segment.text)
       ? 'normal'
@@ -191,6 +192,60 @@ export class LineMeasurementAdapter {
     });
     if (physicalUnit && !(joined.spans.length === 1 && joined.spans[0]?.semanticSlotSpans)) return 0;
     return (joined.advancePt - measure(l).advancePt - measure(r).advancePt) * charScaleFactor(right);
+  }
+
+  /** WORD_KERNED_SPACE_PAIRS: the font pair adjustment across a seam between
+   * two adjacent text pieces of one line when exactly one side of the seam is
+   * U+0020. A word-piece seam (`left` ends with its separator) of one slot
+   * script uses {@link wordBoundaryAdvance}. A §17.3.2.26 slot seam inside a
+   * piece (a highAnsi glyph before an ascii space, or a space before a glyph
+   * of the other Latin slot) cannot be joined by the text service, which
+   * shapes each slot alone; both sides are then proved to be one face (same
+   * route fingerprint, size, weight, style, scale and source sequence) and the
+   * pair is measured from that face as two glyphs against their isolated
+   * advances, with kerning on. Any other seam has no pair here. */
+  kernedSpaceSeamAdvance(left: LayoutTextSeg | undefined, right: LayoutTextSeg): number {
+    if (!left || !left.text || !right.text) return 0;
+    const leftSpace = left.text.endsWith(' ');
+    if (leftSpace === right.text.startsWith(' ')) return 0;
+    if (leftSpace && (left.script === right.script || hasLiveSlotSeam(left) || hasLiveSlotSeam(right))) {
+      return this.wordBoundaryAdvance(left, right);
+    }
+    const l = left.textShapeRequest;
+    const r = right.textShapeRequest;
+    if (!l || !r || l.kerning !== true || r.kerning !== true
+      || !right.textLayoutService || right.textLayoutService !== left.textLayoutService
+      || left.metricOnly || right.metricOnly || left.ruby || right.ruby
+      || left.fitTextRegionIndex !== undefined || right.fitTextRegionIndex !== undefined
+      || left.verticalRun || right.verticalRun || left.rtl || right.rtl
+      || l.complexScript || r.complexScript
+      || (left.script !== 'ascii' && left.script !== 'highAnsi')
+      || (right.script !== 'ascii' && right.script !== 'highAnsi')
+      || !left.fontRoute || left.fontRoute.fingerprint !== right.fontRoute?.fingerprint
+      || calcEffectiveFontPx(left, this.scale) !== calcEffectiveFontPx(right, this.scale)
+      || left.bold !== right.bold || left.italic !== right.italic
+      || l.weight !== r.weight || l.style !== r.style
+      || charScaleFactor(left) !== charScaleFactor(right)
+      || left.sourceRunIndex === undefined || left.sourceRunIndex !== right.sourceRunIndex
+      || left.sourceTextSequence !== right.sourceTextSequence) return 0;
+    const lc = l.substituteContext;
+    const rc = r.substituteContext;
+    if (!lc || !rc || lc.text !== rc.text || lc.offset + left.text.length !== rc.offset) return 0;
+    const before = left.text.slice(graphemeClusterOffsets(left.text).at(-1) ?? 0);
+    const after = right.text.slice(0, graphemeClusterOffsets(right.text)[0] ?? right.text.length);
+    const font = this.fontForSegment(left);
+    const previousFont = this.selectedFont ?? this.initialFont;
+    const previousKerning = this.context.fontKerning;
+    this.setFont(font);
+    this.context.fontKerning = 'normal';
+    try {
+      const width = (text: string) => this.context.measureText(text).width;
+      return (width(before + after) - width(before) - width(after)) * charScaleFactor(right);
+    } finally {
+      this.context.font = previousFont;
+      this.selectedFont = previousFont;
+      this.context.fontKerning = previousKerning;
+    }
   }
 
   /** WORD_CONDENSED_SPACING_ADVANCE_FLOOR units of `segment.text[start, start +

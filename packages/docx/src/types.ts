@@ -1383,9 +1383,9 @@ export interface DocxTextRun {
   /** ECMA-376 §17.3.2.19 `<w:kern w:val>` — font-kerning threshold in POINTS
    *  (the smallest font size that is kerned). A positive resolved threshold
    *  enables kerning at or above that size; absence disables it. Zero disables
-   *  content-run kerning only in mode 15 (WORD_KERN_THRESHOLD_AUTHORITY);
-   *  unmeasured modes, numbering glyphs and paragraph marks retain the previous
-   *  zero size comparison. */
+   *  content-run kerning in every compatibility mode
+   *  (WORD_KERN_THRESHOLD_AUTHORITY); numbering glyphs and paragraph marks
+   *  retain the previous zero size comparison. */
   kerning?: number;
   /** ECMA-376 §17.3.2.10 `<w:eastAsianLayout w:vert>` — horizontal-in-vertical
    *  (縦中横 / tate-chū-yoko). `true` means that in a VERTICAL (tbRl) page this
