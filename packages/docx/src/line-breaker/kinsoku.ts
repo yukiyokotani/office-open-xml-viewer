@@ -78,13 +78,18 @@ export function retractLeadingKinsoku(
   };
 
   if (headText) {
-    const headW = strAdvance(lastText, headText);
+    // The head keeps its first glyph and predecessor, so it keeps the
+    // incoming WORD_KERNED_SPACE_PAIRS seam pair (bounded by its own advance).
+    const headNaturalW = strAdvance(lastText, headText);
+    const seamPair = Math.max(lastText.leadingWordBoundaryPx ?? 0, -headNaturalW);
+    const headW = headNaturalW + seamPair;
     breakerState.currentWidth -= lastText.measuredWidth - headW;
     replaceLastMixedLineItem(breakerState, {
       ...lastText,
       ...RESET_SLICED_TEXT_MEASUREMENT,
       text: headText,
       measuredWidth: headW,
+      ...(seamPair === 0 ? {} : { leadingWordBoundaryPx: seamPair }),
       ...slicedTextMetadata(lastText, 0, split),
     }, scale);
   } else {

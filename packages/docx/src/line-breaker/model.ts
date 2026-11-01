@@ -222,6 +222,9 @@ export interface LayoutTextSeg extends LayoutSegSource {
   border?: DocxRunBorder | null;
   /** Ruby annotation rendered in a small font directly above this segment. */
   ruby?: { text: string; fontSizePt: number; hpsRaisePt?: number };
+  /** Every piece of a ruby-annotated run (only the first carries `ruby`):
+   * none takes a WORD_KERNED_SPACE_PAIRS seam pair. */
+  rubyPiece?: true;
   /** Track-changes revision attached to this run (insertion / deletion /
    *  moveFrom / moveTo). */
   revision?: { kind: 'insertion' | 'deletion' | string; author?: string };

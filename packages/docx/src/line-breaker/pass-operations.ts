@@ -43,6 +43,8 @@ import {
   leadingAutoSpacePx,
   segLetterSpacingPx,
   charSpacingDeltaPx,
+  condensedSpacingMayFloor,
+  condensedUnitAdvancesPx,
   type CondensedAdvanceUnits,
   protectedNoBreakOffsets,
   hardJoinPrefixEnd,
@@ -954,6 +956,19 @@ export function performAddToLine(
     }
   }
   if ('text' in s) {
+    // WORD_KERNED_SPACE_PAIRS: re-resolve the cross-space pair against the
+    // actual predecessor, so every placement path (a fitted width, a fresh
+    // line after a pre-flush, a re-measured box) commits the same width that
+    // retained paint shifts the glyph origin by.
+    const applied = s.leadingWordBoundaryPx ?? 0;
+    const desired = kernedSpacePairAdvance(operationState, s, w - applied);
+    s.leadingWordBoundaryPx = desired === 0 ? undefined : desired;
+    if (desired !== applied) {
+      w += desired - applied;
+      committedWidth = w;
+    }
+  }
+  if ('text' in s) {
     const kind = snapToCharsClass(s, characterGrid);
     // `word-snap-to-chars-script-block-allocation`
     const naturalWidth = s.snapGridNaturalWidthPx ?? w;
@@ -1589,7 +1604,8 @@ export function justifiedPrefixCompression(state: Pick<PassOperationState,
  * for paint. Advances are never shortened here; compression is line-owned. */
 export function fitJustifiedCompression(state: Pick<PassOperationState,
   'justifiedCompression' | 'baseRtl' | 'widthPolicy' | 'characterGrid' | 'breakerState'
-  | 'segAdvance' | 'strAdvance' | 'availW' | 'textSegmentBox' | 'addToLine' | 'scale' | 'measurement' | 'flush'>, first: LayoutTextSeg): boolean {
+  | 'segAdvance' | 'strAdvance' | 'availW' | 'textSegmentBox' | 'addToLine' | 'scale' | 'measurement' | 'flush'
+  | 'reservePrefixWork'>, first: LayoutTextSeg): boolean {
   if (!justifiedCompressionApplies(state) || first.fitTextRegionIndex !== undefined) return false;
   const { breakerState: breaker } = state;
   if (breaker.justifiedUnitEnd) {
@@ -1605,8 +1621,9 @@ export function fitJustifiedCompression(state: Pick<PassOperationState,
   const boxes = members.map(member => {
     if (!('text' in member)) throw new Error('A text candidate lost its placement unit');
     const box = state.textSegmentBox(member);
-    const boundary = state.measurement.wordBoundaryAdvance(
-      previousText && 'text' in previousText ? previousText : undefined, member);
+    // WORD_KERNED_SPACE_PAIRS: the same seam oracle that placement re-resolves.
+    const boundary = seamPairAdvance(state,
+      previousText && 'text' in previousText ? previousText : undefined, member, box.width);
     boundaries.push(boundary);
     member.measuredWidth = box.width + boundary;
     previousText = member;
@@ -1647,6 +1664,61 @@ export function fitJustifiedCompression(state: Pick<PassOperationState,
   return true;
 }
 
+export type SeamPairState = Pick<PassOperationState,
+  'measurement' | 'widthPolicy' | 'characterGrid' | 'scale' | 'reservePrefixWork'>;
+
+/** WORD_KERNED_SPACE_PAIRS: the font's pair adjustment across the seam
+ * between `previous` and `s`, which follows it on the same line, when one side
+ * of the seam is U+0020 (the separator ending a word piece, or a space split
+ * from its glyph by a font slot). A piece already measures the pairs inside
+ * it; only the seam pair is missing from the isolated measurements. The seam
+ * oracle acquires it from the selected face (never a constant) and declines
+ * unless both pieces belong to one identically formatted source sequence with
+ * kerning applying. Snapped-grid cells keep their own allocation.
+ *
+ * The pair adjusts the advance of the seam's first character (the space, or
+ * the glyph before a slot-split space). Under
+ * WORD_CONDENSED_SPACING_ADVANCE_FLOOR that character's committed contextual
+ * advance (the last floor unit of `previous`) is floored at zero with the pair
+ * folded in, so only the floored difference is charged; the charge
+ * never exceeds `widthPx`, the following piece's own advance, so no piece
+ * takes a negative width. Intrinsic sizing keeps its registered-unit
+ * acquisition (joined physical units) unchanged. */
+export function seamPairAdvance(
+  state: SeamPairState,
+  previous: LayoutSeg | undefined,
+  s: LayoutTextSeg,
+  widthPx: number,
+): number {
+  if (!previous || !('text' in previous)) return 0;
+  if (state.widthPolicy === 'intrinsic' && (previous.semanticSlotSpans || s.semanticSlotSpans)) {
+    return state.measurement.wordBoundaryAdvance(previous, s);
+  }
+  const { characterGrid, scale } = state;
+  if (snapToCharsClass(s, characterGrid) || snapToCharsClass(previous, characterGrid)) return 0;
+  let pair = state.measurement.kernedSpaceSeamAdvance(previous, s);
+  if (pair === 0) return 0;
+  if (condensedSpacingMayFloor(previous, characterGrid, scale)) {
+    // The committed contextual advance of the seam's first character (its
+    // pairs inside `previous` included), exactly as segAdvanceWidth floors it.
+    const units = state.measurement.condensedAdvanceUnits(
+      previous, previous.text, 0, characterGrid, state.reservePrefixWork);
+    const last = units ? condensedUnitAdvancesPx(previous, characterGrid, scale, units).at(-1) : undefined;
+    if (last !== undefined) pair = Math.max(0, last + pair) - Math.max(0, last);
+  }
+  return Math.max(pair, -Math.max(0, widthPx));
+}
+
+/** {@link seamPairAdvance} against the text piece ending the current line;
+ * a piece starting a line takes none. */
+export function kernedSpacePairAdvance(
+  state: SeamPairState & Pick<PassOperationState, 'breakerState'>,
+  s: LayoutTextSeg,
+  widthPx: number,
+): number {
+  return seamPairAdvance(state, state.breakerState.currentLine.at(-1), s, widthPx);
+}
+
 export function performTextSegmentBox(
   operationState: PassOperationState,
   s: LayoutTextSeg,
@@ -1681,18 +1753,10 @@ export function performTextSegmentBox(
     condensedNaturalClusters(operationState, s, s.text),
   ) + leadingAutoSpacePx(operationState, s);
   s.snapGridNaturalWidthPx = width;
-  // Max-content uses the unbroken native context, as its ordinary intrinsic
-  // text merge already does. Registered physical units must stay intact;
-  // acquire only their separator pair through the shared boundary oracle.
-  // This is not the bounded-line Word justification/compression policy.
-  if (operationState.widthPolicy === 'intrinsic') {
-    const previous = operationState.breakerState.currentLine.at(-1);
-    if (previous && 'text' in previous && (previous.semanticSlotSpans || s.semanticSlotSpans)) {
-      const boundary = measurement.wordBoundaryAdvance(previous, s);
-      s.leadingWordBoundaryPx = boundary;
-      width += boundary;
-    }
-  }
+  // The seam pair with the preceding piece (WORD_KERNED_SPACE_PAIRS; for
+  // max-content also the separator pair of registered physical units, whose
+  // ordinary text the intrinsic merge already joins) is resolved by the
+  // caller against the actual predecessor: see kernedSpacePairAdvance.
 
   const fullPx = s.fontSize * scale;
   let metricMeasurement = measured;
@@ -1912,25 +1976,44 @@ export function performDecimalAlignmentPrefixWidth(
   if (!point) return undefined;
   let width = 0;
   for (let index = 0; index < point.segmentIndex; index += 1) {
-    width += tabFollowWidth(segments[index]!);
+    width += tabFollowSeamWidth(operationState, segments, index);
   }
   const segment = segments[point.segmentIndex]!;
   if (!('text' in segment)) return width;
-  return width + strAdvance(segment, segment.text.slice(0, point.charOffset));
+  const prefixWidth = strAdvance(segment, segment.text.slice(0, point.charOffset));
+  // The separator follows the segment's seam pair, which precedes its glyphs.
+  return width + prefixWidth + seamPairAdvance(operationState, segments[point.segmentIndex - 1],
+    segment, tabFollowWidth(segment));
+}
+
+/** Advance of `segments[index]` in a tab's following cell, with the
+ * WORD_KERNED_SPACE_PAIRS seam pair against its predecessor in that cell, so
+ * right/center/decimal and positional alignment use the widths that placement
+ * commits. The cell's first item follows the tab, which takes no pair. */
+function tabFollowSeamWidth(
+  operationState: PassOperationState,
+  segments: readonly LayoutSeg[],
+  index: number,
+): number {
+  const segment = segments[index]!;
+  const width = operationState.tabFollowWidth(segment);
+  return 'text' in segment
+    ? width + seamPairAdvance(operationState, segments[index - 1], segment, width)
+    : width;
 }
 
 export function performTabFollowingMetrics(operationState: PassOperationState): Readonly<{
   totalWidth: number;
   decimalPrefixWidth?: number;
 }> {
-  const { breakerState, tabFollowWidth, decimalAlignmentPrefixWidth } = operationState;
+  const { breakerState, decimalAlignmentPrefixWidth } = operationState;
 
   const following: LayoutSeg[] = [];
   let totalWidth = 0;
   for (const q of breakerState.queue) {
     if ('isTab' in q || 'lineBreak' in q) break;
     following.push(q);
-    totalWidth += tabFollowWidth(q);
+    totalWidth += tabFollowSeamWidth(operationState, following, following.length - 1);
   }
   const decimalPrefixWidth = decimalAlignmentPrefixWidth(following);
   return decimalPrefixWidth === undefined ? { totalWidth } : { totalWidth, decimalPrefixWidth };
