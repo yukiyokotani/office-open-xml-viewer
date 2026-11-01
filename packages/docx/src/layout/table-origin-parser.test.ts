@@ -201,6 +201,35 @@ describe('Word table origin and occupied grid', () => {
       expect(x(omitted(shifted + options, rows), mode) - x(omitted(zero + options, rows), mode), `${jc} ${mode}`).toBeCloseTo(36, 8);
     }
   });
+  it('an authored horizontal margin at any layer keeps end tables out of the omitted-margin class', () => {
+    // horizontalMarginsOmitted is lexical: nil/auto/pct and logical start/end
+    // elements are authored even where they resolve to no value.
+    const options = '<w:tblStyle w:val="LogicalTable"/><w:jc w:val="end"/><w:tblInd w:type="dxa" w:w="720"/>';
+    const element = (name: string, kind: string) => `<w:${name} w:type="${kind}" w:w="${kind === 'dxa' ? 0 : 50}"/>`;
+    const authored: [string, string][] = [];
+    for (const kind of ['nil', 'auto', 'pct']) authored.push(['left', kind], ['right', kind]);
+    authored.push(['start', 'dxa'], ['end', 'dxa'], ['start', 'nil'], ['end', 'pct']);
+    const results: Record<string, number> = {};
+    for (const [name, kind] of authored) {
+      const mar = element(name, kind);
+      const cases = {
+        cell: [table(`<w:tr>${cell(2160).replace('/></w:tcPr>', `/><w:tcMar>${mar}</w:tcMar></w:tcPr>`)}${cell(3600)}</w:tr>`, options).replace(margins(), ''), LOGICAL_TABLE_STYLE],
+        exception: [table(`<w:tr><w:tblPrEx><w:tblCellMar>${mar}</w:tblCellMar></w:tblPrEx>${cell(2160)}${cell(3600)}</w:tr>`, options).replace(margins(), ''), LOGICAL_TABLE_STYLE],
+        table: [table(row, options).replace(margins(), `<w:tblCellMar>${mar}</w:tblCellMar>`), LOGICAL_TABLE_STYLE],
+        style: [table(row, options).replace(margins(), ''), `<w:style w:type="table" w:styleId="LogicalTable"><w:name w:val="Logical table"/><w:tblPr><w:tblCellMar>${mar}</w:tblCellMar></w:tblPr></w:style>`],
+      } as const;
+      for (const [layer, [xml, styles]] of Object.entries(cases)) {
+        results[`${layer} ${name} ${kind}`] = layoutTable(xml, 14, styles).flowBounds.xPt;
+      }
+    }
+    // Every case keeps the origin it had before the omitted-margin class:
+    // the indent applies (288), except a legacy left resolved to 0 at table or
+    // style scope, which is the explicit-margin class (end ignores it: 252).
+    for (const [key, xPt] of Object.entries(results)) {
+      expect(xPt, key).toBe(/^(table|style) left /.test(key) ? 252 : 288);
+    }
+    expect(Object.keys(results)).toHaveLength(40);
+  });
   it.each(['center', 'right'])('%s ignores indentation and uses the first cell margin only at the logical end', (jc) => {
     const rows = `<w:tr>${cell(2160, 540)}${cell(3600)}</w:tr><w:tr>${cell(2160, 120)}${cell(3600)}</w:tr>`;
     const options = indent + `<w:jc w:val="${jc}"/>`;
