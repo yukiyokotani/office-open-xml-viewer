@@ -7,7 +7,7 @@ export {
 } from '../slide-cursor-operation.js';
 export { SlidePullWorker } from '../slide-pull-worker.js';
 export type { PresentationBootstrap } from '../worker-protocol.js';
-export { renderSlide } from '../renderer.js';
+export { renderSlide, renderSlideWithEmbeddedFonts } from '../renderer.js';
 export {
   acquirePptxNodeSession,
   type PptxNodeAcquisition,

@@ -2561,6 +2561,7 @@ pub(super) fn parse_classic_impl(
                 .filter(|value| *value > 0),
             cross_between: child(ax, "crossBetween").and_then(|node| attr(&node, "val")),
             date_axis: (ax.tag_name().name() == "dateAx").then_some(true),
+            paired_beside_primary: None,
             crosses,
             crosses_at,
             title_font_size_hpt: title_size,
@@ -2578,8 +2579,15 @@ pub(super) fn parse_classic_impl(
     };
     let secondary_val_axis = secondary_val_ax
         .map(|axis| parse_auxiliary_value_axis(axis, secondary_value_source.as_ref()));
-    let secondary_cat_axis = secondary_cat_ax
-        .map(|axis| parse_auxiliary_value_axis(axis, secondary_category_source.as_ref()));
+    let secondary_cat_axis = secondary_cat_ax.map(|axis| SecondaryValueAxis {
+        // Only the same-side pairing above (`paired_category_axes`) sets this;
+        // the dispatcher keeps a group on such an axis to the shared-category
+        // routes that pairing opened.
+        paired_beside_primary: paired_category_axes
+            .is_some_and(|(_, secondary)| secondary == axis)
+            .then_some(true),
+        ..parse_auxiliary_value_axis(axis, secondary_category_source.as_ref())
+    });
 
     // `<c:plotArea><c:layout><c:manualLayout>` — use the shared parser so
     // schema defaults and all four layout modes cannot diverge by host format.

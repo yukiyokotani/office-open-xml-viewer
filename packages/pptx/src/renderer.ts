@@ -8159,6 +8159,10 @@ type InternalSlideRenderOptions = SlideRenderOptions & {
   /** Placeholder text already resolved on the main thread. Takes precedence
    * over {@link SlideRenderOptions.errorPlaceholder}. */
   errorPlaceholderText?: WireErrorPlaceholder;
+  /** The slide comes from this package's parser (presentation and worker
+   *  paths), whose colour chain is resolved even when it carries no slide
+   *  theme (an unreadable theme part). */
+  parsedTextChain?: boolean;
 };
 
 /**
@@ -8486,11 +8490,17 @@ async function renderSlideLeased(
   const themeDefaultColor = defaultTextColor
     ? `#${defaultTextColor}`
     : '#000000';
-  // A run whose whole chain authors no fill paints PowerPoint's hard default,
-  // literal black, not the theme dk1 (issue #1989; `HARD_DEFAULT_TEXT_COLOR` in
-  // the parser records the controls). The theme colour above only colours the
-  // synthetic SmartArt fallback shape, which has no PowerPoint counterpart.
-  const hardDefaultTextColor = '#000000';
+  // A parsed run whose whole chain authors no fill paints PowerPoint's hard
+  // default, literal black, not the theme dk1 (issue #1989;
+  // `HARD_DEFAULT_TEXT_COLOR` in the parser records the controls); the parser
+  // resolves every inherited colour, including the default-template tx1 of a
+  // master without txStyles. Only this package's own paths (presentation,
+  // render worker, Node parsed slides) pass `parsedTextChain`. A model passed
+  // to the public `renderSlide` has no proven parsed chain, with or without a
+  // slide theme, so it keeps the theme or caller `defaultTextColor`, as in
+  // 0.89.7. The theme colour above also colours the synthetic SmartArt
+  // fallback shape, which has no PowerPoint counterpart.
+  const hardDefaultTextColor = opts.parsedTextChain ? '#000000' : themeDefaultColor;
 
   const pictureBulletImages = new Map<string, SvgImageSource | null>();
   const shapeFillImages = new Map<string, PreparedShapeFill | null>();

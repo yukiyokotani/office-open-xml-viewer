@@ -2238,6 +2238,12 @@ pub struct SecondaryValueAxis {
     /// whether the categories it crosses sit between or on its tick marks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cross_between: Option<String>,
+    /// The deleted secondary category axis shares the primary category axis's
+    /// position and was paired with it by the chart groups' axis IDs (only when
+    /// used as the secondary category axis). Excel writes this form for every
+    /// secondary-axis combo; an axis on another side was resolved by position.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paired_beside_primary: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crosses: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
