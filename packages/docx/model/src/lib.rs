@@ -3620,7 +3620,8 @@ pub struct DocTable {
     /// LEADING edge (left in LTR, right in RTL/`bidi_visual`), in pt (signed —
     /// a negative value pulls the table outward past the leading margin toward
     /// the page edge). `type="dxa"` only; `pct`/`auto` are ignored per §17.4.50.
-    /// `None` ⇒ no direct indent (the renderer adds nothing). Applied by the
+    /// Resolved through the table style hierarchy (§17.7.6); `None` ⇒ no
+    /// indent anywhere in that hierarchy (the renderer adds nothing). Applied by the
     /// renderer only when the resolved `jc` is left/leading.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tbl_ind: Option<f64>,

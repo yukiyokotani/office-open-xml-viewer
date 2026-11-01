@@ -12,7 +12,10 @@ import type { TableLayout } from './types.js';
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 const encoder = new TextEncoder();
 
-function layoutTable(tableXml: string, mode = 14): TableLayout {
+const LOGICAL_TABLE_STYLE = '<w:style w:type="table" w:styleId="LogicalTable"><w:name w:val="Logical table"/></w:style>';
+
+/** `mode: null` omits compatSetting compatibilityMode. */
+function layoutTable(tableXml: string, mode: number | null = 14, tableStyles = LOGICAL_TABLE_STYLE): TableLayout {
   const parts = new Map([
     ['[Content_Types].xml', `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
       <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
@@ -32,10 +35,10 @@ function layoutTable(tableXml: string, mode = 14): TableLayout {
       <w:sectPr><w:pgSz w:w="12240" w:h="14400"/>
         <w:pgMar w:left="1440" w:right="1440" w:top="1440" w:bottom="1440"/>
       </w:sectPr></w:body></w:document>`],
-    ['word/styles.xml', `<w:styles xmlns:w="${W}"><w:style w:type="table" w:styleId="LogicalTable"><w:name w:val="Logical table"/></w:style></w:styles>`],
-    ['word/settings.xml', `<w:settings xmlns:w="${W}"><w:compat>
+    ['word/styles.xml', `<w:styles xmlns:w="${W}">${tableStyles}</w:styles>`],
+    ['word/settings.xml', `<w:settings xmlns:w="${W}">${mode === null ? '' : `<w:compat>
       <w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="${mode}"/>
-    </w:compat></w:settings>`],
+    </w:compat>`}</w:settings>`],
   ]);
   const archive = new DocxArchive(storeZip(new Map(
     [...parts].map(([name, xml]) => [name, encoder.encode(xml)]),
@@ -89,6 +92,39 @@ describe('Word table origin and occupied grid', () => {
       .toBeCloseTo(mode === 15 ? 72 : 54, 8);
     const rtl = layoutTable(table(row, indent + '<w:bidiVisual/>'), mode);
     expect(rtl.flowBounds.xPt).toBeCloseTo(mode === 15 ? 246.6 : 264.6, 8);
+  });
+  it('an omitted compatibility mode hangs the first cell margin like mode 14', () => {
+    for (const options of [indent, indent + '<w:bidiVisual/>', '<w:jc w:val="right"/>']) {
+      expect(layoutTable(table(row, options), null).flowBounds.xPt)
+        .toBeCloseTo(layoutTable(table(row, options), 14).flowBounds.xPt, 8);
+    }
+    expect(layoutTable(table(row, indent), null).flowBounds.xPt).toBeCloseTo(59.4, 8);
+  });
+  it('a table style tblInd is authored indentation, and unspecified horizontal cell margins are zero', () => {
+    // WORD_TABLE_ORIGIN_COMPATIBILITY / WORD_TABLE_UNSPECIFIED_HORIZONTAL_CELL_MARGIN.
+    const normalTable = (tblPr: string) => `<w:style w:type="table" w:default="1" w:styleId="TableNormal"><w:name w:val="Normal Table"/><w:tblPr>${tblPr}</w:tblPr></w:style>`;
+    const styleMargins = '<w:tblCellMar><w:left w:w="108" w:type="dxa"/><w:right w:w="108" w:type="dxa"/></w:tblCellMar>';
+    const indented = '<w:style w:type="table" w:styleId="Indented"><w:basedOn w:val="TableNormal"/><w:tblPr><w:tblInd w:w="500" w:type="dxa"/></w:tblPr></w:style>';
+    const styled = normalTable('<w:tblInd w:w="0" w:type="dxa"/>' + styleMargins) + indented;
+    const plain = (tblPr = '', tcMar = '') => `<w:tbl><w:tblPr>${tblPr}<w:tblW w:type="dxa" w:w="5000"/></w:tblPr><w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:type="dxa" w:w="5000"/>${tcMar}</w:tcPr><w:p><w:r><w:t>x</w:t></w:r></w:p></w:tc></w:tr></w:tbl>`;
+    const textStart = (layout: TableLayout) => layout.rows[0]?.cells[0]?.contentBounds.xPt;
+    const tcMar = '<w:tcMar><w:left w:w="400" w:type="dxa"/></w:tcMar>';
+    for (const mode of [null, 14]) {
+      // The default style's tblInd 0 hangs the style or tcMar margin outside the band.
+      expect(layoutTable(plain(), mode, styled).flowBounds.xPt).toBeCloseTo(66.6, 8);
+      expect(textStart(layoutTable(plain('', tcMar), mode, styled))).toBeCloseTo(72, 8);
+      // A basedOn style's tblInd 500 is the table indentation.
+      expect(textStart(layoutTable(plain('<w:tblStyle w:val="Indented"/>'), mode, styled))).toBeCloseTo(97, 8);
+      // Without tblInd anywhere in the hierarchy the same margin does not hang.
+      expect(layoutTable(plain('', tcMar), mode, normalTable(styleMargins)).flowBounds.xPt).toBeCloseTo(72, 8);
+    }
+    expect(textStart(layoutTable(plain('<w:tblStyle w:val="Indented"/>'), 15, styled))).toBeCloseTo(102.4, 8);
+    // No style margins at all: the text starts at the table edge on both sides.
+    for (const styles of ['', normalTable('<w:tblInd w:w="0" w:type="dxa"/>')]) {
+      const bare = layoutTable(plain(), null, styles);
+      expect(textStart(bare)).toBeCloseTo(72, 8);
+      expect(bare.rows[0]?.cells[0]?.contentBounds.widthPt).toBeCloseTo(250, 8);
+    }
   });
   it.each(['center', 'right'])('%s ignores indentation and uses the first cell margin only at the logical end', (jc) => {
     const rows = `<w:tr>${cell(2160, 540)}${cell(3600)}</w:tr><w:tr>${cell(2160, 120)}${cell(3600)}</w:tr>`;

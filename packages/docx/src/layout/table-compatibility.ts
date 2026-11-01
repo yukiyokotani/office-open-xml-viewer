@@ -175,7 +175,7 @@ export const WORD_TABLE_ORIGIN_COMPATIBILITY = defineCompatibilityRule({
   id: 'word-table-origin-compatibility',
   evidence: { kind: 'office-observation', syntheticFixtureId: 'table-origin-compatibility-and-occupied-grid',
     application: 'Microsoft Word', version: '16.113.2', platform: 'macOS 27.0' },
-  description: '528 ordinary-table controls cover modes 11/12/14/15, LTR/RTL, leading/center/end, omitted/zero/positive/negative indentation, explicit zero/asymmetric cell margins, cell overrides, first-row exceptions, fixed/AutoFit, nested contents, borderless and full-band tables. For top-level body tables with positive dxa cell preferences, explicit legacy horizontal margins and zero spacing (fixed auto/dxa table width or AutoFit dxa table width), modes 11/12/14 hang the first cell left margin: leading placement only with authored indentation and anchored to the first row, end placement per row. Center and end ignore indentation in both placement and width fitting, as ECMA-376 §17.4.50 specifies (contrary to MS-OI29500 §2.1.155). Mode 15 removes the margin hang. Border rasterization is separate from nominal grid geometry. Spaced tables and wholly omitted horizontal margins remain unresolved and retain the previous origin and content-inset behavior; Nested table origins, logical start/end margin spellings, and other compatibility modes are outside the measured scope. Windows Word 16.0 build 16.0.20430 retest is consistent within the tested subset; see the officeObservations entry for this rule in scripts/docx-compatibility-microsoft-evidence.json for values and evidence limits.',
+  description: '528 ordinary-table controls cover modes 11/12/14/15, LTR/RTL, leading/center/end, omitted/zero/positive/negative indentation, explicit zero/asymmetric cell margins, cell overrides, first-row exceptions, fixed/AutoFit, nested contents, borderless and full-band tables. For top-level body tables with positive dxa cell preferences, explicit legacy horizontal margins and zero spacing (fixed auto/dxa table width or AutoFit dxa table width), modes 11/12/14 hang the first cell left margin: leading placement only with authored indentation and anchored to the first row, end placement per row. Center and end ignore indentation in both placement and width fitting, as ECMA-376 §17.4.50 specifies (contrary to MS-OI29500 §2.1.155). Mode 15 removes the margin hang. Windows Word 16.0.20527 single-cell controls (5000-twip dxa table and cell, single borders, with no styles part, a styles part without a table style, or a default Normal Table style carrying tblInd 0 and 108-twip left/right margins; compatibility mode omitted, 14 and 15) extend this: an omitted compatibilityMode hangs exactly like mode 14 (style margins 108, tblCellMar 300/200, tcMar 400/100, tblInd 500, tblInd -300, tblInd 500 with tblCellMar left 200, right-aligned and bidiVisual tables all place text identically in both); a tblInd supplied by the table style hierarchy (the default table style\'s tblInd 0, or a basedOn style\'s tblInd 500) counts as authored indentation, while the same explicit margins without any tblInd in the hierarchy do not hang; a centered table never hangs; and a table nested in a cell keeps its edge at the containing cell\'s content edge in every mode (nested origins stay outside the hang). Spaced tables and wholly omitted horizontal margins remain unresolved and retain the previous origin behavior (their content inset is word-table-unspecified-horizontal-cell-margin); logical start/end margin spellings and other compatibility modes are outside the measured scope. Border rasterization is separate from nominal grid geometry. Windows Word 16.0 build 16.0.20430 retest is consistent within the tested subset; see the officeObservations entry for this rule in scripts/docx-compatibility-microsoft-evidence.json for values and evidence limits.',
 });
 
 export const WORD_FIXED_UNUSED_LEADING_GRID = defineCompatibilityRule({
@@ -189,6 +189,26 @@ export const WORD_FIXED_UNUSED_LEADING_GRID = defineCompatibilityRule({
 export function wordMeasuredTableOriginMode(mode: number | undefined): boolean {
   return mode === 11 || mode === 12 || mode === 14 || mode === 15;
 }
+
+/** WORD_TABLE_ORIGIN_COMPATIBILITY origin scope: the explicit measured modes
+ * plus an omitted compatibilityMode, which places tables like mode 14.
+ * WORD_FIXED_UNUSED_LEADING_GRID keeps {@link wordMeasuredTableOriginMode}. */
+export function wordMeasuredTableOriginPlacementMode(mode: number | undefined): boolean {
+  return mode === undefined || wordMeasuredTableOriginMode(mode);
+}
+
+/**
+ * ECMA-376 §17.4.34 / §17.4.11 give tables whose style hierarchy never
+ * specifies a leading/trailing cell margin 115 twips. Word lays out 0. The
+ * DOCX parser applies this fallback (parser.rs, table cell margins), after
+ * direct tblCellMar and the associated (or §17.7.4 default) table style.
+ */
+export const WORD_TABLE_UNSPECIFIED_HORIZONTAL_CELL_MARGIN = defineCompatibilityRule({
+  id: 'word-table-unspecified-horizontal-cell-margin',
+  evidence: { kind: 'office-observation', syntheticFixtureId: 'table-cell-margin-default-and-origin',
+    application: 'Microsoft Word', version: '16.0.20527', platform: 'Windows' },
+  description: 'A left or right cell margin that neither tcMar, tblCellMar nor the table style hierarchy specifies is 0, not the 115 twips of ECMA-376 §§17.4.34/17.4.11. Windows Word 16.0.20527 controls (5000-twip single-cell tables with no styles part, or a styles part without any table style, in compatibility modes omitted/14/15): text starts at the table edge and ends at its trailing edge for default margins, tblInd 500, centered, right-aligned, bidiVisual, tblInd -300 and nested 3000-twip tables, while explicit tblCellMar 0, 300/200 and tcMar 400/100 apply as authored; a table with only tblCellMar left 200 keeps a 0 right margin. A default Normal Table style carrying 108-twip margins supplies 108 as usual. A table style that exists but omits tblCellMar was not measured separately; it reaches the same fallback.',
+});
 
 export const WORD_EXACT_ROW_VERTICAL_CLIP_ONLY = defineCompatibilityRule({
   id: 'word-exact-row-vertical-clip-only',

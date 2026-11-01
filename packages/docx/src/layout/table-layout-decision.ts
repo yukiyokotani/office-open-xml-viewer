@@ -1,7 +1,7 @@
 import type { TableFormatInput } from './types.js';
 import { projectTableColumnLayoutInput, projectEffectiveTablePreferredWidthPt, absoluteTablePreferredWidthPt,
   type TableLayoutSource, type TableSourceAcquisitionInput } from './table-source-acquisition.js';
-import { wordFixedOccupiedGridInput, wordMeasuredTableOriginMode,
+import { wordFixedOccupiedGridInput, wordMeasuredTableOriginPlacementMode,
   wordTableEffectiveIndentPt, wordTableOriginTranslationPt } from './table-compatibility.js';
 import { isVerticalTextDirection } from './section-orientation.js';
 
@@ -30,7 +30,7 @@ function tableOriginContext(
     : (table.tblInd ?? 0);
   // WORD_TABLE_ORIGIN_COMPATIBILITY: preserve the prior contract for unresolved
   // margins/spacing, nested origins, positioned tables, and unmeasured modes.
-  const measuredOrigin = wordMeasuredTableOriginMode(mode) && format.ordinaryFlow
+  const measuredOrigin = wordMeasuredTableOriginPlacementMode(mode) && format.ordinaryFlow
     && table.widthPct == null
     && (!firstRowException?.preferredWidthAuthored || firstRowException.preferredWidth?.kind !== 'pct')
     && (firstRowException?.layout === 'fixed' || table.layout === 'fixed'
@@ -283,7 +283,10 @@ export function decideLogicalTable(
     : authoredEnvironment;
   const origin = tableOriginContext(table, source.format, environment.mode);
   const topLevelBody = environment.topLevel && environment.story === 'body';
-  const measuredOrigin = commonFrame && commonGrid && topLevelBody && origin.measuredOrigin;
+  // An omitted mode is inside the origin observation; the outer-edge table
+  // keeps its unmeasured placement instead.
+  const measuredOrigin = commonFrame && commonGrid && topLevelBody && origin.measuredOrigin
+    && source.format.outerEdgeIndent !== true;
   const input = projectTableColumnLayoutInput(source, contentWidthPt,
     () => ({ minWidthPt: 0, maxWidthPt: 0 }), contentWidthPt);
   const gridScope = commonFrame && commonGrid && topLevelBody && source.format.ordinaryFlow
