@@ -595,6 +595,8 @@ export interface WrapLayoutCtx {
     /** WORD_KASHIDA_LINE_FIT: required width of a window reaching the band's
      *  far edge, when its fitted width differs from an interior window's. */
     farEdgeMinimumStartWidthPt?: number;
+    /** WORD_KASHIDA_LINE_FIT: forward admission test of a candidate window. */
+    acceptWindow?: import('../layout/float-wrap.js').LineWindowAcceptance;
     probeHeightPt: number;
     paragraphXPt: number;
     maximumWidthPt: number;

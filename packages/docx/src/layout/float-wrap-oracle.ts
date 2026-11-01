@@ -4,6 +4,7 @@ import {
   skipPastTopAndBottom,
   type FloatRect,
   type LineFloatReference,
+  type LineWindowAcceptance,
 } from './float-wrap.js';
 
 export interface WrapOracle {
@@ -15,6 +16,9 @@ export interface WrapOracle {
     /** WORD_KASHIDA_LINE_FIT: required width of a window reaching the band's
      *  far edge, when it differs (its reserve base runs past that edge). */
     readonly farEdgeMinimumStartWidthPt?: number;
+    /** WORD_KASHIDA_LINE_FIT: forward admission test of a candidate window
+     *  (offset from paragraphXPt); a refused window is skipped. */
+    readonly acceptWindow?: LineWindowAcceptance;
     readonly probeHeightPt: number;
     readonly paragraphXPt: number;
     readonly maximumWidthPt: number;
@@ -53,6 +57,7 @@ export function createFloatWrapOracle(
       minimumStartWidthPt,
       squareMinimumStartWidthPt,
       farEdgeMinimumStartWidthPt,
+      acceptWindow,
       probeHeightPt,
       paragraphXPt,
       maximumWidthPt,
@@ -75,6 +80,7 @@ export function createFloatWrapOracle(
         },
         squareMinimumStartWidthPt ?? minimumStartWidthPt,
         farEdgeMinimumStartWidthPt,
+        acceptWindow,
       );
       return {
         topYPt: window.topY,

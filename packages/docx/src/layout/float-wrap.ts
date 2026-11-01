@@ -570,6 +570,7 @@ function firstUsableFreeGap(
   squareRequiredWidth: number,
   readingDirection: 'ltr' | 'rtl',
   farEdgeRequiredWidth?: number,
+  accept?: (gap: Readonly<{ l: ExactRational; r: ExactRational }>) => boolean,
 ): Readonly<{
   l: ExactRational;
   r: ExactRational;
@@ -638,7 +639,7 @@ function firstUsableFreeGap(
         ? farEdgeRequiredWidth
         : gap.squareConstrained ? squareRequiredWidth : polygonRequiredWidth,
     );
-    if (compareExactRational(width, unreducedExactFromNumber(requirement)) >= 0) {
+    if (compareExactRational(width, unreducedExactFromNumber(requirement)) >= 0 && (accept?.(gap) ?? true)) {
       return {
         l: gap.l,
         r: gap.r,
@@ -778,6 +779,7 @@ function lineWindowAtY(
   polygonRequiredWidth: number,
   squareRequiredWidth: number,
   farEdgeRequiredWidth?: number,
+  acceptWindow?: LineWindowAcceptance,
 ): { topY: number; xOffset: number; maxWidth: number } | null {
   const exactTop = unreducedExactFromNumber(topY);
   const exactBottom = addUnreducedExact(
@@ -815,8 +817,25 @@ function lineWindowAtY(
     squareRequiredWidth,
     reference.readingDirection,
     farEdgeRequiredWidth,
+    acceptWindow === undefined ? undefined
+      : (gap) => acceptWindow({ topY, ...exactGapWindow(gap, paraXLeft, paraXRight) }),
   );
   if (!best) return null;
+  return { topY, ...exactGapWindow(best, paraXLeft, paraXRight) };
+}
+
+/** WORD_KASHIDA_LINE_FIT: a caller's forward admission test of a candidate
+ * window (offset from the queried band's left edge); a window it refuses is
+ * skipped like one narrower than the requirement. */
+export type LineWindowAcceptance = (window: Readonly<{ topY: number; xOffset: number; maxWidth: number }>) => boolean;
+
+/** The representable window of a free gap: start rounded up, end rounded
+ * down, both contained in the gap and the paragraph band. */
+function exactGapWindow(
+  best: Readonly<{ l: ExactRational; r: ExactRational }>,
+  paraXLeft: number,
+  paraXRight: number,
+): { xOffset: number; maxWidth: number } {
   const zero: ExactRational = { numerator: 0n, denominator: 1n };
   const xOffsetCandidate = subtractUnreducedExact(
     best.l,
@@ -862,7 +881,6 @@ function lineWindowAtY(
     throw new Error('Exact float window could not represent a contained end');
   }
   return {
-    topY,
     xOffset: xOffsetNumber,
     maxWidth: maxWidthNumber,
   };
@@ -1213,21 +1231,38 @@ function nextLocalSweepEvent(
     left: AffineBoundary,
     right: AffineBoundary,
     squareConstrained: boolean,
-    farEdge: boolean,
   ): void => {
     const exactWidth = {
       slope: subtractUnreducedExact(right.exact.slope, left.exact.slope),
       intercept: subtractUnreducedExact(right.exact.intercept, left.exact.intercept),
     };
     gaps.push({ exactWidth });
-    // A gap reaching the band's far edge (reading order) takes its own
-    // fitted requirement when the caller supplies one.
-    const requirement = Math.max(
+    if (farEdgeRequiredWidth !== undefined) {
+      // WORD_KASHIDA_LINE_FIT: classify and measure the gap as gap selection
+      // does, clipped to the band on this slab (a through-wrap opening may run
+      // past the band edge), so a window reaching the far edge gets its root.
+      const atMidpoint = (boundary: AffineBoundary): ExactRational => addUnreducedExact(
+        multiplyUnreducedExact(boundary.exact.slope, exactMidpoint), boundary.exact.intercept);
+      const clippedLeft = compareExactRational(atMidpoint(left), atMidpoint(pageLeft)) < 0 ? pageLeft : left;
+      const clippedRight = compareExactRational(atMidpoint(right), atMidpoint(pageRight)) > 0 ? pageRight : right;
+      if (compareExactRational(atMidpoint(clippedRight), atMidpoint(clippedLeft)) <= 0) return;
+      const reachesFarEdge = reference.readingDirection === 'rtl' ? clippedLeft === pageLeft : clippedRight === pageRight;
+      appendRequirementRoot(clippedLeft, clippedRight, Math.max(
+        MIN_LINE_GAP,
+        reachesFarEdge ? farEdgeRequiredWidth : squareConstrained ? squareRequiredWidth : polygonRequiredWidth,
+      ));
+      return;
+    }
+    appendRequirementRoot(left, right, Math.max(
       MIN_LINE_GAP,
-      farEdge && farEdgeRequiredWidth !== undefined
-        ? farEdgeRequiredWidth
-        : squareConstrained ? squareRequiredWidth : polygonRequiredWidth,
-    );
+      squareConstrained ? squareRequiredWidth : polygonRequiredWidth,
+    ));
+  };
+  const appendRequirementRoot = (left: AffineBoundary, right: AffineBoundary, requirement: number): void => {
+    const exactWidth = {
+      slope: subtractUnreducedExact(right.exact.slope, left.exact.slope),
+      intercept: subtractUnreducedExact(right.exact.intercept, left.exact.intercept),
+    };
     const widthAtLower = addUnreducedExact(
       multiplyUnreducedExact(exactWidth.slope, unreducedExactFromNumber(lower)),
       exactWidth.intercept,
@@ -1246,18 +1281,15 @@ function nextLocalSweepEvent(
     }
   };
   let gapLeft = pageLeft;
-  let first = true;
   for (const interval of merged) {
     appendGapRoot(
       gapLeft,
       interval.left,
       gapLeft.square || interval.left.square,
-      first && reference.readingDirection === 'rtl',
     );
-    first = false;
     gapLeft = interval.right;
   }
-  appendGapRoot(gapLeft, pageRight, gapLeft.square, reference.readingDirection !== 'rtl' || first);
+  appendGapRoot(gapLeft, pageRight, gapLeft.square);
   let widestGap = gaps[0];
   for (const gap of gaps.slice(1)) {
     const comparison = compareExactRational(
@@ -1387,6 +1419,7 @@ function computePreparedLineFloatWindowCore(
   squareRequiredWidth: number = polygonRequiredWidth,
   diagnostics: MutableLineFloatSweepDiagnostics | null = null,
   farEdgeRequiredWidth?: number,
+  acceptWindow?: LineWindowAcceptance,
 ): { topY: number; xOffset: number; maxWidth: number } {
   const paraXLeft = paraX;
   const paraXRight = paraX + maxWidth;
@@ -1406,7 +1439,7 @@ function computePreparedLineFloatWindowCore(
     return lineWindowAtY(
       candidateY, probeH, paraXLeft, paraXRight, maxWidth, prepared,
       columnXLeftPt, columnXRightPt, reference,
-      polygonRequiredWidth, squareRequiredWidth, farEdgeRequiredWidth,
+      polygonRequiredWidth, squareRequiredWidth, farEdgeRequiredWidth, acceptWindow,
     );
   };
   const current = evaluate(topY);
@@ -1532,10 +1565,14 @@ export function computePreparedLineFloatWindow(
    * (reading order) needs, when its fitted width differs from an interior
    * window's; omitted, every window takes the requirements above. */
   farEdgeRequiredWidth?: number,
+  /** WORD_KASHIDA_LINE_FIT: forward admission test of each candidate window
+   * the requirements admit (a numbered first line resolves its body indent
+   * per window); omitted, every such window is accepted. */
+  acceptWindow?: LineWindowAcceptance,
 ): { topY: number; xOffset: number; maxWidth: number } {
   return computePreparedLineFloatWindowCore(
     topY, polygonRequiredWidth, probeH, paraX, maxWidth, prepared,
-    columnXLeftPt, columnXRightPt, reference, squareRequiredWidth, null, farEdgeRequiredWidth,
+    columnXLeftPt, columnXRightPt, reference, squareRequiredWidth, null, farEdgeRequiredWidth, acceptWindow,
   );
 }
 

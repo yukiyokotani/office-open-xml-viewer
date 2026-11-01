@@ -256,14 +256,19 @@ describe('WORD_KASHIDA_LINE_FIT line breaker', () => {
   it('asks the line-window oracle once per rejection with each kind\'s requirement', () => {
     // A numbered first line with a -50 pt authored hanging indent: every top
     // offers a narrowed 390 pt window, too small for the 320 pt word at 0.8
-    // (it needs 450 pt). The fit-aware search leaves them in one query.
+    // (it needs 450 pt). The forward-tested search leaves them in one query.
     let calls = 0;
     const lineWindow: NonNullable<WrapLayoutCtx['lineWindow']> = (input) => {
       calls += 1;
       if (calls > 50) throw new Error('search did not terminate');
-      return input.minimumStartWidthPt > 390
-        ? { topYPt: 100000, xOffsetPt: 0, maximumWidthPt: input.maximumWidthPt }
-        : { topYPt: input.topYPt, xOffsetPt: 20, maximumWidthPt: 390 };
+      // Like the production oracle, it skips windows the forward test refuses.
+      for (let top = input.topYPt; top < 1000; top += 10) {
+        if (input.minimumStartWidthPt <= 390
+          && (input.acceptWindow?.({ topY: top, xOffset: 20, maxWidth: 390 }) ?? true)) {
+          return { topYPt: top, xOffsetPt: 20, maximumWidthPt: 390 };
+        }
+      }
+      return { topYPt: 100000, xOffsetPt: 0, maximumWidthPt: input.maximumWidthPt };
     };
     const wrapCtx: WrapLayoutCtx = { ...wrap([]), floats: [], lineWindow,
       numberingFirstLine: { authoredFirstIndentPx: -50, bodyIndentAt: (edge) => edge } };
@@ -295,41 +300,69 @@ describe('WORD_KASHIDA_LINE_FIT line breaker', () => {
     expect(lines[0]!.availWidth * 0.8).toBeGreaterThanOrEqual(95 - 1e-9);
   });
 
-  it('matches a fine scan of sloped contours (randomized)', () => {
+  it('matches a fine scan of sloped contours, inside and past the band (randomized)', () => {
     let seed = 7717;
     const random = (): number => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
-    const reference = { xLeftPt: 0, xRightPt: 360, readingDirection: 'ltr' as const };
-    for (let trial = 0; trial < 60; trial += 1) {
+    for (let trial = 0; trial < 80; trial += 1) {
+      // Every other trial uses a 300 pt band in a 400 pt column, so contours
+      // and their openings run past the band's far edge.
+      const band = trial % 2 === 0 ? 360 : 300;
+      const span = band === 360 ? 360 : 400;
       const top = 60 + Math.round(random() * 120);
       const bottom = 140 + Math.round(random() * 160);
       const height = 40 + Math.round(random() * 80);
-      const farEdge = random() < 0.5;
+      const startSide = random() < 0.5;
       // A contour whose free side widens linearly from `top` to `bottom`.
-      const polygon = farEdge
-        ? [{ xPt: 0, yPt: 0 }, { xPt: 360 - top, yPt: 0 }, { xPt: 360 - bottom, yPt: height }, { xPt: 0, yPt: height }]
-        : [{ xPt: top, yPt: 0 }, { xPt: 360, yPt: 0 }, { xPt: 360, yPt: height }, { xPt: bottom, yPt: height }];
-      const float: FloatRect = { ...obstacle(0, 360), authoredWrap: 'through', imageY: 0, imageH: height, yTop: 0, yBottom: height,
+      const polygon = startSide
+        ? [{ xPt: 0, yPt: 0 }, { xPt: span - top, yPt: 0 }, { xPt: span - bottom, yPt: height }, { xPt: 0, yPt: height }]
+        : [{ xPt: top, yPt: 0 }, { xPt: span, yPt: 0 }, { xPt: span, yPt: height }, { xPt: bottom, yPt: height }];
+      const float: FloatRect = { ...obstacle(0, span), authoredWrap: 'through', imageY: 0, imageH: height, yTop: 0, yBottom: height,
         wrapPolygon: polygon };
       const trailing = Math.round(random() * 80) - 20;
       const [fraction, share] = [[1, 0.1], [1, 0.2], [0.9, 0], [0.8, 0]][Math.floor(random() * 4)]!;
       const word = 5 * (12 + Math.floor(random() * 20));
       const lines = run([token('W'.repeat(word / 5))], {
-        maxWidth: 300 + 60, marginRightPx: 360 + trailing, wrapCtx: wrap([float]), lineFit: fit(fraction, share),
+        maxWidth: band, marginRightPx: band + trailing, wrapCtx: wrap([float], span), lineFit: fit(fraction, share),
       });
-      const fitted = (width: number): number => width * fraction
-        - share * Math.max(0, width + (farEdge ? trailing : 0));
+      const reference = { xLeftPt: 0, xRightPt: band, readingDirection: 'ltr' as const };
+      const fitted = (window: { xOffset: number; maxWidth: number }): number => window.maxWidth * fraction
+        - share * Math.max(0, window.maxWidth + (window.xOffset + window.maxWidth >= band - 1e-9 ? trailing : 0));
       // Fine scan: the first top (0.01 pt steps) whose window fits the word.
       const prepared = prepareFloatWrap([float]);
       let expected = height;
       for (let y = 0; y < height; y += 0.01) {
-        const window = computePreparedLineFloatWindow(y, 1, 10, 0, 360, prepared, 0, 360, reference, 1);
-        if (window.topY === y && fitted(window.maxWidth) >= word) { expected = y; break; }
+        const window = computePreparedLineFloatWindow(y, 1, 10, 0, band, prepared, 0, span, reference, 1);
+        if (window.topY === y && fitted(window) >= word) { expected = y; break; }
       }
-      const label = JSON.stringify({ trial, top, bottom, height, farEdge, trailing, fraction, share, word });
+      const label = JSON.stringify({ trial, band, top, bottom, height, startSide, trailing, fraction, share, word });
       const got = lines[0]?.topY ?? Number.NaN;
       expect(Math.abs(got - expected), label).toBeLessThanOrEqual(0.011);
     }
-  }, 30_000);
+  }, 60_000);
+
+  it('tests a numbered first line\'s windows with the body indent each resolves', () => {
+    // Band [0, 600], floats at 100-150, 250-300 and 450-600; authored indent
+    // -50, resolved body indent 0, a 5 pt marker and default tabs every 36.
+    // In [300, 450] the body starts at 324: (150 - 24) x 0.8 = 100.8 >= 95.
+    const floats = wrap([band(100, 150, 0, 60), band(250, 300, 0, 60), band(450, 600, 0, 60)], 600);
+    const wrapCtx: WrapLayoutCtx = { ...floats, numberingFirstLine: {
+      authoredFirstIndentPx: -50, bodyIndentAt: (edge) => Math.ceil((edge + 5) / 36) * 36 } };
+    const lines = run([token('W'.repeat(19))], { maxWidth: 600, marginRightPx: 600, wrapCtx, lineFit: fit(0.8, 0) });
+    expect([lines[0]!.topY, lines[0]!.xOffset]).toEqual([0, 300]);
+  });
+
+  it('gives a through-wrap opening that runs past the band its far-edge root', () => {
+    // Band [0, 300] in a 360 pt column, text margin at 360; one through float
+    // whose notch opens from x = 200 - y to 350: the clipped far-edge window
+    // is 100 + y wide and fits 18 W (90 pt) at a 10% reserve of (window + 60)
+    // from y = 6.667.
+    const through: FloatRect = { ...obstacle(0, 400), authoredWrap: 'through', imageY: 0, imageH: 60, yTop: 0, yBottom: 60,
+      wrapPolygon: [{ xPt: 0, yPt: 0 }, { xPt: 200, yPt: 0 }, { xPt: 150, yPt: 50 }, { xPt: 350, yPt: 50 },
+        { xPt: 350, yPt: 0 }, { xPt: 400, yPt: 0 }, { xPt: 400, yPt: 60 }, { xPt: 0, yPt: 60 }] };
+    const lines = run([token('W'.repeat(18))], { maxWidth: 300, marginRightPx: 360, wrapCtx: wrap([through]), lineFit: fit(1, 0.1) });
+    expect(lines[0]!.topY).toBeGreaterThan(6.6);
+    expect(lines[0]!.topY).toBeLessThanOrEqual(7);
+  });
 
   it('measures a run of separately formatted line-end spaces with linear work', () => {
     const reads = (count: number): number => {

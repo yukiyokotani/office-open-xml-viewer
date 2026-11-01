@@ -384,27 +384,48 @@ function placeNumberingFirstLine(
   numbering: NonNullable<WrapLayoutCtx['numberingFirstLine']>,
   hangingOffset: number,
 ): void {
-  const { breakerState, maxWidth, baseRtl } = operationState;
-  const base = baseRtl
-    ? maxWidth - (breakerState.lineXOffset + breakerState.lineMaxWidth)
-    : breakerState.lineXOffset;
-  const windowEdge = base + hangingOffset;
-  const authored = numbering.authoredFirstIndentPx;
-  const leadingEdge = Math.max(Math.max(0, windowEdge) + authored, windowEdge);
-  if (leadingEdge <= authored) {
+  const { breakerState } = operationState;
+  const resolved = resolveNumberingFirstLine(operationState, numbering, hangingOffset,
+    breakerState.lineXOffset, breakerState.lineMaxWidth);
+  if (!resolved) {
     breakerState.firstIndentOverride = undefined;
     breakerState.numberingFirstLine = undefined;
     return;
   }
+  breakerState.lineXOffset = resolved.xOffset;
+  breakerState.lineMaxWidth = resolved.maxWidth;
+  breakerState.firstIndentOverride = resolved.indent;
+  breakerState.numberingFirstLine = {
+    leadingEdgePx: resolved.leadingEdge, bodyIndentPx: resolved.bodyIndent, lineStartOffsetPx: resolved.indent,
+  };
+}
+
+/** The geometry {@link placeNumberingFirstLine} gives a numbered first line in
+ * a window, or null when the window leaves the leading edge where the indents
+ * put it. Pure, so a candidate window can be tested before it is placed. */
+function resolveNumberingFirstLine(
+  operationState: Pick<PassOperationState, 'maxWidth' | 'baseRtl'>,
+  numbering: NonNullable<WrapLayoutCtx['numberingFirstLine']>,
+  hangingOffset: number,
+  lineXOffset: number,
+  lineMaxWidth: number,
+): { xOffset: number; maxWidth: number; indent: number; leadingEdge: number; bodyIndent: number } | null {
+  const { maxWidth, baseRtl } = operationState;
+  const base = baseRtl ? maxWidth - (lineXOffset + lineMaxWidth) : lineXOffset;
+  const windowEdge = base + hangingOffset;
+  const authored = numbering.authoredFirstIndentPx;
+  const leadingEdge = Math.max(Math.max(0, windowEdge) + authored, windowEdge);
+  if (leadingEdge <= authored) return null;
   const bodyIndent = Math.max(leadingEdge, numbering.bodyIndentAt(leadingEdge));
   // The breaker reads a line's window start as origin + min(0, first indent).
   // The body indent is never negative here, so re-anchor the origin at the
   // window's real leading edge (keeping its trailing edge) before charging it.
-  if (!baseRtl) breakerState.lineXOffset += hangingOffset;
-  breakerState.lineMaxWidth -= hangingOffset;
-  breakerState.firstIndentOverride = bodyIndent - windowEdge;
-  breakerState.numberingFirstLine = {
-    leadingEdgePx: leadingEdge, bodyIndentPx: bodyIndent, lineStartOffsetPx: bodyIndent - windowEdge,
+  return {
+    xOffset: baseRtl ? lineXOffset : lineXOffset + hangingOffset,
+    maxWidth: lineMaxWidth - hangingOffset,
+    indent: bodyIndent - windowEdge,
+    leadingEdge,
+    bodyIndent,
   };
 }
 
@@ -439,8 +460,18 @@ function placeLineWindow(
   // another width than an interior one (its reserve base runs past the edge);
   // the solver tests each window against its own kind's requirement.
   const farEdgeRequirement = transaction.farEdgeRequirement;
+  // Each candidate is also tested forward, as admission will see it.
+  const fitAdvance = transaction.fitAdvance;
+  const fits = (placed: Readonly<{ xOffset: number; maxWidth: number }>): boolean =>
+    fitAdvance === undefined || candidateLineFitWidth(operationState, placed) >= fitAdvance - 1e-9;
   const query = (topY: number, x: number, width: number, height: number,
+    placedFrom: ((window: Readonly<{ xOffset: number; maxWidth: number }>) => { xOffset: number; maxWidth: number }) | null,
     requiredWidth = transaction.requirement) => {
+    // A probe that is not a line window (the margin extension) takes neither
+    // the far-edge requirement nor the forward test.
+    const farEdgeRequirement = placedFrom ? transaction.farEdgeRequirement : undefined;
+    const acceptWindow = fitAdvance === undefined || !placedFrom ? undefined
+      : (window: Readonly<{ xOffset: number; maxWidth: number }>) => fits(placedFrom(window));
     if (wrapCtx.lineWindow) {
       const win = wrapCtx.lineWindow({
         topYPt: topY, minimumStartWidthPt: requiredWidth,
@@ -448,6 +479,7 @@ function placeLineWindow(
         paragraphXPt: x, maximumWidthPt: width,
         columnXPt: wrapCtx.columnXPt, columnWidthPt: wrapCtx.columnWidthPt,
         ...(farEdgeRequirement !== undefined ? { farEdgeMinimumStartWidthPt: farEdgeRequirement } : {}),
+        ...(acceptWindow ? { acceptWindow } : {}),
       });
       return { topY: win.topYPt, xOffset: win.xOffsetPt, maxWidth: win.maximumWidthPt };
     }
@@ -455,7 +487,7 @@ function placeLineWindow(
       topY, requiredWidth, height, x, width,
       preparedFloatWrap ?? prepareFloatWrap(wrapCtx.floats),
       wrapCtx.columnXPt, wrapCtx.columnXPt + wrapCtx.columnWidthPt,
-      reference, requiredWidth, farEdgeRequirement,
+      reference, requiredWidth, farEdgeRequirement, acceptWindow,
     );
   };
   // The requirement of a window at absolute [leftPt, leftPt + widthPt].
@@ -470,8 +502,11 @@ function placeLineWindow(
     const left = baseRtl ? lineBandX : cursor.right;
     const right = baseRtl ? cursor.left : lineBandX + lineBandWidth;
     if (probeH !== undefined && right > left) {
-      const next = query(cursor.topY, left, right - left, probeH);
-      if (next.topY === cursor.topY && next.maxWidth >= requirementOf(left + next.xOffset, next.maxWidth)) {
+      const placedFrom = (window: Readonly<{ xOffset: number; maxWidth: number }>) =>
+        ({ xOffset: left - wrapCtx.paraX + window.xOffset, maxWidth: window.maxWidth });
+      const next = query(cursor.topY, left, right - left, probeH, placedFrom);
+      if (next.topY === cursor.topY && next.maxWidth >= requirementOf(left + next.xOffset, next.maxWidth)
+        && fits(placedFrom(next))) {
         // A strictly smaller unvisited band gives monotonic horizontal
         // progress; the column and largest-side reference never shrink.
         accepted = {
@@ -502,7 +537,8 @@ function placeLineWindow(
       transaction.snapshot = null;
       return;
     }
-    const win = query(transaction.requestTopY, lineBandX, lineBandWidth, probeH);
+    const win = query(transaction.requestTopY, lineBandX, lineBandWidth, probeH,
+      (window) => ({ xOffset: window.xOffset, maxWidth: window.maxWidth + hangingOffset }));
     accepted = {
       topY: win.topY,
       xOffset: win.xOffset,
@@ -517,7 +553,8 @@ function placeLineWindow(
   // that does not honor the requirement. Accept it without a transaction:
   // forced placement is then the established behavior, and the search ends.
   if (rejected && accepted.narrowed
-    && accepted.solverWidth < requirementOf(wrapCtx.paraX + accepted.xOffset, accepted.solverWidth)) {
+    && (accepted.solverWidth < requirementOf(wrapCtx.paraX + accepted.xOffset, accepted.solverWidth)
+      || !fits(accepted))) {
     accepted = { ...accepted, narrowed: false };
   }
   breakerState.currentLineTopY = accepted.topY;
@@ -533,7 +570,7 @@ function placeLineWindow(
   } else if (extensionProbeH === undefined) {
     breakerState.lineMarginExtension = extension;
   } else {
-    const free = query(accepted.topY, wrapCtx.paraX + maxWidth, extension, extensionProbeH, extension);
+    const free = query(accepted.topY, wrapCtx.paraX + maxWidth, extension, extensionProbeH, null, extension);
     breakerState.lineMarginExtension = free.topY === accepted.topY && free.xOffset === 0
       && free.maxWidth >= extension ? extension : 0;
   }
@@ -642,15 +679,23 @@ export function performRejectGap(
     // WORD_KASHIDA_LINE_FIT: the search asks each window kind for the width
     // whose fitted width holds the unit, so the solver itself (its exact
     // sweep included) finds the first window that admission will accept.
-    const need = lineFitWindowRequirements(operationState, rejection.requiredWidth);
-    const rejectedNeed = windowReachesFarEdge(operationState, rejected) ? need.farEdge : need.interior;
-    if (rejectedNeed > rejected.solverWidth) {
+    // A numbered first line resolves its body indent per window, which no
+    // width requirement expresses: it asks only for the advance (no window
+    // fits less) and the solver tests each candidate forward through the same
+    // numbering resolution placement applies.
+    const numbered = breakerState.isFirst && operationState.wrapCtx?.numberingFirstLine !== undefined;
+    const need = numbered
+      ? { interior: rejection.requiredWidth, farEdge: rejection.requiredWidth }
+      : lineFitWindowRequirements(operationState, rejection.requiredWidth);
+    if (candidateLineFitWidth(operationState, rejected) < rejection.requiredWidth - 1e-9) {
       transaction.farEdgeRequirement = Math.max(transaction.farEdgeRequirement ?? transaction.requirement, need.farEdge);
       transaction.requirement = Math.max(transaction.requirement, need.interior);
+      transaction.fitAdvance = Math.max(transaction.fitAdvance ?? 0, rejection.requiredWidth);
     } else {
-      // A window that met its own requirement yet rejected the unit
-      // (non-monotone advances): the unit takes the full band.
+      // A window whose fit holds the unit yet rejected it (non-monotone
+      // advances): the unit takes the full band.
       transaction.farEdgeRequirement = undefined;
+      transaction.fitAdvance = undefined;
       transaction.requirement = maxWidth - hangingOffset;
     }
     placeLineWindow(operationState, transaction, rejected);
@@ -691,14 +736,47 @@ type LineFitState = Pick<PassOperationState,
  * The single forward helper: every admission compares with this width (via
  * availW) and {@link lineFitWindowRequirements} is its inverse per window kind. */
 export function lineFitWidth(operationState: LineFitState, widthPx: number): number {
+  return windowLineFitWidth(operationState, {
+    xOffset: operationState.breakerState.lineXOffset, maxWidth: operationState.breakerState.lineMaxWidth,
+  }, widthPx);
+}
+
+/** {@link lineFitWidth} of a given line window. */
+function windowLineFitWidth(
+  operationState: Pick<PassOperationState, 'lineFit' | 'maxWidth' | 'marginRightPx' | 'tabOriginPx' | 'baseRtl'>,
+  window: Readonly<{ xOffset: number; maxWidth: number }>,
+  widthPx: number,
+): number {
   const fit = operationState.lineFit;
   if (fit === undefined) return widthPx;
   if (fit.reserveShare === 0) return widthPx * fit.fraction;
-  const window = { xOffset: operationState.breakerState.lineXOffset, maxWidth: operationState.breakerState.lineMaxWidth };
   // A reserve base cut short by a negative trailing indent never enlarges the
   // fit past the window: the reserve is at least zero.
   return widthPx * fit.fraction
     - fit.reserveShare * Math.max(0, window.maxWidth + lineReserveExtension(operationState, window));
+}
+
+/** The fit width admission will give a candidate line window (placed
+ * geometry, paraX-relative): the first line's indent, and for a numbered
+ * first line the body indent {@link placeNumberingFirstLine} resolves there. */
+function candidateLineFitWidth(
+  operationState: PassOperationState,
+  window: Readonly<{ xOffset: number; maxWidth: number }>,
+): number {
+  const { breakerState, wrapCtx } = operationState;
+  let { xOffset, maxWidth: lineMaxWidth } = window;
+  let indent = 0;
+  if (breakerState.isFirst) {
+    const override = breakerState.firstIndentOverride;
+    breakerState.firstIndentOverride = undefined;
+    indent = operationState.firstIndent;
+    breakerState.firstIndentOverride = override;
+    const numbering = wrapCtx?.numberingFirstLine;
+    const resolved = numbering && resolveNumberingFirstLine(operationState, numbering,
+      placementHangingOffset(operationState), xOffset, lineMaxWidth);
+    if (resolved) ({ xOffset, maxWidth: lineMaxWidth, indent } = resolved);
+  }
+  return windowLineFitWidth(operationState, { xOffset, maxWidth: lineMaxWidth }, lineMaxWidth - indent);
 }
 
 /** Signed distance the reserve base runs past a line window's far edge: from
@@ -713,17 +791,6 @@ function lineReserveExtension(
   if (baseRtl) return window.xOffset > 1e-9 ? 0 : tabOriginPx + window.xOffset;
   const end = window.xOffset + window.maxWidth;
   return end < maxWidth - 1e-9 ? 0 : marginRightPx - end;
-}
-
-/** Whether a line window reaches the band's far edge (no float narrows that
- * side): the classification {@link lineReserveExtension} uses. */
-function windowReachesFarEdge(
-  operationState: Pick<PassOperationState, 'maxWidth' | 'baseRtl'>,
-  window: Readonly<{ xOffset: number; maxWidth: number }>,
-): boolean {
-  return operationState.baseRtl
-    ? window.xOffset <= 1e-9
-    : window.xOffset + window.maxWidth >= operationState.maxWidth - 1e-9;
 }
 
 /** The solver width each window kind needs for its {@link lineFitWidth} to
