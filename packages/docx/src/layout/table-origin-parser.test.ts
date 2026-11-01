@@ -109,7 +109,7 @@ describe('Word table origin and occupied grid', () => {
     const plain = (tblPr = '', tcMar = '') => `<w:tbl><w:tblPr>${tblPr}<w:tblW w:type="dxa" w:w="5000"/></w:tblPr><w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:type="dxa" w:w="5000"/>${tcMar}</w:tcPr><w:p><w:r><w:t>x</w:t></w:r></w:p></w:tc></w:tr></w:tbl>`;
     const textStart = (layout: TableLayout) => layout.rows[0]?.cells[0]?.contentBounds.xPt;
     const tcMar = '<w:tcMar><w:left w:w="400" w:type="dxa"/></w:tcMar>';
-    for (const mode of [null, 14]) {
+    for (const mode of [null, 11, 12, 14]) {
       // The default style's tblInd 0 hangs the style or tcMar margin outside the band.
       expect(layoutTable(plain(), mode, styled).flowBounds.xPt).toBeCloseTo(66.6, 8);
       expect(textStart(layoutTable(plain('', tcMar), mode, styled))).toBeCloseTo(72, 8);
