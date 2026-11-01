@@ -1,6 +1,6 @@
 import type { LineSpacing, TabStop, DocxRunBorder, EmphasisMark } from '../types';
 import type { CanvasFontRoute, HyperlinkTarget, NumberFormat, Duotone, ResolvedFontMetric } from '@silurus/ooxml-core';
-import { type FloatRect } from '../float-layout.js';
+import { type FloatRect, type LineWindowAdmission } from '../float-layout.js';
 import type { LayoutServices } from '../layout/types.js';
 import type { VerticalGlyphMeasurementService } from '../layout/measurement-capabilities.js';
 import type { GlyphInkBounds, TextLayoutService, TextShapeRequest, FontScriptSlot } from '../layout/text.js';
@@ -603,6 +603,8 @@ export interface WrapLayoutCtx {
      *  indented text band the square side-gap math uses). */
     columnXPt: number;
     columnWidthPt: number;
+    /** Further admission test of a candidate window (see LineWindowAdmission). */
+    admitsWindow?: LineWindowAdmission;
   }) => {
     topYPt: number;
     xOffsetPt: number;
