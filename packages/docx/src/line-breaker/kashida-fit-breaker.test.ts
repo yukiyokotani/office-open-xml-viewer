@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { layoutLines, type LayoutLine, type LayoutSeg, type LayoutTextSeg, type WrapLayoutCtx } from '../line-layout.js';
+import { computePreparedLineFloatWindow, prepareFloatWrap } from '../layout/float-wrap.js';
 import type { FloatRect } from '../layout/float-wrap.js';
 import type { LineFitWidth } from './pass-driver.js';
 
@@ -271,5 +272,70 @@ describe('WORD_KASHIDA_LINE_FIT line breaker', () => {
     });
     expect(lines[0]!.topY).toBe(1000);
     expect(work).toBeLessThan(1000);
+  });
+  it('ends the retry budget on the band placement expands, never re-requesting a rejected window', () => {
+    // A numbered first line with a -50 pt authored hanging indent expands the
+    // 360 pt band to 410 pt. Every top offers a narrowed 390 pt window whose
+    // 0.8 fit cannot hold the 320 pt word; past the retry budget the search
+    // must leave the windows behind and place the word.
+    let calls = 0;
+    const lineWindow: NonNullable<WrapLayoutCtx['lineWindow']> = (input) => {
+      calls += 1;
+      if (calls > 5000) throw new Error('retry search did not terminate');
+      if (input.minimumStartWidthPt > 390) {
+        return { topYPt: 100000, xOffsetPt: 0, maximumWidthPt: input.maximumWidthPt };
+      }
+      for (let top = input.topYPt; ; top += 10) {
+        const excluded = input.excludedWindows?.some((window) => window.topY === top);
+        if (!excluded) return { topYPt: top, xOffsetPt: 20, maximumWidthPt: 390 };
+      }
+    };
+    const wrapCtx: WrapLayoutCtx = { ...wrap([]), floats: [], lineWindow,
+      numberingFirstLine: { authoredFirstIndentPx: -50, bodyIndentAt: (edge) => edge } };
+    const lines = run([token('W'.repeat(64))], { wrapCtx, lineFit: fit(0.8, 0) });
+    expect(calls).toBeLessThan(5000);
+    expect(lines[0]!.topY).toBe(100000);
+  });
+
+  it('keeps the original line grid when a retry resumes below the request top', () => {
+    // The breaker hands the solver the original request top as grid origin.
+    const origins: Array<number | undefined> = [];
+    const lineWindow: NonNullable<WrapLayoutCtx['lineWindow']> = (input) => {
+      origins.push(input.gridOriginYPt);
+      for (let top = input.topYPt; ; top += 5) {
+        if (top >= 30) return { topYPt: top, xOffsetPt: 0, maximumWidthPt: input.maximumWidthPt };
+        if (!input.excludedWindows?.some((window) => window.topY === top)) {
+          return { topYPt: top, xOffsetPt: 0, maximumWidthPt: 100 };
+        }
+      }
+    };
+    run([token('W'.repeat(19))], { wrapCtx: { ...wrap([]), floats: [], lineWindow }, lineFit: fit(0.8, 0) });
+    expect(origins.filter((origin) => origin !== undefined).every((origin) => origin === 0)).toBe(true);
+    expect(origins.some((origin) => origin === 0)).toBe(true);
+    // The solver steps a tight band on that grid: resumed at 5 with origin 0
+    // it reaches the fitting window at 10, not 15.
+    const tight: FloatRect = { ...obstacle(120, 360), authoredWrap: 'tight', imageY: 0, imageH: 1000, yTop: 0, yBottom: 1000,
+      wrapPolygon: [{ xPt: 120, yPt: 0 }, { xPt: 360, yPt: 0 }, { xPt: 360, yPt: 1000 }, { xPt: 150, yPt: 1000 },
+        { xPt: 150, yPt: 10 }, { xPt: 120, yPt: 10 }] };
+    const prepared = prepareFloatWrap([tight]);
+    const reference = { xLeftPt: 0, xRightPt: 360, readingDirection: 'ltr' as const };
+    expect(computePreparedLineFloatWindow(5, 140, 10, 0, 360, prepared, 0, 360, reference, 140, [], 0).topY).toBe(10);
+    expect(computePreparedLineFloatWindow(5, 140, 10, 0, 360, prepared, 0, 360, reference, 140, [], 5).topY).toBe(15);
+  });
+
+  it('measures a run of separately formatted line-end spaces with linear work', () => {
+    const reads = (count: number): number => {
+      let calls = 0;
+      const ctx = { measureText: (text: string) => { calls += 1; return { width: text.length * 5,
+        fontBoundingBoxAscent: 8, fontBoundingBoxDescent: 2 }; } } as unknown as CanvasRenderingContext2D;
+      const spaces = Array.from({ length: count }, (_, index) => token(' ', { joinPrev: true, color: index % 2 ? 'FF0000' : '0000FF' }));
+      layoutLines(ctx, [token('W'.repeat(18)), ...spaces, token('next')], 360, 0, 1, [], wrap([band(0, 268, 0, 10)], 360, true), {}, 0,
+        undefined, undefined, undefined, 360, true, true, false, undefined, 'bounded', undefined, true, false,
+        { fraction: 1, reserveShare: 0, rtlVisiblePrefix: true });
+      return calls;
+    };
+    const small = reads(400);
+    const large = reads(800);
+    expect(large).toBeLessThan(small * 2.5);
   });
 });

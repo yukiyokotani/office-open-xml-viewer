@@ -204,6 +204,8 @@ export interface GapTransaction {
   excluded?: Array<{ topY: number; leftPt: number; widthPt: number }>;
   /** Excluded-window retries taken by this line (bounded). */
   excludedRetries?: number;
+  /** The original request top: the line-grid origin of resumed searches. */
+  gridOriginY?: number;
 }
 
 export function createLineBreakerState(maxWidth: number, wrapCtx?: WrapLayoutCtx) {

@@ -1405,6 +1405,9 @@ function computePreparedLineFloatWindowCore(
   squareRequiredWidth: number = polygonRequiredWidth,
   diagnostics: MutableLineFloatSweepDiagnostics | null = null,
   excluded: readonly ExcludedLineWindow[] = [],
+  /** Origin of the line grid; a search resumed below its original top keeps
+   * the original grid (defaults to `topY`). */
+  gridOriginY: number = topY,
 ): { topY: number; xOffset: number; maxWidth: number } {
   const paraXLeft = paraX;
   const paraXRight = paraX + maxWidth;
@@ -1466,12 +1469,13 @@ function computePreparedLineFloatWindowCore(
   // `lineGridAfter` is exact, finite and O(1). "Earliest" is stated on that
   // grid. Beyond the domain (off every page) the exact sweep alone places the
   // line, so extreme binary64 inputs keep origin/main's behaviour.
-  const pitch = Math.abs(topY) <= LINE_SEARCH_Y_LIMIT_PT ? lineSearchPitch(probeH) : null;
+  const pitch = Math.abs(topY) <= LINE_SEARCH_Y_LIMIT_PT && Math.abs(gridOriginY) <= LINE_SEARCH_Y_LIMIT_PT
+    && gridOriginY <= topY ? lineSearchPitch(probeH) : null;
   const tightAt = (y: number): boolean =>
     pitch !== null && Math.abs(y) <= LINE_SEARCH_Y_LIMIT_PT
     && bandMeetsTightPolygon(prepared, y, probeH, paraXLeft, paraXRight);
   const gridAfter = (y: number): number =>
-    lineGridAfter(topY, pitch!, Math.min(y, LINE_SEARCH_Y_LIMIT_PT));
+    lineGridAfter(gridOriginY, pitch!, Math.min(y, LINE_SEARCH_Y_LIMIT_PT));
   let stepBudget = TIGHT_LINE_STEP_LIMIT;
   const lineStepAfter = (y: number): number => {
     if (stepBudget > 0) {
@@ -1483,7 +1487,9 @@ function computePreparedLineFloatWindowCore(
   };
   let cursor = topY;
   // topY is grid position 0.
-  let cursorOnGrid = true;
+  // A resumed search starts on the original grid only at a grid position.
+  let cursorOnGrid = topY === gridOriginY
+    || (pitch !== null && lineGridAfter(gridOriginY, pitch, topY - pitch / 2) === topY);
   let structuralIndex = 0;
   for (;;) {
     while (structuralIndex < structuralEvents.length
@@ -1548,10 +1554,12 @@ export function computePreparedLineFloatWindow(
   squareRequiredWidth: number = polygonRequiredWidth,
   /** Windows to skip (a fit rejection); every other candidate stays. */
   excluded: readonly ExcludedLineWindow[] = [],
+  /** Line-grid origin of a resumed search (defaults to `topY`). */
+  gridOriginY: number = topY,
 ): { topY: number; xOffset: number; maxWidth: number } {
   return computePreparedLineFloatWindowCore(
     topY, polygonRequiredWidth, probeH, paraX, maxWidth, prepared,
-    columnXLeftPt, columnXRightPt, reference, squareRequiredWidth, null, excluded,
+    columnXLeftPt, columnXRightPt, reference, squareRequiredWidth, null, excluded, gridOriginY,
   );
 }
 

@@ -1,4 +1,4 @@
-import { lineEndSpaceCharged, measureFitTextUnit, measureJoinedTextUnit, trailingSpaceSuffixWidth } from './atomic-units.js';
+import { lineEndSpaceCharged, lineTrailingSpaceSuffixWidth, measureFitTextUnit, measureJoinedTextUnit } from './atomic-units.js';
 import { placeOptionalHyphenPrefix } from './optional-hyphens.js';
 import {
   kinsokuAdjustedSplit,
@@ -152,7 +152,7 @@ function placedAdvanceExceeds(
 function visibleLineWidth(context: BreakOpportunityIteratorContext, placedVisible: string): number {
   const { breakerState } = context;
   if (placedVisible !== '' || lineEndSpaceCharged(context)) return breakerState.currentWidth;
-  return breakerState.currentWidth - trailingSpaceSuffixWidth(breakerState.currentLine, context);
+  return breakerState.currentWidth - lineTrailingSpaceSuffixWidth(breakerState.currentLine, context);
 }
 
 function lineAdvanceFrom(line: readonly LayoutSeg[], start: number): number {
@@ -1164,7 +1164,8 @@ function placeOrSplitText(context: BreakOpportunityIteratorContext, inputFrame: 
         // no visible character leaves the line's whole space suffix out.
         const minimal = context.minimalLegalTextWidth(s);
         const suffix = minimal === 0 && !lineEndSpaceCharged(context)
-          ? trailingSpaceSuffixWidth(breakerState.currentLine.slice(unitStart), context) : 0;
+          ? Math.min(lineTrailingSpaceSuffixWidth(breakerState.currentLine, context),
+            lineAdvanceFrom(breakerState.currentLine, unitStart)) : 0;
         context.forcedPlacement(
           lineAdvanceFrom(breakerState.currentLine, unitStart) - suffix + minimal,
           unitStart,

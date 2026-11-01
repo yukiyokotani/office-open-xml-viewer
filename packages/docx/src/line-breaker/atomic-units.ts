@@ -24,18 +24,42 @@ export function lineEndSpaceCharged(state: Pick<AtomicTextMeasurement, 'baseRtl'
  * looked through. The single suffix measure of every visible-prefix fit. */
 export function trailingSpaceSuffixWidth(
   items: readonly LayoutSeg[],
-  measurement: Pick<AtomicTextMeasurement, 'segAdvance' | 'strAdvance'>,
+  measurement: Pick<AtomicTextMeasurement, 'segAdvance' | 'strAdvance' | 'reservePrefixWork'>,
+  /** Items before this index are known to hold `knownWidth` of the suffix,
+   * running back into them only when every later item is spaces alone. */
+  from = 0,
+  knownWidth = 0,
 ): number {
   let width = 0;
-  for (let index = items.length - 1; index >= 0; index -= 1) {
+  for (let index = items.length - 1; index >= from; index -= 1) {
     const item = items[index]!;
-    if (!('text' in item)) break;
+    if (!('text' in item)) return width;
     if (item.text === '') continue;
-    if (!item.text.endsWith(' ')) break;
+    if (!item.text.endsWith(' ')) return width;
+    measurement.reservePrefixWork(item.text.length);
     const trimmed = item.text.replace(/ +$/u, '');
     width += measurement.segAdvance(item) - measurement.strAdvance(item, trimmed);
-    if (trimmed.length > 0) break;
+    if (trimmed.length > 0) return width;
   }
+  return width + knownWidth;
+}
+
+/** Running {@link trailingSpaceSuffixWidth} of a line that grows by appends:
+ * each query reads only the items appended since the last one, so a run of
+ * space-only segments costs linear work. A line that was cut back or replaced
+ * (a flush or a rollback) is measured afresh. */
+const lineSuffixCache = new WeakMap<readonly LayoutSeg[], { length: number; last: LayoutSeg | undefined; width: number }>();
+export function lineTrailingSpaceSuffixWidth(
+  line: readonly LayoutSeg[],
+  measurement: Pick<AtomicTextMeasurement, 'segAdvance' | 'strAdvance' | 'reservePrefixWork'>,
+): number {
+  const cached = lineSuffixCache.get(line);
+  const valid = cached !== undefined && cached.length <= line.length
+    && (cached.length === 0 || line[cached.length - 1] === cached.last);
+  const width = valid
+    ? trailingSpaceSuffixWidth(line, measurement, cached.length, cached.width)
+    : trailingSpaceSuffixWidth(line, measurement);
+  lineSuffixCache.set(line, { length: line.length, last: line[line.length - 1], width });
   return width;
 }
 

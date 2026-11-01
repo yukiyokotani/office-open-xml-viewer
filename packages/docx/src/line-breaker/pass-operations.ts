@@ -427,8 +427,7 @@ function placeLineWindow(
   // it in the returned width so fit/tab arithmetic and planLine consume the
   // same safe window, including the mirrored logical start of RTL paragraphs.
   const numbering = breakerState.isFirst ? wrapCtx.numberingFirstLine : undefined;
-  const hangingOffset = breakerState.isFirst
-    ? Math.min(0, numbering ? numbering.authoredFirstIndentPx : firstIndent) : 0;
+  const hangingOffset = placementHangingOffset(operationState);
   const lineBandX = wrapCtx.paraX + (baseRtl ? 0 : hangingOffset);
   const lineBandWidth = maxWidth - hangingOffset;
   const reference = {
@@ -437,6 +436,7 @@ function placeLineWindow(
     readingDirection: wrapCtx.readingDirection ?? (baseRtl ? 'rtl' : 'ltr'),
   } as const;
   const excluded = transaction.excluded ?? [];
+  const gridOriginY = transaction.gridOriginY;
   const query = (topY: number, x: number, width: number, height: number,
     requiredWidth = transaction.requirement) => {
     if (wrapCtx.lineWindow) {
@@ -446,6 +446,7 @@ function placeLineWindow(
         paragraphXPt: x, maximumWidthPt: width,
         columnXPt: wrapCtx.columnXPt, columnWidthPt: wrapCtx.columnWidthPt,
         ...(excluded.length > 0 ? { excludedWindows: excluded } : {}),
+        ...(gridOriginY !== undefined && gridOriginY <= topY ? { gridOriginYPt: gridOriginY } : {}),
       });
       return { topY: win.topYPt, xOffset: win.xOffsetPt, maxWidth: win.maximumWidthPt,
         solverWindow: { leftPt: x + win.xOffsetPt, widthPt: win.maximumWidthPt } };
@@ -455,6 +456,7 @@ function placeLineWindow(
       preparedFloatWrap ?? prepareFloatWrap(wrapCtx.floats),
       wrapCtx.columnXPt, wrapCtx.columnXPt + wrapCtx.columnWidthPt,
       reference, requiredWidth, excluded,
+      gridOriginY !== undefined && gridOriginY <= topY ? gridOriginY : topY,
     );
     return { ...win, solverWindow: { leftPt: x + win.xOffset, widthPt: win.maxWidth } };
   };
@@ -632,7 +634,8 @@ export function performRejectGap(
   }
   transaction.stopBefore = null;
   const rejected = transaction.window;
-  const hangingOffset = breakerState.isFirst ? Math.min(0, firstIndent) : 0;
+  // The hanging offset placement expands the band by (the authored one).
+  const hangingOffset = placementHangingOffset(operationState);
   if (lineFitReduced(operationState) && rejected.solverWindow) {
     // WORD_KASHIDA_LINE_FIT: each window has its own reserve, so no width
     // requirement can stand for it. The search asks only for the raw advance
@@ -649,6 +652,7 @@ export function performRejectGap(
     const retries = (transaction.excludedRetries ?? 0) + 1;
     if (retries <= LINE_FIT_RETRY_BUDGET) {
       transaction.excludedRetries = retries;
+      transaction.gridOriginY ??= transaction.requestTopY;
       transaction.requestTopY = Math.max(transaction.requestTopY, rejected.topY);
       transaction.excluded = [
         ...(transaction.excluded ?? []).filter((window) => window.topY >= transaction.requestTopY),
@@ -659,7 +663,11 @@ export function performRejectGap(
       placeLineWindow(operationState, transaction, null);
       return;
     }
-    transaction.requirement = maxWidth - hangingOffset;
+    // Past the budget the unit takes the full band placement expands to; the
+    // requirement then exceeds every rejected window, so the search makes
+    // progress (a wider window, or the band below the exclusions).
+    transaction.requirement = Math.max(maxWidth - hangingOffset,
+      nextWidthAbove(rejected.solverWidth), transaction.requirement);
     placeLineWindow(operationState, transaction, rejected);
     return;
   }
@@ -672,6 +680,20 @@ export function performRejectGap(
     ? Math.max(transaction.requirement, required)
     : maxWidth - hangingOffset;
   placeLineWindow(operationState, transaction, rejected);
+}
+
+/** The hanging offset by which placement expands a first line's band: the
+ * authored first-line indent of a numbered paragraph, else the pass's. */
+function placementHangingOffset(operationState: Pick<PassOperationState, 'breakerState' | 'wrapCtx' | 'firstIndent'>): number {
+  const { breakerState, wrapCtx, firstIndent } = operationState;
+  if (!breakerState.isFirst) return 0;
+  const numbering = wrapCtx?.numberingFirstLine;
+  return Math.min(0, numbering ? numbering.authoredFirstIndentPx : firstIndent);
+}
+
+/** The smallest width the solver can tell apart from `width`, upwards. */
+function nextWidthAbove(width: number): number {
+  return width + Math.max(1e-9, Math.abs(width) * 1e-12);
 }
 
 /** Excluded-window retries one line may take (WORD_KASHIDA_LINE_FIT). */

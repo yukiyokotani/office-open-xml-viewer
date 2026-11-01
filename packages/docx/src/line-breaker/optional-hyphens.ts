@@ -73,7 +73,6 @@ export function placeOptionalHyphenPrefix(
   // is excluded, across members. RTL keeps its ordinary containment policy
   // outside WORD_RTL_JUSTIFIED_VISIBLE_FIT.
   if (!lineEndSpaceCharged(context)) {
-    for (const member of members) context.reservePrefixWork(member.text.length);
     width -= trailingSpaceSuffixWidth(members.filter((member) => !member.optionalHyphen), context);
   }
   if (context.fitsMeasuredWidth(width, context.availW())) return false;

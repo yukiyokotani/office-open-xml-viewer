@@ -23,6 +23,8 @@ export interface WrapOracle {
     readonly columnWidthPt: number;
     /** Windows to skip (a fit rejection); every other candidate stays. */
     readonly excludedWindows?: readonly ExcludedLineWindow[];
+    /** Line-grid origin of a resumed search (defaults to `topYPt`). */
+    readonly gridOriginYPt?: number;
   }): {
     readonly topYPt: number;
     readonly xOffsetPt: number;
@@ -58,6 +60,7 @@ export function createFloatWrapOracle(
       columnXPt,
       columnWidthPt,
       excludedWindows,
+      gridOriginYPt,
     }) => {
       const window = computePreparedLineFloatWindow(
         topYPt,
@@ -75,6 +78,7 @@ export function createFloatWrapOracle(
         },
         squareMinimumStartWidthPt ?? minimumStartWidthPt,
         excludedWindows ?? [],
+        gridOriginYPt ?? topYPt,
       );
       return {
         topYPt: window.topY,

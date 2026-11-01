@@ -594,6 +594,8 @@ export interface WrapLayoutCtx {
     squareMinimumStartWidthPt?: number;
     /** Windows to skip (a WORD_KASHIDA_LINE_FIT rejection), absolute. */
     excludedWindows?: readonly import('../layout/float-wrap.js').ExcludedLineWindow[];
+    /** Line-grid origin of a resumed search (defaults to `topYPt`). */
+    gridOriginYPt?: number;
     probeHeightPt: number;
     paragraphXPt: number;
     maximumWidthPt: number;
