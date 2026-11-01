@@ -133,6 +133,7 @@ describe('layout context resolvers', () => {
       lineWrapLikeWord6: true,
       enableOpenTypeFeatures: false,
       ulTrailSpace: false,
+      doNotExpandShiftReturn: false,
     });
   });
 
@@ -151,6 +152,7 @@ describe('layout context resolvers', () => {
       lineWrapLikeWord6: false,
       enableOpenTypeFeatures: false,
       ulTrailSpace: false,
+      doNotExpandShiftReturn: false,
     });
     expect(context.grid).toEqual({
       kind: 'none',
