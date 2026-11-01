@@ -249,6 +249,13 @@ describe('kerned U+0020 pairs (WORD_KERNED_SPACE_PAIRS)', () => {
     expect(text(25.2)).toEqual(['x ', 'AB,']);
   });
 
+  it('judges hanging punctuation again after a pre-flush drops the seam pair', () => {
+    // The glued 'AB,’' group moves to a fresh line, where 'AB' has no pair
+    // and its 17pt visible prefix does not fit 16.5pt.
+    const wrapped = lines(layout([run('x AB,\u2019', { kerning: 2 })], 16.5, 15));
+    expect(wrapped.map(line => line.map(p => p.text).join(''))).toEqual(['x ', 'A', 'B,\u2019']);
+  });
+
   it.each([
     ['ruby', { ruby: { text: 'r', fontSizePt: 6 } }],
     ['right-to-left', { rtl: true }],

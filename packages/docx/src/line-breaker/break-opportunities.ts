@@ -439,7 +439,18 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
   // The authored opportunity follows the existing whole-unit justified fit;
   // it must not introduce a wrap before a word admitted by that policy.
   if (placeOptionalHyphenPrefix(context, s)) return;
+  const fittedPredecessor = breakerState.currentLine.at(-1);
   if (prepareAtomicTextFit(context, { s, w, trailingSpaceW, sDictSea, fitWidthFor })) return;
+  // A pre-flush (an atomic group or a SEA chunk moved to a fresh line) leaves
+  // every admission value above fitted against the previous line's
+  // predecessor. With a WORD_KERNED_SPACE_PAIRS pair in them, judge the piece
+  // again at the new line start, where it takes no pair. Without one, the
+  // values are unchanged and the established path continues.
+  if (kernedSpacePair !== 0 && breakerState.currentLine.at(-1) !== fittedPredecessor) {
+    s.leadingWordBoundaryPx = undefined;
+    breakerState.queue.unshift(s);
+    return;
+  }
 
   // §17.3.1.21 permits one eligible punctuation character past the text
   // extent. The isolated compatibility predicate owns both the CJK-language
