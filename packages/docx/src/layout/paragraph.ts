@@ -1643,6 +1643,30 @@ export function planLine(input: PlanLineInput): LineLayout {
       && centresWithoutOpportunity(segments, distSegments, bidi, firstContentIndex) && afterLastTab === 0;
   }
 
+  // WORD_RTL_JUSTIFIED_VISIBLE_FIT admitted this line by its visible width.
+  // A line-end space drawn between segments cannot hang, so whatever overflow
+  // remains is absorbed into that space: the next segment on its drawn side
+  // moves over it and the visible text stays inside the band.
+  if (rtlVisibleEdge && rtlHangSide === null && rtlLineEndSpacePt > 0) {
+    const overflowPt = distributedWidthPt - lineSlackPt;
+    const position = visual.order.indexOf(lastTextIndex);
+    const owner = visual.rtl[lastTextIndex] === true ? visual.order[position - 1] : lastTextIndex;
+    if (overflowPt > 1e-9 && owner !== undefined) {
+      const absorbPt = Math.min(overflowPt, rtlLineEndSpacePt);
+      const merged = new Map(stretchByIndex ?? []);
+      const previous = merged.get(owner);
+      const ownedPt = previous?.trailingGap ? previous.trailingDelta ?? perGapPt : 0;
+      merged.set(owner, {
+        splitBefore: previous?.splitBefore ?? [],
+        internalStretch: previous?.internalStretch ?? 0,
+        ...(previous?.gapDeltas ? { gapDeltas: previous.gapDeltas } : {}),
+        trailingGap: true,
+        trailingDelta: ownedPt - absorbPt,
+      });
+      stretchByIndex = merged;
+      distributedWidthPt -= absorbPt;
+    }
+  }
   const drawnWidthPt = naturalWidthPt + distributedWidthPt;
   // WORD_FLOAT_GAP_FLOW aligns the visible word edge, while
   // the trailing separator remains source-owned. Its advance must not shift

@@ -275,4 +275,16 @@ describe('WORD_RTL_JUSTIFIED_VISIBLE_FIT', () => {
       expect(end(short!)).toBeCloseTo(370);
     }
   });
+  it('absorbs an overflowing line-end space drawn between segments of a final line', () => {
+    // A 250 pt Hebrew word, a space, an 80 pt Latin word and its space: 340 pt
+    // visible, 350 pt in all, in a 345 pt band. The Latin word is drawn
+    // leftmost, so its space sits between the two words and takes the 5 pt.
+    const rtl = { bidi: true, indentRight: 15 } as Partial<DocParagraph>;
+    for (const settings of MODES) {
+      const [final] = lines(para([textRun(`${'\u05d0'.repeat(25)} ${'a'.repeat(8)} `)], 'both', rtl), settings);
+      expect(characters(final!)).toHaveLength(33);
+      expect(start(final!)).toBeCloseTo(35);
+      expect(end(final!)).toBeCloseTo(380);
+    }
+  });
 });
