@@ -2726,6 +2726,18 @@ pub(crate) fn merge_table_margin_layer(
     }
 }
 
+/// ECMA-376 §17.4.50 `<w:tblInd>` as a signed pt length, or `None` when this
+/// layer is ignored and a lower one applies. CT_TblWidth (§17.4.87) defaults an
+/// omitted `w:w` to 0 and an omitted `w:type` to dxa; §17.18.90 `nil` is a zero
+/// width. §17.4.50 ignores `pct` and `auto` (and unknown types) for tblInd.
+pub(crate) fn table_indent_pt(node: roxmltree::Node) -> Option<f64> {
+    match attr_w(node, "type").as_deref() {
+        None | Some("dxa") => Some(attr_w(node, "w").map_or(0.0, |v| twips_to_pt(&v))),
+        Some("nil") => Some(0.0),
+        _ => None,
+    }
+}
+
 fn parse_tbl_style_def(style_node: roxmltree::Node, based_on: Option<String>) -> TableStyleDef {
     let mut def = TableStyleDef {
         based_on,
@@ -2768,11 +2780,7 @@ fn parse_tbl_style_def(style_node: roxmltree::Node, based_on: Option<String>) ->
             def.cell_margin_right = edge("right").or_else(|| edge("end"));
         }
         def.cell_spacing = table_width_wire(child_w(tbl_pr, "tblCellSpacing"));
-        def.tbl_ind = child_w(tbl_pr, "tblInd").and_then(|n| match attr_w(n, "type").as_deref() {
-            None | Some("dxa") => attr_w(n, "w").map(|v| twips_to_pt(&v)),
-            Some("nil") => Some(0.0),
-            _ => None,
-        });
+        def.tbl_ind = child_w(tbl_pr, "tblInd").and_then(table_indent_pt);
     }
     if let Some(tc_pr) = child_w(style_node, "tcPr") {
         def.cell_shd = shd_fill(tc_pr);
