@@ -4399,10 +4399,33 @@ function changedAnchorKeys(
   return changed;
 }
 
+/** The earliest page each changed anchor touches (applied or observed), as the
+ * earliest such anchor and the earliest page of every other changed anchor. */
+function earliestChangedPages(
+  changed: ReadonlySet<string>,
+  applied: ReadonlyMap<string, PageWrapDestination>,
+  observed: ReadonlyMap<string, PageWrapDestination>,
+): Readonly<{ first: Readonly<{ key: string; pageIndex: number }>; second: number }> {
+  let first = { key: '', pageIndex: Infinity };
+  let second = Infinity;
+  for (const key of changed) {
+    const pageIndex = Math.min(applied.get(key)?.pageIndex ?? Infinity, observed.get(key)?.pageIndex ?? Infinity);
+    if (pageIndex < first.pageIndex) {
+      second = first.pageIndex;
+      first = { key, pageIndex };
+    } else if (pageIndex < second) {
+      second = pageIndex;
+    }
+  }
+  return { first, second };
+}
+
 /** What a header/footer reserve repagination reads of the previous pass. */
 type ReserveRepaginationCarry = Readonly<{
   fieldContexts: ReturnType<typeof paginationFieldPageContexts>;
   anchorPlan: ReturnType<typeof pageAnchorDestinationPlan>;
+  /** The pass needed the page-scoped table floor proof (#2012). */
+  pageScopedFloorProof: boolean;
 }>;
 
 /** An unseeded run's second anchor pass, already advanced while the first
@@ -4421,6 +4444,11 @@ type LeadingSecondPass = Readonly<{
 
 const ANCHOR_PASS_BASE_LIMIT = 16;
 
+/** Passes whose anchor run needed the page-scoped table floor proof (#2012).
+ * Balance and header/footer reserve reruns of the same document start in that
+ * mode instead of failing their strict runs again. */
+const pageScopedFloorProofPasses = new WeakSet<BodyPaginationPassResult>();
+
 /** Page numbering is not an input of `pageAnchorDestinationPlan`; a closed page
  * is finalized with this placeholder only to read its destinations. */
 const CLOSED_PAGE_NUMBER = Object.freeze({
@@ -4437,6 +4465,7 @@ function* paginateBodyWithAnchorConvergenceSteps(
   balancePlan: BodyBalancePlan,
   publisher?: BodyPagePublisher,
   seedPlan?: ReturnType<typeof pageAnchorDestinationPlan>,
+  pageScoped = false,
 ): PaginationSteps<BodyPaginationPassResult> {
   let pageOwnedAnchorCount = 0;
   for (const entry of input.sequence) {
@@ -4631,11 +4660,15 @@ function* paginateBodyWithAnchorConvergenceSteps(
   // The plan the most recent converge step observed; at a fixed point it is
   // the plan its returned pass applied.
   let convergedPlan: ReadonlyMap<string, PageWrapDestination> = new Map();
+  let convergedFloors: ReadonlyMap<string, number> = new Map();
   const converge = function* (
     // `null` throughout, matching the solver's first-pass `previous`: an
     // unseeded run has no applied plan, which is not an omitted argument.
     initialPlan: ReadonlyMap<string, PageWrapDestination> | null,
     publish: boolean,
+    laterPagesIsolated = false,
+    // Floors an earlier page-scoped run proved; retained like recovery floors.
+    initialFloors: ReadonlyMap<string, number> | null = null,
   ) {
     type AnchorPassCarry = Readonly<{
       plan: ReadonlyMap<string, PageWrapDestination>;
@@ -4643,7 +4676,7 @@ function* paginateBodyWithAnchorConvergenceSteps(
       deferrals: AnchorLineDeferrals;
     }>;
     const noDeferrals: AnchorLineDeferrals = new Map();
-    const settledFloors = new Map<string, number>();
+    const settledFloors = new Map<string, number>(initialFloors ?? []);
     let restart: AnchorPassCarry | null = null;
     const latest: { carry: AnchorPassCarry | null } = { carry: null };
     let remainingPasses = anchorPassLimit;
@@ -4685,7 +4718,7 @@ function* paginateBodyWithAnchorConvergenceSteps(
                   options,
                   reserves,
                   appliedPlan,
-                  previous?.minimumTablePageBySource ?? null,
+                  previous?.minimumTablePageBySource ?? (settledFloors.size > 0 ? settledFloors : null),
                   balancePlan,
                   publish ? anchorPassObserver(appliedPlan) : undefined,
                   appliedDeferrals.size > 0 ? appliedDeferrals : null,
@@ -4711,11 +4744,24 @@ function* paginateBodyWithAnchorConvergenceSteps(
               && lineTests.plan === observed && lineTests.deferrals === appliedDeferrals
               ? changedAnchorKeys(appliedPlan, observed)
               : null;
+            // With `laterPagesIsolated`, anchors registered and observed only on
+            // pages after the table's registered page are ignored: pages are laid
+            // out in order, so they cannot change whether its preceding text
+            // fitted there. The two earliest changed pages answer that for every
+            // table in one scan.
+            const earliestChanges = laterPagesIsolated && changedKeys
+              ? earliestChangedPages(changedKeys, appliedPlan!, observed)
+              : null;
             for (const [key, destination] of observed) {
               if (destination.kind !== 'floating-table') continue;
               const prior = appliedPlan?.get(key);
-              if (prior?.kind !== 'floating-table' || !changedKeys
-                || (changedKeys.size > 1 || (changedKeys.size === 1 && !changedKeys.has(key)))) {
+              if (prior?.kind !== 'floating-table' || !changedKeys) continue;
+              if (earliestChanges) {
+                const otherPage = earliestChanges.first.key === key
+                  ? earliestChanges.second
+                  : earliestChanges.first.pageIndex;
+                if (otherPage <= prior.pageIndex) continue;
+              } else if (changedKeys.size > 1 || (changedKeys.size === 1 && !changedKeys.has(key))) {
                 continue;
               }
               // Only this table's changed exclusion can have moved its source in
@@ -4734,6 +4780,7 @@ function* paginateBodyWithAnchorConvergenceSteps(
               minimumTablePageBySource.set(key, floor);
             }
             convergedPlan = lineTests.plan;
+            convergedFloors = minimumTablePageBySource;
             latest.carry = Object.freeze({
               plan: lineTests.plan,
               minimumTablePageBySource,
@@ -4803,6 +4850,11 @@ function* paginateBodyWithAnchorConvergenceSteps(
       }
     }
   };
+  // Whether this document needs the page-scoped floor proof (#2012): set when
+  // the carry-free run needed it, or by an earlier run of the same document
+  // (balance and header/footer reserve reruns). The host and frame carry runs
+  // settle the same tables, so they use it too, seeded with its floors.
+  let pageScopedFloorProof = pageScoped;
   const carryFree = function* () {
     if (pageOwnedAnchorCount === 0) {
       return yield* paginateBodyPassSteps(
@@ -4810,15 +4862,30 @@ function* paginateBodyWithAnchorConvergenceSteps(
         publisher ? passPublicationObserver(publisher, carryBounded(livePageIndex)) : undefined,
       );
     }
-    try {
+    const seededThenUnseeded = function* (scoped: boolean) {
       try {
-        return yield* converge(seedPlan ?? null, true);
+        return yield* converge(seedPlan ?? null, true, scoped);
       } catch (error) {
         if (!seedPlan || !(error instanceof ExactConvergenceError)) throw error;
         // A plan carried from another reserve/balance run is only a starting
         // estimate. Its former page ownership may be invalid in this run; retry
         // once from the unseeded source order before reporting non-convergence.
-        return yield* converge(null, true);
+        return yield* converge(null, true, scoped);
+      }
+    };
+    try {
+      if (pageScopedFloorProof) return yield* seededThenUnseeded(true);
+      try {
+        return yield* seededThenUnseeded(false);
+      } catch (error) {
+        if (!(error instanceof ExactConvergenceError)) throw error;
+        // #2012: when a table move shifts the tables of later sections, every
+        // pass changes several anchors and the single-table floor proof never
+        // holds, so the run alternates until its limit. Retry with the proof
+        // scoped to pages up to the table's own. Only runs that would otherwise
+        // fail take this path, so every converging layout is unchanged.
+        pageScopedFloorProof = true;
+        return yield* converge(null, true, true);
       }
     } catch (error) {
       if (error instanceof ExactConvergenceError) {
@@ -4833,8 +4900,10 @@ function* paginateBodyWithAnchorConvergenceSteps(
     }
   };
   const settled = yield* carryFree();
+  if (pageScopedFloorProof) pageScopedFloorProofPasses.add(settled);
   if (settled.terminalDiagnostic !== null) return settled;
   const settledPlan = convergedPlan;
+  const settledFloors = convergedFloors;
   // WORD_LATER_ANCHOR_EARLIER_LINE_WRAP: carry each qualifying
   // paragraph-relative drawing, with the geometry of its first placement, to
   // the start of its page so earlier lines wrap around it. A carried drawing
@@ -4847,10 +4916,11 @@ function* paginateBodyWithAnchorConvergenceSteps(
     for (const [key, destination] of hostPlan) carriedPlan.set(key, destination);
     anchorPassLimit = ANCHOR_PASS_BASE_LIMIT + 4 * (pageOwnedAnchorCount + hostPlan.size);
     try {
-      carried = yield* converge(carriedPlan, false);
+      carried = yield* converge(carriedPlan, false, pageScopedFloorProof, pageScopedFloorProof ? convergedFloors : null);
     } catch (error) {
       if (!(error instanceof ExactConvergenceError)) throw error;
       convergedPlan = settledPlan;
+      convergedFloors = settledFloors;
       carried = settled;
     }
   }
@@ -4867,7 +4937,10 @@ function* paginateBodyWithAnchorConvergenceSteps(
   const roundLimit = ANCHOR_PASS_BASE_LIMIT + 4 * carried.frameObservations.length;
   for (let round = 0; ; round += 1) {
     const next = frameCarryPlan(carried, applied, everCarried);
-    if (next === null) return carried;
+    if (next === null) {
+      if (pageScopedFloorProof) pageScopedFloorProofPasses.add(carried);
+      return carried;
+    }
     if (round >= roundLimit) {
       throw new LayoutInvariantError(
         'NON_CONVERGENCE',
@@ -4879,7 +4952,7 @@ function* paginateBodyWithAnchorConvergenceSteps(
     anchorPassLimit = ANCHOR_PASS_BASE_LIMIT
       + 4 * (pageOwnedAnchorCount + hostPlan.size + frameEntries);
     try {
-      carried = yield* converge(next, false);
+      carried = yield* converge(next, false, pageScopedFloorProof, pageScopedFloorProof ? convergedFloors : null);
       applied = convergedPlan;
     } catch (error) {
       if (!(error instanceof ExactConvergenceError)) throw error;
@@ -5032,6 +5105,7 @@ function* paginateBodyWithColumnBalancingSteps(
   reserves: readonly HeaderFooterReserve[],
   publisher?: BodyPagePublisher,
   seedPlan?: ReturnType<typeof pageAnchorDestinationPlan>,
+  pageScoped = false,
 ): PaginationSteps<BodyPaginationPassResult> {
   let plan: BodyBalancePlan = new Map();
   let lastBodyEntry = input.sequence.length - 1;
@@ -5061,6 +5135,7 @@ function* paginateBodyWithColumnBalancingSteps(
     plan,
     seedPublisher,
     seedPlan,
+    pageScoped,
   );
   if (pass.terminalDiagnostic !== null) return pass;
   for (const boundary of continuousBalanceBoundaries(input)) {
@@ -5073,6 +5148,7 @@ function* paginateBodyWithColumnBalancingSteps(
     // plan of this one. Release this pass before the next one builds so two
     // whole layouts are never live at once.
     const anchorPlan = pageAnchorDestinationPlan(pass.layout);
+    const scoped = pageScopedFloorProofPasses.has(pass);
     pass = null;
     pass = yield* paginateBodyWithAnchorConvergenceSteps(
       input,
@@ -5082,6 +5158,7 @@ function* paginateBodyWithColumnBalancingSteps(
       plan,
       undefined,
       anchorPlan,
+      scoped,
     );
     if (pass.terminalDiagnostic !== null) return pass;
   }
@@ -5095,9 +5172,10 @@ function* paginateBodyWithColumnBalancingSteps(
           pass.footnoteReserveByPage, terminal, region),
       }));
       const anchorPlan = pageAnchorDestinationPlan(pass.layout);
+      const scoped = pageScopedFloorProofPasses.has(pass);
       pass = null;
       pass = yield* paginateBodyWithAnchorConvergenceSteps(input, services, options, reserves,
-        nextPlan, undefined, anchorPlan);
+        nextPlan, undefined, anchorPlan, scoped);
     }
   }
   return pass;
@@ -5267,6 +5345,7 @@ export function* paginateBodySteps(
       // pass. Reuse the accepted geometry for this later reserve iteration
       // when stable; changed ownership still runs exact convergence anew.
       anchorPlan: pageAnchorDestinationPlan(pass.layout),
+      pageScopedFloorProof: pageScopedFloorProofPasses.has(pass),
     }),
     repaginate: function* reserveRepagination(reserves, carried) {
       const contexts = carried.fieldContexts;
@@ -5274,30 +5353,44 @@ export function* paginateBodySteps(
         totalPages: contexts.length,
         resolveDestinationPage: (pageIndex) => contexts[pageIndex],
       });
-      let observed = reserves;
-      const openingObservations = new Set<string>();
-      // Retry the same algorithm with actual opening observations. Bound retries
-      // by the page ceiling, retain only recent exact identities, and share the
-      // original hard miss ledger. Completed-pass exact reserve, field and anchor
-      // convergence remains unchanged. A fixed small retry cap would reject
-      // documents with many independent first/default section boundaries.
-      for (let refinement = 0; refinement < MAX_BODY_LAYOUT_PAGES; refinement++) {
-        const fingerprint = JSON.stringify(observed);
-        if (openingObservations.has(fingerprint)) throw new LayoutInvariantError('NON_CONVERGENCE', 'Opened page reserve observations did not converge');
-        openingObservations.add(fingerprint);
-        if (openingObservations.size > MAX_OPENED_RESERVE_IDENTITIES) {
-          openingObservations.delete(openingObservations.values().next().value!);
+      const refine = function* (pageScoped: boolean) {
+        let observed = reserves;
+        const openingObservations = new Set<string>();
+        // Retry the same algorithm with actual opening observations. Bound retries
+        // by the page ceiling, retain only recent exact identities, and share the
+        // original hard miss ledger. Completed-pass exact reserve, field and anchor
+        // convergence remains unchanged. A fixed small retry cap would reject
+        // documents with many independent first/default section boundaries.
+        for (let refinement = 0; refinement < MAX_BODY_LAYOUT_PAGES; refinement++) {
+          const fingerprint = JSON.stringify(observed);
+          if (openingObservations.has(fingerprint)) throw new LayoutInvariantError('NON_CONVERGENCE', 'Opened page reserve observations did not converge');
+          openingObservations.add(fingerprint);
+          if (openingObservations.size > MAX_OPENED_RESERVE_IDENTITIES) {
+            openingObservations.delete(openingObservations.values().next().value!);
+          }
+          try {
+            return yield* paginateBodyWithColumnBalancingSteps(
+              input, iterationServices, options, observed, undefined, carried.anchorPlan,
+              pageScoped,
+            );
+          } catch (error) {
+            if (!(error instanceof OpenedPageReserveObservation)) throw error;
+            observed = error.reserves;
+          }
         }
-        try {
-          return yield* paginateBodyWithColumnBalancingSteps(
-            input, iterationServices, options, observed, undefined, carried.anchorPlan,
-          );
-        } catch (error) {
-          if (!(error instanceof OpenedPageReserveObservation)) throw error;
-          observed = error.reserves;
-        }
+        throw new LayoutInvariantError('NON_CONVERGENCE', 'Opened page reserve observation refinement limit exceeded');
+      };
+      if (carried.pageScopedFloorProof) return yield* refine(true);
+      try {
+        return yield* refine(false);
+      } catch (error) {
+        // #2012: the reserve run can alternate on page-table floors that the
+        // strict proof never settles even though the reserve-free run did.
+        // Only a run that would otherwise fail retries with the page-scoped
+        // proof, so every converging layout is unchanged.
+        if (!(error instanceof LayoutInvariantError) || error.code !== 'NON_CONVERGENCE') throw error;
+        return yield* refine(true);
       }
-      throw new LayoutInvariantError('NON_CONVERGENCE', 'Opened page reserve observation refinement limit exceeded');
     },
     identity: (pass) => paginationFieldPageContexts(pass.layout),
     requiresConvergence: seed.session.hasPaginationFields,
