@@ -36,6 +36,34 @@ function hasLiveSlotSeam(segment: LayoutTextSeg | undefined): boolean {
   return first !== undefined && first.end < end;
 }
 
+/** WORD_KERNED_SPACE_PAIRS seam eligibility, independent of the measured
+ * amount: kerning applies to both pieces, which are horizontal non-complex
+ * Latin (ascii/highAnsi) text of one face, size, weight, style and scale in
+ * one source sequence, and neither is a metric-only, fitText, ruby (any piece
+ * of a ruby run) or tate-chu-yoko unit. The intrinsic merge consults the same
+ * predicate so max-content never kerns a seam bounded lines do not. */
+export function kernedSpaceSeamIdentity(left: LayoutTextSeg, right: LayoutTextSeg, scale: number): boolean {
+  const l = left.textShapeRequest;
+  const r = right.textShapeRequest;
+  return !!l && !!r && l.kerning === true && r.kerning === true
+    && !!right.textLayoutService && right.textLayoutService === left.textLayoutService
+    && !left.tateChuYoko && !right.tateChuYoko
+    && !left.ruby && !right.ruby && !left.rubyPiece && !right.rubyPiece
+    && !left.metricOnly && !right.metricOnly
+    && left.fitTextRegionIndex === undefined && right.fitTextRegionIndex === undefined
+    && !left.verticalRun && !right.verticalRun && !left.rtl && !right.rtl
+    && !l.complexScript && !r.complexScript
+    && (left.script === 'ascii' || left.script === 'highAnsi')
+    && (right.script === 'ascii' || right.script === 'highAnsi')
+    && !!left.fontRoute && left.fontRoute.fingerprint === right.fontRoute?.fingerprint
+    && calcEffectiveFontPx(left, scale) === calcEffectiveFontPx(right, scale)
+    && left.bold === right.bold && left.italic === right.italic
+    && l.weight === r.weight && l.style === r.style
+    && charScaleFactor(left) === charScaleFactor(right)
+    && left.sourceRunIndex !== undefined && left.sourceRunIndex === right.sourceRunIndex
+    && left.sourceTextSequence === right.sourceTextSequence;
+}
+
 /** Owns the Canvas state used by one line-breaking pass. The state recorded here
  * describes only assignments made by this adapter; a future advance cache must
  * also account for the document-scoped shaping service and its feature state. */
@@ -216,23 +244,7 @@ export class LineMeasurementAdapter {
     if (leftSpace && (left.script === right.script || hasLiveSlotSeam(left) || hasLiveSlotSeam(right))) {
       return this.wordBoundaryAdvance(left, right);
     }
-    const l = left.textShapeRequest;
-    const r = right.textShapeRequest;
-    if (!l || !r || l.kerning !== true || r.kerning !== true
-      || !right.textLayoutService || right.textLayoutService !== left.textLayoutService
-      || left.metricOnly || right.metricOnly || left.ruby || right.ruby
-      || left.fitTextRegionIndex !== undefined || right.fitTextRegionIndex !== undefined
-      || left.verticalRun || right.verticalRun || left.rtl || right.rtl
-      || l.complexScript || r.complexScript
-      || (left.script !== 'ascii' && left.script !== 'highAnsi')
-      || (right.script !== 'ascii' && right.script !== 'highAnsi')
-      || !left.fontRoute || left.fontRoute.fingerprint !== right.fontRoute?.fingerprint
-      || calcEffectiveFontPx(left, this.scale) !== calcEffectiveFontPx(right, this.scale)
-      || left.bold !== right.bold || left.italic !== right.italic
-      || l.weight !== r.weight || l.style !== r.style
-      || charScaleFactor(left) !== charScaleFactor(right)
-      || left.sourceRunIndex === undefined || left.sourceRunIndex !== right.sourceRunIndex
-      || left.sourceTextSequence !== right.sourceTextSequence) return 0;
+    if (!kernedSpaceSeamIdentity(left, right, this.scale)) return 0;
     // Adjacency is the caller's line order within that one source sequence;
     // the probe is independent text, so no shaping context is reused (the
     // intrinsic merge also rebuilds contexts of the pieces it joins).

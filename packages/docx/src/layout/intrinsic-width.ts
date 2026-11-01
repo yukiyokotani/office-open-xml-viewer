@@ -1,5 +1,5 @@
 import { textBreakWindow, textBreakOffsets } from '../line-breaker/text-break-window.js';
-import { LineMeasurementAdapter } from '../line-breaker/measurement-adapter.js';
+import { LineMeasurementAdapter, kernedSpaceSeamIdentity } from '../line-breaker/measurement-adapter.js';
 import { condensedSpacingMayFloor, slicedTextMetadata } from '../line-breaker/advance.js';
 import { optionalHyphenBreakAllowed } from '../line-breaker/optional-hyphens.js';
 import { graphemeClusterOffsets } from '@silurus/ooxml-core';
@@ -228,9 +228,15 @@ function mergeCompatibleTextSegments(
       // pair, and a merged string's contextual clusters would give the pair
       // to the second character, which WORD_CONDENSED_SPACING_ADVANCE_FLOOR
       // floors differently from the seam's first character.
+      // A seam that bounded lines leave unkerned (ruby, right-to-left and the
+      // other exclusions of kernedSpaceSeamIdentity, or a snapped grid cell)
+      // stays split too, so the merged native shaping cannot kern it.
       && !(segment.textShapeRequest?.kerning === true
         && previous.text.endsWith(' ') !== segment.text.startsWith(' ')
         && (previous.script !== segment.script
+          || !kernedSpaceSeamIdentity(previous, segment, 1)
+          || snapToCharsClass(previous, characterGrid) !== null
+          || snapToCharsClass(segment, characterGrid) !== null
           || condensedSpacingMayFloor(previous, characterGrid, 1)
           || condensedSpacingMayFloor(segment, characterGrid, 1)))
       && compatibleText(previous, segment)

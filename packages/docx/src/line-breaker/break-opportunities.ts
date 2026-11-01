@@ -466,7 +466,9 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
       s.script === 'complexScript',
       s.overflowPunctuationBidiLanguage,
     ) &&
-    breakerState.currentWidth + strAdvance(s, textBeforeTrailingOverflow) <= availW();
+    // The visible prefix keeps the WORD_KERNED_SPACE_PAIRS seam pair that
+    // placement charges.
+    breakerState.currentWidth + kernedSpacePair + strAdvance(s, textBeforeTrailingOverflow) <= availW();
 
   // WORD_COMPRESSED_SPACE_LINE_FIT: once a mixed line's spaces are shrunk, a
   // following unit (such as a closing mark split into its own source run) is
