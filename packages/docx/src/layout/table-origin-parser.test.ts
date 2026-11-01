@@ -144,6 +144,20 @@ describe('Word table origin and occupied grid', () => {
       }
     }
   });
+  it('an inherited style tblInd never shifts a non-leading table in an unmeasured class', () => {
+    // No left margin anywhere and a pct cell width: both outside the origin observation.
+    const styles = '<w:style w:type="table" w:styleId="Centered"><w:name w:val="Centered"/><w:tblPr><w:jc w:val="center"/><w:tblInd w:w="720" w:type="dxa"/></w:tblPr></w:style>'
+      + '<w:style w:type="table" w:styleId="Plain"><w:name w:val="Plain"/><w:tblPr><w:jc w:val="center"/></w:tblPr></w:style>';
+    for (const tcW of ['<w:tcW w:type="dxa" w:w="5000"/>', '<w:tcW w:type="pct" w:w="5000"/>']) {
+      const tbl = (tblPr: string) => `<w:tbl><w:tblPr>${tblPr}<w:tblW w:type="dxa" w:w="5000"/></w:tblPr><w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid><w:tr><w:tc><w:tcPr>${tcW}</w:tcPr><w:p><w:r><w:t>x</w:t></w:r></w:p></w:tc></w:tr></w:tbl>`;
+      for (const mode of [null, 13, 14]) {
+        const unindented = layoutTable(tbl('<w:tblStyle w:val="Plain"/>'), mode, styles).flowBounds.xPt;
+        expect(layoutTable(tbl('<w:tblStyle w:val="Centered"/>'), mode, styles).flowBounds.xPt).toBeCloseTo(unindented, 8);
+        // A direct leading jc keeps the inherited indent.
+        expect(layoutTable(tbl('<w:tblStyle w:val="Centered"/><w:jc w:val="left"/>'), mode, styles).flowBounds.xPt).toBeCloseTo(72 + 36, 8);
+      }
+    }
+  });
   it.each(['center', 'right'])('%s ignores indentation and uses the first cell margin only at the logical end', (jc) => {
     const rows = `<w:tr>${cell(2160, 540)}${cell(3600)}</w:tr><w:tr>${cell(2160, 120)}${cell(3600)}</w:tr>`;
     const options = indent + `<w:jc w:val="${jc}"/>`;
