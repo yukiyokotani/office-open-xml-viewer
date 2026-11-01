@@ -147,7 +147,7 @@ export function layoutBidiTabStops(
   startPenPx: number,
   leftLimitPx: number,
   intervalPx: number,
-  frame?: Readonly<{ leadingShift: number; indentStart: number; indentEnd: number; bandStart: number; bandEnd: number; narrowed: boolean }>,
+  frame?: Readonly<{ leadingShift: number; indentStart: number; indentEnd: number; bandStart: number; bandEnd: number; fitEnd?: number; narrowed: boolean }>,
 ): BidiTabResult[] {
   return resolveBidiTabStops(items, customStopsPx, startPenPx, leftLimitPx, intervalPx, frame).results;
 }
@@ -158,7 +158,7 @@ function resolveBidiTabStops(
   startPenPx: number,
   leftLimitPx: number,
   intervalPx: number,
-  frame?: Readonly<{ leadingShift: number; indentStart: number; indentEnd: number; bandStart: number; bandEnd: number; narrowed: boolean }>,
+  frame?: Readonly<{ leadingShift: number; indentStart: number; indentEnd: number; bandStart: number; bandEnd: number; fitEnd?: number; narrowed: boolean }>,
 ): { results: BidiTabResult[]; endPen: number } {
   const n = items.length;
   const width = items.map((it) => it.width);
@@ -219,7 +219,7 @@ function resolveBidiTabStops(
       // The fitted prefix, rather than the full queued cell, owns alignment.
       // The final projection may reduce a gap but cannot enlarge its allocation
       // past the fitting band (library policy, not an Office overflow fallback).
-      width[i] = Math.max(0, Math.min(target, frame.bandEnd - following) - pen);
+      width[i] = Math.max(0, Math.min(target, (frame.fitEnd ?? frame.bandEnd) - following) - pen);
       pen += width[i];
       continue;
     }
@@ -255,9 +255,11 @@ function resolveBidiTabStops(
     // A positive trailing indent still limits allocation to its authored band.
     // Only a narrowed float window replaces the margin clamp with its available
     // edge. This is library containment policy, not an Office overflow rule.
-    const trailingLimit = frame?.narrowed
+    const bandLimit = frame?.narrowed
       ? frame.bandEnd
       : Math.min(leftLimitPx, frame?.bandEnd ?? leftLimitPx);
+    // WORD_KASHIDA_LINE_FIT: fitted content ends within the fit width.
+    const trailingLimit = frame?.fitEnd === undefined ? bandLimit : Math.min(bandLimit, frame.fitEnd);
     if (target + fw > trailingLimit) target = trailingLimit - fw;
     // Never let a tab move the pen backwards (right).
     if (target < pen) target = pen;
@@ -272,6 +274,9 @@ function resolveBidiTabStops(
 
 export interface BidiTabPostPassInput {
   readonly baseRtl: boolean;
+  /** WORD_KASHIDA_LINE_FIT: the line's fit width when it is narrower than its
+   * band; resolved cells end within it, while stops keep the band's frame. */
+  readonly fitWidth?: number;
   readonly currentLine: (LayoutTextSeg | LayoutImageSeg | LayoutMathSeg | LayoutTabSeg)[];
   readonly marginRightPx: number;
   readonly maxWidth: number;
@@ -298,9 +303,10 @@ export interface BidiTabPostPassInput {
  * final bidi walk. Both must compare the pen with the same float/indent band. */
 export function bidiTabFrame(input: Pick<BidiTabPostPassInput,
   'marginRightPx' | 'maxWidth' | 'lineXOffset' | 'lineMaxWidth' |
-  'isFirst' | 'firstIndent' | 'tabOriginPx'>) {
+  'isFirst' | 'firstIndent' | 'tabOriginPx' | 'fitWidth'>) {
   const { marginRightPx, maxWidth, lineXOffset, lineMaxWidth, isFirst, firstIndent, tabOriginPx } = input;
   const startPen = marginRightPx - (lineXOffset + lineMaxWidth) + (isFirst ? firstIndent : 0);
+  const bandEnd = marginRightPx - lineXOffset;
   return {
     startPen,
     leftLimit: marginRightPx + tabOriginPx,
@@ -309,7 +315,9 @@ export function bidiTabFrame(input: Pick<BidiTabPostPassInput,
       indentStart: marginRightPx - maxWidth,
       indentEnd: marginRightPx,
       bandStart: marginRightPx - (lineXOffset + lineMaxWidth) + (isFirst ? Math.min(0, firstIndent) : 0),
-      bandEnd: marginRightPx - lineXOffset,
+      bandEnd,
+      // Where fitted content must end: the band end, or the narrower fit width.
+      fitEnd: input.fitWidth === undefined ? bandEnd : Math.min(bandEnd, startPen + input.fitWidth),
       narrowed: lineXOffset !== 0 || lineMaxWidth !== maxWidth,
     },
   };

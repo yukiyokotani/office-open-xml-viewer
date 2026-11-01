@@ -80,6 +80,7 @@ function characters(line: LineLayout): Array<{ character: string; xPt: number }>
     .filter(({ character }) => character.trim() !== '')
     .sort((a, b) => a.xPt - b.xPt);
 }
+const start = (line: LineLayout): number => characters(line)[0]!.xPt;
 const end = (line: LineLayout): number => characters(line).at(-1)!.xPt + 10;
 
 const MODES: Array<DocSettings | undefined> = [undefined, { compatibilityMode: 14 }, MODE_15];
@@ -199,6 +200,35 @@ describe('WORD_RTL_JUSTIFIED_VISIBLE_FIT', () => {
       // Unmeasured alignments keep charging the line-end space.
       const [start] = lines(para([textRun(hebrew)], 'left', rtl), settings);
       expect(wordsOn(start!)).toBe(6);
+    }
+  });
+
+  it('hangs the line-end space past the end edge and keeps the visible text in the band', () => {
+    // The band runs from x = 35 (15 pt end indent on the left) to x = 380.
+    const rtl = { bidi: true, indentRight: 15 } as Partial<DocParagraph>;
+    const hebrew = Array.from({ length: 20 }, () => '\u05d0\u05d1\u05d2\u05d3').join(' ');
+    for (const settings of MODES) {
+      // Seven words justified across the band, the space hanging outside.
+      const [justified] = lines(para([textRun(hebrew)], 'both', rtl), settings);
+      expect(start(justified!)).toBeCloseTo(35);
+      expect(end(justified!)).toBeCloseTo(380);
+      // A 340 pt single word with its space (350 pt) fits the 345 pt band and
+      // stays at the start edge.
+      const word = '\u05d0'.repeat(34);
+      const [single] = lines(para([textRun(`${word} ${word}`)], 'both', rtl), settings);
+      expect(characters(single!)).toHaveLength(34);
+      expect(end(single!)).toBeCloseTo(380);
+      expect(start(single!)).toBeCloseTo(40);
+      // highKashida: the line-end space hangs as well.
+      const [kashida] = lines(para([textRun(hebrew)], 'highKashida', rtl), settings);
+      expect(end(kashida!)).toBeCloseTo(380);
+      expect(start(kashida!)).toBeCloseTo(35);
+      // Latin text keeps its line-end space at the right of its run, where it
+      // hangs past the start edge (blk-0898-kfit6 BL lines).
+      const [latin] = lines(para([textRun(WORDS)], 'both', rtl), settings);
+      expect(wordsOn(latin!)).toBe(7);
+      expect(start(latin!)).toBeCloseTo(35);
+      expect(end(latin!)).toBeCloseTo(380);
     }
   });
 });

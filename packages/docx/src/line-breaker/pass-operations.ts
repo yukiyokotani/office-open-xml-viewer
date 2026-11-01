@@ -622,7 +622,9 @@ export function performRejectGap(
   }
   transaction.stopBefore = null;
   const rejected = transaction.window;
-  const required = rejection.requiredWidth
+  // The unit's advance is measured against the fit width; the window search
+  // compares raw band widths (WORD_KASHIDA_LINE_FIT).
+  const required = lineBandWidthForFit(operationState, rejection.requiredWidth)
     + (breakerState.isFirst ? Math.max(0, firstIndent) : 0);
   const hangingOffset = breakerState.isFirst ? Math.min(0, firstIndent) : 0;
   // The forced unit did not fit this gap, so its advance exceeds the width
@@ -645,6 +647,12 @@ export function performAvailW(operationState: PassOperationState) {
 export function lineFitWidth(operationState: Pick<PassOperationState, 'lineFit'>, widthPx: number): number {
   const fit = operationState.lineFit;
   return fit === undefined ? widthPx : widthPx * fit.fraction - fit.reservePx;
+}
+
+/** Inverse of {@link lineFitWidth}: the band width whose fit width holds `advancePx`. */
+export function lineBandWidthForFit(operationState: Pick<PassOperationState, 'lineFit'>, advancePx: number): number {
+  const fit = operationState.lineFit;
+  return fit === undefined ? advancePx : (advancePx + fit.reservePx) / fit.fraction;
 }
 
 export function performFitsMeasuredWidth(
@@ -710,6 +718,7 @@ export function performFlush(
   performSettleMixedSpaces(operationState);
   breakerState.currentWidth += applyBidiTabPostPass({
     baseRtl,
+    ...(operationState.lineFit ? { fitWidth: operationState.availW() } : {}),
     currentLine: breakerState.currentLine,
     marginRightPx,
     maxWidth: operationState.maxWidth,

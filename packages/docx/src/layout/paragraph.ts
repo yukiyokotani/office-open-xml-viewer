@@ -27,7 +27,7 @@ import { shadowInkBounds } from './vml-shadow.js';
 import { createParagraphAnchorReferenceWorkBudget } from './resource-budgets.js';
 import { addExactRational, exactRationalFromNumber, exactRationalToNumberUp } from './exact-geometry.js';
 import { revisionIsOmitted } from './revision-visibility.js';
-import { wordArabicTextKerned, wordEastAsianAutoSpaceJustifiedMaximumPt, wordKerningApplies, wordLineEndSpaceHangs, wordSoftLineJustifiesAtSpacesOnly } from './line-compatibility.js';
+import { wordArabicTextKerned, wordEastAsianAutoSpaceJustifiedMaximumPt, wordKerningApplies, wordLineEndSpaceHangs, wordRtlJustifiedVisibleFitApplies, wordSoftLineJustifiesAtSpacesOnly } from './line-compatibility.js';
 import type { LineGapPlan } from '../line-breaker/line-gaps.js';
 import { distributeLineSlack as distributeProportionalSlack, enumerateGaps, graphemeClusterOffsets, type LineGap } from '@silurus/ooxml-core';
 import { specifiedTextLineMetrics, specifiedTextParagraphIsHomogeneous } from './specified-line-spacing.js';
@@ -1444,8 +1444,27 @@ export function planLine(input: PlanLineInput): LineLayout {
   // open no inter-CJK gaps.
   const softLineSpacesOnly = softWrapped && wordSoftLineJustifiesAtSpacesOnly(input.alignment);
   const afterLastTab = softWrapped ? 0 : lastTabSegmentIndex(segments) + 1;
+  // WORD_RTL_JUSTIFIED_VISIBLE_FIT: the breaker admitted this right-to-left
+  // line by its visible prefix, so its line-end U+0020 hangs past the line's
+  // end edge and the visible text keeps the start edge.
+  const rtlVisibleEdge = input.baseRtl === true && edge === 'justify'
+    && input.displayMathJustification === undefined
+    && wordRtlJustifiedVisibleFitApplies(input.alignment);
+  const rtlHangingSpacePt = rtlVisibleEdge && input.wordWrap !== false
+    ? trailingAdvancePt(segments, (text) => hangingSpaceVisibleLength(text, (code) => code === 0x20))
+    : 0;
+  // The hanging space sits at the right when it ends a left-to-right run that
+  // is drawn rightmost (a Latin line in a right-to-left paragraph), else at
+  // the left; the visible text of a justified line keeps the band either way.
+  // An unjustified (final) line keeps the space inside the band.
+  let lastTextIndex = segments.length - 1;
+  while (lastTextIndex >= 0 && !(segments[lastTextIndex]!.kind === 'text'
+    && (segments[lastTextIndex] as { text: string }).text !== '')) lastTextIndex -= 1;
+  const lastText = lastTextIndex >= 0 ? segments[lastTextIndex] : undefined;
+  const rtlHangsRight = rtlHangingSpacePt > 0 && lastText?.kind === 'text'
+    && visual.rtl[lastTextIndex] !== true && visual.order.at(-1) === lastTextIndex;
   const kashida = applyJustify ? kashidaLevel(input.alignment) : null;
-  if (kashida && lineSlackPt > 0) {
+  if (kashida && lineSlackPt + rtlHangingSpacePt > 0) {
     // Kashida rewrites one contextual paint operation. A segment already split
     // into cluster-origin operations, or whose elongated text would reach the
     // WORD_CONDENSED_SPACING_ADVANCE_FLOOR, offers no elongation point; the
@@ -1459,7 +1478,7 @@ export function planLine(input: PlanLineInput): LineLayout {
         && !excluded.has(segmentIndex)
         ? { text: segment.text }
         : {}),
-      lineSlackPt,
+      lineSlackPt + rtlHangingSpacePt,
       kashida,
       (segmentIndex, text) => {
         const segment = segments[segmentIndex];
@@ -1492,7 +1511,7 @@ export function planLine(input: PlanLineInput): LineLayout {
         };
       });
       naturalWidthPt += distribution.appliedPx;
-      lineSlackPt = distribution.residualPx;
+      lineSlackPt = distribution.residualPx - rtlHangingSpacePt;
     }
   }
   // WORD_LINE_END_SPACE_HANGS: the spaces ending a line stand outside
@@ -1591,7 +1610,7 @@ export function planLine(input: PlanLineInput): LineLayout {
       }
     }
   } else if (applyJustify) {
-    const justifySlackPt = lineSlackPt + hangingLineEndSpacePt;
+    const justifySlackPt = lineSlackPt + hangingLineEndSpacePt + rtlHangingSpacePt;
     const autoSpace = justifiedAutoSpaceExpansion(segments, justifySlackPt, afterLastTab);
     const autoSpaceTakenPt = autoSpace?.takenPt ?? 0;
     const residualSlackPt = justifySlackPt - autoSpaceTakenPt;
@@ -1632,9 +1651,9 @@ export function planLine(input: PlanLineInput): LineLayout {
     ? alignmentSlackPt
     : edge === 'center' || centreUnjustified
       ? alignmentSlackPt / 2
-      : edge === 'justify' && input.baseRtl
-        && (!applyJustify || ((!softWrapped || softLineSpacesOnly) && distributedWidthPt <= 0))
-        ? alignmentSlackPt
+      : edge === 'justify' && input.baseRtl && (rtlVisibleEdge || !applyJustify
+        || ((!softWrapped || softLineSpacesOnly) && distributedWidthPt <= 0))
+        ? alignmentSlackPt + (rtlHangsRight && applyJustify ? rtlHangingSpacePt : 0)
         : 0;
   const lineStartPt = lineLeftPt + physicalStartOffsetPt;
   const alignmentOffsetPt = input.decimalAutoTabPt === undefined

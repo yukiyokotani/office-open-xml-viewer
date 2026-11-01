@@ -632,7 +632,11 @@ function commitAlignedTabCell(context: BreakOpportunityIteratorContext): void {
  * controls overlap floats and that overlap is not emulated.
  */
 function alignedTabCellAvailW(context: BreakOpportunityIteratorContext): number {
-  return context.availW() + context.breakerState.lineMarginExtension;
+  const { breakerState, firstIndent, widthPolicy } = context;
+  if (widthPolicy !== 'bounded') return context.availW() + breakerState.lineMarginExtension;
+  // WORD_KASHIDA_LINE_FIT takes its share of the complete allocation.
+  return lineFitWidth(context, breakerState.lineMaxWidth - (breakerState.isFirst ? firstIndent : 0)
+    + breakerState.lineMarginExtension);
 }
 
 function processTabSegment(
@@ -664,7 +668,7 @@ function processTabSegment(
   if (baseRtl) {
     let oversizedMarginLeading = false;
     if (seg.ptab) {
-      const input = { ...context, ...breakerState };
+      const input = { ...context, ...breakerState, ...(context.lineFit ? { fitWidth: availW() } : {}) };
       breakerState.currentWidth += resolveCompletedTabCells(input);
       const { startPen, leftLimit, frame } = bidiTabFrame(input);
       let followingWidth = 0;
@@ -689,7 +693,7 @@ function processTabSegment(
         return;
       }
     }
-    const input = { ...context, ...breakerState };
+    const input = { ...context, ...breakerState, ...(context.lineFit ? { fitWidth: availW() } : {}) };
     const { startPen, frame } = bidiTabFrame(input);
     if (frame.narrowed || oversizedMarginLeading || seg.ptab?.relativeTo === 'indent') {
       // Resolve leading gaps before fitting, in the same reading frame as
@@ -714,12 +718,12 @@ function processTabSegment(
             seg.ptab.relativeTo === 'indent' ? frame.indentEnd : input.marginRightPx + tabOriginPx,
             frame.bandStart, frame.bandEnd, frame.narrowed).start
           : stop?.pos ?? pen;
-        if (target > frame.bandEnd && breakerState.currentLine.length > 0) {
+        if (target > frame.fitEnd && breakerState.currentLine.length > 0) {
           flush(undefined, false, seg.src);
           breakerState.queue.unshift(seg);
           return;
         }
-        const gap = target > frame.bandEnd ? 0 : Math.max(0, target - pen);
+        const gap = target > frame.fitEnd ? 0 : Math.max(0, target - pen);
         seg.readingGap = gap;
         seg.measuredWidth = gap;
         seg.leader = stop?.leader;
