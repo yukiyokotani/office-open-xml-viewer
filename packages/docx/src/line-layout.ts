@@ -6,7 +6,7 @@ import { cloneSegmentsForLinePass, convergeLineWrap } from './layout/line-wrap-c
 import type { MeasurementTextContext, VerticalGlyphMeasurementService } from './layout/measurement-capabilities.js';
 import { type DocGridCtx, type LayoutLine, type LayoutSeg, type LineBoundary, type WrapLayoutCtx } from './line-breaker/model.js';
 import { DEFAULT_TAB_PT } from './line-breaker/tabs.js';
-import { runLineBreakerPass } from './line-breaker/pass-driver.js';
+import { runLineBreakerPass, type LineFitWidth } from './line-breaker/pass-driver.js';
 export { type LineBoundary, type LayoutTextSeg, type LayoutTabSeg, type LayoutImageSeg, type LayoutMathSeg, type LayoutLineBreak, type LayoutSeg, type LayoutLine, type WrapLayoutCtx, type DocGridCtx, type LineLayoutEnvironment } from './line-breaker/model.js';
 export { gridCharDeltaPx, eaGlyphCount, gridSegDeltaPx, segmentCharacterGridDeltaPx, charSpacingDeltaPx, condensedSpacingMayFloor, condensedClusterFloorPx, type NaturalClusterAdvance, type CondensedAdvanceUnits, effectiveCharacterSpacingPt, punctuationCompressionTotalPt, widthBalanceSpaceAdjustmentTotalPt, widthBalanceSpaceAdjustmentForTextPt, slicedPunctuationCompressions, charScaleFactor, segLetterSpacingPx, segAdvanceWidth, type SnapToCharsClass, snapToCharsClass, snapToCharsAllocatedWidthPx, isGridLineRule } from './line-breaker/advance.js';
 export { rubyAscentReservePx } from './line-breaker/ruby-metrics.js';
@@ -44,6 +44,7 @@ export function layoutLines(
   verticalGlyphMeasurement?: VerticalGlyphMeasurementService,
   overflowPunct?: boolean,
   justifiedCompression?: JustifiedCompressionOption,
+  lineFit?: LineFitWidth,
 ): LayoutLine[];
 
 export function layoutLines(
@@ -94,6 +95,9 @@ export function layoutLines(
   verticalGlyphMeasurement?: VerticalGlyphMeasurementService,
   overflowPunct = false,
   justifiedCompression: JustifiedCompressionOption = false,
+  // WORD_KASHIDA_LINE_FIT: the part of each bounded line's width its text may
+  // fill; retained paint still justifies to the full width.
+  lineFit?: LineFitWidth,
   passContext?: Readonly<{
     probeHeights: readonly number[] | null;
     probeFloors?: readonly number[] | null;
@@ -133,6 +137,7 @@ export function layoutLines(
       verticalGlyphMeasurement,
       overflowPunct,
       justifiedCompression,
+      lineFit,
       { probeHeights, probeFloors, preparedFloatWrap },
     );
     // DrawingML wrap=none (§21.1.2.1.1) removes only the automatic break at the
@@ -184,6 +189,6 @@ export function layoutLines(
     lineEndIdeographicSpaceHangs: typeof justifiedCompression === 'object'
       ? justifiedCompression.lineEndIdeographicSpaceHangs
       : justifiedCompression,
-    passContext,
+    ...(lineFit ? { lineFit } : {}), passContext,
   });
 }

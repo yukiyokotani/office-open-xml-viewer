@@ -67,6 +67,16 @@ import {
 } from './pass-operations.js';
 import type { PassOperationState } from './pass-operations.js';
 
+/** Paragraph line-fit policy: the WORD_KASHIDA_LINE_FIT reserve and the
+ * WORD_RTL_JUSTIFIED_VISIBLE_FIT visible-prefix fit of right-to-left lines. */
+export interface LineFitWidth {
+  readonly fraction: number;
+  /** Share of the line's start-to-far-edge width reserved (before mode 15). */
+  readonly reserveShare: number;
+  /** A right-to-left line fits its visible prefix, without its line-end U+0020. */
+  readonly rtlVisiblePrefix: boolean;
+}
+
 export interface LineBreakerPassInput {
   readonly ctx: MeasurementTextContext;
   readonly segs: LayoutSeg[];
@@ -91,6 +101,10 @@ export interface LineBreakerPassInput {
   readonly justifiedCompression?: boolean;
   /** A line-end U+3000 hangs from the visible fit (WORD_LINE_END_SPACE_HANGS). */
   readonly lineEndIdeographicSpaceHangs?: boolean;
+  /** WORD_KASHIDA_LINE_FIT: a bounded line's text may fill `fraction` of its
+   * available width less its reserve (absent: the whole width; paint still
+   * justifies to the full width), and WORD_RTL_JUSTIFIED_VISIBLE_FIT. */
+  readonly lineFit?: LineFitWidth;
   readonly passContext: Readonly<{
     probeHeights: readonly number[] | null;
     /** Monotone per-physical-line exclusion probe heights (≥ probeHeights). */
