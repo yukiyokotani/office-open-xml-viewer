@@ -185,6 +185,46 @@ export const WORD_FIXED_UNUSED_LEADING_GRID = defineCompatibilityRule({
   description: 'The original fixed gridBefore controls in modes 11/12/14/15 and 48 follow-ups in modes 14/15 show that a leading track skipped by every row has zero layout width. Fixed auto table width retains the occupied 108/180pt tracks; dxa 324pt scales them to 121.5/202.5pt. A preceding row occupying the 36pt track preserves it and ordinary skipped-row placement. wBefore of 0/18/36pt has no effect in either class. This refines ECMA-376 §§17.4.15 and 17.18.87 only for top-level body nonspaced fixed tables with auto/dxa table width and positive dxa cell preferences; nested and nonbody stories, percentage table width, AutoFit, trailing skips, spans, and nonpositive or missing cell preferences remain outside the observation. Windows Word 16.0 build 16.0.20430 retest is consistent within the tested subset; see the officeObservations entry for this rule in scripts/docx-compatibility-microsoft-evidence.json for values and evidence limits.',
 });
 
+/**
+ * ECMA-376 §17.4.50: tblInd applies only to a leading (left/start/omitted)
+ * table justification. WORD_TABLE_ORIGIN_COMPATIBILITY enables this for its
+ * measured origin classes; this rule extends only the indent part (not the
+ * legacy margin hang) to the further measured table structures below.
+ */
+export const WORD_TABLE_NONLEADING_INDENT_SCOPE = defineCompatibilityRule({
+  id: 'word-table-nonleading-indent-scope',
+  evidence: { kind: 'office-observation', syntheticFixtureId: 'table-nonleading-indent-classes',
+    application: 'Microsoft Word', version: '16.0.20527', platform: 'Windows' },
+  description: 'ECMA-376 §17.4.50 ignores tblInd unless the table justification is leading. Windows Word 16.0.20527 controls (one-row two-cell 4000-twip tables, LTR and bidiVisual, jc left/start/center/right/end, tblInd omitted, +720, -360 and a table-style tblInd 720; compatibility mode omitted, 11, 12, 14 and 15) place and size every center, right and end table identically for all four indents, while left/start tables move by the indent (mirrored under bidiVisual). This holds for omitted horizontal margins (fixed and AutoFit dxa tables), a right-only tblCellMar, explicit 108-twip margins with percentage, auto, nil, missing and zero-dxa cell widths, a percentage table width, an AutoFit auto-width table with dxa or auto cells, 60-twip cell spacing with explicit or omitted margins, tables nested once in a body table cell (explicit and omitted margins), and top-level tables in a header, a footer, a page-anchored text box and a footnote (explicit and omitted margins, LTR and bidiVisual). The indent rule alone extends to these classes; the legacy margin hang of word-table-origin-compatibility keeps its own measured scope. Horizontal margins must be omitted or authored as dxa legacy left/right elements at every layer (cell, exception, table, style), the kind resolved as §17.4.87 does (an omitted type is dxa, a percent measurement is pct); nil/auto/pct widths and logical start/end spellings were not measured. An adjacent-table (§17.4.37) group is one table and qualifies with a common frame and grid. An AutoFit table without any effective preferred table or cell width (tblW auto, tcW auto; zero, nil and auto widths count as absent, as in the column solver) also ignores the indent in these controls, but it is excluded until its separately tracked content-fit width defect is fixed: its nonleading tables are placed far from the observed position at every indent, and applying the indent rule alone moves the indented rows farther from it. Compatibility mode 13 is not a value Word opens; other modes, row-level justification or table exceptions, authored gridBefore/gridAfter (including offsets the parser clears against the grid), floating or vertical-text tables, tables in a quarter-turned (vertical bodyPr) text box, deeper nesting and endnotes were not measured and keep the previous behavior.',
+});
+
+/** WORD_TABLE_NONLEADING_INDENT_SCOPE: the measured structures where a
+ * nonleading table ignores its tblInd outside the origin observation. */
+export function wordNonleadingIndentScope(input: Readonly<{
+  mode: number | undefined;
+  story: string | undefined;
+  topLevel: boolean;
+  tableCellDepth: number;
+  verticalText: boolean;
+  commonFrame: boolean;
+  marginClass: boolean;
+  outerEdgeIndent: boolean;
+  ordinaryFlow: boolean;
+  positioned: boolean;
+  rowOverrides: boolean;
+  gridSkips: boolean;
+  /** AutoFit with no preferred table or cell width (excluded, see the rule). */
+  contentSizedAutoFit: boolean;
+}>): boolean {
+  const story = input.story;
+  const measuredStory = story === 'body' || story === 'header' || story === 'footer'
+    || story === 'footnote' || story === 'textbox';
+  const measuredNesting = input.topLevel || (story === 'body' && input.tableCellDepth === 1);
+  return wordMeasuredTableOriginPlacementMode(input.mode) && measuredStory && measuredNesting
+    && !input.verticalText && input.commonFrame && input.marginClass && !input.outerEdgeIndent && input.ordinaryFlow
+    && !input.positioned && !input.rowOverrides && !input.gridSkips && !input.contentSizedAutoFit;
+}
+
 /** The observation is deliberately restricted to the exported mode boundaries. */
 export function wordMeasuredTableOriginMode(mode: number | undefined): boolean {
   return mode === 11 || mode === 12 || mode === 14 || mode === 15;
@@ -614,8 +654,11 @@ export function wordTableOriginTranslationPt(input: Readonly<{
   indentAuthored: boolean;
   firstLeftMarginPt: number;
   rowLeftMarginPt: number;
+  /** WORD_TABLE_NONLEADING_INDENT_SCOPE outside the origin observation. */
+  nonleadingIndentIgnored?: boolean;
 }>): number {
-  const indentPt = wordTableEffectiveIndentPt(input);
+  const indentPt = wordTableEffectiveIndentPt({ ...input,
+    measured: input.measured || input.nonleadingIndentIgnored === true });
   if (!input.measured) return indentPt;
   if (input.justification === 'center') return indentPt;
   if (input.justification === 'right' || input.justification === 'end') {

@@ -852,6 +852,7 @@ function layoutBodyStory(
       story: request.source.story,
       containers: [],
       lineNumberingEligible: false,
+      ...(request.container.quarterTurned ? { quarterTurned: true } : {}),
     },
   };
   preRegisterPageFloats(root, request.sourceStart?.blockIndex ?? 0, candidate);
@@ -3171,7 +3172,9 @@ function tableDecisionEnvironment(state: BodyMeasurementContext) {
     topLevel: state.storyContext?.containers.length === 0,
     singleColumn: state.sectionLayout?.columns.length === 1,
     textDirection: state.sectionLayout.textDirection,
+    quarterTurnedStory: state.storyContext?.quarterTurned === true,
     inTableCell: state.storyContext?.containers.some((container) => container.kind === 'tableCell') ?? false,
+    tableCellDepth: state.storyContext?.containers.filter((container) => container.kind === 'tableCell').length ?? 0,
     contentX: state.contentX,
     pageWidth: state.pageWidth,
   };
@@ -3291,7 +3294,8 @@ function acquireTableColumnInput(
         nestedTable: (nested) => {
           const source = state.acquisitionInputs.tableSourceAcquisitionInput(nested);
           const nestedDecision = decideLogicalTable(nested, source, [{ table: nested, source }], contentWPt,
-            { ...tableDecisionEnvironment(state), topLevel: false, inTableCell: true });
+            { ...tableDecisionEnvironment(state), topLevel: false, inTableCell: true,
+              tableCellDepth: (tableDecisionEnvironment(state).tableCellDepth ?? 0) + 1 });
           const intrinsic = intrinsicWidthsForTable(nested, nestedDecision.logical);
           return measureTableIntrinsicWidths(projectTableColumnLayoutInput(source, contentWPt,
             (row, cellIndex, preferred) => intrinsic(nested.rows[row]!.cells[cellIndex]!, preferred), contentWPt));

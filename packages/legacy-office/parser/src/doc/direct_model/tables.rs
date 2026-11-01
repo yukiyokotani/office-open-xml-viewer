@@ -400,6 +400,7 @@ fn project_table(
                 before_width: (planned.grid_before != 0)
                     .then(|| physical_width(planned.width_before)),
                 after_width: (planned.grid_after != 0).then(|| physical_width(planned.width_after)),
+                grid_skip_authored: planned.grid_before != 0 || planned.grid_after != 0,
                 justification: None,
                 cell_spacing: None,
                 style_cell_spacing: None,
