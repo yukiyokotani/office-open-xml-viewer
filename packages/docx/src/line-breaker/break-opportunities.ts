@@ -852,7 +852,7 @@ function processTabSegment(
     // WORD_KASHIDA_LINE_FIT reserves nothing for an aligned cell: it is
     // admitted against the band, while text before the tab keeps the fit width.
     const cellAvail = alignedTabCellAvailW(context);
-    const cellLimit = breakerState.currentWidth + tabW + following.totalWidth <= cellAvail
+    const cellLimit = context.fitsMeasuredWidth(breakerState.currentWidth + tabW + following.totalWidth, cellAvail)
       ? cellAvail : availW();
     seg.marginAllocation = cellLimit > lineBandW(context)
       && breakerState.currentWidth + tabW + following.totalWidth > lineBandW(context);
@@ -868,7 +868,7 @@ function processTabSegment(
     addToLine(seg, tabW, seg.fontSize, seg.fontSize * scale * SYNTHETIC_ASCENT_EM, seg.fontSize * scale * SYNTHETIC_DESCENT_EM);
     // Keep an aligned cell atomic only when it fits its band. Oversized cells
     // return to the iterator at their ordinary break sites.
-    if (breakerState.currentWidth + following.totalWidth <= cellLimit) {
+    if (context.fitsMeasuredWidth(breakerState.currentWidth + following.totalWidth, cellLimit)) {
       commitAlignedTabCell(context);
     }
     return;

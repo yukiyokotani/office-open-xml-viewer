@@ -91,6 +91,13 @@ describe('WORD_KASHIDA_LINE_FIT line breaker', () => {
     });
     expect(lead.map((line) => line.segments.filter((segment) => 'text' in segment).map((segment) => (segment as LayoutTextSeg).text.trim()).join('|')))
       .toEqual(['A'.repeat(30), `${'B'.repeat(30)}|C`]);
+    // kfit7 T4: a cell ending at a stop on the margin, whose twip arithmetic
+    // differs from the column width by an ulp, still fits its band.
+    const margin = run([token('A'.repeat(85)), tab(), token('B'.repeat(5))], {
+      maxWidth: 11906 / 20 - 1134 / 20 - 1134 / 20, tabStops: [{ pos: 481.9, alignment: 'right', leader: 'none' }],
+      lineFit: fit(0.9, 0),
+    });
+    expect(margin).toHaveLength(1);
     // A right-to-left end-aligned cell keeps its stop as well: 300 - 50 - 5.
     const [rtl] = run([token('A'), tab(), token('B'.repeat(10))], {
       baseRtl: true, tabStops: [{ pos: 300, alignment: 'end', leader: 'none' }], lineFit: fit(0.8, 0),
