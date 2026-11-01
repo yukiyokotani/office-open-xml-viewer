@@ -379,4 +379,64 @@ describe('WORD_KASHIDA_LINE_FIT line breaker', () => {
     const large = reads(800);
     expect(large).toBeLessThan(small * 2.5);
   });
+  // The resolved fit of a numbered first line in the solver's window at y:
+  // window [left, 360] (paraX 0), body at max(left, bodyIndentAt(left)).
+  const numberedScan = (contour: FloatRect, hanging: number, height: number,
+    bodyIndentAt: (edge: number) => number, fraction: number, share: number, word: number): number => {
+    const prepared = prepareFloatWrap([contour]);
+    const reference = { xLeftPt: hanging, xRightPt: 360, readingDirection: 'ltr' as const };
+    for (let y = 0; y < height; y += 0.01) {
+      const window = computePreparedLineFloatWindow(y, 1, 10, hanging, 360 - hanging, prepared, hanging, 360, reference, 1);
+      if (window.topY !== y) continue;
+      const left = hanging + window.xOffset;
+      if (left < 0) continue;
+      const indent = Math.max(left, bodyIndentAt(left)) - left;
+      if ((window.maxWidth - indent) * fraction - share * window.maxWidth >= word) return y;
+    }
+    return height;
+  };
+
+  it('stops a numbered first line on a sloped contour where its resolved fit first holds', () => {
+    // A through contour on the start side recedes as y grows; the body of
+    // the numbered first line starts at the next 36 pt stop after the
+    // window's start + 5, so the 95 pt word at 0.8 fits only once that stop
+    // is low enough, between plain-width roots.
+    const contour: FloatRect = { ...obstacle(-50, 360), authoredWrap: 'through', imageY: 0, imageH: 60, yTop: 0, yBottom: 60,
+      xLeft: -50, imageX: -50,
+      wrapPolygon: [{ xPt: -50, yPt: 0 }, { xPt: 300, yPt: 0 }, { xPt: 100, yPt: 60 }, { xPt: -50, yPt: 60 }] };
+    const bodyIndentAt = (edge: number): number => Math.ceil((edge + 5) / 36) * 36;
+    const wrapCtx: WrapLayoutCtx = { ...wrap([contour], 410, false, -50), numberingFirstLine: {
+      authoredFirstIndentPx: -50, bodyIndentAt } };
+    const lines = run([token('W'.repeat(19))], { wrapCtx, lineFit: fit(0.8, 0) });
+    const expected = numberedScan(contour, -50, 60, bodyIndentAt, 0.8, 0, 95);
+    expect(expected).toBeLessThan(50);
+    expect(Math.abs((lines[0]?.topY ?? Number.NaN) - expected)).toBeLessThanOrEqual(0.02);
+  });
+
+  it('matches a fine scan of numbered first lines on sloped contours (randomized)', () => {
+    let seed = 90210;
+    const random = (): number => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
+    for (let trial = 0; trial < 60; trial += 1) {
+      const marker = 3 + Math.round(random() * 12);
+      const hanging = -20 - Math.round(random() * 40);
+      const tab = 24 + Math.round(random() * 24);
+      const from = 220 + Math.round(random() * 100);
+      const to = 40 + Math.round(random() * 120);
+      const height = 40 + Math.round(random() * 60);
+      const [fraction, share] = [[1, 0.1], [1, 0.2], [0.9, 0], [0.8, 0]][Math.floor(random() * 4)]!;
+      const word = 5 * (10 + Math.floor(random() * 20));
+      const bodyIndentAt = (edge: number): number => Math.ceil((edge + marker) / tab) * tab;
+      const contour: FloatRect = { ...obstacle(hanging, 360), authoredWrap: 'through', imageY: 0, imageH: height,
+        yTop: 0, yBottom: height, xLeft: hanging, imageX: hanging,
+        wrapPolygon: [{ xPt: hanging, yPt: 0 }, { xPt: from, yPt: 0 }, { xPt: to, yPt: height }, { xPt: hanging, yPt: height }] };
+      const wrapCtx: WrapLayoutCtx = { ...wrap([contour], 360 - hanging, false, hanging),
+        numberingFirstLine: { authoredFirstIndentPx: hanging, bodyIndentAt } };
+      const lines = run([token('W'.repeat(word / 5))], { wrapCtx, lineFit: fit(fraction, share) });
+      const expected = numberedScan(contour, hanging, height, bodyIndentAt, fraction, share, word);
+      const label = JSON.stringify({ trial, marker, hanging, tab, from, to, height, fraction, share, word, expected });
+      const got = lines[0]?.topY ?? Number.NaN;
+      if (expected >= height) continue; // fits only below the contour
+      expect(Math.abs(got - expected), label).toBeLessThanOrEqual(0.02);
+    }
+  }, 60_000);
 });

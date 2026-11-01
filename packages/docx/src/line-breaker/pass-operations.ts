@@ -472,6 +472,12 @@ function placeLineWindow(
     const farEdgeRequirement = placedFrom ? transaction.farEdgeRequirement : undefined;
     const acceptWindow = fitAdvance === undefined || !placedFrom ? undefined
       : (window: Readonly<{ xOffset: number; maxWidth: number }>) => fits(placedFrom(window));
+    // A numbered first line's fit follows its resolved body indent, which no
+    // width requirement expresses: its exact roots become sweep events.
+    const fitRoots = fitAdvance === undefined || !placedFrom || !breakerState.isFirst
+      || !wrapCtx.numberingFirstLine ? undefined
+      : (gap: Parameters<typeof candidateFitRoots>[4], lower: number, upper: number) =>
+        candidateFitRoots(operationState, placedFrom, x, fitAdvance, gap, lower, upper);
     if (wrapCtx.lineWindow) {
       const win = wrapCtx.lineWindow({
         topYPt: topY, minimumStartWidthPt: requiredWidth,
@@ -480,6 +486,7 @@ function placeLineWindow(
         columnXPt: wrapCtx.columnXPt, columnWidthPt: wrapCtx.columnWidthPt,
         ...(farEdgeRequirement !== undefined ? { farEdgeMinimumStartWidthPt: farEdgeRequirement } : {}),
         ...(acceptWindow ? { acceptWindow } : {}),
+        ...(fitRoots ? { fitRoots } : {}),
       });
       return { topY: win.topYPt, xOffset: win.xOffsetPt, maxWidth: win.maximumWidthPt };
     }
@@ -487,7 +494,7 @@ function placeLineWindow(
       topY, requiredWidth, height, x, width,
       preparedFloatWrap ?? prepareFloatWrap(wrapCtx.floats),
       wrapCtx.columnXPt, wrapCtx.columnXPt + wrapCtx.columnWidthPt,
-      reference, requiredWidth, farEdgeRequirement, acceptWindow,
+      reference, requiredWidth, farEdgeRequirement, acceptWindow, fitRoots,
     );
   };
   // The requirement of a window at absolute [leftPt, leftPt + widthPt].
@@ -763,9 +770,20 @@ function candidateLineFitWidth(
   operationState: PassOperationState,
   window: Readonly<{ xOffset: number; maxWidth: number }>,
 ): number {
+  return candidateLineFit(operationState, window).fitPx;
+}
+
+/** {@link candidateLineFitWidth} with the piece of its piecewise-linear form
+ * the window falls in: the numbering regime (unresolved, at the leading edge,
+ * or at one resolved body-indent stop) and the sign of the reserve base. */
+function candidateLineFit(
+  operationState: PassOperationState,
+  window: Readonly<{ xOffset: number; maxWidth: number }>,
+): { fitPx: number; piece: string } {
   const { breakerState, wrapCtx } = operationState;
   let { xOffset, maxWidth: lineMaxWidth } = window;
   let indent = 0;
+  let piece = '';
   if (breakerState.isFirst) {
     const override = breakerState.firstIndentOverride;
     breakerState.firstIndentOverride = undefined;
@@ -774,9 +792,59 @@ function candidateLineFitWidth(
     const numbering = wrapCtx?.numberingFirstLine;
     const resolved = numbering && resolveNumberingFirstLine(operationState, numbering,
       placementHangingOffset(operationState), xOffset, lineMaxWidth);
-    if (resolved) ({ xOffset, maxWidth: lineMaxWidth, indent } = resolved);
+    if (resolved) {
+      ({ xOffset, maxWidth: lineMaxWidth, indent } = resolved);
+      piece = resolved.bodyIndent > resolved.leadingEdge ? `stop:${resolved.bodyIndent}` : 'edge';
+    } else if (numbering) {
+      piece = 'unresolved';
+    }
   }
-  return windowLineFitWidth(operationState, { xOffset, maxWidth: lineMaxWidth }, lineMaxWidth - indent);
+  const lineWindow = { xOffset, maxWidth: lineMaxWidth };
+  const fit = operationState.lineFit;
+  if (fit && fit.reserveShare > 0) {
+    piece += lineMaxWidth + lineReserveExtension(operationState, lineWindow) >= 0 ? '|reserve' : '|clamped';
+  }
+  return { fitPx: windowLineFitWidth(operationState, lineWindow, lineMaxWidth - indent), piece };
+}
+
+/** Tops in (lower, upper) where a candidate window between two affine edges
+ * first holds `advancePx`, and where its fit changes piece (a body-indent
+ * stop or the reserve clamp): within one piece the fit is linear in the top,
+ * so its root is exact up to rounding; pieces are found by bisection. */
+function candidateFitRoots(
+  operationState: PassOperationState,
+  placedFrom: (window: Readonly<{ xOffset: number; maxWidth: number }>) => { xOffset: number; maxWidth: number },
+  bandX: number,
+  advancePx: number,
+  gap: Readonly<{ left: Readonly<{ slope: number; intercept: number }>; right: Readonly<{ slope: number; intercept: number }> }>,
+  lower: number,
+  upper: number,
+): number[] {
+  const at = (y: number): { fitPx: number; piece: string } => {
+    const left = gap.left.slope * y + gap.left.intercept;
+    const right = gap.right.slope * y + gap.right.intercept;
+    if (!(right > left)) return { fitPx: Number.NEGATIVE_INFINITY, piece: 'empty' };
+    return candidateLineFit(operationState, placedFrom({ xOffset: left - bandX, maxWidth: right - left }));
+  };
+  const roots: number[] = [];
+  const pushRoot = (y: number): void => {
+    roots.push(y, y + Math.max(1e-9, Math.abs(y) * 1e-12));
+  };
+  const visit = (a: number, b: number, fa: ReturnType<typeof at>, fb: ReturnType<typeof at>, depth: number): void => {
+    if (fa.piece !== fb.piece && depth < 48 && b - a > 1e-9) {
+      const m = (a + b) / 2;
+      const fm = at(m);
+      visit(a, m, fa, fm, depth + 1);
+      visit(m, b, fm, fb, depth + 1);
+      return;
+    }
+    if (fa.piece !== fb.piece) pushRoot(a);
+    if (fa.fitPx < advancePx && fb.fitPx >= advancePx && Number.isFinite(fa.fitPx)) {
+      pushRoot(a + (advancePx - fa.fitPx) * (b - a) / (fb.fitPx - fa.fitPx));
+    }
+  };
+  visit(lower, upper, at(lower), at(upper), 0);
+  return roots;
 }
 
 /** Signed distance the reserve base runs past a line window's far edge: from

@@ -824,6 +824,20 @@ function lineWindowAtY(
   return { topY, ...exactGapWindow(best, paraXLeft, paraXRight) };
 }
 
+/** WORD_KASHIDA_LINE_FIT: tops within (lower, upper) where a caller's fitted
+ * width of the gap between two affine edges (x = slope * y + intercept, in
+ * the band's coordinates) may begin to admit its unit, or where that fitted
+ * width changes form; the sweep evaluates each as a candidate. */
+export type LineWindowFitRoots = (
+  gap: Readonly<{ left: Readonly<{ slope: number; intercept: number }>; right: Readonly<{ slope: number; intercept: number }> }>,
+  lower: number,
+  upper: number,
+) => readonly number[];
+
+function exactRationalToApproximateNumber(value: ExactRational): number {
+  return Number(value.numerator) / Number(value.denominator);
+}
+
 /** WORD_KASHIDA_LINE_FIT: a caller's forward admission test of a candidate
  * window (offset from the queried band's left edge); a window it refuses is
  * skipped like one narrower than the requirement. */
@@ -1192,6 +1206,7 @@ function nextLocalSweepEvent(
   squareRequiredWidth: number,
   diagnostics: MutableLineFloatSweepDiagnostics | null,
   farEdgeRequiredWidth?: number,
+  fitRoots?: LineWindowFitRoots,
 ): number | null {
   const midpoint = exactBinary64Midpoint(lower, upper);
   const exactMidpoint = unreducedExactFromNumber(midpoint);
@@ -1237,7 +1252,7 @@ function nextLocalSweepEvent(
       intercept: subtractUnreducedExact(right.exact.intercept, left.exact.intercept),
     };
     gaps.push({ exactWidth });
-    if (farEdgeRequiredWidth !== undefined) {
+    if (farEdgeRequiredWidth !== undefined || fitRoots !== undefined) {
       // WORD_KASHIDA_LINE_FIT: classify and measure the gap as gap selection
       // does, clipped to the band on this slab (a through-wrap opening may run
       // past the band edge), so a window reaching the far edge gets its root.
@@ -1249,8 +1264,23 @@ function nextLocalSweepEvent(
       const reachesFarEdge = reference.readingDirection === 'rtl' ? clippedLeft === pageLeft : clippedRight === pageRight;
       appendRequirementRoot(clippedLeft, clippedRight, Math.max(
         MIN_LINE_GAP,
-        reachesFarEdge ? farEdgeRequiredWidth : squareConstrained ? squareRequiredWidth : polygonRequiredWidth,
+        reachesFarEdge && farEdgeRequiredWidth !== undefined ? farEdgeRequiredWidth
+          : squareConstrained ? squareRequiredWidth : polygonRequiredWidth,
       ));
+      // The caller's own fitted-width roots (a numbered first line's piecewise
+      // body indent) become sweep events as well.
+      if (fitRoots) {
+        const affine = (boundary: AffineBoundary) => ({
+          slope: exactRationalToApproximateNumber(boundary.exact.slope),
+          intercept: exactRationalToApproximateNumber(boundary.exact.intercept),
+        });
+        for (const root of fitRoots({ left: affine(clippedLeft), right: affine(clippedRight) }, lower, upper)) {
+          if (root > lower && root < upper && Number.isFinite(root)) {
+            roots.push(root);
+            if (diagnostics) diagnostics.localRootCandidateCount += 1;
+          }
+        }
+      }
       return;
     }
     appendRequirementRoot(left, right, Math.max(
@@ -1420,6 +1450,7 @@ function computePreparedLineFloatWindowCore(
   diagnostics: MutableLineFloatSweepDiagnostics | null = null,
   farEdgeRequiredWidth?: number,
   acceptWindow?: LineWindowAcceptance,
+  fitRoots?: LineWindowFitRoots,
 ): { topY: number; xOffset: number; maxWidth: number } {
   const paraXLeft = paraX;
   const paraXRight = paraX + maxWidth;
@@ -1519,7 +1550,7 @@ function computePreparedLineFloatWindowCore(
         const localEvent = nextLocalSweepEvent(
           cursor, upper, probeH, paraXLeft, paraXRight, prepared,
           columnXLeftPt, columnXRightPt, reference,
-          polygonRequiredWidth, squareRequiredWidth, diagnostics, farEdgeRequiredWidth,
+          polygonRequiredWidth, squareRequiredWidth, diagnostics, farEdgeRequiredWidth, fitRoots,
         );
         if (localEvent !== null && diagnostics) diagnostics.localRootEventCount += 1;
         next = localEvent ?? upper;
@@ -1569,10 +1600,13 @@ export function computePreparedLineFloatWindow(
    * the requirements admit (a numbered first line resolves its body indent
    * per window); omitted, every such window is accepted. */
   acceptWindow?: LineWindowAcceptance,
+  /** WORD_KASHIDA_LINE_FIT: extra sweep events where the caller's fitted
+   * width may begin to admit its unit (see {@link LineWindowFitRoots}). */
+  fitRoots?: LineWindowFitRoots,
 ): { topY: number; xOffset: number; maxWidth: number } {
   return computePreparedLineFloatWindowCore(
     topY, polygonRequiredWidth, probeH, paraX, maxWidth, prepared,
-    columnXLeftPt, columnXRightPt, reference, squareRequiredWidth, null, farEdgeRequiredWidth, acceptWindow,
+    columnXLeftPt, columnXRightPt, reference, squareRequiredWidth, null, farEdgeRequiredWidth, acceptWindow, fitRoots,
   );
 }
 

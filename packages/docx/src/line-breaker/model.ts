@@ -597,6 +597,8 @@ export interface WrapLayoutCtx {
     farEdgeMinimumStartWidthPt?: number;
     /** WORD_KASHIDA_LINE_FIT: forward admission test of a candidate window. */
     acceptWindow?: import('../layout/float-wrap.js').LineWindowAcceptance;
+    /** WORD_KASHIDA_LINE_FIT: extra sweep events from the caller's fit. */
+    fitRoots?: import('../layout/float-wrap.js').LineWindowFitRoots;
     probeHeightPt: number;
     paragraphXPt: number;
     maximumWidthPt: number;
