@@ -2110,8 +2110,7 @@ impl<'a> Reader<'a> {
                     // table directly after another one is laid out with it.
                     table.table.page_break_before |= break_pending;
                     break_pending = false;
-                    if table.table.page_break_before
-                        && (table.top != 0.0 || after_table.is_some())
+                    if table.table.page_break_before && (table.top != 0.0 || after_table.is_some())
                     {
                         return Err(unsupported("table-break"));
                     }
@@ -3026,6 +3025,15 @@ fn paragraph_properties(cascade: &Cascade<'_>, rules: CompatRules) -> Result<Col
             Some(value) => length_pt(value),
         }
     };
+    // §20.219, §20.220: vertical margins are non-negative.
+    let vertical = |name: &str| -> Result<f64, String> {
+        let value = length(name)?;
+        if value >= 0.0 {
+            Ok(value)
+        } else {
+            Err(unsupported("paragraph-margin"))
+        }
+    };
     let alignment = match cascade.get(NS_FO, "text-align") {
         None | Some("start") | Some("left") => "left",
         Some("end") | Some("right") => "right",
@@ -3106,8 +3114,8 @@ fn paragraph_properties(cascade: &Cascade<'_>, rules: CompatRules) -> Result<Col
     };
     Ok(Collected {
         paragraph,
-        top: length("margin-top")?,
-        bottom: length("margin-bottom")?,
+        top: vertical("margin-top")?,
+        bottom: vertical("margin-bottom")?,
         contextual: cascade.get(NS_STYLE, "contextual-spacing") == Some("true"),
         named_style: None,
         area: 0,
@@ -5537,7 +5545,8 @@ mod tests {
             panic!()
         };
         assert_eq!(second.space_before, 8.0);
-        let paragraphs = r#"<text:p text:style-name="Sp">a</text:p><text:p text:style-name="Sp">b</text:p>"#;
+        let paragraphs =
+            r#"<text:p text:style-name="Sp">a</text:p><text:p text:style-name="Sp">b</text:p>"#;
         for (spacing, gap) in [("false", 8.0), ("true", 14.0)] {
             let BodyElement::Paragraph(second) = &read(spacing, paragraphs).body[1] else {
                 panic!()
@@ -5571,7 +5580,13 @@ mod tests {
             assert!(colours(&table.rows[1].cells[0])
                 .iter()
                 .all(|c| *c == (Some(expected.into()), false)));
-            assert!(colours(&table.rows[1].cells[1]).iter().all(|c| c.0.is_none()), "{:?}", colours(&table.rows[1].cells[1]));
+            assert!(
+                colours(&table.rows[1].cells[1])
+                    .iter()
+                    .all(|c| c.0.is_none()),
+                "{:?}",
+                colours(&table.rows[1].cells[1])
+            );
         }
     }
 
@@ -5616,13 +5631,28 @@ mod tests {
         let cases = [
             // Weights beside absolute widths.
             TABLE_STYLES
-                .replace(r#"style:column-width="4cm""#, r#"style:column-width="4cm" style:rel-column-width="1000*""#)
-                .replace(r#"style:column-width="6cm""#, r#"style:column-width="6cm" style:rel-column-width="3000*""#),
+                .replace(
+                    r#"style:column-width="4cm""#,
+                    r#"style:column-width="4cm" style:rel-column-width="1000*""#,
+                )
+                .replace(
+                    r#"style:column-width="6cm""#,
+                    r#"style:column-width="6cm" style:rel-column-width="3000*""#,
+                ),
             // A weight below MINLAY in a relative table.
             TABLE_STYLES
-                .replace(r#"style:width="10cm""#, r#"style:width="10cm" style:rel-width="100%""#)
-                .replace(r#"style:column-width="4cm""#, r#"style:rel-column-width="1*""#)
-                .replace(r#"style:column-width="6cm""#, r#"style:rel-column-width="99*""#),
+                .replace(
+                    r#"style:width="10cm""#,
+                    r#"style:width="10cm" style:rel-width="100%""#,
+                )
+                .replace(
+                    r#"style:column-width="4cm""#,
+                    r#"style:rel-column-width="1*""#,
+                )
+                .replace(
+                    r#"style:column-width="6cm""#,
+                    r#"style:rel-column-width="99*""#,
+                ),
             // A centred grid that does not add up to the table.
             TABLE_STYLES
                 .replace(r#"table:align="left""#, r#"table:align="center""#)
@@ -5657,6 +5687,52 @@ mod tests {
     }
 
     #[test]
+    fn rejects_negative_vertical_margins() {
+        for margin in ["margin-top", "margin-bottom"] {
+            let styles = format!(
+                r#"<style:style style:name="N" style:family="paragraph"><style:paragraph-properties fo:{margin}="-20pt"/></style:style>"#
+            );
+            let result = read_fixture(Fixture {
+                automatic: &styles,
+                body: r#"<text:p>a</text:p><text:p text:style-name="N">b</text:p>"#,
+                ..Fixture::default()
+            });
+            assert_eq!(
+                result.unwrap_err(),
+                unsupported("paragraph-margin"),
+                "{margin}"
+            );
+            let table = TABLE_STYLES
+                .replace(r#"fo:margin-top="5pt""#, r#"fo:margin-top="{top}""#)
+                .replace(
+                    r#"fo:margin-bottom="3pt""#,
+                    r#"fo:margin-bottom="{bottom}""#,
+                )
+                .replace(
+                    "{top}",
+                    if margin == "margin-top" {
+                        "-20pt"
+                    } else {
+                        "5pt"
+                    },
+                )
+                .replace(
+                    "{bottom}",
+                    if margin == "margin-bottom" {
+                        "-20pt"
+                    } else {
+                        "3pt"
+                    },
+                );
+            assert_eq!(
+                read_table(&table, &table_body(TABLE)).unwrap_err(),
+                unsupported("table-margin"),
+                "{margin}"
+            );
+        }
+    }
+
+    #[test]
     fn requires_the_measured_table_settings() {
         let body = table_body(TABLE);
         let read = |settings: &str| {
@@ -5668,24 +5744,39 @@ mod tests {
             })
         };
         assert_eq!(read("").unwrap_err(), unsupported("table-setting"));
-        for item in ["AddParaSpacingToTableCells", "AddParaLineSpacingToTableCells", "TableRowKeep"] {
+        for item in [
+            "AddParaSpacingToTableCells",
+            "AddParaLineSpacingToTableCells",
+            "TableRowKeep",
+        ] {
             let all = table_settings("true");
             let missing = all.replace(
                 &format!(r#"<config:config-item config:name="{item}" config:type="boolean">true</config:config-item>"#),
                 "",
             );
-            assert_eq!(read(&missing).unwrap_err(), unsupported("table-setting"), "{item}");
+            assert_eq!(
+                read(&missing).unwrap_err(),
+                unsupported("table-setting"),
+                "{item}"
+            );
             let off = all.replace(
                 &format!(r#""{item}" config:type="boolean">true"#),
                 &format!(r#""{item}" config:type="boolean">false"#),
             );
-            assert_eq!(read(&off).unwrap_err(), unsupported("table-setting"), "{item}");
+            assert_eq!(
+                read(&off).unwrap_err(),
+                unsupported("table-setting"),
+                "{item}"
+            );
         }
         let at_start = table_settings("true").replace(
             r#""AddParaTableSpacingAtStart" config:type="boolean">true"#,
             r#""AddParaTableSpacingAtStart" config:type="boolean">false"#,
         );
-        assert_eq!(read(&at_start).unwrap_err(), unsupported("compatibility-setting"));
+        assert_eq!(
+            read(&at_start).unwrap_err(),
+            unsupported("compatibility-setting")
+        );
     }
 
     #[test]
@@ -5818,7 +5909,10 @@ mod tests {
                 "table-rel-width",
             ),
             (
-                TABLE_STYLES.replace(r#"style:column-width="4cm""#, r#"style:column-width="0.03cm""#),
+                TABLE_STYLES.replace(
+                    r#"style:column-width="4cm""#,
+                    r#"style:column-width="0.03cm""#,
+                ),
                 table_body(TABLE),
                 "table-columns",
             ),

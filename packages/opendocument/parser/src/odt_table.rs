@@ -57,8 +57,7 @@ fn group<'s>(
     // not modelled; a display name only names the style in the UI.
     if style.attributes.keys().any(|key| {
         key.0 != NS_STYLE || !matches!(key.1.as_str(), "name" | "family" | "display-name")
-    })
-    {
+    }) {
         return Err(unsupported("table-style-attribute"));
     }
     for (key, properties) in &style.groups {
@@ -234,7 +233,9 @@ impl<'a> Reader<'a> {
         let mut width = None;
         let mut relative = None;
         let (mut margin_left, mut top, mut bottom) = (0.0, 0.0, 0.0);
-        let mut jc = "left";
+        // Without an alignment LibreOffice fills the text area whatever the
+        // width (measured); that is not modelled.
+        let mut jc = "";
         let mut break_before = false;
         for (key, value) in properties.into_iter().flatten() {
             match (key.0.as_str(), key.1.as_str()) {
@@ -278,6 +279,13 @@ impl<'a> Reader<'a> {
             Some(_) => return Err(unsupported("table-rel-width")),
             None => width.ok_or_else(|| unsupported("table-width"))?,
         };
+        if jc.is_empty() {
+            return Err(unsupported("table-align"));
+        }
+        // §20.219: vertical margins are non-negative.
+        if !(top >= 0.0 && bottom >= 0.0) {
+            return Err(unsupported("table-margin"));
+        }
         if jc != "left" && margin_left != 0.0 {
             return Err(unsupported("table-align"));
         }
@@ -332,13 +340,14 @@ impl<'a> Reader<'a> {
                     }
                     let mut absolute = None;
                     let mut share = None;
-                    for (key, value) in self.table_group(
-                        Family::TableColumn,
-                        child.attribute((NS_TABLE, "style-name")),
-                        "table-column-properties",
-                    )?
-                    .into_iter()
-                    .flatten()
+                    for (key, value) in self
+                        .table_group(
+                            Family::TableColumn,
+                            child.attribute((NS_TABLE, "style-name")),
+                            "table-column-properties",
+                        )?
+                        .into_iter()
+                        .flatten()
                     {
                         match (key.0.as_str(), key.1.as_str()) {
                             (NS_STYLE, "column-width") => absolute = Some(length_pt(value)?),
@@ -389,10 +398,18 @@ impl<'a> Reader<'a> {
         let col_widths: Vec<f64> = if relative.is_some() {
             let shares = columns
                 .iter()
-                .map(|c| c.1.filter(|share| *share >= 23).map(f64::from))
+                .map(|c| {
+                    c.1.filter(|share| (23..=65535).contains(share))
+                        .map(f64::from)
+                })
                 .collect::<Option<Vec<f64>>>()
                 .ok_or_else(|| unsupported("table-columns"))?;
+            // Weights adding up past 65535 are normalised against that cap
+            // (not measured).
             let total: f64 = shares.iter().sum();
+            if total > 65535.0 {
+                return Err(unsupported("table-columns"));
+            }
             shares.iter().map(|s| s / total * table_width).collect()
         } else {
             let twips = |points: f64| {
@@ -441,19 +458,24 @@ impl<'a> Reader<'a> {
             }
             let mut height = None;
             let mut cant_split = row_keep_default;
-            for (key, value) in self.table_group(
-                Family::TableRow,
-                row.attribute((NS_TABLE, "style-name")),
-                "table-row-properties",
-            )?
-            .into_iter()
-            .flatten()
+            for (key, value) in self
+                .table_group(
+                    Family::TableRow,
+                    row.attribute((NS_TABLE, "style-name")),
+                    "table-row-properties",
+                )?
+                .into_iter()
+                .flatten()
             {
                 match (key.0.as_str(), key.1.as_str()) {
                     // Both together resolve in an order that was not
                     // measured.
                     (NS_STYLE, "row-height" | "min-row-height") => {
-                        let rule = if key.1 == "row-height" { "exact" } else { "atLeast" };
+                        let rule = if key.1 == "row-height" {
+                            "exact"
+                        } else {
+                            "atLeast"
+                        };
                         if height.replace((length_pt(value)?, rule)).is_some() {
                             return Err(unsupported("table-row-height"));
                         }
@@ -653,14 +675,15 @@ impl<'a> Reader<'a> {
         let mut v_align = "top";
         // Shorthands first: a side set beside them wins (§20.183, §20.217,
         // after XSL's precedence of specific over shorthand properties).
-        let mut entries: Vec<_> = self.table_group(
-            Family::TableCell,
-            node.attribute((NS_TABLE, "style-name")),
-            "table-cell-properties",
-        )?
-        .into_iter()
-        .flatten()
-        .collect();
+        let mut entries: Vec<_> = self
+            .table_group(
+                Family::TableCell,
+                node.attribute((NS_TABLE, "style-name")),
+                "table-cell-properties",
+            )?
+            .into_iter()
+            .flatten()
+            .collect();
         entries.sort_by(|(a, _), (b, _)| {
             let side = |key: &(String, String)| !matches!(key.1.as_str(), "padding" | "border");
             (side(a), a).cmp(&(side(b), b))
@@ -740,7 +763,8 @@ impl<'a> Reader<'a> {
             }
             _ => 0.0,
         };
-        if v_align != "top" && (outer(content.first(), true) != 0.0 || outer(content.last(), false) != 0.0)
+        if v_align != "top"
+            && (outer(content.first(), true) != 0.0 || outer(content.last(), false) != 0.0)
         {
             return Err(unsupported("table-cell-align-spacing"));
         }
