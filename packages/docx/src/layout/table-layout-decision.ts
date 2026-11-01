@@ -67,13 +67,27 @@ function memberContext(
     : firstRowException?.indentAuthored ? (firstRowException.indentPt ?? 0) : (table.tblInd ?? 0);
   const baseIndentPt = logicalProperties ? origin.tableIndentPt
     : Number.isFinite(table.tblInd) ? (table.tblInd ?? 0) : 0;
-  const widthIndent = (justification: string | null | undefined, indentPt: number) =>
-    wordTableEffectiveIndentPt({ measured: measuredOrigin, justification, indentPt });
-  const rowIndentPts = format.rows.map((row) => widthIndent(row.justification ?? table.jc,
-    !logicalProperties && row.exception?.indentAuthored ? (row.exception.indentPt ?? 0) : baseIndentPt));
+  // ECMA-376 §17.4.50 judges tblInd by each row's resulting jc. A tblInd
+  // inherited from the table style is dropped for a non-leading row in every
+  // class; a direct (or tblPrEx) indent keeps its per-class contract below.
+  const inheritedTableIndent = table.tblIndInherited === true;
+  const leading = (justification: string | null | undefined) =>
+    justification == null || justification === 'left' || justification === 'start' || justification === 'both';
+  const rowIndent = (justification: string | null | undefined, indentPt: number, fromTable: boolean) =>
+    fromTable && inheritedTableIndent && !leading(justification) ? 0 : indentPt;
+  const widthIndent = (justification: string | null | undefined, indentPt: number, fromTable = true) =>
+    wordTableEffectiveIndentPt({ measured: measuredOrigin, justification,
+      indentPt: rowIndent(justification, indentPt, fromTable) });
+  const tableIndentFromTable = !firstRowException?.indentAuthored;
+  const rowIndentPts = format.rows.map((row) => {
+    const ownException = !logicalProperties && row.exception?.indentAuthored === true;
+    return widthIndent(row.justification ?? table.jc,
+      ownException ? (row.exception?.indentPt ?? 0) : baseIndentPt,
+      !ownException && (logicalProperties ? tableIndentFromTable : true));
+  });
   const rowTranslationsPt = format.rows.map((row) => wordTableOriginTranslationPt({
     mode: state.mode, measured: measuredOrigin, justification: row.justification ?? table.jc,
-    indentPt: tableIndentPt,
+    indentPt: rowIndent(row.justification ?? table.jc, tableIndentPt, tableIndentFromTable),
     indentAuthored: logicalProperties ? origin.indentAuthored : firstRowException?.indentAuthored || table.tblInd != null,
     firstLeftMarginPt: origin.firstLeftMarginPt,
     rowLeftMarginPt: row.cells[0]?.originLeftMarginPt ?? 0,

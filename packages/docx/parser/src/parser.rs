@@ -15937,16 +15937,15 @@ fn parse_table_with_diagnostics(
     // §17.7.4 default table style); None only when the whole hierarchy omits
     // it. Layout distinguishes an authored indent from an omitted one under
     // `word-table-origin-compatibility`, so the style layer must survive here.
-    // §17.4.50 ignores tblInd when the resulting justification is not
-    // leading. The inherited style layer is dropped for such a table, so the
-    // style indent never shifts a centred/trailing table; a direct tblInd
-    // keeps its established contract (layout's word-table-origin-compatibility
-    // decides it per class).
-    let leading_jc = matches!(jc.as_str(), "left" | "start" | "both");
-    let tbl_ind = tbl_pr
+    // §17.4.50 ignores tblInd unless the resulting justification of each
+    // row (tblPrEx/jc, trPr/jc, then this table jc) is leading. Keep the
+    // inherited style value with its provenance so layout can drop it per
+    // row; a direct tblInd keeps its established per-class contract.
+    let direct_tbl_ind = tbl_pr
         .and_then(|p| child_w(p, "tblInd"))
-        .and_then(crate::styles::table_indent_pt)
-        .or(if leading_jc { tstyle.tbl_ind } else { None });
+        .and_then(crate::styles::table_indent_pt);
+    let tbl_ind_inherited = direct_tbl_ind.is_none() && tstyle.tbl_ind.is_some();
+    let tbl_ind = direct_tbl_ind.or(tstyle.tbl_ind);
 
     // ECMA-376 §17.4.52 w:tblLayout/@w:type — "fixed" | "autofit". Absent ⇒ None
     // (renderer applies the spec default "autofit").
@@ -16065,6 +16064,7 @@ fn parse_table_with_diagnostics(
         cell_margin_right: cm_right,
         jc,
         tbl_ind,
+        tbl_ind_inherited,
         layout,
         width_pt: tbl_w_pt,
         width_pct: tbl_w_pct,
@@ -18581,15 +18581,25 @@ mod tests {
                 &styles,
             )
         };
-        // §17.4.50: the inherited style indent is not applied to a
-        // non-leading table; a direct tblInd still is.
+        // §17.4.50: an inherited style indent keeps its provenance so layout
+        // can drop it for each non-leading row; a direct tblInd is not marked.
         let centered = table(r#"<w:tblStyle w:val="CenterChild"/>"#);
-        assert_eq!((centered.jc.as_str(), centered.tbl_ind), ("center", None));
         assert_eq!(
-            table(r#"<w:tblStyle w:val="CenterChild"/><w:tblInd w:w="100" w:type="dxa"/>"#).tbl_ind,
-            Some(5.0)
+            (
+                centered.jc.as_str(),
+                centered.tbl_ind,
+                centered.tbl_ind_inherited
+            ),
+            ("center", Some(36.0), true)
         );
-        assert_eq!(table(r#"<w:tblStyle w:val="RightChild"/>"#).tbl_ind, None);
+        assert_eq!(
+            {
+                let t =
+                    table(r#"<w:tblStyle w:val="CenterChild"/><w:tblInd w:w="100" w:type="dxa"/>"#);
+                (t.tbl_ind, t.tbl_ind_inherited)
+            },
+            (Some(5.0), false)
+        );
         assert_eq!(
             table(r#"<w:tblStyle w:val="Centered"/><w:jc w:val="left"/>"#).tbl_ind,
             Some(36.0)
