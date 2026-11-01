@@ -1241,6 +1241,7 @@ export class PptxPresentation {
             width,
             dpr,
             defaultTextColor: compact.defaultTextColor,
+          parsedTextChain: true,
             cjkFallback: this._cjkFallback,
             majorFont: compact.majorFont,
             minorFont: compact.minorFont,
