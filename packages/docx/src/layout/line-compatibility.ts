@@ -446,6 +446,23 @@ export const WORD_COLLAPSIBLE_LINE_EDGE_VISIBLE_FIT = defineCompatibilityRule({
   description: 'Library fitting uses the visible prefix, excluding a collapsible U+0020 edge separator. ST_Jc (§17.18.44) defines inter-word justification, not an edge-space admission charge. Word mode-14 mixed-format Latin output retains a naturally fitting prefix when only its edge separator exceeds the band; mode-15 compression controls use the same visible prefix. Canonical joining must not turn formatting-only source seams into different admission decisions. This replaces an unsupported separator-charge policy, without adding compression to older modes. RTL separately retains the complete advance because its right-edge origin can otherwise move visible LTR cells outside the band. Other glyphs and authored fixed-width/atomic units retain their existing fit contracts. Evidence: Word compatibility-mode 14 output in PR #1703, and the #1896 Windows sweep (Arial 10pt, a bold run before the line-end space): a line keeps its last word at 110.25pt and not at 110.0pt, the 110.06pt visible prefix, in mode 14 and in a mode-15 left-aligned line.',
 });
 
+export const WORD_LINE_END_SPACE_HANGS = defineCompatibilityRule({
+  id: 'word-line-end-space-hangs',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'justify-1934',
+    application: 'Microsoft Word',
+    version: '16.0.20527.20088',
+    platform: 'Windows',
+  },
+  description: 'The U+0020 and U+3000 spaces that end a left-to-right line (soft-wrapped, ended by a manual break, or paragraph-final) hang past it: they take no part in justification or in centre/right alignment, and Word paints no underline, double underline, strike-through, double strike-through, highlight or shading over them; with ulTrailSpace (§17.15.3.8) the hanging spaces keep all of these, clipped at the right edge of the band of the line (decorated wrapped and paragraph-final U+0020/U+3000 tails, both orders, space-only runs; right, centre and justified lines; with and without a linesAndChars grid, which changes nothing). Windows Word controls in compatibility modes unset, 11, 12, 14 and 15 (Times New Roman 12pt and Arial 11pt, plain, bold and larger runs, one or three trailing spaces, ideographic-space separators, a tab earlier on the line, spaces in their own decorated runs, a text box) end every justified line flush at the right margin (both, distribute, lowKashida and highKashida within 0.6pt; mediumKashida and thaiDistribute lines also end flush but Word breaks those Latin controls at other words, a separate line-breaking difference) and place centre/right-aligned lines by their visible text, wrapped, break-ended and final alike (one, three and ideographic trailing spaces before a break: right +3.2/+9.2/+12.1pt, centre half that, before this rule). Mode-15 justified lines already fit their visible width (WORD_JUSTIFIED_INTERWORD_COMPRESSION), which drops a line-end U+0020 only: there Word keeps a line-end U+3000 that fits inside the margin and hangs one that overflows it, a line-fit question outside this rule, so mode-15 justification keeps the fit of the line breaker. Paragraphs with wordWrap off (§17.3.1.45) keep every trailing space in the line, measured for U+0020, three U+0020 and U+3000 on right and centre lines, bordered or not, Latin and CJK, in modes unset and 15 (right: 3.0, 9.0, 12.0pt short of the margin). Right-to-left lines and other white space characters (NBSP, tab) keep their previous geometry. Underlines under a snapToChars grid keep WORD_SNAP_TO_CHARS_TERMINAL_UNDERLINE, observed on Word for Mac to cover an authored trailing space.',
+});
+
+/** Scope of {@link WORD_LINE_END_SPACE_HANGS}. */
+export function wordLineEndSpaceHangs(bidi: boolean, wordWrap: boolean): boolean {
+  return !bidi && wordWrap;
+}
+
 /** Visible-prefix projection of {@link WORD_COLLAPSIBLE_LINE_EDGE_VISIBLE_FIT}. */
 export function wordVisiblePrefixFitWidthPx(
   widthPx: number,

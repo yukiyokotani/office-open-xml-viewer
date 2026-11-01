@@ -27,9 +27,9 @@ import { shadowInkBounds } from './vml-shadow.js';
 import { createParagraphAnchorReferenceWorkBudget } from './resource-budgets.js';
 import { addExactRational, exactRationalFromNumber, exactRationalToNumberUp } from './exact-geometry.js';
 import { revisionIsOmitted } from './revision-visibility.js';
-import { wordArabicTextKerned, wordEastAsianAutoSpaceJustifiedMaximumPt, wordKerningApplies } from './line-compatibility.js';
+import { wordArabicTextKerned, wordEastAsianAutoSpaceJustifiedMaximumPt, wordKerningApplies, wordLineEndSpaceHangs } from './line-compatibility.js';
 import type { LineGapPlan } from '../line-breaker/line-gaps.js';
-import { distributeLineSlack as distributeProportionalSlack } from '@silurus/ooxml-core';
+import { distributeLineSlack as distributeProportionalSlack, type LineGap } from '@silurus/ooxml-core';
 import { specifiedTextLineMetrics, specifiedTextParagraphIsHomogeneous } from './specified-line-spacing.js';
 import { wordTextBoxVerticalMode } from './compatibility.js';
 import {
@@ -410,6 +410,10 @@ export interface PlanLineInput {
   readonly stretchLastLine: boolean;
   /** Exact lines paint run shading through the authored line box. */
   readonly exactLineSpacing?: boolean;
+  /** §17.15.3.8 ulTrailSpace: hanging line-end spaces keep their underline. */
+  readonly ulTrailSpace?: boolean;
+  /** §17.3.1.45 wordWrap off: line-end spaces do not hang. */
+  readonly wordWrap?: false;
   readonly firstLineIndentPt?: number;
   readonly numbering?: Readonly<{
     /** Resolved logical-start offset of the first-line body after the marker. */
@@ -436,10 +440,33 @@ function segmentWidth(segment: MeasuredLinePlanSegment): number {
   return finiteNonNegative(segment.measuredWidthPt, 'segment.measuredWidthPt');
 }
 
-function distributionSegments(segments: readonly MeasuredLinePlanSegment[]): readonly { text?: string }[] {
-  return segments.map((segment) => segment.kind === 'text' && !segment.fixedPitch
+function distributionSegments(
+  segments: readonly MeasuredLinePlanSegment[],
+  bidi: boolean,
+  wordWrap: boolean,
+): readonly { text?: string }[] {
+  // Zero-advance anchor hosts among the line's trailing hanging spaces are no
+  // content cell: the spaces stay line-end spaces (WORD_LINE_END_SPACE_HANGS).
+  // Elsewhere, and on lines outside the rule, a host keeps its cell, as the
+  // mode-15 gap plan counts it.
+  let suffixStart = segments.length;
+  let hanging = false;
+  while (suffixStart > 0) {
+    const segment = segments[suffixStart - 1];
+    if (segment?.kind === 'anchor-host') {
+      suffixStart -= 1;
+      continue;
+    }
+    if (segment?.kind !== 'text') break;
+    const visible = hangingSpaceVisibleLength(segment.text);
+    if (visible < segment.text.length) hanging = true;
+    if (visible > 0) break;
+    suffixStart -= 1;
+  }
+  const hostsAreHanging = hanging && wordLineEndSpaceHangs(bidi, wordWrap);
+  return segments.map((segment, index) => segment.kind === 'text' && !segment.fixedPitch
     ? { text: segment.text }
-    : {});
+    : hostsAreHanging && index >= suffixStart && segment.kind === 'anchor-host' ? { text: '' } : {});
 }
 
 function kashidaLevel(alignment: string | undefined): KashidaLevel | null {
@@ -972,6 +999,102 @@ function trimTerminalUnderline(
   };
 }
 
+/** UTF-16 length of `text` without the trailing U+0020/U+3000 spaces that
+ * hang under WORD_LINE_END_SPACE_HANGS. */
+function hangingSpaceVisibleLength(
+  text: string,
+  hangs: (code: number) => boolean = (code) => code === 0x20 || code === 0x3000,
+): number {
+  // A backward scan: a trailing-anchored regex rescans interior space runs.
+  let end = text.length;
+  while (end > 0 && hangs(text.charCodeAt(end - 1))) end -= 1;
+  return end;
+}
+
+/** `gaps` without the opportunities among a line's hanging line-end spaces
+ * (WORD_LINE_END_SPACE_HANGS): those after the last visible character, with
+ * zero-advance anchor hosts looked through. */
+function withoutHangingSpaceGaps(
+  gaps: readonly LineGap[],
+  segments: readonly MeasuredLinePlanSegment[],
+): LineGap[] {
+  let last = segments.length - 1;
+  let visibleCodePoints = 0;
+  for (; last >= 0; last -= 1) {
+    const segment = segments[last]!;
+    if (segment.kind === 'anchor-host') continue;
+    if (segment.kind !== 'text') break;
+    const visible = hangingSpaceVisibleLength(segment.text);
+    if (visible > 0) {
+      visibleCodePoints = [...segment.text.slice(0, visible)].length;
+      break;
+    }
+  }
+  // A gap at the last visible character opens only towards the hanging
+  // suffix, the line's end.
+  return gaps.filter((gap) => gap.segIndex < last
+    || (gap.segIndex === last && gap.cpOffset < visibleCodePoints - 1));
+}
+
+/** `placement` without decoration over its text after `visible` UTF-16
+ * units: the hanging line-end spaces of WORD_LINE_END_SPACE_HANGS. */
+function withoutHangingSpaceDecoration(
+  placement: TextPlacement,
+  visible: number,
+  keepUnderline: boolean,
+): TextPlacement {
+  const trimPt = placement.clusters
+    .filter((cluster) => cluster.range.start >= placement.range.start + visible)
+    .reduce((sum, cluster) => sum + cluster.advancePt, 0)
+    + (placement.ownedTrailingSlackPt ?? 0);
+  if (trimPt <= 0) return placement;
+  const kept = (decoration: TextDecorationLayout): boolean =>
+    decoration.kind === 'overline' || (keepUnderline && decoration.kind === 'underline');
+  const decorations = visible === 0
+    ? placement.decorations?.filter(kept)
+    : placement.decorations?.map((decoration) => kept(decoration)
+      ? decoration
+      : trimTerminalUnderline(decoration, trimPt));
+  const narrowed = (rect: LayoutRect): LayoutRect => ({
+    ...rect, widthPt: Math.max(0, rect.widthPt - trimPt),
+  });
+  // An empty list paints nothing; an absent one falls back to the bounds.
+  const highlightFragments = visible === 0
+    ? (placement.highlightFragments ? [] : undefined)
+    : placement.highlightFragments?.map((fragment) => ({ ...fragment, rect: narrowed(fragment.rect) }));
+  return {
+    ...placement,
+    ...(decorations ? { decorations } : {}),
+    ...(highlightFragments ? { highlightFragments } : {}),
+    ...(placement.highlightBounds ? { highlightBounds: narrowed(placement.highlightBounds) } : {}),
+  };
+}
+
+/** `placement` with its decorations and highlight ending at `endPt` at the
+ * latest: ulTrailSpace keeps hanging spaces decorated within the line's band
+ * (WORD_LINE_END_SPACE_HANGS). */
+function withDecorationClippedAt(placement: TextPlacement, endPt: number): TextPlacement {
+  const clipped = (rect: LayoutRect): LayoutRect => rect.xPt + rect.widthPt > endPt
+    ? { ...rect, widthPt: Math.max(0, endPt - rect.xPt) }
+    : rect;
+  return {
+    ...placement,
+    ...(placement.decorations ? {
+      // A decoration wholly past the edge is dropped: a zero-width wave
+      // path would still paint a vertical stroke.
+      decorations: placement.decorations
+        .filter((decoration) => decoration.from.xPt < endPt)
+        .map((decoration) => decoration.to.xPt > endPt
+          ? trimTerminalUnderline(decoration, decoration.to.xPt - endPt)
+          : decoration),
+    } : {}),
+    ...(placement.highlightFragments ? {
+      highlightFragments: placement.highlightFragments.map((fragment) => ({ ...fragment, rect: clipped(fragment.rect) })),
+    } : {}),
+    ...(placement.highlightBounds ? { highlightBounds: clipped(placement.highlightBounds) } : {}),
+  };
+}
+
 /** Adjacent underlined source runs form one visual rule. Use a common
  * clearance below every glyph in the contiguous span; acquiring each run in
  * isolation instead creates stepped solid rules and restarts dash/wave phase
@@ -1158,6 +1281,15 @@ export function planLine(input: PlanLineInput): LineLayout {
       lineSlackPt = distribution.residualPx;
     }
   }
+  // WORD_LINE_END_SPACE_HANGS: the spaces ending a line stand outside
+  // justification and centre/right alignment.
+  const hangingLineEndSpacePt = wordLineEndSpaceHangs(bidi, input.wordWrap !== false)
+    ? trailingAdvancePt(segments, hangingSpaceVisibleLength)
+    : 0;
+  // Its U+0020 part, which the mode-15 visible fit also drops.
+  const hangingLatinSpacePt = hangingLineEndSpacePt > 0
+    ? trailingAdvancePt(segments, (text) => hangingSpaceVisibleLength(text, (code) => code === 0x20))
+    : 0;
   const lastDrawnIndex = visual.order.at(-1) ?? -1;
   // `word-justification-leading-indent-exclusion`
   let firstContentIndex = 0;
@@ -1169,7 +1301,7 @@ export function planLine(input: PlanLineInput): LineLayout {
   let stretchByIndex: ReadonlyMap<number, SegStretch> | null = null;
   let perGapPt = 0;
   let distributedWidthPt = 0;
-  const distSegments = distributionSegments(segments);
+  const distSegments = distributionSegments(segments, bidi, input.wordWrap !== false);
   if (line.justifiedCompressionPt !== undefined) {
     const model = line.gapPlan;
     if (!model) throw new Error('Justified line is missing its retained gap plan');
@@ -1192,9 +1324,14 @@ export function planLine(input: PlanLineInput): LineLayout {
           gapModel: { gaps: model.gaps, state: model.scan },
           proportional: true,
           unweightedExpansion: {
-            gaps: model.expansionGaps,
+            gaps: hangingLineEndSpacePt > 0
+              ? withoutHangingSpaceGaps(model.expansionGaps, segments)
+              : model.expansionGaps,
+            // The fit's visible width drops a line-end U+0020
+            // (WORD_LINE_END_SPACE_HANGS); the unweighted expansion does too,
+            // looking through zero-advance anchor hosts.
             slack: effectiveAvailableWidthPt - physicalStartOffsetPt - retainedNaturalWidthPt
-              - autoSpaceTakenPt,
+              + hangingLatinSpacePt - autoSpaceTakenPt,
           },
         },
       ), segments);
@@ -1211,9 +1348,10 @@ export function planLine(input: PlanLineInput): LineLayout {
       }
     }
   } else if (applyJustify) {
-    const autoSpace = justifiedAutoSpaceExpansion(segments, lineSlackPt);
+    const justifySlackPt = lineSlackPt + hangingLineEndSpacePt;
+    const autoSpace = justifiedAutoSpaceExpansion(segments, justifySlackPt);
     const autoSpaceTakenPt = autoSpace?.takenPt ?? 0;
-    const residualSlackPt = lineSlackPt - autoSpaceTakenPt;
+    const residualSlackPt = justifySlackPt - autoSpaceTakenPt;
     const distribution = keepGraphemeSafeCuts(distributeLineSlack(
       distSegments, residualSlackPt, firstContentIndex,
       bidi ? lastDrawnIndex : segments.length,
@@ -1229,19 +1367,11 @@ export function planLine(input: PlanLineInput): LineLayout {
   const drawnWidthPt = naturalWidthPt + distributedWidthPt;
   // WORD_FLOAT_GAP_FLOW aligns the visible word edge, while
   // the trailing separator remains source-owned. Its advance must not shift
-  // centred/right-aligned gap text. Preserve ordinary lines' existing policy.
-  let trailingSeparatorPt = 0;
-  if (line.availableWidthPt < input.availableWidthPt && !bidi) {
-    for (let index = segments.length - 1; index >= 0; index -= 1) {
-      const segment = segments[index];
-      if (segment?.kind !== 'text') break;
-      const visibleLength = segment.text.trimEnd().length;
-      trailingSeparatorPt += segment.clusters.filter(cluster =>
-        cluster.range.start >= segment.range.start + visibleLength)
-        .reduce((sum, cluster) => sum + cluster.advancePt, 0);
-      if (visibleLength > 0) break;
-    }
-  }
+  // centred/right-aligned gap text. Other soft-wrapped lines exclude their
+  // trailing U+0020 (WORD_LINE_END_SPACE_HANGS).
+  const trailingSeparatorPt = line.availableWidthPt < input.availableWidthPt && !bidi
+    ? trailingAdvancePt(segments, (text) => text.trimEnd().length)
+    : hangingLineEndSpacePt;
   const alignmentSlackPt = lineSlackPt - distributedWidthPt + trailingSeparatorPt;
   const naturalAlignmentOffsetPt = edge === 'right'
     ? alignmentSlackPt
@@ -1468,9 +1598,32 @@ export function planLine(input: PlanLineInput): LineLayout {
     xPt += widthPt;
     if (stretch?.trailingGap) xPt += stretch.trailingDelta ?? perGapPt;
   }
+  // WORD_LINE_END_SPACE_HANGS: no decoration over the hanging line-end
+  // spaces; with ulTrailSpace (§17.15.3.8) they keep every decoration up to
+  // the line's band edge. A snapToChars underline keeps
+  // WORD_SNAP_TO_CHARS_TERMINAL_UNDERLINE.
+  const keepUnderline = segments.some((segment) =>
+    segment.kind === 'text' && segment.decorationTerminalAdvancePt !== undefined);
+  if (hangingLineEndSpacePt > 0) {
+    const bandEndPt = lineLeftPt + availableWidthPt;
+    for (let index = placements.length - 1; index >= 0; index -= 1) {
+      const placement = placements[index];
+      if (placement?.kind === 'anchor-host') continue;
+      if (placement?.kind !== 'text') break;
+      const visible = hangingSpaceVisibleLength(placement.text);
+      placements[index] = input.ulTrailSpace === true
+        ? withDecorationClippedAt(placement, bandEndPt)
+        : withoutHangingSpaceDecoration(placement, visible, keepUnderline);
+      if (visible > 0) break;
+    }
+  }
   for (const [placementIndex, trimPt] of terminalDecorationTrims) {
     const placement = placements[placementIndex];
     if (placement?.kind !== 'text' || !placement.decorations) continue;
+    // §17.15.3.8 ulTrailSpace: an underline ending in trailing spaces keeps
+    // them, whatever the grid's terminal ink extent.
+    if (input.ulTrailSpace === true
+      && placement.text.trimEnd().length < placement.text.length) continue;
     const next = placements[placementIndex + 1];
     const decorations = placement.decorations.map((decoration) => {
       if (decoration.kind !== 'underline') return decoration;
@@ -3081,6 +3234,7 @@ function planMeasuredLines(
   paragraphMarkShapeInput?: NumberingMarkerShapeInput,
   /** Owner section's counter-turn for upright inline graphics. */
   resourceOrientation?: import('./types.js').UprightResourceOrientation,
+  ulTrailSpace = false,
 ): readonly LineLayout[] {
   // WORD_GRID_LINE_CONTENT_FIT_ADMISSION covers plain captions only. Decide
   // authored paragraph eligibility before continuation/keep-next slicing removes
@@ -3351,6 +3505,8 @@ function planMeasuredLines(
         === (measured.lines.at(-1)!.layout.physicalLineIndex ?? measured.lines.length - 1),
       stretchLastLine: context.stretchLastLine,
       exactLineSpacing: context.lineSpacing?.rule === 'exact',
+      ...(ulTrailSpace ? { ulTrailSpace } : {}),
+      ...(context.wordWrap === false ? { wordWrap: false } : {}),
       firstLineIndentPt: context.firstIndentPt,
       ...(lineIndex === 0 && numberingPlan
         ? { numbering: { bodyOffsetPt: raw.numberingFirstLine?.lineStartOffsetPx ?? numberingPlan.bodyOffsetPt } }
@@ -6203,6 +6359,7 @@ function projectAcquiredParagraphLines(
       options.environment.verticalPageFrame,
       options.environment.pageWritingMode,
     ),
+    options.environment.ulTrailSpace === true,
   );
   if (options.sourceRangeStart !== undefined) {
     lines = rebaseMeasuredLineRanges(lines, options.sourceRangeStart);
@@ -6825,4 +6982,26 @@ export function sliceParagraphLayout(
         : {}),
     continuation,
   }, acquired, rebasedSelected);
+}
+
+
+/** Advance of a line's trailing separator: the clusters after each final text
+ * segment's visible prefix (`visibleLength`), across trailing segments that
+ * hold only separators and zero-advance anchor hosts. */
+function trailingAdvancePt(
+  segments: readonly MeasuredLinePlanSegment[],
+  visibleLength: (text: string) => number,
+): number {
+  let advancePt = 0;
+  for (let index = segments.length - 1; index >= 0; index -= 1) {
+    const segment = segments[index];
+    if (segment?.kind === 'anchor-host') continue;
+    if (segment?.kind !== 'text') break;
+    const visible = visibleLength(segment.text);
+    advancePt += segment.clusters.filter(cluster =>
+      cluster.range.start >= segment.range.start + visible)
+      .reduce((sum, cluster) => sum + cluster.advancePt, 0);
+    if (visible > 0) break;
+  }
+  return advancePt;
 }

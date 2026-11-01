@@ -552,6 +552,10 @@ pub struct DocumentSettings {
     /// document-grid line pitch to text in table cells.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub adjust_line_height_in_table: Option<bool>,
+    /// §17.15.3.8 `w:compat` / `w:ulTrailSpace` — underline the trailing
+    /// spaces of a line.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ul_trail_space: Option<bool>,
     /// [MS-DOCX] `w:compat/w:compatSetting[@w:name="compatibilityMode"]`
     /// (`@w:uri="http://schemas.microsoft.com/office/word"`) — the Word
     /// version whose layout rules the document uses (for example 14 or 15).
@@ -1236,6 +1240,10 @@ pub struct DocParagraph {
         default
     )]
     pub auto_space_dn: Option<bool>,
+    /// ECMA-376 §17.3.1.45 `w:wordWrap` resolved through the style cascade:
+    /// `Some(false)` when disabled; omitted (`None`) means the default, on.
+    #[serde(rename = "wordWrap", skip_serializing_if = "Option::is_none", default)]
+    pub word_wrap: Option<bool>,
     /// ECMA-376 §17.3.1.1 `w:adjustRightInd` — permit automatic right-indent
     /// adjustment when a document grid is active. The style-hierarchy default
     /// is true; true is omitted from JSON and the TypeScript model therefore

@@ -125,6 +125,7 @@ function document(
     runs?: DocRun[];
     bidi?: boolean;
     textDirection?: string;
+    ulTrailSpace?: boolean;
   }> = {},
 ): DocxDocumentModel {
   const paragraph: DocParagraph = {
@@ -166,6 +167,7 @@ function document(
     headers: { default: null, first: null, even: null },
     footers: { default: null, first: null, even: null },
     fontFamilyClasses: { 'Test Mincho': 'roman' },
+    ...(options.ulTrailSpace ? { settings: { ulTrailSpace: true } } : {}),
   } as unknown as DocxDocumentModel;
 }
 
@@ -240,6 +242,24 @@ describe('snap-to-chars-terminal-underline-boundaries', () => {
     const end = (lines: readonly StrokeLine[]) => lines
       .filter((line) => Math.abs(line.y1 - line.y2) < 1e-6)[0]!.x2;
     expect(end(spaced.strokes)).toBeGreaterThan(end(plain.strokes));
+  });
+
+  it('keeps the underline through trailing spaces under ulTrailSpace', async () => {
+    // §17.15.3.8: ulTrailSpace underlines trailing spaces; the terminal ink
+    // extent must not cut them.
+    const spaced = recordingCanvas();
+    const underlined = recordingCanvas();
+    await renderDocumentToCanvas(document('あ '), spaced.canvas, 0, { dpr: 1, width: 80 });
+    await renderDocumentToCanvas(document('あ ', { ulTrailSpace: true }), underlined.canvas, 0, { dpr: 1, width: 80 });
+    const end = (lines: readonly StrokeLine[]) => lines
+      .filter((line) => Math.abs(line.y1 - line.y2) < 1e-6)
+      .reduce((max, line) => Math.max(max, line.x2), 0);
+    expect(end(underlined.strokes)).toBeGreaterThan(end(spaced.strokes));
+    expect(end(underlined.strokes)).toBeCloseTo(40, 6);
+    // Every trailing space character, NBSP included.
+    const nbsp = recordingCanvas();
+    await renderDocumentToCanvas(document('あ\u00a0', { ulTrailSpace: true }), nbsp.canvas, 0, { dpr: 1, width: 80 });
+    expect(end(nbsp.strokes)).toBeCloseTo(40, 6);
   });
 
   it('trims each authored hard-break line at its final glyph', async () => {

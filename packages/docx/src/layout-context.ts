@@ -44,6 +44,8 @@ export interface DocumentLayoutSettings {
     readonly balanceSingleByteDoubleByteWidth: boolean;
     readonly lineWrapLikeWord6: boolean;
     readonly enableOpenTypeFeatures: boolean;
+    /** §17.15.3.8 ulTrailSpace: underline trailing spaces. */
+    readonly ulTrailSpace: boolean;
     /** compatSetting compatibilityMode; undefined when the document omits it. */
     readonly compatibilityMode?: number;
   };
@@ -142,6 +144,8 @@ export interface ParagraphLayoutContext {
   readonly defaultTabPt: number;
   /** ECMA-376 §17.3.1.21 — omission on the source paragraph resolves true. */
   readonly overflowPunct?: boolean;
+  /** ECMA-376 §17.3.1.45 wordWrap; present only when disabled. */
+  readonly wordWrap?: false;
   /** Effective marker geometry acquired with the paragraph context and reused
    * by retained layout instead of shaping the marker a second time. */
   readonly numberingMarkerGeometry?: NumberingMarkerGeometry;
@@ -203,6 +207,7 @@ export function resolveDocumentLayoutSettings(
         document.settings?.balanceSingleByteDoubleByteWidth ?? false,
       lineWrapLikeWord6: document.settings?.lineWrapLikeWord6 ?? false,
       enableOpenTypeFeatures: document.settings?.enableOpenTypeFeatures ?? false,
+      ulTrailSpace: document.settings?.ulTrailSpace ?? false,
       ...(document.settings?.compatibilityMode !== undefined
         ? { compatibilityMode: document.settings.compatibilityMode }
         : {}),
@@ -382,6 +387,7 @@ export function resolveParagraphLayoutContext(
     kinsoku: settings.kinsoku,
     defaultTabPt: settings.defaultTabPt,
     overflowPunct: paragraph.overflowPunct !== false,
+    ...(paragraph.wordWrap === false ? { wordWrap: false as const } : {}),
     mathDefJc: settings.mathDefJc,
   };
 }
