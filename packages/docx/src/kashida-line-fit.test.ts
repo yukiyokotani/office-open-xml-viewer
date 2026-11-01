@@ -287,4 +287,41 @@ describe('WORD_RTL_JUSTIFIED_VISIBLE_FIT', () => {
       expect(end(final!)).toBeCloseTo(380);
     }
   });
+  it('charges the right-to-left line-end space where it cannot hang (wordWrap off)', () => {
+    const rtl = { bidi: true, indentRight: 15, wordWrap: false } as Partial<DocParagraph>;
+    const hebrew = Array.from({ length: 20 }, () => '\u05d0\u05d1\u05d2\u05d3').join(' ');
+    for (const settings of MODES) {
+      const [first] = lines(para([textRun(hebrew)], 'both', rtl), settings);
+      expect(wordsOn(first!)).toBe(6);
+      expect(start(first!)).toBeGreaterThanOrEqual(35 - 1e-6);
+      expect(end(first!)).toBeLessThanOrEqual(380 + 1e-6);
+    }
+  });
+
+  it('resolves split line-end spaces on the sides where each is drawn', () => {
+    // Seven Latin words fill 340 pt of a 345 pt right-to-left band; the line
+    // ends with the seventh word's space and a separately coloured space.
+    const rtl = { bidi: true, indentRight: 15 } as Partial<DocParagraph>;
+    const seven = Array.from({ length: 7 }, () => 'aaaa').join(' ');
+    for (const settings of MODES) {
+      const [first] = lines(para([textRun(`${seven} `), textRun(' ', { color: 'FF0000' }), textRun('bbbb cccc')], 'both', rtl), settings);
+      expect(wordsOn(first!)).toBe(7);
+      expect(start(first!)).toBeCloseTo(35);
+      expect(end(first!)).toBeCloseTo(380);
+    }
+  });
+
+  it('excludes a line-end space suffix split across runs from optional-hyphen fitting', () => {
+    // A 345 pt band from x = 20: 150 pt + space + a 180 pt word holding a
+    // soft hyphen is 340 pt visible; its space and a separately coloured one follow.
+    const ltr = { indentRight: 15 } as Partial<DocParagraph>;
+    const soft = textRun('', { optionalHyphen: true } as Partial<DocxTextRun>);
+    for (const settings of MODES) {
+      const [first] = lines(para([textRun(`${'a'.repeat(15)} ${'b'.repeat(9)}`), soft, textRun(`${'b'.repeat(9)} `),
+        textRun(' ', { color: 'FF0000' }), textRun('cccc')], 'both', ltr), settings);
+      expect(characters(first!).map(({ character }) => character).join('')).not.toContain('-');
+      expect(characters(first!)).toHaveLength(33);
+      expect(end(first!)).toBeCloseTo(365);
+    }
+  });
 });

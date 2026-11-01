@@ -672,6 +672,62 @@ function centresWithoutOpportunity(
     || enumerateGaps(distSegments, { firstContentSi: firstContentIndex, lastDrawnSi: Infinity }).gaps.length === 0;
 }
 
+interface RtlInteriorSpace {
+  /** Segment whose trailing gap moves the next drawn segment over the space. */
+  readonly owner: number;
+  readonly widthPt: number;
+}
+
+/** WORD_RTL_JUSTIFIED_VISIBLE_FIT: where a right-to-left line's line-end
+ * U+0020 spaces are drawn. Spaces at the line's right extreme (spaces-only
+ * segments drawn rightmost, then the right end of a left-to-right segment)
+ * and at its left extreme (spaces-only segments drawn leftmost, then the left
+ * end of a right-to-left segment) can hang; the others are drawn between
+ * segments. The single resolver for justification, placement and absorption. */
+function resolveRtlLineEndSpaces(
+  segments: readonly MeasuredLinePlanSegment[],
+  visual: Readonly<{ order: readonly number[]; rtl: readonly boolean[] }>,
+): { rightPt: number; leftPt: number; interior: RtlInteriorSpace[] } {
+  const trailing = new Map<number, { widthPt: number; spacesOnly: boolean }>();
+  for (let index = segments.length - 1; index >= 0; index -= 1) {
+    const segment = segments[index]!;
+    if (segment.kind === 'anchor-host') continue;
+    if (segment.kind !== 'text') break;
+    const visible = hangingSpaceVisibleLength(segment.text, (code) => code === 0x20);
+    const widthPt = segment.clusters
+      .filter((cluster) => cluster.range.start >= segment.range.start + visible)
+      .reduce((sum, cluster) => sum + cluster.advancePt, 0);
+    if (widthPt > 0) trailing.set(index, { widthPt, spacesOnly: visible === 0 });
+    if (visible > 0) break;
+  }
+  const order = visual.order.filter((index) => segments[index]?.kind !== 'anchor-host');
+  const hung = new Set<number>();
+  // Walk inward from one extreme: spaces-only segments hang there; the first
+  // visible segment hangs its spaces only when it draws them on this side.
+  const hangFrom = (positions: readonly number[], drawsSpacesHere: (index: number) => boolean): number => {
+    let widthPt = 0;
+    for (const index of positions) {
+      const space = trailing.get(index);
+      if (!space || hung.has(index)) break;
+      if (!space.spacesOnly && !drawsSpacesHere(index)) break;
+      widthPt += space.widthPt;
+      hung.add(index);
+      if (!space.spacesOnly) break;
+    }
+    return widthPt;
+  };
+  const rightPt = hangFrom([...order].reverse(), (index) => visual.rtl[index] !== true);
+  const leftPt = hangFrom(order, (index) => visual.rtl[index] === true);
+  const interior: RtlInteriorSpace[] = [];
+  for (const [index, { widthPt, spacesOnly }] of trailing) {
+    if (hung.has(index)) continue;
+    const position = order.indexOf(index);
+    const owner = spacesOnly || visual.rtl[index] !== true ? index : order[position - 1];
+    if (owner !== undefined) interior.push({ owner, widthPt });
+  }
+  return { rightPt, leftPt, interior };
+}
+
 function kashidaLevel(alignment: string | undefined): KashidaLevel | null {
   if (alignment === 'lowKashida') return 'low';
   if (alignment === 'mediumKashida') return 'medium';
@@ -1447,27 +1503,16 @@ export function planLine(input: PlanLineInput): LineLayout {
   // WORD_RTL_JUSTIFIED_VISIBLE_FIT: the breaker admitted this right-to-left
   // line by its visible prefix, so its line-end U+0020 hangs past the line's
   // end edge and the visible text keeps the start edge.
-  const rtlVisibleEdge = input.baseRtl === true && edge === 'justify'
-    && input.displayMathJustification === undefined
-    && wordRtlJustifiedVisibleFitApplies(input.alignment);
-  // The space hangs on the side where it is drawn: the right end of a
-  // left-to-right segment drawn rightmost (a Latin line in a right-to-left
-  // paragraph), the left end of a right-to-left segment drawn leftmost. A
-  // space drawn between other segments cannot hang and stays in the line.
-  let lastTextIndex = segments.length - 1;
-  while (lastTextIndex >= 0 && !(segments[lastTextIndex]!.kind === 'text'
-    && (segments[lastTextIndex] as { text: string }).text !== '')) lastTextIndex -= 1;
-  const rtlLineEndSpacePt = rtlVisibleEdge && input.wordWrap !== false && lastTextIndex >= 0
-    ? trailingAdvancePt(segments, (text) => hangingSpaceVisibleLength(text, (code) => code === 0x20))
-    : 0;
-  // A segment of spaces alone is drawn wherever the bidi order puts it.
-  const spacesOnly = lastTextIndex >= 0 && segments[lastTextIndex]!.kind === 'text'
-    && !/\S/u.test((segments[lastTextIndex] as { text: string }).text);
-  const rtlHangSide = rtlLineEndSpacePt <= 0 ? null
-    : visual.order.at(-1) === lastTextIndex && (spacesOnly || visual.rtl[lastTextIndex] !== true) ? 'right'
-      : visual.order[0] === lastTextIndex && (spacesOnly || visual.rtl[lastTextIndex] === true) ? 'left'
-        : null;
-  const rtlHangingSpacePt = rtlHangSide === null ? 0 : rtlLineEndSpacePt;
+  // The breaker's gate (wordJustifiedLineFit) is the same helper; a display
+  // math line holds no line-end space.
+  const rtlVisibleEdge = input.displayMathJustification === undefined
+    && wordRtlJustifiedVisibleFitApplies(input.alignment, input.baseRtl === true, input.wordWrap !== false);
+  // The line-end spaces hang on the side where they are drawn; spaces drawn
+  // between other segments cannot hang and stay in the line.
+  const rtlLineEnd = rtlVisibleEdge
+    ? resolveRtlLineEndSpaces(segments, visual)
+    : { rightPt: 0, leftPt: 0, interior: [] as RtlInteriorSpace[] };
+  const rtlHangingSpacePt = rtlLineEnd.rightPt + rtlLineEnd.leftPt;
   const kashida = applyJustify ? kashidaLevel(input.alignment) : null;
   if (kashida && lineSlackPt + rtlHangingSpacePt > 0) {
     // Kashida rewrites one contextual paint operation. A segment already split
@@ -1644,15 +1689,22 @@ export function planLine(input: PlanLineInput): LineLayout {
   }
 
   // WORD_RTL_JUSTIFIED_VISIBLE_FIT admitted this line by its visible width.
-  // A line-end space drawn between segments cannot hang, so whatever overflow
-  // remains is absorbed into that space: the next segment on its drawn side
-  // moves over it and the visible text stays inside the band.
-  if (rtlVisibleEdge && rtlHangSide === null && rtlLineEndSpacePt > 0) {
+  // A justified line hangs its line-end spaces outside the band in full; an
+  // unjustified one keeps them inside while they fit and hangs only the
+  // overflow, right side first. Overflow left after hanging is absorbed into
+  // the spaces drawn between segments: the next segment on each one's drawn
+  // side moves over it, so the visible text stays inside the band.
+  let rtlRightHangPt = 0;
+  if (rtlVisibleEdge) {
     const overflowPt = distributedWidthPt - lineSlackPt;
-    const position = visual.order.indexOf(lastTextIndex);
-    const owner = visual.rtl[lastTextIndex] === true ? visual.order[position - 1] : lastTextIndex;
-    if (overflowPt > 1e-9 && owner !== undefined) {
-      const absorbPt = Math.min(overflowPt, rtlLineEndSpacePt);
+    rtlRightHangPt = applyJustify ? rtlLineEnd.rightPt : Math.min(Math.max(0, overflowPt), rtlLineEnd.rightPt);
+    const leftHangPt = applyJustify
+      ? rtlLineEnd.leftPt
+      : Math.min(Math.max(0, overflowPt - rtlRightHangPt), rtlLineEnd.leftPt);
+    let residualPt = overflowPt - rtlRightHangPt - leftHangPt;
+    for (const { owner, widthPt } of rtlLineEnd.interior) {
+      if (!(residualPt > 1e-9)) break;
+      const absorbPt = Math.min(residualPt, widthPt);
       const merged = new Map(stretchByIndex ?? []);
       const previous = merged.get(owner);
       const ownedPt = previous?.trailingGap ? previous.trailingDelta ?? perGapPt : 0;
@@ -1665,6 +1717,7 @@ export function planLine(input: PlanLineInput): LineLayout {
       });
       stretchByIndex = merged;
       distributedWidthPt -= absorbPt;
+      residualPt -= absorbPt;
     }
   }
   const drawnWidthPt = naturalWidthPt + distributedWidthPt;
@@ -1682,12 +1735,9 @@ export function planLine(input: PlanLineInput): LineLayout {
       ? alignmentSlackPt / 2
       : edge === 'justify' && input.baseRtl && (rtlVisibleEdge || !applyJustify
         || ((!softWrapped || softLineSpacesOnly) && distributedWidthPt <= 0))
-        ? rtlHangSide === 'right'
-          // A justified line hangs the space past the start edge; an
-          // unjustified one keeps it inside the band while it fits there
-          // (blk-0898-kfit6 final lines) and otherwise starts at the band.
-          ? applyJustify ? alignmentSlackPt + rtlHangingSpacePt : Math.max(alignmentSlackPt, 0)
-          : alignmentSlackPt
+        // Right-hanging line-end spaces pass the start edge; the visible text
+        // keeps it (blk-0898-kfit6 final lines keep their space inside).
+        ? alignmentSlackPt + rtlRightHangPt
         : 0;
   const lineStartPt = lineLeftPt + physicalStartOffsetPt;
   const alignmentOffsetPt = input.decimalAutoTabPt === undefined

@@ -635,6 +635,18 @@ function alignedTabCellAvailW(context: BreakOpportunityIteratorContext): number 
   return lineBandW(context) + context.breakerState.lineMarginExtension;
 }
 
+/** Whether a tab's cell aligns to its stop (right, centre, decimal or an
+ * aligned positional tab) rather than starting there: such a cell takes no
+ * WORD_KASHIDA_LINE_FIT reserve, in either direction. */
+function tabCellIsAligned(
+  seg: LayoutTabSeg,
+  stop: () => { alignment: Parameters<typeof tabAlignmentRole>[0] } | null | undefined,
+): boolean {
+  if (seg.ptab) return seg.ptab.alignment !== 'left';
+  const resolved = stop();
+  return resolved !== null && resolved !== undefined && tabAlignmentRole(resolved.alignment) !== 'leading';
+}
+
 /** Whether WORD_KASHIDA_LINE_FIT narrows this paragraph's fit width. */
 function lineFitReduces(context: BreakOpportunityIteratorContext): boolean {
   const fit = context.lineFit;
@@ -749,15 +761,13 @@ function processTabSegment(
     }
     seg.measuredWidth = 0;
     addToLine(seg, 0, seg.fontSize, seg.fontSize * scale * SYNTHETIC_ASCENT_EM, seg.fontSize * scale * SYNTHETIC_DESCENT_EM);
-    // WORD_KASHIDA_LINE_FIT reserves nothing for an aligned cell: an end or
-    // centre stop's cell is admitted against the band, as left-to-right.
-    if (!seg.ptab && lineFitReduces(context)) {
-      const stop = nextLineTabStop(startPen + breakerState.currentWidth,
-        context.bidiCustomStopsPx, context.bidiIntervalPx, frame.leadingShift);
-      if (stop && tabAlignmentRole(stop.alignment) !== 'leading'
-        && context.fitsMeasuredWidth(breakerState.currentWidth + tabFollowingMetrics().totalWidth, lineBandW(context))) {
-        commitAlignedTabCell(context);
-      }
+    // WORD_KASHIDA_LINE_FIT reserves nothing for an aligned cell: an end,
+    // centre or decimal stop's cell, or a right or centre positional tab's,
+    // is admitted against the band, as left-to-right.
+    if (lineFitReduces(context) && tabCellIsAligned(seg, () => nextLineTabStop(
+      startPen + breakerState.currentWidth, context.bidiCustomStopsPx, context.bidiIntervalPx, frame.leadingShift))
+      && context.fitsMeasuredWidth(breakerState.currentWidth + tabFollowingMetrics().totalWidth, lineBandW(context))) {
+      commitAlignedTabCell(context);
     }
     return;
   }
@@ -810,7 +820,7 @@ function processTabSegment(
     }
     // WORD_KASHIDA_LINE_FIT reserves nothing for an aligned cell: a right or
     // centre positional tab and its cell are admitted against the band.
-    const ptabLimit = seg.ptab.alignment !== 'left' ? lineBandW(context) : availW();
+    const ptabLimit = tabCellIsAligned(seg, () => null) ? lineBandW(context) : availW();
     if (!context.fitsMeasuredWidth(breakerState.currentWidth + tabW, ptabLimit)) {
       if (breakerState.currentLine.length > 0) {
         flush(undefined, false, seg.src);
@@ -824,7 +834,7 @@ function processTabSegment(
     // §17.3.3.23 selects the reference target independently of paragraph
     // indents. Library policy limits allocation to the actual paragraph/float
     // band: a fitting cell stays aligned, and all other cells use normal breaks.
-    if (seg.ptab.alignment !== 'left'
+    if (tabCellIsAligned(seg, () => null)
       && context.fitsMeasuredWidth(breakerState.currentWidth + followW, ptabLimit)) {
       commitAlignedTabCell(context);
     }
@@ -854,7 +864,7 @@ function processTabSegment(
   // Automatic stops returned by nextTabStop are left-aligned, so they fall
   // through to the left-tab path below.
   const alignmentRole = stop ? tabAlignmentRole(stop.alignment) : 'leading';
-  if (stop && alignmentRole !== 'leading') {
+  if (stop && tabCellIsAligned(seg, () => stop)) {
     const stopX = stopParaX;
     seg.leader = stop.leader;
     const following = tabFollowingMetrics();

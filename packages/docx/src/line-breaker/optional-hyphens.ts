@@ -68,13 +68,20 @@ export function placeOptionalHyphenPrefix(
       visiblePrefix ||= member.text.trim().length > 0;
     }
   }
-  const last = members.at(-1)!;
   // A collapsible trailing space does not force an otherwise fitting word
-  // to select an optional hyphen. RTL keeps its ordinary containment policy
+  // to select an optional hyphen; the whole U+0020 suffix of the joined word
+  // is excluded, across members. RTL keeps its ordinary containment policy
   // outside WORD_RTL_JUSTIFIED_VISIBLE_FIT.
-  if (!lineEndSpaceCharged(context) && last.text.endsWith(' ')) {
-    context.reservePrefixWork(last.text.length);
-    width -= context.segAdvance(last) - context.strAdvance(last, last.text.replace(/ +$/u, ''));
+  if (!lineEndSpaceCharged(context)) {
+    for (let index = members.length - 1; index >= 0; index -= 1) {
+      const member = members[index]!;
+      if (member.optionalHyphen) continue;
+      if (!member.text.endsWith(' ')) break;
+      context.reservePrefixWork(member.text.length);
+      const trimmed = member.text.replace(/ +$/u, '');
+      width -= context.segAdvance(member) - context.strAdvance(member, trimmed);
+      if (trimmed.length > 0) break;
+    }
   }
   if (context.fitsMeasuredWidth(width, context.availW())) return false;
   // An unselected owner cannot bypass the existing registered-face space
