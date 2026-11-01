@@ -534,41 +534,45 @@ impl<'a> Reader<'a> {
             });
         }
         self.area = enclosing_area;
-        // LibreOffice continues a row whose authored height, with the
-        // repeated header rows above it, exceeds the page body; the DOCX
-        // layout cannot place such a row (it does not converge). Header rows
-        // of content-dependent height cannot be bounded here, so a table
-        // repeating them admits no other authored row height.
-        let widest = doc_rows
-            .iter()
-            .flat_map(|row| &row.cells)
-            .flat_map(|cell| [&cell.borders.top, &cell.borders.bottom])
-            .filter_map(|side| side.as_ref().map(|b| b.width))
-            .fold(0.0, f64::max);
-        let mut header_height = 0.0;
+        // LibreOffice continues rows whose authored heights, vertical
+        // padding or borders run past a page; the DOCX layout cannot split
+        // that fixed space and does not converge. Each row's fixed space
+        // (its authored height or a cell's vertical padding and borders,
+        // whichever is larger) is held to a quarter of the page body, and so
+        // are the repeated header rows' together, leaving half a page for a
+        // row's content. Header rows of content-dependent height cannot be
+        // bounded here, so a table repeating them admits no other authored
+        // row height (an auto header of any length with auto rows matches
+        // LibreOffice).
+        let bound = self.text_height / 4.0;
+        let fixed = |row: &DocTableRow| {
+            let rule = |side: &Option<BorderSpec>| side.as_ref().map_or(0.0, |b| b.width);
+            row.cells
+                .iter()
+                .map(|cell| {
+                    cell.margin_top.unwrap_or(0.0)
+                        + cell.margin_bottom.unwrap_or(0.0)
+                        + rule(&cell.borders.top)
+                        + rule(&cell.borders.bottom)
+                })
+                .fold(row.row_height.unwrap_or(0.0), f64::max)
+        };
+        let mut header_fixed = 0.0;
+        let mut header_auto = false;
         for row in &doc_rows {
-            let Some(height) = row.row_height else {
-                if row.is_header {
-                    header_height = f64::INFINITY;
-                }
-                continue;
-            };
-            if row.is_header && row.row_height_rule == "exact" {
-                header_height += height;
-            } else if row.is_header {
-                header_height = f64::INFINITY;
+            let space = fixed(row);
+            if space.partial_cmp(&bound) == Some(std::cmp::Ordering::Greater) || space.is_nan() {
+                return Err(unsupported("table-row-height"));
+            }
+            if row.is_header {
+                header_fixed += space;
+                header_auto |= row.row_height_rule != "exact";
+            } else if header_auto && row.row_height.is_some() {
+                return Err(unsupported("table-row-height"));
             }
         }
-        let headers = doc_rows.iter().any(|row| row.is_header);
-        for row in doc_rows.iter().filter(|row| !row.is_header) {
-            if let Some(height) = row.row_height {
-                let above = if headers { header_height } else { 0.0 };
-                if (height + above + 2.0 * widest).partial_cmp(&self.text_height)
-                    != Some(std::cmp::Ordering::Less)
-                {
-                    return Err(unsupported("table-row-height"));
-                }
-            }
+        if header_fixed > bound {
+            return Err(unsupported("table-row-height"));
         }
         // Collapsed borders on a shared edge: the wider one is drawn in
         // LibreOffice and in the DOCX layout alike; two of equal width that
@@ -757,15 +761,6 @@ impl<'a> Reader<'a> {
             }
         }
         if margins.iter().any(|m| *m < 0.0) || margins[1] + margins[3] >= width {
-            return Err(unsupported("table-cell-geometry"));
-        }
-        // Vertical padding and borders that leave no room on a page are
-        // split by LibreOffice, not by the DOCX layout.
-        let rule = |side: &Option<BorderSpec>| side.as_ref().map_or(0.0, |b| b.width);
-        if (margins[0] + margins[2] + rule(&sides[0]) + rule(&sides[2]))
-            .partial_cmp(&self.text_height)
-            != Some(std::cmp::Ordering::Less)
-        {
             return Err(unsupported("table-cell-geometry"));
         }
 

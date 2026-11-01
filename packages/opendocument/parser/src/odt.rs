@@ -6011,7 +6011,7 @@ mod tests {
                     r#"fo:padding="0cm" fo:padding-top="30cm""#,
                 ),
                 table_body(TABLE),
-                "table-cell-geometry",
+                "table-row-height",
             ),
             // A page break before a table with a top margin.
             (
