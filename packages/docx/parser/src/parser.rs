@@ -15911,9 +15911,14 @@ fn parse_table_with_diagnostics(
         }
     }
 
+    // ECMA-376 §17.4.28: an omitted direct jc inherits the table style's jc
+    // (§17.7.6, including the implicit §17.7.4 default style); left otherwise.
+    // §17.4.50 ignores tblInd for the resulting non-leading justification, so a
+    // style-supplied center/right must survive alongside a style tblInd.
     let jc = tbl_pr
         .and_then(|p| child_w(p, "jc"))
         .and_then(|j| attr_w(j, "val"))
+        .or_else(|| tstyle.jc.clone())
         .unwrap_or_else(|| "left".to_string());
 
     // ECMA-376 §17.4.50 `<w:tblInd>` — indentation added BEFORE the table's
@@ -18536,6 +18541,51 @@ mod tests {
         );
         assert_eq!(t.cell_margin_left, 10.0);
         assert_eq!(t.cell_margin_right, 0.0);
+    }
+
+    /// §17.4.28 + §17.7.6: a table that omits `<w:jc>` inherits its style's jc
+    /// through basedOn, next to the style's tblInd; a direct jc wins.
+    #[test]
+    fn table_jc_inherits_from_table_style_hierarchy() {
+        let styles = format!(
+            r#"<w:styles xmlns:w="{ns}">
+              <w:style w:type="table" w:default="1" w:styleId="TableNormal">
+                <w:tblPr><w:tblInd w:w="0" w:type="dxa"/></w:tblPr>
+              </w:style>
+              <w:style w:type="table" w:styleId="Centered">
+                <w:basedOn w:val="TableNormal"/>
+                <w:tblPr><w:jc w:val="center"/><w:tblInd w:w="720" w:type="dxa"/></w:tblPr>
+              </w:style>
+              <w:style w:type="table" w:styleId="RightChild">
+                <w:basedOn w:val="Centered"/>
+                <w:tblPr><w:jc w:val="right"/></w:tblPr>
+              </w:style>
+              <w:style w:type="table" w:styleId="CenterChild">
+                <w:basedOn w:val="Centered"/>
+              </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        );
+        let table = |tbl_pr: &str| {
+            parse_tbl_with_styles(
+                &format!(
+                    r#"<w:tblPr>{tbl_pr}</w:tblPr><w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid>
+                       <w:tr><w:tc><w:p/></w:tc></w:tr>"#
+                ),
+                &styles,
+            )
+        };
+        let centered = table(r#"<w:tblStyle w:val="CenterChild"/>"#);
+        assert_eq!(
+            (centered.jc.as_str(), centered.tbl_ind),
+            ("center", Some(36.0))
+        );
+        assert_eq!(table(r#"<w:tblStyle w:val="RightChild"/>"#).jc, "right");
+        assert_eq!(
+            table(r#"<w:tblStyle w:val="Centered"/><w:jc w:val="left"/>"#).jc,
+            "left"
+        );
+        assert_eq!(table("").jc, "left");
     }
 
     /// §17.4.50 + §17.7.6: a table that omits `<w:tblInd>` inherits the

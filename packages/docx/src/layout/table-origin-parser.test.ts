@@ -126,6 +126,24 @@ describe('Word table origin and occupied grid', () => {
       expect(bare.rows[0]?.cells[0]?.contentBounds.widthPt).toBeCloseTo(250, 8);
     }
   });
+  it('a style-supplied center or right jc ignores the style tblInd (§17.4.50), and a direct jc wins', () => {
+    const styles = '<w:style w:type="table" w:styleId="Centered"><w:name w:val="Centered"/><w:tblPr><w:jc w:val="center"/><w:tblInd w:w="720" w:type="dxa"/></w:tblPr></w:style>'
+      + '<w:style w:type="table" w:styleId="Righted"><w:name w:val="Righted"/><w:basedOn w:val="Centered"/><w:tblPr><w:jc w:val="right"/></w:tblPr></w:style>';
+    const tbl = (tblPr: string, marginsXml = '') => `<w:tbl><w:tblPr>${tblPr}<w:tblW w:type="dxa" w:w="5000"/>${marginsXml}</w:tblPr><w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:type="dxa" w:w="5000"/></w:tcPr><w:p><w:r><w:t>x</w:t></w:r></w:p></w:tc></w:tr></w:tbl>`;
+    // 468pt band at x=72, 250pt table: centred at 181, right-aligned at 290.
+    // The measured origin class (explicit legacy margins, measured modes);
+    // unmeasured classes keep their established nonleading-indent contract.
+    for (const mode of [null, 11, 12, 14, 15]) {
+      for (const marginsXml of [margins()]) {
+        expect(layoutTable(tbl('<w:tblStyle w:val="Centered"/>', marginsXml), mode, styles).flowBounds.xPt).toBeCloseTo(181, 8);
+        const right = layoutTable(tbl('<w:tblStyle w:val="Righted"/>', marginsXml), mode, styles).flowBounds.xPt;
+        expect(right).toBeCloseTo(290 + (mode !== 15 ? 18 : 0), 8);
+        // A direct leading jc overrides the style jc, so the style indent applies.
+        expect(layoutTable(tbl('<w:tblStyle w:val="Centered"/><w:jc w:val="left"/>', marginsXml), mode, styles).flowBounds.xPt)
+          .toBeCloseTo(72 + 36 - (mode !== 15 ? 18 : 0), 8);
+      }
+    }
+  });
   it.each(['center', 'right'])('%s ignores indentation and uses the first cell margin only at the logical end', (jc) => {
     const rows = `<w:tr>${cell(2160, 540)}${cell(3600)}</w:tr><w:tr>${cell(2160, 120)}${cell(3600)}</w:tr>`;
     const options = indent + `<w:jc w:val="${jc}"/>`;

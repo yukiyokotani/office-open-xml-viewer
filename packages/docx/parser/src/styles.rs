@@ -548,6 +548,10 @@ pub struct TableStyleDef {
     /// type-less) length counts; `nil` is a zero length; pct/auto are ignored
     /// per §17.4.50 and leave the layer omitted.
     pub tbl_ind: Option<f64>,
+    /// ECMA-376 §17.4.28 `<w:tblPr><w:jc>` supplied by the table style, inherited
+    /// through basedOn. `None` = omitted. A direct table jc wins; §17.4.50 then
+    /// decides whether the (possibly style-supplied) tblInd applies.
+    pub jc: Option<String>,
     /// ECMA-376 §17.7.6.10/.11: row properties supplied by the table style.
     /// `Option` preserves inheritance and explicit CT_OnOff false values.
     pub tbl_header: Option<bool>,
@@ -897,6 +901,9 @@ impl StyleMap {
             }
             if def.tbl_ind.is_some() {
                 out.tbl_ind = def.tbl_ind;
+            }
+            if def.jc.is_some() {
+                out.jc = def.jc.clone();
             }
             if def.tbl_header.is_some() {
                 out.tbl_header = def.tbl_header;
@@ -2786,6 +2793,7 @@ fn parse_tbl_style_def(style_node: roxmltree::Node, based_on: Option<String>) ->
         }
         def.cell_spacing = table_width_wire(child_w(tbl_pr, "tblCellSpacing"));
         def.tbl_ind = child_w(tbl_pr, "tblInd").and_then(table_indent_pt);
+        def.jc = child_w(tbl_pr, "jc").and_then(|n| attr_w(n, "val"));
     }
     if let Some(tc_pr) = child_w(style_node, "tcPr") {
         def.cell_shd = shd_fill(tc_pr);
