@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import init, { DocxArchive } from '../wasm/docx_parser.js';
 import { normalizeInternalDocumentModel } from '../parser-model.js';
+import { storeZip } from '../conformance/generate.js';
 import { describe, expect, it, vi } from 'vitest';
 
 // Counts body pagination passes: each pass opens exactly one kernel session.
@@ -461,6 +462,79 @@ describe('progressive layout with page-owned anchors', () => {
   }, 300_000);
 });
 
+/** Six nextPage sections, each a page of text and then a near-page-tall page
+ * table whose exclusion pushes that text off its page (#2012). */
+function chainedTableCycleSections(): Readonly<{ model: DocxDocumentModel; tableIndexes: number[] }> {
+  const model = documentModel(0, []);
+  model.section.pageHeight = 842;
+  const sectionBreak = { type: 'sectionBreak', kind: 'nextPage', columns: null } as unknown as BodyElement;
+  const tableIndexes: number[] = [];
+  for (let section = 0; section < 6; section += 1) {
+    if (section > 0) model.body.push(sectionBreak);
+    model.body.push(...Array.from({ length: 26 }, () => line()));
+    tableIndexes.push(model.body.length);
+    model.body.push(pageFloatingTable(524, 0, 1, 667, 0), line(), line());
+  }
+  return { model, tableIndexes };
+}
+
+/** One parsed paragraph holding a top-and-bottom paragraph-relative 200x60 pt
+ * picture whose top is 6 pt above its anchor line. */
+async function parsedTightPictureParagraph(): Promise<BodyElement> {
+  await init({ module_or_path: readFileSync(new URL('../wasm/docx_parser_bg.wasm', import.meta.url)) });
+  const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+  const EMU = 12700;
+  const picture = '<w:r><w:drawing><wp:anchor distT="0" distB="0" distL="114300" distR="114300" '
+    + 'simplePos="0" relativeHeight="251659264" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1">'
+    + '<wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="margin"><wp:posOffset>0</wp:posOffset></wp:positionH>'
+    + `<wp:positionV relativeFrom="paragraph"><wp:posOffset>${-6 * EMU}</wp:posOffset></wp:positionV>`
+    + `<wp:extent cx="${200 * EMU}" cy="${60 * EMU}"/><wp:effectExtent l="0" t="0" r="0" b="0"/>`
+    + '<wp:wrapTopAndBottom/><wp:docPr id="1" name="Picture 1"/>'
+    + '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic>'
+    + '<pic:nvPicPr><pic:cNvPr id="1" name="p.png"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill>'
+    + '<a:blip r:embed="rIdImg"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm>'
+    + `<a:off x="0" y="0"/><a:ext cx="${200 * EMU}" cy="${60 * EMU}"/></a:xfrm><a:prstGeom prst="rect">`
+    + '<a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>';
+  const document = `<w:document xmlns:w="${W}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" `
+    + 'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" '
+    + 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+    + 'xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body>'
+    + '<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="480" w:lineRule="exact"/></w:pPr>'
+    + `<w:r><w:t>x</w:t></w:r>${picture}</w:p><w:sectPr/></w:body></w:document>`;
+  const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  const encoder = new TextEncoder();
+  const archive = new DocxArchive(storeZip(new Map(Object.entries({
+    '[Content_Types].xml': encoder.encode('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+      + '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+      + '<Default Extension="xml" ContentType="application/xml"/>'
+      + '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+      + '</Types>'),
+    '_rels/.rels': encoder.encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+      + `<Relationship Id="rId1" Type="${rel}/officeDocument" Target="word/document.xml"/></Relationships>`),
+    'word/_rels/document.xml.rels': encoder.encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+      + `<Relationship Id="rIdImg" Type="${rel}/image" Target="media/p.png"/></Relationships>`),
+    'word/document.xml': encoder.encode(document),
+  }))));
+  try {
+    return normalizeInternalDocumentModel(JSON.parse(new TextDecoder().decode(archive.parse()))).document.body[0]!;
+  } finally {
+    archive.free();
+  }
+}
+
+/** The lines around the picture of `layout`, relative to the picture's top. */
+function pictureNeighbourhood(layout: DocumentLayout): readonly number[] {
+  for (const page of layout.pages) {
+    const paragraphs = page.layers.body.filter((node) => node.kind === 'paragraph');
+    const drawing = paragraphs.flatMap((node) => node.drawings)[0];
+    if (!drawing) continue;
+    return paragraphs.flatMap((node) => node.lines)
+      .map((entry) => entry.bounds.yPt - drawing.flowBounds.yPt)
+      .filter((delta) => Math.abs(delta) < 150);
+  }
+  throw new Error('No page holds the picture');
+}
+
 describe('page-table destination cycle settlement', () => {
   const coupledTables = () => documentModel(33, [
     [13, pageFloatingTable(468, 72, 1, 360, 0)],
@@ -489,6 +563,82 @@ describe('page-table destination cycle settlement', () => {
         line.bounds.yPt >= table.flowBounds.yPt + table.flowBounds.heightPt)).toBe(true);
     }
   });
+
+  it('settles near-page-tall table cycles in consecutive sections', async () => {
+    // Each table belongs on the page after its section's text. Moving one table
+    // shifts every later section's table by a page; that shift must not hide
+    // the earlier table's proven floor, or the run alternates until its pass
+    // limit (#2012; Word places the controls' tables the same way).
+    const { model, tableIndexes } = chainedTableCycleSections();
+    const { layout } = blockingLayout(model);
+    expect(tableIndexes.map((index) => tablePages(layout, index)))
+      .toEqual([0, 2, 4, 6, 8, 10].map((page) => ({ reachedPage: page, placedPage: page + 1 })));
+    for (const index of tableIndexes) {
+      const page = layout.pages[tablePages(layout, index).placedPage]!;
+      const table = page.layers.body.find((node) => node.kind === 'table')!;
+      const lines = page.layers.body.flatMap((node) => node.kind === 'paragraph' ? node.lines : []);
+      expect(lines.every((line) =>
+        line.bounds.yPt >= table.flowBounds.yPt + table.flowBounds.heightPt)).toBe(true);
+    }
+    const { previews, final } = await progressiveRun(model);
+    expect(layoutFingerprint(final)).toBe(layoutFingerprint(layout));
+    expectPublishedPagesFinal(previews, final);
+  }, 30_000);
+
+  it('keeps those table floors through the later text-frame carry', () => {
+    // A text frame after the tables starts a frame-carry run, which settles the
+    // same tables again and needs the same page-scoped floor proof.
+    const { model, tableIndexes } = chainedTableCycleSections();
+    const framePr = {
+      dropCap: 'none', lines: 1, wrap: 'notBeside', hAnchor: 'page', vAnchor: 'text',
+      hRule: 'exact', h: 60, hSpace: 0, vSpace: 10, w: 100, xAlign: 'center',
+    };
+    model.body.push(...Array.from({ length: 50 }, () => line()));
+    model.body.push({ ...line(), framePr } as unknown as BodyElement);
+    model.body.push(...Array.from({ length: 50 }, () => line()));
+    const { layout } = blockingLayout(model);
+    expect(tableIndexes.map((index) => tablePages(layout, index).placedPage)).toEqual([1, 3, 5, 7, 9, 11]);
+  }, 30_000);
+
+  it('keeps those table floors through the later host-drawing carry', async () => {
+    // A paragraph-relative top-and-bottom picture reaching 6 pt above its anchor
+    // line is carried to the start of its page (WORD_LATER_ANCHOR_EARLIER_LINE_WRAP).
+    // That run settles the same tables again, so it starts from their floors:
+    // the picture keeps its carry and the earlier lines wrap around it, exactly
+    // as in the same document without the tables.
+    const pictureParagraph = await parsedTightPictureParagraph();
+    const withPicture = (model: DocxDocumentModel) => {
+      model.body.push(...Array.from({ length: 50 }, () => line()), pictureParagraph,
+        ...Array.from({ length: 50 }, () => line()));
+      return model;
+    };
+    const { model, tableIndexes } = chainedTableCycleSections();
+    const { layout } = blockingLayout(withPicture(model));
+    expect(tableIndexes.map((index) => tablePages(layout, index).placedPage)).toEqual([1, 3, 5, 7, 9, 11]);
+    const plain = documentModel(0, []);
+    plain.section.pageHeight = 842;
+    const { layout: plainLayout } = blockingLayout(withPicture(plain));
+    expect(pictureNeighbourhood(layout)).toEqual(pictureNeighbourhood(plainLayout));
+  }, 30_000);
+
+  it('keeps those table floors through header reserve repagination', () => {
+    // A header that extends below the top margin repaginates the body; that
+    // rerun settles the same tables and starts with the same floor proof.
+    // Six sections fail the reserve-free run's strict proof first; four pass
+    // it and fail only in the reserve run.
+    for (const sections of [6, 4]) {
+      const { model, tableIndexes } = chainedTableCycleSections();
+      model.body = model.body.slice(0, sections * 30 - 1);
+      model.headers.default = { body: [line()].map((paragraph) => ({
+        ...paragraph, lineSpacing: { value: 48, rule: 'exact', explicit: true },
+      })) } as unknown as DocxDocumentModel['headers']['default'];
+      const { layout } = blockingLayout(model);
+      for (const index of tableIndexes.slice(0, sections)) {
+        const { reachedPage, placedPage } = tablePages(layout, index);
+        expect(placedPage).toBe(reachedPage + 1);
+      }
+    }
+  }, 30_000);
 
   it('settles the coupled T1/T2/T3 cycle deterministically without overlapping body text', () => {
     const model = coupledTables();
