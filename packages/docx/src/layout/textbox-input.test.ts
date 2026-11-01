@@ -1,9 +1,30 @@
 import { describe, expect, it } from 'vitest';
 import { normalizeTextBoxInput } from './textbox-input.js';
+import { shapeRunToDocRun } from './text.js';
 import { textBoxAcquisitionInput } from '../parser-model.js';
 import type { ShapeRun } from '../types.js';
 
 describe('normalizeTextBoxInput', () => {
+  it('preserves public text-box run direction through body-run conversion', () => {
+    const shape = {
+      type: 'shape',
+      textBlocks: [{
+        text: 'direct off plain', fontSizePt: 12, alignment: 'left',
+        runs: [
+          { text: 'direct', fontSizePt: 12, rtl: true },
+          { text: 'off', fontSizePt: 12, rtl: false },
+          { text: 'plain', fontSizePt: 12 },
+        ],
+      }],
+    } as unknown as ShapeRun;
+
+    const [paragraph] = normalizeTextBoxInput(shape);
+    if (!paragraph) throw new Error('expected a text-box paragraph');
+    const runs = paragraph.runs.map((run) => shapeRunToDocRun(run));
+
+    expect(runs.map((run) => run.rtl)).toEqual([true, false, undefined]);
+  });
+
   it('projects complete text-box acquisition by count without traversing its subtree', () => {
     const content = new Proxy([] as unknown[], {
       get(target, property, receiver) {

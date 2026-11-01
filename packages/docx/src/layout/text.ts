@@ -126,6 +126,7 @@ export function shapeRunToDocRun(
     text: run.text,
     bold: run.bold ?? false,
     italic: run.italic ?? false,
+    rtl: run.rtl,
     underline: false,
     strikethrough: false,
     fontSize: run.fontSizePt,

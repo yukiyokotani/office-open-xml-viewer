@@ -12112,6 +12112,7 @@ fn extract_simple_paragraph_text(
             font_family_east_asia: resolve_east_asia_axis(&fmt),
             bold: fmt.bold.unwrap_or(false),
             italic: fmt.italic.unwrap_or(false),
+            rtl: fmt.rtl.unwrap_or(false),
             ruby,
         });
         if first_run_fmt.is_none() {
@@ -27296,6 +27297,44 @@ mod txbx_inline_image_tests {
             &HashMap::new(),
             DepthGuard::root(),
         )
+    }
+
+    #[test]
+    fn text_box_runs_preserve_resolved_rtl() {
+        let styles = StyleMap::parse(
+            r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:style w:type="character" w:styleId="Rtl">
+                <w:rPr><w:rtl/></w:rPr>
+              </w:style>
+            </w:styles>"#,
+        );
+        let doc = XmlDoc::parse(
+            r#"<wps:wsp xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+                       xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <wps:txbx><w:txbxContent><w:p>
+                <w:r><w:rPr><w:rtl/></w:rPr><w:t>direct</w:t></w:r>
+                <w:r><w:rPr><w:rStyle w:val="Rtl"/></w:rPr><w:t>styled</w:t></w:r>
+                <w:r><w:rPr><w:rStyle w:val="Rtl"/><w:rtl w:val="0"/></w:rPr><w:t>off</w:t></w:r>
+                <w:r><w:t>plain</w:t></w:r>
+              </w:p></w:txbxContent></wps:txbx>
+            </wps:wsp>"#,
+        )
+        .unwrap();
+        let body = parse_shape_text_body(
+            &styles,
+            doc.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+        );
+        let block = &body.legacy_blocks[0];
+        let runs = serde_json::to_value(&block.runs).unwrap();
+        assert_eq!(runs[0]["rtl"], true, "direct w:rtl is serialized");
+        assert_eq!(runs[1]["rtl"], true, "rStyle w:rtl is resolved");
+        assert!(
+            runs[2].get("rtl").is_none(),
+            "explicit off overrides rStyle"
+        );
+        assert!(runs[3].get("rtl").is_none(), "absent w:rtl stays omitted");
     }
 
     fn extract_simple_paragraph_text(
