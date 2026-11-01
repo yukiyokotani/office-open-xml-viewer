@@ -5480,7 +5480,7 @@ mod tests {
         assert!(matches!(&runs[2], DocRun::Text(t) if t.list_label.is_none() && t.text == "a"));
     }
 
-    const TABLE_STYLES: &str = r##"<style:style style:name="T" style:family="table"><style:table-properties style:width="10cm" fo:margin-left="-0.191cm" fo:margin-top="5pt" fo:margin-bottom="3pt" table:align="left" style:writing-mode="page"/></style:style><style:style style:name="T.A" style:family="table-column"><style:table-column-properties style:column-width="4cm"/></style:style><style:style style:name="T.B" style:family="table-column"><style:table-column-properties style:column-width="6cm"/></style:style><style:style style:name="T.1" style:family="table-row"><style:table-row-properties style:min-row-height="2cm" fo:keep-together="always"/></style:style><style:style style:name="T.A1" style:family="table-cell"><style:table-cell-properties fo:padding-left="0.191cm" fo:padding-right="0.191cm" fo:padding-top="0cm" fo:padding-bottom="0cm" fo:border="0.5pt solid #000000" style:vertical-align="top" fo:background-color="#ffff00"><style:background-image/></style:table-cell-properties></style:style><style:style style:name="T.B1" style:family="table-cell"><style:table-cell-properties fo:padding="0cm" fo:border-top="2pt solid #ff0000" fo:border-bottom="none" fo:border-left="none" fo:border-right="none"/></style:style><style:style style:name="Sp" style:family="paragraph"><style:paragraph-properties fo:margin-top="6pt" fo:margin-bottom="8pt"/></style:style>"##;
+    const TABLE_STYLES: &str = r##"<style:style style:name="T" style:family="table"><style:table-properties table:border-model="collapsing" style:width="10cm" fo:margin-left="-0.191cm" fo:margin-top="5pt" fo:margin-bottom="3pt" table:align="left" style:writing-mode="page"/></style:style><style:style style:name="T.A" style:family="table-column"><style:table-column-properties style:column-width="4cm"/></style:style><style:style style:name="T.B" style:family="table-column"><style:table-column-properties style:column-width="6cm"/></style:style><style:style style:name="T.1" style:family="table-row"><style:table-row-properties style:min-row-height="2cm" fo:keep-together="always"/></style:style><style:style style:name="T.A1" style:family="table-cell"><style:table-cell-properties fo:padding-left="0.191cm" fo:padding-right="0.191cm" fo:padding-top="0cm" fo:padding-bottom="0cm" fo:border="0.5pt solid #000000" style:vertical-align="top" fo:background-color="#ffff00"><style:background-image/></style:table-cell-properties></style:style><style:style style:name="T.B1" style:family="table-cell"><style:table-cell-properties fo:padding="0cm" fo:border-top="2pt solid #ff0000" fo:border-bottom="none" fo:border-left="none" fo:border-right="none"/></style:style><style:style style:name="Sp" style:family="paragraph"><style:paragraph-properties fo:margin-top="6pt" fo:margin-bottom="8pt"/></style:style>"##;
 
     fn table_body(table: &str) -> String {
         format!(
@@ -5579,7 +5579,7 @@ mod tests {
     fn charges_table_style_scans_per_use() {
         let padded = format!("0.5pt{}solid #000000", " ".repeat(64 * 1024));
         let styles = format!(
-            r#"<style:style style:name="T" style:family="table"><style:table-properties style:width="10cm" table:align="left"/></style:style><style:style style:name="T.A" style:family="table-column"><style:table-column-properties style:column-width="10cm"/></style:style><style:style style:name="T.A1" style:family="table-cell"><style:table-cell-properties fo:padding="0cm" fo:border="{padded}"/></style:style><style:style style:name="Sp" style:family="paragraph"><style:paragraph-properties fo:margin-top="6pt" fo:margin-bottom="8pt"/></style:style>"#
+            r#"<style:style style:name="T" style:family="table"><style:table-properties table:border-model="collapsing" style:width="10cm" table:align="left"/></style:style><style:style style:name="T.A" style:family="table-column"><style:table-column-properties style:column-width="10cm"/></style:style><style:style style:name="T.A1" style:family="table-cell"><style:table-cell-properties fo:padding="0cm" fo:border="{padded}"/></style:style><style:style style:name="Sp" style:family="paragraph"><style:paragraph-properties fo:margin-top="6pt" fo:margin-bottom="8pt"/></style:style>"#
         );
         let rows = |count: usize| {
             let row = r#"<table:table-row><table:table-cell table:style-name="T.A1"><text:p>x</text:p></table:table-cell></table:table-row>"#;
@@ -5612,23 +5612,48 @@ mod tests {
     }
 
     #[test]
-    fn sizes_columns_by_relative_weights_beside_absolute_widths() {
-        let weighted = TABLE_STYLES
-            .replace(
-                r#"style:column-width="4cm""#,
-                r#"style:column-width="4cm" style:rel-column-width="1000*""#,
-            )
-            .replace(
-                r#"style:column-width="6cm""#,
-                r#"style:column-width="6cm" style:rel-column-width="3000*""#,
+    fn rejects_column_grids_libreoffice_refits_by_unmodelled_rules() {
+        let cases = [
+            // Weights beside absolute widths.
+            TABLE_STYLES
+                .replace(r#"style:column-width="4cm""#, r#"style:column-width="4cm" style:rel-column-width="1000*""#)
+                .replace(r#"style:column-width="6cm""#, r#"style:column-width="6cm" style:rel-column-width="3000*""#),
+            // A weight below MINLAY in a relative table.
+            TABLE_STYLES
+                .replace(r#"style:width="10cm""#, r#"style:width="10cm" style:rel-width="100%""#)
+                .replace(r#"style:column-width="4cm""#, r#"style:rel-column-width="1*""#)
+                .replace(r#"style:column-width="6cm""#, r#"style:rel-column-width="99*""#),
+            // A centred grid that does not add up to the table.
+            TABLE_STYLES
+                .replace(r#"table:align="left""#, r#"table:align="center""#)
+                .replace(r#"fo:margin-left="-0.191cm""#, r#"fo:margin-left="0cm""#),
+        ];
+        for styles in cases {
+            assert_eq!(
+                read_table(&styles, &table_body(TABLE)).unwrap_err(),
+                unsupported("table-columns")
             );
-        let document = read_table(&weighted, &table_body(TABLE)).unwrap();
-        let BodyElement::Table(table) = &document.body[1] else {
-            panic!()
-        };
-        let cm = 72.0 / 2.54;
-        assert!((table.col_widths[0] - 2.5 * cm).abs() < 1e-9);
-        assert!((table.col_widths[1] - 7.5 * cm).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn refits_absolute_columns_as_libreoffice_does() {
+        // Traced from LibreOffice 26.8 and matched against its output: a
+        // 10 cm (5669 twip) table with two columns.
+        for (input, expected) in [
+            ([57, 5613], [79, 5590]),
+            ([454, 5216], [473, 5196]),
+            ([1701, 3969], [1709, 3960]),
+            ([170, 5499], [170, 5499]),
+        ] {
+            let fitted = if input.iter().sum::<i64>() == 5669 {
+                input.to_vec()
+            } else {
+                super::table::redistribute(&input, 5669)
+            };
+            assert_eq!(fitted, expected);
+        }
+        assert_eq!(super::table::redistribute(&[100, 200], 330), [110, 220]);
     }
 
     #[test]
@@ -5675,8 +5700,10 @@ mod tests {
         assert_eq!(before.space_after, 8.0 + 5.0);
         assert_eq!(after.space_before, 3.0 + 6.0);
         let cm = 72.0 / 2.54;
-        assert!((table.col_widths[0] - 4.0 * cm).abs() < 1e-9);
-        assert!((table.col_widths[1] - 6.0 * cm).abs() < 1e-9);
+        // 4 cm and 6 cm read as 2268 + 3402 twips against a 5669 twip
+        // table: LibreOffice refits them to 2272 and 3397.
+        assert_eq!(table.col_widths, [2272.0 / 20.0, 3397.0 / 20.0]);
+        let _ = cm;
         assert_eq!(table.jc, "left");
         assert!((table.tbl_ind.unwrap() + 0.191 * cm).abs() < 1e-9);
         assert_eq!(table.layout.as_deref(), Some("fixed"));
@@ -5791,7 +5818,7 @@ mod tests {
                 "table-rel-width",
             ),
             (
-                TABLE_STYLES.replace(r#"style:column-width="6cm""#, r#"style:column-width="5cm""#),
+                TABLE_STYLES.replace(r#"style:column-width="4cm""#, r#"style:column-width="0.03cm""#),
                 table_body(TABLE),
                 "table-columns",
             ),
@@ -5820,11 +5847,26 @@ mod tests {
             ),
             (
                 TABLE_STYLES.replace(
-                    r#"style:width="10cm""#,
-                    r#"style:width="10cm" table:border-model="separating""#,
+                    r#"table:border-model="collapsing""#,
+                    r#"table:border-model="separating""#,
                 ),
                 table_body(TABLE),
                 "table-property",
+            ),
+            // Without a stated model LibreOffice separates the borders.
+            (
+                TABLE_STYLES.replace(r#"table:border-model="collapsing" "#, ""),
+                table_body(TABLE),
+                "table-border-model",
+            ),
+            // Weights in part of the grid.
+            (
+                TABLE_STYLES.replace(
+                    r#"style:column-width="4cm""#,
+                    r#"style:column-width="4cm" style:rel-column-width="1000*""#,
+                ),
+                table_body(TABLE),
+                "table-columns",
             ),
             (
                 TABLE_STYLES.replace(

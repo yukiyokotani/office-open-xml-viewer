@@ -97,6 +97,30 @@ impl Reader<'_> {
     }
 }
 
+/// LibreOffice's fit of absolute column widths `a` (twips) to a left-aligned
+/// table `total` twips wide (`SwXMLTableContext::MakeTable_`, LibreOffice
+/// 26.8): a shortfall is shared in proportion to the widths; an excess
+/// gives every column MINLAY (23) and shares the rest in proportion to the
+/// full widths; the last column takes what remains.
+pub(super) fn redistribute(a: &[i64], total: i64) -> Vec<i64> {
+    const MINLAY: i64 = 23;
+    let sum: i64 = a.iter().sum();
+    let (base, spare): (Vec<i64>, i64) = if sum < total {
+        (a.to_vec(), total - sum)
+    } else {
+        (vec![MINLAY; a.len()], total - MINLAY * a.len() as i64)
+    };
+    let mut out = base.clone();
+    let mut last = base[a.len() - 1] + spare;
+    for i in 0..a.len() - 1 {
+        let extra = a[i] * spare / sum;
+        out[i] += extra;
+        last -= extra;
+    }
+    out[a.len() - 1] = last;
+    out
+}
+
 fn twips(points: f64) -> String {
     ((points * 20.0).round() as i64).to_string()
 }
@@ -143,10 +167,11 @@ impl<'a> Reader<'a> {
             }
         }
         self.charge_construction(std::mem::size_of::<DocTable>())?;
-        // The measured model: collapsing borders (§20.302), which
-        // LibreOffice also reads where no style states a model (it writes
-        // "collapsing" back; the controls state none), and rows that do not
-        // split unless their default says so.
+        // The measured model: collapsing borders (§20.302), stated by the
+        // default table style or the table's own (without either LibreOffice
+        // separates them, insetting text by the border; measured), and rows
+        // that do not split unless their default says so.
+        let mut collapsing = false;
         let mut row_keep_default = false;
         if let Some(default) = self.sheet.default_style(Family::Table) {
             for (key, properties) in &default.style().groups {
@@ -159,7 +184,12 @@ impl<'a> Reader<'a> {
                 )?;
                 for (attribute, value) in &properties.attributes {
                     match (key.as_str(), attribute.0.as_str(), attribute.1.as_str()) {
-                        ("table-properties", NS_TABLE, "border-model") if value == "collapsing" => {
+                        ("table-properties", NS_TABLE, "border-model") => {
+                            collapsing = match value.as_str() {
+                                "collapsing" => true,
+                                "separating" => false,
+                                _ => return Err(unsupported("table-default-style")),
+                            }
                         }
                         _ => return Err(unsupported("table-default-style")),
                     }
@@ -231,10 +261,13 @@ impl<'a> Reader<'a> {
                     }
                 }
                 (NS_FO, "break-after") if value == "auto" => {}
-                (NS_TABLE, "border-model") if value == "collapsing" => {}
+                (NS_TABLE, "border-model") if value == "collapsing" => collapsing = true,
                 (NS_FO, "background-color") if value == "transparent" => {}
                 _ => return Err(unsupported("table-property")),
             }
+        }
+        if !collapsing {
+            return Err(unsupported("table-border-model"));
         }
         // The table's x and width (measured): a 100% relative width fills
         // the text area, else the authored width; aligned left it starts at
@@ -268,7 +301,7 @@ impl<'a> Reader<'a> {
         }
 
         // Columns (§9.1.6) and rows (§9.1.3), header rows first (§9.1.10).
-        let mut columns: Vec<(Option<f64>, Option<f64>)> = Vec::new();
+        let mut columns: Vec<(Option<f64>, Option<u32>)> = Vec::new();
         let mut rows: Vec<(roxmltree::Node<'_, '_>, bool)> = Vec::new();
         for child in node.children() {
             if child.is_text() {
@@ -310,12 +343,13 @@ impl<'a> Reader<'a> {
                         match (key.0.as_str(), key.1.as_str()) {
                             (NS_STYLE, "column-width") => absolute = Some(length_pt(value)?),
                             (NS_STYLE, "rel-column-width") => {
+                                // LibreOffice reads integral weights.
                                 share = Some(
                                     value
                                         .strip_suffix('*')
-                                        .and_then(|v| v.parse::<f64>().ok())
-                                        .filter(|v| *v > 0.0 && v.is_finite())
-                                        .ok_or_else(|| invalid("bad relative column width"))?,
+                                        .and_then(|v| v.parse::<u32>().ok())
+                                        .filter(|v| *v > 0)
+                                        .ok_or_else(|| unsupported("table-columns"))?,
                                 )
                             }
                             _ => return Err(unsupported("table-column")),
@@ -342,33 +376,54 @@ impl<'a> Reader<'a> {
         if columns.is_empty() || rows.is_empty() || rows.len() > MAX_ROWS {
             return Err(unsupported("table-shape"));
         }
-        // LibreOffice sizes columns by their relative weights wherever every
-        // column has one, also beside absolute widths (measured: 4 cm/6 cm
-        // columns weighted 1000*/3000* in a 10 cm table draw 2.5/7.5 cm).
-        let weighted = columns.iter().all(|c| c.1.is_some());
-        if !weighted && columns.iter().any(|c| c.1.is_some()) {
-            return Err(unsupported("table-columns"));
-        }
-        let col_widths: Vec<f64> = if relative.is_some() || weighted {
-            let total: f64 = columns
+        // LibreOffice's column import (sw/source/filter/xml/xmltbli.cxx,
+        // MakeTable_; measured): a relative-width table divides its width by
+        // the columns' relative weights, each raised to at least 23 (MINLAY)
+        // first, so a smaller weight was not measured. An absolute table
+        // reads widths in whole twips (rounded half up) and keeps them where
+        // they add up to the table's twips, as every grid LibreOffice writes
+        // does; otherwise a left-aligned table redistributes the difference
+        // (`redistribute`; a 0.8 cm column next to 9.2 cm in a 10 cm table
+        // draws 0.834 cm). Other alignments were not traced, and weights
+        // beside absolute widths follow other rules: both reject.
+        let col_widths: Vec<f64> = if relative.is_some() {
+            let shares = columns
                 .iter()
-                .map(|c| c.1.ok_or_else(|| unsupported("table-columns")))
-                .sum::<Result<f64, String>>()?;
-            columns
-                .iter()
-                .map(|c| c.1.expect("checked") / total * table_width)
-                .collect()
+                .map(|c| c.1.filter(|share| *share >= 23).map(f64::from))
+                .collect::<Option<Vec<f64>>>()
+                .ok_or_else(|| unsupported("table-columns"))?;
+            let total: f64 = shares.iter().sum();
+            shares.iter().map(|s| s / total * table_width).collect()
         } else {
-            let widths: Vec<f64> = columns
+            let twips = |points: f64| {
+                let scaled = points * 20.0;
+                // A half twip rounds by floating-point error.
+                if (scaled.fract() - 0.5).abs() < 1e-6 {
+                    return None;
+                }
+                let value = (scaled + 0.5).floor();
+                (23.0..=65535.0).contains(&value).then_some(value)
+            };
+            let widths = columns
                 .iter()
-                .map(|c| c.0.ok_or_else(|| unsupported("table-columns")))
-                .collect::<Result<_, _>>()?;
-            // The grid must add up to the table's width (as LibreOffice
-            // writes it); a mismatch is not measured.
-            if (widths.iter().sum::<f64>() - table_width).abs() > 0.5 {
+                .map(|c| match c {
+                    (Some(width), None) => twips(*width).map(|w| w as i64),
+                    _ => None,
+                })
+                .collect::<Option<Vec<i64>>>()
+                .ok_or_else(|| unsupported("table-columns"))?;
+            let total = twips(table_width)
+                .map(|w| w as i64)
+                .filter(|w| *w >= 23 * widths.len() as i64)
+                .ok_or_else(|| unsupported("table-columns"))?;
+            let widths = if widths.iter().sum::<i64>() == total {
+                widths
+            } else if jc == "left" {
+                redistribute(&widths, total)
+            } else {
                 return Err(unsupported("table-columns"));
-            }
-            widths
+            };
+            widths.iter().map(|w| *w as f64 / 20.0).collect()
         };
 
         let enclosing_area = self.area;
