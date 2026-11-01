@@ -34,6 +34,46 @@ function wrap(floats: FloatRect[], columnWidthPt = 360, rtl = false, columnXPt =
     readingDirection: rtl ? 'rtl' : 'ltr', pageH: 800, lineBoxH: () => 10 };
 }
 const fit = (fraction: number, reserveShare: number): LineFitWidth => ({ fraction, reserveShare, rtlVisiblePrefix: false });
+type NumberingFirstLine = NonNullable<WrapLayoutCtx['numberingFirstLine']>;
+/** A numbered first line whose body starts at the next `tab` grid stop at or
+ * after the marker end (edge + marker): constant between the grid edges. */
+function gridNumbering(authored: number, marker: number, tab: number, calls?: { count: number }): NumberingFirstLine {
+  const bodyIndentAt = (edge: number): number => {
+    if (calls) calls.count += 1;
+    return Math.ceil((edge + marker) / tab) * tab;
+  };
+  return {
+    authoredFirstIndentPx: authored, bodyIndentAt,
+    bodyIndentRegimeAt: (edge) => {
+      const constantPx = Math.ceil((edge + marker) / tab) * tab;
+      return { key: `stop:${constantPx}`, constantPx };
+    },
+    bodyIndentBreaks: (lower, upper, limit) => {
+      const first = Math.ceil((lower + marker) / tab);
+      const last = Math.floor((upper + marker) / tab);
+      if (last - first + 1 > limit) return null;
+      const breaks: number[] = [];
+      for (let index = first; index <= last; index += 1) {
+        const edge = index * tab - marker;
+        if (edge > lower && edge < upper) breaks.push(edge);
+      }
+      return breaks;
+    },
+  };
+}
+/** A numbered first line whose body starts `offset` past the marker's
+ * leading edge (a space or nothing suffix): one affine regime. */
+function affineNumbering(authored: number, offset: number, calls?: { count: number }): NumberingFirstLine {
+  return {
+    authoredFirstIndentPx: authored,
+    bodyIndentAt: (edge) => {
+      if (calls) calls.count += 1;
+      return edge + offset;
+    },
+    bodyIndentRegimeAt: () => ({ key: 'offset', offsetPx: offset }),
+    bodyIndentBreaks: () => [],
+  };
+}
 
 function run(segs: LayoutSeg[], options: {
   maxWidth?: number; marginRightPx?: number; wrapCtx?: WrapLayoutCtx; baseRtl?: boolean; firstIndent?: number;
@@ -271,7 +311,7 @@ describe('WORD_KASHIDA_LINE_FIT line breaker', () => {
       return { topYPt: 100000, xOffsetPt: 0, maximumWidthPt: input.maximumWidthPt };
     };
     const wrapCtx: WrapLayoutCtx = { ...wrap([]), floats: [], lineWindow,
-      numberingFirstLine: { authoredFirstIndentPx: -50, bodyIndentAt: (edge) => edge } };
+      numberingFirstLine: affineNumbering(-50, 0) };
     const lines = run([token('W'.repeat(64))], { wrapCtx, lineFit: fit(0.8, 0) });
     expect(lines[0]!.topY).toBe(100000);
     expect(calls).toBeLessThan(10);
@@ -345,8 +385,7 @@ describe('WORD_KASHIDA_LINE_FIT line breaker', () => {
     // -50, resolved body indent 0, a 5 pt marker and default tabs every 36.
     // In [300, 450] the body starts at 324: (150 - 24) x 0.8 = 100.8 >= 95.
     const floats = wrap([band(100, 150, 0, 60), band(250, 300, 0, 60), band(450, 600, 0, 60)], 600);
-    const wrapCtx: WrapLayoutCtx = { ...floats, numberingFirstLine: {
-      authoredFirstIndentPx: -50, bodyIndentAt: (edge) => Math.ceil((edge + 5) / 36) * 36 } };
+    const wrapCtx: WrapLayoutCtx = { ...floats, numberingFirstLine: gridNumbering(-50, 5, 36) };
     const lines = run([token('W'.repeat(19))], { maxWidth: 600, marginRightPx: 600, wrapCtx, lineFit: fit(0.8, 0) });
     expect([lines[0]!.topY, lines[0]!.xOffset]).toEqual([0, 300]);
   });
@@ -363,6 +402,82 @@ describe('WORD_KASHIDA_LINE_FIT line breaker', () => {
     expect(lines[0]!.topY).toBeGreaterThan(6.6);
     expect(lines[0]!.topY).toBeLessThanOrEqual(7);
   });
+
+  /** A through float over [0, 400] x [0, depth + 10] with one notch whose
+   * walls run from (leftTop, 0) to (leftBottom, depth) and from (rightTop, 0)
+   * to (rightBottom, depth). */
+  const notch = (leftTop: number, leftBottom: number, rightTop: number, rightBottom: number, depth = 50): FloatRect => ({
+    ...obstacle(0, 400), authoredWrap: 'through', imageY: 0, imageH: depth + 10, yTop: 0, yBottom: depth + 10,
+    wrapPolygon: [{ xPt: 0, yPt: 0 }, { xPt: leftTop, yPt: 0 }, { xPt: leftBottom, yPt: depth }, { xPt: rightBottom, yPt: depth },
+      { xPt: rightTop, yPt: 0 }, { xPt: 400, yPt: 0 }, { xPt: 400, yPt: depth + 10 }, { xPt: 0, yPt: depth + 10 }],
+  });
+  /** First top (0.01 pt steps) whose solver window in band [0, band] fits
+   * the word with the given fit, the far-edge window's base extended to the
+   * text margin. */
+  const notchScan = (float: FloatRect, band: number, margin: number, fraction: number, share: number, word: number,
+    height: number): number => {
+    const prepared = prepareFloatWrap([float]);
+    const reference = { xLeftPt: 0, xRightPt: band, readingDirection: 'ltr' as const };
+    for (let y = 0; y < height; y += 0.01) {
+      const window = computePreparedLineFloatWindow(y, 1, 10, 0, band, prepared, 0, 400, reference, 1);
+      if (window.topY !== y) continue;
+      const reachesFarEdge = window.xOffset + window.maxWidth >= band - 1e-9;
+      const fitted = window.maxWidth * fraction - share * Math.max(0, window.maxWidth + (reachesFarEdge ? margin - band : 0));
+      if (fitted >= word) return y;
+    }
+    return height;
+  };
+
+  it('splits a slab where a through opening crosses the band edge', () => {
+    // Band [0, 300], text margin 360; the opening runs from 200 to 280 + 2y.
+    // Until y = 10 its far side is the float, so the 85 pt word at a 10%
+    // reserve fits from 0.9 (80 + 2y) >= 85, y = 7.222; past it the window
+    // reaches the band edge and its base runs to the margin (84 pt fit).
+    const lines = run([token('W'.repeat(17))], {
+      maxWidth: 300, marginRightPx: 360, wrapCtx: wrap([notch(200, 200, 280, 380)], 400), lineFit: fit(1, 0.1),
+    });
+    expect(lines[0]!.topY).toBeGreaterThan(7.22);
+    expect(lines[0]!.topY).toBeLessThan(7.23);
+  });
+
+  it('gives an opening wall lying exactly on the band edge the far-edge requirement', () => {
+    // As the past-the-band notch, with its fixed wall on the band edge (300):
+    // the window [200 - y, 300] reaches the far edge, so its base runs to the
+    // margin, 0.9 (100 + y) - 6 >= 90 from y = 6.667.
+    const through: FloatRect = { ...obstacle(0, 400), authoredWrap: 'through', imageY: 0, imageH: 60, yTop: 0, yBottom: 60,
+      wrapPolygon: [{ xPt: 0, yPt: 0 }, { xPt: 200, yPt: 0 }, { xPt: 150, yPt: 50 }, { xPt: 300, yPt: 50 },
+        { xPt: 300, yPt: 0 }, { xPt: 400, yPt: 0 }, { xPt: 400, yPt: 60 }, { xPt: 0, yPt: 60 }] };
+    const lines = run([token('W'.repeat(18))], { maxWidth: 300, marginRightPx: 360, wrapCtx: wrap([through], 400), lineFit: fit(1, 0.1) });
+    expect(lines[0]!.topY).toBeGreaterThan(6.66);
+    expect(lines[0]!.topY).toBeLessThan(6.67);
+  });
+
+  it('matches a fine scan of openings crossing or lying on the band edge (randomized)', () => {
+    let seed = 4242;
+    const random = (): number => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
+    for (let trial = 0; trial < 80; trial += 1) {
+      const band = 300;
+      const leftTop = 120 + Math.round(random() * 80);
+      const leftBottom = leftTop + Math.round(random() * 80) - 40;
+      // Half the trials cross the band edge mid-slab, a quarter lie on it,
+      // a quarter recede past it.
+      const kind = trial % 4;
+      const rightTop = kind === 2 ? band : band - 10 - Math.round(random() * 40);
+      const rightBottom = kind === 2 ? band : kind === 3 ? band + 5 : band + 10 + Math.round(random() * 90);
+      const [top, bottom] = kind === 3 ? [rightBottom, rightTop] : [rightTop, rightBottom];
+      const margin = band + Math.round(random() * 80) - 20;
+      const [fraction, share] = [[1, 0.1], [1, 0.2], [0.9, 0], [0.8, 0]][Math.floor(random() * 4)]!;
+      const word = 5 * (10 + Math.floor(random() * 14));
+      const float = notch(leftTop, leftBottom, top, bottom);
+      const lines = run([token('W'.repeat(word / 5))], {
+        maxWidth: band, marginRightPx: margin, wrapCtx: wrap([float], 400), lineFit: fit(fraction, share),
+      });
+      const expected = notchScan(float, band, margin, fraction, share, word, 40);
+      const label = JSON.stringify({ trial, leftTop, leftBottom, top, bottom, margin, fraction, share, word, expected });
+      if (expected >= 40) continue; // fits only below the notch
+      expect(Math.abs((lines[0]?.topY ?? Number.NaN) - expected), label).toBeLessThanOrEqual(0.011);
+    }
+  }, 60_000);
 
   it('measures a run of separately formatted line-end spaces with linear work', () => {
     const reads = (count: number): number => {
@@ -404,19 +519,53 @@ describe('WORD_KASHIDA_LINE_FIT line breaker', () => {
     const contour: FloatRect = { ...obstacle(-50, 360), authoredWrap: 'through', imageY: 0, imageH: 60, yTop: 0, yBottom: 60,
       xLeft: -50, imageX: -50,
       wrapPolygon: [{ xPt: -50, yPt: 0 }, { xPt: 300, yPt: 0 }, { xPt: 100, yPt: 60 }, { xPt: -50, yPt: 60 }] };
-    const bodyIndentAt = (edge: number): number => Math.ceil((edge + 5) / 36) * 36;
-    const wrapCtx: WrapLayoutCtx = { ...wrap([contour], 410, false, -50), numberingFirstLine: {
-      authoredFirstIndentPx: -50, bodyIndentAt } };
+    const numbering = gridNumbering(-50, 5, 36);
+    const { bodyIndentAt } = numbering;
+    const wrapCtx: WrapLayoutCtx = { ...wrap([contour], 410, false, -50), numberingFirstLine: numbering };
     const lines = run([token('W'.repeat(19))], { wrapCtx, lineFit: fit(0.8, 0) });
     const expected = numberedScan(contour, -50, 60, bodyIndentAt, 0.8, 0, 95);
     expect(expected).toBeLessThan(50);
     expect(Math.abs((lines[0]?.topY ?? Number.NaN) - expected)).toBeLessThanOrEqual(0.02);
   });
 
+  it('places an affine body indent on a sloped contour with bounded work', () => {
+    // A space or nothing suffix: the body starts 5 pt past the marker's
+    // leading edge wherever the contour puts it, one affine piece.
+    const contour: FloatRect = { ...obstacle(-50, 360), authoredWrap: 'through', imageY: 0, imageH: 60, yTop: 0, yBottom: 60,
+      xLeft: -50, imageX: -50,
+      wrapPolygon: [{ xPt: -50, yPt: 0 }, { xPt: 300, yPt: 0 }, { xPt: 100, yPt: 60 }, { xPt: -50, yPt: 60 }] };
+    const calls = { count: 0 };
+    const numbering = affineNumbering(-50, 5, calls);
+    const guarded: NumberingFirstLine = { ...numbering, bodyIndentAt: (edge) => {
+      if (calls.count > 10_000) throw new Error('unbounded body-indent probing');
+      return numbering.bodyIndentAt(edge);
+    } };
+    const wrapCtx: WrapLayoutCtx = { ...wrap([contour], 410, false, -50), numberingFirstLine: guarded };
+    const lines = run([token('W'.repeat(19))], { wrapCtx, lineFit: fit(0.8, 0) });
+    const expected = numberedScan(contour, -50, 60, (edge) => edge + 5, 0.8, 0, 95);
+    expect(expected).toBeLessThan(50);
+    expect(Math.abs((lines[0]?.topY ?? Number.NaN) - expected)).toBeLessThanOrEqual(0.02);
+    expect(calls.count).toBeLessThan(500);
+  });
+
+  it('falls back to the full band past the numbered fit work limit', () => {
+    // A 1e-6 pt default tab grid: the sloped contour crosses millions of
+    // stops, past the work limit, so the line takes the forward-tested full
+    // band below the contour instead of searching.
+    const contour: FloatRect = { ...obstacle(-50, 360), authoredWrap: 'through', imageY: 0, imageH: 60, yTop: 0, yBottom: 60,
+      xLeft: -50, imageX: -50,
+      wrapPolygon: [{ xPt: -50, yPt: 0 }, { xPt: 300, yPt: 0 }, { xPt: 100, yPt: 60 }, { xPt: -50, yPt: 60 }] };
+    const calls = { count: 0 };
+    const wrapCtx: WrapLayoutCtx = { ...wrap([contour], 410, false, -50), numberingFirstLine: gridNumbering(-50, 5, 1e-6, calls) };
+    const lines = run([token('W'.repeat(19))], { wrapCtx, lineFit: fit(0.8, 0) });
+    expect(lines[0]!.topY).toBeGreaterThanOrEqual(60 - 1e-9);
+    expect(calls.count).toBeLessThan(10_000);
+  });
+
   it('matches a fine scan of numbered first lines on sloped contours (randomized)', () => {
     let seed = 90210;
     const random = (): number => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
-    for (let trial = 0; trial < 60; trial += 1) {
+    for (let trial = 0; trial < 90; trial += 1) {
       const marker = 3 + Math.round(random() * 12);
       const hanging = -20 - Math.round(random() * 40);
       const tab = 24 + Math.round(random() * 24);
@@ -425,12 +574,14 @@ describe('WORD_KASHIDA_LINE_FIT line breaker', () => {
       const height = 40 + Math.round(random() * 60);
       const [fraction, share] = [[1, 0.1], [1, 0.2], [0.9, 0], [0.8, 0]][Math.floor(random() * 4)]!;
       const word = 5 * (10 + Math.floor(random() * 20));
-      const bodyIndentAt = (edge: number): number => Math.ceil((edge + marker) / tab) * tab;
+      // Every third trial: a space or nothing suffix (affine offset).
+      const numbering = trial % 3 === 2 ? affineNumbering(hanging, marker) : gridNumbering(hanging, marker, tab);
+      const { bodyIndentAt } = numbering;
       const contour: FloatRect = { ...obstacle(hanging, 360), authoredWrap: 'through', imageY: 0, imageH: height,
         yTop: 0, yBottom: height, xLeft: hanging, imageX: hanging,
         wrapPolygon: [{ xPt: hanging, yPt: 0 }, { xPt: from, yPt: 0 }, { xPt: to, yPt: height }, { xPt: hanging, yPt: height }] };
       const wrapCtx: WrapLayoutCtx = { ...wrap([contour], 360 - hanging, false, hanging),
-        numberingFirstLine: { authoredFirstIndentPx: hanging, bodyIndentAt } };
+        numberingFirstLine: numbering };
       const lines = run([token('W'.repeat(word / 5))], { wrapCtx, lineFit: fit(fraction, share) });
       const expected = numberedScan(contour, hanging, height, bodyIndentAt, fraction, share, word);
       const label = JSON.stringify({ trial, marker, hanging, tab, from, to, height, fraction, share, word, expected });

@@ -1241,6 +1241,27 @@ function nextLocalSweepEvent(
   );
   const pageLeft = constantBoundary(paraXLeft);
   const pageRight = constantBoundary(paraXRight);
+  const fitAware = farEdgeRequiredWidth !== undefined || fitRoots !== undefined;
+  // WORD_KASHIDA_LINE_FIT: a gap's clipped pieces and far-edge kind hold only
+  // while no gap boundary crosses a band edge. Each crossing is a sweep event
+  // and ends the slab on which the gaps are clipped and classified (the
+  // earliest event is the one returned, so roots past it are not needed).
+  let clipUpper = upper;
+  if (fitAware) {
+    const crossings: number[] = [];
+    const appendCrossings = (boundary: AffineBoundary): void => {
+      for (const edge of [pageLeft, pageRight]) {
+        appendLocalRoot(crossings, exactAffineRoot(boundary.exact, edge.exact, 0), lower, upper, diagnostics);
+      }
+    };
+    for (const interval of merged) {
+      appendCrossings(interval.left);
+      appendCrossings(interval.right);
+    }
+    roots.push(...crossings);
+    if (crossings.length > 0) clipUpper = Math.min(...crossings);
+  }
+  const clipMidpoint = unreducedExactFromNumber(exactBinary64Midpoint(lower, clipUpper));
   const gaps: Array<{ exactWidth: AffineBoundary['exact'] }> = [];
   const appendGapRoot = (
     left: AffineBoundary,
@@ -1252,16 +1273,22 @@ function nextLocalSweepEvent(
       intercept: subtractUnreducedExact(right.exact.intercept, left.exact.intercept),
     };
     gaps.push({ exactWidth });
-    if (farEdgeRequiredWidth !== undefined || fitRoots !== undefined) {
+    if (fitAware) {
       // WORD_KASHIDA_LINE_FIT: classify and measure the gap as gap selection
       // does, clipped to the band on this slab (a through-wrap opening may run
       // past the band edge), so a window reaching the far edge gets its root.
+      // No boundary crosses a band edge before clipUpper, so the comparison
+      // at the clipped slab's midpoint holds on all of it.
       const atMidpoint = (boundary: AffineBoundary): ExactRational => addUnreducedExact(
-        multiplyUnreducedExact(boundary.exact.slope, exactMidpoint), boundary.exact.intercept);
+        multiplyUnreducedExact(boundary.exact.slope, clipMidpoint), boundary.exact.intercept);
       const clippedLeft = compareExactRational(atMidpoint(left), atMidpoint(pageLeft)) < 0 ? pageLeft : left;
       const clippedRight = compareExactRational(atMidpoint(right), atMidpoint(pageRight)) > 0 ? pageRight : right;
       if (compareExactRational(atMidpoint(clippedRight), atMidpoint(clippedLeft)) <= 0) return;
-      const reachesFarEdge = reference.readingDirection === 'rtl' ? clippedLeft === pageLeft : clippedRight === pageRight;
+      // By coordinate, as gap selection tests it: a boundary lying exactly on
+      // the band edge reaches it as well as the edge itself does.
+      const reachesFarEdge = reference.readingDirection === 'rtl'
+        ? compareExactRational(atMidpoint(clippedLeft), atMidpoint(pageLeft)) <= 0
+        : compareExactRational(atMidpoint(clippedRight), atMidpoint(pageRight)) >= 0;
       appendRequirementRoot(clippedLeft, clippedRight, Math.max(
         MIN_LINE_GAP,
         reachesFarEdge && farEdgeRequiredWidth !== undefined ? farEdgeRequiredWidth
@@ -1274,8 +1301,8 @@ function nextLocalSweepEvent(
           slope: exactRationalToApproximateNumber(boundary.exact.slope),
           intercept: exactRationalToApproximateNumber(boundary.exact.intercept),
         });
-        for (const root of fitRoots({ left: affine(clippedLeft), right: affine(clippedRight) }, lower, upper)) {
-          if (root > lower && root < upper && Number.isFinite(root)) {
+        for (const root of fitRoots({ left: affine(clippedLeft), right: affine(clippedRight) }, lower, clipUpper)) {
+          if (root > lower && root < clipUpper && Number.isFinite(root)) {
             roots.push(root);
             if (diagnostics) diagnostics.localRootCandidateCount += 1;
           }

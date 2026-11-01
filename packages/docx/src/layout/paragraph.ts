@@ -106,6 +106,7 @@ import {
   type TextBoxAcquisitionInput,
 } from './textbox-input.js';
 import {
+  numberingBodyIndentRegimes,
   numberingMarkerPhysicalLeft,
   resolveNumberingMarkerGeometry,
   shapeNumberingMarkerText,
@@ -2666,15 +2667,22 @@ function numberingFirstLineWindow(
     || ((numbering?.suff || 'tab') === 'tab' && paragraph.indentFirst < 0);
   if (!numbering || !markerInput || !service || !usesResolvedBodyOffset
     || (numbering.text === '' && numbering.picBulletImagePath == null)) return undefined;
+  const suffixInput = {
+    // Tab stops are measured from the leading margin: the right one in RTL.
+    physicalIndentLeftPt: context.baseRtl ? context.physicalIndentRightPt : context.physicalIndentLeftPt,
+    tabStops: paragraph.tabStops,
+    defaultTabPt: context.defaultTabPt,
+  };
+  let regimes: ReturnType<typeof numberingBodyIndentRegimes> | undefined;
+  const regimesOf = () => (regimes ??= numberingBodyIndentRegimes(numbering, markerInput, suffixInput, service));
   return {
     authoredFirstIndentPx: paragraph.indentFirst,
     bodyIndentAt: (markerLeadingEdgePx) => resolveNumberingMarkerGeometry(numbering, markerInput, {
+      ...suffixInput,
       authoredFirstIndentPt: markerLeadingEdgePx,
-      // Tab stops are measured from the leading margin: the right one in RTL.
-      physicalIndentLeftPt: context.baseRtl ? context.physicalIndentRightPt : context.physicalIndentLeftPt,
-      tabStops: paragraph.tabStops,
-      defaultTabPt: context.defaultTabPt,
     }, service).bodyOffsetPt,
+    bodyIndentRegimeAt: (markerLeadingEdgePx) => regimesOf().regimeAt(markerLeadingEdgePx),
+    bodyIndentBreaks: (lowerPx, upperPx, limit) => regimesOf().breaksIn(lowerPx, upperPx, limit),
   };
 }
 

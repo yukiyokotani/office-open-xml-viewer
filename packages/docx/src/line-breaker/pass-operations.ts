@@ -8,6 +8,7 @@ import {
   computePreparedLineFloatWindow,
   type PreparedFloatWrap,
 } from '../float-layout.js';
+import type { LineWindowAcceptance, LineWindowFitRoots } from '../layout/float-wrap.js';
 import { calcEffectiveFontPx, EAST_ASIAN_RE, independentTextShapeRequest, sliceTextShapeRequest } from '../layout/text.js';
 import {
   wordSnapToCharsEastAsianCellCount,
@@ -462,6 +463,7 @@ function placeLineWindow(
   const farEdgeRequirement = transaction.farEdgeRequirement;
   // Each candidate is also tested forward, as admission will see it.
   const fitAdvance = transaction.fitAdvance;
+  const fitRootBudget: FitRootBudget = { remaining: NUMBERED_FIT_PIECE_LIMIT, exhausted: false };
   const fits = (placed: Readonly<{ xOffset: number; maxWidth: number }>): boolean =>
     fitAdvance === undefined || candidateLineFitWidth(operationState, placed) >= fitAdvance - 1e-9;
   const query = (topY: number, x: number, width: number, height: number,
@@ -477,7 +479,17 @@ function placeLineWindow(
     const fitRoots = fitAdvance === undefined || !placedFrom || !breakerState.isFirst
       || !wrapCtx.numberingFirstLine ? undefined
       : (gap: Parameters<typeof candidateFitRoots>[4], lower: number, upper: number) =>
-        candidateFitRoots(operationState, placedFrom, x, fitAdvance, gap, lower, upper);
+        candidateFitRoots(operationState, placedFrom, x, fitAdvance, gap, lower, upper, fitRootBudget);
+    const window = fitRoots && fitRootBudget.exhausted ? null
+      : solve(topY, x, width, height, requiredWidth, farEdgeRequirement, acceptWindow, fitRoots);
+    // Past the line's work limit the roots are incomplete: the line takes
+    // the forward-tested full band instead.
+    return window && !(fitRoots && fitRootBudget.exhausted) ? window
+      : solve(topY, x, width, height, width, undefined, acceptWindow, undefined);
+  };
+  const solve = (topY: number, x: number, width: number, height: number, requiredWidth: number,
+    farEdgeRequirement: number | undefined, acceptWindow: LineWindowAcceptance | undefined,
+    fitRoots: LineWindowFitRoots | undefined) => {
     if (wrapCtx.lineWindow) {
       const win = wrapCtx.lineWindow({
         topYPt: topY, minimumStartWidthPt: requiredWidth,
@@ -794,7 +806,9 @@ function candidateLineFit(
       placementHangingOffset(operationState), xOffset, lineMaxWidth);
     if (resolved) {
       ({ xOffset, maxWidth: lineMaxWidth, indent } = resolved);
-      piece = resolved.bodyIndent > resolved.leadingEdge ? `stop:${resolved.bodyIndent}` : 'edge';
+      // The regime's name, not its value: an affine body indent is one piece.
+      piece = resolved.bodyIndent > resolved.leadingEdge
+        ? numbering.bodyIndentRegimeAt(resolved.leadingEdge).key : 'edge';
     } else if (numbering) {
       piece = 'unresolved';
     }
@@ -807,10 +821,25 @@ function candidateLineFit(
   return { fitPx: windowLineFitWidth(operationState, lineWindow, lineMaxWidth - indent), piece };
 }
 
-/** Tops in (lower, upper) where a candidate window between two affine edges
- * first holds `advancePx`, and where its fit changes piece (a body-indent
- * stop or the reserve clamp): within one piece the fit is linear in the top,
- * so its root is exact up to rounding; pieces are found by bisection. */
+/** Resource limit on the pieces {@link candidateFitRoots} may split one
+ * line's placement into (library policy, not an OOXML rule). Each sweep slab
+ * splits into at most a few pieces per body-indent regime it crosses, so the
+ * work is bounded by slabs times tab stops; past the limit the line falls
+ * back to the forward-tested full band. */
+export const NUMBERED_FIT_PIECE_LIMIT = 4096;
+
+/** Work left for one line's {@link candidateFitRoots} calls. */
+type FitRootBudget = { remaining: number; exhausted: boolean };
+
+/** Tops in (lower, upper) where a candidate numbered first-line window
+ * between two affine edges first holds `advancePx`, and where its fit changes
+ * piece. The pieces are computed, not searched: the window edge is affine in
+ * the top; the leading edge is affine between the clamps at 0 and at the
+ * authored indent; the body indent changes regime only at the leading edges
+ * `bodyIndentBreaks` lists (an affine regime is one piece, a constant one
+ * meets the leading edge once); the reserve base changes sign once. Within a
+ * piece the fit is linear, so its root is exact up to rounding; each piece is
+ * evaluated (`bodyIndentAt` included) only at interior points. */
 function candidateFitRoots(
   operationState: PassOperationState,
   placedFrom: (window: Readonly<{ xOffset: number; maxWidth: number }>) => { xOffset: number; maxWidth: number },
@@ -819,31 +848,109 @@ function candidateFitRoots(
   gap: Readonly<{ left: Readonly<{ slope: number; intercept: number }>; right: Readonly<{ slope: number; intercept: number }> }>,
   lower: number,
   upper: number,
+  budget: FitRootBudget,
 ): number[] {
-  const at = (y: number): { fitPx: number; piece: string } => {
+  const { wrapCtx, maxWidth, baseRtl, lineFit } = operationState;
+  const numbering = wrapCtx?.numberingFirstLine;
+  if (!numbering || budget.exhausted || !(upper > lower)) return [];
+  const hanging = placementHangingOffset(operationState);
+  const authored = numbering.authoredFirstIndentPx;
+  const placedAt = (y: number) => {
     const left = gap.left.slope * y + gap.left.intercept;
     const right = gap.right.slope * y + gap.right.intercept;
-    if (!(right > left)) return { fitPx: Number.NEGATIVE_INFINITY, piece: 'empty' };
-    return candidateLineFit(operationState, placedFrom({ xOffset: left - bandX, maxWidth: right - left }));
+    return placedFrom({ xOffset: left - bandX, maxWidth: right - left });
   };
+  const windowEdgeAt = (y: number): number => {
+    const placed = placedAt(y);
+    return (baseRtl ? maxWidth - (placed.xOffset + placed.maxWidth) : placed.xOffset) + hanging;
+  };
+  const leadingEdgeAt = (y: number): number => {
+    const windowEdge = windowEdgeAt(y);
+    return Math.max(Math.max(0, windowEdge) + authored, windowEdge);
+  };
+  /** Reserve base of the window resolve gives (or the unresolved window). */
+  const reserveBaseAt = (y: number): number => {
+    const placed = placedAt(y);
+    const resolved = resolveNumberingFirstLine(operationState, numbering, hanging, placed.xOffset, placed.maxWidth);
+    const window = resolved ? { xOffset: resolved.xOffset, maxWidth: resolved.maxWidth } : placed;
+    return window.maxWidth + lineReserveExtension(operationState, window);
+  };
+  /** Far-edge kind of the reserve extension, as lineReserveExtension tests it. */
+  const farEdgeGapAt = (y: number): number => {
+    const placed = placedAt(y);
+    return baseRtl ? placed.xOffset - 1e-9 : placed.xOffset + placed.maxWidth - (maxWidth - 1e-9);
+  };
+  /** Tops in (a, b) where f, affine there, takes each target; evaluated at
+   * two interior points only. */
+  const affineRoots = (f: (y: number) => number, a: number, b: number, targets: readonly number[]): number[] => {
+    const y1 = a + (b - a) / 3;
+    const y2 = a + 2 * (b - a) / 3;
+    const f1 = f(y1);
+    const f2 = f(y2);
+    // A constant (up to rounding) has no root.
+    if (!(Math.abs(f2 - f1) > 1e-12 * Math.max(1, Math.abs(f1)))) return [];
+    const slope = (f2 - f1) / (y2 - y1);
+    if (!Number.isFinite(slope)) return [];
+    return targets.map((target) => y1 + (target - f1) / slope).filter((y) => y > a && y < b);
+  };
+  let pieces = [lower, upper];
+  const split = (rootsIn: (a: number, b: number) => readonly number[] | null): boolean => {
+    const next: number[] = [pieces[0]!];
+    for (let index = 1; index < pieces.length; index += 1) {
+      const a = pieces[index - 1]!;
+      const b = pieces[index]!;
+      if (b - a > 1e-9) {
+        const inner = rootsIn(a, b);
+        if (inner === null || inner.length > budget.remaining) {
+          budget.exhausted = true;
+          return false;
+        }
+        budget.remaining -= inner.length + 1;
+        next.push(...[...inner].sort((p, q) => p - q));
+      }
+      next.push(b);
+    }
+    pieces = next;
+    return true;
+  };
+  const interior = (a: number, b: number): number => a + (b - a) / 2;
+  // The window edge, the leading-edge clamps and the far-edge kind.
+  if (!split((a, b) => [
+    ...affineRoots(windowEdgeAt, a, b, authored < 0 ? [0, authored] : [0]),
+    ...affineRoots(farEdgeGapAt, a, b, [0]),
+  ])) return [];
+  // The body-indent regimes the leading edge crosses.
+  if (!split((a, b) => {
+    const from = leadingEdgeAt(a);
+    const to = leadingEdgeAt(b);
+    const breaks = numbering.bodyIndentBreaks(Math.min(from, to), Math.max(from, to), budget.remaining);
+    return breaks === null ? null : affineRoots(leadingEdgeAt, a, b, [...breaks, authored]);
+  })) return [];
+  // A constant regime meets the leading edge once ('edge' past it).
+  if (!split((a, b) => {
+    const regime = numbering.bodyIndentRegimeAt(leadingEdgeAt(interior(a, b)));
+    return regime.constantPx === undefined ? [] : affineRoots(leadingEdgeAt, a, b, [regime.constantPx]);
+  })) return [];
+  // The reserve clamp.
+  if (lineFit && lineFit.reserveShare > 0
+    && !split((a, b) => affineRoots(reserveBaseAt, a, b, [0]))) return [];
   const roots: number[] = [];
   const pushRoot = (y: number): void => {
     roots.push(y, y + Math.max(1e-9, Math.abs(y) * 1e-12));
   };
-  const visit = (a: number, b: number, fa: ReturnType<typeof at>, fb: ReturnType<typeof at>, depth: number): void => {
-    if (fa.piece !== fb.piece && depth < 48 && b - a > 1e-9) {
-      const m = (a + b) / 2;
-      const fm = at(m);
-      visit(a, m, fa, fm, depth + 1);
-      visit(m, b, fm, fb, depth + 1);
-      return;
-    }
-    if (fa.piece !== fb.piece) pushRoot(a);
-    if (fa.fitPx < advancePx && fb.fitPx >= advancePx && Number.isFinite(fa.fitPx)) {
-      pushRoot(a + (advancePx - fa.fitPx) * (b - a) / (fb.fitPx - fa.fitPx));
-    }
-  };
-  visit(lower, upper, at(lower), at(upper), 0);
+  const fitAt = (y: number): number => candidateLineFit(operationState, placedAt(y)).fitPx;
+  // The slab may start on a change of piece (the sweep event just tested,
+  // which rounding may have put on either side): the window just past it is
+  // a candidate of its own.
+  const step = Math.max(1e-9, Math.abs(lower) * 1e-12);
+  if (candidateLineFit(operationState, placedAt(lower - 2 * step)).piece
+    !== candidateLineFit(operationState, placedAt(interior(lower, pieces[1]!))).piece) pushRoot(lower);
+  for (let index = 1; index < pieces.length; index += 1) {
+    const a = pieces[index - 1]!;
+    const b = pieces[index]!;
+    if (index > 1) pushRoot(a);
+    if (b - a > 1e-9) for (const root of affineRoots(fitAt, a, b, [advancePx])) pushRoot(root);
+  }
   return roots;
 }
 
