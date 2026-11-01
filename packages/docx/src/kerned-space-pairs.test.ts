@@ -240,7 +240,38 @@ describe('kerned U+0020 pairs (WORD_KERNED_SPACE_PAIRS)', () => {
     // Only the A+space pair measured inside the 'A ' piece applies.
     expect(lastGlyphX(line!)).toBeCloseTo(30 - 0.75, 6);
   });
+
+  it('hangs trailing punctuation after a visible prefix measured with its seam pair', () => {
+    // 'x AB' is 26 natural and 25.25 with its space+A pair; the comma hangs.
+    const text = (width: number) => lines(layout([run('x AB,', { kerning: 2 })], width, 15))
+      .map(line => line.map(p => p.text).join(''));
+    expect(text(25.25)).toEqual(['x AB,']);
+    expect(text(25.2)).toEqual(['x ', 'AB,']);
+  });
+
+  it.each([
+    ['ruby', { ruby: { text: 'r', fontSizePt: 6 } }],
+    ['right-to-left', { rtl: true }],
+  ] as const)('keeps max-content unkerned at %s seams that bounded lines leave unkerned', (_, extra) => {
+    const runs = [run('x A x A', { kerning: 2, ...extra } as Partial<DocxTextRun>)];
+    const maxWidthPt = maxContent(runs);
+    // Natural 39; only the A+space pairs inside the 'A ' pieces apply.
+    expect(maxWidthPt).toBeCloseTo(39 - 0.75, 6);
+    expect(lines(layout(runs, maxWidthPt, 15))).toHaveLength(1);
+  });
 });
+
+function maxContent(runs: DocxTextRun[]): number {
+  const paragraph = paragraphOf(runs);
+  const doc = modelOf(paragraph, 400, 15);
+  const measure = context();
+  return measureParagraphIntrinsicWidths(paragraph, INTRINSIC_CONTEXT, 400,
+    { context: measure, fontFamilyClasses: {} }, {
+      pageIndex: 0, totalPages: 1, pageWritingMode: 'horizontal-tb',
+      documentHasEastAsianText: false, compatibilityMode: 15,
+      layoutServices: createLayoutServices(doc, { measureContext: measure }),
+    }).maxWidthPt;
+}
 
 const INTRINSIC_CONTEXT: ParagraphLayoutContext = {
   lineGrid: { active: false, pitchPt: null },
