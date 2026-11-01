@@ -68,6 +68,7 @@ pub(super) fn build(
             balance_single_byte_double_byte_width: Some(
                 settings.balance_single_byte_double_byte_width,
             ),
+            do_not_expand_shift_return: Some(settings.do_not_expand_shift_return),
             character_spacing_control: settings.character_spacing_control.map(str::to_string),
             compatibility_mode: Some(11),
             ..DocumentSettings::default()
