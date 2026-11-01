@@ -16222,7 +16222,7 @@ fn parse_table_row(
         row_height_rule,
         is_header,
         cant_split,
-        over_page_continues: false,
+        cuts_in_place: false,
         table_row_layout,
     }
 }

@@ -901,8 +901,8 @@ export function tableFormatInput(table: TableLayoutSource): TableFormatInput {
     return {
       height: rowWire?.height ? privateTableRowHeight(rowWire.height) : publicTableRowHeight(row),
       cantSplit: row.cantSplit === true,
-      ...((row as { __overPageContinues?: boolean }).__overPageContinues === true
-        ? { overPageContinues: true as const } : {}),
+      ...((row as { __cutsInPlace?: boolean }).__cutsInPlace === true
+        ? { cutsInPlace: true as const } : {}),
       repeatedHeader: row.isHeader === true,
       cellSpacingPt: wordTableCellSpacingPt(
         rowWire?.cellSpacing,

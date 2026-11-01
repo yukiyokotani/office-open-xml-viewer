@@ -3782,15 +3782,13 @@ pub struct DocTableRow {
     /// ECMA-376 §17.4.6 w:cantSplit. When true, this row must not be split
     /// across page boundaries.
     pub cant_split: bool,
-    /// A `cant_split` row taller than a whole page splits from where it
-    /// starts, as a row without `cant_split` does, instead of moving to a
-    /// fresh page where Word clips it. DOCX never sets it; producers whose
-    /// rows split that way (LibreOffice) do.
-    #[serde(
-        rename = "__overPageContinues",
-        skip_serializing_if = "std::ops::Not::not"
-    )]
-    pub over_page_continues: bool,
+    /// The row is cut at a page as LibreOffice cuts it: a `cant_split` row
+    /// taller than a whole page splits from where it starts instead of
+    /// moving to a fresh page where Word clips it, and a row whose fragment
+    /// would overflow only by its appended bottom rule is cut so the rule
+    /// fits instead of moving whole. DOCX never sets it.
+    #[serde(rename = "__cutsInPlace", skip_serializing_if = "std::ops::Not::not")]
+    pub cuts_in_place: bool,
     #[serde(rename = "__tableRowLayout")]
     pub table_row_layout: TableRowLayoutAcquisitionWire,
 }

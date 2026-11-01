@@ -3082,7 +3082,10 @@ fn paragraph_properties(cascade: &Cascade<'_>, rules: CompatRules) -> Result<Col
             .get(NS_FO, name)
             .map(|v| v.parse::<u32>().map_err(|_| invalid("bad widows/orphans")))
             .transpose()?
-            .unwrap_or(2))
+            // Unset, LibreOffice applies neither (measured: a paragraph
+            // leaves one line at a page's foot); its own documents set both
+            // to 2 in the default paragraph style.
+            .unwrap_or(0))
     };
     let widow_control = match (count("widows")?, count("orphans")?) {
         (2, 2) => true,
@@ -5770,6 +5773,28 @@ mod tests {
         assert_eq!(
             read_table(&styles, &body).unwrap_err(),
             unsupported("table-cell-line")
+        );
+        // An empty paragraph's line is sized by its mark.
+        let styles = format!(
+            r#"{TABLE_STYLES}<style:style style:name="Huge" style:family="paragraph"><style:text-properties fo:font-size="650pt"/></style:style>"#
+        );
+        let body =
+            table_body(&TABLE.replace("<text:p>c</text:p>", r#"<text:p text:style-name="Huge"/>"#));
+        assert_eq!(
+            read_table(&styles, &body).unwrap_err(),
+            unsupported("table-cell-line")
+        );
+        // Indents leaving no width in the cell.
+        let styles = format!(
+            r#"{TABLE_STYLES}<style:style style:name="Wide" style:family="paragraph"><style:paragraph-properties fo:margin-left="400pt"/></style:style>"#
+        );
+        let body = table_body(&TABLE.replace(
+            "<text:p>c</text:p>",
+            r#"<text:p text:style-name="Wide">c</text:p>"#,
+        ));
+        assert_eq!(
+            read_table(&styles, &body).unwrap_err(),
+            unsupported("table-cell-indent")
         );
     }
 

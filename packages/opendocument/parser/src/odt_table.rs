@@ -520,8 +520,8 @@ impl<'a> Reader<'a> {
                 row_height_rule: height.map_or("auto", |h| h.1).into(),
                 is_header: header,
                 cant_split,
-                // LibreOffice splits a kept-together row taller than a page.
-                over_page_continues: cant_split,
+                // LibreOffice cuts rows at a page its own way (see the flag).
+                cuts_in_place: true,
                 table_row_layout: TableRowLayoutAcquisitionWire {
                     height: height.map(|(value, rule)| TableRowHeightAcquisitionWire {
                         value: Some(twips(value)),
@@ -825,18 +825,43 @@ impl<'a> Reader<'a> {
         // continues a row whose first line does not, the DOCX layout cannot
         // advance. Each line's contribution is held to a quarter page too,
         // counting a font at twice its size.
-        let tallest = content
-            .iter()
-            .flat_map(|element| match element {
-                CellElement::Paragraph(p) => p.runs.iter(),
-                _ => [].iter(),
-            })
-            .map(|run| match run {
-                DocRun::Text(text) => text.font_size * 2.0,
-                DocRun::Image(image) => image.height_pt,
-                _ => 0.0,
-            })
-            .fold(0.0, f64::max);
+        let mark = |p: &DocParagraph| {
+            p.paragraph_mark_font_facts
+                .as_ref()
+                .and_then(|facts| facts.font_size)
+                .into_iter()
+                .chain(p.default_font_size)
+                .fold(0.0, f64::max)
+                * 2.0
+        };
+        let mut tallest: f64 = 0.0;
+        // The cell's text width after its padding.
+        let available = width - margins[1] - margins[3];
+        for element in &content {
+            let CellElement::Paragraph(p) = element else {
+                continue;
+            };
+            // The paragraph mark sizes an empty paragraph's line.
+            tallest = p
+                .runs
+                .iter()
+                .map(|run| match run {
+                    DocRun::Text(text) => text.font_size * 2.0,
+                    DocRun::Image(image) => image.height_pt,
+                    _ => 0.0,
+                })
+                .fold(tallest.max(mark(p)), f64::max);
+            // Indents leaving no width in the cell (LibreOffice clips the
+            // text) or reaching outside it were not measured.
+            let first = p.indent_left + p.indent_first;
+            if p.indent_left < 0.0
+                || first < 0.0
+                || p.indent_right < 0.0
+                || p.indent_left.max(first) + p.indent_right >= available
+            {
+                return Err(unsupported("table-cell-indent"));
+            }
+        }
         if tallest.partial_cmp(&(self.text_height / 4.0)) != Some(std::cmp::Ordering::Less) {
             return Err(unsupported("table-cell-line"));
         }
