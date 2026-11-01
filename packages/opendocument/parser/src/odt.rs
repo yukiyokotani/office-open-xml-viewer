@@ -5488,7 +5488,7 @@ mod tests {
         assert!(matches!(&runs[2], DocRun::Text(t) if t.list_label.is_none() && t.text == "a"));
     }
 
-    const TABLE_STYLES: &str = r##"<style:style style:name="T" style:family="table"><style:table-properties table:border-model="collapsing" style:width="10cm" fo:margin-left="-0.191cm" fo:margin-top="5pt" fo:margin-bottom="3pt" table:align="left" style:writing-mode="page"/></style:style><style:style style:name="T.A" style:family="table-column"><style:table-column-properties style:column-width="4cm"/></style:style><style:style style:name="T.B" style:family="table-column"><style:table-column-properties style:column-width="6cm"/></style:style><style:style style:name="T.1" style:family="table-row"><style:table-row-properties style:min-row-height="2cm" fo:keep-together="always"/></style:style><style:style style:name="T.A1" style:family="table-cell"><style:table-cell-properties fo:padding-left="0.191cm" fo:padding-right="0.191cm" fo:padding-top="0cm" fo:padding-bottom="0cm" fo:border="0.5pt solid #000000" style:vertical-align="top" fo:background-color="#ffff00"><style:background-image/></style:table-cell-properties></style:style><style:style style:name="T.B1" style:family="table-cell"><style:table-cell-properties fo:padding="0cm" fo:border-top="2pt solid #ff0000" fo:border-bottom="none" fo:border-left="none" fo:border-right="none"/></style:style><style:style style:name="Sp" style:family="paragraph"><style:paragraph-properties fo:margin-top="6pt" fo:margin-bottom="8pt"/></style:style>"##;
+    const TABLE_STYLES: &str = r##"<style:style style:name="T" style:family="table"><style:table-properties table:border-model="collapsing" style:width="10cm" fo:margin-left="-0.191cm" fo:margin-top="5pt" fo:margin-bottom="3pt" table:align="left" style:writing-mode="page"/></style:style><style:style style:name="T.A" style:family="table-column"><style:table-column-properties style:column-width="4cm"/></style:style><style:style style:name="T.B" style:family="table-column"><style:table-column-properties style:column-width="6cm"/></style:style><style:style style:name="T.H" style:family="table-row"><style:table-row-properties style:row-height="1cm"/></style:style><style:style style:name="T.1" style:family="table-row"><style:table-row-properties style:min-row-height="2cm" fo:keep-together="always"/></style:style><style:style style:name="T.A1" style:family="table-cell"><style:table-cell-properties fo:padding-left="0.191cm" fo:padding-right="0.191cm" fo:padding-top="0cm" fo:padding-bottom="0cm" fo:border="0.5pt solid #000000" style:vertical-align="top" fo:background-color="#ffff00"><style:background-image/></style:table-cell-properties></style:style><style:style style:name="T.B1" style:family="table-cell"><style:table-cell-properties fo:padding="0cm" fo:border-top="2pt solid #ff0000" fo:border-bottom="none" fo:border-left="none" fo:border-right="none"/></style:style><style:style style:name="Sp" style:family="paragraph"><style:paragraph-properties fo:margin-top="6pt" fo:margin-bottom="8pt"/></style:style>"##;
 
     fn table_body(table: &str) -> String {
         format!(
@@ -5496,7 +5496,7 @@ mod tests {
         )
     }
 
-    const TABLE: &str = r#"<table:table table:name="T" table:style-name="T"><table:table-column table:style-name="T.A"/><table:table-column table:style-name="T.B"/><table:table-header-rows><table:table-row><table:table-cell table:style-name="T.A1" office:value-type="string"><text:p>h1</text:p></table:table-cell><table:table-cell table:style-name="T.B1"><text:p>h2</text:p></table:table-cell></table:table-row></table:table-header-rows><table:table-row table:style-name="T.1"><table:table-cell table:style-name="T.A1"><text:p text:style-name="Sp">a</text:p><text:p text:style-name="Sp">b</text:p></table:table-cell><table:table-cell table:style-name="T.B1"><text:p>c</text:p></table:table-cell></table:table-row></table:table>"#;
+    const TABLE: &str = r#"<table:table table:name="T" table:style-name="T"><table:table-column table:style-name="T.A"/><table:table-column table:style-name="T.B"/><table:table-header-rows><table:table-row table:style-name="T.H"><table:table-cell table:style-name="T.A1" office:value-type="string"><text:p>h1</text:p></table:table-cell><table:table-cell table:style-name="T.B1"><text:p>h2</text:p></table:table-cell></table:table-row></table:table-header-rows><table:table-row table:style-name="T.1"><table:table-cell table:style-name="T.A1"><text:p text:style-name="Sp">a</text:p><text:p text:style-name="Sp">b</text:p></table:table-cell><table:table-cell table:style-name="T.B1"><text:p>c</text:p></table:table-cell></table:table-row></table:table>"#;
 
     fn table_settings(spacing: &str) -> String {
         [
@@ -5985,6 +5985,33 @@ mod tests {
                 ),
                 table_body(TABLE),
                 "table-row-height",
+            ),
+            // Authored heights LibreOffice continues over pages: an auto
+            // header row repeated above an authored row, a row taller than
+            // the page body, and padding taller than it.
+            (
+                TABLE_STYLES.into(),
+                table_body(&TABLE.replace(
+                    r#"<table:table-row table:style-name="T.H">"#,
+                    "<table:table-row>",
+                )),
+                "table-row-height",
+            ),
+            (
+                TABLE_STYLES.replace(
+                    r#"style:min-row-height="2cm""#,
+                    r#"style:min-row-height="30cm""#,
+                ),
+                table_body(TABLE),
+                "table-row-height",
+            ),
+            (
+                TABLE_STYLES.replace(
+                    r#"fo:padding="0cm""#,
+                    r#"fo:padding="0cm" fo:padding-top="30cm""#,
+                ),
+                table_body(TABLE),
+                "table-cell-geometry",
             ),
             // A page break before a table with a top margin.
             (
