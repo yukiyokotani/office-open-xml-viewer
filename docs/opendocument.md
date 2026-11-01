@@ -85,23 +85,20 @@ Currently admitted:
   trailing no-break or other Unicode space keeps its decoration in both;
 - text in the Latin script class of ODF Part 3 Table 22, including the
   spaces, punctuation, symbols and emoji the table leaves unassigned.
-- tables of paragraphs with absolute (refitted to the table as LibreOffice
-  refits them) or full-width relative column widths, explicit
-  left/centre/right alignment and a left margin (also past the text area)
-  but no top or bottom margin, cell padding (the same top and bottom
-  padding across a row), single solid collapsed borders, cell backgrounds,
-  vertical alignment, fixed and minimum row heights up to a quarter of the
-  page, rows kept together (a kept row taller than a page splits where it
-  starts, as LibreOffice splits it), repeated header rows of fixed height
-  whose bottom rule the body rows share (and no kept rows under them), a
-  page break before and automatic text colour over cell backgrounds.
-  Tables need LibreOffice's cell spacing and row keep settings set
-  explicitly, as LibreOffice writes them. Cell paragraphs with top or
-  bottom margins (LibreOffice repeats them where a cell continues on the
-  next page) or lines narrower than their font size, a paragraph kept with
-  the following table, merged or repeated cells, nested tables, lists and
-  headings in cells, double or dashed borders and vertical cell text
-  reject for now;
+- tables of paragraphs, admitted as far as the corpus's tables go:
+  absolute (refitted to the table as LibreOffice refits them) or
+  full-width relative column widths, explicit left/centre/right alignment
+  and a left margin (also past the text area), cell padding (the same top
+  and bottom padding across a row), single solid collapsed borders,
+  minimum row heights and rows splitting at page breaks as LibreOffice
+  splits them, with ASCII or CJK text up to 24 pt in cells. Tables need
+  LibreOffice's cell spacing and row keep settings set explicitly, as
+  LibreOffice writes them. Everything else in tables rejects for now:
+  table margins, page breaks and kept paragraphs at tables, repeated
+  header rows, fixed row heights and rows kept together, cell backgrounds
+  and centred or bottom-aligned cells, cell paragraph margins, merged or
+  repeated cells, nested tables, lists, headings and pictures in cells,
+  double or dashed borders and vertical cell text;
 - lists in label alignment mode, numbered as LibreOffice numbers them
   (continued lists, items nested without a paragraph of their own, list
   headers), with decimal, letter and Roman labels or text bullets, labels

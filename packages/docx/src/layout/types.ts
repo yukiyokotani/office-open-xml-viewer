@@ -1453,11 +1453,9 @@ export interface TableRowFormatInput {
   readonly height: TableRowHeightInput | null;
   /** Effective CT_OnOff values after table-style and direct row resolution. */
   readonly cantSplit: boolean;
-  /** The row is cut at a page as LibreOffice cuts it (DOCX never sets it):
-   * a cantSplit row taller than a page splits from where it starts instead
-   * of moving to a fresh page and being clipped there, and a row overflowing
-   * a fragment only by its appended bottom rule is cut so the rule fits
-   * instead of moving whole. */
+  /** The row is cut at a page as LibreOffice cuts it (DOCX never sets it): a
+   * row overflowing a fragment only by its appended bottom rule is cut so the
+   * rule fits instead of moving whole. */
   readonly cutsInPlace?: true;
   readonly repeatedHeader: boolean;
   readonly cellSpacingPt: number;

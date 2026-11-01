@@ -3643,14 +3643,6 @@ pub struct DocTable {
     /// the table is not floating (no `tblp_pr`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub overlap: Option<String>,
-    /// The table starts on a new page unless it already begins an empty one,
-    /// like a paragraph's `pageBreakBefore`. WordprocessingML has no table
-    /// page break, so DOCX never sets it; other producers' tables do.
-    #[serde(
-        rename = "__pageBreakBefore",
-        skip_serializing_if = "std::ops::Not::not"
-    )]
-    pub page_break_before: bool,
     /// Parser/layout acquisition facts which must retain authored presence and
     /// lexical OOXML values. Kept off the stable TypeScript `DocTable` surface;
     /// `parser-model.ts` snapshots this serde-only wire before layout.
@@ -3782,11 +3774,9 @@ pub struct DocTableRow {
     /// ECMA-376 §17.4.6 w:cantSplit. When true, this row must not be split
     /// across page boundaries.
     pub cant_split: bool,
-    /// The row is cut at a page as LibreOffice cuts it: a `cant_split` row
-    /// taller than a whole page splits from where it starts instead of
-    /// moving to a fresh page where Word clips it, and a row whose fragment
-    /// would overflow only by its appended bottom rule is cut so the rule
-    /// fits instead of moving whole. DOCX never sets it.
+    /// The row is cut at a page as LibreOffice cuts it: a row whose fragment
+    /// would overflow only by the bottom rule a page slice appends is cut so
+    /// the rule fits instead of moving whole. DOCX never sets it.
     #[serde(rename = "__cutsInPlace", skip_serializing_if = "std::ops::Not::not")]
     pub cuts_in_place: bool,
     #[serde(rename = "__tableRowLayout")]

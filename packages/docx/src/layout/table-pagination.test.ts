@@ -1318,30 +1318,6 @@ describe('retained table pagination', () => {
     expect(result.nextCursor).toMatchObject({ rowIndex: 0, rowFragmentIndex: 1 });
   });
 
-  it('splits a producer over-page cantSplit row where it starts', () => {
-    const overPage = { ...row(0, 120, {
-      cantSplit: true,
-      paragraph: paragraph('producer-over-page', [40, 40, 40]),
-    }), cutsInPlace: true as const };
-    const source = acquisition([overPage]);
-
-    const result = take(source, 60);
-
-    expect(result.requiresFreshPage).toBe(false);
-    expect(result.fragment?.unpaintedOverflowPt ?? 0).toBe(0);
-    expect(result.fragment?.rows[0]?.cells[0]?.contentRanges).toEqual([
-      { kind: 'paragraph', blockIndex: 0, lineStart: 0, lineEnd: 1 },
-    ]);
-    expect(result.nextCursor).toMatchObject({ rowIndex: 0, rowFragmentIndex: 1 });
-
-    // A row that fits a fresh page is still kept together.
-    const fitting = acquisition([{ ...row(0, 80, {
-      cantSplit: true,
-      paragraph: paragraph('producer-fitting', [40, 40]),
-    }), cutsInPlace: true as const }]);
-    expect(take(fitting, 60).requiresFreshPage).toBe(true);
-  });
-
   it('cuts a producer row that overflows only by the appended bottom rule', () => {
     const rule = { widthPt: 12, color: '000000', authoredStyle: 'single' };
     const ruled = (index: number, cutsInPlace: boolean) => {
@@ -1368,22 +1344,6 @@ describe('retained table pagination', () => {
     ]);
     expect(cut.fragment!.advancePt).toBeLessThanOrEqual(97);
     expect(cut.nextCursor).toMatchObject({ rowIndex: 1, rowFragmentIndex: 1 });
-  });
-
-  it('keeps a producer cantSplit row that fits a fresh page off a page holding earlier rows', () => {
-    const kept = (index: number, lines: number[]) => ({ ...row(index, lines.reduce((a, b) => a + b, 0), {
-      cantSplit: true,
-      paragraph: paragraph(`kept-${index}`, lines),
-    }), cutsInPlace: true as const });
-    const source = acquisition([kept(0, [10, 10, 10]), kept(1, [20, 20, 20, 20])]);
-
-    const first = take(source, 100);
-    expect(first.fragment?.rows.map((item) => item.logicalRowIndex)).toEqual([0]);
-    expect(first.nextCursor).toMatchObject({ rowIndex: 1, rowFragmentIndex: 0 });
-
-    const second = take(source, 100, first.nextCursor!);
-    expect(second.fragment?.rows.map((item) => item.fragmentIndex)).toEqual([0]);
-    expect(second.nextCursor).toBeNull();
   });
 
   it('clips an over-page cantSplit row to the fresh Word page band without continuation', () => {

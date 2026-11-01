@@ -454,7 +454,6 @@ fn project_table(
         bidi_visual: Some(first_bidi),
         tblp_pr,
         overlap,
-        page_break_before: false,
         table_layout: TableLayoutAcquisitionWire {
             effective_style_id: None,
             cell_frame,

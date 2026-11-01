@@ -1081,9 +1081,6 @@ function acquiredBodyTable(source: SourceRef, table: TableLayoutSource) {
     ...(positioning?.vertAnchor === 'page' || positioning?.vertAnchor === 'margin'
       ? { pageOwnedFloatingTable: true }
       : {}),
-    ...((table as { __pageBreakBefore?: boolean }).__pageBreakBefore === true
-      ? { pageBreakBefore: true as const }
-      : {}),
   });
 }
 

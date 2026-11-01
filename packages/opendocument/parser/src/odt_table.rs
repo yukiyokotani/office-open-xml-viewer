@@ -4,12 +4,16 @@
 //! A table maps to a fixed-layout DOCX table with the authored column grid.
 //! LibreOffice collapses borders: each cell edge is drawn once, centred on
 //! the column edge, a cell's text starts at its edge plus its padding, and
-//! the table's top and bottom borders lie inside the table. Spacing around a
-//! table adds the neighbouring paragraphs' margins and the table's own; a
-//! cell keeps its first paragraph's space before and its last paragraph's
-//! space after. Only the corpus's table shape is admitted: no merged or
-//! repeated cells, nested tables, lists or headings in cells, double borders
-//! or vertical text.
+//! the table's top and bottom borders lie inside the table. The paragraphs
+//! around a table keep their own margins; cell paragraphs have none.
+//!
+//! Only what the corpus's tables use is modelled. Every other table feature
+//! rejects with a broad rule rather than a precise model: table margins,
+//! breaks and kept paragraphs at tables, repeated header rows, fixed row
+//! heights and rows kept together, cell backgrounds and centred or
+//! bottom-aligned cells, merged or repeated cells, nested tables, lists,
+//! headings and pictures in cells, cell text outside ASCII and CJK or above
+//! 24 pt, double or dashed borders and vertical text.
 
 use super::*;
 use docx_model::{
@@ -172,9 +176,8 @@ impl<'a> Reader<'a> {
         // The measured model: collapsing borders (§20.302), stated by the
         // default table style or the table's own (without either LibreOffice
         // separates them, insetting text by the border; measured), and rows
-        // that do not split unless their default says so.
+        // that split at a page.
         let mut collapsing = false;
-        let mut row_keep_default = false;
         if let Some(default) = self.sheet.default_style(Family::Table) {
             for (key, properties) in &default.style().groups {
                 self.charge_work(
@@ -209,13 +212,7 @@ impl<'a> Reader<'a> {
                 )?;
                 for (attribute, value) in &properties.attributes {
                     match (key.as_str(), attribute.0.as_str(), attribute.1.as_str()) {
-                        ("table-row-properties", NS_FO, "keep-together") => {
-                            row_keep_default = match value.as_str() {
-                                "always" => true,
-                                "auto" => false,
-                                _ => return Err(unsupported("table-default-style")),
-                            }
-                        }
+                        ("table-row-properties", NS_FO, "keep-together") if value == "auto" => {}
                         _ => return Err(unsupported("table-default-style")),
                     }
                 }
@@ -239,7 +236,6 @@ impl<'a> Reader<'a> {
         // Without an alignment LibreOffice fills the text area whatever the
         // width (measured); that is not modelled.
         let mut jc = "";
-        let mut break_before = false;
         for (key, value) in properties.into_iter().flatten() {
             match (key.0.as_str(), key.1.as_str()) {
                 (NS_STYLE, "width") => width = Some(length_pt(value)?),
@@ -257,14 +253,9 @@ impl<'a> Reader<'a> {
                     }
                 }
                 (NS_STYLE, "writing-mode") if matches!(value.as_str(), "page" | "lr-tb") => {}
-                (NS_FO, "break-before") => {
-                    break_before = match value.as_str() {
-                        "page" => true,
-                        "auto" => false,
-                        _ => return Err(unsupported("table-break")),
-                    }
-                }
-                (NS_FO, "break-after") if value == "auto" => {}
+                // Page breaks at tables, like the table features below that
+                // no corpus table uses, reject rather than being modelled.
+                (NS_FO, "break-before" | "break-after") if value == "auto" => {}
                 (NS_TABLE, "border-model") if value == "collapsing" => collapsing = true,
                 (NS_FO, "background-color") if value == "transparent" => {}
                 _ => return Err(unsupported("table-property")),
@@ -315,9 +306,9 @@ impl<'a> Reader<'a> {
             return Err(unsupported("table-geometry"));
         }
 
-        // Columns (§9.1.6) and rows (§9.1.3), header rows first (§9.1.10).
+        // Columns (§9.1.6) and rows (§9.1.3).
         let mut columns: Vec<(Option<f64>, Option<u32>)> = Vec::new();
-        let mut rows: Vec<(roxmltree::Node<'_, '_>, bool)> = Vec::new();
+        let mut rows: Vec<roxmltree::Node<'_, '_>> = Vec::new();
         for child in node.children() {
             if child.is_text() {
                 if child.text().is_some_and(|t| !t.trim().is_empty()) {
@@ -376,15 +367,11 @@ impl<'a> Reader<'a> {
                     }
                     columns.extend(std::iter::repeat_n((absolute, share), repeat));
                 }
-                (Some(NS_TABLE), "table-header-rows") if rows.is_empty() => {
-                    for row in child.children().filter(|n| n.is_element()) {
-                        if !xml::is(row, NS_TABLE, "table-row") {
-                            return Err(unsupported("table-child"));
-                        }
-                        rows.push((row, true));
-                    }
+                // Repeated header rows (§9.1.10) are not in the corpus.
+                (Some(NS_TABLE), "table-header-rows") => {
+                    return Err(unsupported("table-header-rows"));
                 }
-                (Some(NS_TABLE), "table-row") => rows.push((child, false)),
+                (Some(NS_TABLE), "table-row") => rows.push(child),
                 (Some(NS_TEXT), "soft-page-break") => {}
                 _ => return Err(unsupported("table-child")),
             }
@@ -453,10 +440,7 @@ impl<'a> Reader<'a> {
         let enclosing_area = self.area;
         let mut doc_rows = Vec::with_capacity(rows.len());
         let row_count = rows.len();
-        for (row, header) in rows {
-            if header && doc_rows.iter().any(|r: &DocTableRow| !r.is_header) {
-                return Err(unsupported("table-header-rows"));
-            }
+        for row in rows {
             for attribute in row.attributes() {
                 match (attribute.namespace(), attribute.name()) {
                     (Some(NS_TABLE), "style-name") => {}
@@ -464,7 +448,6 @@ impl<'a> Reader<'a> {
                 }
             }
             let mut height = None;
-            let mut cant_split = row_keep_default;
             for (key, value) in self
                 .table_group(
                     Family::TableRow,
@@ -475,25 +458,10 @@ impl<'a> Reader<'a> {
                 .flatten()
             {
                 match (key.0.as_str(), key.1.as_str()) {
-                    // Both together resolve in an order that was not
-                    // measured.
-                    (NS_STYLE, "row-height" | "min-row-height") => {
-                        let rule = if key.1 == "row-height" {
-                            "exact"
-                        } else {
-                            "atLeast"
-                        };
-                        if height.replace((length_pt(value)?, rule)).is_some() {
-                            return Err(unsupported("table-row-height"));
-                        }
-                    }
-                    (NS_FO, "keep-together") => {
-                        cant_split = match value.as_str() {
-                            "always" => true,
-                            "auto" => false,
-                            _ => return Err(unsupported("table-row")),
-                        }
-                    }
+                    // A minimum height; fixed heights and rows kept together
+                    // are not in the corpus.
+                    (NS_STYLE, "min-row-height") => height = Some(length_pt(value)?),
+                    (NS_FO, "keep-together") if value == "auto" => {}
                     (NS_FO, "background-color") if value == "transparent" => {}
                     _ => return Err(unsupported("table-row")),
                 }
@@ -523,16 +491,14 @@ impl<'a> Reader<'a> {
             }
             doc_rows.push(DocTableRow {
                 cells,
-                row_height: height.map(|h| h.0),
-                row_height_rule: height.map_or("auto", |h| h.1).into(),
-                is_header: header,
-                cant_split,
+                row_height: height,
+                row_height_rule: if height.is_some() { "atLeast" } else { "auto" }.into(),
                 // LibreOffice cuts rows at a page its own way (see the flag).
                 cuts_in_place: true,
                 table_row_layout: TableRowLayoutAcquisitionWire {
-                    height: height.map(|(value, rule)| TableRowHeightAcquisitionWire {
+                    height: height.map(|value| TableRowHeightAcquisitionWire {
                         value: Some(twips(value)),
-                        rule: rule.into(),
+                        rule: "atLeast".into(),
                         rule_authored: true,
                     }),
                     ..TableRowLayoutAcquisitionWire::default()
@@ -545,9 +511,8 @@ impl<'a> Reader<'a> {
         // padding or borders run past a page; the DOCX layout cannot split
         // that fixed space and does not converge. Each row's fixed space
         // (its authored height or a cell's vertical padding and borders,
-        // whichever is larger) is held to a quarter of the page body, and so
-        // are the repeated header rows' together, leaving half a page for a
-        // row's content.
+        // whichever is larger) is held to a quarter of the page body, leaving
+        // room for a row's first line (bounded in `table_cell`).
         let bound = self.text_height / 4.0;
         let fixed = |row: &DocTableRow| {
             let rule = |side: &Option<BorderSpec>| side.as_ref().map_or(0.0, |b| b.width);
@@ -561,16 +526,6 @@ impl<'a> Reader<'a> {
                 })
                 .fold(row.row_height.unwrap_or(0.0), f64::max)
         };
-        // Repeated header rows of content-dependent height near a page tall
-        // are placed differently from LibreOffice (measured: a 52-line
-        // header moves a line to another page), so they need an exact
-        // height, which bounds them.
-        if doc_rows
-            .iter()
-            .any(|row| row.is_header && row.row_height_rule != "exact")
-        {
-            return Err(unsupported("table-header-rows"));
-        }
         // LibreOffice starts the content of every cell in a row below the
         // row's largest top padding (measured: 0 and 20 pt both start 20 pt
         // down); the DOCX layout pads each cell apart.
@@ -582,28 +537,11 @@ impl<'a> Reader<'a> {
         }) {
             return Err(unsupported("table-cell-padding"));
         }
-        // A kept-together row taller than a page continues under repeated
-        // header rows differently in LibreOffice (measured: a 97-line kept
-        // row under a 60 pt header ends a page earlier); whether a row
-        // outgrows a page is known only at layout, so the two do not mix
-        // (no corpus table has both).
-        if doc_rows.iter().any(|row| row.is_header)
-            && doc_rows.iter().any(|row| !row.is_header && row.cant_split)
-        {
-            return Err(unsupported("table-header-rows"));
-        }
-        let mut header_fixed = 0.0;
         for row in &doc_rows {
             let space = fixed(row);
             if space.partial_cmp(&bound) == Some(std::cmp::Ordering::Greater) || space.is_nan() {
                 return Err(unsupported("table-row-height"));
             }
-            if row.is_header {
-                header_fixed += space;
-            }
-        }
-        if header_fixed > bound {
-            return Err(unsupported("table-row-height"));
         }
         // Collapsed borders on a shared edge: the wider one is drawn in
         // LibreOffice and in the DOCX layout alike; two of equal width that
@@ -628,30 +566,6 @@ impl<'a> Reader<'a> {
                 return Err(unsupported("table-border-conflict"));
             }
         }
-        // Under repeated header rows LibreOffice places a continued page's
-        // rows by their own top rules, not the header's bottom rule
-        // (measured: a 12 pt header bottom rule over unruled rows moves the
-        // DOCX layout's continued rows 12 pt down). Every body row must so
-        // share the header's bottom rule.
-        if let Some(last_header) = doc_rows.iter().rposition(|row| row.is_header) {
-            let same = |a: &Option<BorderSpec>, b: &Option<BorderSpec>| match (a, b) {
-                (None, None) => true,
-                (Some(a), Some(b)) => a.width == b.width && a.color == b.color,
-                _ => false,
-            };
-            let header = &doc_rows[last_header];
-            for row in doc_rows.iter().filter(|row| !row.is_header) {
-                self.charge_work(row.cells.len())?;
-                if header
-                    .cells
-                    .iter()
-                    .zip(&row.cells)
-                    .any(|(above, below)| !same(&above.borders.bottom, &below.borders.top))
-                {
-                    return Err(unsupported("table-header-rule"));
-                }
-            }
-        }
         // Where a page break falls between two rows, LibreOffice draws their
         // shared edge again above the row continuing on the next page, and
         // below the row ending the page only where that row has a bottom
@@ -669,59 +583,38 @@ impl<'a> Reader<'a> {
                 }
             }
         }
-        // LibreOffice counts a row's explicit height (fixed or minimum) from
-        // the top of the border above it (measured). The DOCX layout does so
-        // for an exact row (WORD_COLLAPSED_BORDER_ROW_TRACK_FOOTPRINT) but adds
-        // that border to an atLeast row, so a minimum height is given net of
-        // it; the border is drawn once at the thicker width. Word also adds
-        // the cells' bottom margins to an exact row, which LibreOffice was not
-        // measured to do, so exact rows admit no bottom padding.
+        // LibreOffice counts a row's minimum height from the top of the
+        // border above it (measured); the DOCX layout adds that border to an
+        // atLeast row (WORD_COLLAPSED_BORDER_ROW_TRACK_FOOTPRINT), so the
+        // minimum is given net of it. The border is drawn once at the thicker
+        // width, which the lower cell now carries.
         for index in 0..doc_rows.len() {
-            let width = |cell: &DocTableCell, top: bool| {
-                let side = if top {
-                    &cell.borders.top
-                } else {
-                    &cell.borders.bottom
-                };
-                side.as_ref().map_or(0.0, |b| b.width)
+            let above = index
+                .checked_sub(1)
+                .map(|i| {
+                    doc_rows[i]
+                        .cells
+                        .iter()
+                        .map(|c| c.borders.bottom.as_ref().map_or(0.0, |b| b.width))
+                        .fold(0.0, f64::max)
+                })
+                .unwrap_or(0.0);
+            let row = &mut doc_rows[index];
+            let Some(minimum) = row.row_height else {
+                continue;
             };
-            match doc_rows[index].row_height_rule.as_str() {
-                "exact" => {
-                    if doc_rows[index]
-                        .cells
-                        .iter()
-                        .any(|c| c.margin_bottom != Some(0.0))
-                    {
-                        return Err(unsupported("table-row-padding"));
-                    }
-                }
-                "atLeast" => {
-                    let above = index
-                        .checked_sub(1)
-                        .map(|i| {
-                            doc_rows[i]
-                                .cells
-                                .iter()
-                                .map(|c| width(c, false))
-                                .fold(0.0, f64::max)
-                        })
-                        .unwrap_or(0.0);
-                    let shared = doc_rows[index]
-                        .cells
-                        .iter()
-                        .map(|c| width(c, true))
-                        .fold(above, f64::max);
-                    let row = &mut doc_rows[index];
-                    let height = row.row_height.expect("an atLeast row has a height") - shared;
-                    if height <= 0.0 {
-                        return Err(unsupported("table-row"));
-                    }
-                    row.row_height = Some(height);
-                    if let Some(wire) = row.table_row_layout.height.as_mut() {
-                        wire.value = Some(twips(height));
-                    }
-                }
-                _ => {}
+            let shared = row
+                .cells
+                .iter()
+                .map(|c| c.borders.top.as_ref().map_or(0.0, |b| b.width))
+                .fold(above, f64::max);
+            let height = minimum - shared;
+            if height <= 0.0 {
+                return Err(unsupported("table-row"));
+            }
+            row.row_height = Some(height);
+            if let Some(wire) = row.table_row_layout.height.as_mut() {
+                wire.value = Some(twips(height));
             }
         }
         self.next_table += 1;
@@ -733,9 +626,6 @@ impl<'a> Reader<'a> {
             tbl_ind: (jc == "left").then_some(margin_left),
             layout: Some("fixed".into()),
             width_pt: Some(table_width),
-            // A table that already starts a page breaks no further, as a
-            // paragraph's break does not (measured).
-            page_break_before: break_before,
             table_layout: TableLayoutAcquisitionWire {
                 ordinary_flow: true,
                 outer_edge_indent: true,
@@ -782,8 +672,6 @@ impl<'a> Reader<'a> {
         }
         let mut margins = [0.0f64; 4];
         let mut sides: [Option<BorderSpec>; 4] = [None, None, None, None];
-        let mut background = None;
-        let mut v_align = "top";
         // Shorthands first: a side set beside them wins (§20.183, §20.217,
         // after XSL's precedence of specific over shorthand properties).
         let mut entries: Vec<_> = self
@@ -814,19 +702,10 @@ impl<'a> Reader<'a> {
                 (NS_FO, "border-left") => sides[1] = border(value)?,
                 (NS_FO, "border-bottom") => sides[2] = border(value)?,
                 (NS_FO, "border-right") => sides[3] = border(value)?,
-                (NS_FO, "background-color") => {
-                    background = (value != "transparent")
-                        .then(|| hex_color(value))
-                        .transpose()?
-                }
-                (NS_STYLE, "vertical-align") => {
-                    v_align = match value.as_str() {
-                        "top" | "automatic" => "top",
-                        "middle" => "center",
-                        "bottom" => "bottom",
-                        _ => return Err(unsupported("table-cell-property")),
-                    }
-                }
+                // Cell backgrounds and centred or bottom-aligned content are
+                // not in the corpus.
+                (NS_FO, "background-color") if value == "transparent" => {}
+                (NS_STYLE, "vertical-align") if matches!(value.as_str(), "top" | "automatic") => {}
                 (NS_STYLE, "writing-mode") if matches!(value.as_str(), "page" | "lr-tb") => {}
                 _ => return Err(unsupported("table-cell-property")),
             }
@@ -860,8 +739,8 @@ impl<'a> Reader<'a> {
         if content.is_empty() {
             return Err(unsupported("table-cell-empty"));
         }
-        // A row's first line must fit a page beside its fixed space and the
-        // repeated header rows (each held to a quarter page): LibreOffice
+        // A row's first line must fit a page beside its fixed space (held to
+        // a quarter page): LibreOffice
         // continues a row whose first line does not, the DOCX layout cannot
         // advance. Each line's contribution is held to a quarter page too,
         // counting a font at four times its size (room for tall font
@@ -875,6 +754,21 @@ impl<'a> Reader<'a> {
                 .fold(0.0, f64::max)
                 * 4.0
         };
+        // Fonts above 24 pt and pictures in cells are not in the corpus.
+        for element in &content {
+            let CellElement::Paragraph(p) = element else {
+                continue;
+            };
+            for run in &p.runs {
+                match run {
+                    DocRun::Text(text) if text.font_size > 24.0 => {
+                        return Err(unsupported("table-cell-line"));
+                    }
+                    DocRun::Image(_) => return Err(unsupported("table-cell-content")),
+                    _ => {}
+                }
+            }
+        }
         let mut tallest: f64 = 0.0;
         // The cell's text width after its padding.
         let available = width - margins[1] - margins[3];
@@ -895,7 +789,6 @@ impl<'a> Reader<'a> {
                 .iter()
                 .map(|run| match run {
                     DocRun::Text(text) => text.font_size * 4.0,
-                    DocRun::Image(image) => image.height_pt,
                     _ => 0.0,
                 })
                 .fold(mark(p), f64::max)
@@ -915,11 +808,10 @@ impl<'a> Reader<'a> {
         if tallest.partial_cmp(&(self.text_height / 4.0)) != Some(std::cmp::Ordering::Less) {
             return Err(unsupported("table-cell-line"));
         }
-        // LibreOffice clips a glyph or picture wider than the cell's line;
-        // the DOCX layout paints it whole. A line must hold the widest glyph
-        // it can carry: within 1.25 em for ASCII and CJK text (whose glyphs
-        // keep within an em), within 2 em for any other character (measured:
-        // U+01F1 advances 1.33 em in Liberation Serif).
+        // LibreOffice clips a glyph wider than the cell's line; the DOCX
+        // layout paints it whole. Cell text is held to ASCII and CJK, whose
+        // glyphs keep within an em (other characters are not in the corpus:
+        // U+2E3B advances three), and a line must be at least 1.25 em wide.
         let narrow = |c: char| {
             c.is_ascii()
                 || matches!(c, '\u{3000}'..='\u{9fff}' | '\u{f900}'..='\u{faff}' | '\u{ff00}'..='\u{ffef}')
@@ -928,42 +820,15 @@ impl<'a> Reader<'a> {
             let CellElement::Paragraph(p) = element else {
                 continue;
             };
-            let widest = p
-                .runs
-                .iter()
-                .map(|run| match run {
-                    DocRun::Text(text) => {
-                        text.font_size
-                            * if text.text.chars().all(narrow) {
-                                1.25
-                            } else {
-                                2.0
-                            }
-                    }
-                    DocRun::Image(image) => image.width_pt,
-                    _ => 0.0,
-                })
-                .fold(0.0, f64::max);
             let line =
                 available - p.indent_left.max(p.indent_left + p.indent_first) - p.indent_right;
-            if line < widest {
-                return Err(unsupported("table-cell-indent"));
-            }
-        }
-        if let Some(fill) = &background {
-            // §20.395 automatic colour over the cell's background, as over a
-            // paragraph's (cell paragraphs have none of their own).
-            let resolved = libreoffice_automatic_color(fill)?;
-            for element in &mut content {
-                let CellElement::Paragraph(paragraph) = element else {
-                    continue;
-                };
-                for run in &mut paragraph.runs {
-                    if let DocRun::Text(text) = run {
-                        if text.color.is_none() && text.background.is_none() {
-                            text.color = Some(resolved.to_string());
-                            text.color_auto = false;
-                        }
+            for run in &p.runs {
+                if let DocRun::Text(text) = run {
+                    if !text.text.chars().all(narrow) {
+                        return Err(unsupported("table-cell-text"));
+                    }
+                    if line < text.font_size * 1.25 {
+                        return Err(unsupported("table-cell-indent"));
                     }
                 }
             }
@@ -987,8 +852,7 @@ impl<'a> Reader<'a> {
                 right,
                 ..CellBorders::default()
             },
-            background,
-            v_align: v_align.into(),
+            v_align: "top".into(),
             width_pt: Some(width),
             margin_top: Some(margins[0]),
             margin_left: Some(margins[1]),

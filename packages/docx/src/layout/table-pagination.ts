@@ -2309,13 +2309,12 @@ function takeTableFragmentPass(
       }
     }
 
-    const fitsFreshBand = wholeHeightPt + repeatedHeaderHeightPt
-      <= context.freshPageHeightPt + EPSILON_PT;
-    // A producer's over-page cantSplit row splits where it starts, as a row
-    // without cantSplit does (TableRowFormatInput.cutsInPlace).
-    if (row.cantSplit && !(row.cutsInPlace && !fitsFreshBand)) {
+    if (row.cantSplit) {
       const selectedSourceRows = selected.some((item) => item.ownership === 'source');
       if (selectedSourceRows) break;
+      const freshHeaderHeightPt = context.availableHeightPt - availablePt;
+      const fitsFreshBand = wholeHeightPt + freshHeaderHeightPt
+        <= context.freshPageHeightPt + EPSILON_PT;
       if (fitsFreshBand) {
         return passOf({ fragment: null, nextCursor: cursor, requiresFreshPage: true });
       }

@@ -2103,18 +2103,13 @@ impl<'a> Reader<'a> {
         for block in self.blocks {
             let mut collected = match block {
                 Block::Paragraph(collected) => *collected,
-                Block::Table(mut table) => {
-                    // A break after the previous paragraph starts the table
-                    // on a new page, as a break before it does; on a table
-                    // directly after another one it was not measured.
-                    table.page_break_before |= break_pending;
-                    break_pending = false;
-                    if table.page_break_before && after_table {
+                Block::Table(table) => {
+                    // A page break before a table (after the previous
+                    // paragraph) is not in the corpus.
+                    if break_pending {
                         return Err(unsupported("table-break"));
                     }
-                    // A paragraph kept with a table was not measured (with a
-                    // break before the table LibreOffice ends the keep; the
-                    // DOCX layout carries the paragraph along).
+                    // A paragraph kept with a table is not in the corpus.
                     if matches!(out.last(), Some(BodyElement::Paragraph(p)) if p.keep_next) {
                         return Err(unsupported("table-keep"));
                     }
@@ -5482,7 +5477,7 @@ mod tests {
         assert!(matches!(&runs[2], DocRun::Text(t) if t.list_label.is_none() && t.text == "a"));
     }
 
-    const TABLE_STYLES: &str = r##"<style:style style:name="T" style:family="table"><style:table-properties table:border-model="collapsing" style:width="10cm" fo:margin-left="-0.191cm" fo:margin-top="0pt" fo:margin-bottom="0pt" table:align="left" style:writing-mode="page"/></style:style><style:style style:name="T.A" style:family="table-column"><style:table-column-properties style:column-width="4cm"/></style:style><style:style style:name="T.B" style:family="table-column"><style:table-column-properties style:column-width="6cm"/></style:style><style:style style:name="T.H" style:family="table-row"><style:table-row-properties style:row-height="1cm"/></style:style><style:style style:name="T.1" style:family="table-row"><style:table-row-properties style:min-row-height="2cm"/></style:style><style:style style:name="T.A1" style:family="table-cell"><style:table-cell-properties fo:padding-left="0.191cm" fo:padding-right="0.191cm" fo:padding-top="0cm" fo:padding-bottom="0cm" fo:border="0.5pt solid #000000" style:vertical-align="top" fo:background-color="#ffff00"><style:background-image/></style:table-cell-properties></style:style><style:style style:name="T.B1" style:family="table-cell"><style:table-cell-properties fo:padding="0cm" fo:border-top="2pt solid #ff0000" fo:border-bottom="none" fo:border-left="none" fo:border-right="none"/></style:style><style:style style:name="T.HB" style:family="table-cell"><style:table-cell-properties fo:padding="0cm" fo:border-top="none" fo:border-bottom="2pt solid #ff0000" fo:border-left="none" fo:border-right="none"/></style:style><style:style style:name="Sp" style:family="paragraph"><style:paragraph-properties fo:margin-top="6pt" fo:margin-bottom="8pt"/></style:style>"##;
+    const TABLE_STYLES: &str = r##"<style:style style:name="T" style:family="table"><style:table-properties table:border-model="collapsing" style:width="10cm" fo:margin-left="-0.191cm" fo:margin-top="0pt" fo:margin-bottom="0pt" table:align="left" style:writing-mode="page"/></style:style><style:style style:name="T.A" style:family="table-column"><style:table-column-properties style:column-width="4cm"/></style:style><style:style style:name="T.B" style:family="table-column"><style:table-column-properties style:column-width="6cm"/></style:style><style:style style:name="T.1" style:family="table-row"><style:table-row-properties style:min-row-height="2cm"/></style:style><style:style style:name="T.A1" style:family="table-cell"><style:table-cell-properties fo:padding-left="0.191cm" fo:padding-right="0.191cm" fo:padding-top="0cm" fo:padding-bottom="0cm" fo:border="0.5pt solid #000000" style:vertical-align="top"/></style:style><style:style style:name="T.B1" style:family="table-cell"><style:table-cell-properties fo:padding="0cm" fo:border-top="2pt solid #ff0000" fo:border-bottom="none" fo:border-left="none" fo:border-right="none"/></style:style><style:style style:name="T.HB" style:family="table-cell"><style:table-cell-properties fo:padding="0cm" fo:border-top="none" fo:border-bottom="2pt solid #ff0000" fo:border-left="none" fo:border-right="none"/></style:style><style:style style:name="Sp" style:family="paragraph"><style:paragraph-properties fo:margin-top="6pt" fo:margin-bottom="8pt"/></style:style>"##;
 
     fn table_body(table: &str) -> String {
         format!(
@@ -5490,7 +5485,7 @@ mod tests {
         )
     }
 
-    const TABLE: &str = r#"<table:table table:name="T" table:style-name="T"><table:table-column table:style-name="T.A"/><table:table-column table:style-name="T.B"/><table:table-header-rows><table:table-row table:style-name="T.H"><table:table-cell table:style-name="T.A1" office:value-type="string"><text:p>h1</text:p></table:table-cell><table:table-cell table:style-name="T.HB"><text:p>h2</text:p></table:table-cell></table:table-row></table:table-header-rows><table:table-row table:style-name="T.1"><table:table-cell table:style-name="T.A1"><text:p>a</text:p><text:p>b</text:p></table:table-cell><table:table-cell table:style-name="T.B1"><text:p>c</text:p></table:table-cell></table:table-row></table:table>"#;
+    const TABLE: &str = r#"<table:table table:name="T" table:style-name="T"><table:table-column table:style-name="T.A"/><table:table-column table:style-name="T.B"/><table:table-row><table:table-cell table:style-name="T.A1" office:value-type="string"><text:p>h1</text:p></table:table-cell><table:table-cell table:style-name="T.HB"><text:p>h2</text:p></table:table-cell></table:table-row><table:table-row table:style-name="T.1"><table:table-cell table:style-name="T.A1"><text:p>a</text:p><text:p>b</text:p></table:table-cell><table:table-cell table:style-name="T.B1"><text:p>c</text:p></table:table-cell></table:table-row></table:table>"#;
 
     fn table_settings(spacing: &str) -> String {
         [
@@ -5547,41 +5542,6 @@ mod tests {
     }
 
     #[test]
-    fn resolves_automatic_colour_over_cell_backgrounds() {
-        for (fill, expected) in [("#ffff00", "000000"), ("#000080", "ffffff")] {
-            let document =
-                read_table(&TABLE_STYLES.replace("#ffff00", fill), &table_body(TABLE)).unwrap();
-            let BodyElement::Table(table) = &document.body[1] else {
-                panic!()
-            };
-            let colours = |cell: &docx_model::DocTableCell| -> Vec<(Option<String>, bool)> {
-                cell.content
-                    .iter()
-                    .flat_map(|element| match element {
-                        docx_model::CellElement::Paragraph(p) => p.runs.iter(),
-                        _ => panic!(),
-                    })
-                    .filter_map(|run| match run {
-                        DocRun::Text(text) => Some((text.color.clone(), text.color_auto)),
-                        _ => None,
-                    })
-                    .collect()
-            };
-            // The filled cell resolves; the unfilled one stays automatic.
-            assert!(colours(&table.rows[1].cells[0])
-                .iter()
-                .all(|c| *c == (Some(expected.into()), false)));
-            assert!(
-                colours(&table.rows[1].cells[1])
-                    .iter()
-                    .all(|c| c.0.is_none()),
-                "{:?}",
-                colours(&table.rows[1].cells[1])
-            );
-        }
-    }
-
-    #[test]
     fn charges_table_style_scans_per_use() {
         let padded = format!("0.5pt{}solid #000000", " ".repeat(64 * 1024));
         let styles = format!(
@@ -5597,28 +5557,6 @@ mod tests {
         read_table(&styles, &rows(2)).unwrap();
         let error = read_table(&styles, &rows(300)).unwrap_err();
         assert!(error.contains("style resolution limit"), "{error}");
-    }
-
-    #[test]
-    fn aligns_cells_without_outer_paragraph_spacing() {
-        let middle = TABLE_STYLES.replace(
-            r#"style:vertical-align="top""#,
-            r#"style:vertical-align="middle""#,
-        );
-        let document = read_table(&middle, &table_body(TABLE)).unwrap();
-        let BodyElement::Table(table) = &document.body[1] else {
-            panic!()
-        };
-        assert_eq!(table.rows[1].cells[0].v_align, "center");
-        // Cell paragraphs with vertical margins reject in any alignment.
-        let spaced = TABLE.replace(
-            "<text:p>a</text:p>",
-            r#"<text:p text:style-name="Sp">a</text:p>"#,
-        );
-        assert_eq!(
-            read_table(TABLE_STYLES, &table_body(&spaced)).unwrap_err(),
-            unsupported("table-cell-spacing")
-        );
     }
 
     #[test]
@@ -5794,28 +5732,6 @@ mod tests {
     }
 
     #[test]
-    fn keeps_rows_together_without_repeated_headers() {
-        let kept = TABLE_STYLES.replace(
-            r#"style:min-row-height="2cm""#,
-            r#"style:min-row-height="2cm" fo:keep-together="always""#,
-        );
-        // Under repeated header rows a kept row is not admitted.
-        assert_eq!(
-            read_table(&kept, &table_body(TABLE)).unwrap_err(),
-            unsupported("table-header-rows")
-        );
-        let plain = TABLE
-            .replace("<table:table-header-rows>", "")
-            .replace("</table:table-header-rows>", "");
-        let document = read_table(&kept, &table_body(&plain)).unwrap();
-        let BodyElement::Table(table) = &document.body[1] else {
-            panic!()
-        };
-        assert!(table.rows[1].cant_split && table.rows[1].cuts_in_place);
-        assert!(!table.rows[0].is_header);
-    }
-
-    #[test]
     fn bounds_cell_lines_by_their_widest_glyph_and_quantizes_rules() {
         let narrow = format!(
             r#"{TABLE_STYLES}<style:style style:name="N" style:family="paragraph"><style:paragraph-properties fo:margin-left="150pt"/></style:style>"#
@@ -5832,7 +5748,7 @@ mod tests {
         ));
         assert_eq!(
             read_table(&narrow, &wide).unwrap_err(),
-            unsupported("table-cell-indent")
+            unsupported("table-cell-text")
         );
         // A 0.02 pt rule is under a twip: no rule.
         let thin = TABLE_STYLES.replace("0.5pt solid #000000", "0.02pt solid #000000");
@@ -5911,7 +5827,7 @@ mod tests {
         else {
             panic!("a paragraph, a table and a paragraph")
         };
-        // Spacing around the table adds both margins on each side.
+        // The paragraphs keep their own margins around the table.
         assert_eq!(before.space_after, 8.0);
         assert_eq!(after.space_before, 6.0);
         let cm = 72.0 / 2.54;
@@ -5922,7 +5838,7 @@ mod tests {
         assert_eq!(table.jc, "left");
         assert!((table.tbl_ind.unwrap() + 0.191 * cm).abs() < 1e-9);
         assert_eq!(table.layout.as_deref(), Some("fixed"));
-        assert!(table.rows[0].is_header && !table.rows[1].is_header);
+        assert!(!table.rows[0].is_header && !table.rows[1].is_header);
         // A minimum height is given net of the border above the row (the
         // thicker of the shared edge, here the 2 pt rule).
         let row = &table.rows[1];
@@ -5931,7 +5847,6 @@ mod tests {
         assert!(!row.cant_split);
         let cell = &row.cells[0];
         assert_eq!(cell.v_align, "top");
-        assert_eq!(cell.background.as_deref(), Some("ffff00"));
         assert!((cell.margin_left.unwrap() - 0.191 * cm).abs() < 1e-9);
         assert_eq!(cell.borders.top.as_ref().map(|b| b.width), Some(0.5));
         let other = &row.cells[1];
@@ -5948,13 +5863,12 @@ mod tests {
     }
 
     #[test]
-    fn maps_relative_widths_and_page_breaks_before_tables() {
+    fn maps_relative_widths() {
         let styles = TABLE_STYLES
             .replace(
                 r#"style:width="10cm""#,
-                r#"style:width="10cm" style:rel-width="100%" fo:break-before="page""#,
+                r#"style:width="10cm" style:rel-width="100%""#,
             )
-            .replace(r#"fo:margin-top="5pt""#, r#"fo:margin-top="0pt""#)
             .replace(
                 r#"style:column-width="4cm""#,
                 r#"style:rel-column-width="1000*""#,
@@ -5972,11 +5886,6 @@ mod tests {
         let total: f64 = table.col_widths.iter().sum();
         assert!((total - (width - 0.0)).abs() < 1e-6, "{total} {width}");
         assert!((table.col_widths[1] / table.col_widths[0] - 3.0).abs() < 1e-9);
-        assert!(table.page_break_before);
-        let docx_model::CellElement::Paragraph(first) = &table.rows[0].cells[0].content[0] else {
-            panic!()
-        };
-        assert!(!first.page_break_before);
     }
 
     #[test]
@@ -6039,16 +5948,59 @@ mod tests {
                 table_body(TABLE),
                 "table-columns",
             ),
+            // Table features no corpus table uses reject.
             (
-                TABLE_STYLES
-                    .replace(r#"style:min-row-height="2cm""#, r#"style:row-height="2cm""#)
-                    .replace(
-                        r#"fo:padding="0cm""#,
-                        r#"fo:padding="0cm" fo:padding-bottom="1pt""#,
-                    )
-                    .replace(r#"fo:padding-bottom="0cm""#, r#"fo:padding-bottom="1pt""#),
+                TABLE_STYLES.replace(r#"style:min-row-height="2cm""#, r#"style:row-height="2cm""#),
                 table_body(TABLE),
-                "table-row-padding",
+                "table-row",
+            ),
+            (
+                TABLE_STYLES.replace(
+                    r#"style:min-row-height="2cm""#,
+                    r#"style:min-row-height="2cm" fo:keep-together="always""#,
+                ),
+                table_body(TABLE),
+                "table-row",
+            ),
+            (
+                TABLE_STYLES.into(),
+                table_body(
+                    &TABLE
+                        .replace(
+                            "<table:table-row>",
+                            "<table:table-header-rows><table:table-row>",
+                        )
+                        .replacen(
+                            "</table:table-row>",
+                            "</table:table-row></table:table-header-rows>",
+                            1,
+                        ),
+                ),
+                "table-header-rows",
+            ),
+            (
+                TABLE_STYLES.replace(
+                    r#"style:width="10cm""#,
+                    r#"style:width="10cm" fo:break-before="page""#,
+                ),
+                table_body(TABLE),
+                "table-property",
+            ),
+            (
+                TABLE_STYLES.replace(
+                    r#"fo:border="0.5pt solid #000000""#,
+                    r##"fo:border="0.5pt solid #000000" fo:background-color="#ffff00""##,
+                ),
+                table_body(TABLE),
+                "table-cell-property",
+            ),
+            (
+                TABLE_STYLES.replace(
+                    r#"style:vertical-align="top""#,
+                    r#"style:vertical-align="middle""#,
+                ),
+                table_body(TABLE),
+                "table-cell-property",
             ),
             (
                 TABLE_STYLES.replace(r#"fo:margin-left="-0.191cm""#, r#"fo:margin-left="-3cm""#),
@@ -6104,25 +6056,8 @@ mod tests {
                 table_body(TABLE),
                 "table-border-conflict",
             ),
-            (
-                TABLE_STYLES.replace(
-                    r#"style:min-row-height="2cm""#,
-                    r#"style:min-row-height="2cm" style:row-height="1cm""#,
-                ),
-                table_body(TABLE),
-                "table-row-height",
-            ),
-            // Authored heights LibreOffice continues over pages: an auto
-            // header row repeated (which may near a page), a row taller than
-            // the page body, and padding taller than it.
-            (
-                TABLE_STYLES.into(),
-                table_body(&TABLE.replace(
-                    r#"<table:table-row table:style-name="T.H">"#,
-                    "<table:table-row>",
-                )),
-                "table-header-rows",
-            ),
+            // Fixed space LibreOffice continues over pages: a row taller
+            // than the page body, and padding taller than it.
             (
                 TABLE_STYLES.replace(
                     r#"style:min-row-height="2cm""#,
@@ -6140,15 +6075,6 @@ mod tests {
                     .replace(r#"fo:padding-top="0cm""#, r#"fo:padding-top="30cm""#),
                 table_body(TABLE),
                 "table-row-height",
-            ),
-            // A repeated header's bottom rule unlike the body rows' top rules.
-            (
-                TABLE_STYLES.replace(
-                    r#"fo:border-bottom="2pt solid #ff0000""#,
-                    r#"fo:border-bottom="none""#,
-                ),
-                table_body(TABLE),
-                "table-header-rule",
             ),
             // Table margins (with or without a break before).
             (

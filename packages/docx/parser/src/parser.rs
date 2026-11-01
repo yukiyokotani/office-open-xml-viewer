@@ -16114,7 +16114,6 @@ fn parse_table_with_diagnostics(
         bidi_visual,
         tblp_pr,
         overlap,
-        page_break_before: false,
         table_layout,
     }
 }

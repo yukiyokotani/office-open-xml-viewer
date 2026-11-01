@@ -780,8 +780,8 @@ function hasFollowingInkContent(input: BodyLayoutInput, startIndex: number): boo
       continue;
     }
     const block = entry.kind === 'adjacent-table-group' ? entry : entry.block;
-    if (block.kind !== 'adjacent-table-group' && block.pageBreakBefore) return false;
     if (block.kind !== 'paragraph') return true;
+    if (block.pageBreakBefore) return false;
     if (block.inkless !== true) return true;
   }
   return false;
@@ -1258,9 +1258,8 @@ function* paginateBodyPassSteps(
       const entry = input.sequence[index]!;
       if (entry.kind === 'authored-break' && entry.break !== 'column') break;
       if (entry.kind === 'begin-section' && entry.section.startType !== 'continuous') break;
-      if (entry.kind !== 'body-block') continue;
+      if (entry.kind !== 'body-block' || entry.block.kind !== 'paragraph') continue;
       if (index > startIndex && entry.block.pageBreakBefore) break;
-      if (entry.block.kind !== 'paragraph') continue;
       entry.block.pageOwnedAnchorOccurrenceIds?.forEach((occurrenceId) => anchors.push(
         Object.freeze({ kind: 'drawing', occurrenceId, paragraphSource: entry.block.source }),
       ));
@@ -2906,12 +2905,6 @@ function* paginateBodyPassSteps(
       pendingFrameRun = null;
       currentEntryResume = () => ({ kind: 'table', entryIndex, cursor: undefined });
       if (block.kind === 'table' && resumed?.kind !== 'table') {
-        if (block.pageBreakBefore) {
-          yield* commitTransition(
-            applyAuthoredBreak(state.flow, 'pageBreakBefore'),
-            entryIndex,
-          );
-        }
         const tableKey = `table:${sourceKey(block.source)}`;
         const minimumPage = minimumTablePageBySource?.get(tableKey);
         if (block.pageOwnedFloatingTable === true || minimumPage !== undefined) {
