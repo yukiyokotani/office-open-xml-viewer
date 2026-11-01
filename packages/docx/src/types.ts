@@ -1620,9 +1620,14 @@ export interface DocTable {
    *  LEADING edge (left in an LTR table, right in an RTL/`bidiVisual` table), in
    *  pt. SIGNED: a negative value pulls the table outward past the leading margin
    *  toward the page edge. `type="dxa"` only; `pct`/`auto` are dropped by the
-   *  parser per §17.4.50. Absent ⇒ no direct indent. The renderer applies it only
+   *  parser per §17.4.50. Resolved through the table style hierarchy (§17.7.6);
+   *  absent ⇒ no indent anywhere in that hierarchy. The renderer applies it only
    *  when the resolved `jc` is left/leading (§17.4.50). */
   tblInd?: number;
+  /** True when `tblInd` was inherited from the table style hierarchy rather
+   *  than authored on the table; layout ignores it for a row whose resulting
+   *  jc is not leading (§17.4.50). */
+  tblIndInherited?: boolean;
   /** ECMA-376 §17.4.52 `<w:tblLayout w:type>` — 'fixed' | 'autofit'. Absent
    *  (undefined) means the specification default, 'autofit'. The table grid is
    *  the initial shared grid for §17.18.87; preferred table/cell widths remain

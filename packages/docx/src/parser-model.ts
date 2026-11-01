@@ -830,8 +830,20 @@ function effectiveTableCellMargins(
       { ...tableLeft, scope: 'table' },
       { ...styleLeft, scope: 'style' },
     );
+  const right = firstMargin(cellRight.edge,
+    { ...cellRight, scope: 'cell' },
+  ) ?? publicCellMargin(cell.marginRight) ?? firstMargin(exceptionRight.edge,
+    { ...exceptionRight, scope: 'exception' },
+    { ...tableRight, scope: 'table' },
+    { ...styleRight, scope: 'style' },
+  );
   return {
     originLeftMarginPt: left?.originLeftMarginPt ?? null,
+    // Lexical presence, not resolution: an authored nil/auto/pct or logical
+    // start/end element at any layer (cell, exception, table, style) counts.
+    horizontalMarginsOmitted: hasPrivateCellWire
+      && [cellMargins, exceptionMargins, tableMargins, styleMargins].every((margins) =>
+        margins?.left == null && margins?.right == null && margins?.start == null && margins?.end == null),
     marginsPt: {
       top: firstMargin('top',
         { width: cellMargins?.top, scope: 'cell' },
@@ -848,13 +860,7 @@ function effectiveTableCellMargins(
         { width: styleMargins?.bottom, scope: 'style' },
       ) ?? table.cellMarginBottom,
       left: left?.value ?? table.cellMarginLeft,
-      right: firstMargin(cellRight.edge,
-        { ...cellRight, scope: 'cell' },
-      ) ?? publicCellMargin(cell.marginRight) ?? firstMargin(exceptionRight.edge,
-        { ...exceptionRight, scope: 'exception' },
-        { ...tableRight, scope: 'table' },
-        { ...styleRight, scope: 'style' },
-      ) ?? table.cellMarginRight,
+      right: right ?? table.cellMarginRight,
     },
   };
 }
