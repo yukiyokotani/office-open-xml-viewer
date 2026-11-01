@@ -18601,6 +18601,28 @@ mod tests {
             .tbl_ind,
             Some(25.0)
         );
+        // A percentage w:w overrides the declared type (§17.4.87) and is
+        // ignored for tblInd, whatever w:type says.
+        for direct in [
+            r#"<w:tblInd w:w="25%" w:type="dxa"/>"#,
+            r#"<w:tblInd w:w="25%" w:type="nil"/>"#,
+            r#"<w:tblInd w:w="25%"/>"#,
+        ] {
+            let tbl_pr = format!(r#"<w:tblStyle w:val="Indented"/>{direct}"#);
+            assert_eq!(
+                parse_tbl_with_styles(&body(&tbl_pr), styles).tbl_ind,
+                Some(25.0),
+                "{direct}"
+            );
+        }
+        let pct_child = styles.replace(
+            r#"<w:basedOn w:val="Indented"/>"#,
+            r#"<w:basedOn w:val="Indented"/><w:tblPr><w:tblInd w:w="25%" w:type="dxa"/></w:tblPr>"#,
+        );
+        assert_eq!(
+            parse_tbl_with_styles(&body(r#"<w:tblStyle w:val="Child"/>"#), &pct_child).tbl_ind,
+            Some(25.0)
+        );
         // A derived style's w:w-less or nil tblInd clears the base indent.
         for child in [r#"<w:tblInd w:type="dxa"/>"#, r#"<w:tblInd w:type="nil"/>"#] {
             let xml = styles.replace(

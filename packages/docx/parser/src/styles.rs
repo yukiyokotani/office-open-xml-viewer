@@ -2729,8 +2729,13 @@ pub(crate) fn merge_table_margin_layer(
 /// ECMA-376 §17.4.50 `<w:tblInd>` as a signed pt length, or `None` when this
 /// layer is ignored and a lower one applies. CT_TblWidth (§17.4.87) defaults an
 /// omitted `w:w` to 0 and an omitted `w:type` to dxa; §17.18.90 `nil` is a zero
-/// width. §17.4.50 ignores `pct` and `auto` (and unknown types) for tblInd.
+/// width. §17.4.50 ignores `pct` and `auto` (and unknown types) for tblInd;
+/// a percentage `w:w` overrides any declared type (§17.4.87, MS-OI29500
+/// §2.1.185(b)), so it is ignored too.
 pub(crate) fn table_indent_pt(node: roxmltree::Node) -> Option<f64> {
+    if attr_w(node, "w").is_some_and(|v| v.trim_end().ends_with('%')) {
+        return None;
+    }
     match attr_w(node, "type").as_deref() {
         None | Some("dxa") => Some(attr_w(node, "w").map_or(0.0, |v| twips_to_pt(&v))),
         Some("nil") => Some(0.0),
