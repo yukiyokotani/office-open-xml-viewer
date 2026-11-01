@@ -1,5 +1,4 @@
 import {
-  type ExcludedLineWindow,
   prepareFloatWrap,
   computePreparedLineFloatWindow,
   skipPastTopAndBottom,
@@ -13,6 +12,9 @@ export interface WrapOracle {
     readonly topYPt: number;
     readonly minimumStartWidthPt: number;
     readonly squareMinimumStartWidthPt?: number;
+    /** WORD_KASHIDA_LINE_FIT: required width of a window reaching the band's
+     *  far edge, when it differs (its reserve base runs past that edge). */
+    readonly farEdgeMinimumStartWidthPt?: number;
     readonly probeHeightPt: number;
     readonly paragraphXPt: number;
     readonly maximumWidthPt: number;
@@ -21,10 +23,6 @@ export interface WrapOracle {
      *  band `paragraphXPt`/`maximumWidthPt` the square side-gap math uses. */
     readonly columnXPt: number;
     readonly columnWidthPt: number;
-    /** Windows to skip (a fit rejection); every other candidate stays. */
-    readonly excludedWindows?: readonly ExcludedLineWindow[];
-    /** Line-grid origin of a resumed search (defaults to `topYPt`). */
-    readonly gridOriginYPt?: number;
   }): {
     readonly topYPt: number;
     readonly xOffsetPt: number;
@@ -54,13 +52,12 @@ export function createFloatWrapOracle(
       topYPt,
       minimumStartWidthPt,
       squareMinimumStartWidthPt,
+      farEdgeMinimumStartWidthPt,
       probeHeightPt,
       paragraphXPt,
       maximumWidthPt,
       columnXPt,
       columnWidthPt,
-      excludedWindows,
-      gridOriginYPt,
     }) => {
       const window = computePreparedLineFloatWindow(
         topYPt,
@@ -77,8 +74,7 @@ export function createFloatWrapOracle(
           readingDirection: 'ltr',
         },
         squareMinimumStartWidthPt ?? minimumStartWidthPt,
-        excludedWindows ?? [],
-        gridOriginYPt ?? topYPt,
+        farEdgeMinimumStartWidthPt,
       );
       return {
         topYPt: window.topY,

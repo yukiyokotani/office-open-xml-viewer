@@ -253,75 +253,83 @@ describe('WORD_KASHIDA_LINE_FIT line breaker', () => {
     expect(lines.map((line) => [line.topY, line.xOffset])).toEqual([[10, 300]]);
   });
 
-  it('resumes excluded-window retries from the rejected window (bounded work)', () => {
-    // 100 successive 10 pt bands each leave a 100 pt window; a 95 pt word
-    // fits none of them at 0.8 and lands below them. The oracle counts the
-    // band tops it scans: resuming keeps it linear, a restart is quadratic.
-    let work = 0;
-    const lineWindow: NonNullable<WrapLayoutCtx['lineWindow']> = (input) => {
-      for (let top = input.topYPt; ; top += 10) {
-        work += 1;
-        if (top >= 1000) return { topYPt: top, xOffsetPt: 0, maximumWidthPt: input.maximumWidthPt };
-        const excluded = input.excludedWindows?.some((window) =>
-          window.topY === top && window.leftPt === input.paragraphXPt && window.widthPt === 100);
-        if (100 >= input.minimumStartWidthPt && !excluded) return { topYPt: top, xOffsetPt: 0, maximumWidthPt: 100 };
-      }
-    };
-    const lines = run([token('W'.repeat(19))], {
-      wrapCtx: { ...wrap([]), floats: [], lineWindow }, lineFit: fit(0.8, 0),
-    });
-    expect(lines[0]!.topY).toBe(1000);
-    expect(work).toBeLessThan(1000);
-  });
-  it('ends the retry budget on the band placement expands, never re-requesting a rejected window', () => {
-    // A numbered first line with a -50 pt authored hanging indent expands the
-    // 360 pt band to 410 pt. Every top offers a narrowed 390 pt window whose
-    // 0.8 fit cannot hold the 320 pt word; past the retry budget the search
-    // must leave the windows behind and place the word.
+  it('asks the line-window oracle once per rejection with each kind\'s requirement', () => {
+    // A numbered first line with a -50 pt authored hanging indent: every top
+    // offers a narrowed 390 pt window, too small for the 320 pt word at 0.8
+    // (it needs 450 pt). The fit-aware search leaves them in one query.
     let calls = 0;
     const lineWindow: NonNullable<WrapLayoutCtx['lineWindow']> = (input) => {
       calls += 1;
-      if (calls > 5000) throw new Error('retry search did not terminate');
-      if (input.minimumStartWidthPt > 390) {
-        return { topYPt: 100000, xOffsetPt: 0, maximumWidthPt: input.maximumWidthPt };
-      }
-      for (let top = input.topYPt; ; top += 10) {
-        const excluded = input.excludedWindows?.some((window) => window.topY === top);
-        if (!excluded) return { topYPt: top, xOffsetPt: 20, maximumWidthPt: 390 };
-      }
+      if (calls > 50) throw new Error('search did not terminate');
+      return input.minimumStartWidthPt > 390
+        ? { topYPt: 100000, xOffsetPt: 0, maximumWidthPt: input.maximumWidthPt }
+        : { topYPt: input.topYPt, xOffsetPt: 20, maximumWidthPt: 390 };
     };
     const wrapCtx: WrapLayoutCtx = { ...wrap([]), floats: [], lineWindow,
       numberingFirstLine: { authoredFirstIndentPx: -50, bodyIndentAt: (edge) => edge } };
     const lines = run([token('W'.repeat(64))], { wrapCtx, lineFit: fit(0.8, 0) });
-    expect(calls).toBeLessThan(5000);
     expect(lines[0]!.topY).toBe(100000);
+    expect(calls).toBeLessThan(10);
   });
 
-  it('keeps the original line grid when a retry resumes below the request top', () => {
-    // The breaker hands the solver the original request top as grid origin.
-    const origins: Array<number | undefined> = [];
-    const lineWindow: NonNullable<WrapLayoutCtx['lineWindow']> = (input) => {
-      origins.push(input.gridOriginYPt);
-      for (let top = input.topYPt; ; top += 5) {
-        if (top >= 30) return { topYPt: top, xOffsetPt: 0, maximumWidthPt: input.maximumWidthPt };
-        if (!input.excludedWindows?.some((window) => window.topY === top)) {
-          return { topYPt: top, xOffsetPt: 0, maximumWidthPt: 100 };
-        }
-      }
-    };
-    run([token('W'.repeat(19))], { wrapCtx: { ...wrap([]), floats: [], lineWindow }, lineFit: fit(0.8, 0) });
-    expect(origins.filter((origin) => origin !== undefined).every((origin) => origin === 0)).toBe(true);
-    expect(origins.some((origin) => origin === 0)).toBe(true);
-    // The solver steps a tight band on that grid: resumed at 5 with origin 0
-    // it reaches the fitting window at 10, not 15.
-    const tight: FloatRect = { ...obstacle(120, 360), authoredWrap: 'tight', imageY: 0, imageH: 1000, yTop: 0, yBottom: 1000,
-      wrapPolygon: [{ xPt: 120, yPt: 0 }, { xPt: 360, yPt: 0 }, { xPt: 360, yPt: 1000 }, { xPt: 150, yPt: 1000 },
-        { xPt: 150, yPt: 10 }, { xPt: 120, yPt: 10 }] };
-    const prepared = prepareFloatWrap([tight]);
-    const reference = { xLeftPt: 0, xRightPt: 360, readingDirection: 'ltr' as const };
-    expect(computePreparedLineFloatWindow(5, 140, 10, 0, 360, prepared, 0, 360, reference, 140, [], 0).topY).toBe(10);
-    expect(computePreparedLineFloatWindow(5, 140, 10, 0, 360, prepared, 0, 360, reference, 140, [], 5).topY).toBe(15);
+  it('searches the active baseline with each window\'s own requirement', () => {
+    // A 600 pt band, three floats leaving gaps [0, 100], [150, 250] and
+    // [300, 450] on the first lines. A short word fills the first gap; the
+    // continuation's 95 pt word at 0.8 needs 118.75 pt, misses the second
+    // gap and takes the 150 pt third gap on the same baseline.
+    const floats = wrap([band(100, 150, 0, 60), band(250, 300, 0, 60), band(450, 600, 0, 60)], 600);
+    const lines = run([token('AAAA '), token('W'.repeat(19))], { maxWidth: 600, wrapCtx: floats, lineFit: fit(0.8, 0) });
+    expect(lines.map((line) => [line.topY, line.xOffset, line.availWidth])).toEqual([[0, 0, 100], [0, 300, 150]]);
   });
+
+  it('finds a sloped contour\'s fitting window at its exact threshold', () => {
+    // A through-wrapped contour on the far side widens the gap from 100 pt at
+    // y = 0 to 200 pt at y = 60; a 95 pt word at 0.8 needs 118.75 pt.
+    const sloped: FloatRect = { ...obstacle(100, 360), authoredWrap: 'through', imageY: 0, imageH: 60, yTop: 0, yBottom: 60,
+      wrapPolygon: [{ xPt: 100, yPt: 0 }, { xPt: 360, yPt: 0 }, { xPt: 360, yPt: 60 }, { xPt: 200, yPt: 60 }] };
+    const lines = run([token('W'.repeat(19))], { wrapCtx: wrap([sloped]), lineFit: fit(0.8, 0) });
+    const raw = computePreparedLineFloatWindow(0, 118.75, 10, 0, 360, prepareFloatWrap([sloped]), 0, 360,
+      { xLeftPt: 0, xRightPt: 360, readingDirection: 'ltr' }, 118.75);
+    expect(lines[0]!.topY).toBeCloseTo(raw.topY, 9);
+    expect(lines[0]!.topY).toBeLessThan(20);
+    expect(lines[0]!.availWidth * 0.8).toBeGreaterThanOrEqual(95 - 1e-9);
+  });
+
+  it('matches a fine scan of sloped contours (randomized)', () => {
+    let seed = 7717;
+    const random = (): number => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
+    const reference = { xLeftPt: 0, xRightPt: 360, readingDirection: 'ltr' as const };
+    for (let trial = 0; trial < 60; trial += 1) {
+      const top = 60 + Math.round(random() * 120);
+      const bottom = 140 + Math.round(random() * 160);
+      const height = 40 + Math.round(random() * 80);
+      const farEdge = random() < 0.5;
+      // A contour whose free side widens linearly from `top` to `bottom`.
+      const polygon = farEdge
+        ? [{ xPt: 0, yPt: 0 }, { xPt: 360 - top, yPt: 0 }, { xPt: 360 - bottom, yPt: height }, { xPt: 0, yPt: height }]
+        : [{ xPt: top, yPt: 0 }, { xPt: 360, yPt: 0 }, { xPt: 360, yPt: height }, { xPt: bottom, yPt: height }];
+      const float: FloatRect = { ...obstacle(0, 360), authoredWrap: 'through', imageY: 0, imageH: height, yTop: 0, yBottom: height,
+        wrapPolygon: polygon };
+      const trailing = Math.round(random() * 80) - 20;
+      const [fraction, share] = [[1, 0.1], [1, 0.2], [0.9, 0], [0.8, 0]][Math.floor(random() * 4)]!;
+      const word = 5 * (12 + Math.floor(random() * 20));
+      const lines = run([token('W'.repeat(word / 5))], {
+        maxWidth: 300 + 60, marginRightPx: 360 + trailing, wrapCtx: wrap([float]), lineFit: fit(fraction, share),
+      });
+      const fitted = (width: number): number => width * fraction
+        - share * Math.max(0, width + (farEdge ? trailing : 0));
+      // Fine scan: the first top (0.01 pt steps) whose window fits the word.
+      const prepared = prepareFloatWrap([float]);
+      let expected = height;
+      for (let y = 0; y < height; y += 0.01) {
+        const window = computePreparedLineFloatWindow(y, 1, 10, 0, 360, prepared, 0, 360, reference, 1);
+        if (window.topY === y && fitted(window.maxWidth) >= word) { expected = y; break; }
+      }
+      const label = JSON.stringify({ trial, top, bottom, height, farEdge, trailing, fraction, share, word });
+      const got = lines[0]?.topY ?? Number.NaN;
+      expect(Math.abs(got - expected), label).toBeLessThanOrEqual(0.011);
+    }
+  }, 30_000);
 
   it('measures a run of separately formatted line-end spaces with linear work', () => {
     const reads = (count: number): number => {

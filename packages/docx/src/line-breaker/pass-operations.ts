@@ -435,8 +435,10 @@ function placeLineWindow(
     xRightPt: (wrapCtx.referenceXPt ?? wrapCtx.paraX) + (wrapCtx.referenceWidthPt ?? maxWidth),
     readingDirection: wrapCtx.readingDirection ?? (baseRtl ? 'rtl' : 'ltr'),
   } as const;
-  const excluded = transaction.excluded ?? [];
-  const gridOriginY = transaction.gridOriginY;
+  // WORD_KASHIDA_LINE_FIT: a window reaching the band's far edge may need
+  // another width than an interior one (its reserve base runs past the edge);
+  // the solver tests each window against its own kind's requirement.
+  const farEdgeRequirement = transaction.farEdgeRequirement;
   const query = (topY: number, x: number, width: number, height: number,
     requiredWidth = transaction.requirement) => {
     if (wrapCtx.lineWindow) {
@@ -445,21 +447,22 @@ function placeLineWindow(
         squareMinimumStartWidthPt: requiredWidth, probeHeightPt: height,
         paragraphXPt: x, maximumWidthPt: width,
         columnXPt: wrapCtx.columnXPt, columnWidthPt: wrapCtx.columnWidthPt,
-        ...(excluded.length > 0 ? { excludedWindows: excluded } : {}),
-        ...(gridOriginY !== undefined && gridOriginY <= topY ? { gridOriginYPt: gridOriginY } : {}),
+        ...(farEdgeRequirement !== undefined ? { farEdgeMinimumStartWidthPt: farEdgeRequirement } : {}),
       });
-      return { topY: win.topYPt, xOffset: win.xOffsetPt, maxWidth: win.maximumWidthPt,
-        solverWindow: { leftPt: x + win.xOffsetPt, widthPt: win.maximumWidthPt } };
+      return { topY: win.topYPt, xOffset: win.xOffsetPt, maxWidth: win.maximumWidthPt };
     }
-    const win = computePreparedLineFloatWindow(
+    return computePreparedLineFloatWindow(
       topY, requiredWidth, height, x, width,
       preparedFloatWrap ?? prepareFloatWrap(wrapCtx.floats),
       wrapCtx.columnXPt, wrapCtx.columnXPt + wrapCtx.columnWidthPt,
-      reference, requiredWidth, excluded,
-      gridOriginY !== undefined && gridOriginY <= topY ? gridOriginY : topY,
+      reference, requiredWidth, farEdgeRequirement,
     );
-    return { ...win, solverWindow: { leftPt: x + win.xOffset, widthPt: win.maxWidth } };
   };
+  // The requirement of a window at absolute [leftPt, leftPt + widthPt].
+  const bandFarEdge = baseRtl ? lineBandX : lineBandX + lineBandWidth;
+  const requirementOf = (leftPt: number, widthPt: number): number =>
+    farEdgeRequirement !== undefined && (baseRtl ? leftPt <= bandFarEdge + 1e-9 : leftPt + widthPt >= bandFarEdge - 1e-9)
+      ? farEdgeRequirement : transaction.requirement;
   let accepted: GapWindow & { narrowed: boolean } | null = null;
   const cursor = transaction.cursor;
   if (cursor) {
@@ -468,7 +471,7 @@ function placeLineWindow(
     const right = baseRtl ? cursor.left : lineBandX + lineBandWidth;
     if (probeH !== undefined && right > left) {
       const next = query(cursor.topY, left, right - left, probeH);
-      if (next.topY === cursor.topY && next.maxWidth >= transaction.requirement) {
+      if (next.topY === cursor.topY && next.maxWidth >= requirementOf(left + next.xOffset, next.maxWidth)) {
         // A strictly smaller unvisited band gives monotonic horizontal
         // progress; the column and largest-side reference never shrink.
         accepted = {
@@ -476,7 +479,6 @@ function placeLineWindow(
           xOffset: left - wrapCtx.paraX + next.xOffset,
           maxWidth: next.maxWidth,
           solverWidth: next.maxWidth,
-          solverWindow: next.solverWindow,
           narrowed: true,
         };
       }
@@ -506,7 +508,6 @@ function placeLineWindow(
       xOffset: win.xOffset,
       maxWidth: win.maxWidth + hangingOffset,
       solverWidth: win.maxWidth,
-      solverWindow: win.solverWindow,
       narrowed: win.xOffset !== 0 || win.maxWidth !== lineBandWidth,
     };
   }
@@ -515,7 +516,8 @@ function placeLineWindow(
   // (it differs only by representable rounding) or comes from a boundary
   // that does not honor the requirement. Accept it without a transaction:
   // forced placement is then the established behavior, and the search ends.
-  if (rejected && accepted.narrowed && accepted.solverWidth < transaction.requirement) {
+  if (rejected && accepted.narrowed
+    && accepted.solverWidth < requirementOf(wrapCtx.paraX + accepted.xOffset, accepted.solverWidth)) {
     accepted = { ...accepted, narrowed: false };
   }
   breakerState.currentLineTopY = accepted.topY;
@@ -634,43 +636,27 @@ export function performRejectGap(
   }
   transaction.stopBefore = null;
   const rejected = transaction.window;
-  // The hanging offset placement expands the band by (the authored one).
-  const hangingOffset = placementHangingOffset(operationState);
-  if (lineFitReduced(operationState) && rejected.solverWindow) {
-    // WORD_KASHIDA_LINE_FIT: each window has its own reserve, so no width
-    // requirement can stand for it. The search asks only for the raw advance
-    // (no reserve makes a window need less), skips exactly the rejected
-    // window, and placement tests every candidate forward through the same
-    // fit width admission uses; a candidate that is still too small is
-    // rejected and skipped in turn.
-    //
-    // The search resumes at the rejected window's top: no earlier top offers
-    // a window that is both wide enough and not excluded, and the requirement
-    // never decreases, so earlier tops need no rescan. Exclusions above the
-    // resumed top can no longer match and are dropped. A cumulative budget
-    // bounds the retries of one line; past it the unit takes the full band.
-    const retries = (transaction.excludedRetries ?? 0) + 1;
-    if (retries <= LINE_FIT_RETRY_BUDGET) {
-      transaction.excludedRetries = retries;
-      transaction.gridOriginY ??= transaction.requestTopY;
-      transaction.requestTopY = Math.max(transaction.requestTopY, rejected.topY);
-      transaction.excluded = [
-        ...(transaction.excluded ?? []).filter((window) => window.topY >= transaction.requestTopY),
-        { topY: rejected.topY, ...rejected.solverWindow },
-      ];
-      transaction.requirement = Math.max(transaction.requirement,
-        rejection.requiredWidth + (breakerState.isFirst ? Math.max(0, firstIndent) : 0));
-      placeLineWindow(operationState, transaction, null);
-      return;
+  if (lineFitReduced(operationState)) {
+    // The hanging offset placement expands the band by (the authored one).
+    const hangingOffset = placementHangingOffset(operationState);
+    // WORD_KASHIDA_LINE_FIT: the search asks each window kind for the width
+    // whose fitted width holds the unit, so the solver itself (its exact
+    // sweep included) finds the first window that admission will accept.
+    const need = lineFitWindowRequirements(operationState, rejection.requiredWidth);
+    const rejectedNeed = windowReachesFarEdge(operationState, rejected) ? need.farEdge : need.interior;
+    if (rejectedNeed > rejected.solverWidth) {
+      transaction.farEdgeRequirement = Math.max(transaction.farEdgeRequirement ?? transaction.requirement, need.farEdge);
+      transaction.requirement = Math.max(transaction.requirement, need.interior);
+    } else {
+      // A window that met its own requirement yet rejected the unit
+      // (non-monotone advances): the unit takes the full band.
+      transaction.farEdgeRequirement = undefined;
+      transaction.requirement = maxWidth - hangingOffset;
     }
-    // Past the budget the unit takes the full band placement expands to; the
-    // requirement then exceeds every rejected window, so the search makes
-    // progress (a wider window, or the band below the exclusions).
-    transaction.requirement = Math.max(maxWidth - hangingOffset,
-      nextWidthAbove(rejected.solverWidth), transaction.requirement);
     placeLineWindow(operationState, transaction, rejected);
     return;
   }
+  const hangingOffset = breakerState.isFirst ? Math.min(0, firstIndent) : 0;
   const required = rejection.requiredWidth
     + (breakerState.isFirst ? Math.max(0, firstIndent) : 0);
   // The forced unit did not fit this gap, so its advance exceeds the width
@@ -691,14 +677,6 @@ function placementHangingOffset(operationState: Pick<PassOperationState, 'breake
   return Math.min(0, numbering ? numbering.authoredFirstIndentPx : firstIndent);
 }
 
-/** The smallest width the solver can tell apart from `width`, upwards. */
-function nextWidthAbove(width: number): number {
-  return width + Math.max(1e-9, Math.abs(width) * 1e-12);
-}
-
-/** Excluded-window retries one line may take (WORD_KASHIDA_LINE_FIT). */
-const LINE_FIT_RETRY_BUDGET = 1024;
-
 export function performAvailW(operationState: PassOperationState) {
   const { breakerState, firstIndent, widthPolicy } = operationState;
   return widthPolicy !== 'bounded'
@@ -711,7 +689,7 @@ type LineFitState = Pick<PassOperationState,
 
 /** WORD_KASHIDA_LINE_FIT: the part of a bounded line width its text may fill.
  * The single forward helper: every admission compares with this width (via
- * availW) and {@link lineBandWidthForFit} is its exact inverse. */
+ * availW) and {@link lineFitWindowRequirements} is its inverse per window kind. */
 export function lineFitWidth(operationState: LineFitState, widthPx: number): number {
   const fit = operationState.lineFit;
   if (fit === undefined) return widthPx;
@@ -735,6 +713,41 @@ function lineReserveExtension(
   if (baseRtl) return window.xOffset > 1e-9 ? 0 : tabOriginPx + window.xOffset;
   const end = window.xOffset + window.maxWidth;
   return end < maxWidth - 1e-9 ? 0 : marginRightPx - end;
+}
+
+/** Whether a line window reaches the band's far edge (no float narrows that
+ * side): the classification {@link lineReserveExtension} uses. */
+function windowReachesFarEdge(
+  operationState: Pick<PassOperationState, 'maxWidth' | 'baseRtl'>,
+  window: Readonly<{ xOffset: number; maxWidth: number }>,
+): boolean {
+  return operationState.baseRtl
+    ? window.xOffset <= 1e-9
+    : window.xOffset + window.maxWidth >= operationState.maxWidth - 1e-9;
+}
+
+/** The solver width each window kind needs for its {@link lineFitWidth} to
+ * hold `advancePx`: the smallest width of the monotone fitted width, for an
+ * interior window (no extension) and for one reaching the band's far edge
+ * (the signed trailing-indent extension), the hanging offset placement adds
+ * and the first-line indent admission subtracts included. */
+function lineFitWindowRequirements(
+  operationState: Pick<PassOperationState, 'lineFit' | 'breakerState' | 'wrapCtx' | 'firstIndent'
+    | 'maxWidth' | 'marginRightPx' | 'tabOriginPx' | 'baseRtl'>,
+  advancePx: number,
+): { interior: number; farEdge: number } {
+  const fit = operationState.lineFit!;
+  const { breakerState, firstIndent, maxWidth, marginRightPx, tabOriginPx, baseRtl } = operationState;
+  const indent = breakerState.isFirst ? firstIndent : 0;
+  const hanging = placementHangingOffset(operationState);
+  // lineMaxWidth L = solver width + hanging; fit = (L - indent) * f - s * max(0, L + e).
+  const lineWidthFor = (extension: number): number => {
+    const unreserved = advancePx / fit.fraction + indent;
+    if (fit.reserveShare === 0 || unreserved + extension <= 0) return unreserved;
+    return (advancePx + fit.fraction * indent + fit.reserveShare * extension) / (fit.fraction - fit.reserveShare);
+  };
+  const farExtension = baseRtl ? tabOriginPx : marginRightPx - maxWidth;
+  return { interior: lineWidthFor(0) - hanging, farEdge: lineWidthFor(farExtension) - hanging };
 }
 
 /** Whether WORD_KASHIDA_LINE_FIT narrows this paragraph's fit width. */
