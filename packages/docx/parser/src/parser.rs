@@ -15517,10 +15517,11 @@ fn parse_table_with_diagnostics(
     //      Per §17.7.4 a table that omits `<w:tblStyle>` is implicitly
     //      associated with the `w:default="1"` table style (e.g.
     //      "TableNormal"); we already resolved that into `tstyle` above.
-    //   3. If the style hierarchy never specifies an edge, fall back to the
-    //      spec-mandated default for that edge:
-    //        - §17.4.34 (start) / §17.4.11 (end): 115 twips = 5.75 pt
-    //        - §17.4.5  (bottom) / §17.4.75 (top): 0
+    //   3. If the style hierarchy never specifies an edge, fall back to 0:
+    //        - §17.4.5  (bottom) / §17.4.75 (top): 0 (normative).
+    //        - §17.4.34 (start) / §17.4.11 (end) state 115 twips, but the
+    //          `word-table-unspecified-horizontal-cell-margin` compatibility
+    //          rule (layout/table-compatibility.ts) resolves them to 0.
     //
     // The previous implementation used a magic 3.6 pt fallback for left/right
     // with no spec basis (a value that also silently overrode TableNormal's
@@ -15544,11 +15545,11 @@ fn parse_table_with_diagnostics(
     let cm_left = inline_edge("left")
         .or_else(|| inline_edge("start"))
         .or(tstyle.cell_margin_left)
-        .unwrap_or(5.75); // §17.4.34: 115 twips when never specified
+        .unwrap_or(0.0); // word-table-unspecified-horizontal-cell-margin
     let cm_right = inline_edge("right")
         .or_else(|| inline_edge("end"))
         .or(tstyle.cell_margin_right)
-        .unwrap_or(5.75); // §17.4.11: 115 twips when never specified
+        .unwrap_or(0.0); // word-table-unspecified-horizontal-cell-margin
 
     // §17.4.7/§17.4.8 conditional-format bitmasks. Captured up front so we can
     // both (a) thread each cell's resolved conditional rPr/pPr into its content
@@ -15924,13 +15925,17 @@ fn parse_table_with_diagnostics(
     // writes this for a header banner that must reach the physical page edge).
     // The renderer applies it only when the resolved `jc` is left/leading
     // (§17.4.50: "if the resulting justification … is not left … this property
-    // shall be ignored"). Omitted ⇒ None (style-hierarchy inheritance is a
-    // follow-up; direct inline is the common case and what sample-28 uses).
+    // shall be ignored"). An omitted (or ignored) direct value inherits the
+    // associated table style's tblInd (§17.7.6, including the implicit
+    // §17.7.4 default table style); None only when the whole hierarchy omits
+    // it. Layout distinguishes an authored indent from an omitted one under
+    // `word-table-origin-compatibility`, so the style layer must survive here.
     let tbl_ind = tbl_pr
         .and_then(|p| child_w(p, "tblInd"))
         .filter(|n| attr_w(*n, "type").map(|t| t == "dxa").unwrap_or(true))
         .and_then(|n| attr_w(n, "w"))
-        .map(|v| twips_to_pt(&v));
+        .map(|v| twips_to_pt(&v))
+        .or(tstyle.tbl_ind);
 
     // ECMA-376 §17.4.52 w:tblLayout/@w:type — "fixed" | "autofit". Absent ⇒ None
     // (renderer applies the spec default "autofit").
@@ -18507,12 +18512,11 @@ mod tests {
     }
 
     /// When no table style exists at all and the table omits
-    /// `<w:tblCellMar>`, §17.4.34 / §17.4.11 declare the spec default:
-    /// 115 twips (= 5.75pt) for left/right; §17.4.5 / §17.4.75 declare 0 for
-    /// top/bottom. The previous code used 3.6pt — a magic constant with no
-    /// spec basis. After this fix the fallback is the documented 115/0.
+    /// `<w:tblCellMar>`, top/bottom are 0 (§17.4.5 / §17.4.75) and left/right
+    /// resolve to 0 under word-table-unspecified-horizontal-cell-margin
+    /// (§17.4.34 / §17.4.11 state 115 twips; Windows Word lays out 0).
     #[test]
-    fn no_style_no_inline_uses_spec_default_115_twips_left_right() {
+    fn no_style_no_inline_resolves_horizontal_cell_margins_to_zero() {
         let t = parse_tbl_with_styles(
             r#"<w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>
                <w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid>
@@ -18521,8 +18525,60 @@ mod tests {
         );
         assert_eq!(t.cell_margin_top, 0.0);
         assert_eq!(t.cell_margin_bottom, 0.0);
-        assert_eq!(t.cell_margin_left, 5.75);
-        assert_eq!(t.cell_margin_right, 5.75);
+        assert_eq!(t.cell_margin_left, 0.0);
+        assert_eq!(t.cell_margin_right, 0.0);
+        // An explicit left alone leaves the right edge at the same fallback.
+        let t = parse_tbl_with_styles(
+            r#"<w:tblPr><w:tblCellMar><w:left w:w="200" w:type="dxa"/></w:tblCellMar></w:tblPr>
+               <w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid>
+               <w:tr><w:tc><w:p/></w:tc></w:tr>"#,
+            "",
+        );
+        assert_eq!(t.cell_margin_left, 10.0);
+        assert_eq!(t.cell_margin_right, 0.0);
+    }
+
+    /// §17.4.50 + §17.7.6: a table that omits `<w:tblInd>` inherits the
+    /// indentation of its table style (through basedOn, and from the implicit
+    /// §17.7.4 default table style); a direct value wins.
+    #[test]
+    fn tbl_ind_inherits_from_table_style_hierarchy() {
+        let styles = format!(
+            r#"<w:styles xmlns:w="{ns}">
+              <w:style w:type="table" w:default="1" w:styleId="TableNormal">
+                <w:tblPr><w:tblInd w:w="0" w:type="dxa"/></w:tblPr>
+              </w:style>
+              <w:style w:type="table" w:styleId="Indented">
+                <w:basedOn w:val="TableNormal"/>
+                <w:tblPr><w:tblInd w:w="500" w:type="dxa"/></w:tblPr>
+              </w:style>
+              <w:style w:type="table" w:styleId="Child">
+                <w:basedOn w:val="Indented"/>
+              </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        );
+        let styles = styles.as_str();
+        let body = |tbl_pr: &str| {
+            format!(
+                r#"<w:tblPr>{tbl_pr}</w:tblPr><w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid>
+                   <w:tr><w:tc><w:p/></w:tc></w:tr>"#
+            )
+        };
+        assert_eq!(parse_tbl_with_styles(&body(""), styles).tbl_ind, Some(0.0));
+        assert_eq!(
+            parse_tbl_with_styles(&body(r#"<w:tblStyle w:val="Child"/>"#), styles).tbl_ind,
+            Some(25.0)
+        );
+        assert_eq!(
+            parse_tbl_with_styles(
+                &body(r#"<w:tblStyle w:val="Indented"/><w:tblInd w:w="-300" w:type="dxa"/>"#),
+                styles
+            )
+            .tbl_ind,
+            Some(-15.0)
+        );
+        assert_eq!(parse_tbl_with_styles(&body(""), "").tbl_ind, None);
     }
 
     // Regression guard for PR #516: a STANDALONE internal hyperlink OUTSIDE any

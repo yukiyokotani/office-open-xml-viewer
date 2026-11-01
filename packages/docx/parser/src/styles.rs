@@ -529,9 +529,10 @@ pub struct TableStyleDef {
     /// values Word/Office apply when a table omits `<w:tblCellMar>`
     /// entirely; the parser falls back to these values through
     /// `default_table_style_id`. If a margin is never specified in the
-    /// style hierarchy, §17.4.34 / §17.4.11 / §17.4.5 / §17.4.75 define the
-    /// spec defaults (115 twips for left/right, 0 for top/bottom) which the
-    /// caller applies.
+    /// style hierarchy, the caller applies the fallback: 0 for top/bottom
+    /// (§17.4.5 / §17.4.75) and, under the
+    /// `word-table-unspecified-horizontal-cell-margin` compatibility rule, 0
+    /// for left/right as well (§17.4.34 / §17.4.11 state 115 twips).
     pub cell_margin_top: Option<f64>,
     pub cell_margin_bottom: Option<f64>,
     pub cell_margin_left: Option<f64>,
@@ -541,6 +542,12 @@ pub struct TableStyleDef {
     pub cell_margins: Option<crate::types::TableMarginAcquisitionWire>,
     /// Whole-table style spacing, inherited through basedOn.
     pub cell_spacing: Option<crate::types::TableWidthAcquisitionWire>,
+    /// ECMA-376 §17.4.50 `<w:tblPr><w:tblInd>` supplied by the table style
+    /// (§17.7.6 table style properties), in signed pt. `None` = omitted,
+    /// inherited through basedOn by `resolve_table_style`. Only a dxa (or
+    /// type-less) length counts; `nil` is a zero length; pct/auto are ignored
+    /// per §17.4.50 and leave the layer omitted.
+    pub tbl_ind: Option<f64>,
     /// ECMA-376 §17.7.6.10/.11: row properties supplied by the table style.
     /// `Option` preserves inheritance and explicit CT_OnOff false values.
     pub tbl_header: Option<bool>,
@@ -887,6 +894,9 @@ impl StyleMap {
             merge_table_margin_layer(&mut out.cell_margins, &def.cell_margins);
             if def.cell_spacing.is_some() {
                 out.cell_spacing = def.cell_spacing.clone();
+            }
+            if def.tbl_ind.is_some() {
+                out.tbl_ind = def.tbl_ind;
             }
             if def.tbl_header.is_some() {
                 out.tbl_header = def.tbl_header;
@@ -2758,6 +2768,11 @@ fn parse_tbl_style_def(style_node: roxmltree::Node, based_on: Option<String>) ->
             def.cell_margin_right = edge("right").or_else(|| edge("end"));
         }
         def.cell_spacing = table_width_wire(child_w(tbl_pr, "tblCellSpacing"));
+        def.tbl_ind = child_w(tbl_pr, "tblInd").and_then(|n| match attr_w(n, "type").as_deref() {
+            None | Some("dxa") => attr_w(n, "w").map(|v| twips_to_pt(&v)),
+            Some("nil") => Some(0.0),
+            _ => None,
+        });
     }
     if let Some(tc_pr) = child_w(style_node, "tcPr") {
         def.cell_shd = shd_fill(tc_pr);
