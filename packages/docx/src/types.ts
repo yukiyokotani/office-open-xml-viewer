@@ -1625,6 +1625,10 @@ export interface DocTable {
    *  absent ⇒ no indent anywhere in that hierarchy. The renderer applies it only
    *  when the resolved `jc` is left/leading (§17.4.50). */
   tblInd?: number;
+  /** True when `tblInd` was inherited from the table style hierarchy rather
+   *  than authored on the table; layout ignores it for a row whose resulting
+   *  jc is not leading (§17.4.50). */
+  tblIndInherited?: boolean;
   /** ECMA-376 §17.4.52 `<w:tblLayout w:type>` — 'fixed' | 'autofit'. Absent
    *  (undefined) means the specification default, 'autofit'. The table grid is
    *  the initial shared grid for §17.18.87; preferred table/cell widths remain

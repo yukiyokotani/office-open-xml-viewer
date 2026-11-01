@@ -158,6 +158,29 @@ describe('Word table origin and occupied grid', () => {
       }
     }
   });
+  it('an inherited style tblInd follows each row\'s resulting jc (trPr and tblPrEx overrides)', () => {
+    const styles = '<w:style w:type="table" w:styleId="Indented"><w:name w:val="Indented"/><w:tblPr><w:tblInd w:w="720" w:type="dxa"/></w:tblPr></w:style>'
+      + '<w:style w:type="table" w:styleId="CenteredIndented"><w:name w:val="CenteredIndented"/><w:basedOn w:val="Indented"/><w:tblPr><w:jc w:val="center"/></w:tblPr></w:style>';
+    const rowJc = (how: 'trPr' | 'tblPrEx', jc: string) => how === 'trPr'
+      ? `<w:tr><w:trPr><w:jc w:val="${jc}"/></w:trPr>` : `<w:tr><w:tblPrEx><w:jc w:val="${jc}"/></w:tblPrEx>`;
+    const tbl = (style: string, tr: string, marginsXml: string) => `<w:tbl><w:tblPr><w:tblStyle w:val="${style}"/><w:tblW w:type="dxa" w:w="5000"/>${marginsXml}</w:tblPr><w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid>${tr}<w:tc><w:tcPr><w:tcW w:type="dxa" w:w="5000"/></w:tcPr><w:p><w:r><w:t>x</w:t></w:r></w:p></w:tc></w:tr></w:tbl>`;
+    const rowX = (layout: TableLayout) => layout.rows[0]?.cells[0]?.flowBounds.xPt;
+    // 468pt band at x=72, 250pt table: a centred row sits at 181.
+    for (const how of ['trPr', 'tblPrEx'] as const) {
+      for (const mode of [null, 13, 14, 15]) {
+        // Leading table, centred row: the inherited indent is ignored (no horizontal margins: unmeasured).
+        expect(rowX(layoutTable(tbl('Indented', rowJc(how, 'center'), ''), mode, styles))).toBeCloseTo(181, 8);
+        // Centred table, leading row: the inherited indent applies to that row.
+        expect(rowX(layoutTable(tbl('CenteredIndented', rowJc(how, 'left'), ''), mode, styles))).toBeCloseTo(108, 8);
+      }
+      for (const mode of [null, 14, 15]) {
+        // Measured class (explicit legacy margins): the leading row keeps the indent and its margin hang.
+        expect(rowX(layoutTable(tbl('CenteredIndented', rowJc(how, 'left'), margins()), mode, styles)))
+          .toBeCloseTo(mode === 15 ? 108 : 90, 8);
+        expect(rowX(layoutTable(tbl('Indented', rowJc(how, 'center'), margins()), mode, styles))).toBeCloseTo(181, 8);
+      }
+    }
+  });
   it.each(['center', 'right'])('%s ignores indentation and uses the first cell margin only at the logical end', (jc) => {
     const rows = `<w:tr>${cell(2160, 540)}${cell(3600)}</w:tr><w:tr>${cell(2160, 120)}${cell(3600)}</w:tr>`;
     const options = indent + `<w:jc w:val="${jc}"/>`;
