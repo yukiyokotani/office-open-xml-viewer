@@ -156,6 +156,9 @@ export interface DocSettings {
   adjustLineHeightInTable?: boolean;
   /** §17.15.3.8 `w:compat/w:ulTrailSpace` — underline trailing spaces. */
   ulTrailSpace?: boolean;
+  /** §17.15.3.5 `w:compat/w:doNotExpandShiftReturn` — leave a line that ends
+   * with a manual line break unjustified. */
+  doNotExpandShiftReturn?: boolean;
   /** `w:compat/w:compatSetting[@w:name="compatibilityMode"]` (Word URI) — the
    *  Word version whose layout rules the document uses (for example 14, 15). */
   compatibilityMode?: number;
@@ -575,6 +578,10 @@ export interface DocParagraph {
   /** ECMA-376 §17.3.1.45 `<w:wordWrap>` after the style cascade; present only
    *  when disabled (`false`). Omission means the default, on. */
   wordWrap?: boolean;
+  /** This paragraph piece ends at a page or column break of its source
+   *  paragraph (§17.3.3.1), split off into a body-level break; present only
+   *  when true. */
+  endsAtHardBreak?: boolean;
   /** ECMA-376 §17.3.1.2 `<w:autoSpaceDE>` after the style cascade; present
    *  only when disabled (`false`). Omission means the spec default, on. */
   autoSpaceDE?: boolean;

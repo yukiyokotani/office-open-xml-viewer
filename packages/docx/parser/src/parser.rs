@@ -3522,6 +3522,7 @@ fn parse_document_settings(settings_xml: &str) -> Option<crate::types::DocumentS
     let balance_single_byte_double_byte_width = compat_bool("balanceSingleByteDoubleByteWidth");
     let adjust_line_height_in_table = compat_bool("adjustLineHeightInTable");
     let ul_trail_space = compat_bool("ulTrailSpace");
+    let do_not_expand_shift_return = compat_bool("doNotExpandShiftReturn");
     let split_pg_break_and_para_mark = compat_bool("splitPgBreakAndParaMark");
 
     // ECMA-376 §22.1.2.30 `m:mathPr/m:defJc@m:val` — document-wide default math
@@ -3552,6 +3553,7 @@ fn parse_document_settings(settings_xml: &str) -> Option<crate::types::DocumentS
         && split_pg_break_and_para_mark.is_none()
         && adjust_line_height_in_table.is_none()
         && ul_trail_space.is_none()
+        && do_not_expand_shift_return.is_none()
         && compatibility_mode.is_none()
     {
         return None;
@@ -3571,6 +3573,7 @@ fn parse_document_settings(settings_xml: &str) -> Option<crate::types::DocumentS
         balance_single_byte_double_byte_width,
         adjust_line_height_in_table,
         ul_trail_space,
+        do_not_expand_shift_return,
         split_pg_break_and_para_mark,
         compatibility_mode,
     })
@@ -6543,6 +6546,7 @@ fn parse_paragraph_cond_at_depth_with_diagnostics(
         auto_space_dn: base_para.auto_space_dn.filter(|enabled| !enabled),
         // ECMA-376 §17.3.1.45: omission means wordWrap is on.
         word_wrap: base_para.word_wrap.filter(|enabled| !enabled),
+        ends_at_hard_break: None,
         // ECMA-376 §17.3.1.1: omission resolves through the paragraph style
         // hierarchy and ultimately defaults to true.
         adjust_right_ind: base_para.adjust_right_ind.unwrap_or(true),
@@ -16822,9 +16826,27 @@ mod tests {
                             hyperlink_anchor: None,
                         });
                 }
-                let expected: Vec<_> = old_split_para_on_page_breaks(para.clone())
+                // The previous normalizer plus `endsAtHardBreak` on every
+                // paragraph piece that a page or column break follows.
+                let old = old_split_para_on_page_breaks(para.clone());
+                let followed: Vec<bool> = (0..old.len())
+                    .map(|index| {
+                        matches!(
+                            old.get(index + 1),
+                            Some(OldParaPiece::PageBreak { .. } | OldParaPiece::ColumnBreak)
+                        )
+                    })
+                    .collect();
+                let expected: Vec<_> = old
                     .into_iter()
-                    .map(old_piece_shape)
+                    .zip(followed)
+                    .map(|(piece, followed)| match piece {
+                        OldParaPiece::Para(mut para) if followed => {
+                            para.ends_at_hard_break = Some(true);
+                            old_piece_shape(OldParaPiece::Para(para))
+                        }
+                        piece => old_piece_shape(piece),
+                    })
                     .collect();
                 let actual: Vec<_> = split_para_on_page_breaks(para, false)
                     .into_iter()

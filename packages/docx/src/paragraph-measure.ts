@@ -57,6 +57,9 @@ export interface ParagraphMeasurementEnvironment extends LineLayoutEnvironment {
   readonly compatibilityMode?: number;
   /** §17.15.3.8 ulTrailSpace: hanging line-end spaces keep their underline. */
   readonly ulTrailSpace?: boolean;
+  /** §17.15.3.5 doNotExpandShiftReturn: lines ended by a manual break stay
+   * unjustified. */
+  readonly doNotExpandShiftReturn?: boolean;
 }
 
 export interface TextMeasurer {

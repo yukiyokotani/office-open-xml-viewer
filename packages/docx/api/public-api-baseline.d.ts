@@ -1212,6 +1212,7 @@ export interface DocParagraph {
     widowControl?: boolean;
     overflowPunct?: boolean;
     wordWrap?: boolean;
+    endsAtHardBreak?: boolean;
     autoSpaceDE?: boolean;
     autoSpaceDN?: boolean;
     adjustRightInd?: boolean;
@@ -1274,6 +1275,7 @@ export interface DocSettings {
     balanceSingleByteDoubleByteWidth?: boolean;
     adjustLineHeightInTable?: boolean;
     ulTrailSpace?: boolean;
+    doNotExpandShiftReturn?: boolean;
     compatibilityMode?: number;
 }
 export interface DocTable {

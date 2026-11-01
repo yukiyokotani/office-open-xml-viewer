@@ -74,6 +74,7 @@ impl Properties {
             // retains only an explicit disable for ECMA-376 autoSpaceDE/DN.
             auto_space_de: self.flags.get("autoSpaceDE").copied().filter(|v| !v),
             word_wrap: self.flags.get("wordWrap").copied().filter(|v| !v),
+            ends_at_hard_break: None,
             auto_space_dn: self.flags.get("autoSpaceDN").copied().filter(|v| !v),
             borders,
             style_id: None,

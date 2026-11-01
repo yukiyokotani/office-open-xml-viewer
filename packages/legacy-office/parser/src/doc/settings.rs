@@ -21,6 +21,9 @@ pub(super) struct Properties {
     /// ECMA-376 Part 1 17.15.3.3 balanceSingleByteDoubleByteWidth, the
     /// inverse of MS-DOC 2.7.11 Copts60.fDntBlnSbDbWid.
     pub balance_single_byte_double_byte_width: bool,
+    /// ECMA-376 Part 1 17.15.3.5 doNotExpandShiftReturn, the inverse of
+    /// MS-DOC 2.7.11 Copts60.fExpShRtn.
+    pub do_not_expand_shift_return: bool,
     /// ECMA-376 Part 1 17.15.1.18 characterSpacingControl from MS-DOC 2.7.16
     /// DopTypography.iJustification; `None` when the DOP predates Dop97.
     pub character_spacing_control: Option<&'static str>,
@@ -146,6 +149,8 @@ pub(super) fn read(
     };
     // MS-DOC 2.7.2 DopBase.copts60 (offset 8), 2.7.11 bit P.
     let balance_single_byte_double_byte_width = u16_at(dop, 8)? & (1 << 15) == 0;
+    // 2.7.11 bit N, two bits before P.
+    let do_not_expand_shift_return = u16_at(dop, 8)? & (1 << 13) == 0;
     // MS-DOC 2.7.4 Dop97: dop95 (88 bytes) and adt (2 bytes) precede the
     // DopTypography, whose bits 1-2 are iJustification.
     let character_spacing_control = if dop.len() >= 500 {
@@ -177,6 +182,7 @@ pub(super) fn read(
         footnote_layout_like_ww8,
         do_not_use_html_paragraph_auto_spacing,
         balance_single_byte_double_byte_width,
+        do_not_expand_shift_return,
         character_spacing_control,
     }))
 }
@@ -321,6 +327,22 @@ mod tests {
         );
         assert!(facts(694, 0, 3 << 1).is_err());
         assert_eq!(facts(88, 1 << 15, 0).unwrap(), (false, None));
+    }
+
+    #[test]
+    fn copts60_exp_sh_rtn_projects_do_not_expand_shift_return() {
+        let do_not_expand = |size: u32, copts60: u16| {
+            let (word, mut table) = fixture(size, 720);
+            table[7 + 8..7 + 10].copy_from_slice(&copts60.to_le_bytes());
+            read(&word, &table).map(|value| value.unwrap().do_not_expand_shift_return)
+        };
+        // MS-DOC 2.7.11 bit N fExpShRtn is the inverse of doNotExpandShiftReturn.
+        assert!(do_not_expand(694, 0).unwrap());
+        assert!(!do_not_expand(694, 1 << 13).unwrap());
+        // Neighbouring bits M (fLeaveBackslashAlone) and O (fDntULTrlSpc) are independent.
+        assert!(do_not_expand(694, (1 << 12) | (1 << 14)).unwrap());
+        // The DopBase prefix carries Copts60 in every DOP version.
+        assert!(!do_not_expand(88, 1 << 13).unwrap());
     }
 
     #[test]
