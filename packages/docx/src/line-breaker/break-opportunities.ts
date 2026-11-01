@@ -48,7 +48,7 @@ import {
   rebaseSeaBreaks,
 } from './text-runs.js';
 import { fitCJKPrefix, hasEastAsianVisiblePredecessor } from './fit-search.js';
-import { LineGapRejection, fitJustifiedCompression, justifiedCompressionApplies, justifiedPrefixCompression, lineEndsWithText, type PassOperationState } from './pass-operations.js';
+import { LineGapRejection, fitJustifiedCompression, justifiedCompressionApplies, justifiedPrefixCompression, kernedSpacePairAdvance, lineEndsWithText, type PassOperationState } from './pass-operations.js';
 
 /** The iterator reads only its declared slice of the explicit pass state. */
 export type BreakOpportunityIteratorContext = Pick<
@@ -254,7 +254,11 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
     s.autoSpaceLeadingPx = lineEndsWithText(breakerState.currentLine) ? undefined : 0;
   }
   const segmentBox = textSegmentBox(s);
-  const w = segmentBox.width;
+  // WORD_KERNED_SPACE_PAIRS: fit with the pair across the preceding piece's
+  // last space; placement re-resolves it against the actual predecessor.
+  const kernedSpacePair = kernedSpacePairAdvance(context, s);
+  s.leadingWordBoundaryPx = kernedSpacePair === 0 ? undefined : kernedSpacePair;
+  const w = segmentBox.width + kernedSpacePair;
   const prospectiveWidth = prospectiveSnapAdvance(s, w);
   const h = segmentBox.height;
   const asc = segmentBox.ascent;
@@ -354,10 +358,13 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
   // so the grid delta, w:w scale and w:spacing pitch on the retained glyphs all
   // cancel and trailingSpaceW is the bare trailing-space advance — keeping `w`
   // and `wForFit` on the one advance model (`strAdvance` == the model behind `w`).
+  // A seam pair before visible glyphs belongs to them; a separator-only piece
+  // owns its pair with the preceding glyph, as a piece measured with its own
+  // trailing space does (WORD_KERNED_SPACE_PAIRS).
   const trailingSpaceW = snapToCharsClass(s, characterGrid)
     ? 0
     : s.text.endsWith(' ')
-      ? w - strAdvance(s, trimmed)
+      ? w - (trimmed ? kernedSpacePair : 0) - strAdvance(s, trimmed)
       : 0;
   s.latinNaturalTrailingSpacePx =
     trailingSpaceW > 0 &&
@@ -426,6 +433,9 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
   // the justified-compression family; it is admitted as one unit either way.
   if ((!prefersWholeWordAtScriptBoundary(context, s) || s.autoSpaceBeforePt !== undefined)
     && fitJustifiedCompression(context, s)) return;
+  // A declined justified candidate re-measured its box; restore the fitted pair.
+  s.leadingWordBoundaryPx = kernedSpacePair === 0 ? undefined : kernedSpacePair;
+  s.measuredWidth = w;
   // The authored opportunity follows the existing whole-unit justified fit;
   // it must not introduce a wrap before a word admitted by that policy.
   if (placeOptionalHyphenPrefix(context, s)) return;
@@ -993,8 +1003,20 @@ function settleLineStartAutoSpace(
   return leading === 0 ? frame : { ...frame, w: frame.w - leading, wForFit: frame.wForFit - leading };
 }
 
+/** A pre-flush can likewise leave a segment fitted with its
+ * WORD_KERNED_SPACE_PAIRS pair at a line start, where it has no predecessor. */
+function settleLineStartKernedSpacePair(
+  context: BreakOpportunityIteratorContext,
+  frame: TextFitFrame,
+): TextFitFrame {
+  const pair = frame.s.leadingWordBoundaryPx ?? 0;
+  if (pair === 0 || lineEndsWithText(context.breakerState.currentLine)) return frame;
+  frame.s.leadingWordBoundaryPx = undefined;
+  return { ...frame, w: frame.w - pair, wForFit: frame.wForFit - pair };
+}
+
 function placeOrSplitText(context: BreakOpportunityIteratorContext, inputFrame: TextFitFrame): void {
-  const frame = settleLineStartAutoSpace(context, inputFrame);
+  const frame = settleLineStartKernedSpacePair(context, settleLineStartAutoSpace(context, inputFrame));
   const {
     breakerState,
     flush,

@@ -955,6 +955,19 @@ export function performAddToLine(
       committedWidth = w;
     }
   }
+  if ('text' in s && operationState.widthPolicy !== 'intrinsic') {
+    // WORD_KERNED_SPACE_PAIRS: re-resolve the cross-space pair against the
+    // actual predecessor, so every placement path (a fitted width, a fresh
+    // line after a pre-flush, a re-measured box) commits the same width that
+    // retained paint shifts the glyph origin by.
+    const applied = s.leadingWordBoundaryPx ?? 0;
+    const desired = kernedSpacePairAdvance(operationState, s);
+    s.leadingWordBoundaryPx = desired === 0 ? undefined : desired;
+    if (desired !== applied) {
+      w += desired - applied;
+      committedWidth = w;
+    }
+  }
   if ('text' in s) {
     const kind = snapToCharsClass(s, characterGrid);
     // `word-snap-to-chars-script-block-allocation`
@@ -1527,7 +1540,8 @@ export function fitJustifiedCompression(state: Pick<PassOperationState,
   const boxes = members.map(member => {
     if (!('text' in member)) throw new Error('A text candidate lost its placement unit');
     const box = state.textSegmentBox(member);
-    const boundary = state.measurement.wordBoundaryAdvance(
+    // WORD_KERNED_SPACE_PAIRS: the same seam oracle that placement re-resolves.
+    const boundary = state.measurement.kernedSpaceSeamAdvance(
       previousText && 'text' in previousText ? previousText : undefined, member);
     boundaries.push(boundary);
     member.measuredWidth = box.width + boundary;
@@ -1567,6 +1581,27 @@ export function fitJustifiedCompression(state: Pick<PassOperationState,
   }
   breaker.justifiedCompressionPx = Math.max(0, overflow);
   return true;
+}
+
+/** WORD_KERNED_SPACE_PAIRS: the font's pair adjustment across the seam
+ * between the text piece ending the current line and `s`, which would follow
+ * it on that line, when one side of the seam is U+0020 (the separator ending a
+ * word piece, or a space split from its glyph by a font slot). A piece already
+ * measures the pairs inside it; only the seam pair is missing from the isolated
+ * measurements. The seam oracle acquires it from the selected face (never a
+ * constant) and declines unless both pieces belong to one identically
+ * formatted source sequence with kerning applying. A piece starting a line
+ * takes none. Snapped-grid cells keep their own allocation; intrinsic sizing
+ * keeps its existing joined measurement. */
+export function kernedSpacePairAdvance(
+  state: Pick<PassOperationState, 'breakerState' | 'measurement' | 'widthPolicy' | 'characterGrid'>,
+  s: LayoutTextSeg,
+): number {
+  if (state.widthPolicy === 'intrinsic') return 0;
+  const previous = state.breakerState.currentLine.at(-1);
+  if (!previous || !('text' in previous)
+    || snapToCharsClass(s, state.characterGrid) || snapToCharsClass(previous, state.characterGrid)) return 0;
+  return state.measurement.kernedSpaceSeamAdvance(previous, s);
 }
 
 export function performTextSegmentBox(
