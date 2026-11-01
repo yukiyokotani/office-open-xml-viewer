@@ -67,10 +67,13 @@ import {
 } from './pass-operations.js';
 import type { PassOperationState } from './pass-operations.js';
 
-/** Fit-width reduction of WORD_KASHIDA_LINE_FIT. */
+/** Paragraph line-fit policy: the WORD_KASHIDA_LINE_FIT reserve and the
+ * WORD_RTL_JUSTIFIED_VISIBLE_FIT visible-prefix fit of right-to-left lines. */
 export interface LineFitWidth {
   readonly fraction: number;
   readonly reservePx: number;
+  /** A right-to-left line fits its visible prefix, without its line-end U+0020. */
+  readonly rtlVisiblePrefix: boolean;
 }
 
 export interface LineBreakerPassInput {
@@ -96,8 +99,8 @@ export interface LineBreakerPassInput {
   readonly overflowPunct: boolean;
   readonly justifiedCompression?: boolean;
   /** WORD_KASHIDA_LINE_FIT: a bounded line's text may fill `fraction` of its
-   * available width less `reservePx` (absent: the whole width). Paint still
-   * justifies to the full width. */
+   * available width less `reservePx` (absent: the whole width; paint still
+   * justifies to the full width), and WORD_RTL_JUSTIFIED_VISIBLE_FIT. */
   readonly lineFit?: LineFitWidth;
   readonly passContext: Readonly<{
     probeHeights: readonly number[] | null;

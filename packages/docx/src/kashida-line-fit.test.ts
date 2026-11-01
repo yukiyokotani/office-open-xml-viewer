@@ -136,13 +136,12 @@ describe('WORD_KASHIDA_LINE_FIT', () => {
     const hebrew = Array.from({ length: 20 }, () => '\u05d0\u05d1\u05d2\u05d3').join(' ');
     const rtl = { bidi: true } as Partial<DocParagraph>;
     for (const settings of MODES) {
-      // A right-to-left line fits its line-end space too (5 words: 250 pt).
-      // w:left is the start indent: 320 - 0.2 × 320 = 256 pt (5 words).
-      const [start] = lines(para([textRun(hebrew)], 'highKashida', { ...rtl, indentLeft: 40 }), settings);
+      // w:left is the start indent: 305 - 0.2 × 305 = 244 pt (5 words).
+      const [start] = lines(para([textRun(hebrew)], 'highKashida', { ...rtl, indentLeft: 55 }), settings);
       expect(wordsOn(start!), `mode ${settings?.compatibilityMode}`).toBe(5);
-      // w:right is the end indent: 320 - 0.2 × 360 = 248 pt (4 words) before
-      // mode 15, 0.8 × 320 = 256 pt (5 words) from it.
-      const [end] = lines(para([textRun(hebrew)], 'highKashida', { ...rtl, indentRight: 40 }), settings);
+      // w:right is the end indent: 305 - 0.2 × 360 = 233 pt (4 words) before
+      // mode 15, 0.8 × 305 = 244 pt (5 words) from it.
+      const [end] = lines(para([textRun(hebrew)], 'highKashida', { ...rtl, indentRight: 55 }), settings);
       expect(wordsOn(end!), `mode ${settings?.compatibilityMode}`).toBe(settings === MODE_15 ? 5 : 4);
     }
   });
@@ -185,5 +184,21 @@ describe('WORD_KASHIDA_LINE_FIT', () => {
     const [both] = lines(para(runs, 'both'));
     const bothPlaced = characters(both!);
     expect(bothPlaced[3]!.xPt - bothPlaced[2]!.xPt).toBeGreaterThan(13.1);
+  });
+});
+
+describe('WORD_RTL_JUSTIFIED_VISIBLE_FIT', () => {
+  it('fits a justified right-to-left line by its visible prefix', () => {
+    // A 345 pt line: seven words are 340 pt visible, 350 pt with the line-end
+    // space.
+    const hebrew = Array.from({ length: 20 }, () => '\u05d0\u05d1\u05d2\u05d3').join(' ');
+    const rtl = { bidi: true, indentRight: 15 } as Partial<DocParagraph>;
+    for (const settings of MODES) {
+      const [both] = lines(para([textRun(hebrew)], 'both', rtl), settings);
+      expect(wordsOn(both!), `mode ${settings?.compatibilityMode}`).toBe(7);
+      // Unmeasured alignments keep charging the line-end space.
+      const [start] = lines(para([textRun(hebrew)], 'left', rtl), settings);
+      expect(wordsOn(start!)).toBe(6);
+    }
   });
 });

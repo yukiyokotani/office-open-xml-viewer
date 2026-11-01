@@ -668,7 +668,8 @@ export function performFitsMeasuredWidth(
   }
   // The reversed operation order applies only to the full width; a reduced
   // fit width (WORD_KASHIDA_LINE_FIT) is compared as computed by availW.
-  if (operationState.lineFit !== undefined) return false;
+  const fit = operationState.lineFit;
+  if (fit !== undefined && (fit.fraction !== 1 || fit.reservePx !== 0)) return false;
   return used + (breakerState.isFirst ? firstIndent : 0) <= breakerState.lineMaxWidth;
 }
 

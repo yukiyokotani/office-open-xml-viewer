@@ -618,6 +618,7 @@ export function measureParagraph(
     wordJustifiedLineFit(
       paragraph.alignment, environment.compatibilityMode, placement.availableWidthPt,
       context.baseRtl ? context.physicalIndentRightPt : context.physicalIndentLeftPt,
+      context.baseRtl,
     ),
   );
   if (lines.length === 0) return measureMarkOnly();

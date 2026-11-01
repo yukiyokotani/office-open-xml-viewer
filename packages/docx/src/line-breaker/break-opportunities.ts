@@ -382,11 +382,13 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
   s.mixedNaturalTrailingSpaceCount = mixedSpaces ? s.text.length - trimmed.length : undefined;
   // Library containment policy: an RTL line is anchored at its right edge,
   // so even an invisible trailing-space advance shifts visible LTR cells left.
-  // Count that advance during fitting instead of admitting glyphs past the band.
+  // Count that advance during fitting instead of admitting glyphs past the band,
+  // except on the justified lines WORD_RTL_JUSTIFIED_VISIBLE_FIT measured.
   const fitWidthFor = (
     widthPx: number,
     trailingSpacePx: number,
-  ): number => wordVisiblePrefixFitWidthPx(widthPx, trailingSpacePx, context.baseRtl);
+  ): number => wordVisiblePrefixFitWidthPx(widthPx, trailingSpacePx,
+    context.baseRtl && context.lineFit?.rtlVisiblePrefix !== true);
   const wForFit = fitWidthFor(prospectiveWidth, trailingSpaceW);
   // ECMA-376 §17.3.1.33 does not prescribe a line-breaking tolerance.
   // Word-for-Mac controls with Calibri and Arial, left/center/right aligned
