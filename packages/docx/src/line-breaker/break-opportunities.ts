@@ -256,7 +256,7 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
   const segmentBox = textSegmentBox(s);
   // WORD_KERNED_SPACE_PAIRS: fit with the pair across the preceding piece's
   // last space; placement re-resolves it against the actual predecessor.
-  const kernedSpacePair = kernedSpacePairAdvance(context, s);
+  const kernedSpacePair = kernedSpacePairAdvance(context, s, segmentBox.width);
   s.leadingWordBoundaryPx = kernedSpacePair === 0 ? undefined : kernedSpacePair;
   const w = segmentBox.width + kernedSpacePair;
   const prospectiveWidth = prospectiveSnapAdvance(s, w);
@@ -685,11 +685,7 @@ function processTabSegment(
       const input = { ...context, ...breakerState };
       breakerState.currentWidth += resolveCompletedTabCells(input);
       const { startPen, leftLimit, frame } = bidiTabFrame(input);
-      let followingWidth = 0;
-      for (const q of breakerState.queue) {
-        if ('isTab' in q || 'lineBreak' in q) break;
-        followingWidth += tabFollowWidth(q);
-      }
+      const followingWidth = tabFollowingMetrics().totalWidth;
       const box = wordPositionalTabReferenceBox(
         seg.ptab.relativeTo === 'indent' ? frame.indentStart : 0,
         seg.ptab.relativeTo === 'indent' ? frame.indentEnd : leftLimit,
@@ -779,11 +775,7 @@ function processTabSegment(
     // Width of the content that trails the ptab up to the next tab / line end
     // — needed to right-/center-align it against `target` (the trailing text
     // is what aligns to the stop, §17.18.71).
-    let followW = 0;
-    for (const q of breakerState.queue) {
-      if ('isTab' in q || 'lineBreak' in q) break;
-      followW += tabFollowWidth(q);
-    }
+    const followW = tabFollowingMetrics().totalWidth;
     const target = positionalTabTarget(seg.ptab.alignment, box.start, box.end, followW);
     let tabW = target - absFromParaX;
     // §17.3.3.23: "If the alignment location … cannot be found on the current
@@ -1124,8 +1116,11 @@ function placeOrSplitText(context: BreakOpportunityIteratorContext, inputFrame: 
       queueEmergencyTail(s, split);
     }
   } else {
+    // A prefix keeps the piece's leading seam pair (WORD_KERNED_SPACE_PAIRS),
+    // which placement charges; admit it against the same remaining width.
+    const leadingSeamPair = s.leadingWordBoundaryPx ?? 0;
     const semanticSplit = prefersWholeWordAtScriptBoundary(context, s)
-      ? 0 : explicitTextSplit(s, availW() - breakerState.currentWidth);
+      ? 0 : explicitTextSplit(s, availW() - breakerState.currentWidth - leadingSeamPair);
     if (semanticSplit > 0 && semanticSplit < s.text.length) {
       const prefix = s.text.slice(0, semanticSplit);
       const pw = strNaturalAdvance(s, prefix);
@@ -1151,7 +1146,7 @@ function placeOrSplitText(context: BreakOpportunityIteratorContext, inputFrame: 
       // line, split this member at the widest legal grapheme boundary that
       // fits the actual remaining band. This bases the decision on the group
       // advance, not on the follower's standalone width.
-      const remaining = availW() - breakerState.currentWidth;
+      const remaining = availW() - breakerState.currentWidth - leadingSeamPair;
       const split = emergencyTextSplit(s, remaining, true);
       // Splitting a glued member, or letting it overflow, forces its unit.
       const retained = (remaining > 0 || s.hardJoinPrev === true) && split > 0 && split < s.text.length
