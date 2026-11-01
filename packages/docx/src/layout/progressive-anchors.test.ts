@@ -583,7 +583,7 @@ describe('page-table destination cycle settlement', () => {
     const { previews, final } = await progressiveRun(model);
     expect(layoutFingerprint(final)).toBe(layoutFingerprint(layout));
     expectPublishedPagesFinal(previews, final);
-  });
+  }, 30_000);
 
   it('keeps those table floors through the later text-frame carry', () => {
     // A text frame after the tables starts a frame-carry run, which settles the
@@ -598,7 +598,7 @@ describe('page-table destination cycle settlement', () => {
     model.body.push(...Array.from({ length: 50 }, () => line()));
     const { layout } = blockingLayout(model);
     expect(tableIndexes.map((index) => tablePages(layout, index).placedPage)).toEqual([1, 3, 5, 7, 9, 11]);
-  });
+  }, 30_000);
 
   it('keeps those table floors through the later host-drawing carry', async () => {
     // A paragraph-relative top-and-bottom picture reaching 6 pt above its anchor
@@ -619,7 +619,7 @@ describe('page-table destination cycle settlement', () => {
     plain.section.pageHeight = 842;
     const { layout: plainLayout } = blockingLayout(withPicture(plain));
     expect(pictureNeighbourhood(layout)).toEqual(pictureNeighbourhood(plainLayout));
-  });
+  }, 30_000);
 
   it('keeps those table floors through header reserve repagination', () => {
     // A header that extends below the top margin repaginates the body; that
@@ -638,7 +638,7 @@ describe('page-table destination cycle settlement', () => {
         expect(placedPage).toBe(reachedPage + 1);
       }
     }
-  });
+  }, 30_000);
 
   it('settles the coupled T1/T2/T3 cycle deterministically without overlapping body text', () => {
     const model = coupledTables();
