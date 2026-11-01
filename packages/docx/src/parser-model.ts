@@ -839,8 +839,11 @@ function effectiveTableCellMargins(
   );
   return {
     originLeftMarginPt: left?.originLeftMarginPt ?? null,
-    // No layer (cell, exception, table, style) authors either horizontal edge.
-    horizontalMarginsOmitted: hasPrivateCellWire && left === null && right === null,
+    // Lexical presence, not resolution: an authored nil/auto/pct or logical
+    // start/end element at any layer (cell, exception, table, style) counts.
+    horizontalMarginsOmitted: hasPrivateCellWire
+      && [cellMargins, exceptionMargins, tableMargins, styleMargins].every((margins) =>
+        margins?.left == null && margins?.right == null && margins?.start == null && margins?.end == null),
     marginsPt: {
       top: firstMargin('top',
         { width: cellMargins?.top, scope: 'cell' },
