@@ -1,3 +1,4 @@
+import { lineEndSpaceCharged, trailingSpaceSuffixWidth } from './atomic-units.js';
 import type { BreakOpportunityIteratorContext } from './break-opportunities.js';
 import { seamPairAdvance } from './pass-operations.js';
 import type { LayoutTextSeg } from './model.js';
@@ -75,12 +76,12 @@ export function placeOptionalHyphenPrefix(
       visiblePrefix ||= member.text.trim().length > 0;
     }
   }
-  const last = members.at(-1)!;
   // A collapsible trailing space does not force an otherwise fitting word
-  // to select an optional hyphen. RTL keeps its ordinary containment policy.
-  if (!context.baseRtl && last.text.endsWith(' ')) {
-    context.reservePrefixWork(last.text.length);
-    width -= context.segAdvance(last) - context.strAdvance(last, last.text.replace(/ +$/u, ''));
+  // to select an optional hyphen; the whole U+0020 suffix of the joined word
+  // is excluded, across members. RTL keeps its ordinary containment policy
+  // outside WORD_RTL_JUSTIFIED_VISIBLE_FIT.
+  if (!lineEndSpaceCharged(context)) {
+    width -= trailingSpaceSuffixWidth(members.filter((member) => !member.optionalHyphen), context);
   }
   if (context.fitsMeasuredWidth(width, context.availW())) return false;
   // An unselected owner cannot bypass the existing registered-face space

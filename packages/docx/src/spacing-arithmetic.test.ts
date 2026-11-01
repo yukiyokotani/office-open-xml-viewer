@@ -14,6 +14,9 @@ const mainStreams = JSON.parse(readFileSync(
 // route's resolved family; every geometry value is unchanged.
 // 'review-justified' was re-recorded when WORD_LINE_END_SPACE_HANGS took the
 // line-end space out of justification slack: only its gap offsets changed.
+// 'kashida' (highKashida) was re-recorded for WORD_KASHIDA_LINE_FIT: its
+// over-wide Latin run now force-breaks at 0.8 of the width; every advance,
+// transform and fill keeps its arithmetic.
 // All numeric fields are unrounded doubles, including retained cluster advances
 // and offsets, every transform argument, and every fill's complete paint state.
 describe('unexcluded text keeps main spacing arithmetic bit for bit', () => {

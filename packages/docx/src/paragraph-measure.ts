@@ -27,6 +27,7 @@ import {
   WORD_INLINE_OBJECT_GRID_LINE_ALLOCATION,
   WORD_PICTURE_BULLET_LINE_PARTICIPATION,
   wordJustifiedInterwordCompressionApplies,
+  wordJustifiedLineFit,
 } from './layout/line-compatibility.js';
 import { LayoutInvariantError } from './layout/diagnostics.js';
 import type { MeasurementTextContext } from './layout/measurement-capabilities.js';
@@ -616,6 +617,8 @@ export function measureParagraph(
     ) && environment.verticalCJK !== true
       ? { lineEndIdeographicSpaceHangs: paragraph.wordWrap !== false }
       : false,
+    wordJustifiedLineFit(paragraph.alignment, environment.compatibilityMode, context.baseRtl, context.wordWrap !== false,
+      context.baseRtl ? context.physicalIndentLeftPt : context.physicalIndentRightPt + rightGridAdjustmentPt),
   );
   if (lines.length === 0) return measureMarkOnly();
 
