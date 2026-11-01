@@ -540,10 +540,7 @@ impl<'a> Reader<'a> {
         // (its authored height or a cell's vertical padding and borders,
         // whichever is larger) is held to a quarter of the page body, and so
         // are the repeated header rows' together, leaving half a page for a
-        // row's content. Header rows of content-dependent height cannot be
-        // bounded here, so a table repeating them admits no other authored
-        // row height (an auto header of any length with auto rows matches
-        // LibreOffice).
+        // row's content.
         let bound = self.text_height / 4.0;
         let fixed = |row: &DocTableRow| {
             let rule = |side: &Option<BorderSpec>| side.as_ref().map_or(0.0, |b| b.width);
@@ -557,8 +554,28 @@ impl<'a> Reader<'a> {
                 })
                 .fold(row.row_height.unwrap_or(0.0), f64::max)
         };
+        // Repeated header rows of content-dependent height near a page tall
+        // are placed differently from LibreOffice (measured: a 52-line
+        // header moves a line to another page), so they need an exact
+        // height, which bounds them.
+        if doc_rows
+            .iter()
+            .any(|row| row.is_header && row.row_height_rule != "exact")
+        {
+            return Err(unsupported("table-header-rows"));
+        }
+        // LibreOffice starts the content of every cell in a row below the
+        // row's largest top padding (measured: 0 and 20 pt both start 20 pt
+        // down); the DOCX layout pads each cell apart.
+        if doc_rows.iter().any(|row| {
+            row.cells.windows(2).any(|pair| {
+                pair[0].margin_top != pair[1].margin_top
+                    || pair[0].margin_bottom != pair[1].margin_bottom
+            })
+        }) {
+            return Err(unsupported("table-cell-padding"));
+        }
         let mut header_fixed = 0.0;
-        let mut header_auto = false;
         for row in &doc_rows {
             let space = fixed(row);
             if space.partial_cmp(&bound) == Some(std::cmp::Ordering::Greater) || space.is_nan() {
@@ -566,9 +583,6 @@ impl<'a> Reader<'a> {
             }
             if row.is_header {
                 header_fixed += space;
-                header_auto |= row.row_height_rule != "exact";
-            } else if header_auto && row.row_height.is_some() {
-                return Err(unsupported("table-row-height"));
             }
         }
         if header_fixed > bound {
@@ -785,28 +799,9 @@ impl<'a> Reader<'a> {
             }
         }
         let blocks = std::mem::replace(&mut self.blocks, saved);
-        let mut content = finish_cell(blocks, self.layout_flags)?;
+        let mut content = finish_cell(blocks)?;
         if content.is_empty() {
             return Err(unsupported("table-cell-empty"));
-        }
-        // LibreOffice centres or bottom-aligns a cell's content with the
-        // first paragraph's top and the last one's bottom margin; the DOCX
-        // layout aligns without them (measured: 12 pt above moves centred
-        // text 6 pt, 10 pt below moves bottom-aligned text 10 pt).
-        let outer = |element: Option<&CellElement>, top: bool| match element {
-            Some(CellElement::Paragraph(p)) => {
-                if top {
-                    p.space_before
-                } else {
-                    p.space_after
-                }
-            }
-            _ => 0.0,
-        };
-        if v_align != "top"
-            && (outer(content.first(), true) != 0.0 || outer(content.last(), false) != 0.0)
-        {
-            return Err(unsupported("table-cell-align-spacing"));
         }
         if let Some(fill) = &background {
             // §20.395 automatic colour over the cell's background, as over a
@@ -861,14 +856,14 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// A cell's paragraphs with LibreOffice's spacing inside a cell (measured):
-/// the first keeps its space before, consecutive ones are separated as body
-/// paragraphs are (`LayoutFlags::gap`), and the last keeps its space after.
-fn finish_cell(blocks: Vec<Block>, flags: LayoutFlags) -> Result<Vec<CellElement>, String> {
+/// A cell's paragraphs. LibreOffice repeats a cell paragraph's top margin
+/// where the cell continues on the next page, which the DOCX layout does
+/// not, and aligns centred or bottom-aligned content with the outer margins
+/// (measured), so cell paragraphs admit no vertical margins (none in the
+/// corpus has one).
+fn finish_cell(blocks: Vec<Block>) -> Result<Vec<CellElement>, String> {
     let mut out = Vec::with_capacity(blocks.len());
-    let mut previous: Option<Collected> = None;
-    let count = blocks.len();
-    for (index, block) in blocks.into_iter().enumerate() {
+    for block in blocks {
         let Block::Paragraph(collected) = block else {
             return Err(unsupported("table-cell-content"));
         };
@@ -881,32 +876,17 @@ fn finish_cell(blocks: Vec<Block>, flags: LayoutFlags) -> Result<Vec<CellElement
         if collected.paragraph.keep_next {
             return Err(unsupported("table-cell-keep"));
         }
+        if collected.top != 0.0 || collected.bottom != 0.0 {
+            return Err(unsupported("table-cell-spacing"));
+        }
         let mut paragraph = std::mem::take(&mut collected.paragraph);
-        paragraph.space_before = match &previous {
-            None => collected.top,
-            Some(prev) => {
-                let same = prev.named_style.is_some() && prev.named_style == collected.named_style;
-                if same && prev.contextual != collected.contextual {
-                    return Err(unsupported("contextual-spacing-mixed"));
-                }
-                if same && prev.contextual {
-                    0.0
-                } else {
-                    flags.gap(prev.bottom, collected.top)
-                }
-            }
-        };
-        paragraph.space_after = if index + 1 == count {
-            collected.bottom
-        } else {
-            0.0
-        };
+        paragraph.space_before = 0.0;
+        paragraph.space_after = 0.0;
         if paragraph.shading.is_some() {
             return Err(unsupported("table-cell-paragraph-fill"));
         }
         paragraph.contextual_spacing = false;
         out.push(CellElement::Paragraph(Box::new(paragraph)));
-        previous = Some(collected);
     }
     Ok(out)
 }

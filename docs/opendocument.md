@@ -85,17 +85,20 @@ Currently admitted:
   trailing no-break or other Unicode space keeps its decoration in both;
 - text in the Latin script class of ODF Part 3 Table 22, including the
   spaces, punctuation, symbols and emoji the table leaves unassigned.
-- tables of paragraphs with absolute or full-width relative column widths,
+- tables of paragraphs with absolute (refitted to the table as LibreOffice
+  refits them) or full-width relative column widths, explicit
   left/centre/right alignment and a left margin (also past the text area),
-  cell padding, single solid borders (collapsed as LibreOffice draws them),
-  cell backgrounds, vertical alignment, fixed and minimum row heights,
-  rows kept together (a kept row taller than a page splits where it starts,
-  as LibreOffice splits it), repeated header rows, a page break before and
-  automatic text colour over cell backgrounds. Tables need LibreOffice's
-  cell spacing and row keep settings set explicitly, as LibreOffice writes
-  them. Merged
-  or repeated cells, nested tables, lists and headings in cells, double or
-  dashed borders and vertical cell text reject for now;
+  cell padding (the same top and bottom padding across a row), single solid
+  collapsed borders, cell backgrounds, vertical alignment, fixed and minimum
+  row heights up to a quarter of the page, rows kept together (a kept row
+  taller than a page splits where it starts, as LibreOffice splits it),
+  repeated header rows of fixed height, a page break before and automatic
+  text colour over cell backgrounds. Tables need LibreOffice's cell spacing
+  and row keep settings set explicitly, as LibreOffice writes them. Cell
+  paragraphs with top or bottom margins (LibreOffice repeats them where a
+  cell continues on the next page), merged or repeated cells, nested
+  tables, lists and headings in cells, double or dashed borders and
+  vertical cell text reject for now;
 - lists in label alignment mode, numbered as LibreOffice numbers them
   (continued lists, items nested without a paragraph of their own, list
   headers), with decimal, letter and Roman labels or text bullets, labels

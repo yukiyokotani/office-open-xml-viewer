@@ -5496,7 +5496,7 @@ mod tests {
         )
     }
 
-    const TABLE: &str = r#"<table:table table:name="T" table:style-name="T"><table:table-column table:style-name="T.A"/><table:table-column table:style-name="T.B"/><table:table-header-rows><table:table-row table:style-name="T.H"><table:table-cell table:style-name="T.A1" office:value-type="string"><text:p>h1</text:p></table:table-cell><table:table-cell table:style-name="T.B1"><text:p>h2</text:p></table:table-cell></table:table-row></table:table-header-rows><table:table-row table:style-name="T.1"><table:table-cell table:style-name="T.A1"><text:p text:style-name="Sp">a</text:p><text:p text:style-name="Sp">b</text:p></table:table-cell><table:table-cell table:style-name="T.B1"><text:p>c</text:p></table:table-cell></table:table-row></table:table>"#;
+    const TABLE: &str = r#"<table:table table:name="T" table:style-name="T"><table:table-column table:style-name="T.A"/><table:table-column table:style-name="T.B"/><table:table-header-rows><table:table-row table:style-name="T.H"><table:table-cell table:style-name="T.A1" office:value-type="string"><text:p>h1</text:p></table:table-cell><table:table-cell table:style-name="T.B1"><text:p>h2</text:p></table:table-cell></table:table-row></table:table-header-rows><table:table-row table:style-name="T.1"><table:table-cell table:style-name="T.A1"><text:p>a</text:p><text:p>b</text:p></table:table-cell><table:table-cell table:style-name="T.B1"><text:p>c</text:p></table:table-cell></table:table-row></table:table>"#;
 
     fn table_settings(spacing: &str) -> String {
         [
@@ -5541,10 +5541,7 @@ mod tests {
         };
         assert_eq!(before.space_after, 8.0);
         assert_eq!(after.space_before, 6.0);
-        let docx_model::CellElement::Paragraph(second) = &table.rows[1].cells[0].content[1] else {
-            panic!()
-        };
-        assert_eq!(second.space_before, 8.0);
+        let _ = table;
         let paragraphs =
             r#"<text:p text:style-name="Sp">a</text:p><text:p text:style-name="Sp">b</text:p>"#;
         for (spacing, gap) in [("false", 8.0), ("true", 14.0)] {
@@ -5614,15 +5611,19 @@ mod tests {
             r#"style:vertical-align="top""#,
             r#"style:vertical-align="middle""#,
         );
-        let plain = TABLE.replace(r#" text:style-name="Sp""#, "");
-        let document = read_table(&middle, &table_body(&plain)).unwrap();
+        let document = read_table(&middle, &table_body(TABLE)).unwrap();
         let BodyElement::Table(table) = &document.body[1] else {
             panic!()
         };
         assert_eq!(table.rows[1].cells[0].v_align, "center");
+        // Cell paragraphs with vertical margins reject in any alignment.
+        let spaced = TABLE.replace(
+            "<text:p>a</text:p>",
+            r#"<text:p text:style-name="Sp">a</text:p>"#,
+        );
         assert_eq!(
-            read_table(&middle, &table_body(TABLE)).unwrap_err(),
-            unsupported("table-cell-align-spacing")
+            read_table(TABLE_STYLES, &table_body(&spaced)).unwrap_err(),
+            unsupported("table-cell-spacing")
         );
     }
 
@@ -5813,15 +5814,7 @@ mod tests {
         let other = &row.cells[1];
         assert_eq!(other.borders.top.as_ref().map(|b| b.width), Some(2.0));
         assert!(other.borders.bottom.is_none() && other.borders.left.is_none());
-        // Cell paragraphs keep their outer spacing and add the inner one.
-        let docx_model::CellElement::Paragraph(first) = &cell.content[0] else {
-            panic!()
-        };
-        let docx_model::CellElement::Paragraph(second) = &cell.content[1] else {
-            panic!()
-        };
-        assert_eq!((first.space_before, first.space_after), (6.0, 0.0));
-        assert_eq!((second.space_before, second.space_after), (8.0 + 6.0, 8.0));
+        assert_eq!(cell.content.len(), 2);
     }
 
     #[test]
@@ -5922,7 +5915,8 @@ mod tests {
                     .replace(
                         r#"fo:padding="0cm""#,
                         r#"fo:padding="0cm" fo:padding-bottom="1pt""#,
-                    ),
+                    )
+                    .replace(r#"fo:padding-bottom="0cm""#, r#"fo:padding-bottom="1pt""#),
                 table_body(TABLE),
                 "table-row-padding",
             ),
@@ -5932,11 +5926,13 @@ mod tests {
                 "table-geometry",
             ),
             (
-                TABLE_STYLES.replace(
-                    r#"fo:margin-bottom="8pt""#,
-                    r#"fo:margin-bottom="8pt" fo:keep-with-next="always""#,
+                format!(
+                    r#"{TABLE_STYLES}<style:style style:name="K" style:family="paragraph"><style:paragraph-properties fo:keep-with-next="always"/></style:style>"#
                 ),
-                table_body(TABLE),
+                table_body(&TABLE.replace(
+                    "<text:p>a</text:p>",
+                    r#"<text:p text:style-name="K">a</text:p>"#,
+                )),
                 "table-cell-keep",
             ),
             (
@@ -5987,7 +5983,7 @@ mod tests {
                 "table-row-height",
             ),
             // Authored heights LibreOffice continues over pages: an auto
-            // header row repeated above an authored row, a row taller than
+            // header row repeated (which may near a page), a row taller than
             // the page body, and padding taller than it.
             (
                 TABLE_STYLES.into(),
@@ -5995,7 +5991,7 @@ mod tests {
                     r#"<table:table-row table:style-name="T.H">"#,
                     "<table:table-row>",
                 )),
-                "table-row-height",
+                "table-header-rows",
             ),
             (
                 TABLE_STYLES.replace(
@@ -6006,10 +6002,12 @@ mod tests {
                 "table-row-height",
             ),
             (
-                TABLE_STYLES.replace(
-                    r#"fo:padding="0cm""#,
-                    r#"fo:padding="0cm" fo:padding-top="30cm""#,
-                ),
+                TABLE_STYLES
+                    .replace(
+                        r#"fo:padding="0cm""#,
+                        r#"fo:padding="0cm" fo:padding-top="30cm""#,
+                    )
+                    .replace(r#"fo:padding-top="0cm""#, r#"fo:padding-top="30cm""#),
                 table_body(TABLE),
                 "table-row-height",
             ),
